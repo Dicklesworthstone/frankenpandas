@@ -11360,3 +11360,73 @@ def _everyday5_outcome(m: Any, run: Any) -> Any:
 def test_everyday_ops_round_five_like_pandas(case: str) -> None:
     run = _EVERYDAY5_CASES[case]
     assert _everyday5_outcome(fpd, run) == _everyday5_outcome(pd, run), case
+
+
+# Found by the sixth everyday-ops probe (scratch p13/probe_everyday6.py):
+# Index.str had eight methods of its own - no regex (r'\d' looked for
+# literally), no case= / na=, lists for numpy arrays, the name dropped - now
+# every method is the Series accessor's, wrapped as pandas' Index accessor;
+# a MultiIndex printed only its level count and length; clip with a Series
+# bound beside a whole-number scalar gave float64; a printed text cell broke
+# the line on '\n' where pandas escapes it; Index([True, None]) read bool,
+# Index([1, None]) int64 holding nan, and an object Index printed NaN as None
+# (br-frankenpandas-r0u52).
+def _ev6_index(m: Any) -> Any:
+    return m.Index(["r1", "x22", "R3"], name="n")
+
+
+def _ev6_multi(m: Any) -> Any:
+    return m.MultiIndex.from_tuples([("a", 1), ("bbb", 22)], names=["k", None])
+
+
+_EVERYDAY6_CASES = {
+    "Index.str.contains regex": lambda m: repr(_ev6_index(m).str.contains(r"\d{2}")),
+    "Index.str.contains case": lambda m: repr(_ev6_index(m).str.contains("r", case=False)),
+    "Index.str.startswith tuple": lambda m: repr(_ev6_index(m).str.startswith(("r", "x"))),
+    "Index.str.contains beside None": lambda m: repr(m.Index(["r1", None]).str.contains("1")),
+    "Index.str.upper keeps the name": lambda m: repr(_ev6_index(m).str.upper()),
+    "Index.str.len": lambda m: repr(_ev6_index(m).str.len()),
+    "Index.str.replace regex": lambda m: repr(_ev6_index(m).str.replace(r"\d", "#", regex=True)),
+    "Index.str.split expand": lambda m: repr(m.Index(["a_b", "c_d"]).str.split("_", expand=True)),
+    "Index.str.split expand, one level": lambda m: repr(m.Index(["a", "b"]).str.split("_", expand=True)),
+    "Index.str.partition": lambda m: repr(_ev6_index(m).str.partition("2")),
+    "Index.str.extract is a frame": lambda m: repr(m.Index(["a1", "b2"], name="q").str.extract(r"(\w)(\d)")),
+    "Index.str.get_dummies names its levels": lambda m: repr(m.Index(["a|b", "c"]).str.get_dummies()),
+    "Index.str.upper beside NaN": lambda m: repr(m.Index(["r1", float("nan")]).str.upper()),
+    "Index of ints beside None": lambda m: repr(m.Index([1, None, 3])),
+    "Index of bools beside None": lambda m: repr(m.Index([True, None])),
+    "Index of text beside NaN": lambda m: repr(m.Index(["a", float("nan")])),
+    # NEGATIVE: floats beside NaN stay float64; bools alone stay bool.
+    "Index of floats beside NaN": lambda m: repr(m.Index([1.5, float("nan")])),
+    "Index of bools": lambda m: repr(m.Index([True, False])),
+    "Index.str.cat": lambda m: _ev6_index(m).str.cat(sep="+"),
+    "Index.str.zfill": lambda m: repr(_ev6_index(m).str.zfill(4)),
+    # NEGATIVE: a name the accessor lacks is pandas' AttributeError.
+    "Index.str unknown method": lambda m: _ev6_index(m).str.no_such_method,
+    "MultiIndex repr, justified": lambda m: repr(_ev6_multi(m)),
+    "MultiIndex repr, product named": lambda m: repr(m.MultiIndex.from_product([range(3), list("ab")], names=["i", "c"])),
+    "MultiIndex repr, unnamed": lambda m: repr(m.MultiIndex.from_tuples([("a", "b"), ("c", "d")])),
+    "MultiIndex repr, float with NaN": lambda m: repr(m.MultiIndex.from_tuples([("a", 1.5), ("bbb", None)], names=["x", "y"])),
+    "MultiIndex repr, long": lambda m: repr(m.MultiIndex.from_product([range(60), list("ab")])),
+    "clip Series lower, int upper": lambda m: repr(m.Series([1, 5, 10]).clip(lower=m.Series([2, 2, 2]), upper=8)),
+    # NEGATIVE: a fractional bound makes it float64.
+    "clip Series lower, float upper": lambda m: repr(m.Series([1, 5, 10]).clip(lower=m.Series([2, 2, 2]), upper=8.5)),
+    "text cells escape line breaks": lambda m: repr(m.Series(["a\nb", "c\td"])),
+    "frame text cells escape": lambda m: repr(m.DataFrame({"x": ["a\nb"]})),
+    # NEGATIVE: the values themselves keep the line break.
+    "tolist keeps the line break": lambda m: m.Series(["a\nb"]).tolist(),
+}
+
+
+def _everyday6_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EVERYDAY6_CASES))
+def test_everyday_ops_round_six_like_pandas(case: str) -> None:
+    run = _EVERYDAY6_CASES[case]
+    assert _everyday6_outcome(fpd, run) == _everyday6_outcome(pd, run), case

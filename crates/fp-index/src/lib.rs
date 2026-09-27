@@ -5939,11 +5939,21 @@ impl Index {
         if !non_missing.all(same_kind) {
             return "mixed";
         }
+        // pandas infers with skipna=False: a missing label beside bools or
+        // strings is a kind of its own (an object Index; `[True, None]` read
+        // bool), where NaN is a float and NaT an instant.
+        let beside_missing = |kind| {
+            if self.labels.iter().any(IndexLabel::is_missing) {
+                "mixed"
+            } else {
+                kind
+            }
+        };
         match first {
             IndexLabel::Int64(_) => "integer",
             IndexLabel::Float64(_) => "floating",
-            IndexLabel::Bool(_) => "boolean",
-            IndexLabel::Utf8(_) => "string",
+            IndexLabel::Bool(_) => beside_missing("boolean"),
+            IndexLabel::Utf8(_) => beside_missing("string"),
             IndexLabel::Timedelta64(_) => "timedelta64",
             IndexLabel::Datetime64(_) => "datetime64",
             // The core cannot read an object's kind (pandas says "date" for
@@ -26348,6 +26358,38 @@ mod tests {
         assert_eq!(mixed.infer_objects(), mixed);
         assert!(ints.is_(&ints));
         assert!(!ints.is_(&Index::from_i64(vec![1, 2, 3])));
+    }
+
+    #[test]
+    fn a_missing_label_beside_bools_or_strings_is_mixed() {
+        use fp_types::NullKind;
+        // pd.Index([True, None]) / ['a', np.nan]: inferred 'mixed', object.
+        for labels in [
+            vec![IndexLabel::Bool(true), IndexLabel::Null(NullKind::Null)],
+            vec![
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Null(NullKind::NaN),
+            ],
+        ] {
+            let index = Index::new(labels);
+            assert_eq!(index.inferred_type(), "mixed");
+            assert_eq!(index.dtype(), "object");
+        }
+        // NEGATIVE: NaN is a float and NaT an instant; and every label present.
+        let floats = Index::new(vec![
+            IndexLabel::Float64(OrderedF64(1.5)),
+            IndexLabel::Null(NullKind::NaN),
+        ]);
+        assert_eq!(floats.inferred_type(), "floating");
+        let instants = Index::new(vec![
+            IndexLabel::Datetime64(0),
+            IndexLabel::Null(NullKind::NaT),
+        ]);
+        assert_eq!(instants.inferred_type(), "datetime64");
+        let bools = Index::new(vec![IndexLabel::Bool(true), IndexLabel::Bool(false)]);
+        assert_eq!(bools.dtype(), "bool");
+        let texts = Index::new(vec![IndexLabel::Utf8("a".into())]);
+        assert_eq!(texts.inferred_type(), "string");
     }
 
     #[test]

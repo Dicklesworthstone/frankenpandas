@@ -396,7 +396,12 @@ fn pandas_timedelta_text(nanos: i64, long: bool) -> String {
 /// A Python-`str()`-like text for one object cell.
 fn pandas_object_text(value: &Scalar) -> String {
     match value {
-        Scalar::Utf8(text) => text.clone(),
+        // pandas' pprint_thing escapes tabs and line breaks in a printed
+        // cell or label ('a\nb' prints as a\nb; it broke the line).
+        Scalar::Utf8(text) => text
+            .replace('\t', "\\t")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r"),
         Scalar::Null(NullKind::Null) => "None".to_owned(),
         Scalar::Null(NullKind::NaT) => "NaT".to_owned(),
         Scalar::Null(_) => "NaN".to_owned(),
@@ -6322,114 +6327,106 @@ pub struct PyIndexStringMethods {
     pub(crate) inner: Index,
 }
 
+/// pandas' `Index.str`: every method is the Series accessor's over the
+/// labels, its result wrapped as pandas' Index accessor wraps it (see
+/// [`PyIndexStrMethod`]). It had eight methods of its own - lower, upper,
+/// strip, len, contains, startswith, endswith, replace - with no regex (a
+/// pattern like r'\d' was looked for literally), no case= / na=, lists for
+/// numpy arrays, and the Index name dropped.
 #[pymethods]
 impl PyIndexStringMethods {
-    fn lower(&self) -> PyIndex {
-        let labels = self
-            .inner
+    fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<PyIndexStrMethod> {
+        // Only what the Series accessor has (anything else raises its
+        // AttributeError).
+        let probe = PySeries {
+            inner: Series::from_values("", Vec::new(), Vec::new()).map_err(frame_error_to_py)?,
+        }
+        .into_bound_py_any(py)?;
+        probe.getattr("str")?.getattr(name)?;
+        Ok(PyIndexStrMethod {
+            index: self.inner.clone(),
+            name: name.to_owned(),
+        })
+    }
+}
+
+/// One `Index.str` method, bound to the index (see [`PyIndexStringMethods`]).
+#[pyclass(name = "IndexStrMethod")]
+pub struct PyIndexStrMethod {
+    index: Index,
+    name: String,
+}
+
+#[pymethods]
+impl PyIndexStrMethod {
+    /// The Series accessor's method over the labels; its result as pandas'
+    /// Index accessor gives it: a bool Series with every value present is a
+    /// numpy array, any other Series an Index under this index's name, a
+    /// frame (expand=True) a MultiIndex (extract's stays a frame), anything
+    /// else (str.cat's string) itself.
+    #[pyo3(signature = (*args, **kwargs))]
+    fn __call__(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let values: Vec<Scalar> = self
+            .index
             .labels()
             .iter()
-            .map(|l| match l {
-                IndexLabel::Utf8(s) => IndexLabel::Utf8(s.to_lowercase()),
-                other => other.clone(),
-            })
+            .map(index_label_to_scalar)
+            .collect();
+        let positions = (0..values.len())
+            .map(|position| IndexLabel::Int64(i64::try_from(position).unwrap_or(i64::MAX)))
+            .collect();
+        let series = PySeries {
+            inner: Series::from_values("", positions, values).map_err(frame_error_to_py)?,
+        }
+        .into_bound_py_any(py)?;
+        let result = series
+            .getattr("str")?
+            .call_method(self.name.as_str(), args, kwargs)?;
+        if let Ok(frame) = result.extract::<PyRef<'_, PyDataFrame>>() {
+            // extract's frame stays one; get_dummies' levels are named after
+            // its columns, the rest (split, partition) unnamed.
+            if matches!(self.name.as_str(), "extract" | "extractall") {
+                return Ok(result.unbind());
+            }
+            let frame = PyDataFrame {
+                inner: frame.inner.clone(),
+            };
+            let mut multi = py
+                .get_type::<PyMultiIndex>()
+                .call_method1("from_frame", (frame,))?
+                .extract::<PyMultiIndex>()?;
+            let nlevels = multi.inner.nlevels();
+            if self.name != "get_dummies" {
+                multi.inner = multi.inner.set_names(vec![None; nlevels]);
+            }
+            let multi = multi.into_bound_py_any(py)?;
+            // One level is its Index, as pandas'.
+            if nlevels == 1 {
+                return Ok(multi.call_method1("get_level_values", (0,))?.unbind());
+            }
+            return Ok(multi.unbind());
+        }
+        let Ok(result) = result.extract::<PyRef<'_, PySeries>>() else {
+            return Ok(result.unbind());
+        };
+        let column = result.inner.column();
+        if column.dtype() == DType::Bool && column.validity().all() {
+            return Ok(column_ndarray(py, column)?.unbind());
+        }
+        let labels = column
+            .values()
+            .iter()
+            .map(scalar_to_index_label_converter)
             .collect();
         PyIndex {
-            inner: Index::new(labels),
+            inner: Index::new(labels).rename_index(self.index.name()),
         }
-    }
-
-    fn upper(&self) -> PyIndex {
-        let labels = self
-            .inner
-            .labels()
-            .iter()
-            .map(|l| match l {
-                IndexLabel::Utf8(s) => IndexLabel::Utf8(s.to_uppercase()),
-                other => other.clone(),
-            })
-            .collect();
-        PyIndex {
-            inner: Index::new(labels),
-        }
-    }
-
-    fn strip(&self) -> PyIndex {
-        let labels = self
-            .inner
-            .labels()
-            .iter()
-            .map(|l| match l {
-                IndexLabel::Utf8(s) => IndexLabel::Utf8(s.trim().to_string()),
-                other => other.clone(),
-            })
-            .collect();
-        PyIndex {
-            inner: Index::new(labels),
-        }
-    }
-
-    fn len(&self) -> PyIndex {
-        let labels = self
-            .inner
-            .labels()
-            .iter()
-            .map(|l| match l {
-                IndexLabel::Utf8(s) => IndexLabel::Int64(s.len() as i64),
-                _ => IndexLabel::Null(NullKind::NaN),
-            })
-            .collect();
-        PyIndex {
-            inner: Index::new(labels),
-        }
-    }
-
-    fn contains(&self, pat: &str) -> Vec<bool> {
-        self.inner
-            .labels()
-            .iter()
-            .map(|l| match l {
-                IndexLabel::Utf8(s) => s.contains(pat),
-                _ => false,
-            })
-            .collect()
-    }
-
-    fn startswith(&self, pat: &str) -> Vec<bool> {
-        self.inner
-            .labels()
-            .iter()
-            .map(|l| match l {
-                IndexLabel::Utf8(s) => s.starts_with(pat),
-                _ => false,
-            })
-            .collect()
-    }
-
-    fn endswith(&self, pat: &str) -> Vec<bool> {
-        self.inner
-            .labels()
-            .iter()
-            .map(|l| match l {
-                IndexLabel::Utf8(s) => s.ends_with(pat),
-                _ => false,
-            })
-            .collect()
-    }
-
-    fn replace(&self, pat: &str, repl: &str) -> PyIndex {
-        let labels = self
-            .inner
-            .labels()
-            .iter()
-            .map(|l| match l {
-                IndexLabel::Utf8(s) => IndexLabel::Utf8(s.replace(pat, repl)),
-                other => other.clone(),
-            })
-            .collect();
-        PyIndex {
-            inner: Index::new(labels),
-        }
+        .into_py_any(py)
     }
 }
 
@@ -6452,7 +6449,10 @@ fn pandas_index_repr(py: Python<'_>, index: &Index) -> PyResult<String> {
                         .replace('\r', "\\r")
                         .replace('\n', "\\n")
                 ),
-                IndexLabel::Null(_) if dtype == "object" => "None".to_owned(),
+                // An object Index prints its missing label as it is (None,
+                // NaT or nan); the NaN printed None.
+                IndexLabel::Null(NullKind::Null) if dtype == "object" => "None".to_owned(),
+                IndexLabel::Null(NullKind::NaT) if dtype == "object" => "NaT".to_owned(),
                 IndexLabel::Null(_) => "nan".to_owned(),
                 other => index_label_to_py(py, other)?.bind(py).str()?.to_string(),
             })
@@ -7006,7 +7006,14 @@ impl PyIndex {
         if let Some(multi) = data.map(tuple_labels_multiindex).transpose()?.flatten() {
             return Ok(Py::new(py, PyMultiIndex { inner: multi })?.into_any());
         }
-        row_index_to_py(py, &Self::new(data, name)?.inner)
+        let index = Self::new(data, name)?.inner;
+        if !index.hasnans() {
+            return row_index_to_py(py, &index);
+        }
+        // Ints beside a missing label are float64 with NaN, as pandas' (an
+        // int64 Index held the None).
+        let labels = float_index_labels(index.labels().to_vec());
+        row_index_to_py(py, &Index::new(labels).rename_index(index.name()))
     }
 
     #[getter]
@@ -10502,11 +10509,109 @@ impl PyMultiIndex {
         self.inner == other.inner
     }
 
+    /// pandas' repr: one tuple a line under `MultiIndex([`, each level's
+    /// values right-justified to its widest shown one (text and datetimes
+    /// quoted, floats as Python prints them, a missing one nan), the first
+    /// and last 10 around '...' past 100, then `names=` when any level is
+    /// named and `length=` when cut. It printed only the level count and
+    /// length.
     fn __repr__(&self) -> String {
+        const MAX_SEQ_ITEMS: usize = 100;
+        let n = self.inner.len();
+        let shown: Vec<usize> = if n > MAX_SEQ_ITEMS {
+            (0..10).chain(n - 10..n).collect()
+        } else {
+            (0..n).collect()
+        };
+        let mut columns: Vec<Vec<String>> = Vec::with_capacity(self.inner.nlevels());
+        for level in 0..self.inner.nlevels() {
+            let labels: Vec<IndexLabel> = self
+                .inner
+                .get_level_values(level)
+                .map(|values| {
+                    shown
+                        .iter()
+                        .filter_map(|&row| values.labels().get(row).cloned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let datetimes = !labels.is_empty()
+                && labels
+                    .iter()
+                    .all(|label| matches!(label, IndexLabel::Datetime64(_) | IndexLabel::Null(_)));
+            let texts: Vec<String> = if datetimes {
+                pandas_label_texts(&labels, None)
+                    .into_iter()
+                    .zip(&labels)
+                    .map(|(text, label)| match label {
+                        IndexLabel::Null(_) => "NaT".to_owned(),
+                        _ => format!("'{text}'"),
+                    })
+                    .collect()
+            } else {
+                labels
+                    .iter()
+                    .map(|label| match label {
+                        IndexLabel::Utf8(text) => format!("'{text}'"),
+                        IndexLabel::Float64(value) => Scalar::Float64(value.0).python_repr(),
+                        IndexLabel::Null(_) => "nan".to_owned(),
+                        IndexLabel::Bool(flag) => if *flag { "True" } else { "False" }.to_owned(),
+                        other => other.to_string(),
+                    })
+                    .collect()
+            };
+            let width = texts
+                .iter()
+                .map(|text| text.chars().count())
+                .max()
+                .unwrap_or(0);
+            columns.push(
+                texts
+                    .into_iter()
+                    .map(|text| format!("{text:>width$}"))
+                    .collect(),
+            );
+        }
+        let items: Vec<String> = (0..shown.len())
+            .map(|row| {
+                let parts: Vec<&str> = columns.iter().map(|level| level[row].as_str()).collect();
+                if parts.len() == 1 {
+                    format!("({},)", parts[0])
+                } else {
+                    format!("({})", parts.join(", "))
+                }
+            })
+            .collect();
+        let indent = " ".repeat("MultiIndex([".len());
+        let body = if n > MAX_SEQ_ITEMS {
+            let mut lines = items[..10].to_vec();
+            lines.push("...".to_owned());
+            lines.extend_from_slice(&items[10..]);
+            lines
+                .join(&format!(",\n{indent}"))
+                .replace(&format!("...,\n{indent}"), &format!("...\n{indent}"))
+        } else {
+            items.join(&format!(",\n{indent}"))
+        };
+        let mut attrs = Vec::new();
+        let names = self.inner.names();
+        if names.iter().any(Option::is_some) {
+            let listed: Vec<String> = names
+                .iter()
+                .map(|name| {
+                    name.as_ref()
+                        .map_or_else(|| "None".to_owned(), |name| format!("'{name}'"))
+                })
+                .collect();
+            attrs.push(format!("names=[{}]", listed.join(", ")));
+        }
+        if n > MAX_SEQ_ITEMS {
+            attrs.push(format!("length={n}"));
+        }
         format!(
-            "MultiIndex(levels={}, length={})",
-            self.inner.nlevels(),
-            self.inner.len()
+            "MultiIndex([{body}],\n{}{})",
+            " ".repeat("MultiIndex(".len()),
+            attrs.join(", ")
         )
     }
 
@@ -21016,7 +21121,19 @@ impl PySeries {
                             Some(SeriesOrScalarBound::Series(s)) => Ok(Some(*s)),
                             Some(SeriesOrScalarBound::Scalar(v)) => {
                                 let labels = self.inner.index().labels().to_vec();
-                                let vals = vec![Scalar::Float64(v); labels.len()];
+                                // A whole number beside an int column keeps it
+                                // int64, as pandas (clip(lower=s, upper=8)
+                                // came back float64).
+                                #[allow(clippy::cast_possible_truncation)] // whole, in range
+                                let bound = if self.inner.dtype() == DType::Int64
+                                    && v.fract() == 0.0
+                                    && v.abs() < 9_007_199_254_740_992.0
+                                {
+                                    Scalar::Int64(v as i64)
+                                } else {
+                                    Scalar::Float64(v)
+                                };
+                                let vals = vec![bound; labels.len()];
                                 let s = Series::from_values("bounds", labels, vals)
                                     .map_err(frame_error_to_py)?;
                                 Ok(Some(s))
@@ -57543,6 +57660,7 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStyler>()?;
     m.add_class::<PyIndex>()?;
     m.add_class::<PyIndexStringMethods>()?;
+    m.add_class::<PyIndexStrMethod>()?;
     m.add_class::<PyDatetimeIndex>()?;
     m.add_class::<PyTimedeltaIndex>()?;
     m.add_class::<PyRangeIndex>()?;
