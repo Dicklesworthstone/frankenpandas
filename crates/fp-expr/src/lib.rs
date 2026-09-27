@@ -557,7 +557,7 @@ impl EvalContext {
         if self.anchor_index.is_none() {
             self.anchor_index = Some(series.index().clone());
         }
-        self.series.insert(series.name().to_owned(), series);
+        self.series.insert(series.name().to_string(), series);
     }
 
     pub fn from_dataframe(frame: &fp_frame::DataFrame) -> Result<Self, ExprError> {

@@ -25,7 +25,8 @@ use std::{
 use fp_columnar::{ArithmeticOp, Column, ComparisonOp};
 use fp_expr::DataFrameExprExt;
 use fp_frame::{
-    DataFrame, DropNaHow, FrameError, PlotKind, Series, concat_dataframes, concat_series,
+    DataFrame, DropNaHow, FrameError, PlotKind, Series, SeriesName, concat_dataframes,
+    concat_series,
 };
 use fp_index::{
     AlignMode, CategoricalIndex, DatetimeIndex, DuplicateKeep, Index, IndexLabel, MultiIndex,
@@ -4314,7 +4315,7 @@ fn py_index_arg_name(obj: &Bound<'_, PyAny>) -> Option<String> {
         tdi.inner.name().map(str::to_owned)
     } else if let Ok(series) = obj.extract::<PyRef<'_, PySeries>>() {
         let name = series.inner.name();
-        (!name.is_empty()).then(|| name.to_owned())
+        (!name.is_empty()).then(|| name.to_string())
     } else {
         None
     }
@@ -4394,6 +4395,29 @@ fn py_value_to_column(
     Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
         "Cannot convert value to DataFrame column",
     ))
+}
+
+/// A Series name given from Python: None leaves it unnamed, a string is its
+/// text, and any other label (0, 1.5, a Timestamp) keeps its type, as
+/// pandas' (fvsao.32; `Series(name=0).name` was the string '0'). A name no
+/// label holds (a tuple) is its `str`.
+fn py_series_name(value: &Bound<'_, PyAny>) -> PyResult<SeriesName> {
+    if value.is_none() {
+        return Ok(SeriesName::default());
+    }
+    match py_to_index_label(value) {
+        Ok(label) => Ok(SeriesName::typed(label)),
+        Err(_) => Ok(value.str()?.to_string().into()),
+    }
+}
+
+/// A Series name as pandas reports it: None when unnamed, else its typed
+/// label.
+fn series_name_to_py(py: Python<'_>, name: &SeriesName) -> PyResult<Option<Py<PyAny>>> {
+    if name.is_empty() {
+        return Ok(None);
+    }
+    index_label_to_py(py, &name.label()).map(Some)
 }
 
 /// Convert a Python value to an IndexLabel.
@@ -5370,7 +5394,7 @@ impl PyIndex {
                     .iter()
                     .map(scalar_to_index_label_converter)
                     .collect();
-                let series_name = Some(s.inner.name()).filter(|n| !n.is_empty());
+                let series_name = Some(s.inner.name().as_str()).filter(|n| !n.is_empty());
                 return Ok(PyIndex {
                     inner: Index::new(labels).set_names(name.or(series_name)),
                 });
@@ -14151,14 +14175,9 @@ fn listlike_series_operand(
         }
     };
     let name = if other.get_type().name()?.to_str()?.ends_with("Index") {
-        let label = other.getattr("name")?;
-        if label.is_none() {
-            String::new()
-        } else {
-            label.str()?.to_string()
-        }
+        py_series_name(&other.getattr("name")?)?
     } else {
-        like.name().to_owned()
+        like.name().clone()
     };
     Series::new(name, like.index().clone(), column)
         .map(Some)
@@ -14246,7 +14265,11 @@ fn unwrap_0d<'py>(other: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
 /// a Series or frame, keeping a tz-aware index's zone (a copy of its labels
 /// made a naive index, which does not join an aware one) and taking the
 /// same-index fast path.
-fn series_over_index(name: &str, index: &Index, values: Vec<Scalar>) -> PyResult<Series> {
+fn series_over_index(
+    name: impl Into<SeriesName>,
+    index: &Index,
+    values: Vec<Scalar>,
+) -> PyResult<Series> {
     let column = Column::from_values(values).map_err(column_error_to_py)?;
     Series::new(name, index.clone(), column).map_err(frame_error_to_py)
 }
@@ -16575,25 +16598,20 @@ fn array_ufunc<'py>(
     let mut arrays = Vec::with_capacity(arguments.len());
     for argument in &arguments {
         if let Ok(series) = argument.extract::<PyRef<'_, PySeries>>() {
-            names.push(series.inner.name().to_owned());
+            names.push(series.inner.name().clone());
             arrays.push(ufunc_series_values(py, &series.inner, &name, &mut mask)?);
         } else {
             if argument.get_type().name()?.to_str()?.ends_with("Index") {
-                let label = argument.getattr("name")?;
-                names.push(if label.is_none() {
-                    String::new()
-                } else {
-                    label.str()?.to_string()
-                });
+                names.push(py_series_name(&argument.getattr("name")?)?);
             }
             arrays.push(argument.clone());
         }
     }
     let result = call(arrays, kwargs)?;
-    names.dedup();
+    names.dedup_by(|a, b| a.label() == b.label());
     let name = match names.as_slice() {
         [only] => only.clone(),
-        _ => String::new(),
+        _ => SeriesName::default(),
     };
     let shaped = shape_of.extract::<PyRef<'_, PySeries>>()?;
     let rebuild = |result: &Bound<'py, PyAny>| -> PyResult<Bound<'py, PyAny>> {
@@ -16674,22 +16692,17 @@ fn ufunc_rebuild<'py>(
 
 /// The name of `left <op> other`: an operand Series or Index with another
 /// name leaves the result unnamed (pandas' `get_op_result_name`).
-fn op_result_name(left: &Series, other: &Bound<'_, PyAny>) -> PyResult<String> {
+fn op_result_name(left: &Series, other: &Bound<'_, PyAny>) -> PyResult<SeriesName> {
     let other_name = if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
-        Some(series.inner.name().to_owned())
+        Some(series.inner.name().clone())
     } else if other.get_type().name()?.to_str()?.ends_with("Index") {
-        let name = other.getattr("name")?;
-        Some(if name.is_none() {
-            String::new()
-        } else {
-            name.str()?.to_string()
-        })
+        Some(py_series_name(&other.getattr("name")?)?)
     } else {
         None
     };
     Ok(match other_name {
-        Some(name) if name != left.name() => String::new(),
-        _ => left.name().to_owned(),
+        Some(name) if name.label() != left.name().label() => SeriesName::default(),
+        _ => left.name().clone(),
     })
 }
 
@@ -17122,9 +17135,9 @@ impl PySeries {
         py: Python<'_>,
         data: Option<&Bound<'_, PyAny>>,
         index: Option<&Bound<'_, PyAny>>,
-        name: Option<&str>,
+        name: Option<SeriesName>,
     ) -> PyResult<Self> {
-        let series_name = name.unwrap_or("");
+        let series_name = name.clone().unwrap_or_default();
 
         let Some(data) = data else {
             let labels = extract_index_labels(index, 0)?;
@@ -17136,7 +17149,7 @@ impl PySeries {
         };
 
         if let Ok(s) = data.extract::<PyRef<'_, PySeries>>() {
-            let s_name = name.unwrap_or_else(|| s.inner.name());
+            let s_name = name.unwrap_or_else(|| s.inner.name().clone());
             if let Some(idx_arg) = index {
                 let labels = extract_index_labels(Some(idx_arg), s.inner.len())?;
                 let reindexed = s
@@ -17161,7 +17174,9 @@ impl PySeries {
                 )));
             }
             let index_name = py_index_arg_name(data);
-            let series_name = name.or(index_name.as_deref()).unwrap_or("");
+            let series_name = name
+                .or_else(|| index_name.map(SeriesName::from))
+                .unwrap_or_default();
             let series =
                 Series::new(series_name, Index::new(labels), column).map_err(frame_error_to_py)?;
             return Ok(PySeries { inner: series });
@@ -17284,10 +17299,14 @@ impl PySeries {
         data: Option<&Bound<'_, PyAny>>,
         index: Option<&Bound<'_, PyAny>>,
         dtype: Option<&Bound<'_, PyAny>>,
-        name: Option<&str>,
+        name: Option<&Bound<'_, PyAny>>,
         copy: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let _ = copy; // pandas' copy= does not change the result
+        let name = name
+            .filter(|name| !name.is_none())
+            .map(py_series_name)
+            .transpose()?;
         // dtype=object keeps a list's values as given; `from_data` would first
         // make [1, None, 2] float64 (fvsao.22).
         let object_values = match (data, dtype) {
@@ -17313,7 +17332,7 @@ impl PySeries {
                 )));
             }
             Series::new(
-                name.unwrap_or(""),
+                name.unwrap_or_default(),
                 Index::new(labels),
                 Column::from_object_values(values),
             )
@@ -17330,7 +17349,7 @@ impl PySeries {
                         )));
                     }
                     Series::new(
-                        name.unwrap_or(""),
+                        name.unwrap_or_default(),
                         Index::new(labels),
                         categorical.inner.column().clone(),
                     )
@@ -17416,9 +17435,8 @@ impl PySeries {
     /// Return the name of the Series; None when unnamed, as in pandas (the Rust
     /// Series stores an unnamed Series as "").
     #[getter]
-    fn name(&self) -> Option<&str> {
-        let name = self.inner.name();
-        (!name.is_empty()).then_some(name)
+    fn name(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        series_name_to_py(py, self.inner.name())
     }
 
     /// Return the index of the Series: a MultiIndex when its labels carry row
@@ -17434,12 +17452,10 @@ impl PySeries {
     /// unnames it). It raised AttributeError.
     #[setter(name)]
     fn assign_name(&mut self, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        let name = if value.is_none() {
-            String::new()
-        } else {
-            py_to_index_label(value)?.to_string()
-        };
-        self.inner = self.inner.rename(&name).map_err(frame_error_to_py)?;
+        self.inner = self
+            .inner
+            .rename(py_series_name(value)?)
+            .map_err(frame_error_to_py)?;
         Ok(())
     }
 
@@ -17518,7 +17534,7 @@ impl PySeries {
             .map(|lbl| index_label_to_py(py, lbl))
             .collect::<PyResult<Vec<_>>>()?;
         let idx_list = PyList::new(py, &idx_labels)?;
-        let name = self.name().into_bound_py_any(py)?;
+        let name = self.name(py)?.into_bound_py_any(py)?;
         // Series(data, index, dtype, name): a categorical comes back as
         // 'category' (its categories re-inferred from the values).
         let dtype = if self.inner.is_categorical() {
@@ -18730,7 +18746,7 @@ impl PySeries {
                 let new_col = fill_column_with_other(self.inner.column(), aligned.column(), limit)
                     .map_err(frame_error_to_py)?;
                 let out_s = Series::new(
-                    self.inner.name().to_string(),
+                    self.inner.name().clone(),
                     self.inner.index().clone(),
                     new_col,
                 )
@@ -18745,7 +18761,7 @@ impl PySeries {
                 let new_col = fill_column_with_other(self.inner.column(), &fill_col, limit)
                     .map_err(frame_error_to_py)?;
                 let out_s = Series::new(
-                    self.inner.name().to_string(),
+                    self.inner.name().clone(),
                     self.inner.index().clone(),
                     new_col,
                 )
@@ -18758,7 +18774,7 @@ impl PySeries {
             let new_col = fill_column_with_scalar(self.inner.column(), &fill_val, limit)
                 .map_err(frame_error_to_py)?;
             let out_s = Series::new(
-                self.inner.name().to_string(),
+                self.inner.name().clone(),
                 self.inner.index().clone(),
                 new_col,
             )
@@ -19083,10 +19099,10 @@ impl PySeries {
             return Ok(Some(PySeries { inner: out }));
         }
         let name = match passed(index) {
-            None => String::new(),
-            Some(name) => py_to_index_label(&name)?.to_string(),
+            None => SeriesName::default(),
+            Some(name) => py_series_name(&name)?,
         };
-        let out = self.inner.rename(&name).map_err(frame_error_to_py)?;
+        let out = self.inner.rename(name).map_err(frame_error_to_py)?;
         if inplace {
             self.inner = out.clone();
         }
@@ -19469,8 +19485,8 @@ impl PySeries {
     ) -> PyResult<PySeries> {
         let _ = copy; // pandas' copy= does not change the result
         let spec = if let Ok(mapping) = dtype.cast::<PyDict>() {
-            let name = self.inner.name().to_owned();
-            match mapping.get_item(&name)? {
+            let name = series_name_to_py(dtype.py(), self.inner.name())?;
+            match mapping.get_item(name)? {
                 Some(spec) if mapping.len() == 1 => spec,
                 _ => {
                     return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
@@ -19750,9 +19766,25 @@ impl PySeries {
         self.clone()
     }
 
+    /// pandas' `to_frame(name=)`: the column is `name`, else the Series'
+    /// name, typed (0 stays the integer 0), else the RangeIndex column 0.
     #[pyo3(signature = (name=None))]
-    fn to_frame(&self, name: Option<&str>) -> PyResult<PyDataFrame> {
-        let res = self.inner.to_frame(name).map_err(frame_error_to_py)?;
+    fn to_frame(&self, name: Option<&Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        let series = match name.filter(|name| !name.is_none()) {
+            Some(name) => self
+                .inner
+                .rename(py_series_name(name)?)
+                .map_err(frame_error_to_py)?,
+            None if self.inner.name().is_empty() => self
+                .inner
+                .rename(SeriesName::typed(IndexLabel::Int64(0)))
+                .map_err(frame_error_to_py)?,
+            None => self.inner.clone(),
+        };
+        let mut res = series.to_frame(None).map_err(frame_error_to_py)?;
+        if self.inner.name().is_empty() && name.is_none_or(|name| name.is_none()) {
+            res = res.with_column_range((0, 1, 1));
+        }
         Ok(PyDataFrame { inner: res })
     }
 
@@ -21611,9 +21643,9 @@ impl PySeries {
             .map_err(fp_frame::FrameError::Column)
             .map_err(frame_error_to_py)?;
         let res_name = if self.inner.name() == other.inner.name() {
-            self.inner.name().to_string()
+            self.inner.name().clone()
         } else {
-            String::new()
+            SeriesName::default()
         };
         let res_series = Series::new(res_name, plan.union_index, col).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res_series })
@@ -22092,7 +22124,7 @@ impl PySeries {
             return Ok(da.into_any().unbind());
         }
         let d = PyDict::new(py);
-        d.set_item(self.inner.name(), self.to_list(py)?)?;
+        d.set_item(series_name_to_py(py, self.inner.name())?, self.to_list(py)?)?;
         Ok(d.into_any().unbind())
     }
 
@@ -23229,8 +23261,12 @@ impl PyDataFrame {
             .inner
             .column(col)
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(col.to_owned()))?;
-        let series = Series::new(col, self.inner.series_index(), column.clone())
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let series = Series::new(
+            self.inner.column_series_name(col),
+            self.inner.series_index(),
+            column.clone(),
+        )
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         Ok(PySeries { inner: series })
     }
 
@@ -23245,8 +23281,12 @@ impl PyDataFrame {
                 "column position {position} is out of range"
             )));
         };
-        let series = Series::new(name, self.inner.series_index(), column.clone())
-            .map_err(frame_error_to_py)?;
+        let series = Series::new(
+            self.inner.column_series_name(&name),
+            self.inner.series_index(),
+            column.clone(),
+        )
+        .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: series })
     }
 
@@ -23901,7 +23941,8 @@ fn df_col_to_series(df: &DataFrame, name: &str) -> PyResult<Series> {
     let col = df
         .column(name)
         .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(name.to_string()))?;
-    Series::new(name, df.index().clone(), col.clone()).map_err(frame_error_to_py)
+    Series::new(df.column_series_name(name), df.index().clone(), col.clone())
+        .map_err(frame_error_to_py)
 }
 
 fn normalize_df_cond(
@@ -24457,20 +24498,20 @@ impl PyDataFrame {
             }
 
             if let Ok(s) = data.extract::<PyRef<'_, PySeries>>() {
-                let col_name = explicit_cols
-                    .as_ref()
-                    .and_then(|c| c.first().cloned())
-                    .unwrap_or_else(|| {
-                        if s.inner.name().is_empty() {
-                            "0".to_string()
-                        } else {
-                            s.inner.name().to_string()
-                        }
-                    });
-                let mut df = s
-                    .inner
-                    .to_frame(Some(&col_name))
-                    .map_err(frame_error_to_py)?;
+                // The column is the given one, else the Series' typed name,
+                // else pandas' RangeIndex column 0.
+                let given = explicit_cols.as_ref().and_then(|c| c.first().cloned());
+                let unnamed = given.is_none() && s.inner.name().is_empty();
+                let named = match given {
+                    Some(col_name) => s.inner.rename(col_name),
+                    None if unnamed => s.inner.rename(SeriesName::typed(IndexLabel::Int64(0))),
+                    None => Ok(s.inner.clone()),
+                }
+                .map_err(frame_error_to_py)?;
+                let mut df = named.to_frame(None).map_err(frame_error_to_py)?;
+                if unnamed {
+                    df = df.with_column_range((0, 1, 1));
+                }
                 if let Some(idx) = index {
                     let labels = extract_index_labels(Some(idx), df.len())?;
                     df = df.reindex(labels).map_err(|e| {
@@ -29829,10 +29870,11 @@ impl PyDataFrame {
                     )));
                 }
             };
-            // pandas names the result after q, along either axis (axis=1
-            // was named 'quantile').
-            let q_name = pyo3::types::PyFloat::new(py, q_val).str()?.to_string();
-            let res = res.rename(&q_name).map_err(frame_error_to_py)?;
+            // pandas names the result after q, the float, along either axis
+            // (axis=1 was named 'quantile'; the name was the text '0.3').
+            let res = res
+                .rename(SeriesName::typed(IndexLabel::Float64(OrderedF64(q_val))))
+                .map_err(frame_error_to_py)?;
             if interpolation == "linear" {
                 return Ok(Py::new(py, PySeries { inner: res })?.into_any());
             }
@@ -30196,8 +30238,13 @@ impl PyDataFrame {
         self.inner.equals(&other.inner)
     }
 
-    fn pop(&mut self, item: &str) -> PyResult<PySeries> {
-        let (series, remaining) = self.inner.pop(item).map_err(frame_error_to_py)?;
+    /// pandas' `pop(item)`: the column labelled `item` (typed: `pop(0)`
+    /// takes `DataFrame([[1, 2]])`'s first column), `KeyError` when absent.
+    fn pop(&mut self, item: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let name = self
+            .column_name_for(item)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(item.clone().unbind()))?;
+        let (series, remaining) = self.inner.pop(&name).map_err(frame_error_to_py)?;
         self.inner = remaining;
         Ok(PySeries { inner: series })
     }
@@ -30341,7 +30388,7 @@ impl PyDataFrame {
                 col_labels.push(self.inner.column_label(col_name));
                 col_items.push(val);
             }
-            let s = Series::from_values(label.to_string(), col_labels, col_items)
+            let s = Series::from_values(SeriesName::typed(label), col_labels, col_items)
                 .map_err(frame_error_to_py)?;
             let py_s = Py::new(py, PySeries { inner: s })?;
             list.push(pyo3::types::PyTuple::new(py, &[py_label, py_s.into_any()])?);
@@ -30978,7 +31025,7 @@ impl PyDataFrame {
                 (Some(values), _) => values.get_item(position)?,
                 (None, 0) => PySeries {
                     inner: Series::new(
-                        &names[position],
+                        frame.column_series_name(&names[position]),
                         frame.series_index(),
                         frame.column_at(position).cloned().ok_or_else(|| {
                             PyErr::new::<pyo3::exceptions::PyIndexError, _>(position)
@@ -30994,8 +31041,12 @@ impl PyDataFrame {
                         .map(|column| column[position].clone())
                         .collect();
                     PySeries {
-                        inner: Series::from_values(label.to_string(), column_labels.clone(), row)
-                            .map_err(frame_error_to_py)?,
+                        inner: Series::from_values(
+                            SeriesName::typed(label),
+                            column_labels.clone(),
+                            row,
+                        )
+                        .map_err(frame_error_to_py)?,
                     }
                     .into_bound_py_any(py)?
                 }
@@ -33373,8 +33424,12 @@ impl PyDataFrameILoc {
                 let col = self.inner.column_at(c_norm as usize).ok_or_else(|| {
                     PyErr::new::<pyo3::exceptions::PyIndexError, _>("column index out of bounds")
                 })?;
-                let col_series = Series::new(&col_name, self.inner.series_index(), col.clone())
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                let col_series = Series::new(
+                    self.inner.column_series_name(&col_name),
+                    self.inner.series_index(),
+                    col.clone(),
+                )
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
                 if let Ok(row_slice) = row_key.cast::<pyo3::types::PySlice>() {
                     let sub = slice_rows(row_slice, self.inner.len())?
@@ -35252,8 +35307,12 @@ impl PyDataFrameLoc {
                     MultiLoc::Rows(rows) => {
                         if let Ok(name) = col_key.extract::<String>() {
                             let column = rows.column(&name).ok_or_else(|| loc_key_error(&name))?;
-                            let s = Series::new(&name, rows.series_index(), column.clone())
-                                .map_err(frame_error_to_py)?;
+                            let s = Series::new(
+                                rows.column_series_name(&name),
+                                rows.series_index(),
+                                column.clone(),
+                            )
+                            .map_err(frame_error_to_py)?;
                             return Ok(Py::new(py, PySeries { inner: s })?.into_any());
                         }
                         // A list or a label slice (':' is every column).
@@ -35280,10 +35339,12 @@ impl PyDataFrameLoc {
                     let col = sub
                         .column(&col_name)
                         .ok_or_else(|| loc_key_error(&col_name))?;
-                    let s =
-                        Series::new(&col_name, sub.index().clone(), col.clone()).map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                        })?;
+                    let s = Series::new(
+                        self.inner.column_series_name(&col_name),
+                        sub.index().clone(),
+                        col.clone(),
+                    )
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
                     Ok(Py::new(py, PySeries { inner: s })?.into_any())
                 }
                 // df.loc['r', ['c1', 'c2']] with a unique label -> row Series
@@ -36033,7 +36094,7 @@ impl PySeriesStringAccessor {
         Ok(PyStringListSeries {
             values,
             index: self.series.index().clone(),
-            name: self.series.name().to_owned(),
+            name: self.series.name().clone(),
         })
     }
 }
@@ -36048,7 +36109,7 @@ impl PySeriesStringAccessor {
 pub struct PyStringListSeries {
     values: Vec<Py<PyAny>>,
     index: Index,
-    name: String,
+    name: SeriesName,
 }
 
 impl PyStringListSeries {
@@ -36099,8 +36160,8 @@ impl PyStringListSeries {
     }
 
     #[getter]
-    fn name(&self) -> Option<&str> {
-        (!self.name.is_empty()).then_some(self.name.as_str())
+    fn name(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        series_name_to_py(py, &self.name)
     }
 
     #[getter]
@@ -36138,7 +36199,7 @@ impl PyStringListSeries {
             if self.name.is_empty() {
                 "None"
             } else {
-                &self.name
+                self.name.as_str()
             }
         ));
         Ok(lines.join("\n"))
@@ -38653,7 +38714,7 @@ fn groupby_key_column(
     key: &Bound<'_, PyAny>,
 ) -> PyResult<(Column, Option<String>)> {
     if let Ok(series) = key.extract::<PyRef<'_, PySeries>>() {
-        let name = (!series.inner.name().is_empty()).then(|| series.inner.name().to_owned());
+        let name = (!series.inner.name().is_empty()).then(|| series.inner.name().to_string());
         let aligned = if series.inner.index().labels() == frame.index().labels() {
             series.inner.clone()
         } else {
@@ -39360,7 +39421,12 @@ impl PyGroupBy {
             let values = self.df.column(col).ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("Column not found: {col}"))
             })?;
-            Series::new(col, self.df.index().clone(), values.clone()).map_err(frame_error_to_py)
+            Series::new(
+                self.df.column_series_name(col),
+                self.df.index().clone(),
+                values.clone(),
+            )
+            .map_err(frame_error_to_py)
         };
         let series = column(name)?;
         let key = match self.by.as_slice() {
@@ -39426,14 +39492,25 @@ impl PyGroupBy {
     /// `gb[["v", "w"]]` this groupby over those columns; an absent column is a
     /// KeyError with pandas' message.
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        // A typed label (gb[1] of DataFrame([[1, 2]])'s groupby) selects the
+        // column carrying it (fvsao.32).
+        let typed = frame_column_names_arg(&self.df, key);
+        if let Some(names) = &typed
+            && !key.is_instance_of::<PyList>()
+        {
+            return Ok(Py::new(py, self.column_groupby(&names[0])?)?.into_any());
+        }
         if let Ok(name) = key.extract::<String>() {
             return Ok(Py::new(py, self.column_groupby(&name)?)?.into_any());
         }
-        let names: Vec<String> = key.extract().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "groupby column selection must be a column name or a list of column names",
-            )
-        })?;
+        let names: Vec<String> = match typed {
+            Some(names) => names,
+            None => key.extract().map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "groupby column selection must be a column name or a list of column names",
+                )
+            })?,
+        };
         let missing: Vec<String> = names
             .iter()
             .filter(|name| self.df.column(name).is_none())
@@ -41194,7 +41271,7 @@ impl PySeriesGroupBy {
                             .group_codes()
                     })
                     .map_err(frame_error_to_py)?;
-                let key_name = Some(self.by.name().to_owned()).filter(|name| !name.is_empty());
+                let key_name = Some(self.by.name().to_string()).filter(|name| !name.is_empty());
                 (window_groups_from_codes(&codes, &groups), vec![key_name])
             }
         };
@@ -42007,7 +42084,7 @@ impl PySeriesGroupBy {
             kept_rows &= matches!(&result, Applied::Series(out) if out.index().labels() == rows);
             results.push(result);
         }
-        let key_name = self.by.name();
+        let key_name = self.by.name().as_str();
         let key_name = (!key_name.is_empty()).then_some(key_name);
         // pandas' SeriesGroupBy decides on the FIRST result, None or not.
         match results.first() {
@@ -43983,17 +44060,28 @@ fn concat(
         return Err(not_implemented("concat(names=..., axis=1)"));
     }
     if !series.is_empty() {
-        // axis=1: each Series is a column, named by its key, else its name,
-        // else its position.
+        // axis=1: each Series is a column labelled by its key, else its
+        // (typed) name, else the next integer among the unnamed ones, as
+        // pandas' (['a', 0, 1]; they were the strings of their positions).
+        let mut unnamed = 0_i64;
         for (position, s) in series.iter().enumerate() {
             let name = match &keys {
-                Some(keys) => keys[position].to_string(),
-                None if s.name().is_empty() => position.to_string(),
-                None => s.name().to_owned(),
+                Some(keys) => SeriesName::typed(keys[position].clone()),
+                None if s.name().is_empty() => {
+                    unnamed += 1;
+                    SeriesName::typed(IndexLabel::Int64(unnamed - 1))
+                }
+                None => s.name().clone(),
             };
-            frames.push(s.to_frame(Some(&name)).map_err(frame_error_to_py)?);
+            frames.push(
+                s.rename(name)
+                    .and_then(|s| s.to_frame(None))
+                    .map_err(frame_error_to_py)?,
+            );
         }
     }
+    let unnamed_columns =
+        keys.is_none() && !series.is_empty() && series.iter().all(|s| s.name().is_empty());
     let refs: Vec<&DataFrame> = frames.iter().collect();
     let mut out =
         fp_frame::concat_dataframes_with_axis_join(&refs, axis, join).map_err(frame_error_to_py)?;
@@ -44028,6 +44116,13 @@ fn concat(
                 .collect();
             out = out.set_axis(positions, 1).map_err(frame_error_to_py)?;
         }
+    }
+    // Unnamed Series side by side, or any relabelled by position, are
+    // pandas' RangeIndex columns.
+    if axis == 1 && (ignore_index || unnamed_columns) {
+        let stop = i64::try_from(out.num_columns())
+            .map_err(|_| PyErr::new::<pyo3::exceptions::PyOverflowError, _>("too many columns"))?;
+        out = out.with_column_range((0, stop, 1));
     }
     PyDataFrame { inner: out }.into_py_any(py)
 }
@@ -47640,7 +47735,7 @@ fn crosstab<'py>(
     let name_of = |given: Option<Vec<String>>, series: &PySeries, prefix: &str| {
         given
             .and_then(|names| names.into_iter().next())
-            .or_else(|| (!series.inner.name().is_empty()).then(|| series.inner.name().to_owned()))
+            .or_else(|| (!series.inner.name().is_empty()).then(|| series.inner.name().to_string()))
             .unwrap_or_else(|| format!("{prefix}_0"))
     };
     let row_name = name_of(rownames, &row, "row");
@@ -55438,14 +55533,15 @@ mod tests {
 
         assert!(py_df.equals(&df_copy));
 
-        let mut mod_df = py_df.clone();
-        let popped = mod_df.pop("a").expect("pop"); // ubs:ignore — test fixture
-        assert_eq!(popped.name(), Some("a"));
-        assert_eq!(mod_df.column_labels(), vec!["b"]);
-        assert!(mod_df.pop("nonexistent").is_err());
-
         pyo3::Python::initialize();
         pyo3::Python::attach(|py| {
+            let mut mod_df = py_df.clone();
+            let key = |text: &str| pyo3::types::PyString::new(py, text).into_any();
+            let popped = mod_df.pop(&key("a")).expect("pop"); // ubs:ignore — test fixture
+            assert_eq!(popped.inner.name().as_str(), "a");
+            assert_eq!(mod_df.column_labels(), vec!["b"]);
+            assert!(mod_df.pop(&key("nonexistent")).is_err());
+
             let dict_obj = py_df.to_dict(py, "dict").expect("to_dict dict"); // ubs:ignore — test fixture
             assert!(dict_obj.bind(py).is_instance_of::<pyo3::types::PyDict>());
 

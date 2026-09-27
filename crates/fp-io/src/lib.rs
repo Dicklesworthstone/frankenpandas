@@ -9781,6 +9781,7 @@ pub fn series_from_arrow_array(
     arr: &dyn Array,
     dt: &ArrowDataType,
 ) -> Result<Series, IoError> {
+    let name: String = name.into();
     let values = arrow_array_to_scalars(arr, dt)?;
     if let ArrowDataType::Timestamp(_, Some(_)) = dt {
         // The zone lives on the dtype; value inference alone would drop it, and

@@ -1974,14 +1974,9 @@ _LOC_CASES = {
     "series_label_list": lambda df, dk, s: s.loc[[8, 5]],
     "series_unique_label": lambda df, dk, s: s.loc[6],
     "missing_label_raises": lambda df, dk, s: dk.loc["zz"],
-    "unique_label_row": pytest.param(
-        lambda df, dk, s: df.loc[2],
-        marks=pytest.mark.xfail(
-            strict=True,
-            reason="row Series name is '2' (str) not 2 (int): Series names are strings "
-            "(br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.7)",
-        ),
-    ),
+    # the row Series is named by the typed row label 2, not the string '2'
+    # (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.32)
+    "unique_label_row": lambda df, dk, s: df.loc[2],
 }
 
 
@@ -9170,3 +9165,111 @@ def _column_label_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_COLUMN_LABEL_CASES))
 def test_column_labels_keep_their_types_like_pandas(case: str) -> None:
     assert _column_label_outcome(fpd, case) == _column_label_outcome(pd, case), case
+
+
+# fvsao.32: Series names keep their types. df[0].name, df.iloc[1].name and
+# Series(name=0).name were the strings '0' / '1', and so was every column a
+# named Series became (to_frame, concat, reset_index).
+def _label_kind(value: Any) -> Any:
+    """A label and its kind - 0 and '0' differ, 0 and np.int64(0) do not."""
+    if value is None:
+        return (None, "none")
+    if isinstance(value, (bool, np.bool_)):
+        return (bool(value), "bool")
+    if isinstance(value, (int, np.integer)):
+        return (int(value), "int")
+    if isinstance(value, (float, np.floating)):
+        return (float(value), "float")
+    return (value, type(value).__name__)
+
+
+def _name_view(x: Any) -> Any:
+    if hasattr(x, "tolist") and not hasattr(x, "dtype"):
+        return x
+    if isinstance(x, list):
+        return [_label_kind(v) for v in x]
+    if hasattr(x, "columns"):
+        return (type(x.columns).__name__, [_label_kind(c) for c in x.columns])
+    if hasattr(x, "name") and hasattr(x, "dtype"):
+        return ("series", _label_kind(x.name))
+    return _label_kind(x)
+
+
+def _renamed_in_place(s: Any, name: Any) -> Any:
+    s.name = name
+    return s
+
+
+_SERIES_NAME_CASES = {
+    "df[1]": lambda m: _intcol_frame(m)[1],
+    "iloc[:, 1]": lambda m: _intcol_frame(m).iloc[:, 1],
+    "loc[:, 0]": lambda m: _intcol_frame(m).loc[:, 0],
+    "loc row": lambda m: _intcol_frame(m).loc[2],
+    "iloc row": lambda m: _intcol_frame(m).iloc[1],
+    "float row label": lambda m: m.DataFrame({"v": [1]}, index=[1.5]).iloc[0],
+    "float column": lambda m: _mixed_label_frame(m)[2.5],
+    "bool column": lambda m: m.DataFrame({True: [1]})[True],
+    "items": lambda m: [s.name for _, s in _intcol_frame(m).items()],
+    "iterrows": lambda m: [r.name for _, r in _intcol_frame(m).iterrows()],
+    "pop": lambda m: _intcol_frame(m).pop(0),
+    "apply columns": lambda m: _intcol_frame(m).apply(lambda c: c.name).tolist(),
+    "apply rows": lambda m: _intcol_frame(m).apply(lambda r: r.name, axis=1).tolist(),
+    "Series(name=0)": lambda m: m.Series([1, 2], name=0),
+    "Series(name=2.5)": lambda m: m.Series([1, 2], name=2.5),
+    "Series(name=True)": lambda m: m.Series([1, 2], name=True),
+    "rename(3)": lambda m: m.Series([1, 2], name=0).rename(3),
+    "name = 9": lambda m: _renamed_in_place(m.Series([1, 2]), 9),
+    "Series(series, name=4)": lambda m: m.Series(_intcol_frame(m)[0], name=4),
+    "add": lambda m: _intcol_frame(m)[0] + 1,
+    "abs": lambda m: _intcol_frame(m)[0].abs(),
+    "cumsum": lambda m: _intcol_frame(m)[0].cumsum(),
+    "rolling": lambda m: _intcol_frame(m)[0].rolling(2).sum(),
+    "astype": lambda m: _intcol_frame(m)[0].astype(float),
+    "astype by name": lambda m: m.Series([1, 2], name=0).astype({0: float}),
+    "where": lambda m: (lambda s: s.where(s > 1))(_intcol_frame(m)[0]),
+    "map": lambda m: _intcol_frame(m)[0].map(lambda x: x),
+    "fillna": lambda m: _intcol_frame(m)[0].fillna(0),
+    "str.upper": lambda m: m.DataFrame([["a", "b"]])[1].str.upper(),
+    "dt.year": lambda m: m.DataFrame([[m.Timestamp("2024-01-01")]])[0].dt.year,
+    "same names add": lambda m: (lambda s: s + s)(m.Series([1, 2], name=0)),
+    "groupby(0)[1].sum()": lambda m: _intcol_frame(m).groupby(0)[1].sum(),
+    "T[0]": lambda m: m.DataFrame({"a": [1, 2]}).T[0],
+    "quantile": lambda m: m.DataFrame({"v": [1, 2, 3]}).quantile(0.3),
+    "quantile axis=1": lambda m: m.DataFrame({"v": [1, 2], "w": [3, 4]}).quantile(0.5, axis=1),
+    "to_frame": lambda m: _intcol_frame(m)[0].to_frame(),
+    "to_frame(name=7)": lambda m: _intcol_frame(m)[0].to_frame(name=7),
+    "unnamed to_frame": lambda m: m.Series([1]).to_frame(),
+    "reset_index": lambda m: m.Series([1, 2], name=0).reset_index(),
+    "unnamed reset_index": lambda m: m.Series([1, 2]).reset_index(),
+    "DataFrame(series)": lambda m: m.DataFrame(_intcol_frame(m)[0]),
+    "DataFrame(unnamed series)": lambda m: m.DataFrame(m.Series([1])),
+    "dict of series": lambda m: m.DataFrame({"x": _intcol_frame(m)[0], 7: _intcol_frame(m)[1]}),
+    "concat axis=1": lambda m: m.concat([_intcol_frame(m)[1], _intcol_frame(m)[0]], axis=1),
+    "concat unnamed": lambda m: m.concat([m.Series([1]), m.Series([2])], axis=1),
+    "concat mixed": lambda m: m.concat([m.Series([1], name="a"), m.Series([2]), m.Series([3])], axis=1),
+    "concat ignore_index": lambda m: m.concat([_intcol_frame(m)[0], _intcol_frame(m)[1]], axis=1, ignore_index=True),
+    "concat axis=0": lambda m: m.concat([_intcol_frame(m)[0], _intcol_frame(m)[0]]),
+    "unstack": lambda m: m.Series([1, 2], index=m.MultiIndex.from_tuples([("a", 1), ("a", 2)])).unstack(),
+    # NEGATIVES: '0' is not 0 - a string name stays a string, and names
+    # that differ only in type do not match.
+    "Series(name='0')": lambda m: m.Series([1], name="0"),
+    "string '0' column": lambda m: m.DataFrame({"0": [1]})["0"],
+    "0 + '0' is unnamed": lambda m: m.Series([1, 2], name=0) + m.Series([1, 2], name="0"),
+    "0 + 1 is unnamed": lambda m: m.Series([1, 2], name=0) + m.Series([1, 2], name=1),
+    "row sum is unnamed": lambda m: _intcol_frame(m).sum(axis=1),
+}
+
+
+def _series_name_outcome(m: Any, case: str) -> Any:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return _name_view(_SERIES_NAME_CASES[case](m))
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_SERIES_NAME_CASES))
+def test_series_names_keep_their_types_like_pandas(case: str) -> None:
+    assert _series_name_outcome(fpd, case) == _series_name_outcome(pd, case), case
