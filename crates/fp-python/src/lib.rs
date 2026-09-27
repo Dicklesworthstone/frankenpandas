@@ -5532,6 +5532,86 @@ fn refuse_unhashable_keys(py: Python<'_>, column: &Column) -> PyResult<()> {
     Ok(())
 }
 
+/// pandas' `pprint_thing` of a value in a repr: a sequence as its items
+/// pprinted one level deeper - `[1, 2]` for one that takes item assignment
+/// (a list, an array), `{1}` for a set, else `(a, 1)` (a one-item tuple
+/// `(a,)`), `, ...` past display.max_seq_items - and a dict as `{k: v}` with
+/// its text quoted; `quote` quotes text (unescaped quotes, as pandas);
+/// `escape` spells tabs and line breaks out; past display.pprint_nest_depth,
+/// or for anything else, the value's `str`. An array cell printed numpy's
+/// `['x' 'y']`, a tuple `('a', 1)`.
+fn pandas_pprint(
+    value: &Bound<'_, PyAny>,
+    depth: usize,
+    quote: bool,
+    escape: bool,
+) -> PyResult<String> {
+    const NEST_DEPTH: usize = 3;
+    const MAX_SEQ_ITEMS: usize = 100;
+    let escaped = |text: String| {
+        if escape {
+            text.replace('\t', "\\t")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+        } else {
+            text
+        }
+    };
+    if value.hasattr("__next__")? {
+        return Ok(escaped(value.str()?.to_string()));
+    }
+    if depth < NEST_DEPTH {
+        if let Ok(dict) = value.cast::<PyDict>() {
+            let mut pairs = Vec::new();
+            for (key, item) in dict.iter().take(MAX_SEQ_ITEMS) {
+                pairs.push(format!(
+                    "{}: {}",
+                    pandas_pprint(&key, depth + 1, true, false)?,
+                    pandas_pprint(&item, depth + 1, true, false)?
+                ));
+            }
+            let more = if dict.len() > MAX_SEQ_ITEMS {
+                ", ..."
+            } else {
+                ""
+            };
+            return Ok(format!("{{{}{more}}}", pairs.join(", ")));
+        }
+        let text = value.is_instance_of::<pyo3::types::PyString>()
+            || value.is_instance_of::<pyo3::types::PyBytes>();
+        if !text
+            && let Ok(items) = value.try_iter()
+            && let Ok(len) = value.len()
+        {
+            let mut parts = Vec::with_capacity(len.min(MAX_SEQ_ITEMS));
+            for item in items.take(len.min(MAX_SEQ_ITEMS)) {
+                parts.push(pandas_pprint(&item?, depth + 1, quote, escape)?);
+            }
+            let mut body = parts.join(", ");
+            if len > MAX_SEQ_ITEMS {
+                body.push_str(", ...");
+            } else if len == 1 && value.is_instance_of::<PyTuple>() {
+                body.push(',');
+            }
+            return Ok(if value.is_instance_of::<PySet>() {
+                format!("{{{body}}}")
+            } else if value.hasattr("__setitem__")? {
+                format!("[{body}]")
+            } else {
+                format!("({body})")
+            });
+        }
+    }
+    let shown = escaped(value.str()?.to_string());
+    Ok(
+        if quote && value.is_instance_of::<pyo3::types::PyString>() {
+            format!("'{shown}'")
+        } else {
+            shown
+        },
+    )
+}
+
 /// A Python object an object cell carries (fvsao.33): the core compares,
 /// prints and hashes it through Python.
 struct PyHost(Py<PyAny>);
@@ -5562,6 +5642,20 @@ impl fp_types::HostObject for PyHost {
                 .map(|text| text.to_string())
                 .unwrap_or_default()
         })
+    }
+
+    // pandas displays a pandas object in a cell by its str, anything else
+    // by pprint_thing.
+    fn host_pprint(&self) -> String {
+        Python::attach(|py| {
+            let value = self.0.bind(py);
+            let module = value.get_type().module()?.to_string();
+            if module.starts_with("pandas") || module.starts_with("frankenpandas") {
+                return Ok(value.str()?.to_string());
+            }
+            pandas_pprint(value, 0, false, true)
+        })
+        .unwrap_or_else(|_: PyErr| self.host_str())
     }
 
     fn host_hash(&self) -> Option<u64> {
@@ -31292,6 +31386,7 @@ impl PyDataFrame {
             dropna,
             group_keys,
             unused,
+            selection: None,
         };
         gb.grouped()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
@@ -40178,6 +40273,22 @@ impl PySeriesDatetimeAccessor {
     fn normalize(&self) -> PyResult<PySeries> {
         self.wrap(|dt| dt.normalize())
     }
+    /// pandas' `.dt.isocalendar()`: the ISO year, week and weekday (Monday
+    /// 1) of each instant under its row label, <NA> at NaT (it was an
+    /// unknown attribute). pandas' columns are the nullable UInt32; these
+    /// are the nullable Int64, the narrow-dtype gap of fvsao.23.
+    fn isocalendar(&self) -> PyResult<PyDataFrame> {
+        let mut frame = self.series.dt().isocalendar().map_err(frame_error_to_py)?;
+        for name in ["year", "week", "day"] {
+            let column = frame
+                .column(name)
+                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(name))?
+                .astype(DType::Int64Nullable)
+                .map_err(column_error_to_py)?;
+            frame = frame.with_column(name, column).map_err(frame_error_to_py)?;
+        }
+        Ok(PyDataFrame { inner: frame })
+    }
     /// pandas' `.dt.date`: each instant's `datetime.date` (a zoned column's
     /// wall-clock date) as an object cell. fp-frame's `date()` is text, so
     /// it was left unexposed rather than mistyped (fvsao.17).
@@ -42791,6 +42902,11 @@ pub struct PyGroupBy {
     /// A category key's unused categories under observed=False (pandas'
     /// 2.2 default): the reductions add a row for each (fvsao.39).
     unused: Vec<Scalar>,
+    /// The columns a list selection (`gb[['a', 'b']]`) chose: `apply`
+    /// hands `func` those alone, a key column only when chosen (the frame
+    /// keeps the keys to group by; they reached `func` with a deprecation
+    /// warning pandas gives only without a selection).
+    selection: Option<Vec<String>>,
 }
 
 impl PyGroupBy {
@@ -42848,6 +42964,7 @@ impl PyGroupBy {
             dropna: self.dropna,
             group_keys: self.group_keys,
             unused: self.unused.clone(),
+            selection: self.selection.clone(),
         }
     }
 
@@ -43306,7 +43423,9 @@ impl PyGroupBy {
             }
         }
         let df = self.df.select_columns(&keep).map_err(frame_error_to_py)?;
-        Ok(Py::new(py, self.over(df))?.into_any())
+        let mut selected = self.over(df);
+        selected.selection = Some(names);
+        Ok(Py::new(py, selected)?.into_any())
     }
 
     /// `gb.v` for a column `v`; anything else is pandas' AttributeError.
@@ -44155,7 +44274,9 @@ impl PyGroupBy {
                 own_keys.push(column.as_str());
             }
         }
-        if include_groups && !column_keys.is_empty() {
+        // A list selection hands func exactly its columns, a key among them
+        // only when chosen (pandas' `_selected_obj`), and never warns.
+        if self.selection.is_none() && include_groups && !column_keys.is_empty() {
             PyErr::warn(
                 py,
                 &py.get_type::<pyo3::exceptions::PyDeprecationWarning>(),
@@ -44163,15 +44284,18 @@ impl PyGroupBy {
                 1,
             )?;
         }
-        let kept: Vec<&str> = self
-            .df
-            .column_names()
-            .into_iter()
-            .map(String::as_str)
-            .filter(|column| {
-                !own_keys.contains(column) && (include_groups || !column_keys.contains(column))
-            })
-            .collect();
+        let kept: Vec<&str> = match &self.selection {
+            Some(selection) => selection.iter().map(String::as_str).collect(),
+            None => self
+                .df
+                .column_names()
+                .into_iter()
+                .map(String::as_str)
+                .filter(|column| {
+                    !own_keys.contains(column) && (include_groups || !column_keys.contains(column))
+                })
+                .collect(),
+        };
         let frame = self.df.select_columns(&kept).map_err(frame_error_to_py)?;
         let groups = self.ordered_groups(true)?;
         let keys = index_rows(&self.group_key_index(&groups)?);
@@ -44799,6 +44923,7 @@ impl PyGroupBy {
             dropna: self.dropna,
             group_keys: self.group_keys,
             unused: Vec::new(),
+            selection: None,
         };
         let counts = counting
             .size(py)?
@@ -46539,16 +46664,34 @@ impl PySeriesGroupBy {
         Ok(Py::new(py, PySeries { inner: res })?.into_any())
     }
 
-    fn unique(&self) -> PyResult<PySeries> {
+    /// pandas' `SeriesGroupBy.unique`: one array a group - each group's
+    /// distinct values in first-seen order, as `Series.unique` gives them -
+    /// in an object Series indexed by the groups (it gave every value
+    /// flattened, the groups repeated).
+    fn unique(&self, py: Python<'_>) -> PyResult<PySeries> {
         self.single_key("unique")?;
         self.observed_only("unique")?;
-        let res = self
-            .series
-            .groupby(&self.by)
-            .map_err(frame_error_to_py)?
-            .unique()
+        let groups = self.ordered_groups(false)?;
+        let mut cells = Vec::with_capacity(groups.len());
+        let mut labels = Vec::with_capacity(groups.len());
+        for (label, positions) in groups {
+            let part = Series::new(
+                self.series.name(),
+                self.series.index().take(&positions),
+                self.series.column().take_positions(&positions),
+            )
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+            let array = PySeries { inner: part }
+                .into_bound_py_any(py)?
+                .call_method0("unique")?;
+            cells.push(py_to_cell(py, &array)?);
+            labels.push(label);
+        }
+        let key = self.by.name();
+        let index = Index::new(labels).rename_index((!key.is_empty()).then_some(key.as_str()));
+        let inner = Series::new(self.series.name(), index, Column::from_object_values(cells))
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner })
     }
 }
 
@@ -51796,7 +51939,11 @@ fn factorize(
         uniques_labels = new_uniques;
     }
 
-    let py_codes = PyList::new(py, codes)?.into_any().unbind();
+    // The codes are pandas' int64 numpy array (they were a list).
+    let py_codes = py
+        .import("numpy")?
+        .call_method1("array", (codes, "int64"))?
+        .unbind();
     let py_uniques = PyIndex {
         inner: Index::new(uniques_labels),
     };
@@ -53832,8 +53979,9 @@ impl PyIntervalIndex {
         self.to_rust().is_overlapping()
     }
 
-    fn contains(&self, point: f64) -> Vec<bool> {
-        self.to_rust().contains(point)
+    /// A numpy bool array, as pandas (it was a list).
+    fn contains(&self, point: f64) -> BoolArray {
+        BoolArray::from(self.to_rust().contains(point))
     }
 
     fn get_loc(&self, point: f64) -> PyResult<usize> {
@@ -55454,13 +55602,24 @@ pub fn array(
 #[pyfunction]
 #[pyo3(signature = (start=None, end=None, periods=None, freq=None, name=None, closed="right"))]
 pub fn interval_range(
-    start: Option<f64>,
-    end: Option<f64>,
+    start: Option<&Bound<'_, PyAny>>,
+    end: Option<&Bound<'_, PyAny>>,
     periods: Option<usize>,
-    freq: Option<f64>,
+    freq: Option<&Bound<'_, PyAny>>,
     name: Option<&str>,
     closed: Option<&str>,
 ) -> PyResult<PyIntervalIndex> {
+    // Int start / end / freq give int64 intervals when every break is whole
+    // (pandas downcasts the breaks losslessly; they were always float64).
+    let int_or_absent = |value: Option<&Bound<'_, PyAny>>| {
+        value.is_none_or(|value| {
+            value.is_instance_of::<pyo3::types::PyInt>()
+                && !value.is_instance_of::<pyo3::types::PyBool>()
+        })
+    };
+    let ints = int_or_absent(start) && int_or_absent(end) && int_or_absent(freq);
+    let number = |value: Option<&Bound<'_, PyAny>>| value.map(|v| v.extract::<f64>()).transpose();
+    let (start, end, freq) = (number(start)?, number(end)?, number(freq)?);
     let closed = closed.unwrap_or("right");
     if !matches!(closed, "right" | "left" | "both" | "neither") {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -55530,8 +55689,11 @@ pub fn interval_range(
         Some(last) if i == count => last,
         _ => first + step * i as f64,
     };
+    let whole = ints && (0..=count).all(|i| edge(i).fract() == 0.0);
     for i in 0..count {
-        intervals.push(PyInterval::floats(edge(i), edge(i + 1), closed)?);
+        let mut interval = PyInterval::floats(edge(i), edge(i + 1), closed)?;
+        interval.int_endpoints = whole;
+        intervals.push(interval);
     }
     Ok(PyIntervalIndex {
         intervals,
@@ -60708,6 +60870,7 @@ mod tests {
             dropna: true,
             group_keys: true,
             unused: Vec::new(),
+            selection: None,
         };
         let gb_first = gb.first(false, -1, true).expect("first"); // ubs:ignore — test fixture
         assert_eq!(gb_first.shape(), (2, 1));
@@ -60993,8 +61156,8 @@ mod tests {
         let mid = pii.mid();
         assert_eq!(mid.len(), 2);
 
-        assert_eq!(pii.contains(1.0), vec![true, false]);
-        assert_eq!(pii.contains(2.0), vec![false, true]);
+        assert_eq!(pii.contains(1.0).0, vec![true, false]);
+        assert_eq!(pii.contains(2.0).0, vec![false, true]);
         assert_eq!(pii.get_loc(1.0).unwrap(), 0);
 
         let converted = pii.to_rust();

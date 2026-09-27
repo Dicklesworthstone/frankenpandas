@@ -56716,8 +56716,10 @@ impl DatetimeAccessor<'_> {
         // civil year of the week Thursday; the ISO week is the distance from
         // the Monday of ISO week 1. This keeps the 53-week-correct semantics
         // while skipping per-row month/day/day-of-year extraction. NaT
-        // (i64::MIN) remains validity-missing in all three columns.
-        if let Some(ns_slice) = self.series.column().as_datetime64_slice() {
+        // (i64::MIN) remains validity-missing in all three columns. A zoned
+        // column reads its wall clock below (the UTC instant put Tokyo's
+        // Monday 2024-12-30 08:30 in the Sunday before).
+        if let Some(ns_slice) = self.naive_datetime_slice() {
             const NANOS_PER_DAY: i64 = 86_400_000_000_000;
             let nat = fp_types::Timestamp::NAT;
             let n = ns_slice.len();
@@ -56822,11 +56824,12 @@ impl DatetimeAccessor<'_> {
         } else {
             infer_datetime_shape_lock(vals)
         };
+        let wall = self.wall_clock();
         for v in vals {
             let ymd = if typed {
                 match v {
                     Scalar::Datetime64(ns) if *ns != fp_types::Timestamp::NAT => {
-                        let ts = fp_types::Timestamp::from_nanos(*ns);
+                        let ts = fp_types::Timestamp::from_nanos(wall(*ns));
                         match (ts.year(), ts.month(), ts.day()) {
                             (Some(y), Some(m), Some(d)) => Some((y, m, d)),
                             _ => None,
@@ -180220,6 +180223,33 @@ mod tests {
             Scalar::Int64(53)
         );
         assert_eq!(ic.get_column("day").column().values()[1], Scalar::Int64(4));
+    }
+
+    /// A zoned column's ISO calendar reads its wall clock, as every other
+    /// field does: 2024-12-29 23:30 UTC is Tokyo's Monday 2024-12-30 08:30,
+    /// ISO (2025, 1, 1) in live pandas 2.2.3 - the UTC instant said
+    /// (2024, 52, 7). Both paths: all valid, and beside a NaT.
+    #[test]
+    fn isocalendar_of_a_zoned_column_reads_the_wall_clock() {
+        const NS: i64 = 1_000_000_000;
+        let instant = Scalar::Datetime64(1_735_515_000 * NS);
+        // NEGATIVE: in UTC the instant is its own wall clock, a Sunday.
+        for (zone, expected) in [("Asia/Tokyo", [2025, 1, 1]), ("UTC", [2024, 52, 7])] {
+            for values in [
+                vec![instant.clone()],
+                vec![instant.clone(), Scalar::Null(NullKind::NaT)],
+            ] {
+                let labels = vec![0_i64.into(), 1_i64.into()][..values.len()].to_vec();
+                let column = Column::new(DType::datetime64_tz(zone), values).unwrap();
+                let s = Series::new("ts", Index::new(labels), column).unwrap();
+                let ic = s.dt().isocalendar().unwrap();
+                let first: Vec<Scalar> = ["year", "week", "day"]
+                    .iter()
+                    .map(|name| ic.get_column(name).column().values()[0].clone())
+                    .collect();
+                assert_eq!(first, expected.map(Scalar::Int64).to_vec(), "{zone}");
+            }
+        }
     }
 
     #[test]

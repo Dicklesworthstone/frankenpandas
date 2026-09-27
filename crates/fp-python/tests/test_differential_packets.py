@@ -11855,3 +11855,69 @@ def _everyday8_outcome(m: Any, run: Any) -> Any:
 def test_everyday_ops_round_eight_like_pandas(case: str) -> None:
     run = _EVERYDAY8_CASES[case]
     assert _everyday8_outcome(fpd, run) == _everyday8_outcome(pd, run), case
+
+
+# Found by the ninth everyday-ops probe (scratch p13/probe_everyday9.py,
+# br-frankenpandas-df2ia): interval_range of ints made float intervals;
+# factorize's codes were a list; IntervalIndex.contains gave a list;
+# SeriesGroupBy.unique was refused; groupby(k)[[cols]].apply handed func the
+# key column too; dt.isocalendar() was unknown (and fp-frame read a zoned
+# column's UTC instant); a tuple or array cell printed as Python's str
+# (('a', 1), ['x' 'y']) where pandas pprints it ((a, 1), [x, y]).
+def _e9_sales(m: Any) -> Any:
+    return m.DataFrame({
+        "store": ["n", "s", "n", "e", "s", "n"],
+        "item": ["x", "y", "y", "x", "x", "z"],
+        "qty": [3, 1, 4, 1, 5, 9],
+        "price": [2.5, 3.0, 1.5, 4.0, 2.0, 1.0],
+        "day": m.to_datetime(["2024-01-01", "2024-01-02", "2024-01-02", "2024-01-05", "2024-01-08", "2024-12-30"]),
+    })
+
+
+_EVERYDAY9_CASES = {
+    "interval_range of ints": lambda m: repr(m.interval_range(0, 3)),
+    "interval_range by an int freq": lambda m: repr(m.interval_range(0, 6, freq=2)),
+    "interval_range of ints by periods": lambda m: repr(m.interval_range(start=0, periods=3)),
+    # NEGATIVE: float breaks stay float.
+    "interval_range of floats": lambda m: repr(m.interval_range(0.0, 1.5, freq=0.5)),
+    "IntervalIndex contains": lambda m: repr(m.interval_range(0, 3).contains(1.5)),
+    "factorize codes": lambda m: repr(m.factorize(m.Series(["b", "a", "b", None]))[0]),
+    # NEGATIVE: the uniques were already right.
+    "factorize uniques": lambda m: list(m.factorize(m.Series(["b", "a", "b", None]))[1]),
+    "groupby unique": lambda m: repr(_e9_sales(m).groupby("store")["item"].unique()),
+    "groupby unique of ints": lambda m: repr(_e9_sales(m).groupby("store")["qty"].unique()),
+    "groupby unique of floats": lambda m: repr(m.DataFrame({"k": ["a", "b", "a"], "v": [1.5, 2.0, None]}).groupby("k")["v"].unique()),
+    "apply over a selection": lambda m: repr(_e9_sales(m).groupby("store")[["qty", "price"]].apply(lambda d: d.sum())),
+    "apply over a selection with the key": lambda m: repr(_e9_sales(m).groupby("store")[["store", "qty"]].apply(lambda d: d.shape[1])),
+    # NEGATIVE: without a selection func sees every other column.
+    "apply without a selection": lambda m: repr(_e9_sales(m).groupby("store").apply(lambda d: d.shape[1], include_groups=False)),
+    "dt isocalendar": lambda m: repr(_e9_sales(m)["day"].dt.isocalendar()),
+    "dt isocalendar with NaT": lambda m: repr(m.Series(m.to_datetime(["2024-12-30", None, "2021-01-03"])).dt.isocalendar()),
+    "dt isocalendar zoned": lambda m: repr(m.Series(m.to_datetime(["2024-12-29 23:30"]).tz_localize("UTC").tz_convert("Asia/Tokyo")).dt.isocalendar()),
+    "dt isocalendar week": lambda m: _e9_sales(m)["day"].dt.isocalendar()["week"].tolist(),
+    "tuple cells": lambda m: repr(m.Series([("a", 1), ("b",)])),
+    "array cells": lambda m: repr(m.Series([np.array(["x", "y"], dtype=object), np.array(["z"], dtype=object)])),
+    "float array cells": lambda m: repr(m.Series([np.array([1.5, 2.0]), np.array([3.25])])),
+    "frame of tuple cells": lambda m: repr(m.DataFrame({"t": [("a", 1), ("b", 2)], "n": [1, 2]})),
+    "a dict in a tuple": lambda m: repr(m.Series([({"k": "v"}, "t")])),
+    "a set cell": lambda m: repr(m.Series([{"a"}])),
+    "tuples nested past the depth": lambda m: repr(m.Series([(("a", ("b", ("c", ("d",)))),)])),
+    # NEGATIVE: list and dict cells printed right; astype(str) stays str.
+    "list cells": lambda m: repr(m.Series([["a", "b"], ["c"]])),
+    "dict cells": lambda m: repr(m.Series([{"a": 1}, {"b": "x"}])),
+    "astype str of a tuple": lambda m: m.Series([("a", 1)]).astype(str).tolist(),
+}
+
+
+def _everyday9_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EVERYDAY9_CASES))
+def test_everyday_ops_round_nine_like_pandas(case: str) -> None:
+    run = _EVERYDAY9_CASES[case]
+    assert _everyday9_outcome(fpd, run) == _everyday9_outcome(pd, run), case

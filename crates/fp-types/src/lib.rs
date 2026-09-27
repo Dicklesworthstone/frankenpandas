@@ -1215,8 +1215,14 @@ pub trait HostObject: Send + Sync {
     fn host_eq(&self, other: &dyn HostObject) -> bool;
     /// The host's `repr` (`datetime.date(2024, 1, 5)`).
     fn host_repr(&self) -> String;
-    /// The host's `str` (`2024-01-05`), how pandas prints the cell.
+    /// The host's `str` (`2024-01-05`), what `astype(str)` makes of it.
     fn host_str(&self) -> String;
+    /// The cell as pandas displays it in a repr (`pprint_thing`), where that
+    /// differs from its `str`: a tuple's or array's items unquoted (`(a, 1)`,
+    /// `[1, 2]`); by default its `str`.
+    fn host_pprint(&self) -> String {
+        self.host_str()
+    }
     /// The host's hash, None for an unhashable value (a dict).
     fn host_hash(&self) -> Option<u64>;
     /// `self` ordered against `other` in the host language (Python's `<` /
@@ -1355,7 +1361,7 @@ impl ObjectValue {
     }
 
     /// The cell as pandas displays it in a repr (pandas' `pprint_thing`): a
-    /// list's items unquoted (`[1, a]`), a host value by its str.
+    /// list's items unquoted (`[1, a]`), a host value as the host pprints it.
     #[must_use]
     pub fn pprint(&self) -> String {
         match self {
@@ -1371,7 +1377,7 @@ impl ObjectValue {
                 format!("[{}]", parts.join(", "))
             }
             Self::Bytes(data) => python_bytes_repr(data),
-            Self::Host(value) => value.object().host_str(),
+            Self::Host(value) => value.object().host_pprint(),
         }
     }
 
@@ -9300,6 +9306,47 @@ mod tests {
             Scalar::Object(other)
         );
         assert!(serde_json::to_string(&Scalar::Object(host)).is_err());
+    }
+
+    #[test]
+    fn a_host_cell_displays_by_its_pprint_and_stringifies_by_its_str() {
+        use super::{HostValue, ObjectValue};
+
+        /// A host tuple: Python's str quotes its items, pandas' display not.
+        struct Pair;
+        impl super::HostObject for Pair {
+            fn host_eq(&self, _other: &dyn super::HostObject) -> bool {
+                false
+            }
+            fn host_repr(&self) -> String {
+                "('a', 1)".to_owned()
+            }
+            fn host_str(&self) -> String {
+                "('a', 1)".to_owned()
+            }
+            fn host_pprint(&self) -> String {
+                "(a, 1)".to_owned()
+            }
+            fn host_hash(&self) -> Option<u64> {
+                None
+            }
+            fn host_cmp(&self, _other: &dyn super::HostObject) -> Option<std::cmp::Ordering> {
+                None
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+        let pair = ObjectValue::Host(HostValue::new(Pair));
+        assert_eq!(pair.pprint(), "(a, 1)");
+        // Inside a list cell too.
+        let list = ObjectValue::list(vec![Scalar::Object(pair.clone())]);
+        assert_eq!(list.pprint(), "[(a, 1)]");
+        // NEGATIVE: str (astype(str), writers) stays the host's str.
+        assert_eq!(pair.to_string(), "('a', 1)");
+        // NEGATIVE: a host without its own pprint displays by its str.
+        let named = ObjectValue::Host(HostValue::new(Named("x")));
+        assert_eq!(named.pprint(), "x");
     }
 
     #[test]
