@@ -10927,3 +10927,69 @@ def _describe_kind_outcome(m: Any, run: Any) -> Any:
 def test_describe_of_datetimes_text_and_groups_like_pandas(case: str) -> None:
     run = _DESCRIBE_KIND_CASES[case]
     assert _describe_kind_outcome(fpd, run) == _describe_kind_outcome(pd, run), case
+
+
+# A repr fits the terminal's width as pandas' does (display.max_columns=0,
+# its default in a terminal or a script): the middle columns give way to a
+# '...' column and the dimensions line shows; a cell past
+# display.max_colwidth is cut to '...'; display.max_columns / max_rows /
+# max_colwidth are read (every column was printed, no cell was cut, the
+# rows were fixed at 60 / 10).
+def _with_display(m: Any, options: dict, make: Any) -> str:
+    saved = {key: m.get_option(key) for key in options}
+    try:
+        for key, value in options.items():
+            m.set_option(key, value)
+        return repr(make(m))
+    finally:
+        for key, value in saved.items():
+            m.set_option(key, value)
+
+
+_COLUMN_FIT_FRAMES = {
+    "20 int columns": lambda m: m.DataFrame([list(range(20)), list(range(20, 40))]),
+    "12 float columns": lambda m: m.DataFrame([[i * 1.25 for i in range(12)]]),
+    "long text columns": lambda m: m.DataFrame({f"col_{i}": [f"value number {i}"] for i in range(8)}),
+    "a named index": lambda m: m.DataFrame([list(range(20))], index=m.Index(["r"], name="idx")),
+    "70 rows of 20 columns": lambda m: m.DataFrame([list(range(20))] * 70),
+    "a cell past max_colwidth": lambda m: m.DataFrame({"a": ["x" * 100], "b": [1]}),
+    "two wide cells": lambda m: m.DataFrame({"a": ["x" * 50], "b": ["y" * 50], "c": [1]}),
+    "multiindex columns": lambda m: m.DataFrame([list(range(12))], columns=m.MultiIndex.from_product([["alpha", "beta"], [f"c{i}" for i in range(6)]])),
+    "30 columns": lambda m: m.DataFrame([list(range(30))]),
+    "a Series of long text": lambda m: m.Series(["y" * 80, "short"]),
+    # NEGATIVE: a frame that fits prints whole.
+    "19 columns fit": lambda m: m.DataFrame([list(range(19))]),
+}
+
+_DISPLAY_OPTION_CASES = {
+    "max_columns 6": ({"display.max_columns": 6}, lambda m: m.DataFrame([list(range(12))])),
+    "max_columns 1": ({"display.max_columns": 1}, lambda m: m.DataFrame([list(range(4))])),
+    "max_columns None": ({"display.max_columns": None}, lambda m: m.DataFrame([list(range(30))])),
+    "max_rows 6": ({"display.max_rows": 6, "display.min_rows": 4}, lambda m: m.Series(range(20))),
+    "max_colwidth 10": ({"display.max_colwidth": 10}, lambda m: m.DataFrame({"a": ["abcdefghijklmnop", "x"]})),
+    "max_colwidth None": ({"display.max_colwidth": None}, lambda m: m.DataFrame({"a": ["z" * 70]})),
+    "max_columns 20 wraps wide columns": ({"display.max_columns": 20}, lambda m: m.DataFrame([[i * 1000.125 for i in range(15)]] * 3)),
+    "no expand_frame_repr": ({"display.max_columns": None, "display.expand_frame_repr": False}, lambda m: m.DataFrame([list(range(30))])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_COLUMN_FIT_FRAMES))
+def test_repr_fits_the_terminal_width_like_pandas(case: str) -> None:
+    make = _COLUMN_FIT_FRAMES[case]
+    assert repr(make(fpd)) == repr(make(pd)), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_DISPLAY_OPTION_CASES))
+def test_repr_reads_the_display_options_like_pandas(case: str) -> None:
+    options, make = _DISPLAY_OPTION_CASES[case]
+    assert _with_display(fpd, options, make) == _with_display(pd, options, make), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_to_string_shows_every_column_and_character() -> None:
+    # NEGATIVE: to_string does not fit the terminal or cut cells, in both.
+    for make in (lambda m: m.DataFrame([list(range(30))]), lambda m: m.DataFrame({"a": ["x" * 100]})):
+        assert make(fpd).to_string() == make(pd).to_string()
+        assert "..." not in make(fpd).to_string()

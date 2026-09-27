@@ -570,19 +570,56 @@ fn pandas_label_texts(labels: &[IndexLabel], zone: Option<&str>) -> Vec<String> 
         .collect()
 }
 
-/// pandas' `max_rows` / `min_rows` for the text layouts: the repr's are 60
-/// and 10; `to_string` shows every row unless given them.
+/// pandas' `max_rows` / `min_rows` / `max_colwidth` for the text layouts:
+/// the repr's are 60, 10 and 50; `to_string` shows every row and every
+/// character unless given them.
 #[derive(Clone, Copy)]
 struct RowLimits {
     max_rows: Option<usize>,
     min_rows: Option<usize>,
+    max_colwidth: Option<usize>,
+    /// A frame wider than this wraps into blocks of columns (pandas'
+    /// `expand_frame_repr` at `display.width`); None never wraps.
+    wrap_width: Option<usize>,
 }
 
 impl RowLimits {
-    const REPR: Self = Self {
-        max_rows: Some(60),
-        min_rows: Some(10),
-    };
+    /// The repr's limits: `display.max_rows` / `display.min_rows` /
+    /// `display.max_colwidth` as set (pandas' 60 / 10 / 50 by default; the
+    /// rows were fixed at those and no cell was cut), wrapping at
+    /// `display.width` unless the columns fit the terminal instead.
+    fn repr() -> Self {
+        let wrap = display_flag("display.expand_frame_repr", true)
+            && !matches!(ColumnLayout::repr(), ColumnLayout::Fit(_));
+        Self {
+            max_rows: display_limit("display.max_rows").unwrap_or(Some(60)),
+            min_rows: display_limit("display.min_rows").unwrap_or(Some(10)),
+            max_colwidth: display_limit("display.max_colwidth").unwrap_or(Some(50)),
+            wrap_width: wrap
+                .then(|| display_limit("display.width").flatten())
+                .flatten(),
+        }
+    }
+
+    /// `cells` as pandas cuts them to `max_colwidth`: past it (when it is
+    /// over 3), a cell's first `max_colwidth - 3` characters and '...' (the
+    /// sign space a text cell keeps counts).
+    fn clip(self, cells: Vec<String>) -> Vec<String> {
+        match self.max_colwidth {
+            Some(max) if max > 3 && cells.iter().any(|cell| text_width(cell) > max) => cells
+                .into_iter()
+                .map(|cell| {
+                    if text_width(&cell) > max {
+                        let kept: String = cell.chars().take(max - 3).collect();
+                        format!("{kept}...")
+                    } else {
+                        cell
+                    }
+                })
+                .collect(),
+            _ => cells,
+        }
+    }
 
     /// The rows shown of `len`: all of them, or, past `max_rows`, the first
     /// and last `min(min_rows, max_rows) / 2` (the first alone when that
@@ -735,7 +772,7 @@ impl SeriesFooter {
 
 /// pandas' `repr(series)` (see [`pandas_series_text`]).
 fn pandas_series_repr(series: &Series) -> String {
-    pandas_series_text(series, RowLimits::REPR, true, true, SeriesFooter::REPR)
+    pandas_series_text(series, RowLimits::repr(), true, true, SeriesFooter::REPR)
 }
 
 /// pandas' Series text layout (`SeriesFormatter`), shared by the repr and
@@ -801,7 +838,7 @@ fn pandas_series_text(
     if series.is_empty() {
         return format!("Series([], {footer})");
     }
-    let mut cells = pandas_cells(&column.take_positions(&rows));
+    let mut cells = limits.clip(pandas_cells(&column.take_positions(&rows)));
     if !show_index {
         cells = cells.into_iter().map(without_leading_space).collect();
     }
@@ -891,9 +928,159 @@ fn pandas_multiindex_tuples(multi: &fp_index::MultiIndex) -> Option<Vec<String>>
     )
 }
 
-/// pandas' `repr(df)` (see [`pandas_frame_text`]).
+/// pandas' `repr(df)` (see [`pandas_frame_text`]): the display options'
+/// rows and columns - fitted to the terminal's width by default, as pandas
+/// in a terminal or a script (it printed every column).
 fn pandas_frame_repr(frame: &DataFrame) -> String {
-    pandas_frame_text(frame, RowLimits::REPR, true, None)
+    pandas_frame_text(frame, RowLimits::repr(), true, None, ColumnLayout::repr())
+}
+
+/// How many of a frame's columns its text lays out.
+#[derive(Clone, Copy)]
+enum ColumnLayout {
+    /// Every column (`to_string`; `display.max_columns=None`).
+    All,
+    /// As many as fit this many characters, pandas' terminal fit
+    /// (`display.max_columns=0`, its default in a terminal or a script).
+    Fit(usize),
+    /// At most this many (`display.max_columns=n`).
+    Max(usize),
+    /// Cut already: a '...' column after `after` columns, of `total`.
+    Dots { after: usize, total: usize },
+}
+
+impl ColumnLayout {
+    /// The repr's, from `display.max_columns`: 0 fits the terminal's width,
+    /// n shows at most n, None every column.
+    fn repr() -> Self {
+        match display_limit("display.max_columns").unwrap_or(Some(0)) {
+            Some(0) => Self::Fit(terminal_width()),
+            Some(count) => Self::Max(count),
+            None => Self::All,
+        }
+    }
+}
+
+/// The terminal's width as pandas reads it, Python's
+/// `shutil.get_terminal_size()` (the COLUMNS variable, the terminal, else 80).
+fn terminal_width() -> usize {
+    Python::attach(|py| {
+        py.import("shutil")
+            .and_then(|shutil| shutil.call_method0("get_terminal_size"))
+            .and_then(|size| size.getattr("columns"))
+            .and_then(|columns| columns.extract::<usize>())
+    })
+    .unwrap_or(80)
+}
+
+/// pandas' `adjoin(space, *lists)`: each list left-justified to its widest
+/// text, `space` blanks after every one but the last, line by line.
+fn pandas_adjoin(space: usize, lists: &[Vec<String>]) -> String {
+    let widths: Vec<usize> = lists
+        .iter()
+        .map(|list| list.iter().map(text_width).max().unwrap_or(0))
+        .collect();
+    let lines = lists.iter().map(Vec::len).max().unwrap_or(0);
+    (0..lines)
+        .map(|line| {
+            lists
+                .iter()
+                .zip(&widths)
+                .enumerate()
+                .map(|(position, (list, &width))| {
+                    let text = list.get(line).map_or("", String::as_str);
+                    let width = if position + 1 < lists.len() {
+                        width + space
+                    } else {
+                        width
+                    };
+                    format!("{text:<width$}")
+                })
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A frame's laid-out columns (the index column first when shown) wrapped
+/// into blocks of `line_width` characters, as pandas' `expand_frame_repr`
+/// wraps a repr it does not fit to the terminal: columns go to a block while
+/// the running width (each column and its blank, one more for the last,
+/// two otherwise) stays within the line; every block repeats the index,
+/// the blocks end with a ' \' column but the last, and they are a blank
+/// line apart.
+fn pandas_join_multiline(
+    mut strcols: Vec<Vec<String>>,
+    show_index: bool,
+    line_width: usize,
+) -> String {
+    let index = show_index.then(|| strcols.remove(0));
+    let mut room = line_width as i64;
+    if let Some(index) = &index {
+        room -= index.iter().map(text_width).max().unwrap_or(0) as i64 + 1;
+    }
+    let widths: Vec<usize> = strcols
+        .iter()
+        .map(|column| column.iter().map(text_width).max().unwrap_or(0))
+        .collect();
+    let mut ends = Vec::new();
+    let mut running = 0_i64;
+    for (position, &width) in widths.iter().enumerate() {
+        let adjoined = width as i64 + 1;
+        running += adjoined;
+        let reserve = if position + 1 == widths.len() { 1 } else { 2 };
+        if running + reserve > room && position > 0 {
+            ends.push(position);
+            running = adjoined;
+        }
+    }
+    ends.push(widths.len());
+    let blocks = ends.len();
+    let mut start = 0;
+    let mut texts = Vec::with_capacity(blocks);
+    for (block, &end) in ends.iter().enumerate() {
+        let mut row: Vec<Vec<String>> = strcols[start..end].to_vec();
+        if let Some(index) = &index {
+            row.insert(0, index.clone());
+        }
+        if blocks > 1 {
+            let lines = row.last().map_or(0, Vec::len);
+            let marker = if block + 1 < blocks {
+                let rest = std::iter::repeat_n("  ".to_owned(), lines.saturating_sub(1));
+                std::iter::once(" \\".to_owned()).chain(rest).collect()
+            } else {
+                vec![" ".to_owned(); lines]
+            };
+            row.push(marker);
+        }
+        texts.push(pandas_adjoin(1, &row));
+        start = end;
+    }
+    texts.join("\n\n")
+}
+
+/// How many of the laid-out columns `strcols` (the index column first when
+/// shown) fit `terminal` characters, as pandas fits a repr: from the widest
+/// line's excess over the width (+1), drop the middle column - Python's
+/// `round(n / 2)`, half to even - until none remains; the columns left,
+/// less the index, at least 2.
+fn fitted_column_count(strcols: &[Vec<String>], terminal: usize, show_index: bool) -> usize {
+    let mut widths: Vec<usize> = strcols
+        .iter()
+        .map(|column| column.iter().map(text_width).max().unwrap_or(0))
+        .collect();
+    let line = widths.iter().sum::<usize>() + widths.len().saturating_sub(1);
+    let mut excess = line as i64 - terminal as i64 + 1;
+    while excess > 0 && widths.len() > 1 {
+        let half = widths.len() / 2;
+        let middle = if widths.len() % 2 == 1 && half % 2 == 1 {
+            half + 1
+        } else {
+            half
+        };
+        excess -= widths.remove(middle) as i64 + 1;
+    }
+    widths.len().saturating_sub(usize::from(show_index)).max(2)
 }
 
 /// The header texts of a column MultiIndex over `width` columns, one per
@@ -938,15 +1125,18 @@ fn column_multiindex_headers(
 /// across the columns, with the column-axis level names at the left when
 /// any is named. `limits` rows; the "[n rows x m columns]" line when
 /// `show_dimensions` (None: when truncated, as the repr). Without the index
-/// the cells lose their sign space, as pandas' `leading_space=index`. More
-/// than 20 columns are all shown (pandas truncates them to the display
-/// width). Every frame prints this way (a frame it could not lay out
-/// printed frankenpandas' own Display; fvsao.34).
+/// the cells lose their sign space, as pandas' `leading_space=index`.
+/// `columns` says how many columns show: past those, the first and last
+/// half are laid out again around a '...' column, as pandas truncates a
+/// repr to the terminal's width (every column was shown). Every frame
+/// prints this way (a frame it could not lay out printed frankenpandas' own
+/// Display; fvsao.34).
 fn pandas_frame_text(
     frame: &DataFrame,
     limits: RowLimits,
     show_index: bool,
     show_dimensions: Option<bool>,
+    columns_shown: ColumnLayout,
 ) -> String {
     let (len, width) = frame.shape();
     let columns: Vec<(String, &Column)> = (0..width)
@@ -1054,7 +1244,7 @@ fn pandas_frame_text(
         strcols.push(index_col);
     }
     for ((_, column), header) in columns.iter().zip(&headers) {
-        let mut cells = pandas_cells(&column.take_positions(&rows));
+        let mut cells = limits.clip(pandas_cells(&column.take_positions(&rows)));
         if !show_index {
             cells = cells.into_iter().map(without_leading_space).collect();
         }
@@ -1078,25 +1268,73 @@ fn pandas_frame_text(
         }
         strcols.push(strcol);
     }
-    let last = strcols.len() - 1;
-    let lines = strcols[0].len();
-    let mut text = String::new();
-    for line in 0..lines {
-        if line > 0 {
-            text.push('\n');
-        }
-        for (position, strcol) in strcols.iter().enumerate() {
-            let cell = &strcol[line];
-            if position == last {
-                text.push_str(cell);
-            } else {
-                let pad = strcol.iter().map(text_width).max().unwrap_or(0) + 1;
-                text.push_str(&format!("{cell:<pad$}"));
-            }
+    // pandas' horizontal truncation: past the columns that fit, the first
+    // and last half of them (the first `fitted` when that is 1) laid out
+    // again around a '...' column.
+    let fitted = match columns_shown {
+        ColumnLayout::Fit(terminal) => Some(fitted_column_count(&strcols, terminal, show_index)),
+        ColumnLayout::Max(count) => Some(count),
+        ColumnLayout::All | ColumnLayout::Dots { .. } => None,
+    };
+    if let Some(fitted) = fitted
+        && width > fitted
+    {
+        let keep = fitted / 2;
+        let (positions, after): (Vec<usize>, usize) = if keep >= 1 {
+            ((0..keep).chain(width - keep..width).collect(), keep)
+        } else {
+            ((0..fitted).collect(), fitted)
+        };
+        let mut seen = HashSet::new();
+        let kept: Vec<String> = positions
+            .iter()
+            .filter_map(|&position| frame.column_name_at(position))
+            .filter(|name| seen.insert(name.clone()))
+            .collect();
+        let refs: Vec<&str> = kept.iter().map(String::as_str).collect();
+        if let Ok(cut) = frame.select_columns(&refs) {
+            let dots = ColumnLayout::Dots {
+                after,
+                total: width,
+            };
+            return pandas_frame_text(&cut, limits, show_index, show_dimensions, dots);
         }
     }
-    if show_dimensions.unwrap_or(dots_at.is_some()) {
-        text.push_str(&format!("\n\n[{len} rows x {width} columns]"));
+    let total_columns = match columns_shown {
+        ColumnLayout::Dots { after, total } => {
+            let lines = strcols.first().map_or(0, Vec::len);
+            let dots = vec![" ...".to_owned(); lines];
+            strcols.insert(usize::from(show_index) + after, dots);
+            Some(total)
+        }
+        _ => None,
+    };
+    let mut text = match limits.wrap_width {
+        Some(line_width) => pandas_join_multiline(strcols, show_index, line_width),
+        None => {
+            let last = strcols.len() - 1;
+            let lines = strcols[0].len();
+            let mut text = String::new();
+            for line in 0..lines {
+                if line > 0 {
+                    text.push('\n');
+                }
+                for (position, strcol) in strcols.iter().enumerate() {
+                    let cell = &strcol[line];
+                    if position == last {
+                        text.push_str(cell);
+                    } else {
+                        let pad = strcol.iter().map(text_width).max().unwrap_or(0) + 1;
+                        text.push_str(&format!("{cell:<pad$}"));
+                    }
+                }
+            }
+            text
+        }
+    };
+    if show_dimensions.unwrap_or(dots_at.is_some() || total_columns.is_some()) {
+        let columns = total_columns.unwrap_or(width);
+        text.push_str(&format!("\n\n[{len} rows x {columns} columns]"));
     }
     text
 }
@@ -23432,7 +23670,12 @@ impl PySeries {
         )?;
         let text = pandas_series_text(
             &self.inner,
-            RowLimits { max_rows, min_rows },
+            RowLimits {
+                max_rows,
+                min_rows,
+                max_colwidth: None,
+                wrap_width: None,
+            },
             index,
             header,
             SeriesFooter {
@@ -30142,9 +30385,15 @@ impl PyDataFrame {
         };
         let text = pandas_frame_text(
             &frame,
-            RowLimits { max_rows, min_rows },
+            RowLimits {
+                max_rows,
+                min_rows,
+                max_colwidth: None,
+                wrap_width: None,
+            },
             index,
             show_dimensions,
+            ColumnLayout::All,
         );
         write_text_target(buf, text, false)
     }
@@ -50766,6 +51015,10 @@ fn default_options_map() -> HashMap<String, OptionValue> {
     m.insert("display.min_rows".to_string(), OptionValue::Int(10));
     m.insert("display.max_columns".to_string(), OptionValue::Int(0));
     m.insert("display.width".to_string(), OptionValue::Int(80));
+    m.insert(
+        "display.expand_frame_repr".to_string(),
+        OptionValue::Bool(true),
+    );
     m.insert("display.precision".to_string(), OptionValue::Int(6));
     m.insert("display.max_colwidth".to_string(), OptionValue::Int(50));
     m.insert(
@@ -50840,6 +51093,29 @@ fn default_options_map() -> HashMap<String, OptionValue> {
         OptionValue::Bool(true),
     );
     m
+}
+
+/// A display option's flag as set; `default` when unset or not a bool.
+fn display_flag(name: &str, default: bool) -> bool {
+    GLOBAL_OPTIONS
+        .lock()
+        .ok()
+        .and_then(|map| match map.get(name) {
+            Some(OptionValue::Bool(flag)) => Some(*flag),
+            _ => None,
+        })
+        .unwrap_or(default)
+}
+
+/// A display option's count as set: `Some(Some(n))`, `Some(None)` for None
+/// (no limit; a negative count too), `None` when unset or not a number.
+fn display_limit(name: &str) -> Option<Option<usize>> {
+    let map = GLOBAL_OPTIONS.lock().ok()?;
+    match map.get(name)? {
+        OptionValue::Int(count) => Some(usize::try_from(*count).ok()),
+        OptionValue::None => Some(None),
+        _ => None,
+    }
 }
 
 static GLOBAL_OPTIONS: LazyLock<Mutex<HashMap<String, OptionValue>>> =
