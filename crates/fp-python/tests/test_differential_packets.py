@@ -10870,3 +10870,60 @@ _ROW_LABEL_OBJECTS = {
 def test_numeric_row_labels_print_as_one_block_like_pandas(case: str) -> None:
     obj = _ROW_LABEL_OBJECTS[case]
     assert repr(obj(fpd)) == repr(obj(pd)), case
+
+
+# br-frankenpandas-3vjvd: describe left datetime columns out (pandas describes
+# them - std NaN and last), described them as text under include='all', gave
+# an empty frame for text only; groupby describe came in first-seen order and
+# DataFrameGroupBy.describe one row per group and statistic.
+def _describe_frame(m: Any) -> Any:
+    return m.DataFrame({
+        "u": [1, 2, 3, 4],
+        "t": m.to_datetime(["2024-01-01", "2024-01-03", "2024-01-02", None]),
+        "s": ["a", "b", "a", "c"],
+        "f": [0.5, 1.5, 2.5, 3.5],
+    })
+
+
+def _describe_groups(m: Any) -> Any:
+    return m.DataFrame({"k": ["b", "a", "b", "c"], "v": [1.0, 2.0, 3.0, 4.0], "w": [1, 5, 2, 7], "s": list("wxyz")})
+
+
+_DESCRIBE_KIND_CASES = {
+    "numbers and a datetime": lambda m: _describe_frame(m).describe(),
+    "include all": lambda m: _describe_frame(m).describe(include="all"),
+    "a datetime only": lambda m: _describe_frame(m)[["t"]].describe(),
+    "a datetime first": lambda m: _describe_frame(m)[["t", "u"]].describe(),
+    "include datetime": lambda m: _describe_frame(m).describe(include=["datetime"]),
+    "exclude datetime": lambda m: _describe_frame(m).describe(exclude=["datetime"]),
+    "include number and datetime": lambda m: _describe_frame(m).describe(include=["number", "datetime"]),
+    "percentiles beside a datetime": lambda m: _describe_frame(m).describe(percentiles=[0.1, 0.9]),
+    "text only": lambda m: _describe_frame(m)[["s"]].describe(),
+    "a datetime Series": lambda m: _describe_frame(m)["t"].describe(),
+    "SeriesGroupBy.describe sorted": lambda m: _describe_groups(m).groupby("k")["v"].describe(),
+    # (to_string: 16 columns past pandas' 80-character fit truncate in its repr.)
+    "DataFrameGroupBy.describe": lambda m: (lambda d: (d.to_string(), [str(t) for t in d.dtypes]))(_describe_groups(m).groupby("k").describe()),
+    "SeriesGroupBy.ohlc sorted": lambda m: _describe_groups(m).groupby("k")["v"].ohlc(),
+    # NEGATIVES: numbers alone keep std third; a zoned datetime stays out of
+    # the default describe; sort=False keeps first-seen groups.
+    "numbers only": lambda m: _describe_frame(m)[["u", "f"]].describe(),
+    "a zoned datetime": lambda m: m.DataFrame({"t": m.date_range("2024-01-01", periods=3, tz="US/Eastern"), "v": [1, 2, 3]}).describe(),
+    "groupby sort=False": lambda m: _describe_groups(m).groupby("k", sort=False)["v"].describe(),
+}
+
+
+def _describe_kind_outcome(m: Any, run: Any) -> Any:
+    try:
+        r = run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+    if hasattr(r, "columns"):
+        return (repr(r), [str(d) for d in r.dtypes])
+    return (repr(r), str(getattr(r, "dtype", "")))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_DESCRIBE_KIND_CASES))
+def test_describe_of_datetimes_text_and_groups_like_pandas(case: str) -> None:
+    run = _DESCRIBE_KIND_CASES[case]
+    assert _describe_kind_outcome(fpd, run) == _describe_kind_outcome(pd, run), case

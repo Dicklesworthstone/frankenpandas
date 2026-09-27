@@ -1304,7 +1304,9 @@ pub(crate) fn scalar_to_finite_f64(value: &Scalar) -> Option<f64> {
     }
 }
 
-fn normalize_describe_percentiles(percentiles: &[f64]) -> Result<Vec<f64>, FrameError> {
+/// pandas' describe percentiles: each in [0, 1], no repeats, the median
+/// added, sorted (the binding's datetime rows share them).
+pub fn normalize_describe_percentiles(percentiles: &[f64]) -> Result<Vec<f64>, FrameError> {
     let mut normalized = Vec::with_capacity(percentiles.len() + 1);
 
     for &percentile in percentiles {
@@ -1328,7 +1330,9 @@ fn normalize_describe_percentiles(percentiles: &[f64]) -> Result<Vec<f64>, Frame
     Ok(normalized)
 }
 
-fn describe_percentile_label(percentile: f64) -> String {
+/// pandas' describe row label of a percentile: '25%', '33.3%', '0.05%'.
+#[must_use]
+pub fn describe_percentile_label(percentile: f64) -> String {
     let percent = percentile * 100.0;
     if percent.fract() == 0.0 {
         return format!("{}%", percent as i64);

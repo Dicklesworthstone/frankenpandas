@@ -16785,30 +16785,67 @@ fn describe_dtype_matches(dtype: &DType, spec: &str) -> bool {
     }
 }
 
-/// pandas' `describe(include='all')`: count, unique, top, freq, then the
-/// numeric statistics, every column in the frame's order, NaN where a
-/// statistic does not apply (a numeric column has no top; a text column no
-/// mean).
+/// pandas' union describe (`include='all'`, or numbers beside datetimes):
+/// each column's statistics by its kind - a datetime column's count, mean,
+/// min, `percentiles` and max, a number's count, mean, std, min,
+/// `percentiles` and max, any other column's count, unique, top and freq -
+/// their rows merged as pandas merges them, the shortest list first (so a
+/// datetime column puts std last), every column in the frame's order, NaN
+/// where a statistic does not apply. A datetime column was described as
+/// text (unique / top / freq), and the default describe left it out
+/// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.30 follow-up).
 fn describe_all<'py>(
     py: Python<'py>,
     frame: &DataFrame,
+    percentiles: Option<&[f64]>,
     numeric_describe: impl Fn(&DataFrame) -> Result<DataFrame, FrameError>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let names: Vec<String> = frame.column_names().into_iter().cloned().collect();
+    let dtype_of = |name: &str| frame.column(name).map(Column::dtype);
     let numeric: Vec<&str> = names
         .iter()
-        .filter(|name| {
-            frame
-                .column(name)
-                .is_some_and(|c| matches!(c.dtype(), DType::Int64 | DType::Float64))
-        })
         .map(String::as_str)
+        .filter(|name| matches!(dtype_of(name), Some(DType::Int64 | DType::Float64)))
+        .collect();
+    let datetimes: Vec<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| matches!(dtype_of(name), Some(DType::Datetime64 { .. })))
         .collect();
     let objects: Vec<&str> = names
         .iter()
         .map(String::as_str)
-        .filter(|name| !numeric.contains(name))
+        .filter(|name| !numeric.contains(name) && !datetimes.contains(name))
         .collect();
+    // A datetime column's statistics, through the Series methods pandas'
+    // describe uses (a zone kept on each Timestamp).
+    let quantiles =
+        fp_frame::normalize_describe_percentiles(percentiles.unwrap_or(&[0.25, 0.5, 0.75]))
+            .map_err(frame_error_to_py)?;
+    let mut datetime_labels: Vec<String> = ["count", "mean", "min"].map(str::to_owned).to_vec();
+    for &q in &quantiles {
+        datetime_labels.push(fp_frame::describe_percentile_label(q));
+    }
+    datetime_labels.push("max".to_owned());
+    let mut datetime_cells: HashMap<&str, Vec<Py<PyAny>>> = HashMap::new();
+    for &name in &datetimes {
+        let column = frame
+            .column(name)
+            .cloned()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(name.to_owned()))?;
+        let series = Series::new(name, frame.index().clone(), column).map_err(frame_error_to_py)?;
+        let series = Bound::new(py, PySeries { inner: series })?;
+        let mut values = vec![
+            series.call_method0("count")?.unbind(),
+            series.call_method0("mean")?.unbind(),
+            series.call_method0("min")?.unbind(),
+        ];
+        for &q in &quantiles {
+            values.push(series.call_method1("quantile", (q,))?.unbind());
+        }
+        values.push(series.call_method0("max")?.unbind());
+        datetime_cells.insert(name, values);
+    }
     let numeric_part = if numeric.is_empty() {
         None
     } else {
@@ -16825,20 +16862,41 @@ fn describe_all<'py>(
                 .map_err(frame_error_to_py)?,
         )
     };
-    let mut labels: Vec<String> = Vec::new();
+    // pandas merges the kinds' row lists shortest first: text (4), then
+    // datetime (5 + percentiles), then numbers (6 + percentiles).
+    let text_labels = ["count", "unique", "top", "freq"].map(str::to_owned);
+    let mut lists: Vec<Vec<String>> = Vec::new();
     if object_part.is_some() {
-        labels.extend(["count", "unique", "top", "freq"].map(str::to_owned));
+        lists.push(text_labels.to_vec());
+    }
+    if !datetimes.is_empty() {
+        lists.push(datetime_labels.clone());
     }
     if let Some(part) = &numeric_part {
-        for label in part.index().labels() {
-            let label = label.to_string();
-            if !labels.contains(&label) {
-                labels.push(label);
-            }
+        let numeric_labels = part.index().labels().iter().map(ToString::to_string);
+        lists.push(numeric_labels.collect());
+    }
+    let mut labels: Vec<String> = Vec::new();
+    for label in lists.into_iter().flatten() {
+        if !labels.contains(&label) {
+            labels.push(label);
         }
     }
     let cells = PyDict::new(py);
     for name in &names {
+        if let Some(values) = datetime_cells.remove(name.as_str()) {
+            let mut values: HashMap<&String, Py<PyAny>> =
+                datetime_labels.iter().zip(values).collect();
+            let column = labels
+                .iter()
+                .map(|label| match values.remove(label) {
+                    Some(value) => Ok(value),
+                    None => Ok(f64::NAN.into_pyobject(py)?.into_any().unbind()),
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            cells.set_item(name, PyList::new(py, column)?)?;
+            continue;
+        }
         let part = if numeric.contains(&name.as_str()) {
             numeric_part.as_ref()
         } else {
@@ -27653,8 +27711,48 @@ impl PyDataFrame {
             )?
             .into_any())
         };
+        let is_datetime = |frame: &DataFrame, name: &str| {
+            frame
+                .column(name)
+                .is_some_and(|c| matches!(c.dtype(), DType::Datetime64 { .. }))
+        };
         if include.is_empty() && exclude.is_empty() {
-            return wrap(numeric_describe(&this.inner).map_err(frame_error_to_py)?);
+            // pandas describes the numbers and the naive datetimes by default
+            // (a datetime column was left out; a zoned one stays out), and
+            // the text columns when there are neither (it gave an empty frame).
+            let names: Vec<String> = this.inner.column_names().into_iter().cloned().collect();
+            let naive_datetime = |name: &str| {
+                this.inner
+                    .column(name)
+                    .is_some_and(|c| matches!(c.dtype(), DType::Datetime64 { tz: None }))
+            };
+            let number = |name: &str| {
+                this.inner
+                    .column(name)
+                    .is_some_and(|c| matches!(c.dtype(), DType::Int64 | DType::Float64))
+            };
+            if !names.iter().any(|name| naive_datetime(name)) {
+                if !names.is_empty() && !names.iter().any(|name| number(name)) {
+                    return wrap(
+                        this.inner
+                            .describe_dtypes(&["all"], &[])
+                            .map_err(frame_error_to_py)?,
+                    );
+                }
+                return wrap(numeric_describe(&this.inner).map_err(frame_error_to_py)?);
+            }
+            let described: Vec<&str> = names
+                .iter()
+                .map(String::as_str)
+                .filter(|name| naive_datetime(name) || number(name))
+                .collect();
+            let frame = this
+                .inner
+                .select_columns(&described)
+                .map_err(frame_error_to_py)?;
+            let described = describe_all(py, &frame, percentiles.as_deref(), numeric_describe)?;
+            let described = described.extract::<PyRef<'_, PyDataFrame>>()?.inner.clone();
+            return wrap(described);
         }
         // pandas' selection: include (every dtype when only exclude is
         // given) minus exclude; then numeric, object-style, or - both kinds
@@ -27683,16 +27781,17 @@ impl PyDataFrame {
                 .column(name)
                 .is_some_and(|c| matches!(c.dtype(), DType::Int64 | DType::Float64))
         };
+        let datetime = |name: &&str| is_datetime(&frame, name);
         if refs.iter().all(numeric) {
             wrap(numeric_describe(&frame).map_err(frame_error_to_py)?)
-        } else if !refs.iter().any(numeric) {
+        } else if !refs.iter().any(numeric) && !refs.iter().any(datetime) {
             wrap(
                 frame
                     .describe_dtypes(&["all"], &[])
                     .map_err(frame_error_to_py)?,
             )
         } else {
-            let described = describe_all(py, &frame, numeric_describe)?;
+            let described = describe_all(py, &frame, percentiles.as_deref(), numeric_describe)?;
             let described = described.extract::<PyRef<'_, PyDataFrame>>()?.inner.clone();
             wrap(described)
         }
@@ -42079,14 +42178,44 @@ impl PyGroupBy {
         Ok(PyDataFrame { inner: res })
     }
 
-    fn describe(&self) -> PyResult<PyDataFrame> {
-        self.observed_only("describe")?;
-        let res = self
-            .grouped()
-            .map_err(frame_error_to_py)?
-            .describe()
-            .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: res })
+    /// pandas' `describe()`: each numeric column's per-group statistics
+    /// (its SeriesGroupBy.describe) side by side under its label - columns
+    /// (column, statistic), a row per group in pandas' group order. It gave
+    /// one row per group and statistic ('a|count') under the column alone.
+    /// Several keys are refused for now (the per-column describe is single
+    /// key).
+    fn describe<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let this = slf.borrow();
+        this.observed_only("describe")?;
+        if this.by.len() != 1 {
+            return Err(not_implemented(
+                "DataFrameGroupBy.describe over several keys",
+            ));
+        }
+        let names: Vec<String> = this
+            .df
+            .column_names()
+            .into_iter()
+            .filter(|name| {
+                !this.by.contains(name)
+                    && this
+                        .df
+                        .column(name)
+                        .is_some_and(|c| matches!(c.dtype(), DType::Int64 | DType::Float64))
+            })
+            .cloned()
+            .collect();
+        let labels = names
+            .iter()
+            .map(|name| index_label_to_py(py, &this.df.column_label(name)))
+            .collect::<PyResult<Vec<_>>>()?;
+        drop(this);
+        let described = labels
+            .into_iter()
+            .map(|label| slf.get_item(label)?.call_method0("describe"))
+            .collect::<PyResult<Vec<_>>>()?;
+        concat_side_by_side(py, described, names)
     }
 
     /// `for key, group in gb`: each group's key (a tuple over several keys)
@@ -43071,15 +43200,24 @@ impl PySeriesGroupBy {
         Ok(groups)
     }
 
-    /// A per-group frame (describe, ohlc) in category order for a category
-    /// key; fp-frame's came in first-seen order.
-    fn category_rows(&self, df: DataFrame) -> PyResult<DataFrame> {
-        match self.by.column().categorical().filter(|_| self.sort) {
-            Some(meta) => df
-                .take_rows(&category_order(meta, df.index()))
-                .map_err(frame_error_to_py),
-            None => Ok(df),
+    /// A per-group frame (describe, ohlc) in pandas' group order when
+    /// `sort`: a category key's categories' order, any other key's labels
+    /// sorted. fp-frame's came in first-seen order (Boston before Austin;
+    /// only a category key was reordered).
+    fn ordered_group_frame(&self, df: DataFrame) -> PyResult<DataFrame> {
+        if !self.sort {
+            return Ok(df);
         }
+        let positions = match self.by.column().categorical() {
+            Some(meta) => category_order(meta, df.index()),
+            None => {
+                let labels = df.index().labels();
+                let mut positions: Vec<usize> = (0..labels.len()).collect();
+                positions.sort_by(|&a, &b| labels[a].cmp(&labels[b]));
+                positions
+            }
+        };
+        df.take_rows(&positions).map_err(frame_error_to_py)
     }
 
     /// The series' rows at `positions` (one group's values).
@@ -43872,7 +44010,7 @@ impl PySeriesGroupBy {
             .describe()
             .map_err(frame_error_to_py)?;
         Ok(PyDataFrame {
-            inner: self.category_rows(res)?,
+            inner: self.ordered_group_frame(res)?,
         })
     }
 
@@ -44334,7 +44472,7 @@ impl PySeriesGroupBy {
             .ohlc()
             .map_err(frame_error_to_py)?;
         Ok(PyDataFrame {
-            inner: self.category_rows(res)?,
+            inner: self.ordered_group_frame(res)?,
         })
     }
 
