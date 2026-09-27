@@ -15241,18 +15241,29 @@ impl Column {
             // lazily-typed contiguous column instead. Bit-identical to the
             // Scalar-clone path: each output slot materializes `Scalar::Utf8` of
             // the exact same span bytes in the same order, all-valid mask
-            // (enclosing branch). `as_all_valid_str_vec` borrows the &str spans
-            // without materializing (returns `None` for any non-Utf8 scalar, so
-            // mixed columns fall through to the clone path unchanged).
-            if self.dtype == DType::Utf8
-                && let Some(strs) = self.as_all_valid_str_vec()
-            {
-                let total: usize = positions.iter().map(|&pos| strs[pos].len()).sum();
+            // (enclosing branch). Only the SELECTED spans are borrowed (a
+            // non-Utf8 scalar among them falls through to the clone path): it
+            // borrowed every row's span first, so each 100-row iloc slice of
+            // an 80,000-row text column cost the whole column, and slicing it
+            // into pieces was quadratic (br-frankenpandas-m3yk9).
+            let spans: Option<Vec<&str>> = if self.dtype == DType::Utf8 {
+                positions
+                    .iter()
+                    .map(|&pos| match &self.values[pos] {
+                        Scalar::Utf8(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect()
+            } else {
+                None
+            };
+            if let Some(spans) = spans {
+                let total: usize = spans.iter().map(|span| span.len()).sum();
                 let mut new_bytes = Vec::with_capacity(total);
                 let mut new_offsets = Vec::with_capacity(n + 1);
                 new_offsets.push(0);
-                for &pos in positions {
-                    new_bytes.extend_from_slice(strs[pos].as_bytes());
+                for span in spans {
+                    new_bytes.extend_from_slice(span.as_bytes());
                     new_offsets.push(new_bytes.len());
                 }
                 return Self {
@@ -39658,6 +39669,37 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(div.dtype(), DType::Float64);
+        }
+
+        /// A gather from an eager text column reads only the selected rows
+        /// (it borrowed every row first, O(column) per gather): the same
+        /// values as cloning them, a text row beside a non-text one included.
+        #[test]
+        fn eager_utf8_gather_reads_only_the_selected_rows_m3yk9() {
+            let text = |value: &str| Scalar::Utf8(value.to_owned());
+            let eager = Column::new(DType::Utf8, vec![text("a"), text("bb"), text("")]).unwrap();
+            assert!(
+                eager.as_utf8_contiguous().is_none(),
+                "fixture is Scalar-backed"
+            );
+            let taken = eager.take_positions(&[2, 0, 1]);
+            assert_eq!(taken.values(), &[text(""), text("a"), text("bb")]);
+            assert_eq!(
+                eager.take_contiguous_range(1, 2).values(),
+                &[text("bb"), text("")]
+            );
+            // A mixed object column: the text rows alone gather as text, a
+            // non-text row among them keeps its value (the clone path).
+            let mixed =
+                Column::new(DType::Utf8, vec![text("x"), Scalar::Int64(7), text("y")]).unwrap();
+            assert_eq!(
+                mixed.take_positions(&[2, 0]).values(),
+                &[text("y"), text("x")]
+            );
+            assert_eq!(
+                mixed.take_positions(&[1, 2]).values(),
+                &[Scalar::Int64(7), text("y")]
+            );
         }
 
         #[test]
