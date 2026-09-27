@@ -10641,3 +10641,84 @@ def _tz_object_outcome(m: Any, run: Any) -> Any:
 def test_zones_are_tzinfo_objects_like_pandas(case: str) -> None:
     run = _TZ_OBJECT_CASES[case]
     assert _tz_object_outcome(fpd, run) == _tz_object_outcome(pd, run), case
+
+
+# fvsao.35: Timestamp.unit is pandas' resolution - a string's fraction of a
+# second, microseconds for a datetime or fields, seconds for a date, numpy's
+# own unit, nanoseconds for an int - kept by replace / floor / tz ops / date
+# offsets and made finer by a finer duration; it was always 'ns', and
+# as_unit / asm8 / to_numpy were missing.
+def _stamp_unit_view(v: Any) -> Any:
+    if hasattr(v, "unit") and hasattr(v, "tz_localize"):
+        return (repr(v), v.unit)
+    if isinstance(v, tuple):
+        return tuple(_stamp_unit_view(x) for x in v)
+    return repr(v)
+
+
+_STAMP_UNIT_CASES = {
+    **{f"string {text!r}": (lambda text: lambda m: m.Timestamp(text))(text) for text in [
+        "2024-01-05", "2024-01-05 10:00", "2024-01-05 10:00:01", "2024-01-05 10:00:00.1",
+        "2024-01-05 10:00:00.1234", "2024-01-05 10:00:00.123456", "2024-01-05 10:00:00.1234567",
+        "2024-01-05T10:00:00.123456789", "2024-01", "2024-01-05 10:00+09:00", "Jan 5 2024", "2024/01/05",
+    ]},
+    "a datetime": lambda m: m.Timestamp(datetime.datetime(2024, 1, 5, 10)),
+    "an aware datetime": lambda m: m.Timestamp(datetime.datetime(2024, 1, 5, tzinfo=datetime.timezone.utc)),
+    "a date": lambda m: m.Timestamp(datetime.date(2024, 1, 5)),
+    "fields": lambda m: m.Timestamp(2024, 1, 5),
+    "keyword fields": lambda m: m.Timestamp(year=2024, month=1, day=5),
+    "fields with nanosecond": lambda m: m.Timestamp(2024, 1, 5, nanosecond=5),
+    "an int": lambda m: m.Timestamp(1_700_000_000_000_000_000),
+    "an int in seconds": lambda m: m.Timestamp(1_700_000_000, unit="s"),
+    "an int in ms": lambda m: m.Timestamp(1_700_000_000_000, unit="ms"),
+    "an int in days": lambda m: m.Timestamp(19727, unit="D"),
+    "a float in seconds": lambda m: m.Timestamp(1.7e9, unit="s"),
+    "numpy seconds": lambda m: m.Timestamp(np.datetime64("2024-01-05", "s")),
+    "numpy days": lambda m: m.Timestamp(np.datetime64("2024-01-05")),
+    "numpy ms": lambda m: m.Timestamp(np.datetime64("2024-01-05T10:00:00.123", "ms")),
+    "numpy ns": lambda m: m.Timestamp(np.datetime64("2024-01-05", "ns")),
+    "a Timestamp": lambda m: m.Timestamp(m.Timestamp("2024-01-05")),
+    "keyword ts_input": lambda m: m.Timestamp(ts_input="2024-01-05 10:00:00.5"),
+    "tz keyword": lambda m: m.Timestamp("2024-01-05", tz="UTC"),
+    "fields in a zone": lambda m: m.Timestamp(2024, 1, 5, tz="UTC"),
+    "now, today": lambda m: (m.Timestamp.now().unit, m.Timestamp.today().unit),
+    "min, max": lambda m: (m.Timestamp.min, m.Timestamp.max),
+    "replace keeps it": lambda m: m.Timestamp("2024-01-05").replace(hour=3),
+    "floor / ceil / round / normalize keep it": lambda m: (lambda ts: (ts.floor("h"), ts.ceil("s"), ts.round("D"), ts.normalize()))(m.Timestamp("2024-01-05 10:00:00.123")),
+    "tz_localize / tz_convert keep it": lambda m: (lambda ts: (ts, ts.tz_convert("US/Eastern")))(m.Timestamp("2024-01-05").tz_localize("UTC")),
+    "+ Timedelta is ns": lambda m: m.Timestamp("2024-01-05") + m.Timedelta("1D"),
+    "- Timedelta is ns": lambda m: m.Timestamp("2024-01-05") - m.Timedelta("1h"),
+    "Timedelta + is ns": lambda m: m.Timedelta("1D") + m.Timestamp("2024-01-05"),
+    "+ datetime.timedelta is us": lambda m: m.Timestamp("2024-01-05") + datetime.timedelta(days=1),
+    "- datetime.timedelta is us": lambda m: m.Timestamp("2024-01-05 10:00:00.123") - datetime.timedelta(seconds=1),
+    "+ numpy seconds keeps ms": lambda m: m.Timestamp("2024-01-05 10:00:00.123") + np.timedelta64(1, "s"),
+    "+ DateOffset keeps it": lambda m: m.Timestamp("2024-01-05") + m.DateOffset(days=1),
+    "+ offsets keep it": lambda m: (m.Timestamp("2024-01-05") + m.offsets.Day(1), m.Timestamp("2024-01-05") + m.offsets.MonthEnd()),
+    "offset applied to a Timestamp keeps it": lambda m: m.offsets.MonthEnd().rollforward(m.Timestamp("2024-01-05")),
+    "as_unit": lambda m: (m.Timestamp("2024-01-05").as_unit("ms"), m.Timestamp("2024-01-05 10:00:01.6").as_unit("s")),
+    "as_unit lossless refuses": lambda m: m.Timestamp("2024-01-05 10:00:00.5").as_unit("s", round_ok=False),
+    "as_unit of days refuses": lambda m: m.Timestamp("2024-01-05").as_unit("D"),
+    "to_datetime64 / asm8 / to_numpy in the unit": lambda m: (lambda ts: (ts.to_datetime64(), ts.asm8, ts.to_numpy()))(m.Timestamp("2024-01-05 10:00:00.123")),
+    "to_numpy with copy refuses": lambda m: m.Timestamp("2024-01-05").to_numpy(copy=True),
+    "value is nanoseconds": lambda m: m.Timestamp("2024-01-05").value,
+    # NEGATIVES: to_datetime, a column's and an index's elements, a Period's
+    # start are nanoseconds.
+    "to_datetime is ns": lambda m: m.to_datetime("2024-01-05"),
+    "a column's element is ns": lambda m: m.Series(m.to_datetime(["2024-01-05"])).iloc[0],
+    "an index's element is ns": lambda m: m.DatetimeIndex(["2024-01-05"])[0],
+    "a Period's start is ns": lambda m: m.Period("2024-01-05", "D").to_timestamp(),
+}
+
+
+def _stamp_unit_outcome(m: Any, run: Any) -> Any:
+    try:
+        return _stamp_unit_view(run(m))
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_STAMP_UNIT_CASES))
+def test_timestamp_unit_is_its_resolution_like_pandas(case: str) -> None:
+    run = _STAMP_UNIT_CASES[case]
+    assert _stamp_unit_outcome(fpd, run) == _stamp_unit_outcome(pd, run), case

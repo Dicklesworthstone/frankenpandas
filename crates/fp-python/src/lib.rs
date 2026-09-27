@@ -1700,8 +1700,10 @@ impl PyTimedelta {
         if self.nanos == Timedelta::NAT || instant.is_nat() {
             return nat_object(py);
         }
+        // A Timedelta is nanoseconds, so the sum is.
         PyTimestamp {
             inner: instant.add_timedelta(self.nanos),
+            unit: StampUnit::Ns,
         }
         .into_py_any(py)
     }
@@ -2010,6 +2012,25 @@ fn duration_operand(other: &Bound<'_, PyAny>) -> PyResult<Option<i64>> {
     Ok(None)
 }
 
+/// The resolution of a [`duration_operand`], which a Timestamp moved by it
+/// takes when finer: a Timedelta is nanoseconds, a `datetime.timedelta`
+/// microseconds, a numpy timedelta64 its own unit.
+fn duration_unit(other: &Bound<'_, PyAny>) -> PyResult<StampUnit> {
+    if other.cast::<PyDelta>().is_ok() {
+        return Ok(StampUnit::Us);
+    }
+    if other.get_type().name()?.to_cow()? == "timedelta64" {
+        let unit = other
+            .py()
+            .import("numpy")?
+            .call_method1("datetime_data", (other.getattr("dtype")?,))?
+            .get_item(0)?
+            .extract::<String>()?;
+        return Ok(StampUnit::of_unit(&unit));
+    }
+    Ok(StampUnit::Ns)
+}
+
 /// A number operand of Timedelta `*` / `/` / `//` (a bool is not one, as
 /// pandas).
 enum Number {
@@ -2139,6 +2160,79 @@ fn py_delta_of_micros(py: Python<'_>, micros: i64) -> PyResult<Bound<'_, PyDelta
 #[derive(Clone, Debug)]
 pub struct PyTimestamp {
     pub(crate) inner: Timestamp,
+    /// pandas' resolution, `Timestamp.unit`.
+    pub(crate) unit: StampUnit,
+}
+
+/// pandas' resolution of a Timestamp (`Timestamp.unit`): the finest its
+/// input carried - a string's fraction of a second, a `datetime`'s
+/// microseconds, a numpy datetime64's own unit - kept by the operations on
+/// it and made finer by a finer operand (it was always 'ns'; fvsao.35). The
+/// instant itself is nanoseconds whatever the unit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum StampUnit {
+    S,
+    Ms,
+    Us,
+    #[default]
+    Ns,
+}
+
+impl StampUnit {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::S => "s",
+            Self::Ms => "ms",
+            Self::Us => "us",
+            Self::Ns => "ns",
+        }
+    }
+
+    /// Nanoseconds in one tick.
+    const fn nanos(self) -> i64 {
+        match self {
+            Self::S => 1_000_000_000,
+            Self::Ms => 1_000_000,
+            Self::Us => 1_000,
+            Self::Ns => 1,
+        }
+    }
+
+    /// The unit pandas stores a value given in numpy / epoch unit `unit` at:
+    /// seconds and coarser ('D', 'h', 'm') are seconds.
+    fn of_unit(unit: &str) -> Self {
+        match unit {
+            "ms" => Self::Ms,
+            "us" | "μs" => Self::Us,
+            "ns" => Self::Ns,
+            _ => Self::S,
+        }
+    }
+
+    /// The unit of a date string: the digits of its fraction of a second
+    /// (after `:SS.`) - none is seconds, 1-3 ms, 4-6 us, more ns.
+    fn of_text(text: &str) -> Self {
+        let bytes = text.as_bytes();
+        let digits = (3..bytes.len())
+            .find(|&at| {
+                bytes[at] == b'.'
+                    && bytes[at - 3] == b':'
+                    && bytes[at - 2].is_ascii_digit()
+                    && bytes[at - 1].is_ascii_digit()
+            })
+            .map_or(0, |at| {
+                bytes[at + 1..]
+                    .iter()
+                    .take_while(|byte| byte.is_ascii_digit())
+                    .count()
+            });
+        match digits {
+            0 => Self::S,
+            1..=3 => Self::Ms,
+            4..=6 => Self::Us,
+            _ => Self::Ns,
+        }
+    }
 }
 
 /// A time zone argument as its name: a string as given, a tzinfo object
@@ -2152,38 +2246,6 @@ fn tz_name(zone: &Bound<'_, PyAny>) -> PyResult<String> {
     };
     // pandas' own name for the zone ('+05:30' is UTC+05:30).
     fp_types::tz_canonical_name(&name).map_err(|err| tz_error_to_py(zone.py(), err))
-}
-
-/// The tzinfo object pandas 2.2.3 hands out for the zone `name` (it was the
-/// name, a str - `datetime.now(idx.tz)` raised; fvsao.35): 'UTC' is
-/// `datetime.timezone.utc`, a fixed offset ('UTC+09:00') a
-/// `datetime.timezone`, an IANA name pytz's zone, as pandas 2.2.3 builds
-/// them (`zoneinfo.ZoneInfo` where pytz is absent). `at`, a UTC instant in
-/// ns, localizes a pytz zone to the offset it has then, as `Timestamp.tz`
-/// is (`EST` / `EDT`; an index's or a dtype's zone is the zone itself).
-fn tz_object<'py>(py: Python<'py>, name: &str, at: Option<i64>) -> PyResult<Bound<'py, PyAny>> {
-    let datetime = py.import("datetime")?;
-    let timezone = datetime.getattr("timezone")?;
-    if name == "UTC" {
-        return timezone.getattr("utc");
-    }
-    if name.starts_with("UTC+") || name.starts_with("UTC-") {
-        let seconds =
-            fp_types::tz_offset_seconds(name, 0).map_err(|err| tz_error_to_py(py, err))?;
-        return timezone.call1((PyDelta::new(py, 0, seconds, 0, true)?,));
-    }
-    let Ok(pytz) = py.import("pytz") else {
-        return py.import("zoneinfo")?.getattr("ZoneInfo")?.call1((name,));
-    };
-    let zone = pytz.getattr("timezone")?.call1((name,))?;
-    Ok(match at {
-        Some(nanos) if nanos != i64::MIN => datetime
-            .getattr("datetime")?
-            .call_method1("fromtimestamp", (nanos.div_euclid(1_000_000_000), &zone))
-            .and_then(|stamp| stamp.getattr("tzinfo"))
-            .unwrap_or(zone),
-        _ => zone,
-    })
 }
 
 /// A time-zone failure as pandas raises it: pytz's UnknownTimeZoneError (a
@@ -2213,6 +2275,9 @@ fn tz_error_to_py(py: Python<'_>, err: fp_types::TimeZoneError) -> PyErr {
 /// when pytz is absent).
 fn zone_tzinfo<'py>(py: Python<'py>, zone: &str) -> PyResult<Bound<'py, PyAny>> {
     let timezone = py.import("datetime")?.getattr("timezone")?;
+    // An offset a text carried ('+09:00') is the fixed zone 'UTC+09:00'.
+    let zone = fp_types::tz_canonical_name(zone).map_err(|err| tz_error_to_py(py, err))?;
+    let zone = zone.as_str();
     if zone == "UTC" {
         return timezone.getattr("utc");
     }
@@ -2227,6 +2292,20 @@ fn zone_tzinfo<'py>(py: Python<'py>, zone: &str) -> PyResult<Bound<'py, PyAny>> 
     }
 }
 
+/// [`zone_tzinfo`] at the UTC instant `nanos`, as `Timestamp.tz` is: a pytz
+/// zone localized to the offset it has then (`EST` / `EDT`, where an
+/// index's or a dtype's zone is the zone itself, `LMT`); any other tzinfo
+/// is itself.
+fn instant_tzinfo<'py>(py: Python<'py>, zone: &str, nanos: i64) -> PyResult<Bound<'py, PyAny>> {
+    let tzinfo = zone_tzinfo(py, zone)?;
+    Ok(py
+        .import("datetime")?
+        .getattr("datetime")?
+        .call_method1("fromtimestamp", (nanos.div_euclid(1_000_000_000), &tzinfo))
+        .and_then(|stamp| stamp.getattr("tzinfo"))
+        .unwrap_or(tzinfo))
+}
+
 impl PyTimestamp {
     /// This instant as a `datetime.datetime` - a tz-aware one's in its zone
     /// with the tzinfo pandas gives it (see [`zone_tzinfo`]); None for NaT.
@@ -2236,6 +2315,7 @@ impl PyTimestamp {
         };
         let utc = PyTimestamp {
             inner: Timestamp::from_nanos(self.inner.nanos),
+            unit: self.unit,
         };
         let Some((year, month, day, hour, minute, second, micro)) = utc.civil_fields() else {
             return Ok(None);
@@ -2250,10 +2330,10 @@ impl PyTimestamp {
             .map(Some)
     }
 
-    /// This instant moved by `nanos` (its zone kept); NaT when either is,
-    /// pandas' OutOfBoundsDatetime past the nanosecond range (it was a
-    /// silent NaT).
-    fn shifted(&self, py: Python<'_>, nanos: i64) -> PyResult<Py<PyAny>> {
+    /// This instant moved by `nanos` (its zone kept), in the finer of its
+    /// unit and the duration's `unit`; NaT when either is, pandas'
+    /// OutOfBoundsDatetime past the nanosecond range (it was a silent NaT).
+    fn shifted(&self, py: Python<'_>, nanos: i64, unit: StampUnit) -> PyResult<Py<PyAny>> {
         if nanos == Timedelta::NAT || self.inner.is_nat() {
             return nat_object(py);
         }
@@ -2263,7 +2343,11 @@ impl PyTimestamp {
                 i128::from(self.inner.nanos) + i128::from(nanos)
             ))
         })?;
-        PyTimestamp { inner }.into_py_any(py)
+        PyTimestamp {
+            inner,
+            unit: self.unit.max(unit),
+        }
+        .into_py_any(py)
     }
 
     /// pandas' refusal to mix tz-naive and tz-aware instants in `-`.
@@ -2305,6 +2389,7 @@ impl PyTimestamp {
     fn offset_shift(&self, py: Python<'_>, offset: &PyDateOffset, sign: i64) -> PyResult<Self> {
         let shifted = Self {
             inner: Timestamp::from_nanos(offset.apply(py, self.wall().nanos, sign)?),
+            unit: self.unit,
         };
         match &self.inner.tz {
             Some(zone) if !self.inner.is_nat() => shifted.localized(Some(zone)),
@@ -2317,6 +2402,7 @@ impl PyTimestamp {
     fn on_wall(&self, op: impl FnOnce(&Timestamp) -> Timestamp) -> PyResult<Self> {
         let wall = Self {
             inner: op(&self.wall()),
+            unit: self.unit,
         };
         match &self.inner.tz {
             Some(zone) if !self.inner.is_nat() => wall.localized(Some(zone)),
@@ -2345,12 +2431,13 @@ impl PyTimestamp {
             (Some(_), Some(_)) => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "Cannot localize tz-aware Timestamp, use tz_convert for conversions",
             )),
-            (None, _) => Ok(Self { inner: self.wall() }),
+            (None, _) => Ok(Self {
+                inner: self.wall(),
+                unit: self.unit,
+            }),
             (Some(zone), None) => {
                 if self.inner.is_nat() {
-                    return Ok(Self {
-                        inner: self.inner.clone(),
-                    });
+                    return Ok(self.clone());
                 }
                 let nanos = fp_types::tz_wall_to_utc_nanos(zone, self.inner.nanos)
                     .map_err(|err| Python::attach(|py| tz_error_to_py(py, err)))?;
@@ -2359,6 +2446,7 @@ impl PyTimestamp {
                         nanos,
                         tz: Some(zone.to_owned()),
                     },
+                    unit: self.unit,
                 })
             }
         }
@@ -2377,6 +2465,7 @@ impl PyTimestamp {
                 nanos: self.inner.nanos,
                 tz: tz.map(str::to_owned),
             },
+            unit: self.unit,
         })
     }
 
@@ -2431,9 +2520,17 @@ impl PyTimestamp {
             Ok(kwargs.map(|kw| kw.get_item(name)).transpose()?.flatten())
         };
         let nanosecond = keyword("nanosecond")?.map_or(Ok(0), |v| v.extract::<i64>())?;
-        let nat = || PyTimestamp {
-            inner: Timestamp::from_nanos(Timestamp::NAT),
+        // Each input sets the unit pandas gives it: a string its fraction of
+        // a second, a datetime or fields microseconds (nanoseconds with
+        // nanosecond=), a date seconds, numpy its own unit, an int
+        // nanoseconds or its epoch unit=, a float nanoseconds.
+        let stamp = |inner: Timestamp, unit: StampUnit| PyTimestamp { inner, unit };
+        let fields_unit = if nanosecond == 0 {
+            StampUnit::Us
+        } else {
+            StampUnit::Ns
         };
+        let nat = || stamp(Timestamp::from_nanos(Timestamp::NAT), StampUnit::Ns);
         // The naive Timestamp the arguments describe.
         let naive = (|| -> PyResult<Self> {
             if args.len() >= 3 {
@@ -2441,9 +2538,8 @@ impl PyTimestamp {
                 for (position, field) in fields.iter_mut().enumerate().take(args.len()) {
                     *field = args.get_item(position)?.extract::<i64>()?;
                 }
-                return Ok(PyTimestamp {
-                    inner: Timestamp::from_nanos(civil_nanos(py, fields, nanosecond)?),
-                });
+                let nanos = civil_nanos(py, fields, nanosecond)?;
+                return Ok(stamp(Timestamp::from_nanos(nanos), fields_unit));
             }
             if args.len() == 1 {
                 let arg = args.get_item(0)?;
@@ -2451,20 +2547,17 @@ impl PyTimestamp {
                     return Ok(nat());
                 }
                 if let Ok(ts) = arg.extract::<PyRef<'_, PyTimestamp>>() {
-                    return Ok(PyTimestamp {
-                        inner: ts.inner.clone(),
-                    });
+                    return Ok(ts.clone());
                 }
                 // datetime, date and numpy datetime64 inputs (each fell through
                 // to Timestamp.now(), a silently wrong value; fvsao.35).
                 if let Ok(dt) = arg.cast::<PyDateTime>() {
                     // A tz-aware datetime keeps its instant and zone.
-                    return Ok(PyTimestamp {
-                        inner: Timestamp {
-                            nanos: py_datetime_nanos(dt)?,
-                            tz: py_datetime_zone(dt)?,
-                        },
-                    });
+                    let inner = Timestamp {
+                        nanos: py_datetime_nanos(dt)?,
+                        tz: py_datetime_zone(dt)?,
+                    };
+                    return Ok(stamp(inner, StampUnit::Us));
                 }
                 if let Ok(date) = arg.cast::<pyo3::types::PyDate>() {
                     let days = days_from_ymd(
@@ -2472,35 +2565,37 @@ impl PyTimestamp {
                         i64::from(date.get_month()),
                         i64::from(date.get_day()),
                     );
-                    return Ok(PyTimestamp {
-                        inner: Timestamp::from_nanos(days * 86_400_000_000_000),
-                    });
+                    let inner = Timestamp::from_nanos(days * 86_400_000_000_000);
+                    return Ok(stamp(inner, StampUnit::S));
                 }
                 if arg.get_type().name()?.to_str()? == "datetime64" {
                     let nanos =
                         numpy_temporal_nanos(&arg, "datetime64[ns]")?.unwrap_or(Timestamp::NAT);
-                    return Ok(PyTimestamp {
-                        inner: Timestamp::from_nanos(nanos),
-                    });
+                    let unit = py
+                        .import("numpy")?
+                        .call_method1("datetime_data", (arg.getattr("dtype")?,))?
+                        .get_item(0)?
+                        .extract::<String>()?;
+                    return Ok(stamp(
+                        Timestamp::from_nanos(nanos),
+                        StampUnit::of_unit(&unit),
+                    ));
                 }
                 if let Ok(s) = arg.extract::<String>() {
                     if s == "now" {
-                        return Ok(PyTimestamp {
-                            inner: Timestamp::now(),
-                        });
+                        return Ok(stamp(Timestamp::now(), StampUnit::Us));
                     }
                     if s == "today" {
-                        return Ok(PyTimestamp {
-                            inner: Timestamp::today(),
-                        });
+                        return Ok(stamp(Timestamp::today(), StampUnit::Us));
                     }
                     if matches!(s.trim().to_ascii_lowercase().as_str(), "" | "nat" | "nan") {
                         return Ok(nat());
                     }
+                    let unit = StampUnit::of_text(&s);
                     if let Ok(ts) = Timestamp::parse(&s) {
-                        return Ok(PyTimestamp { inner: ts });
+                        return Ok(stamp(ts, unit));
                     }
-                    return parsed_timestamp(&s).map(|inner| PyTimestamp { inner });
+                    return parsed_timestamp(&s).map(|inner| stamp(inner, unit));
                 }
                 let unit = keyword("unit")?
                     .map(|u| u.extract::<String>())
@@ -2508,18 +2603,15 @@ impl PyTimestamp {
                 let number = !arg.is_instance_of::<pyo3::types::PyBool>();
                 if number && let Ok(val) = arg.extract::<i64>() {
                     let nanos = epoch_nanos(val as f64, Some(val), unit.as_deref())?;
-                    return Ok(PyTimestamp {
-                        inner: Timestamp::from_nanos(nanos),
-                    });
+                    let unit = unit.as_deref().map_or(StampUnit::Ns, StampUnit::of_unit);
+                    return Ok(stamp(Timestamp::from_nanos(nanos), unit));
                 }
                 if number && let Ok(val) = arg.extract::<f64>() {
                     if val.is_nan() {
                         return Ok(nat());
                     }
                     let nanos = epoch_nanos(val, None, unit.as_deref())?;
-                    return Ok(PyTimestamp {
-                        inner: Timestamp::from_nanos(nanos),
-                    });
+                    return Ok(stamp(Timestamp::from_nanos(nanos), StampUnit::Ns));
                 }
             }
             if let Some(kw) = kwargs {
@@ -2529,7 +2621,7 @@ impl PyTimestamp {
                         Ok(ts) => ts,
                         Err(_) => parsed_timestamp(&s)?,
                     };
-                    return Ok(PyTimestamp { inner: ts });
+                    return Ok(stamp(ts, StampUnit::of_text(&s)));
                 }
                 if let Some(y) = kw.get_item("year")? {
                     let mut fields = [y.extract::<i64>()?, 1, 1, 0, 0, 0, 0];
@@ -2539,9 +2631,8 @@ impl PyTimestamp {
                             *field = value.extract::<i64>()?;
                         }
                     }
-                    return Ok(PyTimestamp {
-                        inner: Timestamp::from_nanos(civil_nanos(py, fields, nanosecond)?),
-                    });
+                    let nanos = civil_nanos(py, fields, nanosecond)?;
+                    return Ok(stamp(Timestamp::from_nanos(nanos), fields_unit));
                 }
             }
             // Anything else was Timestamp.now() - no argument, a list, an
@@ -2560,6 +2651,18 @@ impl PyTimestamp {
         if naive.inner.is_nat() {
             return nat_object(py);
         }
+        // A zone a text carried is named as pandas names it ('+09:00' is
+        // 'UTC+09:00'; it kept the text's spelling).
+        let naive = match naive.inner.tz.as_deref().map(fp_types::tz_canonical_name) {
+            Some(Ok(canonical)) => PyTimestamp {
+                inner: Timestamp {
+                    nanos: naive.inner.nanos,
+                    tz: Some(canonical),
+                },
+                unit: naive.unit,
+            },
+            _ => naive,
+        };
         let stamp = match zone {
             None => naive,
             // A tz-aware input is converted to the zone, a naive one localized.
@@ -2696,16 +2799,40 @@ impl PyTimestamp {
         }
     }
 
-    /// numpy's `datetime64[ns]` of the instant (UTC for a tz-aware one, as
-    /// numpy has no zones). It was missing.
+    /// numpy's datetime64 of the instant in this Timestamp's unit (UTC for
+    /// a tz-aware one, as numpy has no zones; it was always `[ns]`).
     fn to_datetime64(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let numpy = py.import("numpy")?;
         if self.inner.is_nat() {
             return Ok(numpy.call_method1("datetime64", ("NaT", "ns"))?.unbind());
         }
+        let ticks = self.inner.nanos.div_euclid(self.unit.nanos());
         Ok(numpy
-            .call_method1("datetime64", (self.inner.nanos, "ns"))?
+            .call_method1("datetime64", (ticks, self.unit.name()))?
             .unbind())
+    }
+
+    /// pandas' `asm8`, [`Self::to_datetime64`] (it was missing).
+    #[getter]
+    fn asm8(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.to_datetime64(py)
+    }
+
+    /// pandas' `to_numpy`, [`Self::to_datetime64`]; a dtype or copy is
+    /// pandas' ValueError (it was missing).
+    #[pyo3(signature = (dtype=None, copy=false))]
+    fn to_numpy(
+        &self,
+        py: Python<'_>,
+        dtype: Option<&Bound<'_, PyAny>>,
+        copy: bool,
+    ) -> PyResult<Py<PyAny>> {
+        if dtype.is_some_and(|dtype| !dtype.is_none()) || copy {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Timestamp.to_numpy dtype and copy arguments are ignored.",
+            ));
+        }
+        self.to_datetime64(py)
     }
 
     /// Python's `ctime` of the wall clock (it was missing).
@@ -2775,6 +2902,7 @@ impl PyTimestamp {
         }
         let wall = PyTimestamp {
             inner: Timestamp::from_nanos(py_datetime_nanos(&dt)? + nanosecond),
+            unit: self.unit,
         };
         // A tz-aware Timestamp's fields are its wall clock; the result keeps
         // the zone (or takes tzinfo=).
@@ -2866,13 +2994,13 @@ impl PyTimestamp {
     }
 
     /// The zone as pandas' tzinfo object, localized to this instant (see
-    /// [`tz_object`]); None when naive.
+    /// [`instant_tzinfo`]; it was the name, a str); None when naive.
     #[getter]
     fn tz<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
         self.inner
             .tz
             .as_deref()
-            .map(|name| tz_object(py, name, Some(self.inner.nanos)))
+            .map(|name| instant_tzinfo(py, name, self.inner.nanos))
             .transpose()
     }
 
@@ -2882,15 +3010,47 @@ impl PyTimestamp {
         self.tz(py)
     }
 
+    /// pandas' resolution (see [`StampUnit`]; it was always 'ns').
     #[getter]
     fn unit(&self) -> Option<&'static str> {
-        self.inner.unit()
+        (!self.inner.is_nat()).then(|| self.unit.name())
+    }
+
+    /// This Timestamp in `unit` ('s', 'ms', 'us', 'ns'): a finer instant is
+    /// floored to it, as pandas' `as_unit` (it was missing); with
+    /// `round_ok=False` a lossy one is pandas' ValueError.
+    #[pyo3(signature = (unit, round_ok=true))]
+    fn as_unit(&self, unit: &str, round_ok: bool) -> PyResult<Self> {
+        let target = match unit {
+            "s" | "ms" | "us" | "ns" => StampUnit::of_unit(unit),
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                    "Only resolutions 's', 'ms', 'us', 'ns' are supported.",
+                ));
+            }
+        };
+        let tick = target.nanos();
+        let nanos = self.inner.nanos;
+        let floored = nanos.div_euclid(tick) * tick;
+        if floored != nanos && !round_ok {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Cannot losslessly convert units",
+            ));
+        }
+        Ok(Self {
+            inner: Timestamp {
+                nanos: if self.inner.is_nat() { nanos } else { floored },
+                tz: self.inner.tz.clone(),
+            },
+            unit: target,
+        })
     }
 
     #[staticmethod]
     fn now() -> Self {
         PyTimestamp {
             inner: Timestamp::now(),
+            unit: StampUnit::Us,
         }
     }
 
@@ -2898,6 +3058,7 @@ impl PyTimestamp {
     fn utcnow() -> Self {
         PyTimestamp {
             inner: Timestamp::utcnow(),
+            unit: StampUnit::Us,
         }
     }
 
@@ -2905,6 +3066,7 @@ impl PyTimestamp {
     fn today() -> Self {
         PyTimestamp {
             inner: Timestamp::today(),
+            unit: StampUnit::Us,
         }
     }
 
@@ -2912,6 +3074,7 @@ impl PyTimestamp {
     fn max() -> Self {
         PyTimestamp {
             inner: Timestamp::from_nanos(i64::MAX),
+            unit: StampUnit::Ns,
         }
     }
 
@@ -2919,6 +3082,7 @@ impl PyTimestamp {
     fn min() -> Self {
         PyTimestamp {
             inner: Timestamp::from_nanos(i64::MIN + 1),
+            unit: StampUnit::Ns,
         }
     }
 
@@ -3045,6 +3209,7 @@ impl PyTimestamp {
     fn __hash__(&self, py: Python<'_>) -> PyResult<isize> {
         let utc = PyTimestamp {
             inner: Timestamp::from_nanos(self.inner.nanos),
+            unit: self.unit,
         };
         if self.inner.nanos.rem_euclid(1_000) == 0
             && let Some(dt) = utc.datetime_object(py)?
@@ -3121,7 +3286,7 @@ impl PyTimestamp {
             return self.offset_shift(py, &offset, 1)?.into_py_any(py);
         }
         match duration_operand(other)? {
-            Some(nanos) => self.shifted(py, nanos),
+            Some(nanos) => self.shifted(py, nanos, duration_unit(other)?),
             None => Ok(py.NotImplemented()),
         }
     }
@@ -3129,7 +3294,7 @@ impl PyTimestamp {
     /// `duration + Timestamp`.
     fn __radd__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
         match duration_operand(other)? {
-            Some(nanos) => self.shifted(py, nanos),
+            Some(nanos) => self.shifted(py, nanos, duration_unit(other)?),
             None => Ok(py.NotImplemented()),
         }
     }
@@ -3139,7 +3304,7 @@ impl PyTimestamp {
     /// either side is NaT (a NaT duration moved the instant by i64::MIN).
     fn __sub__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
         if let Some(nanos) = duration_operand(other)? {
-            return self.shifted(py, duration_neg(nanos)?);
+            return self.shifted(py, duration_neg(nanos)?, duration_unit(other)?);
         }
         if let Ok(offset) = other.extract::<PyRef<'_, PyDateOffset>>() {
             self.offset_shift(py, &offset, -1)?.into_py_any(py)
@@ -3388,6 +3553,7 @@ impl PyPeriod {
         if self.inner.ordinal == i64::MIN {
             return PyTimestamp {
                 inner: Timestamp::nat(),
+                unit: StampUnit::Ns,
             };
         }
         let nanos = match self.inner.freq {
@@ -3411,6 +3577,7 @@ impl PyPeriod {
         };
         PyTimestamp {
             inner: Timestamp::from_nanos(nanos),
+            unit: StampUnit::Ns,
         }
     }
 
@@ -3419,6 +3586,7 @@ impl PyPeriod {
         if self.inner.ordinal == i64::MIN {
             return PyTimestamp {
                 inner: Timestamp::nat(),
+                unit: StampUnit::Ns,
             };
         }
         let nanos = match self.inner.freq {
@@ -3450,6 +3618,7 @@ impl PyPeriod {
         };
         PyTimestamp {
             inner: Timestamp::from_nanos(nanos),
+            unit: StampUnit::Ns,
         }
     }
 
@@ -3866,6 +4035,7 @@ fn cell_to_py(py: Python<'_>, column: &Column, value: &Scalar) -> PyResult<Py<Py
                 nanos: *nanos,
                 tz: Some(zone),
             },
+            unit: StampUnit::Ns,
         }
         .into_py_any(py);
     }
@@ -3991,6 +4161,7 @@ fn reduction_to_py(
                 nanos: *nanos,
                 tz: Some(zone),
             },
+            unit: StampUnit::Ns,
         }
         .into_py_any(py);
     }
@@ -4020,6 +4191,7 @@ fn scalar_to_py(py: Python<'_>, scalar: &Scalar) -> PyResult<Py<PyAny>> {
             } else {
                 PyTimestamp {
                     inner: Timestamp::from_nanos(*ns),
+                    unit: StampUnit::Ns,
                 }
                 .into_py_any(py)
             }
@@ -5280,6 +5452,7 @@ fn index_label_to_py(py: Python<'_>, label: &IndexLabel) -> PyResult<Py<PyAny>> 
             } else {
                 PyTimestamp {
                     inner: Timestamp::from_nanos(*ns),
+                    unit: StampUnit::Ns,
                 }
                 .into_py_any(py)
             }
@@ -7670,6 +7843,7 @@ impl PyDatetimeIndex {
                 nanos,
                 tz: self.inner.tz(),
             },
+            unit: StampUnit::Ns,
         }
         .into_py_any(py)
     }
@@ -9312,13 +9486,13 @@ impl PyDatetimeIndex {
         self.clone()
     }
 
-    /// The zone as pandas' tzinfo object (see [`tz_object`]); None when
-    /// naive.
+    /// The zone as pandas' tzinfo object (see [`zone_tzinfo`]; it was the
+    /// name, a str); None when naive.
     #[getter]
     fn tz<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
         self.inner
             .tz()
-            .map(|name| tz_object(py, &name, None))
+            .map(|name| zone_tzinfo(py, &name))
             .transpose()
     }
 
@@ -36534,6 +36708,7 @@ fn row_label_to_py(py: Python<'_>, index: &Index, label: &IndexLabel) -> PyResul
                 nanos: *nanos,
                 tz: Some(zone.to_owned()),
             },
+            unit: StampUnit::Ns,
         }
         .into_py_any(py);
     }
@@ -38045,12 +38220,12 @@ impl PySeriesDatetimeAccessor {
         let zone = tz.filter(|tz| !tz.is_none()).map(tz_name).transpose()?;
         self.wrap(|dt| dt.tz_convert(zone.as_deref()))
     }
-    /// The column's zone as pandas' tzinfo object (see [`tz_object`]); None
-    /// for a naive column.
+    /// The column's zone as pandas' tzinfo object (see [`zone_tzinfo`]; it
+    /// was the name, a str); None for a naive column.
     #[getter]
     fn tz<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
         match self.series.column().dtype() {
-            DType::Datetime64 { tz: Some(name) } => tz_object(py, &name, None).map(Some),
+            DType::Datetime64 { tz: Some(name) } => zone_tzinfo(py, &name).map(Some),
             _ => Ok(None),
         }
     }
@@ -46955,7 +47130,11 @@ fn to_datetime(
                 nanos: *nanos,
                 tz: Some(tz),
             };
-            return Ok(Py::new(py, PyTimestamp { inner })?.into_any());
+            let stamp = PyTimestamp {
+                inner,
+                unit: StampUnit::Ns,
+            };
+            return Ok(Py::new(py, stamp)?.into_any());
         }
         if let Some(val) = res.values().first() {
             return scalar_to_py(py, val);
@@ -49981,11 +50160,11 @@ impl PyDatetimeTZDtype {
         })
     }
 
-    /// The zone as pandas' tzinfo object (see [`tz_object`]; it was the
+    /// The zone as pandas' tzinfo object (see [`zone_tzinfo`]; it was the
     /// name, a str).
     #[getter]
     fn tz<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        tz_object(py, &self.tz, None)
+        zone_tzinfo(py, &self.tz)
     }
 
     #[getter]
@@ -51425,6 +51604,7 @@ impl PyDateOffset {
                 let [year, month, day, hour, minute, second, micro, nano] = self.absolute;
                 value = PyTimestamp {
                     inner: Timestamp::from_nanos(value),
+                    unit: StampUnit::Ns,
                 }
                 .replace(
                     py,
@@ -51479,6 +51659,15 @@ impl PyDateOffset {
         Ok(None)
     }
 
+    /// The unit a Timestamp moved from an [`Self::instant`] operand keeps:
+    /// a Timestamp's own, a `datetime`'s microseconds.
+    fn instant_unit(other: &Bound<'_, PyAny>) -> StampUnit {
+        match other.extract::<PyRef<'_, PyTimestamp>>() {
+            Ok(ts) => ts.unit,
+            Err(_) => StampUnit::Us,
+        }
+    }
+
     /// `other` (a Timestamp or datetime, a datetime Series or a
     /// DatetimeIndex) with this offset applied `times` times; None for
     /// any other operand.
@@ -51489,8 +51678,11 @@ impl PyDateOffset {
         times: i64,
     ) -> PyResult<Option<Py<PyAny>>> {
         if let Some(nanos) = Self::instant(other)? {
-            let inner = Timestamp::from_nanos(self.apply(py, nanos, times)?);
-            return Ok(Some(PyTimestamp { inner }.into_py_any(py)?));
+            let stamp = PyTimestamp {
+                inner: Timestamp::from_nanos(self.apply(py, nanos, times)?),
+                unit: Self::instant_unit(other),
+            };
+            return Ok(Some(stamp.into_py_any(py)?));
         }
         if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
             let inner = series_apply_offset(py, &series.inner, self, times)?;
@@ -51719,7 +51911,10 @@ impl PyDateOffset {
             ),
             None => Timestamp::from_nanos(nanos),
         };
-        Ok(PyTimestamp { inner })
+        Ok(PyTimestamp {
+            inner,
+            unit: Self::instant_unit(dt),
+        })
     }
 
     /// The Timestamp itself when it is on this offset, else the previous one.
@@ -51739,7 +51934,10 @@ impl PyDateOffset {
             }
             _ => Timestamp::from_nanos(nanos),
         };
-        Ok(PyTimestamp { inner })
+        Ok(PyTimestamp {
+            inner,
+            unit: Self::instant_unit(dt),
+        })
     }
 
     /// Whether the Timestamp's date is on this offset (a relative offset is
@@ -57823,6 +58021,7 @@ mod tests {
         let ts_nanos = 1_705_321_845_000_000_000_i64;
         let ts = PyTimestamp {
             inner: Timestamp::from_nanos(ts_nanos),
+            unit: StampUnit::Ns,
         };
         assert_eq!(ts.year(), Some(2024));
         assert_eq!(ts.month(), Some(1));
