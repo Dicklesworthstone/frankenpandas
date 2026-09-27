@@ -4127,6 +4127,32 @@ TEMPORAL_COLUMN_OPS = {
     "td_div_int": lambda m: _td_column(m) / 3,
     "td_floordiv_td": lambda m: _td_column(m) // m.Timedelta("7min"),
     "td_mod_td": lambda m: _td_column(m) % m.Timedelta("7min"),
+    # unique() iterates Timestamps / Timedeltas (pandas' DatetimeArray /
+    # TimedeltaArray), not numpy datetime64 scalars.
+    "unique": lambda m: [(type(v).__name__, str(v)) for v in _dt_column(m).unique()],
+    "td_unique": lambda m: [(type(v).__name__, str(v)) for v in _td_column(m).unique()],
+    # The rest of the bead's 44 everyday operations (they were already right;
+    # kept here so the whole set stays pinned).
+    "sub_dt": lambda m: _dt_column(m) - _dt_column(m).shift(1),
+    "sub_ts": lambda m: _dt_column(m) - m.Timestamp("2020-01-01"),
+    "add_td": lambda m: _dt_column(m) + m.Timedelta("1D"),
+    "add_pytd": lambda m: _dt_column(m) + datetime.timedelta(hours=1),
+    "gt_ts": lambda m: _dt_column(m) > m.Timestamp("2020-01-02"),
+    "eq_pydt": lambda m: _dt_column(m) == datetime.datetime(2020, 1, 2),
+    "isin": lambda m: _dt_column(m).isin([m.Timestamp("2020-01-02")]),
+    "fillna": lambda m: _dt_column(m).fillna(m.Timestamp("2000-01-01")),
+    "dt.year": lambda m: _dt_column(m).dt.year,
+    "dt.date": lambda m: [(type(v).__name__, str(v)) for v in _dt_column(m).dt.date],
+    "astype_str": lambda m: _dt_column(m).astype(str),
+    "value_counts": lambda m: _dt_column(m).value_counts(),
+    "nunique": lambda m: _dt_column(m).nunique(),
+    "cummax": lambda m: _dt_column(m).cummax(),
+    "groupby_first": lambda m: _keyed_dates(m).first(),
+    "set_index": lambda m: m.DataFrame({"d": _dt_column(m), "v": [1, 2, 3, 4]}).dropna().set_index("d")["v"].sort_index(),
+    "merge_on_dt": lambda m: m.DataFrame({"d": _dt_column(m), "v": [1, 2, 3, 4]}).merge(m.DataFrame({"d": _dt_column(m).head(2), "w": [9, 8]}), on="d")["w"],
+    "td_sum": lambda m: _td_column(m).sum(),
+    "td_max": lambda m: _td_column(m).max(),
+    "td_cumsum": lambda m: _td_column(m).cumsum(),
 }
 
 

@@ -19018,23 +19018,41 @@ impl PySeries {
     /// array in the column's numpy dtype, as pandas' - it was a Python list
     /// (fvsao.30).
     fn unique(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        // A tz-aware column's are its Timestamps in the zone (pandas'
-        // DatetimeArray; a DatetimeIndex here) - the numpy array held the
-        // naive UTC clock.
-        if let DType::Datetime64 { tz: Some(zone) } = self.inner.dtype() {
-            let nanos = self
-                .inner
-                .unique()
-                .iter()
-                .map(|value| match value {
-                    Scalar::Datetime64(nanos) => *nanos,
-                    _ => Timestamp::NAT,
-                })
-                .collect();
-            let inner = DatetimeIndex::new(nanos)
-                .with_tz(Some(&zone))
-                .map_err(index_error_to_py)?;
-            return PyDatetimeIndex { inner }.into_py_any(py);
+        // A datetime / duration column's are Timestamps / Timedeltas, a
+        // zoned one's in its zone (pandas' DatetimeArray / TimedeltaArray; a
+        // DatetimeIndex / TimedeltaIndex here). The numpy array iterated
+        // numpy datetime64 / timedelta64 scalars (fvsao.17) and held a zoned
+        // column's naive UTC clock.
+        match self.inner.dtype() {
+            DType::Datetime64 { tz } => {
+                let nanos = self
+                    .inner
+                    .unique()
+                    .iter()
+                    .map(|value| match value {
+                        Scalar::Datetime64(nanos) => *nanos,
+                        _ => Timestamp::NAT,
+                    })
+                    .collect();
+                let inner = DatetimeIndex::new(nanos)
+                    .with_tz(tz.as_deref())
+                    .map_err(index_error_to_py)?;
+                return PyDatetimeIndex { inner }.into_py_any(py);
+            }
+            DType::Timedelta64 => {
+                let nanos = self
+                    .inner
+                    .unique()
+                    .iter()
+                    .map(|value| match value {
+                        Scalar::Timedelta64(nanos) => *nanos,
+                        _ => Timedelta::NAT,
+                    })
+                    .collect();
+                let inner = TimedeltaIndex::new(nanos);
+                return PyTimedeltaIndex { inner }.into_py_any(py);
+            }
+            _ => {}
         }
         let column = Column::from_values(self.inner.unique()).map_err(column_error_to_py)?;
         Ok(column_ndarray(py, &column)?.unbind())
