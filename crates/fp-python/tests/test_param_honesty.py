@@ -25,6 +25,7 @@ API surface (inspect.signature) and observable results are used.
 from __future__ import annotations
 
 import collections
+import collections.abc
 import inspect
 import math
 from typing import Any, Callable
@@ -292,10 +293,20 @@ def _snap(x: Any) -> Any:
             return ("deferred", type(x).__name__, _snap(x.sum()))
         except Exception as exc:  # noqa: BLE001 - the error class is the picture
             return ("deferred", type(x).__name__, "raise", type(exc).__name__)
-    if inspect.isgenerator(x) or type(x).__name__.endswith("iterator"):
+    # Any iterator is materialized: pandas' itertuples returns a `map`, whose
+    # repr is its memory ADDRESS, so its picture changed with allocation and
+    # the verdict flipped between UNPROBED and IGNORED from run to run.
+    if (
+        inspect.isgenerator(x)
+        or type(x).__name__.endswith("iterator")
+        or isinstance(x, collections.abc.Iterator)
+    ):
         x = list(x)
     if isinstance(x, (list, tuple)):
-        return ("seq", tuple(_snap(v) for v in x))
+        # A namedtuple row keeps its class name and fields - what
+        # itertuples(name=) changes; plain sequences are their items.
+        kind = (type(x).__name__, tuple(x._fields)) if hasattr(x, "_fields") else "seq"
+        return (kind, tuple(_snap(v) for v in x))
     parts: list[Any] = [type(x).__name__, repr(x)]
     for attr in ("dtype", "dtypes", "index", "columns", "name"):
         try:
@@ -541,8 +552,36 @@ class _Honours(_Double):
         return self.inner.head(n)
 
 
+class _DropsTupleName(_Double):
+    """Reads index= but builds every row as the default 'Pandas' tuple."""
+
+    def itertuples(self, index: bool = True, name: Any = "Pandas") -> Any:
+        if name is not None and not isinstance(name, str):
+            raise TypeError("name must be a str or None")
+        return self.inner.itertuples(index=index)
+
+
 def _series(mod: Any) -> Any:
     return mod.Series([3.0, 1.0, 2.0, 5.0, 4.0, 0.0], name="x")
+
+
+def _tuple_frame(mod: Any) -> Any:
+    return mod.DataFrame({"a": [1, 2], "b": [3.5, 4.5]})
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_the_audit_sees_the_rows_itertuples_yields() -> None:
+    # The audit pictured pandas' itertuples `map` by its repr, a memory
+    # address, so the verdict for name= flipped between UNPROBED and IGNORED
+    # with allocation. Materialized, with each namedtuple's class name and
+    # fields in the picture, a double that drops name= is caught...
+    pd_frame = lambda: _tuple_frame(pd)  # noqa: E731
+    dropped = probe(lambda: _DropsTupleName(_tuple_frame(fpd)), pd_frame, "itertuples", "name", "Pandas", {}, {})
+    assert dropped[0] == "IGNORED", dropped
+    # ...and the binding, which honours name= and index=, is not flagged.
+    for param, default in (("name", "Pandas"), ("index", True)):
+        honest = probe(lambda: _tuple_frame(fpd), pd_frame, "itertuples", param, default, {}, {})
+        assert honest[0] == "RESPONSIVE", (param, honest)
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
