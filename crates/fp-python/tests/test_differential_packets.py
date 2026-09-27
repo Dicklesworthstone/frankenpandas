@@ -5102,6 +5102,18 @@ def _multi_setter(m: Any) -> Any:
     return s
 
 
+def _columns_tuple_setter(m: Any) -> Any:
+    frame = m.DataFrame({"v": [1], "w": [2]})
+    frame.columns = [("a", 1), ("b", 2)]
+    return (type(frame.columns).__name__, list(frame.columns))
+
+
+def _columns_multi_setter(m: Any) -> Any:
+    frame = m.DataFrame({"v": [1], "w": [2]})
+    frame.columns = m.MultiIndex.from_tuples([("a", 1), ("b", 2)])
+    return (type(frame.columns).__name__, list(frame.columns))
+
+
 _LABEL_OBJECT_CASES = {
     "Index of tuples is a MultiIndex": lambda m: m.Index([(1, 2), (3, 4)]),
     "Series index= tuples stays flat": lambda m: m.Series([1, 2], index=[(1, 2), (3, 4)]),
@@ -5111,6 +5123,8 @@ _LABEL_OBJECT_CASES = {
     "a tuple key names a tuple label": lambda m: m.Series([1, 2], index=[(1, 2), (3, 4)])[(1, 2)],
     "set_axis a MultiIndex keeps it": lambda m: m.Series([1, 2]).set_axis(m.MultiIndex.from_tuples([("a", 1), ("b", 2)])),
     "index setter a MultiIndex keeps it": _multi_setter,
+    "columns setter tuples stays flat": _columns_tuple_setter,
+    "columns setter a MultiIndex keeps it": _columns_multi_setter,
     "Index of dates": lambda m: m.Index([datetime.date(2020, 1, 2), datetime.date(2020, 1, 1)]),
     "loc a date": lambda m: m.Series([1, 2], index=[datetime.date(2020, 1, 2), datetime.date(2020, 1, 1)]).loc[datetime.date(2020, 1, 1)],
     "truncate dates": lambda m: m.Series([1, 2, 3], index=[datetime.date(2020, 1, d) for d in (1, 2, 3)]).truncate(after=datetime.date(2020, 1, 2)),

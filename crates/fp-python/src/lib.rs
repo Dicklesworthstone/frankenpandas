@@ -25920,29 +25920,18 @@ impl PyDataFrame {
                 value.repr()?
             )));
         }
-        let multi = if let Ok(multi) = value.extract::<PyRef<'_, PyMultiIndex>>() {
-            multi.inner.clone()
-        } else {
-            let items = value.try_iter()?.collect::<PyResult<Vec<_>>>()?;
-            if items.is_empty() || !items.iter().all(|item| item.is_instance_of::<PyTuple>()) {
-                let labels = extract_index_labels(Some(value), 0)?;
-                self.inner = self
-                    .inner
-                    .set_axis(labels, 1)
-                    .map_err(axis_length_error_to_py)?;
-                return Ok(());
-            }
-            let tuples = items
-                .iter()
-                .map(|item| {
-                    item.try_iter()?
-                        .map(|label| py_to_index_label(&label?))
-                        .collect()
-                })
-                .collect::<PyResult<Vec<Vec<IndexLabel>>>>()?;
-            fp_index::MultiIndex::from_tuples(tuples).map_err(index_error_to_py)?
-        };
-        self.inner = frame_with_column_multiindex(&self.inner, multi)?;
+        // A MultiIndex is a two-level column axis; a list of tuples is a flat
+        // axis of tuple labels, as pandas' setter (it built a MultiIndex;
+        // r0hk0).
+        if let Ok(multi) = value.extract::<PyRef<'_, PyMultiIndex>>() {
+            self.inner = frame_with_column_multiindex(&self.inner, multi.inner.clone())?;
+            return Ok(());
+        }
+        let labels = extract_index_labels(Some(value), 0)?;
+        self.inner = self
+            .inner
+            .set_axis(labels, 1)
+            .map_err(axis_length_error_to_py)?;
         Ok(())
     }
 
