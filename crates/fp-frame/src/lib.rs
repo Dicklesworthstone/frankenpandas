@@ -54236,11 +54236,13 @@ impl StringAccessor<'_> {
         let labels = self.series.index().labels().to_vec();
 
         // No-split fast path: when NO value contains `sep`, every row maps to a
-        // SINGLE trimmed token, so skip the per-row `Vec<String>` split + per-row
+        // SINGLE token, so skip the per-row `Vec<String>` split + per-row
         // `HashSet<String>` (2× n heap allocations + clones) and instead borrow
-        // `&str` while tracking one token index per row. Bit-identical to the
-        // general path: the single trimmed non-empty token per row, the same
-        // first-occurrence `all_tokens` order, and the same 0/1 scatter.
+        // `&str` while tracking one token index per row. The same as the
+        // general path: the single non-empty token per row, the columns in
+        // sorted token order (they came in first-seen order here), the same
+        // 0/1 scatter. pandas does not trim a token: ' x ' is its own column
+        // (both paths trimmed; ba9pc probe).
         {
             let vals = self.series.column().values();
             let has_sep = vals.iter().any(|v| match v {
@@ -54254,7 +54256,7 @@ impl StringAccessor<'_> {
                 for v in vals {
                     match v {
                         Scalar::Utf8(s) => {
-                            let t = s.trim();
+                            let t = s.as_str();
                             if t.is_empty() {
                                 row_code.push(None);
                             } else if let Some(&i) = seen.get(t) {
@@ -54282,12 +54284,14 @@ impl StringAccessor<'_> {
                         mat[*c][r] = 1;
                     }
                 }
+                let mut by_token: Vec<usize> = (0..tokens.len()).collect();
+                by_token.sort_unstable_by(|&a, &b| tokens[a].cmp(&tokens[b]));
                 let mut columns = BTreeMap::new();
                 let mut col_order = Vec::new();
-                for (i, token) in tokens.iter().enumerate() {
+                for i in by_token {
                     let col_data = std::mem::take(&mut mat[i]);
-                    columns.insert(token.clone(), Column::from_i64_values_owned(col_data));
-                    col_order.push(token.clone());
+                    columns.insert(tokens[i].clone(), Column::from_i64_values_owned(col_data));
+                    col_order.push(tokens[i].clone());
                 }
                 let index = Index::new(labels).rename_index(self.series.index().name());
                 return DataFrame::new_with_column_order(index, columns, col_order);
@@ -54303,8 +54307,8 @@ impl StringAccessor<'_> {
                 Scalar::Utf8(s) => {
                     let tokens: Vec<String> = s
                         .split(sep)
-                        .map(|t| t.trim().to_owned())
                         .filter(|t| !t.is_empty())
+                        .map(str::to_owned)
                         .collect();
                     let mut row_set: HashSet<String> = HashSet::new();
                     for t in &tokens {
@@ -69614,9 +69618,12 @@ impl DataFrame {
         O: Into<DataFrameColumnOrderStore>,
     {
         let mut columns: ColumnStore = columns.into();
-        // An axis passed through keeps its typed labels (fvsao.32).
+        // An axis passed through keeps its typed labels (fvsao.32), its name
+        // and its zone (they were dropped: df.div(s, axis=0) lost
+        // df.columns.name).
         let axis: DataFrameColumnOrderStore = column_order.into();
         let (labels, range) = (axis.labels.clone(), axis.range);
+        let (name, tz) = (axis.name.clone(), axis.tz.clone());
         let column_order: Vec<String> = axis.into();
         Self::validate_column_lengths(&index, &columns)?;
         if let Some(multiindex) = row_multiindex.as_ref()
@@ -69646,6 +69653,8 @@ impl DataFrame {
             column_order: ColumnAxis {
                 labels,
                 range,
+                name,
+                tz,
                 ..column_order.into()
             },
             column_multiindex,
@@ -69667,6 +69676,7 @@ impl DataFrame {
         let mut columns: ColumnStore = columns.into();
         let axis: DataFrameColumnOrderStore = column_order.into();
         let (labels, range) = (axis.labels.clone(), axis.range);
+        let (name, tz) = (axis.name.clone(), axis.tz.clone());
         let column_order: Vec<String> = axis.into();
         columns.reorder(&column_order);
         Self {
@@ -69676,6 +69686,8 @@ impl DataFrame {
             column_order: ColumnAxis {
                 labels,
                 range,
+                name,
+                tz,
                 ..column_order.into()
             },
             column_multiindex,
@@ -93839,7 +93851,10 @@ impl DataFrame {
                 columns.insert(name.clone(), out.column().clone());
             }
             let index = index.unwrap_or_else(|| self.index.clone());
-            return Self::new_with_axis(index, columns, self.column_order.to_vec());
+            // The columns are untouched: their axis whole - typed labels,
+            // name - rides along (they came back as text, unnamed:
+            // df.div(s, axis=0), crosstab(normalize='index') lost both).
+            return Self::new_with_axis(index, columns, self.column_order.clone());
         }
         let labels: Vec<String> = series
             .index()
@@ -93894,7 +93909,16 @@ impl DataFrame {
             };
             columns.insert(name.clone(), column);
         }
-        Self::new_with_axis(self.index.clone(), columns, names)
+        // pandas keeps the columns - typed labels, axis name - when the
+        // Series' labels are exactly the columns; a union of the two keeps a
+        // name only both share. Both were always dropped.
+        if self.column_order.as_slice() == labels.as_slice() {
+            return Self::new_with_axis(self.index.clone(), columns, self.column_order.clone());
+        }
+        let axis_name = (series.index().name() == self.columns_name())
+            .then(|| self.columns_name().map(str::to_owned))
+            .flatten();
+        Ok(Self::new_with_axis(self.index.clone(), columns, names)?.with_columns_name(axis_name))
     }
 
     /// `df <op> scalar`, or `scalar <op> df` when `reflected`, with pandas'
@@ -161492,6 +161516,28 @@ mod tests {
             [2, 4, 6].map(Scalar::Int64)
         );
         assert!(filled.column("a").unwrap().values()[1].is_missing());
+        // The column axis rides through: its name down the rows and when the
+        // Series' labels are exactly the columns (they were dropped).
+        let named = df.clone().with_columns_name(Some("c".to_owned()));
+        let down = named
+            .arith_series(&by_row, ArithmeticOp::Add, 0, false)
+            .unwrap();
+        assert_eq!(down.columns_name(), Some("c"));
+        let exact = Series::from_values(
+            "s",
+            vec![label("b"), label("a")],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let across = named
+            .arith_series(&exact, ArithmeticOp::Add, 1, false)
+            .unwrap();
+        assert_eq!(across.columns_name(), Some("c"));
+        // NEGATIVE: a union with other labels keeps no name.
+        let union = named
+            .arith_series(&by_column, ArithmeticOp::Add, 1, false)
+            .unwrap();
+        assert_eq!(union.columns_name(), None);
     }
 
     #[test]
@@ -171622,6 +171668,27 @@ mod tests {
         assert_eq!(result.columns["a"].values()[2], Scalar::Int64(1));
         assert_eq!(result.columns["b"].values()[2], Scalar::Int64(0));
         assert_eq!(result.columns["c"].values()[2], Scalar::Int64(0));
+    }
+
+    #[test]
+    fn str_get_dummies_sorts_and_keeps_spaces() {
+        // pandas sorts the tokens and does not trim them; without a separator
+        // in any value the columns came in first-seen order, and both paths
+        // trimmed ' a' into 'a'.
+        let text = |t: &str| Scalar::Utf8(t.to_owned());
+        let series = |values: Vec<Scalar>| {
+            let n = values.len() as i64;
+            Series::from_values("s", (0..n).map(IndexLabel::from).collect(), values).unwrap()
+        };
+        let plain = series(vec![text("b"), text("a"), text(" a"), text("c")]);
+        let dummies = plain.str().get_dummies("|").unwrap();
+        assert_eq!(dummies.column_names(), [" a", "a", "b", "c"]);
+        assert_eq!(dummies.column(" a").unwrap().values()[2], Scalar::Int64(1));
+        let split = series(vec![text("b| a"), text("c")]);
+        assert_eq!(
+            split.str().get_dummies("|").unwrap().column_names(),
+            [" a", "b", "c"]
+        );
     }
 
     // ── DataFrame.from_dict_index ──

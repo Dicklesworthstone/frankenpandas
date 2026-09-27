@@ -24303,6 +24303,7 @@ impl PySeriesILoc {
         key: &Bound<'_, PyAny>,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
+        let key = &resolve_callable_key(self.parent.bind(py).as_any(), key)?;
         write_series_through(py, &self.parent, &mut self.inner, |series| {
             let positions = resolve_iloc_positions(series.len(), key)?;
             series_write(py, series, RowTarget::Rows(positions), value)
@@ -24310,6 +24311,7 @@ impl PySeriesILoc {
     }
 
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let key = &resolve_callable_key(self.parent.bind(py).as_any(), key)?;
         if let Ok(pos) = key.extract::<i64>() {
             let scalar = self
                 .inner
@@ -24367,6 +24369,7 @@ impl PySeriesLoc {
         key: &Bound<'_, PyAny>,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
+        let key = &resolve_callable_key(self.parent.bind(py).as_any(), key)?;
         write_series_through(py, &self.parent, &mut self.inner, |series| {
             series_write(py, series, series_loc_target(series, key)?, value)
         })
@@ -24376,6 +24379,7 @@ impl PySeriesLoc {
     /// slices are inclusive, boolean masks are recognised before integer
     /// labels, and a duplicated label returns every matching row.
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let key = &resolve_callable_key(self.parent.bind(py).as_any(), key)?;
         // A MultiIndex key (s.loc['y'], s.loc[('y', 1)]; fvsao.36).
         if let Some(selected) = series_multiindex_loc(py, &self.inner, key)? {
             return Ok(selected);
@@ -31551,6 +31555,32 @@ impl PyDataFrame {
         }
         let default_func = pyo3::types::PyString::new(py, "mean").into_any();
         let aggfunc = aggfunc.filter(|f| !f.is_none()).unwrap_or(&default_func);
+        // pandas sorts the value columns (sort=True, the default): values
+        // ['z', 'a'] come out a, z - as do the frame's other columns when
+        // `values` is omitted, and a dict aggfunc's keys. They kept the given
+        // order.
+        let sorted_funcs;
+        let aggfunc = if sort {
+            {
+                let frame = &slf.borrow().inner;
+                value_names.sort_by_cached_key(|name| frame.column_label(name));
+            }
+            match aggfunc.cast::<PyDict>() {
+                Ok(funcs) => {
+                    let mut items: Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)> =
+                        funcs.iter().collect();
+                    items.sort_by_cached_key(|(key, _)| py_to_index_label(key).ok());
+                    sorted_funcs = PyDict::new(py);
+                    for (key, func) in items {
+                        sorted_funcs.set_item(key, func)?;
+                    }
+                    sorted_funcs.as_any()
+                }
+                Err(_) => aggfunc,
+            }
+        } else {
+            aggfunc
+        };
         let keyword = |key: &str, value: Bound<'py, PyAny>| -> PyResult<Bound<'py, PyDict>> {
             let kw = PyDict::new(py);
             kw.set_item(key, value)?;
@@ -35640,12 +35670,14 @@ impl PyDataFrameILoc {
         key: &Bound<'_, PyAny>,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
+        let key = &resolve_callable_key(self.parent.bind(py).as_any(), key)?;
         write_frame_through(py, &self.parent, &mut self.inner, |frame| {
             frame_iloc_write(py, frame, key, value)
         })
     }
 
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let key = &resolve_callable_key(self.parent.bind(py).as_any(), key)?;
         // Case 1: Tuple (row_indexer, col_indexer)
         if let Ok(tuple) = key.cast::<pyo3::types::PyTuple>() {
             if tuple.len() != 2 {
@@ -36905,6 +36937,41 @@ fn resolve_loc_columns(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<Optio
 }
 
 /// [`write_series_through`] for a frame's accessors.
+/// pandas' `apply_if_callable` for a `.loc` / `.iloc` key: a callable key -
+/// or a callable part of a `(rows, cols)` tuple - is called with the object
+/// indexed, and its result is the key (`df.loc[lambda d: d.a > 1]`, the
+/// method-chain idiom; `df.loc[:, lambda d: ['a']]`). It was looked up as a
+/// label: KeyError 'Object(<function ...>)'. A class stays a label, as
+/// `df[...]` treats one.
+fn resolve_callable_key<'py>(
+    obj: &Bound<'py, PyAny>,
+    key: &Bound<'_, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let key = key.as_unbound().bind(obj.py());
+    let callable = |part: &Bound<'py, PyAny>| {
+        part.is_callable() && !part.is_instance_of::<pyo3::types::PyType>()
+    };
+    if let Ok(tuple) = key.cast::<pyo3::types::PyTuple>()
+        && tuple.iter().any(|part| callable(&part))
+    {
+        let parts = tuple
+            .iter()
+            .map(|part| {
+                if callable(&part) {
+                    part.call1((obj,))
+                } else {
+                    Ok(part)
+                }
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        return Ok(pyo3::types::PyTuple::new(key.py(), parts)?.into_any());
+    }
+    if callable(key) {
+        return key.call1((obj,));
+    }
+    Ok(key.clone())
+}
+
 fn write_frame_through(
     py: Python<'_>,
     parent: &Py<PyDataFrame>,
@@ -37663,12 +37730,14 @@ impl PyDataFrameLoc {
         key: &Bound<'_, PyAny>,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
+        let key = &resolve_callable_key(self.parent.bind(py).as_any(), key)?;
         write_frame_through(py, &self.parent, &mut self.inner, |frame| {
             frame_loc_write(py, frame, key, value)
         })
     }
 
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let key = &resolve_callable_key(self.parent.bind(py).as_any(), key)?;
         // Row MultiIndex: an outer label or a tuple prefix selects rows,
         // tried first as pandas does (df.loc['x'], df.loc[('x', 2)]); a
         // 2-tuple that matches nothing is then (rows, cols) below. They raised

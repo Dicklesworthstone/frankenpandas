@@ -11235,3 +11235,62 @@ def test_to_parquet_index_argument_like_pandas(case: str, index: Any, tmp_path: 
     assert pyarrow_parquet.read_schema(fp_path).names == pyarrow_parquet.read_schema(pd_path).names
     pd.testing.assert_frame_equal(pd.read_parquet(fp_path), pd.read_parquet(pd_path))
     assert repr(fpd.read_parquet(fp_path)) == repr(pd.read_parquet(pd_path))
+
+
+# Found by the everyday-ops probe (scratch p13/probe_everyday4.py): a callable
+# .loc / .iloc key (the method-chain idiom) was looked up as a label
+# (KeyError 'Object(<function ...>)'); str.get_dummies kept first-seen order
+# without a separator and trimmed tokens (pandas sorts and does not trim);
+# pivot_table did not sort its value columns; frame-by-Series arithmetic
+# dropped the column axis' name and typed labels (so crosstab(normalize=
+# 'index' / 'columns') lost them).
+def _everyday_people(m: Any) -> Any:
+    return m.DataFrame({
+        "dept": ["eng", "ops", "eng", "hr", "ops"],
+        "age": [34, 28, None, 45, 51],
+        "g": ["a", "b", "a", "a", "b"],
+        "salary": [120.5, 80.0, 95.25, 70.0, 88.8],
+    })
+
+
+def _named_axis_frame(m: Any) -> Any:
+    return m.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]}).rename_axis("c", axis=1)
+
+
+_CALLABLE_AND_AXIS_CASES = {
+    "loc callable rows": lambda m: repr(_everyday_people(m).loc[lambda d: d["age"] > 30]),
+    "loc callable rows and columns": lambda m: repr(_everyday_people(m).loc[lambda d: d["age"] > 30, lambda d: ["dept", "age"]]),
+    "iloc callable": lambda m: repr(_everyday_people(m).iloc[lambda d: [0, 2]]),
+    "Series loc callable": lambda m: repr(_everyday_people(m)["age"].loc[lambda s: s > 30]),
+    "loc callable write": lambda m: repr((lambda f: (f.loc.__setitem__((lambda d: d["age"] > 40, "g"), "z"), f)[1])(_everyday_people(m))),
+    "chained assign then loc callable": lambda m: repr(_everyday_people(m).assign(s2=lambda d: d.salary * 2).loc[lambda d: d.s2 > 170]),
+    "str.get_dummies sorts": lambda m: repr(m.Series(["b", "a", "c", None, "a"]).str.get_dummies()),
+    "str.get_dummies keeps spaces": lambda m: repr(m.Series(["b| a", " a", "c"]).str.get_dummies()),
+    "pivot_table sorts values": lambda m: repr(_everyday_people(m).pivot_table(index="dept", values=["salary", "age"], aggfunc="mean")),
+    "pivot_table sorts values per aggfunc": lambda m: repr(_everyday_people(m).pivot_table(index="dept", values=["salary", "age"], aggfunc=["mean", "max"])),
+    "pivot_table sorts every other column": lambda m: repr(_everyday_people(m)[["dept", "salary", "age"]].pivot_table(index="dept", aggfunc="max")),
+    "pivot_table sorts a dict aggfunc": lambda m: repr(_everyday_people(m).pivot_table(index="dept", values=["salary", "age"], aggfunc={"salary": "sum", "age": "max"})),
+    # NEGATIVE: sort=False keeps the given order.
+    "pivot_table sort=False": lambda m: repr(_everyday_people(m).pivot_table(index="dept", values=["salary", "age"], aggfunc="sum", sort=False)),
+    "div axis 0 keeps the column axis": lambda m: _named_axis_frame(m).div(m.Series([1.0, 2.0]), axis=0).columns.name,
+    "frame / Series on the columns": lambda m: (_named_axis_frame(m) / m.Series([1.0, 2.0], index=["a", "b"])).columns.name,
+    "frame / Series of the same name": lambda m: (_named_axis_frame(m) / m.Series([1.0, 2.0], index=m.Index(["a", "x"], name="c"))).columns.name,
+    # NEGATIVE: a union with other labels keeps no name.
+    "frame / Series of other labels": lambda m: (_named_axis_frame(m) / m.Series([1.0], index=["a"])).columns.name,
+    "crosstab normalize index": lambda m: repr(m.crosstab(_everyday_people(m)["dept"], _everyday_people(m)["age"].notna(), normalize="index")),
+    "crosstab normalize columns": lambda m: repr(m.crosstab(_everyday_people(m)["dept"], _everyday_people(m)["g"], normalize="columns")),
+}
+
+
+def _callable_and_axis_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_CALLABLE_AND_AXIS_CASES))
+def test_callable_keys_dummies_pivot_order_and_column_axis_like_pandas(case: str) -> None:
+    run = _CALLABLE_AND_AXIS_CASES[case]
+    assert _callable_and_axis_outcome(fpd, run) == _callable_and_axis_outcome(pd, run), case
