@@ -3965,9 +3965,10 @@ fn scalar_to_py(py: Python<'_>, scalar: &Scalar) -> PyResult<Py<PyAny>> {
 /// A Python value as a cell of object data holds it (fvsao.33): a scalar as
 /// [`py_to_scalar`] reads it, a list as a list cell (its items cells too),
 /// and any other object - a tuple, dict, set, `datetime.date`, an array - as
-/// itself. For DATA (a Series' values, a frame's cells, apply results);
-/// arguments that must be scalars keep [`py_to_scalar`], so `fillna([1, 2])`
-/// still raises as pandas does. They raised "Cannot convert list to Scalar".
+/// itself. For DATA (a Series' values, a frame's cells, apply results) and
+/// operands (a date to compare with or fill); an argument that must not be
+/// a list refuses it itself (`fillna([1, 2])` raises as pandas does). They
+/// raised "Cannot convert list to Scalar".
 fn py_to_cell(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
     if let Ok(list) = obj.cast::<PyList>() {
         let items = list
@@ -3975,6 +3976,14 @@ fn py_to_cell(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
             .map(|item| py_to_cell(py, &item))
             .collect::<PyResult<Vec<_>>>()?;
         return Ok(Scalar::Object(fp_types::ObjectValue::list(items)));
+    }
+    // A numpy array is an object cell as it is, as pandas keeps it (a
+    // one-element array became its float through numpy's deprecated
+    // conversion; fvsao.69).
+    if obj.get_type().name().is_ok_and(|name| name == "ndarray") {
+        return Ok(Scalar::Object(fp_types::ObjectValue::Host(
+            fp_types::HostValue::new(PyHost(obj.clone().unbind())),
+        )));
     }
     match py_to_scalar(py, obj) {
         Ok(scalar) => Ok(scalar),
@@ -31658,11 +31667,12 @@ impl PyDataFrame {
     ///   (the frame's index when the lengths match), axis=1 with Series
     ///   results or result_type='expand' one row per result.
     ///
-    /// pandas' remaining shapes are a Series of Python objects (lists,
-    /// dicts), which needs object cells the columnar store does not hold
-    /// (fvsao.33): they raise NotImplementedError where a bare Python list
-    /// came back. raw and result_type were refused, `args=` reached func as
-    /// a keyword, and string / list / dict funcs raised TypeError.
+    /// pandas' remaining shapes (axis=1 sequences without 'expand', axis=0
+    /// 'reduce', all-dict or unequal-length results) are a Series of the
+    /// results as object cells (fvsao.69; they raised NotImplementedError,
+    /// and before that a bare Python list came back). raw and result_type
+    /// were refused, `args=` reached func as a keyword, and string / list /
+    /// dict funcs raised TypeError.
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (func, axis=None, raw=false, result_type=None, args=None, by_row=None, engine=None, engine_kwargs=None, **kwargs))]
     fn apply<'py>(
@@ -31889,25 +31899,33 @@ impl PyDataFrame {
                 return frame_from_values(py, &stacked, &names, &row_index);
             }
         }
-        let object_cells = || {
-            not_implemented(
-                "DataFrame.apply whose result is a Series of lists / dicts / tuples (object cells; fvsao.33)",
-            )
+        // pandas' "Series of the results" shapes: each result an object cell
+        // (a list a list cell; a tuple, dict or array the Python object) over
+        // the result axis. They raised NotImplementedError while the columnar
+        // store could hold no Python object (fvsao.69).
+        let objects = |results: &[Bound<'py, PyAny>]| -> PyResult<Bound<'py, PyAny>> {
+            let cells = results
+                .iter()
+                .map(|result| py_to_cell(py, result))
+                .collect::<PyResult<Vec<_>>>()?;
+            let column = Column::from_object_values(cells);
+            PySeries {
+                inner: Series::new("", result_index.clone(), column).map_err(frame_error_to_py)?,
+            }
+            .into_bound_py_any(py)
         };
         // Scalars (pandas decides on the first result): a Series over the
-        // other axis.
+        // other axis; a later sequence is an object cell among them.
         if !results.first().is_some_and(|first| is_sequence(first)) {
             let cells = results
                 .iter()
-                .map(|result| {
-                    if is_sequence(result) {
-                        Err(object_cells())
-                    } else {
-                        py_to_scalar(py, result)
-                    }
-                })
+                .map(|result| py_to_cell(py, result))
                 .collect::<PyResult<Vec<_>>>()?;
-            let column = Column::from_values(cells).map_err(column_error_to_py)?;
+            let column = if cells.iter().any(|cell| matches!(cell, Scalar::Object(_))) {
+                Column::from_object_values(cells)
+            } else {
+                Column::from_values(cells).map_err(column_error_to_py)?
+            };
             return PySeries {
                 inner: Series::new("", result_index.clone(), column).map_err(frame_error_to_py)?,
             }
@@ -31932,10 +31950,14 @@ impl PyDataFrame {
             // per result, and sequences of unequal length are a Series of
             // them.
             if result_type == Some("reduce") || (result_type.is_none() && all_dicts) {
-                return Err(object_cells());
+                return objects(&results);
             }
+            // Series beside other sequences, or some dicts among lists: what
+            // pandas builds depends on its DataFrame construction of them.
             if any_series != all_series || any_dict {
-                return Err(object_cells());
+                return Err(not_implemented(
+                    "DataFrame.apply mixing Series or dict results with other sequences over the columns",
+                ));
             }
             if !all_series {
                 let lengths = results
@@ -31943,7 +31965,7 @@ impl PyDataFrame {
                     .map(|result| result.len())
                     .collect::<PyResult<Vec<_>>>()?;
                 if lengths.windows(2).any(|pair| pair[0] != pair[1]) {
-                    return Err(object_cells());
+                    return objects(&results);
                 }
             }
             if names.iter().collect::<HashSet<_>>().len() != names.len() {
@@ -31969,7 +31991,7 @@ impl PyDataFrame {
         // any sequences under 'expand', become one row each (a frame over
         // the results, transposed); other sequences are a Series of them.
         if result_type != Some("expand") && !results[0].is_instance_of::<PySeries>() {
-            return Err(object_cells());
+            return objects(&results);
         }
         // Dicts: a column per key in first-seen order, missing where a row
         // lacks it. pandas builds them through a transpose, so numbers share

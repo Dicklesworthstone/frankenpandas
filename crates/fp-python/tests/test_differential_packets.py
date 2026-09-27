@@ -1164,8 +1164,8 @@ def test_dataframe_apply_axis1_and_row_returns():
     assert list(row_sums.values) == [11, 22, 33]
 
     # Row-wise function returning dict -> DataFrame under result_type="expand";
-    # pandas' default is a Series of the dicts, which needs object cells
-    # (fvsao.33) and raises (it used to expand the dicts regardless).
+    # pandas' default is a Series of the dicts (it used to expand the dicts
+    # regardless).
     def row_transform(row):
         return {"sum": row["a"] + row["b"], "diff": row["b"] - row["a"]}
 
@@ -1173,8 +1173,11 @@ def test_dataframe_apply_axis1_and_row_returns():
     assert isinstance(df_out, fpd.DataFrame)
     assert list(df_out["sum"].values) == [11, 22, 33]
     assert list(df_out["diff"].values) == [9, 18, 27]
-    with pytest.raises(NotImplementedError):
-        df.apply(row_transform, axis=1)
+    # TEST-CHANGE (fvsao.69): this default raised NotImplementedError while
+    # the columnar store could hold no dict; it is the Series of the dicts.
+    dicts = df.apply(row_transform, axis=1)
+    assert isinstance(dicts, fpd.Series)
+    assert dicts.tolist() == [{"sum": 11, "diff": 9}, {"sum": 22, "diff": 18}, {"sum": 33, "diff": 27}]
 
 
 def test_series_map_na_action_and_mapping():
@@ -2795,8 +2798,9 @@ def test_numpy_keywords_follow_pandas_rule() -> None:
         lambda: fpd.crosstab(fpd.Series(["a"]), fpd.Series(["b"]), normalize=True, margins=True),
         lambda: _hd(fpd).groupby("a").value_counts(dropna=False),
         lambda: _hd(fpd).pivot_table(index="a", values="b", dropna=False),
-        # pandas' Series of lists: object cells (fvsao.33); it returned a bare list.
-        lambda: _hd(fpd).apply(lambda r: [r["a"], r["b"]], axis=1),
+        # TEST-CHANGE (fvsao.69): apply(lambda r: [...], axis=1) left this list;
+        # its Series of lists is built from object cells now
+        # (test_frame_apply_object_results_match_pandas).
         lambda: _hs(fpd).interpolate(method="nearest", limit_direction="both"),
         lambda: _hs(fpd).to_string(float_format="{:.1f}".format),
         lambda: _hs(fpd).view("int64"),
@@ -4997,6 +5001,71 @@ def _dtypes_outcome(m: Any, case: str) -> Any:
 @pytest.mark.parametrize("case", list(_DTYPES_CASES))
 def test_dtypes_are_dtype_objects_like_pandas(case: str) -> None:
     assert _dtypes_outcome(fpd, case) == _dtypes_outcome(pd, case), case
+
+
+# fvsao.69: DataFrame.apply results that are a Series of lists / dicts /
+# tuples raised NotImplementedError (fvsao.45 left them for object cells).
+# The cells keep their container type; numpy scalars inside them (pandas'
+# rows hand out np.int64) are compared by value.
+def _apply_plain(v: Any) -> Any:
+    if isinstance(v, np.ndarray):
+        return ("ndarray", _apply_plain(v.tolist()) if v.ndim == 0 else [_apply_plain(x) for x in v.tolist()])
+    if isinstance(v, (list, tuple)):
+        return (type(v).__name__, [_apply_plain(x) for x in v])
+    if isinstance(v, dict):
+        return ("dict", sorted((str(k), _apply_plain(x)) for k, x in v.items()))
+    if isinstance(v, np.generic):
+        return v.item()
+    return "nan" if isinstance(v, float) and v != v else v
+
+
+def _apply_view(x: Any) -> Any:
+    if hasattr(x, "columns"):
+        return ("frame", [str(c) for c in x.columns], [str(i) for i in x.index], [[_apply_plain(v) for v in row] for row in x.values.tolist()])
+    return ("series", str(x.dtype), [str(i) for i in x.index], [_apply_plain(v) for v in x.tolist()])
+
+
+def _ab_frame(m: Any) -> Any:
+    return m.DataFrame({"a": [1, 2], "b": [3, 4]}, index=["x", "y"])
+
+
+_APPLY_OBJECT_CASES = {
+    "rows to lists": lambda m: _ab_frame(m).apply(lambda r: [r["a"], r["b"]], axis=1),
+    "rows to dicts": lambda m: _ab_frame(m).apply(lambda r: {"s": r["a"] + r["b"]}, axis=1),
+    "rows to tuples": lambda m: _ab_frame(m).apply(lambda r: (r["a"], r["b"]), axis=1),
+    "rows to arrays": lambda m: _ab_frame(m).apply(lambda r: np.array([r["a"]]), axis=1),
+    "columns to dicts": lambda m: _ab_frame(m).apply(lambda c: {"m": c.max()}),
+    "columns to ragged lists": lambda m: _ab_frame(m).apply(lambda c: list(c)[: 1 if c.name == "a" else 2]),
+    "reduce to lists": lambda m: _ab_frame(m).apply(lambda c: list(c), result_type="reduce"),
+    "a scalar, then a list": lambda m: _ab_frame(m).apply(lambda r: r["a"] if r["a"] == 1 else [r["a"]], axis=1),
+    "rows to lists, exploded": lambda m: _ab_frame(m).apply(lambda r: [r["a"], r["b"]], axis=1).explode(),
+    "rows to lists, str.len": lambda m: _ab_frame(m).apply(lambda r: [r["a"], r["b"]], axis=1).str.len(),
+    # An array is an object cell as it is (a one-element array became its
+    # float, through numpy's deprecated conversion).
+    "a Series of arrays keeps them": lambda m: m.Series([np.array([1]), np.array([2, 3])]),
+    "one-element arrays stay arrays": lambda m: m.Series([np.array([1]), np.array([2])]),
+    "a 0-d array stays an array": lambda m: m.Series([np.array(5)]),
+    # NEGATIVES: the frame-building shapes are unchanged.
+    "expand still expands": lambda m: _ab_frame(m).apply(lambda r: [r["a"], r["b"]], axis=1, result_type="expand"),
+    "Series results build a frame": lambda m: _ab_frame(m).apply(lambda r: m.Series({"p": r["a"], "q": r["b"]}), axis=1),
+    "equal-length lists over the columns build a frame": lambda m: _ab_frame(m).apply(lambda c: [c.iloc[0], c.iloc[1]]),
+    "scalars stay numeric": lambda m: _ab_frame(m).apply(lambda r: r["a"] * 10, axis=1),
+}
+
+
+def _apply_object_outcome(m: Any, case: str) -> Any:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return _apply_view(_APPLY_OBJECT_CASES[case](m))
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_APPLY_OBJECT_CASES))
+def test_frame_apply_object_results_match_pandas(case: str) -> None:
+    assert _apply_object_outcome(fpd, case) == _apply_object_outcome(pd, case), case
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
