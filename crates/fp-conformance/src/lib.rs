@@ -7283,11 +7283,11 @@ fn fuzz_feather_scalar_for_dtype(dtype: &DType, bytes: &[u8]) -> Scalar {
         }
         DType::Datetime64 { .. } => Scalar::Datetime64(i64::from(payload % 100) * 1_000_000_000),
         DType::Period => Scalar::Period(Period::new(i64::from(payload % 100), PeriodFreq::Daily)),
-        DType::Interval => Scalar::Interval(fp_types::Interval {
-            left: f64::from(payload % 10),
-            right: f64::from(payload % 10 + 5),
-            closed: fp_types::IntervalClosed::Both,
-        }),
+        DType::Interval => Scalar::Interval(fp_types::Interval::new(
+            f64::from(payload % 10),
+            f64::from(payload % 10 + 5),
+            fp_types::IntervalClosed::Both,
+        )),
     }
 }
 

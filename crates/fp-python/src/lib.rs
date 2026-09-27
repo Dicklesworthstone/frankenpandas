@@ -194,10 +194,7 @@ fn column_pandas_dtype<'py>(py: Python<'py>, column: &Column) -> PyResult<Bound<
         DType::BoolNullable => PyBooleanDtype.into_bound_py_any(py),
         DType::Categorical => {
             let (categories, ordered) = column.categorical().map_or((None, false), |meta| {
-                (
-                    Some(meta.categories.iter().map(ToString::to_string).collect()),
-                    meta.ordered,
-                )
+                (Some(meta.categories.clone()), meta.ordered)
             });
             PyCategoricalDtype {
                 categories,
@@ -410,13 +407,128 @@ fn pandas_object_text(value: &Scalar) -> String {
     }
 }
 
+/// pandas' dtype for a categorical's `categories` (the footer's
+/// `Categories (3, int64)`, CategoricalDtype's `categories_dtype`): the one
+/// kind they share, float64 for ints beside floats, object for text or a
+/// mix, and for Intervals `interval[int64, right]` - their subtype (int64
+/// only when every one is) and closed side; they printed 'interval'
+/// (fvsao.54).
+fn categories_dtype_name(categories: &[Scalar]) -> String {
+    let all = |test: fn(&Scalar) -> bool| !categories.is_empty() && categories.iter().all(test);
+    if let Some(Scalar::Interval(first)) = categories.first()
+        && all(|category| matches!(category, Scalar::Interval(_)))
+    {
+        let int = all(|category| {
+            matches!(category, Scalar::Interval(interval)
+                if interval.subtype == fp_types::IntervalSubtype::Int64)
+        });
+        return fp_types::IntervalDtype {
+            subtype: if int { DType::Int64 } else { DType::Float64 },
+            closed: Some(first.closed),
+        }
+        .to_string();
+    }
+    if all(|category| matches!(category, Scalar::Int64(_) | Scalar::Float64(_)))
+        && !all(|category| matches!(category, Scalar::Int64(_)))
+    {
+        return "float64".to_owned();
+    }
+    match categories.first() {
+        Some(first)
+            if !matches!(first, Scalar::Utf8(_))
+                && categories
+                    .iter()
+                    .all(|category| category.dtype() == first.dtype()) =>
+        {
+            pandas_dtype_name(&first.dtype())
+        }
+        _ => "object".to_owned(),
+    }
+}
+
+/// `categories` as pandas' Index repr lists them: text quoted (escaped),
+/// an Interval as it prints, anything else as Python prints it.
+fn category_repr_items(categories: &[Scalar]) -> Vec<String> {
+    categories
+        .iter()
+        .map(|category| match category {
+            Scalar::Utf8(text) => format!(
+                "'{}'",
+                text.replace('\t', "\\t")
+                    .replace('\r', "\\r")
+                    .replace('\n', "\\n")
+            ),
+            other => pandas_object_text(other),
+        })
+        .collect()
+}
+
+/// A categorical's categories as pandas' `.cat.categories` /
+/// `CategoricalDtype.categories` give them: an IntervalIndex of Intervals
+/// (cut / qcut bins; fvsao.54), else an Index.
+fn categories_index(py: Python<'_>, categories: &[Scalar]) -> PyResult<Py<PyAny>> {
+    if !categories.is_empty() && categories.iter().all(|c| matches!(c, Scalar::Interval(_))) {
+        let intervals = categories
+            .iter()
+            .filter_map(|category| match category {
+                Scalar::Interval(interval) => Some(PyInterval::of(interval)),
+                _ => None,
+            })
+            .collect();
+        return PyIntervalIndex {
+            intervals,
+            name: None,
+        }
+        .into_py_any(py);
+    }
+    PyIndex {
+        inner: Index::new(
+            categories
+                .iter()
+                .map(scalar_to_index_label_converter)
+                .collect(),
+        ),
+    }
+    .into_py_any(py)
+}
+
+/// A column's values as pandas materializes a run of them (repr cells,
+/// tolist, iteration, `.values`): an interval categorical's go through
+/// IntervalIndex.take, which makes `interval[int64]` float64 once any is
+/// missing - '(10.0, 50.0]' beside NaN, where one value alone (`iloc`) or
+/// `astype(str)` stays '(10, 50]' (fvsao.54).
+fn materialized_values(column: &Column) -> std::borrow::Cow<'_, [Scalar]> {
+    let values = column.values();
+    let int_intervals = values.iter().any(|value| {
+        matches!(value, Scalar::Interval(interval)
+            if interval.subtype == fp_types::IntervalSubtype::Int64)
+    });
+    if int_intervals && values.iter().any(Scalar::is_missing) {
+        std::borrow::Cow::Owned(
+            values
+                .iter()
+                .map(|value| match value {
+                    Scalar::Interval(interval) => Scalar::Interval(fp_types::Interval::new(
+                        interval.left,
+                        interval.right,
+                        interval.closed,
+                    )),
+                    other => other.clone(),
+                })
+                .collect(),
+        )
+    } else {
+        std::borrow::Cow::Borrowed(values)
+    }
+}
+
 /// The cells pandas' formatter makes for `column` (before justification):
 /// numbers, bools and objects take a leading space, datetimes and
 /// timedeltas do not; a tz-aware column shows its wall clock and offset in
 /// any zone.
 #[allow(clippy::cast_precision_loss)] // pandas performs the same int64 -> float64 widening
 fn pandas_cells(column: &Column) -> Vec<String> {
-    let values = column.values();
+    let values = materialized_values(column);
     match column.dtype() {
         DType::Int64 if column.validity().all() => values
             .iter()
@@ -818,13 +930,7 @@ fn pandas_series_text(
                 other => pandas_object_text(other),
             })
             .collect();
-        let kind = if meta.categories.iter().all(|c| matches!(c, Scalar::Utf8(_))) {
-            "object".to_owned()
-        } else {
-            meta.categories
-                .first()
-                .map_or_else(|| "object".to_owned(), |c| pandas_dtype_name(&c.dtype()))
-        };
+        let kind = categories_dtype_name(&meta.categories);
         let joiner = if meta.ordered { " < " } else { ", " };
         if !footer.is_empty() {
             footer.push('\n');
@@ -4276,10 +4382,11 @@ fn py_to_scalar(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
             "neither" => fp_types::IntervalClosed::Neither,
             _ => fp_types::IntervalClosed::Right,
         };
-        return Ok(Scalar::Interval(fp_types::Interval {
-            left: interval.left,
-            right: interval.right,
-            closed,
+        let cell = fp_types::Interval::new(interval.left, interval.right, closed);
+        return Ok(Scalar::Interval(if interval.int_endpoints {
+            cell.with_int_endpoints()
+        } else {
+            cell
         }));
     }
     if let Ok(type_name) = obj.get_type().name() {
@@ -4527,12 +4634,7 @@ fn scalar_to_py(py: Python<'_>, scalar: &Scalar) -> PyResult<Py<PyAny>> {
         }
         Scalar::Period(p) => PyPeriod { inner: *p }.into_py_any(py),
         // An Interval cell is an Interval (it came back None).
-        Scalar::Interval(interval) => PyInterval {
-            left: interval.left,
-            right: interval.right,
-            closed: interval.closed.to_string(),
-        }
-        .into_py_any(py),
+        Scalar::Interval(interval) => PyInterval::of(interval).into_py_any(py),
         // An object cell: a list cell is a Python list, a host cell the very
         // Python object it carries (fvsao.33).
         Scalar::Object(fp_types::ObjectValue::List(items)) => {
@@ -6269,14 +6371,35 @@ fn pandas_index_text(
     justify: bool,
     mut attrs: Vec<String>,
 ) -> String {
+    let data = pandas_object_summary(class, items, justify);
+    let n = items.len();
+    if n > PANDAS_MAX_SEQ_ITEMS {
+        let at = if attrs.last().is_some_and(|attr| attr.starts_with("freq=")) {
+            attrs.len() - 1
+        } else {
+            attrs.len()
+        };
+        attrs.insert(at, format!("length={n}"));
+    }
+    format!("{class}({data}{})", attrs.join(", "))
+}
+
+/// pandas' display.max_seq_items default: past it a summary shows the
+/// first and last 10 around `...`.
+const PANDAS_MAX_SEQ_ITEMS: usize = 100;
+
+/// pandas' `format_object_summary(items, name=class)` at the default
+/// display.width 80: `[a, b, ...], ` wrapped under the class name's width
+/// (and `],` then a line break once it wraps).
+fn pandas_object_summary(class: &str, items: &[String], justify: bool) -> String {
     const WIDTH: usize = 80;
-    const MAX_SEQ_ITEMS: usize = 100;
+    const MAX_SEQ_ITEMS: usize = PANDAS_MAX_SEQ_ITEMS;
     let space1 = format!("\n{}", " ".repeat(class.len() + 1));
     let space2 = format!("\n{}", " ".repeat(class.len() + 2));
     let n = items.len();
     let truncated = n > MAX_SEQ_ITEMS;
     let width_of = |text: &str| text.chars().count();
-    let data = match n {
+    match n {
         0 => "[], ".to_owned(),
         1 => format!("[{}], ", items[0]),
         2 => format!("[{}, {}], ", items[0], items[1]),
@@ -6332,16 +6455,7 @@ fn pandas_index_text(
             }
             format!("[{}", &summary[space2.len()..])
         }
-    };
-    if truncated {
-        let at = if attrs.last().is_some_and(|attr| attr.starts_with("freq=")) {
-            attrs.len() - 1
-        } else {
-            attrs.len()
-        };
-        attrs.insert(at, format!("length={n}"));
     }
-    format!("{class}({data}{})", attrs.join(", "))
 }
 
 /// Python wrapper for FrankenPandas Index.
@@ -19874,8 +19988,7 @@ impl PySeries {
     /// Return values as a Python list.
     fn tolist(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let column = self.inner.column();
-        let values: Vec<Py<PyAny>> = column
-            .values()
+        let values: Vec<Py<PyAny>> = materialized_values(column)
             .iter()
             .map(|s| cell_to_py(py, column, s))
             .collect::<PyResult<Vec<Py<PyAny>>>>()?;
@@ -19886,8 +19999,7 @@ impl PySeries {
     /// back to `s[i]`, whose elements are numpy scalars.
     fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let column = self.inner.column();
-        let values = column
-            .values()
+        let values = materialized_values(column)
             .iter()
             .map(|value| iterated_to_py(py, column, value))
             .collect::<PyResult<Vec<_>>>()?;
@@ -23892,7 +24004,7 @@ fn column_ndarray<'py>(py: Python<'py>, column: &Column) -> PyResult<Bound<'py, 
         let buffer = pyo3::types::PyByteArray::new(py, &numpy_bytes(column, kind));
         return np.call_method1("frombuffer", (buffer, kind));
     }
-    object_ndarray(py, &np, column.values())
+    object_ndarray(py, &np, &materialized_values(column))
 }
 
 /// An object numpy array holding `values` as Python objects, filled
@@ -38966,16 +39078,23 @@ fn category_order(meta: &CategoricalMetadata, index: &Index) -> Vec<usize> {
         .row_multiindex()
         .and_then(|levels| levels.get_level_values(0).ok())
         .map_or_else(|| index.labels().to_vec(), |level| level.labels().to_vec());
-    let rank = |label: &IndexLabel| {
-        let value = index_label_to_scalar(label);
-        meta.categories
-            .iter()
-            .position(|category| *category == value)
-            .unwrap_or(usize::MAX)
-    };
     let mut positions: Vec<usize> = (0..keys.len()).collect();
-    positions.sort_by_key(|&position| rank(&keys[position]));
+    positions.sort_by_key(|&position| category_rank(meta, &keys[position]));
     positions
+}
+
+/// A group label's position among a category key's categories (past them
+/// when none is it): the category it holds, or the one labelled so - an
+/// Interval category (cut / qcut) labels its group as its text, and every
+/// group ranked last, in first-seen order (fvsao.54).
+fn category_rank(meta: &CategoricalMetadata, label: &IndexLabel) -> usize {
+    let value = index_label_to_scalar(label);
+    meta.categories
+        .iter()
+        .position(|category| {
+            *category == value || scalar_to_index_label_converter(category) == *label
+        })
+        .unwrap_or(usize::MAX)
 }
 
 /// A groupby's `.groups` (with `row_labels`: each group's row labels as an
@@ -39020,18 +39139,11 @@ impl PySeriesCategoricalAccessor {
         Ok(self.accessor()?.ordered())
     }
 
-    /// The categories as an Index, as pandas returns them.
+    /// The categories as an Index (an IntervalIndex of cut / qcut bins), as
+    /// pandas returns them.
     #[getter]
-    fn categories(&self) -> PyResult<PyIndex> {
-        let labels = self
-            .accessor()?
-            .categories()
-            .iter()
-            .map(scalar_to_index_label_converter)
-            .collect();
-        Ok(PyIndex {
-            inner: Index::new(labels),
-        })
+    fn categories(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        categories_index(py, self.accessor()?.categories())
     }
 
     /// Each row's category code, -1 where missing (pandas' are int8 for
@@ -41258,13 +41370,7 @@ impl PyGroupBy {
             if self.sort
                 && let Some(meta) = self.df.column(&self.by[0]).and_then(Column::categorical)
             {
-                ordered.sort_by_key(|(key, _)| {
-                    let value = index_label_to_scalar(key);
-                    meta.categories
-                        .iter()
-                        .position(|category| *category == value)
-                        .unwrap_or(usize::MAX)
-                });
+                ordered.sort_by_key(|(key, _)| category_rank(meta, key));
             }
         }
         Ok(ordered)
@@ -43446,13 +43552,7 @@ impl PySeriesGroupBy {
             // First seen; the unused categories (no rows) after them.
             (false, _) => groups
                 .sort_by_key(|(_, positions)| positions.first().copied().unwrap_or(usize::MAX)),
-            (true, Some(meta)) => groups.sort_by_key(|(key, _)| {
-                let value = index_label_to_scalar(key);
-                meta.categories
-                    .iter()
-                    .position(|category| *category == value)
-                    .unwrap_or(usize::MAX)
-            }),
+            (true, Some(meta)) => groups.sort_by_key(|(key, _)| category_rank(meta, key)),
             (true, None) => groups.sort_by(|a, b| a.0.cmp(&b.0)),
         }
         Ok(groups)
@@ -46573,7 +46673,7 @@ fn categorical_with_dtype(series: &Series, dtype: &Bound<'_, PyAny>) -> PyResult
     let built = match &categorical.categories {
         None => Series::from_categorical(series.name(), values.to_vec(), true),
         Some(categories) => {
-            let categories: Vec<Scalar> = categories.iter().cloned().map(Scalar::Utf8).collect();
+            let categories = categories.clone();
             let codes = values
                 .iter()
                 .map(|value| {
@@ -50623,11 +50723,13 @@ define_simple_dtype!(PyFloat32Dtype, "Float32Dtype", "Float32", "f");
 define_simple_dtype!(PyFloat64Dtype, "Float64Dtype", "Float64", "f");
 define_simple_dtype!(PyStringDtype, "StringDtype", "string", "O");
 
+/// pandas' `CategoricalDtype`. The categories are values of their own
+/// kind: they were their text, so `CategoricalDtype([1, 2])` matched no int
+/// and printed `["1", "2"]` with categories_dtype=object (fvsao.54).
 #[pyclass(name = "CategoricalDtype", from_py_object)]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PyCategoricalDtype {
-    #[pyo3(get)]
-    pub categories: Option<Vec<String>>,
+    pub categories: Option<Vec<Scalar>>,
     #[pyo3(get)]
     pub ordered: bool,
 }
@@ -50636,11 +50738,18 @@ pub struct PyCategoricalDtype {
 impl PyCategoricalDtype {
     #[new]
     #[pyo3(signature = (categories=None, ordered=false))]
-    fn new(categories: Option<Vec<String>>, ordered: Option<bool>) -> Self {
-        Self {
-            categories,
+    fn new(
+        py: Python<'_>,
+        categories: Option<&Bound<'_, PyAny>>,
+        ordered: Option<bool>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            categories: categories
+                .filter(|categories| !categories.is_none())
+                .map(|categories| py_categories(py, categories))
+                .transpose()?,
             ordered: ordered.unwrap_or(false),
-        }
+        })
     }
 
     #[getter]
@@ -50653,16 +50762,35 @@ impl PyCategoricalDtype {
         "O"
     }
 
+    /// The categories as an Index (an IntervalIndex of Intervals), or None.
+    #[getter]
+    fn categories(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.categories
+            .as_deref()
+            .map(|categories| categories_index(py, categories))
+            .transpose()
+    }
+
+    /// pandas' repr: the categories as its Index summary lists them (and
+    /// wraps them, a lone ',' line after), their dtype.
     fn __repr__(&self) -> String {
-        let ord_str = if self.ordered { "True" } else { "False" };
+        let ordered = if self.ordered { "True" } else { "False" };
         match &self.categories {
-            Some(cats) => format!(
-                "CategoricalDtype(categories={:?}, ordered={}, categories_dtype=object)",
-                cats, ord_str
-            ),
+            Some(categories) => {
+                let justify = !categories.iter().all(|c| matches!(c, Scalar::Utf8(_)));
+                let data = pandas_object_summary(
+                    "CategoricalDtype",
+                    &category_repr_items(categories),
+                    justify,
+                );
+                format!(
+                    "CategoricalDtype(categories={}, ordered={ordered}, categories_dtype={})",
+                    data.trim_end_matches([',', ' ']),
+                    categories_dtype_name(categories)
+                )
+            }
             None => format!(
-                "CategoricalDtype(categories=None, ordered={}, categories_dtype=None)",
-                ord_str
+                "CategoricalDtype(categories=None, ordered={ordered}, categories_dtype=None)"
             ),
         }
     }
@@ -51422,21 +51550,20 @@ impl PyGrouper {
 #[pyclass(name = "Interval", from_py_object)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct PyInterval {
-    #[pyo3(get)]
     pub left: f64,
-    #[pyo3(get)]
     pub right: f64,
     #[pyo3(get)]
     pub closed: String,
+    /// Integer endpoints (pandas' `interval[int64]`): `.left` / `.right` /
+    /// `.length` are ints and print without '.0' (fvsao.54: they were
+    /// floats).
+    pub int_endpoints: bool,
 }
 
-#[pymethods]
 impl PyInterval {
-    #[new]
-    #[pyo3(signature = (left, right, closed="right"))]
-    fn new(left: f64, right: f64, closed: Option<&str>) -> PyResult<Self> {
-        let closed_str = closed.unwrap_or("right");
-        if !["right", "left", "both", "neither"].contains(&closed_str) {
+    /// A float64 interval from Rust endpoints, the closed side checked.
+    fn floats(left: f64, right: f64, closed: &str) -> PyResult<Self> {
+        if !["right", "left", "both", "neither"].contains(&closed) {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "closed must be one of 'right', 'left', 'both', 'neither'",
             ));
@@ -51444,13 +51571,84 @@ impl PyInterval {
         Ok(Self {
             left,
             right,
+            closed: closed.to_owned(),
+            int_endpoints: false,
+        })
+    }
+
+    /// The Python Interval of `interval`, its endpoint type kept.
+    fn of(interval: &fp_types::Interval) -> Self {
+        Self {
+            left: interval.left,
+            right: interval.right,
+            closed: interval.closed.to_string(),
+            int_endpoints: interval.subtype == fp_types::IntervalSubtype::Int64,
+        }
+    }
+
+    /// An endpoint as Python holds it: an int for integer endpoints.
+    #[allow(clippy::cast_possible_truncation)] // whole numbers by construction
+    fn endpoint<'py>(&self, py: Python<'py>, value: f64) -> PyResult<Bound<'py, PyAny>> {
+        if self.int_endpoints {
+            (value as i64).into_bound_py_any(py)
+        } else {
+            value.into_bound_py_any(py)
+        }
+    }
+
+    /// An endpoint's text: an int's digits, a float as Python's `repr`.
+    #[allow(clippy::cast_possible_truncation)] // whole numbers by construction
+    fn endpoint_text(&self, value: f64) -> String {
+        if self.int_endpoints {
+            format!("{}", value as i64)
+        } else {
+            fp_types::Scalar::Float64(value).python_repr()
+        }
+    }
+}
+
+#[pymethods]
+impl PyInterval {
+    /// Integer endpoints make an int64 interval (`Interval(0, 3)`); any
+    /// float one a float64 interval, as pandas.
+    #[new]
+    #[pyo3(signature = (left, right, closed="right"))]
+    fn new(
+        left: &Bound<'_, PyAny>,
+        right: &Bound<'_, PyAny>,
+        closed: Option<&str>,
+    ) -> PyResult<Self> {
+        let closed_str = closed.unwrap_or("right");
+        if !["right", "left", "both", "neither"].contains(&closed_str) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "closed must be one of 'right', 'left', 'both', 'neither'",
+            ));
+        }
+        let integer = |value: &Bound<'_, PyAny>| {
+            value.is_instance_of::<pyo3::types::PyInt>()
+                && !value.is_instance_of::<pyo3::types::PyBool>()
+        };
+        Ok(Self {
+            left: left.extract::<f64>()?,
+            right: right.extract::<f64>()?,
             closed: closed_str.to_string(),
+            int_endpoints: integer(left) && integer(right),
         })
     }
 
     #[getter]
-    fn length(&self) -> f64 {
-        self.right - self.left
+    fn left<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.endpoint(py, self.left)
+    }
+
+    #[getter]
+    fn right<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.endpoint(py, self.right)
+    }
+
+    #[getter]
+    fn length<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.endpoint(py, self.right - self.left)
     }
 
     #[getter]
@@ -51531,10 +51729,15 @@ impl PyInterval {
         }
     }
 
+    /// pandas' repr: `Interval(0, 3, closed='right')` for integer
+    /// endpoints, `Interval(0.0, 3.0, ...)` for float ones (a float's '.0'
+    /// was dropped).
     fn __repr__(&self) -> String {
         format!(
             "Interval({}, {}, closed='{}')",
-            self.left, self.right, self.closed
+            self.endpoint_text(self.left),
+            self.endpoint_text(self.right),
+            self.closed
         )
     }
 
@@ -51545,7 +51748,11 @@ impl PyInterval {
             "both" => ('[', ']'),
             _ => ('(', ')'),
         };
-        format!("{}{}, {}{}", l_bracket, self.left, self.right, r_bracket)
+        format!(
+            "{l_bracket}{}, {}{r_bracket}",
+            self.endpoint_text(self.left),
+            self.endpoint_text(self.right)
+        )
     }
 }
 
@@ -51597,7 +51804,7 @@ impl PyIntervalIndex {
         }
         let mut intervals = Vec::with_capacity(breaks.len() - 1);
         for i in 0..(breaks.len() - 1) {
-            intervals.push(PyInterval::new(breaks[i], breaks[i + 1], Some(closed_str))?);
+            intervals.push(PyInterval::floats(breaks[i], breaks[i + 1], closed_str)?);
         }
         Ok(Self {
             intervals,
@@ -51616,7 +51823,7 @@ impl PyIntervalIndex {
         let closed_str = closed.unwrap_or("right");
         let mut intervals = Vec::with_capacity(data.len());
         for (left, right) in data {
-            intervals.push(PyInterval::new(left, right, Some(closed_str))?);
+            intervals.push(PyInterval::floats(left, right, closed_str)?);
         }
         Ok(Self {
             intervals,
@@ -51641,7 +51848,7 @@ impl PyIntervalIndex {
         }
         let mut intervals = Vec::with_capacity(left.len());
         for (l, r) in left.into_iter().zip(right) {
-            intervals.push(PyInterval::new(l, r, Some(closed_str))?);
+            intervals.push(PyInterval::floats(l, r, closed_str)?);
         }
         Ok(Self {
             intervals,
@@ -51674,8 +51881,14 @@ impl PyIntervalIndex {
         Ok(self.intervals[pos as usize].clone())
     }
 
+    /// pandas' repr: the intervals as its Index summary lists them (right-
+    /// justified once they wrap), then dtype and name. It printed the Rust
+    /// structs.
     fn __repr__(&self) -> String {
-        format!("IntervalIndex({:?})", self.intervals)
+        let items: Vec<String> = self.intervals.iter().map(PyInterval::__str__).collect();
+        let mut attrs = vec![format!("dtype='{}'", self.interval_dtype().__repr__())];
+        attrs.extend(self.name.as_ref().map(|name| format!("name='{name}'")));
+        pandas_index_text("IntervalIndex", &items, true, attrs)
     }
 
     #[getter]
@@ -51711,9 +51924,11 @@ impl PyIntervalIndex {
         self.to_rust().is_non_overlapping_monotonic()
     }
 
+    /// pandas' `interval[int64, right]`: int64 when every endpoint is an
+    /// int (it was always float64, as text).
     #[getter]
-    fn dtype(&self) -> String {
-        self.to_rust().dtype()
+    fn dtype(&self) -> PyIntervalDtype {
+        self.interval_dtype()
     }
 
     #[getter]
@@ -51736,7 +51951,7 @@ impl PyIntervalIndex {
         let labels = self
             .intervals
             .iter()
-            .map(|iv| IndexLabel::Float64(fp_index::OrderedF64(iv.left)))
+            .map(|iv| self.endpoint_label(iv.left))
             .collect();
         PyIndex {
             inner: Index::new(labels),
@@ -51748,7 +51963,7 @@ impl PyIntervalIndex {
         let labels = self
             .intervals
             .iter()
-            .map(|iv| IndexLabel::Float64(fp_index::OrderedF64(iv.right)))
+            .map(|iv| self.endpoint_label(iv.right))
             .collect();
         PyIndex {
             inner: Index::new(labels),
@@ -51825,7 +52040,9 @@ impl PyIntervalIndex {
     fn set_closed(&self, closed: &str) -> PyResult<Self> {
         let mut intervals = Vec::with_capacity(self.intervals.len());
         for iv in &self.intervals {
-            intervals.push(PyInterval::new(iv.left, iv.right, Some(closed))?);
+            let mut next = PyInterval::floats(iv.left, iv.right, closed)?;
+            next.int_endpoints = iv.int_endpoints;
+            intervals.push(next);
         }
         Ok(Self {
             intervals,
@@ -51852,6 +52069,31 @@ impl PyIntervalIndex {
 }
 
 impl PyIntervalIndex {
+    /// pandas' dtype: `interval[int64, <closed>]` when every endpoint is an
+    /// int (an empty index too), else float64.
+    fn interval_dtype(&self) -> PyIntervalDtype {
+        let subtype = if self.intervals.iter().all(|iv| iv.int_endpoints) {
+            "int64"
+        } else {
+            "float64"
+        };
+        PyIntervalDtype {
+            subtype: Some(subtype.to_owned()),
+            closed: Some(self.closed()),
+        }
+    }
+
+    /// An endpoint as the `left` / `right` Index holds it: an int for the
+    /// int64 subtype.
+    #[allow(clippy::cast_possible_truncation)] // whole numbers when int64
+    fn endpoint_label(&self, value: f64) -> IndexLabel {
+        if self.intervals.iter().all(|iv| iv.int_endpoints) {
+            IndexLabel::Int64(value as i64)
+        } else {
+            IndexLabel::Float64(fp_index::OrderedF64(value))
+        }
+    }
+
     pub fn to_rust(&self) -> fp_index::IntervalIndex {
         let values: Vec<fp_types::Interval> = self
             .intervals
@@ -51873,15 +52115,7 @@ impl PyIntervalIndex {
     }
 
     pub fn from_rust(rust_idx: &fp_index::IntervalIndex) -> Self {
-        let intervals = rust_idx
-            .values()
-            .iter()
-            .map(|iv| PyInterval {
-                left: iv.left,
-                right: iv.right,
-                closed: iv.closed.to_string(),
-            })
-            .collect();
+        let intervals = rust_idx.values().iter().map(PyInterval::of).collect();
         Self {
             intervals,
             name: rust_idx.name().map(str::to_string),
@@ -51987,7 +52221,7 @@ impl PyCategorical {
     fn dtype(&self) -> PyCategoricalDtype {
         let meta = self.meta();
         PyCategoricalDtype {
-            categories: Some(meta.categories.iter().map(ToString::to_string).collect()),
+            categories: Some(meta.categories.clone()),
             ordered: meta.ordered,
         }
     }
@@ -53446,7 +53680,7 @@ pub fn interval_range(
         _ => first + step * i as f64,
     };
     for i in 0..count {
-        intervals.push(PyInterval::new(edge(i), edge(i + 1), Some(closed))?);
+        intervals.push(PyInterval::floats(edge(i), edge(i + 1), closed)?);
     }
     Ok(PyIntervalIndex {
         intervals,
@@ -58794,11 +59028,13 @@ mod tests {
                     left: 0.0,
                     right: 1.5,
                     closed: "right".to_string(),
+                    int_endpoints: false,
                 },
                 PyInterval {
                     left: 1.5,
                     right: 3.0,
                     closed: "right".to_string(),
+                    int_endpoints: false,
                 },
             ],
             name: Some("iv_idx".to_string()),
@@ -58810,7 +59046,8 @@ mod tests {
         assert!(pii.open_left());
         assert!(!pii.open_right());
         assert!(pii.is_non_overlapping_monotonic());
-        assert_eq!(pii.dtype(), "interval[float64, right]");
+        // TEST-CHANGE (fvsao.54): an IntervalDtype, was its text.
+        assert_eq!(pii.dtype().__repr__(), "interval[float64, right]");
         assert!(pii.is_unique());
         assert!(pii.is_monotonic_increasing());
         assert!(!pii.is_monotonic_decreasing());
@@ -58839,6 +59076,7 @@ mod tests {
             left: 1.0,
             right: 2.0,
             closed: "both".to_string(),
+            int_endpoints: false,
         };
         assert_eq!(pii.overlaps(&other), vec![true, true]);
 

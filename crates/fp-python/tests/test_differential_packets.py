@@ -11043,3 +11043,74 @@ def _json_dates_outcome(m: Any, run: Any) -> Any:
 def test_to_json_date_format_and_unit_like_pandas(case: str) -> None:
     run = _JSON_DATE_CASES[case]
     assert _json_dates_outcome(fpd, run) == _json_dates_outcome(pd, run), case
+
+
+# br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.54: cut / qcut values
+# are pandas Intervals - interval[int64] for integer bins, '(0, 5]' - in an
+# ordered categorical whose categories are an IntervalIndex; they were the
+# intervals' text. Once a run of them holds a NaN they materialize as float64
+# intervals ('(20.0, 50.0]'), as pandas' IntervalIndex.take makes them.
+def _cut_ages(m: Any) -> Any:
+    return m.Series([25, 3, 7, 30, 61, None], name="age")
+
+
+def _cut_frame(m: Any) -> Any:
+    return m.DataFrame({"age": [25, 3, 7, 30, 61, 45], "k": ["a", "b", "a", "b", "a", "a"], "v": [1, 2, 3, 4, 5, 6]})
+
+
+_CUT_EDGES = [0, 5, 10, 20, 50, 100]
+_CUT_INTERVAL_CASES = {
+    "a value is an Interval": lambda m: (type(m.cut(_cut_ages(m), _CUT_EDGES).iloc[0]).__name__, repr(m.cut(_cut_ages(m), _CUT_EDGES).iloc[0])),
+    "a float bin's value": lambda m: repr(m.cut(_cut_ages(m), 3).iloc[1]),
+    "a qcut value": lambda m: repr(m.qcut(m.Series([1.0, 2, 3, 4]), 2).iloc[0]),
+    "right=False value": lambda m: repr(m.cut(_cut_ages(m), _CUT_EDGES, right=False).iloc[0]),
+    "endpoints": lambda m: (lambda iv: (iv.left, iv.right, iv.mid, iv.length, iv.closed))(m.cut(_cut_ages(m), _CUT_EDGES).iloc[0]),
+    "repr, int bins, a NaN": lambda m: repr(m.cut(_cut_ages(m), _CUT_EDGES)),
+    "repr, int bins": lambda m: repr(m.cut(m.Series([25, 3, 7]), [0, 5, 10, 50])),
+    "repr, equal widths": lambda m: repr(m.cut(_cut_ages(m), 3)),
+    "repr, float bins": lambda m: repr(m.cut(_cut_ages(m), [0.0, 10.5, 100.0])),
+    "repr, right=False": lambda m: repr(m.cut(_cut_ages(m), _CUT_EDGES, right=False)),
+    "repr, include_lowest": lambda m: repr(m.cut(m.Series([0, 5, 7]), [0, 5, 10], include_lowest=True)),
+    "include_lowest bins only the first edge": lambda m: repr(m.cut(m.Series([-0.0005, 0.0, 5.0]), [0, 5, 10], include_lowest=True)),
+    "repr, qcut": lambda m: repr(m.qcut(m.Series([1.0, 2, 3, 4, 5, 6, 7, 8]), 4)),
+    "repr, qcut list": lambda m: repr(m.qcut(m.Series([1.0, 2, 3, 4, 5]), [0, 0.5, 1])),
+    "dtype, int bins": lambda m: repr(m.cut(_cut_ages(m), _CUT_EDGES).dtype),
+    "dtype, qcut": lambda m: repr(m.qcut(m.Series([1.0, 2, 3, 4]), 2).dtype),
+    "dtype, twelve bins wrap": lambda m: repr(m.cut(m.Series(range(40)), 12).dtype),
+    "categories, int bins": lambda m: repr(m.cut(_cut_ages(m), _CUT_EDGES).cat.categories),
+    "categories, qcut": lambda m: repr(m.qcut(m.Series([1.0, 2, 3, 4]), 2).cat.categories),
+    "categories, twelve bins wrap": lambda m: repr(m.cut(m.Series(range(40)), 12).cat.categories),
+    "codes": lambda m: m.cut(_cut_ages(m), _CUT_EDGES).cat.codes.tolist(),
+    "tolist, a NaN": lambda m: [repr(v) for v in m.cut(_cut_ages(m), _CUT_EDGES).tolist()],
+    "tolist": lambda m: [repr(v) for v in m.cut(m.Series([25, 3]), [0, 5, 50]).tolist()],
+    "iteration, a NaN": lambda m: [repr(v) for v in m.cut(_cut_ages(m), _CUT_EDGES)],
+    "to_numpy, a NaN": lambda m: [repr(v) for v in m.cut(_cut_ages(m), _CUT_EDGES).to_numpy()],
+    "== an Interval": lambda m: (m.cut(_cut_ages(m), _CUT_EDGES) == m.Interval(20, 50)).tolist(),
+    "astype(str)": lambda m: m.cut(m.Series([25, 3, 7]), _CUT_EDGES).astype(str).tolist(),
+    "value_counts": lambda m: repr(m.cut(_cut_ages(m), _CUT_EDGES).value_counts()),
+    "sort_values": lambda m: repr(m.cut(_cut_ages(m), _CUT_EDGES).sort_values()),
+    "groupby a cut Series": lambda m: repr(_cut_frame(m).groupby(m.cut(_cut_frame(m)["age"], _CUT_EDGES), observed=True)["v"].sum()),
+    "groupby a cut Series, unused bins": lambda m: repr(_cut_frame(m).groupby(m.cut(_cut_frame(m)["age"], _CUT_EDGES), observed=False)["v"].sum()),
+    "groupby a cut column and a key": lambda m: repr(_cut_frame(m).assign(b=lambda d: m.cut(d["age"], _CUT_EDGES)).groupby(["b", "k"], observed=True)["v"].sum()),
+    "crosstab": lambda m: repr(m.crosstab(m.cut(_cut_frame(m)["age"], [0, 20, 100]), _cut_frame(m)["k"])),
+    "a frame's cut column, a NaN": lambda m: repr(m.DataFrame({"b": m.cut(_cut_ages(m), _CUT_EDGES)})),
+    "CategoricalDtype of ints": lambda m: repr(m.Series([1, 2, 3]).astype(m.CategoricalDtype([1, 2]))),
+    "CategoricalDtype repr": lambda m: repr(m.CategoricalDtype(["x", "y"], ordered=True)),
+    "CategoricalDtype repr wraps": lambda m: repr(m.CategoricalDtype(list(range(30)))),
+    # NEGATIVE: labels= names the bins with the labels, not Intervals.
+    "labels are text": lambda m: (type(m.cut(_cut_ages(m), [0, 18, 65, 100], labels=["kid", "adult", "senior"]).iloc[0]).__name__, repr(m.cut(_cut_ages(m), [0, 18, 65, 100], labels=["kid", "adult", "senior"]))),
+}
+
+
+def _cut_interval_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_CUT_INTERVAL_CASES))
+def test_cut_and_qcut_values_are_intervals_like_pandas(case: str) -> None:
+    run = _CUT_INTERVAL_CASES[case]
+    assert _cut_interval_outcome(fpd, run) == _cut_interval_outcome(pd, run), case

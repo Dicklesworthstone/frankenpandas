@@ -2063,6 +2063,11 @@ impl Scalar {
             // inside one column and a uniform gather cannot reproduce the mix,
             // which is a storage-model question. (br-frankenpandas-xwxci)
             _ if self.is_missing() && other.is_missing() => true,
+            // An Interval's `==` ignores its subtype (pandas' Interval(0, 3)
+            // == Interval(0.0, 3.0)), but interval[int64] and
+            // interval[float64] are different pandas dtypes - '(0, 3]' and
+            // '(0.0, 3.0]' (fvsao.54).
+            (Self::Interval(a), Self::Interval(b)) => a == b && a.subtype == b.subtype,
             _ => self == other,
         }
     }
@@ -8125,17 +8130,56 @@ impl std::fmt::Display for IntervalClosed {
     }
 }
 
+/// The type of an interval's endpoints, pandas' `interval[int64]` or
+/// `interval[float64]` subtype: integer endpoints print without '.0'
+/// (`pd.cut(s, [0, 3, 6])` is `(0, 3]`, where float edges are `(0.0, 3.0]`).
+/// The endpoints themselves are `f64` either way (fvsao.54).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntervalSubtype {
+    #[default]
+    Float64,
+    Int64,
+}
+
+impl IntervalSubtype {
+    /// Whether this is the float subtype (serde skips it, the default).
+    #[must_use]
+    pub const fn is_float(&self) -> bool {
+        matches!(self, Self::Float64)
+    }
+
+    /// The subtype's dtype name ('int64' / 'float64').
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Float64 => "float64",
+            Self::Int64 => "int64",
+        }
+    }
+}
+
 /// A bounded numeric interval between two `f64` endpoints.
 ///
 /// Matches `pd.Interval(left, right, closed)` on the numeric-subtype path.
 /// Accessors match pandas: `.left`, `.right`, `.closed`, `.length`, `.mid`,
-/// `.contains`, `.is_empty`, `.overlaps`.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// `.contains`, `.is_empty`, `.overlaps`. Equality ignores the `subtype`, as
+/// pandas' `Interval(0, 3) == Interval(0.0, 3.0)`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Interval {
     pub left: f64,
     pub right: f64,
     #[serde(default)]
     pub closed: IntervalClosed,
+    /// The endpoints' type as pandas reports and prints it.
+    #[serde(default, skip_serializing_if = "IntervalSubtype::is_float")]
+    pub subtype: IntervalSubtype,
+}
+
+impl PartialEq for Interval {
+    fn eq(&self, other: &Self) -> bool {
+        self.left == other.left && self.right == other.right && self.closed == other.closed
+    }
 }
 
 impl Interval {
@@ -8147,6 +8191,21 @@ impl Interval {
             left,
             right,
             closed,
+            subtype: IntervalSubtype::Float64,
+        }
+    }
+
+    /// This interval with integer endpoints (pandas' `interval[int64]`)
+    /// when both are whole numbers; unchanged otherwise.
+    #[must_use]
+    pub fn with_int_endpoints(self) -> Self {
+        if self.left.fract() == 0.0 && self.right.fract() == 0.0 {
+            Self {
+                subtype: IntervalSubtype::Int64,
+                ..self
+            }
+        } else {
+            self
         }
     }
 
@@ -8293,20 +8352,26 @@ impl Interval {
 }
 
 impl std::fmt::Display for Interval {
-    /// Matches `str(pd.Interval(...))` for the `interval[float64]` subtype, which
-    /// is the only subtype FrankenPandas stores (f64 endpoints): the endpoints
-    /// render with Python `str(float)` semantics, so whole numbers KEEP ".0"
+    /// Matches `str(pd.Interval(...))`: `interval[float64]` endpoints render
+    /// with Python `str(float)` semantics, so whole numbers KEEP ".0"
     /// (`str(pd.Interval(0.0, 5.0, 'right'))` is `"(0.0, 5.0]"`, not `"(0, 5]"`).
     /// Verified vs pandas 2.2.3 across whole/fractional/negative/scientific
-    /// endpoints. (br-frankenpandas-5xw1b)
+    /// endpoints. (br-frankenpandas-5xw1b) The `interval[int64]` subtype
+    /// prints integers (`"(0, 5]"`).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let left_bracket = if self.closed.left_closed() { '[' } else { '(' };
         let right_bracket = if self.closed.right_closed() { ']' } else { ')' };
+        // The int64 subtype prints its endpoints as integers ('(0, 3]').
+        #[allow(clippy::cast_possible_truncation)] // whole numbers, checked
+        let endpoint = |value: f64| match self.subtype {
+            IntervalSubtype::Int64 if value.fract() == 0.0 => format!("{}", value as i64),
+            _ => float_to_string_for_astype(value),
+        };
         write!(
             f,
             "{left_bracket}{}, {}{right_bracket}",
-            float_to_string_for_astype(self.left),
-            float_to_string_for_astype(self.right)
+            endpoint(self.left),
+            endpoint(self.right)
         )
     }
 }

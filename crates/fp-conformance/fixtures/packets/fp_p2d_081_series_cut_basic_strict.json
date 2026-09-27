@@ -5,37 +5,102 @@
   "operation": "series_cut",
   "fixture_provenance": {
     "pandas_version": "2.2.3",
-    "oracle_script_sha256": "51158fcced248f019797cb4a6c9df12d1d5b3ea8eebdc0ad1413754d49b2ab13",
-    "generated_at": "2026-09-01T06:09:56Z"
+    "oracle_script_sha256": "5d7d5eb9bd4dc0432ae5d951e87b237647472a9b7bdeffd121e3f1c15c942af4",
+    "generated_at": "2026-09-27T13:51:32Z"
   },
   "cut_bins": 2,
   "left": {
     "name": "vals",
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
     "values": [
-      { "kind": "float64", "value": 1.0 },
-      { "kind": "float64", "value": 2.0 },
-      { "kind": "float64", "value": 3.0 },
-      { "kind": "float64", "value": 4.0 }
+      {
+        "kind": "float64",
+        "value": 1.0
+      },
+      {
+        "kind": "float64",
+        "value": 2.0
+      },
+      {
+        "kind": "float64",
+        "value": 3.0
+      },
+      {
+        "kind": "float64",
+        "value": 4.0
+      }
     ]
   },
   "expected_series": {
     "index": [
-      { "kind": "int64", "value": 0 },
-      { "kind": "int64", "value": 1 },
-      { "kind": "int64", "value": 2 },
-      { "kind": "int64", "value": 3 }
+      {
+        "kind": "int64",
+        "value": 0
+      },
+      {
+        "kind": "int64",
+        "value": 1
+      },
+      {
+        "kind": "int64",
+        "value": 2
+      },
+      {
+        "kind": "int64",
+        "value": 3
+      }
     ],
     "values": [
-      { "kind": "utf8", "value": "(0.997, 2.5]" },
-      { "kind": "utf8", "value": "(0.997, 2.5]" },
-      { "kind": "utf8", "value": "(2.5, 4.0]" },
-      { "kind": "utf8", "value": "(2.5, 4.0]" }
-    ]
+      {
+        "kind": "interval",
+        "value": {
+          "left": 0.997,
+          "right": 2.5,
+          "closed": "right"
+        }
+      },
+      {
+        "kind": "interval",
+        "value": {
+          "left": 0.997,
+          "right": 2.5,
+          "closed": "right"
+        }
+      },
+      {
+        "kind": "interval",
+        "value": {
+          "left": 2.5,
+          "right": 4.0,
+          "closed": "right"
+        }
+      },
+      {
+        "kind": "interval",
+        "value": {
+          "left": 2.5,
+          "right": 4.0,
+          "closed": "right"
+        }
+      }
+    ],
+    "name": "vals"
   }
 }

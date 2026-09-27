@@ -41892,10 +41892,14 @@ impl SeriesGroupBy<'_> {
                     Scalar::Object(object) => IndexLabel::Object(object.clone()),
                     // Period/Interval still have NO IndexLabel variant — a
                     // representation gap (no6s4 / 00ze3-class), not a mapping
-                    // bug. The debug rendering keeps distinct groups DISTINCT;
-                    // the old `"NaN"` collapse gave every unlisted key the
-                    // SAME label. Missing values never reach here (skipped
-                    // above), so this is not the null path.
+                    // bug. They label as pandas prints them ('2024-01',
+                    // '(0, 3]' - a groupby over pd.cut; the debug rendering
+                    // was 'Interval(Interval { .. })', fvsao.54): distinct
+                    // groups stay DISTINCT; the old `"NaN"` collapse gave
+                    // every unlisted key the SAME label. Missing values never
+                    // reach here (skipped above), so this is not the null path.
+                    Scalar::Period(period) => IndexLabel::Utf8(period.calendar_string()),
+                    Scalar::Interval(interval) => IndexLabel::Utf8(interval.to_string()),
                     other => IndexLabel::Utf8(format!("{other:?}")),
                 };
                 order.push(lbl);
@@ -62301,22 +62305,6 @@ fn cut_frac_digits(x: f64, precision: i32) -> i32 {
     }
 }
 
-/// A rounded cut/qcut bin edge as pandas' Interval repr prints it: the
-/// shortest round-trip float form, always with a trailing `.0` for whole
-/// numbers (pandas prints `4.0`, not `4`).
-fn cut_edge_text(rounded: f64) -> String {
-    let s = format!("{rounded}");
-    if s.contains('.')
-        || s.contains('e')
-        || s.contains('E')
-        || !s.bytes().any(|b| b.is_ascii_digit())
-    {
-        s
-    } else {
-        format!("{s}.0")
-    }
-}
-
 /// pandas' `_infer_precision`: the smallest precision from 3 up at which the
 /// rounded edges are all distinct (3 when none is).
 fn cut_infer_precision(edges: &[f64]) -> i32 {
@@ -62333,17 +62321,18 @@ fn cut_infer_precision(edges: &[f64]) -> i32 {
         .unwrap_or(3)
 }
 
-/// pandas' `_format_labels` for the intervals between `edges`: each edge
-/// rounded at the inferred precision (a fixed 3 printed [0.5, 0.5) for the
-/// bins pandas shows as [0.5, 0.5005)); right-closed with `include_lowest`,
-/// the first lowered by 10^-precision; `integer_edges` print as integers
-/// unless that lowering makes the breaks fractional.
-fn cut_interval_labels(
+/// pandas' `_format_labels` intervals between `edges` - the Intervals its
+/// cut / qcut categories are: each edge rounded at the inferred precision (a
+/// fixed 3 printed [0.5, 0.5) for the bins pandas shows as [0.5, 0.5005));
+/// right-closed with `include_lowest`, the first lowered by 10^-precision;
+/// `integer_edges` make int64 intervals ('(0, 3]') unless that lowering
+/// makes the breaks fractional. They were the intervals' text (fvsao.54).
+fn cut_intervals(
     edges: &[f64],
     right: bool,
     include_lowest: bool,
     integer_edges: bool,
-) -> Vec<String> {
+) -> Vec<Interval> {
     let precision = cut_infer_precision(edges);
     let mut breaks: Vec<f64> = edges
         .iter()
@@ -62357,24 +62346,45 @@ fn cut_interval_labels(
         let step = 10f64.powi(digits);
         *first = ((*first - 10f64.powi(-precision)) * step).round() / step;
     }
-    let text = |edge: f64| {
-        if integer_edges && !lowered {
-            format!("{}", edge as i64)
-        } else {
-            cut_edge_text(edge)
-        }
+    let closed = if right {
+        IntervalClosed::Right
+    } else {
+        IntervalClosed::Left
     };
     breaks
         .windows(2)
         .map(|pair| {
-            let (left, right_edge) = (text(pair[0]), text(pair[1]));
-            if right {
-                format!("({left}, {right_edge}]")
+            let interval = Interval::new(pair[0], pair[1], closed);
+            if integer_edges && !lowered {
+                interval.with_int_endpoints()
             } else {
-                format!("[{left}, {right_edge})")
+                interval
             }
         })
         .collect()
+}
+
+/// The categories cut / qcut give their bins: pandas' Intervals, or the
+/// caller's labels.
+enum BinCategories {
+    Intervals(Vec<Interval>),
+    Labels(Vec<String>),
+}
+
+impl BinCategories {
+    fn len(&self) -> usize {
+        match self {
+            Self::Intervals(intervals) => intervals.len(),
+            Self::Labels(labels) => labels.len(),
+        }
+    }
+
+    fn scalar(&self, bin: usize) -> Scalar {
+        match self {
+            Self::Intervals(intervals) => Scalar::Interval(intervals[bin]),
+            Self::Labels(labels) => Scalar::Utf8(labels[bin].clone()),
+        }
+    }
 }
 
 /// pandas' equal-width bins for `pd.cut(x, bins)` (right-closed) over
@@ -62382,8 +62392,8 @@ fn cut_interval_labels(
 /// the first edge lowered by 0.1% of the range, or, for one repeated
 /// value, the range padded by 0.1% of it (0.001 at zero) - the constant
 /// case printed (5.0, 5.0]. Returns the base and width a value's bin is
-/// computed from (`ceil((v - base) / width) - 1`, clamped) and the labels.
-fn cut_equal_width(min_val: f64, max_val: f64, bins: usize) -> (f64, f64, Vec<String>) {
+/// computed from (`ceil((v - base) / width) - 1`, clamped) and the bins.
+fn cut_equal_width(min_val: f64, max_val: f64, bins: usize) -> (f64, f64, BinCategories) {
     let constant = min_val == max_val;
     let pad = |v: f64| if v == 0.0 { 0.001 } else { 0.001 * v.abs() };
     let (lo, hi) = if constant {
@@ -62397,23 +62407,61 @@ fn cut_equal_width(min_val: f64, max_val: f64, bins: usize) -> (f64, f64, Vec<St
     if !constant {
         edges[0] -= 0.001 * (hi - lo);
     }
-    (lo, width, cut_interval_labels(&edges, true, false, false))
+    (
+        lo,
+        width,
+        BinCategories::Intervals(cut_intervals(&edges, true, false, false)),
+    )
 }
 
-/// A cut/qcut result as pandas returns it: an ordered categorical whose
-/// categories are every bin label in bin order, empty bins included, so sorts,
-/// groupby and value_counts follow the bins rather than the label text
-/// (`"(10, 20]"` sorted before `"(5, 10]"` as a plain string column). The
-/// binned values keep their backing (the contiguous-Utf8 fast paths stay lazy).
+/// A cut/qcut result as pandas returns it from each value's bin (`None`:
+/// missing or outside the bins, NaN): an ordered categorical whose categories
+/// are every bin in bin order, empty bins included, so sorts, groupby and
+/// value_counts follow the bins rather than the label text (`"(10, 20]"`
+/// sorted before `"(5, 10]"` as a plain string column). Intervals keep each
+/// row's bin code (a lazy codes backing, as pandas' Categorical: a Scalar per
+/// row cost 1.6x the old label text); custom labels in every bin emit one
+/// contiguous Utf8 buffer (lazy).
 fn binned_categorical(
     series: &Series,
-    binned: Column,
-    bin_labels: &[String],
+    bins: impl Iterator<Item = Option<usize>>,
+    categories: &BinCategories,
 ) -> Result<Series, FrameError> {
+    let binned = match categories {
+        BinCategories::Intervals(intervals) => Column::from_category_codes(
+            DType::Interval,
+            bins.map(|bin| {
+                bin.and_then(|bin| u32::try_from(bin).ok())
+                    .unwrap_or(u32::MAX)
+            })
+            .collect(),
+            intervals.iter().copied().map(Scalar::Interval).collect(),
+        ),
+        BinCategories::Labels(labels) => {
+            let bins: Vec<Option<usize>> = bins.collect();
+            if bins.iter().all(Option::is_some) {
+                let mut bytes: Vec<u8> = Vec::with_capacity(bins.len() * 12);
+                let mut offsets: Vec<usize> = Vec::with_capacity(bins.len() + 1);
+                offsets.push(0);
+                for bin in bins.into_iter().flatten() {
+                    bytes.extend_from_slice(labels[bin].as_bytes());
+                    offsets.push(bytes.len());
+                }
+                Column::from_utf8_contiguous(bytes, offsets)
+            } else {
+                Column::from_values(
+                    bins.into_iter()
+                        .map(|bin| {
+                            bin.map_or(Scalar::Null(NullKind::NaN), |bin| categories.scalar(bin))
+                        })
+                        .collect(),
+                )?
+            }
+        }
+    };
     let meta = CategoricalMetadata::new(
-        bin_labels
-            .iter()
-            .map(|label| Scalar::Utf8(label.clone()))
+        (0..categories.len())
+            .map(|bin| categories.scalar(bin))
             .collect(),
         true,
     );
@@ -62709,11 +62757,9 @@ pub fn cut(series: &Series, bins: usize) -> Result<Series, FrameError> {
     // `valid` copy, and (crucially for the Int64 case) NO per-value `.values()`
     // Scalar materialization (cut_i64 boxed all n values into Scalars first). One
     // pass computes min/max (folding each element as f64, exactly as the generic
-    // arm's `to_f64()` fold), then emits the pre-formatted interval labels into a
-    // single contiguous byte buffer. Bit-identical to the generic all-valid arm:
-    // same min/max, same edges/labels, same `ceil-1`/clamp bin index, same
-    // contiguous-Utf8 output. Nullable / NaN-bearing / non-numeric columns keep
-    // the general Scalar path below.
+    // arm's `to_f64()` fold), then bins each value. Bit-identical to the generic
+    // all-valid arm: same min/max, same edges, same `ceil-1`/clamp bin index.
+    // Nullable / NaN-bearing / non-numeric columns keep the general path below.
     enum CutTyped<'a> {
         F64(&'a [f64]),
         I64(&'a [i64]),
@@ -62738,36 +62784,22 @@ pub fn cut(series: &Series, bins: usize) -> Result<Series, FrameError> {
                         .fold(f64::NEG_INFINITY, f64::max),
                 ),
             };
-            let (base, width, bin_labels) = cut_equal_width(min_val, max_val, bins);
-            let bin_idx = |f: f64| -> usize {
-                if width == 0.0 {
+            let (base, width, categories) = cut_equal_width(min_val, max_val, bins);
+            let bin_idx = |f: f64| -> Option<usize> {
+                Some(if width == 0.0 {
                     0
                 } else {
                     (((f - base) / width).ceil() as i64 - 1).clamp(0, (bins as i64) - 1) as usize
-                }
+                })
             };
-            let mut bytes: Vec<u8> = Vec::with_capacity(n * 12);
-            let mut offsets: Vec<usize> = Vec::with_capacity(n + 1);
-            offsets.push(0);
-            match &ts {
+            return match &ts {
                 CutTyped::F64(d) => {
-                    for &f in *d {
-                        bytes.extend_from_slice(bin_labels[bin_idx(f)].as_bytes());
-                        offsets.push(bytes.len());
-                    }
+                    binned_categorical(series, d.iter().map(|&f| bin_idx(f)), &categories)
                 }
                 CutTyped::I64(d) => {
-                    for &x in *d {
-                        bytes.extend_from_slice(bin_labels[bin_idx(x as f64)].as_bytes());
-                        offsets.push(bytes.len());
-                    }
+                    binned_categorical(series, d.iter().map(|&x| bin_idx(x as f64)), &categories)
                 }
-            }
-            return binned_categorical(
-                series,
-                Column::from_utf8_contiguous(bytes, offsets),
-                &bin_labels,
-            );
+            };
         }
     }
 
@@ -62811,86 +62843,55 @@ pub fn cut(series: &Series, bins: usize) -> Result<Series, FrameError> {
     let min_val = valid.iter().copied().fold(f64::INFINITY, f64::min);
     let max_val = valid.iter().copied().fold(f64::NEG_INFINITY, f64::max);
 
-    // Per br-frankenpandas-21a14: pre-format bin labels ONCE (one per bin)
-    // and compute bucket index in O(1) per value. Was O(n × bins) inner
-    // scan plus n redundant String allocations. pandas' edges, padding and
-    // label precision: see cut_equal_width (br-frankenpandas-4rfy1).
-    let (base, width, bin_labels) = cut_equal_width(min_val, max_val, bins);
+    // Per br-frankenpandas-21a14: build the bins ONCE and compute bucket
+    // index in O(1) per value. Was O(n × bins) inner scan plus n redundant
+    // String allocations. pandas' edges, padding and label precision: see
+    // cut_equal_width (br-frankenpandas-4rfy1).
+    let (base, width, categories) = cut_equal_width(min_val, max_val, bins);
 
-    // FAST PATH (all-valid): emit the pre-formatted bin labels into ONE
-    // contiguous byte buffer instead of n Scalar::Utf8(label.clone()) +
-    // from_values. Bit-identical (same bin_idx + same bin_labels; all-valid =>
-    // no null-kind question). Missing values fall through to the Scalar path.
-    if floats.iter().all(Option::is_some) {
-        let mut bytes: Vec<u8> = Vec::with_capacity(floats.len() * 12);
-        let mut offsets: Vec<usize> = Vec::with_capacity(floats.len() + 1);
-        offsets.push(0);
-        for &v in &floats {
-            let f = v.expect("all-valid checked above");
-            let bin_idx = if width == 0.0 {
+    let bin_indices = floats.iter().map(|v| {
+        v.map(|f| {
+            // Compute bucket index directly from uniform bin width
+            // from `base` (min_val, or the padded min of a constant
+            // range, whose single value then falls in its middle bin
+            // as pandas' searchsorted places it).
+            // Edge cases:
+            // - Value == min_val: pandas's first-bin-inclusive on
+            //   both sides means bin 0 (the floor formula gives 0).
+            // - Value == max_val: floor((max - min) / width) == bins,
+            //   which we clamp to bins - 1.
+            // - Value just above max (shouldn't happen since min/max
+            //   come from this same set, but float rounding can put
+            //   things slightly outside): clamp to bins - 1.
+            if width == 0.0 {
                 0
             } else {
-                (((f - base) / width).ceil() as i64 - 1).clamp(0, (bins as i64) - 1) as usize
-            };
-            bytes.extend_from_slice(bin_labels[bin_idx].as_bytes());
-            offsets.push(bytes.len());
-        }
-        return binned_categorical(
-            series,
-            Column::from_utf8_contiguous(bytes, offsets),
-            &bin_labels,
-        );
-    }
-
-    let labels: Vec<Scalar> = floats
-        .iter()
-        .map(|v| match v {
-            None => Scalar::Null(NullKind::NaN),
-            Some(f) => {
-                // Compute bucket index directly from uniform bin width
-                // from `base` (min_val, or the padded min of a constant
-                // range, whose single value then falls in its middle bin
-                // as pandas' searchsorted places it).
-                // Edge cases:
-                // - Value == min_val: pandas's first-bin-inclusive on
-                //   both sides means bin 0 (the floor formula gives 0).
-                // - Value == max_val: floor((max - min) / width) == bins,
-                //   which we clamp to bins - 1.
-                // - Value just above max (shouldn't happen since min/max
-                //   come from this same set, but float rounding can put
-                //   things slightly outside): clamp to bins - 1.
-                let bin_idx = if width == 0.0 {
-                    0
-                } else {
-                    // Right-closed intervals (left, right]: a value at
-                    // exactly bin_idx * width + min belongs to bin
-                    // (bin_idx - 1), not bin_idx. Hence ceil - 1 rather
-                    // than floor. The first bin is inclusive on the
-                    // left edge too — handled by clamping the raw
-                    // result to [0, bins-1] (a value at min gives -1
-                    // before clamping).
-                    let raw = ((*f - base) / width).ceil() as i64 - 1;
-                    raw.clamp(0, (bins as i64) - 1) as usize
-                };
-                Scalar::Utf8(bin_labels[bin_idx].clone())
+                // Right-closed intervals (left, right]: a value at
+                // exactly bin_idx * width + min belongs to bin
+                // (bin_idx - 1), not bin_idx. Hence ceil - 1 rather
+                // than floor. The first bin is inclusive on the
+                // left edge too — handled by clamping the raw
+                // result to [0, bins-1] (a value at min gives -1
+                // before clamping).
+                let raw = ((f - base) / width).ceil() as i64 - 1;
+                raw.clamp(0, (bins as i64) - 1) as usize
             }
         })
-        .collect();
+    });
 
     // Per br-frankenpandas-23d91: pandas pd.cut preserves source axis name.
-    binned_categorical(series, Column::from_values(labels)?, &bin_labels)
+    binned_categorical(series, bin_indices, &categories)
 }
 
 /// Bin values into the explicit intervals defined by `edges`.
 ///
 /// Matches `pd.cut(series, bins=[...], right=...)` for an explicit, strictly
-/// increasing edge sequence. Returns a Series of interval-string labels like
-/// `"(0, 5]"` (`right=true`) or `"[0, 5)"` (`right=false`). Out-of-range and
-/// missing values become NaN. Edge labels print as integers only when EVERY
-/// edge is an `Int64` scalar (mirroring pandas' int-vs-float bins dtype);
-/// When `labels` is `Some`, those strings replace the interval labels (one per
-/// bin); otherwise interval strings are produced. `include_lowest` is not
-/// modeled here.
+/// increasing edge sequence. Returns a categorical of the Intervals pandas
+/// makes, `(0, 5]` (`right=true`) or `[0, 5)` (`right=false`); out-of-range
+/// and missing values become NaN. The intervals are `interval[int64]` only
+/// when EVERY edge is an `Int64` scalar (pandas' int-vs-float bins dtype) and
+/// `include_lowest` did not lower the first. When `labels` is `Some`, those
+/// strings are the categories instead (one per bin).
 pub fn cut_bins(
     series: &Series,
     edges: &[Scalar],
@@ -62904,8 +62905,8 @@ pub fn cut_bins(
         ));
     }
     // `include_lowest` only applies to right-closed bins (pandas ignores it for
-    // right=False) and makes the first bin left-inclusive by lowering its left
-    // edge 0.001 — which also forces float-formatted labels.
+    // right=False): a value AT the first edge falls in the first bin, whose
+    // Interval's left is lowered by 10^-precision (making it float).
     let lowest = include_lowest && right;
     let integer_edges = edges.iter().all(|e| matches!(e, Scalar::Int64(_)));
     let edge_vals: Vec<f64> = edges
@@ -62923,7 +62924,7 @@ pub fn cut_bins(
     }
 
     let n_bins = edge_vals.len() - 1;
-    let labels: Vec<String> = match labels {
+    let categories = match labels {
         Some(custom) => {
             if custom.len() != n_bins {
                 return Err(FrameError::CompatibilityRejected(format!(
@@ -62931,79 +62932,47 @@ pub fn cut_bins(
                     custom.len()
                 )));
             }
-            custom.iter().map(|s| (*s).to_string()).collect()
+            BinCategories::Labels(custom.iter().map(|s| (*s).to_string()).collect())
         }
-        None => cut_interval_labels(&edge_vals, right, lowest, integer_edges),
+        None => BinCategories::Intervals(cut_intervals(&edge_vals, right, lowest, integer_edges)),
     };
 
-    // The first bin's effective lower bound (left-inclusive under include_lowest).
-    let first = if lowest {
-        edge_vals[0] - 0.001
-    } else {
-        edge_vals[0]
-    };
-    let last = edge_vals[n_bins];
-    let bin_indices: Vec<Option<usize>> = series
-        .values()
-        .iter()
-        .map(|v| {
-            if v.is_missing() {
-                return None;
-            }
-            let Ok(x) = v.to_f64() else {
-                return None;
-            };
-            if x.is_nan() {
-                return None;
-            }
-            // right=true: (e_i, e_{i+1}] — exclude the very first left edge.
-            // right=false: [e_i, e_{i+1}) — exclude the very last right edge.
-            if right {
-                if x <= first || x > last {
-                    return None;
-                }
-                let lower = |i: usize| if i == 0 { first } else { edge_vals[i] };
-                (0..n_bins).find(|&i| x > lower(i) && x <= edge_vals[i + 1])
-            } else {
-                if x < first || x >= last {
-                    return None;
-                }
-                (0..n_bins).find(|&i| x >= edge_vals[i] && x < edge_vals[i + 1])
-            }
-        })
-        .collect();
-
-    // FAST PATH (all in-range): emit bin labels into ONE contiguous buffer (no n
-    // Scalar::Utf8 clones), same lever as cut/qcut. Bit-identical; out-of-range/
-    // missing values fall through to the Scalar path (exact Null spelling).
-    if bin_indices.iter().all(Option::is_some) {
-        let mut bytes: Vec<u8> = Vec::with_capacity(bin_indices.len() * 12);
-        let mut offsets: Vec<usize> = Vec::with_capacity(bin_indices.len() + 1);
-        offsets.push(0);
-        for idx in &bin_indices {
-            bytes.extend_from_slice(labels[idx.expect("all-Some checked")].as_bytes());
-            offsets.push(bytes.len());
+    let (first, last) = (edge_vals[0], edge_vals[n_bins]);
+    let bin_indices = series.values().iter().map(|v| {
+        if v.is_missing() {
+            return None;
         }
-        return binned_categorical(
-            series,
-            Column::from_utf8_contiguous(bytes, offsets),
-            &labels,
-        );
-    }
-    let out: Vec<Scalar> = bin_indices
-        .iter()
-        .map(|idx| match idx {
-            Some(i) => Scalar::Utf8(labels[*i].clone()),
-            None => Scalar::Null(NullKind::NaN),
-        })
-        .collect();
-    binned_categorical(series, Column::from_values(out)?, &labels)
+        let Ok(x) = v.to_f64() else {
+            return None;
+        };
+        if x.is_nan() {
+            return None;
+        }
+        // right=true: (e_i, e_{i+1}] — exclude the very first left edge,
+        // but for include_lowest's value AT it.
+        // right=false: [e_i, e_{i+1}) — exclude the very last right edge.
+        if right {
+            if lowest && x == first {
+                return Some(0);
+            }
+            if x <= first || x > last {
+                return None;
+            }
+            (0..n_bins).find(|&i| x > edge_vals[i] && x <= edge_vals[i + 1])
+        } else {
+            if x < first || x >= last {
+                return None;
+            }
+            (0..n_bins).find(|&i| x >= edge_vals[i] && x < edge_vals[i + 1])
+        }
+    });
+    binned_categorical(series, bin_indices, &categories)
 }
 
 /// Quantile-based binning.
 ///
 /// Matches `pd.qcut(series, q)`. Creates bins with approximately equal
-/// numbers of observations. Returns a Series of string labels.
+/// numbers of observations. Returns a categorical of their Intervals.
 pub fn qcut(series: &Series, q: usize) -> Result<Series, FrameError> {
     if q == 0 {
         return Err(FrameError::CompatibilityRejected(
@@ -63106,12 +63075,12 @@ pub fn qcut_at_quantiles(
         .collect();
     let q = edges.len() - 1;
 
-    // Per br-frankenpandas-e00ce: pre-format labels ONCE (q of them) and
+    // Per br-frankenpandas-e00ce: build the bins ONCE (q of them) and
     // resolve the bucket via binary search (O(log q)) per value.
-    // pandas labels qcut's bins as cut's with include_lowest: the first left
+    // pandas' qcut Intervals are cut's with include_lowest: the first left
     // edge lowered by 10^-precision, edges at the inferred precision
-    // (br-frankenpandas-4rfy1). Label-only; bucket assignment is unchanged.
-    let bin_labels: Vec<String> = match labels {
+    // (br-frankenpandas-4rfy1). Bucket assignment is unchanged by that.
+    let categories = match labels {
         Some(custom) => {
             if custom.len() != q {
                 return Err(FrameError::CompatibilityRejected(format!(
@@ -63119,45 +63088,17 @@ pub fn qcut_at_quantiles(
                     custom.len()
                 )));
             }
-            custom.iter().map(|s| (*s).to_string()).collect()
+            BinCategories::Labels(custom.iter().map(|s| (*s).to_string()).collect())
         }
-        None => cut_interval_labels(&edges, true, true, false),
+        None => BinCategories::Intervals(cut_intervals(&edges, true, true, false)),
     };
 
     // Per br-frankenpandas-6bslt: pandas pd.qcut preserves source axis name
     // (binned_categorical keeps the source index).
-
-    // FAST PATH (all-valid): emit bin labels into ONE contiguous buffer (no n
-    // Scalar::Utf8 clones), same lever as cut(). Bit-identical (same bin_idx +
-    // labels; all-valid => no null-kind question); missing values fall through.
-    if floats.iter().all(Option::is_some) {
-        let mut bytes: Vec<u8> = Vec::with_capacity(floats.len() * 12);
-        let mut offsets: Vec<usize> = Vec::with_capacity(floats.len() + 1);
-        offsets.push(0);
-        for &v in &floats {
-            let f = v.expect("all-valid checked above");
-            let bin_idx = edges[1..=q].partition_point(|&right| right < f).min(q - 1);
-            bytes.extend_from_slice(bin_labels[bin_idx].as_bytes());
-            offsets.push(bytes.len());
-        }
-        return binned_categorical(
-            series,
-            Column::from_utf8_contiguous(bytes, offsets),
-            &bin_labels,
-        );
-    }
-
-    let labels: Vec<Scalar> = floats
+    let bin_indices = floats
         .iter()
-        .map(|v| match v {
-            None => Scalar::Null(NullKind::NaN),
-            Some(f) => {
-                let bin_idx = edges[1..=q].partition_point(|&right| right < *f).min(q - 1);
-                Scalar::Utf8(bin_labels[bin_idx].clone())
-            }
-        })
-        .collect();
-    binned_categorical(series, Column::from_values(labels)?, &bin_labels)
+        .map(|v| v.map(|f| edges[1..=q].partition_point(|&right| right < f).min(q - 1)));
+    binned_categorical(series, bin_indices, &categories)
 }
 
 /// Convert an Index to a single-column DataFrame.
@@ -99657,10 +99598,12 @@ impl DataFrameGroupBy<'_> {
             // An object key (a datetime.date from s.dt.date) labels its group
             // as itself; it rendered as "Object(datetime.date(...))" (fvsao.66).
             Scalar::Object(object) => IndexLabel::Object(object.clone()),
-            // Still the debug rendering for PERIOD and INTERVAL keys, which
-            // `IndexLabel` has no variant for — a representation gap, not a
-            // mapping bug. See br-frankenpandas-no6s4.
-            other => IndexLabel::Utf8(format!("{other:?}")),
+            // PERIOD and INTERVAL keys, which `IndexLabel` has no variant
+            // for (a representation gap, br-frankenpandas-no6s4), label as
+            // pandas prints them: a groupby over pd.cut printed
+            // 'Interval(Interval { .. })' (fvsao.54).
+            Scalar::Period(period) => IndexLabel::Utf8(period.calendar_string()),
+            Scalar::Interval(interval) => IndexLabel::Utf8(interval.to_string()),
         }
     }
 
@@ -106264,6 +106207,9 @@ impl DataFrameGroupBy<'_> {
                 "False".to_owned()
             }),
             Scalar::Object(object) => IndexLabel::Object(object.clone()),
+            // As pandas prints them (group_key_label; fvsao.54).
+            Scalar::Period(period) => IndexLabel::Utf8(period.calendar_string()),
+            Scalar::Interval(interval) => IndexLabel::Utf8(interval.to_string()),
             other => IndexLabel::Utf8(format!("{other:?}")),
         }
     }
@@ -111552,7 +111498,9 @@ mod tests {
     use fp_columnar::ValidityMask;
     use fp_index::{AlignMode, Index};
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
-    use fp_types::{DType, IntervalClosed, NullKind, Period, PeriodFreq, Scalar, Timedelta};
+    use fp_types::{
+        DType, Interval, IntervalClosed, NullKind, Period, PeriodFreq, Scalar, Timedelta,
+    };
     use serde_json::Value;
 
     #[cfg(feature = "lazy-transpose-view")]
@@ -158976,14 +158924,8 @@ mod tests {
             let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
             let s = Series::from_values("x", idx, vals).unwrap();
             let res = super::cut_bins(&s, &edges, right, None, false).unwrap();
-            let got: Vec<Option<String>> = res
-                .values()
-                .iter()
-                .map(|v| match v {
-                    Scalar::Utf8(t) => Some(t.clone()),
-                    _ => None,
-                })
-                .collect();
+            // TEST-CHANGE (fvsao.54): the Intervals' text, was the values.
+            let got: Vec<Option<String>> = res.values().iter().map(interval_text).collect();
             let exp: Vec<Option<String>> =
                 expected.iter().map(|o| o.map(|s| s.to_string())).collect();
             assert_eq!(got, exp, "cut(right={right}) {got:?} != {exp:?}");
@@ -159022,11 +158964,14 @@ mod tests {
         // wrong label count errors.
         assert!(super::cut_bins(&s, &edges, true, Some(&["only_one"]), false).is_err());
         // include_lowest: first bin is left-inclusive ("(-0.001, 5]") and all
-        // labels float-format; v==first edge (0.0) now bins instead of NaN.
+        // labels float-format; v==first edge (0.0) now bins instead of NaN -
+        // but a value below it does not (pandas bins only x == edges[0]; the
+        // lowered -0.001 is the Interval's text, not a bound: -0.0005 was
+        // binned, fvsao.54).
         let s2 = Series::from_values(
             "x",
-            (0..4i64).map(IndexLabel::Int64).collect(),
-            [0.0, 2.0, 5.0, 7.0]
+            (0..5i64).map(IndexLabel::Int64).collect(),
+            [0.0, 2.0, 5.0, 7.0, -0.0005]
                 .iter()
                 .map(|&v| Scalar::Float64(v))
                 .collect(),
@@ -159036,10 +158981,7 @@ mod tests {
             .unwrap()
             .values()
             .iter()
-            .map(|v| match v {
-                Scalar::Utf8(t) => Some(t.clone()),
-                _ => None,
-            })
+            .map(interval_text)
             .collect();
         assert_eq!(
             got,
@@ -159047,7 +158989,8 @@ mod tests {
                 Some("(-0.001, 5.0]".into()),
                 Some("(-0.001, 5.0]".into()),
                 Some("(-0.001, 5.0]".into()),
-                Some("(5.0, 10.0]".into())
+                Some("(5.0, 10.0]".into()),
+                None
             ]
         );
     }
@@ -159163,13 +159106,11 @@ mod tests {
             let idx: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
             let s = Series::from_values("x", idx, vals).unwrap();
             let res = super::qcut_at_quantiles(&s, &quantiles, None).unwrap();
+            // TEST-CHANGE (fvsao.54): the Intervals' text, was the values.
             let got: Vec<String> = res
                 .values()
                 .iter()
-                .map(|v| match v {
-                    Scalar::Utf8(t) => t.clone(),
-                    _ => "<NaN>".to_string(),
-                })
+                .map(|v| interval_text(v).unwrap_or_else(|| "<NaN>".to_string()))
                 .collect();
             let exp: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
             assert_eq!(got, exp, "qcut_at_quantiles {got:?} != {exp:?}");
@@ -171101,6 +171042,16 @@ mod tests {
 
     // ── cut / qcut ──
 
+    /// A cut / qcut value as pandas' `str(Interval)` prints it (`None`: NaN).
+    /// Anything but an Interval fails: they were the text (fvsao.54).
+    fn interval_text(value: &Scalar) -> Option<String> {
+        match value {
+            Scalar::Interval(interval) => Some(interval.to_string()),
+            other if other.is_missing() => None,
+            other => panic!("cut / qcut value is not an Interval: {other:?}"),
+        }
+    }
+
     #[test]
     fn cut_basic() {
         let s = Series::from_values(
@@ -171119,22 +171070,23 @@ mod tests {
         assert_eq!(result.column().dtype(), DType::Categorical);
         let meta = result.column().categorical().expect("cut is categorical");
         assert!(meta.ordered);
+        // TEST-CHANGE (fvsao.54): the categories are pandas' Intervals, were
+        // their text.
         assert_eq!(
             meta.categories,
             vec![
-                Scalar::Utf8("(-0.01, 5.0]".into()),
-                Scalar::Utf8("(5.0, 10.0]".into())
+                Scalar::Interval(Interval::new(-0.01, 5.0, IntervalClosed::Right)),
+                Scalar::Interval(Interval::new(5.0, 10.0, IntervalClosed::Right))
             ]
         );
         assert_eq!(result.len(), 4);
         // 0.0 falls in first bin, 5.0 in first bin, 7.5 in second, 10.0 in second
-        let v0 = &result.column().values()[0];
-        let v1 = &result.column().values()[1];
-        let v3 = &result.column().values()[3];
-        assert!(matches!(v0, Scalar::Utf8(_)));
-        // Values at boundaries should have labels
-        assert!(matches!(v1, Scalar::Utf8(_)));
-        assert!(matches!(v3, Scalar::Utf8(_)));
+        let texts: Vec<Option<String>> = result.values().iter().map(interval_text).collect();
+        assert_eq!(
+            texts,
+            ["(-0.01, 5.0]", "(-0.01, 5.0]", "(5.0, 10.0]", "(5.0, 10.0]"]
+                .map(|text| Some(text.to_string()))
+        );
     }
 
     #[test]
@@ -171157,24 +171109,21 @@ mod tests {
         assert_eq!(meta.categories.len(), 2);
         assert_eq!(result.len(), 4);
         // First two values in first quantile, last two in second
+        // (TEST-CHANGE fvsao.54: Intervals, were their text).
         let v0 = &result.column().values()[0];
         let v3 = &result.column().values()[3];
-        assert!(matches!(v0, Scalar::Utf8(_)));
-        assert!(matches!(v3, Scalar::Utf8(_)));
-        // The labels should be different for first and last
-        assert_ne!(v0, v3);
+        assert_eq!(interval_text(v0).as_deref(), Some("(0.999, 2.5]"));
+        assert_eq!(interval_text(v3).as_deref(), Some("(2.5, 4.0]"));
     }
 
     #[test]
     fn cut_labels_use_pandas_padding_and_precision() {
+        // TEST-CHANGE (fvsao.54): the Intervals' text, was the values.
         let labels_of = |series: &Series| -> Vec<String> {
             series
                 .values()
                 .iter()
-                .map(|value| match value {
-                    Scalar::Utf8(label) => label.clone(),
-                    other => format!("{other:?}"),
-                })
+                .map(|value| interval_text(value).unwrap_or_else(|| format!("{value:?}")))
                 .collect()
         };
         let from = |values: Vec<Scalar>| {
@@ -171233,12 +171182,13 @@ mod tests {
             .categorical()
             .expect("cut_bins is categorical");
         assert!(meta.ordered);
+        // TEST-CHANGE (fvsao.54): int64 Intervals, were their text.
         assert_eq!(
-            meta.categories,
-            bin_labels
+            meta.categories
                 .iter()
-                .map(|label| Scalar::Utf8((*label).into()))
-                .collect::<Vec<_>>()
+                .map(|category| interval_text(category).expect("a bin"))
+                .collect::<Vec<_>>(),
+            bin_labels
         );
         let values = Series::from_values(
             "v",
@@ -171269,7 +171219,16 @@ mod tests {
         );
         // NEGATIVE: the same labels as a plain string key sort as text.
         let text = df
-            .with_column("bin", Column::from_values(bins.values().to_vec()).unwrap())
+            .with_column(
+                "bin",
+                Column::from_values(
+                    bins.values()
+                        .iter()
+                        .map(|bin| Scalar::Utf8(interval_text(bin).expect("binned")))
+                        .collect(),
+                )
+                .unwrap(),
+            )
             .unwrap();
         let keys: Vec<String> = text
             .groupby(&["bin"])
@@ -212663,9 +212622,13 @@ mod tests {
             "expected 5..=10 distinct quantile labels, got {}",
             unique.len()
         );
-        // Every output is a Utf8 label (no nulls in input).
+        // Every output is an Interval (no nulls in input; TEST-CHANGE
+        // fvsao.54: was a Utf8 label).
         for v in binned.column().values() {
-            assert!(matches!(v, Scalar::Utf8(_)));
+            assert!(
+                matches!(v, Scalar::Interval(_)),
+                "expected an Interval, got {v:?}"
+            );
         }
     }
 
@@ -212724,11 +212687,12 @@ mod tests {
             "expected ~10 distinct bin labels, got {}",
             unique.len()
         );
-        // Every output is a Utf8 bin label (no NaNs since input has no nulls).
+        // Every output is an Interval (no NaNs since input has no nulls;
+        // TEST-CHANGE fvsao.54: was a Utf8 label).
         for v in binned.column().values() {
             assert!(
-                matches!(v, Scalar::Utf8(_)),
-                "expected Utf8 label, got {v:?}"
+                matches!(v, Scalar::Interval(_)),
+                "expected an Interval, got {v:?}"
             );
         }
     }

@@ -1892,6 +1892,24 @@ fn scalar_compare(left: &Scalar, right: &Scalar, op: ComparisonOp) -> Result<boo
             }
         };
     }
+    // Intervals (the values of cut / qcut; fvsao.54): pandas orders two by
+    // (left, right, closed) - equal whatever their subtype - and an Interval
+    // is never equal to another kind of value (ordering one raises).
+    if let (Scalar::Interval(a), Scalar::Interval(b)) = (left, right) {
+        let key = |iv: &Interval| (iv.left, iv.right, iv.closed.to_string());
+        let ordering = key(a).partial_cmp(&key(b));
+        return Ok(ordering.is_some_and(|ordering| op_holds(ordering, op)));
+    }
+    if matches!(left, Scalar::Interval(_)) || matches!(right, Scalar::Interval(_)) {
+        return match op {
+            ComparisonOp::Eq => Ok(false),
+            ComparisonOp::Ne => Ok(true),
+            _ => Err(ColumnError::Type(TypeError::NonNumericValue {
+                value: format!("{left:?}"),
+                dtype: DType::Interval,
+            })),
+        };
+    }
     // Coerce differing numeric types to avoid precision loss (e.g. Bool vs Int64).
     let left_dtype = left.dtype();
     let right_dtype = right.dtype();
@@ -2650,6 +2668,16 @@ enum ScalarValues {
     LazyAllValidPeriodVec {
         data: Arc<Vec<i64>>,
         freq: PeriodFreq,
+        values: OnceLock<Vec<Scalar>>,
+    },
+    /// Each row's category, `categories[codes[i]]` (a code past them: a
+    /// missing row, NaN) - a categorical kept as pandas keeps one, codes
+    /// plus categories, boxing a Scalar per row only when read. pd.cut /
+    /// qcut's Interval bins (fvsao.54) built one per row, 1.6x the old
+    /// label text's cost.
+    LazyCategoryCodes {
+        codes: Arc<Vec<u32>>,
+        categories: Arc<[Scalar]>,
         values: OnceLock<Vec<Scalar>>,
     },
     /// Nullable Datetime64 backing (the temporal mirror of `LazyNullableInt64`):
@@ -5529,6 +5557,23 @@ impl ScalarValues {
                         .collect()
                 })
                 .as_slice(),
+            Self::LazyCategoryCodes {
+                codes,
+                categories,
+                values,
+            } => values
+                .get_or_init(|| {
+                    codes
+                        .iter()
+                        .map(|&code| {
+                            categories
+                                .get(code as usize)
+                                .cloned()
+                                .unwrap_or(Scalar::Null(NullKind::NaN))
+                        })
+                        .collect()
+                })
+                .as_slice(),
             Self::LazyNullableDatetime64 {
                 data,
                 validity,
@@ -6340,6 +6385,7 @@ impl ScalarValues {
             Self::LazyAllValidDatetime64Vec { data, .. } => data.len(),
             Self::LazyAllValidTimedelta64Vec { data, .. } => data.len(),
             Self::LazyAllValidPeriodVec { data, .. } => data.len(),
+            Self::LazyCategoryCodes { codes, .. } => codes.len(),
             Self::LazyNullableDatetime64 { data, .. } => data.len(),
             Self::LazyNullableTimedelta64 { data, .. } => data.len(),
             Self::LazyNullablePeriod { data, .. } => data.len(),
@@ -6404,6 +6450,7 @@ impl ScalarValues {
             | Self::LazyAllValidDatetime64Vec { values, .. }
             | Self::LazyAllValidTimedelta64Vec { values, .. }
             | Self::LazyAllValidPeriodVec { values, .. }
+            | Self::LazyCategoryCodes { values, .. }
             | Self::LazyNullableDatetime64 { values, .. }
             | Self::LazyNullableTimedelta64 { values, .. }
             | Self::LazyNullablePeriod { values, .. }
@@ -6665,6 +6712,13 @@ impl Clone for ScalarValues {
             Self::LazyAllValidPeriodVec { data, freq, .. } => Self::LazyAllValidPeriodVec {
                 data: Arc::clone(data),
                 freq: *freq,
+                values: OnceLock::new(),
+            },
+            Self::LazyCategoryCodes {
+                codes, categories, ..
+            } => Self::LazyCategoryCodes {
+                codes: Arc::clone(codes),
+                categories: Arc::clone(categories),
                 values: OnceLock::new(),
             },
             Self::LazyNullableDatetime64 { data, validity, .. } => {
@@ -12364,6 +12418,34 @@ impl Column {
             dtype: DType::Period,
             values: ScalarValues::lazy_all_valid_period_owned(data, freq),
             validity: ValidityMask::all_valid(len),
+            data: None,
+            categorical: None,
+        }
+    }
+
+    /// A column of `categories[code]` per row - a code past them is a
+    /// missing row (NaN) - that keeps the codes and boxes a `Scalar` per row
+    /// only when a consumer reads the Scalar view: pd.cut / qcut's Interval
+    /// bins (fvsao.54). Semantically identical to `Column::new(dtype,
+    /// scalars)` over the same values; `dtype` is the categories' own.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_category_codes(dtype: DType, codes: Vec<u32>, categories: Vec<Scalar>) -> Self {
+        let len = codes.len();
+        let mut words = vec![0_u64; len.div_ceil(64)];
+        for (row, &code) in codes.iter().enumerate() {
+            if (code as usize) < categories.len() {
+                words[row / 64] |= 1_u64 << (row % 64);
+            }
+        }
+        Self {
+            dtype,
+            values: ScalarValues::LazyCategoryCodes {
+                codes: Arc::new(codes),
+                categories: categories.into(),
+                values: OnceLock::new(),
+            },
+            validity: ValidityMask::from_words(words, len),
             data: None,
             categorical: None,
         }
@@ -37033,6 +37115,50 @@ mod tests {
             uniques.values(),
             &[Scalar::Interval(first), Scalar::Interval(second)]
         );
+    }
+
+    #[test]
+    fn category_codes_column_reads_as_its_categories_fvsao54() {
+        let first = Interval::new(0.0, 1.0, IntervalClosed::Right);
+        let second = Interval::new(1.0, 2.0, IntervalClosed::Right);
+        let categories = vec![Scalar::Interval(first), Scalar::Interval(second)];
+        // Code 7 is past the categories: missing, as u32::MAX is.
+        let column = Column::from_category_codes(
+            DType::Interval,
+            vec![1, u32::MAX, 0, 7, 1],
+            categories.clone(),
+        );
+        // Nothing is boxed until the Scalar view is read.
+        assert!(!column.scalar_cache_is_materialized());
+        assert_eq!(column.len(), 5);
+        assert_eq!(column.dtype(), DType::Interval);
+        let valid: Vec<bool> = (0..5).map(|row| column.validity().get(row)).collect();
+        assert_eq!(valid, [true, false, true, false, true]);
+        // The same values as the eager column of those Scalars.
+        let eager = Column::new(
+            DType::Interval,
+            vec![
+                Scalar::Interval(second),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Interval(first),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Interval(second),
+            ],
+        )
+        .expect("eager intervals");
+        assert!(
+            column
+                .values()
+                .iter()
+                .zip(eager.values())
+                .all(|(lazy, eager)| lazy.semantic_eq(eager))
+        );
+        // A clone keeps the codes (fresh cache) and reads the same.
+        let copy = column.clone();
+        assert_eq!(copy.values(), column.values());
+        // NEGATIVE: an all-missing codes column holds no category.
+        let none = Column::from_category_codes(DType::Interval, vec![u32::MAX; 3], categories);
+        assert!(none.values().iter().all(Scalar::is_missing));
     }
 
     #[test]

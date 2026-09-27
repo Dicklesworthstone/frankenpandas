@@ -16,6 +16,7 @@ import importlib
 import io
 import json
 import math
+import numbers
 import os
 import re
 import struct
@@ -310,6 +311,14 @@ def scalar_from_json(value: dict[str, Any]) -> Any:
         if _PD is None:
             raise OracleError("pandas not initialized for timedelta scalar parse")
         return _PD.Timedelta(int(raw))
+    # interval: fp-types Scalar::Interval's serde form (scalar_to_json below).
+    if kind == "interval":
+        if _PD is None:
+            raise OracleError("pandas not initialized for interval scalar parse")
+        endpoint = int if raw.get("subtype") == "int64" else float
+        return _PD.Interval(
+            endpoint(raw["left"]), endpoint(raw["right"]), closed=raw.get("closed", "right")
+        )
     raise OracleError(f"unsupported scalar kind: {kind!r}")
 
 
@@ -362,6 +371,26 @@ def scalar_to_json(value: Any) -> dict[str, Any]:
     # the two libraries disagree on.
     if _PD is not None and isinstance(value, _PD.Timestamp):
         return {"kind": "datetime64", "value": int(value.value)}
+    # br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.54: a
+    # pd.Interval (the values of pd.cut / qcut) writes as fp-types'
+    # Scalar::Interval - {"left", "right", "closed"}, plus "subtype": "int64"
+    # for integer endpoints (interval[int64] prints '(0, 3]') - instead of
+    # str(value): the utf8 text certified a string column where pandas holds
+    # Intervals. FrankenPandas' Interval is numeric with finite JSON
+    # endpoints; any other refuses rather than stringifying.
+    if _PD is not None and isinstance(value, _PD.Interval):
+        left, right = value.left, value.right
+        integral = all(
+            isinstance(v, numbers.Integral) and not isinstance(v, bool) for v in (left, right)
+        )
+        if not integral and not all(
+            isinstance(v, numbers.Real) and math.isfinite(v) for v in (left, right)
+        ):
+            raise OracleError(f"interval endpoints FrankenPandas cannot hold: {value!r}")
+        out = {"left": float(left), "right": float(right), "closed": value.closed}
+        if integral:
+            out["subtype"] = "int64"
+        return {"kind": "interval", "value": out}
     if isinstance(value, int):
         return {"kind": "int64", "value": value}
     if isinstance(value, float):
