@@ -8796,6 +8796,16 @@ def _eastern_index(m: Any) -> Any:
     return m.DatetimeIndex(["2024-03-09 18:00", "2024-03-10 00:00", "2024-03-10 07:00", "NaT"]).tz_localize("US/Eastern")
 
 
+def _eastern_repeats(m: Any) -> Any:
+    """Three aware instants, the first repeated (groups, a duplicate row)."""
+    return m.DatetimeIndex(["2024-03-09 18:00", "2024-03-10 07:00", "2024-03-09 18:00"]).tz_localize("US/Eastern")
+
+
+def _zoned(r: Any) -> Any:
+    """A result's index as its class, zone and texts, and its values' texts."""
+    return (type(r.index).__name__, str(getattr(r.index, "tz", None)), _texts(r.index), str(r.values.tolist()))
+
+
 # (fvsao.55) A DatetimeIndex carried no time zone: date_range(tz=),
 # DatetimeIndex.tz_localize / tz_convert and DatetimeIndex(tz=) were refused,
 # an aware column set as the index became naive UTC labels, and the fields,
@@ -8849,6 +8859,49 @@ _TZ_INDEX_CASES = {
     "index setter keeps the zone": lambda m: (lambda d: (setattr(d, "index", _eastern_index(m)[:3]), str(d.index.tz))[1])(m.DataFrame({"v": [1, 2, 3]})),
     "shift by a fixed freq keeps the zone": lambda m: _texts(m.Series([1, 2, 3], index=_eastern_index(m)[:3]).shift(1, freq="h").index),
     "unique of an aware column": lambda m: str(m.Series(_eastern_index(m)[:3]).unique()[0]),
+    # (fvsao.60) Paths that rebuilt an index from its bare labels dropped the
+    # zone - the right instants, printed as naive UTC.
+    "rolling apply": lambda m: _zoned(m.Series([1.0, 2.0, 3.0], index=_eastern_index(m)[:3]).rolling(2).apply(lambda w: w.sum())),
+    "expanding apply": lambda m: _zoned(m.Series([1.0, 2.0, 3.0], index=_eastern_index(m)[:3]).expanding().apply(lambda w: w.sum())),
+    "frame rolling apply over a repeated label": lambda m: _zoned(m.DataFrame({"v": [1.0, 2.0, 3.0]}, index=_eastern_repeats(m)).rolling(2).apply(lambda w: w.sum())),
+    "frame expanding apply over a repeated label": lambda m: _zoned(m.DataFrame({"v": [1.0, 2.0, 3.0]}, index=_eastern_repeats(m)).expanding().apply(lambda w: w.max())),
+    "reindex takes the target's zone": lambda m: _zoned(m.Series([1.0, 2.0, 3.0], index=_eastern_index(m)[:3]).reindex(_eastern_index(m)[:3][::-1])),
+    "reindex fill_value": lambda m: _zoned(m.Series([1.0, 2.0, 3.0], index=_eastern_index(m)[:3]).reindex(_eastern_index(m)[:2].append(m.DatetimeIndex(["2024-03-11"]).tz_localize("US/Eastern")), fill_value=0)),
+    "frame reindex": lambda m: _zoned(m.DataFrame({"v": [1.0, 2.0, 3.0]}, index=_eastern_index(m)[:3]).reindex(_eastern_index(m)[:3][::-1])),
+    "T.T": lambda m: _zoned(m.DataFrame({"v": [1.0, 2.0, 3.0]}, index=_eastern_index(m)[:3]).T.T),
+    "T columns carry the zone": lambda m: (lambda c: (str(c.tz), _texts(c)))(m.DataFrame({"v": [1.0, 2.0, 3.0]}, index=_eastern_index(m)[:3]).T.columns),
+    "merge on both indexes": lambda m: (lambda d: _zoned(d.merge(d, left_index=True, right_index=True)))(m.DataFrame({"v": [1.0, 2.0, 3.0]}, index=_eastern_index(m)[:3])),
+    "merge two zones meets in UTC": lambda m: (lambda d: _zoned(d.merge(d.tz_convert("Asia/Tokyo").rename(columns={"v": "u"}), left_index=True, right_index=True)))(m.DataFrame({"v": [1.0, 2.0, 3.0]}, index=_eastern_index(m)[:3])),
+    "join": lambda m: (lambda d: _zoned(d.join(d.rename(columns={"v": "u"}))))(m.DataFrame({"v": [1.0, 2.0, 3.0]}, index=_eastern_index(m)[:3])),
+    "Index.value_counts": lambda m: _zoned(_eastern_repeats(m).value_counts()),
+    "Index.value_counts normalize is a proportion": lambda m: (lambda r: (r.name, _zoned(r)))(_eastern_repeats(m).value_counts(normalize=True)),
+    "groupby(level=0)": lambda m: _zoned(m.Series([1.0, 2.0, 3.0], index=_eastern_repeats(m)).groupby(level=0).sum()),
+    "frame groupby(level=0)": lambda m: _zoned(m.DataFrame({"v": [1.0, 2.0, 3.0]}, index=_eastern_repeats(m)).groupby(level=0).max()),
+    "groupby an aware column": lambda m: _zoned(m.DataFrame({"k": _eastern_repeats(m), "v": [1.0, 2.0, 3.0]}).groupby("k").mean()),
+    "groupby an aware column, size": lambda m: _zoned(m.DataFrame({"k": _eastern_repeats(m), "v": [1.0, 2.0, 3.0]}).groupby("k").size()),
+    "groupby an aware Series": lambda m: _zoned(m.Series([1.0, 2.0, 3.0]).groupby(m.Series(_eastern_repeats(m))).count()),
+    "groupby agg of a list": lambda m: _zoned(m.Series([1.0, 2.0, 3.0], index=_eastern_repeats(m)).groupby(level=0).agg(["sum", "max"])),
+    "nlargest, nsmallest": lambda m: (lambda s: (_zoned(s.nlargest(2)), _zoned(s.nsmallest(2))))(m.Series([1.0, 3.0, 2.0], index=_eastern_index(m)[:3])),
+    "drop_duplicates": lambda m: _zoned(m.Series([1.0, 1.0, 2.0], index=_eastern_index(m)[:3]).drop_duplicates()),
+    "loc a list of labels": lambda m: (lambda i: _zoned(m.Series([1.0, 2.0, 3.0], index=i).loc[[i[2], i[0]]]))(_eastern_index(m)[:3]),
+    "skipna=False min over rows": lambda m: _zoned(m.DataFrame({"v": [1.0, None, 3.0], "w": [4.0, 5.0, 6.0]}, index=_eastern_index(m)[:3]).min(axis=1, skipna=False)),
+    "set_axis a DatetimeIndex": lambda m: _zoned(m.Series([1, 2, 3]).set_axis(_eastern_index(m)[:3])),
+    "append in the same zone": lambda m: (lambda r: (type(r).__name__, str(r.tz), _texts(r)))(_eastern_index(m)[:2].append(_eastern_index(m)[2:3])),
+    "append a list of indexes": lambda m: _texts(_eastern_index(m)[:1].append([_eastern_index(m)[1:2], _eastern_index(m)[2:3]])),
+    "append naive to naive": lambda m: _texts(m.DatetimeIndex(["2024-01-01"]).append(m.DatetimeIndex(["2024-01-02"]))),
+    "append two zones is an object Index": lambda m: (lambda r: (type(r).__name__, str(r.dtype), _texts(r)))(_eastern_index(m)[:2].append(_eastern_index(m)[2:3].tz_convert("UTC"))),
+    "append aware and naive is an object Index": lambda m: (lambda r: (type(r).__name__, str(r.dtype), _texts(r)))(_eastern_index(m)[:2].append(m.DatetimeIndex(["2024-01-01"]))),
+    "append durations": lambda m: _texts(m.TimedeltaIndex(["1D"]).append(m.TimedeltaIndex(["2h"]))),
+    "concat two zones is an object Index": lambda m: (lambda s: (lambda r: (type(r.index).__name__, str(r.index.dtype), _texts(r.index)))(m.concat([s, s.tz_convert("UTC")])))(m.Series([1.0, 2.0], index=_eastern_index(m)[:2])),
+    "concat aware and naive is an object Index": lambda m: (lambda r: (type(r.index).__name__, str(r.index.dtype), _texts(r.index)))(m.concat([m.Series([1.0], index=_eastern_index(m)[:1]), m.Series([2.0], index=m.DatetimeIndex(["2024-01-01"]))])),
+    "frame concat two zones is an object Index": lambda m: (lambda d: _texts(m.concat([d, d.tz_convert("Asia/Tokyo")]).index))(m.DataFrame({"v": [1.0, 2.0]}, index=_eastern_index(m)[:2])),
+    # NEGATIVES: a naive index stays naive through the same paths; labels
+    # the caller gives keep no zone of the old index; aware beside naive is
+    # pandas' TypeError.
+    "naive stays naive": lambda m: (lambda i: (lambda s: (_zoned(s.groupby(level=0).sum()), _zoned(s.nlargest(2)), _zoned(s.reindex(i[::-1])), _zoned(s.to_frame().T.T)))(m.Series([1.0, 2.0, 3.0], index=i)))(m.DatetimeIndex(["2024-03-09 18:00", "2024-03-10 00:00", "2024-03-10 07:00"])),
+    "rename to text drops the zone": lambda m: (lambda i: _zoned(m.Series([1.0, 2.0, 3.0], index=i).rename(index={i[0]: "a", i[1]: "b", i[2]: "c"})))(_eastern_index(m)[:3]),
+    "set_axis naive labels": lambda m: _zoned(m.Series([1.0, 2.0, 3.0], index=_eastern_index(m)[:3]).set_axis(m.DatetimeIndex(["2024-01-01", "2024-01-02", "2024-01-03"]))),
+    "merge an aware index with a naive one": lambda m: m.DataFrame({"v": [1.0]}, index=_eastern_index(m)[:1]).merge(m.DataFrame({"u": [2.0]}, index=m.DatetimeIndex(["2024-01-01"])), left_index=True, right_index=True),
     # NEGATIVES (pandas' errors): localizing an aware index, converting a
     # naive one, aware against naive, a skipped wall time, an unknown zone.
     "localize an aware index": lambda m: _eastern_index(m).tz_localize("UTC"),

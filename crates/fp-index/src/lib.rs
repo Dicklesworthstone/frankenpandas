@@ -2303,6 +2303,15 @@ impl Index {
         self.set_names(name)
     }
 
+    /// An index of `labels` taken from this one (a subset, a reordering, a
+    /// repeat): this index's name, and its zone while the labels are all
+    /// datetimes. `Index::new(labels)` plus the name dropped the zone, so a
+    /// tz-aware index came back as naive UTC labels (fvsao.60).
+    #[must_use]
+    pub fn relabeled(&self, labels: Vec<IndexLabel>) -> Self {
+        self.propagate_name(Self::new(labels))
+    }
+
     /// Internal: propagate this index's name onto a newly created index.
     fn propagate_name(&self, mut other: Self) -> Self {
         other.name.clone_from(&self.name);
@@ -30985,6 +30994,26 @@ mod tests {
         let one_day = durations[0].expect("non-NAT label decodes");
         assert_eq!(one_day.num_seconds(), 86_400);
         assert_eq!(durations[1], None);
+    }
+
+    #[test]
+    fn relabeled_keeps_the_name_and_the_zone_of_datetime_labels_fvsao_60() {
+        let instants = |ns: &[i64]| ns.iter().map(|&v| IndexLabel::Datetime64(v)).collect();
+        let aware = Index::new(instants(&[30, 10, 20]))
+            .set_names(Some("when"))
+            .with_tz(Some("US/Eastern"))
+            .unwrap();
+        // A subset / reordering of the labels keeps both (Index::new plus
+        // the name dropped the zone).
+        let taken = aware.relabeled(instants(&[20, 30]));
+        assert_eq!(taken.name(), Some("when"));
+        assert_eq!(taken.tz(), Some("US/Eastern"));
+        // NEGATIVES: labels that are not all datetimes keep the name only;
+        // a naive index invents no zone.
+        let text = aware.relabeled(vec![IndexLabel::Utf8("a".to_owned())]);
+        assert_eq!((text.name(), text.tz()), (Some("when"), None));
+        let naive = Index::new(instants(&[1])).relabeled(instants(&[1]));
+        assert_eq!(naive.tz(), None);
     }
 
     #[test]

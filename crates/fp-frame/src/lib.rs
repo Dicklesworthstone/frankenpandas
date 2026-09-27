@@ -10948,7 +10948,7 @@ impl Series {
         // the index axis name (the levels reorder; the axis name is metadata).
         Ok(Self {
             name: self.name.clone(),
-            index: Index::new(labels).rename_index(self.index.name()),
+            index: self.index.relabeled(labels),
             column: self.column.clone(),
             categorical: self.categorical.clone(),
             sparse: self.sparse.clone(),
@@ -13687,7 +13687,7 @@ impl Series {
         let index = if use_typed_int64_index {
             Index::from_i64_values(out_label_ints).rename_index(self.index.name())
         } else {
-            Index::new(out_labels).rename_index(self.index.name())
+            self.index.relabeled(out_labels)
         };
         // Label selection is a row subset — see `with_row_subset`.
         self.with_row_subset(index, column)
@@ -24031,7 +24031,7 @@ impl Series {
                 .map(|(i, _)| self.index_label_at(*i))
                 .collect();
             let values: Vec<Scalar> = indexed.iter().map(|(_, v)| Scalar::Float64(*v)).collect();
-            let index = Index::new(labels).rename_index(self.index.name());
+            let index = self.index.relabeled(labels);
             let column = Column::from_values(values)?;
             return Self::new(self.name.clone(), index, column);
         }
@@ -24055,7 +24055,7 @@ impl Series {
                 .map(|(i, _)| self.index_label_at(*i))
                 .collect();
             let values: Vec<Scalar> = indexed.iter().map(|(_, v)| Scalar::Int64(*v)).collect();
-            let index = Index::new(labels).rename_index(self.index.name());
+            let index = self.index.relabeled(labels);
             let column = Column::from_values(values)?;
             return Self::new(self.name.clone(), index, column);
         }
@@ -24095,7 +24095,7 @@ impl Series {
         let values: Vec<Scalar> = indexed.iter().map(|(_, v)| (*v).clone()).collect();
 
         // Per br-frankenpandas-0trpd: preserve index name through nlargest.
-        let index = Index::new(labels).rename_index(self.index.name());
+        let index = self.index.relabeled(labels);
         let column = Column::from_values(values)?;
         Self::new(self.name.clone(), index, column)
     }
@@ -24132,7 +24132,7 @@ impl Series {
                 .map(|(i, _)| self.index_label_at(*i))
                 .collect();
             let values: Vec<Scalar> = indexed.iter().map(|(_, v)| Scalar::Float64(*v)).collect();
-            let index = Index::new(labels).rename_index(self.index.name());
+            let index = self.index.relabeled(labels);
             let column = Column::from_values(values)?;
             return Self::new(self.name.clone(), index, column);
         }
@@ -24155,7 +24155,7 @@ impl Series {
                 .map(|(i, _)| self.index_label_at(*i))
                 .collect();
             let values: Vec<Scalar> = indexed.iter().map(|(_, v)| Scalar::Int64(*v)).collect();
-            let index = Index::new(labels).rename_index(self.index.name());
+            let index = self.index.relabeled(labels);
             let column = Column::from_values(values)?;
             return Self::new(self.name.clone(), index, column);
         }
@@ -24192,7 +24192,7 @@ impl Series {
         let values: Vec<Scalar> = indexed.iter().map(|(_, v)| (*v).clone()).collect();
 
         // Per br-frankenpandas-0trpd: preserve index name through nsmallest.
-        let index = Index::new(labels).rename_index(self.index.name());
+        let index = self.index.relabeled(labels);
         let column = Column::from_values(values)?;
         Self::new(self.name.clone(), index, column)
     }
@@ -24300,7 +24300,7 @@ impl Series {
 
         // Per br-frankenpandas-0trpd: preserve index name through
         // nlargest_keep/nsmallest_keep variants.
-        let index = Index::new(labels).rename_index(self.index.name());
+        let index = self.index.relabeled(labels);
         let column = Column::from_values(values)?;
         Self::new(self.name.clone(), index, column)
     }
@@ -27019,7 +27019,7 @@ impl Series {
         // Per br-frankenpandas-8nh42: pandas Series.unstack preserves the
         // source axis name on the result row index (when the source is
         // string-composite, the source axis name is the only signal we have).
-        let index = Index::new(labels).rename_index(self.index.name());
+        let index = self.index.relabeled(labels);
         DataFrame::new_with_column_order(index, columns, col_order)
     }
 
@@ -27980,7 +27980,7 @@ impl Series {
                     kept.push(data[i]);
                 }
             }
-            let index = Index::new(labels).rename_index(self.index.name());
+            let index = self.index.relabeled(labels);
             return Self::new(
                 self.name.clone(),
                 index,
@@ -28008,7 +28008,7 @@ impl Series {
                     kept.push(data[i]);
                 }
             }
-            let index = Index::new(labels).rename_index(self.index.name());
+            let index = self.index.relabeled(labels);
             return Self::new(
                 self.name.clone(),
                 index,
@@ -28033,7 +28033,7 @@ impl Series {
                     kept.push(Scalar::Timedelta64(data[i]));
                 }
             }
-            let index = Index::new(labels).rename_index(self.index.name());
+            let index = self.index.relabeled(labels);
             return Self::new(
                 self.name.clone(),
                 index,
@@ -28087,7 +28087,7 @@ impl Series {
             }
             let labels_src = self.index.labels();
             let labels: Vec<IndexLabel> = indices.iter().map(|&i| labels_src[i].clone()).collect();
-            let index = Index::new(labels).rename_index(self.index.name());
+            let index = self.index.relabeled(labels);
             let column = self.column.take_positions(&indices);
             return Self::new(self.name.clone(), index, column);
         }
@@ -28167,7 +28167,7 @@ impl Series {
             }
             let labels_src = self.index.labels();
             let labels: Vec<IndexLabel> = indices.iter().map(|&i| labels_src[i].clone()).collect();
-            let index = Index::new(labels).rename_index(self.index.name());
+            let index = self.index.relabeled(labels);
             let column = self.column.take_positions(&indices);
             return Self::new(self.name.clone(), index, column);
         }
@@ -28429,8 +28429,9 @@ impl Series {
             });
         }
         // Per br-frankenpandas-5qzhr: pandas Series.set_axis preserves axis
-        // name (the name is metadata separate from the labels).
-        let index = Index::new(labels).rename_index(self.index.name());
+        // name (the name is metadata separate from the labels). The labels
+        // are the caller's, so they keep no zone of the old index.
+        let index = Index::new(labels).set_names(self.index.name());
         Self::new(self.name.clone(), index, self.column.clone())
     }
 
@@ -65775,6 +65776,10 @@ struct ColumnAxis {
     /// The column axis' own name, pandas' `df.columns.name` (a pivot's
     /// columns are named after its `columns` column).
     name: Option<String>,
+    /// The zone of datetime column labels - a tz-aware row index transposed
+    /// onto the columns keeps it, and gives it back to the rows on the way
+    /// back (`df.T.T` came back naive UTC, fvsao.60).
+    tz: Option<String>,
 }
 
 impl ColumnAxis {
@@ -65801,6 +65806,9 @@ impl ColumnAxis {
     /// Records `labels` for the names they key (a string label needs no
     /// record).
     fn record(&mut self, labels: impl IntoIterator<Item = IndexLabel>) {
+        // New labels bring no zone the axis knows; a caller that knows theirs
+        // (transpose) sets it after.
+        self.tz = None;
         let mut map = self.labels.as_deref().cloned().unwrap_or_default();
         for label in labels {
             if !matches!(label, IndexLabel::Utf8(_)) {
@@ -65839,6 +65847,7 @@ impl From<Vec<String>> for ColumnAxis {
             labels: None,
             range: None,
             name: None,
+            tz: None,
         }
     }
 }
@@ -65851,6 +65860,7 @@ impl From<LazyDataFrameColumnOrder> for ColumnAxis {
             labels: None,
             range: None,
             name: None,
+            tz: None,
         }
     }
 }
@@ -65869,6 +65879,7 @@ impl Clone for ColumnAxis {
             labels: self.labels.clone(),
             range: self.range,
             name: self.name.clone(),
+            tz: self.tz.clone(),
         }
     }
 }
@@ -65924,6 +65935,7 @@ impl<'de> Deserialize<'de> for ColumnAxis {
             labels: None,
             range: None,
             name: None,
+            tz: None,
         })
     }
 }
@@ -72988,11 +73000,23 @@ impl DataFrame {
         } else {
             Index::from_utf8(self.column_order.to_vec())
         };
-        // The column axis' name is the row axis' now.
-        match self.columns_name() {
+        // The column axis' name is the row axis' now, and so is its zone
+        // while the labels are all datetimes.
+        let index = match self.columns_name() {
             Some(name) => index.rename_index(Some(name)),
             None => index,
+        };
+        match self.columns_tz() {
+            Some(zone) => index.clone().with_tz(Some(zone)).unwrap_or(index),
+            None => index,
         }
+    }
+
+    /// The zone of datetime column labels (pandas' `df.columns.tz`): a
+    /// tz-aware row index transposed onto the columns keeps it.
+    #[must_use]
+    pub fn columns_tz(&self) -> Option<&str> {
+        self.column_order.tz.as_deref()
     }
 
     #[must_use]
@@ -75813,7 +75837,7 @@ impl DataFrame {
         let index = if use_typed_int64_index {
             Index::from_i64_values(out_label_ints).rename_index(self.index.name())
         } else {
-            Index::new(out_labels).rename_index(self.index.name())
+            self.index.relabeled(out_labels)
         };
         let mut out = Self::new_with_axis(index, columns, out_columns)?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
@@ -78366,6 +78390,7 @@ impl DataFrame {
                 column_order: ColumnAxis {
                     range: self.index.range_span(),
                     name: self.index.name().map(str::to_owned),
+                    tz: self.index.tz().map(str::to_owned),
                     ..LazyDataFrameColumnOrder::int64_unit_range(view.column_start, view.column_len)
                         .into()
                 },
@@ -78427,8 +78452,9 @@ impl DataFrame {
                 // the rows were one.
                 out.column_order.record(self.index.labels().iter().cloned());
                 out.column_order.range = self.index.range_span();
-                // The axes trade names too.
+                // The axes trade names and zones too.
                 out.column_order.name = self.index.name().map(str::to_owned);
+                out.column_order.tz = self.index.tz().map(str::to_owned);
                 Ok(out)
             };
 
@@ -82881,7 +82907,7 @@ impl DataFrame {
 
                 // Per br-frankenpandas-hrsc3: pandas df.corrwith(other, axis=1)
                 // preserves df.index.name on the row-wise correlation result.
-                let index = Index::new(labels).rename_index(self.index.name());
+                let index = self.index.relabeled(labels);
                 let column = Column::from_values(values)?;
                 Series::new(String::new(), index, column)
             }
@@ -83485,8 +83511,9 @@ impl DataFrame {
                     });
                 }
                 // Per br-frankenpandas-gyej0: pandas df.set_axis(labels, axis=0)
-                // preserves index name (metadata separate from labels).
-                let new_index = Index::new(labels).rename_index(self.index.name());
+                // preserves index name (metadata separate from labels). The
+                // labels are the caller's: they keep no zone of the old index.
+                let new_index = Index::new(labels).set_names(self.index.name());
                 Self::validate_duplicate_label_policy(
                     self.allows_duplicate_labels,
                     &new_index,
@@ -87563,7 +87590,7 @@ impl DataFrame {
         Ok(Self {
             columns: result_cols.into(),
             column_order: self.column_order.clone(),
-            index: Index::new(new_labels).rename_index(self.index.name()),
+            index: self.index.relabeled(new_labels),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: None,
             allows_duplicate_labels: self.allows_duplicate_labels,
@@ -97059,7 +97086,7 @@ impl DataFrame {
             .collect();
         // Per br-frankenpandas-mu31x: pandas df.compare preserves
         // self.index.name on the result.
-        let new_index = Index::new(new_labels).rename_index(self.index.name());
+        let new_index = self.index.relabeled(new_labels);
         // An empty result keeps a flat axis: MultiIndex::from_arrays on empty
         // levels would assert a two-level shape onto a frame with no columns,
         // which pandas does not do either.
@@ -97919,7 +97946,7 @@ impl DataFrame {
         let out = DataFrame {
             columns: result_cols.into(),
             column_order: col_order.into(),
-            index: Index::new(new_indices).rename_index(self.index.name()),
+            index: self.index.relabeled(new_indices),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: None,
             allows_duplicate_labels: self.allows_duplicate_labels,
@@ -119524,6 +119551,55 @@ mod tests {
         let result = frame.corrwith(&doubled).unwrap();
         assert_eq!(result.name(), "");
         assert_eq!(result.values(), &[Scalar::Float64(1.0)]);
+    }
+
+    #[test]
+    fn a_tz_aware_index_keeps_its_zone_through_rebuilt_indexes_fvsao_60() {
+        let hour = 3_600_000_000_000_i64;
+        let aware = Index::new(
+            (0..3)
+                .map(|h| IndexLabel::Datetime64(h * hour))
+                .collect::<Vec<_>>(),
+        )
+        .with_tz(Some("Asia/Tokyo"))
+        .unwrap();
+        let values = vec![
+            Scalar::Float64(1.0),
+            Scalar::Float64(3.0),
+            Scalar::Float64(2.0),
+        ];
+        let series = Series::new("v", aware.clone(), Column::from_values(values).unwrap()).unwrap();
+        // Paths that took labels out of the index and rebuilt it lost the
+        // zone: the right instants, naive.
+        assert_eq!(series.nlargest(2).unwrap().index().tz(), Some("Asia/Tokyo"));
+        assert_eq!(
+            series.nsmallest(1).unwrap().index().tz(),
+            Some("Asia/Tokyo")
+        );
+        assert_eq!(
+            series.drop_duplicates().unwrap().index().tz(),
+            Some("Asia/Tokyo")
+        );
+        // A transpose parks the zone on the column axis and gives it back.
+        let frame = series.to_frame(None).unwrap();
+        let transposed = frame.transpose().unwrap();
+        assert_eq!(transposed.columns_tz(), Some("Asia/Tokyo"));
+        let back = transposed.transpose().unwrap();
+        assert_eq!(back.index().tz(), Some("Asia/Tokyo"));
+        assert_eq!(back.index().labels(), aware.labels());
+        // NEGATIVES: new column labels bring no zone of the old axis, and a
+        // naive index stays naive both ways.
+        let relabeled = transposed.with_recorded_column_labels(vec![IndexLabel::Utf8("a".into())]);
+        assert_eq!(relabeled.columns_tz(), None);
+        let naive = Series::new(
+            "v",
+            Index::new(vec![IndexLabel::Datetime64(0)]),
+            Column::from_values(vec![Scalar::Float64(1.0)]).unwrap(),
+        )
+        .unwrap();
+        let round_trip = naive.to_frame(None).unwrap().transpose().unwrap();
+        assert_eq!(round_trip.columns_tz(), None);
+        assert_eq!(round_trip.transpose().unwrap().index().tz(), None);
     }
 
     #[test]

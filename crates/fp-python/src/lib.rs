@@ -4364,6 +4364,98 @@ fn refuse_unordered_set(obj: &Bound<'_, PyAny>) -> PyResult<()> {
 
 /// The time zone an `index=` argument carries: a tz-aware DatetimeIndex's,
 /// or a tz-aware datetime Series' (its values are the labels).
+/// `Index.append`'s argument as pandas takes it: an index, or a list /
+/// tuple of them. A lone index given where a list was expected was read as
+/// the list of its elements, and each dropped (fvsao.60).
+fn append_pieces<'py>(other: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    if other.is_instance_of::<PyList>() || other.is_instance_of::<PyTuple>() {
+        other.try_iter()?.collect()
+    } else {
+        Ok(vec![other.clone()])
+    }
+}
+
+/// pandas' object Index of every element of `first` then `pieces`, as
+/// `append` builds one from indexes of different kinds: each element as
+/// Python has it, an aware Timestamp kept whole with its zone.
+fn object_index_of<'py>(
+    first: Bound<'py, PyAny>,
+    pieces: Vec<Bound<'py, PyAny>>,
+) -> PyResult<PyIndex> {
+    let mut labels = Vec::new();
+    for piece in std::iter::once(first).chain(pieces) {
+        for item in piece.try_iter()? {
+            let item = item?;
+            let aware = item.getattr("tz").is_ok_and(|tz| !tz.is_none());
+            labels.push(if aware {
+                IndexLabel::Object(fp_types::ObjectValue::Host(fp_types::HostValue::new(
+                    PyHost(item.unbind()),
+                )))
+            } else {
+                py_to_index_label(&item)?
+            });
+        }
+    }
+    Ok(PyIndex {
+        inner: Index::new(labels),
+    })
+}
+
+/// pandas' row axis for pieces stacked by `concat` whose indexes are in
+/// different zones (or aware beside naive, or aware beside other labels):
+/// an object Index of every piece's elements as Python has them, each
+/// Timestamp in its own zone. None when every non-empty piece shares one
+/// zone or none is aware - fp's concat keeps that index. The bare instants
+/// came back naive UTC (fvsao.60).
+fn mixed_zone_rows(py: Python<'_>, indexes: &[&Index]) -> PyResult<Option<Index>> {
+    let zones: Vec<Option<&str>> = indexes
+        .iter()
+        .filter(|index| !index.is_empty())
+        .map(|index| index.tz())
+        .collect();
+    if zones.iter().all(Option::is_none) || zones.windows(2).all(|pair| pair[0] == pair[1]) {
+        return Ok(None);
+    }
+    let mut pieces = indexes
+        .iter()
+        .map(|index| Ok(row_index_to_py(py, index)?.into_bound(py)))
+        .collect::<PyResult<Vec<_>>>()?;
+    if pieces.is_empty() {
+        return Ok(None);
+    }
+    let first = pieces.remove(0);
+    Ok(Some(object_index_of(first, pieces)?.inner))
+}
+
+/// The zone of a tz-aware datetime column (a groupby key's); None for any
+/// other column.
+fn column_zone(column: &Column) -> Option<String> {
+    match column.dtype() {
+        DType::Datetime64 { tz } => tz,
+        _ => None,
+    }
+}
+
+/// `index` shown in `zone` while its labels are all datetimes, unchanged
+/// otherwise (a groupby result keyed by an aware column's instants).
+fn index_in_zone(index: Index, zone: &str) -> Index {
+    index.clone().with_tz(Some(zone)).unwrap_or(index)
+}
+
+/// `series` with its index shown in `zone` (None: as it is) - for results
+/// whose rows are another index's labels, taken as bare UTC instants.
+fn series_index_in_zone(series: Series, zone: Option<&str>) -> PyResult<Series> {
+    let Some(zone) = zone else {
+        return Ok(series);
+    };
+    let index = series
+        .index()
+        .clone()
+        .with_tz(Some(zone))
+        .map_err(index_error_to_py)?;
+    Series::new(series.name(), index, series.column().clone()).map_err(frame_error_to_py)
+}
+
 fn index_arg_zone(obj: &Bound<'_, PyAny>) -> Option<String> {
     if let Ok(dti) = obj.extract::<PyRef<'_, PyDatetimeIndex>>() {
         dti.inner.tz()
@@ -6460,10 +6552,14 @@ impl PyIndex {
         }
     }
 
-    fn append(&self, other: IndexArg) -> Self {
-        PyIndex {
-            inner: self.inner.append(&other.inner),
+    /// pandas' `Index.append(other)`, `other` an index or a list / tuple of
+    /// them (a list of indexes was read as one index of them).
+    fn append(&self, other: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let mut inner = self.inner.clone();
+        for piece in append_pieces(other)? {
+            inner = inner.append(&piece.extract::<IndexArg>()?.inner);
         }
+        Ok(PyIndex { inner })
     }
 
     /// A missing label is pandas' `KeyError(label)` (its message was
@@ -7028,7 +7124,7 @@ impl PyIndex {
         // pandas names a normalized count 'proportion' (fvsao.30), and the
         // counts' index after this one (it was unnamed).
         let name = if normalize { "proportion" } else { "count" };
-        let index = Index::new(idx_labels).set_names(self.inner.name());
+        let index = self.inner.relabeled(idx_labels);
         let s = Series::new(name, index, col).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: s })
     }
@@ -8396,7 +8492,11 @@ impl PyDatetimeIndex {
         }
         let col = Column::from_values(vals)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        let s = Series::new("count", Index::new(idx_labels), col).map_err(frame_error_to_py)?;
+        // The counted labels are this index's: its name and zone (fvsao.60);
+        // a normalized count is 'proportion', as for Index (fvsao.30).
+        let index = self.inner.as_index().relabeled(idx_labels);
+        let name = if normalize { "proportion" } else { "count" };
+        let s = Series::new(name, index, col).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: s })
     }
 
@@ -8493,27 +8593,32 @@ impl PyDatetimeIndex {
         self.as_py_index().any()
     }
 
-    /// The instants of `others` after these; the zone kept only when every
-    /// piece shares it (pandas gives an object Index otherwise).
-    fn append(&self, others: Vec<Bound<'_, PyAny>>) -> PyResult<Self> {
-        let mut combined = self.inner.asi8();
-        let mut shared_zone = true;
-        for other in others {
-            if let Ok(dti) = other.extract::<PyRef<'_, PyDatetimeIndex>>() {
-                combined.extend(dti.inner.asi8());
-                shared_zone &= dti.inner.tz() == self.inner.tz();
-            } else if let Ok(list) = other.extract::<Vec<i64>>() {
-                combined.extend(list);
-                shared_zone &= self.inner.tz().is_none();
+    /// pandas' `DatetimeIndex.append(other)`, `other` an index or a list /
+    /// tuple of them: instants all in this index's zone (or all naive) stay a
+    /// DatetimeIndex; anything else - another zone, aware beside naive, other
+    /// labels - is pandas' object Index of the elements as they are, an aware
+    /// Timestamp kept in its own zone. A lone index was read as a list of its
+    /// Timestamps and every one dropped, and two zones fell to naive UTC
+    /// (fvsao.60).
+    fn append(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let pieces = append_pieces(other)?;
+        let zone = self.inner.tz();
+        let mut nanos = self.inner.asi8();
+        let mut one_zone = true;
+        for piece in &pieces {
+            match piece.extract::<PyRef<'_, PyDatetimeIndex>>() {
+                Ok(dti) if dti.inner.tz() == zone => nanos.extend(dti.inner.asi8()),
+                _ => {
+                    one_zone = false;
+                    break;
+                }
             }
         }
-        let out = self.with_nanos(combined);
-        if shared_zone {
-            return Ok(out);
+        if one_zone {
+            return Ok(Py::new(py, self.with_nanos(nanos))?.into_any());
         }
-        Ok(Self {
-            inner: out.inner.with_tz(None).map_err(index_error_to_py)?,
-        })
+        let this = Py::new(py, self.clone())?.into_bound(py).into_any();
+        Ok(Py::new(py, object_index_of(this, pieces)?)?.into_any())
     }
 
     fn argmax(&self) -> PyResult<usize> {
@@ -11468,20 +11573,26 @@ impl PyTimedeltaIndex {
         self.as_py_index().any()
     }
 
-    fn append(&self, others: Vec<Bound<'_, PyAny>>) -> PyResult<Self> {
+    /// pandas' `TimedeltaIndex.append(other)`, `other` an index or a list /
+    /// tuple of them: durations stay a TimedeltaIndex, anything else is
+    /// pandas' object Index (a lone index's elements were dropped; fvsao.60).
+    fn append(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let pieces = append_pieces(other)?;
         let mut combined = self.inner.asi8();
-        for other in others {
-            if let Ok(tdi) = other.extract::<PyRef<'_, PyTimedeltaIndex>>() {
-                combined.extend(tdi.inner.asi8());
-            } else if let Ok(list) = other.extract::<Vec<i64>>() {
-                combined.extend(list);
+        for piece in &pieces {
+            match piece.extract::<PyRef<'_, PyTimedeltaIndex>>() {
+                Ok(tdi) => combined.extend(tdi.inner.asi8()),
+                Err(_) => {
+                    let this = Py::new(py, self.clone())?.into_bound(py).into_any();
+                    return Ok(Py::new(py, object_index_of(this, pieces)?)?.into_any());
+                }
             }
         }
         let mut out = TimedeltaIndex::new(combined);
         if let Some(n) = self.inner.name() {
             out = out.set_name(n);
         }
-        Ok(Self { inner: out })
+        Ok(Py::new(py, Self { inner: out })?.into_any())
     }
 
     fn argsort(&self) -> IndexerArray {
@@ -12123,9 +12234,13 @@ impl PyRangeIndex {
         Self::or_index(slf.py(), out, ranges)
     }
 
-    fn append(slf: PyRef<'_, Self>, other: IndexArg) -> PyResult<Py<PyAny>> {
-        let ranges = other.inner.range_span().is_some();
-        let out = slf.as_super().append(other).inner;
+    fn append(slf: PyRef<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let ranges = append_pieces(other)?.iter().all(|piece| {
+            piece
+                .extract::<IndexArg>()
+                .is_ok_and(|piece| piece.inner.range_span().is_some())
+        });
+        let out = slf.as_super().append(other)?.inner;
         Self::or_index(slf.py(), out, ranges)
     }
 
@@ -12846,18 +12961,26 @@ impl PyPeriodIndex {
         self.as_py_index().any()
     }
 
-    fn append(&self, others: Vec<Bound<'_, PyAny>>) -> PyResult<Self> {
+    /// pandas' `PeriodIndex.append(other)`, `other` an index or a list /
+    /// tuple of them: periods stay a PeriodIndex, anything else is pandas'
+    /// object Index (a lone index's elements were dropped; fvsao.60).
+    fn append(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let pieces = append_pieces(other)?;
         let mut combined = self.inner.values().to_vec();
-        for other in others {
-            if let Ok(pi) = other.extract::<PyRef<'_, PyPeriodIndex>>() {
-                combined.extend(pi.inner.values().iter().copied());
+        for piece in &pieces {
+            match piece.extract::<PyRef<'_, PyPeriodIndex>>() {
+                Ok(pi) => combined.extend(pi.inner.values().iter().copied()),
+                Err(_) => {
+                    let this = Py::new(py, self.clone())?.into_bound(py).into_any();
+                    return Ok(Py::new(py, object_index_of(this, pieces)?)?.into_any());
+                }
             }
         }
         let mut out = PeriodIndex::new(combined);
         if let Some(n) = self.inner.name() {
             out = out.set_name(n);
         }
-        Ok(Self { inner: out })
+        Ok(Py::new(py, Self { inner: out })?.into_any())
     }
 
     fn argmax(&self) -> PyResult<usize> {
@@ -21964,17 +22087,21 @@ impl PySeries {
             return Ok(self.clone());
         };
         // Any index-like target (a DatetimeIndex raised TypeError).
-        let labels = idx_obj.extract::<IndexArg>()?.inner.labels().to_vec();
+        let target = idx_obj.extract::<IndexArg>()?;
+        let labels = target.inner.labels().to_vec();
         let reindexed = match method {
             Some(m) => self.inner.reindex_with_method(labels.clone(), m),
             None => self.inner.reindex(labels.clone()),
         }
         .map_err(frame_error_to_py)?;
+        // The rows are the target's labels: a tz-aware target keeps its zone
+        // (they came back naive UTC, fvsao.60).
+        let reindexed = series_index_in_zone(reindexed, target.inner.tz())?;
         let Some(fill) = fill_value.filter(|fv| !fv.is_none()) else {
             return Ok(PySeries { inner: reindexed });
         };
         let fill = py_to_scalar(py, fill)?;
-        let source_positions = self.inner.index().get_indexer(&Index::new(labels.clone()));
+        let source_positions = self.inner.index().get_indexer(&Index::new(labels));
         let values = reindexed
             .values()
             .iter()
@@ -21987,8 +22114,9 @@ impl PySeries {
                 }
             })
             .collect();
-        let filled =
-            Series::from_values(reindexed.name(), labels, values).map_err(frame_error_to_py)?;
+        let column = Column::from_values(values).map_err(column_error_to_py)?;
+        let filled = Series::new(reindexed.name(), reindexed.index().clone(), column)
+            .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: filled })
     }
 
@@ -22304,20 +22432,23 @@ impl PySeries {
                 .map_err(frame_error_to_py)?;
             return Ok(PySeries { inner: s });
         }
-        let lbls = if let Ok(py_idx) = labels.extract::<PyRef<'_, PyIndex>>() {
-            py_idx.inner.labels().to_vec()
-        } else if let Ok(list) = labels.cast::<PyList>() {
+        // A list's labels, or any index-like's (a DatetimeIndex raised
+        // TypeError), with a tz-aware target's zone (fvsao.60).
+        let (lbls, zone) = if let Ok(list) = labels.cast::<PyList>() {
             let mut v = Vec::with_capacity(list.len());
             for item in list.iter() {
                 v.push(py_to_index_label(&item)?);
             }
-            v
+            (v, None)
         } else {
-            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "set_axis expects Index or list of labels",
-            ));
+            let target = labels.extract::<IndexArg>()?;
+            (
+                target.inner.labels().to_vec(),
+                target.inner.tz().map(str::to_owned),
+            )
         };
         let s = self.inner.set_axis(lbls).map_err(frame_error_to_py)?;
+        let s = series_index_in_zone(s, zone.as_deref())?;
         Ok(PySeries { inner: s })
     }
 
@@ -24044,9 +24175,14 @@ impl PyDataFrame {
     /// '0'), a RangeIndex for pandas' default columns, named as the axis is
     /// (fvsao.32).
     fn column_axis_index(&self) -> Index {
-        Index::new(self.inner.column_labels())
+        let index = Index::new(self.inner.column_labels())
             .with_range_span(self.inner.column_range_span())
-            .rename_index(self.inner.columns_name())
+            .rename_index(self.inner.columns_name());
+        // A transposed tz-aware row index keeps its zone (fvsao.60).
+        match self.inner.columns_tz() {
+            Some(zone) => index.clone().with_tz(Some(zone)).unwrap_or(index),
+            None => index,
+        }
     }
 
     /// `df[name] = value` for the column keyed `name`: a Series on this very
@@ -24715,7 +24851,12 @@ impl PyDataFrame {
                 _ => value.clone(),
             })
             .collect();
-        Series::from_values(reduced.name(), reduced.index().labels().to_vec(), values)
+        // The reduction's own index: its name and zone (fvsao.60).
+        Series::new(
+            reduced.name(),
+            reduced.index().clone(),
+            Column::from_values(values)?,
+        )
     }
 
     /// pandas' skipna=False for min/max/median: a column (or row, for
@@ -24758,7 +24899,12 @@ impl PyDataFrame {
                 _ => value.clone(),
             })
             .collect();
-        Series::from_values(reduced.name(), reduced.index().labels().to_vec(), values)
+        // The reduction's own index: its name and zone (fvsao.60).
+        Series::new(
+            reduced.name(),
+            reduced.index().clone(),
+            Column::from_values(values)?,
+        )
     }
 
     pub fn skew_internal(&self, axis: usize, numeric_only: bool) -> Result<Series, FrameError> {
@@ -32469,13 +32615,24 @@ impl PyDataFrame {
         let target_index = index.or_else(|| labels.filter(|_| ax == 0));
         if let Some(idx_obj) = target_index {
             // Any index-like target (a DatetimeIndex raised TypeError).
-            let row_labels = idx_obj.extract::<IndexArg>()?.inner.labels().to_vec();
+            let target = idx_obj.extract::<IndexArg>()?;
+            let row_labels = target.inner.labels().to_vec();
             res = match (method, &fill) {
                 (Some(m), _) => res.reindex_with_method(row_labels, m),
                 (None, Some(f)) => res.reindex_fill(row_labels, f.clone()),
                 (None, None) => res.reindex(row_labels),
             }
             .map_err(frame_error_to_py)?;
+            // The rows are the target's labels: a tz-aware target keeps its
+            // zone (fvsao.60).
+            if let Some(zone) = target.inner.tz() {
+                let index = res
+                    .index()
+                    .clone()
+                    .with_tz(Some(zone))
+                    .map_err(index_error_to_py)?;
+                res = res.with_index(index).map_err(frame_error_to_py)?;
+            }
         }
         let target_columns = columns.or_else(|| labels.filter(|_| ax == 1));
         if let Some(col_obj) = target_columns {
@@ -33281,9 +33438,9 @@ impl PyDataFrame {
             }
             v
         } else {
-            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "set_axis expects Index or list of labels",
-            ));
+            // Any other array-like (an ndarray, a tuple, a Series), as pandas
+            // takes it (it raised TypeError).
+            labels.extract::<IndexArg>()?.inner.labels().to_vec()
         };
         let df = self
             .inner
@@ -38288,7 +38445,10 @@ impl PyRolling {
                 )?);
             }
         }
-        Series::from_values(s.name(), labels.to_vec(), out).map_err(frame_error_to_py)
+        // The source index itself: its name and zone (bare labels came back
+        // as naive UTC, fvsao.60).
+        let column = Column::from_values(out).map_err(column_error_to_py)?;
+        Series::new(s.name(), s.index().clone(), column).map_err(frame_error_to_py)
     }
 
     /// Refuses a time-based window where `method` only runs count windows
@@ -38755,7 +38915,17 @@ impl PyRolling {
                         .map_err(frame_error_to_py)?;
                     out_series_list.push(self.apply_windows(py, &s, func, raw, args, kwargs)?);
                 }
-                let res_df = DataFrame::from_series(out_series_list).map_err(frame_error_to_py)?;
+                // Every result is on the frame's own rows, in order: aligning
+                // them (from_series) multiplied a repeated label's rows.
+                let names: Vec<String> = col_names.iter().map(|name| name.to_string()).collect();
+                let columns: BTreeMap<String, Column> = names
+                    .iter()
+                    .cloned()
+                    .zip(out_series_list.iter().map(|s| s.column().clone()))
+                    .collect();
+                let res_df = DataFrame::new_with_column_order(df.index().clone(), columns, names)
+                    .map_err(frame_error_to_py)?
+                    .with_recorded_column_labels(df.column_labels());
                 return Ok(Py::new(py, PyDataFrame { inner: res_df })?.into_any());
             }
         }
@@ -39217,9 +39387,10 @@ impl PyExpanding {
                         out_vals.push(res_scalar);
                     }
                 }
+                // The source index itself: its name and zone (fvsao.60).
+                let column = Column::from_values(out_vals).map_err(column_error_to_py)?;
                 let res_series =
-                    Series::from_values(s.name(), s.index().labels().to_vec(), out_vals)
-                        .map_err(frame_error_to_py)?;
+                    Series::new(s.name(), s.index().clone(), column).map_err(frame_error_to_py)?;
                 return Ok(Py::new(py, PySeries { inner: res_series })?.into_any());
             }
             if let Some(ref df) = self.dataframe {
@@ -39256,15 +39427,18 @@ impl PyExpanding {
                             out_vals.push(res_scalar);
                         }
                     }
-                    let s = Series::from_values(
-                        col_name.as_str(),
-                        df.index().labels().to_vec(),
-                        out_vals,
-                    )
-                    .map_err(frame_error_to_py)?;
-                    out_series_list.push(s);
+                    out_series_list
+                        .push(Column::from_values(out_vals).map_err(column_error_to_py)?);
                 }
-                let res_df = DataFrame::from_series(out_series_list).map_err(frame_error_to_py)?;
+                // Every column is on the frame's own rows, in order: its
+                // index as it is (name, zone), no alignment (which multiplied
+                // a repeated label's rows).
+                let names: Vec<String> = col_names.iter().map(|name| name.to_string()).collect();
+                let columns: BTreeMap<String, Column> =
+                    names.iter().cloned().zip(out_series_list).collect();
+                let res_df = DataFrame::new_with_column_order(df.index().clone(), columns, names)
+                    .map_err(frame_error_to_py)?
+                    .with_recorded_column_labels(df.column_labels());
                 return Ok(Py::new(py, PyDataFrame { inner: res_df })?.into_any());
             }
         }
@@ -39745,7 +39919,13 @@ fn flat_index_level_values(index: &Index, level: &Bound<'_, PyAny>) -> PyResult<
         ));
     }
     let values = index.labels().iter().map(index_label_to_scalar).collect();
-    Column::from_values(values).map_err(column_error_to_py)
+    let column = Column::from_values(values).map_err(column_error_to_py)?;
+    // A tz-aware index keys its groups in its zone (they came back naive
+    // UTC, fvsao.60).
+    Ok(match index.tz() {
+        Some(zone) => column.with_dtype(DType::datetime64_tz(zone)),
+        None => column,
+    })
 }
 
 /// `DataFrame.groupby(level=...)` over a flat index: the index labels as the
@@ -40164,6 +40344,12 @@ impl PyGroupBy {
     fn with_unused(&self, op: &str, df: DataFrame) -> PyResult<DataFrame> {
         // The value columns keep the typed labels they had (fvsao.32).
         let df = df.with_recorded_column_labels(self.df.column_labels());
+        let df = match self.key_zone() {
+            Some(zone) => df
+                .with_index(index_in_zone(df.index().clone(), &zone))
+                .map_err(frame_error_to_py)?,
+            None => df,
+        };
         if self.unused.is_empty() {
             return Ok(df);
         }
@@ -40202,6 +40388,15 @@ impl PyGroupBy {
     /// A per-group reduction Series with the unused categories' rows (see
     /// [`Self::with_unused`]).
     fn with_unused_series(&self, op: &str, s: Series) -> PyResult<Series> {
+        let s = match self.key_zone() {
+            Some(zone) => Series::new(
+                s.name(),
+                index_in_zone(s.index().clone(), &zone),
+                s.column().clone(),
+            )
+            .map_err(frame_error_to_py)?,
+            None => s,
+        };
         if self.unused.is_empty() {
             return Ok(s);
         }
@@ -40231,6 +40426,16 @@ impl PyGroupBy {
     fn finish(&self, op: &str, result: Result<DataFrame, FrameError>) -> PyResult<PyDataFrame> {
         let inner = self.with_unused(op, result.map_err(frame_error_to_py)?)?;
         Ok(PyDataFrame { inner })
+    }
+
+    /// The zone of this groupby's one tz-aware key: its groups are the key's
+    /// instants, shown in it (they came back naive UTC, fvsao.60). None over
+    /// several keys or a naive one.
+    fn key_zone(&self) -> Option<String> {
+        match self.by.as_slice() {
+            [key] if self.as_index => self.df.column(key).and_then(column_zone),
+            _ => None,
+        }
     }
 
     /// NotImplementedError for a per-group operation that does not add
@@ -42146,7 +42351,16 @@ impl PySeriesGroupBy {
                 None => s.sort_index(true).map_err(frame_error_to_py)?,
             },
         };
-        self.label_groups(s)
+        let s = self.label_groups(s)?;
+        // One tz-aware key: the groups are its instants, in its zone (they
+        // came back naive UTC, fvsao.60).
+        Ok(match (&self.groups, column_zone(self.by.column())) {
+            (None, Some(zone)) => {
+                let index = index_in_zone(s.index().clone(), &zone);
+                Series::new(s.name(), index, s.column().clone()).map_err(frame_error_to_py)?
+            }
+            _ => s,
+        })
     }
 
     /// Every group's key and row positions in pandas' group order - by key
@@ -42371,6 +42585,13 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .agg(&refs)
             .map_err(frame_error_to_py)?;
+        // One tz-aware key: the groups in its zone (fvsao.60).
+        let df = match column_zone(self.by.column()) {
+            Some(zone) => df
+                .with_index(index_in_zone(df.index().clone(), &zone))
+                .map_err(frame_error_to_py)?,
+            None => df,
+        };
         Ok(Py::new(py, PyDataFrame { inner: df })?.into_any())
     }
 }
@@ -45016,6 +45237,14 @@ fn concat(
         let out = fp_frame::concat_series_with_ignore_index(&refs, ignore_index)
             .map_err(frame_error_to_py)?;
         let Some(keys) = &keys else {
+            let indexes: Vec<&Index> = series.iter().map(Series::index).collect();
+            let out = match mixed_zone_rows(py, &indexes)? {
+                Some(index) if !ignore_index => {
+                    Series::new(out.name(), index, out.column().clone())
+                        .map_err(frame_error_to_py)?
+                }
+                _ => out,
+            };
             return PySeries { inner: out }.into_py_any(py);
         };
         let pieces: Vec<&Index> = series.iter().map(Series::index).collect();
@@ -45101,6 +45330,16 @@ fn concat(
             .set_axis(flat, 0)
             .and_then(|framed| framed.with_row_multiindex(levels))
             .map_err(frame_error_to_py)?;
+    }
+    if keys.is_none() && axis == 0 && !ignore_index {
+        let pieces = frames
+            .iter()
+            .map(frame_row_index)
+            .collect::<PyResult<Vec<_>>>()?;
+        let pieces: Vec<&Index> = pieces.iter().collect();
+        if let Some(index) = mixed_zone_rows(py, &pieces)? {
+            out = out.with_index(index).map_err(frame_error_to_py)?;
+        }
     }
     if ignore_index {
         if axis == 0 {
@@ -45963,6 +46202,9 @@ fn merge_impl(
                 "merge with left_index/right_index mixed with column keys",
             ));
         }
+        // An aware index against a naive one is pandas' TypeError (it
+        // merged the bare instants into an empty frame).
+        fp_index::check_tz_compatible(left.index(), right.index()).map_err(index_error_to_py)?;
         const KEY: &str = "__fp_merge_index_key__";
         let keyed = |frame: &DataFrame| -> PyResult<DataFrame> {
             let labels: Vec<Scalar> = frame
@@ -45998,7 +46240,14 @@ fn merge_impl(
             let span = side.range_span()?;
             (side.labels() == frame.index().labels()).then_some(span)
         });
-        let index = frame.index().rename_index(name).with_range_span(span);
+        // Two tz-aware indexes join in their shared zone, or in UTC for two
+        // zones (they came back naive UTC, fvsao.60).
+        let index = frame
+            .index()
+            .rename_index(name)
+            .with_range_span(span)
+            .with_tz(fp_index::joined_tz(left.index(), right.index()).as_deref())
+            .map_err(index_error_to_py)?;
         return frame.with_index(index).map_err(frame_error_to_py);
     }
 
@@ -56317,7 +56566,14 @@ mod tests {
         assert_eq!(idx_a.union(arg(), None).len(), 3);
         assert_eq!(idx_a.intersection(arg()).len(), 1);
         assert_eq!(idx_a.difference(arg(), None).len(), 1);
-        assert_eq!(idx_a.append(arg()).len(), 4);
+        Python::initialize();
+        Python::attach(|py| {
+            let other = Py::new(py, idx_b.clone())
+                .expect("index")
+                .into_bound(py)
+                .into_any();
+            assert_eq!(idx_a.append(&other).expect("append").len(), 4);
+        });
         // union sorts (pandas' sort=None) unless sort=False.
         let unsorted = PyIndex {
             inner: Index::new(vec![IndexLabel::Int64(9), IndexLabel::Int64(1)]),
