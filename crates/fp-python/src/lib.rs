@@ -1553,16 +1553,7 @@ impl PyTimedelta {
     /// pandas' ISO 8601 duration from the components ('P1DT2H3M4.5S',
     /// 'P-1DT23H0M0S'; it printed the repr text).
     fn isoformat(&self) -> String {
-        if self.nanos == Timedelta::NAT {
-            return "NaT".to_string();
-        }
-        let c = Timedelta::components(self.nanos);
-        let seconds = format!(
-            "{}.{:03}{:03}{:03}",
-            c.seconds, c.milliseconds, c.microseconds, c.nanoseconds
-        );
-        let seconds = seconds.trim_end_matches('0').trim_end_matches('.');
-        format!("P{}DT{}H{}M{seconds}S", c.days, c.hours, c.minutes)
+        Timedelta::isoformat(self.nanos)
     }
 
     #[classattr]
@@ -3991,6 +3982,113 @@ fn py_to_cell(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
             fp_types::HostValue::new(PyHost(obj.clone().unbind())),
         ))),
     }
+}
+
+/// pandas' min / max (`position: false`) or argmin / argmax over an object
+/// column holding non-text cells (dates, a mix of ints and strings): numpy's
+/// object reduction with Python's own comparisons, a missing cell standing
+/// in as +inf (min) / -inf (max) under skipna - so a date beside a missing
+/// value or a string beside an int is pandas' TypeError. The winning row and
+/// cell; None when every cell is missing. fp-frame read such cells as NaN
+/// (fvsao.67). A text-only column keeps fp-frame's path, as pandas' `string`
+/// dtype (which the binding does not tell from object) answers.
+fn object_extreme(
+    py: Python<'_>,
+    series: &Series,
+    maximum: bool,
+    position: bool,
+    skipna: bool,
+) -> PyResult<Option<(usize, Py<PyAny>)>> {
+    let column = series.column();
+    let fill = if maximum {
+        f64::NEG_INFINITY
+    } else {
+        f64::INFINITY
+    };
+    let mut best: Option<(usize, Bound<'_, PyAny>)> = None;
+    let mut any_present = false;
+    for (row, value) in column.values().iter().enumerate() {
+        let cell = if value.is_missing() && skipna {
+            fill.into_bound_py_any(py)?
+        } else {
+            any_present |= !value.is_missing();
+            cell_to_py(py, column, value)?.into_bound(py)
+        };
+        best = Some(match best {
+            None => (row, cell),
+            // numpy: minimum keeps the running value while it is <= the
+            // next; argmin moves only on a strictly smaller one.
+            Some((at, current)) => {
+                let keep = match (maximum, position) {
+                    (false, false) => current.le(&cell)?,
+                    (true, false) => current.ge(&cell)?,
+                    (false, true) => !cell.lt(&current)?,
+                    (true, true) => !cell.gt(&current)?,
+                };
+                if keep { (at, current) } else { (row, cell) }
+            }
+        });
+    }
+    Ok(best
+        .filter(|_| any_present)
+        .map(|(row, cell)| (row, cell.unbind())))
+}
+
+/// `series` with each `datetime.date` / naive `datetime.datetime` object
+/// cell as the instant it names (a date its midnight, as pandas' Timestamp
+/// reads it) and every other cell as it is: how `to_datetime` and `to_json`
+/// read a column of dates (they gave NaT / the date's text; fvsao.67). An
+/// aware datetime stays an object.
+fn object_instants(py: Python<'_>, series: &Series) -> PyResult<Series> {
+    if !series.column().holds_non_text() {
+        return Ok(series.clone());
+    }
+    let values = series
+        .values()
+        .iter()
+        .map(|value| {
+            if !matches!(value, Scalar::Object(fp_types::ObjectValue::Host(_))) {
+                return Ok(value.clone());
+            }
+            let object = scalar_to_py(py, value)?;
+            let object = object.bind(py);
+            let naive = match object.cast::<PyDateTime>() {
+                Ok(instant) => instant.get_tzinfo().is_none(),
+                Err(_) => object.cast::<pyo3::types::PyDate>().is_ok(),
+            };
+            if !naive {
+                return Ok(value.clone());
+            }
+            let stamp = py.get_type::<PyTimestamp>().call1((object,))?;
+            py_to_scalar(py, &stamp)
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    Series::new(
+        series.name(),
+        series.index().clone(),
+        Column::from_object_values(values),
+    )
+    .map_err(frame_error_to_py)
+}
+
+/// `frame` with each column of dates as their instants ([`object_instants`]).
+fn frame_object_instants(py: Python<'_>, frame: &DataFrame) -> PyResult<DataFrame> {
+    let mut out = frame.clone();
+    for position in 0..frame.shape().1 {
+        let Some(column) = frame.column_at(position) else {
+            continue;
+        };
+        if !column.holds_non_text() {
+            continue;
+        }
+        let series =
+            Series::new("", frame.index().clone(), column.clone()).map_err(frame_error_to_py)?;
+        let instants = object_instants(py, &series)?;
+        out = out
+            .isetitem(position, instants.column().clone())
+            .map_err(frame_error_to_py)?;
+    }
+    Ok(out)
 }
 
 /// pandas' TypeError for a group key column holding an unhashable cell (a
@@ -14699,7 +14797,10 @@ fn comparison_scalar(
     other: &Bound<'_, PyAny>,
     dtype: &DType,
 ) -> PyResult<Option<Scalar>> {
-    let scalar = py_to_scalar(py, other)?;
+    // A Python object no scalar holds (a datetime.date, a dict) is an object
+    // cell, compared as Python compares it; it raised "Cannot convert date to
+    // Scalar" (fvsao.67).
+    let scalar = py_to_cell(py, other)?;
     let Scalar::Utf8(text) = &scalar else {
         return Ok(Some(scalar));
     };
@@ -18672,6 +18773,10 @@ impl PySeries {
             self.check_numeric_only("min")?;
         }
         Python::attach(|py| {
+            if self.inner.column().holds_non_text() {
+                return object_extreme(py, &self.inner, false, false, skipna)?
+                    .map_or_else(|| f64::NAN.into_py_any(py), |(_, cell)| Ok(cell));
+            }
             let result = if !skipna {
                 self.inner.min_skipna(false)
             } else {
@@ -18697,6 +18802,10 @@ impl PySeries {
             self.check_numeric_only("max")?;
         }
         Python::attach(|py| {
+            if self.inner.column().holds_non_text() {
+                return object_extreme(py, &self.inner, true, false, skipna)?
+                    .map_or_else(|| f64::NAN.into_py_any(py), |(_, cell)| Ok(cell));
+            }
             let result = if !skipna {
                 self.inner.max_skipna(false)
             } else {
@@ -19194,8 +19303,16 @@ impl PySeries {
                 return Ok(PySeries { inner: out_s });
             }
 
-            // 3. Scalar fill
-            let fill_val = py_to_scalar(py, val)?;
+            // 3. Scalar fill: a Python object no scalar holds (a date) fills
+            // as an object cell (it raised; fvsao.67); a list is refused, as
+            // pandas.
+            if val.is_instance_of::<PyList>() || val.is_instance_of::<pyo3::types::PyTuple>() {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                    "\"value\" parameter must be a scalar or dict, but you passed a \"{}\"",
+                    val.get_type().name()?
+                )));
+            }
+            let fill_val = py_to_cell(py, val)?;
             let new_col = fill_column_with_scalar(self.inner.column(), &fill_val, limit)
                 .map_err(frame_error_to_py)?;
             let out_s = Series::new(
@@ -20004,7 +20121,8 @@ impl PySeries {
             scalars.reserve(len);
             for i in 0..len {
                 let item = seq.get_item(i)?;
-                scalars.push(py_to_scalar(py, &item)?);
+                // A date needle is an object cell (it raised; fvsao.67).
+                scalars.push(py_to_cell(py, &item)?);
             }
         }
         let res = self.inner.isin(&scalars).map_err(frame_error_to_py)?;
@@ -20051,7 +20169,13 @@ impl PySeries {
                 "No axis named {ax} for object type Series"
             )));
         }
-        match self.inner.idxmax_ext(skipna).map_err(frame_error_to_py)? {
+        let found = if self.inner.column().holds_non_text() {
+            object_extreme(py, &self.inner, true, true, skipna)?
+                .and_then(|(row, _)| self.inner.index().labels().get(row).cloned())
+        } else {
+            self.inner.idxmax_ext(skipna).map_err(frame_error_to_py)?
+        };
+        match found {
             Some(label) => row_label_to_py(py, self.inner.index(), &label),
             None => Ok(pyo3::types::PyFloat::new(py, f64::NAN).into_any().unbind()),
         }
@@ -20070,7 +20194,13 @@ impl PySeries {
                 "No axis named {ax} for object type Series"
             )));
         }
-        match self.inner.idxmin_ext(skipna).map_err(frame_error_to_py)? {
+        let found = if self.inner.column().holds_non_text() {
+            object_extreme(py, &self.inner, false, true, skipna)?
+                .and_then(|(row, _)| self.inner.index().labels().get(row).cloned())
+        } else {
+            self.inner.idxmin_ext(skipna).map_err(frame_error_to_py)?
+        };
+        match found {
             Some(label) => row_label_to_py(py, self.inner.index(), &label),
             None => Ok(pyo3::types::PyFloat::new(py, f64::NAN).into_any().unbind()),
         }
@@ -22383,7 +22513,8 @@ impl PySeries {
             if lines {
                 return Err(not_implemented("Series.to_json(lines=True)"));
             }
-            self.inner
+            // A column of dates writes as their instants (fvsao.67).
+            Python::attach(|py| object_instants(py, &self.inner))?
                 .to_json(orient.unwrap_or("index"))
                 .map_err(frame_error_to_py)
         })
@@ -29280,13 +29411,14 @@ impl PyDataFrame {
             for (k, v) in column_dict_arg(&self.inner, dict)?.iter() {
                 let col_name = k.extract::<String>()?;
                 let mut scs = Vec::new();
+                // A date needle is an object cell (it raised; fvsao.67).
                 if let Ok(list) = v.cast::<PyList>() {
                     for item in list.iter() {
-                        scs.push(py_to_scalar(py, &item)?);
+                        scs.push(py_to_cell(py, &item)?);
                     }
                 } else if let Ok(tuple) = v.cast::<pyo3::types::PyTuple>() {
                     for item in tuple.iter() {
-                        scs.push(py_to_scalar(py, &item)?);
+                        scs.push(py_to_cell(py, &item)?);
                     }
                 } else if let Ok(s) = v.extract::<PyRef<'_, PySeries>>() {
                     scs.extend(s.inner.values().iter().cloned());
@@ -29314,7 +29446,7 @@ impl PyDataFrame {
         if let Ok(list) = values.cast::<PyList>() {
             let mut scs = Vec::with_capacity(list.len());
             for item in list.iter() {
-                scs.push(py_to_scalar(py, &item)?);
+                scs.push(py_to_cell(py, &item)?);
             }
             let res = self
                 .inner
@@ -29325,7 +29457,7 @@ impl PyDataFrame {
         if let Ok(tuple) = values.cast::<pyo3::types::PyTuple>() {
             let mut scs = Vec::with_capacity(tuple.len());
             for item in tuple.iter() {
-                scs.push(py_to_scalar(py, &item)?);
+                scs.push(py_to_cell(py, &item)?);
             }
             let res = self
                 .inner
@@ -33474,15 +33606,17 @@ impl PyDataFrame {
             mode,
         };
         write_json_py("DataFrame.to_json", path_or_buf, orient, &args, |lines| {
+            // Columns of dates write as their instants (fvsao.67).
+            let frame = Python::attach(|py| frame_object_instants(py, &self.inner))?;
             if lines {
                 // pandas ends every record line, the last included, with "\n".
-                let mut text = fp_io::write_jsonl_string(&self.inner).map_err(io_error_to_py)?;
+                let mut text = fp_io::write_jsonl_string(&frame).map_err(io_error_to_py)?;
                 if !text.is_empty() && !text.ends_with('\n') {
                     text.push('\n');
                 }
                 Ok(text)
             } else {
-                self.inner
+                frame
                     .to_json(orient.unwrap_or("columns"))
                     .map_err(frame_error_to_py)
             }
@@ -45880,8 +46014,10 @@ fn to_datetime(
         return Ok(py.None());
     }
     if let Ok(s) = arg.extract::<PyRef<'_, PySeries>>() {
-        warn_order(s.inner.values())?;
-        let res = fp_frame::to_datetime_with_options(&s.inner, opts).map_err(to_datetime_error)?;
+        // A column of dates (s.dt.date) is its midnights (it became NaT).
+        let series = object_instants(py, &s.inner)?;
+        warn_order(series.values())?;
+        let res = fp_frame::to_datetime_with_options(&series, opts).map_err(to_datetime_error)?;
         return Ok(Py::new(py, PySeries { inner: res })?.into_any());
     }
     if let Ok(dti) = arg.extract::<PyRef<'_, PyDatetimeIndex>>() {

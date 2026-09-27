@@ -1826,10 +1826,18 @@ impl ColumnData {
     }
 }
 
-/// Compare two non-missing scalars using the given comparison operator.
-///
-/// Both scalars are converted to `f64` for comparison. For `Utf8` values,
-/// lexicographic ordering is used. Returns `Err` for incompatible types.
+/// Whether `op` holds between two values `ordering` apart.
+fn op_holds(ordering: std::cmp::Ordering, op: ComparisonOp) -> bool {
+    match op {
+        ComparisonOp::Lt => ordering.is_lt(),
+        ComparisonOp::Le => ordering.is_le(),
+        ComparisonOp::Gt => ordering.is_gt(),
+        ComparisonOp::Ge => ordering.is_ge(),
+        ComparisonOp::Eq => ordering.is_eq(),
+        ComparisonOp::Ne => ordering.is_ne(),
+    }
+}
+
 /// Python's ordering of two lists: the first unequal items decide, else the
 /// shorter list is the lesser.
 fn list_compare(left: &[Scalar], right: &[Scalar], op: ComparisonOp) -> Result<bool, ColumnError> {
@@ -1838,30 +1846,30 @@ fn list_compare(left: &[Scalar], right: &[Scalar], op: ComparisonOp) -> Result<b
             return scalar_compare(a, b, op);
         }
     }
-    let ordering = left.len().cmp(&right.len());
-    Ok(match op {
-        ComparisonOp::Lt => ordering.is_lt(),
-        ComparisonOp::Le => ordering.is_le(),
-        ComparisonOp::Gt => ordering.is_gt(),
-        ComparisonOp::Ge => ordering.is_ge(),
-        ComparisonOp::Eq => ordering.is_eq(),
-        ComparisonOp::Ne => ordering.is_ne(),
-    })
+    Ok(op_holds(left.len().cmp(&right.len()), op))
 }
 
+/// Compare two non-missing scalars using the given comparison operator.
+///
+/// Both scalars are converted to `f64` for comparison. For `Utf8` values,
+/// lexicographic ordering is used. Returns `Err` for incompatible types.
 fn scalar_compare(left: &Scalar, right: &Scalar, op: ComparisonOp) -> Result<bool, ColumnError> {
     // Object cells (fvsao.33): == / != by the cells' own equality (a list is
     // never equal to a value of another kind); ordering between two lists
-    // itemwise, as Python's; any other ordering of an object is a type error.
+    // itemwise and between two host values (dates) as Python orders them
+    // (fvsao.67); any other ordering of an object is a type error.
     if matches!(left, Scalar::Object(_)) || matches!(right, Scalar::Object(_)) {
         return match op {
             ComparisonOp::Eq => Ok(left == right),
             ComparisonOp::Ne => Ok(left != right),
             _ => {
-                if let (Scalar::Object(a), Scalar::Object(b)) = (left, right)
-                    && let (Some(a), Some(b)) = (a.as_list(), b.as_list())
-                {
-                    return list_compare(a, b, op);
+                if let (Scalar::Object(a), Scalar::Object(b)) = (left, right) {
+                    if let (Some(a), Some(b)) = (a.as_list(), b.as_list()) {
+                        return list_compare(a, b, op);
+                    }
+                    if let Some(ordering) = a.python_cmp(b) {
+                        return Ok(op_holds(ordering, op));
+                    }
                 }
                 let shown = match (left, right) {
                     (Scalar::Object(object), _) | (_, Scalar::Object(object)) => object.repr(),

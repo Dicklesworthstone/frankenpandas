@@ -4158,7 +4158,9 @@ impl Timedelta {
     ///
     /// Matches pandas `pd.Timedelta.isoformat()`. Returns format like
     /// "P1DT2H3M4.567890123S" for 1 day, 2 hours, 3 minutes, 4.567890123 seconds.
-    /// NaT returns "NaT".
+    /// A negative duration is pandas' components form: whole days rounded
+    /// down, then a non-negative clock (-1 day -1 hour is "P-2DT23H0M0S";
+    /// it was "-P1DT1H0M0S"). NaT returns "NaT".
     #[must_use]
     pub fn isoformat(nanos: i64) -> String {
         use std::fmt::Write as _;
@@ -4167,11 +4169,8 @@ impl Timedelta {
             return "NaT".to_string();
         }
 
-        let negative = nanos < 0;
-        let abs_nanos = nanos.saturating_abs();
-
-        let days = abs_nanos / Self::NANOS_PER_DAY;
-        let remaining = abs_nanos % Self::NANOS_PER_DAY;
+        let days = nanos.div_euclid(Self::NANOS_PER_DAY);
+        let remaining = nanos.rem_euclid(Self::NANOS_PER_DAY);
 
         let hours = remaining / Self::NANOS_PER_HOUR;
         let remaining = remaining % Self::NANOS_PER_HOUR;
@@ -4186,9 +4185,6 @@ impl Timedelta {
         // `format!` calls allocated two temporary strings for integral values
         // and three for fractional values before copying them into `result`.
         let mut result = String::with_capacity(40);
-        if negative {
-            result.push('-');
-        }
         // `fmt::Write for String` is infallible.
         let _ = write!(result, "P{days}DT{hours}H{minutes}M{seconds}");
         if sub_sec_nanos != 0 {
@@ -13708,10 +13704,15 @@ mod tests {
             Timedelta::isoformat(Timedelta::NANOS_PER_SEC + 500_000_000),
             "P0DT0H0M1.5S"
         );
+        // TEST-CHANGE (fvsao.68): this pinned "-P1DT1H0M0S"; pandas 2.2.3's
+        // pd.Timedelta(-90000000000000).isoformat() is "P-2DT23H0M0S" (whole
+        // days rounded down, then a non-negative clock), and -1ns is
+        // "P-1DT23H59M59.999999999S" (both measured live).
         assert_eq!(
             Timedelta::isoformat(-(Timedelta::NANOS_PER_DAY + Timedelta::NANOS_PER_HOUR)),
-            "-P1DT1H0M0S"
+            "P-2DT23H0M0S"
         );
+        assert_eq!(Timedelta::isoformat(-1), "P-1DT23H59M59.999999999S");
     }
 
     #[test]
@@ -13787,18 +13788,13 @@ mod tests {
             })
             .collect();
 
-        for &value in &[
-            Timedelta::NAT,
-            0,
-            1,
-            -1,
-            Timedelta::NANOS_PER_DAY,
-            i64::MAX,
-            i64::MIN + 1,
-        ] {
+        // The former implementation wrote a negative duration "-P..."; since
+        // fvsao.68 it is pandas' "P-..." form, so the two agree on
+        // non-negative durations only (the timing still covers both signs).
+        for &value in &[Timedelta::NAT, 0, 1, Timedelta::NANOS_PER_DAY, i64::MAX] {
             assert_eq!(former_impl(value), Timedelta::isoformat(value));
         }
-        for &value in &values {
+        for &value in values.iter().filter(|value| **value >= 0) {
             assert_eq!(former_impl(value), Timedelta::isoformat(value));
         }
 

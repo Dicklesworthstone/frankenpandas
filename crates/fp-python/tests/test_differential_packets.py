@@ -4827,6 +4827,122 @@ def test_dt_date_and_object_labels_match_pandas(case: str) -> None:
     assert _object_label_outcome(fpd, case) == _object_label_outcome(pd, case), case
 
 
+# fvsao.67: a Python object as an operand (== date, isin, fillna, between)
+# raised "Cannot convert date to Scalar"; min / max / idxmax over dates gave
+# NaN; to_datetime of a column of dates gave NaT; to_json wrote the dates'
+# text. An object column's min follows pandas: Python's comparisons with a
+# missing cell as +inf, so a date beside a missing value raises.
+def _nullable_days(m: Any) -> Any:
+    d = datetime.date
+    return m.Series([d(2020, 1, 15), d(2020, 1, 2), None, d(2019, 12, 31)], name="d")
+
+
+def _stamped_dates(m: Any) -> Any:
+    return _stamped_frame(m)["ts"].dt.date
+
+
+_OBJECT_OPERAND_CASES = {
+    "== a date": lambda m: _stamped_dates(m) == datetime.date(2020, 1, 5),
+    "!= a date": lambda m: _stamped_dates(m) != datetime.date(2020, 1, 5),
+    "> a date": lambda m: _stamped_dates(m) > datetime.date(2020, 1, 5),
+    "<= a date": lambda m: _nullable_days(m) <= datetime.date(2020, 1, 2),
+    "== a time": lambda m: _stamped_frame(m)["ts"].dt.time == datetime.time(3, 0),
+    "< a time": lambda m: _stamped_frame(m)["ts"].dt.time < datetime.time(5, 0),
+    "filter rows by date": lambda m: _stamped_frame(m)[_stamped_dates(m) == datetime.date(2020, 1, 5)],
+    "isin dates": lambda m: _stamped_dates(m).isin([datetime.date(2020, 1, 6)]),
+    "isin mixed needles": lambda m: _nullable_days(m).isin([datetime.date(2020, 1, 2), "x", 3]),
+    "frame isin dates": lambda m: m.DataFrame({"d": _days(m)}).isin([datetime.date(2020, 1, 2)]),
+    "fillna a date": lambda m: _stamped_dates(m).fillna(datetime.date(1999, 1, 1)),
+    "between dates": lambda m: _nullable_days(m).between(datetime.date(2020, 1, 1), datetime.date(2020, 1, 31)),
+    "== a dict": lambda m: m.Series([{"a": 1}, {"b": 2}]) == {"a": 1},
+    "min of dates": lambda m: _days(m).min(),
+    "max of dates": lambda m: _days(m).max(),
+    "idxmin of dates": lambda m: _days(m).idxmin(),
+    "idxmax of dates": lambda m: _days(m).idxmax(),
+    "min of dates, NaT dropped": lambda m: _stamped_dates(m).dropna().min(),
+    "min of numeric objects with a missing value": lambda m: m.Series([3, 1.5, None], dtype=object).min(),
+    "to_datetime of dt.date": lambda m: m.to_datetime(_stamped_dates(m)),
+    "to_datetime of a date column": lambda m: m.to_datetime(_nullable_days(m)),
+    "to_json of dates": lambda m: _stamped_dates(m).to_json(),
+    "frame to_json of dates": lambda m: _stamped_frame(m).assign(day=lambda f: f["ts"].dt.date)[["day", "v"]].to_json(),
+    "to_json lines of dates": lambda m: m.DataFrame({"day": [datetime.date(2020, 1, 5)], "v": [1]}).to_json(orient="records", lines=True),
+    # NEGATIVES: pandas refuses these (the exception class is compared).
+    "min of dates beside a missing value raises": lambda m: _stamped_dates(m).min(),
+    "max of dates beside None raises": lambda m: _nullable_days(m).max(),
+    "idxmax beside None raises": lambda m: _nullable_days(m).idxmax(),
+    "min of dates and text raises": lambda m: m.Series([datetime.date(2020, 1, 1), "x"]).min(),
+    "min of ints and text raises": lambda m: m.Series([1, "a"]).min(),
+    "a datetime column == a date is False": lambda m: _stamped_frame(m)["ts"] == datetime.date(2020, 1, 5),
+    "a datetime column < a date raises": lambda m: _stamped_frame(m)["ts"] < datetime.date(2020, 1, 5),
+    "a date > text raises": lambda m: _nullable_days(m) > "x",
+    "a date == text is False": lambda m: _nullable_days(m) == "x",
+    "fillna of a list raises": lambda m: _nullable_days(m).fillna([1, 2]),
+    "isin a list needle": lambda m: _nullable_days(m).isin([[1]]),
+    "isin matches list cells": lambda m: m.Series([[1], [2]]).isin([[1]]),
+    "text dates stay text to to_json": lambda m: m.Series(["2020-01-05"]).to_json(),
+    "times stay text to to_json": lambda m: m.Series([datetime.time(3, 0)]).to_json(),
+}
+
+
+def _object_operand_outcome(m: Any, case: str) -> Any:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return _typed_view(_OBJECT_OPERAND_CASES[case](m))
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_OBJECT_OPERAND_CASES))
+def test_object_operands_and_reductions_match_pandas(case: str) -> None:
+    assert _object_operand_outcome(fpd, case) == _object_operand_outcome(pd, case), case
+
+
+# fvsao.68: to_json wrote datetime64 / timedelta64 values and datetime index
+# keys as their display text ("2020-01-05 00:00:00"); pandas writes epoch
+# milliseconds (truncated toward zero), and ISO 8601 under orient='table'.
+def _temporal_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "d": m.to_datetime(["2020-01-05 03:04:05.123456789", None]),
+            "t": m.to_timedelta(["1D 2h", None]),
+            "v": [1, 2],
+        }
+    )
+
+
+_TEMPORAL_JSON_CASES = {
+    **{f"frame {o}": (lambda o: lambda m: _temporal_frame(m).to_json(orient=o))(o) for o in ("columns", "index", "records", "split", "values", "table")},
+    **{f"datetime Series {o}": (lambda o: lambda m: _temporal_frame(m)["d"].to_json(orient=o))(o) for o in ("index", "split", "records")},
+    **{f"timedelta Series {o}": (lambda o: lambda m: _temporal_frame(m)["t"].to_json(orient=o))(o) for o in ("index", "split", "records")},
+    "datetime index keys": lambda m: m.Series([1, 2], index=m.DatetimeIndex(["2020-01-05 03:04:05.123456", None])).to_json(),
+    "datetime index split": lambda m: m.Series([1, 2], index=m.DatetimeIndex(["2020-01-05", None])).to_json(orient="split"),
+    "datetime index table": lambda m: m.Series([1, 2], index=m.DatetimeIndex(["2020-01-05 03:04:05.123456", None])).to_frame("v").to_json(orient="table"),
+    "timedelta index keys": lambda m: m.Series([1, 2], index=m.to_timedelta(["1D", None])).to_json(),
+    "timedelta index table": lambda m: m.Series([1, 2], index=m.to_timedelta(["1D", None])).to_frame("v").to_json(orient="table"),
+    "negative milliseconds truncate toward zero": lambda m: m.Series(m.to_timedelta([-1, -1_500_000, 1_500_000], unit="ns")).to_json(),
+    "negative durations in ISO": lambda m: m.DataFrame({"t": m.to_timedelta([-90000000000000, 1_002_003], unit="ns")}).to_json(orient="table"),
+    "Timedelta.isoformat of a negative": lambda m: m.Timedelta(-90000000000000).isoformat(),
+    # NEGATIVES: text, numbers and nulls are written as before.
+    "numbers and text unchanged": lambda m: m.DataFrame({"a": [1, 2.5, None], "b": ["x", "y", None]}).to_json(),
+    "date-like text stays text": lambda m: m.Series(["2020-01-05 00:00:00"]).to_json(),
+}
+
+
+def _temporal_json_outcome(m: Any, case: str) -> Any:
+    try:
+        return _TEMPORAL_JSON_CASES[case](m)
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_TEMPORAL_JSON_CASES))
+def test_temporal_to_json_matches_pandas(case: str) -> None:
+    assert _temporal_json_outcome(fpd, case) == _temporal_json_outcome(pd, case), case
+
+
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_string_arithmetic_matches_pandas() -> None:
     # fvsao.13: s + t concatenated nothing - "value 'a' has non-numeric dtype".

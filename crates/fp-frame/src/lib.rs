@@ -4432,6 +4432,62 @@ fn csv_escape_with_char(value: &str, sep: char, escapechar: char) -> String {
     result
 }
 
+/// pandas' to_json number for a datetime64 / timedelta64 value
+/// (date_format='epoch', date_unit='ms'): whole milliseconds, truncated
+/// toward zero, NaT null. They were written as their display text
+/// ("2020-01-05 00:00:00", "1 days 00:00:00"; fvsao.68).
+fn epoch_ms_json(nanos: i64) -> Value {
+    if nanos == Timestamp::NAT {
+        Value::Null
+    } else {
+        Value::from(nanos / 1_000_000)
+    }
+}
+
+/// orient='table''s ISO 8601 form: an instant to the millisecond
+/// ("2020-01-05T03:04:05.123", truncated), a duration as
+/// `Timedelta::isoformat` ("P1DT2H0M0S"); None for a NaT instant.
+fn iso_instant_json(nanos: i64) -> Option<String> {
+    if nanos == Timestamp::NAT {
+        return None;
+    }
+    let seconds = nanos.div_euclid(1_000_000_000);
+    let sub_second = u32::try_from(nanos.rem_euclid(1_000_000_000)).ok()?;
+    DateTime::from_timestamp(seconds, sub_second).map(|instant| {
+        instant
+            .naive_utc()
+            .format("%Y-%m-%dT%H:%M:%S%.3f")
+            .to_string()
+    })
+}
+
+/// A cell of a `dtype` column under orient='table': instants and durations
+/// in ISO 8601 (a duration column's missing cell is pandas' "NaT", a NaT
+/// instant null), anything else as the other orients write it.
+fn scalar_to_table_json_value(value: &Scalar, dtype: &DType) -> Value {
+    match value {
+        Scalar::Datetime64(nanos) => iso_instant_json(*nanos).map_or(Value::Null, Value::String),
+        Scalar::Timedelta64(nanos) => Value::String(Timedelta::isoformat(*nanos)),
+        missing if missing.is_missing() && *dtype == DType::Timedelta64 => {
+            Value::String("NaT".to_owned())
+        }
+        other => scalar_to_json_value(other),
+    }
+}
+
+/// An index label under orient='table': as [`scalar_to_table_json_value`],
+/// but a NaT duration label is null (pandas).
+fn index_label_to_table_json_value(label: &IndexLabel) -> Value {
+    match label {
+        IndexLabel::Datetime64(nanos) => {
+            iso_instant_json(*nanos).map_or(Value::Null, Value::String)
+        }
+        IndexLabel::Timedelta64(nanos) if *nanos == Timedelta::NAT => Value::Null,
+        IndexLabel::Timedelta64(nanos) => Value::String(Timedelta::isoformat(*nanos)),
+        other => index_label_to_json_value(other),
+    }
+}
+
 fn scalar_to_json_value(value: &Scalar) -> Value {
     match value {
         Scalar::Null(_) => Value::Null,
@@ -4441,10 +4497,7 @@ fn scalar_to_json_value(value: &Scalar) -> Value {
             .map(Value::Number)
             .unwrap_or(Value::Null),
         Scalar::Utf8(v) => Value::String(v.clone()),
-        Scalar::Timedelta64(v) if *v == Timedelta::NAT => Value::Null,
-        Scalar::Timedelta64(v) => Value::String(Timedelta::format(*v)),
-        Scalar::Datetime64(v) if *v == Timedelta::NAT => Value::Null,
-        Scalar::Datetime64(v) => Value::String(format_datetime_ns(*v)),
+        Scalar::Timedelta64(v) | Scalar::Datetime64(v) => epoch_ms_json(*v),
         Scalar::Period(v) if v.ordinal == i64::MIN => Value::Null,
         Scalar::Period(v) => Value::String(v.calendar_string()),
         Scalar::Interval(interval) => Value::String(format!("{interval}")),
@@ -4524,10 +4577,13 @@ impl Serialize for CellJson<'_> {
                 }
             }
             Scalar::Utf8(v) => serializer.serialize_str(v),
-            Scalar::Timedelta64(v) if *v == Timedelta::NAT => serializer.serialize_none(),
-            Scalar::Timedelta64(v) => serializer.serialize_str(&Timedelta::format(*v)),
-            Scalar::Datetime64(v) if *v == Timedelta::NAT => serializer.serialize_none(),
-            Scalar::Datetime64(v) => serializer.serialize_str(&format_datetime_ns(*v)),
+            // pandas' epoch milliseconds (scalar_to_json_value's epoch_ms_json).
+            Scalar::Timedelta64(v) | Scalar::Datetime64(v) if *v == Timestamp::NAT => {
+                serializer.serialize_none()
+            }
+            Scalar::Timedelta64(v) | Scalar::Datetime64(v) => {
+                serializer.serialize_i64(*v / 1_000_000)
+            }
             Scalar::Period(v) if v.ordinal == i64::MIN => serializer.serialize_none(),
             Scalar::Period(v) => serializer.serialize_str(&v.calendar_string()),
             Scalar::Interval(interval) => serializer.serialize_str(&format!("{interval}")),
@@ -4788,8 +4844,7 @@ fn index_label_to_json_value(label: &IndexLabel) -> Value {
         IndexLabel::Float64(v) => Value::from(v.0),
         IndexLabel::Bool(b) => Value::from(*b),
         IndexLabel::Utf8(v) => Value::String(v.clone()),
-        IndexLabel::Timedelta64(ns) => Value::String(Timedelta::format(*ns)),
-        IndexLabel::Datetime64(ns) => Value::String(format_datetime_ns(*ns)),
+        IndexLabel::Timedelta64(ns) | IndexLabel::Datetime64(ns) => epoch_ms_json(*ns),
         IndexLabel::Object(object) => scalar_to_json_value(&Scalar::Object(object.clone())),
         // pandas to_json renders a missing label as JSON null.
         IndexLabel::Null(_) => Value::Null,
@@ -4800,8 +4855,12 @@ fn index_label_to_json_key(label: &IndexLabel) -> String {
     match label {
         IndexLabel::Int64(v) => v.to_string(),
         IndexLabel::Utf8(v) => v.clone(),
-        IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
-        IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
+        // pandas keys a datetime / timedelta label by its epoch milliseconds,
+        // a NaT one "null" (fvsao.68; they were the display text).
+        IndexLabel::Timedelta64(ns) | IndexLabel::Datetime64(ns) if *ns == Timestamp::NAT => {
+            "null".to_owned()
+        }
+        IndexLabel::Timedelta64(ns) | IndexLabel::Datetime64(ns) => (*ns / 1_000_000).to_string(),
         f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
         IndexLabel::Object(object) => object.to_string(),
         IndexLabel::Null(_) => label.to_string(),
@@ -8436,6 +8495,14 @@ fn compare_non_missing_scalars_for_between(
         // `df["date"].between(start, end)` — the canonical date-range filter — failed.
         (Scalar::Timedelta64(lhs), Scalar::Timedelta64(rhs))
         | (Scalar::Datetime64(lhs), Scalar::Datetime64(rhs)) => Ok(lhs.cmp(rhs)),
+        // Object cells (dates between two dates) as Python orders them; a
+        // type error where Python cannot (fvsao.67).
+        (Scalar::Object(lhs), Scalar::Object(rhs)) => lhs.python_cmp(rhs).ok_or_else(|| {
+            FrameError::Column(ColumnError::Type(fp_types::TypeError::NonNumericValue {
+                value: lhs.repr(),
+                dtype: DType::Utf8,
+            }))
+        }),
         _ => Err(FrameError::CompatibilityRejected(format!(
             "between: cannot compare {:?} value with {:?} bound",
             value.dtype(),
@@ -27219,8 +27286,14 @@ impl Series {
                     .iter()
                     .map(scalar_to_json_value)
                     .collect();
+                // An unnamed Series' name is null, a typed one (0) its value.
+                let name = if self.name.is_empty() {
+                    Value::Null
+                } else {
+                    index_label_to_json_value(&self.name.label())
+                };
                 serialize_json_value(&Value::Object(Map::from_iter([
-                    ("name".to_owned(), Value::String(self.name.to_string())),
+                    ("name".to_owned(), name),
                     ("index".to_owned(), Value::Array(index)),
                     ("data".to_owned(), Value::Array(data)),
                 ])))
@@ -86474,14 +86547,19 @@ impl DataFrame {
                 let data = (0..self.len())
                     .map(|row_idx| {
                         let mut row = Map::new();
+                        // The table schema's instants and durations are ISO
+                        // 8601, not the other orients' epoch milliseconds.
                         row.insert(
                             index_name.clone(),
-                            index_label_to_json_value(&self.index.labels()[row_idx]),
+                            index_label_to_table_json_value(&self.index.labels()[row_idx]),
                         );
                         for (col_idx, name) in self.column_order.iter().enumerate() {
                             row.insert(
                                 self.table_column_name(col_idx)?,
-                                scalar_to_json_value(&self.columns[name].values()[row_idx]),
+                                scalar_to_table_json_value(
+                                    &self.columns[name].values()[row_idx],
+                                    &self.columns[name].dtype(),
+                                ),
                             );
                         }
                         Ok(Value::Object(row))
@@ -127200,6 +127278,120 @@ mod tests {
         .unwrap();
         assert_eq!(mixed.nunique_with_dropna(false), 2);
         assert_eq!(mixed.nunique_with_dropna(true), 1);
+    }
+
+    #[test]
+    fn object_cells_compare_and_bound_in_their_own_order_fvsao_67() {
+        use fp_types::{HostValue, ObjectValue};
+        let day = |n: u32| Scalar::Object(ObjectValue::Host(HostValue::new(Day(n))));
+        let rows: Vec<IndexLabel> = (0..3).map(IndexLabel::Int64).collect();
+        let days = Series::from_values("d", rows.clone(), vec![day(15), day(2), day(9)]).unwrap();
+        let flags = |series: Series| series.values().to_vec();
+        let bools = |values: [bool; 3]| values.into_iter().map(Scalar::Bool).collect::<Vec<_>>();
+        // Ordering two host cells is the host's order (2 < 9 < 15; the reprs
+        // put "Day(15)" first); it was a type error.
+        let nines = Series::from_values("n", rows.clone(), vec![day(9), day(9), day(9)]).unwrap();
+        assert_eq!(flags(days.gt(&nines).unwrap()), bools([true, false, false]));
+        assert_eq!(flags(days.le(&nines).unwrap()), bools([false, true, true]));
+        // between two host bounds, inclusive both ends.
+        assert_eq!(
+            flags(days.between(&day(2), &day(9), "both").unwrap()),
+            bools([false, true, true])
+        );
+        // NEGATIVE: a host value cannot be ordered against text - a type
+        // error, not an answer - but == answers (never equal).
+        let text = Scalar::Utf8("x".to_owned());
+        let texts =
+            Series::from_values("t", rows, vec![text.clone(), text.clone(), text.clone()]).unwrap();
+        assert!(days.gt(&texts).is_err());
+        assert!(days.between(&text, &text, "both").is_err());
+        assert_eq!(
+            flags(days.eq(&texts).unwrap()),
+            bools([false, false, false])
+        );
+    }
+
+    #[test]
+    fn temporal_json_is_epoch_milliseconds_and_table_iso_fvsao_68() {
+        let rows = vec![IndexLabel::Int64(0), IndexLabel::Int64(1)];
+        let instants = Series::new(
+            "d",
+            Index::new(rows.clone()),
+            Column::new(
+                DType::datetime64_naive(),
+                vec![
+                    Scalar::Datetime64(1_578_193_445_123_456_789),
+                    Scalar::Null(NullKind::NaT),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let durations = Series::new(
+            "t",
+            Index::new(rows.clone()),
+            Column::new(
+                DType::Timedelta64,
+                vec![
+                    Scalar::Timedelta64(93_600_000_000_000),
+                    Scalar::Null(NullKind::NaT),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let frame = DataFrame::from_series(vec![instants.clone(), durations]).unwrap();
+        // pandas' epoch milliseconds on every orient but table; NaT null.
+        assert_eq!(
+            frame.to_json("records").unwrap(),
+            r#"[{"d":1578193445123,"t":93600000},{"d":null,"t":null}]"#
+        );
+        assert_eq!(
+            frame.to_json("columns").unwrap(),
+            r#"{"d":{"0":1578193445123,"1":null},"t":{"0":93600000,"1":null}}"#
+        );
+        assert_eq!(
+            instants.to_json("split").unwrap(),
+            r#"{"name":"d","index":[0,1],"data":[1578193445123,null]}"#
+        );
+        // orient='table': ISO 8601 to the millisecond, a duration's ISO form,
+        // a duration column's missing cell "NaT", an instant's null.
+        let table = frame.to_json("table").unwrap();
+        assert!(
+            table.contains(r#""d":"2020-01-05T03:04:05.123""#),
+            "{table}"
+        );
+        assert!(table.contains(r#""t":"P1DT2H0M0S""#), "{table}");
+        assert!(table.contains(r#""d":null,"t":"NaT""#), "{table}");
+        // A datetime label keys by its epoch milliseconds (a NaT one "null"),
+        // truncated toward zero before 1970.
+        let keyed = Series::from_values(
+            "v",
+            vec![
+                IndexLabel::Datetime64(-500_000),
+                IndexLabel::Datetime64(fp_types::Timestamp::NAT),
+            ],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+        assert_eq!(keyed.to_json("index").unwrap(), r#"{"0":1,"null":2}"#);
+        // An unnamed Series' split name is null.
+        let unnamed =
+            Series::from_values("", rows, vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap();
+        assert!(
+            unnamed
+                .to_json("split")
+                .unwrap()
+                .starts_with(r#"{"name":null,"#)
+        );
+        // NEGATIVE: text that looks like a date, and numbers, stay as they are.
+        let text = Series::from_values(
+            "s",
+            vec![IndexLabel::Int64(0)],
+            vec![Scalar::Utf8("2020-01-05".to_owned())],
+        )
+        .unwrap();
+        assert_eq!(text.to_json("index").unwrap(), r#"{"0":"2020-01-05"}"#);
     }
 
     #[test]
