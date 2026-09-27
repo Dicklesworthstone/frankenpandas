@@ -55229,6 +55229,10 @@ fn plotting_deregister_matplotlib_converters() -> PyResult<()> {
 /// FrankenPandas Python module.
 #[pymodule]
 fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Every call into the core holds the GIL, which a Python object cell
+    // needs; the core's kernels then run inline while such a cell is alive
+    // instead of deadlocking their workers (4qg5w.13).
+    fp_types::declare_host_lock();
     // The Cargo package version, not a literal: the 0.3.0 wheel reported 0.2.0.
     // (br-frankenpandas-rc0923-epic-buildable-everywhere-0zz8y.3)
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

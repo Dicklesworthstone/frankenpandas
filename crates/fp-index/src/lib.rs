@@ -231,9 +231,15 @@ impl IndexLabel {
 /// the parallel work it was sizing.
 ///
 /// Caching means this will not notice an affinity or quota change made from outside a
-/// running process; that is the right trade for sizing a worker pool.
+/// running process; that is the right trade for sizing a worker pool. One worker while
+/// a Python object cell is alive in the binding's process, as
+/// `fp_columnar::cached_available_parallelism` (a worker touching one would wait on the
+/// GIL its caller holds; 4qg5w.13).
 fn cached_available_parallelism() -> usize {
     static AVAILABLE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    if fp_types::host_values_block_workers() {
+        return 1;
+    }
     *AVAILABLE
         .get_or_init(|| std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get))
 }

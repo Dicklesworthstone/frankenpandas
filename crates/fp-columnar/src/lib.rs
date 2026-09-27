@@ -10279,8 +10279,17 @@ fn binary_parallel_min_len(op: ArithmeticOp) -> usize {
 /// to size a worker pool for one kernel, where re-reading a 7-file walk per call
 /// costs far more than tracking a change that does not happen. The env-derived
 /// policy beside it is cached the same way and for the same reason.
+///
+/// One worker (inline) while a Python object cell is alive in the Python
+/// binding's process: a worker thread that compares, hashes or prints one
+/// needs the GIL, which the calling thread holds while it waits for the
+/// worker - a deadlock (`fp_types::host_values_block_workers`;
+/// groupby(dates).rank() hung, 4qg5w.13).
 pub fn cached_available_parallelism() -> usize {
     static AVAILABLE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    if fp_types::host_values_block_workers() {
+        return 1;
+    }
     *AVAILABLE
         .get_or_init(|| std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get))
 }

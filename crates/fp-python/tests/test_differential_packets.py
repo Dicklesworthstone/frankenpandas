@@ -5153,6 +5153,37 @@ def test_python_objects_as_labels_match_pandas(case: str) -> None:
     assert _label_object_outcome(fpd, case) == _label_object_outcome(pd, case), case
 
 
+_OBJECT_PARALLEL_SCRIPT = """
+import datetime, json, sys
+import {module} as m
+d = datetime.date
+frame = m.DataFrame({{"k": [d(2020, 1, 1), d(2020, 1, 2), d(2020, 1, 1)], "v": [1, 2, 3], "w": [3.5, 1.5, 2.5]}})
+print(json.dumps(frame.groupby("k").rank().to_dict("list")))
+"""
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_parallel_kernels_over_python_objects_do_not_deadlock() -> None:
+    # 4qg5w.13: DataFrame.groupby(dates).rank() hung forever - its column
+    # workers hashed the date keys through Python, waiting on the GIL their
+    # caller held while it waited for them. Run in a subprocess so a
+    # regression fails on the timeout instead of hanging the suite.
+    import subprocess
+    import sys
+
+    results = {}
+    for name in ("pandas", "frankenpandas"):
+        done = subprocess.run(
+            [sys.executable, "-c", _OBJECT_PARALLEL_SCRIPT.format(module=name)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert done.returncode == 0, done.stderr[-2000:]
+        results[name] = json.loads(done.stdout)
+    assert results["frankenpandas"] == results["pandas"]
+
+
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_string_arithmetic_matches_pandas() -> None:
     # fvsao.13: s + t concatenated nothing - "value 'a' has non-numeric dtype".

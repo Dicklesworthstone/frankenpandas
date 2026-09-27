@@ -1228,31 +1228,76 @@ pub trait HostObject: Send + Sync {
     fn as_any(&self) -> &dyn std::any::Any;
 }
 
+/// How many host objects are alive (see [`host_values_block_workers`]).
+static LIVE_HOST_VALUES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Whether this process's callers may hold a host lock (see
+/// [`declare_host_lock`]).
+static HOST_LOCK_DECLARED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Declare that callers into the core may hold a host lock that host objects
+/// need - the Python binding, whose every call holds the GIL, declares it
+/// when its module loads. Without it no worker is ever blocked.
+pub fn declare_host_lock() {
+    HOST_LOCK_DECLARED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether a parallel kernel must run inline (one worker): a host value
+/// compares, hashes and prints through its host (Python), which a worker
+/// thread reaches only by taking the host's lock (the GIL); when the thread
+/// that spawned the worker holds that lock while it waits for the worker,
+/// both wait forever - `DataFrame.groupby(dates).rank()` hung that way
+/// (4qg5w.13). So while any host object is alive in a process whose callers
+/// may hold that lock, kernels size themselves to one worker.
+#[must_use]
+pub fn host_values_block_workers() -> bool {
+    workers_blocked(
+        HOST_LOCK_DECLARED.load(std::sync::atomic::Ordering::Relaxed),
+        LIVE_HOST_VALUES.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+/// The rule of [`host_values_block_workers`], free of process state.
+const fn workers_blocked(host_lock_declared: bool, live_host_values: usize) -> bool {
+    host_lock_declared && live_host_values > 0
+}
+
+/// A host object, counted alive while any handle to it exists.
+struct HostSlot(Box<dyn HostObject>);
+
+impl Drop for HostSlot {
+    fn drop(&mut self) {
+        LIVE_HOST_VALUES.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// A shared handle on a [`HostObject`].
 #[derive(Clone)]
-pub struct HostValue(std::sync::Arc<dyn HostObject>);
+pub struct HostValue(std::sync::Arc<HostSlot>);
 
 impl HostValue {
     #[must_use]
     pub fn new(object: impl HostObject + 'static) -> Self {
-        Self(std::sync::Arc::new(object))
+        LIVE_HOST_VALUES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self(std::sync::Arc::new(HostSlot(Box::new(object))))
     }
 
     #[must_use]
     pub fn object(&self) -> &dyn HostObject {
-        &*self.0
+        &*self.0.0
     }
 }
 
 impl PartialEq for HostValue {
     fn eq(&self, other: &Self) -> bool {
-        std::sync::Arc::ptr_eq(&self.0, &other.0) || self.0.host_eq(&*other.0)
+        std::sync::Arc::ptr_eq(&self.0, &other.0) || self.object().host_eq(other.object())
     }
 }
 
 impl std::fmt::Debug for HostValue {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0.host_repr())
+        formatter.write_str(&self.object().host_repr())
     }
 }
 
@@ -1280,7 +1325,7 @@ impl ObjectValue {
                 let parts: Vec<String> = items.iter().map(Scalar::python_repr).collect();
                 format!("[{}]", parts.join(", "))
             }
-            Self::Host(value) => value.0.host_repr(),
+            Self::Host(value) => value.object().host_repr(),
         }
     }
 
@@ -1300,7 +1345,7 @@ impl ObjectValue {
                     .collect();
                 format!("[{}]", parts.join(", "))
             }
-            Self::Host(value) => value.0.host_str(),
+            Self::Host(value) => value.object().host_str(),
         }
     }
 
@@ -1309,7 +1354,7 @@ impl ObjectValue {
     #[must_use]
     pub fn python_eq_scalar(&self, other: &Scalar) -> bool {
         match self {
-            Self::Host(value) => value.0.host_eq_scalar(other),
+            Self::Host(value) => value.object().host_eq_scalar(other),
             Self::List(_) => false,
         }
     }
@@ -1324,7 +1369,7 @@ impl ObjectValue {
                 if left == right {
                     Some(std::cmp::Ordering::Equal)
                 } else {
-                    left.0.host_cmp(&*right.0)
+                    left.object().host_cmp(right.object())
                 }
             }
             (Self::List(left), Self::List(right)) => {
@@ -1431,9 +1476,9 @@ impl std::hash::Hash for ObjectValue {
             }
             Self::Host(value) => {
                 1_u8.hash(state);
-                match value.0.host_hash() {
+                match value.object().host_hash() {
                     Some(hash) => hash.hash(state),
-                    None => value.0.host_repr().hash(state),
+                    None => value.object().host_repr().hash(state),
                 }
             }
         }
@@ -1452,7 +1497,7 @@ impl std::fmt::Display for ObjectValue {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::List(_) => formatter.write_str(&self.repr()),
-            Self::Host(value) => formatter.write_str(&value.0.host_str()),
+            Self::Host(value) => formatter.write_str(&value.object().host_str()),
         }
     }
 }
@@ -8837,6 +8882,29 @@ mod tests {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
+    }
+
+    #[test]
+    fn host_values_block_workers_only_under_a_declared_host_lock_4qg5w_13() {
+        use std::sync::atomic::Ordering;
+
+        use super::{HostValue, LIVE_HOST_VALUES, workers_blocked};
+        // The rule: inline only when a host lock may be held AND a host value
+        // is alive. NEGATIVE: without a declared lock (pure Rust callers, this
+        // test process) nothing is blocked however many host values live.
+        assert!(workers_blocked(true, 1));
+        assert!(!workers_blocked(true, 0));
+        assert!(!workers_blocked(false, 3));
+        // The count: non-zero while a handle is held, clones included (other
+        // tests may hold host values concurrently, so only "alive while held"
+        // is asserted, never "dead after drop"; the lock is never declared
+        // here, so no concurrent test loses its workers).
+        let first = HostValue::new(Named("held"));
+        assert!(LIVE_HOST_VALUES.load(Ordering::Relaxed) > 0);
+        let clone = first.clone();
+        drop(first);
+        assert!(LIVE_HOST_VALUES.load(Ordering::Relaxed) > 0);
+        assert_eq!(clone.object().host_str(), "held");
     }
 
     #[test]
