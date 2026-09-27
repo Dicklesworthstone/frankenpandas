@@ -34960,7 +34960,6 @@ impl PyDataFrame {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
         reject_unsupported_kwargs("to_feather", kwargs, &[])?;
-        arrow_writer_frame("to_feather", &self.inner, None)?;
         let bytes = fp_io::write_feather_bytes(&self.inner).map_err(io_error_to_py)?;
         py_output_bytes(py, Some(path), bytes).map(|_| ())
     }
@@ -35087,7 +35086,7 @@ impl PyDataFrame {
             "DataFrame.to_orc",
             &[("engine_kwargs", engine_kwargs.is_none_or(|k| k.is_none()))],
         )?;
-        arrow_writer_frame("to_orc", &self.inner, index)?;
+        let _ = index; // the ORC writer fails closed (no-Tokio policy) before it matters
         let bytes = fp_io::write_orc_bytes(&self.inner).map_err(io_error_to_py)?;
         py_output_bytes(py, path, bytes)
     }
@@ -35120,8 +35119,9 @@ impl PyDataFrame {
             }
         };
         reject_unsupported_kwargs("to_parquet", kwargs, &[])?;
-        arrow_writer_frame("to_parquet", &self.inner, index)?;
-        let bytes = fp_io::write_parquet_bytes_with_compression(&self.inner, codec)
+        // The index travels as pandas writes it (a label index was refused;
+        // br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.22).
+        let bytes = fp_io::write_parquet_bytes_with_compression(&self.inner, codec, index)
             .map_err(io_error_to_py)?;
         py_output_bytes(py, path, bytes)
     }
@@ -55348,17 +55348,6 @@ fn py_output_text(target: Option<&Bound<'_, PyAny>>, text: String) -> PyResult<O
     Ok(None)
 }
 
-/// True for an unnamed 0..n Int64 row index — the one index fp-io's Arrow
-/// writers can omit without losing information (pandas stores it as metadata).
-fn has_default_range_index(frame: &DataFrame) -> bool {
-    let index = frame.index();
-    frame.row_multiindex().is_none()
-        && index.name().is_none()
-        && index.labels().iter().enumerate().all(|(pos, label)| {
-            matches!(label, IndexLabel::Int64(v) if usize::try_from(*v).ok() == Some(pos))
-        })
-}
-
 /// `Series.to_frame()` for the Series writers: an unnamed Series becomes column
 /// `0`, as in pandas.
 /// pandas' `to_csv` keywords, shared by `DataFrame.to_csv` and
@@ -55898,17 +55887,6 @@ fn series_as_frame(series: &Series) -> PyResult<PyDataFrame> {
     Ok(PyDataFrame {
         inner: series.to_frame(Some(name)).map_err(frame_error_to_py)?,
     })
-}
-
-/// fp-io's Parquet/Feather writers serialize columns only; refuse rather than
-/// silently drop a label index pandas would have kept.
-fn arrow_writer_frame(func: &str, frame: &DataFrame, index: Option<bool>) -> PyResult<()> {
-    if index != Some(false) && !has_default_range_index(frame) {
-        return Err(not_implemented(&format!(
-            "{func} with a non-default index (call reset_index() first, or pass index=False)"
-        )));
-    }
-    Ok(())
 }
 
 /// Keyword arguments this binding does not implement: any non-None value raises

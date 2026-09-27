@@ -11173,3 +11173,65 @@ def _categorical_summary_outcome(m: Any, run: Any) -> Any:
 def test_categorical_describe_unique_and_repr_like_pandas(case: str) -> None:
     run = _CATEGORICAL_SUMMARY_CASES[case]
     assert _categorical_summary_outcome(fpd, run) == _categorical_summary_outcome(pd, run), case
+
+
+# br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.22: Parquet / Feather
+# keep the row index as pandas does - a RangeIndex as metadata, any other index
+# as columns recorded in the 'pandas' schema metadata - and both readers
+# restore it. fp's writers refused a label index and its readers read
+# pandas' index columns ('k', '__index_level_0__') as data over 0..n, losing a
+# RangeIndex's start and step; a pandas nullable Int64 column read as float64.
+_ARROW_INDEX_FRAMES = {
+    "named str index": lambda m: m.DataFrame({"a": [1, 2], "b": ["x", "y"]}, index=m.Index(["p", "q"], name="k")),
+    "unnamed str index": lambda m: m.DataFrame({"a": [1, 2]}, index=["p", "q"]),
+    "datetime index": lambda m: m.DataFrame({"a": [1, 2]}, index=m.to_datetime(["2024-01-01", "2024-01-02"])),
+    "tz datetime index": lambda m: m.DataFrame({"a": [1, 2]}, index=m.DatetimeIndex(m.to_datetime(["2024-01-01", "2024-01-02"]).tz_localize("UTC"), name="t")),
+    "RangeIndex(5, 7)": lambda m: m.DataFrame({"a": [1, 2]}, index=m.RangeIndex(5, 7)),
+    "RangeIndex step 2, named": lambda m: m.DataFrame({"a": [1, 2]}, index=m.RangeIndex(0, 4, 2, name="r")),
+    "default RangeIndex": lambda m: m.DataFrame({"a": [1, 2]}),
+    "int index": lambda m: m.DataFrame({"a": [1, 2]}, index=[10, 20]),
+    "float index": lambda m: m.DataFrame({"a": [1, 2]}, index=[0.5, 1.5]),
+    "MultiIndex half named": lambda m: m.DataFrame({"a": [1, 2]}, index=m.MultiIndex.from_tuples([("x", 1), ("y", 2)], names=["k", None])),
+    "MultiIndex named": lambda m: m.DataFrame({"a": [1, 2]}, index=m.MultiIndex.from_tuples([("x", 1), ("y", 2)], names=["k", "n"])),
+    "columns axis name": lambda m: m.DataFrame({"a": [1, 2]}).rename_axis("cols", axis=1),
+    "index named like a column": lambda m: m.DataFrame({"a": [1, 2]}, index=m.Index(["p", "q"], name="a")),
+    "nullable Int64 column": lambda m: m.DataFrame({"a": m.array([1, None], dtype="Int64")}),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("fmt", ["parquet", "feather"])
+@pytest.mark.parametrize("case", list(_ARROW_INDEX_FRAMES))
+def test_arrow_files_keep_the_row_index_like_pandas(case: str, fmt: str, tmp_path: Path) -> None:
+    pytest.importorskip("pyarrow")
+    build = _ARROW_INDEX_FRAMES[case]
+    pd_path, fp_path = str(tmp_path / f"pd.{fmt}"), str(tmp_path / f"fp.{fmt}")
+    getattr(build(pd), f"to_{fmt}")(pd_path)
+    getattr(build(fpd), f"to_{fmt}")(fp_path)
+    read_pd, read_fp = getattr(pd, f"read_{fmt}"), getattr(fpd, f"read_{fmt}")
+    expected = read_pd(pd_path)
+    # pandas reads fp's file exactly as it reads its own (index type, name, dtypes).
+    pd.testing.assert_frame_equal(read_pd(fp_path), expected)
+    # fp reads either file back as pandas does.
+    for path in (pd_path, fp_path):
+        got = read_fp(path)
+        assert repr(got) == repr(expected), path
+        assert [str(v) for v in got.index.tolist()] == [str(v) for v in expected.index.tolist()], path
+        assert list(got.index.names) == list(expected.index.names), path
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("index", [None, True, False])
+@pytest.mark.parametrize("case", ["named str index", "default RangeIndex"])
+def test_to_parquet_index_argument_like_pandas(case: str, index: Any, tmp_path: Path) -> None:
+    pyarrow_parquet = pytest.importorskip("pyarrow.parquet")
+    build = _ARROW_INDEX_FRAMES[case]
+    pd_path, fp_path = str(tmp_path / "pd.parquet"), str(tmp_path / "fp.parquet")
+    build(pd).to_parquet(pd_path, index=index)
+    build(fpd).to_parquet(fp_path, index=index)
+    # The same columns in the file: index=None keeps a RangeIndex as metadata
+    # only (NEGATIVE for a writer that always writes the index as a column),
+    # True writes it, False writes no index.
+    assert pyarrow_parquet.read_schema(fp_path).names == pyarrow_parquet.read_schema(pd_path).names
+    pd.testing.assert_frame_equal(pd.read_parquet(fp_path), pd.read_parquet(pd_path))
+    assert repr(fpd.read_parquet(fp_path)) == repr(pd.read_parquet(pd_path))

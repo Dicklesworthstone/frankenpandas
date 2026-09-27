@@ -333,11 +333,17 @@ def test_to_parquet_without_a_path_returns_parquet_bytes():
     assert payload[:4] == b"PAR1" and payload[-4:] == b"PAR1"
 
 
-def test_arrow_writers_refuse_to_drop_a_label_index(tmp_path):
+def test_arrow_writers_keep_a_label_index(tmp_path):
+    # TEST-CHANGE (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.22):
+    # the writers refused a label index (NotImplementedError); they now write
+    # it as pandas does and the readers restore it.
     frame = fpd.DataFrame({"k": ["x", "y"], "v": [1, 2]}).set_index("k")
-    for writer in ("to_parquet", "to_feather"):
-        with pytest.raises(NotImplementedError, match="non-default index"):
-            getattr(frame, writer)(str(tmp_path / f"idx.{writer}"))
+    for writer, reader in (("to_parquet", fpd.read_parquet), ("to_feather", fpd.read_feather)):
+        path = str(tmp_path / f"idx.{writer}")
+        getattr(frame, writer)(path)
+        back = reader(path)
+        assert back.index.tolist() == ["x", "y"] and back.index.name == "k"
+        assert _as_lists(back) == {"v": [1, 2]}
     # index=False is an explicit request to drop it, as in pandas.
     frame.to_parquet(str(tmp_path / "no_index.parquet"), index=False)
     assert _as_lists(fpd.read_parquet(str(tmp_path / "no_index.parquet"))) == {"v": [1, 2]}

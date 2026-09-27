@@ -110,7 +110,7 @@ use arrow::{
         TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
         TimestampSecondArray,
     },
-    datatypes::{DataType as ArrowDataType, Field, Metadata as ArrowMetadata, Schema, TimeUnit},
+    datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit},
 };
 use csv::{ReaderBuilder, StringRecord, WriterBuilder};
 use dta::stata::{
@@ -7148,19 +7148,15 @@ fn materialize_synthetic_row_multiindex_columns(frame: &DataFrame) -> Result<Dat
     materialize_row_multiindex_columns(frame, &names)
 }
 
-/// Schema-level metadata key under which Parquet / Feather / Arrow IPC files
-/// carry the row MultiIndex level names (a JSON array, `null` for an unnamed
-/// level). The level VALUES travel as the synthetic `__index_level_N__`
-/// columns that `promote_synthetic_row_multiindex_if_present` recognises; the
-/// NAMES had nowhere to go, so every round-trip came back as
-/// `__index_level_0__` / `__index_level_1__` / ... where pandas keeps
-/// `region` / `product` / `year` (br-frankenpandas-wfkzm).
-const ROW_MULTIINDEX_NAMES_METADATA_KEY: &str = "frankenpandas.row_multiindex_names";
-
-/// Same payload for the JSON `split` orient, as an extra top-level key. pandas
-/// cannot round-trip a MultiIndex through `split` at all
-/// (`read_json(orient="split")` raises NotImplementedError on the tuple
-/// index), so the key costs no interoperability.
+/// The row MultiIndex level names (a JSON array, `null` for an unnamed level)
+/// for the JSON `split` orient, as an extra top-level key: the level VALUES
+/// travel as the synthetic `__index_level_N__` columns that
+/// `promote_synthetic_row_multiindex_if_present` recognises, the NAMES had
+/// nowhere to go (br-frankenpandas-wfkzm). pandas cannot round-trip a
+/// MultiIndex through `split` at all (`read_json(orient="split")` raises
+/// NotImplementedError on the tuple index), so the key costs no
+/// interoperability. Parquet / Feather / Arrow IPC carry them in pandas'
+/// own metadata instead (`pandas_arrow_layout`).
 const JSON_SPLIT_INDEX_NAMES_KEY: &str = "index_names";
 
 /// Re-apply level names to a frame whose row MultiIndex was rebuilt from the
@@ -7178,13 +7174,6 @@ fn restore_row_multiindex_names(
     }
     let renamed = row_multiindex.clone().set_names(names.to_vec());
     frame.with_row_multiindex(renamed).map_err(IoError::from)
-}
-
-fn row_multiindex_names_from_arrow_metadata(
-    metadata: &ArrowMetadata,
-) -> Option<Vec<Option<String>>> {
-    let raw = metadata.get(ROW_MULTIINDEX_NAMES_METADATA_KEY)?;
-    serde_json::from_str::<Vec<Option<String>>>(raw).ok()
 }
 
 fn promote_frame_index_columns(
@@ -9875,6 +9864,12 @@ fn retag_from_field_metadata(col: Column, field: &Field) -> Column {
         "Float64Nullable" => DType::Float64Nullable,
         _ => return col,
     };
+    retag_nullable(col, declared)
+}
+
+/// `col` as the nullable extension dtype `declared` (Int64 / Float64 /
+/// boolean), keeping its values.
+fn retag_nullable(col: Column, declared: DType) -> Column {
     if col.dtype() == declared {
         return col;
     }
@@ -9892,25 +9887,158 @@ fn retag_from_field_metadata(col: Column, field: &Field) -> Column {
     }
 }
 
-fn dataframe_to_record_batch(frame: &DataFrame) -> Result<RecordBatch, IoError> {
-    let row_multiindex_names = frame
-        .row_multiindex()
-        .map(|row_multiindex| row_multiindex.names().to_vec());
-    let materialized = if frame.row_multiindex().is_some() {
-        Some(materialize_synthetic_row_multiindex_columns(frame)?)
-    } else {
-        None
+/// The schema metadata key under which pandas (pyarrow's
+/// `Table.from_pandas`) records how a frame's row index and column labels
+/// travel in an Arrow / Parquet / Feather file. fp writes and reads it the
+/// same way (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.22).
+const PANDAS_METADATA_KEY: &str = "pandas";
+
+/// pandas' (`pandas_type`, `numpy_type`, `metadata`) for a column, as
+/// pyarrow records them - a nullable Int64 is `numpy_type: 'Int64'`, which
+/// pandas reads back as Int64.
+fn pandas_column_type(column: &Column) -> (&'static str, &'static str, serde_json::Value) {
+    use serde_json::{Value, json};
+    match column.dtype() {
+        DType::Int64 => ("int64", "int64", Value::Null),
+        DType::Int64Nullable => ("int64", "Int64", Value::Null),
+        DType::Float64 => ("float64", "float64", Value::Null),
+        DType::Float64Nullable => ("float64", "Float64", Value::Null),
+        DType::Bool => ("bool", "bool", Value::Null),
+        DType::BoolNullable => ("bool", "boolean", Value::Null),
+        DType::Datetime64 { tz: None } => ("datetime", "datetime64[ns]", Value::Null),
+        DType::Datetime64 { tz: Some(tz) } => (
+            "datetimetz",
+            "datetime64[ns]",
+            json!({ "timezone": fp_tz_to_arrow(tz.to_string()) }),
+        ),
+        DType::Timedelta64 => ("object", "timedelta64[ns]", Value::Null),
+        DType::Categorical => (
+            "categorical",
+            "int32",
+            json!({
+                "num_categories": column.categorical().map_or(0, |meta| meta.categories.len()),
+                "ordered": column.categorical().is_some_and(|meta| meta.ordered),
+            }),
+        ),
+        DType::Null => ("empty", "object", Value::Null),
+        _ => ("unicode", "object", Value::Null),
+    }
+}
+
+/// A frame's columns as pandas lays them out in an Arrow table (pyarrow's
+/// `Table.from_pandas(preserve_index=index)`) and the `pandas` metadata
+/// recording them: the data columns, then each index level as a column - its
+/// name, or `__index_level_N__` when unnamed or taken by a data column. With
+/// `index=None` a RangeIndex (fp's, or labels 0..n under no name) travels as
+/// metadata only; `Some(true)` writes it as a column too, `Some(false)` no
+/// index at all. A label index was dropped, and a row MultiIndex travelled as
+/// fp-only leading columns pandas read as data.
+fn pandas_arrow_layout(
+    frame: &DataFrame,
+    index: Option<bool>,
+) -> Result<(Vec<(String, Column)>, String), IoError> {
+    use serde_json::{Value, json};
+    let data_names: Vec<String> = frame.column_names().into_iter().cloned().collect();
+    let field_for = |level: usize, name: Option<&str>| match name {
+        Some(name) if !data_names.iter().any(|data| data == name) => name.to_owned(),
+        _ => format!("{SYNTHETIC_ROW_MULTIINDEX_PREFIX}{level}__"),
     };
-    let frame = materialized.as_ref().unwrap_or(frame);
-
-    let col_names: Vec<String> = frame.column_names().into_iter().cloned().collect();
-    let mut fields = Vec::with_capacity(col_names.len());
-    let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(col_names.len());
-
-    for name in &col_names {
-        let col = frame
+    let level_column = |labels: &[IndexLabel], tz: Option<&str>| -> Result<Column, IoError> {
+        let values: Vec<Scalar> = labels.iter().map(index_label_to_scalar_value).collect();
+        Ok(match tz {
+            Some(tz) => Column::new(
+                DType::Datetime64 {
+                    tz: Some(tz.into()),
+                },
+                values,
+            )?,
+            None => Column::from_values(values)?,
+        })
+    };
+    let mut index_columns: Vec<Value> = Vec::new();
+    let mut levels: Vec<(String, Option<String>, Column)> = Vec::new();
+    if index != Some(false) {
+        if let Some(row_multiindex) = frame.row_multiindex() {
+            for (level, name) in row_multiindex.names().iter().enumerate() {
+                let labels = row_multiindex.get_level_values(level)?;
+                let field = field_for(level, name.as_deref());
+                levels.push((field, name.clone(), level_column(labels.labels(), None)?));
+            }
+        } else {
+            let row_index = frame.index();
+            let range = row_index.range_span().or_else(|| {
+                row_index
+                    .name()
+                    .is_none()
+                    .then(|| row_index.int64_range_span())
+                    .flatten()
+                    .filter(|&(start, _, step)| start == 0 && step == 1)
+            });
+            match range {
+                Some((start, stop, step)) if index.is_none() => index_columns.push(json!({
+                    "kind": "range",
+                    "name": row_index.name(),
+                    "start": start,
+                    "stop": stop,
+                    "step": step,
+                })),
+                _ => levels.push((
+                    field_for(0, row_index.name()),
+                    row_index.name().map(str::to_owned),
+                    level_column(row_index.labels(), row_index.tz())?,
+                )),
+            }
+        }
+    }
+    let entry = |name: Value, field: &str, column: &Column| {
+        let (pandas_type, numpy_type, metadata) = pandas_column_type(column);
+        json!({
+            "name": name,
+            "field_name": field,
+            "pandas_type": pandas_type,
+            "numpy_type": numpy_type,
+            "metadata": metadata,
+        })
+    };
+    let mut columns: Vec<(String, Column)> = Vec::with_capacity(data_names.len() + levels.len());
+    let mut described: Vec<Value> = Vec::with_capacity(data_names.len() + levels.len());
+    for name in &data_names {
+        let column = frame
             .column(name)
             .ok_or_else(|| IoError::Parquet(format!("missing column: {name}")))?;
+        described.push(entry(json!(name), name, column));
+        columns.push((name.clone(), column.clone()));
+    }
+    for (field, name, column) in levels {
+        described.push(entry(json!(name), &field, &column));
+        index_columns.push(json!(field));
+        columns.push((field, column));
+    }
+    let metadata = json!({
+        "index_columns": index_columns,
+        "column_indexes": [{
+            "name": frame.columns_name(),
+            "field_name": frame.columns_name(),
+            "pandas_type": "unicode",
+            "numpy_type": "object",
+            "metadata": { "encoding": "UTF-8" },
+        }],
+        "columns": described,
+        "attributes": {},
+        "creator": { "library": "frankenpandas", "version": env!("CARGO_PKG_VERSION") },
+        "pandas_version": "2.2.3",
+    });
+    Ok((columns, metadata.to_string()))
+}
+
+fn dataframe_to_record_batch(
+    frame: &DataFrame,
+    index: Option<bool>,
+) -> Result<RecordBatch, IoError> {
+    let (columns, pandas_metadata) = pandas_arrow_layout(frame, index)?;
+    let mut fields = Vec::with_capacity(columns.len());
+    let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(columns.len());
+    for (name, col) in &columns {
         let dt = col.dtype();
         let mut field = Field::new(name.as_str(), dtype_to_arrow(dt.clone()), true)
             .with_dict_is_ordered(col.categorical().is_some_and(|meta| meta.ordered));
@@ -9921,25 +10049,96 @@ fn dataframe_to_record_batch(frame: &DataFrame) -> Result<RecordBatch, IoError> 
             )]));
         }
         fields.push(field);
-        let arr = column_to_arrow_array(col)?;
-        arrays.push(arr);
+        arrays.push(column_to_arrow_array(col)?);
     }
-
-    let schema = match row_multiindex_names {
-        Some(names) => {
-            let encoded = serde_json::to_string(&names)
-                .map_err(|e| IoError::Parquet(format!("encode row multiindex names: {e}")))?;
-            Arc::new(Schema::new_with_metadata(
-                fields,
-                std::collections::HashMap::from([(
-                    ROW_MULTIINDEX_NAMES_METADATA_KEY.to_owned(),
-                    encoded,
-                )]),
-            ))
-        }
-        None => Arc::new(Schema::new(fields)),
-    };
+    let schema = Arc::new(Schema::new_with_metadata(
+        fields,
+        std::collections::HashMap::from([(PANDAS_METADATA_KEY.to_owned(), pandas_metadata)]),
+    ));
     RecordBatch::try_new(schema, arrays).map_err(|e| IoError::Parquet(e.to_string()))
+}
+
+/// A frame read from an Arrow-family file as its `pandas` metadata describes
+/// it (pyarrow's `table.to_pandas()`): the `index_columns` fields become the
+/// row index (a MultiIndex for several) under their logical names, a
+/// `{"kind": "range"}` entry is the RangeIndex it records, and a named
+/// `column_indexes` entry names the column axis. They were read as data
+/// columns (`k`, `__index_level_0__`) over a default 0..n index
+/// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.22). Metadata that
+/// does not match the columns read leaves the frame as read.
+fn apply_pandas_metadata(frame: DataFrame, raw: &str) -> Result<DataFrame, IoError> {
+    use serde_json::Value;
+    let Ok(meta) = serde_json::from_str::<Value>(raw) else {
+        return Ok(frame);
+    };
+    let logical_name = |field: &str| -> Option<String> {
+        let entry = meta["columns"]
+            .as_array()?
+            .iter()
+            .find(|entry| entry["field_name"].as_str() == Some(field))?;
+        match &entry["name"] {
+            Value::Null => None,
+            Value::String(name) => Some(name.clone()),
+            other => Some(other.to_string()),
+        }
+    };
+    let mut frame = frame;
+    // pandas' nullable extension columns (numpy_type 'Int64' / 'Float64' /
+    // 'boolean') come back as those dtypes, as pyarrow restores them; an
+    // Int64 column holding a NA read as float64 (1.0, NaN).
+    for entry in meta["columns"].as_array().into_iter().flatten() {
+        let declared = match entry["numpy_type"].as_str() {
+            Some("Int64") => DType::Int64Nullable,
+            Some("Float64") => DType::Float64Nullable,
+            Some("boolean") => DType::BoolNullable,
+            _ => continue,
+        };
+        if let Some(field) = entry["field_name"].as_str()
+            && let Some(column) = frame.column(field)
+            && column.dtype() != declared
+        {
+            let retagged = retag_nullable(column.clone(), declared);
+            frame = frame.with_column(field, retagged)?;
+        }
+    }
+    let descriptors = meta["index_columns"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let fields: Vec<&str> = descriptors.iter().filter_map(Value::as_str).collect();
+    if !fields.is_empty()
+        && fields.len() == descriptors.len()
+        && fields.iter().all(|field| frame.column(field).is_some())
+    {
+        let names: Vec<Option<String>> = fields.iter().map(|field| logical_name(field)).collect();
+        frame = promote_frame_index_columns(&frame, &fields)?;
+        frame = match names.as_slice() {
+            [name] => {
+                let renamed = frame.index().rename_index(name.as_deref());
+                frame.with_index(renamed)?
+            }
+            _ => restore_row_multiindex_names(frame, &names)?,
+        };
+    } else if let [range] = descriptors.as_slice()
+        && range["kind"].as_str() == Some("range")
+        && let (Some(start), Some(stop), Some(step)) = (
+            range["start"].as_i64(),
+            range["stop"].as_i64(),
+            range["step"].as_i64(),
+        )
+        && step != 0
+    {
+        let range_index = Index::from_range(start, stop, step).rename_index(range["name"].as_str());
+        if range_index.len() == frame.len() {
+            frame = frame.with_index(range_index)?;
+        }
+    }
+    if let Some([axis]) = meta["column_indexes"].as_array().map(Vec::as_slice)
+        && let Some(name) = axis["name"].as_str()
+    {
+        frame = frame.with_columns_name(Some(name.to_owned()));
+    }
+    Ok(frame)
 }
 
 /// Build the block-backed representation directly from one homogeneous Arrow
@@ -10042,12 +10241,9 @@ fn record_batch_to_dataframe(batch: &RecordBatch) -> Result<DataFrame, IoError> 
     // NOT the ~27ms decode). Bit-identical: same integer labels 0..n_rows.
     let index = Index::default_range(n_rows);
 
-    let frame = DataFrame::new_with_column_order(index, columns, col_order)?;
-    let frame = promote_synthetic_row_multiindex_if_present(&frame)?;
-    match row_multiindex_names_from_arrow_metadata(schema.metadata()) {
-        Some(names) => restore_row_multiindex_names(frame, &names),
-        None => Ok(frame),
-    }
+    // The row index the file's `pandas` metadata records is applied by the
+    // readers once every batch is read (apply_pandas_metadata).
+    DataFrame::new_with_column_order(index, columns, col_order).map_err(IoError::from)
 }
 
 fn fp_dtype_for_arrow_data_type(dt: &ArrowDataType) -> DType {
@@ -10544,36 +10740,46 @@ pub enum ParquetCompression {
     Snappy,
 }
 
-/// Write a DataFrame to an in-memory, uncompressed Parquet buffer.
+/// Write a DataFrame to an in-memory, uncompressed Parquet buffer, its row
+/// index as pandas' default `to_parquet(index=None)` writes it.
 pub fn write_parquet_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
-    write_parquet_bytes_with_compression(frame, ParquetCompression::Uncompressed)
+    write_parquet_bytes_with_compression(frame, ParquetCompression::Uncompressed, None)
 }
 
 /// Write a DataFrame to an in-memory Parquet buffer with the given codec
-/// (pandas' `to_parquet(compression=...)`, br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.5).
+/// (pandas' `to_parquet(compression=...)`, br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.5)
+/// and pandas' `index=`: `None` keeps a RangeIndex as metadata and any other
+/// index as columns, `Some(true)` writes the index as columns always,
+/// `Some(false)` not at all (see [`pandas_arrow_layout`]).
 pub fn write_parquet_bytes_with_compression(
     frame: &DataFrame,
     compression: ParquetCompression,
+    index: Option<bool>,
 ) -> Result<Vec<u8>, IoError> {
-    let batch = dataframe_to_record_batch(frame)?;
+    let batch = dataframe_to_record_batch(frame, index)?;
     let mut buf = Vec::new();
     let codec = match compression {
         ParquetCompression::Uncompressed => parquet::basic::Compression::UNCOMPRESSED,
         ParquetCompression::Snappy => parquet::basic::Compression::SNAPPY,
     };
-    let mut builder = parquet::file::properties::WriterProperties::builder().set_compression(codec);
-    // The Arrow schema-level metadata on `batch` does not come back as batch
-    // metadata from the Parquet reader, so the row MultiIndex level names also
-    // ride in the file's own key-value metadata (br-frankenpandas-wfkzm).
-    if let Some(row_multiindex) = frame.row_multiindex() {
-        let encoded = serde_json::to_string(&row_multiindex.names().to_vec())?;
-        builder =
-            builder.set_key_value_metadata(Some(vec![parquet::file::metadata::KeyValue::new(
-                ROW_MULTIINDEX_NAMES_METADATA_KEY.to_owned(),
-                encoded,
-            )]));
-    }
-    let props = Some(builder.build());
+    // The `pandas` metadata also rides in the file's own key-value metadata,
+    // where pyarrow writes it too (the Parquet reader does not hand the Arrow
+    // schema's metadata back with its batches).
+    let pandas_metadata = batch
+        .schema()
+        .metadata()
+        .get(PANDAS_METADATA_KEY)
+        .cloned()
+        .unwrap_or_default();
+    let props = Some(
+        parquet::file::properties::WriterProperties::builder()
+            .set_compression(codec)
+            .set_key_value_metadata(Some(vec![parquet::file::metadata::KeyValue::new(
+                PANDAS_METADATA_KEY.to_owned(),
+                pandas_metadata,
+            )]))
+            .build(),
+    );
     let mut writer = ArrowWriter::try_new(&mut buf, batch.schema(), props)
         .map_err(|e| IoError::Parquet(e.to_string()))?;
     writer
@@ -10597,20 +10803,14 @@ pub fn read_parquet_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
     // row count collapses that to a single typed conversion, no concat. Clamp so a
     // pathological row count can't request an absurd allocation up front.
     let total_rows = builder.metadata().file_metadata().num_rows().max(0) as usize;
-    // Level names written by `write_parquet_bytes` (see there); absent on files
-    // from older builds or other writers, in which case the synthetic
-    // `__index_level_N__` names stay.
-    let level_names: Option<Vec<Option<String>>> = builder
+    // pandas' metadata (pyarrow's and fp's writers put it in the file's
+    // key-value metadata).
+    let pandas_metadata: Option<String> = builder
         .metadata()
         .file_metadata()
         .key_value_metadata()
-        .and_then(|pairs| {
-            pairs
-                .iter()
-                .find(|pair| pair.key == ROW_MULTIINDEX_NAMES_METADATA_KEY)
-        })
-        .and_then(|pair| pair.value.as_deref())
-        .and_then(|raw| serde_json::from_str::<Vec<Option<String>>>(raw).ok());
+        .and_then(|pairs| pairs.iter().find(|pair| pair.key == PANDAS_METADATA_KEY))
+        .and_then(|pair| pair.value.clone());
     let batch_size = total_rows.clamp(1, 16 * 1024 * 1024);
     let reader = builder
         .with_batch_size(batch_size)
@@ -10643,8 +10843,8 @@ pub fn read_parquet_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
         let refs: Vec<&DataFrame> = all_frames.iter().collect();
         fp_frame::concat_dataframes(&refs)?
     };
-    match level_names {
-        Some(names) => restore_row_multiindex_names(frame, &names),
+    match pandas_metadata {
+        Some(raw) => apply_pandas_metadata(frame, &raw),
         None => Ok(frame),
     }
 }
@@ -11614,10 +11814,12 @@ pub fn write_excel_with_options(
 ///
 /// Matches `pd.DataFrame.to_feather()`. Feather v2 is the Arrow IPC file format
 /// — the fastest columnar interchange format, recommended by pandas over HDF5.
+/// The row index travels as pandas' writes it (a RangeIndex as metadata, any
+/// other as columns; see [`pandas_arrow_layout`]).
 pub fn write_feather_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
     use arrow::ipc::writer::FileWriter;
 
-    let batch = dataframe_to_record_batch(frame)?;
+    let batch = dataframe_to_record_batch(frame, None)?;
     let schema = batch.schema();
 
     let mut buf = Vec::new();
@@ -11638,6 +11840,7 @@ pub fn read_feather_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
 
     let cursor = std::io::Cursor::new(data);
     let reader = FileReader::try_new(cursor, None).map_err(|e| IoError::Arrow(e.to_string()))?;
+    let pandas_metadata = reader.schema().metadata().get(PANDAS_METADATA_KEY).cloned();
 
     let mut all_frames: Vec<DataFrame> = Vec::new();
     for batch_result in reader {
@@ -11653,17 +11856,18 @@ pub fn read_feather_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
         )?);
     }
 
-    if all_frames.len() == 1 {
-        if let Some(frame) = all_frames.into_iter().next() {
-            return Ok(frame);
-        }
-        return Err(IoError::Arrow(
-            "feather reader produced zero record batches".to_owned(),
-        ));
+    let frame = if all_frames.len() == 1 {
+        all_frames.into_iter().next().ok_or_else(|| {
+            IoError::Arrow("feather reader produced zero record batches".to_owned())
+        })?
+    } else {
+        let refs: Vec<&DataFrame> = all_frames.iter().collect();
+        fp_frame::concat_dataframes(&refs)?
+    };
+    match pandas_metadata {
+        Some(raw) => apply_pandas_metadata(frame, &raw),
+        None => Ok(frame),
     }
-
-    let refs: Vec<&DataFrame> = all_frames.iter().collect();
-    fp_frame::concat_dataframes(&refs).map_err(IoError::from)
 }
 
 /// Write a DataFrame to an Arrow IPC (Feather v2) file.
@@ -11690,7 +11894,7 @@ pub fn read_feather(path: &Path) -> Result<DataFrame, IoError> {
 pub fn write_ipc_stream_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
     use arrow::ipc::writer::StreamWriter;
 
-    let batch = dataframe_to_record_batch(frame)?;
+    let batch = dataframe_to_record_batch(frame, None)?;
     let schema = batch.schema();
 
     let mut buf = Vec::new();
@@ -11736,6 +11940,7 @@ pub fn read_ipc_stream_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
 
     let cursor = std::io::Cursor::new(data);
     let reader = StreamReader::try_new(cursor, None).map_err(|e| IoError::Arrow(e.to_string()))?;
+    let pandas_metadata = reader.schema().metadata().get(PANDAS_METADATA_KEY).cloned();
 
     let mut all_frames: Vec<DataFrame> = Vec::new();
     for batch_result in reader {
@@ -11751,17 +11956,18 @@ pub fn read_ipc_stream_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
         )?);
     }
 
-    if all_frames.len() == 1 {
-        if let Some(frame) = all_frames.into_iter().next() {
-            return Ok(frame);
-        }
-        return Err(IoError::Arrow(
-            "ipc stream reader produced zero record batches".to_owned(),
-        ));
+    let frame = if all_frames.len() == 1 {
+        all_frames.into_iter().next().ok_or_else(|| {
+            IoError::Arrow("ipc stream reader produced zero record batches".to_owned())
+        })?
+    } else {
+        let refs: Vec<&DataFrame> = all_frames.iter().collect();
+        fp_frame::concat_dataframes(&refs)?
+    };
+    match pandas_metadata {
+        Some(raw) => apply_pandas_metadata(frame, &raw),
+        None => Ok(frame),
     }
-
-    let refs: Vec<&DataFrame> = all_frames.iter().collect();
-    fp_frame::concat_dataframes(&refs).map_err(IoError::from)
 }
 
 // ── SQL I/O ─────────────────────────────────────────────────────────────
@@ -24839,9 +25045,12 @@ mod tests {
                 SerializedFileReader::new(bytes::Bytes::from(bytes)).expect("parquet reader");
             reader.metadata().row_group(0).column(0).compression()
         };
-        let snappy =
-            super::write_parquet_bytes_with_compression(&frame, super::ParquetCompression::Snappy)
-                .expect("write snappy");
+        let snappy = super::write_parquet_bytes_with_compression(
+            &frame,
+            super::ParquetCompression::Snappy,
+            None,
+        )
+        .expect("write snappy");
         let plain = super::write_parquet_bytes(&frame).expect("write plain");
         assert_eq!(
             codec_of(snappy.clone()),
@@ -29716,7 +29925,7 @@ mod tests {
         let frame = DataFrame::new_with_column_order(Index::from_i64(vec![0, 1]), cols, order)
             .expect("frame");
 
-        let batch = super::dataframe_to_record_batch(&frame).expect("batch");
+        let batch = super::dataframe_to_record_batch(&frame, None).expect("batch");
         let schema = batch.schema();
         assert_eq!(
             schema.field(0).data_type(),
@@ -29783,7 +29992,7 @@ mod tests {
         )
         .expect("frame");
 
-        let batch = super::dataframe_to_record_batch(&frame).expect("batch");
+        let batch = super::dataframe_to_record_batch(&frame, None).expect("batch");
         let field = batch.schema().field(0).clone();
         assert_eq!(
             field.data_type(),

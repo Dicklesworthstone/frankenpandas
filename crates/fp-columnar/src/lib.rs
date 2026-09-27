@@ -15369,7 +15369,8 @@ impl Column {
                     }
                 }
             }
-            return Self::from_f64_values_with_validity(data, ValidityMask::from_words(words, n));
+            return Self::from_f64_values_with_validity(data, ValidityMask::from_words(words, n))
+                .keeping_nullable_dtype(&self.dtype);
         }
 
         // Nullable Int64 sibling of the typed_f64 gather: a `LazyNullableInt64`
@@ -15395,7 +15396,8 @@ impl Column {
             return Self::from_i64_values_with_validity(
                 gathered,
                 ValidityMask::from_words(words, n),
-            );
+            )
+            .keeping_nullable_dtype(&self.dtype);
         }
 
         // Nullable temporal / Bool siblings of the LazyNullableInt64 gather above.
@@ -15449,7 +15451,8 @@ impl Column {
             return Self::from_bool_values_with_validity(
                 gathered,
                 ValidityMask::from_words(words, n),
-            );
+            )
+            .keeping_nullable_dtype(&self.dtype);
         }
 
         // Nullable contiguous-Utf8 sibling of the typed nullable gathers above: a
@@ -16611,6 +16614,19 @@ impl Column {
     #[must_use]
     pub fn has_nulls(&self) -> bool {
         self.validity.count_invalid() > 0
+    }
+
+    /// `self` under `source` when that is the nullable extension flavour of
+    /// `self`'s dtype (Int64 / Float64 / boolean): the typed nullable gathers
+    /// build the plain dtype, so a take of an Int64 column holding a NA - its
+    /// head, iloc, sort, repr - read back as int64 (printed 1.0 / NaN;
+    /// br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.22).
+    #[must_use]
+    fn keeping_nullable_dtype(mut self, source: &DType) -> Self {
+        if *source != self.dtype && self.dtype.to_nullable() == *source {
+            self.dtype = source.clone();
+        }
+        self
     }
 
     /// Promote the dtype to its nullable variant if the column has nulls.
@@ -37159,6 +37175,34 @@ mod tests {
         // NEGATIVE: an all-missing codes column holds no category.
         let none = Column::from_category_codes(DType::Interval, vec![u32::MAX; 3], categories);
         assert!(none.values().iter().all(Scalar::is_missing));
+    }
+
+    #[test]
+    fn take_keeps_a_nullable_extension_dtype_4qg5w22() {
+        // Typed nullable backings (as a read_parquet column, promoted to its
+        // extension dtype) gather through the typed paths: the dtype rode
+        // back as plain int64 / float64 / bool.
+        let mask = ValidityMask::from_words(vec![0b101], 3);
+        let ints = Column::from_i64_values_with_validity(vec![1, 0, 3], mask.clone())
+            .promote_to_nullable();
+        let floats = Column::from_f64_values_with_validity(vec![1.5, 0.0, 3.5], mask.clone())
+            .promote_to_nullable();
+        let bools = Column::from_bool_values_with_validity(vec![true, false, true], mask.clone())
+            .promote_to_nullable();
+        for (column, dtype) in [
+            (&ints, DType::Int64Nullable),
+            (&floats, DType::Float64Nullable),
+            (&bools, DType::BoolNullable),
+        ] {
+            assert_eq!(column.dtype(), dtype);
+            let taken = column.take_positions(&[2, 1, 0]);
+            assert_eq!(taken.dtype(), dtype);
+            assert!(taken.values()[1].is_missing());
+            assert!(!taken.values()[0].is_missing());
+        }
+        // NEGATIVE: a plain Int64 with a missing row stays plain Int64.
+        let plain = Column::from_i64_values_with_validity(vec![1, 0, 3], mask);
+        assert_eq!(plain.take_positions(&[2, 1]).dtype(), DType::Int64);
     }
 
     #[test]
