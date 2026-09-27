@@ -21066,6 +21066,22 @@ impl PySeries {
         let lhs = series_operand(py, other, &self.inner)?;
         wrap_series(lhs.remainder(&self.inner))
     }
+    /// `divmod(s, other)`: `(s // other, s % other)`, as pandas (it was a
+    /// TypeError; buwrx).
+    fn __divmod__(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+    ) -> PyResult<(PySeries, PySeries)> {
+        Ok((self.__floordiv__(py, other)?, self.__mod__(py, other)?))
+    }
+    fn __rdivmod__(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+    ) -> PyResult<(PySeries, PySeries)> {
+        Ok((self.__rfloordiv__(py, other)?, self.__rmod__(py, other)?))
+    }
     fn __pow__(
         &self,
         py: Python<'_>,
@@ -29878,6 +29894,14 @@ impl PyDataFrame {
     }
     fn __rmod__(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         self.arith_operator(other, ArithmeticOp::Mod, true, "%")
+    }
+    /// `divmod(df, other)`: `(df // other, df % other)`, as pandas (it was a
+    /// TypeError; buwrx).
+    fn __divmod__(&self, other: &Bound<'_, PyAny>) -> PyResult<(PyDataFrame, PyDataFrame)> {
+        Ok((self.__floordiv__(other)?, self.__mod__(other)?))
+    }
+    fn __rdivmod__(&self, other: &Bound<'_, PyAny>) -> PyResult<(PyDataFrame, PyDataFrame)> {
+        Ok((self.__rfloordiv__(other)?, self.__rmod__(other)?))
     }
     fn __pow__(
         &self,

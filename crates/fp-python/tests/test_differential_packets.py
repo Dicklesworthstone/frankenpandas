@@ -12638,3 +12638,43 @@ def _row_mi_outcome(m: Any, run: Any) -> Any:
 def test_row_multiindex_everyday_ops_like_pandas(case: str) -> None:
     run = _ROW_MI_CASES[case]
     assert _row_mi_outcome(fpd, run) == _row_mi_outcome(pd, run), case
+
+
+# br-frankenpandas-buwrx (everyday probe 13): a cross merge sorted each
+# side's columns by name; divmod of a Series / DataFrame was a TypeError.
+def _bw_left(m: Any) -> Any:
+    return m.DataFrame({"z": [1, 2], "k": ["a", "b"], "v": [3, 4]})
+
+
+def _bw_right(m: Any) -> Any:
+    return m.DataFrame({"k": ["b", "c"], "w": [20, 30], "v": [9, 8]})
+
+
+_CROSS_DIVMOD_CASES = {
+    "cross merge": lambda m: repr(_bw_left(m).merge(_bw_right(m), how="cross")),
+    "cross merge suffixes": lambda m: repr(_bw_left(m).merge(_bw_right(m), how="cross", suffixes=("_l", "_r"))),
+    "cross merge indicator": lambda m: repr(_bw_left(m).merge(_bw_right(m), how="cross", indicator=True)),
+    "divmod Series by int": lambda m: tuple(repr(part) for part in divmod(m.Series([7, 8, -7]), 3)),
+    "divmod Series by Series": lambda m: tuple(repr(part) for part in divmod(m.Series([7, 8]), m.Series([2, 3]))),
+    "divmod float Series": lambda m: tuple(repr(part) for part in divmod(m.Series([7.5, -2.5]), 2)),
+    "rdivmod Series": lambda m: tuple(repr(part) for part in divmod(10, m.Series([3, 4]))),
+    "divmod DataFrame": lambda m: tuple(repr(part) for part in divmod(m.DataFrame({"a": [7, 8], "b": [9, -9]}), 4)),
+    "rdivmod DataFrame": lambda m: tuple(repr(part) for part in divmod(10, m.DataFrame({"a": [3, 4]}))),
+    # NEGATIVE: an inner merge's columns as before; // and % unchanged.
+    "inner merge": lambda m: repr(_bw_left(m).merge(_bw_right(m), on="k")),
+    "floordiv and mod": lambda m: (repr(m.Series([7, 8]) // 3), repr(m.Series([7, 8]) % 3)),
+}
+
+
+def _cross_divmod_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_CROSS_DIVMOD_CASES))
+def test_cross_merge_and_divmod_like_pandas(case: str) -> None:
+    run = _CROSS_DIVMOD_CASES[case]
+    assert _cross_divmod_outcome(fpd, run) == _cross_divmod_outcome(pd, run), case

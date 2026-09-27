@@ -10194,22 +10194,32 @@ fn merge_dataframes_cross(
         collect_overlapping_column_names(&left_col_names, &right_col_names, &HashSet::new());
     ensure_merge_suffixes_for_overlaps(&overlapping_names, suffixes)?;
 
-    for (name, col) in left.columns() {
+    // Each side's columns in its own order, as pandas (the store iterates
+    // them by name, so the right side's came back sorted; buwrx).
+    for position in 0..left.num_columns() {
+        let (Some(name), Some(col)) = (left.column_name_at(position), left.column_at(position))
+        else {
+            continue;
+        };
         let reindexed = col.reindex_by_positions(&left_positions)?;
-        let out_name = if right_col_names.contains(name) {
-            apply_merge_suffix(name, suffixes.left.as_deref())
+        let out_name = if right_col_names.contains(&name) {
+            apply_merge_suffix(&name, suffixes.left.as_deref())
         } else {
-            name.clone()
+            name
         };
         insert_merged_output_column(&mut columns, &mut column_order, out_name, reindexed)?;
     }
 
-    for (name, col) in right.columns() {
+    for position in 0..right.num_columns() {
+        let (Some(name), Some(col)) = (right.column_name_at(position), right.column_at(position))
+        else {
+            continue;
+        };
         let reindexed = col.reindex_by_positions(&right_positions)?;
-        let out_name = if left_col_names.contains(name) {
-            apply_merge_suffix(name, suffixes.right.as_deref())
+        let out_name = if left_col_names.contains(&name) {
+            apply_merge_suffix(&name, suffixes.right.as_deref())
         } else {
-            name.clone()
+            name
         };
         insert_merged_output_column(&mut columns, &mut column_order, out_name, reindexed)?;
     }
@@ -18544,6 +18554,42 @@ mod tests {
         assert_eq!(merged.index.labels().len(), 0);
         assert!(merged.columns.get("l").unwrap().values().is_empty());
         assert!(merged.columns.get("r").unwrap().values().is_empty());
+    }
+
+    /// A cross merge keeps each side's own column order, as pandas (the
+    /// columns came back sorted by name; buwrx).
+    #[test]
+    fn merge_cross_keeps_each_sides_column_order_buwrx() {
+        let ints = |values: [i64; 2]| values.map(Scalar::Int64).to_vec();
+        let left = DataFrame::from_dict(
+            &["z", "k", "a"],
+            vec![
+                ("z", ints([1, 2])),
+                ("k", ints([3, 4])),
+                ("a", ints([5, 6])),
+            ],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(
+            &["k", "w", "b"],
+            vec![
+                ("k", ints([7, 8])),
+                ("w", ints([9, 10])),
+                ("b", ints([11, 12])),
+            ],
+        )
+        .unwrap();
+        let merged = merge_dataframes(&left, &right, "ignored", JoinType::Cross).unwrap();
+        assert_eq!(merged.column_order, ["z", "k_x", "a", "k_y", "w", "b"]);
+        assert_eq!(
+            merged.columns.get("w").unwrap().values(),
+            [9, 10, 9, 10].map(Scalar::Int64)
+        );
+        // NEGATIVE: the rows are still left-major.
+        assert_eq!(
+            merged.columns.get("z").unwrap().values(),
+            [1, 1, 2, 2].map(Scalar::Int64)
+        );
     }
 
     #[test]
