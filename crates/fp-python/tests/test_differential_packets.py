@@ -2341,8 +2341,8 @@ def test_concat_refuses_what_it_cannot_match() -> None:
         fpd.concat([frame, frame], keys=["p"])
     with pytest.raises(NotImplementedError, match="names"):
         fpd.concat([frame, frame], names=["p"])
-    with pytest.raises(NotImplementedError, match="sort"):
-        fpd.concat([frame, frame], sort=True)
+    # TEST-CHANGE (ft9vr): concat(sort=True) left this list; it sorts the
+    # other axis as pandas does now (test_everyday_ops_round_eight_like_pandas).
     with pytest.raises(ValueError, match="No objects to concatenate"):
         fpd.concat([])
 
@@ -2723,14 +2723,15 @@ def test_to_records_carries_the_index_like_pandas() -> None:
     frame = {"a": [3, 1], "b": [1.5, _NAN]}
     expected = pd.DataFrame(frame, index=["d", "a"]).to_records()
     got = fpd.DataFrame(frame, index=["d", "a"]).to_records()
-    # The records are dicts, not a recarray (fvsao.7); the fields and values
-    # must be pandas'. The index used to be missing.
-    assert [list(r) for r in got] == [list(expected.dtype.names)] * len(expected)
-    assert [tuple(_marker(v) for v in r.values()) for r in got] == [
+    # TEST-CHANGE (ft9vr): the records are pandas' numpy recarray now (they
+    # were dicts, fvsao.7): its fields, dtypes and values. The index used to
+    # be missing.
+    assert got.dtype == expected.dtype
+    assert [tuple(_marker(v) for v in r) for r in got] == [
         tuple(_marker(v) for v in r) for r in expected
     ]
     without = pd.DataFrame(frame).to_records(index=False)
-    assert [list(r) for r in fpd.DataFrame(frame).to_records(index=False)] == [list(without.dtype.names)] * 2
+    assert fpd.DataFrame(frame).to_records(index=False).dtype == without.dtype
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
@@ -11779,3 +11780,78 @@ def _nan_key_outcome(m: Any, run: Any) -> Any:
 def test_missing_keys_and_object_first_like_pandas(case: str) -> None:
     run = _NAN_KEY_CASES[case]
     assert _nan_key_outcome(fpd, run) == _nan_key_outcome(pd, run), case
+
+
+# Found by the eighth everyday-ops probe (scratch p13/probe_everyday8.py,
+# br-frankenpandas-ft9vr): a tuple Series name printed as Python's repr and
+# .loc of a full MultiIndex key named its row by that text; a slice of tuples
+# over a MultiIndex was empty; stack left the column level unnamed;
+# DataFrame.dot(Series) was a TypeError; merge of an index with a column key
+# and concat(sort=True) were refused; to_records gave dicts; to_dict('tight')
+# was refused; memory_usage(deep=True) counted an object column's characters.
+def _e8_mi(m: Any) -> Any:
+    return m.DataFrame({"v": [1, 2, 3, 4, 5, 6]}, index=m.MultiIndex.from_product([["a", "b"], [1, 2, 3]], names=["k", "i"]))
+
+
+def _e8_frame(m: Any) -> Any:
+    return m.DataFrame({"g": ["a", "b", "a", "c", "b"], "x": [3.0, 1.5, None, 4.0, 2.5], "n": [1, 5, 3, 2, 4], "s": ["p", "q", "p", "r", None]})
+
+
+def _e8_left(m: Any) -> Any:
+    return m.DataFrame({"v": [1, 2, 3]}, index=[10, 20, 40])
+
+
+def _e8_right(m: Any) -> Any:
+    return m.DataFrame({"k": [20, 30, 10, 20], "w": [5, 6, 7, 8]}, index=["a", "b", "c", "d"])
+
+
+_EVERYDAY8_CASES = {
+    "tuple name": lambda m: repr(m.Series([1, 2], name=("x", 3))),
+    "one-tuple name": lambda m: repr(m.Series([1], name=("x",))),
+    "nested tuple name": lambda m: repr(m.Series([1], name=("x", ("y", 1)))),
+    "loc of a full key names the row": lambda m: repr(_e8_mi(m).loc[("a", 2)]),
+    # NEGATIVE: a text name prints as it did.
+    "text name": lambda m: repr(m.Series([1], name="t")),
+    "loc slice of tuples": lambda m: repr(_e8_mi(m).loc[("a", 2):("b", 1)]),
+    "loc slice from a tuple": lambda m: repr(_e8_mi(m).loc[("a", 3):]),
+    # NEGATIVE: an outer-label slice is unchanged.
+    "loc slice of outer labels": lambda m: repr(_e8_mi(m).loc["a":"b"]),
+    "stack names the column level": lambda m: repr(_e8_mi(m)["v"].unstack().stack()),
+    "dot a Series": lambda m: repr(m.DataFrame({"a": [1, 2], "b": [3, 4]}).dot(m.Series([1, 1], index=["a", "b"]))),
+    "dot a float Series": lambda m: repr(m.DataFrame({"a": [1, 2], "b": [3, 4]}, index=["x", "y"]).dot(m.Series([1.5, 1], index=["a", "b"]))),
+    "matmul a Series": lambda m: repr(m.DataFrame({"a": [1, 2], "b": [3, 4]}) @ m.Series([1, 1], index=["a", "b"])),
+    "Series dot a DataFrame": lambda m: repr(m.Series([1, 2], index=["a", "b"]).dot(m.DataFrame({"u": [1, 2], "v": [3, 4]}, index=["a", "b"]))),
+    # str: an int sum prints 11 (11.0 == 11 would pass a float).
+    "Series dot int Series": lambda m: str(m.Series([1, 2]).dot(m.Series([3, 4]))),
+    "dot int frames": lambda m: repr(m.DataFrame({"a": [1, 2]}).dot(m.DataFrame({"u": [3]}, index=["a"]))),
+    "concat sort": lambda m: repr(m.concat([m.DataFrame({"b": [1], "a": [2]}), m.DataFrame({"a": [3], "c": [4]})], sort=True)),
+    "concat sort side by side": lambda m: repr(m.concat([m.Series([1], index=["z"], name="p"), m.Series([2], index=["a"], name="q")], axis=1, sort=True)),
+    # NEGATIVE: sort=False keeps the first-seen order.
+    "concat unsorted": lambda m: repr(m.concat([m.DataFrame({"b": [1], "a": [2]}), m.DataFrame({"a": [3], "c": [4]})])),
+    "to_records": lambda m: repr(_e8_frame(m).head(2).to_records()),
+    "to_records without the index": lambda m: repr(_e8_frame(m).head(2).to_records(index=False)),
+    "to_dict tight": lambda m: _e8_frame(m).head(2).to_dict("tight"),
+    "to_dict tight named": lambda m: _e8_frame(m).head(1).rename_axis(index="r", columns="c").to_dict("tight"),
+    "memory_usage deep": lambda m: repr(_e8_frame(m).memory_usage(deep=True)),
+    "memory_usage deep, object index": lambda m: repr(m.DataFrame({"t": ["hello world", None]}, index=["x", "yy"]).memory_usage(deep=True)),
+    "Series memory_usage deep": lambda m: m.Series(["a", None], index=["x", "y"]).memory_usage(deep=True),
+    # NEGATIVE: numbers are their shallow bytes, deep or not.
+    "memory_usage deep of numbers": lambda m: repr(_e8_frame(m)[["x", "n"]].memory_usage(deep=True)),
+}
+for _how in ("inner", "left", "right", "outer"):
+    _EVERYDAY8_CASES[f"merge index to column {_how}"] = (lambda how: lambda m: repr(_e8_left(m).merge(_e8_right(m), left_index=True, right_on="k", how=how)))(_how)
+    _EVERYDAY8_CASES[f"merge column to index {_how}"] = (lambda how: lambda m: repr(_e8_right(m).merge(_e8_left(m), left_on="k", right_index=True, how=how)))(_how)
+
+
+def _everyday8_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EVERYDAY8_CASES))
+def test_everyday_ops_round_eight_like_pandas(case: str) -> None:
+    run = _EVERYDAY8_CASES[case]
+    assert _everyday8_outcome(fpd, run) == _everyday8_outcome(pd, run), case

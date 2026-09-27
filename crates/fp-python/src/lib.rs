@@ -1470,6 +1470,33 @@ impl SeriesFooter {
     };
 }
 
+/// A Series name as pandas' footer prints it (`pprint_thing`): a tuple's
+/// items unquoted in parentheses - (a, 1), (x,) - where it printed Python's
+/// repr ('a', 1); any other name as its text.
+fn pandas_name_text(name: &SeriesName) -> String {
+    let label = name.label();
+    if !matches!(label, IndexLabel::Object(_)) {
+        return name.to_string();
+    }
+    fn pprinted(value: &Bound<'_, PyAny>) -> PyResult<String> {
+        match value.cast::<PyTuple>() {
+            Ok(items) => {
+                let parts = items
+                    .iter()
+                    .map(|item| pprinted(&item))
+                    .collect::<PyResult<Vec<_>>>()?;
+                Ok(match parts.as_slice() {
+                    [only] => format!("({only},)"),
+                    _ => format!("({})", parts.join(", ")),
+                })
+            }
+            Err(_) => Ok(value.str()?.to_string()),
+        }
+    }
+    Python::attach(|py| pprinted(index_label_to_py(py, &label)?.bind(py)))
+        .unwrap_or_else(|_| name.to_string())
+}
+
 /// pandas' `repr(series)` (see [`pandas_series_text`]).
 fn pandas_series_repr(series: &Series) -> String {
     pandas_series_text(
@@ -1510,7 +1537,7 @@ fn pandas_series_text(
         footer.push(format!("Freq: {freq}"));
     }
     if parts.name && !series.name().is_empty() {
-        footer.push(format!("Name: {}", series.name()));
+        footer.push(format!("Name: {}", pandas_name_text(series.name())));
     }
     if parts.length.unwrap_or(dots_at.is_some()) {
         footer.push(format!("Length: {}", series.len()));
@@ -23287,15 +23314,29 @@ impl PySeries {
         position(value)?.into_py_any(py)
     }
 
-    #[pyo3(signature = (index=true))]
-    fn memory_usage(&self, py: Python<'_>, index: bool) -> PyResult<usize> {
+    /// pandas' `memory_usage(index=True, deep=False)`; deep=True counts an
+    /// object column or index as pandas does ([`object_deep_bytes`]; deep=
+    /// was an unknown keyword).
+    #[pyo3(signature = (index=true, deep=false))]
+    fn memory_usage(&self, py: Python<'_>, index: bool, deep: bool) -> PyResult<usize> {
+        let values = match object_deep_bytes(py, self.inner.column())?.filter(|_| deep) {
+            Some(bytes) => bytes,
+            None => self.inner.nbytes(),
+        };
         if !index {
-            return Ok(self.inner.nbytes());
+            return Ok(values);
         }
-        match self.inner.index().range_span() {
-            Some(span) => Ok(self.inner.nbytes() + range_index_nbytes(py, span)?),
-            None => Ok(self.inner.memory_usage()),
-        }
+        let labels = match self.inner.index().range_span() {
+            Some(span) => range_index_nbytes(py, span)?,
+            None => match index_deep_bytes(py, self.inner.index())?.filter(|_| deep) {
+                Some(bytes) => bytes,
+                None => self
+                    .inner
+                    .memory_usage()
+                    .saturating_sub(self.inner.nbytes()),
+            },
+        };
+        Ok(values + labels)
     }
 
     /// pandas' `s.drop(labels=None, *, axis=0, index=None, columns=None,
@@ -23598,8 +23639,48 @@ impl PySeries {
         Ok(PySeries { inner: s })
     }
 
-    fn dot(&self, other: &PySeries) -> PyResult<f64> {
-        self.inner.dot(&other.inner).map_err(frame_error_to_py)
+    /// pandas' `Series.dot(other)` / `@`: by a Series their sum of products
+    /// (an int for two int Series; it was always a float), by a DataFrame
+    /// (aligned on this Series' labels) a Series over its columns - that was
+    /// a TypeError.
+    #[allow(clippy::cast_possible_truncation)] // an int product's exact float
+    fn dot(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(frame) = other.extract::<PyRef<'_, PyDataFrame>>() {
+            let columns = frame.inner.transpose().map_err(frame_error_to_py)?;
+            let this = self
+                .inner
+                .to_frame(Some("dot"))
+                .map_err(frame_error_to_py)?;
+            let product = columns.dot(&this).map_err(frame_error_to_py)?;
+            let column = product.column_at(0).cloned().ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("matrices are not aligned")
+            })?;
+            let mut inner =
+                Series::new("", product.index().clone(), column).map_err(frame_error_to_py)?;
+            // Ints by ints stay int64, as numpy's product.
+            let int_frame = (0..frame.inner.num_columns()).all(|position| {
+                frame
+                    .inner
+                    .column_at(position)
+                    .is_some_and(|c| c.dtype() == DType::Int64)
+            });
+            if int_frame && self.inner.column().dtype() == DType::Int64 {
+                inner = inner.astype(DType::Int64).map_err(frame_error_to_py)?;
+            }
+            return PySeries { inner }.into_py_any(py);
+        }
+        let series = other.extract::<PyRef<'_, PySeries>>()?;
+        let total = self.inner.dot(&series.inner).map_err(frame_error_to_py)?;
+        let ints = self.inner.column().dtype() == DType::Int64
+            && series.inner.column().dtype() == DType::Int64;
+        if ints && total.fract() == 0.0 && total.abs() < 9.007_199_254_740_992e15 {
+            return (total as i64).into_py_any(py);
+        }
+        total.into_py_any(py)
+    }
+
+    fn __matmul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.dot(py, other)
     }
 
     #[pyo3(signature = (cond, other=None, inplace=false, axis=None, level=None))]
@@ -31368,7 +31449,7 @@ impl PyDataFrame {
                 }
                 Ok(out.into_any().unbind())
             }
-            "split" => {
+            "split" | "tight" => {
                 let out = PyDict::new(py);
                 let idx_list: Vec<Py<PyAny>> = idx_labels
                     .iter()
@@ -31397,6 +31478,20 @@ impl PyDataFrame {
                     data_rows.push(PyList::new(py, row_vals)?);
                 }
                 out.set_item("data", PyList::new(py, data_rows)?)?;
+                // 'tight' is 'split' and the axes' names, one per level (it
+                // was refused).
+                if orient == "tight" {
+                    let index_names: Vec<Option<String>> = match self.inner.row_multiindex() {
+                        Some(levels) => levels.names().to_vec(),
+                        None => vec![self.inner.index().name().map(str::to_owned)],
+                    };
+                    let column_names: Vec<Option<String>> = match self.inner.columns_multiindex() {
+                        Some(levels) => levels.names().to_vec(),
+                        None => vec![self.inner.columns_name().map(str::to_owned)],
+                    };
+                    out.set_item("index_names", index_names)?;
+                    out.set_item("column_names", column_names)?;
+                }
                 Ok(out.into_any().unbind())
             }
             other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -33626,21 +33721,38 @@ impl PyDataFrame {
     }
 
     /// pandas' `memory_usage(index=True, deep=False)` (deep= was an unknown
-    /// keyword; fvsao.30).
+    /// keyword; fvsao.30). deep=True counts an object column or index as
+    /// pandas does ([`object_deep_bytes`]; it counted their characters).
     #[pyo3(signature = (index=true, deep=false))]
     fn memory_usage(&self, py: Python<'_>, index: bool, deep: bool) -> PyResult<PySeries> {
         let res = self
             .inner
             .memory_usage_with_options(index, deep)
             .map_err(frame_error_to_py)?;
-        // A RangeIndex's entry is pandas' (see range_index_nbytes).
-        let Some(span) = self.inner.index().range_span().filter(|_| index) else {
-            return Ok(PySeries { inner: res });
-        };
+        let as_int = |bytes: usize| Scalar::Int64(i64::try_from(bytes).unwrap_or(i64::MAX));
         let mut values = res.values().to_vec();
-        if let Some(first) = values.first_mut() {
-            *first =
-                Scalar::Int64(i64::try_from(range_index_nbytes(py, span)?).unwrap_or(i64::MAX));
+        if deep {
+            let offset = usize::from(index);
+            for position in 0..self.inner.num_columns() {
+                if let Some(column) = self.inner.column_at(position)
+                    && let Some(bytes) = object_deep_bytes(py, column)?
+                    && let Some(slot) = values.get_mut(offset + position)
+                {
+                    *slot = as_int(bytes);
+                }
+            }
+            if index
+                && let Some(bytes) = index_deep_bytes(py, self.inner.index())?
+                && let Some(first) = values.first_mut()
+            {
+                *first = as_int(bytes);
+            }
+        }
+        // A RangeIndex's entry is pandas' (see range_index_nbytes).
+        if let Some(span) = self.inner.index().range_span().filter(|_| index)
+            && let Some(first) = values.first_mut()
+        {
+            *first = as_int(range_index_nbytes(py, span)?);
         }
         let column = Column::from_values(values).map_err(column_error_to_py)?;
         let inner =
@@ -34412,9 +34524,52 @@ impl PyDataFrame {
         self.applymap(py, func)
     }
 
-    fn dot(&self, other: &PyDataFrame) -> PyResult<PyDataFrame> {
-        let df = self.inner.dot(&other.inner).map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: df })
+    /// pandas' `DataFrame.dot(other)` / `@`: by a DataFrame a DataFrame; by
+    /// a Series (aligned on its labels) an unnamed Series under this frame's
+    /// index - it was a TypeError.
+    fn dot(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        // Ints by ints stay int64, as numpy's product (it was float64).
+        let ints = |frame: &DataFrame| {
+            (0..frame.num_columns()).all(|position| {
+                frame
+                    .column_at(position)
+                    .is_some_and(|c| c.dtype() == DType::Int64)
+            })
+        };
+        if let Ok(frame) = other.extract::<PyRef<'_, PyDataFrame>>() {
+            let mut inner = self.inner.dot(&frame.inner).map_err(frame_error_to_py)?;
+            if ints(&self.inner) && ints(&frame.inner) {
+                inner = inner.astype(DType::Int64).map_err(frame_error_to_py)?;
+            }
+            return PyDataFrame { inner }.into_py_any(py);
+        }
+        let series = other.extract::<PyRef<'_, PySeries>>().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "unsupported type: {}",
+                other
+                    .get_type()
+                    .name()
+                    .map_or_else(|_| "object".into(), |n| n.to_string())
+            ))
+        })?;
+        let as_frame = series
+            .inner
+            .to_frame(Some("dot"))
+            .map_err(frame_error_to_py)?;
+        let product = self.inner.dot(&as_frame).map_err(frame_error_to_py)?;
+        let column = product.column_at(0).cloned().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>("matrices are not aligned")
+        })?;
+        let mut inner =
+            Series::new("", product.index().clone(), column).map_err(frame_error_to_py)?;
+        if ints(&self.inner) && series.inner.column().dtype() == DType::Int64 {
+            inner = inner.astype(DType::Int64).map_err(frame_error_to_py)?;
+        }
+        PySeries { inner }.into_py_any(py)
+    }
+
+    fn __matmul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.dot(py, other)
     }
 
     #[pyo3(signature = (cond, other=None, inplace=false, axis=None, level=None))]
@@ -35009,7 +35164,9 @@ impl PyDataFrame {
             Some(multi) => multi.names().to_vec(),
             None => vec![index.name().map(str::to_owned)],
         };
-        names.push(None);
+        // The column level is named after the column axis (an unstack's
+        // moved level; it was unnamed).
+        names.push(self.inner.columns_name().map(str::to_owned));
         let row_labels = index.labels();
         let columns = self.inner.column_names();
         let mut arrays: Vec<Vec<IndexLabel>> = vec![Vec::new(); row_levels.len() + 1];
@@ -36153,20 +36310,71 @@ impl PyDataFrame {
                 ("index_dtypes", index_dtypes.is_none()),
             ],
         )?;
-        let records = self.to_dict(py, "records")?;
-        if !index {
-            return Ok(records);
+        // pandas' numpy record array: the index first (one field a level,
+        // named after it, else 'index' / 'level_n'), then each column, each
+        // field its numpy dtype (it was a list of dicts).
+        let mut arrays: Vec<Bound<'_, PyAny>> = Vec::new();
+        let mut names: Vec<String> = Vec::new();
+        if index {
+            let frame_index = self.inner.index();
+            match self.inner.row_multiindex() {
+                Some(levels) => {
+                    for level in 0..levels.nlevels() {
+                        let values = levels.get_level_values(level).map_err(index_error_to_py)?;
+                        arrays.push(
+                            row_index_to_py(py, &values)?
+                                .bind(py)
+                                .call_method0("to_numpy")?,
+                        );
+                        names.push(
+                            levels.names()[level]
+                                .clone()
+                                .unwrap_or_else(|| format!("level_{level}")),
+                        );
+                    }
+                }
+                None => {
+                    let plain = Index::new(frame_index.labels().to_vec())
+                        .rename_index(frame_index.name())
+                        .with_tz(frame_index.tz())
+                        .map_err(index_error_to_py)?;
+                    arrays.push(
+                        row_index_to_py(py, &plain)?
+                            .bind(py)
+                            .call_method0("to_numpy")?,
+                    );
+                    names.push(frame_index.name().unwrap_or("index").to_owned());
+                }
+            }
         }
-        let key = self.inner.index().name().unwrap_or("index").to_owned();
-        let labels = self.inner.index().labels();
-        let out = PyList::empty(py);
-        for (record, label) in records.bind(py).try_iter()?.zip(labels) {
-            let with_index = PyDict::new(py);
-            with_index.set_item(&key, index_label_to_py(py, label)?)?;
-            with_index.update(record?.cast::<PyDict>()?.as_mapping())?;
-            out.append(with_index)?;
+        for position in 0..self.inner.num_columns() {
+            let (Some(name), Some(column)) = (
+                self.inner.column_name_at(position),
+                self.inner.column_at(position),
+            ) else {
+                continue;
+            };
+            let series = Series::new(name.as_str(), self.inner.index().clone(), column.clone())
+                .map_err(frame_error_to_py)?;
+            arrays.push(
+                PySeries { inner: series }
+                    .into_bound_py_any(py)?
+                    .call_method0("to_numpy")?,
+            );
+            names.push(
+                index_label_to_py(py, &self.inner.column_label(&name))?
+                    .bind(py)
+                    .str()?
+                    .to_string(),
+            );
         }
-        Ok(out.into_any().unbind())
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("names", names)?;
+        Ok(py
+            .import("numpy")?
+            .getattr("rec")?
+            .call_method("fromarrays", (arrays,), Some(&kwargs))?
+            .unbind())
     }
 
     /// pandas' `DataFrame.to_sql`. `chunksize` only batches the inserts;
@@ -38297,18 +38505,6 @@ fn multiindex_remainder(
     multiindex_levels_index(multi, positions, &keep)
 }
 
-/// A MultiIndex entry as pandas prints the tuple, `('x', 2)`.
-fn multiindex_tuple_text(key: &[IndexLabel]) -> String {
-    let parts: Vec<String> = key
-        .iter()
-        .map(|label| match label {
-            IndexLabel::Utf8(text) => format!("'{text}'"),
-            other => other.to_string(),
-        })
-        .collect();
-    format!("({})", parts.join(", "))
-}
-
 /// `s.loc[key]` / `s[key]` over a MultiIndex, `key` an outer label or a
 /// tuple prefix: the matching values with the keyed levels dropped, or a
 /// full key's single value. None when `series` has no MultiIndex, `key` is
@@ -38572,6 +38768,29 @@ fn multiindex_rows_for(
             .map_err(index_error_to_py)?
             .labels()
             .to_vec();
+        // A tuple bound is a key prefix: the first row whose leading labels
+        // are at or past it, the last at or before it, compared level by
+        // level as pandas' slice_locs reads a sorted MultiIndex (a tuple
+        // bound matched no outer label: the slice was empty).
+        let levels: Vec<Vec<IndexLabel>> = (0..multi.nlevels())
+            .map(|level| {
+                multi
+                    .get_level_values(level)
+                    .map(|values| values.labels().to_vec())
+                    .map_err(index_error_to_py)
+            })
+            .collect::<PyResult<_>>()?;
+        let prefix_of = |row: usize, len: usize| -> Vec<&IndexLabel> {
+            levels.iter().take(len).map(|level| &level[row]).collect()
+        };
+        let tuple_bound = |name: &str| -> PyResult<Option<Vec<IndexLabel>>> {
+            let value = slice.getattr(name)?;
+            if value.is_instance_of::<PyTuple>() {
+                multiindex_key(&value, multi.nlevels())
+            } else {
+                Ok(None)
+            }
+        };
         let bound = |name: &str| -> PyResult<Option<IndexLabel>> {
             let value = slice.getattr(name)?;
             if value.is_none() {
@@ -38580,13 +38799,18 @@ fn multiindex_rows_for(
                 py_to_index_label(&value).map(Some)
             }
         };
-        let start = match bound("start")? {
-            Some(label) => outer.iter().position(|value| *value == label),
-            None => Some(0),
+        let start = match (tuple_bound("start")?, bound("start")?) {
+            (Some(key), _) => (0..outer.len())
+                .find(|&row| prefix_of(row, key.len()) >= key.iter().collect::<Vec<_>>()),
+            (None, Some(label)) => outer.iter().position(|value| *value == label),
+            (None, None) => Some(0),
         };
-        let stop = match bound("stop")? {
-            Some(label) => outer.iter().rposition(|value| *value == label),
-            None => outer.len().checked_sub(1),
+        let stop = match (tuple_bound("stop")?, bound("stop")?) {
+            (Some(key), _) => (0..outer.len())
+                .rev()
+                .find(|&row| prefix_of(row, key.len()) <= key.iter().collect::<Vec<_>>()),
+            (None, Some(label)) => outer.iter().rposition(|value| *value == label),
+            (None, None) => outer.len().checked_sub(1),
         };
         return Ok(match (start, stop) {
             (Some(start), Some(stop)) if start <= stop => Some((start..=stop).collect()),
@@ -38637,8 +38861,15 @@ fn frame_multiindex_loc(
         if positions.len() == 1 {
             let flat = frame.index().labels()[positions[0]].clone();
             let row = frame.loc_row(&flat).map_err(loc_key_error)?;
-            let name = multiindex_tuple_text(&labels);
-            let row = Series::new(name.as_str(), row.index().clone(), row.column().clone())
+            // The row is named by its key, a tuple, as pandas' (it was the
+            // tuple's text).
+            let py = key.py();
+            let items = labels
+                .iter()
+                .map(|label| index_label_to_py(py, label))
+                .collect::<PyResult<Vec<_>>>()?;
+            let name = py_series_name(PyTuple::new(py, items)?.as_any())?;
+            let row = Series::new(name, row.index().clone(), row.column().clone())
                 .map_err(frame_error_to_py)?;
             return Ok(Some(MultiLoc::Row(row)));
         }
@@ -47600,6 +47831,37 @@ fn concat(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let _ = copy; // pandas' copy= does not change the result
+    // sort=True: the result's other axis sorted - the columns of rows
+    // stacked, the index of columns side by side - as pandas' combined
+    // index is (it was refused).
+    if sort {
+        let result = concat(
+            py,
+            objs,
+            axis,
+            join,
+            ignore_index,
+            keys,
+            false,
+            copy,
+            kwargs,
+        )?;
+        let result = result.bind(py);
+        if !result.is_instance_of::<PyDataFrame>() {
+            return Ok(result.clone().unbind());
+        }
+        let side_by_side = axis.is_some_and(|axis| {
+            axis.extract::<i64>().is_ok_and(|axis| axis == 1)
+                || axis.extract::<String>().is_ok_and(|axis| axis == "columns")
+        });
+        let sort_kwargs = PyDict::new(py);
+        if !side_by_side {
+            sort_kwargs.set_item("axis", 1)?;
+        }
+        return Ok(result
+            .call_method("sort_index", (), Some(&sort_kwargs))?
+            .unbind());
+    }
     let mut names: Option<Vec<Option<String>>> = None;
     if let Some(kwargs) = kwargs {
         if let Some(flag) = kwargs.get_item("verify_integrity")?
@@ -47615,9 +47877,6 @@ fn concat(
         }
     }
     reject_unsupported_kwargs("concat", kwargs, &[])?;
-    if sort {
-        return Err(not_implemented("concat(sort=True)"));
-    }
     // A mapping's keys are the keys= of its values.
     let keys = keys.filter(|k| !k.is_none());
     let (objs, keys) = match objs.cast::<PyDict>() {
@@ -48816,6 +49075,110 @@ fn merge_impl(
         )
     };
 
+    // One side's index against the other's column (left_index with
+    // right_on, left_on with right_index), as pandas: the rows a column
+    // merge gives, indexed by the column side's row labels (NaN where it has
+    // no row), its key column filled from the index where it has none (it
+    // was refused).
+    let mixed = match (
+        args.left_index,
+        args.right_index,
+        args.left_on,
+        args.right_on,
+    ) {
+        (true, false, None, Some(keys)) if args.on.is_none() => {
+            Some((true, merge_key_names(right, keys)?))
+        }
+        (false, true, Some(keys), None) if args.on.is_none() => {
+            Some((false, merge_key_names(left, keys)?))
+        }
+        _ => None,
+    };
+    if let Some((index_on_left, keys)) = mixed {
+        let [key] = keys.as_slice() else {
+            return Err(not_implemented(
+                "merge of an index with several column keys",
+            ));
+        };
+        const KEY: &str = "__fp_merge_index_key__";
+        const LABEL: &str = "__fp_merge_row_label__";
+        let with_labels = |frame: &DataFrame, name: &str| -> PyResult<DataFrame> {
+            let labels: Vec<Scalar> = frame
+                .index()
+                .labels()
+                .iter()
+                .map(index_label_to_scalar)
+                .collect();
+            let column = Column::from_values(labels).map_err(column_error_to_py)?;
+            frame.with_column(name, column).map_err(frame_error_to_py)
+        };
+        let (keyed_left, keyed_right, left_key, right_key) = if index_on_left {
+            (
+                with_labels(left, KEY)?,
+                with_labels(right, LABEL)?,
+                KEY,
+                key.as_str(),
+            )
+        } else {
+            (
+                with_labels(left, LABEL)?,
+                with_labels(right, KEY)?,
+                key.as_str(),
+                KEY,
+            )
+        };
+        let merged = run(
+            &keyed_left,
+            &keyed_right,
+            &[left_key.to_owned()],
+            &[right_key.to_owned()],
+        )?;
+        let (Some(index_keys), Some(column_keys), Some(row_labels)) =
+            (merged.column(KEY), merged.column(key), merged.column(LABEL))
+        else {
+            return Err(not_implemented("merge of an index with a column key"));
+        };
+        // An int key column filled stays int (the merge widened it for the
+        // rows it had none).
+        let source = if index_on_left { right } else { left };
+        let int_key = source
+            .column(key)
+            .is_some_and(|column| column.dtype() == DType::Int64);
+        #[allow(clippy::cast_possible_truncation)] // whole floats of int keys
+        let filled: Vec<Scalar> = column_keys
+            .values()
+            .iter()
+            .zip(index_keys.values())
+            .map(|(own, from_index)| {
+                let value = if own.is_missing() { from_index } else { own };
+                match value {
+                    Scalar::Float64(v) if int_key && v.fract() == 0.0 => Scalar::Int64(*v as i64),
+                    other => other.clone(),
+                }
+            })
+            .collect();
+        let filled = Column::from_values(filled).map_err(column_error_to_py)?;
+        let index = Index::new(
+            row_labels
+                .values()
+                .iter()
+                .map(scalar_to_index_label_converter)
+                .collect(),
+        );
+        let names: Vec<String> = merged
+            .column_names()
+            .into_iter()
+            .filter(|name| name.as_str() != KEY && name.as_str() != LABEL)
+            .cloned()
+            .collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let frame = merged
+            .with_column(key, filled)
+            .and_then(|frame| frame.select_columns(&refs))
+            .and_then(|frame| frame.with_index(index))
+            .map_err(frame_error_to_py)?;
+        return Ok(frame);
+    }
     if args.left_index || args.right_index {
         if !(args.left_index && args.right_index)
             || args.on.is_some()
@@ -57289,6 +57652,43 @@ fn range_index_nbytes(py: Python<'_>, (start, stop, step): (i64, i64, i64)) -> P
         + size(start.into_bound_py_any(py)?)?
         + size(stop.into_bound_py_any(py)?)?
         + size(step.into_bound_py_any(py)?)?)
+}
+
+/// pandas' `memory_usage(deep=True)` of a column pandas holds as Python
+/// objects (dtype object: text, bools beside a missing one, object cells): a
+/// pointer a row and each value's `sys.getsizeof` (a str 42 bytes and up, None
+/// 16); it counted the text's characters. None for any other column, whose
+/// deep bytes are its shallow ones.
+fn object_deep_bytes(py: Python<'_>, column: &Column) -> PyResult<Option<usize>> {
+    if column_pandas_dtype_name(column) != "object" {
+        return Ok(None);
+    }
+    let sys = py.import("sys")?;
+    let mut bytes = column.len().saturating_mul(8);
+    for value in column.values() {
+        let size: usize = sys
+            .call_method1("getsizeof", (scalar_to_py(py, value)?,))?
+            .extract()?;
+        bytes = bytes.saturating_add(size);
+    }
+    Ok(Some(bytes))
+}
+
+/// [`object_deep_bytes`] of an object index (text labels): None for any
+/// other.
+fn index_deep_bytes(py: Python<'_>, index: &Index) -> PyResult<Option<usize>> {
+    if index.dtype() != "object" || index.row_multiindex().is_some() {
+        return Ok(None);
+    }
+    let sys = py.import("sys")?;
+    let mut bytes = index.len().saturating_mul(8);
+    for label in index.labels() {
+        let size: usize = sys
+            .call_method1("getsizeof", (index_label_to_py(py, label)?,))?
+            .extract()?;
+        bytes = bytes.saturating_add(size);
+    }
+    Ok(Some(bytes))
 }
 
 /// pandas' `compression='infer'` compresses a path ending in a compression
