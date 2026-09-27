@@ -10993,3 +10993,53 @@ def test_to_string_shows_every_column_and_character() -> None:
     for make in (lambda m: m.DataFrame([list(range(30))]), lambda m: m.DataFrame({"a": ["x" * 100]})):
         assert make(fpd).to_string() == make(pd).to_string()
         assert "..." not in make(fpd).to_string()
+
+
+# br-frankenpandas-u6p7i (to_json): date_format= and date_unit= were refused.
+# 'iso' writes ISO 8601 text (the fraction cut to the unit, a zoned instant in
+# UTC with 'Z', a duration 'P1DT2H3M4.500S' with the fraction a value needs),
+# otherwise integers in the unit since the epoch; a datetime index likewise.
+def _json_dates_frame(m: Any) -> Any:
+    return m.DataFrame({
+        "t": m.to_datetime(["2024-01-05 10:30:15.123456789", None]),
+        "z": m.to_datetime(["2024-01-05 10:30:00", "2024-07-01 00:00:00"]).tz_localize("US/Eastern"),
+        "d": m.to_timedelta(["1 days 02:03:04.5", "5ms"]),
+        "v": [1, 2],
+    })
+
+
+def _json_dates_indexed(m: Any) -> Any:
+    return m.DataFrame({"v": [1, 2]}, index=m.to_datetime(["2024-01-05", "2024-01-06 12:00:00"], format="ISO8601"))
+
+
+_JSON_DATE_CASES = {
+    **{f"records {kw}": (lambda kw: lambda m: _json_dates_frame(m).to_json(orient="records", **kw))(kw) for kw in [
+        {"date_format": "iso"}, {"date_format": "iso", "date_unit": "s"}, {"date_format": "iso", "date_unit": "us"},
+        {"date_format": "iso", "date_unit": "ns"}, {"date_format": "epoch", "date_unit": "s"},
+        {"date_format": "epoch", "date_unit": "ns"}, {"date_unit": "us"},
+    ]},
+    **{f"datetime index {o} iso": (lambda o: lambda m: _json_dates_indexed(m).to_json(orient=o, date_format="iso"))(o) for o in ["index", "columns", "split", "values"]},
+    "datetime index epoch seconds": lambda m: _json_dates_indexed(m).to_json(orient="split", date_unit="s"),
+    "Series iso": lambda m: m.Series(m.to_datetime(["2024-01-05", None]), name="s").to_json(date_format="iso"),
+    "Series of durations iso": lambda m: m.Series(m.to_timedelta(["1h", "5ms", "2 days 00:00:01.5", "1us", "-1h", "1500us"])).to_json(date_format="iso"),
+    "Series epoch nanoseconds": lambda m: m.Series(m.to_datetime(["2024-01-05"])).to_json(date_unit="ns"),
+    "records lines iso": lambda m: _json_dates_frame(m).to_json(orient="records", lines=True, date_format="iso"),
+    "an unknown unit raises": lambda m: _json_dates_frame(m).to_json(date_unit="h"),
+    "orient table with epoch raises": lambda m: _json_dates_frame(m).to_json(orient="table", date_format="epoch"),
+    # NEGATIVE: the default (epoch milliseconds) is unchanged.
+    "default epoch milliseconds": lambda m: _json_dates_frame(m).to_json(orient="records"),
+}
+
+
+def _json_dates_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_JSON_DATE_CASES))
+def test_to_json_date_format_and_unit_like_pandas(case: str) -> None:
+    run = _JSON_DATE_CASES[case]
+    assert _json_dates_outcome(fpd, run) == _json_dates_outcome(pd, run), case

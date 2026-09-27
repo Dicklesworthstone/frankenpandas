@@ -23514,10 +23514,8 @@ impl PySeries {
         mode: &str,
     ) -> PyResult<Option<String>> {
         let args = JsonWriteArgs {
-            date_format,
             double_precision,
             force_ascii,
-            date_unit,
             default_handler,
             lines,
             compression,
@@ -23530,8 +23528,19 @@ impl PySeries {
             if lines {
                 return Err(not_implemented("Series.to_json(lines=True)"));
             }
-            // A column of dates writes as their instants (fvsao.67).
-            Python::attach(|py| object_instants(py, &self.inner))?
+            // A column of dates writes as their instants (fvsao.67), in
+            // date_format / date_unit.
+            let series = Python::attach(|py| object_instants(py, &self.inner))?;
+            let frame = series
+                .to_frame(Some("__value__"))
+                .map_err(frame_error_to_py)?;
+            let frame = json_orient_dates(frame, orient, date_format, date_unit)?;
+            let column = frame
+                .column("__value__")
+                .cloned()
+                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("__value__"))?;
+            Series::new(series.name(), frame.index().clone(), column)
+                .map_err(frame_error_to_py)?
                 .to_json(orient.unwrap_or("index"))
                 .map_err(frame_error_to_py)
         })
@@ -34787,10 +34796,8 @@ impl PyDataFrame {
         mode: &str,
     ) -> PyResult<Option<String>> {
         let args = JsonWriteArgs {
-            date_format,
             double_precision,
             force_ascii,
-            date_unit,
             default_handler,
             lines,
             compression,
@@ -34800,8 +34807,10 @@ impl PyDataFrame {
             mode,
         };
         write_json_py("DataFrame.to_json", path_or_buf, orient, &args, |lines| {
-            // Columns of dates write as their instants (fvsao.67).
+            // Columns of dates write as their instants (fvsao.67), in
+            // date_format / date_unit.
             let frame = Python::attach(|py| frame_object_instants(py, &self.inner))?;
+            let frame = json_orient_dates(frame, orient, date_format, date_unit)?;
             if lines {
                 // pandas ends every record line, the last included, with "\n".
                 let mut text = fp_io::write_jsonl_string(&frame).map_err(io_error_to_py)?;
@@ -55275,12 +55284,11 @@ fn write_text_target(
 }
 
 /// pandas' `to_json` keywords around `orient`, shared by DataFrame and
-/// Series (fvsao.5: they were dropped through `**kwargs`).
+/// Series (fvsao.5: they were dropped through `**kwargs`); `date_format` and
+/// `date_unit` are applied by the caller's render ([`json_dates`]).
 struct JsonWriteArgs<'a, 'py> {
-    date_format: Option<&'a str>,
     double_precision: i64,
     force_ascii: bool,
-    date_unit: &'a str,
     default_handler: Option<&'a Bound<'py, PyAny>>,
     lines: bool,
     compression: Option<&'a str>,
@@ -55305,9 +55313,7 @@ fn write_json_py(
     unsupported_params(
         method,
         &[
-            ("date_format", args.date_format.is_none()),
             ("double_precision", args.double_precision == 10),
-            ("date_unit", args.date_unit == "ms"),
             ("default_handler", args.default_handler.is_none()),
             (
                 "compression",
@@ -55344,6 +55350,163 @@ fn write_json_py(
         text
     };
     write_text_target(path_or_buf, text, args.mode == "a")
+}
+
+/// `frame` as `to_json(orient)` writes its dates: orient='table' writes ISO
+/// itself at milliseconds (epoch is pandas' ValueError; another unit is
+/// refused for now), any other orient through [`json_dates`].
+fn json_orient_dates(
+    frame: DataFrame,
+    orient: Option<&str>,
+    date_format: Option<&str>,
+    date_unit: &str,
+) -> PyResult<DataFrame> {
+    if orient != Some("table") {
+        return json_dates(frame, date_format, date_unit);
+    }
+    if date_format == Some("epoch") {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Trying to write with `orient='table'` and `date_format='epoch'`. Table Schema \
+             requires dates to be formatted with `date_format='iso'`",
+        ));
+    }
+    if date_unit != "ms" {
+        return Err(not_implemented("to_json(orient='table', date_unit=...)"));
+    }
+    Ok(frame)
+}
+
+/// `frame`'s datetimes and timedeltas as pandas' `to_json` writes them for
+/// `date_format` / `date_unit` (both were refused): 'iso' is ISO 8601 text -
+/// '2024-01-05T10:30:15.123', the fraction cut to the unit, a zoned instant
+/// in UTC with 'Z', a duration 'P1DT2H3M4.500S' - and otherwise integers in
+/// the unit since the epoch (milliseconds, the renderer's own, pass through);
+/// a datetime index's labels likewise. NaT stays missing (null).
+fn json_dates(frame: DataFrame, date_format: Option<&str>, date_unit: &str) -> PyResult<DataFrame> {
+    let per_unit: i64 = match date_unit {
+        "s" => 1_000_000_000,
+        "ms" => 1_000_000,
+        "us" => 1_000,
+        "ns" => 1,
+        other => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Invalid value '{other}' for option 'date_unit'"
+            )));
+        }
+    };
+    let iso = date_format == Some("iso");
+    if !iso && date_unit == "ms" {
+        return Ok(frame);
+    }
+    let digits = match date_unit {
+        "s" => 0,
+        "ms" => 3,
+        "us" => 6,
+        _ => 9,
+    };
+    let instant = |nanos: i64, zoned: bool| -> Scalar {
+        if iso {
+            let seconds = Timestamp::from_nanos(nanos.div_euclid(1_000_000_000) * 1_000_000_000);
+            let base = seconds.isoformat();
+            let fraction = nanos.rem_euclid(1_000_000_000);
+            let mut text = if digits == 0 {
+                base
+            } else {
+                let cut = fraction / 10_i64.pow(9 - digits);
+                format!("{base}.{cut:0width$}", width = digits as usize)
+            };
+            if zoned {
+                text.push('Z');
+            }
+            Scalar::Utf8(text)
+        } else {
+            Scalar::Int64(nanos.div_euclid(per_unit))
+        }
+    };
+    // A duration's ISO text: Python's components (a negative one's days
+    // negative, the rest positive), the fraction - none for whole seconds -
+    // at the precision it needs (3, 6 or 9 digits).
+    let duration = |nanos: i64| -> Scalar {
+        if iso {
+            const DAY: i64 = 86_400_000_000_000;
+            let days = nanos.div_euclid(DAY);
+            let rest = nanos.rem_euclid(DAY);
+            let seconds = rest / 1_000_000_000;
+            let fraction = rest % 1_000_000_000;
+            let fraction = if fraction == 0 {
+                String::new()
+            } else if fraction % 1_000_000 == 0 {
+                format!(".{:03}", fraction / 1_000_000)
+            } else if fraction % 1_000 == 0 {
+                format!(".{:06}", fraction / 1_000)
+            } else {
+                format!(".{fraction:09}")
+            };
+            Scalar::Utf8(format!(
+                "P{days}DT{}H{}M{}{fraction}S",
+                seconds / 3_600,
+                seconds % 3_600 / 60,
+                seconds % 60
+            ))
+        } else {
+            Scalar::Int64(nanos / per_unit)
+        }
+    };
+    let dtype_out = if iso { DType::Utf8 } else { DType::Int64 };
+    let mut out = frame.clone();
+    for name in frame.column_names() {
+        let Some(column) = frame.column(name) else {
+            continue;
+        };
+        let values: Vec<Scalar> = match column.dtype() {
+            DType::Datetime64 { tz } => column
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Datetime64(nanos) if *nanos != Timestamp::NAT => {
+                        instant(*nanos, tz.is_some())
+                    }
+                    _ => Scalar::Null(NullKind::Null),
+                })
+                .collect(),
+            DType::Timedelta64 => column
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Timedelta64(nanos) if *nanos != Timedelta::NAT => duration(*nanos),
+                    _ => Scalar::Null(NullKind::Null),
+                })
+                .collect(),
+            _ => continue,
+        };
+        let converted = Column::new(dtype_out.clone(), values).map_err(column_error_to_py)?;
+        out = out
+            .with_column(name.clone(), converted)
+            .map_err(frame_error_to_py)?;
+    }
+    let labels = frame.index().labels();
+    if !labels.is_empty()
+        && labels
+            .iter()
+            .all(|label| matches!(label, IndexLabel::Datetime64(_)))
+    {
+        let zoned = frame.index().tz().is_some();
+        let relabelled: Vec<IndexLabel> = labels
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Datetime64(nanos) if *nanos != Timestamp::NAT => {
+                    match instant(*nanos, zoned) {
+                        Scalar::Utf8(text) => IndexLabel::Utf8(text),
+                        Scalar::Int64(value) => IndexLabel::Int64(value),
+                        _ => label.clone(),
+                    }
+                }
+                other => other.clone(),
+            })
+            .collect();
+        out = out.set_axis(relabelled, 0).map_err(frame_error_to_py)?;
+    }
+    Ok(out)
 }
 
 /// pandas' `force_ascii=True`: every non-ASCII character becomes a `\uXXXX`
