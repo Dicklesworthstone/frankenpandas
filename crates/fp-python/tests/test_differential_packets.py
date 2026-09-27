@@ -10843,3 +10843,30 @@ def test_numeric_column_labels_print_at_one_width_like_pandas(case: str) -> None
     frame = _HEADER_WIDTH_FRAMES[case]
     for text in (repr, lambda d: d.to_string(index=False)):
         assert text(frame(fpd)) == text(frame(pd)), case
+
+
+# br-frankenpandas-0jg0l (rows): a float index printed each label at its own
+# precision ('1.5' where pandas prints '1.50' beside '10.25'), ints beside
+# floats as ints, and no sign space beside a negative label - so a float
+# value_counts or a groupby over float keys printed differently.
+_ROW_LABEL_OBJECTS = {
+    "float index": lambda m: m.Series([1, 2], index=[1.5, 10.25]),
+    "negative int index": lambda m: m.Series([1, 2, 3], index=[-5, 100, 7]),
+    "negative float index": lambda m: m.Series([1, 2], index=[-1.5, 2.0]),
+    "int and float index": lambda m: m.Series([1, 2], index=[1, 2.5]),
+    "frame float index": lambda m: m.DataFrame({"v": [1, 2]}, index=[0.1, 100.0]),
+    "frame negative index": lambda m: m.DataFrame({"v": [1, 2]}, index=[-1, 10]),
+    "value_counts of floats": lambda m: m.Series([1.5, 1.5, 10.25]).value_counts(),
+    "groupby over float keys": lambda m: m.DataFrame({"k": [0.5, 10.25, 0.5], "v": [1, 2, 3]}).groupby("k")["v"].sum(),
+    # NEGATIVES: a float index with NaN, a bool index and text print as before.
+    "float index with NaN": lambda m: m.Series([1, 2], index=[1.5, float("nan")]),
+    "bool index": lambda m: m.Series([1, 2], index=[True, False]),
+    "text index": lambda m: m.Series([1, 2], index=["a", "bb"]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_ROW_LABEL_OBJECTS))
+def test_numeric_row_labels_print_as_one_block_like_pandas(case: str) -> None:
+    obj = _ROW_LABEL_OBJECTS[case]
+    assert repr(obj(fpd)) == repr(obj(pd)), case
