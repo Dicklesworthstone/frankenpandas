@@ -4222,6 +4222,126 @@ fn refuse_labels_keyed_alike<'py>(
     Ok(())
 }
 
+/// Whether `data` is a (non-empty) list of Series - pandas' rows-of-Series
+/// frame, which labels its own rows and columns ([`frame_from_series_rows`]).
+fn is_series_list(data: &Bound<'_, PyAny>) -> bool {
+    data.cast::<PyList>().is_ok_and(|list| {
+        !list.is_empty()
+            && list
+                .iter()
+                .all(|item| item.extract::<PyRef<'_, PySeries>>().is_ok())
+    })
+}
+
+/// pandas' `DataFrame([s1, s2, ...])`: each Series a ROW, labelled by its
+/// name (typed; `'Unnamed <k>'` counting the unnamed ones when some are
+/// named, pandas' RangeIndex when none is), the columns the union of the
+/// Series' indexes in the order their labels first appear (a RangeIndex
+/// when every Series shares one), a label a Series lacks NaN; `columns`
+/// (`columns=`) are the columns instead, selected before the dtypes are
+/// read. It raised TypeError (fvsao.63).
+fn frame_from_series_rows(
+    rows: &[Series],
+    columns: Option<&[IndexLabel]>,
+    promote: impl Fn(Vec<Scalar>) -> Vec<Scalar>,
+) -> PyResult<DataFrame> {
+    let mut labels: Vec<IndexLabel> = Vec::new();
+    let mut seen: HashSet<&IndexLabel> = HashSet::new();
+    let mut positions: Vec<HashMap<&IndexLabel, usize>> = Vec::with_capacity(rows.len());
+    for row in rows {
+        if row.index().has_duplicates() {
+            return Err(not_implemented(
+                "DataFrame of Series whose index repeats a label",
+            ));
+        }
+        let mut at = HashMap::with_capacity(row.len());
+        for (position, label) in row.index().labels().iter().enumerate() {
+            if seen.insert(label) {
+                labels.push(label.clone());
+            }
+            at.insert(label, position);
+        }
+        positions.push(at);
+    }
+    let selected = columns.is_some();
+    if let Some(columns) = columns {
+        labels = columns.to_vec();
+    }
+    let cells: Vec<Vec<Scalar>> = labels
+        .iter()
+        .map(|label| {
+            rows.iter()
+                .zip(&positions)
+                .map(|(row, at)| match at.get(label) {
+                    Some(&position) => row.column().values()[position].clone(),
+                    None => Scalar::Null(NullKind::NaN),
+                })
+                .collect()
+        })
+        .collect();
+    // pandas stacks the rows into one 2-D array: all-numeric cells with a
+    // float or a missing one anywhere make EVERY column float64; any other
+    // mix is read column by column.
+    let numeric = cells.iter().flatten().all(|cell| {
+        matches!(
+            cell,
+            Scalar::Int64(_) | Scalar::Float64(_) | Scalar::Null(NullKind::NaN | NullKind::Null)
+        )
+    });
+    let floats = numeric
+        && cells
+            .iter()
+            .flatten()
+            .any(|cell| matches!(cell, Scalar::Float64(_) | Scalar::Null(_)));
+    let mut columns = BTreeMap::new();
+    let mut order = Vec::with_capacity(labels.len());
+    for (label, values) in labels.iter().zip(cells) {
+        let column = if floats {
+            Column::new(DType::Float64, values)
+        } else {
+            Column::from_values(promote(values))
+        }
+        .map_err(column_error_to_py)?;
+        let name = fp_frame::column_key(label);
+        columns.insert(name.clone(), column);
+        order.push(name);
+    }
+    let unnamed = rows.iter().filter(|row| row.name().is_empty()).count();
+    let index = if unnamed == rows.len() {
+        Index::default_range(rows.len())
+    } else {
+        let mut next_unnamed = 0;
+        Index::new(
+            rows.iter()
+                .map(|row| {
+                    if row.name().is_empty() {
+                        next_unnamed += 1;
+                        IndexLabel::Utf8(format!("Unnamed {}", next_unnamed - 1))
+                    } else {
+                        row.name().label()
+                    }
+                })
+                .collect(),
+        )
+    };
+    let span = rows
+        .first()
+        .and_then(|first| first.index().range_span())
+        .filter(|span| {
+            !selected
+                && rows
+                    .iter()
+                    .all(|row| row.index().range_span() == Some(*span))
+        });
+    let frame = DataFrame::new_with_column_order(index, columns, order)
+        .map_err(frame_error_to_py)?
+        .with_recorded_column_labels(labels);
+    Ok(match span {
+        Some(span) => frame.with_column_range(span),
+        None => frame,
+    })
+}
+
 /// [`column_arg`] for an optional argument.
 fn column_arg_opt<'py>(
     frame: &DataFrame,
@@ -4299,6 +4419,10 @@ fn constructor_column_labels(
     let Some(data) = data.filter(|data| !data.is_none()) else {
         return Ok(frame);
     };
+    // Rows of Series label their own columns.
+    if is_series_list(data) {
+        return Ok(frame);
+    }
     if let Ok(dict) = data.cast::<PyDict>() {
         refuse_labels_keyed_alike(dict.keys().iter())?;
         let labels = dict
@@ -4368,6 +4492,11 @@ fn constructor_range_span(
     };
     if let Some(span) = own_rows(data) {
         return span;
+    }
+    // Rows of Series are labelled by their names: a RangeIndex only when
+    // none is named, as the rows already say.
+    if is_series_list(data) {
+        return rows.range_span();
     }
     match data.cast::<PyDict>() {
         Ok(mapping) if for_frame => {
@@ -24717,6 +24846,38 @@ impl PyDataFrame {
                 }
             };
 
+            // A list of Series: one row each, pandas' (fvsao.63).
+            if is_series_list(data) {
+                let rows: Vec<Series> = data
+                    .try_iter()?
+                    .map(|item| Ok(item?.extract::<PyRef<'_, PySeries>>()?.inner.clone()))
+                    .collect::<PyResult<_>>()?;
+                // columns= as labels (typed ones too).
+                let wanted: Option<Vec<IndexLabel>> = match columns.filter(|c| !c.is_none()) {
+                    None => None,
+                    Some(columns) => Some(
+                        columns
+                            .try_iter()?
+                            .map(|item| {
+                                let item = item?;
+                                match typed_column_label(&item) {
+                                    Some(label) => Ok(label),
+                                    None => Ok(IndexLabel::Utf8(item.str()?.to_string())),
+                                }
+                            })
+                            .collect::<PyResult<_>>()?,
+                    ),
+                };
+                let mut frame = frame_from_series_rows(&rows, wanted.as_deref(), promote)?;
+                if let Some(index) = index.filter(|index| !index.is_none()) {
+                    let labels = extract_index_labels(Some(index), frame.len())?;
+                    frame = frame
+                        .with_index(Index::new(labels))
+                        .map_err(axis_length_error_to_py)?;
+                }
+                return Ok(PyDataFrame { inner: frame });
+            }
+
             if let Ok(df) = data.extract::<PyRef<'_, PyDataFrame>>() {
                 let mut res = df.inner.clone();
                 if let Some(cols) = explicit_cols {
@@ -32355,17 +32516,20 @@ impl PyDataFrame {
         Ok(PySeries { inner: s })
     }
 
-    /// pandas' `DataFrame.xs` on the row index. The row comes back as a
-    /// one-row frame, pandas' drop_level=False shape, whatever drop_level
-    /// says (the Series return is fvsao.7's).
+    /// pandas' `DataFrame.xs`: on a flat row index the row labelled `key`
+    /// as a Series named by it (the rows as a frame for a repeated label),
+    /// with axis=1 the column; over a row MultiIndex with `level=`, the rows
+    /// whose level is `key`. The row came back as a one-row frame
+    /// (fvsao.63).
     #[pyo3(signature = (key, axis=None, level=None, drop_level=true))]
     fn xs(
         &self,
+        py: Python<'_>,
         key: &Bound<'_, PyAny>,
         axis: Option<&Bound<'_, PyAny>>,
         level: Option<&Bound<'_, PyAny>>,
         drop_level: bool,
-    ) -> PyResult<PyDataFrame> {
+    ) -> PyResult<Py<PyAny>> {
         let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
         // xs(key, level=) over a row MultiIndex: the rows whose `level` is
         // `key`, that level dropped unless drop_level=False (fvsao.36; it
@@ -32394,7 +32558,7 @@ impl PyDataFrame {
             }
             if !drop_level {
                 let inner = frame_rows_keeping_multiindex(&self.inner, multi, &rows)?;
-                return Ok(PyDataFrame { inner });
+                return Ok(Py::new(py, PyDataFrame { inner })?.into_any());
             }
             let keep: Vec<usize> = (0..multi.nlevels()).filter(|&l| l != position).collect();
             let (index, rest) = multiindex_levels_index(multi, &rows, &keep)?;
@@ -32407,15 +32571,41 @@ impl PyDataFrame {
             if let Some(rest) = rest {
                 inner = inner.with_row_multiindex(rest).map_err(frame_error_to_py)?;
             }
-            return Ok(PyDataFrame { inner });
+            return Ok(Py::new(py, PyDataFrame { inner })?.into_any());
         }
-        unsupported_params(
-            "DataFrame.xs",
-            &[("axis", ax == 0), ("level", level.is_none())],
-        )?;
-        let lbl = py_to_index_label(key)?;
-        let df = self.inner.xs(&lbl).map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: df })
+        unsupported_params("DataFrame.xs", &[("level", level.is_none())])?;
+        let absent = || PyErr::new::<pyo3::exceptions::PyKeyError, _>(key.clone().unbind());
+        if ax == 1 {
+            // The column labelled `key`, typed labels included.
+            let key = column_arg(py, &self.inner, key.clone())?;
+            let name = key
+                .extract::<String>()
+                .ok()
+                .filter(|name| self.inner.column(name).is_some())
+                .ok_or_else(absent)?;
+            return Ok(Py::new(py, self.column_series(&name)?)?.into_any());
+        }
+        // Date text on a DatetimeIndex is its instant, as .loc reads it.
+        let label =
+            fp_frame::datetime_list_label(self.inner.index().labels(), &py_to_index_label(key)?);
+        match self
+            .inner
+            .index()
+            .labels()
+            .iter()
+            .filter(|row| **row == label)
+            .count()
+        {
+            0 => Err(absent()),
+            1 => {
+                let row = self.inner.loc_row(&label).map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PySeries { inner: row })?.into_any())
+            }
+            _ => {
+                let rows = self.inner.xs(&label).map_err(frame_error_to_py)?;
+                Ok(Py::new(py, PyDataFrame { inner: rows })?.into_any())
+            }
+        }
     }
 
     /// pandas' `DataFrame.rename_axis`: `mapper` (the row index, or with

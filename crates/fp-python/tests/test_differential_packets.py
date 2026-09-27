@@ -9419,6 +9419,67 @@ def _setitem_int_0_on_str_columns(m: Any) -> Any:
     return frame
 
 
+# fvsao.63: DataFrame.xs(label) returned a one-row frame (pandas: the row as
+# a Series named by it), get(0) missed typed labels (it gave the default),
+# and DataFrame([s1, s2]) - each Series a row - raised TypeError.
+def _dup_rows(m: Any) -> Any:
+    return m.DataFrame({"v": [1, 2, 3]}, index=["a", "b", "a"])
+
+
+def _named_rows(m: Any) -> Any:
+    return [m.Series([1, 2], index=["x", "y"], name=0), m.Series([3, 4], index=["y", "z"], name=1)]
+
+
+def _rows_view(x: Any) -> Any:
+    if hasattr(x, "columns"):
+        return (_axis_view(x), [str(d) for d in x.dtypes])
+    if hasattr(x, "dtype"):
+        return (_axis_view(x), str(x.dtype))
+    return x
+
+
+_XS_GET_ROWS_CASES = {
+    "xs(1)": lambda m: _intcol_frame(m).xs(1),
+    "xs('b')": lambda m: _dup_rows(m).xs("b"),
+    "xs of a repeated label": lambda m: _dup_rows(m).xs("a"),
+    "xs(1, axis=1)": lambda m: _intcol_frame(m).xs(1, axis=1),
+    "xs(0, axis='columns')": lambda m: _intcol_frame(m).xs(0, axis="columns"),
+    "xs(date text)": lambda m: m.DataFrame({"v": [1.0, 2.0]}, index=m.to_datetime(["2024-01-01", "2024-01-02"])).xs("2024-01-02"),
+    "get(1)": lambda m: _intcol_frame(m).get(1),
+    "get([0, 1])": lambda m: _intcol_frame(m).get([0, 1]),
+    "rows of named Series": lambda m: m.DataFrame(_named_rows(m)),
+    "rows of unnamed Series": lambda m: m.DataFrame([m.Series([1, 2]), m.Series([3, 4])]),
+    "rows with some unnamed": lambda m: m.DataFrame([m.Series([1, 2], name="p"), m.Series([3, 4]), m.Series([5, 6])]),
+    "rows of mixed dtypes": lambda m: m.DataFrame([m.Series([1.5, 2.0]), m.Series(["a", "b"])]),
+    "rows index=": lambda m: m.DataFrame(_named_rows(m), index=["r1", "r2"]),
+    "rows columns=": lambda m: m.DataFrame(_named_rows(m), columns=["y"]),
+    "rows in first-seen label order": lambda m: m.DataFrame([m.Series([1, 2], index=["b", "a"]), m.Series([3], index=["a"])]),
+    "rows: a gap makes every column float": lambda m: m.DataFrame([m.Series([1, 2], index=["p", "q"]), m.Series([3], index=["p"])]),
+    "rows of one Series": lambda m: m.DataFrame(_named_rows(m)[:1]),
+    # NEGATIVES: an absent label is xs' KeyError and get's default; index=
+    # of the wrong length is pandas' ValueError.
+    "xs of an absent label": lambda m: _intcol_frame(m).xs(7),
+    "get of an absent label": lambda m: _intcol_frame(m).get(7, "default"),
+    "get of an absent label, no default": lambda m: _intcol_frame(m).get(7),
+    "rows index= of the wrong length": lambda m: m.DataFrame(_named_rows(m), index=["only"]),
+}
+
+
+def _xs_get_rows_outcome(m: Any, case: str) -> Any:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return _rows_view(_XS_GET_ROWS_CASES[case](m))
+    except Exception as e:  # noqa: BLE001 - the exception type is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_XS_GET_ROWS_CASES))
+def test_xs_get_and_rows_of_series_match_pandas(case: str) -> None:
+    assert _xs_get_rows_outcome(fpd, case) == _xs_get_rows_outcome(pd, case), case
+
+
 # A REFUSAL, not parity (fvsao.32 stays open for it): pandas keeps the
 # integer label 0 and the string '0' as two columns; frankenpandas keys
 # columns by text, so one of them overwrote the other - df['0'] = ... on
