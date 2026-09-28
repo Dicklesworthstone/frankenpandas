@@ -9559,6 +9559,48 @@ fn compare_categorical_codes_with_na_position(
     }
 }
 
+/// `column` with its missing values filled by `fill_value`: a categorical
+/// column by that category, keeping its categories and ordering (a value
+/// outside them is pandas' TypeError; the fill raised 'cannot cast scalar
+/// of dtype Utf8 to Categorical' for any value; br-frankenpandas-k2bwx),
+/// any other as `Column::fillna` fills.
+pub fn fill_column(column: &Column, fill_value: &Scalar) -> Result<Column, FrameError> {
+    let Some(meta) = column.categorical() else {
+        return Ok(column.fillna(fill_value)?);
+    };
+    if fill_value.is_missing() || !column.has_any_missing() {
+        return Ok(column.clone());
+    }
+    let code_of = |value: &Scalar| {
+        meta.categories
+            .iter()
+            .position(|category| category == value)
+            .map(|position| position as i64)
+    };
+    let Some(fill_code) = code_of(fill_value) else {
+        let shown = match fill_value {
+            Scalar::Utf8(text) => text.clone(),
+            other => other.to_string(),
+        };
+        return Err(FrameError::CompatibilityRejected(format!(
+            "Cannot setitem on a Categorical with a new category ({shown}), set the categories first"
+        )));
+    };
+    let codes = column
+        .values()
+        .iter()
+        .map(|value| {
+            if value.is_missing() {
+                fill_code
+            } else {
+                code_of(value).unwrap_or(-1)
+            }
+        })
+        .collect();
+    let filled = Series::from_categorical_codes("", codes, meta.categories.clone(), meta.ordered)?;
+    Ok(filled.column().clone())
+}
+
 impl Series {
     pub fn new(
         name: impl Into<LabelName>,
@@ -14088,7 +14130,7 @@ impl Series {
     ///
     /// Matches `pd.Series.fillna(value)`.
     pub fn fillna(&self, fill_value: &Scalar) -> Result<Self, FrameError> {
-        let column = self.column.fillna(fill_value)?;
+        let column = fill_column(&self.column, fill_value)?;
         Self::new(self.name.clone(), self.index.clone(), column)
     }
 
@@ -74637,10 +74679,7 @@ impl DataFrame {
         // scope workers. Bit-identical — same Column::fillna per column, reassembled in
         // column order.
         let filled = self.par_map_column_positions_min(16_384, |pos| {
-            Ok(self
-                .column_at(pos)
-                .expect("column in bounds")
-                .fillna(fill_value)?)
+            fill_column(self.column_at(pos).expect("column in bounds"), fill_value)
         })?;
         let pairs: Vec<(String, Column)> = self
             .column_names()

@@ -14208,3 +14208,115 @@ _EXTENSION_ARRAY_CASES = {
 def test_extension_arrays_like_pandas(case: str) -> None:
     run = _EXTENSION_ARRAY_CASES[case]
     assert _ea_outcome(lambda: run(fpd)) == _ea_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-z6jxh (everyday probe 24): validate='one_to_one' with
+# repeated keys on both sides named the left dataset; pandas names both.
+def _mv_frames(m: Any, left: list, right: list) -> Any:
+    return m.DataFrame({"k": left, "l": range(len(left))}), m.DataFrame({"k": right, "r": range(len(right))})
+
+
+def _mv_outcome(run: Any) -> Any:
+    try:
+        return ("ok", [repr(v) for v in run()])
+    except NameError:
+        raise
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        # By class name: pandas' MergeError is pandas.errors', ours
+        # frankenpandas.errors'.
+        return ("raise", type(e).__name__, str(e))
+
+
+_MERGE_VALIDATE_SIDES_CASES = {
+    "both sides repeat": lambda m: [m.merge(*_mv_frames(m, [1, 1], [1, 1]), on="k", validate="one_to_one")],
+    "both sides repeat, text keys": lambda m: [
+        m.merge(*_mv_frames(m, ["a", "a"], ["a", "a"]), on="k", validate="one_to_one")
+    ],
+    "both sides repeat, 1:1": lambda m: [m.merge(*_mv_frames(m, [1, 1], [1, 1]), on="k", validate="1:1")],
+    "left repeats": lambda m: [m.merge(*_mv_frames(m, [1, 1], [1, 2]), on="k", validate="one_to_one")],
+    "right repeats": lambda m: [m.merge(*_mv_frames(m, [1, 2], [1, 1]), on="k", validate="one_to_one")],
+    # NEGATIVE: unique keys merge.
+    "unique keys merge": lambda m: [
+        m.merge(*_mv_frames(m, [1, 2], [2, 1]), on="k", validate="one_to_one").to_string()
+    ],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_MERGE_VALIDATE_SIDES_CASES))
+def test_merge_validate_names_sides_like_pandas(case: str) -> None:
+    run = _MERGE_VALIDATE_SIDES_CASES[case]
+    assert _mv_outcome(lambda: run(fpd)) == _mv_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-k2bwx (everyday probe 25): read_csv refused a separator
+# longer than one character (sep=r'\s+' included); a categorical's fillna
+# raised for its own category; MultiIndex.set_levels refused level=; the
+# index classes' drop_duplicates / duplicated refused keep=.
+def _e25_csv(m: Any, text: str, **kwargs: Any) -> list:
+    frame = m.read_csv(io.StringIO(text), **kwargs)
+    return frame.to_string().split("\n") + [str(t) for t in frame.dtypes]
+
+
+_E25_MI_ARGS = (["a", "b"], [1, 2])
+
+
+def _e25_mi(m: Any) -> Any:
+    return m.MultiIndex.from_product(_E25_MI_ARGS, names=["l", "n"])
+
+
+_EVERYDAY25_CASES = {
+    "read_csv whitespace sep": lambda m: _e25_csv(m, "a  b\n1  2\n3 4", sep=r"\s+"),
+    "read_csv whitespace sep leading and trailing": lambda m: _e25_csv(m, "  a\tb  \n 1 \t 2 \n", sep=r"\s+"),
+    "read_csv whitespace sep quoted field": lambda m: _e25_csv(m, 'a b\n"x y" 2', sep=r"\s+"),
+    "read_csv whitespace sep header None": lambda m: _e25_csv(m, "1 2\n3 4", sep=r"\s+", header=None),
+    "read_csv regex sep warns": lambda m: _e25_csv(m, "a; b\n1;2\n3;  4", sep=r";\s*"),
+    "read_csv regex sep python engine": lambda m: _e25_csv(m, "a::b\n1::2", sep="::", engine="python"),
+    "read_csv regex sep c engine raises": lambda m: _e25_csv(m, "a::b\n1::2", sep="::", engine="c"),
+    "read_table whitespace sep": lambda m: m.read_table(io.StringIO("a b\n1 2"), sep=r"\s+").to_string().split("\n"),
+    "categorical fillna with a category": lambda m: [
+        m.Series(["a", None], dtype="category").cat.add_categories("z").fillna("z")
+    ],
+    "categorical fillna keeps order": lambda m: [
+        m.Series(["lo", None, "hi"], dtype="category")
+        .cat.reorder_categories(["lo", "hi"], ordered=True)
+        .fillna("hi")
+        .cat.codes.tolist()
+    ],
+    "categorical fillna outside the categories raises": lambda m: [
+        m.Series(["a", None], dtype="category").fillna("x")
+    ],
+    "frame fillna over a categorical column": lambda m: [
+        m.DataFrame({"c": m.Series(["a", None], dtype="category")}).fillna("a").to_string(),
+        [str(t) for t in m.DataFrame({"c": m.Series(["a", None], dtype="category")}).fillna("a").dtypes],
+    ],
+    "set_levels by name": lambda m: [_e25_mi(m).set_levels(["x", "y"], level="l")],
+    "set_levels by position": lambda m: [_e25_mi(m).set_levels([10, 20], level=1)],
+    "set_levels several levels": lambda m: [_e25_mi(m).set_levels([["p", "q"], [7, 8]], level=[0, 1])],
+    "Index drop_duplicates keep": lambda m: [
+        m.Index([3, 1, 2, 1]).drop_duplicates(keep="last"),
+        m.Index([3, 1, 2, 1]).drop_duplicates(keep=False),
+        m.Index([3, 1, 2, 1]).duplicated(keep="last").tolist(),
+    ],
+    "typed index drop_duplicates keep": lambda m: [
+        m.DatetimeIndex(["2024-01-01", "2024-01-02", "2024-01-01"]).drop_duplicates(keep="last"),
+        m.TimedeltaIndex(["1h", "2h", "1h"]).drop_duplicates(keep=False),
+        m.PeriodIndex(["2024-01", "2024-02", "2024-01"], freq="M").drop_duplicates(keep="last"),
+        m.MultiIndex.from_tuples([("a", 1), ("b", 2), ("a", 1)]).drop_duplicates(keep=False),
+        m.RangeIndex(3).drop_duplicates(keep="last"),
+    ],
+    "drop_duplicates bad keep raises": lambda m: [m.Index([1, 1]).drop_duplicates(keep="middle")],
+    # NEGATIVES: a one-character sep, fillna of a plain column, set_levels
+    # of every level, drop_duplicates' default keep.
+    "read_csv comma sep": lambda m: _e25_csv(m, "a,b\n1,2", sep=","),
+    "plain fillna": lambda m: [m.Series([1.0, None]).fillna(0)],
+    "set_levels every level": lambda m: [_e25_mi(m).set_levels([["x", "y"], [5, 6]])],
+    "drop_duplicates default": lambda m: [m.Index([3, 1, 2, 1]).drop_duplicates()],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EVERYDAY25_CASES))
+def test_everyday25_like_pandas(case: str) -> None:
+    run = _EVERYDAY25_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

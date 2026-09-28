@@ -1144,6 +1144,11 @@ fn has_duplicate_composite_keys(keys: &[CompositeJoinKey]) -> bool {
     false
 }
 
+/// validate='one_to_one' with repeated keys on both sides, which pandas
+/// reports as 'not unique in either left or right dataset'.
+const ONE_TO_ONE_BOTH_SIDES_DUPLICATED: &str =
+    "merge validate='one_to_one' failed: left and right keys are not unique";
+
 fn validate_merge_cardinality(
     validate_mode: MergeValidateMode,
     left_keys: &[CompositeJoinKey],
@@ -1157,14 +1162,22 @@ fn validate_merge_cardinality(
 
     match validate_mode {
         MergeValidateMode::OneToOne => {
-            // Preserve pandas's left-first failure precedence when both sides
-            // duplicate while avoiding an unnecessary right-side scan on a
-            // left-side failure.
-            if has_duplicate_composite_keys(left_keys) {
-                return fail("merge validate='one_to_one' failed: left keys are not unique");
-            }
-            if has_duplicate_composite_keys(right_keys) {
-                return fail("merge validate='one_to_one' failed: right keys are not unique");
+            // pandas names both sides when neither is unique ('not unique in
+            // either left or right dataset'), else the one that is not (the
+            // left failure was reported first whatever the right held;
+            // br-frankenpandas-z6jxh).
+            match (
+                has_duplicate_composite_keys(left_keys),
+                has_duplicate_composite_keys(right_keys),
+            ) {
+                (true, true) => return fail(ONE_TO_ONE_BOTH_SIDES_DUPLICATED),
+                (true, false) => {
+                    return fail("merge validate='one_to_one' failed: left keys are not unique");
+                }
+                (false, true) => {
+                    return fail("merge validate='one_to_one' failed: right keys are not unique");
+                }
+                (false, false) => {}
             }
         }
         MergeValidateMode::OneToMany => {
@@ -1252,9 +1265,9 @@ fn typed_validate_merge_cardinality(
             }
         }
         MergeValidateMode::OneToOne => {
-            // Both sides must be typed before deciding anything: a left-side
-            // failure outranks a right-side one, so answering from the right
-            // alone could surface the wrong message.
+            // Both sides must be typed before deciding anything: the failure
+            // names each side that repeats, so answering from one side alone
+            // could surface the wrong message.
             let Some(left_duplicated) = typed_single_int64_key_has_duplicates(left_key_columns)
             else {
                 return Ok(false);
@@ -1263,13 +1276,16 @@ fn typed_validate_merge_cardinality(
             else {
                 return Ok(false);
             };
-            if left_duplicated {
-                return fail("merge validate='one_to_one' failed: left keys are not unique");
+            match (left_duplicated, right_duplicated) {
+                (true, true) => fail(ONE_TO_ONE_BOTH_SIDES_DUPLICATED),
+                (true, false) => {
+                    fail("merge validate='one_to_one' failed: left keys are not unique")
+                }
+                (false, true) => {
+                    fail("merge validate='one_to_one' failed: right keys are not unique")
+                }
+                (false, false) => Ok(true),
             }
-            if right_duplicated {
-                return fail("merge validate='one_to_one' failed: right keys are not unique");
-            }
-            Ok(true)
         }
     }
 }
@@ -19405,7 +19421,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_validate_one_to_one_keeps_left_error_precedence_when_both_sides_duplicate() {
+    fn merge_validate_one_to_one_names_both_sides_when_both_duplicate_z6jxh() {
         let left = DataFrame::from_dict(
             &["id", "left_v"],
             vec![
@@ -19434,8 +19450,48 @@ mod tests {
                 ..MergeExecutionOptions::default()
             },
         )
-        .expect_err("one_to_one must reject duplicate left keys before right keys");
-        assert!(format!("{err}").contains("left keys are not unique"));
+        .expect_err("one_to_one must reject keys repeated on both sides");
+        // pandas 2.2.3: 'Merge keys are not unique in either left or right
+        // dataset' - both sides named, not the left first (z6jxh).
+        assert!(format!("{err}").contains("left and right keys are not unique"));
+
+        // The composite-key path (text keys) answers alike; NEGATIVE: with
+        // only the right side repeating, only the right is named.
+        let text_keys = |values: [&str; 2]| {
+            DataFrame::from_dict(
+                &["id"],
+                vec![(
+                    "id",
+                    values.iter().map(|v| Scalar::Utf8((*v).into())).collect(),
+                )],
+            )
+            .expect("text-keyed frame")
+        };
+        let validate = |left: &DataFrame, right: &DataFrame| {
+            merge_dataframes_on_with_options(
+                left,
+                right,
+                &["id"],
+                &["id"],
+                JoinType::Inner,
+                MergeExecutionOptions {
+                    validate_mode: Some(MergeValidateMode::OneToOne),
+                    ..MergeExecutionOptions::default()
+                },
+            )
+            .expect_err("one_to_one must reject a repeated key")
+            .to_string()
+        };
+        let both = validate(&text_keys(["a", "a"]), &text_keys(["a", "a"]));
+        assert!(
+            both.contains("left and right keys are not unique"),
+            "{both}"
+        );
+        let right_only = validate(&text_keys(["a", "b"]), &text_keys(["a", "a"]));
+        assert!(
+            right_only.contains(": right keys are not unique"),
+            "{right_only}"
+        );
     }
 
     #[test]
@@ -21400,23 +21456,21 @@ mod typed_validate_cardinality_uza04 {
         );
     }
 
-    /// PRECEDENCE. With BOTH sides duplicated under `one_to_one`, pandas — and
-    /// the generic checker — report the LEFT failure. The typed checker must
-    /// not answer from whichever side it happened to inspect first.
+    /// PRECEDENCE. With BOTH sides duplicated under `one_to_one`, pandas —
+    /// and the generic checker — name BOTH sides ('not unique in either left
+    /// or right dataset'; this pinned a left-first report pandas 2.2.3 does
+    /// not make, z6jxh). The typed checker must not answer from whichever
+    /// side it happened to inspect first.
     #[test]
-    fn one_to_one_reports_the_left_failure_first_uza04() {
+    fn one_to_one_names_both_sides_when_both_repeat_uza04() {
         let left = int_frame("left_v", vec![1, 1, 2], vec![10, 11, 20]);
         let right = int_frame("right_v", vec![1, 1, 2], vec![100, 101, 200]);
         let error = merge(&left, &right, Some(MergeValidateMode::OneToOne))
             .expect_err("both sides duplicated must be rejected");
         let message = format!("{error}");
         assert!(
-            message.contains("left keys are not unique"),
-            "left-before-right precedence must hold, got: {message}"
-        );
-        assert!(
-            !message.contains("right keys are not unique"),
-            "the right-side message must not pre-empt the left one, got: {message}"
+            message.contains("left and right keys are not unique"),
+            "both sides must be named, got: {message}"
         );
     }
 

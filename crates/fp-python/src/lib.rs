@@ -6524,33 +6524,32 @@ impl fp_types::HostObject for PyHost {
 }
 
 /// Parse `keep` parameter for duplicate row/value detection.
+/// The positions a `duplicated` mask leaves: what `drop_duplicates(keep=)`
+/// keeps.
+fn unduplicated_positions(duplicated: &[bool]) -> Vec<usize> {
+    duplicated
+        .iter()
+        .enumerate()
+        .filter_map(|(position, &repeated)| (!repeated).then_some(position))
+        .collect()
+}
+
+/// pandas' `keep=` of duplicated / drop_duplicates: 'first', 'last' or
+/// False; anything else is pandas' ValueError (it also read 'First',
+/// 'false' and 'none', and raised texts of its own; br-frankenpandas-k2bwx).
 fn parse_duplicate_keep(keep: Option<&Bound<'_, PyAny>>) -> PyResult<DuplicateKeep> {
-    match keep {
-        None => Ok(DuplicateKeep::First),
-        Some(k) => {
-            if let Ok(b) = k.extract::<bool>() {
-                if !b {
-                    return Ok(DuplicateKeep::None);
-                }
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "keep=True is invalid; use 'first', 'last', or False",
-                ));
-            }
-            if let Ok(s) = k.extract::<String>() {
-                match s.to_ascii_lowercase().as_str() {
-                    "first" => Ok(DuplicateKeep::First),
-                    "last" => Ok(DuplicateKeep::Last),
-                    "false" | "none" => Ok(DuplicateKeep::None),
-                    other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                        "keep must be 'first', 'last', or False, got {other:?}"
-                    ))),
-                }
-            } else {
-                Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                    "keep must be a string or boolean False",
-                ))
-            }
-        }
+    let Some(keep) = keep else {
+        return Ok(DuplicateKeep::First);
+    };
+    if keep.is_instance_of::<pyo3::types::PyBool>() && !keep.is_truthy()? {
+        return Ok(DuplicateKeep::None);
+    }
+    match keep.extract::<String>().as_deref() {
+        Ok("first") => Ok(DuplicateKeep::First),
+        Ok("last") => Ok(DuplicateKeep::Last),
+        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            r#"keep must be either "first", "last" or False"#,
+        )),
     }
 }
 
@@ -9234,14 +9233,20 @@ impl PyIndex {
         self.inner.nunique()
     }
 
-    fn drop_duplicates(&self) -> Self {
-        PyIndex {
-            inner: self.inner.drop_duplicates(),
-        }
+    /// pandas' `drop_duplicates(*, keep='first')`: 'last' keeps each
+    /// label's last occurrence, False drops every repeated label (keep= was
+    /// refused; br-frankenpandas-k2bwx).
+    #[pyo3(signature = (*, keep=None))]
+    fn drop_duplicates(&self, keep: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        Ok(PyIndex {
+            inner: self.inner.drop_duplicates_keep(parse_duplicate_keep(keep)?),
+        })
     }
 
-    fn duplicated(&self) -> BoolArray {
-        self.inner.duplicated(DuplicateKeep::First).into()
+    /// pandas' `duplicated(keep='first')` (keep= was refused).
+    #[pyo3(signature = (keep=None))]
+    fn duplicated(&self, keep: Option<&Bound<'_, PyAny>>) -> PyResult<BoolArray> {
+        Ok(self.inner.duplicated(parse_duplicate_keep(keep)?).into())
     }
 
     fn min(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -10827,16 +10832,26 @@ impl PyDatetimeIndex {
         self.inner.nunique()
     }
 
-    fn drop_duplicates(&self) -> PyResult<Self> {
-        let inner = self
-            .inner
-            .drop_duplicates()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    /// pandas' `drop_duplicates(*, keep='first')` (keep= was refused;
+    /// br-frankenpandas-k2bwx).
+    #[pyo3(signature = (*, keep=None))]
+    fn drop_duplicates(&self, keep: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let keep = parse_duplicate_keep(keep)?;
+        let inner = if matches!(keep, DuplicateKeep::First) {
+            self.inner
+                .drop_duplicates()
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+        } else {
+            let kept = unduplicated_positions(&self.inner.duplicated(keep));
+            self.inner.take(&kept).map_err(index_error_to_py)?
+        };
         Ok(PyDatetimeIndex { inner })
     }
 
-    fn duplicated(&self) -> BoolArray {
-        self.inner.duplicated(DuplicateKeep::First).into()
+    /// pandas' `duplicated(keep='first')` (keep= was refused).
+    #[pyo3(signature = (keep=None))]
+    fn duplicated(&self, keep: Option<&Bound<'_, PyAny>>) -> PyResult<BoolArray> {
+        Ok(self.inner.duplicated(parse_duplicate_keep(keep)?).into())
     }
 
     fn isna(&self) -> Vec<bool> {
@@ -13141,14 +13156,19 @@ impl PyMultiIndex {
             .map_err(index_error_to_py)
     }
 
-    fn drop_duplicates(&self) -> Self {
-        Self {
-            inner: self.inner.drop_duplicates(),
-        }
+    /// pandas' `drop_duplicates(*, keep='first')` (keep= was refused;
+    /// br-frankenpandas-k2bwx).
+    #[pyo3(signature = (*, keep=None))]
+    fn drop_duplicates(&self, keep: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        Ok(Self {
+            inner: self.inner.drop_duplicates_keep(parse_duplicate_keep(keep)?),
+        })
     }
 
-    fn duplicated(&self) -> BoolArray {
-        self.inner.duplicated(DuplicateKeep::First).into()
+    /// pandas' `duplicated(keep='first')` (keep= was refused).
+    #[pyo3(signature = (keep=None))]
+    fn duplicated(&self, keep: Option<&Bound<'_, PyAny>>) -> PyResult<BoolArray> {
+        Ok(self.inner.duplicated(parse_duplicate_keep(keep)?).into())
     }
 
     fn equal_levels(&self, other: &PyMultiIndex) -> bool {
@@ -13607,22 +13627,60 @@ impl PyMultiIndex {
             .map_err(index_error_to_py)
     }
 
-    fn set_levels(&self, levels: Vec<Bound<'_, PyAny>>) -> PyResult<Self> {
-        let mut new_levels = Vec::with_capacity(levels.len());
-        for lvl in &levels {
-            if let Ok(seq) = lvl.cast::<pyo3::types::PySequence>() {
-                let len = seq.len()?;
-                let mut col = Vec::with_capacity(len);
-                for i in 0..len {
-                    col.push(py_to_index_label(&seq.get_item(i)?)?);
-                }
-                new_levels.push(col);
-            } else {
+    /// pandas' `set_levels(levels, *, level=None, verify_integrity=True)`:
+    /// every level's values, or with `level` (a position or name, or a list
+    /// of them) only that level's (`levels` its values, or a list of them).
+    /// `level=` was refused (br-frankenpandas-k2bwx).
+    #[pyo3(signature = (levels, *, level=None, verify_integrity=true))]
+    fn set_levels(
+        &self,
+        levels: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+        verify_integrity: bool,
+    ) -> PyResult<Self> {
+        let _ = verify_integrity; // the new levels are always checked
+        let one_level = |values: &Bound<'_, PyAny>| -> PyResult<Vec<IndexLabel>> {
+            let Ok(seq) = values.cast::<pyo3::types::PySequence>() else {
                 return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                     "Each level must be a sequence of labels",
                 ));
+            };
+            (0..seq.len()?)
+                .map(|i| py_to_index_label(&seq.get_item(i)?))
+                .collect()
+        };
+        let new_levels = match level.filter(|level| !level.is_none()) {
+            None => levels
+                .try_iter()?
+                .map(|values| one_level(&values?))
+                .collect::<PyResult<Vec<_>>>()?,
+            Some(level) => {
+                let mut current: Vec<Vec<IndexLabel>> = self
+                    .inner
+                    .levels()
+                    .iter()
+                    .map(|index| index.labels().to_vec())
+                    .collect();
+                if level.is_instance_of::<PyList>() || level.is_instance_of::<PyTuple>() {
+                    let targets: Vec<Bound<'_, PyAny>> =
+                        level.try_iter()?.collect::<PyResult<_>>()?;
+                    let values: Vec<Bound<'_, PyAny>> =
+                        levels.try_iter()?.collect::<PyResult<_>>()?;
+                    if targets.len() != values.len() {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                            "Length of levels must match length of level.",
+                        ));
+                    }
+                    for (target, values) in targets.iter().zip(&values) {
+                        current[multiindex_level_position(&self.inner, target)?] =
+                            one_level(values)?;
+                    }
+                } else {
+                    current[multiindex_level_position(&self.inner, level)?] = one_level(levels)?;
+                }
+                current
             }
-        }
+        };
         self.inner
             .set_levels(new_levels)
             .map(|inner| Self { inner })
@@ -14072,8 +14130,17 @@ impl PyTimedeltaIndex {
         self.inner.nunique()
     }
 
-    pub fn drop_duplicates(&self) -> PyResult<Self> {
-        let d = self.inner.drop_duplicates().map_err(index_error_to_py)?;
+    /// pandas' `drop_duplicates(*, keep='first')` (keep= was refused;
+    /// br-frankenpandas-k2bwx).
+    #[pyo3(signature = (*, keep=None))]
+    pub fn drop_duplicates(&self, keep: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let keep = parse_duplicate_keep(keep)?;
+        let d = if matches!(keep, DuplicateKeep::First) {
+            self.inner.drop_duplicates().map_err(index_error_to_py)?
+        } else {
+            let kept = unduplicated_positions(&self.inner.duplicated(keep));
+            self.inner.take(&kept).map_err(index_error_to_py)?
+        };
         Ok(Self { inner: d })
     }
 
@@ -15313,7 +15380,12 @@ impl PyRangeIndex {
         Self::copy(slf)
     }
 
-    fn drop_duplicates(slf: PyRef<'_, Self>) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (*, keep=None))]
+    fn drop_duplicates(
+        slf: PyRef<'_, Self>,
+        keep: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        parse_duplicate_keep(keep)?;
         Self::copy(slf)
     }
 
@@ -16109,10 +16181,19 @@ impl PyPeriodIndex {
         self.inner.diff(periods)
     }
 
-    fn drop_duplicates(&self) -> Self {
-        Self {
-            inner: self.inner.drop_duplicates(),
+    /// pandas' `drop_duplicates(*, keep='first')` (keep= was refused;
+    /// br-frankenpandas-k2bwx).
+    #[pyo3(signature = (*, keep=None))]
+    fn drop_duplicates(&self, keep: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let keep = parse_duplicate_keep(keep)?;
+        if matches!(keep, DuplicateKeep::First) {
+            return Ok(Self {
+                inner: self.inner.drop_duplicates(),
+            });
         }
+        let kept = unduplicated_positions(&self.inner.duplicated(keep));
+        let inner = self.inner.take(&kept).map_err(index_error_to_py)?;
+        Ok(Self { inner })
     }
 
     #[pyo3(signature = (keep=None))]
@@ -17157,10 +17238,19 @@ impl PyCategoricalIndex {
         ))
     }
 
-    fn drop_duplicates(&self) -> Self {
-        Self {
-            inner: self.inner.unique(),
+    /// pandas' `drop_duplicates(*, keep='first')` (keep= was refused;
+    /// br-frankenpandas-k2bwx).
+    #[pyo3(signature = (*, keep=None))]
+    fn drop_duplicates(&self, keep: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let keep = parse_duplicate_keep(keep)?;
+        if matches!(keep, DuplicateKeep::First) {
+            return Ok(Self {
+                inner: self.inner.unique(),
+            });
         }
+        let kept = unduplicated_positions(&self.inner.duplicated(keep));
+        let inner = self.inner.take(&kept).map_err(index_error_to_py)?;
+        Ok(Self { inner })
     }
 
     #[pyo3(signature = (keep=None))]
@@ -17518,7 +17608,8 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 // refusal to rank an unordered categorical by group (fvsao.71).
                 || msg.starts_with("'<' not supported between instances of ")
                 || msg == "Cannot perform rank with non-ordered Categorical"
-                || msg.starts_with("Bin edges must be unique: ");
+                || msg.starts_with("Bin edges must be unique: ")
+                || msg.starts_with("Cannot setitem on a Categorical with a new category");
             let text = if pandas_verbatim {
                 msg.clone()
             } else {
@@ -17559,6 +17650,8 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 || lower.contains("not supported between instances of")
                 || lower.contains("rank is not supported for")
                 || lower.contains("cannot perform rank with non-ordered categorical")
+                // pandas' TypeError for a fill outside the categories.
+                || lower.contains("cannot setitem on a categorical with a new category")
             {
                 (PyErrorKind::Type, text)
             } else {
@@ -18062,7 +18155,8 @@ fn fill_column_with_scalar(
         }
         Column::new(col.dtype().clone(), out).map_err(fp_frame::FrameError::Column)
     } else {
-        col.fillna(scalar).map_err(fp_frame::FrameError::Column)
+        // A categorical fills with its category (k2bwx).
+        fp_frame::fill_column(col, scalar)
     }
 }
 
@@ -52417,6 +52511,84 @@ fn astype_error_to_py(err: &fp_frame::FrameError) -> PyErr {
     }
 }
 
+/// pandas' `read_csv` separator longer than one character, over `text`:
+/// `\s+` splits a line at each run of whitespace outside `quote`d fields,
+/// its leading and trailing whitespace no field (the C parser's
+/// delim_whitespace); any other pattern is a regex each stripped line is
+/// split by (the python engine's, which pandas falls back to with its
+/// ParserWarning, or refuses when another engine is named). The fields come
+/// back joined by a control byte `text` does not hold, the separator the
+/// parser then reads. `sep='\s+'` was refused (br-frankenpandas-k2bwx).
+fn split_by_separator_pattern(
+    py: Python<'_>,
+    text: &str,
+    pattern: &str,
+    quote: u8,
+    engine: Option<&Bound<'_, PyAny>>,
+) -> PyResult<(String, u8)> {
+    let Some(delimiter) = [0x1f_u8, 0x1e, 0x1d, 0x1c]
+        .into_iter()
+        .find(|byte| !text.as_bytes().contains(byte))
+    else {
+        return Err(not_implemented(
+            "read_csv(sep=<pattern>) over text holding the bytes 0x1c-0x1f",
+        ));
+    };
+    let joiner = char::from(delimiter);
+    let mut out = String::with_capacity(text.len());
+    if pattern == r"\s+" {
+        let quote = char::from(quote);
+        let (mut in_quote, mut line_start, mut gap) = (false, true, false);
+        for ch in text.chars() {
+            if in_quote {
+                in_quote = ch != quote;
+                out.push(ch);
+            } else if ch == '\n' {
+                out.push('\n');
+                (line_start, gap) = (true, false);
+            } else if ch.is_whitespace() {
+                gap = !line_start;
+            } else {
+                if gap {
+                    out.push(joiner);
+                    gap = false;
+                }
+                line_start = false;
+                in_quote = ch == quote;
+                out.push(ch);
+            }
+        }
+        return Ok((out, delimiter));
+    }
+    let engine = engine
+        .filter(|engine| !engine.is_none())
+        .map(|engine| engine.extract::<String>())
+        .transpose()?;
+    match engine.as_deref() {
+        Some("python" | "python-fwf") => {}
+        Some(other) => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "the '{other}' engine does not support regex separators (separators > 1 char and different from '\\s+' are interpreted as regex)"
+            )));
+        }
+        None => PyErr::warn(
+            py,
+            &py.get_type::<ParserWarning>(),
+            c"Falling back to the 'python' engine because the 'c' engine does not support regex separators (separators > 1 char and different from '\\s+' are interpreted as regex); you can avoid this warning by specifying engine='python'.",
+            1,
+        )?,
+    }
+    let compiled = py.import("re")?.call_method1("compile", (pattern,))?;
+    for (position, line) in text.split('\n').enumerate() {
+        if position > 0 {
+            out.push('\n');
+        }
+        let fields: Vec<String> = compiled.call_method1("split", (line.trim(),))?.extract()?;
+        out.push_str(&fields.join(&joiner.to_string()));
+    }
+    Ok((out, delimiter))
+}
+
 /// The keywords `read_csv` and `read_table` share (pandas' defaults).
 struct CsvReadArgs<'a, 'py> {
     sep: Option<&'a str>,
@@ -52646,17 +52818,24 @@ fn read_csv_impl(
         &["engine", "low_memory", "memory_map"],
     )?;
 
-    let sep = match (args.sep, args.delimiter) {
+    // A separator longer than one character is a pattern (see
+    // `split_by_separator_pattern`; it was refused).
+    let (mut sep, sep_pattern) = match (args.sep, args.delimiter) {
         (Some(_), Some(_)) => {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Specified a sep and a delimiter; you can only specify one.",
             ));
         }
         (Some(sep), None) | (None, Some(sep)) => match sep.as_bytes() {
-            [byte] => *byte,
-            _ => return Err(not_implemented(&format!("read_csv(sep={sep:?})"))),
+            [byte] => (*byte, None),
+            [] => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Delimiter must be at least one character",
+                ));
+            }
+            _ => (default_sep, Some(sep)),
         },
-        (None, None) => default_sep,
+        (None, None) => (default_sep, None),
     };
 
     let bytes = py_input_bytes(source)?;
@@ -52680,6 +52859,14 @@ fn read_csv_impl(
     // pandas' C parser drops a UTF-8 byte-order mark.
     if let Some(stripped) = text.strip_prefix('\u{feff}') {
         text = stripped.to_owned();
+    }
+    if let Some(pattern) = sep_pattern {
+        let engine = match args.kwargs {
+            Some(kwargs) => kwargs.get_item("engine")?,
+            None => None,
+        };
+        let quote = quotechar.unwrap_or(fp_io::CsvReadOptions::default().quotechar);
+        (text, sep) = split_by_separator_pattern(py, &text, pattern, quote, engine.as_ref())?;
     }
     // skiprows: an int skips that many leading lines; a list-like or a
     // callable skips the records it names (it raised TypeError).
@@ -53246,6 +53433,12 @@ fn merge_key_names(frame: &DataFrame, keys: &Bound<'_, PyAny>) -> PyResult<Vec<S
 /// fp-join's validate failure as pandas' MergeError message.
 fn merge_error_to_py(error: fp_join::JoinError) -> PyErr {
     let message = error.to_string();
+    // Neither side unique: pandas names both (z6jxh).
+    if message.contains("validate='one_to_one' failed: left and right keys are not unique") {
+        return MergeError::new_err(
+            "Merge keys are not unique in either left or right dataset; not a one-to-one merge",
+        );
+    }
     for (mode, side, kind) in [
         ("one_to_one", "left", "one-to-one"),
         ("one_to_one", "right", "one-to-one"),
@@ -65489,7 +65682,8 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// the bare name. Setting a heap type's `__name__` rewrites its `tp_name`
 /// to that name; each class exported here (or from a registered
 /// `frankenpandas.*` submodule) gets its own name back, and `frankenpandas`
-/// as its `__module__` in place of `builtins` (br-frankenpandas-c5b7x).
+/// as its `__module__` in place of `builtins` (br-frankenpandas-c5b7x) - an
+/// exception class `frankenpandas.errors` in place of `errors`.
 fn bare_class_type_names(m: &Bound<'_, PyModule>) -> PyResult<()> {
     const HEAP_TYPE: u64 = 1 << 9;
     let py = m.py();
@@ -65514,9 +65708,14 @@ fn bare_class_type_names(m: &Bound<'_, PyModule>) -> PyResult<()> {
             };
             let heap_type = kind.getattr("__flags__")?.extract::<u64>()? & HEAP_TYPE != 0;
             let module = kind.module()?;
-            let module = module.to_str()?;
-            if heap_type && (module == "builtins" || module == "frankenpandas") {
-                kind.setattr("__module__", "frankenpandas")?;
+            // The exception classes' module was a bare `errors` (k2bwx).
+            let home = match module.to_str()? {
+                "builtins" | "frankenpandas" => "frankenpandas",
+                "errors" => "frankenpandas.errors",
+                _ => continue,
+            };
+            if heap_type {
+                kind.setattr("__module__", home)?;
                 kind.setattr("__name__", kind.name()?)?;
             }
         }
@@ -65895,7 +66094,7 @@ mod tests {
 
         let u = idx.unique();
         assert_eq!(u.len(), 3);
-        let dedup = idx.drop_duplicates();
+        let dedup = idx.drop_duplicates(None).expect("keep='first' by default");
         assert_eq!(dedup.len(), 3);
 
         let sorted_idx = PyIndex {
