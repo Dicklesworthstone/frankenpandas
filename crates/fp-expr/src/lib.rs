@@ -610,7 +610,7 @@ impl EvalContext {
                 context.insert_series(series);
             } else if name == "index"
                 || name == "ilevel_0"
-                || frame.index().name() == Some(name.as_str())
+                || frame.index().name().is_some_and(|index| *index == name)
             {
                 context.insert_index_series(&name, frame.index())?;
             }
@@ -9670,7 +9670,7 @@ mod tests {
                     context.insert_series(series);
                 } else if name == "index"
                     || name == "ilevel_0"
-                    || frame.index().name() == Some(name.as_str())
+                    || frame.index().name().is_some_and(|index| *index == name)
                 {
                     context.insert_index_series(&name, frame.index())?;
                 }

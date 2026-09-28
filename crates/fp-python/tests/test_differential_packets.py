@@ -13251,3 +13251,78 @@ _CONCAT_NAME_CASES = {
 def test_concat_series_name_like_pandas(case: str) -> None:
     run = _CONCAT_NAME_CASES[case]
     assert _sdt_outcome(fpd, run) == _sdt_outcome(pd, run), case
+
+
+# br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.64: axis names keep
+# their type - set_index(0).index.name is the integer 0 (it was the string
+# '0'), Index(name=7) and index.name = 3 work (they raised TypeError),
+# rename_axis(None) unnames the axis (it kept the name).
+def _axn_frame(m: Any) -> Any:
+    return m.DataFrame([[1, 2], [1, 3], [2, 5]])
+
+
+def _axn_view(x: Any) -> Any:
+    if isinstance(x, list):  # FrozenList / list of column labels
+        return (type(x).__name__, [(type(v).__name__, v) for v in x])
+    return (type(x).__name__, x)
+
+
+def _axn_outcome(m: Any, run: Any) -> Any:
+    try:
+        return _axn_view(run(m))
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+def _axn_assigned(m: Any) -> Any:
+    frame = _axn_frame(m)
+    frame.index.name = 3
+    return frame.index.name
+
+
+def _axn_pivot(m: Any) -> Any:
+    return m.DataFrame({"r": [0, 0, 1], "c": [5, 6, 5], "v": [1, 2, 3]}).pivot(index="r", columns="c", values="v")
+
+
+_AXIS_NAME_CASES = {
+    "set_index(0)": lambda m: _axn_frame(m).set_index(0).index.name,
+    "groupby(0).sum()": lambda m: _axn_frame(m).groupby(0).sum().index.name,
+    "groupby(0)[1].sum()": lambda m: _axn_frame(m).groupby(0)[1].sum().index.name,
+    "groupby(0).size()": lambda m: _axn_frame(m).groupby(0).size().index.name,
+    "value_counts of a Series named 0": lambda m: m.Series([1, 2], name=0).value_counts().index.name,
+    "Index(name=7)": lambda m: m.Index([5, 6], name=7).name,
+    "Series(index=Index(name=7))": lambda m: m.Series([1, 2], index=m.Index([5, 6], name=7)).index.name,
+    "index.name = 3": _axn_assigned,
+    "Index.rename(7)": lambda m: m.Index([1, 2]).rename(7).name,
+    "rename_axis(0)": lambda m: _axn_frame(m).rename_axis(0).index.name,
+    "rename_axis(columns=0)": lambda m: _axn_frame(m).rename_axis(columns=0).columns.name,
+    "sort_index keeps it": lambda m: _axn_frame(m).set_index(0).sort_index().index.name,
+    "head keeps it": lambda m: _axn_frame(m).set_index(0).head(1).index.name,
+    "arithmetic keeps it": lambda m: (_axn_frame(m).set_index(0) + 1).index.name,
+    "loc keeps it": lambda m: _axn_frame(m).set_index(0).loc[[1]].index.name,
+    "transpose moves it": lambda m: _axn_frame(m).set_index(0).T.columns.name,
+    "pivot_table index": lambda m: _axn_frame(m).pivot_table(index=0, values=1, aggfunc="sum").index.name,
+    "join keeps it": lambda m: _axn_frame(m).set_index(0).join(_axn_frame(m).set_index(0), rsuffix="_r").index.name,
+    "reset_index round trip": lambda m: list(_axn_frame(m).set_index(0).reset_index().columns),
+    "flat index names": lambda m: _axn_frame(m).set_index(0).index.names,
+    "Index.to_frame column": lambda m: list(m.Index([1, 2], name=5).to_frame().columns),
+    "Index.to_series name": lambda m: m.Index([1, 2], name=5).to_series().name,
+    "unnamed Index.to_frame column": lambda m: list(m.Index([1, 2]).to_frame().columns),
+    "rename_axis(None, axis=1) after pivot": lambda m: _axn_pivot(m).rename_axis(None, axis=1).columns.name,
+    "Series.rename_axis(None)": lambda m: m.Series([1], index=m.Index([1], name="a")).rename_axis(None).index.name,
+    "rename_axis(mapper='k')": lambda m: _axn_frame(m).rename_axis(mapper="k").index.name,
+    "rename_axis two positionals": lambda m: _axn_frame(m).rename_axis("a", "b"),
+    # NEGATIVES: a string name stays a string - including a column renamed
+    # from 0 to '0' (rename kept the integer label) - and None stays None.
+    "rename 0 -> '0' columns": lambda m: list(_axn_frame(m).rename(columns={0: "0"}).columns),
+    "rename 0 -> '0' then set_index": lambda m: _axn_frame(m).rename(columns={0: "0"}).set_index("0").index.name,
+    "string name": lambda m: m.Index([1, 2], name="a").name,
+    "None name": lambda m: m.Index([1, 2], name=None).name,
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_AXIS_NAME_CASES))
+def test_axis_names_keep_their_type_like_pandas(case: str) -> None:
+    run = _AXIS_NAME_CASES[case]
+    assert _axn_outcome(fpd, run) == _axn_outcome(pd, run), case

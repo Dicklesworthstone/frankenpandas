@@ -468,7 +468,7 @@ fn assert_date_range_matches_pandas(case: DateRangeCase<'_>) -> Result<(), Strin
         case.case_id
     );
     assert_eq!(
-        actual.name().map(str::to_owned),
+        actual.name().map(String::from),
         expected.name,
         "pandas.tseries date_range name parity drift for {}",
         case.case_id
@@ -551,7 +551,7 @@ fn assert_bdate_range_matches_pandas(case: BusinessDateRangeCase<'_>) -> Result<
         case.case_id
     );
     assert_eq!(
-        actual.name().map(str::to_owned),
+        actual.name().map(String::from),
         expected.name,
         "pandas.tseries bdate_range name parity drift for {}",
         case.case_id

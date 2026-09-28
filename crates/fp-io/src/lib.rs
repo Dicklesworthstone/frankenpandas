@@ -4051,7 +4051,7 @@ pub fn write_xml_string_with_options(
     let index_label = options
         .index_label
         .clone()
-        .or_else(|| frame.index().name().map(ToOwned::to_owned))
+        .or_else(|| frame.index().name().map(String::from))
         .unwrap_or_else(|| "index".to_owned());
     if options.include_index {
         validate_xml_element_name(&index_label)?;
@@ -4330,14 +4330,14 @@ fn resolve_csv_index_header(frame: &DataFrame, options: &CsvWriteOptions) -> Str
     options
         .index_label
         .clone()
-        .or_else(|| frame.index().name().map(ToOwned::to_owned))
+        .or_else(|| frame.index().name().map(String::from))
         .unwrap_or_default()
 }
 
 fn resolve_table_index_header(frame: &DataFrame, index_label: Option<&str>) -> String {
     index_label
         .map(ToOwned::to_owned)
-        .or_else(|| frame.index().name().map(ToOwned::to_owned))
+        .or_else(|| frame.index().name().map(String::from))
         .unwrap_or_default()
 }
 
@@ -10142,8 +10142,8 @@ fn pandas_arrow_layout(
                     "step": step,
                 })),
                 _ => levels.push((
-                    field_for(0, row_index.name()),
-                    row_index.name().map(str::to_owned),
+                    field_for(0, row_index.name().map(|n| n.as_str())),
+                    row_index.name().map(String::from),
                     level_column(row_index.labels(), row_index.tz())?,
                 )),
             }
@@ -11911,7 +11911,7 @@ pub fn write_excel_bytes_with_options(
             let idx_header = options
                 .index_label
                 .as_deref()
-                .unwrap_or_else(|| frame.index().name().unwrap_or(""));
+                .unwrap_or_else(|| frame.index().name().map_or("", |n| n.as_str()));
             worksheet
                 .write_string(0, 0, idx_header)
                 .map_err(|e| IoError::Excel(format!("write index header: {e}")))?;
@@ -13797,7 +13797,7 @@ fn resolve_sql_index_label(
     let label = match options
         .index_label
         .clone()
-        .or_else(|| frame.index().name().map(str::to_owned))
+        .or_else(|| frame.index().name().map(String::from))
     {
         Some(label) => label,
         None if frame.column("index").is_some() => "level_0".to_owned(),
@@ -26315,7 +26315,7 @@ mod tests {
         )
         .expect("parse excel rows with named index column");
 
-        assert_eq!(frame.index().name(), Some("row_id"));
+        assert_eq!(frame.index().name().map(|n| n.as_str()), Some("row_id"));
         assert_eq!(frame.index().labels()[0], IndexLabel::Int64(10));
         assert_eq!(frame.index().labels()[1], IndexLabel::Int64(20));
         assert!(frame.column("row_id").is_none());
@@ -26517,7 +26517,7 @@ mod tests {
         .expect("read excel");
 
         assert_eq!(frame2.index().labels(), frame.index().labels());
-        assert_eq!(frame2.index().name(), Some("row_id"));
+        assert_eq!(frame2.index().name().map(|n| n.as_str()), Some("row_id"));
         assert!(frame2.column("row_id").is_none());
         assert_eq!(
             frame2.column("vals").unwrap().values(),
@@ -26614,7 +26614,7 @@ mod tests {
         // ints values.
         let result = read_sql_table_with_index_col(&conn, "indexed_tbl", Some("ints"))
             .expect("read with index");
-        assert_eq!(result.index().name(), Some("ints"));
+        assert_eq!(result.index().name().map(|n| n.as_str()), Some("ints"));
         assert_eq!(result.index().labels()[0], crate::IndexLabel::Int64(10));
         assert_eq!(result.index().labels()[1], crate::IndexLabel::Int64(20));
         assert_eq!(result.index().labels()[2], crate::IndexLabel::Int64(30));
@@ -26783,7 +26783,7 @@ mod tests {
         )
         .expect("projection with index_col");
 
-        assert_eq!(result.index().name(), Some("ints"));
+        assert_eq!(result.index().name().map(|n| n.as_str()), Some("ints"));
         assert_eq!(
             result.index().labels(),
             &[
@@ -26821,7 +26821,7 @@ mod tests {
             read_sql_table_columns_with_index_col(&conn, "auto_proj_tbl", &["names"], Some("ints"))
                 .expect("auto-project index_col");
 
-        assert_eq!(result.index().name(), Some("ints"));
+        assert_eq!(result.index().name().map(|n| n.as_str()), Some("ints"));
         assert_eq!(
             result.index().labels(),
             &[
@@ -26863,7 +26863,7 @@ mod tests {
         .expect("all chunks");
 
         assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].index().name(), Some("ints"));
+        assert_eq!(chunks[0].index().name().map(|n| n.as_str()), Some("ints"));
         assert_eq!(
             chunks[0].index().labels(),
             &[IndexLabel::Int64(10), IndexLabel::Int64(20)]
@@ -26902,7 +26902,7 @@ mod tests {
         )
         .expect("explicit include + index_col");
 
-        assert_eq!(result.index().name(), Some("ints"));
+        assert_eq!(result.index().name().map(|n| n.as_str()), Some("ints"));
         assert_eq!(result.column_names(), vec!["names"]);
         assert!(result.column("ints").is_none());
     }
@@ -26956,7 +26956,7 @@ mod tests {
         .expect("all chunks");
 
         assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].index().name(), Some("ints"));
+        assert_eq!(chunks[0].index().name().map(|n| n.as_str()), Some("ints"));
         assert_eq!(
             chunks[0].index().labels(),
             &[IndexLabel::Int64(10), IndexLabel::Int64(20)]
@@ -27015,7 +27015,7 @@ mod tests {
             Some("label"),
         )
         .expect("read query with index");
-        assert_eq!(result.index().name(), Some("label"));
+        assert_eq!(result.index().name().map(|n| n.as_str()), Some("label"));
         // Order respected by the SELECT (ints DESC) → index labels in
         // reversed name order.
         assert_eq!(
@@ -27689,7 +27689,7 @@ mod tests {
 
         let roundtrip = read_sql_table_with_index_col(&conn, "indexed_write_tbl", Some("row_id"))
             .expect("read with promoted index");
-        assert_eq!(roundtrip.index().name(), Some("row_id"));
+        assert_eq!(roundtrip.index().name().map(|n| n.as_str()), Some("row_id"));
         assert_eq!(roundtrip.index().labels(), frame.index().labels());
         assert!(roundtrip.column("row_id").is_none());
         assert_eq!(
@@ -27990,7 +27990,7 @@ mod tests {
             conn.seen_params.borrow().as_slice(),
             &[Scalar::Float64(1.0)]
         );
-        assert_eq!(frame.index().name(), Some("row_id"));
+        assert_eq!(frame.index().name().map(|n| n.as_str()), Some("row_id"));
         assert_eq!(
             frame.index().labels(),
             &[IndexLabel::Int64(101), IndexLabel::Int64(102)]
@@ -28039,7 +28039,7 @@ mod tests {
                 IndexLabel::Utf8("carol".to_owned())
             ]
         );
-        assert_eq!(indexed.index().name(), Some("names"));
+        assert_eq!(indexed.index().name().map(|n| n.as_str()), Some("names"));
         assert!(indexed.column("names").is_none());
         assert_eq!(
             indexed.column("ints").unwrap().values(),
@@ -28291,7 +28291,7 @@ mod tests {
         .expect("all chunks");
 
         assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].index().name(), Some("ts"));
+        assert_eq!(chunks[0].index().name().map(|n| n.as_str()), Some("ts"));
         // parse_dates column promoted to index → DatetimeIndex (br-frankenpandas-0ezw7).
         assert_eq!(
             chunks[0].index().labels(),
@@ -28388,7 +28388,7 @@ mod tests {
         .expect("all chunks");
 
         assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].index().name(), Some("id"));
+        assert_eq!(chunks[0].index().name().map(|n| n.as_str()), Some("id"));
         assert_eq!(chunks[0].index().labels(), &[IndexLabel::Int64(10)]);
         assert!(chunks[0].column("id").is_none());
         assert_eq!(chunks[1].index().labels(), &[IndexLabel::Int64(20)]);
@@ -28457,7 +28457,7 @@ mod tests {
         )
         .expect("read indexed query frame");
 
-        assert_eq!(frame.index().name(), Some("ts"));
+        assert_eq!(frame.index().name().map(|n| n.as_str()), Some("ts"));
         // parse_dates column promoted to index → DatetimeIndex (br-frankenpandas-0ezw7).
         assert_eq!(
             frame.index().labels(),
@@ -28538,7 +28538,7 @@ mod tests {
         .expect("all chunks");
 
         assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].index().name(), Some("label"));
+        assert_eq!(chunks[0].index().name().map(|n| n.as_str()), Some("label"));
         assert_eq!(
             chunks[0].index().labels(),
             &[
@@ -28681,7 +28681,7 @@ mod tests {
                 .expect("all chunks");
 
         assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].index().name(), Some("id"));
+        assert_eq!(chunks[0].index().name().map(|n| n.as_str()), Some("id"));
         assert_eq!(
             chunks[0].index().labels(),
             &[IndexLabel::Int64(10), IndexLabel::Int64(20)]
@@ -29094,7 +29094,7 @@ mod tests {
             Some("id"),
         )
         .expect("indexed table reader honors options.columns");
-        assert_eq!(frame.index().name(), Some("id"));
+        assert_eq!(frame.index().name().map(|n| n.as_str()), Some("id"));
         assert_eq!(frame.column_names(), vec!["val"]);
         assert!(frame.column("id").is_none());
         assert!(frame.column("secret").is_none());
@@ -29149,7 +29149,7 @@ mod tests {
         )
         .expect("read table with options and index_col");
 
-        assert_eq!(frame.index().name(), Some("ts"));
+        assert_eq!(frame.index().name().map(|n| n.as_str()), Some("ts"));
         assert_eq!(
             frame.index().labels(),
             &[
@@ -29236,7 +29236,7 @@ mod tests {
         .expect("all chunks");
 
         assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].index().name(), Some("ts"));
+        assert_eq!(chunks[0].index().name().map(|n| n.as_str()), Some("ts"));
         // parse_dates column promoted to index → DatetimeIndex (br-frankenpandas-0ezw7).
         assert_eq!(
             chunks[0].index().labels(),
@@ -39624,11 +39624,12 @@ mod merge_simple_numeric_csv_chunks_tests {
 /// writes them. Expected strings are numpy 2.3.5 / pandas 2.2.3.
 #[cfg(test)]
 mod float32_csv_fvsao23 {
-    use super::{write_csv_string, write_numpy_float32};
     use fp_columnar::Column;
     use fp_frame::{DataFrame, Series};
     use fp_index::Index;
     use fp_types::NumericWidth;
+
+    use super::{write_csv_string, write_numpy_float32};
 
     fn spelled(v: f64) -> String {
         let mut out = String::new();

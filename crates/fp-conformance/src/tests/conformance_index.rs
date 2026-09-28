@@ -685,7 +685,7 @@ print(json.dumps(res))
     assert_eq!(r.start(), oracle["start"].as_i64().unwrap());
     assert_eq!(r.stop(), oracle["stop"].as_i64().unwrap());
     assert_eq!(r.step(), oracle["step"].as_i64().unwrap());
-    assert_eq!(r.name(), Some("my_range"));
+    assert_eq!(r.name().map(|n| n.as_str()), Some("my_range"));
     assert_eq!(r.len(), oracle["len"].as_u64().unwrap() as usize);
     assert_eq!(
         r.is_monotonic_increasing(),

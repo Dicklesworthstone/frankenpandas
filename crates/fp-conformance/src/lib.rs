@@ -6937,7 +6937,12 @@ fn excel_round_trip_read_options(frame: &DataFrame) -> ExcelReadOptions {
         return ExcelReadOptions::default();
     }
     ExcelReadOptions {
-        index_col: Some(frame.index().name().unwrap_or("Unnamed: 0").to_owned()),
+        index_col: Some(
+            frame
+                .index()
+                .name()
+                .map_or_else(|| "Unnamed: 0".to_owned(), String::from),
+        ),
         ..ExcelReadOptions::default()
     }
 }

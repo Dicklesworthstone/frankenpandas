@@ -2287,7 +2287,10 @@ print(json.dumps(res))
     assert_eq!(actual_cols, oracle_cols);
 
     let renamed_ax = df.rename_axis("sample_id").expect("rename_axis");
-    assert_eq!(renamed_ax.index().name(), oracle["ax_name"].as_str());
+    assert_eq!(
+        renamed_ax.index().name().map(|n| n.as_str()),
+        oracle["ax_name"].as_str()
+    );
 }
 
 #[test]

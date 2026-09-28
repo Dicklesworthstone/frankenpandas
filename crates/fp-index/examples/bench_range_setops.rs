@@ -606,7 +606,7 @@ fn main() {
                 .collect();
             let index = Index::from_datetime64(nanos).set_name("timestamp");
             black_box(&index);
-            index.len() ^ index.name().map_or(0, str::len)
+            index.len() ^ index.name().map_or(0, |name| name.len())
         };
         let candidate = || {
             let index = date_range(
@@ -618,7 +618,7 @@ fn main() {
             )
             .expect("valid benchmark date range");
             black_box(&index);
-            index.len() ^ index.name().map_or(0, str::len)
+            index.len() ^ index.name().map_or(0, |name| name.len())
         };
         let (reference_ns, candidate_ns, sink) = paired_percentiles_ns(iters, reference, candidate);
         println!(

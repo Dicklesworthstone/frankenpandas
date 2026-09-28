@@ -4342,14 +4342,14 @@ fn readme_index_naming_methods() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── set_name returns a NEW Index with the name set ──────────
     let named = idx.set_name("year");
-    assert_eq!(named.name(), Some("year"));
+    assert_eq!(named.name().map(|name| name.as_str()), Some("year"));
     // Original unchanged.
     assert_eq!(idx.name(), None);
 
     // ── rename_index(Some/None) ─────────────────────────────────
     let renamed = named.rename_index(Some("revised"));
-    assert_eq!(renamed.name(), Some("revised"));
-    let cleared = named.rename_index(None);
+    assert_eq!(renamed.name().map(|name| name.as_str()), Some("revised"));
+    let cleared = named.rename_index(None::<&str>);
     assert_eq!(cleared.name(), None);
 
     // ── rename: closure-based label rewrite ────────────────────

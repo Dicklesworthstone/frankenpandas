@@ -341,6 +341,155 @@ impl fmt::Display for IndexLabel {
     }
 }
 
+/// The canonical name a typed column label keys its column under: its
+/// pandas text (`0`, `1.5`, `True`, `2024-01-01 00:00:00`), the string
+/// itself for a string label. The binding keys columns by it, so a label
+/// and its name always agree.
+#[must_use]
+pub fn column_key(label: &IndexLabel) -> String {
+    label.to_string()
+}
+
+/// A pandas name - a Series' name, an index's or a column axis' name: its
+/// text - what it is keyed and printed as - and, when it is not a string,
+/// the typed pandas label it stands for (`df[0]`'s name is the integer 0,
+/// `df.set_index(0).index.name` too; they were the strings '0'; fvsao.32,
+/// fvsao.64). It reads as the text (Deref, Display, Debug, serde,
+/// comparison with a string), and the label rides along wherever the name
+/// is cloned; a name rebuilt from text alone is a string.
+#[derive(Clone, Default)]
+pub struct LabelName {
+    text: String,
+    label: Option<IndexLabel>,
+}
+
+impl LabelName {
+    /// The name standing for `label`, keyed by its text (see
+    /// [`column_key`]); a string label is plain text.
+    #[must_use]
+    pub fn typed(label: IndexLabel) -> Self {
+        match label {
+            IndexLabel::Utf8(text) => Self { text, label: None },
+            label => Self {
+                text: column_key(&label),
+                label: Some(label),
+            },
+        }
+    }
+
+    /// The typed label this name stands for; the text as a string label for
+    /// a plain name.
+    #[must_use]
+    pub fn label(&self) -> IndexLabel {
+        self.label
+            .clone()
+            .filter(|label| column_key(label) == self.text)
+            .unwrap_or_else(|| IndexLabel::Utf8(self.text.clone()))
+    }
+}
+
+impl std::ops::Deref for LabelName {
+    type Target = String;
+
+    fn deref(&self) -> &String {
+        &self.text
+    }
+}
+
+impl AsRef<str> for LabelName {
+    fn as_ref(&self) -> &str {
+        &self.text
+    }
+}
+
+impl From<String> for LabelName {
+    fn from(text: String) -> Self {
+        Self { text, label: None }
+    }
+}
+
+impl From<&str> for LabelName {
+    fn from(text: &str) -> Self {
+        text.to_owned().into()
+    }
+}
+
+impl From<&String> for LabelName {
+    fn from(text: &String) -> Self {
+        text.clone().into()
+    }
+}
+
+impl From<&Self> for LabelName {
+    fn from(name: &Self) -> Self {
+        name.clone()
+    }
+}
+
+impl From<LabelName> for String {
+    fn from(name: LabelName) -> Self {
+        name.text
+    }
+}
+
+impl From<&LabelName> for String {
+    fn from(name: &LabelName) -> Self {
+        name.text.clone()
+    }
+}
+
+impl fmt::Display for LabelName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.text, formatter)
+    }
+}
+
+impl fmt::Debug for LabelName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.text, formatter)
+    }
+}
+
+/// Names are equal when their labels are: 0 and '0' differ, as in pandas
+/// (whose `s + t` of those is unnamed).
+impl PartialEq for LabelName {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text && self.label == other.label
+    }
+}
+
+impl Eq for LabelName {}
+
+impl PartialEq<str> for LabelName {
+    fn eq(&self, other: &str) -> bool {
+        self.text == other
+    }
+}
+
+impl PartialEq<&str> for LabelName {
+    fn eq(&self, other: &&str) -> bool {
+        self.text == *other
+    }
+}
+
+impl PartialEq<String> for LabelName {
+    fn eq(&self, other: &String) -> bool {
+        &self.text == other
+    }
+}
+
+impl Serialize for LabelName {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.text.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for LabelName {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self::from)
+    }
+}
+
 /// Hinnant `civil_from_days`: proleptic-Gregorian (year, month, day) for a day
 /// count since the 1970-01-01 epoch. Floor-correct for negative (pre-epoch)
 /// days. Identical algorithm to `fp-frame`'s `datetime64_civil_from_nanos`.
@@ -1728,9 +1877,10 @@ impl<'de> Deserialize<'de> for IndexLabels {
 pub struct Index {
     #[serde(default)]
     labels: IndexLabels,
-    /// Optional name for the index (matches pandas `Index.name`).
+    /// Optional name for the index (matches pandas `Index.name`), typed:
+    /// `set_index(0)` names it the integer 0 (fvsao.64).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
+    name: Option<LabelName>,
     /// Runtime-only immutable identity for this label vector lineage.
     #[serde(skip, default = "next_index_label_identity")]
     label_identity: u64,
@@ -2242,23 +2392,25 @@ impl Index {
             .clone()
     }
 
-    /// Return the index name (matches `pd.Index.name`).
+    /// Return the index name (matches `pd.Index.name`): its text, and its
+    /// typed label when it is not a string ([`LabelName`]).
     #[must_use]
-    pub fn name(&self) -> Option<&str> {
-        self.name.as_deref()
+    pub fn name(&self) -> Option<&LabelName> {
+        self.name.as_ref()
     }
 
     /// Return a new index with the given name (matches `pd.Index.set_names`).
+    /// A [`LabelName`] keeps its typed label; text is a string name.
     #[must_use]
-    pub fn set_names(&self, name: Option<&str>) -> Self {
+    pub fn set_names<N: Into<LabelName>>(&self, name: Option<N>) -> Self {
         let mut idx = self.clone();
-        idx.name = name.map(String::from);
+        idx.name = name.map(Into::into);
         idx
     }
 
     /// Alias for `set_names` — set the index name, returning a new `Index`.
     #[must_use]
-    pub fn set_name(&self, name: &str) -> Self {
+    pub fn set_name<N: Into<LabelName>>(&self, name: N) -> Self {
         self.set_names(Some(name))
     }
 
@@ -2268,7 +2420,7 @@ impl Index {
     /// a single-element list with the current name (or `None`).
     #[must_use]
     pub fn names(&self) -> Vec<Option<String>> {
-        vec![self.name.clone()]
+        vec![self.name.clone().map(String::from)]
     }
 
     /// Set names from a list.
@@ -2297,9 +2449,10 @@ impl Index {
         flat
     }
 
-    /// Return a new index with the name cleared.
+    /// Return a new index named `name` (`None` clears it); a
+    /// [`LabelName`] keeps its typed label.
     #[must_use]
-    pub fn rename_index(&self, name: Option<&str>) -> Self {
+    pub fn rename_index<N: Into<LabelName>>(&self, name: Option<N>) -> Self {
         self.set_names(name)
     }
 
@@ -2467,7 +2620,7 @@ impl Index {
 
     /// Internal: if both indexes share the same name, return it; otherwise None.
     /// Matches pandas behavior for binary set operations.
-    fn shared_name(&self, other: &Self) -> Option<String> {
+    fn shared_name(&self, other: &Self) -> Option<LabelName> {
         if self.name == other.name {
             self.name.clone()
         } else {
@@ -6942,7 +7095,7 @@ fn positional_diff<T>(
 
 fn optional_diffs_to_timedelta_index(
     values: Vec<Option<i64>>,
-    name: Option<&str>,
+    name: Option<&LabelName>,
 ) -> TimedeltaIndex {
     let mut out = TimedeltaIndex::new(
         values
@@ -7650,26 +7803,26 @@ impl DatetimeIndex {
     }
 
     #[must_use]
-    pub fn name(&self) -> Option<&str> {
+    pub fn name(&self) -> Option<&LabelName> {
         self.index.name()
     }
 
     #[must_use]
-    pub fn set_name(&self, name: &str) -> Self {
+    pub fn set_name<N: Into<LabelName>>(&self, name: N) -> Self {
         Self {
             index: self.index.set_name(name),
         }
     }
 
     #[must_use]
-    pub fn set_names(&self, name: Option<&str>) -> Self {
+    pub fn set_names<N: Into<LabelName>>(&self, name: Option<N>) -> Self {
         Self {
             index: self.index.set_names(name),
         }
     }
 
     #[must_use]
-    pub fn rename_index(&self, name: Option<&str>) -> Self {
+    pub fn rename_index<N: Into<LabelName>>(&self, name: Option<N>) -> Self {
         self.set_names(name)
     }
 
@@ -9617,26 +9770,26 @@ impl TimedeltaIndex {
     }
 
     #[must_use]
-    pub fn name(&self) -> Option<&str> {
+    pub fn name(&self) -> Option<&LabelName> {
         self.index.name()
     }
 
     #[must_use]
-    pub fn set_name(&self, name: &str) -> Self {
+    pub fn set_name<N: Into<LabelName>>(&self, name: N) -> Self {
         Self {
             index: self.index.set_name(name),
         }
     }
 
     #[must_use]
-    pub fn set_names(&self, name: Option<&str>) -> Self {
+    pub fn set_names<N: Into<LabelName>>(&self, name: Option<N>) -> Self {
         Self {
             index: self.index.set_names(name),
         }
     }
 
     #[must_use]
-    pub fn rename_index(&self, name: Option<&str>) -> Self {
+    pub fn rename_index<N: Into<LabelName>>(&self, name: Option<N>) -> Self {
         self.set_names(name)
     }
 
@@ -11020,7 +11173,7 @@ impl TimedeltaIndex {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeriodIndex {
     values: Vec<Period>,
-    name: Option<String>,
+    name: Option<LabelName>,
 }
 
 impl PeriodIndex {
@@ -11070,32 +11223,32 @@ impl PeriodIndex {
     }
 
     #[must_use]
-    pub fn name(&self) -> Option<&str> {
-        self.name.as_deref()
+    pub fn name(&self) -> Option<&LabelName> {
+        self.name.as_ref()
     }
 
     #[must_use]
-    pub fn set_name(&self, name: &str) -> Self {
+    pub fn set_name<N: Into<LabelName>>(&self, name: N) -> Self {
         let mut out = self.clone();
-        out.name = Some(name.to_owned());
+        out.name = Some(name.into());
         out
     }
 
     #[must_use]
-    pub fn set_names(&self, name: Option<&str>) -> Self {
+    pub fn set_names<N: Into<LabelName>>(&self, name: Option<N>) -> Self {
         let mut out = self.clone();
-        out.name = name.map(str::to_owned);
+        out.name = name.map(Into::into);
         out
     }
 
     #[must_use]
-    pub fn rename_index(&self, name: Option<&str>) -> Self {
+    pub fn rename_index<N: Into<LabelName>>(&self, name: Option<N>) -> Self {
         self.set_names(name)
     }
 
     #[must_use]
     pub fn names(&self) -> Vec<Option<String>> {
-        vec![self.name.clone()]
+        vec![self.name.clone().map(String::from)]
     }
 
     #[must_use]
@@ -11175,7 +11328,7 @@ impl PeriodIndex {
     #[must_use]
     pub fn memory_usage(&self, deep: bool) -> usize {
         let name_bytes = if deep {
-            self.name.as_ref().map_or(0, String::len)
+            self.name.as_ref().map_or(0, |name| name.len())
         } else {
             0
         };
@@ -12466,7 +12619,7 @@ pub struct RangeIndex {
     start: i64,
     stop: i64,
     step: i64,
-    name: Option<String>,
+    name: Option<LabelName>,
 }
 
 /// Borrowed, lazily evaluated Int64 values of a [`RangeIndex`].
@@ -12703,32 +12856,32 @@ impl RangeIndex {
     }
 
     #[must_use]
-    pub fn name(&self) -> Option<&str> {
-        self.name.as_deref()
+    pub fn name(&self) -> Option<&LabelName> {
+        self.name.as_ref()
     }
 
     #[must_use]
-    pub fn set_name(&self, name: &str) -> Self {
+    pub fn set_name<N: Into<LabelName>>(&self, name: N) -> Self {
         let mut out = self.clone();
-        out.name = Some(name.to_owned());
+        out.name = Some(name.into());
         out
     }
 
     #[must_use]
-    pub fn set_names(&self, name: Option<&str>) -> Self {
+    pub fn set_names<N: Into<LabelName>>(&self, name: Option<N>) -> Self {
         let mut out = self.clone();
-        out.name = name.map(str::to_owned);
+        out.name = name.map(Into::into);
         out
     }
 
     #[must_use]
-    pub fn rename_index(&self, name: Option<&str>) -> Self {
+    pub fn rename_index<N: Into<LabelName>>(&self, name: Option<N>) -> Self {
         self.set_names(name)
     }
 
     #[must_use]
     pub fn names(&self) -> Vec<Option<String>> {
-        vec![self.name.clone()]
+        vec![self.name.clone().map(String::from)]
     }
 
     #[must_use]
@@ -13095,7 +13248,7 @@ impl RangeIndex {
         &self,
         first_position: usize,
         len: usize,
-        name: Option<&str>,
+        name: Option<&LabelName>,
     ) -> Option<Index> {
         let start = if len == 0 {
             self.start
@@ -14825,7 +14978,7 @@ pub struct CategoricalIndex {
     labels: Vec<String>,
     categories: Vec<String>,
     ordered: bool,
-    name: Option<String>,
+    name: Option<LabelName>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     category_codes: Option<Vec<usize>>,
 }
@@ -14882,7 +15035,7 @@ impl CategoricalIndex {
         labels: Vec<String>,
         categories: Vec<String>,
         ordered: bool,
-        name: Option<String>,
+        name: Option<LabelName>,
     ) -> Self {
         let category_codes = Self::category_codes_for(&labels, &categories);
         Self {
@@ -14985,32 +15138,32 @@ impl CategoricalIndex {
     }
 
     #[must_use]
-    pub fn name(&self) -> Option<&str> {
-        self.name.as_deref()
+    pub fn name(&self) -> Option<&LabelName> {
+        self.name.as_ref()
     }
 
     #[must_use]
-    pub fn set_name(&self, name: &str) -> Self {
+    pub fn set_name<N: Into<LabelName>>(&self, name: N) -> Self {
         let mut out = self.clone();
-        out.name = Some(name.to_owned());
+        out.name = Some(name.into());
         out
     }
 
     #[must_use]
-    pub fn set_names(&self, name: Option<&str>) -> Self {
+    pub fn set_names<N: Into<LabelName>>(&self, name: Option<N>) -> Self {
         let mut out = self.clone();
-        out.name = name.map(str::to_owned);
+        out.name = name.map(Into::into);
         out
     }
 
     #[must_use]
-    pub fn rename_index(&self, name: Option<&str>) -> Self {
+    pub fn rename_index<N: Into<LabelName>>(&self, name: Option<N>) -> Self {
         self.set_names(name)
     }
 
     #[must_use]
     pub fn names(&self) -> Vec<Option<String>> {
-        vec![self.name.clone()]
+        vec![self.name.clone().map(String::from)]
     }
 
     #[must_use]
@@ -15055,7 +15208,7 @@ impl CategoricalIndex {
                 .saturating_add(saturating_usize_sum(
                     self.categories.iter().map(String::len),
                 ))
-                .saturating_add(self.name.as_ref().map_or(0, String::len))
+                .saturating_add(self.name.as_ref().map_or(0, |name| name.len()))
         } else {
             fixed
         }
@@ -16798,7 +16951,7 @@ impl CategoricalIndex {
 pub struct IntervalIndex {
     values: Vec<Interval>,
     closed: IntervalClosed,
-    name: Option<String>,
+    name: Option<LabelName>,
 }
 
 impl IntervalIndex {
@@ -16823,7 +16976,7 @@ impl IntervalIndex {
         Self {
             values,
             closed,
-            name,
+            name: name.map(LabelName::from),
         }
     }
 
@@ -16932,32 +17085,32 @@ impl IntervalIndex {
     }
 
     #[must_use]
-    pub fn name(&self) -> Option<&str> {
-        self.name.as_deref()
+    pub fn name(&self) -> Option<&LabelName> {
+        self.name.as_ref()
     }
 
     #[must_use]
-    pub fn set_name(&self, name: &str) -> Self {
+    pub fn set_name<N: Into<LabelName>>(&self, name: N) -> Self {
         let mut out = self.clone();
-        out.name = Some(name.to_owned());
+        out.name = Some(name.into());
         out
     }
 
     #[must_use]
-    pub fn set_names(&self, name: Option<&str>) -> Self {
+    pub fn set_names<N: Into<LabelName>>(&self, name: Option<N>) -> Self {
         let mut out = self.clone();
-        out.name = name.map(str::to_owned);
+        out.name = name.map(Into::into);
         out
     }
 
     #[must_use]
-    pub fn rename_index(&self, name: Option<&str>) -> Self {
+    pub fn rename_index<N: Into<LabelName>>(&self, name: Option<N>) -> Self {
         self.set_names(name)
     }
 
     #[must_use]
     pub fn names(&self) -> Vec<Option<String>> {
-        vec![self.name.clone()]
+        vec![self.name.clone().map(String::from)]
     }
 
     #[must_use]
@@ -17590,7 +17743,7 @@ pub fn align_inner(left: &Index, right: &Index) -> AlignmentPlan {
             }
         }
         let shared_name = if left.name() == right.name() {
-            left.name().map(str::to_owned)
+            left.name().cloned()
         } else {
             None
         };
@@ -17621,7 +17774,7 @@ pub fn align_inner(left: &Index, right: &Index) -> AlignmentPlan {
     // shared index name (preserved when both operands agree, None when
     // they differ). Mirrors align_non_unique handling.
     let shared_name = if left.name() == right.name() {
-        left.name().map(str::to_owned)
+        left.name().cloned()
     } else {
         None
     };
@@ -17745,7 +17898,7 @@ pub fn align_union(left: &Index, right: &Index) -> AlignmentPlan {
         let (union_vals, left_positions, right_positions) =
             align_union_i64(&left_vals, &right_vals);
         let shared_name = if left.name() == right.name() {
-            left.name().map(str::to_owned)
+            left.name().cloned()
         } else {
             None
         };
@@ -17785,7 +17938,7 @@ pub fn align_union(left: &Index, right: &Index) -> AlignmentPlan {
     // Per br-frankenpandas-r4k11: pandas outer alignment preserves the
     // shared index name. Mirrors align_inner / align_non_unique handling.
     let shared_name = if left.name() == right.name() {
-        left.name().map(str::to_owned)
+        left.name().cloned()
     } else {
         None
     };
@@ -17985,14 +18138,8 @@ pub fn multi_way_align(indexes: &[&Index]) -> MultiAlignmentPlan {
     }
     // Per br-frankenpandas-nrhjq: pandas multi-index union sets name to
     // the shared name across all inputs (= None if any differ).
-    let first_name = indexes
-        .first()
-        .and_then(|idx| idx.name())
-        .map(str::to_owned);
-    let shared_name = if indexes
-        .iter()
-        .all(|idx| idx.name() == first_name.as_deref())
-    {
+    let first_name = indexes.first().and_then(|idx| idx.name()).cloned();
+    let shared_name = if indexes.iter().all(|idx| idx.name() == first_name.as_ref()) {
         first_name
     } else {
         None
@@ -18924,7 +19071,7 @@ impl MultiIndex {
 
     /// Scalar index name, matching `pd.MultiIndex.name`.
     #[must_use]
-    pub fn name(&self) -> Option<&str> {
+    pub const fn name(&self) -> Option<&LabelName> {
         None
     }
 
@@ -21857,7 +22004,7 @@ mod tests {
                 IndexLabel::Datetime64(1_704_412_800_000_000_000),
             ]
         );
-        assert_eq!(idx.name(), Some("biz"));
+        assert_eq!(idx.name().map(|n| n.as_str()), Some("biz"));
     }
 
     #[test]
@@ -21905,7 +22052,7 @@ mod tests {
             })
         );
         assert!(index.labels.materialized.get().is_none());
-        assert_eq!(index.name(), Some("timestamp"));
+        assert_eq!(index.name().map(|n| n.as_str()), Some("timestamp"));
         assert_eq!(
             index.labels(),
             &[
@@ -21964,7 +22111,7 @@ mod tests {
         )
         .unwrap();
         assert!(empty.is_empty());
-        assert_eq!(empty.name(), Some("empty"));
+        assert_eq!(empty.name().map(|n| n.as_str()), Some("empty"));
     }
 
     #[test]
@@ -22195,7 +22342,7 @@ mod tests {
 
         let unique = index.unique();
 
-        assert_eq!(unique.name(), Some("row"));
+        assert_eq!(unique.name().map(|n| n.as_str()), Some("row"));
         assert_eq!(unique.labels.int64_view().unwrap().as_slice(), &[3, 1, 2]);
         assert!(index.labels.materialized.get().is_none());
         assert!(
@@ -22221,7 +22368,7 @@ mod tests {
 
         let dropped = index.drop_duplicates();
 
-        assert_eq!(dropped.name(), Some("axis"));
+        assert_eq!(dropped.name().map(|n| n.as_str()), Some("axis"));
         assert_eq!(dropped.labels.int64_view().unwrap().as_slice(), &[9, 4, 2]);
         assert!(index.labels.materialized.get().is_none());
         assert!(
@@ -22238,12 +22385,12 @@ mod tests {
         let keep_last = index.drop_duplicates_keep(DuplicateKeep::Last);
         let keep_none = index.drop_duplicates_keep(DuplicateKeep::None);
 
-        assert_eq!(keep_last.name(), Some("axis"));
+        assert_eq!(keep_last.name().map(|n| n.as_str()), Some("axis"));
         assert_eq!(
             keep_last.labels.int64_view().unwrap().as_slice(),
             &[9, 4, 2]
         );
-        assert_eq!(keep_none.name(), Some("axis"));
+        assert_eq!(keep_none.name().map(|n| n.as_str()), Some("axis"));
         assert_eq!(keep_none.labels.int64_view().unwrap().as_slice(), &[2]);
         assert!(
             index.labels.materialized.get().is_none(),
@@ -22344,8 +22491,8 @@ mod tests {
 
         let intersection = left.intersection(&right);
         let difference = left.difference(&right);
-        assert_eq!(intersection.name(), Some("axis"));
-        assert_eq!(difference.name(), Some("axis"));
+        assert_eq!(intersection.name().map(|n| n.as_str()), Some("axis"));
+        assert_eq!(difference.name().map(|n| n.as_str()), Some("axis"));
         assert_eq!(
             intersection.labels.int64_view().unwrap().as_slice(),
             &[3, 9]
@@ -22741,9 +22888,9 @@ mod tests {
         assert_eq!(range.dtypes(), vec!["int64"]);
         assert_eq!(range.names(), vec![Some("row".to_owned())]);
         assert_eq!(range.copy(), range);
-        assert_eq!(range.rename_index(None).name(), None);
+        assert_eq!(range.rename_index(None::<&str>).name(), None);
         assert_eq!(range.nbytes(), 3 * std::mem::size_of::<i64>());
-        assert_eq!(range.to_index().name(), Some("row"));
+        assert_eq!(range.to_index().name().map(|n| n.as_str()), Some("row"));
         assert!(RangeIndex::new(0, 5, 0).is_err());
 
         let dt = DatetimeIndex::new(vec![1_706_918_400_000_000_000, i64::MIN]).set_name("when");
@@ -22810,9 +22957,9 @@ mod tests {
         assert_eq!(period.dtypes(), vec!["period[M]".to_owned()]);
         assert_eq!(period.names(), vec![Some("period".to_owned())]);
         assert_eq!(period.copy(), period);
-        assert_eq!(period.rename_index(None).name(), None);
+        assert_eq!(period.rename_index(None::<&str>).name(), None);
         assert!(period.nbytes() <= period.memory_usage(true));
-        assert_eq!(period.to_index().name(), Some("period"));
+        assert_eq!(period.to_index().name().map(|n| n.as_str()), Some("period"));
 
         let period_width = std::mem::size_of::<Period>();
         assert_eq!(period.nbytes(), 3 * period_width);
@@ -22848,7 +22995,10 @@ mod tests {
         assert_eq!(categorical.isna(), vec![false, false, false]);
         assert_eq!(categorical.notna(), vec![true, true, true]);
         assert!(categorical.nbytes() <= categorical.memory_usage(true));
-        assert_eq!(categorical.to_index().name(), Some("priority"));
+        assert_eq!(
+            categorical.to_index().name().map(|n| n.as_str()),
+            Some("priority")
+        );
         assert!(
             CategoricalIndex::with_categories(
                 vec!["missing".to_owned()],
@@ -23041,7 +23191,7 @@ mod tests {
         assert!(range.is_(&range));
         assert!(range.equals(&range.copy()));
         assert!(range.identical(&range.copy()));
-        assert!(!range.identical(&range.rename_index(None)));
+        assert!(!range.identical(&range.rename_index(None::<&str>)));
         assert!(range.is_unique());
         assert!(!range.has_duplicates());
         assert!(range.is_monotonic_increasing());
@@ -23064,7 +23214,7 @@ mod tests {
         assert!(dt.is_(&dt));
         assert!(dt.equals(&dt.copy()));
         assert!(dt.identical(&dt.copy()));
-        assert!(!dt.identical(&dt.rename_index(None)));
+        assert!(!dt.identical(&dt.rename_index(None::<&str>)));
         assert!(dt.is_unique());
         assert!(!dt.has_duplicates());
         assert_eq!(dt.nunique(), 1);
@@ -23093,7 +23243,7 @@ mod tests {
         assert!(td.is_(&td));
         assert!(td.equals(&td.copy()));
         assert!(td.identical(&td.copy()));
-        assert!(!td.identical(&td.rename_index(None)));
+        assert!(!td.identical(&td.rename_index(None::<&str>)));
         assert!(td.is_unique());
         assert_eq!(td.nunique(), 1);
         assert_eq!(td.nunique_with_dropna(false), 2);
@@ -23120,7 +23270,7 @@ mod tests {
         assert!(period.is_(&period));
         assert!(period.equals(&period.copy()));
         assert!(period.identical(&period.copy()));
-        assert!(!period.identical(&period.rename_index(None)));
+        assert!(!period.identical(&period.rename_index(None::<&str>)));
         assert!(period.is_unique());
         assert!(!period.has_duplicates());
         assert!(period.is_monotonic_increasing());
@@ -23151,7 +23301,7 @@ mod tests {
         assert!(categorical.is_(&categorical));
         assert!(categorical.equals(&categorical.copy()));
         assert!(categorical.identical(&categorical.copy()));
-        assert!(!categorical.identical(&categorical.rename_index(None)));
+        assert!(!categorical.identical(&categorical.rename_index(None::<&str>)));
         assert!(!categorical.is_unique());
         assert!(categorical.has_duplicates());
         assert_eq!(categorical.nunique(), 2);
@@ -23607,7 +23757,7 @@ mod tests {
                 IndexLabel::from("hippo"),
             ]
         );
-        assert_eq!(deduped.name(), Some("animals"));
+        assert_eq!(deduped.name().map(|n| n.as_str()), Some("animals"));
     }
 
     #[test]
@@ -23722,7 +23872,7 @@ mod tests {
         let left = Index::from_i64(vec![1, 2, 3]).set_name("left_axis");
         let right = Index::from_i64(vec![2, 3, 4]).set_name("right_axis");
         let result = left.difference(&right);
-        assert_eq!(result.name(), Some("left_axis"));
+        assert_eq!(result.name().map(|n| n.as_str()), Some("left_axis"));
     }
 
     #[test]
@@ -23861,7 +24011,7 @@ mod tests {
     fn int64_sort_values_preserves_name_and_stable_duplicates_6ubrp() {
         let index = Index::from_i64_values(vec![3, 1, 2, 1, 3]).set_name("rows");
         let sorted = index.sort_values();
-        assert_eq!(sorted.name(), Some("rows"));
+        assert_eq!(sorted.name().map(|n| n.as_str()), Some("rows"));
         assert_eq!(
             sorted.labels(),
             &[
@@ -23880,7 +24030,7 @@ mod tests {
             .unwrap()
             .set_name("axis");
         let sorted = index.sort_values();
-        assert_eq!(sorted.name(), Some("axis"));
+        assert_eq!(sorted.name().map(|n| n.as_str()), Some("axis"));
         assert_eq!(
             sorted.labels.int64_affine_range(),
             Some(Int64AffineLabels {
@@ -23925,7 +24075,7 @@ mod tests {
 
         let taken = index.take(&[2, 0, 2]);
 
-        assert_eq!(taken.name(), Some("rows"));
+        assert_eq!(taken.name().map(|n| n.as_str()), Some("rows"));
         assert_eq!(taken.labels.int64_view().unwrap().as_slice(), &[30, 10, 30]);
         assert!(index.labels.materialized.get().is_none());
         assert!(
@@ -23943,7 +24093,7 @@ mod tests {
 
         let taken = index.take(&[3, 1]);
 
-        assert_eq!(taken.name(), Some("axis"));
+        assert_eq!(taken.name().map(|n| n.as_str()), Some("axis"));
         assert_eq!(taken.labels.int64_view().unwrap().as_slice(), &[14, 8]);
         assert!(index.labels.materialized.get().is_none());
         assert!(
@@ -24259,10 +24409,10 @@ mod tests {
         let difference = left.difference(&right);
         let symmetric = left.symmetric_difference(&right);
 
-        assert_eq!(intersection.name(), Some("axis"));
-        assert_eq!(union.name(), Some("axis"));
-        assert_eq!(difference.name(), Some("axis"));
-        assert_eq!(symmetric.name(), Some("axis"));
+        assert_eq!(intersection.name().map(|n| n.as_str()), Some("axis"));
+        assert_eq!(union.name().map(|n| n.as_str()), Some("axis"));
+        assert_eq!(difference.name().map(|n| n.as_str()), Some("axis"));
+        assert_eq!(symmetric.name().map(|n| n.as_str()), Some("axis"));
         assert_eq!(
             intersection.labels.int64_view().unwrap().as_slice(),
             &[1, 2]
@@ -24826,7 +24976,7 @@ mod tests {
         let dropped = Index::new(labels).set_name("mixed").drop_labels(&drops);
 
         assert_eq!(dropped.labels(), expected.as_slice());
-        assert_eq!(dropped.name(), Some("mixed"));
+        assert_eq!(dropped.name().map(|n| n.as_str()), Some("mixed"));
     }
 
     #[test]
@@ -24964,7 +25114,7 @@ mod tests {
 
         let dropped = index.drop_labels(&[IndexLabel::Int64(1), IndexLabel::Utf8("1".into())]);
 
-        assert_eq!(dropped.name(), Some("row"));
+        assert_eq!(dropped.name().map(|n| n.as_str()), Some("row"));
         assert_eq!(dropped.labels.int64_view().unwrap().as_slice(), &[2, 3, 4]);
         assert!(index.labels.materialized.get().is_none());
         assert!(
@@ -24999,7 +25149,7 @@ mod tests {
             IndexLabel::Utf8("2".into()),
         ]);
 
-        assert_eq!(dropped.name(), Some("row"));
+        assert_eq!(dropped.name().map(|n| n.as_str()), Some("row"));
         assert_eq!(
             dropped.labels.int64_view().unwrap().as_slice(),
             &[0, 2, 3, 5, 6]
@@ -25020,7 +25170,7 @@ mod tests {
 
         let dropped = index.drop_labels(&[IndexLabel::Int64(8), IndexLabel::Int64(2)]);
 
-        assert_eq!(dropped.name(), Some("axis"));
+        assert_eq!(dropped.name().map(|n| n.as_str()), Some("axis"));
         assert_eq!(dropped.labels.int64_view().unwrap().as_slice(), &[10, 6, 4]);
         assert!(index.labels.materialized.get().is_none());
         assert!(
@@ -25044,7 +25194,7 @@ mod tests {
 
         let str_idx = index.astype_str();
 
-        assert_eq!(str_idx.name(), Some("row"));
+        assert_eq!(str_idx.name().map(|n| n.as_str()), Some("row"));
         assert_eq!(
             str_idx.labels(),
             &[
@@ -25076,7 +25226,7 @@ mod tests {
 
         let str_idx = index.astype_str();
 
-        assert_eq!(str_idx.name(), Some("axis"));
+        assert_eq!(str_idx.name().map(|n| n.as_str()), Some("axis"));
         assert_eq!(
             str_idx.labels(),
             &[
@@ -25118,7 +25268,7 @@ mod tests {
             ]
         );
         assert_eq!(floats.dtype(), "float64");
-        assert_eq!(floats.name(), Some("n"));
+        assert_eq!(floats.name().map(|n| n.as_str()), Some("n"));
         let flags = Index::new(vec![IndexLabel::Int64(3), IndexLabel::Int64(0)])
             .astype("bool")
             .expect("bool cast");
@@ -25146,7 +25296,7 @@ mod tests {
 
         let cast = index.astype_int();
 
-        assert_eq!(cast.name(), Some("rows"));
+        assert_eq!(cast.name().map(|n| n.as_str()), Some("rows"));
         assert_eq!(cast.labels.int64_view().unwrap().as_slice(), &[7, 5, 7]);
         assert!(index.labels.materialized.get().is_none());
         assert!(
@@ -25164,7 +25314,7 @@ mod tests {
 
         let cast = index.astype_int();
 
-        assert_eq!(cast.name(), Some("axis"));
+        assert_eq!(cast.name().map(|n| n.as_str()), Some("axis"));
         assert_eq!(cast.labels.int64_view().unwrap().as_slice(), &[2, 6, 10]);
         assert!(index.labels.materialized.get().is_none());
         assert!(
@@ -25193,7 +25343,7 @@ mod tests {
         );
 
         let dropped = index.dropna();
-        assert_eq!(dropped.name(), Some("rows"));
+        assert_eq!(dropped.name().map(|n| n.as_str()), Some("rows"));
         assert_eq!(dropped.labels.int64_view().unwrap().as_slice(), &[1, 0, -4]);
         assert!(index.labels.materialized.get().is_none());
         assert!(
@@ -25202,7 +25352,7 @@ mod tests {
         );
 
         let filled = index.fillna(&IndexLabel::Utf8("missing".into()));
-        assert_eq!(filled.name(), Some("rows"));
+        assert_eq!(filled.name().map(|n| n.as_str()), Some("rows"));
         assert_eq!(filled.labels.int64_view().unwrap().as_slice(), &[1, 0, -4]);
         assert!(index.labels.materialized.get().is_none());
         assert!(
@@ -25223,7 +25373,7 @@ mod tests {
         assert!(index.labels.materialized.get().is_none());
 
         let dropped = index.dropna();
-        assert_eq!(dropped.name(), Some("axis"));
+        assert_eq!(dropped.name().map(|n| n.as_str()), Some("axis"));
         assert_eq!(dropped.labels.int64_view().unwrap().as_slice(), &[4, 2, 0]);
         assert!(index.labels.materialized.get().is_none());
         assert!(
@@ -25292,7 +25442,7 @@ mod tests {
                 IndexLabel::Datetime64(1_800_000_000_000_000_000),
             ]
         );
-        assert_eq!(filled.name(), Some("when"));
+        assert_eq!(filled.name().map(|n| n.as_str()), Some("when"));
     }
 
     #[test]
@@ -25324,7 +25474,7 @@ mod tests {
                 IndexLabel::Timedelta64(5),
             ]
         );
-        assert_eq!(dropped.name(), Some("t"));
+        assert_eq!(dropped.name().map(|n| n.as_str()), Some("t"));
     }
 
     #[test]
@@ -25377,7 +25527,7 @@ mod tests {
 
         let result = index.insert(1, IndexLabel::Int64(15)).unwrap();
 
-        assert_eq!(result.name(), Some("rows"));
+        assert_eq!(result.name().map(|n| n.as_str()), Some("rows"));
         assert_eq!(
             result.labels.int64_view().unwrap().as_slice(),
             &[10, 15, 20, 30]
@@ -25398,7 +25548,7 @@ mod tests {
 
         let result = index.insert(2, IndexLabel::Int64(7)).unwrap();
 
-        assert_eq!(result.name(), Some("axis"));
+        assert_eq!(result.name().map(|n| n.as_str()), Some("axis"));
         assert_eq!(
             result.labels.int64_view().unwrap().as_slice(),
             &[2, 5, 7, 8]
@@ -25425,7 +25575,7 @@ mod tests {
             result.labels(),
             &[IndexLabel::Int64(10), IndexLabel::Int64(30)]
         );
-        assert_eq!(result.name(), Some("k"));
+        assert_eq!(result.name().map(|n| n.as_str()), Some("k"));
     }
 
     #[test]
@@ -25435,7 +25585,7 @@ mod tests {
 
         let result = index.delete(2).unwrap();
 
-        assert_eq!(result.name(), Some("rows"));
+        assert_eq!(result.name().map(|n| n.as_str()), Some("rows"));
         assert_eq!(
             result.labels.int64_view().unwrap().as_slice(),
             &[10, 20, 40]
@@ -25456,7 +25606,7 @@ mod tests {
 
         let result = index.delete(1).unwrap();
 
-        assert_eq!(result.name(), Some("axis"));
+        assert_eq!(result.name().map(|n| n.as_str()), Some("axis"));
         assert_eq!(result.labels.int64_view().unwrap().as_slice(), &[2, 8, 11]);
         assert!(index.labels.materialized.get().is_none());
         assert!(
@@ -25486,7 +25636,7 @@ mod tests {
                 IndexLabel::Int64(4),
             ]
         );
-        assert_eq!(result.name(), Some("left"));
+        assert_eq!(result.name().map(|n| n.as_str()), Some("left"));
     }
 
     #[test]
@@ -25506,7 +25656,7 @@ mod tests {
 
         let appended = left.append(&right);
 
-        assert_eq!(appended.name(), Some("row"));
+        assert_eq!(appended.name().map(|n| n.as_str()), Some("row"));
         assert_eq!(
             appended.labels.int64_view().unwrap().as_slice(),
             &[1, 2, 3, 4, 5]
@@ -25530,7 +25680,7 @@ mod tests {
 
         let appended = left.append(&right);
 
-        assert_eq!(appended.name(), Some("axis"));
+        assert_eq!(appended.name().map(|n| n.as_str()), Some("axis"));
         assert_eq!(
             appended.labels.int64_view().unwrap().as_slice(),
             &[10, 8, 6, 1, 4, 7]
@@ -25558,7 +25708,7 @@ mod tests {
                 IndexLabel::Int64(3),
             ]
         );
-        assert_eq!(result.name(), Some("k"));
+        assert_eq!(result.name().map(|n| n.as_str()), Some("k"));
     }
 
     #[test]
@@ -25582,7 +25732,7 @@ mod tests {
 
         let repeated = index.repeat(3);
 
-        assert_eq!(repeated.name(), Some("row"));
+        assert_eq!(repeated.name().map(|n| n.as_str()), Some("row"));
         assert_eq!(
             repeated.labels.int64_view().unwrap().as_slice(),
             &[2, 2, 2, 4, 4, 4, 6, 6, 6]
@@ -25603,7 +25753,7 @@ mod tests {
 
         let repeated = index.repeat(0);
 
-        assert_eq!(repeated.name(), Some("axis"));
+        assert_eq!(repeated.name().map(|n| n.as_str()), Some("axis"));
         assert!(repeated.labels.int64_view().unwrap().is_empty());
         assert!(index.labels.materialized.get().is_none());
         assert!(
@@ -25735,7 +25885,7 @@ mod tests {
                 IndexLabel::Int64(2),
             ]
         );
-        assert_eq!(shifted.name(), Some("k"));
+        assert_eq!(shifted.name().map(|n| n.as_str()), Some("k"));
     }
 
     #[test]
@@ -25781,7 +25931,7 @@ mod tests {
 
         let shifted = index.shift(2, IndexLabel::Int64(-1));
 
-        assert_eq!(shifted.name(), Some("k"));
+        assert_eq!(shifted.name().map(|n| n.as_str()), Some("k"));
         assert_eq!(
             shifted.labels.int64_view().unwrap().as_slice(),
             &[-1, -1, 1, 2]
@@ -25821,7 +25971,7 @@ mod tests {
 
         let shifted = index.shift(-1, IndexLabel::Int64(99));
 
-        assert_eq!(shifted.name(), Some("axis"));
+        assert_eq!(shifted.name().map(|n| n.as_str()), Some("axis"));
         assert_eq!(
             shifted.labels.int64_view().unwrap().as_slice(),
             &[8, 6, 4, 99]
@@ -25956,7 +26106,7 @@ mod tests {
                 IndexLabel::Int64(0),
             ]
         );
-        assert_eq!(replaced.name(), Some("k"));
+        assert_eq!(replaced.name().map(|n| n.as_str()), Some("k"));
     }
 
     #[test]
@@ -25991,7 +26141,7 @@ mod tests {
 
         let replaced = index.putmask(&[false, true, false, true], &IndexLabel::Int64(9));
 
-        assert_eq!(replaced.name(), Some("row"));
+        assert_eq!(replaced.name().map(|n| n.as_str()), Some("row"));
         assert_eq!(
             replaced.labels.int64_view().unwrap().as_slice(),
             &[1, 9, 3, 9]
@@ -26025,7 +26175,7 @@ mod tests {
 
         let replaced = index.putmask(&[true, false, true], &IndexLabel::Int64(5));
 
-        assert_eq!(replaced.name(), Some("axis"));
+        assert_eq!(replaced.name().map(|n| n.as_str()), Some("axis"));
         assert_eq!(
             replaced.labels.int64_view().unwrap().as_slice(),
             &[5, 8, 5, 4]
@@ -28313,7 +28463,7 @@ mod tests {
             uniques.labels(),
             &[IndexLabel::from("a"), IndexLabel::from("b")]
         );
-        assert_eq!(uniques.name(), Some("letters"));
+        assert_eq!(uniques.name().map(|n| n.as_str()), Some("letters"));
 
         let target = Index::new(vec![
             IndexLabel::Utf8("a".into()),
@@ -28601,16 +28751,47 @@ mod tests {
     fn index_set_name() {
         let idx = Index::new(vec![1_i64.into(), 2_i64.into()]);
         let named = idx.set_name("year");
-        assert_eq!(named.name(), Some("year"));
+        assert_eq!(named.name().map(|n| n.as_str()), Some("year"));
         assert_eq!(named.labels(), idx.labels());
+    }
+
+    #[test]
+    fn index_names_keep_their_type_fvsao64() {
+        use super::LabelName;
+        let zero = LabelName::typed(IndexLabel::Int64(0));
+        let named = Index::new(vec![1_i64.into()]).set_name(zero.clone());
+        assert_eq!(
+            named.name().map(LabelName::label),
+            Some(IndexLabel::Int64(0))
+        );
+        // A name handed on keeps its label (relabel, rename by name, union
+        // of two indexes named alike).
+        assert_eq!(named.relabeled(vec![2_i64.into()]).name(), Some(&zero));
+        assert_eq!(
+            Index::new(vec![3_i64.into()])
+                .rename_index(named.name())
+                .name(),
+            Some(&zero)
+        );
+        assert_eq!(named.union(&named.clone()).name(), Some(&zero));
+        // NEGATIVE: the integer 0 and the string '0' are different names - a
+        // union of indexes named each is unnamed, as pandas' - and text
+        // names a string.
+        let text = Index::new(vec![4_i64.into()]).set_name("0");
+        assert_eq!(
+            text.name().map(LabelName::label),
+            Some(IndexLabel::Utf8("0".to_owned()))
+        );
+        assert_eq!(named.union(&text).name(), None);
+        assert_eq!(named.names(), vec![Some("0".to_owned())]);
     }
 
     #[test]
     fn index_set_names_some_and_none() {
         let idx = Index::new(vec!["a".into(), "b".into()]);
         let named = idx.set_names(Some("letters"));
-        assert_eq!(named.name(), Some("letters"));
-        let cleared = named.set_names(None);
+        assert_eq!(named.name().map(|n| n.as_str()), Some("letters"));
+        let cleared = named.set_names(None::<&str>);
         assert_eq!(cleared.name(), None);
     }
 
@@ -28618,7 +28799,7 @@ mod tests {
     fn index_name_propagates_through_unique() {
         let idx = Index::new(vec![1_i64.into(), 1_i64.into(), 2_i64.into()]).set_name("id");
         let u = idx.unique();
-        assert_eq!(u.name(), Some("id"));
+        assert_eq!(u.name().map(|n| n.as_str()), Some("id"));
         assert_eq!(u.len(), 2);
     }
 
@@ -28626,14 +28807,14 @@ mod tests {
     fn index_name_propagates_through_sort_values() {
         let idx = Index::new(vec![3_i64.into(), 1_i64.into(), 2_i64.into()]).set_name("val");
         let sorted = idx.sort_values();
-        assert_eq!(sorted.name(), Some("val"));
+        assert_eq!(sorted.name().map(|n| n.as_str()), Some("val"));
     }
 
     #[test]
     fn index_name_propagates_through_take_and_slice() {
         let idx = Index::new(vec!["a".into(), "b".into(), "c".into()]).set_name("letter");
-        assert_eq!(idx.take(&[0, 2]).name(), Some("letter"));
-        assert_eq!(idx.slice(1, 2).name(), Some("letter"));
+        assert_eq!(idx.take(&[0, 2]).name().map(|n| n.as_str()), Some("letter"));
+        assert_eq!(idx.slice(1, 2).name().map(|n| n.as_str()), Some("letter"));
     }
 
     #[test]
@@ -28643,30 +28824,30 @@ mod tests {
             IndexLabel::Int64(v) => IndexLabel::Int64(v * 10),
             other => other.clone(),
         });
-        assert_eq!(mapped.name(), Some("x"));
+        assert_eq!(mapped.name().map(|n| n.as_str()), Some("x"));
     }
 
     #[test]
     fn index_name_propagates_through_drop_labels() {
         let idx = Index::new(vec![1_i64.into(), 2_i64.into(), 3_i64.into()]).set_name("num");
         let dropped = idx.drop_labels(&[2_i64.into()]);
-        assert_eq!(dropped.name(), Some("num"));
+        assert_eq!(dropped.name().map(|n| n.as_str()), Some("num"));
         assert_eq!(dropped.len(), 2);
     }
 
     #[test]
     fn index_name_propagates_through_astype() {
         let idx = Index::new(vec![1_i64.into(), 2_i64.into()]).set_name("n");
-        assert_eq!(idx.astype_str().name(), Some("n"));
+        assert_eq!(idx.astype_str().name().map(|n| n.as_str()), Some("n"));
         let idx2 = Index::new(vec!["1".into(), "2".into()]).set_name("s");
-        assert_eq!(idx2.astype_int().name(), Some("s"));
+        assert_eq!(idx2.astype_int().name().map(|n| n.as_str()), Some("s"));
     }
 
     #[test]
     fn index_name_shared_for_intersection() {
         let a = Index::new(vec![1_i64.into(), 2_i64.into()]).set_name("x");
         let b = Index::new(vec![2_i64.into(), 3_i64.into()]).set_name("x");
-        assert_eq!(a.intersection(&b).name(), Some("x"));
+        assert_eq!(a.intersection(&b).name().map(|n| n.as_str()), Some("x"));
 
         let c = Index::new(vec![2_i64.into(), 3_i64.into()]).set_name("y");
         assert_eq!(a.intersection(&c).name(), None);
@@ -28676,7 +28857,7 @@ mod tests {
     fn index_name_shared_for_union() {
         let a = Index::new(vec![1_i64.into()]).set_name("k");
         let b = Index::new(vec![2_i64.into()]).set_name("k");
-        assert_eq!(a.union_with(&b).name(), Some("k"));
+        assert_eq!(a.union_with(&b).name().map(|n| n.as_str()), Some("k"));
 
         let c = Index::new(vec![2_i64.into()]);
         assert_eq!(a.union_with(&c).name(), None);
@@ -28686,7 +28867,7 @@ mod tests {
     fn index_name_propagates_through_where_cond() {
         let idx = Index::new(vec!["a".into(), "b".into()]).set_name("col");
         let result = idx.where_cond(&[true, false], &"Z".into());
-        assert_eq!(result.name(), Some("col"));
+        assert_eq!(result.name().map(|n| n.as_str()), Some("col"));
     }
 
     #[test]
@@ -28696,7 +28877,7 @@ mod tests {
 
         let replaced = index.where_cond(&[true, false, true], &IndexLabel::Int64(-1));
 
-        assert_eq!(replaced.name(), Some("row"));
+        assert_eq!(replaced.name().map(|n| n.as_str()), Some("row"));
         assert_eq!(
             replaced.labels.int64_view().unwrap().as_slice(),
             &[4, -1, 6, -1]
@@ -28730,7 +28911,7 @@ mod tests {
 
         let replaced = index.where_cond(&[false, true, true, false], &IndexLabel::Int64(0));
 
-        assert_eq!(replaced.name(), Some("axis"));
+        assert_eq!(replaced.name().map(|n| n.as_str()), Some("axis"));
         assert_eq!(
             replaced.labels.int64_view().unwrap().as_slice(),
             &[0, 5, 8, 0]
@@ -28746,8 +28927,8 @@ mod tests {
     fn index_rename_index() {
         let idx = Index::new(vec![1_i64.into()]);
         let named = idx.rename_index(Some("foo"));
-        assert_eq!(named.name(), Some("foo"));
-        let cleared = named.rename_index(None);
+        assert_eq!(named.name().map(|n| n.as_str()), Some("foo"));
+        let cleared = named.rename_index(None::<&str>);
         assert_eq!(cleared.name(), None);
     }
 
@@ -28770,7 +28951,7 @@ mod tests {
     fn index_set_names_list() {
         let idx = Index::new(vec![1_i64.into()]);
         let named = idx.set_names_list(&[Some("foo")]);
-        assert_eq!(named.name(), Some("foo"));
+        assert_eq!(named.name().map(|n| n.as_str()), Some("foo"));
         let cleared = named.set_names_list(&[None]);
         assert_eq!(cleared.name(), None);
     }
@@ -28780,7 +28961,7 @@ mod tests {
         let idx = Index::new(vec!["a".into(), "b".into()]).set_name("x");
         let flat = idx.to_flat_index();
         assert_eq!(flat, idx);
-        assert_eq!(flat.name(), Some("x"));
+        assert_eq!(flat.name().map(|n| n.as_str()), Some("x"));
     }
 
     // ── MultiIndex tests ──
@@ -28944,14 +29125,14 @@ mod tests {
             level0.labels(),
             &[IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())]
         );
-        assert_eq!(level0.name(), Some("letter"));
+        assert_eq!(level0.name().map(|n| n.as_str()), Some("letter"));
 
         let level1 = mi.get_level_values(1).unwrap();
         assert_eq!(
             level1.labels(),
             &[IndexLabel::Int64(1), IndexLabel::Int64(2)]
         );
-        assert_eq!(level1.name(), Some("number"));
+        assert_eq!(level1.name().map(|n| n.as_str()), Some("number"));
     }
 
     #[test]
@@ -29014,12 +29195,12 @@ mod tests {
 
         let levels = mi.levels();
         assert_eq!(levels[0].labels(), &[IndexLabel::Utf8("a".into())]);
-        assert_eq!(levels[0].name(), Some("letter"));
+        assert_eq!(levels[0].name().map(|n| n.as_str()), Some("letter"));
         assert_eq!(
             levels[1].labels(),
             &[IndexLabel::Int64(1), IndexLabel::Int64(2)]
         );
-        assert_eq!(levels[1].name(), Some("number"));
+        assert_eq!(levels[1].name().map(|n| n.as_str()), Some("number"));
         assert_eq!(mi.codes(), vec![vec![0, -1, 0], vec![0, 1, 0]]);
         assert_eq!(mi.levshape(), vec![1, 2]);
         assert!(mi.memory_usage(false) <= mi.memory_usage(true));
@@ -29373,7 +29554,7 @@ mod tests {
         );
         if let super::MultiIndexOrIndex::Index(idx) = result {
             assert_eq!(idx.labels(), &[IndexLabel::Int64(1), IndexLabel::Int64(2)]);
-            assert_eq!(idx.name(), Some("number"));
+            assert_eq!(idx.name().map(|n| n.as_str()), Some("number"));
         }
     }
 
@@ -29443,7 +29624,7 @@ mod tests {
             Some(super::MultiIndexOrIndex::Index(index))
                 if index.labels()
                     == [IndexLabel::Utf8("A".into()), IndexLabel::Utf8("B".into())]
-                    && index.name() == Some("product")
+                    && index.name().is_some_and(|name| name == "product")
         ));
     }
 
@@ -31054,7 +31235,7 @@ mod tests {
         // Middle insertion.
         let middle = dt.insert(1, b)?;
         assert_eq!(middle.values(), vec![Some(a), Some(b), Some(c)]);
-        assert_eq!(middle.name(), Some("ts"));
+        assert_eq!(middle.name().map(|n| n.as_str()), Some("ts"));
 
         // End insertion (loc == len()).
         let end = dt.insert(dt.len(), b)?;
@@ -31072,7 +31253,7 @@ mod tests {
         let td = super::TimedeltaIndex::new(vec![100_i64, 300]).set_name("d");
         let td_inserted = td.insert(1, 200)?;
         assert_eq!(td_inserted.values(), vec![Some(100), Some(200), Some(300)]);
-        assert_eq!(td_inserted.name(), Some("d"));
+        assert_eq!(td_inserted.name().map(|n| n.as_str()), Some("d"));
 
         use fp_types::{Period, PeriodFreq};
         let p1 = Period::new(10, PeriodFreq::Monthly);
@@ -31120,7 +31301,7 @@ mod tests {
         let filled = dt.fillna(unix);
         // NAT is replaced; existing values are preserved.
         assert_eq!(filled.values(), vec![Some(unix), Some(unix), Some(0)]);
-        assert_eq!(filled.name(), Some("ts"));
+        assert_eq!(filled.name().map(|n| n.as_str()), Some("ts"));
 
         let iso = dt.isnull();
         assert_eq!(iso, dt.isna());
@@ -31131,7 +31312,7 @@ mod tests {
         let td = super::TimedeltaIndex::new(vec![100_i64, nat, 0]).set_name("d");
         let td_filled = td.fillna(99);
         assert_eq!(td_filled.values(), vec![Some(100), Some(99), Some(0)]);
-        assert_eq!(td_filled.name(), Some("d"));
+        assert_eq!(td_filled.name().map(|n| n.as_str()), Some("d"));
         assert_eq!(td.isnull(), td.isna());
         assert_eq!(td.notnull(), td.notna());
     }
@@ -31205,12 +31386,15 @@ mod tests {
         // A subset / reordering of the labels keeps both (Index::new plus
         // the name dropped the zone).
         let taken = aware.relabeled(instants(&[20, 30]));
-        assert_eq!(taken.name(), Some("when"));
+        assert_eq!(taken.name().map(|n| n.as_str()), Some("when"));
         assert_eq!(taken.tz(), Some("US/Eastern"));
         // NEGATIVES: labels that are not all datetimes keep the name only;
         // a naive index invents no zone.
         let text = aware.relabeled(vec![IndexLabel::Utf8("a".to_owned())]);
-        assert_eq!((text.name(), text.tz()), (Some("when"), None));
+        assert_eq!(
+            (text.name().map(|n| n.as_str()), text.tz()),
+            (Some("when"), None)
+        );
         let naive = Index::new(instants(&[1])).relabeled(instants(&[1]));
         assert_eq!(naive.tz(), None);
     }
@@ -31230,7 +31414,7 @@ mod tests {
         // the labels become UTC instants, the fields keep the wall clock.
         let ny = dt.tz_localize(Some("US/Eastern")).expect("localize");
         assert_eq!(ny.tz().as_deref(), Some("US/Eastern"));
-        assert_eq!(ny.name(), Some("ts"));
+        assert_eq!(ny.name().map(|n| n.as_str()), Some("ts"));
         assert_eq!(
             ny.values(),
             vec![Some(jan + 5 * HOUR), Some(jul + 4 * HOUR), None]
@@ -31365,7 +31549,7 @@ mod tests {
 
         let masked = r.r#where(&[true, false, true, false, true], 99)?;
         assert_eq!(int64_labels(&masked), vec![0, 99, 2, 99, 4]);
-        assert_eq!(masked.name(), Some("r"));
+        assert_eq!(masked.name().map(|n| n.as_str()), Some("r"));
 
         let put = r.putmask(&[false, true, false, true, false], 99)?;
         assert_eq!(int64_labels(&put), vec![0, 99, 2, 99, 4]);
@@ -31389,7 +31573,7 @@ mod tests {
 
         let inter = left.intersection(&right);
         assert_eq!(int64_labels(&inter), vec![3, 4]);
-        assert_eq!(inter.name(), Some("r"));
+        assert_eq!(inter.name().map(|n| n.as_str()), Some("r"));
 
         let union = left.union(&right);
         assert_eq!(int64_labels(&union), vec![0, 1, 2, 3, 4, 5, 6, 7]);
@@ -31454,21 +31638,21 @@ mod tests {
     #[test]
     fn typed_index_variants_rename_alias_match_pandas_i8t6n() {
         let dt = super::DatetimeIndex::new(vec![]);
-        assert_eq!(dt.rename("ts").name(), Some("ts"));
+        assert_eq!(dt.rename("ts").name().map(|n| n.as_str()), Some("ts"));
 
         let td = super::TimedeltaIndex::new(vec![]);
-        assert_eq!(td.rename("d").name(), Some("d"));
+        assert_eq!(td.rename("d").name().map(|n| n.as_str()), Some("d"));
 
         use fp_types::PeriodFreq;
         let pi = super::PeriodIndex::new(vec![]);
-        assert_eq!(pi.rename("p").name(), Some("p"));
+        assert_eq!(pi.rename("p").name().map(|n| n.as_str()), Some("p"));
         let _ = PeriodFreq::Monthly; // suppress unused-import warning when no other test in scope
 
         let r = super::RangeIndex::new(0, 0, 1).unwrap();
-        assert_eq!(r.rename("r").name(), Some("r"));
+        assert_eq!(r.rename("r").name().map(|n| n.as_str()), Some("r"));
 
         let cat = super::CategoricalIndex::from_values(vec!["a".to_owned()], false);
-        assert_eq!(cat.rename("c").name(), Some("c"));
+        assert_eq!(cat.rename("c").name().map(|n| n.as_str()), Some("c"));
     }
 
     #[test]
@@ -31699,7 +31883,7 @@ mod tests {
         // where: keep position 0 and 2.
         let masked = pi.r#where(&[true, false, true], p1)?;
         assert_eq!(masked.values(), &[p1, p1, p3]);
-        assert_eq!(masked.name(), Some("p"));
+        assert_eq!(masked.name().map(|n| n.as_str()), Some("p"));
 
         // putmask: replace masked positions.
         let put = pi.putmask(&[false, true, false], p1)?;
@@ -31788,8 +31972,8 @@ mod tests {
         let sorted_alias = pi.sort()?;
         assert_eq!(sorted.values(), &[p1, p2, p3]);
         assert_eq!(sorted_alias.values(), sorted.values());
-        assert_eq!(sorted.name(), Some("p"));
-        assert_eq!(sorted_alias.name(), Some("p"));
+        assert_eq!(sorted.name().map(|n| n.as_str()), Some("p"));
+        assert_eq!(sorted_alias.name().map(|n| n.as_str()), Some("p"));
 
         let mixed = super::PeriodIndex::new(vec![
             Period::new(10, PeriodFreq::Monthly),
@@ -31929,7 +32113,7 @@ mod tests {
             as_int.labels(),
             &[IndexLabel::Int64(600), IndexLabel::Int64(601)]
         );
-        assert_eq!(as_int.name(), Some("p"));
+        assert_eq!(as_int.name().map(|n| n.as_str()), Some("p"));
 
         let as_datetime = pi.astype("datetime64[ns]")?;
         assert_eq!(
@@ -31939,7 +32123,7 @@ mod tests {
                 IndexLabel::Datetime64(1_580_515_200_000_000_000),
             ]
         );
-        assert_eq!(as_datetime.name(), Some("p"));
+        assert_eq!(as_datetime.name().map(|n| n.as_str()), Some("p"));
 
         Ok(())
     }
@@ -31956,7 +32140,7 @@ mod tests {
         assert_eq!(pi.notnull(), pi.notna());
         let dropped = pi.dropna();
         assert_eq!(dropped.values(), pi.values());
-        assert_eq!(dropped.name(), Some("periods"));
+        assert_eq!(dropped.name().map(|n| n.as_str()), Some("periods"));
     }
 
     #[test]
@@ -32012,7 +32196,7 @@ mod tests {
         let shifted = pi.shift(2)?;
         assert_eq!(shifted.values()[0].ordinal, 12);
         assert_eq!(shifted.values()[1].ordinal, 13);
-        assert_eq!(shifted.name(), Some("p"));
+        assert_eq!(shifted.name().map(|n| n.as_str()), Some("p"));
 
         // Negative shift.
         let back = pi.shift(-1)?;
@@ -32510,7 +32694,7 @@ mod tests {
         // where: keep position 0 and 2; replace position 1 with i64::MIN (NAT).
         let masked = dt.r#where(&[true, false, true], i64::MIN)?;
         assert_eq!(masked.values(), vec![Some(a), None, Some(c)]);
-        assert_eq!(masked.name(), Some("ts"));
+        assert_eq!(masked.name().map(|n| n.as_str()), Some("ts"));
 
         // putmask: replace positions where mask=true with c.
         let put = dt.putmask(&[true, false, false], c)?;
@@ -32545,7 +32729,7 @@ mod tests {
 
         let masked = td.r#where(&[false, true, false], nat)?;
         assert_eq!(masked.values(), vec![None, Some(200), None]);
-        assert_eq!(masked.name(), Some("d"));
+        assert_eq!(masked.name().map(|n| n.as_str()), Some("d"));
 
         let put = td.putmask(&[false, true, true], 999)?;
         assert_eq!(put.values(), vec![Some(100), Some(999), Some(999)]);
@@ -32718,7 +32902,7 @@ mod tests {
         let dt = super::DatetimeIndex::new(vec![1_704_067_200_i64 * NS]).set_name("ts");
         let dt_flat = dt.to_flat_index();
         assert_eq!(dt_flat.len(), 1);
-        assert_eq!(dt_flat.name(), Some("ts"));
+        assert_eq!(dt_flat.name().map(|n| n.as_str()), Some("ts"));
         assert!(matches!(
             dt_flat.labels()[0],
             super::IndexLabel::Datetime64(_)
@@ -32729,7 +32913,7 @@ mod tests {
         let td = super::TimedeltaIndex::new(vec![100_i64]).set_name("d");
         let td_flat = td.to_flat_index();
         assert_eq!(td_flat.len(), 1);
-        assert_eq!(td_flat.name(), Some("d"));
+        assert_eq!(td_flat.name().map(|n| n.as_str()), Some("d"));
         assert_eq!(td.to_frame(), td_flat.to_frame());
         assert_eq!(td.to_series(), td_flat.to_series());
 
@@ -32744,7 +32928,7 @@ mod tests {
         let r = super::RangeIndex::new(0, 3, 1).unwrap().set_name("r");
         let r_flat = r.to_flat_index();
         assert_eq!(r_flat.len(), 3);
-        assert_eq!(r_flat.name(), Some("r"));
+        assert_eq!(r_flat.name().map(|n| n.as_str()), Some("r"));
         assert_eq!(r.to_frame(), r_flat.to_frame());
         assert_eq!(r.to_series(), r_flat.to_series());
 
@@ -32938,7 +33122,7 @@ mod tests {
         let range = super::RangeIndex::new(9, 0, -4)?.set_name("row");
 
         let level_values = range.get_level_values(0)?;
-        assert_eq!(level_values.name(), Some("row"));
+        assert_eq!(level_values.name().map(|n| n.as_str()), Some("row"));
         assert_eq!(
             level_values.labels.int64_view().unwrap().as_slice(),
             &[9, 5, 1]
@@ -33065,7 +33249,7 @@ mod tests {
             dt_mapped.labels(),
             &[super::IndexLabel::Int64(1), super::IndexLabel::Int64(2)]
         );
-        assert_eq!(dt_mapped.name(), Some("ts"));
+        assert_eq!(dt_mapped.name().map(|n| n.as_str()), Some("ts"));
 
         let td = super::TimedeltaIndex::new(vec![5, 10]).set_name("delta");
         assert_eq!(
@@ -33116,7 +33300,10 @@ mod tests {
             dt.astype("int64").unwrap(),
             dt.to_flat_index().astype("int64").unwrap()
         );
-        assert_eq!(dt.astype("int64").unwrap().name(), Some("ts"));
+        assert_eq!(
+            dt.astype("int64").unwrap().name().map(|n| n.as_str()),
+            Some("ts")
+        );
         assert!(dt.astype("float64").is_err());
 
         let td = super::TimedeltaIndex::new(vec![5, 10]).set_name("delta");
@@ -33124,7 +33311,10 @@ mod tests {
             td.astype("string").unwrap(),
             td.to_flat_index().astype("string").unwrap()
         );
-        assert_eq!(td.astype("string").unwrap().name(), Some("delta"));
+        assert_eq!(
+            td.astype("string").unwrap().name().map(|n| n.as_str()),
+            Some("delta")
+        );
 
         use fp_types::{Period, PeriodFreq};
         let pi = super::PeriodIndex::new(vec![Period::new(1, PeriodFreq::Monthly)]);
@@ -33138,7 +33328,10 @@ mod tests {
             range.astype("str").unwrap(),
             range.to_flat_index().astype("str").unwrap()
         );
-        assert_eq!(range.astype("str").unwrap().name(), Some("r"));
+        assert_eq!(
+            range.astype("str").unwrap().name().map(|n| n.as_str()),
+            Some("r")
+        );
 
         let cat = super::CategoricalIndex::from_values(vec!["7".to_owned()], false);
         assert_eq!(
@@ -33153,7 +33346,7 @@ mod tests {
         let range = super::RangeIndex::new(9, 0, -4).unwrap().set_name("r");
 
         let as_int = range.astype("int64").unwrap();
-        assert_eq!(as_int.name(), Some("r"));
+        assert_eq!(as_int.name().map(|n| n.as_str()), Some("r"));
         assert_eq!(as_int.labels.int64_view().unwrap().as_slice(), &[9, 5, 1]);
         assert!(
             as_int.labels.materialized.get().is_none(),
@@ -33161,7 +33354,7 @@ mod tests {
         );
 
         let as_string = range.astype("string").unwrap();
-        assert_eq!(as_string.name(), Some("r"));
+        assert_eq!(as_string.name().map(|n| n.as_str()), Some("r"));
         assert_eq!(
             as_string.labels(),
             &[
@@ -33189,7 +33382,11 @@ mod tests {
 
         let empty = super::RangeIndex::new(0, 0, 1).unwrap().set_name("empty");
         assert_eq!(
-            empty.astype("datetime64[ns]").unwrap().name(),
+            empty
+                .astype("datetime64[ns]")
+                .unwrap()
+                .name()
+                .map(|n| n.as_str()),
             Some("empty")
         );
         assert_eq!(empty.astype("timedelta64[ns]").unwrap().len(), 0);
@@ -33291,7 +33488,7 @@ mod tests {
         let dt = super::DatetimeIndex::new(vec![NS, 3 * NS, 5 * NS]).set_name("ts");
         let drop_dt = [super::IndexLabel::Datetime64(3 * NS)];
         assert_eq!(dt.drop(&drop_dt), dt.to_flat_index().drop(&drop_dt));
-        assert_eq!(dt.drop(&drop_dt).name(), Some("ts"));
+        assert_eq!(dt.drop(&drop_dt).name().map(|n| n.as_str()), Some("ts"));
 
         let td = super::TimedeltaIndex::new(vec![30, 10, 20]);
         let (td_sorted, td_order) = td.sortlevel();
@@ -33343,7 +33540,7 @@ mod tests {
 
         let dt_floor = dt.floor("h").unwrap();
         assert_eq!(dt_floor.asi8(), vec![0, hour, i64::MIN]);
-        assert_eq!(dt_floor.name(), Some("ts"));
+        assert_eq!(dt_floor.name().map(|n| n.as_str()), Some("ts"));
 
         let dt_ceil = dt.ceil("h").unwrap();
         assert_eq!(dt_ceil.asi8(), vec![hour, 2 * hour, i64::MIN]);
@@ -33360,7 +33557,7 @@ mod tests {
         assert_eq!(td.floor("h").unwrap().asi8(), vec![0, hour, nat]);
         assert_eq!(td.ceil("h").unwrap().asi8(), vec![hour, 2 * hour, nat]);
         assert_eq!(td.round("h").unwrap().asi8(), vec![0, 2 * hour, nat]);
-        assert_eq!(td.round("h").unwrap().name(), Some("d"));
+        assert_eq!(td.round("h").unwrap().name().map(|n| n.as_str()), Some("d"));
         assert!(td.ceil("not-a-frequency").is_err());
 
         use fp_types::{Period, PeriodFreq};
@@ -33371,7 +33568,7 @@ mod tests {
         .set_name("p");
         let rounded_periods = periods.round("not-a-frequency");
         assert_eq!(rounded_periods.values(), periods.values());
-        assert_eq!(rounded_periods.name(), Some("p"));
+        assert_eq!(rounded_periods.name().map(|n| n.as_str()), Some("p"));
     }
 
     #[test]
@@ -33383,13 +33580,13 @@ mod tests {
         assert_eq!(dt.diff(1).asi8(), vec![nat, 2 * day, nat, nat]);
         assert_eq!(dt.diff(-1).asi8(), vec![-2 * day, nat, nat, nat]);
         assert_eq!(dt.diff(0).asi8(), vec![0, 0, nat, 0]);
-        assert_eq!(dt.diff(1).name(), Some("ts"));
+        assert_eq!(dt.diff(1).name().map(|n| n.as_str()), Some("ts"));
 
         let td = super::TimedeltaIndex::new(vec![day, 4 * day, nat, 9 * day]).set_name("delta");
         assert_eq!(td.diff(2).asi8(), vec![nat, nat, nat, 5 * day]);
         assert_eq!(td.diff(-1).asi8(), vec![-3 * day, nat, nat, nat]);
         assert_eq!(td.diff(0).asi8(), vec![0, 0, nat, 0]);
-        assert_eq!(td.diff(1).name(), Some("delta"));
+        assert_eq!(td.diff(1).name().map(|n| n.as_str()), Some("delta"));
 
         use fp_types::{Period, PeriodFreq};
         let periods = super::PeriodIndex::new(vec![
@@ -33406,7 +33603,7 @@ mod tests {
         assert_eq!(range.diff(1), vec![None, Some(2), Some(2), Some(2)]);
         assert_eq!(range.diff(-2), vec![Some(-4), Some(-4), None, None]);
         assert_eq!(range.diff(0), vec![Some(0), Some(0), Some(0), Some(0)]);
-        assert_eq!(range.name(), Some("r"));
+        assert_eq!(range.name().map(|n| n.as_str()), Some("r"));
 
         let descending = super::RangeIndex::new(9, 0, -3).unwrap();
         assert_eq!(descending.diff(1), vec![None, Some(-3), Some(-3)]);
@@ -33508,7 +33705,7 @@ mod tests {
                 Period::new(28_486_834, PeriodFreq::Minutely),
             ]
         );
-        assert_eq!(minutely.name(), Some("ts"));
+        assert_eq!(minutely.name().map(|n| n.as_str()), Some("ts"));
         assert_eq!(
             dt.to_period("S")?.values(),
             &[
@@ -33638,7 +33835,7 @@ mod tests {
                 Period::new(12, PeriodFreq::Monthly),
             ]
         );
-        assert_eq!(annual_start.name(), Some("p"));
+        assert_eq!(annual_start.name().map(|n| n.as_str()), Some("p"));
 
         let quarterly = super::PeriodIndex::new(vec![
             Period::new(0, PeriodFreq::Quarterly),
@@ -33859,7 +34056,10 @@ mod tests {
             monthly.to_timestamp("end")?.asi8(),
             monthly.end_time()?.asi8()
         );
-        assert_eq!(monthly.to_timestamp("")?.name(), Some("period"));
+        assert_eq!(
+            monthly.to_timestamp("")?.name().map(|n| n.as_str()),
+            Some("period")
+        );
         assert_eq!(monthly.qyear()?, vec![1970, 1970]);
         assert!(matches!(
             monthly.to_timestamp("middle"),
@@ -33963,7 +34163,7 @@ mod tests {
         // intersection: b, c (in self order).
         let inter = left.intersection(&right);
         assert_eq!(inter.values(), vec![Some(b), Some(c)]);
-        assert_eq!(inter.name(), Some("ts"));
+        assert_eq!(inter.name().map(|n| n.as_str()), Some("ts"));
 
         // union: a, b, c then d.
         let union = left.union(&right);
@@ -33990,7 +34190,7 @@ mod tests {
 
         let inter = left.intersection(&right);
         assert_eq!(inter.values(), vec![Some(200), Some(300)]);
-        assert_eq!(inter.name(), Some("d"));
+        assert_eq!(inter.name().map(|n| n.as_str()), Some("d"));
 
         let union = left.union(&right);
         assert_eq!(
@@ -34070,7 +34270,7 @@ mod tests {
             Some(1_704_067_200_i64 * NS + 2 * day_ns)
         );
         assert_eq!(shifted.values()[1], None);
-        assert_eq!(shifted.name(), Some("ts"));
+        assert_eq!(shifted.name().map(|n| n.as_str()), Some("ts"));
 
         // Negative shift.
         let back = dt.shift(-1, day_ns);
@@ -34128,8 +34328,8 @@ mod tests {
         // NAT sorts first (na_position='first' default).
         assert_eq!(sorted.values(), vec![None, Some(a), Some(b), Some(c)]);
         assert_eq!(sorted_alias.values(), sorted.values());
-        assert_eq!(sorted.name(), Some("ts"));
-        assert_eq!(sorted_alias.name(), Some("ts"));
+        assert_eq!(sorted.name().map(|n| n.as_str()), Some("ts"));
+        assert_eq!(sorted_alias.name().map(|n| n.as_str()), Some("ts"));
 
         let all_nat = super::DatetimeIndex::new(vec![i64::MIN, i64::MIN]);
         assert_eq!(all_nat.min(), None);
@@ -34154,8 +34354,8 @@ mod tests {
         let sorted_alias = td.sort();
         assert_eq!(sorted.values(), vec![None, Some(100), Some(200), Some(300)]);
         assert_eq!(sorted_alias.values(), sorted.values());
-        assert_eq!(sorted.name(), Some("d"));
-        assert_eq!(sorted_alias.name(), Some("d"));
+        assert_eq!(sorted.name().map(|n| n.as_str()), Some("d"));
+        assert_eq!(sorted_alias.name().map(|n| n.as_str()), Some("d"));
 
         let all_nat = super::TimedeltaIndex::new(vec![nat, nat]);
         assert_eq!(all_nat.min(), None);
@@ -34178,14 +34378,14 @@ mod tests {
 
         let merged = left.append(&right);
         assert_eq!(merged.values(), vec![Some(a), Some(b), Some(c)]);
-        assert_eq!(merged.name(), Some("ts"));
+        assert_eq!(merged.name().map(|n| n.as_str()), Some("ts"));
 
         let mismatched = super::DatetimeIndex::new(vec![c]).set_name("other");
         assert_eq!(left.append(&mismatched).name(), None);
 
         let trimmed = left.append(&right).delete(1)?;
         assert_eq!(trimmed.values(), vec![Some(a), Some(c)]);
-        assert_eq!(trimmed.name(), Some("ts"));
+        assert_eq!(trimmed.name().map(|n| n.as_str()), Some("ts"));
 
         let oob = left.delete(5).unwrap_err();
         assert!(matches!(
@@ -34204,7 +34404,7 @@ mod tests {
         let right = super::TimedeltaIndex::new(vec![3_i64]).set_name("d");
         let merged = left.append(&right);
         assert_eq!(merged.values(), vec![Some(1), Some(2), Some(3)]);
-        assert_eq!(merged.name(), Some("d"));
+        assert_eq!(merged.name().map(|n| n.as_str()), Some("d"));
 
         let trimmed = merged.delete(0)?;
         assert_eq!(trimmed.values(), vec![Some(2), Some(3)]);
@@ -34230,7 +34430,7 @@ mod tests {
 
         let merged = left.append(&right);
         assert_eq!(merged.values(), &[p1, p2, p3]);
-        assert_eq!(merged.name(), Some("p"));
+        assert_eq!(merged.name().map(|n| n.as_str()), Some("p"));
 
         let mismatched = super::PeriodIndex::new(vec![p3]).set_name("other");
         assert_eq!(left.append(&mismatched).name(), None);
@@ -34348,7 +34548,7 @@ mod tests {
         let range = super::RangeIndex::new(2, 11, 3).unwrap().set_name("r");
 
         let taken = range.take(&[2, 0, 2])?;
-        assert_eq!(taken.name(), Some("r"));
+        assert_eq!(taken.name().map(|n| n.as_str()), Some("r"));
         assert_eq!(taken.labels.int64_view().unwrap().as_slice(), &[8, 2, 8]);
         assert!(
             taken.labels.materialized.get().is_none(),
@@ -34356,7 +34556,7 @@ mod tests {
         );
 
         let repeated = range.repeat(2);
-        assert_eq!(repeated.name(), Some("r"));
+        assert_eq!(repeated.name().map(|n| n.as_str()), Some("r"));
         assert_eq!(
             repeated.labels.int64_view().unwrap().as_slice(),
             &[2, 2, 5, 5, 8, 8]
@@ -34374,7 +34574,7 @@ mod tests {
         let range = super::RangeIndex::new(10, 40, 3).unwrap().set_name("r");
 
         let ascending = range.take(&[1, 3, 5])?;
-        assert_eq!(ascending.name(), Some("r"));
+        assert_eq!(ascending.name().map(|n| n.as_str()), Some("r"));
         assert_eq!(
             ascending.labels.int64_view().unwrap().as_slice(),
             &[13, 19, 25]
@@ -34439,7 +34639,7 @@ mod tests {
         let zero_pos = usize::try_from(i128::from(i64::MAX) + 1).unwrap();
         let taken = range.take(&[0, zero_pos, range.len() - 1])?;
 
-        assert_eq!(taken.name(), Some("wide"));
+        assert_eq!(taken.name().map(|n| n.as_str()), Some("wide"));
         assert_eq!(
             taken.labels.int64_view().unwrap().as_slice(),
             &[i64::MIN, 0, i64::MAX - 1]
@@ -34452,7 +34652,7 @@ mod tests {
         let range = super::RangeIndex::new(9, 0, -4).unwrap().set_name("r");
 
         let taken = range.take(&[2, 0])?;
-        assert_eq!(taken.name(), Some("r"));
+        assert_eq!(taken.name().map(|n| n.as_str()), Some("r"));
         assert_eq!(taken.labels.int64_view().unwrap().as_slice(), &[1, 9]);
         assert!(
             taken.labels.materialized.get().is_none(),
@@ -34469,7 +34669,7 @@ mod tests {
         ));
 
         let repeated = range.repeat(2);
-        assert_eq!(repeated.name(), Some("r"));
+        assert_eq!(repeated.name().map(|n| n.as_str()), Some("r"));
         assert_eq!(
             repeated.labels.int64_view().unwrap().as_slice(),
             &[9, 9, 5, 5, 1, 1]
@@ -34487,7 +34687,7 @@ mod tests {
         let range = super::RangeIndex::new(9, 0, -4).unwrap().set_name("r");
         let flat = range.to_flat_index();
 
-        assert_eq!(flat.name(), Some("r"));
+        assert_eq!(flat.name().map(|n| n.as_str()), Some("r"));
         assert_eq!(flat.labels.int64_view().unwrap().as_slice(), &[9, 5, 1]);
         assert!(
             flat.labels.materialized.get().is_none(),
@@ -34508,7 +34708,7 @@ mod tests {
         let range = super::RangeIndex::new(2, 11, 3).unwrap().set_name("r");
 
         let replaced = range.r#where(&[true, false, true], 99)?;
-        assert_eq!(replaced.name(), Some("r"));
+        assert_eq!(replaced.name().map(|n| n.as_str()), Some("r"));
         assert_eq!(
             replaced.labels.int64_view().unwrap().as_slice(),
             &[2, 99, 8]
@@ -34519,7 +34719,7 @@ mod tests {
         );
 
         let masked = range.putmask(&[false, true, false], -7)?;
-        assert_eq!(masked.name(), Some("r"));
+        assert_eq!(masked.name().map(|n| n.as_str()), Some("r"));
         assert_eq!(masked.labels.int64_view().unwrap().as_slice(), &[2, -7, 8]);
         assert!(
             masked.labels.materialized.get().is_none(),
@@ -34534,7 +34734,7 @@ mod tests {
         let range = super::RangeIndex::new(9, 0, -4).unwrap().set_name("r");
 
         let replaced = range.r#where(&[true, false, true], 99)?;
-        assert_eq!(replaced.name(), Some("r"));
+        assert_eq!(replaced.name().map(|n| n.as_str()), Some("r"));
         assert_eq!(
             replaced.labels.int64_view().unwrap().as_slice(),
             &[9, 99, 1]
@@ -34545,7 +34745,7 @@ mod tests {
         );
 
         let masked = range.putmask(&[false, true, false], -7)?;
-        assert_eq!(masked.name(), Some("r"));
+        assert_eq!(masked.name().map(|n| n.as_str()), Some("r"));
         assert_eq!(masked.labels.int64_view().unwrap().as_slice(), &[9, -7, 1]);
         assert!(
             masked.labels.materialized.get().is_none(),
@@ -34584,10 +34784,10 @@ mod tests {
         let difference = left.difference(&right);
         let symmetric = left.symmetric_difference(&right);
 
-        assert_eq!(intersection.name(), Some("k"));
-        assert_eq!(union.name(), Some("k"));
-        assert_eq!(difference.name(), Some("k"));
-        assert_eq!(symmetric.name(), Some("k"));
+        assert_eq!(intersection.name().map(|n| n.as_str()), Some("k"));
+        assert_eq!(union.name().map(|n| n.as_str()), Some("k"));
+        assert_eq!(difference.name().map(|n| n.as_str()), Some("k"));
+        assert_eq!(symmetric.name().map(|n| n.as_str()), Some("k"));
         assert_eq!(
             intersection.labels.int64_view().unwrap().as_slice(),
             &[2, 3, 4]
@@ -34620,10 +34820,10 @@ mod tests {
         let difference = left.difference(&right);
         let symmetric = left.symmetric_difference(&right);
 
-        assert_eq!(intersection.name(), Some("k"));
-        assert_eq!(union.name(), Some("k"));
-        assert_eq!(difference.name(), Some("k"));
-        assert_eq!(symmetric.name(), Some("k"));
+        assert_eq!(intersection.name().map(|n| n.as_str()), Some("k"));
+        assert_eq!(union.name().map(|n| n.as_str()), Some("k"));
+        assert_eq!(difference.name().map(|n| n.as_str()), Some("k"));
+        assert_eq!(symmetric.name().map(|n| n.as_str()), Some("k"));
         // pandas 2.2.3: intersection uses sort=False (self-order, descending
         // preserved); union/difference/symmetric_difference use sort=None and
         // return ascending-sorted results for these both-non-empty operands.
@@ -34642,7 +34842,10 @@ mod tests {
         assert_eq!(left.intersection(&mismatched).name(), None);
         assert_eq!(left.union(&mismatched).name(), None);
         assert_eq!(left.symmetric_difference(&mismatched).name(), None);
-        assert_eq!(left.difference(&mismatched).name(), Some("k"));
+        assert_eq!(
+            left.difference(&mismatched).name().map(|n| n.as_str()),
+            Some("k")
+        );
 
         // intersection (self-order) and this single-span difference keep lazy
         // affine backing; union/symmetric materialize because reconciling the
@@ -34666,10 +34869,10 @@ mod tests {
         let difference = left.difference(&right);
         let symmetric = left.symmetric_difference(&right);
 
-        assert_eq!(intersection.name(), Some("k"));
-        assert_eq!(union.name(), Some("k"));
-        assert_eq!(difference.name(), Some("k"));
-        assert_eq!(symmetric.name(), Some("k"));
+        assert_eq!(intersection.name().map(|n| n.as_str()), Some("k"));
+        assert_eq!(union.name().map(|n| n.as_str()), Some("k"));
+        assert_eq!(difference.name().map(|n| n.as_str()), Some("k"));
+        assert_eq!(symmetric.name().map(|n| n.as_str()), Some("k"));
         // pandas 2.2.3: intersection sort=False (self-order); union/difference/
         // symmetric_difference sort=None -> ascending for both-non-empty inputs.
         assert_eq!(
@@ -34826,9 +35029,9 @@ mod tests {
         let appended = left.append(&right);
         let deleted = left.delete(1)?;
 
-        assert_eq!(inserted.name(), Some("k"));
-        assert_eq!(appended.name(), Some("k"));
-        assert_eq!(deleted.name(), Some("k"));
+        assert_eq!(inserted.name().map(|n| n.as_str()), Some("k"));
+        assert_eq!(appended.name().map(|n| n.as_str()), Some("k"));
+        assert_eq!(deleted.name().map(|n| n.as_str()), Some("k"));
         assert_eq!(
             inserted.labels.int64_view().unwrap().as_slice(),
             &[0, 99, 1, 2]
@@ -34885,14 +35088,14 @@ mod tests {
         let right = super::RangeIndex::new(-1, -6, -2).unwrap().set_name("k");
 
         let inserted = left.insert(2, 99)?;
-        assert_eq!(inserted.name(), Some("k"));
+        assert_eq!(inserted.name().map(|n| n.as_str()), Some("k"));
         assert_eq!(
             inserted.labels.int64_view().unwrap().as_slice(),
             &[9, 5, 99, 1]
         );
 
         let appended = left.append(&right);
-        assert_eq!(appended.name(), Some("k"));
+        assert_eq!(appended.name().map(|n| n.as_str()), Some("k"));
         assert_eq!(
             appended.labels.int64_view().unwrap().as_slice(),
             &[9, 5, 1, -1, -3, -5]
@@ -34917,7 +35120,7 @@ mod tests {
         assert_eq!(left.append(&mismatched_name).name(), None);
 
         let deleted = left.delete(1)?;
-        assert_eq!(deleted.name(), Some("k"));
+        assert_eq!(deleted.name().map(|n| n.as_str()), Some("k"));
         assert_eq!(deleted.labels.int64_view().unwrap().as_slice(), &[9, 1]);
         assert_eq!(
             deleted.labels.int64_two_affine.as_deref().copied(),
@@ -34973,7 +35176,7 @@ mod tests {
 
         let taken = dt.take(&[2, 0, 0])?;
         assert_eq!(taken.values(), vec![Some(c), Some(a), Some(a)]);
-        assert_eq!(taken.name(), Some("ts"));
+        assert_eq!(taken.name().map(|n| n.as_str()), Some("ts"));
 
         let oob = dt.take(&[3]).unwrap_err();
         assert!(matches!(
@@ -34989,7 +35192,7 @@ mod tests {
             repeated.values(),
             vec![Some(a), Some(a), Some(b), Some(b), Some(c), Some(c)]
         );
-        assert_eq!(repeated.name(), Some("ts"));
+        assert_eq!(repeated.name().map(|n| n.as_str()), Some("ts"));
 
         let mask = dt.isin(&[a, c]);
         assert_eq!(mask, vec![true, false, true]);
@@ -35004,7 +35207,7 @@ mod tests {
         let td = super::TimedeltaIndex::new(vec![100_i64, 200, 300]).set_name("d");
         let taken = td.take(&[2, 0])?;
         assert_eq!(taken.values(), vec![Some(300), Some(100)]);
-        assert_eq!(taken.name(), Some("d"));
+        assert_eq!(taken.name().map(|n| n.as_str()), Some("d"));
 
         assert!(matches!(
             td.take(&[7]).unwrap_err(),
@@ -35042,7 +35245,7 @@ mod tests {
 
         let taken = pi.take(&[2, 1])?;
         assert_eq!(taken.values(), &[p3, p2]);
-        assert_eq!(taken.name(), Some("pp"));
+        assert_eq!(taken.name().map(|n| n.as_str()), Some("pp"));
 
         assert!(matches!(
             pi.take(&[5]).unwrap_err(),
@@ -35160,7 +35363,7 @@ mod tests {
             other => other.clone(),
         });
 
-        assert_eq!(mapped.name(), Some("r"));
+        assert_eq!(mapped.name().map(|n| n.as_str()), Some("r"));
         assert_eq!(
             mapped.labels(),
             &[
@@ -35225,7 +35428,7 @@ mod tests {
             IndexLabel::Int64(2),
         ]);
 
-        assert_eq!(dropped.name(), Some("r"));
+        assert_eq!(dropped.name().map(|n| n.as_str()), Some("r"));
         assert_eq!(dropped.labels.int64_view().unwrap().as_slice(), &[8, 4]);
         assert!(
             dropped.labels.materialized.get().is_none(),
@@ -35247,7 +35450,7 @@ mod tests {
             IndexLabel::Int64(0),
         ]);
 
-        assert_eq!(dropped.name(), Some("r"));
+        assert_eq!(dropped.name().map(|n| n.as_str()), Some("r"));
         assert_eq!(dropped.labels.int64_view().unwrap().as_slice(), &[9, 3]);
         assert!(
             dropped.labels.materialized.get().is_none(),
@@ -35268,7 +35471,7 @@ mod tests {
         let (sorted, order) = descending.sortlevel();
 
         assert_eq!(order, vec![3, 2, 1, 0]);
-        assert_eq!(sorted.name(), Some("r"));
+        assert_eq!(sorted.name().map(|n| n.as_str()), Some("r"));
         assert_eq!(
             sorted.labels.int64_view().unwrap().as_slice(),
             &[2, 4, 6, 8]
@@ -35290,7 +35493,7 @@ mod tests {
         let other = super::Index::from_i64_values(vec![6, 12, 6, 0]).set_name("k");
 
         let inner = range.join(&other, "inner")?;
-        assert_eq!(inner.name(), Some("k"));
+        assert_eq!(inner.name().map(|n| n.as_str()), Some("k"));
         assert_eq!(inner.labels.int64_view().unwrap().as_slice(), &[6]);
         assert!(
             inner.labels.materialized.get().is_none(),
@@ -35298,7 +35501,7 @@ mod tests {
         );
 
         let outer = range.join(&other, "outer")?;
-        assert_eq!(outer.name(), Some("k"));
+        assert_eq!(outer.name().map(|n| n.as_str()), Some("k"));
         assert_eq!(
             outer.labels.int64_view().unwrap().as_slice(),
             &[9, 6, 6, 3, 12, 0]
@@ -35399,7 +35602,7 @@ mod tests {
 
         let unique = pi.unique();
         assert_eq!(unique.values(), &[p1, p2, p3]);
-        assert_eq!(unique.name(), Some("p"));
+        assert_eq!(unique.name().map(|n| n.as_str()), Some("p"));
 
         let dup_first = pi.duplicated(super::DuplicateKeep::First);
         assert_eq!(dup_first, vec![false, false, true, false, true, true]);
@@ -35612,7 +35815,7 @@ mod tests {
             ]
             .as_slice()
         );
-        assert_eq!(merged.name(), Some("level"));
+        assert_eq!(merged.name().map(|n| n.as_str()), Some("level"));
         assert!(merged.categories().contains(&"e".to_owned()));
 
         // delete OOB.
@@ -35915,7 +36118,7 @@ mod tests {
             unique.labels(),
             vec!["low".to_owned(), "high".to_owned(), "med".to_owned()].as_slice()
         );
-        assert_eq!(unique.name(), Some("level"));
+        assert_eq!(unique.name().map(|n| n.as_str()), Some("level"));
 
         // duplicated keep=First: positions 2, 4, 5 are duplicates of earlier.
         let dup_first = categorical.duplicated(super::DuplicateKeep::First);
@@ -36154,7 +36357,7 @@ mod tests {
             labels: repeated.labels().to_vec(),
             categories: repeated.categories().to_vec(),
             ordered: repeated.ordered(),
-            name: repeated.name().map(str::to_owned),
+            name: repeated.name().cloned(),
             category_codes: None,
         };
         assert_matches_flat(&same_public_state_without_sidecar);
@@ -36172,7 +36375,7 @@ mod tests {
             labels: repeated.labels().to_vec(),
             categories: repeated.categories().to_vec(),
             ordered: repeated.ordered(),
-            name: repeated.name().map(str::to_owned),
+            name: repeated.name().cloned(),
             category_codes: Some(vec![usize::MAX; repeated.len()]),
         };
         assert_matches_flat(&malformed_sidecar);
@@ -36288,7 +36491,7 @@ mod tests {
             ],
             categories: vec!["low".to_owned()],
             ordered: true,
-            name: Some("dirty".to_owned()),
+            name: Some("dirty".into()),
             category_codes: None,
         };
         assert!(invalid.category_rank_unique_scan_is_bounded());
@@ -36373,7 +36576,7 @@ mod tests {
             labels: repeated.labels().to_vec(),
             categories: repeated.categories().to_vec(),
             ordered: repeated.ordered(),
-            name: repeated.name().map(str::to_owned),
+            name: repeated.name().cloned(),
             category_codes: None,
         };
         assert_eq!(
@@ -36385,7 +36588,7 @@ mod tests {
             labels: repeated.labels().to_vec(),
             categories: repeated.categories().to_vec(),
             ordered: repeated.ordered(),
-            name: repeated.name().map(str::to_owned),
+            name: repeated.name().cloned(),
             category_codes: Some(vec![usize::MAX; repeated.len()]),
         };
         assert_eq!(repeated.value_counts(), malformed_sidecar.value_counts());
@@ -36517,7 +36720,7 @@ mod tests {
             labels: repeated.labels().to_vec(),
             categories: repeated.categories().to_vec(),
             ordered: repeated.ordered(),
-            name: repeated.name().map(str::to_owned),
+            name: repeated.name().cloned(),
             category_codes: None,
         };
         assert_eq!(repeated, same_public_state_without_sidecar);
@@ -36533,7 +36736,7 @@ mod tests {
             ],
             categories: vec!["low".to_owned()],
             ordered: true,
-            name: Some("dirty".to_owned()),
+            name: Some("dirty".into()),
             category_codes: None,
         };
         assert!(invalid.category_rank_unique_scan_is_bounded());
@@ -36627,7 +36830,7 @@ mod tests {
             super::TimedeltaIndex::new(vec![fp_types::Timedelta::NAT, 0_i64]).set_name("delta");
         let dropped = td.dropna();
         assert_eq!(dropped.values(), vec![Some(0)]);
-        assert_eq!(dropped.name(), Some("delta"));
+        assert_eq!(dropped.name().map(|n| n.as_str()), Some("delta"));
     }
 
     #[test]
@@ -36722,7 +36925,7 @@ mod tests {
         let dt = super::DatetimeIndex::new(vec![i64::MIN, 0_i64, i64::MIN]).set_name("ts");
         let dropped = dt.dropna();
         assert_eq!(dropped.values(), vec![Some(0)]);
-        assert_eq!(dropped.name(), Some("ts"));
+        assert_eq!(dropped.name().map(|n| n.as_str()), Some("ts"));
     }
 
     #[test]
@@ -37080,7 +37283,7 @@ mod tests {
             normed.values(),
             vec![Some(1_705_276_800_i64 * NS), Some(midnight), None]
         );
-        assert_eq!(normed.name(), Some("when"));
+        assert_eq!(normed.name().map(|n| n.as_str()), Some("when"));
         assert!(normed.is_normalized());
     }
 
@@ -38171,7 +38374,7 @@ mod interval_index_tests {
             .expect("from_breaks")
             .set_name("my_intervals");
 
-        assert_eq!(ii.name(), Some("my_intervals"));
+        assert_eq!(ii.name().map(|n| n.as_str()), Some("my_intervals"));
         assert_eq!(ii.names(), vec![Some("my_intervals".to_string())]);
 
         let left_idx = ii.left();
@@ -38207,7 +38410,7 @@ mod interval_index_tests {
 
         // Rename
         let renamed = ii.rename_index(Some("new_name"));
-        assert_eq!(renamed.name(), Some("new_name"));
+        assert_eq!(renamed.name().map(|n| n.as_str()), Some("new_name"));
     }
 
     #[test]
@@ -38295,7 +38498,7 @@ mod interval_index_tests {
         // to_index
         let idx = ii.to_index();
         assert_eq!(idx.len(), 4);
-        assert_eq!(idx.name(), Some("sample"));
+        assert_eq!(idx.name().map(|n| n.as_str()), Some("sample"));
 
         // From<IntervalIndex> for Index
         let idx_from: Index = ii.into();
@@ -38369,7 +38572,7 @@ mod interval_index_tests {
             values(&rounded),
             values(&floats(&[1.0, 2.0, 4.0, -0.0, 0.0]))
         );
-        assert_eq!(rounded.name(), Some("n"));
+        assert_eq!(rounded.name().map(|n| n.as_str()), Some("n"));
         assert_eq!(
             values(&floats(&[1.25, 2.5, 0.125]).round(1)),
             values(&floats(&[1.2, 2.5, 0.1]))

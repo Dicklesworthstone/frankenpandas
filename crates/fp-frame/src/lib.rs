@@ -1355,150 +1355,14 @@ pub fn describe_percentile_label(percentile: f64) -> String {
 }
 
 pub use fp_index::IndexSlice;
+/// A Series' name, like an axis' name, is a [`LabelName`]: its text, and
+/// its typed label when it is not a string (fvsao.32, fvsao.64).
+pub use fp_index::{LabelName, column_key};
 pub use fp_types::CategoricalMetadata;
-
-/// A Series' name: its text - what it is keyed and printed as - and, when it
-/// is not a string, the typed pandas label it stands for (`df[0]`'s name is
-/// the integer 0, `df.iloc[1]`'s the row label 1; they were the strings '0'
-/// and '1'; fvsao.32). It reads as the text (Deref, Display, Debug, serde,
-/// comparison with a string), and the label rides along wherever the name
-/// is cloned; a name rebuilt from text alone is a string.
-#[derive(Clone, Default)]
-pub struct SeriesName {
-    text: String,
-    label: Option<IndexLabel>,
-}
-
-impl SeriesName {
-    /// The name standing for `label`, keyed by its text (see
-    /// [`column_key`]); a string label is plain text.
-    #[must_use]
-    pub fn typed(label: IndexLabel) -> Self {
-        match label {
-            IndexLabel::Utf8(text) => Self { text, label: None },
-            label => Self {
-                text: column_key(&label),
-                label: Some(label),
-            },
-        }
-    }
-
-    /// The typed label this name stands for; the text as a string label for
-    /// a plain name.
-    #[must_use]
-    pub fn label(&self) -> IndexLabel {
-        self.label
-            .clone()
-            .filter(|label| column_key(label) == self.text)
-            .unwrap_or_else(|| IndexLabel::Utf8(self.text.clone()))
-    }
-}
-
-impl std::ops::Deref for SeriesName {
-    type Target = String;
-
-    fn deref(&self) -> &String {
-        &self.text
-    }
-}
-
-impl AsRef<str> for SeriesName {
-    fn as_ref(&self) -> &str {
-        &self.text
-    }
-}
-
-impl From<String> for SeriesName {
-    fn from(text: String) -> Self {
-        Self { text, label: None }
-    }
-}
-
-impl From<&str> for SeriesName {
-    fn from(text: &str) -> Self {
-        text.to_owned().into()
-    }
-}
-
-impl From<&String> for SeriesName {
-    fn from(text: &String) -> Self {
-        text.clone().into()
-    }
-}
-
-impl From<&SeriesName> for SeriesName {
-    fn from(name: &SeriesName) -> Self {
-        name.clone()
-    }
-}
-
-impl From<SeriesName> for String {
-    fn from(name: SeriesName) -> Self {
-        name.text
-    }
-}
-
-impl From<&SeriesName> for String {
-    fn from(name: &SeriesName) -> Self {
-        name.text.clone()
-    }
-}
-
-impl std::fmt::Display for SeriesName {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(&self.text, formatter)
-    }
-}
-
-impl std::fmt::Debug for SeriesName {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Debug::fmt(&self.text, formatter)
-    }
-}
-
-/// Names are equal when their labels are: 0 and '0' differ, as in pandas
-/// (whose `s + t` of those is unnamed).
-impl PartialEq for SeriesName {
-    fn eq(&self, other: &Self) -> bool {
-        self.text == other.text && self.label == other.label
-    }
-}
-
-impl Eq for SeriesName {}
-
-impl PartialEq<str> for SeriesName {
-    fn eq(&self, other: &str) -> bool {
-        self.text == other
-    }
-}
-
-impl PartialEq<&str> for SeriesName {
-    fn eq(&self, other: &&str) -> bool {
-        self.text == *other
-    }
-}
-
-impl PartialEq<String> for SeriesName {
-    fn eq(&self, other: &String) -> bool {
-        &self.text == other
-    }
-}
-
-impl Serialize for SeriesName {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.text.serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for SeriesName {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        String::deserialize(deserializer).map(Self::from)
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Series {
-    name: SeriesName,
+    name: LabelName,
     index: Index,
     column: Column,
     /// Optional categorical metadata. When present, `column` stores
@@ -9624,7 +9488,7 @@ fn compare_categorical_codes_with_na_position(
 
 impl Series {
     pub fn new(
-        name: impl Into<SeriesName>,
+        name: impl Into<LabelName>,
         index: Index,
         column: Column,
     ) -> Result<Self, FrameError> {
@@ -9647,7 +9511,7 @@ impl Series {
     }
 
     pub fn from_values(
-        name: impl Into<SeriesName>,
+        name: impl Into<LabelName>,
         index_labels: Vec<IndexLabel>,
         values: Vec<Scalar>,
     ) -> Result<Self, FrameError> {
@@ -9776,7 +9640,7 @@ impl Series {
     /// Keys become the index labels, values become the column.
     /// Matches `pd.Series({"a": 1, "b": 2})`.
     pub fn from_pairs(
-        name: impl Into<SeriesName>,
+        name: impl Into<LabelName>,
         pairs: Vec<(IndexLabel, Scalar)>,
     ) -> Result<Self, FrameError> {
         let (labels, values): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
@@ -9787,7 +9651,7 @@ impl Series {
     ///
     /// Matches `pd.Series({"a": 1, "b": 2})`.
     pub fn from_dict(
-        name: impl Into<SeriesName>,
+        name: impl Into<LabelName>,
         data: BTreeMap<IndexLabel, Scalar>,
     ) -> Result<Self, FrameError> {
         let (labels, values): (Vec<_>, Vec<_>) = data.into_iter().collect();
@@ -9798,7 +9662,7 @@ impl Series {
     ///
     /// Matches `np.arange(start, stop, step)`.
     pub fn arange(
-        name: impl Into<SeriesName>,
+        name: impl Into<LabelName>,
         start: f64,
         stop: f64,
         step: f64,
@@ -9812,7 +9676,7 @@ impl Series {
     ///
     /// Matches `np.linspace(start, stop, num)`.
     pub fn linspace(
-        name: impl Into<SeriesName>,
+        name: impl Into<LabelName>,
         start: f64,
         stop: f64,
         num: usize,
@@ -9826,7 +9690,7 @@ impl Series {
     ///
     /// Matches `np.logspace(start, stop, num)`.
     pub fn logspace(
-        name: impl Into<SeriesName>,
+        name: impl Into<LabelName>,
         start: f64,
         stop: f64,
         num: usize,
@@ -9840,7 +9704,7 @@ impl Series {
     ///
     /// Matches `np.geomspace(start, stop, num)`.
     pub fn geomspace(
-        name: impl Into<SeriesName>,
+        name: impl Into<LabelName>,
         start: f64,
         stop: f64,
         num: usize,
@@ -9853,7 +9717,7 @@ impl Series {
     /// Create a Series filled with zeros (Float64 by default).
     ///
     /// Matches `np.zeros(n)`.
-    pub fn zeros(name: impl Into<SeriesName>, n: usize) -> Result<Self, FrameError> {
+    pub fn zeros(name: impl Into<LabelName>, n: usize) -> Result<Self, FrameError> {
         let col = Column::zeros(n, DType::Float64)?;
         let idx = Index::from_range(0, n as i64, 1);
         Self::new(name, idx, col)
@@ -9863,7 +9727,7 @@ impl Series {
     ///
     /// Matches `np.zeros(n, dtype=dtype)`.
     pub fn zeros_dtype(
-        name: impl Into<SeriesName>,
+        name: impl Into<LabelName>,
         n: usize,
         dtype: DType,
     ) -> Result<Self, FrameError> {
@@ -9875,7 +9739,7 @@ impl Series {
     /// Create a Series filled with ones (Float64 by default).
     ///
     /// Matches `np.ones(n)`.
-    pub fn ones(name: impl Into<SeriesName>, n: usize) -> Result<Self, FrameError> {
+    pub fn ones(name: impl Into<LabelName>, n: usize) -> Result<Self, FrameError> {
         let col = Column::ones(n, DType::Float64)?;
         let idx = Index::from_range(0, n as i64, 1);
         Self::new(name, idx, col)
@@ -9885,7 +9749,7 @@ impl Series {
     ///
     /// Matches `np.ones(n, dtype=dtype)`.
     pub fn ones_dtype(
-        name: impl Into<SeriesName>,
+        name: impl Into<LabelName>,
         n: usize,
         dtype: DType,
     ) -> Result<Self, FrameError> {
@@ -9898,7 +9762,7 @@ impl Series {
     ///
     /// Matches `np.full(n, fill_value)`.
     pub fn full(
-        name: impl Into<SeriesName>,
+        name: impl Into<LabelName>,
         n: usize,
         fill_value: Scalar,
     ) -> Result<Self, FrameError> {
@@ -9910,7 +9774,7 @@ impl Series {
     /// Generate a Hann (Hanning) window Series.
     ///
     /// Matches `np.hanning(M)`.
-    pub fn hanning(name: impl Into<SeriesName>, m: usize) -> Result<Self, FrameError> {
+    pub fn hanning(name: impl Into<LabelName>, m: usize) -> Result<Self, FrameError> {
         let col = Column::hanning(m)?;
         let idx = Index::from_range(0, m as i64, 1);
         Self::new(name, idx, col)
@@ -9919,7 +9783,7 @@ impl Series {
     /// Generate a Hamming window Series.
     ///
     /// Matches `np.hamming(M)`.
-    pub fn hamming(name: impl Into<SeriesName>, m: usize) -> Result<Self, FrameError> {
+    pub fn hamming(name: impl Into<LabelName>, m: usize) -> Result<Self, FrameError> {
         let col = Column::hamming(m)?;
         let idx = Index::from_range(0, m as i64, 1);
         Self::new(name, idx, col)
@@ -9928,7 +9792,7 @@ impl Series {
     /// Generate a Blackman window Series.
     ///
     /// Matches `np.blackman(M)`.
-    pub fn blackman(name: impl Into<SeriesName>, m: usize) -> Result<Self, FrameError> {
+    pub fn blackman(name: impl Into<LabelName>, m: usize) -> Result<Self, FrameError> {
         let col = Column::blackman(m)?;
         let idx = Index::from_range(0, m as i64, 1);
         Self::new(name, idx, col)
@@ -9937,7 +9801,7 @@ impl Series {
     /// Generate a Bartlett (triangular) window Series.
     ///
     /// Matches `np.bartlett(M)`.
-    pub fn bartlett(name: impl Into<SeriesName>, m: usize) -> Result<Self, FrameError> {
+    pub fn bartlett(name: impl Into<LabelName>, m: usize) -> Result<Self, FrameError> {
         let col = Column::bartlett(m)?;
         let idx = Index::from_range(0, m as i64, 1);
         Self::new(name, idx, col)
@@ -10837,7 +10701,7 @@ impl Series {
     ///
     /// Matches `pd.Series(5, index=[0, 1, 2])`.
     pub fn broadcast(
-        name: impl Into<SeriesName>,
+        name: impl Into<LabelName>,
         value: Scalar,
         index_labels: Vec<IndexLabel>,
     ) -> Result<Self, FrameError> {
@@ -10847,9 +10711,9 @@ impl Series {
     }
 
     /// The name: text, plus the typed label when it is not a string (see
-    /// [`SeriesName`]).
+    /// [`LabelName`]).
     #[must_use]
-    pub fn name(&self) -> &SeriesName {
+    pub fn name(&self) -> &LabelName {
         &self.name
     }
 
@@ -11109,7 +10973,7 @@ impl Series {
         let out_name = if self.name == other.name {
             self.name.clone()
         } else {
-            SeriesName::default()
+            LabelName::default()
         };
 
         // pandas: a tz-aware datetime index does not join a naive one.
@@ -11447,7 +11311,7 @@ impl Series {
         let name = if self.name == other.name {
             self.name.clone()
         } else {
-            SeriesName::default()
+            LabelName::default()
         };
         let dtype = if nullable {
             DType::BoolNullable
@@ -11496,7 +11360,7 @@ impl Series {
         let name = if self.name == other.name {
             self.name.clone()
         } else {
-            SeriesName::default()
+            LabelName::default()
         };
         Self::new(name, left.index.clone(), Column::from_values(values)?).map(Some)
     }
@@ -15638,10 +15502,10 @@ impl Series {
         // Per br-frankenpandas-nvglo: pandas sets the result's index name
         // to the original Series's name (e.g. `s.name`). The result Series
         // name itself is "count".
-        let index_name: Option<&str> = if self.name.is_empty() {
+        let index_name: Option<&LabelName> = if self.name.is_empty() {
             None
         } else {
-            Some(self.name.as_str())
+            Some(&self.name)
         };
         let index = Index::new(labels).rename_index(index_name);
         let column = Column::from_values(values)?;
@@ -15786,10 +15650,10 @@ impl Series {
         }
 
         // Per br-frankenpandas-nvglo: result index name = original Series name.
-        let index_name: Option<&str> = if self.name.is_empty() {
+        let index_name: Option<&LabelName> = if self.name.is_empty() {
             None
         } else {
-            Some(self.name.as_str())
+            Some(&self.name)
         };
         let index = Index::new(labels).rename_index(index_name);
         // A tz-aware column's values label the counts in its zone (a NaN
@@ -26326,23 +26190,21 @@ impl Series {
                 .with_recorded_column_labels([value_label]);
             return Ok(SeriesResetIndexResult::DataFrame(frame));
         }
-        let index_column_name = match self.index.name() {
+        // The index column is labelled by the index's typed name (0 stays
+        // the integer 0; fvsao.64), else 'index' / 'level_0'.
+        let index_label = match self.index.name() {
             Some(name) => {
-                if name == value_column_name {
+                if *name == value_column_name {
                     return Err(FrameError::CompatibilityRejected(format!(
                         "cannot insert {name}, already exists"
                     )));
                 }
-                name.to_owned()
+                name.label()
             }
-            None => {
-                if value_column_name == "index" {
-                    "level_0".to_owned()
-                } else {
-                    "index".to_owned()
-                }
-            }
+            None if value_column_name == "index" => IndexLabel::Utf8("level_0".to_owned()),
+            None => IndexLabel::Utf8("index".to_owned()),
         };
+        let index_column_name = column_key(&index_label);
 
         let index_values = index_labels_to_column_scalars(self.index.labels());
 
@@ -26361,7 +26223,7 @@ impl Series {
             columns,
             vec![index_column_name, value_column_name],
         )?
-        .with_recorded_column_labels([value_label]);
+        .with_recorded_column_labels([index_label, value_label]);
         Ok(SeriesResetIndexResult::DataFrame(frame))
     }
 
@@ -26728,7 +26590,10 @@ impl Series {
     /// becomes the single coordinate/dimension, and the Series values
     /// become the data array.
     pub fn to_xarray(&self) -> Result<SeriesXArrayDataArray, FrameError> {
-        let dim_name = self.index.name().unwrap_or("index").to_owned();
+        let dim_name = self
+            .index
+            .name()
+            .map_or_else(|| "index".to_owned(), String::from);
         let coords = self
             .index
             .labels()
@@ -28239,10 +28104,10 @@ impl Series {
             labels.push(IndexLabel::Int64(v));
             counts.push(i64::from(c));
         }
-        let index_name: Option<&str> = if self.name.is_empty() {
+        let index_name: Option<&LabelName> = if self.name.is_empty() {
             None
         } else {
-            Some(self.name.as_str())
+            Some(&self.name)
         };
         let index = Index::new(labels).rename_index(index_name);
         let column = Column::from_i64_values_owned(counts);
@@ -28966,7 +28831,7 @@ impl Series {
     /// Rename the Series (return a copy with a new name).
     ///
     /// Matches `pd.Series.rename(name)`.
-    pub fn rename(&self, name: impl Into<SeriesName>) -> Result<Self, FrameError> {
+    pub fn rename(&self, name: impl Into<LabelName>) -> Result<Self, FrameError> {
         Self::new(name, self.index.clone(), self.column.clone())
     }
 
@@ -28977,7 +28842,7 @@ impl Series {
     /// renames the index AXIS (the label that appears above the index column
     /// in `Series.info()` / `Series.to_frame()`). Per br-frankenpandas-17c2d
     /// (skill /porting-to-rust).
-    pub fn rename_axis(&self, name: &str) -> Result<Self, FrameError> {
+    pub fn rename_axis<N: Into<LabelName>>(&self, name: N) -> Result<Self, FrameError> {
         Self::new(
             self.name.clone(),
             self.index.set_name(name),
@@ -30953,7 +30818,7 @@ impl Series {
     /// A categorical Series whose row `i` is category `codes[i]` of `meta`
     /// (-1: missing), stored by value.
     fn categorical_from_code_parts(
-        name: impl Into<SeriesName>,
+        name: impl Into<LabelName>,
         index: Index,
         codes: &[i64],
         meta: CategoricalMetadata,
@@ -30984,7 +30849,7 @@ impl Series {
     /// non-missing values in sorted order (first-seen order when they do not
     /// sort), and the Series stores the values (see `Self::category_codes`).
     pub fn from_categorical(
-        name: impl Into<SeriesName>,
+        name: impl Into<LabelName>,
         values: Vec<Scalar>,
         ordered: bool,
     ) -> Result<Self, FrameError> {
@@ -31031,7 +30896,7 @@ impl Series {
     ///
     /// Matches `pd.Categorical.from_codes(codes, categories)`.
     pub fn from_categorical_codes(
-        name: impl Into<SeriesName>,
+        name: impl Into<LabelName>,
         codes: Vec<i64>,
         categories: Vec<Scalar>,
         ordered: bool,
@@ -31068,7 +30933,7 @@ impl Series {
     /// the Series-level dtype/accessor surface. The current storage remains
     /// dense; compressed sparse storage is tracked separately in fp-columnar.
     pub fn from_sparse_dense(
-        name: impl Into<SeriesName>,
+        name: impl Into<LabelName>,
         index_labels: Vec<IndexLabel>,
         values: Vec<Scalar>,
         value_dtype: DType,
@@ -42869,7 +42734,7 @@ impl SeriesGroupBy<'_> {
 
         // Per br-frankenpandas-p6y8q: pandas Series.groupby(by).<agg>() returns
         // a Series whose .index.name == by.name (the grouping Series' name).
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -42917,7 +42782,7 @@ impl SeriesGroupBy<'_> {
                     buckets[g].push(col_vals[i].clone());
                 }
                 let values: Vec<Scalar> = buckets.iter().map(|b| func(b)).collect();
-                let by_name = self.by.name().as_str();
+                let by_name = self.by.name();
                 let idx_name = if by_name.is_empty() {
                     None
                 } else {
@@ -42945,7 +42810,7 @@ impl SeriesGroupBy<'_> {
         }
 
         // Per br-frankenpandas-pz1ro: sister to agg_scalar fix (p6y8q).
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -43057,7 +42922,7 @@ impl SeriesGroupBy<'_> {
 
         // Per br-frankenpandas-lanwk: pandas SeriesGroupBy corr/cov returns
         // group-keyed Series whose .index.name == by.name. Sister to p6y8q.
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -43547,7 +43412,7 @@ impl SeriesGroupBy<'_> {
                     .iter()
                     .map(|nums| Scalar::Float64(func(nums)))
                     .collect();
-                let by_name = self.by.name().as_str();
+                let by_name = self.by.name();
                 let idx_name = if by_name.is_empty() {
                     None
                 } else {
@@ -43609,7 +43474,7 @@ impl SeriesGroupBy<'_> {
                         }
                     })
                     .collect();
-                let by_name = self.by.name().as_str();
+                let by_name = self.by.name();
                 let idx_name = if by_name.is_empty() {
                     None
                 } else {
@@ -43658,7 +43523,7 @@ impl SeriesGroupBy<'_> {
                     .iter()
                     .map(|nums| Scalar::Float64(func(nums)))
                     .collect();
-                let by_name = self.by.name().as_str();
+                let by_name = self.by.name();
                 let idx_name = if by_name.is_empty() {
                     None
                 } else {
@@ -43716,7 +43581,7 @@ impl SeriesGroupBy<'_> {
                         }
                     })
                     .collect();
-                let by_name = self.by.name().as_str();
+                let by_name = self.by.name();
                 let idx_name = if by_name.is_empty() {
                     None
                 } else {
@@ -43771,7 +43636,7 @@ impl SeriesGroupBy<'_> {
                     .iter()
                     .map(|nums| Scalar::Float64(func(nums)))
                     .collect();
-                let by_name = self.by.name().as_str();
+                let by_name = self.by.name();
                 let idx_name = if by_name.is_empty() {
                     None
                 } else {
@@ -43835,7 +43700,7 @@ impl SeriesGroupBy<'_> {
                         }
                     })
                     .collect();
-                let by_name = self.by.name().as_str();
+                let by_name = self.by.name();
                 let idx_name = if by_name.is_empty() {
                     None
                 } else {
@@ -43904,7 +43769,7 @@ impl SeriesGroupBy<'_> {
                         }
                     })
                     .collect();
-                let by_name = self.by.name().as_str();
+                let by_name = self.by.name();
                 let idx_name = if by_name.is_empty() {
                     None
                 } else {
@@ -43956,7 +43821,7 @@ impl SeriesGroupBy<'_> {
             }
         }
         // Per br-frankenpandas-b5ijf: sister to agg_scalar fix (p6y8q).
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -44134,7 +43999,7 @@ impl SeriesGroupBy<'_> {
             }
         }
         // Per br-frankenpandas-1iqhe: sister to p6y8q. Apply by-Series name.
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -44175,7 +44040,7 @@ impl SeriesGroupBy<'_> {
                     sizes[g] += 1;
                 }
             }
-            let by_name = self.by.name().as_str();
+            let by_name = self.by.name();
             let idx_name = if by_name.is_empty() {
                 None
             } else {
@@ -44214,7 +44079,7 @@ impl SeriesGroupBy<'_> {
                     }
                 }
             }
-            let by_name = self.by.name().as_str();
+            let by_name = self.by.name();
             let idx_name = if by_name.is_empty() {
                 None
             } else {
@@ -44239,7 +44104,7 @@ impl SeriesGroupBy<'_> {
             for &g in gids.iter() {
                 sizes[g] += 1;
             }
-            let by_name = self.by.name().as_str();
+            let by_name = self.by.name();
             let idx_name = if by_name.is_empty() {
                 None
             } else {
@@ -44281,7 +44146,7 @@ impl SeriesGroupBy<'_> {
                     sizes[g] += 1;
                 }
             }
-            let by_name = self.by.name().as_str();
+            let by_name = self.by.name();
             let idx_name = if by_name.is_empty() {
                 None
             } else {
@@ -44320,7 +44185,7 @@ impl SeriesGroupBy<'_> {
                     *p = v.get(i) && !d[i].is_nan();
                 }
             }
-            let by_name = self.by.name().as_str();
+            let by_name = self.by.name();
             let idx_name = if by_name.is_empty() {
                 None
             } else {
@@ -44420,7 +44285,7 @@ impl SeriesGroupBy<'_> {
             values.push(Scalar::Int64(cnt as i64));
         }
         // Per br-frankenpandas-hdoih: sister to p6y8q. Apply by-Series name.
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -44486,7 +44351,7 @@ impl SeriesGroupBy<'_> {
                 )
             })
             .collect();
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -44655,7 +44520,7 @@ impl SeriesGroupBy<'_> {
                 values[row]
             };
         }
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -44772,7 +44637,7 @@ impl SeriesGroupBy<'_> {
                 }
             })
             .collect();
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -44862,7 +44727,7 @@ impl SeriesGroupBy<'_> {
                 }
             })
             .collect();
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -44914,7 +44779,7 @@ impl SeriesGroupBy<'_> {
             values.push(wrap(best.unwrap_or(fp_types::Timedelta::NAT)));
         }
         // Per br-frankenpandas-a2m7y: sister to p6y8q. Apply by-Series name.
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -44993,7 +44858,7 @@ impl SeriesGroupBy<'_> {
             }
         }
         let values: Vec<Scalar> = acc.iter().map(|&b| Scalar::Bool(b)).collect();
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -45109,7 +44974,7 @@ impl SeriesGroupBy<'_> {
             }
         }
         let labels: Vec<IndexLabel> = key_of_gid.iter().map(|&k| IndexLabel::Int64(k)).collect();
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -45158,7 +45023,7 @@ impl SeriesGroupBy<'_> {
             seen[g].insert(&vbytes[voffsets[i]..voffsets[i + 1]]);
         }
         let values: Vec<Scalar> = seen.iter().map(|s| Scalar::Int64(s.len() as i64)).collect();
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -45216,7 +45081,7 @@ impl SeriesGroupBy<'_> {
                 None
             };
             if let Some(count) = count {
-                let by_name = self.by.name().as_str();
+                let by_name = self.by.name();
                 let idx_name = if by_name.is_empty() {
                     None
                 } else {
@@ -45301,7 +45166,7 @@ impl SeriesGroupBy<'_> {
                             out_f64.push(v);
                         }
                     }
-                    let by_name = self.by.name().as_str();
+                    let by_name = self.by.name();
                     let idx_name = if by_name.is_empty() {
                         None
                     } else {
@@ -45350,7 +45215,7 @@ impl SeriesGroupBy<'_> {
                             out_i64.push(v);
                         }
                     }
-                    let by_name = self.by.name().as_str();
+                    let by_name = self.by.name();
                     let idx_name = if by_name.is_empty() {
                         None
                     } else {
@@ -45406,7 +45271,7 @@ impl SeriesGroupBy<'_> {
                         out_values.push(v.clone());
                     }
                 }
-                let by_name = self.by.name().as_str();
+                let by_name = self.by.name();
                 let idx_name = if by_name.is_empty() {
                     None
                 } else {
@@ -45449,7 +45314,7 @@ impl SeriesGroupBy<'_> {
         }
 
         // Per br-frankenpandas-99iel: sister to p6y8q. Apply by-Series name.
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -45515,7 +45380,7 @@ impl SeriesGroupBy<'_> {
             columns.insert("low".to_owned(), Column::from_f64_values_owned(lows));
             columns.insert("close".to_owned(), Column::from_f64_values_owned(closes));
 
-            let by_name = self.by.name().as_str();
+            let by_name = self.by.name();
             let idx_name = if by_name.is_empty() {
                 None
             } else {
@@ -45581,7 +45446,7 @@ impl SeriesGroupBy<'_> {
 
         // Per br-frankenpandas-midpz: pandas Series.groupby(by).ohlc() returns
         // a DataFrame whose .index.name == by.name.
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -45644,7 +45509,7 @@ impl SeriesGroupBy<'_> {
                     Scalar::Float64(group_nanquantile_f64(&mut buf, q))
                 });
             }
-            let by_name = self.by.name().as_str();
+            let by_name = self.by.name();
             let idx_name = if by_name.is_empty() {
                 None
             } else {
@@ -45754,7 +45619,7 @@ impl SeriesGroupBy<'_> {
         let values: Vec<Scalar> = (0..ng)
             .map(|g| finalize(cnt[g], m2[g], m3[g], m4[g]))
             .collect();
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -45973,7 +45838,7 @@ impl SeriesGroupBy<'_> {
             .iter()
             .map(|&r| index_label_to_scalar(&idx_labels[r]))
             .collect();
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -46454,7 +46319,7 @@ impl SeriesGroupBy<'_> {
             labels.push(order[i].clone());
             values.push(Scalar::Timedelta64(reducer(&ns_vals)));
         }
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -47469,7 +47334,7 @@ impl SeriesGroupBy<'_> {
         // is a MultiIndex with [by-name, source-name]: the flat composite
         // labels carry those two levels (the result was a one-level index
         // of "group, value" strings).
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -47572,7 +47437,7 @@ impl SeriesGroupBy<'_> {
 
         // Per br-frankenpandas-e1xcz: pandas SeriesGroupBy.describe result
         // DataFrame's row index is named after by-Series.
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -48003,7 +47868,7 @@ impl SeriesGroupBy<'_> {
         // (one row per group), so the index axis name is self.by.name(),
         // not source-axis name. Bypass series_from_groupby_apply_parts
         // (which uses source-axis name for same-shape transforms).
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -48223,7 +48088,7 @@ impl SeriesGroupBy<'_> {
                 let data = self.series.column.as_i64_slice().unwrap();
                 Column::from_i64_values_owned(first_row.iter().map(|&r| data[r]).collect())
             };
-            let by_name = self.by.name().as_str();
+            let by_name = self.by.name();
             let idx_name = if by_name.is_empty() {
                 None
             } else {
@@ -48269,7 +48134,7 @@ impl SeriesGroupBy<'_> {
         };
         // Per br-frankenpandas-qs1aj: pandas Series.groupby(by).first preserves
         // by-Series name on result index.
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -48300,7 +48165,7 @@ impl SeriesGroupBy<'_> {
                 let data = self.series.column.as_i64_slice().unwrap();
                 Column::from_i64_values_owned(last_row.iter().map(|&r| data[r]).collect())
             };
-            let by_name = self.by.name().as_str();
+            let by_name = self.by.name();
             let idx_name = if by_name.is_empty() {
                 None
             } else {
@@ -48347,7 +48212,7 @@ impl SeriesGroupBy<'_> {
         };
         // Per br-frankenpandas-qs1aj: pandas Series.groupby(by).last preserves
         // by-Series name on result index.
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -48368,7 +48233,7 @@ impl SeriesGroupBy<'_> {
         }
         // Per br-frankenpandas-ju3rs: pandas Series.groupby(by).size preserves
         // by-Series name on result index.
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -48526,7 +48391,7 @@ impl SeriesGroupBy<'_> {
                     result_cols.insert(func.to_string(), Column::from_values(values)?);
                     col_order.push(func.to_string());
                 }
-                let by_name = self.by.name().as_str();
+                let by_name = self.by.name();
                 let idx_name = if by_name.is_empty() {
                     None
                 } else {
@@ -48619,7 +48484,7 @@ impl SeriesGroupBy<'_> {
 
         // Per br-frankenpandas-0dc6p: pandas Series.groupby(by).agg([...])
         // returns DataFrame whose .index.name == by.name.
-        let by_name = self.by.name().as_str();
+        let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
             None
         } else {
@@ -51604,7 +51469,7 @@ impl StringAccessor<'_> {
         &self,
         write: W,
         fallback: F,
-        name: &SeriesName,
+        name: &LabelName,
     ) -> Result<Series, FrameError>
     where
         W: Fn(&str, &mut Vec<u8>),
@@ -51657,7 +51522,7 @@ impl StringAccessor<'_> {
         self.apply_str(fallback, name)
     }
 
-    fn apply_str_bool<F>(&self, func: F, name: &SeriesName) -> Result<Series, FrameError>
+    fn apply_str_bool<F>(&self, func: F, name: &LabelName) -> Result<Series, FrameError>
     where
         F: Fn(&str) -> bool + Sync,
     {
@@ -51759,7 +51624,7 @@ impl StringAccessor<'_> {
     ///
     /// Non-contiguous backings delegate to [`Self::apply_str_bool`] so the
     /// Scalar and null-bearing paths keep one implementation.
-    fn apply_str_bytes_bool<F>(&self, func: F, name: &SeriesName) -> Result<Series, FrameError>
+    fn apply_str_bytes_bool<F>(&self, func: F, name: &LabelName) -> Result<Series, FrameError>
     where
         F: Fn(&[u8]) -> bool + Sync,
     {
@@ -51839,7 +51704,7 @@ impl StringAccessor<'_> {
         &self,
         needle: &str,
         affix: StrAffix,
-        name: &SeriesName,
+        name: &LabelName,
     ) -> Result<Series, FrameError> {
         let column = self.series.column();
         let Some((in_bytes, in_offsets)) = column.as_utf8_contiguous_arc() else {
@@ -51953,7 +51818,7 @@ impl StringAccessor<'_> {
         )
     }
 
-    fn apply_str<F>(&self, func: F, name: &SeriesName) -> Result<Series, FrameError>
+    fn apply_str<F>(&self, func: F, name: &LabelName) -> Result<Series, FrameError>
     where
         F: Fn(&str) -> Scalar,
     {
@@ -52034,7 +51899,7 @@ impl StringAccessor<'_> {
     /// ints unpromoted and the NaT itself intact. A non-string element behaves
     /// exactly like a `None`: it becomes `nan` and forces the promotion.
     /// (br-frankenpandas-lwvet)
-    fn apply_str_int_scalar<F>(&self, func: F, name: &SeriesName) -> Result<Series, FrameError>
+    fn apply_str_int_scalar<F>(&self, func: F, name: &LabelName) -> Result<Series, FrameError>
     where
         F: Fn(&str) -> Scalar,
     {
@@ -52086,7 +51951,7 @@ impl StringAccessor<'_> {
     /// float64 promotion. Routing these two through `apply_str_int_scalar`
     /// would silently redefine that contract under cover of a pandas-parity
     /// change, so they keep their own body. (br-frankenpandas-lwvet)
-    fn apply_str_nullable_int<F>(&self, func: F, name: &SeriesName) -> Result<Series, FrameError>
+    fn apply_str_nullable_int<F>(&self, func: F, name: &LabelName) -> Result<Series, FrameError>
     where
         F: Fn(&str) -> Scalar,
     {
@@ -52114,7 +51979,7 @@ impl StringAccessor<'_> {
     /// broke the no-null case; emitting `Int64` unconditionally broke the
     /// with-null case. This helper produces `Int64` per element and promotes
     /// the column to `Float64` only when a null forced the promotion.
-    fn apply_str_int<F>(&self, func: F, name: &SeriesName) -> Result<Series, FrameError>
+    fn apply_str_int<F>(&self, func: F, name: &LabelName) -> Result<Series, FrameError>
     where
         F: Fn(&str) -> i64 + Sync,
     {
@@ -53317,7 +53182,7 @@ impl StringAccessor<'_> {
         } else {
             None
         };
-        let out_name = named_single.map_or_else(|| self.series.name().clone(), SeriesName::from);
+        let out_name = named_single.map_or_else(|| self.series.name().clone(), LabelName::from);
         self.apply_str(
             |s| match re.captures(s) {
                 Some(caps) => {
@@ -54470,8 +54335,7 @@ impl StringAccessor<'_> {
 
         // Per br-frankenpandas-zaeuo: pandas Series.str.partition preserves
         // source axis name on each of the three result Series.
-        let name_owner = self.series.index().name().map(str::to_owned);
-        let idx_name = name_owner.as_deref();
+        let idx_name = self.series.index().name();
         let build =
             |vals: Vec<Scalar>| -> Result<Column, FrameError> { Ok(Column::from_values(vals)?) };
         let s1 = Series::new(
@@ -54532,8 +54396,7 @@ impl StringAccessor<'_> {
 
         // Per br-frankenpandas-o5vvx: pandas Series.str.rpartition preserves
         // source axis name on each of the three result Series.
-        let name_owner = self.series.index().name().map(str::to_owned);
-        let idx_name = name_owner.as_deref();
+        let idx_name = self.series.index().name();
         let s1 = Series::new(
             format!("{}_0", self.series.name()),
             Index::new(labels.clone()).rename_index(idx_name),
@@ -55303,7 +55166,7 @@ impl DatetimeAccessor<'_> {
     }
 
     /// Helper: apply a datetime extraction function to each value.
-    fn extract_component<F>(&self, func: F, name: &SeriesName) -> Result<Series, FrameError>
+    fn extract_component<F>(&self, func: F, name: &LabelName) -> Result<Series, FrameError>
     where
         F: Fn(&str) -> Scalar,
     {
@@ -55336,7 +55199,7 @@ impl DatetimeAccessor<'_> {
     fn extract_component_nullable_int<F>(
         &self,
         func: F,
-        name: &SeriesName,
+        name: &LabelName,
     ) -> Result<Series, FrameError>
     where
         F: Fn(&str) -> Scalar,
@@ -55365,7 +55228,7 @@ impl DatetimeAccessor<'_> {
     /// pandas promotes THOSE to float64 when a NaT is present, where NaN is
     /// the correct missing value — so the two families need opposite policies
     /// and get separate helpers rather than a shared one with a flag.
-    fn extract_component_bool<F>(&self, func: F, name: &SeriesName) -> Result<Series, FrameError>
+    fn extract_component_bool<F>(&self, func: F, name: &LabelName) -> Result<Series, FrameError>
     where
         F: Fn(&str) -> Option<bool>,
     {
@@ -55411,7 +55274,7 @@ impl DatetimeAccessor<'_> {
     /// inference has no counterpart on this path. Per-element `pd.Period` is what
     /// the behaviour corresponds to, and it reads a distinct freq per element:
     /// `2024`->Y-DEC, `2024-06`->M, `2024-06-15`->D, `2024-06-15T12:30:00`->s.
-    fn try_extract_component<F>(&self, func: F, name: &SeriesName) -> Result<Series, FrameError>
+    fn try_extract_component<F>(&self, func: F, name: &LabelName) -> Result<Series, FrameError>
     where
         F: Fn(&str) -> Result<Scalar, FrameError>,
     {
@@ -55427,7 +55290,7 @@ impl DatetimeAccessor<'_> {
     fn try_extract_component_one_format<F>(
         &self,
         func: F,
-        name: &SeriesName,
+        name: &LabelName,
     ) -> Result<Series, FrameError>
     where
         F: Fn(&str) -> Result<Scalar, FrameError>,
@@ -55438,7 +55301,7 @@ impl DatetimeAccessor<'_> {
     fn try_extract_component_inner<F>(
         &self,
         func: F,
-        name: &SeriesName,
+        name: &LabelName,
         one_format: bool,
     ) -> Result<Series, FrameError>
     where
@@ -55514,7 +55377,7 @@ impl DatetimeAccessor<'_> {
     /// REJECTED Datetime64 columns (validate_datetime_dtype only accepts Utf8);
     /// each component method now routes Datetime64 here before the string path,
     /// so `dt.<x>` works on typed datetime columns the way pandas does.
-    fn extract_component_typed<F>(&self, ts_fn: F, name: &SeriesName) -> Result<Series, FrameError>
+    fn extract_component_typed<F>(&self, ts_fn: F, name: &LabelName) -> Result<Series, FrameError>
     where
         F: Fn(&fp_types::Timestamp) -> Option<i64>,
     {
@@ -55553,7 +55416,7 @@ impl DatetimeAccessor<'_> {
     fn extract_component_typed_nullable_int<F>(
         &self,
         ts_fn: F,
-        name: &SeriesName,
+        name: &LabelName,
     ) -> Result<Series, FrameError>
     where
         F: Fn(&fp_types::Timestamp) -> Option<i64>,
@@ -55570,7 +55433,7 @@ impl DatetimeAccessor<'_> {
     fn extract_component_typed_bool<F>(
         &self,
         ts_fn: F,
-        name: &SeriesName,
+        name: &LabelName,
     ) -> Result<Series, FrameError>
     where
         F: Fn(&fp_types::Timestamp) -> Option<bool>,
@@ -55623,7 +55486,7 @@ impl DatetimeAccessor<'_> {
     fn extract_component_typed_str<F>(
         &self,
         ts_fn: F,
-        name: &SeriesName,
+        name: &LabelName,
     ) -> Result<Series, FrameError>
     where
         F: Fn(&fp_types::Timestamp) -> String,
@@ -55713,7 +55576,7 @@ impl DatetimeAccessor<'_> {
 
     fn typed_datetime_year_all_valid(
         &self,
-        name: &SeriesName,
+        name: &LabelName,
     ) -> Option<Result<Series, FrameError>> {
         let nanos = self.naive_datetime_slice()?;
         if nanos.contains(&fp_types::Timestamp::NAT) {
@@ -55778,7 +55641,7 @@ impl DatetimeAccessor<'_> {
     /// `None` (caller falls back) on non-dense / any NaT.
     fn typed_datetime_dayofyear_all_valid(
         &self,
-        name: &SeriesName,
+        name: &LabelName,
     ) -> Option<Result<Series, FrameError>> {
         let nanos = self.naive_datetime_slice()?;
         if nanos.contains(&fp_types::Timestamp::NAT) {
@@ -55822,7 +55685,7 @@ impl DatetimeAccessor<'_> {
     /// falls back) on non-dense / any NaT.
     fn typed_datetime_weekofyear_all_valid(
         &self,
-        name: &SeriesName,
+        name: &LabelName,
     ) -> Option<Result<Series, FrameError>> {
         let nanos = self.naive_datetime_slice()?;
         if nanos.contains(&fp_types::Timestamp::NAT) {
@@ -55861,7 +55724,7 @@ impl DatetimeAccessor<'_> {
     fn typed_datetime_civil_component_all_valid(
         &self,
         component: fn((i64, i64, i64)) -> i64,
-        name: &SeriesName,
+        name: &LabelName,
     ) -> Option<Result<Series, FrameError>> {
         let nanos = self.naive_datetime_slice()?;
         if nanos.contains(&fp_types::Timestamp::NAT) {
@@ -55886,7 +55749,7 @@ impl DatetimeAccessor<'_> {
     fn typed_datetime_civil_bool_component_all_valid(
         &self,
         component: fn((i64, i64, i64)) -> bool,
-        name: &SeriesName,
+        name: &LabelName,
     ) -> Option<Result<Series, FrameError>> {
         let nanos = self.naive_datetime_slice()?;
         if nanos.contains(&fp_types::Timestamp::NAT) {
@@ -55909,7 +55772,7 @@ impl DatetimeAccessor<'_> {
     fn typed_datetime_civil_str_component_all_valid(
         &self,
         component: fn((i64, i64, i64)) -> &'static str,
-        name: &SeriesName,
+        name: &LabelName,
     ) -> Option<Result<Series, FrameError>> {
         let nanos = self.naive_datetime_slice()?;
         // Write each static name's bytes DIRECTLY into a contiguous output buffer
@@ -55942,7 +55805,7 @@ impl DatetimeAccessor<'_> {
     fn typed_datetime_nanos_str_component_all_valid(
         &self,
         component: fn(i64) -> &'static str,
-        name: &SeriesName,
+        name: &LabelName,
     ) -> Option<Result<Series, FrameError>> {
         let nanos = self.naive_datetime_slice()?;
         // Contiguous static-name buffer (see civil_str sibling) — skips the
@@ -55972,7 +55835,7 @@ impl DatetimeAccessor<'_> {
     fn typed_datetime_civil_string_component_all_valid(
         &self,
         component: fn((i64, i64, i64)) -> String,
-        name: &SeriesName,
+        name: &LabelName,
     ) -> Option<Result<Series, FrameError>> {
         let nanos = self.naive_datetime_slice()?;
         // Build the output Utf8 column into ONE contiguous byte buffer + offsets
@@ -56005,7 +55868,7 @@ impl DatetimeAccessor<'_> {
     fn typed_datetime_nanos_string_component_all_valid(
         &self,
         component: fn(i64) -> String,
-        name: &SeriesName,
+        name: &LabelName,
     ) -> Option<Result<Series, FrameError>> {
         let nanos = self.naive_datetime_slice()?;
         // Contiguous output buffer (see civil_string sibling) — skips the
@@ -56036,7 +55899,7 @@ impl DatetimeAccessor<'_> {
     fn typed_datetime_full_string_component_all_valid<F>(
         &self,
         component: F,
-        name: &SeriesName,
+        name: &LabelName,
     ) -> Option<Result<Series, FrameError>>
     where
         F: Fn(i64, i64, i64, i64, i64, i64) -> String,
@@ -56071,7 +55934,7 @@ impl DatetimeAccessor<'_> {
     fn typed_datetime_nanos_component_all_valid(
         &self,
         component: fn(i64) -> i64,
-        name: &SeriesName,
+        name: &LabelName,
     ) -> Option<Result<Series, FrameError>> {
         let nanos = self.naive_datetime_slice()?;
         if nanos.contains(&fp_types::Timestamp::NAT) {
@@ -63802,7 +63665,9 @@ pub fn qcut_at_quantiles(
 /// The column name defaults to the index's name, or "0" if unnamed.
 /// The resulting DataFrame uses a default RangeIndex.
 pub fn index_to_frame(index: &Index, name: Option<&str>) -> Result<DataFrame, FrameError> {
-    let col_name = name.or_else(|| index.name()).unwrap_or("0");
+    let col_name = name
+        .or_else(|| index.name().map(|n| n.as_str()))
+        .unwrap_or("0");
     let values: Vec<Scalar> = index
         .labels()
         .iter()
@@ -63829,7 +63694,9 @@ pub fn index_to_frame(index: &Index, name: Option<&str>) -> Result<DataFrame, Fr
 /// The series name defaults to the index's name, or "0" if unnamed.
 /// The resulting Series uses the same index labels as its own index.
 pub fn index_to_series(index: &Index, name: Option<&str>) -> Result<Series, FrameError> {
-    let series_name = name.or_else(|| index.name()).unwrap_or("0");
+    let series_name = name
+        .or_else(|| index.name().map(|n| n.as_str()))
+        .unwrap_or("0");
     let values: Vec<Scalar> = index
         .labels()
         .iter()
@@ -64107,11 +63974,12 @@ pub fn concat_series_with_ignore_index(
     // Per br-frankenpandas-6c7ja: pandas preserves the index name when all
     // concatenated series share it; drops to None when they differ.
     let first_name = series_list.first().and_then(|s| s.index().name());
-    let shared_name: Option<&str> = if series_list.iter().all(|s| s.index().name() == first_name) {
-        first_name
-    } else {
-        None
-    };
+    let shared_name: Option<&LabelName> =
+        if series_list.iter().all(|s| s.index().name() == first_name) {
+            first_name
+        } else {
+            None
+        };
     // perf: typed Int64 index concat (extend i64 buffers -> from_i64_values) when every
     // input index is all-Int64, instead of materializing Vec<IndexLabel> (16 B/label).
     // Bit-identical labels (2bgtq); name preserved via rename_index.
@@ -66867,14 +66735,6 @@ type ColumnOrderNames = Vec<String>;
 
 type DataFrameColumnOrderStore = ColumnAxis;
 
-/// The canonical name a typed column label keys its column under: its
-/// pandas text (`0`, `1.5`, `True`, `2024-01-01 00:00:00`), the string
-/// itself for a string label. The binding keys columns by it, so a label
-/// and its name always agree.
-#[must_use]
-pub fn column_key(label: &IndexLabel) -> String {
-    label.to_string()
-}
 
 /// The storage keys of the columns under a column MultiIndex given as one
 /// label list per level: each column's [`column_key`]s joined with '_', as
@@ -66924,8 +66784,8 @@ struct ColumnAxis {
     /// (see [`DataFrame::column_range_span`], which checks it still holds).
     range: Option<(i64, i64, i64)>,
     /// The column axis' own name, pandas' `df.columns.name` (a pivot's
-    /// columns are named after its `columns` column).
-    name: Option<String>,
+    /// columns are named after its `columns` column), typed (fvsao.64).
+    name: Option<LabelName>,
     /// The zone of datetime column labels - a tz-aware row index transposed
     /// onto the columns keeps it, and gives it back to the rows on the way
     /// back (`df.T.T` came back naive UTC, fvsao.60).
@@ -66953,17 +66813,23 @@ impl ColumnAxis {
         IndexLabel::Utf8(name.to_owned())
     }
 
-    /// Records `labels` for the names they key (a string label needs no
-    /// record).
+    /// Records `labels` for the names they key. A string label needs no
+    /// record unless its key stood for a typed label (a recorded one, a
+    /// range's integer), which it then overrides: rename(columns={0: '0'})
+    /// kept the integer 0.
     fn record(&mut self, labels: impl IntoIterator<Item = IndexLabel>) {
         // New labels bring no zone the axis knows; a caller that knows theirs
         // (transpose) sets it after.
         self.tz = None;
         let mut map = self.labels.as_deref().cloned().unwrap_or_default();
         for label in labels {
-            if !matches!(label, IndexLabel::Utf8(_)) {
-                map.insert(column_key(&label), label);
+            let key = column_key(&label);
+            if matches!(label, IndexLabel::Utf8(_))
+                && matches!(self.label(&key), IndexLabel::Utf8(_))
+            {
+                continue;
             }
+            map.insert(key, label);
         }
         self.labels = (!map.is_empty()).then(|| Arc::new(map));
     }
@@ -70327,7 +70193,7 @@ impl DataFrame {
                     "cannot insert {name}, already exists"
                 )));
             }
-            return Ok(name.to_owned());
+            return Ok(name.to_string());
         }
         // Unnamed index: fall back to 'index', then 'level_0' on collision.
         if !self.columns.contains_key("index") {
@@ -73954,8 +73820,8 @@ impl DataFrame {
     /// The name a Series of the column keyed `name` takes: its typed label
     /// (`DataFrame([[1, 2]])[0].name` is the integer 0).
     #[must_use]
-    pub fn column_series_name(&self, name: &str) -> SeriesName {
-        SeriesName::typed(self.column_label(name))
+    pub fn column_series_name(&self, name: &str) -> LabelName {
+        LabelName::typed(self.column_label(name))
     }
 
     /// Every column's typed label, in column order.
@@ -74003,15 +73869,16 @@ impl DataFrame {
     /// pandas' `df.columns.name`: the column axis' own name (a pivot's is
     /// its `columns` column's).
     #[must_use]
-    pub fn columns_name(&self) -> Option<&str> {
-        self.column_order.name.as_deref()
+    pub fn columns_name(&self) -> Option<&LabelName> {
+        self.column_order.name.as_ref()
     }
 
     /// This frame with its column axis named `name` (pandas'
-    /// `rename_axis(columns=name)`; None unnames it).
+    /// `rename_axis(columns=name)`; None unnames it). A [`LabelName`] keeps
+    /// its typed label.
     #[must_use]
-    pub fn with_columns_name(mut self, name: Option<String>) -> Self {
-        self.column_order.name = name;
+    pub fn with_columns_name<N: Into<LabelName>>(mut self, name: Option<N>) -> Self {
+        self.column_order.name = name.map(Into::into);
         self
     }
 
@@ -74143,7 +74010,7 @@ impl DataFrame {
     /// RangeIndex columns (`DataFrame([[1, 2]]).sum().index`; fvsao.32).
     fn columns_series(
         &self,
-        name: impl Into<SeriesName>,
+        name: impl Into<LabelName>,
         labels: Vec<IndexLabel>,
         values: Vec<Scalar>,
     ) -> Result<Series, FrameError> {
@@ -76052,6 +75919,9 @@ impl DataFrame {
         let source = self.columns.get(column).ok_or_else(|| {
             FrameError::CompatibilityRejected(format!("column '{column}' not found"))
         })?;
+        // The index is named by the column's typed label: set_index(0)'s
+        // name is the integer 0 (fvsao.64; it was the string '0').
+        let index_name = self.column_series_name(column);
 
         // perf (br-frankenpandas-p9omo): typed Int64 column -> index without the
         // per-Scalar scalar_to_index_label map + Index::new generic build. as_i64_slice
@@ -76059,7 +75929,7 @@ impl DataFrame {
         // bit-identical to Index::new([IndexLabel::Int64..]) — the inverse of bp6k7.
         // Per br-frankenpandas-fuzon: pandas set_index(col) sets the new index name to col.
         let index = if let Some(data) = source.as_i64_slice() {
-            Index::from_i64_values(data.to_vec()).rename_index(Some(column))
+            Index::from_i64_values(data.to_vec()).rename_index(Some(&index_name))
         } else if let Some(data) = source.as_f64_slice() {
             // Typed all-valid Float64 -> Float64 labels directly, skipping the
             // `.values()` Scalar Vec + the `scalar_to_index_label` map. Bit-
@@ -76073,13 +75943,13 @@ impl DataFrame {
                     IndexLabel::Float64(fp_index::OrderedF64(v))
                 })
                 .collect();
-            Index::new(labels).rename_index(Some(column))
+            Index::new(labels).rename_index(Some(&index_name))
         } else if let Some((bytes, offsets)) = source.utf8_contiguous_arcs() {
             // Typed all-valid contiguous-Utf8 -> lazy Utf8 index over the same
             // immutable backing. `Index::labels()` materializes the identical
             // `IndexLabel::Utf8` strings as the direct path, but set_index can
             // return without allocating one String per row.
-            Index::from_utf8_contiguous(bytes, offsets).rename_index(Some(column))
+            Index::from_utf8_contiguous(bytes, offsets).rename_index(Some(&index_name))
         } else if let Some((bytes, offsets)) = utf8_key_owned_contiguous(source) {
             // Scalar-backed (from_values) all-valid Utf8: the contiguous-arc fast
             // path above misses it, so set_index fell to the generic path that
@@ -76090,26 +75960,26 @@ impl DataFrame {
             // identical per-row IndexLabel::Utf8 strings the generic path builds.
             // An object column holding non-text cells is declined (fvsao.66).
             Index::from_utf8_contiguous(std::sync::Arc::from(bytes), std::sync::Arc::from(offsets))
-                .rename_index(Some(column))
+                .rename_index(Some(&index_name))
         } else if let Some(data) = source.as_datetime64_slice() {
             // Typed Datetime64 -> Datetime64 labels directly (the common
             // `df.set_index('datetime_col')` time-series path), skipping the
             // `.values()` Scalar Vec. Bit-identical to `set_index_label`, which
             // makes a NaT the NaT label too (it was rejected).
             let labels: Vec<IndexLabel> = data.iter().map(|&v| IndexLabel::Datetime64(v)).collect();
-            Index::new(labels).rename_index(Some(column))
+            Index::new(labels).rename_index(Some(&index_name))
         } else if let Some(data) = source.as_bool_slice() {
             // Typed all-valid Bool (as_bool_slice requires validity.all) -> Bool
             // labels directly. Bit-identical:
             // `scalar_to_index_label(Bool(b)) = IndexLabel::Bool(b)`.
             let labels: Vec<IndexLabel> = data.iter().map(|&b| IndexLabel::Bool(b)).collect();
-            Index::new(labels).rename_index(Some(column))
+            Index::new(labels).rename_index(Some(&index_name))
         } else if let Some(data) = source.as_timedelta64_slice() {
             // Typed Timedelta64 -> Timedelta64 labels directly, a NaT the NaT
             // label (bit-identical to `set_index_label`).
             let labels: Vec<IndexLabel> =
                 data.iter().map(|&v| IndexLabel::Timedelta64(v)).collect();
-            Index::new(labels).rename_index(Some(column))
+            Index::new(labels).rename_index(Some(&index_name))
         } else {
             let dtype = source.dtype();
             let labels = source
@@ -76117,7 +75987,7 @@ impl DataFrame {
                 .iter()
                 .map(|value| set_index_label(&dtype, value))
                 .collect::<Result<Vec<_>, _>>()?;
-            Index::new(labels).rename_index(Some(column))
+            Index::new(labels).rename_index(Some(&index_name))
         };
         // A tz-aware column's zone rides on the index (pandas: a DatetimeIndex
         // of that dtype); it became naive UTC labels.
@@ -76212,7 +76082,7 @@ impl DataFrame {
             ),
             None => (
                 vec![self.index.labels().to_vec()],
-                vec![self.index.name().map(str::to_owned)],
+                vec![self.index.name().map(String::from)],
             ),
         };
         for level in 0..keys.nlevels() {
@@ -76260,7 +76130,7 @@ impl DataFrame {
             .collect();
         let index = row_multiindex
             .to_flat_index(sep)
-            .set_name(&new_name_parts.join(sep));
+            .set_name(new_name_parts.join(sep));
 
         let mut out = if drop {
             let drop_set: std::collections::BTreeSet<&str> = columns.iter().copied().collect();
@@ -76436,7 +76306,12 @@ impl DataFrame {
 
         let mut out = Self::new_with_axes(index, None, columns, column_order, column_multiindex)?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out.with_labels_of(self))
+        // The index column is labelled by the index's typed name: 0 stays
+        // the integer 0 (fvsao.64).
+        let index_label = self.index.name().map(LabelName::label);
+        Ok(out
+            .with_labels_of(self)
+            .with_recorded_column_labels(index_label))
     }
 
     /// The column MultiIndex with `names` in front, each as `(name, '', ...)`,
@@ -77544,7 +77419,7 @@ impl DataFrame {
         }
 
         // The index label is the Series name, typed (pandas semantics).
-        let name = SeriesName::typed(self.index.labels()[position].clone());
+        let name = LabelName::typed(self.index.labels()[position].clone());
         // Indexed by the columns: a RangeIndex when they are one (fvsao.32),
         // their MultiIndex when they have one (g3bux).
         let span = self.column_range_span();
@@ -78570,7 +78445,7 @@ impl DataFrame {
     /// Rename the row index axis.
     ///
     /// Matches `pd.DataFrame.rename_axis(name)` for flat row indexes.
-    pub fn rename_axis(&self, name: &str) -> Result<Self, FrameError> {
+    pub fn rename_axis<N: Into<LabelName>>(&self, name: N) -> Result<Self, FrameError> {
         if self.row_multiindex.is_some() {
             return Err(FrameError::CompatibilityRejected(
                 "DataFrame.rename_axis: scalar name requires a flat row index".to_owned(),
@@ -79066,7 +78941,7 @@ impl DataFrame {
         let labels: Vec<IndexLabel> = allowed.iter().map(|name| self.column_label(name)).collect();
         // Named after q, the float (pandas' name is 0.5, not the text '0.5').
         self.columns_series(
-            SeriesName::typed(IndexLabel::Float64(fp_index::OrderedF64(q))),
+            LabelName::typed(IndexLabel::Float64(fp_index::OrderedF64(q))),
             labels,
             values,
         )
@@ -79757,7 +79632,7 @@ impl DataFrame {
                 ),
                 column_order: ColumnAxis {
                     range: self.index.range_span(),
-                    name: self.index.name().map(str::to_owned),
+                    name: self.index.name().cloned(),
                     tz: self.index.tz().map(str::to_owned),
                     ..LazyDataFrameColumnOrder::int64_unit_range(view.column_start, view.column_len)
                         .into()
@@ -79821,7 +79696,7 @@ impl DataFrame {
                 out.column_order.record(self.index.labels().iter().cloned());
                 out.column_order.range = self.index.range_span();
                 // The axes trade names and zones too.
-                out.column_order.name = self.index.name().map(str::to_owned);
+                out.column_order.name = self.index.name().cloned();
                 out.column_order.tz = self.index.tz().map(str::to_owned);
                 Ok(out)
             };
@@ -82072,7 +81947,8 @@ impl DataFrame {
             return Ok(Self {
                 columns: result_cols.into(),
                 column_order: result_col_order.into(),
-                index: Index::new(idx_labels).rename_index(Some(index_col)),
+                index: Index::new(idx_labels)
+                    .rename_index(Some(self.column_series_name(index_col))),
                 column_multiindex: None,
                 row_multiindex: None,
                 allows_duplicate_labels: self.allows_duplicate_labels,
@@ -82264,7 +82140,8 @@ impl DataFrame {
             return Ok(Self {
                 columns: result_cols.into(),
                 column_order: result_col_order.into(),
-                index: Index::new(idx_labels).rename_index(Some(index_col)),
+                index: Index::new(idx_labels)
+                    .rename_index(Some(self.column_series_name(index_col))),
                 column_multiindex: None,
                 row_multiindex: None,
                 allows_duplicate_labels: self.allows_duplicate_labels,
@@ -82364,7 +82241,7 @@ impl DataFrame {
         Ok(Self {
             columns: result_cols.into(),
             column_order: result_col_order.into(),
-            index: Index::new(new_labels).rename_index(Some(index_col)),
+            index: Index::new(new_labels).rename_index(Some(self.column_series_name(index_col))),
             column_multiindex: None,
             row_multiindex: None,
             allows_duplicate_labels: self.allows_duplicate_labels,
@@ -87244,7 +87121,12 @@ impl DataFrame {
         Ok(DataFrameGroupBy {
             df: self,
             by: by.iter().map(|s| (*s).to_string()).collect(),
-            key_names: by.iter().map(|s| Some((*s).to_string())).collect(),
+            // Each key column's typed label: groupby(0)'s index is named the
+            // integer 0 (fvsao.64).
+            key_names: by
+                .iter()
+                .map(|s| Some(self.column_series_name(s)))
+                .collect(),
             as_index,
             sort,
             dropna,
@@ -87573,7 +87455,7 @@ impl DataFrame {
                             .collect()
                     })
                     .collect();
-                let index_names = vec![self.index.name().map(str::to_owned)];
+                let index_names = vec![self.index.name().map(String::from)];
                 let column_names = self
                     .column_multiindex
                     .as_ref()
@@ -87630,7 +87512,10 @@ impl DataFrame {
             ));
         }
 
-        let dim_name = self.index.name().unwrap_or("index").to_owned();
+        let dim_name = self
+            .index
+            .name()
+            .map_or_else(|| "index".to_owned(), String::from);
         if self.columns.contains_key(&dim_name) {
             return Err(FrameError::CompatibilityRejected(format!(
                 "to_xarray index coordinate name {dim_name:?} collides with a column label"
@@ -88219,7 +88104,7 @@ impl DataFrame {
                                 "to_json orient 'table' cannot serialize index name {name:?} because it collides with a column label"
                             )));
                         }
-                        name.to_owned()
+                        name.to_string()
                     }
                     None => self.reset_index_column_name()?,
                 };
@@ -89457,7 +89342,7 @@ impl DataFrame {
                 ),
                 None => (
                     vec![self.column_labels()],
-                    vec![self.columns_name().map(str::to_owned)],
+                    vec![self.columns_name().map(String::from)],
                 ),
             };
         let source_depth = levels.len();
@@ -89485,7 +89370,7 @@ impl DataFrame {
             if position == 0 {
                 names.extend(match piece.columns_multiindex() {
                     Some(multi) => multi.names().to_vec(),
-                    None => vec![piece.columns_name().map(str::to_owned)],
+                    None => vec![piece.columns_name().map(String::from)],
                 });
             }
             for (at, piece_name) in piece.column_order.iter().enumerate() {
@@ -90042,7 +89927,7 @@ impl DataFrame {
 
         // Per br-frankenpandas-xb0ra: pandas sets the result's index.name
         // to the name of the source column used as the pivot index.
-        let index = Index::new(row_labels).rename_index(Some(index_col));
+        let index = Index::new(row_labels).rename_index(Some(self.column_series_name(index_col)));
         let frame = Self {
             index,
             column_order: column_order.into(),
@@ -90181,7 +90066,7 @@ impl DataFrame {
         }
 
         let row_labels: Vec<IndexLabel> = row_keys.iter().map(|&k| IndexLabel::Int64(k)).collect();
-        let index = Index::new(row_labels).rename_index(Some(index_col));
+        let index = Index::new(row_labels).rename_index(Some(self.column_series_name(index_col)));
         Ok(Self {
             index,
             column_order: column_order.into(),
@@ -95018,7 +94903,7 @@ impl DataFrame {
             return self.over_own_columns(self.index.clone(), columns);
         }
         let axis_name = (series.index().name() == self.columns_name())
-            .then(|| self.columns_name().map(str::to_owned))
+            .then(|| self.columns_name().cloned())
             .flatten();
         Ok(Self::new_with_axis(self.index.clone(), columns, names)?.with_columns_name(axis_name))
     }
@@ -98742,7 +98627,7 @@ impl DataFrame {
         // Level 1 ('self'/'other') is unnamed in pandas; level 0 keeps the
         // original index name.
         let multiindex = fp_index::MultiIndex::from_arrays(vec![level0, level1])?
-            .set_names(vec![self.index.name().map(str::to_owned), None]);
+            .set_names(vec![self.index.name().map(String::from), None]);
         let flat_index = multiindex.to_flat_index("/");
         Self::new_with_axes(flat_index, Some(multiindex), columns, column_order, None)
     }
@@ -99801,8 +99686,9 @@ pub struct DataFrameGroupBy<'a> {
     /// default, or the name of the array/Series/Index/callable key that a
     /// caller grouped by through a key column of its own (None for an
     /// unnamed array), as pandas names it
-    /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.19).
-    key_names: Vec<Option<String>>,
+    /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.19), typed
+    /// (fvsao.64).
+    key_names: Vec<Option<LabelName>>,
     as_index: bool,
     sort: bool,
     dropna: bool,
@@ -100026,7 +99912,10 @@ impl DataFrameGroupBy<'_> {
     /// Name the result's key levels `names` (one per key; None for an
     /// unnamed key) instead of the key column names - for keys a caller
     /// grouped by through key columns of its own (fvsao.19).
-    pub fn with_key_names(mut self, names: Vec<Option<String>>) -> Result<Self, FrameError> {
+    pub fn with_key_names<N: Into<LabelName>>(
+        mut self,
+        names: Vec<Option<N>>,
+    ) -> Result<Self, FrameError> {
         if names.len() != self.by.len() {
             return Err(FrameError::CompatibilityRejected(format!(
                 "groupby: {} key names for {} keys",
@@ -100034,13 +99923,22 @@ impl DataFrameGroupBy<'_> {
                 self.by.len()
             )));
         }
-        self.key_names = names;
+        self.key_names = names.into_iter().map(|name| name.map(Into::into)).collect();
         Ok(self)
     }
 
     /// The result index name of a single-key groupby.
-    fn single_key_name(&self) -> Option<&str> {
-        self.key_names.first().and_then(Option::as_deref)
+    fn single_key_name(&self) -> Option<&LabelName> {
+        self.key_names.first().and_then(Option::as_ref)
+    }
+
+    /// The key names' texts: a several-key result's level names (a
+    /// MultiIndex's level names are text).
+    fn key_name_texts(&self) -> Vec<Option<String>> {
+        self.key_names
+            .iter()
+            .map(|name| name.clone().map(String::from))
+            .collect()
     }
 
     fn sum_group_vals(dtype: DType, group_vals: &[Scalar]) -> Scalar {
@@ -100809,7 +100707,7 @@ impl DataFrameGroupBy<'_> {
                 ));
             }
         }
-        let names: Vec<Option<String>> = self.key_names.clone();
+        let names: Vec<Option<String>> = self.key_name_texts();
         // dropna=False keys hold a missing label as a value of its level, as
         // pandas' groupby levels do (an unstack sorts it last).
         Ok(Some(
@@ -101025,7 +100923,7 @@ impl DataFrameGroupBy<'_> {
             .into_iter()
             .map(|(name, values)| Ok((name, Column::from_values(values)?)))
             .collect::<Result<_, FrameError>>()?;
-        let mut names: Vec<Option<String>> = self.key_names.clone();
+        let mut names: Vec<Option<String>> = self.key_name_texts();
         names.push(Some("index".to_owned()));
 
         DataFrame::new_with_axes(
@@ -103509,7 +103407,7 @@ impl DataFrameGroupBy<'_> {
                     level_arrays[level_idx].push(IndexLabel::Int64(value));
                 }
             }
-            let names: Vec<Option<String>> = self.key_names.clone();
+            let names: Vec<Option<String>> = self.key_name_texts();
             let row_multiindex =
                 Some(fp_index::MultiIndex::from_arrays(level_arrays)?.set_names(names));
             let mut frame = self.dense_aggregate_emit(
@@ -105292,7 +105190,7 @@ impl DataFrameGroupBy<'_> {
                 level_arrays[level_idx].push(IndexLabel::Int64(value));
             }
         }
-        let names: Vec<Option<String>> = self.key_names.clone();
+        let names: Vec<Option<String>> = self.key_name_texts();
         let mi = fp_index::MultiIndex::from_arrays(level_arrays)?.set_names(names);
         Ok((Index::new(labels), mi))
     }
@@ -105317,7 +105215,7 @@ impl DataFrameGroupBy<'_> {
                 level_arrays[level_idx].push(value.to_index_label());
             }
         }
-        let names: Vec<Option<String>> = self.key_names.clone();
+        let names: Vec<Option<String>> = self.key_name_texts();
         let mi = fp_index::MultiIndex::from_arrays(level_arrays)?.set_names(names);
         Ok((Index::new(labels), mi))
     }
@@ -106662,7 +106560,7 @@ impl DataFrameGroupBy<'_> {
                 }
             }
 
-            let names: Vec<Option<String>> = self.key_names.clone();
+            let names: Vec<Option<String>> = self.key_name_texts();
             let row_multiindex =
                 Some(fp_index::MultiIndex::from_arrays(level_arrays)?.set_names(names));
             return Ok(Some(DataFrame::new_with_axes(
@@ -107543,7 +107441,7 @@ impl DataFrameGroupBy<'_> {
             }
         }
 
-        let mut names: Vec<Option<String>> = self.key_names.clone();
+        let mut names: Vec<Option<String>> = self.key_name_texts();
         names.push(Some("index".to_owned()));
 
         Ok((
@@ -113244,7 +113142,7 @@ mod tests {
             plan.right_positions,
             vec![None, Some(0), Some(1), None, Some(2)]
         );
-        assert_eq!(plan.union_index.name(), Some("idx"));
+        assert_eq!(plan.union_index.name().map(|n| n.as_str()), Some("idx"));
     }
 
     #[test]
@@ -119476,11 +119374,11 @@ mod tests {
 
         // sort_values uses take_rows_by_positions
         let sorted = df.sort_values("v", true).unwrap();
-        assert_eq!(sorted.index().name(), Some("myidx"));
+        assert_eq!(sorted.index().name().map(|n| n.as_str()), Some("myidx"));
 
         // head also routes through take_rows_by_positions
         let h = df.head(2).unwrap();
-        assert_eq!(h.index().name(), Some("myidx"));
+        assert_eq!(h.index().name().map(|n| n.as_str()), Some("myidx"));
     }
 
     #[test]
@@ -119500,7 +119398,7 @@ mod tests {
         .rename_axis("myidx")
         .unwrap();
         let out = df.sample(Some(2), None, false, Some(42)).unwrap();
-        assert_eq!(out.index().name(), Some("myidx"));
+        assert_eq!(out.index().name().map(|n| n.as_str()), Some("myidx"));
         assert_eq!(out.len(), 2);
     }
 
@@ -119516,9 +119414,9 @@ mod tests {
         .rename_axis("myidx")
         .unwrap();
         let out = df.add_prefix_axis("p_", 0).unwrap();
-        assert_eq!(out.index().name(), Some("myidx"));
+        assert_eq!(out.index().name().map(|n| n.as_str()), Some("myidx"));
         let out2 = df.add_suffix_axis("_s", 0).unwrap();
-        assert_eq!(out2.index().name(), Some("myidx"));
+        assert_eq!(out2.index().name().map(|n| n.as_str()), Some("myidx"));
     }
 
     #[test]
@@ -119541,7 +119439,7 @@ mod tests {
         .unwrap();
 
         let out = df.dropna().unwrap();
-        assert_eq!(out.index().name(), Some("myidx"));
+        assert_eq!(out.index().name().map(|n| n.as_str()), Some("myidx"));
         assert_eq!(out.len(), 2);
     }
 
@@ -119566,19 +119464,19 @@ mod tests {
 
         // head preserves name
         let h = s.head(2).unwrap();
-        assert_eq!(h.index().name(), Some("myidx"));
+        assert_eq!(h.index().name().map(|n| n.as_str()), Some("myidx"));
 
         // tail preserves name
         let t = s.tail(2).unwrap();
-        assert_eq!(t.index().name(), Some("myidx"));
+        assert_eq!(t.index().name().map(|n| n.as_str()), Some("myidx"));
 
         // sort_values preserves name
         let sv = s.sort_values(true).unwrap();
-        assert_eq!(sv.index().name(), Some("myidx"));
+        assert_eq!(sv.index().name().map(|n| n.as_str()), Some("myidx"));
 
         // sort_index preserves name
         let si = s.sort_index(false).unwrap();
-        assert_eq!(si.index().name(), Some("myidx"));
+        assert_eq!(si.index().name().map(|n| n.as_str()), Some("myidx"));
     }
 
     #[test]
@@ -119598,9 +119496,18 @@ mod tests {
         .unwrap()
         .rename_axis("myidx")
         .unwrap();
-        assert_eq!(s.take(&[0, 2]).unwrap().index().name(), Some("myidx"));
-        assert_eq!(s.argsort(true).unwrap().index().name(), Some("myidx"));
-        assert_eq!(s.duplicated().unwrap().index().name(), Some("myidx"));
+        assert_eq!(
+            s.take(&[0, 2]).unwrap().index().name().map(|n| n.as_str()),
+            Some("myidx")
+        );
+        assert_eq!(
+            s.argsort(true).unwrap().index().name().map(|n| n.as_str()),
+            Some("myidx")
+        );
+        assert_eq!(
+            s.duplicated().unwrap().index().name().map(|n| n.as_str()),
+            Some("myidx")
+        );
         let mask = Series::from_values(
             "m",
             vec!["a".into(), "b".into(), "c".into(), "d".into()],
@@ -119612,7 +119519,10 @@ mod tests {
             ],
         )
         .unwrap();
-        assert_eq!(s.filter(&mask).unwrap().index().name(), Some("myidx"));
+        assert_eq!(
+            s.filter(&mask).unwrap().index().name().map(|n| n.as_str()),
+            Some("myidx")
+        );
     }
 
     #[test]
@@ -119633,29 +119543,19 @@ mod tests {
         .unwrap()
         .rename_axis("myidx")
         .unwrap();
-        assert_eq!(s.iloc(&[0, 2]).unwrap().index().name(), Some("myidx"));
+        let name = |s: Series| s.index().name().map(ToString::to_string);
+        let myidx = Some("myidx".to_owned());
+        assert_eq!(name(s.iloc(&[0, 2]).unwrap()), myidx);
+        assert_eq!(name(s.loc(&["a".into(), "c".into()]).unwrap()), myidx);
         assert_eq!(
-            s.loc(&["a".into(), "c".into()]).unwrap().index().name(),
-            Some("myidx")
+            name(s.loc_bool(&[true, false, true, false]).unwrap()),
+            myidx
         );
         assert_eq!(
-            s.loc_bool(&[true, false, true, false])
-                .unwrap()
-                .index()
-                .name(),
-            Some("myidx")
+            name(s.loc_slice(Some(&"b".into()), Some(&"c".into())).unwrap()),
+            myidx
         );
-        assert_eq!(
-            s.loc_slice(Some(&"b".into()), Some(&"c".into()))
-                .unwrap()
-                .index()
-                .name(),
-            Some("myidx")
-        );
-        assert_eq!(
-            s.iloc_slice(Some(0), Some(2)).unwrap().index().name(),
-            Some("myidx")
-        );
+        assert_eq!(name(s.iloc_slice(Some(0), Some(2)).unwrap()), myidx);
     }
 
     #[test]
@@ -119670,8 +119570,14 @@ mod tests {
         .unwrap()
         .rename_axis("myidx")
         .unwrap();
-        assert_eq!(s.isna().unwrap().index().name(), Some("myidx"));
-        assert_eq!(s.notna().unwrap().index().name(), Some("myidx"));
+        assert_eq!(
+            s.isna().unwrap().index().name().map(|n| n.as_str()),
+            Some("myidx")
+        );
+        assert_eq!(
+            s.notna().unwrap().index().name().map(|n| n.as_str()),
+            Some("myidx")
+        );
     }
 
     #[test]
@@ -119693,11 +119599,11 @@ mod tests {
 
         // fillna preserves index name
         let filled = s.fillna(&Scalar::Int64(0)).unwrap();
-        assert_eq!(filled.index().name(), Some("myidx"));
+        assert_eq!(filled.index().name().map(|n| n.as_str()), Some("myidx"));
 
         // ffill preserves index name
         let f = s.ffill(None).unwrap();
-        assert_eq!(f.index().name(), Some("myidx"));
+        assert_eq!(f.index().name().map(|n| n.as_str()), Some("myidx"));
 
         // abs preserves index name (on numeric Series)
         let nums = Series::from_values(
@@ -119709,7 +119615,7 @@ mod tests {
         .rename_axis("myidx")
         .unwrap();
         let absed = nums.abs().unwrap();
-        assert_eq!(absed.index().name(), Some("myidx"));
+        assert_eq!(absed.index().name().map(|n| n.as_str()), Some("myidx"));
     }
 
     #[test]
@@ -119730,7 +119636,7 @@ mod tests {
         .rename_axis("myidx")
         .unwrap();
         let out = s.truncate(Some(&"b".into()), Some(&"c".into())).unwrap();
-        assert_eq!(out.index().name(), Some("myidx"));
+        assert_eq!(out.index().name().map(|n| n.as_str()), Some("myidx"));
     }
 
     #[test]
@@ -119751,11 +119657,11 @@ mod tests {
         .rename_axis("myidx")
         .unwrap();
         let l = s.nlargest(2).unwrap();
-        assert_eq!(l.index().name(), Some("myidx"));
+        assert_eq!(l.index().name().map(|n| n.as_str()), Some("myidx"));
         let n = s.nsmallest(2).unwrap();
-        assert_eq!(n.index().name(), Some("myidx"));
+        assert_eq!(n.index().name().map(|n| n.as_str()), Some("myidx"));
         let lk = s.nlargest_keep(2, "first").unwrap();
-        assert_eq!(lk.index().name(), Some("myidx"));
+        assert_eq!(lk.index().name().map(|n| n.as_str()), Some("myidx"));
     }
 
     #[test]
@@ -119771,9 +119677,9 @@ mod tests {
         .rename_axis("myidx")
         .unwrap();
         let p = s.add_prefix("p_").unwrap();
-        assert_eq!(p.index().name(), Some("myidx"));
+        assert_eq!(p.index().name().map(|n| n.as_str()), Some("myidx"));
         let q = s.add_suffix("_s").unwrap();
-        assert_eq!(q.index().name(), Some("myidx"));
+        assert_eq!(q.index().name().map(|n| n.as_str()), Some("myidx"));
     }
 
     #[test]
@@ -119789,7 +119695,7 @@ mod tests {
         .rename_axis("myidx")
         .unwrap();
         let dropped = s.drop(&["b".into()]).unwrap();
-        assert_eq!(dropped.index().name(), Some("myidx"));
+        assert_eq!(dropped.index().name().map(|n| n.as_str()), Some("myidx"));
         assert_eq!(dropped.len(), 2);
     }
 
@@ -119807,7 +119713,7 @@ mod tests {
         .unwrap();
 
         let result = s.dropna().unwrap();
-        assert_eq!(result.index().name(), Some("idx"));
+        assert_eq!(result.index().name().map(|n| n.as_str()), Some("idx"));
 
         // Even when result is empty:
         let all_null = Series::from_values(
@@ -119819,7 +119725,7 @@ mod tests {
         .rename_axis("idx")
         .unwrap();
         let empty_result = all_null.dropna().unwrap();
-        assert_eq!(empty_result.index().name(), Some("idx"));
+        assert_eq!(empty_result.index().name().map(|n| n.as_str()), Some("idx"));
         assert_eq!(empty_result.len(), 0);
     }
 
@@ -120019,7 +119925,7 @@ mod tests {
 
         let out = s.value_counts().unwrap();
         assert_eq!(out.name(), "count");
-        assert_eq!(out.index().name(), Some("vals"));
+        assert_eq!(out.index().name().map(|n| n.as_str()), Some("vals"));
         assert_eq!(
             out.index().labels(),
             &[
@@ -120049,7 +119955,7 @@ mod tests {
 
         let out = s.value_counts().unwrap();
         assert_eq!(out.name(), "count");
-        assert_eq!(out.index().name(), Some("vals"));
+        assert_eq!(out.index().name().map(|n| n.as_str()), Some("vals"));
         assert_eq!(
             out.values(),
             &[Scalar::Int64(2), Scalar::Int64(2), Scalar::Int64(2)]
@@ -120126,7 +120032,7 @@ mod tests {
 
         let out = datetimes.value_counts().unwrap();
         assert_eq!(out.name(), "count");
-        assert_eq!(out.index().name(), Some("when"));
+        assert_eq!(out.index().name().map(|n| n.as_str()), Some("when"));
         assert_eq!(
             out.index().labels(),
             &[
@@ -120162,7 +120068,7 @@ mod tests {
         .unwrap();
 
         let out = timedeltas.value_counts().unwrap();
-        assert_eq!(out.index().name(), Some("delta"));
+        assert_eq!(out.index().name().map(|n| n.as_str()), Some("delta"));
         assert_eq!(
             out.index().labels(),
             &[
@@ -120564,7 +120470,7 @@ mod tests {
         // pandas keeps the source Series name as the index name and calls the
         // result "count" (br-frankenpandas-nvglo); unchanged by this fix.
         assert_eq!(out.name(), "count");
-        assert_eq!(out.index().name(), Some("vals"));
+        assert_eq!(out.index().name().map(|n| n.as_str()), Some("vals"));
     }
 
     #[test]
@@ -120747,14 +120653,14 @@ mod tests {
         .unwrap();
 
         let out = s.value_counts().unwrap();
-        assert_eq!(out.index().name(), Some("myname"));
+        assert_eq!(out.index().name().map(|n| n.as_str()), Some("myname"));
         assert_eq!(out.name(), "count");
 
         // Same expectation via value_counts_with_options.
         let out2 = s
             .value_counts_with_options(false, true, false, true)
             .unwrap();
-        assert_eq!(out2.index().name(), Some("myname"));
+        assert_eq!(out2.index().name().map(|n| n.as_str()), Some("myname"));
         assert_eq!(out2.name(), "count");
     }
 
@@ -122982,7 +122888,7 @@ mod tests {
 
         let casted = s.astype(DType::Int64).unwrap();
         assert_eq!(casted.name(), "vals");
-        assert_eq!(casted.index().name(), Some("row_id"));
+        assert_eq!(casted.index().name().map(|n| n.as_str()), Some("row_id"));
         assert_eq!(casted.index().labels(), index.labels());
         assert_eq!(casted.column().dtype(), DType::Int64);
         assert_eq!(
@@ -123752,7 +123658,7 @@ mod tests {
                 IndexLabel::from(14_i64),
             ]
         );
-        assert_eq!(out.index().name(), Some("row_id"));
+        assert_eq!(out.index().name().map(|n| n.as_str()), Some("row_id"));
         assert_eq!(
             out.column_names()
                 .into_iter()
@@ -124751,7 +124657,7 @@ mod tests {
 
         let dropped = df.dropna().unwrap();
         assert_eq!(dropped.index().labels(), &[IndexLabel::from("dup")]);
-        assert_eq!(dropped.index().name(), Some("row_id"));
+        assert_eq!(dropped.index().name().map(|n| n.as_str()), Some("row_id"));
         assert_eq!(dropped.column("a").unwrap().values(), &[Scalar::Int64(1)]);
         assert_eq!(dropped.column("b").unwrap().values(), &[Scalar::Int64(10)]);
     }
@@ -126066,7 +125972,7 @@ mod tests {
                 IndexLabel::Utf8("gamma".to_string()),
             ]
         );
-        assert_eq!(out.index().name(), Some("key"));
+        assert_eq!(out.index().name().map(|n| n.as_str()), Some("key"));
         let names = out.column_names().into_iter().cloned().collect::<Vec<_>>();
         assert_eq!(names, vec!["v".to_string()]);
         assert!(out.column("key").is_none());
@@ -126094,7 +126000,7 @@ mod tests {
             &[IndexLabel::Datetime64(t0), IndexLabel::Datetime64(t1)]
         );
         assert_eq!(out.index().dtype(), "datetime64[ns]");
-        assert_eq!(out.index().name(), Some("t"));
+        assert_eq!(out.index().name().map(|n| n.as_str()), Some("t"));
         let names = out.column_names().into_iter().cloned().collect::<Vec<_>>();
         assert_eq!(names, vec!["v".to_owned()]);
         assert!(out.column("t").is_none());
@@ -126121,7 +126027,7 @@ mod tests {
             &[IndexLabel::Timedelta64(d0), IndexLabel::Timedelta64(d1)]
         );
         assert_eq!(out.index().dtype(), "timedelta64[ns]");
-        assert_eq!(out.index().name(), Some("d"));
+        assert_eq!(out.index().name().map(|n| n.as_str()), Some("d"));
         assert_eq!(
             out.column("d").unwrap().values(),
             &[Scalar::Timedelta64(d0), Scalar::Timedelta64(d1)]
@@ -128064,7 +127970,7 @@ mod tests {
 
         let renamed = df.rename_axis("row_id").unwrap();
 
-        assert_eq!(renamed.index().name(), Some("row_id"));
+        assert_eq!(renamed.index().name().map(|n| n.as_str()), Some("row_id"));
         assert_eq!(df.index().name(), None);
         assert_eq!(renamed.column_names(), vec!["city", "sales"]);
         assert_eq!(
@@ -129058,6 +128964,49 @@ mod tests {
     }
 
     #[test]
+    fn typed_axis_names_from_typed_columns_fvsao_64() {
+        use crate::LabelName;
+        let columns = || {
+            DataFrame::from_dict(
+                &["0", "1"],
+                vec![
+                    (
+                        "0",
+                        vec![Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(2)],
+                    ),
+                    (
+                        "1",
+                        vec![Scalar::Int64(2), Scalar::Int64(3), Scalar::Int64(5)],
+                    ),
+                ],
+            )
+            .unwrap()
+        };
+        let typed = columns()
+            .with_column_labels(vec![IndexLabel::Int64(0), IndexLabel::Int64(1)])
+            .unwrap();
+        let index_name = |frame: &DataFrame| frame.index().name().map(LabelName::label);
+        // set_index and groupby name the index by the column's typed label.
+        let indexed = typed.set_index("0", true).unwrap();
+        assert_eq!(index_name(&indexed), Some(IndexLabel::Int64(0)));
+        let summed = typed.groupby(&["0"]).unwrap().sum().unwrap();
+        assert_eq!(index_name(&summed), Some(IndexLabel::Int64(0)));
+        // reset_index gives the column its typed label back.
+        let back = indexed.reset_index(false).unwrap();
+        assert_eq!(back.column_label("0"), IndexLabel::Int64(0));
+        // A string label recorded over an integer one replaces it
+        // (rename(columns={0: '0'}) kept the integer).
+        let text = typed
+            .clone()
+            .with_recorded_column_labels([IndexLabel::Utf8("0".to_owned())]);
+        assert_eq!(text.column_label("0"), IndexLabel::Utf8("0".to_owned()));
+        assert_eq!(text.column_label("1"), IndexLabel::Int64(1));
+        // NEGATIVE: an untyped frame names its index by the string.
+        let plain = columns().set_index("0", true).unwrap();
+        assert_eq!(index_name(&plain), Some(IndexLabel::Utf8("0".to_owned())));
+    }
+
+    #[test]
     fn typed_labels_through_reshapes_and_the_column_axis_name_fvsao_32() {
         let frame = DataFrame::from_dict(
             &["0", "1", "2", "3"],
@@ -129105,9 +129054,12 @@ mod tests {
         assert_eq!(valued.column_label("06"), IndexLabel::Utf8("06".to_owned()));
         // The column axis' name rides along and trades places in a transpose.
         let named = frame.clone().with_columns_name(Some("k".to_owned()));
-        assert_eq!(named.head(1).unwrap().columns_name(), Some("k"));
+        assert_eq!(
+            named.head(1).unwrap().columns_name().map(|n| n.as_str()),
+            Some("k")
+        );
         let transposed = named.transpose().unwrap();
-        assert_eq!(transposed.index().name(), Some("k"));
+        assert_eq!(transposed.index().name().map(|n| n.as_str()), Some("k"));
         assert_eq!(transposed.columns_name(), None);
         assert_eq!(frame.columns_name(), None);
         // A concat of frames labelling one key as both the integer 0 and
@@ -153556,7 +153508,7 @@ mod tests {
             result.index().labels(),
             &[0_i64.into(), 1_i64.into(), 2_i64.into()]
         );
-        assert_eq!(result.index().name(), Some("idx"));
+        assert_eq!(result.index().name().map(|n| n.as_str()), Some("idx"));
         assert_eq!(
             result.values(),
             &[
@@ -162762,7 +162714,7 @@ mod tests {
         let down = named
             .arith_series(&by_row, ArithmeticOp::Add, 0, false)
             .unwrap();
-        assert_eq!(down.columns_name(), Some("c"));
+        assert_eq!(down.columns_name().map(|n| n.as_str()), Some("c"));
         let exact = Series::from_values(
             "s",
             vec![label("b"), label("a")],
@@ -162772,7 +162724,7 @@ mod tests {
         let across = named
             .arith_series(&exact, ArithmeticOp::Add, 1, false)
             .unwrap();
-        assert_eq!(across.columns_name(), Some("c"));
+        assert_eq!(across.columns_name().map(|n| n.as_str()), Some("c"));
         // NEGATIVE: a union with other labels keeps no name.
         let union = named
             .arith_series(&by_column, ArithmeticOp::Add, 1, false)
@@ -171344,9 +171296,9 @@ mod tests {
         );
         // A named flat axis keeps its name; NEGATIVE: a selection that keeps
         // columns is as before.
-        let named = flat.clone().with_columns_name(Some("c".into()));
+        let named = flat.clone().with_columns_name(Some("c"));
         let none = named.select_dtypes(&[DType::Utf8], &[]).unwrap();
-        assert_eq!(none.columns_name(), Some("c"));
+        assert_eq!(none.columns_name().map(|n| n.as_str()), Some("c"));
         assert!(none.columns_multiindex().is_none());
         let kept = named.select_dtypes(&[DType::Int64], &[]).unwrap();
         assert_eq!(kept.column_names(), vec!["a_x", "b_y"]);
@@ -174194,7 +174146,7 @@ mod tests {
         // The first level: rows (b, c) sorted, columns a named 'a'; a gap
         // makes the ints float64.
         let first = s.unstack_levels(&[0], None).unwrap();
-        assert_eq!(first.columns_name(), Some("a"));
+        assert_eq!(first.columns_name().map(|n| n.as_str()), Some("a"));
         assert_eq!(first.column_labels(), vec![text("x"), text("y")]);
         assert_eq!(first.len(), 4);
         assert_eq!(first.column("x").unwrap().dtype(), DType::Float64);
@@ -187837,7 +187789,7 @@ mod tests {
                         IndexLabel::Utf8("B".into()),
                         IndexLabel::Utf8("A".into())
                     ]
-                    && index.name() == Some("product")
+                    && index.name().is_some_and(|name| name == "product")
         ));
     }
 
@@ -192423,7 +192375,7 @@ mod tests {
             IndexLabel::Utf8("NaT".into()),
         ];
         assert_eq!(out.index().labels(), expected.as_slice());
-        assert_eq!(out.index().name(), Some("when"));
+        assert_eq!(out.index().name().map(|n| n.as_str()), Some("when"));
         assert_eq!(
             out.column("value").unwrap().values(),
             df.column("value").unwrap().values()
@@ -192489,7 +192441,7 @@ mod tests {
                 IndexLabel::Utf8("NaT".into()),
             ]
         );
-        assert_eq!(weekly.index().name(), Some("when"));
+        assert_eq!(weekly.index().name().map(|n| n.as_str()), Some("when"));
 
         let business = df.to_period("B").unwrap();
         assert_eq!(
@@ -192580,7 +192532,7 @@ mod tests {
                 ],
                 "to_period({freq})"
             );
-            assert_eq!(periods.index().name(), Some("when"));
+            assert_eq!(periods.index().name().map(|n| n.as_str()), Some("when"));
         }
 
         // to_timestamp round-trips the anchored label (anchor-independent split).
@@ -192767,7 +192719,7 @@ mod tests {
             IndexLabel::Datetime64(i64::MIN),
         ];
         assert_eq!(out.index().labels(), expected.as_slice());
-        assert_eq!(out.index().name(), Some("period"));
+        assert_eq!(out.index().name().map(|n| n.as_str()), Some("period"));
         assert_eq!(
             out.column("value").unwrap().values(),
             df.column("value").unwrap().values()
@@ -192808,7 +192760,7 @@ mod tests {
 
         let out = df.to_timestamp("M", "start").unwrap();
         assert!(out.index().labels().is_empty());
-        assert_eq!(out.index().name(), Some("period"));
+        assert_eq!(out.index().name().map(|n| n.as_str()), Some("period"));
         assert!(out.column_names().is_empty());
     }
 
@@ -192842,7 +192794,7 @@ mod tests {
             ]
             .as_slice()
         );
-        assert_eq!(start.index().name(), Some("period"));
+        assert_eq!(start.index().name().map(|n| n.as_str()), Some("period"));
 
         let end = df.to_timestamp("W", "end").unwrap();
         assert_eq!(
@@ -195886,7 +195838,7 @@ mod tests {
             &[Scalar::Int64(0), Scalar::Int64(2)]
         );
         // Index name propagated from the index Series.
-        assert_eq!(ct.index().name(), Some("row"));
+        assert_eq!(ct.index().name().map(|n| n.as_str()), Some("row"));
     }
 
     #[test]
@@ -208074,7 +208026,7 @@ mod tests {
 
         let renamed = s.rename_axis("idx").unwrap();
         // Index axis renamed.
-        assert_eq!(renamed.index().name(), Some("idx"));
+        assert_eq!(renamed.index().name().map(|n| n.as_str()), Some("idx"));
         // Series name itself unchanged.
         assert_eq!(renamed.name(), "values");
         // Values unchanged.
@@ -208092,10 +208044,13 @@ mod tests {
         )
         .unwrap();
         let first = s.rename_axis("first_name").unwrap();
-        assert_eq!(first.index().name(), Some("first_name"));
+        assert_eq!(first.index().name().map(|n| n.as_str()), Some("first_name"));
         // Renaming again replaces the axis name.
         let second = first.rename_axis("second_name").unwrap();
-        assert_eq!(second.index().name(), Some("second_name"));
+        assert_eq!(
+            second.index().name().map(|n| n.as_str()),
+            Some("second_name")
+        );
     }
 
     #[test]
@@ -208107,7 +208062,7 @@ mod tests {
         let with_axis = s.rename_axis("ax").unwrap();
         let with_both = with_axis.rename("renamed").unwrap();
         assert_eq!(with_both.name(), "renamed");
-        assert_eq!(with_both.index().name(), Some("ax"));
+        assert_eq!(with_both.index().name().map(|n| n.as_str()), Some("ax"));
     }
 
     // ── DataFrame Bool-column ops parity (br-frankenpandas-fcf80) ─
@@ -211565,7 +211520,7 @@ mod tests {
         let by_key = grouped.column_as_series("v").unwrap();
         let wide = by_key.unstack().unwrap();
         assert_eq!(wide.column_names(), vec!["x", "y"]);
-        assert_eq!(wide.index().name(), Some("k"));
+        assert_eq!(wide.index().name().map(|n| n.as_str()), Some("k"));
         // (b, y) does not occur: NaN, so the int values are float64.
         assert_eq!(
             wide.columns()["x"].values(),
@@ -211829,7 +211784,7 @@ mod tests {
         let keyed = frame
             .with_index(Index::new((5..8).map(IndexLabel::Int64).collect()).set_name("k"))
             .unwrap();
-        assert_eq!(keyed.index().name(), Some("k"));
+        assert_eq!(keyed.index().name().map(|n| n.as_str()), Some("k"));
         assert_eq!(keyed.index().labels()[0], IndexLabel::Int64(5));
         assert!(
             frame
@@ -213062,7 +213017,7 @@ mod tests {
             .unwrap();
 
         let same = super::concat_series(&[&s1, &s2]).unwrap();
-        assert_eq!(same.index().name(), Some("myidx"));
+        assert_eq!(same.index().name().map(|n| n.as_str()), Some("myidx"));
 
         let mixed = super::concat_series(&[&s1, &s3]).unwrap();
         assert!(mixed.index().name().is_none());
@@ -213100,7 +213055,7 @@ mod tests {
         .rename_axis("myidx")
         .unwrap();
         let out = df.truncate(Some(&"a".into()), Some(&"b".into())).unwrap();
-        assert_eq!(out.index().name(), Some("myidx"));
+        assert_eq!(out.index().name().map(|n| n.as_str()), Some("myidx"));
     }
 
     #[test]
@@ -213116,7 +213071,7 @@ mod tests {
         .rename_axis("myidx")
         .unwrap();
         let out = s.reindex(vec!["a".into(), "c".into(), "d".into()]).unwrap();
-        assert_eq!(out.index().name(), Some("myidx"));
+        assert_eq!(out.index().name().map(|n| n.as_str()), Some("myidx"));
         assert_eq!(out.len(), 3);
 
         let df = DataFrame::from_dict_with_index(
@@ -213127,7 +213082,7 @@ mod tests {
         .rename_axis("idx")
         .unwrap();
         let out2 = df.reindex(vec!["a".into(), "c".into()]).unwrap();
-        assert_eq!(out2.index().name(), Some("idx"));
+        assert_eq!(out2.index().name().map(|n| n.as_str()), Some("idx"));
     }
 
     #[test]
@@ -213151,7 +213106,7 @@ mod tests {
                 .unwrap();
 
         let same = super::concat_dataframes(&[&a, &b]).unwrap();
-        assert_eq!(same.index().name(), Some("myidx"));
+        assert_eq!(same.index().name().map(|n| n.as_str()), Some("myidx"));
 
         let mixed = super::concat_dataframes(&[&a, &c]).unwrap();
         assert!(mixed.index().name().is_none());
@@ -219965,7 +219920,7 @@ mod test_select_columns_perf_76e1fd {
         let result = s.to_period("M").unwrap();
         assert_eq!(result.name(), "vals");
         assert_eq!(result.len(), 3);
-        assert_eq!(result.index().name(), Some("when"));
+        assert_eq!(result.index().name().map(|n| n.as_str()), Some("when"));
         assert_eq!(result.values(), s.values());
         assert_eq!(
             result.index().labels()[0],

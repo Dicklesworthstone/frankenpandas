@@ -763,7 +763,7 @@ print(json.dumps(res))
         .collect();
     assert_eq!(actual_renamed_idx, oracle_renamed_idx);
     assert_eq!(
-        s_renamed_axis.index().name(),
+        s_renamed_axis.index().name().map(|n| n.as_str()),
         oracle["renamed_axis_name"].as_str()
     );
 }
@@ -1053,7 +1053,7 @@ print(json.dumps(res))
 
     assert_eq!(remainder.name(), oracle["remainder_name"].as_str().unwrap());
     assert_eq!(
-        remainder.index().name(),
+        remainder.index().name().map(|n| n.as_str()),
         oracle["remainder_idx_name"].as_str()
     );
 }

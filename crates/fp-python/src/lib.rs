@@ -25,8 +25,7 @@ use std::{
 use fp_columnar::{ArithmeticOp, Column, ComparisonOp};
 use fp_expr::DataFrameExprExt;
 use fp_frame::{
-    DataFrame, DropNaHow, FrameError, PlotKind, Series, SeriesName, concat_dataframes,
-    concat_series,
+    DataFrame, DropNaHow, FrameError, LabelName, PlotKind, Series, concat_dataframes, concat_series,
 };
 use fp_index::{
     AlignMode, CategoricalIndex, DatetimeIndex, DuplicateKeep, Index, IndexLabel, MultiIndex,
@@ -1621,7 +1620,7 @@ impl SeriesFooter {
 /// A Series name as pandas' footer prints it (`pprint_thing`): a tuple's
 /// items unquoted in parentheses - (a, 1), (x,) - where it printed Python's
 /// repr ('a', 1); any other name as its text.
-fn pandas_name_text(name: &SeriesName) -> String {
+fn pandas_name_text(name: &LabelName) -> String {
     let label = name.label();
     if !matches!(label, IndexLabel::Object(_)) {
         return name.to_string();
@@ -1747,7 +1746,7 @@ fn pandas_series_text(
                 .collect();
             (
                 pandas_label_texts(&shown, index.tz()),
-                index.name().map(str::to_owned),
+                index.name().map(String::from),
             )
         }
     };
@@ -2090,7 +2089,7 @@ fn pandas_frame_text(
             // prints it (pivot's 'c'; it was blank).
             (
                 headers,
-                vec![frame.columns_name().unwrap_or_default().to_owned()],
+                vec![frame.columns_name().map(String::from).unwrap_or_default()],
             )
         }
     };
@@ -2118,7 +2117,7 @@ fn pandas_frame_text(
             });
             (
                 vec![texts],
-                frame.index().name().map(|name| vec![name.to_owned()]),
+                frame.index().name().map(|name| vec![name.to_string()]),
             )
         }
     };
@@ -6748,16 +6747,16 @@ fn index_arg_freq(obj: &Bound<'_, PyAny>) -> Option<String> {
 
 /// The name an Index argument gives the Series built from it, as pandas'
 /// `Series(Index([1, 2], name='a')).name == 'a'`.
-fn py_index_arg_name(obj: &Bound<'_, PyAny>) -> Option<String> {
+fn py_index_arg_name(obj: &Bound<'_, PyAny>) -> Option<LabelName> {
     if let Ok(idx) = obj.extract::<PyRef<'_, PyIndex>>() {
-        idx.inner.name().map(str::to_owned)
+        idx.inner.name().cloned()
     } else if let Ok(dti) = obj.extract::<PyRef<'_, PyDatetimeIndex>>() {
-        dti.inner.name().map(str::to_owned)
+        dti.inner.name().cloned()
     } else if let Ok(tdi) = obj.extract::<PyRef<'_, PyTimedeltaIndex>>() {
-        tdi.inner.name().map(str::to_owned)
+        tdi.inner.name().cloned()
     } else if let Ok(series) = obj.extract::<PyRef<'_, PySeries>>() {
         let name = series.inner.name();
-        (!name.is_empty()).then(|| name.to_string())
+        (!name.is_empty()).then(|| name.clone())
     } else {
         None
     }
@@ -6843,23 +6842,41 @@ fn py_value_to_column(
 /// text, and any other label (0, 1.5, a Timestamp) keeps its type, as
 /// pandas' (fvsao.32; `Series(name=0).name` was the string '0'). A name no
 /// label holds (a tuple) is its `str`.
-fn py_series_name(value: &Bound<'_, PyAny>) -> PyResult<SeriesName> {
+fn py_series_name(value: &Bound<'_, PyAny>) -> PyResult<LabelName> {
     if value.is_none() {
-        return Ok(SeriesName::default());
+        return Ok(LabelName::default());
     }
     match py_to_index_label(value) {
-        Ok(label) => Ok(SeriesName::typed(label)),
+        Ok(label) => Ok(LabelName::typed(label)),
         Err(_) => Ok(value.str()?.to_string().into()),
     }
 }
 
 /// A Series name as pandas reports it: None when unnamed, else its typed
 /// label.
-fn series_name_to_py(py: Python<'_>, name: &SeriesName) -> PyResult<Option<Py<PyAny>>> {
+fn series_name_to_py(py: Python<'_>, name: &LabelName) -> PyResult<Option<Py<PyAny>>> {
     if name.is_empty() {
         return Ok(None);
     }
     index_label_to_py(py, &name.label()).map(Some)
+}
+
+/// An axis name (an index's, the columns') as pandas reports it: None when
+/// unnamed, else its typed label - `set_index(0).index.name` is the integer
+/// 0 (fvsao.64; it was the string '0').
+fn axis_name_to_py(py: Python<'_>, name: Option<&LabelName>) -> PyResult<Option<Py<PyAny>>> {
+    name.map(|name| index_label_to_py(py, &name.label()))
+        .transpose()
+}
+
+/// An axis name given from Python: None unnames the axis; a string is its
+/// text, and any other label (0, 1.5, a Timestamp) keeps its type
+/// (`pd.Index([5, 6], name=7)` raised TypeError; fvsao.64).
+fn py_axis_name(value: &Bound<'_, PyAny>) -> PyResult<Option<LabelName>> {
+    if value.is_none() {
+        return Ok(None);
+    }
+    py_series_name(value).map(Some)
 }
 
 /// The MultiIndex `pd.Index([(1, 2), (3, 4)])` builds from a list (or
@@ -7959,18 +7976,19 @@ pub struct PyOwnedIndex {
 #[pymethods]
 impl PyOwnedIndex {
     #[getter]
-    fn name(slf: PyRef<'_, Self>) -> Option<String> {
-        slf.as_super().inner.name().map(str::to_owned)
+    fn name(slf: PyRef<'_, Self>) -> PyResult<Option<Py<PyAny>>> {
+        axis_name_to_py(slf.py(), slf.as_super().inner.name())
     }
 
     /// `index.name = value`: this Index and its owner's index are renamed.
     #[setter]
-    fn set_name(mut slf: PyRefMut<'_, Self>, name: Option<&str>) -> PyResult<()> {
+    fn set_name(mut slf: PyRefMut<'_, Self>, name: &Bound<'_, PyAny>) -> PyResult<()> {
         let py = slf.py();
+        let name = py_axis_name(name)?;
         let owner = slf.owner.clone_ref(py);
         let columns = slf.columns;
         let base = slf.as_super();
-        base.inner = base.inner.set_names(name);
+        base.inner = base.inner.set_names(name.clone());
         rename_owner_index(owner.bind(py), name, columns)
     }
 }
@@ -7978,13 +7996,14 @@ impl PyOwnedIndex {
 /// Rename the row index of `owner` (the DataFrame or Series an `.index`
 /// came from), or with `columns` its column axis (a `.columns`), as pandas'
 /// shared Index object renames it.
-fn rename_owner_index(owner: &Bound<'_, PyAny>, name: Option<&str>, columns: bool) -> PyResult<()> {
+fn rename_owner_index(
+    owner: &Bound<'_, PyAny>,
+    name: Option<LabelName>,
+    columns: bool,
+) -> PyResult<()> {
     if columns {
         if let Ok(mut frame) = owner.extract::<PyRefMut<'_, PyDataFrame>>() {
-            frame.inner = frame
-                .inner
-                .clone()
-                .with_columns_name(name.map(str::to_owned));
+            frame.inner = frame.inner.clone().with_columns_name(name);
         }
         return Ok(());
     }
@@ -8012,17 +8031,18 @@ pub struct PyOwnedDatetimeIndex {
 #[pymethods]
 impl PyOwnedDatetimeIndex {
     #[getter]
-    fn name(slf: PyRef<'_, Self>) -> Option<String> {
-        slf.as_super().inner.name().map(str::to_owned)
+    fn name(slf: PyRef<'_, Self>) -> PyResult<Option<Py<PyAny>>> {
+        axis_name_to_py(slf.py(), slf.as_super().inner.name())
     }
 
     #[setter]
-    fn set_name(mut slf: PyRefMut<'_, Self>, name: Option<&str>) -> PyResult<()> {
+    fn set_name(mut slf: PyRefMut<'_, Self>, name: &Bound<'_, PyAny>) -> PyResult<()> {
         let py = slf.py();
+        let name = py_axis_name(name)?;
         let owner = slf.owner.clone_ref(py);
         let columns = slf.columns;
         let base = slf.as_super();
-        base.inner = base.inner.set_names(name);
+        base.inner = base.inner.set_names(name.clone());
         rename_owner_index(owner.bind(py), name, columns)
     }
 }
@@ -8039,17 +8059,18 @@ pub struct PyOwnedTimedeltaIndex {
 #[pymethods]
 impl PyOwnedTimedeltaIndex {
     #[getter]
-    fn name(slf: PyRef<'_, Self>) -> Option<String> {
-        slf.as_super().inner.name().map(str::to_owned)
+    fn name(slf: PyRef<'_, Self>) -> PyResult<Option<Py<PyAny>>> {
+        axis_name_to_py(slf.py(), slf.as_super().inner.name())
     }
 
     #[setter]
-    fn set_name(mut slf: PyRefMut<'_, Self>, name: Option<&str>) -> PyResult<()> {
+    fn set_name(mut slf: PyRefMut<'_, Self>, name: &Bound<'_, PyAny>) -> PyResult<()> {
         let py = slf.py();
+        let name = py_axis_name(name)?;
         let owner = slf.owner.clone_ref(py);
         let columns = slf.columns;
         let base = slf.as_super();
-        base.inner = base.inner.set_names(name);
+        base.inner = base.inner.set_names(name.clone());
         rename_owner_index(owner.bind(py), name, columns)
     }
 }
@@ -8067,17 +8088,18 @@ pub struct PyOwnedRangeIndex {
 #[pymethods]
 impl PyOwnedRangeIndex {
     #[getter]
-    fn name(slf: PyRef<'_, Self>) -> Option<String> {
-        slf.as_super().as_super().inner.name().map(str::to_owned)
+    fn name(slf: PyRef<'_, Self>) -> PyResult<Option<Py<PyAny>>> {
+        axis_name_to_py(slf.py(), slf.as_super().as_super().inner.name())
     }
 
     #[setter]
-    fn set_name(mut slf: PyRefMut<'_, Self>, name: Option<&str>) -> PyResult<()> {
+    fn set_name(mut slf: PyRefMut<'_, Self>, name: &Bound<'_, PyAny>) -> PyResult<()> {
         let py = slf.py();
+        let name = py_axis_name(name)?;
         let owner = slf.owner.clone_ref(py);
         let columns = slf.columns;
         let base = slf.as_super().as_super();
-        base.inner = base.inner.set_names(name);
+        base.inner = base.inner.set_names(name.clone());
         rename_owner_index(owner.bind(py), name, columns)
     }
 }
@@ -8153,9 +8175,10 @@ impl PyIndex {
                 labels_ndarray(py, index.inner.labels())?,
                 self.inner
                     .name()
-                    .filter(|name| index.inner.name() == Some(*name)),
+                    .filter(|name| index.inner.name() == Some(*name))
+                    .cloned(),
             ),
-            Err(_) => (other.clone(), self.inner.name()),
+            Err(_) => (other.clone(), self.inner.name().cloned()),
         };
         let out = labels.call_method1(op, (other,))?;
         if out.is(py.NotImplemented()) {
@@ -8167,7 +8190,7 @@ impl PyIndex {
     /// `-index`, `+index`, `abs(index)`: numpy's answer as an Index.
     fn unary(&self, py: Python<'_>, op: &str) -> PyResult<Py<PyAny>> {
         let out = labels_ndarray(py, self.inner.labels())?.call_method0(op)?;
-        Ok(Py::new(py, Self::new(Some(&out), self.inner.name())?)?.into_any())
+        Ok(Py::new(py, Self::new(Some(&out), self.inner.name().cloned())?)?.into_any())
     }
 
     /// `Index.astype` by pandas dtype name (shared with the typed index classes).
@@ -8183,7 +8206,7 @@ impl PyIndex {
     /// when `name` is None) - it took the Series' index labels - or a
     /// sequence of labels, bools kept as bools (a list of bools went
     /// through the int path and came back 1/0).
-    fn new(data: Option<&Bound<'_, PyAny>>, name: Option<&str>) -> PyResult<Self> {
+    fn new(data: Option<&Bound<'_, PyAny>>, name: Option<LabelName>) -> PyResult<Self> {
         let mut labels: Vec<IndexLabel> = Vec::new();
         if let Some(d) = data {
             if let Ok(idx) = d.extract::<PyRef<'_, PyIndex>>() {
@@ -8199,7 +8222,7 @@ impl PyIndex {
                     .iter()
                     .map(scalar_to_index_label_converter)
                     .collect();
-                let series_name = Some(s.inner.name().as_str()).filter(|n| !n.is_empty());
+                let series_name = Some(s.inner.name().clone()).filter(|n| !n.is_empty());
                 return Ok(PyIndex {
                     inner: Index::new(labels).set_names(name.or(series_name)),
                 });
@@ -8250,10 +8273,12 @@ impl PyIndex {
         data: Option<&Bound<'_, PyAny>>,
         dtype: Option<&Bound<'_, PyAny>>,
         copy: bool,
-        name: Option<&str>,
+        name: Option<&Bound<'_, PyAny>>,
         tupleize_cols: bool,
     ) -> PyResult<Py<PyAny>> {
         let _ = copy; // pandas' copy= does not change the labels
+        // Any hashable names it, typed (`name=7` raised TypeError; fvsao.64).
+        let name = name.map(py_axis_name).transpose()?.flatten();
         if let Some(dtype) = dtype.filter(|dtype| !dtype.is_none()) {
             return Ok(Py::new(py, Self::new(data, name)?.astype(dtype, true)?)?.into_any());
         }
@@ -8263,7 +8288,8 @@ impl PyIndex {
         }
         // Aware datetimes of one zone are that zone's DatetimeIndex.
         if let Some(data) = data.filter(|data| sequence_zone(data).is_some()) {
-            let index = PyDatetimeIndex::new(py, Some(data), None, None, name)?;
+            let mut index = PyDatetimeIndex::new(py, Some(data), None, None, None)?;
+            index.inner = index.inner.set_names(name);
             return Ok(Py::new(py, index)?.into_any());
         }
         // Tuples are pandas' MultiIndex (they became their text; r0hk0) -
@@ -8285,13 +8311,14 @@ impl PyIndex {
     }
 
     #[getter]
-    fn name(&self) -> Option<String> {
-        self.inner.name().map(String::from)
+    fn name(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        axis_name_to_py(py, self.inner.name())
     }
 
     #[setter]
-    fn set_name(&mut self, name: Option<&str>) {
-        self.inner = self.inner.set_names(name);
+    fn set_name(&mut self, name: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.inner = self.inner.set_names(py_axis_name(name)?);
+        Ok(())
     }
 
     fn to_list(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
@@ -8339,7 +8366,7 @@ impl PyIndex {
             .map(|lbl| index_label_to_py(py, lbl))
             .collect::<PyResult<Vec<_>>>()?;
         let idx_list = PyList::new(py, &idx_labels)?;
-        let name = self.inner.name().into_bound_py_any(py)?;
+        let name = axis_name_to_py(py, self.inner.name())?.into_bound_py_any(py)?;
         // Index(data, dtype, copy, name), as pandas' constructor reads its
         // positional arguments.
         let args = PyTuple::new(
@@ -8716,10 +8743,11 @@ impl PyIndex {
         self.clone()
     }
 
-    fn rename(&self, name: Option<&str>) -> Self {
-        PyIndex {
-            inner: self.inner.rename_index(name),
-        }
+    /// `Index.rename(name)`: any hashable, typed (fvsao.64).
+    fn rename(&self, name: &Bound<'_, PyAny>) -> PyResult<Self> {
+        Ok(PyIndex {
+            inner: self.inner.rename_index(py_axis_name(name)?),
+        })
     }
 
     fn __contains__(&self, key: &Bound<'_, PyAny>) -> bool {
@@ -9033,9 +9061,11 @@ impl PyIndex {
         1
     }
 
+    /// pandas' FrozenList of the one (typed) name.
     #[getter]
-    fn names(&self) -> Vec<Option<String>> {
-        vec![self.inner.name().map(str::to_string)]
+    fn names(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let name = axis_name_to_py(py, self.inner.name())?;
+        frozen_list(py, vec![name.into_py_any(py)?])
     }
 
     #[getter]
@@ -9235,12 +9265,20 @@ impl PyIndex {
     }
 
     #[pyo3(signature = (index=None, name=None))]
-    fn to_series(&self, index: Option<&PyIndex>, name: Option<&str>) -> PyResult<PySeries> {
+    fn to_series(
+        &self,
+        index: Option<&PyIndex>,
+        name: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
         let idx = match index {
             Some(i) => i.inner.clone(),
             None => self.inner.clone(),
         };
-        let series_name = name.or_else(|| self.inner.name()).unwrap_or("");
+        // `name`, else the index's typed name (fvsao.64).
+        let series_name = match name.filter(|name| !name.is_none()) {
+            Some(name) => py_series_name(name)?,
+            None => self.inner.name().cloned().unwrap_or_default(),
+        };
         let col = Column::from_values(
             self.inner
                 .labels()
@@ -9263,8 +9301,17 @@ impl PyIndex {
     }
 
     #[pyo3(signature = (index=true, name=None))]
-    fn to_frame(&self, index: bool, name: Option<&str>) -> PyResult<PyDataFrame> {
-        let col_name = name.or_else(|| self.inner.name()).unwrap_or("0");
+    fn to_frame(&self, index: bool, name: Option<&Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        // The column is `name`, else the index's typed name, else the
+        // integer 0, as pandas' (fvsao.64; they were text).
+        let label = match name.filter(|name| !name.is_none()) {
+            Some(name) => py_series_name(name)?.label(),
+            None => self
+                .inner
+                .name()
+                .map_or(IndexLabel::Int64(0), LabelName::label),
+        };
+        let col_name = fp_frame::column_key(&label);
         let idx = if index {
             self.inner.clone()
         } else {
@@ -9288,9 +9335,10 @@ impl PyIndex {
         )
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let mut col_map = BTreeMap::new();
-        col_map.insert(col_name.to_string(), col);
-        let df = DataFrame::new_with_column_order(idx, col_map, vec![col_name.to_string()])
-            .map_err(frame_error_to_py)?;
+        col_map.insert(col_name.clone(), col);
+        let df = DataFrame::new_with_column_order(idx, col_map, vec![col_name])
+            .map_err(frame_error_to_py)?
+            .with_recorded_column_labels([label]);
         Ok(PyDataFrame { inner: df })
     }
 
@@ -9829,7 +9877,7 @@ impl PyDatetimeIndex {
         data: Option<&Bound<'_, PyAny>>,
         freq: Option<&Bound<'_, PyAny>>,
         tz: Option<&Bound<'_, PyAny>>,
-        name: Option<&str>,
+        name: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let mut inner = if let Some(d) = data {
             if let Ok(dti) = d.extract::<PyRef<'_, PyDatetimeIndex>>() {
@@ -9910,7 +9958,8 @@ impl PyDatetimeIndex {
         } else {
             DatetimeIndex::new(Vec::new())
         };
-        if let Some(n) = name {
+        // Any hashable names it, typed (fvsao.64).
+        if let Some(n) = name.map(py_axis_name).transpose()?.flatten() {
             inner = inner.set_name(n);
         }
         if let Some(zone) = tz.filter(|tz| !tz.is_none()) {
@@ -9951,13 +10000,14 @@ impl PyDatetimeIndex {
     }
 
     #[getter]
-    fn name(&self) -> Option<String> {
-        self.inner.name().map(String::from)
+    fn name(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        axis_name_to_py(py, self.inner.name())
     }
 
     #[setter]
-    fn set_name(&mut self, name: Option<&str>) {
-        self.inner = self.inner.set_names(name);
+    fn set_name(&mut self, name: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.inner = self.inner.set_names(py_axis_name(name)?);
+        Ok(())
     }
 
     /// `datetime64[ns]`, or `datetime64[ns, zone]` for a tz-aware index, as
@@ -10341,10 +10391,10 @@ impl PyDatetimeIndex {
         self.clone()
     }
 
-    fn rename(&self, name: &str) -> Self {
-        PyDatetimeIndex {
-            inner: self.inner.rename(name),
-        }
+    fn rename(&self, name: &Bound<'_, PyAny>) -> PyResult<Self> {
+        Ok(PyDatetimeIndex {
+            inner: self.inner.rename_index(py_axis_name(name)?),
+        })
     }
 
     fn equals(&self, other: &PyDatetimeIndex) -> bool {
@@ -10520,9 +10570,11 @@ impl PyDatetimeIndex {
         1
     }
 
+    /// pandas' FrozenList of the one (typed) name.
     #[getter]
-    fn names(&self) -> Vec<Option<String>> {
-        vec![self.inner.name().map(str::to_string)]
+    fn names(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let name = axis_name_to_py(py, self.inner.name())?;
+        frozen_list(py, vec![name.into_py_any(py)?])
     }
 
     #[getter]
@@ -10648,9 +10700,13 @@ impl PyDatetimeIndex {
     fn to_series(
         &self,
         index: Option<&Bound<'_, PyAny>>,
-        name: Option<&str>,
+        name: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        let series_name = name.or_else(|| self.inner.name()).unwrap_or("");
+        // `name`, else the index's typed name (fvsao.64).
+        let series_name = match name.filter(|name| !name.is_none()) {
+            Some(name) => py_series_name(name)?,
+            None => self.inner.name().cloned().unwrap_or_default(),
+        };
         let idx = if let Some(i_obj) = index {
             if let Ok(py_idx) = i_obj.extract::<PyRef<'_, PyIndex>>() {
                 py_idx.inner.clone()
@@ -10665,8 +10721,17 @@ impl PyDatetimeIndex {
     }
 
     #[pyo3(signature = (index=true, name=None))]
-    fn to_frame(&self, index: bool, name: Option<&str>) -> PyResult<PyDataFrame> {
-        let col_name = name.or_else(|| self.inner.name()).unwrap_or("0");
+    fn to_frame(&self, index: bool, name: Option<&Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        // The column is `name`, else the index's typed name, else the
+        // integer 0, as pandas' (fvsao.64; they were text).
+        let label = match name.filter(|name| !name.is_none()) {
+            Some(name) => py_series_name(name)?.label(),
+            None => self
+                .inner
+                .name()
+                .map_or(IndexLabel::Int64(0), LabelName::label),
+        };
+        let col_name = fp_frame::column_key(&label);
         let idx = if index {
             self.inner.as_index().clone()
         } else {
@@ -12208,9 +12273,13 @@ impl PyMultiIndex {
     fn to_series(
         &self,
         index: Option<&Bound<'_, PyAny>>,
-        name: Option<&str>,
+        name: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        let s_name = name.unwrap_or("");
+        let s_name = name
+            .filter(|name| !name.is_none())
+            .map(py_series_name)
+            .transpose()?
+            .unwrap_or_default();
         let idx = if let Some(i_obj) = index {
             if let Ok(py_idx) = i_obj.extract::<PyRef<'_, PyIndex>>() {
                 py_idx.inner.clone()
@@ -13329,14 +13398,15 @@ impl PyTimedeltaIndex {
     }
 
     #[getter]
-    pub fn name(&self) -> Option<String> {
-        self.inner.name().map(str::to_owned)
+    pub fn name(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        axis_name_to_py(py, self.inner.name())
     }
 
     /// `index.name = value` (pandas' Index name is writable; it raised).
     #[setter]
-    fn set_name(&mut self, name: Option<&str>) {
-        self.inner = self.inner.set_names(name);
+    fn set_name(&mut self, name: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.inner = self.inner.set_names(py_axis_name(name)?);
+        Ok(())
     }
 
     #[getter]
@@ -13465,10 +13535,10 @@ impl PyTimedeltaIndex {
         }
     }
 
-    pub fn rename(&self, name: Option<&str>) -> Self {
-        Self {
-            inner: self.inner.rename_index(name),
-        }
+    pub fn rename(&self, name: &Bound<'_, PyAny>) -> PyResult<Self> {
+        Ok(Self {
+            inner: self.inner.rename_index(py_axis_name(name)?),
+        })
     }
 
     pub fn equals(&self, other: &Self) -> bool {
@@ -13624,9 +13694,11 @@ impl PyTimedeltaIndex {
         1
     }
 
+    /// pandas' FrozenList of the one (typed) name.
     #[getter]
-    fn names(&self) -> Vec<Option<String>> {
-        vec![self.inner.name().map(str::to_string)]
+    fn names(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let name = axis_name_to_py(py, self.inner.name())?;
+        frozen_list(py, vec![name.into_py_any(py)?])
     }
 
     #[getter]
@@ -13770,9 +13842,13 @@ impl PyTimedeltaIndex {
     fn to_series(
         &self,
         index: Option<&Bound<'_, PyAny>>,
-        name: Option<&str>,
+        name: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        let series_name = name.or_else(|| self.inner.name()).unwrap_or("");
+        // `name`, else the index's typed name (fvsao.64).
+        let series_name = match name.filter(|name| !name.is_none()) {
+            Some(name) => py_series_name(name)?,
+            None => self.inner.name().cloned().unwrap_or_default(),
+        };
         let idx = if let Some(i_obj) = index {
             if let Ok(py_idx) = i_obj.extract::<PyRef<'_, PyIndex>>() {
                 py_idx.inner.clone()
@@ -13799,8 +13875,17 @@ impl PyTimedeltaIndex {
     }
 
     #[pyo3(signature = (index=true, name=None))]
-    fn to_frame(&self, index: bool, name: Option<&str>) -> PyResult<PyDataFrame> {
-        let col_name = name.or_else(|| self.inner.name()).unwrap_or("0");
+    fn to_frame(&self, index: bool, name: Option<&Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        // The column is `name`, else the index's typed name, else the
+        // integer 0, as pandas' (fvsao.64; they were text).
+        let label = match name.filter(|name| !name.is_none()) {
+            Some(name) => py_series_name(name)?.label(),
+            None => self
+                .inner
+                .name()
+                .map_or(IndexLabel::Int64(0), LabelName::label),
+        };
+        let col_name = fp_frame::column_key(&label);
         let idx = if index {
             self.inner.as_index().clone()
         } else {
@@ -13819,9 +13904,10 @@ impl PyTimedeltaIndex {
         )
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let mut col_map = BTreeMap::new();
-        col_map.insert(col_name.to_string(), col);
-        let df = DataFrame::new_with_column_order(idx, col_map, vec![col_name.to_string()])
-            .map_err(frame_error_to_py)?;
+        col_map.insert(col_name.clone(), col);
+        let df = DataFrame::new_with_column_order(idx, col_map, vec![col_name])
+            .map_err(frame_error_to_py)?
+            .with_recorded_column_labels([label]);
         Ok(PyDataFrame { inner: df })
     }
 
@@ -14286,7 +14372,7 @@ impl PyRangeIndex {
     fn object(
         py: Python<'_>,
         (start, stop, step): (i64, i64, i64),
-        name: Option<&str>,
+        name: Option<LabelName>,
     ) -> PyResult<Py<PyAny>> {
         RangeIndex::new(start, stop, step)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
@@ -14345,7 +14431,7 @@ impl PyRangeIndex {
             _ => None,
         });
         match span {
-            Some(span) => Self::object(py, span, index.name()),
+            Some(span) => Self::object(py, span, index.name().cloned()),
             None => slf.as_super().arithmetic(py, other, op),
         }
     }
@@ -14420,7 +14506,7 @@ impl PyRangeIndex {
                 start.into_bound_py_any(py)?,
                 stop.into_bound_py_any(py)?,
                 step.into_bound_py_any(py)?,
-                index.name().into_bound_py_any(py)?,
+                axis_name_to_py(py, index.name())?.into_bound_py_any(py)?,
             ],
         )?;
         Ok((py.get_type::<Self>().into_any(), args))
@@ -14459,7 +14545,7 @@ impl PyRangeIndex {
         if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
             let rows = slice_rows(slice, index.len())?;
             if let Some(span) = index.sliced_range_span(rows.start, rows.stop, rows.step) {
-                return Self::object(py, span, index.name());
+                return Self::object(py, span, index.name().cloned());
             }
         }
         slf.as_super().__getitem__(py, key)
@@ -14579,7 +14665,7 @@ impl PyRangeIndex {
         let stop = start
             .checked_sub(step)
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyOverflowError, _>("range overflow"))?;
-        Self::object(slf.py(), (last, stop, -step), index.name())
+        Self::object(slf.py(), (last, stop, -step), index.name().cloned())
     }
 
     fn copy(slf: PyRef<'_, Self>) -> PyResult<Py<PyAny>> {
@@ -14587,8 +14673,8 @@ impl PyRangeIndex {
         Self::again(&slf, index)
     }
 
-    fn rename(slf: PyRef<'_, Self>, name: Option<&str>) -> PyResult<Py<PyAny>> {
-        let index = slf.as_super().inner.set_names(name);
+    fn rename(slf: PyRef<'_, Self>, name: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let index = slf.as_super().inner.set_names(py_axis_name(name)?);
         Self::again(&slf, index)
     }
 
@@ -14666,7 +14752,7 @@ impl PyRangeIndex {
     fn from_range(
         cls: &Bound<'_, pyo3::types::PyType>,
         data: &Bound<'_, PyAny>,
-        name: Option<&str>,
+        name: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let part = |attr: &str| data.getattr(attr).and_then(|value| value.extract::<i64>());
         let (Ok(start), Ok(stop), Ok(step)) = (part("start"), part("stop"), part("step")) else {
@@ -14674,6 +14760,7 @@ impl PyRangeIndex {
                 "data must be a range object or RangeIndex",
             ));
         };
+        let name = name.map(py_axis_name).transpose()?.flatten();
         Self::object(cls.py(), (start, stop, step), name)
     }
 
@@ -14836,8 +14923,8 @@ impl PyPeriodIndex {
     }
 
     #[getter]
-    pub fn name(&self) -> Option<String> {
-        self.inner.name().map(str::to_owned)
+    pub fn name(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        axis_name_to_py(py, self.inner.name())
     }
 
     #[getter]
@@ -14885,10 +14972,10 @@ impl PyPeriodIndex {
         }
     }
 
-    pub fn rename(&self, name: Option<&str>) -> Self {
-        Self {
-            inner: self.inner.rename_index(name),
-        }
+    pub fn rename(&self, name: &Bound<'_, PyAny>) -> PyResult<Self> {
+        Ok(Self {
+            inner: self.inner.rename_index(py_axis_name(name)?),
+        })
     }
 
     pub fn equals(&self, other: &Self) -> bool {
@@ -14997,9 +15084,11 @@ impl PyPeriodIndex {
         1
     }
 
+    /// pandas' FrozenList of the one (typed) name.
     #[getter]
-    pub fn names(&self) -> Vec<Option<String>> {
-        vec![self.inner.name().map(str::to_string)]
+    pub fn names(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let name = axis_name_to_py(py, self.inner.name())?;
+        frozen_list(py, vec![name.into_py_any(py)?])
     }
 
     #[getter]
@@ -15147,10 +15236,14 @@ impl PyPeriodIndex {
     pub fn to_series(
         &self,
         index: Option<&Bound<'_, PyAny>>,
-        name: Option<&str>,
+        name: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
         let idx = self.inner.to_index();
-        let series_name = name.or_else(|| self.inner.name()).unwrap_or("");
+        // `name`, else the index's typed name (fvsao.64).
+        let series_name = match name.filter(|name| !name.is_none()) {
+            Some(name) => py_series_name(name)?,
+            None => self.inner.name().cloned().unwrap_or_default(),
+        };
         let final_idx = if let Some(i_obj) = index {
             if let Ok(py_idx) = i_obj.extract::<PyRef<'_, PyIndex>>() {
                 py_idx.inner.clone()
@@ -15175,8 +15268,17 @@ impl PyPeriodIndex {
     }
 
     #[pyo3(signature = (index=true, name=None))]
-    pub fn to_frame(&self, index: bool, name: Option<&str>) -> PyResult<PyDataFrame> {
-        let col_name = name.or_else(|| self.inner.name()).unwrap_or("0");
+    pub fn to_frame(&self, index: bool, name: Option<&Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        // The column is `name`, else the index's typed name, else the
+        // integer 0, as pandas' (fvsao.64; they were text).
+        let label = match name.filter(|name| !name.is_none()) {
+            Some(name) => py_series_name(name)?.label(),
+            None => self
+                .inner
+                .name()
+                .map_or(IndexLabel::Int64(0), LabelName::label),
+        };
+        let col_name = fp_frame::column_key(&label);
         let idx = self.inner.to_index();
         let final_idx = if index {
             idx.clone()
@@ -15194,9 +15296,10 @@ impl PyPeriodIndex {
         )
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let mut col_map = BTreeMap::new();
-        col_map.insert(col_name.to_string(), col);
-        let df = DataFrame::new_with_column_order(final_idx, col_map, vec![col_name.to_string()])
-            .map_err(frame_error_to_py)?;
+        col_map.insert(col_name.clone(), col);
+        let df = DataFrame::new_with_column_order(final_idx, col_map, vec![col_name])
+            .map_err(frame_error_to_py)?
+            .with_recorded_column_labels([label]);
         Ok(PyDataFrame { inner: df })
     }
 
@@ -15873,8 +15976,8 @@ impl PyCategoricalIndex {
     }
 
     #[getter]
-    pub fn name(&self) -> Option<String> {
-        self.inner.name().map(str::to_owned)
+    pub fn name(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        axis_name_to_py(py, self.inner.name())
     }
 
     #[getter]
@@ -15932,10 +16035,10 @@ impl PyCategoricalIndex {
         }
     }
 
-    pub fn rename(&self, name: Option<&str>) -> Self {
-        Self {
-            inner: self.inner.rename_index(name),
-        }
+    pub fn rename(&self, name: &Bound<'_, PyAny>) -> PyResult<Self> {
+        Ok(Self {
+            inner: self.inner.rename_index(py_axis_name(name)?),
+        })
     }
 
     pub fn equals(&self, other: &Self) -> bool {
@@ -16060,9 +16163,11 @@ impl PyCategoricalIndex {
         1
     }
 
+    /// pandas' FrozenList of the one (typed) name.
     #[getter]
-    pub fn names(&self) -> Vec<Option<String>> {
-        vec![self.inner.name().map(str::to_string)]
+    pub fn names(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let name = axis_name_to_py(py, self.inner.name())?;
+        frozen_list(py, vec![name.into_py_any(py)?])
     }
 
     #[getter]
@@ -16210,10 +16315,14 @@ impl PyCategoricalIndex {
     pub fn to_series(
         &self,
         index: Option<&Bound<'_, PyAny>>,
-        name: Option<&str>,
+        name: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
         let idx = self.inner.to_index();
-        let series_name = name.or_else(|| self.inner.name()).unwrap_or("");
+        // `name`, else the index's typed name (fvsao.64).
+        let series_name = match name.filter(|name| !name.is_none()) {
+            Some(name) => py_series_name(name)?,
+            None => self.inner.name().cloned().unwrap_or_default(),
+        };
         let final_idx = if let Some(i_obj) = index {
             if let Ok(py_idx) = i_obj.extract::<PyRef<'_, PyIndex>>() {
                 py_idx.inner.clone()
@@ -16238,8 +16347,17 @@ impl PyCategoricalIndex {
     }
 
     #[pyo3(signature = (index=true, name=None))]
-    pub fn to_frame(&self, index: bool, name: Option<&str>) -> PyResult<PyDataFrame> {
-        let col_name = name.or_else(|| self.inner.name()).unwrap_or("0");
+    pub fn to_frame(&self, index: bool, name: Option<&Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        // The column is `name`, else the index's typed name, else the
+        // integer 0, as pandas' (fvsao.64; they were text).
+        let label = match name.filter(|name| !name.is_none()) {
+            Some(name) => py_series_name(name)?.label(),
+            None => self
+                .inner
+                .name()
+                .map_or(IndexLabel::Int64(0), LabelName::label),
+        };
+        let col_name = fp_frame::column_key(&label);
         let idx = self.inner.to_index();
         let final_idx = if index {
             idx.clone()
@@ -16257,9 +16375,10 @@ impl PyCategoricalIndex {
         )
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let mut col_map = BTreeMap::new();
-        col_map.insert(col_name.to_string(), col);
-        let df = DataFrame::new_with_column_order(final_idx, col_map, vec![col_name.to_string()])
-            .map_err(frame_error_to_py)?;
+        col_map.insert(col_name.clone(), col);
+        let df = DataFrame::new_with_column_order(final_idx, col_map, vec![col_name])
+            .map_err(frame_error_to_py)?
+            .with_recorded_column_labels([label]);
         Ok(PyDataFrame { inner: df })
     }
 
@@ -17669,7 +17788,7 @@ fn unwrap_0d<'py>(other: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
 /// made a naive index, which does not join an aware one) and taking the
 /// same-index fast path.
 fn series_over_index(
-    name: impl Into<SeriesName>,
+    name: impl Into<LabelName>,
     index: &Index,
     values: Vec<Scalar>,
 ) -> PyResult<Series> {
@@ -18675,17 +18794,13 @@ fn concat_side_by_side<'py>(
 /// `mapper` is pandas' ValueError. Only one text name was taken, so a list
 /// or dict raised TypeError.
 fn rename_axis_names(
-    current: &[Option<String>],
+    current: &[Option<LabelName>],
     mapper: Option<&Bound<'_, PyAny>>,
     index: Option<&Bound<'_, PyAny>>,
-) -> PyResult<Vec<Option<String>>> {
-    let optional_name = |value: &Bound<'_, PyAny>| -> PyResult<Option<String>> {
-        if value.is_none() {
-            Ok(None)
-        } else {
-            value.str()?.extract::<String>().map(Some)
-        }
-    };
+) -> PyResult<Vec<Option<LabelName>>> {
+    // A name keeps its type: rename_axis(0) names the axis the integer 0
+    // (fvsao.64; it was the string '0').
+    let optional_name = py_axis_name;
     if mapper.is_some_and(|mapper| mapper.cast::<PyDict>().is_ok() || mapper.is_callable()) {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Use `.rename` to alter labels with a mapper.",
@@ -18698,7 +18813,7 @@ fn rename_axis_names(
         return current
             .iter()
             .map(
-                |name| match mapping.get_item(name.as_deref().into_py_any(spec.py())?)? {
+                |name| match mapping.get_item(axis_name_to_py(spec.py(), name.as_ref())?)? {
                     Some(renamed) => optional_name(&renamed),
                     None => Ok(name.clone()),
                 },
@@ -18708,7 +18823,7 @@ fn rename_axis_names(
     if spec.is_callable() {
         return current
             .iter()
-            .map(|name| optional_name(&spec.call1((name.as_deref(),))?))
+            .map(|name| optional_name(&spec.call1((axis_name_to_py(spec.py(), name.as_ref())?,))?))
             .collect();
     }
     if spec.is_instance_of::<PyList>() || spec.is_instance_of::<PyTuple>() {
@@ -18734,21 +18849,55 @@ fn rename_axis_names(
 }
 
 /// `index`'s names: each level's for a row MultiIndex, else its one name.
-fn index_names(index: &Index) -> Vec<Option<String>> {
+fn index_names(index: &Index) -> Vec<Option<LabelName>> {
     index.row_multiindex().map_or_else(
-        || vec![index.name().map(str::to_owned)],
-        |levels| levels.names().to_vec(),
+        || vec![index.name().cloned()],
+        |levels| level_names(levels.names()),
     )
 }
 
-/// `index` renamed to `names` (see [`rename_axis_names`]).
-fn index_with_names(index: &Index, names: Vec<Option<String>>) -> PyResult<Index> {
+/// `rename_axis`'s mapper, positional or `mapper=`: read from `*args`, where
+/// `rename_axis(None)` - which unnames the axis - is a passed None, not an
+/// absent mapper (a `mapper=None` default could not tell them apart, so it
+/// left the name).
+fn rename_axis_mapper<'py>(
+    args: &Bound<'py, PyTuple>,
+    mapper: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    match (args.len(), mapper) {
+        (0, mapper) => Ok(mapper.cloned()),
+        (1, None) => args.get_item(0).map(Some),
+        (1, Some(_)) => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "NDFrame.rename_axis() got multiple values for argument 'mapper'",
+        )),
+        (given, _) => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "NDFrame.rename_axis() takes from 1 to 2 positional arguments but {} were given",
+            given + 1
+        ))),
+    }
+}
+
+/// A MultiIndex's level names as axis names (level names are text).
+fn level_names(names: &[Option<String>]) -> Vec<Option<LabelName>> {
+    names
+        .iter()
+        .map(|name| name.clone().map(LabelName::from))
+        .collect()
+}
+
+/// `index` renamed to `names` (see [`rename_axis_names`]); a MultiIndex's
+/// levels take their text.
+fn index_with_names(index: &Index, names: Vec<Option<LabelName>>) -> PyResult<Index> {
     match index.row_multiindex() {
         Some(levels) => index
             .clone()
-            .with_row_multiindex(levels.clone().set_names(names))
+            .with_row_multiindex(
+                levels
+                    .clone()
+                    .set_names(names.into_iter().map(|n| n.map(String::from)).collect()),
+            )
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())),
-        None => Ok(index.rename_index(names.into_iter().next().flatten().as_deref())),
+        None => Ok(index.rename_index(names.into_iter().next().flatten())),
     }
 }
 
@@ -19371,7 +19520,7 @@ fn row_multiindex_axis(multi: fp_index::MultiIndex) -> PyResult<Index> {
         .collect();
     multi
         .to_flat_index("/")
-        .set_name(&names.join("/"))
+        .set_name(names.join("/"))
         .with_row_multiindex(multi)
         .map_err(index_error_to_py)
 }
@@ -19673,7 +19822,7 @@ fn pairwise_window_result(
     }
     let multi = fp_index::MultiIndex::from_arrays(vec![row_labels, column_labels])
         .map_err(index_error_to_py)?
-        .set_names(vec![source.index().name().map(str::to_owned), None]);
+        .set_names(vec![source.index().name().map(String::from), None]);
     let frame = DataFrame::new_with_column_order(Index::default_range(n * k), map, columns)
         .map_err(frame_error_to_py)?
         .with_row_multiindex(multi)
@@ -20264,7 +20413,7 @@ fn array_ufunc<'py>(
     names.dedup_by(|a, b| a.label() == b.label());
     let name = match names.as_slice() {
         [only] => only.clone(),
-        _ => SeriesName::default(),
+        _ => LabelName::default(),
     };
     let shaped = shape_of.extract::<PyRef<'_, PySeries>>()?;
     let rebuild = |result: &Bound<'py, PyAny>| -> PyResult<Bound<'py, PyAny>> {
@@ -20345,7 +20494,7 @@ fn ufunc_rebuild<'py>(
 
 /// The name of `left <op> other`: an operand Series or Index with another
 /// name leaves the result unnamed (pandas' `get_op_result_name`).
-fn op_result_name(left: &Series, other: &Bound<'_, PyAny>) -> PyResult<SeriesName> {
+fn op_result_name(left: &Series, other: &Bound<'_, PyAny>) -> PyResult<LabelName> {
     let other_name = if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
         Some(series.inner.name().clone())
     } else if other.get_type().name()?.to_str()?.ends_with("Index") {
@@ -20354,7 +20503,7 @@ fn op_result_name(left: &Series, other: &Bound<'_, PyAny>) -> PyResult<SeriesNam
         None
     };
     Ok(match other_name {
-        Some(name) if name.label() != left.name().label() => SeriesName::default(),
+        Some(name) if name.label() != left.name().label() => LabelName::default(),
         _ => left.name().clone(),
     })
 }
@@ -20806,7 +20955,7 @@ impl PySeries {
         py: Python<'_>,
         data: Option<&Bound<'_, PyAny>>,
         index: Option<&Bound<'_, PyAny>>,
-        name: Option<SeriesName>,
+        name: Option<LabelName>,
     ) -> PyResult<Self> {
         let series_name = name.clone().unwrap_or_default();
 
@@ -20845,9 +20994,7 @@ impl PySeries {
                 )));
             }
             let index_name = py_index_arg_name(data);
-            let series_name = name
-                .or_else(|| index_name.map(SeriesName::from))
-                .unwrap_or_default();
+            let series_name = name.or(index_name).unwrap_or_default();
             let series =
                 Series::new(series_name, Index::new(labels), column).map_err(frame_error_to_py)?;
             return Ok(PySeries { inner: series });
@@ -22368,8 +22515,12 @@ impl PySeries {
         // pandas' binned counts sit on an unnamed index (the bins are not
         // the Series' values; it was named after the Series).
         let r = if bins.is_some_and(|bins| !bins.is_none()) {
-            Series::new(r.name(), r.index().rename_index(None), r.column().clone())
-                .map_err(frame_error_to_py)?
+            Series::new(
+                r.name(),
+                r.index().rename_index(None::<&str>),
+                r.column().clone(),
+            )
+            .map_err(frame_error_to_py)?
         } else {
             r
         };
@@ -22950,7 +23101,7 @@ impl PySeries {
             return Ok(Some(PySeries { inner: out }));
         }
         let name = match passed(index) {
-            None => SeriesName::default(),
+            None => LabelName::default(),
             Some(name) => py_series_name(&name)?,
         };
         let out = self.inner.rename(name).map_err(frame_error_to_py)?;
@@ -23689,7 +23840,7 @@ impl PySeries {
                 .map_err(frame_error_to_py)?,
             None if self.inner.name().is_empty() => self
                 .inner
-                .rename(SeriesName::typed(IndexLabel::Int64(0)))
+                .rename(LabelName::typed(IndexLabel::Int64(0)))
                 .map_err(frame_error_to_py)?,
             None => self.inner.clone(),
         };
@@ -24079,8 +24230,12 @@ impl PySeries {
                     .map_err(frame_error_to_py)?
                 } else {
                     let values = flat_index_level_values(index, level)?;
-                    Series::new(index.name().unwrap_or(""), index.clone(), values)
-                        .map_err(frame_error_to_py)?
+                    Series::new(
+                        index.name().cloned().unwrap_or_default(),
+                        index.clone(),
+                        values,
+                    )
+                    .map_err(frame_error_to_py)?
                 }
             }
             (Some(_), Some(_)) => {
@@ -25548,15 +25703,18 @@ impl PySeries {
     }
 
     /// pandas' `Series.rename_axis`: `mapper` or `index` names the index.
-    #[pyo3(signature = (mapper=None, *, index=None, axis=None, copy=None, inplace=false))]
+    #[pyo3(signature = (*args, mapper=None, index=None, axis=None, copy=None, inplace=false))]
     fn rename_axis(
         &self,
+        args: &Bound<'_, PyTuple>,
         mapper: Option<&Bound<'_, PyAny>>,
         index: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
         copy: Option<bool>,
         inplace: bool,
     ) -> PyResult<PySeries> {
+        let mapper = rename_axis_mapper(args, mapper)?;
+        let mapper = mapper.as_ref();
         // copy= only lets pandas share buffers; a new Series satisfies it.
         let _ = copy;
         unsupported_params("Series.rename_axis", &[("inplace", !inplace)])?;
@@ -25682,7 +25840,7 @@ impl PySeries {
         let res_name = if self.inner.name() == other.inner.name() {
             self.inner.name().clone()
         } else {
-            SeriesName::default()
+            LabelName::default()
         };
         let res_series = Series::new(res_name, plan.union_index, col).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res_series })
@@ -26904,7 +27062,7 @@ impl PyDataFrame {
                         .map_err(index_error_to_py)
                 })
                 .collect::<PyResult<_>>()?,
-            None => vec![(index.name().map(str::to_owned), index.labels().to_vec())],
+            None => vec![(index.name().map(String::from), index.labels().to_vec())],
         };
         let mut columns = Vec::new();
         for (name, labels) in levels {
@@ -26937,7 +27095,7 @@ impl PyDataFrame {
                 .inner
                 .set_axis(index.labels().to_vec(), 1)
                 .map_err(frame_error_to_py)?
-                .with_columns_name(index.name().map(str::to_owned))),
+                .with_columns_name(index.name().cloned())),
         }
     }
 
@@ -27011,7 +27169,7 @@ impl PyDataFrame {
         ])
         .map_err(index_error_to_py)?
         .set_names(vec![
-            self.inner.index().name().map(str::to_owned),
+            self.inner.index().name().map(String::from),
             multi.names().get(1).cloned().flatten(),
         ]);
         DataFrame::new_with_column_order(Index::new(flat), columns, order)
@@ -27564,7 +27722,7 @@ impl PyDataFrame {
                 if key.is_instance_of::<PyTuple>() {
                     series.inner = series
                         .inner
-                        .rename(SeriesName::typed(py_to_index_label(key)?))
+                        .rename(LabelName::typed(py_to_index_label(key)?))
                         .map_err(frame_error_to_py)?;
                 }
                 return Ok(Py::new(py, series)?.into_any());
@@ -29252,7 +29410,7 @@ impl PyDataFrame {
                 let unnamed = given.is_none() && s.inner.name().is_empty();
                 let named = match given {
                     Some(col_name) => s.inner.rename(col_name),
-                    None if unnamed => s.inner.rename(SeriesName::typed(IndexLabel::Int64(0))),
+                    None if unnamed => s.inner.rename(LabelName::typed(IndexLabel::Int64(0))),
                     None => Ok(s.inner.clone()),
                 }
                 .map_err(frame_error_to_py)?;
@@ -33415,11 +33573,11 @@ impl PyDataFrame {
                 if orient == "tight" {
                     let index_names: Vec<Option<String>> = match self.inner.row_multiindex() {
                         Some(levels) => levels.names().to_vec(),
-                        None => vec![self.inner.index().name().map(str::to_owned)],
+                        None => vec![self.inner.index().name().map(String::from)],
                     };
                     let column_names: Vec<Option<String>> = match self.inner.columns_multiindex() {
                         Some(levels) => levels.names().to_vec(),
-                        None => vec![self.inner.columns_name().map(str::to_owned)],
+                        None => vec![self.inner.columns_name().map(String::from)],
                     };
                     out.set_item("index_names", index_names)?;
                     out.set_item("column_names", column_names)?;
@@ -35181,7 +35339,7 @@ impl PyDataFrame {
             // pandas names the result after q, the float, along either axis
             // (axis=1 was named 'quantile'; the name was the text '0.3').
             let res = res
-                .rename(SeriesName::typed(IndexLabel::Float64(OrderedF64(q_val))))
+                .rename(LabelName::typed(IndexLabel::Float64(OrderedF64(q_val))))
                 .map_err(frame_error_to_py)?;
             if interpolation == "linear" {
                 return Ok(Py::new(py, PySeries { inner: res })?.into_any());
@@ -37369,11 +37527,11 @@ impl PyDataFrame {
         };
         let mut names: Vec<Option<String>> = match row_multi {
             Some(multi) => multi.names().to_vec(),
-            None => vec![index.name().map(str::to_owned)],
+            None => vec![index.name().map(String::from)],
         };
         // The column level is named after the column axis (an unstack's
         // moved level; it was unnamed).
-        names.push(self.inner.columns_name().map(str::to_owned));
+        names.push(self.inner.columns_name().map(String::from));
         let row_labels = index.labels();
         let columns = self.inner.column_names();
         let mut arrays: Vec<Vec<IndexLabel>> = vec![Vec::new(); row_levels.len() + 1];
@@ -37661,7 +37819,7 @@ impl PyDataFrame {
         if list_like && index.row_multiindex().is_none() {
             let levels = fp_index::MultiIndex::from_arrays(vec![index.labels().to_vec()])
                 .map_err(index_error_to_py)?
-                .set_names(vec![index.name().map(str::to_owned)]);
+                .set_names(vec![index.name().map(String::from)]);
             index = index
                 .with_row_multiindex(levels)
                 .map_err(index_error_to_py)?;
@@ -37813,9 +37971,11 @@ impl PyDataFrame {
     /// pandas' `DataFrame.rename_axis`: `mapper` (the row index, or with
     /// axis=1 the column axis), `index=` and `columns=` name the axes (the
     /// column axis could not be named; fvsao.32).
-    #[pyo3(signature = (mapper=None, *, index=None, columns=None, axis=None, copy=None, inplace=false))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (*args, mapper=None, index=None, columns=None, axis=None, copy=None, inplace=false))]
     fn rename_axis(
         &self,
+        args: &Bound<'_, PyTuple>,
         mapper: Option<&Bound<'_, PyAny>>,
         index: Option<&Bound<'_, PyAny>>,
         columns: Option<&Bound<'_, PyAny>>,
@@ -37823,6 +37983,8 @@ impl PyDataFrame {
         copy: Option<bool>,
         inplace: bool,
     ) -> PyResult<PyDataFrame> {
+        let mapper = rename_axis_mapper(args, mapper)?;
+        let mapper = mapper.as_ref();
         // copy= only lets pandas share buffers; a new frame satisfies it.
         let _ = copy;
         let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
@@ -37836,7 +37998,7 @@ impl PyDataFrame {
             let Some(columns) = columns else {
                 return Ok(frame);
             };
-            let current = [frame.columns_name().map(str::to_owned)];
+            let current = [frame.columns_name().cloned()];
             let names = rename_axis_names(&current, None, Some(columns))?;
             Ok(frame.with_columns_name(names.into_iter().next().flatten()))
         };
@@ -37848,16 +38010,22 @@ impl PyDataFrame {
         let df = match self.inner.row_multiindex() {
             // A list names each level; index= as a dict / function maps them.
             Some(levels) => {
-                let names = rename_axis_names(levels.names(), mapper, index)?;
-                self.inner
-                    .clone()
-                    .with_row_multiindex(levels.clone().set_names(names))
+                let names = rename_axis_names(&level_names(levels.names()), mapper, index)?;
+                self.inner.clone().with_row_multiindex(
+                    levels
+                        .clone()
+                        .set_names(names.into_iter().map(|n| n.map(String::from)).collect()),
+                )
             }
+            // The typed name, or none (rename_axis(None) named it '').
             None => {
-                let current = [self.inner.index().name().map(str::to_owned)];
+                let current = [self.inner.index().name().cloned()];
                 let names = rename_axis_names(&current, mapper, index)?;
-                self.inner
-                    .rename_axis(names.into_iter().next().flatten().as_deref().unwrap_or(""))
+                let renamed = self
+                    .inner
+                    .index()
+                    .rename_index(names.into_iter().next().flatten());
+                self.inner.with_index(renamed)
             }
         }
         .map_err(frame_error_to_py)?;
@@ -38710,7 +38878,11 @@ impl PyDataFrame {
                             .bind(py)
                             .call_method0("to_numpy")?,
                     );
-                    names.push(frame_index.name().unwrap_or("index").to_owned());
+                    names.push(
+                        frame_index
+                            .name()
+                            .map_or_else(|| "index".to_owned(), String::from),
+                    );
                 }
             }
         }
@@ -38815,7 +38987,12 @@ impl PyDataFrame {
         let mut col_type_defs = Vec::new();
 
         let idx_col_name = if index {
-            let name = index_label.unwrap_or_else(|| self.inner.index().name().unwrap_or("index"));
+            let name = index_label.unwrap_or_else(|| {
+                self.inner
+                    .index()
+                    .name()
+                    .map_or("index", |name| name.as_str())
+            });
             columns_to_write.push(name.to_string());
             col_type_defs.push(format!("\"{name}\" TEXT"));
             Some(name)
@@ -39014,7 +39191,11 @@ impl PyDataFrame {
             ));
         }
         xml.push_str(&format!("<{root_name}>\n"));
-        let index_tag = self.inner.index().name().unwrap_or("index").to_owned();
+        let index_tag = self
+            .inner
+            .index()
+            .name()
+            .map_or_else(|| "index".to_owned(), String::from);
         for (i, label) in self.inner.index().labels().iter().enumerate() {
             xml.push_str(&format!("  <{row_name}>\n"));
             if index {
@@ -41879,7 +42060,7 @@ impl PySeriesStringAccessor {
         let levels = fp_index::MultiIndex::from_arrays(vec![outer, inner])
             .map_err(index_error_to_py)?
             .set_names(vec![
-                self.series.index().name().map(str::to_owned),
+                self.series.index().name().map(String::from),
                 Some("match".to_owned()),
             ]);
         let flat = levels.to_flat_index("/");
@@ -43556,7 +43737,7 @@ fn func_columns(frame: DataFrame, source: &DataFrame, funcs: &[&str]) -> PyResul
     }
     let mut names: Vec<Option<String>> = match source_multi {
         Some(multi) => multi.names().to_vec(),
-        None => vec![source.columns_name().map(str::to_owned)],
+        None => vec![source.columns_name().map(String::from)],
     };
     names.push(None);
     let multi = fp_index::MultiIndex::from_arrays(levels)
@@ -45082,7 +45263,7 @@ fn groupby_key_column(
         ));
     }
     if let Some(column) = py_array_like_column(py, key)? {
-        return Ok((column, py_index_arg_name(key)));
+        return Ok((column, py_index_arg_name(key).map(String::from)));
     }
     if let Ok(list) = key.cast::<PyList>() {
         let values = list
@@ -45106,7 +45287,7 @@ fn flat_index_level_values(index: &Index, level: &Bound<'_, PyAny>) -> PyResult<
         Ok(position) => position == 0 || position == -1,
         Err(_) => level
             .extract::<String>()
-            .is_ok_and(|name| index.name() == Some(name.as_str())),
+            .is_ok_and(|name| index.name().is_some_and(|index_name| *index_name == name)),
     };
     if index.row_multiindex().is_some() || !names_this_level {
         return Err(not_implemented(
@@ -45168,7 +45349,7 @@ fn group_by_index_level(
     let df = frame
         .with_column(key_column.clone(), column)
         .map_err(frame_error_to_py)?;
-    Ok((df, vec![key_column], vec![index.name().map(str::to_owned)]))
+    Ok((df, vec![key_column], vec![index.name().map(String::from)]))
 }
 
 /// One group's `groupby.apply(func)` result, sorted as pandas'
@@ -45315,7 +45496,7 @@ fn index_rows(index: &Index) -> Vec<Vec<IndexLabel>> {
 fn index_level_names(index: &Index) -> Vec<Option<String>> {
     match index.row_multiindex() {
         Some(levels) => levels.names().to_vec(),
-        None => vec![index.name().map(str::to_owned)],
+        None => vec![index.name().map(String::from)],
     }
 }
 
@@ -45394,7 +45575,25 @@ impl PyGroupBy {
         let by_refs: Vec<&str> = self.by.iter().map(String::as_str).collect();
         self.df
             .groupby_full_options(&by_refs, self.as_index, self.sort, self.dropna)?
-            .with_key_names(self.key_names.clone())
+            .with_key_names(self.typed_key_names())
+    }
+
+    /// The key names, a column key's as its column's typed label: groupby(0)
+    /// names the result's index the integer 0 (fvsao.64; it was '0').
+    fn typed_key_names(&self) -> Vec<Option<LabelName>> {
+        self.key_names
+            .iter()
+            .zip(&self.by)
+            .map(|(name, by)| {
+                name.as_ref().map(|name| {
+                    if name == by {
+                        self.df.column_series_name(name)
+                    } else {
+                        LabelName::from(name)
+                    }
+                })
+            })
+            .collect()
     }
 
     /// Every group's label and row positions in pandas' group order (by key,
@@ -45565,9 +45764,9 @@ impl PyGroupBy {
     /// the keys' labels named after them, carrying the MultiIndex levels
     /// over several keys.
     fn group_key_index(&self, groups: &[(IndexLabel, Vec<usize>)]) -> PyResult<Index> {
-        if let [name] = self.key_names.as_slice() {
+        if let [name] = self.typed_key_names().as_slice() {
             let labels = groups.iter().map(|(key, _)| key.clone()).collect();
-            return Ok(Index::new(labels).set_names(name.as_deref()));
+            return Ok(Index::new(labels).set_names(name.clone()));
         }
         let (_, order) = self
             .grouped()
@@ -45927,8 +46126,8 @@ impl PyGroupBy {
                     .grouped()
                     .and_then(|gb| gb.group_codes())
                     .map_err(frame_error_to_py)?;
-                let groups = match (by, self.key_names.as_slice()) {
-                    ([_], [name]) => groups.set_names(name.as_deref()),
+                let groups = match (by, self.typed_key_names().as_slice()) {
+                    ([_], [name]) => groups.set_names(name.clone()),
                     _ => groups,
                 };
                 return Ok(PySeriesGroupBy {
@@ -45943,10 +46142,10 @@ impl PyGroupBy {
                 });
             }
         };
-        // The key Series carries the key's own name (None -> ""), which
-        // names the result's index (fvsao.19).
+        // The key Series carries the key's own (typed) name (None -> ""),
+        // which names the result's index (fvsao.19, fvsao.64).
         let key_name = self
-            .key_names
+            .typed_key_names()
             .first()
             .cloned()
             .flatten()
@@ -46198,9 +46397,9 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .size()
             .map_err(frame_error_to_py)?;
-        let key = match self.key_names.as_slice() {
-            [key] => key.as_deref(),
-            _ => counts.index().name(),
+        let key = match self.typed_key_names().as_slice() {
+            [key] => key.clone(),
+            _ => counts.index().name().cloned(),
         };
         let index = counts.index().rename_index(key);
         let name = if self.as_index { "" } else { "size" };
@@ -50543,7 +50742,7 @@ fn keyed_rows(
     }
     let level_name = |piece: &Index, level: usize| match piece.row_multiindex() {
         Some(multi) => multi.names().get(level).cloned().flatten(),
-        None => piece.name().map(str::to_owned),
+        None => piece.name().map(String::from),
     };
     let rows: usize = pieces.iter().map(|piece| piece.len()).sum();
     let mut arrays = vec![Vec::with_capacity(rows); key_levels + index_levels];
@@ -50816,7 +51015,7 @@ fn concat(
                     ),
                     None => (
                         vec![frame.column_labels()],
-                        vec![frame.columns_name().map(str::to_owned)],
+                        vec![frame.columns_name().map(String::from)],
                     ),
                 })
             };
@@ -50865,10 +51064,10 @@ fn concat(
         let mut unnamed = 0_i64;
         for (position, s) in series.iter().enumerate() {
             let name = match &keys {
-                Some(keys) => SeriesName::typed(keys[position].clone()),
+                Some(keys) => LabelName::typed(keys[position].clone()),
                 None if s.name().is_empty() => {
                     unnamed += 1;
-                    SeriesName::typed(IndexLabel::Int64(unnamed - 1))
+                    LabelName::typed(IndexLabel::Int64(unnamed - 1))
                 }
                 None => s.name().clone(),
             };
@@ -57330,7 +57529,7 @@ impl PyIntervalIndex {
         let intervals = rust_idx.values().iter().map(PyInterval::of).collect();
         Self {
             intervals,
-            name: rust_idx.name().map(str::to_string),
+            name: rust_idx.name().map(String::from),
         }
     }
 }
@@ -60026,7 +60225,7 @@ impl PyGroupedWindow {
                     self.kind
                 )));
             }
-            inner_name.get_or_insert_with(|| index.name().map(str::to_owned));
+            inner_name.get_or_insert_with(|| index.name().map(String::from));
             for label in index.labels() {
                 for (level, key) in outer.iter_mut().zip(&group.key) {
                     level.push(key.clone());
@@ -63150,6 +63349,17 @@ mod tests {
 
     use super::*;
 
+    /// A name getter's answer as Python sees it, as its `str` (the getters
+    /// hand pandas' typed label to Python; fvsao.64).
+    fn name_text(get: impl FnOnce(Python<'_>) -> PyResult<Option<Py<PyAny>>>) -> Option<String> {
+        Python::initialize();
+        Python::attach(|py| {
+            get(py)
+                .expect("name getter") // ubs:ignore — test helper
+                .map(|name| name.bind(py).str().expect("str").to_string()) // ubs:ignore — test helper
+        })
+    }
+
     #[cfg(feature = "lazy-transpose-view")]
     #[test]
     fn dataframe_observers_preserve_lazy_transpose_storage() {
@@ -63195,7 +63405,7 @@ mod tests {
             inner: Index::new(labels).set_name("my_idx"),
         };
         assert_eq!(idx.len(), 3);
-        assert_eq!(idx.name(), Some("my_idx".to_string()));
+        assert_eq!(name_text(|py| idx.name(py)), Some("my_idx".to_string()));
         assert!(idx.is_unique());
         Python::initialize();
         Python::attach(|py| {
@@ -63206,8 +63416,11 @@ mod tests {
             );
         });
 
-        idx.set_name(Some("renamed"));
-        assert_eq!(idx.name(), Some("renamed".to_string()));
+        Python::attach(|py| {
+            let renamed = "renamed".into_bound_py_any(py).expect("str"); // ubs:ignore — test fixture
+            idx.set_name(&renamed).expect("set_name"); // ubs:ignore — test fixture
+        });
+        assert_eq!(name_text(|py| idx.name(py)), Some("renamed".to_string()));
 
         Python::attach(|py| {
             let other = Bound::new(
@@ -63839,7 +64052,7 @@ mod tests {
         let tdi = timedelta_range(Some("0D"), None, Some(4), "1D", Some("td_idx"))
             .expect("timedelta_range"); // ubs:ignore — test fixture
         assert_eq!(tdi.len(), 4);
-        assert_eq!(tdi.name().as_deref(), Some("td_idx"));
+        assert_eq!(name_text(|py| tdi.name(py)).as_deref(), Some("td_idx"));
         assert_eq!(tdi.ndim(), 1);
         assert!(!tdi.empty());
         assert_eq!(tdi.shape(), (4,));
@@ -63868,7 +64081,7 @@ mod tests {
             assert_eq!(PyRangeIndex::start(ri.borrow()), 0);
             assert_eq!(PyRangeIndex::stop(ri.borrow()), 10);
             assert_eq!(PyRangeIndex::step(ri.borrow()), 2);
-            assert_eq!(index.name().as_deref(), Some("my_range"));
+            assert_eq!(name_text(|py| index.name(py)).as_deref(), Some("my_range"));
             let number = |value: i64| value.into_bound_py_any(py).expect("int"); // ubs:ignore — test fixture
             assert!(PyRangeIndex::__contains__(ri.borrow(), &number(4)));
             assert!(!PyRangeIndex::__contains__(ri.borrow(), &number(5)));
@@ -63899,7 +64112,7 @@ mod tests {
         let pi = period_range(Some("2024-01"), None, Some(3), Some("M"), Some("monthly"))
             .expect("period_range"); // ubs:ignore — test fixture
         assert_eq!(pi.len(), 3);
-        assert_eq!(pi.name().as_deref(), Some("monthly"));
+        assert_eq!(name_text(|py| pi.name(py)).as_deref(), Some("monthly"));
         // TEST-CHANGE (39h5n): the fields are pandas' int64 Index, not a
         // list of Options; their values are unchanged.
         Python::attach(|py| {
@@ -63932,7 +64145,7 @@ mod tests {
         .expect("categorical index"); // ubs:ignore — test fixture
         let py_ci = PyCategoricalIndex { inner: ci };
         assert_eq!(py_ci.len(), 4);
-        assert_eq!(py_ci.name().as_deref(), None);
+        assert_eq!(name_text(|py| py_ci.name(py)), None);
         assert_eq!(py_ci.categories(), vec!["cat", "dog"]);
         assert_eq!(py_ci.codes(), vec![Some(0), Some(1), Some(0), Some(1)]);
         assert!(!py_ci.ordered());
@@ -64090,7 +64303,7 @@ mod tests {
             )
             .expect("bdate_range"); // ubs:ignore — test fixture
             assert_eq!(bdr.len(), 5);
-            assert_eq!(bdr.name().as_deref(), Some("bday"));
+            assert_eq!(name_text(|py| bdr.name(py)).as_deref(), Some("bday"));
         });
     }
 

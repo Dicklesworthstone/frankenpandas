@@ -790,12 +790,12 @@ fn join_series_with_global_allocator(
     // Per br-frankenpandas-wp0n6: pandas Series.join preserves shared
     // index name (preserved when both operands agree, None when they differ).
     let shared_name = if left.index().name().eq(&right.index().name()) {
-        left.index().name().map(str::to_owned)
+        left.index().name().cloned()
     } else {
         None
     };
     Ok(JoinedSeries {
-        index: Index::new(out_labels).rename_index(shared_name.as_deref()),
+        index: Index::new(out_labels).rename_index(shared_name),
         left_values,
         right_values,
     })
@@ -889,12 +889,12 @@ fn join_series_with_arena(
     // Per br-frankenpandas-ceces: pandas Series.join preserves shared
     // index name. Sister to join_series fix (wp0n6).
     let shared_name = if left.index().name().eq(&right.index().name()) {
-        left.index().name().map(str::to_owned)
+        left.index().name().cloned()
     } else {
         None
     };
     Ok(JoinedSeries {
-        index: Index::new(out_labels).rename_index(shared_name.as_deref()),
+        index: Index::new(out_labels).rename_index(shared_name),
         left_values,
         right_values,
     })
