@@ -14030,3 +14030,181 @@ _EVERYDAY23_CASES = {
 def test_everyday23_like_pandas(case: str) -> None:
     run = _EVERYDAY23_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-5y62q: pandas' array classes did not exist - pd.array
+# answered a Series (and inferred float64 for [1, None]), Series.array /
+# Index.array an ndarray / list (Index.array was even a method), an
+# extension dtype's .values an object ndarray and its unique() an ndarray,
+# DatetimeIndex or TimedeltaIndex; pd.arrays aliased Series / index classes.
+# With them: a masked or zoned column's to_numpy() (object arrays of None /
+# naive UTC datetime64), dtype='string' of ints ('1.0'), CategoricalIndex
+# and PeriodIndex to_series / to_frame / values (object columns, a list).
+def _ea_view(v: Any) -> Any:
+    if isinstance(v, np.ndarray):
+        return ("ndarray", str(v.dtype), repr(v))
+    if isinstance(v, (list, tuple)):
+        return [_ea_view(x) for x in v]
+    return (type(v).__name__, repr(v))
+
+
+def _ea_outcome(run: Any) -> Any:
+    try:
+        return ("ok", _ea_view(run()))
+    except NameError:
+        raise
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+def _ea_ints(m: Any) -> Any:
+    return m.array([1, None, 3])
+
+
+_EXTENSION_ARRAY_CASES = {
+    # pd.array's inference and dtype=
+    "array ints": lambda m: m.array([1, None, 3]),
+    "array ints from ndarray": lambda m: m.array(np.array([1, 2])),
+    "array floats": lambda m: m.array([1.5, None]),
+    "array int and nan": lambda m: m.array([1, np.nan]),
+    "array strings": lambda m: m.array(["a", None]),
+    "array bools": lambda m: m.array([True, None]),
+    "array datetimes": lambda m: m.array(m.to_datetime(["2024-01-01", None])),
+    "array aware datetimes": lambda m: m.array(m.to_datetime(["2024-01-01"]).tz_localize("US/Eastern")),
+    "array timedeltas": lambda m: m.array([m.Timedelta("1h"), None]),
+    "array whole-day timedeltas": lambda m: m.array(m.to_timedelta(["1D", "2D"])),
+    "array periods": lambda m: m.array(m.period_range("2024-01", periods=3, freq="M")),
+    "array empty": lambda m: m.array([]),
+    "array dtype Int64": lambda m: m.array([1, None, 3], dtype="Int64"),
+    "array dtype Int32": lambda m: m.array([1, None], dtype="Int32"),
+    "array dtype Float64": lambda m: m.array([1, None], dtype="Float64"),
+    "array dtype boolean": lambda m: m.array([1, 0], dtype="boolean"),
+    "array dtype int64": lambda m: m.array([1, 2], dtype="int64"),
+    "array dtype object": lambda m: m.array(["a", None], dtype=object),
+    "array dtype category": lambda m: m.array(["a", "b"], dtype="category"),
+    "array of a Series": lambda m: m.array(m.Series([1, 2])),
+    "array of an Int64 Series": lambda m: m.array(m.Series([1, None], dtype="Int64")),
+    "array of an array": lambda m: m.array(_ea_ints(m)),
+    "array long wraps": lambda m: m.array(list(range(40)), dtype="Int64"),
+    "array past 100 truncates": lambda m: m.array(list(range(200)), dtype="Int64"),
+    "array long strings": lambda m: m.array(["word%d" % i for i in range(30)]),
+    "array of a scalar raises": lambda m: m.array(1),
+    # Series / Index surfaces
+    "Series int array": lambda m: m.Series([1, 2]).array,
+    "Series Int64 array": lambda m: m.Series([1, None], dtype="Int64").array,
+    "Series aware array": lambda m: m.Series(m.to_datetime(["2024-01-01"]).tz_localize("UTC")).array,
+    "Series Int64 values": lambda m: m.Series([1, None], dtype="Int64").values,
+    "Series boolean values": lambda m: m.Series([True, None], dtype="boolean").values,
+    "Series string values": lambda m: m.Series(["a", None], dtype="string").values,
+    "Series Int64 unique": lambda m: m.Series([1, None, 1], dtype="Int64").unique(),
+    "Series string unique": lambda m: m.Series(["a", None, "a"], dtype="string").unique(),
+    "Series datetime unique": lambda m: m.Series(m.to_datetime(["2024-01-01"] * 2)).unique(),
+    "Series aware unique": lambda m: m.Series(m.to_datetime(["2024-01-01"] * 2).tz_localize("UTC")).unique(),
+    "Series timedelta unique": lambda m: m.Series(m.to_timedelta(["1h"] * 2)).unique(),
+    "Series period unique": lambda m: m.Series(m.period_range("2024-01", periods=2, freq="M")).unique(),
+    "Index array": lambda m: m.Index(["a"]).array,
+    "RangeIndex array": lambda m: m.RangeIndex(3).array,
+    "DatetimeIndex array": lambda m: m.DatetimeIndex(["2024-01-01"]).array,
+    "TimedeltaIndex array": lambda m: m.TimedeltaIndex(["1h"]).array,
+    "PeriodIndex array": lambda m: m.period_range("2024-01", periods=2, freq="M").array,
+    "MultiIndex array raises": lambda m: m.MultiIndex.from_tuples([("a", 1)]).array,
+    # the array protocol
+    "len iter tolist": lambda m: [len(_ea_ints(m)), list(_ea_ints(m)), _ea_ints(m).tolist()],
+    "getitem": lambda m: [_ea_ints(m)[0], _ea_ints(m)[1], _ea_ints(m)[-1]],
+    "getitem out of range": lambda m: _ea_ints(m)[5],
+    "getitem slice positions mask": lambda m: [
+        _ea_ints(m)[1:],
+        _ea_ints(m)[[0, 2]],
+        _ea_ints(m)[np.array([True, False, True])],
+        _ea_ints(m)[::-1],
+    ],
+    "setitem": lambda m: (lambda a: (a.__setitem__(1, 7), a)[1])(_ea_ints(m)),
+    "contains": lambda m: [1 in _ea_ints(m), 2 in _ea_ints(m), m.NA in _ea_ints(m), None in _ea_ints(m)],
+    "unhashable": lambda m: hash(_ea_ints(m)),
+    "dtype shape": lambda m: [str(_ea_ints(m).dtype), _ea_ints(m).shape, _ea_ints(m).ndim, _ea_ints(m).size],
+    "to_numpy isna asarray": lambda m: [_ea_ints(m).to_numpy(), _ea_ints(m).isna(), np.asarray(_ea_ints(m))],
+    "unique dropna fillna copy": lambda m: [
+        m.array([1, None, 1]).unique(),
+        _ea_ints(m).dropna(),
+        _ea_ints(m).fillna(0),
+        _ea_ints(m).copy(),
+    ],
+    "astype": lambda m: [_ea_ints(m).astype("Int32"), _ea_ints(m).astype("float64"), _ea_ints(m).astype("string")],
+    "take": lambda m: [
+        _ea_ints(m).take([0, 2]),
+        _ea_ints(m).take([0, -1]),
+        _ea_ints(m).take([0, -1], allow_fill=True),
+        _ea_ints(m).take([0, -1], allow_fill=True, fill_value=5),
+    ],
+    "argsort": lambda m: [_ea_ints(m).argsort(), _ea_ints(m).argsort(ascending=False)],
+    "reductions": lambda m: [_ea_ints(m).sum(), _ea_ints(m).max(), _ea_ints(m).mean(), _ea_ints(m).min(skipna=False)],
+    "arithmetic": lambda m: [
+        _ea_ints(m) + 1,
+        1 + _ea_ints(m),
+        _ea_ints(m) / 2,
+        _ea_ints(m) // 2,
+        -_ea_ints(m),
+        _ea_ints(m) + _ea_ints(m),
+    ],
+    "comparison": lambda m: [_ea_ints(m) == 1, _ea_ints(m) > 1],
+    "array plus a Series is a Series": lambda m: _ea_ints(m) + m.Series([1, 2, 3]),
+    "string concat": lambda m: m.array(["a", None]) + "x",
+    "datetime tz and difference": lambda m: [
+        m.array(m.to_datetime(["2024-01-01"]).tz_localize("UTC")).tz,
+        m.array(m.to_datetime(["2024-01-01", None])) - m.array(m.to_datetime(["2023-12-31", "2024-01-01"])),
+    ],
+    "equals": lambda m: [_ea_ints(m).equals(m.array([1, None, 3])), _ea_ints(m).equals(m.array([1, None, 4]))],
+    "Series and frame of an array": lambda m: [
+        m.Series(_ea_ints(m)),
+        m.DataFrame({"x": _ea_ints(m)}).dtypes,
+    ],
+    "isin": lambda m: [_ea_ints(m).isin([1]), m.array(["a", None]).isin(["a"])],
+    "astype object and text keep NA": lambda m: [_ea_ints(m).astype(object), _ea_ints(m).astype(str)],
+    "astype int with NA raises": lambda m: _ea_ints(m).astype("int64"),
+    "masked to_numpy": lambda m: [
+        m.Series([1, 2], dtype="Int64").to_numpy(),
+        m.Series([1.5, None], dtype="Float64").to_numpy(),
+        m.Series([True, None], dtype="boolean").to_numpy(),
+        np.asarray(m.Series([1, None], dtype="Int64")),
+    ],
+    "aware to_numpy is Timestamps": lambda m: [
+        m.Series(m.to_datetime(["2024-01-01", None]).tz_localize("UTC")).to_numpy(),
+        np.asarray(m.array(m.to_datetime(["2024-01-01"]).tz_localize("UTC"))),
+    ],
+    "string dtype keeps each value's text": lambda m: [
+        m.array([1, None], dtype="string"),
+        m.Series([1, 2.5, None], dtype="string").tolist(),
+    ],
+    "CategoricalIndex surfaces": lambda m: [
+        m.CategoricalIndex(["a", "b", "a"]).array,
+        m.CategoricalIndex(["a", "b", "a"]).values,
+        str(m.CategoricalIndex(["a", "b"]).to_series().dtype),
+        [str(t) for t in m.CategoricalIndex(["a", "b"]).to_frame().dtypes],
+        str(m.Series(m.CategoricalIndex(["a", "b"])).dtype),
+    ],
+    "PeriodIndex to_series": lambda m: [
+        str(m.period_range("2024-01", periods=2, freq="M").to_series().dtype),
+        [str(t) for t in m.period_range("2024-01", periods=2, freq="M").to_frame().dtypes],
+    ],
+    "class names": lambda m: [
+        type(m.array([1])).__name__,
+        isinstance(m.array([1]), m.arrays.IntegerArray),
+        isinstance(m.Series([1]), m.arrays.IntegerArray),
+        isinstance(m.array([1]), m.api.extensions.ExtensionArray),
+    ],
+    # NEGATIVES: numpy dtypes' .values / unique() stay numpy arrays; a
+    # zoned column's .values is its UTC datetime64 array; a period column's
+    # .values an object array.
+    "Series int values": lambda m: m.Series([1, 2]).values,
+    "Series int unique": lambda m: m.Series([1, 1, 2]).unique(),
+    "Series object unique": lambda m: m.Series(["a", "a"]).unique(),
+    "Series aware values": lambda m: m.Series(m.to_datetime(["2024-01-01"]).tz_localize("UTC")).values,
+    "Series period values": lambda m: m.Series(m.period_range("2024-01", periods=2, freq="M")).values,
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EXTENSION_ARRAY_CASES))
+def test_extension_arrays_like_pandas(case: str) -> None:
+    run = _EXTENSION_ARRAY_CASES[case]
+    assert _ea_outcome(lambda: run(fpd)) == _ea_outcome(lambda: run(pd)), case

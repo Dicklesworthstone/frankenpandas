@@ -6562,7 +6562,37 @@ fn parse_duplicate_keep(keep: Option<&Bound<'_, PyAny>>) -> PyResult<DuplicateKe
 /// anything else. These raised "Cannot convert ndarray to Scalar" in the
 /// DataFrame paths, and a DatetimeIndex became its formatted strings with NaT
 /// as 1970-01-01 (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.15).
+/// A CategoricalIndex's labels as a categorical column of its categories and
+/// ordering, a missing label code -1.
+fn categorical_index_column(index: &CategoricalIndex) -> PyResult<Column> {
+    let categories = index.categories();
+    let codes = index
+        .labels()
+        .iter()
+        .zip(index.isna())
+        .map(|(label, missing)| {
+            categories
+                .iter()
+                .position(|category| !missing && category == label)
+                .map_or(-1, |position| position as i64)
+        })
+        .collect();
+    let categories = categories.iter().cloned().map(Scalar::Utf8).collect();
+    Series::from_categorical_codes("", codes, categories, index.ordered())
+        .map(|series| series.column().clone())
+        .map_err(frame_error_to_py)
+}
+
 fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Option<Column>> {
+    // An array is its column, dtype and all.
+    if let Ok(array) = obj.extract::<PyRef<'_, PyExtensionArray>>() {
+        return Ok(Some(array.inner.column().clone()));
+    }
+    // A CategoricalIndex is a categorical column of its categories and
+    // ordering (it was an object column of its labels; 5y62q).
+    if let Ok(categorical) = obj.extract::<PyRef<'_, PyCategoricalIndex>>() {
+        return categorical_index_column(&categorical.inner).map(Some);
+    }
     let temporal = |dtype: DType, nanos: Vec<Option<i64>>, wrap: fn(i64) -> Scalar| {
         let values = nanos
             .into_iter()
@@ -8303,7 +8333,7 @@ fn pandas_index_text(
     justify: bool,
     mut attrs: Vec<String>,
 ) -> String {
-    let data = pandas_object_summary(class, items, justify);
+    let data = pandas_object_summary(Some(class), items, justify);
     let n = items.len();
     if n > PANDAS_MAX_SEQ_ITEMS {
         let at = if attrs.last().is_some_and(|attr| attr.starts_with("freq=")) {
@@ -8322,12 +8352,14 @@ const PANDAS_MAX_SEQ_ITEMS: usize = 100;
 
 /// pandas' `format_object_summary(items, name=class)` at the default
 /// display.width 80: `[a, b, ...], ` wrapped under the class name's width
-/// (and `],` then a line break once it wraps).
-fn pandas_object_summary(class: &str, items: &[String], justify: bool) -> String {
+/// (and `],` then a line break once it wraps); without a class, pandas'
+/// `indent_for_name=False` (an array's repr), under the `[` alone.
+fn pandas_object_summary(class: Option<&str>, items: &[String], justify: bool) -> String {
     const WIDTH: usize = 80;
     const MAX_SEQ_ITEMS: usize = PANDAS_MAX_SEQ_ITEMS;
-    let space1 = format!("\n{}", " ".repeat(class.len() + 1));
-    let space2 = format!("\n{}", " ".repeat(class.len() + 2));
+    let indent = class.map_or(0, |class| class.len() + 1);
+    let space1 = format!("\n{}", " ".repeat(indent));
+    let space2 = format!("\n{}", " ".repeat(indent + 1));
     let n = items.len();
     let truncated = n > MAX_SEQ_ITEMS;
     let width_of = |text: &str| text.chars().count();
@@ -9926,8 +9958,11 @@ impl PyIndex {
         Ok(PySeries { inner: s })
     }
 
-    fn array(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
-        self.to_list(py)
+    /// pandas' `Index.array` (see [`index_array`]; it was a method
+    /// answering a list).
+    #[getter]
+    fn array(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        index_array(slf.as_any())
     }
 
     fn ravel(&self) -> Self {
@@ -11466,8 +11501,11 @@ impl PyDatetimeIndex {
         self.as_py_index().argsort()
     }
 
-    fn array(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
-        self.as_py_index().array(py)
+    /// pandas' `Index.array` (see [`index_array`]; it was a method
+    /// answering a list).
+    #[getter]
+    fn array(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        index_array(slf.as_any())
     }
 
     /// Labels are nanoseconds; another unit is not supported (it was
@@ -12999,8 +13037,11 @@ impl PyMultiIndex {
         PyIndex { inner: flat }.argsort()
     }
 
-    fn array(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
-        self.to_list(py)
+    /// pandas' `Index.array` (see [`index_array`]; it was a method
+    /// answering a list).
+    #[getter]
+    fn array(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        index_array(slf.as_any())
     }
 
     fn to_numpy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -14594,8 +14635,11 @@ impl PyTimedeltaIndex {
         self.as_py_index().argsort()
     }
 
-    fn array(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
-        self.as_py_index().array(py)
+    /// pandas' `Index.array` (see [`index_array`]; it was a method
+    /// answering a list).
+    #[getter]
+    fn array(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        index_array(slf.as_any())
     }
 
     /// Labels are nanoseconds; another unit is not supported (it was
@@ -15348,6 +15392,14 @@ fn period_field_index<T: Into<i64>>(
     .into_py_any(py)
 }
 
+impl PyPeriodIndex {
+    /// Its labels as a column: a period one (to_series / to_frame).
+    fn series_column(&self) -> PyResult<Column> {
+        let periods = self.inner.values().iter().copied().map(Scalar::Period);
+        Column::from_values(periods.collect()).map_err(column_error_to_py)
+    }
+}
+
 #[pymethods]
 impl PyPeriodIndex {
     #[new]
@@ -15807,16 +15859,9 @@ impl PyPeriodIndex {
         } else {
             idx.clone()
         };
-        let col = Column::from_values(
-            idx.labels()
-                .iter()
-                .map(|l| match l {
-                    IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
-                    _ => Scalar::Null(NullKind::NaN),
-                })
-                .collect(),
-        )
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        // Its own dtype - period / categorical - as pandas' (it was an object
+        // column of the labels' text; br-frankenpandas-5y62q).
+        let col = self.series_column()?;
         let s = Series::new(series_name, final_idx, col).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: s })
     }
@@ -15839,16 +15884,9 @@ impl PyPeriodIndex {
         } else {
             Index::from_range(0, self.inner.len() as i64, 1)
         };
-        let col = Column::from_values(
-            idx.labels()
-                .iter()
-                .map(|l| match l {
-                    IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
-                    _ => Scalar::Null(NullKind::NaN),
-                })
-                .collect(),
-        )
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        // Its own dtype - period / categorical - as pandas' (it was an object
+        // column of the labels' text; br-frankenpandas-5y62q).
+        let col = self.series_column()?;
         let mut col_map = BTreeMap::new();
         col_map.insert(col_name.clone(), col);
         let df = DataFrame::new_with_column_order(final_idx, col_map, vec![col_name])
@@ -15996,8 +16034,11 @@ impl PyPeriodIndex {
         self.as_py_index().argsort()
     }
 
-    fn array(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
-        self.as_py_index().array(py)
+    /// pandas' `Index.array` (see [`index_array`]; it was a method
+    /// answering a list).
+    #[getter]
+    fn array(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        index_array(slf.as_any())
     }
 
     #[getter]
@@ -16470,6 +16511,13 @@ pub struct PyCategoricalIndex {
     pub(crate) inner: CategoricalIndex,
 }
 
+impl PyCategoricalIndex {
+    /// Its labels as a column: a categorical one (to_series / to_frame).
+    fn series_column(&self) -> PyResult<Column> {
+        categorical_index_column(&self.inner)
+    }
+}
+
 #[pymethods]
 impl PyCategoricalIndex {
     #[new]
@@ -16578,9 +16626,11 @@ impl PyCategoricalIndex {
         self.tolist()
     }
 
+    /// pandas' `CategoricalIndex.values`: its Categorical (it was a list of
+    /// the labels' text; br-frankenpandas-5y62q).
     #[getter]
-    pub fn values(&self) -> Vec<String> {
-        self.tolist()
+    pub fn values(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        extension_array(py, self.series_column()?)
     }
 
     pub fn copy(&self) -> Self {
@@ -16890,16 +16940,9 @@ impl PyCategoricalIndex {
         } else {
             idx.clone()
         };
-        let col = Column::from_values(
-            idx.labels()
-                .iter()
-                .map(|l| match l {
-                    IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
-                    _ => Scalar::Null(NullKind::NaN),
-                })
-                .collect(),
-        )
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        // Its own dtype - period / categorical - as pandas' (it was an object
+        // column of the labels' text; br-frankenpandas-5y62q).
+        let col = self.series_column()?;
         let s = Series::new(series_name, final_idx, col).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: s })
     }
@@ -16922,16 +16965,9 @@ impl PyCategoricalIndex {
         } else {
             Index::from_range(0, self.inner.len() as i64, 1)
         };
-        let col = Column::from_values(
-            idx.labels()
-                .iter()
-                .map(|l| match l {
-                    IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
-                    _ => Scalar::Null(NullKind::NaN),
-                })
-                .collect(),
-        )
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        // Its own dtype - period / categorical - as pandas' (it was an object
+        // column of the labels' text; br-frankenpandas-5y62q).
+        let col = self.series_column()?;
         let mut col_map = BTreeMap::new();
         col_map.insert(col_name.clone(), col);
         let df = DataFrame::new_with_column_order(final_idx, col_map, vec![col_name])
@@ -17077,8 +17113,11 @@ impl PyCategoricalIndex {
         self.as_py_index().argsort()
     }
 
-    fn array(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
-        self.as_py_index().array(py)
+    /// pandas' `Index.array` (see [`index_array`]; it was a method
+    /// answering a list).
+    #[getter]
+    fn array(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        index_array(slf.as_any())
     }
 
     fn as_ordered(&self) -> Self {
@@ -21826,10 +21865,11 @@ impl PySeries {
             .map(py_series_name)
             .transpose()?;
         // dtype=object keeps a list's values as given; `from_data` would first
-        // make [1, None, 2] float64 (fvsao.22).
+        // make [1, None, 2] float64 (fvsao.22). So does dtype='string', whose
+        // text is each given value's (1 was '1.0'; br-frankenpandas-5y62q).
         let object_values = match (data, dtype) {
             (Some(data), Some(dtype))
-                if is_object_dtype_arg(dtype)
+                if (is_object_dtype_arg(dtype) || is_string_dtype_arg(dtype))
                     && (data.is_instance_of::<PyList>() || data.is_instance_of::<PyTuple>()) =>
             {
                 Some(
@@ -23286,47 +23326,24 @@ impl PySeries {
             .map_err(frame_error_to_py)?;
             return PyCategorical { inner }.into_py_any(py);
         }
-        // A datetime / duration column's are Timestamps / Timedeltas, a
-        // zoned one's in its zone (pandas' DatetimeArray / TimedeltaArray; a
-        // DatetimeIndex / TimedeltaIndex here). The numpy array iterated
-        // numpy datetime64 / timedelta64 scalars (fvsao.17) and held a zoned
-        // column's naive UTC clock.
-        match self.inner.dtype() {
-            DType::Datetime64 { tz } => {
-                let nanos = self
-                    .inner
-                    .unique()
-                    .iter()
-                    .map(|value| match value {
-                        Scalar::Datetime64(nanos) => *nanos,
-                        _ => Timestamp::NAT,
-                    })
-                    .collect();
-                let inner = DatetimeIndex::new(nanos)
-                    .with_tz(tz.as_deref())
-                    .map_err(index_error_to_py)?;
-                return PyDatetimeIndex { inner }.into_py_any(py);
-            }
-            DType::Timedelta64 => {
-                let nanos = self
-                    .inner
-                    .unique()
-                    .iter()
-                    .map(|value| match value {
-                        Scalar::Timedelta64(nanos) => *nanos,
-                        _ => Timedelta::NAT,
-                    })
-                    .collect();
-                let inner = TimedeltaIndex::new(nanos);
-                return PyTimedeltaIndex { inner }.into_py_any(py);
-            }
-            _ => {}
+        // An extension dtype's are its array: a datetime / duration column's
+        // a DatetimeArray / TimedeltaArray (in its zone; the numpy array
+        // iterated numpy datetime64 / timedelta64 scalars, fvsao.17, and they
+        // were then a DatetimeIndex / TimedeltaIndex), a masked or string
+        // column's its IntegerArray / StringArray ... (they were numpy
+        // arrays, Int64's float64; br-frankenpandas-5y62q).
+        let source = self.inner.column();
+        if ArrayKind::of(source) != ArrayKind::Numpy {
+            let distinct = Column::new(source.dtype(), self.inner.unique())
+                .map_err(column_error_to_py)?
+                .keeping_dtype_of(source);
+            return extension_array(py, distinct);
         }
         // The distinct values are the column's own: an int32 column's are an
         // int32 array (fvsao.23).
         let column = Column::from_values(self.inner.unique())
             .map_err(column_error_to_py)?
-            .keeping_dtype_of(self.inner.column());
+            .keeping_dtype_of(source);
         Ok(column_ndarray(py, &column)?.unbind())
     }
 
@@ -24251,12 +24268,17 @@ impl PySeries {
 
     /// pandas' `Series.values`: a numpy array (int64 / float64 / bool /
     /// datetime64[ns] / timedelta64[ns], else object) - it was a list - and
-    /// a categorical's Categorical (it was the object array of its values).
+    /// a categorical's Categorical (it was the object array of its values);
+    /// the masked and string dtypes' arrays (they were object arrays;
+    /// br-frankenpandas-5y62q).
     #[getter]
     fn values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         if self.inner.column().categorical().is_some() {
             let inner = self.inner.clone();
             return Bound::new(py, PyCategorical { inner }).map(Bound::into_any);
+        }
+        if ArrayKind::of(self.inner.column()).is_values_array() {
+            return Ok(extension_array(py, self.inner.column().clone())?.into_bound(py));
         }
         column_ndarray(py, self.inner.column())
     }
@@ -24277,7 +24299,12 @@ impl PySeries {
         let missing = na_value
             .map(|_| missing_ndarray(py, &[column], column.len()))
             .transpose()?;
-        finish_to_numpy(column_ndarray(py, column)?, missing, dtype, na_value)
+        let values = match (dtype, na_value) {
+            (None, None) => pandas_default_ndarray(py, column)?,
+            _ => None,
+        };
+        let values = values.map_or_else(|| column_ndarray(py, column), Ok)?;
+        finish_to_numpy(values, missing, dtype, na_value)
     }
 
     /// The numpy array protocol: `np.asarray(s)`, `np.array(s)` and numpy
@@ -24291,7 +24318,13 @@ impl PySeries {
         copy: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let _ = copy;
-        finish_to_numpy(column_ndarray(py, self.inner.column())?, None, dtype, None)
+        let column = self.inner.column();
+        let values = match dtype {
+            None => pandas_default_ndarray(py, column)?,
+            Some(_) => None,
+        };
+        let values = values.map_or_else(|| column_ndarray(py, column), Ok)?;
+        finish_to_numpy(values, None, dtype, None)
     }
 
     /// numpy's ufunc protocol: `np.log(s)` is a Series with this index and
@@ -25542,9 +25575,11 @@ impl PySeries {
         self.tolist(py)
     }
 
+    /// pandas' `Series.array`: the array of its dtype (a numpy dtype's a
+    /// NumpyExtensionArray; see [`extension_array`]). It was `.values`.
     #[getter]
     fn array(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.values(py).map(Bound::unbind)
+        extension_array(py, self.inner.column().clone())
     }
 
     #[getter]
@@ -27312,6 +27347,72 @@ fn object_ndarray<'py>(
     let array = np.call_method("empty", (items.len(),), Some(&kwargs))?;
     array.set_item(pyo3::types::PySlice::full(py), PyList::new(py, items)?)?;
     Ok(array)
+}
+
+/// pandas 2.2's numpy array of a masked (nullable int / float / boolean) or
+/// zoned column when no dtype or na_value is asked (`to_numpy()`,
+/// `np.asarray`): a masked one's numpy dtype while nothing is missing, with
+/// a missing value float64 NaN for ints, the float dtype with NaN for
+/// floats, an object array holding NA for booleans; a zoned one's object
+/// array of Timestamps (and NaT). None for any other column. They were
+/// object arrays holding None, and the zoned column's naive UTC
+/// datetime64 (br-frankenpandas-5y62q).
+fn pandas_default_ndarray<'py>(
+    py: Python<'py>,
+    column: &Column,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let numpy_dtype = match column.dtype() {
+        DType::Int64Nullable => DType::Int64,
+        DType::Float64Nullable => DType::Float64,
+        DType::BoolNullable => DType::Bool,
+        DType::Datetime64 { tz: Some(_) } => {
+            let len = i64::try_from(column.len()).unwrap_or(i64::MAX);
+            let inner = Series::new(
+                LabelName::default(),
+                Index::from_range(0, len, 1),
+                column.clone(),
+            )
+            .map_err(frame_error_to_py)?;
+            let stamps = Bound::new(py, PySeries { inner })?.call_method0("tolist")?;
+            let array = py
+                .import("numpy")?
+                .call_method1("empty", (column.len(), "object"))?;
+            array.set_item(pyo3::types::PySlice::full(py), stamps)?;
+            return Ok(Some(array));
+        }
+        _ => return Ok(None),
+    };
+    let plain = if !column.has_any_missing() {
+        column
+            .astype(numpy_dtype.clone())
+            .map_err(column_error_to_py)?
+    } else if numpy_dtype == DType::Bool {
+        let na = na_object(py)?;
+        let items: Vec<Py<PyAny>> = column
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Bool(flag) => pyo3::types::PyBool::new(py, *flag)
+                    .to_owned()
+                    .into_any()
+                    .unbind(),
+                _ => na.clone_ref(py),
+            })
+            .collect();
+        let array = py
+            .import("numpy")?
+            .call_method1("empty", (items.len(), "object"))?;
+        array.set_item(pyo3::types::PySlice::full(py), PyList::new(py, items)?)?;
+        return Ok(Some(array));
+    } else {
+        column.astype(DType::Float64).map_err(column_error_to_py)?
+    };
+    let plain = if numpy_dtype == DType::Int64 && column.has_any_missing() {
+        plain
+    } else {
+        plain.keeping_dtype_of(column)
+    };
+    column_ndarray(py, &plain).map(Some)
 }
 
 /// A numpy array of an index's labels, as pandas' `Index.values`: the
@@ -57189,7 +57290,7 @@ impl PyCategoricalDtype {
             Some(categories) => {
                 let justify = !categories.iter().all(|c| matches!(c, Scalar::Utf8(_)));
                 let data = pandas_object_summary(
-                    "CategoricalDtype",
+                    Some("CategoricalDtype"),
                     &category_repr_items(categories),
                     justify,
                 );
@@ -58496,6 +58597,12 @@ impl PyIntervalIndex {
         self.intervals.clone()
     }
 
+    /// pandas' `IntervalIndex.array`: its IntervalArray (there was none).
+    #[getter]
+    fn array(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        index_array(slf.as_any())
+    }
+
     fn set_closed(&self, closed: &str) -> PyResult<Self> {
         let mut intervals = Vec::with_capacity(self.intervals.len());
         for iv in &self.intervals {
@@ -58579,6 +58686,859 @@ impl PyIntervalIndex {
             intervals,
             name: rust_idx.name().map(String::from),
         }
+    }
+}
+
+/// The pandas array class a column answers as (`pd.array`, `Series.array`,
+/// an extension dtype's `unique()` / `.values`): the masked Integer /
+/// Floating / Boolean arrays, StringArray, the datetime-like arrays and
+/// IntervalArray for the extension dtypes, NumpyExtensionArray for a numpy
+/// one (a categorical is a Categorical).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArrayKind {
+    Integer,
+    Floating,
+    Boolean,
+    String,
+    Datetime,
+    Timedelta,
+    Period,
+    Interval,
+    Numpy,
+}
+
+impl ArrayKind {
+    fn of(column: &Column) -> Self {
+        match column.dtype() {
+            DType::Int64Nullable => Self::Integer,
+            DType::Float64Nullable => Self::Floating,
+            DType::BoolNullable => Self::Boolean,
+            DType::Utf8 if column.is_pandas_string() => Self::String,
+            DType::Datetime64 { .. } => Self::Datetime,
+            DType::Timedelta64 => Self::Timedelta,
+            DType::Period => Self::Period,
+            DType::Interval => Self::Interval,
+            _ => Self::Numpy,
+        }
+    }
+
+    /// Whether pandas' `Series.values` of this kind is the array (the
+    /// masked and string dtypes) rather than a numpy array.
+    const fn is_values_array(self) -> bool {
+        matches!(
+            self,
+            Self::Integer | Self::Floating | Self::Boolean | Self::String
+        )
+    }
+
+    /// The masked (nullable int / float / boolean) arrays.
+    const fn is_masked(self) -> bool {
+        matches!(self, Self::Integer | Self::Floating | Self::Boolean)
+    }
+
+    /// Whether `item`, a missing value, is the one `item in array` finds:
+    /// pandas' NA in the masked and string arrays, NaT in the datetime-like
+    /// ones, NaN in the others (None in none of them).
+    fn holds_as_missing(self, item: &Bound<'_, PyAny>) -> bool {
+        match self {
+            Self::Integer | Self::Floating | Self::Boolean | Self::String => {
+                item.is_instance_of::<PyNAType>()
+            }
+            Self::Datetime | Self::Timedelta | Self::Period => item.is_instance_of::<PyNaTType>(),
+            Self::Interval | Self::Numpy => {
+                item.is_instance_of::<pyo3::types::PyFloat>()
+                    && item.extract::<f64>().is_ok_and(f64::is_nan)
+            }
+        }
+    }
+}
+
+/// pandas' `ExtensionArray`: a one-dimensional array of a column's values in
+/// the class its dtype takes (see [`ArrayKind`]), held as an unnamed Series
+/// over a RangeIndex; its operations run through that Series and answer an
+/// array of their result's kind, as pandas' arrays do. `pd.array`,
+/// `Series.array`, `Index.array` and an extension dtype's `unique()` /
+/// `.values` were Series, lists, ndarrays or index objects
+/// (br-frankenpandas-5y62q).
+#[pyclass(name = "ExtensionArray", subclass, from_py_object)]
+#[derive(Clone)]
+pub struct PyExtensionArray {
+    inner: Series,
+}
+
+macro_rules! define_extension_array {
+    ($struct_name:ident, $class_name:literal) => {
+        #[pyclass(name = $class_name, extends = PyExtensionArray)]
+        pub struct $struct_name;
+    };
+}
+
+define_extension_array!(PyIntegerArray, "IntegerArray");
+define_extension_array!(PyFloatingArray, "FloatingArray");
+define_extension_array!(PyBooleanArray, "BooleanArray");
+define_extension_array!(PyStringArray, "StringArray");
+define_extension_array!(PyTimedeltaArray, "TimedeltaArray");
+define_extension_array!(PyPeriodArray, "PeriodArray");
+define_extension_array!(PyIntervalArray, "IntervalArray");
+define_extension_array!(PyNumpyExtensionArray, "NumpyExtensionArray");
+
+/// pandas' `DatetimeArray`, which carries its zone.
+#[pyclass(name = "DatetimeArray", extends = PyExtensionArray)]
+pub struct PyDatetimeArray;
+
+#[pymethods]
+impl PyDatetimeArray {
+    #[getter]
+    fn tz(slf: PyRef<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let array: &PyExtensionArray = slf.as_ref();
+        Ok(array.series(py)?.getattr("dt")?.getattr("tz")?.unbind())
+    }
+
+    /// An array keeps no frequency (pandas' None here).
+    #[getter]
+    const fn freq(&self) -> Option<i64> {
+        None
+    }
+}
+
+/// `column` as the pandas array its dtype takes: a Categorical for a
+/// categorical, else the [`ArrayKind`] class over its values.
+fn extension_array(py: Python<'_>, column: Column) -> PyResult<Py<PyAny>> {
+    let kind = ArrayKind::of(&column);
+    let categorical = column.categorical().is_some();
+    let len = i64::try_from(column.len()).unwrap_or(i64::MAX);
+    let inner = Series::new(LabelName::default(), Index::from_range(0, len, 1), column)
+        .map_err(frame_error_to_py)?;
+    if categorical {
+        return PyCategorical { inner }.into_py_any(py);
+    }
+    let base = pyo3::PyClassInitializer::from(PyExtensionArray { inner });
+    Ok(match kind {
+        ArrayKind::Integer => Py::new(py, base.add_subclass(PyIntegerArray))?.into_any(),
+        ArrayKind::Floating => Py::new(py, base.add_subclass(PyFloatingArray))?.into_any(),
+        ArrayKind::Boolean => Py::new(py, base.add_subclass(PyBooleanArray))?.into_any(),
+        ArrayKind::String => Py::new(py, base.add_subclass(PyStringArray))?.into_any(),
+        ArrayKind::Datetime => Py::new(py, base.add_subclass(PyDatetimeArray))?.into_any(),
+        ArrayKind::Timedelta => Py::new(py, base.add_subclass(PyTimedeltaArray))?.into_any(),
+        ArrayKind::Period => Py::new(py, base.add_subclass(PyPeriodArray))?.into_any(),
+        ArrayKind::Interval => Py::new(py, base.add_subclass(PyIntervalArray))?.into_any(),
+        ArrayKind::Numpy => Py::new(py, base.add_subclass(PyNumpyExtensionArray))?.into_any(),
+    })
+}
+
+/// A Series operation's answer as an array: a Series becomes the array of
+/// its column; anything else (a scalar, an ndarray, NotImplemented) as is.
+fn array_result(py: Python<'_>, result: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    match result.extract::<PyRef<'_, PySeries>>() {
+        Ok(series) => extension_array(py, series.inner.column().clone()),
+        Err(_) => Ok(result.clone().unbind()),
+    }
+}
+
+/// Whether `obj` is one of the index classes.
+fn is_index_object(obj: &Bound<'_, PyAny>) -> bool {
+    obj.is_instance_of::<PyIndex>()
+        || obj.is_instance_of::<PyDatetimeIndex>()
+        || obj.is_instance_of::<PyTimedeltaIndex>()
+        || obj.is_instance_of::<PyPeriodIndex>()
+        || obj.is_instance_of::<PyIntervalIndex>()
+        || obj.is_instance_of::<PyCategoricalIndex>()
+        || obj.is_instance_of::<PyMultiIndex>()
+}
+
+/// An index's values as pandas' `Index.array`: the array its dtype takes (a
+/// MultiIndex has none: pandas' ValueError). It was a list, and a method.
+fn index_array(obj: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    let py = obj.py();
+    if obj.is_instance_of::<PyMultiIndex>() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "MultiIndex has no single backing array. Use 'MultiIndex.to_numpy()' to get a NumPy array of tuples.",
+        ));
+    }
+    // Series(index) keeps every index class's dtype (a PeriodIndex's
+    // to_series is an object column).
+    let series = PySeries::new(py, Some(obj), None, None, None, None)?;
+    extension_array(py, series.inner.column().clone())
+}
+
+impl PyExtensionArray {
+    fn series<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PySeries>> {
+        Bound::new(
+            py,
+            PySeries {
+                inner: self.inner.clone(),
+            },
+        )
+    }
+
+    fn kind(&self) -> ArrayKind {
+        ArrayKind::of(self.inner.column())
+    }
+
+    /// What the elements come out of: a NumpyExtensionArray's numpy array
+    /// (numpy scalars, as pandas'), else the Series (pandas' boxing: a
+    /// masked array's numpy scalars and NA, Timestamps, ...).
+    fn elements<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        if self.kind() == ArrayKind::Numpy {
+            return column_ndarray(py, self.inner.column());
+        }
+        Ok(self.series(py)?.into_any())
+    }
+
+    /// `self <method> other` through the Series: another array by its
+    /// values (position against position); NotImplemented for a Series,
+    /// DataFrame or Index, which answer (pandas' arrays defer to them).
+    fn binary(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        method: &str,
+    ) -> PyResult<Py<PyAny>> {
+        if other.is_instance_of::<PySeries>()
+            || other.is_instance_of::<PyDataFrame>()
+            || is_index_object(other)
+        {
+            return Ok(py.NotImplemented());
+        }
+        let operand = match other.extract::<PyRef<'_, Self>>() {
+            Ok(array) => array.series(py)?.into_any(),
+            Err(_) => other.clone(),
+        };
+        array_result(py, &self.series(py)?.call_method1(method, (operand,))?)
+    }
+
+    fn unary(&self, py: Python<'_>, method: &str) -> PyResult<Py<PyAny>> {
+        array_result(py, &self.series(py)?.call_method0(method)?)
+    }
+
+    /// A masked array as the numpy `target` dtype, as pandas' `astype`: the
+    /// values cast (a missing one filled for the cast) and each missing slot
+    /// NaN for a float target, NaT for a datetime one, NA otherwise; an int
+    /// or bool target refuses a missing value.
+    fn masked_as_numpy(&self, py: Python<'_>, target: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let kind: String = target.getattr("kind")?.extract()?;
+        let has_missing = self.inner.column().has_any_missing();
+        if has_missing && matches!(kind.as_str(), "i" | "u") {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "cannot convert NA to integer",
+            ));
+        }
+        if has_missing && kind == "b" {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "cannot convert float NaN to bool",
+            ));
+        }
+        let series = self.series(py)?;
+        let zero = if self.kind() == ArrayKind::Boolean {
+            false.into_py_any(py)?
+        } else {
+            0.into_py_any(py)?
+        };
+        let data = series
+            .call_method1("fillna", (zero,))?
+            .call_method0("to_numpy")?
+            .call_method1("astype", (target,))?;
+        if has_missing {
+            let mask = series.call_method0("isna")?.call_method0("to_numpy")?;
+            let filler = match kind.as_str() {
+                "f" => f64::NAN.into_py_any(py)?,
+                "M" => py
+                    .import("numpy")?
+                    .getattr("datetime64")?
+                    .call1(("NaT",))?
+                    .unbind(),
+                _ => na_object(py)?,
+            };
+            data.set_item(mask, filler)?;
+        }
+        Ok(data.unbind())
+    }
+
+    /// A Series method's answer as it is, `args` / `kwargs` passed on.
+    fn delegate(
+        &self,
+        py: Python<'_>,
+        method: &str,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        Ok(self.series(py)?.call_method(method, args, kwargs)?.unbind())
+    }
+
+    /// pandas' element texts in the array's repr (its `_formatter`): the
+    /// masked arrays' values as `str` gives them, a StringArray's quoted,
+    /// the datetime-like ones quoted (and NaT, but a TimedeltaArray's; a
+    /// TimedeltaArray of whole days as `N days`), a missing interval `nan`,
+    /// a NumpyExtensionArray's numpy scalars by their repr.
+    fn repr_items(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        const DAY: i64 = 86_400_000_000_000;
+        let kind = self.kind();
+        let column = self.inner.column();
+        let whole_days = kind == ArrayKind::Timedelta
+            && column.values().iter().all(|value| match value {
+                Scalar::Timedelta64(nanos) => *nanos == Timedelta::NAT || nanos % DAY == 0,
+                _ => true,
+            });
+        let mut items = Vec::with_capacity(column.len());
+        for (element, value) in self.elements(py)?.try_iter()?.zip(column.values()) {
+            let element = element?;
+            let missing = value.is_missing();
+            items.push(match kind {
+                ArrayKind::Integer
+                | ArrayKind::Floating
+                | ArrayKind::Boolean
+                | ArrayKind::String
+                    if missing =>
+                {
+                    "<NA>".to_owned()
+                }
+                ArrayKind::Integer | ArrayKind::Floating | ArrayKind::Boolean => {
+                    element.str()?.to_string()
+                }
+                ArrayKind::String | ArrayKind::Numpy => element.repr()?.to_string(),
+                ArrayKind::Datetime | ArrayKind::Period if missing => "'NaT'".to_owned(),
+                ArrayKind::Datetime | ArrayKind::Period => format!("'{}'", element.str()?),
+                ArrayKind::Timedelta => match value {
+                    Scalar::Timedelta64(nanos) if *nanos != Timedelta::NAT && whole_days => {
+                        format!("'{} days'", nanos.div_euclid(DAY))
+                    }
+                    Scalar::Timedelta64(nanos) if *nanos != Timedelta::NAT => {
+                        format!("'{}'", element.str()?)
+                    }
+                    _ => "NaT".to_owned(),
+                },
+                ArrayKind::Interval if missing => "nan".to_owned(),
+                ArrayKind::Interval => element.str()?.to_string(),
+            });
+        }
+        Ok(items)
+    }
+}
+
+#[pymethods]
+impl PyExtensionArray {
+    fn __len__(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.elements(py)?.call_method0("__iter__")
+    }
+
+    /// An element by its position (a negative one from the end; past the
+    /// end numpy's IndexError), or the array of a slice / positions / mask.
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let iloc = self.series(py)?.getattr("iloc")?;
+        let position = !key.is_instance_of::<pyo3::types::PyBool>()
+            && (key.is_instance_of::<pyo3::types::PyInt>()
+                || key.is_instance(&py.import("numpy")?.getattr("integer")?)?);
+        if position {
+            let len = i64::try_from(self.inner.len()).unwrap_or(i64::MAX);
+            let at: i64 = key.extract()?;
+            let resolved = if at < 0 { at + len } else { at };
+            if !(0..len).contains(&resolved) {
+                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                    "index {at} is out of bounds for axis 0 with size {len}"
+                )));
+            }
+            if self.kind() == ArrayKind::Numpy {
+                return Ok(self.elements(py)?.get_item(resolved)?.unbind());
+            }
+            return Ok(iloc.get_item(resolved)?.unbind());
+        }
+        let key = match key.extract::<PyRef<'_, Self>>() {
+            Ok(array) => array.series(py)?.call_method0("to_numpy")?,
+            Err(_) => key.clone(),
+        };
+        array_result(py, &iloc.get_item(key)?)
+    }
+
+    fn __setitem__(
+        &mut self,
+        py: Python<'_>,
+        key: &Bound<'_, PyAny>,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let series = self.series(py)?;
+        series.getattr("iloc")?.set_item(key, value)?;
+        self.inner = series.borrow().inner.clone();
+        Ok(())
+    }
+
+    /// pandas' `item in array`: a missing value when it is the array's own
+    /// and the array has one, any other value when an element equals it.
+    fn __contains__(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if api_is_scalar(item) && isna(py, item)?.bind(py).is_truthy()? {
+            return Ok(self.kind().holds_as_missing(item) && self.inner.column().has_any_missing());
+        }
+        self.series(py)?
+            .call_method1("__eq__", (item,))?
+            .call_method0("any")?
+            .is_truthy()
+    }
+
+    /// pandas' arrays are mutable, so unhashable.
+    fn __hash__(slf: &Bound<'_, Self>) -> PyResult<isize> {
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "unhashable type: '{}'",
+            slf.get_type().name()?
+        )))
+    }
+
+    /// pandas' `<Class>`, the values as format_object_summary lists them
+    /// (wrapped at 80 columns, the first and last 10 past 100), then
+    /// `Length: n, dtype: d`.
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        let py = slf.py();
+        let array = slf.borrow();
+        let items = array.repr_items(py)?;
+        let summary = pandas_object_summary(None, &items, true);
+        let dtype = column_pandas_dtype(py, array.inner.column())?
+            .str()?
+            .to_string();
+        Ok(format!(
+            "<{}>\n{}\nLength: {}, dtype: {dtype}",
+            slf.get_type().name()?,
+            summary.trim_end_matches([',', ' ', '\n']),
+            array.inner.len()
+        ))
+    }
+
+    #[getter]
+    fn dtype<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        column_pandas_dtype(py, self.inner.column())
+    }
+
+    #[getter]
+    fn shape(&self) -> (usize,) {
+        (self.inner.len(),)
+    }
+
+    #[getter]
+    const fn ndim(&self) -> usize {
+        1
+    }
+
+    /// numpy's product of the shape, an int64 as pandas'.
+    #[getter]
+    fn size(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(py
+            .import("numpy")?
+            .getattr("int64")?
+            .call1((self.inner.len(),))?
+            .unbind())
+    }
+
+    #[getter]
+    fn nbytes(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(self.series(py)?.getattr("nbytes")?.unbind())
+    }
+
+    fn tolist(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(self.series(py)?.call_method0("tolist")?.unbind())
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn to_numpy(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.delegate(py, "to_numpy", args, kwargs)
+    }
+
+    /// numpy's conversion (`np.asarray(array)`): `to_numpy`, cast to `dtype`.
+    #[pyo3(signature = (dtype=None, copy=None))]
+    fn __array__(
+        &self,
+        py: Python<'_>,
+        dtype: Option<&Bound<'_, PyAny>>,
+        copy: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = copy; // to_numpy answers a fresh array
+        let values = self.series(py)?.call_method0("to_numpy")?;
+        match dtype.filter(|dtype| !dtype.is_none()) {
+            Some(dtype) => Ok(values.call_method1("astype", (dtype,))?.unbind()),
+            None => Ok(values.unbind()),
+        }
+    }
+
+    /// pandas' `isna()`: a numpy bool array.
+    fn isna(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(self
+            .series(py)?
+            .call_method0("isna")?
+            .call_method0("to_numpy")?
+            .unbind())
+    }
+
+    /// The distinct values in order of first appearance (one missing value
+    /// kept), an array of this kind.
+    fn unique(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let column = self.inner.column();
+        let distinct = Column::new(column.dtype(), self.inner.unique())
+            .map_err(column_error_to_py)?
+            .keeping_dtype_of(column);
+        extension_array(py, distinct)
+    }
+
+    fn copy(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        extension_array(py, self.inner.column().clone())
+    }
+
+    fn dropna(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.unary(py, "dropna")
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn fillna(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        array_result(py, self.delegate(py, "fillna", args, kwargs)?.bind(py))
+    }
+
+    /// pandas' `astype`: an array for an extension dtype (the datetime-like
+    /// ones included), a numpy array for a numpy one.
+    #[pyo3(signature = (dtype, copy=true))]
+    fn astype(&self, py: Python<'_>, dtype: &Bound<'_, PyAny>, copy: bool) -> PyResult<Py<PyAny>> {
+        let _ = copy; // the answer is always new
+        // A masked array to a numpy dtype (what numpy.dtype reads) keeps NA
+        // in its object / text slots, as pandas'.
+        if self.kind().is_masked()
+            && let Ok(target) = py.import("numpy")?.call_method1("dtype", (dtype,))
+        {
+            return self.masked_as_numpy(py, &target);
+        }
+        let cast = self.series(py)?.call_method1("astype", (dtype,))?;
+        let column = cast
+            .extract::<PyRef<'_, PySeries>>()?
+            .inner
+            .column()
+            .clone();
+        if ArrayKind::of(&column) == ArrayKind::Numpy && column.categorical().is_none() {
+            return Ok(cast.call_method0("to_numpy")?.unbind());
+        }
+        extension_array(py, column)
+    }
+
+    /// pandas' `take(indices, allow_fill=False, fill_value=None)`: the
+    /// elements at `indices` (a negative one from the end), or with
+    /// `allow_fill` each -1 as `fill_value` (the missing value by default).
+    #[pyo3(signature = (indices, allow_fill=false, fill_value=None))]
+    fn take(
+        &self,
+        py: Python<'_>,
+        indices: &Bound<'_, PyAny>,
+        allow_fill: bool,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let positions: Vec<i64> = indices
+            .try_iter()?
+            .map(|position| position.and_then(|position| position.extract()))
+            .collect::<PyResult<_>>()?;
+        let column = self.inner.column();
+        let len = i64::try_from(column.len()).unwrap_or(i64::MAX);
+        let fill = match fill_value.filter(|fill| !fill.is_none()) {
+            Some(fill) => py_to_cell(py, fill)?,
+            None => Scalar::missing_for_dtype(column.dtype()),
+        };
+        let mut values = Vec::with_capacity(positions.len());
+        for position in positions {
+            if allow_fill && position == -1 {
+                values.push(fill.clone());
+                continue;
+            }
+            if allow_fill && position < -1 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Invalid value in 'indices'. Must be between -1 and the length of the array minus 1.",
+                ));
+            }
+            let resolved = if position < 0 {
+                position + len
+            } else {
+                position
+            };
+            let Some(value) = usize::try_from(resolved)
+                .ok()
+                .and_then(|at| column.values().get(at))
+            else {
+                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                    "index out of bounds",
+                ));
+            };
+            values.push(value.clone());
+        }
+        let taken = Column::new(column.dtype(), values)
+            .map_err(column_error_to_py)?
+            .narrowed_like(column);
+        extension_array(py, taken)
+    }
+
+    /// pandas' `isin(values)`: a BooleanArray for a masked array (its
+    /// missing slots False unless the values hold NA), a numpy bool array
+    /// for the others.
+    fn isin(&self, py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let found = self.series(py)?.call_method1("isin", (values,))?;
+        if !self.kind().is_masked() {
+            return Ok(found.call_method0("to_numpy")?.unbind());
+        }
+        let column = found
+            .extract::<PyRef<'_, PySeries>>()?
+            .inner
+            .column()
+            .astype(DType::BoolNullable)
+            .map_err(column_error_to_py)?;
+        extension_array(py, column)
+    }
+
+    #[pyo3(signature = (dropna=true))]
+    fn value_counts(&self, py: Python<'_>, dropna: bool) -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dropna", dropna)?;
+        Ok(self
+            .series(py)?
+            .call_method("value_counts", (), Some(&kwargs))?
+            .unbind())
+    }
+
+    /// pandas' `argsort`: the positions ordering the present values (a
+    /// stable sort), the missing ones last (or first).
+    #[pyo3(signature = (ascending=true, kind="quicksort", na_position="last"))]
+    fn argsort(
+        &self,
+        py: Python<'_>,
+        ascending: bool,
+        kind: &str,
+        na_position: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = kind; // stable, which numpy's sorts agree with on distinct values
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("ascending", ascending)?;
+        kwargs.set_item("kind", "stable")?;
+        kwargs.set_item("na_position", na_position)?;
+        let sorted = self
+            .series(py)?
+            .call_method("sort_values", (), Some(&kwargs))?;
+        Ok(sorted.getattr("index")?.call_method0("to_numpy")?.unbind())
+    }
+
+    fn equals(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        match other.extract::<PyRef<'_, Self>>() {
+            Ok(array) if array.kind() == self.kind() => self
+                .series(py)?
+                .call_method1("equals", (array.series(py)?,))?
+                .is_truthy(),
+            _ => Ok(false),
+        }
+    }
+
+    // The reductions, as the Series' (skipna / min_count / ddof pass on).
+    #[pyo3(signature = (*args, **kwargs))]
+    fn sum(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.delegate(py, "sum", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn prod(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.delegate(py, "prod", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn min(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.delegate(py, "min", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn max(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.delegate(py, "max", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn mean(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.delegate(py, "mean", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn median(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.delegate(py, "median", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn std(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.delegate(py, "std", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn var(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.delegate(py, "var", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn any(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.delegate(py, "any", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn all(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.delegate(py, "all", args, kwargs)
+    }
+
+    fn __richcmp__(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        op: pyo3::class::basic::CompareOp,
+    ) -> PyResult<Py<PyAny>> {
+        use pyo3::class::basic::CompareOp;
+        let method = match op {
+            CompareOp::Lt => "__lt__",
+            CompareOp::Le => "__le__",
+            CompareOp::Eq => "__eq__",
+            CompareOp::Ne => "__ne__",
+            CompareOp::Gt => "__gt__",
+            CompareOp::Ge => "__ge__",
+        };
+        self.binary(py, other, method)
+    }
+
+    // Arithmetic and logic through the Series, answering an array.
+    fn __add__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.binary(py, other, "__add__")
+    }
+    fn __radd__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.binary(py, other, "__radd__")
+    }
+    fn __sub__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.binary(py, other, "__sub__")
+    }
+    fn __rsub__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.binary(py, other, "__rsub__")
+    }
+    fn __mul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.binary(py, other, "__mul__")
+    }
+    fn __rmul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.binary(py, other, "__rmul__")
+    }
+    fn __truediv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.binary(py, other, "__truediv__")
+    }
+    fn __rtruediv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.binary(py, other, "__rtruediv__")
+    }
+    fn __floordiv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.binary(py, other, "__floordiv__")
+    }
+    fn __rfloordiv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.binary(py, other, "__rfloordiv__")
+    }
+    fn __mod__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.binary(py, other, "__mod__")
+    }
+    fn __rmod__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.binary(py, other, "__rmod__")
+    }
+    fn __pow__(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        _modulo: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.binary(py, other, "__pow__")
+    }
+    fn __rpow__(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        _modulo: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.binary(py, other, "__rpow__")
+    }
+    fn __and__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.binary(py, other, "__and__")
+    }
+    fn __rand__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.binary(py, other, "__rand__")
+    }
+    fn __or__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.binary(py, other, "__or__")
+    }
+    fn __ror__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.binary(py, other, "__ror__")
+    }
+    fn __xor__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.binary(py, other, "__xor__")
+    }
+    fn __rxor__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.binary(py, other, "__rxor__")
+    }
+
+    fn __neg__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.unary(py, "__neg__")
+    }
+    fn __pos__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.unary(py, "__pos__")
+    }
+    fn __abs__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.unary(py, "__abs__")
+    }
+    fn __invert__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.unary(py, "__invert__")
     }
 }
 
@@ -60178,18 +61138,63 @@ pub fn show_versions(py: Python<'_>, as_json: Option<&Bound<'_, PyAny>>) -> PyRe
     Ok(())
 }
 
+/// pandas' `pd.array(data, dtype=None, copy=True)`: an array (see
+/// [`extension_array`]). Without a dtype an array stays its class, a Series
+/// or Index answers by its own dtype (a numpy one a NumpyExtensionArray),
+/// and other data by pandas' inference: ints (missing values beside them)
+/// Int64, floats Float64, bools boolean, text string, empty data Float64,
+/// datetimes / durations / periods / intervals their arrays, anything else
+/// a NumpyExtensionArray. A scalar is pandas' ValueError. It answered a
+/// Series, [1, None] float64 (br-frankenpandas-5y62q).
 #[pyfunction]
-#[pyo3(signature = (data, dtype=None))]
+#[pyo3(signature = (data, dtype=None, copy=true))]
 pub fn array(
     py: Python<'_>,
     data: &Bound<'_, PyAny>,
     dtype: Option<&Bound<'_, PyAny>>,
-) -> PyResult<PySeries> {
-    let s = PySeries::from_data(py, Some(data), None, None)?;
-    match dtype {
-        Some(dt) => s.astype(dt, None, "raise"),
-        None => Ok(s),
+    copy: bool,
+) -> PyResult<Py<PyAny>> {
+    let _ = copy; // the array is always new
+    if is_scalar_impl(data) {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "Cannot pass scalar '{}' to 'pandas.array'.",
+            data.str()?
+        )));
     }
+    let dtype = dtype.filter(|dtype| !dtype.is_none());
+    if dtype.is_none() {
+        if let Ok(array) = data.extract::<PyRef<'_, PyExtensionArray>>() {
+            return extension_array(py, array.inner.column().clone());
+        }
+        if let Ok(categorical) = data.extract::<PyRef<'_, PyCategorical>>() {
+            return extension_array(py, categorical.inner.column().clone());
+        }
+        if data.is_instance_of::<PySeries>() || is_index_object(data) {
+            let series = PySeries::new(py, Some(data), None, None, None, None)?;
+            return extension_array(py, series.inner.column().clone());
+        }
+    }
+    let inferred = match dtype {
+        Some(_) => None,
+        None => match infer_dtype_impl(data, true)? {
+            "integer" | "integer-na" => Some("Int64"),
+            "floating" | "mixed-integer-float" => Some("Float64"),
+            "boolean" => Some("boolean"),
+            "string" => Some("string"),
+            "empty" if !data.hasattr("dtype")? && data.len()? == 0 => Some("Float64"),
+            _ => None,
+        },
+    };
+    let inferred = inferred.map(|name| pyo3::types::PyString::new(py, name).into_any());
+    let series = PySeries::new(
+        py,
+        Some(data),
+        None,
+        dtype.or(inferred.as_ref()),
+        None,
+        None,
+    )?;
+    extension_array(py, series.inner.column().clone())
 }
 
 /// pandas' `interval_range(start, end, periods, freq, name, closed)`:
@@ -64142,6 +65147,15 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     types_mod.add_function(wrap_pyfunction!(api_infer_dtype, &types_mod)?)?;
     types_mod.add_function(wrap_pyfunction!(api_pandas_dtype, &types_mod)?)?;
     api_mod.add_submodule(&types_mod)?;
+    // frankenpandas.api.extensions: the array base class (the module did
+    // not exist; br-frankenpandas-5y62q).
+    let extensions_mod = PyModule::new(m.py(), "extensions")?;
+    extensions_mod.add("ExtensionArray", m.py().get_type::<PyExtensionArray>())?;
+    api_mod.add_submodule(&extensions_mod)?;
+    m.py()
+        .import("sys")?
+        .getattr("modules")?
+        .set_item("frankenpandas.api.extensions", &extensions_mod)?;
     m.add_submodule(&api_mod)?;
     m.py()
         .import("sys")?
@@ -64244,21 +65258,24 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
         .getattr("modules")?
         .set_item("frankenpandas.plotting", &plotting)?;
 
-    // frankenpandas.arrays
+    // frankenpandas.arrays: the array classes (they were Series / index
+    // classes under the arrays' names, so isinstance(series, IntegerArray)
+    // held; the Arrow and Sparse arrays, which do not exist here, went with
+    // them; br-frankenpandas-5y62q).
     let arrays = PyModule::new(m.py(), "arrays")?;
     arrays.add("Categorical", m.py().get_type::<PyCategorical>())?;
-    arrays.add("ArrowExtensionArray", m.py().get_type::<PySeries>())?;
-    arrays.add("ArrowStringArray", m.py().get_type::<PySeries>())?;
-    arrays.add("BooleanArray", m.py().get_type::<PySeries>())?;
-    arrays.add("DatetimeArray", m.py().get_type::<PyDatetimeIndex>())?;
-    arrays.add("FloatingArray", m.py().get_type::<PySeries>())?;
-    arrays.add("IntegerArray", m.py().get_type::<PySeries>())?;
-    arrays.add("IntervalArray", m.py().get_type::<PyIntervalIndex>())?;
-    arrays.add("NumpyExtensionArray", m.py().get_type::<PySeries>())?;
-    arrays.add("PeriodArray", m.py().get_type::<PyPeriodIndex>())?;
-    arrays.add("SparseArray", m.py().get_type::<PySeries>())?;
-    arrays.add("StringArray", m.py().get_type::<PySeries>())?;
-    arrays.add("TimedeltaArray", m.py().get_type::<PyTimedeltaIndex>())?;
+    arrays.add("BooleanArray", m.py().get_type::<PyBooleanArray>())?;
+    arrays.add("DatetimeArray", m.py().get_type::<PyDatetimeArray>())?;
+    arrays.add("FloatingArray", m.py().get_type::<PyFloatingArray>())?;
+    arrays.add("IntegerArray", m.py().get_type::<PyIntegerArray>())?;
+    arrays.add("IntervalArray", m.py().get_type::<PyIntervalArray>())?;
+    arrays.add(
+        "NumpyExtensionArray",
+        m.py().get_type::<PyNumpyExtensionArray>(),
+    )?;
+    arrays.add("PeriodArray", m.py().get_type::<PyPeriodArray>())?;
+    arrays.add("StringArray", m.py().get_type::<PyStringArray>())?;
+    arrays.add("TimedeltaArray", m.py().get_type::<PyTimedeltaArray>())?;
     m.add_submodule(&arrays)?;
     m.py()
         .import("sys")?
