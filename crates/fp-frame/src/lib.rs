@@ -6321,8 +6321,10 @@ fn parse_datetime64_nanos(value: &str) -> Result<i64, FrameError> {
 /// The first and last nanosecond a date string names at its own resolution,
 /// as pandas' partial-string indexing reads it: "2024" a year, "2024-01" a
 /// month, "2024-01-05" a day; with a time, its hour, minute or second (a
-/// fractional second is exact).
-fn partial_date_bounds(text: &str) -> Result<(i64, i64), FrameError> {
+/// fractional second is exact). Public for the bindings' MultiIndex
+/// lookups, whose datetime levels read a date string the same way
+/// (br-frankenpandas-c4v57).
+pub fn partial_date_bounds(text: &str) -> Result<(i64, i64), FrameError> {
     const SECOND: i64 = 1_000_000_000;
     let text = text.trim();
     let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());

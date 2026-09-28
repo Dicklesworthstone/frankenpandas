@@ -38212,23 +38212,22 @@ impl PyDataFrame {
             && let Some(multi) = self.inner.row_multiindex()
         {
             let label = py_to_index_label(key)?;
+            // A date string on a datetime level selects its period, a slice
+            // that keeps the level, as pandas' (it raised KeyError).
             let values = multi
                 .get_level_values(position)
-                .map_err(index_error_to_py)?;
-            let rows: Vec<usize> = values
+                .map_err(index_error_to_py)?
                 .labels()
-                .iter()
-                .enumerate()
-                .filter(|(_, value)| **value == label)
-                .map(|(row, _)| row)
-                .collect();
+                .to_vec();
+            let (rows, period) =
+                level_key_rows(&[values], std::slice::from_ref(&label), multi.len(), false);
             if rows.is_empty() {
                 return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
                     "{}",
                     key.repr()?
                 )));
             }
-            if !drop_level {
+            if !drop_level || !period.is_empty() {
                 let inner = frame_rows_keeping_multiindex(&self.inner, multi, &rows)?;
                 return Ok(Py::new(py, PyDataFrame { inner })?.into_any());
             }
@@ -41270,11 +41269,18 @@ fn multiindex_key(key: &Bound<'_, PyAny>, nlevels: usize) -> PyResult<Option<Vec
     Ok(None)
 }
 
-/// The rows of `multi` whose first `key.len()` levels equal `key`.
+/// The rows of `multi` whose first `key.len()` levels equal `key` - or, a
+/// date string on a datetime level, hold an instant inside the period it
+/// names (pandas' partial-string indexing: '2024-01-01' a day, '2024-01' a
+/// month; it matched nothing, a KeyError) - and the levels a period matched,
+/// which pandas keeps in the result as a slice's. With `instant`, a date
+/// string is the one instant it parses to, as pandas reads a key inside a
+/// list of keys ('2024-01' is 2024-01-01 00:00 there).
 fn multiindex_prefix_positions(
     multi: &fp_index::MultiIndex,
     key: &[IndexLabel],
-) -> PyResult<Vec<usize>> {
+    instant: bool,
+) -> PyResult<(Vec<usize>, Vec<usize>)> {
     let levels: Vec<Vec<IndexLabel>> = (0..key.len())
         .map(|level| {
             multi
@@ -41283,14 +41289,55 @@ fn multiindex_prefix_positions(
         })
         .collect::<Result<_, _>>()
         .map_err(index_error_to_py)?;
-    Ok((0..multi.len())
-        .filter(|&row| {
-            levels
-                .iter()
-                .zip(key)
-                .all(|(level, label)| level.get(row) == Some(label))
+    Ok(level_key_rows(&levels, key, multi.len(), instant))
+}
+
+/// The rows (of `len`) whose `levels` values match `key` one level each,
+/// and the levels a date-string period (or, with `instant`, its first
+/// instant) matched (see [`multiindex_prefix_positions`]).
+fn level_key_rows(
+    levels: &[Vec<IndexLabel>],
+    key: &[IndexLabel],
+    len: usize,
+    instant: bool,
+) -> (Vec<usize>, Vec<usize>) {
+    enum LevelKey<'a> {
+        Exact(&'a IndexLabel),
+        Period(i64, i64),
+    }
+    let mut periods = Vec::new();
+    let keys: Vec<LevelKey<'_>> = levels
+        .iter()
+        .zip(key)
+        .enumerate()
+        .map(|(position, (values, label))| {
+            if let IndexLabel::Utf8(text) = label
+                && !values.contains(label)
+                && values
+                    .iter()
+                    .any(|value| matches!(value, IndexLabel::Datetime64(_)))
+                && let Ok((first, last)) = fp_frame::partial_date_bounds(text)
+            {
+                periods.push(position);
+                LevelKey::Period(first, if instant { first } else { last })
+            } else {
+                LevelKey::Exact(label)
+            }
         })
-        .collect())
+        .collect();
+    let rows = (0..len)
+        .filter(|&row| {
+            levels.iter().zip(&keys).all(|(level, key)| match key {
+                LevelKey::Exact(label) => level.get(row) == Some(*label),
+                LevelKey::Period(first, last) => matches!(
+                    level.get(row),
+                    Some(IndexLabel::Datetime64(nanos))
+                        if *nanos != i64::MIN && (*first..=*last).contains(nanos)
+                ),
+            })
+        })
+        .collect();
+    (rows, periods)
 }
 
 /// The position of `level` - an int (negative from the end) or a level
@@ -41397,14 +41444,18 @@ fn multiindex_levels_index(
     Ok((Index::new(flat), Some(rest)))
 }
 
-/// The index `multi` leaves at `positions` once its first `dropped` levels
-/// are keyed away (see [`multiindex_levels_index`]).
+/// The index `multi` leaves at `positions` once its first `keyed` levels
+/// are keyed away - all but the `periods` a date string matched, which
+/// stay (see [`multiindex_prefix_positions`], [`multiindex_levels_index`]).
 fn multiindex_remainder(
     multi: &fp_index::MultiIndex,
     positions: &[usize],
-    dropped: usize,
+    keyed: usize,
+    periods: &[usize],
 ) -> PyResult<(Index, Option<fp_index::MultiIndex>)> {
-    let keep: Vec<usize> = (dropped..multi.nlevels()).collect();
+    let keep: Vec<usize> = (0..multi.nlevels())
+        .filter(|level| *level >= keyed || periods.contains(level))
+        .collect();
     multiindex_levels_index(multi, positions, &keep)
 }
 
@@ -41448,19 +41499,20 @@ fn series_multiindex_loc(
     let Some(labels) = multiindex_key(key, multi.nlevels())? else {
         return Ok(None);
     };
-    let positions = multiindex_prefix_positions(multi, &labels)?;
+    let (positions, periods) = multiindex_prefix_positions(multi, &labels, false)?;
     if positions.is_empty() {
         return Ok(None);
     }
-    if labels.len() == multi.nlevels() && positions.len() == 1 {
+    let full_key = labels.len() == multi.nlevels() && periods.is_empty();
+    if full_key && positions.len() == 1 {
         return scalar_to_py(py, &series.values()[positions[0]]).map(Some);
     }
     let rows: Vec<i64> = positions.iter().map(|&row| row as i64).collect();
     let taken = series.take(&rows).map_err(frame_error_to_py)?;
-    if labels.len() == multi.nlevels() {
+    if full_key {
         return Ok(Some(Py::new(py, PySeries { inner: taken })?.into_any()));
     }
-    let (index, rest) = multiindex_remainder(multi, &positions, labels.len())?;
+    let (index, rest) = multiindex_remainder(multi, &positions, labels.len(), &periods)?;
     let index = match rest {
         Some(rest) => index.with_row_multiindex(rest).map_err(index_error_to_py)?,
         None => index,
@@ -41651,7 +41703,7 @@ fn multiindex_rows_for(
             let Some(labels) = multiindex_key(&item, multi.nlevels())? else {
                 return Ok(None);
             };
-            let found = multiindex_prefix_positions(multi, &labels)?;
+            let (found, _) = multiindex_prefix_positions(multi, &labels, true)?;
             if found.is_empty() {
                 return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
                     "{}",
@@ -41754,13 +41806,13 @@ fn frame_multiindex_loc(
     let Some(labels) = multiindex_key(key, multi.nlevels())? else {
         return Ok(None);
     };
-    let positions = multiindex_prefix_positions(multi, &labels)?;
+    let (positions, periods) = multiindex_prefix_positions(multi, &labels, false)?;
     if positions.is_empty() {
         return Ok(None);
     }
     let rows: Vec<i64> = positions.iter().map(|&row| row as i64).collect();
     let taken = frame.take(&rows, 0).map_err(frame_error_to_py)?;
-    if labels.len() == multi.nlevels() {
+    if labels.len() == multi.nlevels() && periods.is_empty() {
         if positions.len() == 1 {
             let flat = frame.index().labels()[positions[0]].clone();
             let row = frame.loc_row(&flat).map_err(loc_key_error)?;
@@ -41779,7 +41831,7 @@ fn frame_multiindex_loc(
         return frame_rows_keeping_multiindex(frame, multi, &positions)
             .map(|rows| Some(MultiLoc::Rows(rows)));
     }
-    let (index, rest) = multiindex_remainder(multi, &positions, labels.len())?;
+    let (index, rest) = multiindex_remainder(multi, &positions, labels.len(), &periods)?;
     let mut out = taken.with_index(index).map_err(frame_error_to_py)?;
     if let Some(rest) = rest {
         out = out.with_row_multiindex(rest).map_err(frame_error_to_py)?;
@@ -64397,6 +64449,41 @@ mod tests {
         let flat = Python::attach(|py| py_mi.to_flat_index(py)).expect("flat index"); // ubs:ignore — test fixture
         assert_eq!(flat.len(), 2);
         assert!(matches!(flat.inner.labels()[0], IndexLabel::Object(_)));
+    }
+
+    /// A date string keys a datetime level by the period it names (or, in a
+    /// list of keys, the instant it parses to); br-frankenpandas-c4v57.
+    #[test]
+    fn level_key_rows_read_a_date_string_as_its_period_c4v57() {
+        const DAY: i64 = 86_400_000_000_000;
+        let jan1 = 1_704_067_200 * 1_000_000_000; // 2024-01-01
+        let city = |name: &str| IndexLabel::Utf8(name.to_owned());
+        let levels = vec![
+            vec![city("Oslo"), city("Rome"), city("Rome"), city("Rome")],
+            vec![
+                IndexLabel::Datetime64(jan1 + 9 * 3_600_000_000_000),
+                IndexLabel::Datetime64(jan1),
+                IndexLabel::Datetime64(jan1 + 14 * DAY),
+                IndexLabel::Datetime64(jan1 + 32 * DAY),
+            ],
+        ];
+        let month = [city("Rome"), IndexLabel::Utf8("2024-01".to_owned())];
+        assert_eq!(
+            level_key_rows(&levels, &month, 4, false),
+            (vec![1, 2], vec![1])
+        );
+        // In a list of keys: the instant 2024-01-01 00:00 alone.
+        assert_eq!(level_key_rows(&levels, &month, 4, true), (vec![1], vec![1]));
+        let day = [city("Oslo"), IndexLabel::Utf8("2024-01-01".to_owned())];
+        assert_eq!(level_key_rows(&levels, &day, 4, false), (vec![0], vec![1]));
+        // NEGATIVES: an exact instant matches exactly (no period level); a
+        // string on a text level is a label; an empty period matches nothing.
+        let exact = [city("Rome"), IndexLabel::Datetime64(jan1)];
+        assert_eq!(level_key_rows(&levels, &exact, 4, false), (vec![1], vec![]));
+        let text = [IndexLabel::Utf8("2024".to_owned())];
+        assert_eq!(level_key_rows(&levels, &text, 4, false), (vec![], vec![]));
+        let empty = [city("Rome"), IndexLabel::Utf8("2023-05".to_owned())];
+        assert_eq!(level_key_rows(&levels, &empty, 4, false), (vec![], vec![1]));
     }
 
     #[test]

@@ -13648,3 +13648,41 @@ _EVERYDAY19_CASES = {
 def test_everyday19_like_pandas(case: str) -> None:
     run = _EVERYDAY19_CASES[case]
     assert _sdt_outcome(fpd, run) == _sdt_outcome(pd, run), case
+
+
+# br-frankenpandas-c4v57: a date string keys a datetime MultiIndex level by
+# the period it names - pandas' partial-string indexing, a slice that keeps
+# the level (it raised KeyError).
+def _c4v57_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "city": ["Oslo", "Rome", "Oslo", "Rome"],
+            "day": m.to_datetime(
+                ["2024-01-01 09:00", "2024-01-01 00:00", "2024-02-02 00:00", "2024-01-15 00:00"]
+            ),
+            "rain": [10, 2, 12, 3],
+        }
+    ).set_index(["city", "day"])
+
+
+_PARTIAL_STRING_LEVEL_CASES = {
+    "loc day string": lambda m: _c4v57_frame(m).loc[("Rome", "2024-01-01")],
+    "loc day string, time inside": lambda m: _c4v57_frame(m).loc[("Oslo", "2024-01-01")],
+    "loc month string": lambda m: _c4v57_frame(m).loc[("Rome", "2024-01")],
+    "loc year string": lambda m: _c4v57_frame(m).loc[("Oslo", "2024")],
+    "Series loc month string": lambda m: _c4v57_frame(m)["rain"].loc[("Rome", "2024-01")],
+    "xs day string": lambda m: _c4v57_frame(m).xs("2024-01-01", level="day"),
+    "list of partial keys": lambda m: _c4v57_frame(m).loc[[("Rome", "2024-01")]],
+    # NEGATIVES: a Timestamp key is an exact match (the level drops); a
+    # string with no instant inside is a KeyError; an outer label as before.
+    "loc Timestamp key": lambda m: _c4v57_frame(m).loc[("Rome", m.Timestamp("2024-01-15"))],
+    "loc empty period raises": lambda m: _c4v57_frame(m).loc[("Rome", "2023-05")],
+    "loc outer label": lambda m: _c4v57_frame(m).loc["Rome"],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_PARTIAL_STRING_LEVEL_CASES))
+def test_partial_string_on_datetime_level_like_pandas(case: str) -> None:
+    run = _PARTIAL_STRING_LEVEL_CASES[case]
+    assert _sdt_outcome(fpd, run) == _sdt_outcome(pd, run), case
