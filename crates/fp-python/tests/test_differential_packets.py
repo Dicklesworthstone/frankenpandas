@@ -13554,3 +13554,97 @@ _EVERYDAY18_CASES = {
 def test_everyday18_like_pandas(case: str) -> None:
     run = _EVERYDAY18_CASES[case]
     assert _sdt_outcome(fpd, run) == _sdt_outcome(pd, run), case
+
+
+# br-frankenpandas-stofr (everyday probe 19): set_index([.., <datetime
+# column>]) made the MultiIndex level text, so unstack gave string columns
+# and a Timestamp key found nothing; pivot_table(index= / columns=<Series>)
+# raised TypeError (an index Series lost its name).
+def _e19_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "city": ["Oslo", "Rome", "Oslo", "Lima", "Rome", "Lima"],
+            "rain": [10, 2, 12, 0, 3, 1],
+            "t": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "day": m.to_datetime(
+                ["2024-01-01", "2024-01-01", "2024-01-02", "2024-01-02", "2024-01-03", None]
+            ),
+            "wait": m.to_timedelta(["1h", "2h", "1h", "3h", "2h", "1h"]),
+        }
+    )
+
+
+def _e19_axis(index: Any) -> Any:
+    return (type(index).__name__, str(index.dtype), [repr(v) for v in index.tolist()], index.name)
+
+
+def _e19_by_day(m: Any) -> Any:
+    return _e19_frame(m).set_index(["city", "day"])
+
+
+_EVERYDAY19_CASES = {
+    "set_index datetime level": lambda m: _e19_axis(_e19_by_day(m).index.levels[1]),
+    "set_index level values": lambda m: _e19_axis(_e19_by_day(m).index.get_level_values("day")),
+    "set_index timedelta level": lambda m: _e19_axis(_e19_frame(m).set_index(["city", "wait"]).index.levels[1]),
+    "set_index append datetime": lambda m: _e19_axis(
+        _e19_frame(m).set_index("city").set_index("day", append=True).index.levels[1]
+    ),
+    "unstack datetime columns": lambda m: _e19_by_day(m)["rain"].unstack(),
+    "unstack(0) datetime index": lambda m: _e19_axis(_e19_by_day(m)["rain"].unstack(0).index),
+    "frame unstack": lambda m: _e19_by_day(m)[["rain"]].unstack(),
+    "loc Timestamp key": lambda m: _e19_by_day(m).loc[("Oslo", m.Timestamp("2024-01-02"))],
+    "xs datetime level": lambda m: _e19_by_day(m).xs(m.Timestamp("2024-01-01"), level="day"),
+    "reset_index restores datetime": lambda m: _e19_by_day(m).reset_index(),
+    "groupby datetime level": lambda m: _e19_by_day(m).groupby(level="day")["rain"].sum(),
+    "sort_index": lambda m: _e19_by_day(m).sort_index(),
+    "sort_index NaT first": lambda m: _e19_by_day(m).sort_index(na_position="first"),
+    "sort_index descending NaT last": lambda m: _e19_by_day(m).sort_index(ascending=False),
+    "sort_index NaN level": lambda m: m.DataFrame(
+        {"k": ["a", "a", "b"], "j": [2.0, np.nan, 1.0], "v": [1, 2, 3]}
+    )
+    .set_index(["k", "j"])
+    .sort_index(),
+    "sort_index bad na_position raises": lambda m: _e19_by_day(m).sort_index(na_position="middle"),
+    "datetime columns with NaT": lambda m: m.DataFrame(
+        [[1.0, 2.0, 3.0]], columns=m.DatetimeIndex(["NaT", "2024-01-01", "2024-01-02"])
+    ),
+    "to_csv": lambda m: _e19_by_day(m).to_csv(),
+    "index tolist": lambda m: [repr(v) for v in _e19_by_day(m).index.tolist()],
+    "pivot_table columns Series": lambda m: _e19_frame(m).pivot_table(
+        index="city", columns=_e19_frame(m)["day"].dt.day, values="rain", fill_value=0
+    ),
+    "pivot_table index Series": lambda m: _e19_frame(m).pivot_table(index=_e19_frame(m)["city"].str[0], values="rain"),
+    "pivot_table both Series": lambda m: _e19_frame(m).pivot_table(
+        index=_e19_frame(m)["city"].str.upper(), columns=_e19_frame(m)["rain"] > 2, values="rain", aggfunc="count"
+    ),
+    "pivot_table ndarray key": lambda m: _e19_frame(m).pivot_table(index=np.array(list("ababab")), values="rain"),
+    "pivot_table names and a Series": lambda m: _e19_frame(m).pivot_table(
+        index=["city", _e19_frame(m)["rain"] > 5], values="t"
+    ),
+    "pivot_table misaligned Series": lambda m: _e19_frame(m).pivot_table(
+        index=m.Series(["x", "y"], index=[1, 3]), values="rain"
+    ),
+    "pivot_table Series margins": lambda m: _e19_frame(m).pivot_table(
+        index=_e19_frame(m)["city"].str[0], values="rain", margins=True
+    ),
+    "pivot_table Series values omitted": lambda m: _e19_frame(m)[["rain", "t"]].pivot_table(
+        index=_e19_frame(m)["city"].str[0]
+    ),
+    "pivot_table Series aggfunc list": lambda m: _e19_frame(m).pivot_table(
+        index=_e19_frame(m)["city"].str[0], values="rain", aggfunc=["sum", "max"]
+    ),
+    "pd.pivot_table Series": lambda m: m.pivot_table(_e19_frame(m), index=_e19_frame(m)["city"].str[0], values="rain"),
+    "pivot_table wrong length raises": lambda m: _e19_frame(m).pivot_table(index=np.array(["a", "b"]), values="rain"),
+    # NEGATIVES: a text level and name keys as before.
+    "set_index text level": lambda m: _e19_axis(_e19_frame(m).set_index(["day", "city"]).index.levels[1]),
+    "pivot_table by names": lambda m: _e19_frame(m)[["city", "rain"]]
+    .assign(big=lambda d: d["rain"] > 2)
+    .pivot_table(index="city", columns="big", values="rain", aggfunc="sum"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EVERYDAY19_CASES))
+def test_everyday19_like_pandas(case: str) -> None:
+    run = _EVERYDAY19_CASES[case]
+    assert _sdt_outcome(fpd, run) == _sdt_outcome(pd, run), case

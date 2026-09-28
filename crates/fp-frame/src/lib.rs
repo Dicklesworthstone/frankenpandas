@@ -76348,9 +76348,24 @@ impl DataFrame {
                                 // a datetime level NaT; this was the EMPTY STRING
                                 // ('', 2). to_multi_index serves only set_index /
                                 // set_index(append=True).
-                                Scalar::Null(NullKind::NaT) => IndexLabel::Utf8("NaT".to_owned()),
+                                //
+                                // A naive datetime / a duration level is a
+                                // DatetimeIndex / TimedeltaIndex in pandas; they
+                                // were their text, so unstack gave string columns
+                                // (br-frankenpandas-stofr). A zoned one keeps its
+                                // text: a typed label carries no zone.
+                                Scalar::Null(NullKind::NaT) => match col.dtype() {
+                                    DType::Timedelta64 => IndexLabel::Timedelta64(Timedelta::NAT),
+                                    DType::Datetime64 { .. } if col.timezone().is_none() => {
+                                        IndexLabel::Datetime64(Timestamp::NAT)
+                                    }
+                                    _ => IndexLabel::Utf8("NaT".to_owned()),
+                                },
                                 Scalar::Null(_) => IndexLabel::Null(NullKind::NaN),
-                                Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+                                Scalar::Timedelta64(v) => IndexLabel::Timedelta64(*v),
+                                Scalar::Datetime64(v) if col.timezone().is_none() => {
+                                    IndexLabel::Datetime64(*v)
+                                }
                                 Scalar::Datetime64(v) => IndexLabel::Utf8(format_datetime_ns(*v)),
                                 Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
                                 Scalar::Interval(interval) => {
@@ -129138,6 +129153,83 @@ mod tests {
         assert_eq!(dtype(mix), DType::Utf8);
         let bools = vec![Scalar::Bool(true), Scalar::Null(NullKind::Null)];
         assert_eq!(dtype(bools), DType::Utf8);
+    }
+
+    /// set_index([.., <datetime column>]) builds pandas' DatetimeIndex /
+    /// TimedeltaIndex levels: typed labels, NaT typed (they were their text,
+    /// so unstack gave string columns; br-frankenpandas-stofr).
+    #[test]
+    fn set_index_multi_keeps_temporal_levels_typed_stofr() {
+        let (day, hour) = (Timedelta::NANOS_PER_DAY, Timedelta::NANOS_PER_HOUR);
+        let text = |value: &str| Scalar::Utf8(value.to_owned());
+        let df = DataFrame::from_dict(
+            &["city", "day", "wait", "rain"],
+            vec![
+                ("city", vec![text("Oslo"), text("Rome"), text("Oslo")]),
+                (
+                    "day",
+                    vec![
+                        Scalar::Datetime64(0),
+                        Scalar::Datetime64(day),
+                        Scalar::Null(NullKind::NaT),
+                    ],
+                ),
+                (
+                    "wait",
+                    vec![
+                        Scalar::Timedelta64(hour),
+                        Scalar::Null(NullKind::NaT),
+                        Scalar::Timedelta64(0),
+                    ],
+                ),
+                (
+                    "rain",
+                    vec![Scalar::Int64(10), Scalar::Int64(2), Scalar::Int64(12)],
+                ),
+            ],
+        )
+        .unwrap();
+        let multi = df.to_multi_index(&["city", "day", "wait"]).unwrap();
+        let level = |position: usize| multi.get_level_values(position).unwrap().labels().to_vec();
+        assert_eq!(
+            level(1),
+            vec![
+                IndexLabel::Datetime64(0),
+                IndexLabel::Datetime64(day),
+                IndexLabel::Datetime64(fp_types::Timestamp::NAT),
+            ]
+        );
+        assert_eq!(
+            level(2),
+            vec![
+                IndexLabel::Timedelta64(hour),
+                IndexLabel::Timedelta64(Timedelta::NAT),
+                IndexLabel::Timedelta64(0),
+            ]
+        );
+        // NEGATIVE: a text level stays text.
+        assert_eq!(level(0)[0], IndexLabel::Utf8("Oslo".to_owned()));
+        // Unstacking the day level labels the columns with the instants,
+        // NaT first as pandas' (its code -1 sorts first).
+        let rain = df
+            .set_index_multi(&["city", "day"], true, "|")
+            .unwrap()
+            .column_as_series("rain")
+            .unwrap();
+        let wide = rain.unstack().unwrap();
+        let labels: Vec<IndexLabel> = wide
+            .column_names()
+            .into_iter()
+            .map(|name| wide.column_label(name))
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                IndexLabel::Datetime64(fp_types::Timestamp::NAT),
+                IndexLabel::Datetime64(0),
+                IndexLabel::Datetime64(day),
+            ]
+        );
     }
 
     #[test]

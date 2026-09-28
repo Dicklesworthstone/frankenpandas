@@ -1244,17 +1244,39 @@ impl TextKeywords<'_, '_> {
 }
 
 /// The header texts pandas prints for flat column `labels` (before a
-/// numeric column's leading space): a numeric (int / float / bool) or a
-/// datetime column Index is formatted as one block ([`pandas_label_texts`])
-/// with every text left-justified to the widest, as pandas' `_format_flat`;
-/// any other Index prints each label as it is. The labels printed each at
+/// numeric column's leading space): a numeric (int / float / bool) column
+/// Index is formatted as one block ([`pandas_label_texts`]) with every text
+/// left-justified to the widest, as pandas' `_format_flat`; a datetime one
+/// as one block unjustified; any other Index prints each label as it is. The labels printed each at
 /// its own width, so every frame with 11+ default columns differed
 /// (br-frankenpandas-0jg0l).
 fn pandas_column_label_texts(labels: &[IndexLabel]) -> Vec<String> {
     let all = |test: fn(&IndexLabel) -> bool| !labels.is_empty() && labels.iter().all(test);
+    // A DatetimeIndex's header texts share one resolution but are not
+    // justified (pandas' _format_with_header): a NaT label prints 'NaT' at
+    // its own width - it was padded to the dates', and a NaT held as a null
+    // label printed every date with its '00:00:00'.
+    if labels
+        .iter()
+        .any(|label| matches!(label, IndexLabel::Datetime64(_)))
+        && all(|label| {
+            matches!(
+                label,
+                IndexLabel::Datetime64(_) | IndexLabel::Null(NullKind::NaT)
+            )
+        })
+    {
+        let instants: Vec<IndexLabel> = labels
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Null(_) => IndexLabel::Datetime64(i64::MIN),
+                other => other.clone(),
+            })
+            .collect();
+        return pandas_label_texts(&instants, None);
+    }
     if !(all(|label| matches!(label, IndexLabel::Int64(_) | IndexLabel::Float64(_)))
-        || all(|label| matches!(label, IndexLabel::Bool(_)))
-        || all(|label| matches!(label, IndexLabel::Datetime64(_))))
+        || all(|label| matches!(label, IndexLabel::Bool(_))))
     {
         return labels.iter().map(fp_frame::column_key).collect();
     }
@@ -7240,10 +7262,16 @@ fn row_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
     if index.range_span().is_some() {
         return Ok(Py::new(py, PyRangeIndex::initializer(index.clone()))?.into_any());
     }
-    // Instants and durations come back as pandas' DatetimeIndex /
-    // TimedeltaIndex, with their accessors (df.index.year, .month_name(),
-    // .normalize(); groupby(df.index.month)); every index was a plain Index
-    // (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.18).
+    flat_index_to_py(py, index)
+}
+
+/// A flat index as pandas' class for its labels: instants and durations
+/// come back as pandas' DatetimeIndex / TimedeltaIndex, with their
+/// accessors (df.index.year, .month_name(), .normalize();
+/// groupby(df.index.month)); every index was a plain Index
+/// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.18) - a
+/// MultiIndex level too (br-frankenpandas-stofr).
+fn flat_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
     let labels = index.labels();
     if !labels.is_empty() {
         if labels
@@ -11961,14 +11989,15 @@ impl PyMultiIndex {
     }
 
     /// One level's values, `level` a position or a level name (a name
-    /// raised TypeError).
-    fn get_level_values(&self, level: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+    /// raised TypeError); a datetime / duration level's are a DatetimeIndex
+    /// / TimedeltaIndex, as pandas'.
+    fn get_level_values(&self, py: Python<'_>, level: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let position = multiindex_level_position(&self.inner, level)?;
         let idx = self
             .inner
             .get_level_values(position)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
-        Ok(PyIndex { inner: idx })
+        flat_index_to_py(py, &idx)
     }
 
     /// pandas' `to_flat_index()`: an Index of the tuples (it joined each
@@ -12187,14 +12216,15 @@ impl PyMultiIndex {
         self.inner.dtypes()
     }
 
-    /// pandas' FrozenList of the level Indexes.
+    /// pandas' FrozenList of the level Indexes (a datetime / duration one a
+    /// DatetimeIndex / TimedeltaIndex).
     #[getter]
     fn levels(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let levels = self
             .inner
             .levels()
             .into_iter()
-            .map(|level| Py::new(py, PyIndex { inner: level }).map(Py::into_any))
+            .map(|level| flat_index_to_py(py, &level))
             .collect::<PyResult<Vec<_>>>()?;
         frozen_list(py, levels)
     }
@@ -18839,6 +18869,153 @@ fn mangled_agg_labels(funcs: &[Bound<'_, PyAny>]) -> PyResult<Vec<String>> {
             })
         })
         .collect()
+}
+
+/// A pivot_table over array-like keys (see [`pivot_array_keys`]): the frame
+/// carrying each key under a free column name, the `index` / `columns`
+/// specs naming those columns, and each free name's key name.
+struct PivotArrayKeys<'py> {
+    frame: DataFrame,
+    index: Option<Bound<'py, PyAny>>,
+    columns: Option<Bound<'py, PyAny>>,
+    renames: Vec<(String, Option<LabelName>)>,
+}
+
+/// pivot_table's array-like keys - a Series (aligned on the rows), an
+/// ndarray or an Index, alone or in a list beside column names - group by
+/// their values, as pandas' groupby does (they raised TypeError; an index
+/// Series lost its name). None when every key names a column.
+fn pivot_array_keys<'py>(
+    py: Python<'py>,
+    frame: &DataFrame,
+    index: Option<&Bound<'py, PyAny>>,
+    columns: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Option<PivotArrayKeys<'py>>> {
+    let is_array = |key: &Bound<'py, PyAny>| {
+        key.extract::<PyRef<'_, PySeries>>().is_ok()
+            || (!key.is_instance_of::<pyo3::types::PyString>()
+                && key
+                    .getattr("ndim")
+                    .ok()
+                    .and_then(|ndim| ndim.extract::<i64>().ok())
+                    == Some(1))
+    };
+    let keys_of = |spec: Option<&Bound<'py, PyAny>>| -> PyResult<Vec<Bound<'py, PyAny>>> {
+        match spec.filter(|spec| !spec.is_none()) {
+            None => Ok(Vec::new()),
+            Some(spec) if spec.is_instance_of::<PyList>() => spec.try_iter()?.collect(),
+            Some(spec) => Ok(vec![spec.clone()]),
+        }
+    };
+    let (index_keys, column_keys) = (keys_of(index)?, keys_of(columns)?);
+    if !index_keys.iter().chain(&column_keys).any(is_array) {
+        return Ok(None);
+    }
+    let mut frame = frame.clone();
+    let mut renames: Vec<(String, Option<LabelName>)> = Vec::new();
+    let mut bind = |key: &Bound<'py, PyAny>| -> PyResult<Bound<'py, PyAny>> {
+        if !is_array(key) {
+            return Ok(key.clone());
+        }
+        let column = if let Ok(series) = key.extract::<PyRef<'_, PySeries>>() {
+            if series.inner.index().labels() == frame.index().labels() {
+                series.inner.column().clone()
+            } else {
+                series
+                    .inner
+                    .reindex(frame.index().labels().to_vec())
+                    .map_err(frame_error_to_py)?
+                    .column()
+                    .clone()
+            }
+        } else {
+            let values = key
+                .call_method0("tolist")?
+                .try_iter()?
+                .map(|value| py_to_scalar(py, &value?))
+                .collect::<PyResult<Vec<_>>>()?;
+            if values.len() != frame.len() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Grouper and axis must be same length",
+                ));
+            }
+            Column::from_values(values).map_err(column_error_to_py)?
+        };
+        let name = match key.getattr("name") {
+            Ok(name) => py_axis_name(&name)?,
+            Err(_) => None,
+        };
+        let mut free = format!("__fp_pivot_key_{}__", renames.len());
+        while frame.column(&free).is_some() {
+            free.push('_');
+        }
+        frame = frame
+            .with_column(free.clone(), column)
+            .map_err(frame_error_to_py)?;
+        let spec = pyo3::types::PyString::new(py, &free).into_any();
+        renames.push((free, name));
+        Ok(spec)
+    };
+    let mut spec_of = |keys: Vec<Bound<'py, PyAny>>,
+                       spec: Option<&Bound<'py, PyAny>>|
+     -> PyResult<Option<Bound<'py, PyAny>>> {
+        let bound = keys.iter().map(&mut bind).collect::<PyResult<Vec<_>>>()?;
+        Ok(match spec.filter(|spec| !spec.is_none()) {
+            None => None,
+            Some(spec) if spec.is_instance_of::<PyList>() => {
+                Some(PyList::new(py, bound)?.into_any())
+            }
+            Some(_) => bound.into_iter().next(),
+        })
+    };
+    let index = spec_of(index_keys, index)?;
+    let columns = spec_of(column_keys, columns)?;
+    Ok(Some(PivotArrayKeys {
+        frame,
+        index,
+        columns,
+        renames,
+    }))
+}
+
+/// `table`'s axes named after the array keys the free column names carried
+/// (see [`pivot_array_keys`]).
+fn named_after_keys(
+    table: &DataFrame,
+    renames: &[(String, Option<LabelName>)],
+) -> PyResult<DataFrame> {
+    let renamed = |name: Option<&LabelName>| -> Option<LabelName> {
+        match renames
+            .iter()
+            .find(|(free, _)| name.is_some_and(|name| **name == **free))
+        {
+            Some((_, key_name)) => key_name.clone(),
+            None => name.cloned(),
+        }
+    };
+    let renamed_levels = |multi: &fp_index::MultiIndex| {
+        let names = multi
+            .names()
+            .iter()
+            .map(|name| renamed(name.as_ref()))
+            .collect();
+        multi.clone().set_names(names)
+    };
+    let mut out = match table.row_multiindex() {
+        Some(multi) => table.clone().with_row_multiindex(renamed_levels(multi)),
+        None => table.with_index(table.index().rename_index(renamed(table.index().name()))),
+    }
+    .map_err(frame_error_to_py)?;
+    out = match out.columns_multiindex() {
+        Some(multi) => out
+            .with_columns_multiindex(Some(renamed_levels(multi)))
+            .map_err(frame_error_to_py)?,
+        None => {
+            let name = renamed(out.columns_name());
+            out.with_columns_name(name)
+        }
+    };
+    Ok(out)
 }
 
 /// `results` side by side under `keys` (`concat(results, axis=1, keys=...)`):
@@ -32040,12 +32217,33 @@ impl PyDataFrame {
                 })
                 .collect::<Result<_, _>>()
                 .map_err(index_error_to_py)?;
+            // A missing label (NaN, NaT) goes to `na_position` in its level
+            // whatever the direction, as pandas' (it sorted by its encoding:
+            // a NaT level first).
+            let na_first = match na_position {
+                "first" => true,
+                "last" => false,
+                other => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "invalid na_position: {other}"
+                    )));
+                }
+            };
             let mut rows: Vec<usize> = (0..self.inner.len()).collect();
             rows.sort_by(|&a, &b| {
                 for &position in &order {
-                    let ordering = levels[position][a].cmp(&levels[position][b]);
+                    let (left, right) = (&levels[position][a], &levels[position][b]);
+                    let ordering = match (left.is_missing(), right.is_missing()) {
+                        (true, true) => std::cmp::Ordering::Equal,
+                        (true, false) if na_first => std::cmp::Ordering::Less,
+                        (true, false) => std::cmp::Ordering::Greater,
+                        (false, true) if na_first => std::cmp::Ordering::Greater,
+                        (false, true) => std::cmp::Ordering::Less,
+                        (false, false) if asc => left.cmp(right),
+                        (false, false) => right.cmp(left),
+                    };
                     if ordering != std::cmp::Ordering::Equal {
-                        return if asc { ordering } else { ordering.reverse() };
+                        return ordering;
                     }
                 }
                 std::cmp::Ordering::Equal
@@ -34824,6 +35022,30 @@ impl PyDataFrame {
     ) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
         let _ = observed;
+        // Array-like keys pivot a copy carrying them as columns; the table's
+        // axes take the keys' names.
+        let array_keys = pivot_array_keys(py, &slf.borrow().inner, index, columns)?;
+        if let Some(keys) = array_keys {
+            let frame = Bound::new(py, PyDataFrame { inner: keys.frame })?;
+            let table = Self::pivot_table(
+                &frame,
+                values,
+                keys.index.as_ref(),
+                keys.columns.as_ref(),
+                aggfunc,
+                fill_value,
+                margins,
+                dropna,
+                margins_name,
+                observed,
+                sort,
+            )?;
+            let Ok(result) = table.extract::<PyRef<'_, PyDataFrame>>() else {
+                return Ok(table);
+            };
+            let inner = named_after_keys(&result.inner, &keys.renames)?;
+            return Ok(Bound::new(py, PyDataFrame { inner })?.into_any());
+        }
         let names = |spec: Option<&Bound<'py, PyAny>>| -> PyResult<Vec<String>> {
             match spec.filter(|spec| !spec.is_none()) {
                 None => Ok(Vec::new()),
@@ -64160,10 +64382,16 @@ mod tests {
         assert_eq!(py_mi.len(), 2);
 
         pyo3::Python::initialize();
-        let lvl0 =
-            Python::attach(|py| py_mi.get_level_values(pyo3::types::PyInt::new(py, 0).as_any()))
-                .expect("level 0"); // ubs:ignore — test fixture
-        assert_eq!(lvl0.len(), 2);
+        // TEST-CHANGE (stofr): get_level_values answers the level's pandas
+        // class (a Python object), so its length is read through Python.
+        let lvl0 = Python::attach(|py| -> PyResult<usize> {
+            py_mi
+                .get_level_values(py, pyo3::types::PyInt::new(py, 0).as_any())?
+                .bind(py)
+                .len()
+        })
+        .expect("level 0"); // ubs:ignore — test fixture
+        assert_eq!(lvl0, 2);
         // TEST-CHANGE (7m8bq): to_flat_index took a sep= pandas does not
         // have and joined each tuple; pandas' is an Index of the tuples.
         let flat = Python::attach(|py| py_mi.to_flat_index(py)).expect("flat index"); // ubs:ignore — test fixture
