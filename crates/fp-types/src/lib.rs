@@ -5777,18 +5777,25 @@ impl Timestamp {
 
     // ── String-unit rounding (br-frankenpandas-lbsx) ────────────────────
     //
-    // Pandas convenience: `.floor('H')` / `.ceil('1D')` / `.round('s')`.
-    // These delegate to `Timedelta::unit_to_nanos` for unit lookup, then to
+    // Pandas convenience: `.floor('H')` / `.ceil('1D')` / `.round('15min')`.
+    // These read the frequency with `fixed_freq_nanos`, then delegate to
     // the nanos-based `floor_to`/`ceil_to`/`round_to`. Unknown unit strings
     // return NaT, matching the rest of fp-types' "missing-input → missing-
     // output" convention.
+
+    /// A fixed frequency's length: a bare unit (`Timedelta::unit_to_nanos`)
+    /// or a multiple of one ('15min', '1D', '30s' - they were unknown, so
+    /// `round('15min')` was NaT); None for anything else.
+    fn fixed_freq_nanos(freq: &str) -> Option<i64> {
+        Timedelta::unit_to_nanos(freq).or_else(|| Timedelta::parse(freq).ok())
+    }
 
     /// Round down to the nearest multiple of the named unit.
     ///
     /// Matches `pd.Timestamp(...).floor(unit)`. Unknown unit → NaT.
     #[must_use]
     pub fn floor_to_unit(&self, unit: &str) -> Self {
-        match Timedelta::unit_to_nanos(unit) {
+        match Self::fixed_freq_nanos(unit) {
             Some(unit_nanos) => self.floor_to(unit_nanos),
             None => Self::nat(),
         }
@@ -5799,7 +5806,7 @@ impl Timestamp {
     /// Matches `pd.Timestamp(...).ceil(unit)`. Unknown unit → NaT.
     #[must_use]
     pub fn ceil_to_unit(&self, unit: &str) -> Self {
-        match Timedelta::unit_to_nanos(unit) {
+        match Self::fixed_freq_nanos(unit) {
             Some(unit_nanos) => self.ceil_to(unit_nanos),
             None => Self::nat(),
         }
@@ -5810,7 +5817,7 @@ impl Timestamp {
     /// Matches `pd.Timestamp(...).round(unit)`. Unknown unit → NaT.
     #[must_use]
     pub fn round_to_unit(&self, unit: &str) -> Self {
-        match Timedelta::unit_to_nanos(unit) {
+        match Self::fixed_freq_nanos(unit) {
             Some(unit_nanos) => self.round_to(unit_nanos),
             None => Self::nat(),
         }
@@ -18492,6 +18499,26 @@ mod tests {
         assert!(ts.floor_to_unit("fortnight").is_nat());
         assert!(ts.ceil_to_unit("century").is_nat());
         assert!(ts.round_to_unit("xyz").is_nat());
+    }
+
+    /// pd.Timestamp('2024-03-15 13:47:21').round('15min') is 13:45 (a
+    /// multiple of a unit was unknown here: NaT).
+    #[test]
+    fn timestamp_rounding_reads_a_multiple_of_a_unit_3agof() {
+        let (min, sec) = (Timedelta::NANOS_PER_MIN, Timedelta::NANOS_PER_SEC);
+        let base = 1_710_460_800 * sec; // 2024-03-15 00:00:00
+        let ts = Timestamp::from_nanos(base + 13 * Timedelta::NANOS_PER_HOUR + 47 * min + 21 * sec);
+        let at = |minutes: i64, seconds: i64| base + minutes * min + seconds * sec;
+        assert_eq!(ts.round("15min").nanos, at(13 * 60 + 45, 0));
+        assert_eq!(ts.floor("15min").nanos, at(13 * 60 + 45, 0));
+        assert_eq!(ts.ceil("15min").nanos, at(14 * 60, 0));
+        assert_eq!(ts.round("30s").nanos, at(13 * 60 + 47, 30));
+        assert_eq!(ts.ceil("1D").nanos, base + Timedelta::NANOS_PER_DAY);
+        // 2024-03-15 is 19797 days after the epoch: the 7-day floor is day
+        // 19796 (2024-03-14), as pandas'.
+        assert_eq!(ts.floor("7D").nanos, 19_796 * Timedelta::NANOS_PER_DAY);
+        // NEGATIVE: a calendar frequency is no fixed length.
+        assert!(ts.round("ME").is_nat());
     }
 
     #[test]

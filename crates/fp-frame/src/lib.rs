@@ -3118,12 +3118,33 @@ enum QuantileInterpolation {
     Midpoint,
 }
 
+/// The rank of the `q` quantile in `n` sorted values as pandas' Series /
+/// DataFrame quantile finds it: numpy's `percentile(values, q * 100)`
+/// (pandas' `_nanpercentile` scales `q` by 100 and numpy divides it back,
+/// which can move its last bit) at `(n - 1) * q`.
+fn numpy_percentile_rank(q: f64, n: usize) -> f64 {
+    (n - 1) as f64 * (q * 100.0 / 100.0)
+}
+
+/// numpy's `_lerp`: `a` to `b` by `t`, from the nearer end (`b` stepped
+/// back when `t >= 0.5`); `a * (1 - t) + b * t` rounds differently in the
+/// last bit (`Series.quantile(0.1)` of nine values was 1.4200000000000002,
+/// pandas 1.42).
+fn numpy_lerp(a: f64, b: f64, t: f64) -> f64 {
+    let diff = b - a;
+    if t >= 0.5 {
+        b - diff * (1.0 - t)
+    } else {
+        a + diff * t
+    }
+}
+
 /// Compute the q-th quantile of a pre-sorted slice using the given interpolation.
 fn percentile_with_interpolation(sorted: &[f64], q: f64, mode: QuantileInterpolation) -> f64 {
     if sorted.len() == 1 {
         return sorted[0];
     }
-    let pos = q * (sorted.len() - 1) as f64;
+    let pos = numpy_percentile_rank(q, sorted.len());
     let lower = pos.floor() as usize;
     let upper = pos.ceil() as usize;
     if lower == upper {
@@ -3131,7 +3152,7 @@ fn percentile_with_interpolation(sorted: &[f64], q: f64, mode: QuantileInterpola
     }
     let frac = pos - lower as f64;
     match mode {
-        QuantileInterpolation::Linear => sorted[lower] * (1.0 - frac) + sorted[upper] * frac,
+        QuantileInterpolation::Linear => numpy_lerp(sorted[lower], sorted[upper], frac),
         QuantileInterpolation::Lower => sorted[lower],
         QuantileInterpolation::Higher => sorted[upper],
         QuantileInterpolation::Nearest => {
@@ -3151,7 +3172,7 @@ fn percentile_with_interpolation(sorted: &[f64], q: f64, mode: QuantileInterpola
                 sorted[upper]
             }
         }
-        QuantileInterpolation::Midpoint => 0.5 * (sorted[lower] + sorted[upper]),
+        QuantileInterpolation::Midpoint => numpy_lerp(sorted[lower], sorted[upper], 0.5),
     }
 }
 
@@ -8615,18 +8636,13 @@ fn pack_utf8_span_u128(span: &[u8]) -> u128 {
     packed
 }
 
-/// Quantile of a non-empty `f64` buffer via O(n) quickselect — bit-identical to
-/// sorting then `percentile_with_interpolation`. Only the `lower`/`upper` order
-/// statistics (upper-lower <= 1) are needed: `select_nth_unstable_by(upper)`
-/// yields the upper one and leaves earlier elements <= it, so the lower one is
-/// `max(lower_partition)`. The interpolation match mirrors
-/// `percentile_with_interpolation` exactly (incl `Nearest`'s banker's rounding).
 /// Linear quantile of a non-empty `f64` slice, bit-identical to
 /// `fp_types::nanquantile`'s numeric arm (br-frankenpandas-gqcsr): select the
 /// `lo`-th order statistic in place, take the `(lo+1)`-th as the min of the right
 /// partition, and interpolate with the SAME float expression
-/// `lo_val + (hi_val - lo_val) * weight` (NOT `typed_quantile_f64`'s
-/// `s_lower*(1-frac)+s_upper*frac`, which rounds differently). Caller passes only
+/// `lo_val + (hi_val - lo_val) * weight` - pandas' groupby kernel's, NOT
+/// `typed_quantile_f64`'s numpy percentile (`numpy_lerp`), which rounds
+/// differently. Caller passes only
 /// finite values (matching `collect_finite`). Used by the typed groupby quantile
 /// path to skip the per-group `Scalar` materialization.
 fn group_nanquantile_f64(v: &mut [f64], q: f64) -> f64 {
@@ -8648,12 +8664,18 @@ fn group_nanquantile_f64(v: &mut [f64], q: f64) -> f64 {
     lo_val + (hi_val - lo_val) * weight
 }
 
+/// Quantile of a non-empty `f64` buffer via O(n) quickselect — bit-identical to
+/// sorting then `percentile_with_interpolation`. Only the `lower`/`upper` order
+/// statistics (upper-lower <= 1) are needed: `select_nth_unstable_by(upper)`
+/// yields the upper one and leaves earlier elements <= it, so the lower one is
+/// `max(lower_partition)`. The interpolation match mirrors
+/// `percentile_with_interpolation` exactly (incl `Nearest`'s banker's rounding).
 fn typed_quantile_f64(mut v: Vec<f64>, q: f64, mode: QuantileInterpolation) -> f64 {
     let n = v.len();
     if n == 1 {
         return v[0];
     }
-    let pos = q * (n - 1) as f64;
+    let pos = numpy_percentile_rank(q, n);
     let lower = pos.floor() as usize;
     let upper = pos.ceil() as usize;
     let (lo_part, kth, _) = v.select_nth_unstable_by(upper, |a, b| {
@@ -8666,7 +8688,7 @@ fn typed_quantile_f64(mut v: Vec<f64>, q: f64, mode: QuantileInterpolation) -> f
     let s_lower = lo_part.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let frac = pos - lower as f64;
     match mode {
-        QuantileInterpolation::Linear => s_lower * (1.0 - frac) + s_upper * frac,
+        QuantileInterpolation::Linear => numpy_lerp(s_lower, s_upper, frac),
         QuantileInterpolation::Lower => s_lower,
         QuantileInterpolation::Higher => s_upper,
         QuantileInterpolation::Nearest => {
@@ -8680,7 +8702,7 @@ fn typed_quantile_f64(mut v: Vec<f64>, q: f64, mode: QuantileInterpolation) -> f
                 s_upper
             }
         }
-        QuantileInterpolation::Midpoint => 0.5 * (s_lower + s_upper),
+        QuantileInterpolation::Midpoint => numpy_lerp(s_lower, s_upper, 0.5),
     }
 }
 
@@ -26854,14 +26876,14 @@ impl Series {
             if sorted.is_empty() {
                 return f64::NAN;
             }
-            let idx = p * (sorted.len() as f64 - 1.0);
+            let idx = numpy_percentile_rank(p, sorted.len());
             let lo = idx.floor() as usize;
             let hi = idx.ceil() as usize;
             if lo == hi || hi >= sorted.len() {
                 sorted[lo.min(sorted.len() - 1)]
             } else {
                 let frac = idx - lo as f64;
-                sorted[lo] * (1.0 - frac) + sorted[hi] * frac
+                numpy_lerp(sorted[lo], sorted[hi], frac)
             }
         };
 
@@ -58515,6 +58537,28 @@ impl DatetimeAccessor<'_> {
             return rounded.dt().tz_localize(Some(&zone));
         }
         let freq_ns = resolve_fixed_frequency(freq)?;
+        // A duration column rounds its durations, pandas' TimedeltaProperties
+        // (it fell to the text path below: every value NaN).
+        if matches!(self.series.column().dtype(), DType::Timedelta64) {
+            let out: Vec<Scalar> = self
+                .series
+                .column()
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => {
+                        Scalar::Timedelta64(snap_datetime_ns(*ns, freq_ns, mode))
+                    }
+                    _ => Scalar::Timedelta64(Timedelta::NAT),
+                })
+                .collect();
+            let column = Column::new(DType::Timedelta64, out)?;
+            return Series::new(
+                self.series.name().to_owned(),
+                self.series.index().clone(),
+                column,
+            );
+        }
         if self.is_typed_datetime() {
             // Typed all-valid fast path (br-frankenpandas-j5150): read the nanos
             // directly off `as_datetime64_slice`, snap each, and emit a typed
@@ -63552,8 +63596,20 @@ pub fn qcut(series: &Series, q: usize) -> Result<Series, FrameError> {
             "qcut: q must be > 0".to_string(),
         ));
     }
-    let probs: Vec<f64> = (0..=q).map(|i| i as f64 / q as f64).collect();
-    qcut_at_quantiles(series, &probs, None, false)
+    qcut_at_quantiles(series, &qcut_probabilities(q), None, false)
+}
+
+/// pandas' `qcut(x, q)` probabilities for an integer `q`: numpy's
+/// `linspace(0, 1, q + 1)`, `i * (1 / q)` with the last exactly 1 (`i / q`
+/// differs in the last bit: 3 / 10 is 0.3, 3 * (1 / 10) 0.30000000000000004).
+#[must_use]
+pub fn qcut_probabilities(q: usize) -> Vec<f64> {
+    let step = 1.0 / q as f64;
+    let mut probabilities: Vec<f64> = (0..=q).map(|i| i as f64 * step).collect();
+    if let Some(last) = probabilities.last_mut() {
+        *last = 1.0;
+    }
+    probabilities
 }
 
 /// Quantile-based binning at an explicit sequence of quantile probabilities.
@@ -63574,6 +63630,21 @@ pub fn qcut_at_quantiles(
     labels: Option<&[&str]>,
     drop_duplicate_edges: bool,
 ) -> Result<Series, FrameError> {
+    qcut_with_edges(series, quantiles, labels, drop_duplicate_edges).map(|(binned, _)| binned)
+}
+
+/// [`qcut_at_quantiles`] and the edges it cut at, pandas' `qcut(...,
+/// retbins=True)`: the sample quantiles as pandas' `Series.quantile` finds
+/// them (numpy's percentile, `numpy_lerp`), the distinct ones under
+/// `duplicates='drop'`. With no value to bin the edges are NaN - repeated,
+/// so `duplicates='raise'` refuses them as pandas (every value came back
+/// NaN).
+pub fn qcut_with_edges(
+    series: &Series,
+    quantiles: &[f64],
+    labels: Option<&[&str]>,
+    drop_duplicate_edges: bool,
+) -> Result<(Series, Vec<f64>), FrameError> {
     if quantiles.len() < 2 {
         return Err(FrameError::CompatibilityRejected(
             "qcut: q must list at least 2 quantiles".to_string(),
@@ -63629,55 +63700,66 @@ pub fn qcut_at_quantiles(
             .collect()
     };
 
+    // pandas refuses repeated edges - except a lone pair, which it bins.
+    let repeated_edges = |edges: &[f64]| {
+        let shown: Vec<String> = edges
+            .iter()
+            .map(|edge| {
+                if edge.is_nan() {
+                    "nan".to_string()
+                } else if edge.fract() == 0.0 && edge.abs() < 1e16 {
+                    format!("{edge:.1}")
+                } else {
+                    edge.to_string()
+                }
+            })
+            .collect();
+        FrameError::CompatibilityRejected(format!(
+            "Bin edges must be unique: Index([{}], dtype='float64').\nYou can drop duplicate edges by setting the 'duplicates' kwarg",
+            shown.join(", ")
+        ))
+    };
+    // One edge left (every value tied) bins nothing: all missing, no
+    // categories, as pandas.
+    let nothing_binned = |edges: Vec<f64>| {
+        binned_categorical(
+            series,
+            floats.iter().map(|_| None),
+            &BinCategories::Intervals(Vec::new()),
+        )
+        .map(|binned| (binned, edges))
+    };
+
     let mut valid: Vec<f64> = floats.iter().filter_map(|v| *v).collect();
     if valid.is_empty() {
-        // Per br-frankenpandas-6bslt: pandas pd.qcut preserves source axis name.
-        let nans = vec![Scalar::Null(NullKind::NaN); series.len()];
-        let index = series.index().clone();
-        let column = Column::from_values(nans)?;
-        return Series::new(series.name(), index, column);
+        // Per br-frankenpandas-6bslt: pandas pd.qcut preserves source axis name
+        // (binned_categorical keeps the source index).
+        if drop_duplicate_edges || quantiles.len() == 2 {
+            return nothing_binned(vec![f64::NAN]);
+        }
+        return Err(repeated_edges(&vec![f64::NAN; quantiles.len()]));
     }
 
     valid.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = valid.len();
 
-    // Sample quantile (numpy 'linear') at each probability.
+    // Sample quantile at each probability, as pandas' Series.quantile.
     let mut edges: Vec<f64> = quantiles
         .iter()
         .map(|&frac| {
-            let idx = frac * (n - 1) as f64;
-            let lo = idx.floor() as usize;
-            let hi = idx.ceil().min((n - 1) as f64) as usize;
-            let t = idx - lo as f64;
-            valid[lo] * (1.0 - t) + valid[hi] * t
+            let rank = numpy_percentile_rank(frac, n);
+            let lo = rank.floor() as usize;
+            let hi = rank.ceil().min((n - 1) as f64) as usize;
+            numpy_lerp(valid[lo], valid[hi], rank - lo as f64)
         })
         .collect();
-    if edges.windows(2).any(|pair| pair[0] == pair[1]) {
+    if edges.len() != 2 && edges.windows(2).any(|pair| pair[0] == pair[1]) {
         if !drop_duplicate_edges {
-            let shown: Vec<String> = edges
-                .iter()
-                .map(|edge| {
-                    if edge.fract() == 0.0 && edge.abs() < 1e16 {
-                        format!("{edge:.1}")
-                    } else {
-                        edge.to_string()
-                    }
-                })
-                .collect();
-            return Err(FrameError::CompatibilityRejected(format!(
-                "Bin edges must be unique: Index([{}], dtype='float64').\nYou can drop duplicate edges by setting the 'duplicates' kwarg",
-                shown.join(", ")
-            )));
+            return Err(repeated_edges(&edges));
         }
         edges.dedup();
-        // One edge left (every value tied) bins nothing: all missing, no
-        // categories, as pandas.
         if edges.len() < 2 {
-            return binned_categorical(
-                series,
-                floats.iter().map(|_| None),
-                &BinCategories::Intervals(Vec::new()),
-            );
+            return nothing_binned(edges);
         }
     }
     let q = edges.len() - 1;
@@ -63705,7 +63787,7 @@ pub fn qcut_at_quantiles(
     let bin_indices = floats
         .iter()
         .map(|v| v.map(|f| edges[1..=q].partition_point(|&right| right < f).min(q - 1)));
-    binned_categorical(series, bin_indices, &categories)
+    binned_categorical(series, bin_indices, &categories).map(|binned| (binned, edges))
 }
 
 /// Convert an Index to a single-column DataFrame.
@@ -79240,27 +79322,24 @@ impl DataFrame {
                         // ```
                         //
                         // so routing quantile through the median would be a silently
-                        // wrong LAST BIT. `group_nanquantile_f64` is the crate's own
-                        // interpolating quantile, bit-identical to
-                        // `fp_types::nanquantile`'s numeric arm — which is what the
-                        // axis=0 arm reaches through `s.quantile(0.5)`. Using it here
-                        // makes the two axes agree with each other by construction.
-                        //
-                        // (FP's interpolation still differs from pandas' in the last
-                        // ulp — pandas reproduces neither `(a+b)/2` nor
-                        // `lo + (hi-lo)*w` exactly. That is a pre-existing,
-                        // crate-wide property of nanquantile and not something to
-                        // fork per call site; noted here so the next reader does not
-                        // "fix" it by switching formulas on one arm.)
+                        // wrong LAST BIT. pandas' row quantile is Series.quantile,
+                        // numpy's percentile (`numpy_lerp`: 6.844 - 8.2 * 0.5 is
+                        // that 2.7439999999999998), so this is the axis=0 arm's
+                        // `typed_quantile_f64` - not the groupby kernel's
+                        // `group_nanquantile_f64`, whose `lo + (hi - lo) * w` is
+                        // pandas' groupby arithmetic, not its Series one.
                         "quantile" => {
                             if row_vals.is_empty() {
-                                // group_nanquantile_f64 selects an order statistic
+                                // typed_quantile_f64 selects an order statistic
                                 // and would panic on an empty slice; pandas returns
                                 // NaN for an all-missing row.
                                 Scalar::Float64(f64::NAN)
                             } else {
-                                let mut sorted = row_vals.clone();
-                                Scalar::Float64(group_nanquantile_f64(&mut sorted, 0.5))
+                                Scalar::Float64(typed_quantile_f64(
+                                    row_vals.clone(),
+                                    0.5,
+                                    QuantileInterpolation::Linear,
+                                ))
                             }
                         }
                         "idxmax" | "idxmin" => {
@@ -80121,7 +80200,7 @@ impl DataFrame {
             nums.sort_by(cmp);
             return Self::percentile_linear(nums, q);
         }
-        let pos = q * (n - 1) as f64;
+        let pos = numpy_percentile_rank(q, n);
         let lower = pos.floor() as usize;
         let upper = pos.ceil() as usize;
         nums.select_nth_unstable_by(lower, cmp);
@@ -80136,7 +80215,7 @@ impl DataFrame {
                 .min_by(|a, b| cmp(a, b))
                 .expect("right partition is non-empty when upper > lower");
             let frac = pos - lower as f64;
-            lo_val * (1.0 - frac) + hi_val * frac
+            numpy_lerp(lo_val, hi_val, frac)
         }
     }
 
@@ -80147,14 +80226,14 @@ impl DataFrame {
         if sorted.len() == 1 {
             return sorted[0];
         }
-        let pos = q * (sorted.len() - 1) as f64;
+        let pos = numpy_percentile_rank(q, sorted.len());
         let lower = pos.floor() as usize;
         let upper = pos.ceil() as usize;
         if lower == upper {
             sorted[lower]
         } else {
             let frac = pos - lower as f64;
-            sorted[lower] * (1.0 - frac) + sorted[upper] * frac
+            numpy_lerp(sorted[lower], sorted[upper], frac)
         }
     }
 
@@ -160509,6 +160588,137 @@ mod tests {
             texts(&super::qcut_at_quantiles(&spread, &[0.0, 0.5, 1.0], None, false).unwrap()),
             texts(&super::qcut_at_quantiles(&spread, &[0.0, 0.5, 1.0], None, true).unwrap())
         );
+    }
+
+    /// pandas' Series quantile is numpy's percentile (q * 100 / 100, the
+    /// nearer-end lerp) and qcut bins at it over np.linspace(0, 1, q + 1):
+    /// every expected value below is live pandas 2.2.3 / numpy 2.3.5's repr
+    /// (fp's a * (1 - t) + b * t at q * (n - 1) gave the commented ones).
+    #[test]
+    fn quantile_and_qcut_edges_are_numpys_percentile_1ly8z() {
+        let series = |values: &[f64]| {
+            Series::from_values(
+                "x",
+                (0..values.len() as i64).map(IndexLabel::Int64).collect(),
+                values.iter().map(|&v| Scalar::Float64(v)).collect(),
+            )
+            .unwrap()
+        };
+        let quantile =
+            |s: &Series, q: f64, how: &str| match s.quantile_with_interpolation(q, how).unwrap() {
+                Scalar::Float64(v) => v,
+                other => panic!("{other:?}"),
+            };
+        let nine = series(&[0.3, 1.7, 2.2, 5.9, 7.1, 8.8, 9.05, 12.4, 13.3]);
+        assert_eq!(quantile(&nine, 0.1, "linear"), 1.42); // was 1.4200000000000002
+        assert_eq!(quantile(&nine, 1.0 / 3.0, "linear"), 4.666666666666664); // ...666
+        assert_eq!(quantile(&nine, 0.95, "linear"), 12.94); // 12.940000000000001
+        let six = series(&[0.1, 0.7, 0.2, 0.9, 0.35, 1.3]);
+        assert_eq!(quantile(&six, 0.45, "linear"), 0.4375); // 0.43749999999999994
+        let ints = Series::from_values(
+            "x",
+            (0..5i64).map(IndexLabel::Int64).collect(),
+            [1, 5, 7, 10, 11].map(Scalar::Int64).to_vec(),
+        )
+        .unwrap();
+        assert_eq!(ints.quantile(0.3).unwrap(), Scalar::Float64(5.4)); // 5.3999999999999995
+        // numpy's midpoint is its lerp at 0.5, not (a + b) / 2 (-1.55).
+        assert_eq!(
+            quantile(&series(&[-4.2, 1.1]), 0.5, "midpoint"),
+            -1.5500000000000003
+        );
+        // NEGATIVE: the other modes pick or halve as before.
+        assert_eq!(quantile(&six, 0.3, "lower"), 0.2);
+        assert_eq!(quantile(&six, 0.3, "higher"), 0.35);
+
+        // qcut's edges (retbins=True) and their probabilities.
+        assert_eq!(super::qcut_probabilities(10)[3], 0.30000000000000004);
+        let (_, edges) =
+            super::qcut_with_edges(&nine, &super::qcut_probabilities(3), None, false).unwrap();
+        assert_eq!(edges, vec![0.3, 4.666666666666664, 8.883333333333333, 13.3]);
+        let one_to_31: Vec<f64> = (1..=31).map(f64::from).collect();
+        let (_, deciles) = super::qcut_with_edges(
+            &series(&one_to_31),
+            &super::qcut_probabilities(10),
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(deciles[3], 10.000000000000002);
+        assert_eq!(deciles[6], 19.000000000000004);
+        let (_, dropped) = super::qcut_with_edges(
+            &series(&[1.0, 1.0, 1.0, 2.0, 3.0]),
+            &super::qcut_probabilities(4),
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(dropped, vec![1.0, 2.0, 3.0]);
+
+        // Nothing to bin: pandas' edges are NaN, repeated, so the default
+        // refuses them (every value came back NaN); 'drop' bins nothing.
+        let missing = series(&[f64::NAN, f64::NAN]);
+        let err = super::qcut(&missing, 2).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Bin edges must be unique: Index([nan, nan, nan], dtype='float64')"),
+            "{err}"
+        );
+        let (binned, edges) =
+            super::qcut_with_edges(&missing, &super::qcut_probabilities(2), None, true).unwrap();
+        assert!(binned.values().iter().all(Scalar::is_missing));
+        assert!(binned.column().categorical().is_some());
+        assert!(edges.iter().all(|edge| edge.is_nan()));
+        // A lone pair of tied edges is binned, as pandas (it raised).
+        let flat = super::qcut(&series(&[5.0, 5.0, 5.0]), 1).unwrap();
+        assert!(flat.values().iter().all(|value| !value.is_missing()));
+    }
+
+    /// Series.dt.floor / ceil / round of a duration column round the
+    /// durations, pandas' TimedeltaProperties (every value was NaN).
+    #[test]
+    fn dt_rounding_of_durations_rounds_them_3agof() {
+        let (min, sec) = (Timedelta::NANOS_PER_MIN, Timedelta::NANOS_PER_SEC);
+        let day_2h47m21s =
+            Timedelta::NANOS_PER_DAY + 2 * Timedelta::NANOS_PER_HOUR + 47 * min + 21 * sec;
+        let durations = Series::from_values(
+            "d",
+            (0..3i64).map(IndexLabel::Int64).collect(),
+            vec![
+                Scalar::Timedelta64(day_2h47m21s),
+                Scalar::Timedelta64(7 * min + 30 * sec),
+                Scalar::Null(NullKind::NaT),
+            ],
+        )
+        .unwrap();
+        let nanos = |s: Series| -> Vec<Option<i64>> {
+            assert_eq!(s.column().dtype(), DType::Timedelta64);
+            s.values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => Some(*ns),
+                    _ => None,
+                })
+                .collect()
+        };
+        let day_2h45m = Timedelta::NANOS_PER_DAY + 2 * Timedelta::NANOS_PER_HOUR + 45 * min;
+        // pd.Series(pd.TimedeltaIndex(['1 days 02:47:21', '00:07:30', None]))
+        // .dt.round('15min') -> [1 days 02:45:00, 0 days 00:00:00, NaT]
+        // (7.5 minutes ties to the even multiple, 0).
+        assert_eq!(
+            nanos(durations.dt().round("15min").unwrap()),
+            vec![Some(day_2h45m), Some(0), None]
+        );
+        assert_eq!(
+            nanos(durations.dt().ceil("15min").unwrap()),
+            vec![Some(day_2h45m + 15 * min), Some(15 * min), None]
+        );
+        assert_eq!(
+            nanos(durations.dt().floor("1min").unwrap()),
+            vec![Some(day_2h45m + 2 * min), Some(7 * min), None]
+        );
+        // NEGATIVE: a calendar frequency is no fixed length.
+        assert!(durations.dt().round("ME").is_err());
     }
 
     #[test]
