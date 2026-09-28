@@ -5547,6 +5547,17 @@ fn reduction_to_py(
     numpy_scalar_of(py, result, reduction_width(series.column().width(), op))
 }
 
+/// A skew / kurtosis as pandas' nanops returns it: np.float64, except
+/// `np.nan` - a plain float - when there are too few values (fewer than 3
+/// for skew, 4 for kurt; `enough` false). They were plain floats.
+fn moment_to_py(py: Python<'_>, value: f64, enough: bool) -> PyResult<Py<PyAny>> {
+    if enough {
+        numpy_scalar(py, &Scalar::Float64(value))
+    } else {
+        f64::NAN.into_py_any(py)
+    }
+}
+
 /// The numpy width of a reduction of a column of `width`, as pandas'
 /// nanops give it (live pandas 2.2.3, fvsao.23): min / max / first / last
 /// keep the column's dtype (an int32 max is np.int32); a float32 column's
@@ -8665,15 +8676,10 @@ impl PyIndex {
     }
 
     fn isin(&self, values: &Bound<'_, PyAny>) -> PyResult<BoolArray> {
-        let mut labels = Vec::new();
-        if let Ok(seq) = values.cast::<pyo3::types::PySequence>() {
-            let len = seq.len()?;
-            labels.reserve(len);
-            for i in 0..len {
-                let item = seq.get_item(i)?;
-                labels.push(py_to_index_label(&item)?);
-            }
-        }
+        let labels = isin_values(values)?
+            .iter()
+            .map(py_to_index_label)
+            .collect::<PyResult<Vec<_>>>()?;
         Ok(self.inner.isin(&labels).into())
     }
 
@@ -20896,18 +20902,8 @@ impl PySeries {
                     .into_any()
                     .unbind(),
             )),
-            "skew" => Ok(Some(
-                self.skew(None, true, false)?
-                    .into_pyobject(py)?
-                    .into_any()
-                    .unbind(),
-            )),
-            "kurt" | "kurtosis" => Ok(Some(
-                self.kurt(None, true, false)?
-                    .into_pyobject(py)?
-                    .into_any()
-                    .unbind(),
-            )),
+            "skew" => Ok(Some(self.skew(py, None, true, false)?)),
+            "kurt" | "kurtosis" => Ok(Some(self.kurt(py, None, true, false)?)),
             _ => Ok(None),
         }
     }
@@ -22392,10 +22388,11 @@ impl PySeries {
     #[pyo3(signature = (axis=None, skipna=true, numeric_only=false))]
     fn skew(
         &self,
+        py: Python<'_>,
         axis: Option<&Bound<'_, PyAny>>,
         skipna: bool,
         numeric_only: bool,
-    ) -> PyResult<f64> {
+    ) -> PyResult<Py<PyAny>> {
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("skew")?;
@@ -22404,19 +22401,21 @@ impl PySeries {
         }
         // skipna=False: a missing value makes the moment NaN, as in pandas.
         if !skipna && self.inner.count() < self.inner.len() {
-            return Ok(f64::NAN);
+            return numpy_scalar(py, &Scalar::Float64(f64::NAN));
         }
-        self.inner.skew().map_err(frame_error_to_py)
+        let value = self.inner.skew().map_err(frame_error_to_py)?;
+        moment_to_py(py, value, self.inner.count() >= 3)
     }
 
     /// Return the sample (excess) kurtosis.
     #[pyo3(signature = (axis=None, skipna=true, numeric_only=false))]
     fn kurt(
         &self,
+        py: Python<'_>,
         axis: Option<&Bound<'_, PyAny>>,
         skipna: bool,
         numeric_only: bool,
-    ) -> PyResult<f64> {
+    ) -> PyResult<Py<PyAny>> {
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("kurt")?;
@@ -22425,9 +22424,10 @@ impl PySeries {
         }
         // skipna=False: a missing value makes the moment NaN, as in pandas.
         if !skipna && self.inner.count() < self.inner.len() {
-            return Ok(f64::NAN);
+            return numpy_scalar(py, &Scalar::Float64(f64::NAN));
         }
-        self.inner.kurt().map_err(frame_error_to_py)
+        let value = self.inner.kurt().map_err(frame_error_to_py)?;
+        moment_to_py(py, value, self.inner.count() >= 4)
     }
 
     /// Return the absolute value of each element as a new Series.
@@ -23586,16 +23586,11 @@ impl PySeries {
     }
 
     fn isin(&self, py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        let mut scalars = Vec::new();
-        if let Ok(seq) = values.cast::<pyo3::types::PySequence>() {
-            let len = seq.len()?;
-            scalars.reserve(len);
-            for i in 0..len {
-                let item = seq.get_item(i)?;
-                // A date needle is an object cell (it raised; fvsao.67).
-                scalars.push(py_to_cell(py, &item)?);
-            }
-        }
+        // A date needle is an object cell (it raised; fvsao.67).
+        let scalars = isin_values(values)?
+            .iter()
+            .map(|item| py_to_cell(py, item))
+            .collect::<PyResult<Vec<_>>>()?;
         let res = self.inner.isin(&scalars).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
     }
@@ -24047,10 +24042,11 @@ impl PySeries {
     #[pyo3(signature = (other, method="pearson", min_periods=None))]
     fn corr(
         &self,
+        py: Python<'_>,
         other: &PySeries,
         method: Option<&str>,
         min_periods: Option<usize>,
-    ) -> PyResult<f64> {
+    ) -> PyResult<Py<PyAny>> {
         // Fewer than two pairs already correlate to NaN, so min_periods up to
         // 2 is the default answer; a larger floor needs the pair count.
         unsupported_params(
@@ -24068,20 +24064,24 @@ impl PySeries {
                 )));
             }
         };
-        res.map_err(frame_error_to_py)
+        // np.float64, NaN included, as pandas' (it was a Python float).
+        numpy_scalar(py, &Scalar::Float64(res.map_err(frame_error_to_py)?))
     }
 
     #[pyo3(signature = (other, min_periods=None, ddof=1))]
     fn cov(
         &self,
+        py: Python<'_>,
         other: &PySeries,
         min_periods: Option<usize>,
         ddof: Option<usize>,
-    ) -> PyResult<f64> {
+    ) -> PyResult<Py<PyAny>> {
         let ddof_val = ddof.unwrap_or(1);
-        self.inner
+        let value = self
+            .inner
             .cov_with_options(&other.inner, min_periods, ddof_val)
-            .map_err(frame_error_to_py)
+            .map_err(frame_error_to_py)?;
+        numpy_scalar(py, &Scalar::Float64(value))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -24422,11 +24422,12 @@ impl PySeries {
     #[pyo3(signature = (axis=None, skipna=true, numeric_only=false))]
     fn kurtosis(
         &self,
+        py: Python<'_>,
         axis: Option<&Bound<'_, PyAny>>,
         skipna: bool,
         numeric_only: bool,
-    ) -> PyResult<f64> {
-        self.kurt(axis, skipna, numeric_only)
+    ) -> PyResult<Py<PyAny>> {
+        self.kurt(py, axis, skipna, numeric_only)
     }
 
     #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, min_count=0, **kwargs))]
@@ -24914,9 +24915,10 @@ impl PySeries {
     }
 
     #[pyo3(signature = (lag=None))]
-    fn autocorr(&self, lag: Option<usize>) -> PyResult<f64> {
+    fn autocorr(&self, py: Python<'_>, lag: Option<usize>) -> PyResult<Py<PyAny>> {
         let l = lag.unwrap_or(1);
-        self.inner.autocorr(l).map_err(frame_error_to_py)
+        let value = self.inner.autocorr(l).map_err(frame_error_to_py)?;
+        numpy_scalar(py, &Scalar::Float64(value))
     }
 
     #[pyo3(signature = (ascending=true))]
@@ -25105,10 +25107,12 @@ impl PySeries {
         let total = self.inner.dot(&series.inner).map_err(frame_error_to_py)?;
         let ints = self.inner.column().dtype() == DType::Int64
             && series.inner.column().dtype() == DType::Int64;
+        // A numpy scalar, as pandas' (np.int64 / np.float64; they were
+        // Python numbers).
         if ints && total.fract() == 0.0 && total.abs() < 9.007_199_254_740_992e15 {
-            return (total as i64).into_py_any(py);
+            return numpy_scalar(py, &Scalar::Int64(total as i64));
         }
-        total.into_py_any(py)
+        numpy_scalar(py, &Scalar::Float64(total))
     }
 
     fn __matmul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -25396,16 +25400,18 @@ impl PySeries {
         };
         let fill = py_to_scalar(py, fill)?;
         let source_positions = self.inner.index().get_indexer(&Index::new(labels));
+        // A label found takes the source's own value - the reindexed column
+        // had turned float by the very rows the fill replaces, so
+        // reindex(fill_value=0) of an int Series came back float64.
+        let source_values = self.inner.values();
         let values = reindexed
             .values()
             .iter()
             .zip(&source_positions)
-            .map(|(value, source)| {
-                if source.is_none() && value.is_missing() {
-                    fill.clone()
-                } else {
-                    value.clone()
-                }
+            .map(|(value, source)| match source {
+                Some(position) if method.is_none() => source_values[*position].clone(),
+                None if value.is_missing() => fill.clone(),
+                _ => value.clone(),
             })
             .collect();
         let column = Column::from_values(values).map_err(column_error_to_py)?;
@@ -35761,10 +35767,12 @@ impl PyDataFrame {
         match parsed_axis {
             None => {
                 if num_rows == 1 && num_cols == 1 {
+                    // The one element as .iat gives it - a numpy scalar for a
+                    // number (it was a Python int / float).
                     let col_name = self.inner.column_names()[0];
                     let col = self.column_series(col_name)?;
-                    let s = col.inner.column().values()[0].clone();
-                    scalar_to_py(py, &s)
+                    let column = col.inner.column();
+                    element_to_py(py, column, &column.values()[0])
                 } else if num_cols == 1 {
                     let col_name = self.inner.column_names()[0];
                     let col = self.column_series(col_name)?;
@@ -37892,11 +37900,19 @@ impl PyDataFrame {
         // xs(key, level=) over a row MultiIndex: the rows whose `level` is
         // `key`, that level dropped unless drop_level=False (fvsao.36; it
         // raised NotImplementedError).
-        if ax == 0
-            && let Some(level) = level.filter(|level| !level.is_none())
+        // Without level=, a (non-tuple) key over a row MultiIndex selects on
+        // its first level, as pandas' (it raised KeyError).
+        let row_level = match (
+            level.filter(|level| !level.is_none()),
+            self.inner.row_multiindex(),
+        ) {
+            (Some(level), Some(multi)) if ax == 0 => Some(multiindex_level_position(multi, level)?),
+            (None, Some(_)) if ax == 0 && !key.is_instance_of::<PyTuple>() => Some(0),
+            _ => None,
+        };
+        if let Some(position) = row_level
             && let Some(multi) = self.inner.row_multiindex()
         {
-            let position = multiindex_level_position(multi, level)?;
             let label = py_to_index_label(key)?;
             let values = multi
                 .get_level_values(position)
@@ -51948,6 +51964,24 @@ fn read_csv_impl(
     Ok(PyDataFrame { inner: frame })
 }
 
+/// The values of an `isin()` argument: any list-like - a list, tuple, set,
+/// dict (its keys), ndarray, Series (its values), Index or generator - and
+/// pandas' TypeError for a str or a scalar. Only registered sequences were
+/// read, so a Series, set or ndarray matched nothing and every row came back
+/// False.
+fn isin_values<'py>(values: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    let list_like = !values.is_instance_of::<pyo3::types::PyString>()
+        && !values.is_instance_of::<pyo3::types::PyBytes>()
+        && values.try_iter().is_ok();
+    if !list_like {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "only list-like objects are allowed to be passed to isin(), you passed a `{}`",
+            values.get_type().name()?
+        )));
+    }
+    values.try_iter()?.collect()
+}
+
 /// The file position a generated `Unnamed: {position}` header name stands for
 /// (see [`csv_header_cell_blank`]).
 fn unnamed_header_position(name: &str) -> Option<usize> {
@@ -64345,7 +64379,13 @@ mod tests {
         );
 
         let s2 = py_s.clone();
-        let c = py_s.corr(&s2, None, None).expect("corr"); // ubs:ignore — test fixture
+        // corr is a numpy float now, read back through Python.
+        Python::initialize();
+        let c: f64 = Python::attach(|py| {
+            py_s.corr(py, &s2, None, None)
+                .and_then(|c| c.extract::<f64>(py))
+        })
+        .expect("corr"); // ubs:ignore — test fixture
         assert!((c - 1.0).abs() < 1e-6);
 
         let ffilled = py_s

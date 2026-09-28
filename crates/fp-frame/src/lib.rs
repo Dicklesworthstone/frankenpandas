@@ -4261,6 +4261,45 @@ fn index_label_to_utf8_scalar(label: &IndexLabel) -> Scalar {
     }
 }
 
+/// An object (Utf8-backed) column as pandas' `infer_objects` re-reads it:
+/// ints are int64 (float64 beside a missing value), ints and floats
+/// float64, bools bool (object beside a missing value), instants
+/// datetime64, durations timedelta64; text, any other object or a mix stays
+/// object (None). A categorical or 'string' column is not object.
+fn inferred_object_column(column: &Column) -> Result<Option<Column>, FrameError> {
+    if column.dtype() != DType::Utf8 || column.is_pandas_string() || column.categorical().is_some()
+    {
+        return Ok(None);
+    }
+    let values = column.values();
+    let present: Vec<&Scalar> = values.iter().filter(|value| !value.is_missing()).collect();
+    if present.is_empty() {
+        return Ok(None);
+    }
+    let missing = present.len() < values.len();
+    let all = |kind: fn(&Scalar) -> bool| present.iter().all(|value| kind(value));
+    let inferred: Vec<Scalar> = if all(|v| matches!(v, Scalar::Int64(_))) && !missing
+        || all(|v| matches!(v, Scalar::Bool(_))) && !missing
+        || all(|v| matches!(v, Scalar::Datetime64(_)))
+        || all(|v| matches!(v, Scalar::Timedelta64(_)))
+    {
+        values.to_vec()
+    } else if all(|v| matches!(v, Scalar::Int64(_) | Scalar::Float64(_))) {
+        values
+            .iter()
+            .map(|value| match value {
+                Scalar::Int64(v) => Scalar::Float64(*v as f64),
+                Scalar::Float64(v) => Scalar::Float64(*v),
+                _ => Scalar::Null(NullKind::NaN),
+            })
+            .collect()
+    } else {
+        return Ok(None);
+    };
+    let inferred = Column::from_values(inferred)?;
+    Ok((inferred.dtype() != DType::Utf8).then_some(inferred))
+}
+
 /// Index labels as the values of a column (`reset_index`): typed, except that
 /// a mix of Int64 and Utf8 labels becomes all-Utf8 so the column can hold it.
 fn index_labels_to_column_scalars(labels: &[IndexLabel]) -> Vec<Scalar> {
@@ -28754,10 +28793,14 @@ impl Series {
 
     /// Infer object dtypes to best-possible scalar dtypes.
     ///
-    /// Matches `pd.Series.infer_objects()` for the current Utf8-backed
-    /// object representation: numpy dtypes stay, text stays text.
+    /// Matches `pd.Series.infer_objects()` (see `inferred_object_column`):
+    /// numpy dtypes stay, text stays text. It returned the Series as it was,
+    /// so an object Series of ints stayed object.
     pub fn infer_objects(&self) -> Result<Self, FrameError> {
-        Ok(self.clone())
+        match inferred_object_column(&self.column)? {
+            Some(column) => Self::new(self.name.clone(), self.index.clone(), column),
+            None => Ok(self.clone()),
+        }
     }
 
     /// Map values with optional NaN skipping.
@@ -85251,13 +85294,23 @@ impl DataFrame {
 
     /// Infer better dtypes for object columns.
     ///
-    /// Matches `pd.DataFrame.infer_objects()` for the Utf8-backed object
-    /// representation: numpy dtypes stay, text stays text.
+    /// Matches `pd.DataFrame.infer_objects()` column by column (see
+    /// `inferred_object_column`): numpy dtypes stay, text stays text
+    /// (pandas: DataFrame({'n': ['10']}).infer_objects() is object).
     pub fn infer_objects(&self) -> Result<Self, FrameError> {
-        // Text stays text (pandas: DataFrame({'n': ['10']}).infer_objects()
-        // is object); it ran convert_dtypes, which parsed numeric-looking
-        // text into numbers.
-        Ok(self.clone())
+        let mut out = self.clone();
+        for name in self.column_order.iter() {
+            if let Some(column) = self
+                .columns
+                .get(name)
+                .map(inferred_object_column)
+                .transpose()?
+                .flatten()
+            {
+                out = out.with_column(name.clone(), column)?;
+            }
+        }
+        Ok(out)
     }
 
     /// Get the top N rows ordered by a column.
@@ -128970,6 +129023,42 @@ mod tests {
             panic!("reset_index(drop=false) is a frame");
         };
         assert_eq!(reset.column_label("0"), IndexLabel::Int64(0));
+    }
+
+    #[test]
+    fn infer_objects_reads_object_columns_like_pandas_tiofb() {
+        // An object column holds its values as given (pandas dtype=object).
+        let object = |values: Vec<Scalar>| {
+            let column = Column::from_object_values(values);
+            Series::new("s", Index::default_range(column.len()), column).unwrap()
+        };
+        let dtype = |values: Vec<Scalar>| object(values).infer_objects().unwrap().dtype();
+        // pandas 2.2.3: ints int64, ints beside a missing value float64,
+        // ints and floats float64, bools bool.
+        assert_eq!(
+            dtype(vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            DType::Int64
+        );
+        assert_eq!(
+            dtype(vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)]),
+            DType::Float64
+        );
+        assert_eq!(
+            dtype(vec![Scalar::Int64(1), Scalar::Float64(2.5)]),
+            DType::Float64
+        );
+        assert_eq!(
+            dtype(vec![Scalar::Bool(true), Scalar::Bool(false)]),
+            DType::Bool
+        );
+        // NEGATIVES: text, an int + text mix and bools beside a missing
+        // value stay object.
+        let text = vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned())];
+        assert_eq!(dtype(text), DType::Utf8);
+        let mix = vec![Scalar::Int64(1), Scalar::Utf8("a".to_owned())];
+        assert_eq!(dtype(mix), DType::Utf8);
+        let bools = vec![Scalar::Bool(true), Scalar::Null(NullKind::Null)];
+        assert_eq!(dtype(bools), DType::Utf8);
     }
 
     #[test]

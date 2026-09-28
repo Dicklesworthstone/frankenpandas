@@ -13392,3 +13392,62 @@ _EVERYDAY16_CASES = {
 def test_everyday16_like_pandas(case: str) -> None:
     run = _EVERYDAY16_CASES[case]
     assert _sdt_outcome(fpd, run) == _sdt_outcome(pd, run), case
+
+
+# br-frankenpandas-tiofb: isin read only registered sequences (a Series, set
+# or ndarray matched nothing - all False); reindex(fill_value=) of ints came
+# back float; xs(key) on a row MultiIndex raised; infer_objects was a no-op;
+# moments / corr / dot / squeeze returned Python numbers.
+def _e17_frame(m: Any) -> Any:
+    return m.DataFrame({"k": ["a", "b", "a", "c"], "v": [1.0, None, 3.0, 4.0], "w": [10, 20, 30, 40]})
+
+
+def _e17_typed(value: Any) -> Any:
+    return (type(value).__name__, value if value == value else "nan")
+
+
+def _e17_close(value: Any) -> Any:
+    # The type, and the value to 12 places: fp's Pearson sums differ from
+    # numpy's corrcoef (BLAS dot, reciprocal multiply) in the last bit - a
+    # precision gap recorded on the bead, not what these cases test.
+    return (type(value).__name__, round(float(value), 12))
+
+
+_EVERYDAY17_CASES = {
+    "isin Series": lambda m: _e17_frame(m)["k"].isin(m.Series(["a", "c"])).tolist(),
+    "isin set": lambda m: _e17_frame(m)["k"].isin({"b"}).tolist(),
+    "isin ndarray": lambda m: _e17_frame(m)["w"].isin(np.array([10, 40])).tolist(),
+    "isin generator": lambda m: _e17_frame(m)["w"].isin(v for v in [20]).tolist(),
+    "Index.isin set": lambda m: m.Index([1, 2, 3]).isin({2, 3}).tolist(),
+    "reindex fill_value keeps int": lambda m: m.Series([1, 2, 3], index=["x", "y", "z"]).reindex(["x", "q"], fill_value=0),
+    "xs first level": lambda m: _e17_frame(m).set_index(["k", "w"]).xs("a"),
+    "infer_objects ints": lambda m: str(m.Series([1, 2], dtype=object).infer_objects().dtype),
+    "infer_objects ints + None": lambda m: str(m.Series([1, None], dtype=object).infer_objects().dtype),
+    "infer_objects floats": lambda m: str(m.Series([1, 2.5], dtype=object).infer_objects().dtype),
+    "infer_objects bools": lambda m: str(m.Series([True, False], dtype=object).infer_objects().dtype),
+    "infer_objects frame": lambda m: [
+        str(t) for t in m.DataFrame({"a": m.Series([1, 2], dtype=object), "b": ["x", "y"]}).infer_objects().dtypes
+    ],
+    "skew np.float64": lambda m: type(m.Series([1.0, 2.0, 4.0]).skew()).__name__,
+    "kurt np.float64": lambda m: type(m.Series([1.0, 2.0, 4.0, 8.0, 9.0]).kurt()).__name__,
+    "corr": lambda m: _e17_close(m.Series([1.0, 2.0, 3.0]).corr(m.Series([1.0, 5.0, 2.0]))),
+    "cov": lambda m: _e17_typed(m.Series([1.0, 2.0, 3.0]).cov(m.Series([1.0, 5.0, 2.0]))),
+    "autocorr": lambda m: _e17_close(m.Series([1.0, 3.0, 2.0, 5.0]).autocorr()),
+    "dot ints": lambda m: _e17_typed(m.Series([1, 2]).dot(m.Series([3, 4]))),
+    "dot floats": lambda m: _e17_typed(m.Series([1.5, 2]).dot(m.Series([3, 4]))),
+    "squeeze 1x1": lambda m: _e17_typed(m.DataFrame({"a": [7]}).squeeze()),
+    # NEGATIVES: isin of a str is pandas' TypeError; text and int + str mixes
+    # stay object; too few values give a plain float nan.
+    "isin str raises": lambda m: _raises(lambda: m.Series(["a"]).isin("a")),
+    "infer_objects text stays": lambda m: str(m.Series(["a", "b"], dtype=object).infer_objects().dtype),
+    "infer_objects mix stays": lambda m: str(m.Series([1, "a"], dtype=object).infer_objects().dtype),
+    "skew of 2 values": lambda m: _e17_typed(m.Series([1.0, 2.0]).skew()),
+    "squeeze text": lambda m: _e17_typed(m.DataFrame({"a": ["x"]}).squeeze()),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EVERYDAY17_CASES))
+def test_everyday17_like_pandas(case: str) -> None:
+    run = _EVERYDAY17_CASES[case]
+    assert _sdt_outcome(fpd, run) == _sdt_outcome(pd, run), case
