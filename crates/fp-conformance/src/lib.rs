@@ -6539,6 +6539,17 @@ impl Default for CiPipelineConfig {
     }
 }
 
+/// The last `max_chars` characters of a command's output. A failed cargo
+/// command ends with what names the failure - the failing test, its panic,
+/// the rerun hint - after a head of `Compiling` lines; the head alone named
+/// nothing on CI run 36377733707's G3 failure.
+fn output_tail(text: &str, max_chars: usize) -> &str {
+    let skip = text.chars().count().saturating_sub(max_chars);
+    let mut rest = text.chars();
+    rest.by_ref().take(skip).for_each(drop);
+    rest.as_str()
+}
+
 /// Evaluate a single CI gate using Rust-native checks where possible.
 pub fn evaluate_ci_gate(gate: CiGate, config: &CiPipelineConfig) -> CiGateResult {
     let start = SystemTime::now();
@@ -6683,11 +6694,15 @@ pub fn evaluate_ci_gate(gate: CiGate, config: &CiPipelineConfig) -> CiGateResult
                         Ok(output) => {
                             if !output.status.success() {
                                 all_ok = false;
+                                // cargo test prints its failures to stdout
+                                // and the rerun hint last on stderr.
+                                let stdout = String::from_utf8_lossy(&output.stdout);
                                 let stderr = String::from_utf8_lossy(&output.stderr);
                                 errs.push(format!(
-                                    "`{cmd}` failed (exit {}): {}",
+                                    "`{cmd}` failed (exit {}):\n--- stdout (tail) ---\n{}\n--- stderr (tail) ---\n{}",
                                     output.status.code().unwrap_or(-1),
-                                    stderr.chars().take(500).collect::<String>()
+                                    output_tail(&stdout, 4000),
+                                    output_tail(&stderr, 1500)
                                 ));
                             }
                         }
@@ -28760,6 +28775,25 @@ test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; fini
             assert!(!gate.label().is_empty());
             assert!(gate.to_string().contains("G"));
         }
+    }
+
+    #[test]
+    fn ci_gate_failure_output_keeps_the_tail() {
+        let log = "   Compiling a\n   Compiling b\nfailures:\n    my_test\ntest result: FAILED";
+        assert_eq!(super::output_tail(log, 19), "test result: FAILED");
+        assert_eq!(
+            super::output_tail(log, 41),
+            "failures:\n    my_test\ntest result: FAILED"
+        );
+        // NEGATIVE: the head of the same length - what was kept before -
+        // names no failing test.
+        assert!(!log.chars().take(41).collect::<String>().contains("my_test"));
+        // Shorter output is kept whole; the cut lands on a char boundary
+        // (a byte slice would panic inside 'é').
+        assert_eq!(super::output_tail("abc", 10), "abc");
+        assert_eq!(super::output_tail("", 10), "");
+        assert_eq!(super::output_tail("ééé", 2), "éé");
+        assert_eq!(super::output_tail("abc", 0), "");
     }
 
     #[test]

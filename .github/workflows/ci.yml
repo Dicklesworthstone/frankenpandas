@@ -599,6 +599,14 @@ jobs:
       - name: Create temp dirs
         run: mkdir -p .tmp .target-gates
 
+      # G3 (`cargo test --workspace --lib`) and G7 (llvm-cov over the
+      # workspace) run fp-python's in-process binding tests on this
+      # interpreter, which import numpy - the test job's r8lly step, missing
+      # here: G3 and G7 failed on 36377733707 while the test job, with numpy,
+      # passed the same commit.
+      - name: Install the binding's runtime dependency (numpy)
+        run: python -m pip install "numpy>=1.22"
+
       # G7 (Coverage Floor) shells out to `cargo llvm-cov --workspace
       # --summary-only`; on 35961608652 it failed in 18ms with "no such command:
       # llvm-cov" because nothing installed it. (kyvo0.6)
