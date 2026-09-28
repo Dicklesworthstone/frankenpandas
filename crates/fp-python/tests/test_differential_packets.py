@@ -13031,6 +13031,10 @@ _NARROW_DTYPE_CASES = {
     "dtype == np.int32": lambda m: m.Series([1]).astype("int32").dtype == np.int32,
     "is_unsigned_integer_dtype": lambda m: m.api.types.is_unsigned_integer_dtype(m.Series([1]).astype("uint8")),
     "float32 repr": lambda m: repr(m.Series([0.1, 1 / 3]).astype("float32")),
+    # to_csv writes numpy's float32 spelling (0.1, 1e+06), not float64's.
+    "float32 to_csv": lambda m: m.DataFrame({"f": np.array([0.1, 1e6, 1 / 3, 1e-5], dtype=np.float32)}).to_csv(),
+    "float32 to_csv with NaN": lambda m: m.DataFrame({"f": np.array([0.1, np.nan], dtype=np.float32)}).to_csv(index=False),
+    "float32 Series to_csv": lambda m: m.Series([0.1, 2.5], name="f").astype("float32").to_csv(),
 }
 
 

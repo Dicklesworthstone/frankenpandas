@@ -2410,13 +2410,21 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
         // All-valid (no validity-mask null) Datetime64 ns + the column-uniform
         // to_csv format; NaT sentinels render as na_rep inline.
         Dt(&'a [i64], DatetimeCsvFormat),
+        // A float32 column (with its validity when nullable): present rows in
+        // numpy's float32 spelling, missing ones na_rep (fvsao.23).
+        F32(&'a [f64], Option<&'a fp_columnar::ValidityMask>),
     }
     let mut cols: Vec<FastCol<'_>> = Vec::with_capacity(headers.len());
     for name in &headers {
         let column = frame.column(name)?;
+        let single = column.width() == Some(fp_types::NumericWidth::Float32);
         if let Some(s) = column.as_f64_slice() {
             if s.len() != n {
                 return None;
+            }
+            if single {
+                cols.push(FastCol::F32(s, None));
+                continue;
             }
             cols.push(FastCol::F {
                 values: s,
@@ -2451,6 +2459,10 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
             // frame off the fast path. Render present slots and na_rep at missing ones.
             if s.len() != n {
                 return None;
+            }
+            if single {
+                cols.push(FastCol::F32(s, Some(validity)));
+                continue;
             }
             cols.push(FastCol::FN(s, validity));
         } else if let Some((s, validity)) = column.as_i64_slice_with_validity() {
@@ -2588,6 +2600,18 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
                         let v = s[r];
                         if validity.get(r) && !v.is_nan() {
                             write_pandas_float(dst, v);
+                        } else if single_field && options.na_rep.is_empty() {
+                            dst.push_str("\"\"");
+                        } else {
+                            dst.push_str(&options.na_rep);
+                        }
+                    }
+                    // A float32 cell: FastCol::F / FN's rules in numpy's float32
+                    // spelling (0.1, not 0.10000000149011612).
+                    FastCol::F32(s, validity) => {
+                        let v = s[r];
+                        if validity.is_none_or(|validity| validity.get(r)) && !v.is_nan() {
+                            write_numpy_float32(dst, v);
                         } else if single_field && options.na_rep.is_empty() {
                             dst.push_str("\"\"");
                         } else {
@@ -2778,6 +2802,15 @@ pub fn write_csv_string_with_options(
     } else {
         None
     };
+    // A float32 column writes numpy's float32 spelling (fvsao.23).
+    let singles: Vec<bool> = headers
+        .iter()
+        .map(|name| {
+            frame
+                .column(name)
+                .is_some_and(|column| column.width() == Some(fp_types::NumericWidth::Float32))
+        })
+        .collect();
 
     for row_idx in 0..frame.index().len() {
         let mut row = Vec::with_capacity(headers.len() + if options.include_index { 1 } else { 0 });
@@ -2787,6 +2820,11 @@ pub fn write_csv_string_with_options(
         row.extend(headers.iter().enumerate().map(|(col_idx, name)| {
             let value = frame.column(name).and_then(|column| column.value(row_idx));
             match value {
+                Some(Scalar::Float64(v)) if !v.is_nan() && singles[col_idx] => {
+                    let mut text = String::new();
+                    write_numpy_float32(&mut text, *v);
+                    options.float_text(text)
+                }
                 // A float cell takes pandas' `decimal` separator.
                 Some(scalar @ Scalar::Float64(v)) if !v.is_nan() => options.float_text(
                     scalar_to_csv_cell(scalar, &options.na_rep, dt_formats[col_idx]),
@@ -4643,6 +4681,75 @@ fn format_pandas_float(v: f64) -> String {
     let mut out = String::new();
     write_pandas_float(&mut out, v);
     out
+}
+
+/// Append numpy's `str(np.float32(v))` - how pandas writes a float32 cell to
+/// CSV (fvsao.23): float32's shortest round-trip digits (0.1, not
+/// 0.10000000149011612), positional for 1e-4 <= |v| < 1e6 (the bound
+/// compared in float64, so float32's 1e-4 falls below it), else scientific
+/// with a signed two-digit exponent ('1e-04', '1.6777216e+07'); a whole
+/// number keeps '.0'. NaN and infinities as [`write_pandas_float`].
+fn write_numpy_float32(out: &mut String, v: f64) {
+    #[allow(clippy::cast_possible_truncation)] // a float32 column's value, exact
+    let single = v as f32;
+    if !single.is_finite() {
+        write_pandas_float(out, v);
+        return;
+    }
+    if single == 0.0 {
+        out.push_str(if single.is_sign_negative() {
+            "-0.0"
+        } else {
+            "0.0"
+        });
+        return;
+    }
+    // Rust's LowerExp of an f32 is its shortest round-trip digits.
+    let scientific = format!("{:e}", single.abs());
+    let (mantissa, exponent) = scientific.split_once('e').unwrap_or((&scientific, "0"));
+    let exponent: i32 = exponent.parse().unwrap_or(0);
+    let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+    if single.is_sign_negative() {
+        out.push('-');
+    }
+    let magnitude = f64::from(single.abs());
+    if (1e-4..1e6).contains(&magnitude) {
+        // Positional: the decimal point `exponent + 1` digits in.
+        let point = exponent + 1;
+        if point <= 0 {
+            out.push_str("0.");
+            for _ in 0..-point {
+                out.push('0');
+            }
+            out.push_str(&digits);
+        } else {
+            let point = usize::try_from(point).unwrap_or(0);
+            if digits.len() <= point {
+                out.push_str(&digits);
+                for _ in digits.len()..point {
+                    out.push('0');
+                }
+                out.push_str(".0");
+            } else {
+                out.push_str(&digits[..point]);
+                out.push('.');
+                out.push_str(&digits[point..]);
+            }
+        }
+        return;
+    }
+    out.push_str(&digits[..1]);
+    if digits.len() > 1 {
+        out.push('.');
+        out.push_str(&digits[1..]);
+    }
+    out.push('e');
+    out.push(if exponent < 0 { '-' } else { '+' });
+    let exponent = exponent.unsigned_abs();
+    if exponent < 10 {
+        out.push('0');
+    }
+    out.push_str(&exponent.to_string());
 }
 
 /// Append the pandas `str(float)` rendering of `v` directly to `out`, without
@@ -39510,5 +39617,76 @@ mod merge_simple_numeric_csv_chunks_tests {
         let df_empty = json_normalize_str(empty_arr, None, None).expect("empty array");
         assert_eq!(df_empty.len(), 0);
         assert_eq!(df_empty.column_names().len(), 0);
+    }
+}
+
+/// Float32 cells in CSV (fvsao.23): numpy's `str(np.float32(v))`, as pandas
+/// writes them. Expected strings are numpy 2.3.5 / pandas 2.2.3.
+#[cfg(test)]
+mod float32_csv_fvsao23 {
+    use super::{write_csv_string, write_numpy_float32};
+    use fp_columnar::Column;
+    use fp_frame::{DataFrame, Series};
+    use fp_index::Index;
+    use fp_types::NumericWidth;
+
+    fn spelled(v: f64) -> String {
+        let mut out = String::new();
+        write_numpy_float32(&mut out, v);
+        out
+    }
+
+    #[test]
+    fn numpy_float32_spelling() {
+        let cases = [
+            (0.1, "0.1"),
+            (1.0, "1.0"),
+            (1.0 / 3.0, "0.33333334"),
+            // float32's 1e-4 is just below 1e-4: scientific
+            (1e-4, "1e-04"),
+            (0.000_100_001, "0.000100001"),
+            (1.5e-5, "1.5e-05"),
+            (123_456.7, "123456.7"),
+            (999_999.0, "999999.0"),
+            // float32 turns scientific at 1e6 (float64 at 1e16)
+            (1e6, "1e+06"),
+            (9_999_999.0, "9.999999e+06"),
+            (16_777_217.0, "1.6777216e+07"),
+            (3.4e38, "3.4e+38"),
+            (-2.25, "-2.25"),
+            (0.0, "0.0"),
+            (-0.0, "-0.0"),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(spelled(value), expected, "{value}");
+        }
+        // NEGATIVE: float64's own spelling of the same value
+        assert_ne!(spelled(0.1), "0.10000000149011612");
+    }
+
+    #[test]
+    fn to_csv_writes_float32_columns_in_float32() {
+        // DataFrame({'f': np.array([0.1, 1e6], dtype=np.float32)}).to_csv()
+        let single = Series::new(
+            "f",
+            Index::default_range(2),
+            Column::from_f64_values(vec![0.1, 1e6])
+                .cast_to_width(NumericWidth::Float32, false)
+                .unwrap(),
+        )
+        .unwrap();
+        let frame = DataFrame::from_series(vec![single]).unwrap();
+        assert_eq!(write_csv_string(&frame).unwrap(), ",f\n0,0.1\n1,1e+06\n");
+        // A missing value keeps the nullable path (pandas: '0.1', '').
+        let gapped = Series::new(
+            "f",
+            Index::default_range(2),
+            Column::from_f64_values(vec![0.1, f64::NAN])
+                .cast_to_width(NumericWidth::Float32, false)
+                .unwrap(),
+        )
+        .unwrap();
+        let frame = DataFrame::from_series(vec![gapped]).unwrap();
+        assert_eq!(write_csv_string(&frame).unwrap(), ",f\n0,0.1\n1,\n");
     }
 }
