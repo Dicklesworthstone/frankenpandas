@@ -215,6 +215,39 @@ fn column_pandas_dtype_name(column: &Column) -> String {
     pandas_dtype_name(&dtype)
 }
 
+/// pandas' IntervalDtype of an interval column: its subtype int64 only when
+/// every value is an interval of int endpoints (a missing value makes it
+/// float64, as numpy's NaN does), its closed side its intervals' (pandas'
+/// default right with none). str() of it is interval[int64, right]; its
+/// name, which a Series repr prints, stays interval. It was the text
+/// 'interval' (br-frankenpandas-q69jo).
+fn column_interval_dtype(column: &Column) -> PyIntervalDtype {
+    let mut closed = None;
+    let mut all_int = true;
+    for value in column.values() {
+        match value {
+            Scalar::Interval(interval) => {
+                closed.get_or_insert(interval.closed);
+                all_int &= interval.subtype == fp_types::IntervalSubtype::Int64;
+            }
+            _ => all_int = false,
+        }
+    }
+    let subtype = if closed.is_some() && all_int {
+        "int64"
+    } else {
+        "float64"
+    };
+    PyIntervalDtype {
+        subtype: Some(subtype.to_owned()),
+        closed: Some(
+            closed
+                .unwrap_or(fp_types::IntervalClosed::Right)
+                .to_string(),
+        ),
+    }
+}
+
 /// The frequency of a Period column's values (None when none is a period).
 fn column_period_freq(column: &Column) -> Option<PeriodFreq> {
     column.values().iter().find_map(|value| match value {
@@ -353,6 +386,7 @@ fn column_pandas_dtype<'py>(py: Python<'py>, column: &Column) -> PyResult<Bound<
             tz: tz.to_string(),
         }
         .into_bound_py_any(py),
+        DType::Interval => column_interval_dtype(column).into_bound_py_any(py),
         _ => Ok(pyo3::types::PyString::new(py, &name).into_any()),
     }
 }
@@ -6454,6 +6488,11 @@ impl fp_types::HostObject for PyHost {
     fn host_pprint(&self) -> String {
         Python::attach(|py| {
             let value = self.0.bind(py);
+            // pandas' array formatter prints a StringDtype cell by its repr,
+            // string[python] (df.dtypes printed 'string'; vzoct).
+            if value.is_instance_of::<PyStringDtype>() {
+                return Ok(value.repr()?.to_string());
+            }
             let module = value.get_type().module()?.to_string();
             if module.starts_with("pandas") || module.starts_with("frankenpandas") {
                 return Ok(value.str()?.to_string());
@@ -21654,6 +21693,42 @@ fn normalize_series_cond(
     )))
 }
 
+/// pandas' FutureWarning when an inplace `where` / `mask` must change the
+/// Series' dtype to hold a scalar `other` (a bool Series gaining NaN, an int
+/// one gaining 0.5): 'Setting an item of incompatible dtype is deprecated'.
+/// NaN into an int column (float64) is exempt, as pandas' (vzoct).
+fn warn_inplace_upcast(
+    py: Python<'_>,
+    before: &Series,
+    after: &Series,
+    other: &SeriesOrScalar,
+) -> PyResult<()> {
+    let old = column_pandas_dtype_name(before.column());
+    if old == column_pandas_dtype_name(after.column()) {
+        return Ok(());
+    }
+    let SeriesOrScalar::Scalar(value) = other else {
+        return Ok(());
+    };
+    if value.is_missing() && before.column().dtype() == DType::Int64 {
+        return Ok(());
+    }
+    let shown = if value.is_missing() {
+        "nan".to_owned()
+    } else {
+        scalar_to_py(py, value)?.bind(py).str()?.to_string()
+    };
+    let message = format!(
+        "Setting an item of incompatible dtype is deprecated and will raise an error in a future version of pandas. Value '{shown}' has dtype incompatible with {old}, please explicitly cast to a compatible dtype first."
+    );
+    PyErr::warn(
+        py,
+        &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+        &std::ffi::CString::new(message)?,
+        1,
+    )
+}
+
 fn normalize_series_other(
     py: Python<'_>,
     inner: &Series,
@@ -25970,9 +26045,13 @@ impl PySeries {
         self.dot(py, other)
     }
 
+    // where / mask read the Series under a shared borrow and take the
+    // mutable one only to write in place: `s.where(s)` (cond, or other,
+    // the Series itself) raised RuntimeError 'Already mutably borrowed'
+    // (br-frankenpandas-vzoct).
     #[pyo3(signature = (cond, other=None, inplace=false, axis=None, level=None))]
     fn r#where(
-        &mut self,
+        slf: &Bound<'_, Self>,
         py: Python<'_>,
         cond: &Bound<'_, PyAny>,
         other: Option<&Bound<'_, PyAny>>,
@@ -25987,11 +26066,18 @@ impl PySeries {
                 "No axis named {ax} for object type Series"
             )));
         }
-        let cond_series = normalize_series_cond(py, &self.inner, cond)?;
-        let other_val = normalize_series_other(py, &self.inner, other)?;
-        let res_inner = execute_series_where(&self.inner, &cond_series, &other_val)?;
+        let res_inner = {
+            let this = slf.borrow();
+            let cond_series = normalize_series_cond(py, &this.inner, cond)?;
+            let other_val = normalize_series_other(py, &this.inner, other)?;
+            let result = execute_series_where(&this.inner, &cond_series, &other_val)?;
+            if inplace.unwrap_or(false) {
+                warn_inplace_upcast(py, &this.inner, &result, &other_val)?;
+            }
+            result
+        };
         if inplace.unwrap_or(false) {
-            self.inner = res_inner;
+            slf.borrow_mut().inner = res_inner;
             Ok(None)
         } else {
             Ok(Some(PySeries { inner: res_inner }))
@@ -26000,7 +26086,7 @@ impl PySeries {
 
     #[pyo3(signature = (cond, other=None, inplace=false, axis=None, level=None))]
     fn mask(
-        &mut self,
+        slf: &Bound<'_, Self>,
         py: Python<'_>,
         cond: &Bound<'_, PyAny>,
         other: Option<&Bound<'_, PyAny>>,
@@ -26015,12 +26101,19 @@ impl PySeries {
                 "No axis named {ax} for object type Series"
             )));
         }
-        let cond_series = normalize_series_cond(py, &self.inner, cond)?;
-        let not_cond_series = cond_series.not().map_err(frame_error_to_py)?;
-        let other_val = normalize_series_other(py, &self.inner, other)?;
-        let res_inner = execute_series_where(&self.inner, &not_cond_series, &other_val)?;
+        let res_inner = {
+            let this = slf.borrow();
+            let cond_series = normalize_series_cond(py, &this.inner, cond)?;
+            let not_cond_series = cond_series.not().map_err(frame_error_to_py)?;
+            let other_val = normalize_series_other(py, &this.inner, other)?;
+            let result = execute_series_where(&this.inner, &not_cond_series, &other_val)?;
+            if inplace.unwrap_or(false) {
+                warn_inplace_upcast(py, &this.inner, &result, &other_val)?;
+            }
+            result
+        };
         if inplace.unwrap_or(false) {
-            self.inner = res_inner;
+            slf.borrow_mut().inner = res_inner;
             Ok(None)
         } else {
             Ok(Some(PySeries { inner: res_inner }))
@@ -27223,11 +27316,46 @@ impl PySeries {
         axis: Option<usize>,
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PySeries> {
+    ) -> PyResult<Py<PyAny>> {
         if let Some(bad) = axis.filter(|&a| a != 0) {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "No axis named {bad} for object type Series"
             )));
+        }
+        // A list of functions: each one's transform, side by side under the
+        // function's name (its __name__, or the name given; pandas'
+        // transform_list_like - a list was called as a function;
+        // br-frankenpandas-vzoct).
+        if func.is_instance_of::<PyList>() || func.is_instance_of::<PyTuple>() {
+            if func.len()? == 0 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "No transform functions were provided",
+                ));
+            }
+            let this = Bound::new(py, self.clone())?;
+            let names = PyList::empty(py);
+            let pieces = PyList::empty(py);
+            for function in func.try_iter()? {
+                let function = function?;
+                let name = if function.hasattr("__name__")? {
+                    function.getattr("__name__")?
+                } else {
+                    function.clone()
+                };
+                names.append(name)?;
+                let call_args: Vec<Bound<'_, PyAny>> =
+                    std::iter::once(function).chain(args.iter()).collect();
+                let call_args = PyTuple::new(py, call_args)?;
+                pieces.append(this.call_method("transform", call_args, kwargs)?)?;
+            }
+            let concat_kwargs = PyDict::new(py);
+            concat_kwargs.set_item("axis", 1)?;
+            concat_kwargs.set_item("keys", names)?;
+            return Ok(py
+                .import("frankenpandas")?
+                .getattr("concat")?
+                .call((pieces,), Some(&concat_kwargs))?
+                .unbind());
         }
         // A name is that method, else numpy's function of it (pandas'
         // _apply_str; the name was called as a function: TypeError), and
@@ -27242,14 +27370,14 @@ impl PySeries {
             .map_err(transform_failure)?;
             return match result.extract::<PyRef<'_, PySeries>>() {
                 Ok(series) if series.inner.index().labels() == self.inner.index().labels() => {
-                    Ok(series.clone())
+                    Ok(Py::new(py, series.clone())?.into_any())
                 }
                 _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                     "Function did not transform",
                 )),
             };
         }
-        self.apply(py, func, true, Some(args), kwargs)
+        Ok(Py::new(py, self.apply(py, func, true, Some(args), kwargs)?)?.into_any())
     }
 
     /// A Series is its own transpose; the arguments are numpy's, which
@@ -30340,6 +30468,7 @@ impl PyDataFrame {
                 let mut col_map = BTreeMap::new();
                 let mut detected_order = Vec::new();
                 let mut detected_nrows: Option<usize> = None;
+                let mut scalar_columns: Vec<(String, Scalar)> = Vec::new();
 
                 // Check for any PySeries in dict to align indices
                 let mut series_indices: Vec<Index> = Vec::new();
@@ -30475,11 +30604,14 @@ impl PyDataFrame {
                         sequence_column(scalars).map_err(column_error_to_py)?
                     } else {
                         let scalar = py_to_cell(py, &value)?;
-                        let nr = common_labels
-                            .as_ref()
-                            .map(|l| l.len())
-                            .or(detected_nrows)
-                            .unwrap_or(1);
+                        // A scalar broadcasts to the length the other values
+                        // give, however they are ordered (a scalar before a
+                        // list made one row; br-frankenpandas-vzoct).
+                        let Some(nr) = common_labels.as_ref().map(Vec::len) else {
+                            detected_order.push(col_name.clone());
+                            scalar_columns.push((col_name, scalar));
+                            continue;
+                        };
                         Column::from_values(vec![scalar; nr]).map_err(|e| {
                             PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
                         })?
@@ -30487,6 +30619,19 @@ impl PyDataFrame {
 
                     detected_order.push(col_name.clone());
                     col_map.insert(col_name, col);
+                }
+                if !scalar_columns.is_empty() {
+                    let Some(nr) = detected_nrows else {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                            "If using all scalar values, you must pass an index",
+                        ));
+                    };
+                    for (col_name, scalar) in scalar_columns {
+                        let col = Column::from_values(vec![scalar; nr]).map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                        })?;
+                        col_map.insert(col_name, col);
+                    }
                 }
 
                 let column_order = explicit_cols.unwrap_or(detected_order);
@@ -40272,6 +40417,36 @@ impl PyDataFrame {
                 columns.set_item(column, transformed)?;
             }
             return py.get_type::<PyDataFrame>().call1((columns,));
+        }
+        // A list of functions transforms each column by every one, the
+        // pieces side by side under the column labels (pandas'
+        // transform_list_like: columns (a, sqrt), (a, exp), ...; it answered
+        // one column's; br-frankenpandas-vzoct).
+        if (func.is_instance_of::<PyList>() || func.is_instance_of::<PyTuple>())
+            && parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0) == 0
+        {
+            if func.len()? == 0 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "No transform functions were provided",
+                ));
+            }
+            let this = slf.as_any();
+            let labels = PyList::empty(py);
+            let pieces = PyList::empty(py);
+            for position in 0..slf.borrow().inner.num_columns() {
+                let column = this
+                    .getattr("iloc")?
+                    .get_item((pyo3::types::PySlice::full(py), position))?;
+                labels.append(column.getattr("name")?)?;
+                pieces.append(column.call_method("transform", (func,), kwargs)?)?;
+            }
+            let concat_kwargs = PyDict::new(py);
+            concat_kwargs.set_item("axis", 1)?;
+            concat_kwargs.set_item("keys", labels)?;
+            return py
+                .import("frankenpandas")?
+                .getattr("concat")?
+                .call((pieces,), Some(&concat_kwargs));
         }
         // A name is that method, else numpy's function of it, as the
         // Series' (apply looked it up as a frame attribute alone).
@@ -57664,12 +57839,16 @@ impl PyIntervalDtype {
         self.__repr__()
     }
 
+    /// pandas' IntervalDtype equality: another IntervalDtype alike, or its
+    /// name or full text in any case ('interval', 'interval[int64,
+    /// right]'; only 'interval' matched; q69jo).
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
         if let Ok(other_dt) = other.extract::<Self>() {
             return *self == other_dt;
         }
         if let Ok(s) = other.extract::<String>() {
-            return s == "interval";
+            let s = s.to_lowercase();
+            return s == "interval" || s == self.__repr__().to_lowercase();
         }
         false
     }

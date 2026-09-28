@@ -14320,3 +14320,108 @@ _EVERYDAY25_CASES = {
 def test_everyday25_like_pandas(case: str) -> None:
     run = _EVERYDAY25_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-q69jo: an interval column's dtype was the text
+# 'interval'; pandas' IntervalDtype prints its subtype and closed side
+# (interval[int64, right]) and still equals 'interval'.
+_INTERVAL_DTYPE_CASES = {
+    "int intervals": lambda m: [str(m.Series(m.interval_range(0, 2)).dtype)],
+    "float intervals": lambda m: [str(m.Series(m.interval_range(0.0, 1.0, periods=2)).dtype)],
+    "closed left": lambda m: [str(m.Series(m.interval_range(0, 2, closed="left")).dtype)],
+    "closed both": lambda m: [str(m.Series(m.interval_range(0, 2, closed="both")).dtype)],
+    "a missing value makes it float": lambda m: [str(m.Series([m.Interval(0, 1), None]).dtype)],
+    "int beside float is float": lambda m: [str(m.Series([m.Interval(0, 1), m.Interval(0.5, 2.5)]).dtype)],
+    "frame dtypes": lambda m: [m.DataFrame({"i": m.interval_range(0, 2)}).dtypes.to_string()],
+    "arrays": lambda m: [m.array([m.Interval(0, 1)]), m.array([m.Interval(0.5, 1.5), None])],
+    "compares with its name and text": lambda m: [
+        m.Series(m.interval_range(0, 2)).dtype == "interval",
+        m.Series(m.interval_range(0, 2)).dtype == "interval[int64, right]",
+        m.Series(m.interval_range(0, 2)).dtype == "Interval[int64, right]",
+        m.Series(m.interval_range(0, 2)).dtype.name,
+    ],
+    # NEGATIVES: a Series repr prints the dtype's name (interval); a wrong
+    # subtype or side compares unequal; cut's result is categorical.
+    "Series repr footer": lambda m: [repr(m.Series(m.interval_range(0, 2)))],
+    "cut": lambda m: [str(m.Series(m.cut([1, 5, 9], bins=[0, 3, 6, 10])).dtype)],
+    "other subtype unequal": lambda m: [
+        m.Series(m.interval_range(0, 2)).dtype == "interval[float64, right]",
+        m.Series(m.interval_range(0, 2)).dtype == "interval[int64, left]",
+    ],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_INTERVAL_DTYPE_CASES))
+def test_interval_dtype_like_pandas(case: str) -> None:
+    run = _INTERVAL_DTYPE_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-vzoct (everyday probe 26): a scalar in a dict built one
+# row when it came before a list; transform with a list of functions lost
+# the column level (a Series' called the list); where on an int column kept
+# int64 beside NaN, and s.where(s) raised 'Already mutably borrowed'; a
+# StringDtype printed 'string' in df.dtypes.
+def _e26_shown(frame: Any) -> list:
+    return frame.to_string().split("\n") + [str(t) for t in frame.dtypes]
+
+
+def _e26_ints(m: Any) -> Any:
+    return m.DataFrame({"a": [1, 2, 3], "b": [4.0, 5.0, 6.0]}, index=["r1", "r2", "r3"])
+
+
+def _e26_mask_itself_inplace(m: Any) -> list:
+    s = m.Series([True, False, True])
+    returned = s.mask(s, inplace=True)
+    return [returned, s.tolist()]
+
+
+def _e26_where_itself(m: Any) -> list:
+    s = m.Series([True, False, True])
+    return s.where(s).tolist()
+
+
+def _e26_where_inplace(m: Any, values: list, other: Any) -> list:
+    s = m.Series(values)
+    if other is None:
+        s.where(s > 1, inplace=True)
+    else:
+        s.where(s > 1, other, inplace=True)
+    return [s.tolist(), str(s.dtype)]
+
+
+_EVERYDAY26_CASES = {
+    "dict scalar before a list": lambda m: _e26_shown(m.DataFrame({"a": 1, "b": [1, 2]})),
+    "dict of scalars without an index raises": lambda m: [m.DataFrame({"a": 1, "b": 2})],
+    "frame transform callables warns nothing": lambda m: _e26_shown(
+        _e26_ints(m).transform([np.sqrt, lambda x: x + 1])
+    ),
+    "series transform list": lambda m: _e26_shown(m.Series([1.0, 4.0]).transform(["sqrt", "exp"])),
+    "series transform callables": lambda m: [list(m.Series([1.0, 4.0]).transform([np.sqrt, lambda x: x + 1]).columns)],
+    "transform empty list raises": lambda m: [m.Series([1.0]).transform([])],
+    "frame where int column": lambda m: _e26_shown(_e26_ints(m).where(_e26_ints(m) > 2)),
+    "frame mask int column": lambda m: _e26_shown(_e26_ints(m).mask(_e26_ints(m) > 2)),
+    "series where itself": lambda m: _e26_where_itself(m),
+    "series mask itself inplace": lambda m: _e26_mask_itself_inplace(m),
+    "inplace where upcasting an int warns": lambda m: _e26_where_inplace(m, [1, 2, 3], 0.5),
+    "string dtype in dtypes": lambda m: [m.DataFrame({"c": m.Series(["a"], dtype="string")}).dtypes.to_string()],
+    # NEGATIVES: a scalar after a list, scalars with an index, a frame
+    # transform list of names, one transform function; where keeping a float
+    # column float and an int other int; str() of the string dtype.
+    "dict scalar after a list": lambda m: _e26_shown(m.DataFrame({"b": [1, 2], "a": "x"})),
+    "dict of scalars with an index": lambda m: _e26_shown(m.DataFrame({"a": 1, "b": 2.5}, index=[0, 1])),
+    "frame transform list of names": lambda m: _e26_shown(_e26_ints(m).transform(["sqrt", "exp"])),
+    "transform one function": lambda m: _e26_shown(_e26_ints(m).transform("sqrt")),
+    "frame where int other": lambda m: _e26_shown(_e26_ints(m).where(_e26_ints(m) > 2, -1)),
+    "str of the string dtype": lambda m: [str(m.StringDtype())],
+    "inplace where NaN into an int is silent": lambda m: _e26_where_inplace(m, [1, 2, 3], None),
+    "inplace where NaN into a float is silent": lambda m: _e26_where_inplace(m, [1.0, 2.0], None),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EVERYDAY26_CASES))
+def test_everyday26_like_pandas(case: str) -> None:
+    run = _EVERYDAY26_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

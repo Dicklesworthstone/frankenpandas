@@ -9703,7 +9703,7 @@ impl Series {
     /// `result` with its column in this Series' nullable dtype, as
     /// [`nullable_kept`] (`where`, `mask`).
     fn keep_nullable(&self, result: Self) -> Result<Self, FrameError> {
-        let column = nullable_kept(&self.column, result.column.clone());
+        let column = nullable_kept(&self.column, result.column.clone())?;
         Self::new(result.name.clone(), result.index.clone(), column)
     }
 
@@ -64300,13 +64300,26 @@ fn concat_nullable_dtype(frames: &[&DataFrame], col_name: &str) -> Option<DType>
 /// `source` is nullable and `result` holds the same kind of values: pandas'
 /// masked arrays keep their dtype through a selection or a fill (`where`,
 /// `mask`), where rebuilding from values made a nullable Int64 a plain int64
-/// holding the NA (4qg5w.11). Anything else is `result`.
-fn nullable_kept(source: &Column, result: Column) -> Column {
+/// holding the NA (4qg5w.11). A plain int64 column that held no missing value
+/// and gained one is float64, as numpy's int64 holds no NaN, and so is an
+/// all-missing `result` of such an int or of a float `source` (df.where over
+/// an int column reported int64 beside NaN, an all-NaN float column object;
+/// br-frankenpandas-vzoct). An int64 source that already held a missing
+/// value keeps its dtype, so where(cond, self) stays the identity. Anything
+/// else is `result`.
+fn nullable_kept(source: &Column, result: Column) -> Result<Column, FrameError> {
     let dtype = source.dtype();
+    let numpy_int_gained_missing = dtype == DType::Int64 && !source.has_any_missing();
     if dtype.is_nullable() && result.dtype() == dtype.to_non_nullable() {
-        result.with_dtype(dtype)
+        Ok(result.with_dtype(dtype))
+    } else if (result.dtype() == DType::Int64
+        && result.has_any_missing()
+        && numpy_int_gained_missing)
+        || (result.dtype() == DType::Null && (numpy_int_gained_missing || dtype == DType::Float64))
+    {
+        Ok(result.astype(DType::Float64)?)
     } else {
-        result
+        Ok(result)
     }
 }
 
@@ -80643,7 +80656,7 @@ impl DataFrame {
 
             new_columns.insert(
                 col_name.clone(),
-                nullable_kept(data_col, Column::from_values(values)?),
+                nullable_kept(data_col, Column::from_values(values)?)?,
             );
         }
 
@@ -80707,7 +80720,7 @@ impl DataFrame {
 
             new_columns.insert(
                 col_name.clone(),
-                nullable_kept(data_col, Column::from_values(values)?),
+                nullable_kept(data_col, Column::from_values(values)?)?,
             );
         }
 
@@ -80879,7 +80892,7 @@ impl DataFrame {
 
             new_columns.insert(
                 col_name.clone(),
-                nullable_kept(data_col, Column::from_values(values)?),
+                nullable_kept(data_col, Column::from_values(values)?)?,
             );
         }
 
@@ -81045,7 +81058,7 @@ impl DataFrame {
 
             new_columns.insert(
                 col_name.clone(),
-                nullable_kept(data_col, Column::from_values(values)?),
+                nullable_kept(data_col, Column::from_values(values)?)?,
             );
         }
 
@@ -130759,10 +130772,46 @@ mod tests {
         .unwrap();
 
         let result = df.where_cond(&cond, None).unwrap();
-        assert_eq!(result.column("a").unwrap().values()[0], Scalar::Int64(1));
+        // numpy's int64 holds no NaN: pandas makes both columns float64
+        // (they stayed int64 beside the NaN; vzoct).
+        assert_eq!(result.column("a").unwrap().dtype(), DType::Float64);
+        assert_eq!(
+            result.column("a").unwrap().values()[0],
+            Scalar::Float64(1.0)
+        );
         assert!(result.column("a").unwrap().values()[1].is_missing());
         assert!(result.column("b").unwrap().values()[0].is_missing());
-        assert_eq!(result.column("b").unwrap().values()[1], Scalar::Int64(4));
+        assert_eq!(
+            result.column("b").unwrap().values()[1],
+            Scalar::Float64(4.0)
+        );
+
+        // NEGATIVE: an int `other` fills without a NaN, and int64 stays.
+        let filled = df.where_cond(&cond, Some(&Scalar::Int64(0))).unwrap();
+        assert_eq!(filled.column("a").unwrap().dtype(), DType::Int64);
+
+        // mask leaving a float column all NaN keeps it float64 (it was
+        // inferred object).
+        let floats = DataFrame::from_dict(
+            &["f"],
+            vec![("f", vec![Scalar::Float64(4.0), Scalar::Float64(5.0)])],
+        )
+        .unwrap();
+        let everywhere = DataFrame::from_dict(
+            &["f"],
+            vec![("f", vec![Scalar::Bool(true), Scalar::Bool(true)])],
+        )
+        .unwrap();
+        let masked = floats.mask(&everywhere, None).unwrap();
+        assert_eq!(masked.column("f").unwrap().dtype(), DType::Float64);
+        assert!(
+            masked
+                .column("f")
+                .unwrap()
+                .values()
+                .iter()
+                .all(Scalar::is_missing)
+        );
     }
 
     #[test]
@@ -130785,7 +130834,11 @@ mod tests {
         let result = df.where_cond(&cond, None).unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result.index().labels(), df.index().labels());
-        assert_eq!(result.column("a").unwrap().values()[0], Scalar::Int64(1));
+        // float64 beside the NaN, as pandas' (vzoct).
+        assert_eq!(
+            result.column("a").unwrap().values()[0],
+            Scalar::Float64(1.0)
+        );
         assert!(result.column("a").unwrap().values()[1].is_missing());
     }
 
