@@ -5078,23 +5078,103 @@ pub fn tz_utc_to_wall_nanos(tz: &str, utc_nanos: i64) -> Result<i64, TimeZoneErr
 /// change skips is [`TimeZoneError::NonExistent`], one it repeats
 /// [`TimeZoneError::Ambiguous`]. NaT (`i64::MIN`) stays NaT.
 pub fn tz_wall_to_utc_nanos(tz: &str, wall_nanos: i64) -> Result<i64, TimeZoneError> {
+    tz_wall_to_utc_nanos_with(tz, wall_nanos, AmbiguousTime::Raise, NonexistentTime::Raise)
+}
+
+/// What `tz_localize` does with a wall time a DST change repeats (pandas'
+/// `ambiguous=`, for one value): refuse it, take its first occurrence (DST,
+/// pandas' `True`) or its second (standard time, `False`), or make it NaT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AmbiguousTime {
+    Raise,
+    Earliest,
+    Latest,
+    NaT,
+}
+
+/// What `tz_localize` does with a wall time a DST change skips (pandas'
+/// `nonexistent=`): refuse it, move it to the first instant after the gap
+/// (`shift_forward`) or the last nanosecond before it (`shift_backward`),
+/// make it NaT, or move the wall time by a duration (nanoseconds) and
+/// localize that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonexistentTime {
+    Raise,
+    ShiftForward,
+    ShiftBackward,
+    NaT,
+    Shift(i64),
+}
+
+/// [`tz_wall_to_utc_nanos`] under pandas' `ambiguous` / `nonexistent`
+/// policies; NaT (`i64::MIN`) where a policy says NaT.
+pub fn tz_wall_to_utc_nanos_with(
+    tz: &str,
+    wall_nanos: i64,
+    ambiguous: AmbiguousTime,
+    nonexistent: NonexistentTime,
+) -> Result<i64, TimeZoneError> {
     use chrono::{LocalResult, TimeZone};
     if wall_nanos == i64::MIN {
         return Ok(wall_nanos);
     }
+    let zone = Zone::parse(tz)?;
     let naive = chrono::DateTime::from_timestamp_nanos(wall_nanos).naive_utc();
-    let local = match Zone::parse(tz)? {
+    let local = match &zone {
         Zone::Fixed(offset) => offset
             .from_local_datetime(&naive)
             .map(|at| at.fixed_offset()),
         Zone::Named(zone) => zone.from_local_datetime(&naive).map(|at| at.fixed_offset()),
     };
+    let nanos_of = |at: chrono::DateTime<chrono::FixedOffset>| {
+        at.timestamp_nanos_opt()
+            .ok_or_else(|| TimeZoneError::NonExistent(naive.to_string()))
+    };
     match local {
-        LocalResult::Single(at) => at
-            .timestamp_nanos_opt()
-            .ok_or_else(|| TimeZoneError::NonExistent(naive.to_string())),
-        LocalResult::None => Err(TimeZoneError::NonExistent(naive.to_string())),
-        LocalResult::Ambiguous(..) => Err(TimeZoneError::Ambiguous(naive.to_string())),
+        LocalResult::Single(at) => nanos_of(at),
+        LocalResult::Ambiguous(earliest, latest) => match ambiguous {
+            AmbiguousTime::Raise => Err(TimeZoneError::Ambiguous(naive.to_string())),
+            AmbiguousTime::Earliest => nanos_of(earliest),
+            AmbiguousTime::Latest => nanos_of(latest),
+            AmbiguousTime::NaT => Ok(i64::MIN),
+        },
+        LocalResult::None => match nonexistent {
+            NonexistentTime::Raise => Err(TimeZoneError::NonExistent(naive.to_string())),
+            NonexistentTime::NaT => Ok(i64::MIN),
+            NonexistentTime::Shift(delta) => {
+                let shifted = wall_nanos
+                    .checked_add(delta)
+                    .ok_or_else(|| TimeZoneError::NonExistent(naive.to_string()))?;
+                tz_wall_to_utc_nanos_with(tz, shifted, ambiguous, NonexistentTime::Raise)
+            }
+            NonexistentTime::ShiftForward | NonexistentTime::ShiftBackward => {
+                // The gap's UTC transition: the wall time read with the
+                // offset in force before the change lands after it, read
+                // with the offset after the change lands before it; the
+                // first instant between them carrying the later offset is
+                // the transition (exact to the nanosecond - pandas'
+                // shift_backward is one nanosecond before it).
+                const DAY: i64 = 86_400_000_000_000;
+                let offset_at = |utc: i64| i64::from(zone.offset_seconds(utc)) * 1_000_000_000;
+                let before = wall_nanos.saturating_sub(offset_at(wall_nanos.saturating_sub(DAY)));
+                let after = wall_nanos.saturating_sub(offset_at(wall_nanos.saturating_add(DAY)));
+                let (mut low, mut high) = (before.min(after), before.max(after));
+                let later = offset_at(high);
+                while high - low > 1 {
+                    let middle = low + (high - low) / 2;
+                    if offset_at(middle) == later {
+                        high = middle;
+                    } else {
+                        low = middle;
+                    }
+                }
+                Ok(if nonexistent == NonexistentTime::ShiftForward {
+                    high
+                } else {
+                    high - 1
+                })
+            }
+        },
     }
 }
 
@@ -18079,6 +18159,57 @@ mod tests {
             Ok("EST")
         );
         assert_eq!(tz_abbreviation("+05:30", 0).as_deref(), Ok("UTC+05:30"));
+    }
+
+    /// pandas' `tz_localize(ambiguous=, nonexistent=)` for one wall time
+    /// (br-frankenpandas-84w06), live pandas 2.2.3 in America/New_York:
+    /// 02:30 on 2024-03-10 does not exist - shift_forward 03:00-04:00 (07:00
+    /// UTC), shift_backward 01:59:59.999999999-05:00, NaT, or +1h 03:30-04:00;
+    /// 01:30 on 2024-11-03 happens twice - True (DST) 05:30 UTC, False
+    /// (standard) 06:30 UTC, NaT.
+    #[test]
+    fn tz_localize_policies_follow_pandas_84w06() {
+        use super::{
+            AmbiguousTime as A, NonexistentTime as N, TimeZoneError,
+            tz_wall_to_utc_nanos_with as at,
+        };
+        let hour = 3_600_000_000_000_i64;
+        let minute = 60_000_000_000_i64;
+        let skipped = 19_792 * 24 * hour + 2 * hour + 30 * minute;
+        let transition = 19_792 * 24 * hour + 7 * hour;
+        let zone = "America/New_York";
+        assert_eq!(at(zone, skipped, A::Raise, N::ShiftForward), Ok(transition));
+        assert_eq!(
+            at(zone, skipped, A::Raise, N::ShiftBackward),
+            Ok(transition - 1)
+        );
+        assert_eq!(at(zone, skipped, A::Raise, N::NaT), Ok(i64::MIN));
+        assert_eq!(
+            at(zone, skipped, A::Raise, N::Shift(hour)),
+            Ok(transition + 30 * minute)
+        );
+        let repeated = 20_030 * 24 * hour + hour + 30 * minute;
+        assert_eq!(
+            at(zone, repeated, A::Earliest, N::Raise),
+            Ok(repeated + 4 * hour)
+        );
+        assert_eq!(
+            at(zone, repeated, A::Latest, N::Raise),
+            Ok(repeated + 5 * hour)
+        );
+        assert_eq!(at(zone, repeated, A::NaT, N::Raise), Ok(i64::MIN));
+        // NEGATIVES: the policies leave a wall time that exists once alone,
+        // and 'raise' still refuses as before.
+        let noon = 19_723 * 24 * hour + 12 * hour;
+        assert_eq!(at(zone, noon, A::NaT, N::NaT), Ok(noon + 5 * hour));
+        assert_eq!(
+            at(zone, skipped, A::NaT, N::Raise),
+            Err(TimeZoneError::NonExistent("2024-03-10 02:30:00".to_owned()))
+        );
+        assert_eq!(
+            at(zone, repeated, A::Raise, N::NaT),
+            Err(TimeZoneError::Ambiguous("2024-11-03 01:30:00".to_owned()))
+        );
     }
 
     #[test]

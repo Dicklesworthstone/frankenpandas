@@ -3699,6 +3699,133 @@ fn tz_error_to_py(py: Python<'_>, err: fp_types::TimeZoneError) -> PyErr {
     }
 }
 
+/// pandas' `tz_localize(ambiguous=, nonexistent=)` arguments as fp-frame's
+/// options (they were refused unless 'raise'; br-frankenpandas-84w06):
+/// `ambiguous` a bool (True: the DST occurrence), 'NaT', 'infer' or an
+/// array of bools, one per value - any other string reads as 'raise', as
+/// pandas'; `nonexistent` 'raise', 'NaT', 'shift_forward',
+/// 'shift_backward' or a timedelta.
+fn tz_localize_options(
+    ambiguous: Option<&Bound<'_, PyAny>>,
+    nonexistent: Option<&Bound<'_, PyAny>>,
+) -> PyResult<fp_frame::TzLocalizeOptions> {
+    use fp_frame::{TzAmbiguousPolicy, TzNonexistentPolicy};
+    let ambiguous = match ambiguous.filter(|value| !value.is_none()) {
+        None => TzAmbiguousPolicy::Raise,
+        Some(value) if value.is_instance_of::<pyo3::types::PyBool>() => {
+            TzAmbiguousPolicy::from_bool(value.is_truthy()?)
+        }
+        Some(value) => match value.extract::<String>() {
+            Ok(text) if text == "NaT" => TzAmbiguousPolicy::NaT,
+            Ok(text) if text == "infer" => TzAmbiguousPolicy::Infer,
+            Ok(_) => TzAmbiguousPolicy::Raise,
+            Err(_) => TzAmbiguousPolicy::Mask(
+                value
+                    .try_iter()?
+                    .map(|item| item?.is_truthy())
+                    .collect::<PyResult<Vec<_>>>()?,
+            ),
+        },
+    };
+    let nonexistent = match nonexistent.filter(|value| !value.is_none()) {
+        None => TzNonexistentPolicy::Raise,
+        Some(value) => match value.extract::<String>().ok().as_deref() {
+            Some("raise") => TzNonexistentPolicy::Raise,
+            Some("NaT") => TzNonexistentPolicy::NaT,
+            Some("shift_forward") => TzNonexistentPolicy::ShiftForward,
+            Some("shift_backward") => TzNonexistentPolicy::ShiftBackward,
+            _ => match duration_operand(value)? {
+                Some(nanos) if nanos != Timedelta::NAT => {
+                    TzNonexistentPolicy::shift_by_nanos(nanos)
+                }
+                _ => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "The nonexistent argument must be one of 'raise', 'NaT', 'shift_forward', 'shift_backward' or a timedelta object",
+                    ));
+                }
+            },
+        },
+    };
+    Ok(fp_frame::TzLocalizeOptions {
+        ambiguous,
+        nonexistent,
+    })
+}
+
+/// pandas' refusal of an `ambiguous` bool array whose length is not the
+/// values' `len`.
+fn check_ambiguous_mask(options: &fp_frame::TzLocalizeOptions, len: usize) -> PyResult<()> {
+    match &options.ambiguous {
+        fp_frame::TzAmbiguousPolicy::Mask(mask) if mask.len() != len => {
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Length of ambiguous bool-array must be the same size as vals",
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// `values` (naive wall-clock nanoseconds, NaT `i64::MIN`) localized to
+/// `zone` under `options` through fp-frame's Series path - the one that
+/// reads `ambiguous='infer'` and per-value arrays - as UTC nanoseconds.
+fn localized_nanos(
+    values: &[i64],
+    zone: &str,
+    options: fp_frame::TzLocalizeOptions,
+) -> PyResult<Vec<i64>> {
+    check_ambiguous_mask(&options, values.len())?;
+    let column = Column::new(
+        DType::datetime64_naive(),
+        values
+            .iter()
+            .map(|&nanos| Scalar::Datetime64(nanos))
+            .collect(),
+    )
+    .map_err(column_error_to_py)?;
+    let positions = Index::new_known_unique_int64_unit_range(0, values.len());
+    let series = Series::new("", positions, column).map_err(frame_error_to_py)?;
+    let localized = series
+        .dt()
+        .tz_localize_with_options(Some(zone), options)
+        .map_err(frame_error_to_py)?;
+    Ok(localized
+        .values()
+        .iter()
+        .map(|value| match value {
+            Scalar::Datetime64(nanos) => *nanos,
+            _ => i64::MIN,
+        })
+        .collect())
+}
+
+/// `dti.tz_localize(zone, ambiguous=, nonexistent=)`: fp-index's path for
+/// pandas' 'raise' defaults (and for dropping or refusing a zone), else the
+/// wall times localized under `options` (see [`localized_nanos`]), the name
+/// kept.
+fn localize_datetime_index(
+    dti: &DatetimeIndex,
+    zone: Option<&str>,
+    options: fp_frame::TzLocalizeOptions,
+) -> PyResult<DatetimeIndex> {
+    let Some(zone) = zone.filter(|_| {
+        options != fp_frame::TzLocalizeOptions::default() && dti.as_index().tz().is_none()
+    }) else {
+        return dti.tz_localize(zone).map_err(index_error_to_py);
+    };
+    let wall: Vec<i64> = dti
+        .values()
+        .into_iter()
+        .map(|nanos| nanos.unwrap_or(i64::MIN))
+        .collect();
+    let utc = localized_nanos(&wall, zone, options)?;
+    let index = DatetimeIndex::new(utc)
+        .into_index()
+        .with_tz(Some(zone))
+        .map_err(index_error_to_py)?
+        .rename_index(dti.name().cloned());
+    DatetimeIndex::from_index(index).map_err(index_error_to_py)
+}
+
 /// The tzinfo pandas 2.2 gives a zone: `datetime.timezone.utc` for UTC, a
 /// fixed `datetime.timezone` for an offset, else pytz's zone (zoneinfo's
 /// when pytz is absent).
@@ -3885,6 +4012,21 @@ impl PyTimestamp {
     /// placed in `tz` (a wall time a DST change repeats or skips is an
     /// error), or a tz-aware one's wall clock kept without its zone (None).
     fn localized(&self, tz: Option<&str>) -> PyResult<Self> {
+        self.localized_with(
+            tz,
+            fp_types::AmbiguousTime::Raise,
+            fp_types::NonexistentTime::Raise,
+        )
+    }
+
+    /// [`Self::localized`] under pandas' `ambiguous` / `nonexistent`
+    /// policies for one value (a policy's NaT is a NaT Timestamp).
+    fn localized_with(
+        &self,
+        tz: Option<&str>,
+        ambiguous: fp_types::AmbiguousTime,
+        nonexistent: fp_types::NonexistentTime,
+    ) -> PyResult<Self> {
         match (tz, &self.inner.tz) {
             (Some(_), Some(_)) => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "Cannot localize tz-aware Timestamp, use tz_convert for conversions",
@@ -3897,8 +4039,19 @@ impl PyTimestamp {
                 if self.inner.is_nat() {
                     return Ok(self.clone());
                 }
-                let nanos = fp_types::tz_wall_to_utc_nanos(zone, self.inner.nanos)
-                    .map_err(|err| Python::attach(|py| tz_error_to_py(py, err)))?;
+                let nanos = fp_types::tz_wall_to_utc_nanos_with(
+                    zone,
+                    self.inner.nanos,
+                    ambiguous,
+                    nonexistent,
+                )
+                .map_err(|err| Python::attach(|py| tz_error_to_py(py, err)))?;
+                if nanos == i64::MIN {
+                    return Ok(Self {
+                        inner: Timestamp::nat(),
+                        unit: self.unit,
+                    });
+                }
                 Ok(Self {
                     inner: Timestamp {
                         nanos,
@@ -4556,23 +4709,57 @@ impl PyTimestamp {
     }
 
     /// pandas' `Timestamp.tz_localize(tz, ambiguous='raise',
-    /// nonexistent='raise')` (it was missing): see [`Self::localized`].
-    #[pyo3(signature = (tz, ambiguous="raise", nonexistent="raise"))]
+    /// nonexistent='raise')` (it was missing): see [`Self::localized`]. The
+    /// policies are pandas' for one value (see [`tz_localize_options`]; only
+    /// 'raise' was supported); 'infer' and arrays are its ValueError, and a
+    /// policy's NaT is pandas' NaT.
+    #[pyo3(signature = (tz, ambiguous=None, nonexistent=None))]
     fn tz_localize(
         &self,
+        py: Python<'_>,
         tz: Option<&Bound<'_, PyAny>>,
-        ambiguous: &str,
-        nonexistent: &str,
-    ) -> PyResult<Self> {
-        unsupported_params(
-            "Timestamp.tz_localize",
-            &[
-                ("ambiguous", ambiguous == "raise"),
-                ("nonexistent", nonexistent == "raise"),
-            ],
-        )?;
+        ambiguous: Option<&Bound<'_, PyAny>>,
+        nonexistent: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        use fp_frame::{TzAmbiguousPolicy, TzNonexistentPolicy};
+        use fp_types::{AmbiguousTime, NonexistentTime};
+        let options = tz_localize_options(ambiguous, nonexistent)?;
+        let ambiguous = match options.ambiguous {
+            TzAmbiguousPolicy::Raise => AmbiguousTime::Raise,
+            TzAmbiguousPolicy::Earliest => AmbiguousTime::Earliest,
+            TzAmbiguousPolicy::Latest => AmbiguousTime::Latest,
+            TzAmbiguousPolicy::NaT => AmbiguousTime::NaT,
+            TzAmbiguousPolicy::Infer | TzAmbiguousPolicy::Mask(_) => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "'ambiguous' parameter must be one of: True, False, 'NaT', 'raise' (default)",
+                ));
+            }
+        };
+        let nonexistent = match options.nonexistent {
+            TzNonexistentPolicy::Raise => NonexistentTime::Raise,
+            TzNonexistentPolicy::NaT => NonexistentTime::NaT,
+            TzNonexistentPolicy::ShiftForward => NonexistentTime::ShiftForward,
+            TzNonexistentPolicy::ShiftBackward => NonexistentTime::ShiftBackward,
+            TzNonexistentPolicy::ShiftBy(shift) => {
+                NonexistentTime::Shift(shift.num_nanoseconds().unwrap_or(i64::MAX))
+            }
+        };
         let zone = tz.filter(|tz| !tz.is_none()).map(tz_name).transpose()?;
-        self.localized(zone.as_deref())
+        let mut localized = self.localized_with(zone.as_deref(), ambiguous, nonexistent)?;
+        if localized.inner.is_nat() && !self.inner.is_nat() {
+            return nat_object(py);
+        }
+        // pandas' shift_backward steps ONE OF THE TIMESTAMP'S OWN UNITS back
+        // from the gap - a second for Timestamp('2024-03-10 02:30'), where a
+        // datetime64[ns] array steps a nanosecond.
+        if nonexistent == NonexistentTime::ShiftBackward && !localized.inner.is_nat() {
+            let forward =
+                self.localized_with(zone.as_deref(), ambiguous, NonexistentTime::ShiftForward)?;
+            if forward.inner.nanos == localized.inner.nanos + 1 {
+                localized.inner.nanos = forward.inner.nanos - self.unit.nanos();
+            }
+        }
+        localized.into_py_any(py)
     }
 
     /// pandas' `Timestamp.tz_convert(tz)` (it was missing): see
@@ -7284,6 +7471,22 @@ fn row_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
         return Ok(Py::new(py, PyRangeIndex::initializer(index.clone()))?.into_any());
     }
     flat_index_to_py(py, index)
+}
+
+/// `iter(index)`: its elements as `index[i]` gives them. The Datetime /
+/// Timedelta / Period / Interval / Categorical / MultiIndex classes had no
+/// `__iter__` - `for` reached them through the `__getitem__` fallback - so
+/// they were not `collections.abc.Iterable`, as pandas' are
+/// (br-frankenpandas-84w06).
+fn iter_by_position(index: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    let items = (0..index.len()?)
+        .map(|position| index.get_item(position))
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(PyList::new(index.py(), items)?
+        .as_any()
+        .try_iter()?
+        .into_any()
+        .unbind())
 }
 
 /// A flat index as pandas' class for its labels: instants and durations
@@ -10187,6 +10390,10 @@ impl PyDatetimeIndex {
         self.inner.len()
     }
 
+    fn __iter__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        iter_by_position(slf.as_any())
+    }
+
     #[getter]
     fn is_monotonic_increasing(&self) -> bool {
         self.inner.is_monotonic_increasing()
@@ -11647,8 +11854,9 @@ impl PyDatetimeIndex {
     /// pandas' `tz_localize(tz)`: naive wall times placed in `tz` (a wall
     /// time a DST change skips or repeats raises pytz's error, pandas'
     /// default), or an aware index's wall clock without its zone (None);
-    /// localizing an aware index is pandas' TypeError. Only the default
-    /// `ambiguous` / `nonexistent='raise'` is supported.
+    /// localizing an aware index is pandas' TypeError. `ambiguous` /
+    /// `nonexistent` take pandas' policies (see [`tz_localize_options`];
+    /// only 'raise' was supported).
     #[pyo3(signature = (tz, ambiguous=None, nonexistent=None))]
     fn tz_localize(
         &self,
@@ -11656,24 +11864,10 @@ impl PyDatetimeIndex {
         ambiguous: Option<&Bound<'_, PyAny>>,
         nonexistent: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        let is_raise = |arg: Option<&Bound<'_, PyAny>>| {
-            arg.is_none_or(|arg| {
-                arg.is_none() || arg.extract::<String>().is_ok_and(|v| v == "raise")
-            })
-        };
-        unsupported_params(
-            "DatetimeIndex.tz_localize",
-            &[
-                ("ambiguous", is_raise(ambiguous)),
-                ("nonexistent", is_raise(nonexistent)),
-            ],
-        )?;
+        let options = tz_localize_options(ambiguous, nonexistent)?;
         let zone = tz.filter(|tz| !tz.is_none()).map(tz_name).transpose()?;
         Ok(Self {
-            inner: self
-                .inner
-                .tz_localize(zone.as_deref())
-                .map_err(index_error_to_py)?,
+            inner: localize_datetime_index(&self.inner, zone.as_deref(), options)?,
         })
     }
 
@@ -11992,6 +12186,10 @@ impl PyMultiIndex {
 
     fn __len__(&self) -> usize {
         self.inner.len()
+    }
+
+    fn __iter__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        iter_by_position(slf.as_any())
     }
 
     #[getter]
@@ -13715,6 +13913,10 @@ impl PyTimedeltaIndex {
         self.inner.len()
     }
 
+    fn __iter__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        iter_by_position(slf.as_any())
+    }
+
     /// pandas' TimedeltaIndex repr: '1 days' when every duration is whole
     /// days, else '1 days 00:00:00' for all, quoted, NaT bare, wrapped /
     /// truncated as Index's (it printed a Rust debug list of nanoseconds),
@@ -15141,6 +15343,10 @@ impl PyPeriodIndex {
         self.inner.len()
     }
 
+    fn __iter__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        iter_by_position(slf.as_any())
+    }
+
     /// pandas' repr: the periods quoted as its Index summary lists them (NaT
     /// too: 'NaT'), then dtype and name. It printed only the length and
     /// dtype.
@@ -16186,6 +16392,10 @@ impl PyCategoricalIndex {
         self.inner.len()
     }
 
+    fn __iter__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        iter_by_position(slf.as_any())
+    }
+
     /// pandas' repr: the labels quoted, then `categories=` (past
     /// display.max_categories 8, the first and last 4 around `...`),
     /// `ordered=`, the dtype and the name (it printed Rust's `["a"]` and
@@ -17116,6 +17326,11 @@ fn index_error_to_py(err: fp_index::IndexError) -> PyErr {
 }
 
 fn frame_error_to_py(err: fp_frame::FrameError) -> PyErr {
+    // A time-zone failure is pytz's class, as pandas raises it (a DST-skipped
+    // or repeated wall time was a ValueError; br-frankenpandas-84w06).
+    if let fp_frame::FrameError::Index(fp_index::IndexError::TimeZone(tz)) = &err {
+        return Python::attach(|py| tz_error_to_py(py, tz.clone()));
+    }
     let (kind, msg) = classify_frame_error(&err);
     match kind {
         PyErrorKind::Index => PyErr::new::<pyo3::exceptions::PyIndexError, _>(msg),
@@ -26710,22 +26925,20 @@ impl PySeries {
     }
 
     /// pandas' `Series.tz_localize`: the DatetimeIndex's wall times placed in
-    /// `tz` (it raised NotImplementedError for any zone).
-    #[pyo3(signature = (tz, axis=0, level=None, copy=None, ambiguous="raise", nonexistent="raise"))]
+    /// `tz` (it raised NotImplementedError for any zone), under pandas'
+    /// `ambiguous` / `nonexistent` policies.
+    #[pyo3(signature = (tz, axis=0, level=None, copy=None, ambiguous=None, nonexistent=None))]
     fn tz_localize(
         &self,
         tz: Option<&Bound<'_, PyAny>>,
         axis: Option<usize>,
         level: Option<usize>,
         copy: Option<bool>,
-        ambiguous: Option<&str>,
-        nonexistent: Option<&str>,
+        ambiguous: Option<&Bound<'_, PyAny>>,
+        nonexistent: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
         let _ = copy;
-        let op = IndexTzOp::Localize {
-            ambiguous,
-            nonexistent,
-        };
+        let op = IndexTzOp::Localize(tz_localize_options(ambiguous, nonexistent)?);
         let index = index_tz_changed(self.inner.index(), tz, op, axis, level)?;
         let inner = Series::new(self.inner.name(), index, self.inner.column().clone())
             .map_err(frame_error_to_py)?;
@@ -39692,21 +39905,18 @@ impl PyDataFrame {
     }
 
     /// Same as `Series.tz_localize`, on the row DatetimeIndex.
-    #[pyo3(signature = (tz, axis=0, level=None, copy=None, ambiguous="raise", nonexistent="raise"))]
+    #[pyo3(signature = (tz, axis=0, level=None, copy=None, ambiguous=None, nonexistent=None))]
     fn tz_localize(
         &self,
         tz: Option<&Bound<'_, PyAny>>,
         axis: Option<usize>,
         level: Option<usize>,
         copy: Option<bool>,
-        ambiguous: Option<&str>,
-        nonexistent: Option<&str>,
+        ambiguous: Option<&Bound<'_, PyAny>>,
+        nonexistent: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let _ = copy;
-        let op = IndexTzOp::Localize {
-            ambiguous,
-            nonexistent,
-        };
+        let op = IndexTzOp::Localize(tz_localize_options(ambiguous, nonexistent)?);
         let index = index_tz_changed(self.inner.index(), tz, op, axis, level)?;
         Ok(PyDataFrame {
             inner: self.inner.with_index(index).map_err(frame_error_to_py)?,
@@ -39714,13 +39924,10 @@ impl PyDataFrame {
     }
 }
 
-/// Which zone change `index_tz_changed` makes.
-#[derive(Clone, Copy)]
-enum IndexTzOp<'a> {
-    Localize {
-        ambiguous: Option<&'a str>,
-        nonexistent: Option<&'a str>,
-    },
+/// Which zone change `index_tz_changed` makes: a localization under pandas'
+/// `ambiguous` / `nonexistent` policies (see [`tz_localize_options`]).
+enum IndexTzOp {
+    Localize(fp_frame::TzLocalizeOptions),
     Convert,
 }
 
@@ -39731,25 +39938,15 @@ enum IndexTzOp<'a> {
 fn index_tz_changed(
     index: &Index,
     tz: Option<&Bound<'_, PyAny>>,
-    op: IndexTzOp<'_>,
+    op: IndexTzOp,
     axis: Option<usize>,
     level: Option<usize>,
 ) -> PyResult<Index> {
-    let raise_policy = |value: Option<&str>| value.is_none_or(|value| value == "raise");
-    let (ambiguous_ok, nonexistent_ok) = match op {
-        IndexTzOp::Localize {
-            ambiguous,
-            nonexistent,
-        } => (raise_policy(ambiguous), raise_policy(nonexistent)),
-        IndexTzOp::Convert => (true, true),
-    };
     unsupported_params(
         "tz_localize / tz_convert",
         &[
             ("axis", axis.is_none_or(|axis| axis == 0)),
             ("level", level.is_none()),
-            ("ambiguous", ambiguous_ok),
-            ("nonexistent", nonexistent_ok),
         ],
     )?;
     let zone = tz.filter(|tz| !tz.is_none()).map(tz_name).transpose()?;
@@ -39759,10 +39956,9 @@ fn index_tz_changed(
         )
     })?;
     let changed = match op {
-        IndexTzOp::Localize { .. } => dti.tz_localize(zone.as_deref()),
-        IndexTzOp::Convert => dti.tz_convert(zone.as_deref()),
-    }
-    .map_err(index_error_to_py)?;
+        IndexTzOp::Localize(options) => localize_datetime_index(&dti, zone.as_deref(), options)?,
+        IndexTzOp::Convert => dti.tz_convert(zone.as_deref()).map_err(index_error_to_py)?,
+    };
     Ok(changed.into_index())
 }
 
@@ -43377,23 +43573,19 @@ impl PySeriesDatetimeAccessor {
     /// pandas' `Series.dt.tz_localize(tz)`: naive wall times placed in `tz`
     /// (datetime64[ns, tz]; a DST-repeated or skipped wall time raises), or a
     /// zone dropped keeping the wall clock (None). fp-frame had it; the
-    /// accessor did not (AttributeError).
-    #[pyo3(signature = (tz, ambiguous="raise", nonexistent="raise"))]
+    /// accessor did not (AttributeError). `ambiguous` / `nonexistent` take
+    /// pandas' policies (see [`tz_localize_options`]).
+    #[pyo3(signature = (tz, ambiguous=None, nonexistent=None))]
     fn tz_localize(
         &self,
         tz: Option<&Bound<'_, PyAny>>,
-        ambiguous: &str,
-        nonexistent: &str,
+        ambiguous: Option<&Bound<'_, PyAny>>,
+        nonexistent: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        unsupported_params(
-            "Series.dt.tz_localize",
-            &[
-                ("ambiguous", ambiguous == "raise"),
-                ("nonexistent", nonexistent == "raise"),
-            ],
-        )?;
+        let options = tz_localize_options(ambiguous, nonexistent)?;
+        check_ambiguous_mask(&options, self.series.len())?;
         let zone = tz.filter(|tz| !tz.is_none()).map(tz_name).transpose()?;
-        self.wrap(|dt| dt.tz_localize(zone.as_deref()))
+        self.wrap(|dt| dt.tz_localize_with_options(zone.as_deref(), options))
     }
     /// pandas' `Series.dt.tz_convert(tz)`: the same instants in `tz` (None:
     /// UTC, naive); a naive column raises.
@@ -52295,8 +52487,20 @@ fn read_csv_impl(
     {
         // Positions, or names given alongside `names=`: pandas keeps file order.
         let mut keep = Vec::new();
-        for item in usecols.try_iter()? {
-            keep.push(csv_column_ref(&frame, &item?)?);
+        if usecols.is_callable() {
+            // A callable keeps the columns whose name it accepts, as pandas'
+            // (it raised TypeError, 'function' object is not iterable;
+            // br-frankenpandas-84w06).
+            for name in frame.column_names() {
+                let label = index_label_to_py(py, &frame.column_label(name))?;
+                if usecols.call1((label,))?.is_truthy()? {
+                    keep.push(name.clone());
+                }
+            }
+        } else {
+            for item in usecols.try_iter()? {
+                keep.push(csv_column_ref(&frame, &item?)?);
+            }
         }
         let ordered: Vec<&str> = frame
             .column_names()
@@ -57861,6 +58065,10 @@ impl PyIntervalIndex {
 
     fn __len__(&self) -> usize {
         self.intervals.len()
+    }
+
+    fn __iter__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        iter_by_position(slf.as_any())
     }
 
     fn __getitem__(&self, idx: isize) -> PyResult<PyInterval> {

@@ -7954,7 +7954,17 @@ fn align_union_merge_sorted(left: &Index, right: &Index) -> AlignmentPlan {
 ///
 /// The bool/utf8 arms are deliberately NOT faked with a Utf8 relabel here;
 /// they are recorded for the object-dtype pass.
-fn compare_promote_padded_column(values: &[Scalar], padded: bool) -> Result<Column, FrameError> {
+fn compare_promote_padded_column(
+    values: &[Scalar],
+    padded: bool,
+    source: &DType,
+) -> Result<Column, FrameError> {
+    // Only missing cells left (a lone NaN difference) keep a numeric
+    // source's float64, as pandas' (they inferred object;
+    // br-frankenpandas-84w06).
+    if matches!(source, DType::Int64 | DType::Float64) && values.iter().all(Scalar::is_missing) {
+        return Ok(Column::new(DType::Float64, values.to_vec())?);
+    }
     let col = Column::from_values(values.to_vec())?;
     if !padded || col.dtype() != DType::Int64 {
         return Ok(col);
@@ -55109,6 +55119,15 @@ impl From<Duration> for TzNonexistentPolicy {
     }
 }
 
+impl TzNonexistentPolicy {
+    /// pandas' `nonexistent=<timedelta>` from its nanoseconds - for callers
+    /// that carry durations as nanoseconds rather than chrono's `Duration`.
+    #[must_use]
+    pub fn shift_by_nanos(nanos: i64) -> Self {
+        Self::ShiftBy(Duration::nanoseconds(nanos))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TzLocalizeOptions {
     pub ambiguous: TzAmbiguousPolicy,
@@ -60382,16 +60401,18 @@ fn localize_scalar_to_timezone(
 
 fn resolve_ambiguous_local_datetime(
     naive: NaiveDateTime,
-    zone_name: &str,
+    _zone_name: &str,
     earliest: DateTime<Tz>,
     latest: DateTime<Tz>,
     policy: ResolvedAmbiguousPolicy,
 ) -> Result<Option<DateTime<FixedOffset>>, FrameError> {
     match policy {
-        ResolvedAmbiguousPolicy::Raise => Err(FrameError::CompatibilityRejected(format!(
-            "ambiguous local time '{}' in timezone '{zone_name}'",
-            format_naive_datetime(naive)
-        ))),
+        // pandas' AmbiguousTimeError, typed so the bindings raise pytz's
+        // class (it was a ValueError; br-frankenpandas-84w06).
+        ResolvedAmbiguousPolicy::Raise => Err(fp_index::IndexError::TimeZone(
+            fp_types::TimeZoneError::Ambiguous(format_naive_datetime(naive)),
+        )
+        .into()),
         ResolvedAmbiguousPolicy::Earliest => {
             Ok(Some(earliest.with_timezone(&earliest.offset().fix())))
         }
@@ -60430,46 +60451,41 @@ fn resolve_nonexistent_local_datetime(
     policy: &TzNonexistentPolicy,
 ) -> Result<Option<DateTime<FixedOffset>>, FrameError> {
     match policy {
-        TzNonexistentPolicy::Raise => Err(FrameError::CompatibilityRejected(format!(
-            "nonexistent local time '{}' in timezone '{zone_name}'",
-            format_naive_datetime(naive)
-        ))),
+        // pandas' NonExistentTimeError, typed so the bindings raise pytz's
+        // class (it was a ValueError; br-frankenpandas-84w06).
+        TzNonexistentPolicy::Raise => Err(fp_index::IndexError::TimeZone(
+            fp_types::TimeZoneError::NonExistent(format_naive_datetime(naive)),
+        )
+        .into()),
         TzNonexistentPolicy::NaT => Ok(None),
+        // The first instant after the gap, or the last NANOSECOND before
+        // it, as pandas (this stepped by whole seconds: shift_backward gave
+        // 01:59:59 where pandas gives 01:59:59.999999999).
         TzNonexistentPolicy::ShiftForward | TzNonexistentPolicy::ShiftBackward => {
-            let step = if matches!(policy, TzNonexistentPolicy::ShiftForward) {
-                1_i64
-            } else {
-                -1_i64
+            let unresolved = || {
+                FrameError::CompatibilityRejected(format!(
+                    "could not resolve nonexistent local time '{}' in timezone '{zone_name}'",
+                    format_naive_datetime(naive)
+                ))
             };
-            let mut candidate = naive;
-            for _ in 0..86_400 {
-                candidate = candidate
-                    .checked_add_signed(Duration::seconds(step))
-                    .ok_or_else(|| {
-                        FrameError::CompatibilityRejected(format!(
-                            "could not resolve nonexistent local time '{}' in timezone '{zone_name}'",
-                            format_naive_datetime(naive)
-                        ))
-                    })?;
-                match zone.from_local_datetime(&candidate) {
-                    LocalResult::Single(value) => {
-                        return Ok(Some(value.with_timezone(&value.offset().fix())));
-                    }
-                    LocalResult::Ambiguous(earliest, latest) => {
-                        let chosen = if matches!(policy, TzNonexistentPolicy::ShiftForward) {
-                            earliest
-                        } else {
-                            latest
-                        };
-                        return Ok(Some(chosen.with_timezone(&chosen.offset().fix())));
-                    }
-                    LocalResult::None => {}
-                }
-            }
-            Err(FrameError::CompatibilityRejected(format!(
-                "could not resolve nonexistent local time '{}' in timezone '{zone_name}'",
-                format_naive_datetime(naive)
-            )))
+            let shift = if matches!(policy, TzNonexistentPolicy::ShiftForward) {
+                fp_types::NonexistentTime::ShiftForward
+            } else {
+                fp_types::NonexistentTime::ShiftBackward
+            };
+            let wall = naive
+                .and_utc()
+                .timestamp_nanos_opt()
+                .ok_or_else(unresolved)?;
+            let utc = fp_types::tz_wall_to_utc_nanos_with(
+                zone_name,
+                wall,
+                fp_types::AmbiguousTime::Raise,
+                shift,
+            )
+            .map_err(|err| FrameError::from(fp_index::IndexError::TimeZone(err)))?;
+            let instant = DateTime::from_timestamp_nanos(utc).with_timezone(&zone);
+            Ok(Some(instant.with_timezone(&instant.offset().fix())))
         }
         TzNonexistentPolicy::ShiftBy(shift) => {
             let shifted = naive.checked_add_signed(*shift).ok_or_else(|| {
@@ -98729,13 +98745,15 @@ impl DataFrame {
                 row_indices.iter().map(|&i| other_vals[i].clone()).collect();
             let self_name = format!("{col_name}_{}", result_names.0);
             let other_name = format!("{col_name}_{}", result_names.1);
+            let self_dtype = self.columns[col_name].dtype();
+            let other_dtype = other.columns[col_name].dtype();
             columns.insert(
                 self_name.clone(),
-                compare_promote_padded_column(&self_filtered, *col_had_padding)?,
+                compare_promote_padded_column(&self_filtered, *col_had_padding, &self_dtype)?,
             );
             columns.insert(
                 other_name.clone(),
-                compare_promote_padded_column(&other_filtered, *col_had_padding)?,
+                compare_promote_padded_column(&other_filtered, *col_had_padding, &other_dtype)?,
             );
             column_order.push(self_name);
             column_order.push(other_name);
@@ -98796,9 +98814,10 @@ impl DataFrame {
                 interleaved.push(self_vals[i].clone());
                 interleaved.push(other_vals[i].clone());
             }
+            let dtype = self.columns[col_name].dtype();
             columns.insert(
                 col_name.clone(),
-                compare_promote_padded_column(&interleaved, *col_had_padding)?,
+                compare_promote_padded_column(&interleaved, *col_had_padding, &dtype)?,
             );
             column_order.push(col_name.clone());
         }
@@ -153145,6 +153164,39 @@ mod tests {
         assert_eq!(diff.num_columns(), 0);
     }
 
+    /// A lone difference whose `self` side is NaN keeps the float column's
+    /// float64 on both sides, as pandas' (the all-missing side inferred
+    /// object; br-frankenpandas-84w06).
+    #[test]
+    fn dataframe_compare_all_missing_side_keeps_float_84w06() {
+        let frame = |second: Scalar| {
+            DataFrame::from_dict(
+                &["x"],
+                vec![(
+                    "x",
+                    vec![Scalar::Float64(1.0), second, Scalar::Float64(2.0)],
+                )],
+            )
+            .unwrap()
+        };
+        let diff = frame(Scalar::Null(NullKind::NaN))
+            .compare(&frame(Scalar::Float64(0.0)))
+            .unwrap();
+        let dtypes: Vec<DType> = (0..diff.num_columns())
+            .map(|position| diff.column_at(position).unwrap().dtype())
+            .collect();
+        assert_eq!(dtypes, vec![DType::Float64, DType::Float64]);
+        // NEGATIVE: a text column's lone missing side is not made numeric.
+        let text = |second: Scalar| {
+            DataFrame::from_dict(&["s"], vec![("s", vec![Scalar::Utf8("a".into()), second])])
+                .unwrap()
+        };
+        let diff = text(Scalar::Null(NullKind::Null))
+            .compare(&text(Scalar::Utf8("b".into())))
+            .unwrap();
+        assert_ne!(diff.column_at(0).unwrap().dtype(), DType::Float64);
+    }
+
     #[test]
     fn dataframe_compare_length_mismatch() {
         let df1 = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(1)])]).unwrap();
@@ -186604,11 +186656,18 @@ mod tests {
         )
         .unwrap();
         let err = s.dt().tz_localize(Some("America/New_York")).unwrap_err();
-        assert!(
-            err.to_string().contains(
-                "ambiguous local time '2024-11-03 01:30:00' in timezone 'America/New_York'"
-            )
-        );
+        // TEST-CHANGE (br-frankenpandas-84w06): the refusal is the typed
+        // time-zone error, whose text is pandas' AmbiguousTimeError message
+        // (it was fp's "ambiguous local time '...' in timezone '...'").
+        assert!(matches!(
+            err,
+            FrameError::Index(fp_index::IndexError::TimeZone(
+                fp_types::TimeZoneError::Ambiguous(_)
+            ))
+        ));
+        assert!(err.to_string().contains(
+            "Cannot infer dst time from 2024-11-03 01:30:00, try using the 'ambiguous' argument"
+        ));
     }
 
     #[test]
@@ -186808,9 +186867,13 @@ mod tests {
                 },
             )
             .unwrap();
+        // TEST-CHANGE (br-frankenpandas-84w06): shift_backward is the last
+        // NANOSECOND before the gap - live pandas 2.2.3 gives
+        // Timestamp('2024-03-10 01:59:59.999999999-0500') - where this pinned
+        // the whole-second step's 01:59:59.
         assert_eq!(
             result.values()[0],
-            Scalar::Utf8("2024-03-10 01:59:59-05:00[America/New_York]".into())
+            Scalar::Utf8("2024-03-10 01:59:59.999999999-05:00[America/New_York]".into())
         );
     }
 

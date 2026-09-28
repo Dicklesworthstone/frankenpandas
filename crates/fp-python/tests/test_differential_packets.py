@@ -4,6 +4,7 @@ Differential conformance test harness for frankenpandas vs pandas oracle on pack
 
 from __future__ import annotations
 
+import collections.abc
 import datetime
 import glob
 import itertools
@@ -13800,3 +13801,106 @@ def _fork_dot_outcome(m: Any) -> Any:
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_forked_child_reaches_pooled_kernels_like_pandas() -> None:
     assert _fork_dot_outcome(fpd) == _fork_dot_outcome(pd)
+
+
+# br-frankenpandas-84w06 (everyday probe 22): tz_localize's ambiguous= /
+# nonexistent= were refused unless 'raise'; a DST-skipped or repeated wall
+# time raised ValueError, not pytz's NonExistentTimeError /
+# AmbiguousTimeError; shift_backward stepped whole seconds; read_csv's
+# usecols callable raised; compare() made an all-NaN 'self' object; six
+# index classes were not collections.abc.Iterable.
+def _e22_outcome(run: Any) -> Any:
+    try:
+        return ("ok", [repr(v) for v in run()])
+    except NameError:
+        # A bug in the case itself, never an outcome: raised on both arms it
+        # compared equal (the Iterable case did, before collections.abc was
+        # imported).
+        raise
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__module__, type(e).__name__, str(e))
+
+
+_E22_ZONE = "America/New_York"
+
+
+def _e22_gap(m: Any) -> Any:
+    return m.Series(m.to_datetime(["2024-03-10 02:30", "2024-03-10 04:00"]))
+
+
+def _e22_repeat(m: Any) -> Any:
+    return m.Series(m.to_datetime(["2024-11-03 01:30", "2024-11-03 01:30"]))
+
+
+def _e22_fall(m: Any) -> Any:
+    return m.to_datetime(["2024-11-03 00:30", "2024-11-03 01:30", "2024-11-03 01:30", "2024-11-03 02:30"])
+
+
+_EVERYDAY22_CASES = {
+    "dt nonexistent shift_forward": lambda m: _e22_gap(m).dt.tz_localize(_E22_ZONE, nonexistent="shift_forward"),
+    "dt nonexistent shift_backward": lambda m: _e22_gap(m).dt.tz_localize(_E22_ZONE, nonexistent="shift_backward"),
+    "dt nonexistent NaT": lambda m: _e22_gap(m).dt.tz_localize(_E22_ZONE, nonexistent="NaT"),
+    "dt nonexistent timedelta": lambda m: _e22_gap(m).dt.tz_localize(_E22_ZONE, nonexistent=m.Timedelta("1h")),
+    "dt nonexistent raises pytz": lambda m: _e22_gap(m).dt.tz_localize(_E22_ZONE),
+    "dt nonexistent bogus raises": lambda m: _e22_gap(m).dt.tz_localize(_E22_ZONE, nonexistent="bogus"),
+    "dt ambiguous NaT": lambda m: _e22_repeat(m).dt.tz_localize(_E22_ZONE, ambiguous="NaT"),
+    "dt ambiguous True": lambda m: _e22_repeat(m).dt.tz_localize(_E22_ZONE, ambiguous=True),
+    "dt ambiguous array": lambda m: _e22_repeat(m).dt.tz_localize(_E22_ZONE, ambiguous=[True, False]),
+    "dt ambiguous array wrong length": lambda m: _e22_repeat(m).dt.tz_localize(_E22_ZONE, ambiguous=[True]),
+    "dt ambiguous raises pytz": lambda m: _e22_repeat(m).dt.tz_localize(_E22_ZONE),
+    "dt ambiguous infer": lambda m: m.Series(_e22_fall(m)).dt.tz_localize(_E22_ZONE, ambiguous="infer"),
+    "index ambiguous infer": lambda m: m.DatetimeIndex(_e22_fall(m)).tz_localize(_E22_ZONE, ambiguous="infer"),
+    "index nonexistent NaT": lambda m: m.DatetimeIndex(_e22_gap(m)).tz_localize(_E22_ZONE, nonexistent="NaT"),
+    "Series.tz_localize ambiguous array": lambda m: m.Series([1, 2, 3, 4], index=_e22_fall(m))
+    .tz_localize(_E22_ZONE, ambiguous=[True, True, False, False])
+    .index,
+    "DataFrame.tz_localize shift_forward": lambda m: m.DataFrame({"v": [1, 2]}, index=m.DatetimeIndex(_e22_gap(m)))
+    .tz_localize(_E22_ZONE, nonexistent="shift_forward")
+    .index,
+    "Timestamp ambiguous False": lambda m: [m.Timestamp("2024-11-03 01:30").tz_localize(_E22_ZONE, ambiguous=False)],
+    "Timestamp ambiguous NaT": lambda m: [m.Timestamp("2024-11-03 01:30").tz_localize(_E22_ZONE, ambiguous="NaT")],
+    "Timestamp ambiguous infer raises": lambda m: [
+        m.Timestamp("2024-11-03 01:30").tz_localize(_E22_ZONE, ambiguous="infer")
+    ],
+    "Timestamp shift_backward": lambda m: [
+        m.Timestamp("2024-03-10 02:30").tz_localize(_E22_ZONE, nonexistent="shift_backward")
+    ],
+    "Timestamp shift_forward": lambda m: [
+        m.Timestamp("2024-03-10 02:30").tz_localize(_E22_ZONE, nonexistent="shift_forward")
+    ],
+    "read_csv usecols callable": lambda m: m.read_csv(io.StringIO("a,bb,c\n1,2,3"), usecols=lambda c: len(c) == 1)
+    .to_string()
+    .split("\n"),
+    "compare all-NaN self keeps float64": lambda m: [
+        str(t) for t in m.DataFrame({"x": [1.0, float("nan"), 2.0]}).compare(m.DataFrame({"x": [1.0, 0.0, 2.0]})).dtypes
+    ],
+    "index classes are Iterable": lambda m: [
+        isinstance(i, collections.abc.Iterable)
+        for i in [
+            m.DatetimeIndex(["2024-01-01"]),
+            m.TimedeltaIndex(["1h"]),
+            m.period_range("2024-01", periods=1, freq="M"),
+            m.IntervalIndex.from_breaks([0, 1]),
+            m.CategoricalIndex(["a"]),
+            m.MultiIndex.from_tuples([("a", 1)]),
+        ]
+    ],
+    # NEGATIVES: a wall time that exists once is untouched by the policies;
+    # a usecols list and a compare with values on both sides as before.
+    "dt policies on a plain time": lambda m: m.Series(m.to_datetime(["2024-06-01 12:00"])).dt.tz_localize(
+        _E22_ZONE, ambiguous="NaT", nonexistent="NaT"
+    ),
+    "read_csv usecols list": lambda m: m.read_csv(io.StringIO("a,bb,c\n1,2,3"), usecols=["a", "c"])
+    .to_string()
+    .split("\n"),
+    "compare values both sides": lambda m: [
+        str(t) for t in m.DataFrame({"x": [1.0, 5.0]}).compare(m.DataFrame({"x": [1.0, 6.0]})).dtypes
+    ],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EVERYDAY22_CASES))
+def test_everyday22_like_pandas(case: str) -> None:
+    run = _EVERYDAY22_CASES[case]
+    assert _e22_outcome(lambda: run(fpd)) == _e22_outcome(lambda: run(pd)), case
