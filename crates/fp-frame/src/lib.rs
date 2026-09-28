@@ -26170,10 +26170,14 @@ impl Series {
         if let Some(levels) = self.index.row_multiindex() {
             let mut columns = BTreeMap::new();
             let mut order = Vec::with_capacity(levels.nlevels() + 1);
+            // Each level's column is labelled by its typed name (fvsao.64).
+            let mut labels = Vec::with_capacity(levels.nlevels() + 1);
             for level in 0..levels.nlevels() {
-                let level_name = levels.names()[level]
-                    .clone()
-                    .unwrap_or_else(|| format!("level_{level}"));
+                let level_label = levels.names()[level].as_ref().map_or_else(
+                    || IndexLabel::Utf8(format!("level_{level}")),
+                    LabelName::label,
+                );
+                let level_name = column_key(&level_label);
                 if level_name == value_column_name || order.contains(&level_name) {
                     return Err(FrameError::CompatibilityRejected(format!(
                         "cannot insert {level_name}, already exists"
@@ -26183,11 +26187,13 @@ impl Series {
                     index_labels_to_column_scalars(levels.get_level_values(level)?.labels());
                 columns.insert(level_name.clone(), Column::from_values(values)?);
                 order.push(level_name);
+                labels.push(level_label);
             }
             columns.insert(value_column_name.clone(), self.column.clone());
             order.push(value_column_name);
+            labels.push(value_label);
             let frame = DataFrame::new_with_column_order(range_index(self.len())?, columns, order)?
-                .with_recorded_column_labels([value_label]);
+                .with_recorded_column_labels(labels);
             return Ok(SeriesResetIndexResult::DataFrame(frame));
         }
         // The index column is labelled by the index's typed name (0 stays
@@ -27080,13 +27086,13 @@ impl Series {
                 .collect()
         };
         let names = levels.names();
-        let name_of = |of: &[usize]| -> Vec<Option<String>> {
+        let name_of = |of: &[usize]| -> Vec<Option<LabelName>> {
             of.iter().map(|&level| names[level].clone()).collect()
         };
         let row_labels = side_labels(&kept, &row_combos);
         let index = if let [only] = kept.as_slice() {
             Index::new(row_labels.into_iter().next().unwrap_or_default())
-                .rename_index(names[*only].as_deref())
+                .rename_index(names[*only].clone())
         } else {
             let multi = fp_index::MultiIndex::from_arrays(row_labels)?.set_names(name_of(&kept));
             multi.to_flat_index("|").with_row_multiindex(multi)?
@@ -68210,11 +68216,10 @@ pub struct DataFrameDictTight {
     /// Row-major nested data: `data[row][col]`.
     pub data: Vec<Vec<Scalar>>,
     /// Names of each index level (pandas emits `[None]` for an
-    /// unnamed single-level index).
-    pub index_names: Vec<Option<String>>,
-    /// Names of each column level (always `[None]` until MultiIndex
-    /// columns land).
-    pub column_names: Vec<Option<String>>,
+    /// unnamed single-level index), typed (fvsao.64).
+    pub index_names: Vec<Option<LabelName>>,
+    /// Names of each column level, typed.
+    pub column_names: Vec<Option<LabelName>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69327,7 +69332,7 @@ impl DataFrame {
         let joined_name = row_multiindex
             .names()
             .iter()
-            .filter_map(|name| name.clone())
+            .filter_map(|name| name.as_ref().map(ToString::to_string))
             .collect::<Vec<_>>()
             .join(sep);
         let flat = row_multiindex.to_flat_index(sep);
@@ -70215,7 +70220,9 @@ impl DataFrame {
         let mut names = Vec::with_capacity(row_multiindex.nlevels());
         let mut used = self.columns.keys().cloned().collect::<BTreeSet<_>>();
         for (level, name) in row_multiindex.names().iter().enumerate() {
-            let candidate = name.clone().unwrap_or_else(|| format!("level_{level}"));
+            let candidate = name
+                .as_ref()
+                .map_or_else(|| format!("level_{level}"), ToString::to_string);
             if !used.insert(candidate.clone()) {
                 return Err(FrameError::CompatibilityRejected(format!(
                     "cannot insert {candidate}, already exists"
@@ -76082,7 +76089,7 @@ impl DataFrame {
             ),
             None => (
                 vec![self.index.labels().to_vec()],
-                vec![self.index.name().map(String::from)],
+                vec![self.index.name().cloned()],
             ),
         };
         for level in 0..keys.nlevels() {
@@ -76126,7 +76133,7 @@ impl DataFrame {
         let new_name_parts: Vec<String> = row_multiindex
             .names()
             .iter()
-            .map(|name| name.clone().unwrap_or_default())
+            .map(|name| name.as_ref().map(ToString::to_string).unwrap_or_default())
             .collect();
         let index = row_multiindex
             .to_flat_index(sep)
@@ -76233,7 +76240,12 @@ impl DataFrame {
             levels.push(level_labels);
         }
 
-        let names: Vec<Option<String>> = columns.iter().map(|&c| Some(c.to_owned())).collect();
+        // Each level is named by its column's typed label: set_index([0, 1])
+        // names them the integers 0 and 1 (fvsao.64).
+        let names: Vec<Option<LabelName>> = columns
+            .iter()
+            .map(|&c| Some(self.column_series_name(c)))
+            .collect();
 
         fp_index::MultiIndex::from_arrays(levels)
             .map(|mi| mi.set_names(names))
@@ -76277,7 +76289,16 @@ impl DataFrame {
             let mut out =
                 Self::new_with_axes(index, None, columns, column_order, column_multiindex)?;
             out.allows_duplicate_labels = self.allows_duplicate_labels;
-            return Ok(out.with_labels_of(self));
+            // The level columns are labelled by the levels' typed names
+            // (fvsao.64).
+            let level_labels = row_multiindex
+                .names()
+                .iter()
+                .flatten()
+                .map(LabelName::label);
+            return Ok(out
+                .with_labels_of(self)
+                .with_recorded_column_labels(level_labels));
         }
 
         let index_column_name = self.reset_index_column_name()?;
@@ -85205,7 +85226,7 @@ impl DataFrame {
         let names = self
             .column_order
             .iter()
-            .map(|name| Some(name.clone()))
+            .map(|name| Some(self.column_series_name(name)))
             .collect();
         let levels = fp_index::MultiIndex::from_arrays(levels)?.set_names(names);
         let index = counts.index().clone().with_row_multiindex(levels)?;
@@ -87455,7 +87476,7 @@ impl DataFrame {
                             .collect()
                     })
                     .collect();
-                let index_names = vec![self.index.name().map(String::from)];
+                let index_names = vec![self.index.name().cloned()];
                 let column_names = self
                     .column_multiindex
                     .as_ref()
@@ -89328,7 +89349,7 @@ impl DataFrame {
         fill_value: Option<&Scalar>,
     ) -> Result<Self, FrameError> {
         // The source's column levels: its column MultiIndex's, else its labels.
-        let (levels, mut names): (Vec<Vec<IndexLabel>>, Vec<Option<String>>) =
+        let (levels, mut names): (Vec<Vec<IndexLabel>>, Vec<Option<LabelName>>) =
             match self.columns_multiindex() {
                 Some(multi) => (
                     (0..multi.nlevels())
@@ -89342,7 +89363,7 @@ impl DataFrame {
                 ),
                 None => (
                     vec![self.column_labels()],
-                    vec![self.columns_name().map(String::from)],
+                    vec![self.columns_name().cloned()],
                 ),
             };
         let source_depth = levels.len();
@@ -89370,7 +89391,7 @@ impl DataFrame {
             if position == 0 {
                 names.extend(match piece.columns_multiindex() {
                     Some(multi) => multi.names().to_vec(),
-                    None => vec![piece.columns_name().map(String::from)],
+                    None => vec![piece.columns_name().cloned()],
                 });
             }
             for (at, piece_name) in piece.column_order.iter().enumerate() {
@@ -98627,7 +98648,7 @@ impl DataFrame {
         // Level 1 ('self'/'other') is unnamed in pandas; level 0 keeps the
         // original index name.
         let multiindex = fp_index::MultiIndex::from_arrays(vec![level0, level1])?
-            .set_names(vec![self.index.name().map(String::from), None]);
+            .set_names(vec![self.index.name().cloned(), None]);
         let flat_index = multiindex.to_flat_index("/");
         Self::new_with_axes(flat_index, Some(multiindex), columns, column_order, None)
     }
@@ -99932,15 +99953,6 @@ impl DataFrameGroupBy<'_> {
         self.key_names.first().and_then(Option::as_ref)
     }
 
-    /// The key names' texts: a several-key result's level names (a
-    /// MultiIndex's level names are text).
-    fn key_name_texts(&self) -> Vec<Option<String>> {
-        self.key_names
-            .iter()
-            .map(|name| name.clone().map(String::from))
-            .collect()
-    }
-
     fn sum_group_vals(dtype: DType, group_vals: &[Scalar]) -> Scalar {
         match dtype {
             DType::Int64 => {
@@ -100707,7 +100719,7 @@ impl DataFrameGroupBy<'_> {
                 ));
             }
         }
-        let names: Vec<Option<String>> = self.key_name_texts();
+        let names: Vec<Option<LabelName>> = self.key_names.clone();
         // dropna=False keys hold a missing label as a value of its level, as
         // pandas' groupby levels do (an unstack sorts it last).
         Ok(Some(
@@ -100923,8 +100935,8 @@ impl DataFrameGroupBy<'_> {
             .into_iter()
             .map(|(name, values)| Ok((name, Column::from_values(values)?)))
             .collect::<Result<_, FrameError>>()?;
-        let mut names: Vec<Option<String>> = self.key_name_texts();
-        names.push(Some("index".to_owned()));
+        let mut names: Vec<Option<LabelName>> = self.key_names.clone();
+        names.push(Some("index".into()));
 
         DataFrame::new_with_axes(
             Index::new(flat_labels),
@@ -103407,7 +103419,7 @@ impl DataFrameGroupBy<'_> {
                     level_arrays[level_idx].push(IndexLabel::Int64(value));
                 }
             }
-            let names: Vec<Option<String>> = self.key_name_texts();
+            let names: Vec<Option<LabelName>> = self.key_names.clone();
             let row_multiindex =
                 Some(fp_index::MultiIndex::from_arrays(level_arrays)?.set_names(names));
             let mut frame = self.dense_aggregate_emit(
@@ -105190,7 +105202,7 @@ impl DataFrameGroupBy<'_> {
                 level_arrays[level_idx].push(IndexLabel::Int64(value));
             }
         }
-        let names: Vec<Option<String>> = self.key_name_texts();
+        let names: Vec<Option<LabelName>> = self.key_names.clone();
         let mi = fp_index::MultiIndex::from_arrays(level_arrays)?.set_names(names);
         Ok((Index::new(labels), mi))
     }
@@ -105215,7 +105227,7 @@ impl DataFrameGroupBy<'_> {
                 level_arrays[level_idx].push(value.to_index_label());
             }
         }
-        let names: Vec<Option<String>> = self.key_name_texts();
+        let names: Vec<Option<LabelName>> = self.key_names.clone();
         let mi = fp_index::MultiIndex::from_arrays(level_arrays)?.set_names(names);
         Ok((Index::new(labels), mi))
     }
@@ -106560,7 +106572,7 @@ impl DataFrameGroupBy<'_> {
                 }
             }
 
-            let names: Vec<Option<String>> = self.key_name_texts();
+            let names: Vec<Option<LabelName>> = self.key_names.clone();
             let row_multiindex =
                 Some(fp_index::MultiIndex::from_arrays(level_arrays)?.set_names(names));
             return Ok(Some(DataFrame::new_with_axes(
@@ -107441,8 +107453,8 @@ impl DataFrameGroupBy<'_> {
             }
         }
 
-        let mut names: Vec<Option<String>> = self.key_name_texts();
-        names.push(Some("index".to_owned()));
+        let mut names: Vec<Option<LabelName>> = self.key_names.clone();
+        names.push(Some("index".into()));
 
         Ok((
             Index::new(flat_labels),
@@ -121497,10 +121509,7 @@ mod tests {
         frame.index = frame.index.rename_index(Some("k"));
         let appended = frame.set_index_append(&["b"], true, "/").unwrap();
         let levels = appended.row_multiindex().expect("a row MultiIndex");
-        assert_eq!(
-            levels.names(),
-            &[Some("k".to_owned()), Some("b".to_owned())]
-        );
+        assert_eq!(levels.names(), &[Some("k".into()), Some("b".into())]);
         assert_eq!(
             levels.get_level_values(0).unwrap().labels(),
             &[IndexLabel::from(7_i64), IndexLabel::from(8_i64)]
@@ -147380,7 +147389,7 @@ mod tests {
         assert_eq!(row_multiindex.nlevels(), 2);
         assert_eq!(
             row_multiindex.names(),
-            &[Some("grp".to_owned()), Some("index".to_owned())]
+            &[Some("grp".into()), Some("index".into())]
         );
         let first_tuple = row_multiindex.get_tuple(0).unwrap();
         assert_eq!(first_tuple[0], &IndexLabel::Utf8("a".to_owned()));
@@ -149756,7 +149765,7 @@ mod tests {
         let df = DataFrame::new_with_column_order(index, columns, vec!["a".to_string()]).unwrap();
         let result = df.to_dict("tight").unwrap();
         let tight = result.as_tight().expect("tight");
-        assert_eq!(tight.index_names, vec![Some("row_id".to_owned())]);
+        assert_eq!(tight.index_names, vec![Some("row_id".into())]);
     }
 
     #[test]
@@ -149802,7 +149811,7 @@ mod tests {
         );
         assert_eq!(
             tight.column_names,
-            vec![Some("field".to_owned()), Some("stat".to_owned())]
+            vec![Some("field".into()), Some("stat".into())]
         );
         assert_eq!(
             tight.data,
@@ -162495,10 +162504,7 @@ mod tests {
         let label = |s: &str| IndexLabel::Utf8(s.to_owned());
         let tuples = |index: &Index| {
             let levels = index.row_multiindex().expect("row MultiIndex levels");
-            assert_eq!(
-                levels.names(),
-                &[Some("k".to_owned()), Some("j".to_owned())]
-            );
+            assert_eq!(levels.names(), &[Some("k".into()), Some("j".into())]);
             (0..levels.len())
                 .map(|row| {
                     levels
@@ -171290,10 +171296,7 @@ mod tests {
         assert_eq!(none.num_columns(), 0);
         let axis = none.columns_multiindex().unwrap();
         assert_eq!(axis.len(), 0);
-        assert_eq!(
-            axis.names(),
-            [Some("top".to_owned()), Some("sub".to_owned())]
-        );
+        assert_eq!(axis.names(), [Some("top".into()), Some("sub".into())]);
         // A named flat axis keeps its name; NEGATIVE: a selection that keeps
         // columns is as before.
         let named = flat.clone().with_columns_name(Some("c"));
@@ -174151,12 +174154,12 @@ mod tests {
         assert_eq!(first.len(), 4);
         assert_eq!(first.column("x").unwrap().dtype(), DType::Float64);
         let rows = first.row_multiindex().unwrap();
-        assert_eq!(rows.names(), &[Some("b".to_owned()), Some("c".to_owned())]);
+        assert_eq!(rows.names(), &[Some("b".into()), Some("c".into())]);
         // Two levels: a column MultiIndex named (b, c), its combinations in
         // the order they first appear, as pandas' _unstack_multiple.
         let two = s.unstack_levels(&[1, 2], None).unwrap();
         let columns = two.columns_multiindex().unwrap();
-        let names = [Some("b".to_owned()), Some("c".to_owned())];
+        let names: [Option<crate::LabelName>; 2] = [Some("b".into()), Some("c".into())];
         assert_eq!(columns.names(), &names);
         let order: Vec<Vec<IndexLabel>> = (0..columns.len())
             .map(|p| columns.get_tuple(p).unwrap().into_iter().cloned().collect())
@@ -174171,7 +174174,7 @@ mod tests {
         let frame = s.to_frame(None).unwrap();
         let unstacked = frame.unstack_levels(&[1], None).unwrap();
         let multi = unstacked.columns_multiindex().unwrap();
-        assert_eq!(multi.names(), &[None, Some("b".to_owned())]);
+        assert_eq!(multi.names(), &[None, Some("b".into())]);
         assert_eq!(multi.len(), 2);
         // NEGATIVE: a repeated combination is pandas' error, not the first value.
         let repeated = fp_index::MultiIndex::from_arrays(vec![
@@ -179282,10 +179285,7 @@ mod tests {
             .index()
             .row_multiindex()
             .expect("value_counts carries its (key, value) levels");
-        assert_eq!(
-            levels.names(),
-            &[Some("k".to_owned()), Some("v".to_owned())]
-        );
+        assert_eq!(levels.names(), &[Some("k".into()), Some("v".into())]);
         assert_eq!(
             levels.get_level_values(1)?.labels(),
             &[
@@ -179311,7 +179311,7 @@ mod tests {
                 .index()
                 .row_multiindex()
                 .map(|levels| levels.names().to_vec()),
-            Some(vec![Some("k".to_owned()), None])
+            Some(vec![Some("k".into()), None])
         );
         Ok(())
     }

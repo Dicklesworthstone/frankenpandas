@@ -13261,6 +13261,10 @@ def _axn_frame(m: Any) -> Any:
     return m.DataFrame([[1, 2], [1, 3], [2, 5]])
 
 
+def _axn_frame3(m: Any) -> Any:
+    return m.DataFrame([[1, 2, 3], [1, 2, 4], [2, 3, 5]])
+
+
 def _axn_view(x: Any) -> Any:
     if isinstance(x, list):  # FrozenList / list of column labels
         return (type(x).__name__, [(type(v).__name__, v) for v in x])
@@ -13312,8 +13316,23 @@ _AXIS_NAME_CASES = {
     "Series.rename_axis(None)": lambda m: m.Series([1], index=m.Index([1], name="a")).rename_axis(None).index.name,
     "rename_axis(mapper='k')": lambda m: _axn_frame(m).rename_axis(mapper="k").index.name,
     "rename_axis two positionals": lambda m: _axn_frame(m).rename_axis("a", "b"),
+    # MultiIndex level names (stage 2).
+    "set_index([0, 1]) names": lambda m: _axn_frame3(m).set_index([0, 1]).index.names,
+    "groupby([0, 1]) names": lambda m: _axn_frame3(m).groupby([0, 1]).sum().index.names,
+    "groupby(level=0) name": lambda m: _axn_frame3(m).set_index([0, 1]).groupby(level=0).sum().index.name,
+    "droplevel name": lambda m: _axn_frame3(m).set_index([0, 1]).droplevel(0).index.name,
+    "xs level name": lambda m: _axn_frame3(m).set_index([0, 1]).xs(1, level=0).index.name,
+    "get_level_values name": lambda m: _axn_frame3(m).set_index([0, 1]).index.get_level_values(1).name,
+    "swaplevel names": lambda m: _axn_frame3(m).set_index([0, 1]).swaplevel().index.names,
+    "stack names": lambda m: _axn_frame(m).set_index(0).stack().index.names,
+    "MultiIndex.from_arrays(names=[0, 1])": lambda m: m.MultiIndex.from_arrays([[1], [2]], names=[0, 1]).names,
+    "MultiIndex.to_frame columns": lambda m: list(m.MultiIndex.from_arrays([[1], [2]], names=[5, "a"]).to_frame().columns),
+    "unnamed MultiIndex.to_frame columns": lambda m: list(m.MultiIndex.from_arrays([[1], [2]]).to_frame().columns),
+    "to_dict tight index_names": lambda m: _axn_frame(m).set_index(0).to_dict("tight")["index_names"],
+    "groupby([0, 1]) reset_index columns": lambda m: list(_axn_frame3(m).groupby([0, 1]).sum().reset_index().columns),
     # NEGATIVES: a string name stays a string - including a column renamed
     # from 0 to '0' (rename kept the integer label) - and None stays None.
+    "string level names": lambda m: m.DataFrame({"a": [1], "b": [2], "c": [3]}).set_index(["a", "b"]).index.names,
     "rename 0 -> '0' columns": lambda m: list(_axn_frame(m).rename(columns={0: "0"}).columns),
     "rename 0 -> '0' then set_index": lambda m: _axn_frame(m).rename(columns={0: "0"}).set_index("0").index.name,
     "string name": lambda m: m.Index([1, 2], name="a").name,

@@ -18836,8 +18836,9 @@ impl<T> IndexSlice<T> {
 pub struct MultiIndex {
     /// One `Vec<IndexLabel>` per level, all the same length (= nrows).
     levels: Vec<Vec<IndexLabel>>,
-    /// Optional name for each level.
-    names: Vec<Option<String>>,
+    /// Optional name for each level, typed: set_index([0, 1]) names them the
+    /// integers 0 and 1 (fvsao.64).
+    names: Vec<Option<LabelName>>,
     /// Per-level first-seen identity codes, used by duplicate/unique kernels.
     #[serde(skip)]
     identity_codes: Option<Vec<Vec<u32>>>,
@@ -18937,7 +18938,7 @@ impl PartialEq for MultiIndex {
 }
 
 impl MultiIndex {
-    fn from_levels_and_names(levels: Vec<Vec<IndexLabel>>, names: Vec<Option<String>>) -> Self {
+    fn from_levels_and_names(levels: Vec<Vec<IndexLabel>>, names: Vec<Option<LabelName>>) -> Self {
         let identity_codes = build_multi_index_identity_codes(&levels);
         Self {
             levels,
@@ -19063,9 +19064,9 @@ impl MultiIndex {
         self.is_monotonic_increasing()
     }
 
-    /// Level names.
+    /// Level names, typed ([`LabelName`]).
     #[must_use]
-    pub fn names(&self) -> &[Option<String>] {
+    pub fn names(&self) -> &[Option<LabelName>] {
         &self.names
     }
 
@@ -19268,7 +19269,7 @@ impl MultiIndex {
 
     /// Set the names for all levels.
     #[must_use]
-    pub fn set_names(mut self, names: Vec<Option<String>>) -> Self {
+    pub fn set_names(mut self, names: Vec<Option<LabelName>>) -> Self {
         // Pad or truncate to match nlevels.
         self.names = names;
         self.names.resize(self.nlevels(), None);
@@ -19279,7 +19280,7 @@ impl MultiIndex {
     ///
     /// Unlike [`Self::set_names`], pandas rename requires one name per level
     /// and returns a renamed clone without mutating the source index.
-    pub fn rename(&self, names: Vec<Option<String>>) -> Result<Self, IndexError> {
+    pub fn rename(&self, names: Vec<Option<LabelName>>) -> Result<Self, IndexError> {
         if names.len() != self.nlevels() {
             return Err(IndexError::LengthMismatch {
                 expected: self.nlevels(),
@@ -19291,7 +19292,7 @@ impl MultiIndex {
     }
 
     /// Rename one MultiIndex level, matching `pd.MultiIndex.rename(name, level=...)`.
-    pub fn rename_level(&self, name: Option<String>, level: usize) -> Result<Self, IndexError> {
+    pub fn rename_level(&self, name: Option<LabelName>, level: usize) -> Result<Self, IndexError> {
         if level >= self.nlevels() {
             return Err(IndexError::OutOfBounds {
                 position: level,
@@ -19303,7 +19304,7 @@ impl MultiIndex {
         Ok(Self::from_levels_and_names(self.levels.clone(), names))
     }
 
-    fn shared_names(&self, other: &Self) -> Vec<Option<String>> {
+    fn shared_names(&self, other: &Self) -> Vec<Option<LabelName>> {
         self.names
             .iter()
             .zip(&other.names)
@@ -19424,7 +19425,7 @@ impl MultiIndex {
 
     fn from_tuples_with_names(
         tuples: Vec<Vec<IndexLabel>>,
-        names: Vec<Option<String>>,
+        names: Vec<Option<LabelName>>,
     ) -> Result<Self, IndexError> {
         Ok(Self::from_tuples(tuples)?.set_names(names))
     }
@@ -20564,7 +20565,7 @@ impl MultiIndex {
         (left.as_str(), right.as_str())
     }
 
-    fn two_utf8_result_from_pairs(pairs: Vec<(&str, &str)>, names: Vec<Option<String>>) -> Self {
+    fn two_utf8_result_from_pairs(pairs: Vec<(&str, &str)>, names: Vec<Option<LabelName>>) -> Self {
         let mut left = Vec::with_capacity(pairs.len());
         let mut right = Vec::with_capacity(pairs.len());
         for (l, r) in pairs {
@@ -21533,7 +21534,7 @@ impl MultiIndex {
         let mut names = Vec::with_capacity(columns.len());
         let mut levels = Vec::with_capacity(columns.len());
         for (name, values) in columns {
-            names.push(name);
+            names.push(name.map(LabelName::from));
             levels.push(values);
         }
 
@@ -21854,7 +21855,7 @@ impl MultiIndex {
 
         let new_levels: Vec<Vec<IndexLabel>> =
             order.iter().map(|&idx| self.levels[idx].clone()).collect();
-        let new_names: Vec<Option<String>> =
+        let new_names: Vec<Option<LabelName>> =
             order.iter().map(|&idx| self.names[idx].clone()).collect();
 
         Ok(Self::from_levels_and_names(new_levels, new_names))
@@ -22735,7 +22736,7 @@ mod tests {
             vec![1_i64.into(), 1_i64.into(), 2_i64.into()],
         ])
         .expect("levels")
-        .set_names(vec![Some("k".to_owned()), Some("j".to_owned())]);
+        .set_names(vec![Some("k".into()), Some("j".into())]);
         let flat = Index::new(vec![utf8("y|1"), utf8("x|1"), utf8("x|2")]);
         let index = flat
             .clone()
@@ -28787,6 +28788,33 @@ mod tests {
     }
 
     #[test]
+    fn multiindex_level_names_keep_their_type_fvsao64() {
+        use super::LabelName;
+        let zero = LabelName::typed(IndexLabel::Int64(0));
+        let multi = super::MultiIndex::from_arrays(vec![
+            vec![1_i64.into(), 2_i64.into()],
+            vec!["x".into(), "y".into()],
+        ])
+        .unwrap()
+        .set_names(vec![Some(zero.clone()), Some("b".into())]);
+        let label = |name: &Option<LabelName>| name.as_ref().map(LabelName::label);
+        assert_eq!(label(&multi.names()[0]), Some(IndexLabel::Int64(0)));
+        // A level taken out keeps its typed name; a renamed level takes the
+        // new one.
+        assert_eq!(multi.get_level_values(0).unwrap().name(), Some(&zero));
+        let seven = Some(LabelName::typed(IndexLabel::Int64(7)));
+        let renamed = multi.rename_level(seven, 1).unwrap();
+        assert_eq!(label(&renamed.names()[1]), Some(IndexLabel::Int64(7)));
+        // NEGATIVE: a string level name is the string ('0' is not 0).
+        let text = multi.clone().set_names(vec![Some("0".into()), None]);
+        assert_eq!(
+            label(&text.names()[0]),
+            Some(IndexLabel::Utf8("0".to_owned()))
+        );
+        assert_ne!(text.names()[0], multi.names()[0]);
+    }
+
+    #[test]
     fn index_set_names_some_and_none() {
         let idx = Index::new(vec!["a".into(), "b".into()]);
         let named = idx.set_names(Some("letters"));
@@ -29971,7 +29999,7 @@ mod tests {
         );
         assert_eq!(
             left.intersection(&right).unwrap().names(),
-            vec![Some("L0".to_owned()), None]
+            vec![Some("L0".into()), None]
         );
     }
 

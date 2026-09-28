@@ -18977,7 +18977,12 @@ fn build_fixture_multiindex(spec: &FixtureMultiIndex) -> Result<fp_index::MultiI
         fp_index::MultiIndex::from_tuples(spec.tuples.clone()).map_err(|err| err.to_string())?
     };
     if !spec.names.is_empty() {
-        multiindex = multiindex.set_names(spec.names.clone());
+        multiindex = multiindex.set_names(
+            spec.names
+                .iter()
+                .map(|name| name.clone().map(Into::into))
+                .collect(),
+        );
     }
     Ok(multiindex)
 }
@@ -18993,7 +18998,11 @@ fn multiindex_to_fixture(multiindex: &fp_index::MultiIndex) -> Result<FixtureMul
         .collect::<Result<Vec<_>, _>>()?;
     Ok(FixtureMultiIndex {
         tuples,
-        names: multiindex.names().to_vec(),
+        names: multiindex
+            .names()
+            .iter()
+            .map(|name| name.clone().map(String::from))
+            .collect(),
     })
 }
 

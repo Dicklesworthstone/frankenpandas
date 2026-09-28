@@ -1536,7 +1536,7 @@ type LevelTexts = (Vec<Vec<String>>, Option<Vec<String>>);
 
 /// A frame's column axis as levels: one label list per level and each
 /// level's name.
-type ColumnLevels = (Vec<Vec<IndexLabel>>, Vec<Option<String>>);
+type ColumnLevels = (Vec<Vec<IndexLabel>>, Vec<Option<LabelName>>);
 
 /// The texts pandas prints for a row MultiIndex at `rows`: one list per
 /// level, sparsified unless `sparsify` is false (to_string's), and the level
@@ -1562,7 +1562,7 @@ fn pandas_multiindex_texts(
         multi
             .names()
             .iter()
-            .map(|name| name.clone().unwrap_or_default())
+            .map(|name| name.as_ref().map(ToString::to_string).unwrap_or_default())
             .collect()
     });
     Some((levels, names))
@@ -1991,7 +1991,7 @@ fn column_multiindex_headers(
         multi
             .names()
             .iter()
-            .map(|name| name.clone().unwrap_or_default())
+            .map(|name| name.as_ref().map(ToString::to_string).unwrap_or_default())
             .collect()
     } else {
         vec![String::new(); multi.nlevels()]
@@ -11565,7 +11565,7 @@ impl PyDatetimeIndex {
 
 fn extract_index_names_flexible(
     names: Option<&Bound<'_, PyAny>>,
-) -> PyResult<Option<Vec<Option<String>>>> {
+) -> PyResult<Option<Vec<Option<LabelName>>>> {
     let Some(names_obj) = names else {
         return Ok(None);
     };
@@ -11573,23 +11573,17 @@ fn extract_index_names_flexible(
         return Ok(None);
     }
     if let Ok(s) = names_obj.extract::<String>() {
-        return Ok(Some(vec![Some(s)]));
+        return Ok(Some(vec![Some(s.into())]));
     }
+    // Each name keeps its type: names=[0, 1] are the integers (fvsao.64).
     if let Ok(iter) = names_obj.try_iter() {
         let mut res = Vec::new();
         for item in iter {
-            let item = item?;
-            if item.is_none() {
-                res.push(None);
-            } else if let Ok(s) = item.extract::<String>() {
-                res.push(Some(s));
-            } else {
-                res.push(Some(item.str()?.to_string()));
-            }
+            res.push(py_axis_name(&item?)?);
         }
         return Ok(Some(res));
     }
-    Ok(Some(vec![Some(names_obj.str()?.to_string())]))
+    Ok(Some(vec![py_axis_name(names_obj)?]))
 }
 
 /// Python wrapper for FrankenPandas MultiIndex.
@@ -11817,14 +11811,14 @@ impl PyMultiIndex {
         Ok(PyMultiIndex { inner })
     }
 
-    /// pandas' FrozenList of the level names.
+    /// pandas' FrozenList of the level names, typed (fvsao.64).
     #[getter]
     fn names(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let names = self
             .inner
             .names()
             .iter()
-            .map(|name| name.clone().into_py_any(py))
+            .map(|name| axis_name_to_py(py, name.as_ref())?.into_py_any(py))
             .collect::<PyResult<Vec<_>>>()?;
         frozen_list(py, names)
     }
@@ -12309,28 +12303,22 @@ impl PyMultiIndex {
         let idx = Index::from_range(0, self.inner.len() as i64, 1);
         let mut col_names = Vec::with_capacity(self.inner.nlevels());
         let mut col_map = BTreeMap::new();
-        let custom_names: Option<Vec<String>> = if let Some(n_obj) = name {
-            if let Ok(list) = n_obj.extract::<Vec<String>>() {
-                Some(list)
-            } else if let Ok(s) = n_obj.extract::<String>() {
-                Some(vec![s])
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        // Each column is labelled by `name`'s entry, else the level's typed
+        // name, else the level's position - the integers 0, 1 (fvsao.64;
+        // they were the strings '0', '1').
+        let custom_names = extract_index_names_flexible(name)?;
+        let mut labels = Vec::with_capacity(self.inner.nlevels());
         for level_idx in 0..self.inner.nlevels() {
-            let col_name = if let Some(ref c_names) = custom_names {
-                c_names
-                    .get(level_idx)
-                    .cloned()
-                    .unwrap_or_else(|| format!("{level_idx}"))
-            } else if let Some(Some(n)) = self.inner.names().get(level_idx) {
-                n.clone()
-            } else {
-                format!("{level_idx}")
-            };
+            let label = match &custom_names {
+                Some(names) => names.get(level_idx).cloned().flatten(),
+                None => self.inner.names().get(level_idx).cloned().flatten(),
+            }
+            .map_or_else(
+                || IndexLabel::Int64(i64::try_from(level_idx).unwrap_or(i64::MAX)),
+                |name| name.label(),
+            );
+            let col_name = fp_frame::column_key(&label);
+            labels.push(label);
             let level_idx_obj = self
                 .inner
                 .get_level_values(level_idx)
@@ -12345,8 +12333,9 @@ impl PyMultiIndex {
             col_map.insert(col_name.clone(), col);
             col_names.push(col_name);
         }
-        let df =
-            DataFrame::new_with_column_order(idx, col_map, col_names).map_err(frame_error_to_py)?;
+        let df = DataFrame::new_with_column_order(idx, col_map, col_names)
+            .map_err(frame_error_to_py)?
+            .with_recorded_column_labels(labels);
         // index=True: indexed by this MultiIndex itself, as pandas (the
         // flat 'n/a' labels; rvqoi).
         let df = if index {
@@ -12973,10 +12962,12 @@ impl PyMultiIndex {
         }
     }
 
-    fn rename(&self, names: Vec<Option<String>>) -> Self {
-        Self {
+    /// `MultiIndex.rename(names)`: each name keeps its type (fvsao.64).
+    fn rename(&self, names: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let names = extract_index_names_flexible(Some(names))?.unwrap_or_default();
+        Ok(Self {
             inner: self.inner.clone().set_names(names),
-        }
+        })
     }
 
     fn reorder_levels(&self, order: Vec<usize>) -> PyResult<Self> {
@@ -13048,17 +13039,18 @@ impl PyMultiIndex {
     /// level 0).
     #[pyo3(signature = (names, level=None))]
     fn set_names(&self, names: &Bound<'_, PyAny>, level: Option<usize>) -> PyResult<Self> {
-        let ns = if let Ok(s) = names.extract::<String>() {
-            vec![Some(s)]
+        // Names keep their type (fvsao.64): set_names([0, 1]), and a scalar
+        // name for one level (set_names(0, level=0)).
+        let ns: Vec<Option<LabelName>> = if let Ok(s) = names.extract::<String>() {
+            vec![Some(s.into())]
         } else if let Ok(seq) = names.cast::<pyo3::types::PySequence>() {
             let mut list = Vec::new();
             for i in 0..seq.len()? {
-                let item = seq.get_item(i)?;
-                list.push(item.extract::<Option<String>>()?);
+                list.push(py_axis_name(&seq.get_item(i)?)?);
             }
             list
         } else {
-            Vec::new()
+            vec![py_axis_name(names)?]
         };
         let ns = match level {
             None => ns,
@@ -18852,7 +18844,7 @@ fn rename_axis_names(
 fn index_names(index: &Index) -> Vec<Option<LabelName>> {
     index.row_multiindex().map_or_else(
         || vec![index.name().cloned()],
-        |levels| level_names(levels.names()),
+        |levels| levels.names().to_vec(),
     )
 }
 
@@ -18877,25 +18869,12 @@ fn rename_axis_mapper<'py>(
     }
 }
 
-/// A MultiIndex's level names as axis names (level names are text).
-fn level_names(names: &[Option<String>]) -> Vec<Option<LabelName>> {
-    names
-        .iter()
-        .map(|name| name.clone().map(LabelName::from))
-        .collect()
-}
-
-/// `index` renamed to `names` (see [`rename_axis_names`]); a MultiIndex's
-/// levels take their text.
+/// `index` renamed to `names` (see [`rename_axis_names`]).
 fn index_with_names(index: &Index, names: Vec<Option<LabelName>>) -> PyResult<Index> {
     match index.row_multiindex() {
         Some(levels) => index
             .clone()
-            .with_row_multiindex(
-                levels
-                    .clone()
-                    .set_names(names.into_iter().map(|n| n.map(String::from)).collect()),
-            )
+            .with_row_multiindex(levels.clone().set_names(names))
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())),
         None => Ok(index.rename_index(names.into_iter().next().flatten())),
     }
@@ -19516,7 +19495,7 @@ fn row_multiindex_axis(multi: fp_index::MultiIndex) -> PyResult<Index> {
     let names: Vec<String> = multi
         .names()
         .iter()
-        .map(|name| name.clone().unwrap_or_default())
+        .map(|name| name.as_ref().map(ToString::to_string).unwrap_or_default())
         .collect();
     multi
         .to_flat_index("/")
@@ -19822,7 +19801,7 @@ fn pairwise_window_result(
     }
     let multi = fp_index::MultiIndex::from_arrays(vec![row_labels, column_labels])
         .map_err(index_error_to_py)?
-        .set_names(vec![source.index().name().map(String::from), None]);
+        .set_names(vec![source.index().name().cloned(), None]);
     let frame = DataFrame::new_with_column_order(Index::default_range(n * k), map, columns)
         .map_err(frame_error_to_py)?
         .with_row_multiindex(multi)
@@ -24223,7 +24202,7 @@ impl PySeries {
                         .collect();
                     let name = multi.names().get(position).cloned().flatten();
                     Series::new(
-                        name.as_deref().unwrap_or(""),
+                        name.unwrap_or_default(),
                         index.clone(),
                         Column::from_values(values).map_err(column_error_to_py)?,
                     )
@@ -27055,7 +27034,12 @@ impl PyDataFrame {
                         .get_level_values(level)
                         .map(|values| {
                             (
-                                multi.names().get(level).cloned().flatten(),
+                                multi
+                                    .names()
+                                    .get(level)
+                                    .cloned()
+                                    .flatten()
+                                    .map(String::from),
                                 values.labels().to_vec(),
                             )
                         })
@@ -27169,7 +27153,7 @@ impl PyDataFrame {
         ])
         .map_err(index_error_to_py)?
         .set_names(vec![
-            self.inner.index().name().map(String::from),
+            self.inner.index().name().cloned(),
             multi.names().get(1).cloned().flatten(),
         ]);
         DataFrame::new_with_column_order(Index::new(flat), columns, order)
@@ -31858,7 +31842,7 @@ impl PyDataFrame {
                             .get(position)
                             .cloned()
                             .flatten()
-                            .unwrap_or_else(|| format!("level_{position}"));
+                            .map_or_else(|| format!("level_{position}"), String::from);
                         out = out
                             .insert(
                                 slot,
@@ -33369,7 +33353,7 @@ impl PyDataFrame {
         let column_keys_only = by
             .iter()
             .zip(&key_names)
-            .all(|(column, name)| name.as_deref() == Some(column.as_str()));
+            .all(|(column, name)| name.as_deref() == Some(column));
         if !as_index && !column_keys_only {
             return Err(not_implemented(
                 "DataFrame.groupby(as_index=False) over keys that are not columns",
@@ -33571,14 +33555,22 @@ impl PyDataFrame {
                 // 'tight' is 'split' and the axes' names, one per level (it
                 // was refused).
                 if orient == "tight" {
-                    let index_names: Vec<Option<String>> = match self.inner.row_multiindex() {
+                    // The axis names, typed (fvsao.64).
+                    let typed =
+                        |names: Vec<Option<LabelName>>| -> PyResult<Vec<Option<Py<PyAny>>>> {
+                            names
+                                .iter()
+                                .map(|name| axis_name_to_py(py, name.as_ref()))
+                                .collect()
+                        };
+                    let index_names = typed(match self.inner.row_multiindex() {
                         Some(levels) => levels.names().to_vec(),
-                        None => vec![self.inner.index().name().map(String::from)],
-                    };
-                    let column_names: Vec<Option<String>> = match self.inner.columns_multiindex() {
+                        None => vec![self.inner.index().name().cloned()],
+                    })?;
+                    let column_names = typed(match self.inner.columns_multiindex() {
                         Some(levels) => levels.names().to_vec(),
-                        None => vec![self.inner.columns_name().map(String::from)],
-                    };
+                        None => vec![self.inner.columns_name().cloned()],
+                    })?;
                     out.set_item("index_names", index_names)?;
                     out.set_item("column_names", column_names)?;
                 }
@@ -34539,13 +34531,16 @@ impl PyDataFrame {
             })?;
             let mut columns = std::collections::BTreeMap::new();
             let mut order = Vec::with_capacity(multi.nlevels() + 1);
+            // Each variable column is labelled by its level's typed name
+            // (fvsao.64), else `variable_i`.
+            let mut labels = Vec::with_capacity(multi.nlevels());
             for level in 0..multi.nlevels() {
-                let name = multi
-                    .names()
-                    .get(level)
-                    .cloned()
-                    .flatten()
-                    .unwrap_or_else(|| format!("variable_{level}"));
+                let label = multi.names().get(level).cloned().flatten().map_or_else(
+                    || IndexLabel::Utf8(format!("variable_{level}")),
+                    |name| name.label(),
+                );
+                let name = fp_frame::column_key(&label);
+                labels.push(label);
                 let values: Vec<Scalar> = (0..multi.len())
                     .flat_map(|column| {
                         let label = multi
@@ -34564,7 +34559,8 @@ impl PyDataFrame {
             columns.insert(value_label.to_owned(), value);
             order.push(value_label.to_owned());
             res = DataFrame::new_with_column_order(res.index().clone(), columns, order)
-                .map_err(frame_error_to_py)?;
+                .map_err(frame_error_to_py)?
+                .with_recorded_column_labels(labels);
         }
         Ok(PyDataFrame { inner: res })
     }
@@ -37525,13 +37521,13 @@ impl PyDataFrame {
                 .collect::<PyResult<_>>()?,
             None => vec![index.labels().to_vec()],
         };
-        let mut names: Vec<Option<String>> = match row_multi {
+        let mut names: Vec<Option<LabelName>> = match row_multi {
             Some(multi) => multi.names().to_vec(),
-            None => vec![index.name().map(String::from)],
+            None => vec![index.name().cloned()],
         };
         // The column level is named after the column axis (an unstack's
         // moved level; it was unnamed).
-        names.push(self.inner.columns_name().map(String::from));
+        names.push(self.inner.columns_name().cloned());
         let row_labels = index.labels();
         let columns = self.inner.column_names();
         let mut arrays: Vec<Vec<IndexLabel>> = vec![Vec::new(); row_levels.len() + 1];
@@ -37819,7 +37815,7 @@ impl PyDataFrame {
         if list_like && index.row_multiindex().is_none() {
             let levels = fp_index::MultiIndex::from_arrays(vec![index.labels().to_vec()])
                 .map_err(index_error_to_py)?
-                .set_names(vec![index.name().map(String::from)]);
+                .set_names(vec![index.name().cloned()]);
             index = index
                 .with_row_multiindex(levels)
                 .map_err(index_error_to_py)?;
@@ -38010,12 +38006,10 @@ impl PyDataFrame {
         let df = match self.inner.row_multiindex() {
             // A list names each level; index= as a dict / function maps them.
             Some(levels) => {
-                let names = rename_axis_names(&level_names(levels.names()), mapper, index)?;
-                self.inner.clone().with_row_multiindex(
-                    levels
-                        .clone()
-                        .set_names(names.into_iter().map(|n| n.map(String::from)).collect()),
-                )
+                let names = rename_axis_names(levels.names(), mapper, index)?;
+                self.inner
+                    .clone()
+                    .with_row_multiindex(levels.clone().set_names(names))
             }
             // The typed name, or none (rename_axis(None) named it '').
             None => {
@@ -38863,8 +38857,8 @@ impl PyDataFrame {
                         );
                         names.push(
                             levels.names()[level]
-                                .clone()
-                                .unwrap_or_else(|| format!("level_{level}")),
+                                .as_ref()
+                                .map_or_else(|| format!("level_{level}"), ToString::to_string),
                         );
                     }
                 }
@@ -41010,7 +41004,11 @@ fn multiindex_level_position(
     multi
         .names()
         .iter()
-        .position(|candidate| candidate.as_deref() == Some(name.as_str()))
+        .position(|candidate| {
+            candidate
+                .as_ref()
+                .is_some_and(|candidate| *candidate == name)
+        })
         .ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("Level {name} not found"))
         })
@@ -41058,13 +41056,13 @@ fn multiindex_levels_index(
         })
         .collect::<Result<_, _>>()
         .map_err(index_error_to_py)?;
-    let names: Vec<Option<String>> = keep
+    let names: Vec<Option<LabelName>> = keep
         .iter()
         .map(|&level| multi.names().get(level).cloned().flatten())
         .collect();
     if remaining.len() == 1 {
         let labels = remaining.into_iter().next().unwrap_or_default();
-        return Ok((Index::new(labels).rename_index(names[0].as_deref()), None));
+        return Ok((Index::new(labels).rename_index(names[0].clone()), None));
     }
     let flat: Vec<IndexLabel> = (0..positions.len())
         .map(|row| {
@@ -42060,8 +42058,8 @@ impl PySeriesStringAccessor {
         let levels = fp_index::MultiIndex::from_arrays(vec![outer, inner])
             .map_err(index_error_to_py)?
             .set_names(vec![
-                self.series.index().name().map(String::from),
-                Some("match".to_owned()),
+                self.series.index().name().cloned(),
+                Some("match".into()),
             ]);
         let flat = levels.to_flat_index("/");
         let columns: BTreeMap<String, Column> = names
@@ -43735,9 +43733,9 @@ fn func_columns(frame: DataFrame, source: &DataFrame, funcs: &[&str]) -> PyResul
             level.push(label);
         }
     }
-    let mut names: Vec<Option<String>> = match source_multi {
+    let mut names: Vec<Option<LabelName>> = match source_multi {
         Some(multi) => multi.names().to_vec(),
-        None => vec![source.columns_name().map(String::from)],
+        None => vec![source.columns_name().cloned()],
     };
     names.push(None);
     let multi = fp_index::MultiIndex::from_arrays(levels)
@@ -45166,7 +45164,7 @@ fn resolve_groupby_keys(
     py: Python<'_>,
     frame: &DataFrame,
     by: &Bound<'_, PyAny>,
-) -> PyResult<(DataFrame, Vec<String>, Vec<Option<String>>)> {
+) -> PyResult<(DataFrame, Vec<String>, Vec<Option<LabelName>>)> {
     let is_column = |key: &Bound<'_, PyAny>| {
         key.extract::<String>()
             .is_ok_and(|name| frame.column(&name).is_some())
@@ -45201,8 +45199,9 @@ fn resolve_groupby_keys(
             if frame.column(&name).is_none() {
                 return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(name));
             }
-            columns.push(name.clone());
-            names.push(Some(name));
+            // A column key is named by the column's typed label (fvsao.64).
+            names.push(Some(frame.column_series_name(&name)));
+            columns.push(name);
             continue;
         }
         let (column, name) = groupby_key_column(py, frame, key)?;
@@ -45234,9 +45233,9 @@ fn groupby_key_column(
     py: Python<'_>,
     frame: &DataFrame,
     key: &Bound<'_, PyAny>,
-) -> PyResult<(Column, Option<String>)> {
+) -> PyResult<(Column, Option<LabelName>)> {
     if let Ok(series) = key.extract::<PyRef<'_, PySeries>>() {
-        let name = (!series.inner.name().is_empty()).then(|| series.inner.name().to_string());
+        let name = (!series.inner.name().is_empty()).then(|| series.inner.name().clone());
         let aligned = if series.inner.index().labels() == frame.index().labels() {
             series.inner.clone()
         } else {
@@ -45263,7 +45262,7 @@ fn groupby_key_column(
         ));
     }
     if let Some(column) = py_array_like_column(py, key)? {
-        return Ok((column, py_index_arg_name(key).map(String::from)));
+        return Ok((column, py_index_arg_name(key)));
     }
     if let Ok(list) = key.cast::<PyList>() {
         let values = list
@@ -45309,10 +45308,10 @@ fn flat_index_level_values(index: &Index, level: &Bound<'_, PyAny>) -> PyResult<
 fn group_by_index_level(
     frame: &DataFrame,
     level: &Bound<'_, PyAny>,
-) -> PyResult<(DataFrame, Vec<String>, Vec<Option<String>>)> {
+) -> PyResult<(DataFrame, Vec<String>, Vec<Option<LabelName>>)> {
     // A row MultiIndex: each requested level (a position, a name, or a list
     // of them) rides as a key column named for the level (fvsao.36; it
-    // raised NotImplementedError).
+    // raised NotImplementedError), its name typed (fvsao.64).
     if let Some(multi) = frame.row_multiindex() {
         let mut df = frame.clone();
         let mut keys = Vec::new();
@@ -45349,7 +45348,7 @@ fn group_by_index_level(
     let df = frame
         .with_column(key_column.clone(), column)
         .map_err(frame_error_to_py)?;
-    Ok((df, vec![key_column], vec![index.name().map(String::from)]))
+    Ok((df, vec![key_column], vec![index.name().cloned()]))
 }
 
 /// One group's `groupby.apply(func)` result, sorted as pandas'
@@ -45380,7 +45379,7 @@ impl Applied {
 /// (pandas' `_concat_objects`).
 enum AppliedLayout {
     /// Under leading levels holding each result's group key, named.
-    Keyed(Vec<Vec<IndexLabel>>, Vec<Option<String>>),
+    Keyed(Vec<Vec<IndexLabel>>, Vec<Option<LabelName>>),
     /// Back in the original row order: each concatenated row's original
     /// position (every result kept its group's rows).
     Restored(Vec<usize>),
@@ -45399,7 +45398,7 @@ fn restored_order(origin: &[usize]) -> Vec<usize> {
 /// keeps the name its pieces share.
 fn keyed_group_rows(
     keys: &[Vec<IndexLabel>],
-    key_names: Vec<Option<String>>,
+    key_names: Vec<Option<LabelName>>,
     pieces: &[&Index],
 ) -> PyResult<(Vec<IndexLabel>, fp_index::MultiIndex)> {
     let (flat, levels) = keyed_rows(keys, pieces, None)?;
@@ -45493,10 +45492,10 @@ fn index_rows(index: &Index) -> Vec<Vec<IndexLabel>> {
 }
 
 /// The name of every level of `index`.
-fn index_level_names(index: &Index) -> Vec<Option<String>> {
+fn index_level_names(index: &Index) -> Vec<Option<LabelName>> {
     match index.row_multiindex() {
         Some(levels) => levels.names().to_vec(),
-        None => vec![index.name().map(String::from)],
+        None => vec![index.name().cloned()],
     }
 }
 
@@ -45548,8 +45547,9 @@ pub struct PyGroupBy {
     by: Vec<String>,
     /// The name each key gives the result (a column key's name; an array,
     /// Series, Index or callable key's own name, None when unnamed); such a
-    /// key rides in `df` as a key column of its own (fvsao.19).
-    key_names: Vec<Option<String>>,
+    /// key rides in `df` as a key column of its own (fvsao.19). Typed: a
+    /// column key's is its column's label (fvsao.64).
+    key_names: Vec<Option<LabelName>>,
     /// pandas' `groupby(as_index=, sort=, dropna=)` (br-frankenpandas-n57tz:
     /// fp-frame had all three; the binding took only `by`).
     as_index: bool,
@@ -45575,25 +45575,7 @@ impl PyGroupBy {
         let by_refs: Vec<&str> = self.by.iter().map(String::as_str).collect();
         self.df
             .groupby_full_options(&by_refs, self.as_index, self.sort, self.dropna)?
-            .with_key_names(self.typed_key_names())
-    }
-
-    /// The key names, a column key's as its column's typed label: groupby(0)
-    /// names the result's index the integer 0 (fvsao.64; it was '0').
-    fn typed_key_names(&self) -> Vec<Option<LabelName>> {
-        self.key_names
-            .iter()
-            .zip(&self.by)
-            .map(|(name, by)| {
-                name.as_ref().map(|name| {
-                    if name == by {
-                        self.df.column_series_name(name)
-                    } else {
-                        LabelName::from(name)
-                    }
-                })
-            })
-            .collect()
+            .with_key_names(self.key_names.clone())
     }
 
     /// Every group's label and row positions in pandas' group order (by key,
@@ -45641,7 +45623,7 @@ impl PyGroupBy {
             .by
             .iter()
             .zip(&self.key_names)
-            .filter(|(column, name)| name.as_deref() != Some(column.as_str()))
+            .filter(|(column, name)| name.as_deref() != Some(column))
             .map(|(column, _)| column.as_str())
             .filter(|column| frame.column(column).is_some())
             .collect();
@@ -45710,7 +45692,7 @@ impl PyGroupBy {
     }
 
     /// The names of the key levels `apply` lays its results out under.
-    fn apply_key_names(&self, key_index: &Index) -> Vec<Option<String>> {
+    fn apply_key_names(&self, key_index: &Index) -> Vec<Option<LabelName>> {
         if self.as_index {
             index_level_names(key_index)
         } else {
@@ -45764,7 +45746,7 @@ impl PyGroupBy {
     /// the keys' labels named after them, carrying the MultiIndex levels
     /// over several keys.
     fn group_key_index(&self, groups: &[(IndexLabel, Vec<usize>)]) -> PyResult<Index> {
-        if let [name] = self.typed_key_names().as_slice() {
+        if let [name] = self.key_names.as_slice() {
             let labels = groups.iter().map(|(key, _)| key.clone()).collect();
             return Ok(Index::new(labels).set_names(name.clone()));
         }
@@ -46126,7 +46108,7 @@ impl PyGroupBy {
                     .grouped()
                     .and_then(|gb| gb.group_codes())
                     .map_err(frame_error_to_py)?;
-                let groups = match (by, self.typed_key_names().as_slice()) {
+                let groups = match (by, self.key_names.as_slice()) {
                     ([_], [name]) => groups.set_names(name.clone()),
                     _ => groups,
                 };
@@ -46145,7 +46127,7 @@ impl PyGroupBy {
         // The key Series carries the key's own (typed) name (None -> ""),
         // which names the result's index (fvsao.19, fvsao.64).
         let key_name = self
-            .typed_key_names()
+            .key_names
             .first()
             .cloned()
             .flatten()
@@ -46397,7 +46379,7 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .size()
             .map_err(frame_error_to_py)?;
-        let key = match self.typed_key_names().as_slice() {
+        let key = match self.key_names.as_slice() {
             [key] => key.clone(),
             _ => counts.index().name().cloned(),
         };
@@ -47007,7 +46989,7 @@ impl PyGroupBy {
             .by
             .iter()
             .zip(&self.key_names)
-            .filter(|(column, name)| name.as_deref() != Some(column.as_str()))
+            .filter(|(column, name)| name.as_deref() != Some(column))
             .map(|(column, _)| column.as_str())
             .collect();
         let kept: Vec<&str> = self
@@ -47102,7 +47084,7 @@ impl PyGroupBy {
         let mut column_keys = Vec::new();
         let mut own_keys = Vec::new();
         for (column, name) in self.by.iter().zip(&self.key_names) {
-            if name.as_deref() == Some(column.as_str()) {
+            if name.as_deref() == Some(column) {
                 column_keys.push(column.as_str());
             } else {
                 own_keys.push(column.as_str());
@@ -47461,7 +47443,7 @@ impl PyGroupBy {
             .by
             .iter()
             .zip(&self.key_names)
-            .filter(|(column, name)| name.as_deref() != Some(column.as_str()))
+            .filter(|(column, name)| name.as_deref() != Some(column))
             .map(|(column, _)| column.as_str())
             .collect();
         let kept: Vec<&str> = self
@@ -47718,7 +47700,7 @@ impl PyGroupBy {
             .by
             .iter()
             .zip(&self.key_names)
-            .filter(|(column, name)| name.as_deref() == Some(column.as_str()))
+            .filter(|(column, name)| name.as_deref() == Some(column))
             .map(|(column, _)| column.as_str())
             .collect();
         let others: Vec<String> = self
@@ -47761,7 +47743,11 @@ impl PyGroupBy {
         let mut by = self.by.clone();
         by.extend(values.iter().cloned());
         let mut key_names = self.key_names.clone();
-        key_names.extend(values.iter().map(|name| Some(name.clone())));
+        key_names.extend(
+            values
+                .iter()
+                .map(|name| Some(self.df.column_series_name(name))),
+        );
         let counting = PyGroupBy {
             df: self.df.clone(),
             by,
@@ -48082,7 +48068,7 @@ impl PySeriesGroupBy {
                             .group_codes()
                     })
                     .map_err(frame_error_to_py)?;
-                let key_name = Some(self.by.name().to_string()).filter(|name| !name.is_empty());
+                let key_name = Some(self.by.name().clone()).filter(|name| !name.is_empty());
                 (window_groups_from_codes(&codes, &groups), vec![key_name])
             }
         };
@@ -48961,7 +48947,7 @@ impl PySeriesGroupBy {
             kept_rows &= matches!(&result, Applied::Series(out) if out.index().labels() == rows);
             results.push(result);
         }
-        let key_name = self.by.name().as_str();
+        let key_name = self.by.name();
         let key_name = (!key_name.is_empty()).then_some(key_name);
         // pandas' SeriesGroupBy decides on the FIRST result, None or not.
         match results.first() {
@@ -48992,7 +48978,7 @@ impl PySeriesGroupBy {
                     }
                 }
                 let layout = if self.group_keys {
-                    AppliedLayout::Keyed(keys, vec![key_name.map(str::to_owned)])
+                    AppliedLayout::Keyed(keys, vec![key_name.cloned()])
                 } else if kept_rows {
                     AppliedLayout::Restored(origin)
                 } else {
@@ -49250,7 +49236,12 @@ impl PySeriesGroupBy {
     #[getter]
     fn keys(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(levels) = self.groups.as_ref().and_then(Index::row_multiindex) {
-            return Ok(PyList::new(py, levels.names())?.into_any().unbind());
+            let names = levels
+                .names()
+                .iter()
+                .map(|name| axis_name_to_py(py, name.as_ref()))
+                .collect::<PyResult<Vec<_>>>()?;
+            return Ok(PyList::new(py, names)?.into_any().unbind());
         }
         Ok(pyo3::types::PyString::new(py, self.by.name())
             .into_any()
@@ -50726,7 +50717,7 @@ fn frame_row_index(frame: &DataFrame) -> PyResult<Index> {
 fn keyed_rows(
     keys: &[Vec<IndexLabel>],
     pieces: &[&Index],
-    names: Option<Vec<Option<String>>>,
+    names: Option<Vec<Option<LabelName>>>,
 ) -> PyResult<(Vec<IndexLabel>, fp_index::MultiIndex)> {
     // Each key is one level (several for a groupby's tuple keys); each
     // piece's index adds its own levels after them.
@@ -50742,7 +50733,7 @@ fn keyed_rows(
     }
     let level_name = |piece: &Index, level: usize| match piece.row_multiindex() {
         Some(multi) => multi.names().get(level).cloned().flatten(),
-        None => piece.name().map(String::from),
+        None => piece.name().cloned(),
     };
     let rows: usize = pieces.iter().map(|piece| piece.len()).sum();
     let mut arrays = vec![Vec::with_capacity(rows); key_levels + index_levels];
@@ -50861,7 +50852,7 @@ fn concat(
             .call_method("sort_index", (), Some(&sort_kwargs))?
             .unbind());
     }
-    let mut names: Option<Vec<Option<String>>> = None;
+    let mut names: Option<Vec<Option<LabelName>>> = None;
     if let Some(kwargs) = kwargs {
         if let Some(flag) = kwargs.get_item("verify_integrity")?
             && !flag.is_truthy()?
@@ -50869,9 +50860,8 @@ fn concat(
             kwargs.del_item("verify_integrity")?;
         }
         if let Some(given) = kwargs.get_item("names")? {
-            if !given.is_none() {
-                names = Some(given.extract()?);
-            }
+            // Each name keeps its type (fvsao.64).
+            names = extract_index_names_flexible(Some(&given))?;
             kwargs.del_item("names")?;
         }
     }
@@ -51015,7 +51005,7 @@ fn concat(
                     ),
                     None => (
                         vec![frame.column_labels()],
-                        vec![frame.columns_name().map(String::from)],
+                        vec![frame.columns_name().cloned()],
                     ),
                 })
             };
@@ -60134,7 +60124,7 @@ pub struct PyGroupedWindow {
     kwargs: Option<Py<PyDict>>,
     target: ResampleTarget,
     groups: Vec<WindowGroup>,
-    key_names: Vec<Option<String>>,
+    key_names: Vec<Option<LabelName>>,
 }
 
 impl PyGroupedWindow {
@@ -60143,7 +60133,7 @@ impl PyGroupedWindow {
         kind: &'static str,
         target: ResampleTarget,
         groups: Vec<WindowGroup>,
-        key_names: Vec<Option<String>>,
+        key_names: Vec<Option<LabelName>>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
@@ -60193,7 +60183,7 @@ impl PyGroupedWindow {
         let mut frame_parts: Vec<DataFrame> = Vec::new();
         let mut outer: Vec<Vec<IndexLabel>> = vec![Vec::new(); self.key_names.len()];
         let mut inner: Vec<IndexLabel> = Vec::new();
-        let mut inner_name: Option<Option<String>> = None;
+        let mut inner_name: Option<Option<LabelName>> = None;
         for group in groups {
             let sub = match &self.target {
                 ResampleTarget::Series(s) => {
@@ -60225,7 +60215,7 @@ impl PyGroupedWindow {
                     self.kind
                 )));
             }
-            inner_name.get_or_insert_with(|| index.name().map(String::from));
+            inner_name.get_or_insert_with(|| index.name().cloned());
             for label in index.labels() {
                 for (level, key) in outer.iter_mut().zip(&group.key) {
                     level.push(key.clone());
@@ -64406,7 +64396,7 @@ mod tests {
         let gb = PyGroupBy {
             df: py_df.inner.clone(),
             by: vec!["grp".to_string()],
-            key_names: vec![Some("grp".to_string())],
+            key_names: vec![Some("grp".into())],
             as_index: true,
             sort: true,
             dropna: true,

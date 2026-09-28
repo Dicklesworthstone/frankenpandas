@@ -2722,7 +2722,7 @@ pub fn write_csv_string_with_options(
         let level_names: Vec<String> = row_multiindex
             .names()
             .iter()
-            .map(|name| name.clone().unwrap_or_default())
+            .map(|name| name.as_ref().map(ToString::to_string).unwrap_or_default())
             .collect();
         // The levels head their own columns; aliases name the data columns.
         let column_names =
@@ -7331,7 +7331,11 @@ fn restore_row_multiindex_names(
     if row_multiindex.nlevels() != names.len() {
         return Ok(frame);
     }
-    let renamed = row_multiindex.clone().set_names(names.to_vec());
+    let names = names
+        .iter()
+        .map(|name| name.clone().map(Into::into))
+        .collect();
+    let renamed = row_multiindex.clone().set_names(names);
     frame.with_row_multiindex(renamed).map_err(IoError::from)
 }
 
@@ -10120,8 +10124,9 @@ fn pandas_arrow_layout(
         if let Some(row_multiindex) = frame.row_multiindex() {
             for (level, name) in row_multiindex.names().iter().enumerate() {
                 let labels = row_multiindex.get_level_values(level)?;
-                let field = field_for(level, name.as_deref());
-                levels.push((field, name.clone(), level_column(labels.labels(), None)?));
+                let field = field_for(level, name.as_ref().map(|name| name.as_str()));
+                let name = name.clone().map(String::from);
+                levels.push((field, name, level_column(labels.labels(), None)?));
             }
         } else {
             let row_index = frame.index();
@@ -18297,7 +18302,7 @@ mod tests {
             .row_multiindex()
             .expect("row multiindex")
             .clone()
-            .set_names(names.iter().map(|n| n.map(str::to_owned)).collect());
+            .set_names(names.iter().map(|n| n.map(Into::into)).collect());
         frame.with_row_multiindex(renamed).expect("renamed levels")
     }
 
@@ -24201,9 +24206,9 @@ mod tests {
         assert_eq!(
             older.row_multiindex().unwrap().names().to_vec(),
             vec![
-                Some("__index_level_0__".to_owned()),
-                Some("__index_level_1__".to_owned()),
-                Some("__index_level_2__".to_owned()),
+                Some("__index_level_0__".into()),
+                Some("__index_level_1__".into()),
+                Some("__index_level_2__".into()),
             ]
         );
     }
