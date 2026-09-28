@@ -13451,3 +13451,106 @@ _EVERYDAY17_CASES = {
 def test_everyday17_like_pandas(case: str) -> None:
     run = _EVERYDAY17_CASES[case]
     assert _sdt_outcome(fpd, run) == _sdt_outcome(pd, run), case
+
+
+# br-frankenpandas-3agof (everyday probe 18): Timestamp.round('15min') was
+# NaT; pd.cut / qcut of an ndarray, Index or tuple raised, a list gave a
+# Series (pandas: a Categorical, an ndarray under labels=False) and retbins
+# was refused; dt.round of durations was all NaN. br-frankenpandas-1ly8z:
+# Series.quantile(0.1) was 1.4200000000000002 (numpy's percentile: 1.42).
+_E18_NINE = [0.3, 1.7, 2.2, 5.9, 7.1, 8.8, 9.05, 12.4, 13.3]
+
+
+def _e18_binned(r: Any) -> Any:
+    kind = type(r).__name__
+    values = [str(v) for v in r.tolist()]
+    if kind == "Categorical":
+        return (kind, values, [str(c) for c in r.categories], type(r.categories).__name__, r.ordered)
+    if kind == "ndarray":
+        return (kind, values, str(r.dtype))
+    return (kind, values, r.name, r.index.tolist(), str(r.dtype))
+
+
+def _e18_bins(pair: Any) -> Any:
+    binned, edges = pair
+    return (_e18_binned(binned), type(edges).__name__, str(edges.dtype), [repr(e) for e in edges.tolist()])
+
+
+_EVERYDAY18_CASES = {
+    "ts round 15min": lambda m: repr(m.Timestamp("2024-03-15 13:47:21").round("15min")),
+    "ts floor 7D": lambda m: repr(m.Timestamp("2024-03-15 13:47:21").floor("7D")),
+    "ts ceil 30s": lambda m: repr(m.Timestamp("2024-03-15 13:47:21").ceil("30s")),
+    "ts round 10ms": lambda m: repr(m.Timestamp("2024-03-15 13:47:21.123456").round("10ms")),
+    "ts round 2min tie to even": lambda m: repr(m.Timestamp("2024-01-01 00:03:00").round("2min")),
+    "tz ts round 15min": lambda m: repr(m.Timestamp("2024-03-15 13:47:21", tz="US/Eastern").round("15min")),
+    "ts round ME raises": lambda m: m.Timestamp("2024-03-15").round("ME"),
+    "ts floor W raises": lambda m: m.Timestamp("2024-03-15").floor("W"),
+    "ts round 0min raises": lambda m: m.Timestamp("2024-03-15").round("0min"),
+    "ts max round D raises": lambda m: m.Timestamp.max.round("D"),
+    "NaT round": lambda m: repr(m.NaT.round("15min")),
+    "td components type": lambda m: type(m.Timedelta("1 days 02:47:21").components).__name__,
+    "dt round durations": lambda m: repr(
+        m.Series(m.TimedeltaIndex(["1 days 02:47:21", "00:07:30", None])).dt.round("15min").tolist()
+    ),
+    "dt ceil durations": lambda m: repr(m.Series(m.TimedeltaIndex(["1 days 02:47:21"])).dt.ceil("7D").tolist()),
+    "cut ndarray": lambda m: _e18_binned(m.cut(np.array([1, 2, 3, 4, 5.5]), 2)),
+    "cut Index": lambda m: _e18_binned(m.cut(m.Index([1, 2, 3, 4, 5.5]), [0, 2, 6])),
+    "cut tuple": lambda m: _e18_binned(m.cut((1, 2, 3, 4, 5.5), 2)),
+    "cut list": lambda m: _e18_binned(m.cut([1, 2, 3, 4, 5.5], 2)),
+    "cut list labels False": lambda m: _e18_binned(m.cut([1, 2, 3, 4, 5.5], [0, 2, 6], labels=False)),
+    "cut list NaN int bins": lambda m: _e18_binned(m.cut([1, np.nan, 3, 4], [0, 2, 6])),
+    "cut retbins": lambda m: _e18_bins(m.cut(_E18_NINE, 3, retbins=True)),
+    "cut left retbins": lambda m: _e18_bins(m.cut(_E18_NINE, 3, right=False, retbins=True)),
+    "cut int edges retbins": lambda m: _e18_bins(m.cut(_E18_NINE, [0, 5, 10, 15], retbins=True)),
+    "cut ndarray edges": lambda m: _e18_binned(m.cut(_E18_NINE, np.array([0, 5, 15]))),
+    "qcut ndarray": lambda m: _e18_binned(m.qcut(np.array(_E18_NINE), 2)),
+    "qcut labels False": lambda m: _e18_binned(m.qcut(_E18_NINE, 3, labels=False)),
+    "qcut retbins": lambda m: _e18_bins(m.qcut(_E18_NINE, 3, retbins=True)),
+    "qcut deciles retbins": lambda m: _e18_bins(m.qcut(list(range(1, 32)), 10, retbins=True)),
+    "qcut drop retbins": lambda m: _e18_bins(m.qcut([1, 1, 1, 2, 3], 4, duplicates="drop", retbins=True)),
+    "qcut all NaN raises": lambda m: m.qcut([np.nan, np.nan], 2),
+    # (Its empty categories are an Index here, pandas' an empty IntervalIndex.)
+    "qcut all NaN drop": lambda m: [
+        (type(r).__name__, [str(v) for v in r], len(r.categories))
+        for r in [m.qcut([np.nan, np.nan], 2, duplicates="drop")]
+    ],
+    "cut empty raises": lambda m: m.cut([], 2),
+    "cut all NaN raises": lambda m: m.cut([np.nan, np.nan], 2),
+    "cut infinity raises": lambda m: m.cut([1, np.inf], 2),
+    "cut str raises": lambda m: m.cut("abc", 2),
+    "cut 2-D raises": lambda m: m.cut(np.array([[1, 2], [3, 4]]), 2),
+    "iterate Categorical": lambda m: [str(v) for v in m.cut([1, 2, 3, 4], 2)],
+    "category Series.values": lambda m: type(m.Series(["a", "b"], dtype="category").values).__name__,
+    "quantile 0.1": lambda m: repr(float(m.Series(_E18_NINE).quantile(0.1))),
+    "quantile 1/3": lambda m: repr(float(m.Series(_E18_NINE).quantile(1 / 3))),
+    "quantile list": lambda m: [repr(float(v)) for v in m.Series(_E18_NINE).quantile([0.1, 0.3, 0.95]).tolist()],
+    "quantile 0.45": lambda m: repr(float(m.Series([0.1, 0.7, 0.2, 0.9, 0.35, 1.3]).quantile(0.45))),
+    "int quantile 0.3": lambda m: repr(float(m.Series([1, 5, 7, 10, 11]).quantile(0.3))),
+    "quantile midpoint": lambda m: repr(float(m.Series([-4.2, 1.1]).quantile(0.5, interpolation="midpoint"))),
+    "describe percentiles": lambda m: [
+        repr(float(v)) for v in m.Series(_E18_NINE).describe(percentiles=[0.1, 0.95]).tolist()
+    ],
+    "frame quantile": lambda m: [repr(float(v)) for v in m.DataFrame({"a": _E18_NINE}).quantile(0.1).tolist()],
+    # NEGATIVES: a bare unit rounds as before; a Series x is binned to a
+    # Series; groupby / rolling quantile keep pandas' own kernel arithmetic.
+    "ts round h": lambda m: repr(m.Timestamp("2024-03-15 13:47:21").round("h")),
+    "dt round datetimes": lambda m: repr(
+        m.Series(m.DatetimeIndex(["2024-03-15 13:47:21", None])).dt.round("15min").tolist()
+    ),
+    "cut Series": lambda m: _e18_binned(m.cut(m.Series([1, 2, 3, 4], index=list("abcd"), name="v"), 2)),
+    "qcut Series labels False": lambda m: _e18_binned(m.qcut(m.Series(_E18_NINE, name="v"), 3, labels=False)),
+    "groupby quantile": lambda m: [
+        repr(float(v))
+        for v in m.DataFrame({"k": [0, 0, 0, 0, 1, 1, 1, 1, 1], "a": _E18_NINE}).groupby("k")["a"].quantile(0.3)
+    ],
+    "rolling quantile": lambda m: [
+        repr(float(v)) for v in m.Series(_E18_NINE).rolling(5).quantile(0.3).dropna().tolist()
+    ],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EVERYDAY18_CASES))
+def test_everyday18_like_pandas(case: str) -> None:
+    run = _EVERYDAY18_CASES[case]
+    assert _sdt_outcome(fpd, run) == _sdt_outcome(pd, run), case

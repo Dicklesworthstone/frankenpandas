@@ -2556,6 +2556,38 @@ impl PyNaTType {
         i64::MIN as isize
     }
 
+    /// pandas' NaT rounds to NaT whatever the frequency (the methods were
+    /// missing: AttributeError).
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn round(
+        &self,
+        py: Python<'_>,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        nat_object(py)
+    }
+
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn floor(
+        &self,
+        py: Python<'_>,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        nat_object(py)
+    }
+
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn ceil(
+        &self,
+        py: Python<'_>,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        nat_object(py)
+    }
+
     fn __richcmp__(&self, _other: &Bound<'_, PyAny>, op: pyo3::class::basic::CompareOp) -> bool {
         match op {
             pyo3::class::basic::CompareOp::Eq => false,
@@ -2642,8 +2674,9 @@ impl PyNaTType {
     }
 }
 
-/// Components breakdown for `Timedelta` (pandas `Timedelta.components`).
-#[pyclass(name = "TimedeltaComponents", from_py_object)]
+/// Components breakdown for `Timedelta` (pandas `Timedelta.components`),
+/// named as pandas' namedtuple ('Components'; it was 'TimedeltaComponents').
+#[pyclass(name = "Components", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyTimedeltaComponents {
     #[pyo3(get)]
@@ -3292,12 +3325,29 @@ impl PyTimedelta {
     }
 }
 
-/// A fixed frequency's length for Timedelta rounding: a calendar one is
-/// pandas' ValueError, a zero one ZeroDivisionError.
+/// A fixed frequency's length for rounding: a calendar one is pandas'
+/// ValueError naming the offset ('<MonthEnd> is a non-fixed frequency'),
+/// anything else its invalid-frequency ValueError.
+fn fixed_freq_nanos(freq: &str) -> PyResult<i64> {
+    parse_freq_to_nanos(freq).map_err(|_| {
+        // pandas' bare 'W' is W-SUN.
+        let offset = offset_for_freqstr(freq).ok().flatten().or_else(|| {
+            freq.ends_with('W')
+                .then(|| offset_for_freqstr(&format!("{freq}-SUN")).ok().flatten())
+                .flatten()
+        });
+        let message = match offset {
+            Some(offset) => format!("{} is a non-fixed frequency", offset.__repr__()),
+            None => format!("Invalid frequency: {freq}"),
+        };
+        PyErr::new::<pyo3::exceptions::PyValueError, _>(message)
+    })
+}
+
+/// A fixed frequency's length for Timedelta rounding (see
+/// [`fixed_freq_nanos`]); a zero one is pandas' ZeroDivisionError.
 fn duration_step(freq: &str) -> PyResult<i64> {
-    let step = parse_freq_to_nanos(freq).map_err(|_| {
-        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{freq} is a non-fixed frequency"))
-    })?;
+    let step = fixed_freq_nanos(freq)?;
     if step == 0 {
         return Err(PyErr::new::<pyo3::exceptions::PyZeroDivisionError, _>(
             "integer division or modulo by zero",
@@ -3744,6 +3794,35 @@ impl PyTimestamp {
             Some(zone) if !self.inner.is_nat() => wall.localized(Some(zone)),
             _ => Ok(wall),
         }
+    }
+
+    /// floor / ceil / round (`op`) to a multiple of the fixed `freq` on the
+    /// wall clock: any multiple ('15min', '7D', '30s') - it read only a bare
+    /// unit, so `round('15min')` was NaT - with pandas' ValueError for a
+    /// calendar, unknown or zero frequency (they were NaT too) and its
+    /// OutOfBoundsDatetime past the nanosecond range.
+    fn rounded(&self, freq: &str, op: fn(&Timestamp, i64) -> Timestamp) -> PyResult<Self> {
+        if self.inner.is_nat() {
+            return Ok(self.clone());
+        }
+        let step = fixed_freq_nanos(freq)?;
+        if step == 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Division by zero in rounding",
+            ));
+        }
+        let rounded = self.on_wall(|wall| op(wall, step))?;
+        if rounded.inner.is_nat() {
+            let shown = match offset_for_freqstr(freq) {
+                Ok(Some(offset)) => offset.__repr__(),
+                _ => freq.to_owned(),
+            };
+            return Err(OutOfBoundsDatetime::new_err(format!(
+                "Cannot round {} to freq={shown} without overflow",
+                self.__str__()
+            )));
+        }
+        Ok(rounded)
     }
 
     /// pandas' `+HH:MM` for a tz-aware Timestamp's offset (`colon`) or its
@@ -4500,15 +4579,15 @@ impl PyTimestamp {
     // floor / ceil / round / normalize work on the wall clock; a tz-aware
     // result is that wall time back in its zone.
     fn floor(&self, freq: &str) -> PyResult<Self> {
-        self.on_wall(|wall| wall.floor_to_unit(freq))
+        self.rounded(freq, Timestamp::floor_to)
     }
 
     fn ceil(&self, freq: &str) -> PyResult<Self> {
-        self.on_wall(|wall| wall.ceil_to_unit(freq))
+        self.rounded(freq, Timestamp::ceil_to)
     }
 
     fn round(&self, freq: &str) -> PyResult<Self> {
-        self.on_wall(|wall| wall.round_to_unit(freq))
+        self.rounded(freq, Timestamp::round_to)
     }
 
     fn normalize(&self) -> PyResult<Self> {
@@ -22477,15 +22556,7 @@ impl PySeries {
         dropna: bool,
     ) -> PyResult<PySeries> {
         let counted = match bins.filter(|bins| !bins.is_none()) {
-            Some(bins) => {
-                let series = Bound::new(
-                    py,
-                    PySeries {
-                        inner: self.inner.clone(),
-                    },
-                )?;
-                cut_series(py, series.as_any(), bins, true, None, 3, true, "raise")?.inner
-            }
+            Some(bins) => cut_series(py, &self.inner, bins, true, None, 3, true, "raise")?.0,
             None => self.inner.clone(),
         };
         let r = counted
@@ -23533,9 +23604,14 @@ impl PySeries {
     }
 
     /// pandas' `Series.values`: a numpy array (int64 / float64 / bool /
-    /// datetime64[ns] / timedelta64[ns], else object) - it was a list.
+    /// datetime64[ns] / timedelta64[ns], else object) - it was a list - and
+    /// a categorical's Categorical (it was the object array of its values).
     #[getter]
     fn values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        if self.inner.column().categorical().is_some() {
+            let inner = self.inner.clone();
+            return Bound::new(py, PyCategorical { inner }).map(Bound::into_any);
+        }
         column_ndarray(py, self.inner.column())
     }
 
@@ -53695,7 +53771,11 @@ fn pivot_table<'py>(
     )
 }
 
-/// Bin values into discrete intervals (pandas `cut`).
+/// Bin values into discrete intervals (pandas `cut`) - any 1-D `x`: a
+/// Series for a Series, else a Categorical (the codes' ndarray under
+/// `labels=False`), with the edges' ndarray beside it under `retbins=True`
+/// (an ndarray or an Index raised TypeError, a list came back a Series and
+/// retbins was refused).
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (x, bins, right=true, labels=None, retbins=false, precision=3, include_lowest=false, duplicates="raise", ordered=true))]
@@ -53710,31 +53790,26 @@ fn cut(
     include_lowest: bool,
     duplicates: &str,
     ordered: bool,
-) -> PyResult<PySeries> {
-    // retbins returns the edges pandas computed too; not produced yet.
-    unsupported_params("cut", &[("retbins", !retbins)])?;
+) -> PyResult<Py<PyAny>> {
     if !matches!(duplicates, "raise" | "drop") {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
             "invalid value for 'duplicates' parameter, valid options are: raise, drop; got '{duplicates}'"
         )));
     }
+    let (series, series_input) = binning_input(py, x)?;
     let (labels, codes) = bin_labels_arg(labels)?;
     if codes {
-        let binned = cut(
+        let (binned, edges) = cut_series(
             py,
-            x,
+            &series,
             bins,
             right,
             None,
-            false,
             precision,
             include_lowest,
             duplicates,
-            true,
         )?;
-        return Ok(PySeries {
-            inner: bin_codes(&binned.inner)?,
-        });
+        return binned_result(py, bin_codes(&binned)?, series_input, true, retbins, edges);
     }
     // pandas' ordered=: False needs the labels and lets them repeat (one
     // category each); True refuses repeated labels. The keyword raised
@@ -53758,9 +53833,9 @@ fn cut(
         }
         _ => {}
     }
-    let binned = cut_series(
+    let (binned, edges) = cut_series(
         py,
-        x,
+        &series,
         bins,
         right,
         labels,
@@ -53769,14 +53844,13 @@ fn cut(
         duplicates,
     )?;
     if ordered {
-        return Ok(binned);
+        return binned_result(py, binned, series_input, false, retbins, edges);
     }
     // Unordered: one category per distinct label - in the labels' order,
     // or sorted when a label repeats (pandas then infers the categories:
     // Categorical(labels, categories=None)).
     let mut categories: Vec<Scalar> = Vec::new();
     let all: Vec<Scalar> = binned
-        .inner
         .column()
         .categorical()
         .map(|meta| meta.categories.clone())
@@ -53790,51 +53864,112 @@ fn cut(
         categories.sort_by(|a, b| a.semantic_cmp(b));
     }
     let column = binned
-        .inner
         .column()
         .clone()
         .with_categorical(Some(CategoricalMetadata::new(categories, false)));
-    Series::new(binned.inner.name(), binned.inner.index().clone(), column)
-        .map(|inner| PySeries { inner })
-        .map_err(frame_error_to_py)
+    let unordered =
+        Series::new(binned.name(), binned.index().clone(), column).map_err(frame_error_to_py)?;
+    binned_result(py, unordered, series_input, false, retbins, edges)
 }
 
-/// `pd.cut` after its argument checks (see [`cut`]).
+/// pd.cut / pd.qcut's `x` as a Series, and whether it was one. pandas bins
+/// any 1-D array-like - a list, tuple, ndarray or Index (an ndarray or an
+/// Index raised TypeError) - and refuses a scalar, a str or a 2-D array.
+fn binning_input(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<(Series, bool)> {
+    if let Ok(series) = x.extract::<PyRef<'_, PySeries>>() {
+        return Ok((series.inner.clone(), true));
+    }
+    let not_one_dimensional =
+        || PyErr::new::<pyo3::exceptions::PyValueError, _>("Input array must be 1 dimensional");
+    if x.is_instance_of::<pyo3::types::PyString>() || x.is_instance_of::<pyo3::types::PyBytes>() {
+        return Err(not_one_dimensional());
+    }
+    if let Ok(ndim) = x.getattr("ndim")
+        && ndim.extract::<i64>().ok() != Some(1)
+    {
+        return Err(not_one_dimensional());
+    }
+    let items = if x.hasattr("tolist")? {
+        x.call_method0("tolist")?
+    } else {
+        x.clone()
+    };
+    let Ok(items) = items.try_iter() else {
+        return Err(not_one_dimensional());
+    };
+    let values = items
+        .map(|item| py_to_scalar(py, &item?))
+        .collect::<PyResult<Vec<_>>>()?;
+    Series::from_values(
+        "",
+        (0..values.len())
+            .map(|i| IndexLabel::Int64(i as i64))
+            .collect(),
+        values,
+    )
+    .map(|series| (series, false))
+    .map_err(frame_error_to_py)
+}
+
+/// pd.cut / pd.qcut's answer: `binned` as a Series for a Series `x`, else
+/// pandas' Categorical - the codes' ndarray under `labels=False` - and
+/// under `retbins` the edges' ndarray beside it (an integer list's stay
+/// int64, as pandas'). A binning without edges refuses retbins.
+fn binned_result(
+    py: Python<'_>,
+    binned: Series,
+    series_input: bool,
+    codes: bool,
+    retbins: bool,
+    edges: Option<Vec<Scalar>>,
+) -> PyResult<Py<PyAny>> {
+    let result = if series_input {
+        PySeries { inner: binned }.into_py_any(py)?
+    } else if codes {
+        column_ndarray(py, binned.column())?.unbind()
+    } else {
+        PyCategorical { inner: binned }.into_py_any(py)?
+    };
+    if !retbins {
+        return Ok(result);
+    }
+    let Some(edges) = edges else {
+        return Err(not_implemented("cut(retbins=True) of a non-numeric x"));
+    };
+    let edges = edges
+        .iter()
+        .map(|edge| scalar_to_py(py, edge))
+        .collect::<PyResult<Vec<_>>>()?;
+    let edges = py
+        .import("numpy")?
+        .call_method1("asarray", (PyList::new(py, edges)?,))?;
+    PyTuple::new(py, [result, edges.unbind()])?.into_py_any(py)
+}
+
+/// pandas' refusal of repeated bin edges, `edges` shown as its float Index.
+fn repeated_bin_edges(edges: &[&str]) -> PyErr {
+    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+        "Bin edges must be unique: Index([{}], dtype='float64').\nYou can drop duplicate edges by setting the 'duplicates' kwarg",
+        edges.join(", ")
+    ))
+}
+
+/// `pd.cut` of `series` after its argument checks (see [`cut`]): the binned
+/// Series and pandas' edges (its `retbins`; None where they are not read).
 #[allow(clippy::too_many_arguments)]
 fn cut_series(
     py: Python<'_>,
-    x: &Bound<'_, PyAny>,
+    series: &Series,
     bins: &Bound<'_, PyAny>,
     right: bool,
     labels: Option<Vec<String>>,
     precision: usize,
     include_lowest: bool,
     duplicates: &str,
-) -> PyResult<PySeries> {
+) -> PyResult<(Series, Option<Vec<Scalar>>)> {
     // precision sets the digits of the interval labels; only pandas'
     // default is produced (it was ignored).
     unsupported_params("cut", &[("precision", precision == 3)])?;
-    let series = if let Ok(s) = x.extract::<PyRef<'_, PySeries>>() {
-        s.inner.clone()
-    } else if let Ok(list) = x.cast::<PyList>() {
-        let values: Vec<Scalar> = list
-            .iter()
-            .map(|v| py_to_scalar(py, &v))
-            .collect::<PyResult<Vec<_>>>()?;
-        Series::from_values(
-            "",
-            (0..values.len())
-                .map(|i| IndexLabel::Int64(i as i64))
-                .collect(),
-            values,
-        )
-        .map_err(frame_error_to_py)?
-    } else {
-        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "x must be a Series or list of numbers",
-        ));
-    };
-
     let label_strings = labels.unwrap_or_default();
     let label_refs: Option<Vec<&str>> = if label_strings.is_empty() {
         None
@@ -53847,7 +53982,7 @@ fn cut_series(
             "`bins` should be a positive integer.",
         ));
     }
-    let res = if let Ok(n_bins) = bins.extract::<usize>() {
+    if let Ok(n_bins) = bins.extract::<usize>() {
         // pandas: a positive count, and no more edges than memory holds
         // (numpy's MemoryError; the edges aborted the process).
         if n_bins == 0 {
@@ -53864,31 +53999,50 @@ fn cut_series(
                 i128::try_from(n_bins).unwrap_or(i128::MAX) + 1
             )));
         }
-        if label_refs.is_some() || !right || include_lowest {
-            let mut min_v = f64::INFINITY;
-            let mut max_v = f64::NEG_INFINITY;
-            for v in series.values() {
-                if let Ok(f) = v.to_f64() {
-                    if f < min_v {
-                        min_v = f;
-                    }
-                    if f > max_v {
-                        max_v = f;
-                    }
-                }
+        // pandas finds no range in nothing: an empty x is its ValueError,
+        // and an all-missing one has NaN edges - repeated, so refused
+        // unless dropped (or a lone pair) - where every value came back NaN.
+        if series.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Cannot cut empty array",
+            ));
+        }
+        if series.count() == 0 {
+            if duplicates == "drop" || n_bins == 1 {
+                let none = Series::from_categorical_codes(
+                    series.name(),
+                    vec![-1; series.len()],
+                    Vec::new(),
+                    true,
+                )
+                .map_err(frame_error_to_py)?;
+                let binned =
+                    Series::new(series.name(), series.index().clone(), none.column().clone())
+                        .map_err(frame_error_to_py)?;
+                return Ok((binned, Some(vec![Scalar::Float64(f64::NAN)])));
             }
-            if min_v.is_infinite() || max_v.is_infinite() {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "cannot cut empty or all-null series",
-                ));
-            }
-            // pandas' bins for an integer count: numpy's linspace from the
-            // min to the max (the last edge exactly the max), then the open
-            // side widened by 0.1% of the range so the extreme value lands
-            // in its bin - the first edge when right-closed, the LAST when
-            // left-closed (the max fell out as NaN with right=False) - or,
-            // for one repeated value, the range padded by 0.1% of it (0.001
-            // at zero).
+            return Err(repeated_bin_edges(&vec!["nan"; n_bins + 1]));
+        }
+        let extreme = |value: Result<Scalar, fp_frame::FrameError>| {
+            value
+                .ok()
+                .and_then(|value| value.to_f64().ok())
+                .filter(|value| !value.is_nan())
+        };
+        let range = extreme(series.min()).zip(extreme(series.max()));
+        if range.is_some_and(|(low, high)| low.is_infinite() || high.is_infinite()) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "cannot specify integer `bins` when input data contains infinity",
+            ));
+        }
+        // pandas' bins for an integer count: numpy's linspace from the
+        // min to the max (the last edge exactly the max), then the open
+        // side widened by 0.1% of the range so the extreme value lands
+        // in its bin - the first edge when right-closed, the LAST when
+        // left-closed (the max fell out as NaN with right=False) - or,
+        // for one repeated value, the range padded by 0.1% of it (0.001
+        // at zero).
+        let edges = range.map(|(mut min_v, mut max_v)| {
             let constant = min_v == max_v;
             if constant {
                 let pad = |v: f64| if v == 0.0 { 0.001 } else { 0.001 * v.abs() };
@@ -53906,42 +54060,49 @@ fn cut_series(
                     edges[n_bins] += adj;
                 }
             }
-            let edges: Vec<Scalar> = edges.into_iter().map(Scalar::Float64).collect();
-            fp_frame::cut_bins(
-                &series,
-                &edges,
-                right,
-                label_refs.as_deref(),
-                include_lowest,
-            )
-            .map_err(frame_error_to_py)?
+            edges.into_iter().map(Scalar::Float64).collect::<Vec<_>>()
+        });
+        let binned = if label_refs.is_some() || !right || include_lowest {
+            let Some(edges) = &edges else {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "cannot cut empty or all-null series",
+                ));
+            };
+            fp_frame::cut_bins(series, edges, right, label_refs.as_deref(), include_lowest)
         } else {
-            fp_frame::cut(&series, n_bins).map_err(frame_error_to_py)?
-        }
-    } else if let Ok(edges_list) = bins.cast::<PyList>() {
-        let mut edges: Vec<Scalar> = edges_list
-            .iter()
-            .map(|v| py_to_scalar(py, &v))
-            .collect::<PyResult<Vec<_>>>()?;
-        // duplicates='drop' bins between the distinct edges.
-        if duplicates == "drop" {
-            edges.dedup_by(|b, a| a.semantic_eq(b));
-        }
-        fp_frame::cut_bins(
-            &series,
-            &edges,
-            right,
-            label_refs.as_deref(),
-            include_lowest,
-        )
-        .map_err(frame_error_to_py)?
-    } else {
-        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            fp_frame::cut(series, n_bins)
+        };
+        return binned
+            .map(|binned| (binned, edges))
+            .map_err(frame_error_to_py);
+    }
+    // Any list-like of edges (a tuple or an ndarray raised TypeError).
+    let not_edges = || {
+        PyErr::new::<pyo3::exceptions::PyTypeError, _>(
             "bins must be an integer or a list of bin edges",
-        ));
+        )
     };
-
-    Ok(PySeries { inner: res })
+    if bins.is_instance_of::<pyo3::types::PyString>() {
+        return Err(not_edges());
+    }
+    let edge_items = if bins.hasattr("tolist")? {
+        bins.call_method0("tolist")?
+    } else {
+        bins.clone()
+    };
+    let Ok(edge_items) = edge_items.try_iter() else {
+        return Err(not_edges());
+    };
+    let mut edges: Vec<Scalar> = edge_items
+        .map(|v| py_to_scalar(py, &v?))
+        .collect::<PyResult<Vec<_>>>()?;
+    // duplicates='drop' bins between the distinct edges.
+    if duplicates == "drop" {
+        edges.dedup_by(|b, a| a.semantic_eq(b));
+    }
+    fp_frame::cut_bins(series, &edges, right, label_refs.as_deref(), include_lowest)
+        .map(|binned| (binned, Some(edges)))
+        .map_err(frame_error_to_py)
 }
 
 /// A cut/qcut `labels=` argument: the bin names, or None for pandas'
@@ -54001,17 +54162,20 @@ fn bin_codes(binned: &Series) -> PyResult<Series> {
 /// Discretize variable into equal-sized buckets based on rank or sample quantiles (pandas `qcut`).
 /// `duplicates='drop'` bins over the distinct edges where tied values repeat
 /// one; the default `'raise'` refuses them, as pandas (the keyword was
-/// unknown, and repeated edges were binned).
+/// unknown, and repeated edges were binned). Any 1-D `x`, answered as
+/// [`cut`]'s - with the edges' ndarray under `retbins=True` (the keyword
+/// was unknown).
 #[pyfunction]
-#[pyo3(signature = (x, q, labels=None, precision=3, duplicates="raise"))]
+#[pyo3(signature = (x, q, labels=None, retbins=false, precision=3, duplicates="raise"))]
 fn qcut(
     py: Python<'_>,
     x: &Bound<'_, PyAny>,
     q: &Bound<'_, PyAny>,
     labels: Option<&Bound<'_, PyAny>>,
+    retbins: bool,
     precision: usize,
     duplicates: &str,
-) -> PyResult<PySeries> {
+) -> PyResult<Py<PyAny>> {
     let drop_duplicates = match duplicates {
         "raise" => false,
         "drop" => true,
@@ -54021,36 +54185,11 @@ fn qcut(
             ));
         }
     };
+    let (series, series_input) = binning_input(py, x)?;
     let (labels, codes) = bin_labels_arg(labels)?;
-    if codes {
-        let binned = qcut(py, x, q, None, precision, duplicates)?;
-        return Ok(PySeries {
-            inner: bin_codes(&binned.inner)?,
-        });
-    }
     // precision sets the digits of the interval labels; only pandas'
     // default is produced (it was ignored).
     unsupported_params("qcut", &[("precision", precision == 3)])?;
-    let series = if let Ok(s) = x.extract::<PyRef<'_, PySeries>>() {
-        s.inner.clone()
-    } else if let Ok(list) = x.cast::<PyList>() {
-        let values: Vec<Scalar> = list
-            .iter()
-            .map(|v| py_to_scalar(py, &v))
-            .collect::<PyResult<Vec<_>>>()?;
-        Series::from_values(
-            "",
-            (0..values.len())
-                .map(|i| IndexLabel::Int64(i as i64))
-                .collect(),
-            values,
-        )
-        .map_err(frame_error_to_py)?
-    } else {
-        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "x must be a Series or list of numbers",
-        ));
-    };
 
     let label_strings = labels.unwrap_or_default();
     let label_refs: Option<Vec<&str>> = if label_strings.is_empty() {
@@ -54059,28 +54198,37 @@ fn qcut(
         Some(label_strings.iter().map(String::as_str).collect())
     };
 
-    let res = if let Ok(n_q) = q.extract::<usize>() {
-        if n_q == 0 {
-            fp_frame::qcut(&series, n_q).map_err(frame_error_to_py)?
-        } else {
-            let probs: Vec<f64> = (0..=n_q).map(|i| i as f64 / n_q as f64).collect();
-            fp_frame::qcut_at_quantiles(&series, &probs, label_refs.as_deref(), drop_duplicates)
-                .map_err(frame_error_to_py)?
-        }
-    } else if let Ok(q_list) = q.cast::<PyList>() {
-        let quantiles: Vec<f64> = q_list
-            .iter()
-            .map(|v| v.extract::<f64>())
-            .collect::<PyResult<Vec<_>>>()?;
-        fp_frame::qcut_at_quantiles(&series, &quantiles, label_refs.as_deref(), drop_duplicates)
-            .map_err(frame_error_to_py)?
-    } else {
-        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+    // An integer's are numpy's linspace(0, 1, q + 1); any list-like of
+    // quantiles otherwise (a tuple or an ndarray raised TypeError).
+    let not_quantiles = || {
+        PyErr::new::<pyo3::exceptions::PyTypeError, _>(
             "q must be an integer or a list of quantiles [0.0..1.0]",
-        ));
+        )
     };
-
-    Ok(PySeries { inner: res })
+    let quantiles: Vec<f64> = if let Ok(n_q) = q.extract::<usize>() {
+        fp_frame::qcut_probabilities(n_q)
+    } else {
+        if q.is_instance_of::<pyo3::types::PyString>() {
+            return Err(not_quantiles());
+        }
+        let items = if q.hasattr("tolist")? {
+            q.call_method0("tolist")?
+        } else {
+            q.clone()
+        };
+        let Ok(items) = items.try_iter() else {
+            return Err(not_quantiles());
+        };
+        items
+            .map(|v| v?.extract::<f64>())
+            .collect::<PyResult<Vec<_>>>()?
+    };
+    let (binned, edges) =
+        fp_frame::qcut_with_edges(&series, &quantiles, label_refs.as_deref(), drop_duplicates)
+            .map_err(frame_error_to_py)?;
+    let binned = if codes { bin_codes(&binned)? } else { binned };
+    let edges = edges.into_iter().map(Scalar::Float64).collect();
+    binned_result(py, binned, series_input, codes, retbins, Some(edges))
 }
 
 /// Read SQL query or database table into a DataFrame.
@@ -57748,16 +57896,9 @@ impl PyCategorical {
     }
 
     #[getter]
-    fn categories(&self) -> PyIndex {
-        let labels = self
-            .meta()
-            .categories
-            .iter()
-            .map(scalar_to_index_label_converter)
-            .collect();
-        PyIndex {
-            inner: Index::new(labels),
-        }
+    fn categories(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        // cut / qcut bins are an IntervalIndex (they were their text).
+        categories_index(py, &self.meta().categories)
     }
 
     #[getter]
@@ -57791,11 +57932,13 @@ impl PyCategorical {
         }
     }
 
+    /// The values as the Series' tolist gives them (cut's integer bins
+    /// beside a missing value are float intervals, as pandas').
     fn tolist(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-        self.inner
-            .values()
+        let column = self.inner.column();
+        materialized_values(column)
             .iter()
-            .map(|value| scalar_to_py(py, value))
+            .map(|value| cell_to_py(py, column, value))
             .collect()
     }
 
@@ -57820,6 +57963,15 @@ impl PyCategorical {
 
     fn __len__(&self) -> usize {
         self.inner.len()
+    }
+
+    /// Iterates its values, as pandas' (it was not iterable).
+    fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(PyList::new(py, self.tolist(py)?)?
+            .as_any()
+            .try_iter()?
+            .into_any()
+            .unbind())
     }
 
     /// pandas' Categorical comparisons: as the Series of these values
