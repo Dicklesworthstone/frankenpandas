@@ -6039,6 +6039,9 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             .map(|header| csv_column_na_set(options, header, &na_set))
             .collect()
     };
+    // Which header cells were blank: such a column is `Unnamed: i`, but as
+    // the index it is unnamed - what to_csv writes above an unnamed index.
+    let mut blank_headers: Vec<bool> = Vec::new();
     let (headers, mut columns, mut raw_columns, deferred_parse_date_columns, column_na) =
         if options.has_headers {
             let headers_record = records.next().transpose()?.ok_or(IoError::MissingHeaders)?;
@@ -6048,6 +6051,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
 
             let header_count = headers_record.len();
             let row_hint = input.len() / (header_count * 8).max(1);
+            blank_headers = headers_record.iter().map(str::is_empty).collect();
             let headers = pandas_header_names(headers_record.iter());
             let columns: Vec<Vec<Scalar>> = (0..header_count)
                 .map(|_| Vec::with_capacity(row_hint))
@@ -6330,8 +6334,11 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             })
             .collect();
         // Per br-frankenpandas-l0vbr: pandas pd.read_csv(index_col='col')
-        // sets result.index.name = 'col'.
-        let index = Index::new(index_labels).set_name(idx_col_name);
+        // sets result.index.name = 'col' - and leaves it unnamed when the
+        // header cell was blank: read_csv(to_csv output, index_col=0) had
+        // the index named 'Unnamed: 0'.
+        let blank = blank_headers.get(idx_pos).copied().unwrap_or(false);
+        let index = Index::new(index_labels).set_names((!blank).then_some(idx_col_name));
 
         let mut out_columns = BTreeMap::new();
         let mut column_order = Vec::with_capacity(headers.len() - 1);
@@ -23619,6 +23626,31 @@ mod tests {
                 read_csv_with_options(input, &CsvReadOptions::default()).expect("options path");
             assert_eq!(with_options.column_names(), want, "options {input:?}");
         }
+    }
+
+    #[test]
+    fn csv_index_col_of_a_blank_header_is_unnamed_4kmaw() {
+        // to_csv writes a blank cell above an unnamed index; read back as the
+        // index it is unnamed, as pandas' (it was named 'Unnamed: 0').
+        let read = |input: &str, index_col: &str| {
+            let options = CsvReadOptions {
+                index_col: Some(index_col.to_owned()),
+                ..CsvReadOptions::default()
+            };
+            read_csv_with_options(input, &options).expect("read")
+        };
+        let frame = read(",v\na,1\nb,2\n", "Unnamed: 0");
+        assert_eq!(frame.index().name(), None);
+        assert_eq!(frame.column_names(), ["v"]);
+        // NEGATIVES: a named header names the index, and a header that says
+        // 'Unnamed: 0' is a name (pandas clears only the names it made).
+        let named = read("k,v\na,1\n", "k");
+        assert_eq!(named.index().name().map(|n| n.as_str()), Some("k"));
+        let literal = read("Unnamed: 0,v\na,1\n", "Unnamed: 0");
+        assert_eq!(
+            literal.index().name().map(|n| n.as_str()),
+            Some("Unnamed: 0")
+        );
     }
 
     #[test]

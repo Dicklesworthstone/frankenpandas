@@ -25849,9 +25849,11 @@ impl PySeries {
         }
     }
 
+    /// pandas' `Series.dtypes`: the dtype object, as `dtype` (it was the
+    /// dtype's name, a str).
     #[getter]
-    fn dtypes(&self) -> String {
-        self.inner.dtype_name()
+    fn dtypes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        column_pandas_dtype(py, self.inner.column())
     }
 
     #[getter]
@@ -51911,11 +51913,78 @@ fn read_csv_impl(
                     .map_err(frame_error_to_py)?;
             }
         }
+        // An index column whose header cell was blank - what to_csv writes
+        // above an unnamed index - is named `Unnamed: i` as a column, but the
+        // index it becomes is unnamed, as pandas' (read_csv(index_col=0) of
+        // a to_csv file had its index named 'Unnamed: 0').
+        let blank = |name: &str| -> PyResult<bool> {
+            match unnamed_header_position(name) {
+                Some(position) => csv_header_cell_blank(&text, &opts, position),
+                None => Ok(false),
+            }
+        };
+        if let Some(levels) = frame.row_multiindex().cloned() {
+            let mut names = levels.names().to_vec();
+            let mut renamed = false;
+            for name in &mut names {
+                if name.as_ref().map_or(Ok(false), |name| blank(name))? {
+                    *name = None;
+                    renamed = true;
+                }
+            }
+            if renamed {
+                frame = frame
+                    .with_row_multiindex(levels.set_names(names))
+                    .map_err(frame_error_to_py)?;
+            }
+        } else if frame.index().name().map_or(Ok(false), |name| blank(name))? {
+            let index = frame.index().rename_index(None::<&str>);
+            frame = frame.with_index(index).map_err(frame_error_to_py)?;
+        }
     }
     if parse_index_dates && let Some(index) = datetime_index_if_parsed(frame.index())? {
         frame = frame.with_index(index).map_err(frame_error_to_py)?;
     }
     Ok(PyDataFrame { inner: frame })
+}
+
+/// The file position a generated `Unnamed: {position}` header name stands for
+/// (see [`csv_header_cell_blank`]).
+fn unnamed_header_position(name: &str) -> Option<usize> {
+    name.strip_prefix("Unnamed: ")?.parse().ok()
+}
+
+/// Whether the CSV header cell at `position` was blank, as pandas tells a
+/// generated `Unnamed: i` name from a header that says so (its
+/// `unnamed_cols`): the header row re-read as one verbatim data row.
+fn csv_header_cell_blank(
+    text: &str,
+    opts: &fp_io::CsvReadOptions,
+    position: usize,
+) -> PyResult<bool> {
+    let mut header = opts.clone();
+    header.has_headers = false;
+    header.nrows = Some(1);
+    header.skipfooter = 0;
+    header.usecols = None;
+    header.index_col = None;
+    header.dtype = None;
+    header.parse_dates = None;
+    header.parse_date_combinations = None;
+    header.parse_date_combinations_named = None;
+    header.na_values = Vec::new();
+    header.na_values_by_column = None;
+    header.keep_default_na = false;
+    let row = fp_io::read_csv_with_options(text, &header).map_err(io_error_to_py)?;
+    Ok(row
+        .column_names()
+        .get(position)
+        .and_then(|name| row.column(name))
+        .is_some_and(|column| {
+            column.values().first().is_none_or(|cell| {
+                cell.is_missing() || matches!(cell, Scalar::Utf8(text) if text.is_empty())
+            })
+        }))
 }
 
 /// pandas' `read_csv(parse_dates=True)`: the index as datetimes when every
@@ -57717,6 +57786,77 @@ impl PyCategorical {
 
     fn __len__(&self) -> usize {
         self.inner.len()
+    }
+
+    /// pandas' Categorical comparisons: as the Series of these values
+    /// compares (ordering only when ordered, a scalar only a category), as
+    /// a numpy bool array. There were none - `==` was identity and `<`
+    /// raised.
+    fn __richcmp__(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        op: pyo3::basic::CompareOp,
+    ) -> PyResult<Py<PyAny>> {
+        let series = Py::new(
+            py,
+            PySeries {
+                inner: self.inner.clone(),
+            },
+        )?
+        .into_bound(py);
+        let other = match other.extract::<PyRef<'_, Self>>() {
+            Ok(categorical) => Py::new(
+                py,
+                PySeries {
+                    inner: categorical.inner.clone(),
+                },
+            )?
+            .into_bound(py)
+            .into_any(),
+            Err(_) => other.clone(),
+        };
+        let method = match op {
+            pyo3::basic::CompareOp::Lt => "__lt__",
+            pyo3::basic::CompareOp::Le => "__le__",
+            pyo3::basic::CompareOp::Eq => "__eq__",
+            pyo3::basic::CompareOp::Ne => "__ne__",
+            pyo3::basic::CompareOp::Gt => "__gt__",
+            pyo3::basic::CompareOp::Ge => "__ge__",
+        };
+        let result = series.call_method1(method, (other,))?;
+        if result.is(py.NotImplemented()) {
+            return Ok(result.unbind());
+        }
+        Ok(result.call_method0("to_numpy")?.unbind())
+    }
+
+    /// pandas' `Categorical.max` / `min`: the largest / smallest category
+    /// present (an ordered Categorical only), as the Series' (they were
+    /// missing).
+    #[pyo3(signature = (*, skipna=true))]
+    fn max(&self, py: Python<'_>, skipna: bool) -> PyResult<Py<PyAny>> {
+        self.extreme(py, "max", skipna)
+    }
+
+    #[pyo3(signature = (*, skipna=true))]
+    fn min(&self, py: Python<'_>, skipna: bool) -> PyResult<Py<PyAny>> {
+        self.extreme(py, "min", skipna)
+    }
+}
+
+impl PyCategorical {
+    fn extreme(&self, py: Python<'_>, method: &str, skipna: bool) -> PyResult<Py<PyAny>> {
+        let series = Py::new(
+            py,
+            PySeries {
+                inner: self.inner.clone(),
+            },
+        )?
+        .into_bound(py);
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("skipna", skipna)?;
+        Ok(series.call_method(method, (), Some(&kwargs))?.unbind())
     }
 }
 

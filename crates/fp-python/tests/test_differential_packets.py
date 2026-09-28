@@ -13345,3 +13345,50 @@ _AXIS_NAME_CASES = {
 def test_axis_names_keep_their_type_like_pandas(case: str) -> None:
     run = _AXIS_NAME_CASES[case]
     assert _axn_outcome(fpd, run) == _axn_outcome(pd, run), case
+
+
+# br-frankenpandas-4kmaw: read_csv(index_col=) of a blank header cell - what
+# to_csv writes above an unnamed index - named the index 'Unnamed: 0';
+# Series.dtypes was a str; Categorical had no comparisons, max or min.
+_EVERYDAY16_FRAME_CSV = ",store,city\n0,a,X\n1,b,Y\n"
+
+
+def _e16_csv_index(m: Any, text: str, index_col: Any) -> Any:
+    frame = m.read_csv(io.StringIO(text), index_col=index_col)
+    return (frame.index.names, list(frame.columns))
+
+
+def _e16_cat(m: Any) -> Any:
+    return m.Categorical(["lo", "hi", None, "mid"], categories=["lo", "mid", "hi"], ordered=True)
+
+
+_EVERYDAY16_CASES = {
+    "to_csv round trip index_col=0": lambda m: _e16_csv_index(m, _EVERYDAY16_FRAME_CSV, 0),
+    "blank header index_col by name": lambda m: _e16_csv_index(m, _EVERYDAY16_FRAME_CSV, "Unnamed: 0"),
+    "blank headers index_col=[0, 1]": lambda m: _e16_csv_index(m, ",,v\na,x,1\nb,y,2\n", [0, 1]),
+    "frame to_csv read back": lambda m: repr(
+        m.read_csv(io.StringIO(m.DataFrame({"v": [1, 2]}).to_csv()), index_col=0)
+    ),
+    # NEGATIVES: a named header names the index, and a header that literally
+    # says 'Unnamed: 0' is a name (pandas' unnamed_cols are the generated ones).
+    "named header index_col=0": lambda m: _e16_csv_index(m, "k,v\na,1\n", 0),
+    "literal Unnamed: 0 header": lambda m: _e16_csv_index(m, "Unnamed: 0,v\na,1\n", 0),
+    "Series.dtypes": lambda m: (type(m.Series([1]).dtypes).__name__, str(m.Series([1.5]).dtypes)),
+    "Categorical <": lambda m: (_e16_cat(m) < "hi").tolist(),
+    "Categorical >=": lambda m: (_e16_cat(m) >= "mid").tolist(),
+    "Categorical == scalar": lambda m: (_e16_cat(m) == "lo").tolist(),
+    "Categorical != scalar": lambda m: (_e16_cat(m) != "lo").tolist(),
+    "Categorical == Categorical": lambda m: (_e16_cat(m) == _e16_cat(m)).tolist(),
+    "Categorical max": lambda m: _e16_cat(m).max(),
+    "Categorical min": lambda m: _e16_cat(m).min(),
+    # NEGATIVE: an unordered Categorical only compares for equality.
+    "unordered Categorical <": lambda m: _raises(lambda: m.Categorical(["a", "b"]) < "a"),
+    "unordered Categorical ==": lambda m: (m.Categorical(["a", "b", None]) == "a").tolist(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EVERYDAY16_CASES))
+def test_everyday16_like_pandas(case: str) -> None:
+    run = _EVERYDAY16_CASES[case]
+    assert _sdt_outcome(fpd, run) == _sdt_outcome(pd, run), case
