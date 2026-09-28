@@ -9169,6 +9169,57 @@ pub fn merge_dataframes_on_with_options(
     join_type: JoinType,
     options: MergeExecutionOptions,
 ) -> Result<MergedDataFrame, JoinError> {
+    let suffixes = resolve_merge_suffixes(options.suffixes.clone());
+    let merged = merge_dataframes_on_with_options_storage(
+        left, right, left_on, right_on, join_type, options,
+    )?;
+    Ok(keeping_source_widths(merged, left, right, &suffixes))
+}
+
+/// `merged` with each output column in the numpy width of the left or
+/// right column it came from (fvsao.23) - found by its name, or by its name
+/// less that side's suffix - where its storage carries the width and every
+/// value is in range: a row the join invented as missing leaves an int32
+/// column float64, as pandas'.
+fn keeping_source_widths(
+    mut merged: MergedDataFrame,
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    suffixes: &ResolvedMergeSuffixes,
+) -> MergedDataFrame {
+    let source_of = |name: &str| {
+        let unsuffixed = |suffix: Option<&str>| {
+            suffix
+                .filter(|suffix| !suffix.is_empty())
+                .and_then(|suffix| name.strip_suffix(suffix))
+        };
+        left.column(name)
+            .or_else(|| right.column(name))
+            .or_else(|| unsuffixed(suffixes.left.as_deref()).and_then(|base| left.column(base)))
+            .or_else(|| unsuffixed(suffixes.right.as_deref()).and_then(|base| right.column(base)))
+    };
+    for position in 0..merged.columns.len() {
+        let Some(name) = merged.columns.name_at(position).map(str::to_owned) else {
+            continue;
+        };
+        let Some(source) = source_of(&name).filter(|source| source.width().is_some()) else {
+            continue;
+        };
+        if let Some(column) = merged.columns.column_at_mut(position) {
+            *column = column.clone().narrowed_like(source);
+        }
+    }
+    merged
+}
+
+fn merge_dataframes_on_with_options_storage(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    left_on: &[&str],
+    right_on: &[&str],
+    join_type: JoinType,
+    options: MergeExecutionOptions,
+) -> Result<MergedDataFrame, JoinError> {
     let MergeExecutionOptions {
         indicator_name,
         validate_mode,

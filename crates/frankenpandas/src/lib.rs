@@ -86,7 +86,7 @@ pub use fp_frame::{
 };
 pub use fp_frame::{
     array, assert_frame_eq, assert_index_eq, assert_series_eq, crosstab, crosstab_normalize, cut,
-    cut_bins, factorize, factorize_with_options, from_dummies, get_dummies,
+    cut_bins, downcast_numeric, factorize, factorize_with_options, from_dummies, get_dummies,
     get_dummies_with_options, lreshape, melt, pivot, pivot_table, pivot_table_with_dropna,
     plotting, qcut, qcut_at_quantiles, show_versions, testing,
     testing::{
@@ -522,11 +522,11 @@ pub use fp_runtime::{
 };
 pub use fp_types::{
     AsDType, CategoricalDType, CategoricalDtype, DType, IntervalDType, IntervalDtype, NA, NAT, NaT,
-    NullKind, OptionContextGuard, OptionError, OptionValue, PeriodDType, PeriodDtype, Scalar,
-    SparseDType, TypeError, api, cast_scalar, cast_scalar_owned, common_dtype, count_na,
-    describe_option, dropna, eng_float_format, fill_na, get_eng_float_format, get_option,
-    infer_dtype, isna, isnull, notna, notnull, option_context, pandas_dtype,
-    reset_eng_float_format, reset_option, set_eng_float_format, set_option,
+    NullKind, NumericWidth, NumpyNumeric, OptionContextGuard, OptionError, OptionValue,
+    PeriodDType, PeriodDtype, Scalar, SparseDType, TypeError, api, cast_scalar, cast_scalar_owned,
+    common_dtype, count_na, describe_option, dropna, eng_float_format, fill_na,
+    get_eng_float_format, get_option, infer_dtype, isna, isnull, notna, notnull, option_context,
+    pandas_dtype, reset_eng_float_format, reset_option, set_eng_float_format, set_option,
 };
 // fd90.263: pandas-equivalent helper types for Datetime64/Timedelta64/Period/Interval
 // scalar variants. Users typically interact via Scalar::Timedelta64(nanos) etc., but

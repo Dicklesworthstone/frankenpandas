@@ -516,6 +516,434 @@ impl std::fmt::Display for DType {
     }
 }
 
+/// A numpy numeric dtype narrower than the 64-bit storage a column keeps its
+/// values in: pandas' int8 / int16 / int32, uint8 / uint16 / uint32 / uint64
+/// and float32, and over a nullable column the masked Int8 ... UInt64 /
+/// Float32 (fvsao.23).
+///
+/// The values stay in the Int64 / Float64 storage (or its nullable form);
+/// the width is the dtype pandas reports and confines the values: an integer
+/// width holds only values in its range (a cast or arithmetic wraps into it,
+/// as numpy does: `astype('int8')` of 300 is 44), float32 only values exactly
+/// representable as an `f32` (every result is rounded to the nearest `f32`,
+/// which for `+ - * /` and `sqrt` is what float32 arithmetic gives: binary64
+/// carries more than 2 * 24 + 2 significand bits, so rounding twice cannot
+/// land elsewhere).
+///
+/// uint64 holds only values below 2**63 in that storage: a larger one would
+/// be its negative two's-complement pattern, which every path that does not
+/// know the width reads as the negative number, so it is refused instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum NumericWidth {
+    #[serde(rename = "int8")]
+    Int8,
+    #[serde(rename = "int16")]
+    Int16,
+    #[serde(rename = "int32")]
+    Int32,
+    #[serde(rename = "uint8")]
+    UInt8,
+    #[serde(rename = "uint16")]
+    UInt16,
+    #[serde(rename = "uint32")]
+    UInt32,
+    #[serde(rename = "uint64")]
+    UInt64,
+    #[serde(rename = "float32")]
+    Float32,
+}
+
+impl NumericWidth {
+    /// Every width, integers first.
+    pub const ALL: [Self; 8] = [
+        Self::Int8,
+        Self::Int16,
+        Self::Int32,
+        Self::UInt8,
+        Self::UInt16,
+        Self::UInt32,
+        Self::UInt64,
+        Self::Float32,
+    ];
+
+    /// pandas' dtype name: numpy's (`int32`) over a numpy column, the masked
+    /// extension dtype's (`Int32`, `UInt8`, `Float32`) over a nullable one.
+    #[must_use]
+    pub const fn name(self, nullable: bool) -> &'static str {
+        match (self, nullable) {
+            (Self::Int8, false) => "int8",
+            (Self::Int16, false) => "int16",
+            (Self::Int32, false) => "int32",
+            (Self::UInt8, false) => "uint8",
+            (Self::UInt16, false) => "uint16",
+            (Self::UInt32, false) => "uint32",
+            (Self::UInt64, false) => "uint64",
+            (Self::Float32, false) => "float32",
+            (Self::Int8, true) => "Int8",
+            (Self::Int16, true) => "Int16",
+            (Self::Int32, true) => "Int32",
+            (Self::UInt8, true) => "UInt8",
+            (Self::UInt16, true) => "UInt16",
+            (Self::UInt32, true) => "UInt32",
+            (Self::UInt64, true) => "UInt64",
+            (Self::Float32, true) => "Float32",
+        }
+    }
+
+    /// The width and whether it is the masked (nullable) dtype, for a pandas
+    /// or numpy dtype name: `int32` / `i4` / `<i4`, `Int32` / `Int32Dtype`,
+    /// `float32` / `f4` / `single`, ... `None` for any other name, the 64-bit
+    /// ones included (those are [`DType`]'s).
+    #[must_use]
+    pub fn parse(name: &str) -> Option<(Self, bool)> {
+        let name = name.trim();
+        let name = name
+            .strip_prefix('<')
+            .or_else(|| name.strip_prefix('|'))
+            .or_else(|| name.strip_prefix('='))
+            .unwrap_or(name);
+        let found = match name {
+            "int8" | "i1" | "byte" => (Self::Int8, false),
+            "int16" | "i2" | "short" => (Self::Int16, false),
+            "int32" | "i4" | "intc" => (Self::Int32, false),
+            "uint8" | "u1" | "ubyte" => (Self::UInt8, false),
+            "uint16" | "u2" | "ushort" => (Self::UInt16, false),
+            "uint32" | "u4" | "uintc" => (Self::UInt32, false),
+            "uint64" | "u8" | "uint" | "ulonglong" | "uintp" => (Self::UInt64, false),
+            "float32" | "f4" | "single" => (Self::Float32, false),
+            "Int8" | "Int8Dtype" => (Self::Int8, true),
+            "Int16" | "Int16Dtype" => (Self::Int16, true),
+            "Int32" | "Int32Dtype" => (Self::Int32, true),
+            "UInt8" | "UInt8Dtype" => (Self::UInt8, true),
+            "UInt16" | "UInt16Dtype" => (Self::UInt16, true),
+            "UInt32" | "UInt32Dtype" => (Self::UInt32, true),
+            "UInt64" | "UInt64Dtype" => (Self::UInt64, true),
+            "Float32" | "Float32Dtype" => (Self::Float32, true),
+            _ => return None,
+        };
+        Some(found)
+    }
+
+    /// The storage dtype a column of this width keeps its values in.
+    #[must_use]
+    pub const fn storage(self, nullable: bool) -> DType {
+        match (self.is_float(), nullable) {
+            (true, false) => DType::Float64,
+            (true, true) => DType::Float64Nullable,
+            (false, false) => DType::Int64,
+            (false, true) => DType::Int64Nullable,
+        }
+    }
+
+    /// Whether a column of `dtype` can carry this width: an integer width
+    /// over Int64 / Int64Nullable, float32 over Float64 / Float64Nullable.
+    #[must_use]
+    pub const fn fits_storage(self, dtype: &DType) -> bool {
+        if self.is_float() {
+            matches!(dtype, DType::Float64 | DType::Float64Nullable)
+        } else {
+            matches!(dtype, DType::Int64 | DType::Int64Nullable)
+        }
+    }
+
+    /// numpy's `itemsize`: bytes per element.
+    #[must_use]
+    pub const fn itemsize(self) -> usize {
+        match self {
+            Self::Int8 | Self::UInt8 => 1,
+            Self::Int16 | Self::UInt16 => 2,
+            Self::Int32 | Self::UInt32 | Self::Float32 => 4,
+            Self::UInt64 => 8,
+        }
+    }
+
+    /// numpy's `kind`: `'i'`, `'u'` or `'f'`.
+    #[must_use]
+    pub const fn kind(self) -> char {
+        match self {
+            Self::Int8 | Self::Int16 | Self::Int32 => 'i',
+            Self::UInt8 | Self::UInt16 | Self::UInt32 | Self::UInt64 => 'u',
+            Self::Float32 => 'f',
+        }
+    }
+
+    #[must_use]
+    pub const fn is_float(self) -> bool {
+        matches!(self, Self::Float32)
+    }
+
+    #[must_use]
+    pub const fn is_unsigned(self) -> bool {
+        matches!(
+            self,
+            Self::UInt8 | Self::UInt16 | Self::UInt32 | Self::UInt64
+        )
+    }
+
+    /// The smallest and largest value an integer width holds in the Int64
+    /// storage (uint64's largest is `i64::MAX`, see the type's doc); `None`
+    /// for float32.
+    #[must_use]
+    pub const fn int_bounds(self) -> Option<(i64, i64)> {
+        match self {
+            Self::Int8 => Some((i8::MIN as i64, i8::MAX as i64)),
+            Self::Int16 => Some((i16::MIN as i64, i16::MAX as i64)),
+            Self::Int32 => Some((i32::MIN as i64, i32::MAX as i64)),
+            Self::UInt8 => Some((0, u8::MAX as i64)),
+            Self::UInt16 => Some((0, u16::MAX as i64)),
+            Self::UInt32 => Some((0, u32::MAX as i64)),
+            Self::UInt64 => Some((0, i64::MAX)),
+            Self::Float32 => None,
+        }
+    }
+
+    /// Whether an integer width holds `value` unchanged.
+    #[must_use]
+    pub const fn holds_int(self, value: i64) -> bool {
+        match self.int_bounds() {
+            Some((low, high)) => low <= value && value <= high,
+            None => false,
+        }
+    }
+
+    /// `value` wrapped into an integer width as numpy's casts and integer
+    /// arithmetic wrap it (modulo 2**bits, two's complement): int8 of 300 is
+    /// 44, uint8 of -5 is 251. Any wrapping i64 result reduces to the right
+    /// one, since 2**bits divides 2**64. `None` for float32, and for a uint64
+    /// result at or above 2**63 (not held; see the type's doc).
+    #[must_use]
+    pub const fn wrap_int(self, value: i64) -> Option<i64> {
+        match self {
+            Self::Int8 => Some(value as i8 as i64),
+            Self::Int16 => Some(value as i16 as i64),
+            Self::Int32 => Some(value as i32 as i64),
+            Self::UInt8 => Some(value as u8 as i64),
+            Self::UInt16 => Some(value as u16 as i64),
+            Self::UInt32 => Some(value as u32 as i64),
+            Self::UInt64 if value >= 0 => Some(value),
+            Self::UInt64 | Self::Float32 => None,
+        }
+    }
+
+    /// `value` rounded to the nearest `f32` (ties to even), as a float32
+    /// column holds it: 0.1 is 0.10000000149011612. NaN and infinities stay;
+    /// a finite value beyond `f32::MAX` becomes an infinity, as numpy's cast.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn round_f32(value: f64) -> f64 {
+        f64::from(value as f32)
+    }
+
+    /// The smallest signed integer width holding every value in
+    /// `low..=high`, or `None` when only int64 does (`to_numeric(...,
+    /// downcast='integer')`).
+    #[must_use]
+    pub const fn smallest_signed(low: i64, high: i64) -> Option<Self> {
+        if low >= i8::MIN as i64 && high <= i8::MAX as i64 {
+            Some(Self::Int8)
+        } else if low >= i16::MIN as i64 && high <= i16::MAX as i64 {
+            Some(Self::Int16)
+        } else if low >= i32::MIN as i64 && high <= i32::MAX as i64 {
+            Some(Self::Int32)
+        } else {
+            None
+        }
+    }
+
+    /// The smallest unsigned integer width holding every value in
+    /// `low..=high`, or `None` when a value is negative
+    /// (`downcast='unsigned'`).
+    #[must_use]
+    pub const fn smallest_unsigned(low: i64, high: i64) -> Option<Self> {
+        if low < 0 {
+            None
+        } else if high <= u8::MAX as i64 {
+            Some(Self::UInt8)
+        } else if high <= u16::MAX as i64 {
+            Some(Self::UInt16)
+        } else if high <= u32::MAX as i64 {
+            Some(Self::UInt32)
+        } else {
+            Some(Self::UInt64)
+        }
+    }
+
+    /// pandas' dtype for the codes of a categorical with `categories`
+    /// categories: the smallest signed width whose maximum exceeds the
+    /// count (codes run -1 .. count - 1; `coerce_indexer_dtype`), so 126
+    /// categories are int8 and 127 are int16. `None` means int64.
+    #[must_use]
+    pub const fn for_category_codes(categories: usize) -> Option<Self> {
+        if categories < i8::MAX as usize {
+            Some(Self::Int8)
+        } else if categories < i16::MAX as usize {
+            Some(Self::Int16)
+        } else if categories < i32::MAX as usize {
+            Some(Self::Int32)
+        } else {
+            None
+        }
+    }
+}
+
+/// numpy's float32 `add.reduce` of `values` - its `pairwise_sum`, every
+/// addition in float32: below 8 values a running sum from 0; up to 128,
+/// eight running sums over the 8-value blocks folded as
+/// `((r0 + r1) + (r2 + r3)) + ((r4 + r5) + (r6 + r7))`, then the remainder;
+/// beyond that the two halves (the first a multiple of 8 long) summed
+/// apart. pandas' float32 `sum` and `mean` are it bit for bit, where a
+/// float64 sum rounded once differs in the last place (fvsao.23).
+#[must_use]
+pub fn numpy_pairwise_sum_f32(values: &[f32]) -> f32 {
+    const BLOCK: usize = 128;
+    let n = values.len();
+    if n < 8 {
+        return values.iter().fold(0.0_f32, |acc, &value| acc + value);
+    }
+    if n <= BLOCK {
+        let mut sums = [0.0_f32; 8];
+        sums.copy_from_slice(&values[..8]);
+        let whole = n - n % 8;
+        for block in values[8..whole].as_chunks::<8>().0 {
+            for (sum, &value) in sums.iter_mut().zip(block) {
+                *sum += value;
+            }
+        }
+        let folded = ((sums[0] + sums[1]) + (sums[2] + sums[3]))
+            + ((sums[4] + sums[5]) + (sums[6] + sums[7]));
+        return values[whole..]
+            .iter()
+            .fold(folded, |acc, &value| acc + value);
+    }
+    let mut half = n / 2;
+    half -= half % 8;
+    numpy_pairwise_sum_f32(&values[..half]) + numpy_pairwise_sum_f32(&values[half..])
+}
+
+/// A numeric column's numpy dtype as numpy's promotion sees it: kind and
+/// bits. The 64-bit ones are a column without a [`NumericWidth`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NumpyNumeric {
+    Bool,
+    Int(u8),
+    UInt(u8),
+    Float(u8),
+}
+
+impl NumpyNumeric {
+    /// The numpy dtype of a column of `dtype` carrying `width`; `None` for a
+    /// column that is not bool, integer or float (or a width its storage
+    /// cannot carry).
+    #[must_use]
+    pub const fn of(dtype: &DType, width: Option<NumericWidth>) -> Option<Self> {
+        match (dtype, width) {
+            (DType::Bool | DType::BoolNullable, None) => Some(Self::Bool),
+            (DType::Int64 | DType::Int64Nullable, None) => Some(Self::Int(64)),
+            (DType::Float64 | DType::Float64Nullable, None) => Some(Self::Float(64)),
+            (DType::Int64 | DType::Int64Nullable, Some(width)) if !width.is_float() => {
+                Some(Self::of_width(width))
+            }
+            (DType::Float64 | DType::Float64Nullable, Some(NumericWidth::Float32)) => {
+                Some(Self::Float(32))
+            }
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn of_width(width: NumericWidth) -> Self {
+        match width {
+            NumericWidth::Int8 => Self::Int(8),
+            NumericWidth::Int16 => Self::Int(16),
+            NumericWidth::Int32 => Self::Int(32),
+            NumericWidth::UInt8 => Self::UInt(8),
+            NumericWidth::UInt16 => Self::UInt(16),
+            NumericWidth::UInt32 => Self::UInt(32),
+            NumericWidth::UInt64 => Self::UInt(64),
+            NumericWidth::Float32 => Self::Float(32),
+        }
+    }
+
+    /// The width a column of this numpy dtype carries: `None` for bool,
+    /// int64 and float64.
+    #[must_use]
+    pub const fn width(self) -> Option<NumericWidth> {
+        match self {
+            Self::Int(8) => Some(NumericWidth::Int8),
+            Self::Int(16) => Some(NumericWidth::Int16),
+            Self::Int(32) => Some(NumericWidth::Int32),
+            Self::UInt(8) => Some(NumericWidth::UInt8),
+            Self::UInt(16) => Some(NumericWidth::UInt16),
+            Self::UInt(32) => Some(NumericWidth::UInt32),
+            Self::UInt(64) => Some(NumericWidth::UInt64),
+            Self::Float(32) => Some(NumericWidth::Float32),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_float(self) -> bool {
+        matches!(self, Self::Float(_))
+    }
+
+    /// numpy's `result_type` of two arrays: the smallest dtype holding both
+    /// (bool yields to anything; int8 + uint8 is int16, int64 + uint64
+    /// float64; float32 holds integers of up to 16 bits, a wider integer
+    /// makes it float64).
+    #[must_use]
+    pub const fn result_type(self, other: Self) -> Self {
+        const fn wider(a: u8, b: u8) -> u8 {
+            if a > b { a } else { b }
+        }
+        match (self, other) {
+            (Self::Bool, x) | (x, Self::Bool) => x,
+            (Self::Int(a), Self::Int(b)) => Self::Int(wider(a, b)),
+            (Self::UInt(a), Self::UInt(b)) => Self::UInt(wider(a, b)),
+            (Self::Int(signed), Self::UInt(unsigned))
+            | (Self::UInt(unsigned), Self::Int(signed)) => {
+                if signed > unsigned {
+                    Self::Int(signed)
+                } else if unsigned < 64 {
+                    Self::Int(wider(signed, unsigned * 2))
+                } else {
+                    Self::Float(64)
+                }
+            }
+            (Self::Float(a), Self::Float(b)) => Self::Float(wider(a, b)),
+            (Self::Float(bits), Self::Int(int_bits) | Self::UInt(int_bits))
+            | (Self::Int(int_bits) | Self::UInt(int_bits), Self::Float(bits)) => {
+                if int_bits <= 16 {
+                    Self::Float(bits)
+                } else {
+                    Self::Float(64)
+                }
+            }
+        }
+    }
+
+    /// The dtype of this array combined with a Python `int` (NEP 50: the
+    /// Python scalar is weak, the array's dtype wins; bool becomes int64).
+    /// Whether the int fits that dtype is the caller's check.
+    #[must_use]
+    pub const fn with_python_int(self) -> Self {
+        match self {
+            Self::Bool => Self::Int(64),
+            other => other,
+        }
+    }
+
+    /// The dtype of this array combined with a Python `float`: a float
+    /// array keeps its dtype (float32 + 0.2 is float32), anything else is
+    /// float64.
+    #[must_use]
+    pub const fn with_python_float(self) -> Self {
+        match self {
+            Self::Float(bits) => Self::Float(bits),
+            _ => Self::Float(64),
+        }
+    }
+}
+
 /// Trait for types that carry or represent a [`DType`].
 pub trait AsDType {
     /// Return the corresponding [`DType`].
@@ -20433,5 +20861,196 @@ mod sparse_dtype_pandas_name_3gxc6 {
         assert_eq!(pandas_dtype("Interval[int64]").unwrap(), DType::Interval);
         assert_eq!(pandas_dtype("sparse[float64]").unwrap(), DType::Sparse);
         assert_eq!(pandas_dtype("Sparse[int64, 0]").unwrap(), DType::Sparse);
+    }
+}
+
+/// `NumericWidth` / `NumpyNumeric` — numpy's narrow numeric dtypes and their
+/// promotion (fvsao.23). Expected values are live pandas 2.2.3 / numpy 2.4.6.
+#[cfg(test)]
+mod numeric_width_fvsao23 {
+    use super::{DType, NumericWidth, NumpyNumeric, numpy_pairwise_sum_f32};
+
+    #[test]
+    fn float32_sum_is_numpys_pairwise_sum_bit_for_bit() {
+        // numpy 2.4.6: a = ((arange(n) * 37) % 1000).astype(float32) *
+        // float32(0.013); a.sum().view(uint32). Lengths 5 and 64 are ones
+        // where a float64 sum rounded once gives another float32 (NEGATIVE).
+        let cases: [(usize, u32); 5] = [
+            (5, 1_083_829_126),
+            (64, 1_136_679_190),
+            (129, 1_145_981_108),
+            (1000, 1_170_926_592),
+            (4097, 1_188_011_795),
+        ];
+        for (n, bits) in cases {
+            #[allow(clippy::cast_precision_loss)] // below 1000
+            let values: Vec<f32> = (0..n)
+                .map(|k| ((k * 37) % 1000) as f32 * 0.013_f32)
+                .collect();
+            assert_eq!(numpy_pairwise_sum_f32(&values).to_bits(), bits, "n={n}");
+            if n < 100 {
+                #[allow(clippy::cast_possible_truncation)]
+                let rounded_once = values.iter().map(|&v| f64::from(v)).sum::<f64>() as f32;
+                assert_ne!(rounded_once.to_bits(), bits, "n={n}");
+            }
+        }
+        assert_eq!(numpy_pairwise_sum_f32(&[]), 0.0);
+    }
+
+    #[test]
+    fn names_parse_and_round_trip() {
+        for width in NumericWidth::ALL {
+            for nullable in [false, true] {
+                assert_eq!(
+                    NumericWidth::parse(width.name(nullable)),
+                    Some((width, nullable))
+                );
+            }
+        }
+        for (name, expected) in [
+            ("<i4", (NumericWidth::Int32, false)),
+            ("f4", (NumericWidth::Float32, false)),
+            ("UInt8Dtype", (NumericWidth::UInt8, true)),
+        ] {
+            assert_eq!(NumericWidth::parse(name), Some(expected), "{name}");
+        }
+        // The 64-bit names are DType's, not a width: 'i8' is numpy's int64.
+        for name in ["int64", "Int64", "float64", "i8", "f8", "int", "float"] {
+            assert_eq!(NumericWidth::parse(name), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn wrapping_is_numpys_modular_cast_not_saturation() {
+        // pd.Series([1, 2, 300, -5]).astype('int8') -> [1, 2, 44, -5]
+        assert_eq!(NumericWidth::Int8.wrap_int(300), Some(44));
+        // .astype('uint8') -> [1, 2, 44, 251]; uint16 -5 -> 65531
+        assert_eq!(NumericWidth::UInt8.wrap_int(-5), Some(251));
+        assert_eq!(NumericWidth::UInt16.wrap_int(-5), Some(65531));
+        assert_eq!(NumericWidth::UInt32.wrap_int(-5), Some(4_294_967_291));
+        // int8 100 + 100 -> -56; 100 * 2 -> -56
+        assert_eq!(NumericWidth::Int8.wrap_int(200), Some(-56));
+        assert_eq!(
+            NumericWidth::Int32.wrap_int(i64::from(i32::MAX) + 1),
+            Some(i64::from(i32::MIN))
+        );
+        // A wrapped i64 product reduces to the width's product.
+        let product = 50_000_i64.wrapping_pow(5);
+        assert_eq!(
+            NumericWidth::Int32.wrap_int(product),
+            Some(i64::from(50_000_i32.wrapping_pow(5)))
+        );
+        // uint64 at or above 2**63 is refused, never stored negative.
+        assert_eq!(NumericWidth::UInt64.wrap_int(-1), None);
+        assert_eq!(NumericWidth::UInt64.wrap_int(7), Some(7));
+        assert_eq!(NumericWidth::Float32.wrap_int(1), None);
+        assert!(NumericWidth::Int8.holds_int(-128) && !NumericWidth::Int8.holds_int(128));
+    }
+
+    #[test]
+    fn float32_rounding_is_to_nearest_not_truncation() {
+        // np.float32(0.1) as float64 -> 0.10000000149011612
+        assert_eq!(NumericWidth::round_f32(0.1), 0.100_000_001_490_116_12);
+        // float32 0.1 + 0.2 -> 0.30000001192092896 (not float64's
+        // 0.30000000000000004)
+        let sum =
+            NumericWidth::round_f32(NumericWidth::round_f32(0.1) + NumericWidth::round_f32(0.2));
+        assert_eq!(sum, 0.300_000_011_920_928_96);
+        // 1 + 2**-24 is a tie between 1 and 1 + 2**-23: ties to even -> 1.
+        // 1 + 3 * 2**-25 is above the tie: rounds up, where truncation stays 1.
+        assert_eq!(NumericWidth::round_f32(1.0 + 2f64.powi(-24)), 1.0);
+        let above_tie = 1.0 + 3.0 * 2f64.powi(-25);
+        assert_eq!(NumericWidth::round_f32(above_tie), 1.0 + 2f64.powi(-23));
+        assert!(NumericWidth::round_f32(f64::NAN).is_nan());
+        assert_eq!(NumericWidth::round_f32(1e300), f64::INFINITY);
+    }
+
+    #[test]
+    fn result_type_matches_numpy_promotion() {
+        use NumpyNumeric::{Bool, Float, Int, UInt};
+        let cases = [
+            (Int(32), Int(64), Int(64)), // int32 + int64 -> int64
+            (Int(8), UInt(8), Int(16)),  // int8 + uint8 -> int16
+            (Int(16), UInt(8), Int(16)),
+            (Int(8), UInt(16), Int(32)),
+            (Int(32), UInt(32), Int(64)),
+            (Int(64), UInt(64), Float(64)), // no integer holds both
+            (UInt(8), UInt(32), UInt(32)),
+            (Float(32), Int(8), Float(32)), // float32 * int8 -> float32
+            (Float(32), UInt(16), Float(32)),
+            (Float(32), Int(32), Float(64)), // float32 * int32 -> float64
+            (Float(32), Float(64), Float(64)),
+            (Bool, Int(8), Int(8)),
+            (Bool, Float(32), Float(32)),
+        ];
+        for (a, b, expected) in cases {
+            assert_eq!(a.result_type(b), expected, "{a:?} {b:?}");
+            assert_eq!(b.result_type(a), expected, "{b:?} {a:?}");
+        }
+        // NEP 50: int32 + 1 -> int32; int32 + 0.5 -> float64;
+        // float32 + 0.2 -> float32
+        assert_eq!(Int(32).with_python_int(), Int(32));
+        assert_eq!(Int(32).with_python_float(), Float(64));
+        assert_eq!(Float(32).with_python_float(), Float(32));
+        assert_eq!(Bool.with_python_int(), Int(64));
+    }
+
+    #[test]
+    fn columns_map_to_numpy_dtypes() {
+        let cases = [
+            (DType::Int64, None, Some(NumpyNumeric::Int(64))),
+            (
+                DType::Int64Nullable,
+                Some(NumericWidth::UInt8),
+                Some(NumpyNumeric::UInt(8)),
+            ),
+            (
+                DType::Float64,
+                Some(NumericWidth::Float32),
+                Some(NumpyNumeric::Float(32)),
+            ),
+            // A width its storage cannot carry is not a numpy dtype.
+            (DType::Float64, Some(NumericWidth::Int8), None),
+            (DType::Utf8, None, None),
+        ];
+        for (dtype, width, expected) in cases {
+            assert_eq!(NumpyNumeric::of(&dtype, width), expected, "{dtype:?}");
+        }
+        for width in NumericWidth::ALL {
+            assert_eq!(NumpyNumeric::of_width(width).width(), Some(width));
+            assert!(width.fits_storage(&width.storage(false)));
+            assert!(width.fits_storage(&width.storage(true)));
+        }
+        assert_eq!(NumpyNumeric::Int(64).width(), None);
+    }
+
+    #[test]
+    fn downcast_and_category_code_widths() {
+        // to_numeric([1, 2], downcast='integer') -> int8; [1, 300] signed ->
+        // int16, unsigned -> uint16
+        let int32_max_plus_one = i64::from(i32::MAX) + 1;
+        let signed = [
+            ((1, 2), Some(NumericWidth::Int8)),
+            ((1, 300), Some(NumericWidth::Int16)),
+            ((0, int32_max_plus_one), None),
+        ];
+        for ((low, high), expected) in signed {
+            assert_eq!(NumericWidth::smallest_signed(low, high), expected);
+        }
+        let unsigned = [((1, 300), Some(NumericWidth::UInt16)), ((-1, 3), None)];
+        for ((low, high), expected) in unsigned {
+            assert_eq!(NumericWidth::smallest_unsigned(low, high), expected);
+        }
+        // cat.codes: 2 categories int8, 200 int16; 126 int8, 127 int16
+        for (categories, expected) in [
+            (2, NumericWidth::Int8),
+            (126, NumericWidth::Int8),
+            (127, NumericWidth::Int16),
+            (200, NumericWidth::Int16),
+        ] {
+            assert_eq!(NumericWidth::for_category_codes(categories), Some(expected));
+        }
+        assert_eq!(NumericWidth::itemsize(NumericWidth::Int8), 1);
+        assert_eq!(NumericWidth::Float32.itemsize(), 4);
     }
 }

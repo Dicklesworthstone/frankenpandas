@@ -12846,3 +12846,220 @@ def _wrap_outcome(m: Any, run: Any) -> Any:
 def test_str_wrap_is_pythons_textwrap_like_pandas(case: str) -> None:
     run = _WRAP_CASES[case]
     assert _wrap_outcome(fpd, run) == _wrap_outcome(pd, run), case
+
+
+# br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.23: numpy's narrow
+# numeric dtypes - int8 / int16 / int32, uint8 ... uint64, float32 and their
+# masked forms - as pandas makes, keeps, promotes and reports them ('int32'
+# was "data type not understood" and numpy int32 / float32 arrays widened).
+def _narrow_frame() -> Any:
+    return {
+        "k": [1, 1, 2, 2],
+        "i": np.array([3, 1, 2, 1], dtype=np.int32),
+        "u": np.array([200, 1, 2, 3], dtype=np.uint8),
+        "f": np.array([0.5, 1.5, 2.25, 0.1], dtype=np.float32),
+    }
+
+
+def _i32(m: Any) -> Any:
+    return m.Series([3, 1, 2, 1], index=[10, 11, 12, 13], name="v").astype("int32")
+
+
+def _f32(m: Any) -> Any:
+    return m.Series([0.5, None, 2.25, 0.1], name="f").astype("float32")
+
+
+_NARROW_I = [1, 2, 300, -5]
+
+_NARROW_DTYPE_CASES = {
+    # casts: integers wrap into the width, floats round to float32
+    "astype int32": lambda m: m.Series(_NARROW_I).astype("int32"),
+    # NEGATIVE: numpy wraps - 300 as int8 is 44, not 300 and not an error.
+    "astype int8 wraps": lambda m: m.Series(_NARROW_I).astype("int8"),
+    "astype uint8 wraps": lambda m: m.Series(_NARROW_I).astype("uint8"),
+    "astype uint16": lambda m: m.Series(_NARROW_I).astype("uint16"),
+    "astype uint32": lambda m: m.Series(_NARROW_I).astype("uint32"),
+    "astype uint64": lambda m: m.Series([1, 2]).astype("uint64"),
+    "astype float32": lambda m: m.Series([0.1, 0.2, 1.5]).astype("float32"),
+    "astype np.int16": lambda m: m.Series(_NARROW_I).astype(np.int16),
+    "astype np.dtype float32": lambda m: m.Series([0.1]).astype(np.dtype("float32")),
+    "astype float to int32 truncates": lambda m: m.Series([1.7, -2.7]).astype("int32"),
+    # NEGATIVE: a 64-bit dtype drops the width.
+    "astype int32 back to int64": lambda m: m.Series(_NARROW_I).astype("int32").astype("int64"),
+    "float32 values as float64": lambda m: m.Series([0.1]).astype("float32").astype("float64").tolist(),
+    # pandas raises by design: numpy int32 cannot hold NaN.
+    "astype int32 of NaN": lambda m: m.Series([1.0, None]).astype("int32"),
+    # pandas raises by design: a datetime / timedelta is not cast to a narrow
+    # dtype (wrapping its nanoseconds gave 23396352).
+    "astype datetime to int32": lambda m: m.Series(m.to_datetime(["2024-01-01"])).astype("int32"),
+    "astype timedelta to float32": lambda m: m.Series(m.to_timedelta(["1 day"])).astype("float32"),
+    "astype datetime to Int32": lambda m: m.Series(m.to_datetime(["2024-01-01"])).astype("Int32"),
+    "astype Int32": lambda m: m.Series([1, None]).astype("Int32"),
+    "astype UInt8": lambda m: m.Series([1, None]).astype("UInt8"),
+    "astype Float32": lambda m: m.Series([0.1, None]).astype("Float32"),
+    "Series dtype int32": lambda m: m.Series([1, 2], dtype="int32"),
+    "Series dtype float32": lambda m: m.Series([1, 2], dtype="float32"),
+    "Series of numpy int32": lambda m: m.Series(np.array([1, 2], dtype=np.int32)),
+    "Series of numpy float32": lambda m: m.Series(np.array([1.5, 2.5], dtype=np.float32)),
+    "Series of numpy int8 extremes": lambda m: m.Series(np.array([127, -128], dtype=np.int8)),
+    "DataFrame of numpy uint16": lambda m: m.DataFrame({"a": np.array([1, 2], dtype=np.uint16)}),
+    "DataFrame dtype float32": lambda m: m.DataFrame({"a": [0.1, 0.2]}, dtype="float32"),
+    # pandas raises by design: the constructor refuses what astype wraps.
+    "Series int8 of 300": lambda m: m.Series([1, 300], dtype="int8"),
+    "Series uint8 of -1": lambda m: m.Series([1, -1], dtype="uint8"),
+    "Series int32 of 1.5": lambda m: m.Series([1.5], dtype="int32"),
+    "Series int32 of None": lambda m: m.Series([1, None], dtype="int32"),
+    "Series Int8 of 300": lambda m: m.Series([1, 300], dtype="Int8"),
+    "Series int8 of a numpy 300": lambda m: m.Series(np.array([1, 300]), dtype="int8"),
+    "DataFrame int8 of 300": lambda m: m.DataFrame({"a": [1, 300]}, dtype="int8"),
+    # A Series as the data casts as astype does (wraps).
+    "Series int8 of a Series": lambda m: m.Series(m.Series([1, 300]), dtype="int8"),
+    "frame astype dict": lambda m: m.DataFrame({"a": [1, 2], "b": [0.5, 1.5]}).astype({"a": "int16", "b": "float32"}),
+    "frame astype int32": lambda m: m.DataFrame({"a": [1, 2], "b": [3, 4]}).astype("int32"),
+    # widths pandas derives
+    "cat codes int8": lambda m: m.Series(["a", "b", "a"], dtype="category").cat.codes,
+    "cat codes of 200 categories": lambda m: str(m.Series([str(k) for k in range(200)], dtype="category").cat.codes.dtype),
+    "dt.year": lambda m: m.Series(m.to_datetime(["2024-03-01"])).dt.year,
+    "dt.dayofweek": lambda m: m.Series(m.to_datetime(["2024-03-01"])).dt.dayofweek,
+    # NEGATIVE: a NaT row makes the field float64, not int32.
+    "dt.year with NaT": lambda m: m.Series(m.to_datetime(["2024-03-01", None])).dt.year,
+    "timedelta seconds": lambda m: m.Series(m.to_timedelta(["1 days 00:00:01"])).dt.seconds,
+    # NEGATIVE: days stays int64.
+    "timedelta days": lambda m: m.Series(m.to_timedelta(["1 days 00:00:01"])).dt.days,
+    "to_numeric downcast integer": lambda m: m.to_numeric(m.Series([1, 2]), downcast="integer"),
+    "to_numeric downcast signed": lambda m: m.to_numeric(m.Series([1, 300]), downcast="signed"),
+    "to_numeric downcast unsigned": lambda m: m.to_numeric(m.Series([1, 300]), downcast="unsigned"),
+    "to_numeric downcast float": lambda m: m.to_numeric(m.Series([1.5, 2.5]), downcast="float"),
+    "to_numeric downcast whole floats": lambda m: m.to_numeric(m.Series([1.0, 2.0]), downcast="integer"),
+    # arithmetic: numpy 2's promotion, integers wrapping at the width
+    "int32 + 1": lambda m: m.Series(_NARROW_I).astype("int32") + 1,
+    "int8 + 100 wraps": lambda m: m.Series([100, 1]).astype("int8") + 100,
+    "int8 * int8 wraps": lambda m: m.Series([100, 3]).astype("int8") * m.Series([2, 3]).astype("int8"),
+    # NEGATIVE: int32 with int64 is int64.
+    "int32 + int64": lambda m: m.Series([1, 2]).astype("int32") + m.Series([1, 2]),
+    "int8 + uint8": lambda m: m.Series([1, 2]).astype("int8") + m.Series([1, 2]).astype("uint8"),
+    "int32 + 0.5": lambda m: m.Series([1, 2]).astype("int32") + 0.5,
+    "int32 / int32": lambda m: m.Series([1, 2]).astype("int32") / m.Series([2, 2]).astype("int32"),
+    "int32 // 2": lambda m: m.Series([7, -7]).astype("int32") // 2,
+    "int32 % 3": lambda m: m.Series([7, -7]).astype("int32") % 3,
+    "int32 ** 2": lambda m: m.Series([3, 4]).astype("int32") ** 2,
+    # pandas raises by design: 2**40 is out of bounds for int32.
+    "int32 + 2**40": lambda m: m.Series([1]).astype("int32") + 2**40,
+    "uint8 - 1 wraps": lambda m: m.Series([0, 5]).astype("uint8") - 1,
+    "float32 + float32": lambda m: (m.Series([0.1]).astype("float32") + m.Series([0.2]).astype("float32")).tolist(),
+    "float32 + 0.2": lambda m: m.Series([0.1]).astype("float32") + 0.2,
+    "float32 + float64": lambda m: m.Series([0.1]).astype("float32") + m.Series([0.2]),
+    "float32 * int32": lambda m: m.Series([1.5]).astype("float32") * m.Series([2]).astype("int32"),
+    "float32 * int8": lambda m: m.Series([1.5]).astype("float32") * m.Series([2]).astype("int8"),
+    "float32 / 3": lambda m: _f32(m) / 3,
+    "int32 * np.float32": lambda m: _i32(m) * np.float32(2.0),
+    "int32 + np.int8": lambda m: _i32(m) + np.int8(1),
+    "-int32": lambda m: -m.Series([1, -2]).astype("int32"),
+    "abs int8 -128": lambda m: m.Series([-128, 5]).astype("int8").abs(),
+    "int32 == 1": lambda m: m.Series([1, 2]).astype("int32") == 1,
+    # reductions: pandas' scalar types
+    "int32 sum": lambda m: _narrow_view(m.Series([2**30, 2**30]).astype("int32").sum()),
+    "uint8 sum": lambda m: _narrow_view(m.Series([200, 200]).astype("uint8").sum()),
+    "int32 mean": lambda m: _narrow_view(m.Series([1, 2]).astype("int32").mean()),
+    "int32 max": lambda m: _narrow_view(m.Series([1, 2]).astype("int32").max()),
+    "float32 sum": lambda m: _narrow_view(m.Series([0.1, 0.2]).astype("float32").sum()),
+    "float32 mean": lambda m: _narrow_view(m.Series([0.1, 0.2]).astype("float32").mean()),
+    "float32 std": lambda m: _narrow_view(m.Series([0.1, 0.2, 0.4]).astype("float32").std()),
+    "float32 quantile": lambda m: _narrow_view(_f32(m).quantile(0.5)),
+    # NEGATIVE: numpy's float32 pairwise sum, not a float64 sum rounded once
+    # (they differ in the last place on these).
+    "float32 sum of 1000": lambda m: _narrow_view(m.Series(np.random.default_rng(7).random(1000, dtype=np.float32) * 1000).sum()),
+    "float32 mean of 10": lambda m: _narrow_view(m.Series(np.random.default_rng(7).random(10, dtype=np.float32) * 1000).mean()),
+    "int16 element": lambda m: _narrow_view(m.Series([7]).astype("int16").iloc[0]),
+    "int32 cumsum": lambda m: m.Series([1, 2]).astype("int32").cumsum(),
+    "float32 cumsum": lambda m: m.Series([0.1, 0.2]).astype("float32").cumsum(),
+    "uint8 cumsum": lambda m: m.Series([200, 100]).astype("uint8").cumsum(),
+    "int32 cummax": lambda m: _i32(m).cummax(),
+    # structure keeps the width
+    "iloc": lambda m: _i32(m).iloc[[2, 0]],
+    "boolean filter": lambda m: (lambda s: s[s > 1])(_i32(m)),
+    "sort_values": lambda m: _i32(m).sort_values(),
+    "head": lambda m: _i32(m).head(2),
+    "drop_duplicates": lambda m: _i32(m).drop_duplicates(),
+    "nlargest": lambda m: _i32(m).nlargest(2),
+    "dropna float32": lambda m: _f32(m).dropna(),
+    "unique": lambda m: _narrow_view(_i32(m).unique()),
+    "concat int32": lambda m: m.concat([m.Series([1]).astype("int32"), m.Series([2]).astype("int32")]),
+    "concat int8 int16": lambda m: m.concat([m.Series([1]).astype("int8"), m.Series([2]).astype("int16")]),
+    # NEGATIVE: a missing row makes int32 float64; float32 stays.
+    "int32 reindex missing": lambda m: m.Series([1, 2]).astype("int32").reindex([0, 5]),
+    "float32 reindex missing": lambda m: m.Series([1, 2]).astype("float32").reindex([0, 5]),
+    "int32 shift": lambda m: m.Series([1, 2]).astype("int32").shift(1),
+    "float32 shift": lambda m: m.Series([1, 2]).astype("float32").shift(1),
+    "float32 fillna 0.1": lambda m: _f32(m).fillna(0.1).tolist(),
+    "int32 where other 0": lambda m: _i32(m).where(_i32(m) > 1, 0),
+    "int32 where NaN": lambda m: _i32(m).where(_i32(m) > 1),
+    "int32 replace": lambda m: _i32(m).replace(1, 7),
+    "int32 clip": lambda m: m.Series([1, 5]).astype("int32").clip(2, 4),
+    "float32 round": lambda m: m.Series([1.25, 2.5]).astype("float32").round(1),
+    # groupby: pandas' groupby dtypes
+    "groupby sum": lambda m: m.DataFrame(_narrow_frame()).groupby("k").sum(),
+    "groupby mean": lambda m: m.DataFrame(_narrow_frame()).groupby("k").mean(),
+    "groupby first": lambda m: m.DataFrame(_narrow_frame()).groupby("k").first(),
+    "groupby agg dict": lambda m: m.DataFrame(_narrow_frame()).groupby("k").agg({"i": "sum", "f": "mean", "u": "max"}),
+    "groupby cumsum": lambda m: m.DataFrame(_narrow_frame()).groupby("k").cumsum(),
+    # NEGATIVE: an int8 group sum past int8 is int64.
+    "groupby int8 sum of 200": lambda m: m.DataFrame({"k": [1, 1], "v": np.array([100, 100], dtype=np.int8)}).groupby("k").sum(),
+    "SeriesGroupBy sum": lambda m: m.DataFrame(_narrow_frame()).groupby("k")["i"].sum(),
+    # frames
+    "frame dtypes": lambda m: [str(t) for t in m.DataFrame(_narrow_frame()).dtypes],
+    # A guard, not a gap: the display had these digits when float32 widened.
+    "frame repr": lambda m: repr(m.DataFrame(_narrow_frame())),
+    "frame merge": lambda m: m.DataFrame(_narrow_frame()).merge(m.DataFrame({"k": [1, 2], "w": np.array([5, 6], dtype=np.int16)}), on="k"),
+    "frame concat rows": lambda m: m.concat([m.DataFrame(_narrow_frame()), m.DataFrame(_narrow_frame())]),
+    "frame to_numpy int32": lambda m: _narrow_view(m.DataFrame(_narrow_frame())[["i"]].to_numpy()),
+    "frame to_numpy float32": lambda m: _narrow_view(m.DataFrame(_narrow_frame())[["f"]].to_numpy()),
+    "frame values int32 uint8": lambda m: _narrow_view(m.DataFrame(_narrow_frame())[["i", "u"]].values),
+    "frame T": lambda m: m.DataFrame(_narrow_frame())[["i"]].T,
+    "frame where": lambda m: (lambda d: d.where(d > 1, 0))(m.DataFrame(_narrow_frame())[["i"]]),
+    "frame melt": lambda m: m.DataFrame(_narrow_frame())[["k", "i"]].melt(id_vars="k"),
+    "select_dtypes int32": lambda m: list(m.DataFrame(_narrow_frame()).select_dtypes("int32").columns),
+    # NEGATIVE: 'int64' is int64 alone ...
+    "select_dtypes int64": lambda m: list(m.DataFrame(_narrow_frame()).select_dtypes("int64").columns),
+    # ... and 'integer' every width (a guard: every column matched when all
+    # were int64).
+    "select_dtypes integer": lambda m: list(m.DataFrame(_narrow_frame()).select_dtypes("integer").columns),
+    "memory_usage": lambda m: m.DataFrame(_narrow_frame()).memory_usage(index=False),
+    "memory_usage masked": lambda m: m.Series([1, None], dtype="Int32").memory_usage(index=False),
+    "to_numpy int32": lambda m: _narrow_view(m.Series([1, 2]).astype("int32").to_numpy()),
+    "values uint8": lambda m: _narrow_view(m.Series([1, 2]).astype("uint8").values),
+    "dtype == np.int32": lambda m: m.Series([1]).astype("int32").dtype == np.int32,
+    "is_unsigned_integer_dtype": lambda m: m.api.types.is_unsigned_integer_dtype(m.Series([1]).astype("uint8")),
+    "float32 repr": lambda m: repr(m.Series([0.1, 1 / 3]).astype("float32")),
+}
+
+
+def _narrow_view(x: Any) -> Any:
+    """A result as its values and dtype: a frame's repr and dtypes, a
+    Series' repr and dtype, an array's dtype and values, a numpy scalar's
+    type and repr."""
+    if hasattr(x, "columns") and hasattr(x, "dtypes"):
+        return (repr(x), [str(t) for t in x.dtypes])
+    if hasattr(x, "dtype") and hasattr(x, "index"):
+        return (repr(x), str(x.dtype))
+    if isinstance(x, np.ndarray):
+        return (str(x.dtype), x.tolist())
+    if isinstance(x, np.generic):
+        return (type(x).__name__, repr(x))
+    return x
+
+
+def _narrow_outcome(m: Any, run: Any) -> Any:
+    try:
+        return _narrow_view(run(m))
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        # The message too: a dtype this binding did not understand raised
+        # TypeError where pandas' constructor refusal is a TypeError.
+        return ("raise", type(e).__name__, str(e))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_NARROW_DTYPE_CASES))
+def test_narrow_numeric_dtypes_like_pandas(case: str) -> None:
+    run = _NARROW_DTYPE_CASES[case]
+    assert _narrow_outcome(fpd, run) == _narrow_outcome(pd, run), case

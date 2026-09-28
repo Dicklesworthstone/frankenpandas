@@ -33,7 +33,8 @@ use fp_index::{
     OrderedF64, PeriodIndex, RangeIndex, TimedeltaIndex,
 };
 use fp_types::{
-    CategoricalMetadata, DType, NullKind, Period, PeriodFreq, Scalar, Timedelta, Timestamp,
+    CategoricalMetadata, DType, NullKind, NumericWidth, Period, PeriodFreq, Scalar, Timedelta,
+    Timestamp,
 };
 use mimalloc::MiMalloc;
 use pyo3::{
@@ -195,6 +196,10 @@ fn n_method_refused_dtype(column: &Column) -> Option<String> {
 
 fn column_pandas_dtype_name(column: &Column) -> String {
     let dtype = column.dtype();
+    // A narrow numpy dtype, or its masked form (int32 / Int32; fvsao.23).
+    if let Some(width) = column.width() {
+        return width.name(dtype.is_nullable()).to_owned();
+    }
     if dtype == DType::Bool && column.has_any_missing() {
         return "object".to_owned();
     }
@@ -310,6 +315,13 @@ fn shifted_periods(series: &Series, n: &Bound<'_, PyAny>, sign: i64) -> PyResult
 /// tz-aware ones; the name for anything else.
 fn column_pandas_dtype<'py>(py: Python<'py>, column: &Column) -> PyResult<Bound<'py, PyAny>> {
     let name = column_pandas_dtype_name(column);
+    if let Some(width) = column.width() {
+        return if column.dtype().is_nullable() {
+            masked_width_dtype(py, width)
+        } else {
+            py.import("numpy")?.call_method1("dtype", (name,))
+        };
+    }
     if matches!(
         name.as_str(),
         "int64" | "float64" | "bool" | "object" | "datetime64[ns]" | "timedelta64[ns]"
@@ -336,6 +348,21 @@ fn column_pandas_dtype<'py>(py: Python<'py>, column: &Column) -> PyResult<Bound<
         }
         .into_bound_py_any(py),
         _ => Ok(pyo3::types::PyString::new(py, &name).into_any()),
+    }
+}
+
+/// pandas' masked extension dtype of a narrow width: `pd.Int8Dtype()` ...
+/// `pd.Float32Dtype()`.
+fn masked_width_dtype(py: Python<'_>, width: NumericWidth) -> PyResult<Bound<'_, PyAny>> {
+    match width {
+        NumericWidth::Int8 => PyInt8Dtype.into_bound_py_any(py),
+        NumericWidth::Int16 => PyInt16Dtype.into_bound_py_any(py),
+        NumericWidth::Int32 => PyInt32Dtype.into_bound_py_any(py),
+        NumericWidth::UInt8 => PyUInt8Dtype.into_bound_py_any(py),
+        NumericWidth::UInt16 => PyUInt16Dtype.into_bound_py_any(py),
+        NumericWidth::UInt32 => PyUInt32Dtype.into_bound_py_any(py),
+        NumericWidth::UInt64 => PyUInt64Dtype.into_bound_py_any(py),
+        NumericWidth::Float32 => PyFloat32Dtype.into_bound_py_any(py),
     }
 }
 
@@ -5363,12 +5390,27 @@ fn is_nullable_extension(dtype: &DType) -> bool {
 /// numpy scalar (np.int64 / np.float64 / np.bool_) - they came back as
 /// Python int / float / bool; anything else as `scalar_to_py`.
 fn numpy_scalar(py: Python<'_>, scalar: &Scalar) -> PyResult<Py<PyAny>> {
+    numpy_scalar_of(py, scalar, None)
+}
+
+/// [`numpy_scalar`] of a column of `width`: an int32 column's element is
+/// np.int32, a float32 column's np.float32 (fvsao.23).
+fn numpy_scalar_of(
+    py: Python<'_>,
+    scalar: &Scalar,
+    width: Option<NumericWidth>,
+) -> PyResult<Py<PyAny>> {
     let (name, value) = match scalar {
         Scalar::Int64(v) => ("int64", v.into_py_any(py)?),
         Scalar::Float64(v) => ("float64", v.into_py_any(py)?),
         Scalar::Null(NullKind::NaN) => ("float64", f64::NAN.into_py_any(py)?),
         Scalar::Bool(b) => ("bool_", b.into_py_any(py)?),
         _ => return scalar_to_py(py, scalar),
+    };
+    let name = match (width, name) {
+        (Some(width), "float64") if width.is_float() => width.name(false),
+        (Some(width), "int64") if !width.is_float() => width.name(false),
+        _ => name,
     };
     Ok(py.import("numpy")?.getattr(name)?.call1((value,))?.unbind())
 }
@@ -5416,11 +5458,13 @@ fn frame_element_named(
 fn element_to_py(py: Python<'_>, column: &Column, value: &Scalar) -> PyResult<Py<PyAny>> {
     match column.dtype() {
         DType::Int64 | DType::Float64 if value.is_missing() => {
-            numpy_scalar(py, &Scalar::Float64(f64::NAN))
+            numpy_scalar_of(py, &Scalar::Float64(f64::NAN), column.width())
         }
-        DType::Int64 | DType::Float64 => numpy_scalar(py, value),
+        DType::Int64 | DType::Float64 => numpy_scalar_of(py, value, column.width()),
         DType::Bool if !value.is_missing() => numpy_scalar(py, value),
-        dtype if is_nullable_extension(&dtype) && !value.is_missing() => numpy_scalar(py, value),
+        dtype if is_nullable_extension(&dtype) && !value.is_missing() => {
+            numpy_scalar_of(py, value, column.width())
+        }
         _ => cell_to_py(py, column, value),
     }
 }
@@ -5478,7 +5522,25 @@ fn reduction_to_py(
     {
         return f64::NAN.into_py_any(py);
     }
-    numpy_scalar(py, result)
+    numpy_scalar_of(py, result, reduction_width(series.column().width(), op))
+}
+
+/// The numpy width of a reduction of a column of `width`, as pandas'
+/// nanops give it (live pandas 2.2.3, fvsao.23): min / max / first / last
+/// keep the column's dtype (an int32 max is np.int32); a float32 column's
+/// sum, mean, median, std, var, prod and quantile are float32 too; an integer
+/// column's sum and prod widen to int64, or uint64 when unsigned (a uint8
+/// sum is np.uint64); anything else of an integer column is float64.
+fn reduction_width(width: Option<NumericWidth>, op: &str) -> Option<NumericWidth> {
+    let width = width?;
+    match op {
+        "min" | "max" | "first" | "last" => Some(width),
+        "sum" | "mean" | "median" | "std" | "var" | "prod" | "quantile" if width.is_float() => {
+            Some(width)
+        }
+        "sum" | "prod" if width.is_unsigned() => Some(NumericWidth::UInt64),
+        _ => None,
+    }
 }
 
 fn scalar_to_py(py: Python<'_>, scalar: &Scalar) -> PyResult<Py<PyAny>> {
@@ -5990,6 +6052,37 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
         )));
     }
     let kind = obj.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    // An array of a numpy dtype narrower than 64 bits keeps it, as pandas'
+    // Series(np.array([1, 2], dtype=np.int32)) is int32 (it widened to
+    // int64 / float64; fvsao.23).
+    if matches!(kind.as_str(), "i" | "u" | "f")
+        && let Some((width, _)) =
+            NumericWidth::parse(&obj.getattr("dtype")?.getattr("name")?.extract::<String>()?)
+    {
+        let column = if width.is_float() {
+            Column::from_f64_values(obj.call_method0("tolist")?.extract::<Vec<f64>>()?)
+        } else {
+            let values = obj.call_method0("tolist")?;
+            match values.extract::<Vec<i64>>() {
+                Ok(values) => Column::from_i64_values(values),
+                // A uint64 value at or above 2**63.
+                Err(_) => {
+                    let largest = py
+                        .import("builtins")?
+                        .getattr("max")?
+                        .call1((values,))?
+                        .extract::<u64>()?;
+                    return Err(column_error_to_py(
+                        fp_columnar::ColumnError::UInt64OutOfRange { value: largest },
+                    ));
+                }
+            }
+        };
+        return column
+            .cast_to_width(width, false)
+            .map(Some)
+            .map_err(column_error_to_py);
+    }
     let temporal_array = |ns_dtype: &str| -> PyResult<Vec<Option<i64>>> {
         Ok(obj
             .call_method1("astype", (ns_dtype,))?
@@ -16742,6 +16835,173 @@ fn wrap_series(result: Result<Series, fp_frame::FrameError>) -> PyResult<PySerie
         .map_err(frame_error_to_py)
 }
 
+/// numpy's dtype for arithmetic between `left` and the operand `other`,
+/// by numpy 2's promotion (NEP 50; fvsao.23): with a Series or a numpy
+/// scalar the smallest dtype holding both (int8 + uint8 is int16, int32 +
+/// int64 int64); a Python bool / int / float is weak - `left`'s dtype wins
+/// (int32 + 1 is int32, float32 + 0.2 float32, int32 + 0.5 float64) - and
+/// an int outside `left`'s integer width is numpy's OverflowError. `None`
+/// when a side is not a numpy number: the engine's dtype stands.
+fn arith_result_numpy(
+    left: &Series,
+    other: &Bound<'_, PyAny>,
+) -> PyResult<Option<fp_types::NumpyNumeric>> {
+    use fp_types::NumpyNumeric;
+    let Some(this) = NumpyNumeric::of(&left.dtype(), left.column().width()) else {
+        return Ok(None);
+    };
+    if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
+        let column = series.inner.column();
+        return Ok(
+            NumpyNumeric::of(&column.dtype(), column.width()).map(|that| this.result_type(that))
+        );
+    }
+    if other.is_exact_instance_of::<pyo3::types::PyBool>() {
+        return Ok(Some(this.result_type(NumpyNumeric::Bool)));
+    }
+    if other.is_exact_instance_of::<pyo3::types::PyInt>() {
+        if let Some(width) = this.width().filter(|width| !width.is_float())
+            && !other
+                .extract::<i64>()
+                .is_ok_and(|value| width.holds_int(value))
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyOverflowError, _>(format!(
+                "Python integer {} out of bounds for {}",
+                other.str()?,
+                width.name(false)
+            )));
+        }
+        return Ok(Some(this.with_python_int()));
+    }
+    if other.is_exact_instance_of::<pyo3::types::PyFloat>() {
+        return Ok(Some(this.with_python_float()));
+    }
+    // A numpy scalar (np.int8(3), np.float64(0.5)) brings its own dtype.
+    let Ok(name) = other
+        .getattr("dtype")
+        .and_then(|dtype| dtype.getattr("name"))
+        .and_then(|name| name.extract::<String>())
+    else {
+        return Ok(None);
+    };
+    let that = match NumericWidth::parse(&name) {
+        Some((width, false)) => Some(NumpyNumeric::of_width(width)),
+        Some((_, true)) => None,
+        None => match name.as_str() {
+            "int64" => Some(NumpyNumeric::Int(64)),
+            "float64" => Some(NumpyNumeric::Float(64)),
+            "bool" => Some(NumpyNumeric::Bool),
+            _ => None,
+        },
+    };
+    Ok(that.map(|that| this.result_type(that)))
+}
+
+/// An arithmetic result in numpy's dtype for it (fvsao.23): the width of
+/// [`arith_result_numpy`] - true division of integers float64 - with the
+/// values wrapped into an integer width (int8 100 + 100 is -56, uint8
+/// 0 - 1 is 255) or rounded to float32. A result whose storage cannot
+/// carry the width (an int32 sum that alignment left with a missing row is
+/// float64) keeps the engine's dtype, as pandas'.
+fn narrowed_arith(
+    result: Result<Series, fp_frame::FrameError>,
+    left: &Series,
+    other: &Bound<'_, PyAny>,
+    true_division: bool,
+) -> PyResult<PySeries> {
+    let numeric = arith_result_numpy(left, other)?;
+    let inner = result.map_err(frame_error_to_py)?;
+    let numeric = match numeric {
+        Some(numeric) if true_division && !numeric.is_float() => fp_types::NumpyNumeric::Float(64),
+        Some(numeric) => numeric,
+        None => return Ok(PySeries { inner }),
+    };
+    Ok(PySeries {
+        inner: narrowed_to(inner, numeric.width())?,
+    })
+}
+
+/// The dtype pandas gives a groupby reduction `op` of a column of `width`
+/// whose result is `result` (live pandas 2.2.3, fvsao.23): a float32
+/// column's reductions are float32; an integer column's min / max /
+/// first / last keep its width, and its sum / prod come back in it when
+/// every group's value fits - int32 sums are int32, an int8 sum of 200 is
+/// int64, a uint8 product of 10000 uint64 (unsigned widens to uint64).
+/// `None`: the engine's 64-bit dtype.
+fn groupby_reduction_width(width: NumericWidth, op: &str, result: &Column) -> Option<NumericWidth> {
+    // A cumulative sum / product / min / max types as the reduction.
+    let op = match op.split('(').next().unwrap_or(op) {
+        "cumsum" => "sum",
+        "cumprod" => "prod",
+        "cummin" => "min",
+        "cummax" => "max",
+        other => other,
+    };
+    if width.is_float() {
+        return matches!(
+            op,
+            "sum"
+                | "prod"
+                | "min"
+                | "max"
+                | "first"
+                | "last"
+                | "mean"
+                | "median"
+                | "std"
+                | "var"
+                | "sem"
+        )
+        .then_some(width);
+    }
+    match op {
+        "min" | "max" | "first" | "last" => Some(width),
+        "sum" | "prod" => {
+            let held = result.values().iter().all(|value| match value {
+                Scalar::Int64(v) => width.holds_int(*v),
+                _ => true,
+            });
+            if held {
+                Some(width)
+            } else {
+                width.is_unsigned().then_some(NumericWidth::UInt64)
+            }
+        }
+        _ => None,
+    }
+}
+
+/// A unary operation's result (`-s`, `~s`, `abs(s)`, `+s`) in the
+/// operand's width, wrapped as numpy wraps it: `-` and `abs` of an int8
+/// -128 are -128 (fvsao.23).
+fn unary_keeping_width(
+    result: Result<Series, fp_frame::FrameError>,
+    operand: &Series,
+) -> PyResult<PySeries> {
+    let inner = result.map_err(frame_error_to_py)?;
+    Ok(PySeries {
+        inner: narrowed_to(inner, operand.column().width())?,
+    })
+}
+
+/// `series` as `width` when its storage carries that width (see
+/// [`narrowed_arith`]); unchanged for `None` or a storage that cannot.
+fn narrowed_to(series: Series, width: Option<NumericWidth>) -> PyResult<Series> {
+    let Some(width) = width else {
+        return Ok(series);
+    };
+    let column = series.column();
+    let dtype = column.dtype();
+    let carried = width.fits_storage(&dtype)
+        && (width.is_float() || dtype != DType::Int64 || !column.has_nulls());
+    if !carried || column.width() == Some(width) {
+        return Ok(series);
+    }
+    series
+        .astype_width(width, dtype.is_nullable())
+        .map_err(frame_error_to_py)
+}
+
 fn wrap_frame(result: Result<DataFrame, fp_frame::FrameError>) -> PyResult<PyDataFrame> {
     result
         .map(|inner| PyDataFrame { inner })
@@ -18782,7 +19042,7 @@ fn describe_all<'py>(
 /// dtypes line and the memory line (pandas' size format, `+` when an object
 /// column's size is a lower bound). The index reads RangeIndex when its
 /// labels are 0..n-1 (frankenpandas keeps no range provenance, fvsao.18);
-/// the byte count is frankenpandas' own.
+/// the byte count is `DataFrame.memory_usage`'s sum.
 fn pandas_info_text(
     this: &Bound<'_, PyDataFrame>,
     verbose: Option<bool>,
@@ -18812,7 +19072,7 @@ fn pandas_info_text(
         .collect();
     let dtypes: Vec<String> = (0..width)
         .filter_map(|position| frame.column_at(position))
-        .map(|column| pandas_dtype_name(&column.dtype()))
+        .map(column_pandas_dtype_name)
         .collect();
     let verbose = verbose.unwrap_or(width <= max_cols.unwrap_or(100));
     if width == 0 {
@@ -18895,9 +19155,9 @@ fn pandas_info_text(
     let show_memory = memory_usage.is_none_or(|m| m.is_none() || m.is_truthy().unwrap_or(true));
     if show_memory {
         let deep = memory_usage.is_some_and(|m| m.extract::<String>().is_ok_and(|m| m == "deep"));
-        let bytes: usize = frame
-            .memory_usage_with_options(true, deep)
-            .map_err(frame_error_to_py)?
+        // DataFrame.memory_usage's bytes, a RangeIndex as pandas counts it
+        // (132 bytes, not 8 a row; the line read 100 where pandas' 200).
+        let bytes: usize = frame_memory_usage(this.py(), frame, true, deep)?
             .column()
             .values()
             .iter()
@@ -20721,10 +20981,13 @@ impl PySeries {
         if let Some(inner) = string_dtype_series(&series, dtype)? {
             return Ok(PySeries { inner });
         }
-        let target = py_dtype_arg(dtype)?;
-        let inner = series
-            .astype(target)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        if let Some((width, nullable)) = py_width_arg(dtype)
+            && let Some(data) = data.filter(|data| data.extract::<PyRef<'_, PySeries>>().is_err())
+        {
+            let from_ndarray = data.get_type().name()? == "ndarray";
+            refuse_lossy_constructor_ints(series.column(), width, nullable, from_ndarray)?;
+        }
+        let inner = series_astype_arg(&series, dtype)?.map_err(|e| astype_error_to_py(&e))?;
         Ok(PySeries { inner })
     }
 
@@ -20999,7 +21262,7 @@ impl PySeries {
             return Ok(PySeries { inner });
         }
         let rhs = series_operand(py, other, &self.inner)?;
-        wrap_series(self.inner.add(&rhs))
+        narrowed_arith(self.inner.add(&rhs), &self.inner, other, false)
     }
     fn __radd__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         if let Ok(offset) = other.extract::<PyRef<'_, PyDateOffset>>() {
@@ -21010,7 +21273,7 @@ impl PySeries {
             return Ok(PySeries { inner });
         }
         let lhs = series_operand(py, other, &self.inner)?;
-        wrap_series(lhs.add(&self.inner))
+        narrowed_arith(lhs.add(&self.inner), &self.inner, other, false)
     }
     fn __sub__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         if let Ok(offset) = other.extract::<PyRef<'_, PyDateOffset>>() {
@@ -21021,43 +21284,43 @@ impl PySeries {
             return Ok(PySeries { inner });
         }
         let rhs = series_operand(py, other, &self.inner)?;
-        wrap_series(self.inner.sub(&rhs))
+        narrowed_arith(self.inner.sub(&rhs), &self.inner, other, false)
     }
     fn __rsub__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let lhs = series_operand(py, other, &self.inner)?;
-        wrap_series(lhs.sub(&self.inner))
+        narrowed_arith(lhs.sub(&self.inner), &self.inner, other, false)
     }
     fn __mul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let rhs = series_operand(py, other, &self.inner)?;
-        wrap_series(self.inner.mul(&rhs))
+        narrowed_arith(self.inner.mul(&rhs), &self.inner, other, false)
     }
     fn __rmul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let lhs = series_operand(py, other, &self.inner)?;
-        wrap_series(lhs.mul(&self.inner))
+        narrowed_arith(lhs.mul(&self.inner), &self.inner, other, false)
     }
     fn __truediv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let rhs = series_operand(py, other, &self.inner)?;
-        wrap_series(self.inner.div(&rhs))
+        narrowed_arith(self.inner.div(&rhs), &self.inner, other, true)
     }
     fn __rtruediv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let lhs = series_operand(py, other, &self.inner)?;
-        wrap_series(lhs.div(&self.inner))
+        narrowed_arith(lhs.div(&self.inner), &self.inner, other, true)
     }
     fn __floordiv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let rhs = series_operand(py, other, &self.inner)?;
-        wrap_series(self.inner.floordiv(&rhs))
+        narrowed_arith(self.inner.floordiv(&rhs), &self.inner, other, false)
     }
     fn __rfloordiv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let lhs = series_operand(py, other, &self.inner)?;
-        wrap_series(lhs.floordiv(&self.inner))
+        narrowed_arith(lhs.floordiv(&self.inner), &self.inner, other, false)
     }
     fn __mod__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let rhs = series_operand(py, other, &self.inner)?;
-        wrap_series(self.inner.remainder(&rhs))
+        narrowed_arith(self.inner.remainder(&rhs), &self.inner, other, false)
     }
     fn __rmod__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let lhs = series_operand(py, other, &self.inner)?;
-        wrap_series(lhs.remainder(&self.inner))
+        narrowed_arith(lhs.remainder(&self.inner), &self.inner, other, false)
     }
     /// `divmod(s, other)`: `(s // other, s % other)`, as pandas (it was a
     /// TypeError; buwrx).
@@ -21082,7 +21345,7 @@ impl PySeries {
         _modulo: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
         let rhs = series_operand(py, other, &self.inner)?;
-        wrap_series(self.inner.power(&rhs))
+        narrowed_arith(self.inner.power(&rhs), &self.inner, other, false)
     }
     fn __rpow__(
         &self,
@@ -21091,27 +21354,27 @@ impl PySeries {
         _modulo: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
         let lhs = series_operand(py, other, &self.inner)?;
-        wrap_series(lhs.power(&self.inner))
+        narrowed_arith(lhs.power(&self.inner), &self.inner, other, false)
     }
     /// `-s`; pandas negates a bool Series as logical NOT (it raised).
     fn __neg__(&self) -> PyResult<PySeries> {
         if self.inner.dtype() == DType::Bool {
             return wrap_series(self.inner.invert());
         }
-        wrap_series(self.inner.neg())
+        unary_keeping_width(self.inner.neg(), &self.inner)
     }
     /// `~s`: logical NOT of a bool Series, bitwise NOT of ints, as pandas.
     /// `df[~mask]` raised "bad operand type for unary ~"
     /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.13).
     fn __invert__(&self) -> PyResult<PySeries> {
-        wrap_series(self.inner.invert())
+        unary_keeping_width(self.inner.invert(), &self.inner)
     }
     /// `abs(s)` and `+s`, as pandas.
     fn __abs__(&self) -> PyResult<PySeries> {
-        wrap_series(self.inner.abs())
+        unary_keeping_width(self.inner.abs(), &self.inner)
     }
     fn __pos__(&self) -> PyResult<PySeries> {
-        wrap_series(self.inner.positive())
+        unary_keeping_width(self.inner.positive(), &self.inner)
     }
     /// `s & other`, `s | other`, `s ^ other` and their reflected forms, as
     /// pandas (see [`series_logical`]); a DataFrame operand answers itself.
@@ -22081,7 +22344,11 @@ impl PySeries {
             }
             _ => {}
         }
-        let column = Column::from_values(self.inner.unique()).map_err(column_error_to_py)?;
+        // The distinct values are the column's own: an int32 column's are an
+        // int32 array (fvsao.23).
+        let column = Column::from_values(self.inner.unique())
+            .map_err(column_error_to_py)?
+            .keeping_width_of(self.inner.column());
         Ok(column_ndarray(py, &column)?.unbind())
     }
 
@@ -22970,14 +23237,12 @@ impl PySeries {
         if let Some(inner) = string_dtype_series(&self.inner, &spec)? {
             return Ok(PySeries { inner });
         }
-        match self.inner.astype(py_dtype_arg(&spec)?) {
+        match series_astype_arg(&self.inner, &spec)? {
             Ok(inner) => Ok(PySeries { inner }),
             Err(_) if errors == "ignore" => Ok(PySeries {
                 inner: self.inner.clone(),
             }),
-            Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                e.to_string(),
-            )),
+            Err(e) => Err(astype_error_to_py(&e)),
         }
     }
 
@@ -25975,7 +26240,13 @@ fn column_ndarray<'py>(py: Python<'py>, column: &Column) -> PyResult<Bound<'py, 
     let np = py.import("numpy")?;
     if let Some(kind) = numpy_kind(column) {
         let buffer = pyo3::types::PyByteArray::new(py, &numpy_bytes(column, kind));
-        return np.call_method1("frombuffer", (buffer, kind));
+        let array = np.call_method1("frombuffer", (buffer, kind))?;
+        // A narrow numpy column's array is its own dtype (int32, float32;
+        // fvsao.23): the values it holds are exactly that dtype's.
+        if let Some(width) = column.width().filter(|_| !column.dtype().is_nullable()) {
+            return array.call_method1("astype", (width.name(false),));
+        }
+        return Ok(array);
     }
     object_ndarray(py, &np, &materialized_values(column))
 }
@@ -26048,7 +26319,23 @@ fn frame_ndarray<'py>(py: Python<'py>, frame: &DataFrame) -> PyResult<Bound<'py,
             "frombuffer",
             (pyo3::types::PyByteArray::new(py, &bytes), kind),
         )?;
-        return flat.call_method1("reshape", ((rows, width),));
+        let array = flat.call_method1("reshape", ((rows, width),))?;
+        // Narrow columns' common numpy dtype (fvsao.23): int32 and uint8 are
+        // int32, float32 alone float32 - numpy's result_type over them.
+        let narrow = columns
+            .iter()
+            .map(|column| fp_types::NumpyNumeric::of(&column.dtype(), column.width()))
+            .reduce(|left, right| left.zip(right).map(|(left, right)| left.result_type(right)))
+            .flatten()
+            .and_then(fp_types::NumpyNumeric::width);
+        if let Some(narrow) = narrow
+            && (narrow.is_float() == (kind == "float64"))
+            && kind != "bool"
+            && columns.iter().all(|column| !column.dtype().is_nullable())
+        {
+            return array.call_method1("astype", (narrow.name(false),));
+        }
+        return Ok(array);
     }
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", "object")?;
@@ -29332,9 +29619,23 @@ impl PyDataFrame {
             Some(dtype) if is_object_dtype_arg(dtype) => {
                 object_frame(&built, None).map_err(frame_error_to_py)?
             }
-            Some(dtype) => built
-                .astype(py_dtype_arg(dtype)?)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?,
+            Some(dtype) => match py_width_arg(dtype) {
+                Some((width, nullable)) => {
+                    // A frame's columns cast as the Series constructor's
+                    // (see `refuse_lossy_constructor_ints`); a frame given
+                    // as the data casts as astype.
+                    if data.is_some_and(|data| data.extract::<PyRef<'_, PyDataFrame>>().is_err()) {
+                        for position in 0..built.num_columns() {
+                            if let Some(column) = built.column_at(position) {
+                                refuse_lossy_constructor_ints(column, width, nullable, false)?;
+                            }
+                        }
+                    }
+                    built.astype_width(width, nullable)
+                }
+                None => built.astype(py_dtype_arg(dtype)?),
+            }
+            .map_err(|e| astype_error_to_py(&e))?,
         };
         Ok(PyDataFrame { inner })
     }
@@ -32383,6 +32684,7 @@ impl PyDataFrame {
         let result = if let Ok(mapping) = dtype.cast::<PyDict>() {
             let mapping = column_dict_arg(&self.inner, mapping)?;
             let mut targets: Vec<(String, DType)> = Vec::with_capacity(mapping.len());
+            let mut widths: Vec<(String, NumericWidth, bool)> = Vec::new();
             let mut objects: Vec<String> = Vec::new();
             for (column, spec) in mapping.iter() {
                 let column = column.extract::<String>()?;
@@ -32397,6 +32699,8 @@ impl PyDataFrame {
                 }
                 if is_object_dtype_arg(&spec) {
                     objects.push(column);
+                } else if let Some((width, nullable)) = py_width_arg(&spec) {
+                    widths.push((column, width, nullable));
                 } else {
                     targets.push((column, py_dtype_arg(&spec)?));
                 }
@@ -32405,11 +32709,18 @@ impl PyDataFrame {
                 .iter()
                 .map(|(column, dt)| (column.as_str(), dt.clone()))
                 .collect();
-            self.inner
-                .astype_columns(&pairs)
-                .and_then(|frame| object_frame(&frame, Some(&objects)))
+            widths.iter().fold(
+                self.inner
+                    .astype_columns(&pairs)
+                    .and_then(|frame| object_frame(&frame, Some(&objects))),
+                |frame, (column, width, nullable)| {
+                    frame.and_then(|frame| frame.astype_column_width(column, *width, *nullable))
+                },
+            )
         } else if is_object_dtype_arg(dtype) {
             object_frame(&self.inner, None)
+        } else if let Some((width, nullable)) = py_width_arg(dtype) {
+            self.inner.astype_width(width, nullable)
         } else {
             let target = py_dtype_arg(dtype)?;
             self.inner.astype(target)
@@ -32419,9 +32730,7 @@ impl PyDataFrame {
             Err(_) if errors == "ignore" => Ok(PyDataFrame {
                 inner: self.inner.clone(),
             }),
-            Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                e.to_string(),
-            )),
+            Err(e) => Err(astype_error_to_py(&e)),
         }
     }
 
@@ -35288,39 +35597,9 @@ impl PyDataFrame {
     /// pandas does ([`object_deep_bytes`]; it counted their characters).
     #[pyo3(signature = (index=true, deep=false))]
     fn memory_usage(&self, py: Python<'_>, index: bool, deep: bool) -> PyResult<PySeries> {
-        let res = self
-            .inner
-            .memory_usage_with_options(index, deep)
-            .map_err(frame_error_to_py)?;
-        let as_int = |bytes: usize| Scalar::Int64(i64::try_from(bytes).unwrap_or(i64::MAX));
-        let mut values = res.values().to_vec();
-        if deep {
-            let offset = usize::from(index);
-            for position in 0..self.inner.num_columns() {
-                if let Some(column) = self.inner.column_at(position)
-                    && let Some(bytes) = object_deep_bytes(py, column)?
-                    && let Some(slot) = values.get_mut(offset + position)
-                {
-                    *slot = as_int(bytes);
-                }
-            }
-            if index
-                && let Some(bytes) = index_deep_bytes(py, self.inner.index())?
-                && let Some(first) = values.first_mut()
-            {
-                *first = as_int(bytes);
-            }
-        }
-        // A RangeIndex's entry is pandas' (see range_index_nbytes).
-        if let Some(span) = self.inner.index().range_span().filter(|_| index)
-            && let Some(first) = values.first_mut()
-        {
-            *first = as_int(range_index_nbytes(py, span)?);
-        }
-        let column = Column::from_values(values).map_err(column_error_to_py)?;
-        let inner =
-            Series::new(res.name(), res.index().clone(), column).map_err(frame_error_to_py)?;
-        Ok(PySeries { inner })
+        Ok(PySeries {
+            inner: frame_memory_usage(py, &self.inner, index, deep)?,
+        })
     }
 
     #[getter]
@@ -42605,8 +42884,8 @@ impl PySeriesCategoricalAccessor {
         categories_index(py, self.accessor()?.categories())
     }
 
-    /// Each row's category code, -1 where missing (pandas' are int8 for
-    /// small category counts; these are int64).
+    /// Each row's category code, -1 where missing: int8 for up to 126
+    /// categories, then int16 / int32, as pandas'.
     #[getter]
     fn codes(&self) -> PyResult<PySeries> {
         self.apply(|cat| cat.codes())
@@ -45114,10 +45393,45 @@ impl PyGroupBy {
                 && column.dtype() != target
             {
                 let column = column.astype(target).map_err(column_error_to_py)?;
-                inner = inner.with_column(name, column).map_err(frame_error_to_py)?;
+                inner = inner
+                    .with_column(name.clone(), column)
+                    .map_err(frame_error_to_py)?;
             }
         }
-        Ok(PyDataFrame { inner })
+        Ok(PyDataFrame {
+            inner: self.narrowed_frame(op, inner)?,
+        })
+    }
+
+    /// `frame`, a per-group `op` over this groupby's columns, with each
+    /// value column from a narrow source column in pandas' dtype for `op`
+    /// (see [`groupby_reduction_width`]; fvsao.23).
+    fn narrowed_frame(&self, op: &str, frame: DataFrame) -> PyResult<DataFrame> {
+        let names: Vec<String> = frame.column_names().into_iter().cloned().collect();
+        names
+            .iter()
+            .try_fold(frame, |frame, name| self.narrowed_column(op, frame, name))
+    }
+
+    /// [`Self::narrowed_frame`] of the one column `name`.
+    fn narrowed_column(&self, op: &str, frame: DataFrame, name: &str) -> PyResult<DataFrame> {
+        if self.by.iter().any(|key| key == name) {
+            return Ok(frame);
+        }
+        let width = self.df.column(name).and_then(Column::width);
+        if let (Some(width), Some(column)) = (width, frame.column(name))
+            && let Some(target) = groupby_reduction_width(width, op, column)
+            && target.fits_storage(&column.dtype())
+            && (target.is_float() || column.dtype().is_nullable() || !column.has_nulls())
+            && column.width() != Some(target)
+        {
+            let nullable = column.dtype().is_nullable();
+            let column = column
+                .cast_to_width(target, nullable)
+                .map_err(column_error_to_py)?;
+            return frame.with_column(name, column).map_err(frame_error_to_py);
+        }
+        Ok(frame)
     }
 
     /// The zone of this groupby's one tz-aware key: its groups are the key's
@@ -45648,7 +45962,7 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .cumsum()
             .map_err(frame_error_to_py)?;
-        self.out(result)
+        self.out(self.narrowed_frame("cumsum", result)?)
     }
 
     fn cumprod(&self) -> PyResult<PyDataFrame> {
@@ -45657,7 +45971,7 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .cumprod()
             .map_err(frame_error_to_py)?;
-        self.out(result)
+        self.out(self.narrowed_frame("cumprod", result)?)
     }
 
     fn cummin(&self) -> PyResult<PyDataFrame> {
@@ -45666,7 +45980,7 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .cummin()
             .map_err(frame_error_to_py)?;
-        self.out(result)
+        self.out(self.narrowed_frame("cummin", result)?)
     }
 
     fn cummax(&self) -> PyResult<PyDataFrame> {
@@ -45675,7 +45989,7 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .cummax()
             .map_err(frame_error_to_py)?;
-        self.out(result)
+        self.out(self.narrowed_frame("cummax", result)?)
     }
 
     #[pyo3(signature = (periods=1))]
@@ -46058,6 +46372,15 @@ impl PyGroupBy {
             })
         }
         .map_err(frame_error_to_py)?;
+        // A {column: function} dict's columns each in pandas' dtype for its
+        // function (fvsao.23).
+        let res = if two_level {
+            res
+        } else {
+            specs.iter().try_fold(res, |res, (column, funcs)| {
+                self.narrowed_column(&funcs[0], res, column)
+            })?
+        };
         // Under MultiIndex columns a (column, function) axis leads with the
         // column's own levels, the function last (sdyhq: the joined key
         // led).
@@ -47305,6 +47628,14 @@ impl PySeriesGroupBy {
     /// as_index=False the keys moved into a column beside it, as pandas does.
     fn wrap_result(&self, op: &str, s: Series) -> PyResult<Py<PyAny>> {
         let res = masked_reduction(&self.series.column().dtype(), op, self.per_group(op, s)?)?;
+        // A narrow column's groups in pandas' dtype for `op` (fvsao.23).
+        let res = match self.series.column().width() {
+            Some(width) => {
+                let target = groupby_reduction_width(width, op, res.column());
+                narrowed_to(res, target)?
+            }
+            None => res,
+        };
         Python::attach(|py| {
             if self.as_index {
                 return Ok(Py::new(py, PySeries { inner: res })?.into_any());
@@ -50448,18 +50779,121 @@ fn index_astype_name(dtype: &Bound<'_, PyAny>) -> PyResult<String> {
 }
 
 fn py_dtype_arg(obj: &Bound<'_, PyAny>) -> PyResult<DType> {
+    parse_dtype(&dtype_arg_text(obj)?)
+}
+
+/// The dtype name a dtype argument spells: a str as given, a type's name
+/// (`np.int32` -> 'int32'), a dtype object's `name` ('Int32'), else its
+/// `str`.
+fn dtype_arg_text(obj: &Bound<'_, PyAny>) -> PyResult<String> {
     if let Ok(name) = obj.extract::<String>() {
-        return parse_dtype(&name);
+        return Ok(name);
     }
     if let Ok(ty) = obj.cast::<pyo3::types::PyType>() {
-        return parse_dtype(&ty.name()?.extract::<String>()?);
+        return ty.name()?.extract::<String>();
     }
     if let Ok(name) = obj.getattr("name")
         && let Ok(name) = name.extract::<String>()
     {
-        return parse_dtype(&name);
+        return Ok(name);
     }
-    parse_dtype(&obj.str()?.extract::<String>()?)
+    obj.str()?.extract::<String>()
+}
+
+/// The numpy width narrower than 64 bits a dtype argument names - 'int32',
+/// `np.uint8`, `np.dtype('float32')`, 'Int16', `pd.Float32Dtype()` - and
+/// whether it is the masked dtype (fvsao.23).
+fn py_width_arg(obj: &Bound<'_, PyAny>) -> Option<(NumericWidth, bool)> {
+    dtype_arg_text(obj)
+        .ok()
+        .and_then(|name| NumericWidth::parse(&name))
+}
+
+/// `series` cast to the dtype argument `dtype`: a numpy width narrower
+/// than 64 bits by [`Series::astype_width`] (fvsao.23; it was "data type
+/// 'int32' not understood"), any other dtype by [`Series::astype`]. The
+/// outer error is a dtype argument pandas does not understand, the inner
+/// the cast's own failure.
+fn series_astype_arg(
+    series: &Series,
+    dtype: &Bound<'_, PyAny>,
+) -> PyResult<Result<Series, fp_frame::FrameError>> {
+    if let Some((width, nullable)) = py_width_arg(dtype) {
+        return Ok(series.astype_width(width, nullable));
+    }
+    Ok(series.astype(py_dtype_arg(dtype)?))
+}
+
+/// pandas' constructor refusals for an integer `dtype=` narrower than 64
+/// bits over list or array data (fvsao.23), where `astype` would wrap: a
+/// value outside the width (`Series([1, 300], dtype='int8')` is an
+/// OverflowError, a ValueError from an ndarray), a fractional float
+/// (ValueError), a missing value in a numpy width (TypeError); a masked
+/// width refuses the first two as TypeError. Data that is already a Series
+/// takes `astype`'s wrap, as pandas'.
+fn refuse_lossy_constructor_ints(
+    column: &Column,
+    width: NumericWidth,
+    nullable: bool,
+    from_ndarray: bool,
+) -> PyResult<()> {
+    if width.is_float() {
+        return Ok(());
+    }
+    let name = width.name(false);
+    for value in column.values() {
+        let (fractional, outside) = match value {
+            Scalar::Int64(v) => (false, !width.holds_int(*v)),
+            #[allow(clippy::cast_possible_truncation)]
+            Scalar::Float64(v) if v.is_finite() => (
+                v.fract() != 0.0,
+                *v < -9.3e18 || *v > 9.3e18 || !width.holds_int(*v as i64),
+            ),
+            missing if missing.is_missing() && !nullable => {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "int() argument must be a string, a bytes-like object or a real number, not 'NoneType'",
+                ));
+            }
+            _ => (false, false),
+        };
+        if nullable && (fractional || outside) {
+            let source = if fractional { "float64" } else { "int64" };
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "cannot safely cast non-equivalent {source} to {name}"
+            )));
+        }
+        if fractional {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Trying to coerce float values to integers",
+            ));
+        }
+        if outside && from_ndarray {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Values are too large to be losslessly converted to {name}. To cast anyway, use pd.Series(values).astype({name})"
+            )));
+        }
+        if outside {
+            return Err(PyErr::new::<pyo3::exceptions::PyOverflowError, _>(format!(
+                "The elements provided in the data cannot all be casted to the dtype {name}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// A failed cast as pandas raises it: `IntCastingNaNError` (a ValueError)
+/// for a missing or infinite value cast to a numpy integer, TypeError for a
+/// cast pandas does not make (a datetime to int32), else ValueError.
+fn astype_error_to_py(err: &fp_frame::FrameError) -> PyErr {
+    match err {
+        fp_frame::FrameError::Column(fp_columnar::ColumnError::IntCastingNaN) => {
+            PyErr::new::<IntCastingNaNError, _>(err.to_string())
+        }
+        fp_frame::FrameError::Column(fp_columnar::ColumnError::UnsupportedCast(message)) => {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(message.clone())
+        }
+        _ => PyErr::new::<pyo3::exceptions::PyValueError, _>(err.to_string()),
+    }
 }
 
 /// The keywords `read_csv` and `read_table` share (pandas' defaults).
@@ -51528,10 +51962,29 @@ fn merge(
     })
 }
 
-/// Convert argument to numeric type (pandas `to_numeric`).
+/// Convert argument to numeric type (pandas `to_numeric`); `downcast=`
+/// narrows the result to the smallest integer / unsigned / float32 dtype
+/// holding it (fvsao.23; it was an unknown keyword).
 #[pyfunction]
-#[pyo3(signature = (arg, errors="raise"))]
-fn to_numeric(py: Python<'_>, arg: &Bound<'_, PyAny>, errors: &str) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (arg, errors="raise", downcast=None))]
+fn to_numeric(
+    py: Python<'_>,
+    arg: &Bound<'_, PyAny>,
+    errors: &str,
+    downcast: Option<&str>,
+) -> PyResult<Py<PyAny>> {
+    let converted = to_numeric_series(py, arg, errors)?;
+    let converted = match downcast {
+        Some(downcast) => {
+            fp_frame::downcast_numeric(&converted, downcast).map_err(frame_error_to_py)?
+        }
+        None => converted,
+    };
+    Ok(Py::new(py, PySeries { inner: converted })?.into_any())
+}
+
+/// [`to_numeric`]'s conversion of a Series or list, before `downcast=`.
+fn to_numeric_series(py: Python<'_>, arg: &Bound<'_, PyAny>, errors: &str) -> PyResult<Series> {
     let err_policy = match errors {
         "raise" => fp_frame::ToNumericErrors::Raise,
         "coerce" => fp_frame::ToNumericErrors::Coerce,
@@ -51545,9 +51998,8 @@ fn to_numeric(py: Python<'_>, arg: &Bound<'_, PyAny>, errors: &str) -> PyResult<
     let opts = fp_frame::ToNumericOptions { errors: err_policy };
 
     if let Ok(s) = arg.extract::<PyRef<'_, PySeries>>() {
-        let res = fp_frame::to_numeric_with_options(&s.inner, opts)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        return fp_frame::to_numeric_with_options(&s.inner, opts)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()));
     }
     if let Ok(list) = arg.cast::<PyList>() {
         let values: Vec<Scalar> = list
@@ -51562,9 +52014,8 @@ fn to_numeric(py: Python<'_>, arg: &Bound<'_, PyAny>, errors: &str) -> PyResult<
             values,
         )
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        let res = fp_frame::to_numeric_with_options(&temp_series, opts)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        return fp_frame::to_numeric_with_options(&temp_series, opts)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()));
     }
     Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
         "arg must be a Series or list",
@@ -60234,6 +60685,48 @@ fn ascii_escape_json(text: &str) -> String {
 /// pandas' `RangeIndex.nbytes` (its memory_usage entry): the range object and
 /// its start, stop and step as Python sizes them - not 8 bytes a label
 /// (range(0, 2) is 132, it was 16).
+/// pandas' `DataFrame.memory_usage(index=, deep=)`: fp-frame's per-column
+/// bytes with deep=True counting an object column or index as pandas does
+/// ([`object_deep_bytes`]) and a RangeIndex as pandas' ([`range_index_nbytes`]);
+/// `info()`'s memory line is their sum.
+fn frame_memory_usage(
+    py: Python<'_>,
+    frame: &DataFrame,
+    index: bool,
+    deep: bool,
+) -> PyResult<Series> {
+    let res = frame
+        .memory_usage_with_options(index, deep)
+        .map_err(frame_error_to_py)?;
+    let as_int = |bytes: usize| Scalar::Int64(i64::try_from(bytes).unwrap_or(i64::MAX));
+    let mut values = res.values().to_vec();
+    if deep {
+        let offset = usize::from(index);
+        for position in 0..frame.num_columns() {
+            if let Some(column) = frame.column_at(position)
+                && let Some(bytes) = object_deep_bytes(py, column)?
+                && let Some(slot) = values.get_mut(offset + position)
+            {
+                *slot = as_int(bytes);
+            }
+        }
+        if index
+            && let Some(bytes) = index_deep_bytes(py, frame.index())?
+            && let Some(first) = values.first_mut()
+        {
+            *first = as_int(bytes);
+        }
+    }
+    // A RangeIndex's entry is pandas' (see range_index_nbytes).
+    if let Some(span) = frame.index().range_span().filter(|_| index)
+        && let Some(first) = values.first_mut()
+    {
+        *first = as_int(range_index_nbytes(py, span)?);
+    }
+    let column = Column::from_values(values).map_err(column_error_to_py)?;
+    Series::new(res.name(), res.index().clone(), column).map_err(frame_error_to_py)
+}
+
 fn range_index_nbytes(py: Python<'_>, (start, stop, step): (i64, i64, i64)) -> PyResult<usize> {
     let sys = py.import("sys")?;
     let size = |obj: Bound<'_, PyAny>| -> PyResult<usize> {

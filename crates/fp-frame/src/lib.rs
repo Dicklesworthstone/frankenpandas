@@ -147,8 +147,9 @@ pub const fn overflow_policy_for_mode(mode: RuntimeMode) -> OverflowPolicy {
     }
 }
 use fp_types::{
-    DType, Interval, IntervalClosed, NullKind, OverflowPolicy, PandasTemporalError, Period,
-    PeriodFreq, Scalar, SparseDType, TemporalFailure, Timedelta, Timestamp, common_dtype,
+    DType, Interval, IntervalClosed, NullKind, NumericWidth, NumpyNumeric, OverflowPolicy,
+    PandasTemporalError, Period, PeriodFreq, Scalar, SparseDType, TemporalFailure, Timedelta,
+    Timestamp, common_dtype,
 };
 use regex::Regex;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -1735,7 +1736,16 @@ fn column_memory_usage_bytes_with_deep(column: &Column, deep: bool) -> usize {
             })
             .sum()
     } else {
-        column.len() * dtype_memory_width(column.dtype())
+        // A narrow numpy dtype's own itemsize (int8 is 1 byte a value;
+        // fvsao.23), and beside a masked dtype's values its mask, a byte a
+        // value: pd.Series([1, None], dtype='Int64').nbytes is 18, 'Int32'
+        // 10 (live pandas 2.2.3; masked columns counted 8 and 4).
+        let dtype = column.dtype();
+        let masked = usize::from(dtype.is_nullable());
+        let values = column
+            .width()
+            .map_or_else(|| dtype_memory_width(dtype), NumericWidth::itemsize);
+        column.len() * (values + masked)
     }
 }
 
@@ -12468,7 +12478,7 @@ impl Series {
             return Some(Self::new(
                 self.name.clone(),
                 index,
-                Column::from_i64_values_owned(gathered),
+                Column::from_i64_values_owned(gathered).keeping_width_of(&self.column),
             ));
         }
 
@@ -12492,7 +12502,7 @@ impl Series {
             return Some(Self::new(
                 self.name.clone(),
                 index,
-                Column::from_f64_values(gathered),
+                Column::from_f64_values(gathered).keeping_width_of(&self.column),
             ));
         }
 
@@ -14972,6 +14982,10 @@ impl Series {
     ///
     /// Matches `pd.Series.dropna()`.
     pub fn dropna(&self) -> Result<Self, FrameError> {
+        self.keeping_width(self.dropna_storage(), false)
+    }
+
+    fn dropna_storage(&self) -> Result<Self, FrameError> {
         // Nothing-to-drop short-circuit: when no value is missing, dropna keeps
         // every row in order ⇒ output == self. `has_any_missing` is a cheap typed
         // predicate (NaN scan for f64, O(1) validity count for i64/bool/Utf8) that
@@ -17006,6 +17020,10 @@ impl Series {
     ///
     /// Matches `pd.Series.replace(to_replace, value)` for scalar pairs.
     pub fn replace(&self, replacements: &[(Scalar, Scalar)]) -> Result<Self, FrameError> {
+        self.keeping_width(self.replace_storage(replacements), false)
+    }
+
+    fn replace_storage(&self, replacements: &[(Scalar, Scalar)]) -> Result<Self, FrameError> {
         // Typed all-Int64 fast path (see `map`): inline-key `i64` probe over the
         // raw `&[i64]` view, skipping the lazy-column Scalar materialization and
         // the per-row `ScalarKey` + std-HashMap SipHash. An unmapped value keeps
@@ -17507,6 +17525,87 @@ impl Series {
         Self::new(self.name.clone(), self.index.clone(), column)
     }
 
+    /// Cast to a numpy dtype narrower than 64 bits - `astype('int32')`,
+    /// `astype('uint8')`, `astype('float32')`, and with `nullable` the
+    /// masked `Int32` ... `Float32` (fvsao.23) - as
+    /// [`Column::cast_to_width`] casts: integers wrap into the width
+    /// (`astype('int8')` of 300 is 44), floats round to float32. A
+    /// categorical casts its values, as [`Self::astype`].
+    pub fn astype_width(&self, width: NumericWidth, nullable: bool) -> Result<Self, FrameError> {
+        if let Some(categorical) = self.cat() {
+            return categorical.to_values()?.astype_width(width, nullable);
+        }
+        let column = self.column.cast_to_width(width, nullable)?;
+        Self::new(self.name.clone(), self.index.clone(), column)
+    }
+
+    /// A float32 column's values as float32 with 0 where one is missing (as
+    /// pandas' nanops fill them before summing) and the count present;
+    /// `None` for any other column.
+    fn float32_values_zero_filled(&self) -> Option<(Vec<f32>, usize)> {
+        if self.column.width() != Some(NumericWidth::Float32) {
+            return None;
+        }
+        let mut count = 0;
+        #[allow(clippy::cast_possible_truncation)] // float32 values, exact
+        let values = self
+            .column
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Float64(v) if !v.is_nan() => {
+                    count += 1;
+                    *v as f32
+                }
+                _ => 0.0,
+            })
+            .collect();
+        Some((values, count))
+    }
+
+    /// `result`, an elementwise operation on this Series that pandas keeps
+    /// in its dtype (abs, clip, round, shift, fillna; fvsao.23), in this
+    /// Series' width: float32 rounded; an integer width wrapped when
+    /// `wrapping`, as numpy's arithmetic wraps (`abs` of an int8 -128 is
+    /// -128), and otherwise kept only while every value is in its range (a
+    /// clip bound or fill past it leaves the storage's int64). A result
+    /// whose storage cannot carry the width (an int32 shift gaps into
+    /// float64) is as the engine built it.
+    fn keeping_width(
+        &self,
+        result: Result<Self, FrameError>,
+        wrapping: bool,
+    ) -> Result<Self, FrameError> {
+        let result = result?;
+        let Some(width) = self.column.width() else {
+            return Ok(result);
+        };
+        let column = result.column();
+        let dtype = column.dtype();
+        let carried = width.fits_storage(&dtype)
+            && (width.is_float() || dtype != DType::Int64 || !column.has_nulls());
+        if !carried || column.width() == Some(width) {
+            return Ok(result);
+        }
+        let in_range = |value: &i64| width.holds_int(*value);
+        let held = width.is_float()
+            || wrapping
+            || column.as_i64_slice().map_or_else(
+                || {
+                    column.values().iter().all(|value| match value {
+                        Scalar::Int64(v) => in_range(v),
+                        _ => true,
+                    })
+                },
+                |values| values.iter().all(in_range),
+            );
+        if held {
+            result.astype_width(width, dtype.is_nullable())
+        } else {
+            Ok(result)
+        }
+    }
+
     /// Cast with error handling.
     ///
     /// Matches `pd.Series.astype(dtype, errors='coerce'|'raise')`.
@@ -17547,6 +17646,10 @@ impl Series {
     ///
     /// Matches `pd.Series.clip(lower, upper)`. NaN values pass through unchanged.
     pub fn clip(&self, lower: Option<f64>, upper: Option<f64>) -> Result<Self, FrameError> {
+        self.keeping_width(self.clip_storage(lower, upper), false)
+    }
+
+    fn clip_storage(&self, lower: Option<f64>, upper: Option<f64>) -> Result<Self, FrameError> {
         // Per br-frankenpandas-aaa1e: pandas preserves Int64 dtype when
         // input is Int64 and all bounds are integer-valued (or absent).
         // Detect that case to keep dtype contract; fall back to Float64
@@ -18184,7 +18287,12 @@ impl Series {
     /// Matches `pd.Series.abs()`. Numeric, boolean, and timedelta dtypes
     /// retain their pandas-observable dtype; missing values pass through.
     pub fn abs(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.abs()?)
+        let result = self
+            .column
+            .abs()
+            .map_err(FrameError::from)
+            .and_then(|column| Self::new(self.name.clone(), self.index.clone(), column));
+        self.keeping_width(result, true)
     }
 
     /// Alias for `abs`. Matches `np.absolute`.
@@ -19474,6 +19582,12 @@ impl Series {
     ///
     /// Matches `pd.Series.sum()`.
     pub fn sum(&self) -> Result<Scalar, FrameError> {
+        // A float32 column sums as pandas' nansum does: numpy's float32
+        // pairwise sum with 0 where a value is missing (fvsao.23).
+        if let Some((values, _)) = self.float32_values_zero_filled() {
+            let sum = fp_types::numpy_pairwise_sum_f32(&values);
+            return Ok(Scalar::Float64(f64::from(sum)));
+        }
         // Per br-frankenpandas-a52db: pandas preserves Int64/Bool dtype for
         // sum and matches numpy wrap-on-overflow for Int64 (wrapping_add).
         // Empty Int64/Bool series → Scalar::Int64(0). Float64 path falls
@@ -19711,6 +19825,17 @@ impl Series {
     pub fn mean(&self) -> Result<Scalar, FrameError> {
         if matches!(self.column.dtype(), DType::Datetime64 { .. }) {
             return Ok(self.datetime_mean());
+        }
+        // A float32 column's mean is pandas' nanmean: the float32 pairwise
+        // sum over the float32 count (fvsao.23).
+        if let Some((values, count)) = self.float32_values_zero_filled() {
+            if count == 0 {
+                return Ok(Scalar::Float64(f64::NAN));
+            }
+            #[allow(clippy::cast_precision_loss)] // numpy's float32 count
+            let count = count as f32;
+            let mean = fp_types::numpy_pairwise_sum_f32(&values) / count;
+            return Ok(Scalar::Float64(f64::from(mean)));
         }
         // Concat chunk fast path (see sum): fold the lazy chunks in place instead
         // of materializing the cold buffer. Bit-identical to f64_valid_sum_count
@@ -21297,6 +21422,10 @@ impl Series {
     /// downward (earlier positions become NaN); negative shifts move
     /// values upward (later positions become NaN).
     pub fn shift(&self, periods: i64) -> Result<Self, FrameError> {
+        self.keeping_width(self.shift_storage(periods), false)
+    }
+
+    fn shift_storage(&self, periods: i64) -> Result<Self, FrameError> {
         // A datetime/timedelta column fills the gap with NaT, as pandas (the
         // NaN fill read back as nan;
         // br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.17).
@@ -21319,6 +21448,17 @@ impl Series {
     /// column), no missing value is introduced, so the result keeps that dtype
     /// rather than widening to Float64 — exactly as pandas does.
     pub fn shift_with_fill_value(
+        &self,
+        periods: i64,
+        fill_value: Scalar,
+    ) -> Result<Self, FrameError> {
+        self.keeping_width(
+            self.shift_with_fill_value_storage(periods, fill_value),
+            false,
+        )
+    }
+
+    fn shift_with_fill_value_storage(
         &self,
         periods: i64,
         fill_value: Scalar,
@@ -21778,6 +21918,41 @@ impl Series {
     ///
     /// Matches `pd.Series.cumsum(skipna=True)`.
     pub fn cumsum(&self) -> Result<Self, FrameError> {
+        // A float32 column accumulates in float32, each partial sum rounded
+        // (float32 0.1 then 0.2 is float32's 0.3); an unsigned narrow one
+        // sums to uint64, a signed one to int64, as numpy's cumsum (fvsao.23).
+        match self.column.width() {
+            Some(NumericWidth::Float32) => {
+                let mut acc = 0.0_f64;
+                let out: Vec<Scalar> = self
+                    .column
+                    .values()
+                    .iter()
+                    .map(|value| match value {
+                        Scalar::Float64(v) if !v.is_nan() => {
+                            acc = NumericWidth::round_f32(acc + v);
+                            Scalar::Float64(acc)
+                        }
+                        _ => Scalar::missing_for_dtype(self.column.dtype()),
+                    })
+                    .collect();
+                let column = Column::new(self.column.dtype(), out)?.keeping_width_of(&self.column);
+                return Series::new(self.name.clone(), self.index.clone(), column);
+            }
+            Some(width) if width.is_unsigned() => {
+                let summed = self.cumsum_storage()?;
+                let column = summed.column();
+                if NumericWidth::UInt64.fits_storage(&column.dtype()) && !column.has_nulls() {
+                    return summed.astype_width(NumericWidth::UInt64, column.dtype().is_nullable());
+                }
+                return Ok(summed);
+            }
+            _ => {}
+        }
+        self.cumsum_storage()
+    }
+
+    fn cumsum_storage(&self) -> Result<Self, FrameError> {
         // Typed fast path: an all-valid Int64/Float64 column runs the prefix
         // sum over its contiguous buffer and re-ingests typed — no lazy Scalar
         // materialization, no 32B-per-cell Vec<Scalar>. Bit-identical: the
@@ -22272,6 +22447,10 @@ impl Series {
     ///
     /// Matches `pd.Series.cummin(skipna=True)`.
     pub fn cummin(&self) -> Result<Self, FrameError> {
+        self.keeping_width(self.cummin_storage(), false)
+    }
+
+    fn cummin_storage(&self) -> Result<Self, FrameError> {
         if self.column.dtype().is_datetime() {
             return self.cum_datetime64_extreme(false);
         }
@@ -22501,6 +22680,10 @@ impl Series {
     ///
     /// Matches `pd.Series.cummax(skipna=True)`.
     pub fn cummax(&self) -> Result<Self, FrameError> {
+        self.keeping_width(self.cummax_storage(), false)
+    }
+
+    fn cummax_storage(&self) -> Result<Self, FrameError> {
         if self.column.dtype().is_datetime() {
             return self.cum_datetime64_extreme(true);
         }
@@ -22729,8 +22912,12 @@ impl Series {
     /// values become `NaN`. The condition Series is aligned to `self` via
     /// left-index alignment before masking.
     pub fn where_cond(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
-        // A nullable Series keeps its dtype (4qg5w.11).
-        self.keep_nullable(self.where_cond_selected(cond, other)?)
+        // A nullable Series keeps its dtype (4qg5w.11), a narrow one its
+        // width while `other` fits it (fvsao.23).
+        let selected = self
+            .where_cond_selected(cond, other)
+            .and_then(|selected| self.keep_nullable(selected));
+        self.keeping_width(selected, false)
     }
 
     fn where_cond_selected(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
@@ -23185,8 +23372,12 @@ impl Series {
     /// Matches `series.mask(cond, other)`. This is the inverse of `where`:
     /// values are replaced where the condition IS True, not where it is False.
     pub fn mask(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
-        // A nullable Series keeps its dtype (4qg5w.11).
-        self.keep_nullable(self.mask_selected(cond, other)?)
+        // A nullable Series keeps its dtype (4qg5w.11), a narrow one its
+        // width while `other` fits it (fvsao.23).
+        let selected = self
+            .mask_selected(cond, other)
+            .and_then(|selected| self.keep_nullable(selected));
+        self.keeping_width(selected, false)
     }
 
     fn mask_selected(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
@@ -24151,6 +24342,10 @@ impl Series {
     ///
     /// Matches `series.nlargest(n)`. Missing values are excluded.
     pub fn nlargest(&self, n: usize) -> Result<Self, FrameError> {
+        self.keeping_width(self.nlargest_storage(n), false)
+    }
+
+    fn nlargest_storage(&self, n: usize) -> Result<Self, FrameError> {
         // Per br-frankenpandas-9978d: use Scalar::semantic_cmp instead of
         // to_f64-based extraction. The old impl silently filtered out
         // Utf8 values via to_f64.ok().map(...). semantic_cmp works on
@@ -24256,6 +24451,10 @@ impl Series {
     ///
     /// Matches `series.nsmallest(n)`. Missing values are excluded.
     pub fn nsmallest(&self, n: usize) -> Result<Self, FrameError> {
+        self.keeping_width(self.nsmallest_storage(n), false)
+    }
+
+    fn nsmallest_storage(&self, n: usize) -> Result<Self, FrameError> {
         // Per br-frankenpandas-9978d: see nlargest above. Sister fix to
         // 7db78 (idxmin/idxmax Utf8). semantic_cmp generalizes the
         // ordering across all dtypes.
@@ -28274,6 +28473,10 @@ impl Series {
     /// - `Last`: keep the last occurrence of each value
     /// - `None`: drop all duplicated values entirely
     pub fn drop_duplicates_keep(&self, keep: DuplicateKeep) -> Result<Self, FrameError> {
+        self.keeping_width(self.drop_duplicates_keep_storage(keep), false)
+    }
+
+    fn drop_duplicates_keep_storage(&self, keep: DuplicateKeep) -> Result<Self, FrameError> {
         // A categorical Series stores its values (br-frankenpandas-hrxn9; it held
         // codes when this was written), so deduping them keeps exactly the rows
         // pandas keeps; the result must stay categorical over the SAME category
@@ -49710,14 +49913,15 @@ impl CategoricalAccessor<'_> {
     ///
     /// Matches `pd.Series.cat.codes`: the codes (-1 where missing), unnamed as
     /// pandas returns them (`.cat.codes.name is None`; this was
-    /// "{name}_codes"). pandas' codes are int8 for small category counts;
-    /// these are Int64.
+    /// "{name}_codes"), of pandas' width for the category count - int8 up
+    /// to 126 categories, then int16, int32 (they were int64; fvsao.23).
     pub fn codes(&self) -> Result<Series, FrameError> {
-        Series::new(
-            String::new(),
-            self.series.index.clone(),
-            Column::from_i64_values(self.row_codes()),
-        )
+        let codes = Column::from_i64_values(self.row_codes());
+        let codes = match NumericWidth::for_category_codes(self.meta.categories.len()) {
+            Some(width) => codes.cast_to_width(width, false)?,
+            None => codes,
+        };
+        Series::new(String::new(), self.series.index.clone(), codes)
     }
 
     /// Rename categories.
@@ -55894,6 +56098,25 @@ impl DatetimeAccessor<'_> {
     ///
     /// Matches `pd.Series.dt.year`.
     pub fn year(&self) -> Result<Series, FrameError> {
+        self.int32_field(self.year_int64())
+    }
+
+    /// A datetime's calendar or clock field, or a timedelta's seconds /
+    /// microseconds / nanoseconds, as pandas types it: int32 (live pandas
+    /// 2.2.3: `s.dt.year.dtype` is int32; fvsao.23). A field with a NaT row
+    /// stays float64, and a period column's fields stay int64, as pandas'.
+    fn int32_field(&self, field: Result<Series, FrameError>) -> Result<Series, FrameError> {
+        let field = field?;
+        if self.series.dtype() == DType::Period
+            || field.column().dtype() != DType::Int64
+            || field.column().has_nulls()
+        {
+            return Ok(field);
+        }
+        field.astype_width(NumericWidth::Int32, false)
+    }
+
+    fn year_int64(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
             if let Some(result) = self.typed_datetime_year_all_valid(self.series.name()) {
                 return result;
@@ -55907,6 +56130,10 @@ impl DatetimeAccessor<'_> {
     ///
     /// Matches `pd.Series.dt.month`.
     pub fn month(&self) -> Result<Series, FrameError> {
+        self.int32_field(self.month_int64())
+    }
+
+    fn month_int64(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
             if let Some(result) =
                 self.typed_datetime_civil_component_all_valid(|(_, m, _)| m, self.series.name())
@@ -55922,6 +56149,10 @@ impl DatetimeAccessor<'_> {
     ///
     /// Matches `pd.Series.dt.day`.
     pub fn day(&self) -> Result<Series, FrameError> {
+        self.int32_field(self.day_int64())
+    }
+
+    fn day_int64(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
             if let Some(result) =
                 self.typed_datetime_civil_component_all_valid(|(_, _, d)| d, self.series.name())
@@ -55937,6 +56168,10 @@ impl DatetimeAccessor<'_> {
     ///
     /// Matches `pd.Series.dt.hour`.
     pub fn hour(&self) -> Result<Series, FrameError> {
+        self.int32_field(self.hour_int64())
+    }
+
+    fn hour_int64(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
             if let Some(result) = self.typed_datetime_nanos_component_all_valid(
                 |ns| ns.rem_euclid(Timedelta::NANOS_PER_DAY) / Timedelta::NANOS_PER_HOUR,
@@ -55953,6 +56188,10 @@ impl DatetimeAccessor<'_> {
     ///
     /// Matches `pd.Series.dt.minute`.
     pub fn minute(&self) -> Result<Series, FrameError> {
+        self.int32_field(self.minute_int64())
+    }
+
+    fn minute_int64(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
             if let Some(result) = self.typed_datetime_nanos_component_all_valid(
                 |ns| ns.rem_euclid(Timedelta::NANOS_PER_HOUR) / Timedelta::NANOS_PER_MIN,
@@ -55969,6 +56208,10 @@ impl DatetimeAccessor<'_> {
     ///
     /// Matches `pd.Series.dt.second`.
     pub fn second(&self) -> Result<Series, FrameError> {
+        self.int32_field(self.second_int64())
+    }
+
+    fn second_int64(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
             if let Some(result) = self.typed_datetime_nanos_component_all_valid(
                 |ns| ns.rem_euclid(Timedelta::NANOS_PER_MIN) / 1_000_000_000,
@@ -55985,6 +56228,10 @@ impl DatetimeAccessor<'_> {
     ///
     /// Matches `pd.Series.dt.microsecond`.
     pub fn microsecond(&self) -> Result<Series, FrameError> {
+        self.int32_field(self.microsecond_int64())
+    }
+
+    fn microsecond_int64(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
             // Provably bit-identical to the chrono path: `Timestamp::microsecond`
             // IS `(nanos.rem_euclid(NANOS_PER_SEC) as u64 / 1000) as i64`, so
@@ -56004,6 +56251,10 @@ impl DatetimeAccessor<'_> {
     ///
     /// Matches `pd.Series.dt.nanosecond`.
     pub fn nanosecond(&self) -> Result<Series, FrameError> {
+        self.int32_field(self.nanosecond_int64())
+    }
+
+    fn nanosecond_int64(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
             // Provably bit-identical: `Timestamp::nanosecond` IS
             // `(nanos.rem_euclid(NANOS_PER_SEC) as u64 % 1000) as i64`.
@@ -56022,6 +56273,10 @@ impl DatetimeAccessor<'_> {
     ///
     /// Matches `pd.Series.dt.dayofweek` / `pd.Series.dt.weekday`.
     pub fn dayofweek(&self) -> Result<Series, FrameError> {
+        self.int32_field(self.dayofweek_int64())
+    }
+
+    fn dayofweek_int64(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
             // Provably bit-identical to the chrono path: `Timestamp::dayofweek`
             // IS `((nanos.div_euclid(NANOS_PER_DAY) + 3) % 7 + 7) % 7` (Monday=0,
@@ -56638,6 +56893,10 @@ impl DatetimeAccessor<'_> {
     ///
     /// Matches `pd.Series.dt.quarter`.
     pub fn quarter(&self) -> Result<Series, FrameError> {
+        self.int32_field(self.quarter_int64())
+    }
+
+    fn quarter_int64(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
             if let Some(result) = self.typed_datetime_civil_component_all_valid(
                 |(_, m, _)| (m - 1) / 3 + 1,
@@ -56663,6 +56922,10 @@ impl DatetimeAccessor<'_> {
     ///
     /// Matches `pd.Series.dt.dayofyear`.
     pub fn dayofyear(&self) -> Result<Series, FrameError> {
+        self.int32_field(self.dayofyear_int64())
+    }
+
+    fn dayofyear_int64(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
             if let Some(result) = self.typed_datetime_dayofyear_all_valid(self.series.name()) {
                 return result;
@@ -57447,6 +57710,10 @@ impl DatetimeAccessor<'_> {
     ///
     /// Matches `pd.Series.dt.days_in_month`.
     pub fn days_in_month(&self) -> Result<Series, FrameError> {
+        self.int32_field(self.days_in_month_int64())
+    }
+
+    fn days_in_month_int64(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
             // Provably bit-identical to the chrono path: the closure is verbatim
             // `Timestamp::days_in_month` (leap check + days table), evaluated on
@@ -58094,19 +58361,19 @@ impl DatetimeAccessor<'_> {
     /// Seconds within the day (0..=86399). Matches `pd.Series.dt.seconds`.
     /// See [`Self::days`] for the measured table and the float64 rationale.
     pub fn seconds(&self) -> Result<Series, FrameError> {
-        self.timedelta_component(fp_types::Timedelta::seconds)
+        self.int32_field(self.timedelta_component(fp_types::Timedelta::seconds))
     }
 
     /// Microseconds within the second (0..=999_999). Matches
     /// `pd.Series.dt.microseconds`. See [`Self::days`].
     pub fn microseconds(&self) -> Result<Series, FrameError> {
-        self.timedelta_component(fp_types::Timedelta::microseconds)
+        self.int32_field(self.timedelta_component(fp_types::Timedelta::microseconds))
     }
 
     /// Nanoseconds within the microsecond (0..=999). Matches
     /// `pd.Series.dt.nanoseconds`. See [`Self::days`].
     pub fn nanoseconds(&self) -> Result<Series, FrameError> {
-        self.timedelta_component(fp_types::Timedelta::nanoseconds)
+        self.int32_field(self.timedelta_component(fp_types::Timedelta::nanoseconds))
     }
 
     fn last_day_of_month(year: i32, month: u32) -> Option<u32> {
@@ -60516,6 +60783,70 @@ pub fn to_numeric_with_options(
     let index = series.index().clone();
     let column = Column::from_values(converted)?;
     Series::new(series.name(), index, column)
+}
+
+/// `pd.to_numeric(..., downcast=...)`'s narrowing of a numeric Series
+/// (fvsao.23): the smallest dtype of the `downcast` family - 'integer' /
+/// 'signed' int8, int16, int32; 'unsigned' uint8 ... uint64 when no value
+/// is negative; 'float' float32 - no wider than the Series' own that holds
+/// every value, as pandas' `maybe_downcast_numeric` accepts it: an integer
+/// width when each value cast to it is equal (so whole floats downcast
+/// too, and a missing value keeps the Series as it is), float32 when each
+/// value is within 5e-4 of its float32. The Series is returned unchanged
+/// when no candidate holds it, or when it is not numpy numeric.
+///
+/// # Errors
+/// pandas' `ValueError` for any other `downcast`.
+pub fn downcast_numeric(series: &Series, downcast: &str) -> Result<Series, FrameError> {
+    use NumericWidth::{Float32, Int8, Int16, Int32, UInt8, UInt16, UInt32, UInt64};
+    let family: &[NumericWidth] = match downcast {
+        "integer" | "signed" => &[Int8, Int16, Int32],
+        "unsigned" => &[UInt8, UInt16, UInt32, UInt64],
+        "float" => &[Float32],
+        _ => {
+            return Err(FrameError::CompatibilityRejected(
+                "invalid downcasting method provided".to_owned(),
+            ));
+        }
+    };
+    let column = series.column();
+    let numbers: Vec<f64> = match column.dtype() {
+        DType::Int64 | DType::Float64 if !column.has_nulls() || downcast == "float" => column
+            .values()
+            .iter()
+            .map(|value| value.to_f64().unwrap_or(f64::NAN))
+            .collect(),
+        _ => return Ok(series.clone()),
+    };
+    if downcast == "unsigned" && numbers.iter().any(|value| *value < 0.0) {
+        return Ok(series.clone());
+    }
+    let itemsize = column.width().map_or(8, NumericWidth::itemsize);
+    let holds = |width: NumericWidth| {
+        numbers.iter().all(|&value| {
+            if width.is_float() {
+                let single = NumericWidth::round_f32(value);
+                (value.is_nan() && single.is_nan()) || (single - value).abs() <= 5e-4
+            } else {
+                // `high + 1` is exact where `high` alone is not (uint64's
+                // i64::MAX rounds up to 2**63): the value is whole.
+                value.is_finite()
+                    && value.fract() == 0.0
+                    && width
+                        .int_bounds()
+                        .is_some_and(|(low, high)| low as f64 <= value && value < high as f64 + 1.0)
+            }
+        })
+    };
+    match family
+        .iter()
+        .copied()
+        .find(|width| width.itemsize() <= itemsize && holds(*width))
+    {
+        Some(width) if Some(width) == column.width() => Ok(series.clone()),
+        Some(width) => series.astype_width(width, false),
+        None => Ok(series.clone()),
+    }
 }
 
 /// Convert a Series of strings or integers to normalized ISO 8601 datetime strings.
@@ -63554,7 +63885,32 @@ fn i64_slice_min_simd(data: &[i64]) -> Option<i64> {
     Some(best)
 }
 
+/// The concatenated column of `series_list`, in numpy's dtype for the
+/// pieces (fvsao.23): int8 then int16 is int16, int32 twice int32, int8
+/// with float32 float32 - `result_type` over every piece, each piece's
+/// values held by it - while a piece that is not a numpy number (or a
+/// 64-bit one) leaves the storage's dtype.
 fn concat_series_columns(series_list: &[&Series], total_len: usize) -> Result<Column, FrameError> {
+    let column = concat_series_columns_storage(series_list, total_len)?;
+    let width = series_list
+        .iter()
+        .map(|series| fp_types::NumpyNumeric::of(&series.dtype(), series.column().width()))
+        .reduce(|left, right| left.zip(right).map(|(left, right)| left.result_type(right)))
+        .flatten()
+        .and_then(fp_types::NumpyNumeric::width);
+    match width {
+        Some(width) if width.fits_storage(&column.dtype()) => {
+            let nullable = column.dtype().is_nullable();
+            Ok(column.cast_to_width(width, nullable)?)
+        }
+        _ => Ok(column),
+    }
+}
+
+fn concat_series_columns_storage(
+    series_list: &[&Series],
+    total_len: usize,
+) -> Result<Column, FrameError> {
     // A nullable (masked) piece makes pandas' masked result: ints Int64, any
     // float beside them Float64, bools boolean; bools beside numbers stay
     // object (Int64 pieces came back an int64 column holding nulls).
@@ -64077,6 +64433,28 @@ pub fn concat_dataframes_with_ignore_index(
                 None => column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?,
             },
         );
+    }
+
+    // Each column in numpy's dtype for its pieces (fvsao.23): int32 rows on
+    // int32 rows are int32, int8 on int16 int16; a frame lacking the column
+    // adds gaps, not a dtype (an int32 column so gapped is float64, which
+    // int32 does not ride on; a float32 one stays float32).
+    for col_name in &union_columns {
+        let width = frames
+            .iter()
+            .filter_map(|frame| frame.column(col_name))
+            .map(|column| fp_types::NumpyNumeric::of(&column.dtype(), column.width()))
+            .reduce(|left, right| left.zip(right).map(|(left, right)| left.result_type(right)))
+            .flatten()
+            .and_then(fp_types::NumpyNumeric::width);
+        if let (Some(width), Some(column)) = (width, columns.get_mut(col_name)) {
+            let nullable = column.dtype().is_nullable();
+            let carried = width.fits_storage(&column.dtype())
+                && (width.is_float() || nullable || !column.has_nulls());
+            if carried {
+                *column = column.cast_to_width(width, nullable)?;
+            }
+        }
     }
 
     DataFrame::new_with_column_order(index, columns, union_columns)
@@ -77265,6 +77643,63 @@ impl DataFrame {
         self.astype_columns(&[(name, dtype)])
     }
 
+    /// Cast the column `name` to a numpy dtype narrower than 64 bits
+    /// (`df.astype({'a': 'int16'})`), as [`Series::astype_width`].
+    pub fn astype_column_width(
+        &self,
+        name: &str,
+        width: NumericWidth,
+        nullable: bool,
+    ) -> Result<Self, FrameError> {
+        if !self.columns.contains_key(name) {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "column '{name}' not found"
+            )));
+        }
+        self.astype_width_where(width, nullable, |column| column == name)
+    }
+
+    /// Cast every column to a numpy dtype narrower than 64 bits
+    /// (`df.astype('int32')`), as [`Series::astype_width`].
+    pub fn astype_width(&self, width: NumericWidth, nullable: bool) -> Result<Self, FrameError> {
+        self.astype_width_where(width, nullable, |_| true)
+    }
+
+    /// [`Self::astype`]'s walk over the columns (by position, so duplicate
+    /// names each cast their own values), casting the `selected` ones to
+    /// `width`.
+    fn astype_width_where(
+        &self,
+        width: NumericWidth,
+        nullable: bool,
+        selected: impl Fn(&str) -> bool,
+    ) -> Result<Self, FrameError> {
+        let n_cols = self.num_columns();
+        let mut pairs = Vec::with_capacity(n_cols);
+        let mut column_order = Vec::with_capacity(n_cols);
+        for pos in 0..n_cols {
+            let col_name = self.column_name_at(pos).expect("column in bounds");
+            let col = self.column_at(pos).expect("column in bounds");
+            let casted = if selected(&col_name) {
+                col.cast_to_width(width, nullable)?
+            } else {
+                col.clone()
+            };
+            pairs.push((col_name.clone(), casted));
+            column_order.push(col_name);
+        }
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            columns,
+            column_order,
+            self.column_multiindex.clone(),
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out.with_labels_of(self))
+    }
+
     /// Cast all columns to a single target dtype.
     ///
     /// Matches `df.astype(dtype)` (scalar form).
@@ -79198,6 +79633,32 @@ impl DataFrame {
     }
 
     pub fn transpose(&self) -> Result<Self, FrameError> {
+        // Each row is one value of every column: numpy's dtype for the
+        // columns (an all-int32 frame transposes to int32 columns; fvsao.23).
+        let width = self
+            .column_order
+            .iter()
+            .filter_map(|name| self.columns.get(name))
+            .map(|column| NumpyNumeric::of(&column.dtype(), column.width()))
+            .reduce(|left, right| left.zip(right).map(|(left, right)| left.result_type(right)))
+            .flatten()
+            .and_then(NumpyNumeric::width);
+        let mut transposed = self.transpose_storage()?;
+        if let Some(width) = width {
+            for position in 0..transposed.columns.len() {
+                if let Some(column) = transposed.columns.column_at_mut(position)
+                    && width.fits_storage(&column.dtype())
+                    && (width.is_float() || column.dtype().is_nullable() || !column.has_nulls())
+                {
+                    let nullable = column.dtype().is_nullable();
+                    *column = column.cast_to_width(width, nullable)?;
+                }
+            }
+        }
+        Ok(transposed)
+    }
+
+    fn transpose_storage(&self) -> Result<Self, FrameError> {
         #[cfg(feature = "lazy-transpose-view")]
         if !self.column_order.is_empty()
             && let Some(view) = self.transpose_view()?
@@ -79959,6 +80420,11 @@ impl DataFrame {
     /// Matches `df.where(cond, other)`. Applies element-wise to each column.
     /// If `other` is `None`, replaced values become NaN.
     pub fn where_cond(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
+        // Each narrow column keeps its width while `other` fits it (fvsao.23).
+        self.keeping_column_widths(self.where_cond_storage(cond, other))
+    }
+
+    fn where_cond_storage(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
         if let Some(result) = self.where_mask_typed_f64(cond, other, false) {
             return result;
         }
@@ -81066,6 +81532,77 @@ impl DataFrame {
     /// `var_name`: name for the variable column (default "variable")
     /// `value_name`: name for the value column (default "value")
     pub fn melt(
+        &self,
+        id_vars: &[&str],
+        value_vars: &[&str],
+        var_name: Option<&str>,
+        value_name: Option<&str>,
+    ) -> Result<Self, FrameError> {
+        let melted = self.melt_storage(id_vars, value_vars, var_name, value_name);
+        let mut melted = self.keeping_column_widths(melted)?;
+        // The value column holds every value column's values: numpy's dtype
+        // for them (int32 columns melt to an int32 value; fvsao.23).
+        let sources: Vec<&Column> = if value_vars.is_empty() {
+            self.column_order
+                .iter()
+                .filter(|name| !id_vars.contains(&name.as_str()))
+                .filter_map(|name| self.columns.get(name))
+                .collect()
+        } else {
+            value_vars
+                .iter()
+                .filter_map(|name| self.columns.get(name))
+                .collect()
+        };
+        let width = sources
+            .iter()
+            .map(|column| NumpyNumeric::of(&column.dtype(), column.width()))
+            .reduce(|left, right| left.zip(right).map(|(left, right)| left.result_type(right)))
+            .flatten()
+            .and_then(NumpyNumeric::width);
+        let value_name = value_name.unwrap_or("value");
+        let position = melted.columns.positions_of(value_name).first().copied();
+        if let (Some(width), Some(position)) = (width, position)
+            && let Some(column) = melted.columns.column_at_mut(position)
+            && width.fits_storage(&column.dtype())
+            && (width.is_float() || column.dtype().is_nullable() || !column.has_nulls())
+        {
+            let nullable = column.dtype().is_nullable();
+            *column = column.cast_to_width(width, nullable)?;
+        }
+        Ok(melted)
+    }
+
+    /// `result`, a columnwise operation on this frame that pandas keeps in
+    /// each column's dtype (where, mask, a melt's id columns; fvsao.23):
+    /// each column of `result` named as one of this frame's carries that
+    /// column's width where it fits (see [`Column::narrowed_like`]).
+    fn keeping_column_widths(&self, result: Result<Self, FrameError>) -> Result<Self, FrameError> {
+        let mut result = result?;
+        if self
+            .columns
+            .iter_positional()
+            .all(|(_, column)| column.width().is_none())
+        {
+            return Ok(result);
+        }
+        let names: Vec<String> = result
+            .columns
+            .iter_positional()
+            .map(|(name, _)| name.clone())
+            .collect();
+        for (position, name) in names.iter().enumerate() {
+            let Some(source) = self.columns.get(name).filter(|c| c.width().is_some()) else {
+                continue;
+            };
+            if let Some(column) = result.columns.column_at_mut(position) {
+                *column = column.clone().narrowed_like(source);
+            }
+        }
+        Ok(result)
+    }
+
+    fn melt_storage(
         &self,
         id_vars: &[&str],
         value_vars: &[&str],
@@ -98138,12 +98675,20 @@ impl DataFrame {
     /// Matches `df.select_dtypes(include=['float64'], exclude=['bool'])`.
     /// Pass empty slices to not filter on that criterion.
     pub fn select_dtypes(&self, include: &[DType], exclude: &[DType]) -> Result<Self, FrameError> {
-        let mut selected = Vec::new();
-        for name in &self.column_order {
-            let dt = self.columns[name].dtype();
+        self.select_columns_where(|column| {
+            let dt = column.dtype();
             let included = include.is_empty() || include.contains(&dt);
             let excluded = !exclude.is_empty() && exclude.contains(&dt);
-            if included && !excluded {
+            included && !excluded
+        })
+    }
+
+    /// The columns `keep` accepts, in order; none is still this frame's
+    /// axis (its name, an empty MultiIndex of its level names).
+    fn select_columns_where(&self, keep: impl Fn(&Column) -> bool) -> Result<Self, FrameError> {
+        let mut selected = Vec::new();
+        for name in &self.column_order {
+            if keep(&self.columns[name]) {
                 selected.push(name.as_str());
             }
         }
@@ -98170,23 +98715,46 @@ impl DataFrame {
     /// - `"bool"`, `"boolean"` → Bool
     /// - `"object"`, `"string"`, `"str"` → Utf8
     /// - `"timedelta"`, `"timedelta64"` → Timedelta64
+    /// - a narrow numpy name (`"int32"`, `"uint8"`, `"float32"`) or its
+    ///   masked form (`"Int32"`) → the columns of exactly that width, while
+    ///   the exact 64-bit names (`"int64"`, `"int"`, `"float64"`, `"float"`)
+    ///   leave those out and the abstract ones (`"number"`, `"integer"`,
+    ///   `"floating"`) keep them (fvsao.23).
     pub fn select_dtypes_by_name(
         &self,
         include: &[&str],
         exclude: &[&str],
     ) -> Result<Self, FrameError> {
-        let include_set = expand_dtype_aliases(include)?;
-        let exclude_set = expand_dtype_aliases(exclude)?;
-        if !include_set.is_empty() && !exclude_set.is_empty() {
-            for dt in &include_set {
-                if exclude_set.contains(dt) {
-                    return Err(FrameError::CompatibilityRejected(
-                        "include and exclude overlap".to_owned(),
-                    ));
-                }
-            }
+        fn storage_names<'a>(names: &[&'a str]) -> Vec<&'a str> {
+            names
+                .iter()
+                .copied()
+                .filter(|name| NumericWidth::parse(name).is_none())
+                .collect()
         }
-        self.select_dtypes(&include_set, &exclude_set)
+        let include_set = expand_dtype_aliases(&storage_names(include))?;
+        let exclude_set = expand_dtype_aliases(&storage_names(exclude))?;
+        let overlap = include_set.iter().any(|dt| exclude_set.contains(dt))
+            || include
+                .iter()
+                .any(|name| NumericWidth::parse(name).is_some() && exclude.contains(name));
+        if overlap {
+            return Err(FrameError::CompatibilityRejected(
+                "include and exclude overlap".to_owned(),
+            ));
+        }
+        let matches = |column: &Column, name: &str| {
+            if let Some((width, nullable)) = NumericWidth::parse(name) {
+                return column.width() == Some(width) && column.dtype().is_nullable() == nullable;
+            }
+            let exact_64 = matches!(name, "int" | "int64" | "i8" | "float" | "float64" | "f8");
+            (!exact_64 || column.width().is_none())
+                && expand_dtype_alias(name).is_ok_and(|dtypes| dtypes.contains(&column.dtype()))
+        };
+        self.select_columns_where(|column| {
+            let included = include.is_empty() || include.iter().any(|name| matches(column, name));
+            included && !exclude.iter().any(|name| matches(column, name))
+        })
     }
 
     /// Filter rows or columns by label.

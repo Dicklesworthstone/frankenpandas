@@ -68,11 +68,11 @@ use std::sync::{Arc, OnceLock};
 
 use fp_types::{
     CategoricalMetadata, DType, DatetimeStringResolution, Interval, IntervalClosed, NullKind,
-    Period, PeriodFreq, Scalar, SparseDType, Timedelta, TimedeltaStringResolution, Timestamp,
-    TypeError, cast_scalar, cast_scalar_owned, common_dtype, infer_dtype, nanall, nanany,
-    nanargmax, nanargmin, nancummax, nancummin, nancumprod, nancumsum, nankurt, nanmax, nanmean,
-    nanmedian, nanmin, nannunique, nanprod, nanptp, nanquantile, nansem, nanskew, nanstd, nansum,
-    nanvar,
+    NumericWidth, NumpyNumeric, Period, PeriodFreq, Scalar, SparseDType, Timedelta,
+    TimedeltaStringResolution, Timestamp, TypeError, cast_scalar, cast_scalar_owned, common_dtype,
+    infer_dtype, nanall, nanany, nanargmax, nanargmin, nancummax, nancummin, nancumprod, nancumsum,
+    nankurt, nanmax, nanmean, nanmedian, nanmin, nannunique, nanprod, nanptp, nanquantile, nansem,
+    nanskew, nanstd, nansum, nanvar,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -7160,6 +7160,15 @@ pub struct Column {
     data: Option<ColumnData>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     categorical: Option<CategoricalMetadata>,
+    /// The numpy dtype narrower than the storage that pandas reports for this
+    /// column - int32, uint8, float32, or over a nullable column Int32, UInt8,
+    /// Float32 (fvsao.23); `None` is the storage's own 64-bit dtype. The
+    /// values are confined to it (see [`NumericWidth`]). Structural
+    /// operations - take, slice, reindex, concat of the same width - carry
+    /// it; every other result is built without it and so reports the
+    /// storage dtype, the widening this column had before widths existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    width: Option<NumericWidth>,
 }
 
 impl Clone for Column {
@@ -7208,6 +7217,7 @@ impl Clone for Column {
             validity: self.validity.clone(),
             data,
             categorical: self.categorical.clone(),
+            width: self.width,
         }
     }
 }
@@ -7218,17 +7228,24 @@ impl PartialEq for Column {
             && self.values == other.values
             && self.validity == other.validity
             && self.categorical == other.categorical
+            && self.width == other.width
     }
 }
 
 impl std::fmt::Debug for Column {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Column")
+        let mut debug = f.debug_struct("Column");
+        debug
             .field("dtype", &self.dtype)
             .field("values", &self.values)
             .field("validity", &self.validity)
-            .field("categorical", &self.categorical)
-            .finish()
+            .field("categorical", &self.categorical);
+        // Only a narrow column shows its width: a 64-bit column's Debug is
+        // what it was before widths existed (fp-frame's Debug goldens).
+        if let Some(width) = self.width {
+            debug.field("width", &width);
+        }
+        debug.finish()
     }
 }
 
@@ -11766,6 +11783,19 @@ pub enum ColumnError {
     DTypeMismatch { left: DType, right: DType },
     #[error("Integers to negative integer powers are not allowed.")]
     NegativeIntegerPower,
+    /// A uint64 value at or above 2**63: pandas holds it, the Int64 storage
+    /// a uint64 column lives in cannot (see [`NumericWidth`]; fvsao.23).
+    #[error("uint64 value {value} is at or above 2**63, which a column cannot hold yet")]
+    UInt64OutOfRange { value: u64 },
+    /// pandas' `IntCastingNaNError`: a missing or infinite value cast to a
+    /// numpy integer dtype, which has no missing value.
+    #[error("Cannot convert non-finite values (NA or inf) to integer")]
+    IntCastingNaN,
+    /// pandas' TypeError for a cast it does not make, in its words: a
+    /// datetime, timedelta, period or interval column to a narrow numeric
+    /// dtype (fvsao.23; its int64 view is nanoseconds or ordinals).
+    #[error("{0}")]
+    UnsupportedCast(String),
     #[error(transparent)]
     Type(#[from] TypeError),
 }
@@ -12027,6 +12057,7 @@ impl Column {
             validity,
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -12090,6 +12121,7 @@ impl Column {
                 data: None,
                 categorical,
                 values,
+                width: None,
             });
         }
 
@@ -12196,6 +12228,7 @@ impl Column {
             validity,
             data,
             categorical: None,
+            width: None,
             values,
         })
     }
@@ -12270,6 +12303,7 @@ impl Column {
             validity,
             data,
             categorical: None,
+            width: None,
             values,
         })
     }
@@ -12323,6 +12357,7 @@ impl Column {
             validity: ValidityMask::all_valid(len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -12340,6 +12375,7 @@ impl Column {
             validity: ValidityMask::all_valid(len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -12367,6 +12403,7 @@ impl Column {
             validity: ValidityMask::all_valid(len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -12385,6 +12422,7 @@ impl Column {
             validity: ValidityMask::all_valid(len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -12420,6 +12458,7 @@ impl Column {
             validity: ValidityMask::all_valid(len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -12448,6 +12487,7 @@ impl Column {
             validity: ValidityMask::from_words(words, len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -12468,6 +12508,7 @@ impl Column {
             validity: ValidityMask::all_valid(len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -12493,6 +12534,7 @@ impl Column {
             validity: ValidityMask::all_valid(len),
             data: None,
             categorical: None,
+            width: None,
         })
     }
 
@@ -12511,6 +12553,7 @@ impl Column {
             validity: ValidityMask::all_valid(total_len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -12531,6 +12574,7 @@ impl Column {
             validity: ValidityMask::all_valid(total_len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -12548,6 +12592,7 @@ impl Column {
             validity: ValidityMask::all_valid(total_len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -12566,6 +12611,7 @@ impl Column {
             validity: ValidityMask::all_valid(total_len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -12587,6 +12633,7 @@ impl Column {
             validity: ValidityMask::all_valid(total_len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -12607,6 +12654,7 @@ impl Column {
             validity: ValidityMask::all_valid(total_len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -12663,6 +12711,7 @@ impl Column {
             validity,
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -12699,6 +12748,7 @@ impl Column {
             validity,
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -12741,6 +12791,7 @@ impl Column {
             validity,
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -12767,6 +12818,7 @@ impl Column {
             validity,
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -12799,6 +12851,7 @@ impl Column {
             validity,
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -12832,6 +12885,7 @@ impl Column {
             validity,
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -12857,6 +12911,7 @@ impl Column {
             validity: ValidityMask::all_valid(total_len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -12883,6 +12938,7 @@ impl Column {
             validity: ValidityMask::all_valid(total_len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -12910,6 +12966,7 @@ impl Column {
             validity,
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -12938,6 +12995,7 @@ impl Column {
             validity,
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -12968,6 +13026,7 @@ impl Column {
             validity,
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -12990,6 +13049,7 @@ impl Column {
             validity: ValidityMask::all_valid(len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -13026,6 +13086,7 @@ impl Column {
             validity: ValidityMask::all_valid(len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -13061,6 +13122,7 @@ impl Column {
             validity: ValidityMask::all_valid(len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -13082,6 +13144,7 @@ impl Column {
             validity,
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -13116,6 +13179,7 @@ impl Column {
             validity,
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -13149,6 +13213,7 @@ impl Column {
             validity: ValidityMask::all_valid(len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -13173,6 +13238,7 @@ impl Column {
             validity: ValidityMask::all_valid(len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -13192,6 +13258,7 @@ impl Column {
             validity: ValidityMask::all_valid(len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -13207,6 +13274,7 @@ impl Column {
             validity,
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -13234,6 +13302,7 @@ impl Column {
             validity: ValidityMask::all_valid(len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -13290,6 +13359,7 @@ impl Column {
             validity: ValidityMask::all_valid(len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -13330,6 +13400,7 @@ impl Column {
             validity,
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -13460,6 +13531,7 @@ impl Column {
             validity: ValidityMask::all_valid(len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -13500,6 +13572,7 @@ impl Column {
                 validity: ValidityMask::all_valid(n),
                 data: None,
                 categorical: None,
+                width: None,
             })
             .collect()
     }
@@ -13538,6 +13611,7 @@ impl Column {
             validity: ValidityMask::all_valid(len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -13560,6 +13634,7 @@ impl Column {
             validity,
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -13580,6 +13655,7 @@ impl Column {
             validity,
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -13597,6 +13673,7 @@ impl Column {
                 validity,
                 data: None,
                 categorical: None,
+                width: None,
             };
         }
         Self {
@@ -13605,6 +13682,7 @@ impl Column {
             validity,
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -13619,6 +13697,7 @@ impl Column {
                 validity,
                 data: None,
                 categorical: None,
+                width: None,
             };
         }
         Self {
@@ -13627,6 +13706,7 @@ impl Column {
             validity,
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -13654,6 +13734,7 @@ impl Column {
             validity,
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -13677,6 +13758,7 @@ impl Column {
             validity,
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -13715,6 +13797,7 @@ impl Column {
             validity,
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -13738,6 +13821,7 @@ impl Column {
             validity,
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -13814,6 +13898,7 @@ impl Column {
             validity: ValidityMask::from_invalid_ranges(Arc::from(invalid_ranges), len),
             data: None,
             categorical: None,
+            width: None,
         })
     }
 
@@ -14341,6 +14426,7 @@ impl Column {
             validity: ValidityMask::all_valid(len),
             data: None,
             categorical: None,
+            width: None,
         }
     }
 
@@ -14517,6 +14603,7 @@ impl Column {
             validity: ValidityMask::all_valid(codes_len),
             data: None,
             categorical: None,
+            width: None,
         };
         let uniques = Self {
             dtype: DType::Utf8,
@@ -14527,6 +14614,7 @@ impl Column {
             validity: ValidityMask::all_valid(unique_len),
             data: None,
             categorical: None,
+            width: None,
         };
         Some((codes, uniques))
     }
@@ -15028,6 +15116,13 @@ impl Column {
     /// validated index positions; this mirrors the prior `values()[pos]` index).
     #[must_use]
     pub fn take_positions(&self, positions: &[usize]) -> Self {
+        self.take_positions_storage(positions)
+            .keeping_width_of(self)
+    }
+
+    /// [`Self::take_positions`] of the storage: its fast paths build the
+    /// result through the storage's own constructors, which know no width.
+    fn take_positions_storage(&self, positions: &[usize]) -> Self {
         let n = positions.len();
         if self.validity.all() {
             // Zero-copy contiguous-range Float64 view
@@ -15054,6 +15149,7 @@ impl Column {
                     validity: ValidityMask::all_valid(n),
                     data: None,
                     categorical: None,
+                    width: None,
                 };
             }
 
@@ -15078,6 +15174,7 @@ impl Column {
                     validity: ValidityMask::all_valid(n),
                     data: None,
                     categorical: None,
+                    width: None,
                 };
             }
 
@@ -15098,6 +15195,7 @@ impl Column {
                     validity: ValidityMask::all_valid(n),
                     data: None,
                     categorical: None,
+                    width: None,
                 };
             }
 
@@ -15117,6 +15215,7 @@ impl Column {
                     validity: ValidityMask::all_valid(n),
                     data: None,
                     categorical: None,
+                    width: None,
                 };
             }
 
@@ -15142,6 +15241,7 @@ impl Column {
                     validity: ValidityMask::all_valid(n),
                     data: None,
                     categorical: None,
+                    width: None,
                 };
             }
 
@@ -15159,6 +15259,7 @@ impl Column {
                     validity: ValidityMask::all_valid(n),
                     data: None,
                     categorical: None,
+                    width: None,
                 };
             }
 
@@ -15201,6 +15302,7 @@ impl Column {
                     validity: ValidityMask::all_valid(n),
                     data: None,
                     categorical: self.categorical.clone(),
+                    width: self.width,
                 };
             }
 
@@ -15229,6 +15331,7 @@ impl Column {
                     validity: ValidityMask::all_valid(n),
                     data: None,
                     categorical: self.categorical.clone(),
+                    width: self.width,
                 };
             }
 
@@ -15272,6 +15375,7 @@ impl Column {
                     validity: ValidityMask::all_valid(n),
                     data: None,
                     categorical: self.categorical.clone(),
+                    width: self.width,
                 };
             }
 
@@ -15289,6 +15393,7 @@ impl Column {
                 validity: ValidityMask::all_valid(n),
                 data: None,
                 categorical: self.categorical.clone(),
+                width: self.width,
             };
         }
 
@@ -15519,6 +15624,7 @@ impl Column {
             validity: ValidityMask::from_words(words, n),
             data: None,
             categorical: self.categorical.clone(),
+            width: self.width,
         }
     }
 
@@ -15560,6 +15666,7 @@ impl Column {
             validity: ValidityMask::all_valid(len),
             data: None,
             categorical: None,
+            width: None,
         })
     }
 
@@ -15591,6 +15698,11 @@ impl Column {
     #[must_use]
     #[doc(hidden)]
     pub fn take_position_runs(&self, runs: &[(usize, usize)], out_len: usize) -> Self {
+        self.take_position_runs_storage(runs, out_len)
+            .keeping_width_of(self)
+    }
+
+    fn take_position_runs_storage(&self, runs: &[(usize, usize)], out_len: usize) -> Self {
         debug_assert_eq!(runs.iter().map(|&(_, len)| len).sum::<usize>(), out_len);
         for &(start, len) in runs {
             let end = start
@@ -15620,6 +15732,7 @@ impl Column {
                     validity: ValidityMask::all_valid(out_len),
                     data: None,
                     categorical: None,
+                    width: None,
                 };
             }
 
@@ -15634,6 +15747,7 @@ impl Column {
                     validity: ValidityMask::all_valid(out_len),
                     data: None,
                     categorical: None,
+                    width: None,
                 };
             }
 
@@ -15648,6 +15762,7 @@ impl Column {
                     validity: ValidityMask::all_valid(out_len),
                     data: None,
                     categorical: None,
+                    width: None,
                 };
             }
 
@@ -15667,6 +15782,7 @@ impl Column {
                     validity: ValidityMask::all_valid(out_len),
                     data: None,
                     categorical: None,
+                    width: None,
                 };
             }
 
@@ -15683,6 +15799,7 @@ impl Column {
                     validity: ValidityMask::all_valid(out_len),
                     data: None,
                     categorical: None,
+                    width: None,
                 };
             }
 
@@ -15792,6 +15909,11 @@ impl Column {
     /// Panics if the requested range overflows or extends beyond this column.
     #[must_use]
     pub fn take_contiguous_range(&self, start: usize, len: usize) -> Self {
+        self.take_contiguous_range_storage(start, len)
+            .keeping_width_of(self)
+    }
+
+    fn take_contiguous_range_storage(&self, start: usize, len: usize) -> Self {
         let end = start
             .checked_add(len)
             .expect("contiguous range end must not overflow");
@@ -15813,6 +15935,7 @@ impl Column {
                     validity: ValidityMask::all_valid(len),
                     data: None,
                     categorical: None,
+                    width: None,
                 };
             }
 
@@ -15838,6 +15961,7 @@ impl Column {
                     validity: ValidityMask::all_valid(len),
                     data: None,
                     categorical: None,
+                    width: None,
                 };
             }
 
@@ -15857,6 +15981,7 @@ impl Column {
                     validity: ValidityMask::all_valid(len),
                     data: None,
                     categorical: self.categorical.clone(),
+                    width: self.width,
                 };
             }
 
@@ -15876,6 +16001,7 @@ impl Column {
                     validity: ValidityMask::all_valid(len),
                     data: None,
                     categorical: self.categorical.clone(),
+                    width: self.width,
                 };
             }
         }
@@ -15942,6 +16068,7 @@ impl Column {
                     validity: ValidityMask::from_words(words, len),
                     data: None,
                     categorical: None,
+                    width: None,
                 };
             }
 
@@ -16036,6 +16163,7 @@ impl Column {
                     validity: mask,
                     data: None,
                     categorical: None,
+                    width: None,
                 };
             }
             // ZERO-COPY WINDOW FOR NaN-AS-MISSING SOURCES. `from_f64_values`
@@ -16065,6 +16193,7 @@ impl Column {
                     validity: mask,
                     data: None,
                     categorical: None,
+                    width: None,
                 };
             }
 
@@ -16179,6 +16308,7 @@ impl Column {
             validity: ValidityMask::all_valid(len),
             data: None,
             categorical: None,
+            width: None,
         })
     }
 
@@ -16203,6 +16333,7 @@ impl Column {
             validity: ValidityMask::all_valid(positions.len()),
             data: None,
             categorical: None,
+            width: None,
         })
     }
 
@@ -16618,7 +16749,227 @@ impl Column {
             validity: self.validity.clone(),
             data: self.data.clone(),
             categorical,
+            width: self.width,
         }
+    }
+
+    /// The numpy dtype narrower than the storage that pandas reports for
+    /// this column (int32, uint8, float32, ...), or `None` for the storage's
+    /// own dtype (fvsao.23).
+    #[must_use]
+    pub const fn width(&self) -> Option<NumericWidth> {
+        self.width
+    }
+
+    /// `result`, a structural operation's output over `source`'s rows (a
+    /// take, slice, reindex, concat), with `source`'s width where the
+    /// result's storage carries it: an int32 column reindexed onto missing
+    /// rows became float64, which is not int32's storage, so it reports
+    /// float64 as pandas does - and a numpy Int64 storage left holding a
+    /// missing value is no numpy integer column either. The values are
+    /// `source`'s, so already confined; a result holding new values goes
+    /// through [`Self::narrowed_like`]. Public for a caller's own gather of
+    /// `source`'s rows (a typed fast path building the column itself); it
+    /// must hold only `source`'s values.
+    #[must_use]
+    pub fn keeping_width_of(mut self, source: &Self) -> Self {
+        // The common case, a 64-bit source, costs nothing on the hot takes.
+        if source.width.is_none() {
+            self.width = None;
+            return self;
+        }
+        let numpy_int_with_missing = self.dtype == DType::Int64 && self.has_nulls();
+        self.width = source.width.filter(|width| {
+            width.fits_storage(&self.dtype) && (width.is_float() || !numpy_int_with_missing)
+        });
+        self
+    }
+
+    /// `self`, an operation's result holding `source`'s values and maybe
+    /// values it added (a fill, a bound, a row a join invented), in
+    /// `source`'s width where pandas keeps it: carried where the storage
+    /// can (see [`Self::keeping_width_of`]), then confined to it - float32
+    /// rounds, an integer width is dropped when an added value left its
+    /// range.
+    #[must_use]
+    pub fn narrowed_like(self, source: &Self) -> Self {
+        if source.width.is_none() || self.width.is_some() {
+            return self;
+        }
+        self.keeping_width_of(source).confined()
+    }
+
+    /// This column with its width's confinement re-established over values
+    /// an operation added (a fill value): float32 rounds every value to the
+    /// nearest f32; an integer width whose range a value left is dropped
+    /// (numpy would move to a wider dtype; the storage's int64 is one).
+    #[must_use]
+    fn confined(self) -> Self {
+        match self.width {
+            None => self,
+            Some(NumericWidth::Float32) => {
+                if let Some(values) = self.as_f64_slice() {
+                    let single = |value: f64| NumericWidth::round_f32(value);
+                    if values
+                        .iter()
+                        .all(|&value| value.is_nan() || single(value) == value)
+                    {
+                        return self;
+                    }
+                    let rounded = values.iter().map(|&value| single(value)).collect();
+                    return Self::from_f64_values(rounded)
+                        .keeping_nullable_dtype(&self.dtype)
+                        .with_width_unchecked(NumericWidth::Float32);
+                }
+                let rounded = self
+                    .values
+                    .iter()
+                    .map(|value| match value {
+                        Scalar::Float64(v) => Scalar::Float64(NumericWidth::round_f32(*v)),
+                        other => other.clone(),
+                    })
+                    .collect();
+                match Self::new(self.dtype.clone(), rounded) {
+                    Ok(column) => column.with_width_unchecked(NumericWidth::Float32),
+                    Err(_) => self.with_width_dropped(),
+                }
+            }
+            Some(width) => {
+                let held = self.values.iter().all(|value| match value {
+                    Scalar::Int64(v) => width.holds_int(*v),
+                    _ => true,
+                });
+                if held {
+                    self
+                } else {
+                    self.with_width_dropped()
+                }
+            }
+        }
+    }
+
+    /// pandas' refusal of a datetime, timedelta, period or interval column
+    /// cast to a narrow numeric dtype (live pandas 2.2.3): its int64 view is
+    /// nanoseconds or ordinals, which wrapped into int32 would be numbers
+    /// nobody asked for (`astype('int32')` of 2024-01-01 gave 23396352).
+    fn refuse_temporal_width_cast(
+        &self,
+        width: NumericWidth,
+        nullable: bool,
+    ) -> Result<(), ColumnError> {
+        let period_name = || {
+            self.values()
+                .iter()
+                .find_map(|value| match value {
+                    Scalar::Period(period) => Some(format!("period[{}]", period.freq.alias())),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "period".to_owned())
+        };
+        let (name, array) = match self.dtype {
+            DType::Datetime64 { .. } => ("datetime64[ns]".to_owned(), "DatetimeArray"),
+            DType::Timedelta64 => ("timedelta64[ns]".to_owned(), "TimedeltaArray"),
+            DType::Period => (period_name(), "PeriodArray"),
+            DType::Interval => ("interval".to_owned(), "IntervalArray"),
+            _ => return Ok(()),
+        };
+        let target = width.name(nullable);
+        let message = if width.is_float() || self.dtype == DType::Interval {
+            format!("Cannot cast {array} to dtype {target}")
+        } else if nullable {
+            format!("{name} cannot be converted to IntegerDtype")
+        } else {
+            format!(
+                "Converting from {name} to {target} is not supported. Do obj.astype('int64').astype(dtype) instead"
+            )
+        };
+        Err(ColumnError::UnsupportedCast(message))
+    }
+
+    fn with_width_unchecked(mut self, width: NumericWidth) -> Self {
+        self.width = Some(width);
+        self
+    }
+
+    fn with_width_dropped(mut self) -> Self {
+        self.width = None;
+        self
+    }
+
+    /// This column as the numpy dtype `width` - `astype('int8')`,
+    /// `Series(..., dtype='float32')` - over the nullable storage when
+    /// `nullable` (pandas' Int8 ... Float32): the values are first cast to
+    /// the storage as [`Self::astype`] casts them (text parsed, a float
+    /// truncated toward zero, a missing value refused by a numpy integer
+    /// target), then an integer width wraps each (`astype('int8')` of 300
+    /// is 44, `astype('uint8')` of -5 is 251) and float32 rounds each to
+    /// the nearest f32.
+    ///
+    /// # Errors
+    /// [`Self::astype`]'s; `IntCastingNaN` for a missing or infinite value
+    /// cast to a numpy (not nullable) integer width; `UInt64OutOfRange` for
+    /// a uint64 value at or above 2**63 (a negative value's uint64 wrap),
+    /// which the storage cannot hold.
+    pub fn cast_to_width(&self, width: NumericWidth, nullable: bool) -> Result<Self, ColumnError> {
+        self.refuse_temporal_width_cast(width, nullable)?;
+        let storage = width.storage(nullable);
+        if !nullable && !width.is_float() {
+            let infinite = match self.as_f64_slice() {
+                Some(values) => values.iter().any(|value| value.is_infinite()),
+                None => {
+                    self.dtype.is_floating()
+                        && self
+                            .values
+                            .iter()
+                            .any(|value| matches!(value, Scalar::Float64(v) if v.is_infinite()))
+                }
+            };
+            if infinite || self.has_nulls() {
+                return Err(ColumnError::IntCastingNaN);
+            }
+        }
+        let base = if self.width.is_none() && self.dtype == storage {
+            self.clone()
+        } else {
+            self.astype(storage.clone())?
+        };
+        if width.is_float() {
+            if let Some(values) = base.as_f64_slice() {
+                let rounded = values
+                    .iter()
+                    .map(|value| NumericWidth::round_f32(*value))
+                    .collect();
+                return Ok(Self::from_f64_values(rounded)
+                    .keeping_nullable_dtype(&storage)
+                    .with_width_unchecked(width));
+            }
+            return Ok(base.with_width_unchecked(width).confined());
+        }
+        #[allow(clippy::cast_sign_loss)]
+        let refuse = |value: i64| ColumnError::UInt64OutOfRange {
+            value: value as u64,
+        };
+        if let Some(values) = base.as_i64_slice() {
+            let wrapped = values
+                .iter()
+                .map(|&value| width.wrap_int(value).ok_or_else(|| refuse(value)))
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(Self::from_i64_values(wrapped)
+                .keeping_nullable_dtype(&storage)
+                .with_width_unchecked(width));
+        }
+        let wrapped = base
+            .values
+            .iter()
+            .map(|value| match value {
+                Scalar::Int64(v) => width
+                    .wrap_int(*v)
+                    .map(Scalar::Int64)
+                    .ok_or_else(|| refuse(*v)),
+                other => Ok(other.clone()),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self::new(storage, wrapped)?.with_width_unchecked(width))
     }
 
     /// Returns true if this column contains any null/missing values.
@@ -16653,12 +17004,16 @@ impl Column {
         if new_dtype == self.dtype {
             return self.clone();
         }
+        // A numpy column with a null is one an operation built; pandas would
+        // hold it as float64, not the masked dtype of its width, so the
+        // width is not carried into the promotion.
         Self {
             dtype: new_dtype,
             values: self.values.clone(),
             validity: self.validity.clone(),
             data: self.data.clone(),
             categorical: self.categorical.clone(),
+            width: None,
         }
     }
 
@@ -16674,12 +17029,14 @@ impl Column {
         } else {
             None
         };
+        let width = self.width.filter(|width| width.fits_storage(&dtype));
         Self {
             dtype,
             values: self.values.clone(),
             validity: self.validity.clone(),
             data: None,
             categorical,
+            width,
         }
     }
 
@@ -17041,6 +17398,7 @@ impl Column {
 
     pub fn reindex_by_positions(&self, positions: &[Option<usize>]) -> Result<Self, ColumnError> {
         self.reindex_by_positions_marking(positions, NullKind::Null)
+            .map(|column| column.keeping_width_of(self))
     }
 
     /// [`Self::reindex_by_positions`] whose Utf8 gaps materialize
@@ -17360,6 +17718,7 @@ impl Column {
             validity,
             data: None,
             categorical: self.categorical.clone(),
+            width: None,
         })
     }
 
@@ -17367,6 +17726,17 @@ impl Column {
     /// rows while preserving the exact stored scalar for present source rows.
     #[doc(hidden)]
     pub fn reindex_by_positions_with_absent_scalar(
+        &self,
+        positions: &[Option<usize>],
+        absent: Scalar,
+    ) -> Result<Self, ColumnError> {
+        // The fill value is any scalar: confined to the width like the rows
+        // it joins (a float32 column's fill 0.1 is float32's 0.1).
+        self.reindex_by_positions_with_absent_scalar_storage(positions, absent)
+            .map(|column| column.keeping_width_of(self).confined())
+    }
+
+    fn reindex_by_positions_with_absent_scalar_storage(
         &self,
         positions: &[Option<usize>],
         absent: Scalar,
@@ -17416,6 +17786,7 @@ impl Column {
             validity,
             data: None,
             categorical: self.categorical.clone(),
+            width: None,
         })
     }
 
@@ -18013,6 +18384,7 @@ impl Column {
             validity,
             data: None,
             categorical: None,
+            width: None,
         })
     }
 
@@ -20420,6 +20792,13 @@ impl Column {
     /// Returns a new column where every missing position is replaced
     /// by `fill_value`. The fill value is cast to the column's dtype.
     pub fn fillna(&self, fill_value: &Scalar) -> Result<Self, ColumnError> {
+        // The fill joins the width: a float32 column's fillna(0.1) is
+        // float32's 0.1.
+        self.fillna_storage(fill_value)
+            .map(|column| column.keeping_width_of(self).confined())
+    }
+
+    fn fillna_storage(&self, fill_value: &Scalar) -> Result<Self, ColumnError> {
         if self.dtype == DType::Null {
             let replacement_dtype = if fill_value.is_missing() {
                 DType::Null
@@ -20820,7 +21199,20 @@ impl Column {
     ///
     /// Returns `ColumnError::DTypeMismatch` when `other.dtype()` differs
     /// from `self.dtype()`.
+    /// The rows of `self` then `other`, of one dtype; the result's width is
+    /// numpy's for the pair (int8 then int16 is int16, int32 then int64 is
+    /// int64), which holds every value of both.
     pub fn concat(&self, other: &Self) -> Result<Self, ColumnError> {
+        let width = NumpyNumeric::of(&self.dtype, self.width)
+            .zip(NumpyNumeric::of(&other.dtype, other.width))
+            .and_then(|(left, right)| left.result_type(right).width());
+        self.concat_storage(other).map(|column| match width {
+            Some(width) if width.fits_storage(&column.dtype) => column.with_width_unchecked(width),
+            _ => column,
+        })
+    }
+
+    fn concat_storage(&self, other: &Self) -> Result<Self, ColumnError> {
         if self.dtype != other.dtype {
             return Err(ColumnError::DTypeMismatch {
                 left: self.dtype.clone(),
@@ -26515,6 +26907,13 @@ impl Column {
     /// failing conversion. Missing values pass through as the
     /// target dtype's canonical missing representation.
     pub fn astype(&self, target: DType) -> Result<Self, ColumnError> {
+        // A DType names the 64-bit storage: astype('int64') of an int32
+        // column is int64 (its same-dtype shortcut kept the width), astype
+        // ('float64') of float32 is float64 holding the float32 values.
+        self.astype_storage(target).map(Self::with_width_dropped)
+    }
+
+    fn astype_storage(&self, target: DType) -> Result<Self, ColumnError> {
         if self.dtype == target {
             // ⚠️ EXCEPT Utf8 CARRYING A MISSING VALUE. Casting to string does not
             // KEEP missingness — pandas STRINGIFIES it, and spells it differently
@@ -32072,6 +32471,13 @@ impl Column {
     /// form. Positive periods shift right (vacates the head); negative
     /// periods shift left (vacates the tail).
     pub fn shift(&self, periods: i64, fill: Scalar) -> Result<Self, ColumnError> {
+        // A float32 column shifts in float32 (its NaN gaps are float32's);
+        // an int32 one gaps into float64, which int32 does not ride on.
+        self.shift_storage(periods, fill)
+            .map(|column| column.keeping_width_of(self).confined())
+    }
+
+    fn shift_storage(&self, periods: i64, fill: Scalar) -> Result<Self, ColumnError> {
         let len = self.values.len();
         if len == 0 || periods == 0 {
             return Ok(self.clone());
@@ -32135,6 +32541,7 @@ impl Column {
                 validity: ValidityMask::all_valid(len),
                 data: None,
                 categorical: None,
+                width: None,
             });
         }
         let mut out: Vec<Scalar> = Vec::with_capacity(len);
@@ -32163,6 +32570,13 @@ impl Column {
     /// Missing values pass through unchanged. Result dtype is Float64
     /// (via `infer_dtype`) to accommodate fractional clipping.
     pub fn clip(&self, lower: Option<f64>, upper: Option<f64>) -> Result<Self, ColumnError> {
+        // A bound joins the width (int32 clipped is int32; a bound outside
+        // int8 leaves int8 for int64).
+        self.clip_storage(lower, upper)
+            .map(|column| column.keeping_width_of(self).confined())
+    }
+
+    fn clip_storage(&self, lower: Option<f64>, upper: Option<f64>) -> Result<Self, ColumnError> {
         let lower = lower.filter(|v| !v.is_nan());
         let upper = upper.filter(|v| !v.is_nan());
         // pandas treats scalar bounds as the endpoints of an interval, not as
@@ -32281,6 +32695,12 @@ impl Column {
     /// decimals. Bool columns pass through unchanged. Missing values are
     /// preserved.
     pub fn round(&self, decimals: i32) -> Result<Self, ColumnError> {
+        // float32 rounds to a float32 (1.25 to one decimal is float32's 1.2).
+        self.round_storage(decimals)
+            .map(|column| column.keeping_width_of(self).confined())
+    }
+
+    fn round_storage(&self, decimals: i32) -> Result<Self, ColumnError> {
         if matches!(self.dtype, DType::Bool) || (self.dtype == DType::Int64 && decimals >= 0) {
             return Ok(self.clone());
         }
@@ -37655,6 +38075,7 @@ mod tests {
                 validity: ValidityMask::all_valid(len),
                 data: None,
                 categorical: None,
+                width: None,
             }
         };
         let left = make(vec![1.0, f64::NAN, 2.0, f64::INFINITY, 1.0, f64::NAN, -3.5]);
@@ -41260,6 +41681,7 @@ mod tests {
                 validity: ValidityMask::all_valid(3),
                 data: None,
                 categorical: None,
+                width: None,
             };
             assert!(mixed.has_any_missing());
             assert!(!mixed.all_missing());
@@ -41273,6 +41695,7 @@ mod tests {
                 validity: ValidityMask::all_valid(2),
                 data: None,
                 categorical: None,
+                width: None,
             };
             assert!(all_nan.has_any_missing());
             assert!(all_nan.all_missing());
@@ -47366,6 +47789,7 @@ mod tests {
                 validity: ValidityMask::all_valid(5),
                 data: None,
                 categorical: None,
+                width: None,
             };
 
             let (codes, uniques) = col.factorize().expect("factorize");
@@ -47421,6 +47845,7 @@ mod tests {
                 validity: ValidityMask::all_valid(4),
                 data: None,
                 categorical: None,
+                width: None,
             };
 
             let (codes, uniques) = col.factorize().expect("factorize");
@@ -52818,6 +53243,7 @@ mod tests {
                 validity: ValidityMask::all_valid(3),
                 data: None,
                 categorical: None,
+                width: None,
             };
 
             let is_null = col.isnull().expect("isnull");
@@ -52985,6 +53411,7 @@ mod tests {
                 validity: ValidityMask::all_valid(4),
                 data: None,
                 categorical: None,
+                width: None,
             };
             let right = Column {
                 dtype: DType::Bool,
@@ -52992,6 +53419,7 @@ mod tests {
                 validity: ValidityMask::all_valid(4),
                 data: None,
                 categorical: None,
+                width: None,
             };
 
             assert_eq!(
@@ -53055,6 +53483,7 @@ mod tests {
                 validity: ValidityMask::all_valid(4),
                 data: None,
                 categorical: None,
+                width: None,
             };
             let right = Column {
                 dtype: DType::Bool,
@@ -53062,6 +53491,7 @@ mod tests {
                 validity: ValidityMask::all_valid(4),
                 data: None,
                 categorical: None,
+                width: None,
             };
 
             assert_eq!(
@@ -53119,6 +53549,7 @@ mod tests {
                 validity: ValidityMask::all_valid(4),
                 data: None,
                 categorical: None,
+                width: None,
             };
             let right = Column {
                 dtype: DType::Bool,
@@ -53126,6 +53557,7 @@ mod tests {
                 validity: ValidityMask::all_valid(4),
                 data: None,
                 categorical: None,
+                width: None,
             };
 
             assert_eq!(
@@ -53875,6 +54307,7 @@ mod tests {
                 validity: ValidityMask::all_valid(4),
                 data: None,
                 categorical: None,
+                width: None,
             };
 
             assert_eq!(col.count(), 3);
@@ -66268,5 +66701,207 @@ mod floordiv_mod_f64_pandas_special_value_lock {
             let rhs = ((b >> 11) as f64) / 1_048_576.0 - 4_294_967_296.0;
             (lhs, if rhs == 0.0 { 1.0 } else { rhs })
         }
+    }
+}
+
+/// Narrow numpy dtypes on a column (fvsao.23): the width a cast sets, what
+/// structural operations carry, and where it is dropped. Expected values are
+/// live pandas 2.2.3.
+#[cfg(test)]
+mod numeric_width_columns_fvsao23 {
+    use super::{Column, ColumnError};
+    use fp_types::{DType, NumericWidth, Scalar};
+
+    fn ints(values: &[i64]) -> Column {
+        Column::from_i64_values(values.to_vec())
+    }
+
+    #[test]
+    fn cast_wraps_integers_and_rounds_float32() {
+        // pd.Series([1, 2, 300, -5]).astype('int8') -> [1, 2, 44, -5];
+        // 'uint8' -> [1, 2, 44, 251]
+        let source = ints(&[1, 2, 300, -5]);
+        let int8 = source.cast_to_width(NumericWidth::Int8, false).unwrap();
+        assert_eq!(int8.width(), Some(NumericWidth::Int8));
+        assert_eq!(int8.dtype(), DType::Int64);
+        assert_eq!(int8.as_i64_slice().unwrap(), &[1, 2, 44, -5]);
+        let uint8 = source.cast_to_width(NumericWidth::UInt8, false).unwrap();
+        assert_eq!(uint8.as_i64_slice().unwrap(), &[1, 2, 44, 251]);
+        // astype('float32') of 0.1 is 0.10000000149011612 as float64
+        let floats = Column::from_f64_values(vec![0.1, 1.5]);
+        let single = floats.cast_to_width(NumericWidth::Float32, false).unwrap();
+        assert_eq!(single.width(), Some(NumericWidth::Float32));
+        assert_eq!(
+            single.as_f64_slice().unwrap(),
+            &[0.100_000_001_490_116_12, 1.5]
+        );
+        // A float to int32 truncates toward zero: [1.7, -2.7] -> [1, -2]
+        let truncated = Column::from_f64_values(vec![1.7, -2.7])
+            .cast_to_width(NumericWidth::Int32, false)
+            .unwrap();
+        assert_eq!(truncated.as_i64_slice().unwrap(), &[1, -2]);
+    }
+
+    #[test]
+    fn missing_values_need_the_masked_dtype() {
+        let with_missing = Column::new(
+            DType::Float64,
+            vec![Scalar::Float64(1.0), Scalar::Null(fp_types::NullKind::NaN)],
+        )
+        .unwrap();
+        // astype('int32') of [1.0, NaN] raises IntCastingNaNError ...
+        assert_eq!(
+            with_missing.cast_to_width(NumericWidth::Int32, false),
+            Err(ColumnError::IntCastingNaN)
+        );
+        let infinite = Column::from_f64_values(vec![f64::INFINITY]);
+        assert_eq!(
+            infinite.cast_to_width(NumericWidth::Int16, false),
+            Err(ColumnError::IntCastingNaN)
+        );
+        // ... astype('Int32') holds it: [1, <NA>] dtype Int32
+        let masked = with_missing
+            .cast_to_width(NumericWidth::Int32, true)
+            .unwrap();
+        assert_eq!(masked.dtype(), DType::Int64Nullable);
+        assert_eq!(masked.width(), Some(NumericWidth::Int32));
+        assert_eq!(masked.values()[0], Scalar::Int64(1));
+        assert!(masked.values()[1].is_missing());
+        // float32 keeps NaN as numpy does
+        let single = with_missing
+            .cast_to_width(NumericWidth::Float32, false)
+            .unwrap();
+        assert_eq!(single.width(), Some(NumericWidth::Float32));
+        assert!(single.values()[1].is_missing());
+    }
+
+    #[test]
+    fn temporal_columns_are_refused_not_wrapped() {
+        // pd.Series(pd.to_datetime(['2024-01-01'])).astype('int32') raises
+        // TypeError; wrapping its nanoseconds gave 23396352.
+        let stamps = Column::new(
+            DType::Datetime64 { tz: None },
+            vec![Scalar::Datetime64(1_704_067_200_000_000_000)],
+        )
+        .unwrap();
+        let refused = |width, nullable| match stamps.cast_to_width(width, nullable) {
+            Err(ColumnError::UnsupportedCast(message)) => message,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            refused(NumericWidth::Int32, false),
+            "Converting from datetime64[ns] to int32 is not supported. Do obj.astype('int64').astype(dtype) instead"
+        );
+        assert_eq!(
+            refused(NumericWidth::Float32, false),
+            "Cannot cast DatetimeArray to dtype float32"
+        );
+        assert_eq!(
+            refused(NumericWidth::Int32, true),
+            "datetime64[ns] cannot be converted to IntegerDtype"
+        );
+    }
+
+    #[test]
+    fn uint64_beyond_the_storage_is_refused_not_stored_negative() {
+        assert_eq!(
+            ints(&[-1]).cast_to_width(NumericWidth::UInt64, false),
+            Err(ColumnError::UInt64OutOfRange { value: u64::MAX })
+        );
+        let held = ints(&[1, 2])
+            .cast_to_width(NumericWidth::UInt64, false)
+            .unwrap();
+        assert_eq!(held.width(), Some(NumericWidth::UInt64));
+    }
+
+    #[test]
+    fn structural_operations_carry_the_width() {
+        let int32 = ints(&[3, 1, 2])
+            .cast_to_width(NumericWidth::Int32, false)
+            .unwrap();
+        // iloc[[2, 0]], head(2), slice keep int32
+        assert_eq!(
+            int32.take_positions(&[2, 0]).width(),
+            Some(NumericWidth::Int32)
+        );
+        assert_eq!(
+            int32.take_contiguous_range(0, 2).width(),
+            Some(NumericWidth::Int32)
+        );
+        assert_eq!(int32.head(2).unwrap().width(), Some(NumericWidth::Int32));
+        let all_present = int32.reindex_by_positions(&[Some(1), Some(0)]).unwrap();
+        assert_eq!(all_present.width(), Some(NumericWidth::Int32));
+        // An int32 column is distinct from the int64 one with its values.
+        assert_ne!(int32, ints(&[3, 1, 2]));
+        assert_eq!(int32.clone(), int32);
+    }
+
+    #[test]
+    fn a_missing_row_ends_an_integer_width_but_not_float32() {
+        // int32 reindexed onto a missing label is float64; float32 stays.
+        let int32 = ints(&[1, 2])
+            .cast_to_width(NumericWidth::Int32, false)
+            .unwrap();
+        let reindexed = int32.reindex_by_positions(&[Some(0), None]).unwrap();
+        assert_eq!(reindexed.width(), None);
+        let single = Column::from_f64_values(vec![1.0, 2.0])
+            .cast_to_width(NumericWidth::Float32, false)
+            .unwrap();
+        let reindexed = single.reindex_by_positions(&[Some(0), None]).unwrap();
+        assert_eq!(reindexed.width(), Some(NumericWidth::Float32));
+        // A fill value joins the width: float32's 0.1, not float64's.
+        let filled = single
+            .reindex_by_positions_with_absent_scalar(&[Some(0), None], Scalar::Float64(0.1))
+            .unwrap();
+        assert_eq!(filled.width(), Some(NumericWidth::Float32));
+        assert_eq!(
+            filled.values()[1],
+            Scalar::Float64(0.100_000_001_490_116_12)
+        );
+        // An int fill outside int8 leaves int8 for the storage's int64.
+        let int8 = ints(&[1]).cast_to_width(NumericWidth::Int8, false).unwrap();
+        let wide_fill = int8
+            .reindex_by_positions_with_absent_scalar(&[Some(0), None], Scalar::Int64(300))
+            .unwrap();
+        assert_eq!(wide_fill.width(), None);
+        let narrow_fill = int8
+            .reindex_by_positions_with_absent_scalar(&[Some(0), None], Scalar::Int64(7))
+            .unwrap();
+        assert_eq!(narrow_fill.width(), Some(NumericWidth::Int8));
+    }
+
+    #[test]
+    fn concat_takes_numpys_result_width_and_casts_drop_it() {
+        let int8 = ints(&[1]).cast_to_width(NumericWidth::Int8, false).unwrap();
+        let int16 = ints(&[2])
+            .cast_to_width(NumericWidth::Int16, false)
+            .unwrap();
+        let int32 = ints(&[3])
+            .cast_to_width(NumericWidth::Int32, false)
+            .unwrap();
+        // pd.concat of int8 and int16 is int16; int32 and int64 is int64
+        assert_eq!(
+            int8.concat(&int16).unwrap().width(),
+            Some(NumericWidth::Int16)
+        );
+        assert_eq!(
+            int32.concat(&int32).unwrap().width(),
+            Some(NumericWidth::Int32)
+        );
+        assert_eq!(int32.concat(&ints(&[4])).unwrap().width(), None);
+        // int8 then uint8 is int16, holding both
+        let uint8 = ints(&[200])
+            .cast_to_width(NumericWidth::UInt8, false)
+            .unwrap();
+        assert_eq!(
+            int8.concat(&uint8).unwrap().width(),
+            Some(NumericWidth::Int16)
+        );
+        // Relabelling the storage as float drops an integer width.
+        assert_eq!(int32.with_dtype(DType::Float64).width(), None);
+        assert_eq!(
+            int32.with_dtype(DType::Int64Nullable).width(),
+            Some(NumericWidth::Int32)
+        );
     }
 }
