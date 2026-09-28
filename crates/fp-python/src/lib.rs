@@ -200,6 +200,10 @@ fn column_pandas_dtype_name(column: &Column) -> String {
     if let Some(width) = column.width() {
         return width.name(dtype.is_nullable()).to_owned();
     }
+    // pandas' `string` extension dtype (fvsao.59).
+    if column.is_pandas_string() {
+        return "string".to_owned();
+    }
     if dtype == DType::Bool && column.has_any_missing() {
         return "object".to_owned();
     }
@@ -321,6 +325,9 @@ fn column_pandas_dtype<'py>(py: Python<'py>, column: &Column) -> PyResult<Bound<
         } else {
             py.import("numpy")?.call_method1("dtype", (name,))
         };
+    }
+    if column.is_pandas_string() {
+        return PyStringDtype.into_bound_py_any(py);
     }
     if matches!(
         name.as_str(),
@@ -831,6 +838,20 @@ fn materialized_values(column: &Column) -> std::borrow::Cow<'_, [Scalar]> {
 #[allow(clippy::cast_precision_loss)] // pandas performs the same int64 -> float64 widening
 fn pandas_cells(column: &Column) -> Vec<String> {
     let values = materialized_values(column);
+    // pandas' `string` dtype prints its missing value as <NA>, and each cell
+    // with the leading space of an extension array's formatter (fvsao.59).
+    if column.is_pandas_string() {
+        return values
+            .iter()
+            .map(|value| {
+                if value.is_missing() {
+                    " <NA>".to_owned()
+                } else {
+                    format!(" {}", pandas_object_text(value))
+                }
+            })
+            .collect();
+    }
     match column.dtype() {
         DType::Int64 if column.validity().all() => values
             .iter()
@@ -5371,7 +5392,9 @@ fn cell_to_py(py: Python<'_>, column: &Column, value: &Scalar) -> PyResult<Py<Py
         }
         .into_py_any(py);
     }
-    if value.is_missing() && is_nullable_extension(&column.dtype()) {
+    // A nullable extension column's missing value is pd.NA - pandas'
+    // `string` dtype's too (fvsao.59; it read back None).
+    if value.is_missing() && (is_nullable_extension(&column.dtype()) || column.is_pandas_string()) {
         return na_object(py);
     }
     scalar_to_py(py, value)
@@ -16958,6 +16981,13 @@ fn narrowed_arith(
 ) -> PyResult<PySeries> {
     let numeric = arith_result_numpy(left, other)?;
     let inner = result.map_err(frame_error_to_py)?;
+    // `string` + text is `string` (fvsao.59).
+    if left.column().is_pandas_string() && inner.column().dtype() == DType::Utf8 {
+        let column = inner.column().clone().as_pandas_string();
+        return Series::new(inner.name(), inner.index().clone(), column)
+            .map(|inner| PySeries { inner })
+            .map_err(frame_error_to_py);
+    }
     let numeric = match numeric {
         Some(numeric) if true_division && !numeric.is_float() => fp_types::NumpyNumeric::Float(64),
         Some(numeric) => numeric,
@@ -17016,6 +17046,35 @@ fn groupby_reduction_width(width: NumericWidth, op: &str, result: &Column) -> Op
         }
         _ => None,
     }
+}
+
+/// A comparison of pandas' `string` Series as pandas gives it: boolean, with
+/// pd.NA where the Series is missing (`s == 'a'` of ['a', <NA>] is
+/// [True, <NA>]; fvsao.59). Any other comparison as it is.
+fn masked_string_comparison(left: &Series, result: PyResult<PySeries>) -> PyResult<PySeries> {
+    let result = result?;
+    let source = left.column();
+    if !source.is_pandas_string() || result.inner.len() != source.len() {
+        return Ok(result);
+    }
+    let values = result
+        .inner
+        .column()
+        .values()
+        .iter()
+        .zip(source.values())
+        .map(|(value, original)| {
+            if original.is_missing() {
+                Scalar::Null(NullKind::Null)
+            } else {
+                value.clone()
+            }
+        })
+        .collect();
+    let column = Column::new(DType::BoolNullable, values).map_err(column_error_to_py)?;
+    Series::new(result.inner.name(), result.inner.index().clone(), column)
+        .map(|inner| PySeries { inner })
+        .map_err(frame_error_to_py)
 }
 
 /// A unary operation's result (`-s`, `~s`, `abs(s)`, `+s`) in the
@@ -20495,6 +20554,7 @@ impl PySeries {
     /// temporal mean/median were refused here
     /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.17).
     fn require_numeric(&self, name: &str) -> PyResult<()> {
+        self.refuse_string_reduction(name)?;
         let temporal_reduction = matches!(name, "mean" | "median" | "std");
         let array = match self.inner.dtype() {
             // The nullable extension dtypes reduce too (Int64 mean raised).
@@ -20515,6 +20575,23 @@ impl PySeries {
         };
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
             "{array} does not support reduction '{name}'"
+        )))
+    }
+
+    /// pandas' refusal of a numeric reduction (sum, mean, std, any, ...) of
+    /// its `string` dtype, and NotImplementedError for a cumulative one
+    /// (min / max reduce; fvsao.59 - sum concatenated the text).
+    fn refuse_string_reduction(&self, name: &str) -> PyResult<()> {
+        if !self.inner.column().is_pandas_string() || matches!(name, "min" | "max") {
+            return Ok(());
+        }
+        if name.starts_with("cum") {
+            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                format!("cannot perform {name} with type string"),
+            ));
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "Cannot perform reduction '{name}' with string dtype"
         )))
     }
 }
@@ -21466,7 +21543,7 @@ impl PySeries {
             return Ok(PySeries { inner });
         }
         let rhs = self.ordering_operand(py, other)?;
-        wrap_series(self.inner.gt(&rhs))
+        masked_string_comparison(&self.inner, wrap_series(self.inner.gt(&rhs)))
     }
     fn __ge__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         if let Some(inner) =
@@ -21475,7 +21552,7 @@ impl PySeries {
             return Ok(PySeries { inner });
         }
         let rhs = self.ordering_operand(py, other)?;
-        wrap_series(self.inner.ge(&rhs))
+        masked_string_comparison(&self.inner, wrap_series(self.inner.ge(&rhs)))
     }
     fn __lt__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         if let Some(inner) =
@@ -21484,7 +21561,7 @@ impl PySeries {
             return Ok(PySeries { inner });
         }
         let rhs = self.ordering_operand(py, other)?;
-        wrap_series(self.inner.lt(&rhs))
+        masked_string_comparison(&self.inner, wrap_series(self.inner.lt(&rhs)))
     }
     fn __le__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         if let Some(inner) =
@@ -21493,7 +21570,7 @@ impl PySeries {
             return Ok(PySeries { inner });
         }
         let rhs = self.ordering_operand(py, other)?;
-        wrap_series(self.inner.le(&rhs))
+        masked_string_comparison(&self.inner, wrap_series(self.inner.le(&rhs)))
     }
     fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         if let Some(inner) =
@@ -21501,14 +21578,14 @@ impl PySeries {
         {
             return Ok(PySeries { inner });
         }
-        self.equality(py, other, true)
+        masked_string_comparison(&self.inner, self.equality(py, other, true))
     }
     fn __ne__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         if let Some(inner) = period_comparison(&self.inner, other, std::cmp::Ordering::is_ne, true)?
         {
             return Ok(PySeries { inner });
         }
-        self.equality(py, other, false)
+        masked_string_comparison(&self.inner, self.equality(py, other, false))
     }
 
     // The flex forms of the operators: pandas' (other, level=, fill_value=,
@@ -21869,6 +21946,7 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         numpy_compat_kwargs("sum", kwargs)?;
+        self.refuse_string_reduction("sum")?;
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("sum")?;
@@ -21989,6 +22067,7 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         numpy_compat_kwargs("std", kwargs)?;
+        self.refuse_string_reduction("std")?;
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("std")?;
@@ -22053,6 +22132,7 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         numpy_compat_kwargs("median", kwargs)?;
+        self.refuse_string_reduction("median")?;
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("median")?;
@@ -22081,6 +22161,7 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         numpy_compat_kwargs("var", kwargs)?;
+        self.refuse_string_reduction("var")?;
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("var")?;
@@ -22103,6 +22184,7 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         numpy_compat_kwargs("prod", kwargs)?;
+        self.refuse_string_reduction("prod")?;
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("prod")?;
@@ -22240,6 +22322,7 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
         numpy_compat_kwargs("cumsum", kwargs)?;
+        self.refuse_string_reduction("cumsum")?;
         let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
         if ax != 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -22291,8 +22374,9 @@ impl PySeries {
             r
         };
         // A nullable Series counts in the masked Int64 (its proportions
-        // Float64), as pandas' (int64 / float64).
-        if self.inner.dtype().is_nullable() {
+        // Float64), as pandas' (int64 / float64) - a `string` one too
+        // (fvsao.59).
+        if self.inner.dtype().is_nullable() || self.inner.column().is_pandas_string() {
             let target = if normalize {
                 DType::Float64Nullable
             } else {
@@ -22395,7 +22479,7 @@ impl PySeries {
         // int32 array (fvsao.23).
         let column = Column::from_values(self.inner.unique())
             .map_err(column_error_to_py)?
-            .keeping_width_of(self.inner.column());
+            .keeping_dtype_of(self.inner.column());
         Ok(column_ndarray(py, &column)?.unbind())
     }
 
@@ -22601,6 +22685,7 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
         numpy_compat_kwargs("cumprod", kwargs)?;
+        self.refuse_string_reduction("cumprod")?;
         let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
         if ax != 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -22623,6 +22708,7 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
         numpy_compat_kwargs("cummin", kwargs)?;
+        self.refuse_string_reduction("cummin")?;
         let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
         if ax != 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -22645,6 +22731,7 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
         numpy_compat_kwargs("cummax", kwargs)?;
+        self.refuse_string_reduction("cummax")?;
         let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
         if ax != 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -23283,6 +23370,28 @@ impl PySeries {
         }
         if let Some(inner) = string_dtype_series(&self.inner, &spec)? {
             return Ok(PySeries { inner });
+        }
+        // astype(str) of a `string` Series spells its missing value '<NA>'
+        // (fvsao.59; it gave 'None').
+        if self.inner.column().is_pandas_string()
+            && dtype_arg_text(&spec).is_ok_and(|name| name == "str")
+        {
+            let values = self
+                .inner
+                .values()
+                .iter()
+                .map(|value| {
+                    if value.is_missing() {
+                        Scalar::Utf8("<NA>".to_owned())
+                    } else {
+                        value.clone()
+                    }
+                })
+                .collect();
+            let column = Column::new(DType::Utf8, values).map_err(column_error_to_py)?;
+            return Series::new(self.inner.name(), self.inner.index().clone(), column)
+                .map(|inner| PySeries { inner })
+                .map_err(frame_error_to_py);
         }
         match series_astype_arg(&self.inner, &spec)? {
             Ok(inner) => Ok(PySeries { inner }),
@@ -24124,6 +24233,7 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         let _ = bool_only;
+        self.refuse_string_reduction("any")?;
         self.check_logical_reduction("any", axis, kwargs)?;
         let result = if skipna || !self.inner.column().has_nulls() {
             self.inner.any().map_err(frame_error_to_py)?
@@ -24146,6 +24256,7 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         let _ = bool_only;
+        self.refuse_string_reduction("all")?;
         self.check_logical_reduction("all", axis, kwargs)?;
         let result = if skipna || !self.inner.column().has_nulls() {
             self.inner.all().map_err(frame_error_to_py)?
@@ -24733,8 +24844,17 @@ impl PySeries {
                     out.push(v.clone());
                     continue;
                 }
-                let py_val = scalar_to_py(py, v)?;
+                // The function sees the value as the column holds it: pd.NA
+                // for a `string` Series' missing one (fvsao.59; it saw None),
+                // and a pd.NA it returns stays the object, as pandas'.
+                let py_val = cell_to_py(py, self.inner.column(), v)?;
                 let res = arg.call1((py_val,))?;
+                if self.inner.column().is_pandas_string() && res.is_instance_of::<PyNAType>() {
+                    out.push(Scalar::Object(fp_types::ObjectValue::Host(
+                        fp_types::HostValue::new(PyHost(res.unbind())),
+                    )));
+                    continue;
+                }
                 out.push(py_to_scalar(py, &res)?);
             }
             let s = series_over_index(self.inner.name(), index, out)?;
@@ -26293,6 +26413,19 @@ fn column_ndarray<'py>(py: Python<'py>, column: &Column) -> PyResult<Bound<'py, 
         if let Some(width) = column.width().filter(|_| !column.dtype().is_nullable()) {
             return array.call_method1("astype", (width.name(false),));
         }
+        return Ok(array);
+    }
+    // pandas' `string` dtype's array holds pd.NA where a value is missing
+    // (fvsao.59; it held None).
+    if column.is_pandas_string() {
+        let items = materialized_values(column)
+            .iter()
+            .map(|value| cell_to_py(py, column, value))
+            .collect::<PyResult<Vec<_>>>()?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", "object")?;
+        let array = np.call_method("empty", (items.len(),), Some(&kwargs))?;
+        array.set_item(pyo3::types::PySlice::full(py), PyList::new(py, items)?)?;
         return Ok(array);
     }
     object_ndarray(py, &np, &materialized_values(column))
@@ -29666,6 +29799,22 @@ impl PyDataFrame {
             Some(dtype) if is_object_dtype_arg(dtype) => {
                 object_frame(&built, None).map_err(frame_error_to_py)?
             }
+            // dtype='string': every column pandas' `string` dtype (fvsao.59).
+            Some(dtype) if is_string_dtype_arg(dtype) => {
+                let mut frame = built;
+                for name in frame
+                    .column_names()
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                {
+                    if let Some(column) = frame.column(&name) {
+                        let text = pandas_string_column(column)?;
+                        frame = frame.with_column(name, text).map_err(frame_error_to_py)?;
+                    }
+                }
+                frame
+            }
             Some(dtype) => match py_width_arg(dtype) {
                 Some((width, nullable)) => {
                     // A frame's columns cast as the Series constructor's
@@ -32728,6 +32877,8 @@ impl PyDataFrame {
         errors: &str,
     ) -> PyResult<PyDataFrame> {
         let _ = copy; // pandas' copy= does not change the result
+        // The columns cast to pandas' `string` dtype, after the rest (fvsao.59).
+        let mut strings: Vec<String> = Vec::new();
         let result = if let Ok(mapping) = dtype.cast::<PyDict>() {
             let mapping = column_dict_arg(&self.inner, mapping)?;
             let mut targets: Vec<(String, DType)> = Vec::with_capacity(mapping.len());
@@ -32746,6 +32897,8 @@ impl PyDataFrame {
                 }
                 if is_object_dtype_arg(&spec) {
                     objects.push(column);
+                } else if is_string_dtype_arg(&spec) {
+                    strings.push(column);
                 } else if let Some((width, nullable)) = py_width_arg(&spec) {
                     widths.push((column, width, nullable));
                 } else {
@@ -32766,11 +32919,28 @@ impl PyDataFrame {
             )
         } else if is_object_dtype_arg(dtype) {
             object_frame(&self.inner, None)
+        } else if is_string_dtype_arg(dtype) {
+            strings = self.inner.column_names().into_iter().cloned().collect();
+            Ok(self.inner.clone())
         } else if let Some((width, nullable)) = py_width_arg(dtype) {
             self.inner.astype_width(width, nullable)
         } else {
             let target = py_dtype_arg(dtype)?;
             self.inner.astype(target)
+        };
+        let result = match result {
+            Ok(mut frame) => {
+                for name in &strings {
+                    if let Some(column) = frame.column(name) {
+                        let text = pandas_string_column(column)?;
+                        frame = frame
+                            .with_column(name.clone(), text)
+                            .map_err(frame_error_to_py)?;
+                    }
+                }
+                Ok(frame)
+            }
+            failed => failed,
         };
         match result {
             Ok(inner) => Ok(PyDataFrame { inner }),
@@ -41389,13 +41559,11 @@ pub struct PySeriesStringAccessor {
 #[pymethods]
 impl PySeriesStringAccessor {
     fn lower(&self) -> PyResult<PySeries> {
-        let s = self.series.str().lower().map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: s })
+        self.wrap(|s| s.lower())
     }
 
     fn upper(&self) -> PyResult<PySeries> {
-        let s = self.series.str().upper().map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: s })
+        self.wrap(|s| s.upper())
     }
 
     /// pandas' `strip(to_strip=None)`: whitespace, or the given characters
@@ -41425,8 +41593,7 @@ impl PySeriesStringAccessor {
     }
 
     fn len(&self) -> PyResult<PySeries> {
-        let s = self.series.str().len().map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: s })
+        self.wrap(|s| s.len())
     }
 
     /// pandas' `startswith(pat, na=None)`: `pat` a string or a tuple of them.
@@ -41926,7 +42093,7 @@ impl PySeriesStringAccessor {
         }
         if !expand && df.num_columns() == 1 {
             let s = self.series.str().extract(pat).map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+            return Ok(Py::new(py, self.finish(s)?)?.into_any());
         }
         Ok(Py::new(py, PyDataFrame { inner: df })?.into_any())
     }
@@ -42079,7 +42246,79 @@ impl PySeriesStringAccessor {
         &self,
         op: impl FnOnce(&fp_frame::StringAccessor<'_>) -> Result<Series, FrameError>,
     ) -> PyResult<PySeries> {
-        op(&self.series.str())
+        let inner = op(&self.series.str()).map_err(frame_error_to_py)?;
+        self.finish(inner)
+    }
+
+    /// A str method's result as pandas gives it over a `string` column
+    /// (fvsao.59): text stays `string`, a count (len, count, find) is Int64
+    /// and a test (contains, startswith, isdigit) boolean, each with pd.NA
+    /// where the source is missing; anything else (split's lists) as it is,
+    /// and every result of an object column as it is.
+    fn finish(&self, inner: Series) -> PyResult<PySeries> {
+        let source = self.series.column();
+        if !source.is_pandas_string() || inner.len() != source.len() {
+            return Ok(PySeries { inner });
+        }
+        let values = inner.column().values();
+        let only = |test: fn(&Scalar) -> bool| {
+            values.iter().all(|value| value.is_missing() || test(value))
+        };
+        let target = match inner.column().dtype() {
+            DType::Utf8 if only(|value| matches!(value, Scalar::Utf8(_))) => None,
+            DType::Bool | DType::BoolNullable => Some(DType::BoolNullable),
+            DType::Utf8 if only(|value| matches!(value, Scalar::Bool(_))) => {
+                Some(DType::BoolNullable)
+            }
+            DType::Int64 | DType::Int64Nullable => Some(DType::Int64Nullable),
+            DType::Float64
+                if only(|value| matches!(value, Scalar::Float64(v) if v.fract() == 0.0)) =>
+            {
+                Some(DType::Int64Nullable)
+            }
+            // Any other result (split's lists) holds pd.NA, as the object,
+            // where the source is missing.
+            _ if source.has_nulls() => {
+                let na = Python::attach(|py| -> PyResult<Scalar> {
+                    Ok(Scalar::Object(fp_types::ObjectValue::Host(
+                        fp_types::HostValue::new(PyHost(na_object(py)?)),
+                    )))
+                })?;
+                let cells = values
+                    .iter()
+                    .zip(source.values())
+                    .map(|(value, original)| {
+                        if original.is_missing() {
+                            na.clone()
+                        } else {
+                            value.clone()
+                        }
+                    })
+                    .collect();
+                let column = Column::from_object_values(cells);
+                return Series::new(inner.name(), inner.index().clone(), column)
+                    .map(|inner| PySeries { inner })
+                    .map_err(frame_error_to_py);
+            }
+            _ => return Ok(PySeries { inner }),
+        };
+        #[allow(clippy::cast_possible_truncation)] // whole counts
+        let refined: Vec<Scalar> = values
+            .iter()
+            .zip(source.values())
+            .map(|(value, original)| match value {
+                _ if original.is_missing() => Scalar::Null(NullKind::Null),
+                Scalar::Float64(v) if target.is_some() => Scalar::Int64(*v as i64),
+                other => other.clone(),
+            })
+            .collect();
+        let column = match target {
+            Some(dtype) => Column::new(dtype, refined).map_err(column_error_to_py)?,
+            None => Column::new(DType::Utf8, refined)
+                .map_err(column_error_to_py)?
+                .as_pandas_string(),
+        };
+        Series::new(inner.name(), inner.index().clone(), column)
             .map(|inner| PySeries { inner })
             .map_err(frame_error_to_py)
     }
@@ -42097,10 +42336,10 @@ impl PySeriesStringAccessor {
             })
             .collect::<PyResult<Vec<_>>>()?;
         let column = Column::from_values(values).map_err(column_error_to_py)?;
-        Ok(PySeries {
-            inner: Series::new(self.series.name(), self.series.index().clone(), column)
+        self.finish(
+            Series::new(self.series.name(), self.series.index().clone(), column)
                 .map_err(frame_error_to_py)?,
-        })
+        )
     }
 
     /// Each string's `method(*args)` computed by Python itself, as a list
@@ -42127,9 +42366,9 @@ impl PySeriesStringAccessor {
             })
             .collect::<PyResult<Vec<_>>>()?;
         let column = Column::from_values(cells).map_err(column_error_to_py)?;
-        Series::new(self.series.name(), self.series.index().clone(), column)
-            .map(|inner| PySeries { inner })
-            .map_err(frame_error_to_py)
+        let inner = Series::new(self.series.name(), self.series.index().clone(), column)
+            .map_err(frame_error_to_py)?;
+        self.finish(inner)
     }
 }
 
@@ -45464,6 +45703,16 @@ impl PyGroupBy {
     fn narrowed_column(&self, op: &str, frame: DataFrame, name: &str) -> PyResult<DataFrame> {
         if self.by.iter().any(|key| key == name) {
             return Ok(frame);
+        }
+        // A `string` column's first / last / min / max are `string` (fvsao.59).
+        if self.df.column(name).is_some_and(Column::is_pandas_string)
+            && matches!(op, "first" | "last" | "min" | "max")
+            && let Some(column) = frame.column(name)
+            && column.dtype() == DType::Utf8
+            && !column.is_pandas_string()
+        {
+            let column = column.clone().as_pandas_string();
+            return frame.with_column(name, column).map_err(frame_error_to_py);
         }
         let width = self.df.column(name).and_then(Column::width);
         if let (Some(width), Some(column)) = (width, frame.column(name))
@@ -50709,10 +50958,25 @@ fn is_object_dtype_arg(obj: &Bound<'_, PyAny>) -> bool {
 
 /// `series` as a pandas object column: the same values, as they are.
 fn object_series(series: &Series) -> PyResult<Series> {
+    let mut values = series.column().values().to_vec();
+    // A `string` Series' missing value stays pd.NA as the object (pandas'
+    // astype(object) of one holds NAType; fvsao.59).
+    if series.column().is_pandas_string() {
+        let na = Python::attach(|py| -> PyResult<Scalar> {
+            Ok(Scalar::Object(fp_types::ObjectValue::Host(
+                fp_types::HostValue::new(PyHost(na_object(py)?)),
+            )))
+        })?;
+        for value in &mut values {
+            if value.is_missing() {
+                *value = na.clone();
+            }
+        }
+    }
     Series::new(
         series.name(),
         series.index().clone(),
-        Column::from_object_values(series.column().values().to_vec()),
+        Column::from_object_values(values),
     )
     .map_err(frame_error_to_py)
 }
@@ -50753,11 +51017,23 @@ fn string_dtype_series(series: &Series, dtype: &Bound<'_, PyAny>) -> PyResult<Op
     if name.as_deref() != Some("string") {
         return Ok(None);
     }
-    let text = series.astype(DType::Utf8).map_err(frame_error_to_py)?;
+    Series::new(
+        series.name(),
+        series.index().clone(),
+        pandas_string_column(series.column())?,
+    )
+    .map(Some)
+    .map_err(frame_error_to_py)
+}
+
+/// `column` as pandas' `string` dtype: each present value as its text, a
+/// missing value pd.NA (fvsao.59).
+fn pandas_string_column(column: &Column) -> PyResult<Column> {
+    let text = column.astype(DType::Utf8).map_err(column_error_to_py)?;
     let values = text
         .values()
         .iter()
-        .zip(series.values())
+        .zip(column.values())
         .map(|(cast, value)| {
             if value.is_missing() {
                 Scalar::Null(NullKind::Null)
@@ -50766,10 +51042,51 @@ fn string_dtype_series(series: &Series, dtype: &Bound<'_, PyAny>) -> PyResult<Op
             }
         })
         .collect();
-    let column = Column::new(DType::Utf8, values).map_err(column_error_to_py)?;
-    Series::new(series.name(), series.index().clone(), column)
-        .map(Some)
-        .map_err(frame_error_to_py)
+    Ok(Column::new(DType::Utf8, values)
+        .map_err(column_error_to_py)?
+        .as_pandas_string())
+}
+
+/// A dtype argument that refines a column's storage: pandas' `string` dtype
+/// over Utf8, or a numpy width narrower than 64 bits (and its masked form)
+/// over Int64 / Float64. A reader builds the storage, then applies it.
+#[derive(Debug, Clone, Copy)]
+enum DtypeRefinementArg {
+    PandasString,
+    Width(NumericWidth, bool),
+}
+
+impl DtypeRefinementArg {
+    fn of(dtype: &Bound<'_, PyAny>) -> Option<Self> {
+        if is_string_dtype_arg(dtype) {
+            return Some(Self::PandasString);
+        }
+        py_width_arg(dtype).map(|(width, nullable)| Self::Width(width, nullable))
+    }
+
+    /// The dtype a reader builds the column in first.
+    const fn storage(self) -> DType {
+        match self {
+            Self::PandasString => DType::Utf8,
+            Self::Width(width, nullable) => width.storage(nullable),
+        }
+    }
+
+    fn apply(self, column: &Column) -> PyResult<Column> {
+        match self {
+            Self::PandasString => pandas_string_column(column),
+            Self::Width(width, nullable) => column
+                .cast_to_width(width, nullable)
+                .map_err(column_error_to_py),
+        }
+    }
+}
+
+/// Whether a dtype argument names pandas' `string` dtype ('string',
+/// `pd.StringDtype()`).
+fn is_string_dtype_arg(dtype: &Bound<'_, PyAny>) -> bool {
+    !dtype.is_instance_of::<pyo3::types::PyType>()
+        && dtype_arg_text(dtype).is_ok_and(|name| name == "string")
 }
 
 /// `series` as the categorical `dtype` describes when it is a
@@ -51260,13 +51577,27 @@ fn read_csv_impl(
         }
     }
     let mut frame_dtype: Option<DType> = None;
+    // Columns read as their storage, then made pandas' `string` or a narrow
+    // width ('int32', 'float32'; fvsao.59 / fvsao.23: 'int32' was not
+    // understood and 'string' read as object).
+    let mut refinements: Vec<(Option<String>, DtypeRefinementArg)> = Vec::new();
     if let Some(dtype) = args.dtype.filter(|d| !d.is_none()) {
         if let Ok(mapping) = dtype.cast::<PyDict>() {
             let mut by_column = std::collections::HashMap::new();
             for (column, spec) in mapping.iter() {
-                by_column.insert(column.extract::<String>()?, py_dtype_arg(&spec)?);
+                let name = column.extract::<String>()?;
+                let storage = match DtypeRefinementArg::of(&spec) {
+                    Some(refinement) => {
+                        refinements.push((Some(name.clone()), refinement));
+                        refinement.storage()
+                    }
+                    None => py_dtype_arg(&spec)?,
+                };
+                by_column.insert(name, storage);
             }
             opts.dtype = Some(by_column);
+        } else if let Some(refinement) = DtypeRefinementArg::of(dtype) {
+            refinements.push((None, refinement));
         } else {
             frame_dtype = Some(py_dtype_arg(dtype)?);
         }
@@ -51352,6 +51683,20 @@ fn read_csv_impl(
     }
     if let Some(dtype) = frame_dtype {
         frame = frame.astype(dtype).map_err(frame_error_to_py)?;
+    }
+    for (column, refinement) in &refinements {
+        let names: Vec<String> = match column {
+            Some(name) => vec![name.clone()],
+            None => frame.column_names().into_iter().cloned().collect(),
+        };
+        for name in names {
+            if let Some(source) = frame.column(&name) {
+                let refined = refinement.apply(source)?;
+                frame = frame
+                    .with_column(name, refined)
+                    .map_err(frame_error_to_py)?;
+            }
+        }
     }
     if let Some(index_col) = args.index_col.filter(|i| !i.is_none()) {
         let columns: Vec<String> = if index_col.extract::<bool>().is_ok_and(|b| !b) {
@@ -54026,6 +54371,10 @@ fn is_string_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
     if let Ok(series) = obj.extract::<PyRef<'_, PySeries>>() {
         if let Some(meta) = series.inner.column().categorical() {
             return meta.categories.iter().all(text);
+        }
+        // pandas' `string` dtype is one, whatever it holds (fvsao.59).
+        if series.inner.column().is_pandas_string() {
+            return true;
         }
         if series.inner.dtype() == DType::Utf8 {
             return series.inner.values().iter().all(text);

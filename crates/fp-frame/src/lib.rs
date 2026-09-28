@@ -12478,7 +12478,7 @@ impl Series {
             return Some(Self::new(
                 self.name.clone(),
                 index,
-                Column::from_i64_values_owned(gathered).keeping_width_of(&self.column),
+                Column::from_i64_values_owned(gathered).keeping_dtype_of(&self.column),
             ));
         }
 
@@ -12502,7 +12502,7 @@ impl Series {
             return Some(Self::new(
                 self.name.clone(),
                 index,
-                Column::from_f64_values(gathered).keeping_width_of(&self.column),
+                Column::from_f64_values(gathered).keeping_dtype_of(&self.column),
             ));
         }
 
@@ -17576,7 +17576,21 @@ impl Series {
         result: Result<Self, FrameError>,
         wrapping: bool,
     ) -> Result<Self, FrameError> {
-        let result = result?;
+        let mut result = result?;
+        // pandas' `string` dtype stays while the result is text (a fill with
+        // a number makes object; fvsao.59).
+        if self.column.is_pandas_string()
+            && !result.column.is_pandas_string()
+            && result.column.dtype() == DType::Utf8
+            && result
+                .column
+                .values()
+                .iter()
+                .all(|value| value.is_missing() || matches!(value, Scalar::Utf8(_)))
+        {
+            result.column = result.column.as_pandas_string();
+            return Ok(result);
+        }
         let Some(width) = self.column.width() else {
             return Ok(result);
         };
@@ -21936,7 +21950,7 @@ impl Series {
                         _ => Scalar::missing_for_dtype(self.column.dtype()),
                     })
                     .collect();
-                let column = Column::new(self.column.dtype(), out)?.keeping_width_of(&self.column);
+                let column = Column::new(self.column.dtype(), out)?.keeping_dtype_of(&self.column);
                 return Series::new(self.name.clone(), self.index.clone(), column);
             }
             Some(width) if width.is_unsigned() => {
@@ -23028,7 +23042,9 @@ impl Series {
                 .map(|(val, c)| match c {
                     Scalar::Bool(true) => val.clone(),
                     Scalar::Bool(false) => fill.clone(),
-                    Scalar::Null(_) => Scalar::Null(NullKind::NaN),
+                    // An NA condition, or a label the condition lacks, is
+                    // False to pandas: `other` (it made the value missing).
+                    Scalar::Null(_) => fill.clone(),
                     _ => fill.clone(),
                 })
                 .collect();
@@ -23048,7 +23064,9 @@ impl Series {
             .map(|(val, c)| match c {
                 Scalar::Bool(true) => val.clone(),
                 Scalar::Bool(false) => fill.clone(),
-                Scalar::Null(_) => Scalar::Null(NullKind::NaN),
+                // An NA condition, or a label the condition lacks, is False
+                // to pandas: `other` (it made the value missing).
+                Scalar::Null(_) => fill.clone(),
                 _ => fill.clone(),
             })
             .collect();
@@ -23472,7 +23490,9 @@ impl Series {
                 .map(|(val, c)| match c {
                     Scalar::Bool(true) => fill.clone(),
                     Scalar::Bool(false) => val.clone(),
-                    Scalar::Null(_) => Scalar::Null(NullKind::NaN),
+                    // An NA condition, or a label the condition lacks, is
+                    // False to pandas: `other` (it made the value missing).
+                    Scalar::Null(_) => fill.clone(),
                     _ => val.clone(),
                 })
                 .collect();
@@ -23492,7 +23512,9 @@ impl Series {
             .map(|(val, c)| match c {
                 Scalar::Bool(true) => fill.clone(),
                 Scalar::Bool(false) => val.clone(),
-                Scalar::Null(_) => Scalar::Null(NullKind::NaN),
+                // An NA condition, or a label the condition lacks, is False
+                // to pandas: `other` (it made the value missing).
+                Scalar::Null(_) => fill.clone(),
                 _ => val.clone(),
             })
             .collect();
@@ -28851,11 +28873,9 @@ impl Series {
         //   pd.to_numeric(pd.Series(['1','2','3']))
         //     -> int64 [1,2,3]                        THIS is the parser
         //
-        // FrankenPandas has no separate `string` extension dtype distinct from
-        // Utf8, so the faithful result for a string column is the column
-        // itself. (br-frankenpandas-fixture-divergence-triage-9s0c4)
-        //
-        // Numbers and bools take pandas' nullable dtypes (see
+        // A text column keeps its text as pandas' `string` dtype (fvsao.59;
+        // br-frankenpandas-fixture-divergence-triage-9s0c4 kept it object),
+        // and numbers and bools take pandas' nullable dtypes (see
         // `convert_column_dtypes`; they were returned unchanged).
         let column = convert_column_dtypes(&self.column)?;
         Self::new(self.name.clone(), self.index.clone(), column)
@@ -63564,6 +63584,26 @@ fn convert_column_dtypes(column: &Column) -> Result<Column, FrameError> {
             DType::Float64Nullable
         })
     };
+    // A text column is pandas' `string` dtype, its missing value pd.NA
+    // (pd.Series(['a', None]).convert_dtypes() is string [a, <NA>]; fvsao.59).
+    let mut texts = values.iter().filter(|value| !value.is_missing()).peekable();
+    if column.dtype() == DType::Utf8
+        && !column.is_pandas_string()
+        && texts.peek().is_some()
+        && texts.all(|value| matches!(value, Scalar::Utf8(_)))
+    {
+        let normalized = values
+            .iter()
+            .map(|value| {
+                if value.is_missing() {
+                    Scalar::Null(NullKind::Null)
+                } else {
+                    value.clone()
+                }
+            })
+            .collect();
+        return Ok(Column::new(DType::Utf8, normalized)?.as_pandas_string());
+    }
     let mut present = values.iter().filter(|value| !value.is_missing());
     let target = match column.dtype() {
         DType::Int64 | DType::Int64Nullable => Some(DType::Int64Nullable),
@@ -63892,6 +63932,14 @@ fn i64_slice_min_simd(data: &[i64]) -> Option<i64> {
 /// 64-bit one) leaves the storage's dtype.
 fn concat_series_columns(series_list: &[&Series], total_len: usize) -> Result<Column, FrameError> {
     let column = concat_series_columns_storage(series_list, total_len)?;
+    // `string` pieces concatenate to `string` (fvsao.59).
+    if !series_list.is_empty()
+        && series_list
+            .iter()
+            .all(|series| series.column().is_pandas_string())
+    {
+        return Ok(column.as_pandas_string());
+    }
     let width = series_list
         .iter()
         .map(|series| fp_types::NumpyNumeric::of(&series.dtype(), series.column().width()))
@@ -64029,16 +64077,14 @@ pub fn concat_series_with_ignore_index(
     // "concat" where pandas gives "vals"
     // (br-frankenpandas-live-oracle-passes-by-skip-l7r1p).
     //
-    // The DISAGREEING case is deliberately left as "concat". pandas answers None
-    // there, FrankenPandas' Series name is a `String` with no None, and the
-    // oracle omits `name` from the expectation when pandas returns None — so
-    // nothing observes this arm today. Inventing a representation for it is a
-    // separate question from the agreeing case, which is simply wrong.
+    // When they DISAGREE pandas' name is None, which a Series name spells as
+    // the empty name (the Python binding reads "" back as None); it was the
+    // literal "concat", so pd.concat([s_named_t, unnamed]).name was 'concat'.
     let first_name = series_list[0].name();
     let name = if series_list.iter().all(|s| s.name() == first_name) {
         first_name.clone()
     } else {
-        "concat".into()
+        "".into()
     };
 
     if ignore_index {
@@ -64440,6 +64486,18 @@ pub fn concat_dataframes_with_ignore_index(
     // adds gaps, not a dtype (an int32 column so gapped is float64, which
     // int32 does not ride on; a float32 one stays float32).
     for col_name in &union_columns {
+        // `string` pieces concatenate to `string` (fvsao.59).
+        let pieces: Vec<&Column> = frames
+            .iter()
+            .filter_map(|frame| frame.column(col_name))
+            .collect();
+        if !pieces.is_empty()
+            && pieces.iter().all(|column| column.is_pandas_string())
+            && let Some(column) = columns.get_mut(col_name)
+        {
+            *column = column.clone().as_pandas_string();
+            continue;
+        }
         let width = frames
             .iter()
             .filter_map(|frame| frame.column(col_name))
@@ -70098,6 +70156,9 @@ impl DataFrame {
     /// accepted only when every output column can consume that affine witness
     /// directly; otherwise callers fall back to the materialized positions
     /// vector path above.
+    // The store is the lazy store under lazy-transpose-view, a ColumnStore
+    // without.
+    #[allow(clippy::useless_conversion)]
     fn take_rows_by_affine_certificate_unchecked(
         &self,
         certificate: AffineSelectionCertificate,
@@ -70313,6 +70374,9 @@ impl DataFrame {
         }
     }
 
+    // The store is the lazy store under lazy-transpose-view, a ColumnStore
+    // without.
+    #[allow(clippy::useless_conversion)]
     fn new_with_axes<C, O>(
         index: Index,
         row_multiindex: Option<fp_index::MultiIndex>,
@@ -70369,6 +70433,9 @@ impl DataFrame {
         })
     }
 
+    // The store is the lazy store under lazy-transpose-view, a ColumnStore
+    // without.
+    #[allow(clippy::useless_conversion)]
     fn new_with_axes_trusted<C, O>(
         index: Index,
         row_multiindex: Option<fp_index::MultiIndex>,
@@ -81562,6 +81629,16 @@ impl DataFrame {
             .and_then(NumpyNumeric::width);
         let value_name = value_name.unwrap_or("value");
         let position = melted.columns.positions_of(value_name).first().copied();
+        // `string` columns melt to a `string` value column (fvsao.59).
+        if !sources.is_empty()
+            && sources.iter().all(|column| column.is_pandas_string())
+            && let Some(position) = position
+            && let Some(column) = melted.columns.column_at_mut(position)
+            && column.dtype() == DType::Utf8
+        {
+            *column = column.clone().as_pandas_string();
+            return Ok(melted);
+        }
         if let (Some(width), Some(position)) = (width, position)
             && let Some(column) = melted.columns.column_at_mut(position)
             && width.fits_storage(&column.dtype())
@@ -81582,7 +81659,7 @@ impl DataFrame {
         if self
             .columns
             .iter_positional()
-            .all(|(_, column)| column.width().is_none())
+            .all(|(_, column)| column.width().is_none() && !column.is_pandas_string())
         {
             return Ok(result);
         }
@@ -115859,6 +115936,71 @@ mod tests {
                 "mask_mode={mask_mode}: null condition takes `other`"
             );
         }
+    }
+
+    /// The Series sibling of the two DataFrame tests above, which 9s0c4 /
+    /// yf758 left behind (br-frankenpandas-yatxj). MEASURED, live pandas
+    /// 2.2.3, s = [1, 2, 3], a boolean condition [False, <NA>, True] and a
+    /// condition [True, False] on labels 0, 1 only:
+    ///
+    /// ```text
+    /// s.where(b, 0) -> [0, 0, 3]        s.mask(b, 0) -> [1, 0, 0]
+    /// s.where(c, 0) -> [1, 0, 0]        s.mask(c, 0) -> [0, 2, 0]
+    /// ```
+    ///
+    /// frankenpandas made the NA / absent rows NaN.
+    #[test]
+    fn series_where_and_mask_take_other_on_a_null_or_absent_condition_yatxj() {
+        let s = Series::from_values(
+            "s",
+            (0..3_i64).map(IndexLabel::Int64).collect(),
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+        let masked = Series::new(
+            "b",
+            Index::default_range(3),
+            Column::new(
+                DType::BoolNullable,
+                vec![
+                    Scalar::Bool(false),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Bool(true),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let partial = Series::from_values(
+            "c",
+            (0..2_i64).map(IndexLabel::Int64).collect(),
+            vec![Scalar::Bool(true), Scalar::Bool(false)],
+        )
+        .unwrap();
+        let zero = Scalar::Int64(0);
+        let ints = |series: Series| -> Vec<Scalar> { series.values().to_vec() };
+        let expect = |values: [i64; 3]| values.map(Scalar::Int64).to_vec();
+        assert_eq!(
+            ints(s.where_cond(&masked, Some(&zero)).unwrap()),
+            expect([0, 0, 3])
+        );
+        assert_eq!(
+            ints(s.mask(&masked, Some(&zero)).unwrap()),
+            expect([1, 0, 0])
+        );
+        assert_eq!(
+            ints(s.where_cond(&partial, Some(&zero)).unwrap()),
+            expect([1, 0, 0])
+        );
+        assert_eq!(
+            ints(s.mask(&partial, Some(&zero)).unwrap()),
+            expect([0, 2, 0])
+        );
+        // NEGATIVE: with no `other` the NA row is missing, as pandas'
+        // s.where(b) -> [nan, nan, 3.0].
+        let unfilled = s.where_cond(&masked, None).unwrap();
+        assert!(unfilled.values()[1].is_missing());
+        assert_eq!(unfilled.values()[2], Scalar::Float64(3.0));
     }
 
     /// `pct_change()` FORWARD-FILLS before differencing — that is pandas 2.2.3's

@@ -7169,6 +7169,13 @@ pub struct Column {
     /// storage dtype, the widening this column had before widths existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     width: Option<NumericWidth>,
+    /// Whether this Utf8 column is pandas' `string` extension dtype
+    /// (`dtype='string'`, `pd.StringDtype()`) rather than object: its missing
+    /// value is pd.NA and its str methods answer `string` / `Int64` /
+    /// `boolean` (fvsao.59). Carried as the width is - structural operations
+    /// keep it, anything else builds an object column.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pandas_string: bool,
 }
 
 impl Clone for Column {
@@ -7218,6 +7225,7 @@ impl Clone for Column {
             data,
             categorical: self.categorical.clone(),
             width: self.width,
+            pandas_string: self.pandas_string,
         }
     }
 }
@@ -7229,6 +7237,7 @@ impl PartialEq for Column {
             && self.validity == other.validity
             && self.categorical == other.categorical
             && self.width == other.width
+            && self.pandas_string == other.pandas_string
     }
 }
 
@@ -7244,6 +7253,9 @@ impl std::fmt::Debug for Column {
         // what it was before widths existed (fp-frame's Debug goldens).
         if let Some(width) = self.width {
             debug.field("width", &width);
+        }
+        if self.pandas_string {
+            debug.field("pandas_string", &true);
         }
         debug.finish()
     }
@@ -12058,6 +12070,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -12122,6 +12135,7 @@ impl Column {
                 categorical,
                 values,
                 width: None,
+                pandas_string: false,
             });
         }
 
@@ -12229,6 +12243,7 @@ impl Column {
             data,
             categorical: None,
             width: None,
+            pandas_string: false,
             values,
         })
     }
@@ -12304,6 +12319,7 @@ impl Column {
             data,
             categorical: None,
             width: None,
+            pandas_string: false,
             values,
         })
     }
@@ -12358,6 +12374,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -12376,6 +12393,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -12404,6 +12422,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -12423,6 +12442,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -12459,6 +12479,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -12488,6 +12509,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -12509,6 +12531,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -12535,6 +12558,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         })
     }
 
@@ -12554,6 +12578,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -12575,6 +12600,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -12593,6 +12619,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -12612,6 +12639,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -12634,6 +12662,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -12655,6 +12684,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -12712,6 +12742,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -12749,6 +12780,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -12792,6 +12824,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -12819,6 +12852,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -12852,6 +12886,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -12886,6 +12921,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -12912,6 +12948,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -12939,6 +12976,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -12967,6 +13005,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -12996,6 +13035,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -13027,6 +13067,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -13050,6 +13091,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -13087,6 +13129,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -13123,6 +13166,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -13145,6 +13189,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -13180,6 +13225,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -13214,6 +13260,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -13239,6 +13286,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -13259,6 +13307,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -13275,6 +13324,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -13303,6 +13353,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -13360,6 +13411,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -13401,6 +13453,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -13532,6 +13585,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -13573,6 +13627,7 @@ impl Column {
                 data: None,
                 categorical: None,
                 width: None,
+                pandas_string: false,
             })
             .collect()
     }
@@ -13612,6 +13667,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -13635,6 +13691,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -13656,6 +13713,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -13674,6 +13732,7 @@ impl Column {
                 data: None,
                 categorical: None,
                 width: None,
+                pandas_string: false,
             };
         }
         Self {
@@ -13683,6 +13742,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -13698,6 +13758,7 @@ impl Column {
                 data: None,
                 categorical: None,
                 width: None,
+                pandas_string: false,
             };
         }
         Self {
@@ -13707,6 +13768,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -13735,6 +13797,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -13759,6 +13822,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -13798,6 +13862,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -13822,6 +13887,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -13899,6 +13965,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         })
     }
 
@@ -14427,6 +14494,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -14604,6 +14672,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         };
         let uniques = Self {
             dtype: DType::Utf8,
@@ -14615,6 +14684,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         };
         Some((codes, uniques))
     }
@@ -15117,7 +15187,7 @@ impl Column {
     #[must_use]
     pub fn take_positions(&self, positions: &[usize]) -> Self {
         self.take_positions_storage(positions)
-            .keeping_width_of(self)
+            .keeping_dtype_of(self)
     }
 
     /// [`Self::take_positions`] of the storage: its fast paths build the
@@ -15150,6 +15220,7 @@ impl Column {
                     data: None,
                     categorical: None,
                     width: None,
+                    pandas_string: false,
                 };
             }
 
@@ -15175,6 +15246,7 @@ impl Column {
                     data: None,
                     categorical: None,
                     width: None,
+                    pandas_string: false,
                 };
             }
 
@@ -15196,6 +15268,7 @@ impl Column {
                     data: None,
                     categorical: None,
                     width: None,
+                    pandas_string: false,
                 };
             }
 
@@ -15216,6 +15289,7 @@ impl Column {
                     data: None,
                     categorical: None,
                     width: None,
+                    pandas_string: false,
                 };
             }
 
@@ -15242,6 +15316,7 @@ impl Column {
                     data: None,
                     categorical: None,
                     width: None,
+                    pandas_string: false,
                 };
             }
 
@@ -15260,6 +15335,7 @@ impl Column {
                     data: None,
                     categorical: None,
                     width: None,
+                    pandas_string: false,
                 };
             }
 
@@ -15303,6 +15379,7 @@ impl Column {
                     data: None,
                     categorical: self.categorical.clone(),
                     width: self.width,
+                    pandas_string: self.pandas_string,
                 };
             }
 
@@ -15332,6 +15409,7 @@ impl Column {
                     data: None,
                     categorical: self.categorical.clone(),
                     width: self.width,
+                    pandas_string: self.pandas_string,
                 };
             }
 
@@ -15376,6 +15454,7 @@ impl Column {
                     data: None,
                     categorical: self.categorical.clone(),
                     width: self.width,
+                    pandas_string: self.pandas_string,
                 };
             }
 
@@ -15394,6 +15473,7 @@ impl Column {
                 data: None,
                 categorical: self.categorical.clone(),
                 width: self.width,
+                pandas_string: self.pandas_string,
             };
         }
 
@@ -15625,6 +15705,7 @@ impl Column {
             data: None,
             categorical: self.categorical.clone(),
             width: self.width,
+            pandas_string: self.pandas_string,
         }
     }
 
@@ -15667,6 +15748,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         })
     }
 
@@ -15699,7 +15781,7 @@ impl Column {
     #[doc(hidden)]
     pub fn take_position_runs(&self, runs: &[(usize, usize)], out_len: usize) -> Self {
         self.take_position_runs_storage(runs, out_len)
-            .keeping_width_of(self)
+            .keeping_dtype_of(self)
     }
 
     fn take_position_runs_storage(&self, runs: &[(usize, usize)], out_len: usize) -> Self {
@@ -15733,6 +15815,7 @@ impl Column {
                     data: None,
                     categorical: None,
                     width: None,
+                    pandas_string: false,
                 };
             }
 
@@ -15748,6 +15831,7 @@ impl Column {
                     data: None,
                     categorical: None,
                     width: None,
+                    pandas_string: false,
                 };
             }
 
@@ -15763,6 +15847,7 @@ impl Column {
                     data: None,
                     categorical: None,
                     width: None,
+                    pandas_string: false,
                 };
             }
 
@@ -15783,6 +15868,7 @@ impl Column {
                     data: None,
                     categorical: None,
                     width: None,
+                    pandas_string: false,
                 };
             }
 
@@ -15800,6 +15886,7 @@ impl Column {
                     data: None,
                     categorical: None,
                     width: None,
+                    pandas_string: false,
                 };
             }
 
@@ -15910,7 +15997,7 @@ impl Column {
     #[must_use]
     pub fn take_contiguous_range(&self, start: usize, len: usize) -> Self {
         self.take_contiguous_range_storage(start, len)
-            .keeping_width_of(self)
+            .keeping_dtype_of(self)
     }
 
     fn take_contiguous_range_storage(&self, start: usize, len: usize) -> Self {
@@ -15936,6 +16023,7 @@ impl Column {
                     data: None,
                     categorical: None,
                     width: None,
+                    pandas_string: false,
                 };
             }
 
@@ -15962,6 +16050,7 @@ impl Column {
                     data: None,
                     categorical: None,
                     width: None,
+                    pandas_string: false,
                 };
             }
 
@@ -15982,6 +16071,7 @@ impl Column {
                     data: None,
                     categorical: self.categorical.clone(),
                     width: self.width,
+                    pandas_string: self.pandas_string,
                 };
             }
 
@@ -16002,6 +16092,7 @@ impl Column {
                     data: None,
                     categorical: self.categorical.clone(),
                     width: self.width,
+                    pandas_string: self.pandas_string,
                 };
             }
         }
@@ -16069,6 +16160,7 @@ impl Column {
                     data: None,
                     categorical: None,
                     width: None,
+                    pandas_string: false,
                 };
             }
 
@@ -16164,6 +16256,7 @@ impl Column {
                     data: None,
                     categorical: None,
                     width: None,
+                    pandas_string: false,
                 };
             }
             // ZERO-COPY WINDOW FOR NaN-AS-MISSING SOURCES. `from_f64_values`
@@ -16194,6 +16287,7 @@ impl Column {
                     data: None,
                     categorical: None,
                     width: None,
+                    pandas_string: false,
                 };
             }
 
@@ -16309,6 +16403,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         })
     }
 
@@ -16334,6 +16429,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         })
     }
 
@@ -16750,6 +16846,7 @@ impl Column {
             data: self.data.clone(),
             categorical,
             width: self.width,
+            pandas_string: self.pandas_string,
         }
     }
 
@@ -16762,17 +16859,19 @@ impl Column {
     }
 
     /// `result`, a structural operation's output over `source`'s rows (a
-    /// take, slice, reindex, concat), with `source`'s width where the
-    /// result's storage carries it: an int32 column reindexed onto missing
-    /// rows became float64, which is not int32's storage, so it reports
-    /// float64 as pandas does - and a numpy Int64 storage left holding a
-    /// missing value is no numpy integer column either. The values are
-    /// `source`'s, so already confined; a result holding new values goes
-    /// through [`Self::narrowed_like`]. Public for a caller's own gather of
+    /// take, slice, reindex, concat), with `source`'s dtype refinement where
+    /// the result's storage carries it - its width, and pandas' `string`
+    /// dtype over Utf8. An int32 column reindexed onto missing rows became
+    /// float64, which is not int32's storage, so it reports float64 as pandas
+    /// does - and a numpy Int64 storage left holding a missing value is no
+    /// numpy integer column either. The values are `source`'s, so already
+    /// confined; a result holding new values goes through
+    /// [`Self::narrowed_like`]. Public for a caller's own gather of
     /// `source`'s rows (a typed fast path building the column itself); it
     /// must hold only `source`'s values.
     #[must_use]
-    pub fn keeping_width_of(mut self, source: &Self) -> Self {
+    pub fn keeping_dtype_of(mut self, source: &Self) -> Self {
+        self.pandas_string = source.pandas_string && self.dtype == DType::Utf8;
         // The common case, a 64-bit source, costs nothing on the hot takes.
         if source.width.is_none() {
             self.width = None;
@@ -16788,15 +16887,34 @@ impl Column {
     /// `self`, an operation's result holding `source`'s values and maybe
     /// values it added (a fill, a bound, a row a join invented), in
     /// `source`'s width where pandas keeps it: carried where the storage
-    /// can (see [`Self::keeping_width_of`]), then confined to it - float32
+    /// can (see [`Self::keeping_dtype_of`]), then confined to it - float32
     /// rounds, an integer width is dropped when an added value left its
     /// range.
     #[must_use]
-    pub fn narrowed_like(self, source: &Self) -> Self {
+    pub fn narrowed_like(mut self, source: &Self) -> Self {
+        // Any text joins a `string` column (fillna('z') of one is `string`).
+        if source.pandas_string && self.dtype == DType::Utf8 {
+            self.pandas_string = true;
+        }
         if source.width.is_none() || self.width.is_some() {
             return self;
         }
-        self.keeping_width_of(source).confined()
+        self.keeping_dtype_of(source).confined()
+    }
+
+    /// Whether this is pandas' `string` extension dtype over its Utf8
+    /// storage (fvsao.59).
+    #[must_use]
+    pub const fn is_pandas_string(&self) -> bool {
+        self.pandas_string
+    }
+
+    /// This Utf8 column as pandas' `string` dtype (the caller made its values
+    /// text or missing); any other column unchanged.
+    #[must_use]
+    pub fn as_pandas_string(mut self) -> Self {
+        self.pandas_string = self.dtype == DType::Utf8;
+        self
     }
 
     /// This column with its width's confinement re-established over values
@@ -17014,6 +17132,7 @@ impl Column {
             data: self.data.clone(),
             categorical: self.categorical.clone(),
             width: None,
+            pandas_string: false,
         }
     }
 
@@ -17030,6 +17149,7 @@ impl Column {
             None
         };
         let width = self.width.filter(|width| width.fits_storage(&dtype));
+        let pandas_string = self.pandas_string && dtype == DType::Utf8;
         Self {
             dtype,
             values: self.values.clone(),
@@ -17037,6 +17157,7 @@ impl Column {
             data: None,
             categorical,
             width,
+            pandas_string,
         }
     }
 
@@ -17398,7 +17519,7 @@ impl Column {
 
     pub fn reindex_by_positions(&self, positions: &[Option<usize>]) -> Result<Self, ColumnError> {
         self.reindex_by_positions_marking(positions, NullKind::Null)
-            .map(|column| column.keeping_width_of(self))
+            .map(|column| column.keeping_dtype_of(self))
     }
 
     /// [`Self::reindex_by_positions`] whose Utf8 gaps materialize
@@ -17719,6 +17840,7 @@ impl Column {
             data: None,
             categorical: self.categorical.clone(),
             width: None,
+            pandas_string: false,
         })
     }
 
@@ -17733,7 +17855,7 @@ impl Column {
         // The fill value is any scalar: confined to the width like the rows
         // it joins (a float32 column's fill 0.1 is float32's 0.1).
         self.reindex_by_positions_with_absent_scalar_storage(positions, absent)
-            .map(|column| column.keeping_width_of(self).confined())
+            .map(|column| column.keeping_dtype_of(self).confined())
     }
 
     fn reindex_by_positions_with_absent_scalar_storage(
@@ -17787,6 +17909,7 @@ impl Column {
             data: None,
             categorical: self.categorical.clone(),
             width: None,
+            pandas_string: false,
         })
     }
 
@@ -18385,6 +18508,7 @@ impl Column {
             data: None,
             categorical: None,
             width: None,
+            pandas_string: false,
         })
     }
 
@@ -20793,9 +20917,13 @@ impl Column {
     /// by `fill_value`. The fill value is cast to the column's dtype.
     pub fn fillna(&self, fill_value: &Scalar) -> Result<Self, ColumnError> {
         // The fill joins the width: a float32 column's fillna(0.1) is
-        // float32's 0.1.
-        self.fillna_storage(fill_value)
-            .map(|column| column.keeping_width_of(self).confined())
+        // float32's 0.1; a `string` column stays `string` for a text fill.
+        let text_fill = fill_value.is_missing() || matches!(fill_value, Scalar::Utf8(_));
+        self.fillna_storage(fill_value).map(|column| {
+            let mut column = column.keeping_dtype_of(self).confined();
+            column.pandas_string &= text_fill;
+            column
+        })
     }
 
     fn fillna_storage(&self, fill_value: &Scalar) -> Result<Self, ColumnError> {
@@ -21206,9 +21334,20 @@ impl Column {
         let width = NumpyNumeric::of(&self.dtype, self.width)
             .zip(NumpyNumeric::of(&other.dtype, other.width))
             .and_then(|(left, right)| left.result_type(right).width());
-        self.concat_storage(other).map(|column| match width {
-            Some(width) if width.fits_storage(&column.dtype) => column.with_width_unchecked(width),
-            _ => column,
+        // Two `string` columns concatenate to `string`; with object, object.
+        let pandas_string = self.pandas_string && other.pandas_string;
+        self.concat_storage(other).map(|column| {
+            let column = match width {
+                Some(width) if width.fits_storage(&column.dtype) => {
+                    column.with_width_unchecked(width)
+                }
+                _ => column,
+            };
+            if pandas_string {
+                column.as_pandas_string()
+            } else {
+                column
+            }
         })
     }
 
@@ -26910,7 +27049,12 @@ impl Column {
         // A DType names the 64-bit storage: astype('int64') of an int32
         // column is int64 (its same-dtype shortcut kept the width), astype
         // ('float64') of float32 is float64 holding the float32 values.
-        self.astype_storage(target).map(Self::with_width_dropped)
+        // Nor is it pandas' `string` dtype: astype(object) of one is object.
+        self.astype_storage(target).map(|column| {
+            let mut column = column.with_width_dropped();
+            column.pandas_string = false;
+            column
+        })
     }
 
     fn astype_storage(&self, target: DType) -> Result<Self, ColumnError> {
@@ -32474,7 +32618,7 @@ impl Column {
         // A float32 column shifts in float32 (its NaN gaps are float32's);
         // an int32 one gaps into float64, which int32 does not ride on.
         self.shift_storage(periods, fill)
-            .map(|column| column.keeping_width_of(self).confined())
+            .map(|column| column.keeping_dtype_of(self).confined())
     }
 
     fn shift_storage(&self, periods: i64, fill: Scalar) -> Result<Self, ColumnError> {
@@ -32542,6 +32686,7 @@ impl Column {
                 data: None,
                 categorical: None,
                 width: None,
+                pandas_string: false,
             });
         }
         let mut out: Vec<Scalar> = Vec::with_capacity(len);
@@ -32573,7 +32718,7 @@ impl Column {
         // A bound joins the width (int32 clipped is int32; a bound outside
         // int8 leaves int8 for int64).
         self.clip_storage(lower, upper)
-            .map(|column| column.keeping_width_of(self).confined())
+            .map(|column| column.keeping_dtype_of(self).confined())
     }
 
     fn clip_storage(&self, lower: Option<f64>, upper: Option<f64>) -> Result<Self, ColumnError> {
@@ -32697,7 +32842,7 @@ impl Column {
     pub fn round(&self, decimals: i32) -> Result<Self, ColumnError> {
         // float32 rounds to a float32 (1.25 to one decimal is float32's 1.2).
         self.round_storage(decimals)
-            .map(|column| column.keeping_width_of(self).confined())
+            .map(|column| column.keeping_dtype_of(self).confined())
     }
 
     fn round_storage(&self, decimals: i32) -> Result<Self, ColumnError> {
@@ -38076,6 +38221,7 @@ mod tests {
                 data: None,
                 categorical: None,
                 width: None,
+                pandas_string: false,
             }
         };
         let left = make(vec![1.0, f64::NAN, 2.0, f64::INFINITY, 1.0, f64::NAN, -3.5]);
@@ -41682,6 +41828,7 @@ mod tests {
                 data: None,
                 categorical: None,
                 width: None,
+                pandas_string: false,
             };
             assert!(mixed.has_any_missing());
             assert!(!mixed.all_missing());
@@ -41696,6 +41843,7 @@ mod tests {
                 data: None,
                 categorical: None,
                 width: None,
+                pandas_string: false,
             };
             assert!(all_nan.has_any_missing());
             assert!(all_nan.all_missing());
@@ -47790,6 +47938,7 @@ mod tests {
                 data: None,
                 categorical: None,
                 width: None,
+                pandas_string: false,
             };
 
             let (codes, uniques) = col.factorize().expect("factorize");
@@ -47846,6 +47995,7 @@ mod tests {
                 data: None,
                 categorical: None,
                 width: None,
+                pandas_string: false,
             };
 
             let (codes, uniques) = col.factorize().expect("factorize");
@@ -53244,6 +53394,7 @@ mod tests {
                 data: None,
                 categorical: None,
                 width: None,
+                pandas_string: false,
             };
 
             let is_null = col.isnull().expect("isnull");
@@ -53412,6 +53563,7 @@ mod tests {
                 data: None,
                 categorical: None,
                 width: None,
+                pandas_string: false,
             };
             let right = Column {
                 dtype: DType::Bool,
@@ -53420,6 +53572,7 @@ mod tests {
                 data: None,
                 categorical: None,
                 width: None,
+                pandas_string: false,
             };
 
             assert_eq!(
@@ -53484,6 +53637,7 @@ mod tests {
                 data: None,
                 categorical: None,
                 width: None,
+                pandas_string: false,
             };
             let right = Column {
                 dtype: DType::Bool,
@@ -53492,6 +53646,7 @@ mod tests {
                 data: None,
                 categorical: None,
                 width: None,
+                pandas_string: false,
             };
 
             assert_eq!(
@@ -53550,6 +53705,7 @@ mod tests {
                 data: None,
                 categorical: None,
                 width: None,
+                pandas_string: false,
             };
             let right = Column {
                 dtype: DType::Bool,
@@ -53558,6 +53714,7 @@ mod tests {
                 data: None,
                 categorical: None,
                 width: None,
+                pandas_string: false,
             };
 
             assert_eq!(
@@ -54308,6 +54465,7 @@ mod tests {
                 data: None,
                 categorical: None,
                 width: None,
+                pandas_string: false,
             };
 
             assert_eq!(col.count(), 3);
@@ -66903,5 +67061,74 @@ mod numeric_width_columns_fvsao23 {
             int32.with_dtype(DType::Int64Nullable).width(),
             Some(NumericWidth::Int32)
         );
+    }
+}
+
+/// pandas' `string` dtype over a Utf8 column (fvsao.59): what carries the
+/// marker and what ends it.
+#[cfg(test)]
+mod pandas_string_columns_fvsao59 {
+    use super::Column;
+    use fp_types::{DType, NullKind, Scalar};
+
+    fn text(values: &[Option<&str>]) -> Column {
+        Column::new(
+            DType::Utf8,
+            values
+                .iter()
+                .map(|value| {
+                    value.map_or(Scalar::Null(NullKind::Null), |text| {
+                        Scalar::Utf8(text.to_owned())
+                    })
+                })
+                .collect(),
+        )
+        .unwrap()
+        .as_pandas_string()
+    }
+
+    #[test]
+    fn structural_operations_carry_the_string_dtype() {
+        let strings = text(&[Some("ab"), None, Some("c")]);
+        assert!(strings.is_pandas_string());
+        assert!(strings.take_positions(&[2, 0]).is_pandas_string());
+        assert!(strings.take_contiguous_range(0, 2).is_pandas_string());
+        assert!(
+            strings
+                .reindex_by_positions(&[Some(0), None])
+                .unwrap()
+                .is_pandas_string()
+        );
+        assert!(strings.concat(&strings).unwrap().is_pandas_string());
+        // A text fill stays `string` ...
+        assert!(
+            strings
+                .fillna(&Scalar::Utf8("z".to_owned()))
+                .unwrap()
+                .is_pandas_string()
+        );
+        // ... it is distinct from the object column holding the same text.
+        assert_ne!(strings, strings.astype(DType::Utf8).unwrap());
+    }
+
+    #[test]
+    fn a_cast_an_object_piece_or_a_number_ends_it() {
+        let strings = text(&[Some("ab"), None]);
+        // NEGATIVE: astype(object) is object ...
+        assert!(!strings.astype(DType::Utf8).unwrap().is_pandas_string());
+        // ... concat with an object column is object ...
+        let objects = Column::new(DType::Utf8, vec![Scalar::Utf8("q".to_owned())]).unwrap();
+        assert!(!strings.concat(&objects).unwrap().is_pandas_string());
+        // ... a number filled in is no longer text ...
+        assert!(
+            !strings
+                .fillna(&Scalar::Int64(5))
+                .unwrap()
+                .is_pandas_string()
+        );
+        // ... and a non-Utf8 column cannot carry it.
+        let ints = Column::from_i64_values(vec![1, 2]).as_pandas_string();
+        assert!(!ints.is_pandas_string());
+        assert!(!strings.with_dtype(DType::Categorical).is_pandas_string());
     }
 }

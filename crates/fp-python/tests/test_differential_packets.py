@@ -13117,3 +13117,137 @@ def _scalar_label_outcome(m: Any, run: Any) -> Any:
 def test_index_labels_come_back_as_pandas_scalars(case: str) -> None:
     run = _SCALAR_LABEL_CASES[case]
     assert _scalar_label_outcome(fpd, run) == _scalar_label_outcome(pd, run), case
+
+
+# br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.59: pandas' `string`
+# extension dtype - dtype='string', astype('string'), convert_dtypes() - kept
+# as its own dtype: pd.NA for a missing value, `string` / Int64 / boolean
+# results from str methods and comparisons (it was object with None).
+def _sdt(m: Any) -> Any:
+    return m.Series(["ab", None, "c d", "ab"], dtype="string", name="t")
+
+
+def _sdt_frame(m: Any) -> Any:
+    return m.DataFrame({"k": [1, 1, 2, 2], "t": ["ab", None, "c d", "ab"]}).astype({"t": "string"})
+
+
+_STRING_DTYPE_CASES = {
+    "repr": lambda m: _sdt(m),
+    "dtype name": lambda m: str(_sdt(m).dtype),
+    "dtype == 'string'": lambda m: _sdt(m).dtype == "string",
+    "tolist types": lambda m: [type(v).__name__ for v in _sdt(m).tolist()],
+    "iteration types": lambda m: [type(v).__name__ for v in _sdt(m)],
+    "missing element": lambda m: type(_sdt(m)[1]).__name__,
+    # A guard: pandas' to_dict of a `string` Series gives None, not pd.NA.
+    "to_dict": lambda m: {k: type(v).__name__ for k, v in _sdt(m).to_dict().items()},
+    "str.len": lambda m: _sdt(m).str.len(),
+    "str.upper": lambda m: _sdt(m).str.upper(),
+    "str.contains": lambda m: _sdt(m).str.contains("a"),
+    "str.startswith": lambda m: _sdt(m).str.startswith("c"),
+    "str.split": lambda m: _sdt(m).str.split(" "),
+    "str.replace": lambda m: _sdt(m).str.replace("a", "x"),
+    "str.slice": lambda m: _sdt(m).str.slice(0, 1),
+    "str.count": lambda m: _sdt(m).str.count("a"),
+    "str.isdigit": lambda m: _sdt(m).str.isdigit(),
+    "str.extract": lambda m: _sdt(m).str.extract(r"(\w)", expand=False),
+    "== 'ab'": lambda m: _sdt(m) == "ab",
+    "< 'b'": lambda m: _sdt(m) < "b",
+    "+ '!'": lambda m: _sdt(m) + "!",
+    "astype object": lambda m: [type(v).__name__ for v in _sdt(m).astype(object).tolist()],
+    "object astype string": lambda m: [type(v).__name__ for v in m.Series(["a", None]).astype("string").tolist()],
+    "astype str": lambda m: _sdt(m).astype(str).tolist(),
+    "concat": lambda m: m.concat([_sdt(m), _sdt(m)]),
+    "fillna": lambda m: _sdt(m).fillna("z"),
+    "dropna": lambda m: _sdt(m).dropna(),
+    "sort_values": lambda m: _sdt(m).sort_values(),
+    "iloc": lambda m: _sdt(m).iloc[[2, 0]],
+    "shift": lambda m: _sdt(m).shift(1),
+    "reindex": lambda m: _sdt(m).reindex([0, 9]),
+    "replace": lambda m: _sdt(m).replace("ab", "b"),
+    "value_counts": lambda m: _sdt(m).value_counts(),
+    "value_counts dropna False": lambda m: _sdt(m).value_counts(dropna=False),
+    "to_numpy": lambda m: [type(v).__name__ for v in _sdt(m).to_numpy().tolist()],
+    "map": lambda m: _sdt(m).map(lambda v: v * 2 if isinstance(v, str) else v),
+    # Guards: min reduces text, and the dtype is a string dtype.
+    "min": lambda m: _sdt(m).min(),
+    "is_string_dtype": lambda m: m.api.types.is_string_dtype(_sdt(m)),
+    # pandas raises by design: no numeric reduction of text.
+    "sum": lambda m: _sdt(m).sum(),
+    "mean": lambda m: _sdt(m).mean(),
+    "cumsum": lambda m: _sdt(m).cumsum(),
+    "frame repr": lambda m: _sdt_frame(m),
+    "frame dtypes": lambda m: [str(t) for t in _sdt_frame(m).dtypes],
+    "frame astype string": lambda m: [str(t) for t in m.DataFrame({"a": ["x", None], "b": [1, 2]}).astype({"a": "string"}).dtypes],
+    "frame astype string all": lambda m: m.DataFrame({"a": ["x", None], "b": [1, 2]}).astype("string"),
+    "DataFrame dtype string": lambda m: m.DataFrame({"a": ["x", None]}, dtype="string"),
+    "convert_dtypes": lambda m: [str(t) for t in m.DataFrame({"a": ["x", None], "b": [1, None], "c": [1.5, None]}).convert_dtypes().dtypes],
+    "read_csv dtype string": lambda m: m.read_csv(io.StringIO("a,b\nx,1\n,2\n"), dtype={"a": "string"}),
+    "read_csv dtype int32": lambda m: m.read_csv(io.StringIO("a,b\n7,1\n8,2\n"), dtype={"a": "int32"}).dtypes.tolist(),
+    "frame merge": lambda m: _sdt_frame(m).merge(m.DataFrame({"k": [1, 2], "w": [5, 6]}), on="k"),
+    "groupby first": lambda m: _sdt_frame(m).groupby("k").first(),
+    "melt": lambda m: _sdt_frame(m).melt(id_vars="k"),
+    "frame to_csv": lambda m: _sdt_frame(m).to_csv(),
+    # NEGATIVE: an object column keeps None and object semantics.
+    "object Series missing element": lambda m: type(m.Series(["ab", None])[1]).__name__,
+    "object Series str.len": lambda m: m.Series(["ab", None]).str.len(),
+    "object Series == 'ab'": lambda m: m.Series(["ab", None]) == "ab",
+}
+
+
+def _sdt_view(x: Any) -> Any:
+    if hasattr(x, "columns") and hasattr(x, "dtypes"):
+        return (repr(x), [str(t) for t in x.dtypes])
+    if hasattr(x, "dtype") and hasattr(x, "index"):
+        return (repr(x), str(x.dtype))
+    return x
+
+
+def _sdt_outcome(m: Any, run: Any) -> Any:
+    try:
+        return _sdt_view(run(m))
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_STRING_DTYPE_CASES))
+def test_string_dtype_like_pandas(case: str) -> None:
+    run = _STRING_DTYPE_CASES[case]
+    assert _sdt_outcome(fpd, run) == _sdt_outcome(pd, run), case
+
+
+# br-frankenpandas-yatxj: Series.where / mask take `other` where the
+# condition is NA or lacks the label, as pandas (it made them NaN).
+_WHERE_NA_CASES = {
+    "where NA condition": lambda m: m.Series([1, 2, 3]).where(m.Series([False, None, True], dtype="boolean"), 0),
+    "mask NA condition": lambda m: m.Series([1, 2, 3]).mask(m.Series([False, None, True], dtype="boolean"), 0),
+    "where absent label": lambda m: m.Series([1, 2, 3]).where(m.Series([True, False], index=[0, 1]), 0),
+    "mask absent label": lambda m: m.Series([1, 2, 3]).mask(m.Series([True, False], index=[0, 1]), 0),
+    "where string NA condition": lambda m: _sdt(m).where(_sdt(m) != "ab", "zz"),
+    # NEGATIVE: no `other` leaves the NA row missing.
+    "where NA condition, no other": lambda m: m.Series([1, 2, 3]).where(m.Series([False, None, True], dtype="boolean")),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_WHERE_NA_CASES))
+def test_series_where_mask_null_condition_like_pandas(case: str) -> None:
+    run = _WHERE_NA_CASES[case]
+    assert _sdt_outcome(fpd, run) == _sdt_outcome(pd, run), case
+
+
+# br-frankenpandas-f0q81: pd.concat of Series whose names disagree is
+# unnamed, as pandas (it was named 'concat').
+_CONCAT_NAME_CASES = {
+    "disagreeing names": lambda m: m.concat([m.Series(["a"], name="t"), m.Series(["q"], name="u")]).name,
+    "one unnamed": lambda m: m.concat([m.Series([1], name="t"), m.Series([2])]).name,
+    # NEGATIVE: agreeing names are kept.
+    "agreeing names": lambda m: m.concat([m.Series([1], name="vals"), m.Series([2], name="vals")]).name,
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_CONCAT_NAME_CASES))
+def test_concat_series_name_like_pandas(case: str) -> None:
+    run = _CONCAT_NAME_CASES[case]
+    assert _sdt_outcome(fpd, run) == _sdt_outcome(pd, run), case
