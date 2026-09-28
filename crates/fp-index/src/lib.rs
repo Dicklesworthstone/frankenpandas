@@ -7485,7 +7485,7 @@ fn freq_unique_deltas(values: &[i64]) -> Vec<i64> {
 /// sub-day step reads them, as a DST change moves the wall clock). Needs
 /// three or more strictly monotonic labels. A day multiple tries the annual,
 /// quarterly and monthly rules (the dates' month position: YS / YE / QS /
-/// QE / MS / ME and their business forms), then 'D' or 'W-<day>' for a
+/// QE / MS / ME and their business forms), then 'D' or `W-<day>` for a
 /// single step, then business days ('B'); a sub-day step is its tick
 /// ('h', 'min', 's', 'ms', 'us', 'ns') with a count. None otherwise.
 #[must_use]

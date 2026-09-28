@@ -223,6 +223,14 @@ jobs:
       - name: Create temp dirs
         run: mkdir -p .tmp .target
 
+      - name: Install the binding's runtime dependency (numpy)
+        # fp-python's Rust tests run the binding in-process on this
+        # interpreter, and the binding imports numpy as the installed
+        # package does (crates/fp-python/pyproject.toml: numpy>=1.22).
+        # Only the oracle venv had it, so a test reaching a numpy path
+        # failed with ModuleNotFoundError (scheduled run 36309038557).
+        run: python -m pip install "numpy>=1.22"
+
       - name: Install and verify required pandas oracle
         run: |
           python -m venv .venv-oracle

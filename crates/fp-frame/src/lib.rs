@@ -23560,7 +23560,7 @@ impl Series {
     /// - `"right"`: `left < x <= right`
     ///
     /// Null elements produce `false`; a nullable Series gives the `boolean`
-    /// dtype with <NA> there, as pandas' masked comparison.
+    /// dtype with `<NA>` there, as pandas' masked comparison.
     pub fn between(
         &self,
         left: &Scalar,
@@ -30759,7 +30759,7 @@ impl Series {
     ///
     /// Matches `pd.Categorical(values)`: the categories are the distinct
     /// non-missing values in sorted order (first-seen order when they do not
-    /// sort), and the Series stores the values (see [`Self::category_codes`]).
+    /// sort), and the Series stores the values (see `Self::category_codes`).
     pub fn from_categorical(
         name: impl Into<SeriesName>,
         values: Vec<Scalar>,
@@ -38369,7 +38369,7 @@ impl Resample<'_> {
     /// skipped, so ffill ran past a NaN row). `fill_value` fills only the
     /// edges no row matched, not a row's own NaN. A repeated timestamp is
     /// pandas' ValueError; `limit` bounds the inexact matches per source row
-    /// and must be positive. A nullable column keeps its dtype (<NA> where
+    /// and must be positive. A nullable column keeps its dtype (`<NA>` where
     /// nothing matched); an int one becomes float only when an edge is left
     /// missing.
     pub fn upsample(
@@ -54511,8 +54511,8 @@ impl StringAccessor<'_> {
     /// pandas' `Series.str.encode(encoding)`: each str as its bytes (a bytes
     /// cell), a missing value kept as it is (None stays None, NaN stays
     /// NaN), any other value NaN; the name kept. It returned each str's byte
-    /// LENGTH under the name '<name>_encoded' (DISC-025, 4qg5w.8). The core
-    /// encodes UTF-8, ASCII and Latin-1 (see [`TextCodec`]), strictly: a
+    /// LENGTH under the name `<name>_encoded` (DISC-025, 4qg5w.8). The core
+    /// encodes UTF-8, ASCII and Latin-1 (see `TextCodec`), strictly: a
     /// character the codec cannot hold is Python's UnicodeEncodeError text.
     /// Other codecs are refused - the Python binding uses Python's own.
     pub fn encode(&self, encoding: &str) -> Result<Series, FrameError> {
@@ -57234,6 +57234,13 @@ impl DatetimeAccessor<'_> {
                 },
                 self.series.name(),
             );
+        }
+        // Text under a format beyond %Y %m %d %H %M %S: read as datetimes
+        // (unparseable text NaT) and rendered as the typed path renders
+        // them - those directives were left in the output as written
+        // ('%B %A %j'; dt_strftime_matches_generic_path).
+        if !six_directive_format(&fmt) {
+            return to_datetime(self.series)?.dt().strftime(format);
         }
         self.extract_component(
             |s| {
@@ -70087,7 +70094,7 @@ impl DataFrame {
             index,
             row_multiindex: None,
             columns: LazyDataFrameColumns::float64_block(store),
-            column_order: LazyDataFrameColumnOrder::Eager(names),
+            column_order: LazyDataFrameColumnOrder::Eager(names).into(),
             column_multiindex: None,
             allows_duplicate_labels: true,
         })
@@ -104545,7 +104552,7 @@ impl DataFrameGroupBy<'_> {
 
     /// pandas' `min_count` on a groupby sum/prod/min/max/first/last already
     /// reduced into `reduced`: a group with fewer than `min_count` non-missing
-    /// values gets a missing result (see [`mask_groups`]; `mask_text = false`
+    /// values gets a missing result (see `mask_groups`; `mask_text = false`
     /// for min/max, which pandas leaves strings alone under). `min_count = 0`
     /// changes nothing.
     pub fn with_min_count(

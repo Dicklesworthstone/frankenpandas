@@ -10802,7 +10802,7 @@ pub fn write_parquet_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
 /// (pandas' `to_parquet(compression=...)`, br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.5)
 /// and pandas' `index=`: `None` keeps a RangeIndex as metadata and any other
 /// index as columns, `Some(true)` writes the index as columns always,
-/// `Some(false)` not at all (see [`pandas_arrow_layout`]).
+/// `Some(false)` not at all (see `pandas_arrow_layout`).
 pub fn write_parquet_bytes_with_compression(
     frame: &DataFrame,
     compression: ParquetCompression,
@@ -11867,7 +11867,7 @@ pub fn write_excel_with_options(
 /// Matches `pd.DataFrame.to_feather()`. Feather v2 is the Arrow IPC file format
 /// — the fastest columnar interchange format, recommended by pandas over HDF5.
 /// The row index travels as pandas' writes it (a RangeIndex as metadata, any
-/// other as columns; see [`pandas_arrow_layout`]).
+/// other as columns; see `pandas_arrow_layout`).
 pub fn write_feather_bytes(frame: &DataFrame) -> Result<Vec<u8>, IoError> {
     use arrow::ipc::writer::FileWriter;
 

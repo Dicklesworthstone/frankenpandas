@@ -41467,9 +41467,37 @@ impl PySeriesStringAccessor {
     fn repeat(&self, repeats: usize) -> PyResult<PySeries> {
         self.wrap(|s| s.repeat(repeats))
     }
-    #[pyo3(name = "wrap")]
-    fn wrap_text(&self, width: usize) -> PyResult<PySeries> {
-        self.wrap(|s| s.wrap(width))
+    /// pandas' `wrap(width, **kwargs)`: each string through the running
+    /// Python's own `textwrap.TextWrapper(width=width, **kwargs)`, its lines
+    /// joined by '\n' - pandas' implementation, so it follows each Python's
+    /// textwrap (the Rust port matched 3.13's; 3.11 keeps a space 3.13
+    /// drops, and CI runs 3.11) and takes the TextWrapper keywords (they
+    /// were refused).
+    #[pyo3(name = "wrap", signature = (width, **kwargs))]
+    fn wrap_text(
+        &self,
+        py: Python<'_>,
+        width: usize,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PySeries> {
+        let options = match kwargs {
+            Some(given) => given.copy()?,
+            None => PyDict::new(py),
+        };
+        options.set_item("width", width)?;
+        let wrapper = py
+            .import("textwrap")?
+            .getattr("TextWrapper")?
+            .call((), Some(&options))?;
+        let newline = pyo3::types::PyString::new(py, "\n");
+        self.map_strings(|text| {
+            let lines = wrapper.call_method1("wrap", (text,))?;
+            Ok(Scalar::Utf8(
+                newline
+                    .call_method1("join", (lines,))?
+                    .extract::<String>()?,
+            ))
+        })
     }
     fn normalize(&self, form: &str) -> PyResult<PySeries> {
         self.wrap(|s| s.normalize(form))

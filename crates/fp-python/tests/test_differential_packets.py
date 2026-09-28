@@ -12815,3 +12815,34 @@ def _n_method_outcome(m: Any, run: Any) -> Any:
 def test_timedelta_components_and_n_methods_like_pandas(case: str) -> None:
     run = _N_METHOD_CASES[case]
     assert _n_method_outcome(fpd, run) == _n_method_outcome(pd, run), case
+
+
+# br-frankenpandas-r8lly: str.wrap is the running Python's
+# textwrap.TextWrapper, as pandas' - fp ported one CPython version's (3.13
+# drops a trailing space 3.11 / 3.12 keep, so CI on 3.11 failed) - and it
+# takes TextWrapper's keywords (they were refused).
+_WRAP_TEXTS = ["  Alice Smith ", "a-very-long-hyphenated-word here", None, "tab\tsep", ""]
+
+_WRAP_CASES = {
+    "width 4": lambda m: m.Series(_WRAP_TEXTS).str.wrap(4).tolist(),
+    "width 6 no long-word breaks": lambda m: m.Series(_WRAP_TEXTS).str.wrap(6, break_long_words=False).tolist(),
+    "no hyphen breaks": lambda m: m.Series(_WRAP_TEXTS).str.wrap(8, break_on_hyphens=False).tolist(),
+    "keep whitespace": lambda m: m.Series(_WRAP_TEXTS).str.wrap(5, drop_whitespace=False).tolist(),
+    "no tab expansion": lambda m: m.Series(_WRAP_TEXTS).str.wrap(5, expand_tabs=False, replace_whitespace=False).tolist(),
+    # pandas raises by design: an unknown TextWrapper keyword is a TypeError.
+    "unknown keyword": lambda m: m.Series(_WRAP_TEXTS).str.wrap(4, nope=1).tolist(),
+}
+
+
+def _wrap_outcome(m: Any, run: Any) -> Any:
+    try:
+        return run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_WRAP_CASES))
+def test_str_wrap_is_pythons_textwrap_like_pandas(case: str) -> None:
+    run = _WRAP_CASES[case]
+    assert _wrap_outcome(fpd, run) == _wrap_outcome(pd, run), case

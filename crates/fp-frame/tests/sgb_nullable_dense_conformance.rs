@@ -4,10 +4,10 @@
 //! branch instead of the slow generic `agg_numeric` build_groups path. Pins the
 //! BIT-IDENTICAL semantics with hand-computed expected output, matching
 //! `agg_numeric`'s reference exactly: missing values are skipped (`is_missing()`),
-//! and an ALL-MISSING group emits `Null(NaN)` for EVERY func (sum included — this
-//! is the SeriesGroupBy `nums.is_empty() -> Null(NaN)` arm, distinct from
-//! DataFrameGroupBy where all-missing sum is 0.0). Int64 keys 0,1,2,3 are
-//! first-seen == sorted so group order is unambiguous.
+//! and an ALL-MISSING group emits `Null(NaN)` for mean / min / max and 0.0 for
+//! sum (pandas' min_count=0; fvsao.35 made it so for the SeriesGroupBy as for
+//! the DataFrameGroupBy). Int64 keys 0,1,2,3 are first-seen == sorted so group
+//! order is unambiguous.
 
 use fp_columnar::Column;
 use fp_frame::Series;
@@ -81,12 +81,17 @@ fn assert_f64(got: &[f64], want: &[f64]) {
     }
 }
 
+/// TEST-CHANGE: this asserted NaN for the all-missing group's sum; pandas'
+/// groupby sum has min_count=0, so it is 0.0 - live pandas 2.2.3:
+/// Series([2, nan, 4, nan, 6, 6, 5]).groupby([0, 1, 0, 2, 1, 0, 3]).sum()
+/// is [12.0, 6.0, 0.0, 5.0]. fvsao.35 (a3686be49) moved the engine to
+/// pandas and left this pin behind (the lib-only gates never ran it).
 #[test]
 fn sgb_nullable_dense_sum() {
     let v = val_series();
     let r = v.groupby(&key_series()).unwrap().sum().unwrap();
     assert_eq!(group_keys(&r), vec![0, 1, 2, 3]);
-    assert_f64(&vals_f64(&r), &[12.0, 6.0, f64::NAN, 5.0]);
+    assert_f64(&vals_f64(&r), &[12.0, 6.0, 0.0, 5.0]);
 }
 
 #[test]
