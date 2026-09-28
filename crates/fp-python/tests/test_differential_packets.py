@@ -13063,3 +13063,53 @@ def _narrow_outcome(m: Any, run: Any) -> Any:
 def test_narrow_numeric_dtypes_like_pandas(case: str) -> None:
     run = _NARROW_DTYPE_CASES[case]
     assert _narrow_outcome(fpd, run) == _narrow_outcome(pd, run), case
+
+
+# br-frankenpandas-x8ql1: a label read out of an Int64 / Float64 index is a
+# numpy scalar (np.int64(10)), as pandas returns it - it was a Python int -
+# while a RangeIndex's stays a Python int and iteration / tolist stay Python
+# scalars.
+def _int_labelled(m: Any) -> Any:
+    return m.Series([3, 1, 2], index=[10, 11, 12])
+
+
+_SCALAR_LABEL_CASES = {
+    "idxmax": lambda m: _int_labelled(m).idxmax(),
+    "idxmin": lambda m: _int_labelled(m).idxmin(),
+    "idxmax of a float index": lambda m: m.Series([3.0, 1.0], index=[0.5, 1.5]).idxmax(),
+    "index[0]": lambda m: _int_labelled(m).index[0],
+    "float index[0]": lambda m: m.Index([0.5, 1.5])[0],
+    "index.max": lambda m: _int_labelled(m).index.max(),
+    "index.min": lambda m: _int_labelled(m).index.min(),
+    "index.asof": lambda m: m.Index([1, 2, 3]).asof(2),
+    "frame index[1]": lambda m: m.DataFrame({"a": [1, 5]}, index=[7, 8]).index[1],
+    "first_valid_index": lambda m: _int_labelled(m).first_valid_index(),
+    "last_valid_index": lambda m: _int_labelled(m).last_valid_index(),
+    "frame first_valid_index": lambda m: m.DataFrame({"a": [None, 5]}, index=[7, 8]).first_valid_index(),
+    "MultiIndex idxmax": lambda m: m.Series([1.0, 2.0], index=m.MultiIndex.from_tuples([(1, "a"), (2, "b")])).idxmax(),
+    # NEGATIVE: a RangeIndex's label, iteration and tolist are Python ints,
+    # a text label a str.
+    "RangeIndex idxmax": lambda m: m.Series([1, 2]).idxmax(),
+    "RangeIndex[1]": lambda m: m.Series([1, 2]).index[1],
+    "index tolist": lambda m: _int_labelled(m).index.tolist()[0],
+    "iterating an index": lambda m: next(iter(_int_labelled(m).index)),
+    "items key": lambda m: next(iter(_int_labelled(m).items()))[0],
+    "text idxmax": lambda m: m.Series([1, 2], index=["a", "b"]).idxmax(),
+}
+
+
+def _scalar_label_outcome(m: Any, run: Any) -> Any:
+    try:
+        value = run(m)
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+    if isinstance(value, tuple):
+        return tuple((type(part).__name__, repr(part)) for part in value)
+    return (type(value).__name__, repr(value))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_SCALAR_LABEL_CASES))
+def test_index_labels_come_back_as_pandas_scalars(case: str) -> None:
+    run = _SCALAR_LABEL_CASES[case]
+    assert _scalar_label_outcome(fpd, run) == _scalar_label_outcome(pd, run), case

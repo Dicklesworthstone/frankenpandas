@@ -6949,6 +6949,46 @@ fn py_to_index_label(obj: &Bound<'_, PyAny>) -> PyResult<IndexLabel> {
     }
 }
 
+/// One label read out of `index` as pandas returns it (`index[0]`,
+/// `index.max()`, `s.idxmax()`, `first_valid_index`): an int or float label
+/// of an Int64 / Float64 index is a numpy scalar - np.int64(10), not 10 - and
+/// a RangeIndex's a Python int; any other as [`row_label_to_py`]
+/// (br-frankenpandas-x8ql1). Iteration and `tolist` stay Python scalars.
+fn index_scalar_to_py(py: Python<'_>, index: &Index, label: &IndexLabel) -> PyResult<Py<PyAny>> {
+    let numeric = |label: &IndexLabel| match label {
+        IndexLabel::Int64(value) => Some(Scalar::Int64(*value)),
+        IndexLabel::Float64(value) => Some(Scalar::Float64(value.0)),
+        _ => None,
+    };
+    // A MultiIndex row is the tuple of its levels' values, each numeric one
+    // a numpy scalar too ((np.int64(2), 'b')).
+    if let Some(multi) = index.row_multiindex() {
+        let Some(row) = index
+            .labels()
+            .iter()
+            .position(|candidate| candidate == label)
+        else {
+            return row_label_to_py(py, index, label);
+        };
+        let parts = (0..multi.nlevels())
+            .map(|level| {
+                let values = multi.get_level_values(level).map_err(index_error_to_py)?;
+                let value = &values.labels()[row];
+                match numeric(value) {
+                    Some(scalar) => numpy_scalar(py, &scalar),
+                    None => index_label_to_py(py, value),
+                }
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        return Ok(PyTuple::new(py, parts)?.into_any().unbind());
+    }
+    match numeric(label) {
+        Some(Scalar::Int64(_)) if index.range_span().is_some() => row_label_to_py(py, index, label),
+        Some(scalar) => numpy_scalar(py, &scalar),
+        None => row_label_to_py(py, index, label),
+    }
+}
+
 /// Convert an IndexLabel to a Python object.
 fn index_label_to_py(py: Python<'_>, label: &IndexLabel) -> PyResult<Py<PyAny>> {
     match label {
@@ -8253,6 +8293,13 @@ impl PyIndex {
         self.inner.len()
     }
 
+    /// Iterating yields the labels as Python scalars (`tolist`'s), as
+    /// pandas' Index does - `index[i]` is a numpy scalar (x8ql1), so the
+    /// sequence-protocol fallback through `__getitem__` is not.
+    fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(self.tolist(py)?.bind(py).try_iter()?.into_any().unbind())
+    }
+
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         pandas_index_repr(py, &self.inner)
     }
@@ -8296,7 +8343,7 @@ impl PyIndex {
                     "index out of bounds",
                 ));
             }
-            return index_label_to_py(py, &self.inner.labels()[pos]);
+            return index_scalar_to_py(py, &self.inner, &self.inner.labels()[pos]);
         }
         if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
             let s_idx = slice.indices(self.inner.len() as isize)?;
@@ -8555,14 +8602,14 @@ impl PyIndex {
 
     fn min(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         match self.inner.min() {
-            Some(l) => index_label_to_py(py, &l),
+            Some(l) => index_scalar_to_py(py, &self.inner, &l),
             None => Ok(py.None()),
         }
     }
 
     fn max(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         match self.inner.max() {
-            Some(l) => index_label_to_py(py, &l),
+            Some(l) => index_scalar_to_py(py, &self.inner, &l),
             None => Ok(py.None()),
         }
     }
@@ -9358,7 +9405,7 @@ impl PyIndex {
     fn asof(&self, py: Python<'_>, label: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let lbl = py_to_index_label(label)?;
         match self.inner.asof(&lbl) {
-            Some(l) => index_label_to_py(py, &l),
+            Some(l) => index_scalar_to_py(py, &self.inner, &l),
             None => Ok(py.None()),
         }
     }
@@ -23361,7 +23408,7 @@ impl PySeries {
             self.inner.idxmax_ext(skipna).map_err(frame_error_to_py)?
         };
         match found {
-            Some(label) => row_label_to_py(py, self.inner.index(), &label),
+            Some(label) => index_scalar_to_py(py, self.inner.index(), &label),
             None => Ok(pyo3::types::PyFloat::new(py, f64::NAN).into_any().unbind()),
         }
     }
@@ -23386,7 +23433,7 @@ impl PySeries {
             self.inner.idxmin_ext(skipna).map_err(frame_error_to_py)?
         };
         match found {
-            Some(label) => row_label_to_py(py, self.inner.index(), &label),
+            Some(label) => index_scalar_to_py(py, self.inner.index(), &label),
             None => Ok(pyo3::types::PyFloat::new(py, f64::NAN).into_any().unbind()),
         }
     }
@@ -24264,14 +24311,14 @@ impl PySeries {
 
     fn first_valid_index(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         match self.inner.first_valid_index() {
-            Some(l) => index_label_to_py(py, &l),
+            Some(l) => index_scalar_to_py(py, self.inner.index(), &l),
             None => Ok(py.None()),
         }
     }
 
     fn last_valid_index(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         match self.inner.last_valid_index() {
-            Some(l) => index_label_to_py(py, &l),
+            Some(l) => index_scalar_to_py(py, self.inner.index(), &l),
             None => Ok(py.None()),
         }
     }
@@ -35322,14 +35369,14 @@ impl PyDataFrame {
 
     fn first_valid_index(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         match self.inner.first_valid_index() {
-            Some(l) => index_label_to_py(py, &l),
+            Some(l) => index_scalar_to_py(py, self.inner.index(), &l),
             None => Ok(py.None()),
         }
     }
 
     fn last_valid_index(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         match self.inner.last_valid_index() {
-            Some(l) => index_label_to_py(py, &l),
+            Some(l) => index_scalar_to_py(py, self.inner.index(), &l),
             None => Ok(py.None()),
         }
     }
