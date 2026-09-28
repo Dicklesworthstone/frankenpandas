@@ -2558,6 +2558,226 @@ impl PyNAType {
     ) -> PyResult<Py<PyAny>> {
         na_object(py)
     }
+
+    // pandas' NA propagates through arithmetic with a number, a string or NA
+    // itself (an array: one NA per element), `+` / `-` with a duration and
+    // `-` with a date; anything else is NotImplemented. Every operator raised
+    // TypeError (br-frankenpandas-c5b7x).
+    fn __add__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        na_propagated(py, other, false, true)
+    }
+    fn __radd__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        na_propagated(py, other, false, true)
+    }
+    fn __sub__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        na_propagated(py, other, true, true)
+    }
+    fn __rsub__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        na_propagated(py, other, true, true)
+    }
+    fn __mul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        na_propagated(py, other, false, false)
+    }
+    fn __rmul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        na_propagated(py, other, false, false)
+    }
+    fn __matmul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        na_propagated(py, other, false, false)
+    }
+    fn __rmatmul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        na_propagated(py, other, false, false)
+    }
+    fn __truediv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        na_propagated(py, other, false, false)
+    }
+    fn __rtruediv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        na_propagated(py, other, false, false)
+    }
+    fn __floordiv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        na_propagated(py, other, false, false)
+    }
+    fn __rfloordiv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        na_propagated(py, other, false, false)
+    }
+    fn __mod__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        na_propagated(py, other, false, false)
+    }
+    fn __rmod__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        na_propagated(py, other, false, false)
+    }
+    fn __divmod__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        na_divmod(py, other)
+    }
+    fn __rdivmod__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        na_divmod(py, other)
+    }
+
+    /// `NA ** 0` is 1 (of the exponent's type), any other number NA; an
+    /// array is 1 where it is 0 and NA elsewhere.
+    fn __pow__(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        _modulo: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        na_power(py, other, 0)
+    }
+
+    /// `1 ** NA` is 1, any other number NA; an array keeps its 1s and is NA
+    /// elsewhere.
+    fn __rpow__(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        _modulo: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        na_power(py, other, 1)
+    }
+
+    fn __neg__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        na_object(py)
+    }
+    fn __pos__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        na_object(py)
+    }
+    fn __abs__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        na_object(py)
+    }
+    fn __invert__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        na_object(py)
+    }
+
+    // Kleene logic, as pandas' NA: False & NA is False, True | NA is True,
+    // every other bool / NA pairing NA (by identity: True / False only).
+    fn __and__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        na_kleene(py, other, Some(false))
+    }
+    fn __rand__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        na_kleene(py, other, Some(false))
+    }
+    fn __or__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        na_kleene(py, other, Some(true))
+    }
+    fn __ror__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        na_kleene(py, other, Some(true))
+    }
+    fn __xor__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        na_kleene(py, other, None)
+    }
+    fn __rxor__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        na_kleene(py, other, None)
+    }
+}
+
+/// Whether `other` is a number as pandas' NA reads one (`numbers.Number`
+/// or a numpy bool).
+fn na_is_number(other: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let py = other.py();
+    Ok(
+        other.is_instance(&py.import("numbers")?.getattr("Number")?)?
+            || other.is_instance(&py.import("numpy")?.getattr("bool_")?)?,
+    )
+}
+
+/// pandas' NA arithmetic with `other`: NA for a number, str / bytes, NA or
+/// a 0-d array, and for a date (Python's, or our Timestamp) when `dates`, a
+/// duration (Python's, or our Timedelta) when `durations`; an object array
+/// of NA for an n-d array; NotImplemented otherwise.
+fn na_propagated(
+    py: Python<'_>,
+    other: &Bound<'_, PyAny>,
+    dates: bool,
+    durations: bool,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let datetime = py.import("datetime")?;
+    let scalar = other.is_instance_of::<PyNAType>()
+        || other.is_instance_of::<pyo3::types::PyString>()
+        || other.is_instance_of::<pyo3::types::PyBytes>()
+        || na_is_number(other)?
+        || (dates
+            && (other.is_instance(&datetime.getattr("date")?)?
+                || other.extract::<PyRef<'_, PyTimestamp>>().is_ok()))
+        || (durations
+            && (other.is_instance(&datetime.getattr("timedelta")?)?
+                || other.extract::<PyRef<'_, PyTimedelta>>().is_ok()));
+    let array = other.is_instance(&numpy.getattr("ndarray")?)?;
+    if scalar || (array && other.getattr("ndim")?.extract::<usize>()? == 0) {
+        return na_object(py);
+    }
+    if array {
+        let filled = numpy.call_method1("empty", (other.getattr("shape")?, "object"))?;
+        filled.call_method1("fill", (na_object(py)?,))?;
+        return Ok(filled.unbind());
+    }
+    Ok(py.NotImplemented())
+}
+
+/// `divmod` with NA: a pair of [`na_propagated`] answers (two arrays for
+/// an array).
+fn na_divmod(py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    let quotient = na_propagated(py, other, false, false)?;
+    if quotient.is(py.NotImplemented()) {
+        return Ok(quotient);
+    }
+    let remainder = na_propagated(py, other, false, false)?;
+    Ok(PyTuple::new(py, [quotient, remainder])?.into_any().unbind())
+}
+
+/// NA `**` (`fixed` 0: NA is the base) or reflected `**` (`fixed` 1: NA is
+/// the exponent) with `other`: `other` itself where it equals `fixed` - as
+/// `type(other)(1)` for the exponent 0 - NA elsewhere; a number, NA or an
+/// array only, NotImplemented otherwise.
+fn na_power(py: Python<'_>, other: &Bound<'_, PyAny>, fixed: i64) -> PyResult<Py<PyAny>> {
+    if other.is_instance_of::<PyNAType>() {
+        return na_object(py);
+    }
+    if na_is_number(other)? {
+        if !other.eq(fixed)? {
+            return na_object(py);
+        }
+        return Ok(if fixed == 0 {
+            other.get_type().call1((1,))?.unbind()
+        } else {
+            other.clone().unbind()
+        });
+    }
+    let numpy = py.import("numpy")?;
+    if other.is_instance(&numpy.getattr("ndarray")?)? {
+        let kept = if fixed == 0 {
+            other.getattr("dtype")?.getattr("type")?.call1((1,))?
+        } else {
+            other.clone()
+        };
+        let mask = other.call_method1("__eq__", (fixed,))?;
+        return Ok(numpy
+            .call_method1("where", (mask, kept, na_object(py)?))?
+            .unbind());
+    }
+    Ok(py.NotImplemented())
+}
+
+/// NA `&` / `|` (`absorbing` the bool that decides the answer: False for
+/// `&`, True for `|`; None for `^`, which is always NA) with `other` - by
+/// identity with True / False, as pandas' NA; NotImplemented for anything
+/// but a bool or NA.
+fn na_kleene(
+    py: Python<'_>,
+    other: &Bound<'_, PyAny>,
+    absorbing: Option<bool>,
+) -> PyResult<Py<PyAny>> {
+    let true_ = pyo3::types::PyBool::new(py, true);
+    let false_ = pyo3::types::PyBool::new(py, false);
+    let is_true = other.is(&*true_);
+    let is_false = other.is(&*false_);
+    if !(is_true || is_false || other.is_instance_of::<PyNAType>()) {
+        return Ok(py.NotImplemented());
+    }
+    match absorbing {
+        Some(true) if is_true => Ok(true_.to_owned().into_any().unbind()),
+        Some(false) if is_false => Ok(false_.to_owned().into_any().unbind()),
+        _ => na_object(py),
+    }
 }
 
 /// Temporal missing value sentinel `NaTType` (pandas `pd.NaT`).
@@ -19445,6 +19665,19 @@ fn named_agg_spec<'py>(
     Ok(Some(spec.clone()))
 }
 
+/// One `eval` line's `target = rhs` parts when it assigns a column (not
+/// `==`, `!=`, `<=`, `>=`, and the target an identifier).
+fn eval_assignment_parts(line: &str) -> Option<(&str, &str)> {
+    let (target, rhs) = line.split_once('=')?;
+    let target = target.trim();
+    (!target.is_empty()
+        && !target.ends_with(['!', '<', '>', '='])
+        && !rhs.starts_with('=')
+        && target.chars().all(|c| c.is_alphanumeric() || c == '_')
+        && !target.starts_with(|c: char| c.is_ascii_digit()))
+    .then_some((target, rhs.trim()))
+}
+
 /// pandas' `@name` references in a `query` / `eval` expression, resolved as
 /// pandas resolves them: `local_dict`, then the calling frame's locals, then
 /// `global_dict` or the frame's globals (`level` frames further up). A scalar
@@ -29028,7 +29261,9 @@ impl PyDataFrame {
                     }
                 })
                 .collect();
-            let col = Column::from_values(col_vals).map_err(FrameError::Column)?;
+            // float64 even when every pair fell below min_periods (an
+            // all-NaN column was inferred object; br-frankenpandas-c5b7x).
+            let col = Column::new(DType::Float64, col_vals).map_err(FrameError::Column)?;
             columns_map.insert(name.clone(), col);
         }
 
@@ -34767,31 +35002,35 @@ impl PyDataFrame {
         let _ = (engine, parser);
         let (expr, locals) = resolve_expr_locals(py, expr, local_dict, global_dict, level)?;
         let expr = expr.as_str();
-        if let Some((target, rhs)) = expr.split_once('=') {
-            let target = target.trim();
-            if !target.is_empty()
-                && !target.ends_with('!')
-                && !target.ends_with('<')
-                && !target.ends_with('>')
-                && !target.ends_with('=')
-                && !rhs.starts_with('=')
-                && target.chars().all(|c| c.is_alphanumeric() || c == '_')
-                && !target.starts_with(|c: char| c.is_ascii_digit())
-            {
-                let evaluated = self
-                    .inner
-                    .eval_with_locals(rhs.trim(), &locals)
+        // pandas runs each non-blank line in order, a later line seeing the
+        // columns an earlier one assigned; several lines must all assign
+        // (a multi-line eval was one parse error; br-frankenpandas-c5b7x).
+        let assignments: Vec<Option<(&str, &str)>> = expr
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(eval_assignment_parts)
+            .collect();
+        if assignments.len() > 1 && assignments.iter().any(Option::is_none) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Multi-line expressions are only valid if all expressions contain an assignment",
+            ));
+        }
+        if !assignments.is_empty() && assignments.iter().all(Option::is_some) {
+            let mut new_df = self.inner.clone();
+            for (target, rhs) in assignments.into_iter().flatten() {
+                let evaluated = new_df
+                    .eval_with_locals(rhs, &locals)
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-                let new_df = self
-                    .inner
+                new_df = new_df
                     .with_column(target, evaluated.column().clone())
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-                if inplace {
-                    self.inner = new_df;
-                    return Ok(py.None());
-                }
-                return Ok(Py::new(py, PyDataFrame { inner: new_df })?.into_any());
             }
+            if inplace {
+                self.inner = new_df;
+                return Ok(py.None());
+            }
+            return Ok(Py::new(py, PyDataFrame { inner: new_df })?.into_any());
         }
         if inplace {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -55953,7 +56192,22 @@ fn factorize(
     values: &Bound<'_, PyAny>,
     sort: bool,
     use_na_sentinel: bool,
-) -> PyResult<(Py<PyAny>, PyIndex)> {
+) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
+    // pandas answers an Index of uniques for a Series / Index (and our
+    // Categorical, its ExtensionArray), a numpy array for anything else, and
+    // deprecates what is not an ndarray (a list; it was an Index for every
+    // input; br-frankenpandas-c5b7x).
+    let keeps_index = values.extract::<PyRef<'_, PySeries>>().is_ok()
+        || values.extract::<PyRef<'_, PyIndex>>().is_ok()
+        || values.extract::<PyRef<'_, PyCategorical>>().is_ok();
+    if !keeps_index && !values.is_instance(&py.import("numpy")?.getattr("ndarray")?)? {
+        PyErr::warn(
+            py,
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            c"factorize with argument that is not not a Series, Index, ExtensionArray, or np.ndarray is deprecated and will raise in a future version.",
+            1,
+        )?;
+    }
     let s = PySeries::from_data(py, Some(values), None, None)?;
     let col_vals = s.inner.column().values();
 
@@ -56016,10 +56270,13 @@ fn factorize(
         .import("numpy")?
         .call_method1("array", (codes, "int64"))?
         .unbind();
+    if !keeps_index {
+        return Ok((py_codes, labels_ndarray(py, &uniques_labels)?.unbind()));
+    }
     let py_uniques = PyIndex {
         inner: Index::new(uniques_labels),
     };
-    Ok((py_codes, py_uniques))
+    Ok((py_codes, Py::new(py, py_uniques)?.into_any()))
 }
 
 /// A get_dummies cell in pandas' `dtype` (bool by default; float64 was
@@ -64204,6 +64461,49 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let __future__ = m.py().import("__future__")?;
     m.add("annotations", __future__.getattr("annotations")?)?;
 
+    bare_class_type_names(m)?;
+    Ok(())
+}
+
+/// PyO3 builds every class's C-level `tp_name` as `<module>.<Name>`
+/// (`builtins.` without a declared module), which Python's own TypeErrors
+/// print: "unsupported operand type(s) for +: 'builtins.NAType' and
+/// 'list'", "unhashable type: 'frankenpandas.DataFrame'" where pandas prints
+/// the bare name. Setting a heap type's `__name__` rewrites its `tp_name`
+/// to that name; each class exported here (or from a registered
+/// `frankenpandas.*` submodule) gets its own name back, and `frankenpandas`
+/// as its `__module__` in place of `builtins` (br-frankenpandas-c5b7x).
+fn bare_class_type_names(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    const HEAP_TYPE: u64 = 1 << 9;
+    let py = m.py();
+    let mut namespaces = vec![m.dict()];
+    for item in py
+        .import("sys")?
+        .getattr("modules")?
+        .call_method0("items")?
+        .try_iter()?
+    {
+        let (name, module): (String, Bound<'_, PyAny>) = item?.extract()?;
+        if name.starts_with("frankenpandas.")
+            && let Ok(module) = module.cast_into::<PyModule>()
+        {
+            namespaces.push(module.dict());
+        }
+    }
+    for namespace in namespaces {
+        for value in namespace.values() {
+            let Ok(kind) = value.cast::<pyo3::types::PyType>() else {
+                continue;
+            };
+            let heap_type = kind.getattr("__flags__")?.extract::<u64>()? & HEAP_TYPE != 0;
+            let module = kind.module()?;
+            let module = module.to_str()?;
+            if heap_type && (module == "builtins" || module == "frankenpandas") {
+                kind.setattr("__module__", "frankenpandas")?;
+                kind.setattr("__name__", kind.name()?)?;
+            }
+        }
+    }
     Ok(())
 }
 

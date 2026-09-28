@@ -13904,3 +13904,129 @@ _EVERYDAY22_CASES = {
 def test_everyday22_like_pandas(case: str) -> None:
     run = _EVERYDAY22_CASES[case]
     assert _e22_outcome(lambda: run(fpd)) == _e22_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-c5b7x (everyday probe 23): pd.NA raised TypeError under
+# every arithmetic / logical operator; a multi-line eval was a parse error;
+# diff(axis=1) made int pairs float64; cov(min_periods=) made an all-NaN
+# column object; pd.factorize(list) answered an Index, not pandas' ndarray
+# and FutureWarning.
+def _e23_outcome(run: Any) -> Any:
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            values = [repr(v) for v in run()]
+        return ("ok", values, [(w.category.__name__, str(w.message)) for w in caught])
+    except NameError:
+        raise
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__module__, type(e).__name__, str(e))
+
+
+def _e23_frame(m: Any) -> Any:
+    return m.DataFrame({"a": [1, 2, 3, 4], "b": [10, 20, 30, 40]})
+
+
+def _e23_shown(frame: Any) -> list:
+    return frame.to_string().split("\n") + [str(t) for t in frame.dtypes]
+
+
+def _e23_eval_inplace(m: Any) -> list:
+    frame = _e23_frame(m)
+    returned = frame.eval("c = a + b\nd = c - a", inplace=True)
+    return [returned] + _e23_shown(frame)
+
+
+def _e23_factorize(values: Any, m: Any, **kwargs: Any) -> list:
+    codes, uniques = m.factorize(values, **kwargs)
+    return [codes, type(uniques).__name__, list(uniques), uniques if isinstance(uniques, np.ndarray) else None]
+
+
+_EVERYDAY23_CASES = {
+    "NA arithmetic": lambda m: [
+        m.NA + 1,
+        1 + m.NA,
+        m.NA * 0,
+        m.NA - 2.5,
+        3 / m.NA,
+        m.NA // 2,
+        m.NA % 2,
+        "a" + m.NA,
+        m.NA + m.NA,
+        m.NA + np.int64(4),
+        -m.NA,
+        abs(m.NA),
+        ~m.NA,
+    ],
+    "NA divmod": lambda m: [divmod(m.NA, 2), divmod(7, m.NA)],
+    "NA pow": lambda m: [m.NA**0, 1**m.NA, m.NA**2, 2**m.NA, m.NA**0.0, 1.0**m.NA, m.NA**False, m.NA**m.NA],
+    "NA kleene": lambda m: [
+        m.NA | True,
+        True | m.NA,
+        m.NA & False,
+        False & m.NA,
+        m.NA | False,
+        m.NA & True,
+        m.NA ^ True,
+        m.NA | m.NA,
+    ],
+    "NA with durations and dates": lambda m: [
+        m.NA + datetime.timedelta(days=1),
+        datetime.timedelta(days=1) - m.NA,
+        datetime.date(2024, 1, 1) - m.NA,
+    ],
+    "NA with arrays": lambda m: [m.NA + np.array([1, 2]), m.NA**np.array([0, 2]), divmod(m.NA, np.array([3]))],
+    "eval multiline": lambda m: _e23_shown(_e23_frame(m).eval("c = a * 2\nd = c + b")),
+    "eval multiline blank lines": lambda m: _e23_shown(_e23_frame(m).eval("\n c = a + 1 \n\n a = c * 2\n")),
+    "eval multiline inplace": lambda m: _e23_eval_inplace(m),
+    "eval multiline without assignment raises": lambda m: [_e23_frame(m).eval("c = a * 2\na + b")],
+    "diff axis1 int pair": lambda m: _e23_shown(_e23_frame(m).diff(axis=1)),
+    "diff axis1 mixed": lambda m: _e23_shown(m.DataFrame({"a": [1, 2], "b": [5, 7], "c": [1.5, 2.0]}).diff(axis=1)),
+    "diff axis1 backward": lambda m: _e23_shown(
+        m.DataFrame({"a": [1, 2], "b": [5, 7], "c": [1.5, 2.0]}).diff(-1, axis=1)
+    ),
+    "diff axis1 wraps like numpy": lambda m: _e23_shown(
+        m.DataFrame({"a": [-(2**63), 5], "b": [2**62, 1]}).diff(axis=1)
+    ),
+    "diff axis1 nullable Int64": lambda m: _e23_shown(
+        m.DataFrame({"a": m.Series([1, None], dtype="Int64"), "b": m.Series([5, 7], dtype="Int64")}).diff(axis=1)
+    ),
+    "cov min_periods": lambda m: _e23_shown(
+        m.DataFrame({"a": [1.0, 2.0, float("nan")], "b": [2.0, 1.0, 3.0]}).cov(min_periods=3)
+    ),
+    "cov min_periods above length": lambda m: _e23_shown(
+        m.DataFrame({"a": [1.0, 2.0, 4.0], "b": [2.0, 1.0, 3.0]}).cov(min_periods=5)
+    ),
+    "factorize list": lambda m: _e23_factorize(["b", "a", "b", None], m),
+    "factorize list sort": lambda m: _e23_factorize(["b", "a", "b"], m, sort=True),
+    "factorize int list": lambda m: _e23_factorize([3, 1, 3], m),
+    "factorize ndarray": lambda m: _e23_factorize(np.array(["b", "a", "b"], dtype=object), m),
+    # Python's own TypeErrors name a class by its bare name, as pandas'
+    # ('builtins.NAType' / 'frankenpandas.Series' before).
+    "NA has no len": lambda m: [len(m.NA)],
+    "Series as a list index raises": lambda m: [[1, 2][m.Series([0])]],
+    "DataFrame as a list index raises": lambda m: [[1, 2][m.DataFrame({"a": [0]})]],
+    # NEGATIVES: NA refuses what pandas' NA refuses (a list, a duration
+    # product, a string power) and compares as NA; a single-line eval and a
+    # comparison are not assignments; diff along axis 0 and with periods=0
+    # stays float64; cov without a threshold; a Series keeps its Index.
+    "NA with a list raises": lambda m: [m.NA + [1]],
+    "NA times a duration raises": lambda m: [m.NA * datetime.timedelta(days=1)],
+    "NA plus a date raises": lambda m: [m.NA + datetime.date(2024, 1, 1)],
+    "NA power of a string raises": lambda m: [m.NA ** "x"],
+    "NA and a non-bool raises": lambda m: [m.NA & 1],
+    "NA compares as NA": lambda m: [m.NA == m.NA, m.NA == 1, m.NA < 2],
+    "eval single line": lambda m: list(_e23_frame(m).eval("a + b")),
+    "eval comparison": lambda m: list(_e23_frame(m).eval("a == b")),
+    "diff axis0 int": lambda m: _e23_shown(_e23_frame(m).diff()),
+    "diff axis1 periods 0": lambda m: _e23_shown(_e23_frame(m).diff(0, axis=1)),
+    "cov default": lambda m: _e23_shown(m.DataFrame({"a": [1.0, 2.0, 4.0], "b": [2.0, 1.0, 3.0]}).cov()),
+    "factorize Series keeps Index": lambda m: _e23_factorize(m.Series(["b", "a", "b"]), m),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EVERYDAY23_CASES))
+def test_everyday23_like_pandas(case: str) -> None:
+    run = _EVERYDAY23_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

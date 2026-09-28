@@ -94003,6 +94003,21 @@ impl DataFrame {
             });
 
         let is_temporal = all_timedelta || all_datetime;
+        // pandas' diff(axis=1) is `self - self.shift(periods, axis=1)`: an
+        // int64 pair stays int64 (wrapping, as numpy), a pair with a nullable
+        // Int64 side is Int64, and a column without a partner subtracts the
+        // edge column shifted out - all-NA Int64 when that column is Int64,
+        // else NaN (every column was float64; br-frankenpandas-c5b7x).
+        // periods=0 is pandas' axis=0 diff, which is float.
+        let int_dtype = |col: &Column| {
+            (periods != 0 && matches!(col.dtype(), DType::Int64 | DType::Int64Nullable))
+                .then(|| col.dtype())
+        };
+        let edge_nullable = n_cols > 0
+            && int_dtype(
+                self.column_at(if periods >= 0 { 0 } else { n_cols - 1 })
+                    .expect("column in bounds"),
+            ) == Some(DType::Int64Nullable);
 
         let mut pairs = Vec::with_capacity(n_cols);
         let mut column_order = Vec::with_capacity(n_cols);
@@ -94019,10 +94034,38 @@ impl DataFrame {
                     _ => None,
                 }
             };
+            let current_int = int_dtype(self.column_at(j).expect("column in bounds"));
 
             if let Some(p_idx) = prev_idx {
                 let current_col = self.column_at(j).expect("column in bounds");
                 let prev_col = self.column_at(p_idx).expect("column in bounds");
+                let int_out = match (current_int, int_dtype(prev_col)) {
+                    (Some(DType::Int64), Some(DType::Int64))
+                        if !current_col.has_any_missing() && !prev_col.has_any_missing() =>
+                    {
+                        Some(DType::Int64)
+                    }
+                    (Some(_), Some(_))
+                        if current_col.dtype() == DType::Int64Nullable
+                            || prev_col.dtype() == DType::Int64Nullable =>
+                    {
+                        Some(DType::Int64Nullable)
+                    }
+                    _ => None,
+                };
+                if let Some(dtype) = int_out {
+                    for (curr_val, prev_val) in current_col.values().iter().zip(prev_col.values()) {
+                        vals.push(match (curr_val, prev_val) {
+                            (Scalar::Int64(c), Scalar::Int64(p)) => {
+                                Scalar::Int64(c.wrapping_sub(*p))
+                            }
+                            _ => Scalar::missing_for_dtype(dtype.clone()),
+                        });
+                    }
+                    pairs.push((name.clone(), Column::new(dtype, vals)?));
+                    column_order.push(name);
+                    continue;
+                }
 
                 for i in 0..n_rows {
                     let curr_val = &current_col.values()[i];
@@ -94070,6 +94113,11 @@ impl DataFrame {
                         _ => vals.push(Scalar::Null(NullKind::NaN)),
                     }
                 }
+            } else if current_int.is_some() && edge_nullable {
+                vals.resize(n_rows, Scalar::missing_for_dtype(DType::Int64Nullable));
+                pairs.push((name.clone(), Column::new(DType::Int64Nullable, vals)?));
+                column_order.push(name);
+                continue;
             } else if is_temporal {
                 vals.resize(n_rows, Scalar::Null(NullKind::NaT));
             } else {
@@ -150641,6 +150689,70 @@ mod tests {
         assert!(cola.values()[1].is_missing());
         assert_eq!(colb.values()[0], Scalar::Float64(3.0)); // 4 - 1
         assert_eq!(colb.values()[1], Scalar::Float64(-1.0)); // 2 - 3
+    }
+
+    #[test]
+    fn dataframe_diff_axis1_keeps_int_pairs_int_c5b7x() {
+        // pandas 2.2.3: DataFrame({'a': [1, 2], 'b': [5, 7], 'c': [1.5, 2.0]})
+        // .diff(axis=1) is float64 / int64 / float64 - an int pair stays int.
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(i64::MIN)]),
+                ("b", vec![Scalar::Int64(5), Scalar::Int64(i64::MAX)]),
+                ("c", vec![Scalar::Float64(1.5), Scalar::Float64(2.0)]),
+            ],
+        )
+        .unwrap();
+        let out = df.diff_axis1(1).unwrap();
+        assert_eq!(out.column("a").unwrap().dtype(), DType::Float64);
+        let b = out.column("b").unwrap();
+        assert_eq!(b.dtype(), DType::Int64);
+        // numpy's wrapping int64 subtraction.
+        assert_eq!(b.values(), &[Scalar::Int64(4), Scalar::Int64(-1)]);
+        // NEGATIVE: a float partner is float64; periods=0 (pandas' axis=0
+        // diff) is float64 even for the int pair.
+        assert_eq!(out.column("c").unwrap().dtype(), DType::Float64);
+        let zero = df.diff_axis1(0).unwrap();
+        assert_eq!(zero.column("b").unwrap().dtype(), DType::Float64);
+        let backward = df.diff_axis1(-1).unwrap();
+        assert_eq!(backward.column("a").unwrap().dtype(), DType::Int64);
+        assert_eq!(backward.column("b").unwrap().dtype(), DType::Float64);
+
+        // A nullable Int64 pair is Int64 with <NA>, and so is the edge column
+        // whose shifted-out partner is Int64.
+        let two_rows =
+            DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(0); 2])]).unwrap();
+        let nullable = two_rows
+            .with_column(
+                "a",
+                Column::new(
+                    DType::Int64Nullable,
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::missing_for_dtype(DType::Int64Nullable),
+                    ],
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .with_column(
+                "b",
+                Column::new(
+                    DType::Int64Nullable,
+                    vec![Scalar::Int64(5), Scalar::Int64(7)],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let out = nullable.diff_axis1(1).unwrap();
+        let a = out.column("a").unwrap();
+        assert_eq!(a.dtype(), DType::Int64Nullable);
+        assert!(a.values().iter().all(Scalar::is_missing));
+        let b = out.column("b").unwrap();
+        assert_eq!(b.dtype(), DType::Int64Nullable);
+        assert_eq!(b.values()[0], Scalar::Int64(4));
+        assert!(b.values()[1].is_missing());
     }
 
     #[test]
