@@ -13686,3 +13686,117 @@ _PARTIAL_STRING_LEVEL_CASES = {
 def test_partial_string_on_datetime_level_like_pandas(case: str) -> None:
     run = _PARTIAL_STRING_LEVEL_CASES[case]
     assert _sdt_outcome(fpd, run) == _sdt_outcome(pd, run), case
+
+
+# br-frankenpandas-wl75u: a column MultiIndex's int / float / bool level
+# prints as pandas' left-justified block ('False', 'True '; '-1 ', ' 10',
+# ' 5 '), which sets the columns' widths (it printed each label bare).
+# br-frankenpandas-o3w6t: a pivot_table key also named as a value is
+# pandas' groupby refusal (it answered a table).
+def _mi_header_frame(m: Any, tuples: Any, row: Any) -> Any:
+    return m.DataFrame([row], columns=m.MultiIndex.from_tuples(tuples))
+
+
+_MI_HEADER_CASES = {
+    "bool level": lambda m: _mi_header_frame(m, [("a", False), ("a", True)], [1.5, 22.0]).to_string(),
+    "bool level unsparsified": lambda m: _mi_header_frame(
+        m, [("a", False), ("b", True), ("b", False)], [1, 2, 3]
+    ).to_string(),
+    "bool level text columns": lambda m: _mi_header_frame(m, [("a", False), ("a", True)], ["u", "vv"]).to_string(),
+    "int level with a negative": lambda m: _mi_header_frame(
+        m, [("a", -1), ("a", 10), ("b", 5)], [1.5, 22.0, 3.0]
+    ).to_string(),
+    "int level": lambda m: _mi_header_frame(m, [("a", 1), ("a", 10)], [1.5, 22.0]).to_string(),
+    "float level": lambda m: _mi_header_frame(m, [("a", 1.5), ("a", 10.25)], [1.5, 22.0]).to_string(),
+    "outer int level": lambda m: _mi_header_frame(m, [(1, "x"), (100, "y")], [1.5, 22.0]).to_string(),
+    "pivot_table bool columns key": lambda m: m.DataFrame(
+        {"city": ["O", "R"], "rain": [1, 5], "t": [1.0, 2.0]}
+    )
+    .assign(big=lambda d: d["rain"] > 2)
+    .pivot_table(index="city", columns="big")
+    .to_string(),
+    # pandas narrows to keys + values only when that is fewer columns than
+    # the frame has: then the doubled key raises; otherwise the key is
+    # simply no value.
+    "pivot_table columns key as values raises": lambda m: m.DataFrame(
+        {"city": ["O", "R", "O"], "rain": [1, 5, 2], "t": [1.0, 2.0, 3.0], "u": [4, 5, 6]}
+    ).pivot_table(index="city", columns="rain", values="rain", aggfunc="count"),
+    "pivot_table index key in values raises": lambda m: m.DataFrame(
+        {"city": ["O", "R", "O"], "rain": [1, 5, 2], "t": [1.0, 2.0, 3.0], "u": [4, 5, 6]}
+    ).pivot_table(index="city", values=["city", "rain"]),
+    "pivot_table index key in values, narrow frame": lambda m: m.DataFrame(
+        {"city": ["O", "R", "O"], "rain": [1, 5, 2]}
+    ).pivot_table(index="city", values=["city", "rain"]),
+    "pivot_table columns key as values, narrow frame": lambda m: m.DataFrame(
+        {"city": ["O", "R", "O"], "rain": [1, 5, 2]}
+    ).pivot_table(index="city", columns="rain", values="rain", aggfunc="count"),
+    # set_index with ONE key in a list is a flat Index named after it (it
+    # was a one-level unnamed MultiIndex - which the empty pivot above
+    # printed as '(O), (R)').
+    "set_index one-key list": lambda m: [
+        (type(i).__name__, i.nlevels, [repr(v) for v in i], i.name)
+        for i in [m.DataFrame({"city": ["O", "R"], "v": [1, 2]}).set_index(["city"]).index]
+    ],
+    # NEGATIVES: a text level and a datetime level as before; values
+    # distinct from the keys pivot as before; two keys and append still
+    # build a MultiIndex.
+    "set_index two-key list": lambda m: [
+        (type(i).__name__, i.nlevels, i.names) for i in [
+            m.DataFrame({"city": ["O", "R"], "k": [1, 2], "v": [1, 2]}).set_index(["city", "k"]).index
+        ]
+    ],
+    "set_index append one-key list": lambda m: [
+        (type(i).__name__, i.nlevels)
+        for i in [m.DataFrame({"city": ["O", "R"], "v": [1, 2]}).set_index(["city"], append=True).index]
+    ],
+    "text level": lambda m: _mi_header_frame(m, [("a", "x"), ("a", "long")], [1.5, 22.0]).to_string(),
+    "datetime level": lambda m: _mi_header_frame(
+        m, [("a", m.Timestamp("2024-01-01")), ("a", m.Timestamp("2024-01-02"))], [1.5, 22.0]
+    ).to_string(),
+    "pivot_table distinct values": lambda m: m.DataFrame(
+        {"city": ["O", "R", "O"], "rain": [1, 5, 2], "t": [1.0, 2.0, 3.0]}
+    ).pivot_table(index="city", columns="rain", values="t", aggfunc="sum"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_MI_HEADER_CASES))
+def test_multiindex_headers_and_pivot_grouper_like_pandas(case: str) -> None:
+    run = _MI_HEADER_CASES[case]
+    assert _sdt_outcome(fpd, run) == _sdt_outcome(pd, run), case
+
+
+# br-frankenpandas-1vv8i: a fork()ed child that reaches a pooled kernel
+# (DataFrame.dot dispatches through fp's persistent worker pool) after the
+# parent used it hung forever - the pool's channels survived the fork, its
+# threads did not. Each engine runs the same fork workflow; the child's
+# answer (or "hung" after a bounded wait) must be pandas'.
+def _fork_dot_frame(m: Any) -> Any:
+    return m.DataFrame({f"c{i}": [float((r * 7 + i) % 13) for r in range(60_000)] for i in range(12)})
+
+
+def _fork_dot_child(m: Any, queue: Any) -> None:
+    frame = _fork_dot_frame(m)
+    queue.put(round(float(frame.dot(frame.T.iloc[:, :3]).to_numpy().sum()), 3))
+
+
+def _fork_dot_outcome(m: Any) -> Any:
+    import multiprocessing
+
+    frame = _fork_dot_frame(m)
+    parent = round(float(frame.dot(frame.T.iloc[:, :3]).to_numpy().sum()), 3)
+    context = multiprocessing.get_context("fork")
+    queue = context.Queue()
+    child = context.Process(target=_fork_dot_child, args=(m, queue))
+    child.start()
+    child.join(60)
+    if child.is_alive():
+        child.kill()
+        child.join()
+        return (parent, "hung")
+    return (parent, child.exitcode, queue.get(timeout=5))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_forked_child_reaches_pooled_kernels_like_pandas() -> None:
+    assert _fork_dot_outcome(fpd) == _fork_dot_outcome(pd)

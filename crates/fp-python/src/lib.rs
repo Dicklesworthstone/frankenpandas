@@ -1983,10 +1983,31 @@ fn fitted_column_count(strcols: &[Vec<String>], terminal: usize, show_index: boo
     widths.len().saturating_sub(usize::from(show_index)).max(2)
 }
 
+/// One column-MultiIndex level's header texts as pandas' `_format_multi`
+/// formats a level (`_format_flat`): an int, float or bool level as one
+/// block left-justified to its widest ('-1 ', ' 10', ' 5 '; 'False',
+/// 'True '), any other level label by label (they all printed unjustified,
+/// which moved the columns a bool or int level heads; br-frankenpandas-wl75u).
+fn multiindex_level_header_texts(labels: &[IndexLabel]) -> Vec<String> {
+    let all = |test: fn(&IndexLabel) -> bool| !labels.is_empty() && labels.iter().all(test);
+    let texts = pandas_label_texts(labels, None);
+    if !(all(|label| matches!(label, IndexLabel::Int64(_) | IndexLabel::Float64(_)))
+        || all(|label| matches!(label, IndexLabel::Bool(_))))
+    {
+        return texts;
+    }
+    let width = texts.iter().map(text_width).max().unwrap_or(0);
+    texts
+        .into_iter()
+        .map(|text| format!("{text:<width$}"))
+        .collect()
+}
+
 /// The header texts of a column MultiIndex over `width` columns, one per
 /// level for each column, sparsified across the columns unless `sparsify`
 /// is false, and the corner beside them (the column-axis level names, blank
 /// when none is named); None when its levels do not cover the columns.
+/// `numeric` flags the columns whose header takes pandas' leading space.
 fn column_multiindex_headers(
     multi: &fp_index::MultiIndex,
     width: usize,
@@ -1997,7 +2018,7 @@ fn column_multiindex_headers(
             multi
                 .get_level_values(level)
                 .ok()
-                .map(|values| pandas_label_texts(values.labels(), None))
+                .map(|values| multiindex_level_header_texts(values.labels()))
         })
         .collect::<Option<_>>()?;
     if levels.iter().any(|texts| texts.len() != width) {
@@ -34087,10 +34108,18 @@ impl PyDataFrame {
                 .set_index(&single, drop)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
         } else if let Ok(list) = keys.extract::<Vec<String>>() {
-            let refs: Vec<&str> = list.iter().map(String::as_str).collect();
-            self.inner
-                .set_index_multi(&refs, drop, "/")
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+            // One key in a list is pandas' flat Index named after it (it was
+            // a one-level MultiIndex, unnamed).
+            if let [single] = list.as_slice() {
+                self.inner
+                    .set_index(single, drop)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+            } else {
+                let refs: Vec<&str> = list.iter().map(String::as_str).collect();
+                self.inner
+                    .set_index_multi(&refs, drop, "/")
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+            }
         } else {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "keys must be a column name or list of column names",
@@ -35065,6 +35094,45 @@ impl PyDataFrame {
             return Err(not_implemented("DataFrame.pivot_table without index"));
         }
         let mut value_names = names(values)?;
+        // A key also named as a value (br-frankenpandas-o3w6t). pandas
+        // narrows the frame to `keys + values` only when that list is shorter
+        // than the frame: then the key column is held twice and groupby
+        // refuses it (fp answered a table); otherwise it groups the whole
+        // frame and the key is simply no value.
+        if let Some(key) = index_keys
+            .iter()
+            .chain(&column_keys)
+            .find(|key| value_names.contains(key))
+        {
+            let selected = index_keys.len() + column_keys.len() + value_names.len();
+            if selected < slf.borrow().inner.num_columns() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Grouper for '{key}' not 1-dimensional"
+                )));
+            }
+            value_names.retain(|name| !index_keys.contains(name) && !column_keys.contains(name));
+            if value_names.is_empty() {
+                // Nothing left to aggregate: pandas' table is the index keys'
+                // groups with no columns (it indexed an empty value list).
+                let keys = PyList::new(
+                    py,
+                    index_keys
+                        .iter()
+                        .map(|name| index_label_to_py(py, &slf.borrow().inner.column_label(name)))
+                        .collect::<PyResult<Vec<_>>>()?,
+                )?;
+                let groups = slf
+                    .as_any()
+                    .get_item(&keys)?
+                    .call_method0("drop_duplicates")?
+                    .call_method1("set_index", (&keys,))?;
+                return if sort {
+                    groups.call_method0("sort_index")
+                } else {
+                    Ok(groups)
+                };
+            }
+        }
         if value_names.is_empty() {
             value_names = slf
                 .borrow()
@@ -64449,6 +64517,42 @@ mod tests {
         let flat = Python::attach(|py| py_mi.to_flat_index(py)).expect("flat index"); // ubs:ignore — test fixture
         assert_eq!(flat.len(), 2);
         assert!(matches!(flat.inner.labels()[0], IndexLabel::Object(_)));
+    }
+
+    /// A column-MultiIndex level's header texts are pandas' `_format_flat`
+    /// block: numeric and bool levels left-justified to their widest (the
+    /// sign space kept beside a negative), text and datetime levels as they
+    /// are (br-frankenpandas-wl75u).
+    #[test]
+    fn multiindex_level_header_texts_justify_like_pandas_wl75u() {
+        let texts = |labels: &[IndexLabel]| multiindex_level_header_texts(labels);
+        assert_eq!(
+            texts(&[IndexLabel::Bool(false), IndexLabel::Bool(true)]),
+            vec!["False", "True "]
+        );
+        assert_eq!(
+            texts(&[IndexLabel::Int64(1), IndexLabel::Int64(10)]),
+            vec!["1 ", "10"]
+        );
+        assert_eq!(
+            texts(&[
+                IndexLabel::Int64(-1),
+                IndexLabel::Int64(10),
+                IndexLabel::Int64(5)
+            ]),
+            vec!["-1 ", " 10", " 5 "]
+        );
+        // NEGATIVES: a text level and a datetime level are not justified.
+        let words = [
+            IndexLabel::Utf8("x".into()),
+            IndexLabel::Utf8("long".into()),
+        ];
+        assert_eq!(texts(&words), vec!["x", "long"]);
+        let day = 86_400_000_000_000_i64;
+        assert_eq!(
+            texts(&[IndexLabel::Datetime64(0), IndexLabel::Datetime64(day)]),
+            vec!["1970-01-01", "1970-01-02"]
+        );
     }
 
     /// A date string keys a datetime level by the period it names (or, in a

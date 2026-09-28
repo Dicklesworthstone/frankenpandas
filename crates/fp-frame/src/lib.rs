@@ -51349,6 +51349,16 @@ mod str_worker_pool {
         /// explicit `is_err` check used to provide, now for free.
         job_txs: Vec<OnceLock<Sender<Job>>>,
         threads: usize,
+        /// THE PROCESS WHOSE THREADS THE WORKERS ARE (br-frankenpandas-1vv8i).
+        ///
+        /// fork() copies this pool - its initialised `job_txs` and the
+        /// channels behind them - into the child, but not one of its worker
+        /// threads. In the child a `send` still succeeds (the receiver half is
+        /// in the copied memory), nobody ever receives, and `run` blocked
+        /// forever on the results: a `multiprocessing` fork child calling
+        /// `df.dot` after its parent had hung. `run` in any other process
+        /// executes the jobs on the calling thread instead.
+        owner: u32,
     }
 
     static POOL: OnceLock<Pool> = OnceLock::new();
@@ -51363,10 +51373,17 @@ mod str_worker_pool {
         /// width is the per-call cap the scoped-spawn path used, so the pool
         /// can still grow to serve any chunking those kernels ask for.
         pub fn new() -> Self {
+            Self::owned_by(std::process::id())
+        }
+
+        /// A pool whose workers belong to process `owner` (see `owner`); a
+        /// test builds one owned by another pid to stand for a forked child.
+        pub(super) fn owned_by(owner: u32) -> Self {
             let threads = fp_columnar::cached_available_parallelism().min(64);
             Self {
                 job_txs: (0..threads).map(|_| OnceLock::new()).collect(),
                 threads,
+                owner,
             }
         }
 
@@ -51453,7 +51470,8 @@ mod str_worker_pool {
             T: Send + 'static,
         {
             let mut jobs = jobs;
-            if self.threads == 0 || jobs.len() < 2 {
+            // In a forked child the workers do not exist (see `owner`).
+            if self.threads == 0 || jobs.len() < 2 || std::process::id() != self.owner {
                 return jobs.into_iter().map(|job| job()).collect();
             }
             let (result_tx, result_rx) = channel::<(usize, T)>();
@@ -135719,6 +135737,27 @@ mod tests {
         assert!(
             pool.live_workers() < pool.threads() || pool.threads() <= wide,
             "must not have spawned the full core count for a {wide}-way job"
+        );
+    }
+
+    /// A pool whose workers belong to another process - what a fork()ed child
+    /// inherits: the pool and its channels, none of its threads - runs every
+    /// job on the caller, in order, and dispatches nothing (it sent them to
+    /// threads that do not exist and hung forever; br-frankenpandas-1vv8i).
+    /// The owning process still dispatches (the test above, whose workers
+    /// grow with demand, is the NEGATIVE).
+    #[test]
+    fn str_worker_pool_runs_caller_side_in_a_forked_child_1vv8i() {
+        let foreign = super::str_worker_pool::Pool::owned_by(std::process::id().wrapping_add(1));
+        let jobs: Vec<_> = (0..foreign.threads().clamp(2, 6))
+            .map(|i| move || i * 3)
+            .collect();
+        let want: Vec<usize> = (0..jobs.len()).map(|i| i * 3).collect();
+        assert_eq!(foreign.run(jobs), want);
+        assert_eq!(
+            foreign.live_workers(),
+            0,
+            "a pool from another process must not dispatch to its workers"
         );
     }
 
