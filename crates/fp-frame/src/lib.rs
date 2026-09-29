@@ -8588,6 +8588,86 @@ fn forward_fill_scalars(vals: &[Scalar]) -> Vec<Scalar> {
     out
 }
 
+/// `vals` filled as pandas' groupby fill methods fill one group: forward
+/// (`ffill` / `pad`) or backward (`bfill` / `backfill`) from the nearest
+/// value, at most `limit` missing values in a row.
+fn fill_scalars_limited(vals: &[Scalar], forward: bool, limit: Option<usize>) -> Vec<Scalar> {
+    let mut out = vals.to_vec();
+    if !forward {
+        out.reverse();
+    }
+    let mut last: Option<Scalar> = None;
+    let mut run = 0_usize;
+    for cell in &mut out {
+        if cell.is_missing() {
+            if let Some(fill) = &last
+                && limit.is_none_or(|limit| run < limit)
+            {
+                *cell = fill.clone();
+            }
+            run += 1;
+        } else {
+            last = Some(cell.clone());
+            run = 0;
+        }
+    }
+    if !forward {
+        out.reverse();
+    }
+    out
+}
+
+/// One group's pandas `pct_change` over its (already filled) values:
+/// `filled / filled.shift(periods) - 1`. No zero guard - a zero divisor is
+/// inf (NaN for 0/0), as pandas' division (fvsao.13); a timedelta pair
+/// divides its nanoseconds. The DataFrameGroupBy path answered NaN for a
+/// zero divisor and computed `(v - prev) / prev`, off in the last bits
+/// (br-frankenpandas-n57tz).
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_wrap)] // row offsets and nanoseconds
+fn group_pct_change(vals: &[Scalar], periods: i64) -> Vec<Scalar> {
+    let group_len = vals.len() as i64;
+    vals.iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            let prev_idx = (idx as i64).checked_sub(periods).unwrap_or(-1);
+            if prev_idx < 0 || prev_idx >= group_len {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let previous = &vals[prev_idx as usize];
+            if value.is_missing() || previous.is_missing() {
+                return Scalar::Null(NullKind::NaN);
+            }
+            // Per br-frankenpandas-dj6rv: Timedelta64 pct_change matches
+            // pandas - ns deltas divide as dimensionless f64.
+            if let (Scalar::Timedelta64(cur_ns), Scalar::Timedelta64(prev_ns)) = (value, previous) {
+                if *cur_ns == Timedelta::NAT || *prev_ns == Timedelta::NAT {
+                    return Scalar::Null(NullKind::NaN);
+                }
+                return Scalar::Float64(*cur_ns as f64 / *prev_ns as f64 - 1.0);
+            }
+            if let (Ok(current), Ok(prev)) = (value.to_f64(), previous.to_f64()) {
+                Scalar::Float64(current / prev - 1.0)
+            } else {
+                Scalar::Null(NullKind::NaN)
+            }
+        })
+        .collect()
+}
+
+/// pandas' groupby `pct_change` fill method as a direction: forward for
+/// `ffill` / `pad`, backward for `bfill` / `backfill`, None for no fill
+/// (fill_method=None).
+fn pct_change_fill_direction(fill_method: Option<&str>) -> Result<Option<bool>, FrameError> {
+    match fill_method {
+        None => Ok(None),
+        Some("ffill" | "pad") => Ok(Some(true)),
+        Some("bfill" | "backfill") => Ok(Some(false)),
+        Some(other) => Err(FrameError::CompatibilityRejected(format!(
+            "pct_change: unknown fill_method {other:?}"
+        ))),
+    }
+}
+
 /// A timedelta reduction's result back as the datetime it stands for: the
 /// same nanoseconds (NaT stays NaT); see `Series::datetime_as_timedelta`.
 fn datetime_from_timedelta_result(result: Scalar) -> Scalar {
@@ -48222,41 +48302,31 @@ impl SeriesGroupBy<'_> {
                 }
             }
         }
-        self.transform_groups(|vals| {
-            // pandas groupby.pct_change default fill_method='ffill' forward-fills
-            // within each group before computing. (br-frankenpandas-c3zld)
-            let vals = forward_fill_scalars(vals);
-            let group_len = vals.len() as i64;
-            vals.iter()
-                .enumerate()
-                .map(|(idx, value)| {
-                    let prev_idx = idx as i64 - periods;
-                    if prev_idx < 0 || prev_idx >= group_len {
-                        return Scalar::Null(NullKind::NaN);
-                    }
-                    let previous = &vals[prev_idx as usize];
-                    if value.is_missing() || previous.is_missing() {
-                        return Scalar::Null(NullKind::NaN);
-                    }
-                    // Per br-frankenpandas-dj6rv: Timedelta64 pct_change
-                    // matches pandas — ns deltas divide as dimensionless f64.
-                    if let (Scalar::Timedelta64(cur_ns), Scalar::Timedelta64(prev_ns)) =
-                        (value, previous)
-                    {
-                        if *cur_ns == Timedelta::NAT || *prev_ns == Timedelta::NAT {
-                            return Scalar::Null(NullKind::NaN);
-                        }
-                        // pandas' `filled / shifted - 1`, no zero guard: a zero
-                        // divisor is inf (or NaN for 0/0), as pandas (fvsao.13).
-                        return Scalar::Float64(*cur_ns as f64 / *prev_ns as f64 - 1.0);
-                    }
-                    if let (Ok(current), Ok(prev)) = (value.to_f64(), previous.to_f64()) {
-                        Scalar::Float64(current / prev - 1.0)
-                    } else {
-                        Scalar::Null(NullKind::NaN)
-                    }
-                })
-                .collect()
+        // pandas groupby.pct_change default fill_method='ffill' forward-fills
+        // within each group before computing. (br-frankenpandas-c3zld)
+        self.transform_groups(|vals| group_pct_change(&forward_fill_scalars(vals), periods))
+    }
+
+    /// pandas' `pct_change(periods, fill_method, limit)` of each group: the
+    /// group filled forward (`ffill` / `pad`) or backward (`bfill` /
+    /// `backfill`) up to `limit`, or not at all (None), then `filled /
+    /// filled.shift(periods) - 1` within it. fill_method=None forward-filled
+    /// like the default, and a method or limit was refused
+    /// (br-frankenpandas-n57tz).
+    pub fn pct_change_with_fill(
+        &self,
+        periods: i64,
+        fill_method: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Series, FrameError> {
+        let direction = pct_change_fill_direction(fill_method)?;
+        if direction == Some(true) && limit.is_none() {
+            return self.pct_change(periods);
+        }
+        let periods = clamp_periods(periods, self.series.len());
+        self.transform_groups(|vals| match direction {
+            Some(forward) => group_pct_change(&fill_scalars_limited(vals, forward, limit), periods),
+            None => group_pct_change(vals, periods),
         })
     }
 
@@ -48502,9 +48572,28 @@ impl SeriesGroupBy<'_> {
         }
     }
 
-    fn select_extreme_positions(&self, n: usize, largest: bool) -> Vec<usize> {
+    /// Each group's `n` largest (`largest`) or smallest non-missing values
+    /// under pandas' `keep`: 'first' breaks a tie by the earlier row,
+    /// 'last' by the later one (listing it first), 'all' keeps every row
+    /// tied with the n-th value (br-frankenpandas-n57tz: keep was
+    /// unexpected).
+    fn select_extreme_positions(
+        &self,
+        n: usize,
+        largest: bool,
+        keep: &str,
+    ) -> Result<Vec<usize>, FrameError> {
+        let last = match keep {
+            "first" | "all" => false,
+            "last" => true,
+            _ => {
+                return Err(FrameError::CompatibilityRejected(
+                    r#"keep must be either "first", "last" or "all""#.to_owned(),
+                ));
+            }
+        };
         if n == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         let (_order, order_keys, groups) = self.build_groups();
@@ -48523,29 +48612,50 @@ impl SeriesGroupBy<'_> {
                 } else {
                     values[*left].semantic_cmp(&values[*right])
                 };
-                if ordering == Ordering::Equal {
-                    left.cmp(right)
-                } else {
-                    ordering
+                match ordering {
+                    Ordering::Equal if last => right.cmp(left),
+                    Ordering::Equal => left.cmp(right),
+                    ordering => ordering,
                 }
             });
-            selected.extend(group_positions.into_iter().take(n));
+            let mut take = n.min(group_positions.len());
+            if keep == "all" && take > 0 {
+                let boundary = &values[group_positions[take - 1]];
+                while take < group_positions.len()
+                    && values[group_positions[take]].semantic_cmp(boundary) == Ordering::Equal
+                {
+                    take += 1;
+                }
+            }
+            selected.extend(group_positions.into_iter().take(take));
         }
 
-        selected
+        Ok(selected)
     }
 
     /// Return up to `n` largest non-missing values from each group, indexed
     /// by (group key, row label) as pandas'.
     pub fn nlargest(&self, n: usize) -> Result<Series, FrameError> {
-        let positions = self.select_extreme_positions(n, true);
-        self.keyed_by_group(&positions)
+        self.nlargest_keep(n, "first")
     }
 
     /// Return up to `n` smallest non-missing values from each group, indexed
     /// by (group key, row label) as pandas'.
     pub fn nsmallest(&self, n: usize) -> Result<Series, FrameError> {
-        let positions = self.select_extreme_positions(n, false);
+        self.nsmallest_keep(n, "first")
+    }
+
+    /// pandas' `nlargest(n, keep)` of each group ([`Self::nlargest`] with
+    /// 'first').
+    pub fn nlargest_keep(&self, n: usize, keep: &str) -> Result<Series, FrameError> {
+        let positions = self.select_extreme_positions(n, true, keep)?;
+        self.keyed_by_group(&positions)
+    }
+
+    /// pandas' `nsmallest(n, keep)` of each group ([`Self::nsmallest`] with
+    /// 'first').
+    pub fn nsmallest_keep(&self, n: usize, keep: &str) -> Result<Series, FrameError> {
+        let positions = self.select_extreme_positions(n, false, keep)?;
         self.keyed_by_group(&positions)
     }
 
@@ -112020,45 +112130,27 @@ impl DataFrameGroupBy<'_> {
         if let Some(df) = self.try_pct_change_dense(periods) {
             return Ok(df);
         }
-        self.transform_groups(|vals| {
-            // pandas groupby.pct_change default fill_method='ffill' forward-fills
-            // within each group before computing. (br-frankenpandas-c3zld)
-            let vals = forward_fill_scalars(vals);
-            let group_len = vals.len() as i64;
-            vals.iter()
-                .enumerate()
-                .map(|(i, v)| {
-                    let prev_idx = (i as i64).checked_sub(periods).unwrap_or(-1);
-                    if prev_idx < 0 || prev_idx >= group_len {
-                        return Scalar::Null(NullKind::NaN);
-                    }
-                    let prev = &vals[prev_idx as usize];
-                    if v.is_missing() || prev.is_missing() {
-                        return Scalar::Null(NullKind::NaN);
-                    }
-                    // Per br-frankenpandas-dj6rv: Timedelta64 pct_change
-                    // matches pandas — ns deltas divide as dimensionless f64.
-                    if let (Scalar::Timedelta64(cur_ns), Scalar::Timedelta64(prev_ns)) = (v, prev) {
-                        if *cur_ns == Timedelta::NAT || *prev_ns == Timedelta::NAT {
-                            return Scalar::Null(NullKind::NaN);
-                        }
-                        let prev_f = *prev_ns as f64;
-                        if prev_f.abs() < f64::EPSILON {
-                            return Scalar::Null(NullKind::NaN);
-                        }
-                        return Scalar::Float64((*cur_ns as f64 - prev_f) / prev_f);
-                    }
-                    if let (Ok(curr), Ok(prv)) = (v.to_f64(), prev.to_f64()) {
-                        if prv.abs() < f64::EPSILON {
-                            Scalar::Null(NullKind::NaN)
-                        } else {
-                            Scalar::Float64((curr - prv) / prv)
-                        }
-                    } else {
-                        Scalar::Null(NullKind::NaN)
-                    }
-                })
-                .collect()
+        // pandas groupby.pct_change default fill_method='ffill' forward-fills
+        // within each group before computing. (br-frankenpandas-c3zld)
+        self.transform_groups(|vals| group_pct_change(&forward_fill_scalars(vals), periods))
+    }
+
+    /// pandas' `pct_change(periods, fill_method, limit)` of each group, column
+    /// by column (see `SeriesGroupBy::pct_change_with_fill`).
+    pub fn pct_change_with_fill(
+        &self,
+        periods: i64,
+        fill_method: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<DataFrame, FrameError> {
+        let direction = pct_change_fill_direction(fill_method)?;
+        if direction == Some(true) && limit.is_none() {
+            return self.pct_change(periods);
+        }
+        let periods = clamp_periods(periods, self.df.len());
+        self.transform_groups(|vals| match direction {
+            Some(forward) => group_pct_change(&fill_scalars_limited(vals, forward, limit), periods),
+            None => group_pct_change(vals, periods),
         })
     }
 
@@ -183041,6 +183133,135 @@ mod tests {
         let skew_nan = grouped.skew_with_skipna(false)?;
         assert!(matches!(skew_nan.values()[0], Scalar::Float64(x) if x.is_nan()));
         assert_eq!(skew_nan.values()[1], grouped.skew()?.values()[1]);
+        Ok(())
+    }
+
+    #[test]
+    fn groupby_pct_change_fill_and_nlargest_keep_n57tz() -> Result<(), FrameError> {
+        // One group: 1, NaN, NaN, 4.
+        let nan = Scalar::Null(NullKind::NaN);
+        let index: Vec<IndexLabel> = (0_i64..4).map(Into::into).collect();
+        let keys = Series::from_values("k", index.clone(), vec![Scalar::Utf8("x".into()); 4])?;
+        let values = Series::from_values(
+            "v",
+            index,
+            vec![
+                Scalar::Float64(1.0),
+                nan.clone(),
+                nan.clone(),
+                Scalar::Float64(4.0),
+            ],
+        )?;
+        let grouped = values.groupby(&keys)?;
+        let shown = |series: Series| -> Vec<Option<f64>> {
+            series
+                .values()
+                .iter()
+                .map(|value| value.to_f64().ok().filter(|x| !x.is_nan()))
+                .collect()
+        };
+        // NEGATIVE: ffill with no limit is the default.
+        assert_eq!(
+            shown(grouped.pct_change_with_fill(1, Some("ffill"), None)?),
+            shown(grouped.pct_change(1)?)
+        );
+        assert_eq!(
+            shown(grouped.pct_change(1)?),
+            [None, Some(0.0), Some(0.0), Some(3.0)]
+        );
+        // No fill: every change beside a NaN is NaN.
+        assert_eq!(
+            shown(grouped.pct_change_with_fill(1, None, None)?),
+            [None, None, None, None]
+        );
+        // ffill up to one missing value: the second NaN stays.
+        assert_eq!(
+            shown(grouped.pct_change_with_fill(1, Some("ffill"), Some(1))?),
+            [None, Some(0.0), None, None]
+        );
+        // bfill: 1, 4, 4, 4.
+        assert_eq!(
+            shown(grouped.pct_change_with_fill(1, Some("bfill"), None)?),
+            [None, Some(3.0), Some(0.0), Some(0.0)]
+        );
+        assert!(
+            grouped
+                .pct_change_with_fill(1, Some("nearest"), None)
+                .is_err()
+        );
+
+        // A zero divisor is inf in the frame form too (it was NaN on the
+        // generic path, which the trailing NaN keeps this column on).
+        let frame = DataFrame::from_dict(
+            &["k", "z"],
+            vec![
+                ("k", vec![Scalar::Utf8("x".into()); 4]),
+                (
+                    "z",
+                    vec![
+                        Scalar::Float64(0.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(0.0),
+                        nan,
+                    ],
+                ),
+            ],
+        )?;
+        let changes = frame.groupby(&["k"])?.pct_change(1)?;
+        let z = changes.column("z").expect("z").values();
+        assert!(matches!(z[1], Scalar::Float64(x) if x == f64::INFINITY));
+        assert_eq!(z[2], Scalar::Float64(-1.0));
+
+        // nlargest keep: group 0 is 3, 3, 1 at a, b, c.
+        let ties = Series::from_values(
+            "v",
+            ["a", "b", "c", "d"].into_iter().map(Into::into).collect(),
+            vec![
+                Scalar::Int64(3),
+                Scalar::Int64(3),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+            ],
+        )?;
+        let groups = Series::from_values(
+            "g",
+            ["a", "b", "c", "d"].into_iter().map(Into::into).collect(),
+            vec![
+                Scalar::Int64(0),
+                Scalar::Int64(0),
+                Scalar::Int64(0),
+                Scalar::Int64(1),
+            ],
+        )?;
+        let grouped = ties.groupby(&groups)?;
+        let rows = |series: Series| -> Result<Vec<IndexLabel>, FrameError> {
+            Ok(series
+                .index()
+                .row_multiindex()
+                .expect("(group, row) levels")
+                .get_level_values(1)?
+                .labels()
+                .to_vec())
+        };
+        let text = |label: &str| IndexLabel::Utf8(label.into());
+        // NEGATIVE: 'first' is nlargest as it was.
+        assert_eq!(rows(grouped.nlargest(1)?)?, [text("a"), text("d")]);
+        assert_eq!(
+            rows(grouped.nlargest_keep(1, "last")?)?,
+            [text("b"), text("d")]
+        );
+        assert_eq!(
+            rows(grouped.nlargest_keep(1, "all")?)?,
+            [text("a"), text("b"), text("d")]
+        );
+        assert_eq!(
+            rows(grouped.nlargest_keep(2, "last")?)?,
+            [text("b"), text("a"), text("d")]
+        );
+        assert!(matches!(
+            grouped.nsmallest_keep(1, "x"),
+            Err(FrameError::CompatibilityRejected(msg)) if msg == r#"keep must be either "first", "last" or "all""#
+        ));
         Ok(())
     }
 

@@ -18017,7 +18017,8 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 || msg.starts_with("Cannot specify 'allow_duplicates=True' when ")
                 // pandas' groupby cumulative refusals by dtype (cemrq).
                 || msg.starts_with("function is not implemented for this dtype: [how->")
-                || msg.ends_with(" is not supported for object dtype");
+                || msg.ends_with(" is not supported for object dtype")
+                || msg == r#"keep must be either "first", "last" or "all""#;
             let text = if pandas_verbatim {
                 msg.clone()
             } else {
@@ -18680,6 +18681,101 @@ fn pct_change_fill_args(
         _ => None,
     };
     Ok((fill, limit))
+}
+
+/// A groupby `pct_change`'s `fill_method` / `limit` / `freq` / `axis` as
+/// pandas 2.2 reads them (`owner` 'SeriesGroupBy' or 'DataFrameGroupBy'),
+/// with its FutureWarnings in its order: a fill_method other than None, or
+/// any limit, is deprecated; left out, the default 'ffill' still fills and
+/// warns when a group holds a missing value (`any_missing`); then the
+/// deprecated axis ([`groupby_axis`]). An unknown method is pandas'
+/// AttributeError (it looks the method up on the groupby); fill_method=None
+/// fills nothing. `freq` (a per-group shift of the index) is refused.
+/// Returns the fill method (None: no fill) and the limit
+/// (br-frankenpandas-n57tz: fill_method=None forward-filled, a method or
+/// limit was refused, axis was unexpected).
+fn groupby_pct_change_args(
+    py: Python<'_>,
+    owner: &str,
+    fill_method: &Passed<'_>,
+    limit: &Passed<'_>,
+    freq: Option<&Bound<'_, PyAny>>,
+    axis: &Passed<'_>,
+    any_missing: bool,
+) -> PyResult<(Option<String>, Option<usize>)> {
+    let warn = |message: String| {
+        let message = std::ffi::CString::new(message)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        PyErr::warn(
+            py,
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            &message,
+            1,
+        )
+    };
+    let explicit_fill = fill_method.0.as_ref().filter(|method| !method.is_none());
+    if explicit_fill.is_some() || limit.0.is_some() {
+        warn(format!(
+            "The 'fill_method' keyword being not None and the 'limit' keyword in \
+             {owner}.pct_change are deprecated and will be removed in a future version. \
+             Either fill in any non-leading NA values prior to calling pct_change or \
+             specify 'fill_method=None' to not fill NA values."
+        ))?;
+    }
+    let fill = match &fill_method.0 {
+        None => {
+            if limit.0.is_none() && any_missing {
+                warn(format!(
+                    "The default fill_method='ffill' in {owner}.pct_change is deprecated and \
+                     will be removed in a future version. Either fill in any non-leading NA \
+                     values prior to calling pct_change or specify 'fill_method=None' to not \
+                     fill NA values."
+                ))?;
+            }
+            Some("ffill".to_owned())
+        }
+        Some(method) if method.is_none() => None,
+        Some(method) => {
+            // A groupby has ffill and bfill (pad / backfill went in 2.0).
+            let name = method.extract::<String>()?;
+            if !matches!(name.as_str(), "ffill" | "bfill") {
+                return Err(pyo3::exceptions::PyAttributeError::new_err(format!(
+                    "'{owner}' object has no attribute '{name}'"
+                )));
+            }
+            Some(name)
+        }
+    };
+    let limit = match &limit.0 {
+        Some(value) if !value.is_none() => Some(value.extract::<usize>()?),
+        _ => None,
+    };
+    groupby_axis(py, owner, "pct_change", axis, false)?;
+    unsupported_params(
+        &format!("{owner}.pct_change"),
+        &[("freq", freq.is_none_or(|freq| freq.is_none()))],
+    )?;
+    Ok((fill, limit))
+}
+
+/// pandas' deprecated `get_group(name, obj=...)`: the group's rows of `obj`
+/// by position, `obj.iloc[gb.indices[name]]` - a missing name is pandas'
+/// KeyError, before the FutureWarning (br-frankenpandas-n57tz: obj was
+/// unexpected).
+fn group_rows_of<'py>(
+    groupby: &Bound<'py, PyAny>,
+    name: &Bound<'py, PyAny>,
+    obj: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = groupby.py();
+    let positions = groupby.getattr("indices")?.get_item(name)?;
+    PyErr::warn(
+        py,
+        &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+        c"obj is deprecated and will be removed in a future version. Do ``df.iloc[gb.indices.get(name)]`` instead of ``gb.get_group(name, obj=df)``.",
+        1,
+    )?;
+    obj.getattr("iloc")?.get_item(positions)
 }
 
 /// A flag pandas reads by Python truthiness: `rank(ascending=None)` ranks
@@ -49990,6 +50086,29 @@ pub struct PyGroupBy {
 }
 
 impl PyGroupBy {
+    /// Whether a value column (not a key) holds a missing value in a row
+    /// that belongs to a group - pandas' `any(grp.isna().values.any() for _,
+    /// grp in self)`, which pct_change's default-fill warning reads.
+    fn groups_hold_missing(&self) -> PyResult<bool> {
+        let columns: Vec<&Column> = self
+            .df
+            .column_names()
+            .into_iter()
+            .filter(|name| !self.by.contains(name))
+            .filter_map(|name| self.df.column(name))
+            .collect();
+        if !columns.iter().any(|column| column.has_any_missing()) {
+            return Ok(false);
+        }
+        Ok(self.ordered_groups(false)?.iter().any(|(_, positions)| {
+            positions.iter().any(|&row| {
+                columns
+                    .iter()
+                    .any(|column| column.values()[row].is_missing())
+            })
+        }))
+    }
+
     /// pandas' `any` / `all` (`all`) with `skipna`: skipna=False reads a
     /// missing value as numpy's truthy NaN (fp-frame's
     /// `bool_reduce_with_skipna`); over pandas' nullable dtypes that is
@@ -51159,8 +51278,11 @@ impl PyGroupBy {
         self.out(self.narrowed_frame("cummax", result)?)
     }
 
-    #[pyo3(signature = (periods=1))]
-    fn diff(&self, periods: usize) -> PyResult<PyDataFrame> {
+    /// pandas' `diff(periods=1, axis=<no_default>)`: the deprecated axis
+    /// ([`groupby_axis`]; it was unexpected - br-frankenpandas-n57tz).
+    #[pyo3(signature = (periods=1, axis=Passed(None)))]
+    fn diff(&self, py: Python<'_>, periods: usize, axis: Passed<'_>) -> PyResult<PyDataFrame> {
+        groupby_axis(py, "DataFrameGroupBy", "diff", &axis, false)?;
         require_c_int_periods(i128::try_from(periods).unwrap_or(i128::MAX))?;
         let result = self
             .grouped()
@@ -51170,13 +51292,42 @@ impl PyGroupBy {
         self.out(result)
     }
 
-    #[pyo3(signature = (periods=1))]
-    fn pct_change(&self, periods: i64) -> PyResult<PyDataFrame> {
+    /// pandas' `pct_change(periods=1, fill_method=<no_default>,
+    /// limit=<no_default>, freq=None, axis=<no_default>)`
+    /// ([`groupby_pct_change_args`]; the keywords were unexpected -
+    /// br-frankenpandas-n57tz).
+    #[pyo3(signature = (
+        periods=1,
+        fill_method=Passed(None),
+        limit=Passed(None),
+        freq=None,
+        axis=Passed(None)
+    ))]
+    fn pct_change(
+        &self,
+        py: Python<'_>,
+        periods: i64,
+        fill_method: Passed<'_>,
+        limit: Passed<'_>,
+        freq: Option<&Bound<'_, PyAny>>,
+        axis: Passed<'_>,
+    ) -> PyResult<PyDataFrame> {
         require_c_int_periods(i128::from(periods))?;
+        let any_missing =
+            fill_method.0.is_none() && limit.0.is_none() && self.groups_hold_missing()?;
+        let (fill, limit) = groupby_pct_change_args(
+            py,
+            "DataFrameGroupBy",
+            &fill_method,
+            &limit,
+            freq,
+            &axis,
+            any_missing,
+        )?;
         let result = self
             .grouped()
             .map_err(frame_error_to_py)?
-            .pct_change(periods)
+            .pct_change_with_fill(periods, fill.as_deref(), limit)
             .map_err(frame_error_to_py)?;
         self.out(result)
     }
@@ -51393,12 +51544,15 @@ impl PyGroupBy {
         self.kurt()
     }
 
-    /// pandas' `DataFrameGroupBy.rank(method, ascending, na_option, pct)`.
+    /// pandas' `DataFrameGroupBy.rank(method, ascending, na_option, pct,
+    /// axis)`: the deprecated axis ([`groupby_axis`]; it was unexpected -
+    /// br-frankenpandas-n57tz).
     #[pyo3(signature = (
         method=RankOption::text("average"),
         ascending=Truthy(true),
         na_option=RankOption::text("keep"),
-        pct=Truthy(false)
+        pct=Truthy(false),
+        axis=Passed(None)
     ))]
     fn rank(
         &self,
@@ -51407,8 +51561,10 @@ impl PyGroupBy {
         ascending: Truthy,
         na_option: RankOption,
         pct: Truthy,
+        axis: Passed<'_>,
     ) -> PyResult<PyDataFrame> {
         let (method, na_option) = rank_options(py, &method, &na_option)?;
+        groupby_axis(py, "DataFrameGroupBy", "rank", &axis, false)?;
         let result = self
             .grouped()
             .map_err(frame_error_to_py)?
@@ -51769,16 +51925,27 @@ impl PyGroupBy {
         Ok(PyList::new(py, pairs)?.try_iter()?.into_any().unbind())
     }
 
-    fn get_group(&self, name: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    /// pandas' `get_group(name, obj=None)`; a deprecated `obj` takes the
+    /// group's rows of that object ([`group_rows_of`]).
+    #[pyo3(signature = (name, obj=None))]
+    fn get_group<'py>(
+        slf: &Bound<'py, Self>,
+        name: &Bound<'py, PyAny>,
+        obj: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if let Some(obj) = obj.filter(|obj| !obj.is_none()) {
+            return group_rows_of(slf.as_any(), name, obj);
+        }
+        let this = slf.borrow();
         let s = name
             .extract::<String>()
             .or_else(|_| name.str().map(|py_s| py_s.to_string()))?;
-        let res = self
+        let res = this
             .grouped()
             .map_err(frame_error_to_py)?
             .get_group(&s)
             .map_err(frame_error_to_py)?;
-        self.out(res)
+        this.out(res)?.into_bound_py_any(slf.py())
     }
 
     /// pandas' `gb.groups`: each group's row labels, in group order.
@@ -52583,8 +52750,10 @@ impl PyGroupBy {
                 "cummax" => Some(self.cummax(py, Passed(None), false)?),
                 "ffill" => Some(self.ffill(None)?),
                 "bfill" => Some(self.bfill(None)?),
-                "diff" => Some(self.diff(1)?),
-                "pct_change" => Some(self.pct_change(1)?),
+                "diff" => Some(self.diff(py, 1, Passed(None))?),
+                "pct_change" => {
+                    Some(self.pct_change(py, 1, Passed(None), Passed(None), None, Passed(None))?)
+                }
                 _ => None,
             };
             if let Some(kernel) = kernel {
@@ -53648,32 +53817,40 @@ impl PySeriesGroupBy {
         self.wrap_result("value_counts", res)
     }
 
-    #[pyo3(signature = (n=5))]
-    fn nlargest(&self, n: usize) -> PyResult<PySeries> {
+    /// pandas' `nlargest(n=5, keep='first')` of each group: 'last' breaks
+    /// a tie by the later row, 'all' keeps every row tied with the n-th
+    /// (keep was unexpected - br-frankenpandas-n57tz).
+    #[pyo3(signature = (n=5, keep="first"))]
+    fn nlargest(&self, n: usize, keep: &str) -> PyResult<PySeries> {
         self.single_key("nlargest")?;
         let res = self
             .series
             .groupby(&self.by)
             .map_err(frame_error_to_py)?
-            .nlargest(n)
+            .nlargest_keep(n, keep)
             .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
     }
 
-    #[pyo3(signature = (n=5))]
-    fn nsmallest(&self, n: usize) -> PyResult<PySeries> {
+    /// pandas' `nsmallest(n=5, keep='first')` of each group (see
+    /// [`Self::nlargest`]).
+    #[pyo3(signature = (n=5, keep="first"))]
+    fn nsmallest(&self, n: usize, keep: &str) -> PyResult<PySeries> {
         self.single_key("nsmallest")?;
         let res = self
             .series
             .groupby(&self.by)
             .map_err(frame_error_to_py)?
-            .nsmallest(n)
+            .nsmallest_keep(n, keep)
             .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
     }
 
-    #[pyo3(signature = (periods=1))]
-    fn diff(&self, periods: usize) -> PyResult<PySeries> {
+    /// pandas' `diff(periods=1, axis=<no_default>)`: the deprecated axis
+    /// ([`groupby_axis`]; it was unexpected - br-frankenpandas-n57tz).
+    #[pyo3(signature = (periods=1, axis=Passed(None)))]
+    fn diff(&self, py: Python<'_>, periods: usize, axis: Passed<'_>) -> PyResult<PySeries> {
+        groupby_axis(py, "SeriesGroupBy", "diff", &axis, false)?;
         require_c_int_periods(i128::try_from(periods).unwrap_or(i128::MAX))?;
         let res = self
             .series
@@ -53820,10 +53997,18 @@ impl PySeriesGroupBy {
         self.prod(false, 0)
     }
 
-    /// pandas' `sgb.quantile(q=0.5, interpolation='linear')`; another
-    /// interpolation takes each group's quantile under it (it was refused).
-    #[pyo3(signature = (q=0.5, interpolation="linear"))]
-    fn quantile(&self, q: f64, interpolation: Option<&str>) -> PyResult<PySeries> {
+    /// pandas' `sgb.quantile(q=0.5, interpolation='linear',
+    /// numeric_only=False)`; another interpolation takes each group's
+    /// quantile under it (it was refused); numeric_only is pandas' TypeError
+    /// over a non-numeric Series (it was unexpected - br-frankenpandas-n57tz).
+    #[pyo3(signature = (q=0.5, interpolation="linear", numeric_only=false))]
+    fn quantile(
+        &self,
+        q: f64,
+        interpolation: Option<&str>,
+        numeric_only: bool,
+    ) -> PyResult<PySeries> {
+        self.check_numeric_only("quantile", numeric_only)?;
         let interpolation = interpolation.unwrap_or("linear");
         let res = if interpolation == "linear" {
             self.series
@@ -53901,12 +54086,15 @@ impl PySeriesGroupBy {
         self.kurt()
     }
 
-    /// pandas' `SeriesGroupBy.rank(method, ascending, na_option, pct)`.
+    /// pandas' `SeriesGroupBy.rank(method, ascending, na_option, pct,
+    /// axis)`: the deprecated axis ([`groupby_axis`]; it was unexpected -
+    /// br-frankenpandas-n57tz).
     #[pyo3(signature = (
         method=RankOption::text("average"),
         ascending=Truthy(true),
         na_option=RankOption::text("keep"),
-        pct=Truthy(false)
+        pct=Truthy(false),
+        axis=Passed(None)
     ))]
     fn rank(
         &self,
@@ -53915,8 +54103,10 @@ impl PySeriesGroupBy {
         ascending: Truthy,
         na_option: RankOption,
         pct: Truthy,
+        axis: Passed<'_>,
     ) -> PyResult<PySeries> {
         let (method, na_option) = rank_options(py, &method, &na_option)?;
+        groupby_axis(py, "SeriesGroupBy", "rank", &axis, false)?;
         let res = self
             .series
             .groupby(&self.by)
@@ -54017,18 +54207,29 @@ impl PySeriesGroupBy {
         })
     }
 
-    fn get_group(&self, name: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        self.single_key("get_group")?;
+    /// pandas' `get_group(name, obj=None)`; a deprecated `obj` takes the
+    /// group's rows of that object ([`group_rows_of`]).
+    #[pyo3(signature = (name, obj=None))]
+    fn get_group<'py>(
+        slf: &Bound<'py, Self>,
+        name: &Bound<'py, PyAny>,
+        obj: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if let Some(obj) = obj.filter(|obj| !obj.is_none()) {
+            return group_rows_of(slf.as_any(), name, obj);
+        }
+        let this = slf.borrow();
+        this.single_key("get_group")?;
         let s = name
             .extract::<String>()
             .or_else(|_| name.str().map(|py_s| py_s.to_string()))?;
-        let res = self
+        let res = this
             .series
-            .groupby(&self.by)
+            .groupby(&this.by)
             .map_err(frame_error_to_py)?
             .get_group(&s)
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        PySeries { inner: res }.into_bound_py_any(slf.py())
     }
 
     /// `for key, group in sgb`: each group's key (a tuple over several keys)
@@ -54534,28 +54735,51 @@ impl PySeriesGroupBy {
         })
     }
 
-    #[pyo3(signature = (periods=1, fill_method=None, limit=None, freq=None))]
+    /// pandas' `pct_change(periods=1, fill_method=<no_default>,
+    /// limit=<no_default>, freq=None, axis=<no_default>)`
+    /// ([`groupby_pct_change_args`]): fill_method=None forward-filled like
+    /// the default, a method or limit was refused and axis was unexpected
+    /// (br-frankenpandas-n57tz).
+    #[pyo3(signature = (
+        periods=1,
+        fill_method=Passed(None),
+        limit=Passed(None),
+        freq=None,
+        axis=Passed(None)
+    ))]
     fn pct_change(
         &self,
+        py: Python<'_>,
         periods: Option<i64>,
-        fill_method: Option<&str>,
-        limit: Option<usize>,
-        freq: Option<&str>,
+        fill_method: Passed<'_>,
+        limit: Passed<'_>,
+        freq: Option<&Bound<'_, PyAny>>,
+        axis: Passed<'_>,
     ) -> PyResult<PySeries> {
-        unsupported_params(
-            "SeriesGroupBy.pct_change",
-            &[
-                ("fill_method", fill_method.is_none()),
-                ("limit", limit.is_none()),
-                ("freq", freq.is_none()),
-            ],
-        )?;
         require_c_int_periods(i128::from(periods.unwrap_or(1)))?;
+        let any_missing = fill_method.0.is_none()
+            && limit.0.is_none()
+            && self.series.column().has_any_missing()
+            && {
+                let values = self.series.column().values();
+                self.ordered_groups(false)?
+                    .iter()
+                    .any(|(_, positions)| positions.iter().any(|&row| values[row].is_missing()))
+            };
+        let (fill, limit) = groupby_pct_change_args(
+            py,
+            "SeriesGroupBy",
+            &fill_method,
+            &limit,
+            freq,
+            &axis,
+            any_missing,
+        )?;
         let res = self
             .series
             .groupby(&self.by)
             .map_err(frame_error_to_py)?
-            .pct_change(periods.unwrap_or(1))
+            .pct_change_with_fill(periods.unwrap_or(1), fill.as_deref(), limit)
             .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
     }

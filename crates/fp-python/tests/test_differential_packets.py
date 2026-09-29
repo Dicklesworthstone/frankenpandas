@@ -16870,3 +16870,83 @@ def test_groupby_refusals_n57tz() -> None:
         nullable.groupby("k")["b"].any(skipna=False)
     with pytest.raises(NotImplementedError):
         nullable.groupby("k")[["b"]].all(skipna=False)
+
+
+# br-frankenpandas-n57tz, GroupBy slice d2: pct_change(fill_method, limit,
+# axis) - fill_method=None forward-filled, a method or limit was refused,
+# and DataFrameGroupBy answered NaN for a zero divisor (pandas: inf);
+# nlargest / nsmallest(keep); quantile(numeric_only); diff / rank(axis);
+# get_group(obj).
+def _gp_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "k": ["x", "y", "x", "x", "y", "y", "x"],
+            "n": [1.0, 2.0, np.nan, 4.0, 5.0, 3.0, 1.0],
+            "m": [2.0, 1.0, 3.0, np.nan, np.nan, 6.0, 5.0],
+            "z": [0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0],
+            "t": ["p", "q", "r", "s", "u", "v", "w"],
+        },
+        index=m.date_range("2024-01-01", periods=7, freq="D"),
+    )
+
+
+def _gp(m: Any) -> Any:
+    return _gp_frame(m).groupby("k")
+
+
+def _gp_ties(m: Any) -> Any:
+    return m.Series([3, 3, 1, 3, 2], index=list("abcde")).groupby([0, 0, 0, 1, 1])
+
+
+_GP_CASES = {
+    "pct_change, a NaN in a group": lambda m: _rl_shown(_gp(m)["n"].pct_change()),
+    "frame pct_change, a NaN in a group": lambda m: _rl_shown(_gp(m)[["n", "m"]].pct_change()),
+    "pct_change fill_method None": lambda m: _rl_shown(_gp(m)["n"].pct_change(fill_method=None)),
+    "frame pct_change fill_method None": lambda m: _rl_shown(_gp(m)[["n", "m"]].pct_change(fill_method=None)),
+    "pct_change ffill": lambda m: _rl_shown(_gp(m)["n"].pct_change(fill_method="ffill")),
+    "frame pct_change bfill": lambda m: _rl_shown(_gp(m)[["n", "m"]].pct_change(fill_method="bfill")),
+    "frame pct_change bfill limit 1": lambda m: _rl_shown(_gp(m)[["m"]].pct_change(fill_method="bfill", limit=1)),
+    "frame pct_change backfill": lambda m: _rl_shown(_gp(m)[["m"]].pct_change(fill_method="backfill")),
+    "pct_change pad": lambda m: _rl_shown(_gp(m)["n"].pct_change(fill_method="pad")),
+    "pct_change limit 1": lambda m: _rl_shown(_gp(m)["n"].pct_change(limit=1)),
+    "frame pct_change periods 2, no fill": lambda m: _rl_shown(_gp(m)[["n"]].pct_change(periods=2, fill_method=None)),
+    "frame pct_change periods -1, no fill": lambda m: _rl_shown(_gp(m)[["n"]].pct_change(periods=-1, fill_method=None)),
+    "pct_change a bad fill_method": lambda m: _rl_shown(_gp(m)["n"].pct_change(fill_method="zzz")),
+    "frame pct_change a bad fill_method": lambda m: _rl_shown(_gp(m)[["n"]].pct_change(fill_method="zzz")),
+    "frame pct_change axis 0": lambda m: _rl_shown(_gp(m)[["z"]].pct_change(axis=0)),
+    "pct_change axis 1": lambda m: _rl_shown(_gp(m)["z"].pct_change(axis=1)),
+    # The generic path (a column with a NaN leaves the dense one): a zero
+    # divisor was NaN there; the all-valid dense path already gave inf.
+    "frame pct_change over a zero, beside a NaN column": lambda m: _rl_shown(_gp(m)[["z", "m"]].pct_change(fill_method=None)),
+    "frame pct_change over a zero": lambda m: _rl_shown(_gp(m)[["z"]].pct_change()),
+    "frame pct_change timedelta over a zero": lambda m: _rl_shown(
+        m.DataFrame({"k": ["x", "x", "x"], "d": m.to_timedelta([0, 2, 4], unit="s")}).groupby("k")[["d"]].pct_change()
+    ),
+    "nlargest keep last": lambda m: _rl_shown(_gp_ties(m).nlargest(1, keep="last")),
+    "nlargest keep all": lambda m: _rl_shown(_gp_ties(m).nlargest(1, keep="all")),
+    "nlargest 2 keep last": lambda m: _rl_shown(_gp_ties(m).nlargest(2, keep="last")),
+    "nsmallest 2 keep all": lambda m: _rl_shown(_gp_ties(m).nsmallest(2, keep="all")),
+    "nsmallest keep last": lambda m: _rl_shown(_gp_ties(m).nsmallest(2, keep="last")),
+    "nlargest a bad keep": lambda m: _rl_shown(_gp_ties(m).nlargest(1, keep="x")),
+    "quantile numeric_only": lambda m: _rl_shown(_gp(m)["n"].quantile(0.5, numeric_only=True)),
+    "quantile numeric_only over text": lambda m: _rl_shown(_gp(m)["t"].quantile(0.5, numeric_only=True)),
+    "frame diff axis 0": lambda m: _rl_shown(_gp(m)[["n"]].diff(axis=0)),
+    "diff axis index": lambda m: _rl_shown(_gp(m)["n"].diff(axis="index")),
+    "diff axis 1": lambda m: _rl_shown(_gp(m)["n"].diff(axis=1)),
+    "frame rank axis 0": lambda m: _rl_shown(_gp(m)[["n"]].rank(axis=0)),
+    "rank axis 0": lambda m: _rl_shown(_gp(m)["n"].rank(axis=0)),
+    "frame get_group obj": lambda m: _rl_shown(_gp(m).get_group("x", obj=m.DataFrame({"w": range(7)}))),
+    "get_group obj": lambda m: _rl_shown(_gp(m)["n"].get_group("y", obj=m.Series(range(7)))),
+    "get_group obj, a missing name": lambda m: _rl_shown(_gp(m).get_group("q", obj=m.DataFrame({"w": range(7)}))),
+    # NEGATIVE: the defaults were already pandas' where no group holds a NaN.
+    "pct_change, no NaN": lambda m: _rl_shown(_gp(m)["z"].pct_change()),
+    "nlargest": lambda m: _rl_shown(_gp_ties(m).nlargest(1)),
+    "get_group": lambda m: _rl_shown(_gp(m).get_group("y")),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_GP_CASES))
+def test_groupby_keywords_d2_like_pandas_n57tz(case: str) -> None:
+    run = _GP_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
