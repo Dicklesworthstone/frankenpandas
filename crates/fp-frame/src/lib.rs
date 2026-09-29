@@ -62668,6 +62668,7 @@ pub fn to_datetime_values_with_options(
     // column format); they used to be read as strftime patterns that match
     // nothing, so every value came back NaT.
     let per_element = matches!(options.format, Some("mixed" | "ISO8601"));
+    let mixed = options.format == Some("mixed");
     let options = ToDatetimeOptions {
         format: options.format.filter(|_| !per_element),
         ..options
@@ -62784,6 +62785,18 @@ pub fn to_datetime_values_with_options(
                         // A row the column's ONE guessed format cannot parse.
                         // (br-frankenpandas-hzayc)
                         Scalar::Null(NullKind::NaT)
+                    } else if mixed
+                        && let Some(guess) = guess_day_month_format(s, options.dayfirst)
+                            .filter(|guess| !guess.format.starts_with("%Y"))
+                    {
+                        // format='mixed': each numeric day/month string read
+                        // as its own guess - day first with dayfirst, or when
+                        // only that reads (13/02/2024) - as pandas'
+                        // per-element parser reads it (05/02/2024 with
+                        // dayfirst was May 2, 13/02/2024 and 05.02.2024
+                        // unparseable; br-frankenpandas-6kaxp). A string with
+                        // a zone has no such guess and reads below.
+                        parse_datetime_string(s, Some(&guess.format))
                     } else if let Some(pattern) = inferred_timezone_pattern {
                         parse_datetime_string_with_timezone_pattern(s, pattern)
                     } else if !options.utc

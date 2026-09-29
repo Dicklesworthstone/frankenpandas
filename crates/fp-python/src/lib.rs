@@ -3722,6 +3722,36 @@ impl PyTimedelta {
     }
 }
 
+/// The period freq pandas reads an index's own offset freq as, for
+/// `to_period()`: a month end or start ('ME', 'BME', 'MS', 'BMS') the month
+/// 'M', a quarter or year end its 'Q-' / 'Y-' anchor, a quarter or year
+/// start the anchor before it ('QS-JAN' is 'Q-DEC'); any other freq as it
+/// is. The offset's own name was read as a period freq, so a date_range of
+/// 'ME' could not become periods (br-frankenpandas-6kaxp).
+fn offset_freq_as_period(freq: &str) -> String {
+    const MONTHS: [&str; 12] = [
+        "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+    ];
+    let (base, anchor) = freq.split_once('-').map_or((freq, None), |(base, anchor)| {
+        (base, Some(anchor))
+    });
+    let month_before = |anchor: Option<&str>| {
+        let position = MONTHS
+            .iter()
+            .position(|month| Some(*month) == anchor.or(Some("JAN")))
+            .unwrap_or(0);
+        MONTHS[(position + 11) % 12]
+    };
+    match base {
+        "ME" | "BME" | "MS" | "BMS" => "M".to_owned(),
+        "QE" | "BQE" => format!("Q-{}", anchor.unwrap_or("DEC")),
+        "YE" | "BYE" => format!("Y-{}", anchor.unwrap_or("DEC")),
+        "QS" | "BQS" => format!("Q-{}", month_before(anchor)),
+        "YS" | "BYS" => format!("Y-{}", month_before(anchor)),
+        _ => freq.to_owned(),
+    }
+}
+
 /// A fixed frequency's length for rounding: a calendar one is pandas'
 /// ValueError naming the offset ('<MonthEnd> is a non-fixed frequency'),
 /// anything else its invalid-frequency ValueError.
@@ -13458,8 +13488,9 @@ impl PyDatetimeIndex {
     /// unknown freq as daily.
     #[pyo3(signature = (freq=None))]
     fn to_period(&self, freq: Option<&str>) -> PyResult<PyPeriodIndex> {
-        // Without a freq, the index's own (a date_range's 'D'), as pandas.
-        let own = self.inner.freqstr();
+        // Without a freq, the index's own (a date_range's 'D'), read as the
+        // period it spans (see `offset_freq_as_period`).
+        let own = self.inner.freqstr().map(|own| offset_freq_as_period(&own));
         let Some(freq) = freq.or(own.as_deref()) else {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "You must pass a freq argument as current index has none.",
@@ -41202,9 +41233,26 @@ impl PyDataFrame {
         .unwrap_or_default()
     }
 
+    /// pandas' `attrs`: the dict the frame carries, read and changed in
+    /// place or set whole (a copy of the mapping). It is this object's
+    /// own: operations do not carry it to their results as pandas' do. It
+    /// was a new empty dict on every read and could not be set
+    /// (br-frankenpandas-6kaxp).
     #[getter]
-    fn attrs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        Ok(PyDict::new(py))
+    fn attrs<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyDict>> {
+        let own = slf.getattr("__dict__")?;
+        if let Some(attrs) = own.cast::<PyDict>()?.get_item("_attrs")? {
+            return Ok(attrs.cast_into::<PyDict>()?);
+        }
+        let attrs = PyDict::new(slf.py());
+        own.set_item("_attrs", &attrs)?;
+        Ok(attrs)
+    }
+
+    #[setter]
+    fn set_attrs(slf: &Bound<'_, Self>, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let copy = slf.py().get_type::<PyDict>().call1((value,))?;
+        slf.getattr("__dict__")?.set_item("_attrs", copy)
     }
 
     fn r#bool(&self) -> PyResult<bool> {
@@ -41357,18 +41405,51 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: res })
     }
 
-    /// pandas' `asof(where, subset=None)` (`where` was named `label`).
+    /// pandas' `asof(where, subset=None)` (`where` was named `label`): one
+    /// label the last row at or before it with no missing value (in
+    /// `subset`), as a Series; a list-like of labels the frame of those rows
+    /// under them, a label before every such row a row of NaN (a list was
+    /// read as one label: the last row's values; br-frankenpandas-6kaxp).
     #[pyo3(signature = (r#where, subset=None))]
-    fn asof(&self, r#where: &Bound<'_, PyAny>, subset: Option<Vec<String>>) -> PyResult<PySeries> {
-        let lbl = py_to_index_label(r#where)?;
+    fn asof(
+        &self,
+        py: Python<'_>,
+        r#where: &Bound<'_, PyAny>,
+        subset: Option<Vec<String>>,
+    ) -> PyResult<Py<PyAny>> {
         let subset_refs: Option<Vec<&str>> = subset
             .as_ref()
             .map(|s| s.iter().map(String::as_str).collect());
+        if is_list_like_impl(r#where) {
+            let rows = r#where
+                .try_iter()?
+                .map(|key| {
+                    self.inner
+                        .asof(&py_to_index_label(&key?)?, subset_refs.as_deref())
+                        .map_err(frame_error_to_py)
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            let data = PyDict::new(py);
+            for position in 0..self.inner.num_columns() {
+                let cells = rows
+                    .iter()
+                    .map(|row| scalar_to_py(py, &row.values()[position]))
+                    .collect::<PyResult<Vec<_>>>()?;
+                data.set_item(self.column_key_py(py, position)?, PyList::new(py, cells)?)?;
+            }
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("index", r#where)?;
+            return Ok(py
+                .get_type::<PyDataFrame>()
+                .call((data,), Some(&kwargs))?
+                .unbind());
+        }
+        let lbl = py_to_index_label(r#where)?;
         let res = self
             .inner
             .asof(&lbl, subset_refs.as_deref())
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        Py::new(py, PySeries { inner: res }).map(Py::into_any)
     }
 
     #[pyo3(signature = (other, axis=None, drop=false, method="pearson", numeric_only=false))]
@@ -43842,10 +43923,12 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: final_df })
     }
 
+    /// The frame's flags (set_flags' allows_duplicate_labels; it was always
+    /// True).
     #[getter]
     fn flags(&self) -> PyFlags {
         PyFlags {
-            allows_duplicate_labels: true,
+            allows_duplicate_labels: self.inner.flags().allows_duplicate_labels(),
         }
     }
 
@@ -44072,8 +44155,10 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner })
     }
 
-    /// pandas' `set_flags`. frankenpandas always allows duplicate labels,
-    /// which is pandas' default flag; turning it off is not supported yet.
+    /// pandas' `set_flags(*, copy=False, allows_duplicate_labels=None)`: the
+    /// frame with the flag set (fp-frame keeps it); refusing duplicates on a
+    /// frame that holds some is pandas' DuplicateLabelError (turning the
+    /// flag off was refused; br-frankenpandas-6kaxp).
     #[pyo3(signature = (*, copy=false, allows_duplicate_labels=None))]
     fn set_flags(
         &self,
@@ -44082,14 +44167,11 @@ impl PyDataFrame {
     ) -> PyResult<PyDataFrame> {
         // copy= only lets pandas share buffers; a new frame satisfies it.
         let _ = copy;
-        unsupported_params(
-            "DataFrame.set_flags",
-            &[(
-                "allows_duplicate_labels",
-                allows_duplicate_labels != Some(false),
-            )],
-        )?;
-        Ok(self.clone())
+        let inner = self
+            .inner
+            .set_flags(allows_duplicate_labels)
+            .map_err(|err| DuplicateLabelError::new_err(err.to_string()))?;
+        Ok(PyDataFrame { inner })
     }
 
     #[getter]
@@ -63560,7 +63642,7 @@ fn to_datetime_error(err: fp_frame::FrameError) -> PyErr {
 /// `'coerce'` makes them NaT; `format='mixed'` / `'ISO8601'` parse each
 /// element on its own (they were read as strftime patterns: all NaT).
 #[pyfunction]
-#[pyo3(signature = (arg, errors="raise", dayfirst=false, yearfirst=false, utc=false, format=None, unit=None))]
+#[pyo3(signature = (arg, errors="raise", dayfirst=false, yearfirst=false, utc=false, format=None, unit=None, origin=None))]
 #[allow(clippy::too_many_arguments)]
 fn to_datetime(
     py: Python<'_>,
@@ -63571,7 +63653,27 @@ fn to_datetime(
     utc: bool,
     format: Option<&str>,
     unit: Option<&str>,
+    origin: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // origin= (it was refused): 'unix' the default, 'julian', a date, or a
+    // number of `unit`s past the epoch (br-frankenpandas-6kaxp).
+    let origin = origin.filter(|origin| !origin.is_none());
+    let origin_number = origin
+        .filter(|origin| !origin.is_instance_of::<pyo3::types::PyBool>())
+        .and_then(|origin| origin.extract::<f64>().ok());
+    let origin_text = match origin {
+        Some(origin) if origin_number.is_none() => Some(origin.str()?.to_string()),
+        _ => None,
+    };
+    #[allow(clippy::cast_possible_truncation)] // whole and inside the i64 range
+    let origin = match (origin_text.as_deref(), origin_number) {
+        (Some("unix"), _) | (None, None) => None,
+        (Some(text), _) => Some(fp_frame::ToDatetimeOrigin::Str(text)),
+        (None, Some(number)) if number.fract() == 0.0 && number.abs() < 9.2e18 => {
+            Some(fp_frame::ToDatetimeOrigin::Int(number as i64))
+        }
+        (None, Some(number)) => Some(fp_frame::ToDatetimeOrigin::Float(number)),
+    };
     let errors = match errors {
         "raise" => fp_frame::DatetimeErrors::Raise,
         "coerce" => fp_frame::DatetimeErrors::Coerce,
@@ -63587,6 +63689,7 @@ fn to_datetime(
         format,
         unit,
         utc,
+        origin,
         errors,
         dayfirst,
         ..Default::default()
@@ -64393,10 +64496,173 @@ fn period_range(
     Ok(PyPeriodIndex { inner })
 }
 
+/// pandas' custom business days (freq 'C'): the weekdays `weekmask` holds
+/// (pandas' 'Mon Tue Wed Thu Fri' by default; day names or seven 0 / 1
+/// digits) that no holiday names.
+struct CustomBusinessCalendar {
+    open: [bool; 7],
+    holidays: HashSet<i64>,
+}
+
+impl CustomBusinessCalendar {
+    const DAY: i64 = 86_400_000_000_000;
+
+    fn new(
+        py: Python<'_>,
+        weekmask: Option<&Bound<'_, PyAny>>,
+        holidays: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        const NAMES: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+        let text = match weekmask {
+            None => "Mon Tue Wed Thu Fri".to_owned(),
+            Some(weekmask) => match weekmask.extract::<String>() {
+                Ok(text) => text,
+                // A list-like is numpy's seven flags, Monday first.
+                Err(_) => {
+                    let flags = weekmask
+                        .try_iter()?
+                        .map(|flag| flag?.is_truthy())
+                        .collect::<PyResult<Vec<bool>>>()?;
+                    if flags.len() != 7 {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                            "A business day weekmask array must have length 7",
+                        ));
+                    }
+                    flags.iter().map(|&open| if open { '1' } else { '0' }).collect()
+                }
+            },
+        };
+        let text = text.trim();
+        let invalid =
+            || PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid weekmask {text:?}"));
+        let mut open = [false; 7];
+        if text.len() == 7 && text.bytes().all(|b| matches!(b, b'0' | b'1')) {
+            for (day, flag) in open.iter_mut().zip(text.bytes()) {
+                *day = flag == b'1';
+            }
+        } else {
+            for name in text.split_whitespace() {
+                let day = NAMES
+                    .iter()
+                    .position(|known| known.eq_ignore_ascii_case(name))
+                    .ok_or_else(invalid)?;
+                open[day] = true;
+            }
+        }
+        let holidays = match holidays {
+            None => HashSet::new(),
+            Some(holidays) => holidays
+                .try_iter()?
+                .map(|holiday| Self::day_of(py, &holiday?))
+                .collect::<PyResult<_>>()?,
+        };
+        Ok(Self { open, holidays })
+    }
+
+    /// The day number (days since 1970-01-01) of a date-like.
+    fn day_of(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<i64> {
+        let stamp = py.get_type::<PyTimestamp>().call1((value,))?;
+        let nanos = stamp.extract::<PyRef<'_, PyTimestamp>>()?.inner.nanos;
+        Ok(nanos.div_euclid(Self::DAY))
+    }
+
+    fn is_open(&self, day: i64) -> bool {
+        // 1970-01-01 was a Thursday (Monday 0).
+        let weekday = usize::try_from((day + 3).rem_euclid(7)).unwrap_or(0);
+        self.open[weekday] && !self.holidays.contains(&day)
+    }
+
+    /// pandas' bdate_range under this calendar: the open days from `start`
+    /// to `end` (their ends as `inclusive` says), `periods` of them on from
+    /// `start` or back from `end`, under freq 'C'.
+    #[allow(clippy::too_many_arguments)]
+    fn days(
+        &self,
+        py: Python<'_>,
+        start: Option<&Bound<'_, PyAny>>,
+        end: Option<&Bound<'_, PyAny>>,
+        periods: Option<usize>,
+        tz: Option<&Bound<'_, PyAny>>,
+        name: Option<&str>,
+        inclusive: &str,
+    ) -> PyResult<PyDatetimeIndex> {
+        if !self.open.iter().any(|&open| open) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "weekmask must contain at least one day",
+            ));
+        }
+        let day = |value: Option<&Bound<'_, PyAny>>| {
+            value
+                .filter(|value| !value.is_none())
+                .map(|value| Self::day_of(py, value))
+                .transpose()
+        };
+        let (first, last) = (day(start)?, day(end)?);
+        let mut days: Vec<i64> = Vec::new();
+        match (first, last, periods) {
+            (Some(first), Some(last), None) => {
+                let (keep_first, keep_last) = match inclusive {
+                    "both" => (true, true),
+                    "left" => (true, false),
+                    "right" => (false, true),
+                    "neither" => (false, false),
+                    _ => {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                            "Inclusive has to be either 'both', 'neither', 'left' or 'right'",
+                        ));
+                    }
+                };
+                days = (first..=last)
+                    .filter(|&day| self.is_open(day))
+                    .filter(|&day| (keep_first || day != first) && (keep_last || day != last))
+                    .collect();
+            }
+            (Some(first), None, Some(count)) => {
+                let mut at = first;
+                while days.len() < count {
+                    if self.is_open(at) {
+                        days.push(at);
+                    }
+                    at += 1;
+                }
+            }
+            (None, Some(last), Some(count)) => {
+                let mut at = last;
+                while days.len() < count {
+                    if self.is_open(at) {
+                        days.push(at);
+                    }
+                    at -= 1;
+                }
+                days.reverse();
+            }
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Of the four parameters: start, end, periods, and freq, exactly three must be specified",
+                ));
+            }
+        }
+        let naive = DatetimeIndex::new(days.into_iter().map(|day| day * Self::DAY).collect())
+            .with_freq(Some("C".to_owned()));
+        let mut inner = match tz.filter(|tz| !tz.is_none()) {
+            Some(zone) => naive
+                .tz_localize(Some(&tz_name(zone)?))
+                .map_err(index_error_to_py)?
+                .with_freq(Some("C".to_owned())),
+            None => naive,
+        };
+        if let Some(name) = name {
+            inner = inner.set_name(LabelName::from(name));
+        }
+        Ok(PyDatetimeIndex { inner })
+    }
+}
+
 /// Return a fixed frequency DatetimeIndex with business day frequency
 /// (pandas `bdate_range`): [`date_range`] with pandas' defaults here, freq
-/// 'B' and normalized endpoints. A custom calendar (`weekmask=`/`holidays=`,
-/// freq 'C') is not supported yet.
+/// 'B' and normalized endpoints; freq 'C' (with `weekmask=` / `holidays=`)
+/// a custom business calendar (see [`CustomBusinessCalendar`]; it was
+/// refused; br-frankenpandas-6kaxp).
 #[pyfunction]
 #[pyo3(signature = (start=None, end=None, periods=None, freq=Some("B"), tz=None, normalize=true, name=None, weekmask=None, holidays=None, inclusive="both"))]
 #[allow(clippy::too_many_arguments)]
@@ -64418,10 +64684,16 @@ fn bdate_range(
             "freq must be specified for bdate_range; use date_range instead",
         ));
     };
-    if weekmask.is_some_and(|w| !w.is_none()) || holidays.is_some_and(|h| !h.is_none()) {
-        return Err(not_implemented(
-            "bdate_range(weekmask=/holidays=), a custom business calendar",
-        ));
+    let weekmask = weekmask.filter(|weekmask| !weekmask.is_none());
+    let holidays = holidays.filter(|holidays| !holidays.is_none());
+    if (weekmask.is_some() || holidays.is_some()) && !freq.starts_with('C') {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "a custom frequency string is required when holidays or weekmask are passed, got frequency {freq}"
+        )));
+    }
+    if freq == "C" {
+        let calendar = CustomBusinessCalendar::new(py, weekmask, holidays)?;
+        return calendar.days(py, start, end, periods, tz, name, inclusive);
     }
     let freq = pyo3::types::PyString::new(py, freq);
     date_range(
@@ -72216,7 +72488,7 @@ fn infer_freq(index: &Bound<'_, PyAny>, warn: bool) -> PyResult<Option<String>> 
         };
     }
     let py = index.py();
-    if let Ok(dt_obj) = to_datetime(py, index, "coerce", false, false, false, None, None) {
+    if let Ok(dt_obj) = to_datetime(py, index, "coerce", false, false, false, None, None, None) {
         let dt_bound = dt_obj.bind(py);
         if let Ok(dti) = dt_bound.extract::<PyRef<'_, PyDatetimeIndex>>() {
             let nanos: Vec<i64> = dti.inner.values().into_iter().flatten().collect();

@@ -19127,3 +19127,59 @@ _SL_CASES = {
 def test_shift_list_and_concat_verify_like_pandas_ox034(case: str) -> None:
     run = _SL_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-6kaxp: to_datetime(format='mixed') reads each numeric
+# day/month string as its own guess (dayfirst was ignored); DataFrame.asof of
+# a list of labels is a frame (a Series of the wrong row); to_period of a
+# 'ME'-like index; to_datetime(origin=), bdate_range(freq='C'), set_flags and
+# attrs= (all refused).
+def _e43_frame(m: Any) -> Any:
+    return m.DataFrame({"v": [1.0, np.nan, 3.0], "w": [10, 20, 30]}, index=[10, 20, 30])
+
+
+def _e43_with_attrs(m: Any) -> list:
+    frame = _e43_frame(m)
+    frame.attrs = {"src": "x"}
+    frame.attrs["n"] = 1
+    return [frame.attrs]
+
+
+_E43_CASES = {
+    "mixed dayfirst": lambda m: [m.to_datetime(["2024-01-05", "05/02/2024"], format="mixed", dayfirst=True)],
+    "mixed dotted dayfirst": lambda m: [m.to_datetime(["05.02.2024"], format="mixed", dayfirst=True)],
+    "mixed day over 12": lambda m: [m.to_datetime(["13/02/2024", "2024-03-01"], format="mixed")],
+    "mixed with time dayfirst": lambda m: [m.to_datetime(["05/02/2024 10:00"], format="mixed", dayfirst=True)],
+    "asof list": lambda m: _e23_shown(_e43_frame(m).asof([15, 25, 5])),
+    "asof list subset": lambda m: _e23_shown(_e43_frame(m).asof([25], subset=["w"])),
+    "to_period of ME": lambda m: [m.DataFrame({"v": [1, 2]}, index=m.date_range("2024-01-31", periods=2, freq="ME")).to_period().index],
+    "to_period of QE and YE": lambda m: [
+        m.date_range("2024-03-31", periods=2, freq="QE").to_period(),
+        m.date_range("2024-12-31", periods=2, freq="YE").to_period(),
+    ],
+    "to_period of MS": lambda m: [m.date_range("2024-01-01", periods=2, freq="MS").to_period()],
+    "origin date": lambda m: [m.to_datetime([1, 2], unit="D", origin="2024-01-01")],
+    "origin number": lambda m: [m.to_datetime([1, 2], unit="D", origin=10)],
+    "custom business holidays": lambda m: [m.bdate_range("2024-01-01", periods=4, freq="C", holidays=["2024-01-03"])],
+    "custom business weekmask": lambda m: [m.bdate_range(end="2024-01-10", periods=3, freq="C", weekmask="Mon Wed Fri")],
+    "custom business digits": lambda m: [m.bdate_range("2024-01-01", "2024-01-10", freq="C", weekmask="1010100")],
+    "custom business weekend start": lambda m: [m.bdate_range("2024-01-06", periods=2, freq="C")],
+    "holidays need C": lambda m: [m.bdate_range("2024-01-01", periods=2, holidays=["2024-01-02"])],
+    "weekmask list length": lambda m: [m.bdate_range("2024-01-01", periods=3, freq="C", weekmask=["Tue", "Thu"])],
+    "set_flags": lambda m: [_e43_frame(m).set_flags(allows_duplicate_labels=False).flags.allows_duplicate_labels],
+    "attrs": _e43_with_attrs,
+    # Negatives: already pandas'.
+    "mixed monthfirst": lambda m: [m.to_datetime(["05/02/2024"], format="mixed")],
+    "asof one label": lambda m: [_e43_frame(m).asof(25)],
+    "to_period of D": lambda m: [m.date_range("2024-01-01", periods=2, freq="D").to_period()],
+    "unit without origin": lambda m: [m.to_datetime([1, 2], unit="D")],
+    "bdate_range B": lambda m: [m.bdate_range("2024-01-05", periods=3)],
+    "flags default": lambda m: [_e43_frame(m).flags.allows_duplicate_labels, _e43_frame(m).attrs],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E43_CASES))
+def test_everyday43_dates_asof_flags_like_pandas_6kaxp(case: str) -> None:
+    run = _E43_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
