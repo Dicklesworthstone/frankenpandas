@@ -6881,8 +6881,7 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
         return Ok(Some(column));
     }
     // A RangeIndex is an Index.
-    let labels = obj
-        .extract::<PyRef<'_, PyIndex>>()
+    let labels = plain_index_ref(obj)
         .ok()
         .map(|idx| idx.inner.labels().to_vec());
     if let Some(labels) = labels {
@@ -7583,7 +7582,7 @@ fn index_arg_freq(obj: &Bound<'_, PyAny>) -> Option<String> {
 /// another (see [`fp_index::DeclaredDtype`]): the rows built on its labels
 /// keep it, as pandas'.
 fn index_arg_declared(obj: &Bound<'_, PyAny>) -> Option<fp_index::DeclaredDtype> {
-    obj.extract::<PyRef<'_, PyIndex>>()
+    plain_index_ref(obj)
         .ok()
         .and_then(|index| index.inner.declared_dtype())
 }
@@ -7591,7 +7590,7 @@ fn index_arg_declared(obj: &Bound<'_, PyAny>) -> Option<fp_index::DeclaredDtype>
 /// The name an Index argument gives the Series built from it, as pandas'
 /// `Series(Index([1, 2], name='a')).name == 'a'`.
 fn py_index_arg_name(obj: &Bound<'_, PyAny>) -> Option<LabelName> {
-    if let Ok(idx) = obj.extract::<PyRef<'_, PyIndex>>() {
+    if let Ok(idx) = plain_index_ref(obj) {
         idx.inner.name().cloned()
     } else if let Ok(dti) = obj.extract::<PyRef<'_, PyDatetimeIndex>>() {
         dti.inner.name().cloned()
@@ -8472,7 +8471,7 @@ fn extract_index_labels(
     default_len: usize,
 ) -> PyResult<Vec<IndexLabel>> {
     if let Some(index) = index {
-        if let Ok(py_idx) = index.extract::<PyRef<'_, PyIndex>>() {
+        if let Ok(py_idx) = plain_index_ref(index) {
             Ok(py_idx.inner.labels().to_vec())
         } else if let Ok(dti) = index.extract::<PyRef<'_, PyDatetimeIndex>>() {
             Ok(dti.inner.clone().into_index().labels().to_vec())
@@ -8617,7 +8616,7 @@ fn extract_columns_names(columns: Option<&Bound<'_, PyAny>>) -> PyResult<Option<
     let Some(cols) = columns else {
         return Ok(None);
     };
-    if let Ok(idx) = cols.extract::<PyRef<'_, PyIndex>>() {
+    if let Ok(idx) = plain_index_ref(cols) {
         let names = idx.inner.labels().iter().map(|l| l.to_string()).collect();
         return Ok(Some(names));
     }
@@ -9205,11 +9204,36 @@ pub struct PyIndex {
 /// anything else through `Index(obj)`.
 pub struct IndexArg(PyIndex);
 
+/// Whether `obj` is one of the typed index classes - DatetimeIndex,
+/// TimedeltaIndex, PeriodIndex, CategoricalIndex, MultiIndex - which are
+/// Index subclasses (br-frankenpandas-myyy1) whose base labels are not what
+/// a plain Index's reader expects (a MultiIndex's are its joined labels).
+fn typed_index_object(obj: &Bound<'_, PyAny>) -> bool {
+    obj.is_instance_of::<PyDatetimeIndex>()
+        || obj.is_instance_of::<PyTimedeltaIndex>()
+        || obj.is_instance_of::<PyPeriodIndex>()
+        || obj.is_instance_of::<PyCategoricalIndex>()
+        || obj.is_instance_of::<PyMultiIndex>()
+}
+
+/// `obj` as a plain Index object (an Index, a RangeIndex, a Series' or
+/// frame's `.index`), for the readers of index-like arguments: a typed
+/// index class is refused here, as before it was an Index subclass, so each
+/// reader keeps its own handling of those.
+fn plain_index_ref<'py>(obj: &Bound<'py, PyAny>) -> PyResult<PyRef<'py, PyIndex>> {
+    if typed_index_object(obj) {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "a typed index is not a plain Index here",
+        ));
+    }
+    obj.extract::<PyRef<'py, PyIndex>>().map_err(Into::into)
+}
+
 impl<'a, 'py> FromPyObject<'a, 'py> for IndexArg {
     type Error = PyErr;
 
     fn extract(obj: pyo3::Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
-        if let Ok(index) = obj.extract::<PyRef<'_, PyIndex>>() {
+        if let Ok(index) = plain_index_ref(&obj) {
             return Ok(Self(index.clone()));
         }
         // The typed index classes carry their labels directly.
@@ -9474,6 +9498,8 @@ impl PyOwnedDatetimeIndex {
         let columns = slf.columns;
         let base = slf.as_super();
         base.inner = base.inner.set_names(name.clone());
+        let index = base.as_super();
+        index.inner = index.inner.set_names(name.clone());
         rename_owner_index(owner.bind(py), name, columns)
     }
 }
@@ -9502,6 +9528,8 @@ impl PyOwnedTimedeltaIndex {
         let columns = slf.columns;
         let base = slf.as_super();
         base.inner = base.inner.set_names(name.clone());
+        let index = base.as_super();
+        index.inner = index.inner.set_names(name.clone());
         rename_owner_index(owner.bind(py), name, columns)
     }
 }
@@ -9618,7 +9646,7 @@ impl PyIndex {
             return Ok(py.NotImplemented());
         }
         let labels = labels_ndarray(py, self.inner.labels())?;
-        let (other, name) = match other.extract::<PyRef<'_, PyIndex>>() {
+        let (other, name) = match plain_index_ref(other) {
             Ok(index) => (
                 labels_ndarray(py, index.inner.labels())?,
                 self.inner
@@ -9638,6 +9666,30 @@ impl PyIndex {
             .inner
             .with_dtype_of(&self.inner);
         Ok(Py::new(py, Self { inner })?.into_any())
+    }
+
+    /// A binary operator of this Index: its labels' arithmetic. The typed
+    /// index classes inherit the operators without them - answering
+    /// NotImplemented, Python's TypeError as before they were Index
+    /// subclasses - since those labels are instants, periods, categories or
+    /// joined tuples, not numpy's values (br-frankenpandas-myyy1).
+    fn operator(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>, op: &str) -> PyResult<Py<PyAny>> {
+        if typed_index_object(slf.as_any()) {
+            return Ok(slf.py().NotImplemented());
+        }
+        slf.borrow().arithmetic(slf.py(), other, op)
+    }
+
+    /// A unary operator of this Index (see [`Self::operator`]): a typed
+    /// index class answers Python's TypeError for a missing operator.
+    fn unary_operator(slf: &Bound<'_, Self>, op: &str, operand: &str) -> PyResult<Py<PyAny>> {
+        if typed_index_object(slf.as_any()) {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "bad operand type for {operand}: '{}'",
+                slf.get_type().name()?
+            )));
+        }
+        slf.borrow().unary(slf.py(), op)
     }
 
     /// `-index`, `+index`, `abs(index)`: numpy's answer as an Index.
@@ -9662,7 +9714,7 @@ impl PyIndex {
     fn new(data: Option<&Bound<'_, PyAny>>, name: Option<LabelName>) -> PyResult<Self> {
         let mut labels: Vec<IndexLabel> = Vec::new();
         if let Some(d) = data {
-            if let Ok(idx) = d.extract::<PyRef<'_, PyIndex>>() {
+            if let Ok(idx) = plain_index_ref(d) {
                 let mut inner = idx.inner.clone();
                 if let Some(n) = name {
                     inner = inner.set_name(n);
@@ -9989,95 +10041,93 @@ impl PyIndex {
         op: pyo3::class::basic::CompareOp,
     ) -> PyResult<Bound<'py, PyAny>> {
         let labels = labels_ndarray(py, self.inner.labels())?;
-        let other = match other.extract::<PyRef<'_, PyIndex>>() {
+        let other = match plain_index_ref(other) {
             Ok(index) => labels_ndarray(py, index.inner.labels())?,
             Err(_) => other.clone(),
         };
         labels.rich_compare(other, op)
     }
 
-    fn __add__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.arithmetic(py, other, "__add__")
+    fn __add__(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        Self::operator(slf, other, "__add__")
     }
 
-    fn __radd__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.arithmetic(py, other, "__radd__")
+    fn __radd__(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        Self::operator(slf, other, "__radd__")
     }
 
-    fn __sub__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.arithmetic(py, other, "__sub__")
+    fn __sub__(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        Self::operator(slf, other, "__sub__")
     }
 
-    fn __rsub__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.arithmetic(py, other, "__rsub__")
+    fn __rsub__(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        Self::operator(slf, other, "__rsub__")
     }
 
-    fn __mul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.arithmetic(py, other, "__mul__")
+    fn __mul__(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        Self::operator(slf, other, "__mul__")
     }
 
-    fn __rmul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.arithmetic(py, other, "__rmul__")
+    fn __rmul__(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        Self::operator(slf, other, "__rmul__")
     }
 
-    fn __truediv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.arithmetic(py, other, "__truediv__")
+    fn __truediv__(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        Self::operator(slf, other, "__truediv__")
     }
 
-    fn __rtruediv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.arithmetic(py, other, "__rtruediv__")
+    fn __rtruediv__(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        Self::operator(slf, other, "__rtruediv__")
     }
 
-    fn __floordiv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.arithmetic(py, other, "__floordiv__")
+    fn __floordiv__(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        Self::operator(slf, other, "__floordiv__")
     }
 
-    fn __rfloordiv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.arithmetic(py, other, "__rfloordiv__")
+    fn __rfloordiv__(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        Self::operator(slf, other, "__rfloordiv__")
     }
 
-    fn __mod__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.arithmetic(py, other, "__mod__")
+    fn __mod__(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        Self::operator(slf, other, "__mod__")
     }
 
-    fn __rmod__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.arithmetic(py, other, "__rmod__")
+    fn __rmod__(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        Self::operator(slf, other, "__rmod__")
     }
 
     fn __pow__(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         other: &Bound<'_, PyAny>,
         modulo: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         if modulo.is_some_and(|modulo| !modulo.is_none()) {
-            return Ok(py.NotImplemented());
+            return Ok(slf.py().NotImplemented());
         }
-        self.arithmetic(py, other, "__pow__")
+        Self::operator(slf, other, "__pow__")
     }
 
     fn __rpow__(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         other: &Bound<'_, PyAny>,
         modulo: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         if modulo.is_some_and(|modulo| !modulo.is_none()) {
-            return Ok(py.NotImplemented());
+            return Ok(slf.py().NotImplemented());
         }
-        self.arithmetic(py, other, "__rpow__")
+        Self::operator(slf, other, "__rpow__")
     }
 
-    fn __neg__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.unary(py, "__neg__")
+    fn __neg__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        Self::unary_operator(slf, "__neg__", "unary -")
     }
 
-    fn __pos__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.unary(py, "__pos__")
+    fn __pos__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        Self::unary_operator(slf, "__pos__", "unary +")
     }
 
-    fn __abs__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.unary(py, "__abs__")
+    fn __abs__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        Self::unary_operator(slf, "__abs__", "abs()")
     }
 
     /// `reversed(index)`: the labels last to first (it raised TypeError, an
@@ -10293,9 +10343,7 @@ impl PyIndex {
     /// pandas' `Index.equals`: same labels in the same order, names ignored;
     /// anything that is not an Index is False (a list raised TypeError).
     fn equals(&self, other: &Bound<'_, PyAny>) -> bool {
-        other
-            .extract::<PyRef<'_, PyIndex>>()
-            .is_ok_and(|other| self.inner.equals(&other.inner))
+        plain_index_ref(other).is_ok_and(|other| self.inner.equals(&other.inner))
     }
 
     #[getter]
@@ -10709,7 +10757,7 @@ impl PyIndex {
     /// pandas' `identical`: `equals` with the same name and the same class
     /// (a RangeIndex is not identical to an Index of its labels).
     fn identical(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
-        let Ok(other_index) = other.extract::<PyRef<'_, PyIndex>>() else {
+        let Ok(other_index) = plain_index_ref(other) else {
             return Ok(false);
         };
         Ok(
@@ -11104,7 +11152,7 @@ impl PyIndex {
     }
 
     fn is_(&self, other: &Bound<'_, PyAny>) -> bool {
-        if let Ok(other_idx) = other.extract::<PyRef<'_, PyIndex>>() {
+        if let Ok(other_idx) = plain_index_ref(other) {
             self.inner.is_(&other_idx.inner)
         } else {
             false
@@ -11336,7 +11384,7 @@ impl PyIndex {
     }
 
     fn get_indexer_for(&self, target: &Bound<'_, PyAny>) -> PyResult<Vec<i64>> {
-        let target_idx = if let Ok(py_idx) = target.extract::<PyRef<'_, PyIndex>>() {
+        let target_idx = if let Ok(py_idx) = plain_index_ref(target) {
             py_idx.inner.clone()
         } else {
             let py_idx = PyIndex::new(Some(target), None)?;
@@ -11354,7 +11402,7 @@ impl PyIndex {
         &self,
         target: &Bound<'_, PyAny>,
     ) -> PyResult<(Vec<isize>, Vec<usize>)> {
-        let target_idx = if let Ok(py_idx) = target.extract::<PyRef<'_, PyIndex>>() {
+        let target_idx = if let Ok(py_idx) = plain_index_ref(target) {
             py_idx.inner.clone()
         } else {
             let py_idx = PyIndex::new(Some(target), None)?;
@@ -11458,7 +11506,7 @@ impl PyIndex {
         sort: bool,
     ) -> PyResult<Py<PyAny>> {
         unsupported_params("Index.join", &[("level", level.is_none())])?;
-        let other_idx = if let Ok(py_idx) = other.extract::<PyRef<'_, PyIndex>>() {
+        let other_idx = if let Ok(py_idx) = plain_index_ref(other) {
             py_idx.inner.clone()
         } else {
             let py_idx = PyIndex::new(Some(other), None)?;
@@ -11501,7 +11549,7 @@ impl PyIndex {
                 ("tolerance", tolerance.is_none()),
             ],
         )?;
-        let target_idx = if let Ok(py_idx) = target.extract::<PyRef<'_, PyIndex>>() {
+        let target_idx = if let Ok(py_idx) = plain_index_ref(target) {
             py_idx.inner.clone()
         } else {
             let py_idx = PyIndex::new(Some(target), None)?;
@@ -11634,12 +11682,38 @@ impl PyIndex {
     }
 }
 
-/// Python wrapper for FrankenPandas DatetimeIndex.
-#[pyclass(name = "DatetimeIndex", from_py_object, subclass)]
+/// Python wrapper for FrankenPandas DatetimeIndex: a subclass of Index, as
+/// pandas' (`isinstance(dti, pd.Index)` was False; br-frankenpandas-myyy1).
+#[pyclass(extends = PyIndex, name = "DatetimeIndex", from_py_object, subclass)]
 #[derive(Clone)]
 pub struct PyDatetimeIndex {
     pub(crate) inner: DatetimeIndex,
 }
+
+/// The typed index classes extend [`PyIndex`], whose labels are the typed
+/// index's own: each object is built over that base (as `Py::new` and a
+/// `#[new]` build it), and returned by value as that object.
+macro_rules! index_subclass_object {
+    ($class:ty) => {
+        impl From<$class> for pyo3::PyClassInitializer<$class> {
+            fn from(index: $class) -> Self {
+                pyo3::PyClassInitializer::from(index.as_py_index()).add_subclass(index)
+            }
+        }
+
+        impl<'py> IntoPyObject<'py> for $class {
+            type Target = $class;
+            type Output = Bound<'py, $class>;
+            type Error = PyErr;
+
+            fn into_pyobject(self, py: Python<'py>) -> PyResult<Bound<'py, $class>> {
+                Bound::new(py, self)
+            }
+        }
+    };
+}
+
+index_subclass_object!(PyDatetimeIndex);
 
 /// Whether the index's wall clock is the run `freqstr` generates from its
 /// first label (pandas' `_validate_frequency`); an empty index follows any.
@@ -11900,7 +11974,7 @@ impl PyDatetimeIndex {
         let mut inner = if let Some(d) = data {
             if let Ok(dti) = d.extract::<PyRef<'_, PyDatetimeIndex>>() {
                 dti.inner.clone()
-            } else if let Ok(idx) = d.extract::<PyRef<'_, PyIndex>>() {
+            } else if let Ok(idx) = plain_index_ref(d) {
                 DatetimeIndex::from_index(idx.inner.clone())
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
             } else if let Ok(s) = d.extract::<PyRef<'_, PySeries>>() {
@@ -12022,9 +12096,13 @@ impl PyDatetimeIndex {
         axis_name_to_py(py, self.inner.name())
     }
 
+    /// `index.name = value`: this index and its base Index's labels.
     #[setter]
-    fn set_name(&mut self, name: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.inner = self.inner.set_names(py_axis_name(name)?);
+    fn set_name(mut slf: PyRefMut<'_, Self>, name: &Bound<'_, PyAny>) -> PyResult<()> {
+        let name = py_axis_name(name)?;
+        slf.inner = slf.inner.set_names(name.clone());
+        let base = slf.as_super();
+        base.inner = base.inner.set_names(name);
         Ok(())
     }
 
@@ -12798,7 +12876,7 @@ impl PyDatetimeIndex {
             None => self.inner.name().cloned().unwrap_or_default(),
         };
         let idx = if let Some(i_obj) = index {
-            if let Ok(py_idx) = i_obj.extract::<PyRef<'_, PyIndex>>() {
+            if let Ok(py_idx) = plain_index_ref(i_obj) {
                 py_idx.inner.clone()
             } else {
                 self.inner.as_index().clone()
@@ -13727,15 +13805,55 @@ fn extract_index_names_flexible(
     Ok(Some(vec![py_axis_name(names_obj)?]))
 }
 
-/// Python wrapper for FrankenPandas MultiIndex.
-#[pyclass(name = "MultiIndex", from_py_object)]
+/// Python wrapper for FrankenPandas MultiIndex: a subclass of Index (see
+/// [`PyDatetimeIndex`]).
+#[pyclass(extends = PyIndex, name = "MultiIndex", from_py_object)]
 #[derive(Clone)]
 pub struct PyMultiIndex {
     pub(crate) inner: MultiIndex,
 }
 
+index_subclass_object!(PyMultiIndex);
+
+impl PyMultiIndex {
+    /// The base Index's labels: the tuples flattened with the levels
+    /// attached, as an axis holding this MultiIndex keeps it.
+    fn as_py_index(&self) -> PyIndex {
+        let flat = self.inner.to_flat_index(", ");
+        PyIndex {
+            inner: flat
+                .clone()
+                .with_row_multiindex(self.inner.clone())
+                .unwrap_or(flat),
+        }
+    }
+}
+
 #[pymethods]
 impl PyMultiIndex {
+    /// `np.asarray(mi)`: its tuples in a 1-D object array, as pandas' (a
+    /// 0-d array holding the MultiIndex; br-frankenpandas-myyy1).
+    #[pyo3(signature = (dtype=None, copy=None))]
+    fn __array__<'py>(
+        slf: &Bound<'py, Self>,
+        dtype: Option<&Bound<'py, PyAny>>,
+        copy: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let _ = copy;
+        let tuples = slf.try_iter()?.collect::<PyResult<Vec<_>>>()?;
+        let array = slf
+            .py()
+            .import("numpy")?
+            .call_method1("empty", (tuples.len(), "object"))?;
+        for (position, tuple) in tuples.into_iter().enumerate() {
+            array.set_item(position, tuple)?;
+        }
+        match dtype.filter(|dtype| !dtype.is_none()) {
+            Some(dtype) => array.call_method1("astype", (dtype,)),
+            None => Ok(array),
+        }
+    }
+
     #[staticmethod]
     #[pyo3(signature = (tuples, sortorder=None, names=None))]
     fn from_tuples(
@@ -14458,7 +14576,7 @@ impl PyMultiIndex {
             .transpose()?
             .unwrap_or_default();
         let idx = if let Some(i_obj) = index {
-            if let Ok(py_idx) = i_obj.extract::<PyRef<'_, PyIndex>>() {
+            if let Ok(py_idx) = plain_index_ref(i_obj) {
                 py_idx.inner.clone()
             } else {
                 self.inner.to_flat_index("/")
@@ -14672,7 +14790,7 @@ impl PyMultiIndex {
     ) -> PyResult<Vec<Option<usize>>> {
         let where_idx = if let Ok(py_mi) = where_.extract::<PyRef<'_, PyMultiIndex>>() {
             py_mi.inner.to_flat_index("/")
-        } else if let Ok(py_idx) = where_.extract::<PyRef<'_, PyIndex>>() {
+        } else if let Ok(py_idx) = plain_index_ref(where_) {
             py_idx.inner.clone()
         } else {
             PyIndex::new(Some(where_), None)?.inner
@@ -15419,12 +15537,15 @@ impl PyMultiIndex {
     }
 }
 
-/// Python wrapper for FrankenPandas TimedeltaIndex.
-#[pyclass(name = "TimedeltaIndex", from_py_object, subclass)]
+/// Python wrapper for FrankenPandas TimedeltaIndex: a subclass of Index
+/// (see [`PyDatetimeIndex`]).
+#[pyclass(extends = PyIndex, name = "TimedeltaIndex", from_py_object, subclass)]
 #[derive(Clone)]
 pub struct PyTimedeltaIndex {
     pub(crate) inner: TimedeltaIndex,
 }
+
+index_subclass_object!(PyTimedeltaIndex);
 
 impl PyTimedeltaIndex {
     /// A `slice_locs` bound: a duration string is the Timedelta it parses
@@ -15687,10 +15808,14 @@ impl PyTimedeltaIndex {
         axis_name_to_py(py, self.inner.name())
     }
 
-    /// `index.name = value` (pandas' Index name is writable; it raised).
+    /// `index.name = value` (pandas' Index name is writable; it raised):
+    /// this index and its base Index's labels.
     #[setter]
-    fn set_name(&mut self, name: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.inner = self.inner.set_names(py_axis_name(name)?);
+    fn set_name(mut slf: PyRefMut<'_, Self>, name: &Bound<'_, PyAny>) -> PyResult<()> {
+        let name = py_axis_name(name)?;
+        slf.inner = slf.inner.set_names(name.clone());
+        let base = slf.as_super();
+        base.inner = base.inner.set_names(name);
         Ok(())
     }
 
@@ -16203,7 +16328,7 @@ impl PyTimedeltaIndex {
             None => self.inner.name().cloned().unwrap_or_default(),
         };
         let idx = if let Some(i_obj) = index {
-            if let Ok(py_idx) = i_obj.extract::<PyRef<'_, PyIndex>>() {
+            if let Ok(py_idx) = plain_index_ref(i_obj) {
                 py_idx.inner.clone()
             } else {
                 self.inner.as_index().clone()
@@ -17161,12 +17286,15 @@ impl PyRangeIndex {
     }
 }
 
-/// Python wrapper for FrankenPandas PeriodIndex.
-#[pyclass(name = "PeriodIndex", from_py_object)]
+/// Python wrapper for FrankenPandas PeriodIndex: a subclass of Index (see
+/// [`PyDatetimeIndex`]).
+#[pyclass(extends = PyIndex, name = "PeriodIndex", from_py_object)]
 #[derive(Clone)]
 pub struct PyPeriodIndex {
     pub(crate) inner: PeriodIndex,
 }
+
+index_subclass_object!(PyPeriodIndex);
 
 /// pandas' PeriodIndex field (year, month, quarter, ...): an int64 Index, a
 /// NaT period's field -1 (pandas' period field arrays). It was a list
@@ -17694,7 +17822,7 @@ impl PyPeriodIndex {
             None => self.inner.name().cloned().unwrap_or_default(),
         };
         let final_idx = if let Some(i_obj) = index {
-            if let Ok(py_idx) = i_obj.extract::<PyRef<'_, PyIndex>>() {
+            if let Ok(py_idx) = plain_index_ref(i_obj) {
                 py_idx.inner.clone()
             } else {
                 idx.clone()
@@ -18403,12 +18531,15 @@ impl PyPeriodIndex {
     }
 }
 
-/// Python wrapper for FrankenPandas CategoricalIndex.
-#[pyclass(name = "CategoricalIndex", from_py_object)]
+/// Python wrapper for FrankenPandas CategoricalIndex: a subclass of Index
+/// (see [`PyDatetimeIndex`]).
+#[pyclass(extends = PyIndex, name = "CategoricalIndex", from_py_object)]
 #[derive(Clone)]
 pub struct PyCategoricalIndex {
     pub(crate) inner: CategoricalIndex,
 }
+
+index_subclass_object!(PyCategoricalIndex);
 
 impl PyCategoricalIndex {
     /// Its labels as a column: a categorical one (to_series / to_frame).
@@ -18836,7 +18967,7 @@ impl PyCategoricalIndex {
             None => self.inner.name().cloned().unwrap_or_default(),
         };
         let final_idx = if let Some(i_obj) = index {
-            if let Ok(py_idx) = i_obj.extract::<PyRef<'_, PyIndex>>() {
+            if let Ok(py_idx) = plain_index_ref(i_obj) {
                 py_idx.inner.clone()
             } else {
                 idx.clone()
@@ -18995,7 +19126,7 @@ impl PyCategoricalIndex {
     fn append(&self, other: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
         let other_idx = if let Ok(ci) = other.extract::<PyRef<'_, PyCategoricalIndex>>() {
             ci.inner.to_index()
-        } else if let Ok(idx) = other.extract::<PyRef<'_, PyIndex>>() {
+        } else if let Ok(idx) = plain_index_ref(other) {
             idx.inner.clone()
         } else {
             PyIndex::new(Some(other), None)?.inner
@@ -25214,7 +25345,7 @@ impl PySeries {
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
             return Ok(Py::new(py, PySeries { inner: s })?.into_any());
         }
-        if let Ok(idx) = key.extract::<PyRef<'_, PyIndex>>() {
+        if let Ok(idx) = plain_index_ref(key) {
             let labels = idx.inner.labels().to_vec();
             let s = self
                 .inner
@@ -35621,7 +35752,7 @@ impl PyDataFrame {
             return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
         }
         // `df[index]` with an Index -> select columns
-        if let Ok(idx) = key.extract::<PyRef<'_, PyIndex>>() {
+        if let Ok(idx) = plain_index_ref(key) {
             let cols: Vec<String> = idx
                 .inner
                 .labels()
@@ -44070,7 +44201,7 @@ impl PyDataFrame {
             }
             return Ok(out);
         }
-        let lbls = if let Ok(py_idx) = labels.extract::<PyRef<'_, PyIndex>>() {
+        let lbls = if let Ok(py_idx) = plain_index_ref(labels) {
             py_idx.inner.labels().to_vec()
         } else if let Ok(list) = labels.cast::<PyList>() {
             let mut v = Vec::with_capacity(list.len());
@@ -49247,7 +49378,7 @@ impl PySeriesStringAccessor {
             // pandas' TypeError).
             let array = |item: &Bound<'_, PyAny>| {
                 item.extract::<PyRef<'_, PySeries>>().is_ok()
-                    || item.extract::<PyRef<'_, PyIndex>>().is_ok()
+                    || plain_index_ref(item).is_ok()
                     || (item.hasattr("__array__").unwrap_or(false)
                         && item.extract::<PyRef<'_, PyDataFrame>>().is_err()
                         && ndim(item) == Some(1))
@@ -50856,7 +50987,7 @@ fn window_select(frame: Option<&DataFrame>, key: &Bound<'_, PyAny>) -> PyResult<
     let many = key.is_instance_of::<PyList>()
         || key.is_instance_of::<PyTuple>()
         || key.extract::<PyRef<'_, PySeries>>().is_ok()
-        || key.extract::<PyRef<'_, PyIndex>>().is_ok()
+        || plain_index_ref(key).is_ok()
         || key.get_type().name()?.to_cow()? == "ndarray";
     if !many {
         return match frame.and_then(|frame| frame_column_name_for(frame, key)) {
@@ -54140,7 +54271,7 @@ fn resolve_groupby_keys(
             || key.cast::<PyList>().is_ok()
             || key.extract::<PyRef<'_, PySeries>>().is_ok()
             || key.get_type().name().is_ok_and(|name| name == "ndarray")
-            || key.extract::<PyRef<'_, PyIndex>>().is_ok()
+            || plain_index_ref(key).is_ok()
             || key.extract::<PyRef<'_, PyDatetimeIndex>>().is_ok()
             || key.extract::<PyRef<'_, PyTimedeltaIndex>>().is_ok()
     };
@@ -64532,7 +64663,7 @@ fn to_datetime(
         .map_err(index_error_to_py)?;
         return Ok(Py::new(py, PyDatetimeIndex { inner })?.into_any());
     }
-    if let Ok(idx) = arg.extract::<PyRef<'_, PyIndex>>() {
+    if let Ok(idx) = plain_index_ref(arg) {
         let values: Vec<Scalar> = idx
             .inner
             .labels()
@@ -64958,7 +65089,7 @@ fn isna(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let res = s.isna()?;
         return Ok(Py::new(py, res)?.into_any());
     }
-    if let Ok(idx) = obj.extract::<PyRef<'_, PyIndex>>() {
+    if let Ok(idx) = plain_index_ref(obj) {
         return Ok(idx.isna().into_pyobject(py)?.unbind());
     }
     if let Ok(dti) = obj.extract::<PyRef<'_, PyDatetimeIndex>>() {
@@ -65121,7 +65252,7 @@ fn to_timedelta(
         )?
         .into_any());
     }
-    if let Ok(idx) = arg.extract::<PyRef<'_, PyIndex>>() {
+    if let Ok(idx) = plain_index_ref(arg) {
         let values: Vec<Scalar> = idx
             .inner
             .labels()
@@ -66538,8 +66669,8 @@ fn assert_index_equal(
 ) -> PyResult<()> {
     assert_equal_kwargs("assert_index_equal", kwargs)?;
     let exact = exact.map_or(Ok(true), assert_type_flag)?;
-    let l_idx = left.extract::<PyRef<'_, PyIndex>>()?;
-    let r_idx = right.extract::<PyRef<'_, PyIndex>>()?;
+    let l_idx = plain_index_ref(left)?;
+    let r_idx = plain_index_ref(right)?;
     assert_indexes_equal(
         "Index",
         &l_idx.inner,
@@ -66713,7 +66844,7 @@ fn is_string_dtype_impl(obj: &Bound<'_, PyAny>) -> bool {
             return series.inner.values().iter().all(text);
         }
     }
-    if let Ok(index) = obj.extract::<PyRef<'_, PyIndex>>()
+    if let Ok(index) = plain_index_ref(obj)
         && index.inner.dtype() == "object"
     {
         return index
@@ -67265,7 +67396,7 @@ fn unique(py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     if let Ok(s) = values.extract::<PyRef<'_, PySeries>>() {
         return s.unique(py);
     }
-    if let Ok(idx) = values.extract::<PyRef<'_, PyIndex>>() {
+    if let Ok(idx) = plain_index_ref(values) {
         // A numpy array, as pandas 2.2's pd.unique of an Index (it was a
         // list; fvsao.30).
         return Ok(labels_ndarray(py, idx.unique(None)?.inner.labels())?.unbind());
@@ -67308,7 +67439,7 @@ fn factorize(
     // deprecates what is not an ndarray (a list; it was an Index for every
     // input; br-frankenpandas-c5b7x).
     let keeps_index = values.extract::<PyRef<'_, PySeries>>().is_ok()
-        || values.extract::<PyRef<'_, PyIndex>>().is_ok()
+        || plain_index_ref(values).is_ok()
         || values.extract::<PyRef<'_, PyCategorical>>().is_ok();
     if !keeps_index && !values.is_instance(&py.import("numpy")?.getattr("ndarray")?)? {
         PyErr::warn(
@@ -73269,7 +73400,7 @@ fn infer_freq(index: &Bound<'_, PyAny>, warn: bool) -> PyResult<Option<String>> 
             )),
         };
     }
-    if let Ok(py_idx) = index.extract::<PyRef<'_, PyIndex>>() {
+    if let Ok(py_idx) = plain_index_ref(index) {
         return match fp_index::infer_freq(&py_idx.inner) {
             Ok(f) => Ok(f),
             Err(fp_index::DateRangeError::InsufficientDates) => {
@@ -74742,7 +74873,7 @@ fn passed<'py>(obj: Option<&Bound<'py, PyAny>>) -> Option<Bound<'py, PyAny>> {
 /// `columns=`): a list, tuple, set or Index gives its labels; anything else,
 /// a string included, is one label.
 fn py_label_list(obj: &Bound<'_, PyAny>) -> PyResult<Vec<IndexLabel>> {
-    if let Ok(index) = obj.extract::<PyRef<'_, PyIndex>>() {
+    if let Ok(index) = plain_index_ref(obj) {
         return Ok(index.inner.labels().to_vec());
     }
     if obj.is_instance_of::<PyList>()

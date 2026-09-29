@@ -19426,3 +19426,55 @@ _E46_CASES = {
 def test_everyday46_partition_where_cut_intervals_like_pandas_oq1df(case: str) -> None:
     run = _E46_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-myyy1: DatetimeIndex, TimedeltaIndex, PeriodIndex,
+# CategoricalIndex and MultiIndex are Index subclasses (isinstance was
+# False), and numpy reads each as its values.
+def _e47_indexes(m: Any) -> dict:
+    return {
+        "dates": m.date_range("2024-01-01", periods=2, freq="D", name="d"),
+        "durations": m.to_timedelta(["1d", "2d"]),
+        "periods": m.period_range("2024-01", periods=2, freq="M"),
+        "categories": m.CategoricalIndex(["a", "b"], name="c"),
+        "levels": m.MultiIndex.from_tuples([("a", 1), ("b", 2)], names=["k", "n"]),
+    }
+
+
+def _e47_renamed(m: Any, kind: str) -> list:
+    index = _e47_indexes(m)[kind].copy()
+    index.name = "w"
+    return [str(index.name), str(index.to_series().index.name)]
+
+
+_E47_CASES = {
+    **{
+        f"isinstance {kind}": (lambda m, kind=kind: [isinstance(_e47_indexes(m)[kind], m.Index)])
+        for kind in ["dates", "durations", "periods", "categories", "levels"]
+    },
+    **{
+        f"issubclass {name}": (lambda m, name=name: [issubclass(getattr(m, name), m.Index)])
+        for name in ["DatetimeIndex", "TimedeltaIndex", "PeriodIndex", "CategoricalIndex", "MultiIndex"]
+    },
+    **{
+        f"numpy {kind}": (lambda m, kind=kind: [repr(np.asarray(_e47_indexes(m)[kind]))])
+        for kind in ["durations", "periods", "categories", "levels"]
+    },
+    # Negatives: already pandas' (a renamed index keeps its base Index's
+    # labels in step; a MultiIndex read as an Index argument is its tuples).
+    "renamed dates": lambda m: _e47_renamed(m, "dates"),
+    "renamed durations": lambda m: _e47_renamed(m, "durations"),
+    "isinstance RangeIndex": lambda m: [isinstance(m.RangeIndex(3), m.Index)],
+    "isinstance Series": lambda m: [isinstance(m.Series([1]), m.Index)],
+    "isinstance own class": lambda m: [isinstance(_e47_indexes(m)["dates"], m.DatetimeIndex)],
+    "numpy dates": lambda m: [repr(np.asarray(_e47_indexes(m)["dates"]))],
+    "Index of a MultiIndex": lambda m: [m.Index(_e47_indexes(m)["levels"])],
+    "Index union MultiIndex": lambda m: [m.Index([10]).union(_e47_indexes(m)["levels"])],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E47_CASES))
+def test_everyday47_index_subclasses_like_pandas_myyy1(case: str) -> None:
+    run = _E47_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
