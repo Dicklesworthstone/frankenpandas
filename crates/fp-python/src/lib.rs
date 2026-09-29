@@ -48385,6 +48385,9 @@ pub struct PyRolling {
     on: Option<String>,
     /// pandas' `method='table'` (numba's), which this binding does not run.
     table: bool,
+    /// The columns selected from a frame windowed along `on` (the frame
+    /// holds them and `on`); without `on` a selection is its own target.
+    select: Option<WindowSelect>,
 }
 
 /// pandas' `rolling(window, min_periods=None, center=False, win_type=None,
@@ -48493,7 +48496,76 @@ fn rolling_of(
         step,
         on: on.map(str::to_owned),
         table: method == "table",
+        select: None,
     })
+}
+
+/// A window's column selection (`df.rolling(2)['w']`, `[['w', 'v']]`, `.w`):
+/// the column keys asked for, and whether one label was (a Series answer).
+#[derive(Clone)]
+struct WindowSelect {
+    columns: Vec<String>,
+    single: bool,
+}
+
+/// pandas' selection of `key` from a window over `frame` (None: a Series'
+/// window): a list, tuple, array or Index selects those columns, anything
+/// else one - pandas' KeyError "Columns not found: 'zz'" / "Column not
+/// found: zz" for a label the frame lacks (every label of a Series'
+/// window). It was not subscriptable (br-frankenpandas-cdqwd).
+fn window_select(frame: Option<&DataFrame>, key: &Bound<'_, PyAny>) -> PyResult<WindowSelect> {
+    let key_error = |message: String| PyErr::new::<pyo3::exceptions::PyKeyError, _>(message);
+    let many = key.is_instance_of::<PyList>()
+        || key.is_instance_of::<PyTuple>()
+        || key.extract::<PyRef<'_, PySeries>>().is_ok()
+        || key.extract::<PyRef<'_, PyIndex>>().is_ok()
+        || key.get_type().name()?.to_cow()? == "ndarray";
+    if !many {
+        return match frame.and_then(|frame| frame_column_name_for(frame, key)) {
+            Some(name) => Ok(WindowSelect {
+                columns: vec![name],
+                single: true,
+            }),
+            None => Err(key_error(format!("Column not found: {}", key.str()?))),
+        };
+    }
+    let mut columns = Vec::new();
+    let mut missing = Vec::new();
+    for item in key.try_iter()? {
+        let item = item?;
+        match frame.and_then(|frame| frame_column_name_for(frame, &item)) {
+            Some(name) => columns.push(name),
+            None => missing.push(item.repr()?.to_string()),
+        }
+    }
+    if !missing.is_empty() {
+        return Err(key_error(format!(
+            "Columns not found: {}",
+            missing.join(", ")
+        )));
+    }
+    Ok(WindowSelect {
+        columns,
+        single: false,
+    })
+}
+
+/// The selected columns of `frame`: one as a Series, several as a frame.
+fn window_selection_target(frame: &DataFrame, select: &WindowSelect) -> PyResult<ResampleTarget> {
+    if select.single {
+        let name = &select.columns[0];
+        let column = frame
+            .column(name)
+            .cloned()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(name.clone()))?;
+        let series =
+            Series::new(name.as_str(), frame.index().clone(), column).map_err(frame_error_to_py)?;
+        return Ok(ResampleTarget::Series(series));
+    }
+    let names: Vec<&str> = select.columns.iter().map(String::as_str).collect();
+    Ok(ResampleTarget::DataFrame(
+        frame.select_columns(&names).map_err(frame_error_to_py)?,
+    ))
 }
 
 /// The dtypes a window aggregation reads as float64, as pandas' (bool and
@@ -48943,7 +49015,83 @@ impl PyRolling {
             step: self.step,
             on: self.on.clone(),
             table: self.table,
+            select: None,
         }
+    }
+
+    /// These windows over the columns `key` selects (see
+    /// [`window_select`]): the selection itself without `on`, else the
+    /// selection beside `on`, answered as pandas lays it out
+    /// ([`Self::frame_out`]; br-frankenpandas-cdqwd).
+    fn selected(&self, key: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let select = window_select(self.dataframe.as_ref(), key)?;
+        let Some(df) = &self.dataframe else {
+            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                "Column not found",
+            ));
+        };
+        let mut window = self.with_frame(df.clone());
+        match self.on.as_deref() {
+            None => match window_selection_target(df, &select)? {
+                ResampleTarget::Series(series) => {
+                    window.series = Some(series);
+                    window.dataframe = None;
+                }
+                ResampleTarget::DataFrame(frame) => window.dataframe = Some(frame),
+            },
+            Some(on) => {
+                let mut names: Vec<&str> = select.columns.iter().map(String::as_str).collect();
+                if !names.contains(&on) {
+                    names.push(on);
+                }
+                window.dataframe = Some(df.select_columns(&names).map_err(frame_error_to_py)?);
+                window.select = Some(select);
+            }
+        }
+        Ok(window)
+    }
+
+    /// pandas' columns for windows along `on`: the others sorted (pandas
+    /// takes them as `columns.difference([on])`), `on` put back after the
+    /// columns that stood before it in the selection, or last when the
+    /// selection left it out. They kept the frame's order.
+    fn on_layout(&self, res: DataFrame) -> PyResult<DataFrame> {
+        let (Some(on), Some(source)) = (self.on.as_deref(), &self.dataframe) else {
+            return Ok(res);
+        };
+        let names: Vec<String> = res.column_names().into_iter().cloned().collect();
+        let Some(on_at) = names.iter().position(|name| name == on) else {
+            return Ok(res);
+        };
+        let labels = res.column_labels();
+        let mut others: Vec<usize> = (0..names.len()).filter(|&at| at != on_at).collect();
+        let comparable = others.windows(2).all(|pair| {
+            std::mem::discriminant(&labels[pair[0]]) == std::mem::discriminant(&labels[pair[1]])
+        });
+        if comparable {
+            others.sort_by(|&a, &b| {
+                labels[a]
+                    .partial_cmp(&labels[b])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+        let selected: Vec<String> = match &self.select {
+            Some(select) => select.columns.clone(),
+            None => source.column_names().into_iter().cloned().collect(),
+        };
+        let at = match selected.iter().position(|name| name == on) {
+            Some(on_loc) => others
+                .iter()
+                .filter(|&&other| selected[..on_loc].contains(&names[other]))
+                .count(),
+            None => others.len(),
+        };
+        let mut order = others;
+        order.insert(at, on_at);
+        if order.iter().copied().eq(0..names.len()) {
+            return Ok(res);
+        }
+        res.take_columns(&order).map_err(frame_error_to_py)
     }
 
     /// The Series window: `(t - offset, t]` (closed as `closed` says) over
@@ -49102,12 +49250,20 @@ impl PyRolling {
         pairwise_window_result(py, frame.as_deref(), other.as_ref(), result)
     }
 
-    /// A DataFrame result as pandas returns it, `step=` taken.
+    /// A DataFrame result as pandas returns it, `step=` taken, laid out
+    /// along `on` as pandas' ([`Self::on_layout`]); one column selected
+    /// beside `on` is that column's Series.
     fn frame_out(&self, py: Python<'_>, res: DataFrame) -> PyResult<Py<PyAny>> {
         let res = match self.stepped_rows(res.len())? {
             Some(rows) => res.take(&rows, 0).map_err(frame_error_to_py)?,
             None => res,
         };
+        let res = self.on_layout(res)?;
+        if let Some(select) = self.select.as_ref().filter(|select| select.single)
+            && let ResampleTarget::Series(series) = window_selection_target(&res, select)?
+        {
+            return Ok(Py::new(py, PySeries { inner: series })?.into_any());
+        }
         Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
     }
 
@@ -49210,6 +49366,81 @@ fn rolling_window_arg(window: &Bound<'_, PyAny>) -> PyResult<(usize, Option<Stri
 
 #[pymethods]
 impl PyRolling {
+    /// pandas' column selection: `df.rolling(2)['w']` / `[['w', 'v']]`
+    /// (see [`PyRolling::selected`]; br-frankenpandas-cdqwd).
+    fn __getitem__(&self, key: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.selected(key)
+    }
+
+    /// A frame column as an attribute (`df.rolling(2).w`), as pandas; any
+    /// other name is its AttributeError.
+    fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<Self> {
+        let key = pyo3::types::PyString::new(py, name);
+        if self
+            .dataframe
+            .as_ref()
+            .is_some_and(|df| frame_column_name_for(df, key.as_any()).is_some())
+        {
+            return self.selected(key.as_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+            format!("'Rolling' object has no attribute '{name}'"),
+        ))
+    }
+
+    /// pandas' window attributes (they were missing;
+    /// br-frankenpandas-cdqwd): the row count, or a time window's offset.
+    #[getter]
+    fn window(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.offset {
+            Some(offset) => offset.into_py_any(py),
+            None => self.window.into_py_any(py),
+        }
+    }
+
+    /// As passed; a time window's is 1, as pandas'.
+    #[getter]
+    fn min_periods(&self) -> Option<usize> {
+        self.min_periods.or(self.offset.as_ref().map(|_| 1))
+    }
+
+    #[getter]
+    fn center(&self) -> bool {
+        self.center
+    }
+
+    /// Always None: a weighted window (scipy's) is refused.
+    #[getter]
+    fn win_type(&self) -> Option<String> {
+        None
+    }
+
+    #[getter]
+    fn on(&self) -> Option<String> {
+        self.on.clone()
+    }
+
+    /// As passed (None when left out).
+    #[getter(closed)]
+    fn closed_as_passed(&self) -> Option<String> {
+        self.closed.map(|closed| closed.to_string())
+    }
+
+    #[getter]
+    fn step(&self) -> Option<usize> {
+        self.step
+    }
+
+    #[getter]
+    fn method(&self) -> &'static str {
+        if self.table { "table" } else { "single" }
+    }
+
+    #[getter]
+    fn axis(&self) -> usize {
+        0
+    }
+
     // pandas' signatures (br-frankenpandas-n57tz): numeric_only (a frame's
     // other columns are pandas' DataError, or left out; bool and the
     // nullable numbers are read as float64), engine / engine_kwargs (numba
@@ -49717,6 +49948,61 @@ impl PyExpanding {
 
 #[pymethods]
 impl PyExpanding {
+    /// pandas' column selection, as Rolling's (br-frankenpandas-cdqwd).
+    fn __getitem__(&self, key: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let select = window_select(self.dataframe.as_ref(), key)?;
+        let target = match &self.dataframe {
+            Some(df) => window_selection_target(df, &select)?,
+            None => {
+                return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                    "Column not found",
+                ));
+            }
+        };
+        let (series, dataframe) = match target {
+            ResampleTarget::Series(series) => (Some(series), None),
+            ResampleTarget::DataFrame(frame) => (None, Some(frame)),
+        };
+        Ok(Self {
+            series,
+            dataframe,
+            min_periods: self.min_periods,
+        })
+    }
+
+    /// A frame column as an attribute, as pandas; any other name is its
+    /// AttributeError.
+    fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<Self> {
+        let key = pyo3::types::PyString::new(py, name);
+        if self
+            .dataframe
+            .as_ref()
+            .is_some_and(|df| frame_column_name_for(df, key.as_any()).is_some())
+        {
+            return self.__getitem__(key.as_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+            format!("'Expanding' object has no attribute '{name}'"),
+        ))
+    }
+
+    /// pandas' window attributes (they were missing): min_periods (1 when
+    /// left out), method, axis.
+    #[getter]
+    fn min_periods(&self) -> usize {
+        self.min_periods.unwrap_or(1)
+    }
+
+    #[getter]
+    fn method(&self) -> &'static str {
+        "single"
+    }
+
+    #[getter]
+    fn axis(&self) -> usize {
+        0
+    }
+
     // pandas' signatures, as Rolling's (br-frankenpandas-n57tz).
     #[pyo3(signature = (numeric_only=false, engine=None, engine_kwargs=None))]
     pub fn sum(
@@ -50246,6 +50532,49 @@ impl PyExponentialMovingWindow {
     #[getter]
     pub fn ndim(&self) -> usize {
         if self.series.is_some() { 1 } else { 2 }
+    }
+
+    /// pandas' column selection, as Rolling's (br-frankenpandas-cdqwd).
+    fn __getitem__(&self, key: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let select = window_select(self.dataframe.as_ref(), key)?;
+        let target = match &self.dataframe {
+            Some(df) => window_selection_target(df, &select)?,
+            None => {
+                return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                    "Column not found",
+                ));
+            }
+        };
+        let (series, dataframe) = match target {
+            ResampleTarget::Series(series) => (Some(series), None),
+            ResampleTarget::DataFrame(frame) => (None, Some(frame)),
+        };
+        Ok(Self {
+            series,
+            dataframe,
+            span: self.span,
+            alpha: self.alpha,
+            adjust: self.adjust,
+            min_periods: self.min_periods,
+            ignore_na: self.ignore_na,
+            deltas: self.deltas.clone(),
+        })
+    }
+
+    /// A frame column as an attribute, as pandas; any other name is its
+    /// AttributeError.
+    fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<Self> {
+        let key = pyo3::types::PyString::new(py, name);
+        if self
+            .dataframe
+            .as_ref()
+            .is_some_and(|df| frame_column_name_for(df, key.as_any()).is_some())
+        {
+            return self.__getitem__(key.as_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+            format!("'ExponentialMovingWindow' object has no attribute '{name}'"),
+        ))
     }
 
     // pandas' signatures (br-frankenpandas-n57tz): numeric_only as the
@@ -68914,6 +69243,87 @@ impl PyGroupedWindow {
         })
     }
 
+    /// These windows over the columns `key` selects ([`window_select`]),
+    /// the same groups: a rolling window along `on` indexes the selection by
+    /// that column and runs along it, as pandas (each group's answer then
+    /// keyed by it). It was not subscriptable, and a column attribute ran
+    /// the ungrouped window (br-frankenpandas-cdqwd).
+    fn selected(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let frame = match &self.target {
+            ResampleTarget::DataFrame(frame) => Some(frame),
+            ResampleTarget::Series(_) => None,
+        };
+        let select = window_select(frame, key)?;
+        let Some(frame) = frame else {
+            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                "Column not found",
+            ));
+        };
+        if self.repeated.is_some() {
+            return Err(not_implemented(
+                "a column selection from a groupby window over repeated column names",
+            ));
+        }
+        let mut args = self.args.bind(py).clone();
+        let kwargs = self
+            .kwargs
+            .as_ref()
+            .map(|k| k.bind(py).copy())
+            .transpose()?;
+        let mut on: Option<String> = None;
+        if self.kind == "rolling" {
+            if let Some(kwargs) = &kwargs
+                && let Some(value) = kwargs.get_item("on")?
+            {
+                if !value.is_none() {
+                    on = Some(value.extract()?);
+                }
+                kwargs.del_item("on")?;
+            } else if args.len() > 4 && !args.get_item(4)?.is_none() {
+                on = Some(args.get_item(4)?.extract()?);
+                let mut items: Vec<Bound<'_, PyAny>> = args.iter().collect();
+                items[4] = py.None().into_bound(py);
+                args = PyTuple::new(py, items)?;
+            }
+        }
+        let frame = match &on {
+            Some(on) => frame.set_index(on, true).map_err(frame_error_to_py)?,
+            None => frame.clone(),
+        };
+        // pandas takes a selection along `on` as columns.difference([on]):
+        // sorted.
+        let mut select = select;
+        if on.is_some() {
+            select.columns.sort_by(|a, b| {
+                frame
+                    .column_label(a)
+                    .partial_cmp(&frame.column_label(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+        let target = window_selection_target(&frame, &select)?;
+        Self::new(
+            py,
+            self.kind,
+            target,
+            self.groups.clone(),
+            self.key_names.clone(),
+            None,
+            &args,
+            kwargs.as_ref(),
+        )
+    }
+
+    /// pandas' class of this grouped window, for its AttributeError.
+    fn pandas_class(&self) -> &'static str {
+        match self.kind {
+            "rolling" => "RollingGroupby",
+            "expanding" => "ExpandingGroupby",
+            "ewm" => "ExponentialMovingWindowGroupby",
+            _ => "DatetimeIndexResamplerGroupby",
+        }
+    }
+
     /// The ungrouped window of this kind over `target`.
     fn window_over<'py>(
         &self,
@@ -69036,8 +69446,15 @@ impl PyGroupedWindow {
         format!("GroupbyWindow({}, groups={})", self.kind, self.groups.len())
     }
 
+    /// pandas' column selection (see [`PyGroupedWindow::selected`]).
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.selected(py, key)
+    }
+
     /// A method of the ungrouped window, run per group; a plain attribute
-    /// (`.window`, `.min_periods`) is the same for every group.
+    /// (`.window`, `.min_periods`) is the same for every group; a frame
+    /// column the window has no attribute of selects it (it ran the
+    /// ungrouped window's selection; cdqwd).
     fn __getattr__(slf: PyRef<'_, Self>, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         if name.starts_with('_') {
             return Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
@@ -69045,7 +69462,20 @@ impl PyGroupedWindow {
             ));
         }
         let window = slf.window_over(py, &slf.target)?;
-        let attribute = window.getattr(name)?;
+        if !window.get_type().hasattr(name)?
+            && let ResampleTarget::DataFrame(frame) = &slf.target
+        {
+            let key = pyo3::types::PyString::new(py, name);
+            if frame_column_name_for(frame, key.as_any()).is_some() {
+                return Py::new(py, slf.selected(py, key.as_any())?).map(Py::into_any);
+            }
+        }
+        let attribute = window.getattr(name).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyAttributeError, _>(format!(
+                "'{}' object has no attribute '{name}'",
+                slf.pandas_class()
+            ))
+        })?;
         if !attribute.is_callable() {
             return Ok(attribute.unbind());
         }

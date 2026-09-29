@@ -17435,3 +17435,149 @@ def test_masked_row_reductions_fp_refuses_8u5eh() -> None:
         frame[["i", "B"]].mean(axis=1)
     with pytest.raises(NotImplementedError):
         frame[["i", "I"]].kurt(axis=1)
+
+
+# br-frankenpandas-cdqwd: a window's column selection - df.rolling(2)['w'],
+# [['w', 'v']], .w, the same after expanding / ewm, and after a groupby's
+# rolling / expanding / ewm / resample (a TypeError or AttributeError, and a
+# grouped resample's column attribute ran the ungrouped window); pandas'
+# layout along `on` (the other columns sorted, `on` back in place, a
+# grouped selection keyed by it); the window attributes.
+def _ws_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "g": ["a", "a", "b", "a", "b", "b"],
+            "t": m.to_datetime(
+                ["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05", "2024-01-06"]
+            ),
+            "w": [10, 20, 30, 40, 50, 60],
+            "v": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "s": list("uvwxyz"),
+        }
+    )
+
+
+def _ws_ungrouped(m: Any) -> Any:
+    return _ws_frame(m).drop(columns=["g"])
+
+
+_WS_CASES = {
+    "rolling item": lambda m: _mk_shown(_ws_ungrouped(m).rolling(2)["w"].sum()),
+    "rolling attr": lambda m: _mk_shown(_ws_ungrouped(m).rolling(2).v.mean()),
+    "rolling list": lambda m: _mk_shown(_ws_ungrouped(m).rolling(2)[["w", "v"]].max()),
+    "rolling tuple": lambda m: _mk_shown(_ws_ungrouped(m).rolling(3)[("v", "w")].min()),
+    "rolling item apply": lambda m: _mk_shown(
+        _ws_ungrouped(m).rolling(2)["v"].apply(lambda x: x.iloc[-1] - x.iloc[0])
+    ),
+    "rolling item corr": lambda m: _mk_shown(_ws_ungrouped(m).rolling(3)["v"].corr(_ws_ungrouped(m)["w"])),
+    "rolling on sum": lambda m: _mk_shown(_ws_ungrouped(m)[["t", "w", "v"]].rolling("2D", on="t").sum()),
+    "rolling on in the middle": lambda m: _mk_shown(_ws_ungrouped(m)[["w", "t", "v"]].rolling("2D", on="t").mean()),
+    "rolling on item": lambda m: _mk_shown(_ws_ungrouped(m).rolling("2D", on="t")["w"].sum()),
+    "rolling on list": lambda m: _mk_shown(_ws_ungrouped(m).rolling("2D", on="t")[["w", "v"]].sum()),
+    "rolling on list with on": lambda m: _mk_shown(_ws_ungrouped(m).rolling("2D", on="t")[["w", "t"]].sum()),
+    "expanding item": lambda m: _mk_shown(_ws_ungrouped(m).expanding()["w"].sum()),
+    "expanding list": lambda m: _mk_shown(_ws_ungrouped(m).expanding(2)[["v", "w"]].mean()),
+    "ewm attr": lambda m: _mk_shown(_ws_ungrouped(m).ewm(span=2).v.mean()),
+    "ewm list": lambda m: _mk_shown(_ws_ungrouped(m).ewm(alpha=0.5)[["w", "v"]].std()),
+    "resample item": lambda m: _mk_shown(_ws_ungrouped(m).set_index("t").resample("2D")["w"].sum()),
+    "rolling attributes": lambda m: [
+        _ws_ungrouped(m).rolling(2).window,
+        _ws_ungrouped(m).rolling(2).min_periods,
+        _ws_ungrouped(m).rolling(2, min_periods=1, center=True).center,
+        _ws_ungrouped(m).rolling(2).win_type,
+        _ws_ungrouped(m).rolling(2).on,
+        _ws_ungrouped(m).rolling(2).closed,
+        _ws_ungrouped(m).rolling(2, step=2).step,
+        _ws_ungrouped(m).rolling(2).method,
+        _ws_ungrouped(m).rolling(2).axis,
+    ],
+    "time rolling attributes": lambda m: [
+        _ws_ungrouped(m).rolling("2D", on="t", closed="left").window,
+        _ws_ungrouped(m).rolling("2D", on="t").min_periods,
+        _ws_ungrouped(m).rolling("2D", on="t").on,
+        _ws_ungrouped(m).rolling("2D", on="t", closed="left").closed,
+    ],
+    "expanding attributes": lambda m: [
+        _ws_ungrouped(m).expanding().min_periods,
+        _ws_ungrouped(m).expanding(3).min_periods,
+        _ws_ungrouped(m).expanding().method,
+        _ws_ungrouped(m).expanding().axis,
+    ],
+    "grouped rolling on sum": lambda m: _mk_shown(
+        _ws_frame(m)[["g", "t", "w", "v"]].groupby("g").rolling("2D", on="t").sum()
+    ),
+    "grouped rolling on attr": lambda m: _mk_shown(_ws_frame(m).groupby("g").rolling("2D", on="t").w.sum()),
+    "grouped rolling on item": lambda m: _mk_shown(_ws_frame(m).groupby("g").rolling("2D", on="t")["w"].sum()),
+    "grouped rolling on list": lambda m: _mk_shown(
+        _ws_frame(m).groupby("g").rolling("2D", on="t")[["w", "v"]].sum()
+    ),
+    "grouped rolling attr": lambda m: _mk_shown(_ws_frame(m).groupby("g").rolling(2).w.sum()),
+    "grouped rolling item": lambda m: _mk_shown(_ws_frame(m).groupby("g").rolling(2)["v"].mean()),
+    "grouped rolling list": lambda m: _mk_shown(_ws_frame(m).groupby("g").rolling(2)[["w", "v"]].max()),
+    "grouped expanding attr": lambda m: _mk_shown(_ws_frame(m).groupby("g").expanding().w.sum()),
+    "grouped expanding item": lambda m: _mk_shown(_ws_frame(m).groupby("g").expanding()["v"].mean()),
+    "grouped ewm attr": lambda m: _mk_shown(_ws_frame(m).groupby("g").ewm(span=2).v.mean()),
+    "grouped ewm list": lambda m: _mk_shown(_ws_frame(m).groupby("g").ewm(span=2)[["w", "v"]].mean()),
+    "grouped resample attr": lambda m: _mk_shown(_ws_frame(m).set_index("t").groupby("g").resample("2D").w.sum()),
+    "grouped resample item": lambda m: _mk_shown(
+        _ws_frame(m).set_index("t").groupby("g").resample("2D")["v"].mean()
+    ),
+    "grouped text count": lambda m: _mk_shown(_ws_frame(m).groupby("g").rolling(2)["s"].count()),
+    "grouped window attribute": lambda m: [_ws_frame(m).groupby("g").rolling(2).window],
+    # Negatives: pandas' errors, the selection before the window, and a
+    # column named like a method (the method wins).
+    "missing item": lambda m: _mk_shown(_ws_ungrouped(m).rolling(2)["zz"].sum()),
+    "missing in a list": lambda m: _mk_shown(_ws_ungrouped(m).rolling(2)[["w", "zz"]].sum()),
+    "missing attr": lambda m: [_ws_ungrouped(m).rolling(2).zz],
+    "missing expanding attr": lambda m: [_ws_ungrouped(m).expanding().zz],
+    "a Series window item": lambda m: [_ws_ungrouped(m).w.rolling(2)["w"]],
+    "grouped missing item": lambda m: _mk_shown(_ws_frame(m).groupby("g").rolling(2)["zz"].sum()),
+    "grouped missing attr": lambda m: [_ws_frame(m).groupby("g").rolling(2).zz],
+    "grouped key column": lambda m: _mk_shown(_ws_frame(m).groupby("g").rolling(2)["g"].count()),
+    "select before the window": lambda m: _mk_shown(_ws_frame(m).groupby("g").w.rolling(2).sum()),
+    "a column named sum": lambda m: _mk_shown(
+        m.DataFrame({"sum": [1.0, 2.0, 3.0], "x": [4.0, 5.0, 6.0]}).rolling(2).sum()
+    ),
+    "a column named sum selected": lambda m: _mk_shown(
+        m.DataFrame({"sum": [1.0, 2.0, 3.0], "x": [4.0, 5.0, 6.0]}).rolling(2)["sum"].sum()
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_WS_CASES))
+def test_window_column_selection_like_pandas_cdqwd(case: str) -> None:
+    run = _WS_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-1tkrg: pandas' Index repr per kind - dtype= / name=, a
+# default index's RangeIndex(start=, stop=, step=), a DatetimeIndex's freq=,
+# wrapping and truncation (the fixes landed in 9a57caef1 and the fvsao.18 /
+# fvsao.35 work; this is the bead's named probe).
+_IXREPR_CASES = {
+    "int named": lambda m: [repr(m.Index([1, 1], name="a"))],
+    "set_index": lambda m: [repr(m.DataFrame({"a": [1, 1]}).set_index("a").index)],
+    "float": lambda m: [repr(m.Index([1.5, 2.0]))],
+    "object": lambda m: [repr(m.Index(["x", "y"]))],
+    "bool": lambda m: [repr(m.Index([True, False]))],
+    "range": lambda m: [repr(m.RangeIndex(3))],
+    "a frame's default index": lambda m: [repr(m.DataFrame({"a": [1, 2, 3]}).index)],
+    "datetime": lambda m: [repr(m.DatetimeIndex(["2024-01-01", "2024-01-02"]))],
+    "date_range": lambda m: [repr(m.date_range("2024-01-01", periods=3))],
+    "timedelta": lambda m: [repr(m.to_timedelta(["1s", "2s"]))],
+    "long": lambda m: [repr(m.Index(list(range(200))))],
+    "wrapped": lambda m: [repr(m.Index([f"label_{i}" for i in range(12)]))],
+    "nan": lambda m: [repr(m.Index([1.0, np.nan]))],
+    "columns": lambda m: [repr(m.DataFrame({"a": [1], "b": [2]}).columns)],
+    "categorical": lambda m: [repr(m.CategoricalIndex(["a", "b", "a"]))],
+    "multi": lambda m: [repr(m.MultiIndex.from_tuples([(1, "a"), (2, "b")], names=["x", "y"]))],
+    "duplicate keys": lambda m: [m.DataFrame({"a": [1, 1]}).set_index("a", verify_integrity=True)],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_IXREPR_CASES))
+def test_index_repr_forms_like_pandas_1tkrg(case: str) -> None:
+    run = _IXREPR_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
