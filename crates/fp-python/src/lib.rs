@@ -7615,6 +7615,124 @@ fn py_to_index_label(obj: &Bound<'_, PyAny>) -> PyResult<IndexLabel> {
 /// of an Int64 / Float64 index is a numpy scalar - np.int64(10), not 10 - and
 /// a RangeIndex's a Python int; any other as [`row_label_to_py`]
 /// (br-frankenpandas-x8ql1). Iteration and `tolist` stay Python scalars.
+/// numpy's axis check for a 1-D reduction (pandas' validate_minmax_axis):
+/// None, 0 or -1, anything else its ValueError.
+fn one_dim_axis(axis: Option<i64>) -> PyResult<()> {
+    match axis {
+        None | Some(0 | -1) => Ok(()),
+        Some(_) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "`axis` must be fewer than the number of dimensions (1)",
+        )),
+    }
+}
+
+/// pandas' `Index.min` / `max` (`largest`) with `axis` / `skipna`: the least
+/// or greatest present label; NaN when the index is empty, all missing, or
+/// holds a missing label with skipna=False; a missing label beside text is
+/// Python's TypeError comparing str with float, as pandas' object reduction
+/// raises. A null label sorts after every concrete one, so the max of a
+/// float index holding NaN was the NaN (br-frankenpandas-zvn7a).
+fn index_extreme(
+    py: Python<'_>,
+    index: &Index,
+    largest: bool,
+    axis: Option<i64>,
+    skipna: bool,
+) -> PyResult<Py<PyAny>> {
+    one_dim_axis(axis)?;
+    let labels = index.labels();
+    let present: Vec<&IndexLabel> = labels.iter().filter(|label| !label.is_missing()).collect();
+    let nan = || pyo3::types::PyFloat::new(py, f64::NAN).into_any().unbind();
+    if present.is_empty() || (!skipna && present.len() < labels.len()) {
+        return Ok(nan());
+    }
+    if present.len() < labels.len()
+        && present
+            .iter()
+            .any(|label| matches!(label, IndexLabel::Utf8(_)))
+    {
+        let symbol = if largest { ">=" } else { "<=" };
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "'{symbol}' not supported between instances of 'str' and 'float'"
+        )));
+    }
+    let best = present
+        .iter()
+        .copied()
+        .reduce(|best, label| {
+            if (largest && label > best) || (!largest && label < best) {
+                label
+            } else {
+                best
+            }
+        })
+        .expect("a present label");
+    index_scalar_to_py(py, index, best)
+}
+
+/// pandas' `Index.argmin` / `argmax` (`largest`) with `axis` / `skipna`: the
+/// first position of the least / greatest present label; an empty index is
+/// numpy's ValueError; a missing label with skipna=False, or every label
+/// missing, is -1 with pandas' FutureWarning (`owner` names the class); a
+/// missing label beside text is Python's TypeError. argmax found the NaN,
+/// which sorts last (br-frankenpandas-zvn7a).
+fn index_arg_extreme(
+    py: Python<'_>,
+    index: &Index,
+    owner: &str,
+    largest: bool,
+    axis: Option<i64>,
+    skipna: bool,
+) -> PyResult<Py<PyAny>> {
+    one_dim_axis(axis)?;
+    let labels = index.labels();
+    if labels.is_empty() {
+        let op = if largest { "argmax" } else { "argmin" };
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "attempt to get {op} of an empty sequence"
+        )));
+    }
+    let missing = labels.iter().filter(|label| label.is_missing()).count();
+    if missing > 0 && (!skipna || missing == labels.len()) {
+        let message = std::ffi::CString::new(format!(
+            "The behavior of {owner}.argmax/argmin with skipna=False and NAs, or with all-NAs \
+             is deprecated. In a future version this will raise ValueError."
+        ))
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        PyErr::warn(
+            py,
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            &message,
+            1,
+        )?;
+        return (-1_i64).into_py_any(py);
+    }
+    if missing > 0
+        && labels
+            .iter()
+            .any(|label| matches!(label, IndexLabel::Utf8(_)))
+    {
+        let symbol = if largest { ">" } else { "<" };
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "'{symbol}' not supported between instances of 'float' and 'str'"
+        )));
+    }
+    let mut best: Option<usize> = None;
+    for (position, label) in labels.iter().enumerate() {
+        if label.is_missing() {
+            continue;
+        }
+        let better = best.is_none_or(|at| {
+            let current = &labels[at];
+            (largest && label > current) || (!largest && label < current)
+        });
+        if better {
+            best = Some(position);
+        }
+    }
+    NumpyInt64::from(best.unwrap_or(0)).into_py_any(py)
+}
+
 fn index_scalar_to_py(py: Python<'_>, index: &Index, label: &IndexLabel) -> PyResult<Py<PyAny>> {
     let numeric = |label: &IndexLabel| match label {
         IndexLabel::Int64(value) => Some(Scalar::Int64(*value)),
@@ -9395,18 +9513,16 @@ impl PyIndex {
         Ok(self.inner.duplicated(parse_duplicate_keep(keep)?).into())
     }
 
-    fn min(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        match self.inner.min() {
-            Some(l) => index_scalar_to_py(py, &self.inner, &l),
-            None => Ok(py.None()),
-        }
+    /// pandas' `min(axis=None, skipna=True)` ([`index_extreme`]).
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn min(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
+        index_extreme(py, &self.inner, false, axis, skipna)
     }
 
-    fn max(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        match self.inner.max() {
-            Some(l) => index_scalar_to_py(py, &self.inner, &l),
-            None => Ok(py.None()),
-        }
+    /// pandas' `max(axis=None, skipna=True)` ([`index_extreme`]).
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn max(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
+        index_extreme(py, &self.inner, true, axis, skipna)
     }
 
     fn isin(&self, values: &Bound<'_, PyAny>) -> PyResult<BoolArray> {
@@ -9527,36 +9643,16 @@ impl PyIndex {
         }
     }
 
-    fn argmax(&self) -> PyResult<NumpyInt64> {
-        let labels = self.inner.labels();
-        if labels.is_empty() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "attempt to get argmax of an empty sequence",
-            ));
-        }
-        let mut max_idx = 0;
-        for i in 1..labels.len() {
-            if labels[i] > labels[max_idx] {
-                max_idx = i;
-            }
-        }
-        Ok(max_idx.into())
+    /// pandas' `argmax(axis=None, skipna=True)` ([`index_arg_extreme`]).
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn argmax(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
+        index_arg_extreme(py, &self.inner, "Index", true, axis, skipna)
     }
 
-    fn argmin(&self) -> PyResult<NumpyInt64> {
-        let labels = self.inner.labels();
-        if labels.is_empty() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "attempt to get argmin of an empty sequence",
-            ));
-        }
-        let mut min_idx = 0;
-        for i in 1..labels.len() {
-            if labels[i] < labels[min_idx] {
-                min_idx = i;
-            }
-        }
-        Ok(min_idx.into())
+    /// pandas' `argmin(axis=None, skipna=True)` ([`index_arg_extreme`]).
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn argmin(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
+        index_arg_extreme(py, &self.inner, "Index", false, axis, skipna)
     }
 
     fn argsort(&self) -> IndexerArray {
@@ -10625,6 +10721,15 @@ fn datetime_labels_follow(index: &DatetimeIndex, freqstr: &str) -> PyResult<bool
 }
 
 impl PyDatetimeIndex {
+    /// Whether a label is NaT.
+    fn holds_nat(&self) -> bool {
+        self.inner
+            .as_index()
+            .labels()
+            .iter()
+            .any(IndexLabel::is_missing)
+    }
+
     /// A `slice_locs` bound: a date string is the period it names at its
     /// own resolution, as pandas' partial-string slicing reads it - a start
     /// its first instant, an end (`last`) its last, on the index's wall
@@ -11134,12 +11239,29 @@ impl PyDatetimeIndex {
 
     // Timestamps in the index's zone (NaT when there is no instant), as
     // pandas; these were formatted strings (fvsao.18).
-    fn min(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.timestamp_object(py, self.inner.min().unwrap_or(Timestamp::NAT))
+    /// pandas' `min(axis=None, skipna=True)`: a NaT with skipna=False is NaT
+    /// (the keywords were unexpected - br-frankenpandas-zvn7a).
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn min(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
+        one_dim_axis(axis)?;
+        let stamp = if !skipna && self.holds_nat() {
+            Timestamp::NAT
+        } else {
+            self.inner.min().unwrap_or(Timestamp::NAT)
+        };
+        self.timestamp_object(py, stamp)
     }
 
-    fn max(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.timestamp_object(py, self.inner.max().unwrap_or(Timestamp::NAT))
+    /// pandas' `max(axis=None, skipna=True)` (see [`Self::min`]).
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn max(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
+        one_dim_axis(axis)?;
+        let stamp = if !skipna && self.holds_nat() {
+            Timestamp::NAT
+        } else {
+            self.inner.max().unwrap_or(Timestamp::NAT)
+        };
+        self.timestamp_object(py, stamp)
     }
 
     fn mean(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -11832,12 +11954,31 @@ impl PyDatetimeIndex {
         Ok(Py::new(py, object_index_of(this, pieces)?)?.into_any())
     }
 
-    fn argmax(&self) -> PyResult<NumpyInt64> {
-        self.as_py_index().argmax()
+    /// pandas' `argmax(axis=None, skipna=True)` ([`index_arg_extreme`]; the
+    /// NaT, sorting first, was argmin - br-frankenpandas-zvn7a).
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn argmax(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
+        index_arg_extreme(
+            py,
+            self.inner.as_index(),
+            "DatetimeIndex",
+            true,
+            axis,
+            skipna,
+        )
     }
 
-    fn argmin(&self) -> PyResult<NumpyInt64> {
-        self.as_py_index().argmin()
+    /// pandas' `argmin(axis=None, skipna=True)` ([`index_arg_extreme`]).
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn argmin(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
+        index_arg_extreme(
+            py,
+            self.inner.as_index(),
+            "DatetimeIndex",
+            false,
+            axis,
+            skipna,
+        )
     }
 
     fn argsort(&self) -> IndexerArray {
@@ -13389,14 +13530,16 @@ impl PyMultiIndex {
             .map_err(index_error_to_py)
     }
 
-    fn argmax(&self) -> PyResult<NumpyInt64> {
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn argmax(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
         let flat = self.inner.to_flat_index("/");
-        PyIndex { inner: flat }.argmax()
+        index_arg_extreme(py, &flat, "MultiIndex", true, axis, skipna)
     }
 
-    fn argmin(&self) -> PyResult<NumpyInt64> {
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn argmin(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
         let flat = self.inner.to_flat_index("/");
-        PyIndex { inner: flat }.argmin()
+        index_arg_extreme(py, &flat, "MultiIndex", false, axis, skipna)
     }
 
     fn argsort(&self) -> IndexerArray {
@@ -13856,14 +13999,16 @@ impl PyMultiIndex {
         PyIndex { inner: flat }.map(py, mapper)
     }
 
-    fn max(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn max(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
         let flat = self.inner.to_flat_index("/");
-        PyIndex { inner: flat }.max(py)
+        PyIndex { inner: flat }.max(py, axis, skipna)
     }
 
-    fn min(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn min(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
         let flat = self.inner.to_flat_index("/");
-        PyIndex { inner: flat }.min(py)
+        PyIndex { inner: flat }.min(py, axis, skipna)
     }
 
     #[getter]
@@ -14464,12 +14609,30 @@ impl PyTimedeltaIndex {
         self.inner.has_duplicates()
     }
 
-    pub fn min(&self) -> Option<i64> {
-        self.inner.min().filter(|&x| x != Timedelta::NAT)
+    /// pandas' `min(axis=None, skipna=True)`: a Timedelta, NaT when there is
+    /// none or a NaT with skipna=False - it answered the nanoseconds as an
+    /// int (br-frankenpandas-zvn7a).
+    #[pyo3(signature = (axis=None, skipna=true))]
+    pub fn min(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
+        one_dim_axis(axis)?;
+        let nanos = if !skipna && self.inner.isna().contains(&true) {
+            Timedelta::NAT
+        } else {
+            self.inner.min().unwrap_or(Timedelta::NAT)
+        };
+        scalar_to_py(py, &Scalar::Timedelta64(nanos))
     }
 
-    pub fn max(&self) -> Option<i64> {
-        self.inner.max().filter(|&x| x != Timedelta::NAT)
+    /// pandas' `max(axis=None, skipna=True)` (see [`Self::min`]).
+    #[pyo3(signature = (axis=None, skipna=true))]
+    pub fn max(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
+        one_dim_axis(axis)?;
+        let nanos = if !skipna && self.inner.isna().contains(&true) {
+            Timedelta::NAT
+        } else {
+            self.inner.max().unwrap_or(Timedelta::NAT)
+        };
+        scalar_to_py(py, &Scalar::Timedelta64(nanos))
     }
 
     pub fn mean(&self) -> Option<i64> {
@@ -14488,16 +14651,32 @@ impl PyTimedeltaIndex {
         self.inner.var()
     }
 
-    pub fn argmax(&self) -> PyResult<usize> {
-        self.inner
-            .argmax()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    /// pandas' `argmax(axis=None, skipna=True)` ([`index_arg_extreme`]; the
+    /// position came back a Python int, and the keywords were unexpected -
+    /// br-frankenpandas-zvn7a).
+    #[pyo3(signature = (axis=None, skipna=true))]
+    pub fn argmax(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
+        index_arg_extreme(
+            py,
+            self.inner.as_index(),
+            "TimedeltaIndex",
+            true,
+            axis,
+            skipna,
+        )
     }
 
-    pub fn argmin(&self) -> PyResult<usize> {
-        self.inner
-            .argmin()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    /// pandas' `argmin(axis=None, skipna=True)` ([`index_arg_extreme`]).
+    #[pyo3(signature = (axis=None, skipna=true))]
+    pub fn argmin(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
+        index_arg_extreme(
+            py,
+            self.inner.as_index(),
+            "TimedeltaIndex",
+            false,
+            axis,
+            skipna,
+        )
     }
 
     pub fn isna(&self) -> Vec<bool> {
@@ -16492,12 +16671,28 @@ impl PyPeriodIndex {
         Ok(Py::new(py, Self { inner: out })?.into_any())
     }
 
-    fn argmax(&self) -> PyResult<NumpyInt64> {
-        self.as_py_index().argmax()
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn argmax(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
+        index_arg_extreme(
+            py,
+            &self.as_py_index().inner,
+            "PeriodIndex",
+            true,
+            axis,
+            skipna,
+        )
     }
 
-    fn argmin(&self) -> PyResult<NumpyInt64> {
-        self.as_py_index().argmin()
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn argmin(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
+        index_arg_extreme(
+            py,
+            &self.as_py_index().inner,
+            "PeriodIndex",
+            false,
+            axis,
+            skipna,
+        )
     }
 
     fn argsort(&self) -> IndexerArray {
@@ -17583,12 +17778,28 @@ impl PyCategoricalIndex {
         })
     }
 
-    fn argmax(&self) -> PyResult<NumpyInt64> {
-        self.as_py_index().argmax()
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn argmax(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
+        index_arg_extreme(
+            py,
+            &self.as_py_index().inner,
+            "CategoricalIndex",
+            true,
+            axis,
+            skipna,
+        )
     }
 
-    fn argmin(&self) -> PyResult<NumpyInt64> {
-        self.as_py_index().argmin()
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn argmin(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
+        index_arg_extreme(
+            py,
+            &self.as_py_index().inner,
+            "CategoricalIndex",
+            false,
+            axis,
+            skipna,
+        )
     }
 
     fn argsort(&self) -> IndexerArray {
@@ -17746,12 +17957,14 @@ impl PyCategoricalIndex {
         self.as_py_index().map(py, mapper)
     }
 
-    fn max(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.as_py_index().max(py)
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn max(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
+        self.as_py_index().max(py, axis, skipna)
     }
 
-    fn min(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.as_py_index().min(py)
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn min(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
+        self.as_py_index().min(py, axis, skipna)
     }
 
     fn notna(&self) -> Vec<bool> {
@@ -71908,10 +72121,10 @@ mod tests {
             assert!(PyRangeIndex::__contains__(ri.borrow(), &number(4)));
             assert!(!PyRangeIndex::__contains__(ri.borrow(), &number(5)));
             let int = |value: PyResult<Py<PyAny>>| value.and_then(|v| v.extract::<i64>(py)).ok();
-            assert_eq!(int(index.min(py)), Some(0));
-            assert_eq!(int(index.max(py)), Some(8));
-            assert_eq!(index.argmax().unwrap().0, 4);
-            assert_eq!(index.argmin().unwrap().0, 0);
+            assert_eq!(int(index.min(py, None, true)), Some(0));
+            assert_eq!(int(index.max(py, None, true)), Some(8));
+            assert_eq!(int(index.argmax(py, None, true)), Some(4));
+            assert_eq!(int(index.argmin(py, None, true)), Some(0));
             assert_eq!(index.argsort().0, vec![0, 1, 2, 3, 4]);
             assert!(!index.all());
             assert!(index.any());

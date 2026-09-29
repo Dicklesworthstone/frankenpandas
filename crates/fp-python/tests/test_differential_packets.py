@@ -17042,3 +17042,50 @@ _NB_CASES = {
 def test_numeric_only_skips_object_bools_ildvj(case: str) -> None:
     run = _NB_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-zvn7a: Index.max() / argmax() answered the NaN (a null
+# label sorts after every concrete one), DatetimeIndex.argmin() the NaT (it
+# sorts first), TimedeltaIndex.min() / max() the nanoseconds as an int; pandas
+# skips a missing value, and the reductions take its skipna / axis.
+def _ir_floats(m: Any) -> Any:
+    return m.Index([3.0, 1.0, np.nan, 2.0, 1.0], name="v")
+
+
+def _ir_stamps(m: Any) -> Any:
+    return m.DatetimeIndex(["2024-01-02", None, "2024-01-01"])
+
+
+def _ir_deltas(m: Any) -> Any:
+    return m.TimedeltaIndex(["1D", None, "2D"])
+
+
+_IR_CASES = {}
+for _op in ["min", "max", "argmin", "argmax"]:
+    _IR_CASES.update(
+        {
+            f"{_op}": (lambda op: lambda m: [getattr(_ir_floats(m), op)()])(_op),
+            f"{_op} skipna False": (lambda op: lambda m: [getattr(_ir_floats(m), op)(skipna=False)])(_op),
+            f"{_op} all missing": (lambda op: lambda m: [getattr(m.Index([np.nan, np.nan]), op)()])(_op),
+            f"{_op} empty": (lambda op: lambda m: [getattr(m.Index([], dtype=float), op)()])(_op),
+            f"{_op} axis 0": (lambda op: lambda m: [getattr(_ir_floats(m), op)(axis=0)])(_op),
+            f"{_op} axis -1": (lambda op: lambda m: [getattr(_ir_floats(m), op)(axis=-1)])(_op),
+            f"{_op} axis 1": (lambda op: lambda m: [getattr(_ir_floats(m), op)(axis=1)])(_op),
+            f"{_op} text with None": (lambda op: lambda m: [getattr(m.Index(["b", None, "a"]), op)()])(_op),
+            f"{_op} text with None, skipna False": (lambda op: lambda m: [getattr(m.Index(["b", None, "a"]), op)(skipna=False)])(_op),
+            f"{_op} datetime with NaT": (lambda op: lambda m: [getattr(_ir_stamps(m), op)()])(_op),
+            f"{_op} datetime with NaT, skipna False": (lambda op: lambda m: [getattr(_ir_stamps(m), op)(skipna=False)])(_op),
+            f"{_op} timedelta with NaT": (lambda op: lambda m: [getattr(_ir_deltas(m), op)()])(_op),
+            # NEGATIVE: nothing missing was already pandas'.
+            f"{_op} text": (lambda op: lambda m: [getattr(m.Index(["b", "a", "c"]), op)()])(_op),
+            f"{_op} ints": (lambda op: lambda m: [getattr(m.Index([4, 1, 9]), op)()])(_op),
+        }
+    )
+_IR_CASES["timedelta min skipna False"] = lambda m: [_ir_deltas(m).min(skipna=False)]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_IR_CASES))
+def test_index_reductions_skip_missing_like_pandas_zvn7a(case: str) -> None:
+    run = _IR_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
