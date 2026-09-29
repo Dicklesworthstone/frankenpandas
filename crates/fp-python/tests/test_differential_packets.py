@@ -19258,3 +19258,114 @@ _E44_CASES = {
 def test_everyday44_masked_categorical_multicolumn_like_pandas_mv4w4(case: str) -> None:
     run = _E44_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-5mxxn: merge refuses keys of kinds that cannot match (text
+# against numbers matched nothing) and reads keys of other differing dtypes
+# as objects (the left's dtype was kept), reads a left_on / right_on index
+# level, concat keeps a shared categorical dtype and casts bools beside
+# numbers as pandas, pct_change takes freq= (refused), and an index set or
+# reindexed from a date_range keeps its freq.
+def _e45_merged(m: Any, left: Any, right: Any, **kwargs: Any) -> list:
+    merged = m.merge(m.DataFrame({"k": left, "a": range(len(left))}), m.DataFrame({"k": right, "b": range(len(right))}), on="k", **kwargs)
+    return _e23_shown(merged)
+
+
+def _e45_series(m: Any) -> Any:
+    return m.Series([1.0, 2.0, np.nan, 4.0, 5.0, 6.0], index=m.date_range("2024-01-01", periods=6, freq="8h"))
+
+
+def _e45_days(m: Any) -> Any:
+    return m.date_range("2024-01-01", periods=3, freq="D")
+
+
+def _e45_indexed(m: Any, data: Any) -> Any:
+    data.index = _e45_days(m)
+    return data
+
+
+def _e45_labelled(m: Any) -> Any:
+    data = m.Series([1, 2])
+    data.index = m.Index(["a", "b"], name="x")
+    return data
+
+
+_E45_CASES = {
+    "text and ints": lambda m: _e45_merged(m, ["1", "2"], [1, 2]),
+    "ints and text": lambda m: _e45_merged(m, [1, 2], ["1", "2"]),
+    "floats and string dtype": lambda m: _e45_merged(m, [1.0], m.Series(["1"], dtype="string")),
+    "dates and text": lambda m: _e45_merged(m, m.to_datetime(["2024-01-01"]), ["2024-01-01"]),
+    "timedeltas and ints": lambda m: _e45_merged(m, m.to_timedelta(["1d"]), [1]),
+    "left_on names": lambda m: [
+        m.merge(m.DataFrame({"a": ["1"]}), m.DataFrame({"b": [1]}), left_on="a", right_on="b")
+    ],
+    "left_on an index level": lambda m: _e23_shown(
+        m.merge(
+            m.DataFrame({"v": [1, 2]}, index=m.MultiIndex.from_tuples([("a", 1), ("b", 2)], names=["k", "n"])),
+            m.DataFrame({"k": ["a", "b"], "w": [3, 4]}),
+            left_on="k",
+            right_on="k",
+        )
+    ),
+    "right_on an index level": lambda m: _e23_shown(
+        m.merge(
+            m.DataFrame({"key": ["a", "b"], "w": [3, 4]}),
+            m.DataFrame({"v": [1, 2]}, index=m.Index(["b", "a"], name="k")),
+            left_on="key",
+            right_on="k",
+        )
+    ),
+    "concat categoricals": lambda m: [m.concat([m.Series(["a", "b"], dtype="category")] * 2)],
+    "concat categorical columns": lambda m: _e23_shown(
+        m.concat([m.DataFrame({"c": m.Series(["a"], dtype="category"), "v": [1]})] * 2)
+    ),
+    "concat bool and int": lambda m: [m.concat([m.Series([True]), m.Series([1])])],
+    "concat bool and float": lambda m: [m.concat([m.Series([True, False]), m.Series([1.5])])],
+    "pct_change freq": lambda m: [_e45_series(m).pct_change(freq="8h")],
+    "pct_change freq no fill": lambda m: [_e45_series(m).pct_change(freq="8h", fill_method=None)],
+    "pct_change freq 2 periods": lambda m: [_e45_series(m).pct_change(periods=2, freq="4h")],
+    "frame pct_change freq": lambda m: _e23_shown(_e45_series(m).to_frame("v").pct_change(freq="16h")),
+    "ints and object ints": lambda m: _e45_merged(m, [1, 2], m.Series([1, 2], dtype=object)),
+    "ints and categorical": lambda m: _e45_merged(m, [1], m.Series(["1"], dtype="category")),
+    "ints and categorical ints": lambda m: _e45_merged(m, [1, 2], m.Series([2, 3], dtype="category")),
+    "string dtype and object": lambda m: _e45_merged(m, m.Series(["a", "b"], dtype="string"), ["b", "c"]),
+    "categorical and object": lambda m: _e45_merged(m, m.Series(["a", "b"], dtype="category"), ["b", "c"]),
+    "categoricals of other categories": lambda m: _e45_merged(
+        m, m.Series(["a", "b"], dtype="category"), m.Series(["b", "c"], dtype="category")
+    ),
+    "zoned and naive dates": lambda m: _e45_merged(
+        m, m.to_datetime(["2024-01-01"]).tz_localize("UTC"), m.to_datetime(["2024-01-01"])
+    ),
+    "periods and text": lambda m: _e45_merged(m, m.period_range("2024-01", periods=1, freq="M"), ["2024-01"]),
+    "set index keeps freq": lambda m: [_e45_indexed(m, m.Series([1, 2, 3]))],
+    "set frame index keeps freq": lambda m: [str(_e45_indexed(m, m.DataFrame({"v": [1, 2, 3]})).index)],
+    "reindex keeps freq": lambda m: [m.Series([1.0, 2.0], index=_e45_days(m)[:2]).reindex(_e45_days(m))],
+    "frame reindex keeps freq": lambda m: [
+        str(m.DataFrame({"v": [1.0]}, index=_e45_days(m)[:1]).reindex(_e45_days(m)).index)
+    ],
+    # Negatives: already pandas'.
+    "ints and floats": lambda m: _e45_merged(m, [1, 2], [1.0, 3.0], how="outer"),
+    "text and bools": lambda m: _e45_merged(m, ["1"], [True]),
+    "object and string dtype": lambda m: _e45_merged(m, ["a", "b"], m.Series(["b", "c"], dtype="string")),
+    "categoricals of the same categories": lambda m: _e45_merged(
+        m, m.Series(["a", "b"], dtype="category"), m.Series(["b", "a"], dtype="category")
+    ),
+    "set index of labels": lambda m: [_e45_labelled(m)],
+    "dates in two zones": lambda m: _e45_merged(
+        m,
+        m.to_datetime(["2024-01-01"]).tz_localize("UTC"),
+        m.to_datetime(["2024-01-01"]).tz_localize("UTC").tz_convert("US/Eastern"),
+    ),
+    "concat categoricals of other categories": lambda m: [
+        m.concat([m.Series(["a"], dtype="category"), m.Series(["b"], dtype="category")])
+    ],
+    "concat ints and floats": lambda m: [m.concat([m.Series([1]), m.Series([1.5])])],
+    "pct_change periods": lambda m: [_e45_series(m).pct_change(periods=2)],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E45_CASES))
+def test_everyday45_merge_concat_pct_change_like_pandas_5mxxn(case: str) -> None:
+    run = _E45_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

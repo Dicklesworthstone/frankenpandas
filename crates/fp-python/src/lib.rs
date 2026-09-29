@@ -8568,9 +8568,12 @@ fn index_from_axis_value(value: &Bound<'_, PyAny>) -> PyResult<Index> {
         .ok()
         .and_then(|name| name.extract::<String>().ok());
     let labels = extract_index_labels(Some(value), 0)?;
+    // A DatetimeIndex / TimedeltaIndex keeps its freq, as the constructors'
+    // index= does (`s.index = dr` dropped it).
     Index::new(labels)
         .rename_index(name.as_deref())
         .with_tz(zone.as_deref())
+        .map(|index| index.with_freq(index_arg_freq(value)))
         .map_err(index_error_to_py)
 }
 
@@ -20048,6 +20051,44 @@ impl<'a, 'py> FromPyObject<'a, 'py> for Passed<'py> {
     }
 }
 
+/// pandas' `pct_change` with `freq`: the values filled as `fill_method` says,
+/// over those `periods` x `freq` earlier by label - `data / data.shift(
+/// periods, freq=freq) - 1`, a repeated label's first row kept, reindexed
+/// like the data (it was refused; br-frankenpandas-5mxxn). `data` is the
+/// Series or the DataFrame.
+fn pct_change_by_freq<'py>(
+    data: &Bound<'py, PyAny>,
+    periods: i64,
+    freq: &str,
+    fill_method: Option<&str>,
+    limit: Option<usize>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = data.py();
+    let fill = PyDict::new(py);
+    fill.set_item("limit", limit)?;
+    let filled = match fill_method {
+        Some("pad" | "ffill") => data.call_method("ffill", (), Some(&fill))?,
+        Some("bfill" | "backfill") => data.call_method("bfill", (), Some(&fill))?,
+        _ => data.clone(),
+    };
+    let shift = PyDict::new(py);
+    shift.set_item("freq", freq)?;
+    let shifted = filled.call_method("shift", (periods,), Some(&shift))?;
+    let ratio = filled
+        .call_method1("__truediv__", (shifted,))?
+        .call_method1("__sub__", (1,))?;
+    let first = ratio
+        .getattr("index")?
+        .call_method0("duplicated")?
+        .call_method0("__invert__")?;
+    let changes = ratio
+        .get_item(first)?
+        .call_method1("reindex_like", (&filled,))?;
+    // The data's own index (its freq kept), whose labels these are.
+    changes.setattr("index", data.getattr("index")?)?;
+    Ok(changes)
+}
+
 /// pct_change's `fill_method` / `limit` as pandas 2.2 reads them, with its
 /// FutureWarnings: a fill_method other than None, or any limit, is
 /// deprecated; left out, the default 'pad' still fills, and warns when a
@@ -26687,9 +26728,21 @@ impl PySeries {
         limit: Passed<'_>,
         freq: Option<&str>,
     ) -> PyResult<PySeries> {
-        unsupported_params("Series.pct_change", &[("freq", freq.is_none())])?;
         let (fill_method, limit) =
             pct_change_fill_args(py, "Series", &fill_method, &limit, &[self.inner.column()])?;
+        if let Some(freq) = freq {
+            let data = Bound::new(
+                py,
+                PySeries {
+                    inner: self.inner.clone(),
+                },
+            )?;
+            let changes =
+                pct_change_by_freq(data.as_any(), periods, freq, fill_method.as_deref(), limit)?;
+            return Ok(PySeries {
+                inner: changes.extract::<PyRef<'_, PySeries>>()?.inner.clone(),
+            });
+        }
         let r = self
             .inner
             .pct_change_with_fill(periods, fill_method.as_deref(), limit)
@@ -29506,8 +29559,16 @@ impl PySeries {
         }
         .map_err(frame_error_to_py)?;
         // The rows are the target's labels: a tz-aware target keeps its zone
-        // (they came back naive UTC, fvsao.60).
+        // (they came back naive UTC, fvsao.60) and a date_range its freq.
         let reindexed = series_index_in_zone(reindexed, target.inner.tz())?;
+        let reindexed = match target.inner.freq() {
+            Some(freq) => {
+                let index = reindexed.index().clone().with_freq(Some(freq.to_owned()));
+                Series::new(reindexed.name(), index, reindexed.column().clone())
+                    .map_err(frame_error_to_py)?
+            }
+            None => reindexed,
+        };
         let Some(fill) = fill_value.filter(|fv| !fv.is_none()) else {
             return Ok(PySeries { inner: reindexed });
         };
@@ -39241,13 +39302,29 @@ impl PyDataFrame {
         freq: Option<&str>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        unsupported_params("DataFrame.pct_change", &[("freq", freq.is_none())])?;
         let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        unsupported_params(
+            "DataFrame.pct_change",
+            &[("freq", freq.is_none() || ax == 0)],
+        )?;
         let columns: Vec<&Column> = (0..self.inner.num_columns())
             .filter_map(|position| self.inner.column_at(position))
             .collect();
         let (fill_method, limit) =
             pct_change_fill_args(py, "DataFrame", &fill_method, &limit, &columns)?;
+        if let Some(freq) = freq {
+            let data = Bound::new(
+                py,
+                PyDataFrame {
+                    inner: self.inner.clone(),
+                },
+            )?;
+            let changes =
+                pct_change_by_freq(data.as_any(), periods, freq, fill_method.as_deref(), limit)?;
+            return Ok(PyDataFrame {
+                inner: changes.extract::<PyRef<'_, PyDataFrame>>()?.inner.clone(),
+            });
+        }
         let res = match ax {
             0 => self
                 .inner
@@ -42782,13 +42859,17 @@ impl PyDataFrame {
             }
             .map_err(frame_error_to_py)?;
             // The rows are the target's labels: a tz-aware target keeps its
-            // zone (fvsao.60).
+            // zone (fvsao.60) and a date_range its freq.
             if let Some(zone) = target.inner.tz() {
                 let index = res
                     .index()
                     .clone()
                     .with_tz(Some(zone))
                     .map_err(index_error_to_py)?;
+                res = res.with_index(index).map_err(frame_error_to_py)?;
+            }
+            if let Some(freq) = target.inner.freq() {
+                let index = res.index().clone().with_freq(Some(freq.to_owned()));
                 res = res.with_index(index).map_err(frame_error_to_py)?;
             }
         }
@@ -61340,6 +61421,8 @@ fn keyed_rows(
 /// `sort=True`, mixed Series/DataFrame lists and keys that do not pair with
 /// the objects one to one raise NotImplementedError.
 /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.3)
+/// The result then keeps the dtypes pandas keeps (see
+/// [`concat_kept_dtypes`]).
 #[pyfunction]
 #[pyo3(signature = (
     objs,
@@ -61354,6 +61437,126 @@ fn keyed_rows(
 ))]
 #[allow(clippy::too_many_arguments)]
 fn concat(
+    py: Python<'_>,
+    objs: &Bound<'_, PyAny>,
+    axis: Option<&Bound<'_, PyAny>>,
+    join: &str,
+    ignore_index: bool,
+    keys: Option<&Bound<'_, PyAny>>,
+    sort: bool,
+    copy: Option<&Bound<'_, PyAny>>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let result = concat_objects(py, objs, axis, join, ignore_index, keys, sort, copy, kwargs)?;
+    let stacked = !axis.is_some_and(|axis| {
+        axis.extract::<i64>().is_ok_and(|axis| axis == 1)
+            || axis.extract::<String>().is_ok_and(|axis| axis == "columns")
+    });
+    if !stacked {
+        return Ok(result);
+    }
+    let pieces: Vec<Bound<'_, PyAny>> = match objs.cast::<PyDict>() {
+        Ok(mapping) => mapping.values().iter().collect(),
+        Err(_) => objs.try_iter()?.collect::<PyResult<_>>()?,
+    };
+    concat_kept_dtypes(&pieces, result.bind(py)).map(Bound::unbind)
+}
+
+/// The dtypes pandas' concat keeps stacking `pieces`, set on `result` (they
+/// became object; br-frankenpandas-5mxxn): a categorical Series - or frame
+/// column - every piece holds under one categorical dtype stays that
+/// categorical; Series of numpy bools beside numbers are numpy's
+/// concatenation of them, in an object Series (pandas' GH#39817 cast: True
+/// is 1, or 1.0 beside a float), where the bools were kept.
+fn concat_kept_dtypes<'py>(
+    pieces: &[Bound<'py, PyAny>],
+    result: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let Some(first) = pieces.first() else {
+        return Ok(result.clone());
+    };
+    let categorical =
+        |dtype: &Bound<'py, PyAny>| -> PyResult<bool> { Ok(dtype.str()? == "category") };
+    let same_categorical = |dtypes: &[Bound<'py, PyAny>]| -> PyResult<bool> {
+        let Some(first) = dtypes.first() else {
+            return Ok(false);
+        };
+        if !categorical(first)? {
+            return Ok(false);
+        }
+        for dtype in dtypes {
+            if !dtype.eq(first)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    };
+    if pieces
+        .iter()
+        .all(|piece| piece.is_instance_of::<PySeries>())
+    {
+        let dtypes = pieces
+            .iter()
+            .map(|piece| piece.getattr("dtype"))
+            .collect::<PyResult<Vec<_>>>()?;
+        if same_categorical(&dtypes)? {
+            return result.call_method1("astype", (first.getattr("dtype")?,));
+        }
+        let names = dtypes
+            .iter()
+            .map(|dtype| dtype.str().map(|name| name.to_string()))
+            .collect::<PyResult<Vec<_>>>()?;
+        let numeric = |name: &str| matches!(name, "int64" | "float64");
+        if names.iter().any(|name| name == "bool")
+            && names.iter().any(|name| numeric(name))
+            && names.iter().all(|name| name == "bool" || numeric(name))
+        {
+            let floats = names.iter().any(|name| name == "float64");
+            let target = if floats { "float64" } else { "int64" };
+            return result
+                .call_method1("astype", (target,))?
+                .call_method1("astype", ("object",));
+        }
+        return Ok(result.clone());
+    }
+    // Frames whose columns repeat a key are left as they are (a key names
+    // several columns there).
+    let unique_columns = |frame: &Bound<'py, PyAny>| -> PyResult<bool> {
+        frame.getattr("columns")?.getattr("is_unique")?.is_truthy()
+    };
+    if pieces
+        .iter()
+        .all(|piece| piece.is_instance_of::<PyDataFrame>())
+        && unique_columns(result)?
+        && pieces
+            .iter()
+            .map(unique_columns)
+            .collect::<PyResult<Vec<bool>>>()?
+            .into_iter()
+            .all(|unique| unique)
+    {
+        for column in result.getattr("columns")?.try_iter()? {
+            let column = column?;
+            let mut dtypes = Vec::with_capacity(pieces.len());
+            for piece in pieces {
+                if !piece.getattr("columns")?.contains(&column)? {
+                    break;
+                }
+                dtypes.push(piece.get_item(&column)?.getattr("dtype")?);
+            }
+            if dtypes.len() == pieces.len() && same_categorical(&dtypes)? {
+                let kept = result
+                    .get_item(&column)?
+                    .call_method1("astype", (&dtypes[0],))?;
+                result.set_item(&column, kept)?;
+            }
+        }
+    }
+    Ok(result.clone())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn concat_objects(
     py: Python<'_>,
     objs: &Bound<'_, PyAny>,
     axis: Option<&Bound<'_, PyAny>>,
@@ -63484,6 +63687,198 @@ fn merge_error_to_py(error: fp_join::JoinError) -> PyErr {
     PyErr::new::<pyo3::exceptions::PyValueError, _>(message)
 }
 
+/// pandas' reading of a merge key pair (`_maybe_coerce_merge_keys`). Kinds
+/// that cannot match are refused: a datetime, a timedelta or a period
+/// against anything else, a zoned datetime against a naive one, numbers
+/// against text (strings in an object column, or the `string` dtype) -
+/// "You are trying to merge on object and int64 columns for key 'k'" (text
+/// keys against numbers matched nothing, an empty frame). Other dtypes that
+/// differ are read as objects - ints against object ints, a bool against
+/// numbers or objects, the `string` dtype against object, a categorical
+/// against another dtype - true when both keys become object (a categorical
+/// its categories' dtype), so the result's key is object as pandas' (it
+/// kept the left's dtype). False when the keys merge as they are: one
+/// dtype, numbers of one kind or ints against floats, categoricals of the
+/// same categories, zoned datetimes (br-frankenpandas-5mxxn).
+fn merge_keys_coerced(left: &Column, right: &Column, name: &str) -> PyResult<bool> {
+    #[derive(PartialEq)]
+    enum Kind {
+        Datetime(bool),
+        Timedelta,
+        Period,
+        Number,
+        Text,
+        Other,
+    }
+    let kind = |column: &Column| {
+        if column.categorical().is_some() {
+            return Kind::Other;
+        }
+        match column.dtype() {
+            DType::Datetime64 { tz } => Kind::Datetime(tz.is_some()),
+            DType::Timedelta64 => Kind::Timedelta,
+            DType::Period => Kind::Period,
+            DType::Int64 | DType::Float64 | DType::Int64Nullable | DType::Float64Nullable => {
+                Kind::Number
+            }
+            DType::Utf8 if column.is_pandas_string() => Kind::Text,
+            DType::Utf8 => {
+                let mut present = column.values().iter().filter(|value| !value.is_missing());
+                let first = present.next();
+                if first.is_some_and(|value| matches!(value, Scalar::Utf8(_)))
+                    && present.all(|value| matches!(value, Scalar::Utf8(_)))
+                {
+                    Kind::Text
+                } else {
+                    Kind::Other
+                }
+            }
+            _ => Kind::Other,
+        }
+    };
+    let (left_kind, right_kind) = (kind(left), kind(right));
+    let temporal = |one: &Kind, other: &Kind| {
+        matches!(one, Kind::Datetime(_) | Kind::Timedelta | Kind::Period) && one != other
+    };
+    let refused = temporal(&left_kind, &right_kind)
+        || temporal(&right_kind, &left_kind)
+        || matches!(
+            (&left_kind, &right_kind),
+            (Kind::Number, Kind::Text) | (Kind::Text, Kind::Number)
+        );
+    if refused {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "You are trying to merge on {} and {} columns for key '{name}'. If you wish to proceed you should use pd.concat",
+            column_pandas_dtype_name(left),
+            column_pandas_dtype_name(right)
+        )));
+    }
+    match (left.categorical(), right.categorical()) {
+        // Categoricals whose dtypes hash alike: the same categories in any
+        // order, or in one order when both are ordered.
+        (Some(one), Some(other)) => {
+            let same = one.ordered == other.ordered
+                && one.categories.len() == other.categories.len()
+                && if one.ordered {
+                    one.categories == other.categories
+                } else {
+                    one.categories
+                        .iter()
+                        .all(|category| other.categories.contains(category))
+                };
+            if same {
+                return Ok(false);
+            }
+        }
+        (None, None) if column_pandas_dtype_name(left) == column_pandas_dtype_name(right) => {
+            return Ok(false);
+        }
+        _ => {}
+    }
+    // numpy's kind of a numeric key; a bool with a missing value is object.
+    let numeric = |column: &Column| {
+        if column.categorical().is_some() {
+            return None;
+        }
+        match column.dtype() {
+            DType::Int64 | DType::Int64Nullable => Some('i'),
+            DType::Float64 | DType::Float64Nullable => Some('f'),
+            DType::BoolNullable => Some('b'),
+            DType::Bool if !column.has_any_missing() => Some('b'),
+            _ => None,
+        }
+    };
+    if let (Some(one), Some(other)) = (numeric(left), numeric(right)) {
+        return Ok(one != other && (one == 'b' || other == 'b'));
+    }
+    // Datetimes both zoned (in any zones) or both naive merge as they are;
+    // every other pair of dtypes that differ is read as objects - the
+    // `string` dtype against object included.
+    Ok(!matches!(left_kind, Kind::Datetime(_)) || left_kind != right_kind)
+}
+
+/// `frame` with its merge key column `key` read as objects - a categorical
+/// as its categories' dtype - as pandas coerces keys whose dtypes differ.
+fn merge_key_as_object(py: Python<'_>, frame: &DataFrame, key: &str) -> PyResult<DataFrame> {
+    let Some(column) = frame.column(key) else {
+        return Ok(frame.clone());
+    };
+    let series = Bound::new(
+        py,
+        PySeries {
+            inner: Series::new(key, frame.index().clone(), column.clone())
+                .map_err(frame_error_to_py)?,
+        },
+    )?;
+    let dtype = if column.categorical().is_some() {
+        series
+            .getattr("cat")?
+            .getattr("categories")?
+            .getattr("dtype")?
+    } else {
+        pyo3::types::PyString::new(py, "object").into_any()
+    };
+    let cast = series.call_method1("astype", (dtype,))?;
+    let cast = cast
+        .extract::<PyRef<'_, PySeries>>()?
+        .inner
+        .column()
+        .clone();
+    frame.with_column(key, cast).map_err(frame_error_to_py)
+}
+
+/// The key names a merge key argument gives as text (none for another).
+fn merge_key_texts(keys: Option<&Bound<'_, PyAny>>) -> Vec<String> {
+    let Some(keys) = keys.filter(|keys| !keys.is_none()) else {
+        return Vec::new();
+    };
+    match keys.extract::<String>() {
+        Ok(name) => vec![name],
+        Err(_) => keys.extract::<Vec<String>>().unwrap_or_default(),
+    }
+}
+
+/// The frame a merge reads its `left_on` / `right_on` keys from, and the
+/// levels it reset: a key naming one of its index levels and none of its
+/// columns is that level reset into a column, as pandas reads it (a column
+/// merge then numbers the rows anew; the key was pandas' ValueError
+/// "missing key column"; br-frankenpandas-5mxxn). None when every key is a
+/// column.
+fn merge_side_with_key_levels(
+    py: Python<'_>,
+    frame: &DataFrame,
+    keys: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<(DataFrame, Vec<String>)>> {
+    let names = merge_key_texts(keys);
+    if names.is_empty() {
+        return Ok(None);
+    }
+    let object = Bound::new(
+        py,
+        PyDataFrame {
+            inner: frame.clone(),
+        },
+    )?;
+    let level_names = object.getattr("index")?.getattr("names")?;
+    let mut levels = Vec::new();
+    for name in names {
+        if frame.column(&name).is_none() && level_names.contains(&name)? {
+            levels.push(name);
+        }
+    }
+    if levels.is_empty() {
+        return Ok(None);
+    }
+    // A flat index is its one level.
+    let kwargs = PyDict::new(py);
+    if level_names.len()? > 1 {
+        kwargs.set_item("level", &levels)?;
+    }
+    let reset = object.call_method("reset_index", (), Some(&kwargs))?;
+    let reset = reset.extract::<PyRef<'_, PyDataFrame>>()?.inner.clone();
+    Ok(Some((reset, levels)))
+}
+
 /// pandas `merge` over fp-join (suffixes, indicator, validate and sort
 /// included); left_index/right_index merges join on the index labels moved
 /// into a key column and restore them as the result index.
@@ -63493,6 +63888,49 @@ fn merge_impl(
     right: &DataFrame,
     args: &MergeArgs<'_, '_>,
 ) -> PyResult<DataFrame> {
+    let (left_levels, right_levels) = Python::attach(|py| {
+        PyResult::Ok((
+            merge_side_with_key_levels(py, left, args.left_on)?,
+            merge_side_with_key_levels(py, right, args.right_on)?,
+        ))
+    })?;
+    if left_levels.is_some() || right_levels.is_some() {
+        let merged = merge_impl(
+            left_levels.as_ref().map_or(left, |(frame, _)| frame),
+            right_levels.as_ref().map_or(right, |(frame, _)| frame),
+            args,
+        )?;
+        // A level read as a key is no column of the result, unless the key
+        // it pairs with on the other side is a column of its name (the one
+        // key column both sides share), as pandas'.
+        let (left_keys, right_keys) = (
+            merge_key_texts(args.left_on),
+            merge_key_texts(args.right_on),
+        );
+        let mut dropped: Vec<&String> = Vec::new();
+        for (levels, own, other) in [
+            (left_levels.as_ref(), &left_keys, &right_keys),
+            (right_levels.as_ref(), &right_keys, &left_keys),
+        ] {
+            for level in levels.map_or(&[][..], |(_, levels)| levels.as_slice()) {
+                if let Some(position) = own.iter().position(|key| key == level)
+                    && other.get(position) != Some(level)
+                {
+                    dropped.push(level);
+                }
+            }
+        }
+        if dropped.is_empty() {
+            return Ok(merged);
+        }
+        let kept: Vec<&str> = merged
+            .column_names()
+            .into_iter()
+            .filter(|name| !dropped.contains(name))
+            .map(String::as_str)
+            .collect();
+        return merged.select_columns(&kept).map_err(frame_error_to_py);
+    }
     let join_type = match args.how {
         "inner" => fp_join::JoinType::Inner,
         "left" => fp_join::JoinType::Left,
@@ -63545,6 +63983,31 @@ fn merge_impl(
                left_on: &[String],
                right_on: &[String]|
      -> PyResult<DataFrame> {
+        let (mut cast_left, mut cast_right) = (None, None);
+        for (left_key, right_key) in left_on.iter().zip(right_on) {
+            if let (Some(left_column), Some(right_column)) =
+                (left.column(left_key), right.column(right_key))
+                && merge_keys_coerced(left_column, right_column, left_key)?
+            {
+                Python::attach(|py| {
+                    cast_left = Some(merge_key_as_object(
+                        py,
+                        cast_left.as_ref().unwrap_or(left),
+                        left_key,
+                    )?);
+                    cast_right = Some(merge_key_as_object(
+                        py,
+                        cast_right.as_ref().unwrap_or(right),
+                        right_key,
+                    )?);
+                    PyResult::Ok(())
+                })?;
+            }
+        }
+        let (left, right) = (
+            cast_left.as_ref().unwrap_or(left),
+            cast_right.as_ref().unwrap_or(right),
+        );
         let l: Vec<&str> = left_on.iter().map(String::as_str).collect();
         let r: Vec<&str> = right_on.iter().map(String::as_str).collect();
         let merged = fp_join::merge_dataframes_on_with_options(
