@@ -2241,10 +2241,11 @@ def test_read_excel_blank_cells_match_pandas(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_read_csv_unsupported_keyword_is_not_silently_ignored() -> None:
-    # (converters= was the example until it was implemented; see
-    # test_read_csv_parser_options_and_groupby_nth_match_pandas.)
-    with pytest.raises(NotImplementedError, match="chunksize"):
-        fpd.read_csv(io.StringIO(_CSV), chunksize=10)
+    # (converters= and then chunksize= were the example until they were
+    # implemented; see test_read_csv_parser_options_and_groupby_nth_match_pandas
+    # and test_read_csv_chunks_and_date_format_like_pandas_9c1ss.)
+    with pytest.raises(NotImplementedError, match="header"):
+        fpd.read_csv(io.StringIO(_CSV), header=[0, 1])
     with pytest.raises(ValueError, match="only specify one"):
         fpd.read_csv(io.StringIO(_CSV), sep=",", delimiter=",")
 
@@ -18997,4 +18998,90 @@ _E40_CASES = {
 @pytest.mark.parametrize("case", list(_E40_CASES))
 def test_everyday40_sort_pivot_isin_like_pandas_9nmry(case: str) -> None:
     run = _E40_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-9c1ss: read_csv(chunksize= / iterator=True) is pandas'
+# TextFileReader - each chunk parsed on its own (its own dtypes), the index
+# running on - and read_csv(date_format=) parses the parse_dates columns
+# with it (both were refused).
+_RC_CSV = "a,b,d\n1,x,2024-01-05\n2,y,2024-02-10\n3,,2024-03-15\n4,w,2024-04-20\n5,v,2024-05-25\n"
+
+
+def _rc_shown(frame: Any) -> list:
+    return [list(frame.index), repr(frame.to_dict("list")), [str(t) for t in frame.dtypes]]
+
+
+def _rc_steps(reader: Any, calls: list) -> list:
+    out = []
+    for call in calls:
+        try:
+            out.append(_rc_shown(call(reader)))
+        except StopIteration:
+            out.append("StopIteration")
+    return out
+
+
+_RC_CASES = {
+    "chunks": lambda m: [_rc_shown(c) for c in m.read_csv(io.StringIO(_RC_CSV), chunksize=2)],
+    "a chunk's own dtypes": lambda m: [
+        _rc_shown(c) for c in m.read_csv(io.StringIO("n\n1\n2\n\n3\nx\n"), chunksize=2)
+    ],
+    "missing value in a later chunk": lambda m: [
+        _rc_shown(c) for c in m.read_csv(io.StringIO("n,f\n1,1.5\n2,2.5\n,3.5\n4,\n"), chunksize=2)
+    ],
+    "chunk larger than the file": lambda m: [_rc_shown(c) for c in m.read_csv(io.StringIO(_RC_CSV), chunksize=10)],
+    "get_chunk sizes": lambda m: _rc_steps(
+        m.read_csv(io.StringIO(_RC_CSV), chunksize=2),
+        [lambda r: r.get_chunk(), lambda r: r.get_chunk(1), lambda r: r.get_chunk(), lambda r: r.get_chunk()],
+    ),
+    "iterator": lambda m: _rc_steps(
+        m.read_csv(io.StringIO(_RC_CSV), iterator=True),
+        [lambda r: r.get_chunk(2), lambda r: r.read(1), lambda r: r.read(), lambda r: r.get_chunk()],
+    ),
+    "iterator iterated": lambda m: [_rc_shown(c) for c in m.read_csv(io.StringIO(_RC_CSV), iterator=True)],
+    "get_chunk then iterate": lambda m: (lambda r: [_rc_shown(r.get_chunk(3))] + [_rc_shown(c) for c in r])(
+        m.read_csv(io.StringIO(_RC_CSV), chunksize=2)
+    ),
+    "index_col": lambda m: [_rc_shown(c) for c in m.read_csv(io.StringIO(_RC_CSV), chunksize=2, index_col="b")],
+    "nrows": lambda m: [_rc_shown(c) for c in m.read_csv(io.StringIO(_RC_CSV), chunksize=2, nrows=3)],
+    "skiprows list": lambda m: [_rc_shown(c) for c in m.read_csv(io.StringIO(_RC_CSV), chunksize=2, skiprows=[1, 4])],
+    "skiprows callable": lambda m: [
+        _rc_shown(c) for c in m.read_csv(io.StringIO(_RC_CSV), chunksize=3, skiprows=lambda i: i == 2)
+    ],
+    "names and no header": lambda m: [
+        _rc_shown(c) for c in m.read_csv(io.StringIO("1,x\n2,y\n3,z\n"), chunksize=2, header=None, names=["n", "s"])
+    ],
+    "quoted line break": lambda m: [
+        _rc_shown(c) for c in m.read_csv(io.StringIO('a,b\n1,"x\ny"\n2,z\n3,w\n'), chunksize=1)
+    ],
+    "comment lines": lambda m: [
+        _rc_shown(c) for c in m.read_csv(io.StringIO("a\n# note\n1\n2\n# more\n3\n"), chunksize=2, comment="#")
+    ],
+    "read_table": lambda m: [_rc_shown(c) for c in m.read_table(io.StringIO("a\tb\n1\tx\n2\ty\n3\tz\n"), chunksize=2)],
+    "with block": lambda m: (lambda r: [_rc_shown(c) for c in r])(m.read_csv(io.StringIO(_RC_CSV), chunksize=4)),
+    "read everything": lambda m: [_rc_shown(m.read_csv(io.StringIO(_RC_CSV), chunksize=2).read())],
+    "chunksize 0": lambda m: [m.read_csv(io.StringIO(_RC_CSV), chunksize=0)],
+    "type": lambda m: [type(m.read_csv(io.StringIO(_RC_CSV), chunksize=2)).__name__],
+    "date_format": lambda m: [_rc_shown(m.read_csv(io.StringIO(_RC_CSV), parse_dates=["d"], date_format="%Y-%m-%d"))],
+    "date_format dict": lambda m: [
+        _rc_shown(m.read_csv(io.StringIO(_RC_CSV), parse_dates=["d"], date_format={"d": "%Y-%m-%d"}))
+    ],
+    "date_format day first": lambda m: [
+        _rc_shown(m.read_csv(io.StringIO("d\n05/01/2024\n20/02/2024\n"), parse_dates=["d"], date_format="%d/%m/%Y"))
+    ],
+    "date_format mismatch": lambda m: [
+        _rc_shown(m.read_csv(io.StringIO(_RC_CSV), parse_dates=["d"], date_format="%d/%m/%Y"))
+    ],
+    "date_format without parse_dates": lambda m: [_rc_shown(m.read_csv(io.StringIO(_RC_CSV), date_format="%Y"))],
+    # Negatives: already pandas'.
+    "no chunks": lambda m: [_rc_shown(m.read_csv(io.StringIO(_RC_CSV)))],
+    "parse_dates without a format": lambda m: [_rc_shown(m.read_csv(io.StringIO(_RC_CSV), parse_dates=["d"]))],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_RC_CASES))
+def test_read_csv_chunks_and_date_format_like_pandas_9c1ss(case: str) -> None:
+    run = _RC_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

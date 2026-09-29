@@ -61800,6 +61800,37 @@ fn stringified_na_values(values: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
     Ok(out)
 }
 
+/// A read_csv source's text: its bytes decoded as `encoding` (UTF-8 by
+/// default), a byte-order mark dropped as pandas' C parser drops it.
+fn csv_source_text(
+    py: Python<'_>,
+    source: &Bound<'_, PyAny>,
+    encoding: Option<&str>,
+) -> PyResult<String> {
+    let bytes = py_input_bytes(source)?;
+    let text = match encoding {
+        Some(encoding)
+            if !matches!(
+                encoding.to_ascii_lowercase().replace('_', "-").as_str(),
+                "utf-8" | "utf8" | "utf-8-sig"
+            ) =>
+        {
+            pyo3::types::PyBytes::new(py, &bytes)
+                .call_method1("decode", (encoding,))?
+                .extract::<String>()?
+        }
+        _ => String::from_utf8(bytes).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "input is not valid UTF-8: {e}"
+            ))
+        })?,
+    };
+    Ok(match text.strip_prefix('\u{feff}') {
+        Some(stripped) => stripped.to_owned(),
+        None => text,
+    })
+}
+
 /// `text` without the CSV rows `skiprows` names, as pandas' tokenizer
 /// skips them: a list-like of 0-based row numbers (the header's row
 /// included) skips those rows, a callable each row number it is true for.
@@ -61821,9 +61852,27 @@ fn skip_csv_records(
                 .collect::<PyResult<_>>()?,
         )
     };
-    let bytes = text.as_bytes();
     let mut kept = String::with_capacity(text.len());
-    let (mut start, mut row) = (0_usize, 0_i64);
+    for (row, record) in csv_records(text, delimiter, quote).into_iter().enumerate() {
+        let row = i64::try_from(row).unwrap_or(i64::MAX);
+        let skip = match &listed {
+            Some(rows) => rows.contains(&row),
+            None => skiprows.call1((row,))?.is_truthy()?,
+        };
+        if !skip {
+            kept.push_str(record);
+        }
+    }
+    Ok(kept)
+}
+
+/// The CSV rows of `text`, each with its line break, as pandas' tokenizer
+/// reads them: a quoted field's line break does not end a row (`quote` only
+/// opens a field at its start).
+fn csv_records(text: &str, delimiter: u8, quote: u8) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut records = Vec::new();
+    let mut start = 0_usize;
     while start < bytes.len() {
         // The end of the row starting at `start` (past its line break).
         let (mut at, mut in_quote, mut field_start) = (start, false, true);
@@ -61846,17 +61895,10 @@ fn skip_csv_records(
             in_quote = field_start && byte == quote;
             field_start = byte == delimiter;
         }
-        let skip = match &listed {
-            Some(rows) => rows.contains(&row),
-            None => skiprows.call1((row,))?.is_truthy()?,
-        };
-        if !skip {
-            kept.push_str(&text[start..at]);
-        }
-        row += 1;
+        records.push(&text[start..at]);
         start = at;
     }
-    Ok(kept)
+    records
 }
 
 /// One column label from a pandas position-or-name argument.
@@ -61970,6 +62012,10 @@ fn read_csv_impl(
         .map(|v| v.is_truthy())
         .transpose()?
         .unwrap_or(false);
+    // date_format (a format, or {column: format}): the parse_dates columns
+    // read with it as to_datetime(format=) reads them, one it does not read
+    // left as text, as pandas' (it was refused; br-frankenpandas-9c1ss).
+    let date_formats = take("date_format")?.filter(|formats| !formats.is_none());
     // converters={column: func} (it was refused): see `apply_csv_converters`.
     let converters = take("converters")?;
     if converters.is_some() && args.names.is_some() {
@@ -62001,28 +62047,7 @@ fn read_csv_impl(
         (None, None) => (default_sep, None),
     };
 
-    let bytes = py_input_bytes(source)?;
-    let mut text = match args.encoding {
-        Some(encoding)
-            if !matches!(
-                encoding.to_ascii_lowercase().replace('_', "-").as_str(),
-                "utf-8" | "utf8" | "utf-8-sig"
-            ) =>
-        {
-            pyo3::types::PyBytes::new(py, &bytes)
-                .call_method1("decode", (encoding,))?
-                .extract::<String>()?
-        }
-        _ => String::from_utf8(bytes).map_err(|e| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "input is not valid UTF-8: {e}"
-            ))
-        })?,
-    };
-    // pandas' C parser drops a UTF-8 byte-order mark.
-    if let Some(stripped) = text.strip_prefix('\u{feff}') {
-        text = stripped.to_owned();
-    }
+    let mut text = csv_source_text(py, source, args.encoding)?;
     if let Some(pattern) = sep_pattern {
         let engine = match args.kwargs {
             Some(kwargs) => kwargs.get_item("engine")?,
@@ -62128,7 +62153,9 @@ fn read_csv_impl(
         opts.usecols = Some(names.clone());
     }
 
-    let day_first_dates = if dayfirst {
+    // The parse_dates columns read after the parser: day first, or with a
+    // date_format (which pandas prefers to dayfirst).
+    let later_dates = if dayfirst || date_formats.is_some() {
         opts.parse_dates.take().unwrap_or_default()
     } else {
         Vec::new()
@@ -62137,20 +62164,40 @@ fn read_csv_impl(
     if let Some(converters) = &converters {
         frame = apply_csv_converters(py, frame, &text, &opts, converters)?;
     }
-    for name in &day_first_dates {
+    for name in &later_dates {
         let Some(column) = frame.column(name) else {
             continue;
         };
+        let format = match &date_formats {
+            Some(formats) => match formats.cast::<PyDict>() {
+                Ok(per_column) => per_column
+                    .get_item(name)?
+                    .map(|format| format.extract::<String>())
+                    .transpose()?,
+                Err(_) => Some(formats.extract::<String>()?),
+            },
+            None => None,
+        };
         let text_dates = Series::new(name.as_str(), frame.index().clone(), column.clone())
             .map_err(frame_error_to_py)?;
-        let dates = fp_frame::to_datetime_with_options(
+        let parsed = fp_frame::to_datetime_with_options(
             &text_dates,
             fp_frame::ToDatetimeOptions {
-                dayfirst: true,
+                format: format.as_deref(),
+                dayfirst: dayfirst && format.is_none(),
+                errors: if format.is_some() {
+                    fp_frame::DatetimeErrors::Raise
+                } else {
+                    fp_frame::DatetimeErrors::Coerce
+                },
                 ..Default::default()
             },
-        )
-        .map_err(frame_error_to_py)?;
+        );
+        let dates = match parsed {
+            Ok(dates) => dates,
+            Err(_) if format.is_some() => continue,
+            Err(err) => return Err(frame_error_to_py(err)),
+        };
         frame = frame
             .with_column(name.clone(), dates.column().clone())
             .map_err(frame_error_to_py)?;
@@ -62471,7 +62518,7 @@ fn read_csv(
     nrows: Option<usize>,
     encoding: Option<&str>,
     kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<PyDataFrame> {
+) -> PyResult<Py<PyAny>> {
     let args = CsvReadArgs {
         sep,
         delimiter,
@@ -62487,7 +62534,267 @@ fn read_csv(
         encoding,
         kwargs,
     };
-    read_csv_impl(py, filepath_or_buffer, b',', &args)
+    if let Some(reader) = PyTextFileReader::from_args(py, filepath_or_buffer, b',', &args)? {
+        return reader.into_py_any(py);
+    }
+    read_csv_impl(py, filepath_or_buffer, b',', &args)?.into_py_any(py)
+}
+
+/// read_csv's arguments owned by a reader, for its chunks.
+struct OwnedCsvArgs {
+    sep: Option<String>,
+    delimiter: Option<String>,
+    names: Option<Vec<String>>,
+    index_col: Option<Py<PyAny>>,
+    usecols: Option<Py<PyAny>>,
+    dtype: Option<Py<PyAny>>,
+    parse_dates: Option<Py<PyAny>>,
+    na_values: Option<Py<PyAny>>,
+    keep_default_na: bool,
+    kwargs: Option<Py<PyDict>>,
+}
+
+/// pandas' `TextFileReader`, read_csv / read_table's answer to chunksize=
+/// or iterator=True (they were refused; br-frankenpandas-9c1ss): iterating
+/// it yields `chunksize` rows at a time (what is left without one),
+/// get_chunk(size) the next `size`, read(nrows) the next `nrows` (the rest
+/// by default); each chunk is parsed on its own, as pandas' parser reads it
+/// (its dtypes its own rows'), the default index running on across chunks;
+/// a context manager. The source is read and split into rows up front, so
+/// the memory held is the whole text's.
+#[pyclass(name = "TextFileReader", module = "frankenpandas")]
+pub struct PyTextFileReader {
+    /// The rows before the data - the header's - that every chunk is read
+    /// under.
+    prefix: String,
+    rows: Vec<String>,
+    position: usize,
+    chunksize: Option<usize>,
+    default_sep: u8,
+    args: OwnedCsvArgs,
+    started: bool,
+}
+
+impl PyTextFileReader {
+    /// The reader read_csv(chunksize= / iterator=True) returns, or None
+    /// without them. `args.kwargs` loses both keys; the rows are the source's
+    /// after skiprows, its blank and whole-line comment rows and the header
+    /// rows, at most `nrows` of them.
+    fn from_args(
+        py: Python<'_>,
+        source: &Bound<'_, PyAny>,
+        default_sep: u8,
+        args: &CsvReadArgs<'_, '_>,
+    ) -> PyResult<Option<Self>> {
+        let Some(kwargs) = args.kwargs else {
+            return Ok(None);
+        };
+        let chunksize = kwargs.get_item("chunksize")?.filter(|size| !size.is_none());
+        let iterator = kwargs
+            .get_item("iterator")?
+            .map(|flag| flag.is_truthy())
+            .transpose()?
+            .unwrap_or(false);
+        for key in ["chunksize", "iterator"] {
+            if kwargs.contains(key)? {
+                kwargs.del_item(key)?;
+            }
+        }
+        let chunksize = match chunksize {
+            Some(size) => match size.extract::<i64>() {
+                Ok(size) if size >= 1 => Some(usize::try_from(size).unwrap_or(usize::MAX)),
+                _ => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "'chunksize' must be an integer >=1",
+                    ));
+                }
+            },
+            None if iterator => None,
+            None => return Ok(None),
+        };
+        let text = csv_source_text(py, source, args.encoding)?;
+        let byte = |name: &str| -> PyResult<Option<u8>> {
+            Ok(kwargs
+                .get_item(name)?
+                .and_then(|value| value.extract::<String>().ok())
+                .and_then(|value| value.bytes().next()))
+        };
+        let delimiter = args
+            .sep
+            .or(args.delimiter)
+            .filter(|sep| sep.len() == 1)
+            .map_or(default_sep, |sep| sep.as_bytes()[0]);
+        let quote = byte("quotechar")?.unwrap_or(b'"');
+        let comment = byte("comment")?;
+        let mut records = csv_records(&text, delimiter, quote);
+        if let Some(skiprows) = args.skiprows.filter(|skiprows| !skiprows.is_none()) {
+            if let Ok(count) = skiprows.extract::<usize>() {
+                records.drain(..count.min(records.len()));
+            } else {
+                let mut kept = Vec::with_capacity(records.len());
+                for (row, record) in records.into_iter().enumerate() {
+                    let row = i64::try_from(row).unwrap_or(i64::MAX);
+                    let skip = if skiprows.is_callable() {
+                        skiprows.call1((row,))?.is_truthy()?
+                    } else {
+                        skiprows.contains(row)?
+                    };
+                    if !skip {
+                        kept.push(record);
+                    }
+                }
+                records = kept;
+            }
+        }
+        // A blank row or a whole-line comment is no row, as pandas' parser
+        // skips them.
+        records.retain(|record| {
+            !record.trim_end_matches(['\r', '\n']).is_empty()
+                && comment.is_none_or(|comment| !record.as_bytes().starts_with(&[comment]))
+        });
+        let header_rows = match kwargs.get_item("header")? {
+            Some(header) if header.is_none() => 0,
+            Some(header) if header.extract::<usize>().is_ok() => header.extract::<usize>()? + 1,
+            _ if args.names.is_some() => 0,
+            _ => 1,
+        };
+        let header_rows = header_rows.min(records.len());
+        let mut prefix = records[..header_rows].concat();
+        if !prefix.is_empty() && !prefix.ends_with('\n') {
+            prefix.push('\n');
+        }
+        let mut rows: Vec<String> = records[header_rows..]
+            .iter()
+            .map(|record| (*record).to_owned())
+            .collect();
+        if let Some(nrows) = args.nrows {
+            rows.truncate(nrows);
+        }
+        let own = |value: Option<&Bound<'_, PyAny>>| value.map(|value| value.clone().unbind());
+        Ok(Some(Self {
+            prefix,
+            rows,
+            position: 0,
+            chunksize,
+            default_sep,
+            args: OwnedCsvArgs {
+                sep: args.sep.map(str::to_owned),
+                delimiter: args.delimiter.map(str::to_owned),
+                names: args.names.clone(),
+                index_col: own(args.index_col),
+                usecols: own(args.usecols),
+                dtype: own(args.dtype),
+                parse_dates: own(args.parse_dates),
+                na_values: own(args.na_values),
+                keep_default_na: args.keep_default_na,
+                kwargs: Some(kwargs.copy()?.unbind()),
+            },
+            started: false,
+        }))
+    }
+
+    /// `rows` read under the prefix with read_csv's own arguments.
+    fn parse(&self, py: Python<'_>, rows: &[String]) -> PyResult<DataFrame> {
+        let mut text = self.prefix.clone();
+        for row in rows {
+            text.push_str(row);
+            if !row.ends_with('\n') {
+                text.push('\n');
+            }
+        }
+        let source = py.import("io")?.getattr("StringIO")?.call1((text,))?;
+        let kwargs = match &self.args.kwargs {
+            Some(kwargs) => Some(kwargs.bind(py).copy()?),
+            None => None,
+        };
+        let bind = |value: &Option<Py<PyAny>>| value.as_ref().map(|value| value.bind(py).clone());
+        let (index_col, usecols, dtype) = (
+            bind(&self.args.index_col),
+            bind(&self.args.usecols),
+            bind(&self.args.dtype),
+        );
+        let (parse_dates, na_values) = (bind(&self.args.parse_dates), bind(&self.args.na_values));
+        let args = CsvReadArgs {
+            sep: self.args.sep.as_deref(),
+            delimiter: self.args.delimiter.as_deref(),
+            names: self.args.names.clone(),
+            index_col: index_col.as_ref(),
+            usecols: usecols.as_ref(),
+            dtype: dtype.as_ref(),
+            parse_dates: parse_dates.as_ref(),
+            na_values: na_values.as_ref(),
+            keep_default_na: self.args.keep_default_na,
+            skiprows: None,
+            nrows: None,
+            encoding: None,
+            kwargs: kwargs.as_ref(),
+        };
+        Ok(read_csv_impl(py, &source, self.default_sep, &args)?.inner)
+    }
+}
+
+#[pymethods]
+impl PyTextFileReader {
+    /// The next `nrows` rows (the rest by default) as a frame; pandas'
+    /// StopIteration once none is left (the first read of a file without
+    /// rows is its empty frame).
+    #[pyo3(signature = (nrows=None))]
+    fn read(&mut self, py: Python<'_>, nrows: Option<usize>) -> PyResult<PyDataFrame> {
+        if self.started && self.position >= self.rows.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyStopIteration, _>(()));
+        }
+        self.started = true;
+        let start = self.position;
+        let stop = nrows.map_or(self.rows.len(), |nrows| {
+            start.saturating_add(nrows).min(self.rows.len())
+        });
+        let mut frame = self.parse(py, &self.rows[start..stop])?;
+        if frame.index().range_span().is_some() {
+            let span = |at: usize| i64::try_from(at).unwrap_or(i64::MAX);
+            frame = frame
+                .with_index(Index::from_range(span(start), span(stop), 1))
+                .map_err(frame_error_to_py)?;
+        }
+        self.position = stop;
+        Ok(PyDataFrame { inner: frame })
+    }
+
+    /// The next `size` rows (`chunksize` by default, the rest without one).
+    #[pyo3(signature = (size=None))]
+    fn get_chunk(&mut self, py: Python<'_>, size: Option<usize>) -> PyResult<PyDataFrame> {
+        let size = size.or(self.chunksize);
+        self.read(py, size)
+    }
+
+    #[getter]
+    fn chunksize(&self) -> Option<usize> {
+        self.chunksize
+    }
+
+    fn close(&mut self) {
+        self.position = self.rows.len();
+        self.started = true;
+    }
+
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<PyDataFrame>> {
+        if self.started && self.position >= self.rows.len() {
+            return Ok(None);
+        }
+        self.get_chunk(py, None).map(Some)
+    }
+
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    #[pyo3(signature = (*_args))]
+    fn __exit__(&mut self, _args: &Bound<'_, PyTuple>) {
+        self.close();
+    }
 }
 
 /// Map a pandas `orient=` string to the fp-io `JsonOrient` enum.
@@ -70837,7 +71144,7 @@ pub fn read_table(
     nrows: Option<usize>,
     encoding: Option<&str>,
     kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<PyDataFrame> {
+) -> PyResult<Py<PyAny>> {
     let args = CsvReadArgs {
         sep,
         delimiter,
@@ -70853,7 +71160,10 @@ pub fn read_table(
         encoding,
         kwargs,
     };
-    read_csv_impl(py, filepath_or_buffer, b'\t', &args)
+    if let Some(reader) = PyTextFileReader::from_args(py, filepath_or_buffer, b'\t', &args)? {
+        return reader.into_py_any(py);
+    }
+    read_csv_impl(py, filepath_or_buffer, b'\t', &args)?.into_py_any(py)
 }
 
 #[pyfunction]
@@ -75643,6 +75953,7 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<PySeries>()?;
     m.add_class::<PyDataFrame>()?;
+    m.add_class::<PyTextFileReader>()?;
     m.add_class::<PyPlotResult>()?;
     m.add_class::<PyPlotAccessor>()?;
     m.add_class::<PyGroupBy>()?;
