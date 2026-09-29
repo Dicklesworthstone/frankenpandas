@@ -64288,15 +64288,70 @@ fn parse_json_orient(orient: &str) -> PyResult<fp_io::JsonOrient> {
 /// `path_or_buf` is pandas': a path, a file-like object (it took a path
 /// string only, so `read_json(io.StringIO(...))` raised; fvsao.31), or - with
 /// pandas 2.2's FutureWarning - a literal JSON string; `lines=True` reads
-/// line-delimited records.
+/// line-delimited records, the first `nrows` of them.
+///
+/// Then pandas' conversions (br-frankenpandas-3rj8b; each keyword was a
+/// TypeError, and the defaults' conversions were missing, so '01' stayed
+/// text and a `date` column its strings): `convert_dates` (True: the
+/// columns named date / datetime / modified / timestamp* / *_at / *_time
+/// with `keep_default_dates`, or the columns listed) parses ISO text, and
+/// ints in range as epoch `date_unit` (s, ms, us, ns: the first that fits);
+/// `dtype` True (the default) tries the other text columns as float64 and
+/// floats as int64 where exact, False leaves them (missing values NaN), a
+/// dtype or {column: dtype} casts. `typ='series'` reads a Series
+/// (orient index, split or records); `orient='table'` restores the schema's
+/// index and dtypes; `encoding` / `compression` read the source as
+/// read_csv does. `chunksize` and `convert_axes=False` stay refused.
 #[pyfunction]
-#[pyo3(signature = (path_or_buf, orient=None, lines=false))]
+#[pyo3(signature = (path_or_buf, orient=None, typ="frame", dtype=None, convert_axes=None, convert_dates=None, keep_default_dates=true, precise_float=false, date_unit=None, encoding=None, encoding_errors="strict", lines=false, chunksize=None, compression=Some("infer"), nrows=None, storage_options=None, dtype_backend=None, engine="ujson"))]
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 fn read_json(
     py: Python<'_>,
     path_or_buf: &Bound<'_, PyAny>,
     orient: Option<&str>,
+    typ: &str,
+    dtype: Option<&Bound<'_, PyAny>>,
+    convert_axes: Option<bool>,
+    convert_dates: Option<&Bound<'_, PyAny>>,
+    keep_default_dates: bool,
+    precise_float: bool,
+    date_unit: Option<&str>,
+    encoding: Option<&str>,
+    encoding_errors: &str,
     lines: bool,
-) -> PyResult<PyDataFrame> {
+    chunksize: Option<usize>,
+    compression: Option<&str>,
+    nrows: Option<usize>,
+    storage_options: Option<&Bound<'_, PyAny>>,
+    dtype_backend: Option<&Bound<'_, PyAny>>,
+    engine: &str,
+) -> PyResult<Py<PyAny>> {
+    // precise_float: fp parses every float precisely, pandas' True.
+    let _ = precise_float;
+    unsupported_params(
+        "read_json",
+        &[
+            ("convert_axes", convert_axes != Some(false)),
+            ("encoding_errors", encoding_errors == "strict"),
+            ("chunksize", chunksize.is_none()),
+            (
+                "storage_options",
+                storage_options.is_none_or(|s| s.is_none()),
+            ),
+            ("dtype_backend", dtype_backend.is_none_or(|d| d.is_none())),
+            ("engine", engine == "ujson"),
+        ],
+    )?;
+    if !matches!(typ, "frame" | "series") {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "typ={typ} is an invalid value for typ"
+        )));
+    }
+    if nrows.is_some() && !lines {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "nrows can only be passed if lines=True",
+        ));
+    }
     let literal = path_or_buf
         .extract::<String>()
         .ok()
@@ -64311,19 +64366,291 @@ fn read_json(
             )?;
             text
         }
-        None => py_input_text(path_or_buf)?,
+        None => csv_source_text(py, path_or_buf, encoding, compression)?,
     };
-    if lines {
-        let df = fp_io::read_jsonl_str(&text).map_err(io_error_to_py)?;
-        return Ok(PyDataFrame { inner: df });
+    let module = py.import("frankenpandas")?;
+    if orient == Some("table") {
+        return json_table_frame(py, &text);
     }
-    let orient = match orient {
-        Some(orient) => parse_json_orient(orient)?,
-        None if text.trim_start().starts_with('[') => fp_io::JsonOrient::Records,
-        None => fp_io::JsonOrient::Columns,
+    let parsed: Bound<'_, PyAny> = if typ == "series" {
+        let data = py.import("json")?.call_method1("loads", (&text,))?;
+        match orient.unwrap_or("index") {
+            "split" => {
+                let keywords = PyDict::new(py);
+                for key in ["index", "name"] {
+                    if let Ok(value) = data.get_item(key) {
+                        keywords.set_item(key, value)?;
+                    }
+                }
+                module
+                    .getattr("Series")?
+                    .call((data.get_item("data")?,), Some(&keywords))?
+            }
+            "index" | "records" => module.getattr("Series")?.call1((data,))?,
+            other => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid value '{other}' for option 'orient'"
+                )));
+            }
+        }
+    } else if lines {
+        let text = match nrows {
+            Some(nrows) => text
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .take(nrows)
+                .collect::<Vec<_>>()
+                .join("\n"),
+            None => text,
+        };
+        let frame = fp_io::read_jsonl_str(&text).map_err(io_error_to_py)?;
+        Bound::new(py, PyDataFrame { inner: frame })?.into_any()
+    } else {
+        let orient = match orient {
+            Some(orient) => parse_json_orient(orient)?,
+            None if text.trim_start().starts_with('[') => fp_io::JsonOrient::Records,
+            None => fp_io::JsonOrient::Columns,
+        };
+        let frame = fp_io::read_json_str(&text, orient).map_err(io_error_to_py)?;
+        Bound::new(py, PyDataFrame { inner: frame })?.into_any()
     };
-    let df = fp_io::read_json_str(&text, orient).map_err(io_error_to_py)?;
-    Ok(PyDataFrame { inner: df })
+    Ok(json_converted(parsed, dtype, convert_dates, keep_default_dates, date_unit)?.unbind())
+}
+
+/// Whether a column name is one pandas' `keep_default_dates` parses: date,
+/// datetime, modified, timestamp*, *_at, *_time (case-insensitive).
+fn json_default_date_column(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with("_at")
+        || lower.ends_with("_time")
+        || lower.starts_with("timestamp")
+        || matches!(lower.as_str(), "modified" | "date" | "datetime")
+}
+
+/// pandas' read_json conversions of a parsed Series or DataFrame (see
+/// [`read_json`]): the date columns first, then `dtype`.
+fn json_converted<'py>(
+    parsed: Bound<'py, PyAny>,
+    dtype: Option<&Bound<'py, PyAny>>,
+    convert_dates: Option<&Bound<'py, PyAny>>,
+    keep_default_dates: bool,
+    date_unit: Option<&str>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let dtype = dtype.filter(|dtype| !dtype.is_none());
+    let coerce = match dtype {
+        None => true,
+        Some(flag) if flag.is_instance_of::<pyo3::types::PyBool>() => flag.is_truthy()?,
+        Some(_) => false,
+    };
+    let dates_on = convert_dates
+        .filter(|flag| !flag.is_none())
+        .is_none_or(|flag| {
+            !flag.is_instance_of::<pyo3::types::PyBool>() || flag.is_truthy().unwrap_or(true)
+        });
+    let listed: Vec<String> = convert_dates
+        .filter(|dates| dates.is_instance_of::<PyList>())
+        .map(|dates| dates.extract())
+        .transpose()?
+        .unwrap_or_default();
+    // A Series: its values as pandas' SeriesParser converts them.
+    if parsed.is_instance_of::<PySeries>() {
+        if let Some(cast) = dtype.filter(|_| !coerce) {
+            if !cast.is_instance_of::<pyo3::types::PyBool>() {
+                return parsed.call_method1("astype", (cast,));
+            }
+        }
+        if dates_on && let Some(dates) = json_date_values(&parsed, date_unit)? {
+            return Ok(dates);
+        }
+        return if coerce {
+            json_numbers(&parsed)
+        } else {
+            Ok(parsed)
+        };
+    }
+    let columns: Vec<Bound<'py, PyAny>> = parsed
+        .getattr("columns")?
+        .try_iter()?
+        .collect::<PyResult<_>>()?;
+    let mut frame = parsed;
+    for column in columns {
+        let name = column.str()?.to_string();
+        let values = frame.get_item(&column)?;
+        // dtype given per column or for all: that dtype.
+        if let Some(cast) = dtype.filter(|_| !coerce) {
+            if let Ok(per_column) = cast.cast::<PyDict>() {
+                if let Some(wanted) = per_column.get_item(&column)? {
+                    frame.set_item(&column, values.call_method1("astype", (wanted,))?)?;
+                    continue;
+                }
+            } else if !cast.is_instance_of::<pyo3::types::PyBool>() {
+                frame.set_item(&column, values.call_method1("astype", (cast,))?)?;
+                continue;
+            }
+        }
+        let is_date = dates_on
+            && (listed.contains(&name) || (keep_default_dates && json_default_date_column(&name)));
+        if is_date && let Some(dates) = json_date_values(&values, date_unit)? {
+            frame.set_item(&column, dates)?;
+            continue;
+        }
+        if coerce {
+            frame.set_item(&column, json_numbers(&values)?)?;
+        }
+        let _ = &mut frame;
+    }
+    Ok(frame)
+}
+
+/// pandas' `_try_convert_to_date` of `values`: text or ints (object ints
+/// read as int64) as instants - ints only when every present one is past a
+/// year of seconds, in the first of `date_unit` (else s, ms, us, ns) that
+/// reads them; None when nothing converts.
+fn json_date_values<'py>(
+    values: &Bound<'py, PyAny>,
+    date_unit: Option<&str>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let py = values.py();
+    if values.len()? == 0 {
+        return Ok(None);
+    }
+    let module = py.import("frankenpandas")?;
+    let dtype = values.getattr("dtype")?.str()?.to_string();
+    let numbers = if dtype == "object" || dtype == "string" {
+        values.call_method1("astype", ("int64",)).ok()
+    } else if dtype.starts_with("int") || dtype.starts_with("float") {
+        Some(values.clone())
+    } else {
+        None
+    };
+    let to_datetime = module.getattr("to_datetime")?;
+    let raising = PyDict::new(py);
+    raising.set_item("errors", "raise")?;
+    if let Some(numbers) = numbers {
+        let in_range = numbers
+            .call_method0("isna")?
+            .call_method1(
+                "__or__",
+                (numbers.call_method1("__gt__", (31_536_000_i64,))?,),
+            )?
+            .call_method0("all")?
+            .is_truthy()?;
+        if !in_range {
+            return Ok(None);
+        }
+        let units: Vec<&str> = match date_unit {
+            Some(unit) => vec![unit],
+            None => vec!["s", "ms", "us", "ns"],
+        };
+        for unit in units {
+            let keywords = raising.copy()?;
+            keywords.set_item("unit", unit)?;
+            if let Ok(dates) = to_datetime.call((&numbers,), Some(&keywords)) {
+                return Ok(Some(dates));
+            }
+        }
+        return Ok(None);
+    }
+    if dtype == "object" || dtype == "string" {
+        return Ok(to_datetime.call((values,), Some(&raising)).ok());
+    }
+    Ok(None)
+}
+
+/// pandas' `_try_convert_data` numbers: text tried as float64, then floats as
+/// int64 where every value is whole (a missing one keeps them floats).
+fn json_numbers<'py>(values: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let dtype = values.getattr("dtype")?.str()?.to_string();
+    let mut data = values.clone();
+    if dtype == "object" || dtype == "string" {
+        if let Ok(floats) = data.call_method1("astype", ("float64",)) {
+            data = floats;
+        }
+    }
+    let now = data.getattr("dtype")?.str()?.to_string();
+    if data.len()? > 0 && (now == "float64" || now == "object") {
+        if let Ok(ints) = data.call_method1("astype", ("int64",)) {
+            if ints
+                .call_method1("__eq__", (&data,))?
+                .call_method0("all")?
+                .is_truthy()?
+            {
+                data = ints;
+            }
+        }
+    }
+    Ok(data)
+}
+
+/// pandas' `read_json(orient='table')`: the records under the schema - the
+/// primaryKey the index (an unnamed one written as 'index' comes back
+/// unnamed), each field's type its dtype (integer int64, number float64,
+/// boolean bool, datetime datetime64 in the field's tz, duration
+/// timedelta64, an extDtype that dtype) (it was a ValueError).
+fn json_table_frame(py: Python<'_>, text: &str) -> PyResult<Py<PyAny>> {
+    let module = py.import("frankenpandas")?;
+    let document = py.import("json")?.call_method1("loads", (text,))?;
+    let schema = document.get_item("schema")?;
+    let fields: Vec<Bound<'_, PyAny>> = schema
+        .get_item("fields")?
+        .try_iter()?
+        .collect::<PyResult<_>>()?;
+    let names = PyList::empty(py);
+    for field in &fields {
+        names.append(field.get_item("name")?)?;
+    }
+    let keywords = PyDict::new(py);
+    keywords.set_item("columns", &names)?;
+    let mut frame = module
+        .getattr("DataFrame")?
+        .call((document.get_item("data")?,), Some(&keywords))?;
+    for field in &fields {
+        let name = field.get_item("name")?;
+        let values = frame.get_item(&name)?;
+        let kind = field.get_item("type")?.extract::<String>()?;
+        let converted = if let Ok(Some(ext)) = field
+            .call_method1("get", ("extDtype",))
+            .map(|e| (!e.is_none()).then_some(e))
+        {
+            values.call_method1("astype", (ext,))?
+        } else {
+            match kind.as_str() {
+                "integer" => values.call_method1("astype", ("int64",))?,
+                "number" => values.call_method1("astype", ("float64",))?,
+                "boolean" => values.call_method1("astype", ("bool",))?,
+                "datetime" => {
+                    let dates = module.getattr("to_datetime")?.call1((values,))?;
+                    match field.call_method1("get", ("tz",))? {
+                        tz if tz.is_none() => dates,
+                        tz => dates.getattr("dt")?.call_method1("tz_convert", (tz,))?,
+                    }
+                }
+                "duration" => module.getattr("to_timedelta")?.call1((values,))?,
+                _ => values,
+            }
+        };
+        frame.set_item(&name, converted)?;
+    }
+    let keys: Vec<Bound<'_, PyAny>> = match schema.call_method1("get", ("primaryKey",))? {
+        key if key.is_none() => Vec::new(),
+        key => key.try_iter()?.collect::<PyResult<_>>()?,
+    };
+    if !keys.is_empty() {
+        let index = if keys.len() == 1 {
+            keys[0].clone()
+        } else {
+            PyList::new(py, &keys)?.into_any()
+        };
+        frame = frame.call_method1("set_index", (index,))?;
+        if keys.len() == 1
+            && keys[0]
+                .extract::<String>()
+                .is_ok_and(|name| name == "index")
+        {
+            frame.getattr("index")?.setattr("name", py.None())?;
+        }
+    }
+    Ok(frame.unbind())
 }
 
 /// Read a line-delimited JSON file into a DataFrame (pandas
@@ -65122,6 +65449,12 @@ fn to_datetime_error(err: fp_frame::FrameError) -> PyErr {
             if message.starts_with("Unknown datetime string format") =>
         {
             DateParseError::new_err(message)
+        }
+        // An epoch past the nanosecond range in its unit.
+        fp_frame::FrameError::CompatibilityRejected(message)
+            if message.starts_with("cannot convert input ") =>
+        {
+            OutOfBoundsDatetime::new_err(message)
         }
         fp_frame::FrameError::CompatibilityRejected(message) => {
             PyErr::new::<pyo3::exceptions::PyValueError, _>(message)

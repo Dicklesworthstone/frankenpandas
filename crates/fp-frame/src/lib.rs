@@ -62639,7 +62639,14 @@ pub fn to_datetime_with_options(
 
     // Per br-frankenpandas-iy82u: pandas pd.to_datetime preserves source axis name.
     let index = series.index().clone();
-    let mut column = Column::from_values(converted)?;
+    // Every value NaT is still pandas' datetime64[ns] column (it inferred
+    // object; br-frankenpandas-3rj8b).
+    let all_missing = converted.iter().all(Scalar::is_missing);
+    let mut column = if all_missing && !converted.is_empty() {
+        Column::new(DType::Datetime64 { tz: None }, converted)?
+    } else {
+        Column::from_values(converted)?
+    };
     // utc=True is pandas' datetime64[ns, UTC]: the values are already UTC
     // instants; the dtype said naive.
     if utc && matches!(column.dtype(), DType::Datetime64 { .. }) {
@@ -62850,6 +62857,24 @@ pub fn to_datetime_values_with_options(
                 datetime64_scalar_from_parsed_datetime(parsed)
             }
         };
+        // A number past the nanosecond range in its unit is pandas'
+        // OutOfBoundsDatetime under errors='raise' (it was a silent NaT;
+        // br-frankenpandas-3rj8b).
+        if options.errors == DatetimeErrors::Raise
+            && result.is_missing()
+            && let Some(unit) = options.unit.filter(|_| parsed_unit.is_some())
+            && matches!(val, Scalar::Int64(_) | Scalar::Float64(_))
+            && !val.is_missing()
+        {
+            let input = match val {
+                Scalar::Int64(value) => value.to_string(),
+                Scalar::Float64(value) => value.to_string(),
+                _ => String::new(),
+            };
+            return Err(FrameError::CompatibilityRejected(format!(
+                "cannot convert input {input} with the unit '{unit}', at position {position}"
+            )));
+        }
         if options.errors == DatetimeErrors::Raise
             && result.is_missing()
             && let Scalar::Utf8(text) = val
@@ -193991,6 +194016,45 @@ mod tests {
                 datetime64_scalar("1969-12-31 23:59:59"),
             ]
         );
+    }
+
+    #[test]
+    fn to_datetime_unit_past_the_range_raises_or_is_datetime_nat_3rj8b() {
+        let s = Series::from_values(
+            "epoch",
+            vec![0_i64.into()],
+            vec![Scalar::Int64(1_704_067_200_000)],
+        )
+        .unwrap();
+        let raising = super::ToDatetimeOptions {
+            unit: Some("s"),
+            errors: super::DatetimeErrors::Raise,
+            ..super::ToDatetimeOptions::default()
+        };
+        let err = super::to_datetime_with_options(&s, raising).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("cannot convert input 1704067200000 with the unit 's', at position 0"),
+            "{err}"
+        );
+        // Coerced: NaT, still a datetime64 column (it inferred object).
+        let coerced = super::to_datetime_with_unit(&s, "s").unwrap();
+        assert!(coerced.values()[0].is_missing());
+        assert!(matches!(
+            coerced.column().dtype(),
+            DType::Datetime64 { tz: None }
+        ));
+        // In range in its unit: converted, no error under raise.
+        let ok = super::to_datetime_with_options(
+            &s,
+            super::ToDatetimeOptions {
+                unit: Some("ms"),
+                errors: super::DatetimeErrors::Raise,
+                ..super::ToDatetimeOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(ok.values(), &[datetime64_scalar("2024-01-01 00:00:00")]);
     }
 
     #[test]

@@ -19837,3 +19837,84 @@ _E51_CASES = {
 def test_everyday51_fwf_csv_compression_parquet_html_like_pandas_jn2nd(case: str) -> None:
     run = _E51_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-3rj8b: read_json's default conversions (numeric text to
+# numbers, date-named columns to instants - both were left as parsed) and
+# its keywords (dtype=, convert_dates=, typ=, orient='table', nrows=,
+# precise_float=, encoding=, compression= were TypeErrors); to_datetime of
+# an epoch past the nanosecond range raises (a silent NaT) and an all-NaT
+# result is datetime64 (object).
+def _e52_json(m: Any, text: str, **kwargs: Any) -> list:
+    result = m.read_json(__import__("io").StringIO(text), **kwargs)
+    if hasattr(result, "columns"):
+        return _e23_shown(result) + [repr(result.index)]
+    return [result, repr(result.index)]
+
+
+def _e52_raised(run: Any) -> list:
+    try:
+        return ["no error", repr(run())]
+    except Exception as error:  # noqa: BLE001 - the class and message are the outcome
+        return [type(error).__name__, str(error)]
+
+
+def _e52_table(m: Any) -> list:
+    frame = m.DataFrame(
+        {"a": [1, 2], "f": [1.5, None], "d": m.to_datetime(["2024-01-01", None]), "b": [True, False]},
+        index=m.Index(["x", "y"], name="i"),
+    )
+    return _e52_json(m, frame.to_json(orient="table"), orient="table")
+
+
+def _e52_gzip(m: Any) -> list:
+    import gzip
+    import os
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, "f.json.gz")
+        with gzip.open(path, "wt") as handle:
+            handle.write('[{"a":"1"},{"a":"2"}]')
+        return _e23_shown(m.read_json(path))
+
+
+_E52_CASES = {
+    "numeric text": lambda m: _e52_json(m, '[{"a":"01","b":"x","c":1.5}]'),
+    "whole floats": lambda m: _e52_json(m, '[{"a":1.0},{"a":2.0}]'),
+    "numeric text beside a null": lambda m: _e52_json(m, '[{"a":"1"},{"a":null}]'),
+    "dtype False": lambda m: _e52_json(m, '[{"a":"01","b":"x"}]', dtype=False),
+    "dtype per column": lambda m: _e52_json(m, '[{"a":1,"b":2}]', dtype={"a": "float64"}),
+    "a date column": lambda m: _e52_json(m, '[{"date":"2024-01-01","x":"2024-01-01"}]'),
+    "convert_dates False": lambda m: _e52_json(m, '[{"date":"2024-01-01"}]', convert_dates=False),
+    "convert_dates listed": lambda m: _e52_json(m, '[{"when":"2024-01-01"}]', convert_dates=["when"]),
+    "epoch ms in modified": lambda m: _e52_json(m, '[{"modified":1704067200000}]'),
+    "created_at and timestamp": lambda m: _e52_json(
+        m, '[{"created_at":"2024-01-02T03:04:05","timestamp_x":1704067200}]'
+    ),
+    "a Series": lambda m: _e52_json(m, '{"a":1,"b":2}', typ="series"),
+    "a split Series": lambda m: _e52_json(m, '{"name":"s","index":["x","y"],"data":[1,2]}', typ="series", orient="split"),
+    "orient table": _e52_table,
+    "nrows of lines": lambda m: _e52_json(m, '{"a":1}\n{"a":2}\n{"a":3}\n', lines=True, nrows=2),
+    "precise_float": lambda m: _e52_json(m, '[{"a":0.1}]', precise_float=True),
+    "a gzip file": _e52_gzip,
+    # The class and message (pandas raises it from its tslibs module).
+    "to_datetime past the range": lambda m: _e52_raised(lambda: m.to_datetime([1704067200000], unit="s")),
+    "to_datetime coerced past the range": lambda m: [
+        m.to_datetime(m.Series([1704067200000]), unit="s", errors="coerce")
+    ],
+    # Negatives: already pandas'.
+    "a small int in a date column": lambda m: _e52_json(m, '[{"date":5}]'),
+    "ints": lambda m: _e52_json(m, '[{"a":1},{"a":2}]'),
+    "text": lambda m: _e52_json(m, '[{"a":"x"},{"a":"y"}]'),
+    "split frame": lambda m: _e52_json(m, '{"columns":["a"],"index":[0],"data":[[1]]}', orient="split"),
+    "lines": lambda m: _e52_json(m, '{"a":1}\n{"a":2}\n', lines=True),
+    "to_datetime ms": lambda m: [m.to_datetime(m.Series([1704067200000]), unit="ms")],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E52_CASES))
+def test_everyday52_read_json_conversions_like_pandas_3rj8b(case: str) -> None:
+    run = _E52_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
