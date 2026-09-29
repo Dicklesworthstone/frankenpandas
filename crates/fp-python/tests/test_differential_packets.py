@@ -19183,3 +19183,78 @@ _E43_CASES = {
 def test_everyday43_dates_asof_flags_like_pandas_6kaxp(case: str) -> None:
     run = _E43_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-mv4w4: a masked integer refuses a fraction fill (it was
+# truncated), a masked Series rounds in its dtype, a masked value_counts puts
+# <NA> after its values, a categorical maps its categories, and .loc reads
+# and writes MultiIndex columns by label, tuple (slices in it) or list (the
+# write appended bogus columns).
+def _e44_counts(m: Any, values: list, dtype: str, **kwargs: Any) -> list:
+    counts = m.Series(values, dtype=dtype).value_counts(dropna=False, **kwargs)
+    return [str(v) for v in counts.index] + [str(v) for v in counts] + [str(counts.dtype)]
+
+
+def _e44_frame(m: Any) -> Any:
+    columns = m.MultiIndex.from_product([["a", "b"], ["x", "y"]])
+    return m.DataFrame(np.arange(8).reshape(2, 4), columns=columns, index=["r1", "r2"])
+
+
+def _e44_written(m: Any, key: Any, value: Any) -> list:
+    frame = _e44_frame(m)
+    frame.loc[key] = value
+    return _e23_shown(frame) + [str(list(frame.columns))]
+
+
+def _e44_shown(result: Any) -> list:
+    if hasattr(result, "columns"):
+        return _e23_shown(result) + [str(list(result.columns))]
+    return [str(list(result.index)), str(list(result)), str(result.name)]
+
+
+_E44_CASES = {
+    "Int64 fillna fraction": lambda m: [m.Series([1, None], dtype="Int64").fillna(2.5)],
+    "Int32 fillna fraction": lambda m: [m.Series([1, None], dtype="Int32").fillna(0.5)],
+    "Int64 fillna text": lambda m: [m.Series([1, None], dtype="Int64").fillna("x")],
+    "Float64 round": lambda m: [m.Series([1.25, None], dtype="Float64").round(1)],
+    "Int64 round": lambda m: [m.Series([15, None], dtype="Int64").round(-1)],
+    "Int64 value_counts": lambda m: _e44_counts(m, [1, None, 3, 4], "Int64"),
+    "Int64 value_counts unsorted": lambda m: _e44_counts(m, [None, 1, 3, 3], "Int64", sort=False),
+    "Int64 value_counts normalize": lambda m: _e44_counts(m, [1, None, 3], "Int64", normalize=True),
+    "boolean value_counts": lambda m: _e44_counts(m, [None, True, False], "boolean"),
+    "category map dict": lambda m: [m.Series(["a", "b"], dtype="category").map({"a": "A", "b": "B"})],
+    "category map function": lambda m: [m.Series(["a", "b", "a"], dtype="category").map(str.upper)],
+    "category map with a missing value": lambda m: [m.Series(["a", None], dtype="category").map({"a": "A"})],
+    "category map ordered": lambda m: [
+        m.Series(m.Categorical(["lo", "hi"], categories=["lo", "hi"], ordered=True)).map({"lo": 0, "hi": 1})
+    ],
+    "loc row, top slice": lambda m: _e44_shown(_e44_frame(m).loc["r1", ("a", slice(None))]),
+    "loc rows, top slice": lambda m: _e44_shown(_e44_frame(m).loc[:, ("a", slice(None))]),
+    "loc rows, level slice": lambda m: _e44_shown(_e44_frame(m).loc[:, (slice(None), "y")]),
+    "loc IndexSlice": lambda m: _e44_shown(_e44_frame(m).loc[:, m.IndexSlice[:, "y"]]),
+    "loc row, top": lambda m: _e44_shown(_e44_frame(m).loc["r1", "a"]),
+    "loc row, tuple": lambda m: [_e44_frame(m).loc["r1", ("b", "x")]],
+    "loc row, tops": lambda m: _e44_shown(_e44_frame(m).loc["r1", ["a", "b"]]),
+    "loc row, tuples": lambda m: _e44_shown(_e44_frame(m).loc["r1", [("a", "x"), ("b", "y")]]),
+    "loc write tuple": lambda m: _e44_written(m, (slice(None), ("a", "x")), 0),
+    "loc write row, tuple": lambda m: _e44_written(m, ("r1", ("b", "y")), 9),
+    "loc write row, top": lambda m: _e44_written(m, ("r1", "a"), 5),
+    "loc write top slice": lambda m: _e44_written(m, (slice(None), ("a", slice(None))), 0),
+    # Negatives: already pandas'.
+    "Int64 value_counts ascending": lambda m: _e44_counts(m, [1, None, 3, 3], "Int64", ascending=True),
+    "Int64 fillna whole": lambda m: [m.Series([1, None], dtype="Int64").fillna(2.0)],
+    "float round": lambda m: [m.Series([1.25, None]).round(1)],
+    "float value_counts": lambda m: _e44_counts(m, [1, None, 3, 4], "float64"),
+    "string value_counts": lambda m: _e44_counts(m, ["a", None, "a", "b"], "string"),
+    "category map to repeats": lambda m: [m.Series(["a", "b", "a"], dtype="category").map({"a": "A", "b": "A"})],
+    "category map partly": lambda m: [m.Series(["a", "b"], dtype="category").map({"a": "A"})],
+    "loc rows, tuple": lambda m: _e44_shown(_e44_frame(m).loc[:, ("b", "x")]),
+    "getitem top": lambda m: _e44_shown(_e44_frame(m)["a"]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E44_CASES))
+def test_everyday44_masked_categorical_multicolumn_like_pandas_mv4w4(case: str) -> None:
+    run = _E44_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

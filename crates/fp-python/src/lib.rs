@@ -3732,9 +3732,9 @@ fn offset_freq_as_period(freq: &str) -> String {
     const MONTHS: [&str; 12] = [
         "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
     ];
-    let (base, anchor) = freq.split_once('-').map_or((freq, None), |(base, anchor)| {
-        (base, Some(anchor))
-    });
+    let (base, anchor) = freq
+        .split_once('-')
+        .map_or((freq, None), |(base, anchor)| (base, Some(anchor)));
     let month_before = |anchor: Option<&str>| {
         let position = MONTHS
             .iter()
@@ -20413,6 +20413,27 @@ fn fill_column_with_other(
     }
 }
 
+/// pandas' refusal of a fill a masked integer column cannot hold: a
+/// fraction or text is "Invalid value '2.5' for dtype Int64" (the fill was
+/// truncated into the column; br-frankenpandas-mv4w4). A whole number and a
+/// missing value pass.
+fn refuse_masked_int_fill(py: Python<'_>, col: &Column, value: &Bound<'_, PyAny>) -> PyResult<()> {
+    if col.dtype() != DType::Int64Nullable
+        || value.is_none()
+        || (api_is_scalar(value) && isna(py, value)?.bind(py).is_truthy()?)
+        || value
+            .extract::<f64>()
+            .is_ok_and(|number| number.is_finite() && number.fract() == 0.0)
+    {
+        return Ok(());
+    }
+    let dtype = col.width().map_or("Int64", |width| width.name(true));
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        "Invalid value '{}' for dtype {dtype}",
+        value.str()?
+    )))
+}
+
 fn fill_column_with_scalar(
     col: &Column,
     scalar: &Scalar,
@@ -24397,6 +24418,65 @@ fn execute_series_where(inner: &Series, cond: &Series, other: &SeriesOrScalar) -
 }
 
 impl PySeries {
+    /// pandas' `Categorical.map` under `Series.map` (a callable or a dict):
+    /// the categories mapped, and while those stay distinct and none is
+    /// missing - nor would a missing value map to anything - the same codes
+    /// under them, a categorical as before; None otherwise, for the value
+    /// map (it always came back object; br-frankenpandas-mv4w4).
+    fn categorical_map(
+        &self,
+        py: Python<'_>,
+        arg: &Bound<'_, PyAny>,
+        ignore_na: bool,
+    ) -> PyResult<Option<PySeries>> {
+        if self.inner.column().categorical().is_none()
+            || !(arg.is_callable() || arg.is_instance_of::<PyDict>())
+        {
+            return Ok(None);
+        }
+        let this = Bound::new(
+            py,
+            PySeries {
+                inner: self.inner.clone(),
+            },
+        )?;
+        let accessor = this.getattr("cat")?;
+        let categories = accessor
+            .getattr("categories")?
+            .call_method1("map", (arg,))?;
+        if self.inner.column().has_any_missing() && !ignore_na {
+            let missing = if arg.is_callable() {
+                arg.call1((f64::NAN,))?
+            } else {
+                arg.call_method1("get", (f64::NAN, f64::NAN))?
+            };
+            if !(api_is_scalar(&missing) && isna(py, &missing)?.bind(py).is_truthy()?) {
+                return Ok(None);
+            }
+        }
+        if !categories.getattr("is_unique")?.is_truthy()?
+            || categories.getattr("hasnans")?.is_truthy()?
+        {
+            return Ok(None);
+        }
+        let module = py.import("frankenpandas")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("categories", &categories)?;
+        kwargs.set_item("ordered", accessor.getattr("ordered")?)?;
+        let values = module.getattr("Categorical")?.call_method(
+            "from_codes",
+            (accessor.getattr("codes")?,),
+            Some(&kwargs),
+        )?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("index", this.getattr("index")?)?;
+        kwargs.set_item("name", this.getattr("name")?)?;
+        let mapped = module.getattr("Series")?.call((values,), Some(&kwargs))?;
+        Ok(Some(PySeries {
+            inner: mapped.extract::<PyRef<'_, PySeries>>()?.inner.clone(),
+        }))
+    }
+
     /// `shift` by one int: the values `periods` rows on (the labels by
     /// `freq`), `fill_value` where none moved in.
     fn shift_by(
@@ -26155,6 +26235,45 @@ impl PySeries {
         } else {
             r
         };
+        // A masked array counts its missing values after its values
+        // (BaseMaskedArray.value_counts), so among equal counts - and
+        // unsorted - the missing row follows the others (it kept its first
+        // missing value's place; br-frankenpandas-mv4w4). A numpy or a
+        // `string` column keeps first appearance, as pandas.
+        let r = if !dropna
+            && bins.is_none_or(|bins| bins.is_none())
+            && matches!(
+                self.inner.column().dtype(),
+                DType::Int64Nullable | DType::Float64Nullable | DType::BoolNullable
+            )
+            && let Some(missing) = r.index().labels().iter().position(IndexLabel::is_missing)
+        {
+            let counts: Vec<f64> = r
+                .values()
+                .iter()
+                .map(|count| count.to_f64().unwrap_or(0.0))
+                .collect();
+            let mut rows: Vec<usize> = (0..r.len()).filter(|&row| row != missing).collect();
+            let ahead = rows
+                .iter()
+                .take_while(|&&row| {
+                    !sort
+                        || if ascending {
+                            counts[row] <= counts[missing]
+                        } else {
+                            counts[row] >= counts[missing]
+                        }
+                })
+                .count();
+            rows.insert(ahead, missing);
+            let positions: Vec<i64> = rows
+                .iter()
+                .map(|&row| i64::try_from(row).unwrap_or(i64::MAX))
+                .collect();
+            r.take(&positions).map_err(frame_error_to_py)?
+        } else {
+            r
+        };
         // A nullable Series counts in the masked Int64 (its proportions
         // Float64), as pandas' (int64 / float64) - a `string` one too
         // (fvsao.59).
@@ -26403,6 +26522,7 @@ impl PySeries {
                     val.get_type().name()?
                 )));
             }
+            refuse_masked_int_fill(py, self.inner.column(), val)?;
             let fill_val = py_to_cell(py, val)?;
             let new_col = fill_column_with_scalar(self.inner.column(), &fill_val, limit)
                 .map_err(frame_error_to_py)?;
@@ -26582,6 +26702,15 @@ impl PySeries {
     fn round(&self, decimals: i32, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PySeries> {
         numpy_compat_kwargs("round", kwargs)?;
         let r = self.inner.round(decimals).map_err(frame_error_to_py)?;
+        // A masked Series rounds in its own dtype, as pandas' (a Float64
+        // one came back float64; br-frankenpandas-mv4w4).
+        let own = self.inner.column().dtype();
+        if matches!(own, DType::Float64Nullable | DType::Int64Nullable) && r.column().dtype() != own
+        {
+            let column = r.column().astype(own).map_err(column_error_to_py)?;
+            let r = Series::new(r.name(), r.index().clone(), column).map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner: r });
+        }
         Ok(PySeries { inner: r })
     }
 
@@ -28892,6 +29021,9 @@ impl PySeries {
         na_action: Option<&str>,
     ) -> PyResult<PySeries> {
         let ignore_na = na_action == Some("ignore");
+        if let Some(mapped) = self.categorical_map(py, arg, ignore_na)? {
+            return Ok(mapped);
+        }
         let vals = self.inner.column().values();
         // Each result keeps this index (its name and a tz-aware zone).
         let index = self.inner.index();
@@ -32174,6 +32306,103 @@ impl PyDataFrame {
             })
             .collect();
         Ok(Some((wanted.len(), positions)))
+    }
+
+    /// The columns a `.loc` column key selects on a MultiIndex column axis,
+    /// as pandas reads it, beside [`Self::multi_column_selection`]'s label
+    /// and full-tuple keys: a tuple holding a slice (`slice(None)` any label
+    /// of that level, a bounded one the labels between its ends) or a list
+    /// (any of its labels) per level - `pd.IndexSlice[:, 'y']` is one - and a
+    /// list of top-level labels or of tuples; every level kept for these.
+    /// None for flat columns or another key; Some(None) when the key is
+    /// [`Self::multi_column_selection`]'s to answer.
+    fn multi_column_loc_positions(
+        &self,
+        key: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<Option<Vec<usize>>>> {
+        let Some(multi) = self.inner.columns_multiindex() else {
+            return Ok(None);
+        };
+        enum Part {
+            Label(IndexLabel),
+            Between(Option<IndexLabel>, Option<IndexLabel>),
+            AnyOf(Vec<IndexLabel>),
+        }
+        let part = |item: &Bound<'_, PyAny>| -> PyResult<Part> {
+            if let Ok(slice) = item.cast::<pyo3::types::PySlice>() {
+                let end = |name: &str| -> PyResult<Option<IndexLabel>> {
+                    let bound = slice.getattr(name)?;
+                    if bound.is_none() {
+                        Ok(None)
+                    } else {
+                        py_to_index_label(&bound).map(Some)
+                    }
+                };
+                return Ok(Part::Between(end("start")?, end("stop")?));
+            }
+            if let Ok(list) = item.cast::<PyList>() {
+                return list
+                    .iter()
+                    .map(|label| py_to_index_label(&label))
+                    .collect::<PyResult<_>>()
+                    .map(Part::AnyOf);
+            }
+            py_to_index_label(item).map(Part::Label)
+        };
+        let matches = |labels: &[&IndexLabel], parts: &[Part]| {
+            labels.len() >= parts.len()
+                && labels.iter().zip(parts).all(|(&have, part)| match part {
+                    Part::Label(want) => have == want,
+                    Part::Between(low, high) => {
+                        low.as_ref().is_none_or(|low| have >= low)
+                            && high.as_ref().is_none_or(|high| have <= high)
+                    }
+                    Part::AnyOf(wanted) => wanted.contains(have),
+                })
+        };
+        let select = |parts: &[Part]| -> Vec<usize> {
+            (0..multi.len())
+                .filter(|&position| {
+                    multi
+                        .get_tuple(position)
+                        .is_some_and(|labels| matches(&labels, parts))
+                })
+                .collect()
+        };
+        if let Ok(tuple) = key.cast::<PyTuple>() {
+            let parts = tuple
+                .iter()
+                .map(|item| part(&item))
+                .collect::<PyResult<Vec<_>>>()?;
+            if parts.iter().all(|part| matches!(part, Part::Label(_))) {
+                return Ok(Some(None));
+            }
+            return Ok(Some(Some(select(&parts))));
+        }
+        if let Ok(list) = key.cast::<PyList>() {
+            let mut positions = Vec::new();
+            for item in list.iter() {
+                let parts = match item.cast::<PyTuple>() {
+                    Ok(tuple) => tuple
+                        .iter()
+                        .map(|label| py_to_index_label(&label).map(Part::Label))
+                        .collect::<PyResult<Vec<_>>>()?,
+                    Err(_) => vec![Part::Label(py_to_index_label(&item)?)],
+                };
+                let found = select(&parts);
+                if found.is_empty() {
+                    return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                        item.clone().unbind(),
+                    ));
+                }
+                positions.extend(found);
+            }
+            return Ok(Some(Some(positions)));
+        }
+        if key.is_instance_of::<pyo3::types::PyString>() {
+            return Ok(Some(None));
+        }
+        Ok(None)
     }
 
     /// `df[key]` on a two-level column axis, as pandas answers it: one
@@ -46502,6 +46731,31 @@ fn write_frame_through(
     Ok(())
 }
 
+/// The existing columns a `.loc` column key names on a MultiIndex column
+/// axis (see [`PyDataFrame::multi_column_loc_positions`] and
+/// [`PyDataFrame::multi_column_selection`]); None for flat columns, another
+/// key, or a key naming none (which the enlargement path answers).
+fn multi_column_write_positions(
+    frame: &DataFrame,
+    key: &Bound<'_, PyAny>,
+) -> PyResult<Option<Vec<usize>>> {
+    if frame.columns_multiindex().is_none() {
+        return Ok(None);
+    }
+    let view = PyDataFrame {
+        inner: frame.clone(),
+    };
+    let positions = match view.multi_column_loc_positions(key)? {
+        Some(Some(positions)) => positions,
+        Some(None) => match view.multi_column_selection(key)? {
+            Some((_, positions)) => positions,
+            None => return Ok(None),
+        },
+        None => return Ok(None),
+    };
+    Ok((!positions.is_empty()).then_some(positions))
+}
+
 /// `frame` after `frame.loc[key] = value`: `key` is rows or `(rows, cols)`;
 /// a single row label the index lacks appends a row ([`loc_enlarge`]),
 /// anything else writes existing rows ([`loc_assign`]).
@@ -46528,13 +46782,26 @@ fn frame_loc_write(
                 "Too many indexers; DataFrame loc takes at most 2",
             ));
         }
-        // A typed column label names the column carrying it (fvsao.32).
-        let col_key = column_arg(py, frame, tuple.get_item(1)?)?;
-        let columns = match col_key.extract::<String>() {
-            Ok(name) => vec![name],
-            Err(_) => resolve_loc_columns(frame, &col_key)?.unwrap_or_default(),
-        };
-        (tuple.get_item(0)?, columns)
+        // Under MultiIndex columns the key names existing columns as the
+        // getter reads it (a top label, a tuple - slices and lists in it -
+        // or a list), and those are written (a new ('a', '') / ('x', '')
+        // column was appended per part of the key and the named one left as
+        // it was; br-frankenpandas-mv4w4).
+        if let Some(positions) = multi_column_write_positions(frame, &tuple.get_item(1)?)? {
+            let columns = positions
+                .iter()
+                .filter_map(|&position| frame.column_name_at(position))
+                .collect();
+            (tuple.get_item(0)?, columns)
+        } else {
+            // A typed column label names the column carrying it (fvsao.32).
+            let col_key = column_arg(py, frame, tuple.get_item(1)?)?;
+            let columns = match col_key.extract::<String>() {
+                Ok(name) => vec![name],
+                Err(_) => resolve_loc_columns(frame, &col_key)?.unwrap_or_default(),
+            };
+            (tuple.get_item(0)?, columns)
+        }
     } else {
         (key.clone(), every_column())
     };
@@ -47899,6 +48166,37 @@ impl PyDataFrameLoc {
                         Ok(Py::new(py, PyDataFrame { inner: sub })?.into_any())
                     }
                 };
+            }
+            // Under MultiIndex columns the column key picks its columns as
+            // pandas' (a label, a tuple - slices and lists in it too - or a
+            // list), then the row key reads them (a row its Series over
+            // them; a slice or a list in the key raised TypeError, a row with
+            // a label or a list KeyError; br-frankenpandas-mv4w4).
+            let columns_key = tuple.get_item(1)?;
+            let frame = PyDataFrame {
+                inner: self.inner.clone(),
+            };
+            if let Some(selection) = frame.multi_column_loc_positions(&columns_key)? {
+                let columns = match selection {
+                    Some(positions) => {
+                        if positions.is_empty() {
+                            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                                columns_key.unbind(),
+                            ));
+                        }
+                        let sub = self
+                            .inner
+                            .take_columns(&positions)
+                            .map_err(frame_error_to_py)?;
+                        Py::new(py, PyDataFrame { inner: sub })?.into_any()
+                    }
+                    None => frame.__getitem__(py, &columns_key)?,
+                };
+                return columns
+                    .bind(py)
+                    .getattr("loc")?
+                    .get_item(tuple.get_item(0)?)
+                    .map(Bound::unbind);
             }
             let rows = resolve_loc_rows(&self.inner, &tuple.get_item(0)?)?;
             // Under MultiIndex columns the column key of a rows selection
@@ -64528,13 +64826,17 @@ impl CustomBusinessCalendar {
                             "A business day weekmask array must have length 7",
                         ));
                     }
-                    flags.iter().map(|&open| if open { '1' } else { '0' }).collect()
+                    flags
+                        .iter()
+                        .map(|&open| if open { '1' } else { '0' })
+                        .collect()
                 }
             },
         };
         let text = text.trim();
-        let invalid =
-            || PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid weekmask {text:?}"));
+        let invalid = || {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid weekmask {text:?}"))
+        };
         let mut open = [false; 7];
         if text.len() == 7 && text.bytes().all(|b| matches!(b, b'0' | b'1')) {
             for (day, flag) in open.iter_mut().zip(text.bytes()) {
