@@ -3118,6 +3118,20 @@ enum QuantileInterpolation {
     Midpoint,
 }
 
+/// The [`QuantileInterpolation`] pandas' `interpolation=` names.
+fn parse_quantile_interpolation(interpolation: &str) -> Result<QuantileInterpolation, FrameError> {
+    match interpolation {
+        "linear" => Ok(QuantileInterpolation::Linear),
+        "lower" => Ok(QuantileInterpolation::Lower),
+        "higher" => Ok(QuantileInterpolation::Higher),
+        "nearest" => Ok(QuantileInterpolation::Nearest),
+        "midpoint" => Ok(QuantileInterpolation::Midpoint),
+        other => Err(FrameError::CompatibilityRejected(format!(
+            "quantile: interpolation must be one of 'linear', 'lower', 'higher', 'nearest', 'midpoint', got {other:?}"
+        ))),
+    }
+}
+
 /// The rank of the `q` quantile in `n` sorted values as pandas' Series /
 /// DataFrame quantile finds it: numpy's `percentile(values, q * 100)`
 /// (pandas' `_nanpercentile` scales `q` by 100 and numpy divides it back,
@@ -3742,16 +3756,131 @@ fn build_mode_column(values: Vec<Scalar>) -> Result<Column, FrameError> {
 /// Numeric value of a label, for `reindex(method="nearest")` distance.
 ///
 /// br-frankenpandas-reindex-nearest. Only the ORDERED NUMERIC labels have a
-/// meaningful distance. pandas will happily do `nearest` on a datetime index too
-/// (the distance is the timedelta), and this returns `None` for those and for
-/// strings so the caller can refuse explicitly rather than invent an order.
-/// Extending it to Datetime64/Timedelta64 is a follow-up, not an oversight.
+/// meaningful distance: numbers, and a datetime / timedelta label's
+/// nanoseconds (pandas' distance there is the timedelta; they were refused,
+/// br-frankenpandas-u6p7i). Strings and NaT have none, so the caller can
+/// refuse explicitly rather than invent an order.
 fn nearest_label_value(label: &IndexLabel) -> Option<f64> {
     match label {
         IndexLabel::Int64(v) => Some(*v as f64),
         IndexLabel::Float64(v) => Some(v.0),
+        IndexLabel::Datetime64(v) | IndexLabel::Timedelta64(v) if *v != i64::MIN => Some(*v as f64),
         _ => None,
     }
+}
+
+/// The distance between two labels for a reindex `tolerance`: exact in
+/// integers (nanoseconds for datetimes and timedeltas), else in floats;
+/// None where a label has no numeric value.
+fn reindex_label_distance(a: &IndexLabel, b: &IndexLabel) -> Option<f64> {
+    let integer = |label: &IndexLabel| match label {
+        IndexLabel::Int64(v) | IndexLabel::Datetime64(v) | IndexLabel::Timedelta64(v)
+            if *v != i64::MIN || matches!(label, IndexLabel::Int64(_)) =>
+        {
+            Some(i128::from(*v))
+        }
+        _ => None,
+    };
+    match (integer(a), integer(b)) {
+        (Some(x), Some(y)) => Some((x - y).unsigned_abs() as f64),
+        _ => Some((nearest_label_value(a)? - nearest_label_value(b)?).abs()),
+    }
+}
+
+/// Each target label's source row for a method reindex: its own row when
+/// present, else by `method` (pad / backfill: [`fill_reindex_positions`];
+/// nearest: [`nearest_reindex_positions`]), then pandas' `limit` - at most
+/// that many absent labels take each source row, counted outward from it
+/// (nearest takes the nearer of the limited pad and backfill rows, the
+/// greater label on a tie) - and `tolerance` - a row whose label is further
+/// than the target's tolerance from it is dropped (br-frankenpandas-u6p7i:
+/// both were refused).
+fn method_reindex_positions(
+    source: &[IndexLabel],
+    target: &[IndexLabel],
+    positions: &[Option<usize>],
+    method: &str,
+    limit: Option<usize>,
+    tolerance: Option<&[f64]>,
+) -> Result<Vec<Option<usize>>, FrameError> {
+    let forward = match method {
+        "ffill" | "pad" => Some(true),
+        "bfill" | "backfill" => Some(false),
+        "nearest" => None,
+        other => {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "unsupported reindex method: '{other}'"
+            )));
+        }
+    };
+    let limited = |direction: bool| -> Result<Vec<Option<usize>>, FrameError> {
+        let mut filled = fill_reindex_positions(source, target, positions, direction)?;
+        if let Some(limit) = limit {
+            let mut taken: HashMap<usize, usize> = HashMap::new();
+            let order: Vec<usize> = if direction {
+                (0..target.len()).collect()
+            } else {
+                (0..target.len()).rev().collect()
+            };
+            for j in order {
+                if positions[j].is_some() {
+                    continue;
+                }
+                if let Some(row) = filled[j] {
+                    let count = taken.entry(row).or_default();
+                    if *count >= limit {
+                        filled[j] = None;
+                    } else {
+                        *count += 1;
+                    }
+                }
+            }
+        }
+        Ok(filled)
+    };
+    let mut filled = match (forward, limit) {
+        (Some(direction), _) => limited(direction)?,
+        (None, None) => nearest_reindex_positions(source, target, positions)?,
+        (None, Some(_)) => {
+            let (below, above) = (limited(true)?, limited(false)?);
+            below
+                .iter()
+                .zip(&above)
+                .zip(target)
+                .map(|((&low, &high), label)| match (low, high) {
+                    (Some(low), Some(high)) => {
+                        let far = |row: usize| reindex_label_distance(&source[row], label);
+                        match far(low).partial_cmp(&far(high)) {
+                            Some(Ordering::Less) => Some(low),
+                            Some(Ordering::Greater) => Some(high),
+                            _ => Some(if source[low] > source[high] {
+                                low
+                            } else {
+                                high
+                            }),
+                        }
+                    }
+                    (low, None) => low,
+                    (None, high) => high,
+                })
+                .collect()
+        }
+    };
+    if let Some(tolerance) = tolerance {
+        for (slot, (label, &allowed)) in filled.iter_mut().zip(target.iter().zip(tolerance)) {
+            if let Some(row) = *slot {
+                let distance = reindex_label_distance(&source[row], label).ok_or_else(|| {
+                    FrameError::CompatibilityRejected(
+                        "reindex tolerance needs a numeric or datetime index".to_owned(),
+                    )
+                })?;
+                if distance > allowed || allowed.is_nan() {
+                    *slot = None;
+                }
+            }
+        }
+    }
+    Ok(filled)
 }
 
 /// Resolve absent labels to the CLOSEST source label, as `reindex(method="nearest")`.
@@ -3803,6 +3932,11 @@ fn nearest_reindex_positions(
             continue;
         }
         let Some(want) = nearest_label_value(label) else {
+            // A missing target label (NaN, NaT) has no nearest row.
+            if label.is_missing() {
+                out.push(None);
+                continue;
+            }
             return Err(FrameError::CompatibilityRejected(
                 "reindex method 'nearest' needs a numeric index".to_owned(),
             ));
@@ -12924,7 +13058,7 @@ impl Series {
 
     /// Reindex to new labels with a fill method for introduced NaN.
     ///
-    /// Matches `s.reindex(new_labels, method='ffill'|'bfill')`.
+    /// Matches `s.reindex(new_labels, method='ffill'|'bfill'|'nearest')`.
     ///
     /// Single-pass, label-presence driven: only labels ABSENT from the source
     /// are filled from the nearest source label in the fill direction; labels
@@ -12936,25 +13070,24 @@ impl Series {
         new_labels: Vec<IndexLabel>,
         method: &str,
     ) -> Result<Self, FrameError> {
+        self.reindex_with_method_options(new_labels, method, None, None)
+    }
+
+    /// [`Self::reindex_with_method`] with pandas' `limit` and `tolerance`
+    /// (one per new label, in the labels' units: nanoseconds for datetimes;
+    /// see `method_reindex_positions`).
+    pub fn reindex_with_method_options(
+        &self,
+        new_labels: Vec<IndexLabel>,
+        method: &str,
+        limit: Option<usize>,
+        tolerance: Option<&[f64]>,
+    ) -> Result<Self, FrameError> {
         if self.index.has_duplicates() {
             return Err(FrameError::CompatibilityRejected(
                 "reindex cannot handle duplicate index labels".to_owned(),
             ));
         }
-        // br-frankenpandas-reindex-nearest: 'nearest' is pandas' third method and
-        // was rejected here as unsupported. It is not a direction, so it cannot be
-        // folded into `forward` — it resolves each absent label to the CLOSEST
-        // source label instead of the closest one in a direction.
-        let forward = match method {
-            "ffill" | "pad" => Some(true),
-            "bfill" | "backfill" => Some(false),
-            "nearest" => None,
-            other => {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "unsupported reindex method: '{other}'"
-                )));
-            }
-        };
         // Preserve the index name on a flat label list (mirrors `reindex`).
         let new_index = Index::new(new_labels).rename_index(self.index.name());
         // Resolve each new label to its source position (`None` = absent),
@@ -12962,18 +13095,20 @@ impl Series {
         let positions: Vec<Option<usize>> =
             reindex_positions_int64_direct(self.index.labels(), new_index.labels())
                 .unwrap_or_else(|| self.index.get_indexer(&new_index));
-        // Absent labels inherit the nearest present source position in the fill
-        // direction; present labels (incl. source NaNs) keep their own position.
-        let filled = match forward {
-            Some(direction) => fill_reindex_positions(
-                self.index.labels(),
-                new_index.labels(),
-                &positions,
-                direction,
-            )?,
-            None => nearest_reindex_positions(self.index.labels(), new_index.labels(), &positions)?,
-        };
-        let col = self.column.reindex_by_positions(&filled)?;
+        // Absent labels inherit a present source position by the method;
+        // present labels (incl. source NaNs) keep their own position.
+        let filled = method_reindex_positions(
+            self.index.labels(),
+            new_index.labels(),
+            &positions,
+            method,
+            limit,
+            tolerance,
+        )?;
+        // A label no row fills is a gap pandas invents, as plain `reindex`'s
+        // (an int Series became float64 there but stayed int64 holding a
+        // missing value here).
+        let col = reindex_column_with_invented_gaps(&self.column, &filled)?;
         Self::new(self.name.clone(), new_index, col)
     }
 
@@ -17210,18 +17345,7 @@ impl Series {
                 "quantile must be between 0 and 1, got {q}"
             )));
         }
-        let mode = match interpolation {
-            "linear" => QuantileInterpolation::Linear,
-            "lower" => QuantileInterpolation::Lower,
-            "higher" => QuantileInterpolation::Higher,
-            "nearest" => QuantileInterpolation::Nearest,
-            "midpoint" => QuantileInterpolation::Midpoint,
-            other => {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "quantile: interpolation must be one of 'linear', 'lower', 'higher', 'nearest', 'midpoint', got {other:?}"
-                )));
-            }
-        };
+        let mode = parse_quantile_interpolation(interpolation)?;
         if let Some(nanos) = self.datetime_as_timedelta()? {
             return nanos
                 .quantile_with_interpolation(q, interpolation)
@@ -31207,11 +31331,49 @@ impl Series {
 /// to a tiny `sort_by`, so the original path is kept.
 const ROLLING_ORDER_STAT_MIN_WINDOW: usize = 32;
 
-/// Selector for the rolling order-statistic kernel (median or a quantile).
+/// Selector for the rolling order-statistic kernel (median or a quantile
+/// with its interpolation).
 #[derive(Clone, Copy)]
 enum RollingOrderStat {
     Median,
-    Quantile(f64),
+    Quantile(f64, QuantileInterpolation),
+}
+
+/// pandas' rolling / expanding quantile of a window's `count` values,
+/// `kth(k)` the k-th smallest: the rank `q * (count - 1)`, its value when
+/// the rank is whole, else its two neighbours combined by `mode` - linear
+/// as `lo + (hi - lo) * frac` (not numpy's lerp), nearest to the even rank
+/// on a tie, midpoint their mean (br-frankenpandas-u6p7i: only linear was
+/// taken).
+fn window_quantile<F: Fn(usize) -> f64>(
+    count: usize,
+    q: f64,
+    mode: QuantileInterpolation,
+    kth: &F,
+) -> f64 {
+    let pos = q * (count - 1) as f64;
+    let lo = pos.floor() as usize;
+    let hi = pos.ceil() as usize;
+    if lo == hi || hi >= count {
+        return kth(lo);
+    }
+    let frac = pos - lo as f64;
+    let (low, high) = (kth(lo), kth(hi));
+    match mode {
+        QuantileInterpolation::Linear => low + (high - low) * frac,
+        QuantileInterpolation::Lower => low,
+        QuantileInterpolation::Higher => high,
+        QuantileInterpolation::Nearest => {
+            if frac < 0.5 {
+                low
+            } else if frac > 0.5 || !lo.is_multiple_of(2) {
+                high
+            } else {
+                low
+            }
+        }
+        QuantileInterpolation::Midpoint => (low + high) / 2.0,
+    }
 }
 
 impl RollingOrderStat {
@@ -31227,15 +31389,8 @@ impl RollingOrderStat {
                     sorted[mid]
                 }
             }
-            RollingOrderStat::Quantile(q) => {
-                let pos = q * (sorted.len() - 1) as f64;
-                let lo = pos.floor() as usize;
-                let hi = pos.ceil() as usize;
-                if lo == hi || hi >= sorted.len() {
-                    sorted[lo]
-                } else {
-                    sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo as f64)
-                }
+            RollingOrderStat::Quantile(q, mode) => {
+                window_quantile(sorted.len(), q, mode, &|k| sorted[k])
             }
         }
     }
@@ -31253,18 +31408,7 @@ impl RollingOrderStat {
                     kth(mid)
                 }
             }
-            RollingOrderStat::Quantile(q) => {
-                let pos = q * (count - 1) as f64;
-                let lo = pos.floor() as usize;
-                let hi = pos.ceil() as usize;
-                if lo == hi || hi >= count {
-                    kth(lo)
-                } else {
-                    let l = kth(lo);
-                    let h = kth(hi);
-                    l + (h - l) * (pos - lo as f64)
-                }
-            }
+            RollingOrderStat::Quantile(q, mode) => window_quantile(count, q, mode, kth),
         }
     }
 }
@@ -32617,10 +32761,23 @@ impl Rolling<'_> {
     ///
     /// Matches `series.rolling(window).quantile(q)`.
     pub fn quantile(&self, q: f64) -> Result<Series, FrameError> {
+        self.quantile_with_interpolation(q, "linear")
+    }
+
+    /// Rolling quantile with pandas' `interpolation` ('linear', 'lower',
+    /// 'higher', 'nearest', 'midpoint'; see `window_quantile`).
+    ///
+    /// Matches `series.rolling(window).quantile(q, interpolation)`.
+    pub fn quantile_with_interpolation(
+        &self,
+        q: f64,
+        interpolation: &str,
+    ) -> Result<Series, FrameError> {
         self.validate()?;
         require_window_quantile(q)?;
+        let mode = parse_quantile_interpolation(interpolation)?;
         if self.window >= ROLLING_ORDER_STAT_MIN_WINDOW {
-            return self.rolling_order_stat(RollingOrderStat::Quantile(q));
+            return self.rolling_order_stat(RollingOrderStat::Quantile(q, mode));
         }
         self.apply_rolling(
             |nums| {
@@ -32629,14 +32786,7 @@ impl Rolling<'_> {
                 }
                 let mut sorted = nums.to_vec();
                 sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let pos = q * (sorted.len() - 1) as f64;
-                let lo = pos.floor() as usize;
-                let hi = pos.ceil() as usize;
-                if lo == hi || hi >= sorted.len() {
-                    sorted[lo]
-                } else {
-                    sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo as f64)
-                }
+                window_quantile(sorted.len(), q, mode, &|k| sorted[k])
             },
             self.series.name(),
         )
@@ -34230,9 +34380,22 @@ impl Expanding<'_> {
     ///
     /// Matches `series.expanding().quantile(q)`.
     pub fn quantile(&self, q: f64) -> Result<Series, FrameError> {
+        self.quantile_with_interpolation(q, "linear")
+    }
+
+    /// Expanding quantile with pandas' `interpolation` (see
+    /// `window_quantile`).
+    ///
+    /// Matches `series.expanding().quantile(q, interpolation)`.
+    pub fn quantile_with_interpolation(
+        &self,
+        q: f64,
+        interpolation: &str,
+    ) -> Result<Series, FrameError> {
         require_window_quantile(q)?;
+        let mode = parse_quantile_interpolation(interpolation)?;
         if self.series.column().len() >= ROLLING_ORDER_STAT_MIN_WINDOW {
-            return self.expanding_order_stat(RollingOrderStat::Quantile(q));
+            return self.expanding_order_stat(RollingOrderStat::Quantile(q, mode));
         }
         self.apply_expanding(
             |nums| {
@@ -34241,14 +34404,7 @@ impl Expanding<'_> {
                 }
                 let mut sorted = nums.to_vec();
                 sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let pos = q * (sorted.len() - 1) as f64;
-                let lo = pos.floor() as usize;
-                let hi = pos.ceil() as usize;
-                if lo == hi || hi >= sorted.len() {
-                    sorted[lo]
-                } else {
-                    sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo as f64)
-                }
+                window_quantile(sorted.len(), q, mode, &|k| sorted[k])
             },
             self.series.name(),
         )
@@ -39315,6 +39471,16 @@ impl DataFrameRolling<'_> {
         self.apply_rolling(move |r| r.quantile(q))
     }
 
+    /// Rolling quantile with pandas' `interpolation` across all numeric
+    /// columns (see [`Rolling::quantile_with_interpolation`]).
+    pub fn quantile_with_interpolation(
+        &self,
+        q: f64,
+        interpolation: &str,
+    ) -> Result<DataFrame, FrameError> {
+        self.apply_rolling(move |r| r.quantile_with_interpolation(q, interpolation))
+    }
+
     fn pairwise_rolling<F>(&self, agg: F) -> Result<DataFrame, FrameError>
     where
         F: Fn(&Rolling<'_>, &Series) -> Result<Series, FrameError>,
@@ -39671,6 +39837,19 @@ impl DataFrameExpanding<'_> {
     /// Expanding quantile across all numeric columns.
     pub fn quantile(&self, q: f64) -> Result<DataFrame, FrameError> {
         self.apply_expanding(move |s, mp| s.expanding(Some(mp)).quantile(q))
+    }
+
+    /// Expanding quantile with pandas' `interpolation` across all numeric
+    /// columns (see [`Expanding::quantile_with_interpolation`]).
+    pub fn quantile_with_interpolation(
+        &self,
+        q: f64,
+        interpolation: &str,
+    ) -> Result<DataFrame, FrameError> {
+        self.apply_expanding(move |s, mp| {
+            s.expanding(Some(mp))
+                .quantile_with_interpolation(q, interpolation)
+        })
     }
 
     /// Expanding sample skewness (Fisher-Pearson) across all numeric
@@ -86265,25 +86444,23 @@ impl DataFrame {
         new_labels: Vec<IndexLabel>,
         method: &str,
     ) -> Result<Self, FrameError> {
+        self.reindex_with_method_options(new_labels, method, None, None)
+    }
+
+    /// [`Self::reindex_with_method`] with pandas' `limit` and `tolerance`
+    /// (one per new label; see `method_reindex_positions`).
+    pub fn reindex_with_method_options(
+        &self,
+        new_labels: Vec<IndexLabel>,
+        method: &str,
+        limit: Option<usize>,
+        tolerance: Option<&[f64]>,
+    ) -> Result<Self, FrameError> {
         if self.index.has_duplicates() {
             return Err(FrameError::CompatibilityRejected(
                 "reindex cannot handle duplicate index labels".to_owned(),
             ));
         }
-        // br-frankenpandas-reindex-nearest: 'nearest' is pandas' third method and
-        // was rejected here as unsupported. It is not a direction, so it cannot be
-        // folded into `forward` — it resolves each absent label to the CLOSEST
-        // source label instead of the closest one in a direction.
-        let forward = match method {
-            "ffill" | "pad" => Some(true),
-            "bfill" | "backfill" => Some(false),
-            "nearest" => None,
-            other => {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "unsupported reindex method: '{other}'"
-                )));
-            }
-        };
         // Preserve the index name on a flat label list (mirrors `reindex`).
         let new_index = Index::new(new_labels).rename_index(self.index.name());
         // Resolve each new label to its source row position (`None` = absent),
@@ -86308,28 +86485,25 @@ impl DataFrame {
             } else {
                 self.index.get_indexer(&new_index)
             };
-        // Absent labels inherit the nearest present source position in the fill
-        // direction; present labels (incl. source NaNs) keep their own position.
-        let filled = match forward {
-            Some(direction) => fill_reindex_positions(
-                self.index.labels(),
-                new_index.labels(),
-                &positions,
-                direction,
-            )?,
-            None => nearest_reindex_positions(self.index.labels(), new_index.labels(), &positions)?,
-        };
+        // Absent labels inherit a present source position by the method;
+        // present labels (incl. source NaNs) keep their own position.
+        let filled = method_reindex_positions(
+            self.index.labels(),
+            new_index.labels(),
+            &positions,
+            method,
+            limit,
+            tolerance,
+        )?;
         // Gather each column from the carried positions. Remaining `None` slots
-        // (leading gap for ffill / trailing gap for bfill) become the column's
-        // dtype-appropriate missing sentinel — `Null(NaN)` for Float64, but
-        // `Null(Null)` for Int64/Utf8/Bool and `NaT` for temporal — exactly as
-        // plain `reindex` and the `Series` variant do (both use
-        // `reindex_by_positions`, which fills `None` via `missing_for_dtype`).
-        // Hardcoding `Null(NaN)` here diverged from those paths on non-Float64
-        // columns.
+        // (leading gap for ffill / trailing gap for bfill, a limit or a
+        // tolerance) are gaps pandas invents, as plain `reindex` and the
+        // `Series` variant fill them (`reindex_column_with_invented_gaps`: an
+        // all-valid int column widens to float64, a missing text cell is NaN;
+        // they stayed int64 / None here, br-frankenpandas-u6p7i).
         let mut result_cols = BTreeMap::new();
         for name in &self.column_order {
-            let col = self.columns[name].reindex_by_positions(&filled)?;
+            let col = reindex_column_with_invented_gaps(&self.columns[name], &filled)?;
             result_cols.insert(name.clone(), col);
         }
         Self::validate_duplicate_label_policy(
@@ -119199,15 +119373,21 @@ mod tests {
     }
 
     #[test]
-    fn dataframe_reindex_with_method_absent_uses_column_dtype_missing_sentinel() {
-        // A genuinely-absent label (a leading gap under ffill) must be filled
-        // with the column's dtype-appropriate missing sentinel, matching plain
-        // `reindex` and the Series variant — NOT a hardcoded Float64 NaN. For an
-        // Int64 column `missing_for_dtype` is `Null(NullKind::Null)`. The old
-        // DataFrame path hardcoded `Null(NullKind::NaN)`, diverging on non-float
-        // columns.
+    fn dataframe_reindex_with_method_absent_is_an_invented_gap() {
+        // A genuinely-absent label (a leading gap under ffill) is a gap pandas
+        // invents, as plain `reindex` fills it: measured on pandas 2.2.3,
+        // DataFrame({'n': [10, 20], 's': ['a', 'b']}, index=[18, 19])
+        // .reindex([17, 18, 19], method='ffill') is n float64 [NaN, 10.0,
+        // 20.0] and s object [nan, 'a', 'b']. (This test pinned an int64
+        // column holding a Null gap, which pandas cannot hold.)
         let df = DataFrame::from_dict_with_index(
-            vec![("n", vec![Scalar::Int64(10), Scalar::Int64(20)])],
+            vec![
+                ("n", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+                (
+                    "s",
+                    vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into())],
+                ),
+            ],
             vec![18_i64.into(), 19_i64.into()],
         )
         .unwrap();
@@ -119217,13 +119397,68 @@ mod tests {
         let result = df
             .reindex_with_method(vec![17_i64.into(), 18_i64.into(), 19_i64.into()], "ffill")
             .unwrap();
-        let v = result.column("n").unwrap().values();
-        assert_eq!(v.len(), 3);
-        // Dtype-appropriate missing sentinel for the absent slot, not NaN.
-        assert_eq!(v[0], Scalar::Null(NullKind::Null));
-        assert_ne!(v[0], Scalar::Null(NullKind::NaN));
-        assert_eq!(v[1], Scalar::Int64(10));
-        assert_eq!(v[2], Scalar::Int64(20));
+        let n = result.column("n").unwrap();
+        assert_eq!(n.dtype(), DType::Float64);
+        assert!(n.values()[0].is_missing());
+        assert_eq!(n.values()[1], Scalar::Float64(10.0));
+        assert_eq!(n.values()[2], Scalar::Float64(20.0));
+        let s = result.column("s").unwrap().values();
+        assert_eq!(s[0], Scalar::Null(NullKind::NaN));
+        assert_eq!(s[1], Scalar::Utf8("a".into()));
+    }
+
+    #[test]
+    fn reindex_with_method_limit_and_tolerance_bound_the_fill_u6p7i() {
+        // Measured on pandas 2.2.3 over Series([1.0, 2.0, 3.0], index=[0, 5,
+        // 10]) and target [0, 1, 2, 3, 4, 6, 9, 11, 14, 20].
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 5_i64.into(), 10_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let target: Vec<IndexLabel> = [0_i64, 1, 2, 3, 4, 6, 9, 11, 14, 20]
+            .into_iter()
+            .map(IndexLabel::from)
+            .collect();
+        let values = |method: &str, limit: Option<usize>, tolerance: Option<f64>| {
+            let tolerance = tolerance.map(|t| vec![t; target.len()]);
+            s.reindex_with_method_options(target.clone(), method, limit, tolerance.as_deref())
+                .unwrap()
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Float64(x) if !x.is_nan() => Some(*x),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let (n, a, b, c) = (None, Some(1.0), Some(2.0), Some(3.0));
+        // limit counts outward from each source row; exact labels do not count.
+        assert_eq!(values("pad", Some(2), None), [a, a, a, n, n, b, b, c, c, n]);
+        assert_eq!(
+            values("bfill", Some(1), None),
+            [a, n, n, n, b, n, c, n, n, n]
+        );
+        assert_eq!(
+            values("nearest", Some(1), None),
+            [a, a, n, n, b, b, c, c, n, n]
+        );
+        // tolerance keeps a row at most that far from the target label.
+        assert_eq!(
+            values("pad", None, Some(2.0)),
+            [a, a, a, n, n, b, n, c, n, n]
+        );
+        assert_eq!(
+            values("nearest", None, Some(2.5)),
+            [a, a, a, b, b, b, c, c, n, n]
+        );
+        // NEGATIVE: without limit or tolerance every label past the first fills.
+        assert_eq!(values("pad", None, None), [a, a, a, a, a, b, b, c, c, c]);
     }
 
     // ---- Series comparison operator tests ----
@@ -168031,6 +168266,107 @@ mod tests {
         let result = s.rolling(3, None).quantile(0.5).unwrap();
         // quantile(0.5) of [0,5,10] = 5.0
         assert_eq!(result.values()[2], Scalar::Float64(5.0));
+    }
+
+    #[test]
+    fn rolling_and_expanding_quantile_interpolation_like_pandas_u6p7i() {
+        // Measured on pandas 2.2.3: a small window (the per-window sort) and a
+        // 33-wide one (the order-statistic path), q off a rank and on a .5
+        // tie at an odd and an even lower rank.
+        let series = |values: Vec<f64>| {
+            let len = i64::try_from(values.len()).unwrap();
+            let labels = (0..len).map(IndexLabel::from).collect();
+            Series::from_values(
+                "x",
+                labels,
+                values.into_iter().map(Scalar::Float64).collect(),
+            )
+            .unwrap()
+        };
+        let floats = |result: Series| -> Vec<f64> {
+            result
+                .values()
+                .iter()
+                .map(|v| v.to_f64().unwrap_or(f64::NAN))
+                .collect()
+        };
+        let small = series(vec![1.0, 4.0, 2.0, 8.0, 5.0]);
+        let big = series((0..40).map(f64::from).collect());
+        let cases: [(&str, [f64; 2], [f64; 2], [f64; 2], [f64; 2], [f64; 5]); 5] = [
+            (
+                "linear",
+                [3.0, 4.5],
+                [9.6, 10.6],
+                [9.5, 10.5],
+                [10.5, 11.5],
+                [1.0, 2.5, 2.0, 3.0, 4.0],
+            ),
+            (
+                "lower",
+                [2.0, 4.0],
+                [9.0, 10.0],
+                [9.0, 10.0],
+                [10.0, 11.0],
+                [1.0, 1.0, 2.0, 2.0, 4.0],
+            ),
+            (
+                "higher",
+                [4.0, 5.0],
+                [10.0, 11.0],
+                [10.0, 11.0],
+                [11.0, 12.0],
+                [1.0, 4.0, 2.0, 4.0, 4.0],
+            ),
+            (
+                "nearest",
+                [4.0, 5.0],
+                [10.0, 11.0],
+                [10.0, 11.0],
+                [10.0, 11.0],
+                [1.0, 1.0, 2.0, 4.0, 4.0],
+            ),
+            (
+                "midpoint",
+                [3.0, 4.5],
+                [9.5, 10.5],
+                [9.5, 10.5],
+                [10.5, 11.5],
+                [1.0, 2.5, 2.0, 3.0, 4.0],
+            ),
+        ];
+        for (mode, small_w4, big_q3, big_tie_odd, big_tie_even, expanding) in cases {
+            let rolled = |s: &Series, w: usize, q: f64| {
+                floats(
+                    s.rolling(w, None)
+                        .quantile_with_interpolation(q, mode)
+                        .unwrap(),
+                )
+            };
+            assert_eq!(rolled(&small, 4, 0.5)[3..], small_w4, "{mode} small");
+            assert_eq!(rolled(&big, 33, 0.3)[32..34], big_q3, "{mode} big");
+            assert_eq!(
+                rolled(&big, 33, 0.296_875)[32..34],
+                big_tie_odd,
+                "{mode} odd tie"
+            );
+            assert_eq!(
+                rolled(&big, 33, 0.328_125)[32..34],
+                big_tie_even,
+                "{mode} even tie"
+            );
+            let grown = small
+                .expanding(None)
+                .quantile_with_interpolation(0.5, mode)
+                .unwrap();
+            assert_eq!(floats(grown), expanding, "{mode} expanding");
+        }
+        // NEGATIVE: an unknown interpolation is refused.
+        assert!(
+            small
+                .rolling(2, None)
+                .quantile_with_interpolation(0.5, "cubic")
+                .is_err()
+        );
     }
 
     #[test]

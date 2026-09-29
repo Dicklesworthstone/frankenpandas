@@ -2804,7 +2804,9 @@ def test_numpy_keywords_follow_pandas_rule() -> None:
     "call",
     [
         lambda: fpd.crosstab(fpd.Series(["a"]), fpd.Series(["b"]), normalize=True, margins=True),
-        lambda: _hd(fpd).groupby("a").value_counts(dropna=False),
+        # TEST-CHANGE (u6p7i): groupby(...).value_counts(dropna=False) left
+        # this list; it counts the missing values as pandas does now
+        # (test_refused_parameters_now_answer_like_pandas_u6p7i).
         # TEST-CHANGE (vbt4s): pivot_table(dropna=False) left this list; it
         # keeps a missing key as its own group as pandas does now
         # (test_everyday_ops_round_seven_like_pandas).
@@ -14913,4 +14915,305 @@ _L8_CASES = {
 @pytest.mark.parametrize("case", list(_L8_CASES))
 def test_everyday30_31_like_pandas(case: str) -> None:
     run = _L8_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-u6p7i: parameters that raised NotImplementedError (the
+# Index factorize / sortlevel / join / to_numpy / searchsorted options,
+# rename_axis(inplace), the groupby shift fill / idxmax skipna / value_counts
+# dropna, rolling and expanding quantile interpolation, interpolate(axis=1),
+# to_csv index_label lists and False, reindex limit / tolerance) against
+# pandas 2.2.3, with what they exposed: an int idxmax answer holding NaN was
+# int64, a method reindex's gap kept an int column int64, a label over a row
+# MultiIndex was dropped by to_csv, and Index.factorize / sortlevel answered
+# lists.
+def _u6_shown(result: Any) -> list:
+    if isinstance(result, tuple):
+        return [line for part in result for line in _u6_shown(part)]
+    if type(result).__name__ == "DataFrame":
+        return [str(t) for t in result.dtypes] + result.to_string().split("\n")
+    if type(result).__name__ == "Series":
+        return [str(result.dtype), repr(result.name)] + result.to_string().split("\n")
+    return [repr(result)]
+
+
+def _u6_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "g": ["a", "b", "a", "b", "a", "c"],
+            "x": [1.0, np.nan, 3.0, 4.0, 2.0, np.nan],
+            "y": [5, 6, 7, 8, 9, 1],
+            "s": list("pqrstu"),
+            "z": [True, False, True, True, False, True],
+        }
+    )
+
+
+def _u6_rename_axis_inplace(m: Any, frame: bool) -> list:
+    target = _u6_frame(m) if frame else _u6_frame(m)["y"]
+    returned = target.rename_axis("idx", inplace=True)
+    return [repr(returned)] + _u6_shown(target)
+
+
+def _u6_mi(m: Any) -> Any:
+    return m.DataFrame(
+        {"v": [1, 2], "w": [3.5, 4.5]},
+        index=m.MultiIndex.from_tuples([("a", 1), ("b", 2)], names=["k", "n"]),
+    )
+
+
+def _u6_flat(m: Any) -> Any:
+    return m.DataFrame({"v": [1, 2]}, index=m.Index([10, 20], name="i"))
+
+
+def _u6_windowed(m: Any) -> Any:
+    return m.Series([1.0, 4.0, np.nan, 2.0, 8.0, 5.0, 7.0])
+
+
+def _u6_spaced(m: Any, values: Any = None) -> Any:
+    return m.Series([1.0, 2.0, 3.0] if values is None else values, index=[0, 5, 10])
+
+
+_U6_TARGET = [0, 1, 2, 3, 4, 6, 9, 11, 14, 20]
+
+_U6_CASES = {
+    # Index
+    "Index.factorize codes are an array": lambda m: _u6_shown(m.Index(["b", None, "a", "b"]).factorize()),
+    "factorize without the NA sentinel": lambda m: _u6_shown(
+        m.Index(["b", None, "a", "b"]).factorize(use_na_sentinel=False)
+    ),
+    "factorize without the NA sentinel sorted": lambda m: _u6_shown(
+        m.Index(["b", None, "a", "b"]).factorize(sort=True, use_na_sentinel=False)
+    ),
+    "factorize without the NA sentinel NaN first": lambda m: _u6_shown(
+        m.Index([np.nan, 1.0, 1.0]).factorize(use_na_sentinel=False)
+    ),
+    "factorize without the NA sentinel sorted floats": lambda m: _u6_shown(
+        m.Index([np.nan, 3.0, 1.0]).factorize(sort=True, use_na_sentinel=False)
+    ),
+    # An all-NaN index is object here (pandas float64): its factorize is
+    # br-frankenpandas-mzes1's probe.
+    "factorize without the NA sentinel nothing missing": lambda m: _u6_shown(
+        m.Index([3, 1, 3]).factorize(use_na_sentinel=False)
+    ),
+    "sortlevel ascending": lambda m: _u6_shown(m.Index([3, 1, 2]).sortlevel()),
+    "sortlevel descending": lambda m: _u6_shown(m.Index([3, 1, 2]).sortlevel(ascending=False)),
+    "sortlevel descending keeps ties in order": lambda m: _u6_shown(
+        m.Index(["b", "c", "a", "b"]).sortlevel(ascending=False)
+    ),
+    "sortlevel puts NaN first": lambda m: _u6_shown(m.Index([3.0, np.nan, 2.0]).sortlevel()),
+    "sortlevel na_position last": lambda m: _u6_shown(
+        m.Index([3.0, np.nan, 2.0]).sortlevel(na_position="last")
+    ),
+    "sortlevel descending NaN": lambda m: _u6_shown(m.Index([3.0, np.nan, 2.0]).sortlevel(ascending=False)),
+    "sortlevel ascending as a list": lambda m: _u6_shown(m.Index([3, 1, 2]).sortlevel(ascending=[False])),
+    "sortlevel ascending list of two raises": lambda m: _u6_shown(
+        m.Index([3, 1]).sortlevel(ascending=[True, False])
+    ),
+    "join inner indexers": lambda m: _u6_shown(
+        m.Index([1, 2, 3]).join(m.Index([2, 3, 4]), how="inner", return_indexers=True)
+    ),
+    "join left indexers": lambda m: _u6_shown(
+        m.Index([1, 2, 3]).join(m.Index([2, 3, 4]), how="left", return_indexers=True)
+    ),
+    "join right indexers": lambda m: _u6_shown(
+        m.Index([1, 2, 3]).join(m.Index([2, 3, 4]), how="right", return_indexers=True)
+    ),
+    "join outer indexers": lambda m: _u6_shown(
+        m.Index([1, 2, 3]).join(m.Index([2, 3, 4]), how="outer", return_indexers=True)
+    ),
+    "join outer of unsorted labels": lambda m: _u6_shown(
+        m.Index([3, 1]).join(m.Index([2, 3]), how="outer", return_indexers=True)
+    ),
+    "join inner of unsorted labels": lambda m: _u6_shown(
+        m.Index([3, 1, 2]).join(m.Index([2, 3]), how="inner", return_indexers=True)
+    ),
+    "join left sorted": lambda m: _u6_shown(
+        m.Index([3, 1, 2]).join(m.Index([2, 5]), how="left", sort=True, return_indexers=True)
+    ),
+    "join of equal indexes": lambda m: _u6_shown(
+        m.Index([1, 2, 3]).join(m.Index([1, 2, 3]), how="inner", return_indexers=True)
+    ),
+    "join repeated left labels": lambda m: _u6_shown(
+        m.Index(["a", "b", "a"]).join(m.Index(["a", "c"]), how="left", return_indexers=True)
+    ),
+    "join repeated labels on both sides": lambda m: _u6_shown(
+        m.Index(["b", "a", "b"]).join(m.Index(["b", "b"]), how="inner", return_indexers=True)
+    ),
+    "join repeated labels outer": lambda m: _u6_shown(
+        m.Index(["a", "b", "a"]).join(m.Index(["c", "a"]), how="outer", return_indexers=True)
+    ),
+    "join repeated monotonic right": lambda m: _u6_shown(
+        m.Index([1, 1, 2]).join(m.Index([1, 2, 3]), how="right", return_indexers=True)
+    ),
+    "join with an empty index": lambda m: _u6_shown(
+        m.Index([1, 2]).join(m.Index([3]).drop([3]), how="left", return_indexers=True)
+    ),
+    "Index.to_numpy na_value": lambda m: _u6_shown(m.Index([1.0, None]).to_numpy(na_value=0.0)),
+    "Index.to_numpy text na_value": lambda m: _u6_shown(m.Index(["a", None]).to_numpy(na_value="z")),
+    "Index.to_numpy dtype and na_value": lambda m: _u6_shown(
+        m.Index([1.0, None]).to_numpy(dtype="int64", na_value=-1)
+    ),
+    "DatetimeIndex.to_numpy na_value": lambda m: _u6_shown(
+        m.DatetimeIndex(["2024-01-01", None]).to_numpy(na_value=m.Timestamp("2000-01-01"))
+    ),
+    "to_numpy text na_value into floats raises": lambda m: _u6_shown(
+        m.Series([1.0, None]).to_numpy(na_value="z")
+    ),
+    "to_numpy text na_value into ints raises without a gap": lambda m: _u6_shown(
+        m.Index([1, 2]).to_numpy(na_value="z")
+    ),
+    "to_numpy text na_value as objects": lambda m: _u6_shown(
+        m.Series([1.0, None]).to_numpy(dtype=object, na_value="z")
+    ),
+    "Series.searchsorted sorter": lambda m: _u6_shown(m.Series([3, 1, 2]).searchsorted(2, sorter=[1, 2, 0])),
+    "Series.searchsorted sorter of values": lambda m: _u6_shown(
+        m.Series([3, 1, 2]).searchsorted([0, 2, 5], side="right", sorter=np.array([1, 2, 0]))
+    ),
+    "Index.searchsorted sorter": lambda m: _u6_shown(m.Index([30, 10, 20]).searchsorted(15, sorter=[1, 2, 0])),
+    "searchsorted sorter of the wrong size raises": lambda m: _u6_shown(
+        m.Series([3, 1, 2]).searchsorted(2, sorter=[1, 0])
+    ),
+    "Series.rename_axis inplace": lambda m: _u6_rename_axis_inplace(m, False),
+    "DataFrame.rename_axis inplace": lambda m: _u6_rename_axis_inplace(m, True),
+    # groupby
+    "groupby shift fill_value": lambda m: _u6_shown(_u6_frame(m).groupby("g")[["x", "y"]].shift(1, fill_value=0)),
+    "groupby shift backwards fill_value": lambda m: _u6_shown(
+        _u6_frame(m).groupby("g")[["x", "y"]].shift(-1, fill_value=-1)
+    ),
+    "groupby shift int filled with a float": lambda m: _u6_shown(
+        _u6_frame(m).groupby("g")[["y"]].shift(1, fill_value=0.5)
+    ),
+    "groupby shift text fill": lambda m: _u6_shown(_u6_frame(m).groupby("g")[["s"]].shift(2, fill_value="none")),
+    "groupby shift bool filled with False": lambda m: _u6_shown(
+        _u6_frame(m).groupby("g")[["z"]].shift(1, fill_value=False)
+    ),
+    "groupby shift fill across dtypes": lambda m: _u6_shown(_u6_frame(m).groupby("g").shift(1, fill_value=0)),
+    "groupby shift fill with missing keys": lambda m: _u6_shown(
+        _u6_frame(m).assign(g=["a", None, "a", "b", None, "b"]).groupby("g").shift(1, fill_value=0)
+    ),
+    "groupby idxmax skipna=False": lambda m: _u6_shown(_u6_frame(m).groupby("g")[["x", "y"]].idxmax(skipna=False)),
+    "groupby idxmin skipna=False": lambda m: _u6_shown(_u6_frame(m).groupby("g")[["x", "y"]].idxmin(skipna=False)),
+    "groupby idxmax of an all-NA group": lambda m: _u6_shown(_u6_frame(m).groupby("g")[["x", "y"]].idxmax()),
+    "groupby idxmax numeric_only": lambda m: _u6_shown(_u6_frame(m).groupby("g").idxmax(numeric_only=True)),
+    "groupby idxmax skipna=False text labels": lambda m: _u6_shown(
+        _u6_frame(m).set_index("s").groupby("g")[["x"]].idxmax(skipna=False)
+    ),
+    "SeriesGroupBy idxmin skipna=False": lambda m: _u6_shown(_u6_frame(m).groupby("g")["x"].idxmin(skipna=False)),
+    "SeriesGroupBy idxmax of an all-NA group": lambda m: _u6_shown(_u6_frame(m).groupby("g")["x"].idxmax()),
+    "groupby value_counts dropna=False": lambda m: _u6_shown(
+        _u6_frame(m).groupby("g")[["x"]].value_counts(dropna=False)
+    ),
+    "groupby value_counts dropna=False normalized": lambda m: _u6_shown(
+        _u6_frame(m).groupby("g")[["x"]].value_counts(dropna=False, normalize=True)
+    ),
+    "groupby value_counts subset dropna=False": lambda m: _u6_shown(
+        _u6_frame(m).groupby("g").value_counts(subset=["x"], dropna=False)
+    ),
+    "groupby(dropna=False) value_counts dropna=True": lambda m: _u6_shown(
+        _u6_frame(m).assign(g=["a", None, "a", "b", None, "b"]).groupby("g", dropna=False)[["x"]].value_counts()
+    ),
+    "groupby value_counts dropna=False as_index=False": lambda m: _u6_shown(
+        _u6_frame(m).groupby("g", as_index=False)[["x"]].value_counts(dropna=False)
+    ),
+    # windows
+    "rolling quantile lower": lambda m: _u6_shown(_u6_windowed(m).rolling(3).quantile(0.5, interpolation="lower")),
+    "rolling quantile higher": lambda m: _u6_shown(_u6_windowed(m).rolling(3).quantile(0.3, interpolation="higher")),
+    "rolling quantile nearest": lambda m: _u6_shown(_u6_windowed(m).rolling(4).quantile(0.5, interpolation="nearest")),
+    "rolling quantile midpoint": lambda m: _u6_shown(
+        _u6_windowed(m).rolling(4, min_periods=1).quantile(0.25, interpolation="midpoint")
+    ),
+    "rolling 33 quantile nearest on a tie": lambda m: _u6_shown(
+        m.Series(np.arange(40, dtype=float)).rolling(33).quantile(0.328125, interpolation="nearest").tail(3)
+    ),
+    "expanding quantile higher": lambda m: _u6_shown(_u6_windowed(m).expanding().quantile(0.25, interpolation="higher")),
+    "frame rolling quantile lower": lambda m: _u6_shown(
+        _u6_frame(m)[["x", "y"]].rolling(2).quantile(0.5, interpolation="lower")
+    ),
+    "frame expanding quantile nearest": lambda m: _u6_shown(
+        _u6_frame(m)[["x", "y"]].expanding().quantile(0.5, interpolation="nearest")
+    ),
+    # interpolate
+    "interpolate along rows": lambda m: _u6_shown(
+        m.DataFrame({"a": [1.0, 2.0], "b": [np.nan, np.nan], "c": [3.0, 6.0]}).interpolate(axis=1)
+    ),
+    "interpolate along rows by name": lambda m: _u6_shown(
+        m.DataFrame({"a": [1.0, np.nan], "b": [np.nan, 5.0], "c": [3.0, np.nan], "d": [4.0, 7.0]}).interpolate(
+            axis="columns"
+        )
+    ),
+    # to_csv
+    "to_csv MultiIndex index_label list": lambda m: [_u6_mi(m).to_csv(index_label=["K", "N"])],
+    "to_csv MultiIndex index_label tuple": lambda m: [_u6_mi(m).to_csv(index_label=("K", "N"))],
+    "to_csv MultiIndex index_label text": lambda m: [_u6_mi(m).to_csv(index_label="both")],
+    "to_csv MultiIndex short index_label list": lambda m: [_u6_mi(m).to_csv(index_label=["K"])],
+    "to_csv MultiIndex index_label False": lambda m: [_u6_mi(m).to_csv(index_label=False)],
+    "to_csv index_label list": lambda m: [_u6_flat(m).to_csv(index_label=["row"])],
+    "to_csv long index_label list": lambda m: [_u6_flat(m).to_csv(index_label=["a", "b"])],
+    "to_csv index_label False": lambda m: [_u6_flat(m).to_csv(index_label=False)],
+    "Series.to_csv index_label list": lambda m: [m.Series([1, 2], name="s").to_csv(index_label=["r"])],
+    "Series.to_csv index_label False": lambda m: [m.Series([1, 2], name="s").to_csv(index_label=False)],
+    "to_csv MultiIndex columns index_label list": lambda m: [
+        m.DataFrame([[1, 2]], columns=m.MultiIndex.from_tuples([("a", "x"), ("a", "y")])).to_csv(index_label=["L"])
+    ],
+    # reindex
+    "reindex pad limit": lambda m: _u6_shown(_u6_spaced(m).reindex(_U6_TARGET, method="pad", limit=2)),
+    "reindex bfill limit": lambda m: _u6_shown(_u6_spaced(m).reindex(_U6_TARGET, method="bfill", limit=1)),
+    "reindex nearest limit": lambda m: _u6_shown(_u6_spaced(m).reindex(_U6_TARGET, method="nearest", limit=1)),
+    "reindex pad tolerance": lambda m: _u6_shown(_u6_spaced(m).reindex(_U6_TARGET, method="pad", tolerance=2)),
+    "reindex nearest tolerance": lambda m: _u6_shown(
+        _u6_spaced(m).reindex(_U6_TARGET, method="nearest", tolerance=2.5)
+    ),
+    "reindex tolerance per label": lambda m: _u6_shown(
+        _u6_spaced(m).reindex([1, 6, 20], method="nearest", tolerance=[1, 0, 10])
+    ),
+    "reindex pad limit and tolerance": lambda m: _u6_shown(
+        _u6_spaced(m).reindex(_U6_TARGET, method="pad", limit=2, tolerance=1)
+    ),
+    "reindex tolerance list of the wrong size raises": lambda m: _u6_shown(
+        _u6_spaced(m).reindex([1, 6, 20], method="nearest", tolerance=[1, 0])
+    ),
+    "reindex tolerance without a method raises": lambda m: _u6_shown(_u6_spaced(m).reindex([1, 5], tolerance=1)),
+    "reindex limit without a method raises": lambda m: _u6_shown(_u6_spaced(m).reindex([1, 5], limit=1)),
+    "reindex int values pad limit": lambda m: _u6_shown(
+        _u6_spaced(m, [1, 2, 3]).reindex(_U6_TARGET, method="pad", limit=1)
+    ),
+    "reindex datetimes nearest within a Timedelta": lambda m: _u6_shown(
+        m.Series([1.0, 2.0], index=m.to_datetime(["2024-01-01", "2024-01-05"])).reindex(
+            m.to_datetime(["2024-01-02", "2024-01-03", "2024-01-06"]), method="nearest", tolerance=m.Timedelta("1D")
+        )
+    ),
+    "reindex datetimes pad within a text tolerance": lambda m: _u6_shown(
+        m.Series([1.0, 2.0], index=m.to_datetime(["2024-01-01", "2024-01-05"])).reindex(
+            m.to_datetime(["2024-01-02", "2024-01-03", "2024-01-06"]), method="pad", tolerance="1D"
+        )
+    ),
+    "reindex text labels with a tolerance raises": lambda m: _u6_shown(
+        m.Series([1, 2], index=["a", "c"]).reindex(["b"], method="pad", tolerance=1)
+    ),
+    "frame reindex pad limit": lambda m: _u6_shown(
+        m.DataFrame({"a": [1.0, 2.0], "b": ["x", "y"]}, index=[0, 5]).reindex([0, 1, 2, 5, 6], method="pad", limit=1)
+    ),
+    "frame reindex nearest tolerance": lambda m: _u6_shown(
+        m.DataFrame({"a": [1.0, 2.0]}, index=[0, 5]).reindex([1, 2, 4, 9], method="nearest", tolerance=1)
+    ),
+    "frame reindex ffill leading gap": lambda m: _u6_shown(
+        m.DataFrame({"n": [10, 20], "s": ["a", "b"]}, index=[18, 19]).reindex([17, 18, 19], method="ffill")
+    ),
+    # NEGATIVES: the defaults answer as they did.
+    "groupby shift without a fill": lambda m: _u6_shown(_u6_frame(m).groupby("g")[["x", "y"]].shift(1)),
+    "SeriesGroupBy idxmax skipna=False without NA": lambda m: _u6_shown(
+        _u6_frame(m).groupby("g")["y"].idxmax(skipna=False)
+    ),
+    "groupby value_counts": lambda m: _u6_shown(_u6_frame(m).groupby("g")[["x"]].value_counts()),
+    "rolling quantile linear": lambda m: _u6_shown(_u6_windowed(m).rolling(3).quantile(0.3)),
+    "reindex pad": lambda m: _u6_shown(_u6_spaced(m).reindex(_U6_TARGET, method="pad")),
+    "to_csv index_label text": lambda m: [_u6_flat(m).to_csv(index_label="row")],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_U6_CASES))
+def test_refused_parameters_now_answer_like_pandas_u6p7i(case: str) -> None:
+    run = _U6_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
