@@ -15711,3 +15711,95 @@ _MZES1_CASES = {
 def test_all_missing_index_labels_type_it_like_pandas(case: str) -> None:
     run = _MZES1_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-47qjv (scratch p14/oracle_dupgb.py, oracle_dupgb2.py vs
+# pandas 2.2.3): a groupby over a frame whose column names repeat read the
+# first repeated column's data for each (sum gave both 'a' columns the first
+# one's sums), numeric_only and the windows doubled them, agg of a list
+# raised, gb['a'] was the first 'a' alone, and a repeated key grouped.
+def _q47_frame(m: Any) -> Any:
+    return m.DataFrame(
+        [[1.5, 9.0, 1, 5], [4.0, np.nan, 2, 6], [2.0, 7.0, 1, 7], [3.0, 1.0, 2, 8]],
+        columns=["a", "a", "k", "c"],
+    )
+
+
+def _q47_shown(result: Any) -> list:
+    if hasattr(result, "columns"):
+        return [type(result).__name__, repr(list(result.columns)), result.to_string()]
+    if hasattr(result, "to_string"):
+        return [type(result).__name__, repr(result.name), result.to_string()]
+    return [repr(result)]
+
+
+def _q47(op: Any) -> Any:
+    return lambda m: _q47_shown(op(_q47_frame(m).groupby("k")))
+
+
+_Q47_CASES = {
+    "sum": _q47(lambda g: g.sum()),
+    "mean": _q47(lambda g: g.mean()),
+    "mean numeric_only beside text": lambda m: _q47_shown(
+        m.DataFrame([[1.5, 9.0, "x", 1], [4.0, np.nan, "y", 2], [2.0, 7.0, "x", 1]], columns=["a", "a", "b", "k"])
+        .groupby("k")
+        .mean(numeric_only=True)
+    ),
+    "min": _q47(lambda g: g.min()),
+    "std": _q47(lambda g: g.std()),
+    "median": _q47(lambda g: g.median()),
+    "count": _q47(lambda g: g.count()),
+    "first": _q47(lambda g: g.first()),
+    "nunique": _q47(lambda g: g.nunique()),
+    "cumsum": _q47(lambda g: g.cumsum()),
+    "shift": _q47(lambda g: g.shift()),
+    "rank": _q47(lambda g: g.rank()),
+    "head": _q47(lambda g: g.head(1)),
+    "nth": _q47(lambda g: g.nth(0)),
+    "agg of a name": _q47(lambda g: g.agg("sum")),
+    "agg of a list": _q47(lambda g: g.agg(["sum", "max"])),
+    "agg of a lambda": _q47(lambda g: g.agg(lambda s: s.sum())),
+    "transform of a name": _q47(lambda g: g.transform("sum")),
+    "transform of a lambda": _q47(lambda g: g.transform(lambda s: s - s.mean())),
+    "apply": _q47(lambda g: g.apply(lambda d: d.sum())),
+    "filter": _q47(lambda g: g.filter(lambda d: d["c"].sum() > 12)),
+    "get_group": _q47(lambda g: g.get_group(1)),
+    "iteration": _q47(lambda g: [_q47_shown(group) for _, group in g]),
+    "describe": _q47(lambda g: g.describe()),
+    "quantile": _q47(lambda g: g.quantile(0.5)),
+    "idxmax": _q47(lambda g: g.idxmax()),
+    "rolling sum": _q47(lambda g: g.rolling(2).sum()),
+    "expanding sum": _q47(lambda g: g.expanding().sum()),
+    "value_counts": _q47(lambda g: g.value_counts()),
+    # The repeated float columns: an int column's ohlc is float64 here
+    # whether names repeat or not (pandas keeps int64; br-frankenpandas-c90rr).
+    "ohlc": _q47(lambda g: g[["a"]].ohlc()),
+    "corr values": _q47(lambda g: [list(g.corr().columns), g.corr().values.tolist()]),
+    "a repeated name selects its columns": _q47(lambda g: g["a"].sum()),
+    "a list with a repeated name": _q47(lambda g: g[["a", "c"]].sum()),
+    "a repeated name as an attribute": _q47(lambda g: g.a.max()),
+    "a dict naming a repeated column raises": _q47(lambda g: g.agg({"a": "sum"})),
+    "named aggregation of a repeated column raises": _q47(lambda g: g.agg(s=("a", "sum"))),
+    "as_index False": lambda m: _q47_shown(_q47_frame(m).groupby("k", as_index=False).sum()),
+    "two keys": lambda m: _q47_shown(_q47_frame(m).groupby(["k", "c"]).sum()),
+    "a repeated key raises": lambda m: _q47_shown(
+        m.DataFrame([[1, 2, 3]], columns=["k", "k", "a"]).groupby("k").sum()
+    ),
+    # NEGATIVE: a column whose name does not repeat, and frames without a
+    # repeated name, as before.
+    "a column of its own": _q47(lambda g: g["c"].sum()),
+    "a dict naming a column of its own": _q47(lambda g: g.agg({"c": "sum"})),
+    "unique names": lambda m: _q47_shown(
+        m.DataFrame({"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0], "k": [1, 1, 2]}).groupby("k").sum()
+    ),
+    "unique names agg of a list": lambda m: _q47_shown(
+        m.DataFrame({"a": [1.0, 2.0, 3.0], "k": [1, 1, 2]}).groupby("k").agg(["sum", "max"])
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_Q47_CASES))
+def test_groupby_over_repeated_column_names_like_pandas(case: str) -> None:
+    run = _Q47_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

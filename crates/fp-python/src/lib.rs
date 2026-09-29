@@ -19,7 +19,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    sync::{LazyLock, Mutex},
+    sync::{Arc, LazyLock, Mutex},
 };
 
 use fp_columnar::{ArithmeticOp, Column, ComparisonOp};
@@ -35436,6 +35436,8 @@ impl PyDataFrame {
             ));
         }
         let unused = check_category_keys(py, &df, &by, observed)?;
+        // Repeated column names each keep their own column (47qjv).
+        let (df, repeated) = RepeatedColumns::keyed(df, &by)?;
         let gb = PyGroupBy {
             df,
             by,
@@ -35446,6 +35448,7 @@ impl PyDataFrame {
             group_keys,
             unused,
             selection: None,
+            repeated,
         };
         gb.grouped()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
@@ -48319,6 +48322,218 @@ fn stacked_series(results: &[Applied], labels: &[IndexLabel]) -> PyResult<Vec<(S
         .collect()
 }
 
+/// The mark a repeated column's stand-in key carries around its position
+/// (see [`RepeatedColumns`]): a control character no frame names a column
+/// with, closing the key so no stand-in is part of another.
+const STAND_IN_MARK: char = '\u{1f}';
+
+/// A groupby over a frame whose column names repeat: pandas keeps each such
+/// column apart, where fp-frame's groupby finds its columns by name (each
+/// read the first one's data; br-frankenpandas-47qjv). The frame is keyed by
+/// a stand-in per repeated column - its name, the mark, its position, the
+/// mark - and every result goes back under the names
+/// ([`PyGroupBy::restored`]).
+struct RepeatedColumns {
+    /// Each stand-in key and the name it stands for, in column order.
+    stand_ins: Vec<(String, String)>,
+    /// The frame's columns before the stand-ins, over no rows: a selection
+    /// resolves its labels there, and a result takes back their typed
+    /// labels, axis name and MultiIndex levels.
+    labels: DataFrame,
+}
+
+impl RepeatedColumns {
+    /// `frame` for a groupby over `by`, and when column names repeat, it
+    /// keyed by a stand-in for each repeated one with those stand-ins; a
+    /// repeated key column is pandas' ValueError.
+    fn keyed(frame: DataFrame, by: &[String]) -> PyResult<(DataFrame, Option<Arc<Self>>)> {
+        let names: Vec<String> = frame.column_names().into_iter().cloned().collect();
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for name in &names {
+            *counts.entry(name.as_str()).or_default() += 1;
+        }
+        if counts.values().all(|&count| count == 1) {
+            return Ok((frame, None));
+        }
+        if let Some(key) = by
+            .iter()
+            .find(|key| counts.get(key.as_str()).is_some_and(|&count| count > 1))
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Grouper for '{key}' not 1-dimensional"
+            )));
+        }
+        let mut stand_ins = Vec::new();
+        let keys = names
+            .iter()
+            .enumerate()
+            .map(|(position, name)| {
+                if counts[name.as_str()] == 1 {
+                    return name.clone();
+                }
+                let key = format!("{name}{STAND_IN_MARK}{position}{STAND_IN_MARK}");
+                stand_ins.push((key.clone(), name.clone()));
+                key
+            })
+            .collect();
+        let labels = frame.head(0).map_err(frame_error_to_py)?;
+        let keyed = frame.with_column_keys(keys).map_err(frame_error_to_py)?;
+        Ok((keyed, Some(Arc::new(Self { stand_ins, labels }))))
+    }
+
+    /// The stand-ins of a repeated `name`, in column order (none for a name
+    /// that does not repeat).
+    fn stand_ins_of(&self, name: &str) -> Vec<String> {
+        self.stand_ins
+            .iter()
+            .filter(|(_, of)| of == name)
+            .map(|(stand_in, _)| stand_in.clone())
+            .collect()
+    }
+
+    /// `text` with every stand-in in it back to its name.
+    fn restore_text(&self, text: &str) -> String {
+        if !text.contains(STAND_IN_MARK) {
+            return text.to_owned();
+        }
+        self.stand_ins
+            .iter()
+            .fold(text.to_owned(), |text, (stand_in, name)| {
+                text.replace(stand_in.as_str(), name)
+            })
+    }
+
+    /// `label` with a stand-in in its text back to its name.
+    fn restore_label(&self, label: &IndexLabel) -> IndexLabel {
+        match label {
+            IndexLabel::Utf8(text) if text.contains(STAND_IN_MARK) => {
+                IndexLabel::Utf8(self.restore_text(text))
+            }
+            label => label.clone(),
+        }
+    }
+
+    /// `name` with a stand-in in its text back to the typed label of the
+    /// name it stands for.
+    fn restore_name(&self, name: &LabelName) -> LabelName {
+        if !name.contains(STAND_IN_MARK) {
+            return name.clone();
+        }
+        let text = self.restore_text(name);
+        if self.labels.column(&text).is_some() {
+            self.labels.column_series_name(&text)
+        } else {
+            LabelName::from(text)
+        }
+    }
+
+    /// `index` with its stand-ins back to their names (its labels and
+    /// name), or None when it holds none.
+    fn restore_index(&self, index: &Index) -> Option<Index> {
+        let labels = index.labels();
+        let named = index
+            .name()
+            .is_some_and(|name| name.contains(STAND_IN_MARK));
+        let marked = labels
+            .iter()
+            .any(|label| matches!(label, IndexLabel::Utf8(text) if text.contains(STAND_IN_MARK)));
+        if !named && !marked {
+            return None;
+        }
+        let restored = if marked {
+            Index::new(
+                labels
+                    .iter()
+                    .map(|label| self.restore_label(label))
+                    .collect(),
+            )
+        } else {
+            index.clone()
+        };
+        Some(restored.rename_index(index.name().map(|name| self.restore_name(name))))
+    }
+
+    /// A result frame back under the repeated names: its column keys and
+    /// column MultiIndex levels, its row labels (corr's) and row MultiIndex
+    /// levels and names, with the columns' typed labels.
+    fn restore_frame(&self, frame: DataFrame) -> PyResult<DataFrame> {
+        let keys: Vec<String> = frame
+            .column_names()
+            .into_iter()
+            .map(|key| self.restore_text(key))
+            .collect();
+        let mut frame = if frame.column_names().into_iter().eq(keys.iter()) {
+            frame
+        } else {
+            let axis = match frame.columns_multiindex() {
+                Some(levels) => Some(
+                    self.restore_multiindex(levels)?
+                        .unwrap_or_else(|| levels.clone()),
+                ),
+                None => None,
+            };
+            let name = frame.columns_name().cloned();
+            frame
+                .with_column_keys(keys)
+                .and_then(|frame| frame.with_columns_multiindex(axis))
+                .map_err(frame_error_to_py)?
+                .with_columns_name(name)
+        };
+        if let Some(levels) = frame.row_multiindex()
+            && let Some(levels) = self.restore_multiindex(levels)?
+        {
+            frame = frame
+                .with_row_multiindex(levels)
+                .map_err(frame_error_to_py)?;
+        } else if let Some(index) = self.restore_index(frame.index()) {
+            frame = frame.with_index(index).map_err(frame_error_to_py)?;
+        }
+        Ok(frame.with_typed_labels_of(&self.labels))
+    }
+
+    /// `levels` with its stand-ins back to their names (level values and
+    /// names), or None when it holds none.
+    fn restore_multiindex(
+        &self,
+        levels: &fp_index::MultiIndex,
+    ) -> PyResult<Option<fp_index::MultiIndex>> {
+        let mut arrays = Vec::with_capacity(levels.nlevels());
+        let mut marked = false;
+        for level in 0..levels.nlevels() {
+            let values = levels.get_level_values(level).map_err(index_error_to_py)?;
+            marked |= values.labels().iter().any(
+                |label| matches!(label, IndexLabel::Utf8(text) if text.contains(STAND_IN_MARK)),
+            );
+            arrays.push(
+                values
+                    .labels()
+                    .iter()
+                    .map(|label| self.restore_label(label))
+                    .collect(),
+            );
+        }
+        let names: Vec<Option<LabelName>> = levels
+            .names()
+            .iter()
+            .map(|name| name.as_ref().map(|name| self.restore_name(name)))
+            .collect();
+        marked |= levels
+            .names()
+            .iter()
+            .flatten()
+            .any(|name| name.contains(STAND_IN_MARK));
+        if !marked {
+            return Ok(None);
+        }
+        Ok(Some(
+            fp_index::MultiIndex::from_arrays(arrays)
+                .map_err(index_error_to_py)?
+                .set_names(names)
+                .with_missing_as_level(levels.missing_is_a_level()),
+        ))
+    }
+}
+
 /// Python wrapper for FrankenPandas GroupBy.
 #[derive(Clone)]
 #[pyclass(name = "DataFrameGroupBy", from_py_object)]
@@ -48346,9 +48561,21 @@ pub struct PyGroupBy {
     /// keeps the keys to group by; they reached `func` with a deprecation
     /// warning pandas gives only without a selection).
     selection: Option<Vec<String>>,
+    /// The stand-ins `df` keys its repeated column names by (see
+    /// [`RepeatedColumns`]); None when no name repeats.
+    repeated: Option<Arc<RepeatedColumns>>,
 }
 
 impl PyGroupBy {
+    /// A result frame back under the repeated column names (see
+    /// [`RepeatedColumns::restore_frame`]); unchanged when no name repeats.
+    fn restored(&self, frame: DataFrame) -> PyResult<DataFrame> {
+        match &self.repeated {
+            Some(repeated) => repeated.restore_frame(frame),
+            None => Ok(frame),
+        }
+    }
+
     /// The fp-frame groupby over `by` with this object's options; every
     /// aggregation goes through it.
     fn grouped(&self) -> Result<fp_frame::DataFrameGroupBy<'_>, FrameError> {
@@ -48432,7 +48659,7 @@ impl PyGroupBy {
             _ => frame,
         };
         Ok(PyDataFrame {
-            inner: frame.with_typed_labels_of(&self.df),
+            inner: self.restored(frame.with_typed_labels_of(&self.df))?,
         })
     }
 
@@ -48447,6 +48674,7 @@ impl PyGroupBy {
             group_keys: self.group_keys,
             unused: self.unused.clone(),
             selection: self.selection.clone(),
+            repeated: self.repeated.clone(),
         }
     }
 
@@ -48511,7 +48739,9 @@ impl PyGroupBy {
             (Index::default_range(rows.len()), None)
         };
         let order: Vec<String> = pairs.iter().map(|(name, _)| name.clone()).collect();
-        let columns: BTreeMap<String, Column> = pairs.into_iter().collect();
+        // A store keeps a label the results repeat (a frame's repeated
+        // column names) as columns of their own (47qjv).
+        let columns = fp_frame::ColumnStore::from_pairs(pairs);
         let mut frame =
             DataFrame::new_with_column_order(index, columns, order).map_err(frame_error_to_py)?;
         if let Some(levels) = levels {
@@ -48646,8 +48876,94 @@ impl PyGroupBy {
             }
         }
         Ok(PyDataFrame {
-            inner: self.narrowed_frame(op, inner)?,
+            inner: self.restored(self.narrowed_frame(op, inner)?)?,
         })
+    }
+
+    /// The stand-in keys of a repeated column `name` (see
+    /// [`RepeatedColumns`]); None for a name that does not repeat.
+    fn stand_ins_of(&self, name: &str) -> Option<Vec<String>> {
+        self.repeated
+            .as_ref()
+            .map(|repeated| repeated.stand_ins_of(name))
+            .filter(|stand_ins| !stand_ins.is_empty())
+    }
+
+    /// This groupby over the columns `names` key (the keys ride along):
+    /// pandas' `gb[[...]]`; an absent column is a KeyError with pandas'
+    /// message.
+    fn selected(&self, py: Python<'_>, names: Vec<String>) -> PyResult<Py<PyAny>> {
+        let missing: Vec<String> = names
+            .iter()
+            .filter(|name| self.df.column(name).is_none())
+            .map(|name| format!("'{name}'"))
+            .collect();
+        if !missing.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Columns not found: {}",
+                missing.join(", ")
+            )));
+        }
+        let mut keep: Vec<&str> = self.by.iter().map(String::as_str).collect();
+        for name in &names {
+            if !keep.contains(&name.as_str()) {
+                keep.push(name);
+            }
+        }
+        let df = self.df.select_columns(&keep).map_err(frame_error_to_py)?;
+        let mut selected = self.over(df);
+        selected.selection = Some(names);
+        Ok(Py::new(py, selected)?.into_any())
+    }
+
+    /// A dict or named aggregation naming a repeated column (see
+    /// [`RepeatedColumns`]): pandas' AttributeError, its selection being a
+    /// frame there, not a Series.
+    fn refuse_repeated_agg_columns(
+        &self,
+        func: Option<&Bound<'_, PyAny>>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let Some(repeated) = &self.repeated else {
+            return Ok(());
+        };
+        let mut named: Vec<Bound<'_, PyAny>> = Vec::new();
+        if let Some(dict) = func.and_then(|func| func.cast::<PyDict>().ok()) {
+            named.extend(dict.keys());
+        }
+        for (_, spec) in kwargs.into_iter().flat_map(|named| named.iter()) {
+            if let Ok(column) = spec.get_item(0)
+                && spec.is_instance_of::<PyTuple>()
+            {
+                named.push(column);
+            }
+        }
+        let repeats = named.iter().any(|key| {
+            key.extract::<String>()
+                .ok()
+                .map(|name| vec![name])
+                .or_else(|| frame_column_names_arg(&repeated.labels, key))
+                .unwrap_or_default()
+                .iter()
+                .any(|name| !repeated.stand_ins_of(name).is_empty())
+        });
+        if repeats {
+            return Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                "'DataFrame' object has no attribute 'name'",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The typed name of the column `key` keys: a stand-in's is the name it
+    /// stands for (see [`RepeatedColumns`]).
+    fn column_series_name(&self, key: &str) -> LabelName {
+        match &self.repeated {
+            Some(repeated) if key.contains(STAND_IN_MARK) => {
+                repeated.restore_name(&LabelName::from(key))
+            }
+            _ => self.df.column_series_name(key),
+        }
     }
 
     /// `frame`, a per-group `op` over this groupby's columns, with each
@@ -48892,6 +49208,7 @@ impl PyGroupBy {
             ResampleTarget::DataFrame(target),
             window_groups_from_codes(&codes, &groups),
             self.key_names.clone(),
+            self.repeated.clone(),
             args,
             kwargs,
         )
@@ -48952,7 +49269,8 @@ impl PyGroupBy {
                     for column in self.df.column_names() {
                         if !self.by.contains(column) {
                             results.push(per_column(column, spec)?);
-                            keys.push(column.clone());
+                            // A repeated name's stand-in back to it (47qjv).
+                            keys.push(self.column_series_name(column).to_string());
                         }
                     }
                 }
@@ -48974,7 +49292,7 @@ impl PyGroupBy {
             // The rows' MultiIndex rides along, so a transform keeps it
             // (it came back flat; rvqoi).
             Series::new(
-                self.df.column_series_name(col),
+                self.column_series_name(col),
                 self.df.series_index(),
                 values.clone(),
             )
@@ -49045,15 +49363,24 @@ impl PyGroupBy {
     /// KeyError with pandas' message.
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         // A typed label (gb[1] of DataFrame([[1, 2]])'s groupby) selects the
-        // column carrying it (fvsao.32).
-        let typed = frame_column_names_arg(&self.df, key);
-        if let Some(names) = &typed
-            && !key.is_instance_of::<PyList>()
-        {
-            return Ok(Py::new(py, self.column_groupby(&names[0])?)?.into_any());
-        }
-        if let Ok(name) = key.extract::<String>() {
-            return Ok(Py::new(py, self.column_groupby(&name)?)?.into_any());
+        // column carrying it (fvsao.32), read among the frame's own labels
+        // under repeated names; a repeated name selects every column under
+        // it - this groupby over them, as pandas (it was the first; 47qjv).
+        let source = self
+            .repeated
+            .as_ref()
+            .map_or(&self.df, |repeated| &repeated.labels);
+        let typed = frame_column_names_arg(source, key);
+        let single = match &typed {
+            Some(names) if !key.is_instance_of::<PyList>() => Some(names[0].clone()),
+            Some(_) => None,
+            None => key.extract::<String>().ok(),
+        };
+        if let Some(name) = single {
+            return match self.stand_ins_of(&name) {
+                Some(stand_ins) => self.selected(py, stand_ins),
+                None => Ok(Py::new(py, self.column_groupby(&name)?)?.into_any()),
+            };
         }
         let names: Vec<String> = match typed {
             Some(names) => names,
@@ -49063,33 +49390,26 @@ impl PyGroupBy {
                 )
             })?,
         };
-        let missing: Vec<String> = names
-            .iter()
-            .filter(|name| self.df.column(name).is_none())
-            .map(|name| format!("'{name}'"))
-            .collect();
-        if !missing.is_empty() {
-            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
-                "Columns not found: {}",
-                missing.join(", ")
-            )));
-        }
-        let mut keep: Vec<&str> = self.by.iter().map(String::as_str).collect();
-        for name in &names {
-            if !keep.contains(&name.as_str()) {
-                keep.push(name);
+        let mut keys: Vec<String> = Vec::with_capacity(names.len());
+        for name in names {
+            for key in self.stand_ins_of(&name).unwrap_or_else(|| vec![name]) {
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
             }
         }
-        let df = self.df.select_columns(&keep).map_err(frame_error_to_py)?;
-        let mut selected = self.over(df);
-        selected.selection = Some(names);
-        Ok(Py::new(py, selected)?.into_any())
+        self.selected(py, keys)
     }
 
-    /// `gb.v` for a column `v`; anything else is pandas' AttributeError.
-    fn __getattr__(&self, name: &str) -> PyResult<PySeriesGroupBy> {
+    /// `gb.v` for a column `v` (a repeated name: this groupby over its
+    /// columns, as [`Self::__getitem__`]); anything else is pandas'
+    /// AttributeError.
+    fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         if self.df.column(name).is_some() {
-            return self.column_groupby(name);
+            return Ok(Py::new(py, self.column_groupby(name)?)?.into_any());
+        }
+        if let Some(stand_ins) = self.stand_ins_of(name) {
+            return self.selected(py, stand_ins);
         }
         Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
             format!("'DataFrameGroupBy' object has no attribute '{name}'"),
@@ -49141,7 +49461,7 @@ impl PyGroupBy {
             .count()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         Ok(PyDataFrame {
-            inner: self.with_unused("count", result)?,
+            inner: self.restored(self.with_unused("count", result)?)?,
         })
     }
 
@@ -49212,7 +49532,7 @@ impl PyGroupBy {
             .reduce(numeric_only, |gb| gb.std_ddof(ddof))
             .map_err(float_conversion_error_to_py)?;
         Ok(PyDataFrame {
-            inner: self.with_unused("std", result)?,
+            inner: self.restored(self.with_unused("std", result)?)?,
         })
     }
 
@@ -49297,7 +49617,7 @@ impl PyGroupBy {
             .nunique()
             .map_err(frame_error_to_py)?;
         Ok(PyDataFrame {
-            inner: self.with_unused("nunique", result)?,
+            inner: self.restored(self.with_unused("nunique", result)?)?,
         })
     }
 
@@ -49308,7 +49628,7 @@ impl PyGroupBy {
             .any()
             .map_err(frame_error_to_py)?;
         Ok(PyDataFrame {
-            inner: self.with_unused("any", result)?,
+            inner: self.restored(self.with_unused("any", result)?)?,
         })
     }
 
@@ -49319,7 +49639,7 @@ impl PyGroupBy {
             .all()
             .map_err(frame_error_to_py)?;
         Ok(PyDataFrame {
-            inner: self.with_unused("all", result)?,
+            inner: self.restored(self.with_unused("all", result)?)?,
         })
     }
 
@@ -49408,7 +49728,9 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .corr()
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+        Ok(PyDataFrame {
+            inner: self.restored(result)?,
+        })
     }
 
     fn cov(&self) -> PyResult<PyDataFrame> {
@@ -49418,7 +49740,9 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .cov()
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+        Ok(PyDataFrame {
+            inner: self.restored(result)?,
+        })
     }
 
     fn ohlc(&self) -> PyResult<PyDataFrame> {
@@ -49428,7 +49752,9 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .ohlc()
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+        Ok(PyDataFrame {
+            inner: self.restored(result)?,
+        })
     }
 
     /// pandas' `gb.ngroups` property (it was a method).
@@ -49492,10 +49818,18 @@ impl PyGroupBy {
                 slf.as_any()
                     .get_item(name)?
                     .call_method("quantile", (q,), Some(&kwargs))?;
-            columns.push(result.extract::<PyRef<'_, PySeries>>()?.inner.clone());
+            // A repeated name's column under its stand-in, which keeps it
+            // apart until the frame goes back under the names (47qjv).
+            let series = result.extract::<PyRef<'_, PySeries>>()?.inner.clone();
+            columns.push(if name.contains(STAND_IN_MARK) {
+                series.rename(name.as_str()).map_err(frame_error_to_py)?
+            } else {
+                series
+            });
         }
+        let frame = DataFrame::from_series(columns).map_err(frame_error_to_py)?;
         Ok(PyDataFrame {
-            inner: DataFrame::from_series(columns).map_err(frame_error_to_py)?,
+            inner: slf.borrow().restored(frame)?,
         })
     }
 
@@ -49506,7 +49840,7 @@ impl PyGroupBy {
             .reduce(numeric_only, |gb| gb.sem_ddof(ddof))
             .map_err(float_conversion_error_to_py)?;
         Ok(PyDataFrame {
-            inner: self.with_unused("sem", result)?,
+            inner: self.restored(self.with_unused("sem", result)?)?,
         })
     }
 
@@ -49580,6 +49914,7 @@ impl PyGroupBy {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        self.refuse_repeated_agg_columns(func, kwargs)?;
         // A {column: func} dict's typed keys name their columns (fvsao.32).
         let column_keyed = match func.map(|func| func.cast::<PyDict>()) {
             Some(Ok(dict)) => Some(column_dict_arg(&self.df, dict)?.into_any()),
@@ -49791,7 +50126,7 @@ impl PyGroupBy {
         Ok(Py::new(
             py,
             PyDataFrame {
-                inner: res.with_typed_labels_of(&self.df),
+                inner: self.restored(res.with_typed_labels_of(&self.df))?,
             },
         )?
         .into_any())
@@ -49860,12 +50195,17 @@ impl PyGroupBy {
             .iter()
             .map(|name| index_label_to_py(py, &this.df.column_label(name)))
             .collect::<PyResult<Vec<_>>>()?;
+        // A repeated name's stand-in back to it (47qjv).
+        let keys = names
+            .iter()
+            .map(|name| this.column_series_name(name).to_string())
+            .collect();
         drop(this);
         let described = labels
             .into_iter()
             .map(|label| slf.get_item(label)?.call_method0("describe"))
             .collect::<PyResult<Vec<_>>>()?;
-        concat_side_by_side(py, described, names)
+        concat_side_by_side(py, described, keys)
     }
 
     /// `for key, group in gb`: each group's key (a tuple over several keys)
@@ -49889,7 +50229,7 @@ impl PyGroupBy {
             .map(String::as_str)
             .filter(|column| !own_keys.contains(column))
             .collect();
-        let frame = self.df.select_columns(&kept).map_err(frame_error_to_py)?;
+        let frame = self.restored(self.df.select_columns(&kept).map_err(frame_error_to_py)?)?;
         let mut pairs = Vec::with_capacity(groups.len());
         for ((_, positions), key) in groups.iter().zip(&keys) {
             let key = group_key_object(py, key)?;
@@ -49931,7 +50271,7 @@ impl PyGroupBy {
     #[getter]
     fn dtypes(&self, py: Python<'_>) -> PyResult<PySeries> {
         let gb = self.grouped().map_err(frame_error_to_py)?;
-        let first = gb.first().map_err(frame_error_to_py)?;
+        let first = self.restored(gb.first().map_err(frame_error_to_py)?)?;
         PyDataFrame { inner: first }.dtypes(py)
     }
 
@@ -49942,7 +50282,9 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .corrwith(&other.inner)
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: res })
+        Ok(PyDataFrame {
+            inner: self.restored(res)?,
+        })
     }
 
     /// pandas' `gb.apply(func, *args, include_groups=True, **kwargs)`:
@@ -50002,7 +50344,8 @@ impl PyGroupBy {
                 })
                 .collect(),
         };
-        let frame = self.df.select_columns(&kept).map_err(frame_error_to_py)?;
+        // func sees a repeated name's columns under it (47qjv).
+        let frame = self.restored(self.df.select_columns(&kept).map_err(frame_error_to_py)?)?;
         let groups = self.ordered_groups(true)?;
         let keys = index_rows(&self.group_key_index(&groups)?);
         let mut results = Vec::with_capacity(groups.len());
@@ -50257,17 +50600,25 @@ impl PyGroupBy {
             &[("dropna", dropna != Some(false))],
         )?;
         // The kept groups' rows in their original order, as pandas' filter
-        // (it concatenated the kept groups in key order; fvsao.30).
+        // (it concatenated the kept groups in key order; fvsao.30), under
+        // a repeated name's columns (47qjv).
+        let restored;
+        let frame = if self.repeated.is_some() {
+            restored = self.restored(self.df.clone())?;
+            &restored
+        } else {
+            &self.df
+        };
         let mut kept: Vec<usize> = Vec::new();
         for (_, positions) in self.ordered_groups(false)? {
-            let group_df = self.df.take_rows(&positions).map_err(frame_error_to_py)?;
+            let group_df = frame.take_rows(&positions).map_err(frame_error_to_py)?;
             let res = func.call1((PyDataFrame { inner: group_df },))?;
             if res.is_truthy()? {
                 kept.extend(positions);
             }
         }
         kept.sort_unstable();
-        let rows = self.df.take_rows(&kept).map_err(frame_error_to_py)?;
+        let rows = frame.take_rows(&kept).map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: rows })
     }
 
@@ -50348,7 +50699,9 @@ impl PyGroupBy {
             .take_rows(&rows)
             .and_then(|frame| frame.select_columns(&kept))
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner })
+        Ok(PyDataFrame {
+            inner: self.restored(inner)?,
+        })
     }
 
     #[pyo3(signature = (func, *args, **kwargs))]
@@ -50557,7 +50910,8 @@ impl PyGroupBy {
             .map(String::as_str)
             .filter(|column| !keys.contains(column))
             .collect();
-        let frame = self.df.select_columns(&kept).map_err(frame_error_to_py)?;
+        // func sees a repeated name's columns under it (47qjv).
+        let frame = self.restored(self.df.select_columns(&kept).map_err(frame_error_to_py)?)?;
         let mut pieces = Vec::new();
         let mut origin = Vec::new();
         for (_, positions) in self.ordered_groups(false)? {
@@ -50655,7 +51009,7 @@ impl PyGroupBy {
         key_names.extend(
             values
                 .iter()
-                .map(|name| Some(self.df.column_series_name(name))),
+                .map(|name| Some(self.column_series_name(name))),
         );
         // The groupby's own dropna drops a missing key, value_counts' a
         // missing value (they could only agree; the value_counts dropna
@@ -50671,6 +51025,7 @@ impl PyGroupBy {
             group_keys: self.group_keys,
             unused: Vec::new(),
             selection: None,
+            repeated: self.repeated.clone(),
         };
         let counts = counting
             .size(py)?
@@ -51097,6 +51452,7 @@ impl PySeriesGroupBy {
             ResampleTarget::Series(self.series.clone()),
             groups,
             key_names,
+            None,
             args,
             kwargs,
         )
@@ -64926,15 +65282,20 @@ pub struct PyGroupedWindow {
     target: ResampleTarget,
     groups: Vec<WindowGroup>,
     key_names: Vec<Option<LabelName>>,
+    /// The stand-ins a frame target keys its repeated column names by: the
+    /// windows run over them, the result goes back under the names (47qjv).
+    repeated: Option<Arc<RepeatedColumns>>,
 }
 
 impl PyGroupedWindow {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
         kind: &'static str,
         target: ResampleTarget,
         groups: Vec<WindowGroup>,
         key_names: Vec<Option<LabelName>>,
+        repeated: Option<Arc<RepeatedColumns>>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
@@ -64947,6 +65308,7 @@ impl PyGroupedWindow {
             target,
             groups,
             key_names,
+            repeated,
         })
     }
 
@@ -65048,6 +65410,10 @@ impl PyGroupedWindow {
                     .and_then(|out| out.set_axis(flat, 0))
                     .and_then(|out| out.with_row_multiindex(levels))
                     .map_err(frame_error_to_py)?;
+            let out = match &self.repeated {
+                Some(repeated) => repeated.restore_frame(out)?,
+                None => out,
+            };
             return PyDataFrame { inner: out }.into_py_any(py);
         }
         let refs: Vec<&Series> = series_parts.iter().collect();
@@ -69459,6 +69825,7 @@ mod tests {
             group_keys: true,
             unused: Vec::new(),
             selection: None,
+            repeated: None,
         };
         let gb_first = gb.first(false, -1, true).expect("first"); // ubs:ignore — test fixture
         assert_eq!(gb_first.shape(), (2, 1));
