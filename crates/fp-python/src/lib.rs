@@ -6081,6 +6081,37 @@ fn iterated_to_py(py: Python<'_>, column: &Column, value: &Scalar) -> PyResult<P
 /// NaN that pandas' nanops hands back as the Python float: `mean` of no
 /// values, and `min` / `max` / `std` / `var` / `median` of an empty Series
 /// (measured, pandas 2.2.3). `op` is the reduction's name.
+/// Whether `column` is pandas' object dtype: text or mixed cells (not its
+/// `string` dtype), or no dtype at all (an empty column's).
+fn is_object_column(column: &Column) -> bool {
+    matches!(column.dtype(), DType::Utf8 | DType::Null) && !column.is_pandas_string()
+}
+
+/// An object column's sum / prod as pandas answers it through Python's
+/// arithmetic: `result` (its numbers' reduction) as a Python number, and
+/// over no values the op's `identity` - NaN when `min_count` asks for more
+/// (br-frankenpandas-qymo3).
+fn object_total(
+    py: Python<'_>,
+    result: Py<PyAny>,
+    count: usize,
+    min_count: usize,
+    identity: i64,
+) -> PyResult<Py<PyAny>> {
+    if count == 0 {
+        return if min_count > 0 {
+            f64::NAN.into_py_any(py)
+        } else {
+            identity.into_py_any(py)
+        };
+    }
+    let result = result.into_bound(py);
+    if result.hasattr("item")? {
+        return Ok(result.call_method0("item")?.unbind());
+    }
+    Ok(result.unbind())
+}
+
 fn reduction_to_py(
     py: Python<'_>,
     series: &Series,
@@ -23639,6 +23670,32 @@ impl PySeries {
         })
     }
 
+    /// An object column holding only numbers (ints and floats, missing
+    /// values aside) as the numeric Series pandas' reductions read it as;
+    /// None for any other column, text among them (its sum / prod / mean /
+    /// median were refused; br-frankenpandas-qymo3).
+    fn object_numbers(&self) -> Option<PySeries> {
+        let column = self.inner.column();
+        if !is_object_column(column) {
+            return None;
+        }
+        let values = column.values();
+        if !values.iter().all(|value| {
+            value.is_missing() || matches!(value, Scalar::Int64(_) | Scalar::Float64(_))
+        }) {
+            return None;
+        }
+        // No number at all: NaN floats, which every numeric kernel reads.
+        let numbers = if values.iter().all(Scalar::is_missing) {
+            Column::new(DType::Float64, values.to_vec()).ok()?
+        } else {
+            Column::from_values(values.to_vec()).ok()?
+        };
+        Series::new(self.inner.name(), self.inner.index().clone(), numbers)
+            .ok()
+            .map(|inner| PySeries { inner })
+    }
+
     /// pandas' reductions over datetime64/timedelta64 are mean, median and
     /// std (a timedelta); the rest raise TypeError naming the array type. The
     /// temporal mean/median were refused here
@@ -25066,6 +25123,14 @@ impl PySeries {
         if numeric_only {
             self.check_numeric_only("sum")?;
         }
+        // An object column of numbers sums as Python does: a Python number,
+        // 0 over none (it was a numpy one; qymo3).
+        if let Some(numbers) = self.object_numbers() {
+            let total = numbers.sum(axis, skipna, numeric_only, min_count, kwargs)?;
+            return Python::attach(|py| {
+                object_total(py, total, numbers.inner.count(), min_count, 0)
+            });
+        }
         if matches!(self.inner.dtype(), DType::Datetime64 { .. }) {
             // pandas' refusal, not the kernel's internal to_f64 message.
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
@@ -25099,7 +25164,32 @@ impl PySeries {
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("mean")?;
+        } else if let Some(numbers) = self.object_numbers() {
+            // An object column of numbers averages as its numbers (it was
+            // refused; qymo3).
+            return numbers.mean(axis, skipna, numeric_only, kwargs);
         } else {
+            // pandas sums an object column of text before reading it as a
+            // number, so its refusal names the joined text.
+            let column = self.inner.column();
+            let texts: Option<String> = (is_object_column(column) && column.count() > 0)
+                .then(|| {
+                    column
+                        .values()
+                        .iter()
+                        .filter(|value| !value.is_missing())
+                        .map(|value| match value {
+                            Scalar::Utf8(text) => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Option<String>>()
+                })
+                .flatten();
+            if let Some(joined) = texts {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                    "Could not convert string '{joined}' to numeric"
+                )));
+            }
             self.require_numeric("mean")?;
         }
         Python::attach(|py| {
@@ -25251,6 +25341,10 @@ impl PySeries {
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("median")?;
+        } else if let Some(numbers) = self.object_numbers() {
+            // An object column of numbers has its numbers' median (it was
+            // refused; qymo3).
+            return numbers.median(axis, skipna, numeric_only, kwargs);
         } else {
             self.require_numeric("median")?;
         }
@@ -25303,6 +25397,13 @@ impl PySeries {
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("prod")?;
+        } else if let Some(numbers) = self.object_numbers() {
+            // An object column of numbers multiplies as Python does: a
+            // Python number, 1 over none (it was refused; qymo3).
+            let total = numbers.prod(axis, skipna, numeric_only, min_count, kwargs)?;
+            return Python::attach(|py| {
+                object_total(py, total, numbers.inner.count(), min_count.unwrap_or(0), 1)
+            });
         } else {
             self.require_numeric("prod")?;
         }
@@ -32555,6 +32656,75 @@ impl PyDataFrame {
         Ok(PySeries { inner })
     }
 
+    /// Whether this frame has no rows and, unless `numeric_only`, an object
+    /// column - whose sum / prod pandas answers with the op's identity in an
+    /// object Series (br-frankenpandas-qymo3).
+    fn empty_with_object_columns(&self, numeric_only: bool) -> bool {
+        !numeric_only
+            && self.inner.index().is_empty()
+            && self
+                .inner
+                .column_names()
+                .into_iter()
+                .any(|name| self.inner.column(name).is_some_and(is_object_column))
+    }
+
+    /// `reduced`, `op`'s (sum / prod) answer over the columns of a frame
+    /// without rows, as pandas answers an object column there: each object
+    /// column's 0 (sum) or 1 (prod), the Series an object one (it was int64
+    /// 0 and NaN; qymo3). Unchanged for any other frame, or a `min_count`.
+    fn empty_object_identities(
+        &self,
+        op: &str,
+        numeric_only: bool,
+        min_count: usize,
+        reduced: PySeries,
+    ) -> PyResult<PySeries> {
+        let columns = self.inner.column_names();
+        if min_count > 0
+            || !self.empty_with_object_columns(numeric_only)
+            || columns.len() != reduced.inner.len()
+        {
+            return Ok(reduced);
+        }
+        let identity = i64::from(op == "prod");
+        let values: Vec<Scalar> = columns
+            .iter()
+            .zip(reduced.inner.values())
+            .map(|(name, value)| match self.inner.column(name) {
+                Some(column) if is_object_column(column) => Scalar::Int64(identity),
+                _ => value.clone(),
+            })
+            .collect();
+        let inner = Series::new(
+            reduced.inner.name(),
+            reduced.inner.index().clone(),
+            Column::from_object_values(values),
+        )
+        .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner })
+    }
+
+    /// `op` (sum / prod) across the columns of a frame without rows holding
+    /// an object column: pandas' empty object Series over the (empty) rows
+    /// (it refused the object columns; qymo3). None for any other frame.
+    fn empty_object_rows_answer(
+        &self,
+        axis: usize,
+        numeric_only: bool,
+    ) -> PyResult<Option<PySeries>> {
+        if axis != 1 || !self.empty_with_object_columns(numeric_only) {
+            return Ok(None);
+        }
+        let inner = Series::new(
+            "",
+            self.inner.index().clone(),
+            Column::from_object_values(Vec::new()),
+        )
+        .map_err(frame_error_to_py)?;
+        Ok(Some(PySeries { inner }))
+    }
+
     /// pandas' min_count for sum/prod: a column (or row, for axis=1) with
     /// fewer valid values than `min_count` reduces to NaN (fvsao.5).
     fn below_min_count_is_nan(
@@ -35206,11 +35376,15 @@ impl PyDataFrame {
         numpy_compat_kwargs("sum", kwargs)?;
         let ax = parse_axis_param(axis)?;
         self.refuse_masked_rows("sum", ax, numeric_only)?;
+        if let Some(answer) = self.empty_object_rows_answer(ax, numeric_only)? {
+            return Ok(answer);
+        }
         let summed = self.sum_internal(ax, skipna, numeric_only);
         wrap_series(
             summed.and_then(|s| self.below_min_count_is_nan(s, ax, numeric_only, min_count)),
         )
         .and_then(|s| self.masked_answer("sum", ax, numeric_only, s))
+        .and_then(|s| self.empty_object_identities("sum", numeric_only, min_count, s))
     }
 
     /// Return the mean of each column or row.
@@ -39539,12 +39713,16 @@ impl PyDataFrame {
         numpy_compat_kwargs("prod", kwargs)?;
         let ax = parse_axis_param(axis)?;
         self.refuse_masked_rows("prod", ax, numeric_only)?;
+        if let Some(answer) = self.empty_object_rows_answer(ax, numeric_only)? {
+            return Ok(answer);
+        }
         let product = self.prod_internal(ax, skipna, numeric_only);
         let min_count = min_count.unwrap_or(0);
         wrap_series(
             product.and_then(|s| self.below_min_count_is_nan(s, ax, numeric_only, min_count)),
         )
         .and_then(|s| self.masked_answer("prod", ax, numeric_only, s))
+        .and_then(|s| self.empty_object_identities("prod", numeric_only, min_count, s))
     }
 
     #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, min_count=0, **kwargs))]

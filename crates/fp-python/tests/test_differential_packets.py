@@ -18389,3 +18389,55 @@ _NQ_CASES = {
 def test_int_and_float_labels_are_one_number_l5sed(case: str) -> None:
     run = _NQ_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-qymo3: an object column of numbers reduces as pandas'
+# object reductions do - sum / prod a Python number (0 / 1 over none), mean /
+# median its numbers' - and a frame without rows answers its object columns'
+# sum / prod with the identity in an object Series (they were int64 0 / NaN,
+# numpy scalars, or refused).
+def _oz_shown(result: Any) -> list:
+    # A Series or frame by its rows; a scalar (numpy's, text) by value and type.
+    if hasattr(result, "to_string"):
+        return _mk_shown(result)
+    return [result, type(result).__name__]
+
+
+def _oz_empty(m: Any) -> Any:
+    return m.DataFrame(columns=["a", "b"])
+
+
+_OZ_CASES = {
+    "object ints sum": lambda m: _oz_shown(m.Series([1, 2], dtype=object).sum()),
+    "object ints prod": lambda m: _oz_shown(m.Series([1, 2, 3], dtype=object).prod()),
+    "object ints mean": lambda m: _oz_shown(m.Series([1, 2], dtype=object).mean()),
+    "object ints median": lambda m: _oz_shown(m.Series([1, 2, 4], dtype=object).median()),
+    "object floats sum": lambda m: _oz_shown(m.Series([1.5, 2.0], dtype=object).sum()),
+    "object mixed sum": lambda m: _oz_shown(m.Series([1, 2.5], dtype=object).sum()),
+    "object with None sum": lambda m: _oz_shown(m.Series([1, None, 2], dtype=object).sum()),
+    "empty object sum": lambda m: _oz_shown(m.Series([], dtype=object).sum()),
+    "empty object prod": lambda m: _oz_shown(m.Series([], dtype=object).prod()),
+    "empty object mean": lambda m: _oz_shown(m.Series([], dtype=object).mean()),
+    "empty object sum min_count": lambda m: _oz_shown(m.Series([], dtype=object).sum(min_count=1)),
+    "empty frame sum": lambda m: _oz_shown(_oz_empty(m).sum()),
+    "empty frame prod": lambda m: _oz_shown(_oz_empty(m).prod()),
+    "empty frame sum across": lambda m: _oz_shown(_oz_empty(m).sum(axis=1)),
+    "empty frame prod across": lambda m: _oz_shown(_oz_empty(m).prod(axis=1)),
+    "empty frame mean": lambda m: _oz_shown(_oz_empty(m).mean()),
+    # Negatives: text, the typed empty frame, and pandas' refusals.
+    "text sum": lambda m: _oz_shown(m.Series(["a", "b"]).sum()),
+    "text mean": lambda m: _oz_shown(m.Series(["a", "b"]).mean()),
+    "object ints min": lambda m: _oz_shown(m.Series([1, 2], dtype=object).min()),
+    "int64 sum": lambda m: _oz_shown(m.Series([1, 2]).sum()),
+    "typed empty frame sum": lambda m: _oz_shown(
+        m.DataFrame({"a": m.Series([], dtype="int64"), "b": m.Series([], dtype="float64")}).sum()
+    ),
+    "object ints numeric_only": lambda m: _oz_shown(m.Series([1, 2], dtype=object).sum(numeric_only=True)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_OZ_CASES))
+def test_object_reductions_like_pandas_qymo3(case: str) -> None:
+    run = _OZ_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
