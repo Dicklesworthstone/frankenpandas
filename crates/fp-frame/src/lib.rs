@@ -17204,7 +17204,137 @@ impl Series {
     ///
     /// Matches `pd.Series.replace(to_replace, value)` for scalar pairs.
     pub fn replace(&self, replacements: &[(Scalar, Scalar)]) -> Result<Self, FrameError> {
-        self.keeping_width(self.replace_storage(replacements), false)
+        let replacements = self.replace_keys_by_value(replacements);
+        let out = self.keeping_width(self.replace_storage(&replacements), false)?;
+        let writes_missing = replacements.iter().any(|(_, value)| value.is_missing());
+        self.holding_replaced(out, writes_missing, |before| {
+            replacements
+                .iter()
+                .find(|(key, _)| key.semantic_eq(before))
+                .map(|(_, value)| value.clone())
+        })
+    }
+
+    /// The replace keys as this column compares them: pandas matches by
+    /// value, so the key 1 finds a float column's 1.0 and the key 1.0 an int
+    /// column's 1 (neither was replaced; br-frankenpandas-y1092).
+    #[allow(clippy::cast_precision_loss)] // an int key compares as float64, as pandas'
+    fn replace_keys_by_value<'a>(
+        &self,
+        replacements: &'a [(Scalar, Scalar)],
+    ) -> std::borrow::Cow<'a, [(Scalar, Scalar)]> {
+        let dtype = self.column.dtype();
+        let float_column = matches!(dtype, DType::Float64 | DType::Float64Nullable);
+        let int_column = matches!(dtype, DType::Int64 | DType::Int64Nullable);
+        let key_for = |key: &Scalar| match key {
+            Scalar::Int64(v) if float_column => Some(Scalar::Float64(*v as f64)),
+            Scalar::Float64(v) if int_column => dense_i64_key_from_f64(*v).map(Scalar::Int64),
+            _ => None,
+        };
+        if !replacements.iter().any(|(key, _)| key_for(key).is_some()) {
+            return std::borrow::Cow::Borrowed(replacements);
+        }
+        std::borrow::Cow::Owned(
+            replacements
+                .iter()
+                .map(|(key, value)| (key_for(key).unwrap_or_else(|| key.clone()), value.clone()))
+                .collect(),
+        )
+    }
+
+    /// pandas' dtype for what a replace wrote into this column (its block
+    /// coercion), `written` naming the value a replaced cell took (looked at
+    /// only when `writes_missing`, some replacement value being missing). A
+    /// nullable column keeps its dtype while its values are its kind (a
+    /// missing value is <NA>). A missing value written where a value was: a
+    /// numpy int64 / float64 column cannot hold None, so it becomes object,
+    /// and int64 holds a NaN only as float64; a datetime / timedelta
+    /// column's missing is NaT; text replaced by nothing but NaN is float64.
+    /// Inference over the replaced values skipped the missing and the
+    /// nullable flag, so Int64 came back int64 and int64 held None or NaN
+    /// (br-frankenpandas-y1092).
+    fn holding_replaced(
+        &self,
+        out: Self,
+        writes_missing: bool,
+        written: impl Fn(&Scalar) -> Option<Scalar>,
+    ) -> Result<Self, FrameError> {
+        let source = self.column.dtype();
+        let kind = match source {
+            DType::Int64Nullable => Some(DType::Int64),
+            DType::Float64Nullable => Some(DType::Float64),
+            DType::BoolNullable => Some(DType::Bool),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            let result = out.column.dtype();
+            if result == source || (result != kind && result != DType::Null) {
+                return Ok(out);
+            }
+            let column = Column::new(source, out.column.values().to_vec())?;
+            return Self::new(out.name.clone(), out.index.clone(), column);
+        }
+        if !writes_missing
+            || !matches!(
+                source,
+                DType::Int64
+                    | DType::Float64
+                    | DType::Datetime64 { .. }
+                    | DType::Timedelta64
+                    | DType::Utf8
+            )
+        {
+            return Ok(out);
+        }
+        let before = self.column.values();
+        let after = out.column.values();
+        let mut values: Option<Vec<Scalar>> = None;
+        let (mut wrote_none, mut wrote_nan) = (false, false);
+        for (pos, (old, new)) in before.iter().zip(after).enumerate() {
+            if old.is_missing() || !new.is_missing() {
+                continue;
+            }
+            let value = written(old).unwrap_or(Scalar::Null(NullKind::NaN));
+            if matches!(value, Scalar::Null(NullKind::NaN))
+                || matches!(value, Scalar::Float64(v) if v.is_nan())
+            {
+                wrote_nan = true;
+            } else {
+                wrote_none = true;
+            }
+            values.get_or_insert_with(|| after.to_vec())[pos] = value;
+        }
+        let Some(mut values) = values else {
+            return Ok(out);
+        };
+        let result = out.column.dtype();
+        let numeric = matches!(result, DType::Int64 | DType::Float64 | DType::Null);
+        let column = match source {
+            DType::Int64 | DType::Float64 if wrote_none && numeric => {
+                Column::from_object_values(values)
+            }
+            DType::Int64 if numeric => {
+                for value in &mut values {
+                    if value.is_missing() {
+                        *value = Scalar::Null(NullKind::NaN);
+                    }
+                }
+                Column::new(DType::Float64, values)?
+            }
+            DType::Datetime64 { .. } | DType::Timedelta64 if result == source => {
+                for value in &mut values {
+                    if value.is_missing() {
+                        *value = Scalar::Null(NullKind::NaT);
+                    }
+                }
+                Column::new(source, values)?
+            }
+            DType::Utf8 if wrote_nan && !wrote_none && values.iter().all(Scalar::is_missing) => {
+                Column::from_f64_values(vec![f64::NAN; values.len()])
+            }
+            _ => return Ok(out),
+        };
+        Self::new(out.name.clone(), out.index.clone(), column)
     }
 
     fn replace_storage(&self, replacements: &[(Scalar, Scalar)]) -> Result<Self, FrameError> {
@@ -17392,6 +17522,29 @@ impl Series {
             }
         }
         self.with_values_preserving_index(out)
+    }
+
+    /// pandas' regex replace with a non-string `value` (NaN, None, a
+    /// number): every string cell the pattern finds (`re.search`) becomes
+    /// `value` whole, of its own type; any other cell is unchanged. (A
+    /// string value is a substitution - [`Self::replace_regex`]; this one
+    /// was written as its text, so NaN came back as the string 'nan';
+    /// br-frankenpandas-otatv.)
+    pub fn replace_regex_cells(&self, pat: &str, value: &Scalar) -> Result<Self, FrameError> {
+        let re = regex::Regex::new(pat)
+            .map_err(|e| FrameError::CompatibilityRejected(format!("invalid regex: {e}")))?;
+        let hit = |val: &Scalar| matches!(val, Scalar::Utf8(s) if re.is_match(s));
+        if !self.column.values().iter().any(hit) {
+            return Ok(self.clone());
+        }
+        let out = self
+            .column
+            .values()
+            .iter()
+            .map(|val| if hit(val) { value.clone() } else { val.clone() })
+            .collect();
+        let out = self.with_values_preserving_index(out)?;
+        self.holding_replaced(out, value.is_missing(), |_| Some(value.clone()))
     }
 
     /// Compute the q-th quantile (0.0 to 1.0) using linear interpolation.
@@ -98932,6 +99085,39 @@ impl DataFrame {
         Ok(out.with_labels_of(self))
     }
 
+    /// [`Series::replace_regex_cells`] over every text column: a string
+    /// cell the pattern finds becomes the non-string `value` whole
+    /// (br-frankenpandas-otatv).
+    pub fn replace_regex_cells(&self, pat: &str, value: &Scalar) -> Result<Self, FrameError> {
+        regex::Regex::new(pat)
+            .map_err(|e| FrameError::CompatibilityRejected(format!("invalid regex: {e}")))?;
+        let n_cols = self.num_columns();
+        let mut pairs = Vec::with_capacity(n_cols);
+        let mut column_order = Vec::with_capacity(n_cols);
+        for pos in 0..n_cols {
+            let name = self.column_name_at(pos).expect("column in bounds");
+            let col = self.column_at(pos).expect("column in bounds");
+            if col.dtype() == DType::Utf8 {
+                let replaced = Series::new(name.clone(), self.index.clone(), col.clone())?
+                    .replace_regex_cells(pat, value)?;
+                pairs.push((name.clone(), replaced.column().clone()));
+            } else {
+                pairs.push((name.clone(), col.clone()));
+            }
+            column_order.push(name.clone());
+        }
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            columns,
+            column_order,
+            self.column_multiindex.clone(),
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out.with_labels_of(self))
+    }
+
     /// Align two DataFrames on their indices.
     ///
     /// Matches `df1.align(df2, join='outer'|'inner'|'left'|'right')`.
@@ -124690,6 +124876,114 @@ mod tests {
             ints.iloc_slice(Some(1), None).unwrap().column().values(),
             &[Scalar::Int64(20)]
         );
+    }
+
+    #[test]
+    fn series_replace_holds_what_it_writes_y1092() {
+        // MEASURED, live pandas 2.2.3: pd.Series([1, 2, 1]).replace(1, np.nan)
+        // is float64, .replace(1, None) object; a float column's None is
+        // object; Int64 stays Int64; the key 1 finds 1.0. fp kept int64
+        // holding the missing, dropped Int64, and missed 1.0.
+        let labels = vec![0_i64.into(), 1_i64.into(), 2_i64.into()];
+        let ints = Series::from_values(
+            "v",
+            labels.clone(),
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1)],
+        )
+        .unwrap();
+        let nan = ints
+            .replace(&[(Scalar::Int64(1), Scalar::Null(NullKind::NaN))])
+            .unwrap();
+        assert_eq!(nan.column().dtype(), DType::Float64);
+        assert_eq!(nan.column().values()[1], Scalar::Float64(2.0));
+        assert!(nan.column().values()[0].is_missing());
+        let none = ints
+            .replace(&[(Scalar::Int64(1), Scalar::Null(NullKind::Null))])
+            .unwrap();
+        assert_eq!(none.column().dtype(), DType::Utf8); // object
+        assert_eq!(none.column().values()[0], Scalar::Null(NullKind::Null));
+        assert_eq!(none.column().values()[1], Scalar::Int64(2));
+        let floats = Series::from_values(
+            "f",
+            labels[..2].to_vec(),
+            vec![Scalar::Float64(1.5), Scalar::Float64(1.0)],
+        )
+        .unwrap();
+        assert_eq!(
+            floats
+                .replace(&[(Scalar::Int64(1), Scalar::Float64(0.0))])
+                .unwrap()
+                .column()
+                .values(),
+            &[Scalar::Float64(1.5), Scalar::Float64(0.0)]
+        );
+        assert_eq!(
+            floats
+                .replace(&[(Scalar::Float64(1.5), Scalar::Null(NullKind::Null))])
+                .unwrap()
+                .column()
+                .dtype(),
+            DType::Utf8
+        );
+        let nullable = Series::new(
+            "n",
+            Index::new(labels[..2].to_vec()),
+            Column::new(
+                DType::Int64Nullable,
+                vec![Scalar::Int64(1), Scalar::Int64(2)],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        for value in [Scalar::Int64(5), Scalar::Null(NullKind::Null)] {
+            let out = nullable.replace(&[(Scalar::Int64(1), value)]).unwrap();
+            assert_eq!(out.column().dtype(), DType::Int64Nullable);
+        }
+        // NEGATIVE: no hit keeps int64; a NaN written into float64 stays.
+        let missed = ints
+            .replace(&[(Scalar::Int64(9), Scalar::Null(NullKind::Null))])
+            .unwrap();
+        assert_eq!(missed.column().dtype(), DType::Int64);
+        assert_eq!(
+            floats
+                .replace(&[(Scalar::Float64(1.5), Scalar::Null(NullKind::NaN))])
+                .unwrap()
+                .column()
+                .dtype(),
+            DType::Float64
+        );
+    }
+
+    #[test]
+    fn series_replace_regex_cells_writes_the_value_whole_otatv() {
+        // MEASURED, live pandas 2.2.3: pd.Series(['34', 'x', 'y1'])
+        // .replace(r'^\D+$', np.nan, regex=True) is ['34', nan, 'y1'] (fp
+        // stored the text 'nan'); r'\d' finds '34' and 'y1' whole; every cell
+        // NaN is float64.
+        let text = Series::from_values(
+            "t",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("34".into()),
+                Scalar::Utf8("x".into()),
+                Scalar::Utf8("y1".into()),
+            ],
+        )
+        .unwrap();
+        let nan = Scalar::Null(NullKind::NaN);
+        let out = text.replace_regex_cells(r"^\D+$", &nan).unwrap();
+        assert_eq!(out.column().values()[0], Scalar::Utf8("34".into()));
+        assert!(out.column().values()[1].is_missing());
+        let found = text.replace_regex_cells(r"\d", &Scalar::Int64(0)).unwrap();
+        assert_eq!(
+            found.column().values(),
+            &[Scalar::Int64(0), Scalar::Utf8("x".into()), Scalar::Int64(0)]
+        );
+        let all = text.replace_regex_cells(r".*", &nan).unwrap();
+        assert_eq!(all.column().dtype(), DType::Float64);
+        // NEGATIVE: no match leaves the Series as it was.
+        let none = text.replace_regex_cells(r"^zzz$", &nan).unwrap();
+        assert_eq!(none.column().values(), text.column().values());
     }
 
     #[test]

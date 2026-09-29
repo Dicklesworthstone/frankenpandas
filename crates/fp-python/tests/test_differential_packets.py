@@ -16171,3 +16171,153 @@ _GZ_CASES = {
 def test_empty_series_slices_keep_the_dtype_gzune(case: str) -> None:
     run = _GZ_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# Series / DataFrame.replace results shown as dtype and cell reprs per column.
+def _rp_shown(result: Any) -> list:
+    if hasattr(result, "columns"):
+        return [f"{c}:{result[c].dtype}:{result[c].tolist()!r}" for c in result.columns]
+    return [str(result.dtype), repr(result.tolist())]
+
+
+def _rp_text(m: Any) -> Any:
+    return m.Series(["34", "x", "y1"])
+
+
+def _rp_frame(m: Any) -> Any:
+    return m.DataFrame({"a": ["34", "x", "y1"], "b": ["z", "5", "q"], "n": [1.5, 2.5, 3.5]})
+
+
+# br-frankenpandas-otatv (scratch p14/oracle_rxcell.py, oracle_replwarn*.py vs
+# pandas 2.2.3): a regex replace's non-string value - NaN, None, a number -
+# replaces each text cell the pattern finds (re.search) whole, keeping its
+# type; it was written as its text (NaN stored 'nan'). A result pandas
+# converts from object warns its downcasting FutureWarning.
+_OT_CASES = {
+    "NaN": lambda m: _rp_shown(_rp_text(m).replace(r"^\D+$", np.nan, regex=True)),
+    "NaN is missing": lambda m: _rp_shown(_rp_text(m).replace(r"^\D+$", np.nan, regex=True).isna()),
+    "None": lambda m: _rp_shown(_rp_text(m).replace(r"^\D+$", None, regex=True)),
+    "an int": lambda m: _rp_shown(_rp_text(m).replace(r"^\D+$", 0, regex=True)),
+    "a float": lambda m: _rp_shown(_rp_text(m).replace(r"^\D+$", 1.5, regex=True)),
+    "a bool": lambda m: _rp_shown(_rp_text(m).replace(r"^\D+$", True, regex=True)),
+    "found, not matched whole": lambda m: _rp_shown(_rp_text(m).replace(r"\d", np.nan, regex=True)),
+    "every cell NaN": lambda m: _rp_shown(_rp_text(m).replace(r".*", np.nan, regex=True)),
+    "every cell an int": lambda m: _rp_shown(_rp_text(m).replace(r".", 7, regex=True)),
+    "regex keyword": lambda m: _rp_shown(_rp_text(m).replace(regex=r"^\D+$", value=np.nan)),
+    "a dict": lambda m: _rp_shown(_rp_text(m).replace({r"^\D+$": np.nan, r"^\d+$": 0}, regex=True)),
+    "a list, one value": lambda m: _rp_shown(_rp_text(m).replace([r"^x$", r"^y"], np.nan, regex=True)),
+    "a list of values": lambda m: _rp_shown(_rp_text(m).replace([r"^x$", r"^y"], [np.nan, 0], regex=True)),
+    "missing cells stay": lambda m: _rp_shown(m.Series(["a", None, np.nan, "bb"]).replace(r"^b", 0, regex=True)),
+    "an object column": lambda m: _rp_shown(m.Series(["a", 1, 2.5], dtype=object).replace(r"a", np.nan, regex=True)),
+    "frame": lambda m: _rp_shown(_rp_frame(m).replace(r"^\D+$", np.nan, regex=True)),
+    "frame, an int": lambda m: _rp_shown(_rp_frame(m).replace(r"^\d+$", 0, regex=True)),
+    "frame, a nested dict": lambda m: _rp_shown(_rp_frame(m).replace({"a": {r"^\D+$": np.nan}}, regex=True)),
+    "frame, a column dict": lambda m: _rp_shown(_rp_frame(m).replace({"a": r"^\D+$"}, np.nan, regex=True)),
+    "frame, a pattern dict": lambda m: _rp_shown(_rp_frame(m).replace({r"^\D+$": np.nan}, regex=True)),
+    "frame, a list": lambda m: _rp_shown(_rp_frame(m).replace([r"^x$", r"^z$"], [np.nan, 1], regex=True)),
+    "frame, a column all NaN": lambda m: _rp_shown(
+        m.DataFrame({"a": ["x", "y"], "b": ["1", "z"]}).replace(r"^[a-z]$", np.nan, regex=True)
+    ),
+    "frame, two columns in one step": lambda m: _rp_shown(
+        m.DataFrame({"a": ["x", "x"], "b": ["y", "y"]}).replace(r"^[xy]$", np.nan, regex=True)
+    ),
+    # NEGATIVE: a string value is re.sub's replacement; no match; numbers.
+    "a string substitutes": lambda m: _rp_shown(_rp_text(m).replace(r"\D", "_", regex=True)),
+    "a group reference": lambda m: _rp_shown(_rp_text(m).replace(r"(\d)", r"<\1>", regex=True)),
+    "no match": lambda m: _rp_shown(_rp_text(m).replace(r"^zzz$", np.nan, regex=True)),
+    "a float column": lambda m: _rp_shown(m.Series([1.0, 12.0]).replace(r"1", np.nan, regex=True)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_OT_CASES))
+def test_regex_replace_with_a_value_like_pandas_otatv(case: str) -> None:
+    run = _OT_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-y1092 (scratch p14/oracle_replnone.py, oracle_replmiss.py,
+# oracle_replnullable.py, oracle_replwarn*.py vs pandas 2.2.3): an explicit
+# value=None read as the value left out, so replace('a', None) padded; a
+# missing value written into int64 stayed int64 (NaN makes float64, None
+# object; float64 turns object for None), a nullable column became numpy
+# (Int64 -> int64 on any replace), a datetime's missing read nan, the key 1
+# missed a float column's 1.0, a dict with a value was not refused, and
+# replace's FutureWarnings (method / limit / a left-out value / downcasting)
+# were not given. (pd.NA written into int64 is an object <NA> in pandas and
+# reads None here: br-frankenpandas-ylytd.)
+def _y1_ints(m: Any) -> Any:
+    return m.Series([1, 2, 1])
+
+
+_Y1_CASES = {
+    "None": lambda m: _rp_shown(m.Series(["a", "b", "a"]).replace("a", None)),
+    "value=None": lambda m: _rp_shown(m.Series(["a", "b", "a"]).replace("a", value=None)),
+    "a list to None": lambda m: _rp_shown(m.Series(["a", "b", "c"]).replace(["a", "c"], None)),
+    "int to None": lambda m: _rp_shown(_y1_ints(m).replace(1, None)),
+    "int to NaN": lambda m: _rp_shown(_y1_ints(m).replace(1, np.nan)),
+    "int, a list to NaN": lambda m: _rp_shown(_y1_ints(m).replace([1, 2], np.nan)),
+    "int, a dict to NaN": lambda m: _rp_shown(_y1_ints(m).replace({1: np.nan})),
+    "int, a dict to None": lambda m: _rp_shown(_y1_ints(m).replace({1: None})),
+    "int32 to NaN": lambda m: _rp_shown(m.Series([1, 2], dtype="int32").replace(1, np.nan)),
+    "int32 to None": lambda m: _rp_shown(m.Series([1, 2], dtype="int32").replace(1, None)),
+    "float to None": lambda m: _rp_shown(m.Series([1.5, 2.5]).replace(1.5, None)),
+    "float32 to None": lambda m: _rp_shown(m.Series([1.5, 2.5], dtype="float32").replace(1.5, None)),
+    "Int64 to None": lambda m: _rp_shown(m.Series([1, 2], dtype="Int64").replace(1, None)),
+    "Int64 to NaN": lambda m: _rp_shown(m.Series([1, 2], dtype="Int64").replace(1, np.nan)),
+    "Int64 to 5": lambda m: _rp_shown(m.Series([1, 2], dtype="Int64").replace(1, 5)),
+    "Int64 with NA": lambda m: _rp_shown(m.Series([1, None], dtype="Int64").replace(1, 7)),
+    "Float64 to None": lambda m: _rp_shown(m.Series([1.5, 2.5], dtype="Float64").replace(1.5, None)),
+    "boolean to None": lambda m: _rp_shown(m.Series([True, False], dtype="boolean").replace(True, None)),
+    "datetime to NaN": lambda m: _rp_shown(
+        m.Series(m.to_datetime(["2024-01-01", "2024-01-02"])).replace(m.Timestamp("2024-01-01"), np.nan)
+    ),
+    "timedelta to NaN": lambda m: _rp_shown(
+        m.Series(m.to_timedelta(["1D", "2D"])).replace(m.Timedelta("1D"), np.nan)
+    ),
+    "text all to NaN": lambda m: _rp_shown(m.Series(["a", "a"]).replace("a", np.nan)),
+    "text all to 1": lambda m: _rp_shown(m.Series(["a", "a"]).replace("a", 1)),
+    "text by a dict": lambda m: _rp_shown(m.Series(["a", "b"]).replace({"a": 1, "b": 2})),
+    "the key 1 finds 1.0": lambda m: _rp_shown(m.Series([1.5, 1.0]).replace(1, 0)),
+    "the key 1.0 finds 1": lambda m: _rp_shown(_y1_ints(m).replace(1.0, 9)),
+    "a sentinel": lambda m: _rp_shown(
+        m.DataFrame({"a": [-999, 5], "b": [1.5, -999.0], "c": ["x", "y"]}).replace(-999, np.nan)
+    ),
+    "frame to None": lambda m: _rp_shown(m.DataFrame({"a": ["x", "y"], "b": [1, 2]}).replace("x", None)),
+    "frame, int to None": lambda m: _rp_shown(m.DataFrame({"a": [1, 2], "b": [1.5, 1.0]}).replace(1, None)),
+    "frame, a column dict to None": lambda m: _rp_shown(
+        m.DataFrame({"a": ["x", "y"], "b": ["x", "q"]}).replace({"a": "x"}, None)
+    ),
+    "frame, a nested dict to NaN": lambda m: _rp_shown(
+        m.DataFrame({"a": [1, 2], "b": [1, 2]}).replace({"a": {1: np.nan}})
+    ),
+    "frame, a list, two columns": lambda m: _rp_shown(
+        m.DataFrame({"a": ["x", "x"], "b": ["y", "y"]}).replace(["x", "y"], np.nan)
+    ),
+    "frame, a regex to None": lambda m: _rp_shown(
+        m.DataFrame({"a": ["x", "y"], "b": [1, 2]}).replace(r"^x$", None, regex=True)
+    ),
+    "None for None": lambda m: _rp_shown(m.Series([1.0, np.nan]).replace(None, None)),
+    "value=None alone": lambda m: _rp_shown(m.Series([1.0, np.nan]).replace(value=None)),
+    "a dict and a value": lambda m: _rp_shown(m.Series(["a", "b"]).replace({"a": "b"}, None)),
+    "a dict and a list": lambda m: _rp_shown(m.Series(["a", "b"]).replace({"a": "b"}, [5])),
+    "method": lambda m: _rp_shown(_y1_ints(m).replace(1, method="bfill")),
+    "limit": lambda m: _rp_shown(_y1_ints(m).replace(1, 5, limit=1)),
+    "a regex and no value": lambda m: _rp_shown(_rp_text(m).replace(r"^\D+$", regex=True)),
+    # NEGATIVE: a value left out still pads (and warns); no hit keeps int64;
+    # the key 1.5 finds no int; a dict alone; a string value.
+    "no value pads": lambda m: _rp_shown(m.Series(["a", "b", "a"]).replace("a")),
+    "frame, no value pads": lambda m: _rp_shown(m.DataFrame({"a": [1, 2]}).replace(1)),
+    "no value, no to_replace": lambda m: _rp_shown(m.Series([1.0, np.nan]).replace()),
+    "no hit keeps int64": lambda m: _rp_shown(_y1_ints(m).replace(9, None)),
+    "the key 1.5 finds no int": lambda m: _rp_shown(_y1_ints(m).replace(1.5, 9)),
+    "a dict alone": lambda m: _rp_shown(m.Series(["a", "b"]).replace({"a": "z"})),
+    "a string value": lambda m: _rp_shown(m.Series(["a", "b"]).replace("a", "z")),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_Y1_CASES))
+def test_replace_writes_none_and_keeps_dtypes_like_pandas_y1092(case: str) -> None:
+    run = _Y1_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

@@ -18956,6 +18956,116 @@ fn python_repl_to_rust_regex_repl(repl: &str) -> String {
     out
 }
 
+/// A regex replace's `value` as pandas reads it: a string is `re.sub`'s
+/// replacement; any other value - NaN, None, a number - replaces each text
+/// cell the pattern finds (`re.search`) whole, keeping its type. (It was
+/// written as its text: NaN stored the string 'nan'; br-frankenpandas-otatv.)
+#[derive(Clone)]
+enum RegexValue {
+    Sub(String),
+    Cell(Scalar),
+}
+
+impl RegexValue {
+    fn from_py(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Self> {
+        if let Ok(text) = obj.extract::<&str>() {
+            return Ok(Self::Sub(python_repl_to_rust_regex_repl(text)));
+        }
+        py_to_cell(py, obj).map(Self::Cell)
+    }
+
+    fn series(&self, series: &Series, pat: &str) -> PyResult<Series> {
+        match self {
+            Self::Sub(repl) => series.replace_regex(pat, repl),
+            Self::Cell(value) => series.replace_regex_cells(pat, value),
+        }
+        .map_err(frame_error_to_py)
+    }
+
+    fn frame(&self, frame: &DataFrame, pat: &str) -> PyResult<DataFrame> {
+        match self {
+            Self::Sub(repl) => frame.replace_regex(pat, repl),
+            Self::Cell(value) => frame.replace_regex_cells(pat, value),
+        }
+        .map_err(frame_error_to_py)
+    }
+}
+
+/// pandas 2.2's FutureWarnings on `replace`'s arguments, in its order: the
+/// deprecated `method`, else `limit`; and a value left out beside a
+/// to_replace that is not a dict with regex False, which pads.
+fn warn_replace_args(
+    py: Python<'_>,
+    owner: &str,
+    method: Option<&str>,
+    limit: Option<usize>,
+    pads_left_out_value: bool,
+) -> PyResult<()> {
+    let warn = |message: String| {
+        let message = std::ffi::CString::new(message)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        PyErr::warn(
+            py,
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            &message,
+            1,
+        )
+    };
+    if method.is_some() {
+        warn(format!(
+            "The 'method' keyword in {owner}.replace is deprecated and will be removed in a \
+             future version."
+        ))?;
+    } else if limit.is_some() {
+        warn(format!(
+            "The 'limit' keyword in {owner}.replace is deprecated and will be removed in a \
+             future version."
+        ))?;
+    }
+    if pads_left_out_value && method.is_none() {
+        warn(format!(
+            "{owner}.replace without 'value' and with non-dict-like 'to_replace' is deprecated \
+             and will raise in a future version. Explicitly specify the new values instead."
+        ))?;
+    }
+    Ok(())
+}
+
+/// Whether a replace turned an object column into another dtype (all
+/// missing stays object): pandas 2.2's "Downcasting behavior in `replace`".
+fn replace_downcast(old: &Column, new: &Column) -> bool {
+    old.dtype() == DType::Utf8
+        && !old.is_pandas_string()
+        && !matches!(new.dtype(), DType::Utf8 | DType::Null)
+}
+
+/// How many of a frame's columns a replace downcast ([`replace_downcast`]).
+fn replace_downcasts(before: &DataFrame, after: &DataFrame) -> usize {
+    (0..before.num_columns())
+        .filter(|&pos| {
+            matches!(
+                (before.column_at(pos), after.column_at(pos)),
+                (Some(old), Some(new)) if replace_downcast(old, new)
+            )
+        })
+        .count()
+}
+
+/// pandas 2.2's downcasting FutureWarning, `times` times: once per replace
+/// step (one pattern, one scalar) that downcast some column, or once per
+/// downcast column when the replace goes pair by pair or column by column.
+fn warn_replace_downcast(py: Python<'_>, times: usize) -> PyResult<()> {
+    for _ in 0..times {
+        PyErr::warn(
+            py,
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            c"Downcasting behavior in `replace` is deprecated and will be removed in a future version. To retain the old behavior, explicitly call `result.infer_objects(copy=False)`. To opt-in to the future behavior, set `pd.set_option('future.no_silent_downcasting', True)`",
+            1,
+        )?;
+    }
+    Ok(())
+}
+
 fn series_replace_with_method(
     series: &Series,
     targets: &[Scalar],
@@ -24899,21 +25009,36 @@ impl PySeries {
     }
 
     /// Replace values dynamically or via an `{old: new}` mapping (pandas `Series.replace`).
-    #[pyo3(signature = (to_replace=None, value=None, inplace=false, limit=None, regex=None, method=None))]
+    /// An explicit `value=None` is a value - the targets become None - not
+    /// the pad a left-out value means (br-frankenpandas-y1092).
+    #[pyo3(signature = (to_replace=None, value=Passed(None), inplace=false, limit=None, regex=None, method=None))]
     #[allow(clippy::too_many_arguments)]
     fn replace(
         &mut self,
         py: Python<'_>,
         to_replace: Option<&Bound<'_, PyAny>>,
-        value: Option<&Bound<'_, PyAny>>,
+        value: Passed<'_>,
         inplace: bool,
         limit: Option<usize>,
         regex: Option<&Bound<'_, PyAny>>,
         method: Option<&str>,
     ) -> PyResult<Option<PySeries>> {
+        let value = value.0.as_ref();
+        let dict_to_replace = to_replace
+            .is_some_and(|t| t.cast::<PyDict>().is_ok() || t.extract::<PyRef<PySeries>>().is_ok());
+        let regex_false = regex.is_none_or(|r| r.extract::<bool>().is_ok_and(|b| !b));
+        warn_replace_args(
+            py,
+            "Series",
+            method,
+            limit,
+            value.is_none() && !dict_to_replace && regex_false,
+        )?;
+        let mut padded = false;
         let result = (|| -> PyResult<PySeries> {
             let mut is_regex = false;
             let mut effective_to_replace = to_replace;
+            let mut pattern_kw = false;
 
             if let Some(reg) = regex {
                 if let Ok(b) = reg.extract::<bool>() {
@@ -24922,6 +25047,7 @@ impl PySeries {
                     is_regex = true;
                     if effective_to_replace.is_none() {
                         effective_to_replace = Some(reg);
+                        pattern_kw = true;
                     }
                 }
             }
@@ -24930,7 +25056,7 @@ impl PySeries {
             // `to_replace` the targets are the missing values, and with no
             // `value` each target is padded from its neighbour (`method`, default
             // pad). This returned the Series unchanged.
-            let value_given = value.is_some_and(|v| !v.is_none());
+            let value_given = value.is_some();
             let Some(to_repl) = effective_to_replace.filter(|t| !t.is_none()) else {
                 if is_regex {
                     return Ok(PySeries {
@@ -24952,11 +25078,15 @@ impl PySeries {
                 }
             }
             .map_err(frame_error_to_py)?;
+                padded = true;
                 return Ok(PySeries { inner: filled });
             };
             let dict_like =
                 to_repl.cast::<PyDict>().is_ok() || to_repl.extract::<PyRef<PySeries>>().is_ok();
-            let method = if !value_given && !is_regex && !dict_like {
+            // With no value, a to_replace that is not a dict pads its
+            // targets taken literally, regex=True or not, as pandas' (the
+            // pattern's matches became '').
+            let method = if !value_given && !pattern_kw && !dict_like {
                 method.or(Some("pad"))
             } else {
                 method
@@ -24979,7 +25109,28 @@ impl PySeries {
                 };
                 let res = series_replace_with_method(&self.inner, &targets, is_ffill, limit)
                     .map_err(frame_error_to_py)?;
+                padded = true;
                 return Ok(PySeries { inner: res });
+            }
+
+            // A dict (or Series) to_replace names the new values itself, so a
+            // value beside it - None included - is pandas' error, not ignored
+            // (br-frankenpandas-y1092).
+            if dict_like
+                && !self.inner.is_empty()
+                && let Some(val_obj) = value
+                && val_obj.cast::<PyDict>().is_err()
+                && val_obj.extract::<PyRef<PySeries>>().is_err()
+            {
+                return Err(if is_py_collection(val_obj) {
+                    PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                        "value argument must be scalar, dict, or Series",
+                    )
+                } else {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "Series.replace cannot use dict-like to_replace and non-None value",
+                    )
+                });
             }
 
             if is_regex {
@@ -24987,44 +25138,15 @@ impl PySeries {
                     let mut current = self.inner.clone();
                     for (pat_obj, repl_obj) in dict.iter() {
                         let pat: String = pat_obj.extract()?;
-                        let repl: String = if let Ok(s) = repl_obj.extract::<&str>() {
-                            python_repl_to_rust_regex_repl(s)
-                        } else {
-                            let sc = py_to_scalar(py, &repl_obj)?;
-                            match sc {
-                                Scalar::Utf8(s) => python_repl_to_rust_regex_repl(&s),
-                                Scalar::Int64(i) => i.to_string(),
-                                Scalar::Float64(f) => f.to_string(),
-                                Scalar::Bool(b) => b.to_string(),
-                                _ => repl_obj.to_string(),
-                            }
-                        };
-                        current = current
-                            .replace_regex(&pat, &repl)
-                            .map_err(frame_error_to_py)?;
+                        current = RegexValue::from_py(py, &repl_obj)?.series(&current, &pat)?;
                     }
                     return Ok(PySeries { inner: current });
                 } else if let Ok(pat) = to_repl.extract::<String>() {
-                    let repl = if let Some(val_obj) = value {
-                        if let Ok(s) = val_obj.extract::<&str>() {
-                            python_repl_to_rust_regex_repl(s)
-                        } else {
-                            let sc = py_to_scalar(py, val_obj)?;
-                            match sc {
-                                Scalar::Utf8(s) => python_repl_to_rust_regex_repl(&s),
-                                Scalar::Int64(i) => i.to_string(),
-                                Scalar::Float64(f) => f.to_string(),
-                                Scalar::Bool(b) => b.to_string(),
-                                _ => val_obj.to_string(),
-                            }
-                        }
-                    } else {
-                        String::new()
+                    let repl = match value {
+                        Some(val_obj) => RegexValue::from_py(py, val_obj)?,
+                        None => RegexValue::Sub(String::new()),
                     };
-                    let res = self
-                        .inner
-                        .replace_regex(&pat, &repl)
-                        .map_err(frame_error_to_py)?;
+                    let res = repl.series(&self.inner, &pat)?;
                     return Ok(PySeries { inner: res });
                 } else if is_py_collection(to_repl) {
                     let mut pat_list = Vec::new();
@@ -25036,7 +25158,7 @@ impl PySeries {
                         if is_py_collection(val_obj) {
                             let mut repl_list = Vec::new();
                             for item in val_obj.try_iter()? {
-                                repl_list.push(item?.extract::<String>()?);
+                                repl_list.push(RegexValue::from_py(py, &item?)?);
                             }
                             if pat_list.len() != repl_list.len() {
                                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -25048,18 +25170,12 @@ impl PySeries {
                                 ));
                             }
                             for (pat, repl) in pat_list.iter().zip(repl_list.iter()) {
-                                let repl_conv = python_repl_to_rust_regex_repl(repl);
-                                current = current
-                                    .replace_regex(pat, &repl_conv)
-                                    .map_err(frame_error_to_py)?;
+                                current = repl.series(&current, pat)?;
                             }
                         } else {
-                            let repl_str = val_obj.extract::<String>()?;
-                            let repl_conv = python_repl_to_rust_regex_repl(&repl_str);
+                            let repl = RegexValue::from_py(py, val_obj)?;
                             for pat in &pat_list {
-                                current = current
-                                    .replace_regex(pat, &repl_conv)
-                                    .map_err(frame_error_to_py)?;
+                                current = repl.series(&current, pat)?;
                             }
                         }
                     }
@@ -25131,6 +25247,9 @@ impl PySeries {
                 inner: self.inner.clone(),
             })
         })()?;
+        if !padded && replace_downcast(self.inner.column(), result.inner.column()) {
+            warn_replace_downcast(py, 1)?;
+        }
         Ok(series_inplace(&mut self.inner, result, inplace))
     }
 
@@ -34837,21 +34956,39 @@ impl PyDataFrame {
     }
 
     /// Replace values dynamically or via mappings (pandas `DataFrame.replace`).
-    #[pyo3(signature = (to_replace=None, value=None, inplace=false, limit=None, regex=None, method=None))]
+    /// An explicit `value=None` is a value, as for a Series
+    /// (br-frankenpandas-y1092).
+    #[pyo3(signature = (to_replace=None, value=Passed(None), inplace=false, limit=None, regex=None, method=None))]
     #[allow(clippy::too_many_arguments)]
     fn replace(
         &mut self,
         py: Python<'_>,
         to_replace: Option<&Bound<'_, PyAny>>,
-        value: Option<&Bound<'_, PyAny>>,
+        value: Passed<'_>,
         inplace: bool,
         limit: Option<usize>,
         regex: Option<&Bound<'_, PyAny>>,
         method: Option<&str>,
     ) -> PyResult<Option<PyDataFrame>> {
+        let value = value.0.as_ref();
+        let dict_to_replace = to_replace.is_some_and(|t| t.cast::<PyDict>().is_ok());
+        let regex_false = regex.is_none_or(|r| r.extract::<bool>().is_ok_and(|b| !b));
+        warn_replace_args(
+            py,
+            "DataFrame",
+            method,
+            limit,
+            value.is_none() && !dict_to_replace && regex_false,
+        )?;
+        // The downcasting warnings: one per downcast column (a list or a
+        // dict goes pair by pair or column by column), one in all for a
+        // single scalar or pattern (`per_column` false), or as counted.
+        let mut per_column = true;
+        let mut counted: Option<usize> = None;
         let result = (|| -> PyResult<PyDataFrame> {
             let mut is_regex = false;
             let mut effective_to_replace = to_replace;
+            let mut pattern_kw = false;
 
             if let Some(reg) = regex {
                 if let Ok(b) = reg.extract::<bool>() {
@@ -34860,6 +34997,7 @@ impl PyDataFrame {
                     is_regex = true;
                     if effective_to_replace.is_none() {
                         effective_to_replace = Some(reg);
+                        pattern_kw = true;
                     }
                 }
             }
@@ -34868,7 +35006,7 @@ impl PyDataFrame {
             // `to_replace` the targets are the missing values, and with no
             // `value` each target is padded from its neighbour (`method`, default
             // pad). This returned the frame unchanged.
-            let value_given = value.is_some_and(|v| !v.is_none());
+            let value_given = value.is_some();
             let Some(to_repl) = effective_to_replace.filter(|t| !t.is_none()) else {
                 if is_regex {
                     return Ok(PyDataFrame {
@@ -34890,10 +35028,13 @@ impl PyDataFrame {
                 }
             }
             .map_err(frame_error_to_py)?;
+                counted = Some(0);
                 return Ok(PyDataFrame { inner: filled });
             };
             let dict_like = to_repl.cast::<PyDict>().is_ok();
-            let method = if !value_given && !is_regex && !dict_like {
+            // With no value, a to_replace that is not a dict pads its
+            // targets taken literally, regex=True or not (as a Series).
+            let method = if !value_given && !pattern_kw && !dict_like {
                 method.or(Some("pad"))
             } else {
                 method
@@ -34935,6 +35076,7 @@ impl PyDataFrame {
                     column_order,
                 )
                 .map_err(frame_error_to_py)?;
+                counted = Some(0);
                 return Ok(PyDataFrame { inner: out });
             }
 
@@ -34966,11 +35108,8 @@ impl PyDataFrame {
                                         .map_err(frame_error_to_py)?;
                                         for (pat_obj, repl_obj) in inner_dict.iter() {
                                             let pat: &str = pat_obj.extract()?;
-                                            let repl: &str = repl_obj.extract()?;
-                                            let repl_conv = python_repl_to_rust_regex_repl(repl);
-                                            s = s
-                                                .replace_regex(pat, &repl_conv)
-                                                .map_err(frame_error_to_py)?;
+                                            s = RegexValue::from_py(py, &repl_obj)?
+                                                .series(&s, pat)?;
                                         }
                                         col_map.insert(name.clone(), s.column().clone());
                                         continue;
@@ -35009,33 +35148,28 @@ impl PyDataFrame {
                                         col.clone(),
                                     )
                                     .map_err(frame_error_to_py)?;
-                                    let repl_str: String = if let Some(val_obj) = value {
+                                    let repl = if let Some(val_obj) = value {
                                         if let Ok(val_dict) = val_obj.cast::<PyDict>() {
                                             if let Ok(Some(col_repl)) = val_dict.get_item(&name) {
-                                                col_repl.extract::<String>()?
+                                                RegexValue::from_py(py, &col_repl)?
                                             } else {
                                                 col_map.insert(name.clone(), col.clone());
                                                 continue;
                                             }
                                         } else {
-                                            val_obj.extract::<String>()?
+                                            RegexValue::from_py(py, val_obj)?
                                         }
                                     } else {
-                                        String::new()
+                                        RegexValue::Sub(String::new())
                                     };
-                                    let repl_conv = python_repl_to_rust_regex_repl(&repl_str);
                                     if is_py_collection(&pat_obj) {
                                         for item in pat_obj.try_iter()? {
                                             let pat_str: String = item?.extract()?;
-                                            s = s
-                                                .replace_regex(&pat_str, &repl_conv)
-                                                .map_err(frame_error_to_py)?;
+                                            s = repl.series(&s, &pat_str)?;
                                         }
                                     } else {
                                         let pat_str: String = pat_obj.extract()?;
-                                        s = s
-                                            .replace_regex(&pat_str, &repl_conv)
-                                            .map_err(frame_error_to_py)?;
+                                        s = repl.series(&s, &pat_str)?;
                                     }
                                     col_map.insert(name.clone(), s.column().clone());
                                 } else {
@@ -35052,28 +35186,24 @@ impl PyDataFrame {
                         return Ok(PyDataFrame { inner: out });
                     }
 
-                    // Global pattern dict
+                    // Global pattern dict, a pattern a step.
                     let mut df = self.inner.clone();
+                    let mut steps = 0;
                     for (pat_obj, repl_obj) in dict.iter() {
                         let pat: &str = pat_obj.extract()?;
-                        let repl: &str = repl_obj.extract()?;
-                        let repl_conv = python_repl_to_rust_regex_repl(repl);
-                        df = df
-                            .replace_regex(pat, &repl_conv)
-                            .map_err(frame_error_to_py)?;
+                        let next = RegexValue::from_py(py, &repl_obj)?.frame(&df, pat)?;
+                        steps += usize::from(replace_downcasts(&df, &next) > 0);
+                        df = next;
                     }
+                    counted = Some(steps);
                     return Ok(PyDataFrame { inner: df });
                 } else if let Ok(pat) = to_repl.extract::<&str>() {
-                    let repl = if let Some(val_obj) = value {
-                        val_obj.extract::<&str>()?
-                    } else {
-                        ""
+                    let repl = match value {
+                        Some(val_obj) => RegexValue::from_py(py, val_obj)?,
+                        None => RegexValue::Sub(String::new()),
                     };
-                    let repl_conv = python_repl_to_rust_regex_repl(repl);
-                    let res = self
-                        .inner
-                        .replace_regex(pat, &repl_conv)
-                        .map_err(frame_error_to_py)?;
+                    let res = repl.frame(&self.inner, pat)?;
+                    per_column = false;
                     return Ok(PyDataFrame { inner: res });
                 } else if is_py_collection(to_repl) {
                     let mut pat_list = Vec::new();
@@ -35081,11 +35211,12 @@ impl PyDataFrame {
                         pat_list.push(item?.extract::<String>()?);
                     }
                     let mut df = self.inner.clone();
+                    let mut steps = 0;
                     if let Some(val_obj) = value {
-                        if is_py_collection(val_obj) {
+                        let repl_list = if is_py_collection(val_obj) {
                             let mut repl_list = Vec::new();
                             for item in val_obj.try_iter()? {
-                                repl_list.push(item?.extract::<String>()?);
+                                repl_list.push(RegexValue::from_py(py, &item?)?);
                             }
                             if pat_list.len() != repl_list.len() {
                                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -35096,22 +35227,19 @@ impl PyDataFrame {
                                     ),
                                 ));
                             }
-                            for (pat, repl) in pat_list.iter().zip(repl_list.iter()) {
-                                let repl_conv = python_repl_to_rust_regex_repl(repl);
-                                df = df
-                                    .replace_regex(pat, &repl_conv)
-                                    .map_err(frame_error_to_py)?;
-                            }
+                            repl_list
                         } else {
-                            let repl_str = val_obj.extract::<&str>()?;
-                            let repl_conv = python_repl_to_rust_regex_repl(repl_str);
-                            for pat in &pat_list {
-                                df = df
-                                    .replace_regex(pat, &repl_conv)
-                                    .map_err(frame_error_to_py)?;
-                            }
+                            let repl = RegexValue::from_py(py, val_obj)?;
+                            pat_list.iter().map(|_| repl.clone()).collect()
+                        };
+                        // A pattern a step.
+                        for (pat, repl) in pat_list.iter().zip(repl_list.iter()) {
+                            let next = repl.frame(&df, pat)?;
+                            steps += usize::from(replace_downcasts(&df, &next) > 0);
+                            df = next;
                         }
                     }
+                    counted = Some(steps);
                     return Ok(PyDataFrame { inner: df });
                 }
             }
@@ -35255,6 +35383,7 @@ impl PyDataFrame {
                     .inner
                     .replace(&[(from_s, to_s)])
                     .map_err(frame_error_to_py)?;
+                per_column = false;
                 return Ok(PyDataFrame { inner: res });
             }
 
@@ -35262,6 +35391,11 @@ impl PyDataFrame {
                 inner: self.inner.clone(),
             })
         })()?;
+        let downcasts = counted.unwrap_or_else(|| {
+            let columns = replace_downcasts(&self.inner, &result.inner);
+            if per_column { columns } else { columns.min(1) }
+        });
+        warn_replace_downcast(py, downcasts)?;
         Ok(frame_inplace(&mut self.inner, result, inplace))
     }
 
@@ -71541,7 +71675,15 @@ mod tests {
             let val_1 = 1_i64.into_bound_py_any(py).unwrap();
             let val_10 = 10_i64.into_bound_py_any(py).unwrap();
             let s_sc = py_s
-                .replace(py, Some(&val_1), Some(&val_10), false, None, None, None)
+                .replace(
+                    py,
+                    Some(&val_1),
+                    Passed(Some(val_10.clone())),
+                    false,
+                    None,
+                    None,
+                    None,
+                )
                 .expect("replace scalar")
                 .expect("a copy");
             assert_eq!(
@@ -71561,7 +71703,7 @@ mod tests {
                 .replace(
                     py,
                     Some(list_targets.as_any()),
-                    Some(&val_99),
+                    Passed(Some(val_99.clone())),
                     false,
                     None,
                     None,
@@ -71582,7 +71724,15 @@ mod tests {
             // 3. Method ffill with limit
             let val_2 = 2_i64.into_bound_py_any(py).unwrap();
             let s_ffill = py_s
-                .replace(py, Some(&val_2), None, false, Some(1), None, Some("ffill"))
+                .replace(
+                    py,
+                    Some(&val_2),
+                    Passed(None),
+                    false,
+                    Some(1),
+                    None,
+                    Some("ffill"),
+                )
                 .expect("replace ffill")
                 .expect("a copy");
             assert_eq!(
@@ -71610,7 +71760,7 @@ mod tests {
                 .replace(
                     py,
                     Some(&reg_pat),
-                    Some(&reg_repl),
+                    Passed(Some(reg_repl.clone())),
                     false,
                     None,
                     Some(&reg_flag),
@@ -71643,7 +71793,15 @@ mod tests {
             let nest_dict = pyo3::types::PyDict::new(py);
             nest_dict.set_item("a", col_a_dict).unwrap();
             let df_nest = py_df
-                .replace(py, Some(nest_dict.as_any()), None, false, None, None, None)
+                .replace(
+                    py,
+                    Some(nest_dict.as_any()),
+                    Passed(None),
+                    false,
+                    None,
+                    None,
+                    None,
+                )
                 .expect("df nest replace")
                 .expect("a copy");
             assert_eq!(
@@ -71663,7 +71821,7 @@ mod tests {
                 .replace(
                     py,
                     Some(col_spec_dict.as_any()),
-                    Some(&val_99),
+                    Passed(Some(val_99.clone())),
                     false,
                     None,
                     None,
