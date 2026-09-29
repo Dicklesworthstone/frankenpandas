@@ -1561,8 +1561,9 @@ fn dtype_memory_width(dtype: DType) -> usize {
 fn expand_dtype_alias(name: &str) -> Result<&'static [DType], FrameError> {
     match name {
         "number" | "numeric" => Ok(&[DType::Int64, DType::Float64]),
-        "integer" | "int" | "int64" | "i8" => Ok(&[DType::Int64]),
-        "floating" | "float" | "float64" | "f8" => Ok(&[DType::Float64]),
+        // The masked names select the numpy kind too, as pandas' (8u5eh).
+        "integer" | "int" | "int64" | "i8" | "Int64" => Ok(&[DType::Int64]),
+        "floating" | "float" | "float64" | "f8" | "Float64" => Ok(&[DType::Float64]),
         "bool" | "boolean" | "?" => Ok(&[DType::Bool]),
         "object" | "string" | "str" | "O" => Ok(&[DType::Utf8]),
         "category" | "categorical" => Ok(&[DType::Categorical]),
@@ -3729,8 +3730,33 @@ fn vals_are_timedelta(vals: &[Scalar]) -> bool {
 fn selection_dtype(column: &Column) -> DType {
     match column.dtype() {
         DType::Bool if column.has_any_missing() => DType::Utf8,
+        // A masked column is selected with its numpy kind, as pandas'
+        // select_dtypes (Int64 under 'int64' / 'integer' / 'number', boolean
+        // under 'bool'); they matched nothing (br-frankenpandas-8u5eh).
+        DType::Int64Nullable => DType::Int64,
+        DType::Float64Nullable => DType::Float64,
+        DType::BoolNullable => DType::Bool,
         dtype => dtype,
     }
+}
+
+/// A column describe reads as a number: int64 / float64 and pandas' masked
+/// Int64 / Float64 (br-frankenpandas-8u5eh).
+fn is_describe_number(column: &Column) -> bool {
+    matches!(
+        column.dtype(),
+        DType::Int64 | DType::Float64 | DType::Int64Nullable | DType::Float64Nullable
+    )
+}
+
+/// A described column's statistics, in pandas' masked Float64 for a masked
+/// column (a missing statistic its NA; br-frankenpandas-8u5eh).
+fn describe_stats_column(source: &Column, stats: Vec<Scalar>) -> Result<Column, FrameError> {
+    let column = Column::from_values(stats)?;
+    if source.dtype().is_nullable() {
+        return Ok(column.astype(DType::Float64Nullable)?);
+    }
+    Ok(column)
 }
 
 /// A group's running max (`max`) or min of datetime64 cells, a NaT kept
@@ -80393,12 +80419,10 @@ impl DataFrame {
         // the par_map_columns scope workers is bit-identical (identical per-column
         // arithmetic, results reassembled in column_order). The serial loop left
         // all but one core idle. The numeric columns are taken by POSITION: a
-        // repeated column key describes its own column (i17d4).
+        // repeated column key describes its own column (i17d4); a masked
+        // Int64 / Float64 column is one (it was described as text; 8u5eh).
         let numeric_positions: Vec<usize> = (0..self.num_columns())
-            .filter(|&pos| {
-                self.column_at(pos)
-                    .is_some_and(|col| matches!(col.dtype(), DType::Int64 | DType::Float64))
-            })
+            .filter(|&pos| self.column_at(pos).is_some_and(is_describe_number))
             .collect();
         let numeric = self.take_columns(&numeric_positions)?;
 
@@ -80510,7 +80534,7 @@ impl DataFrame {
                 Scalar::Float64(max),
             ];
 
-            Ok(Column::from_values(stats)?)
+            describe_stats_column(col, stats)
         })?;
 
         Ok(numeric.with_index_and_columns_at_positions(out_index, stat_columns))
@@ -80541,12 +80565,10 @@ impl DataFrame {
         // bit-identical — every column runs the identical extraction + sort +
         // percentile_linear and the result columns are reassembled in
         // column_order. The serial loop left all but one core idle. The numeric
-        // columns are taken by POSITION (i17d4).
+        // columns are taken by POSITION (i17d4), a masked number among them
+        // (8u5eh).
         let numeric_positions: Vec<usize> = (0..self.num_columns())
-            .filter(|&pos| {
-                self.column_at(pos)
-                    .is_some_and(|col| matches!(col.dtype(), DType::Int64 | DType::Float64))
-            })
+            .filter(|&pos| self.column_at(pos).is_some_and(is_describe_number))
             .collect();
         let numeric = self.take_columns(&numeric_positions)?;
 
@@ -80591,7 +80613,7 @@ impl DataFrame {
                 stats.push(Scalar::Float64(nums[nums.len() - 1]));
             }
 
-            Ok(Column::from_values(stats)?)
+            describe_stats_column(col, stats)
         })?;
 
         Ok(numeric.with_index_and_columns_at_positions(out_index, stat_columns))
@@ -93708,13 +93730,20 @@ impl DataFrame {
         // Per br-frankenpandas-4zg55: skipna variants delegate to sum/mean/etc
         // which now preserve Timedelta64 (br-28lgk family). Allow Timedelta64
         // columns through. Sister to br-vpeoh and br-qin9h.
-        // By position: a repeated column key reduces its own column (i17d4).
+        // By position: a repeated column key reduces its own column (i17d4);
+        // a masked Int64 / Float64 / boolean column is reduced too (it was
+        // left out of skipna=False's answer; br-frankenpandas-8u5eh).
         let allowed: Vec<bool> = (0..self.num_columns())
             .map(|pos| {
                 self.column_at(pos).is_some_and(|column| {
                     matches!(
                         column.dtype(),
-                        DType::Int64 | DType::Float64 | DType::Timedelta64
+                        DType::Int64
+                            | DType::Float64
+                            | DType::Timedelta64
+                            | DType::Int64Nullable
+                            | DType::Float64Nullable
+                            | DType::BoolNullable
                     )
                 })
             })
@@ -93868,11 +93897,21 @@ impl DataFrame {
     /// repeated column key is its own column (by name every one read the
     /// first; i17d4).
     fn numeric_row_reduction_columns(&self) -> Vec<&Column> {
+        // pandas' masked Int64 / Float64 / boolean are numbers across a row
+        // too (their cells were left out; br-frankenpandas-8u5eh); the typed
+        // fast paths take numpy columns alone, so these reduce generically.
         (0..self.num_columns())
             .filter_map(|pos| self.column_at(pos))
             .filter(|column| {
-                let dt = column.dtype();
-                dt == DType::Int64 || dt == DType::Float64 || dt == DType::Bool
+                matches!(
+                    column.dtype(),
+                    DType::Int64
+                        | DType::Float64
+                        | DType::Bool
+                        | DType::Int64Nullable
+                        | DType::Float64Nullable
+                        | DType::BoolNullable
+                )
             })
             .collect()
     }
@@ -100705,10 +100744,16 @@ impl DataFrame {
             ));
         }
         let matches = |column: &Column, name: &str| {
-            if let Some((width, nullable)) = NumericWidth::parse(name) {
-                return column.width() == Some(width) && column.dtype().is_nullable() == nullable;
+            // A width name takes the numpy and the masked column of that
+            // width alike, as pandas' ('Int32' took the masked one alone;
+            // br-frankenpandas-8u5eh).
+            if let Some((width, _)) = NumericWidth::parse(name) {
+                return column.width() == Some(width);
             }
-            let exact_64 = matches!(name, "int" | "int64" | "i8" | "float" | "float64" | "f8");
+            let exact_64 = matches!(
+                name,
+                "int" | "int64" | "i8" | "Int64" | "float" | "float64" | "f8" | "Float64"
+            );
             (!exact_64 || column.width().is_none())
                 && expand_dtype_alias(name)
                     .is_ok_and(|dtypes| dtypes.contains(&selection_dtype(column)))
@@ -157011,6 +157056,86 @@ mod tests {
             names(df.select_dtypes(&[DType::Float64], &[]).unwrap()),
             ["n"]
         );
+    }
+
+    #[test]
+    fn masked_columns_select_describe_and_reduce_as_numbers_8u5eh() {
+        // I is pandas' masked Int64 [1, <NA>, 3], B its boolean [True, <NA>,
+        // False].
+        let df = DataFrame::from_dict(
+            &["i", "n"],
+            vec![
+                (
+                    "i",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "n",
+                    vec![
+                        Scalar::Float64(1.5),
+                        Scalar::Float64(2.5),
+                        Scalar::Float64(3.5),
+                    ],
+                ),
+            ],
+        )
+        .unwrap()
+        .with_column(
+            "I",
+            Column::new(
+                DType::Int64Nullable,
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Int64(3),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .with_column(
+            "B",
+            Column::new(
+                DType::BoolNullable,
+                vec![
+                    Scalar::Bool(true),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Bool(false),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let names = |frame: DataFrame| -> Vec<String> {
+            frame.column_names().into_iter().cloned().collect()
+        };
+        assert_eq!(
+            names(df.select_dtypes_by_name(&["number"], &[]).unwrap()),
+            ["i", "n", "I"]
+        );
+        assert_eq!(
+            names(df.select_dtypes_by_name(&["Int64"], &[]).unwrap()),
+            ["i", "I"]
+        );
+        assert_eq!(
+            names(df.select_dtypes_by_name(&["bool"], &[]).unwrap()),
+            ["B"]
+        );
+        // describe reads I as a number, its statistics Float64.
+        let described = df.describe().unwrap();
+        assert_eq!(names(described.clone()), ["i", "n", "I"]);
+        let stats = described.column("I").unwrap();
+        assert_eq!(stats.dtype(), DType::Float64Nullable);
+        assert_eq!(stats.values()[0], Scalar::Float64(2.0));
+        // Across a row the masked cells count: 1 + 1.5 + 1 + True.
+        let rows = df.sum_axis1().unwrap();
+        assert_eq!(rows.values()[0], Scalar::Float64(4.5));
+        // skipna=False keeps the masked columns, missing where one holds NA.
+        let summed = df.sum_skipna(false).unwrap();
+        assert_eq!(summed.len(), 4);
+        assert!(summed.values()[2].is_missing());
+        // NEGATIVE: a width name takes its own width alone.
+        assert!(names(df.select_dtypes_by_name(&["int32"], &[]).unwrap()).is_empty());
     }
 
     #[test]

@@ -8393,12 +8393,6 @@ impl PyIndexStrMethod {
     }
 }
 
-/// pandas' `Index.__repr__` (format_object_summary + _format_attrs at the
-/// default display.width 80 and display.max_seq_items 100): labels wrapped
-/// at 80 columns under `Index([`, the first and last 10 around `...` past
-/// 100 labels, non-string labels right-justified once the labels wrap,
-/// then `dtype=` / `name=` / `length=`. It printed every label on one line
-/// with no dtype.
 /// pandas' result dtype for a groupby reduction `op` over a nullable (masked)
 /// column: sum / prod of ints or bools Int64, of floats Float64; min / max /
 /// first / last the column's own; mean / median / std / var / sem / skew
@@ -8422,6 +8416,103 @@ fn masked_reduction_dtype(source: &DType, op: &str) -> Option<DType> {
         "any" | "all" => DType::BoolNullable,
         _ => return None,
     })
+}
+
+/// A column numeric_only reduces: int64 / float64, a bool column without a
+/// missing value (with one it is pandas' object column; ildvj), and pandas'
+/// masked Int64 / Float64 / boolean (they were left out;
+/// br-frankenpandas-8u5eh).
+fn numeric_only_column(column: &Column) -> bool {
+    match column.dtype() {
+        DType::Bool => !column.has_any_missing(),
+        dtype => matches!(
+            dtype,
+            DType::Int64
+                | DType::Float64
+                | DType::Int64Nullable
+                | DType::Float64Nullable
+                | DType::BoolNullable
+        ),
+    }
+}
+
+/// pandas' dtype for a frame reduction `op`'s answer over one column of
+/// `dtype`: sum / prod make bools ints, min / max keep the dtype, anything
+/// else is a float - each masked for a masked column. None for any other
+/// column (object, text, temporal), which is answered as it was
+/// (br-frankenpandas-8u5eh).
+fn column_answer_dtype(op: &str, dtype: &DType) -> Option<DType> {
+    let (int, float) = if dtype.is_nullable() {
+        (DType::Int64Nullable, DType::Float64Nullable)
+    } else {
+        (DType::Int64, DType::Float64)
+    };
+    match dtype {
+        DType::Float64 | DType::Float64Nullable => Some(float),
+        DType::Int64 | DType::Int64Nullable | DType::Bool | DType::BoolNullable => Some(match op {
+            "sum" | "prod" => int,
+            "min" | "max" => dtype.clone(),
+            _ => float,
+        }),
+        _ => None,
+    }
+}
+
+/// pandas' common dtype of a frame reduction's per-column answers: one
+/// dtype stays itself, a bool beside a number is object (None), bools are
+/// bool, numbers int or - any float among them - float, masked when any
+/// answer is (br-frankenpandas-8u5eh).
+fn common_answer_dtype(answers: &[DType]) -> Option<DType> {
+    let first = answers.first()?;
+    if answers.iter().all(|answer| answer == first) {
+        return Some(first.clone());
+    }
+    let boolish = |answer: &DType| matches!(answer, DType::Bool | DType::BoolNullable);
+    let masked = answers.iter().any(DType::is_nullable);
+    if answers.iter().any(boolish) {
+        if !answers.iter().all(boolish) {
+            return None;
+        }
+        return Some(if masked {
+            DType::BoolNullable
+        } else {
+            DType::Bool
+        });
+    }
+    let float = answers
+        .iter()
+        .any(|answer| matches!(answer, DType::Float64 | DType::Float64Nullable));
+    Some(match (float, masked) {
+        (true, true) => DType::Float64Nullable,
+        (true, false) => DType::Float64,
+        (false, true) => DType::Int64Nullable,
+        (false, false) => DType::Int64,
+    })
+}
+
+/// A reduction's value as an answer of `dtype`: a bool's 0.0 / 1.0 back to
+/// the bool, a whole float an int, an int a float, a missing value that
+/// dtype's own missing value (pd.NA for a masked one; 8u5eh).
+fn as_answer(value: &Scalar, dtype: &DType) -> Scalar {
+    if value.is_missing() {
+        return Scalar::missing_for_dtype(dtype.clone());
+    }
+    match (dtype, value) {
+        (DType::Bool | DType::BoolNullable, Scalar::Float64(v)) => Scalar::Bool(*v != 0.0),
+        (DType::Bool | DType::BoolNullable, Scalar::Int64(v)) => Scalar::Bool(*v != 0),
+        // Whole and within i64: the cast is exact.
+        (DType::Int64 | DType::Int64Nullable, Scalar::Float64(v))
+            if v.fract() == 0.0 && v.abs() < 9.0e18 =>
+        {
+            Scalar::Int64(*v as i64)
+        }
+        (DType::Int64 | DType::Int64Nullable, Scalar::Bool(v)) => Scalar::Int64(i64::from(*v)),
+        (DType::Float64 | DType::Float64Nullable, Scalar::Int64(v)) => Scalar::Float64(*v as f64),
+        (DType::Float64 | DType::Float64Nullable, Scalar::Bool(v)) => {
+            Scalar::Float64(f64::from(u8::from(*v)))
+        }
+        _ => value.clone(),
+    }
 }
 
 /// A groupby reduction's Series in its masked dtype (see
@@ -8571,6 +8662,12 @@ fn pandas_get_loc(
     }
 }
 
+/// pandas' `Index.__repr__` (format_object_summary + _format_attrs at the
+/// default display.width 80 and display.max_seq_items 100): labels wrapped
+/// at 80 columns under `Index([`, the first and last 10 around `...` past
+/// 100 labels, non-string labels right-justified once the labels wrap,
+/// then `dtype=` / `name=` / `length=`. It printed every label on one line
+/// with no dtype.
 fn pandas_index_repr(py: Python<'_>, index: &Index) -> PyResult<String> {
     let dtype = index.dtype();
     let items = index
@@ -21585,6 +21682,38 @@ fn describe_dtype_names(spec: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<String>
 /// Whether a column of `dtype` is what a `describe` include / exclude name
 /// selects ('all', 'number', 'object', 'category', 'bool', 'datetime',
 /// 'timedelta', or a pandas dtype name).
+/// A select_dtypes selector as the dtype name fp-frame reads: a string as
+/// given, a numpy or builtin type as the kind it names (np.number 'number',
+/// np.integer 'integer', int 'int64', np.object_ 'object'), and a dtype
+/// object as its text ('Int64', 'boolean', 'float64'). A type raised
+/// TypeError (br-frankenpandas-8u5eh).
+fn select_dtype_name(item: &Bound<'_, PyAny>) -> PyResult<String> {
+    if let Ok(name) = item.extract::<String>() {
+        return Ok(name);
+    }
+    if let Ok(kind) = item.cast::<pyo3::types::PyType>() {
+        let name = kind.name()?.to_string();
+        return Ok(match name.as_str() {
+            "signedinteger" => "integer".to_owned(),
+            "bool_" => "bool".to_owned(),
+            "object_" => "object".to_owned(),
+            "int" => "int64".to_owned(),
+            "float" => "float64".to_owned(),
+            _ => name,
+        });
+    }
+    Ok(item.str()?.to_string())
+}
+
+/// A column pandas' describe reads as a number: int64 / float64 and the
+/// masked Int64 / Float64 (they were described as text; 8u5eh).
+fn describe_number(column: &Column) -> bool {
+    matches!(
+        column.dtype(),
+        DType::Int64 | DType::Float64 | DType::Int64Nullable | DType::Float64Nullable
+    )
+}
+
 fn describe_dtype_matches(dtype: &DType, spec: &str) -> bool {
     match spec {
         "all" => true,
@@ -21654,7 +21783,7 @@ fn describe_all<'py>(
     let numeric: Vec<&str> = names
         .iter()
         .map(String::as_str)
-        .filter(|name| matches!(dtype_of(name), Some(DType::Int64 | DType::Float64)))
+        .filter(|name| frame.column(name).is_some_and(describe_number))
         .collect();
     let datetimes: Vec<&str> = names
         .iter()
@@ -21783,7 +21912,19 @@ fn describe_all<'py>(
             },
         )?,
     )?;
-    py.get_type::<PyDataFrame>().call((cells,), Some(&kw))
+    let described = py.get_type::<PyDataFrame>().call((cells,), Some(&kw))?;
+    // A masked number column is pandas' Float64, NA where a statistic does
+    // not apply (br-frankenpandas-8u5eh).
+    let masked = PyDict::new(py);
+    for &name in &numeric {
+        if dtype_of(name).is_some_and(|dtype| dtype.is_nullable()) {
+            masked.set_item(name, "Float64")?;
+        }
+    }
+    if masked.is_empty() {
+        return Ok(described);
+    }
+    described.call_method1("astype", (masked,))
 }
 
 /// pandas' `DataFrame.info` text: the class, the index line, the column
@@ -31393,9 +31534,18 @@ impl PyDataFrame {
                 .column_at(position)
                 .is_some_and(|col| match col.dtype() {
                     // A bool column holding a missing value is pandas' object
-                    // column (br-frankenpandas-ildvj).
+                    // column (br-frankenpandas-ildvj); a masked one is a
+                    // number (8u5eh).
                     DType::Bool => col.has_any_missing(),
-                    dtype => !matches!(dtype, DType::Int64 | DType::Float64 | DType::Timedelta64),
+                    dtype => !matches!(
+                        dtype,
+                        DType::Int64
+                            | DType::Float64
+                            | DType::Timedelta64
+                            | DType::Int64Nullable
+                            | DType::Float64Nullable
+                            | DType::BoolNullable
+                    ),
                 })
         })
     }
@@ -31508,7 +31658,17 @@ impl PyDataFrame {
                 if object_bool && numeric_only {
                     continue;
                 }
-                if matches!(dtype, DType::Int64 | DType::Float64 | DType::Bool) {
+                // pandas' masked Int64 / Float64 / boolean are numbers too
+                // (they raised "could not convert"; br-frankenpandas-8u5eh).
+                if matches!(
+                    dtype,
+                    DType::Int64
+                        | DType::Float64
+                        | DType::Bool
+                        | DType::Int64Nullable
+                        | DType::Float64Nullable
+                        | DType::BoolNullable
+                ) {
                     cols.push(position);
                 } else if dtype == DType::Timedelta64 {
                     if !numeric_only {
@@ -31940,6 +32100,109 @@ impl PyDataFrame {
         } else {
             self.inner.count()
         }
+    }
+
+    /// The columns a reduction over `numeric_only` reads, in order.
+    fn reduced_columns(&self, numeric_only: bool) -> Vec<&Column> {
+        (0..self.inner.num_columns())
+            .filter_map(|position| self.inner.column_at(position))
+            .filter(|column| !numeric_only || numeric_only_column(column))
+            .collect()
+    }
+
+    /// The reduced columns' dtypes when one of them is masked; None when
+    /// none is, or when a column is not a number or bool (pandas' object
+    /// column included), whose answer stays as it was.
+    fn masked_reduced_dtypes(&self, numeric_only: bool) -> Option<Vec<DType>> {
+        let columns = self.reduced_columns(numeric_only);
+        if !columns.iter().any(|column| column.dtype().is_nullable()) {
+            return None;
+        }
+        columns
+            .iter()
+            .map(|column| match column.dtype() {
+                DType::Bool if column.has_any_missing() => None,
+                dtype => column_answer_dtype("min", &dtype).map(|_| dtype),
+            })
+            .collect()
+    }
+
+    /// Each reduced column's answer dtype for `op` over the columns
+    /// (axis=0), or - over rows - the one answer of their common dtype, as
+    /// pandas reduces the rows of the columns cast to it (see
+    /// [`column_answer_dtype`]); None as [`Self::masked_reduced_dtypes`], or
+    /// over rows when there is no common number dtype.
+    fn masked_answers(&self, op: &str, axis: usize, numeric_only: bool) -> Option<Vec<DType>> {
+        let dtypes = self.masked_reduced_dtypes(numeric_only)?;
+        if axis == 1 {
+            let common = common_answer_dtype(&dtypes)?;
+            return Some(vec![column_answer_dtype(op, &common)?]);
+        }
+        dtypes
+            .iter()
+            .map(|dtype| column_answer_dtype(op, dtype))
+            .collect()
+    }
+
+    /// Over rows (axis=1) pandas casts a bool column beside a number one to
+    /// object (the answers are objects, or it raises), and raises for kurt
+    /// of several columns, when a column is masked: refused
+    /// (br-frankenpandas-8u5eh).
+    fn refuse_masked_rows(&self, op: &str, axis: usize, numeric_only: bool) -> PyResult<()> {
+        let Some(dtypes) = self
+            .masked_reduced_dtypes(numeric_only)
+            .filter(|_| axis == 1)
+        else {
+            return Ok(());
+        };
+        if common_answer_dtype(&dtypes).is_none() || (op == "kurt" && dtypes.len() > 1) {
+            return Err(not_implemented(&format!(
+                "DataFrame.{op}(axis=1) of masked columns beside bool columns, or kurt of several"
+            )));
+        }
+        Ok(())
+    }
+
+    /// A frame reduction's answer in pandas' dtype when a column it reads is
+    /// masked (Int64 / Float64 / boolean): the columns' common answer dtype
+    /// ([`common_answer_dtype`]) - masked, or object with each answer its
+    /// own column's kind (a boolean column's min was 0.0); over rows the
+    /// answer of the columns' common dtype. A frame of numpy columns keeps
+    /// its answer. They were numpy float64 / int64, NaN for pd.NA
+    /// (br-frankenpandas-8u5eh).
+    fn masked_answer(
+        &self,
+        op: &str,
+        axis: usize,
+        numeric_only: bool,
+        reduced: PySeries,
+    ) -> PyResult<PySeries> {
+        let Some(answers) = self.masked_answers(op, axis, numeric_only) else {
+            return Ok(reduced);
+        };
+        let reduced = reduced.inner;
+        let common = common_answer_dtype(&answers);
+        let values: Vec<Scalar> = match &common {
+            Some(common) => reduced
+                .values()
+                .iter()
+                .map(|value| as_answer(value, common))
+                .collect(),
+            None if axis == 0 && answers.len() == reduced.len() => reduced
+                .values()
+                .iter()
+                .zip(&answers)
+                .map(|(value, answer)| as_answer(value, answer))
+                .collect(),
+            None => return Ok(PySeries { inner: reduced }),
+        };
+        let mut column = Column::from_values(values).map_err(column_error_to_py)?;
+        if let Some(common) = common {
+            column = column.astype(common).map_err(column_error_to_py)?;
+        }
+        let inner = Series::new(reduced.name(), reduced.index().clone(), column)
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner })
     }
 
     /// pandas' min_count for sum/prod: a column (or row, for axis=1) with
@@ -34468,11 +34731,7 @@ impl PyDataFrame {
                     .column(name)
                     .is_some_and(|c| matches!(c.dtype(), DType::Datetime64 { tz: None }))
             };
-            let number = |name: &str| {
-                this.inner
-                    .column(name)
-                    .is_some_and(|c| matches!(c.dtype(), DType::Int64 | DType::Float64))
-            };
+            let number = |name: &str| this.inner.column(name).is_some_and(describe_number);
             if !names.iter().any(|name| naive_datetime(name)) {
                 if !names.is_empty() && !names.iter().any(|name| number(name)) {
                     return wrap(
@@ -34487,10 +34746,7 @@ impl PyDataFrame {
             let described: Vec<usize> = (0..this.inner.num_columns())
                 .filter(|&position| {
                     this.inner.column_at(position).is_some_and(|c| {
-                        matches!(
-                            c.dtype(),
-                            DType::Int64 | DType::Float64 | DType::Datetime64 { tz: None }
-                        )
+                        describe_number(c) || matches!(c.dtype(), DType::Datetime64 { tz: None })
                     })
                 })
                 .collect();
@@ -34530,7 +34786,7 @@ impl PyDataFrame {
             .filter_map(|position| frame.column_at(position))
             .map(|c| {
                 (
-                    matches!(c.dtype(), DType::Int64 | DType::Float64),
+                    describe_number(c),
                     matches!(c.dtype(), DType::Datetime64 { .. }),
                 )
             })
@@ -34591,10 +34847,12 @@ impl PyDataFrame {
     ) -> PyResult<PySeries> {
         numpy_compat_kwargs("sum", kwargs)?;
         let ax = parse_axis_param(axis)?;
+        self.refuse_masked_rows("sum", ax, numeric_only)?;
         let summed = self.sum_internal(ax, skipna, numeric_only);
         wrap_series(
             summed.and_then(|s| self.below_min_count_is_nan(s, ax, numeric_only, min_count)),
         )
+        .and_then(|s| self.masked_answer("sum", ax, numeric_only, s))
     }
 
     /// Return the mean of each column or row.
@@ -34608,7 +34866,9 @@ impl PyDataFrame {
     ) -> PyResult<PySeries> {
         numpy_compat_kwargs("mean", kwargs)?;
         let ax = parse_axis_param(axis)?;
+        self.refuse_masked_rows("mean", ax, numeric_only)?;
         wrap_series(self.mean_internal(ax, skipna, numeric_only))
+            .and_then(|s| self.masked_answer("mean", ax, numeric_only, s))
     }
 
     /// Return the median of each column or row.
@@ -34622,7 +34882,9 @@ impl PyDataFrame {
     ) -> PyResult<PySeries> {
         numpy_compat_kwargs("median", kwargs)?;
         let ax = parse_axis_param(axis)?;
+        self.refuse_masked_rows("median", ax, numeric_only)?;
         wrap_series(self.median_internal(ax, skipna, numeric_only))
+            .and_then(|s| self.masked_answer("median", ax, numeric_only, s))
     }
 
     /// Return the standard deviation of each column or row.
@@ -34638,7 +34900,9 @@ impl PyDataFrame {
         numpy_compat_kwargs("std", kwargs)?;
         let ax = parse_axis_param(axis)?;
         let ddof_val = ddof.unwrap_or(1);
+        self.refuse_masked_rows("std", ax, numeric_only)?;
         wrap_series(self.std_internal(ax, skipna, ddof_val, numeric_only))
+            .and_then(|s| self.masked_answer("std", ax, numeric_only, s))
     }
 
     /// Return the variance of each column or row.
@@ -34654,7 +34918,9 @@ impl PyDataFrame {
         numpy_compat_kwargs("var", kwargs)?;
         let ax = parse_axis_param(axis)?;
         let ddof_val = ddof.unwrap_or(1);
+        self.refuse_masked_rows("var", ax, numeric_only)?;
         wrap_series(self.var_internal(ax, skipna, ddof_val, numeric_only))
+            .and_then(|s| self.masked_answer("var", ax, numeric_only, s))
     }
 
     /// Return the count of non-missing values per column or row.
@@ -34675,7 +34941,9 @@ impl PyDataFrame {
     ) -> PyResult<PySeries> {
         numpy_compat_kwargs("min", kwargs)?;
         let ax = parse_axis_param(axis)?;
+        self.refuse_masked_rows("min", ax, numeric_only)?;
         wrap_series(self.min_internal(ax, skipna, numeric_only))
+            .and_then(|s| self.masked_answer("min", ax, numeric_only, s))
     }
 
     /// Return the maximum of each column or row.
@@ -34689,7 +34957,9 @@ impl PyDataFrame {
     ) -> PyResult<PySeries> {
         numpy_compat_kwargs("max", kwargs)?;
         let ax = parse_axis_param(axis)?;
+        self.refuse_masked_rows("max", ax, numeric_only)?;
         wrap_series(self.max_internal(ax, skipna, numeric_only))
+            .and_then(|s| self.masked_answer("max", ax, numeric_only, s))
     }
 
     /// Return the column-pair correlation matrix as a DataFrame.
@@ -38894,11 +39164,13 @@ impl PyDataFrame {
     ) -> PyResult<PySeries> {
         numpy_compat_kwargs("prod", kwargs)?;
         let ax = parse_axis_param(axis)?;
+        self.refuse_masked_rows("prod", ax, numeric_only)?;
         let product = self.prod_internal(ax, skipna, numeric_only);
         let min_count = min_count.unwrap_or(0);
         wrap_series(
             product.and_then(|s| self.below_min_count_is_nan(s, ax, numeric_only, min_count)),
         )
+        .and_then(|s| self.masked_answer("prod", ax, numeric_only, s))
     }
 
     #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, min_count=0, **kwargs))]
@@ -38991,8 +39263,18 @@ impl PyDataFrame {
             let res = res
                 .rename(LabelName::typed(IndexLabel::Float64(OrderedF64(q_val))))
                 .map_err(frame_error_to_py)?;
+            // A masked column makes the quantiles pandas' Float64 (8u5eh).
+            let answer = |res: Series| -> PyResult<Py<PyAny>> {
+                let res = PySeries { inner: res };
+                let res = if ax == 0 {
+                    self.masked_answer("quantile", 0, numeric_only, res)?
+                } else {
+                    res
+                };
+                Ok(Py::new(py, res)?.into_any())
+            };
             if interpolation == "linear" {
-                return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+                return answer(res);
             }
             // Any other interpolation was ignored for a single q: each
             // numeric column's (axis=0) or row's (axis=1) quantile under it,
@@ -39031,7 +39313,7 @@ impl PyDataFrame {
             let column = Column::from_values(values).map_err(column_error_to_py)?;
             let res =
                 Series::new(res.name(), res.index().clone(), column).map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+            return answer(res);
         }
 
         if let Some(qs) = q_vec {
@@ -39052,9 +39334,19 @@ impl PyDataFrame {
                         let s =
                             Series::new(col_name.clone(), df_to_use.index().clone(), col.clone())
                                 .map_err(frame_error_to_py)?;
-                        let q_s = s
+                        let mut q_s = s
                             .quantile_list(&qs, interpolation)
                             .map_err(frame_error_to_py)?;
+                        // A masked column's quantiles are pandas' Float64
+                        // (8u5eh).
+                        if ax == 0 && col.dtype().is_nullable() {
+                            let column = q_s
+                                .column()
+                                .astype(DType::Float64Nullable)
+                                .map_err(column_error_to_py)?;
+                            q_s = Series::new(q_s.name(), q_s.index().clone(), column)
+                                .map_err(frame_error_to_py)?;
+                        }
                         series_list.push(q_s);
                     }
                 }
@@ -39143,7 +39435,9 @@ impl PyDataFrame {
     ) -> PyResult<PySeries> {
         let ax = parse_axis_param(axis)?;
         let ddof_val = ddof.unwrap_or(1);
+        self.refuse_masked_rows("sem", ax, numeric_only)?;
         wrap_series(self.sem_internal(ax, skipna, ddof_val, numeric_only))
+            .and_then(|s| self.masked_answer("sem", ax, numeric_only, s))
     }
 
     #[pyo3(signature = (axis=None, skipna=true, numeric_only=false))]
@@ -39154,8 +39448,10 @@ impl PyDataFrame {
         numeric_only: bool,
     ) -> PyResult<PySeries> {
         let ax = parse_axis_param(axis)?;
+        self.refuse_masked_rows("skew", ax, numeric_only)?;
         let skewed = self.skew_internal(ax, numeric_only);
         wrap_series(skewed.and_then(|s| self.missing_is_nan(s, ax, numeric_only, skipna)))
+            .and_then(|s| self.masked_answer("skew", ax, numeric_only, s))
     }
 
     #[pyo3(signature = (axis=None, skipna=true, numeric_only=false))]
@@ -39166,8 +39462,10 @@ impl PyDataFrame {
         numeric_only: bool,
     ) -> PyResult<PySeries> {
         let ax = parse_axis_param(axis)?;
+        self.refuse_masked_rows("kurt", ax, numeric_only)?;
         let kurtosis = self.kurt_internal(ax, numeric_only);
         wrap_series(kurtosis.and_then(|s| self.missing_is_nan(s, ax, numeric_only, skipna)))
+            .and_then(|s| self.masked_answer("kurt", ax, numeric_only, s))
     }
 
     #[pyo3(signature = (axis=None, skipna=true, numeric_only=false))]
@@ -41012,32 +41310,34 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: res })
     }
 
+    /// pandas' `select_dtypes(include, exclude)`: each a selector or a list,
+    /// tuple or set of them - a dtype name, a numpy or builtin type, or a
+    /// dtype object ([`select_dtype_name`]; the types were refused), a
+    /// masked column selected with its numpy kind (8u5eh).
     #[pyo3(signature = (include=None, exclude=None))]
     fn select_dtypes(
         &self,
         include: Option<&Bound<'_, PyAny>>,
         exclude: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let extract_str_vec = |obj: Option<&Bound<'_, PyAny>>| -> PyResult<Vec<String>> {
-            match obj {
-                None => Ok(Vec::new()),
-                Some(o) => {
-                    if let Ok(s) = o.extract::<String>() {
-                        Ok(vec![s])
-                    } else if let Ok(list) = o.cast::<PyList>() {
-                        let mut v = Vec::with_capacity(list.len());
-                        for item in list.iter() {
-                            v.push(item.extract::<String>()?);
-                        }
-                        Ok(v)
-                    } else {
-                        o.extract::<Vec<String>>()
-                    }
-                }
+        let selector_names = |obj: Option<&Bound<'_, PyAny>>| -> PyResult<Vec<String>> {
+            let Some(obj) = obj.filter(|obj| !obj.is_none()) else {
+                return Ok(Vec::new());
+            };
+            let many = obj.is_instance_of::<PyList>()
+                || obj.is_instance_of::<PyTuple>()
+                || obj.is_instance_of::<pyo3::types::PySet>()
+                || obj.is_instance_of::<pyo3::types::PyFrozenSet>();
+            if many {
+                obj.try_iter()?
+                    .map(|item| select_dtype_name(&item?))
+                    .collect()
+            } else {
+                Ok(vec![select_dtype_name(obj)?])
             }
         };
-        let inc = extract_str_vec(include)?;
-        let exc = extract_str_vec(exclude)?;
+        let inc = selector_names(include)?;
+        let exc = selector_names(exclude)?;
         let inc_refs: Vec<&str> = inc.iter().map(String::as_str).collect();
         let exc_refs: Vec<&str> = exc.iter().map(String::as_str).collect();
         let df = self

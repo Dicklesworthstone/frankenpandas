@@ -17309,3 +17309,129 @@ def test_resample_keywords_fp_refuses_n57tz() -> None:
         _rs_series(fpd).tz_localize("US/Eastern").resample("D", offset="2h")
     with pytest.raises(NotImplementedError):
         _rs_series(fpd).resample("D", origin="end", offset="1h", closed="left")
+
+
+# br-frankenpandas-8u5eh: pandas' masked Int64 / Float64 / boolean columns in
+# the frame reductions (left out by numeric_only, "could not convert" for
+# std / var / sem, numpy dtypes and NaN for pd.NA, a boolean min 0.0),
+# select_dtypes (they matched nothing; a numpy type was refused) and
+# describe (described as text).
+def _mk_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "c": [True, False, True],
+            "n": [1.0, 2.0, np.nan],
+            "i": [1, 2, 3],
+            "I": m.array([1, None, 3], dtype="Int64"),
+            "F": m.array([1.5, None, 2.5], dtype="Float64"),
+            "B": m.array([True, None, False], dtype="boolean"),
+        }
+    )
+
+
+def _mk_mixed(m: Any) -> Any:
+    frame = _mk_frame(m)
+    frame["b"] = [True, np.nan, False]
+    frame["t"] = ["x", "y", "z"]
+    return frame
+
+
+def _mk_shown(result: Any) -> list:
+    if isinstance(result, list):
+        return result
+    dtypes = [str(t) for t in result.dtypes] if hasattr(result, "columns") else [str(result.dtype)]
+    return result.to_string().split("\n") + dtypes
+
+
+def _mk_reduce(m: Any, op: str, columns: Any = None, **kwargs: Any) -> list:
+    frame = _mk_frame(m) if columns is None else _mk_frame(m)[columns]
+    return _mk_shown(getattr(frame, op)(**kwargs))
+
+
+_MK_OPS = ["sum", "prod", "min", "max", "mean", "median", "std", "var", "sem", "skew", "kurt", "count"]
+
+_MK_CASES = {
+    **{f"{op} of every kind": (lambda m, op=op: _mk_reduce(m, op)) for op in _MK_OPS},
+    **{f"{op} of Int64": (lambda m, op=op: _mk_reduce(m, op, ["I"])) for op in _MK_OPS},
+    **{f"{op} of float64 and Int64": (lambda m, op=op: _mk_reduce(m, op, ["n", "I"])) for op in _MK_OPS},
+    **{f"{op} of boolean": (lambda m, op=op: _mk_reduce(m, op, ["B"])) for op in ["sum", "min", "max", "mean"]},
+    **{
+        f"{op} numeric_only": (lambda m, op=op: _mk_shown(getattr(_mk_mixed(m), op)(numeric_only=True)))
+        for op in ["sum", "mean", "std", "min", "median", "count"]
+    },
+    "sum skipna=False": lambda m: _mk_reduce(m, "sum", ["i", "I", "F"], skipna=False),
+    "sum min_count": lambda m: _mk_reduce(m, "sum", ["I", "F"], min_count=3),
+    "mean of Int64 and Float64 over rows": lambda m: _mk_reduce(m, "mean", ["I", "F"], axis=1),
+    "sum of int64 and Int64 over rows": lambda m: _mk_reduce(m, "sum", ["i", "I"], axis=1),
+    "min of int64 and Int64 over rows": lambda m: _mk_reduce(m, "min", ["i", "I"], axis=1),
+    "std of float64 and Float64 over rows": lambda m: _mk_reduce(m, "std", ["n", "F"], axis=1),
+    "sum of boolean over rows": lambda m: _mk_reduce(m, "sum", ["B"], axis=1),
+    "quantile": lambda m: _mk_reduce(m, "quantile", ["n", "I", "F"]),
+    "quantile list": lambda m: _mk_shown(_mk_frame(m)[["n", "I"]].quantile([0.25, 0.75])),
+    "rank numeric_only": lambda m: _mk_shown(_mk_mixed(m).rank(numeric_only=True)),
+    "describe": lambda m: _mk_shown(_mk_frame(m).describe()),
+    "describe of Int64 and Float64": lambda m: _mk_shown(_mk_frame(m)[["I", "F"]].describe()),
+    "describe include all": lambda m: _mk_shown(_mk_mixed(m).describe(include="all")),
+    "describe include number": lambda m: _mk_shown(_mk_mixed(m).describe(include="number")),
+    "describe percentiles": lambda m: _mk_shown(_mk_frame(m)[["I"]].describe(percentiles=[0.1])),
+    **{
+        f"select_dtypes {kind} {selector!r}": (
+            lambda m, kind=kind, selector=selector: list(
+                _mk_mixed(m).select_dtypes(**{kind: selector}).columns
+            )
+        )
+        for kind in ("include", "exclude")
+        for selector in [
+            "number", "integer", "int", "int64", "floating", "float64", "bool", "boolean", "Int64", "Float64",
+            np.number, np.integer, np.floating, np.bool_, np.int64, np.float64, int, float, bool, object,
+            np.dtype("int64"), ["number", "bool"], ("integer",),
+        ]
+    },
+    "select_dtypes of dtype objects": lambda m: [
+        list(_mk_frame(m).select_dtypes(include=m.Int64Dtype()).columns),
+        list(_mk_frame(m).select_dtypes(include=m.Float64Dtype()).columns),
+        list(_mk_frame(m).select_dtypes(include=m.BooleanDtype()).columns),
+    ],
+    "select_dtypes of a narrow width": lambda m: [
+        list(
+            m.DataFrame(
+                {"a": np.array([1, 2], dtype="int32"), "A": m.array([1, None], dtype="Int32"), "i": [1, 2]}
+            )
+            .select_dtypes(**{kind: selector})
+            .columns
+        )
+        for kind in ("include", "exclude")
+        for selector in ("int32", "Int32", "integer")
+    ],
+    # Negatives: numpy frames answer as they did; pandas' errors stay.
+    "numpy frame sum": lambda m: _mk_reduce(m, "sum", ["c", "n", "i"]),
+    "numpy frame min": lambda m: _mk_reduce(m, "min", ["c", "n", "i"]),
+    "numpy frame std": lambda m: _mk_reduce(m, "std", ["n", "i"]),
+    "numpy frame describe": lambda m: _mk_shown(_mk_frame(m)[["c", "n", "i"]].describe()),
+    "numpy frame select number": lambda m: list(_mk_frame(m)[["c", "n", "i"]].select_dtypes("number").columns),
+    "numpy frame sum skipna=False": lambda m: _mk_reduce(m, "sum", ["n", "i"], skipna=False),
+    "numpy frame sum over rows": lambda m: _mk_reduce(m, "sum", ["n", "i"], axis=1),
+    "select_dtypes object leaves the masked out": lambda m: list(_mk_mixed(m).select_dtypes("object").columns),
+    "std of text beside Int64 raises": lambda m: _mk_shown(_mk_mixed(m)[["I", "t"]].std()),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_MK_CASES))
+def test_masked_columns_reduce_like_pandas_8u5eh(case: str) -> None:
+    run = _MK_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_masked_row_reductions_fp_refuses_8u5eh() -> None:
+    # pandas casts a bool column beside a masked number to object over rows
+    # (and raises for some ops, and for kurt of several masked columns); fp
+    # refuses them.
+    frame = _mk_frame(fpd)
+    with pytest.raises(NotImplementedError):
+        frame[["c", "I"]].sum(axis=1)
+    with pytest.raises(NotImplementedError):
+        frame[["i", "B"]].mean(axis=1)
+    with pytest.raises(NotImplementedError):
+        frame[["i", "I"]].kurt(axis=1)
