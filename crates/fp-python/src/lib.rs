@@ -47189,6 +47189,68 @@ fn window_frame_input<'a>(
     Ok(std::borrow::Cow::Owned(frame))
 }
 
+/// [`window_frame_input`] for a window `agg([...])`, which pandas runs
+/// column by column as Series, so a non-numeric column is the Series'
+/// DataError, "No numeric types to aggregate".
+fn window_agg_list_frame_input<'a>(
+    df: &'a DataFrame,
+    on: Option<&str>,
+) -> PyResult<std::borrow::Cow<'a, DataFrame>> {
+    window_frame_input(df, on, false, false)
+        .map_err(|_| PyErr::new::<DataError, _>("No numeric types to aggregate"))
+}
+
+/// pandas' window `agg({column: name})` over a frame: each named column its
+/// own aggregation, in the dict's order, as a frame (it raised TypeError
+/// 'func must be a string or list of strings'). `agg_one` runs one name
+/// over the windows of a frame of that column (and `on`). A list per
+/// column is refused; a column the frame lacks is pandas' KeyError.
+fn window_agg_dict(
+    py: Python<'_>,
+    df: &DataFrame,
+    spec: &Bound<'_, PyDict>,
+    on: Option<&str>,
+    agg_one: impl Fn(DataFrame, &Bound<'_, PyAny>) -> PyResult<Py<PyAny>>,
+) -> PyResult<DataFrame> {
+    let mut names: Vec<String> = Vec::with_capacity(spec.len());
+    let mut columns: BTreeMap<String, Column> = BTreeMap::new();
+    // The windows' own rows (step= keeps fewer than the frame's).
+    let mut index = df.index().clone();
+    for (key, func) in spec.iter() {
+        let name: String = key.extract()?;
+        if df.column(&name).is_none() {
+            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Column(s) ['{name}'] do not exist"
+            )));
+        }
+        if func.extract::<String>().is_err() {
+            return Err(not_implemented("a window agg with a list per column"));
+        }
+        let mut selected = vec![name.as_str()];
+        selected.extend(on.filter(|on| *on != name));
+        let sub = df.select_columns(&selected).map_err(frame_error_to_py)?;
+        // pandas aggregates each entry as a Series: a text column is that
+        // Series' DataError.
+        let result = agg_one(sub, &func).map_err(|err| {
+            if err.is_instance_of::<DataError>(py) {
+                PyErr::new::<DataError, _>("No numeric types to aggregate")
+            } else {
+                err
+            }
+        })?;
+        let frame = result.bind(py).extract::<PyRef<'_, PyDataFrame>>()?;
+        let column = frame
+            .inner
+            .column(&name)
+            .cloned()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(name.clone()))?;
+        index = frame.inner.index().clone();
+        columns.insert(name.clone(), column);
+        names.push(name);
+    }
+    DataFrame::new_with_column_order(index, columns, names).map_err(frame_error_to_py)
+}
+
 /// pandas' window aggregation input for a Series: a number as it is, bool
 /// and the nullable numbers as float64, another dtype pandas' DataError
 /// ("No numeric types to aggregate"; its NotImplementedError under
@@ -47284,6 +47346,22 @@ fn datetime_like_labels(index: &Index) -> bool {
 impl PyRolling {
     fn closed(&self) -> IntervalClosed {
         self.closed.unwrap_or(IntervalClosed::Right)
+    }
+
+    /// These windows over another frame (a dict agg's column and `on`).
+    fn with_frame(&self, dataframe: DataFrame) -> Self {
+        Self {
+            series: None,
+            dataframe: Some(dataframe),
+            window: self.window,
+            min_periods: self.min_periods,
+            center: self.center,
+            offset: self.offset.clone(),
+            closed: self.closed,
+            step: self.step,
+            on: self.on.clone(),
+            table: self.table,
+        }
     }
 
     /// The Series window: `(t - offset, t]` (closed as `closed` says) over
@@ -47792,8 +47870,15 @@ impl PyRolling {
     /// aggregation, a `_cython_table` callable its name, any other callable
     /// `apply(func, raw=False)`; callables raised (fvsao.7). Names run
     /// over any window (a time-based one was refused); a callable over
-    /// count windows.
+    /// count windows; a frame's `{column: name}` column by column
+    /// ([`window_agg_dict`]).
     pub fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let (Ok(spec), Some(df)) = (func.cast::<PyDict>(), &self.dataframe) {
+            let res = window_agg_dict(py, df, spec, self.on.as_deref(), |sub, f| {
+                self.with_frame(sub).agg(py, f)
+            })?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
         if agg_spec_has_callable(func) {
             self.require_count_window("agg")?;
             return match named_agg_spec(func, "Rolling")? {
@@ -47832,7 +47917,7 @@ impl PyRolling {
                 return self.frame_out(py, res);
             }
             if let Some(ref df) = self.dataframe {
-                let df = window_frame_input(df, self.on.as_deref(), false, false)?;
+                let df = window_agg_list_frame_input(df, self.on.as_deref())?;
                 let res = self
                     .frame_window(&df)?
                     .agg(&str_slices)
@@ -47888,10 +47973,15 @@ impl PyRolling {
         }
         if func.is_callable() {
             if let Some(ref s) = self.series {
-                let res_series = self.apply_windows(py, s, func, raw, args, kwargs)?;
+                let s = window_series_input(s, "Rolling", "apply", false, false)?;
+                let res_series = self.apply_windows(py, &s, func, raw, args, kwargs)?;
                 return self.series_out(py, res_series);
             }
             if let Some(ref df) = self.dataframe {
+                // pandas' input: bool and nullable numbers as float64, any
+                // other dtype its DataError by pandas' dtype name (it gave
+                // fp's, 'Utf8').
+                let df = window_frame_input(df, None, false, false)?;
                 let col_names = df.column_names();
                 if col_names.is_empty() {
                     let empty_df = DataFrame::new(df.index().clone(), BTreeMap::new())
@@ -47903,12 +47993,6 @@ impl PyRolling {
                     let Some(col) = df.column(col_name) else {
                         continue;
                     };
-                    if col.dtype() != DType::Int64 && col.dtype() != DType::Float64 {
-                        return Err(PyErr::new::<DataError, _>(format!(
-                            "Cannot aggregate non-numeric type: {:?}",
-                            col.dtype()
-                        )));
-                    }
                     let s = Series::new(col_name.as_str(), df.index().clone(), col.clone())
                         .map_err(frame_error_to_py)?;
                     out_series_list.push(self.apply_windows(py, &s, func, raw, args, kwargs)?);
@@ -48276,8 +48360,19 @@ impl PyExpanding {
     }
 
     /// pandas' `Expanding.agg`: as [`PyRolling::agg`] (callables raised;
-    /// fvsao.7).
+    /// fvsao.7), a frame's `{column: name}` too.
     pub fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let (Ok(spec), Some(df)) = (func.cast::<PyDict>(), &self.dataframe) {
+            let res = window_agg_dict(py, df, spec, None, |sub, f| {
+                PyExpanding {
+                    series: None,
+                    dataframe: Some(sub),
+                    min_periods: self.min_periods,
+                }
+                .agg(py, f)
+            })?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
         if agg_spec_has_callable(func) {
             return match named_agg_spec(func, "Expanding")? {
                 Some(named) => self.agg(py, &named),
@@ -48315,7 +48410,7 @@ impl PyExpanding {
                 return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
             }
             if let Some(ref df) = self.dataframe {
-                let df = window_frame_input(df, None, false, false)?;
+                let df = window_agg_list_frame_input(df, None)?;
                 let res = df
                     .expanding(self.min_periods)
                     .agg(&str_slices)
@@ -48370,6 +48465,7 @@ impl PyExpanding {
         }
         if func.is_callable() {
             if let Some(ref s) = self.series {
+                let s = window_series_input(s, "Expanding", "apply", false, false)?;
                 let n = s.len();
                 let vals = s.column().values();
                 let mut out_vals = Vec::with_capacity(n);
@@ -48392,6 +48488,8 @@ impl PyExpanding {
                 return Ok(Py::new(py, PySeries { inner: res_series })?.into_any());
             }
             if let Some(ref df) = self.dataframe {
+                // pandas' input, as Rolling.apply's.
+                let df = window_frame_input(df, None, false, false)?;
                 let n = df.len();
                 let min_p = self.min_periods.unwrap_or(1);
                 let col_names = df.column_names();
@@ -48405,12 +48503,6 @@ impl PyExpanding {
                     let Some(col) = df.column(col_name) else {
                         continue;
                     };
-                    if col.dtype() != DType::Int64 && col.dtype() != DType::Float64 {
-                        return Err(PyErr::new::<DataError, _>(format!(
-                            "Cannot aggregate non-numeric type: {:?}",
-                            col.dtype()
-                        )));
-                    }
                     let vals = col.values();
                     let mut out_vals = Vec::with_capacity(n);
                     for i in 0..n {
@@ -48612,8 +48704,23 @@ impl PyExponentialMovingWindow {
     }
 
     /// pandas' `ExponentialMovingWindow.agg`: a name (or a list of them), a
-    /// `_cython_table` callable as its name (callables raised; fvsao.7).
+    /// `_cython_table` callable as its name (callables raised; fvsao.7), a
+    /// frame's `{column: name}`.
     pub fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let (Ok(spec), Some(df)) = (func.cast::<PyDict>(), &self.dataframe) {
+            let res = window_agg_dict(py, df, spec, None, |sub, f| {
+                PyExponentialMovingWindow {
+                    series: None,
+                    dataframe: Some(sub),
+                    span: self.span,
+                    alpha: self.alpha,
+                    adjust: self.adjust,
+                    min_periods: self.min_periods,
+                }
+                .agg(py, f)
+            })?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
         if agg_spec_has_callable(func)
             && let Some(named) = named_agg_spec(func, "ExponentialMovingWindow")?
         {
@@ -48640,7 +48747,7 @@ impl PyExponentialMovingWindow {
                 return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
             }
             if let Some(ref df) = self.dataframe {
-                let df = window_frame_input(df, None, false, false)?;
+                let df = window_agg_list_frame_input(df, None)?;
                 let res = df
                     .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
                     .agg(&str_slices)

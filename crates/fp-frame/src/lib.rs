@@ -48241,16 +48241,51 @@ impl SeriesGroupBy<'_> {
         selected
     }
 
-    /// Return up to `n` largest non-missing values from each group.
+    /// Return up to `n` largest non-missing values from each group, indexed
+    /// by (group key, row label) as pandas'.
     pub fn nlargest(&self, n: usize) -> Result<Series, FrameError> {
         let positions = self.select_extreme_positions(n, true);
-        self.take_positions(&positions)
+        self.keyed_by_group(&positions)
     }
 
-    /// Return up to `n` smallest non-missing values from each group.
+    /// Return up to `n` smallest non-missing values from each group, indexed
+    /// by (group key, row label) as pandas'.
     pub fn nsmallest(&self, n: usize) -> Result<Series, FrameError> {
         let positions = self.select_extreme_positions(n, false);
-        self.take_positions(&positions)
+        self.keyed_by_group(&positions)
+    }
+
+    /// The rows at `positions` under pandas' index for a per-group result
+    /// that is not a filter: the group key level (named as the grouping)
+    /// before the row's own label (the group level was dropped;
+    /// br-frankenpandas-rqeqs).
+    fn keyed_by_group(&self, positions: &[usize]) -> Result<Series, FrameError> {
+        let taken = self.take_positions(positions)?;
+        let keys = self.by.column().values();
+        let labels = self.series.index().labels();
+        let mut flat = Vec::with_capacity(positions.len());
+        let mut group_level = Vec::with_capacity(positions.len());
+        let mut row_level = Vec::with_capacity(positions.len());
+        for &pos in positions {
+            let key = scalar_to_index_label(&keys[pos])?;
+            let label = labels[pos].clone();
+            flat.push(IndexLabel::Utf8(format!("{key}, {label}")));
+            group_level.push(key);
+            row_level.push(label);
+        }
+        let by_name = self.by.name();
+        let levels = fp_index::MultiIndex::from_frame(vec![
+            (
+                (!by_name.is_empty()).then(|| by_name.to_string()),
+                group_level,
+            ),
+            (
+                self.series.index().name().map(ToString::to_string),
+                row_level,
+            ),
+        ])?;
+        let index = Index::new(flat).with_row_multiindex(levels)?;
+        Series::new(self.series.name(), index, taken.column().clone())
     }
 
     /// Count non-missing values within each group.
@@ -125548,6 +125583,52 @@ mod tests {
     }
 
     #[test]
+    fn series_groupby_nlargest_keeps_the_group_level_rqeqs() {
+        // MEASURED, live pandas 2.2.3: df.groupby('g').w.nlargest(1) for
+        // g = [a, a, b, a, b, b], w = [10, ..., 60] is (a, 3) 40, (b, 5) 60,
+        // the levels named ['g', None]; fp dropped the group level.
+        let labels: Vec<IndexLabel> = (0..6_i64).map(Into::into).collect();
+        let w = Series::from_values(
+            "w",
+            labels.clone(),
+            (1..=6_i64)
+                .map(|v| Scalar::Int64(v * 10))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let g = Series::from_values(
+            "g",
+            labels,
+            ["a", "a", "b", "a", "b", "b"]
+                .iter()
+                .map(|k| Scalar::Utf8((*k).into()))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let out = w.groupby(&g).unwrap().nlargest(1).unwrap();
+        assert_eq!(
+            out.column().values(),
+            &[Scalar::Int64(40), Scalar::Int64(60)]
+        );
+        let levels = out.index().row_multiindex().expect("a MultiIndex");
+        assert_eq!(
+            levels.get_level_values(0).unwrap().labels(),
+            &[IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())]
+        );
+        assert_eq!(
+            levels.get_level_values(1).unwrap().labels(),
+            &[IndexLabel::Int64(3), IndexLabel::Int64(5)]
+        );
+        assert_eq!(
+            levels.names()[0].as_ref().map(ToString::to_string),
+            Some("g".to_owned())
+        );
+        // NEGATIVE: head keeps the rows' own labels (a filter).
+        let head = w.groupby(&g).unwrap().head(1).unwrap();
+        assert!(head.index().row_multiindex().is_none());
+    }
+
+    #[test]
     fn window_ddof_bias_and_count_of_any_dtype_n57tz() {
         // MEASURED, live pandas 2.2.3 over pd.Series([1., 2., 4., 7., 11.]):
         // rolling(3).var(ddof=0)[2] 1.555556, .sem(ddof=0)[2] 0.881917 (the
@@ -181826,14 +181907,27 @@ mod tests {
         )?;
         let gb = values.groupby(&groups)?;
 
+        // TEST-CHANGE (br-frankenpandas-rqeqs): the rows' own labels are the
+        // second level after the group key, as pandas' (a, 10), (a, 12),
+        // (b, 17), (b, 13); the flat index pinned the dropped group level.
         let largest = gb.nlargest(2)?;
+        let levels = largest.index().row_multiindex().expect("a MultiIndex");
         assert_eq!(
-            largest.index().labels(),
+            levels.get_level_values(1).unwrap().labels(),
             &[
                 IndexLabel::Int64(10),
                 IndexLabel::Int64(12),
                 IndexLabel::Int64(17),
                 IndexLabel::Int64(13),
+            ]
+        );
+        assert_eq!(
+            levels.get_level_values(0).unwrap().labels(),
+            &[
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("b".into()),
             ]
         );
         assert_eq!(
@@ -181848,7 +181942,13 @@ mod tests {
 
         let smallest = gb.nsmallest(2)?;
         assert_eq!(
-            smallest.index().labels(),
+            smallest
+                .index()
+                .row_multiindex()
+                .expect("a MultiIndex")
+                .get_level_values(1)
+                .unwrap()
+                .labels(),
             &[
                 IndexLabel::Int64(14),
                 IndexLabel::Int64(10),

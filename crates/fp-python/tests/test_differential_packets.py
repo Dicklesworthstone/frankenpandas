@@ -16512,3 +16512,79 @@ _WK_CASES = {
 def test_window_method_keywords_like_pandas_n57tz(case: str) -> None:
     run = _WK_CASES[case]
     assert _wk_outcome(lambda: run(fpd)) == _wk_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-02lwd, br-frankenpandas-rc0923-epic-python-honest-dropin-
+# fvsao.46 (scratch p14/oracle_rollaggdict.py, oracle_rollagglist.py vs
+# pandas 2.2.3): a window agg with a dict raised TypeError; an agg list or
+# a dict entry over a text column is pandas' Series DataError ('No numeric
+# types to aggregate'), and apply's gave fp's dtype name ('Utf8') where
+# pandas says 'object' (and dropped bool / nullable-number columns).
+def _wd_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "t": m.date_range("2024-01-01", periods=5, freq="D"),
+            "v": [1.0, 2.0, np.nan, 4.0, 5.0],
+            "w": [10, 20, 30, 40, 50],
+            "s": ["a", "b", "c", "d", "e"],
+        }
+    )
+
+
+_WD_CASES = {
+    "a dict": lambda m: _rl_shown(_wd_frame(m)[["v", "w"]].rolling(2).agg({"v": "sum", "w": "max"})),
+    "a dict of one column": lambda m: _rl_shown(_wd_frame(m)[["v", "w"]].rolling(2).agg({"w": "mean"})),
+    "a dict in its own order": lambda m: _rl_shown(_wd_frame(m)[["v", "w"]].rolling(2).agg({"w": "min", "v": "count"})),
+    "a dict with step": lambda m: _rl_shown(_wd_frame(m)[["v", "w"]].rolling(2, step=2).agg({"v": "sum", "w": "max"})),
+    "a dict along on": lambda m: _rl_shown(_wd_frame(m)[["t", "v", "w"]].rolling("2D", on="t").agg({"v": "sum", "w": "max"})),
+    "a dict naming no column": lambda m: _rl_shown(_wd_frame(m)[["v", "w"]].rolling(2).agg({"zz": "sum"})),
+    "a dict naming text": lambda m: _rl_shown(_wd_frame(m).drop(columns="t").rolling(2).agg({"s": "sum"})),
+    "expanding, a dict": lambda m: _rl_shown(_wd_frame(m)[["v", "w"]].expanding().agg({"v": "max", "w": "sum"})),
+    "ewm, a dict": lambda m: _rl_shown(_wd_frame(m)[["v", "w"]].ewm(span=2).agg({"v": "mean", "w": "std"})),
+    "a list over text": lambda m: _rl_shown(_wd_frame(m)[["v", "s"]].rolling(2).agg(["sum", "mean"])),
+    "expanding, a list over text": lambda m: _rl_shown(_wd_frame(m)[["v", "s"]].expanding().agg(["sum"])),
+    "ewm, a list over text": lambda m: _rl_shown(_wd_frame(m)[["v", "s"]].ewm(span=2).agg(["mean"])),
+    "apply over text": lambda m: _rl_shown(_wd_frame(m)[["v", "s"]].rolling(2).apply(lambda w: w.sum())),
+    "apply over bool": lambda m: _rl_shown(m.DataFrame({"b": [True, False, True]}).rolling(2).apply(lambda w: w.sum())),
+    "expanding apply over text": lambda m: _rl_shown(_wd_frame(m)[["v", "s"]].expanding().apply(lambda w: w.sum())),
+    # NEGATIVE: a name and a list keep their paths.
+    "a name": lambda m: _rl_shown(_wd_frame(m)[["v", "w"]].rolling(2).agg("sum")),
+    "a list": lambda m: _rl_shown(_wd_frame(m)[["v", "w"]].rolling(2).agg(["sum", "max"])),
+    "apply over numbers": lambda m: _rl_shown(_wd_frame(m)[["v", "w"]].rolling(2).apply(lambda w: w.max())),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_WD_CASES))
+def test_window_agg_dict_and_text_errors_like_pandas_02lwd(case: str) -> None:
+    run = _WD_CASES[case]
+    assert _wk_outcome(lambda: run(fpd)) == _wk_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-rqeqs (scratch p14/oracle_everyday38.py vs pandas
+# 2.2.3): SeriesGroupBy.nlargest / nsmallest dropped the group level;
+# pandas indexes them by (group key, row label).
+def _nk_frame(m: Any) -> Any:
+    return m.DataFrame({"g": ["a", "a", "b", "a", "b", "b"], "w": [10, 20, 30, 40, 50, 60]})
+
+
+_NK_CASES = {
+    "nlargest": lambda m: _rl_shown(_nk_frame(m).groupby("g").w.nlargest(1)),
+    "nlargest 2": lambda m: _rl_shown(_nk_frame(m).groupby("g").w.nlargest(2)),
+    "nsmallest": lambda m: _rl_shown(_nk_frame(m).groupby("g").w.nsmallest(2)),
+    "a named index": lambda m: _rl_shown(_nk_frame(m).rename_axis("row").groupby("g").w.nlargest(1)),
+    "text row labels": lambda m: _rl_shown(
+        _nk_frame(m).set_axis(list("uvwxyz")).groupby("g").w.nsmallest(1)
+    ),
+    "the level values": lambda m: [list(_nk_frame(m).groupby("g").w.nlargest(1).index)],
+    # NEGATIVE: head and tail keep the rows' own labels (filters).
+    "head": lambda m: _rl_shown(_nk_frame(m).groupby("g").w.head(1)),
+    "Series.nlargest": lambda m: _rl_shown(_nk_frame(m).w.nlargest(2)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_NK_CASES))
+def test_groupby_nlargest_keeps_the_group_level_rqeqs(case: str) -> None:
+    run = _NK_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
