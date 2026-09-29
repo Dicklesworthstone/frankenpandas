@@ -15942,9 +15942,11 @@ impl PyPeriodIndex {
         ))
     }
 
+    /// Whether any period is NaT (this was always False,
+    /// br-frankenpandas-u6p7i).
     #[getter]
     pub fn hasnans(&self) -> bool {
-        false
+        self.inner.hasnans()
     }
 
     #[getter]
@@ -16216,36 +16218,42 @@ impl PyPeriodIndex {
                 "invalid how option: {how}"
             )));
         }
-        if self
+        // The NaT periods go (the index came back with them: its NaT was
+        // not seen as missing; br-frankenpandas-u6p7i).
+        let kept: Vec<usize> = self
             .inner
-            .to_index()
-            .labels()
+            .isna()
             .iter()
-            .any(IndexLabel::is_missing)
-        {
-            return Err(not_implemented(
-                "dropna on an index with missing labels of this type",
-            ));
-        }
-        Ok(self.clone())
+            .enumerate()
+            .filter_map(|(position, &missing)| (!missing).then_some(position))
+            .collect();
+        let inner = self.inner.take(&kept).map_err(index_error_to_py)?;
+        Ok(Self { inner })
     }
 
-    /// With no missing labels there is nothing to fill; filling them is not
-    /// supported yet (this returned the index unfilled whatever the value).
+    /// pandas' `PeriodIndex.fillna(value)`: each NaT becomes `value`, a
+    /// Period (or its text) of the index's frequency; any other value makes
+    /// pandas an object Index, which is not supported (this returned the
+    /// index with its NaT; br-frankenpandas-u6p7i).
     #[pyo3(signature = (value=None))]
     pub fn fillna(&self, value: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
-        let has_missing = self
-            .inner
-            .to_index()
-            .labels()
-            .iter()
-            .any(IndexLabel::is_missing);
-        if value.is_some_and(|v| !v.is_none()) && has_missing {
-            return Err(not_implemented(
-                "fillna on an index with missing labels of this type",
-            ));
-        }
-        Ok(self.clone())
+        let missing = self.inner.isna();
+        let Some(value) = value.filter(|value| !value.is_none() && missing.contains(&true)) else {
+            return Ok(self.clone());
+        };
+        let fill = if let Ok(period) = value.extract::<PyRef<'_, PyPeriod>>() {
+            Some(period.inner)
+        } else if let Ok(text) = value.extract::<String>() {
+            Period::parse(&text).ok()
+        } else {
+            None
+        };
+        let filled = fill.and_then(|fill| self.inner.putmask(&missing, fill).ok());
+        filled.map(|inner| Self { inner }).ok_or_else(|| {
+            not_implemented(
+                "PeriodIndex.fillna with a value that is not a Period of its frequency (an object Index in pandas)",
+            )
+        })
     }
 
     fn as_py_index(&self) -> PyIndex {
@@ -16525,12 +16533,14 @@ impl PyPeriodIndex {
         self.as_py_index().isin(values)
     }
 
-    fn isna(&self) -> Vec<bool> {
-        self.inner.isna()
+    /// pandas' NaT mask, a numpy bool array (a list, all False, before;
+    /// br-frankenpandas-u6p7i).
+    fn isna(&self) -> BoolArray {
+        self.inner.isna().into()
     }
 
-    fn isnull(&self) -> Vec<bool> {
-        self.inner.isnull()
+    fn isnull(&self) -> BoolArray {
+        self.inner.isnull().into()
     }
 
     fn item(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -16581,12 +16591,12 @@ impl PyPeriodIndex {
             .map(|p| p.to_string())
     }
 
-    fn notna(&self) -> Vec<bool> {
-        self.inner.notna()
+    fn notna(&self) -> BoolArray {
+        self.inner.notna().into()
     }
 
-    fn notnull(&self) -> Vec<bool> {
-        self.inner.notnull()
+    fn notnull(&self) -> BoolArray {
+        self.inner.notnull().into()
     }
 
     fn nunique(&self) -> usize {
@@ -18287,6 +18297,28 @@ fn wrap_frame(result: Result<DataFrame, fp_frame::FrameError>) -> PyResult<PyDat
     result
         .map(|inner| PyDataFrame { inner })
         .map_err(frame_error_to_py)
+}
+
+/// A frame-with-Series operation's `result` over `source`'s own rows keeps
+/// their MultiIndex levels (the row axis came back flat: 'a, 1';
+/// br-frankenpandas-u6p7i).
+fn with_source_row_levels(
+    result: Result<DataFrame, fp_frame::FrameError>,
+    source: &DataFrame,
+) -> PyResult<PyDataFrame> {
+    let inner = result.map_err(frame_error_to_py)?;
+    let inner = match source.row_multiindex() {
+        Some(levels)
+            if inner.row_multiindex().is_none()
+                && inner.index().labels() == source.index().labels() =>
+        {
+            inner
+                .with_row_multiindex(levels.clone())
+                .map_err(frame_error_to_py)?
+        }
+        _ => inner,
+    };
+    Ok(PyDataFrame { inner })
 }
 
 fn parse_axis_param_for_type(
@@ -20844,6 +20876,7 @@ fn rename_multiindex_levels(
     py: Python<'_>,
     mapper: &Bound<'_, PyAny>,
     multi: &fp_index::MultiIndex,
+    only: Option<usize>,
 ) -> PyResult<fp_index::MultiIndex> {
     let mut levels = Vec::with_capacity(multi.nlevels());
     for level in 0..multi.nlevels() {
@@ -20852,6 +20885,11 @@ fn rename_multiindex_levels(
             .map_err(index_error_to_py)?
             .labels()
             .to_vec();
+        // rename(level=) maps that level alone.
+        if only.is_some_and(|only| only != level) {
+            levels.push(values);
+            continue;
+        }
         let renamed: HashMap<IndexLabel, IndexLabel> = rename_pairs(py, mapper, &values, false)?
             .into_iter()
             .collect();
@@ -21880,13 +21918,13 @@ impl PySeries {
     /// the comparison forms work across labels, where `s < t` refuses them),
     /// then `fill_value` stands in for a value missing on exactly one side
     /// before `op` runs (missing on both stays missing); `axis` can only name a
-    /// Series' one axis, and `level` is refused (br-frankenpandas-n57tz,
-    /// br-frankenpandas-zwfz3; the binding took `other` alone).
-    #[allow(clippy::too_many_arguments)]
+    /// Series' one axis, and `level` joins a Series `other` on that level of
+    /// this Series' MultiIndex (br-frankenpandas-n57tz, br-frankenpandas-zwfz3;
+    /// the binding took `other` alone; br-frankenpandas-u6p7i: `level` was
+    /// refused).
     fn flex(
         &self,
         py: Python<'_>,
-        method: &str,
         other: &Bound<'_, PyAny>,
         level: Option<&Bound<'_, PyAny>>,
         fill_value: Option<&Bound<'_, PyAny>>,
@@ -21894,10 +21932,27 @@ impl PySeries {
         op: impl Fn(&Self, Python<'_>, &Bound<'_, PyAny>) -> PyResult<Self>,
     ) -> PyResult<Self> {
         parse_axis_param_for_type(axis, "Series")?;
-        unsupported_params(
-            &format!("Series.{method}"),
-            &[("level", level.is_none_or(|l| l.is_none()))],
-        )?;
+        // `level` joins a Series operand on that level of this Series'
+        // MultiIndex: its value under each row's label there (it was
+        // refused, br-frankenpandas-u6p7i).
+        let spread;
+        let other = match level.filter(|level| !level.is_none()) {
+            Some(level) => {
+                let index = self.inner.index();
+                match (
+                    axis_level_values(index, index.row_multiindex(), level)?,
+                    other.extract::<PyRef<'_, PySeries>>(),
+                ) {
+                    (Some(labels), Ok(series)) => {
+                        let inner = spread_over_level(&series.inner, labels, index)?;
+                        spread = Bound::new(py, PySeries { inner })?.into_any();
+                        &spread
+                    }
+                    _ => other,
+                }
+            }
+            None => other,
+        };
         let fill = fill_value
             .filter(|f| !f.is_none())
             .map(|f| py_to_scalar(py, f))
@@ -23096,7 +23151,7 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(py, "add", other, level, fill_value, axis, Self::__add__)
+        self.flex(py, other, level, fill_value, axis, Self::__add__)
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn radd(
@@ -23107,7 +23162,7 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(py, "radd", other, level, fill_value, axis, Self::__radd__)
+        self.flex(py, other, level, fill_value, axis, Self::__radd__)
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn sub(
@@ -23118,7 +23173,7 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(py, "sub", other, level, fill_value, axis, Self::__sub__)
+        self.flex(py, other, level, fill_value, axis, Self::__sub__)
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn subtract(
@@ -23129,15 +23184,7 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(
-            py,
-            "subtract",
-            other,
-            level,
-            fill_value,
-            axis,
-            Self::__sub__,
-        )
+        self.flex(py, other, level, fill_value, axis, Self::__sub__)
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn rsub(
@@ -23148,7 +23195,7 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(py, "rsub", other, level, fill_value, axis, Self::__rsub__)
+        self.flex(py, other, level, fill_value, axis, Self::__rsub__)
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn mul(
@@ -23159,7 +23206,7 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(py, "mul", other, level, fill_value, axis, Self::__mul__)
+        self.flex(py, other, level, fill_value, axis, Self::__mul__)
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn multiply(
@@ -23170,15 +23217,7 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(
-            py,
-            "multiply",
-            other,
-            level,
-            fill_value,
-            axis,
-            Self::__mul__,
-        )
+        self.flex(py, other, level, fill_value, axis, Self::__mul__)
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn rmul(
@@ -23189,7 +23228,7 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(py, "rmul", other, level, fill_value, axis, Self::__rmul__)
+        self.flex(py, other, level, fill_value, axis, Self::__rmul__)
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn div(
@@ -23200,7 +23239,7 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(py, "div", other, level, fill_value, axis, Self::__truediv__)
+        self.flex(py, other, level, fill_value, axis, Self::__truediv__)
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn divide(
@@ -23211,15 +23250,7 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(
-            py,
-            "divide",
-            other,
-            level,
-            fill_value,
-            axis,
-            Self::__truediv__,
-        )
+        self.flex(py, other, level, fill_value, axis, Self::__truediv__)
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn truediv(
@@ -23230,15 +23261,7 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(
-            py,
-            "truediv",
-            other,
-            level,
-            fill_value,
-            axis,
-            Self::__truediv__,
-        )
+        self.flex(py, other, level, fill_value, axis, Self::__truediv__)
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn rtruediv(
@@ -23249,15 +23272,7 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(
-            py,
-            "rtruediv",
-            other,
-            level,
-            fill_value,
-            axis,
-            Self::__rtruediv__,
-        )
+        self.flex(py, other, level, fill_value, axis, Self::__rtruediv__)
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn rdiv(
@@ -23268,15 +23283,7 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(
-            py,
-            "rdiv",
-            other,
-            level,
-            fill_value,
-            axis,
-            Self::__rtruediv__,
-        )
+        self.flex(py, other, level, fill_value, axis, Self::__rtruediv__)
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn floordiv(
@@ -23287,15 +23294,7 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(
-            py,
-            "floordiv",
-            other,
-            level,
-            fill_value,
-            axis,
-            Self::__floordiv__,
-        )
+        self.flex(py, other, level, fill_value, axis, Self::__floordiv__)
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn rfloordiv(
@@ -23306,15 +23305,7 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(
-            py,
-            "rfloordiv",
-            other,
-            level,
-            fill_value,
-            axis,
-            Self::__rfloordiv__,
-        )
+        self.flex(py, other, level, fill_value, axis, Self::__rfloordiv__)
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn r#mod(
@@ -23325,7 +23316,7 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(py, "mod", other, level, fill_value, axis, Self::__mod__)
+        self.flex(py, other, level, fill_value, axis, Self::__mod__)
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn rmod(
@@ -23336,7 +23327,7 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(py, "rmod", other, level, fill_value, axis, Self::__rmod__)
+        self.flex(py, other, level, fill_value, axis, Self::__rmod__)
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn pow(
@@ -23347,7 +23338,7 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(py, "pow", other, level, fill_value, axis, |s, py, o| {
+        self.flex(py, other, level, fill_value, axis, |s, py, o| {
             s.__pow__(py, o, None)
         })
     }
@@ -23360,7 +23351,7 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(py, "rpow", other, level, fill_value, axis, |s, py, o| {
+        self.flex(py, other, level, fill_value, axis, |s, py, o| {
             s.__rpow__(py, o, None)
         })
     }
@@ -23373,7 +23364,7 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(py, "eq", other, level, fill_value, axis, Self::__eq__)
+        self.flex(py, other, level, fill_value, axis, Self::__eq__)
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn ne(
@@ -23384,7 +23375,7 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(py, "ne", other, level, fill_value, axis, Self::__ne__)
+        self.flex(py, other, level, fill_value, axis, Self::__ne__)
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn lt(
@@ -23395,7 +23386,7 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(py, "lt", other, level, fill_value, axis, Self::__lt__)
+        self.flex(py, other, level, fill_value, axis, Self::__lt__)
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn le(
@@ -23406,7 +23397,7 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(py, "le", other, level, fill_value, axis, Self::__le__)
+        self.flex(py, other, level, fill_value, axis, Self::__le__)
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn gt(
@@ -23417,7 +23408,7 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(py, "gt", other, level, fill_value, axis, Self::__gt__)
+        self.flex(py, other, level, fill_value, axis, Self::__gt__)
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn ge(
@@ -23428,7 +23419,7 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(py, "ge", other, level, fill_value, axis, Self::__ge__)
+        self.flex(py, other, level, fill_value, axis, Self::__ge__)
     }
 
     /// Return the sum of the Series. Fewer than `min_count` valid values make
@@ -24400,11 +24391,33 @@ impl PySeries {
     ) -> PyResult<Option<PySeries>> {
         let _ = copy;
         parse_axis_param_for_type(axis, "Series")?;
-        unsupported_params(
-            "Series.rename",
-            &[("level", level.is_none_or(|l| l.is_none()))],
-        )?;
+        let level = level.filter(|level| !level.is_none());
         let relabel = index.filter(|i| i.is_instance_of::<PyDict>() || i.is_callable());
+        if let Some(mapping) = relabel
+            && let Some(multi) = self.inner.index().row_multiindex().cloned()
+        {
+            // Under a MultiIndex every level's labels are mapped, or with
+            // `level` that level's alone (it was refused, and the flat
+            // labels were mapped whole; br-frankenpandas-u6p7i).
+            let only = level
+                .map(|level| multiindex_level_position(&multi, level))
+                .transpose()?;
+            let renamed = rename_multiindex_levels(py, mapping, &multi, only)?;
+            let out = Series::new(
+                self.inner.name(),
+                row_multiindex_axis(renamed)?,
+                self.inner.column().clone(),
+            )
+            .map_err(frame_error_to_py)?;
+            if inplace {
+                self.inner = out;
+                return Ok(None);
+            }
+            return Ok(Some(PySeries { inner: out }));
+        }
+        if let Some(level) = level {
+            axis_level_values(self.inner.index(), None, level)?;
+        }
         if let Some(mapping) = relabel {
             let labels = self.inner.index().labels().to_vec();
             let pairs = rename_pairs(py, mapping, &labels, errors == "raise")?;
@@ -29437,7 +29450,8 @@ impl PyDataFrame {
     /// ('columns' by default, or 'index'); `fill_value` fills a value missing
     /// on exactly one side against another DataFrame, fills the frame's own
     /// missing values against a scalar, and against a Series is pandas'
-    /// NotImplementedError; `level` is refused.
+    /// NotImplementedError; `level` joins `other` on a level of the matched
+    /// axis ([`frame_level_operand`]; it was refused, br-frankenpandas-u6p7i).
     #[allow(clippy::too_many_arguments)]
     fn flex_arith(
         &self,
@@ -29451,10 +29465,11 @@ impl PyDataFrame {
         reflected: bool,
     ) -> PyResult<PyDataFrame> {
         let axis = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(1);
-        unsupported_params(
-            &format!("DataFrame.{method}"),
-            &[("level", level.is_none_or(|l| l.is_none()))],
-        )?;
+        let spread = match level.filter(|level| !level.is_none()) {
+            Some(level) => frame_level_operand(py, &self.inner, other, axis, level)?,
+            None => None,
+        };
+        let other = spread.as_ref().unwrap_or(other);
         let fill = fill_value.filter(|f| !f.is_none());
         if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
             if let Some(fill) = fill {
@@ -29462,7 +29477,10 @@ impl PyDataFrame {
                     format!("fill_value {} not supported.", fill.repr()?),
                 ));
             }
-            return wrap_frame(self.inner.arith_series(&series.inner, op, axis, reflected));
+            return with_source_row_levels(
+                self.inner.arith_series(&series.inner, op, axis, reflected),
+                &self.inner,
+            );
         }
         let Some(fill) = fill else {
             return self.arith_operator(other, op, reflected, method);
@@ -29512,23 +29530,28 @@ impl PyDataFrame {
     }
 
     /// pandas' DataFrame flex comparisons (`df.eq(other, axis=, level=)`):
-    /// `axis` places a Series operand; `level` is refused.
+    /// `axis` places a Series operand; `level` joins `other` on a level of
+    /// that axis ([`frame_level_operand`]; it was refused,
+    /// br-frankenpandas-u6p7i).
     fn flex_cmp(
         &self,
         py: Python<'_>,
-        method: &str,
         other: &Bound<'_, PyAny>,
         axis: Option<&Bound<'_, PyAny>>,
         level: Option<&Bound<'_, PyAny>>,
         op: ComparisonOp,
     ) -> PyResult<PyDataFrame> {
         let axis = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(1);
-        unsupported_params(
-            &format!("DataFrame.{method}"),
-            &[("level", level.is_none_or(|l| l.is_none()))],
-        )?;
+        let spread = match level.filter(|level| !level.is_none()) {
+            Some(level) => frame_level_operand(py, &self.inner, other, axis, level)?,
+            None => None,
+        };
+        let other = spread.as_ref().unwrap_or(other);
         if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
-            return wrap_frame(self.inner.cmp_series(&series.inner, op, axis));
+            return with_source_row_levels(
+                self.inner.cmp_series(&series.inner, op, axis),
+                &self.inner,
+            );
         }
         self.cmp_operator(py, other, op)
     }
@@ -32753,7 +32776,7 @@ impl PyDataFrame {
         axis: Option<&Bound<'_, PyAny>>,
         level: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        self.flex_cmp(py, "eq", other, axis, level, ComparisonOp::Eq)
+        self.flex_cmp(py, other, axis, level, ComparisonOp::Eq)
     }
     #[pyo3(signature = (other, axis=None, level=None))]
     fn ne(
@@ -32763,7 +32786,7 @@ impl PyDataFrame {
         axis: Option<&Bound<'_, PyAny>>,
         level: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        self.flex_cmp(py, "ne", other, axis, level, ComparisonOp::Ne)
+        self.flex_cmp(py, other, axis, level, ComparisonOp::Ne)
     }
     #[pyo3(signature = (other, axis=None, level=None))]
     fn lt(
@@ -32773,7 +32796,7 @@ impl PyDataFrame {
         axis: Option<&Bound<'_, PyAny>>,
         level: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        self.flex_cmp(py, "lt", other, axis, level, ComparisonOp::Lt)
+        self.flex_cmp(py, other, axis, level, ComparisonOp::Lt)
     }
     #[pyo3(signature = (other, axis=None, level=None))]
     fn le(
@@ -32783,7 +32806,7 @@ impl PyDataFrame {
         axis: Option<&Bound<'_, PyAny>>,
         level: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        self.flex_cmp(py, "le", other, axis, level, ComparisonOp::Le)
+        self.flex_cmp(py, other, axis, level, ComparisonOp::Le)
     }
     #[pyo3(signature = (other, axis=None, level=None))]
     fn gt(
@@ -32793,7 +32816,7 @@ impl PyDataFrame {
         axis: Option<&Bound<'_, PyAny>>,
         level: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        self.flex_cmp(py, "gt", other, axis, level, ComparisonOp::Gt)
+        self.flex_cmp(py, other, axis, level, ComparisonOp::Gt)
     }
     #[pyo3(signature = (other, axis=None, level=None))]
     fn ge(
@@ -32803,7 +32826,7 @@ impl PyDataFrame {
         axis: Option<&Bound<'_, PyAny>>,
         level: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        self.flex_cmp(py, "ge", other, axis, level, ComparisonOp::Ge)
+        self.flex_cmp(py, other, axis, level, ComparisonOp::Ge)
     }
 
     /// `"a" in df` checks the column labels, as in pandas: under a two-level
@@ -33946,7 +33969,8 @@ impl PyDataFrame {
     /// callable per axis (br-frankenpandas-n57tz: a bare mapping renamed the
     /// COLUMNS where pandas' `mapper` targets the index unless axis=1, and
     /// index=, callables, errors= and inplace= were absent). `copy` only
-    /// decides buffer sharing in pandas; `level` is refused.
+    /// decides buffer sharing in pandas; `level` maps that level of a
+    /// MultiIndex axis alone (it was refused, br-frankenpandas-u6p7i).
     #[pyo3(signature = (
         mapper=None,
         index=None,
@@ -33971,10 +33995,7 @@ impl PyDataFrame {
         errors: &str,
     ) -> PyResult<Option<PyDataFrame>> {
         let _ = copy;
-        unsupported_params(
-            "DataFrame.rename",
-            &[("level", level.is_none_or(|l| l.is_none()))],
-        )?;
+        let level = level.filter(|level| !level.is_none());
         let (index, columns) = match passed(mapper) {
             Some(mapper) => {
                 if passed(index).is_some() || passed(columns).is_some() {
@@ -33997,15 +34018,28 @@ impl PyDataFrame {
         }
         let raise = errors == "raise";
         let mut out = self.inner.clone();
+        // The one level `level` names on a MultiIndex axis (a flat axis has
+        // only its own, which renames as without it).
+        let level_on =
+            |axis: &Index, multi: Option<&fp_index::MultiIndex>| -> PyResult<Option<usize>> {
+                match (level, multi) {
+                    (Some(level), Some(multi)) => multiindex_level_position(multi, level).map(Some),
+                    (Some(level), None) => axis_level_values(axis, None, level).map(|_| None),
+                    (None, _) => Ok(None),
+                }
+            };
         if let Some(columns) = columns.as_ref()
             && let Some(multi) = out.columns_multiindex().cloned()
         {
             // Under MultiIndex columns every level's labels are mapped, as
             // pandas (they were left as they were; 7m8bq).
-            let renamed = rename_multiindex_levels(py, columns, &multi)?;
+            let only = level_on(out.index(), Some(&multi))?;
+            let renamed = rename_multiindex_levels(py, columns, &multi, only)?;
             out = PyDataFrame { inner: out }
                 .with_column_axis(fp_index::MultiIndexOrIndex::Multi(renamed))?;
         } else if let Some(columns) = columns {
+            let keys = Index::new(Vec::new()).rename_index(out.columns_name().cloned());
+            level_on(&keys, None)?;
             // The mapping matches and gives typed labels ({0: 'a'},
             // {'a': 5}); the columns were matched as strings (fvsao.32).
             let names = out.column_labels();
@@ -34028,9 +34062,11 @@ impl PyDataFrame {
             if let Some(multi) = out.row_multiindex().cloned() {
                 // Under a row MultiIndex every level's labels are mapped and
                 // the levels kept (they were flattened to 'n, a'; rvqoi).
-                let renamed = rename_multiindex_levels(py, &index, &multi)?;
+                let only = level_on(out.index(), Some(&multi))?;
+                let renamed = rename_multiindex_levels(py, &index, &multi, only)?;
                 out = with_row_axis(out, &row_multiindex_axis(renamed)?)?;
             } else {
+                level_on(out.index(), None)?;
                 let labels = out.index().labels().to_vec();
                 let pairs = rename_pairs(py, &index, &labels, raise)?;
                 out = out.rename_index(&pairs);
@@ -40861,13 +40897,6 @@ impl PyDataFrame {
         column_dtypes: Option<&Bound<'_, PyAny>>,
         index_dtypes: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        unsupported_params(
-            "DataFrame.to_records",
-            &[
-                ("column_dtypes", column_dtypes.is_none()),
-                ("index_dtypes", index_dtypes.is_none()),
-            ],
-        )?;
         // pandas' numpy record array: the index first (one field a level,
         // named after it, else 'index' / 'level_n'), then each column, each
         // field its numpy dtype (it was a list of dicts).
@@ -40930,12 +40959,56 @@ impl PyDataFrame {
                     .to_string(),
             );
         }
+        // column_dtypes / index_dtypes: a dtype for every field of their
+        // kind, or a mapping by field name, else by position among them
+        // (they were refused, br-frankenpandas-u6p7i).
+        let index_fields = arrays.len() - self.inner.num_columns().min(arrays.len());
+        let np = py.import("numpy")?;
+        let numpy_dtype = np.getattr("dtype")?;
+        let mut cast = Vec::with_capacity(arrays.len());
+        for (field, array) in arrays.into_iter().enumerate() {
+            let (mapping, element, position) = if field < index_fields {
+                (index_dtypes, "index", field)
+            } else {
+                (column_dtypes, "column", field - index_fields)
+            };
+            let Some(mapping) = mapping.filter(|mapping| !mapping.is_none()) else {
+                cast.push(array);
+                continue;
+            };
+            let key = if field < index_fields {
+                names[field].clone().into_bound_py_any(py)?
+            } else {
+                let name = self.inner.column_name_at(position).unwrap_or_default();
+                index_label_to_py(py, &self.inner.column_label(&name))?.into_bound(py)
+            };
+            let dtype = if let Ok(map) = mapping.cast::<PyDict>() {
+                match map.get_item(&key)? {
+                    Some(dtype) => Some(dtype),
+                    None => map.get_item(position)?,
+                }
+            } else if mapping.is_instance_of::<pyo3::types::PyString>()
+                || mapping.is_instance_of::<pyo3::types::PyType>()
+                || mapping.is_instance(&numpy_dtype)?
+            {
+                Some(mapping.clone())
+            } else {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid dtype {} specified for {element} {}",
+                    mapping.str()?,
+                    names[field]
+                )));
+            };
+            cast.push(match dtype {
+                Some(dtype) => array.call_method1("astype", (dtype,))?,
+                None => array,
+            });
+        }
         let kwargs = PyDict::new(py);
         kwargs.set_item("names", names)?;
-        Ok(py
-            .import("numpy")?
+        Ok(np
             .getattr("rec")?
-            .call_method("fromarrays", (arrays,), Some(&kwargs))?
+            .call_method("fromarrays", (cast,), Some(&kwargs))?
             .unbind())
     }
 
@@ -43102,6 +43175,110 @@ fn multiindex_level_position(
         .ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("Level {name} not found"))
         })
+}
+
+/// The values of `level` along an axis, one per position: that level's
+/// labels over a MultiIndex; None over a flat axis, where only its own level
+/// (0, -1 or its name) exists - any other is pandas' IndexError / KeyError.
+fn axis_level_values(
+    index: &Index,
+    multi: Option<&fp_index::MultiIndex>,
+    level: &Bound<'_, PyAny>,
+) -> PyResult<Option<Vec<IndexLabel>>> {
+    if let Some(multi) = multi {
+        let position = multiindex_level_position(multi, level)?;
+        let values = multi
+            .get_level_values(position)
+            .map_err(index_error_to_py)?;
+        return Ok(Some(values.labels().to_vec()));
+    }
+    if let Ok(position) = level.extract::<i64>() {
+        return match position {
+            0 | -1 => Ok(None),
+            p if p < -1 => Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                "Too many levels: Index has only 1 level, {p} is not a valid level number"
+            ))),
+            p => Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                "Too many levels: Index has only 1 level, not {}",
+                i128::from(p) + 1
+            ))),
+        };
+    }
+    let name = level.str()?.to_string();
+    let own = index.name().map(ToString::to_string);
+    if own.as_deref() == Some(name.as_str()) {
+        return Ok(None);
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+        "Requested level ({name}) does not match index name ({})",
+        own.unwrap_or_else(|| "None".to_owned())
+    )))
+}
+
+/// A flat-labelled `other` spread over `labels` - the values of a level of
+/// the receiving axis, one per position - under `index`: each position
+/// takes `other`'s value at its label, NaN where `other` has none, as
+/// pandas' flex operations join a Series on a level.
+fn spread_over_level(other: &Series, labels: Vec<IndexLabel>, index: &Index) -> PyResult<Series> {
+    let spread = other.reindex(labels).map_err(frame_error_to_py)?;
+    Series::new(other.name(), index.clone(), spread.column().clone()).map_err(frame_error_to_py)
+}
+
+/// A frame flex operation's `other` joined on `level` of the axis it
+/// matches, as pandas' `df.add(other, axis=, level=)`: a Series spread over
+/// that level of the rows (axis 0) or of the columns (axis 1, labelled by
+/// the column keys), a DataFrame over that level of the rows. None where
+/// the axis is flat (the level only checked) or `other` is a scalar.
+fn frame_level_operand<'py>(
+    py: Python<'py>,
+    frame: &DataFrame,
+    other: &Bound<'py, PyAny>,
+    axis: usize,
+    level: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let rows = frame.index();
+    if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
+        if axis == 0 {
+            let Some(labels) = axis_level_values(rows, frame.row_multiindex(), level)? else {
+                return Ok(None);
+            };
+            let inner = spread_over_level(&series.inner, labels, rows)?;
+            return Ok(Some(Bound::new(py, PySeries { inner })?.into_any()));
+        }
+        let keys = Index::new(
+            frame
+                .column_names()
+                .into_iter()
+                .map(|key| IndexLabel::Utf8(key.clone()))
+                .collect(),
+        )
+        .rename_index(frame.columns_name().cloned());
+        let Some(labels) = axis_level_values(&keys, frame.columns_multiindex(), level)? else {
+            return Ok(None);
+        };
+        let inner = spread_over_level(&series.inner, labels, &keys)?;
+        return Ok(Some(Bound::new(py, PySeries { inner })?.into_any()));
+    }
+    if let Ok(other) = other.extract::<PyRef<'_, PyDataFrame>>() {
+        let Some(labels) = axis_level_values(rows, frame.row_multiindex(), level)? else {
+            return Ok(None);
+        };
+        let spread = other
+            .inner
+            .reindex(labels)
+            .and_then(|spread| spread.with_index(rows.clone()))
+            .map_err(frame_error_to_py)?;
+        let spread = match frame.row_multiindex() {
+            Some(levels) => spread
+                .with_row_multiindex(levels.clone())
+                .map_err(frame_error_to_py)?,
+            None => spread,
+        };
+        return Ok(Some(
+            Bound::new(py, PyDataFrame { inner: spread })?.into_any(),
+        ));
+    }
+    Ok(None)
 }
 
 /// The positions of `level` - one level or a list of them - in `multi`, in
@@ -56344,9 +56521,9 @@ fn cut_series(
     include_lowest: bool,
     duplicates: &str,
 ) -> PyResult<(Series, Option<Vec<Scalar>>)> {
-    // precision sets the digits of the interval labels; only pandas'
-    // default is produced (it was ignored).
-    unsupported_params("cut", &[("precision", precision == 3)])?;
+    // precision sets the digits of the interval labels (only pandas' 3 was
+    // taken; br-frankenpandas-u6p7i). Past 17 an f64 rounds to itself.
+    let precision = i32::try_from(precision.min(17)).unwrap_or(17);
     let label_strings = labels.unwrap_or_default();
     let label_refs: Option<Vec<&str>> = if label_strings.is_empty() {
         None
@@ -56445,9 +56622,16 @@ fn cut_series(
                     "cannot cut empty or all-null series",
                 ));
             };
-            fp_frame::cut_bins(series, edges, right, label_refs.as_deref(), include_lowest)
+            fp_frame::cut_bins_with_precision(
+                series,
+                edges,
+                right,
+                label_refs.as_deref(),
+                include_lowest,
+                precision,
+            )
         } else {
-            fp_frame::cut(series, n_bins)
+            fp_frame::cut_with_precision(series, n_bins, precision)
         };
         return binned
             .map(|binned| (binned, edges))
@@ -56477,9 +56661,16 @@ fn cut_series(
     if duplicates == "drop" {
         edges.dedup_by(|b, a| a.semantic_eq(b));
     }
-    fp_frame::cut_bins(series, &edges, right, label_refs.as_deref(), include_lowest)
-        .map(|binned| (binned, Some(edges)))
-        .map_err(frame_error_to_py)
+    fp_frame::cut_bins_with_precision(
+        series,
+        &edges,
+        right,
+        label_refs.as_deref(),
+        include_lowest,
+        precision,
+    )
+    .map(|binned| (binned, Some(edges)))
+    .map_err(frame_error_to_py)
 }
 
 /// A cut/qcut `labels=` argument: the bin names, or None for pandas'
@@ -56564,9 +56755,9 @@ fn qcut(
     };
     let (series, series_input) = binning_input(py, x)?;
     let (labels, codes) = bin_labels_arg(labels)?;
-    // precision sets the digits of the interval labels; only pandas'
-    // default is produced (it was ignored).
-    unsupported_params("qcut", &[("precision", precision == 3)])?;
+    // precision sets the digits of the interval labels (only pandas' 3 was
+    // taken; br-frankenpandas-u6p7i). Past 17 an f64 rounds to itself.
+    let precision = i32::try_from(precision.min(17)).unwrap_or(17);
 
     let label_strings = labels.unwrap_or_default();
     let label_refs: Option<Vec<&str>> = if label_strings.is_empty() {
@@ -56600,9 +56791,14 @@ fn qcut(
             .map(|v| v?.extract::<f64>())
             .collect::<PyResult<Vec<_>>>()?
     };
-    let (binned, edges) =
-        fp_frame::qcut_with_edges(&series, &quantiles, label_refs.as_deref(), drop_duplicates)
-            .map_err(frame_error_to_py)?;
+    let (binned, edges) = fp_frame::qcut_with_edges_precision(
+        &series,
+        &quantiles,
+        label_refs.as_deref(),
+        drop_duplicates,
+        precision,
+    )
+    .map_err(frame_error_to_py)?;
     let binned = if codes { bin_codes(&binned)? } else { binned };
     let edges = edges.into_iter().map(Scalar::Float64).collect();
     binned_result(py, binned, series_input, codes, retbins, Some(edges))

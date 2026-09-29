@@ -11284,19 +11284,17 @@ impl PeriodIndex {
         vec![self.dtype()]
     }
 
-    /// Whether any period label is missing.
-    ///
-    /// FrankenPandas `Period` currently has no NaT sentinel, so this is
-    /// always false until native period missing values are introduced.
+    /// Whether any period label is missing (NaT, [`Period::is_nat`]; this
+    /// was always false, br-frankenpandas-u6p7i).
     #[must_use]
     pub fn hasnans(&self) -> bool {
-        false
+        self.values.iter().any(Period::is_nat)
     }
 
     /// Missing-value mask, matching `pd.PeriodIndex.isna()`.
     #[must_use]
     pub fn isna(&self) -> Vec<bool> {
-        vec![false; self.len()]
+        self.values.iter().map(Period::is_nat).collect()
     }
 
     /// Alias for [`isna`](Self::isna), matching `pd.PeriodIndex.isnull()`.
@@ -11308,7 +11306,7 @@ impl PeriodIndex {
     /// Non-missing mask, matching `pd.PeriodIndex.notna()`.
     #[must_use]
     pub fn notna(&self) -> Vec<bool> {
-        vec![true; self.len()]
+        self.values.iter().map(|period| !period.is_nat()).collect()
     }
 
     /// Alias for [`notna`](Self::notna), matching `pd.PeriodIndex.notnull()`.

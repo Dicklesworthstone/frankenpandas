@@ -1,4 +1,4 @@
 0    1.5
 1    2.6999999999999993
 2    4.699999999999999
-Name: a, Length: 3, dtype: Float64
+Name: , Length: 3, dtype: Float64

@@ -13114,6 +13114,18 @@ impl Series {
 
     // --- Comparison Operators ---
 
+    /// The name of a result of this Series and `other`, as pandas names it:
+    /// theirs when both share it, else none. (Comparisons were named 'a==b'
+    /// and the numpy-style power / remainder / fmod / floor_divide kept this
+    /// Series' name; br-frankenpandas-u6p7i.)
+    fn shared_name(&self, other: &Self) -> LabelName {
+        if self.name == other.name {
+            self.name.clone()
+        } else {
+            LabelName::default()
+        }
+    }
+
     /// Core comparison: align indexes, reindex columns, apply comparison.
     /// Returns a Bool-typed Series.
     fn comparison_op(&self, other: &Self, op: ComparisonOp) -> Result<Self, FrameError> {
@@ -13122,20 +13134,7 @@ impl Series {
             return self.categorical_ordering_comparison_op(other, op);
         }
 
-        let op_symbol = match op {
-            ComparisonOp::Gt => ">",
-            ComparisonOp::Lt => "<",
-            ComparisonOp::Eq => "==",
-            ComparisonOp::Ne => "!=",
-            ComparisonOp::Ge => ">=",
-            ComparisonOp::Le => "<=",
-        };
-
-        let out_name = if self.name == other.name {
-            self.name.clone()
-        } else {
-            format!("{}{op_symbol}{}", self.name, other.name).into()
-        };
+        let out_name = self.shared_name(other);
 
         // Identity fast path (mirrors `binary_op_with_policy`'s arithmetic
         // handling): when the two indexes are equal, alignment is purely
@@ -13246,21 +13245,8 @@ impl Series {
             })
             .collect();
 
-        let op_symbol = match op {
-            ComparisonOp::Gt => ">",
-            ComparisonOp::Lt => "<",
-            ComparisonOp::Eq => "==",
-            ComparisonOp::Ne => "!=",
-            ComparisonOp::Ge => ">=",
-            ComparisonOp::Le => "<=",
-        };
-        let out_name = if self.name == other.name {
-            self.name.clone()
-        } else {
-            format!("{}{op_symbol}{}", self.name, other.name).into()
-        };
         Self::new(
-            out_name,
+            self.shared_name(other),
             plan.union_index,
             Column::new(DType::Bool, values)?,
         )
@@ -19016,7 +19002,7 @@ impl Series {
     /// Matches `np.floor_divide(s1, s2)` / `s1 // s2`.
     pub fn floor_divide(&self, other: &Self) -> Result<Self, FrameError> {
         Self::new(
-            self.name.clone(),
+            self.shared_name(other),
             self.index.clone(),
             self.column.floor_divide(other.column())?,
         )
@@ -19027,7 +19013,7 @@ impl Series {
     /// Matches `np.fmod(s1, s2)`.
     pub fn fmod(&self, other: &Self) -> Result<Self, FrameError> {
         Self::new(
-            self.name.clone(),
+            self.shared_name(other),
             self.index.clone(),
             self.column.fmod(other.column())?,
         )
@@ -19044,7 +19030,7 @@ impl Series {
             ));
         }
         Self::new(
-            self.name.clone(),
+            self.shared_name(other),
             self.index.clone(),
             self.column.power(other.column())?,
         )
@@ -19061,10 +19047,10 @@ impl Series {
             && let Some(column) =
                 self.timedelta_scaled_binary_same_index(other, ArithmeticOp::Mod)?
         {
-            return Self::new(self.name.clone(), self.index.clone(), column);
+            return Self::new(self.shared_name(other), self.index.clone(), column);
         }
         Self::new(
-            self.name.clone(),
+            self.shared_name(other),
             self.index.clone(),
             self.column.remainder(other.column())?,
         )
@@ -63093,8 +63079,9 @@ fn cut_round_frac(x: f64, precision: i32) -> f64 {
     if !x.is_finite() || x == 0.0 {
         return x;
     }
+    // numpy's `around`: half to even.
     let factor = 10f64.powi(cut_frac_digits(x, precision));
-    (x * factor).round() / factor
+    (x * factor).round_ties_even() / factor
 }
 
 /// The decimals `cut_round_frac` keeps for `x`: `precision` when it has a
@@ -63108,10 +63095,11 @@ fn cut_frac_digits(x: f64, precision: i32) -> i32 {
     }
 }
 
-/// pandas' `_infer_precision`: the smallest precision from 3 up at which the
-/// rounded edges are all distinct (3 when none is).
-fn cut_infer_precision(edges: &[f64]) -> i32 {
-    (3..20)
+/// pandas' `_infer_precision`: the smallest precision from `base` (cut /
+/// qcut's `precision`, 3 by default) up at which the rounded edges are all
+/// distinct (`base` when none is).
+fn cut_infer_precision(edges: &[f64], base: i32) -> i32 {
+    (base..20)
         .find(|&precision| {
             let mut levels: Vec<f64> = edges
                 .iter()
@@ -63121,7 +63109,7 @@ fn cut_infer_precision(edges: &[f64]) -> i32 {
             levels.dedup();
             levels.len() == edges.len()
         })
-        .unwrap_or(3)
+        .unwrap_or(base)
 }
 
 /// pandas' `_format_labels` intervals between `edges` - the Intervals its
@@ -63135,19 +63123,18 @@ fn cut_intervals(
     right: bool,
     include_lowest: bool,
     integer_edges: bool,
+    base_precision: i32,
 ) -> Vec<Interval> {
-    let precision = cut_infer_precision(edges);
+    let precision = cut_infer_precision(edges, base_precision);
     let mut breaks: Vec<f64> = edges
         .iter()
         .map(|&edge| cut_round_frac(edge, precision))
         .collect();
     let lowered = right && include_lowest;
     if lowered && let Some(first) = breaks.first_mut() {
-        // Exact decimal subtraction: both terms have at most `digits`
-        // decimals, so rounding there only removes binary noise.
-        let digits = cut_frac_digits(*first, precision).max(precision);
-        let step = 10f64.powi(digits);
-        *first = ((*first - 10f64.powi(-precision)) * step).round() / step;
+        // pandas' plain float `x - 10 ** -precision`, binary noise and all
+        // (1.2 - 0.1 is (1.0999999999999999, ...]); it was rounded away here.
+        *first -= 1.0 / 10f64.powi(precision);
     }
     let closed = if right {
         IntervalClosed::Right
@@ -63195,8 +63182,14 @@ impl BinCategories {
 /// the first edge lowered by 0.1% of the range, or, for one repeated
 /// value, the range padded by 0.1% of it (0.001 at zero) - the constant
 /// case printed (5.0, 5.0]. Returns the base and width a value's bin is
-/// computed from (`ceil((v - base) / width) - 1`, clamped) and the bins.
-fn cut_equal_width(min_val: f64, max_val: f64, bins: usize) -> (f64, f64, BinCategories) {
+/// computed from (`ceil((v - base) / width) - 1`, clamped) and the bins,
+/// labelled at `precision` (pandas' `precision=`, see `cut_intervals`).
+fn cut_equal_width(
+    min_val: f64,
+    max_val: f64,
+    bins: usize,
+    precision: i32,
+) -> (EqualWidthBins, BinCategories) {
     let constant = min_val == max_val;
     let pad = |v: f64| if v == 0.0 { 0.001 } else { 0.001 * v.abs() };
     let (lo, hi) = if constant {
@@ -63210,11 +63203,37 @@ fn cut_equal_width(min_val: f64, max_val: f64, bins: usize) -> (f64, f64, BinCat
     if !constant {
         edges[0] -= 0.001 * (hi - lo);
     }
-    (
-        lo,
-        width,
-        BinCategories::Intervals(cut_intervals(&edges, true, false, false)),
-    )
+    let categories = BinCategories::Intervals(cut_intervals(&edges, true, false, false, precision));
+    (EqualWidthBins { lo, width, edges }, categories)
+}
+
+/// The equal-width bins of [`cut_equal_width`]: a value's bin is guessed
+/// from `lo` and `width` and settled against the edges themselves, as
+/// pandas' right-closed searchsorted places it (the guess alone put a value
+/// lying on an inner edge, 2.3456 of [1.2345, 2.3456, 3.4567] in two bins,
+/// in the bin above it; br-frankenpandas-u6p7i).
+struct EqualWidthBins {
+    lo: f64,
+    width: f64,
+    edges: Vec<f64>,
+}
+
+impl EqualWidthBins {
+    fn bin(&self, value: f64) -> usize {
+        let last = self.edges.len().saturating_sub(2);
+        if self.width == 0.0 {
+            return 0;
+        }
+        let guess = ((value - self.lo) / self.width).ceil() as i64 - 1;
+        let mut bin = usize::try_from(guess.max(0)).unwrap_or(0).min(last);
+        while bin > 0 && value <= self.edges[bin] {
+            bin -= 1;
+        }
+        while bin < last && value > self.edges[bin + 1] {
+            bin += 1;
+        }
+        bin
+    }
 }
 
 /// A cut/qcut result as pandas returns it from each value's bin (`None`:
@@ -63548,6 +63567,16 @@ pub fn array(data: &[Scalar], dtype: Option<DType>) -> Result<Series, FrameError
 }
 
 pub fn cut(series: &Series, bins: usize) -> Result<Series, FrameError> {
+    cut_with_precision(series, bins, 3)
+}
+
+/// [`cut`] with pandas' `precision=` (the digits of the interval labels;
+/// 3 in [`cut`]).
+pub fn cut_with_precision(
+    series: &Series,
+    bins: usize,
+    precision: i32,
+) -> Result<Series, FrameError> {
     if bins == 0 {
         return Err(FrameError::CompatibilityRejected(
             "cut: bins must be > 0".to_string(),
@@ -63587,14 +63616,8 @@ pub fn cut(series: &Series, bins: usize) -> Result<Series, FrameError> {
                         .fold(f64::NEG_INFINITY, f64::max),
                 ),
             };
-            let (base, width, categories) = cut_equal_width(min_val, max_val, bins);
-            let bin_idx = |f: f64| -> Option<usize> {
-                Some(if width == 0.0 {
-                    0
-                } else {
-                    (((f - base) / width).ceil() as i64 - 1).clamp(0, (bins as i64) - 1) as usize
-                })
-            };
+            let (binning, categories) = cut_equal_width(min_val, max_val, bins, precision);
+            let bin_idx = |f: f64| -> Option<usize> { Some(binning.bin(f)) };
             return match &ts {
                 CutTyped::F64(d) => {
                     binned_categorical(series, d.iter().map(|&f| bin_idx(f)), &categories)
@@ -63650,37 +63673,13 @@ pub fn cut(series: &Series, bins: usize) -> Result<Series, FrameError> {
     // index in O(1) per value. Was O(n × bins) inner scan plus n redundant
     // String allocations. pandas' edges, padding and label precision: see
     // cut_equal_width (br-frankenpandas-4rfy1).
-    let (base, width, categories) = cut_equal_width(min_val, max_val, bins);
+    let (binning, categories) = cut_equal_width(min_val, max_val, bins, precision);
 
-    let bin_indices = floats.iter().map(|v| {
-        v.map(|f| {
-            // Compute bucket index directly from uniform bin width
-            // from `base` (min_val, or the padded min of a constant
-            // range, whose single value then falls in its middle bin
-            // as pandas' searchsorted places it).
-            // Edge cases:
-            // - Value == min_val: pandas's first-bin-inclusive on
-            //   both sides means bin 0 (the floor formula gives 0).
-            // - Value == max_val: floor((max - min) / width) == bins,
-            //   which we clamp to bins - 1.
-            // - Value just above max (shouldn't happen since min/max
-            //   come from this same set, but float rounding can put
-            //   things slightly outside): clamp to bins - 1.
-            if width == 0.0 {
-                0
-            } else {
-                // Right-closed intervals (left, right]: a value at
-                // exactly bin_idx * width + min belongs to bin
-                // (bin_idx - 1), not bin_idx. Hence ceil - 1 rather
-                // than floor. The first bin is inclusive on the
-                // left edge too — handled by clamping the raw
-                // result to [0, bins-1] (a value at min gives -1
-                // before clamping).
-                let raw = ((f - base) / width).ceil() as i64 - 1;
-                raw.clamp(0, (bins as i64) - 1) as usize
-            }
-        })
-    });
+    // Each value's right-closed bin (EqualWidthBins::bin): the first bin
+    // takes the minimum (its edge is lowered), the last the maximum, and a
+    // constant range's single value its middle bin, as pandas' searchsorted
+    // places them.
+    let bin_indices = floats.iter().map(|v| v.map(|f| binning.bin(f)));
 
     // Per br-frankenpandas-23d91: pandas pd.cut preserves source axis name.
     binned_categorical(series, bin_indices, &categories)
@@ -63701,6 +63700,19 @@ pub fn cut_bins(
     right: bool,
     labels: Option<&[&str]>,
     include_lowest: bool,
+) -> Result<Series, FrameError> {
+    cut_bins_with_precision(series, edges, right, labels, include_lowest, 3)
+}
+
+/// [`cut_bins`] with pandas' `precision=` (the digits of the interval
+/// labels; 3 in [`cut_bins`]).
+pub fn cut_bins_with_precision(
+    series: &Series,
+    edges: &[Scalar],
+    right: bool,
+    labels: Option<&[&str]>,
+    include_lowest: bool,
+    precision: i32,
 ) -> Result<Series, FrameError> {
     if edges.len() < 2 {
         return Err(FrameError::CompatibilityRejected(
@@ -63737,7 +63749,13 @@ pub fn cut_bins(
             }
             BinCategories::Labels(custom.iter().map(|s| (*s).to_string()).collect())
         }
-        None => BinCategories::Intervals(cut_intervals(&edge_vals, right, lowest, integer_edges)),
+        None => BinCategories::Intervals(cut_intervals(
+            &edge_vals,
+            right,
+            lowest,
+            integer_edges,
+            precision,
+        )),
     };
 
     let (first, last) = (edge_vals[0], edge_vals[n_bins]);
@@ -63905,6 +63923,18 @@ pub fn qcut_with_edges(
     labels: Option<&[&str]>,
     drop_duplicate_edges: bool,
 ) -> Result<(Series, Vec<f64>), FrameError> {
+    qcut_with_edges_precision(series, quantiles, labels, drop_duplicate_edges, 3)
+}
+
+/// [`qcut_with_edges`] with pandas' `precision=` (the digits of the
+/// interval labels; 3 in [`qcut_with_edges`]).
+pub fn qcut_with_edges_precision(
+    series: &Series,
+    quantiles: &[f64],
+    labels: Option<&[&str]>,
+    drop_duplicate_edges: bool,
+    precision: i32,
+) -> Result<(Series, Vec<f64>), FrameError> {
     if quantiles.len() < 2 {
         return Err(FrameError::CompatibilityRejected(
             "qcut: q must list at least 2 quantiles".to_string(),
@@ -64039,7 +64069,7 @@ pub fn qcut_with_edges(
             }
             BinCategories::Labels(custom.iter().map(|s| (*s).to_string()).collect())
         }
-        None => BinCategories::Intervals(cut_intervals(&edges, true, true, false)),
+        None => BinCategories::Intervals(cut_intervals(&edges, true, true, false, precision)),
     };
 
     // Per br-frankenpandas-6bslt: pandas pd.qcut preserves source axis name
@@ -119462,6 +119492,31 @@ mod tests {
     }
 
     // ---- Series comparison operator tests ----
+
+    #[test]
+    fn two_series_results_share_a_name_or_have_none_u6p7i() {
+        // Measured on pandas 2.2.3: Series([1, 2], name='a') compared with or
+        // raised to a Series named 'b' is unnamed (fp named them 'a==b' / 'a');
+        // with a Series named 'a' it keeps 'a'.
+        let named = |name: &str, values: [i64; 2]| {
+            Series::from_values(
+                name,
+                vec![0_i64.into(), 1_i64.into()],
+                values.into_iter().map(Scalar::Int64).collect(),
+            )
+            .unwrap()
+        };
+        let (a, b) = (named("a", [1, 2]), named("b", [1, 3]));
+        let unnamed = super::LabelName::default();
+        assert_eq!(a.eq_series(&b).unwrap().name(), &unnamed);
+        assert_eq!(a.lt(&b).unwrap().name(), &unnamed);
+        assert_eq!(a.power(&b).unwrap().name(), &unnamed);
+        assert_eq!(a.remainder(&b).unwrap().name(), &unnamed);
+        // NEGATIVE: a shared name is kept.
+        let same = named("a", [1, 3]);
+        assert_eq!(a.eq_series(&same).unwrap().name(), a.name());
+        assert_eq!(a.power(&same).unwrap().name(), a.name());
+    }
 
     #[test]
     fn series_gt_basic() {

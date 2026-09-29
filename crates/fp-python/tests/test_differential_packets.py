@@ -3175,9 +3175,12 @@ def test_frame_flex_keyword_errors_and_refusals() -> None:
             _fs_frame(m).add(_row_s(m), axis=0, fill_value=0)
         with pytest.raises(ValueError, match="No axis named 2 for object type DataFrame"):
             _fs_frame(m).add(_row_s(m), axis=2)
-    # level= broadcasts over a MultiIndex level, which the binding cannot.
-    with pytest.raises(NotImplementedError, match="level"):
-        _fs_frame(fpd).add(fpd.Series([1, 2], index=["a", "b"]), level=0)
+    # TEST-CHANGE (u6p7i): level= answers now (it was refused): over the flat
+    # column axis level 0 is the plain operation, as pandas' (the MultiIndex
+    # cases: test_levels_op_names_periods_and_cut_precision_like_pandas_u6p7i).
+    got = _fs_frame(fpd).add(fpd.Series([1, 2], index=["a", "b"]), level=0)
+    want = _fs_frame(pd).add(pd.Series([1, 2], index=["a", "b"]), level=0)
+    assert got.to_string() == want.to_string()
 
 
 def _dr(m: Any) -> Any:
@@ -3727,9 +3730,11 @@ def test_series_flex_keyword_errors_and_refusals() -> None:
     for m in (pd, fpd):
         with pytest.raises(ValueError, match="No axis named 1 for object type Series"):
             _flex_s(m).add(_flex_s(m), axis=1)
-    # level= broadcasts over a MultiIndex level, which the binding cannot.
-    with pytest.raises(NotImplementedError, match="level"):
-        _flex_s(fpd).add(_flex_s(fpd), level=0)
+    # TEST-CHANGE (u6p7i): level= answers now (it was refused): over a flat
+    # index level 0 is the plain operation, as pandas' (the MultiIndex cases:
+    # test_levels_op_names_periods_and_cut_precision_like_pandas_u6p7i).
+    got = _flex_s(fpd).add(_flex_s(fpd), level=0).tolist()
+    assert got == _flex_s(pd).add(_flex_s(pd), level=0).tolist()
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
@@ -15216,4 +15221,159 @@ _U6_CASES = {
 @pytest.mark.parametrize("case", list(_U6_CASES))
 def test_refused_parameters_now_answer_like_pandas_u6p7i(case: str) -> None:
     run = _U6_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-u6p7i, the MultiIndex `level=` parameters that raised
+# NotImplementedError (rename, the Series and DataFrame flex arithmetic and
+# comparisons), to_records(column_dtypes=, index_dtypes=), PeriodIndex
+# dropna / fillna and cut / qcut(precision=), with what they exposed: a
+# comparison of two Series was named 'a==b' and power / mod kept the left
+# name (pandas: the shared name or None), a MultiIndex frame with a Series
+# along its rows came back with flat 'a, 1' labels, a PeriodIndex's NaT was
+# not missing (dropna kept it), and cut put a value on an inner edge in the
+# bin above and rounded the include_lowest edge's float noise away.
+def _lv_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {"v": [1, 2, 3, 4], "w": [1.5, 2.5, 3.5, 4.5]},
+        index=m.MultiIndex.from_tuples([("a", 1), ("a", 2), ("b", 1), ("b", 2)], names=["k", "n"]),
+    )
+
+
+def _lv_columns(m: Any) -> Any:
+    return m.DataFrame(
+        [[1, 2, 3]], columns=m.MultiIndex.from_tuples([("a", "x"), ("a", "y"), ("b", "x")], names=["u", "l"])
+    )
+
+
+def _lv_keys(m: Any) -> Any:
+    return m.Series([10, 20], index=m.Index(["a", "b"], name="k"))
+
+
+def _lv_ns(m: Any) -> Any:
+    return m.Series([100, 200, 300], index=[1, 2, 3])
+
+
+def _lv_named(m: Any, name: Any, values: list) -> Any:
+    return m.Series(values, name=name)
+
+
+def _lv_records(result: Any) -> list:
+    return [repr(result), str(result.dtype)]
+
+
+_LV_CASES = {
+    "rename a level by name": lambda m: _u6_shown(_lv_frame(m).rename(index={1: 100}, level="n")),
+    "rename a level by number": lambda m: _u6_shown(_lv_frame(m).rename(index={"a": "A", 1: 9}, level=0)),
+    "rename a level by function": lambda m: _u6_shown(_lv_frame(m).rename(index=str.upper, level="k")),
+    "rename mapper on a level": lambda m: _u6_shown(_lv_frame(m).rename({2: 20}, level=1)),
+    "rename a column level": lambda m: _u6_shown(_lv_columns(m).rename(columns={"x": "X"}, level="l")),
+    "rename the outer column level": lambda m: _u6_shown(
+        _lv_columns(m).rename(columns={"a": "A", "x": "X"}, level=0)
+    ),
+    "rename a flat index at level 0": lambda m: _u6_shown(
+        m.DataFrame({"v": [1]}, index=["a"]).rename(index={"a": "b"}, level=0)
+    ),
+    "rename a flat index at level 1 raises": lambda m: _u6_shown(
+        m.DataFrame({"v": [1]}, index=["a"]).rename(index={"a": "b"}, level=1)
+    ),
+    "rename an unknown level raises": lambda m: _u6_shown(_lv_frame(m).rename(index={1: 100}, level="zz")),
+    "Series.rename a level": lambda m: _u6_shown(_lv_frame(m)["v"].rename(index={1: 100}, level="n")),
+    "Series.rename a level by function": lambda m: _u6_shown(
+        _lv_frame(m)["v"].rename(lambda x: x * 10 if isinstance(x, int) else x, level=1)
+    ),
+    "Series.rename every level": lambda m: _u6_shown(_lv_frame(m)["v"].rename(index={1: 100, "a": "A"})),
+    "add on a level": lambda m: _u6_shown(_lv_frame(m)["v"].add(_lv_keys(m), level="k")),
+    "add on level 0": lambda m: _u6_shown(_lv_frame(m)["v"].add(_lv_keys(m), level=0)),
+    "sub on the inner level": lambda m: _u6_shown(_lv_frame(m)["v"].sub(_lv_ns(m), level="n")),
+    "mul on a level with a fill": lambda m: _u6_shown(
+        _lv_frame(m)["v"].mul(m.Series([2], index=["a"]), level="k", fill_value=1)
+    ),
+    "div on a level with a missing label": lambda m: _u6_shown(
+        _lv_frame(m)["v"].div(m.Series([2], index=["a"]), level="k")
+    ),
+    "radd on a level": lambda m: _u6_shown(_lv_frame(m)["v"].radd(_lv_keys(m), level="k")),
+    "pow on a level": lambda m: _u6_shown(_lv_frame(m)["v"].pow(m.Series([2, 3], index=[1, 2]), level="n")),
+    "eq on a level": lambda m: _u6_shown(_lv_frame(m)["v"].eq(m.Series([1, 4], index=["a", "b"]), level="k")),
+    "lt on a level": lambda m: _u6_shown(_lv_frame(m)["v"].lt(m.Series([2, 4], index=["a", "b"]), level="k")),
+    "frame add a Series along rows on a level": lambda m: _u6_shown(
+        _lv_frame(m).add(_lv_keys(m), axis=0, level="k")
+    ),
+    "frame mul a Series along the index on a level": lambda m: _u6_shown(
+        _lv_frame(m).mul(_lv_ns(m), axis="index", level="n")
+    ),
+    "frame sub a frame on a level": lambda m: _u6_shown(
+        _lv_frame(m).sub(m.DataFrame({"v": [1, 2], "w": [0.5, 0.5]}, index=m.Index(["a", "b"], name="k")), level="k")
+    ),
+    "frame add a Series across a column level": lambda m: _u6_shown(
+        _lv_columns(m).add(m.Series([10, 20], index=["x", "y"]), axis=1, level="l")
+    ),
+    "frame eq a Series on a level": lambda m: _u6_shown(_lv_frame(m).eq(_lv_keys(m), axis=0, level="k")),
+    "add on the only level of a flat index": lambda m: _u6_shown(_lv_ns(m).add(_lv_ns(m), level=0)),
+    "add on a level no label matches": lambda m: _u6_shown(
+        _lv_frame(m)["v"].add(m.Series([1], index=["z"]), level="k")
+    ),
+    "frame op a Series over its own MultiIndex rows": lambda m: _u6_shown(
+        _lv_frame(m).add(_lv_frame(m)["v"], axis=0)
+    ),
+    "eq of differently named Series": lambda m: _u6_shown(
+        _lv_named(m, "a", [1, 2]).eq(_lv_named(m, "b", [1, 3]))
+    ),
+    "== of differently named Series": lambda m: _u6_shown(_lv_named(m, "a", [1, 2]) == _lv_named(m, "b", [1, 3])),
+    "lt against an unnamed Series": lambda m: _u6_shown(_lv_named(m, "a", [1, 2]).lt(_lv_named(m, None, [1, 3]))),
+    "pow of differently named Series": lambda m: _u6_shown(
+        _lv_named(m, "a", [1, 2]).pow(_lv_named(m, "b", [1, 3]))
+    ),
+    "** against an unnamed Series": lambda m: _u6_shown(_lv_named(m, "a", [1, 2]) ** _lv_named(m, None, [1, 3])),
+    "mod against an unnamed Series": lambda m: _u6_shown(_lv_named(m, "a", [1, 2]).mod(_lv_named(m, None, [1, 3]))),
+    "to_records column_dtypes by name": lambda m: _lv_records(
+        _lv_frame(m).reset_index().to_records(column_dtypes={"v": "int32"})
+    ),
+    "to_records column_dtypes by position": lambda m: _lv_records(
+        m.DataFrame({"a": [1, 2], "b": [1.5, 2.5]}).to_records(column_dtypes={1: "float32"})
+    ),
+    "to_records one column dtype": lambda m: _lv_records(
+        m.DataFrame({"a": [1, 2], "b": [3, 4]}).to_records(index=False, column_dtypes="int8")
+    ),
+    "to_records index_dtypes": lambda m: _lv_records(
+        m.DataFrame({"a": [1, 2]}, index=m.Index([10, 20], name="i")).to_records(index_dtypes={"i": "int16"})
+    ),
+    "to_records an invalid column dtype raises": lambda m: _lv_records(
+        m.DataFrame({"a": [1, 2]}).to_records(column_dtypes=[1])
+    ),
+    # PeriodIndex NaT (never seen as missing: dropna kept it, hasnans was
+    # False) and cut / qcut precision (refused) and edges.
+    "PeriodIndex.dropna": lambda m: [repr(m.PeriodIndex(["2024-01", None, "2024-03"], freq="M", name="p").dropna())],
+    "PeriodIndex.isna": lambda m: [repr(m.PeriodIndex(["2024-01", None], freq="M").isna())],
+    "PeriodIndex.notna": lambda m: [repr(m.PeriodIndex(["2024-01", None], freq="M").notna())],
+    "PeriodIndex.hasnans": lambda m: [repr(m.PeriodIndex(["2024-01", None], freq="M").hasnans)],
+    "PeriodIndex.fillna with a Period": lambda m: [
+        repr(m.PeriodIndex(["2024-01", None], freq="M").fillna(m.Period("2024-02", freq="M")))
+    ],
+    "PeriodIndex.fillna with text": lambda m: [repr(m.PeriodIndex(["2024-01", None], freq="M").fillna("2024-02"))],
+    "cut precision 2": lambda m: [repr(m.cut([1.2345, 2.3456, 3.4567], 2, precision=2))],
+    "cut precision 0": lambda m: [repr(m.cut([1.2345, 2.3456, 3.4567, 9.87], 3, precision=0))],
+    "cut edges precision 1": lambda m: [repr(m.cut([1.25, 2.5], [1.23456, 2.0, 3.98765], precision=1))],
+    "qcut precision 1": lambda m: [repr(m.qcut([1.2345, 2.3456, 3.4567, 4.5], 2, precision=1))],
+    "qcut precision 4": lambda m: [repr(m.qcut([1.2345, 2.3456, 3.4567, 4.5], 3, precision=4))],
+    "cut a value on an inner edge": lambda m: [repr(m.cut([1.2345, 2.3456, 3.4567], 2))],
+    "cut include_lowest first edge": lambda m: [
+        repr(m.cut([1.235, 2.0, 3.0], [1.235, 2.0, 3.0], include_lowest=True))
+    ],
+    "qcut first edge": lambda m: [repr(m.qcut([1.235, 2.0, 3.0, 4.0], 2))],
+    # NEGATIVES: a shared name is kept; no level is the plain operation;
+    # cut at its default precision off the edges; an index without NaT.
+    "cut default precision": lambda m: [repr(m.cut([1, 4, 7, 10], 3))],
+    "PeriodIndex.dropna without NaT": lambda m: [repr(m.PeriodIndex(["2024-01", "2024-02"], freq="M").dropna())],
+    "eq of Series sharing a name": lambda m: _u6_shown(_lv_named(m, "a", [1, 2]).eq(_lv_named(m, "a", [1, 3]))),
+    "pow of Series sharing a name": lambda m: _u6_shown(_lv_named(m, "a", [1, 2]).pow(_lv_named(m, "a", [1, 3]))),
+    "add without a level": lambda m: _u6_shown(_lv_ns(m).add(_lv_ns(m))),
+    "to_records without dtypes": lambda m: _lv_records(m.DataFrame({"a": [1, 2]}).to_records()),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_LV_CASES))
+def test_levels_op_names_periods_and_cut_precision_like_pandas_u6p7i(case: str) -> None:
+    run = _LV_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

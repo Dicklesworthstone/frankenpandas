@@ -9227,6 +9227,13 @@ impl Period {
         Self { ordinal, freq }
     }
 
+    /// Whether this is NaT: the missing period, ordinal `i64::MIN` (what a
+    /// missing element of a PeriodIndex holds and what renders `NaT`).
+    #[must_use]
+    pub const fn is_nat(&self) -> bool {
+        self.ordinal == i64::MIN
+    }
+
     /// Integer position on this period's frequency axis, matching
     /// `pd.Period.ordinal`.
     #[must_use]
