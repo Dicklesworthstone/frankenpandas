@@ -19620,3 +19620,101 @@ _E49_CASES = {
 def test_everyday49_datetimelike_index_arithmetic_like_pandas_a2t82(case: str) -> None:
     run = _E49_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-uch5o: pickle / copy.deepcopy of the scalars, the typed
+# indexes, Categorical and the frames and Series holding them (each raised
+# 'cannot pickle'; a MultiIndex / CategoricalIndex came back a plain Index,
+# a masked Series float64, a zoned column naive).
+def _e50_shown(back: Any) -> list:
+    import pandas.api.types  # noqa: F401 - the oracle's own
+
+    shown = [repr(back)]
+    if hasattr(back, "dtypes") and hasattr(back, "columns"):
+        shown += [str(list(map(str, back.dtypes))), repr(back.index), repr(back.columns)]
+    elif hasattr(back, "dtype"):
+        shown.append(str(back.dtype))
+    if hasattr(back, "index") and not hasattr(back, "columns"):
+        shown.append(repr(back.index))
+    for attribute in ("unit", "freqstr", "name", "names", "tz"):
+        if hasattr(back, attribute):
+            shown.append(f"{attribute}={getattr(back, attribute)!r}")
+    return shown
+
+
+def _e50_pickled(make: Any) -> Any:
+    import copy
+    import pickle
+
+    def run(m: Any) -> list:
+        made = make(m)
+        return _e50_shown(pickle.loads(pickle.dumps(made))) + _e50_shown(copy.deepcopy(made))
+
+    return run
+
+
+def _e50_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "d": m.to_datetime(["2024-01-01", None]),
+            "z": m.to_datetime(["2024-01-01", "2024-01-02"]).tz_localize("US/Eastern"),
+            "t": m.to_timedelta(["1h", None]),
+            "p": m.period_range("2024-01", periods=2, freq="M"),
+            "c": m.Series(["b", "a"], dtype=m.CategoricalDtype(["b", "a", "z"], ordered=True)),
+            "i": m.Series([1, None], dtype="Int64"),
+            "s": m.Series(["x", None], dtype="string"),
+            "n": m.Series([1, 2], dtype="int32"),
+        },
+        index=m.date_range("2024-03-01", periods=2, freq="D", name="when"),
+    )
+
+
+_E50_CASES = {
+    "Timestamp": _e50_pickled(lambda m: m.Timestamp("2024-01-02 03:04:05.000000006")),
+    "zoned Timestamp": _e50_pickled(lambda m: m.Timestamp("2024-01-02 03:04", tz="US/Eastern")),
+    "Timestamp of seconds": _e50_pickled(lambda m: m.Timestamp("2024-01-02")),
+    "NaT is NaT": lambda m: [__import__("pickle").loads(__import__("pickle").dumps(m.NaT)) is m.NaT],
+    "NA is NA": lambda m: [__import__("copy").deepcopy(m.NA) is m.NA],
+    "Timedelta": _e50_pickled(lambda m: m.Timedelta("1 days 02:03:04.5")),
+    "Period": _e50_pickled(lambda m: m.Period("2024-03", freq="M")),
+    "Interval": _e50_pickled(lambda m: m.Interval(0, 1, closed="left")),
+    "DateOffset": lambda m: [repr(__import__("pickle").loads(__import__("pickle").dumps(m.DateOffset(months=2, days=1))))],
+    "MonthEnd": lambda m: [repr(__import__("pickle").loads(__import__("pickle").dumps(m.offsets.MonthEnd(2))))],
+    "QuarterBegin": lambda m: [
+        repr(__import__("pickle").loads(__import__("pickle").dumps(m.offsets.QuarterBegin(startingMonth=2))))
+    ],
+    "Week": lambda m: [repr(__import__("copy").deepcopy(m.offsets.Week(weekday=3)))],
+    "an offset still adds": lambda m: [
+        repr(m.Timestamp("2024-01-15") + __import__("copy").deepcopy(m.offsets.MonthEnd()))
+    ],
+    "frame of every kind": _e50_pickled(_e50_frame),
+    "Series of dates under a named range": _e50_pickled(lambda m: _e50_frame(m)["d"]),
+    "masked Series": _e50_pickled(lambda m: m.Series([1, None], dtype="Int64", name="i")),
+    "categorical Series": _e50_pickled(lambda m: _e50_frame(m)["c"]),
+    "DatetimeIndex": _e50_pickled(lambda m: m.date_range("2024-01-01", periods=3, freq="D", name="d")),
+    "zoned DatetimeIndex": _e50_pickled(
+        lambda m: m.date_range("2024-01-01", periods=2, freq="h", tz="UTC").tz_convert("Asia/Tokyo")
+    ),
+    "TimedeltaIndex": _e50_pickled(lambda m: m.to_timedelta(["1h", None])),
+    "PeriodIndex": _e50_pickled(lambda m: m.period_range("2024-01", periods=2, freq="M", name="p")),
+    "CategoricalIndex": _e50_pickled(lambda m: m.CategoricalIndex(["a", "b"], categories=["b", "a"], name="c")),
+    "MultiIndex": _e50_pickled(lambda m: m.MultiIndex.from_tuples([("a", 1), ("b", 2)], names=["k", "n"])),
+    "IntervalIndex": lambda m: [repr(__import__("copy").deepcopy(m.interval_range(0, 2, name="i")))],
+    "Categorical": _e50_pickled(lambda m: m.Categorical(["a", "b"], categories=["b", "a"], ordered=True)),
+    "frame under a MultiIndex": _e50_pickled(
+        lambda m: m.DataFrame({"v": [1, 2]}, index=m.MultiIndex.from_tuples([("a", 1), ("b", 2)], names=["k", "n"]))
+    ),
+    # A default index came back a plain Int64 Index (not a RangeIndex).
+    "int frame": _e50_pickled(lambda m: m.DataFrame({"a": [1, 2], "b": [1.5, None]})),
+    "named float Series": _e50_pickled(lambda m: m.Series([1.5, 2.5], name="x")),
+    # Negatives: already pandas'.
+    "Index": _e50_pickled(lambda m: m.Index(["a", "b"], name="i")),
+    "RangeIndex": _e50_pickled(lambda m: m.RangeIndex(2, 8, 2, name="r")),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E50_CASES))
+def test_everyday50_pickle_and_deepcopy_like_pandas_uch5o(case: str) -> None:
+    run = _E50_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

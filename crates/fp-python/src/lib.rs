@@ -2661,6 +2661,14 @@ fn na_object(py: Python<'_>) -> PyResult<Py<PyAny>> {
 
 #[pymethods]
 impl PyNAType {
+    /// Pickles (and deep-copies) as the NA singleton ([`restore`]).
+    fn __reduce__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        restore_call(py, "NA", py.None().into_bound(py))
+    }
+
     #[new]
     fn new() -> Self {
         PyNAType
@@ -2932,6 +2940,14 @@ fn nat_object(py: Python<'_>) -> PyResult<Py<PyAny>> {
 
 #[pymethods]
 impl PyNaTType {
+    /// Pickles (and deep-copies) as the NaT singleton ([`restore`]).
+    fn __reduce__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        restore_call(py, "NaT", py.None().into_bound(py))
+    }
+
     #[new]
     fn new() -> Self {
         PyNaTType
@@ -3156,6 +3172,15 @@ pub struct PyTimedelta {
 
 #[pymethods]
 impl PyTimedelta {
+    /// Pickles (and deep-copies) as this duration ([`restore`]; it could not
+    /// be pickled, br-frankenpandas-uch5o).
+    fn __reduce__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        restore_call(py, "Timedelta", self.nanos.into_bound_py_any(py)?)
+    }
+
     /// pandas' `Timedelta(value, unit=, **components)`: a string, int or
     /// float (in `unit`, rounded to whole nanoseconds; NaN is NaT), another
     /// Timedelta, a `datetime.timedelta` or numpy timedelta64, or the
@@ -4490,6 +4515,18 @@ impl PyTimestamp {
 
 #[pymethods]
 impl PyTimestamp {
+    /// Pickles (and deep-copies) as this instant - its nanoseconds, zone
+    /// and unit ([`restore`]; it could not be pickled,
+    /// br-frankenpandas-uch5o).
+    fn __reduce__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let payload =
+            (self.inner.nanos, self.inner.tz.clone(), self.unit.name()).into_bound_py_any(py)?;
+        restore_call(py, "Timestamp", payload)
+    }
+
     /// A missing input (None, NaT, NaN, 'NaT', 'nan', '') is pandas' NaT
     /// singleton (it was a NaT-holding Timestamp or raised); a string
     /// pandas parses - '2024-01', 'Jan 5 2024', '2024/01/05' - is parsed as
@@ -5483,6 +5520,20 @@ fn period_freq_offset(freq: PeriodFreq, n: i64) -> PyResult<PyDateOffset> {
 
 #[pymethods]
 impl PyPeriod {
+    /// Pickles (and deep-copies) as `Period(str(self), freq=freqstr)`
+    /// ([`restore`]; it could not be pickled, br-frankenpandas-uch5o).
+    fn __reduce__<'py>(
+        slf: &Bound<'py, Self>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let py = slf.py();
+        let payload = constructor_payload(
+            py,
+            vec![slf.str()?.into_any()],
+            &[("freq", slf.getattr("freqstr")?)],
+        )?;
+        restore_call(py, "Period", payload)
+    }
+
     #[new]
     #[pyo3(signature = (*args, **kwargs))]
     fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
@@ -12125,6 +12176,19 @@ impl PyDatetimeIndex {
 
 #[pymethods]
 impl PyDatetimeIndex {
+    /// Pickles (and deep-copies) as these instants - their nanoseconds,
+    /// zone, freq and name ([`restore`]; it could not be pickled,
+    /// br-frankenpandas-uch5o).
+    fn __reduce__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let name = axis_name_to_py(py, self.inner.name())?.into_bound_py_any(py)?;
+        let payload =
+            (self.inner.asi8(), self.inner.tz(), self.inner.freq(), name).into_bound_py_any(py)?;
+        restore_call(py, "DatetimeIndex", payload)
+    }
+
     /// pandas' `DatetimeIndex(data, freq=, tz=, name=)`: `tz` localizes
     /// naive data (wall times in that zone) and converts aware data;
     /// `freq` is 'infer' (the labels' inferred frequency) or a frequency the
@@ -13996,6 +14060,29 @@ impl PyMultiIndex {
 
 #[pymethods]
 impl PyMultiIndex {
+    /// Pickles (and deep-copies) as `MultiIndex.from_arrays(level values,
+    /// names=)` ([`restore`]; it came back a plain Index of joined labels,
+    /// br-frankenpandas-uch5o).
+    fn __reduce__<'py>(
+        slf: &Bound<'py, Self>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let py = slf.py();
+        let levels = slf.borrow().inner.nlevels();
+        let arrays = (0..levels)
+            .map(|level| {
+                slf.call_method1("get_level_values", (level,))?
+                    .call_method0("tolist")
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let names = slf
+            .getattr("names")?
+            .try_iter()?
+            .collect::<PyResult<Vec<_>>>()?;
+        let names = PyList::new(py, names)?;
+        let payload = (PyList::new(py, arrays)?, names).into_bound_py_any(py)?;
+        restore_call(py, "MultiIndex", payload)
+    }
+
     /// `np.asarray(mi)`: its tuples in a 1-D object array, as pandas' (a
     /// 0-d array holding the MultiIndex; br-frankenpandas-myyy1).
     #[pyo3(signature = (dtype=None, copy=None))]
@@ -15769,6 +15856,18 @@ impl PyTimedeltaIndex {
 
 #[pymethods]
 impl PyTimedeltaIndex {
+    /// Pickles (and deep-copies) as these durations - their nanoseconds,
+    /// freq and name ([`restore`]; it could not be pickled,
+    /// br-frankenpandas-uch5o).
+    fn __reduce__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let name = axis_name_to_py(py, self.inner.name())?.into_bound_py_any(py)?;
+        let payload = (self.inner.asi8(), self.inner.freq(), name).into_bound_py_any(py)?;
+        restore_call(py, "TimedeltaIndex", payload)
+    }
+
     #[new]
     #[pyo3(signature = (data=None, unit=None, freq=None, name=None))]
     pub fn new(
@@ -17489,6 +17588,24 @@ impl PyPeriodIndex {
 
 #[pymethods]
 impl PyPeriodIndex {
+    /// Pickles (and deep-copies) as `PeriodIndex(periods, freq=, name=)`
+    /// ([`restore`]; it could not be pickled, br-frankenpandas-uch5o).
+    fn __reduce__<'py>(
+        slf: &Bound<'py, Self>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let py = slf.py();
+        let periods = PyList::new(py, slf.try_iter()?.collect::<PyResult<Vec<_>>>()?)?;
+        let payload = constructor_payload(
+            py,
+            vec![periods.into_any()],
+            &[
+                ("freq", slf.getattr("freqstr")?),
+                ("name", slf.getattr("name")?),
+            ],
+        )?;
+        restore_call(py, "PeriodIndex", payload)
+    }
+
     #[new]
     #[pyo3(signature = (data=None, freq=None, name=None))]
     pub fn new(
@@ -18715,6 +18832,28 @@ impl PyCategoricalIndex {
 
 #[pymethods]
 impl PyCategoricalIndex {
+    /// Pickles (and deep-copies) as `CategoricalIndex(values, categories=,
+    /// ordered=, name=)` ([`restore`]; it came back a plain Index,
+    /// br-frankenpandas-uch5o).
+    fn __reduce__<'py>(
+        slf: &Bound<'py, Self>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let py = slf.py();
+        let values = PyList::new(py, slf.try_iter()?.collect::<PyResult<Vec<_>>>()?)?;
+        let categories = slf.getattr("categories")?.try_iter()?;
+        let categories = PyList::new(py, categories.collect::<PyResult<Vec<_>>>()?)?;
+        let payload = constructor_payload(
+            py,
+            vec![values.into_any()],
+            &[
+                ("categories", categories.into_any()),
+                ("ordered", slf.getattr("ordered")?),
+                ("name", slf.getattr("name")?),
+            ],
+        )?;
+        restore_call(py, "CategoricalIndex", payload)
+    }
+
     #[new]
     #[pyo3(signature = (data=None, categories=None, ordered=false, name=None))]
     pub fn new(
@@ -25401,37 +25540,32 @@ impl PySeries {
         pandas_series_repr(&self.inner)
     }
 
+    /// Pickles (and deep-copies) through [`restore`]: the values, the index
+    /// object (a DatetimeIndex keeps its freq and zone, a MultiIndex its
+    /// levels) and the dtype the values alone would not bring back - a
+    /// categorical's categories and order, a masked or `string` dtype, a
+    /// narrow width (a masked Series came back float64, a categorical with
+    /// its categories re-inferred; br-frankenpandas-uch5o).
     fn __reduce__<'py>(
-        &self,
-        py: Python<'py>,
+        slf: &Bound<'py, Self>,
     ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
-        let constructor = py.get_type::<PySeries>().into_any();
-        let vals: Vec<Py<PyAny>> = self
-            .inner
-            .column()
+        let py = slf.py();
+        let this = slf.borrow();
+        // Each value as the column holds it (a zoned instant keeps its zone).
+        let column = this.inner.column();
+        let vals: Vec<Py<PyAny>> = column
             .values()
             .iter()
-            .map(|s| scalar_to_py(py, s))
+            .map(|s| cell_to_py(py, column, s))
             .collect::<PyResult<Vec<_>>>()?;
-        let vals_list = PyList::new(py, &vals)?;
-        let idx_labels: Vec<Py<PyAny>> = self
-            .inner
-            .index()
-            .labels()
-            .iter()
-            .map(|lbl| index_label_to_py(py, lbl))
-            .collect::<PyResult<Vec<_>>>()?;
-        let idx_list = PyList::new(py, &idx_labels)?;
-        let name = self.name(py)?.into_bound_py_any(py)?;
-        // Series(data, index, dtype, name): a categorical comes back as
-        // 'category' (its categories re-inferred from the values).
-        let dtype = if self.inner.is_categorical() {
-            "category".into_bound_py_any(py)?
-        } else {
-            py.None().into_bound(py)
-        };
-        let args = PyTuple::new(py, [vals_list.as_any(), idx_list.as_any(), &dtype, &name])?;
-        Ok((constructor, args))
+        let payload = (
+            PyList::new(py, &vals)?,
+            slf.getattr("index")?,
+            pickled_dtype(py, this.inner.column())?,
+            this.name(py)?,
+        )
+            .into_bound_py_any(py)?;
+        restore_call(py, "Series", payload)
     }
 
     /// Purely integer-location based indexing for selection by position
@@ -35691,34 +35825,44 @@ impl PyDataFrame {
         pandas_frame_repr(&self.inner)
     }
 
+    /// Pickles (and deep-copies) through [`restore`]: each column's values,
+    /// the index object (its class, freq, zone and name kept; the labels
+    /// were re-inferred, unnamed), the column labels, and each column's
+    /// dtype where its values alone would not bring it back (see
+    /// [`pickled_dtype`]; masked, `string` and categorical columns came
+    /// back object or float64; br-frankenpandas-uch5o).
     fn __reduce__<'py>(
-        &self,
-        py: Python<'py>,
+        slf: &Bound<'py, Self>,
     ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
-        let constructor = py.get_type::<PyDataFrame>().into_any();
+        let py = slf.py();
+        let this = slf.borrow();
         let dict = PyDict::new(py);
-        let col_names = self.column_labels();
+        let dtypes = PyDict::new(py);
+        let col_names = this.column_labels();
         for col_name in &col_names {
-            if let Some(col) = self.inner.column(col_name) {
+            if let Some(col) = this.inner.column(col_name) {
+                // Each value as the column holds it (a zoned instant keeps
+                // its zone; it came back naive).
                 let vals: Vec<Py<PyAny>> = col
                     .values()
                     .iter()
-                    .map(|s| scalar_to_py(py, s))
+                    .map(|s| cell_to_py(py, col, s))
                     .collect::<PyResult<Vec<_>>>()?;
                 dict.set_item(col_name, PyList::new(py, &vals)?)?;
+                let dtype = pickled_dtype(py, col)?;
+                if !dtype.is_none() {
+                    dtypes.set_item(col_name, dtype)?;
+                }
             }
         }
-        let idx_labels: Vec<Py<PyAny>> = self
-            .inner
-            .index()
-            .labels()
-            .iter()
-            .map(|lbl| index_label_to_py(py, lbl))
-            .collect::<PyResult<Vec<_>>>()?;
-        let idx_list = PyList::new(py, &idx_labels)?;
-        let cols_list = PyList::new(py, &col_names)?;
-        let args = PyTuple::new(py, [dict.as_any(), idx_list.as_any(), cols_list.as_any()])?;
-        Ok((constructor, args))
+        let payload = (
+            dict,
+            slf.getattr("index")?,
+            PyList::new(py, &col_names)?,
+            dtypes,
+        )
+            .into_bound_py_any(py)?;
+        restore_call(py, "DataFrame", payload)
     }
 
     /// Return the first n rows. pandas slices `iloc[:n]`, so `n=None` keeps
@@ -69583,6 +69727,20 @@ impl PyInterval {
 
 #[pymethods]
 impl PyInterval {
+    /// Pickles (and deep-copies) as `Interval(left, right, closed=)`
+    /// ([`restore`]; it could not be pickled, br-frankenpandas-uch5o).
+    fn __reduce__<'py>(
+        slf: &Bound<'py, Self>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let py = slf.py();
+        let payload = constructor_payload(
+            py,
+            vec![slf.getattr("left")?, slf.getattr("right")?],
+            &[("closed", slf.getattr("closed")?)],
+        )?;
+        restore_call(py, "Interval", payload)
+    }
+
     /// Integer endpoints make an int64 interval (`Interval(0, 3)`); any
     /// float one a float64 interval, as pandas.
     #[new]
@@ -69776,6 +69934,21 @@ pub struct PyIntervalIndex {
 
 #[pymethods]
 impl PyIntervalIndex {
+    /// Pickles (and deep-copies) as `IntervalIndex(intervals, name=)`
+    /// ([`restore`]; it could not be pickled, br-frankenpandas-uch5o).
+    fn __reduce__<'py>(
+        slf: &Bound<'py, Self>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let py = slf.py();
+        let intervals = PyList::new(py, slf.try_iter()?.collect::<PyResult<Vec<_>>>()?)?;
+        let payload = constructor_payload(
+            py,
+            vec![intervals.into_any()],
+            &[("name", slf.getattr("name")?)],
+        )?;
+        restore_call(py, "IntervalIndex", payload)
+    }
+
     #[new]
     #[pyo3(signature = (data=None, name=None))]
     fn new(data: Option<&Bound<'_, PyAny>>, name: Option<&str>) -> PyResult<Self> {
@@ -71371,6 +71544,27 @@ impl PyCategorical {
 
 #[pymethods]
 impl PyCategorical {
+    /// Pickles (and deep-copies) as `Categorical(values, categories=,
+    /// ordered=)` ([`restore`]; it could not be pickled,
+    /// br-frankenpandas-uch5o).
+    fn __reduce__<'py>(
+        slf: &Bound<'py, Self>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let py = slf.py();
+        let values = PyList::new(py, slf.try_iter()?.collect::<PyResult<Vec<_>>>()?)?;
+        let categories = slf.getattr("categories")?.try_iter()?;
+        let categories = PyList::new(py, categories.collect::<PyResult<Vec<_>>>()?)?;
+        let payload = constructor_payload(
+            py,
+            vec![values.into_any()],
+            &[
+                ("categories", categories.into_any()),
+                ("ordered", slf.getattr("ordered")?),
+            ],
+        )?;
+        restore_call(py, "Categorical", payload)
+    }
+
     #[new]
     #[pyo3(signature = (values, categories=None, ordered=None))]
     fn new(
@@ -71759,6 +71953,61 @@ impl PyDateOffset {
             attr,
             ..Default::default()
         }
+    }
+
+    /// The offset a pickled one's fields describe (see `__reduce__`); its
+    /// kind one of [`DATE_OFFSET_KINDS`].
+    fn restored(payload: &Bound<'_, PyAny>) -> PyResult<Self> {
+        type Relative = (i64, i64, i64, i64, i64, i64, i64, i64, i64);
+        type Named = (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let ((n, normalize), relative, absolute, (anchor, kind, attr, rule_code)): (
+            (i64, bool),
+            Relative,
+            Vec<Option<i64>>,
+            Named,
+        ) = payload.extract()?;
+        let (years, months, weeks, days, hours, minutes, seconds, microseconds, nanoseconds) =
+            relative;
+        let kind = match kind {
+            None => None,
+            Some(kind) => Some(
+                DATE_OFFSET_KINDS
+                    .iter()
+                    .copied()
+                    .find(|known| *known == kind)
+                    .ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "unknown offset class {kind:?} in a pickle"
+                        ))
+                    })?,
+            ),
+        };
+        let absolute: [Option<i64>; 8] = absolute.try_into().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>("a pickled offset needs 8 fields")
+        })?;
+        Ok(Self {
+            n,
+            normalize,
+            years,
+            months,
+            weeks,
+            days,
+            hours,
+            minutes,
+            seconds,
+            microseconds,
+            nanoseconds,
+            absolute,
+            anchor,
+            kind,
+            attr,
+            rule_code,
+        })
     }
 
     /// A fixed tick of `nanos` per unit (Day, Hour, ...).
@@ -72231,6 +72480,38 @@ fn series_apply_offset(
 
 #[pymethods]
 impl PyDateOffset {
+    /// Pickles (and deep-copies) as this offset - every field, rebuilt by
+    /// [`PyDateOffset::restored`] ([`restore`]; it could not be pickled,
+    /// br-frankenpandas-uch5o).
+    fn __reduce__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let payload = (
+            (self.n, self.normalize),
+            (
+                self.years,
+                self.months,
+                self.weeks,
+                self.days,
+                self.hours,
+                self.minutes,
+                self.seconds,
+                self.microseconds,
+                self.nanoseconds,
+            ),
+            self.absolute.to_vec(),
+            (
+                self.anchor.clone(),
+                self.kind,
+                self.attr.clone(),
+                self.rule_code.clone(),
+            ),
+        )
+            .into_bound_py_any(py)?;
+        restore_call(py, "DateOffset", payload)
+    }
+
     /// pandas' `DateOffset(n=1, normalize=False, **kwds)`: relative
     /// `years`..`nanoseconds` and absolute `year`..`nanosecond`.
     #[new]
@@ -77667,6 +77948,199 @@ fn plotting_deregister_matplotlib_converters() -> PyResult<()> {
     Ok(())
 }
 
+/// Every pandas offset class a [`PyDateOffset`] stands for (its `kind`), so
+/// an unpickled offset takes the kind back ([`restore`]).
+const DATE_OFFSET_KINDS: [&str; 23] = [
+    "Day",
+    "Hour",
+    "Minute",
+    "Second",
+    "Milli",
+    "Micro",
+    "Nano",
+    "Week",
+    "MonthEnd",
+    "MonthBegin",
+    "BusinessMonthEnd",
+    "BusinessMonthBegin",
+    "SemiMonthEnd",
+    "SemiMonthBegin",
+    "QuarterEnd",
+    "QuarterBegin",
+    "BusinessQuarterEnd",
+    "BusinessQuarterBegin",
+    "YearEnd",
+    "YearBegin",
+    "BusinessYearEnd",
+    "BusinessYearBegin",
+    "BusinessDay",
+];
+
+/// The `(callable, args)` an object's `__reduce__` gives: frankenpandas'
+/// [`restore`] with what the object is (`kind`) and what it keeps
+/// (`payload`). A class may not be found by pickle under its module, so
+/// every object here pickles through this one function.
+fn restore_call<'py>(
+    py: Python<'py>,
+    kind: &str,
+    payload: Bound<'py, PyAny>,
+) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+    let restore = py.import("frankenpandas")?.getattr("_restore")?;
+    let args = PyTuple::new(py, [kind.into_bound_py_any(py)?, payload])?;
+    Ok((restore, args))
+}
+
+/// A class's constructor call as a [`restore`] payload: `(args, kwargs)`.
+fn constructor_payload<'py>(
+    py: Python<'py>,
+    args: Vec<Bound<'py, PyAny>>,
+    kwargs: &[(&str, Bound<'py, PyAny>)],
+) -> PyResult<Bound<'py, PyAny>> {
+    let keywords = PyDict::new(py);
+    for (key, value) in kwargs {
+        keywords.set_item(*key, value)?;
+    }
+    Ok(PyTuple::new(
+        py,
+        [PyTuple::new(py, args)?.into_any(), keywords.into_any()],
+    )?
+    .into_any())
+}
+
+/// The dtype a pickled column is rebuilt under where its values alone would
+/// not bring it back - a categorical's categories and order, a masked or
+/// `string` dtype, a narrow width - else None, the values inferring it.
+fn pickled_dtype<'py>(py: Python<'py>, column: &Column) -> PyResult<Bound<'py, PyAny>> {
+    if let Some(meta) = column.categorical() {
+        let categories = meta
+            .categories
+            .iter()
+            .map(|category| scalar_to_py(py, category))
+            .collect::<PyResult<Vec<_>>>()?;
+        return ("category", PyList::new(py, categories)?, meta.ordered).into_bound_py_any(py);
+    }
+    if column.dtype().is_nullable() || column.is_pandas_string() || column.width().is_some() {
+        return column_pandas_dtype_name(column).into_bound_py_any(py);
+    }
+    Ok(py.None().into_bound(py))
+}
+
+/// The dtype object a [`pickled_dtype`] spec names.
+fn restored_dtype<'py>(py: Python<'py>, spec: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let Ok((_, categories, ordered)) = spec.extract::<(String, Bound<'py, PyAny>, bool)>() else {
+        return Ok(spec.clone());
+    };
+    let keywords = PyDict::new(py);
+    keywords.set_item("ordered", ordered)?;
+    py.import("frankenpandas")?
+        .getattr("CategoricalDtype")?
+        .call((categories,), Some(&keywords))
+}
+
+/// Rebuilds a pickled (or deep-copied) frankenpandas object - the callable
+/// every `__reduce__` here names ([`restore_call`]); each type could not be
+/// pickled, a MultiIndex or CategoricalIndex came back a plain Index and a
+/// masked Series float64 (br-frankenpandas-uch5o). `payload` by `kind`:
+/// Timestamp (nanos, zone, unit); Timedelta nanos; NaT / NA none;
+/// DateOffset its fields; DatetimeIndex (nanos, zone, freq, name);
+/// TimedeltaIndex (nanos, freq, name); Series (values, index, dtype, name);
+/// DataFrame (columns' values, index, column labels, dtypes); MultiIndex
+/// (level values, names); any other class the (args, kwargs) of its
+/// constructor.
+#[pyfunction(name = "_restore")]
+fn restore(py: Python<'_>, kind: &str, payload: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    let module = py.import("frankenpandas")?;
+    match kind {
+        "Timestamp" => {
+            let (nanos, tz, unit): (i64, Option<String>, String) = payload.extract()?;
+            PyTimestamp {
+                inner: Timestamp { nanos, tz },
+                unit: StampUnit::of_unit(&unit),
+            }
+            .into_py_any(py)
+        }
+        "Timedelta" => PyTimedelta {
+            nanos: payload.extract()?,
+        }
+        .into_py_any(py),
+        "NaT" | "NA" => Ok(module.getattr(kind)?.unbind()),
+        "DateOffset" => PyDateOffset::restored(payload)?.into_py_any(py),
+        "DatetimeIndex" => {
+            let (nanos, tz, freq, name): (
+                Vec<i64>,
+                Option<String>,
+                Option<String>,
+                Bound<'_, PyAny>,
+            ) = payload.extract()?;
+            let index = DatetimeIndex::new(nanos)
+                .with_tz(tz.as_deref())
+                .map_err(index_error_to_py)?
+                .with_freq(freq)
+                .set_names(py_axis_name(&name)?);
+            PyDatetimeIndex { inner: index }.into_py_any(py)
+        }
+        "TimedeltaIndex" => {
+            let (nanos, freq, name): (Vec<i64>, Option<String>, Bound<'_, PyAny>) =
+                payload.extract()?;
+            let index = TimedeltaIndex::new(nanos)
+                .with_freq(freq)
+                .set_names(py_axis_name(&name)?);
+            PyTimedeltaIndex { inner: index }.into_py_any(py)
+        }
+        "Series" => {
+            let (values, index, dtype, name): (
+                Bound<'_, PyAny>,
+                Bound<'_, PyAny>,
+                Bound<'_, PyAny>,
+                Bound<'_, PyAny>,
+            ) = payload.extract()?;
+            let keywords = PyDict::new(py);
+            keywords.set_item("index", index)?;
+            keywords.set_item("dtype", restored_dtype(py, &dtype)?)?;
+            keywords.set_item("name", name)?;
+            Ok(module
+                .getattr("Series")?
+                .call((values,), Some(&keywords))?
+                .unbind())
+        }
+        "DataFrame" => {
+            let (data, index, columns, dtypes): (
+                Bound<'_, PyAny>,
+                Bound<'_, PyAny>,
+                Bound<'_, PyAny>,
+                Bound<'_, PyDict>,
+            ) = payload.extract()?;
+            let keywords = PyDict::new(py);
+            keywords.set_item("index", index)?;
+            keywords.set_item("columns", columns)?;
+            let mut frame = module
+                .getattr("DataFrame")?
+                .call((data,), Some(&keywords))?;
+            if !dtypes.is_empty() {
+                let wanted = PyDict::new(py);
+                for (column, spec) in dtypes.iter() {
+                    wanted.set_item(column, restored_dtype(py, &spec)?)?;
+                }
+                frame = frame.call_method1("astype", (wanted,))?;
+            }
+            Ok(frame.unbind())
+        }
+        "MultiIndex" => {
+            let (arrays, names): (Bound<'_, PyAny>, Bound<'_, PyAny>) = payload.extract()?;
+            let keywords = PyDict::new(py);
+            keywords.set_item("names", names)?;
+            Ok(module
+                .getattr("MultiIndex")?
+                .call_method("from_arrays", (arrays,), Some(&keywords))?
+                .unbind())
+        }
+        _ => {
+            let (args, kwargs): (Bound<'_, PyTuple>, Bound<'_, PyDict>) = payload.extract()?;
+            Ok(module.getattr(kind)?.call(args, Some(&kwargs))?.unbind())
+        }
+    }
+}
+
 /// FrankenPandas Python module.
 #[pymodule]
 fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -77779,6 +78253,7 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pivot, m)?)?;
     m.add_function(wrap_pyfunction!(pivot_table, m)?)?;
     m.add_function(wrap_pyfunction!(cut, m)?)?;
+    m.add_function(wrap_pyfunction!(restore, m)?)?;
     m.add_function(wrap_pyfunction!(qcut, m)?)?;
     m.add_function(wrap_pyfunction!(to_numeric, m)?)?;
     m.add_function(wrap_pyfunction!(to_datetime, m)?)?;
