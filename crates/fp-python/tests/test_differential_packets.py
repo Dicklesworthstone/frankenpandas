@@ -17199,3 +17199,113 @@ def test_index_get_indexer_method_needs_unique_labels_n57tz() -> None:
         pd.Index([1, 1, 2]).get_indexer([2], method="pad")
     with pytest.raises(fpd.errors.InvalidIndexError, match=message):
         fpd.Index([1, 1, 2]).get_indexer([2], method="pad")
+
+
+# br-frankenpandas-n57tz, slice f: resample's first argument is `rule` (it
+# was `freq`); axis / convention / kind warn pandas' deprecations, `offset`
+# moves a fixed step's origin, `level` is 0 or the index's name, a Series'
+# `on` is pandas' KeyError - all were unexpected keywords (a frame's level
+# was refused).
+def _rs_series(m: Any, name: Any = None) -> Any:
+    index = m.date_range("2024-01-01 00:30", periods=10, freq="7h", name=name)
+    return m.Series(np.arange(10), index=index, name="v")
+
+
+def _rs_frame(m: Any, name: Any = None) -> Any:
+    frame = _rs_series(m, name).to_frame()
+    frame["w"] = np.arange(10) * 2.0
+    return frame
+
+
+def _rs_shown(result: Any) -> list:
+    dtypes = [str(t) for t in result.dtypes] if hasattr(result, "columns") else [str(result.dtype)]
+    return result.to_string().split("\n") + dtypes
+
+
+_RS_CASES = {
+    "rule keyword": lambda m: _rs_shown(_rs_series(m).resample(rule="D").sum()),
+    "frame rule keyword": lambda m: _rs_shown(_rs_frame(m).resample(rule="D").sum()),
+    "positional closed after axis": lambda m: _rs_shown(_rs_series(m).resample("D", 0, "right").sum()),
+    "offset text": lambda m: _rs_shown(_rs_series(m).resample("D", offset="2h").sum()),
+    "offset Timedelta": lambda m: _rs_shown(_rs_series(m).resample("D", offset=m.Timedelta("-3h")).sum()),
+    "offset int nanoseconds": lambda m: _rs_shown(_rs_series(m).resample("D", offset=3600 * 10**9).sum()),
+    "offset datetime.timedelta": lambda m: _rs_shown(
+        _rs_series(m).resample("D", offset=datetime.timedelta(hours=4)).sum()
+    ),
+    "offset from start": lambda m: _rs_shown(_rs_series(m).resample("D", origin="start", offset="1h").sum()),
+    "offset from epoch": lambda m: _rs_shown(_rs_series(m).resample("D", origin="epoch", offset="5h").sum()),
+    "offset from a timestamp": lambda m: _rs_shown(
+        _rs_series(m).resample("D", origin="2023-06-01 04:00", offset="1h").sum()
+    ),
+    "offset from end": lambda m: _rs_shown(_rs_series(m).resample("D", origin="end", offset="1h").sum()),
+    "offset from end_day sub-day": lambda m: _rs_shown(
+        _rs_series(m).resample("5h", origin="end_day", offset="30min").sum()
+    ),
+    "offset sub-day rule": lambda m: _rs_shown(_rs_series(m).resample("3h", offset="30min").sum()),
+    "offset closed right": lambda m: _rs_shown(
+        _rs_series(m).resample("D", offset="2h", closed="right", label="right").sum()
+    ),
+    "offset frame mean": lambda m: _rs_shown(_rs_frame(m).resample("D", offset="2h").mean()),
+    "offset frame on": lambda m: _rs_shown(
+        _rs_frame(m).reset_index().resample("D", on="index", offset="2h").sum()
+    ),
+    "axis 0": lambda m: _rs_shown(_rs_series(m).resample("D", axis=0).sum()),
+    "axis index": lambda m: _rs_shown(_rs_series(m).resample("D", axis="index").sum()),
+    "frame axis 0": lambda m: _rs_shown(_rs_frame(m).resample("D", axis=0).sum()),
+    "kind timestamp": lambda m: _rs_shown(_rs_series(m).resample("D", kind="timestamp").sum()),
+    "kind None warns": lambda m: _rs_shown(_rs_series(m).resample("D", kind=None).sum()),
+    "convention": lambda m: _rs_shown(_rs_series(m).resample("D", convention="start").sum()),
+    "convention None warns": lambda m: _rs_shown(_rs_series(m).resample("D", convention=None).sum()),
+    "group_keys True": lambda m: _rs_shown(_rs_series(m).resample("D", group_keys=True).sum()),
+    "level 0": lambda m: _rs_shown(_rs_series(m).resample("D", level=0).sum()),
+    "level name": lambda m: _rs_shown(_rs_series(m, "t").resample("D", level="t").sum()),
+    "frame level 0": lambda m: _rs_shown(_rs_frame(m).resample("D", level=0).sum()),
+    "frame level name": lambda m: _rs_shown(_rs_frame(m, "t").resample("D", level="t").sum()),
+    # Negatives: a calendar rule reads no offset, and the rest are pandas'
+    # errors.
+    "offset ignored by a calendar rule": lambda m: _rs_shown(_rs_series(m).resample("W", offset="2h").sum()),
+    "offset from end before the first label": lambda m: _rs_shown(
+        _rs_series(m).resample("D", origin="end", offset="-1h").sum()
+    ),
+    "offset from end_day before the first label": lambda m: _rs_shown(
+        _rs_series(m).resample("D", origin="end_day", offset="3h").sum()
+    ),
+    "offset unreadable": lambda m: _rs_shown(_rs_series(m).resample("D", offset="abc").sum()),
+    "offset unreadable for a calendar rule": lambda m: _rs_shown(_rs_series(m).resample("W", offset="abc").sum()),
+    "axis 1 of a Series": lambda m: _rs_shown(_rs_series(m).resample("D", axis=1).sum()),
+    "axis None": lambda m: _rs_shown(_rs_series(m).resample("D", axis=None).sum()),
+    "Series on": lambda m: _rs_shown(_rs_series(m).resample("D", on="x").sum()),
+    "Series on and level": lambda m: _rs_shown(_rs_series(m).resample("D", on="x", level=0).sum()),
+    "level -1": lambda m: _rs_shown(_rs_series(m).resample("D", level=-1).sum()),
+    "level 1": lambda m: _rs_shown(_rs_series(m).resample("D", level=1).sum()),
+    "level another name": lambda m: _rs_shown(_rs_series(m, "t").resample("D", level="u").sum()),
+    "frame level -1": lambda m: _rs_shown(_rs_frame(m).resample("D", level=-1).sum()),
+    "frame level 1": lambda m: _rs_shown(_rs_frame(m).resample("D", level=1).sum()),
+    "frame on and level": lambda m: _rs_shown(
+        _rs_frame(m).reset_index().resample("D", on="index", level=0).sum()
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_RS_CASES))
+def test_resample_keywords_like_pandas_n57tz(case: str) -> None:
+    run = _RS_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_resample_keywords_fp_refuses_n57tz() -> None:
+    # pandas answers these (a transposed resample, a PeriodIndex result, an
+    # offset over a tz-aware index, empty bins before an end origin's first
+    # label); fp refuses them, after pandas' FutureWarning where pandas warns.
+    with pytest.warns(FutureWarning, match="DataFrame.resample with axis=1 is deprecated"):
+        with pytest.raises(NotImplementedError):
+            _rs_frame(fpd).resample("D", axis=1)
+    with pytest.warns(FutureWarning, match="The 'kind' keyword in Series.resample is deprecated"):
+        with pytest.raises(NotImplementedError):
+            _rs_series(fpd).resample("D", kind="period")
+    with pytest.raises(NotImplementedError):
+        _rs_series(fpd).tz_localize("US/Eastern").resample("D", offset="2h")
+    with pytest.raises(NotImplementedError):
+        _rs_series(fpd).resample("D", origin="end", offset="1h", closed="left")

@@ -26973,22 +26973,69 @@ impl PySeries {
         .into_py_any(py)
     }
 
-    /// pandas' `Series.resample(rule, closed=, label=, origin=)`; `rule` a
-    /// string alias or an offset object.
-    #[pyo3(signature = (freq, closed=None, label=None, origin=None))]
-    pub fn resample(
+    /// pandas' `Series.resample(rule, axis, closed, label, convention, kind,
+    /// on, level, origin, offset, group_keys)`; `rule` a string alias or an
+    /// offset object. axis / convention / kind warn pandas' deprecations
+    /// ([`resample_deprecations`]); `on` is pandas' KeyError (a Series has
+    /// no columns), `level` 0 or the index's name ([`resample_level`]),
+    /// `offset` moves a fixed step's origin ([`resample_offset_origin`]).
+    /// group_keys reads only in an apply answering more than one row a bin,
+    /// which is refused. The first argument was named `freq` and the others
+    /// were unexpected keywords (br-frankenpandas-n57tz).
+    #[pyo3(signature = (
+        rule,
+        axis=Passed(None),
+        closed=None,
+        label=None,
+        convention=Passed(None),
+        kind=Passed(None),
+        on=None,
+        level=None,
+        origin=None,
+        offset=None,
+        group_keys=false
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn resample(
         &self,
-        freq: &Bound<'_, PyAny>,
-        closed: Option<&str>,
-        label: Option<&str>,
-        origin: Option<&str>,
+        py: Python<'_>,
+        rule: &Bound<'_, PyAny>,
+        axis: Passed<'_>,
+        closed: Option<String>,
+        label: Option<String>,
+        convention: Passed<'_>,
+        kind: Passed<'_>,
+        on: Option<&Bound<'_, PyAny>>,
+        level: Option<&Bound<'_, PyAny>>,
+        origin: Option<String>,
+        offset: Option<&Bound<'_, PyAny>>,
+        group_keys: bool,
     ) -> PyResult<PyResampler> {
+        // pandas' group_keys changes only an apply's multi-row answers.
+        let _ = group_keys;
+        resample_deprecations(py, "Series", &axis, &kind, &convention)?;
+        if let Some(on) = on.filter(|on| !on.is_none()) {
+            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                on.clone().unbind(),
+            ));
+        }
+        resample_level(self.inner.index(), level, false)?;
+        let rule = freq_alias(rule, "resample")?;
+        let (mut closed, mut label) = (closed, label);
+        let origin = resample_offset_origin(
+            self.inner.index(),
+            &rule,
+            origin,
+            offset,
+            &mut closed,
+            &mut label,
+        )?;
         PyResampler::new(
             ResampleTarget::Series(self.inner.clone()),
-            freq_alias(freq, "resample")?,
-            closed.map(str::to_string),
-            label.map(str::to_string),
-            origin.map(str::to_string),
+            rule,
+            closed,
+            label,
+            origin,
         )
     }
 
@@ -38689,34 +38736,74 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: res })
     }
 
-    /// pandas' `DataFrame.resample(rule, closed=, label=, origin=, on=)`:
-    /// `rule` a string alias or an offset object; `on` bins by that
-    /// datetime column instead of the index (it becomes the result's index
-    /// and leaves the aggregated columns), as pandas. `on=` raised TypeError.
-    #[pyo3(signature = (freq, closed=None, label=None, origin=None, on=None, level=None))]
+    /// pandas' `DataFrame.resample(rule, axis, closed, label, convention,
+    /// kind, on, level, origin, offset, group_keys)`: `rule` a string alias
+    /// or an offset object; `on` bins by that datetime column instead of the
+    /// index (it becomes the result's index and leaves the aggregated
+    /// columns), as pandas. axis / convention / kind warn pandas'
+    /// deprecations (axis=1 is then refused), `level` is 0 or the index's
+    /// name (a MultiIndex level is refused), `offset` moves a fixed step's
+    /// origin; group_keys as Series.resample. The first argument was named
+    /// `freq`, `level` was refused and the others were unexpected keywords
+    /// (br-frankenpandas-n57tz).
+    #[pyo3(signature = (
+        rule,
+        axis=Passed(None),
+        closed=None,
+        label=None,
+        convention=Passed(None),
+        kind=Passed(None),
+        on=None,
+        level=None,
+        origin=None,
+        offset=None,
+        group_keys=false
+    ))]
     #[allow(clippy::too_many_arguments)]
-    pub fn resample(
+    fn resample(
         &self,
-        freq: &Bound<'_, PyAny>,
-        closed: Option<&str>,
-        label: Option<&str>,
-        origin: Option<&str>,
+        py: Python<'_>,
+        rule: &Bound<'_, PyAny>,
+        axis: Passed<'_>,
+        closed: Option<String>,
+        label: Option<String>,
+        convention: Passed<'_>,
+        kind: Passed<'_>,
         on: Option<&str>,
         level: Option<&Bound<'_, PyAny>>,
+        origin: Option<String>,
+        offset: Option<&Bound<'_, PyAny>>,
+        group_keys: bool,
     ) -> PyResult<PyResampler> {
-        if level.is_some_and(|level| !level.is_none()) {
-            return Err(not_implemented("DataFrame.resample(level=...)"));
+        // pandas' group_keys changes only an apply's multi-row answers.
+        let _ = group_keys;
+        resample_deprecations(py, "DataFrame", &axis, &kind, &convention)?;
+        if level.is_some_and(|level| !level.is_none()) && self.inner.row_multiindex().is_some() {
+            return Err(not_implemented(
+                "DataFrame.resample(level=) of a MultiIndex",
+            ));
         }
+        resample_level(self.inner.index(), level, on.is_some())?;
         let frame = match on {
             Some(on) => self.inner.set_index(on, true).map_err(frame_error_to_py)?,
             None => self.inner.clone(),
         };
+        let rule = freq_alias(rule, "resample")?;
+        let (mut closed, mut label) = (closed, label);
+        let origin = resample_offset_origin(
+            frame.index(),
+            &rule,
+            origin,
+            offset,
+            &mut closed,
+            &mut label,
+        )?;
         PyResampler::new(
             ResampleTarget::DataFrame(frame),
-            freq_alias(freq, "resample")?,
-            closed.map(str::to_string),
-            label.map(str::to_string),
-            origin.map(str::to_string),
+            rule,
+            closed,
+            label,
+            origin,
         )
     }
 
@@ -65643,6 +65730,209 @@ fn require_resample_axis(index: &Index) -> PyResult<()> {
     ))
 }
 
+/// pandas' deprecated `resample` keywords (`owner` 'Series' / 'DataFrame'),
+/// each with its FutureWarning in pandas' order: axis - the rows run, a
+/// frame's columns are refused after the warning, anything else is pandas'
+/// ValueError - then kind ('period', a PeriodIndex result, refused) and
+/// convention (it reads a PeriodIndex alone). They were unexpected
+/// (br-frankenpandas-n57tz).
+fn resample_deprecations(
+    py: Python<'_>,
+    owner: &str,
+    axis: &Passed<'_>,
+    kind: &Passed<'_>,
+    convention: &Passed<'_>,
+) -> PyResult<()> {
+    let warn = |message: String| -> PyResult<()> {
+        let message = std::ffi::CString::new(message)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        PyErr::warn(
+            py,
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            &message,
+            1,
+        )
+    };
+    if let Some(axis) = &axis.0 {
+        if parse_axis_param_for_type(Some(axis), owner)? == Some(1) {
+            warn(
+                "DataFrame.resample with axis=1 is deprecated. Do `frame.T.resample(...)` \
+                 without axis instead."
+                    .to_owned(),
+            )?;
+            return Err(not_implemented("DataFrame.resample(axis=1)"));
+        }
+        warn(format!(
+            "The 'axis' keyword in {owner}.resample is deprecated and will be removed in a \
+             future version."
+        ))?;
+    }
+    if let Some(kind) = &kind.0 {
+        warn(format!(
+            "The 'kind' keyword in {owner}.resample is deprecated and will be removed in a \
+             future version. Explicitly cast the index to the desired type instead"
+        ))?;
+        if !kind.is_none() && kind.extract::<String>()? == "period" {
+            return Err(not_implemented(&format!("{owner}.resample(kind='period')")));
+        }
+    }
+    if convention.0.is_some() {
+        warn(format!(
+            "The 'convention' keyword in {owner}.resample is deprecated and will be removed in \
+             a future version. Explicitly cast PeriodIndex to DatetimeIndex before resampling \
+             instead."
+        ))?;
+    }
+    Ok(())
+}
+
+/// pandas' resample `level` over a flat index: 0 or the index's name bins
+/// the index, as without it; anything else is pandas' "The level {level} is
+/// not valid" (-1 too), and a level beside `on` its ValueError. It was an
+/// unexpected keyword for a Series and refused for a frame
+/// (br-frankenpandas-n57tz).
+fn resample_level(index: &Index, level: Option<&Bound<'_, PyAny>>, on: bool) -> PyResult<()> {
+    let Some(level) = level.filter(|level| !level.is_none()) else {
+        return Ok(());
+    };
+    if on {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "The Grouper cannot specify both a key and a level!",
+        ));
+    }
+    if level.extract::<i64>().is_ok_and(|number| number == 0)
+        || (index.name().is_some() && py_axis_name(level)?.as_ref() == index.name())
+    {
+        return Ok(());
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+        "The level {} is not valid",
+        level.str()?
+    )))
+}
+
+/// The origin a resample bins from with pandas' `offset`, which pandas adds
+/// to the origin for a fixed step (a calendar rule reads neither): the first
+/// label's midnight (start_day, the default), the first label (start), the
+/// epoch, a timestamp, or for `end` / `end_day` the first bin edge pandas
+/// counts back from the last label (or its day's end) - then closing and
+/// labelling on the right unless told - moved by the offset (a Timedelta,
+/// its text, or an int of nanoseconds), as an explicit timestamp. A text
+/// pandas cannot read is its ValueError, as is an end origin's first bin
+/// past the first label; a tz-aware index, a NaT offset, a tz-aware origin
+/// and an end origin with empty bins before the first label's are refused.
+/// It was an unexpected keyword (br-frankenpandas-n57tz).
+fn resample_offset_origin(
+    index: &Index,
+    rule: &str,
+    origin: Option<String>,
+    offset: Option<&Bound<'_, PyAny>>,
+    closed: &mut Option<String>,
+    label: &mut Option<String>,
+) -> PyResult<Option<String>> {
+    let Some(offset) = offset.filter(|offset| !offset.is_none()) else {
+        return Ok(origin);
+    };
+    let not_convertible = || {
+        let shown = offset
+            .repr()
+            .map(|repr| repr.to_string())
+            .unwrap_or_default();
+        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "'offset' should be a Timedelta convertible type. Got {shown} instead."
+        ))
+    };
+    let offset_ns = match duration_operand(offset)? {
+        Some(Timedelta::NAT) => return Err(not_implemented("resample(offset=NaT)")),
+        Some(nanos) => nanos,
+        None => match offset.extract::<i64>() {
+            Ok(nanos) => nanos,
+            Err(_) => offset
+                .extract::<String>()
+                .ok()
+                .and_then(|text| Timedelta::parse(&text).ok())
+                .ok_or_else(not_convertible)?,
+        },
+    };
+    let Some(step) = parse_freq_to_nanos(rule).ok().filter(|step| *step > 0) else {
+        return Ok(origin);
+    };
+    if index.tz().is_some() {
+        return Err(not_implemented("resample(offset=) over a tz-aware index"));
+    }
+    let stamps = || {
+        index.labels().iter().filter_map(|label| match label {
+            IndexLabel::Datetime64(nanos) if *nanos != Timestamp::NAT => Some(*nanos),
+            _ => None,
+        })
+    };
+    let (Some(first), Some(last)) = (stamps().min(), stamps().max()) else {
+        return Ok(origin);
+    };
+    let day = Timedelta::NANOS_PER_DAY;
+    let end_anchored = matches!(origin.as_deref(), Some("end" | "end_day"));
+    let base = match origin.as_deref() {
+        None | Some("start_day") => first.div_euclid(day) * day,
+        Some("start") => first,
+        Some("epoch") => 0,
+        Some(end @ ("end" | "end_day")) => {
+            let origin_last = if end == "end" || last.rem_euclid(day) == 0 {
+                last
+            } else {
+                last.div_euclid(day) * day + day
+            };
+            let closed = closed.get_or_insert_with(|| "right".to_owned());
+            label.get_or_insert_with(|| "right".to_owned());
+            let mut steps = (origin_last - first).div_euclid(step);
+            if closed == "left" {
+                steps += 1;
+            }
+            origin_last - steps * step
+        }
+        Some(custom) => match Timestamp::parse(custom) {
+            Ok(stamp) if stamp.tz.is_some() => {
+                return Err(not_implemented("resample(offset=) from a tz-aware origin"));
+            }
+            Ok(stamp) => stamp.nanos,
+            // fp-frame answers pandas' error for an origin it cannot read.
+            Err(_) => return Ok(origin),
+        },
+    };
+    let overflow =
+        || PyErr::new::<pyo3::exceptions::PyOverflowError, _>("resample origin + offset overflows");
+    let moved = base.checked_add(offset_ns).ok_or_else(overflow)?;
+    if end_anchored {
+        // pandas bins from the edge it counted back to (`base`), not from
+        // the first label: its first bin edge is the one the first label
+        // gives here, or the label falls before it (pandas' ValueError), or
+        // empty bins come before the label's (refused).
+        let right = closed.as_deref() == Some("right");
+        let edge = |at: i64| -> Option<i64> {
+            let back = at.checked_sub(moved)?.rem_euclid(step);
+            match (back > 0, right) {
+                (true, _) => at.checked_sub(back),
+                (false, true) => at.checked_sub(step),
+                (false, false) => Some(at),
+            }
+        };
+        let (theirs, ours) = (
+            edge(base).ok_or_else(overflow)?,
+            edge(first).ok_or_else(overflow)?,
+        );
+        if first < theirs {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Values falls before first bin",
+            ));
+        }
+        if theirs != ours {
+            return Err(not_implemented(
+                "resample(origin='end', offset=) with empty bins before the first label",
+            ));
+        }
+    }
+    Ok(Some(Timestamp::from_nanos(moved).isoformat()))
+}
+
 /// `series` (datetime64) with `offset` applied `times` times to each value;
 /// NaT stays NaT.
 fn series_apply_offset(
@@ -72902,9 +73192,41 @@ mod tests {
             // These fixtures are integer-indexed, which pandas refuses to
             // resample (TypeError); this used to build a resampler that binned
             // nothing.
-            let refused = py_df.resample(rule.as_any(), None, None, None, None, None);
+            let resample_df = |frame: &PyDataFrame| {
+                frame.resample(
+                    py,
+                    rule.as_any(),
+                    Passed(None),
+                    None,
+                    None,
+                    Passed(None),
+                    Passed(None),
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                )
+            };
+            let resample_s = |series: &PySeries| {
+                series.resample(
+                    py,
+                    rule.as_any(),
+                    Passed(None),
+                    None,
+                    None,
+                    Passed(None),
+                    Passed(None),
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                )
+            };
+            let refused = resample_df(&py_df);
             assert!(refused.is_err_and(|e| e.is_instance_of::<pyo3::exceptions::PyTypeError>(py)));
-            assert!(py_s.resample(rule.as_any(), None, None, None).is_err());
+            assert!(resample_s(&py_s).is_err());
 
             let dated = PySeries {
                 inner: Series::from_values(
@@ -72914,9 +73236,7 @@ mod tests {
                 )
                 .expect("series"), // ubs:ignore — test fixture
             };
-            let resampler_s = dated
-                .resample(rule.as_any(), None, None, None)
-                .expect("resample"); // ubs:ignore — test fixture
+            let resampler_s = resample_s(&dated).expect("resample"); // ubs:ignore — test fixture
             assert_eq!(resampler_s.freq, "1D");
         });
     }
