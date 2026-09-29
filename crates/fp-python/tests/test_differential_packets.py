@@ -20213,3 +20213,75 @@ _E56_CASES = {
 def test_everyday56_categorical_surface_like_pandas_7679g(case: str) -> None:
     run = _E56_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-sa6lb: query / eval expressions fp-expr cannot parse (a
+# .str / .dt accessor, a method chain) raised 'parse error'; they run as
+# pandas' python engine runs them. br-frankenpandas-7fbgd: .loc's KeyError for
+# missing labels was Rust Debug text ('Int64(5)').
+def _e57_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "k": ["apple", "banana", "avocado", "cherry"],
+            "a": [1, 2, 3, 4],
+            "b": [4.5, -1.2, 3.3, 0.5],
+            "t": m.to_datetime(["2023-05-01", "2024-01-02", "2024-06-30", "2025-02-03"]),
+            "my col": [10, 20, 30, 40],
+        }
+    )
+
+
+def _e57_rows(m: Any, expr: str, **kwargs: Any) -> list:
+    return _e57_frame(m).query(expr, **kwargs).index.tolist()
+
+
+def _e57_raised(run: Any) -> list:
+    # The class by name and the message (pandas.errors and frankenpandas'
+    # errors module differ).
+    try:
+        run()
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return [type(e).__name__, str(e)]
+    return ["no raise"]
+
+
+_E57_PREFIXES = ["cherry"]
+_E57_CASES = {
+    "query str startswith": lambda m: _e57_rows(m, "k.str.startswith('a')", engine="python"),
+    "query str contains default engine": lambda m: _e57_rows(m, "k.str.contains('an')"),
+    "query str len": lambda m: _e57_rows(m, "k.str.len() > 5", engine="python"),
+    "query dt year": lambda m: _e57_rows(m, "t.dt.year == 2024", engine="python"),
+    "query dt month in list": lambda m: _e57_rows(m, "t.dt.month in [1, 2]", engine="python"),
+    "query method chain": lambda m: _e57_rows(m, "b.abs().round() > 1", engine="python"),
+    "query between": lambda m: _e57_rows(m, "a.between(2, 3)", engine="python"),
+    "query column method": lambda m: _e57_rows(m, "a == a.max()", engine="python"),
+    "query str and compare": lambda m: _e57_rows(m, "k.str.startswith('a') & (a > 1) or not b < 4", engine="python"),
+    "query str with local": lambda m: _e57_rows(m, "k.str.startswith(@_E57_PREFIXES[0][0]) and `my col` > 5", engine="python"),
+    "query str upper compare": lambda m: _e57_rows(m, "k.str.upper() == 'APPLE'", engine="python"),
+    "eval str": lambda m: [_e57_frame(m).eval("k.str.upper()", engine="python").tolist()],
+    "eval assign str": lambda m: [_e57_frame(m).eval("u = k.str.upper()\nn = u.str.len()", engine="python")[["u", "n"]].to_dict("list")],
+    "eval dt": lambda m: [_e57_frame(m).eval("t.dt.day", engine="python").tolist()],
+    "query undefined name": lambda m: _e57_raised(lambda: _e57_rows(m, "zz.str.len() > 1", engine="python")),
+    "query mask not bool": lambda m: _e57_raised(lambda: _e57_rows(m, "k.str.len()", engine="python")),
+    "loc missing list": lambda m: _e57_raised(lambda: _e57_frame(m).loc[[5, 6]])
+    + _e57_raised(lambda: _e57_frame(m)["a"].loc[[5, 6, 5]]),
+    "loc some missing": lambda m: _e57_raised(lambda: _e57_frame(m).loc[[0, 5, 7, 5]])
+    + _e57_raised(lambda: _e57_frame(m)["a"].loc[[1, 7]]),
+    "loc missing scalar": lambda m: _e57_raised(lambda: _e57_frame(m).loc[5])
+    + _e57_raised(lambda: _e57_frame(m).set_index("k").loc["kiwi"]),
+    "loc missing text list": lambda m: _e57_raised(lambda: _e57_frame(m).set_index("k").loc[["kiwi"]]),
+    # Negatives: already pandas'.
+    "query comparison": lambda m: _e57_rows(m, "a > 1 and b < 4"),
+    "query chained comparison": lambda m: _e57_rows(m, "1 < a <= 3"),
+    "query in list": lambda m: _e57_rows(m, "k in ['apple', 'cherry']"),
+    "query not in local": lambda m: _e57_rows(m, "k not in @_E57_PREFIXES"),
+    "eval arithmetic": lambda m: [_e57_frame(m).eval("a * 2 + b").tolist()],
+    "loc present labels": lambda m: [_e57_frame(m).loc[[2, 0]].index.tolist(), _e57_frame(m)["a"].loc[[3]].tolist()],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E57_CASES))
+def test_everyday57_query_python_engine_and_loc_errors_like_pandas_sa6lb(case: str) -> None:
+    run = _E57_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

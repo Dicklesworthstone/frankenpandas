@@ -22884,16 +22884,16 @@ fn eval_assignment_parts(line: &str) -> Option<(&str, &str)> {
 /// a list literal (fp-expr parses `in [...]`); an undefined name is pandas'
 /// UndefinedVariableError. Every `@name` raised "unknown local reference"
 /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.28).
-fn resolve_expr_locals(
-    py: Python<'_>,
+fn resolve_expr_locals<'py>(
+    py: Python<'py>,
     expr: &str,
-    local_dict: Option<&Bound<'_, PyDict>>,
-    global_dict: Option<&Bound<'_, PyDict>>,
+    local_dict: Option<&Bound<'py, PyDict>>,
+    global_dict: Option<&Bound<'py, PyDict>>,
     level: usize,
 ) -> PyResult<(String, BTreeMap<String, Scalar>)> {
     let mut text = String::with_capacity(expr.len());
     let mut locals = BTreeMap::new();
-    let mut frame: Option<Bound<'_, PyAny>> = None;
+    let mut frame: Option<Bound<'py, PyAny>> = None;
     let mut quote: Option<char> = None;
     let mut chars = expr.char_indices().peekable();
     while let Some((_, c)) = chars.next() {
@@ -22922,34 +22922,7 @@ fn resolve_expr_locals(
                 break;
             }
         }
-        let mut value = local_dict.map(|d| d.get_item(&name)).transpose()?.flatten();
-        if value.is_none() {
-            let caller = match &frame {
-                Some(caller) => caller.clone(),
-                None => {
-                    let caller = py.import("sys")?.call_method1("_getframe", (level,))?;
-                    frame = Some(caller.clone());
-                    caller
-                }
-            };
-            let frame_locals = caller.getattr("f_locals")?;
-            if frame_locals.contains(&name)? {
-                value = Some(frame_locals.get_item(&name)?);
-            } else {
-                let globals = match global_dict {
-                    Some(globals) => globals.clone().into_any(),
-                    None => caller.getattr("f_globals")?,
-                };
-                if globals.contains(&name)? {
-                    value = Some(globals.get_item(&name)?);
-                }
-            }
-        }
-        let Some(value) = value else {
-            return Err(PyErr::new::<UndefinedVariableError, _>(format!(
-                "local variable '{name}' is not defined"
-            )));
-        };
+        let value = lookup_expr_local(py, &name, local_dict, global_dict, level, &mut frame)?;
         let listed = value.is_instance_of::<PyList>()
             || value.is_instance_of::<PyTuple>()
             || value.is_instance_of::<pyo3::types::PySet>()
@@ -22985,6 +22958,255 @@ fn resolve_expr_locals(
         }
     }
     Ok((text, locals))
+}
+
+/// The value of `@name` as pandas resolves it: `local_dict`, the calling
+/// frame's locals (`level` frames up), then `global_dict` or that frame's
+/// globals; an undefined name is pandas' UndefinedVariableError. `frame`
+/// keeps the calling frame across names.
+fn lookup_expr_local<'py>(
+    py: Python<'py>,
+    name: &str,
+    local_dict: Option<&Bound<'py, PyDict>>,
+    global_dict: Option<&Bound<'py, PyDict>>,
+    level: usize,
+    frame: &mut Option<Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    if let Some(value) = local_dict.map(|d| d.get_item(name)).transpose()?.flatten() {
+        return Ok(value);
+    }
+    let caller = match frame {
+        Some(caller) => caller.clone(),
+        None => {
+            let caller = py.import("sys")?.call_method1("_getframe", (level,))?;
+            *frame = Some(caller.clone());
+            caller
+        }
+    };
+    let frame_locals = caller.getattr("f_locals")?;
+    if frame_locals.contains(name)? {
+        return frame_locals.get_item(name);
+    }
+    let globals = match global_dict {
+        Some(globals) => globals.clone().into_any(),
+        None => caller.getattr("f_globals")?,
+    };
+    if globals.contains(name)? {
+        return globals.get_item(name);
+    }
+    Err(PyErr::new::<UndefinedVariableError, _>(format!(
+        "local variable '{name}' is not defined"
+    )))
+}
+
+static PYTHON_ENGINE: pyo3::sync::PyOnceLock<Py<PyAny>> = pyo3::sync::PyOnceLock::new();
+
+/// pandas' python engine, for the `query` / `eval` expressions fp-expr
+/// cannot parse - a `.str` / `.dt` accessor, any method chain (they raised
+/// 'parse error'; br-frankenpandas-sa6lb): Python's grammar over the columns
+/// as Series, rewritten as pandas rewrites it (and / or / not as & / | / ~,
+/// a chain of comparisons as the & of its pairs, in / not in as pandas'
+/// _in / _not_in), with @locals, `backticked` column names, the named index
+/// levels and `index`; an unknown name is UndefinedVariableError.
+const PYTHON_ENGINE_SOURCE: &std::ffi::CStr = cr#"
+import ast
+import builtins
+import io
+import tokenize
+
+
+def _list_like(value):
+    return hasattr(value, "__iter__") and not isinstance(value, (str, bytes))
+
+
+def _in(x, y):
+    try:
+        return x.isin(y)
+    except AttributeError:
+        if _list_like(x):
+            try:
+                return y.isin(x)
+            except AttributeError:
+                pass
+        return x in y
+
+
+def _not_in(x, y):
+    try:
+        return ~x.isin(y)
+    except AttributeError:
+        if _list_like(x):
+            try:
+                return ~y.isin(x)
+            except AttributeError:
+                pass
+        return x not in y
+
+
+class _Rewrite(ast.NodeTransformer):
+    def visit_BoolOp(self, node):
+        self.generic_visit(node)
+        op = ast.BitAnd() if isinstance(node.op, ast.And) else ast.BitOr()
+        result = node.values[0]
+        for value in node.values[1:]:
+            result = ast.BinOp(left=result, op=op, right=value)
+        return result
+
+    def visit_UnaryOp(self, node):
+        self.generic_visit(node)
+        if isinstance(node.op, ast.Not):
+            return ast.UnaryOp(op=ast.Invert(), operand=node.operand)
+        return node
+
+    def visit_Compare(self, node):
+        self.generic_visit(node)
+        parts = []
+        left = node.left
+        for op, right in zip(node.ops, node.comparators):
+            if isinstance(op, (ast.In, ast.NotIn)):
+                name = "__fp_in" if isinstance(op, ast.In) else "__fp_not_in"
+                func = ast.Name(id=name, ctx=ast.Load())
+                parts.append(ast.Call(func=func, args=[left, right], keywords=[]))
+            else:
+                parts.append(ast.Compare(left=left, ops=[op], comparators=[right]))
+            left = right
+        result = parts[0]
+        for part in parts[1:]:
+            result = ast.BinOp(left=result, op=ast.BitAnd(), right=part)
+        return result
+
+
+def _prepare(expr):
+    """@name as __fp_local_name, `a b` as __fp_backtick_<n>, outside quotes."""
+    out = []
+    backticks = {}
+    quote = None
+    i = 0
+    while i < len(expr):
+        c = expr[i]
+        if quote is not None:
+            out.append(c)
+            if c == quote:
+                quote = None
+            i += 1
+        elif c in "'\"":
+            quote = c
+            out.append(c)
+            i += 1
+        elif c == "`" and expr.find("`", i + 1) > i:
+            end = expr.find("`", i + 1)
+            key = "__fp_backtick_%d" % len(backticks)
+            backticks[key] = expr[i + 1:end]
+            out.append(key)
+            i = end + 1
+        elif c == "@":
+            j = i + 1
+            while j < len(expr) and (expr[j].isalnum() or expr[j] == "_"):
+                j += 1
+            out.append("__fp_local_" + expr[i + 1:j])
+            i = j
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out), backticks
+
+
+class _Names(dict):
+    def __init__(self, frame, backticks, local_values, undefined):
+        super().__init__()
+        self._frame = frame
+        self._backticks = backticks
+        self._locals = local_values
+        self._undefined = undefined
+
+    def __missing__(self, name):
+        if name.startswith("__fp_local_"):
+            return self._locals[name[len("__fp_local_"):]]
+        frame = self._frame
+        if name in self._backticks:
+            return frame[self._backticks[name]]
+        if any(isinstance(column, str) and column == name for column in frame.columns):
+            return frame[name]
+        index = frame.index
+        for position, level in enumerate(index.names):
+            if level is not None and level == name:
+                values = index.get_level_values(position).to_series()
+                values.index = index
+                return values
+        if name == "index":
+            return index.to_series()
+        raise self._undefined("name '%s' is not defined" % name)
+
+
+def evaluate(expr, frame, local_values, undefined):
+    text, backticks = _prepare(expr.strip())
+    list(tokenize.generate_tokens(io.StringIO(text).readline))
+    tree = ast.fix_missing_locations(_Rewrite().visit(ast.parse(text, mode="eval")))
+    names = _Names(frame, backticks, local_values, undefined)
+    names.update(__fp_in=_in, __fp_not_in=_not_in)
+    # Names resolve through _Names alone (an unknown one raises there); the
+    # builtins stay for the machinery a method call uses (__import__).
+    return eval(compile(tree, "<expr>", "eval"), {"__builtins__": builtins}, names)
+"#;
+
+/// `expr`'s value under pandas' python engine ([`PYTHON_ENGINE_SOURCE`])
+/// over `frame`, its `@name`s resolved as [`lookup_expr_local`] resolves
+/// them.
+fn python_engine_eval<'py>(
+    py: Python<'py>,
+    frame: &DataFrame,
+    expr: &str,
+    local_dict: Option<&Bound<'py, PyDict>>,
+    global_dict: Option<&Bound<'py, PyDict>>,
+    level: usize,
+) -> PyResult<Bound<'py, PyAny>> {
+    let engine = PYTHON_ENGINE.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+        Ok(PyModule::from_code(
+            py,
+            PYTHON_ENGINE_SOURCE,
+            c"frankenpandas/python_engine.py",
+            c"frankenpandas._python_engine",
+        )?
+        .into_any()
+        .unbind())
+    })?;
+    // Every @name, outside quotes and backticks.
+    let local_values = PyDict::new(py);
+    let mut caller = None;
+    let mut quote: Option<char> = None;
+    let mut chars = expr.chars().peekable();
+    while let Some(c) = chars.next() {
+        if let Some(open) = quote {
+            if c == open {
+                quote = None;
+            }
+        } else if matches!(c, '\'' | '"' | '`') {
+            quote = Some(c);
+        } else if c == '@' {
+            let mut name = String::new();
+            while let Some(&next) = chars.peek().filter(|n| n.is_alphanumeric() || **n == '_') {
+                name.push(next);
+                chars.next();
+            }
+            let value = lookup_expr_local(py, &name, local_dict, global_dict, level, &mut caller)?;
+            local_values.set_item(name, value)?;
+        }
+    }
+    let frame = Py::new(
+        py,
+        PyDataFrame {
+            inner: frame.clone(),
+        },
+    )?;
+    engine.bind(py).call_method1(
+        "evaluate",
+        (
+            expr,
+            frame,
+            local_values,
+            py.get_type::<UndefinedVariableError>(),
+        ),
+    )
 }
 
 /// `describe`'s include / exclude as fp-frame's dtype names: a string
@@ -31924,6 +32146,9 @@ impl PySeriesLoc {
         }
         if let Some(labels) = loc_label_list(key) {
             let wanted = loc_list_labels(self.inner.index().labels(), labels?);
+            if let Some(missing) = loc_missing_labels_error(self.inner.index(), &wanted, key)? {
+                return Err(missing);
+            }
             return series(self.inner.loc(&wanted).map_err(loc_key_error)?);
         }
         series_label_get(py, &self.inner, key)
@@ -40271,17 +40496,14 @@ impl PyDataFrame {
         parser: Option<&str>,
     ) -> PyResult<Option<PyDataFrame>> {
         let _ = (engine, parser);
-        let (expr, locals) = resolve_expr_locals(py, expr, local_dict, global_dict, level)?;
-        let query_error =
-            |e: fp_expr::ExprError| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string());
+        let raw = expr;
+        let (expr, locals) = resolve_expr_locals(py, raw, local_dict, global_dict, level)?;
         // Index level names resolve as pandas' query resolves them (they
         // raised 'unknown series reference'; rvqoi): each named level no
         // column shadows rides as a column while the expression runs.
         let levels = self.index_level_columns(&expr)?;
-        let res = if levels.is_empty() {
-            self.inner
-                .query_with_locals(&expr, &locals)
-                .map_err(query_error)?
+        let attempt = if levels.is_empty() {
+            self.inner.query_with_locals(&expr, &locals)
         } else {
             let mut frame = self.inner.clone();
             for (name, column) in levels {
@@ -40295,9 +40517,31 @@ impl PyDataFrame {
                 .collect();
             frame
                 .query_with_locals(&expr, &locals)
-                .map_err(query_error)?
-                .select_columns(&kept)
-                .map_err(frame_error_to_py)?
+                .and_then(|res| res.select_columns(&kept).map_err(Into::into))
+        };
+        let res = match attempt {
+            Ok(res) => res,
+            // What fp-expr's grammar cannot parse (an accessor, a method
+            // chain) runs as pandas' python engine runs it, the rows its
+            // mask selects by loc (br-frankenpandas-sa6lb).
+            Err(fp_expr::ExprError::ParseError(_)) => {
+                let mask =
+                    python_engine_eval(py, &self.inner, raw, local_dict, global_dict, level)?;
+                let frame = Py::new(
+                    py,
+                    PyDataFrame {
+                        inner: self.inner.clone(),
+                    },
+                )?
+                .into_bound(py);
+                let selected = frame.getattr("loc")?.get_item(mask)?;
+                selected.extract::<PyRef<'_, PyDataFrame>>()?.inner.clone()
+            }
+            Err(e) => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    e.to_string(),
+                ));
+            }
         };
         if inplace {
             self.inner = res;
@@ -40324,30 +40568,60 @@ impl PyDataFrame {
         parser: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         let _ = (engine, parser);
-        let (expr, locals) = resolve_expr_locals(py, expr, local_dict, global_dict, level)?;
+        let raw = expr;
+        let (expr, locals) = resolve_expr_locals(py, raw, local_dict, global_dict, level)?;
         let expr = expr.as_str();
+        let value_error =
+            |e: fp_expr::ExprError| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string());
         // pandas runs each non-blank line in order, a later line seeing the
         // columns an earlier one assigned; several lines must all assign
         // (a multi-line eval was one parse error; br-frankenpandas-c5b7x).
-        let assignments: Vec<Option<(&str, &str)>> = expr
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(eval_assignment_parts)
-            .collect();
+        let lines = |text: &'_ str| -> Vec<Option<(String, String)>> {
+            text.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(|line| {
+                    eval_assignment_parts(line)
+                        .map(|(target, rhs)| (target.to_owned(), rhs.to_owned()))
+                })
+                .collect()
+        };
+        let assignments = lines(expr);
         if assignments.len() > 1 && assignments.iter().any(Option::is_none) {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Multi-line expressions are only valid if all expressions contain an assignment",
             ));
         }
         if !assignments.is_empty() && assignments.iter().all(Option::is_some) {
+            // The same lines as written, for the python engine (fp-expr reads
+            // the ones with their @locals resolved).
+            let raw_assignments = lines(raw);
             let mut new_df = self.inner.clone();
-            for (target, rhs) in assignments.into_iter().flatten() {
-                let evaluated = new_df
-                    .eval_with_locals(rhs, &locals)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            for (position, (target, rhs)) in assignments.into_iter().flatten().enumerate() {
+                let column = match new_df.eval_with_locals(&rhs, &locals) {
+                    Ok(evaluated) => evaluated.column().clone(),
+                    // What fp-expr cannot parse runs as pandas' python
+                    // engine runs it (br-frankenpandas-sa6lb).
+                    Err(fp_expr::ExprError::ParseError(_)) => {
+                        let raw_rhs = raw_assignments
+                            .get(position)
+                            .cloned()
+                            .flatten()
+                            .map_or(rhs, |(_, rhs)| rhs);
+                        let value = python_engine_eval(
+                            py,
+                            &new_df,
+                            &raw_rhs,
+                            local_dict,
+                            global_dict,
+                            level,
+                        )?;
+                        py_value_to_column(py, &value, new_df.len())?
+                    }
+                    Err(e) => return Err(value_error(e)),
+                };
                 new_df = new_df
-                    .with_column(target, evaluated.column().clone())
+                    .with_column(target, column)
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
             }
             if inplace {
@@ -40361,11 +40635,16 @@ impl PyDataFrame {
                 "Cannot operate inplace if there is no assignment",
             ));
         }
-        let evaluated = self
-            .inner
-            .eval_with_locals(expr, &locals)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        Ok(Py::new(py, PySeries { inner: evaluated })?.into_any())
+        match self.inner.eval_with_locals(expr, &locals) {
+            Ok(evaluated) => Ok(Py::new(py, PySeries { inner: evaluated })?.into_any()),
+            Err(fp_expr::ExprError::ParseError(_)) => {
+                Ok(
+                    python_engine_eval(py, &self.inner, raw, local_dict, global_dict, level)?
+                        .unbind(),
+                )
+            }
+            Err(e) => Err(value_error(e)),
+        }
     }
 
     /// pandas' `rolling(...)` ([`rolling_of`]): a row count, or a time-based
@@ -46488,6 +46767,50 @@ fn loc_key_error(e: impl std::fmt::Display) -> PyErr {
     PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string())
 }
 
+/// pandas' KeyError for `.loc` list labels `index` lacks: none there,
+/// "None of [<the key as an Index named as `index`>] are in the [index]";
+/// some, "<the missing ones, once each> not in index"; None when all are
+/// there (it was 'loc label not found: Int64(5)'; br-frankenpandas-7fbgd).
+fn loc_missing_labels_error(
+    index: &Index,
+    wanted: &[IndexLabel],
+    key: &Bound<'_, PyAny>,
+) -> PyResult<Option<PyErr>> {
+    let present: HashSet<&IndexLabel> = index.labels().iter().collect();
+    let mut missing: Vec<&IndexLabel> = Vec::new();
+    for label in wanted {
+        if !present.contains(label) && !missing.contains(&label) {
+            missing.push(label);
+        }
+    }
+    if missing.is_empty() {
+        return Ok(None);
+    }
+    let py = key.py();
+    let message = if wanted.iter().all(|label| !present.contains(label)) {
+        // A Series key reads as its array (unnamed), an Index as itself.
+        let values = if key.is_instance_of::<PySeries>() {
+            key.call_method0("to_numpy")?
+        } else {
+            key.clone()
+        };
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("name", axis_name_to_py(py, index.name())?)?;
+        let keyed = py
+            .import("frankenpandas")?
+            .getattr("Index")?
+            .call((values,), Some(&kwargs))?;
+        format!("None of [{}] are in the [index]", keyed.repr()?)
+    } else {
+        let missing = missing
+            .into_iter()
+            .map(|label| index_label_to_py(py, label))
+            .collect::<PyResult<Vec<_>>>()?;
+        format!("{} not in index", PyList::new(py, missing)?.repr()?)
+    };
+    Ok(Some(PyErr::new::<pyo3::exceptions::PyKeyError, _>(message)))
+}
+
 /// The boolean mask carried by a Series indexer, if it is one.
 fn loc_bool_series_mask<'py>(key: &Bound<'py, PyAny>) -> Option<PyRef<'py, PySeries>> {
     key.extract::<PyRef<'_, PySeries>>()
@@ -46744,6 +47067,9 @@ fn resolve_loc_rows(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<LocRows>
     }
     if let Some(labels) = loc_label_list(key) {
         let wanted = loc_list_labels(df.index().labels(), labels?);
+        if let Some(missing) = loc_missing_labels_error(df.index(), &wanted, key)? {
+            return Err(missing);
+        }
         return df.loc(&wanted).map(LocRows::frame).map_err(loc_key_error);
     }
     let label = match loc_key(df.index().labels(), py_to_index_label(key)?)? {
@@ -46756,7 +47082,11 @@ fn resolve_loc_rows(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<LocRows>
         LocKey::Label(label) => label,
     };
     match df.index().labels().iter().filter(|l| **l == label).count() {
-        0 => Err(loc_key_error(format!("{label:?}"))),
+        // pandas' KeyError is the key itself (it was its Debug text,
+        // 'Int64(5)'; br-frankenpandas-7fbgd).
+        0 => Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+            key.clone().unbind(),
+        )),
         1 => Ok(LocRows::Label(label)),
         _ => df.loc(&[label]).map(LocRows::frame).map_err(loc_key_error),
     }
