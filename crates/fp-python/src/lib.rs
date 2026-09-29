@@ -87,6 +87,100 @@ fn parse_freq_to_nanos(freq: &str) -> PyResult<i64> {
         .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("frequency overflow"))
 }
 
+/// `shift`'s `periods`: one int (1 by default), or pandas 2.1's list of them.
+enum ShiftPeriods<'a, 'py> {
+    One(i64),
+    Many(&'a Bound<'py, PyAny>),
+}
+
+impl<'a, 'py> ShiftPeriods<'a, 'py> {
+    fn of(periods: Option<&'a Bound<'py, PyAny>>) -> PyResult<Self> {
+        match periods.filter(|periods| !periods.is_none()) {
+            None => Ok(Self::One(1)),
+            Some(periods) => match periods.extract::<i64>() {
+                Ok(one) => Ok(Self::One(one)),
+                Err(_)
+                    if periods.try_iter().is_ok()
+                        && !periods.is_instance_of::<pyo3::types::PyString>() =>
+                {
+                    Ok(Self::Many(periods))
+                }
+                Err(err) => Err(err),
+            },
+        }
+    }
+}
+
+/// pandas' refusal of `suffix` beside one int `periods` (it was fp's
+/// NotImplementedError).
+fn refuse_int_shift_suffix(suffix: Option<&str>) -> PyResult<()> {
+    if suffix.is_some() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Cannot specify `suffix` if `periods` is an int.",
+        ));
+    }
+    Ok(())
+}
+
+/// pandas' `shift` by a list of periods: `frame` shifted by each, its
+/// columns suffixed `_<period>` (`<suffix>_<period>` with a suffix), side by
+/// side; axis=1 and an empty list are pandas' ValueError, a period that is
+/// not an int its TypeError (a Series shifts as its one-column frame).
+fn shifts_frame(
+    frame: &Bound<'_, PyAny>,
+    periods: &Bound<'_, PyAny>,
+    freq: Option<&str>,
+    axis: Option<&Bound<'_, PyAny>>,
+    fill_value: Option<&Bound<'_, PyAny>>,
+    suffix: Option<&str>,
+) -> PyResult<Py<PyAny>> {
+    let py = frame.py();
+    if parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0) == 1 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "If `periods` contains multiple shifts, `axis` cannot be 1.",
+        ));
+    }
+    let periods: Vec<Bound<'_, PyAny>> = periods.try_iter()?.collect::<PyResult<_>>()?;
+    if periods.is_empty() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "If `periods` is an iterable, it cannot be empty.",
+        ));
+    }
+    let kwargs = PyDict::new(py);
+    if let Some(freq) = freq {
+        kwargs.set_item("freq", freq)?;
+    }
+    if let Some(fill_value) = fill_value {
+        kwargs.set_item("fill_value", fill_value)?;
+    }
+    let mut shifted = Vec::with_capacity(periods.len());
+    for period in &periods {
+        let step = match period.extract::<i64>() {
+            Ok(step) if !period.is_instance_of::<pyo3::types::PyBool>() => step,
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                    "Periods must be integer, but {} is {}.",
+                    period.str()?,
+                    period.get_type().repr()?
+                )));
+            }
+        };
+        let tag = format!("{}_{step}", suffix.unwrap_or(""));
+        shifted.push(
+            frame
+                .call_method("shift", (step,), Some(&kwargs))?
+                .call_method1("add_suffix", (tag,))?,
+        );
+    }
+    let concat_kwargs = PyDict::new(py);
+    concat_kwargs.set_item("axis", 1)?;
+    Ok(py
+        .import("frankenpandas")?
+        .getattr("concat")?
+        .call((PyList::new(py, shifted)?,), Some(&concat_kwargs))?
+        .unbind())
+}
+
 /// `obj.shift(periods, freq=...)`: the row index moved by `periods` x
 /// `freq`, the values left where they are, as pandas shifts an index (it
 /// was refused). A fixed-duration freq over a datetime or timedelta index;
@@ -24272,6 +24366,40 @@ fn execute_series_where(inner: &Series, cond: &Series, other: &SeriesOrScalar) -
 }
 
 impl PySeries {
+    /// `shift` by one int: the values `periods` rows on (the labels by
+    /// `freq`), `fill_value` where none moved in.
+    fn shift_by(
+        &self,
+        periods: i64,
+        freq: Option<&str>,
+        axis: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        suffix: Option<&str>,
+    ) -> PyResult<PySeries> {
+        refuse_int_shift_suffix(suffix)?;
+        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
+        if ax != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {ax} for object type Series"
+            )));
+        }
+        if let Some(freq) = freq {
+            let index = shift_index_by_freq(self.inner.index(), periods, freq, fill_value)?;
+            let res = Series::new(self.inner.name(), index, self.inner.column().clone())
+                .map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner: res });
+        }
+        let res = if let Some(fv) = fill_value {
+            let sc = py_to_scalar(fv.py(), fv)?;
+            self.inner
+                .shift_with_fill_value(periods, sc)
+                .map_err(frame_error_to_py)?
+        } else {
+            self.inner.shift(periods).map_err(frame_error_to_py)?
+        };
+        Ok(PySeries { inner: res })
+    }
+
     /// The index as a Python object, for Rust callers; the `.index` getter
     /// returns one that writes its name back.
     fn index_object(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -27301,39 +27429,33 @@ impl PySeries {
         series_arg_extreme(py, &self.inner, axis, skipna, false)
     }
 
-    /// Shift index by desired number of periods.
-    #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (periods=1, freq=None, axis=None, fill_value=None, suffix=None))]
-    fn shift(
-        &self,
-        periods: i64,
+    /// pandas' `shift(periods=1, freq=None, axis=0, fill_value=None,
+    /// suffix=None)`: an int is [`Self::shift_by`]; a list of ints the frame
+    /// of the shifts, as pandas 2.1's (see [`shifts_frame`]; it was a
+    /// TypeError; br-frankenpandas-ox034).
+    #[pyo3(signature = (periods=None, freq=None, axis=None, fill_value=None, suffix=None))]
+    fn shift<'py>(
+        slf: &Bound<'py, Self>,
+        periods: Option<&Bound<'py, PyAny>>,
         freq: Option<&str>,
-        axis: Option<&Bound<'_, PyAny>>,
-        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'py, PyAny>>,
+        fill_value: Option<&Bound<'py, PyAny>>,
         suffix: Option<&str>,
-    ) -> PyResult<PySeries> {
-        unsupported_params("Series.shift", &[("suffix", suffix.is_none())])?;
-        let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
-        if ax != 0 {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "No axis named {ax} for object type Series"
-            )));
+    ) -> PyResult<Py<PyAny>> {
+        match ShiftPeriods::of(periods)? {
+            ShiftPeriods::One(periods) => slf
+                .borrow()
+                .shift_by(periods, freq, axis, fill_value, suffix)?
+                .into_py_any(slf.py()),
+            ShiftPeriods::Many(periods) => shifts_frame(
+                &slf.call_method0("to_frame")?,
+                periods,
+                freq,
+                axis,
+                fill_value,
+                suffix,
+            ),
         }
-        if let Some(freq) = freq {
-            let index = shift_index_by_freq(self.inner.index(), periods, freq, fill_value)?;
-            let res = Series::new(self.inner.name(), index, self.inner.column().clone())
-                .map_err(frame_error_to_py)?;
-            return Ok(PySeries { inner: res });
-        }
-        let res = if let Some(fv) = fill_value {
-            let sc = py_to_scalar(fv.py(), fv)?;
-            self.inner
-                .shift_with_fill_value(periods, sc)
-                .map_err(frame_error_to_py)?
-        } else {
-            self.inner.shift(periods).map_err(frame_error_to_py)?
-        };
-        Ok(PySeries { inner: res })
     }
 
     /// Return Series with duplicate values removed.
@@ -31040,6 +31162,58 @@ pub struct PyDataFrame {
 }
 
 impl PyDataFrame {
+    /// `shift` by one int: the rows (columns under axis=1) `periods` on,
+    /// the labels by `freq`, `fill_value` where none moved in.
+    fn shift_by(
+        &self,
+        periods: i64,
+        freq: Option<&str>,
+        axis: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        suffix: Option<&str>,
+    ) -> PyResult<PyDataFrame> {
+        refuse_int_shift_suffix(suffix)?;
+        let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        if let Some(freq) = freq {
+            if ax != 0 {
+                return Err(not_implemented("DataFrame.shift(freq=..., axis=1)"));
+            }
+            let index = shift_index_by_freq(self.inner.index(), periods, freq, fill_value)?;
+            let inner = self.inner.with_index(index).map_err(frame_error_to_py)?;
+            return Ok(PyDataFrame { inner });
+        }
+        let fill_sc = match fill_value {
+            Some(fv) => Some(py_to_scalar(fv.py(), fv)?),
+            None => None,
+        };
+        let res = match ax {
+            0 => {
+                if let Some(sc) = fill_sc {
+                    self.inner
+                        .shift_with_fill_value(periods, sc)
+                        .map_err(frame_error_to_py)?
+                } else {
+                    self.inner.shift(periods).map_err(frame_error_to_py)?
+                }
+            }
+            1 => {
+                if let Some(sc) = fill_sc {
+                    self.inner
+                        .shift_axis1_with_fill_value(periods, sc)
+                        .map_err(frame_error_to_py)?
+                } else {
+                    self.inner.shift_axis1(periods).map_err(frame_error_to_py)?
+                }
+            }
+            other => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "No axis named {other} for object type DataFrame"
+                )));
+            }
+        };
+        Ok(PyDataFrame { inner: res })
+    }
+
     /// The frame `any` / `all` (`all` says which) read: the numpy bool
     /// columns alone with `bool_only` (pandas leaves the nullable boolean
     /// out), and with skipna=False each column its values' truth, a missing
@@ -38908,57 +39082,28 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: res })
     }
 
-    /// Shift index by desired number of periods.
-    #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (periods=1, freq=None, axis=None, fill_value=None, suffix=None))]
-    fn shift(
-        &self,
-        periods: i64,
+    /// pandas' `shift(periods=1, freq=None, axis=0, fill_value=None,
+    /// suffix=None)`: an int is [`Self::shift_by`]; a list of ints the frame
+    /// of the shifts, as pandas 2.1's (see [`shifts_frame`]; it was a
+    /// TypeError; br-frankenpandas-ox034).
+    #[pyo3(signature = (periods=None, freq=None, axis=None, fill_value=None, suffix=None))]
+    fn shift<'py>(
+        slf: &Bound<'py, Self>,
+        periods: Option<&Bound<'py, PyAny>>,
         freq: Option<&str>,
-        axis: Option<&Bound<'_, PyAny>>,
-        fill_value: Option<&Bound<'_, PyAny>>,
+        axis: Option<&Bound<'py, PyAny>>,
+        fill_value: Option<&Bound<'py, PyAny>>,
         suffix: Option<&str>,
-    ) -> PyResult<PyDataFrame> {
-        unsupported_params("DataFrame.shift", &[("suffix", suffix.is_none())])?;
-        let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
-        if let Some(freq) = freq {
-            if ax != 0 {
-                return Err(not_implemented("DataFrame.shift(freq=..., axis=1)"));
+    ) -> PyResult<Py<PyAny>> {
+        match ShiftPeriods::of(periods)? {
+            ShiftPeriods::One(periods) => slf
+                .borrow()
+                .shift_by(periods, freq, axis, fill_value, suffix)?
+                .into_py_any(slf.py()),
+            ShiftPeriods::Many(periods) => {
+                shifts_frame(slf.as_any(), periods, freq, axis, fill_value, suffix)
             }
-            let index = shift_index_by_freq(self.inner.index(), periods, freq, fill_value)?;
-            let inner = self.inner.with_index(index).map_err(frame_error_to_py)?;
-            return Ok(PyDataFrame { inner });
         }
-        let fill_sc = match fill_value {
-            Some(fv) => Some(py_to_scalar(fv.py(), fv)?),
-            None => None,
-        };
-        let res = match ax {
-            0 => {
-                if let Some(sc) = fill_sc {
-                    self.inner
-                        .shift_with_fill_value(periods, sc)
-                        .map_err(frame_error_to_py)?
-                } else {
-                    self.inner.shift(periods).map_err(frame_error_to_py)?
-                }
-            }
-            1 => {
-                if let Some(sc) = fill_sc {
-                    self.inner
-                        .shift_axis1_with_fill_value(periods, sc)
-                        .map_err(frame_error_to_py)?
-                } else {
-                    self.inner.shift_axis1(periods).map_err(frame_error_to_py)?
-                }
-            }
-            other => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "No axis named {other} for object type DataFrame"
-                )));
-            }
-        };
-        Ok(PyDataFrame { inner: res })
     }
 
     /// Assign new columns to a DataFrame, returning a new object (pandas `DataFrame.assign`).
@@ -60840,6 +60985,44 @@ fn concat(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let _ = copy; // pandas' copy= does not change the result
+    // verify_integrity=True: the concatenated axis holding a label twice is
+    // pandas' ValueError naming the repeated labels (it was refused;
+    // br-frankenpandas-ox034).
+    if let Some(kwargs) = kwargs
+        && let Some(flag) = kwargs.get_item("verify_integrity")?
+    {
+        kwargs.del_item("verify_integrity")?;
+        if flag.is_truthy()? {
+            let result = concat(
+                py,
+                objs,
+                axis,
+                join,
+                ignore_index,
+                keys,
+                sort,
+                copy,
+                Some(kwargs),
+            )?;
+            let side_by_side = axis.is_some_and(|axis| {
+                axis.extract::<i64>().is_ok_and(|axis| axis == 1)
+                    || axis.extract::<String>().is_ok_and(|axis| axis == "columns")
+            });
+            let labels = result
+                .bind(py)
+                .getattr(if side_by_side { "columns" } else { "index" })?;
+            if !labels.getattr("is_unique")?.extract::<bool>()? {
+                let repeated = labels
+                    .get_item(labels.call_method0("duplicated")?)?
+                    .call_method0("unique")?;
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Indexes have overlapping values: {}",
+                    repeated.repr()?
+                )));
+            }
+            return Ok(result);
+        }
+    }
     // sort=True: the result's other axis sorted - the columns of rows
     // stacked, the index of columns side by side - as pandas' combined
     // index is (it was refused).
@@ -60873,11 +61056,6 @@ fn concat(
     }
     let mut names: Option<Vec<Option<LabelName>>> = None;
     if let Some(kwargs) = kwargs {
-        if let Some(flag) = kwargs.get_item("verify_integrity")?
-            && !flag.is_truthy()?
-        {
-            kwargs.del_item("verify_integrity")?;
-        }
         if let Some(given) = kwargs.get_item("names")? {
             // Each name keeps its type (fvsao.64).
             names = extract_index_names_flexible(Some(&given))?;
@@ -77271,7 +77449,7 @@ mod tests {
         assert_eq!(py_s.inner.idxmax().expect("idxmax"), IndexLabel::Int64(1)); // ubs:ignore — test fixture
         assert_eq!(py_s.inner.idxmin().expect("idxmin"), IndexLabel::Int64(0)); // ubs:ignore — test fixture
 
-        let shifted = py_s.shift(1, None, None, None, None).expect("shift"); // ubs:ignore — test fixture
+        let shifted = py_s.shift_by(1, None, None, None, None).expect("shift"); // ubs:ignore — test fixture
         assert_eq!(shifted.inner.len(), 4);
 
         let nlg = py_s.nlargest(2, "first").expect("nlargest"); // ubs:ignore — test fixture
@@ -77358,7 +77536,7 @@ mod tests {
         let cmax = py_df.cummax(None, true, None).expect("cummax"); // ubs:ignore — test fixture
         assert_eq!(cmax.shape(), (3, 2));
 
-        let sh = py_df.shift(1, None, None, None, None).expect("shift"); // ubs:ignore — test fixture
+        let sh = py_df.shift_by(1, None, None, None, None).expect("shift"); // ubs:ignore — test fixture
         assert_eq!(sh.shape(), (3, 2));
 
         let queried =
@@ -79610,20 +79788,20 @@ mod tests {
 
             // 3. Series shift
             let s_shift = py_s
-                .shift(1, None, None, None, None)
+                .shift_by(1, None, None, None, None)
                 .expect("series shift default");
             assert!(s_shift.inner.values()[0].is_nan() || s_shift.inner.values()[0].is_null());
             assert_eq!(s_shift.inner.values()[1], Scalar::Float64(10.0));
 
             let s_shift_fill = py_s
-                .shift(1, None, None, Some(&fill_99), None)
+                .shift_by(1, None, None, Some(&fill_99), None)
                 .expect("series shift fill_value");
             assert_eq!(s_shift_fill.inner.values()[0], Scalar::Float64(99.0));
             assert_eq!(s_shift_fill.inner.values()[1], Scalar::Float64(10.0));
 
             // Series shift axis 1 error
-            assert!(py_s.shift(1, None, Some(&ax1), None, None).is_err());
-            assert!(py_s.shift(1, None, Some(&ax_str1), None, None).is_err());
+            assert!(py_s.shift_by(1, None, Some(&ax1), None, None).is_err());
+            assert!(py_s.shift_by(1, None, Some(&ax_str1), None, None).is_err());
 
             // Setup DataFrame
             let df = DataFrame::from_dict(
@@ -79676,21 +79854,21 @@ mod tests {
 
             // 6. DataFrame shift
             let df_shift0 = py_df
-                .shift(1, None, None, None, None)
+                .shift_by(1, None, None, None, None)
                 .expect("df shift axis 0");
             let col_a_s0 = df_shift0.inner.column("a").unwrap();
             assert!(col_a_s0.values()[0].is_nan() || col_a_s0.values()[0].is_null());
             assert_eq!(col_a_s0.values()[1], Scalar::Float64(1.0));
 
             let df_shift0_fill = py_df
-                .shift(1, None, None, Some(&fill_99), None)
+                .shift_by(1, None, None, Some(&fill_99), None)
                 .expect("df shift axis 0 fill");
             let col_a_s0_f = df_shift0_fill.inner.column("a").unwrap();
             assert_eq!(col_a_s0_f.values()[0], Scalar::Float64(99.0));
             assert_eq!(col_a_s0_f.values()[1], Scalar::Float64(1.0));
 
             let df_shift1 = py_df
-                .shift(1, None, Some(&ax1), None, None)
+                .shift_by(1, None, Some(&ax1), None, None)
                 .expect("df shift axis 1");
             let col_a_s1 = df_shift1.inner.column("a").unwrap();
             let col_b_s1 = df_shift1.inner.column("b").unwrap();
@@ -79698,14 +79876,14 @@ mod tests {
             assert_eq!(col_b_s1.values()[0], Scalar::Float64(1.0));
 
             let df_shift1_fill = py_df
-                .shift(1, None, Some(&ax1), Some(&fill_99), None)
+                .shift_by(1, None, Some(&ax1), Some(&fill_99), None)
                 .expect("df shift axis 1 fill");
             let col_a_s1_f = df_shift1_fill.inner.column("a").unwrap();
             let col_b_s1_f = df_shift1_fill.inner.column("b").unwrap();
             assert_eq!(col_a_s1_f.values()[0], Scalar::Float64(99.0));
             assert_eq!(col_b_s1_f.values()[0], Scalar::Float64(1.0));
 
-            assert!(py_df.shift(1, None, Some(&ax2), None, None).is_err());
+            assert!(py_df.shift_by(1, None, Some(&ax2), None, None).is_err());
         });
     }
 

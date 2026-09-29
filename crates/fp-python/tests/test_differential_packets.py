@@ -19085,3 +19085,45 @@ _RC_CASES = {
 def test_read_csv_chunks_and_date_format_like_pandas_9c1ss(case: str) -> None:
     run = _RC_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-ox034: shift by a list of periods is the frame of the
+# shifts (pandas 2.1; it was a TypeError), and concat(verify_integrity=True)
+# refuses overlapping labels with pandas' ValueError (it was refused).
+def _sl_frame(m: Any) -> Any:
+    return m.DataFrame({"a": [1, 2, 3], "b": [4.0, 5.0, 6.0]})
+
+
+_SL_CASES = {
+    "frame list": lambda m: _e23_shown(_sl_frame(m).shift([1, 2])),
+    "frame suffix": lambda m: _e23_shown(_sl_frame(m).shift([0, 1], suffix="_s")),
+    "frame fill_value": lambda m: _e23_shown(_sl_frame(m).shift([1, -1], fill_value=0)),
+    "Series unnamed": lambda m: _e23_shown(m.Series([1, 2, 3]).shift([1, -1])),
+    "Series named": lambda m: _e23_shown(m.Series([1, 2, 3], name="x").shift([1], fill_value=0)),
+    "tuple": lambda m: _e23_shown(_sl_frame(m).shift((2,))),
+    "empty list": lambda m: _e23_shown(_sl_frame(m).shift([])),
+    "float period": lambda m: _e23_shown(_sl_frame(m).shift([1.5])),
+    "bool period": lambda m: _e23_shown(_sl_frame(m).shift([True])),
+    "list with axis 1": lambda m: _e23_shown(_sl_frame(m).shift([1], axis=1)),
+    "int with suffix": lambda m: _e23_shown(_sl_frame(m).shift(1, suffix="x")),
+    "verify rows": lambda m: _e23_shown(m.concat([_sl_frame(m), _sl_frame(m)], verify_integrity=True)),
+    "verify columns": lambda m: _e23_shown(m.concat([_sl_frame(m), _sl_frame(m)], axis=1, verify_integrity=True)),
+    "verify Series": lambda m: [m.concat([_sl_frame(m).a, _sl_frame(m).a], verify_integrity=True)],
+    "verify unique labels": lambda m: _e23_shown(
+        m.concat([_sl_frame(m), _sl_frame(m).set_axis([5, 6, 7])], verify_integrity=True)
+    ),
+    "verify with ignore_index": lambda m: _e23_shown(
+        m.concat([_sl_frame(m), _sl_frame(m)], verify_integrity=True, ignore_index=True)
+    ),
+    # Negatives: already pandas'.
+    "int": lambda m: _e23_shown(_sl_frame(m).shift(1)),
+    "Series int fill_value": lambda m: _e23_shown(m.Series([1, 2, 3]).shift(-1, fill_value=9).to_frame()),
+    "verify false": lambda m: _e23_shown(m.concat([_sl_frame(m), _sl_frame(m)], verify_integrity=False)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_SL_CASES))
+def test_shift_list_and_concat_verify_like_pandas_ox034(case: str) -> None:
+    run = _SL_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
