@@ -48427,23 +48427,38 @@ fn category_rank(meta: &CategoricalMetadata, label: &IndexLabel) -> usize {
 
 /// A groupby's `.groups` (with `row_labels`: each group's row labels as an
 /// Index, as pandas gives them; they were positions) or `.indices` (row
-/// positions), keyed in the given group order.
+/// positions, an int64 array), in the given group order, each keyed by its
+/// `keys` levels - a tuple over several keys (it was the flat 'x|1' label).
 fn groups_dict(
     py: Python<'_>,
     groups: &[(IndexLabel, Vec<usize>)],
+    keys: &[Vec<IndexLabel>],
     row_labels: Option<&Index>,
 ) -> PyResult<Py<PyDict>> {
     let dict = PyDict::new(py);
-    for (key, positions) in groups {
-        let py_key = index_label_to_py(py, key)?;
+    let numpy = py.import("numpy")?;
+    for ((_, positions), key) in groups.iter().zip(keys) {
         match row_labels {
             Some(index) => dict.set_item(
-                py_key,
+                group_key_object(py, key, false)?,
                 PyIndex {
                     inner: index.take(positions),
                 },
             )?,
-            None => dict.set_item(py_key, PyList::new(py, positions)?)?,
+            // `.indices`: numpy keys - one key's number too - and int64
+            // arrays of positions, as pandas' (they were Python ints and
+            // lists).
+            None => {
+                let py_key = match key.as_slice() {
+                    [single @ (IndexLabel::Int64(_) | IndexLabel::Float64(_))] => {
+                        numpy_scalar(py, &index_label_to_scalar(single))?
+                    }
+                    _ => group_key_object(py, key, true)?,
+                };
+                let positions =
+                    numpy.call_method1("array", (PyList::new(py, positions)?, "int64"))?;
+                dict.set_item(py_key, positions)?;
+            }
         }
     }
     Ok(dict.unbind())
@@ -52620,21 +52635,82 @@ fn lay_out_series(pieces: &[Series], layout: AppliedLayout) -> PyResult<Series> 
     }
 }
 
-/// A group key as pandas gives it (to `for key, group in gb` and as a group's
-/// `.name`): the label itself for one key, a tuple for several.
-fn group_key_object(py: Python<'_>, key: &[IndexLabel]) -> PyResult<Py<PyAny>> {
+/// A group key as pandas gives it (to `for key, group in gb`, as a group's
+/// `.name`, and keying `.groups` / `.indices`): the label itself for one
+/// key, a tuple for several - whose numbers are numpy scalars with
+/// `numpy_parts`, as pandas' iteration, names and `.indices` zip the
+/// levels' arrays (`.groups` keys hold Python numbers; they were Python
+/// throughout).
+fn group_key_object(py: Python<'_>, key: &[IndexLabel], numpy_parts: bool) -> PyResult<Py<PyAny>> {
+    let part_to_py = |part: &IndexLabel| match part {
+        IndexLabel::Int64(_) | IndexLabel::Float64(_) if numpy_parts => {
+            numpy_scalar(py, &index_label_to_scalar(part))
+        }
+        _ => index_label_to_py(py, part),
+    };
     match key {
         [single] => index_label_to_py(py, single),
         parts => Ok(pyo3::types::PyTuple::new(
             py,
-            parts
-                .iter()
-                .map(|part| index_label_to_py(py, part))
-                .collect::<PyResult<Vec<_>>>()?,
+            parts.iter().map(part_to_py).collect::<PyResult<Vec<_>>>()?,
         )?
         .into_any()
         .unbind()),
     }
+}
+
+/// The positions among `groups` (a multi-key groupby's groups, in code
+/// order) of the group codes `labels` hold.
+fn group_code_positions(groups: &Index, labels: &[IndexLabel]) -> PyResult<Vec<usize>> {
+    labels
+        .iter()
+        .map(|label| match label {
+            IndexLabel::Int64(code) => usize::try_from(*code).ok(),
+            IndexLabel::Float64(code) if code.0.fract() == 0.0 && code.0 >= 0.0 => {
+                Some(code.0 as usize)
+            }
+            _ => None,
+        })
+        .collect::<Option<Vec<usize>>>()
+        .filter(|positions| positions.iter().all(|&p| p < groups.len()))
+        .ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "a multi-key groupby result was not indexed by its group codes",
+            )
+        })
+}
+
+/// `index`, a MultiIndex whose first level holds group codes, with that
+/// level spread into the levels of `groups` (a multi-key groupby's groups)
+/// before its other levels, as pandas lays out a (keys..., row) result.
+fn coded_levels_index(groups: &Index, index: &Index) -> PyResult<Index> {
+    let Some(levels) = index.row_multiindex() else {
+        return Ok(index.clone());
+    };
+    let codes = levels.get_level_values(0).map_err(index_error_to_py)?;
+    let positions = group_code_positions(groups, codes.labels())?;
+    let key_rows = index_rows(groups);
+    let width = groups
+        .row_multiindex()
+        .map_or(1, fp_index::MultiIndex::nlevels);
+    let mut arrays: Vec<Vec<IndexLabel>> = (0..width)
+        .map(|level| {
+            positions
+                .iter()
+                .map(|&group| key_rows[group][level].clone())
+                .collect()
+        })
+        .collect();
+    for level in 1..levels.nlevels() {
+        let values = levels.get_level_values(level).map_err(index_error_to_py)?;
+        arrays.push(values.labels().to_vec());
+    }
+    let mut names = index_level_names(groups);
+    names.extend(levels.names().iter().skip(1).cloned());
+    let multi = fp_index::MultiIndex::from_arrays(arrays)
+        .map_err(index_error_to_py)?
+        .set_names(names);
+    row_multiindex_axis(multi)
 }
 
 /// Each row of `index` as its label on every level (one for a flat index).
@@ -53220,6 +53296,19 @@ impl PyGroupBy {
             .and_then(|gb| gb.group_codes())
             .map_err(frame_error_to_py)?;
         Ok(order)
+    }
+
+    /// Each of the `ordered` groups' key as its levels' labels (a tuple's
+    /// parts over several keys; see [`Self::group_key_index`]); the labels
+    /// themselves where observed=False's unused categories trail the coded
+    /// groups.
+    fn key_levels(&self, ordered: &[(IndexLabel, Vec<usize>)]) -> PyResult<Vec<Vec<IndexLabel>>> {
+        let rows = index_rows(&self.group_key_index(ordered)?);
+        Ok(if rows.len() == ordered.len() {
+            rows
+        } else {
+            ordered.iter().map(|(key, _)| vec![key.clone()]).collect()
+        })
     }
 
     /// A per-group reduction frame with pandas' rows for the unused
@@ -54835,7 +54924,7 @@ impl PyGroupBy {
         let frame = self.restored(self.df.select_columns(&kept).map_err(frame_error_to_py)?)?;
         let mut pairs = Vec::with_capacity(groups.len());
         for ((_, positions), key) in groups.iter().zip(&keys) {
-            let key = group_key_object(py, key)?;
+            let key = group_key_object(py, key, true)?;
             let group = PyDataFrame {
                 inner: frame.take_rows(positions).map_err(frame_error_to_py)?,
             };
@@ -54859,6 +54948,30 @@ impl PyGroupBy {
             return group_rows_of(slf.as_any(), name, obj);
         }
         let this = slf.borrow();
+        // Several keys: the group whose levels are the tuple's labels (its
+        // text matched no group; br-frankenpandas-86mgd).
+        if this.by.len() > 1
+            && let Ok(parts) = name.cast::<PyTuple>()
+        {
+            let wanted = parts
+                .iter()
+                .map(|part| py_to_index_label(&part))
+                .collect::<PyResult<Vec<_>>>()?;
+            let groups = this.ordered_groups(false)?;
+            let levels = this.key_levels(&groups)?;
+            let Some((_, positions)) = groups
+                .iter()
+                .zip(&levels)
+                .find(|(_, key)| **key == wanted)
+                .map(|(group, _)| group)
+            else {
+                return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                    name.clone().unbind(),
+                ));
+            };
+            let rows = this.df.take_rows(positions).map_err(frame_error_to_py)?;
+            return this.out(rows)?.into_bound_py_any(slf.py());
+        }
         let s = name
             .extract::<String>()
             .or_else(|_| name.str().map(|py_s| py_s.to_string()))?;
@@ -54873,13 +54986,20 @@ impl PyGroupBy {
     /// pandas' `gb.groups`: each group's row labels, in group order.
     #[getter]
     fn groups(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        groups_dict(py, &self.ordered_groups(true)?, Some(self.df.index()))
+        let groups = self.ordered_groups(true)?;
+        groups_dict(
+            py,
+            &groups,
+            &self.key_levels(&groups)?,
+            Some(self.df.index()),
+        )
     }
 
     /// pandas' `gb.indices`: each group's row positions, in group order.
     #[getter]
     fn indices(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        groups_dict(py, &self.ordered_groups(true)?, None)
+        let groups = self.ordered_groups(true)?;
+        groups_dict(py, &groups, &self.key_levels(&groups)?, None)
     }
 
     /// pandas' deprecated `gb.dtypes` (its FutureWarning): a row per group
@@ -55029,7 +55149,7 @@ impl PyGroupBy {
             let group = PyDataFrame { inner: group }.into_bound_py_any(py)?;
             // pandas sets each group's `.name` to its key (`lambda d:
             // d.name`); it was missing (AttributeError or a column).
-            group.setattr("name", group_key_object(py, key)?)?;
+            group.setattr("name", group_key_object(py, key, true)?)?;
             let result = func.call(prepend_arg(group, Some(args))?, kwargs)?;
             let result = Applied::from_py(py, &result)?;
             kept_rows &= matches!(&result, Applied::Frame(out) if out.index().labels() == rows);
@@ -56195,26 +56315,82 @@ impl PySeriesGroupBy {
         let Some(groups) = &self.groups else {
             return Ok(s);
         };
-        let positions = s
-            .index()
-            .labels()
-            .iter()
-            .map(|label| match label {
-                IndexLabel::Int64(code) => usize::try_from(*code).ok(),
-                IndexLabel::Float64(code) if code.0.fract() == 0.0 && code.0 >= 0.0 => {
-                    Some(code.0 as usize)
-                }
-                _ => None,
-            })
-            .collect::<Option<Vec<usize>>>()
-            .filter(|positions| positions.iter().all(|&p| p < groups.len()))
-            .ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    "a multi-key groupby result was not indexed by its group codes",
-                )
-            })?;
+        // A (group, row) result - value_counts, nlargest - keeps its inner
+        // levels under the groups', in group-code order (pandas' group
+        // order; they came in first-seen order) with each group's rows in
+        // theirs. It was refused over several keys.
+        if let Some(levels) = s.index().row_multiindex() {
+            let codes = levels.get_level_values(0).map_err(index_error_to_py)?;
+            let codes = group_code_positions(groups, codes.labels())?;
+            let mut order: Vec<usize> = (0..codes.len()).collect();
+            order.sort_by_key(|&row| codes[row]);
+            let s = s.take(&iloc_positions(&order)).map_err(frame_error_to_py)?;
+            let index = coded_levels_index(groups, s.index())?;
+            return Series::new(s.name(), index, s.column().clone()).map_err(frame_error_to_py);
+        }
+        let positions = group_code_positions(groups, s.index().labels())?;
         Series::new(s.name(), groups.take(&positions), s.column().clone())
             .map_err(frame_error_to_py)
+    }
+
+    /// A per-group frame (describe, ohlc) indexed by group code, relabelled
+    /// with the groups' labels and MultiIndex levels; unchanged over one
+    /// key.
+    fn label_group_frame(&self, frame: DataFrame) -> PyResult<DataFrame> {
+        let Some(groups) = &self.groups else {
+            return Ok(frame);
+        };
+        let positions = group_code_positions(groups, frame.index().labels())?;
+        let index = groups.take(&positions);
+        // `with_index` keeps the labels alone; the levels ride separately.
+        let levels = index.row_multiindex().cloned();
+        let frame = frame.with_index(index).map_err(frame_error_to_py)?;
+        match levels {
+            Some(levels) => frame.with_row_multiindex(levels).map_err(frame_error_to_py),
+            None => Ok(frame),
+        }
+    }
+
+    /// Each of the `ordered` groups' key as its levels' labels: over several
+    /// keys a group code's row of the groups, else the key itself.
+    fn key_levels(&self, ordered: &[(IndexLabel, Vec<usize>)]) -> Vec<Vec<IndexLabel>> {
+        let rows = self.groups.as_ref().map(index_rows);
+        ordered
+            .iter()
+            .map(|(key, _)| match (&rows, key) {
+                (Some(rows), IndexLabel::Int64(code)) => usize::try_from(*code)
+                    .ok()
+                    .and_then(|code| rows.get(code))
+                    .cloned()
+                    .unwrap_or_else(|| vec![key.clone()]),
+                _ => vec![key.clone()],
+            })
+            .collect()
+    }
+
+    /// The names of the key levels: the groups' over several keys, else the
+    /// key's own (None unnamed).
+    fn key_level_names(&self) -> Vec<Option<LabelName>> {
+        match &self.groups {
+            Some(groups) => index_level_names(groups),
+            None => {
+                let name = self.by.name();
+                vec![(!name.is_empty()).then(|| name.clone())]
+            }
+        }
+    }
+
+    /// The index of the `ordered` groups: over several keys their rows of
+    /// the groups (a MultiIndex), else the keys, named after the key.
+    fn keys_index(&self, ordered: &[(IndexLabel, Vec<usize>)]) -> PyResult<Index> {
+        let keys: Vec<IndexLabel> = ordered.iter().map(|(key, _)| key.clone()).collect();
+        match &self.groups {
+            Some(groups) => Ok(groups.take(&group_code_positions(groups, &keys)?)),
+            None => {
+                let name = self.by.name();
+                Ok(Index::new(keys).set_names((!name.is_empty()).then_some(name)))
+            }
+        }
     }
 
     /// `kind` (rolling, expanding, ewm, resample) over every group's rows
@@ -56342,23 +56518,32 @@ impl PySeriesGroupBy {
         }))
     }
 
-    /// `agg` of a list of function names: a frame, one column per name.
-    fn agg_names(&self, py: Python<'_>, names: &[String]) -> PyResult<Py<PyAny>> {
-        self.single_key("agg with a list of functions")?;
-        // A category key runs each name through its reduction, which orders
-        // the groups by category and adds the unused ones (fp-frame's
-        // multi-agg orders by value and knows neither).
-        if self.by.column().categorical().is_some() {
+    /// `agg` of a list of function names: a frame, one column per name;
+    /// None when a name is not one [`Self::agg_name`] runs (the caller runs
+    /// each as pandas' method of that name - idxmax, quantile - or raises
+    /// its AttributeError; they were refused).
+    fn agg_names(&self, py: Python<'_>, names: &[String]) -> PyResult<Option<Py<PyAny>>> {
+        if !names
+            .iter()
+            .all(|name| SERIES_GROUPBY_AGG_NAMES.contains(&name.as_str()))
+        {
+            return Ok(None);
+        }
+        // A category key, or several keys, runs each name through its
+        // reduction, which orders the groups by category and adds the unused
+        // ones, or relabels the group codes (fp-frame's multi-agg orders by
+        // value and knows neither; several keys were refused,
+        // br-frankenpandas-86mgd).
+        if self.groups.is_some() || self.by.column().categorical().is_some() {
             let mut results = Vec::with_capacity(names.len());
             for name in names {
-                let result = self.agg_name(py, name)?.ok_or_else(|| {
-                    PyErr::new::<pyo3::exceptions::PyAttributeError, _>(format!(
-                        "'{name}' is not a valid function for 'SeriesGroupBy' object"
-                    ))
-                })?;
-                results.push(result.into_bound(py));
+                if let Some(result) = self.agg_name(py, name)? {
+                    results.push(result.into_bound(py));
+                }
             }
-            return Ok(concat_side_by_side(py, results, names.to_vec())?.unbind());
+            return Ok(Some(
+                concat_side_by_side(py, results, names.to_vec())?.unbind(),
+            ));
         }
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let df = self
@@ -56377,9 +56562,15 @@ impl PySeriesGroupBy {
                 .map_err(frame_error_to_py)?,
             None => df,
         };
-        Ok(Py::new(py, PyDataFrame { inner: df })?.into_any())
+        Ok(Some(Py::new(py, PyDataFrame { inner: df })?.into_any()))
     }
 }
+
+/// The names [`PySeriesGroupBy::agg_name`] runs as its reductions.
+const SERIES_GROUPBY_AGG_NAMES: [&str; 20] = [
+    "sum", "mean", "min", "max", "std", "var", "sem", "count", "first", "last", "median", "prod",
+    "size", "nunique", "any", "all", "cumsum", "cumprod", "cummin", "cummax",
+];
 
 /// `SeriesGroupBy.agg(func=None, *args, **kwargs)`, as pandas': a name is
 /// that aggregation (any other method name is that method); a
@@ -56417,12 +56608,10 @@ fn series_groupby_agg<'py>(
         if plain && let Some(result) = this.borrow().agg_name(py, &name)? {
             return Ok(result.into_bound(py));
         }
-        return match this.getattr(name.as_str()) {
-            Ok(method) if method.is_callable() => method.call(args, kwargs),
-            _ => Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
-                format!("'{name}' is not a valid function for 'SeriesGroupBy' object"),
-            )),
-        };
+        // pandas calls `getattr(gb, name)(*args, **kwargs)`: a name it lacks
+        // is getattr's AttributeError, a property's value calling's
+        // TypeError (both were "not a valid function"; br-frankenpandas-86mgd).
+        return this.getattr(name.as_str())?.call(args, kwargs);
     }
     if func.is_instance_of::<PyDict>() {
         return Err(PyErr::new::<SpecificationError, _>(
@@ -56431,8 +56620,11 @@ fn series_groupby_agg<'py>(
     }
     if func.is_instance_of::<PyList>() || func.is_instance_of::<PyTuple>() {
         let funcs: Vec<Bound<'py, PyAny>> = func.try_iter()?.collect::<PyResult<_>>()?;
-        if plain && let Ok(names) = func.extract::<Vec<String>>() {
-            return Ok(this.borrow().agg_names(py, &names)?.into_bound(py));
+        if plain
+            && let Ok(names) = func.extract::<Vec<String>>()
+            && let Some(result) = this.borrow().agg_names(py, &names)?
+        {
+            return Ok(result.into_bound(py));
         }
         let labels = mangled_agg_labels(&funcs)?;
         let results = funcs
@@ -56694,7 +56886,6 @@ impl PySeriesGroupBy {
         bins: Option<&Bound<'_, PyAny>>,
         dropna: bool,
     ) -> PyResult<Py<PyAny>> {
-        self.single_key("value_counts")?;
         if let Some(bins) = bins.filter(|bins| !bins.is_none()) {
             let kwargs = PyDict::new(py);
             kwargs.set_item("normalize", normalize)?;
@@ -56709,14 +56900,13 @@ impl PySeriesGroupBy {
                 .extract::<PyRef<'_, PySeries>>()?
                 .inner
                 .clone();
-            // Named as pandas names it: the key, then the Series' name.
+            // Named as pandas names it: the keys, then the Series' name.
             let label = |name: &str| (!name.is_empty()).then(|| LabelName::from(name));
             let index = match counts.index().row_multiindex() {
                 Some(levels) => {
-                    let levels = levels.clone().set_names(vec![
-                        label(self.by.name().as_ref()),
-                        label(self.series.name().as_ref()),
-                    ]);
+                    let mut names = self.key_level_names();
+                    names.push(label(self.series.name().as_ref()));
+                    let levels = levels.clone().set_names(names);
                     counts
                         .index()
                         .clone()
@@ -56744,28 +56934,32 @@ impl PySeriesGroupBy {
     /// (keep was unexpected - br-frankenpandas-n57tz).
     #[pyo3(signature = (n=5, keep="first"))]
     fn nlargest(&self, n: usize, keep: &str) -> PyResult<PySeries> {
-        self.single_key("nlargest")?;
         let res = self
             .series
             .groupby(&self.by)
             .map_err(frame_error_to_py)?
             .nlargest_keep(n, keep)
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        // Over several keys the groups are codes, relabelled (it was
+        // refused; br-frankenpandas-86mgd).
+        Ok(PySeries {
+            inner: self.label_groups(res)?,
+        })
     }
 
     /// pandas' `nsmallest(n=5, keep='first')` of each group (see
     /// [`Self::nlargest`]).
     #[pyo3(signature = (n=5, keep="first"))]
     fn nsmallest(&self, n: usize, keep: &str) -> PyResult<PySeries> {
-        self.single_key("nsmallest")?;
         let res = self
             .series
             .groupby(&self.by)
             .map_err(frame_error_to_py)?
             .nsmallest_keep(n, keep)
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        Ok(PySeries {
+            inner: self.label_groups(res)?,
+        })
     }
 
     /// pandas' `diff(periods=1, axis=<no_default>)`: the deprecated axis
@@ -57130,7 +57324,6 @@ impl PySeriesGroupBy {
     ) -> PyResult<PyDataFrame> {
         let py = slf.py();
         let this = slf.borrow();
-        this.single_key("describe")?;
         this.observed_only("describe")?;
         let kwargs = describe_kwargs(py, percentiles, include, exclude)?;
         if kwargs.is_empty() && this.series.column().dtype().is_numeric() {
@@ -57140,27 +57333,27 @@ impl PySeriesGroupBy {
                 .map_err(frame_error_to_py)?
                 .describe()
                 .map_err(frame_error_to_py)?;
+            // Over several keys the rows are group codes, relabelled (it was
+            // refused; br-frankenpandas-86mgd).
+            let res = this.ordered_group_frame(res)?;
             return Ok(PyDataFrame {
-                inner: this.ordered_group_frame(res)?,
+                inner: this.label_group_frame(res)?,
             });
         }
-        let mut keys = Vec::new();
-        let mut described = Vec::new();
-        for (key, positions) in this.ordered_groups(false)? {
+        let groups = this.ordered_groups(false)?;
+        let mut described = Vec::with_capacity(groups.len());
+        for (_, positions) in &groups {
             let part = Py::new(
                 py,
                 PySeries {
-                    inner: this.group_rows(&positions)?,
+                    inner: this.group_rows(positions)?,
                 },
             )?;
             let summary = part.bind(py).call_method("describe", (), Some(&kwargs))?;
             described.push(summary.extract::<PyRef<'_, PySeries>>()?.inner.clone());
-            keys.push(key);
         }
-        let key_name = this.by.name();
-        let index = Index::new(keys).set_names((!key_name.is_empty()).then_some(key_name));
         Ok(PyDataFrame {
-            inner: unstacked_stats(&described, index)?,
+            inner: unstacked_stats(&described, this.keys_index(&groups)?)?,
         })
     }
 
@@ -57176,7 +57369,33 @@ impl PySeriesGroupBy {
             return group_rows_of(slf.as_any(), name, obj);
         }
         let this = slf.borrow();
-        this.single_key("get_group")?;
+        // Several keys: the group whose levels are the tuple's labels (it
+        // was refused; br-frankenpandas-86mgd).
+        if this.groups.is_some() {
+            let wanted = match name.cast::<PyTuple>() {
+                Ok(parts) => parts
+                    .iter()
+                    .map(|part| py_to_index_label(&part))
+                    .collect::<PyResult<Vec<_>>>()?,
+                Err(_) => vec![py_to_index_label(name)?],
+            };
+            let groups = this.ordered_groups(false)?;
+            let levels = this.key_levels(&groups);
+            let Some((_, positions)) = groups
+                .iter()
+                .zip(&levels)
+                .find(|(_, key)| **key == wanted)
+                .map(|(group, _)| group)
+            else {
+                return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                    name.clone().unbind(),
+                ));
+            };
+            return PySeries {
+                inner: this.group_rows(positions)?,
+            }
+            .into_bound_py_any(slf.py());
+        }
         let s = name
             .extract::<String>()
             .or_else(|_| name.str().map(|py_s| py_s.to_string()))?;
@@ -57192,31 +57411,12 @@ impl PySeriesGroupBy {
     /// `for key, group in sgb`: each group's key (a tuple over several keys)
     /// and its values, in group order, as pandas; it raised TypeError.
     fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let key_rows = self.groups.as_ref().map(index_rows);
+        let groups = self.ordered_groups(false)?;
         let mut pairs = Vec::new();
-        for (key, positions) in self.ordered_groups(false)? {
-            let parts = match (&key_rows, &key) {
-                (Some(rows), IndexLabel::Int64(code)) => usize::try_from(*code)
-                    .ok()
-                    .and_then(|code| rows.get(code))
-                    .cloned()
-                    .unwrap_or_else(|| vec![key.clone()]),
-                _ => vec![key.clone()],
-            };
-            let key = match parts.as_slice() {
-                [single] => index_label_to_py(py, single)?,
-                parts => pyo3::types::PyTuple::new(
-                    py,
-                    parts
-                        .iter()
-                        .map(|part| index_label_to_py(py, part))
-                        .collect::<PyResult<Vec<_>>>()?,
-                )?
-                .into_any()
-                .unbind(),
-            };
+        for ((_, positions), parts) in groups.iter().zip(self.key_levels(&groups)) {
+            let key = group_key_object(py, &parts, true)?;
             let group = PySeries {
-                inner: self.group_rows(&positions)?,
+                inner: self.group_rows(positions)?,
             };
             pairs.push(pyo3::types::PyTuple::new(
                 py,
@@ -57226,18 +57426,24 @@ impl PySeriesGroupBy {
         Ok(PyList::new(py, pairs)?.try_iter()?.into_any().unbind())
     }
 
-    /// pandas' `gb.groups`: each group's row labels, in group order.
+    /// pandas' `gb.groups`: each group's row labels, in group order, keyed
+    /// by a tuple over several keys (it was refused; br-frankenpandas-86mgd).
     #[getter]
     fn groups(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        self.single_key("groups")?;
-        groups_dict(py, &self.ordered_groups(true)?, Some(self.series.index()))
+        let groups = self.ordered_groups(true)?;
+        groups_dict(
+            py,
+            &groups,
+            &self.key_levels(&groups),
+            Some(self.series.index()),
+        )
     }
 
     /// pandas' `gb.indices`: each group's row positions, in group order.
     #[getter]
     fn indices(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        self.single_key("indices")?;
-        groups_dict(py, &self.ordered_groups(true)?, None)
+        let groups = self.ordered_groups(true)?;
+        groups_dict(py, &groups, &self.key_levels(&groups), None)
     }
 
     #[getter]
@@ -57253,23 +57459,25 @@ impl PySeriesGroupBy {
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        self.single_key("apply")?;
         if !self.as_index {
             return Err(not_implemented("SeriesGroupBy.apply with as_index=False"));
         }
         let groups = self.ordered_groups(true)?;
+        // Each group's key levels: a tuple's over several keys (they were
+        // refused; br-frankenpandas-86mgd).
+        let levels = self.key_levels(&groups);
         let mut results = Vec::with_capacity(groups.len());
         // pandas' `not_indexed_same` is false while every result is a
         // Series over its group's rows.
         let mut kept_rows = true;
-        for (key, positions) in &groups {
+        for ((_, positions), key) in groups.iter().zip(&levels) {
             let group = self.group_rows(positions)?;
             let rows = group.index().labels().to_vec();
             let group = PySeries { inner: group }.into_bound_py_any(py)?;
             // pandas names each group Series after its key (it kept the
             // column's name); a non-text key is its text here, as Series
             // names are (fvsao.32).
-            group.setattr("name", index_label_to_py(py, key)?)?;
+            group.setattr("name", group_key_object(py, key, true)?)?;
             // pandas calls func(group, *args, **kwargs); both used to be
             // dropped (fvsao.5).
             let result = func.call(prepend_arg(group, Some(args))?, kwargs)?;
@@ -57277,8 +57485,6 @@ impl PySeriesGroupBy {
             kept_rows &= matches!(&result, Applied::Series(out) if out.index().labels() == rows);
             results.push(result);
         }
-        let key_name = self.by.name();
-        let key_name = (!key_name.is_empty()).then_some(key_name);
         // pandas' SeriesGroupBy decides on the FIRST result, None or not.
         match results.first() {
             Some(Applied::Frame(_)) => Err(not_implemented(
@@ -57292,11 +57498,13 @@ impl PySeriesGroupBy {
                 let mut pieces = Vec::new();
                 let mut keys = Vec::new();
                 let mut origin = Vec::new();
-                for (result, (key, positions)) in results.into_iter().zip(&groups) {
+                for (result, ((_, positions), key)) in
+                    results.into_iter().zip(groups.iter().zip(&levels))
+                {
                     match result {
                         Applied::Series(piece) => {
                             pieces.push(piece);
-                            keys.push(vec![key.clone()]);
+                            keys.push(key.clone());
                             origin.extend_from_slice(positions);
                         }
                         Applied::Nothing => {}
@@ -57308,7 +57516,7 @@ impl PySeriesGroupBy {
                     }
                 }
                 let layout = if self.group_keys {
-                    AppliedLayout::Keyed(keys, vec![key_name.cloned()])
+                    AppliedLayout::Keyed(keys, self.key_level_names())
                 } else if kept_rows {
                     AppliedLayout::Restored(origin)
                 } else {
@@ -57322,6 +57530,7 @@ impl PySeriesGroupBy {
             // Scalars: a Series over the group keys named after the grouped
             // Series (it was unnamed; fvsao.7), NaN for None.
             _ => {
+                let index = self.keys_index(&groups)?;
                 let values = results
                     .into_iter()
                     .map(|result| match result {
@@ -57332,8 +57541,6 @@ impl PySeriesGroupBy {
                         )),
                     })
                     .collect::<PyResult<Vec<_>>>()?;
-                let index = Index::new(groups.into_iter().map(|(key, _)| key).collect())
-                    .set_names(key_name);
                 let column = Column::from_values(values).map_err(column_error_to_py)?;
                 let s =
                     Series::new(self.series.name(), index, column).map_err(frame_error_to_py)?;
@@ -57479,7 +57686,6 @@ impl PySeriesGroupBy {
                 .map_err(frame_error_to_py)?;
             return Ok(PySeries { inner: res });
         }
-        self.single_key("fillna")?;
         let groups = self.ordered_groups(false)?;
         if groups.iter().map(|(_, rows)| rows.len()).sum::<usize>() != self.series.len() {
             return Err(not_implemented(
@@ -57679,7 +57885,6 @@ impl PySeriesGroupBy {
     }
 
     fn ohlc(&self) -> PyResult<PyDataFrame> {
-        self.single_key("ohlc")?;
         self.observed_only("ohlc")?;
         let res = self
             .series
@@ -57687,8 +57892,11 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)?
             .ohlc()
             .map_err(frame_error_to_py)?;
+        // Over several keys the rows are group codes, relabelled (it was
+        // refused; br-frankenpandas-86mgd).
+        let res = self.ordered_group_frame(res)?;
         Ok(PyDataFrame {
-            inner: self.ordered_group_frame(res)?,
+            inner: self.label_group_frame(res)?,
         })
     }
 
@@ -57838,23 +58046,21 @@ impl PySeriesGroupBy {
             "SeriesGroupBy.take",
             &[("axis", matches!(axis, None | Some(0)))],
         )?;
-        self.single_key("take")?;
         let groups = self.ordered_groups(false)?;
+        // Each group's key levels: a tuple's over several keys (they were
+        // refused; br-frankenpandas-86mgd).
+        let keys = self.key_levels(&groups);
         let mut pieces = Vec::with_capacity(groups.len());
-        let mut keys = Vec::with_capacity(groups.len());
         let mut origin = Vec::new();
         let mut kept_rows = true;
-        for (key, positions) in &groups {
+        for (_, positions) in &groups {
             let rows = group_take_rows(positions, &indices)?;
             kept_rows &= rows == *positions;
             pieces.push(self.group_rows(&rows)?);
-            keys.push(vec![key.clone()]);
             origin.extend(rows);
         }
-        let key_name = self.by.name();
-        let key_name = (!key_name.is_empty()).then_some(key_name);
         let layout = if self.group_keys {
-            AppliedLayout::Keyed(keys, vec![key_name.cloned()])
+            AppliedLayout::Keyed(keys, self.key_level_names())
         } else if kept_rows {
             AppliedLayout::Restored(origin)
         } else {

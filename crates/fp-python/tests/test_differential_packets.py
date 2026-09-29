@@ -2980,9 +2980,12 @@ def test_groupby_option_refusals_and_errors_match_pandas() -> None:
     # (groupby(level=0) left this list when fvsao.19 implemented it; it is
     # compared with pandas in test_groupby_by_array_like_keys_matches_pandas.
     # dropna=False and group_keys=False left it when they were implemented;
-    # see test_centered_windows_reindex_fill_dayfirst_and_groupby_apply_match_pandas.)
+    # see test_centered_windows_reindex_fill_dayfirst_and_groupby_apply_match_pandas.
+    # TEST-CHANGE (86mgd): SeriesGroupBy.apply under dropna=False left it when
+    # the coded groups were relabelled; its "apply with a missing key kept"
+    # row in test_several_key_series_groupby_like_pandas_86mgd compares it
+    # with pandas.)
     for call in (
-        lambda: _gb_frame(fpd).groupby("k", dropna=False)["a"].apply(lambda s: s.sum()),
         lambda: _gb_frame(fpd).groupby("k", as_index=False).apply(lambda d: d["a"].sum(), include_groups=False),
     ):
         with pytest.raises(NotImplementedError):
@@ -3456,11 +3459,11 @@ def test_multi_key_series_reset_into_pandas_columns() -> None:
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-def test_multi_key_series_groupby_refuses_what_it_cannot_label() -> None:
-    # These results are not relabelled from group codes yet; they raise rather
-    # than come back indexed by the codes. TEST-CHANGE (wsu74): unique is
-    # relabelled now and left this list; test_groupby_unique_like_pandas_wsu74
-    # checks it against pandas over two and three keys.
+def test_multi_key_series_groupby_labels_like_pandas() -> None:
+    # TEST-CHANGE (86mgd): this asserted these raised NotImplementedError (not
+    # relabelled from group codes); they are relabelled now and each is
+    # compared with pandas here (and in test_several_key_series_groupby_like_pandas_86mgd).
+    # Earlier (wsu74) unique left the list the same way.
     for op in (
         lambda g: g.value_counts(),
         lambda g: g.nlargest(1),
@@ -3469,8 +3472,9 @@ def test_multi_key_series_groupby_refuses_what_it_cannot_label() -> None:
         lambda g: g.agg(["sum", "mean"]),
         lambda g: g.get_group(("x", 1)),
     ):
-        with pytest.raises(NotImplementedError, match="several keys"):
-            op(_sgb2(fpd))
+        assert _e23_outcome(lambda: _mx_shown(op(_sgb2(fpd)))) == _e23_outcome(
+            lambda: _mx_shown(op(_sgb2(pd)))
+        )
     # NEGATIVE: one key keeps its flat Index and its own labels.
     single = _mk(fpd).groupby("k")["v"].sum()
     assert type(single.index).__name__ == "Index"
@@ -18175,4 +18179,89 @@ def _mx_flat_assign(m: Any) -> Any:
 @pytest.mark.parametrize("case", list(_MX_CASES))
 def test_multiindex_lists_levels_and_writes_like_pandas_fvsao36(case: str) -> None:
     run = _MX_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-86mgd: a SeriesGroupBy over several keys (df.groupby([k1,
+# k2])[col], s.groupby(level=[..])) refused agg of a list, apply, groups /
+# indices / get_group, describe, value_counts, nlargest / nsmallest, take and
+# ohlc; a DataFrameGroupBy's .groups / .indices were keyed by the flat 'x|1'
+# text and get_group of a tuple missed.
+def _kg_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "a": ["x", "x", "y", "y", "x", "y"],
+            "b": [1, 2, 1, 1, 1, 2],
+            "v": [1.0, 2.5, None, 4.0, 5.0, 6.0],
+            "w": [4, 5, 6, 7, 8, 9],
+        }
+    )
+
+
+def _kg(m: Any, **kwargs: Any) -> Any:
+    return _kg_frame(m).groupby(["a", "b"], **kwargs)["w"]
+
+
+def _kg_dict(groups: Any) -> list:
+    return [(repr(key), list(value), type(value).__name__) for key, value in groups.items()]
+
+
+_KG_CASES = {
+    "agg a list": lambda m: _mx_shown(_kg(m).agg(["sum", "max"])),
+    "agg a list with a lambda": lambda m: _mx_shown(_kg(m).agg(["min", lambda s: s.max() - s.min()])),
+    "agg a list unsorted": lambda m: _mx_shown(
+        _kg_frame(m).groupby(["b", "a"], sort=False)["w"].agg(["sum", "min"])
+    ),
+    "agg a list with a missing key kept": lambda m: _mx_shown(
+        _kg_frame(m).groupby(["a", "v"], dropna=False)["w"].agg(["sum", "count"])
+    ),
+    "agg a list over levels": lambda m: _mx_shown(
+        _kg_frame(m).set_index(["a", "b"])["w"].groupby(level=["a", "b"]).agg(["sum", "max"])
+    ),
+    "apply a scalar": lambda m: _mx_shown(_kg(m).apply(lambda s: s.sum() * 10)),
+    "apply a Series": lambda m: _mx_shown(_kg(m).apply(lambda s: s.cumsum())),
+    "apply the first row": lambda m: _mx_shown(_kg(m).apply(lambda s: s.head(1))),
+    "apply without group keys": lambda m: _mx_shown(_kg(m, group_keys=False).apply(lambda s: s * 2)),
+    "apply reads the group name": lambda m: _mx_shown(_kg(m).apply(lambda s: repr(s.name))),
+    "apply over levels": lambda m: _mx_shown(
+        _kg_frame(m).set_index(["a", "b"])["w"].groupby(level=["a", "b"]).apply(lambda s: s.max())
+    ),
+    "groups": lambda m: _kg_dict(_kg(m).groups),
+    "indices": lambda m: _kg_dict(_kg(m).indices),
+    "get_group": lambda m: _mx_shown(_kg(m).get_group(("x", 1))),
+    "iteration keys": lambda m: [repr(key) for key, _ in _kg(m)],
+    "float key iteration": lambda m: [repr(key) for key, _ in _kg_frame(m).groupby(["a", "v"])["w"]],
+    "describe": lambda m: _mx_shown(_kg(m).describe()),
+    "describe text": lambda m: _mx_shown(_kg_frame(m).assign(t=list("pqpqpp")).groupby(["a", "b"])["t"].describe()),
+    "value_counts": lambda m: _mx_shown(_kg(m).value_counts()),
+    "nlargest": lambda m: _mx_shown(_kg(m).nlargest(1)),
+    "nsmallest": lambda m: _mx_shown(_kg(m).nsmallest(1)),
+    "nlargest unsorted": lambda m: _mx_shown(_kg_frame(m).groupby(["b", "a"], sort=False)["w"].nlargest(1)),
+    "take": lambda m: _mx_shown(_kg(m).take([0])),
+    "take from the end": lambda m: _mx_shown(_kg(m).take([-1])),
+    "ohlc": lambda m: _mx_shown(_kg(m).ohlc()),
+    "fillna by method": lambda m: _mx_shown(_kg_frame(m).groupby(["a", "b"])["v"].fillna(method="ffill")),
+    "apply with a missing key kept": lambda m: _mx_shown(
+        _gb_frame(m).groupby("k", dropna=False)["a"].apply(lambda s: s.sum())
+    ),
+    "frame groups": lambda m: _kg_dict(_kg_frame(m).groupby(["a", "b"]).groups),
+    "frame indices": lambda m: _kg_dict(_kg_frame(m).groupby(["a", "b"]).indices),
+    "frame get_group": lambda m: _mx_shown(_kg_frame(m).groupby(["a", "b"]).get_group(("x", 1))),
+    "one key indices": lambda m: _kg_dict(_kg_frame(m).groupby("b")["w"].indices),
+    # Negatives: one key, and pandas' errors.
+    "one key agg a list": lambda m: _mx_shown(_kg_frame(m).groupby("a")["w"].agg(["sum", "max"])),
+    "one key groups": lambda m: _kg_dict(_kg_frame(m).groupby("a")["w"].groups),
+    "one key iteration keys": lambda m: [repr(key) for key, _ in _kg_frame(m).groupby("b")["w"]],
+    "get_group missing": lambda m: _mx_shown(_kg(m).get_group(("x", 9))),
+    "frame get_group missing": lambda m: _mx_shown(_kg_frame(m).groupby(["a", "b"]).get_group(("x", 9))),
+    "agg an unknown name": lambda m: _mx_shown(_kg(m).agg(["sum", "nonesuch"])),
+    "one key agg an unknown name": lambda m: _mx_shown(_kg_frame(m).groupby("a")["w"].agg(["sum", "nonesuch"])),
+    "agg one unknown name": lambda m: _mx_shown(_kg(m).agg("nonesuch")),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_KG_CASES))
+def test_several_key_series_groupby_like_pandas_86mgd(case: str) -> None:
+    run = _KG_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
