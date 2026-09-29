@@ -18012,7 +18012,9 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 || msg == "Cannot perform rank with non-ordered Categorical"
                 || msg.starts_with("Bin edges must be unique: ")
                 || msg.starts_with("Cannot setitem on a Categorical with a new category")
-                || msg.starts_with("DataFrame columns must be unique for orient=");
+                || msg.starts_with("DataFrame columns must be unique for orient=")
+                || (msg.starts_with("cannot insert ") && msg.ends_with(", already exists"))
+                || msg.starts_with("Cannot specify 'allow_duplicates=True' when ");
             let text = if pandas_verbatim {
                 msg.clone()
             } else {
@@ -24525,38 +24527,58 @@ impl PySeries {
         Ok(series_inplace(&mut self.inner, result, inplace))
     }
 
-    /// Drop missing values, returning a new Series.
-    #[pyo3(signature = (axis=None, how=None, ignore_index=false))]
+    /// Drop missing values: a new Series, or in place with `inplace=True`
+    /// (None returned; it was an unexpected keyword - br-frankenpandas-n57tz).
+    #[pyo3(signature = (axis=None, inplace=false, how=None, ignore_index=false))]
     fn dropna(
-        &self,
+        &mut self,
         axis: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
         how: Option<&str>,
         ignore_index: bool,
-    ) -> PyResult<PySeries> {
-        let ax_opt = parse_axis_param_for_type(axis, "Series")?;
-        if let Some(ax) = ax_opt {
-            if ax != 0 {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "No axis named {ax} for object type Series"
-                )));
+    ) -> PyResult<Option<PySeries>> {
+        let result = (|| -> PyResult<PySeries> {
+            let ax_opt = parse_axis_param_for_type(axis, "Series")?;
+            if let Some(ax) = ax_opt {
+                if ax != 0 {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "No axis named {ax} for object type Series"
+                    )));
+                }
             }
-        }
-        if let Some(h) = how {
-            if !matches!(h, "any" | "all") {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "invalid how option: {h}"
-                )));
+            if let Some(h) = how {
+                if !matches!(h, "any" | "all") {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "invalid how option: {h}"
+                    )));
+                }
             }
-        }
 
-        let mut res = self.inner.dropna().map_err(frame_error_to_py)?;
-        if ignore_index {
-            match res.reset_index(true).map_err(frame_error_to_py)? {
-                fp_frame::SeriesResetIndexResult::Series(s) => res = s,
-                fp_frame::SeriesResetIndexResult::DataFrame(_) => unreachable!(),
+            let mut res = self.inner.dropna().map_err(frame_error_to_py)?;
+            // reset_index(drop=true) is always a Series.
+            if ignore_index
+                && let fp_frame::SeriesResetIndexResult::Series(s) =
+                    res.reset_index(true).map_err(frame_error_to_py)?
+            {
+                res = s;
             }
+            Ok(PySeries { inner: res })
+        })()?;
+        Ok(series_inplace(&mut self.inner, result, inplace))
+    }
+
+    /// Clone this Series (pandas' `copy(deep=True)`). A shallow copy
+    /// (`deep=False`) shares its data with the original in pandas 2.2, so a
+    /// write through either shows in both; frankenpandas' Series own their
+    /// data, so that is refused rather than answered with a deep copy.
+    #[pyo3(signature = (deep=true))]
+    fn copy(&self, deep: bool) -> PyResult<PySeries> {
+        if !deep {
+            return Err(not_implemented(
+                "Series.copy(deep=False) (a shallow copy sharing the original's data)",
+            ));
         }
-        Ok(PySeries { inner: res })
+        Ok(self.clone())
     }
 
     /// Return the cumulative product as a new Series.
@@ -25486,18 +25508,27 @@ impl PySeries {
         }
     }
 
-    fn argmax(&self) -> PyResult<NumpyInt64> {
-        self.inner
-            .argmax()
-            .map(NumpyInt64)
-            .map_err(frame_error_to_py)
+    /// pandas' `argmax(axis=None, skipna=True)` ([`series_arg_extreme`]; it
+    /// took no keywords - br-frankenpandas-n57tz).
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn argmax(
+        &self,
+        py: Python<'_>,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+    ) -> PyResult<Py<PyAny>> {
+        series_arg_extreme(py, &self.inner, axis, skipna, true)
     }
 
-    fn argmin(&self) -> PyResult<NumpyInt64> {
-        self.inner
-            .argmin()
-            .map(NumpyInt64)
-            .map_err(frame_error_to_py)
+    /// pandas' `argmin(axis=None, skipna=True)`.
+    #[pyo3(signature = (axis=None, skipna=true))]
+    fn argmin(
+        &self,
+        py: Python<'_>,
+        axis: Option<&Bound<'_, PyAny>>,
+        skipna: bool,
+    ) -> PyResult<Py<PyAny>> {
+        series_arg_extreme(py, &self.inner, axis, skipna, false)
     }
 
     /// Shift index by desired number of periods.
@@ -25613,10 +25644,6 @@ impl PySeries {
         self.notna()
     }
 
-    fn copy(&self) -> PySeries {
-        self.clone()
-    }
-
     /// pandas' `to_frame(name=)`: the column is `name`, else the Series'
     /// name, typed (0 stays the integer 0), else the RangeIndex column 0.
     #[pyo3(signature = (name=None))]
@@ -25657,13 +25684,7 @@ impl PySeries {
     ) -> PyResult<Py<PyAny>> {
         // A Series index is single-level, so level 0 is the whole index.
         let level_is_default = level.is_none_or(|l| matches!(l.extract::<i64>(), Ok(0)));
-        unsupported_params(
-            "Series.reset_index",
-            &[
-                ("level", level_is_default),
-                ("allow_duplicates", !allow_duplicates),
-            ],
-        )?;
+        unsupported_params("Series.reset_index", &[("level", level_is_default)])?;
         // In place, the Series can only lose its index (pandas' rule).
         if inplace && !drop {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
@@ -25682,7 +25703,7 @@ impl PySeries {
         };
         match self
             .inner
-            .reset_index_with_name(drop, name_str.as_deref())
+            .reset_index_allow_duplicates(drop, name_str.as_deref(), allow_duplicates)
             .map_err(frame_error_to_py)?
         {
             fp_frame::SeriesResetIndexResult::Series(s) if inplace => {
@@ -25752,13 +25773,24 @@ impl PySeries {
         )
     }
 
-    #[pyo3(signature = (min_periods=None))]
-    fn expanding(&self, min_periods: Option<usize>) -> PyExpanding {
-        PyExpanding {
-            series: Some(self.inner.clone()),
-            dataframe: None,
+    /// pandas' `expanding(min_periods=1, axis=<no_default>, method='single')`
+    /// ([`expanding_of`]).
+    #[pyo3(signature = (min_periods=None, axis=Passed(None), method="single"))]
+    fn expanding(
+        &self,
+        py: Python<'_>,
+        min_periods: Option<usize>,
+        axis: Passed<'_>,
+        method: &str,
+    ) -> PyResult<PyExpanding> {
+        expanding_of(
+            py,
+            Some(self.inner.clone()),
+            None,
             min_periods,
-        }
+            &axis,
+            method,
+        )
     }
 
     /// pandas' `s.ewm(com=None, span=None, halflife=None, alpha=None,
@@ -26757,23 +26789,63 @@ impl PySeries {
         Ok(PySeries { inner: res })
     }
 
-    fn at_time(&self, time: &str) -> PyResult<PySeries> {
+    /// pandas' `at_time(time, asof=False, axis=None)`: `asof=True` is
+    /// pandas' own NotImplementedError (the keywords were unexpected -
+    /// br-frankenpandas-n57tz).
+    #[pyo3(signature = (time, asof=false, axis=None))]
+    fn at_time(
+        &self,
+        time: &str,
+        asof: bool,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        if asof {
+            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                "'asof' argument is not supported",
+            ));
+        }
+        time_selection_axis(axis, "Series", "at_time")?;
         let res = self.inner.at_time(time).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
     }
 
-    fn between_time(&self, start: &str, end: &str) -> PyResult<PySeries> {
+    /// pandas' `between_time(start_time, end_time, inclusive='both',
+    /// axis=None)` (pandas' names: `start` / `end` failed as keywords).
+    #[pyo3(signature = (start_time, end_time, inclusive="both", axis=None))]
+    fn between_time(
+        &self,
+        start_time: &str,
+        end_time: &str,
+        inclusive: &str,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        let inclusive = between_time_inclusive(inclusive)?;
+        time_selection_axis(axis, "Series", "between_time")?;
         let res = self
             .inner
-            .between_time(start, end)
+            .between_time_inclusive(start_time, end_time, inclusive)
             .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
     }
 
-    fn asof(&self, py: Python<'_>, label: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        let lbl = py_to_index_label(label)?;
+    /// pandas' `asof(where, subset=None)` for one label (`where` was named
+    /// `label`); a Series has no subset (pandas' ValueError).
+    #[pyo3(signature = (r#where, subset=None))]
+    fn asof(
+        &self,
+        py: Python<'_>,
+        r#where: &Bound<'_, PyAny>,
+        subset: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        if subset.is_some_and(|subset| !subset.is_none()) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "subset is not valid for Series",
+            ));
+        }
+        let lbl = py_to_index_label(r#where)?;
         let val = self.inner.asof_value(&lbl).map_err(frame_error_to_py)?;
-        scalar_to_py(py, &val)
+        // An element as pandas returns one: np.int64, not a Python int.
+        element_to_py(py, self.inner.column(), &val)
     }
 
     #[pyo3(signature = (lag=None))]
@@ -26855,7 +26927,13 @@ impl PySeries {
                 }
                 out.push(py_to_scalar(py, &res)?);
             }
-            let s = series_over_index(self.inner.name(), index, out)?;
+            // Ints beside a missing value are float64 with NaN, as pandas
+            // infers the results (they were an int64 Series holding NaN).
+            let s = series_over_index(
+                self.inner.name(),
+                index,
+                pandas_promote_int_with_missing(out),
+            )?;
             Ok(PySeries { inner: s })
         } else if let Ok(dict) = arg.cast::<PyDict>() {
             let mut out = Vec::with_capacity(vals.len());
@@ -26871,7 +26949,11 @@ impl PySeries {
                     out.push(Scalar::Float64(f64::NAN));
                 }
             }
-            let s = series_over_index(self.inner.name(), index, out)?;
+            let s = series_over_index(
+                self.inner.name(),
+                index,
+                pandas_promote_int_with_missing(out),
+            )?;
             Ok(PySeries { inner: s })
         } else if let Ok(other_ser) = arg.extract::<PyRef<PySeries>>() {
             let mut out = Vec::with_capacity(vals.len());
@@ -26900,7 +26982,11 @@ impl PySeries {
                 };
                 out.push(col_val);
             }
-            let s = series_over_index(self.inner.name(), index, out)?;
+            let s = series_over_index(
+                self.inner.name(),
+                index,
+                pandas_promote_int_with_missing(out),
+            )?;
             Ok(PySeries { inner: s })
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
@@ -26909,8 +26995,18 @@ impl PySeries {
         }
     }
 
-    #[pyo3(signature = (percentiles=None))]
-    fn describe(&self, percentiles: Option<Vec<f64>>) -> PyResult<PySeries> {
+    /// pandas' `describe(percentiles=None, include=None, exclude=None)`:
+    /// `include` / `exclude` choose a frame's columns, and pandas ignores
+    /// them for a Series, as here (they were unexpected keywords -
+    /// br-frankenpandas-n57tz).
+    #[pyo3(signature = (percentiles=None, include=None, exclude=None))]
+    fn describe(
+        &self,
+        percentiles: Option<Vec<f64>>,
+        include: Option<&Bound<'_, PyAny>>,
+        exclude: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        let _ = (include, exclude); // pandas' SeriesDescriber never reads them
         let s = match percentiles {
             Some(p) => self
                 .inner
@@ -27326,9 +27422,17 @@ impl PySeries {
         Ok(list.into())
     }
 
-    fn factorize(&self) -> PyResult<(PySeries, PySeries)> {
-        let (codes, uniques) = self.inner.factorize().map_err(frame_error_to_py)?;
-        Ok((PySeries { inner: codes }, PySeries { inner: uniques }))
+    /// pandas' `factorize(sort=False, use_na_sentinel=True)`: the codes (a
+    /// numpy array) and the uniques as an Index, as `pd.factorize` of the
+    /// Series (it returned two Series and took no keywords -
+    /// br-frankenpandas-n57tz).
+    #[pyo3(signature = (sort=false, use_na_sentinel=true))]
+    fn factorize(
+        slf: &Bound<'_, Self>,
+        sort: bool,
+        use_na_sentinel: bool,
+    ) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
+        factorize(slf.py(), slf.as_any(), sort, use_na_sentinel)
     }
 
     /// pandas' `case_when(caselist)`: each condition and replacement a
@@ -34149,14 +34253,17 @@ impl PyDataFrame {
     }
 
     /// Reset the index to a default integer range, returning a new DataFrame.
+    /// `allow_duplicates` lets an index column repeat a column's label.
     #[pyo3(signature = (
         level = None,
         drop = false,
         inplace = false,
         col_level = 0,
         col_fill = None,
+        allow_duplicates = false,
         names = None
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn reset_index(
         &mut self,
         level: Option<&Bound<'_, PyAny>>,
@@ -34164,6 +34271,7 @@ impl PyDataFrame {
         inplace: bool,
         col_level: usize,
         col_fill: Option<&Bound<'_, PyAny>>,
+        allow_duplicates: bool,
         names: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Option<PyDataFrame>> {
         // Columns are single-level, where pandas never reads col_fill.
@@ -34202,10 +34310,11 @@ impl PyDataFrame {
                             .flatten()
                             .map_or_else(|| format!("level_{position}"), String::from);
                         out = out
-                            .insert(
+                            .insert_allow_duplicates(
                                 slot,
                                 name,
                                 Column::from_values(values).map_err(column_error_to_py)?,
+                                allow_duplicates,
                             )
                             .map_err(frame_error_to_py)?;
                     }
@@ -34228,7 +34337,10 @@ impl PyDataFrame {
             &[("level", level_is_default), ("col_level", col_level == 0)],
         )?;
         let reset = (|| -> PyResult<PyDataFrame> {
-            let mut result = self.inner.reset_index(drop).map_err(frame_error_to_py)?;
+            let mut result = self
+                .inner
+                .reset_index_allow_duplicates(drop, allow_duplicates)
+                .map_err(frame_error_to_py)?;
             if !drop
                 && let Some(n) = names
                 && !n.is_none()
@@ -34759,11 +34871,18 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: result })
     }
 
-    /// Return a copy of this DataFrame.
-    fn copy(&self) -> PyDataFrame {
-        PyDataFrame {
-            inner: self.inner.copy(),
+    /// Return a copy of this DataFrame (pandas' `copy(deep=True)`; a shallow
+    /// copy sharing the frame's data is refused, as for a Series).
+    #[pyo3(signature = (deep=true))]
+    fn copy(&self, deep: bool) -> PyResult<PyDataFrame> {
+        if !deep {
+            return Err(not_implemented(
+                "DataFrame.copy(deep=False) (a shallow copy sharing the original's data)",
+            ));
         }
+        Ok(PyDataFrame {
+            inner: self.inner.copy(),
+        })
     }
 
     /// Return a boolean DataFrame marking missing values (pandas `DataFrame.isnull`).
@@ -36783,13 +36902,24 @@ impl PyDataFrame {
         )
     }
 
-    #[pyo3(signature = (min_periods=None))]
-    fn expanding(&self, min_periods: Option<usize>) -> PyExpanding {
-        PyExpanding {
-            series: None,
-            dataframe: Some(self.inner.clone()),
+    /// pandas' `expanding(min_periods=1, axis=<no_default>, method='single')`
+    /// ([`expanding_of`]).
+    #[pyo3(signature = (min_periods=None, axis=Passed(None), method="single"))]
+    fn expanding(
+        &self,
+        py: Python<'_>,
+        min_periods: Option<usize>,
+        axis: Passed<'_>,
+        method: &str,
+    ) -> PyResult<PyExpanding> {
+        expanding_of(
+            py,
+            None,
+            Some(self.inner.clone()),
             min_periods,
-        }
+            &axis,
+            method,
+        )
     }
 
     /// pandas' `df.ewm(com=None, span=None, halflife=None, alpha=None,
@@ -38706,22 +38836,47 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: res })
     }
 
-    fn at_time(&self, time: &str) -> PyResult<PyDataFrame> {
+    /// pandas' `at_time(time, asof=False, axis=None)` (see Series').
+    #[pyo3(signature = (time, asof=false, axis=None))]
+    fn at_time(
+        &self,
+        time: &str,
+        asof: bool,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        if asof {
+            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                "'asof' argument is not supported",
+            ));
+        }
+        time_selection_axis(axis, "DataFrame", "at_time")?;
         let res = self.inner.at_time(time).map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: res })
     }
 
-    fn between_time(&self, start: &str, end: &str) -> PyResult<PyDataFrame> {
+    /// pandas' `between_time(start_time, end_time, inclusive='both',
+    /// axis=None)` (see Series').
+    #[pyo3(signature = (start_time, end_time, inclusive="both", axis=None))]
+    fn between_time(
+        &self,
+        start_time: &str,
+        end_time: &str,
+        inclusive: &str,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let inclusive = between_time_inclusive(inclusive)?;
+        time_selection_axis(axis, "DataFrame", "between_time")?;
         let res = self
             .inner
-            .between_time(start, end)
+            .between_time_inclusive(start_time, end_time, inclusive)
             .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: res })
     }
 
-    #[pyo3(signature = (label, subset=None))]
-    fn asof(&self, label: &Bound<'_, PyAny>, subset: Option<Vec<String>>) -> PyResult<PySeries> {
-        let lbl = py_to_index_label(label)?;
+    /// pandas' `asof(where, subset=None)` (`where` was named `label`).
+    #[pyo3(signature = (r#where, subset=None))]
+    fn asof(&self, r#where: &Bound<'_, PyAny>, subset: Option<Vec<String>>) -> PyResult<PySeries> {
+        let lbl = py_to_index_label(r#where)?;
         let subset_refs: Option<Vec<&str>> = subset
             .as_ref()
             .map(|s| s.iter().map(String::as_str).collect());
@@ -39410,7 +39565,45 @@ impl PyDataFrame {
         .into_bound_py_any(py)
     }
 
-    fn applymap(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    /// pandas' deprecated `applymap`: [`Self::map`], with pandas'
+    /// FutureWarning (it gave none).
+    #[pyo3(signature = (func, na_action=None, **kwargs))]
+    fn applymap(
+        &self,
+        py: Python<'_>,
+        func: &Bound<'_, PyAny>,
+        na_action: Option<&str>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyDataFrame> {
+        PyErr::warn(
+            py,
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            c"DataFrame.applymap has been deprecated. Use DataFrame.map instead.",
+            1,
+        )?;
+        self.map(py, func, na_action, kwargs)
+    }
+
+    /// pandas' `map(func, na_action=None, **kwargs)`: `func` over every cell,
+    /// the keywords passed to it; `na_action='ignore'` leaves a missing cell
+    /// missing (both were unexpected keywords - br-frankenpandas-n57tz).
+    #[pyo3(signature = (func, na_action=None, **kwargs))]
+    fn map(
+        &self,
+        py: Python<'_>,
+        func: &Bound<'_, PyAny>,
+        na_action: Option<&str>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyDataFrame> {
+        let ignore_na = match na_action {
+            None => false,
+            Some("ignore") => true,
+            Some(other) => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "na_action must be 'ignore' or None. Got '{other}'"
+                )));
+            }
+        };
         let (nrows, ncols) = self.inner.shape();
         // By position: a repeated column key maps its own column (every one
         // mapped the first; br-frankenpandas-i17d4). The columns keep their
@@ -39424,22 +39617,24 @@ impl PyDataFrame {
                 .unwrap_or_default();
             let mut out = Vec::with_capacity(nrows);
             for v in vals {
+                if ignore_na && v.is_missing() {
+                    out.push(v.clone());
+                    continue;
+                }
                 let py_v = scalar_to_py(py, v)?;
-                let res = func.call1((py_v,))?;
+                let res = func.call((py_v,), kwargs)?;
                 out.push(py_to_scalar(py, &res)?);
             }
+            // Ints beside a missing cell are float64 with NaN, as pandas
+            // infers the results (they were an int64 column holding NaN).
             columns.push(
-                Column::from_values(out)
+                Column::from_values(pandas_promote_int_with_missing(out))
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?,
             );
         }
         Ok(PyDataFrame {
             inner: self.inner.with_columns_at_positions(columns),
         })
-    }
-
-    fn map(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        self.applymap(py, func)
     }
 
     /// pandas' `DataFrame.dot(other)` / `@`: by a DataFrame a DataFrame; by
@@ -46994,57 +47189,8 @@ fn rolling_of(
     step: Option<&Bound<'_, PyAny>>,
     method: &str,
 ) -> PyResult<PyRolling> {
-    let owner = if series.is_some() {
-        "Series"
-    } else {
-        "DataFrame"
-    };
     let value_error = |message: String| PyErr::new::<pyo3::exceptions::PyValueError, _>(message);
-    if let Some(axis) = &axis.0 {
-        // pandas reads the axis first: 0 / 'index' / 'rows', or a frame's
-        // 1 / 'columns'; anything else is its ValueError.
-        let number = match axis.extract::<i64>() {
-            Ok(number) => Some(number),
-            Err(_) => axis
-                .extract::<String>()
-                .ok()
-                .and_then(|name| match name.as_str() {
-                    "index" | "rows" => Some(0),
-                    "columns" => Some(1),
-                    _ => None,
-                }),
-        };
-        let columns = match number {
-            Some(0) => false,
-            Some(1) if dataframe.is_some() => true,
-            _ => {
-                return Err(value_error(format!(
-                    "No axis named {} for object type {owner}",
-                    axis.str()?
-                )));
-            }
-        };
-        let message = if columns {
-            "Support for axis=1 in DataFrame.rolling is deprecated and will be removed in a \
-             future version. Use obj.T.rolling(...) instead"
-                .to_owned()
-        } else {
-            format!(
-                "The 'axis' keyword in {owner}.rolling is deprecated and will be removed in a \
-                 future version. Call the method without the axis keyword instead."
-            )
-        };
-        let message = std::ffi::CString::new(message).map_err(|e| value_error(e.to_string()))?;
-        PyErr::warn(
-            py,
-            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
-            &message,
-            1,
-        )?;
-        if columns {
-            return Err(not_implemented("rolling(axis=1)"));
-        }
-    }
+    window_axis(py, "rolling", axis, dataframe.is_some())?;
     if let Some(name) = on
         && dataframe
             .as_ref()
@@ -47331,6 +47477,155 @@ fn window_pairwise_other<'py>(
 /// refused).
 fn window_ddof(ddof: i64) -> PyResult<usize> {
     usize::try_from(ddof).map_err(|_| not_implemented("a negative ddof for a window method"))
+}
+
+/// pandas' `Series.argmax` / `argmin` (`max`): `axis` names the one axis
+/// (numpy's ValueError past it), and a -1 - skipna=False with a missing
+/// value, or every value missing - comes with pandas' FutureWarning, as a
+/// Python int (a found position is numpy's int64).
+fn series_arg_extreme(
+    py: Python<'_>,
+    s: &Series,
+    axis: Option<&Bound<'_, PyAny>>,
+    skipna: bool,
+    max: bool,
+) -> PyResult<Py<PyAny>> {
+    if let Some(axis) = axis.filter(|axis| !axis.is_none())
+        && !matches!(axis.extract::<i64>(), Ok(0 | -1))
+    {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "`axis` must be fewer than the number of dimensions (1)",
+        ));
+    }
+    let position = if max {
+        s.argmax_skipna(skipna)
+    } else {
+        s.argmin_skipna(skipna)
+    }
+    .map_err(frame_error_to_py)?;
+    if position == -1 {
+        PyErr::warn(
+            py,
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            c"The behavior of Series.argmax/argmin with skipna=False and NAs, or with all-NAs is deprecated. In a future version this will raise ValueError.",
+            1,
+        )?;
+        return position.into_py_any(py);
+    }
+    NumpyInt64(position).into_py_any(py)
+}
+
+/// pandas' deprecated `axis=` of a window (`kind`, 'rolling' / 'expanding'):
+/// read first - 0 / 'index' / 'rows', or a frame's 1 / 'columns', anything
+/// else its ValueError - then warned about; axis=1 (the window across the
+/// columns) is refused after the warning.
+fn window_axis(py: Python<'_>, kind: &str, axis: &Passed<'_>, frame: bool) -> PyResult<()> {
+    let Some(axis) = &axis.0 else {
+        return Ok(());
+    };
+    let owner = if frame { "DataFrame" } else { "Series" };
+    let value_error = |message: String| PyErr::new::<pyo3::exceptions::PyValueError, _>(message);
+    let number = match axis.extract::<i64>() {
+        Ok(number) => Some(number),
+        Err(_) => axis
+            .extract::<String>()
+            .ok()
+            .and_then(|name| match name.as_str() {
+                "index" | "rows" => Some(0),
+                "columns" => Some(1),
+                _ => None,
+            }),
+    };
+    let columns = match number {
+        Some(0) => false,
+        Some(1) if frame => true,
+        _ => {
+            return Err(value_error(format!(
+                "No axis named {} for object type {owner}",
+                axis.str()?
+            )));
+        }
+    };
+    let message = if columns {
+        format!(
+            "Support for axis=1 in DataFrame.{kind} is deprecated and will be removed in a \
+             future version. Use obj.T.{kind}(...) instead"
+        )
+    } else {
+        format!(
+            "The 'axis' keyword in {owner}.{kind} is deprecated and will be removed in a \
+             future version. Call the method without the axis keyword instead."
+        )
+    };
+    let message = std::ffi::CString::new(message).map_err(|e| value_error(e.to_string()))?;
+    PyErr::warn(
+        py,
+        &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+        &message,
+        1,
+    )?;
+    if columns {
+        return Err(not_implemented(&format!("{kind}(axis=1)")));
+    }
+    Ok(())
+}
+
+/// pandas' `expanding(min_periods=1, axis=<no_default>, method='single')`
+/// of a Series or a DataFrame: the deprecated axis as rolling's
+/// ([`window_axis`]); method='table' (numba's) is refused - a Series' is
+/// pandas' ValueError, raised here when the window is made rather than
+/// when it aggregates (the keywords were unexpected; br-frankenpandas-n57tz).
+fn expanding_of(
+    py: Python<'_>,
+    series: Option<Series>,
+    dataframe: Option<DataFrame>,
+    min_periods: Option<usize>,
+    axis: &Passed<'_>,
+    method: &str,
+) -> PyResult<PyExpanding> {
+    window_axis(py, "expanding", axis, dataframe.is_some())?;
+    match method {
+        "single" => {}
+        "table" if series.is_some() => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "method='table' not applicable for Series objects.",
+            ));
+        }
+        "table" => return Err(not_implemented("expanding(method='table') (numba's)")),
+        _ => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "method must be 'table' or 'single",
+            ));
+        }
+    }
+    Ok(PyExpanding {
+        series,
+        dataframe,
+        min_periods,
+    })
+}
+
+/// pandas' `between_time(inclusive=)`: which ends of the time range are
+/// kept, or its ValueError.
+fn between_time_inclusive(inclusive: &str) -> PyResult<IntervalClosed> {
+    match inclusive {
+        "both" => Ok(IntervalClosed::Both),
+        "neither" => Ok(IntervalClosed::Neither),
+        "left" => Ok(IntervalClosed::Left),
+        "right" => Ok(IntervalClosed::Right),
+        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Inclusive has to be either 'both', 'neither', 'left' or 'right'",
+        )),
+    }
+}
+
+/// pandas' `at_time` / `between_time` `axis`: the rows (a frame's columns,
+/// axis=1, are refused).
+fn time_selection_axis(axis: Option<&Bound<'_, PyAny>>, kind: &str, method: &str) -> PyResult<()> {
+    if parse_axis_param_for_type(axis, kind)?.unwrap_or(0) != 0 {
+        return Err(not_implemented(&format!("{kind}.{method}(axis=1)")));
+    }
+    Ok(())
 }
 
 /// Whether every label of `index` is a datetime or timedelta.
@@ -70756,8 +71051,17 @@ mod tests {
             ]
         );
 
-        assert_eq!(py_s.argmax().expect("argmax").0, 1); // ubs:ignore — test fixture
-        assert_eq!(py_s.argmin().expect("argmin").0, 0); // ubs:ignore — test fixture
+        pyo3::Python::initialize();
+        let (max, min) = Python::attach(|py| {
+            let position =
+                |result: PyResult<Py<PyAny>>| result.and_then(|found| found.extract::<i64>(py));
+            (
+                position(py_s.argmax(py, None, true)),
+                position(py_s.argmin(py, None, true)),
+            )
+        });
+        assert_eq!(max.expect("argmax"), 1); // ubs:ignore — test fixture
+        assert_eq!(min.expect("argmin"), 0); // ubs:ignore — test fixture
         assert_eq!(py_s.inner.idxmax().expect("idxmax"), IndexLabel::Int64(1)); // ubs:ignore — test fixture
         assert_eq!(py_s.inner.idxmin().expect("idxmin"), IndexLabel::Int64(0)); // ubs:ignore — test fixture
 
@@ -70814,7 +71118,7 @@ mod tests {
         assert_eq!(py_df.ndim(), 2);
         assert_eq!(py_df.size(), 6);
 
-        let df_copy = py_df.copy();
+        let df_copy = py_df.copy(true).expect("a deep copy"); // ubs:ignore — test fixture
         assert_eq!(df_copy.shape(), (3, 2));
 
         let isna_df = py_df.isna().expect("isna"); // ubs:ignore — test fixture
@@ -71054,7 +71358,8 @@ mod tests {
         assert_eq!(roll.window, 2);
         assert!(!roll.center);
 
-        let exp = py_s.expanding(None);
+        let exp = Python::attach(|py| py_s.expanding(py, None, Passed(None), "single"))
+            .expect("expanding"); // ubs:ignore — test fixture
         assert_eq!(exp.min_periods, None);
 
         // span=3 is pandas' com=1, alpha=0.5 (br-frankenpandas-n57tz); span=0.5
@@ -71416,7 +71721,8 @@ mod tests {
         })
         .expect("rolling"); // ubs:ignore — test fixture
         assert_eq!(roll.ndim(), 2);
-        let exp = py_df.expanding(None);
+        let exp = Python::attach(|py| py_df.expanding(py, None, Passed(None), "single"))
+            .expect("expanding"); // ubs:ignore — test fixture
         assert_eq!(exp.ndim(), 2);
         let ewm = py_df
             .ewm(
@@ -72092,16 +72398,22 @@ mod tests {
                 ],
             )
             .expect("series");
-            let py_s = PySeries { inner: s };
+            let mut py_s = PySeries { inner: s };
 
-            let dropped_s = py_s.dropna(None, None, false).expect("dropna s");
+            let dropped_s = py_s
+                .dropna(None, false, None, false)
+                .expect("dropna s")
+                .expect("a copy");
             assert_eq!(dropped_s.inner.len(), 2);
             assert_eq!(
                 dropped_s.inner.index().labels(),
                 &[IndexLabel::Utf8("x0".into()), IndexLabel::Utf8("x2".into())]
             );
 
-            let dropped_s_ign = py_s.dropna(None, None, true).expect("dropna s ign");
+            let dropped_s_ign = py_s
+                .dropna(None, false, None, true)
+                .expect("dropna s ign")
+                .expect("a copy");
             assert_eq!(dropped_s_ign.inner.len(), 2);
             assert_eq!(
                 dropped_s_ign.inner.index().labels(),
@@ -72109,7 +72421,7 @@ mod tests {
             );
 
             let ax1 = pyo3::types::PyInt::new(py, 1);
-            assert!(py_s.dropna(Some(ax1.as_any()), None, false).is_err());
+            assert!(py_s.dropna(Some(ax1.as_any()), false, None, false).is_err());
 
             let df = DataFrame::from_dict(
                 &["a", "b", "c"],

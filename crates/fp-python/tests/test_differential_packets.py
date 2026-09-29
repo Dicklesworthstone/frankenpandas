@@ -16643,3 +16643,97 @@ _EW_CASES = {
 def test_ewm_ignore_na_and_times_like_pandas_e429f(case: str) -> None:
     run = _EW_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-n57tz: keywords pandas' signatures take that fp's did not
+# (a TypeError) or refused - Series.dropna / argmax / argmin / at_time /
+# between_time / asof / describe / expanding / factorize / reset_index,
+# DataFrame.map / applymap / expanding / reset_index.
+def _kw_hours(m: Any) -> Any:
+    return m.Series(range(6), index=m.date_range("2024-01-01 08:00", periods=6, freq="h"))
+
+
+def _kw_inplace(frame: Any, method: str, **kwargs: Any) -> list:
+    returned = getattr(frame, method)(inplace=True, **kwargs)
+    return [returned] + _rl_shown(frame)
+
+
+def _kw_clash(m: Any) -> Any:
+    return m.DataFrame({"a": [1, 2]}, index=m.Index([5, 6], name="a"))
+
+
+def _kw_levels(m: Any) -> Any:
+    return m.DataFrame({"a": [1, 2], "v": [3, 4]}).set_index(["a", "v"], drop=False)
+
+
+_KW_CASES = {
+    "dropna inplace": lambda m: _kw_inplace(m.Series([1.0, np.nan, 3.0]), "dropna"),
+    "dropna ignore_index": lambda m: _rl_shown(m.Series([1.0, np.nan, 3.0]).dropna(ignore_index=True)),
+    "dropna axis 0": lambda m: _rl_shown(m.Series([1.0, np.nan]).dropna(axis=0)),
+    "dropna axis 1": lambda m: _rl_shown(m.Series([1.0, np.nan]).dropna(axis=1)),
+    "argmax skipna False over a NaN": lambda m: [m.Series([1.0, np.nan, 3.0]).argmax(skipna=False)],
+    "argmin skipna False over a NaN": lambda m: [m.Series([1.0, np.nan, 0.0]).argmin(skipna=False)],
+    "argmax all NaN": lambda m: [m.Series([np.nan, np.nan]).argmax()],
+    "argmax axis 0": lambda m: [m.Series([1.0, 5.0]).argmax(axis=0)],
+    "argmax axis 1": lambda m: [m.Series([1.0, 5.0]).argmax(axis=1)],
+    "copy deep True": lambda m: (lambda s: (s.copy(deep=True).__setitem__(0, 99.0), list(s))[1])(m.Series([1.0, 2.0])),
+    "between_time by keyword": lambda m: _rl_shown(_kw_hours(m).between_time(start_time="09:00", end_time="11:00")),
+    "between_time neither": lambda m: _rl_shown(_kw_hours(m).between_time("09:00", "11:00", inclusive="neither")),
+    "between_time left": lambda m: _rl_shown(_kw_hours(m).between_time("09:00", "11:00", inclusive="left")),
+    "between_time right": lambda m: _rl_shown(_kw_hours(m).between_time("09:00", "11:00", inclusive="right")),
+    "between_time a bad inclusive": lambda m: _rl_shown(_kw_hours(m).between_time("09:00", "11:00", inclusive="middle")),
+    "between_time wrapping midnight, left": lambda m: _rl_shown(_kw_hours(m).between_time("12:00", "09:00", inclusive="left")),
+    "frame between_time right": lambda m: _rl_shown(_kw_hours(m).to_frame("v").between_time("09:00", "10:00", inclusive="right")),
+    "at_time by keyword": lambda m: _rl_shown(_kw_hours(m).at_time(time="10:00")),
+    "at_time asof": lambda m: _rl_shown(_kw_hours(m).at_time("10:00", asof=True)),
+    "asof where by keyword": lambda m: [_kw_hours(m).asof(where=m.Timestamp("2024-01-01 10:30"))],
+    "frame map na_action ignore": lambda m: _rl_shown(m.DataFrame({"a": [1.0, np.nan]}).map(lambda v: v * 2, na_action="ignore")),
+    "frame map a bad na_action": lambda m: _rl_shown(m.DataFrame({"a": [1.0, np.nan]}).map(lambda v: v * 2, na_action="x")),
+    "frame map kwargs": lambda m: _rl_shown(m.DataFrame({"a": [1.0, 2.0]}).map(lambda v, k: v * k, k=3)),
+    "applymap na_action ignore": lambda m: _rl_shown(m.DataFrame({"a": ["xy", None]}).applymap(len, na_action="ignore")),
+    # Ints beside a missing result are float64 (an int64 column held NaN).
+    "series map na_action ignore": lambda m: _rl_shown(m.Series(["xy", None]).map(len, na_action="ignore")),
+    "series map a None result": lambda m: _rl_shown(m.Series([1, 2]).map(lambda v: None if v == 2 else v)),
+    "series map a dict, na_action ignore": lambda m: _rl_shown(m.Series(["x", None]).map({"x": 1}, na_action="ignore")),
+    "series map a Series, na_action ignore": lambda m: _rl_shown(m.Series(["x", None]).map(m.Series([1], index=["x"]), na_action="ignore")),
+    "frame map a None result": lambda m: _rl_shown(m.DataFrame({"a": [1, 2]}).map(lambda v: None if v == 2 else v)),
+    "frame map bools, na_action ignore": lambda m: _rl_shown(m.DataFrame({"a": ["x", None]}).map(lambda v: True, na_action="ignore")),
+    "frame map strings, na_action ignore": lambda m: _rl_shown(m.DataFrame({"a": ["x", None]}).map(str.upper, na_action="ignore")),
+    "series describe include": lambda m: _rl_shown(m.Series([1, 2, 3]).describe(include="all")),
+    "expanding axis 0": lambda m: _rl_shown(m.DataFrame({"a": [1.0, 2.0]}).expanding(axis=0).sum()),
+    "series expanding axis 0": lambda m: _rl_shown(m.Series([1.0, 2.0]).expanding(axis=0).sum()),
+    "expanding method table": lambda m: _rl_shown(m.Series([1.0, 2.0]).expanding(method="table").sum()),
+    "factorize sort": lambda m: list(m.Series(["b", "a", "b"]).factorize(sort=True)[0]),
+    "factorize use_na_sentinel False": lambda m: list(m.Series(["b", None, "b"]).factorize(use_na_sentinel=False)[0]),
+    "reset_index allow_duplicates": lambda m: _rl_shown(_kw_clash(m).reset_index(allow_duplicates=True)),
+    "reset_index allow_duplicates, then a column": lambda m: _rl_shown(_kw_clash(m).reset_index(allow_duplicates=True).iloc[:, 0]),
+    "reset_index allow_duplicates inplace": lambda m: _kw_inplace(_kw_clash(m), "reset_index", allow_duplicates=True),
+    "reset_index 'index' and 'level_0' taken": lambda m: _rl_shown(m.DataFrame({"index": [1], "level_0": [2]}).reset_index()),
+    "reset_index 'index' and 'level_0' taken, allowed": lambda m: _rl_shown(m.DataFrame({"index": [1], "level_0": [2]}).reset_index(allow_duplicates=True)),
+    "reset_index levels clash": lambda m: _rl_shown(_kw_levels(m).reset_index()),
+    "reset_index levels clash, allowed": lambda m: _rl_shown(_kw_levels(m).reset_index(allow_duplicates=True)),
+    "series reset_index allow_duplicates": lambda m: _rl_shown(m.Series([1, 2], index=m.Index([5, 6], name="a"), name="a").reset_index(allow_duplicates=True)),
+    # NEGATIVE: the defaults - both-inclusive between_time, a clash without
+    # allow_duplicates, skipna argmax - were already pandas'.
+    "between_time both": lambda m: _rl_shown(_kw_hours(m).between_time("09:00", "11:00")),
+    "reset_index clash": lambda m: _rl_shown(_kw_clash(m).reset_index()),
+    "series reset_index clash": lambda m: _rl_shown(m.Series([1, 2], index=m.Index([5, 6], name="a"), name="a").reset_index()),
+    "argmax": lambda m: [m.Series([1.0, np.nan, 3.0]).argmax()],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_KW_CASES))
+def test_signature_keywords_like_pandas_n57tz(case: str) -> None:
+    run = _KW_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_shallow_copy_is_refused_n57tz() -> None:
+    # pandas 2.2's copy(deep=False) shares the original's data (a write
+    # through it shows in the original); fp has no shared-buffer view, so
+    # it refuses rather than hand back an independent copy.
+    for obj in (fpd.Series([1.0, 2.0]), fpd.DataFrame({"a": [1.0]})):
+        with pytest.raises(NotImplementedError):
+            obj.copy(deep=False)

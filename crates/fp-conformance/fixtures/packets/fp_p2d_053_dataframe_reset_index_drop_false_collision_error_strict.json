@@ -18,5 +18,5 @@
     }
   },
   "reset_index_drop": false,
-  "expected_error_contains": "both 'index' and 'level_0'"
+  "expected_error_contains": "cannot insert level_0, already exists"
 }

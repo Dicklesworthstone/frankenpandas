@@ -26612,6 +26612,19 @@ impl Series {
         drop: bool,
         name: Option<&str>,
     ) -> Result<SeriesResetIndexResult, FrameError> {
+        self.reset_index_allow_duplicates(drop, name, false)
+    }
+
+    /// `pd.Series.reset_index(drop=..., name=..., allow_duplicates=...)`:
+    /// with `allow_duplicates` an index column may share the value column's
+    /// label, where without it that is pandas' "cannot insert X, already
+    /// exists" (br-frankenpandas-n57tz: allow_duplicates was refused).
+    pub fn reset_index_allow_duplicates(
+        &self,
+        drop: bool,
+        name: Option<&str>,
+        allow_duplicates: bool,
+    ) -> Result<SeriesResetIndexResult, FrameError> {
         if drop {
             let index = range_index(self.column.len())?;
             let series = Self::new(self.name.clone(), index, self.column.clone())?;
@@ -26630,7 +26643,9 @@ impl Series {
         // level or `level_i`, as pandas does
         // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
         if let Some(levels) = self.index.row_multiindex() {
-            let mut columns = BTreeMap::new();
+            // The store keeps its pairs in order, repeated labels apart
+            // (allow_duplicates).
+            let mut columns = Vec::with_capacity(levels.nlevels() + 1);
             let mut order = Vec::with_capacity(levels.nlevels() + 1);
             // Each level's column is labelled by its typed name (fvsao.64).
             let mut labels = Vec::with_capacity(levels.nlevels() + 1);
@@ -26640,29 +26655,35 @@ impl Series {
                     LabelName::label,
                 );
                 let level_name = column_key(&level_label);
-                if level_name == value_column_name || order.contains(&level_name) {
+                if !allow_duplicates
+                    && (level_name == value_column_name || order.contains(&level_name))
+                {
                     return Err(FrameError::CompatibilityRejected(format!(
                         "cannot insert {level_name}, already exists"
                     )));
                 }
                 let values =
                     index_labels_to_column_scalars(levels.get_level_values(level)?.labels());
-                columns.insert(level_name.clone(), Column::from_values(values)?);
+                columns.push((level_name.clone(), Column::from_values(values)?));
                 order.push(level_name);
                 labels.push(level_label);
             }
-            columns.insert(value_column_name.clone(), self.column.clone());
+            columns.push((value_column_name.clone(), self.column.clone()));
             order.push(value_column_name);
             labels.push(value_label);
-            let frame = DataFrame::new_with_column_order(range_index(self.len())?, columns, order)?
-                .with_recorded_column_labels(labels);
+            let frame = DataFrame::new_with_column_order(
+                range_index(self.len())?,
+                ColumnStore::from_pairs(columns),
+                order,
+            )?
+            .with_recorded_column_labels(labels);
             return Ok(SeriesResetIndexResult::DataFrame(frame));
         }
         // The index column is labelled by the index's typed name (0 stays
         // the integer 0; fvsao.64), else 'index' / 'level_0'.
         let index_label = match self.index.name() {
             Some(name) => {
-                if *name == value_column_name {
+                if *name == value_column_name && !allow_duplicates {
                     return Err(FrameError::CompatibilityRejected(format!(
                         "cannot insert {name}, already exists"
                     )));
@@ -26682,9 +26703,12 @@ impl Series {
             Some(zone) => index_column.with_dtype(DType::datetime64_tz(zone)),
             None => index_column,
         };
-        let mut columns = BTreeMap::new();
-        columns.insert(index_column_name.clone(), index_column);
-        columns.insert(value_column_name.clone(), self.column.clone());
+        // In order, so an index column sharing the value column's label
+        // (allow_duplicates) stays its own column.
+        let columns = ColumnStore::from_pairs([
+            (index_column_name.clone(), index_column),
+            (value_column_name.clone(), self.column.clone()),
+        ]);
 
         let frame = DataFrame::new_with_column_order(
             range_index(self.len())?,
@@ -29378,7 +29402,12 @@ impl Series {
         // format used for datetime indices in this crate).
         require_datetime_index(self.index.labels(), "at_time")?;
         let target = time_argument(time, "at_time")?;
-        let keep = between_time_positions(&wall_clock_labels(&self.index), target, target);
+        let keep = between_time_positions(
+            &wall_clock_labels(&self.index),
+            target,
+            target,
+            IntervalClosed::Both,
+        );
 
         // A temporal selector builds a datetime index from string input, so the
         // result renders the parsed Timestamp rather than echoing the caller's
@@ -29396,12 +29425,24 @@ impl Series {
     ///
     /// Matches `s.between_time(start_time, end_time)`.
     pub fn between_time(&self, start: &str, end: &str) -> Result<Self, FrameError> {
+        self.between_time_inclusive(start, end, IntervalClosed::Both)
+    }
+
+    /// [`Self::between_time`] with pandas' `inclusive=` (which ends of the
+    /// time range are kept; 'both' the default).
+    pub fn between_time_inclusive(
+        &self,
+        start: &str,
+        end: &str,
+        inclusive: IntervalClosed,
+    ) -> Result<Self, FrameError> {
         // Per br-frankenpandas-g3jqn: see Series::at_time.
         require_datetime_index(self.index.labels(), "between_time")?;
         let keep = between_time_positions(
             &wall_clock_labels(&self.index),
             time_argument(start, "between_time")?,
             time_argument(end, "between_time")?,
+            inclusive,
         );
 
         // See `Series::at_time` (br-frankenpandas-2und8).
@@ -62345,19 +62386,38 @@ fn label_time_of_day(label: &IndexLabel) -> Option<i64> {
     }
 }
 
-/// The positions `between_time(start, end)` keeps: start <= t <= end, or,
-/// when start is after end, the times past start or before end (pandas'
-/// wrap past midnight).
-fn between_time_positions(labels: &[IndexLabel], start: i64, end: i64) -> Vec<usize> {
+/// The positions `between_time(start, end, inclusive=)` keeps: start <= t
+/// <= end (each end closed as `inclusive` says), or, when start is after
+/// end, the times past start or before end (pandas' wrap past midnight).
+fn between_time_positions(
+    labels: &[IndexLabel],
+    start: i64,
+    end: i64,
+    inclusive: IntervalClosed,
+) -> Vec<usize> {
+    let after_start = |time: i64| {
+        if inclusive.left_closed() {
+            start <= time
+        } else {
+            start < time
+        }
+    };
+    let before_end = |time: i64| {
+        if inclusive.right_closed() {
+            time <= end
+        } else {
+            time < end
+        }
+    };
     labels
         .iter()
         .enumerate()
         .filter(|(_, label)| {
             label_time_of_day(label).is_some_and(|time| {
                 if start <= end {
-                    start <= time && time <= end
+                    after_start(time) && before_end(time)
                 } else {
-                    time >= start || time <= end
+                    after_start(time) || before_end(time)
                 }
             })
         })
@@ -71480,47 +71540,51 @@ impl DataFrame {
         }
     }
 
-    fn reset_index_column_name(&self) -> Result<String, FrameError> {
+    fn reset_index_column_name(&self, allow_duplicates: bool) -> Result<String, FrameError> {
         // Named index: pandas restores the former index under the index's NAME
-        // (df.set_index('t').reset_index() -> column 't'). A collision with an
-        // existing column is a ValueError ("cannot insert X, already exists").
-        if let Some(name) = self.index.name() {
-            if self.columns.contains_key(name) {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "cannot insert {name}, already exists"
-                )));
-            }
-            return Ok(name.to_string());
+        // (df.set_index('t').reset_index() -> column 't'); unnamed, under
+        // 'index', or 'level_0' when a column is 'index'. A collision with an
+        // existing column is a ValueError ("cannot insert X, already exists")
+        // unless allow_duplicates (it said "both 'index' and 'level_0'
+        // already exist").
+        let name = match self.index.name() {
+            Some(name) => name.to_string(),
+            None if self.columns.contains_key("index") => "level_0".to_owned(),
+            None => "index".to_owned(),
+        };
+        if !allow_duplicates && self.columns.contains_key(&name) {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "cannot insert {name}, already exists"
+            )));
         }
-        // Unnamed index: fall back to 'index', then 'level_0' on collision.
-        if !self.columns.contains_key("index") {
-            return Ok("index".to_owned());
-        }
-        if !self.columns.contains_key("level_0") {
-            return Ok("level_0".to_owned());
-        }
-        Err(FrameError::CompatibilityRejected(
-            "reset_index cannot insert index column because both 'index' and 'level_0' already exist"
-                .to_owned(),
-        ))
+        Ok(name)
     }
 
     fn reset_index_multi_column_names(
         &self,
         row_multiindex: &fp_index::MultiIndex,
+        allow_duplicates: bool,
     ) -> Result<Vec<String>, FrameError> {
-        let mut names = Vec::with_capacity(row_multiindex.nlevels());
-        let mut used = self.columns.keys().cloned().collect::<BTreeSet<_>>();
-        for (level, name) in row_multiindex.names().iter().enumerate() {
-            let candidate = name
-                .as_ref()
-                .map_or_else(|| format!("level_{level}"), ToString::to_string);
-            if !used.insert(candidate.clone()) {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "cannot insert {candidate}, already exists"
-                )));
+        let names: Vec<String> = row_multiindex
+            .names()
+            .iter()
+            .enumerate()
+            .map(|(level, name)| {
+                name.as_ref()
+                    .map_or_else(|| format!("level_{level}"), ToString::to_string)
+            })
+            .collect();
+        if !allow_duplicates {
+            // pandas inserts the levels last first, so the clash it names is
+            // the last level's (it named the first).
+            let mut used = self.columns.keys().cloned().collect::<BTreeSet<_>>();
+            for candidate in names.iter().rev() {
+                if !used.insert(candidate.clone()) {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "cannot insert {candidate}, already exists"
+                    )));
+                }
             }
-            names.push(candidate);
         }
         Ok(names)
     }
@@ -77560,6 +77624,19 @@ impl DataFrame {
     ///
     /// Matches `df.reset_index(drop=...)` for the single-index DataFrame model.
     pub fn reset_index(&self, drop: bool) -> Result<Self, FrameError> {
+        self.reset_index_allow_duplicates(drop, false)
+    }
+
+    /// `df.reset_index(drop=..., allow_duplicates=...)`: with
+    /// `allow_duplicates` an index column may take a label a column already
+    /// has (pandas' insert rule), where without it that is pandas' "cannot
+    /// insert X, already exists" (br-frankenpandas-n57tz: allow_duplicates
+    /// was refused).
+    pub fn reset_index_allow_duplicates(
+        &self,
+        drop: bool,
+        allow_duplicates: bool,
+    ) -> Result<Self, FrameError> {
         let index = range_index(self.len())?;
         if drop {
             let mut out = Self::new_with_axes(
@@ -77572,10 +77649,18 @@ impl DataFrame {
             out.allows_duplicate_labels = self.allows_duplicate_labels;
             return Ok(out.with_labels_of(self));
         }
+        // pandas' insert of the index columns refuses the keyword itself on
+        // a frame whose flags refuse duplicate labels.
+        if allow_duplicates && !self.allows_duplicate_labels {
+            return Err(FrameError::CompatibilityRejected(
+                "Cannot specify 'allow_duplicates=True' when 'self.flags.allows_duplicate_labels' is False.".to_string(),
+            ));
+        }
 
         if let Some(row_multiindex) = self.row_multiindex.as_ref() {
-            let mut columns = self.columns.clone();
-            let mut column_order = self.reset_index_multi_column_names(row_multiindex)?;
+            let mut column_order =
+                self.reset_index_multi_column_names(row_multiindex, allow_duplicates)?;
+            let mut level_columns = Vec::with_capacity(column_order.len());
             for (level, column_name) in column_order.iter().enumerate() {
                 let level_index = row_multiindex.get_level_values(level)?;
                 // perf (br-frankenpandas-bp6k7): typed Int64 level -> column without
@@ -77586,12 +77671,28 @@ impl DataFrame {
                         Column::from_values(Self::index_labels_to_scalars(level_index.labels()))?
                     }
                 };
-                columns.insert(column_name.clone(), level_column);
+                level_columns.push((column_name.clone(), level_column));
             }
             let column_multiindex = self.column_multiindex_with_leading(&column_order)?;
             column_order.extend(self.column_order.iter().cloned());
-            let mut out =
-                Self::new_with_axes(index, None, columns, column_order, column_multiindex)?;
+            let mut out = if level_columns
+                .iter()
+                .any(|(name, _)| self.columns.contains_key(name))
+            {
+                Self::new_with_axes(
+                    index,
+                    None,
+                    self.column_store_led_by(level_columns),
+                    column_order,
+                    column_multiindex,
+                )?
+            } else {
+                let mut columns = self.columns.clone();
+                for (name, column) in level_columns {
+                    columns.insert(name, column);
+                }
+                Self::new_with_axes(index, None, columns, column_order, column_multiindex)?
+            };
             out.allows_duplicate_labels = self.allows_duplicate_labels;
             // The level columns are labelled by the levels' typed names
             // (fvsao.64).
@@ -77605,7 +77706,7 @@ impl DataFrame {
                 .with_recorded_column_labels(level_labels));
         }
 
-        let index_column_name = self.reset_index_column_name()?;
+        let index_column_name = self.reset_index_column_name(allow_duplicates)?;
         // perf (br-frankenpandas-bp6k7): typed Int64 index -> column without the
         // per-label Scalar materialize + re-validation. An all-Int64 index (default
         // RangeIndex / int indexes) has no missing labels, so from_i64_values is
@@ -77621,15 +77722,25 @@ impl DataFrame {
             None => index_column,
         };
 
-        let mut columns = self.columns.clone();
-        columns.insert(index_column_name.clone(), index_column);
         let column_multiindex =
             self.column_multiindex_with_leading(std::slice::from_ref(&index_column_name))?;
         let mut column_order = Vec::with_capacity(self.column_order.len() + 1);
-        column_order.push(index_column_name);
+        column_order.push(index_column_name.clone());
         column_order.extend(self.column_order.iter().cloned());
 
-        let mut out = Self::new_with_axes(index, None, columns, column_order, column_multiindex)?;
+        let mut out = if self.columns.contains_key(&index_column_name) {
+            Self::new_with_axes(
+                index,
+                None,
+                self.column_store_led_by(vec![(index_column_name, index_column)]),
+                column_order,
+                column_multiindex,
+            )?
+        } else {
+            let mut columns = self.columns.clone();
+            columns.insert(index_column_name, index_column);
+            Self::new_with_axes(index, None, columns, column_order, column_multiindex)?
+        };
         out.allows_duplicate_labels = self.allows_duplicate_labels;
         // The index column is labelled by the index's typed name: 0 stays
         // the integer 0 (fvsao.64).
@@ -77637,6 +77748,20 @@ impl DataFrame {
         Ok(out
             .with_labels_of(self)
             .with_recorded_column_labels(index_label))
+    }
+
+    /// A column store of `leading` then the frame's own columns, in the
+    /// frame's order and with repeated labels kept apart: an index column
+    /// that repeats a column's label (reset_index(allow_duplicates=True))
+    /// would replace that column if inserted into the store.
+    fn column_store_led_by(&self, leading: Vec<(String, Column)>) -> ColumnStore {
+        let own = (0..self.num_columns()).filter_map(|position| {
+            Some((
+                self.column_name_at(position)?,
+                self.column_at(position)?.clone(),
+            ))
+        });
+        ColumnStore::from_pairs(leading.into_iter().chain(own))
     }
 
     /// The column MultiIndex with `names` in front, each as `(name, '', ...)`,
@@ -88261,12 +88386,23 @@ impl DataFrame {
     /// Matches `df.between_time(start_time, end_time)`.
     /// Index labels should be datetime-like strings with time component (HH:MM or HH:MM:SS).
     pub fn between_time(&self, start: &str, end: &str) -> Result<Self, FrameError> {
+        self.between_time_inclusive(start, end, IntervalClosed::Both)
+    }
+
+    /// [`Self::between_time`] with pandas' `inclusive=`.
+    pub fn between_time_inclusive(
+        &self,
+        start: &str,
+        end: &str,
+        inclusive: IntervalClosed,
+    ) -> Result<Self, FrameError> {
         // Per br-frankenpandas-g3jqn: pandas raises TypeError on non-DatetimeIndex.
         require_datetime_index(self.index.labels(), "between_time")?;
         let keep = between_time_positions(
             &wall_clock_labels(&self.index),
             time_argument(start, "between_time")?,
             time_argument(end, "between_time")?,
+            inclusive,
         );
 
         let mut selected = self.take_rows_by_positions(&keep)?;
@@ -88282,7 +88418,12 @@ impl DataFrame {
         // Per br-frankenpandas-g3jqn: pandas raises TypeError on non-DatetimeIndex.
         require_datetime_index(self.index.labels(), "at_time")?;
         let target = time_argument(time, "at_time")?;
-        let keep = between_time_positions(&wall_clock_labels(&self.index), target, target);
+        let keep = between_time_positions(
+            &wall_clock_labels(&self.index),
+            target,
+            target,
+            IntervalClosed::Both,
+        );
 
         let mut selected = self.take_rows_by_positions(&keep)?;
         let freq = fp_index::take_freq(self.index.freq().map(str::to_owned), &keep);
@@ -89557,7 +89698,7 @@ impl DataFrame {
                         }
                         name.to_string()
                     }
-                    None => self.reset_index_column_name()?,
+                    None => self.reset_index_column_name(false)?,
                 };
 
                 let mut fields = Vec::with_capacity(self.column_order.len() + 1);
@@ -128315,7 +128456,87 @@ mod tests {
         .unwrap();
         let err = collision.reset_index(false).unwrap_err();
         assert!(
-            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("both 'index' and 'level_0'"))
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg == "cannot insert level_0, already exists")
+        );
+    }
+
+    #[test]
+    fn dataframe_reset_index_allow_duplicates_n57tz() {
+        // Index 'a' = [5, 6] beside column 'a' = [1, 2].
+        let named = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(5), Scalar::Int64(6)]),
+                ("b", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+        )
+        .unwrap()
+        .set_index("a", true)
+        .unwrap()
+        .rename_columns(&[("b", "a")])
+        .unwrap();
+        // NEGATIVE: without allow_duplicates the clash is pandas' ValueError.
+        let err = named
+            .reset_index_allow_duplicates(false, false)
+            .unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg == "cannot insert a, already exists")
+        );
+        // With it, the index column leads and the column keeps its values.
+        let out = named.reset_index_allow_duplicates(false, true).unwrap();
+        assert_eq!(out.column_names(), vec!["a", "a"]);
+        assert_eq!(
+            out.column_at(0).unwrap().values(),
+            &[Scalar::Int64(5), Scalar::Int64(6)]
+        );
+        assert_eq!(
+            out.column_at(1).unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+
+        // An unnamed index beside 'index' and 'level_0' repeats 'level_0'.
+        let both = DataFrame::from_dict_with_index(
+            vec![
+                ("index", vec![Scalar::Int64(1)]),
+                ("level_0", vec![Scalar::Int64(2)]),
+            ],
+            vec![IndexLabel::from(0_i64)],
+        )
+        .unwrap();
+        let out = both.reset_index_allow_duplicates(false, true).unwrap();
+        assert_eq!(out.column_names(), vec!["level_0", "index", "level_0"]);
+        assert_eq!(out.column_at(2).unwrap().values(), &[Scalar::Int64(2)]);
+
+        // A row MultiIndex names its LAST clashing level, as pandas inserts
+        // the levels last first; allowed, every level column leads.
+        let frame = DataFrame::from_dict(
+            &["a", "v"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("v", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+            ],
+        )
+        .unwrap();
+        let multi = frame.set_index_multi(&["a", "v"], false, "|").unwrap();
+        let err = multi.reset_index(false).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg == "cannot insert v, already exists")
+        );
+        let out = multi.reset_index_allow_duplicates(false, true).unwrap();
+        assert_eq!(out.column_names(), vec!["a", "v", "a", "v"]);
+        assert_eq!(
+            out.column_at(3).unwrap().values(),
+            &[Scalar::Int64(3), Scalar::Int64(4)]
+        );
+
+        // Flags that refuse duplicate labels refuse the keyword itself.
+        let mut strict = named.clone();
+        strict.allows_duplicate_labels = false;
+        let err = strict
+            .reset_index_allow_duplicates(false, true)
+            .unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.starts_with("Cannot specify 'allow_duplicates=True'"))
         );
     }
 
@@ -158996,6 +159217,51 @@ mod tests {
     }
 
     #[test]
+    fn series_between_time_inclusive_n57tz() {
+        let s = Series::from_values(
+            "x",
+            vec![
+                "2024-01-01T09:00:00".into(),
+                "2024-01-01T10:00:00".into(),
+                "2024-01-01T11:00:00".into(),
+                "2024-01-01T12:00:00".into(),
+            ],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap();
+        let kept = |start: &str, end: &str, inclusive: IntervalClosed| {
+            s.between_time_inclusive(start, end, inclusive)
+                .unwrap()
+                .values()
+                .to_vec()
+        };
+        let ints = |values: &[i64]| {
+            values
+                .iter()
+                .copied()
+                .map(Scalar::Int64)
+                .collect::<Vec<_>>()
+        };
+        // NEGATIVE: 'both' is between_time as it was.
+        assert_eq!(
+            kept("09:00", "11:00", IntervalClosed::Both),
+            ints(&[1, 2, 3])
+        );
+        assert_eq!(kept("09:00", "11:00", IntervalClosed::Neither), ints(&[2]));
+        assert_eq!(kept("09:00", "11:00", IntervalClosed::Left), ints(&[1, 2]));
+        assert_eq!(kept("09:00", "11:00", IntervalClosed::Right), ints(&[2, 3]));
+        // Past midnight (start after end) the ends swap roles, as pandas':
+        // left keeps 11:00 and drops 09:00, right the other way round.
+        assert_eq!(kept("11:00", "09:00", IntervalClosed::Left), ints(&[3, 4]));
+        assert_eq!(kept("11:00", "09:00", IntervalClosed::Right), ints(&[1, 4]));
+    }
+
+    #[test]
     fn series_at_time() {
         let s = Series::from_values(
             "x",
@@ -169088,6 +169354,36 @@ mod tests {
         let err = s.reset_index_with_name(false, Some("row")).unwrap_err();
         assert!(
             matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("cannot insert row"))
+        );
+    }
+
+    #[test]
+    fn series_reset_index_allow_duplicates_n57tz() {
+        let index = Index::new(vec![IndexLabel::Int64(5), IndexLabel::Int64(6)]).set_name("a");
+        let s = Series::new(
+            "a".to_owned(),
+            index,
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap(),
+        )
+        .unwrap();
+        // NEGATIVE: the clash is pandas' ValueError without the keyword.
+        assert!(matches!(
+            s.reset_index_allow_duplicates(false, None, false),
+            Err(FrameError::CompatibilityRejected(msg)) if msg == "cannot insert a, already exists"
+        ));
+        let super::SeriesResetIndexResult::DataFrame(out) =
+            s.reset_index_allow_duplicates(false, None, true).unwrap()
+        else {
+            panic!("reset_index(drop=False) gives a frame");
+        };
+        assert_eq!(out.column_names(), vec!["a", "a"]);
+        assert_eq!(
+            out.column_at(0).unwrap().values(),
+            &[Scalar::Int64(5), Scalar::Int64(6)]
+        );
+        assert_eq!(
+            out.column_at(1).unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
         );
     }
 
