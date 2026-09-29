@@ -17581,3 +17581,77 @@ _IXREPR_CASES = {
 def test_index_repr_forms_like_pandas_1tkrg(case: str) -> None:
     run = _IXREPR_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-jno5s: Resampler.apply of a callable that does not
+# reduce - its rows per bin joined under their own labels, or under (bin,
+# label) with group_keys=True - and a frame's callable that reads the bin
+# as a frame (they raised "Cannot convert Series to Scalar").
+def _ra_series(m: Any) -> Any:
+    index = m.to_datetime(
+        ["2024-01-01 00:30", "2024-01-01 07:30", "2024-01-01 14:30", "2024-01-03 01:00", "2024-01-03 09:00"]
+    )
+    return m.Series(np.arange(5) * 10, index=index, name="v")
+
+
+def _ra_frame(m: Any) -> Any:
+    frame = _ra_series(m).to_frame()
+    frame["w"] = np.arange(5) * 1.5
+    return frame
+
+
+def _ra_dense(m: Any) -> Any:
+    return m.Series(np.arange(6), index=m.date_range("2024-01-01", periods=6, freq="8h"), name="d")
+
+
+_RA_CASES = {
+    "head(2)": lambda m: _mk_shown(_ra_series(m).resample("D").apply(lambda g: g.head(2))),
+    "head(2) group_keys": lambda m: _mk_shown(
+        _ra_series(m).resample("D", group_keys=True).apply(lambda g: g.head(2))
+    ),
+    "cumsum": lambda m: _mk_shown(_ra_series(m).resample("D").apply(lambda g: g.cumsum())),
+    "cumsum group_keys": lambda m: _mk_shown(
+        _ra_series(m).resample("D", group_keys=True).apply(lambda g: g.cumsum())
+    ),
+    "reset_index": lambda m: _mk_shown(_ra_series(m).resample("D").apply(lambda g: g.reset_index(drop=True))),
+    "tail(2) half days": lambda m: _mk_shown(_ra_series(m).resample("12h").apply(lambda g: g.tail(2))),
+    "head(1) every bin filled": lambda m: _mk_shown(_ra_dense(m).resample("D").apply(lambda g: g.head(1))),
+    "positional arg": lambda m: _mk_shown(_ra_series(m).resample("D").apply(lambda g, n: g.head(n), 2)),
+    "keyword arg": lambda m: _mk_shown(_ra_series(m).resample("D").apply(lambda g, n=1: g.head(n), n=2)),
+    "agg of a non-reducing callable": lambda m: _mk_shown(_ra_series(m).resample("D").agg(lambda g: g.head(2))),
+    "frame head(2)": lambda m: _mk_shown(_ra_frame(m).resample("D").apply(lambda g: g.head(2))),
+    "frame head(2) group_keys": lambda m: _mk_shown(
+        _ra_frame(m).resample("D", group_keys=True).apply(lambda g: g.head(2))
+    ),
+    "frame filter reading a column": lambda m: _mk_shown(_ra_frame(m).resample("D").apply(lambda g: g[g.v > 5])),
+    "frame value of a column": lambda m: _mk_shown(_ra_frame(m).resample("D").apply(lambda g: g["v"].sum())),
+    "frame column head(2)": lambda m: _mk_shown(_ra_frame(m).resample("D")["w"].apply(lambda g: g.head(2))),
+    # An empty bin's missing value beside int answers is float64 (it was an
+    # int64 holding NaN / None).
+    "max beside an empty bin": lambda m: _mk_shown(_ra_series(m).resample("D").apply(lambda g: g.max())),
+    "max of a frame": lambda m: _mk_shown(_ra_frame(m).resample("D").apply(lambda g: g.max())),
+    "first or None": lambda m: _mk_shown(
+        _ra_series(m).resample("D").apply(lambda g: g.iloc[0] if len(g) else None)
+    ),
+    # Negatives: reducing callables answer one value per bin, as before.
+    "sum": lambda m: _mk_shown(_ra_series(m).resample("D").apply(lambda g: g.sum())),
+    "a name": lambda m: _mk_shown(_ra_series(m).resample("D").apply("mean")),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_RA_CASES))
+def test_resample_apply_rows_like_pandas_jno5s(case: str) -> None:
+    run = _RA_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_resample_apply_rows_fp_refuses_jno5s() -> None:
+    # pandas answers these; fp refuses: rows over a tz-aware index, and a
+    # value in one bin beside rows in another.
+    zoned = _ra_series(fpd).tz_localize("UTC")
+    with pytest.raises(NotImplementedError):
+        zoned.resample("D").apply(lambda g: g.head(2))
+    with pytest.raises(NotImplementedError):
+        _ra_series(fpd).resample("D").apply(lambda g: g.head(2) if len(g) != 2 else g.sum())
