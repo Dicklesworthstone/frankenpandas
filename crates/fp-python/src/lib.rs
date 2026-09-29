@@ -30907,6 +30907,131 @@ impl PyDataFrame {
             .map_err(frame_error_to_py)
     }
 
+    /// pandas' `stack(level, future_stack=True)` of MultiIndex columns: the
+    /// `stacked` levels (in the order given) join the row index after its own
+    /// levels, their values in order of first appearance under each row; the
+    /// other levels stay the columns - their labels in order of first
+    /// appearance, a MultiIndex when several, named as they were - a cell no
+    /// column holds missing (its column float). Stacking every level answers
+    /// a Series of the frame's cells. It was refused (fvsao.36).
+    fn stack_levels_future(
+        &self,
+        py: Python<'_>,
+        multi: &fp_index::MultiIndex,
+        stacked: &[usize],
+    ) -> PyResult<Py<PyAny>> {
+        let rest: Vec<usize> = (0..multi.nlevels())
+            .filter(|level| !stacked.contains(level))
+            .collect();
+        let pick = |tuple: &[&IndexLabel], levels: &[usize]| -> Vec<IndexLabel> {
+            levels.iter().map(|&level| tuple[level].clone()).collect()
+        };
+        let mut stacked_order: Vec<Vec<IndexLabel>> = Vec::new();
+        let mut rest_order: Vec<Vec<IndexLabel>> = Vec::new();
+        let mut at: HashMap<(Vec<IndexLabel>, Vec<IndexLabel>), usize> = HashMap::new();
+        for column in 0..multi.len() {
+            let tuple = multi.get_tuple(column).unwrap_or_default();
+            let (key, other) = (pick(&tuple, stacked), pick(&tuple, &rest));
+            if !stacked_order.contains(&key) {
+                stacked_order.push(key.clone());
+            }
+            if !rest_order.contains(&other) {
+                rest_order.push(other.clone());
+            }
+            at.entry((key, other)).or_insert(column);
+        }
+        // The row index: the frame's row levels, then the stacked ones.
+        let rows = match self.inner.row_multiindex() {
+            Some(levels) => row_multiindex_axis(levels.clone())?,
+            None => self.inner.index().clone(),
+        };
+        let row_labels = index_rows(&rows);
+        let mut names = index_level_names(&rows);
+        names.extend(
+            stacked
+                .iter()
+                .map(|&level| multi.names().get(level).cloned().flatten()),
+        );
+        let width = row_labels.first().map_or(1, Vec::len);
+        let mut arrays: Vec<Vec<IndexLabel>> = vec![Vec::new(); width + stacked.len()];
+        let mut flat = Vec::new();
+        for row in &row_labels {
+            for key in &stacked_order {
+                for (array, label) in arrays.iter_mut().zip(row.iter().chain(key)) {
+                    array.push(label.clone());
+                }
+                let parts: Vec<String> = row.iter().chain(key).map(ToString::to_string).collect();
+                flat.push(IndexLabel::Utf8(parts.join("|")));
+            }
+        }
+        let levels = fp_index::MultiIndex::from_arrays(arrays)
+            .map_err(index_error_to_py)?
+            .set_names(names);
+        let index = Index::new(flat)
+            .with_row_multiindex(levels.clone())
+            .map_err(index_error_to_py)?;
+        let cell = |row: usize, key: &Vec<IndexLabel>, other: &Vec<IndexLabel>| {
+            at.get(&(key.clone(), other.clone()))
+                .and_then(|&column| self.inner.column_at(column))
+                .map_or(Scalar::Null(NullKind::NaN), |column| {
+                    column.values()[row].clone()
+                })
+        };
+        let rows_count = row_labels.len();
+        let values_for = |other: &Vec<IndexLabel>| -> Vec<Scalar> {
+            (0..rows_count)
+                .flat_map(|row| stacked_order.iter().map(move |key| cell(row, key, other)))
+                .collect()
+        };
+        if rest.is_empty() {
+            let column =
+                Column::from_values(pandas_promote_int_with_missing(values_for(&Vec::new())))
+                    .map_err(column_error_to_py)?;
+            let inner = Series::new("", index, column).map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner })?.into_any());
+        }
+        let mut columns = BTreeMap::new();
+        let mut order = Vec::with_capacity(rest_order.len());
+        for (position, other) in rest_order.iter().enumerate() {
+            let name = if rest.len() == 1 {
+                fp_frame::column_key(&other[0])
+            } else {
+                format!("__fp_stack_{position}__")
+            };
+            let column = Column::from_values(pandas_promote_int_with_missing(values_for(other)))
+                .map_err(column_error_to_py)?;
+            columns.insert(name.clone(), column);
+            order.push(name);
+        }
+        let frame =
+            DataFrame::new_with_column_order(Index::new(index.labels().to_vec()), columns, order)
+                .and_then(|frame| frame.with_row_multiindex(levels))
+                .map_err(frame_error_to_py)?;
+        let rest_names: Vec<Option<LabelName>> = rest
+            .iter()
+            .map(|&level| multi.names().get(level).cloned().flatten())
+            .collect();
+        let inner = if rest.len() == 1 {
+            frame
+                .with_recorded_column_labels(rest_order.iter().map(|other| other[0].clone()))
+                .with_columns_name(rest_names[0].clone())
+        } else {
+            let arrays: Vec<Vec<IndexLabel>> = (0..rest.len())
+                .map(|level| {
+                    rest_order
+                        .iter()
+                        .map(|other| other[level].clone())
+                        .collect()
+                })
+                .collect();
+            let columns_axis = fp_index::MultiIndex::from_arrays(arrays)
+                .map_err(index_error_to_py)?
+                .set_names(rest_names);
+            frame_with_column_multiindex(&frame, columns_axis)?
+        };
+        Ok(Py::new(py, PyDataFrame { inner })?.into_any())
+    }
+
     /// The column a full-depth tuple names under MultiIndex columns
     /// (`sort_values(('a', 'x'))`; g3bux). None for flat columns, a
     /// non-tuple, or a tuple naming no single column.
@@ -42163,15 +42288,66 @@ impl PyDataFrame {
     /// (`dropna=False` or `future_stack=True` keep them). An explicit
     /// `dropna=`/`sort=` warns as pandas' deprecated implementation does;
     /// `sort` never reorders a one-level column axis.
-    #[pyo3(signature = (level=-1, dropna=None, sort=None, future_stack=false))]
+    #[pyo3(signature = (level=None, dropna=None, sort=None, future_stack=false))]
     fn stack(
         &self,
         py: Python<'_>,
-        level: i64,
+        level: Option<&Bound<'_, PyAny>>,
         dropna: Option<bool>,
         sort: Option<bool>,
         future_stack: bool,
     ) -> PyResult<Py<PyAny>> {
+        // `level` is pandas' -1 by default; a name or a list of levels as
+        // pandas takes them (a name raised TypeError; fvsao.36).
+        let level_arg = level.filter(|level| !level.is_none());
+        if future_stack && dropna.is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "dropna must be unspecified with future_stack=True as the new implementation does not introduce rows of NA values. This argument will be removed in a future version of pandas.",
+            ));
+        }
+        if future_stack && sort.is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Cannot specify sort with future_stack=True, this argument will be removed in a future version of pandas. Sort the result using .sort_index instead.",
+            ));
+        }
+        if let Some(multi) = self.inner.columns_multiindex()
+            && future_stack
+        {
+            let stacked = match level_arg {
+                None => vec![multi.nlevels() - 1],
+                Some(level) => match level_items(level) {
+                    Some(items) => items
+                        .iter()
+                        .map(|item| multiindex_level_position(multi, item))
+                        .collect::<PyResult<Vec<_>>>()?,
+                    None => vec![multiindex_level_position(multi, level)?],
+                },
+            };
+            return self.stack_levels_future(py, multi, &stacked);
+        }
+        let level: i64 = match level_arg {
+            None => -1,
+            Some(level) => match level.extract::<i64>() {
+                Ok(position) => position,
+                // One level's name: the column axis's own.
+                Err(_) => {
+                    let name = level.str()?.to_string();
+                    let own = self.inner.columns_name().map(ToString::to_string);
+                    if self.inner.columns_multiindex().is_none()
+                        && own.as_deref() == Some(name.as_str())
+                    {
+                        -1
+                    } else if let Some(multi) = self.inner.columns_multiindex() {
+                        i64::try_from(multiindex_level_position(multi, level)?).unwrap_or(i64::MAX)
+                    } else {
+                        return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                            "Requested level ({name}) does not match index name ({})",
+                            own.unwrap_or_else(|| "None".to_owned())
+                        )));
+                    }
+                }
+            },
+        };
         if let Some(multi) = self.inner.columns_multiindex() {
             if multi.nlevels() != 2
                 || !matches!(level, -1 | 1)
@@ -42205,11 +42381,6 @@ impl PyDataFrame {
             return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
                 "Too many levels: Index has only 1 level, {level} is not a valid level number"
             )));
-        }
-        if future_stack && dropna.is_some() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "dropna must be unspecified with future_stack=True as the new implementation does not introduce rows of NA values. This argument will be removed in a future version of pandas.",
-            ));
         }
         if !future_stack && (dropna.is_some() || sort.is_some()) {
             PyErr::warn(

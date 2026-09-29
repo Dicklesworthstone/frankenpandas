@@ -18554,3 +18554,53 @@ _IV_CASES = {
 def test_interval_index_members_like_pandas_4qg5w7(case: str) -> None:
     run = _IV_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.36 remainder:
+# stack(level=..., future_stack=True) over MultiIndex columns - any level, by
+# name or position, a list of them, every level (a Series) - was refused or
+# raised TypeError for a name; an unstack of a float column that holds only
+# NaN in one of its new columns was object (pandas float64).
+def _sk_frame(m: Any, three: bool = False) -> Any:
+    if three:
+        cols = m.MultiIndex.from_tuples(
+            [("x", "p", 1), ("x", "q", 2), ("y", "p", 1)], names=["up", "low", "n"]
+        )
+        return m.DataFrame([[1, 2, 3], [4, 5, 6]], columns=cols, index=["r0", "r1"])
+    cols = m.MultiIndex.from_tuples([("x", "p"), ("x", "q"), ("y", "p")], names=["up", "low"])
+    return m.DataFrame([[1, 2, 3], [4, 5, 6]], columns=cols, index=["r0", "r1"])
+
+
+_SK_CASES = {
+    "stack the last level": lambda m: _mk_shown(_sk_frame(m).stack(future_stack=True)),
+    "stack a level by name": lambda m: _mk_shown(_sk_frame(m).stack(level="up", future_stack=True)),
+    "stack a level by position": lambda m: _mk_shown(_sk_frame(m).stack(level=0, future_stack=True)),
+    "stack a negative level": lambda m: _mk_shown(_sk_frame(m).stack(level=-2, future_stack=True)),
+    "stack every level": lambda m: _mk_shown(_sk_frame(m).stack(level=["up", "low"], future_stack=True)),
+    "stack levels reversed": lambda m: _mk_shown(_sk_frame(m).stack(level=["low", "up"], future_stack=True)),
+    "stack one of three levels": lambda m: _mk_shown(_sk_frame(m, True).stack(level="low", future_stack=True)),
+    "stack two of three levels": lambda m: _mk_shown(
+        _sk_frame(m, True).stack(level=["up", "n"], future_stack=True)
+    ),
+    "stack then unstack": lambda m: _mk_shown(_sk_frame(m).stack(future_stack=True).unstack("low")),
+    "stack a row MultiIndex": lambda m: _mk_shown(
+        _sk_frame(m).set_axis(m.MultiIndex.from_tuples([("a", 1), ("b", 2)]), axis=0).stack(future_stack=True)
+    ),
+    "flat stack by the axis name": lambda m: _mk_shown(
+        m.DataFrame({"a": [1, 2], "b": [3, 4]}).rename_axis(columns="c").stack(level="c", future_stack=True)
+    ),
+    # Negatives: pandas' refusals.
+    "stack an unknown level": lambda m: _mk_shown(_sk_frame(m).stack(level="zz", future_stack=True)),
+    "stack with dropna": lambda m: _mk_shown(_sk_frame(m).stack(dropna=True, future_stack=True)),
+    "stack with sort": lambda m: _mk_shown(_sk_frame(m).stack(sort=True, future_stack=True)),
+    "flat stack by another name": lambda m: _mk_shown(
+        m.DataFrame({"a": [1, 2]}).stack(level="zz", future_stack=True)
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_SK_CASES))
+def test_stack_levels_like_pandas_fvsao36(case: str) -> None:
+    run = _SK_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

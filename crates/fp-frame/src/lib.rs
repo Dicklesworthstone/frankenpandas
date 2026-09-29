@@ -27840,10 +27840,14 @@ impl Series {
                 })
                 .collect();
             // pandas upcasts a numeric source with missing cells to float64
-            // for EVERY column; an all-missing one inferred object.
+            // for EVERY column, and a float source stays float64 though a
+            // column holds only its NaN cells; an all-missing one inferred
+            // object (fvsao.36).
             let column = if nullable {
                 Column::new(self.column.dtype(), values)?
-            } else if any_missing && matches!(self.column.dtype(), DType::Int64 | DType::Float64) {
+            } else if self.column.dtype() == DType::Float64
+                || (any_missing && self.column.dtype() == DType::Int64)
+            {
                 Column::new(DType::Float64, values)?
             } else {
                 Column::from_values(values)?
