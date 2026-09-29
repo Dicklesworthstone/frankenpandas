@@ -29272,6 +29272,10 @@ impl PySeries {
             )?;
             Ok(PySeries { inner: s })
         } else if let Ok(dict) = arg.cast::<PyDict>() {
+            // A dict subclass with __missing__ (a defaultdict) answers its
+            // default for a missing key, as pandas subscripts it (it was NaN;
+            // br-frankenpandas-n9zpp).
+            let defaulting = arg.hasattr("__missing__")?;
             let mut out = Vec::with_capacity(vals.len());
             for v in vals {
                 if ignore_na && (v.is_null() || matches!(v, Scalar::Float64(f) if f.is_nan())) {
@@ -29279,7 +29283,9 @@ impl PySeries {
                     continue;
                 }
                 let py_val = scalar_to_py(py, v)?;
-                if let Some(mapped) = dict.get_item(&py_val)? {
+                if defaulting {
+                    out.push(py_to_scalar(py, &arg.get_item(&py_val)?)?);
+                } else if let Some(mapped) = dict.get_item(&py_val)? {
                     out.push(py_to_scalar(py, &mapped)?);
                 } else {
                     out.push(Scalar::Float64(f64::NAN));
@@ -35340,10 +35346,19 @@ impl PyDataFrame {
             return Ok(());
         }
         let labels = extract_index_labels(Some(value), 0)?;
+        // The axis is named as the labels are - an Index's or Series' own
+        // name, none for a list - as pandas' (an Index's name was dropped;
+        // br-frankenpandas-n9zpp).
+        let name = if is_index_object(value) || value.is_instance_of::<PySeries>() {
+            py_axis_name(&value.getattr("name")?)?
+        } else {
+            None
+        };
         self.inner = self
             .inner
             .set_axis(labels, 1)
-            .map_err(axis_length_error_to_py)?;
+            .map_err(axis_length_error_to_py)?
+            .with_columns_name(name);
         Ok(())
     }
 
@@ -45433,13 +45448,27 @@ impl PyDataFrame {
     ) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
         // A {column: func} dict transforms each named column by its own
-        // function, in the dict's order (pandas' transform_dict_like; it
-        // went through apply as an aggregation).
+        // function, in the dict's order, the pieces side by side under the
+        // column labels (pandas' transform_dict_like: concat(axis=1) - a list
+        // of functions gives (v, abs), (v, cumsum); it went through apply as
+        // an aggregation, then a list gave a frame of the function names;
+        // br-frankenpandas-n9zpp).
         if let Ok(mapping) = func.cast::<PyDict>()
             && parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0) == 0
         {
+            // One list among the functions makes every one a list (pandas'
+            // normalize_dictlike_arg), so each piece is a frame.
+            let listed = |function: &Bound<'py, PyAny>| {
+                function.is_instance_of::<PyList>() || function.is_instance_of::<PyTuple>()
+            };
+            let lists = mapping.values().iter().any(|function| listed(&function));
             let columns = PyDict::new(py);
             for (column, function) in mapping.iter() {
+                let function = if lists && !listed(&function) {
+                    PyList::new(py, [function])?.into_any()
+                } else {
+                    function
+                };
                 let transformed = slf.as_any().get_item(&column)?.call_method(
                     "transform",
                     (function,),
@@ -45447,7 +45476,12 @@ impl PyDataFrame {
                 )?;
                 columns.set_item(column, transformed)?;
             }
-            return py.get_type::<PyDataFrame>().call1((columns,));
+            let concat_kwargs = PyDict::new(py);
+            concat_kwargs.set_item("axis", 1)?;
+            return py
+                .import("frankenpandas")?
+                .getattr("concat")?
+                .call((columns,), Some(&concat_kwargs));
         }
         // A list of functions transforms each column by every one, the
         // pieces side by side under the column labels (pandas'
@@ -61887,6 +61921,7 @@ fn concat_objects(
     let mut series: Vec<Series> = Vec::new();
     // The keys of the objects kept: a None object drops out with its key.
     let mut kept_keys: Vec<IndexLabel> = Vec::new();
+    let mut kept: Vec<&Bound<'_, PyAny>> = Vec::new();
     for (position, item) in objects.iter().enumerate() {
         if item.is_none() {
             continue;
@@ -61894,6 +61929,7 @@ fn concat_objects(
         if let Some(keys) = &keys {
             kept_keys.push(keys[position].clone());
         }
+        kept.push(item);
         if let Ok(frame) = item.extract::<PyRef<'_, PyDataFrame>>() {
             frames.push(frame.inner.clone());
         } else if let Ok(s) = item.extract::<PyRef<'_, PySeries>>() {
@@ -61910,8 +61946,33 @@ fn concat_objects(
             "No objects to concatenate",
         ));
     }
+    // Series among frames are each the one-column frame {name: series}, as
+    // pandas' _sanitize_mixed_ndim makes them: an unnamed one (every one
+    // under ignore_index) column 0 when rows stack, 0, 1, ... in order when
+    // frames sit side by side (it was refused; br-frankenpandas-n9zpp).
     if !frames.is_empty() && !series.is_empty() {
-        return Err(not_implemented("concat of Series mixed with DataFrames"));
+        let mut unnamed = 0_i64;
+        frames = Vec::with_capacity(kept.len());
+        for item in &kept {
+            if let Ok(frame) = item.extract::<PyRef<'_, PyDataFrame>>() {
+                frames.push(frame.inner.clone());
+                continue;
+            }
+            let name = item.getattr("name")?;
+            let column = if !ignore_index && !name.is_none() {
+                name
+            } else if axis == 1 {
+                unnamed += 1;
+                (unnamed - 1).into_pyobject(py)?.into_any()
+            } else {
+                0_i64.into_pyobject(py)?.into_any()
+            };
+            let one = PyDict::new(py);
+            one.set_item(column, *item)?;
+            let frame = py.get_type::<PyDataFrame>().call1((one,))?;
+            frames.push(frame.extract::<PyRef<'_, PyDataFrame>>()?.inner.clone());
+        }
+        series.clear();
     }
     // ignore_index=True drops the keys, as pandas does.
     let keys = if ignore_index || keys.is_none() {
@@ -67777,6 +67838,86 @@ fn get_dummies(
     Ok(PyDataFrame { inner: df })
 }
 
+/// A crosstab `table` normalized as pandas' `_normalize`: over everything
+/// ("all"), each row ("index") or each column ("columns"), missing cells 0.
+fn crosstab_normalized<'py>(table: &Bound<'py, PyAny>, how: &str) -> PyResult<Bound<'py, PyAny>> {
+    let py = table.py();
+    let normalized = match how {
+        "all" => {
+            let total = table.call_method0("sum")?.call_method0("sum")?;
+            table.call_method1("__truediv__", (total,))?
+        }
+        "index" => {
+            let sums = PyDict::new(py);
+            sums.set_item("axis", 1)?;
+            let row_sums = table.call_method("sum", (), Some(&sums))?;
+            let div = PyDict::new(py);
+            div.set_item("axis", 0)?;
+            table.call_method("div", (row_sums,), Some(&div))?
+        }
+        _ => {
+            let column_sums = table.call_method0("sum")?;
+            table.call_method1("__truediv__", (column_sums,))?
+        }
+    };
+    normalized.call_method1("fillna", (0_i64,))
+}
+
+/// A crosstab `table` with margins normalized as pandas' `_normalize`: the
+/// core (margins left out) normalized as without them, then per row the
+/// margin row, per column the margin column, over everything both (their
+/// shares, the corner 1), each margin over its own total (it was refused;
+/// br-frankenpandas-n9zpp).
+fn crosstab_normalized_margins<'py>(
+    table: &Bound<'py, PyAny>,
+    how: &str,
+    margins_name: &str,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = table.py();
+    let (index, columns) = (table.getattr("index")?, table.getattr("columns")?);
+    let iloc = table.getattr("iloc")?;
+    let all_but_last = pyo3::types::PySlice::new(py, 0, -1, 1);
+    let column_margin = iloc.get_item((&all_but_last, -1))?;
+    let index_margin = iloc.get_item((-1, &all_but_last))?;
+    let core = crosstab_normalized(&iloc.get_item((&all_but_last, &all_but_last))?, how)?;
+    let share = |margin: &Bound<'py, PyAny>| {
+        margin.call_method1("__truediv__", (margin.call_method0("sum")?,))
+    };
+    let concat = py.import("frankenpandas")?.getattr("concat")?;
+    let side_by_side = PyDict::new(py);
+    side_by_side.set_item("axis", 1)?;
+    let with_column = |core: &Bound<'py, PyAny>| -> PyResult<Bound<'py, PyAny>> {
+        let pieces = PyList::new(py, [core.clone(), share(&column_margin)?])?;
+        concat.call((pieces,), Some(&side_by_side))
+    };
+    let with_row =
+        |core: &Bound<'py, PyAny>, row: Bound<'py, PyAny>| -> PyResult<Bound<'py, PyAny>> {
+            let row = row.call_method0("to_frame")?.getattr("T")?;
+            concat.call1((PyList::new(py, [core.clone(), row])?,))
+        };
+    let table = match how {
+        "columns" => {
+            let table = with_column(&core)?.call_method1("fillna", (0_i64,))?;
+            table.setattr("columns", columns)?;
+            table
+        }
+        "index" => {
+            let table = with_row(&core, share(&index_margin)?)?.call_method1("fillna", (0_i64,))?;
+            table.setattr("index", index)?;
+            table
+        }
+        _ => {
+            let row = share(&index_margin)?;
+            row.getattr("loc")?.set_item(margins_name, 1_i64)?;
+            let table = with_row(&with_column(&core)?, row)?.call_method1("fillna", (0_i64,))?;
+            table.setattr("index", index)?;
+            table.setattr("columns", columns)?;
+            table
+        }
+    };
+    Ok(table)
+}
+
 /// pandas' `crosstab(index, columns, values=None, rownames=None,
 /// colnames=None, aggfunc=None, margins=False, margins_name='All',
 /// dropna=True, normalize=False)`, built as pandas builds it: a frame of the
@@ -67852,9 +67993,6 @@ fn crosstab<'py>(
             }
         },
     };
-    if normalize.is_some() && margins {
-        return Err(not_implemented("crosstab(normalize=..., margins=True)"));
-    }
     let to_series = |arrays: &[Bound<'py, PyAny>]| -> PyResult<Vec<PySeries>> {
         arrays
             .iter()
@@ -67943,27 +68081,8 @@ fn crosstab<'py>(
     let table = frame.call_method("pivot_table", (), Some(&pivot_kwargs))?;
     let table = match normalize.as_deref() {
         None => table,
-        Some("all") => {
-            let total = table.call_method0("sum")?.call_method0("sum")?;
-            table.call_method1("__truediv__", (total,))?
-        }
-        Some("index") => {
-            let sums = PyDict::new(py);
-            sums.set_item("axis", 1)?;
-            let row_sums = table.call_method("sum", (), Some(&sums))?;
-            let div = PyDict::new(py);
-            div.set_item("axis", 0)?;
-            table.call_method("div", (row_sums,), Some(&div))?
-        }
-        Some(_) => {
-            let column_sums = table.call_method0("sum")?;
-            table.call_method1("__truediv__", (column_sums,))?
-        }
-    };
-    let table = if normalize.is_some() {
-        table.call_method1("fillna", (0_i64,))?
-    } else {
-        table
+        Some(how) if margins => crosstab_normalized_margins(&table, how, margins_name)?,
+        Some(how) => crosstab_normalized(&table, how)?,
     };
     if let [row_name] = row_names.as_slice() {
         table.getattr("index")?.setattr("name", row_name)?;

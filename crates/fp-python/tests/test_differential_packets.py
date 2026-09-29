@@ -2813,7 +2813,9 @@ def test_numpy_keywords_follow_pandas_rule() -> None:
 @pytest.mark.parametrize(
     "call",
     [
-        lambda: fpd.crosstab(fpd.Series(["a"]), fpd.Series(["b"]), normalize=True, margins=True),
+        # TEST-CHANGE (n9zpp): crosstab(normalize=True, margins=True) left
+        # this list; it normalizes the margins as pandas does now
+        # (test_everyday48_transform_crosstab_map_concat_like_pandas_n9zpp).
         # TEST-CHANGE (u6p7i): groupby(...).value_counts(dropna=False) left
         # this list; it counts the missing values as pandas does now
         # (test_refused_parameters_now_answer_like_pandas_u6p7i).
@@ -19477,4 +19479,88 @@ _E47_CASES = {
 @pytest.mark.parametrize("case", list(_E47_CASES))
 def test_everyday47_index_subclasses_like_pandas_myyy1(case: str) -> None:
     run = _E47_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-n9zpp: transform({col: [funcs]}) sets the results side by
+# side (it gave a frame of the function names), crosstab normalizes with
+# margins (refused), map uses a dict subclass's __missing__ (NaN), concat
+# takes Series among frames (refused), and df.columns = index takes its name.
+def _e48_shown(result: Any) -> list:
+    return _e23_shown(result) + [str(list(result.columns)), str(result.columns.names)]
+
+
+def _e48_frame(m: Any) -> Any:
+    return m.DataFrame({"v": [1.0, None, 3.0], "w": [1, 2, 3]})
+
+
+def _e48_keys(m: Any) -> tuple:
+    return (
+        m.Series(["a", "b", "a", "c", "a"], name="k"),
+        m.Series(["x", "x", "y", "y", "y"], name="g"),
+    )
+
+
+def _e48_crosstab(m: Any, **kwargs: Any) -> list:
+    return _e48_shown(m.crosstab(*_e48_keys(m), **kwargs))
+
+
+def _e48_concat(m: Any, *pieces: Any, **kwargs: Any) -> list:
+    frame = m.DataFrame({"a": [1, 2], "b": [3, 4]})
+    named, unnamed = m.Series([5, 6], name="c"), m.Series([7, 8])
+    objects = {"frame": frame, "named": named, "unnamed": unnamed}
+    return _e48_shown(m.concat([objects[piece] for piece in pieces], **kwargs))
+
+
+def _e48_columns_set(m: Any, value: Any) -> list:
+    frame = m.DataFrame({"a": [1], "b": [2]})
+    frame.columns = m.Index(["p", "q"], name="old")
+    frame.columns = value(m)
+    return [str(list(frame.columns)), str(frame.columns.name)]
+
+
+def _e48_default(m: Any) -> Any:
+    import collections
+
+    return collections.defaultdict(lambda: "?", {"a": "A"})
+
+
+_E48_CASES = {
+    "transform list in a dict": lambda m: _e48_shown(_e48_frame(m).transform({"v": ["abs", "cumsum"]})),
+    "transform list beside a name": lambda m: _e48_shown(
+        _e48_frame(m).transform({"v": "abs", "w": ["cumsum", "abs"]})
+    ),
+    "crosstab index margins": lambda m: _e48_crosstab(m, normalize="index", margins=True),
+    "crosstab columns margins": lambda m: _e48_crosstab(m, normalize="columns", margins=True),
+    "crosstab all margins": lambda m: _e48_crosstab(m, normalize="all", margins=True),
+    "crosstab margins name": lambda m: _e48_crosstab(m, normalize=True, margins=True, margins_name="Total"),
+    "map defaultdict": lambda m: [m.Series(["a", "z"]).map(_e48_default(m))],
+    "map Counter": lambda m: [m.Series(["a", "b"]).map(__import__("collections").Counter(["a", "a"]))],
+    "concat frame and named Series": lambda m: _e48_concat(m, "frame", "named", axis=1),
+    "concat Series and frame": lambda m: _e48_concat(m, "named", "frame", axis=1),
+    "concat frame and unnamed Series": lambda m: _e48_concat(m, "frame", "unnamed", "unnamed", axis=1),
+    "concat rows of frame and Series": lambda m: _e48_concat(m, "frame", "named"),
+    "concat rows of frame and unnamed": lambda m: _e48_concat(m, "frame", "unnamed"),
+    "concat mixed with keys": lambda m: _e48_concat(m, "frame", "named", axis=1, keys=["x", "y"]),
+    "concat mixed inner": lambda m: _e48_concat(m, "frame", "named", axis=1, join="inner"),
+    "columns set from a named Index": lambda m: _e48_columns_set(m, lambda m: m.Index(["x", "y"], name="g")),
+    # Negatives: already pandas'.
+    "map defaultdict ignoring NA": lambda m: [m.Series(["a", None]).map(_e48_default(m), na_action="ignore")],
+    "columns set from a list": lambda m: _e48_columns_set(m, lambda m: ["x", "y"]),
+    "transform functions in a dict": lambda m: _e48_shown(
+        _e48_frame(m).transform({"v": np.abs, "w": lambda s: s * 2})
+    ),
+    "transform one in a dict": lambda m: _e48_shown(_e48_frame(m).transform({"w": "cumsum"})),
+    "crosstab normalize alone": lambda m: _e48_crosstab(m, normalize="index"),
+    "crosstab margins alone": lambda m: _e48_crosstab(m, margins=True),
+    "map dict": lambda m: [m.Series(["a", "z"]).map({"a": "A"})],
+    "concat frames": lambda m: _e48_concat(m, "frame", "frame", axis=1),
+    "concat Series": lambda m: _e48_concat(m, "named", "unnamed", axis=1),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E48_CASES))
+def test_everyday48_transform_crosstab_map_concat_like_pandas_n9zpp(case: str) -> None:
+    run = _E48_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
