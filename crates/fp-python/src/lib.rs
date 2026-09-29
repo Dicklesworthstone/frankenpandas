@@ -21149,6 +21149,52 @@ fn pandas_sample_positions(
         .extract()
 }
 
+/// The rows pandas' groupby `sample` draws: ONE state for every group - a
+/// seed makes numpy's RandomState, a RandomState / Generator is itself,
+/// None numpy's global state - each group, in group order, drawing through
+/// [`pandas_sample_positions`] with its own weights (normalized there); the
+/// rows group after group (fp-frame's own generator drew others; qpnp1).
+#[allow(clippy::too_many_arguments)]
+fn grouped_sample_rows(
+    py: Python<'_>,
+    groups: &[(IndexLabel, Vec<usize>)],
+    len: usize,
+    n: Option<i64>,
+    frac: Option<f64>,
+    replace: bool,
+    weights: Option<Vec<Option<f64>>>,
+    random_state: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Vec<usize>> {
+    if weights.as_ref().is_some_and(|weights| weights.len() != len) {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Weights and axis to be sampled must be of same length",
+        ));
+    }
+    let random = py.import("numpy")?.getattr("random")?;
+    let state = match random_state.filter(|state| !state.is_none()) {
+        None => random,
+        Some(state) if state.hasattr("choice")? => state.clone(),
+        Some(state) => random.call_method1("RandomState", (state,))?,
+    };
+    let mut rows = Vec::new();
+    for (_, positions) in groups {
+        let group_weights = weights
+            .as_ref()
+            .map(|weights| positions.iter().map(|&row| weights[row]).collect());
+        let picks = pandas_sample_positions(
+            py,
+            positions.len(),
+            n,
+            frac,
+            replace,
+            group_weights,
+            Some(&state),
+        )?;
+        rows.extend(picks.into_iter().map(|at| positions[at]));
+    }
+    Ok(rows)
+}
+
 /// pandas' weights for `sample`: an array-like is one weight per item, a
 /// Series is aligned to `labels` by label, a string names a column of
 /// `frame` (rows only); missing values are None.
@@ -50947,22 +50993,40 @@ impl PyGroupBy {
         self.idx_extremes(py, "idxmin", axis, skipna, numeric_only)
     }
 
+    /// pandas' `gb.sample(n=None, frac=None, replace=False, weights=None,
+    /// random_state=None)`: each group's rows drawn as pandas draws them
+    /// (see [`grouped_sample_rows`]), keys and all.
     #[pyo3(signature = (n=None, frac=None, replace=false, weights=None, random_state=None))]
     fn sample(
         &self,
-        n: Option<usize>,
+        py: Python<'_>,
+        n: Option<i64>,
         frac: Option<f64>,
-        replace: Option<bool>,
+        replace: bool,
         weights: Option<&Bound<'_, PyAny>>,
-        random_state: Option<u64>,
+        random_state: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        unsupported_params("DataFrameGroupBy.sample", &[("weights", weights.is_none())])?;
-        let res = self
-            .grouped()
-            .map_err(frame_error_to_py)?
-            .sample(n, frac, replace.unwrap_or(false), random_state)
-            .map_err(frame_error_to_py)?;
-        self.out(res)
+        let weights = match weights.filter(|weights| !weights.is_none()) {
+            Some(weights) => Some(sample_weights(
+                py,
+                weights,
+                self.df.index().labels(),
+                Some(&self.df),
+            )?),
+            None => None,
+        };
+        let groups = self.ordered_groups(false)?;
+        let rows = grouped_sample_rows(
+            py,
+            &groups,
+            self.df.len(),
+            n,
+            frac,
+            replace,
+            weights,
+            random_state,
+        )?;
+        self.out(self.df.take_rows(&rows).map_err(frame_error_to_py)?)
     }
 
     /// pandas' `DataFrameGroupBy.shift(periods, fill_value=)`: the rows a
@@ -53039,23 +53103,42 @@ impl PySeriesGroupBy {
         })
     }
 
+    /// pandas' `gb.sample(n=None, frac=None, replace=False, weights=None,
+    /// random_state=None)`: each group's rows drawn as pandas draws them
+    /// (see [`grouped_sample_rows`]).
     #[pyo3(signature = (n=None, frac=None, replace=false, weights=None, random_state=None))]
     fn sample(
         &self,
-        n: Option<usize>,
+        py: Python<'_>,
+        n: Option<i64>,
         frac: Option<f64>,
-        replace: Option<bool>,
+        replace: bool,
         weights: Option<&Bound<'_, PyAny>>,
-        random_state: Option<u64>,
+        random_state: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        unsupported_params("SeriesGroupBy.sample", &[("weights", weights.is_none())])?;
-        let res = self
-            .series
-            .groupby(&self.by)
-            .map_err(frame_error_to_py)?
-            .sample(n, frac, replace.unwrap_or(false), random_state)
-            .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        let weights = match weights.filter(|weights| !weights.is_none()) {
+            Some(weights) => Some(sample_weights(
+                py,
+                weights,
+                self.series.index().labels(),
+                None,
+            )?),
+            None => None,
+        };
+        let groups = self.ordered_groups(false)?;
+        let rows = grouped_sample_rows(
+            py,
+            &groups,
+            self.series.len(),
+            n,
+            frac,
+            replace,
+            weights,
+            random_state,
+        )?;
+        Ok(PySeries {
+            inner: self.group_rows(&rows)?,
+        })
     }
 
     /// pandas' `gb.take(indices)`: each group's rows at those positions (a

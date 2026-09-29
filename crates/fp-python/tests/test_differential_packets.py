@@ -15913,3 +15913,45 @@ _C90_CASES = {
 def test_groupby_everyday_gaps_like_pandas_c90rr(case: str) -> None:
     run = _C90_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-qpnp1 (scratch p14/oracle_sample.py vs pandas 2.2.3):
+# groupby sample(random_state=) drew other rows than pandas (fp-frame's own
+# generator), and refused weights and a RandomState; pandas draws every
+# group from one numpy RandomState in group order.
+def _qp_frame(m: Any) -> Any:
+    return m.DataFrame({"a": list(range(10)), "k": [1, 2] * 5, "j": [0, 0, 1, 1, 0, 0, 1, 1, 0, 0]})
+
+
+def _qp_shown(result: Any) -> list:
+    return [repr(list(result.index)), result.to_string()]
+
+
+_QP_WEIGHTS = [1.0, 2.0, 0.0, 1.0, 5.0, 1.0, 1.0, 0.0, 2.0, 3.0]
+_QP_CASES = {
+    "n": lambda m: _qp_shown(_qp_frame(m).groupby("k").sample(n=1, random_state=0)),
+    "two": lambda m: _qp_shown(_qp_frame(m).groupby("k").sample(n=2, random_state=3)),
+    "frac": lambda m: _qp_shown(_qp_frame(m).groupby("k").sample(frac=0.6, random_state=1)),
+    "replace": lambda m: _qp_shown(_qp_frame(m).groupby("k").sample(n=7, replace=True, random_state=4)),
+    "weights": lambda m: _qp_shown(_qp_frame(m).groupby("k").sample(n=2, weights=_QP_WEIGHTS, random_state=5)),
+    "a RandomState": lambda m: _qp_shown(
+        _qp_frame(m).groupby("k").sample(n=2, random_state=np.random.RandomState(6))
+    ),
+    "two keys": lambda m: _qp_shown(_qp_frame(m).groupby(["k", "j"]).sample(n=1, random_state=7)),
+    "more rows than a group raises": lambda m: _qp_shown(_qp_frame(m).groupby("k").sample(n=6, random_state=0)),
+    "n and frac raise": lambda m: _qp_shown(_qp_frame(m).groupby("k").sample(n=1, frac=0.5)),
+    "Series": lambda m: _qp_shown(_qp_frame(m).groupby("k")["a"].sample(n=2, random_state=8)),
+    "Series by a Series": lambda m: _qp_shown(
+        _qp_frame(m)["a"].groupby(_qp_frame(m)["k"]).sample(frac=0.4, random_state=9)
+    ),
+    # NEGATIVE: the ungrouped sample, as before.
+    "frame sample": lambda m: _qp_shown(_qp_frame(m).sample(n=3, random_state=0)),
+    "Series sample": lambda m: _qp_shown(_qp_frame(m)["a"].sample(n=4, random_state=2)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_QP_CASES))
+def test_groupby_sample_draws_as_pandas_qpnp1(case: str) -> None:
+    run = _QP_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
