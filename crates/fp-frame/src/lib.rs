@@ -14734,6 +14734,40 @@ impl Series {
         limit_direction: &str,
         limit_area: Option<&str>,
     ) -> Result<Self, FrameError> {
+        let vals = self.column.values();
+        let mut out = vals.to_vec();
+        for (i, anchors) in self
+            .interpolation_anchors(limit, limit_direction, limit_area)?
+            .into_iter()
+            .enumerate()
+        {
+            out[i] = match anchors {
+                Some((Some(li), Some(ri))) => {
+                    let lv = vals[li].to_f64().map_err(ColumnError::from)?;
+                    let rv = vals[ri].to_f64().map_err(ColumnError::from)?;
+                    let t = (i - li) as f64 / (ri - li) as f64;
+                    Scalar::Float64(lv + t * (rv - lv))
+                }
+                Some((Some(li), None)) => vals[li].clone(),
+                Some((None, Some(ri))) => vals[ri].clone(),
+                _ => continue,
+            };
+        }
+        self.with_values_preserving_index(out)
+    }
+
+    /// For each position, the valid values bounding its gap (`(left,
+    /// right)`) when pandas' `interpolate` may fill it - a valid value within
+    /// `limit` in the `limit_direction` ('forward' the left one, 'backward'
+    /// the right one, 'both' either), an interior gap (both) or an edge gap
+    /// (one) as `limit_area` asks - else None (a valid value, too). pandas'
+    /// `interpolate_1d` preserve set, as a reach test.
+    fn interpolation_anchors(
+        &self,
+        limit: Option<usize>,
+        limit_direction: &str,
+        limit_area: Option<&str>,
+    ) -> Result<Vec<Option<(Option<usize>, Option<usize>)>>, FrameError> {
         let (use_fwd, use_bwd) = match limit_direction {
             "forward" => (true, false),
             "backward" => (false, true),
@@ -14779,49 +14813,68 @@ impl Series {
         }
 
         let within = |dist: usize| limit.is_none_or(|lim| dist <= lim);
-        let mut out = vals.to_vec();
-        for i in 0..n {
-            if !vals[i].is_missing() {
-                continue;
-            }
-            let left = prev_valid[i];
-            let right = next_valid[i];
-            // limit_area: an interior gap has both anchors; an edge gap exactly
-            // one. A gap with neither anchor is never fillable.
-            let area_ok = match area {
-                None => true,
-                Some(true) => left.is_some() && right.is_some(),
-                Some(false) => left.is_some() != right.is_some(),
-            };
-            let fwd_ok = use_fwd && left.is_some_and(|li| within(i - li));
-            let bwd_ok = use_bwd && right.is_some_and(|ri| within(ri - i));
-            if !area_ok || !(fwd_ok || bwd_ok) {
-                continue; // unreachable / wrong area -> stays missing
-            }
-            out[i] = match (left, right) {
-                (Some(li), Some(ri)) => {
-                    let lv = vals[li].to_f64().map_err(ColumnError::from)?;
-                    let rv = vals[ri].to_f64().map_err(ColumnError::from)?;
-                    let t = (i - li) as f64 / (ri - li) as f64;
-                    Scalar::Float64(lv + t * (rv - lv))
+        Ok((0..n)
+            .map(|i| {
+                if !vals[i].is_missing() {
+                    return None;
                 }
-                (Some(li), None) => vals[li].clone(),
-                (None, Some(ri)) => vals[ri].clone(),
-                (None, None) => continue,
-            };
-        }
+                let (left, right) = (prev_valid[i], next_valid[i]);
+                // limit_area: an interior gap has both anchors; an edge gap
+                // exactly one. A gap with neither anchor is never fillable.
+                let area_ok = match area {
+                    None => true,
+                    Some(true) => left.is_some() && right.is_some(),
+                    Some(false) => left.is_some() != right.is_some(),
+                };
+                let fwd_ok = use_fwd && left.is_some_and(|li| within(i - li));
+                let bwd_ok = use_bwd && right.is_some_and(|ri| within(ri - i));
+                (area_ok && (fwd_ok || bwd_ok)).then_some((left, right))
+            })
+            .collect())
+    }
+
+    /// A method other than linear / pad under pandas' `interpolate_1d`: the
+    /// method's fill ([`interpolate_method`](Self::interpolate_method))
+    /// where [`interpolation_anchors`](Self::interpolation_anchors) says the
+    /// gap may be filled and the method reaches it - `index` / `values` /
+    /// `time` carry the edge value out as numpy's interp does, the scipy
+    /// methods (nearest, zero) fill only between two valid values (they
+    /// filled the leading and trailing gaps too; br-frankenpandas-u6p7i).
+    fn interpolate_within_reach(
+        &self,
+        method: &str,
+        limit: Option<usize>,
+        limit_direction: &str,
+        limit_area: Option<&str>,
+    ) -> Result<Self, FrameError> {
+        let extrapolates = matches!(method, "index" | "values" | "time");
+        let anchors = self.interpolation_anchors(limit, limit_direction, limit_area)?;
+        let full = self.interpolate_method(method)?;
+        let (vals, filled) = (self.column.values(), full.column.values());
+        let out = anchors
+            .into_iter()
+            .enumerate()
+            .map(|(i, anchors)| match anchors {
+                Some((Some(_), Some(_))) => filled[i].clone(),
+                Some((Some(_), None)) if extrapolates => filled[i].clone(),
+                // numpy's interp carries the first value back over a
+                // leading gap (the method's own fill leaves it).
+                Some((None, Some(ri))) if extrapolates => vals[ri].clone(),
+                _ => vals[i].clone(),
+            })
+            .collect();
         self.with_values_preserving_index(out)
     }
 
     /// Whether [`interpolate_with`](Self::interpolate_with) implements this
-    /// combination: linear takes every option, the other methods only `limit`
-    /// in the forward direction.
+    /// combination: every method takes every option but `pad`, a forward fill
+    /// (pandas refuses any other direction) without `limit_area`.
     pub fn interpolate_supports(
         method: &str,
         limit_direction: Option<&str>,
         limit_area: Option<&str>,
     ) -> bool {
-        method == "linear"
+        method != "pad"
             || (matches!(limit_direction, None | Some("forward")) && limit_area.is_none())
     }
 
@@ -14851,8 +14904,14 @@ impl Series {
                 limit_direction.unwrap_or("forward"),
                 limit_area,
             ),
-            (other, None) => self.interpolate_method(other),
-            (other, Some(l)) => self.interpolate_with_limit(other, l),
+            ("pad", None) => self.interpolate_method("pad"),
+            ("pad", Some(l)) => self.interpolate_with_limit("pad", l),
+            (other, _) => self.interpolate_within_reach(
+                other,
+                limit,
+                limit_direction.unwrap_or("forward"),
+                limit_area,
+            ),
         }
     }
 
@@ -15006,7 +15065,10 @@ impl Series {
             // x-axis instead of integer positions, so irregularly-spaced gaps
             // weight by real distance. Edge handling matches `linear`: leading
             // gaps stay missing, trailing gaps forward-carry the last value.
-            "index" | "values" | "time" => {
+            // scipy's `slinear` is the same line between the two valid values
+            // around a gap (interpolate_with leaves its edges missing; it was
+            // unsupported, br-frankenpandas-u6p7i).
+            "index" | "values" | "time" | "slinear" => {
                 let vals = self.column.values();
                 let n = vals.len();
                 let xs: Vec<f64> = self
@@ -157215,6 +157277,63 @@ mod tests {
     }
 
     #[test]
+    fn interpolate_methods_fill_only_what_pandas_reaches_u6p7i() {
+        // Measured on pandas 2.2.3 over [NaN, 1, NaN, NaN, 4, NaN, NaN]:
+        // nearest / zero / slinear fill only between two valid values;
+        // index carries the edge value out as numpy's interp.
+        let series = Series::from_values(
+            "x",
+            (0..7_i64).map(IndexLabel::from).collect::<Vec<_>>(),
+            [f64::NAN, 1.0, f64::NAN, f64::NAN, 4.0, f64::NAN, f64::NAN]
+                .into_iter()
+                .map(|v| {
+                    if v.is_nan() {
+                        Scalar::Null(NullKind::NaN)
+                    } else {
+                        Scalar::Float64(v)
+                    }
+                })
+                .collect(),
+        )
+        .unwrap();
+        let run =
+            |method: &str, limit: Option<usize>, direction: Option<&str>, area: Option<&str>| {
+                series
+                    .interpolate_with(method, limit, direction, area)
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .map(|v| v.to_f64().ok().filter(|x| !x.is_nan()))
+                    .collect::<Vec<_>>()
+            };
+        let (n, a, d) = (None, Some(1.0), Some(4.0));
+        assert_eq!(run("nearest", None, None, None), [n, a, a, d, d, n, n]);
+        assert_eq!(run("nearest", Some(1), None, None), [n, a, a, n, d, n, n]);
+        assert_eq!(
+            run("nearest", None, Some("both"), None),
+            [n, a, a, d, d, n, n]
+        );
+        assert_eq!(
+            run("nearest", None, None, Some("outside")),
+            [n, a, n, n, d, n, n]
+        );
+        assert_eq!(run("zero", None, None, None), [n, a, a, a, d, n, n]);
+        assert_eq!(
+            run("slinear", None, None, None),
+            [n, a, Some(2.0), Some(3.0), d, n, n]
+        );
+        assert_eq!(
+            run("index", None, Some("both"), None),
+            [a, a, Some(2.0), Some(3.0), d, d, d]
+        );
+        // NEGATIVE: linear keeps its forward trailing carry.
+        assert_eq!(
+            run("linear", None, None, None),
+            [n, a, Some(2.0), Some(3.0), d, d, d]
+        );
+    }
+
+    #[test]
     fn interpolate_with_dispatches_every_option_fvsao5() {
         // fvsao.5: the Python binding dropped method/limit/limit_direction/
         // limit_area. Values verified vs pandas 2.2.3:
@@ -157272,13 +157391,17 @@ mod tests {
                 .unwrap()),
             m(&long_gap.interpolate().unwrap())
         );
-        // A non-linear method with a direction is not implemented; it is
-        // rejected rather than interpolated some other way.
-        assert!(!Series::interpolate_supports("nearest", Some("both"), None));
-        assert!(
-            edges
+        // A non-linear method takes a direction (TEST-CHANGE u6p7i: this
+        // pinned its refusal): pandas 2.2.3's nearest fills only between two
+        // valid values, [NaN, 1, 1, 3, NaN] for limit_direction='both'; pad
+        // is a forward fill alone.
+        assert!(Series::interpolate_supports("nearest", Some("both"), None));
+        assert!(!Series::interpolate_supports("pad", Some("both"), None));
+        assert_eq!(
+            m(&edges
                 .interpolate_with("nearest", None, Some("both"), None)
-                .is_err()
+                .unwrap()),
+            vec![None, Some(1.0), Some(1.0), Some(3.0), None]
         );
         // Per column on a frame, with the object-column rule kept.
         let frame = DataFrame::from_series(vec![long_gap.clone()]).unwrap();

@@ -2813,7 +2813,9 @@ def test_numpy_keywords_follow_pandas_rule() -> None:
         # TEST-CHANGE (fvsao.69): apply(lambda r: [...], axis=1) left this list;
         # its Series of lists is built from object cells now
         # (test_frame_apply_object_results_match_pandas).
-        lambda: _hs(fpd).interpolate(method="nearest", limit_direction="both"),
+        # TEST-CHANGE (u6p7i): interpolate(method='nearest',
+        # limit_direction='both') left this list; it fills as pandas does now
+        # (test_interpolate_reach_merges_and_level_reindex_like_pandas_u6p7i).
         # TEST-CHANGE (xn05q): Series.to_string(float_format=) left this list;
         # it formats as pandas now (test_to_string_keywords_like_pandas).
         lambda: _hs(fpd).view("int64"),
@@ -15376,4 +15378,113 @@ _LV_CASES = {
 @pytest.mark.parametrize("case", list(_LV_CASES))
 def test_levels_op_names_periods_and_cut_precision_like_pandas_u6p7i(case: str) -> None:
     run = _LV_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-u6p7i, more refusals and what they exposed:
+# interpolate's nearest / zero filled the leading and trailing gaps (pandas'
+# scipy methods fill only between two valid values), every method but
+# linear refused limit_direction / limit_area, and slinear was unsupported;
+# json_normalize(max_level=) raised on the dict it leaves; merge_asof on the
+# indexes, merge_ordered(suffixes=) and reindex(level=) were refused.
+def _u6c_gappy(m: Any) -> Any:
+    return m.Series([np.nan, 1.0, np.nan, np.nan, 4.0, np.nan, np.nan])
+
+
+def _u6c_asof(m: Any, key: str, values: list, times: list) -> Any:
+    return m.DataFrame({"k": key, "v": values}, index=m.Index(times, name="t"))
+
+
+def _u6c_mi(m: Any) -> Any:
+    return m.Series(
+        [1, 2, 3, 4],
+        index=m.MultiIndex.from_tuples([("a", 1), ("a", 2), ("b", 1), ("c", 2)], names=["k", "n"]),
+        name="v",
+    )
+
+
+_U6C_CASES = {
+    "interpolate nearest": lambda m: _u6_shown(_u6c_gappy(m).interpolate(method="nearest")),
+    "interpolate nearest limit": lambda m: _u6_shown(_u6c_gappy(m).interpolate(method="nearest", limit=1)),
+    "interpolate nearest both": lambda m: _u6_shown(
+        _u6c_gappy(m).interpolate(method="nearest", limit_direction="both")
+    ),
+    "interpolate nearest backward": lambda m: _u6_shown(
+        _u6c_gappy(m).interpolate(method="nearest", limit_direction="backward")
+    ),
+    "interpolate nearest inside": lambda m: _u6_shown(
+        _u6c_gappy(m).interpolate(method="nearest", limit_area="inside")
+    ),
+    "interpolate nearest outside": lambda m: _u6_shown(
+        _u6c_gappy(m).interpolate(method="nearest", limit_area="outside")
+    ),
+    "interpolate zero": lambda m: _u6_shown(_u6c_gappy(m).interpolate(method="zero")),
+    "interpolate zero both": lambda m: _u6_shown(_u6c_gappy(m).interpolate(method="zero", limit_direction="both")),
+    "interpolate index both": lambda m: _u6_shown(_u6c_gappy(m).interpolate(method="index", limit_direction="both")),
+    "interpolate values inside": lambda m: _u6_shown(
+        _u6c_gappy(m).interpolate(method="values", limit_area="inside")
+    ),
+    "interpolate slinear": lambda m: _u6_shown(_u6c_gappy(m).interpolate(method="slinear")),
+    "interpolate slinear over an uneven index": lambda m: _u6_shown(
+        m.Series([1.0, np.nan, 4.0], index=[0, 1, 3]).interpolate(method="slinear")
+    ),
+    "interpolate pad backward raises": lambda m: _u6_shown(
+        _u6c_gappy(m).interpolate(method="pad", limit_direction="both")
+    ),
+    "frame interpolate nearest": lambda m: _u6_shown(
+        m.DataFrame({"a": [np.nan, 1.0, np.nan, 3.0, np.nan]}).interpolate(method="nearest")
+    ),
+    "json_normalize max_level": lambda m: _u6_shown(m.json_normalize([{"a": {"b": {"c": 1}}}], max_level=1)),
+    "json_normalize max_level 0": lambda m: _u6_shown(
+        m.json_normalize([{"a": {"b": 1}, "x": 2}], max_level=0)
+    ),
+    "json_normalize a list value": lambda m: _u6_shown(m.json_normalize([{"a": [1, 2], "b": 3}])),
+    "merge_asof on both indexes": lambda m: _u6_shown(
+        m.merge_asof(
+            _u6c_asof(m, "a", [1.0, 2.0, 3.0], [1, 5, 10]),
+            _u6c_asof(m, "b", [10.0, 20.0, 30.0], [2, 6, 9]),
+            left_index=True,
+            right_index=True,
+        )
+    ),
+    "merge_asof on both indexes forward": lambda m: _u6_shown(
+        m.merge_asof(
+            _u6c_asof(m, "a", [1.0, 2.0, 3.0], [1, 5, 10]),
+            _u6c_asof(m, "b", [10.0, 20.0, 30.0], [2, 6, 9]),
+            left_index=True,
+            right_index=True,
+            direction="forward",
+        )
+    ),
+    "merge_ordered suffixes": lambda m: _u6_shown(
+        m.merge_ordered(
+            m.DataFrame({"t": [1, 5], "v": [1.0, 2.0]}),
+            m.DataFrame({"t": [2, 5], "v": [10.0, 20.0]}),
+            on="t",
+            suffixes=("_1", "_2"),
+        )
+    ),
+    "reindex a level": lambda m: _u6_shown(_u6c_mi(m).reindex(["c", "a"], level=0)),
+    "reindex a level dropping a label": lambda m: _u6_shown(_u6c_mi(m).reindex(["b", "z"], level=0)),
+    "reindex a level by name": lambda m: _u6_shown(_u6c_mi(m).reindex(["b", "a"], level="k")),
+    "reindex the inner level": lambda m: _u6_shown(_u6c_mi(m).reindex([2, 1], level=1)),
+    "frame reindex a level": lambda m: _u6_shown(_u6c_mi(m).to_frame().reindex(["c", "a"], level=0)),
+    "reindex a level with a repeated label raises": lambda m: _u6_shown(_u6c_mi(m).reindex(["a", "a"], level=0)),
+    "reindex a flat index at level 0": lambda m: _u6_shown(
+        m.Series([1, 2], index=["x", "y"]).reindex(["y", "x"], level=0)
+    ),
+    # NEGATIVES: linear interpolate, merge_ordered's own suffixes, a plain
+    # reindex.
+    "interpolate linear": lambda m: _u6_shown(_u6c_gappy(m).interpolate()),
+    "merge_ordered": lambda m: _u6_shown(
+        m.merge_ordered(m.DataFrame({"t": [1, 5], "v": [1.0, 2.0]}), m.DataFrame({"t": [2, 5], "v": [10.0, 20.0]}), on="t")
+    ),
+    "reindex": lambda m: _u6_shown(m.Series([1, 2], index=["x", "y"]).reindex(["y", "x"])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_U6C_CASES))
+def test_interpolate_reach_merges_and_level_reindex_like_pandas_u6p7i(case: str) -> None:
+    run = _U6C_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

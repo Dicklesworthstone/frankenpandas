@@ -26782,7 +26782,6 @@ impl PySeries {
     ) -> PyResult<PySeries> {
         // copy= only lets pandas share buffers; a new Series satisfies it.
         let _ = copy;
-        unsupported_params("Series.reindex", &[("level", level.is_none())])?;
         let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
         if ax != 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -26795,6 +26794,22 @@ impl PySeries {
         // Any index-like target (a DatetimeIndex raised TypeError).
         let target = idx_obj.extract::<IndexArg>()?;
         let labels = target.inner.labels().to_vec();
+        // `level`: the target orders that level of a MultiIndex (see
+        // level_reindex_positions; it was refused, br-frankenpandas-u6p7i);
+        // a flat index's only level reindexes as without it.
+        if let Some(level) = level.filter(|level| !level.is_none()) {
+            let index = self.inner.index();
+            if let Some(multi) = index.row_multiindex() {
+                let position = multiindex_level_position(multi, level)?;
+                let rows = level_reindex_positions(multi, position, &labels)?;
+                return self
+                    .inner
+                    .take(&rows)
+                    .map(|inner| Self { inner })
+                    .map_err(frame_error_to_py);
+            }
+            axis_level_values(index, None, level)?;
+        }
         // limit and tolerance bound a method's fill (they were refused,
         // br-frankenpandas-u6p7i).
         let tolerance =
@@ -26953,6 +26968,11 @@ impl PySeries {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                     "No axis named {ax} for object type Series"
                 )));
+            }
+            if method == "pad" && limit_direction.is_some_and(|d| d != "forward") {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "`limit_direction` must be 'forward' for method `pad`",
+                ));
             }
             if !Series::interpolate_supports(method, limit_direction, limit_area) {
                 return Err(not_implemented(&format!(
@@ -39059,10 +39079,15 @@ impl PyDataFrame {
             Some(fv) => Some(py_to_scalar(py, fv)?),
             None => None,
         };
+        let level = level.filter(|level| !level.is_none());
+        let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        let target_columns = columns.or_else(|| labels.filter(|_| ax == 1));
         unsupported_params(
             "DataFrame.reindex",
             &[
-                ("level", level.is_none()),
+                // `level` orders the rows (below); the column axis's level
+                // is not supported.
+                ("level", level.is_none() || target_columns.is_none()),
                 (
                     "method",
                     method.is_none() || (fill.is_none() && columns.is_none()),
@@ -39070,12 +39095,32 @@ impl PyDataFrame {
             ],
         )?;
         let mut res = self.inner.clone();
-        let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
         let target_index = index.or_else(|| labels.filter(|_| ax == 0));
         if let Some(idx_obj) = target_index {
             // Any index-like target (a DatetimeIndex raised TypeError).
             let target = idx_obj.extract::<IndexArg>()?;
             let row_labels = target.inner.labels().to_vec();
+            // `level`: the target orders that level of a row MultiIndex
+            // (level_reindex_positions; it was refused,
+            // br-frankenpandas-u6p7i); a flat index's only level reindexes
+            // as without it.
+            if let Some(level) = level {
+                let rows = self.inner.index();
+                if let Some(multi) = self.inner.row_multiindex() {
+                    let position = multiindex_level_position(multi, level)?;
+                    let kept: Vec<usize> = level_reindex_positions(multi, position, &row_labels)?
+                        .into_iter()
+                        .filter_map(|row| usize::try_from(row).ok())
+                        .collect();
+                    let levels = multi.take(&kept).map_err(index_error_to_py)?;
+                    let taken = res
+                        .take_rows(&kept)
+                        .and_then(|frame| frame.with_row_multiindex(levels))
+                        .map_err(frame_error_to_py)?;
+                    return Ok(PyDataFrame { inner: taken });
+                }
+                axis_level_values(rows, None, level)?;
+            }
             // limit and tolerance bound a method's fill (they were refused,
             // br-frankenpandas-u6p7i).
             let tolerance = reindex_fill_options(
@@ -39104,7 +39149,6 @@ impl PyDataFrame {
                 res = res.with_index(index).map_err(frame_error_to_py)?;
             }
         }
-        let target_columns = columns.or_else(|| labels.filter(|_| ax == 1));
         if let Some(col_obj) = target_columns {
             // A MultiIndex target - or tuples over MultiIndex columns - is
             // the new column axis: each tuple its column, a new one a
@@ -39437,6 +39481,11 @@ impl PyDataFrame {
         let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
         unsupported_params("DataFrame.interpolate", &[("downcast", downcast.is_none())])?;
         engine_kwargs("DataFrame.interpolate", "scipy", kwargs)?;
+        if method == "pad" && limit_direction.is_some_and(|d| d != "forward") {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "`limit_direction` must be 'forward' for method `pad`",
+            ));
+        }
         if !Series::interpolate_supports(method, limit_direction, limit_area) {
             return Err(not_implemented(&format!(
                 "DataFrame.interpolate(method='{method}') with limit_direction or limit_area"
@@ -43279,6 +43328,62 @@ fn frame_level_operand<'py>(
         ));
     }
     Ok(None)
+}
+
+/// The rows pandas' `reindex(target, level=)` keeps over the MultiIndex
+/// `multi`, in its order: those whose value at `level` is in `target`,
+/// ordered by the levels before it (their sorted order) and then by where
+/// `target` has that value, a row's other levels keeping their order - its
+/// `_join_level` (how='right'). A repeated target label is pandas'
+/// NotImplementedError.
+fn level_reindex_positions(
+    multi: &fp_index::MultiIndex,
+    level: usize,
+    target: &[IndexLabel],
+) -> PyResult<Vec<i64>> {
+    let mut at: HashMap<&IndexLabel, usize> = HashMap::new();
+    for (position, label) in target.iter().enumerate() {
+        if at.insert(label, position).is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                "Index._join_level on non-unique index is not implemented",
+            ));
+        }
+    }
+    let values = |l: usize| -> PyResult<Vec<IndexLabel>> {
+        Ok(multi
+            .get_level_values(l)
+            .map_err(index_error_to_py)?
+            .labels()
+            .to_vec())
+    };
+    let outer: Vec<Vec<usize>> = (0..level)
+        .map(|l| {
+            let labels = values(l)?;
+            let mut sorted = labels.clone();
+            sorted.sort();
+            sorted.dedup();
+            Ok(labels
+                .iter()
+                .map(|label| sorted.partition_point(|value| value < label))
+                .collect())
+        })
+        .collect::<PyResult<_>>()?;
+    let joined = values(level)?;
+    let mut rows: Vec<(Vec<usize>, usize)> = joined
+        .iter()
+        .enumerate()
+        .filter_map(|(row, label)| {
+            let &place = at.get(label)?;
+            let mut key: Vec<usize> = outer.iter().map(|ranks| ranks[row]).collect();
+            key.push(place);
+            Some((key, row))
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(rows
+        .into_iter()
+        .map(|(_, row)| i64::try_from(row).unwrap_or(i64::MAX))
+        .collect())
 }
 
 /// The positions of `level` - one level or a list of them - in `multi`, in
@@ -58640,10 +58745,11 @@ impl<'py> JsonRecords<'py> {
                     "Conflicting metadata name {name}, need distinguishing prefix "
                 )));
             }
-            // pandas repeats the values in an object array.
+            // pandas repeats the values in an object array (a dict or a
+            // list meta value as itself).
             let mut cells = Vec::with_capacity(extractor.records.len());
             for (value, &count) in values.iter().zip(&extractor.lengths) {
-                let cell = py_to_scalar(py, value)?;
+                let cell = py_to_cell(py, value)?;
                 cells.extend(std::iter::repeat_n(cell, count));
             }
             frame = frame
@@ -58837,8 +58943,11 @@ fn json_normalize(
                     break;
                 }
             }
+            // A value max_level leaves unflattened (a dict) or a list is an
+            // object cell, as pandas keeps it (it raised "Cannot convert
+            // dict to Scalar"; br-frankenpandas-u6p7i).
             if let Some(val_bound) = found {
-                col_values.push(py_to_scalar(py, val_bound)?);
+                col_values.push(py_to_cell(py, val_bound)?);
             } else {
                 col_values.push(Scalar::Null(NullKind::NaN));
             }
@@ -63136,11 +63245,60 @@ fn merge_asof(
     allow_exact_matches: bool,
     direction: &str,
 ) -> PyResult<PyDataFrame> {
-    // Joining on the index was dropped (fvsao.5).
-    unsupported_params(
-        "merge_asof",
-        &[("left_index", !left_index), ("right_index", !right_index)],
-    )?;
+    // Both sides on their index: the indexes join as a stand-in key column
+    // and the result is under the left index - one row per left row, as
+    // merge_asof answers (joining on the index was refused, fvsao.5 /
+    // br-frankenpandas-u6p7i). One side's index with the other's column is
+    // still refused.
+    if left_index || right_index {
+        if !(left_index && right_index) || on.or(left_on).or(right_on).is_some() {
+            return Err(not_implemented(
+                "merge_asof with one side on its index and the other on a column",
+            ));
+        }
+        const KEY: &str = "\u{1}asof-index";
+        let py = left.py();
+        let keyed = |frame: &DataFrame| -> PyResult<Bound<'_, PyDataFrame>> {
+            let labels = frame
+                .index()
+                .labels()
+                .iter()
+                .map(index_label_to_scalar)
+                .collect();
+            let column = Column::from_values(labels).map_err(column_error_to_py)?;
+            let inner = frame.with_column(KEY, column).map_err(frame_error_to_py)?;
+            Bound::new(py, PyDataFrame { inner })
+        };
+        let (keyed_left, keyed_right) = (keyed(&left.inner)?, keyed(&right.inner)?);
+        let merged = merge_asof(
+            keyed_left.borrow(),
+            keyed_right.borrow(),
+            Some(KEY),
+            None,
+            None,
+            false,
+            false,
+            by,
+            left_by,
+            right_by,
+            suffixes,
+            tolerance,
+            allow_exact_matches,
+            direction,
+        )?;
+        let frame = merged
+            .inner
+            .drop_column(KEY)
+            .and_then(|frame| frame.with_index(left.inner.index().clone()))
+            .map_err(frame_error_to_py)?;
+        let frame = match left.inner.row_multiindex() {
+            Some(levels) => frame
+                .with_row_multiindex(levels.clone())
+                .map_err(frame_error_to_py)?,
+            None => frame,
+        };
+        return Ok(PyDataFrame { inner: frame });
+    }
     let on_col = on.or(left_on).or(right_on).ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "merge_asof requires an `on` or `left_on`/`right_on` column",
@@ -63236,14 +63394,15 @@ fn merge_ordered(
     suffixes: Option<(&str, &str)>,
     how: Option<&str>,
 ) -> PyResult<PyDataFrame> {
-    // This computes pandas' default outer ordered merge; the by-groups,
-    // suffixes and other join types were dropped (fvsao.5).
+    // This computes pandas' default outer ordered merge; the by-groups and
+    // other join types were dropped (fvsao.5) and are refused. `suffixes`
+    // rename the columns both sides carry (it was refused;
+    // br-frankenpandas-u6p7i).
     unsupported_params(
         "merge_ordered",
         &[
             ("left_by", left_by.is_none()),
             ("right_by", right_by.is_none()),
-            ("suffixes", suffixes.is_none_or(|s| s == ("_x", "_y"))),
             ("how", how.is_none_or(|h| h == "outer")),
         ],
     )?;
@@ -63267,8 +63426,29 @@ fn merge_ordered(
     let merged = fp_join::merge_ordered(&left.inner, &right.inner, &on_refs, fill_method)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
-    let frame = DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    let mut frame =
+        DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    if let Some((left_suffix, right_suffix)) = suffixes.filter(|given| *given != ("_x", "_y")) {
+        // fp-join suffixes the columns both sides carry `_x` / `_y`.
+        let renames: Vec<(String, String)> = left
+            .inner
+            .column_names()
+            .into_iter()
+            .filter(|name| !on_cols.contains(name) && right.inner.column(name).is_some())
+            .flat_map(|name| {
+                [
+                    (format!("{name}_x"), format!("{name}{left_suffix}")),
+                    (format!("{name}_y"), format!("{name}{right_suffix}")),
+                ]
+            })
+            .collect();
+        let pairs: Vec<(&str, &str)> = renames
+            .iter()
+            .map(|(from, to)| (from.as_str(), to.as_str()))
+            .collect();
+        frame = frame.rename_columns(&pairs).map_err(frame_error_to_py)?;
+    }
 
     Ok(PyDataFrame { inner: frame })
 }
