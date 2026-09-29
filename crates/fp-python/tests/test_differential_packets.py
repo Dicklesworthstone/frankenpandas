@@ -19960,3 +19960,64 @@ _E53_CASES = {
 def test_everyday53_masked_dtypes_like_pandas_tdafd(case: str) -> None:
     run = _E53_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-fzfbp: display.precision sets a float repr's digits and
+# display.float_format renders its cells (both were ignored: 6 digits);
+# float_format takes a callable (refused) and the display counts a
+# nonnegative int (either was stored as given).
+def _e54_under(m: Any, key: str, value: Any, show: Any) -> list:
+    with m.option_context(key, value):
+        return [show()]
+
+
+def _e54_set_and_reset(m: Any) -> list:
+    m.set_option("display.precision", 1)
+    try:
+        shown = repr(m.Series([1.25, 2.5]))
+    finally:
+        m.reset_option("display.precision")
+    return [shown, repr(m.Series([1.25, 2.5]))]
+
+
+_E54_FLOATS = [1.23456789, 2.5, float("nan")]
+_E54_CASES = {
+    "precision series": lambda m: _e54_under(m, "display.precision", 2, lambda: repr(m.Series(_E54_FLOATS))),
+    "precision frame": lambda m: _e54_under(
+        m, "display.precision", 2, lambda: repr(m.DataFrame({"a": [1.23456789, 2.5], "b": [1.2e-5, 3.0]}))
+    ),
+    "precision small": lambda m: _e54_under(m, "display.precision", 3, lambda: repr(m.Series([0.001234, 0.5]))),
+    "precision to_string": lambda m: _e54_under(m, "display.precision", 2, lambda: m.Series(_E54_FLOATS).to_string()),
+    "precision 8": lambda m: _e54_under(m, "display.precision", 8, lambda: repr(m.Series(_E54_FLOATS))),
+    "precision 0": lambda m: _e54_under(m, "display.precision", 0, lambda: repr(m.Series([1.25, 2.5]))),
+    "float_format format": lambda m: _e54_under(
+        m, "display.float_format", "{:.1f}".format, lambda: repr(m.Series(_E54_FLOATS))
+    ),
+    "float_format frame": lambda m: _e54_under(
+        m, "display.float_format", "{:,.2f}".format, lambda: repr(m.DataFrame({"a": [1234.5, 2.0]}))
+    ),
+    "float_format lambda": lambda m: _e54_under(
+        m, "display.float_format", lambda x: f"<{x:.1f}>", lambda: repr(m.Series(_E54_FLOATS))
+    ),
+    "float_format get": lambda m: _e54_under(
+        m, "display.float_format", "{:.1f}".format, lambda: callable(m.get_option("display.float_format"))
+    ),
+    "set and reset": _e54_set_and_reset,
+    "float_format text": lambda m: [m.set_option("display.float_format", "{:.1f}")],
+    "precision text": lambda m: [m.set_option("display.precision", "2")],
+    "precision negative": lambda m: [m.set_option("display.precision", -1)],
+    "float_format context text": lambda m: _e54_under(m, "display.float_format", "x", lambda: None),
+    # Negatives: already pandas'.
+    "ints under precision": lambda m: _e54_under(m, "display.precision", 2, lambda: repr(m.Series([1, 2]))),
+    "default repr": lambda m: [repr(m.Series(_E54_FLOATS))],
+    "float_format None": lambda m: _e54_under(
+        m, "display.float_format", None, lambda: m.get_option("display.float_format")
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E54_CASES))
+def test_everyday54_display_options_like_pandas_fzfbp(case: str) -> None:
+    run = _E54_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

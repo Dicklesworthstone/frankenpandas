@@ -578,9 +578,30 @@ fn pandas_dtype_name(dtype: &fp_types::DType) -> String {
 /// pandas' float cells (`None` = missing, shown NaN): `{: .6f}` with the
 /// common trailing zeros trimmed (one decimal kept), or `{: .6e}` when a
 /// value is below 1e-6 or the fixed form runs long with values above 1e6
-/// (FloatArrayFormatter).
+/// (FloatArrayFormatter). The 6 is `display.precision` (it was fixed at 6);
+/// a `display.float_format` callable renders every present value instead
+/// (br-frankenpandas-fzfbp).
 fn pandas_float_cells(values: &[Option<f64>]) -> Vec<String> {
-    const DIGITS: usize = 6;
+    if let Some(format) = display_float_format() {
+        let rendered = Python::attach(|py| {
+            values
+                .iter()
+                .map(|value| match value {
+                    None => Ok("NaN".to_owned()),
+                    Some(value) => format
+                        .0
+                        .bind(py)
+                        .call1((*value,))?
+                        .str()?
+                        .extract::<String>(),
+                })
+                .collect::<PyResult<Vec<_>>>()
+        });
+        if let Ok(cells) = rendered {
+            return cells;
+        }
+    }
+    let digits = display_limit("display.precision").flatten().unwrap_or(6);
     let signed = |body: String, value: f64| {
         if value.is_sign_negative() {
             format!("-{body}")
@@ -588,9 +609,9 @@ fn pandas_float_cells(values: &[Option<f64>]) -> Vec<String> {
             format!(" {body}")
         }
     };
-    let fixed = |value: f64| signed(format!("{:.DIGITS$}", value.abs()), value);
+    let fixed = |value: f64| signed(format!("{:.digits$}", value.abs()), value);
     let scientific = |value: f64| {
-        let text = format!("{:.DIGITS$e}", value.abs());
+        let text = format!("{:.digits$e}", value.abs());
         let (mantissa, exponent) = text.split_once('e').unwrap_or((text.as_str(), "0"));
         let exponent: i32 = exponent.parse().unwrap_or(0);
         let sign = if exponent < 0 { '-' } else { '+' };
@@ -606,9 +627,13 @@ fn pandas_float_cells(values: &[Option<f64>]) -> Vec<String> {
     };
     let cells = render(&fixed);
     let magnitudes: Vec<f64> = values.iter().flatten().map(|value| value.abs()).collect();
-    let too_long = cells.iter().map(text_width).max().unwrap_or(0) > DIGITS + 6;
+    let too_long = cells.iter().map(text_width).max().unwrap_or(0) > digits + 6;
     let large = magnitudes.iter().any(|&value| value > 1e6);
-    let small = magnitudes.iter().any(|&value| value > 0.0 && value < 1e-6);
+    // pandas' has_small_values: below 10 ** -precision.
+    let smallest = 10_f64.powi(-i32::try_from(digits).unwrap_or(6));
+    let small = magnitudes
+        .iter()
+        .any(|&value| value > 0.0 && value < smallest);
     if small || (too_long && large) {
         render(&scientific)
     } else {
@@ -69830,6 +69855,25 @@ enum OptionValue {
     Float(f64),
     Bool(bool),
     Str(String),
+    /// A callable - `display.float_format` (it was refused;
+    /// br-frankenpandas-fzfbp).
+    Object(OptionObject),
+}
+
+/// A callable option value, compared by identity.
+#[derive(Clone)]
+struct OptionObject(std::sync::Arc<Py<PyAny>>);
+
+impl std::fmt::Debug for OptionObject {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("<callable>")
+    }
+}
+
+impl PartialEq for OptionObject {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 impl OptionValue {
@@ -69840,6 +69884,7 @@ impl OptionValue {
             Self::Float(f) => f.into_bound_py_any(py),
             Self::Bool(b) => b.into_bound_py_any(py),
             Self::Str(s) => s.into_bound_py_any(py),
+            Self::Object(object) => Ok(object.0.bind(py).clone()),
         }
     }
 
@@ -69854,12 +69899,49 @@ impl OptionValue {
             Ok(Self::Float(f))
         } else if let Ok(s) = val.extract::<String>() {
             Ok(Self::Str(s))
+        } else if val.is_callable() {
+            Ok(Self::Object(OptionObject(std::sync::Arc::new(
+                val.clone().unbind(),
+            ))))
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Option value must be None, int, float, bool, or str",
+                "Option value must be None, int, float, bool, str or a callable",
             ))
         }
     }
+}
+
+/// `display.float_format` as set: the callable every float cell of a repr is
+/// rendered with, as pandas' (None when unset).
+fn display_float_format() -> Option<OptionObject> {
+    let map = GLOBAL_OPTIONS.lock().ok()?;
+    match map.get("display.float_format")? {
+        OptionValue::Object(object) => Some(object.clone()),
+        _ => None,
+    }
+}
+
+/// pandas' validator for `key`: display.float_format takes a callable or
+/// None, the display counts a nonnegative int or None (either was stored
+/// as given; br-frankenpandas-fzfbp).
+fn validate_option(key: &str, value: &OptionValue) -> PyResult<()> {
+    let message = match key {
+        "display.float_format" => (!matches!(value, OptionValue::None | OptionValue::Object(_)))
+            .then_some("Value must be a callable"),
+        "display.precision"
+        | "display.max_rows"
+        | "display.max_columns"
+        | "display.max_colwidth"
+        | "display.max_dir_items" => (!matches!(
+            value,
+            OptionValue::None | OptionValue::Bool(_) | OptionValue::Int(0..)
+        ))
+        .then_some("Value must be a nonnegative integer or None"),
+        _ => None,
+    };
+    message.map_or(Ok(()), |message| {
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(message))
+    })
 }
 
 fn default_options_map() -> HashMap<String, OptionValue> {
@@ -70022,6 +70104,7 @@ pub fn set_option(args: &Bound<'_, PyTuple>) -> PyResult<()> {
         let pat = key_item.extract::<String>()?;
         let key = resolve_option_key(&pat, &map)?;
         let val = OptionValue::from_py(&val_item)?;
+        validate_option(&key, &val)?;
         map.insert(key, val);
         i += 2;
     }
@@ -70137,6 +70220,7 @@ pub fn option_context(args: &Bound<'_, PyTuple>) -> PyResult<PyOptionContext> {
         let pat = key_item.extract::<String>()?;
         let key = resolve_option_key(&pat, &map)?;
         let val = OptionValue::from_py(&val_item)?;
+        validate_option(&key, &val)?;
         new_values.push((key, val));
         i += 2;
     }
@@ -70186,6 +70270,7 @@ impl PyOptionsWrapper {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
         let key = resolve_option_key(&full_key, &map)?;
         let val = OptionValue::from_py(value)?;
+        validate_option(&key, &val)?;
         map.insert(key, val);
         Ok(())
     }
