@@ -17089,3 +17089,113 @@ _IR_CASES["timedelta min skipna False"] = lambda m: [_ir_deltas(m).min(skipna=Fa
 def test_index_reductions_skip_missing_like_pandas_zvn7a(case: str) -> None:
     run = _IR_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-n57tz, slice e: Index keywords pandas takes that were
+# unexpected; Index.groupby read a numpy array as nothing ({}) and answered
+# lists.
+def _ek_shown(result: Any) -> list:
+    if hasattr(result, "names") and hasattr(result, "dtype") and not hasattr(result, "index"):
+        return [list(result), result.name, str(result.dtype)]
+    if isinstance(result, dict):
+        return [sorted((k, list(v), type(v).__name__) for k, v in result.items())]
+    if isinstance(result, np.ndarray):
+        return [result.tolist(), str(result.dtype)]
+    return [result]
+
+
+def _ek_floats(m: Any) -> Any:
+    return m.Index([3.0, 1.0, np.nan, 2.0, 1.0], name="v")
+
+
+def _ek_inplace(m: Any, method: str, *args: Any, **kwargs: Any) -> list:
+    index = m.Index([1, 2], name="a")
+    returned = getattr(index, method)(*args, inplace=True, **kwargs)
+    return [returned, index.name]
+
+
+_EK_CASES = {
+    "copy name": lambda m: _ek_shown(_ek_floats(m).copy(name="w")),
+    "copy deep": lambda m: _ek_shown(_ek_floats(m).copy(deep=True)),
+    "fillna downcast None": lambda m: _ek_shown(_ek_floats(m).fillna(0.0, downcast=None)),
+    "fillna downcast infer": lambda m: _ek_shown(_ek_floats(m).fillna(0.0, downcast="infer")),
+    "intersection sort None": lambda m: _ek_shown(m.Index([3, 1, 2]).intersection(m.Index([2, 3, 5]), sort=None)),
+    "intersection sort True": lambda m: _ek_shown(m.Index([3, 1, 2]).intersection(m.Index([2, 3, 5]), sort=True)),
+    "intersection sort False": lambda m: _ek_shown(m.Index([3, 1, 2]).intersection(m.Index([2, 3, 5]), sort=False)),
+    "isin level 0": lambda m: _ek_shown(_ek_floats(m).isin([1.0, 3.0], level=0)),
+    "isin level by name": lambda m: _ek_shown(_ek_floats(m).isin([1.0], level="v")),
+    "isin level 1": lambda m: _ek_shown(_ek_floats(m).isin([1.0], level=1)),
+    "isin level -2": lambda m: _ek_shown(_ek_floats(m).isin([1.0], level=-2)),
+    "isin a wrong level name": lambda m: _ek_shown(_ek_floats(m).isin([1.0], level="w")),
+    "map na_action ignore": lambda m: _ek_shown(_ek_floats(m).map(lambda v: v * 2, na_action="ignore")),
+    "map na_action ignore, text": lambda m: _ek_shown(m.Index(["b", "a", None]).map(str.upper, na_action="ignore")),
+    "map a bad na_action": lambda m: _ek_shown(_ek_floats(m).map(lambda v: v, na_action="x")),
+    "nunique dropna False": lambda m: _ek_shown(_ek_floats(m).nunique(dropna=False)),
+    "nunique dropna True": lambda m: _ek_shown(_ek_floats(m).nunique(dropna=True)),
+    "rename inplace": lambda m: _ek_inplace(m, "rename", "z"),
+    "set_names inplace": lambda m: _ek_inplace(m, "set_names", "z"),
+    "set_names an int": lambda m: _ek_shown(_ek_floats(m).set_names(5)),
+    "set_names two names": lambda m: _ek_shown(_ek_floats(m).set_names(["a", "b"])),
+    "repeat axis None": lambda m: _ek_shown(m.Index([1, 2]).repeat(2, axis=None)),
+    "repeat axis 0": lambda m: _ek_shown(m.Index([1, 2]).repeat(2, axis=0)),
+    "symmetric_difference result_name": lambda m: _ek_shown(m.Index([1, 2, 3], name="a").symmetric_difference(m.Index([2, 4], name="b"), result_name="r")),
+    "take a fill_value": lambda m: _ek_shown(m.Index([1.0, 2.0, 3.0]).take([0, -1], fill_value=np.nan)),
+    "take -2 with a fill_value": lambda m: _ek_shown(m.Index([1.0, 2.0, 3.0]).take([0, -2], fill_value=np.nan)),
+    "take allow_fill False": lambda m: _ek_shown(m.Index([1.0, 2.0, 3.0]).take([0, -1], allow_fill=False, fill_value=np.nan)),
+    "take ints with a fill_value": lambda m: _ek_shown(m.Index([1, 2, 3]).take([0, -1], fill_value=9)),
+    "take text with a fill_value": lambda m: _ek_shown(m.Index(["a", "b"]).take([0, -1], fill_value=np.nan)),
+    "take axis 1": lambda m: _ek_shown(m.Index([1.0, 2.0]).take([1], axis=1)),
+    "take out of bounds": lambda m: _ek_shown(m.Index([1.0, 2.0]).take([5])),
+    "unique level 0": lambda m: _ek_shown(_ek_floats(m).unique(level=0)),
+    "unique level 1": lambda m: _ek_shown(_ek_floats(m).unique(level=1)),
+    "value_counts bins": lambda m: _rl_shown(_ek_floats(m).value_counts(bins=2)),
+    "value_counts bins normalize": lambda m: _rl_shown(_ek_floats(m).value_counts(bins=2, normalize=True)),
+    "ravel order F": lambda m: _ek_shown(m.Index([1, 2]).ravel(order="F")),
+    "ravel a bad order": lambda m: _ek_shown(m.Index([1, 2]).ravel(order="x")),
+    "infer_objects copy": lambda m: _ek_shown(m.Index([1, 2]).infer_objects(copy=False)),
+    "get_indexer pad": lambda m: _ek_shown(m.Index([1, 3, 5]).get_indexer([2, 3, 6], method="pad")),
+    "get_indexer bfill": lambda m: _ek_shown(m.Index([1, 3, 5]).get_indexer([0, 2, 6], method="bfill")),
+    "get_indexer nearest": lambda m: _ek_shown(m.Index([1, 3, 5]).get_indexer([2, 4, 6], method="nearest")),
+    "get_indexer tolerance": lambda m: _ek_shown(m.Index([1, 3, 5]).get_indexer([2, 4, 9], method="nearest", tolerance=1)),
+    "get_indexer limit": lambda m: _ek_shown(m.Index([1, 3, 5, 7]).get_indexer([8, 9], method="ffill", limit=1)),
+    "get_indexer not monotonic": lambda m: _ek_shown(m.Index([3, 1, 2]).get_indexer([2], method="pad")),
+    "get_indexer a bad method": lambda m: _ek_shown(m.Index([1, 2]).get_indexer([2], method="zzz")),
+    "get_indexer limit without a method": lambda m: _ek_shown(m.Index([1, 2]).get_indexer([2], limit=1)),
+    "format": lambda m: _ek_shown(_ek_floats(m).format()),
+    "format name": lambda m: _ek_shown(_ek_floats(m).format(name=True)),
+    "format na_rep": lambda m: _ek_shown(_ek_floats(m).format(na_rep="-")),
+    "format formatter": lambda m: _ek_shown(m.Index([1, 2]).format(formatter=lambda v: f"<{v}>")),
+    "groupby a numpy array": lambda m: _ek_shown(m.Index(["a", "b", "a"]).groupby(np.array([1, 2, 1]))),
+    "groupby a list with a NaN": lambda m: _ek_shown(m.Index(["a", "b", "c"]).groupby([1.0, np.nan, 1.0])),
+    "asof_locs": lambda m: _ek_shown(m.Index([1, 3, 5]).asof_locs(m.Index([0, 2, 6]), np.array([True, False, True]))),
+    "view": lambda m: _ek_shown(_ek_floats(m).view()),
+    # NEGATIVE: the defaults were already pandas'.
+    "copy": lambda m: _ek_shown(_ek_floats(m).copy()),
+    "intersection": lambda m: _ek_shown(m.Index([3, 1, 2]).intersection(m.Index([2, 3, 5]))),
+    "get_indexer": lambda m: _ek_shown(m.Index([1, 3, 5]).get_indexer([3, 4])),
+    "take": lambda m: _ek_shown(m.Index([1.0, 2.0, 3.0]).take([0, -1])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EK_CASES))
+def test_index_keywords_like_pandas_n57tz(case: str) -> None:
+    run = _EK_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_index_view_as_a_dtype_is_refused_n57tz() -> None:
+    # pandas' view('int64') reinterprets the float bits; fp refuses it.
+    with pytest.raises(NotImplementedError):
+        fpd.Index([1.0, 2.0]).view("int64")
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_index_get_indexer_method_needs_unique_labels_n57tz() -> None:
+    # pandas' InvalidIndexError (fp's lives in frankenpandas.errors).
+    message = "Reindexing only valid with uniquely valued Index objects"
+    with pytest.raises(pd.errors.InvalidIndexError, match=message):
+        pd.Index([1, 1, 2]).get_indexer([2], method="pad")
+    with pytest.raises(fpd.errors.InvalidIndexError, match=message):
+        fpd.Index([1, 1, 2]).get_indexer([2], method="pad")

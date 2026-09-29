@@ -7615,6 +7615,22 @@ fn py_to_index_label(obj: &Bound<'_, PyAny>) -> PyResult<IndexLabel> {
 /// of an Int64 / Float64 index is a numpy scalar - np.int64(10), not 10 - and
 /// a RangeIndex's a Python int; any other as [`row_label_to_py`]
 /// (br-frankenpandas-x8ql1). Iteration and `tolist` stay Python scalars.
+/// The name `set_names(names)` gives a flat index: a name (any hashable,
+/// typed) or a list / tuple of one - another length is pandas' ValueError.
+fn flat_index_name(names: &Bound<'_, PyAny>) -> PyResult<Option<LabelName>> {
+    if names.is_instance_of::<PyList>() || names.is_instance_of::<PyTuple>() {
+        let items = names.try_iter()?.collect::<PyResult<Vec<_>>>()?;
+        if items.len() != 1 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Length of new names must be 1, got {}",
+                items.len()
+            )));
+        }
+        return py_axis_name(&items[0]);
+    }
+    py_axis_name(names)
+}
+
 /// numpy's axis check for a 1-D reduction (pandas' validate_minmax_axis):
 /// None, 0 or -1, anything else its ValueError.
 fn one_dim_axis(axis: Option<i64>) -> PyResult<()> {
@@ -9487,14 +9503,25 @@ impl PyIndex {
         PyList::new(py, labels)?.call_method0("__iter__")
     }
 
-    fn unique(&self) -> Self {
-        PyIndex {
-            inner: self.inner.unique(),
+    /// pandas' `unique(level=None)`: `level` names the one level (0, -1 or
+    /// the index's name) - any other is pandas' IndexError / KeyError (it
+    /// was unexpected - br-frankenpandas-n57tz).
+    #[pyo3(signature = (level=None))]
+    fn unique(&self, level: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        if let Some(level) = level.filter(|level| !level.is_none()) {
+            axis_level_values(&self.inner, None, level)?;
         }
+        Ok(PyIndex {
+            inner: self.inner.unique(),
+        })
     }
 
-    fn nunique(&self) -> usize {
-        self.inner.nunique()
+    /// pandas' `nunique(dropna=True)`: with dropna=False the missing labels
+    /// count as one more value (it was unexpected - br-frankenpandas-n57tz).
+    #[pyo3(signature = (dropna=true))]
+    fn nunique(&self, dropna: bool) -> usize {
+        let missing = !dropna && self.inner.labels().iter().any(IndexLabel::is_missing);
+        self.inner.nunique() + usize::from(missing)
     }
 
     /// pandas' `drop_duplicates(*, keep='first')`: 'last' keeps each
@@ -9525,7 +9552,18 @@ impl PyIndex {
         index_extreme(py, &self.inner, true, axis, skipna)
     }
 
-    fn isin(&self, values: &Bound<'_, PyAny>) -> PyResult<BoolArray> {
+    /// pandas' `isin(values, level=None)`: `level` names the one level (0,
+    /// -1 or the index's name), any other pandas' IndexError / KeyError (it
+    /// was unexpected - br-frankenpandas-n57tz).
+    #[pyo3(signature = (values, level=None))]
+    fn isin(
+        &self,
+        values: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<BoolArray> {
+        if let Some(level) = level.filter(|level| !level.is_none()) {
+            axis_level_values(&self.inner, None, level)?;
+        }
         let labels = isin_values(values)?
             .iter()
             .map(py_to_index_label)
@@ -9549,9 +9587,18 @@ impl PyIndex {
         self.inner.notna().into()
     }
 
-    fn intersection(&self, other: IndexArg) -> Self {
+    /// pandas' `intersection(other, sort=False)`: in this index's order by
+    /// default, sorted with sort=True or None (it was unexpected -
+    /// br-frankenpandas-n57tz).
+    #[pyo3(signature = (other, sort=Some(false)))]
+    fn intersection(&self, other: IndexArg, sort: Option<bool>) -> Self {
         PyIndex {
-            inner: self.inner.intersection(&other.inner),
+            inner: setop_sorted(
+                self.inner.intersection(&other.inner),
+                &self.inner,
+                &other.inner,
+                sort,
+            ),
         }
     }
 
@@ -9595,15 +9642,36 @@ impl PyIndex {
         pandas_get_loc(py, &self.inner, &py_to_index_label(key)?, key)
     }
 
-    fn copy(&self) -> Self {
-        self.clone()
+    /// pandas' `copy(name=None, deep=False)`: `name` renames the copy; the
+    /// labels are this index's either way (fp's are immutable). The keywords
+    /// were unexpected (br-frankenpandas-n57tz).
+    #[pyo3(signature = (name=None, deep=false))]
+    fn copy(&self, name: Option<&Bound<'_, PyAny>>, deep: bool) -> PyResult<Self> {
+        let _ = deep;
+        match name.filter(|name| !name.is_none()) {
+            Some(name) => Ok(PyIndex {
+                inner: self.inner.rename_index(py_axis_name(name)?),
+            }),
+            None => Ok(self.clone()),
+        }
     }
 
-    /// `Index.rename(name)`: any hashable, typed (fvsao.64).
-    fn rename(&self, name: &Bound<'_, PyAny>) -> PyResult<Self> {
-        Ok(PyIndex {
-            inner: self.inner.rename_index(py_axis_name(name)?),
-        })
+    /// `Index.rename(name, inplace=False)`: any hashable, typed (fvsao.64);
+    /// inplace renames this index and answers None (it was unexpected -
+    /// br-frankenpandas-n57tz).
+    #[pyo3(signature = (name, inplace=false))]
+    fn rename(
+        &mut self,
+        py: Python<'_>,
+        name: &Bound<'_, PyAny>,
+        inplace: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let renamed = self.inner.rename_index(py_axis_name(name)?);
+        if inplace {
+            self.inner = renamed;
+            return Ok(py.None());
+        }
+        PyIndex { inner: renamed }.into_py_any(py)
     }
 
     fn __contains__(&self, key: &Bound<'_, PyAny>) -> bool {
@@ -9716,14 +9784,41 @@ impl PyIndex {
         Ok(PyIndex { inner: res })
     }
 
-    /// pandas' `Index.fillna(value=None)`: no value leaves the index as it is
-    /// (the argument was required).
-    #[pyo3(signature = (value=None))]
-    fn fillna(&self, value: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+    /// pandas' `Index.fillna(value=None, downcast=<no_default>)`: no value
+    /// leaves the index as it is (the argument was required); a downcast is
+    /// ignored with pandas' FutureWarning, as pandas ignores it (it was
+    /// unexpected - br-frankenpandas-n57tz).
+    #[pyo3(signature = (value=None, downcast=Passed(None)))]
+    fn fillna(
+        &self,
+        py: Python<'_>,
+        value: Option<&Bound<'_, PyAny>>,
+        downcast: Passed<'_>,
+    ) -> PyResult<Self> {
+        if downcast.0.is_some() {
+            PyErr::warn(
+                py,
+                &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+                c"The 'downcast' keyword in Index.fillna is deprecated and will be removed in a future version. It was previously silently ignored.",
+                1,
+            )?;
+        }
         let Some(value) = value.filter(|v| !v.is_none()) else {
             return Ok(self.clone());
         };
         let labels = self.inner.labels();
+        // pandas fills, then refuses a downcast other than None when there
+        // was something to fill.
+        if downcast
+            .0
+            .as_ref()
+            .is_some_and(|downcast| !downcast.is_none())
+            && labels.iter().any(IndexLabel::is_missing)
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                "Index.fillna does not support 'downcast' argument values other than 'None'.",
+            ));
+        }
         // An int fills a float index as a float (Index([1.0, nan]).fillna(0)
         // is float64 [1.0, 0.0]; it made an object index).
         let float_index = labels
@@ -9784,7 +9879,15 @@ impl PyIndex {
         Ok(PyIndex { inner: res })
     }
 
-    fn repeat(&self, repeats: i64) -> PyResult<Self> {
+    /// pandas' `repeat(repeats, axis=None)`: an axis is pandas' ValueError
+    /// (it was unexpected - br-frankenpandas-n57tz).
+    #[pyo3(signature = (repeats, axis=None))]
+    fn repeat(&self, repeats: i64, axis: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        if axis.is_some_and(|axis| !axis.is_none()) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "the 'axis' parameter is not supported in the pandas implementation of repeat()",
+            ));
+        }
         let repeats = repeat_count(self.inner.len(), repeats)?;
         let labels = self.inner.labels();
         let mut out = Vec::with_capacity(labels.len() * repeats);
@@ -9800,16 +9903,60 @@ impl PyIndex {
         Ok(PyIndex { inner: res })
     }
 
-    fn take(&self, indices: Vec<i64>) -> PyResult<Self> {
+    /// pandas' `take(indices, axis=0, allow_fill=True, fill_value=None)`:
+    /// with a fill_value (allow_fill) a -1 is a missing label - another
+    /// negative position is pandas' ValueError, as is an index that cannot
+    /// hold one (int64, bool) - else numpy's take: a negative position counts
+    /// from the end, one past it is numpy's IndexError. pandas ignores the
+    /// axis of a 1-D index. The keywords were unexpected
+    /// (br-frankenpandas-n57tz).
+    #[pyo3(signature = (indices, axis=0, allow_fill=true, fill_value=None))]
+    fn take(
+        &self,
+        indices: Vec<i64>,
+        axis: i64,
+        allow_fill: bool,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let _ = axis;
         let labels = self.inner.labels();
         let n = labels.len() as i64;
+        let value_error =
+            |message: &str| PyErr::new::<pyo3::exceptions::PyValueError, _>(message.to_owned());
+        let missing = if allow_fill && fill_value.is_some_and(|value| !value.is_none()) {
+            let missing = match self.inner.dtype() {
+                "int64" | "bool" => {
+                    return Err(value_error(
+                        "Unable to fill values because Index cannot contain NA",
+                    ));
+                }
+                "float64" => IndexLabel::Float64(OrderedF64(f64::NAN)),
+                "datetime64[ns]" => IndexLabel::Datetime64(Timestamp::NAT),
+                "timedelta64[ns]" => IndexLabel::Timedelta64(Timedelta::NAT),
+                _ => IndexLabel::Null(NullKind::NaN),
+            };
+            if indices.iter().any(|&position| position < -1) {
+                return Err(value_error(
+                    "When allow_fill=True and fill_value is not None, all indices must be >= -1",
+                ));
+            }
+            Some(missing)
+        } else {
+            None
+        };
         let mut out = Vec::with_capacity(indices.len());
         for idx in indices {
+            if idx == -1
+                && let Some(missing) = &missing
+            {
+                out.push(missing.clone());
+                continue;
+            }
             let actual = if idx < 0 { n + idx } else { idx };
             if actual < 0 || actual >= n {
-                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
-                    "index out of bounds",
-                ));
+                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                    "index {idx} is out of bounds for axis 0 with size {n}"
+                )));
             }
             out.push(labels[actual as usize].clone());
         }
@@ -9966,24 +10113,81 @@ impl PyIndex {
         self.inner.holds_integer()
     }
 
-    #[pyo3(signature = (other, sort=None))]
-    fn symmetric_difference(&self, other: IndexArg, sort: Option<bool>) -> Self {
-        PyIndex {
-            inner: setop_sorted(
-                self.inner.symmetric_difference(&other.inner),
-                &self.inner,
-                &other.inner,
-                sort,
-            ),
-        }
+    /// pandas' `symmetric_difference(other, result_name=None, sort=None)`:
+    /// `result_name` names the result (it was unexpected -
+    /// br-frankenpandas-n57tz).
+    #[pyo3(signature = (other, result_name=None, sort=None))]
+    fn symmetric_difference(
+        &self,
+        other: IndexArg,
+        result_name: Option<&Bound<'_, PyAny>>,
+        sort: Option<bool>,
+    ) -> PyResult<Self> {
+        let inner = setop_sorted(
+            self.inner.symmetric_difference(&other.inner),
+            &self.inner,
+            &other.inner,
+            sort,
+        );
+        Ok(PyIndex {
+            inner: match result_name.filter(|name| !name.is_none()) {
+                Some(name) => inner.rename_index(py_axis_name(name)?),
+                None => inner,
+            },
+        })
     }
 
-    fn get_indexer(&self, target: IndexArg) -> IndexerArray {
-        self.inner
-            .get_indexer(&target.inner)
+    /// pandas' `get_indexer(target, method=None, limit=None, tolerance=None)`:
+    /// each target label's position, -1 where it is absent; with a method a
+    /// label that is absent takes the neighbour pandas' reindex would ('pad'
+    /// / 'ffill', 'backfill' / 'bfill', 'nearest'), bounded by limit and
+    /// tolerance - an index with repeats is pandas' InvalidIndexError, one
+    /// neither increasing nor decreasing its ValueError (the keywords were
+    /// unexpected - br-frankenpandas-n57tz).
+    #[pyo3(signature = (target, method=None, limit=None, tolerance=None))]
+    fn get_indexer(
+        &self,
+        target: IndexArg,
+        method: Option<&str>,
+        limit: Option<usize>,
+        tolerance: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<IndexerArray> {
+        if let Some(method) = method
+            && !matches!(method, "pad" | "ffill" | "backfill" | "bfill" | "nearest")
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Invalid fill method. Expecting pad (ffill), backfill (bfill) or nearest. Got {method}"
+            )));
+        }
+        let tolerance =
+            reindex_fill_options(&self.inner, target.inner.len(), method, limit, tolerance)?;
+        let positions = match method {
+            None => self.inner.get_indexer(&target.inner),
+            Some(method) => {
+                if self.inner.has_duplicates() {
+                    return Err(InvalidIndexError::new_err(
+                        "Reindexing only valid with uniquely valued Index objects",
+                    ));
+                }
+                if !(self.inner.is_monotonic_increasing() || self.inner.is_monotonic_decreasing()) {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "index must be monotonic increasing or decreasing",
+                    ));
+                }
+                fp_frame::get_indexer_with_method(
+                    &self.inner,
+                    &target.inner,
+                    method,
+                    limit,
+                    tolerance.as_deref(),
+                )
+                .map_err(frame_error_to_py)?
+            }
+        };
+        Ok(positions
             .into_iter()
-            .map(|opt| opt.map(|u| u as i64).unwrap_or(-1))
-            .collect()
+            .map(|opt| opt.map_or(-1, |u| i64::try_from(u).unwrap_or(i64::MAX)))
+            .collect())
     }
 
     #[pyo3(signature = (start=None, end=None, step=None))]
@@ -10183,14 +10387,31 @@ impl PyIndex {
         Ok(PyDataFrame { inner: df })
     }
 
-    #[pyo3(signature = (normalize=false, sort=true, ascending=false, dropna=true))]
+    /// pandas' `value_counts(normalize=False, sort=True, ascending=False,
+    /// bins=None, dropna=True)`; `bins` counts the labels as a Series'
+    /// value_counts(bins=) does, pandas' own route (it was unexpected -
+    /// br-frankenpandas-n57tz).
+    #[pyo3(signature = (normalize=false, sort=true, ascending=false, bins=None, dropna=true))]
     fn value_counts(
         &self,
+        py: Python<'_>,
         normalize: bool,
         sort: bool,
         ascending: bool,
+        bins: Option<&Bound<'_, PyAny>>,
         dropna: bool,
     ) -> PyResult<PySeries> {
+        if let Some(bins) = bins.filter(|bins| !bins.is_none()) {
+            let labels = self.inner.labels();
+            let values = labels.iter().map(index_label_to_scalar).collect();
+            let positions = (0..labels.len())
+                .map(|position| IndexLabel::Int64(i64::try_from(position).unwrap_or(i64::MAX)))
+                .collect();
+            let series = PySeries {
+                inner: Series::from_values("", positions, values).map_err(frame_error_to_py)?,
+            };
+            return series.value_counts(py, normalize, sort, ascending, Some(bins), dropna);
+        }
         let counts = self
             .inner
             .value_counts_with_options(normalize, sort, ascending, dropna);
@@ -10217,12 +10438,24 @@ impl PyIndex {
         index_array(slf.as_any())
     }
 
-    fn ravel(&self) -> Self {
+    /// pandas' `ravel(order='C')`: a 1-D index is its own flattening, and
+    /// pandas reads no order (it was unexpected - br-frankenpandas-n57tz).
+    #[pyo3(signature = (order="C"))]
+    fn ravel(&self, order: &str) -> Self {
+        let _ = order;
         self.clone()
     }
 
-    fn view(&self) -> Self {
-        self.clone()
+    /// pandas' `view(cls=None)`: the same index; a dtype or class to
+    /// reinterpret the bits as is refused (it was unexpected -
+    /// br-frankenpandas-n57tz).
+    #[pyo3(signature = (cls=None))]
+    fn view(&self, cls: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        unsupported_params(
+            "Index.view",
+            &[("cls", cls.is_none_or(|cls| cls.is_none()))],
+        )?;
+        Ok(self.clone())
     }
 
     fn transpose(&self) -> Self {
@@ -10237,27 +10470,33 @@ impl PyIndex {
         }
     }
 
-    #[pyo3(signature = (names, level=None))]
-    fn set_names(&self, names: &Bound<'_, PyAny>, level: Option<usize>) -> PyResult<Self> {
+    /// pandas' `set_names(names, level=None, inplace=False)`: a name (any
+    /// hashable, typed - a non-string one was dropped) or a list of one,
+    /// another length pandas' ValueError; inplace renames this index and
+    /// answers None (it was unexpected - br-frankenpandas-n57tz).
+    #[pyo3(signature = (names, level=None, inplace=false))]
+    fn set_names(
+        &mut self,
+        py: Python<'_>,
+        names: &Bound<'_, PyAny>,
+        level: Option<usize>,
+        inplace: bool,
+    ) -> PyResult<Py<PyAny>> {
         // A flat index has only level 0.
         unsupported_params("set_names", &[("level", level.is_none_or(|l| l == 0))])?;
-        let name_opt = if let Ok(s) = names.extract::<String>() {
-            Some(s)
-        } else if let Ok(seq) = names.cast::<pyo3::types::PySequence>() {
-            if seq.len()? > 0 {
-                Some(seq.get_item(0)?.extract::<String>()?)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let mut inner = self.inner.clone();
-        inner = inner.set_names(name_opt.as_deref());
-        Ok(PyIndex { inner })
+        let renamed = self.inner.rename_index(flat_index_name(names)?);
+        if inplace {
+            self.inner = renamed;
+            return Ok(py.None());
+        }
+        PyIndex { inner: renamed }.into_py_any(py)
     }
 
-    fn infer_objects(&self) -> Self {
+    /// pandas' `infer_objects(copy=None)`: the labels already carry their
+    /// types (copy was unexpected - br-frankenpandas-n57tz).
+    #[pyo3(signature = (copy=None))]
+    fn infer_objects(&self, copy: Option<bool>) -> Self {
+        let _ = copy;
         self.clone()
     }
 
@@ -10325,8 +10564,42 @@ impl PyIndex {
         Ok((codes, PyIndex { inner: uniques }))
     }
 
-    fn format(&self) -> Vec<String> {
-        self.inner.format()
+    /// pandas' deprecated `format(name=False, formatter=None, na_rep='NaN')`,
+    /// with its FutureWarning: each label's text - `formatter`'s answer when
+    /// given - after the name when `name`; pandas 2.2 reads no na_rep (the
+    /// keywords were unexpected - br-frankenpandas-n57tz).
+    #[pyo3(signature = (name=false, formatter=None, na_rep="NaN"))]
+    fn format(
+        &self,
+        py: Python<'_>,
+        name: bool,
+        formatter: Option<&Bound<'_, PyAny>>,
+        na_rep: &str,
+    ) -> PyResult<Vec<String>> {
+        let _ = na_rep;
+        PyErr::warn(
+            py,
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            c"Index.format is deprecated and will be removed in a future version. Convert using index.astype(str) or index.map(formatter) instead.",
+            1,
+        )?;
+        let mut out = Vec::with_capacity(self.inner.len() + 1);
+        if name {
+            out.push(
+                self.inner
+                    .name()
+                    .map_or_else(String::new, ToString::to_string),
+            );
+        }
+        if let Some(formatter) = formatter.filter(|formatter| !formatter.is_none()) {
+            for label in self.inner.labels() {
+                let text = formatter.call1((index_label_to_py(py, label)?,))?;
+                out.push(text.str()?.to_string());
+            }
+            return Ok(out);
+        }
+        out.extend(self.inner.format());
+        Ok(out)
     }
 
     #[pyo3(signature = (periods=1))]
@@ -10367,9 +10640,17 @@ impl PyIndex {
         }
     }
 
-    #[pyo3(signature = (where_, mask=None))]
-    fn asof_locs(&self, where_: IndexArg, mask: Option<Vec<bool>>) -> Vec<Option<usize>> {
-        self.inner.asof_locs(&where_.inner, mask.as_deref())
+    /// pandas' `asof_locs(where, mask)`: each `where` label's last position
+    /// at or before it among the masked labels, -1 where there is none, an
+    /// int64 numpy array (the keyword was named where_, and a list of
+    /// None-or-position came back - br-frankenpandas-n57tz).
+    #[pyo3(signature = (r#where, mask=None))]
+    fn asof_locs(&self, r#where: IndexArg, mask: Option<Vec<bool>>) -> IndexerArray {
+        self.inner
+            .asof_locs(&r#where.inner, mask.as_deref())
+            .into_iter()
+            .map(|position| position.map_or(-1, |at| i64::try_from(at).unwrap_or(i64::MAX)))
+            .collect()
     }
 
     /// pandas' `Index.searchsorted(value, side='left', sorter=None)`; a
@@ -10608,11 +10889,27 @@ impl PyIndex {
         })
     }
 
-    /// pandas' `Index.map(mapper)`: a callable's result for each label, or
-    /// a dict's / Series' value under it - NaN where it has none, the index
-    /// inferred from the values (a dict or a Series raised TypeError;
-    /// br-frankenpandas-u6p7i).
-    fn map(&self, py: Python<'_>, mapper: &Bound<'_, PyAny>) -> PyResult<Self> {
+    /// pandas' `Index.map(mapper, na_action=None)`: a callable's result for
+    /// each label, or a dict's / Series' value under it - NaN where it has
+    /// none, the index inferred from the values (a dict or a Series raised
+    /// TypeError; br-frankenpandas-u6p7i); na_action='ignore' leaves a
+    /// missing label to itself (it was unexpected - br-frankenpandas-n57tz).
+    #[pyo3(signature = (mapper, na_action=None))]
+    fn map(
+        &self,
+        py: Python<'_>,
+        mapper: &Bound<'_, PyAny>,
+        na_action: Option<&str>,
+    ) -> PyResult<Self> {
+        let ignore_na = match na_action {
+            None => false,
+            Some("ignore") => true,
+            Some(other) => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "na_action must either be 'ignore' or None, {other} was passed"
+                )));
+            }
+        };
         let table = if mapper.is_instance_of::<PyDict>() {
             Some(mapper.clone())
         } else if mapper.extract::<PyRef<'_, PySeries>>().is_ok() {
@@ -10640,6 +10937,10 @@ impl PyIndex {
         }
         let mut new_labels = Vec::with_capacity(self.inner.len());
         for l in self.inner.labels() {
+            if ignore_na && l.is_missing() {
+                new_labels.push(l.clone());
+                continue;
+            }
             let py_val = index_label_to_py(py, l)?;
             let res = mapper.call1((py_val,))?;
             new_labels.push(py_to_index_label(&res)?);
@@ -10651,28 +10952,35 @@ impl PyIndex {
         Ok(PyIndex { inner: res })
     }
 
-    fn groupby(&self, py: Python<'_>, by: &Bound<'_, PyAny>) -> PyResult<Py<pyo3::types::PyDict>> {
+    /// pandas' `Index.groupby(values)`: each distinct value of `values`, in
+    /// sorted order and a missing one left out, to an Index of this index's
+    /// labels at its positions. A numpy array was read as nothing (only a
+    /// Python sequence was, so the answer was {}), and each group came back
+    /// a list (br-frankenpandas-n57tz).
+    fn groupby(
+        &self,
+        py: Python<'_>,
+        values: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<pyo3::types::PyDict>> {
         let dict = pyo3::types::PyDict::new(py);
-        if let Ok(seq) = by.cast::<pyo3::types::PySequence>() {
-            let len = seq.len()?;
-            let mut groups: std::collections::BTreeMap<IndexLabel, Vec<IndexLabel>> =
-                std::collections::BTreeMap::new();
-            for i in 0..len.min(self.inner.len()) {
-                let key = py_to_index_label(&seq.get_item(i)?)?;
-                groups
-                    .entry(key)
-                    .or_default()
-                    .push(self.inner.labels()[i].clone());
+        let labels = self.inner.labels();
+        let mut groups: std::collections::BTreeMap<IndexLabel, Vec<IndexLabel>> =
+            std::collections::BTreeMap::new();
+        for (position, item) in values.try_iter()?.enumerate().take(labels.len()) {
+            let key = py_to_index_label(&item?)?;
+            if key.is_missing() {
+                continue;
             }
-            for (k, v) in groups {
-                let py_k = index_label_to_py(py, &k)?;
-                let py_v: Vec<Py<PyAny>> = v
-                    .iter()
-                    .map(|l| index_label_to_py(py, l))
-                    .collect::<PyResult<_>>()?;
-                let v_list = PyList::new(py, py_v)?;
-                dict.set_item(py_k, v_list)?;
-            }
+            groups
+                .entry(key)
+                .or_default()
+                .push(labels[position].clone());
+        }
+        for (key, members) in groups {
+            let part = PyIndex {
+                inner: Index::new(members).rename_index(self.inner.name()),
+            };
+            dict.set_item(index_label_to_py(py, &key)?, Py::new(py, part)?)?;
         }
         Ok(dict.unbind())
     }
@@ -12003,9 +12311,9 @@ impl PyDatetimeIndex {
         self.as_py_index().asof(py, label)
     }
 
-    #[pyo3(signature = (where_, mask=None))]
-    fn asof_locs(&self, where_: IndexArg, mask: Option<Vec<bool>>) -> Vec<Option<usize>> {
-        self.as_py_index().asof_locs(where_, mask)
+    #[pyo3(signature = (r#where, mask=None))]
+    fn asof_locs(&self, r#where: IndexArg, mask: Option<Vec<bool>>) -> IndexerArray {
+        self.as_py_index().asof_locs(r#where, mask)
     }
 
     /// pandas' `DatetimeIndex.astype`; astype(str) prints each instant as
@@ -12111,8 +12419,15 @@ impl PyDatetimeIndex {
         self.as_py_index().factorize(sort, use_na_sentinel)
     }
 
-    fn format(&self) -> Vec<String> {
-        self.as_py_index().format()
+    #[pyo3(signature = (name=false, formatter=None, na_rep="NaN"))]
+    fn format(
+        &self,
+        py: Python<'_>,
+        name: bool,
+        formatter: Option<&Bound<'_, PyAny>>,
+        na_rep: &str,
+    ) -> PyResult<Vec<String>> {
+        self.as_py_index().format(py, name, formatter, na_rep)
     }
 
     /// pandas' `freq`: the offset the index was built with (`<Day>`,
@@ -12166,8 +12481,12 @@ impl PyDatetimeIndex {
         self.as_py_index().get_slice_bound(label, side)
     }
 
-    fn groupby(&self, py: Python<'_>, by: &Bound<'_, PyAny>) -> PyResult<Py<pyo3::types::PyDict>> {
-        self.as_py_index().groupby(py, by)
+    fn groupby(
+        &self,
+        py: Python<'_>,
+        values: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<pyo3::types::PyDict>> {
+        self.as_py_index().groupby(py, values)
     }
 
     fn identical(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -12316,8 +12635,14 @@ impl PyDatetimeIndex {
             .join(py, other, how, level, return_indexers, sort)
     }
 
-    fn map(&self, py: Python<'_>, mapper: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
-        self.as_py_index().map(py, mapper)
+    #[pyo3(signature = (mapper, na_action=None))]
+    fn map(
+        &self,
+        py: Python<'_>,
+        mapper: &Bound<'_, PyAny>,
+        na_action: Option<&str>,
+    ) -> PyResult<PyIndex> {
+        self.as_py_index().map(py, mapper, na_action)
     }
 
     /// Midnight of each wall-clock day (a tz-aware index's back in its zone).
@@ -13875,9 +14200,13 @@ impl PyMultiIndex {
         Python::attach(|py| slice_object(py, s, e, step))
     }
 
-    fn groupby(&self, py: Python<'_>, by: &Bound<'_, PyAny>) -> PyResult<Py<pyo3::types::PyDict>> {
+    fn groupby(
+        &self,
+        py: Python<'_>,
+        values: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<pyo3::types::PyDict>> {
         let flat = self.inner.to_flat_index("/");
-        PyIndex { inner: flat }.groupby(py, by)
+        PyIndex { inner: flat }.groupby(py, values)
     }
 
     fn identical(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -13936,7 +14265,7 @@ impl PyMultiIndex {
             return PyIndex {
                 inner: level_values,
             }
-            .isin(values);
+            .isin(values, None);
         }
         let wanted = values
             .try_iter()?
@@ -13994,9 +14323,15 @@ impl PyMultiIndex {
             .map_err(index_error_to_py)
     }
 
-    fn map(&self, py: Python<'_>, mapper: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+    #[pyo3(signature = (mapper, na_action=None))]
+    fn map(
+        &self,
+        py: Python<'_>,
+        mapper: &Bound<'_, PyAny>,
+        na_action: Option<&str>,
+    ) -> PyResult<PyIndex> {
         let flat = self.inner.to_flat_index("/");
-        PyIndex { inner: flat }.map(py, mapper)
+        PyIndex { inner: flat }.map(py, mapper, na_action)
     }
 
     #[pyo3(signature = (axis=None, skipna=true))]
@@ -15288,9 +15623,9 @@ impl PyTimedeltaIndex {
         self.as_py_index().asof(py, label)
     }
 
-    #[pyo3(signature = (where_, mask=None))]
-    fn asof_locs(&self, where_: IndexArg, mask: Option<Vec<bool>>) -> Vec<Option<usize>> {
-        self.as_py_index().asof_locs(where_, mask)
+    #[pyo3(signature = (r#where, mask=None))]
+    fn asof_locs(&self, r#where: IndexArg, mask: Option<Vec<bool>>) -> IndexerArray {
+        self.as_py_index().asof_locs(r#where, mask)
     }
 
     fn astype(&self, dtype: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
@@ -15347,8 +15682,15 @@ impl PyTimedeltaIndex {
         self.as_py_index().factorize(sort, use_na_sentinel)
     }
 
-    fn format(&self) -> Vec<String> {
-        self.as_py_index().format()
+    #[pyo3(signature = (name=false, formatter=None, na_rep="NaN"))]
+    fn format(
+        &self,
+        py: Python<'_>,
+        name: bool,
+        formatter: Option<&Bound<'_, PyAny>>,
+        na_rep: &str,
+    ) -> PyResult<Vec<String>> {
+        self.as_py_index().format(py, name, formatter, na_rep)
     }
 
     /// pandas' `freq`: the tick offset the index was built with (`<Hour>`,
@@ -15401,8 +15743,12 @@ impl PyTimedeltaIndex {
         self.as_py_index().get_slice_bound(label, side)
     }
 
-    fn groupby(&self, py: Python<'_>, by: &Bound<'_, PyAny>) -> PyResult<Py<pyo3::types::PyDict>> {
-        self.as_py_index().groupby(py, by)
+    fn groupby(
+        &self,
+        py: Python<'_>,
+        values: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<pyo3::types::PyDict>> {
+        self.as_py_index().groupby(py, values)
     }
 
     fn identical(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -15447,8 +15793,14 @@ impl PyTimedeltaIndex {
             .join(py, other, how, level, return_indexers, sort)
     }
 
-    fn map(&self, py: Python<'_>, mapper: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
-        self.as_py_index().map(py, mapper)
+    #[pyo3(signature = (mapper, na_action=None))]
+    fn map(
+        &self,
+        py: Python<'_>,
+        mapper: &Bound<'_, PyAny>,
+        na_action: Option<&str>,
+    ) -> PyResult<PyIndex> {
+        self.as_py_index().map(py, mapper, na_action)
     }
 
     fn putmask(&self, mask: Vec<bool>, value: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
@@ -15828,9 +16180,14 @@ impl PyRangeIndex {
         Self::or_index(slf.py(), out, ranges)
     }
 
-    fn intersection(slf: PyRef<'_, Self>, other: IndexArg) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (other, sort=Some(false)))]
+    fn intersection(
+        slf: PyRef<'_, Self>,
+        other: IndexArg,
+        sort: Option<bool>,
+    ) -> PyResult<Py<PyAny>> {
         let ranges = other.inner.range_span().is_some();
-        let out = slf.as_super().intersection(other).inner;
+        let out = slf.as_super().intersection(other, sort).inner;
         Self::or_index(slf.py(), out, ranges)
     }
 
@@ -15914,7 +16271,9 @@ impl PyRangeIndex {
         names: &Bound<'_, PyAny>,
         level: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
-        let index = slf.as_super().set_names(names, level)?.inner;
+        // A flat index has only level 0.
+        unsupported_params("set_names", &[("level", level.is_none_or(|l| l == 0))])?;
+        let index = slf.as_super().inner.rename_index(flat_index_name(names)?);
         Self::again(&slf, index)
     }
 
@@ -16715,9 +17074,9 @@ impl PyPeriodIndex {
         self.as_py_index().asof(py, label)
     }
 
-    #[pyo3(signature = (where_, mask=None))]
-    fn asof_locs(&self, where_: IndexArg, mask: Option<Vec<bool>>) -> Vec<Option<usize>> {
-        self.as_py_index().asof_locs(where_, mask)
+    #[pyo3(signature = (r#where, mask=None))]
+    fn asof_locs(&self, r#where: IndexArg, mask: Option<Vec<bool>>) -> IndexerArray {
+        self.as_py_index().asof_locs(r#where, mask)
     }
 
     fn astype(&self, dtype: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
@@ -16808,8 +17167,15 @@ impl PyPeriodIndex {
         self.as_py_index().factorize(sort, use_na_sentinel)
     }
 
-    fn format(&self) -> Vec<String> {
-        self.as_py_index().format()
+    #[pyo3(signature = (name=false, formatter=None, na_rep="NaN"))]
+    fn format(
+        &self,
+        py: Python<'_>,
+        name: bool,
+        formatter: Option<&Bound<'_, PyAny>>,
+        na_rep: &str,
+    ) -> PyResult<Vec<String>> {
+        self.as_py_index().format(py, name, formatter, na_rep)
     }
 
     /// pandas' `freq`: the periods' offset (`<MonthEnd>`, `<Day>`,
@@ -16870,8 +17236,12 @@ impl PyPeriodIndex {
         self.as_py_index().get_slice_bound(label, side)
     }
 
-    fn groupby(&self, py: Python<'_>, by: &Bound<'_, PyAny>) -> PyResult<Py<pyo3::types::PyDict>> {
-        self.as_py_index().groupby(py, by)
+    fn groupby(
+        &self,
+        py: Python<'_>,
+        values: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<pyo3::types::PyDict>> {
+        self.as_py_index().groupby(py, values)
     }
 
     fn identical(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -16924,8 +17294,13 @@ impl PyPeriodIndex {
         ))
     }
 
-    fn isin(&self, values: &Bound<'_, PyAny>) -> PyResult<BoolArray> {
-        self.as_py_index().isin(values)
+    #[pyo3(signature = (values, level=None))]
+    fn isin(
+        &self,
+        values: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<BoolArray> {
+        self.as_py_index().isin(values, level)
     }
 
     /// pandas' NaT mask, a numpy bool array (a list, all False, before;
@@ -16956,8 +17331,14 @@ impl PyPeriodIndex {
             .join(py, other, how, level, return_indexers, sort)
     }
 
-    fn map(&self, py: Python<'_>, mapper: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
-        self.as_py_index().map(py, mapper)
+    #[pyo3(signature = (mapper, na_action=None))]
+    fn map(
+        &self,
+        py: Python<'_>,
+        mapper: &Bound<'_, PyAny>,
+        na_action: Option<&str>,
+    ) -> PyResult<PyIndex> {
+        self.as_py_index().map(py, mapper, na_action)
     }
 
     fn max(&self) -> Option<String> {
@@ -17829,9 +18210,9 @@ impl PyCategoricalIndex {
         self.as_py_index().asof(py, label)
     }
 
-    #[pyo3(signature = (where_, mask=None))]
-    fn asof_locs(&self, where_: IndexArg, mask: Option<Vec<bool>>) -> Vec<Option<usize>> {
-        self.as_py_index().asof_locs(where_, mask)
+    #[pyo3(signature = (r#where, mask=None))]
+    fn asof_locs(&self, r#where: IndexArg, mask: Option<Vec<bool>>) -> IndexerArray {
+        self.as_py_index().asof_locs(r#where, mask)
     }
 
     fn astype(&self, dtype: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
@@ -17876,8 +18257,15 @@ impl PyCategoricalIndex {
         self.as_py_index().factorize(sort, use_na_sentinel)
     }
 
-    fn format(&self) -> Vec<String> {
-        self.as_py_index().format()
+    #[pyo3(signature = (name=false, formatter=None, na_rep="NaN"))]
+    fn format(
+        &self,
+        py: Python<'_>,
+        name: bool,
+        formatter: Option<&Bound<'_, PyAny>>,
+        na_rep: &str,
+    ) -> PyResult<Vec<String>> {
+        self.as_py_index().format(py, name, formatter, na_rep)
     }
 
     fn get_indexer_for(&self, target: &Bound<'_, PyAny>) -> PyResult<Vec<i64>> {
@@ -17895,8 +18283,12 @@ impl PyCategoricalIndex {
         self.as_py_index().get_slice_bound(label, side)
     }
 
-    fn groupby(&self, py: Python<'_>, by: &Bound<'_, PyAny>) -> PyResult<Py<pyo3::types::PyDict>> {
-        self.as_py_index().groupby(py, by)
+    fn groupby(
+        &self,
+        py: Python<'_>,
+        values: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<pyo3::types::PyDict>> {
+        self.as_py_index().groupby(py, values)
     }
 
     fn identical(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -17923,8 +18315,13 @@ impl PyCategoricalIndex {
         }
     }
 
-    fn isin(&self, values: &Bound<'_, PyAny>) -> PyResult<BoolArray> {
-        self.as_py_index().isin(values)
+    #[pyo3(signature = (values, level=None))]
+    fn isin(
+        &self,
+        values: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<BoolArray> {
+        self.as_py_index().isin(values, level)
     }
 
     fn isna(&self) -> Vec<bool> {
@@ -17953,8 +18350,14 @@ impl PyCategoricalIndex {
             .join(py, other, how, level, return_indexers, sort)
     }
 
-    fn map(&self, py: Python<'_>, mapper: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
-        self.as_py_index().map(py, mapper)
+    #[pyo3(signature = (mapper, na_action=None))]
+    fn map(
+        &self,
+        py: Python<'_>,
+        mapper: &Bound<'_, PyAny>,
+        na_action: Option<&str>,
+    ) -> PyResult<PyIndex> {
+        self.as_py_index().map(py, mapper, na_action)
     }
 
     #[pyo3(signature = (axis=None, skipna=true))]
@@ -61301,7 +61704,7 @@ fn unique(py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     if let Ok(idx) = values.extract::<PyRef<'_, PyIndex>>() {
         // A numpy array, as pandas 2.2's pd.unique of an Index (it was a
         // list; fvsao.30).
-        return Ok(labels_ndarray(py, idx.unique().inner.labels())?.unbind());
+        return Ok(labels_ndarray(py, idx.unique(None)?.inner.labels())?.unbind());
     }
     let s = PySeries::from_data(py, Some(values), None, None)?;
     s.unique(py)
@@ -71646,9 +72049,9 @@ mod tests {
         assert!(!idx.is_monotonic_increasing());
         assert!(!idx.is_monotonic_decreasing());
         assert!(idx.has_duplicates());
-        assert_eq!(idx.nunique(), 3);
+        assert_eq!(idx.nunique(true), 3);
 
-        let u = idx.unique();
+        let u = idx.unique(None).expect("no level");
         assert_eq!(u.len(), 3);
         let dedup = idx.drop_duplicates(None).expect("keep='first' by default");
         assert_eq!(dedup.len(), 3);
@@ -71679,7 +72082,7 @@ mod tests {
         };
         let arg = || IndexArg(idx_b.clone());
         assert_eq!(idx_a.union(arg(), None).len(), 3);
-        assert_eq!(idx_a.intersection(arg()).len(), 1);
+        assert_eq!(idx_a.intersection(arg(), Some(false)).len(), 1);
         assert_eq!(idx_a.difference(arg(), None).len(), 1);
         Python::initialize();
         Python::attach(|py| {
@@ -72623,9 +73026,9 @@ mod tests {
         assert_eq!(dropped.inner.len(), 2);
         let deleted = idx.delete(0).expect("delete"); // ubs:ignore — test fixture
         assert_eq!(deleted.inner.len(), 2);
-        let repeated = idx.repeat(2).expect("repeat"); // ubs:ignore — test fixture
+        let repeated = idx.repeat(2, None).expect("repeat"); // ubs:ignore — test fixture
         assert_eq!(repeated.inner.len(), 6);
-        let taken = idx.take(vec![1, 0]).expect("take"); // ubs:ignore — test fixture
+        let taken = idx.take(vec![1, 0], 0, true, None).expect("take"); // ubs:ignore — test fixture
         assert_eq!(taken.inner.len(), 2);
 
         let s1 = Series::new(

@@ -3828,6 +3828,31 @@ fn reindex_label_distance(a: &IndexLabel, b: &IndexLabel) -> Option<f64> {
     }
 }
 
+/// pandas' `Index.get_indexer(target, method, limit, tolerance)` with a fill
+/// method: each target label's position in `source` - its own when present,
+/// else by `method` ('pad' / 'ffill', 'backfill' / 'bfill', 'nearest')
+/// under `limit` and `tolerance` (one per target label), as
+/// `reindex(method=)` resolves them. pandas' uniqueness and monotonicity
+/// checks are the caller's (br-frankenpandas-n57tz: the keywords were
+/// unexpected).
+pub fn get_indexer_with_method(
+    source: &Index,
+    target: &Index,
+    method: &str,
+    limit: Option<usize>,
+    tolerance: Option<&[f64]>,
+) -> Result<Vec<Option<usize>>, FrameError> {
+    let positions = source.get_indexer(target);
+    method_reindex_positions(
+        source.labels(),
+        target.labels(),
+        &positions,
+        method,
+        limit,
+        tolerance,
+    )
+}
+
 /// Each target label's source row for a method reindex: its own row when
 /// present, else by `method` (pad / backfill: [`fill_reindex_positions`];
 /// nearest: [`nearest_reindex_positions`]), then pandas' `limit` - at most
