@@ -32,8 +32,8 @@ use fp_index::{
     OrderedF64, PeriodIndex, RangeIndex, TimedeltaIndex,
 };
 use fp_types::{
-    CategoricalMetadata, DType, NullKind, NumericWidth, Period, PeriodFreq, Scalar, Timedelta,
-    Timestamp,
+    CategoricalMetadata, DType, IntervalClosed, NullKind, NumericWidth, Period, PeriodFreq, Scalar,
+    Timedelta, Timestamp,
 };
 use mimalloc::MiMalloc;
 use pyo3::{
@@ -25708,25 +25708,48 @@ impl PySeries {
         Ok(dict.into_any().unbind())
     }
 
-    /// pandas' `rolling(window, min_periods=, center=)`: `window` a row
-    /// count or a time-based window ('7D', Day(7)) over a datetime index
-    /// (it took only a count: '7D' raised TypeError).
-    #[pyo3(signature = (window, min_periods=None, center=false))]
+    /// pandas' `rolling(...)` ([`rolling_of`]): `window` a row count or a
+    /// time-based window ('7D', Day(7)) over a datetime index (it took only
+    /// a count: '7D' raised TypeError).
+    #[pyo3(signature = (
+        window,
+        min_periods=None,
+        center=false,
+        win_type=None,
+        on=None,
+        axis=Passed(None),
+        closed=None,
+        step=None,
+        method="single"
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn rolling(
         &self,
+        py: Python<'_>,
         window: &Bound<'_, PyAny>,
         min_periods: Option<usize>,
         center: bool,
+        win_type: Option<&str>,
+        on: Option<&str>,
+        axis: Passed<'_>,
+        closed: Option<&str>,
+        step: Option<&Bound<'_, PyAny>>,
+        method: &str,
     ) -> PyResult<PyRolling> {
-        let (window, offset) = rolling_window_arg(window)?;
-        Ok(PyRolling {
-            series: Some(self.inner.clone()),
-            dataframe: None,
+        rolling_of(
+            py,
+            Some(self.inner.clone()),
+            None,
             window,
             min_periods,
             center,
-            offset,
-        })
+            win_type,
+            on,
+            &axis,
+            closed,
+            step,
+            method,
+        )
     }
 
     #[pyo3(signature = (min_periods=None))]
@@ -36717,27 +36740,47 @@ impl PyDataFrame {
         Ok(Py::new(py, PySeries { inner: evaluated })?.into_any())
     }
 
-    #[pyo3(signature = (window, min_periods=None, center=false))]
+    /// pandas' `rolling(...)` ([`rolling_of`]): a row count, or a time-based
+    /// window over the datetime index or the `on` column (it was refused).
+    #[pyo3(signature = (
+        window,
+        min_periods=None,
+        center=false,
+        win_type=None,
+        on=None,
+        axis=Passed(None),
+        closed=None,
+        step=None,
+        method="single"
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn rolling(
         &self,
+        py: Python<'_>,
         window: &Bound<'_, PyAny>,
         min_periods: Option<usize>,
         center: bool,
+        win_type: Option<&str>,
+        on: Option<&str>,
+        axis: Passed<'_>,
+        closed: Option<&str>,
+        step: Option<&Bound<'_, PyAny>>,
+        method: &str,
     ) -> PyResult<PyRolling> {
-        let (window, offset) = rolling_window_arg(window)?;
-        if offset.is_some() {
-            return Err(not_implemented(
-                "DataFrame.rolling over a time-based window (Series.rolling takes one)",
-            ));
-        }
-        Ok(PyRolling {
-            series: None,
-            dataframe: Some(self.inner.clone()),
+        rolling_of(
+            py,
+            None,
+            Some(self.inner.clone()),
             window,
             min_periods,
             center,
-            offset,
-        })
+            win_type,
+            on,
+            &axis,
+            closed,
+            step,
+            method,
+        )
     }
 
     #[pyo3(signature = (min_periods=None))]
@@ -46917,34 +46960,270 @@ pub struct PyRolling {
     /// A time-based window ('7D', '2h', or a tick offset's freqstr) in
     /// place of the row count, over a datetime index.
     offset: Option<String>,
+    /// pandas' `closed=` as passed ('right' when left out).
+    closed: Option<IntervalClosed>,
+    /// pandas' `step=`: every step-th row's window.
+    step: Option<usize>,
+    /// pandas' `on=`: the DataFrame column the windows run along, passed
+    /// through as it was.
+    on: Option<String>,
+    /// pandas' `method='table'` (numba's), which this binding does not run.
+    table: bool,
+}
+
+/// pandas' `rolling(window, min_periods=None, center=False, win_type=None,
+/// on=None, axis=<no_default>, closed=None, step=None, method='single')` of
+/// a Series or a DataFrame, checked in pandas' order: the deprecated axis
+/// warns; `on` names a frame column; closed / method / step / min_periods
+/// are validated; a time-based window needs a datetime axis and no step.
+/// `win_type` (scipy's weighted windows) and axis=1 are refused; they were
+/// unexpected keywords, as were closed / step / on
+/// (br-frankenpandas-n57tz).
+#[allow(clippy::too_many_arguments)]
+fn rolling_of(
+    py: Python<'_>,
+    series: Option<Series>,
+    dataframe: Option<DataFrame>,
+    window: &Bound<'_, PyAny>,
+    min_periods: Option<usize>,
+    center: bool,
+    win_type: Option<&str>,
+    on: Option<&str>,
+    axis: &Passed<'_>,
+    closed: Option<&str>,
+    step: Option<&Bound<'_, PyAny>>,
+    method: &str,
+) -> PyResult<PyRolling> {
+    let owner = if series.is_some() {
+        "Series"
+    } else {
+        "DataFrame"
+    };
+    let value_error = |message: String| PyErr::new::<pyo3::exceptions::PyValueError, _>(message);
+    if let Some(axis) = &axis.0 {
+        // pandas reads the axis first: 0 / 'index' / 'rows', or a frame's
+        // 1 / 'columns'; anything else is its ValueError.
+        let number = match axis.extract::<i64>() {
+            Ok(number) => Some(number),
+            Err(_) => axis
+                .extract::<String>()
+                .ok()
+                .and_then(|name| match name.as_str() {
+                    "index" | "rows" => Some(0),
+                    "columns" => Some(1),
+                    _ => None,
+                }),
+        };
+        let columns = match number {
+            Some(0) => false,
+            Some(1) if dataframe.is_some() => true,
+            _ => {
+                return Err(value_error(format!(
+                    "No axis named {} for object type {owner}",
+                    axis.str()?
+                )));
+            }
+        };
+        let message = if columns {
+            "Support for axis=1 in DataFrame.rolling is deprecated and will be removed in a \
+             future version. Use obj.T.rolling(...) instead"
+                .to_owned()
+        } else {
+            format!(
+                "The 'axis' keyword in {owner}.rolling is deprecated and will be removed in a \
+                 future version. Call the method without the axis keyword instead."
+            )
+        };
+        let message = std::ffi::CString::new(message).map_err(|e| value_error(e.to_string()))?;
+        PyErr::warn(
+            py,
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            &message,
+            1,
+        )?;
+        if columns {
+            return Err(not_implemented("rolling(axis=1)"));
+        }
+    }
+    if let Some(name) = on
+        && dataframe
+            .as_ref()
+            .is_none_or(|df| df.column(name).is_none())
+    {
+        return Err(value_error(format!(
+            "invalid on specified as {name}, must be a column (of DataFrame), an Index or None"
+        )));
+    }
+    let closed = closed
+        .map(|closed| match closed {
+            "right" => Ok(IntervalClosed::Right),
+            "left" => Ok(IntervalClosed::Left),
+            "both" => Ok(IntervalClosed::Both),
+            "neither" => Ok(IntervalClosed::Neither),
+            _ => Err(value_error(
+                "closed must be 'right', 'left', 'both' or 'neither'".to_owned(),
+            )),
+        })
+        .transpose()?;
+    if !matches!(method, "single" | "table") {
+        return Err(value_error("method must be 'table' or 'single".to_owned()));
+    }
+    let step = match step.filter(|step| !step.is_none()) {
+        None => None,
+        Some(step) => {
+            let step = step
+                .extract::<i64>()
+                .map_err(|_| value_error("step must be an integer".to_owned()))?;
+            Some(usize::try_from(step).map_err(|_| value_error("step must be >= 0".to_owned()))?)
+        }
+    };
+    let (window, offset) = rolling_window_arg(window)?;
+    if offset.is_none()
+        && let Some(min_periods) = min_periods.filter(|&m| m > window)
+    {
+        return Err(value_error(format!(
+            "min_periods {min_periods} must be <= window {window}"
+        )));
+    }
+    if offset.is_some() {
+        // pandas' own errors: a time window runs along a datetime axis (the
+        // index, or the `on` column) and takes no step.
+        let datetime_axis = match (on, &series, &dataframe) {
+            (Some(name), _, Some(df)) => df.column(name).is_some_and(|column| {
+                column
+                    .values()
+                    .iter()
+                    .all(|v| matches!(v, Scalar::Datetime64(_) | Scalar::Timedelta64(_)))
+            }),
+            (_, Some(s), _) => datetime_like_labels(s.index()),
+            (_, _, Some(df)) => datetime_like_labels(df.index()),
+            _ => false,
+        };
+        if !datetime_axis {
+            return Err(value_error(
+                "window must be an integer 0 or greater".to_owned(),
+            ));
+        }
+        if step.is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                "step is not supported with frequency windows",
+            ));
+        }
+    }
+    if win_type.is_some() {
+        return Err(not_implemented(
+            "rolling(win_type=...) (scipy's weighted windows)",
+        ));
+    }
+    Ok(PyRolling {
+        series,
+        dataframe,
+        window,
+        min_periods,
+        center,
+        offset,
+        closed,
+        step,
+        on: on.map(str::to_owned),
+        table: method == "table",
+    })
+}
+
+/// Whether every label of `index` is a datetime or timedelta.
+fn datetime_like_labels(index: &Index) -> bool {
+    index.labels().iter().all(|label| {
+        matches!(
+            label,
+            IndexLabel::Datetime64(_) | IndexLabel::Timedelta64(_)
+        )
+    })
 }
 
 impl PyRolling {
-    /// The Series window: `(t - offset, t]` over the datetime index for a
-    /// time-based window (min_periods defaulting to 1, as pandas), else
-    /// `window` rows.
+    fn closed(&self) -> IntervalClosed {
+        self.closed.unwrap_or(IntervalClosed::Right)
+    }
+
+    /// The Series window: `(t - offset, t]` (closed as `closed` says) over
+    /// the datetime index for a time-based window (min_periods defaulting
+    /// to 1, as pandas), else `window` rows.
     fn series_window<'a>(&self, s: &'a Series) -> PyResult<fp_frame::Rolling<'a>> {
+        if self.table {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "method='table' not applicable for Series objects.",
+            ));
+        }
         match &self.offset {
             Some(offset) => {
                 if self.center {
                     return Err(not_implemented("rolling(<time window>, center=True)"));
                 }
-                // pandas' own error for a time window over a non-datetime index.
-                if !s.index().labels().iter().all(|label| {
-                    matches!(
-                        label,
-                        IndexLabel::Datetime64(_) | IndexLabel::Timedelta64(_)
-                    )
-                }) {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        "window must be an integer 0 or greater",
-                    ));
-                }
-                s.rolling_offset(offset, self.min_periods)
-                    .map_err(frame_error_to_py)
+                s.rolling_offset_closed(offset, self.min_periods, self.closed())
             }
-            None => Ok(s.rolling_with_center(self.window, self.min_periods, self.center)),
+            None => s.rolling_closed(self.window, self.min_periods, self.center, self.closed()),
         }
+        .map_err(frame_error_to_py)
+    }
+
+    /// The DataFrame's windows over its numeric columns, along `on` when
+    /// given (a time-based window over a frame was refused).
+    fn frame_window<'a>(&self, df: &'a DataFrame) -> PyResult<fp_frame::DataFrameRolling<'a>> {
+        if self.table {
+            return Err(not_implemented("rolling(method='table') (numba's)"));
+        }
+        match &self.offset {
+            Some(offset) => {
+                if self.center {
+                    return Err(not_implemented("rolling(<time window>, center=True)"));
+                }
+                df.rolling_offset(offset, self.min_periods, self.closed(), self.on.as_deref())
+            }
+            None => df.rolling_closed(
+                self.window,
+                self.min_periods,
+                self.center,
+                self.closed(),
+                self.on.as_deref(),
+            ),
+        }
+        .map_err(frame_error_to_py)
+    }
+
+    /// The rows `step=` keeps: every step-th, from the first (pandas'
+    /// ZeroDivisionError for a step of 0).
+    fn stepped_rows(&self, len: usize) -> PyResult<Option<Vec<i64>>> {
+        match self.step {
+            None => Ok(None),
+            Some(0) => Err(PyErr::new::<pyo3::exceptions::PyZeroDivisionError, _>(
+                "division by zero",
+            )),
+            Some(step) => (0..len)
+                .step_by(step)
+                .map(|row| {
+                    i64::try_from(row)
+                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+                })
+                .collect::<PyResult<Vec<_>>>()
+                .map(Some),
+        }
+    }
+
+    /// A Series result as pandas returns it, `step=` taken.
+    fn series_out(&self, py: Python<'_>, res: Series) -> PyResult<Py<PyAny>> {
+        let res = match self.stepped_rows(res.len())? {
+            Some(rows) => res.take(&rows).map_err(frame_error_to_py)?,
+            None => res,
+        };
+        Ok(Py::new(py, PySeries { inner: res })?.into_any())
+    }
+
+    /// A DataFrame result as pandas returns it, `step=` taken.
+    fn frame_out(&self, py: Python<'_>, res: DataFrame) -> PyResult<Py<PyAny>> {
+        let res = match self.stepped_rows(res.len())? {
+            Some(rows) => res.take(&rows, 0).map_err(frame_error_to_py)?,
+            None => res,
+        };
+        Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
     }
 
     /// `apply(func)` over `s`'s count windows (centred when `center`):
@@ -46959,7 +47238,7 @@ impl PyRolling {
         args: Option<&Bound<'_, PyTuple>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Series> {
-        let windows = s.rolling_with_center(self.window, self.min_periods, self.center);
+        let windows = self.series_window(s)?;
         let min_periods = self.min_periods.unwrap_or(self.window);
         let values = s.column().values();
         let labels = s.index().labels();
@@ -46982,15 +47261,34 @@ impl PyRolling {
         Series::new(s.name(), s.index().clone(), column).map_err(frame_error_to_py)
     }
 
-    /// Refuses a time-based window where `method` only runs count windows
-    /// (it would have run a 0-row window).
+    /// Refuses a time-based window, or windows along `on=`, where `method`
+    /// only runs count windows over the rows (it would have run a 0-row
+    /// window, or aggregated the `on` column).
     fn require_count_window(&self, method: &str) -> PyResult<()> {
-        match self.offset {
-            Some(_) => Err(not_implemented(&format!(
+        if self.offset.is_some() {
+            return Err(not_implemented(&format!(
                 "Rolling.{method} over a time-based window"
-            ))),
-            None => Ok(()),
+            )));
         }
+        if self.on.is_some() {
+            return Err(not_implemented(&format!("Rolling.{method} along on=")));
+        }
+        Ok(())
+    }
+
+    /// Refuses `step=` where `method`'s result is not taken row by row (a
+    /// pairwise frame), and method='table' as the windows do.
+    fn require_every_row(&self, method: &str) -> PyResult<()> {
+        if self.table {
+            if let Some(ref s) = self.series {
+                self.series_window(s)?;
+            }
+            return Err(not_implemented("rolling(method='table') (numba's)"));
+        }
+        if self.step.is_some() {
+            return Err(not_implemented(&format!("Rolling.{method} with step=")));
+        }
+        Ok(())
     }
 }
 
@@ -47030,14 +47328,11 @@ impl PyRolling {
     pub fn sum(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
             let res = self.series_window(s)?.sum().map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+            return self.series_out(py, res);
         }
         if let Some(ref df) = self.dataframe {
-            let res = df
-                .rolling_with_center(self.window, self.min_periods, self.center)
-                .sum()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+            let res = self.frame_window(df)?.sum().map_err(frame_error_to_py)?;
+            return self.frame_out(py, res);
         }
         Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Empty rolling object",
@@ -47047,14 +47342,11 @@ impl PyRolling {
     pub fn mean(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
             let res = self.series_window(s)?.mean().map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+            return self.series_out(py, res);
         }
         if let Some(ref df) = self.dataframe {
-            let res = df
-                .rolling_with_center(self.window, self.min_periods, self.center)
-                .mean()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+            let res = self.frame_window(df)?.mean().map_err(frame_error_to_py)?;
+            return self.frame_out(py, res);
         }
         Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Empty rolling object",
@@ -47064,14 +47356,11 @@ impl PyRolling {
     pub fn min(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
             let res = self.series_window(s)?.min().map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+            return self.series_out(py, res);
         }
         if let Some(ref df) = self.dataframe {
-            let res = df
-                .rolling_with_center(self.window, self.min_periods, self.center)
-                .min()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+            let res = self.frame_window(df)?.min().map_err(frame_error_to_py)?;
+            return self.frame_out(py, res);
         }
         Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Empty rolling object",
@@ -47081,14 +47370,11 @@ impl PyRolling {
     pub fn max(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
             let res = self.series_window(s)?.max().map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+            return self.series_out(py, res);
         }
         if let Some(ref df) = self.dataframe {
-            let res = df
-                .rolling_with_center(self.window, self.min_periods, self.center)
-                .max()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+            let res = self.frame_window(df)?.max().map_err(frame_error_to_py)?;
+            return self.frame_out(py, res);
         }
         Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Empty rolling object",
@@ -47098,14 +47384,11 @@ impl PyRolling {
     pub fn std(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
             let res = self.series_window(s)?.std().map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+            return self.series_out(py, res);
         }
         if let Some(ref df) = self.dataframe {
-            let res = df
-                .rolling_with_center(self.window, self.min_periods, self.center)
-                .std()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+            let res = self.frame_window(df)?.std().map_err(frame_error_to_py)?;
+            return self.frame_out(py, res);
         }
         Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Empty rolling object",
@@ -47115,14 +47398,11 @@ impl PyRolling {
     pub fn var(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
             let res = self.series_window(s)?.var().map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+            return self.series_out(py, res);
         }
         if let Some(ref df) = self.dataframe {
-            let res = df
-                .rolling_with_center(self.window, self.min_periods, self.center)
-                .var()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+            let res = self.frame_window(df)?.var().map_err(frame_error_to_py)?;
+            return self.frame_out(py, res);
         }
         Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Empty rolling object",
@@ -47132,14 +47412,11 @@ impl PyRolling {
     pub fn count(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
             let res = self.series_window(s)?.count().map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+            return self.series_out(py, res);
         }
         if let Some(ref df) = self.dataframe {
-            let res = df
-                .rolling_with_center(self.window, self.min_periods, self.center)
-                .count()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+            let res = self.frame_window(df)?.count().map_err(frame_error_to_py)?;
+            return self.frame_out(py, res);
         }
         Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Empty rolling object",
@@ -47149,14 +47426,11 @@ impl PyRolling {
     pub fn median(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
             let res = self.series_window(s)?.median().map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+            return self.series_out(py, res);
         }
         if let Some(ref df) = self.dataframe {
-            let res = df
-                .rolling_with_center(self.window, self.min_periods, self.center)
-                .median()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+            let res = self.frame_window(df)?.median().map_err(frame_error_to_py)?;
+            return self.frame_out(py, res);
         }
         Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Empty rolling object",
@@ -47180,14 +47454,14 @@ impl PyRolling {
                 .series_window(s)?
                 .quantile_with_interpolation(q, interpolation)
                 .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+            return self.series_out(py, res);
         }
         if let Some(ref df) = self.dataframe {
-            let res = df
-                .rolling_with_center(self.window, self.min_periods, self.center)
+            let res = self
+                .frame_window(df)?
                 .quantile_with_interpolation(q, interpolation)
                 .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+            return self.frame_out(py, res);
         }
         Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Empty rolling object",
@@ -47202,14 +47476,11 @@ impl PyRolling {
     pub fn sem(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
             let res = self.series_window(s)?.sem().map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+            return self.series_out(py, res);
         }
         if let Some(ref df) = self.dataframe {
-            let res = df
-                .rolling_with_center(self.window, self.min_periods, self.center)
-                .sem()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+            let res = self.frame_window(df)?.sem().map_err(frame_error_to_py)?;
+            return self.frame_out(py, res);
         }
         Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Empty rolling object",
@@ -47219,14 +47490,11 @@ impl PyRolling {
     pub fn skew(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
             let res = self.series_window(s)?.skew().map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+            return self.series_out(py, res);
         }
         if let Some(ref df) = self.dataframe {
-            let res = df
-                .rolling_with_center(self.window, self.min_periods, self.center)
-                .skew()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+            let res = self.frame_window(df)?.skew().map_err(frame_error_to_py)?;
+            return self.frame_out(py, res);
         }
         Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Empty rolling object",
@@ -47236,14 +47504,11 @@ impl PyRolling {
     pub fn kurt(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(ref s) = self.series {
             let res = self.series_window(s)?.kurt().map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+            return self.series_out(py, res);
         }
         if let Some(ref df) = self.dataframe {
-            let res = df
-                .rolling_with_center(self.window, self.min_periods, self.center)
-                .kurt()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+            let res = self.frame_window(df)?.kurt().map_err(frame_error_to_py)?;
+            return self.frame_out(py, res);
         }
         Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Empty rolling object",
@@ -47279,22 +47544,22 @@ impl PyRolling {
         }
         let asc = ascending.unwrap_or(true);
         if let Some(ref s) = self.series {
-            let windows = s.rolling_with_center(self.window, self.min_periods, self.center);
+            let windows = self.series_window(s)?;
             let mut res = windows.rank(m, asc, "keep").map_err(frame_error_to_py)?;
             if pct {
                 let count = windows.count().map_err(frame_error_to_py)?;
                 res = res.div(&count).map_err(frame_error_to_py)?;
             }
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+            return self.series_out(py, res);
         }
         if let Some(ref df) = self.dataframe {
-            let windows = df.rolling_with_center(self.window, self.min_periods, self.center);
+            let windows = self.frame_window(df)?;
             let mut res = windows.rank(m, asc, "keep").map_err(frame_error_to_py)?;
             if pct {
                 let count = windows.count().map_err(frame_error_to_py)?;
                 res = res.div_df(&count).map_err(frame_error_to_py)?;
             }
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+            return self.frame_out(py, res);
         }
         Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Empty rolling object",
@@ -47304,14 +47569,22 @@ impl PyRolling {
     #[pyo3(signature = (other=None))]
     pub fn corr(&self, py: Python<'_>, other: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
         self.require_count_window("corr")?;
+        self.require_every_row("corr")?;
         let (window, min_periods, center) = (self.window, self.min_periods, self.center);
+        let closed = self.closed();
         let result = execute_window_bivariate(
             py,
             self.series.as_ref(),
             self.dataframe.as_ref(),
             other,
-            |s1, s2| s1.rolling_with_center(window, min_periods, center).corr(s2),
-            Some(|df: &DataFrame| df.rolling_with_center(window, min_periods, center).corr()),
+            |s1, s2| {
+                s1.rolling_closed(window, min_periods, center, closed)?
+                    .corr(s2)
+            },
+            Some(|df: &DataFrame| {
+                df.rolling_closed(window, min_periods, center, closed, None)?
+                    .corr()
+            }),
             "Empty rolling object",
             "DataFrame rolling corr without other is not supported",
         )?;
@@ -47321,14 +47594,22 @@ impl PyRolling {
     #[pyo3(signature = (other=None))]
     pub fn cov(&self, py: Python<'_>, other: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
         self.require_count_window("cov")?;
+        self.require_every_row("cov")?;
         let (window, min_periods, center) = (self.window, self.min_periods, self.center);
+        let closed = self.closed();
         let result = execute_window_bivariate(
             py,
             self.series.as_ref(),
             self.dataframe.as_ref(),
             other,
-            |s1, s2| s1.rolling_with_center(window, min_periods, center).cov(s2),
-            Some(|df: &DataFrame| df.rolling_with_center(window, min_periods, center).cov()),
+            |s1, s2| {
+                s1.rolling_closed(window, min_periods, center, closed)?
+                    .cov(s2)
+            },
+            Some(|df: &DataFrame| {
+                df.rolling_closed(window, min_periods, center, closed, None)?
+                    .cov()
+            }),
             "Empty rolling object",
             "DataFrame rolling cov without other is not supported",
         )?;
@@ -47337,10 +47618,12 @@ impl PyRolling {
 
     /// pandas' `Rolling.agg`: a name (or a list of them) is that
     /// aggregation, a `_cython_table` callable its name, any other callable
-    /// `apply(func, raw=False)`; callables raised (fvsao.7).
+    /// `apply(func, raw=False)`; callables raised (fvsao.7). Names run
+    /// over any window (a time-based one was refused); a callable over
+    /// count windows.
     pub fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.require_count_window("agg")?;
         if agg_spec_has_callable(func) {
+            self.require_count_window("agg")?;
             return match named_agg_spec(func, "Rolling")? {
                 Some(named) => self.agg(py, &named),
                 None if func.is_callable() => self.apply(py, func, false, None, None, None, None),
@@ -47373,15 +47656,15 @@ impl PyRolling {
                     .series_window(s)?
                     .agg(&str_slices)
                     .map_err(frame_error_to_py)?;
-                return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+                return self.frame_out(py, res);
             }
             if let Some(ref df) = self.dataframe {
-                let res = df
-                    .rolling_with_center(self.window, self.min_periods, self.center)
+                let res = self
+                    .frame_window(df)?
                     .agg(&str_slices)
                     .map_err(frame_error_to_py)?;
                 let res = func_columns(res, df, &str_slices)?;
-                return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+                return self.frame_out(py, res);
             }
             Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Empty rolling object",
@@ -47432,7 +47715,7 @@ impl PyRolling {
         if func.is_callable() {
             if let Some(ref s) = self.series {
                 let res_series = self.apply_windows(py, s, func, raw, args, kwargs)?;
-                return Ok(Py::new(py, PySeries { inner: res_series })?.into_any());
+                return self.series_out(py, res_series);
             }
             if let Some(ref df) = self.dataframe {
                 let col_names = df.column_names();
@@ -47467,12 +47750,48 @@ impl PyRolling {
                 let res_df = DataFrame::new_with_column_order(df.index().clone(), columns, names)
                     .map_err(frame_error_to_py)?
                     .with_recorded_column_labels(df.column_labels());
-                return Ok(Py::new(py, PyDataFrame { inner: res_df })?.into_any());
+                return self.frame_out(py, res_df);
             }
         }
         Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
             "rolling.apply currently supported for Series and DataFrame with Python callable",
         ))
+    }
+
+    /// pandas' repr: `Rolling [window=3,center=False,axis=0,closed=left,
+    /// step=2,method=single]`, the attributes that are not None.
+    fn __repr__(&self) -> String {
+        let window = self
+            .offset
+            .clone()
+            .unwrap_or_else(|| self.window.to_string());
+        let mut attrs = vec![format!("window={window}")];
+        if let Some(min_periods) = self.min_periods {
+            attrs.push(format!("min_periods={min_periods}"));
+        }
+        attrs.push(format!(
+            "center={}",
+            if self.center { "True" } else { "False" }
+        ));
+        attrs.push("axis=0".to_owned());
+        if let Some(on) = &self.on {
+            attrs.push(format!("on={on}"));
+        }
+        if let Some(closed) = self.closed {
+            let closed = match (closed.left_closed(), closed.right_closed()) {
+                (true, true) => "both",
+                (true, false) => "left",
+                (false, true) => "right",
+                (false, false) => "neither",
+            };
+            attrs.push(format!("closed={closed}"));
+        }
+        if let Some(step) = self.step {
+            attrs.push(format!("step={step}"));
+        }
+        let method = if self.table { "table" } else { "single" };
+        attrs.push(format!("method={method}"));
+        format!("Rolling [{}]", attrs.join(","))
     }
 }
 
@@ -70300,9 +70619,21 @@ mod tests {
         let mut py_s = PySeries { inner: s };
 
         pyo3::Python::initialize();
-        let roll =
-            Python::attach(|py| py_s.rolling(pyo3::types::PyInt::new(py, 2).as_any(), None, false))
-                .expect("rolling"); // ubs:ignore — test fixture
+        let roll = Python::attach(|py| {
+            py_s.rolling(
+                py,
+                pyo3::types::PyInt::new(py, 2).as_any(),
+                None,
+                false,
+                None,
+                None,
+                Passed(None),
+                None,
+                None,
+                "single",
+            )
+        })
+        .expect("rolling"); // ubs:ignore — test fixture
         assert_eq!(roll.window, 2);
         assert!(!roll.center);
 
@@ -70388,7 +70719,18 @@ mod tests {
             let mut py_df = PyDataFrame { inner: df };
 
             let roll = py_df
-                .rolling(pyo3::types::PyInt::new(py, 2).as_any(), None, false)
+                .rolling(
+                    py,
+                    pyo3::types::PyInt::new(py, 2).as_any(),
+                    None,
+                    false,
+                    None,
+                    None,
+                    Passed(None),
+                    None,
+                    None,
+                    "single",
+                )
                 .expect("rolling"); // ubs:ignore — test fixture
             assert_eq!(roll.window, 2);
             assert!(!roll.center);
@@ -70642,7 +70984,18 @@ mod tests {
         assert_eq!(t_df.shape(), (2, 2));
 
         let roll = Python::attach(|py| {
-            py_df.rolling(pyo3::types::PyInt::new(py, 2).as_any(), None, false)
+            py_df.rolling(
+                py,
+                pyo3::types::PyInt::new(py, 2).as_any(),
+                None,
+                false,
+                None,
+                None,
+                Passed(None),
+                None,
+                None,
+                "single",
+            )
         })
         .expect("rolling"); // ubs:ignore — test fixture
         assert_eq!(roll.ndim(), 2);

@@ -16321,3 +16321,102 @@ _Y1_CASES = {
 def test_replace_writes_none_and_keeps_dtypes_like_pandas_y1092(case: str) -> None:
     run = _Y1_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-n57tz (scratch p14/oracle_rollkw.py, oracle_rollctor.py,
+# oracle_rolldup.py vs pandas 2.2.3): rolling's closed=, step=, on=, axis=,
+# win_type= and method= were unexpected keywords, and a DataFrame's
+# time-based window was refused. closed follows pandas' window indexers (a
+# count window's ends; a time window's interval, a later row at the same
+# time outside a closed right end); step keeps every step-th row; on runs
+# the windows along a datetime column and passes it through.
+def _rl_shown(result: Any) -> list:
+    if isinstance(result, str):
+        return [result]
+    dtypes = [str(t) for t in result.dtypes] if hasattr(result, "columns") else [str(result.dtype)]
+    return result.to_string().split("\n") + dtypes
+
+
+def _rl_counts(m: Any) -> Any:
+    return m.Series([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+
+
+def _rl_times(m: Any) -> Any:
+    stamps = ["2024-01-01 00:00", "2024-01-01 01:00", "2024-01-01 01:00", "2024-01-01 01:00", "2024-01-01 02:00", "2024-01-01 02:30"]
+    return m.Series([1.0, 10.0, 100.0, 1000.0, np.nan, 100000.0], index=m.to_datetime(stamps))
+
+
+def _rl_frame(m: Any) -> Any:
+    days = m.to_datetime(["2024-01-01", "2024-01-02", "2024-01-04", "2024-01-05", "2024-01-09"])
+    return m.DataFrame({"t": days, "a": [1.0, 2.0, 3.0, np.nan, 5.0], "b": [10, 20, 30, 40, 50]})
+
+
+_RL_CASES = {
+    **{
+        f"count closed={c}": (lambda c: lambda m: _rl_shown(_rl_counts(m).rolling(3, closed=c).sum()))(c)
+        for c in ["right", "left", "both", "neither"]
+    },
+    **{
+        f"count closed={c} min_periods=1": (
+            lambda c: lambda m: _rl_shown(_rl_counts(m).rolling(3, closed=c, min_periods=1).mean())
+        )(c)
+        for c in ["left", "neither"]
+    },
+    **{
+        f"time closed={c}": (lambda c: lambda m: _rl_shown(_rl_times(m).rolling("1h", closed=c).sum()))(c)
+        for c in ["right", "left", "both", "neither"]
+    },
+    **{
+        f"time closed={c} count": (lambda c: lambda m: _rl_shown(_rl_times(m).rolling("90min", closed=c).count()))(c)
+        for c in ["left", "neither"]
+    },
+    "centred, closed both": lambda m: _rl_shown(_rl_counts(m).rolling(3, center=True, closed="both").sum()),
+    "centred, closed left": lambda m: _rl_shown(_rl_counts(m).rolling(3, center=True, closed="left").max()),
+    "closed left std": lambda m: _rl_shown(_rl_counts(m).rolling(3, closed="left").std()),
+    "closed both median": lambda m: _rl_shown(_rl_counts(m).rolling(2, closed="both").median()),
+    "closed left apply": lambda m: _rl_shown(_rl_counts(m).rolling(2, closed="left").apply(lambda w: w.max())),
+    "step 2": lambda m: _rl_shown(_rl_counts(m).rolling(2, step=2).sum()),
+    "step 3 centred": lambda m: _rl_shown(_rl_counts(m).rolling(3, step=3, center=True).mean()),
+    "step and closed": lambda m: _rl_shown(_rl_counts(m).rolling(2, step=2, closed="both").sum()),
+    "step agg": lambda m: _rl_shown(_rl_counts(m).rolling(2, step=2).agg(["sum", "max"])),
+    "frame time window": lambda m: _rl_shown(_rl_frame(m).set_index("t").rolling("2D").sum()),
+    "frame time window closed both": lambda m: _rl_shown(_rl_frame(m).set_index("t").rolling("2D", closed="both").mean()),
+    "frame on": lambda m: _rl_shown(_rl_frame(m).rolling("2D", on="t").sum()),
+    "frame on, closed left": lambda m: _rl_shown(_rl_frame(m)[["t", "a"]].rolling("2D", on="t", closed="left").mean()),
+    "frame on, a count window": lambda m: _rl_shown(_rl_frame(m).rolling(2, on="t").sum()),
+    "frame on, the column last": lambda m: _rl_shown(_rl_frame(m)[["a", "t"]].rolling("3D", on="t").max()),
+    "frame closed both": lambda m: _rl_shown(_rl_frame(m)[["a", "b"]].rolling(2, closed="both").sum()),
+    "frame step": lambda m: _rl_shown(_rl_frame(m)[["a", "b"]].rolling(2, step=2).mean()),
+    "series time window agg": lambda m: _rl_shown(_rl_times(m).rolling("1h").agg(["sum", "count"])),
+    "axis=0 warns": lambda m: _rl_shown(_rl_counts(m).rolling(2, axis=0).sum()),
+    "frame axis=0 warns": lambda m: _rl_shown(_rl_frame(m)[["a"]].rolling(2, axis="index").sum()),
+    "repr": lambda m: [repr(_rl_counts(m).rolling(2, closed="left", step=2))],
+    "frame repr": lambda m: [repr(_rl_frame(m).rolling(2, min_periods=1, closed="both"))],
+    # Errors, as pandas.
+    "closed unknown": lambda m: _rl_shown(_rl_counts(m).rolling(2, closed="middle").sum()),
+    "step a float": lambda m: _rl_shown(_rl_counts(m).rolling(2, step=1.5).sum()),
+    "step negative": lambda m: _rl_shown(_rl_counts(m).rolling(2, step=-1).sum()),
+    "step 0": lambda m: _rl_shown(_rl_counts(m).rolling(2, step=0).sum()),
+    "method unknown": lambda m: _rl_shown(_rl_counts(m).rolling(2, method="x").sum()),
+    "method table on a Series": lambda m: _rl_shown(_rl_counts(m).rolling(2, method="table").sum()),
+    "a time window with a step": lambda m: _rl_shown(_rl_times(m).rolling("1h", step=2).sum()),
+    "on a Series": lambda m: _rl_shown(_rl_counts(m).rolling(2, on="a").sum()),
+    "on no column": lambda m: _rl_shown(_rl_frame(m).rolling(2, on="zz").sum()),
+    "on a number column, a time window": lambda m: _rl_shown(_rl_frame(m).rolling("2D", on="a").sum()),
+    "min_periods past the window": lambda m: _rl_shown(_rl_counts(m).rolling(2, min_periods=3).sum()),
+    "axis unknown": lambda m: _rl_shown(_rl_counts(m).rolling(2, axis="sideways").sum()),
+    "a Series' axis 1": lambda m: _rl_shown(_rl_counts(m).rolling(2, axis=1).sum()),
+    # NEGATIVE: closed='right' and the defaults are the plain windows.
+    "closed right is the default": lambda m: _rl_shown(_rl_counts(m).rolling(3, closed="right").mean()),
+    "step None": lambda m: _rl_shown(_rl_counts(m).rolling(2, step=None).sum()),
+    "method single": lambda m: _rl_shown(_rl_counts(m).rolling(2, method="single").sum()),
+    "win_type None": lambda m: _rl_shown(_rl_counts(m).rolling(2, win_type=None).sum()),
+    "time window, no keywords": lambda m: _rl_shown(_rl_times(m).rolling("1h").mean()),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_RL_CASES))
+def test_rolling_keywords_like_pandas_n57tz(case: str) -> None:
+    run = _RL_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

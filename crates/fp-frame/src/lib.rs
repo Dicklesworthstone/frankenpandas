@@ -29654,8 +29654,32 @@ impl Series {
             window,
             min_periods: min_periods.unwrap_or(window),
             center: false,
-            offset_starts: None,
+            bounds: None,
         }
+    }
+
+    /// A count window closed as pandas' `rolling(window, center=, closed=)`
+    /// says ([`fixed_window_bounds`]; 'right', the default, is
+    /// [`Self::rolling_with_center`]). `min_periods` defaults to `window`
+    /// and must not exceed it, as pandas.
+    pub fn rolling_closed(
+        &self,
+        window: usize,
+        min_periods: Option<usize>,
+        center: bool,
+        closed: IntervalClosed,
+    ) -> Result<Rolling<'_>, FrameError> {
+        let min_periods = min_periods.unwrap_or(window);
+        if min_periods > window {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "rolling: min_periods {min_periods} must be <= window {window}"
+            )));
+        }
+        if closed == IntervalClosed::Right {
+            return Ok(self.rolling_with_center(window, Some(min_periods), center));
+        }
+        let bounds = fixed_window_bounds(self.len(), window, center, closed);
+        Ok(Rolling::with_bounds(self, bounds, min_periods))
     }
 
     /// Create a time-based/offset rolling window view of this Series
@@ -29681,66 +29705,24 @@ impl Series {
         window: &str,
         min_periods: Option<usize>,
     ) -> Result<Rolling<'_>, FrameError> {
-        let offset_nanos = fp_types::Timedelta::parse(window).map_err(|e| {
-            FrameError::CompatibilityRejected(format!(
-                "rolling: invalid offset window '{window}': {e}"
-            ))
-        })?;
-        if offset_nanos == fp_types::Timedelta::NAT || offset_nanos <= 0 {
-            return Err(FrameError::CompatibilityRejected(format!(
-                "rolling: offset window '{window}' must be a positive duration"
-            )));
-        }
-        let labels = self.index().labels();
-        let mut ts: Vec<i64> = Vec::with_capacity(labels.len());
-        for label in labels {
-            match label {
-                IndexLabel::Datetime64(v) | IndexLabel::Timedelta64(v) if *v != i64::MIN => {
-                    ts.push(*v);
-                }
-                _ => {
-                    // pandas: ValueError("window must be an integer 0 or
-                    // greater") when a non-datetime index meets a freq window.
-                    return Err(FrameError::CompatibilityRejected(format!(
-                        "rolling: offset window '{window}' requires a datetime-like \
-                         (Datetime64/Timedelta64, non-NaT) index; pandas raises \
-                         'window must be an integer 0 or greater'"
-                    )));
-                }
-            }
-        }
-        if ts.windows(2).any(|w| w[0] > w[1]) {
-            // pandas: ValueError("index values must be monotonic").
-            return Err(FrameError::CompatibilityRejected(
-                "rolling: index values must be monotonic".to_owned(),
-            ));
-        }
-        // Two-pointer left bound: starts[i] = first j with ts[j] > ts[i] -
-        // offset (left-open). Monotonic input ⇒ non-decreasing starts, which
-        // every window_bounds-driven kernel requires.
-        let mut starts = Vec::with_capacity(ts.len());
-        let mut j = 0_usize;
-        for (i, &t) in ts.iter().enumerate() {
-            let start_bound = t.saturating_sub(offset_nanos);
-            while ts[j] <= start_bound {
-                j += 1;
-            }
-            debug_assert!(j <= i);
-            starts.push(j);
-        }
+        self.rolling_offset_closed(window, min_periods, IntervalClosed::Right)
+    }
+
+    /// [`Self::rolling_offset`] closed as pandas' `closed=` says
+    /// ([`offset_window_bounds`]).
+    pub fn rolling_offset_closed(
+        &self,
+        window: &str,
+        min_periods: Option<usize>,
+        closed: IntervalClosed,
+    ) -> Result<Rolling<'_>, FrameError> {
+        let times = self.index().labels().iter().map(|label| match label {
+            IndexLabel::Datetime64(v) | IndexLabel::Timedelta64(v) => Some(*v),
+            _ => None,
+        });
+        let bounds = offset_window(window, times, closed)?;
         // pandas defaults min_periods to 1 for offset windows.
-        let min_periods = min_periods.unwrap_or(1);
-        Ok(Rolling {
-            series: self,
-            // Count-window stand-in (the expanding trick): keeps
-            // `validate()` (window >= 1, min_periods <= window) and the
-            // kernel-selection thresholds well-defined; bounds always come
-            // from `offset_starts` via `window_bounds`.
-            window: self.len().max(min_periods).max(1),
-            min_periods,
-            center: false,
-            offset_starts: Some(starts),
-        })
+        Ok(Rolling::with_bounds(self, bounds, min_periods.unwrap_or(1)))
     }
 
     /// Create a rolling window with explicit center parameter.
@@ -29757,7 +29739,7 @@ impl Series {
             window,
             min_periods: min_periods.unwrap_or(window),
             center,
-            offset_starts: None,
+            bounds: None,
         }
     }
 
@@ -29770,7 +29752,7 @@ impl Series {
             window,
             min_periods: min_periods.unwrap_or(window),
             center: true,
-            offset_starts: None,
+            bounds: None,
         }
     }
 
@@ -31649,18 +31631,116 @@ pub struct Rolling<'a> {
     window: usize,
     min_periods: usize,
     center: bool,
-    /// Per-row window starts for a time-based/offset window (issue #20),
-    /// e.g. `rolling("180D")` over a datetime index. `starts[i]` is the first
-    /// row position inside the left-open right-closed interval
-    /// `(t_i - offset, t_i]` — pandas' default `closed='right'` for offset
-    /// windows. `None` for ordinary count windows. Built by
-    /// [`Series::rolling_offset`] over a monotonic non-decreasing
-    /// datetime-like index, so the starts are non-decreasing and every
+    /// Per-row window bounds `[start, end)` for a time-based/offset window
+    /// (issue #20), e.g. `rolling("180D")` over a datetime index, or for a
+    /// count window closed other than pandas' default 'right'
+    /// ([`offset_window_bounds`], [`fixed_window_bounds`]). `None` for an
+    /// ordinary count window. Both bounds are non-decreasing, so every
     /// two-pointer kernel that consumes [`Rolling::window_bounds`] slides
     /// across them unchanged. When `Some`, `window` is a count-window
     /// stand-in of `len.max(min_periods).max(1)` (the expanding trick) so
     /// `validate` and the kernel-selection thresholds stay well-defined.
-    offset_starts: Option<Vec<usize>>,
+    bounds: Option<Vec<(usize, usize)>>,
+}
+
+/// pandas' fixed-window indexer: row `i`'s window for a count `window`,
+/// trailing or centred, with `closed` saying which ends of the interval
+/// `(i - window, i]` (shifted by half a window when centred) it holds.
+pub fn fixed_window_bounds(
+    len: usize,
+    window: usize,
+    center: bool,
+    closed: IntervalClosed,
+) -> Vec<(usize, usize)> {
+    let offset = if center {
+        window.saturating_sub(1) / 2
+    } else {
+        0
+    };
+    let left_closed = closed.left_closed();
+    let right_open = !closed.right_closed();
+    (0..len)
+        .map(|i| {
+            // pandas: end = i + 1 + offset, start = end - window; a closed
+            // left end takes one row more before, an open right end drops
+            // the row itself; both clipped to the rows.
+            let end = i + 1 + offset - usize::from(right_open);
+            let start = (i + 1 + offset).saturating_sub(window + usize::from(left_closed));
+            (start.min(len), end.min(len))
+        })
+        .collect()
+}
+
+/// pandas' variable-window indexer over monotonic timestamps `ts`: row `i`'s
+/// window holds the rows whose time lies in the interval of length `offset`
+/// ending at `ts[i]`, closed as `closed` says ('right': `(t - offset, t]`),
+/// and a closed right end stops at the row itself (a later row at the same
+/// time is not in it), an open one before the first row at `t`.
+pub fn offset_window_bounds(
+    ts: &[i64],
+    offset: i64,
+    closed: IntervalClosed,
+) -> Vec<(usize, usize)> {
+    let left_closed = closed.left_closed();
+    let right_closed = closed.right_closed();
+    let mut bounds = Vec::with_capacity(ts.len());
+    let (mut start, mut first_at) = (0_usize, 0_usize);
+    for (i, &t) in ts.iter().enumerate() {
+        let start_bound = t.saturating_sub(offset);
+        while start < i && (ts[start] < start_bound || (!left_closed && ts[start] == start_bound)) {
+            start += 1;
+        }
+        while ts[first_at] < t {
+            first_at += 1;
+        }
+        let end = if right_closed { i + 1 } else { first_at };
+        bounds.push((start.min(end), end));
+    }
+    bounds
+}
+
+/// A time-based window's per-row bounds over `times` (a datetime-like axis,
+/// `None` where a value is not one), as pandas' `rolling('7D', closed=)`:
+/// `window` a positive duration ('180D', '12h', '90min', ISO-8601, ... as
+/// [`fp_types::Timedelta::parse`] reads them) over monotonic times.
+///
+/// Errors (as `CompatibilityRejected`) when the window does not parse or is
+/// not strictly positive, when a time is missing or not datetime-like
+/// (pandas: `ValueError: window must be an integer 0 or greater`), or when
+/// the times are not monotonic non-decreasing (pandas: `ValueError: index
+/// values must be monotonic`).
+fn offset_window(
+    window: &str,
+    times: impl IntoIterator<Item = Option<i64>>,
+    closed: IntervalClosed,
+) -> Result<Vec<(usize, usize)>, FrameError> {
+    let offset_nanos = fp_types::Timedelta::parse(window).map_err(|e| {
+        FrameError::CompatibilityRejected(format!("rolling: invalid offset window '{window}': {e}"))
+    })?;
+    if offset_nanos == fp_types::Timedelta::NAT || offset_nanos <= 0 {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "rolling: offset window '{window}' must be a positive duration"
+        )));
+    }
+    let mut ts: Vec<i64> = Vec::new();
+    for time in times {
+        match time {
+            Some(v) if v != i64::MIN => ts.push(v),
+            _ => {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "rolling: offset window '{window}' requires a datetime-like \
+                     (Datetime64/Timedelta64, non-NaT) index; pandas raises \
+                     'window must be an integer 0 or greater'"
+                )));
+            }
+        }
+    }
+    if ts.windows(2).any(|w| w[0] > w[1]) {
+        return Err(FrameError::CompatibilityRejected(
+            "rolling: index values must be monotonic".to_owned(),
+        ));
+    }
+    Ok(offset_window_bounds(&ts, offset_nanos, closed))
 }
 
 /// Which scalar the compensated online variance state emits: raw variance,
@@ -32143,6 +32223,22 @@ impl RollingPairwiseMomentState {
 /// global-`u` Fenwick, so wide windows keep the Fenwick.
 const ROLLING_SORTED_WINDOW_MAX_W: usize = 4096;
 
+impl<'a> Rolling<'a> {
+    /// A window over `series` whose rows for each output row are `bounds`
+    /// (a time-based or closed window), the count window a stand-in of
+    /// `len.max(min_periods).max(1)` (the expanding trick) that keeps
+    /// `validate()` and the kernel-selection thresholds well-defined.
+    fn with_bounds(series: &'a Series, bounds: Vec<(usize, usize)>, min_periods: usize) -> Self {
+        Rolling {
+            series,
+            window: series.len().max(min_periods).max(1),
+            min_periods,
+            center: false,
+            bounds: Some(bounds),
+        }
+    }
+}
+
 impl Rolling<'_> {
     fn validate(&self) -> Result<(), FrameError> {
         if self.window == 0 {
@@ -32476,10 +32572,10 @@ impl Rolling<'_> {
     /// bounds are non-decreasing in `i` for trailing AND centered windows, so a
     /// two-pointer sweep can slide an incremental structure across them.
     pub fn window_bounds(&self, i: usize, len: usize) -> (usize, usize) {
-        // Offset (time-based) window: per-row starts precomputed from the
-        // datetime index (issue #20); trailing right-closed, so end = i + 1.
-        if let Some(starts) = &self.offset_starts {
-            return (starts[i], i + 1);
+        // Offset (time-based) or closed window: per-row bounds precomputed
+        // (issue #20, `closed=`).
+        if let Some(bounds) = &self.bounds {
+            return bounds[i];
         }
         if self.center {
             let half = self.window / 2;
@@ -34433,7 +34529,7 @@ impl Expanding<'_> {
             window: len.max(self.min_periods).max(1),
             min_periods: self.min_periods,
             center: false,
-            offset_starts: None,
+            bounds: None,
         }
     }
 
@@ -39508,9 +39604,34 @@ pub struct DataFrameRolling<'a> {
     /// pandas' `rolling(center=True)`: each window centred on its row (the
     /// DataFrame windows were trailing only).
     center: bool,
+    /// Every column's per-row window bounds for a time-based or closed
+    /// window (see [`Rolling`]'s), computed once from the index or `on`.
+    bounds: Option<Vec<(usize, usize)>>,
+    /// pandas' `rolling(on=)`: the column the windows run over, which is
+    /// not aggregated and comes back as it was, in its place.
+    on: Option<String>,
 }
 
 impl DataFrameRolling<'_> {
+    /// One column's window: the frame's shared bounds, or its count window.
+    fn column_window<'s>(&self, series: &'s Series) -> Rolling<'s> {
+        match &self.bounds {
+            Some(bounds) => Rolling::with_bounds(series, bounds.clone(), self.min_periods),
+            None => series.rolling_with_center(self.window, Some(self.min_periods), self.center),
+        }
+    }
+
+    /// Whether the column at `pos` is aggregated: numeric, and not `on`.
+    fn aggregates(&self, pos: usize) -> bool {
+        matches!(
+            self.df.column_at(pos).map(Column::dtype),
+            Some(DType::Int64 | DType::Float64)
+        ) && self
+            .on
+            .as_deref()
+            .is_none_or(|on| self.df.column_name_at(pos).as_deref() != Some(on))
+    }
+
     /// Apply rolling aggregation to each numeric column, returning a new DataFrame.
     ///
     /// Column-parallel (br-frankenpandas-1q4q4): each numeric column is
@@ -39525,21 +39646,19 @@ impl DataFrameRolling<'_> {
     where
         F: for<'s> Fn(Rolling<'s>) -> Result<Series, FrameError> + Sync,
     {
+        let on_position = self.on.as_deref().and_then(|on| {
+            (0..self.df.num_columns())
+                .find(|&pos| self.df.column_name_at(pos).as_deref() == Some(on))
+        });
         let numeric_positions: Vec<usize> = (0..self.df.num_columns())
-            .filter(|&pos| {
-                matches!(
-                    self.df.column_at(pos).expect("pos in bounds").dtype(),
-                    DType::Int64 | DType::Float64
-                )
-            })
+            .filter(|&pos| self.aggregates(pos))
             .collect();
 
         let agg_one = |pos: usize| -> Result<(String, Column), FrameError> {
             let col = self.df.column_at(pos).expect("pos in bounds");
             let name = self.df.column_name_at(pos).expect("pos in bounds");
             let series = Series::new(&name, self.df.index.clone(), col.clone())?;
-            let result =
-                agg(series.rolling_with_center(self.window, Some(self.min_periods), self.center))?;
+            let result = agg(self.column_window(&series))?;
             Ok((name, result.column().clone()))
         };
 
@@ -39605,6 +39724,22 @@ impl DataFrameRolling<'_> {
                 pairs.push((name, col));
             }
             (pairs, order)
+        };
+        // The `on` column comes back as it was, in its place among them.
+        let (pairs, col_order) = match on_position {
+            Some(on_pos) => {
+                let name = self.df.column_name_at(on_pos).expect("pos in bounds");
+                let before = numeric_positions
+                    .iter()
+                    .filter(|&&pos| pos < on_pos)
+                    .count();
+                let (mut pairs, mut col_order) = (pairs, col_order);
+                let column = self.df.column_at(on_pos).expect("pos in bounds").clone();
+                pairs.push((name.clone(), column));
+                col_order.insert(before, name);
+                (pairs, col_order)
+            }
+            None => (pairs, col_order),
         };
 
         let mut out = DataFrame::new_with_axes(
@@ -39757,11 +39892,7 @@ impl DataFrameRolling<'_> {
                     .expect("numeric column in bounds");
                 let right_series = Series::new(&right_name, self.df.index.clone(), right_col)?;
 
-                let rolling = left_series.rolling_with_center(
-                    self.window,
-                    Some(self.min_periods),
-                    self.center,
-                );
+                let rolling = self.column_window(&left_series);
                 let pair = agg(&rolling, &right_series)?;
                 let pair_name = format!("{left_name}__{right_name}");
                 pairs.push((pair_name.clone(), pair.column().clone()));
@@ -39825,15 +39956,13 @@ impl DataFrameRolling<'_> {
         let mut col_order = Vec::new();
 
         for pos in 0..n_cols {
-            let col = self.df.column_at(pos).expect("pos in bounds");
-            let dt = col.dtype();
-            if dt != DType::Int64 && dt != DType::Float64 {
+            if !self.aggregates(pos) {
                 continue;
             }
+            let col = self.df.column_at(pos).expect("pos in bounds");
             let col_name = self.df.column_name_at(pos).expect("pos in bounds");
             let left_series = Series::new(&col_name, self.df.index.clone(), col.clone())?;
-            let rolling =
-                left_series.rolling_with_center(self.window, Some(self.min_periods), self.center);
+            let rolling = self.column_window(&left_series);
             let paired = agg(&rolling, other)?;
             pairs.push((col_name.clone(), paired.column().clone()));
             col_order.push(col_name);
@@ -39860,17 +39989,13 @@ impl DataFrameRolling<'_> {
         let mut col_order = Vec::new();
 
         for pos in 0..n_cols {
-            let col = self.df.column_at(pos).expect("pos in bounds");
-            let dt = col.dtype();
-            if dt != DType::Int64 && dt != DType::Float64 {
+            if !self.aggregates(pos) {
                 continue;
             }
-
+            let col = self.df.column_at(pos).expect("pos in bounds");
             let col_name = self.df.column_name_at(pos).expect("pos in bounds");
             let series = Series::new(&col_name, self.df.index.clone(), col.clone())?;
-            let rolled = series
-                .rolling_with_center(self.window, Some(self.min_periods), self.center)
-                .agg(funcs)?;
+            let rolled = self.column_window(&series).agg(funcs)?;
             for func in funcs {
                 let out_name = format!("{col_name}_{func}");
                 pairs.push((out_name.clone(), rolled.columns()[*func].clone()));
@@ -87488,6 +87613,92 @@ impl DataFrame {
             window,
             min_periods: min_periods.unwrap_or(window),
             center,
+            bounds: None,
+            on: None,
+        }
+    }
+
+    /// [`Self::rolling_with_center`] closed as pandas' `closed=` says
+    /// ([`fixed_window_bounds`]), and with pandas' `on=` a column passed
+    /// through as it was rather than aggregated. `min_periods` defaults to
+    /// `window` and must not exceed it.
+    pub fn rolling_closed(
+        &self,
+        window: usize,
+        min_periods: Option<usize>,
+        center: bool,
+        closed: IntervalClosed,
+        on: Option<&str>,
+    ) -> Result<DataFrameRolling<'_>, FrameError> {
+        let min_periods = min_periods.unwrap_or(window);
+        if min_periods > window {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "rolling: min_periods {min_periods} must be <= window {window}"
+            )));
+        }
+        let on = self.rolling_on(on)?;
+        let bounds = (closed != IntervalClosed::Right)
+            .then(|| fixed_window_bounds(self.len(), window, center, closed));
+        Ok(DataFrameRolling {
+            df: self,
+            window,
+            min_periods,
+            center,
+            bounds,
+            on,
+        })
+    }
+
+    /// A time-based window (pandas' `df.rolling('7D', on=, closed=)`) over
+    /// the datetime index or, with `on`, over that datetime column, which
+    /// is passed through as it was ([`offset_window_bounds`]); `min_periods`
+    /// defaults to 1, as pandas'.
+    pub fn rolling_offset(
+        &self,
+        window: &str,
+        min_periods: Option<usize>,
+        closed: IntervalClosed,
+        on: Option<&str>,
+    ) -> Result<DataFrameRolling<'_>, FrameError> {
+        let on = self.rolling_on(on)?;
+        let bounds = match on.as_deref().and_then(|name| self.column(name)) {
+            Some(column) => offset_window(
+                window,
+                column.values().iter().map(|value| match value {
+                    Scalar::Datetime64(v) | Scalar::Timedelta64(v) => Some(*v),
+                    _ => None,
+                }),
+                closed,
+            )?,
+            None => offset_window(
+                window,
+                self.index.labels().iter().map(|label| match label {
+                    IndexLabel::Datetime64(v) | IndexLabel::Timedelta64(v) => Some(*v),
+                    _ => None,
+                }),
+                closed,
+            )?,
+        };
+        let min_periods = min_periods.unwrap_or(1);
+        Ok(DataFrameRolling {
+            df: self,
+            window: self.len().max(min_periods).max(1),
+            min_periods,
+            center: false,
+            bounds: Some(bounds),
+            on,
+        })
+    }
+
+    /// pandas' `rolling(on=)`: a column of the frame, or its error.
+    fn rolling_on(&self, on: Option<&str>) -> Result<Option<String>, FrameError> {
+        match on {
+            None => Ok(None),
+            Some(name) if self.column(name).is_some() => Ok(Some(name.to_owned())),
+            Some(name) => Err(FrameError::CompatibilityRejected(format!(
+                "invalid on specified as {name}, must be a column (of DataFrame), an Index \
+                 or None"
+            ))),
         }
     }
 
@@ -113517,12 +113728,13 @@ mod tests {
         SORTED_UNIQUE_UNION_FINGERPRINT_CACHE, SORTED_UNIQUE_UNION_FINGERPRINT_CACHE_MAX, Series,
         SortedUniqueUnionFingerprintKey, ToNumericErrors, ToNumericOptions, TzAmbiguousPolicy,
         TzLocalizeOptions, TzNonexistentPolicy, align_union, align_union_duplicate_aware,
-        align_union_sorted_unique, cut, datetime64_label_from_naive, format_period_label,
-        index_to_frame, index_to_series, int64_unit_range_alignment, parse_datetime64_nanos,
-        parse_naive_datetime_value, qcut, record_alignment_semantic_witness,
-        semantic_index_identity, semantic_int64_unit_range_labels_fingerprint,
-        semantic_integer_index_labels_fingerprint, semantic_sorted_unique_union_output_fingerprint,
-        to_numeric, to_numeric_with_options, typed_dense_values_already_sorted,
+        align_union_sorted_unique, cut, datetime64_label_from_naive, fixed_window_bounds,
+        format_period_label, index_to_frame, index_to_series, int64_unit_range_alignment,
+        offset_window_bounds, parse_datetime64_nanos, parse_naive_datetime_value, qcut,
+        record_alignment_semantic_witness, semantic_index_identity,
+        semantic_int64_unit_range_labels_fingerprint, semantic_integer_index_labels_fingerprint,
+        semantic_sorted_unique_union_output_fingerprint, to_numeric, to_numeric_with_options,
+        typed_dense_values_already_sorted,
     };
 
     fn assert_text_golden(golden_name: &str, actual: &str) {
@@ -124984,6 +125196,93 @@ mod tests {
         // NEGATIVE: no match leaves the Series as it was.
         let none = text.replace_regex_cells(r"^zzz$", &nan).unwrap();
         assert_eq!(none.column().values(), text.column().values());
+    }
+
+    #[test]
+    fn rolling_window_indexers_close_as_pandas_n57tz() {
+        // MEASURED, live pandas 2.2.3: pd.Series([1..6]).rolling(3,
+        // closed=c, min_periods=1).sum() - left [nan,1,3,6,9,12], both
+        // [1,3,6,10,14,18], neither [nan,1,3,5,7,9]; centred closed='both'
+        // at row 1 sums rows 0..=2.
+        let fixed = |center, closed| fixed_window_bounds(6, 3, center, closed);
+        assert_eq!(
+            fixed(false, IntervalClosed::Left)[..4],
+            [(0, 0), (0, 1), (0, 2), (0, 3)]
+        );
+        assert_eq!(fixed(false, IntervalClosed::Both)[3], (0, 4));
+        assert_eq!(fixed(false, IntervalClosed::Neither)[3], (1, 3));
+        assert_eq!(fixed(true, IntervalClosed::Both)[1], (0, 3));
+        assert_eq!(fixed(true, IntervalClosed::Left)[5], (3, 6));
+        // Times 00:00, 01:00 x3, 02:00, 02:30 with a 1h window: closed='left'
+        // at the second 01:00 holds 00:00 only (the other 01:00 rows are
+        // not before it); 'right' at the first 01:00 stops at itself.
+        let hour = 3_600_000_000_000_i64;
+        let ts = [0, hour, hour, hour, 2 * hour, 5 * hour / 2];
+        let left = offset_window_bounds(&ts, hour, IntervalClosed::Left);
+        assert_eq!(left[2], (0, 1));
+        assert_eq!(left[4], (1, 4));
+        let right = offset_window_bounds(&ts, hour, IntervalClosed::Right);
+        assert_eq!(right[1], (1, 2));
+        assert_eq!(right[4], (4, 5));
+        let neither = offset_window_bounds(&ts, hour, IntervalClosed::Neither);
+        assert_eq!(neither[4], (4, 4));
+        assert_eq!(neither[5], (4, 5));
+        // NEGATIVE: 'right' is the plain trailing window.
+        let plain = fixed(false, IntervalClosed::Right);
+        assert_eq!(plain[..3], [(0, 1), (0, 2), (0, 3)]);
+        assert_eq!(plain[5], (3, 6));
+    }
+
+    #[test]
+    fn dataframe_rolling_along_on_passes_it_through_n57tz() {
+        // MEASURED, live pandas 2.2.3: df.rolling('2D', on='t').sum() keeps
+        // t as it was, in its place, and sums a within two days of t.
+        let day = 86_400_000_000_000_i64;
+        let df = DataFrame::from_dict(
+            &["t", "a"],
+            vec![
+                (
+                    "t",
+                    vec![
+                        Scalar::Datetime64(0),
+                        Scalar::Datetime64(day),
+                        Scalar::Datetime64(3 * day),
+                    ],
+                ),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let out = df
+            .rolling_offset("2D", None, IntervalClosed::Right, Some("t"))
+            .unwrap()
+            .sum()
+            .unwrap();
+        assert_eq!(out.column_names(), vec!["t", "a"]);
+        assert_eq!(
+            out.column("t").unwrap().values(),
+            df.column("t").unwrap().values()
+        );
+        assert_eq!(
+            out.column("a").unwrap().values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(3.0)
+            ]
+        );
+        // NEGATIVE: no such column is pandas' error.
+        assert!(
+            df.rolling_offset("2D", None, IntervalClosed::Right, Some("zz"))
+                .is_err()
+        );
     }
 
     #[test]
