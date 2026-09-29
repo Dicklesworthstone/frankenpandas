@@ -21682,6 +21682,48 @@ fn describe_dtype_names(spec: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<String>
 /// Whether a column of `dtype` is what a `describe` include / exclude name
 /// selects ('all', 'number', 'object', 'category', 'bool', 'datetime',
 /// 'timedelta', or a pandas dtype name).
+/// pandas' ValueError for include and exclude sharing canonical types
+/// ([`fp_frame::select_dtype_canonical`]): "include and exclude overlap on
+/// frozenset({<class 'numpy.int64'>})", the set built of numpy's types as
+/// pandas builds it (br-frankenpandas-cmv2p).
+fn select_overlap_error(py: Python<'_>, include: &[&str], exclude: &[&str]) -> PyErr {
+    let excluded: Vec<String> = exclude
+        .iter()
+        .map(|name| fp_frame::select_dtype_canonical(name))
+        .collect();
+    let shared: Vec<String> = include
+        .iter()
+        .map(|name| fp_frame::select_dtype_canonical(name))
+        .filter(|canonical| excluded.contains(canonical))
+        .collect();
+    let built = || -> PyResult<String> {
+        if shared.iter().any(|canonical| canonical == "category") {
+            return Ok(
+                "frozenset({<class 'pandas.core.dtypes.dtypes.CategoricalDtypeType'>})".to_owned(),
+            );
+        }
+        let numpy = py.import("numpy")?;
+        let kinds = shared
+            .iter()
+            .map(|canonical| match canonical.as_str() {
+                "string" => Ok(py.get_type::<pyo3::types::PyString>().into_any()),
+                "bool" => numpy.getattr("bool_"),
+                "object" => numpy.getattr("object_"),
+                other => numpy.getattr(other),
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(pyo3::types::PyFrozenSet::new(py, &kinds)?
+            .repr()?
+            .to_string())
+    };
+    match built() {
+        Ok(shown) => PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "include and exclude overlap on {shown}"
+        )),
+        Err(err) => err,
+    }
+}
+
 /// A select_dtypes selector as the dtype name fp-frame reads: a string as
 /// given, a numpy or builtin type as the kind it names (np.number 'number',
 /// np.integer 'integer', int 'int64', np.object_ 'object'), and a dtype
@@ -21696,6 +21738,8 @@ fn select_dtype_name(item: &Bound<'_, PyAny>) -> PyResult<String> {
         return Ok(match name.as_str() {
             "signedinteger" => "integer".to_owned(),
             "bool_" => "bool".to_owned(),
+            // numpy's str_ is pandas' string dtype error too.
+            "str_" => "str".to_owned(),
             "object_" => "object".to_owned(),
             "int" => "int64".to_owned(),
             "float" => "float64".to_owned(),
@@ -32109,12 +32153,12 @@ impl PyDataFrame {
             .collect()
     }
 
-    /// The reduced columns' dtypes when one of them is masked; None when
-    /// none is, or when a column is not a number or bool (pandas' object
+    /// The reduced columns' dtypes - when `masked`, only if one of them is
+    /// masked; None when a column is not a number or bool (pandas' object
     /// column included), whose answer stays as it was.
-    fn masked_reduced_dtypes(&self, numeric_only: bool) -> Option<Vec<DType>> {
+    fn answer_source_dtypes(&self, numeric_only: bool, masked: bool) -> Option<Vec<DType>> {
         let columns = self.reduced_columns(numeric_only);
-        if !columns.iter().any(|column| column.dtype().is_nullable()) {
+        if masked && !columns.iter().any(|column| column.dtype().is_nullable()) {
             return None;
         }
         columns
@@ -32127,12 +32171,13 @@ impl PyDataFrame {
     }
 
     /// Each reduced column's answer dtype for `op` over the columns
-    /// (axis=0), or - over rows - the one answer of their common dtype, as
-    /// pandas reduces the rows of the columns cast to it (see
-    /// [`column_answer_dtype`]); None as [`Self::masked_reduced_dtypes`], or
-    /// over rows when there is no common number dtype.
+    /// (axis=0, when a column is masked: numpy columns answer right), or -
+    /// over rows - the one answer of their common dtype, as pandas reduces
+    /// the rows of the columns cast to it (see [`column_answer_dtype`]);
+    /// None as [`Self::answer_source_dtypes`], or over rows when there is
+    /// no common number dtype (a bool beside a number, pandas' object).
     fn masked_answers(&self, op: &str, axis: usize, numeric_only: bool) -> Option<Vec<DType>> {
-        let dtypes = self.masked_reduced_dtypes(numeric_only)?;
+        let dtypes = self.answer_source_dtypes(numeric_only, axis == 0)?;
         if axis == 1 {
             let common = common_answer_dtype(&dtypes)?;
             return Some(vec![column_answer_dtype(op, &common)?]);
@@ -32149,7 +32194,7 @@ impl PyDataFrame {
     /// (br-frankenpandas-8u5eh).
     fn refuse_masked_rows(&self, op: &str, axis: usize, numeric_only: bool) -> PyResult<()> {
         let Some(dtypes) = self
-            .masked_reduced_dtypes(numeric_only)
+            .answer_source_dtypes(numeric_only, true)
             .filter(|_| axis == 1)
         else {
             return Ok(());
@@ -32165,10 +32210,12 @@ impl PyDataFrame {
     /// A frame reduction's answer in pandas' dtype when a column it reads is
     /// masked (Int64 / Float64 / boolean): the columns' common answer dtype
     /// ([`common_answer_dtype`]) - masked, or object with each answer its
-    /// own column's kind (a boolean column's min was 0.0); over rows the
-    /// answer of the columns' common dtype. A frame of numpy columns keeps
-    /// its answer. They were numpy float64 / int64, NaN for pd.NA
-    /// (br-frankenpandas-8u5eh).
+    /// own column's kind (a boolean column's min was 0.0); they were numpy
+    /// float64 / int64, NaN for pd.NA (br-frankenpandas-8u5eh). Over rows,
+    /// numpy columns too, the answer of the columns' common dtype: a single
+    /// column's std / var / sem was object (all NaN), a bool column's sum
+    /// float64 and its min 0.0 (br-frankenpandas-bqci7); a bool beside a
+    /// number (pandas' object answers) keeps its float64.
     fn masked_answer(
         &self,
         op: &str,
@@ -41315,6 +41362,7 @@ impl PyDataFrame {
     #[pyo3(signature = (include=None, exclude=None))]
     fn select_dtypes(
         &self,
+        py: Python<'_>,
         include: Option<&Bound<'_, PyAny>>,
         exclude: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
@@ -41336,12 +41384,32 @@ impl PyDataFrame {
         };
         let inc = selector_names(include)?;
         let exc = selector_names(exclude)?;
+        if inc.is_empty() && exc.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "at least one of include or exclude must be nonempty",
+            ));
+        }
         let inc_refs: Vec<&str> = inc.iter().map(String::as_str).collect();
         let exc_refs: Vec<&str> = exc.iter().map(String::as_str).collect();
+        // pandas' errors: an unknown name and a string dtype are its
+        // TypeError, include and exclude sharing a type its ValueError
+        // naming the types (br-frankenpandas-cmv2p).
         let df = self
             .inner
             .select_dtypes_by_name(&inc_refs, &exc_refs)
-            .map_err(frame_error_to_py)?;
+            .map_err(|err| match err {
+                FrameError::CompatibilityRejected(message)
+                    if message.starts_with("data type") || message.starts_with("string dtypes") =>
+                {
+                    PyErr::new::<pyo3::exceptions::PyTypeError, _>(message)
+                }
+                FrameError::CompatibilityRejected(message)
+                    if message.starts_with("include and exclude overlap") =>
+                {
+                    select_overlap_error(py, &inc_refs, &exc_refs)
+                }
+                other => frame_error_to_py(other),
+            })?;
         Ok(PyDataFrame { inner: df })
     }
 

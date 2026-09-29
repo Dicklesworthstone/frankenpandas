@@ -17655,3 +17655,108 @@ def test_resample_apply_rows_fp_refuses_jno5s() -> None:
         zoned.resample("D").apply(lambda g: g.head(2))
     with pytest.raises(NotImplementedError):
         _ra_series(fpd).resample("D").apply(lambda g: g.head(2) if len(g) != 2 else g.sum())
+
+
+# br-frankenpandas-bqci7 (part): a DataFrame's row reductions (axis=1) over
+# numpy columns answer the dtype of the columns' common dtype - a single
+# column's std / var / sem was object (all NaN), a bool column's sum /
+# prod float64 and its min / max 0.0 / 1.0. (A bool beside a number,
+# pandas' object answers, is not covered.)
+def _rd_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "c": [True, False, True],
+            "d": [False, False, True],
+            "i": [1, 2, 3],
+            "j": [4, 5, 6],
+            "n": [1.5, np.nan, 2.5],
+        }
+    )
+
+
+_RD_OPS = ["sum", "prod", "min", "max", "mean", "median", "std", "var", "sem", "skew", "count"]
+
+_RD_CASES = {
+    **{
+        f"{op} of {', '.join(columns)} over rows": (
+            lambda m, op=op, columns=columns: _mk_shown(getattr(_rd_frame(m)[list(columns)], op)(axis=1))
+        )
+        for op in _RD_OPS
+        for columns in [("c",), ("c", "d"), ("i",), ("n",), ("i", "j"), ("i", "n")]
+    },
+    "kurt of four columns over rows": lambda m: _mk_shown(
+        m.DataFrame({"a": [1.0, 2.0], "b": [3.0, 1.0], "c": [2.0, 5.0], "d": [7.0, 1.0]}).kurt(axis=1)
+    ),
+    # Negatives: the columns' reductions (axis 0) answer as before.
+    **{
+        f"{op} of the columns": (lambda m, op=op: _mk_shown(getattr(_rd_frame(m), op)()))
+        for op in ["sum", "min", "std", "mean"]
+    },
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_RD_CASES))
+def test_row_reductions_answer_pandas_dtypes_bqci7(case: str) -> None:
+    run = _RD_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-cmv2p: select_dtypes' selector names as pandas reads them
+# - 'number' / 'integer' take timedelta columns, 'string' pandas' string
+# columns and 'object' the rest, 'datetime' / 'complex' / 'timedelta64[ns]'
+# are names, 'str' / str / numpy.str_ / 'U' pandas' TypeError, 'numeric' /
+# 'categorical' / 'Int64Dtype' / unknown names its "not understood", the
+# include / exclude overlap one canonical type, nothing selected its
+# ValueError.
+def _sn_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "c": [True, False],
+            "n": [1.0, 2.0],
+            "i": [1, 2],
+            "t": ["x", "y"],
+            "k": m.Categorical(["a", "b"]),
+            "d": m.to_timedelta(["1s", "2s"]),
+            "s": m.array(["x", "y"], dtype="string"),
+            "at": m.to_datetime(["2024-01-01", "2024-01-02"]),
+        }
+    )
+
+
+_SN_SELECTORS = [
+    "number", "numeric", "integer", "int", "int64", "Int64", "Int64Dtype", "floating", "float", "Float64",
+    "bool", "boolean", "object", "O", "string", "str", "U", "category", "categorical", "timedelta",
+    "timedelta64", "timedelta64[ns]", "datetime", "datetime64", "datetime64[ns]", "complex", "bogus",
+    str, np.str_, np.timedelta64, np.datetime64, np.number, ["number", "string"], ("category", "bool"),
+]
+
+_SN_CASES = {
+    **{
+        f"{kind} {selector!r}": (
+            lambda m, kind=kind, selector=selector: list(_sn_frame(m).select_dtypes(**{kind: selector}).columns)
+        )
+        for kind in ("include", "exclude")
+        for selector in _SN_SELECTORS
+    },
+    "int beside integer": lambda m: list(_sn_frame(m).select_dtypes(include="int", exclude="integer").columns),
+    "number beside timedelta": lambda m: list(
+        _sn_frame(m).select_dtypes(include="number", exclude="timedelta").columns
+    ),
+    "overlap int and int64": lambda m: list(_sn_frame(m).select_dtypes(include="int", exclude="int64").columns),
+    "overlap bool and boolean": lambda m: list(
+        _sn_frame(m).select_dtypes(include=["bool"], exclude=["boolean"]).columns
+    ),
+    "overlap number": lambda m: list(_sn_frame(m).select_dtypes(include="number", exclude=[np.number]).columns),
+    "overlap category": lambda m: list(_sn_frame(m).select_dtypes(include="category", exclude="category").columns),
+    "overlap string": lambda m: list(_sn_frame(m).select_dtypes(include="string", exclude="string").columns),
+    "nothing selected": lambda m: list(_sn_frame(m).select_dtypes().columns),
+    "empty lists": lambda m: list(_sn_frame(m).select_dtypes(include=[], exclude=[]).columns),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_SN_CASES))
+def test_select_dtypes_names_like_pandas_cmv2p(case: str) -> None:
+    run = _SN_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

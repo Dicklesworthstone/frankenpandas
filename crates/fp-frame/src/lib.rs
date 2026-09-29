@@ -1558,20 +1558,59 @@ fn dtype_memory_width(dtype: DType) -> usize {
     }
 }
 
+/// The column dtypes a pandas select_dtypes name takes. numpy's abstract
+/// number and integer kinds hold timedelta64 (a signed integer), so
+/// 'number' / 'integer' take those columns (they were left out); 'object'
+/// and 'string' tell pandas' string columns apart in the matcher; 'str' is
+/// pandas' TypeError and 'numeric' / 'categorical' are no pandas names
+/// (they were accepted), 'datetime' / 'complex' / 'timedelta64[ns]' are
+/// (they were refused; br-frankenpandas-cmv2p).
 fn expand_dtype_alias(name: &str) -> Result<&'static [DType], FrameError> {
     match name {
-        "number" | "numeric" => Ok(&[DType::Int64, DType::Float64]),
+        "number" => Ok(&[DType::Int64, DType::Float64, DType::Timedelta64]),
+        "integer" => Ok(&[DType::Int64, DType::Timedelta64]),
         // The masked names select the numpy kind too, as pandas' (8u5eh).
-        "integer" | "int" | "int64" | "i8" | "Int64" => Ok(&[DType::Int64]),
+        "int" | "int64" | "i8" | "Int64" => Ok(&[DType::Int64]),
         "floating" | "float" | "float64" | "f8" | "Float64" => Ok(&[DType::Float64]),
         "bool" | "boolean" | "?" => Ok(&[DType::Bool]),
-        "object" | "string" | "str" | "O" => Ok(&[DType::Utf8]),
-        "category" | "categorical" => Ok(&[DType::Categorical]),
-        "timedelta" | "timedelta64" | "m8" => Ok(&[DType::Timedelta64]),
+        "object" | "O" | "string" => Ok(&[DType::Utf8]),
+        "category" => Ok(&[DType::Categorical]),
+        "timedelta" | "timedelta64" | "m8" | "timedelta64[ns]" | "m8[ns]" => {
+            Ok(&[DType::Timedelta64])
+        }
+        "datetime" | "datetime64" | "datetime64[ns]" | "M8" | "M8[ns]" => {
+            Ok(&[DType::Datetime64 { tz: None }])
+        }
+        // A kind no column here holds.
+        "complex" | "complex128" | "c16" => Ok(&[]),
+        "str" | "U" => Err(FrameError::CompatibilityRejected(
+            "string dtypes are not allowed, use 'object' instead".to_owned(),
+        )),
         other => Err(FrameError::CompatibilityRejected(format!(
             "data type '{other}' not understood"
         ))),
     }
+}
+
+/// pandas' canonical type of a select_dtypes name - the numpy scalar type
+/// it resolves to ('int' / 'int64' / 'Int64' one type, 'integer' another):
+/// include and exclude overlap only on the same one (br-frankenpandas-cmv2p).
+#[must_use]
+pub fn select_dtype_canonical(name: &str) -> String {
+    if let Some((width, _)) = NumericWidth::parse(name) {
+        return width.name(false).to_owned();
+    }
+    match name {
+        "int" | "int64" | "i8" | "Int64" => "int64",
+        "float" | "float64" | "f8" | "Float64" => "float64",
+        "bool" | "boolean" | "?" => "bool",
+        "object" | "O" => "object",
+        "timedelta" | "timedelta64" | "m8" | "timedelta64[ns]" | "m8[ns]" => "timedelta64",
+        "datetime" | "datetime64" | "datetime64[ns]" | "M8" | "M8[ns]" => "datetime64",
+        "complex" | "complex128" | "c16" => "complex128",
+        other => other,
+    }
+    .to_owned()
 }
 
 fn expand_dtype_aliases(names: &[&str]) -> Result<Vec<DType>, FrameError> {
@@ -100708,18 +100747,24 @@ impl DataFrame {
     /// set of `DType` variants; unknown aliases return an error consistent
     /// with pandas' `TypeError: data type '...' not understood`.
     ///
-    /// Recognized aliases:
-    /// - `"number"`, `"numeric"` → Int64 + Float64
-    /// - `"integer"`, `"int"`, `"int64"` → Int64
-    /// - `"floating"`, `"float"`, `"float64"` → Float64
+    /// Recognized aliases (the crate's `expand_dtype_alias` table):
+    /// - `"number"` → Int64 + Float64 + Timedelta64, `"integer"` → Int64 +
+    ///   Timedelta64 (numpy's timedelta64 is a signed integer)
+    /// - `"int"`, `"int64"`, `"Int64"` → Int64
+    /// - `"floating"`, `"float"`, `"float64"`, `"Float64"` → Float64
     /// - `"bool"`, `"boolean"` → Bool
-    /// - `"object"`, `"string"`, `"str"` → Utf8
-    /// - `"timedelta"`, `"timedelta64"` → Timedelta64
+    /// - `"object"` → the object columns, `"string"` pandas' string ones
+    /// - `"category"`, `"timedelta"`, `"datetime"` (naive), `"complex"`
     /// - a narrow numpy name (`"int32"`, `"uint8"`, `"float32"`) or its
     ///   masked form (`"Int32"`) → the columns of exactly that width, while
     ///   the exact 64-bit names (`"int64"`, `"int"`, `"float64"`, `"float"`)
     ///   leave those out and the abstract ones (`"number"`, `"integer"`,
     ///   `"floating"`) keep them (fvsao.23).
+    ///
+    /// Include and exclude overlap - pandas' error - only on one canonical
+    /// type ([`select_dtype_canonical`]): 'int' beside 'integer' selects
+    /// the int64 columns that are not integers, none (it was refused;
+    /// br-frankenpandas-cmv2p).
     pub fn select_dtypes_by_name(
         &self,
         include: &[&str],
@@ -100732,16 +100777,22 @@ impl DataFrame {
                 .filter(|name| NumericWidth::parse(name).is_none())
                 .collect()
         }
-        let include_set = expand_dtype_aliases(&storage_names(include))?;
-        let exclude_set = expand_dtype_aliases(&storage_names(exclude))?;
-        let overlap = include_set.iter().any(|dt| exclude_set.contains(dt))
-            || include
-                .iter()
-                .any(|name| NumericWidth::parse(name).is_some() && exclude.contains(name));
-        if overlap {
-            return Err(FrameError::CompatibilityRejected(
-                "include and exclude overlap".to_owned(),
-            ));
+        expand_dtype_aliases(&storage_names(include))?;
+        expand_dtype_aliases(&storage_names(exclude))?;
+        let excluded: Vec<String> = exclude
+            .iter()
+            .map(|name| select_dtype_canonical(name))
+            .collect();
+        let overlap: Vec<String> = include
+            .iter()
+            .map(|name| select_dtype_canonical(name))
+            .filter(|canonical| excluded.contains(canonical))
+            .collect();
+        if !overlap.is_empty() {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "include and exclude overlap on {}",
+                overlap.join(", ")
+            )));
         }
         let matches = |column: &Column, name: &str| {
             // A width name takes the numpy and the masked column of that
@@ -100749,6 +100800,12 @@ impl DataFrame {
             // br-frankenpandas-8u5eh).
             if let Some((width, _)) = NumericWidth::parse(name) {
                 return column.width() == Some(width);
+            }
+            // pandas' string dtype is 'string', not 'object' (cmv2p).
+            match name {
+                "string" => return column.is_pandas_string(),
+                "object" | "O" if column.is_pandas_string() => return false,
+                _ => {}
             }
             let exact_64 = matches!(
                 name,
@@ -157200,18 +157257,35 @@ mod tests {
     fn dataframe_select_dtypes_by_name_unknown_alias_errors() {
         let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(1)])]).unwrap();
 
-        let err = df.select_dtypes_by_name(&["complex"], &[]).unwrap_err();
+        // TEST-CHANGE (cmv2p): 'complex' is a pandas name (it selects no
+        // column here), so the unknown name is one pandas does not know.
+        let err = df.select_dtypes_by_name(&["bogus"], &[]).unwrap_err();
         assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+        assert_eq!(
+            df.select_dtypes_by_name(&["complex"], &[])
+                .unwrap()
+                .num_columns(),
+            0
+        );
+        // 'numeric' and 'categorical' are not pandas names; 'str' is its
+        // string-dtype error.
+        assert!(df.select_dtypes_by_name(&["numeric"], &[]).is_err());
+        assert!(df.select_dtypes_by_name(&["categorical"], &[]).is_err());
+        assert!(df.select_dtypes_by_name(&["str"], &[]).is_err());
     }
 
     #[test]
     fn dataframe_select_dtypes_by_name_overlap_errors() {
         let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(1)])]).unwrap();
 
-        let err = df
-            .select_dtypes_by_name(&["int"], &["integer"])
-            .unwrap_err();
+        // TEST-CHANGE (cmv2p): pandas' overlap is one canonical type -
+        // 'int' and 'int64' are np.int64 - while 'int' beside 'integer'
+        // (np.int64, np.integer) selects the int64 columns that are not
+        // integers: none (pandas 2.2.3; it was refused here).
+        let err = df.select_dtypes_by_name(&["int"], &["int64"]).unwrap_err();
         assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+        let none = df.select_dtypes_by_name(&["int"], &["integer"]).unwrap();
+        assert_eq!(none.num_columns(), 0);
     }
 
     #[test]
