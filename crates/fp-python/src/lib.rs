@@ -26761,13 +26761,30 @@ impl PySeries {
         window: &Bound<'_, PyAny>,
         min_periods: Option<usize>,
         center: bool,
-        win_type: Option<&str>,
+        win_type: Option<&Bound<'_, PyAny>>,
         on: Option<&str>,
         axis: Passed<'_>,
         closed: Option<&str>,
         step: Option<&Bound<'_, PyAny>>,
         method: &str,
-    ) -> PyResult<PyRolling> {
+    ) -> PyResult<Py<PyAny>> {
+        if let Some(win_type) = win_type.filter(|win_type| !win_type.is_none()) {
+            return window_of(
+                py,
+                Some(self.inner.clone()),
+                None,
+                window,
+                min_periods,
+                center,
+                win_type,
+                on,
+                &axis,
+                closed,
+                step,
+                method,
+            )?
+            .into_py_any(py);
+        }
         rolling_of(
             py,
             Some(self.inner.clone()),
@@ -26775,13 +26792,13 @@ impl PySeries {
             window,
             min_periods,
             center,
-            win_type,
             on,
             &axis,
             closed,
             step,
             method,
-        )
+        )?
+        .into_py_any(py)
     }
 
     /// pandas' `expanding(min_periods=1, axis=<no_default>, method='single')`
@@ -38076,13 +38093,30 @@ impl PyDataFrame {
         window: &Bound<'_, PyAny>,
         min_periods: Option<usize>,
         center: bool,
-        win_type: Option<&str>,
+        win_type: Option<&Bound<'_, PyAny>>,
         on: Option<&str>,
         axis: Passed<'_>,
         closed: Option<&str>,
         step: Option<&Bound<'_, PyAny>>,
         method: &str,
-    ) -> PyResult<PyRolling> {
+    ) -> PyResult<Py<PyAny>> {
+        if let Some(win_type) = win_type.filter(|win_type| !win_type.is_none()) {
+            return window_of(
+                py,
+                None,
+                Some(self.inner.clone()),
+                window,
+                min_periods,
+                center,
+                win_type,
+                on,
+                &axis,
+                closed,
+                step,
+                method,
+            )?
+            .into_py_any(py);
+        }
         rolling_of(
             py,
             None,
@@ -38090,13 +38124,13 @@ impl PyDataFrame {
             window,
             min_periods,
             center,
-            win_type,
             on,
             &axis,
             closed,
             step,
             method,
-        )
+        )?
+        .into_py_any(py)
     }
 
     /// pandas' `expanding(min_periods=1, axis=<no_default>, method='single')`
@@ -48461,9 +48495,9 @@ pub struct PyRolling {
 /// a Series or a DataFrame, checked in pandas' order: the deprecated axis
 /// warns; `on` names a frame column; closed / method / step / min_periods
 /// are validated; a time-based window needs a datetime axis and no step.
-/// `win_type` (scipy's weighted windows) and axis=1 are refused; they were
-/// unexpected keywords, as were closed / step / on
-/// (br-frankenpandas-n57tz).
+/// axis=1 is refused; closed / step / on were unexpected keywords
+/// (br-frankenpandas-n57tz). A `win_type` makes pandas' weighted Window
+/// ([`window_of`]) instead.
 #[allow(clippy::too_many_arguments)]
 fn rolling_of(
     py: Python<'_>,
@@ -48472,7 +48506,6 @@ fn rolling_of(
     window: &Bound<'_, PyAny>,
     min_periods: Option<usize>,
     center: bool,
-    win_type: Option<&str>,
     on: Option<&str>,
     axis: &Passed<'_>,
     closed: Option<&str>,
@@ -48545,11 +48578,6 @@ fn rolling_of(
                 "step is not supported with frequency windows",
             ));
         }
-    }
-    if win_type.is_some() {
-        return Err(not_implemented(
-            "rolling(win_type=...) (scipy's weighted windows)",
-        ));
     }
     Ok(PyRolling {
         series,
@@ -48658,7 +48686,10 @@ fn window_reads_as_float(dtype: &DType) -> bool {
 /// and float columns as they are, bool and the nullable numbers as float64,
 /// any other dtype pandas' DataError - unless `numeric_only` leaves it out,
 /// or `every_dtype` (count) takes it as it is. (Other dtypes were left out
-/// silently.)
+/// silently.) numeric_only is pandas' select_dtypes('number'): it leaves
+/// the bool columns out too (they were kept as 0.0 / 1.0), and a bool
+/// column holding a missing value is pandas' object column (it was read
+/// as float; br-frankenpandas-gv69z).
 fn window_frame_input<'a>(
     df: &'a DataFrame,
     on: Option<&str>,
@@ -48678,7 +48709,9 @@ fn window_frame_input<'a>(
         {
             continue;
         }
-        if window_reads_as_float(&dtype) {
+        let boolish = matches!(dtype, DType::Bool | DType::BoolNullable);
+        let object_bool = dtype == DType::Bool && column.has_any_missing();
+        if window_reads_as_float(&dtype) && !object_bool && !(numeric_only && boolish) {
             floats.push((name, DType::Float64));
         } else if numeric_only {
             dropped.push(name);
@@ -49437,6 +49470,815 @@ fn rolling_window_arg(window: &Bound<'_, PyAny>) -> PyResult<(usize, Option<Stri
         Err(_) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "window must be an integer 0 or greater",
         )),
+    }
+}
+
+/// scipy.signal.windows' names this binding computes (their formulas are
+/// scipy's; pandas calls scipy for them), and the ones it only knows.
+const SCIPY_WINDOWS: [&str; 21] = [
+    "barthann",
+    "bartlett",
+    "blackman",
+    "blackmanharris",
+    "bohman",
+    "boxcar",
+    "cosine",
+    "exponential",
+    "flattop",
+    "gaussian",
+    "general_cosine",
+    "general_gaussian",
+    "general_hamming",
+    "hamming",
+    "hann",
+    "kaiser",
+    "lanczos",
+    "nuttall",
+    "parzen",
+    "triang",
+    "tukey",
+];
+const SCIPY_WINDOWS_REFUSED: [&str; 4] = ["chebwin", "dpss", "kaiser_bessel_derived", "taylor"];
+
+/// numpy's `linspace(start, stop, num)`: `start + i * step`, the last point
+/// `stop` itself.
+fn linspace(start: f64, stop: f64, num: usize) -> Vec<f64> {
+    if num == 1 {
+        return vec![start];
+    }
+    let step = (stop - start) / (num - 1) as f64;
+    let mut points: Vec<f64> = (0..num).map(|i| i as f64 * step + start).collect();
+    if let Some(last) = points.last_mut() {
+        *last = stop;
+    }
+    points
+}
+
+/// The modified Bessel function of the first kind, order 0 (numpy's `i0`),
+/// by its power series.
+fn bessel_i0(x: f64) -> f64 {
+    let quarter = x * x / 4.0;
+    let (mut term, mut sum) = (1.0_f64, 1.0_f64);
+    for k in 1..500 {
+        term *= quarter / (k as f64 * k as f64);
+        sum += term;
+        if term < sum * f64::EPSILON {
+            break;
+        }
+    }
+    sum
+}
+
+/// scipy's `general_cosine(M, a)`: the sum of `a[k] cos(k x)` over `x` in
+/// `linspace(-pi, pi, M)`.
+fn general_cosine_window(m: usize, a: &[f64]) -> Vec<f64> {
+    linspace(-std::f64::consts::PI, std::f64::consts::PI, m)
+        .into_iter()
+        .map(|x| {
+            a.iter()
+                .enumerate()
+                .fold(0.0, |sum, (k, coef)| sum + coef * (k as f64 * x).cos())
+        })
+        .collect()
+}
+
+/// scipy.signal.windows' `win_type` window of `len` points - symmetric, or
+/// periodic under `sym=False` - its shape parameters taken from `params`
+/// (pandas passes an aggregation's keywords on): scipy's formulas computed
+/// here. A missing or unexpected parameter is scipy's TypeError
+/// (br-frankenpandas-gv69z).
+fn scipy_window(
+    win_type: &str,
+    len: usize,
+    params: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Vec<f64>> {
+    let type_error = |message: String| PyErr::new::<pyo3::exceptions::PyTypeError, _>(message);
+    let names: &[&str] = match win_type {
+        "kaiser" => &["beta"],
+        "gaussian" => &["std"],
+        "general_gaussian" => &["p", "sig"],
+        "exponential" => &["center", "tau"],
+        "tukey" | "general_hamming" => &["alpha"],
+        "general_cosine" => &["a"],
+        _ => &[],
+    };
+    let mut given: HashMap<String, Bound<'_, PyAny>> = HashMap::new();
+    let mut sym = true;
+    if let Some(params) = params {
+        for (key, value) in params.iter() {
+            let key: String = key.extract()?;
+            if key == "sym" {
+                sym = value.is_truthy()?;
+            } else if names.contains(&key.as_str()) {
+                given.insert(key, value);
+            } else {
+                return Err(type_error(format!(
+                    "{win_type}() got an unexpected keyword argument '{key}'"
+                )));
+            }
+        }
+    }
+    let optional = |name: &str| matches!((win_type, name), ("exponential", _) | ("tukey", "alpha"));
+    let missing: Vec<String> = names
+        .iter()
+        .filter(|name| !optional(name) && !given.contains_key(**name))
+        .map(|name| format!("'{name}'"))
+        .collect();
+    if !missing.is_empty() {
+        let listed = match missing.as_slice() {
+            [one] => one.clone(),
+            [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+            [] => String::new(),
+        };
+        let noun = if missing.len() == 1 {
+            "argument"
+        } else {
+            "arguments"
+        };
+        return Err(type_error(format!(
+            "{win_type}() missing {} required positional {noun}: {listed}",
+            missing.len()
+        )));
+    }
+    let number = |name: &str, default: f64| -> PyResult<f64> {
+        given
+            .get(name)
+            .filter(|value| !value.is_none())
+            .map_or(Ok(default), |value| value.extract::<f64>())
+    };
+    if len <= 1 {
+        return Ok(vec![1.0; len]);
+    }
+    let m = if sym { len } else { len + 1 };
+    let mf = m as f64;
+    let pi = std::f64::consts::PI;
+    let n: Vec<f64> = (0..m).map(|i| i as f64).collect();
+    let mut w: Vec<f64> = match win_type {
+        "boxcar" => vec![1.0; m],
+        "triang" => {
+            let half: Vec<f64> = (1..=m.div_ceil(2)).map(|k| k as f64).collect();
+            if m % 2 == 0 {
+                let rise: Vec<f64> = half.iter().map(|k| (2.0 * k - 1.0) / mf).collect();
+                rise.iter().chain(rise.iter().rev()).copied().collect()
+            } else {
+                let rise: Vec<f64> = half.iter().map(|k| 2.0 * k / (mf + 1.0)).collect();
+                rise.iter()
+                    .chain(rise.iter().rev().skip(1))
+                    .copied()
+                    .collect()
+            }
+        }
+        "hamming" => general_cosine_window(m, &[0.54, 0.46]),
+        "hann" => general_cosine_window(m, &[0.5, 0.5]),
+        "blackman" => general_cosine_window(m, &[0.42, 0.50, 0.08]),
+        "blackmanharris" => general_cosine_window(m, &[0.35875, 0.48829, 0.14128, 0.01168]),
+        "nuttall" => general_cosine_window(m, &[0.3635819, 0.4891775, 0.1365995, 0.0106411]),
+        "flattop" => general_cosine_window(
+            m,
+            &[
+                0.21557895,
+                0.41663158,
+                0.277263158,
+                0.083578947,
+                0.006947368,
+            ],
+        ),
+        "general_hamming" => {
+            let alpha = number("alpha", 0.0)?;
+            general_cosine_window(m, &[alpha, 1.0 - alpha])
+        }
+        "general_cosine" => {
+            let a: Vec<f64> = given
+                .get("a")
+                .map(|value| value.extract::<Vec<f64>>())
+                .transpose()?
+                .unwrap_or_default();
+            general_cosine_window(m, &a)
+        }
+        "bartlett" => n
+            .iter()
+            .map(|&k| {
+                if k <= (mf - 1.0) / 2.0 {
+                    2.0 * k / (mf - 1.0)
+                } else {
+                    2.0 - 2.0 * k / (mf - 1.0)
+                }
+            })
+            .collect(),
+        "parzen" => {
+            let centred: Vec<f64> = (0..m).map(|i| i as f64 - (mf - 1.0) / 2.0).collect();
+            let outer = |x: f64| 2.0 * (1.0 - x.abs() / (mf / 2.0)).powi(3);
+            let inner = |x: f64| {
+                let r = x.abs() / (mf / 2.0);
+                1.0 - 6.0 * r.powi(2) + 6.0 * r.powi(3)
+            };
+            let na: Vec<f64> = centred
+                .iter()
+                .copied()
+                .filter(|&x| x < -(mf - 1.0) / 4.0)
+                .collect();
+            let nb: Vec<f64> = centred
+                .iter()
+                .copied()
+                .filter(|&x| x.abs() <= (mf - 1.0) / 4.0)
+                .collect();
+            let wa: Vec<f64> = na.iter().map(|&x| outer(x)).collect();
+            wa.iter()
+                .copied()
+                .chain(nb.iter().map(|&x| inner(x)))
+                .chain(wa.iter().rev().copied())
+                .collect()
+        }
+        "bohman" => {
+            let inside = linspace(-1.0, 1.0, m);
+            let mut w = vec![0.0];
+            w.extend(inside[1..m - 1].iter().map(|x| {
+                let fac = x.abs();
+                (1.0 - fac) * (pi * fac).cos() + (pi * fac).sin() / pi
+            }));
+            w.push(0.0);
+            w
+        }
+        "barthann" => n
+            .iter()
+            .map(|&k| {
+                let fac = (k / (mf - 1.0) - 0.5).abs();
+                0.62 - 0.48 * fac + 0.38 * (2.0 * pi * fac).cos()
+            })
+            .collect(),
+        "kaiser" => {
+            let beta = number("beta", 0.0)?;
+            let alpha = (mf - 1.0) / 2.0;
+            n.iter()
+                .map(|&k| {
+                    bessel_i0(beta * (1.0 - ((k - alpha) / alpha).powi(2)).sqrt()) / bessel_i0(beta)
+                })
+                .collect()
+        }
+        "gaussian" => {
+            let std = number("std", 0.0)?;
+            n.iter()
+                .map(|&k| {
+                    let x = k - (mf - 1.0) / 2.0;
+                    (-x * x / (2.0 * std * std)).exp()
+                })
+                .collect()
+        }
+        "general_gaussian" => {
+            let (p, sig) = (number("p", 0.0)?, number("sig", 0.0)?);
+            n.iter()
+                .map(|&k| (-0.5 * ((k - (mf - 1.0) / 2.0) / sig).abs().powf(2.0 * p)).exp())
+                .collect()
+        }
+        "exponential" => {
+            let centre = given.get("center").filter(|value| !value.is_none());
+            if sym && centre.is_some() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "If sym==True, center must be None.",
+                ));
+            }
+            let centre = number("center", (mf - 1.0) / 2.0)?;
+            let tau = number("tau", 1.0)?;
+            n.iter()
+                .map(|&k| (-(k - centre).abs() / tau).exp())
+                .collect()
+        }
+        "cosine" => n.iter().map(|&k| (pi / mf * (k + 0.5)).sin()).collect(),
+        "lanczos" => {
+            let sinc = |x: f64| {
+                if x == 0.0 {
+                    1.0
+                } else {
+                    (pi * x).sin() / (pi * x)
+                }
+            };
+            let right = |from: f64| -> Vec<f64> {
+                let mut values = Vec::new();
+                let mut k = from;
+                while k < mf {
+                    values.push(sinc(2.0 * k / (mf - 1.0) - 1.0));
+                    k += 1.0;
+                }
+                values
+            };
+            if m % 2 == 0 {
+                let wh = right(mf / 2.0);
+                wh.iter().rev().chain(wh.iter()).copied().collect()
+            } else {
+                let wh = right((mf + 1.0) / 2.0);
+                wh.iter()
+                    .rev()
+                    .copied()
+                    .chain(std::iter::once(1.0))
+                    .chain(wh.iter().copied())
+                    .collect()
+            }
+        }
+        "tukey" => {
+            let alpha = number("alpha", 0.5)?;
+            if alpha <= 0.0 {
+                vec![1.0; m]
+            } else if alpha >= 1.0 {
+                general_cosine_window(m, &[0.5, 0.5])
+            } else {
+                let width = (alpha * (mf - 1.0) / 2.0).floor() as usize;
+                n.iter()
+                    .enumerate()
+                    .map(|(i, &k)| {
+                        if i <= width {
+                            0.5 * (1.0 + (pi * (-1.0 + 2.0 * k / alpha / (mf - 1.0))).cos())
+                        } else if i >= m - width - 1 {
+                            0.5 * (1.0
+                                + (pi * (-2.0 / alpha + 1.0 + 2.0 * k / alpha / (mf - 1.0))).cos())
+                        } else {
+                            1.0
+                        }
+                    })
+                    .collect()
+            }
+        }
+        other => return Err(not_implemented(&format!("rolling(win_type='{other}')"))),
+    };
+    if !sym {
+        w.truncate(len);
+    }
+    Ok(w)
+}
+
+/// pandas' roll_weighted_sum / roll_weighted_mean over `values` (NaN is
+/// missing): each window's present values times the weights at their
+/// window positions (oldest first), NaN under `minp` present values; the
+/// mean divides by those weights' sum (NaN when it is 0).
+fn roll_weighted_sum_mean(values: &[f64], weights: &[f64], minp: usize, avg: bool) -> Vec<f64> {
+    let (in_n, win_n) = (values.len(), weights.len());
+    let mut output = vec![0.0; in_n];
+    let mut counts = vec![0_usize; in_n];
+    let mut total = vec![0.0; in_n];
+    let minp = if !avg && minp > in_n { in_n + 1 } else { minp }.max(1);
+    for (win_i, &weight) in weights.iter().enumerate() {
+        if weight.is_nan() {
+            continue;
+        }
+        let shift = win_n - win_i - 1;
+        for in_i in 0..in_n.saturating_sub(shift) {
+            let value = values[in_i];
+            if !value.is_nan() {
+                output[in_i + shift] += value * weight;
+                counts[in_i + shift] += 1;
+                total[in_i + shift] += weight;
+            }
+        }
+    }
+    for i in 0..in_n {
+        if counts[i] < minp || (avg && total[i] == 0.0) {
+            output[i] = f64::NAN;
+        } else if avg {
+            output[i] /= total[i];
+        }
+    }
+    output
+}
+
+/// pandas' roll_weighted_var: West's weighted online variance, a value
+/// keeping the weight `weights[i % len]` while it is in the window (as
+/// pandas'), scaled `t * len / ((len - ddof) * sum_w)`; NaN under `minp`
+/// present values or at most `ddof`, 0 for a single one.
+fn roll_weighted_var(values: &[f64], weights: &[f64], minp: usize, ddof: usize) -> Vec<f64> {
+    let (n, win_n) = (values.len(), weights.len());
+    if win_n == 0 {
+        return vec![f64::NAN; n];
+    }
+    let mut state = WestVar::default();
+    let var = |state: &WestVar| {
+        if state.nobs >= minp && state.nobs > ddof {
+            if state.nobs == 1 {
+                0.0
+            } else {
+                let scale = win_n as f64 / ((win_n as f64 - ddof as f64) * state.sum_w);
+                (state.t * scale).max(0.0)
+            }
+        } else {
+            f64::NAN
+        }
+    };
+    let mut output = Vec::with_capacity(n);
+    for i in 0..win_n.min(n) {
+        state.add(values[i], weights[i]);
+        output.push(var(&state));
+    }
+    for i in win_n..n {
+        state.remove(values[i - win_n], weights[(i - win_n) % win_n]);
+        state.add(values[i], weights[i % win_n]);
+        output.push(var(&state));
+    }
+    output
+}
+
+/// West's weighted online mean and sum of squared deviations - pandas'
+/// add_weighted_var / remove_weighted_var; a NaN value changes nothing.
+#[derive(Default)]
+struct WestVar {
+    t: f64,
+    sum_w: f64,
+    mean: f64,
+    nobs: usize,
+}
+
+impl WestVar {
+    fn add(&mut self, value: f64, w: f64) {
+        if value.is_nan() {
+            return;
+        }
+        self.nobs += 1;
+        let q = value - self.mean;
+        let total = self.sum_w + w;
+        let r = q * w / total;
+        self.mean += r;
+        self.t += r * self.sum_w * q;
+        self.sum_w = total;
+    }
+
+    fn remove(&mut self, value: f64, w: f64) {
+        if value.is_nan() {
+            return;
+        }
+        self.nobs -= 1;
+        if self.nobs == 0 {
+            *self = Self::default();
+            return;
+        }
+        let q = value - self.mean;
+        let total = self.sum_w - w;
+        let r = q * w / total;
+        self.mean -= r;
+        self.t -= r * self.sum_w * q;
+        self.sum_w = total;
+    }
+}
+
+/// pandas' `Window`: `rolling(window, win_type=...)`'s weighted windows,
+/// scipy.signal.windows' shapes ([`scipy_window`]) over `window` rows -
+/// sum / mean / var / std weighted as pandas' (centred windows, min_periods
+/// and step as rolling's). win_type was refused (br-frankenpandas-gv69z).
+#[pyclass(name = "Window")]
+pub struct PyWindow {
+    series: Option<Series>,
+    dataframe: Option<DataFrame>,
+    window: usize,
+    min_periods: Option<usize>,
+    center: bool,
+    win_type: String,
+    step: Option<usize>,
+}
+
+/// pandas' `rolling(win_type=...)`: rolling's own checks ([`rolling_of`]),
+/// then the Window's - a win_type scipy knows (pandas' "Invalid win_type"),
+/// a count window ("window must be an integer 0 or greater"), method
+/// 'single'. A window along `on` is refused.
+#[allow(clippy::too_many_arguments)]
+fn window_of(
+    py: Python<'_>,
+    series: Option<Series>,
+    dataframe: Option<DataFrame>,
+    window: &Bound<'_, PyAny>,
+    min_periods: Option<usize>,
+    center: bool,
+    win_type: &Bound<'_, PyAny>,
+    on: Option<&str>,
+    axis: &Passed<'_>,
+    closed: Option<&str>,
+    step: Option<&Bound<'_, PyAny>>,
+    method: &str,
+) -> PyResult<PyWindow> {
+    let rolling = rolling_of(
+        py,
+        series,
+        dataframe,
+        window,
+        min_periods,
+        center,
+        on,
+        axis,
+        closed,
+        step,
+        method,
+    )?;
+    let name = win_type.extract::<String>().ok().filter(|name| {
+        SCIPY_WINDOWS.contains(&name.as_str()) || SCIPY_WINDOWS_REFUSED.contains(&name.as_str())
+    });
+    let Some(name) = name else {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "Invalid win_type {}",
+            win_type.str()?
+        )));
+    };
+    if rolling.offset.is_some() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "window must be an integer 0 or greater",
+        ));
+    }
+    if rolling.table {
+        return Err(not_implemented(
+            "'single' is the only supported method type.",
+        ));
+    }
+    if SCIPY_WINDOWS_REFUSED.contains(&name.as_str()) {
+        return Err(not_implemented(&format!("rolling(win_type='{name}')")));
+    }
+    if rolling.on.is_some() {
+        return Err(not_implemented("rolling(win_type=..., on=...)"));
+    }
+    Ok(PyWindow {
+        series: rolling.series,
+        dataframe: rolling.dataframe,
+        window: rolling.window,
+        min_periods: rolling.min_periods,
+        center: rolling.center,
+        win_type: name,
+        step: rolling.step,
+    })
+}
+
+impl PyWindow {
+    /// `op` ('sum' / 'mean' / 'var' / 'std') over the weighted windows of
+    /// each numeric column as pandas' Window._apply runs it: the weights
+    /// for `params`, the input padded by the centring offset of NaNs and
+    /// the answer shifted back, every `step`-th row.
+    fn run(
+        &self,
+        py: Python<'_>,
+        op: &str,
+        ddof: usize,
+        numeric_only: bool,
+        params: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let weights = scipy_window(&self.win_type, self.window, params)?;
+        let offset = if self.center {
+            weights.len().saturating_sub(1) / 2
+        } else {
+            0
+        };
+        let minp = self.min_periods.unwrap_or(weights.len());
+        let reduce = |column: &Column| -> PyResult<Column> {
+            let mut values: Vec<f64> = column
+                .values()
+                .iter()
+                .map(|value| {
+                    if value.is_missing() {
+                        f64::NAN
+                    } else {
+                        value.to_f64().unwrap_or(f64::NAN)
+                    }
+                })
+                .collect();
+            values.extend(std::iter::repeat_n(f64::NAN, offset));
+            let mut out = match op {
+                "sum" => roll_weighted_sum_mean(&values, &weights, minp, false),
+                "mean" => roll_weighted_sum_mean(&values, &weights, minp, true),
+                _ => {
+                    let var = roll_weighted_var(&values, &weights, minp, ddof);
+                    if op == "std" {
+                        var.into_iter().map(|v| v.max(0.0).sqrt()).collect()
+                    } else {
+                        var
+                    }
+                }
+            };
+            out.drain(..offset.min(out.len()));
+            if let Some(step) = self.step {
+                if step == 0 {
+                    return Err(PyErr::new::<pyo3::exceptions::PyZeroDivisionError, _>(
+                        "division by zero",
+                    ));
+                }
+                out = out.into_iter().step_by(step).collect();
+            }
+            Ok(Column::from_f64_values(out))
+        };
+        let rows = |index: &Index| -> PyResult<Index> {
+            match self.step {
+                Some(step) if step > 0 => {
+                    let positions: Vec<usize> = (0..index.len()).step_by(step).collect();
+                    Ok(index.take(&positions))
+                }
+                _ => Ok(index.clone()),
+            }
+        };
+        if let Some(s) = &self.series {
+            let s = window_series_input(s, "Window", op, numeric_only, false)?;
+            let column = reduce(s.column())?;
+            let res = Series::new(s.name().clone(), rows(s.index())?, column)
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        let Some(df) = &self.dataframe else {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Empty window object",
+            ));
+        };
+        let df = window_frame_input(df, None, numeric_only, false)?;
+        let mut res = match self.step {
+            Some(step) if step > 0 => {
+                let positions: Vec<usize> = (0..df.len()).step_by(step).collect();
+                df.take_rows(&positions).map_err(frame_error_to_py)?
+            }
+            _ => df.as_ref().clone(),
+        };
+        for position in 0..df.num_columns() {
+            let (Some(name), Some(column)) = (df.column_name_at(position), df.column_at(position))
+            else {
+                continue;
+            };
+            res = res
+                .with_column(name, reduce(column)?)
+                .map_err(frame_error_to_py)?;
+        }
+        Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
+    }
+
+    /// These windows over the columns `key` selects ([`window_select`]).
+    fn selected(&self, key: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let select = window_select(self.dataframe.as_ref(), key)?;
+        let Some(df) = &self.dataframe else {
+            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                "Column not found",
+            ));
+        };
+        let (series, dataframe) = match window_selection_target(df, &select)? {
+            ResampleTarget::Series(series) => (Some(series), None),
+            ResampleTarget::DataFrame(frame) => (None, Some(frame)),
+        };
+        Ok(Self {
+            series,
+            dataframe,
+            window: self.window,
+            min_periods: self.min_periods,
+            center: self.center,
+            win_type: self.win_type.clone(),
+            step: self.step,
+        })
+    }
+}
+
+#[pymethods]
+impl PyWindow {
+    fn __repr__(&self) -> String {
+        format!(
+            "Window [window={},center={},win_type={},axis=0,method=single]",
+            self.window,
+            if self.center { "True" } else { "False" },
+            self.win_type
+        )
+    }
+
+    /// pandas' column selection, as Rolling's.
+    fn __getitem__(&self, key: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.selected(key)
+    }
+
+    /// A frame column as an attribute, as pandas; any other name is its
+    /// AttributeError (pandas' Window has sum / mean / var / std alone).
+    fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<Self> {
+        let key = pyo3::types::PyString::new(py, name);
+        if self
+            .dataframe
+            .as_ref()
+            .is_some_and(|df| frame_column_name_for(df, key.as_any()).is_some())
+        {
+            return self.selected(key.as_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+            format!("'Window' object has no attribute '{name}'"),
+        ))
+    }
+
+    #[getter]
+    fn window(&self) -> usize {
+        self.window
+    }
+
+    #[getter]
+    fn win_type(&self) -> String {
+        self.win_type.clone()
+    }
+
+    #[getter]
+    fn min_periods(&self) -> Option<usize> {
+        self.min_periods
+    }
+
+    #[getter]
+    fn center(&self) -> bool {
+        self.center
+    }
+
+    #[getter]
+    fn step(&self) -> Option<usize> {
+        self.step
+    }
+
+    #[getter]
+    fn method(&self) -> &'static str {
+        "single"
+    }
+
+    #[getter]
+    fn axis(&self) -> usize {
+        0
+    }
+
+    #[getter]
+    pub fn ndim(&self) -> usize {
+        if self.series.is_some() { 1 } else { 2 }
+    }
+
+    /// The weighted sum; `kwargs` are the window's shape parameters
+    /// (gaussian's `std`, kaiser's `beta`, ...).
+    #[pyo3(signature = (numeric_only=false, **kwargs))]
+    fn sum(
+        &self,
+        py: Python<'_>,
+        numeric_only: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.run(py, "sum", 0, numeric_only, kwargs)
+    }
+
+    /// The weighted mean.
+    #[pyo3(signature = (numeric_only=false, **kwargs))]
+    fn mean(
+        &self,
+        py: Python<'_>,
+        numeric_only: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.run(py, "mean", 0, numeric_only, kwargs)
+    }
+
+    /// The weighted variance (pandas' scaling; see [`roll_weighted_var`]).
+    #[pyo3(signature = (ddof=1, numeric_only=false, **kwargs))]
+    fn var(
+        &self,
+        py: Python<'_>,
+        ddof: i64,
+        numeric_only: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.run(py, "var", window_ddof(ddof)?, numeric_only, kwargs)
+    }
+
+    /// The weighted standard deviation, the variance's square root.
+    #[pyo3(signature = (ddof=1, numeric_only=false, **kwargs))]
+    fn std(
+        &self,
+        py: Python<'_>,
+        ddof: i64,
+        numeric_only: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.run(py, "std", window_ddof(ddof)?, numeric_only, kwargs)
+    }
+
+    /// pandas' `agg`: a name (sum / mean / var / std) or a list of them,
+    /// one column each.
+    #[pyo3(signature = (func, *args, **kwargs))]
+    fn agg(
+        &self,
+        py: Python<'_>,
+        func: &Bound<'_, PyAny>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = args;
+        if let Ok(name) = func.extract::<String>() {
+            return match name.as_str() {
+                "sum" | "mean" => self.run(py, &name, 0, false, kwargs),
+                "var" | "std" => self.run(py, &name, 1, false, kwargs),
+                other => Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                    format!("'Window' object has no attribute '{other}'"),
+                )),
+            };
+        }
+        if let Ok(names) = func.extract::<Vec<String>>() {
+            let mut results = Vec::with_capacity(names.len());
+            for name in &names {
+                let name = pyo3::types::PyString::new(py, name);
+                results.push(self.agg(py, name.as_any(), args, kwargs)?.into_bound(py));
+            }
+            return Ok(concat_side_by_side(py, results, names)?.unbind());
+        }
+        Err(not_implemented("Window.agg of anything but names"))
+    }
+
+    #[pyo3(signature = (func, *args, **kwargs))]
+    fn aggregate(
+        &self,
+        py: Python<'_>,
+        func: &Bound<'_, PyAny>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.agg(py, func, args, kwargs)
     }
 }
 
@@ -60322,10 +61164,17 @@ fn date_range_endpoint(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Option<i64>> 
         );
         return Ok(Some(days * 86_400_000_000_000));
     }
+    // Text reads as pandas' Timestamp(text) does ('2024' is its first day;
+    // it was "cannot parse '2024' as Timestamp").
     let text: String = obj.extract()?;
-    let ts = Timestamp::parse(&text)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-    Ok(Some(ts.nanos))
+    let stamp = obj
+        .py()
+        .get_type::<PyTimestamp>()
+        .call1((text,))?
+        .extract::<PyRef<'_, PyTimestamp>>()?
+        .inner
+        .nanos;
+    Ok(Some(stamp))
 }
 
 /// The replacement pandas 2.2 names when `freq` spells a deprecated alias
@@ -73896,8 +74745,10 @@ mod tests {
         let mut py_s = PySeries { inner: s };
 
         pyo3::Python::initialize();
-        let roll = Python::attach(|py| {
-            py_s.rolling(
+        // The binding answers a Python object (a Window under win_type), so
+        // its attributes are read as Python's (gv69z).
+        let (window, center) = Python::attach(|py| {
+            let roll = py_s.rolling(
                 py,
                 pyo3::types::PyInt::new(py, 2).as_any(),
                 None,
@@ -73908,11 +74759,16 @@ mod tests {
                 None,
                 None,
                 "single",
-            )
+            )?;
+            let roll = roll.bind(py);
+            Ok::<_, PyErr>((
+                roll.getattr("window")?.extract::<usize>()?,
+                roll.getattr("center")?.extract::<bool>()?,
+            ))
         })
         .expect("rolling"); // ubs:ignore — test fixture
-        assert_eq!(roll.window, 2);
-        assert!(!roll.center);
+        assert_eq!(window, 2);
+        assert!(!center);
 
         let exp = Python::attach(|py| py_s.expanding(py, None, Passed(None), "single"))
             .expect("expanding"); // ubs:ignore — test fixture
@@ -74009,9 +74865,11 @@ mod tests {
                     None,
                     "single",
                 )
-                .expect("rolling"); // ubs:ignore — test fixture
-            assert_eq!(roll.window, 2);
-            assert!(!roll.center);
+                .expect("rolling") // ubs:ignore — test fixture
+                .into_bound(py);
+            let attribute = |name: &str| roll.getattr(name).expect("window attribute"); // ubs:ignore — test fixture
+            assert_eq!(attribute("window").extract::<usize>().ok(), Some(2));
+            assert_eq!(attribute("center").extract::<bool>().ok(), Some(false));
 
             let tr = py_df.transposed().expect("transpose"); // ubs:ignore — test fixture
             assert_eq!(tr.shape(), (2, 3));
@@ -74291,22 +75149,26 @@ mod tests {
         let t_df = py_df.T().expect("T"); // ubs:ignore — test fixture
         assert_eq!(t_df.shape(), (2, 2));
 
-        let roll = Python::attach(|py| {
-            py_df.rolling(
-                py,
-                pyo3::types::PyInt::new(py, 2).as_any(),
-                None,
-                false,
-                None,
-                None,
-                Passed(None),
-                None,
-                None,
-                "single",
-            )
+        let ndim = Python::attach(|py| {
+            py_df
+                .rolling(
+                    py,
+                    pyo3::types::PyInt::new(py, 2).as_any(),
+                    None,
+                    false,
+                    None,
+                    None,
+                    Passed(None),
+                    None,
+                    None,
+                    "single",
+                )?
+                .bind(py)
+                .getattr("ndim")?
+                .extract::<usize>()
         })
         .expect("rolling"); // ubs:ignore — test fixture
-        assert_eq!(roll.ndim(), 2);
+        assert_eq!(ndim, 2);
         let exp = Python::attach(|py| py_df.expanding(py, None, Passed(None), "single"))
             .expect("expanding"); // ubs:ignore — test fixture
         assert_eq!(exp.ndim(), 2);

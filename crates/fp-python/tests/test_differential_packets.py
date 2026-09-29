@@ -17760,3 +17760,109 @@ _SN_CASES = {
 def test_select_dtypes_names_like_pandas_cmv2p(case: str) -> None:
     run = _SN_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-gv69z (part): rolling(win_type=...) - pandas' weighted
+# Window over scipy.signal.windows' shapes (it was refused); numeric_only
+# windows leave bool columns out (they were kept as 0.0 / 1.0); a
+# date_range endpoint '2024' is its first day (it failed to parse).
+def _wt_series(m: Any) -> Any:
+    return m.Series([1.0, 4.0, np.nan, 2.0, 7.0, 3.0, 5.0, 6.0], name="x")
+
+
+def _wt_frame(m: Any) -> Any:
+    return m.DataFrame({"a": [1, 4, 2, 7, 3], "b": [0.5, np.nan, 1.5, 2.5, 4.0], "c": [True, False, True, True, False]})
+
+
+def _wt_error(run: Any) -> list:
+    try:
+        run()
+    except Exception as e:  # noqa: BLE001 - the error is the outcome
+        return [type(e).__name__, str(e)]
+    return ["no error"]
+
+
+_WT_WINDOWS = [
+    ("boxcar", {}), ("triang", {}), ("blackman", {}), ("hamming", {}), ("hann", {}), ("bartlett", {}),
+    ("parzen", {}), ("bohman", {}), ("blackmanharris", {}), ("nuttall", {}), ("barthann", {}),
+    ("kaiser", {"beta": 2.5}), ("gaussian", {"std": 1.2}), ("general_gaussian", {"p": 1.5, "sig": 2.0}),
+    ("exponential", {"tau": 2.0}), ("cosine", {}), ("flattop", {}), ("lanczos", {}),
+    ("tukey", {"alpha": 0.4}), ("general_hamming", {"alpha": 0.6}), ("general_cosine", {"a": [0.5, 0.3, 0.2]}),
+]
+
+_WT_CASES = {
+    **{
+        f"{win_type} {size} mean": (
+            lambda m, win_type=win_type, kw=kw, size=size: _mk_shown(
+                _wt_series(m).rolling(size, win_type=win_type, min_periods=1).mean(**kw)
+            )
+        )
+        for win_type, kw in _WT_WINDOWS
+        for size in (1, 4, 5)
+    },
+    **{
+        f"{win_type} sum": (
+            lambda m, win_type=win_type, kw=kw: _mk_shown(_wt_series(m).rolling(3, win_type=win_type).sum(**kw))
+        )
+        for win_type, kw in _WT_WINDOWS
+    },
+    "periodic hann": lambda m: _mk_shown(_wt_series(m).rolling(4, win_type="hann", min_periods=1).mean(sym=False)),
+    "var": lambda m: _mk_shown(_wt_series(m).rolling(4, win_type="triang", min_periods=2).var()),
+    "std centred": lambda m: _mk_shown(_wt_series(m).rolling(3, win_type="triang", min_periods=1, center=True).std()),
+    "var ddof 0": lambda m: _mk_shown(_wt_series(m).rolling(3, win_type="hamming", min_periods=1).var(ddof=0)),
+    "mean centred even": lambda m: _mk_shown(
+        _wt_series(m).rolling(4, win_type="triang", center=True, min_periods=1).mean()
+    ),
+    "frame mean": lambda m: _mk_shown(_wt_frame(m).rolling(3, win_type="triang", min_periods=1).mean()),
+    "frame sum": lambda m: _mk_shown(_wt_frame(m).rolling(2, win_type="boxcar").sum()),
+    "frame selection": lambda m: _mk_shown(_wt_frame(m).rolling(2, win_type="boxcar")["b"].sum()),
+    "frame numeric_only": lambda m: _mk_shown(
+        _wt_frame(m).assign(t=list("abcde")).rolling(2, win_type="boxcar").sum(numeric_only=True)
+    ),
+    "agg name": lambda m: _mk_shown(_wt_series(m).rolling(3, win_type="triang").agg("mean")),
+    "agg list": lambda m: _mk_shown(_wt_series(m).rolling(3, win_type="triang").agg(["sum", "mean"])),
+    "class and repr": lambda m: [
+        type(_wt_series(m).rolling(3, win_type="triang")).__name__,
+        repr(_wt_series(m).rolling(3, win_type="triang")),
+        _wt_series(m).rolling(3, win_type="triang").win_type,
+        _wt_series(m).rolling(3, win_type="triang").window,
+    ],
+    "window 0": lambda m: _mk_shown(_wt_series(m).rolling(0, win_type="triang").mean()),
+    "step": lambda m: _mk_shown(_wt_series(m).rolling(3, win_type="triang", step=2).mean()),
+    "int series": lambda m: _mk_shown(m.Series([1, 2, 3, 4]).rolling(2, win_type="triang").sum()),
+    # Negatives: pandas' errors.
+    # pandas' DataError lives in pandas.errors, fp's in frankenpandas.errors:
+    # the class name and message are compared.
+    "text column": lambda m: _wt_error(
+        lambda: _wt_frame(m).assign(t=list("abcde")).rolling(2, win_type="boxcar").sum()
+    ),
+    "max": lambda m: _mk_shown(_wt_series(m).rolling(3, win_type="triang").max()),
+    "gaussian without std": lambda m: _mk_shown(_wt_series(m).rolling(3, win_type="gaussian").mean()),
+    "general_gaussian without sig": lambda m: _mk_shown(
+        _wt_series(m).rolling(3, win_type="general_gaussian").mean(p=1.0)
+    ),
+    "unexpected parameter": lambda m: _mk_shown(_wt_series(m).rolling(3, win_type="triang").mean(std=1.0)),
+    "unknown win_type": lambda m: [_wt_series(m).rolling(3, win_type="bogus")],
+    "int win_type": lambda m: [_wt_series(m).rolling(3, win_type=5)],
+    "time window": lambda m: [
+        _wt_series(m).set_axis(m.date_range("2024-01-01", periods=8)).rolling("2D", win_type="triang")
+    ],
+    "min_periods above the window": lambda m: _mk_shown(
+        _wt_series(m).rolling(3, win_type="triang", min_periods=10).sum()
+    ),
+    # numeric_only leaves bool columns out, as pandas' select_dtypes('number').
+    "rolling numeric_only": lambda m: _mk_shown(
+        _wt_frame(m).assign(t=list("abcde")).rolling(2).sum(numeric_only=True)
+    ),
+    "expanding numeric_only": lambda m: _mk_shown(_wt_frame(m).expanding().mean(numeric_only=True)),
+    "ewm numeric_only": lambda m: _mk_shown(_wt_frame(m).ewm(span=2).mean(numeric_only=True)),
+    "rolling of bools": lambda m: _mk_shown(_wt_frame(m)[["a", "c"]].rolling(2).sum()),
+    "date_range from a year": lambda m: [str(x) for x in m.date_range("2024", periods=2)],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_WT_CASES))
+def test_weighted_windows_like_pandas_gv69z(case: str) -> None:
+    run = _WT_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
