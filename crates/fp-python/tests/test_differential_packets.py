@@ -19918,3 +19918,45 @@ _E52_CASES = {
 def test_everyday52_read_json_conversions_like_pandas_3rj8b(case: str) -> None:
     run = _E52_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-tdafd: text astype(bool) is Python truthiness (raised),
+# a masked Series' astype(str) spells <NA> ('None'), NA ** 0 and 1 ** NA
+# are 1 (<NA>), to_numeric keeps a masked Series and downcasts it to the
+# masked width (raised), a missing value in text is NaN (raised), and
+# ffill / bfill / mode keep the masked dtype (int64).
+def _e53_ints(m: Any, values: list) -> Any:
+    return m.Series(values, dtype="Int64")
+
+
+_E53_CASES = {
+    "text as bool": lambda m: [m.Series(["a", "", None]).astype(bool)],
+    "objects as bool": lambda m: [m.Series([0, 1.5, float("nan")], dtype=object).astype(bool)],
+    "Int64 as str": lambda m: [_e53_ints(m, [1, None]).astype(str)],
+    "Float64 as str": lambda m: [m.Series([1.5, None], dtype="Float64").astype(str)],
+    "boolean as str": lambda m: [m.Series([True, None], dtype="boolean").astype(str)],
+    "NA to the zeroth": lambda m: [_e53_ints(m, [None, 2]) ** 0],
+    "one to the NA": lambda m: [1 ** _e53_ints(m, [None, 2])],
+    "Int64 to_numeric": lambda m: [m.to_numeric(_e53_ints(m, [1, None]))],
+    "Int64 downcast": lambda m: [m.to_numeric(_e53_ints(m, [1, None]), downcast="integer")],
+    "Int64 downcast unsigned": lambda m: [m.to_numeric(_e53_ints(m, [300, None]), downcast="unsigned")],
+    "text with None to_numeric": lambda m: [m.to_numeric(m.Series(["1", None]))],
+    "Int64 ffill": lambda m: [_e53_ints(m, [1, None, 3]).ffill()],
+    "Int64 bfill": lambda m: [_e53_ints(m, [None, 2]).bfill()],
+    "Int64 mode": lambda m: [_e53_ints(m, [1, 1, None]).mode()],
+    "boolean ffill": lambda m: [m.Series([True, None], dtype="boolean").ffill()],
+    # Negatives: already pandas'.
+    "ints to the zeroth": lambda m: [m.Series([1, 2]) ** 0],
+    "Int64 squared": lambda m: [_e53_ints(m, [None, 3]) ** 2],
+    "float astype str": lambda m: [m.Series([1.5, float("nan")]).astype(str)],
+    "int64 downcast": lambda m: [m.to_numeric(m.Series([1, 2]), downcast="integer")],
+    "float ffill": lambda m: [m.Series([1.0, None]).ffill()],
+    "string dtype as str": lambda m: [m.Series(["a", None], dtype="string").astype(str)],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E53_CASES))
+def test_everyday53_masked_dtypes_like_pandas_tdafd(case: str) -> None:
+    run = _E53_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

@@ -20246,6 +20246,60 @@ fn bool_numpy_columns(
     Ok(PyDataFrame { inner })
 }
 
+/// `result` under `original`'s masked dtype (Int64, Float64, boolean) where
+/// a fill or `mode` kept the values but not the dtype - it came back int64 /
+/// float64 / bool (br-frankenpandas-tdafd).
+fn keep_masked_dtype(original: &Column, result: Series) -> PyResult<Series> {
+    let dtype = original.dtype();
+    if !dtype.is_nullable() || result.column().dtype() == dtype {
+        return Ok(result);
+    }
+    result.astype(dtype).map_err(|e| astype_error_to_py(&e))
+}
+
+/// pandas' masked power identities in a `**` result: NA ** 0 and 1 ** NA
+/// are 1 (they were <NA>; br-frankenpandas-tdafd). `base` and `exponent`
+/// are the operands, applied where they sit on the result's rows.
+fn masked_pow_ones(base: &Series, exponent: &Series, result: PySeries) -> PyResult<PySeries> {
+    let column = result.inner.column();
+    let rows = result.inner.index().labels();
+    if !column.dtype().is_nullable()
+        || base.index().labels() != rows
+        || exponent.index().labels() != rows
+    {
+        return Ok(result);
+    }
+    let one = match column.dtype() {
+        DType::Float64Nullable => Scalar::Float64(1.0),
+        _ => Scalar::Int64(1),
+    };
+    let is = |value: &Scalar, wanted: f64| {
+        !value.is_missing() && value.to_f64().is_ok_and(|value| value == wanted)
+    };
+    let mut changed = false;
+    let values: Vec<Scalar> = column
+        .values()
+        .iter()
+        .zip(base.values())
+        .zip(exponent.values())
+        .map(|((value, base), exponent)| {
+            if value.is_missing() && (is(exponent, 0.0) || is(base, 1.0)) {
+                changed = true;
+                one.clone()
+            } else {
+                value.clone()
+            }
+        })
+        .collect();
+    if !changed {
+        return Ok(result);
+    }
+    let column = Column::new(column.dtype(), values).map_err(column_error_to_py)?;
+    Series::new(result.inner.name(), result.inner.index().clone(), column)
+        .map(|inner| PySeries { inner })
+        .map_err(frame_error_to_py)
+}
+
 /// A Series result in `target`'s dtype (see [`BoolNumpy`]).
 fn bool_numpy_series(result: PySeries, target: Option<BoolNumpy>) -> PyResult<PySeries> {
     let Some(target) = target else {
@@ -25819,6 +25873,7 @@ impl PySeries {
         };
         let rhs = series_operand(py, other, &self.inner)?;
         let result = narrowed_arith(self.inner.power(&rhs), &self.inner, other, false)?;
+        let result = masked_pow_ones(&self.inner, &rhs, result)?;
         bool_numpy_series(result, target)
     }
     fn __rpow__(
@@ -25832,6 +25887,7 @@ impl PySeries {
             .map(|_| BoolNumpy::Int64);
         let lhs = series_operand(py, other, &self.inner)?;
         let result = narrowed_arith(lhs.power(&self.inner), &self.inner, other, false)?;
+        let result = masked_pow_ones(&lhs, &self.inner, result)?;
         bool_numpy_series(result, target)
     }
     /// `-s`; pandas negates a bool Series as logical NOT (it raised).
@@ -27891,6 +27947,51 @@ impl PySeries {
                 .map(|inner| PySeries { inner })
                 .map_err(frame_error_to_py);
         }
+        let target = dtype_arg_text(&spec).unwrap_or_default();
+        // astype(str) of a masked Series (Int64, Float64, boolean) spells its
+        // <NA> as pandas does (it gave 'None'; br-frankenpandas-tdafd).
+        if self.inner.column().dtype().is_nullable() && target == "str" {
+            let cast =
+                series_astype_arg(&self.inner, &spec)?.map_err(|e| astype_error_to_py(&e))?;
+            let values = cast
+                .values()
+                .iter()
+                .zip(self.inner.values())
+                .map(|(text, value)| {
+                    if value.is_missing() {
+                        Scalar::Utf8("<NA>".to_owned())
+                    } else {
+                        text.clone()
+                    }
+                })
+                .collect();
+            let column = Column::new(DType::Utf8, values).map_err(column_error_to_py)?;
+            return Series::new(self.inner.name(), self.inner.index().clone(), column)
+                .map(|inner| PySeries { inner })
+                .map_err(frame_error_to_py);
+        }
+        // astype(bool) of text / objects is each value's Python truthiness
+        // ('' False, None False, NaN True), as pandas' (it raised 'cannot
+        // cast scalar of dtype Utf8 to Bool'; br-frankenpandas-tdafd).
+        if matches!(self.inner.column().dtype(), DType::Utf8)
+            && !self.inner.column().is_pandas_string()
+            && target == "bool"
+        {
+            let py = spec.py();
+            let flags = self
+                .inner
+                .values()
+                .iter()
+                .map(|value| {
+                    let object = cell_to_py(py, self.inner.column(), value)?;
+                    Ok(Scalar::Bool(object.bind(py).is_truthy()?))
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            let column = Column::new(DType::Bool, flags).map_err(column_error_to_py)?;
+            return Series::new(self.inner.name(), self.inner.index().clone(), column)
+                .map(|inner| PySeries { inner })
+                .map_err(frame_error_to_py);
+        }
         // pandas' integer-cast refusals, and a string column's integers as
         // int() reads them (15crl).
         let read = match pandas_astype_int_source(self.inner.column(), &spec) {
@@ -28449,6 +28550,7 @@ impl PySeries {
                 None => None,
             };
             let res = self.inner.ffill(limit_usize).map_err(frame_error_to_py)?;
+            let res = keep_masked_dtype(self.inner.column(), res)?;
             Ok(PySeries {
                 inner: series_fill_area(&self.inner, res, inside)?,
             })
@@ -28485,6 +28587,7 @@ impl PySeries {
                 None => None,
             };
             let res = self.inner.bfill(limit_usize).map_err(frame_error_to_py)?;
+            let res = keep_masked_dtype(self.inner.column(), res)?;
             Ok(PySeries {
                 inner: series_fill_area(&self.inner, res, inside)?,
             })
@@ -28964,6 +29067,7 @@ impl PySeries {
             .inner
             .mode_with_dropna(dropna)
             .map_err(frame_error_to_py)?;
+        let res = keep_masked_dtype(self.inner.column(), res)?;
         // The modes are numbered by pandas' RangeIndex.
         let span = res.index().int64_range_span();
         Ok(PySeries {

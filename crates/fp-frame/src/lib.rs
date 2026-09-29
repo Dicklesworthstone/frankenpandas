@@ -62306,11 +62306,25 @@ pub fn to_numeric_with_options(
     series: &Series,
     options: ToNumericOptions,
 ) -> Result<Series, FrameError> {
+    // A masked numeric Series is numbers already: itself, as pandas returns
+    // a numeric input (its <NA> raised 'Unable to parse Null';
+    // br-frankenpandas-tdafd).
+    if matches!(
+        series.column().dtype(),
+        DType::Int64Nullable | DType::Float64Nullable
+    ) {
+        return Ok(series.clone());
+    }
     let mut converted = Vec::with_capacity(series.len());
     let mut has_float = false;
 
     for (i, val) in series.values().iter().enumerate() {
         match val {
+            // A missing value is NaN, as pandas' (it raised).
+            Scalar::Null(_) => {
+                has_float = true;
+                converted.push(Scalar::Null(NullKind::NaN));
+            }
             Scalar::Int64(_) | Scalar::Float64(_) => {
                 if matches!(val, Scalar::Float64(_)) {
                     has_float = true;
@@ -62395,10 +62409,20 @@ pub fn downcast_numeric(series: &Series, downcast: &str) -> Result<Series, Frame
         }
     };
     let column = series.column();
+    // A masked integer Series downcasts over its present values to the
+    // masked width (Int8 ...), as pandas' (it was returned as Int64;
+    // br-frankenpandas-tdafd).
+    let masked = column.dtype() == DType::Int64Nullable && downcast != "float";
     let numbers: Vec<f64> = match column.dtype() {
         DType::Int64 | DType::Float64 if !column.has_nulls() || downcast == "float" => column
             .values()
             .iter()
+            .map(|value| value.to_f64().unwrap_or(f64::NAN))
+            .collect(),
+        DType::Int64Nullable if masked => column
+            .values()
+            .iter()
+            .filter(|value| !value.is_missing())
             .map(|value| value.to_f64().unwrap_or(f64::NAN))
             .collect(),
         _ => return Ok(series.clone()),
@@ -62429,7 +62453,7 @@ pub fn downcast_numeric(series: &Series, downcast: &str) -> Result<Series, Frame
         .find(|width| width.itemsize() <= itemsize && holds(*width))
     {
         Some(width) if Some(width) == column.width() => Ok(series.clone()),
-        Some(width) => series.astype_width(width, false),
+        Some(width) => series.astype_width(width, masked),
         None => Ok(series.clone()),
     }
 }
@@ -176833,6 +176857,46 @@ mod tests {
         assert_eq!(result.column().dtype(), DType::Int64);
         assert_eq!(result.column().values()[0], Scalar::Int64(42));
         assert_eq!(result.column().values()[1], Scalar::Int64(99));
+    }
+
+    #[test]
+    fn to_numeric_keeps_and_downcasts_masked_ints_tdafd() {
+        let masked = Series::from_values(
+            "m",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)],
+        )
+        .unwrap()
+        .astype(DType::Int64Nullable)
+        .unwrap();
+        // A masked Series is numbers already: itself.
+        let same = to_numeric(&masked).unwrap();
+        assert_eq!(same.column().dtype(), DType::Int64Nullable);
+        // Downcast over its present values, to the masked width.
+        let small = super::downcast_numeric(&same, "integer").unwrap();
+        assert_eq!(small.column().dtype(), DType::Int64Nullable);
+        assert_eq!(small.column().width(), Some(super::NumericWidth::Int8));
+        assert!(small.values()[1].is_missing());
+        // Text with a missing value: NaN in a float64 column (it raised).
+        let text = Series::from_values(
+            "t",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("1".to_owned()), Scalar::Null(NullKind::Null)],
+        )
+        .unwrap();
+        let parsed = to_numeric(&text).unwrap();
+        assert_eq!(parsed.column().dtype(), DType::Float64);
+        assert!(parsed.values()[1].is_missing());
+        // Negative: an unmasked int64 holding a missing value is not
+        // downcast (numpy cannot hold it in an int width).
+        let plain = Series::from_values(
+            "p",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)],
+        )
+        .unwrap();
+        let kept = super::downcast_numeric(&plain, "integer").unwrap();
+        assert_eq!(kept.column().width(), plain.column().width());
     }
 
     #[test]
