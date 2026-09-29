@@ -7958,6 +7958,107 @@ fn row_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
     flat_index_to_py(py, index)
 }
 
+/// pandas' refusal of a container's truth value - `bool(s)`, `if df:`,
+/// `a and b` over Series - naming the class (each was its length's, so a
+/// wrong branch ran silently; br-frankenpandas-99npt).
+fn ambiguous_truth_value(object: &Bound<'_, PyAny>) -> PyErr {
+    let name = object
+        .get_type()
+        .name()
+        .map_or_else(|_| "object".to_owned(), |name| name.to_string());
+    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+        "The truth value of a {name} is ambiguous. Use a.empty, a.bool(), a.item(), a.any() or a.all()."
+    ))
+}
+
+/// pandas' DataFrameGroupBy.filter verdict on a group: the result squeezed,
+/// then a bool (a missing value drops the group); anything else is pandas'
+/// TypeError (a number was read by its truthiness and a one-row Series by
+/// its length; br-frankenpandas-99npt).
+fn frame_filter_verdict(py: Python<'_>, result: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let result = if result.hasattr("squeeze")? {
+        result.call_method0("squeeze")?
+    } else {
+        result.clone()
+    };
+    let type_name = result.get_type().name()?.to_string();
+    if result.is_instance_of::<pyo3::types::PyBool>()
+        || matches!(type_name.as_str(), "bool" | "bool_")
+    {
+        return result.is_truthy();
+    }
+    if api_is_scalar(&result) && isna(py, &result)?.bind(py).is_truthy()? {
+        return Ok(false);
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        "filter function returned a {type_name}, but expected a scalar bool"
+    )))
+}
+
+/// pandas' SeriesGroupBy.filter verdict on a group: `notna(b) and b`, a
+/// result without a truth value (a Series) pandas' TypeError.
+fn series_filter_verdict(py: Python<'_>, result: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let verdict = if api_is_scalar(result) && isna(py, result)?.bind(py).is_truthy()? {
+        Ok(false)
+    } else {
+        result.is_truthy()
+    };
+    verdict.map_err(|err| {
+        if err.is_instance_of::<pyo3::exceptions::PyValueError>(py)
+            || err.is_instance_of::<pyo3::exceptions::PyTypeError>(py)
+        {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "the filter must return a boolean result",
+            )
+        } else {
+            err
+        }
+    })
+}
+
+/// `slice(start, stop)` with numpy int64 bounds, as pandas' searched slices
+/// come back (`slice(np.int64(0), np.int64(2), None)`).
+fn numpy_slice(py: Python<'_>, start: usize, stop: usize) -> PyResult<Py<PyAny>> {
+    py.import("builtins")?
+        .getattr("slice")?
+        .call1((NumpyInt64::from(start), NumpyInt64::from(stop)))
+        .map(Bound::unbind)
+}
+
+/// The rows of a datetime-like index inside the period a date string names,
+/// `first..=last` (`instants` each row's instant - a DatetimeIndex's wall
+/// clock, a PeriodIndex's start - None for NaT), as pandas' partial-string
+/// `get_loc` gives them: over a monotonic index the slice of them (empty
+/// where the period falls between two rows; a KeyError only past either
+/// end), else their positions.
+fn partial_date_rows(
+    py: Python<'_>,
+    key: &Bound<'_, PyAny>,
+    monotonic: bool,
+    instants: &[Option<i64>],
+    (first, last): (i64, i64),
+) -> PyResult<Py<PyAny>> {
+    if monotonic {
+        if let (Some(Some(low)), Some(Some(high))) = (instants.first(), instants.last())
+            && (last < *low || first > *high)
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                key.clone().unbind(),
+            ));
+        }
+        let start = instants.partition_point(|at| at.is_some_and(|at| at < first));
+        let stop = instants.partition_point(|at| at.is_some_and(|at| at <= last));
+        return numpy_slice(py, start, stop);
+    }
+    instants
+        .iter()
+        .enumerate()
+        .filter(|(_, at)| at.is_some_and(|at| (first..=last).contains(&at)))
+        .map(|(position, _)| i64::try_from(position).unwrap_or(i64::MAX))
+        .collect::<IndexerArray>()
+        .into_py_any(py)
+}
+
 /// `iter(index)`: its elements as `index[i]` gives them. The Datetime /
 /// Timedelta / Period / Interval / Categorical / MultiIndex classes had no
 /// `__iter__` - `for` reached them through the `__getitem__` fallback - so
@@ -9954,12 +10055,16 @@ impl PyIndex {
         PyIndex { inner: renamed }.into_py_any(py)
     }
 
-    fn __contains__(&self, key: &Bound<'_, PyAny>) -> bool {
-        if let Ok(label) = py_to_index_label(key) {
-            self.inner.contains(&label)
-        } else {
-            false
-        }
+    /// An unhashable key is pandas' TypeError (it was not found).
+    fn __contains__(&self, key: &Bound<'_, PyAny>) -> PyResult<bool> {
+        key.hash()?;
+        Ok(py_to_index_label(key).is_ok_and(|label| self.inner.contains(&label)))
+    }
+
+    /// pandas refuses an Index's truth value (it was its length's;
+    /// br-frankenpandas-99npt).
+    fn __bool__(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Err(ambiguous_truth_value(slf.as_any()))
     }
 
     #[getter]
@@ -11389,6 +11494,48 @@ impl PyDatetimeIndex {
         py_to_index_label(bound).map(Some)
     }
 
+    /// The instants on the index's wall clock (NaT as None), as a date
+    /// string names them.
+    fn wall_nanos(&self) -> Vec<Option<i64>> {
+        let wall = self
+            .inner
+            .tz_localize(None)
+            .unwrap_or_else(|_| self.inner.clone());
+        wall.as_index()
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Datetime64(nanos) if !label.is_missing() => Some(*nanos),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// pandas' resolution of the instants as a span in nanoseconds: a day
+    /// when every wall-clock time is midnight, else the coarsest of an hour,
+    /// a minute, a second, a milli-, micro- or nanosecond every one is whole
+    /// in.
+    fn resolution_nanos(walls: &[Option<i64>]) -> i64 {
+        const UNITS: [i64; 7] = [
+            86_400_000_000_000,
+            3_600_000_000_000,
+            60_000_000_000,
+            1_000_000_000,
+            1_000_000,
+            1_000,
+            1,
+        ];
+        UNITS
+            .into_iter()
+            .find(|unit| {
+                walls
+                    .iter()
+                    .flatten()
+                    .all(|wall| wall.rem_euclid(*unit) == 0)
+            })
+            .unwrap_or(1)
+    }
+
     /// The same index (name and time zone kept) over new instants - taken,
     /// sorted, filtered or moved by a duration from this one's.
     fn with_nanos(&self, nanos: Vec<i64>) -> Self {
@@ -11711,6 +11858,11 @@ impl PyDatetimeIndex {
 
     fn __iter__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         iter_by_position(slf.as_any())
+    }
+
+    /// pandas refuses an index's truth value (it was its length's).
+    fn __bool__(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Err(ambiguous_truth_value(slf.as_any()))
     }
 
     #[getter]
@@ -12327,8 +12479,41 @@ impl PyDatetimeIndex {
         }
     }
 
+    /// pandas' `get_loc`: a date string coarser than the index's resolution
+    /// is the period it names (see [`partial_date_rows`]), any other the
+    /// instant it parses to on the index's wall clock (a string was looked
+    /// up as text, a KeyError; br-frankenpandas-99npt).
     fn get_loc(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(text) = key.extract::<String>() {
+            let bounds = fp_frame::partial_date_bounds(&text)
+                .map_err(|_| PyErr::new::<pyo3::exceptions::PyKeyError, _>(key.clone().unbind()))?;
+            let walls = self.wall_nanos();
+            if bounds.1 - bounds.0 >= Self::resolution_nanos(&walls) {
+                let monotonic = self.inner.as_index().is_monotonic_increasing();
+                return partial_date_rows(py, key, monotonic, &walls, bounds);
+            }
+            if let Some(label) = self.slice_bound_label(Some(key), false)? {
+                return pandas_get_loc(py, self.inner.as_index(), &label, key);
+            }
+        }
+        // A numpy datetime64 is the Timestamp it names, as pandas casts it.
+        if key.get_type().name()? == "datetime64" {
+            let instant = py.get_type::<PyTimestamp>().call1((key,))?;
+            return pandas_get_loc(
+                py,
+                self.inner.as_index(),
+                &py_to_index_label(&instant)?,
+                key,
+            );
+        }
         pandas_get_loc(py, self.inner.as_index(), &py_to_index_label(key)?, key)
+    }
+
+    /// pandas' `key in index`: whether `get_loc` finds it (a date string
+    /// the index's instants fall in); an unhashable key is TypeError.
+    fn __contains__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<bool> {
+        key.hash()?;
+        Ok(self.get_loc(py, key).is_ok())
     }
 
     fn get_indexer(&self, target: IndexArg) -> IndexerArray {
@@ -13604,6 +13789,11 @@ impl PyMultiIndex {
         iter_by_position(slf.as_any())
     }
 
+    /// pandas refuses an index's truth value (it was its length's).
+    fn __bool__(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Err(ambiguous_truth_value(slf.as_any()))
+    }
+
     #[getter]
     fn is_unique(&self) -> bool {
         self.inner.is_unique()
@@ -13961,28 +14151,59 @@ impl PyMultiIndex {
             .map_err(index_error_to_py)
     }
 
+    /// pandas' `get_loc`: a whole tuple of a unique MultiIndex its position;
+    /// a first-level label or a shorter tuple the slice of its rows, a bool
+    /// mask where they are not contiguous (or, a label, where the first
+    /// level is unsorted); a missing key a KeyError of it (it was a
+    /// ValueError, a string key one label per character, and several rows a
+    /// list; br-frankenpandas-99npt).
     #[pyo3(signature = (key, level=None))]
     fn get_loc(&self, key: &Bound<'_, PyAny>, level: Option<usize>) -> PyResult<Py<PyAny>> {
-        let labels = if let Ok(seq) = key.cast::<pyo3::types::PySequence>() {
-            let len = seq.len()?;
-            let mut row = Vec::with_capacity(len);
-            for i in 0..len {
-                row.push(py_to_index_label(&seq.get_item(i)?)?);
-            }
-            row
-        } else {
-            vec![py_to_index_label(key)?]
+        let py = key.py();
+        let tuple = key.cast::<PyTuple>().ok();
+        let labels = match &tuple {
+            Some(tuple) => tuple
+                .iter()
+                .map(|item| py_to_index_label(&item))
+                .collect::<PyResult<Vec<_>>>()?,
+            None => vec![py_to_index_label(key)?],
         };
         let positions = self
             .inner
             .get_loc(&labels, level)
-            .map_err(index_error_to_py)?;
-        let py = key.py();
-        if positions.len() == 1 {
-            positions[0].into_py_any(py)
-        } else {
-            positions.into_py_any(py)
+            .map_err(|_| PyErr::new::<pyo3::exceptions::PyKeyError, _>(key.clone().unbind()))?;
+        if tuple.is_some()
+            && level.is_none()
+            && labels.len() == self.inner.nlevels()
+            && self.inner.is_unique()
+            && let [only] = positions.as_slice()
+        {
+            return only.into_py_any(py);
         }
+        let contiguous = positions.windows(2).all(|pair| pair[1] == pair[0] + 1);
+        let sorted_first = || {
+            self.inner
+                .get_level_values(0)
+                .is_ok_and(|values| values.is_monotonic_increasing())
+        };
+        if let (Some(first), Some(last)) = (positions.first(), positions.last())
+            && contiguous
+            && (tuple.is_some() || sorted_first())
+        {
+            return numpy_slice(py, *first, last + 1);
+        }
+        let mut mask = vec![false; self.inner.len()];
+        for position in positions {
+            mask[position] = true;
+        }
+        BoolArray::from(mask).into_py_any(py)
+    }
+
+    /// pandas' `key in index`: whether `get_loc` finds it (a first-level
+    /// label too); an unhashable key is TypeError.
+    fn __contains__(&self, key: &Bound<'_, PyAny>) -> PyResult<bool> {
+        key.hash()?;
+        Ok(self.get_loc(key, None).is_ok())
     }
 
     fn get_indexer(&self, target: &PyMultiIndex) -> PyResult<Vec<i64>> {
@@ -15482,6 +15703,11 @@ impl PyTimedeltaIndex {
         iter_by_position(slf.as_any())
     }
 
+    /// pandas refuses an index's truth value (it was its length's).
+    fn __bool__(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Err(ambiguous_truth_value(slf.as_any()))
+    }
+
     /// pandas' TimedeltaIndex repr: '1 days' when every duration is whole
     /// days, else '1 days 00:00:00' for all, quoted, NaT bare, wrapped /
     /// truncated as Index's (it printed a Rust debug list of nanoseconds),
@@ -15668,8 +15894,30 @@ impl PyTimedeltaIndex {
         }
     }
 
+    /// pandas' `get_loc`: a string is the Timedelta it parses to (it was
+    /// looked up as text, a KeyError; br-frankenpandas-99npt), a KeyError of
+    /// that Timedelta when absent, of the string when it does not parse.
     fn get_loc(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if key.is_instance_of::<pyo3::types::PyString>() {
+            let parsed = py
+                .get_type::<PyTimedelta>()
+                .call1((key,))
+                .map_err(|_| PyErr::new::<pyo3::exceptions::PyKeyError, _>(key.clone().unbind()))?;
+            return pandas_get_loc(
+                py,
+                self.inner.as_index(),
+                &py_to_index_label(&parsed)?,
+                &parsed,
+            );
+        }
         pandas_get_loc(py, self.inner.as_index(), &py_to_index_label(key)?, key)
+    }
+
+    /// pandas' `key in index`: whether `get_loc` finds it; an unhashable
+    /// key is TypeError.
+    fn __contains__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<bool> {
+        key.hash()?;
+        Ok(self.get_loc(py, key).is_ok())
     }
 
     fn get_indexer(&self, target: IndexArg) -> IndexerArray {
@@ -16422,8 +16670,10 @@ impl PyRangeIndex {
         Ok((py.get_type::<Self>().into_any(), args))
     }
 
-    /// A number matches the label it equals (`2.0 in RangeIndex(4)`).
-    fn __contains__(slf: PyRef<'_, Self>, item: &Bound<'_, PyAny>) -> bool {
+    /// A number matches the label it equals (`2.0 in RangeIndex(4)`); an
+    /// unhashable key is pandas' TypeError.
+    fn __contains__(slf: PyRef<'_, Self>, item: &Bound<'_, PyAny>) -> PyResult<bool> {
+        item.hash()?;
         let (start, stop, step) = range_span_of(&slf.as_super().inner);
         let value = match item.extract::<i64>() {
             Ok(value) => Some(value),
@@ -16438,9 +16688,9 @@ impl PyRangeIndex {
                 })
                 .map(|value| value as i64),
         };
-        value.is_some_and(|value| {
+        Ok(value.is_some_and(|value| {
             RangeIndex::new(start, stop, step).is_ok_and(|range| range.contains(value))
-        })
+        }))
     }
 
     /// A slice of a range is a range, as Python slices one
@@ -16947,6 +17197,11 @@ impl PyPeriodIndex {
         iter_by_position(slf.as_any())
     }
 
+    /// pandas refuses an index's truth value (it was its length's).
+    fn __bool__(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Err(ambiguous_truth_value(slf.as_any()))
+    }
+
     /// pandas' repr: the periods quoted as its Index summary lists them (NaT
     /// too: 'NaT'), then dtype and name. It printed only the length and
     /// dtype.
@@ -17099,12 +17354,54 @@ impl PyPeriodIndex {
         }
     }
 
-    pub fn get_loc(&self, key: &Bound<'_, PyAny>) -> PyResult<usize> {
-        let label = py_to_index_label(key)?;
-        self.inner
-            .to_index()
-            .get_loc(&label)
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("{key}")))
+    /// pandas' `get_loc`: a date string naming one period of the index's
+    /// freq is that period, a coarser one (a year over months) the periods
+    /// from the one holding its start to the one holding its end (see
+    /// [`partial_date_rows`]), a finer one a KeyError (a string was looked
+    /// up as text, a KeyError; br-frankenpandas-99npt).
+    pub fn get_loc(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let index = self.inner.to_index();
+        if let Ok(text) = key.extract::<String>()
+            && let Some(freq) = self.inner.freq()
+        {
+            let (first, last) = fp_frame::partial_date_bounds(&text).map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                    "Cannot interpret '{text}' as period"
+                ))
+            })?;
+            let period_of = |nanos| fp_index::datetime_nanos_to_period(nanos, freq);
+            let (from, to) = (
+                period_of(first).map_err(index_error_to_py)?,
+                period_of(last).map_err(index_error_to_py)?,
+            );
+            let start = |period| fp_index::period_start_nanos(period).map_err(index_error_to_py);
+            if from != to {
+                let starts = index
+                    .labels()
+                    .iter()
+                    .map(|label| match label {
+                        IndexLabel::Period(period) if !period.is_nat() => start(*period).ok(),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let monotonic = index.is_monotonic_increasing();
+                return partial_date_rows(py, key, monotonic, &starts, (start(from)?, start(to)?));
+            }
+            if (first, last) != (start(from)?, start(from.shift(1))? - 1) {
+                return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                    key.clone().unbind(),
+                ));
+            }
+            return pandas_get_loc(py, &index, &IndexLabel::Period(from), key);
+        }
+        pandas_get_loc(py, &index, &py_to_index_label(key)?, key)
+    }
+
+    /// pandas' `key in index`: whether `get_loc` finds it (a period of
+    /// another freq is not); an unhashable key is TypeError.
+    fn __contains__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<bool> {
+        key.hash()?;
+        Ok(self.get_loc(py, key).is_ok())
     }
 
     pub fn get_indexer(&self, target: IndexArg) -> IndexerArray {
@@ -18050,6 +18347,11 @@ impl PyCategoricalIndex {
 
     fn __iter__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         iter_by_position(slf.as_any())
+    }
+
+    /// pandas refuses an index's truth value (it was its length's).
+    fn __bool__(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Err(ambiguous_truth_value(slf.as_any()))
     }
 
     /// pandas' repr: the labels quoted, then `categories=` (past
@@ -24416,6 +24718,18 @@ impl PySeries {
     /// Return the length of the Series.
     fn __len__(&self) -> usize {
         self.inner.len()
+    }
+
+    /// pandas refuses a Series' truth value (`if s:` was its length's;
+    /// br-frankenpandas-99npt).
+    fn __bool__(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Err(ambiguous_truth_value(slf.as_any()))
+    }
+
+    /// `key in s` looks the key up in the index, as pandas' (it iterated
+    /// the values).
+    fn __contains__(slf: &Bound<'_, Self>, key: &Bound<'_, PyAny>) -> PyResult<bool> {
+        slf.getattr("index")?.contains(key)
     }
 
     /// pandas' repr layout (see [`pandas_series_repr`]).
@@ -34426,6 +34740,12 @@ impl PyDataFrame {
     /// Return the number of rows.
     fn __len__(&self) -> usize {
         self.inner.len()
+    }
+
+    /// pandas refuses a DataFrame's truth value (`if df:` was its row
+    /// count's; br-frankenpandas-99npt).
+    fn __bool__(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Err(ambiguous_truth_value(slf.as_any()))
     }
 
     /// pandas' repr layout (see [`pandas_frame_repr`]).
@@ -56104,7 +56424,7 @@ impl PyGroupBy {
         for (_, positions) in self.ordered_groups(false)? {
             let group_df = frame.take_rows(&positions).map_err(frame_error_to_py)?;
             let res = func.call1((PyDataFrame { inner: group_df },))?;
-            if res.is_truthy()? {
+            if frame_filter_verdict(func.py(), &res)? {
                 kept.extend(positions);
             }
         }
@@ -58362,7 +58682,7 @@ impl PySeriesGroupBy {
             let res = func.call1((PySeries {
                 inner: self.group_rows(&positions)?,
             },))?;
-            if res.is_truthy()? {
+            if series_filter_verdict(func.py(), &res)? {
                 kept.extend(
                     positions
                         .iter()
@@ -67185,6 +67505,11 @@ impl PyIntervalIndex {
 
     fn __iter__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         iter_by_position(slf.as_any())
+    }
+
+    /// pandas refuses an index's truth value (it was its length's).
+    fn __bool__(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        Err(ambiguous_truth_value(slf.as_any()))
     }
 
     /// The interval at `idx` (a missing one is NaN, as pandas').
@@ -76416,8 +76741,11 @@ mod tests {
             assert_eq!(PyRangeIndex::step(ri.borrow()), 2);
             assert_eq!(name_text(|py| index.name(py)).as_deref(), Some("my_range"));
             let number = |value: i64| value.into_bound_py_any(py).expect("int"); // ubs:ignore — test fixture
-            assert!(PyRangeIndex::__contains__(ri.borrow(), &number(4)));
-            assert!(!PyRangeIndex::__contains__(ri.borrow(), &number(5)));
+            let contains = |value: i64| {
+                PyRangeIndex::__contains__(ri.borrow(), &number(value)).expect("contains") // ubs:ignore — test fixture
+            };
+            assert!(contains(4));
+            assert!(!contains(5));
             let int = |value: PyResult<Py<PyAny>>| value.and_then(|v| v.extract::<i64>(py)).ok();
             assert_eq!(int(index.min(py, None, true)), Some(0));
             assert_eq!(int(index.max(py, None, true)), Some(8));

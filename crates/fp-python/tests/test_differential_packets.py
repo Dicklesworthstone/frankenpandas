@@ -18651,6 +18651,8 @@ _CT_CASES = {
     "seconds": _ct_first_line(lambda m: m.to_datetime(["2024-01-31 10:15:30", "2024-02-01"])),
     "fraction": _ct_first_line(lambda m: m.to_datetime(["2024-01-31 10:15:30.5", "2024-02-01"])),
     "a zone": _ct_first_line(lambda m: m.to_datetime(["2024-01-31 10:15+01:00", "2024-02-01"])),
+    "day first": _ct_first_line(lambda m: m.to_datetime(["31/01/2024", "2024-02-01"])),
+    "day first time": _ct_first_line(lambda m: m.to_datetime(["31/01/2024 10:15", "2024-02-01"])),
     # Negatives: the forms already pandas', and pandas' refusals.
     "cat a Series": lambda m: _mk_shown(_ct_series(m).str.cat(m.Series(["1", "2", "3"]), sep="-")),
     "cat nothing": lambda m: [_ct_series(m).str.cat(sep=","), _ct_series(m).str.cat(sep=",", na_rep="-")],
@@ -18667,4 +18669,113 @@ _CT_CASES = {
 @pytest.mark.parametrize("case", list(_CT_CASES))
 def test_str_cat_and_datetime_errors_like_pandas_l5o7z(case: str) -> None:
     run = _CT_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-99npt: a container has no truth value (bool(s) was its
+# length's), `key in s` looks in the index (it looked in the values), and an
+# index's get_loc / `in` reads a date string, a Timedelta string, a period
+# string and a first-level label as pandas (they were looked up as text).
+def _tv_series(m: Any) -> Any:
+    return m.Series([1, 2, 3], index=["p", "q", "r"])
+
+
+def _tv_dates(m: Any, *values: str, **kwargs: Any) -> Any:
+    return m.DatetimeIndex(list(values), **kwargs) if values else m.date_range("2024-01-01", periods=3, **kwargs)
+
+
+def _tv_multi(m: Any) -> Any:
+    return m.MultiIndex.from_tuples([("x", 1), ("x", 2), ("y", 1)])
+
+
+def _tv_filtered(m: Any, func: Any, series: bool = False) -> list:
+    frame = m.DataFrame({"g": ["a", "a", "b"], "v": [1, 2, 3]})
+    grouped = frame.groupby("g")
+    return list((grouped.v.filter(func) if series else grouped.filter(func)).index)
+
+
+_TV_CASES = {
+    "bool Series": lambda m: [bool(_tv_series(m))],
+    "bool empty Series": lambda m: [bool(m.Series([], dtype=float))],
+    "bool DataFrame": lambda m: [bool(m.DataFrame({"a": [1]}))],
+    "bool empty DataFrame": lambda m: [bool(m.DataFrame())],
+    "bool Index": lambda m: [bool(m.Index(["p"]))],
+    "bool RangeIndex": lambda m: [bool(m.RangeIndex(3))],
+    "bool DatetimeIndex": lambda m: [bool(_tv_dates(m))],
+    "bool MultiIndex": lambda m: [bool(_tv_multi(m))],
+    "bool PeriodIndex": lambda m: [bool(m.period_range("2024-01", periods=2, freq="M"))],
+    "bool TimedeltaIndex": lambda m: [bool(m.to_timedelta(["1d"]))],
+    "bool CategoricalIndex": lambda m: [bool(m.CategoricalIndex(["a"]))],
+    "bool IntervalIndex": lambda m: [bool(m.interval_range(0, 2))],
+    "Series and": lambda m: [_tv_series(m) > 1 and _tv_series(m) < 3],
+    "in Series labels": lambda m: ["p" in _tv_series(m), 1 in _tv_series(m), "z" in _tv_series(m)],
+    "in Series RangeIndex": lambda m: [0 in m.Series([5, 6]), 6 in m.Series([5, 6]), 1.0 in m.Series([5, 6])],
+    "in Series dates": lambda m: [
+        "2024-01-02" in m.Series(range(3), index=_tv_dates(m)),
+        m.Timestamp("2024-01-03") in m.Series(range(3), index=_tv_dates(m)),
+        "2024-01" in m.Series(range(3), index=_tv_dates(m)),
+    ],
+    "in Series MultiIndex": lambda m: [
+        ("x", 2) in m.Series(range(3), index=_tv_multi(m)),
+        "y" in m.Series(range(3), index=_tv_multi(m)),
+        ("y", 2) in m.Series(range(3), index=_tv_multi(m)),
+    ],
+    "in Series unhashable": lambda m: [[1] in _tv_series(m)],
+    "in Index unhashable": lambda m: [[1] in m.Index([1])],
+    "in DatetimeIndex": lambda m: [
+        "2024-01" in _tv_dates(m),
+        np.datetime64("2024-01-01") in _tv_dates(m),
+        "2024-02" in _tv_dates(m, "2024-01-01", "2024-03-01"),
+        "2024-04" in _tv_dates(m, "2024-01-01", "2024-03-01"),
+        "zz" in _tv_dates(m),
+        1 in _tv_dates(m),
+    ],
+    "in PeriodIndex": lambda m: [
+        "2024-02" in m.period_range("2024-01", periods=2, freq="M"),
+        "2024" in m.period_range("2024-01", periods=2, freq="M"),
+        "2024-02-15" in m.period_range("2024-01", periods=2, freq="M"),
+        m.Period("2024-01", freq="D") in m.period_range("2024-01", periods=2, freq="M"),
+    ],
+    "in TimedeltaIndex": lambda m: ["1 days" in m.to_timedelta(["1d", "2d"]), "5 days" in m.to_timedelta(["1d"])],
+    "dates get_loc day": lambda m: [_tv_dates(m).get_loc("2024-01-02")],
+    "dates get_loc month": lambda m: [_tv_dates(m).get_loc("2024-01")],
+    "dates get_loc year": lambda m: [_tv_dates(m).get_loc("2024")],
+    "dates get_loc gap": lambda m: [_tv_dates(m, "2024-01-01", "2024-03-01").get_loc("2024-02")],
+    "dates get_loc before": lambda m: [_tv_dates(m, "2024-01-01", "2024-03-01").get_loc("2023-12")],
+    "dates get_loc unsorted": lambda m: [_tv_dates(m, "2024-02-01", "2024-01-05", "2024-01-20").get_loc("2024-01")],
+    "dates get_loc hourly day": lambda m: [_tv_dates(m, freq="h").get_loc("2024-01-01")],
+    "dates get_loc hourly hour": lambda m: [_tv_dates(m, freq="h").get_loc("2024-01-01 01:00")],
+    "dates get_loc tz month": lambda m: [_tv_dates(m, tz="US/Eastern").get_loc("2024-01")],
+    "dates get_loc repeated day": lambda m: [_tv_dates(m, "2024-01-01", "2024-01-01", "2024-01-02").get_loc("2024-01-01")],
+    "dates get_loc garbage": lambda m: [_tv_dates(m).get_loc("zz")],
+    "periods get_loc": lambda m: [m.period_range("2024-01", periods=3, freq="M").get_loc("2024-02")],
+    "periods get_loc year": lambda m: [m.period_range("2023-11", periods=4, freq="M").get_loc("2024")],
+    "periods get_loc finer": lambda m: [m.period_range("2024-01", periods=3, freq="M").get_loc("2024-02-15")],
+    "timedeltas get_loc": lambda m: [m.to_timedelta(["1d", "2d"]).get_loc("2 days")],
+    "timedeltas get_loc missing": lambda m: [m.to_timedelta(["1d", "2d"]).get_loc("5 days")],
+    "multi get_loc label": lambda m: [_tv_multi(m).get_loc("x")],
+    "multi get_loc tuple": lambda m: [_tv_multi(m).get_loc(("x", 2))],
+    "multi get_loc short tuple": lambda m: [_tv_multi(m).get_loc(("y",))],
+    "multi get_loc missing": lambda m: [_tv_multi(m).get_loc(("y", 2))],
+    "multi get_loc unsorted label": lambda m: [
+        m.MultiIndex.from_tuples([("y", 1), ("x", 1), ("y", 2)]).get_loc("y")
+    ],
+    "frame filter number": lambda m: _tv_filtered(m, lambda g: len(g)),
+    "frame filter Series": lambda m: _tv_filtered(m, lambda g: g.v > 1),
+    "frame filter one-row Series": lambda m: _tv_filtered(m, lambda g: g[["v"]].sum() > 3),
+    "frame filter NA": lambda m: _tv_filtered(m, lambda g: g.v.sum() > 2 if g.v.iloc[0] == 1 else m.NA),
+    "series filter number": lambda m: _tv_filtered(m, lambda s: s.sum() - 3, series=True),
+    "series filter Series": lambda m: _tv_filtered(m, lambda s: s > 1, series=True),
+    # Negatives: already pandas'.
+    "in DataFrame columns": lambda m: ["a" in m.DataFrame({"a": [1]}), 0 in m.DataFrame({"a": [1]})],
+    "in values": lambda m: [2 in _tv_series(m).values, 2 in list(_tv_series(m))],
+    "Series any all empty": lambda m: [_tv_series(m).any(), _tv_series(m).all(), _tv_series(m).empty],
+    "frame filter bool": lambda m: _tv_filtered(m, lambda g: g.v.sum() > 2),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_TV_CASES))
+def test_truth_value_and_membership_like_pandas_99npt(case: str) -> None:
+    run = _TV_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
