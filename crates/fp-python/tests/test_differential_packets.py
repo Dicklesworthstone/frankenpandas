@@ -18265,3 +18265,59 @@ _KG_CASES = {
 def test_several_key_series_groupby_like_pandas_86mgd(case: str) -> None:
     run = _KG_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-jnw2b (and xn05q part 3): an Index operation's result in
+# pandas' common dtype - union / intersection / symmetric_difference cast to
+# the operands' common dtype (Index([1, 2]).union([2.5]) was object,
+# .union([None]) int64 holding None), append reads its labels as the
+# constructor does, insert puts a missing item in as NaN and an object index
+# reads its labels again.
+def _iu_shown(index: Any) -> list:
+    return [repr(index), str(index.dtype), [repr(v) for v in index.tolist()]]
+
+
+_IU_CASES = {
+    "int union None": lambda m: _iu_shown(m.Index([1, 2]).union([None])),
+    "int union float": lambda m: _iu_shown(m.Index([1, 2]).union([2.5])),
+    "int union nan": lambda m: _iu_shown(m.Index([1, 2]).union([float("nan")])),
+    "int union an object Index": lambda m: _iu_shown(m.Index([1, 2]).union(m.Index([3], dtype=object))),
+    "int union nothing": lambda m: _iu_shown(m.Index([1, 2]).union([])),
+    "int union a float Index": lambda m: _iu_shown(m.Index([1, 2]).union(m.Index([1.5, None]))),
+    "object union int": lambda m: _iu_shown(m.Index([1, 2], dtype=object).union([3])),
+    "bool union int": lambda m: _iu_shown(m.Index([True, False]).union([2])),
+    "int union float unsorted": lambda m: _iu_shown(m.Index([2, 1]).union([0.5], sort=False)),
+    "int intersection None and 1": lambda m: _iu_shown(m.Index([1, 2]).intersection([None, 1])),
+    "int symmetric_difference float": lambda m: _iu_shown(m.Index([1, 2]).symmetric_difference([2.5])),
+    "int append None": lambda m: _iu_shown(m.Index([1, 2]).append(m.Index([None]))),
+    "object append int": lambda m: _iu_shown(m.Index([1, 2], dtype=object).append(m.Index([3]))),
+    "int append float": lambda m: _iu_shown(m.Index([1, 2]).append(m.Index([2.5]))),
+    "int insert None": lambda m: _iu_shown(m.Index([1, 2]).insert(0, None)),
+    "int insert float": lambda m: _iu_shown(m.Index([1, 2]).insert(0, 1.5)),
+    "int insert nan": lambda m: _iu_shown(m.Index([1, 2]).insert(1, float("nan"))),
+    "float insert int": lambda m: _iu_shown(m.Index([1.5]).insert(0, 2)),
+    "bool insert None": lambda m: _iu_shown(m.Index([True]).insert(0, None)),
+    "bool insert int": lambda m: _iu_shown(m.Index([True]).insert(0, 2)),
+    "empty insert int": lambda m: _iu_shown(m.Index([]).insert(0, 1)),
+    "object insert int": lambda m: _iu_shown(m.Index([1, 2], dtype=object).insert(0, 3)),
+    "range insert float": lambda m: _iu_shown(m.RangeIndex(3).insert(1, 0.5)),
+    "range insert None": lambda m: _iu_shown(m.RangeIndex(2).insert(0, None)),
+    "int32 insert int": lambda m: _iu_shown(m.DatetimeIndex(["2024-01-05"]).year.insert(0, 7)),
+    # Negatives: the operations whose dtype was already pandas'.
+    "int union int": lambda m: _iu_shown(m.Index([1, 2]).union([3])),
+    "int union text": lambda m: _iu_shown(m.Index([1, 2]).union(["a"])),
+    "text union int": lambda m: _iu_shown(m.Index(["a"]).union([1])),
+    "int append text": lambda m: _iu_shown(m.Index([1, 2]).append(m.Index(["a"]))),
+    "int insert text": lambda m: _iu_shown(m.Index([1, 2]).insert(0, "a")),
+    "text insert None": lambda m: _iu_shown(m.Index(["a"]).insert(0, None)),
+    "int difference text": lambda m: _iu_shown(m.Index([1, 2]).difference(["a"])),
+    "empty union None": lambda m: _iu_shown(m.Index([]).union([None])),
+    "insert past the end": lambda m: _iu_shown(m.Index([1, 2]).insert(5, 3)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_IU_CASES))
+def test_index_operations_take_pandas_common_dtype_jnw2b(case: str) -> None:
+    run = _IU_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

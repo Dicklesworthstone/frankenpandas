@@ -8884,17 +8884,89 @@ impl std::ops::Deref for IndexArg {
 /// empty, or the labels are of mixed kinds (left in first-seen order); False
 /// keeps first-seen order; True sorts. fp-index keeps first-seen order, so
 /// `df.columns.union(['c'])` came back unsorted.
+#[allow(clippy::cast_precision_loss)] // an order, as Python compares them
 fn setop_sorted(result: Index, left: &Index, right: &Index, sort: Option<bool>) -> Index {
+    // Bools beside numbers compare as numbers (Python's False < 1), so
+    // pandas sorts them; other mixes stay as they came.
+    let number = |label: &IndexLabel| match label {
+        IndexLabel::Bool(flag) => Some(f64::from(u8::from(*flag))),
+        IndexLabel::Int64(value) => Some(*value as f64),
+        IndexLabel::Float64(value) => Some(value.0),
+        _ => None,
+    };
+    let numbers: Option<Vec<f64>> = result.labels().iter().map(number).collect();
+    let mixed = result.inferred_type() == "mixed";
     let sorts = match sort {
         Some(sort) => sort,
         None => {
             !(left.is_empty()
                 || right.is_empty()
                 || left.equals(right)
-                || result.inferred_type() == "mixed")
+                || (mixed && numbers.is_none()))
         }
     };
-    if sorts { result.sort_values() } else { result }
+    match numbers {
+        Some(numbers) if sorts && mixed => {
+            let mut order: Vec<usize> = (0..numbers.len()).collect();
+            order.sort_by(|&a, &b| numbers[a].total_cmp(&numbers[b]));
+            result.take(&order)
+        }
+        _ if sorts => result.sort_values(),
+        _ => result,
+    }
+}
+
+/// The dtype of `index` read as pandas' constructor reads its labels:
+/// numbers beside a missing one, or ints beside floats, are float64 (see
+/// [`float_labelled`]) - an operand built from a list (`[None, 1]`) keeps
+/// its labels as given, which compare with an int index's.
+fn constructed_dtype(index: &Index) -> &'static str {
+    if index.declared_dtype().is_some() {
+        return index.dtype();
+    }
+    float_labelled(index.clone()).dtype()
+}
+
+/// pandas' dtype for an index operation joining indexes of dtypes `left`
+/// and `right` (its `_find_common_type_compat`): one dtype stays, ints
+/// meet floats at float64, and anything else - a bool beside a number,
+/// text, an object index, an empty list - meets at object.
+fn index_common_dtype(left: &'static str, right: &'static str) -> &'static str {
+    let number = |dtype: &str| matches!(dtype, "int64" | "int32" | "float64");
+    match (left, right) {
+        _ if left == right => left,
+        ("float64", other) | (other, "float64") if number(other) => "float64",
+        (one, other) if number(one) && number(other) => "int64",
+        _ => "object",
+    }
+}
+
+/// `index` held as pandas holds an operation's result of `dtype`: float64
+/// turns its int labels (and missing ones) into floats, object declares it
+/// (its labels kept); any other dtype leaves it. Set operations kept the
+/// labels' own dtype (Index([1, 2]).union([2.5]) was object, .union([None])
+/// int64 holding a None; br-frankenpandas-jnw2b).
+#[allow(clippy::cast_precision_loss)] // pandas widens the ints the same way
+fn index_in_dtype(index: Index, dtype: &str) -> Index {
+    if index.dtype() == dtype {
+        return index;
+    }
+    match dtype {
+        "float64" => {
+            let labels = index
+                .labels()
+                .iter()
+                .map(|label| match label {
+                    IndexLabel::Int64(value) => IndexLabel::Float64(OrderedF64(*value as f64)),
+                    IndexLabel::Null(_) => IndexLabel::Null(NullKind::NaN),
+                    other => other.clone(),
+                })
+                .collect();
+            Index::new(labels).rename_index(index.name())
+        }
+        "object" => index.with_declared_dtype(Some(fp_index::DeclaredDtype::Object)),
+        _ => index,
+    }
 }
 
 /// `get_indexer`'s positions (-1 where a label is absent) as pandas returns
@@ -9162,6 +9234,23 @@ fn owned_index(
 }
 
 impl PyIndex {
+    /// `item`'s label at `loc` among this index's labels, as given (the
+    /// datetime, timedelta, period and categorical classes' insert; a plain
+    /// Index's reads pandas' dtype rules, see `insert`).
+    fn insert_label(&self, loc: usize, item: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let label = py_to_index_label(item)?;
+        let mut labels = self.inner.labels().to_vec();
+        if loc > labels.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                "Index position out of bounds",
+            ));
+        }
+        labels.insert(loc, label);
+        Ok(PyIndex {
+            inner: Index::new(labels).rename_index(self.inner.name()),
+        })
+    }
+
     /// `index <op> other` elementwise, as pandas: numpy's answer over the
     /// labels as an Index, named after this one (or the name both Indexes
     /// share); every operator raised TypeError. A Series or DataFrame
@@ -9729,28 +9818,25 @@ impl PyIndex {
 
     /// pandas' `intersection(other, sort=False)`: in this index's order by
     /// default, sorted with sort=True or None (it was unexpected -
-    /// br-frankenpandas-n57tz).
+    /// br-frankenpandas-n57tz); in the two indexes' common dtype (see
+    /// [`index_common_dtype`]).
     #[pyo3(signature = (other, sort=Some(false)))]
     fn intersection(&self, other: IndexArg, sort: Option<bool>) -> Self {
+        let dtype = index_common_dtype(self.inner.dtype(), constructed_dtype(&other.inner));
+        let result = index_in_dtype(self.inner.intersection(&other.inner), dtype);
         PyIndex {
-            inner: setop_sorted(
-                self.inner.intersection(&other.inner),
-                &self.inner,
-                &other.inner,
-                sort,
-            ),
+            inner: setop_sorted(result, &self.inner, &other.inner, sort),
         }
     }
 
+    /// pandas' `union(other, sort=None)` (see [`setop_sorted`]), in the two
+    /// indexes' common dtype (see [`index_common_dtype`]).
     #[pyo3(signature = (other, sort=None))]
     fn union(&self, other: IndexArg, sort: Option<bool>) -> Self {
+        let dtype = index_common_dtype(self.inner.dtype(), constructed_dtype(&other.inner));
+        let result = index_in_dtype(self.inner.union(&other.inner), dtype);
         PyIndex {
-            inner: setop_sorted(
-                self.inner.union(&other.inner),
-                &self.inner,
-                &other.inner,
-                sort,
-            ),
+            inner: setop_sorted(result, &self.inner, &other.inner, sort),
         }
     }
 
@@ -9767,13 +9853,19 @@ impl PyIndex {
     }
 
     /// pandas' `Index.append(other)`, `other` an index or a list / tuple of
-    /// them (a list of indexes was read as one index of them).
+    /// them (a list of indexes was read as one index of them); the labels
+    /// read again as pandas' constructor reads them (its `_with_infer`):
+    /// numbers beside a missing one float64, an object index's ints int64
+    /// (Index([1, 2]).append(Index([None])) held a None in int64;
+    /// br-frankenpandas-jnw2b).
     fn append(&self, other: &Bound<'_, PyAny>) -> PyResult<Self> {
         let mut inner = self.inner.clone();
         for piece in append_pieces(other)? {
             inner = inner.append(&piece.extract::<IndexArg>()?.inner);
         }
-        Ok(PyIndex { inner })
+        Ok(PyIndex {
+            inner: float_labelled(inner.with_declared_dtype(None)),
+        })
     }
 
     /// A missing label is pandas' `KeyError(label)` (its message was
@@ -10003,20 +10095,56 @@ impl PyIndex {
         Ok(PyIndex { inner: res })
     }
 
-    fn insert(&self, loc: usize, item: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let label = py_to_index_label(item)?;
+    /// pandas' `insert(loc, item)`, in the dtype holding both: an object
+    /// index reads its labels again (pandas' FutureWarning when that leaves
+    /// object); in any other a missing item is its NaN - float64 in a
+    /// number index - else the common dtype of the index and the item's own
+    /// (see [`index_common_dtype`]). Ints took 1.5 as object and None as
+    /// int64 (br-frankenpandas-jnw2b). `loc` counts from the end when
+    /// negative, as numpy's insert; past either end is numpy's IndexError.
+    fn insert(&self, loc: i64, item: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let py = item.py();
+        let mut label = py_to_index_label(item)?;
         let mut labels = self.inner.labels().to_vec();
-        if loc > labels.len() {
-            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
-                "Index position out of bounds",
-            ));
+        let len = i64::try_from(labels.len()).unwrap_or(i64::MAX);
+        let loc = usize::try_from(if loc < 0 { loc + len } else { loc })
+            .ok()
+            .filter(|&at| at <= labels.len())
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                    "index {loc} is out of bounds for axis 0 with size {len}"
+                ))
+            })?;
+        let own = self.inner.dtype();
+        if own == "object" {
+            labels.insert(loc, label);
+            let inferred = float_labelled(Index::new(labels).rename_index(self.inner.name()));
+            if inferred.dtype() != "object" {
+                PyErr::warn(
+                    py,
+                    &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+                    c"The behavior of Index.insert with object-dtype is deprecated, in a future version this will return an object-dtype Index instead of inferring a non-object dtype. To retain the old behavior, do `idx.insert(loc, item).infer_objects(copy=False)`",
+                    1,
+                )?;
+            }
+            return Ok(PyIndex { inner: inferred });
         }
+        let dtype = if label.is_missing() {
+            label = IndexLabel::Null(NullKind::NaN);
+            if matches!(own, "int64" | "int32" | "float64") {
+                "float64"
+            } else {
+                "object"
+            }
+        } else {
+            let items = PyList::new(py, [item])?;
+            index_common_dtype(own, PyIndex::new(Some(items.as_any()), None)?.inner.dtype())
+        };
         labels.insert(loc, label);
-        let mut res = Index::new(labels);
-        if let Some(n) = self.inner.name() {
-            res = res.rename_index(Some(n));
-        }
-        Ok(PyIndex { inner: res })
+        let res = Index::new(labels).rename_index(self.inner.name());
+        Ok(PyIndex {
+            inner: index_in_dtype(res.with_dtype_of(&self.inner), dtype),
+        })
     }
 
     /// pandas' `repeat(repeats, axis=None)`: an axis is pandas' ValueError
@@ -10259,7 +10387,8 @@ impl PyIndex {
 
     /// pandas' `symmetric_difference(other, result_name=None, sort=None)`:
     /// `result_name` names the result (it was unexpected -
-    /// br-frankenpandas-n57tz).
+    /// br-frankenpandas-n57tz); in the two indexes' common dtype (see
+    /// [`index_common_dtype`]).
     #[pyo3(signature = (other, result_name=None, sort=None))]
     fn symmetric_difference(
         &self,
@@ -10267,12 +10396,9 @@ impl PyIndex {
         result_name: Option<&Bound<'_, PyAny>>,
         sort: Option<bool>,
     ) -> PyResult<Self> {
-        let inner = setop_sorted(
-            self.inner.symmetric_difference(&other.inner),
-            &self.inner,
-            &other.inner,
-            sort,
-        );
+        let dtype = index_common_dtype(self.inner.dtype(), constructed_dtype(&other.inner));
+        let inner = index_in_dtype(self.inner.symmetric_difference(&other.inner), dtype);
+        let inner = setop_sorted(inner, &self.inner, &other.inner, sort);
         Ok(PyIndex {
             inner: match result_name.filter(|name| !name.is_none()) {
                 Some(name) => inner.rename_index(py_axis_name(name)?),
@@ -12672,7 +12798,7 @@ impl PyDatetimeIndex {
     }
 
     fn insert(&self, loc: usize, item: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
-        self.as_py_index().insert(loc, item)
+        self.as_py_index().insert_label(loc, item)
     }
 
     fn is_(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -15918,7 +16044,7 @@ impl PyTimedeltaIndex {
     }
 
     fn insert(&self, loc: usize, item: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
-        self.as_py_index().insert(loc, item)
+        self.as_py_index().insert_label(loc, item)
     }
 
     fn is_(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -16371,7 +16497,7 @@ impl PyRangeIndex {
         Self::or_index(slf.py(), out, true)
     }
 
-    fn insert(slf: PyRef<'_, Self>, loc: usize, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    fn insert(slf: PyRef<'_, Self>, loc: i64, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         // pandas builds an Index when the range was empty.
         let ranges = !slf.as_super().inner.is_empty();
         let out = slf.as_super().insert(loc, item)?.inner;
@@ -17411,7 +17537,7 @@ impl PyPeriodIndex {
     }
 
     fn insert(&self, loc: usize, item: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
-        self.as_py_index().insert(loc, item)
+        self.as_py_index().insert_label(loc, item)
     }
 
     fn is_(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -18458,7 +18584,7 @@ impl PyCategoricalIndex {
     }
 
     fn insert(&self, loc: usize, item: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
-        self.as_py_index().insert(loc, item)
+        self.as_py_index().insert_label(loc, item)
     }
 
     fn is_(&self, other: &Bound<'_, PyAny>) -> bool {
