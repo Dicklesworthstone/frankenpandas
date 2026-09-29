@@ -20156,3 +20156,60 @@ _E55_CASES = {
 def test_everyday55_row_keys_sql_and_testing_like_pandas_h06ox(case: str) -> None:
     run = _E55_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-7679g: pd.Categorical's surface - astype, [i] / slices,
+# value_counts, unique, isna, the category editors, to_numpy / np.asarray,
+# shape / nbytes, copy, fillna, describe, map, equals, argsort, take,
+# repeat, isin, in, codes as an int8 array - was missing (AttributeError,
+# 'not subscriptable', np.asarray the repr's text, codes a list).
+def _e56_cat(m: Any) -> Any:
+    return m.Categorical(["b", "a", None, "b"], categories=["a", "b", "c"])
+
+
+_E56_CASES = {
+    "astype category": lambda m: [_e56_cat(m).astype("category")],
+    "astype object": lambda m: [_e56_cat(m).astype(object).tolist(), type(_e56_cat(m).astype(object)).__name__],
+    "cut astype str": lambda m: [m.cut([1, 5, 9], 3).astype(str).tolist()],
+    "astype str": lambda m: [_e56_cat(m).astype(str).tolist(), list(m.qcut([1, 2, 3, 4], 2).astype(str))],
+    "getitem": lambda m: [_e56_cat(m)[0], _e56_cat(m)[-1], _e56_cat(m)[2], _e56_cat(m)[1:3], list(_e56_cat(m)[[0, 3]])],
+    "getitem out of range": lambda m: [_e56_cat(m)[9]],
+    "contains": lambda m: ["a" in _e56_cat(m), "c" in _e56_cat(m), "z" in _e56_cat(m)],
+    "value_counts": lambda m: [_e56_cat(m).value_counts().to_dict(), _e56_cat(m).value_counts(dropna=False).to_dict()],
+    "unique": lambda m: [_e56_cat(m).unique()],
+    "isna notna": lambda m: [_e56_cat(m).isna().tolist(), _e56_cat(m).notna().tolist(), _e56_cat(m).isnull().tolist()],
+    "category editors": lambda m: [
+        list(_e56_cat(m).add_categories(["d"]).categories),
+        list(_e56_cat(m).rename_categories({"a": "A"}).categories),
+        list(_e56_cat(m).remove_unused_categories().categories),
+        list(_e56_cat(m).remove_categories(["c"]).categories),
+        list(_e56_cat(m).set_categories(["b", "a"]).categories),
+        list(_e56_cat(m).reorder_categories(["c", "b", "a"]).categories),
+        _e56_cat(m).as_ordered().ordered,
+        _e56_cat(m).as_ordered().as_unordered().ordered,
+    ],
+    "to_numpy asarray": lambda m: [_e56_cat(m).to_numpy().tolist(), np.asarray(_e56_cat(m)).tolist()],
+    "shape": lambda m: [_e56_cat(m).shape, _e56_cat(m).ndim, _e56_cat(m).size, type(_e56_cat(m).nbytes).__name__],
+    "copy fillna": lambda m: [list(_e56_cat(m).copy()), list(_e56_cat(m).fillna("a"))],
+    "fillna new category": lambda m: [_e56_cat(m).fillna("z")],
+    "describe": lambda m: [_e56_cat(m).describe().to_dict()],
+    "map": lambda m: [list(_e56_cat(m).map(str.upper, na_action="ignore")), _e56_cat(m).map({"a": 1, "b": 1, "c": 2}, na_action="ignore")],
+    "equals": lambda m: [_e56_cat(m).equals(_e56_cat(m).copy()), _e56_cat(m).equals(_e56_cat(m).fillna("a"))],
+    "argsort": lambda m: [_e56_cat(m).argsort().tolist(), _e56_cat(m).argsort(ascending=False).tolist()],
+    "take repeat": lambda m: [list(_e56_cat(m).take([1, 0])), list(_e56_cat(m).repeat(2))],
+    "isin": lambda m: [_e56_cat(m).isin(["a"]).tolist()],
+    "codes": lambda m: [type(_e56_cat(m).codes).__name__, str(_e56_cat(m).codes.dtype), _e56_cat(m).codes.tolist()],
+    "categories setter": lambda m: [setattr(_e56_cat(m), "categories", ["x", "y", "z"])],
+    # Negatives: already pandas'.
+    "len iter": lambda m: [len(_e56_cat(m)), list(_e56_cat(m))],
+    "ordered min": lambda m: [m.Categorical(["b", "a"], ordered=True).min()],
+    "from_codes": lambda m: [list(m.Categorical.from_codes([0, 1, 0], ["x", "y"]))],
+    "series cat": lambda m: [m.Series(_e56_cat(m)).cat.categories.tolist()],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E56_CASES))
+def test_everyday56_categorical_surface_like_pandas_7679g(case: str) -> None:
+    run = _E56_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

@@ -72966,21 +72966,17 @@ impl PyCategorical {
         categories_index(py, &self.meta().categories)
     }
 
+    /// The codes as pandas holds them: a numpy array of the narrowest
+    /// integer width the categories need (int8 for fewer than 128), -1 for a
+    /// missing value (it was a Python list; br-frankenpandas-7679g).
     #[getter]
-    fn codes(&self) -> PyResult<Vec<i64>> {
-        let cat = self
-            .inner
-            .cat()
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyTypeError, _>("not categorical"))?;
-        let codes = cat.codes().map_err(frame_error_to_py)?;
-        Ok(codes
-            .values()
-            .iter()
-            .map(|code| match code {
-                Scalar::Int64(code) => *code,
-                _ => -1,
-            })
-            .collect())
+    fn codes(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", self.code_dtype())?;
+        Ok(py
+            .import("numpy")?
+            .call_method("array", (self.code_values()?,), Some(&kwargs))?
+            .unbind())
     }
 
     #[getter]
@@ -73135,6 +73131,506 @@ impl PyCategorical {
         }
         Ok(Some(Self { inner }))
     }
+
+    // pandas' Categorical surface below was missing (AttributeError, 'not
+    // subscriptable'; br-frankenpandas-7679g). Most of it is the category
+    // Series' own method.
+
+    /// pandas' `astype(dtype, copy=True)`: a category dtype keeps a
+    /// Categorical, any other the values cast, as a numpy array.
+    #[pyo3(signature = (dtype, copy=true))]
+    fn astype(&self, py: Python<'_>, dtype: &Bound<'_, PyAny>, copy: bool) -> PyResult<Py<PyAny>> {
+        let _ = copy;
+        let cast = self.series(py)?.call_method1("astype", (dtype,))?;
+        if cast
+            .getattr("dtype")?
+            .is_instance_of::<PyCategoricalDtype>()
+        {
+            return Self::wrap(&cast)?.into_py_any(py);
+        }
+        // str: pandas takes the categories cast to numpy text by the codes,
+        // a '<U' array; with a missing value an object array whose missing
+        // cells are numpy's 'nan' text.
+        let is_str = dtype.is(py.get_type::<pyo3::types::PyString>())
+            || dtype.extract::<&str>().is_ok_and(|name| name == "str");
+        if is_str {
+            let numpy = py.import("numpy")?;
+            let texts = cast.call_method0("tolist")?;
+            let codes = self.code_values()?;
+            if !codes.contains(&-1) {
+                return Ok(numpy.call_method1("array", (texts, "str"))?.unbind());
+            }
+            let array = numpy.call_method1("array", (texts, "object"))?;
+            let nan_text = numpy.getattr("str_")?.call1(("nan",))?;
+            for (position, code) in codes.iter().enumerate() {
+                if *code == -1 {
+                    array.set_item(position, &nan_text)?;
+                }
+            }
+            return Ok(array.unbind());
+        }
+        Ok(cast.call_method0("to_numpy")?.unbind())
+    }
+
+    /// `c[i]` the value (NaN when missing), `c[slice / list / mask]` a
+    /// Categorical of those values.
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if !key.is_instance_of::<pyo3::types::PyBool>()
+            && let Ok(position) = key.extract::<i64>()
+        {
+            let len = i64::try_from(self.inner.len()).unwrap_or(i64::MAX);
+            let at = if position < 0 {
+                position + len
+            } else {
+                position
+            };
+            let Some(at) = usize::try_from(at).ok().filter(|&at| at < self.inner.len()) else {
+                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                    "index {position} is out of bounds for axis 0 with size {len}"
+                )));
+            };
+            return Ok(self.tolist(py)?.swap_remove(at));
+        }
+        let taken = self.series(py)?.getattr("iloc")?.get_item(key)?;
+        Self::wrap(&taken)?.into_py_any(py)
+    }
+
+    /// Whether `key` is a category that occurs (a missing value: whether
+    /// one occurs).
+    fn __contains__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let key = py_to_scalar(py, key)?;
+        let meta = self.meta();
+        let codes = self.code_values()?;
+        if key.is_missing() {
+            return Ok(codes.contains(&-1));
+        }
+        Ok(meta
+            .categories
+            .iter()
+            .position(|category| category.semantic_eq(&key))
+            .is_some_and(|position| codes.contains(&i64::try_from(position).unwrap_or(-1))))
+    }
+
+    /// The count of each category, in category order (0 kept), NaN's too
+    /// unless `dropna`, as a Series.
+    #[pyo3(signature = (dropna=true))]
+    fn value_counts(&self, py: Python<'_>, dropna: bool) -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("sort", false)?;
+        kwargs.set_item("dropna", dropna)?;
+        Ok(self
+            .series(py)?
+            .call_method("value_counts", (), Some(&kwargs))?
+            .unbind())
+    }
+
+    /// The values in order of appearance, the categories kept.
+    fn unique(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(self.series(py)?.call_method0("unique")?.unbind())
+    }
+
+    fn isna(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(self
+            .series(py)?
+            .call_method0("isna")?
+            .call_method0("to_numpy")?
+            .unbind())
+    }
+
+    fn isnull(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.isna(py)
+    }
+
+    fn notna(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(self
+            .series(py)?
+            .call_method0("notna")?
+            .call_method0("to_numpy")?
+            .unbind())
+    }
+
+    fn notnull(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.notna(py)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn add_categories(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        self.cat_method(py, "add_categories", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn remove_categories(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        self.cat_method(py, "remove_categories", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn rename_categories(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        self.cat_method(py, "rename_categories", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn remove_unused_categories(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        self.cat_method(py, "remove_unused_categories", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn set_categories(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        self.cat_method(py, "set_categories", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn reorder_categories(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        self.cat_method(py, "reorder_categories", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn as_ordered(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        self.cat_method(py, "as_ordered", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn as_unordered(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        self.cat_method(py, "as_unordered", args, kwargs)
+    }
+
+    /// The values as an object numpy array, NaN for a missing one.
+    #[pyo3(signature = (*args, **kwargs))]
+    fn to_numpy(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        Ok(self
+            .series(py)?
+            .call_method("to_numpy", args, kwargs)?
+            .unbind())
+    }
+
+    /// numpy's view of the values (`np.asarray(c)` was the repr's text in
+    /// a one-element array).
+    #[pyo3(signature = (dtype=None, copy=None))]
+    fn __array__(
+        &self,
+        py: Python<'_>,
+        dtype: Option<&Bound<'_, PyAny>>,
+        copy: Option<bool>,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = copy;
+        let values = self.series(py)?.call_method0("to_numpy")?;
+        match dtype.filter(|dtype| !dtype.is_none()) {
+            Some(dtype) => Ok(py
+                .import("numpy")?
+                .call_method1("asarray", (values, dtype))?
+                .unbind()),
+            None => Ok(values.unbind()),
+        }
+    }
+
+    #[getter]
+    fn shape(&self) -> (usize,) {
+        (self.inner.len(),)
+    }
+
+    #[getter]
+    fn ndim(&self) -> usize {
+        1
+    }
+
+    #[getter]
+    fn size(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// The codes' bytes and the categories' (8 per category).
+    #[getter]
+    fn nbytes(&self) -> usize {
+        let width = match self.code_dtype() {
+            "int8" => 1,
+            "int16" => 2,
+            "int32" => 4,
+            _ => 8,
+        };
+        self.inner.len() * width + 8 * self.meta().categories.len()
+    }
+
+    /// pandas' Categorical has no categories setter (rename_categories is
+    /// the way).
+    #[setter(categories)]
+    fn set_categories_attr(&self, _value: &Bound<'_, PyAny>) -> PyResult<()> {
+        Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+            "property 'categories' of 'Categorical' object has no setter",
+        ))
+    }
+
+    fn copy(&self) -> Self {
+        self.clone()
+    }
+
+    /// The missing values filled with `value` (a category, else pandas'
+    /// TypeError), as the Series' fillna.
+    #[pyo3(signature = (*args, **kwargs))]
+    fn fillna(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        Self::wrap(&self.series(py)?.call_method("fillna", args, kwargs)?)
+    }
+
+    /// pandas' describe: each category's count and share, NaN's too, as a
+    /// frame indexed by the categories (named 'categories').
+    fn describe(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let fp = py.import("frankenpandas")?;
+        let counts = self.value_counts(py, false)?.into_bound(py);
+        let freqs = counts.call_method1("__truediv__", (counts.call_method0("sum")?,))?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("axis", 1)?;
+        let frame = fp.call_method(
+            "concat",
+            (PyList::new(py, [&counts, &freqs])?,),
+            Some(&kwargs),
+        )?;
+        frame.setattr("columns", PyList::new(py, ["counts", "freqs"])?)?;
+        frame.getattr("index")?.setattr("name", "categories")?;
+        Ok(frame.unbind())
+    }
+
+    /// pandas' `map(mapper, na_action=)`: the categories mapped (a callable,
+    /// or a dict / Series looked up); one-to-one onto non-missing values a
+    /// Categorical of the same order, else an Index of each value's. Without
+    /// na_action pandas warns that its 'ignore' default changes.
+    #[pyo3(signature = (mapper, na_action=Passed(None)))]
+    fn map(
+        &self,
+        py: Python<'_>,
+        mapper: &Bound<'_, PyAny>,
+        na_action: Passed<'_>,
+    ) -> PyResult<Py<PyAny>> {
+        let na_action = match na_action {
+            Passed(Some(action)) if !action.is_none() => Some(action.extract::<String>()?),
+            Passed(Some(_)) => None,
+            Passed(None) => {
+                PyErr::warn(
+                    py,
+                    &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+                    c"The default value of 'ignore' for the `na_action` parameter in pandas.Categorical.map is deprecated and will be changed to 'None' in a future version. Please set na_action to the desired value to avoid seeing this warning",
+                    1,
+                )?;
+                Some("ignore".to_owned())
+            }
+        };
+        fn mapped_value<'py>(
+            mapper: &Bound<'py, PyAny>,
+            value: &Bound<'py, PyAny>,
+        ) -> PyResult<Bound<'py, PyAny>> {
+            if mapper.is_callable() {
+                mapper.call1((value,))
+            } else {
+                mapper.call_method1("get", (value, f64::NAN))
+            }
+        }
+        let meta = self.meta();
+        let mut mapped = Vec::with_capacity(meta.categories.len());
+        for category in &meta.categories {
+            mapped.push(mapped_value(
+                mapper,
+                &scalar_to_py(py, category)?.into_bound(py),
+            )?);
+        }
+        let codes = self.code_values()?;
+        let has_nans = codes.contains(&-1);
+        let nan = f64::NAN.into_bound_py_any(py)?;
+        let na_value = if na_action.is_none() && has_nans {
+            mapped_value(mapper, &nan)?
+        } else {
+            nan.clone()
+        };
+        let is_missing = |value: &Bound<'_, PyAny>| -> PyResult<bool> {
+            Ok(value.is_none() || value.extract::<f64>().is_ok_and(f64::is_nan))
+        };
+        let unique = PySet::new(py, &mapped)?.len() == mapped.len();
+        let mut any_missing = false;
+        for value in &mapped {
+            any_missing |= is_missing(value)?;
+        }
+        if unique && !any_missing && is_missing(&na_value)? {
+            let categories = mapped
+                .iter()
+                .map(|value| py_to_scalar(py, value))
+                .collect::<PyResult<Vec<_>>>()?;
+            let inner = Series::from_categorical_codes("", codes, categories, meta.ordered)
+                .map_err(frame_error_to_py)?;
+            return Self { inner }.into_py_any(py);
+        }
+        let values = codes
+            .iter()
+            .map(|&code| {
+                usize::try_from(code)
+                    .ok()
+                    .and_then(|code| mapped.get(code))
+                    .unwrap_or(&na_value)
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        Ok(py
+            .import("frankenpandas")?
+            .getattr("Index")?
+            .call1((PyList::new(py, values)?,))?
+            .unbind())
+    }
+
+    /// Same categories (in order when ordered) and the same values.
+    fn equals(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let Ok(other) = other.extract::<PyRef<'_, Self>>() else {
+            return Ok(false);
+        };
+        let (mine, theirs) = (self.meta(), other.meta());
+        let same_categories = mine.ordered == theirs.ordered
+            && mine.categories.len() == theirs.categories.len()
+            && if mine.ordered {
+                mine.categories
+                    .iter()
+                    .zip(&theirs.categories)
+                    .all(|(a, b)| a.semantic_eq(b))
+            } else {
+                mine.categories
+                    .iter()
+                    .all(|a| theirs.categories.iter().any(|b| a.semantic_eq(b)))
+            };
+        Ok(same_categories
+            && self.inner.len() == other.inner.len()
+            && self
+                .inner
+                .values()
+                .iter()
+                .zip(other.inner.values())
+                .all(|(a, b)| (a.is_missing() && b.is_missing()) || a.semantic_eq(b)))
+    }
+
+    /// The positions that sort the values by category, stably, missing
+    /// ones last (pandas' nargsort).
+    #[pyo3(signature = (*, ascending=true, kind="quicksort"))]
+    fn argsort(&self, py: Python<'_>, ascending: bool, kind: &str) -> PyResult<Py<PyAny>> {
+        let _ = kind;
+        let codes = self.code_values()?;
+        let (mut present, missing): (Vec<usize>, Vec<usize>) =
+            (0..codes.len()).partition(|&position| codes[position] >= 0);
+        if !ascending {
+            present.reverse();
+        }
+        present.sort_by_key(|&position| codes[position]);
+        if !ascending {
+            present.reverse();
+        }
+        present.extend(missing);
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", "intp")?;
+        Ok(py
+            .import("numpy")?
+            .call_method("array", (present,), Some(&kwargs))?
+            .unbind())
+    }
+
+    /// The values at `indices` (negative from the end; -1 missing with
+    /// `allow_fill`).
+    #[pyo3(signature = (indices, *, allow_fill=false, fill_value=None))]
+    fn take(
+        &self,
+        indices: &Bound<'_, PyAny>,
+        allow_fill: bool,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        if fill_value.is_some_and(|value| !value.is_none()) {
+            return Err(not_implemented("Categorical.take(fill_value=...)"));
+        }
+        let codes = self.code_values()?;
+        let len = i64::try_from(codes.len()).unwrap_or(i64::MAX);
+        let mut taken = Vec::new();
+        for index in indices.try_iter()? {
+            let index = index?.extract::<i64>()?;
+            let at = if index < 0 && !allow_fill {
+                index + len
+            } else {
+                index
+            };
+            if allow_fill && index == -1 {
+                taken.push(-1);
+                continue;
+            }
+            let code = usize::try_from(at)
+                .ok()
+                .and_then(|at| codes.get(at))
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                        "index {index} is out of bounds for axis 0 with size {len}"
+                    ))
+                })?;
+            taken.push(*code);
+        }
+        self.with_codes(taken)
+    }
+
+    /// Each value `repeats` times in turn.
+    #[pyo3(signature = (repeats, axis=None))]
+    fn repeat(&self, repeats: usize, axis: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let _ = axis;
+        let codes = self
+            .code_values()?
+            .into_iter()
+            .flat_map(|code| std::iter::repeat_n(code, repeats))
+            .collect();
+        self.with_codes(codes)
+    }
+
+    fn isin(&self, py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        Ok(self
+            .series(py)?
+            .call_method1("isin", (values,))?
+            .call_method0("to_numpy")?
+            .unbind())
+    }
 }
 
 impl PyCategorical {
@@ -73149,6 +73645,83 @@ impl PyCategorical {
         let kwargs = PyDict::new(py);
         kwargs.set_item("skipna", skipna)?;
         Ok(series.call_method(method, (), Some(&kwargs))?.unbind())
+    }
+
+    /// These values as a category Series, whose methods the Categorical
+    /// ones are (br-frankenpandas-7679g).
+    fn series<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        Ok(Py::new(
+            py,
+            PySeries {
+                inner: self.inner.clone(),
+            },
+        )?
+        .into_bound(py)
+        .into_any())
+    }
+
+    /// A category Series result as a Categorical: its values, its index
+    /// dropped.
+    fn wrap(result: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let series = result.extract::<PyRef<'_, PySeries>>()?.inner.clone();
+        let inner = Series::new(
+            "",
+            Index::new_known_unique_int64_unit_range(0, series.len()),
+            series.column().clone(),
+        )
+        .map_err(frame_error_to_py)?;
+        Ok(Self { inner })
+    }
+
+    /// `series.cat.<method>(*args, **kwargs)` as a Categorical.
+    fn cat_method(
+        &self,
+        py: Python<'_>,
+        method: &str,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        let result = self
+            .series(py)?
+            .getattr("cat")?
+            .call_method(method, args, kwargs)?;
+        Self::wrap(&result)
+    }
+
+    /// The codes, -1 for a missing value.
+    fn code_values(&self) -> PyResult<Vec<i64>> {
+        let cat = self
+            .inner
+            .cat()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyTypeError, _>("not categorical"))?;
+        let codes = cat.codes().map_err(frame_error_to_py)?;
+        Ok(codes
+            .values()
+            .iter()
+            .map(|code| match code {
+                Scalar::Int64(code) => *code,
+                _ => -1,
+            })
+            .collect())
+    }
+
+    /// These categories over `codes`.
+    fn with_codes(&self, codes: Vec<i64>) -> PyResult<Self> {
+        let meta = self.meta();
+        let inner = Series::from_categorical_codes("", codes, meta.categories, meta.ordered)
+            .map_err(frame_error_to_py)?;
+        Ok(Self { inner })
+    }
+
+    /// The numpy integer width pandas stores the codes in: int8 below 128
+    /// categories, then int16, int32, int64 (coerce_indexer_dtype).
+    fn code_dtype(&self) -> &'static str {
+        match self.meta().categories.len() {
+            n if n < 1 << 7 => "int8",
+            n if n < 1 << 15 => "int16",
+            n if n < 1 << 31 => "int32",
+            _ => "int64",
+        }
     }
 }
 
