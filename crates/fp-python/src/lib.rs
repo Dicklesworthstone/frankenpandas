@@ -39332,10 +39332,97 @@ impl PyDataFrame {
         }
     }
 
-    /// Render the DataFrame as an HTML table (pandas `DataFrame.to_html`).
-    #[pyo3(signature = (index=true))]
-    fn to_html(&self, index: bool) -> String {
-        self.inner.to_html(index)
+    /// Render the DataFrame as an HTML table (pandas `DataFrame.to_html`):
+    /// `buf` (None returns the text), `columns`, `index`, and on the table
+    /// tag `classes` (after 'dataframe'), `border` (1; 0 or False none) and
+    /// `table_id`; the other keywords are refused at a non-default value
+    /// (it took only `index`, anything else a TypeError;
+    /// br-frankenpandas-jn2nd).
+    #[pyo3(signature = (buf=None, columns=None, col_space=None, header=true, index=true, na_rep="NaN", formatters=None, float_format=None, sparsify=None, index_names=true, justify=None, max_rows=None, max_cols=None, show_dimensions=false, decimal=".", bold_rows=true, classes=None, escape=true, notebook=false, border=None, table_id=None, render_links=false, encoding=None))]
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+    fn to_html(
+        &self,
+        buf: Option<&Bound<'_, PyAny>>,
+        columns: Option<&Bound<'_, PyAny>>,
+        col_space: Option<&Bound<'_, PyAny>>,
+        header: bool,
+        index: bool,
+        na_rep: &str,
+        formatters: Option<&Bound<'_, PyAny>>,
+        float_format: Option<&Bound<'_, PyAny>>,
+        sparsify: Option<&Bound<'_, PyAny>>,
+        index_names: bool,
+        justify: Option<&str>,
+        max_rows: Option<usize>,
+        max_cols: Option<usize>,
+        show_dimensions: bool,
+        decimal: &str,
+        bold_rows: bool,
+        classes: Option<&Bound<'_, PyAny>>,
+        escape: bool,
+        notebook: bool,
+        border: Option<&Bound<'_, PyAny>>,
+        table_id: Option<&str>,
+        render_links: bool,
+        encoding: Option<&str>,
+    ) -> PyResult<Option<String>> {
+        let unset = |value: Option<&Bound<'_, PyAny>>| value.is_none_or(|value| value.is_none());
+        unsupported_params(
+            "DataFrame.to_html",
+            &[
+                ("col_space", unset(col_space)),
+                ("header", header),
+                ("na_rep", na_rep == "NaN"),
+                ("formatters", unset(formatters)),
+                ("float_format", unset(float_format)),
+                ("sparsify", unset(sparsify)),
+                ("index_names", index_names),
+                ("justify", justify.is_none()),
+                ("max_rows", max_rows.is_none()),
+                ("max_cols", max_cols.is_none()),
+                ("show_dimensions", !show_dimensions),
+                ("decimal", decimal == "."),
+                ("bold_rows", bold_rows),
+                ("escape", escape),
+                ("notebook", !notebook),
+                ("render_links", !render_links),
+                ("encoding", encoding.is_none()),
+            ],
+        )?;
+        let frame = select_columns_arg(self.inner.clone(), columns)?;
+        let classes = match classes.filter(|classes| !classes.is_none()) {
+            None => String::new(),
+            Some(one) if one.is_instance_of::<pyo3::types::PyString>() => {
+                format!(" {}", one.extract::<String>()?)
+            }
+            Some(many) => many
+                .try_iter()?
+                .map(|class| Ok(format!(" {}", class?.extract::<String>()?)))
+                .collect::<PyResult<String>>()?,
+        };
+        let border = match border.filter(|border| !border.is_none()) {
+            None => String::from(" border=\"1\""),
+            Some(flag) if flag.is_instance_of::<pyo3::types::PyBool>() => {
+                if flag.is_truthy()? {
+                    String::from(" border=\"1\"")
+                } else {
+                    String::new()
+                }
+            }
+            Some(width) => match width.extract::<i64>()? {
+                0 => String::new(),
+                width => format!(" border=\"{width}\""),
+            },
+        };
+        let id = table_id
+            .map(|id| format!(" id=\"{id}\""))
+            .unwrap_or_default();
+        let tag = format!("<table{border} class=\"dataframe{classes}\"{id}>");
+        let html =
+            frame
+                .to_html(index)
+                .replacen("<table border=\"1\" class=\"dataframe\">", &tag, 1);
+        write_text_target(buf, html, false)
     }
 
     /// Render the DataFrame as a GitHub-flavored Markdown table
@@ -63108,8 +63195,9 @@ fn csv_source_text(
     py: Python<'_>,
     source: &Bound<'_, PyAny>,
     encoding: Option<&str>,
+    compression: Option<&str>,
 ) -> PyResult<String> {
-    let bytes = py_input_bytes(source)?;
+    let bytes = py_input_bytes_as(source, compression)?;
     let text = match encoding {
         Some(encoding)
             if !matches!(
@@ -63131,6 +63219,33 @@ fn csv_source_text(
         Some(stripped) => stripped.to_owned(),
         None => text,
     })
+}
+
+/// A reader's `compression=` taken out of its keywords: 'infer' (pandas'
+/// default) when absent, None for None, else the method - a name, or a
+/// dict's 'method' (see [`py_input_bytes_as`]; it was refused,
+/// br-frankenpandas-jn2nd).
+fn take_compression(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Option<String>> {
+    let Some(value) = kwargs
+        .map(|kwargs| kwargs.get_item("compression"))
+        .transpose()?
+        .flatten()
+    else {
+        return Ok(Some("infer".to_owned()));
+    };
+    if let Some(kwargs) = kwargs {
+        kwargs.del_item("compression")?;
+    }
+    if value.is_none() {
+        return Ok(None);
+    }
+    if let Ok(spec) = value.cast::<PyDict>() {
+        return spec
+            .get_item("method")?
+            .map(|method| method.extract::<String>())
+            .transpose();
+    }
+    Ok(Some(value.extract()?))
 }
 
 /// `text` without the CSV rows `skiprows` names, as pandas' tokenizer
@@ -63323,6 +63438,7 @@ fn read_csv_impl(
     if converters.is_some() && args.names.is_some() {
         return Err(not_implemented("read_csv(converters=...) with names="));
     }
+    let compression = take_compression(args.kwargs)?;
     reject_unsupported_kwargs(
         "read_csv",
         args.kwargs,
@@ -63349,7 +63465,7 @@ fn read_csv_impl(
         (None, None) => (default_sep, None),
     };
 
-    let mut text = csv_source_text(py, source, args.encoding)?;
+    let mut text = csv_source_text(py, source, args.encoding, compression.as_deref())?;
     if let Some(pattern) = sep_pattern {
         let engine = match args.kwargs {
             Some(kwargs) => kwargs.get_item("engine")?,
@@ -63415,11 +63531,30 @@ fn read_csv_impl(
     // width ('int32', 'float32'; fvsao.59 / fvsao.23: 'int32' was not
     // understood and 'string' read as object).
     let mut refinements: Vec<(Option<String>, DtypeRefinementArg)> = Vec::new();
+    // Categorical columns: read as their text (pandas parses the categories
+    // as strings), then made categorical under the spec given - 'category'
+    // or a CategoricalDtype (the parser could not cast text to a
+    // categorical; br-frankenpandas-jn2nd).
+    let categoricals = PyDict::new(py);
     if let Some(dtype) = args.dtype.filter(|d| !d.is_none()) {
         if let Ok(mapping) = dtype.cast::<PyDict>() {
             let mut by_column = std::collections::HashMap::new();
             for (column, spec) in mapping.iter() {
-                let name = column.extract::<String>()?;
+                // An int key names a column by its label under header=None
+                // (0, 1, ...; it raised TypeError, br-frankenpandas-jn2nd).
+                let name = match column.extract::<i64>() {
+                    Ok(position) if !column.is_instance_of::<pyo3::types::PyBool>() => {
+                        position.to_string()
+                    }
+                    _ => column.extract::<String>()?,
+                };
+                if spec.is_instance_of::<PyCategoricalDtype>()
+                    || dtype_arg_text(&spec).is_ok_and(|text| text == "category")
+                {
+                    categoricals.set_item(&column, &spec)?;
+                    by_column.insert(name, DType::Utf8);
+                    continue;
+                }
                 let storage = match DtypeRefinementArg::of(&spec) {
                     Some(refinement) => {
                         refinements.push((Some(name.clone()), refinement));
@@ -63621,6 +63756,36 @@ fn read_csv_impl(
     }
     if parse_index_dates && let Some(index) = datetime_index_if_parsed(frame.index())? {
         frame = frame.with_index(index).map_err(frame_error_to_py)?;
+    }
+    // Without a header row or names the columns are pandas' integer labels
+    // 0, 1, ... (they were the text '0', '1', so df[0] raised KeyError;
+    // br-frankenpandas-jn2nd).
+    if header_row.is_none() && args.names.is_none() {
+        let labels: Vec<IndexLabel> = frame
+            .column_names()
+            .into_iter()
+            .map(|name| match name.parse::<i64>() {
+                Ok(position) => IndexLabel::Int64(position),
+                Err(_) => IndexLabel::Utf8(name.clone()),
+            })
+            .collect();
+        frame = frame.with_recorded_column_labels(labels);
+    }
+    if !categoricals.is_empty() {
+        // The categorical columns still in the frame (index_col may have
+        // taken one).
+        let frame_object = Bound::new(py, PyDataFrame { inner: frame })?;
+        let present = PyDict::new(py);
+        let columns = frame_object.getattr("columns")?;
+        for (column, spec) in categoricals.iter() {
+            if columns.contains(&column)? {
+                present.set_item(column, spec)?;
+            }
+        }
+        let result = frame_object.call_method1("astype", (present,))?;
+        return Ok(PyDataFrame {
+            inner: result.extract::<PyRef<'_, PyDataFrame>>()?.inner.clone(),
+        });
     }
     Ok(PyDataFrame { inner: frame })
 }
@@ -63914,7 +64079,9 @@ impl PyTextFileReader {
             None if iterator => None,
             None => return Ok(None),
         };
-        let text = csv_source_text(py, source, args.encoding)?;
+        // The source is decompressed once; its chunks are plain text.
+        let compression = take_compression(Some(kwargs))?;
+        let text = csv_source_text(py, source, args.encoding, compression.as_deref())?;
         let byte = |name: &str| -> PyResult<Option<u8>> {
             Ok(kwargs
                 .get_item(name)?
@@ -64167,11 +64334,36 @@ fn read_jsonl(path: &str) -> PyResult<PyDataFrame> {
     Ok(PyDataFrame { inner: df })
 }
 
-/// Read a Parquet file into a DataFrame (pandas `read_parquet`).
+/// pandas' `read_parquet(path, engine='auto', columns=None, ...)`: a path,
+/// a binary file object or bytes, `columns` the ones read in that order (it
+/// took only a path, `columns=` a TypeError; br-frankenpandas-jn2nd).
 #[pyfunction]
-fn read_parquet(path: &str) -> PyResult<PyDataFrame> {
-    let df = fp_io::read_parquet(std::path::Path::new(path)).map_err(io_error_to_py)?;
-    Ok(PyDataFrame { inner: df })
+#[pyo3(signature = (path, engine="auto", columns=None, storage_options=None, filters=None, **kwargs))]
+fn read_parquet(
+    path: &Bound<'_, PyAny>,
+    engine: &str,
+    columns: Option<&Bound<'_, PyAny>>,
+    storage_options: Option<&Bound<'_, PyAny>>,
+    filters: Option<&Bound<'_, PyAny>>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<PyDataFrame> {
+    unsupported_params(
+        "read_parquet",
+        &[
+            ("engine", matches!(engine, "auto" | "pyarrow")),
+            (
+                "storage_options",
+                storage_options.is_none_or(|s| s.is_none()),
+            ),
+            ("filters", filters.is_none_or(|f| f.is_none())),
+        ],
+    )?;
+    reject_unsupported_kwargs("read_parquet", kwargs, &[])?;
+    let bytes = py_input_bytes(path)?;
+    let frame = fp_io::read_parquet_bytes(&bytes).map_err(io_error_to_py)?;
+    Ok(PyDataFrame {
+        inner: select_columns_arg(frame, columns)?,
+    })
 }
 
 /// pandas' `merge` keywords after `left`/`right` (see `merge_impl`).
@@ -75778,25 +75970,130 @@ fn py_fspath(obj: &Bound<'_, PyAny>) -> PyResult<String> {
 /// `read()`, or a path (str / os.PathLike). A missing path raises
 /// FileNotFoundError, as pandas does.
 fn py_input_bytes(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
-    if let Ok(b) = obj.cast::<pyo3::types::PyBytes>() {
-        return Ok(b.as_bytes().to_vec());
-    }
-    if !obj.is_instance_of::<pyo3::types::PyString>()
+    py_input_bytes_as(obj, Some("infer"))
+}
+
+/// [`py_input_bytes`] under pandas' `compression=`: 'infer' (the readers'
+/// default) decompresses a path by its extension, a method any input, None
+/// nothing (a compressed file was read as its raw bytes, 'input is not
+/// valid UTF-8'; br-frankenpandas-jn2nd).
+fn py_input_bytes_as(obj: &Bound<'_, PyAny>, compression: Option<&str>) -> PyResult<Vec<u8>> {
+    let (data, path) = if let Ok(b) = obj.cast::<pyo3::types::PyBytes>() {
+        (b.as_bytes().to_vec(), None)
+    } else if !obj.is_instance_of::<pyo3::types::PyString>()
         && let Ok(read) = obj.getattr("read")
     {
         let data = read.call0()?;
-        if let Ok(b) = data.cast::<pyo3::types::PyBytes>() {
-            return Ok(b.as_bytes().to_vec());
-        }
-        return Ok(data.extract::<String>()?.into_bytes());
+        let data = match data.cast::<pyo3::types::PyBytes>() {
+            Ok(b) => b.as_bytes().to_vec(),
+            Err(_) => data.extract::<String>()?.into_bytes(),
+        };
+        (data, None)
+    } else {
+        let path = py_fspath(obj)?;
+        let data = std::fs::read(&path).map_err(|e| {
+            io_error_to_py(fp_io::IoError::Io(std::io::Error::new(
+                e.kind(),
+                format!("{e}: '{path}'"),
+            )))
+        })?;
+        (data, Some(path))
+    };
+    let method = match compression {
+        Some("infer") => path.as_deref().and_then(compression_by_extension),
+        other => other,
+    };
+    match method {
+        Some(method) => decompressed(obj.py(), &data, method, path.as_deref().unwrap_or("")),
+        None => Ok(data),
     }
-    let path = py_fspath(obj)?;
-    std::fs::read(&path).map_err(|e| {
-        io_error_to_py(fp_io::IoError::Io(std::io::Error::new(
-            e.kind(),
-            format!("{e}: '{path}'"),
-        )))
-    })
+}
+
+/// pandas' compression of a path by its extension (`compression='infer'`):
+/// .gz gzip, .bz2 bz2, .zip zip, .xz xz, .zst zstd, a tar archive tar; None
+/// for any other.
+fn compression_by_extension(path: &str) -> Option<&'static str> {
+    let lower = path.to_ascii_lowercase();
+    if [".tar", ".tar.gz", ".tar.bz2", ".tar.xz", ".tgz"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+    {
+        return Some("tar");
+    }
+    [
+        (".gz", "gzip"),
+        (".bz2", "bz2"),
+        (".zip", "zip"),
+        (".xz", "xz"),
+        (".zst", "zstd"),
+    ]
+    .iter()
+    .find(|(ext, _)| lower.ends_with(ext))
+    .map(|(_, method)| *method)
+}
+
+/// `data` decompressed as `method` - Python's gzip / bz2 / lzma / zipfile,
+/// as pandas reads them; a zip holds exactly one file (pandas' ValueError
+/// otherwise). tar and zstd stay refused.
+fn decompressed(py: Python<'_>, data: &[u8], method: &str, source: &str) -> PyResult<Vec<u8>> {
+    let bytes = pyo3::types::PyBytes::new(py, data);
+    let out = match method {
+        "gzip" => py.import("gzip")?.call_method1("decompress", (bytes,))?,
+        "bz2" => py.import("bz2")?.call_method1("decompress", (bytes,))?,
+        "xz" => py.import("lzma")?.call_method1("decompress", (bytes,))?,
+        "zip" => {
+            let buffer = py.import("io")?.getattr("BytesIO")?.call1((bytes,))?;
+            let archive = py.import("zipfile")?.getattr("ZipFile")?.call1((buffer,))?;
+            let names = archive.call_method0("namelist")?;
+            match names.len()? {
+                1 => archive.call_method1("read", (names.get_item(0)?,))?,
+                0 => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Zero files found in ZIP file {source}"
+                    )));
+                }
+                _ => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Multiple files found in ZIP file. Only one file per ZIP: {}",
+                        names.repr()?
+                    )));
+                }
+            }
+        }
+        other => return Err(not_implemented(&format!("compression='{other}'"))),
+    };
+    Ok(out.cast::<pyo3::types::PyBytes>()?.as_bytes().to_vec())
+}
+
+/// `data` compressed as `method` for a file named `path` (see
+/// [`decompressed`]): a zip holds one member named as the file without
+/// its `.zip`, as pandas' archive name.
+fn compressed(py: Python<'_>, data: &[u8], method: &str, path: &str) -> PyResult<Vec<u8>> {
+    let bytes = pyo3::types::PyBytes::new(py, data);
+    let out = match method {
+        "gzip" => py.import("gzip")?.call_method1("compress", (bytes,))?,
+        "bz2" => py.import("bz2")?.call_method1("compress", (bytes,))?,
+        "xz" => py.import("lzma")?.call_method1("compress", (bytes,))?,
+        "zip" => {
+            let buffer = py.import("io")?.getattr("BytesIO")?.call0()?;
+            let zipfile = py.import("zipfile")?;
+            let archive = zipfile.getattr("ZipFile")?.call1((
+                &buffer,
+                "w",
+                zipfile.getattr("ZIP_DEFLATED")?,
+            ))?;
+            let file_name = std::path::Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(path);
+            let member = file_name.strip_suffix(".zip").unwrap_or(file_name);
+            archive.call_method1("writestr", (member, bytes))?;
+            archive.call_method0("close")?;
+            buffer.call_method0("getvalue")?
+        }
+        other => return Err(not_implemented(&format!("compression='{other}'"))),
+    };
+    Ok(out.cast::<pyo3::types::PyBytes>()?.as_bytes().to_vec())
 }
 
 /// Input text from a path, a file-like object, or raw bytes (UTF-8). Invalid
@@ -75887,7 +76184,6 @@ fn write_csv_py(
     path_or_buf: Option<&Bound<'_, PyAny>>,
     args: &CsvWriteArgs<'_, '_>,
 ) -> PyResult<Option<String>> {
-    let compression_is_default = compression_is_plain(args.compression, path_or_buf)?;
     let one_byte = |text: &str| -> Option<u8> {
         match text.as_bytes() {
             [byte] if byte.is_ascii() => Some(*byte),
@@ -75908,7 +76204,6 @@ fn write_csv_py(
                 args.encoding
                     .is_none_or(|e| matches!(e.to_ascii_lowercase().as_str(), "utf-8" | "utf8")),
             ),
-            ("compression", compression_is_default),
             // QUOTE_NONE (3) and later need pandas' own escaping rules.
             ("quoting", matches!(args.quoting, None | Some(0..=2))),
             ("quotechar", one_byte(args.quotechar).is_some()),
@@ -76135,6 +76430,19 @@ fn write_csv_py(
         options.header = false;
     }
     let text = fp_io::write_csv_string_with_options(frame, &options).map_err(io_error_to_py)?;
+    // A compressed file - by the path's extension under 'infer', or the
+    // method given - is the text compressed as pandas writes it (it was
+    // refused; br-frankenpandas-jn2nd).
+    if let Some(target) = path_or_buf.filter(|target| !target.is_none())
+        && let Some((path, method)) = csv_compression_target(args.compression, target)?
+    {
+        if args.mode == "a" {
+            return Err(not_implemented("to_csv(mode='a') to a compressed file"));
+        }
+        let data = compressed(target.py(), (header + &text).as_bytes(), &method, &path)?;
+        std::fs::write(&path, data).map_err(|e| io_error_to_py(fp_io::IoError::Io(e)))?;
+        return Ok(None);
+    }
     write_text_target(path_or_buf, header + &text, args.mode == "a")
 }
 
@@ -76599,6 +76907,28 @@ fn index_deep_bytes(py: Python<'_>, index: &Index) -> PyResult<Option<usize>> {
 /// pandas' `compression='infer'` compresses a path ending in a compression
 /// extension. frankenpandas writes plain text, so that case (and any explicit
 /// compression) is refused rather than written uncompressed (fvsao.5).
+/// The path and compression method a `to_csv` target is written with:
+/// 'infer' by the path's extension, a method as given, None or no
+/// extension none; a compressed write to a file object stays refused.
+fn csv_compression_target(
+    compression: Option<&str>,
+    target: &Bound<'_, PyAny>,
+) -> PyResult<Option<(String, String)>> {
+    if target.hasattr("write")? {
+        return match compression {
+            None | Some("infer") => Ok(None),
+            Some(_) => Err(not_implemented("to_csv(compression=...) to a file object")),
+        };
+    }
+    let path = py_fspath(target)?;
+    let method = match compression {
+        None => None,
+        Some("infer") => compression_by_extension(&path).map(str::to_owned),
+        Some(method) => Some(method.to_owned()),
+    };
+    Ok(method.map(|method| (path, method)))
+}
+
 fn compression_is_plain(
     compression: Option<&str>,
     target: Option<&Bound<'_, PyAny>>,
@@ -76875,13 +77205,16 @@ fn read_fwf(
     widths: Option<&Bound<'_, PyAny>>,
     infer_nrows: usize,
     kwds: Option<&Bound<'_, PyDict>>,
-) -> PyResult<PyDataFrame> {
+) -> PyResult<Py<PyAny>> {
     // Was: call pandas, and without pandas a whitespace splitter that ignored
     // colspecs/widths and read a nonexistent path as literal data.
-    let _ = py;
     // infer_nrows sets how many rows column inference reads.
     unsupported_params("read_fwf", &[("infer_nrows", infer_nrows == 100)])?;
-    reject_unsupported_kwargs("read_fwf", kwds, &[])?;
+    // read_fwf's delimiter is the fill character between fields, not
+    // read_csv's separator.
+    if kwds.is_some_and(|kwds| kwds.contains("delimiter").unwrap_or(false)) {
+        return Err(not_implemented("read_fwf(delimiter=...)"));
+    }
     let mut options = fp_io::FwfReadOptions::default();
     if let Some(specs) = colspecs.filter(|c| !c.is_none()) {
         if specs.extract::<String>().is_err() {
@@ -76892,9 +77225,26 @@ fn read_fwf(
     if let Some(w) = widths.filter(|w| !w.is_none()) {
         options.widths = Some(w.extract::<Vec<usize>>()?);
     }
+    // Inference reads the lines after a skiprows count, as pandas'.
+    if let Some(skip) = kwds
+        .and_then(|kwds| kwds.get_item("skiprows").ok().flatten())
+        .and_then(|skip| skip.extract::<usize>().ok())
+    {
+        options.skiprows = skip;
+    }
+    // pandas' read_fwf is read_csv over the fixed-width fields: the fields
+    // become CSV text, which read_csv parses under every other keyword -
+    // header=None, names=, index_col=, dtype=, nrows=, converters=, ...
+    // (they were refused, or silently dropped when None: header=None read
+    // the first line as the header; br-frankenpandas-jn2nd).
     let text = py_input_text(filepath_or_buffer)?;
-    let frame = fp_io::read_fwf_str(&text, &options).map_err(io_error_to_py)?;
-    Ok(PyDataFrame { inner: frame })
+    let csv = fp_io::fwf_to_csv(&text, &options).map_err(io_error_to_py)?;
+    let buffer = py.import("io")?.getattr("StringIO")?.call1((csv,))?;
+    Ok(py
+        .import("frankenpandas")?
+        .getattr("read_csv")?
+        .call((buffer,), kwds)?
+        .unbind())
 }
 
 #[pyfunction]

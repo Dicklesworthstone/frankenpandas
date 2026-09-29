@@ -2725,8 +2725,14 @@ def test_to_csv_keywords_and_targets_match_pandas(tmp_path: Path) -> None:
                {"lineterminator": "||"}):
         with pytest.raises(NotImplementedError):
             fdf.to_csv(**kw)
-    with pytest.raises(NotImplementedError, match="compression"):
-        fdf.to_csv(tmp_path / "c.csv.gz")
+    # TEST-CHANGE (jn2nd): a .gz path is written gzip-compressed, as pandas
+    # writes it (it was refused): the decompressed text is pandas'.
+    import gzip
+
+    fdf.to_csv(tmp_path / "c.csv.gz")
+    pdf.to_csv(tmp_path / "d.csv.gz")
+    with gzip.open(tmp_path / "c.csv.gz", "rt") as ours, gzip.open(tmp_path / "d.csv.gz", "rt") as theirs:
+        assert ours.read() == theirs.read()
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
@@ -19717,4 +19723,117 @@ _E50_CASES = {
 @pytest.mark.parametrize("case", list(_E50_CASES))
 def test_everyday50_pickle_and_deepcopy_like_pandas_uch5o(case: str) -> None:
     run = _E50_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-jn2nd: read_fwf is read_csv over the fixed-width fields
+# (header=None read the first line as the header; the other keywords were
+# refused), read_csv(header=None) labels its columns 0, 1, ... (text '0'),
+# compressed files are read and written (refused / 'not valid UTF-8'),
+# read_csv(dtype={col: 'category'}), read_parquet(columns=, a buffer) and
+# to_html(classes=, border=, table_id=, buf) work.
+_E51_FWF = "id  name  score\n1   ann   9.5\n22  bob   \n333 cy    7.0\n"
+
+
+def _e51_shown(result: Any) -> list:
+    if isinstance(result, list):
+        return [repr(result)]
+    return _e23_shown(result) + [repr(list(result.columns))]
+
+
+def _e51_fwf(m: Any, text: str = _E51_FWF, **kwargs: Any) -> list:
+    return _e51_shown(m.read_fwf(__import__("io").StringIO(text), **kwargs))
+
+
+def _e51_csv(m: Any, text: str, **kwargs: Any) -> Any:
+    return m.read_csv(__import__("io").StringIO(text), **kwargs)
+
+
+def _e51_written(m: Any, name: str, **kwargs: Any) -> list:
+    import os
+    import tempfile
+
+    frame = m.DataFrame({"a": [1, 2], "s": ["x", "y"]})
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, name)
+        frame.to_csv(path, index=False, **kwargs)
+        return _e51_shown(m.read_csv(path, **kwargs))
+
+
+def _e51_stdlib_compressed(m: Any, ext: str) -> list:
+    import bz2
+    import gzip
+    import lzma
+    import os
+    import tempfile
+    import zipfile
+
+    text = "a,s\n1,x\n2,y\n"
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, f"f.csv.{ext}")
+        if ext == "zip":
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("f.csv", text)
+        else:
+            with {"gz": gzip, "bz2": bz2, "xz": lzma}[ext].open(path, "wt") as handle:
+                handle.write(text)
+        return _e51_shown(m.read_csv(path))
+
+
+def _e51_parquet(m: Any, **kwargs: Any) -> list:
+    import io
+
+    buffer = io.BytesIO()
+    m.DataFrame({"a": [1, 2], "b": ["x", "y"], "c": [1.5, None]}).to_parquet(buffer)
+    buffer.seek(0)
+    return _e51_shown(m.read_parquet(buffer, **kwargs))
+
+
+def _e51_html(m: Any, **kwargs: Any) -> list:
+    return [m.DataFrame({"k": ["a"], "v": [1.5]}).to_html(index=False, **kwargs)]
+
+
+_E51_CASES = {
+    "fwf colspecs without a header": lambda m: _e51_fwf(m, "12345\n67890\n", colspecs=[(0, 2), (2, 5)], header=None),
+    "fwf widths without a header": lambda m: _e51_fwf(m, "12345\n67890\n", widths=[2, 3], header=None),
+    "fwf names": lambda m: _e51_fwf(m, "12345\n67890\n", widths=[2, 3], names=["a", "b"]),
+    "fwf index_col": lambda m: _e51_fwf(m, index_col=0),
+    "fwf dtype": lambda m: _e51_fwf(m, dtype={"id": "float64"}),
+    "fwf nrows": lambda m: _e51_fwf(m, nrows=2),
+    "fwf converters": lambda m: _e51_fwf(m, converters={"name": str.upper}),
+    "fwf chunks": lambda m: [[chunk.shape for chunk in m.read_fwf(__import__("io").StringIO(_E51_FWF), chunksize=2)]],
+    "csv without a header": lambda m: _e51_shown(_e51_csv(m, "1,2\n3,4\n", header=None)),
+    "csv without a header, a column": lambda m: [_e51_csv(m, "1,2\n3,4\n", header=None)[1]],
+    "csv without a header, dtype by position": lambda m: _e51_shown(
+        _e51_csv(m, "1,2\n3,4\n", header=None, dtype={1: "float64"})
+    ),
+    "csv without a header, usecols": lambda m: _e51_shown(_e51_csv(m, "1,2,3\n4,5,6\n", header=None, usecols=[0, 2])),
+    "csv category column": lambda m: _e51_shown(_e51_csv(m, "a,b\nx,1\ny,2\nx,3\n", dtype={"a": "category"})),
+    "csv categories as text": lambda m: [
+        list(_e51_csv(m, "a\n1\n2\n1\n", dtype={"a": "category"})["a"].cat.categories)
+    ],
+    "gzip written and read": lambda m: _e51_written(m, "f.csv.gz"),
+    "bz2 written and read": lambda m: _e51_written(m, "f.csv.bz2"),
+    "xz written and read": lambda m: _e51_written(m, "f.csv.xz"),
+    "zip written and read": lambda m: _e51_written(m, "f.csv.zip"),
+    "explicit gzip": lambda m: _e51_written(m, "f.bin", compression="gzip"),
+    "stdlib gzip read": lambda m: _e51_stdlib_compressed(m, "gz"),
+    "stdlib zip read": lambda m: _e51_stdlib_compressed(m, "zip"),
+    "parquet columns from a buffer": lambda m: _e51_parquet(m, columns=["c", "a"]),
+    "parquet from a buffer": lambda m: _e51_parquet(m),
+    "to_html classes": lambda m: _e51_html(m, classes=["t", "u"]),
+    "to_html without a border": lambda m: _e51_html(m, border=0),
+    "to_html table_id": lambda m: _e51_html(m, table_id="tid", classes="t"),
+    # Negatives: already pandas'.
+    "fwf inferred": lambda m: _e51_fwf(m),
+    "csv with a header": lambda m: _e51_shown(_e51_csv(m, "a,b\n1,2\n")),
+    "csv written plain": lambda m: _e51_written(m, "f.csv"),
+    "to_html": lambda m: _e51_html(m),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E51_CASES))
+def test_everyday51_fwf_csv_compression_parquet_html_like_pandas_jn2nd(case: str) -> None:
+    run = _E51_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

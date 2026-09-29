@@ -620,6 +620,17 @@ fn fwf_csv_options(options: &FwfReadOptions) -> CsvReadOptions {
     }
 }
 
+/// The CSV text a fixed-width input reads as: each line's fields - by
+/// `colspecs` / `widths`, else inferred from non-whitespace runs - trimmed
+/// and quoted. pandas' `read_fwf` is `read_csv` over such fields, so a
+/// caller parsing this with its own CSV options (the Python binding hands
+/// every `read_fwf` keyword to its `read_csv`; br-frankenpandas-jn2nd)
+/// reads it as pandas does.
+pub fn fwf_to_csv(input: &str, options: &FwfReadOptions) -> Result<String, IoError> {
+    let colspecs = resolve_fwf_colspecs(input, options)?;
+    Ok(fwf_lines_to_csv(input, &colspecs))
+}
+
 /// Parse a fixed-width string, matching `pd.read_fwf(io.StringIO(s), ...)`.
 ///
 /// Tokens are sliced by character index, then trimmed of leading and
@@ -627,8 +638,7 @@ fn fwf_csv_options(options: &FwfReadOptions) -> CsvReadOptions {
 /// scalar-coercion path. When `colspecs` and `widths` are omitted, the
 /// ranges are inferred from non-whitespace runs across the input.
 pub fn read_fwf_str(input: &str, options: &FwfReadOptions) -> Result<DataFrame, IoError> {
-    let colspecs = resolve_fwf_colspecs(input, options)?;
-    let csv_input = fwf_lines_to_csv(input, &colspecs);
+    let csv_input = fwf_to_csv(input, options)?;
     let csv_options = fwf_csv_options(options);
     read_csv_with_options(&csv_input, &csv_options)
 }
