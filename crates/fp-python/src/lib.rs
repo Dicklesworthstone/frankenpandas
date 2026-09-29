@@ -9472,6 +9472,16 @@ impl PyIndex {
         Ok((constructor, args))
     }
 
+    /// pandas' Index is immutable: `idx[0] = v` is its TypeError (Python's
+    /// "does not support item assignment" was raised; pandas' printing also
+    /// brackets an index as a mutable-looking sequence, `[0, 4]`).
+    fn __setitem__(&self, key: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let _ = (key, value);
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "Index does not support mutable operations",
+        ))
+    }
+
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(idx) = key.extract::<i64>() {
             let pos = if idx < 0 {
@@ -48552,6 +48562,77 @@ fn category_rank(meta: &CategoricalMetadata, label: &IndexLabel) -> usize {
         .unwrap_or(usize::MAX)
 }
 
+/// pandas' `PrettyDict`, the dict `gb.groups` answers: a dict, printed as
+/// pandas prints it (see [`pprint_thing`]; it printed as a plain dict of
+/// Index reprs; br-frankenpandas-86mgd).
+#[pyclass(name = "PrettyDict", extends = PyDict, module = "frankenpandas")]
+pub struct PyPrettyDict;
+
+#[pymethods]
+impl PyPrettyDict {
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        pprint_thing(slf.as_any(), 0, false)
+    }
+}
+
+/// pandas' `pprint_thing` (`pandas.io.formats.printing`) for what a
+/// `PrettyDict` holds: a dict as `{key: value, ...}` with its text quoted, a
+/// sequence (a tuple, a list, an Index) as `(...)` / `[...]` - each its
+/// first 100 items (`display.max_seq_items`), then '...', three levels deep
+/// (`display.pprint_nest_depth`) - anything else its `str`.
+fn pprint_thing(obj: &Bound<'_, PyAny>, nest: usize, quote_strings: bool) -> PyResult<String> {
+    const MAX_SEQ_ITEMS: usize = 100;
+    const NEST_DEPTH: usize = 3;
+    if nest < NEST_DEPTH
+        && let Ok(dict) = obj.cast::<PyDict>()
+    {
+        let mut pairs = Vec::with_capacity(dict.len().min(MAX_SEQ_ITEMS));
+        for (key, value) in dict.iter().take(MAX_SEQ_ITEMS) {
+            pairs.push(format!(
+                "{}: {}",
+                pprint_thing(&key, nest + 1, true)?,
+                pprint_thing(&value, nest + 1, true)?
+            ));
+        }
+        let more = if dict.len() > MAX_SEQ_ITEMS {
+            ", ..."
+        } else {
+            ""
+        };
+        return Ok(format!("{{{}{more}}}", pairs.join(", ")));
+    }
+    let text = obj.cast::<pyo3::types::PyString>().ok();
+    let sequence = text.is_none()
+        && !obj.is_instance_of::<pyo3::types::PyBytes>()
+        && obj.len().is_ok()
+        && obj.try_iter().is_ok();
+    if nest < NEST_DEPTH && sequence {
+        let len = obj.len()?;
+        let (open, close) = if obj.is_instance_of::<pyo3::types::PySet>() {
+            ("{", "}")
+        } else if obj.hasattr("__setitem__")? {
+            ("[", "]")
+        } else {
+            ("(", ")")
+        };
+        let mut items = Vec::with_capacity(len.min(MAX_SEQ_ITEMS));
+        for item in obj.try_iter()?.take(MAX_SEQ_ITEMS) {
+            items.push(pprint_thing(&item?, nest + 1, quote_strings)?);
+        }
+        let mut body = items.join(", ");
+        if len > MAX_SEQ_ITEMS {
+            body.push_str(", ...");
+        } else if len == 1 && obj.is_instance_of::<PyTuple>() {
+            body.push(',');
+        }
+        return Ok(format!("{open}{body}{close}"));
+    }
+    match text {
+        Some(text) if quote_strings => Ok(format!("'{}'", text.to_str()?)),
+        _ => Ok(obj.str()?.to_string()),
+    }
+}
+
 /// A groupby's `.groups` (with `row_labels`: each group's row labels as an
 /// Index, as pandas gives them; they were positions) or `.indices` (row
 /// positions, an int64 array), in the given group order, each keyed by its
@@ -48562,7 +48643,14 @@ fn groups_dict(
     keys: &[Vec<IndexLabel>],
     row_labels: Option<&Index>,
 ) -> PyResult<Py<PyDict>> {
-    let dict = PyDict::new(py);
+    // `.groups` is pandas' PrettyDict, `.indices` a plain dict.
+    let dict = match row_labels {
+        Some(_) => Py::new(py, PyPrettyDict)?
+            .into_bound(py)
+            .into_any()
+            .cast_into::<PyDict>()?,
+        None => PyDict::new(py),
+    };
     let numpy = py.import("numpy")?;
     for ((_, positions), key) in groups.iter().zip(keys) {
         match row_labels {

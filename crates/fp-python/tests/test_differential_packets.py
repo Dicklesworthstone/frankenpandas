@@ -18206,6 +18206,12 @@ def _kg_dict(groups: Any) -> list:
     return [(repr(key), list(value), type(value).__name__) for key, value in groups.items()]
 
 
+def _kg_index_assign(m: Any) -> list:
+    index = m.Index([1, 2])
+    index[0] = 5
+    return list(index)
+
+
 _KG_CASES = {
     "agg a list": lambda m: _mx_shown(_kg(m).agg(["sum", "max"])),
     "agg a list with a lambda": lambda m: _mx_shown(_kg(m).agg(["min", lambda s: s.max() - s.min()])),
@@ -18248,6 +18254,17 @@ _KG_CASES = {
     "frame indices": lambda m: _kg_dict(_kg_frame(m).groupby(["a", "b"]).indices),
     "frame get_group": lambda m: _mx_shown(_kg_frame(m).groupby(["a", "b"]).get_group(("x", 1))),
     "one key indices": lambda m: _kg_dict(_kg_frame(m).groupby("b")["w"].indices),
+    "groups printed": lambda m: [repr(_kg(m).groups), type(_kg(m).groups).__name__],
+    "one key groups printed": lambda m: [repr(_kg_frame(m).groupby("a")["w"].groups)],
+    "frame groups printed": lambda m: [repr(_kg_frame(m).groupby(["a", "b"]).groups)],
+    "groups printed past 100": lambda m: [repr(m.Series(range(101)).groupby(list(range(101))).groups)],
+    "index item assignment": lambda m: _kg_index_assign(m),
+    "float agg a list": lambda m: _mx_shown(_kg_frame(m).groupby(["a", "b"])["v"].agg(["sum", "mean", "count"])),
+    "float apply": lambda m: _mx_shown(_kg_frame(m).groupby(["a", "b"])["v"].apply(lambda s: s.max())),
+    "float nlargest": lambda m: _mx_shown(_kg_frame(m).groupby(["a", "b"])["v"].nlargest(1)),
+    "float describe": lambda m: _mx_shown(_kg_frame(m).groupby(["a", "b"])["v"].describe()),
+    "float value_counts": lambda m: _mx_shown(_kg_frame(m).groupby(["a", "b"])["v"].value_counts()),
+    "float ohlc": lambda m: _mx_shown(_kg_frame(m).groupby(["a", "b"])["v"].ohlc()),
     # Negatives: one key, and pandas' errors.
     "one key agg a list": lambda m: _mx_shown(_kg_frame(m).groupby("a")["w"].agg(["sum", "max"])),
     "one key groups": lambda m: _kg_dict(_kg_frame(m).groupby("a")["w"].groups),
