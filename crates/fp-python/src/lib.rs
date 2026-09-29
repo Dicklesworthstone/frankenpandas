@@ -17648,7 +17648,8 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 || msg.starts_with("'<' not supported between instances of ")
                 || msg == "Cannot perform rank with non-ordered Categorical"
                 || msg.starts_with("Bin edges must be unique: ")
-                || msg.starts_with("Cannot setitem on a Categorical with a new category");
+                || msg.starts_with("Cannot setitem on a Categorical with a new category")
+                || msg.starts_with("DataFrame columns must be unique for orient=");
             let text = if pandas_verbatim {
                 msg.clone()
             } else {
@@ -18044,6 +18045,81 @@ impl<'a, 'py> FromPyObject<'a, 'py> for RankOption {
         }
         obj.extract::<String>().map(|text| Self(Some(text)))
     }
+}
+
+/// A keyword whose pandas default is its `no_default` sentinel: None when
+/// the caller left it out, else the object passed - an explicit None
+/// included, which pandas tells apart (pct_change warns on any `limit`).
+struct Passed<'py>(Option<Bound<'py, PyAny>>);
+
+impl<'a, 'py> FromPyObject<'a, 'py> for Passed<'py> {
+    type Error = PyErr;
+
+    fn extract(obj: pyo3::Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        Ok(Self(Some(obj.to_owned())))
+    }
+}
+
+/// pct_change's `fill_method` / `limit` as pandas 2.2 reads them, with its
+/// FutureWarnings: a fill_method other than None, or any limit, is
+/// deprecated; left out, the default 'pad' still fills, and warns when a
+/// column has a missing value after its first present one (GH#53491).
+fn pct_change_fill_args(
+    py: Python<'_>,
+    owner: &str,
+    fill_method: &Passed<'_>,
+    limit: &Passed<'_>,
+    columns: &[&Column],
+) -> PyResult<(Option<String>, Option<usize>)> {
+    let explicit_fill = fill_method.0.as_ref().filter(|method| !method.is_none());
+    let warn = |message: String| {
+        let message = std::ffi::CString::new(message)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        PyErr::warn(
+            py,
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            &message,
+            1,
+        )
+    };
+    if explicit_fill.is_some() || limit.0.is_some() {
+        warn(format!(
+            "The 'fill_method' keyword being not None and the 'limit' keyword in \
+             {owner}.pct_change are deprecated and will be removed in a future version. \
+             Either fill in any non-leading NA values prior to calling pct_change or \
+             specify 'fill_method=None' to not fill NA values."
+        ))?;
+    }
+    if fill_method.0.is_none() && limit.0.is_none() {
+        let non_leading_na = |column: &&Column| {
+            if column.as_f64_slice().is_some() || column.as_i64_slice().is_some() {
+                return false;
+            }
+            let values = column.values();
+            match values.iter().position(|value| !value.is_missing()) {
+                None => !values.is_empty(),
+                Some(first) => values[first..].iter().any(Scalar::is_missing),
+            }
+        };
+        if columns.iter().any(non_leading_na) {
+            warn(format!(
+                "The default fill_method='pad' in {owner}.pct_change is deprecated and \
+                 will be removed in a future version. Either fill in any non-leading NA \
+                 values prior to calling pct_change or specify 'fill_method=None' to not \
+                 fill NA values."
+            ))?;
+        }
+    }
+    let fill = match &fill_method.0 {
+        None => Some("pad".to_owned()),
+        Some(method) if method.is_none() => None,
+        Some(method) => Some(method.extract::<String>()?),
+    };
+    let limit = match &limit.0 {
+        Some(value) if !value.is_none() => Some(value.extract::<usize>()?),
+        _ => None,
+    };
+    Ok((fill, limit))
 }
 
 /// A flag pandas reads by Python truthiness: `rank(ascending=None)` ranks
@@ -23796,18 +23872,21 @@ impl PySeries {
     /// pandas 2.2.3's default fill_method is 'pad' (deprecated there, but still
     /// the default): missing values are forward-filled before the change is
     /// computed. An explicit `fill_method=None` disables the fill.
-    #[pyo3(signature = (periods=1, fill_method=Some("pad"), limit=None, freq=None))]
+    #[pyo3(signature = (periods=1, fill_method=Passed(None), limit=Passed(None), freq=None))]
     fn pct_change(
         &self,
+        py: Python<'_>,
         periods: i64,
-        fill_method: Option<&str>,
-        limit: Option<usize>,
+        fill_method: Passed<'_>,
+        limit: Passed<'_>,
         freq: Option<&str>,
     ) -> PyResult<PySeries> {
         unsupported_params("Series.pct_change", &[("freq", freq.is_none())])?;
+        let (fill_method, limit) =
+            pct_change_fill_args(py, "Series", &fill_method, &limit, &[self.inner.column()])?;
         let r = self
             .inner
-            .pct_change_with_fill(periods, fill_method, limit)
+            .pct_change_with_fill(periods, fill_method.as_deref(), limit)
             .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: r })
     }
@@ -28398,6 +28477,21 @@ impl PyDataFrame {
 
     /// `by=` / `columns=` names: a full tuple under MultiIndex columns, a
     /// list of them, or [`Self::column_names_arg`]'s typed labels.
+    /// The positions of the columns full-depth tuples name under MultiIndex
+    /// columns, one per key (None unless every key is such a tuple): a leaf
+    /// name can repeat across the upper levels, so the sort takes the
+    /// column itself (i17d4).
+    fn sort_key_positions(&self, obj: &Bound<'_, PyAny>) -> Option<Vec<usize>> {
+        self.inner.columns_multiindex()?;
+        if let Some(position) = self.multi_column_position(obj) {
+            return Some(vec![position]);
+        }
+        let list = obj.cast::<PyList>().ok()?;
+        list.iter()
+            .map(|item| self.multi_column_position(&item))
+            .collect()
+    }
+
     fn sort_key_names(&self, obj: &Bound<'_, PyAny>) -> Option<Vec<String>> {
         if let Some(name) = self.multi_column_name(obj) {
             return Some(vec![name]);
@@ -29170,8 +29264,8 @@ impl PyDataFrame {
     }
 
     fn has_non_numeric(&self) -> bool {
-        self.inner.column_names().iter().any(|c| {
-            self.inner.column(c).is_some_and(|col| {
+        (0..self.inner.num_columns()).any(|position| {
+            self.inner.column_at(position).is_some_and(|col| {
                 !matches!(
                     col.dtype(),
                     DType::Int64 | DType::Float64 | DType::Bool | DType::Timedelta64
@@ -29488,9 +29582,12 @@ impl PyDataFrame {
         ddof: usize,
         numeric_only: bool,
     ) -> Result<DataFrame, FrameError> {
+        // By position: a repeated column key is its own row and column of
+        // the matrix (i17d4).
         let mut candidate_cols = Vec::new();
-        for name in self.inner.column_names() {
-            if let Some(col) = self.inner.column(name) {
+        let mut positions = Vec::new();
+        for (position, name) in self.inner.column_names().into_iter().enumerate() {
+            if let Some(col) = self.inner.column_at(position) {
                 // The nullable Int64 / Float64 / boolean columns are numeric
                 // too; they were refused with a Rust-spelled witness
                 // ('Int64(1)'), or dropped (4qg5w.5).
@@ -29505,6 +29602,7 @@ impl PyDataFrame {
                         | DType::BoolNullable
                 ) {
                     candidate_cols.push(name.clone());
+                    positions.push(position);
                 } else if !numeric_only {
                     let witness = col
                         .values()
@@ -29535,8 +29633,12 @@ impl PyDataFrame {
 
         let mut has_nans = false;
         let mut series_list = Vec::with_capacity(n);
-        for col_name in &candidate_cols {
-            let col = self.inner.column(col_name).unwrap().clone();
+        for (col_name, &position) in candidate_cols.iter().zip(&positions) {
+            let col = self
+                .inner
+                .column_at(position)
+                .expect("candidate column in bounds")
+                .clone();
             let s = Series::new(col_name.clone(), self.inner.index().clone(), col)?;
             if s.hasnans() {
                 has_nans = true;
@@ -29576,7 +29678,7 @@ impl PyDataFrame {
             .filter(|_| candidate_cols.len() == self.inner.num_columns());
         let idx = Index::new(labels).with_range_span(span);
 
-        let mut columns_map = BTreeMap::new();
+        let mut pairs = Vec::with_capacity(n);
         for (j, name) in candidate_cols.iter().enumerate() {
             let col_vals: Vec<Scalar> = (0..n)
                 .map(|i| {
@@ -29591,13 +29693,20 @@ impl PyDataFrame {
             // float64 even when every pair fell below min_periods (an
             // all-NaN column was inferred object; br-frankenpandas-c5b7x).
             let col = Column::new(DType::Float64, col_vals).map_err(FrameError::Column)?;
-            columns_map.insert(name.clone(), col);
+            pairs.push((name.clone(), col));
         }
 
-        Ok(
-            DataFrame::new_with_column_order(idx, columns_map, candidate_cols)?
-                .with_labels_of(&self.inner),
-        )
+        let out = DataFrame::new_with_column_order(
+            idx,
+            fp_frame::ColumnStore::from_pairs(pairs),
+            candidate_cols,
+        )?
+        .with_labels_of(&self.inner);
+        // MultiIndex columns index the rows by the same levels, as pandas'.
+        match self.inner.columns_multiindex() {
+            Some(levels) => out.with_row_multiindex(levels.take(&positions)?),
+            None => Ok(out),
+        }
     }
 
     pub fn min_internal(
@@ -34254,7 +34363,14 @@ impl PyDataFrame {
             };
 
             let by_refs: Vec<&str> = by_cols.iter().map(String::as_str).collect();
-            let sorted = if let Some(key) = key {
+            let by_positions = self
+                .sort_key_positions(by)
+                .filter(|positions| key.is_none() && positions.len() == asc_flags.len());
+            let sorted = if let Some(positions) = by_positions {
+                self.inner
+                    .sort_values_at(&positions, &asc_flags, na_position)
+                    .map_err(frame_error_to_py)?
+            } else if let Some(key) = key {
                 self.keyed_sort_values(py, key, &by_cols, &asc_flags, na_position)?
             } else if by_refs.len() == 1 {
                 self.inner
@@ -34545,16 +34661,29 @@ impl PyDataFrame {
                 "DataFrame.index must be unique for orient='{orient}'"
             )));
         }
+        // Every column by position: under a repeated key each column is its
+        // own (the dict keeps the last, as pandas', which warns so).
+        let column_at = |position: usize| {
+            self.inner.column_at(position).ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                    "column position {position} missing"
+                ))
+            })
+        };
+        if pyo3::types::PySet::new(py, &keys).is_ok_and(|unique| unique.len() != keys.len()) {
+            PyErr::warn(
+                py,
+                &py.get_type::<pyo3::exceptions::PyUserWarning>(),
+                c"DataFrame columns are not unique, some columns will be omitted.",
+                1,
+            )?;
+        }
 
         match orient {
             "dict" => {
                 let out = PyDict::new(py);
-                for (name, key) in col_names.into_iter().zip(&keys) {
-                    let col = self.inner.column(name).ok_or_else(|| {
-                        PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
-                            "column {name:?} missing"
-                        ))
-                    })?;
+                for (position, key) in keys.iter().enumerate() {
+                    let col = column_at(position)?;
                     let inner_dict = PyDict::new(py);
                     for (i, val) in col.values().iter().enumerate() {
                         let k = index_label_to_py(py, &idx_labels[i])?;
@@ -34567,12 +34696,8 @@ impl PyDataFrame {
             }
             "list" => {
                 let out = PyDict::new(py);
-                for (name, key) in col_names.into_iter().zip(&keys) {
-                    let col = self.inner.column(name).ok_or_else(|| {
-                        PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
-                            "column {name:?} missing"
-                        ))
-                    })?;
+                for (position, key) in keys.iter().enumerate() {
+                    let col = column_at(position)?;
                     let values: Vec<Py<PyAny>> = col
                         .values()
                         .iter()
@@ -34586,12 +34711,8 @@ impl PyDataFrame {
                 let mut rows_list = Vec::with_capacity(n_rows);
                 for row_idx in 0..n_rows {
                     let row_dict = PyDict::new(py);
-                    for (name, key) in col_names.iter().zip(&keys) {
-                        let col = self.inner.column(name).ok_or_else(|| {
-                            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
-                                "column {name:?} missing"
-                            ))
-                        })?;
+                    for (position, key) in keys.iter().enumerate() {
+                        let col = column_at(position)?;
                         let v = scalar_to_py(py, &col.values()[row_idx])?;
                         row_dict.set_item(key, v)?;
                     }
@@ -34604,12 +34725,8 @@ impl PyDataFrame {
                 for row_idx in 0..n_rows {
                     let k = index_label_to_py(py, &idx_labels[row_idx])?;
                     let row_dict = PyDict::new(py);
-                    for (name, key) in col_names.iter().zip(&keys) {
-                        let col = self.inner.column(name).ok_or_else(|| {
-                            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
-                                "column {name:?} missing"
-                            ))
-                        })?;
+                    for (position, key) in keys.iter().enumerate() {
+                        let col = column_at(position)?;
                         let v = scalar_to_py(py, &col.values()[row_idx])?;
                         row_dict.set_item(key, v)?;
                     }
@@ -34619,8 +34736,8 @@ impl PyDataFrame {
             }
             "series" => {
                 let out = PyDict::new(py);
-                for (name, key) in col_names.into_iter().zip(&keys) {
-                    let col_series = self.column_series(name)?;
+                for (position, key) in keys.iter().enumerate() {
+                    let col_series = self.column_series_at(position)?;
                     out.set_item(key, Py::new(py, col_series)?)?;
                 }
                 Ok(out.into_any().unbind())
@@ -35092,21 +35209,27 @@ impl PyDataFrame {
     ///
     /// Default fill_method is 'pad' like pandas 2.2.3; `fill_method=None`
     /// disables the forward fill.
-    #[pyo3(signature = (periods=1, fill_method=Some("pad"), limit=None, freq=None, axis=None))]
+    #[pyo3(signature = (periods=1, fill_method=Passed(None), limit=Passed(None), freq=None, axis=None))]
     fn pct_change(
         &self,
+        py: Python<'_>,
         periods: i64,
-        fill_method: Option<&str>,
-        limit: Option<usize>,
+        fill_method: Passed<'_>,
+        limit: Passed<'_>,
         freq: Option<&str>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         unsupported_params("DataFrame.pct_change", &[("freq", freq.is_none())])?;
         let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
+        let columns: Vec<&Column> = (0..self.inner.num_columns())
+            .filter_map(|position| self.inner.column_at(position))
+            .collect();
+        let (fill_method, limit) =
+            pct_change_fill_args(py, "DataFrame", &fill_method, &limit, &columns)?;
         let res = match ax {
             0 => self
                 .inner
-                .pct_change_with_fill(periods, fill_method, limit)
+                .pct_change_with_fill(periods, fill_method.as_deref(), limit)
                 .map_err(frame_error_to_py)?,
             1 => self
                 .inner
@@ -37189,7 +37312,12 @@ impl PyDataFrame {
         if left.names() != right.names() {
             return Ok(PyDataFrame { inner: res });
         }
-        // Equal column axes join to themselves: this frame's order.
+        // Equal column axes join to themselves: this frame's order. Identical
+        // keys already come back in it, levels and all, each column paired
+        // by position (a leaf name repeats across the upper levels; i17d4).
+        if left.equals(right) && self.inner.column_names() == other.inner.column_names() {
+            return Ok(PyDataFrame { inner: res });
+        }
         if left.equals(right) {
             return Ok(PyDataFrame {
                 inner: res
@@ -37849,9 +37977,36 @@ impl PyDataFrame {
                 }
             }
             if names.iter().collect::<HashSet<_>>().len() != names.len() {
-                return Err(not_implemented(
-                    "DataFrame.apply returning sequences over duplicate column names",
-                ));
+                // A repeated column key: each result is its own column, by
+                // position, over the frame's own rows and columns (i17d4) -
+                // when every result has a value per row (a Series on the
+                // frame's own index).
+                let columns = results
+                    .iter()
+                    .map(|result| -> PyResult<Option<Column>> {
+                        let series = if result.is_instance_of::<PySeries>() {
+                            result.clone()
+                        } else {
+                            py.get_type::<PySeries>().call1((result,))?
+                        };
+                        let series = series.extract::<PyRef<'_, PySeries>>()?;
+                        let fits = if result.is_instance_of::<PySeries>() {
+                            series.inner.index() == frame.index()
+                        } else {
+                            series.inner.len() == nrows
+                        };
+                        Ok(fits.then(|| series.inner.column().clone()))
+                    })
+                    .collect::<PyResult<Option<Vec<_>>>>()?;
+                let Some(columns) = columns else {
+                    return Err(not_implemented(
+                        "DataFrame.apply returning sequences of another length over duplicate column names",
+                    ));
+                };
+                return PyDataFrame {
+                    inner: frame.with_columns_at_positions(columns),
+                }
+                .into_bound_py_any(py);
             }
             // Keyed by the typed labels, so the columns keep them (fvsao.32).
             for (label, result) in column_labels.iter().zip(&results) {
@@ -37995,6 +38150,49 @@ impl PyDataFrame {
                 inner = inner.astype(DType::Int64).map_err(frame_error_to_py)?;
             }
             return PyDataFrame { inner }.into_py_any(py);
+        }
+        // An ndarray, a list: pandas' `np.dot(self.values, np.asarray(other))`,
+        // by position - a 2-D product a frame over its columns 0..n, a 1-D one
+        // a Series, both under this frame's index (it was TypeError
+        // 'unsupported type: ndarray').
+        if !other.is_instance_of::<PySeries>() {
+            let array = py.import("numpy")?.call_method1("asarray", (other,))?;
+            let ndim: usize = array.getattr("ndim")?.extract()?;
+            if matches!(ndim, 1 | 2) {
+                let rows: usize = array.getattr("shape")?.get_item(0)?.extract()?;
+                let (nrows, ncols) = self.inner.shape();
+                if rows != ncols {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Dot product shape mismatch, ({nrows}, {ncols}) vs {}",
+                        array.getattr("shape")?.repr()?
+                    )));
+                }
+                let matrix = if ndim == 1 {
+                    array.call_method1("reshape", ((-1_i64, 1_i64),))?
+                } else {
+                    array.clone()
+                };
+                let right = py.get_type::<PyDataFrame>().call1((matrix,))?;
+                let right = right.extract::<PyRef<'_, PyDataFrame>>()?.inner.clone();
+                let mut product = self.inner.dot(&right).map_err(frame_error_to_py)?;
+                let int_array = array
+                    .getattr("dtype")?
+                    .getattr("kind")?
+                    .extract::<String>()
+                    .is_ok_and(|kind| matches!(kind.as_str(), "i" | "u"));
+                if ints(&self.inner) && int_array {
+                    product = product.astype(DType::Int64).map_err(frame_error_to_py)?;
+                }
+                if ndim == 2 {
+                    return PyDataFrame { inner: product }.into_py_any(py);
+                }
+                let column = product.column_at(0).cloned().ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>("matrices are not aligned")
+                })?;
+                let inner =
+                    Series::new("", product.index().clone(), column).map_err(frame_error_to_py)?;
+                return PySeries { inner }.into_py_any(py);
+            }
         }
         let series = other.extract::<PyRef<'_, PySeries>>().map_err(|_| {
             PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
@@ -39854,6 +40052,42 @@ impl PyDataFrame {
             // date_format / date_unit.
             let frame = Python::attach(|py| frame_object_instants(py, &self.inner))?;
             let frame = json_orient_dates(frame, orient, date_format, date_unit)?;
+            // MultiIndex columns key records / columns / index by each
+            // column's tuple as Python prints it ("('p', 's')"), as pandas'
+            // (the flat leaf names were written, so a leaf name repeated
+            // across the upper levels was refused; i17d4).
+            let frame = match frame.columns_multiindex() {
+                Some(levels)
+                    if matches!(orient.unwrap_or("columns"), "records" | "columns" | "index") =>
+                {
+                    Python::attach(|py| -> PyResult<DataFrame> {
+                        let keys = (0..levels.len())
+                            .map(|position| {
+                                let labels = levels
+                                    .get_tuple(position)
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .map(|label| index_label_to_py(py, label))
+                                    .collect::<PyResult<Vec<_>>>()?;
+                                Ok(PyTuple::new(py, labels)?.str()?.to_string())
+                            })
+                            .collect::<PyResult<Vec<String>>>()?;
+                        let columns = (0..frame.num_columns())
+                            .filter_map(|position| frame.column_at(position).cloned());
+                        let keyed = DataFrame::new_with_column_order(
+                            frame.index().clone(),
+                            fp_frame::ColumnStore::from_pairs(keys.iter().cloned().zip(columns)),
+                            keys,
+                        );
+                        match frame.row_multiindex() {
+                            Some(rows) => keyed.and_then(|f| f.with_row_multiindex(rows.clone())),
+                            None => keyed,
+                        }
+                        .map_err(frame_error_to_py)
+                    })?
+                }
+                _ => frame,
+            };
             if lines {
                 // pandas ends every record line, the last included, with "\n".
                 let mut text = fp_io::write_jsonl_string(&frame).map_err(io_error_to_py)?;
@@ -63400,7 +63634,7 @@ fn write_csv_py(
         }
         None => frame,
     };
-    let options = fp_io::CsvWriteOptions {
+    let mut options = fp_io::CsvWriteOptions {
         delimiter,
         na_rep: args.na_rep.to_owned(),
         header: aliases.is_some() || args.header.map_or(Ok(true), |h| h.extract::<bool>())?,
@@ -63416,8 +63650,76 @@ fn write_csv_py(
         decimal: one_byte(args.decimal).unwrap_or(b'.'),
         header_aliases: aliases,
     };
+    // MultiIndex columns: pandas writes one header row per level - the
+    // level's name (or '') where the index goes, then that level's labels -
+    // and after them a row of the index names when any is set (only the
+    // flat leaf names were written; i17d4).
+    let mut header = String::new();
+    if options.header
+        && options.header_aliases.is_none()
+        && let Some(levels) = frame.columns_multiindex()
+    {
+        let quote = |field: String| -> String {
+            let quote = char::from(options.quote);
+            let needs = match options.quoting {
+                fp_io::CsvQuoting::Minimal => {
+                    field.contains(char::from(options.delimiter))
+                        || field.contains(quote)
+                        || field.contains(['\n', '\r'])
+                }
+                _ => true,
+            };
+            if needs {
+                let doubled = field.replace(quote, &format!("{quote}{quote}"));
+                format!("{quote}{doubled}{quote}")
+            } else {
+                field
+            }
+        };
+        let text_of = |name: Option<&LabelName>| name.map(ToString::to_string).unwrap_or_default();
+        let index_names: Vec<String> = if !options.include_index {
+            Vec::new()
+        } else if let Some(label) = &options.index_label {
+            vec![label.clone()]
+        } else if let Some(rows) = frame.row_multiindex() {
+            rows.names()
+                .iter()
+                .map(|name| text_of(name.as_ref()))
+                .collect()
+        } else {
+            vec![text_of(frame.index().name())]
+        };
+        let mut push_row = |row: Vec<String>| {
+            let fields: Vec<String> = row.into_iter().map(&quote).collect();
+            header.push_str(&fields.join(&char::from(options.delimiter).to_string()));
+            header.push_str(&options.line_terminator);
+        };
+        for level in 0..levels.nlevels() {
+            let mut row = Vec::with_capacity(levels.len() + index_names.len());
+            if options.include_index {
+                row.push(text_of(levels.names().get(level).and_then(Option::as_ref)));
+                row.extend(std::iter::repeat_n(
+                    String::new(),
+                    index_names.len().saturating_sub(1),
+                ));
+            }
+            row.extend((0..levels.len()).map(|position| {
+                levels
+                    .get_tuple(position)
+                    .and_then(|labels| labels.get(level).map(ToString::to_string))
+                    .unwrap_or_default()
+            }));
+            push_row(row);
+        }
+        if index_names.iter().any(|name| !name.is_empty()) {
+            let mut row = index_names;
+            row.extend(std::iter::repeat_n(String::new(), levels.len()));
+            push_row(row);
+        }
+        options.header = false;
+    }
     let text = fp_io::write_csv_string_with_options(frame, &options).map_err(io_error_to_py)?;
-    write_text_target(path_or_buf, text, args.mode == "a")
+    write_text_target(path_or_buf, header + &text, args.mode == "a")
 }
 
 /// `frame` with its datetime columns (and, when `with_index`, a datetime
@@ -66623,9 +66925,9 @@ mod tests {
         let diff_df = py_df.diff(1, None).expect("diff"); // ubs:ignore — test fixture
         assert_eq!(diff_df.shape(), (3, 2));
 
-        let pct_df = py_df
-            .pct_change(1, None, None, None, None)
-            .expect("pct_change"); // ubs:ignore — test fixture
+        let pct_df =
+            Python::attach(|py| py_df.pct_change(py, 1, Passed(None), Passed(None), None, None))
+                .expect("pct_change"); // ubs:ignore — test fixture
         assert_eq!(pct_df.shape(), (3, 2));
 
         let cs = py_df.cumsum(None, true, None).expect("cumsum"); // ubs:ignore — test fixture
@@ -68749,7 +69051,7 @@ mod tests {
 
             // 2. Series pct_change
             let s_pct = py_s
-                .pct_change(1, None, None, None)
+                .pct_change(py, 1, Passed(None), Passed(None), None)
                 .expect("series pct_change");
             assert!(s_pct.inner.values()[0].is_nan() || s_pct.inner.values()[0].is_null());
             assert_eq!(s_pct.inner.values()[1], Scalar::Float64(1.0)); // (20-10)/10 = 1.0
@@ -68801,21 +69103,25 @@ mod tests {
 
             // 5. DataFrame pct_change
             let df_pct0 = py_df
-                .pct_change(1, None, None, None, None)
+                .pct_change(py, 1, Passed(None), Passed(None), None, None)
                 .expect("df pct_change axis 0");
             let col_a_pct0 = df_pct0.inner.column("a").unwrap();
             assert!(col_a_pct0.values()[0].is_nan() || col_a_pct0.values()[0].is_null());
             assert_eq!(col_a_pct0.values()[1], Scalar::Float64(1.0)); // (2-1)/1 = 1.0
 
             let df_pct1 = py_df
-                .pct_change(1, None, None, None, Some(&ax1))
+                .pct_change(py, 1, Passed(None), Passed(None), None, Some(&ax1))
                 .expect("df pct_change axis 1");
             let col_a_pct1 = df_pct1.inner.column("a").unwrap();
             let col_b_pct1 = df_pct1.inner.column("b").unwrap();
             assert!(col_a_pct1.values()[0].is_nan() || col_a_pct1.values()[0].is_null());
             assert_eq!(col_b_pct1.values()[0], Scalar::Float64(9.0)); // (10-1)/1 = 9.0
 
-            assert!(py_df.pct_change(1, None, None, None, Some(&ax2)).is_err());
+            assert!(
+                py_df
+                    .pct_change(py, 1, Passed(None), Passed(None), None, Some(&ax2))
+                    .is_err()
+            );
 
             // 6. DataFrame shift
             let df_shift0 = py_df

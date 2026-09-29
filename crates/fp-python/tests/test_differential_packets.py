@@ -14444,7 +14444,10 @@ def _rk_leaves(m: Any) -> Any:
 def _rk_shown(result: Any) -> list:
     if hasattr(result, "columns"):
         return [result.shape, list(result.columns)] + result.to_string().split("\n")
-    return result.to_string().split("\n")
+    if hasattr(result, "to_string"):
+        return result.to_string().split("\n")
+    # A list of rows, a CSV / JSON text, a dict.
+    return [result]
 
 
 _REPEATED_KEY_OPS = {
@@ -14477,6 +14480,31 @@ _REPEATED_KEY_OPS = {
     "max axis1": lambda d: d.max(axis=1),
     "mean axis1": lambda d: d.mean(axis=1),
     "apply axis1": lambda d: d.apply(lambda row: row.iloc[1] - row.iloc[0], axis=1),
+    # Part 2.
+    "mode": lambda d: d.mode(),
+    "cov": lambda d: d.cov(),
+    "any": lambda d: (d.abs() > 5).any(),
+    "all": lambda d: (d > 1.5).all(),
+    "count axis1": lambda d: d.where(d > 2).count(axis=1),
+    "rank axis1": lambda d: d.rank(axis=1),
+    "isin": lambda d: d.isin([1.25, 6.0, 2.0]),
+    "add with fill_value": lambda d: d.add(d.where(d > 2), fill_value=0),
+    "times a Series down the rows": lambda d: d.mul(d.index.to_series() + 1, axis=0),
+    "minus the first row": lambda d: d - d.iloc[0],
+    "itertuples": lambda d: [tuple(t) for t in d.itertuples(index=False)],
+    "iterrows": lambda d: [list(r) for _, r in d.iterrows()],
+    "select_dtypes": lambda d: d.select_dtypes("number"),
+    "sum numeric_only": lambda d: d.sum(numeric_only=True),
+    "apply column-wise": lambda d: d.apply(lambda c: c * 2),
+    "transform": lambda d: d.transform(lambda c: c - c.mean()),
+    "sort by the last column": lambda d: d.sort_values(d.columns[-1], ascending=False),
+    "sort_index axis1": lambda d: d.sort_index(axis=1),
+    "add_prefix": lambda d: d.add_prefix("x_"),
+    "dot an ndarray": lambda d: d.dot(np.arange(1.0, d.shape[1] + 1)),
+    "to_csv": lambda d: d.to_csv(),
+    "to_json values": lambda d: d.to_json(orient="values"),
+    "to_json records refuses": lambda d: d.to_json(orient="records"),
+    "to_dict list": lambda d: d.to_dict("list"),
 }
 
 _REPEATED_KEY_CASES = {
@@ -14487,6 +14515,11 @@ _REPEATED_KEY_CASES = {
 # A decimals dict rounds every column under its key.
 _REPEATED_KEY_CASES["flat round a dict"] = lambda m: _rk_shown(_rk_flat(m).round({"a": 0}))
 _REPEATED_KEY_CASES["flat idxmax axis1"] = lambda m: _rk_shown(_rk_flat(m).idxmax(axis=1))
+# pandas' own combine_first of flat repeated keys raises AttributeError (it
+# asks a DataFrame for .dtype); MultiIndex columns combine each column.
+_REPEATED_KEY_CASES["leaves combine_first"] = lambda m: _rk_shown(
+    (lambda d: d.where(d > 2).combine_first(d * 10))(_rk_leaves(m))
+)
 # nunique needs a repeated key whose columns count differently.
 _REPEATED_KEY_CASES["flat nunique"] = lambda m: _rk_shown(
     m.DataFrame([[1, 5, 3], [2, 5, 3]], columns=["a", "a", "b"]).nunique()
@@ -14515,4 +14548,71 @@ _REPEATED_KEY_CASES["unique leaves sum"] = lambda m: _rk_shown(
 @pytest.mark.parametrize("case", list(_REPEATED_KEY_CASES))
 def test_repeated_column_keys_like_pandas(case: str) -> None:
     run = _REPEATED_KEY_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-y4f13: pct_change's FutureWarnings (pandas 2.2, GH#53491)
+# and the dtype of an all-NaN change; DataFrame.dot of an ndarray / list;
+# combine_first keeping identical columns' order.
+def _y4_shown(result: Any) -> list:
+    if hasattr(result, "columns"):
+        return [list(result.columns), [str(t) for t in result.dtypes]] + result.to_string().split(
+            "\n"
+        )
+    return [str(result.dtype), result.name] + result.to_string().split("\n")
+
+
+_Y4_CASES = {
+    "pct_change warns on a gap after a value": lambda m: _y4_shown(
+        m.Series([1.0, np.nan, 3.0]).pct_change()
+    ),
+    "pct_change warns on an all-NaN column": lambda m: _y4_shown(
+        m.DataFrame({"y": [np.nan, np.nan], "z": [1.0, 2.0]}).pct_change()
+    ),
+    "pct_change fill_method='pad' warns": lambda m: _y4_shown(
+        m.Series([1.0, 2.0, 4.0]).pct_change(fill_method="pad")
+    ),
+    "pct_change limit=None warns": lambda m: _y4_shown(
+        m.DataFrame({"a": [1.0, 2.0, 4.0]}).pct_change(limit=None)
+    ),
+    "pct_change of an all-NaN column is float64": lambda m: _y4_shown(
+        m.DataFrame({"y": [np.nan, np.nan], "z": [1.0, 2.0]}).pct_change(fill_method=None)
+    ),
+    "dot a vector": lambda m: _y4_shown(
+        m.DataFrame({"a": [1.5, 2.0], "b": [3.0, 4.0]}, index=["x", "y"]).dot(np.array([1.0, 2.0]))
+    ),
+    "dot a list": lambda m: _y4_shown(m.DataFrame({"a": [1.5, 2.0], "b": [3.0, 4.0]}).dot([1.0, 2.0])),
+    "dot a matrix": lambda m: _y4_shown(
+        m.DataFrame({"a": [1.5, 2.0], "b": [3.0, 4.0]}).dot(np.array([[1.0, 0.0, 2.0], [0.5, 1.0, 1.0]]))
+    ),
+    "dot ints stays int": lambda m: _y4_shown(m.DataFrame({"a": [1, 2], "b": [3, 4]}).dot(np.array([1, 2]))),
+    "matmul a vector": lambda m: _y4_shown(m.DataFrame({"a": [1.5, 2.0], "b": [3.0, 4.0]}) @ np.array([1.0, 2.0])),
+    "dot a mis-shaped vector raises": lambda m: _y4_shown(
+        m.DataFrame({"a": [1.5, 2.0], "b": [3.0, 4.0]}).dot(np.array([1.0, 2.0, 3.0]))
+    ),
+    "combine_first keeps identical columns' order": lambda m: _y4_shown(
+        m.DataFrame({"b": [1.0, np.nan], "a": [np.nan, 2.0]}).combine_first(
+            m.DataFrame({"b": [9.0, 9.0], "a": [8.0, 8.0]})
+        )
+    ),
+    # NEGATIVES: no warning without a fill and without a gap after a value;
+    # a union of different columns is still sorted.
+    "pct_change fill_method=None is silent": lambda m: _y4_shown(
+        m.Series([1.0, np.nan, 3.0]).pct_change(fill_method=None)
+    ),
+    "pct_change leading gap only is silent": lambda m: _y4_shown(
+        m.Series([np.nan, 2.0, 4.0]).pct_change()
+    ),
+    "combine_first sorts a union": lambda m: _y4_shown(
+        m.DataFrame({"b": [1.0, np.nan], "a": [np.nan, 2.0]}).combine_first(
+            m.DataFrame({"c": [9.0, 9.0], "a": [8.0, 8.0]})
+        )
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_Y4_CASES))
+def test_pct_change_dot_combine_first_like_pandas(case: str) -> None:
+    run = _Y4_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
