@@ -15836,3 +15836,80 @@ def test_repeated_names_where_pandas_fails_answer_as_unique_names(case: str) -> 
     assert list(got.columns) == repeated, case
     assert [str(dtype) for dtype in got.dtypes] == [str(dtype) for dtype in expected.dtypes], case
     assert got.to_string() == expected.to_string(), case
+
+
+# br-frankenpandas-c90rr (scratch p14/oracle_c90rr.py vs pandas 2.2.3):
+# gb.dtypes was the frame's dtypes as a Series (pandas: a row per group),
+# take took the frame's own rows (pandas: each group's, under its key),
+# apply refused a list / tuple / dict / array answer, corr / cov took no
+# arguments and named their inner level 'index', fillna kept the keys and
+# took no method (nor warned pandas' deprecations), and an int column's
+# ohlc was float64.
+def _c90_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {"a": [1.5, 4.0, 2.0, np.nan, 3.0], "k": [1, 2, 1, 2, 1], "c": [5, 6, 7, 8, 9], "s": ["x", "y", "z", "w", "v"]},
+        index=[10, 11, 12, 13, 14],
+    )
+
+
+def _c90_shown(result: Any) -> list:
+    if hasattr(result, "columns"):
+        return [
+            repr(list(result.columns)),
+            repr([str(dtype) for dtype in result.dtypes]),
+            repr(list(result.index.names)),
+            result.to_string(),
+        ]
+    if hasattr(result, "to_string"):
+        return [repr(result.name), str(result.dtype), repr(list(result.index.names)), result.to_string()]
+    return [repr(result)]
+
+
+def _c90(op: Any) -> Any:
+    return lambda m: _c90_shown(op(_c90_frame(m).groupby("k")))
+
+
+_C90_CASES = {
+    "dtypes": _c90(lambda g: g.dtypes),
+    "dtypes over two keys": lambda m: _c90_shown(_c90_frame(m).groupby(["k", "c"]).dtypes),
+    "dtypes as_index False": lambda m: _c90_shown(_c90_frame(m).groupby("k", as_index=False).dtypes),
+    "take": _c90(lambda g: g.take([0])),
+    "take from the end": _c90(lambda g: g.take([-1])),
+    "take two rows": _c90(lambda g: g.take([0, 1])),
+    "take past a group raises": _c90(lambda g: g.take([5])),
+    "take over two keys": lambda m: _c90_shown(_c90_frame(m).groupby(["k", "c"]).take([0])),
+    "take as_index False": lambda m: _c90_shown(_c90_frame(m).groupby("k", as_index=False).take([0])),
+    "take group_keys False": lambda m: _c90_shown(_c90_frame(m).groupby("k", group_keys=False).take([-1])),
+    "Series take": _c90(lambda g: g["a"].take([0])),
+    "Series take from the end": _c90(lambda g: g["a"].take([-1])),
+    "apply answering a list": _c90(lambda g: g.apply(lambda d: list(d["c"]))),
+    "apply answering a tuple": _c90(lambda g: g.apply(lambda d: (len(d), 1))),
+    "apply answering a dict": _c90(lambda g: g.apply(lambda d: {"n": len(d)})),
+    "apply answering an array": _c90(lambda g: g.apply(lambda d: d["c"].to_numpy())),
+    "Series apply answering a list": _c90(lambda g: g["c"].apply(lambda s: list(s))),
+    "corr": _c90(lambda g: g.corr(numeric_only=True)),
+    "cov": _c90(lambda g: g.cov(numeric_only=True)),
+    "cov ddof 0": _c90(lambda g: g.cov(ddof=0, numeric_only=True)),
+    "corr over two keys": lambda m: _c90_shown(_c90_frame(m).groupby(["k", "s"]).corr(numeric_only=True)),
+    "corr of text raises": _c90(lambda g: g.corr()),
+    "fillna": _c90(lambda g: g.fillna(0)),
+    "fillna forward": _c90(lambda g: g.fillna(method="ffill")),
+    "fillna backward": _c90(lambda g: g.fillna(method="bfill")),
+    "fillna with a limit": _c90(lambda g: g.fillna(method="ffill", limit=1)),
+    "fillna by column": _c90(lambda g: g.fillna({"a": -1})),
+    "Series fillna": _c90(lambda g: g["a"].fillna(0)),
+    "Series fillna forward": _c90(lambda g: g["a"].fillna(method="ffill")),
+    "ohlc of an int column": _c90(lambda g: g[["c"]].ohlc()),
+    "Series ohlc of an int column": _c90(lambda g: g["c"].ohlc()),
+    "Series take of every row": _c90(lambda g: g["c"].take([0, 1])),
+    # NEGATIVE: a float column's ohlc and a reduction, as before.
+    "ohlc of a float column": _c90(lambda g: g[["a"]].ohlc()),
+    "sum": _c90(lambda g: g[["a", "c"]].sum()),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_C90_CASES))
+def test_groupby_everyday_gaps_like_pandas_c90rr(case: str) -> None:
+    run = _C90_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

@@ -24180,6 +24180,15 @@ impl PySeries {
                     "Cannot specify both 'value' and 'method'.",
                 ));
             }
+            // pandas' deprecation of a fill method.
+            if method.is_some_and(|m| matches!(m, "ffill" | "pad" | "bfill" | "backfill")) {
+                PyErr::warn(
+                    py,
+                    &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+                    c"Series.fillna with 'method' is deprecated and will raise in a future version. Use obj.ffill() or obj.bfill() instead.",
+                    1,
+                )?;
+            }
 
             if self.inner.is_empty() {
                 return Ok(PySeries {
@@ -33445,6 +33454,16 @@ impl PyDataFrame {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                     "Cannot specify both 'value' and 'method'.",
                 ));
+            }
+            // pandas' deprecation of a fill method (c90rr: groupby fillna
+            // warns it per group).
+            if method.is_some_and(|m| matches!(m, "ffill" | "pad" | "bfill" | "backfill")) {
+                PyErr::warn(
+                    py,
+                    &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+                    c"DataFrame.fillna with 'method' is deprecated and will raise in a future version. Use obj.ffill() or obj.bfill() instead.",
+                    1,
+                )?;
             }
 
             if self.inner.is_empty() || self.inner.num_columns() == 0 {
@@ -48154,7 +48173,9 @@ impl Applied {
         if let Ok(series) = result.extract::<PyRef<'_, PySeries>>() {
             return Ok(Self::Series(series.inner.clone()));
         }
-        py_to_scalar(py, result).map(Self::Scalar)
+        // A list, tuple, dict or array is an object cell of pandas'
+        // object Series (it was "Cannot convert list to Scalar"; c90rr).
+        py_to_cell(py, result).map(Self::Scalar)
     }
 }
 
@@ -48318,6 +48339,25 @@ fn stacked_series(results: &[Applied], labels: &[IndexLabel]) -> PyResult<Vec<(S
                 label.to_string(),
                 Column::from_values(values).map_err(column_error_to_py)?,
             ))
+        })
+        .collect()
+}
+
+/// The rows of a group (`positions`, its rows in order) a groupby
+/// `take(indices)` picks - a negative index counts from its end - or
+/// pandas' IndexError for an index past the group.
+fn group_take_rows(positions: &[usize], indices: &[i64]) -> PyResult<Vec<usize>> {
+    let len = i64::try_from(positions.len()).unwrap_or(i64::MAX);
+    indices
+        .iter()
+        .map(|&at| {
+            let at = if at < 0 { at + len } else { at };
+            usize::try_from(at)
+                .ok()
+                .and_then(|at| positions.get(at).copied())
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyIndexError, _>("indices are out-of-bounds")
+                })
         })
         .collect()
 }
@@ -49721,25 +49761,59 @@ impl PyGroupBy {
         self.out(result)
     }
 
-    fn corr(&self) -> PyResult<PyDataFrame> {
+    /// pandas' `gb.corr(method='pearson', min_periods=1,
+    /// numeric_only=False)`: each group's `DataFrame.corr` with those
+    /// options, stacked under its key (it took no arguments; c90rr).
+    #[pyo3(signature = (method="pearson", min_periods=1, numeric_only=false))]
+    fn corr(
+        &self,
+        method: Option<&str>,
+        min_periods: Option<usize>,
+        numeric_only: bool,
+    ) -> PyResult<PyDataFrame> {
         self.observed_only("corr")?;
+        let method = method.unwrap_or("pearson");
+        // As DataFrame.corr: a floor above 2 counts each pair's
+        // observations, which the rank methods do not yet.
+        let floor = min_periods.filter(|&floor| floor > 2);
+        unsupported_params(
+            "DataFrameGroupBy.corr",
+            &[("min_periods", floor.is_none() || method == "pearson")],
+        )?;
         let result = self
             .grouped()
             .map_err(frame_error_to_py)?
-            .corr()
-            .map_err(frame_error_to_py)?;
+            .combine_group_stat_frames(|frame| match floor {
+                Some(floor) => frame.corr_min_periods_with_numeric_only(floor, numeric_only),
+                None => frame.corr_method_with_numeric_only(method, numeric_only),
+            })
+            .map_err(float_conversion_error_to_py)?;
         Ok(PyDataFrame {
             inner: self.restored(result)?,
         })
     }
 
-    fn cov(&self) -> PyResult<PyDataFrame> {
+    /// pandas' `gb.cov(min_periods=None, ddof=1, numeric_only=False)`:
+    /// each group's `DataFrame.cov` with those options, stacked under its
+    /// key (it took no arguments; c90rr).
+    #[pyo3(signature = (min_periods=None, ddof=1, numeric_only=false))]
+    fn cov(
+        &self,
+        min_periods: Option<usize>,
+        ddof: Option<usize>,
+        numeric_only: bool,
+    ) -> PyResult<PyDataFrame> {
         self.observed_only("cov")?;
         let result = self
             .grouped()
             .map_err(frame_error_to_py)?
-            .cov()
-            .map_err(frame_error_to_py)?;
+            .combine_group_stat_frames(|frame| {
+                PyDataFrame {
+                    inner: frame.clone(),
+                }
+                .cov_internal(min_periods, ddof.unwrap_or(1), numeric_only)
+            })
+            .map_err(float_conversion_error_to_py)?;
         Ok(PyDataFrame {
             inner: self.restored(result)?,
         })
@@ -50268,11 +50342,68 @@ impl PyGroupBy {
         groups_dict(py, &self.ordered_groups(true)?, None)
     }
 
+    /// pandas' deprecated `gb.dtypes` (its FutureWarning): a row per group
+    /// holding every column's dtype - the key columns' too - under the
+    /// group keys (it was the frame's dtypes as one Series; c90rr).
     #[getter]
-    fn dtypes(&self, py: Python<'_>) -> PyResult<PySeries> {
-        let gb = self.grouped().map_err(frame_error_to_py)?;
-        let first = self.restored(gb.first().map_err(frame_error_to_py)?)?;
-        PyDataFrame { inner: first }.dtypes(py)
+    fn dtypes(&self, py: Python<'_>) -> PyResult<PyDataFrame> {
+        PyErr::warn(
+            py,
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            c"DataFrameGroupBy.dtypes is deprecated and will be removed in a future version. Check the dtypes on the base object instead",
+            1,
+        )?;
+        // A key passed as an array rides as a column of its own; it is not
+        // one of the frame's columns.
+        let own_keys: Vec<&str> = self
+            .by
+            .iter()
+            .zip(&self.key_names)
+            .filter(|(column, name)| name.as_deref() != Some(column))
+            .map(|(column, _)| column.as_str())
+            .collect();
+        let kept: Vec<&str> = self
+            .df
+            .column_names()
+            .into_iter()
+            .map(String::as_str)
+            .filter(|column| !own_keys.contains(column))
+            .collect();
+        let frame = self.restored(self.df.select_columns(&kept).map_err(frame_error_to_py)?)?;
+        let groups = self.ordered_groups(false)?;
+        let mut pairs = Vec::with_capacity(frame.num_columns());
+        for position in 0..frame.num_columns() {
+            let (Some(name), Some(column)) =
+                (frame.column_name_at(position), frame.column_at(position))
+            else {
+                continue;
+            };
+            let dtype = py_to_cell(py, &column_pandas_dtype(py, column)?)?;
+            pairs.push((
+                name.clone(),
+                Column::from_values(vec![dtype; groups.len()]).map_err(column_error_to_py)?,
+            ));
+        }
+        let order: Vec<String> = pairs.iter().map(|(name, _)| name.clone()).collect();
+        let (index, levels) = if self.as_index {
+            let index = self.group_key_index(&groups)?;
+            let levels = index.row_multiindex().cloned();
+            (index, levels)
+        } else {
+            (Index::default_range(groups.len()), None)
+        };
+        let mut out = DataFrame::new_with_column_order(
+            index,
+            fp_frame::ColumnStore::from_pairs(pairs),
+            order,
+        )
+        .map_err(frame_error_to_py)?;
+        if let Some(levels) = levels {
+            out = out.with_row_multiindex(levels).map_err(frame_error_to_py)?;
+        }
+        Ok(PyDataFrame {
+            inner: out.with_typed_labels_of(&frame),
+        })
     }
 
     fn corrwith(&self, other: &PyDataFrame) -> PyResult<PyDataFrame> {
@@ -50583,14 +50714,78 @@ impl PyGroupBy {
         self.window(py, "resample", args, kwargs)
     }
 
-    fn fillna(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        let sc = py_to_scalar(py, value)?;
-        let res = self
-            .grouped()
-            .map_err(frame_error_to_py)?
-            .fillna(&sc)
-            .map_err(frame_error_to_py)?;
-        self.out(res)
+    /// pandas' deprecated `gb.fillna(value=None, method=None, axis=None,
+    /// inplace=False, limit=None, downcast=None)` (its FutureWarning): the
+    /// value columns - the keys left out - through `DataFrame.fillna` with
+    /// those options, a method or a limit reaching within each group, in
+    /// the frame's row order (it kept the key columns, and took a scalar
+    /// value alone; c90rr).
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (value=None, method=None, axis=None, inplace=false, limit=None, downcast=None))]
+    fn fillna(
+        &self,
+        py: Python<'_>,
+        value: Option<&Bound<'_, PyAny>>,
+        method: Option<&str>,
+        axis: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
+        limit: Option<usize>,
+        downcast: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        PyErr::warn(
+            py,
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            c"DataFrameGroupBy.fillna is deprecated and will be removed in a future version. Use obj.ffill() or obj.bfill() for forward or backward filling instead. If you want to fill with a single value, use DataFrame.fillna instead",
+            1,
+        )?;
+        unsupported_params(
+            "DataFrameGroupBy.fillna",
+            &[
+                ("axis", axis.is_none_or(|axis| axis.is_none())),
+                ("inplace", !inplace),
+                (
+                    "downcast",
+                    downcast.is_none_or(|downcast| downcast.is_none()),
+                ),
+            ],
+        )?;
+        let groups = self.ordered_groups(false)?;
+        if groups.iter().map(|(_, rows)| rows.len()).sum::<usize>() != self.df.len() {
+            return Err(not_implemented(
+                "DataFrameGroupBy.fillna with rows whose key is missing (pandas gives them NaN)",
+            ));
+        }
+        let values: Vec<&str> = self
+            .df
+            .column_names()
+            .into_iter()
+            .map(String::as_str)
+            .filter(|column| !self.by.iter().any(|key| key == column))
+            .collect();
+        let frame = self.restored(self.df.select_columns(&values).map_err(frame_error_to_py)?)?;
+        let options = PyDict::new(py);
+        options.set_item("value", value)?;
+        options.set_item("method", method)?;
+        options.set_item("limit", limit)?;
+        let fill = |frame: DataFrame| -> PyResult<DataFrame> {
+            let filled = Py::new(py, PyDataFrame { inner: frame })?
+                .into_bound(py)
+                .call_method("fillna", (), Some(&options))?;
+            Ok(filled.extract::<PyRef<'_, PyDataFrame>>()?.inner.clone())
+        };
+        // A value alone fills every row the same whatever its group.
+        if method.is_none() && limit.is_none() {
+            return self.out(fill(frame)?);
+        }
+        let mut pieces = Vec::with_capacity(groups.len());
+        let mut origin = Vec::new();
+        for (_, positions) in groups {
+            pieces.push(fill(
+                frame.take_rows(&positions).map_err(frame_error_to_py)?,
+            )?);
+            origin.extend(positions);
+        }
+        self.out(lay_out_frames(&pieces, AppliedLayout::Restored(origin))?)
     }
 
     #[pyo3(signature = (func, dropna=true))]
@@ -50847,18 +51042,50 @@ impl PyGroupBy {
         self.out(filled)
     }
 
+    /// pandas' `gb.take(indices)`: each group's rows at those positions (a
+    /// negative one from its end) without the grouping columns, laid out as
+    /// apply lays out frames - under the group keys by default (it took the
+    /// frame's own rows, keys and all; c90rr). An index past a group is
+    /// pandas' IndexError.
     #[pyo3(signature = (indices, axis=None))]
     fn take(&self, indices: Vec<i64>, axis: Option<usize>) -> PyResult<PyDataFrame> {
         unsupported_params(
             "DataFrameGroupBy.take",
             &[("axis", matches!(axis, None | Some(0)))],
         )?;
-        let res = self
-            .grouped()
-            .map_err(frame_error_to_py)?
-            .take(&indices)
-            .map_err(frame_error_to_py)?;
-        self.out(res)
+        let values: Vec<&str> = self
+            .df
+            .column_names()
+            .into_iter()
+            .map(String::as_str)
+            .filter(|column| !self.by.iter().any(|key| key == column))
+            .collect();
+        let frame = self.restored(self.df.select_columns(&values).map_err(frame_error_to_py)?)?;
+        let groups = self.ordered_groups(false)?;
+        let key_index = self.group_key_index(&groups)?;
+        let mut pieces = Vec::with_capacity(groups.len());
+        let mut origin = Vec::new();
+        let mut kept_rows = true;
+        for (_, positions) in &groups {
+            let rows = group_take_rows(positions, &indices)?;
+            kept_rows &= rows == *positions;
+            pieces.push(frame.take_rows(&rows).map_err(frame_error_to_py)?);
+            origin.extend(rows);
+        }
+        let layout = if self.group_keys {
+            let ordinals: Vec<usize> = (0..pieces.len()).collect();
+            AppliedLayout::Keyed(
+                self.apply_keys(&key_index, &ordinals),
+                self.apply_key_names(&key_index),
+            )
+        } else if kept_rows {
+            AppliedLayout::Restored(origin)
+        } else {
+            AppliedLayout::Concatenated
+        };
+        Ok(PyDataFrame {
+            inner: lay_out_frames(&pieces, layout)?,
+        })
     }
 
     #[pyo3(signature = (func, *args, **kwargs))]
@@ -52480,15 +52707,79 @@ impl PySeriesGroupBy {
         self.window(py, "resample", args, kwargs)
     }
 
-    fn fillna(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<PySeries> {
-        let sc = py_to_scalar(py, value)?;
-        let res = self
-            .series
-            .groupby(&self.by)
-            .map_err(frame_error_to_py)?
-            .fillna(&sc)
+    /// pandas' deprecated `gb.fillna(value=None, method=None, axis=None,
+    /// inplace=False, limit=None, downcast=None)` (its FutureWarning): a
+    /// value fills every missing row; a method, or a value with a limit,
+    /// reaches within each group through `Series.fillna` (it took a value
+    /// alone; c90rr).
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (value=None, method=None, axis=None, inplace=false, limit=None, downcast=None))]
+    fn fillna(
+        &self,
+        py: Python<'_>,
+        value: Option<&Bound<'_, PyAny>>,
+        method: Option<&str>,
+        axis: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
+        limit: Option<usize>,
+        downcast: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        PyErr::warn(
+            py,
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            c"SeriesGroupBy.fillna is deprecated and will be removed in a future version. Use obj.ffill() or obj.bfill() for forward or backward filling instead. If you want to fill with a single value, use Series.fillna instead",
+            1,
+        )?;
+        unsupported_params(
+            "SeriesGroupBy.fillna",
+            &[
+                ("axis", axis.is_none_or(|axis| axis.is_none())),
+                ("inplace", !inplace),
+                (
+                    "downcast",
+                    downcast.is_none_or(|downcast| downcast.is_none()),
+                ),
+            ],
+        )?;
+        if let (Some(value), None, None) = (value, method, limit) {
+            let sc = py_to_scalar(py, value)?;
+            let res = self
+                .series
+                .groupby(&self.by)
+                .map_err(frame_error_to_py)?
+                .fillna(&sc)
+                .map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner: res });
+        }
+        self.single_key("fillna")?;
+        let groups = self.ordered_groups(false)?;
+        if groups.iter().map(|(_, rows)| rows.len()).sum::<usize>() != self.series.len() {
+            return Err(not_implemented(
+                "SeriesGroupBy.fillna with rows whose key is missing (pandas gives them NaN)",
+            ));
+        }
+        let options = PyDict::new(py);
+        options.set_item("value", value)?;
+        options.set_item("method", method)?;
+        options.set_item("limit", limit)?;
+        let mut pieces = Vec::with_capacity(groups.len());
+        let mut origin = Vec::new();
+        for (_, positions) in groups {
+            let filled = Py::new(
+                py,
+                PySeries {
+                    inner: self.group_rows(&positions)?,
+                },
+            )?
+            .into_bound(py)
+            .call_method("fillna", (), Some(&options))?;
+            pieces.push(filled.extract::<PyRef<'_, PySeries>>()?.inner.clone());
+            origin.extend(positions);
+        }
+        let out = lay_out_series(&pieces, AppliedLayout::Restored(origin))?
+            .rename(self.series.name())
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        Ok(PySeries { inner: out })
     }
 
     #[pyo3(signature = (func, dropna=true))]
@@ -52767,6 +53058,10 @@ impl PySeriesGroupBy {
         Ok(PySeries { inner: res })
     }
 
+    /// pandas' `gb.take(indices)`: each group's rows at those positions (a
+    /// negative one from its end), laid out as apply lays out Series - under
+    /// the group keys by default (it took the Series' own rows; c90rr). An
+    /// index past a group is pandas' IndexError.
     #[pyo3(signature = (indices, axis=None))]
     fn take(&self, indices: Vec<i64>, axis: Option<usize>) -> PyResult<PySeries> {
         unsupported_params(
@@ -52774,13 +53069,31 @@ impl PySeriesGroupBy {
             &[("axis", matches!(axis, None | Some(0)))],
         )?;
         self.single_key("take")?;
-        let res = self
-            .series
-            .groupby(&self.by)
-            .map_err(frame_error_to_py)?
-            .take(&indices)
+        let groups = self.ordered_groups(false)?;
+        let mut pieces = Vec::with_capacity(groups.len());
+        let mut keys = Vec::with_capacity(groups.len());
+        let mut origin = Vec::new();
+        let mut kept_rows = true;
+        for (key, positions) in &groups {
+            let rows = group_take_rows(positions, &indices)?;
+            kept_rows &= rows == *positions;
+            pieces.push(self.group_rows(&rows)?);
+            keys.push(vec![key.clone()]);
+            origin.extend(rows);
+        }
+        let key_name = self.by.name();
+        let key_name = (!key_name.is_empty()).then_some(key_name);
+        let layout = if self.group_keys {
+            AppliedLayout::Keyed(keys, vec![key_name.cloned()])
+        } else if kept_rows {
+            AppliedLayout::Restored(origin)
+        } else {
+            AppliedLayout::Concatenated
+        };
+        let out = lay_out_series(&pieces, layout)?
+            .rename(self.series.name())
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        Ok(PySeries { inner: out })
     }
 
     #[pyo3(signature = (func, *args, **kwargs))]

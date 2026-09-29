@@ -45694,18 +45694,22 @@ impl SeriesGroupBy<'_> {
             .column
             .as_f64_slice()
             .filter(|values| !values.iter().any(|value| value.is_nan()));
-        let i64_values = self.series.column.as_i64_slice();
+        let i64_values = self
+            .series
+            .column
+            .as_i64_slice()
+            .filter(|_| !self.series.column.has_any_missing());
         if (f64_values.is_some() || i64_values.is_some())
             && let Some((gids, ngroups)) = self.dense_group_ids()
             && let Some(order) = self.dense_group_labels(&gids, ngroups)
         {
-            let mut opens = vec![0.0; ngroups];
-            let mut highs = vec![f64::NEG_INFINITY; ngroups];
-            let mut lows = vec![f64::INFINITY; ngroups];
-            let mut closes = vec![0.0; ngroups];
-            let mut seen = vec![false; ngroups];
-
+            let mut columns = BTreeMap::new();
             if let Some(values) = f64_values {
+                let mut opens = vec![0.0; ngroups];
+                let mut highs = vec![f64::NEG_INFINITY; ngroups];
+                let mut lows = vec![f64::INFINITY; ngroups];
+                let mut closes = vec![0.0; ngroups];
+                let mut seen = vec![false; ngroups];
                 for (row, &group) in gids.iter().enumerate() {
                     let value = values[row];
                     if !seen[group] {
@@ -45716,9 +45720,20 @@ impl SeriesGroupBy<'_> {
                     lows[group] = lows[group].min(value);
                     closes[group] = value;
                 }
+                columns.insert("open".to_owned(), Column::from_f64_values_owned(opens));
+                columns.insert("high".to_owned(), Column::from_f64_values_owned(highs));
+                columns.insert("low".to_owned(), Column::from_f64_values_owned(lows));
+                columns.insert("close".to_owned(), Column::from_f64_values_owned(closes));
             } else if let Some(values) = i64_values {
+                // An int column keeps int64, as pandas (every group holds a
+                // row; it was float64, c90rr).
+                let mut opens = vec![0_i64; ngroups];
+                let mut highs = vec![i64::MIN; ngroups];
+                let mut lows = vec![i64::MAX; ngroups];
+                let mut closes = vec![0_i64; ngroups];
+                let mut seen = vec![false; ngroups];
                 for (row, &group) in gids.iter().enumerate() {
-                    let value = values[row] as f64;
+                    let value = values[row];
                     if !seen[group] {
                         opens[group] = value;
                         seen[group] = true;
@@ -45727,13 +45742,11 @@ impl SeriesGroupBy<'_> {
                     lows[group] = lows[group].min(value);
                     closes[group] = value;
                 }
+                columns.insert("open".to_owned(), Column::from_i64_values_owned(opens));
+                columns.insert("high".to_owned(), Column::from_i64_values_owned(highs));
+                columns.insert("low".to_owned(), Column::from_i64_values_owned(lows));
+                columns.insert("close".to_owned(), Column::from_i64_values_owned(closes));
             }
-
-            let mut columns = BTreeMap::new();
-            columns.insert("open".to_owned(), Column::from_f64_values_owned(opens));
-            columns.insert("high".to_owned(), Column::from_f64_values_owned(highs));
-            columns.insert("low".to_owned(), Column::from_f64_values_owned(lows));
-            columns.insert("close".to_owned(), Column::from_f64_values_owned(closes));
 
             let by_name = self.by.name();
             let idx_name = if by_name.is_empty() {
@@ -45759,8 +45772,32 @@ impl SeriesGroupBy<'_> {
         let mut highs = Vec::with_capacity(order_keys.len());
         let mut lows = Vec::with_capacity(order_keys.len());
         let mut closes = Vec::with_capacity(order_keys.len());
+        // An int column holding no missing value keeps int64 (c90rr).
+        let keep_int =
+            self.series.column.dtype() == DType::Int64 && !self.series.column.has_any_missing();
 
         for key in &order_keys {
+            if keep_int {
+                let ints: Vec<i64> = groups[key]
+                    .iter()
+                    .filter_map(|&idx| match values[idx] {
+                        Scalar::Int64(value) => Some(value),
+                        _ => None,
+                    })
+                    .collect();
+                if let (Some(&open), Some(&close), Some(&high), Some(&low)) = (
+                    ints.first(),
+                    ints.last(),
+                    ints.iter().max(),
+                    ints.iter().min(),
+                ) {
+                    opens.push(Scalar::Int64(open));
+                    highs.push(Scalar::Int64(high));
+                    lows.push(Scalar::Int64(low));
+                    closes.push(Scalar::Int64(close));
+                    continue;
+                }
+            }
             let group_values: Vec<f64> = groups[key]
                 .iter()
                 .filter_map(|&idx| {
@@ -101465,7 +101502,12 @@ impl DataFrameGroupBy<'_> {
         }
     }
 
-    fn combine_group_stat_frames<F>(&self, stat: F) -> Result<DataFrame, FrameError>
+    /// `stat` of every group's frame (its value columns) stacked under the
+    /// group keys: pandas' `DataFrameGroupBy.corr` / `cov` shape, the inner
+    /// level keeping the stat frame's own index name (pandas' None; it was
+    /// 'index', c90rr). A caller with the options of its own stat runs it
+    /// here.
+    pub fn combine_group_stat_frames<F>(&self, stat: F) -> Result<DataFrame, FrameError>
     where
         F: Fn(&DataFrame) -> Result<DataFrame, FrameError>,
     {
@@ -101528,7 +101570,7 @@ impl DataFrameGroupBy<'_> {
             .map(|(name, values)| Ok((name, Column::from_values(values)?)))
             .collect::<Result<_, FrameError>>()?;
         let mut names: Vec<Option<LabelName>> = self.key_names.clone();
-        names.push(Some("index".into()));
+        names.push(stat_frames[0].index.name().cloned());
 
         DataFrame::new_with_axes(
             Index::new(flat_labels),
@@ -107923,12 +107965,11 @@ impl DataFrameGroupBy<'_> {
         let mut group_col_order = Vec::with_capacity(selected_cols.len());
 
         for col_name in selected_cols {
+            // A gather keeps the column's dtype: a float column whose group
+            // holds only NaN stays float64 (it was re-inferred from the
+            // values, and corr(numeric_only=True) then dropped it; c90rr).
             let col = &self.df.columns[col_name];
-            let group_vals: Vec<Scalar> = row_indices
-                .iter()
-                .map(|&i| col.values()[i].clone())
-                .collect();
-            group_cols.insert(col_name.clone(), Column::from_values(group_vals)?);
+            group_cols.insert(col_name.clone(), col.take_positions(row_indices));
             group_col_order.push(col_name.clone());
         }
 
@@ -111632,9 +111673,33 @@ impl DataFrameGroupBy<'_> {
             let mut highs = Vec::with_capacity(group_order.len());
             let mut lows = Vec::with_capacity(group_order.len());
             let mut closes = Vec::with_capacity(group_order.len());
+            // An int column holding no missing value keeps int64, as pandas
+            // (every group has a value; it was float64, c90rr).
+            let keep_int = col.dtype() == DType::Int64 && !col.has_any_missing();
 
             for gkey in &group_order {
                 let row_indices = &groups[gkey];
+                if keep_int {
+                    let ints: Vec<i64> = row_indices
+                        .iter()
+                        .filter_map(|&i| match col.values()[i] {
+                            Scalar::Int64(value) => Some(value),
+                            _ => None,
+                        })
+                        .collect();
+                    if let (Some(&open), Some(&close), Some(&high), Some(&low)) = (
+                        ints.first(),
+                        ints.last(),
+                        ints.iter().max(),
+                        ints.iter().min(),
+                    ) {
+                        opens.push(Scalar::Int64(open));
+                        highs.push(Scalar::Int64(high));
+                        lows.push(Scalar::Int64(low));
+                        closes.push(Scalar::Int64(close));
+                        continue;
+                    }
+                }
                 let gv: Vec<f64> = row_indices
                     .iter()
                     .filter_map(|&i| {
@@ -169362,6 +169427,106 @@ mod tests {
             ]
         );
         assert_eq!(result.column_order.len(), axis.len());
+    }
+
+    #[test]
+    fn groupby_ohlc_keeps_an_int_column_int_c90rr() {
+        // MEASURED, live pandas 2.2.3: DataFrame({'k': [1, 2, 1, 2], 'c': [5,
+        // 6, 7, 8]}).groupby('k').ohlc() and gb['c'].ohlc() are int64 (fp
+        // answered float64).
+        let ints = |values: &[i64]| values.iter().map(|&v| Scalar::Int64(v)).collect();
+        let df = DataFrame::from_dict(
+            &["k", "c"],
+            vec![("k", ints(&[1, 2, 1, 2])), ("c", ints(&[5, 6, 7, 8]))],
+        )
+        .unwrap();
+        let frame = df.groupby(&["k"]).unwrap().ohlc().unwrap();
+        assert_eq!(
+            frame.columns()["c_open"].values(),
+            &[Scalar::Int64(5), Scalar::Int64(6)]
+        );
+        assert_eq!(
+            frame.columns()["c_high"].values(),
+            &[Scalar::Int64(7), Scalar::Int64(8)]
+        );
+        assert_eq!(frame.columns()["c_close"].dtype(), DType::Int64);
+        let rows: Vec<IndexLabel> = (0..4_i64).map(IndexLabel::Int64).collect();
+        let series = Series::from_values("c", rows.clone(), ints(&[5, 6, 7, 8])).unwrap();
+        let by = Series::from_values("k", rows, ints(&[1, 2, 1, 2])).unwrap();
+        let flat = series.groupby(&by).unwrap().ohlc().unwrap();
+        assert_eq!(
+            flat.columns()["low"].values(),
+            &[Scalar::Int64(5), Scalar::Int64(6)]
+        );
+        // NEGATIVE: an int column holding a missing value is pandas' float64.
+        let holed = DataFrame::from_dict(
+            &["k", "c"],
+            vec![
+                ("k", ints(&[1, 2, 1, 2])),
+                (
+                    "c",
+                    vec![
+                        Scalar::Int64(5),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Int64(7),
+                        Scalar::Int64(8),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let frame = holed.groupby(&["k"]).unwrap().ohlc().unwrap();
+        assert_eq!(frame.columns()["c_open"].dtype(), DType::Float64);
+    }
+
+    #[test]
+    fn groupby_corr_inner_level_is_unnamed_c90rr() {
+        // MEASURED, live pandas 2.2.3: df.groupby('k').corr().index.names is
+        // ['k', None] (fp named the inner level 'index').
+        let df = DataFrame::from_dict(
+            &["k", "a", "b"],
+            vec![
+                (
+                    "k",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(1.5),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let out = df.groupby(&["k"]).unwrap().corr().unwrap();
+        let levels = out
+            .row_multiindex()
+            .expect("groupby corr rows are two-level");
+        assert_eq!(levels.names(), &[Some("k".into()), None]);
+        // NEGATIVE: the values stay each group's corr (group 1: a and b on a
+        // line).
+        let Scalar::Float64(ab) = out.columns()["b"].values()[0] else {
+            panic!("corr is float64");
+        };
+        assert!((ab - 1.0).abs() < 1e-12);
     }
 
     #[test]
