@@ -9214,8 +9214,10 @@ impl std::fmt::Display for PeriodFreq {
 ///
 /// Stored as an integer ordinal on a frequency-specific axis plus the
 /// frequency code. Two Periods with different `freq` are incompatible —
-/// arithmetic and comparison require same-freq operands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// arithmetic and comparison require same-freq operands. The derived order
+/// (ordinal, then freq) is a total one for index labels (45fzr): within one
+/// freq it is the periods' own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Period {
     pub ordinal: i64,
     pub freq: PeriodFreq,

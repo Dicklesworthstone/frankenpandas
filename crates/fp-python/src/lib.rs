@@ -387,6 +387,8 @@ fn column_pandas_dtype<'py>(py: Python<'py>, column: &Column) -> PyResult<Bound<
         }
         .into_bound_py_any(py),
         DType::Interval => column_interval_dtype(column).into_bound_py_any(py),
+        // pandas' PeriodDtype, period[M] (it was the str; 45fzr).
+        DType::Period => index_dtype_object(py, &name, None),
         _ => Ok(pyo3::types::PyString::new(py, &name).into_any()),
     }
 }
@@ -1735,8 +1737,12 @@ fn pandas_series_text(
     let (rows, dots_at) = limits.shown(series.len());
     let mut footer = Vec::new();
     // An index with a freq leads the footer, whatever parts are asked for
-    // (pandas' 'Freq: D', to_string's too).
+    // (pandas' 'Freq: D', to_string's too) - a PeriodIndex's own (45fzr).
     if let Some(freq) = index.freq() {
+        footer.push(format!("Freq: {freq}"));
+    } else if matches!(index.labels().first(), Some(IndexLabel::Period(_)))
+        && let Some(freq) = PeriodIndex::from_index(index).and_then(|periods| periods.freqstr())
+    {
         footer.push(format!("Freq: {freq}"));
     }
     if parts.name && !series.name().is_empty() {
@@ -7553,6 +7559,10 @@ fn py_to_index_label(obj: &Bound<'_, PyAny>) -> PyResult<IndexLabel> {
     if let Ok(td) = obj.extract::<PyRef<'_, PyTimedelta>>() {
         return Ok(IndexLabel::Timedelta64(td.nanos));
     }
+    // A Period is the period label (a PeriodIndex's; 45fzr).
+    if let Ok(period) = obj.extract::<PyRef<'_, PyPeriod>>() {
+        return Ok(IndexLabel::Period(period.inner));
+    }
     // A naive datetime.datetime / a datetime.timedelta is the instant /
     // duration it names, as a Timestamp is (they became their text, so
     // Index([datetime(2024, 1, 1)]) was an object Index of strings).
@@ -7670,6 +7680,8 @@ fn index_label_to_py(py: Python<'_>, label: &IndexLabel) -> PyResult<Py<PyAny>> 
         IndexLabel::Bool(b) => b.into_py_any(py),
         // An object label is the Python object (fvsao.66).
         IndexLabel::Object(object) => scalar_to_py(py, &Scalar::Object(object.clone())),
+        // A period label is a Period (NaT for its NaT; 45fzr).
+        IndexLabel::Period(period) => scalar_to_py(py, &Scalar::Period(*period)),
         IndexLabel::Null(NullKind::NaT) => nat_object(py),
         IndexLabel::Null(NullKind::NaN) => f64::NAN.into_py_any(py),
         IndexLabel::Null(NullKind::Null) => Ok(py.None()),
@@ -7783,6 +7795,49 @@ fn iter_by_position(index: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
 /// groupby(df.index.month)); every index was a plain Index
 /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.18) - a
 /// MultiIndex level too (br-frankenpandas-stofr).
+/// pandas' `to_period` of a row index: a DatetimeIndex as the PeriodIndex
+/// of `freq` (its own freq by default), its name kept; any other index is
+/// pandas' TypeError "unsupported Type ..." (45fzr).
+fn index_to_period(py: Python<'_>, index: &Index, freq: Option<&str>) -> PyResult<Index> {
+    let object = row_index_to_py(py, index)?;
+    let object = object.bind(py);
+    let Ok(datetimes) = object.extract::<PyRef<'_, PyDatetimeIndex>>() else {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "unsupported Type {}",
+            object.get_type().name()?
+        )));
+    };
+    Ok(datetimes.to_period(freq)?.inner.to_index())
+}
+
+/// pandas' `to_timestamp` of a row index: a PeriodIndex as the
+/// DatetimeIndex of its periods' start (or end) instants - the starts with
+/// the freq they follow inferred, as pandas; its end instants (the next
+/// start less a nanosecond there) carry none - and any other index pandas'
+/// TypeError "unsupported Type ..." (45fzr). A target `freq` is refused.
+fn index_to_timestamp(
+    py: Python<'_>,
+    index: &Index,
+    freq: Option<&str>,
+    how: &str,
+) -> PyResult<Index> {
+    unsupported_params("to_timestamp", &[("freq", freq.is_none())])?;
+    let Some(periods) = PeriodIndex::from_index(index).filter(|_| !index.is_empty()) else {
+        let object = row_index_to_py(py, index)?;
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "unsupported Type {}",
+            object.bind(py).get_type().name()?
+        )));
+    };
+    let stamps = PyPeriodIndex { inner: periods }.to_timestamp(how)?.inner;
+    let inferred = if how.starts_with(['s', 'S']) {
+        stamps.inferred_freq()
+    } else {
+        None
+    };
+    Ok(stamps.with_freq(inferred).into_index())
+}
+
 fn flat_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
     let labels = index.labels();
     if !labels.is_empty() {
@@ -7820,6 +7875,10 @@ fn flat_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
             && let Ok(inner) = TimedeltaIndex::from_index(index.clone())
         {
             return Ok(Py::new(py, PyTimedeltaIndex { inner })?.into_any());
+        }
+        // Periods of one freq are a PeriodIndex (they were text; 45fzr).
+        if let Some(inner) = PeriodIndex::from_index(index) {
+            return Ok(Py::new(py, PyPeriodIndex { inner })?.into_any());
         }
     }
     Ok(Py::new(
@@ -8082,6 +8141,7 @@ fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
         IndexLabel::Float64(f) => Scalar::Float64(f.0),
         IndexLabel::Bool(b) => Scalar::Bool(*b),
         IndexLabel::Object(object) => Scalar::Object(object.clone()),
+        IndexLabel::Period(period) => Scalar::Period(*period),
         IndexLabel::Null(k) => Scalar::Null(*k),
     }
 }
@@ -9512,6 +9572,7 @@ impl PyIndex {
             IndexLabel::Timedelta64(t) => *t != 0,
             IndexLabel::Datetime64(d) => *d != 0,
             IndexLabel::Object(object) => object.as_list().is_none_or(|items| !items.is_empty()),
+            IndexLabel::Period(period) => !period.is_nat(),
             IndexLabel::Null(_) => false,
         })
     }
@@ -9525,6 +9586,7 @@ impl PyIndex {
             IndexLabel::Timedelta64(t) => *t != 0,
             IndexLabel::Datetime64(d) => *d != 0,
             IndexLabel::Object(object) => object.as_list().is_none_or(|items| !items.is_empty()),
+            IndexLabel::Period(period) => !period.is_nat(),
             IndexLabel::Null(_) => false,
         })
     }
@@ -9969,6 +10031,7 @@ impl PyIndex {
                     IndexLabel::Timedelta64(t) => Scalar::Timedelta64(*t),
                     IndexLabel::Datetime64(d) => Scalar::Datetime64(*d),
                     IndexLabel::Object(object) => Scalar::Object(object.clone()),
+                    IndexLabel::Period(period) => Scalar::Period(*period),
                     IndexLabel::Null(k) => Scalar::Null(*k),
                 })
                 .collect(),
@@ -10007,6 +10070,7 @@ impl PyIndex {
                     IndexLabel::Timedelta64(t) => Scalar::Timedelta64(*t),
                     IndexLabel::Datetime64(d) => Scalar::Datetime64(*d),
                     IndexLabel::Object(object) => Scalar::Object(object.clone()),
+                    IndexLabel::Period(period) => Scalar::Period(*period),
                     IndexLabel::Null(k) => Scalar::Null(*k),
                 })
                 .collect(),
@@ -12269,7 +12333,9 @@ impl PyDatetimeIndex {
     /// unknown freq as daily.
     #[pyo3(signature = (freq=None))]
     fn to_period(&self, freq: Option<&str>) -> PyResult<PyPeriodIndex> {
-        let Some(freq) = freq else {
+        // Without a freq, the index's own (a date_range's 'D'), as pandas.
+        let own = self.inner.freqstr();
+        let Some(freq) = freq.or(own.as_deref()) else {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "You must pass a freq argument as current index has none.",
             ));
@@ -21240,6 +21306,7 @@ fn sort_union_labels(labels: &mut [IndexLabel]) -> PyResult<()> {
         // Object labels order among themselves through Python (IndexLabel's
         // Ord); the core cannot name their class.
         IndexLabel::Object(_) => "object",
+        IndexLabel::Period(_) => "Period",
         IndexLabel::Null(_) => "NoneType",
     };
     let number = |label: &IndexLabel| match label {
@@ -27873,12 +27940,25 @@ impl PySeries {
         series_as_frame(&self.inner)?.to_markdown(buf, mode, index, storage_options, kwargs)
     }
 
-    /// A frankenpandas index is never a DatetimeIndex yet (pandas raises
-    /// TypeError for every other index); this returned the Series unchanged.
+    /// pandas' `Series.to_period(freq=None)`: the DatetimeIndex as a
+    /// PeriodIndex (see [`index_to_period`]; it was refused, 45fzr).
     #[pyo3(signature = (freq=None, copy=None))]
-    fn to_period(&self, freq: Option<&str>, copy: Option<bool>) -> PyResult<PySeries> {
-        let _ = (freq, copy);
-        Err(not_implemented("Series.to_period (a PeriodIndex)"))
+    fn to_period(
+        &self,
+        py: Python<'_>,
+        freq: Option<&str>,
+        copy: Option<bool>,
+    ) -> PyResult<PySeries> {
+        let _ = copy;
+        let index = index_to_period(py, self.inner.index(), freq)?;
+        Ok(PySeries {
+            inner: Series::new(
+                self.inner.name().clone(),
+                index,
+                self.inner.column().clone(),
+            )
+            .map_err(frame_error_to_py)?,
+        })
     }
 
     #[pyo3(signature = (path, *, compression=Some("infer"), protocol=5, storage_options=None))]
@@ -28000,19 +28080,26 @@ impl PySeries {
         write_text_target(buf, text, false)
     }
 
-    /// A frankenpandas index is never a PeriodIndex yet (pandas raises
-    /// TypeError for every other index); this returned the Series unchanged.
+    /// pandas' `Series.to_timestamp(how='start')`: the PeriodIndex as a
+    /// DatetimeIndex (see [`index_to_timestamp`]; it was refused, 45fzr).
     #[pyo3(signature = (freq=None, how="start", copy=None))]
     fn to_timestamp(
         &self,
+        py: Python<'_>,
         freq: Option<&str>,
         how: Option<&str>,
         copy: Option<bool>,
     ) -> PyResult<PySeries> {
-        let _ = (freq, how, copy);
-        Err(not_implemented(
-            "Series.to_timestamp (a DatetimeIndex from a PeriodIndex)",
-        ))
+        let _ = copy;
+        let index = index_to_timestamp(py, self.inner.index(), freq, how.unwrap_or("start"))?;
+        Ok(PySeries {
+            inner: Series::new(
+                self.inner.name().clone(),
+                index,
+                self.inner.column().clone(),
+            )
+            .map_err(frame_error_to_py)?,
+        })
     }
 
     fn to_xarray(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -41345,15 +41432,26 @@ impl PyDataFrame {
         py_output_bytes(py, path, bytes)
     }
 
+    /// pandas' `DataFrame.to_period(freq=None, axis=0)`: the DatetimeIndex
+    /// of the rows as a PeriodIndex (see [`index_to_period`]; it was
+    /// refused, 45fzr). The columns (axis=1) are refused.
     #[pyo3(signature = (freq=None, axis=0, copy=None))]
     fn to_period(
         &self,
+        py: Python<'_>,
         freq: Option<&str>,
         axis: Option<usize>,
         copy: Option<bool>,
     ) -> PyResult<PyDataFrame> {
-        let _ = (freq, axis, copy);
-        Err(not_implemented("DataFrame.to_period (a PeriodIndex)"))
+        let _ = copy;
+        unsupported_params(
+            "DataFrame.to_period",
+            &[("axis", matches!(axis, None | Some(0)))],
+        )?;
+        let index = index_to_period(py, self.inner.index(), freq)?;
+        Ok(PyDataFrame {
+            inner: self.inner.with_index(index).map_err(frame_error_to_py)?,
+        })
     }
 
     #[pyo3(signature = (path, *, compression=Some("infer"), protocol=5, storage_options=None))]
@@ -41685,18 +41783,27 @@ impl PyDataFrame {
         py_output_bytes(py, Some(path), bytes).map(|_| ())
     }
 
+    /// pandas' `DataFrame.to_timestamp(how='start', axis=0)`: the rows'
+    /// PeriodIndex as a DatetimeIndex (see [`index_to_timestamp`]; it was
+    /// refused, 45fzr). The columns (axis=1) are refused.
     #[pyo3(signature = (freq=None, how="start", axis=0, copy=None))]
     fn to_timestamp(
         &self,
+        py: Python<'_>,
         freq: Option<&str>,
         how: Option<&str>,
         axis: Option<usize>,
         copy: Option<bool>,
     ) -> PyResult<PyDataFrame> {
-        let _ = (freq, how, axis, copy);
-        Err(not_implemented(
-            "DataFrame.to_timestamp (a DatetimeIndex from a PeriodIndex)",
-        ))
+        let _ = copy;
+        unsupported_params(
+            "DataFrame.to_timestamp",
+            &[("axis", matches!(axis, None | Some(0)))],
+        )?;
+        let index = index_to_timestamp(py, self.inner.index(), freq, how.unwrap_or("start"))?;
+        Ok(PyDataFrame {
+            inner: self.inner.with_index(index).map_err(frame_error_to_py)?,
+        })
     }
 
     fn to_xarray(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -42273,6 +42380,38 @@ fn loc_key(labels: &[IndexLabel], label: IndexLabel) -> PyResult<LocKey> {
     let IndexLabel::Utf8(text) = &label else {
         return Ok(LocKey::Label(label));
     };
+    // Text on a PeriodIndex names a period, as pandas parses it: the label
+    // at the index's freq, or the rows of a coarser period ('2024' on a
+    // monthly index) - those starting inside it (it was compared as text;
+    // 45fzr).
+    if let Some(IndexLabel::Period(first)) = labels.iter().find(|label| !label.is_missing())
+        && let Ok(period) = Period::parse(text)
+        && !period.is_nat()
+    {
+        if period.freq == first.freq {
+            return Ok(LocKey::Label(IndexLabel::Period(period)));
+        }
+        let next = Period::new(period.ordinal.saturating_add(1), period.freq);
+        if let (Ok(start), Ok(end)) = (
+            fp_index::period_start_nanos(period),
+            fp_index::period_start_nanos(next),
+        ) {
+            let rows: Vec<usize> = labels
+                .iter()
+                .enumerate()
+                .filter(|(_, label)| {
+                    matches!(label, IndexLabel::Period(inner)
+                        if fp_index::period_start_nanos(*inner)
+                            .is_ok_and(|at| (start..end).contains(&at)))
+                })
+                .map(|(row, _)| row)
+                .collect();
+            if rows.is_empty() {
+                return Err(loc_key_error(text));
+            }
+            return Ok(LocKey::Rows(rows));
+        }
+    }
     Ok(
         match fp_frame::datetime_text_key(labels, text).map_err(|_| loc_key_error(text))? {
             Some(fp_frame::DatetimeTextKey::Rows(rows)) => LocKey::Rows(rows),
@@ -59180,7 +59319,9 @@ fn scalar_to_index_label_converter(s: &Scalar) -> IndexLabel {
         Scalar::Bool(b) => IndexLabel::Bool(*b),
         Scalar::Datetime64(d) => IndexLabel::Datetime64(*d),
         Scalar::Timedelta64(t) => IndexLabel::Timedelta64(*t),
-        Scalar::Period(p) => IndexLabel::Int64(p.ordinal),
+        // A period is its own label (it was its ordinal - pd.Index of
+        // periods held ints; 45fzr).
+        Scalar::Period(p) => IndexLabel::Period(*p),
         Scalar::Interval(inv) => IndexLabel::Utf8(inv.to_string()),
         Scalar::Object(object) => IndexLabel::Object(object.clone()),
         Scalar::Null(k) => IndexLabel::Null(*k),

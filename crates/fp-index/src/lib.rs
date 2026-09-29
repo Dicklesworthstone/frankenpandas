@@ -169,6 +169,12 @@ pub enum IndexLabel {
     /// Ordered by [`fp_types::ObjectValue::total_cmp`] (Python's own order
     /// where it has one); before `Null` so null labels still sort last.
     Object(fp_types::ObjectValue),
+    /// A period, a PeriodIndex's label (br-frankenpandas-45fzr): a Series /
+    /// DataFrame row index, groupby keys and value_counts over periods keep
+    /// them (they were their text). Ordered by ordinal (then freq); NaT
+    /// (ordinal `i64::MIN`) is missing. Before `Null` so null labels still
+    /// sort last.
+    Period(fp_types::Period),
     /// Typed missing label (br-frankenpandas-joeff): lets value_counts
     /// (dropna=False) and friends keep pandas' distinct None / nan / NaT
     /// buckets instead of collapsing them or colliding with genuine
@@ -205,6 +211,7 @@ impl IndexLabel {
             Self::Timedelta64(value) => *value == Timedelta::NAT,
             Self::Datetime64(value) => *value == i64::MIN,
             Self::Float64(v) => v.0.is_nan(),
+            Self::Period(period) => period.is_nat(),
             Self::Int64(_) | Self::Utf8(_) | Self::Bool(_) | Self::Object(_) => false,
             Self::Null(_) => true,
         }
@@ -269,6 +276,8 @@ fn index_label_is_truthy(label: &IndexLabel) -> bool {
         IndexLabel::Datetime64(v) => *v != 0,
         // Python truth: an empty list is false, any other object true.
         IndexLabel::Object(object) => object.as_list().is_none_or(|items| !items.is_empty()),
+        // A Period object is true (its NaT was missing above).
+        IndexLabel::Period(_) => true,
         // Unreachable: is_missing() returned true above for every Null.
         IndexLabel::Null(_) => false,
     }
@@ -331,6 +340,8 @@ impl fmt::Display for IndexLabel {
             Self::Datetime64(v) => write!(f, "{}", format_datetime_ns(*v)),
             // pandas prints an object label as its cell (`2020-01-05`).
             Self::Object(object) => f.write_str(&object.pprint()),
+            // A period as its calendar text (`2024-03`, `2024Q1`, NaT).
+            Self::Period(period) => write!(f, "{period}"),
             // Matches pandas' REPR of missing labels in an index (None / NaN /
             // NaT — note uppercase NaN: the formatter surface, unlike
             // str(nan)=='nan' which astype(str) uses). Verified pandas 2.2.3.
@@ -612,11 +623,13 @@ fn detect_sort_order(labels: &[IndexLabel]) -> SortOrder {
             Some(IndexLabel::Utf8(_)) => SortOrder::AscendingUtf8,
             Some(IndexLabel::Timedelta64(_)) => SortOrder::AscendingTimedelta64,
             Some(IndexLabel::Datetime64(_)) => SortOrder::AscendingDatetime64,
-            // Float64/Bool/Object/Null labels use the general (non-typed) backend.
+            // Float64/Bool/Object/Period/Null labels use the general
+            // (non-typed) backend.
             Some(
                 IndexLabel::Float64(_)
                 | IndexLabel::Bool(_)
                 | IndexLabel::Object(_)
+                | IndexLabel::Period(_)
                 | IndexLabel::Null(_),
             ) => SortOrder::Unsorted,
         };
@@ -4976,6 +4989,8 @@ impl Index {
                         .map_or_else(|_| l.clone(), IndexLabel::Int64),
                     IndexLabel::Timedelta64(ns) => IndexLabel::Int64(*ns),
                     IndexLabel::Datetime64(ns) => IndexLabel::Int64(*ns),
+                    // A period is its ordinal (NaT's too), as pandas'.
+                    IndexLabel::Period(period) => IndexLabel::Int64(period.ordinal),
                     // Missing labels and objects have no integer form;
                     // preserved like unparseable strings (pandas astype(int)
                     // raises on NaN — callers reject before reaching here).
@@ -5009,6 +5024,11 @@ impl Index {
                             "Cannot cast a datetime-like Index to dtype float64".to_owned(),
                         ));
                     }
+                    IndexLabel::Period(_) => {
+                        return Err(IndexError::InvalidArgument(
+                            "Cannot cast PeriodIndex to dtype float64".to_owned(),
+                        ));
+                    }
                     IndexLabel::Object(object) => {
                         return Err(IndexError::InvalidArgument(format!(
                             "float() argument must be a string or a real number, not {}",
@@ -5036,6 +5056,8 @@ impl Index {
                     IndexLabel::Bool(b) => *b,
                     IndexLabel::Utf8(s) => !s.is_empty(),
                     IndexLabel::Object(_) => index_label_is_truthy(label),
+                    // NaT is false, a period true (pandas').
+                    IndexLabel::Period(period) => !period.is_nat(),
                     IndexLabel::Null(_)
                     | IndexLabel::Timedelta64(_)
                     | IndexLabel::Datetime64(_) => {
@@ -5087,6 +5109,8 @@ impl Index {
                     IndexLabel::Timedelta64(ns) => IndexLabel::Utf8(Timedelta::format(*ns)),
                     IndexLabel::Datetime64(ns) => IndexLabel::Utf8(format_datetime_ns(*ns)),
                     IndexLabel::Object(object) => IndexLabel::Utf8(object.to_string()),
+                    // A period's calendar text, NaT's 'NaT'.
+                    IndexLabel::Period(period) => IndexLabel::Utf8(period.to_string()),
                     // astype(str) uses Python str() forms: str(None)=='None',
                     // str(nan)=='nan' (LOWERCASE, unlike the repr surface),
                     // str(NaT)=='NaT'. Verified pandas 2.2.3.
@@ -5591,6 +5615,7 @@ impl Index {
                 | IndexLabel::Timedelta64(_)
                 | IndexLabel::Datetime64(_)
                 | IndexLabel::Object(_)
+                | IndexLabel::Period(_)
                 | IndexLabel::Null(_) => 8,
                 IndexLabel::Bool(_) => 1,
                 IndexLabel::Utf8(s) => {
@@ -6090,6 +6115,9 @@ impl Index {
                 "datetime64"
             } else if all(|label| matches!(label, IndexLabel::Timedelta64(_))) {
                 "timedelta64"
+            } else if all(|label| matches!(label, IndexLabel::Period(_))) {
+                // A PeriodIndex of NaT alone is still one (45fzr).
+                "period"
             } else if self.labels.iter().any(|label| {
                 matches!(
                     label,
@@ -6116,6 +6144,9 @@ impl Index {
                     | (IndexLabel::Utf8(_), IndexLabel::Utf8(_))
                     | (IndexLabel::Timedelta64(_), IndexLabel::Timedelta64(_))
                     | (IndexLabel::Datetime64(_), IndexLabel::Datetime64(_))
+            ) || matches!(
+                (first, label),
+                (IndexLabel::Period(a), IndexLabel::Period(b)) if a.freq == b.freq
             )
         };
         if !non_missing.all(same_kind) {
@@ -6138,6 +6169,9 @@ impl Index {
             IndexLabel::Utf8(_) => beside_missing("string"),
             IndexLabel::Timedelta64(_) => "timedelta64",
             IndexLabel::Datetime64(_) => "datetime64",
+            // Periods of one freq (a NaT beside them too); another freq
+            // among them was mixed above.
+            IndexLabel::Period(_) => "period",
             // The core cannot read an object's kind (pandas says "date" for
             // datetime.date labels); and unreachable for Null: `first` comes
             // from the non-missing iterator and every Null label is_missing.
@@ -6757,6 +6791,7 @@ impl<'a> IndexStringAccessor<'a> {
                 | IndexLabel::Timedelta64(_)
                 | IndexLabel::Datetime64(_)
                 | IndexLabel::Object(_)
+                | IndexLabel::Period(_)
                 | IndexLabel::Null(_) => None,
             })
             .collect()
@@ -6927,6 +6962,7 @@ where
             | IndexLabel::Utf8(_)
             | IndexLabel::Timedelta64(_)
             | IndexLabel::Object(_)
+            | IndexLabel::Period(_)
             | IndexLabel::Null(_) => None,
         })
         .collect()
@@ -6960,6 +6996,7 @@ fn datetime_label_time_nanos(label: &IndexLabel) -> Option<i64> {
         | IndexLabel::Utf8(_)
         | IndexLabel::Timedelta64(_)
         | IndexLabel::Object(_)
+        | IndexLabel::Period(_)
         | IndexLabel::Null(_) => None,
     }
 }
@@ -6999,6 +7036,7 @@ where
             | IndexLabel::Timedelta64(_)
             | IndexLabel::Datetime64(_)
             | IndexLabel::Object(_)
+            | IndexLabel::Period(_)
             | IndexLabel::Null(_) => None,
         })
         .collect()
@@ -7202,7 +7240,11 @@ fn period_business_date(ordinal: i64) -> Result<chrono::NaiveDate, IndexError> {
     period_add_days(period_epoch_date(1970, 1, 1)?, calendar_days)
 }
 
-fn period_start_nanos(period: Period) -> Result<i64, IndexError> {
+/// The instant (epoch nanoseconds) a period starts at, pandas'
+/// `Period.start_time`: fp-frame reads a period label there where a
+/// datetime label's own instant is read (45fzr). NaT and an ordinal past
+/// the calendar are errors.
+pub fn period_start_nanos(period: Period) -> Result<i64, IndexError> {
     match period.freq {
         PeriodFreq::Annual => {
             let month_ordinal = period
@@ -8038,6 +8080,7 @@ impl DatetimeIndex {
                 | IndexLabel::Timedelta64(_)
                 | IndexLabel::Datetime64(_)
                 | IndexLabel::Object(_)
+                | IndexLabel::Period(_)
                 | IndexLabel::Null(_) => None,
             })
             .collect()
@@ -8083,6 +8126,7 @@ impl DatetimeIndex {
                 | IndexLabel::Utf8(_)
                 | IndexLabel::Timedelta64(_)
                 | IndexLabel::Object(_)
+                | IndexLabel::Period(_)
                 | IndexLabel::Null(_) => i64::MIN,
             })
             .collect()
@@ -10062,6 +10106,7 @@ impl TimedeltaIndex {
                 | IndexLabel::Utf8(_)
                 | IndexLabel::Datetime64(_)
                 | IndexLabel::Object(_)
+                | IndexLabel::Period(_)
                 | IndexLabel::Null(_) => Timedelta::NAT,
             })
             .collect()
@@ -11531,8 +11576,38 @@ impl PeriodIndex {
 
     #[must_use]
     pub fn to_index(&self) -> Index {
-        Index::from_utf8(self.values.iter().map(Period::to_string).collect())
-            .set_names(self.name.as_deref())
+        // Period labels, so a Series / DataFrame on this index keeps it (it
+        // was their text; 45fzr).
+        Index::new(
+            self.values
+                .iter()
+                .copied()
+                .map(IndexLabel::Period)
+                .collect(),
+        )
+        .set_names(self.name.clone())
+    }
+
+    /// The PeriodIndex `index` holds: its labels periods of one freq (NaT
+    /// among them), or None for any other label (45fzr).
+    #[must_use]
+    pub fn from_index(index: &Index) -> Option<Self> {
+        let mut freq = None;
+        let values = index
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Period(period) if freq.is_none_or(|freq| freq == period.freq) => {
+                    freq = Some(period.freq);
+                    Some(*period)
+                }
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self {
+            values,
+            name: index.name().cloned(),
+        })
     }
 
     /// First-seen unique periods, matching `pd.PeriodIndex.unique()`.
@@ -12444,10 +12519,11 @@ impl PeriodIndex {
         self.to_flat_index().to_series()
     }
 
-    /// Whether any period label coerces to true.
+    /// Whether any period label coerces to true: the flat index's answer, a
+    /// NaT being missing there (pandas raises TypeError for either; 45fzr).
     #[must_use]
     pub fn any(&self) -> bool {
-        !self.values.is_empty()
+        self.to_flat_index().any()
     }
 
     /// Whether all period labels coerce to true.
@@ -19229,6 +19305,7 @@ impl MultiIndex {
             Some(IndexLabel::Null(fp_types::NullKind::Null)) => "NoneType",
             Some(IndexLabel::Null(fp_types::NullKind::NaN)) => "float",
             Some(IndexLabel::Null(fp_types::NullKind::NaT)) => "NaTType",
+            Some(IndexLabel::Period(_)) => "Period",
             Some(IndexLabel::Object(_)) | None => "object",
         }
     }
@@ -19649,6 +19726,7 @@ impl MultiIndex {
                 | IndexLabel::Timedelta64(_)
                 | IndexLabel::Datetime64(_)
                 | IndexLabel::Object(_)
+                | IndexLabel::Period(_)
                 | IndexLabel::Null(_) => 8,
                 IndexLabel::Bool(_) => 1,
                 IndexLabel::Utf8(value) => {
@@ -23072,13 +23150,11 @@ mod tests {
         let td = TimedeltaIndex::new(vec![90_061_000_000_000]);
         assert_eq!(td.r#str().contains("day"), vec![None]);
 
+        // TEST-CHANGE (45fzr): period labels are periods now, not text, so
+        // the str accessor reads them as the instants and durations above
+        // do (pandas raises AttributeError for PeriodIndex.str).
         let period = PeriodIndex::from_range(Period::new(10, PeriodFreq::Monthly), 2);
-        let expected_period_lower: Vec<Option<String>> = period
-            .format()
-            .into_iter()
-            .map(|label| Some(label.to_lowercase()))
-            .collect();
-        assert_eq!(period.r#str().lower(), expected_period_lower);
+        assert_eq!(period.r#str().lower(), vec![None, None]);
 
         let categorical = CategoricalIndex::from_values(
             vec!["Low".to_owned(), "HIGH".to_owned(), String::new()],
@@ -26696,6 +26772,39 @@ mod tests {
         assert_eq!(nones.inferred_type(), "mixed");
         assert_eq!(nones.dtype(), "object");
         assert_eq!(Index::new(Vec::new()).inferred_type(), "empty");
+    }
+
+    #[test]
+    fn period_labels_make_a_period_index_45fzr() {
+        use fp_types::{Period, PeriodFreq};
+        // Ordinal 648 is 2024-01 monthly (54 years of 12 months).
+        let jan = Period::new(648, PeriodFreq::Monthly);
+        let feb = Period::new(649, PeriodFreq::Monthly);
+        let nat = Period::new(i64::MIN, PeriodFreq::Monthly);
+        let index = Index::new(vec![
+            IndexLabel::Period(feb),
+            IndexLabel::Period(jan),
+            IndexLabel::Period(nat),
+        ]);
+        assert_eq!(index.labels()[0].to_string(), "2024-02");
+        assert_eq!(index.labels()[2].to_string(), "NaT");
+        assert!(index.labels()[2].is_missing());
+        assert!(!index.labels()[0].is_missing());
+        assert_eq!(index.inferred_type(), "period");
+        assert!(IndexLabel::Period(jan) < IndexLabel::Period(feb));
+        // A PeriodIndex and its labels round-trip.
+        let periods = PeriodIndex::from_index(&index).expect("periods of one freq");
+        assert_eq!(periods.freqstr().as_deref(), Some("M"));
+        assert_eq!(periods.to_index().labels(), index.labels());
+        // NEGATIVE: text that reads as periods is no PeriodIndex, nor are
+        // periods of two freqs (an object index there, as pandas').
+        assert!(PeriodIndex::from_index(&Index::from_utf8(vec!["2024-01".to_owned()])).is_none());
+        let mixed = Index::new(vec![
+            IndexLabel::Period(jan),
+            IndexLabel::Period(Period::new(0, PeriodFreq::Daily)),
+        ]);
+        assert!(PeriodIndex::from_index(&mixed).is_none());
+        assert_eq!(mixed.inferred_type(), "mixed");
     }
 
     #[test]
@@ -33000,10 +33109,16 @@ mod tests {
         assert_eq!(td.to_series(), td_flat.to_series());
 
         use fp_types::{Period, PeriodFreq};
+        // TEST-CHANGE (45fzr): the flat labels are the periods themselves
+        // (they were their text; pandas' PeriodIndex.to_flat_index is the
+        // PeriodIndex).
         let pi = super::PeriodIndex::new(vec![Period::new(10, PeriodFreq::Monthly)]).set_name("p");
         let pi_flat = pi.to_flat_index();
         assert_eq!(pi_flat.len(), 1);
-        assert!(matches!(pi_flat.labels()[0], super::IndexLabel::Utf8(_)));
+        assert_eq!(
+            pi_flat.labels()[0],
+            super::IndexLabel::Period(Period::new(10, PeriodFreq::Monthly))
+        );
         assert_eq!(pi.to_frame(), pi_flat.to_frame());
         assert_eq!(pi.to_series(), pi_flat.to_series());
 
@@ -33054,9 +33169,12 @@ mod tests {
         assert_eq!(empty_pi.any(), empty_pi.to_flat_index().any());
         assert!(!empty_pi.any());
 
+        // TEST-CHANGE (45fzr): a NaT period label is missing in the flat
+        // index now (it was its text 'NaT', truthy), so a NaT-only index
+        // is not any (pandas raises TypeError for PeriodIndex.any).
         let nat_pi = super::PeriodIndex::new(vec![Period::new(i64::MIN, PeriodFreq::Daily)]);
         assert_eq!(nat_pi.any(), nat_pi.to_flat_index().any());
-        assert!(nat_pi.any());
+        assert!(!nat_pi.any());
 
         let range = super::RangeIndex::new(0, 3, 1).unwrap();
         let range_flat = range.to_flat_index();
@@ -33878,16 +33996,22 @@ mod tests {
             ]
         );
 
-        // to_index / to_flat_index render through the same Display, so the
-        // weekly range has to survive the trip into a flat Utf8 Index too.
+        // to_index / to_flat_index labels render through the same Display,
+        // so the weekly range has to survive the trip into a flat Index too.
+        // TEST-CHANGE (45fzr): the flat labels are periods (they were Utf8
+        // text); their text is compared.
         assert_eq!(
-            dt.to_period("W")?.to_flat_index().labels(),
-            super::Index::from_utf8(vec![
+            dt.to_period("W")?
+                .to_flat_index()
+                .labels()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec![
                 "1969-12-29/1970-01-04".to_owned(),
                 "1969-12-29/1970-01-04".to_owned(),
                 "2024-02-26/2024-03-03".to_owned(),
-            ])
-            .labels()
+            ]
         );
 
         Ok(())

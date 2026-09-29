@@ -1043,9 +1043,10 @@ fn join_component_rank(c: &JoinKeyComponent) -> u8 {
         Present(IndexLabel::Timedelta64(_)) => 4,
         Present(IndexLabel::Datetime64(_)) => 5,
         Present(IndexLabel::Object(_)) => 6,
-        Present(IndexLabel::Null(_)) => 7,
-        FloatBits(_) => 8,
-        Missing => 9,
+        Present(IndexLabel::Period(_)) => 7,
+        Present(IndexLabel::Null(_)) => 8,
+        FloatBits(_) => 9,
+        Missing => 10,
     }
 }
 

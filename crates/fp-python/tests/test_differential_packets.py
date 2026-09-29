@@ -15955,3 +15955,82 @@ _QP_CASES = {
 def test_groupby_sample_draws_as_pandas_qpnp1(case: str) -> None:
     run = _QP_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-45fzr (scratch p14/oracle_perrep.py, oracle_pergb.py,
+# oracle_toperiod.py vs pandas 2.2.3): a Series / DataFrame row index could
+# not be a PeriodIndex - IndexLabel had no Period variant, so index=PeriodIndex,
+# set_index of a period column, groupby / value_counts over periods answered
+# an object Index of their text; loc by a period string missed; to_period /
+# to_timestamp were refused; pd.Index of periods held their ordinals; a
+# period column's dtype was a str.
+def _p45_range(m: Any) -> Any:
+    return m.period_range("2024-01", periods=3, freq="M")
+
+
+def _p45_periods(m: Any) -> Any:
+    return m.Series(m.to_datetime(["2024-01-03", "2024-01-15", "2024-02-02"])).dt.to_period("M")
+
+
+def _p45_shown(result: Any) -> list:
+    return [type(result).__name__, repr(result)]
+
+
+_P45_CASES = {
+    "a Series on a PeriodIndex": lambda m: _p45_shown(m.Series([1, 2, 3], index=_p45_range(m))),
+    "its index": lambda m: _p45_shown(m.Series([1, 2, 3], index=_p45_range(m)).index),
+    "its freqstr": lambda m: [m.Series([1, 2, 3], index=_p45_range(m)).index.freqstr],
+    "a frame on a PeriodIndex": lambda m: _p45_shown(m.DataFrame({"a": [1, 2, 3]}, index=_p45_range(m))),
+    "set_index of a period column": lambda m: _p45_shown(
+        m.DataFrame({"p": _p45_range(m), "a": [1, 2, 3]}).set_index("p").index
+    ),
+    "reset_index to a period column": lambda m: [
+        repr([str(dtype) for dtype in m.Series([1, 2, 3], index=_p45_range(m)).reset_index().dtypes])
+    ],
+    "groupby by periods": lambda m: _p45_shown(
+        m.DataFrame({"u": [3, 5, 2]}).groupby(_p45_periods(m))["u"].sum()
+    ),
+    "groupby a period column": lambda m: _p45_shown(
+        m.DataFrame({"m": _p45_periods(m), "u": [3, 5, 2]}).groupby("m").u.sum()
+    ),
+    "groupby a period level": lambda m: _p45_shown(m.Series([1, 2, 3], index=_p45_range(m)).groupby(level=0).sum()),
+    "value_counts of periods": lambda m: _p45_shown(_p45_periods(m).value_counts()),
+    "Index of the unique periods": lambda m: _p45_shown(m.Index(_p45_periods(m).unique())),
+    "a period column's dtype": lambda m: [repr(_p45_periods(m).dtype)],
+    "loc a period string": lambda m: [repr(m.Series([1, 2, 3], index=_p45_range(m)).loc["2024-02"])],
+    "loc a Period": lambda m: [repr(m.Series([1, 2, 3], index=_p45_range(m)).loc[m.Period("2024-03", "M")])],
+    "loc a coarser period": lambda m: _p45_shown(m.Series([1, 2, 3], index=_p45_range(m)).loc["2024"]),
+    "loc a missing period raises": lambda m: [repr(m.Series([1, 2, 3], index=_p45_range(m)).loc["2025-01"])],
+    "frame loc a period string": lambda m: _p45_shown(m.DataFrame({"a": [1, 2, 3]}, index=_p45_range(m)).loc["2024-02"]),
+    "sort_index": lambda m: _p45_shown(m.Series([1, 2, 3], index=_p45_range(m)).sort_index(ascending=False)),
+    "concat": lambda m: _p45_shown(
+        m.concat([m.Series([1], index=_p45_range(m)[:1]), m.Series([2], index=_p45_range(m)[1:2])])
+    ),
+    "to_period": lambda m: _p45_shown(
+        m.Series([1, 2], index=m.to_datetime(["2024-01-05", "2024-03-09"])).to_period("Q").index
+    ),
+    "to_period of a daily range": lambda m: _p45_shown(
+        m.Series([1, 2], index=m.date_range("2024-01-01", periods=2, freq="D")).to_period().index
+    ),
+    "to_period without a freq raises": lambda m: _p45_shown(
+        m.Series([1, 2], index=m.to_datetime(["2024-01-05", "2024-03-09"])).to_period()
+    ),
+    "to_period of an int index raises": lambda m: _p45_shown(m.Series([1], index=[1]).to_period()),
+    "frame to_period": lambda m: _p45_shown(m.DataFrame({"a": [1]}, index=m.to_datetime(["2024-01-05"])).to_period("M")),
+    "to_timestamp": lambda m: _p45_shown(m.Series([1, 2, 3], index=_p45_range(m)).to_timestamp().index),
+    "to_timestamp at the end": lambda m: _p45_shown(m.Series([1, 2, 3], index=_p45_range(m)).to_timestamp(how="end").index),
+    "frame to_timestamp": lambda m: _p45_shown(m.DataFrame({"a": [1, 2, 3]}, index=_p45_range(m)).to_timestamp()),
+    # NEGATIVE: text that reads as periods stays an object index; a datetime
+    # groupby key stays a DatetimeIndex.
+    "a text index like periods": lambda m: _p45_shown(m.Series([1, 2], index=["2024-01", "2024-02"]).index),
+    "groupby by instants": lambda m: _p45_shown(
+        m.DataFrame({"t": m.to_datetime(["2024-01-01", "2024-01-01"]), "u": [1, 2]}).groupby("t").u.sum()
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_P45_CASES))
+def test_period_row_index_like_pandas_45fzr(case: str) -> None:
+    run = _P45_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

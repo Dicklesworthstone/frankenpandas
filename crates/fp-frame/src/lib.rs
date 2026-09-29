@@ -1282,7 +1282,7 @@ pub(crate) fn format_plot_index_label(l: &IndexLabel) -> String {
         IndexLabel::Utf8(s) => s.clone(),
         IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
         IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-        f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+        f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => f.to_string(),
         IndexLabel::Object(object) => object.to_string(),
         IndexLabel::Null(_) => l.to_string(),
     }
@@ -1620,6 +1620,7 @@ fn index_label_memory_usage_bytes_with_deep(label: &IndexLabel, deep: bool) -> u
         | IndexLabel::Timedelta64(_)
         | IndexLabel::Datetime64(_)
         | IndexLabel::Object(_)
+        | IndexLabel::Period(_)
         | IndexLabel::Null(_) => 8,
         IndexLabel::Bool(_) => 1,
         IndexLabel::Utf8(text) if deep => text.len(),
@@ -1783,11 +1784,14 @@ fn scalar_to_index_label(value: &Scalar) -> Result<IndexLabel, FrameError> {
         Scalar::Bool(b) => Ok(IndexLabel::Bool(*b)),
         // An object cell (a datetime.date) is its own label (fvsao.66).
         Scalar::Object(object) => Ok(IndexLabel::Object(object.clone())),
+        // A period is its own label: set_index of a period column is a
+        // PeriodIndex (45fzr).
+        Scalar::Period(period) => Ok(IndexLabel::Period(*period)),
         Scalar::Null(_) => Err(FrameError::CompatibilityRejected(
             "set_index does not support missing label values".to_owned(),
         )),
-        // Period/Interval indexes need IndexLabel variants that do not yet
-        // exist (tracked separately); reject explicitly for now.
+        // Interval indexes need an IndexLabel variant that does not yet
+        // exist; reject explicitly for now.
         _ => Err(FrameError::CompatibilityRejected(format!(
             "set_index currently supports Int64/Float64/Bool/Utf8/Datetime64/Timedelta64 labels; found {:?}",
             value.dtype()
@@ -1906,7 +1910,9 @@ fn scalar_to_value_counts_index_label(value: &Scalar) -> IndexLabel {
         Scalar::Float64(v) => IndexLabel::Utf8(format!("{v:?}")),
         Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
         Scalar::Datetime64(v) => IndexLabel::Utf8(format_datetime_ns(*v)),
-        Scalar::Period(ordinal) => IndexLabel::Utf8(ordinal.calendar_string()),
+        // A period labels as itself: value_counts / groupby over periods
+        // answer a PeriodIndex (it was their text; 45fzr).
+        Scalar::Period(period) => IndexLabel::Period(*period),
         Scalar::Interval(interval) => IndexLabel::Utf8(format!("{interval}")),
         // An object cell labels as itself (value_counts of s.dt.date; fvsao.66).
         Scalar::Object(object) => IndexLabel::Object(object.clone()),
@@ -2365,7 +2371,7 @@ fn pivot_label_to_column_name(label: &IndexLabel) -> String {
         IndexLabel::Utf8(s) => s.clone(),
         IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
         IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-        f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+        f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => f.to_string(),
         IndexLabel::Object(object) => object.to_string(),
         IndexLabel::Null(_) => label.to_string(),
     }
@@ -4398,6 +4404,9 @@ fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
         IndexLabel::Datetime64(ns) => Scalar::Datetime64(*ns),
         // An object label is its cell again (fvsao.66).
         IndexLabel::Object(object) => Scalar::Object(object.clone()),
+        // A period label is its period again: reset_index of a PeriodIndex
+        // is a period column (45fzr).
+        IndexLabel::Period(period) => Scalar::Period(*period),
         // The natural bijection: a typed-null label round-trips to the
         // same-kind missing scalar.
         IndexLabel::Null(kind) => Scalar::Null(*kind),
@@ -4412,7 +4421,7 @@ fn index_label_to_utf8_scalar(label: &IndexLabel) -> Scalar {
         IndexLabel::Timedelta64(ns) => Scalar::Utf8(Timedelta::format(*ns)),
         IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
         IndexLabel::Object(object) => Scalar::Utf8(object.to_string()),
-        IndexLabel::Null(_) => Scalar::Utf8(label.to_string()),
+        IndexLabel::Period(_) | IndexLabel::Null(_) => Scalar::Utf8(label.to_string()),
     }
 }
 
@@ -4943,6 +4952,9 @@ fn index_label_to_json_value(label: &IndexLabel) -> Value {
         IndexLabel::Utf8(v) => Value::String(v.clone()),
         IndexLabel::Timedelta64(ns) | IndexLabel::Datetime64(ns) => epoch_ms_json(*ns),
         IndexLabel::Object(object) => scalar_to_json_value(&Scalar::Object(object.clone())),
+        // A period as its text (NaT null), as pandas writes one.
+        IndexLabel::Period(period) if period.is_nat() => Value::Null,
+        IndexLabel::Period(period) => Value::String(period.to_string()),
         // pandas to_json renders a missing label as JSON null.
         IndexLabel::Null(_) => Value::Null,
     }
@@ -4958,7 +4970,7 @@ fn index_label_to_json_key(label: &IndexLabel) -> String {
             "null".to_owned()
         }
         IndexLabel::Timedelta64(ns) | IndexLabel::Datetime64(ns) => (*ns / 1_000_000).to_string(),
-        f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+        f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => f.to_string(),
         IndexLabel::Object(object) => object.to_string(),
         IndexLabel::Null(_) => label.to_string(),
     }
@@ -4993,7 +5005,8 @@ fn index_label_to_table_schema_type(label: &IndexLabel) -> &'static str {
         // pandas' table schema calls any object column "string".
         IndexLabel::Utf8(_) | IndexLabel::Object(_) => "string",
         IndexLabel::Timedelta64(_) => "duration",
-        IndexLabel::Datetime64(_) => "datetime",
+        // pandas' table schema calls a period a datetime too.
+        IndexLabel::Datetime64(_) | IndexLabel::Period(_) => "datetime",
         // Same convention as DType::Null in dtype_to_table_schema_type.
         IndexLabel::Null(_) => "any",
     }
@@ -5230,6 +5243,7 @@ fn add_offset_to_label(label: &IndexLabel, offset: &str) -> Result<IndexLabel, F
         | IndexLabel::Bool(_)
         | IndexLabel::Timedelta64(_)
         | IndexLabel::Object(_)
+        | IndexLabel::Period(_)
         | IndexLabel::Null(_) => {
             return Err(FrameError::CompatibilityRejected(
                 "first/last offset requires string (date) index".into(),
@@ -5251,6 +5265,7 @@ fn sub_offset_from_label(label: &IndexLabel, offset: &str) -> Result<IndexLabel,
         | IndexLabel::Bool(_)
         | IndexLabel::Timedelta64(_)
         | IndexLabel::Object(_)
+        | IndexLabel::Period(_)
         | IndexLabel::Null(_) => {
             return Err(FrameError::CompatibilityRejected(
                 "first/last offset requires string (date) index".into(),
@@ -7155,6 +7170,7 @@ fn semantic_integer_label_kind_value(label: &IndexLabel) -> Option<(&'static [u8
         | IndexLabel::Bool(_)
         | IndexLabel::Utf8(_)
         | IndexLabel::Object(_)
+        | IndexLabel::Period(_)
         | IndexLabel::Null(_) => None,
     }
 }
@@ -7262,6 +7278,7 @@ fn sorted_int64_unit_range_labels(labels: &[IndexLabel]) -> Option<(i64, i64)> {
         | IndexLabel::Timedelta64(_)
         | IndexLabel::Datetime64(_)
         | IndexLabel::Object(_)
+        | IndexLabel::Period(_)
         | IndexLabel::Null(_) => {
             return None;
         }
@@ -7274,6 +7291,7 @@ fn sorted_int64_unit_range_labels(labels: &[IndexLabel]) -> Option<(i64, i64)> {
         | IndexLabel::Timedelta64(_)
         | IndexLabel::Datetime64(_)
         | IndexLabel::Object(_)
+        | IndexLabel::Period(_)
         | IndexLabel::Null(_) => {
             return None;
         }
@@ -10903,9 +10921,10 @@ impl Series {
                 IndexLabel::Utf8(s) => s.len(),
                 IndexLabel::Timedelta64(ns) => Timedelta::format(*ns).len(),
                 IndexLabel::Datetime64(ns) => format_datetime_ns(*ns).len(),
-                f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
-                    f.to_string().len()
-                }
+                f @ (IndexLabel::Float64(_)
+                | IndexLabel::Bool(_)
+                | IndexLabel::Object(_)
+                | IndexLabel::Period(_)) => f.to_string().len(),
                 IndexLabel::Null(_) => l.to_string().len(),
             })
             .max()
@@ -10917,9 +10936,10 @@ impl Series {
                 IndexLabel::Utf8(s) => s.clone(),
                 IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                 IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
-                    f.to_string()
-                }
+                f @ (IndexLabel::Float64(_)
+                | IndexLabel::Bool(_)
+                | IndexLabel::Object(_)
+                | IndexLabel::Period(_)) => f.to_string(),
                 IndexLabel::Null(_) => label.to_string(),
             };
             let val_str = match val {
@@ -27567,7 +27587,10 @@ impl Series {
                         scratch = format_datetime_ns(*ns);
                         &scratch
                     }
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
+                    f @ (IndexLabel::Float64(_)
+                    | IndexLabel::Bool(_)
+                    | IndexLabel::Object(_)
+                    | IndexLabel::Period(_)) => {
                         scratch = f.to_string();
                         &scratch
                     }
@@ -27845,7 +27868,7 @@ impl Series {
                     IndexLabel::Utf8(s) => csv_escape(s, sep),
                     IndexLabel::Timedelta64(ns) => csv_escape(&Timedelta::format(*ns), sep),
                     IndexLabel::Datetime64(ns) => csv_escape(&format_datetime_ns(*ns), sep),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => {
+                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
                         csv_escape(&f.to_string(), sep)
                     }
                     IndexLabel::Object(object) => csv_escape(&object.to_string(), sep),
@@ -27968,7 +27991,7 @@ impl Series {
                     IndexLabel::Utf8(s) => quote_str(s, false),
                     IndexLabel::Timedelta64(ns) => quote_str(&Timedelta::format(*ns), false),
                     IndexLabel::Datetime64(ns) => quote_str(&format_datetime_ns(*ns), false),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => {
+                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
                         quote_str(&f.to_string(), false)
                     }
                     IndexLabel::Object(object) => quote_str(&object.to_string(), false),
@@ -36379,6 +36402,8 @@ fn resample_label_to_ns(label: &IndexLabel) -> Option<i64> {
             }
             None
         }
+        // A period at its start instant (45fzr); NaT none.
+        IndexLabel::Period(period) => fp_index::period_start_nanos(*period).ok(),
         IndexLabel::Int64(_)
         | IndexLabel::Float64(_)
         | IndexLabel::Bool(_)
@@ -36443,6 +36468,10 @@ fn resample_label_to_month_ordinal(label: &IndexLabel) -> Option<i64> {
                 None
             }
         }
+        // A period at its start instant (45fzr); NaT none.
+        IndexLabel::Period(period) => resample_label_to_month_ordinal(&IndexLabel::Datetime64(
+            fp_index::period_start_nanos(*period).ok()?,
+        )),
         IndexLabel::Int64(_)
         | IndexLabel::Float64(_)
         | IndexLabel::Bool(_)
@@ -36470,6 +36499,10 @@ fn resample_label_to_date(label: &IndexLabel) -> Option<NaiveDate> {
             let secs = ns.div_euclid(1_000_000_000);
             DateTime::from_timestamp(secs, 0).map(|dt| dt.naive_utc().date())
         }
+        // A period at its start instant (45fzr); NaT none.
+        IndexLabel::Period(period) => resample_label_to_date(&IndexLabel::Datetime64(
+            fp_index::period_start_nanos(*period).ok()?,
+        )),
         IndexLabel::Int64(_)
         | IndexLabel::Float64(_)
         | IndexLabel::Bool(_)
@@ -42505,7 +42538,8 @@ impl SeriesGroupBy<'_> {
                     // groups stay DISTINCT; the old `"NaN"` collapse gave
                     // every unlisted key the SAME label. Missing values never
                     // reach here (skipped above), so this is not the null path.
-                    Scalar::Period(period) => IndexLabel::Utf8(period.calendar_string()),
+                    // A period is its own label (45fzr).
+                    Scalar::Period(period) => IndexLabel::Period(*period),
                     Scalar::Interval(interval) => IndexLabel::Utf8(interval.to_string()),
                     other => IndexLabel::Utf8(format!("{other:?}")),
                 };
@@ -64199,6 +64233,7 @@ pub fn index_to_frame(index: &Index, name: Option<&str>) -> Result<DataFrame, Fr
             IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
             IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
             IndexLabel::Object(object) => Scalar::Object(object.clone()),
+            IndexLabel::Period(period) => Scalar::Period(*period),
             // Typed-null label round-trips to the same-kind missing scalar.
             IndexLabel::Null(kind) => Scalar::Null(*kind),
         })
@@ -64228,6 +64263,7 @@ pub fn index_to_series(index: &Index, name: Option<&str>) -> Result<Series, Fram
             IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
             IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
             IndexLabel::Object(object) => Scalar::Object(object.clone()),
+            IndexLabel::Period(period) => Scalar::Period(*period),
             // Typed-null label round-trips to the same-kind missing scalar.
             IndexLabel::Null(kind) => Scalar::Null(*kind),
         })
@@ -65057,7 +65093,10 @@ pub fn concat_dataframes_with_keys(
                 IndexLabel::Utf8(s) => format!("{key}|{s}"),
                 IndexLabel::Timedelta64(ns) => format!("{key}|{}", Timedelta::format(*ns)),
                 IndexLabel::Datetime64(ns) => format!("{key}|{}", format_datetime_ns(*ns)),
-                f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
+                f @ (IndexLabel::Float64(_)
+                | IndexLabel::Bool(_)
+                | IndexLabel::Object(_)
+                | IndexLabel::Period(_)) => {
                     format!("{key}|{f}")
                 }
                 IndexLabel::Null(_) => format!("{key}|{label}"),
@@ -68406,7 +68445,9 @@ impl<'a> StyledDataFrame<'a> {
                     IndexLabel::Utf8(s) => Self::escape_html_text(s),
                     IndexLabel::Timedelta64(ns) => Self::escape_html_text(&Timedelta::format(*ns)),
                     IndexLabel::Datetime64(ns) => Self::escape_html_text(&format_datetime_ns(*ns)),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
+                        f.to_string()
+                    }
                     IndexLabel::Object(object) => Self::escape_html_text(&object.to_string()),
                     IndexLabel::Null(_) => label.to_string(),
                 };
@@ -69735,6 +69776,7 @@ impl DataFrame {
             // Timedelta64); pandas reset_index on a DatetimeIndex -> datetime64.
             IndexLabel::Datetime64(ns) => Scalar::Datetime64(*ns),
             IndexLabel::Object(object) => Scalar::Object(object.clone()),
+            IndexLabel::Period(period) => Scalar::Period(*period),
             // Typed-null label round-trips to the same-kind missing scalar.
             IndexLabel::Null(kind) => Scalar::Null(*kind),
         }
@@ -73982,7 +74024,7 @@ impl DataFrame {
                     Scalar::Null(kind) => IndexLabel::Null(kind),
                     Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(v)),
                     Scalar::Datetime64(v) => IndexLabel::Utf8(format_datetime_ns(v)),
-                    Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
+                    Scalar::Period(v) => IndexLabel::Period(v),
                     Scalar::Interval(interval) => IndexLabel::Utf8(format!("{interval}")),
                     Scalar::Object(object) => IndexLabel::Object(object),
                 })
@@ -76807,7 +76849,7 @@ impl DataFrame {
                                     IndexLabel::Datetime64(*v)
                                 }
                                 Scalar::Datetime64(v) => IndexLabel::Utf8(format_datetime_ns(*v)),
-                                Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
+                                Scalar::Period(v) => IndexLabel::Period(*v),
                                 Scalar::Interval(interval) => {
                                     IndexLabel::Utf8(format!("{interval}"))
                                 }
@@ -80304,7 +80346,9 @@ impl DataFrame {
                 IndexLabel::Utf8(v) => v.clone(),
                 IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                 IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+                f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
+                    f.to_string()
+                }
                 IndexLabel::Object(object) => object.to_string(),
                 null @ IndexLabel::Null(_) => null.to_string(),
             }
@@ -81643,6 +81687,7 @@ impl DataFrame {
                     IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
                     IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
                     IndexLabel::Object(object) => Scalar::Object(object.clone()),
+                    IndexLabel::Period(period) => Scalar::Period(*period),
                     IndexLabel::Null(kind) => Scalar::Null(*kind),
                 });
                 for col_vals in &col_values {
@@ -82628,7 +82673,9 @@ impl DataFrame {
                     IndexLabel::Utf8(s) => s,
                     IndexLabel::Timedelta64(ns) => Timedelta::format(ns),
                     IndexLabel::Datetime64(ns) => format_datetime_ns(ns),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
+                        f.to_string()
+                    }
                     IndexLabel::Object(object) => object.to_string(),
                     null @ IndexLabel::Null(_) => null.to_string(),
                 };
@@ -87545,7 +87592,9 @@ impl DataFrame {
                     IndexLabel::Utf8(s) => s.clone(),
                     IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                     IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
+                        f.to_string()
+                    }
                     IndexLabel::Object(object) => object.to_string(),
                     IndexLabel::Null(_) => label.to_string(),
                 });
@@ -87642,7 +87691,9 @@ impl DataFrame {
                     IndexLabel::Utf8(s) => escape_html(s),
                     IndexLabel::Timedelta64(ns) => escape_html(&Timedelta::format(*ns)),
                     IndexLabel::Datetime64(ns) => escape_html(&format_datetime_ns(*ns)),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
+                        f.to_string()
+                    }
                     IndexLabel::Object(object) => escape_html(&object.to_string()),
                     IndexLabel::Null(_) => label.to_string(),
                 };
@@ -88071,6 +88122,7 @@ impl DataFrame {
                         IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
                         IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
                         IndexLabel::Object(object) => Scalar::Object(object.clone()),
+                        IndexLabel::Period(period) => Scalar::Period(*period),
                         IndexLabel::Null(kind) => Scalar::Null(*kind),
                     })
                     .collect();
@@ -88215,7 +88267,7 @@ impl DataFrame {
                     IndexLabel::Datetime64(ns) => {
                         out.push_str(&csv_escape(&format_datetime_ns(*ns), sep))
                     }
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => {
+                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
                         out.push_str(&csv_escape(&f.to_string(), sep))
                     }
                     IndexLabel::Object(object) => {
@@ -88312,7 +88364,7 @@ impl DataFrame {
                     IndexLabel::Datetime64(ns) => {
                         out.push_str(&csv_escape(&format_datetime_ns(*ns), sep))
                     }
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => {
+                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
                         out.push_str(&csv_escape(&f.to_string(), sep))
                     }
                     IndexLabel::Object(object) => {
@@ -88463,7 +88515,7 @@ impl DataFrame {
                     IndexLabel::Datetime64(ns) => {
                         out.push_str(&quote_str(&format_datetime_ns(*ns), false))
                     }
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => {
+                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
                         out.push_str(&quote_str(&f.to_string(), false))
                     }
                     IndexLabel::Object(object) => {
@@ -88975,9 +89027,10 @@ impl DataFrame {
                     IndexLabel::Utf8(s) => s.clone(),
                     IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                     IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
-                        f.to_string()
-                    }
+                    f @ (IndexLabel::Float64(_)
+                    | IndexLabel::Bool(_)
+                    | IndexLabel::Object(_)
+                    | IndexLabel::Period(_)) => f.to_string(),
                     IndexLabel::Null(_) => l.to_string(),
                 })
                 .collect();
@@ -89123,9 +89176,10 @@ impl DataFrame {
                     IndexLabel::Utf8(s) => s.clone(),
                     IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                     IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
-                        f.to_string()
-                    }
+                    f @ (IndexLabel::Float64(_)
+                    | IndexLabel::Bool(_)
+                    | IndexLabel::Object(_)
+                    | IndexLabel::Period(_)) => f.to_string(),
                     null @ IndexLabel::Null(_) => null.to_string(),
                 });
             }
@@ -89190,9 +89244,10 @@ impl DataFrame {
                     IndexLabel::Utf8(s) => s.clone(),
                     IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                     IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
-                        f.to_string()
-                    }
+                    f @ (IndexLabel::Float64(_)
+                    | IndexLabel::Bool(_)
+                    | IndexLabel::Object(_)
+                    | IndexLabel::Period(_)) => f.to_string(),
                     IndexLabel::Null(_) => l.to_string(),
                 })
                 .collect();
@@ -89740,9 +89795,10 @@ impl DataFrame {
                     IndexLabel::Utf8(v) => row_part.push_str(v),
                     IndexLabel::Timedelta64(ns) => row_part.push_str(&Timedelta::format(*ns)),
                     IndexLabel::Datetime64(ns) => row_part.push_str(&format_datetime_ns(*ns)),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
-                        row_part.push_str(&format!("{f}"))
-                    }
+                    f @ (IndexLabel::Float64(_)
+                    | IndexLabel::Bool(_)
+                    | IndexLabel::Object(_)
+                    | IndexLabel::Period(_)) => row_part.push_str(&format!("{f}")),
                     l @ IndexLabel::Null(_) => row_part.push_str(&format!("{l}")),
                 }
                 for col_name in col_names {
@@ -90055,9 +90111,10 @@ impl DataFrame {
                 IndexLabel::Int64(v) => v.to_string(),
                 IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                 IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
-                    f.to_string()
-                }
+                f @ (IndexLabel::Float64(_)
+                | IndexLabel::Bool(_)
+                | IndexLabel::Object(_)
+                | IndexLabel::Period(_)) => f.to_string(),
                 IndexLabel::Null(_) => label.to_string(),
             };
             let sep_pos = label_str.rfind('|').ok_or_else(|| {
@@ -101309,11 +101366,12 @@ impl DataFrameGroupBy<'_> {
             // An object key (a datetime.date from s.dt.date) labels its group
             // as itself; it rendered as "Object(datetime.date(...))" (fvsao.66).
             Scalar::Object(object) => IndexLabel::Object(object.clone()),
-            // PERIOD and INTERVAL keys, which `IndexLabel` has no variant
-            // for (a representation gap, br-frankenpandas-no6s4), label as
-            // pandas prints them: a groupby over pd.cut printed
-            // 'Interval(Interval { .. })' (fvsao.54).
-            Scalar::Period(period) => IndexLabel::Utf8(period.calendar_string()),
+            // A PERIOD key is its own label, so the result is on a
+            // PeriodIndex (45fzr); an INTERVAL key, which `IndexLabel` has no
+            // variant for (br-frankenpandas-no6s4), labels as pandas prints
+            // it: a groupby over pd.cut printed 'Interval(Interval { .. })'
+            // (fvsao.54).
+            Scalar::Period(period) => IndexLabel::Period(*period),
             Scalar::Interval(interval) => IndexLabel::Utf8(interval.to_string()),
         }
     }
@@ -107939,8 +107997,9 @@ impl DataFrameGroupBy<'_> {
                 "False".to_owned()
             }),
             Scalar::Object(object) => IndexLabel::Object(object.clone()),
-            // As pandas prints them (group_key_label; fvsao.54).
-            Scalar::Period(period) => IndexLabel::Utf8(period.calendar_string()),
+            // A period is its own label (45fzr); an interval as pandas
+            // prints it (group_key_label; fvsao.54).
+            Scalar::Period(period) => IndexLabel::Period(*period),
             Scalar::Interval(interval) => IndexLabel::Utf8(interval.to_string()),
             other => IndexLabel::Utf8(format!("{other:?}")),
         }
@@ -110996,7 +111055,10 @@ impl DataFrameGroupBy<'_> {
                     IndexLabel::Int64(g) => format!("{g}|{stat}"),
                     IndexLabel::Timedelta64(ns) => format!("{}|{stat}", Timedelta::format(*ns)),
                     IndexLabel::Datetime64(ns) => format!("{}|{stat}", format_datetime_ns(*ns)),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
+                    f @ (IndexLabel::Float64(_)
+                    | IndexLabel::Bool(_)
+                    | IndexLabel::Object(_)
+                    | IndexLabel::Period(_)) => {
                         format!("{f}|{stat}")
                     }
                     IndexLabel::Null(_) => format!("{group_label}|{stat}"),
@@ -111104,9 +111166,10 @@ impl DataFrameGroupBy<'_> {
                 IndexLabel::Int64(v) => v.to_string(),
                 IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                 IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
-                    f.to_string()
-                }
+                f @ (IndexLabel::Float64(_)
+                | IndexLabel::Bool(_)
+                | IndexLabel::Object(_)
+                | IndexLabel::Period(_)) => f.to_string(),
                 IndexLabel::Null(_) => label.to_string(),
             };
             if label_str == name {
@@ -126887,7 +126950,9 @@ mod tests {
             IndexLabel::Float64(_)
         ));
 
-        // Period labels still have no IndexLabel variant and remain rejected.
+        // TEST-CHANGE (45fzr): a period column is a PeriodIndex's labels,
+        // as pandas' set_index (it was rejected: IndexLabel had no Period
+        // variant). The rejection still holds for an interval column.
         let df_period = DataFrame::from_dict(
             &["id", "v"],
             vec![
@@ -126902,7 +126967,29 @@ mod tests {
             ],
         )
         .unwrap();
-        let err = df_period.set_index("id", true).unwrap_err();
+        let indexed = df_period.set_index("id", true).unwrap();
+        assert_eq!(
+            indexed.index().labels(),
+            &[
+                IndexLabel::Period(Period::new(0, PeriodFreq::Daily)),
+                IndexLabel::Period(Period::new(1, PeriodFreq::Daily)),
+            ]
+        );
+        let df_interval = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Interval(fp_types::Interval::new(0.0, 1.0, IntervalClosed::Right)),
+                        Scalar::Interval(fp_types::Interval::new(1.0, 2.0, IntervalClosed::Right)),
+                    ],
+                ),
+                ("v", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+        )
+        .unwrap();
+        let err = df_interval.set_index("id", true).unwrap_err();
         assert!(
             matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("set_index currently supports"))
         );

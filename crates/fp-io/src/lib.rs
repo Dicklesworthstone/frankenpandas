@@ -3099,7 +3099,7 @@ fn html_index_label_string(
         IndexLabel::Utf8(s) => s.clone(),
         IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
         IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-        f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+        f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => f.to_string(),
         IndexLabel::Object(object) => object.to_string(),
         IndexLabel::Null(_) => label.to_string(),
     };
@@ -7221,6 +7221,9 @@ fn index_label_to_json(label: &IndexLabel) -> serde_json::Value {
             }
         }
         IndexLabel::Object(object) => scalar_to_json(&Scalar::Object(object.clone())),
+        // A period as its text, NaT null (45fzr).
+        IndexLabel::Period(period) if period.is_nat() => serde_json::Value::Null,
+        IndexLabel::Period(period) => serde_json::Value::String(period.to_string()),
         // pandas to_json renders a missing label as JSON null.
         IndexLabel::Null(_) => serde_json::Value::Null,
     }
@@ -7261,6 +7264,7 @@ fn index_label_to_scalar_value(label: &IndexLabel) -> Scalar {
         // datetime format. (br-frankenpandas-mdt64)
         IndexLabel::Datetime64(v) => Scalar::Datetime64(*v),
         IndexLabel::Object(object) => Scalar::Object(object.clone()),
+        IndexLabel::Period(period) => Scalar::Period(*period),
         // Typed-null label round-trips to the same-kind missing scalar.
         IndexLabel::Null(kind) => Scalar::Null(*kind),
     }
@@ -11787,6 +11791,13 @@ fn write_excel_index_label(
                 .write_string(excel_row, excel_col, object.to_string())
                 .map_err(|e| IoError::Excel(format!("write index object: {e}")))?;
         }
+        // A period as its text, NaT a blank cell (45fzr).
+        IndexLabel::Period(period) if period.is_nat() => {}
+        IndexLabel::Period(period) => {
+            worksheet
+                .write_string(excel_row, excel_col, period.to_string())
+                .map_err(|e| IoError::Excel(format!("write index period: {e}")))?;
+        }
         IndexLabel::Null(_) => {}
     }
     Ok(())
@@ -13246,6 +13257,7 @@ fn scalar_from_index_label(label: &IndexLabel) -> Scalar {
         IndexLabel::Bool(b) => Scalar::Bool(*b),
         IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
         IndexLabel::Object(object) => Scalar::Object(object.clone()),
+        IndexLabel::Period(period) => Scalar::Period(*period),
         // Typed-null label round-trips to the same-kind missing scalar.
         IndexLabel::Null(kind) => Scalar::Null(*kind),
         IndexLabel::Timedelta64(v) => {
