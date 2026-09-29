@@ -2795,8 +2795,12 @@ def test_assert_equal_flags_decide_like_pandas() -> None:
             pd.DataFrame({"a": [1]}).rename_axis("y"),
             **kw,
         )
-    assert verdict(fpd.testing.assert_index_equal, fpd.Index([1.0]), fpd.Index([1.0 + 1e-9])) == "passes"
-    assert verdict(fpd.testing.assert_index_equal, fpd.Index([1.0]), fpd.Index([1.0 + 1e-9]), check_exact=True) == "fails"
+    # assert_index_equal compares exactly unless check_exact=False, as
+    # pandas' (check_exact defaults to True there; br-frankenpandas-h06ox).
+    for kw in ({}, {"check_exact": True}, {"check_exact": False}):
+        assert verdict(fpd.testing.assert_index_equal, fpd.Index([1.0]), fpd.Index([1.0 + 1e-9]), **kw) == verdict(
+            pd.testing.assert_index_equal, pd.Index([1.0]), pd.Index([1.0 + 1e-9]), **kw
+        ), kw
     with pytest.raises(NotImplementedError, match="check_like"):
         fpd.testing.assert_frame_equal(fpd.DataFrame({"a": [1]}), fpd.DataFrame({"a": [1]}), check_like=True)
 
@@ -20020,4 +20024,135 @@ _E54_CASES = {
 @pytest.mark.parametrize("case", list(_E54_CASES))
 def test_everyday54_display_options_like_pandas_fzfbp(case: str) -> None:
     run = _E54_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-h06ox: a frame's row keys under a MultiIndex / tz-aware
+# index (to_dict, iterrows, itertuples, to_json were the storage text 'a|1',
+# 'a, 1', naive UTC), json_normalize's int with a missing field (int),
+# to_sql's row count (None), read_sql(params=, parse_dates=, dtype=,
+# chunksize=) (refused), api.types.union_categoricals / the dtype classes
+# (missing), a pd.Grouper among groupby keys (refused), and assert_*_equal's
+# messages (frankenpandas' own, Rust Debug values).
+def _e55_mi(m: Any) -> Any:
+    return m.DataFrame({"v": [0, 1, 2, 3], "w": list("abcd")}, index=m.MultiIndex.from_product([["a", "b"], [1, 2]]))
+
+
+def _e55_grouped(m: Any) -> Any:
+    return m.DataFrame({"k": ["a", "a", "b"], "j": [1, 2, 1], "v": [1, 2, 3]}).groupby(["k", "j"]).sum()
+
+
+def _e55_tz(m: Any) -> Any:
+    return m.DataFrame({"v": [1, 2]}, index=m.date_range("2024-01-01", periods=2, tz="US/Eastern"))
+
+
+def _e55_sql(m: Any, query: str, **kwargs: Any) -> list:
+    # Closed here: an unclosed connection's ResourceWarning lands in whichever
+    # case the collector runs during.
+    con = sqlite3.connect(":memory:")
+    try:
+        frame = m.DataFrame({"a": [1, 2, 3], "d": ["2024-01-01", "2024-02-01", "bad"], "e": [1704067200, 1706745600, None]})
+        written = frame.to_sql("t", con, index=False)
+        read = m.read_sql(query, con, **kwargs)
+        if kwargs.get("chunksize") is not None:
+            chunks = list(read)
+            return [written] + [chunk.to_dict("list") for chunk in chunks] + [[chunk.index.tolist() for chunk in chunks]]
+        return [written, read.to_dict("list"), read.dtypes.astype(str).tolist()]
+    finally:
+        con.close()
+
+
+def _e55_ts(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "t": m.to_datetime(["2024-01-01 09:00", "2024-01-01 17:00", "2024-01-03 10:00", "2024-02-10 00:00"]),
+            "v": [1, 2, 3, 4],
+            "k": ["a", "b", "a", "a"],
+        }
+    )
+
+
+def _e55_assert(check: Any) -> list:
+    try:
+        check()
+    except AssertionError as e:
+        return [str(e)]
+    return ["no raise"]
+
+
+_E55_FRAME = {"a": [1, 2, 3], "b": [1.5, None, 3.5], "c": ["x", "y", "z"]}
+_E55_CASES = {
+    "groupby keys to_dict": lambda m: [_e55_grouped(m).to_dict()],
+    "groupby keys iterrows": lambda m: [k for k, _ in _e55_grouped(m).iterrows()],
+    "groupby keys itertuples": lambda m: list(_e55_grouped(m).itertuples()),
+    "multiindex to_dict index": lambda m: [_e55_mi(m).to_dict("index")],
+    "multiindex to_dict split": lambda m: [_e55_mi(m).to_dict("split")],
+    "multiindex to_dict tight": lambda m: [_e55_mi(m).to_dict("tight")],
+    "multiindex to_json": lambda m: [_e55_mi(m).to_json(), _e55_mi(m).to_json(orient="index")],
+    "multiindex to_json split": lambda m: [_e55_mi(m).to_json(orient="split")],
+    "multiindex series to_json": lambda m: [_e55_mi(m)["v"].to_json(), _e55_mi(m)["v"].to_json(orient="split")],
+    "tz keys to_dict": lambda m: [_e55_tz(m).to_dict(), _e55_tz(m).to_dict("index")],
+    "tz keys iterrows": lambda m: [k for k, _ in _e55_tz(m).iterrows()] + [t.Index for t in _e55_tz(m).itertuples()],
+    "json_normalize int missing": lambda m: [
+        m.json_normalize([{"id": 1, "info": {"x": 1}}, {"id": 2, "info": {}}]).to_dict("list")
+    ],
+    "to_sql count and params": lambda m: _e55_sql(m, "select a from t where a >= ?", params=(2,)),
+    "read_sql parse_dates": lambda m: _e55_sql(m, "select d, e from t", parse_dates=["d", "e"]),
+    "read_sql parse_dates format": lambda m: _e55_sql(m, "select d from t", parse_dates={"d": "%Y-%m-%d"}),
+    "read_sql dtype": lambda m: _e55_sql(m, "select a from t", dtype={"a": "float64"}),
+    "read_sql chunksize": lambda m: _e55_sql(m, "select a, e from t", chunksize=2),
+    "read_sql null int": lambda m: _e55_sql(m, "select e from t"),
+    "union_categoricals": lambda m: [
+        m.api.types.union_categoricals([m.Categorical(["b", "a"]), m.Categorical(["c", "a"])])
+    ],
+    "union_categoricals sorted": lambda m: [
+        list(m.api.types.union_categoricals([m.Categorical(["b"]), m.Categorical(["a"])], sort_categories=True).categories)
+    ],
+    "union_categoricals ordered differ": lambda m: [
+        m.api.types.union_categoricals([m.Categorical(["a"], ordered=True), m.Categorical(["b"], ordered=True)])
+    ],
+    "union_categoricals not categorical": lambda m: [m.api.types.union_categoricals([m.Series(["a"])])],
+    "union_categoricals empty": lambda m: [m.api.types.union_categoricals([])],
+    "api types dtype classes": lambda m: [
+        [n for n in ("CategoricalDtype", "DatetimeTZDtype", "PeriodDtype", "IntervalDtype") if hasattr(m.api.types, n)]
+    ],
+    "grouper among keys": lambda m: [_e55_ts(m).groupby([m.Grouper(key="t", freq="D"), "k"])["v"].sum().to_dict()],
+    "grouper second key month end": lambda m: [
+        _e55_ts(m).groupby(["k", m.Grouper(key="t", freq="ME")])["v"].sum().to_dict()
+    ],
+    "grouper frame agg": lambda m: [_e55_ts(m).groupby([m.Grouper(key="t", freq="W"), "k"]).sum().to_dict()],
+    "assert frame int values": lambda m: _e55_assert(
+        lambda: m.testing.assert_frame_equal(m.DataFrame(_E55_FRAME), m.DataFrame(_E55_FRAME).assign(a=[1, 2, 4]))
+    ),
+    "assert frame float values": lambda m: _e55_assert(
+        lambda: m.testing.assert_frame_equal(m.DataFrame(_E55_FRAME), m.DataFrame(_E55_FRAME).assign(b=[1.5, None, 3.6]))
+    ),
+    "assert frame shape": lambda m: _e55_assert(
+        lambda: m.testing.assert_frame_equal(m.DataFrame(_E55_FRAME), m.DataFrame(_E55_FRAME).head(2))
+    ),
+    "assert frame columns": lambda m: _e55_assert(
+        lambda: m.testing.assert_frame_equal(m.DataFrame(_E55_FRAME), m.DataFrame(_E55_FRAME).rename(columns={"c": "d"}))
+    ),
+    "assert frame index": lambda m: _e55_assert(
+        lambda: m.testing.assert_frame_equal(m.DataFrame(_E55_FRAME), m.DataFrame(_E55_FRAME).set_axis([0, 1, 5]))
+    ),
+    "assert series name and length": lambda m: _e55_assert(
+        lambda: m.testing.assert_series_equal(m.Series([1, 2], name="a"), m.Series([1, 2], name="z"))
+    )
+    + _e55_assert(lambda: m.testing.assert_series_equal(m.Series([1, 2, 3]), m.Series([1, 2]))),
+    "assert index": lambda m: _e55_assert(lambda: m.testing.assert_index_equal(m.Index([1, 2]), m.Index([1, 3])))
+    + _e55_assert(lambda: m.testing.assert_index_equal(m.Index([1], name="x"), m.Index([1], name="y")))
+    + _e55_assert(lambda: m.testing.assert_index_equal(m.Index([1]), m.Index([1.0]))),
+    # Negatives: already pandas'.
+    "flat index to_dict": lambda m: [m.DataFrame({"v": [1, 2]}, index=["p", "q"]).to_dict("index")],
+    "naive datetime keys": lambda m: [m.DataFrame({"v": [1]}, index=m.to_datetime(["2024-01-01"])).to_dict()],
+    "multiindex series to_dict": lambda m: [_e55_mi(m)["v"].to_dict()],
+    "frames equal": lambda m: _e55_assert(lambda: m.testing.assert_frame_equal(m.DataFrame(_E55_FRAME), m.DataFrame(_E55_FRAME))),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E55_CASES))
+def test_everyday55_row_keys_sql_and_testing_like_pandas_h06ox(case: str) -> None:
+    run = _E55_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

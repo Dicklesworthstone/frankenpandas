@@ -8173,6 +8173,34 @@ fn row_keys_to_py(py: Python<'_>, index: &Index) -> PyResult<Vec<Py<PyAny>>> {
             .map(|label| row_label_to_py(py, index, label))
             .collect();
     };
+    multiindex_row_keys(py, levels)
+}
+
+/// The Python key of every row of `frame`: the tuple of its row MultiIndex
+/// (the frame's own, or its index's), else [`row_keys_to_py`]'s. to_dict,
+/// iterrows and itertuples read the flat storage labels ('a|1' for a
+/// groupby([k, j]) result, naive UTC instants for a tz-aware index;
+/// br-frankenpandas-h06ox).
+fn frame_row_keys_to_py(py: Python<'_>, frame: &DataFrame) -> PyResult<Vec<Py<PyAny>>> {
+    match frame.row_multiindex() {
+        Some(levels) => multiindex_row_keys(py, levels),
+        None => row_keys_to_py(py, frame.index()),
+    }
+}
+
+/// The index to_json keys rows by under row MultiIndex `levels`: each row's
+/// tuple as Python prints it ("('a', 1)"), as pandas' (the flat storage
+/// label 'a, 1' / 'a|1' was written; br-frankenpandas-h06ox).
+fn json_tuple_keyed_index(py: Python<'_>, levels: &MultiIndex) -> PyResult<Index> {
+    let keys = multiindex_row_keys(py, levels)?
+        .into_iter()
+        .map(|key| Ok(IndexLabel::Utf8(key.bind(py).str()?.to_string())))
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(Index::new(keys))
+}
+
+/// A tuple of `levels`' labels per row.
+fn multiindex_row_keys(py: Python<'_>, levels: &MultiIndex) -> PyResult<Vec<Py<PyAny>>> {
     (0..levels.len())
         .map(|row| {
             let parts = levels
@@ -30992,7 +31020,13 @@ impl PySeries {
                 .column("__value__")
                 .cloned()
                 .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("__value__"))?;
-            Series::new(series.name(), frame.index().clone(), column)
+            let index = match series.index().row_multiindex() {
+                Some(levels) if orient.unwrap_or("index") == "index" => {
+                    Python::attach(|py| json_tuple_keyed_index(py, levels))?
+                }
+                _ => frame.index().clone(),
+            };
+            Series::new(series.name(), index, column)
                 .map_err(frame_error_to_py)?
                 .to_json(orient.unwrap_or("index"))
                 .map_err(frame_error_to_py)
@@ -31091,7 +31125,7 @@ impl PySeries {
         chunksize: Option<usize>,
         dtype: Option<&Bound<'_, PyAny>>,
         method: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<()> {
+    ) -> PyResult<i64> {
         let col_name = if self.inner.name().is_empty() {
             name
         } else {
@@ -39183,14 +39217,70 @@ impl PyDataFrame {
             }
             _ => (by, level),
         };
+        // A pd.Grouper among several keys: its key column, binned as
+        // resample bins it under freq= (pandas' TimeGrouper; only the bins
+        // holding rows are groups). It was refused (br-frankenpandas-h06ox).
         if let Some(keys) = by.and_then(|by| by.cast::<PyList>().ok())
             && keys
                 .iter()
                 .any(|key| key.extract::<PyRef<'_, PyGrouper>>().is_ok())
         {
-            return Err(not_implemented(
-                "groupby with a pd.Grouper among several keys",
-            ));
+            let mut frame = self.inner.clone();
+            let names = PyList::empty(py);
+            for key in keys.iter() {
+                let Ok(grouper) = key.extract::<PyRef<'_, PyGrouper>>() else {
+                    names.append(key)?;
+                    continue;
+                };
+                let (Some(name), None) = (&grouper.key, &grouper.level) else {
+                    return Err(not_implemented(
+                        "groupby with a pd.Grouper(level=...) among several keys",
+                    ));
+                };
+                if let Some(freq) = &grouper.freq {
+                    let column = frame.column(name).ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyKeyError, _>(name.clone())
+                    })?;
+                    if !matches!(column.dtype(), DType::Datetime64 { tz: None }) {
+                        return Err(not_implemented(
+                            "a pd.Grouper(freq=...) among several keys over other than naive datetimes",
+                        ));
+                    }
+                    let instants: Vec<IndexLabel> = column
+                        .values()
+                        .iter()
+                        .map(|value| match value {
+                            Scalar::Datetime64(nanos) if *nanos != Timestamp::NAT => {
+                                IndexLabel::Datetime64(*nanos)
+                            }
+                            _ => IndexLabel::Null(NullKind::NaT),
+                        })
+                        .collect();
+                    let bins = fp_frame::resample_bin_labels(&instants, freq)
+                        .into_iter()
+                        .map(|bin| match bin {
+                            Some(IndexLabel::Datetime64(nanos)) => Scalar::Datetime64(nanos),
+                            _ => Scalar::Null(NullKind::NaT),
+                        })
+                        .collect();
+                    let binned = Column::new(column.dtype(), bins).map_err(column_error_to_py)?;
+                    frame = frame
+                        .with_column(name.clone(), binned)
+                        .map_err(frame_error_to_py)?;
+                }
+                names.append(name)?;
+            }
+            return PyDataFrame { inner: frame }.groupby(
+                py,
+                Some(names.as_any()),
+                axis,
+                level,
+                as_index,
+                sort,
+                group_keys,
+                observed,
+                dropna,
+            );
         }
         // A typed column label (by=0, by=[0, 'a']) names its column
         // (fvsao.32): read as the names it resolves to.
@@ -39316,7 +39406,8 @@ impl PyDataFrame {
     fn to_dict(&self, py: Python<'_>, orient: &str) -> PyResult<Py<PyAny>> {
         let n_rows = self.inner.len();
         let col_names = self.inner.column_names();
-        let idx_labels = self.inner.index().labels();
+        // A row's key: its MultiIndex tuple, a tz-aware instant in its zone.
+        let row_keys = frame_row_keys_to_py(py, &self.inner)?;
         // A column's key, by position: its typed label (0, not '0';
         // fvsao.32), its tuple under MultiIndex columns (g3bux).
         let keys = (0..col_names.len())
@@ -39352,10 +39443,8 @@ impl PyDataFrame {
                 for (position, key) in keys.iter().enumerate() {
                     let col = column_at(position)?;
                     let inner_dict = PyDict::new(py);
-                    for (i, val) in col.values().iter().enumerate() {
-                        let k = index_label_to_py(py, &idx_labels[i])?;
-                        let v = scalar_to_py(py, val)?;
-                        inner_dict.set_item(k, v)?;
+                    for (key, val) in row_keys.iter().zip(col.values()) {
+                        inner_dict.set_item(key, scalar_to_py(py, val)?)?;
                     }
                     out.set_item(key, inner_dict)?;
                 }
@@ -39389,8 +39478,7 @@ impl PyDataFrame {
             }
             "index" => {
                 let out = PyDict::new(py);
-                for row_idx in 0..n_rows {
-                    let k = index_label_to_py(py, &idx_labels[row_idx])?;
+                for (row_idx, k) in row_keys.iter().enumerate() {
                     let row_dict = PyDict::new(py);
                     for (position, key) in keys.iter().enumerate() {
                         let col = column_at(position)?;
@@ -39411,11 +39499,7 @@ impl PyDataFrame {
             }
             "split" | "tight" => {
                 let out = PyDict::new(py);
-                let idx_list: Vec<Py<PyAny>> = idx_labels
-                    .iter()
-                    .map(|l| index_label_to_py(py, l))
-                    .collect::<PyResult<Vec<_>>>()?;
-                out.set_item("index", PyList::new(py, idx_list)?)?;
+                out.set_item("index", PyList::new(py, &row_keys)?)?;
                 out.set_item("columns", PyList::new(py, &keys)?)?;
                 // Columns by position, so a duplicated name keeps its own data
                 // (br-frankenpandas-5ihhi).
@@ -42107,10 +42191,9 @@ impl PyDataFrame {
     }
 
     fn iterrows(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let labels = self.inner.index().labels();
-        let mut list = Vec::with_capacity(labels.len());
-        for (position, label) in labels.iter().enumerate() {
-            let py_label = index_label_to_py(py, label)?;
+        let keys = frame_row_keys_to_py(py, &self.inner)?;
+        let mut list = Vec::with_capacity(keys.len());
+        for (position, py_label) in keys.into_iter().enumerate() {
             // Each row as iloc reads it: the columns' interleaved dtype,
             // indexed by the column axis, its MultiIndex too (g3bux).
             let row = self
@@ -42150,11 +42233,15 @@ impl PyDataFrame {
         };
 
         let mut list = Vec::with_capacity(tuples.len());
-        for (label, vals) in tuples {
+        let keys = if index {
+            frame_row_keys_to_py(py, &self.inner)?
+        } else {
+            Vec::new()
+        };
+        let mut keys = keys.into_iter();
+        for (_, vals) in tuples {
             let mut py_vals = Vec::with_capacity(vals.len() + usize::from(index));
-            if index {
-                py_vals.push(index_label_to_py(py, &label)?);
-            }
+            py_vals.extend(keys.next());
             // Each column's value as iterating that column yields it (a
             // tz-aware Timestamp, a nullable dtype's numpy scalar / pd.NA).
             for (position, v) in vals.iter().enumerate() {
@@ -45364,6 +45451,14 @@ impl PyDataFrame {
                 }
                 _ => frame,
             };
+            // A row MultiIndex keys columns / index by each row's tuple too.
+            let frame = match frame.row_multiindex() {
+                Some(levels) if matches!(orient.unwrap_or("columns"), "columns" | "index") => {
+                    let index = Python::attach(|py| json_tuple_keyed_index(py, levels))?;
+                    frame.with_index(index).map_err(frame_error_to_py)?
+                }
+                _ => frame,
+            };
             if lines {
                 // pandas ends every record line, the last included, with "\n".
                 let mut text = fp_io::write_jsonl_string(&frame).map_err(io_error_to_py)?;
@@ -45664,7 +45759,7 @@ impl PyDataFrame {
         chunksize: Option<usize>,
         dtype: Option<&Bound<'_, PyAny>>,
         method: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<()> {
+    ) -> PyResult<i64> {
         let _ = chunksize;
         unsupported_params(
             "to_sql",
@@ -45750,6 +45845,9 @@ impl PyDataFrame {
         }
 
         let num_rows = self.inner.len();
+        // pandas returns the rows the insert reports (the cursor's
+        // rowcount), 0 for no rows (it returned None; br-frankenpandas-h06ox).
+        let mut inserted = 0;
         if num_rows > 0 {
             let placeholders = vec!["?"; columns_to_write.len()].join(", ");
             let quoted_cols: Vec<String> = columns_to_write
@@ -45788,14 +45886,18 @@ impl PyDataFrame {
                 py_rows.append(row_tuple)?;
             }
 
-            cursor.call_method1("executemany", (insert_sql, py_rows))?;
+            let done = cursor.call_method1("executemany", (insert_sql, py_rows))?;
+            inserted = done
+                .getattr("rowcount")
+                .and_then(|count| count.extract::<i64>())
+                .unwrap_or_else(|_| i64::try_from(num_rows).unwrap_or(i64::MAX));
         }
 
         if let Ok(commit) = db_conn.getattr("commit") {
             commit.call0()?;
         }
 
-        Ok(())
+        Ok(inserted)
     }
 
     #[pyo3(signature = (path, convert_dates=None, write_index=true, **kwargs))]
@@ -67281,14 +67383,27 @@ fn read_sql(
     con: &Bound<'_, PyAny>,
     index_col: Option<&Bound<'_, PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<PyDataFrame> {
-    // pandas' other read_sql keywords (params, parse_dates, columns,
-    // chunksize, dtype, ...) were dropped; coerce_float=True is its default.
+) -> PyResult<Py<PyAny>> {
+    // params= (the query's parameters), parse_dates= (a list of columns, or
+    // {column: format}), dtype= and chunksize= (an iterator of frames, each
+    // built from its own rows) are pandas' (they were refused;
+    // br-frankenpandas-h06ox); coerce_float=True is its default. The other
+    // keywords (columns, dtype_backend, ...) stay refused.
+    let mut params = None;
+    let mut parse_dates = None;
+    let mut dtype = None;
+    let mut chunksize = None;
     if let Some(kwargs) = kwargs {
         for (key, value) in kwargs.iter() {
             let key: String = key.extract()?;
-            if !(key == "coerce_float" && value.is_truthy()?) {
-                return Err(not_implemented(&format!("read_sql({key}=...)")));
+            match key.as_str() {
+                "coerce_float" if value.is_truthy()? => {}
+                "params" | "parse_dates" | "dtype" | "chunksize" if value.is_none() => {}
+                "params" => params = Some(value),
+                "parse_dates" => parse_dates = Some(value),
+                "dtype" => dtype = Some(value),
+                "chunksize" => chunksize = Some(value.extract::<usize>()?),
+                _ => return Err(not_implemented(&format!("read_sql({key}=...)"))),
             }
         }
     }
@@ -67307,12 +67422,16 @@ fn read_sql(
     };
 
     let cursor = db_conn.call_method0("cursor")?;
-    cursor.call_method1("execute", (sql,))?;
+    match &params {
+        Some(params) => cursor.call_method1("execute", (sql, params))?,
+        None => cursor.call_method1("execute", (sql,))?,
+    };
     let desc = cursor.getattr("description")?;
     if desc.is_none() {
-        return Ok(PyDataFrame {
+        return PyDataFrame {
             inner: empty_dataframe(),
-        });
+        }
+        .into_py_any(py);
     }
     let desc_seq = desc.cast::<pyo3::types::PySequence>()?;
     let num_cols = desc_seq.len()?;
@@ -67337,24 +67456,153 @@ fn read_sql(
         }
     }
 
+    let Some(chunksize) = chunksize else {
+        return sql_result_frame(
+            py,
+            &col_names,
+            &col_scalars,
+            0..num_rows,
+            parse_dates.as_ref(),
+            dtype.as_ref(),
+            index_col,
+        )?
+        .into_py_any(py);
+    };
+    // pandas' _query_iterator: a frame per fetchmany(chunksize), its index
+    // from 0; no rows (or chunksize=0) one empty frame.
+    let chunks = PyList::empty(py);
+    let mut start = 0_usize;
+    loop {
+        let end = start.saturating_add(chunksize).min(num_rows);
+        let chunk = sql_result_frame(
+            py,
+            &col_names,
+            &col_scalars,
+            start..end,
+            parse_dates.as_ref(),
+            dtype.as_ref(),
+            index_col,
+        )?;
+        chunks.append(Py::new(py, chunk)?)?;
+        start = end;
+        if start >= num_rows || chunksize == 0 {
+            break;
+        }
+    }
+    Ok(chunks.try_iter()?.into_any().unbind())
+}
+
+/// One read_sql result over `rows` of the fetched columns, as pandas'
+/// records build it (an int column holding a NULL float64 with NaN), with
+/// parse_dates, dtype and index_col applied.
+fn sql_result_frame(
+    py: Python<'_>,
+    col_names: &[String],
+    col_scalars: &[Vec<Scalar>],
+    rows: std::ops::Range<usize>,
+    parse_dates: Option<&Bound<'_, PyAny>>,
+    dtype: Option<&Bound<'_, PyAny>>,
+    index_col: Option<&Bound<'_, PyAny>>,
+) -> PyResult<PyDataFrame> {
     let mut col_map = BTreeMap::new();
-    for (i, name) in col_names.iter().enumerate() {
-        let col = Column::from_values(col_scalars[i].clone())
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    for (name, scalars) in col_names.iter().zip(col_scalars) {
+        let col = Column::from_values(pandas_promote_int_with_missing(
+            scalars[rows.clone()].to_vec(),
+        ))
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         col_map.insert(name.clone(), col);
     }
 
-    let labels: Vec<IndexLabel> = (0..num_rows).map(|i| IndexLabel::Int64(i as i64)).collect();
-    let df = DataFrame::new_with_column_order(Index::new(labels), col_map, col_names.clone())
+    let labels: Vec<IndexLabel> = (0..rows.len())
+        .map(|i| IndexLabel::Int64(i64::try_from(i).unwrap_or(i64::MAX)))
+        .collect();
+    let df = DataFrame::new_with_column_order(Index::new(labels), col_map, col_names.to_vec())
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    let mut py_df = PyDataFrame { inner: df };
 
-    if let Some(idx_col) = index_col {
-        let mut py_df = PyDataFrame { inner: df };
-        py_df.set_index(py, idx_col, true, false, true, false)?;
-        return Ok(py_df);
+    if let Some(parse_dates) = parse_dates {
+        let frame = Py::new(py, py_df)?.into_bound(py);
+        let to_datetime = py.import("frankenpandas")?.getattr("to_datetime")?;
+        let columns: Vec<(Bound<'_, PyAny>, Option<Bound<'_, PyAny>>)> =
+            if let Ok(formats) = parse_dates.cast::<PyDict>() {
+                formats
+                    .iter()
+                    .map(|(key, format)| (key, Some(format)))
+                    .collect()
+            } else if parse_dates.is_instance_of::<pyo3::types::PyString>() {
+                vec![(parse_dates.clone(), None)]
+            } else {
+                parse_dates
+                    .try_iter()?
+                    .map(|key| key.map(|key| (key, None)))
+                    .collect::<PyResult<_>>()?
+            };
+        // pandas' _handle_date_column: {to_datetime keywords} with errors
+        // 'ignore' by default (the column as it was when it does not
+        // parse); a unit code, or a numeric column's epoch seconds, as the
+        // unit; else the format; unparsable text NaT (errors='coerce').
+        for (column, format) in columns {
+            let values = frame.get_item(&column)?;
+            let kwargs = PyDict::new(py);
+            let parsed = match format {
+                Some(options) if options.is_instance_of::<PyDict>() => {
+                    let options = options.cast::<PyDict>()?.copy()?;
+                    let errors = options.call_method1("pop", ("errors", py.None()))?;
+                    kwargs.update(options.as_mapping())?;
+                    if errors.is_none() || errors.extract::<String>().is_ok_and(|e| e == "ignore") {
+                        to_datetime
+                            .call((&values,), Some(&kwargs))
+                            .unwrap_or_else(|_| values.clone())
+                    } else {
+                        kwargs.set_item("errors", errors)?;
+                        to_datetime.call((&values,), Some(&kwargs))?
+                    }
+                }
+                format => {
+                    let numeric = matches!(
+                        values
+                            .getattr("dtype")?
+                            .getattr("kind")?
+                            .extract::<String>()?
+                            .as_str(),
+                        "i" | "u" | "f"
+                    );
+                    let format = match format {
+                        Some(format) => Some(format.extract::<String>()?),
+                        None if numeric => Some("s".to_owned()),
+                        None => None,
+                    };
+                    kwargs.set_item("errors", "coerce")?;
+                    match format.as_deref() {
+                        Some(unit @ ("D" | "d" | "h" | "m" | "s" | "ms" | "us" | "ns")) => {
+                            kwargs.set_item("unit", unit)?;
+                        }
+                        Some(format) => kwargs.set_item("format", format)?,
+                        None => {}
+                    }
+                    to_datetime.call((&values,), Some(&kwargs))?
+                }
+            };
+            frame.set_item(&column, parsed)?;
+        }
+        py_df = PyDataFrame {
+            inner: frame.extract::<PyRef<'_, PyDataFrame>>()?.inner.clone(),
+        };
+    }
+    if let Some(dtype) = dtype {
+        let cast = Py::new(py, py_df)?
+            .into_bound(py)
+            .call_method1("astype", (dtype,))?;
+        py_df = PyDataFrame {
+            inner: cast.extract::<PyRef<'_, PyDataFrame>>()?.inner.clone(),
+        };
     }
 
-    Ok(PyDataFrame { inner: df })
+    if let Some(idx_col) = index_col {
+        py_df.set_index(py, idx_col, true, false, true, false)?;
+    }
+
+    Ok(py_df)
 }
 
 /// Read SQL query into a DataFrame.
@@ -67366,7 +67614,7 @@ fn read_sql_query(
     con: &Bound<'_, PyAny>,
     index_col: Option<&Bound<'_, PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<PyDataFrame> {
+) -> PyResult<Py<PyAny>> {
     read_sql(py, sql, con, index_col, kwargs)
 }
 
@@ -67379,7 +67627,7 @@ fn read_sql_table(
     con: &Bound<'_, PyAny>,
     index_col: Option<&Bound<'_, PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<PyDataFrame> {
+) -> PyResult<Py<PyAny>> {
     let sql = format!("SELECT * FROM \"{table_name}\"");
     read_sql(py, &sql, con, index_col, kwargs)
 }
@@ -67457,10 +67705,105 @@ fn assert_scalars_equal(
     }
 }
 
+/// pandas' `raise_assert_detail`: "{obj} are different", the message, the
+/// `[index]` / `[left]` / `[right]` lines and the first difference (the
+/// messages were frankenpandas' own, the values in Rust's Debug spelling -
+/// Int64(3), Some("x"); br-frankenpandas-h06ox).
+fn assert_detail(
+    obj: &str,
+    message: &str,
+    index: Option<&str>,
+    left: &str,
+    right: &str,
+    first_diff: Option<&str>,
+) -> PyErr {
+    let mut text = format!("{obj} are different\n\n{message}");
+    if let Some(index) = index {
+        text.push_str(&format!("\n[index]: {index}"));
+    }
+    text.push_str(&format!("\n[left]:  {left}\n[right]: {right}"));
+    if let Some(first_diff) = first_diff {
+        text.push('\n');
+        text.push_str(first_diff);
+    }
+    PyErr::new::<pyo3::exceptions::PyAssertionError, _>(text)
+}
+
+/// pandas' `pprint_thing` of an array: each value's str, comma-joined in
+/// brackets, the first 100 then ", ..." (display.max_seq_items).
+fn assert_array_text(values: &[Bound<'_, PyAny>]) -> PyResult<String> {
+    let shown = values
+        .iter()
+        .take(100)
+        .map(|value| value.str().map(|text| text.to_string()))
+        .collect::<PyResult<Vec<_>>>()?;
+    let more = if values.len() > 100 { ", ..." } else { "" };
+    Ok(format!("[{}{more}]", shown.join(", ")))
+}
+
+/// The share of `mismatches` in `len`, as pandas prints
+/// `np.round(diff, 5)`: 33.33333, 50.0, 100.0.
+fn assert_percent(mismatches: usize, len: usize) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let percent = if len == 0 {
+        0.0
+    } else {
+        (mismatches as f64 * 100.0 / len as f64 * 1e5).round() / 1e5
+    };
+    if percent.fract() == 0.0 {
+        format!("{percent:.1}")
+    } else {
+        format!("{percent}")
+    }
+}
+
+/// The values part of pandas' `assert_*_equal` over `left` / `right` (their
+/// numpy arrays, `index` the rows' labels): "{obj} values are different
+/// (p %)", with the first difference on pandas' approximate path (floats,
+/// objects), not on its exact one (ints, bools).
+fn assert_values_detail(
+    obj: &str,
+    left: &Bound<'_, PyAny>,
+    right: &Bound<'_, PyAny>,
+    index: Option<&Bound<'_, PyAny>>,
+    differs: &[bool],
+    exact: bool,
+) -> PyResult<PyErr> {
+    let left: Vec<_> = left.try_iter()?.collect::<PyResult<_>>()?;
+    let right: Vec<_> = right.try_iter()?.collect::<PyResult<_>>()?;
+    let index = match index {
+        Some(index) => Some(assert_array_text(
+            &index.try_iter()?.collect::<PyResult<Vec<_>>>()?,
+        )?),
+        None => None,
+    };
+    let first = differs.iter().position(|differ| *differ);
+    let first_diff = match first {
+        Some(position) if !exact => Some(format!(
+            "At positional index {position}, first diff: {} != {}",
+            left[position].str()?,
+            right[position].str()?
+        )),
+        _ => None,
+    };
+    let mismatches = differs.iter().filter(|differ| **differ).count();
+    Ok(assert_detail(
+        obj,
+        &format!(
+            "{obj} values are different ({} %)",
+            assert_percent(mismatches, differs.len())
+        ),
+        index.as_deref(),
+        &assert_array_text(&left)?,
+        &assert_array_text(&right)?,
+        first_diff.as_deref(),
+    ))
+}
+
 /// Assert that two DataFrames are equal.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (left, right, check_dtype=true, check_index_type=None, check_column_type=None, check_frame_type=true, check_names=true, check_exact=false, rtol=1e-5, atol=1e-8, **kwargs))]
+#[pyo3(signature = (left, right, check_dtype=true, check_index_type=None, check_column_type=None, check_frame_type=true, check_names=true, check_exact=None, rtol=1e-5, atol=1e-8, **kwargs))]
 fn assert_frame_equal(
     _py: Python<'_>,
     left: &Bound<'_, PyAny>,
@@ -67470,7 +67813,7 @@ fn assert_frame_equal(
     check_column_type: Option<&Bound<'_, PyAny>>,
     check_frame_type: bool,
     check_names: bool,
-    check_exact: bool,
+    check_exact: Option<bool>,
     rtol: f64,
     atol: f64,
     kwargs: Option<&Bound<'_, PyDict>>,
@@ -67479,6 +67822,9 @@ fn assert_frame_equal(
     // frames differing in dtype or index name passed. Column labels are
     // strings here, so check_column_type has nothing more to compare.
     assert_equal_kwargs("assert_frame_equal", kwargs)?;
+    // Unset, pandas compares the axes approximately and each column as
+    // assert_series_equal does (ints and bools exactly).
+    let axes_exact = check_exact.unwrap_or(false);
     let check_index_type = check_index_type.map_or(Ok(true), assert_type_flag)?;
     if let Some(flag) = check_column_type {
         assert_type_flag(flag)?;
@@ -67497,66 +67843,119 @@ fn assert_frame_equal(
         ));
     };
 
-    if l_df.inner.shape() != r_df.inner.shape() {
-        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
-            format!(
-                "DataFrame shape mismatch: left {:?}, right {:?}",
-                l_df.inner.shape(),
-                r_df.inner.shape()
-            ),
+    let (l_shape, r_shape) = (l_df.inner.shape(), r_df.inner.shape());
+    if l_shape != r_shape {
+        return Err(assert_detail(
+            "DataFrame",
+            "DataFrame shape mismatch",
+            None,
+            &format!("({}, {})", l_shape.0, l_shape.1),
+            &format!("({}, {})", r_shape.0, r_shape.1),
+            None,
         ));
     }
     let l_cols = l_df.column_labels();
     let r_cols = r_df.column_labels();
     if l_cols != r_cols {
-        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
-            format!(
-                "DataFrame columns mismatch: left {:?}, right {:?}",
-                l_cols, r_cols
+        let (l_axis, r_axis) = (left.getattr("columns")?, right.getattr("columns")?);
+        let differs: Vec<bool> = l_cols.iter().zip(&r_cols).map(|(l, r)| l != r).collect();
+        let first_diff = match differs.iter().position(|differ| *differ) {
+            Some(position) if !axes_exact => Some(format!(
+                "At positional index {position}, first diff: {} != {}",
+                l_axis.get_item(position)?.str()?,
+                r_axis.get_item(position)?.str()?
+            )),
+            _ => None,
+        };
+        return Err(assert_detail(
+            "DataFrame.columns",
+            &format!(
+                "DataFrame.columns values are different ({} %)",
+                assert_percent(
+                    differs.iter().filter(|differ| **differ).count(),
+                    differs.len()
+                )
             ),
+            None,
+            &l_axis.repr()?.to_string(),
+            &r_axis.repr()?.to_string(),
+            first_diff.as_deref(),
         ));
     }
     assert_indexes_equal(
         "DataFrame.index",
+        (&left.getattr("index")?, &right.getattr("index")?),
         l_df.inner.index(),
         r_df.inner.index(),
         check_index_type,
         check_names,
-        check_exact,
+        axes_exact,
         rtol,
         atol,
     )?;
-    for col in &l_cols {
+    for (position, col) in l_cols.iter().enumerate() {
         let lc = l_df.inner.column(col).unwrap();
         let rc = r_df.inner.column(col).unwrap();
+        let obj = format!("DataFrame.iloc[:, {position}] (column name=\"{col}\")");
         if check_dtype && lc.dtype() != rc.dtype() {
-            return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
-                format!(
-                    "Attributes of DataFrame.iloc[:, {}] (column name=\"{col}\") are different\n\n\
-                 Attribute \"dtype\" are different\n[left]:  {}\n[right]: {}",
-                    l_cols.iter().position(|c| c == col).unwrap_or(0),
-                    pandas_dtype_name(&lc.dtype()),
-                    pandas_dtype_name(&rc.dtype()),
-                ),
+            return Err(assert_detail(
+                &format!("Attributes of {obj}"),
+                "Attribute \"dtype\" are different",
+                None,
+                &pandas_dtype_name(&lc.dtype()),
+                &pandas_dtype_name(&rc.dtype()),
+                None,
             ));
         }
-        for row in 0..lc.len() {
-            let (ls, rs) = (&lc.values()[row], &rc.values()[row]);
-            if !assert_scalars_equal(ls, rs, check_exact, rtol, atol, !check_dtype) {
-                return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
-                    format!("Values differ at column '{col}', row {row}: {ls:?} != {rs:?}"),
-                ));
-            }
+        let exact = check_exact.unwrap_or_else(|| assert_exact_dtype(lc) || assert_exact_dtype(rc));
+        let differs: Vec<bool> = lc
+            .values()
+            .iter()
+            .zip(rc.values())
+            .map(|(ls, rs)| !assert_scalars_equal(ls, rs, exact, rtol, atol, !check_dtype))
+            .collect();
+        if differs.contains(&true) {
+            return Err(assert_values_detail(
+                &obj,
+                &assert_column_values(left, position)?,
+                &assert_column_values(right, position)?,
+                Some(&left.getattr("index")?),
+                &differs,
+                exact,
+            )?);
         }
     }
     Ok(())
 }
 
-/// The index part of pandas' `assert_*_equal`: the labels (their types
-/// too unless `check_type` is False), and the names when `check_names`.
+/// The numpy values of `frame`'s column at `position`, for a message.
+fn assert_column_values<'py>(
+    frame: &Bound<'py, PyAny>,
+    position: usize,
+) -> PyResult<Bound<'py, PyAny>> {
+    frame
+        .getattr("iloc")?
+        .get_item((pyo3::types::PySlice::full(frame.py()), position))?
+        .call_method0("to_numpy")
+}
+
+/// Whether pandas compares a column exactly when check_exact is unset: a
+/// numeric one that is not float (ints, bools).
+fn assert_exact_dtype(column: &Column) -> bool {
+    matches!(
+        column.dtype(),
+        DType::Int64 | DType::Int64Nullable | DType::Bool | DType::BoolNullable
+    )
+}
+
+/// The index part of pandas' `assert_*_equal` (`objects` the Python
+/// indexes, for the messages): the inferred type unless `check_type` is
+/// False, the length, the labels (the first difference unless
+/// `check_exact`), and the names when `check_names`.
 #[allow(clippy::too_many_arguments)]
 fn assert_indexes_equal(
     what: &str,
+    objects: (&Bound<'_, PyAny>, &Bound<'_, PyAny>),
     left: &Index,
     right: &Index,
     check_type: bool,
@@ -67565,24 +67964,82 @@ fn assert_indexes_equal(
     rtol: f64,
     atol: f64,
 ) -> PyResult<()> {
+    let (l_obj, r_obj) = objects;
     let (l, r) = (left.labels(), right.labels());
-    let same = l.len() == r.len()
-        && l.iter().zip(r).all(|(a, b)| {
+    if check_type {
+        let (l_type, r_type) = (
+            l_obj.getattr("inferred_type")?,
+            r_obj.getattr("inferred_type")?,
+        );
+        if !l_type.eq(&r_type)? {
+            return Err(assert_detail(
+                what,
+                "Attribute \"inferred_type\" are different",
+                None,
+                &l_type.str()?.to_string(),
+                &r_type.str()?.to_string(),
+                None,
+            ));
+        }
+    }
+    if l.len() != r.len() {
+        return Err(assert_detail(
+            what,
+            &format!("{what} length are different"),
+            None,
+            &format!("{}, {}", l.len(), l_obj.repr()?),
+            &format!("{}, {}", r.len(), r_obj.repr()?),
+            None,
+        ));
+    }
+    let differs: Vec<bool> = l
+        .iter()
+        .zip(r)
+        .map(|(a, b)| {
             let (a, b) = (index_label_to_scalar(a), index_label_to_scalar(b));
-            assert_scalars_equal(&a, &b, check_exact, rtol, atol, !check_type)
-        });
-    if !same {
-        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
-            format!("{what} values are different"),
+            !assert_scalars_equal(&a, &b, check_exact, rtol, atol, !check_type)
+        })
+        .collect();
+    if let Some(position) = differs.iter().position(|differ| *differ) {
+        let first_diff = if check_exact {
+            None
+        } else {
+            Some(format!(
+                "At positional index {position}, first diff: {} != {}",
+                l_obj.get_item(position)?.str()?,
+                r_obj.get_item(position)?.str()?
+            ))
+        };
+        return Err(assert_detail(
+            what,
+            &format!(
+                "{what} values are different ({} %)",
+                assert_percent(
+                    differs.iter().filter(|differ| **differ).count(),
+                    differs.len()
+                )
+            ),
+            None,
+            &l_obj.repr()?.to_string(),
+            &r_obj.repr()?.to_string(),
+            first_diff.as_deref(),
         ));
     }
     if check_names && left.name() != right.name() {
-        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
-            format!(
-                "{what} are different\n\nAttribute \"names\" are different\n[left]:  [{:?}]\n[right]: [{:?}]",
-                left.name(),
-                right.name()
-            ),
+        let names = |index: &Bound<'_, PyAny>| -> PyResult<String> {
+            let names = index
+                .getattr("names")?
+                .try_iter()?
+                .collect::<PyResult<Vec<_>>>()?;
+            Ok(PyList::new(index.py(), names)?.repr()?.to_string())
+        };
+        return Err(assert_detail(
+            what,
+            "Attribute \"names\" are different",
+            None,
+            &names(l_obj)?,
+            &names(r_obj)?,
+            None,
         ));
     }
     Ok(())
@@ -67591,7 +68048,7 @@ fn assert_indexes_equal(
 /// Assert that two Series are equal.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (left, right, check_dtype=true, check_index_type=None, check_series_type=true, check_names=true, check_exact=false, rtol=1e-5, atol=1e-8, **kwargs))]
+#[pyo3(signature = (left, right, check_dtype=true, check_index_type=None, check_series_type=true, check_names=true, check_exact=None, rtol=1e-5, atol=1e-8, **kwargs))]
 fn assert_series_equal(
     _py: Python<'_>,
     left: &Bound<'_, PyAny>,
@@ -67600,7 +68057,7 @@ fn assert_series_equal(
     check_index_type: Option<&Bound<'_, PyAny>>,
     check_series_type: bool,
     check_names: bool,
-    check_exact: bool,
+    check_exact: Option<bool>,
     rtol: f64,
     atol: f64,
     kwargs: Option<&Bound<'_, PyDict>>,
@@ -67623,51 +68080,65 @@ fn assert_series_equal(
         ));
     };
 
+    let (l_index, r_index) = (left.getattr("index")?, right.getattr("index")?);
     if l_s.inner.len() != r_s.inner.len() {
-        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
-            format!(
-                "Series length mismatch: left {}, right {}",
-                l_s.inner.len(),
-                r_s.inner.len()
-            ),
+        return Err(assert_detail(
+            "Series",
+            "Series length are different",
+            None,
+            &format!("{}, {}", l_s.inner.len(), l_index.repr()?),
+            &format!("{}, {}", r_s.inner.len(), r_index.repr()?),
+            None,
         ));
     }
     assert_indexes_equal(
         "Series.index",
+        (&l_index, &r_index),
         l_s.inner.index(),
         r_s.inner.index(),
         check_index_type,
         check_names,
-        check_exact,
+        check_exact.unwrap_or(false),
         rtol,
         atol,
     )?;
     let lc = l_s.inner.column();
     let rc = r_s.inner.column();
     if check_dtype && lc.dtype() != rc.dtype() {
-        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
-            format!(
-                "Attributes of Series are different\n\nAttribute \"dtype\" are different\n[left]:  {}\n[right]: {}",
-                pandas_dtype_name(&lc.dtype()),
-                pandas_dtype_name(&rc.dtype()),
-            ),
+        return Err(assert_detail(
+            "Attributes of Series",
+            "Attribute \"dtype\" are different",
+            None,
+            &pandas_dtype_name(&lc.dtype()),
+            &pandas_dtype_name(&rc.dtype()),
+            None,
         ));
     }
-    for row in 0..lc.len() {
-        let (ls, rs) = (&lc.values()[row], &rc.values()[row]);
-        if !assert_scalars_equal(ls, rs, check_exact, rtol, atol, !check_dtype) {
-            return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
-                format!("Series values differ at row {row}: {ls:?} != {rs:?}"),
-            ));
-        }
+    let exact = check_exact.unwrap_or_else(|| assert_exact_dtype(lc) || assert_exact_dtype(rc));
+    let differs: Vec<bool> = lc
+        .values()
+        .iter()
+        .zip(rc.values())
+        .map(|(ls, rs)| !assert_scalars_equal(ls, rs, exact, rtol, atol, !check_dtype))
+        .collect();
+    if differs.contains(&true) {
+        return Err(assert_values_detail(
+            "Series",
+            &left.call_method0("to_numpy")?,
+            &right.call_method0("to_numpy")?,
+            Some(&l_index),
+            &differs,
+            exact,
+        )?);
     }
     if check_names && l_s.inner.name() != r_s.inner.name() {
-        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
-            format!(
-                "Attributes of Series are different\n\nAttribute \"name\" are different\n[left]:  {}\n[right]: {}",
-                l_s.inner.name(),
-                r_s.inner.name()
-            ),
+        return Err(assert_detail(
+            "Series",
+            "Attribute \"name\" are different",
+            None,
+            &left.getattr("name")?.str()?.to_string(),
+            &right.getattr("name")?.str()?.to_string(),
+            None,
         ));
     }
     Ok(())
@@ -67679,7 +68150,7 @@ fn assert_series_equal(
 /// to match exactly).
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (left, right, exact=None, check_names=true, check_exact=false, rtol=1e-5, atol=1e-8, **kwargs))]
+#[pyo3(signature = (left, right, exact=None, check_names=true, check_exact=true, rtol=1e-5, atol=1e-8, **kwargs))]
 fn assert_index_equal(
     _py: Python<'_>,
     left: &Bound<'_, PyAny>,
@@ -67697,6 +68168,7 @@ fn assert_index_equal(
     let r_idx = plain_index_ref(right)?;
     assert_indexes_equal(
         "Index",
+        (left, right),
         &l_idx.inner,
         &r_idx.inner,
         exact,
@@ -68387,6 +68859,114 @@ fn api_is_dtype_equal(source: &Bound<'_, PyAny>, target: &Bound<'_, PyAny>) -> b
 #[pyfunction(name = "infer_dtype", signature = (value, skipna=true))]
 fn api_infer_dtype(value: &Bound<'_, PyAny>, skipna: bool) -> PyResult<&'static str> {
     infer_dtype_impl(value, skipna)
+}
+
+/// pandas' `api.types.union_categoricals(to_union, sort_categories=False,
+/// ignore_order=False)`: the values of each Categorical / category Series /
+/// CategoricalIndex in turn, as one Categorical. Categories that match (as a
+/// set, in one order when ordered) keep the first's order and orderedness;
+/// else, unordered, their union in order of appearance; ordered ones that
+/// differ are pandas' TypeError (it was missing; br-frankenpandas-h06ox).
+#[pyfunction(name = "union_categoricals", signature = (to_union, sort_categories=false, ignore_order=false))]
+fn api_union_categoricals(
+    py: Python<'_>,
+    to_union: &Bound<'_, PyAny>,
+    sort_categories: bool,
+    ignore_order: bool,
+) -> PyResult<PyCategorical> {
+    let type_error =
+        |message: &str| PyErr::new::<pyo3::exceptions::PyTypeError, _>(message.to_owned());
+    let mut parts = Vec::new();
+    for item in to_union.try_iter()? {
+        let item = item?;
+        let dtype = item.getattr("dtype").ok();
+        if !dtype
+            .as_ref()
+            .is_some_and(|dtype| dtype.is_instance_of::<PyCategoricalDtype>())
+        {
+            // pandas unwraps a Series / Index to its array first, which
+            // then has no categories.
+            let unwrapped = item.is_instance_of::<PySeries>() || item.is_instance_of::<PyIndex>();
+            return Err(if unwrapped {
+                PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                    "'numpy.ndarray' object has no attribute 'categories'",
+                )
+            } else {
+                type_error("all components to combine must be Categorical")
+            });
+        }
+        let dtype = item.getattr("dtype")?;
+        let categories = dtype
+            .getattr("categories")?
+            .try_iter()?
+            .collect::<PyResult<Vec<_>>>()?;
+        let ordered = dtype.getattr("ordered")?.is_truthy()?;
+        parts.push((item, categories, ordered));
+    }
+    let Some((_, first_categories, first_ordered)) = parts.first() else {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "No Categoricals to union",
+        ));
+    };
+    let same = |a: &[Bound<'_, PyAny>], b: &[Bound<'_, PyAny>]| -> PyResult<bool> {
+        Ok(a.len() == b.len() && PySet::new(py, a)?.eq(PySet::new(py, b)?)?)
+    };
+    let in_order = |a: &[Bound<'_, PyAny>], b: &[Bound<'_, PyAny>]| -> PyResult<bool> {
+        Ok(a.len() == b.len() && PyList::new(py, a)?.eq(PyList::new(py, b)?)?)
+    };
+    let mut matching = true;
+    for (_, categories, ordered) in &parts[1..] {
+        let matches = if *first_ordered || *ordered {
+            ordered == first_ordered && in_order(first_categories, categories)?
+        } else {
+            same(first_categories, categories)?
+        };
+        matching &= matches;
+    }
+    let (categories, mut ordered) = if matching {
+        if sort_categories && !ignore_order && *first_ordered {
+            return Err(type_error(
+                "Cannot use sort_categories=True with ordered Categoricals",
+            ));
+        }
+        (PyList::new(py, first_categories)?, *first_ordered)
+    } else if ignore_order || parts.iter().all(|(_, _, ordered)| !ordered) {
+        let union = PyList::empty(py);
+        let seen = PySet::empty(py)?;
+        for (_, categories, _) in &parts {
+            for category in categories {
+                if !seen.contains(category)? {
+                    seen.add(category)?;
+                    union.append(category)?;
+                }
+            }
+        }
+        (union, false)
+    } else if parts.iter().all(|(_, _, ordered)| *ordered) {
+        return Err(type_error(
+            "to union ordered Categoricals, all categories must be the same",
+        ));
+    } else {
+        return Err(type_error("Categorical.ordered must be the same"));
+    };
+    if sort_categories {
+        categories.sort()?;
+    }
+    if ignore_order {
+        ordered = false;
+    }
+    let values = PyList::empty(py);
+    for (item, _, _) in &parts {
+        for value in item.try_iter()? {
+            values.append(value?)?;
+        }
+    }
+    PyCategorical::new(
+        py,
+        values.as_any(),
+        Some(categories.as_any()),
+        Some(ordered),
+    )
 }
 
 #[pyfunction(name = "pandas_dtype")]
@@ -69382,7 +69962,10 @@ fn json_normalize(
                 col_values.push(Scalar::Null(NullKind::NaN));
             }
         }
-        let col = Column::from_values(col_values)
+        // A field missing from a record makes an int column float64 with
+        // NaN, as the constructor builds it (it stayed int;
+        // br-frankenpandas-h06ox).
+        let col = Column::from_values(pandas_promote_int_with_missing(col_values))
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         col_map.insert(col_name.clone(), col);
     }
@@ -79307,6 +79890,13 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     types_mod.add_function(wrap_pyfunction!(api_is_dtype_equal, &types_mod)?)?;
     types_mod.add_function(wrap_pyfunction!(api_infer_dtype, &types_mod)?)?;
     types_mod.add_function(wrap_pyfunction!(api_pandas_dtype, &types_mod)?)?;
+    // The dtype classes and union_categoricals, as pandas' api.types
+    // exports them (they were missing; br-frankenpandas-h06ox).
+    types_mod.add_function(wrap_pyfunction!(api_union_categoricals, &types_mod)?)?;
+    types_mod.add("CategoricalDtype", m.py().get_type::<PyCategoricalDtype>())?;
+    types_mod.add("DatetimeTZDtype", m.py().get_type::<PyDatetimeTZDtype>())?;
+    types_mod.add("PeriodDtype", m.py().get_type::<PyPeriodDtype>())?;
+    types_mod.add("IntervalDtype", m.py().get_type::<PyIntervalDtype>())?;
     api_mod.add_submodule(&types_mod)?;
     // frankenpandas.api.extensions: the array base class (the module did
     // not exist; br-frankenpandas-5y62q).

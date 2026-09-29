@@ -5086,6 +5086,31 @@ fn index_label_to_json_value(label: &IndexLabel) -> Value {
     }
 }
 
+/// The `split` orient's `index` entries: under row MultiIndex `levels` each
+/// row's levels as an array ([["a", 1], ...]), as pandas' (the flat storage
+/// label "a|1" was written; br-frankenpandas-h06ox), else each label.
+fn split_index_json_values(index: &Index, levels: Option<&fp_index::MultiIndex>) -> Vec<Value> {
+    match levels {
+        Some(levels) => (0..levels.len())
+            .map(|row| {
+                Value::Array(
+                    levels
+                        .get_tuple(row)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(index_label_to_json_value)
+                        .collect(),
+                )
+            })
+            .collect(),
+        None => index
+            .labels()
+            .iter()
+            .map(index_label_to_json_value)
+            .collect(),
+    }
+}
+
 fn index_label_to_json_key(label: &IndexLabel) -> String {
     match label {
         IndexLabel::Int64(v) => v.to_string(),
@@ -28429,12 +28454,7 @@ impl Series {
     pub fn to_json(&self, orient: &str) -> Result<String, FrameError> {
         match orient {
             "split" => {
-                let index = self
-                    .index
-                    .labels()
-                    .iter()
-                    .map(index_label_to_json_value)
-                    .collect();
+                let index = split_index_json_values(&self.index, self.index.row_multiindex());
                 let data = self
                     .column
                     .values()
@@ -37284,6 +37304,25 @@ fn resample_label_to_ns(label: &IndexLabel) -> Option<i64> {
 fn resample_bin_label(key: &str) -> IndexLabel {
     let text = IndexLabel::Utf8(key.to_owned());
     resample_label_to_ns(&text).map_or(text, IndexLabel::Datetime64)
+}
+
+/// The resample bin of each of `labels` under `freq`, labelled as a
+/// resample result labels it (its edge), `None` for a label in no bin (a
+/// missing one): pandas' TimeGrouper among groupby keys,
+/// groupby([Grouper(key='t', freq='D'), 'k']) (br-frankenpandas-h06ox).
+#[must_use]
+pub fn resample_bin_labels(labels: &[IndexLabel], freq: &str) -> Vec<Option<IndexLabel>> {
+    let grouping = resample_build_groups_with_options(labels, freq, None, None, None);
+    let mut bins = vec![None; labels.len()];
+    for (key, members) in &grouping.groups {
+        let label = resample_bin_label(key);
+        for &row in members {
+            if let Some(bin) = bins.get_mut(row) {
+                *bin = Some(label.clone());
+            }
+        }
+    }
+    bins
 }
 
 /// Per-bin integer or bool results that took an empty bin: numpy int64/bool
@@ -90334,12 +90373,7 @@ impl DataFrame {
                 // Stream the big `data` array (DataArrayJson), keep the small
                 // per-row index vec. Skips the n*m data Value tree + per-cell
                 // values(). Columns are serialized directly from column_order.
-                let index: Vec<Value> = self
-                    .index
-                    .labels()
-                    .iter()
-                    .map(index_label_to_json_value)
-                    .collect();
+                let index = split_index_json_values(&self.index, self.row_multiindex());
                 let col_values: Vec<&[Scalar]> = (0..self.num_columns())
                     .filter_map(|pos| self.column_at(pos))
                     .map(Column::values)
@@ -176897,6 +176931,71 @@ mod tests {
         .unwrap();
         let kept = super::downcast_numeric(&plain, "integer").unwrap();
         assert_eq!(kept.column().width(), plain.column().width());
+    }
+
+    #[test]
+    fn resample_bin_labels_and_split_multiindex_rows_h06ox() {
+        const HOUR: i64 = 3_600_000_000_000;
+        let jan1 = 1_704_067_200_000_000_000; // 2024-01-01T00:00
+        let labels = vec![
+            IndexLabel::Datetime64(jan1 + 9 * HOUR),
+            IndexLabel::Datetime64(jan1 + 58 * HOUR), // 2024-01-03T10:00
+            IndexLabel::Null(NullKind::NaT),
+        ];
+        // Each row's day bin, labelled at its left edge; a NaT in none.
+        let days = super::resample_bin_labels(&labels, "D");
+        assert_eq!(
+            days,
+            vec![
+                Some(IndexLabel::Datetime64(jan1)),
+                Some(IndexLabel::Datetime64(jan1 + 48 * HOUR)),
+                None
+            ]
+        );
+        // Month-end bins are labelled at the period's end (2024-01-31).
+        let months = super::resample_bin_labels(&labels[..2], "ME");
+        assert_eq!(months[0], months[1]);
+        assert_eq!(
+            months[0],
+            Some(IndexLabel::Datetime64(jan1 + 30 * 24 * HOUR))
+        );
+
+        // split writes each MultiIndex row as its levels' array.
+        let multi = fp_index::MultiIndex::from_tuples(vec![
+            vec![IndexLabel::Utf8("a".to_owned()), IndexLabel::Int64(1)],
+            vec![IndexLabel::Utf8("b".to_owned()), IndexLabel::Int64(2)],
+        ])
+        .unwrap();
+        let index = multi.to_flat_index("|").with_row_multiindex(multi).unwrap();
+        let series = Series::new(
+            "v",
+            index,
+            Column::from_values(vec![Scalar::Int64(0), Scalar::Int64(1)]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            series.to_json("split").unwrap(),
+            r#"{"name":"v","index":[["a",1],["b",2]],"data":[0,1]}"#
+        );
+        let frame = series.to_frame(None).unwrap();
+        assert!(
+            frame
+                .to_json("split")
+                .unwrap()
+                .contains(r#""index":[["a",1],["b",2]]"#)
+        );
+        // Negative: a flat index writes its labels.
+        let flat = Series::from_values(
+            "v",
+            vec![IndexLabel::Utf8("a|1".to_owned())],
+            vec![Scalar::Int64(0)],
+        )
+        .unwrap();
+        assert!(
+            flat.to_json("split")
+                .unwrap()
+                .contains(r#""index":["a|1"]"#)
+        );
     }
 
     #[test]
