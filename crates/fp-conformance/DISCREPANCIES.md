@@ -8,7 +8,7 @@
 > resolve to the wrong entry depending on which heading a reader hit first, and one
 > real citation did. The duplicates were renumbered to DISC-022/023/024, keeping the
 > number on whichever entry the existing in-tree citations actually meant. The next
-> free number is DISC-031. To see every ID in use:
+> free number is DISC-032. To see every ID in use:
 > `grep -n '^### DISC-' crates/fp-conformance/DISCREPANCIES.md`
 
 ## Active Divergences
@@ -175,6 +175,14 @@
 - **Resolution:** ACCEPTED (2026-09-27, br-frankenpandas-xn05q). Reproducing it would format one column's values with another column's formatter.
 - **Tests affected:** `test_to_string_formats_the_named_column_past_max_cols` pins fp's behavior (the differential table `test_to_string_keywords_like_pandas` covers a truncated formatters LIST instead).
 - **Review date:** 2026-09-27
+
+### DISC-031: `query` and `combine_first` answer over repeated column names, where pandas 2.2.3 fails
+- **Reference:** MEASURED, live pandas 2.2.3, `DataFrame([[1.5, 9.0, 3.0, 1], ...], columns=['a', 'a', 'b', 'k'])`: `.query('k > 1')` raises `TypeError: dtype 'a float64 a float64 dtype: object' not understood` (its resolvers hand the repeated name a DataFrame where a Series is meant), and `.combine_first(d.fillna(0))` raises `AttributeError: 'DataFrame' object has no attribute 'dtype'` - internal failures, not a documented refusal.
+- **Our impl:** fp keeps each repeated column apart (br-frankenpandas-i17d4) and answers both as pandas answers the same frame with its names made unique, the names given back.
+- **Impact:** code that fails in pandas answers in fp; nothing that works in pandas answers differently.
+- **Resolution:** ACCEPTED (2026-09-29, br-frankenpandas-i17d4). Reproducing an internal pandas failure would buy no compatibility.
+- **Tests affected:** `test_repeated_names_where_pandas_fails_answer_as_unique_names` checks fp against pandas on the uniquely named frame and asserts pandas' own failure, so a pandas fix shows there.
+- **Review date:** 2026-09-29
 
 ## Resolved Divergences
 

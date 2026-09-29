@@ -15803,3 +15803,36 @@ _Q47_CASES = {
 def test_groupby_over_repeated_column_names_like_pandas(case: str) -> None:
     run = _Q47_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# DISC-031: pandas 2.2.3 itself fails on these over repeated column names -
+# query raises TypeError "dtype ... not understood", combine_first
+# AttributeError "'DataFrame' object has no attribute 'dtype'" - where
+# FrankenPandas answers as pandas answers the frame with its names made
+# unique (given back after); pandas' failure is asserted too, so its fix
+# shows here (br-frankenpandas-i17d4).
+def _disc31_frame(m: Any, columns: list) -> Any:
+    return m.DataFrame(
+        [[1.5, 9.0, 3.0, 1], [4.0, np.nan, 6.0, 2], [2.0, 7.0, 1.0, 1]],
+        columns=columns,
+    )
+
+
+_DISC31_CASES = {
+    "query": lambda d: d.query("k > 1"),
+    "combine_first": lambda d: d.combine_first(d.fillna(0)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_DISC31_CASES))
+def test_repeated_names_where_pandas_fails_answer_as_unique_names(case: str) -> None:
+    run = _DISC31_CASES[case]
+    repeated = ["a", "a", "b", "k"]
+    with pytest.raises((TypeError, AttributeError)):
+        run(_disc31_frame(pd, repeated))
+    expected = run(_disc31_frame(pd, ["a", "a_1", "b", "k"])).set_axis(repeated, axis=1)
+    got = run(_disc31_frame(fpd, repeated))
+    assert list(got.columns) == repeated, case
+    assert [str(dtype) for dtype in got.dtypes] == [str(dtype) for dtype in expected.dtypes], case
+    assert got.to_string() == expected.to_string(), case
