@@ -64382,6 +64382,35 @@ pub fn concat_dataframes_with_ignore_index(
     if frames.is_empty() {
         return DataFrame::new(Index::new(Vec::new()), BTreeMap::new());
     }
+    // Identically keyed frames whose column keys repeat (['a', 'a', 'b'], or
+    // MultiIndex columns whose leaf names repeat) concatenate column by
+    // column, as pandas' concat of equal axes: keyed by position here, then
+    // under the first frame's axis (by name the repeats collapsed into one
+    // column; i17d4).
+    let first = frames[0];
+    if first.has_repeated_column_keys()
+        && frames
+            .iter()
+            .all(|frame| frame.column_order == first.column_order)
+    {
+        let keyed = frames
+            .iter()
+            .map(|frame| frame.with_positional_keys())
+            .collect::<Result<Vec<_>, _>>()?;
+        let refs: Vec<&DataFrame> = keyed.iter().collect();
+        let out = concat_dataframes_with_ignore_index(&refs, ignore_index)?;
+        let columns = (0..out.num_columns())
+            .filter_map(|position| out.column_at(position).cloned())
+            .collect();
+        return Ok(first.with_index_and_columns_at_positions(out.index.clone(), columns));
+    }
+    // Differing axes where a frame repeats a column key cannot be aligned:
+    // pandas' InvalidIndexError (the repeats collapsed into one column).
+    if frames.iter().any(|frame| frame.has_repeated_column_keys()) {
+        return Err(FrameError::CompatibilityRejected(
+            "Reindexing only valid with uniquely valued Index objects".to_owned(),
+        ));
+    }
 
     // Build index.
     let total_len: usize = frames.iter().map(|f| f.len()).sum();
@@ -64845,6 +64874,18 @@ pub fn concat_dataframes_with_keys(
 fn concat_dataframes_axis0_inner(frames: &[&DataFrame]) -> Result<DataFrame, FrameError> {
     if frames.is_empty() {
         return DataFrame::new(Index::new(Vec::new()), BTreeMap::new());
+    }
+    // Equal column axes share every column: the inner join is the outer one,
+    // which keeps repeated column keys apart (i17d4).
+    if frames.iter().any(|frame| frame.has_repeated_column_keys()) {
+        // pandas intersects the column axes (to their unique labels) and
+        // cannot reindex a repeated key into that: InvalidIndexError (the
+        // repeats collapsed; i17d4). Only frames sharing one axis object
+        // skip the intersection - the Python binding routes those to the
+        // outer concat.
+        return Err(FrameError::CompatibilityRejected(
+            "Reindexing only valid with uniquely valued Index objects".to_owned(),
+        ));
     }
 
     let mut shared_columns: Vec<String> = frames[0].column_names().into_iter().cloned().collect();
@@ -80659,6 +80700,44 @@ impl DataFrame {
     /// Whether a column key repeats (pandas' duplicate column labels, or a
     /// column MultiIndex whose leaf keys repeat): the name-keyed fast paths
     /// assume they do not (i17d4).
+    /// This frame's columns keyed by their positions ("0", "1", ...), over the
+    /// same rows: an operation that keys columns by name then keeps repeated
+    /// keys apart, and its result goes back under the original axis
+    /// ([`Self::with_index_and_columns_at_positions`]; i17d4).
+    fn with_positional_keys(&self) -> Result<Self, FrameError> {
+        self.with_column_keys(
+            (0..self.num_columns())
+                .map(|position| position.to_string())
+                .collect(),
+        )
+    }
+
+    /// This frame with its columns keyed `keys`, position for position, over
+    /// the same rows and row MultiIndex (the typed column labels, column
+    /// MultiIndex and axis name dropped): stand-in keys for an operation
+    /// that finds columns by name, so repeated keys stay apart (i17d4).
+    ///
+    /// # Errors
+    /// `LengthMismatch` when `keys` does not name every column.
+    pub fn with_column_keys(&self, keys: Vec<String>) -> Result<Self, FrameError> {
+        if keys.len() != self.num_columns() {
+            return Err(FrameError::LengthMismatch {
+                index_len: keys.len(),
+                column_len: self.num_columns(),
+            });
+        }
+        let columns =
+            (0..self.num_columns()).filter_map(|position| self.column_at(position).cloned());
+        let mut out = Self::new_with_column_order(
+            self.index.clone(),
+            ColumnStore::from_pairs(keys.iter().cloned().zip(columns)),
+            keys,
+        )?;
+        out.row_multiindex = self.row_multiindex.clone();
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
+    }
+
     fn has_repeated_column_keys(&self) -> bool {
         let mut seen = HashSet::with_capacity(self.column_order.len());
         !self
@@ -81708,13 +81787,15 @@ impl DataFrame {
         let sources: Vec<&Column> = if value_vars.is_empty() {
             self.column_order
                 .iter()
-                .filter(|name| !id_vars.contains(&name.as_str()))
-                .filter_map(|name| self.columns.get(name))
+                .enumerate()
+                .filter(|(_, name)| !id_vars.contains(&name.as_str()))
+                .filter_map(|(position, _)| self.column_at(position))
                 .collect()
         } else {
             value_vars
                 .iter()
-                .filter_map(|name| self.columns.get(name))
+                .flat_map(|name| self.columns.positions_of(name).iter())
+                .filter_map(|&position| self.column_at(position))
                 .collect()
         };
         let width = sources
@@ -81785,17 +81866,6 @@ impl DataFrame {
         let var_col_name = var_name.unwrap_or("variable");
         let val_col_name = value_name.unwrap_or("value");
 
-        // Determine value_vars: if empty, use all non-id columns
-        let actual_value_vars: Vec<String> = if value_vars.is_empty() {
-            self.column_order
-                .iter()
-                .filter(|c| !id_vars.contains(&c.as_str()))
-                .cloned()
-                .collect()
-        } else {
-            value_vars.iter().map(|s| (*s).to_string()).collect()
-        };
-
         // Validate columns exist
         for col in id_vars {
             if !self.columns.contains_key(col) {
@@ -81804,13 +81874,38 @@ impl DataFrame {
                 )));
             }
         }
-        for col in &actual_value_vars {
-            if !self.columns.contains_key(col) {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "missing column: {col}"
-                )));
+        // The value vars by POSITION - if none are named, every non-id column
+        // - so each column under a repeated key melts its own values, and a
+        // named repeated key melts all its columns, as pandas (the first
+        // column's values were melted for each; i17d4).
+        let mut value_positions: Vec<usize> = Vec::new();
+        if value_vars.is_empty() {
+            value_positions.extend(
+                self.column_order
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, name)| !id_vars.contains(&name.as_str()))
+                    .map(|(position, _)| position),
+            );
+        } else {
+            for col in value_vars {
+                let positions = self.columns.positions_of(col);
+                if positions.is_empty() {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "missing column: {col}"
+                    )));
+                }
+                value_positions.extend_from_slice(positions);
             }
         }
+        let actual_value_vars: Vec<String> = value_positions
+            .iter()
+            .map(|&position| self.column_order[position].clone())
+            .collect();
+        let value_columns: Vec<&Column> = value_positions
+            .iter()
+            .map(|&position| self.column_at(position).expect("column in bounds"))
+            .collect();
 
         let n_rows = self.index.len();
         let n_value_vars = actual_value_vars.len();
@@ -81968,10 +82063,9 @@ impl DataFrame {
                 at += take;
             }
         }
-        let numeric_slices: Option<Vec<NumSlice>> = actual_value_vars
+        let numeric_slices: Option<Vec<NumSlice>> = value_columns
             .iter()
-            .map(|name| {
-                let c = &self.columns[name];
+            .map(|&c| {
                 if let Some(s) = c.as_f64_slice() {
                     Some(NumSlice::F64(s))
                 } else if let Some(s) = c.as_i64_slice() {
@@ -82048,18 +82142,17 @@ impl DataFrame {
             }
         } else {
             let mut value_vals = Vec::with_capacity(total_rows);
-            for vv in &actual_value_vars {
-                let src = &self.columns[vv];
+            for src in &value_columns {
                 value_vals.extend_from_slice(src.values());
             }
             // Determine a common dtype across all melted value columns so mixed
             // numeric inputs promote the same way pandas does.
-            let value_dtype = if actual_value_vars.is_empty() {
+            let value_dtype = if value_columns.is_empty() {
                 Ok(DType::Float64)
             } else {
-                actual_value_vars
+                value_columns
                     .iter()
-                    .map(|name| self.columns[name].dtype())
+                    .map(|column| column.dtype())
                     .try_fold(DType::Null, common_dtype)
             };
             match value_dtype {
@@ -89311,10 +89404,9 @@ impl DataFrame {
         // cell). Composite labels stay format!-per-cell (each is unique — pandas
         // dodges this with a MultiIndex; see the structural note below).
         let labels = self.index.labels();
-        let col_refs: Vec<&Column> = self
-            .column_order
-            .iter()
-            .map(|name| &self.columns[name])
+        // By position: a repeated column key stacks its own values (i17d4).
+        let col_refs: Vec<&Column> = (0..n_cols)
+            .filter_map(|position| self.column_at(position))
             .collect();
 
         // Build the n*m composite labels into ONE contiguous Utf8 buffer +
@@ -127291,6 +127383,26 @@ mod tests {
         assert_eq!(
             df.dot(&weights).unwrap().column_at(0).unwrap().values(),
             &[f(358.5), f(626.5)]
+        );
+
+        // Part 3: a row concat of equal axes, melt and stack by position; a
+        // row concat of differing axes is pandas' InvalidIndexError.
+        let rows = crate::concat_dataframes(&[&df, &df]).unwrap();
+        assert_eq!(second(&rows), vec![f(5.75), f(2.25), f(5.75), f(2.25)]);
+        let only_b = df.take_columns(&[2]).unwrap();
+        let err = crate::concat_dataframes(&[&df, &only_b]).unwrap_err();
+        assert!(matches!(
+            err,
+            FrameError::CompatibilityRejected(msg) if msg.contains("uniquely valued")
+        ));
+        let melted = df.melt(&[], &[], None, None).unwrap();
+        assert_eq!(
+            melted.column("value").unwrap().values(),
+            &[f(1.0), f(4.0), f(5.75), f(2.25), f(3.0), f(6.0)]
+        );
+        assert_eq!(
+            df.stack().unwrap().column_at(0).unwrap().values(),
+            &[f(1.0), f(5.75), f(3.0), f(4.0), f(2.25), f(6.0)]
         );
 
         // NEGATIVE: unique keys are untouched by the positional rebuild.

@@ -17723,6 +17723,14 @@ fn frame_error_to_py(err: fp_frame::FrameError) -> PyErr {
     if let fp_frame::FrameError::Index(fp_index::IndexError::TimeZone(tz)) = &err {
         return Python::attach(|py| tz_error_to_py(py, tz.clone()));
     }
+    // Aligning an axis whose labels repeat is pandas' InvalidIndexError
+    // (pandas.errors), e.g. a row concat of differing column axes with a
+    // repeated key (i17d4).
+    if let fp_frame::FrameError::CompatibilityRejected(msg) = &err
+        && msg == "Reindexing only valid with uniquely valued Index objects"
+    {
+        return InvalidIndexError::new_err(msg.clone());
+    }
     let (kind, msg) = classify_frame_error(&err);
     match kind {
         PyErrorKind::Index => PyErr::new::<pyo3::exceptions::PyIndexError, _>(msg),
@@ -20263,6 +20271,39 @@ fn describe_all<'py>(
     numeric_describe: impl Fn(&DataFrame) -> Result<DataFrame, FrameError>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let names: Vec<String> = frame.column_names().into_iter().cloned().collect();
+    // Repeated column keys: each column described by its position, then
+    // under the frame's own labels (they collapsed into one; i17d4).
+    if names.iter().collect::<HashSet<_>>().len() != names.len() {
+        let keyed = frame
+            .with_column_keys(
+                (0..names.len())
+                    .map(|position| position.to_string())
+                    .collect(),
+            )
+            .map_err(frame_error_to_py)?;
+        let described = describe_all(py, &keyed, percentiles, numeric_describe)?;
+        let columns: Py<PyAny> = match frame.columns_multiindex() {
+            Some(levels) => Py::new(
+                py,
+                PyMultiIndex {
+                    inner: levels.clone(),
+                },
+            )?
+            .into_any(),
+            None => PyList::new(
+                py,
+                frame
+                    .column_labels()
+                    .iter()
+                    .map(|label| index_label_to_py(py, label))
+                    .collect::<PyResult<Vec<_>>>()?,
+            )?
+            .into_any()
+            .unbind(),
+        };
+        described.setattr("columns", columns)?;
+        return Ok(described);
+    }
     let dtype_of = |name: &str| frame.column(name).map(Column::dtype);
     let numeric: Vec<&str> = names
         .iter()
@@ -32582,11 +32623,6 @@ impl PyDataFrame {
             )?
             .into_any())
         };
-        let is_datetime = |frame: &DataFrame, name: &str| {
-            frame
-                .column(name)
-                .is_some_and(|c| matches!(c.dtype(), DType::Datetime64 { .. }))
-        };
         if include.is_empty() && exclude.is_empty() {
             // pandas describes the numbers and the naive datetimes by default
             // (a datetime column was left out; a zoned one stays out), and
@@ -32612,14 +32648,20 @@ impl PyDataFrame {
                 }
                 return wrap(numeric_describe(&this.inner).map_err(frame_error_to_py)?);
             }
-            let described: Vec<&str> = names
-                .iter()
-                .map(String::as_str)
-                .filter(|name| naive_datetime(name) || number(name))
+            // By position, each column under a repeated key once (i17d4).
+            let described: Vec<usize> = (0..this.inner.num_columns())
+                .filter(|&position| {
+                    this.inner.column_at(position).is_some_and(|c| {
+                        matches!(
+                            c.dtype(),
+                            DType::Int64 | DType::Float64 | DType::Datetime64 { tz: None }
+                        )
+                    })
+                })
                 .collect();
             let frame = this
                 .inner
-                .select_columns(&described)
+                .take_columns(&described)
                 .map_err(frame_error_to_py)?;
             let described = describe_all(py, &frame, percentiles.as_deref(), numeric_describe)?;
             let described = described.extract::<PyRef<'_, PyDataFrame>>()?.inner.clone();
@@ -32628,10 +32670,13 @@ impl PyDataFrame {
         // pandas' selection: include (every dtype when only exclude is
         // given) minus exclude; then numeric, object-style, or - both kinds
         // selected - pandas' union layout.
-        let selected: Vec<String> = (0..this.inner.shape().1)
-            .filter_map(|position| {
-                let name = this.inner.column_name_at(position)?;
-                let dtype = this.inner.column_at(position)?.dtype();
+        // By position: each column under a repeated key is selected once
+        // (by name every one was taken for each; i17d4).
+        let selected: Vec<usize> = (0..this.inner.shape().1)
+            .filter(|&position| {
+                let Some(dtype) = this.inner.column_at(position).map(Column::dtype) else {
+                    return false;
+                };
                 let wanted = include.is_empty()
                     || include
                         .iter()
@@ -32639,23 +32684,28 @@ impl PyDataFrame {
                 let dropped = exclude
                     .iter()
                     .any(|spec| describe_dtype_matches(&dtype, spec));
-                (wanted && !dropped).then_some(name)
+                wanted && !dropped
             })
             .collect();
-        let refs: Vec<&str> = selected.iter().map(String::as_str).collect();
         let frame = this
             .inner
-            .select_columns(&refs)
+            .take_columns(&selected)
             .map_err(frame_error_to_py)?;
-        let numeric = |name: &&str| {
-            frame
-                .column(name)
-                .is_some_and(|c| matches!(c.dtype(), DType::Int64 | DType::Float64))
-        };
-        let datetime = |name: &&str| is_datetime(&frame, name);
-        if refs.iter().all(numeric) {
+        let kinds: Vec<(bool, bool)> = (0..frame.num_columns())
+            .filter_map(|position| frame.column_at(position))
+            .map(|c| {
+                (
+                    matches!(c.dtype(), DType::Int64 | DType::Float64),
+                    matches!(c.dtype(), DType::Datetime64 { .. }),
+                )
+            })
+            .collect();
+        if kinds.iter().all(|(numeric, _)| *numeric) {
             wrap(numeric_describe(&frame).map_err(frame_error_to_py)?)
-        } else if !refs.iter().any(numeric) && !refs.iter().any(datetime) {
+        } else if !kinds
+            .iter()
+            .any(|(numeric, datetime)| *numeric || *datetime)
+        {
             wrap(
                 frame
                     .describe_dtypes(&["all"], &[])
@@ -43336,6 +43386,32 @@ impl PyDataFrameLoc {
             let col_key = column_arg(py, &self.inner, columns_key)?;
 
             match (rows, resolve_loc_columns(&self.inner, &col_key)?) {
+                // A column label that keys several columns selects all of
+                // them, as `df['c']` (it answered the first; i17d4): over a
+                // row label a Series of their cells, over rows a frame.
+                (LocRows::Frame(sub), None)
+                    if col_key
+                        .extract::<String>()
+                        .is_ok_and(|name| sub.column_occurrences(&name) > 1) =>
+                {
+                    let col_name = col_key.extract::<String>()?;
+                    let res = sub
+                        .select_columns(&[col_name.as_str()])
+                        .map_err(loc_key_error)?;
+                    Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
+                }
+                (LocRows::Label(label), None)
+                    if col_key
+                        .extract::<String>()
+                        .is_ok_and(|name| self.inner.column_occurrences(&name) > 1) =>
+                {
+                    let col_name = col_key.extract::<String>()?;
+                    let row_series = self.inner.loc_row(&label).map_err(loc_key_error)?;
+                    let sub = row_series
+                        .loc(&[self.inner.column_label(&col_name)])
+                        .map_err(loc_key_error)?;
+                    Ok(Py::new(py, PySeries { inner: sub })?.into_any())
+                }
                 // df.loc['r', 'c'] with a unique label -> scalar
                 (LocRows::Label(label), None) => {
                     let col_name = col_key.extract::<String>()?;
@@ -52691,6 +52767,17 @@ fn concat(
     };
 
     let objects = objs.try_iter()?.collect::<PyResult<Vec<_>>>()?;
+    // One and the same frame object throughout shares one column axis, so
+    // pandas' inner join does not intersect it; the outer concat is the
+    // same there, and keeps a repeated column key (i17d4).
+    let join = if join == fp_frame::ConcatJoin::Inner
+        && objects.len() > 1
+        && objects.iter().all(|object| object.is(&objects[0]))
+    {
+        fp_frame::ConcatJoin::Outer
+    } else {
+        join
+    };
     if keys
         .as_ref()
         .is_some_and(|keys| keys.len() != objects.len())

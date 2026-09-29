@@ -14515,6 +14515,57 @@ _REPEATED_KEY_CASES = {
 # A decimals dict rounds every column under its key.
 _REPEATED_KEY_CASES["flat round a dict"] = lambda m: _rk_shown(_rk_flat(m).round({"a": 0}))
 _REPEATED_KEY_CASES["flat idxmax axis1"] = lambda m: _rk_shown(_rk_flat(m).idxmax(axis=1))
+# Part 3: row concat, merge, melt, stack, loc and describe(include='all').
+def _rk_raised(run: Any) -> list:
+    try:
+        return ["ok", _rk_shown(run())]
+    except Exception as e:  # noqa: BLE001 - the class and text are the outcome
+        return ["raise", type(e).__name__, str(e)]
+
+
+def _rk_keyed(m: Any) -> Any:
+    return _rk_flat(m).assign(k=[1, 2])
+
+
+_REPEATED_KEY_CASES["flat concat rows"] = lambda m: _rk_shown(m.concat([_rk_flat(m), _rk_flat(m)]))
+_REPEATED_KEY_CASES["leaves concat rows"] = lambda m: _rk_shown(
+    m.concat([_rk_leaves(m), _rk_leaves(m) * 2])
+)
+_REPEATED_KEY_CASES["flat concat ignore_index"] = lambda m: _rk_shown(
+    m.concat([_rk_flat(m), _rk_flat(m) * 2], ignore_index=True)
+)
+# pandas' inner join intersects the column axes, which a repeated key cannot
+# be reindexed into - unless the frames are one object (one shared axis).
+_REPEATED_KEY_CASES["flat concat inner of one frame"] = lambda m: _rk_shown(
+    (lambda d: m.concat([d, d], join="inner"))(_rk_flat(m))
+)
+_REPEATED_KEY_CASES["flat concat inner of equal frames raises"] = lambda m: _rk_raised(
+    lambda: m.concat([_rk_flat(m), _rk_flat(m)], join="inner")
+)
+_REPEATED_KEY_CASES["flat concat of differing axes raises"] = lambda m: _rk_raised(
+    lambda: m.concat([_rk_flat(m), _rk_flat(m)[["b"]]])
+)
+_REPEATED_KEY_CASES["flat merge"] = lambda m: _rk_shown(
+    _rk_keyed(m).merge(m.DataFrame({"k": [1, 2], "z": [5, 6]}), on="k")
+)
+_REPEATED_KEY_CASES["flat merge from the right"] = lambda m: _rk_shown(
+    m.DataFrame({"k": [2, 1], "z": [5, 6]}).merge(_rk_keyed(m), on="k")
+)
+_REPEATED_KEY_CASES["flat merge sharing the name"] = lambda m: _rk_shown(
+    _rk_keyed(m).merge(m.DataFrame({"k": [1, 2], "a": [5, 6]}), on="k")
+)
+_REPEATED_KEY_CASES["flat melt"] = lambda m: _rk_shown(_rk_flat(m).melt())
+_REPEATED_KEY_CASES["flat melt the repeated key"] = lambda m: _rk_shown(
+    _rk_keyed(m).melt(id_vars="k", value_vars=["a"])
+)
+_REPEATED_KEY_CASES["flat stack"] = lambda m: _rk_shown(_rk_flat(m).stack())
+_REPEATED_KEY_CASES["flat loc the repeated key"] = lambda m: _rk_shown(_rk_flat(m).loc[:, "a"])
+_REPEATED_KEY_CASES["flat loc a row of the repeated key"] = lambda m: _rk_shown(
+    _rk_flat(m).loc[1, "a"]
+)
+_REPEATED_KEY_CASES["flat describe all"] = lambda m: _rk_shown(
+    _rk_flat(m).assign(t=["x", "y"]).describe(include="all")
+)
 # pandas' own combine_first of flat repeated keys raises AttributeError (it
 # asks a DataFrame for .dtype); MultiIndex columns combine each column.
 _REPEATED_KEY_CASES["leaves combine_first"] = lambda m: _rk_shown(
