@@ -20285,3 +20285,79 @@ _E57_CASES = {
 def test_everyday57_query_python_engine_and_loc_errors_like_pandas_sa6lb(case: str) -> None:
     run = _E57_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-5mkvo: DataFrame reductions given axis=None (np.mean(df)
+# passes it) reduced each column - pandas 2 reduces mean / median / min / max
+# / skew / kurt / any / all over both axes, warns for sum / prod / std / var
+# / sem, refuses count / nunique; compare / align refused their keywords and
+# align(join='left') took the other frame's columns; Index.join(how='outer')
+# kept the left order.
+def _e58_frames(m: Any) -> tuple:
+    return (
+        m.DataFrame({"a": [1, 2, 3], "b": [4.0, None, 6.0]}),
+        m.DataFrame({"a": [1, 5, 3], "b": [4.0, 7.0, None]}),
+    )
+
+
+_E58_CASES = {
+    "axis None scalar reductions": lambda m: [
+        getattr(_e58_frames(m)[0], name)(axis=None) for name in ("mean", "median", "min", "max", "skew", "kurt", "any", "all")
+    ],
+    "axis None numeric_only": lambda m: [m.DataFrame({"a": [1, 2], "s": ["x", "y"]}).mean(axis=None, numeric_only=True)],
+    "axis None skipna False": lambda m: [_e58_frames(m)[0].mean(axis=None, skipna=False)],
+    "nan scalar types": lambda m: [
+        m.Series([1.0, None]).mean(skipna=False),
+        m.Series([1.0, None]).median(skipna=False),
+        m.Series([None, None], dtype=float).mean(),
+    ],
+    "axis None deprecated": lambda m: [getattr(_e58_frames(m)[0], name)(axis=None) for name in ("sum", "prod", "std", "var", "sem")],
+    "axis None refused": lambda m: [_e58_frames(m)[0].count(axis=None)],
+    "numpy reductions": lambda m: [np.mean(_e58_frames(m)[0]), np.max(_e58_frames(m)[0]), np.sum(_e58_frames(m)[0])],
+    "compare keep_shape": lambda m: [_e58_frames(m)[0].compare(_e58_frames(m)[1], keep_shape=True).to_dict()],
+    "compare keep_equal": lambda m: [
+        _e58_frames(m)[0].compare(_e58_frames(m)[1], keep_shape=True, keep_equal=True).to_dict()
+    ],
+    "compare align_axis 0": lambda m: [_e58_frames(m)[0].compare(_e58_frames(m)[1], align_axis=0).to_dict()],
+    "compare result_names": lambda m: [
+        _e58_frames(m)[0].compare(_e58_frames(m)[1], result_names=("L", "R")).columns.tolist()
+    ],
+    "compare result_names list": lambda m: [_e58_frames(m)[0].compare(_e58_frames(m)[1], result_names=["L", "R"])],
+    "series compare": lambda m: [
+        _e58_frames(m)[0]["a"].compare(_e58_frames(m)[1]["a"]).to_dict(),
+        _e58_frames(m)[0]["a"].compare(_e58_frames(m)[1]["a"], align_axis=0).to_dict(),
+    ],
+    "align axis": lambda m: [
+        [x.columns.tolist() for x in _e58_frames(m)[0].align(_e58_frames(m)[1][["a"]], join="inner", axis=1)],
+        [x.index.tolist() for x in _e58_frames(m)[0].align(_e58_frames(m)[1].iloc[1:], join="inner", axis=0)],
+    ],
+    "align fill_value": lambda m: [
+        [x.to_dict("list") for x in _e58_frames(m)[0].align(_e58_frames(m)[1].iloc[:2], join="outer", fill_value=0)]
+    ],
+    "align left join columns": lambda m: [
+        [x.to_dict() for x in m.DataFrame({"b": [1], "a": [2]}, index=[3]).align(m.DataFrame({"c": [5], "a": [6]}, index=[1]), join="left")]
+    ],
+    "series align fill": lambda m: [
+        [x.tolist() for x in _e58_frames(m)[0]["a"].align(_e58_frames(m)[1]["a"].iloc[1:], join="outer", fill_value=-1)]
+    ],
+    "frame series align": lambda m: [[x.shape for x in _e58_frames(m)[0].align(_e58_frames(m)[1]["a"], axis=0, join="inner")]],
+    "index join outer": lambda m: [
+        m.Index([3, 1, 2]).join(m.Index([2, 5, 1]), how="outer").tolist(),
+        m.Index(["b", "a", "c"]).join(m.Index(["b", "a", "c"]), how="outer").tolist(),
+    ],
+    # Negatives: already pandas'.
+    "axis 0 and 1": lambda m: [_e58_frames(m)[0].mean().tolist(), _e58_frames(m)[0].max(axis=1).tolist()],
+    "compare default": lambda m: [_e58_frames(m)[0].compare(_e58_frames(m)[1]).to_dict()],
+    "align default": lambda m: [[x.to_dict() for x in _e58_frames(m)[0].align(_e58_frames(m)[1].iloc[:2], join="inner")]],
+    "index join inner left": lambda m: [
+        m.Index([3, 1, 2]).join(m.Index([2, 5, 1]), how="inner").tolist(),
+        m.Index([3, 1, 2]).join(m.Index([2, 5]), how="left").tolist(),
+    ],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E58_CASES))
+def test_everyday58_axis_none_compare_align_like_pandas_5mkvo(case: str) -> None:
+    run = _E58_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

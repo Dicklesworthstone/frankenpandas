@@ -11746,8 +11746,14 @@ impl PyIndex {
             .inner
             .join(&other_idx, how)
             .map_err(index_error_to_py)?;
-        // sort=True orders the joined labels (it was dropped, fvsao.5).
-        let joined = if sort { joined.sortlevel().0 } else { joined };
+        // sort=True orders the joined labels (it was dropped, fvsao.5); an
+        // outer join is pandas' union, sorted whatever sort says (it kept
+        // the left order; br-frankenpandas-5mkvo).
+        let joined = if sort || how == "outer" {
+            joined.sortlevel().0
+        } else {
+            joined
+        };
         PyIndex { inner: joined }.into_py_any(py)
     }
 
@@ -26648,6 +26654,21 @@ impl PySeries {
                 self.inner.mean()
             }
             .map_err(frame_error_to_py)?;
+            // pandas' nanmean: a NaN over counted values (skipna=False
+            // counts every one; inf - inf) is np.float64, a plain nan only
+            // when none was counted (it was always plain;
+            // br-frankenpandas-5mkvo).
+            let counted = if skipna {
+                self.inner.column().count()
+            } else {
+                self.inner.len()
+            };
+            if counted > 0
+                && matches!(result, Scalar::Float64(value) if value.is_nan())
+                && !is_nullable_extension(&self.inner.dtype())
+            {
+                return numpy_scalar(py, &result);
+            }
             reduction_to_py(py, &self.inner, "mean", &result)
         })
     }
@@ -26804,6 +26825,14 @@ impl PySeries {
                 self.inner.median()
             }
             .map_err(frame_error_to_py)?;
+            // pandas' nanmedian returns a plain nan when skipna=False meets a
+            // missing value (it was np.float64; br-frankenpandas-5mkvo).
+            if !skipna
+                && self.inner.column().count() < self.inner.len()
+                && !is_nullable_extension(&self.inner.dtype())
+            {
+                return f64::NAN.into_py_any(py);
+            }
             reduction_to_py(py, &self.inner, "median", &r)
         })
     }
@@ -29767,32 +29796,104 @@ impl PySeries {
         Ok(PySeries { inner: res })
     }
 
-    #[pyo3(signature = (other, join="outer"))]
-    fn align(&self, other: &PySeries, join: &str) -> PyResult<(PySeries, PySeries)> {
-        let mode = match join {
-            "outer" => AlignMode::Outer,
-            "inner" => AlignMode::Inner,
-            "left" => AlignMode::Left,
-            "right" => AlignMode::Right,
-            _ => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Invalid join mode '{join}'"
-                )));
-            }
-        };
-        let (s1, s2) = self
-            .inner
-            .align(&other.inner, mode)
-            .map_err(frame_error_to_py)?;
-        Ok((PySeries { inner: s1 }, PySeries { inner: s2 }))
+    /// pandas' `align(other, join='outer', axis=None, level=None, copy=None,
+    /// fill_value=None)` of two Series: the indexes joined as
+    /// [`PyDataFrame::align`] joins an axis, `fill_value` where the join
+    /// brings in a label (it was refused; br-frankenpandas-5mkvo).
+    #[pyo3(signature = (other, join="outer", axis=None, level=None, copy=None, fill_value=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn align<'py>(
+        slf: &Bound<'py, Self>,
+        other: &Bound<'py, PySeries>,
+        join: &str,
+        axis: Option<&Bound<'py, PyAny>>,
+        level: Option<&Bound<'py, PyAny>>,
+        copy: Option<bool>,
+        fill_value: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
+        let _ = copy;
+        parse_axis_param_for_type(axis.filter(|axis| !axis.is_none()), "Series")?;
+        if level.is_some_and(|level| !level.is_none()) {
+            return Err(not_implemented("Series.align(level=...)"));
+        }
+        let (this, other) = (slf.as_any(), other.as_any());
+        let joined = aligned_axis(&this.getattr("index")?, &other.getattr("index")?, join)?;
+        filled_after_align(
+            aligned_on(this, "index", joined.as_ref(), None)?,
+            aligned_on(other, "index", joined.as_ref(), None)?,
+            fill_value,
+        )
     }
 
-    fn compare(&self, other: &PySeries) -> PyResult<PyDataFrame> {
-        let res = self
-            .inner
-            .compare(&other.inner)
+    /// pandas' `compare(other, align_axis=1, keep_shape=False,
+    /// keep_equal=False, result_names=('self', 'other'))`: the two as
+    /// one-column frames compared, side by side as columns (align_axis=1)
+    /// or stacked per label (0). An equal value makes the column float, as
+    /// pandas masks before dropping; the Series must be labelled alike
+    /// (the keywords were refused, an int stayed int; br-frankenpandas-5mkvo).
+    #[pyo3(signature = (other, align_axis=None, keep_shape=false, keep_equal=false, result_names=None))]
+    fn compare(
+        &self,
+        py: Python<'_>,
+        other: &PySeries,
+        align_axis: Option<&Bound<'_, PyAny>>,
+        keep_shape: bool,
+        keep_equal: bool,
+        result_names: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let align_axis = compare_align_axis(align_axis, "Series")?;
+        let (left, right) = compare_result_names(result_names)?;
+        if self.inner.index().labels() != other.inner.index().labels() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Can only compare identically-labeled Series objects",
+            ));
+        }
+        let frame = |series: &Series| {
+            series
+                .to_frame(Some("__compare__"))
+                .map_err(frame_error_to_py)
+        };
+        let compared = frame(&self.inner)?
+            .compare_with_align_axis(
+                &frame(&other.inner)?,
+                (&left, &right),
+                keep_shape,
+                keep_equal,
+                align_axis,
+            )
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: res })
+        let compared = PyDataFrame { inner: compared };
+        if align_axis == 0 {
+            // One column over a (label, result name) row MultiIndex.
+            let mut stacked = compared.column_series_at(0)?.inner;
+            stacked = Series::new(
+                self.inner.name(),
+                stacked.index().clone(),
+                stacked.column().clone(),
+            )
+            .map_err(frame_error_to_py)?;
+            return PySeries { inner: stacked }.into_py_any(py);
+        }
+        let columns = [0, 1]
+            .into_iter()
+            .map(|position| {
+                compared.inner.column_at(position).cloned().ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyKeyError, _>("compare column missing")
+                })
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let side_by_side = DataFrame::new_with_column_order(
+            compared.inner.index().clone(),
+            fp_frame::ColumnStore::from_pairs(
+                [left.clone(), right.clone()].into_iter().zip(columns),
+            ),
+            vec![left, right],
+        )
+        .map_err(frame_error_to_py)?;
+        PyDataFrame {
+            inner: side_by_side,
+        }
+        .into_py_any(py)
     }
 
     fn convert_dtypes(&self) -> PyResult<PySeries> {
@@ -32241,7 +32342,174 @@ pub struct PyDataFrame {
     inner: DataFrame,
 }
 
+/// The dtypes a reduction's `numeric_only` keeps (pandas counts bools).
+const NUMERIC_DTYPES: &[&str] = &["number", "bool"];
+
+/// The axis `align` reindexes both sides onto: None when they are equal
+/// (pandas leaves them), else outer the sorted union, inner the
+/// intersection, left / right that side's labels (br-frankenpandas-5mkvo).
+fn aligned_axis<'py>(
+    left: &Bound<'py, PyAny>,
+    right: &Bound<'py, PyAny>,
+    join: &str,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    if left.call_method1("equals", (right,))?.is_truthy()? {
+        return Ok(None);
+    }
+    Ok(Some(match join {
+        "outer" => left.call_method1("union", (right,))?,
+        "inner" => left.call_method1("intersection", (right,))?,
+        "left" => left.clone(),
+        "right" => right.clone(),
+        other => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "do not recognize join method {other}"
+            )));
+        }
+    }))
+}
+
+/// `obj` reindexed along `axis` ('index' / 'columns') onto `labels`, the
+/// new cells `fill_value`; `obj` itself when there is nothing to reindex.
+fn aligned_on<'py>(
+    obj: &Bound<'py, PyAny>,
+    axis: &str,
+    labels: Option<&Bound<'py, PyAny>>,
+    fill_value: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let Some(labels) = labels else {
+        return Ok(obj.clone());
+    };
+    let kwargs = PyDict::new(obj.py());
+    kwargs.set_item(axis, labels)?;
+    if let Some(fill_value) = fill_value.filter(|value| !value.is_none()) {
+        kwargs.set_item("fill_value", fill_value)?;
+    }
+    obj.call_method("reindex", (), Some(&kwargs))
+}
+
+/// pandas' align with a Series fills after reindexing: every missing value
+/// of both sides - what the join brought in and what was there - becomes
+/// `fill_value` (a reindexed int side is float by then), when it is not
+/// missing itself.
+fn filled_after_align<'py>(
+    left: Bound<'py, PyAny>,
+    right: Bound<'py, PyAny>,
+    fill_value: Option<&Bound<'py, PyAny>>,
+) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
+    let Some(fill) = fill_value
+        .filter(|value| !value.is_none() && !value.extract::<f64>().is_ok_and(f64::is_nan))
+    else {
+        return Ok((left, right));
+    };
+    Ok((
+        left.call_method1("fillna", (fill,))?,
+        right.call_method1("fillna", (fill,))?,
+    ))
+}
+
+/// `compare`'s align_axis: 1 / 'columns' (the default) or 0 / 'index' /
+/// 'rows'.
+fn compare_align_axis(align_axis: Option<&Bound<'_, PyAny>>, type_name: &str) -> PyResult<i64> {
+    match align_axis.filter(|axis| !axis.is_none()) {
+        None => Ok(1),
+        Some(axis) => {
+            let axis = parse_axis_param_for_type(Some(axis), "DataFrame").map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "No axis named {axis} for object type {type_name}"
+                ))
+            })?;
+            Ok(i64::from(axis == Some(1)))
+        }
+    }
+}
+
+/// `compare`'s result_names: a 2-tuple (pandas refuses anything else),
+/// ('self', 'other') by default.
+fn compare_result_names(result_names: Option<&Bound<'_, PyAny>>) -> PyResult<(String, String)> {
+    let Some(names) = result_names.filter(|names| !names.is_none()) else {
+        return Ok(("self".to_owned(), "other".to_owned()));
+    };
+    let Ok(names) = names.cast::<PyTuple>() else {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "Passing 'result_names' as a {} is not supported. Provide 'result_names' as a tuple \
+             instead.",
+            names.get_type().repr()?
+        )));
+    };
+    Ok((
+        names.get_item(0)?.str()?.to_string(),
+        names.get_item(1)?.str()?.to_string(),
+    ))
+}
+
+/// Whether `axis=None` was passed (not left out) to a reduction.
+fn axis_passed_none(axis: &Passed<'_>) -> bool {
+    axis.0.as_ref().is_some_and(|axis| axis.is_none())
+}
+
 impl PyDataFrame {
+    /// pandas 2's reduction over both axes when `axis=None` is passed (mean,
+    /// median, min, max, skew, kurt, any, all): every value - of the columns
+    /// of the `only` dtypes, when given (numeric_only / bool_only) - as one
+    /// Series reduced by `method`; None for any other axis (each column was
+    /// reduced, so np.mean(df) was a Series; br-frankenpandas-5mkvo).
+    fn reduce_both_axes(
+        &self,
+        py: Python<'_>,
+        method: &str,
+        axis: &Passed<'_>,
+        skipna: bool,
+        only: Option<&[&str]>,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        if !axis_passed_none(axis) {
+            return Ok(None);
+        }
+        let mut frame = Py::new(
+            py,
+            PyDataFrame {
+                inner: self.inner.clone(),
+            },
+        )?
+        .into_bound(py)
+        .into_any();
+        if let Some(only) = only {
+            frame = frame.call_method1("select_dtypes", (PyList::new(py, only)?,))?;
+        }
+        let values = py
+            .import("numpy")?
+            .call_method1("asarray", (frame,))?
+            .call_method0("ravel")?;
+        let series = py
+            .import("frankenpandas")?
+            .getattr("Series")?
+            .call1((values,))?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("skipna", skipna)?;
+        Ok(Some(
+            series.call_method(method, (), Some(&kwargs))?.unbind(),
+        ))
+    }
+
+    /// pandas' FutureWarning for sum / prod / std / var / sem given
+    /// `axis=None`, which still reduce each column (br-frankenpandas-5mkvo).
+    fn warn_axis_none(py: Python<'_>, method: &str, axis: &Passed<'_>) -> PyResult<()> {
+        if !axis_passed_none(axis) {
+            return Ok(());
+        }
+        let message = std::ffi::CString::new(format!(
+            "The behavior of DataFrame.{method} with axis=None is deprecated, in a future version \
+             this will reduce over both axes and return a scalar. To retain the old behavior, pass \
+             axis=0 (or do not pass axis)"
+        ))?;
+        PyErr::warn(
+            py,
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            &message,
+            1,
+        )
+    }
+
     /// `shift` by one int: the rows (columns under axis=1) `periods` on,
     /// the labels by `freq`, `fill_value` where none moved in.
     fn shift_by(
@@ -37285,17 +37553,19 @@ impl PyDataFrame {
 
     /// Return the sum of each column or row. A column (or row) with fewer
     /// than `min_count` valid values sums to NaN, as in pandas.
-    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, min_count=0, **kwargs))]
+    #[pyo3(signature = (axis=Passed(None), skipna=true, numeric_only=false, min_count=0, **kwargs))]
     fn sum(
         &self,
-        axis: Option<&Bound<'_, PyAny>>,
+        py: Python<'_>,
+        axis: Passed<'_>,
         skipna: bool,
         numeric_only: bool,
         min_count: usize,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
         numpy_compat_kwargs("sum", kwargs)?;
-        let ax = parse_axis_param(axis)?;
+        Self::warn_axis_none(py, "sum", &axis)?;
+        let ax = parse_axis_param(axis.0.as_ref().filter(|axis| !axis.is_none()))?;
         self.refuse_masked_rows("sum", ax, numeric_only)?;
         if let Some(answer) = self.empty_object_rows_answer(ax, numeric_only)? {
             return Ok(answer);
@@ -37309,49 +37579,73 @@ impl PyDataFrame {
     }
 
     /// Return the mean of each column or row.
-    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, **kwargs))]
+    #[pyo3(signature = (axis=Passed(None), skipna=true, numeric_only=false, **kwargs))]
     fn mean(
         &self,
-        axis: Option<&Bound<'_, PyAny>>,
+        py: Python<'_>,
+        axis: Passed<'_>,
         skipna: bool,
         numeric_only: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PySeries> {
+    ) -> PyResult<Py<PyAny>> {
         numpy_compat_kwargs("mean", kwargs)?;
-        let ax = parse_axis_param(axis)?;
+        if let Some(value) = self.reduce_both_axes(
+            py,
+            "mean",
+            &axis,
+            skipna,
+            numeric_only.then_some(NUMERIC_DTYPES),
+        )? {
+            return Ok(value);
+        }
+        let ax = parse_axis_param(axis.0.as_ref())?;
         self.refuse_masked_rows("mean", ax, numeric_only)?;
         wrap_series(self.mean_internal(ax, skipna, numeric_only))
-            .and_then(|s| self.masked_answer("mean", ax, numeric_only, s))
+            .and_then(|s| self.masked_answer("mean", ax, numeric_only, s))?
+            .into_py_any(py)
     }
 
     /// Return the median of each column or row.
-    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, **kwargs))]
+    #[pyo3(signature = (axis=Passed(None), skipna=true, numeric_only=false, **kwargs))]
     fn median(
         &self,
-        axis: Option<&Bound<'_, PyAny>>,
+        py: Python<'_>,
+        axis: Passed<'_>,
         skipna: bool,
         numeric_only: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PySeries> {
+    ) -> PyResult<Py<PyAny>> {
         numpy_compat_kwargs("median", kwargs)?;
-        let ax = parse_axis_param(axis)?;
+        if let Some(value) = self.reduce_both_axes(
+            py,
+            "median",
+            &axis,
+            skipna,
+            numeric_only.then_some(NUMERIC_DTYPES),
+        )? {
+            return Ok(value);
+        }
+        let ax = parse_axis_param(axis.0.as_ref())?;
         self.refuse_masked_rows("median", ax, numeric_only)?;
         wrap_series(self.median_internal(ax, skipna, numeric_only))
-            .and_then(|s| self.masked_answer("median", ax, numeric_only, s))
+            .and_then(|s| self.masked_answer("median", ax, numeric_only, s))?
+            .into_py_any(py)
     }
 
     /// Return the standard deviation of each column or row.
-    #[pyo3(signature = (axis=None, skipna=true, ddof=1, numeric_only=false, **kwargs))]
+    #[pyo3(signature = (axis=Passed(None), skipna=true, ddof=1, numeric_only=false, **kwargs))]
     fn std(
         &self,
-        axis: Option<&Bound<'_, PyAny>>,
+        py: Python<'_>,
+        axis: Passed<'_>,
         skipna: bool,
         ddof: Option<usize>,
         numeric_only: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
         numpy_compat_kwargs("std", kwargs)?;
-        let ax = parse_axis_param(axis)?;
+        Self::warn_axis_none(py, "std", &axis)?;
+        let ax = parse_axis_param(axis.0.as_ref().filter(|axis| !axis.is_none()))?;
         let ddof_val = ddof.unwrap_or(1);
         self.refuse_masked_rows("std", ax, numeric_only)?;
         wrap_series(self.std_internal(ax, skipna, ddof_val, numeric_only))
@@ -37359,60 +37653,85 @@ impl PyDataFrame {
     }
 
     /// Return the variance of each column or row.
-    #[pyo3(signature = (axis=None, skipna=true, ddof=1, numeric_only=false, **kwargs))]
+    #[pyo3(signature = (axis=Passed(None), skipna=true, ddof=1, numeric_only=false, **kwargs))]
     fn var(
         &self,
-        axis: Option<&Bound<'_, PyAny>>,
+        py: Python<'_>,
+        axis: Passed<'_>,
         skipna: bool,
         ddof: Option<usize>,
         numeric_only: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
         numpy_compat_kwargs("var", kwargs)?;
-        let ax = parse_axis_param(axis)?;
+        Self::warn_axis_none(py, "var", &axis)?;
+        let ax = parse_axis_param(axis.0.as_ref().filter(|axis| !axis.is_none()))?;
         let ddof_val = ddof.unwrap_or(1);
         self.refuse_masked_rows("var", ax, numeric_only)?;
         wrap_series(self.var_internal(ax, skipna, ddof_val, numeric_only))
             .and_then(|s| self.masked_answer("var", ax, numeric_only, s))
     }
 
-    /// Return the count of non-missing values per column or row.
-    #[pyo3(signature = (axis=None, numeric_only=false))]
-    fn count(&self, axis: Option<&Bound<'_, PyAny>>, numeric_only: bool) -> PyResult<PySeries> {
-        let ax = parse_axis_param(axis)?;
+    /// Return the count of non-missing values per column or row;
+    /// `axis=None` is pandas' ValueError (it counted each column).
+    #[pyo3(signature = (axis=Passed(None), numeric_only=false))]
+    fn count(&self, axis: Passed<'_>, numeric_only: bool) -> PyResult<PySeries> {
+        let ax = parse_axis_param(axis.0.as_ref())?;
         wrap_series(self.count_internal(ax, numeric_only))
     }
 
     /// Return the minimum of each column or row.
-    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, **kwargs))]
+    #[pyo3(signature = (axis=Passed(None), skipna=true, numeric_only=false, **kwargs))]
     fn min(
         &self,
-        axis: Option<&Bound<'_, PyAny>>,
+        py: Python<'_>,
+        axis: Passed<'_>,
         skipna: bool,
         numeric_only: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PySeries> {
+    ) -> PyResult<Py<PyAny>> {
         numpy_compat_kwargs("min", kwargs)?;
-        let ax = parse_axis_param(axis)?;
+        if let Some(value) = self.reduce_both_axes(
+            py,
+            "min",
+            &axis,
+            skipna,
+            numeric_only.then_some(NUMERIC_DTYPES),
+        )? {
+            return Ok(value);
+        }
+        let ax = parse_axis_param(axis.0.as_ref())?;
         self.refuse_masked_rows("min", ax, numeric_only)?;
         wrap_series(self.min_internal(ax, skipna, numeric_only))
-            .and_then(|s| self.masked_answer("min", ax, numeric_only, s))
+            .and_then(|s| self.masked_answer("min", ax, numeric_only, s))?
+            .into_py_any(py)
     }
 
     /// Return the maximum of each column or row.
-    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, **kwargs))]
+    #[pyo3(signature = (axis=Passed(None), skipna=true, numeric_only=false, **kwargs))]
     fn max(
         &self,
-        axis: Option<&Bound<'_, PyAny>>,
+        py: Python<'_>,
+        axis: Passed<'_>,
         skipna: bool,
         numeric_only: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PySeries> {
+    ) -> PyResult<Py<PyAny>> {
         numpy_compat_kwargs("max", kwargs)?;
-        let ax = parse_axis_param(axis)?;
+        if let Some(value) = self.reduce_both_axes(
+            py,
+            "max",
+            &axis,
+            skipna,
+            numeric_only.then_some(NUMERIC_DTYPES),
+        )? {
+            return Ok(value);
+        }
+        let ax = parse_axis_param(axis.0.as_ref())?;
         self.refuse_masked_rows("max", ax, numeric_only)?;
         wrap_series(self.max_internal(ax, skipna, numeric_only))
-            .and_then(|s| self.masked_answer("max", ax, numeric_only, s))
+            .and_then(|s| self.masked_answer("max", ax, numeric_only, s))?
+            .into_py_any(py)
     }
 
     /// Return the column-pair correlation matrix as a DataFrame.
@@ -41772,34 +42091,46 @@ impl PyDataFrame {
     /// `bool_only` looks at the bool columns alone, and with skipna=False
     /// a missing value counts as its Python truth (both were unknown
     /// keywords; br-frankenpandas-u6p7i).
-    #[pyo3(signature = (axis=None, bool_only=false, skipna=true, **kwargs))]
+    #[pyo3(signature = (axis=Passed(None), bool_only=false, skipna=true, **kwargs))]
     fn any(
         &self,
         py: Python<'_>,
-        axis: Option<usize>,
+        axis: Passed<'_>,
         bool_only: bool,
         skipna: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PySeries> {
+    ) -> PyResult<Py<PyAny>> {
         numpy_compat_kwargs("any", kwargs)?;
-        let inner = self.logical_reduction(py, false, axis == Some(1), bool_only, skipna)?;
-        Ok(PySeries { inner })
+        if let Some(value) =
+            self.reduce_both_axes(py, "any", &axis, skipna, bool_only.then_some(&["bool"][..]))?
+        {
+            return Ok(value);
+        }
+        let rows = parse_axis_param(axis.0.as_ref())? == 1;
+        let inner = self.logical_reduction(py, false, rows, bool_only, skipna)?;
+        PySeries { inner }.into_py_any(py)
     }
 
     /// pandas' `DataFrame.all(axis=0, bool_only=False, skipna=True)`
     /// (see [`PyDataFrame::any`]).
-    #[pyo3(signature = (axis=None, bool_only=false, skipna=true, **kwargs))]
+    #[pyo3(signature = (axis=Passed(None), bool_only=false, skipna=true, **kwargs))]
     fn all(
         &self,
         py: Python<'_>,
-        axis: Option<usize>,
+        axis: Passed<'_>,
         bool_only: bool,
         skipna: bool,
         kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PySeries> {
+    ) -> PyResult<Py<PyAny>> {
         numpy_compat_kwargs("all", kwargs)?;
-        let inner = self.logical_reduction(py, true, axis == Some(1), bool_only, skipna)?;
-        Ok(PySeries { inner })
+        if let Some(value) =
+            self.reduce_both_axes(py, "all", &axis, skipna, bool_only.then_some(&["bool"][..]))?
+        {
+            return Ok(value);
+        }
+        let rows = parse_axis_param(axis.0.as_ref())? == 1;
+        let inner = self.logical_reduction(py, true, rows, bool_only, skipna)?;
+        PySeries { inner }.into_py_any(py)
     }
 
     #[pyo3(signature = (axis=None, numeric_only=false, dropna=true))]
@@ -41817,17 +42148,19 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: res })
     }
 
-    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, min_count=0, **kwargs))]
+    #[pyo3(signature = (axis=Passed(None), skipna=true, numeric_only=false, min_count=0, **kwargs))]
     fn prod(
         &self,
-        axis: Option<&Bound<'_, PyAny>>,
+        py: Python<'_>,
+        axis: Passed<'_>,
         skipna: bool,
         numeric_only: bool,
         min_count: Option<usize>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
         numpy_compat_kwargs("prod", kwargs)?;
-        let ax = parse_axis_param(axis)?;
+        Self::warn_axis_none(py, "prod", &axis)?;
+        let ax = parse_axis_param(axis.0.as_ref().filter(|axis| !axis.is_none()))?;
         self.refuse_masked_rows("prod", ax, numeric_only)?;
         if let Some(answer) = self.empty_object_rows_answer(ax, numeric_only)? {
             return Ok(answer);
@@ -41841,16 +42174,17 @@ impl PyDataFrame {
         .and_then(|s| self.empty_object_identities("prod", numeric_only, min_count, s))
     }
 
-    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false, min_count=0, **kwargs))]
+    #[pyo3(signature = (axis=Passed(None), skipna=true, numeric_only=false, min_count=0, **kwargs))]
     fn product(
         &self,
-        axis: Option<&Bound<'_, PyAny>>,
+        py: Python<'_>,
+        axis: Passed<'_>,
         skipna: bool,
         numeric_only: bool,
         min_count: Option<usize>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
-        self.prod(axis, skipna, numeric_only, min_count, kwargs)
+        self.prod(py, axis, skipna, numeric_only, min_count, kwargs)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -42093,57 +42427,82 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: res })
     }
 
-    #[pyo3(signature = (axis=None, skipna=true, ddof=1, numeric_only=false))]
+    #[pyo3(signature = (axis=Passed(None), skipna=true, ddof=1, numeric_only=false))]
     fn sem(
         &self,
-        axis: Option<&Bound<'_, PyAny>>,
+        py: Python<'_>,
+        axis: Passed<'_>,
         skipna: bool,
         ddof: Option<usize>,
         numeric_only: bool,
     ) -> PyResult<PySeries> {
-        let ax = parse_axis_param(axis)?;
+        Self::warn_axis_none(py, "sem", &axis)?;
+        let ax = parse_axis_param(axis.0.as_ref().filter(|axis| !axis.is_none()))?;
         let ddof_val = ddof.unwrap_or(1);
         self.refuse_masked_rows("sem", ax, numeric_only)?;
         wrap_series(self.sem_internal(ax, skipna, ddof_val, numeric_only))
             .and_then(|s| self.masked_answer("sem", ax, numeric_only, s))
     }
 
-    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false))]
+    #[pyo3(signature = (axis=Passed(None), skipna=true, numeric_only=false))]
     fn skew(
         &self,
-        axis: Option<&Bound<'_, PyAny>>,
+        py: Python<'_>,
+        axis: Passed<'_>,
         skipna: bool,
         numeric_only: bool,
-    ) -> PyResult<PySeries> {
-        let ax = parse_axis_param(axis)?;
+    ) -> PyResult<Py<PyAny>> {
+        if let Some(value) = self.reduce_both_axes(
+            py,
+            "skew",
+            &axis,
+            skipna,
+            numeric_only.then_some(NUMERIC_DTYPES),
+        )? {
+            return Ok(value);
+        }
+        let ax = parse_axis_param(axis.0.as_ref())?;
         self.refuse_masked_rows("skew", ax, numeric_only)?;
         let skewed = self.skew_internal(ax, numeric_only);
         wrap_series(skewed.and_then(|s| self.missing_is_nan(s, ax, numeric_only, skipna)))
-            .and_then(|s| self.masked_answer("skew", ax, numeric_only, s))
+            .and_then(|s| self.masked_answer("skew", ax, numeric_only, s))?
+            .into_py_any(py)
     }
 
-    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false))]
+    #[pyo3(signature = (axis=Passed(None), skipna=true, numeric_only=false))]
     fn kurt(
         &self,
-        axis: Option<&Bound<'_, PyAny>>,
+        py: Python<'_>,
+        axis: Passed<'_>,
         skipna: bool,
         numeric_only: bool,
-    ) -> PyResult<PySeries> {
-        let ax = parse_axis_param(axis)?;
+    ) -> PyResult<Py<PyAny>> {
+        if let Some(value) = self.reduce_both_axes(
+            py,
+            "kurt",
+            &axis,
+            skipna,
+            numeric_only.then_some(NUMERIC_DTYPES),
+        )? {
+            return Ok(value);
+        }
+        let ax = parse_axis_param(axis.0.as_ref())?;
         self.refuse_masked_rows("kurt", ax, numeric_only)?;
         let kurtosis = self.kurt_internal(ax, numeric_only);
         wrap_series(kurtosis.and_then(|s| self.missing_is_nan(s, ax, numeric_only, skipna)))
-            .and_then(|s| self.masked_answer("kurt", ax, numeric_only, s))
+            .and_then(|s| self.masked_answer("kurt", ax, numeric_only, s))?
+            .into_py_any(py)
     }
 
-    #[pyo3(signature = (axis=None, skipna=true, numeric_only=false))]
+    #[pyo3(signature = (axis=Passed(None), skipna=true, numeric_only=false))]
     fn kurtosis(
         &self,
-        axis: Option<&Bound<'_, PyAny>>,
+        py: Python<'_>,
+        axis: Passed<'_>,
         skipna: bool,
         numeric_only: bool,
-    ) -> PyResult<PySeries> {
-        self.kurt(axis, skipna, numeric_only)
+    ) -> PyResult<Py<PyAny>> {
+        self.kurt(py, axis, skipna, numeric_only)
     }
 
     #[pyo3(signature = (before=None, after=None, axis=None, copy=None))]
@@ -42710,30 +43069,79 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner })
     }
 
-    #[pyo3(signature = (other, join="outer"))]
-    fn align(&self, other: &PyDataFrame, join: &str) -> PyResult<(PyDataFrame, PyDataFrame)> {
-        let mode = match join {
-            "outer" => AlignMode::Outer,
-            "inner" => AlignMode::Inner,
-            "left" => AlignMode::Left,
-            "right" => AlignMode::Right,
-            _ => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Invalid join mode '{join}'"
-                )));
+    /// pandas' `align(other, join='outer', axis=None, level=None, copy=None,
+    /// fill_value=None)`: each axis the two differ on (both, or `axis`'s)
+    /// joined - outer the sorted union, inner the intersection, left / right
+    /// that side's labels - and both reindexed onto it, `fill_value` in the
+    /// cells that brings in; a Series aligns with the rows (axis=0) or the
+    /// columns (axis=1). axis= / fill_value= were refused, and join='left'
+    /// took the other frame's columns too (br-frankenpandas-5mkvo).
+    #[pyo3(signature = (other, join="outer", axis=None, level=None, copy=None, fill_value=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn align<'py>(
+        slf: &Bound<'py, Self>,
+        other: &Bound<'py, PyAny>,
+        join: &str,
+        axis: Option<&Bound<'py, PyAny>>,
+        level: Option<&Bound<'py, PyAny>>,
+        copy: Option<bool>,
+        fill_value: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
+        let _ = copy;
+        if level.is_some_and(|level| !level.is_none()) {
+            return Err(not_implemented("DataFrame.align(level=...)"));
+        }
+        let axis = parse_axis_param_for_type(axis.filter(|axis| !axis.is_none()), "DataFrame")?;
+        let this = slf.as_any();
+        if other.is_instance_of::<PySeries>() {
+            let Some(axis) = axis else {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Must specify axis=0 or 1",
+                ));
+            };
+            let frame_axis = if axis == 0 { "index" } else { "columns" };
+            let joined = aligned_axis(&this.getattr(frame_axis)?, &other.getattr("index")?, join)?;
+            return filled_after_align(
+                aligned_on(this, frame_axis, joined.as_ref(), None)?,
+                aligned_on(other, "index", joined.as_ref(), None)?,
+                fill_value,
+            );
+        }
+        let (mut left, mut right) = (this.clone(), other.clone());
+        for (position, name) in [(0, "index"), (1, "columns")] {
+            if axis.is_some_and(|axis| axis != position) {
+                continue;
             }
-        };
-        let (df1, df2) = self
-            .inner
-            .align(&other.inner, mode)
-            .map_err(frame_error_to_py)?;
-        Ok((PyDataFrame { inner: df1 }, PyDataFrame { inner: df2 }))
+            let joined = aligned_axis(&left.getattr(name)?, &right.getattr(name)?, join)?;
+            left = aligned_on(&left, name, joined.as_ref(), fill_value)?;
+            right = aligned_on(&right, name, joined.as_ref(), fill_value)?;
+        }
+        Ok((left, right))
     }
 
-    fn compare(&self, other: &PyDataFrame) -> PyResult<PyDataFrame> {
+    /// pandas' `compare(other, align_axis=1, keep_shape=False,
+    /// keep_equal=False, result_names=('self', 'other'))` (the keywords were
+    /// refused; br-frankenpandas-5mkvo).
+    #[pyo3(signature = (other, align_axis=None, keep_shape=false, keep_equal=false, result_names=None))]
+    fn compare(
+        &self,
+        other: &PyDataFrame,
+        align_axis: Option<&Bound<'_, PyAny>>,
+        keep_shape: bool,
+        keep_equal: bool,
+        result_names: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let align_axis = compare_align_axis(align_axis, "DataFrame")?;
+        let (left, right) = compare_result_names(result_names)?;
         let res = self
             .inner
-            .compare(&other.inner)
+            .compare_with_align_axis(
+                &other.inner,
+                (&left, &right),
+                keep_shape,
+                keep_equal,
+                align_axis,
+            )
             .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: res })
     }
@@ -44842,9 +45250,10 @@ impl PyDataFrame {
         .into_bound_py_any(py)
     }
 
-    #[pyo3(signature = (axis=None, dropna=true))]
-    fn nunique(&self, axis: Option<&Bound<'_, PyAny>>, dropna: bool) -> PyResult<PySeries> {
-        let ax = parse_axis_param(axis)?;
+    /// `axis=None` is pandas' ValueError (each column was counted).
+    #[pyo3(signature = (axis=Passed(None), dropna=true))]
+    fn nunique(&self, axis: Passed<'_>, dropna: bool) -> PyResult<PySeries> {
+        let ax = parse_axis_param(axis.0.as_ref())?;
         let s = self
             .inner
             .nunique_axis_with_dropna(ax, dropna)
@@ -82594,9 +83003,16 @@ mod tests {
         .expect("series"); // ubs:ignore — test fixture
         let py_s2 = PySeries { inner: s2 };
 
-        let (a1, a2) = py_s1.align(&py_s2, "outer").expect("align"); // ubs:ignore — test fixture
-        assert_eq!(a1.inner.len(), 3);
-        assert_eq!(a2.inner.len(), 3);
+        Python::attach(|py| {
+            let (b1, b2) = (
+                Bound::new(py, py_s1.clone()).expect("s1"), // ubs:ignore — test fixture
+                Bound::new(py, py_s2.clone()).expect("s2"), // ubs:ignore — test fixture
+            );
+            let (a1, a2) =
+                PySeries::align(&b1, &b2, "outer", None, None, None, None).expect("align"); // ubs:ignore — test fixture
+            assert_eq!(a1.len().expect("len"), 3); // ubs:ignore — test fixture
+            assert_eq!(a2.len().expect("len"), 3); // ubs:ignore — test fixture
+        });
 
         let cf = py_s1.combine_first(&py_s2).expect("combine_first"); // ubs:ignore — test fixture
         assert_eq!(cf.inner.len(), 3);
@@ -82607,9 +83023,21 @@ mod tests {
         )
         .expect("df"); // ubs:ignore — test fixture
         let py_df1 = PyDataFrame { inner: df1 };
-        let (d1, d2) = py_df1.align(&py_df1, "inner").expect("align df"); // ubs:ignore — test fixture
-        assert_eq!(d1.shape(), (2, 1));
-        assert_eq!(d2.shape(), (2, 1));
+        Python::attach(|py| {
+            let frame = Bound::new(
+                py,
+                PyDataFrame {
+                    inner: py_df1.inner.clone(),
+                },
+            )
+            .expect("df"); // ubs:ignore — test fixture
+            let (d1, d2) =
+                PyDataFrame::align(&frame, frame.as_any(), "inner", None, None, None, None)
+                    .expect("align df"); // ubs:ignore — test fixture
+            let shape = |d: &Bound<'_, PyAny>| d.getattr("shape")?.extract::<(usize, usize)>();
+            assert_eq!(shape(&d1).expect("shape"), (2, 1)); // ubs:ignore — test fixture
+            assert_eq!(shape(&d2).expect("shape"), (2, 1)); // ubs:ignore — test fixture
+        });
 
         let ewm = py_df1
             .ewm(
