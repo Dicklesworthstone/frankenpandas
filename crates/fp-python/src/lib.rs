@@ -8867,7 +8867,13 @@ impl<'a, 'py> FromPyObject<'a, 'py> for IndexArg {
         if let Some(inner) = typed {
             return Ok(Self(PyIndex { inner }));
         }
-        PyIndex::new(Some(&obj), None).map(Self)
+        // A list is the Index pandas' constructor makes of it: numbers
+        // beside a missing one float64 ([None, 1] kept None, which a float
+        // index's NaN did not match; l5sed).
+        let index = PyIndex::new(Some(&obj), None)?;
+        Ok(Self(PyIndex {
+            inner: float_labelled(index.inner),
+        }))
     }
 }
 
@@ -8914,17 +8920,6 @@ fn setop_sorted(result: Index, left: &Index, right: &Index, sort: Option<bool>) 
         _ if sorts => result.sort_values(),
         _ => result,
     }
-}
-
-/// The dtype of `index` read as pandas' constructor reads its labels:
-/// numbers beside a missing one, or ints beside floats, are float64 (see
-/// [`float_labelled`]) - an operand built from a list (`[None, 1]`) keeps
-/// its labels as given, which compare with an int index's.
-fn constructed_dtype(index: &Index) -> &'static str {
-    if index.declared_dtype().is_some() {
-        return index.dtype();
-    }
-    float_labelled(index.clone()).dtype()
 }
 
 /// pandas' dtype for an index operation joining indexes of dtypes `left`
@@ -9822,7 +9817,13 @@ impl PyIndex {
     /// [`index_common_dtype`]).
     #[pyo3(signature = (other, sort=Some(false)))]
     fn intersection(&self, other: IndexArg, sort: Option<bool>) -> Self {
-        let dtype = index_common_dtype(self.inner.dtype(), constructed_dtype(&other.inner));
+        // Equal indexes answer this one in its own dtype, as pandas' shortcut
+        // does (Index([1, 2]) and Index([1.0, 2.0]) are equal; l5sed).
+        let dtype = if self.inner.equals(&other.inner) {
+            self.inner.dtype()
+        } else {
+            index_common_dtype(self.inner.dtype(), other.inner.dtype())
+        };
         let result = index_in_dtype(self.inner.intersection(&other.inner), dtype);
         PyIndex {
             inner: setop_sorted(result, &self.inner, &other.inner, sort),
@@ -9833,7 +9834,7 @@ impl PyIndex {
     /// indexes' common dtype (see [`index_common_dtype`]).
     #[pyo3(signature = (other, sort=None))]
     fn union(&self, other: IndexArg, sort: Option<bool>) -> Self {
-        let dtype = index_common_dtype(self.inner.dtype(), constructed_dtype(&other.inner));
+        let dtype = index_common_dtype(self.inner.dtype(), other.inner.dtype());
         let result = index_in_dtype(self.inner.union(&other.inner), dtype);
         PyIndex {
             inner: setop_sorted(result, &self.inner, &other.inner, sort),
@@ -10396,7 +10397,7 @@ impl PyIndex {
         result_name: Option<&Bound<'_, PyAny>>,
         sort: Option<bool>,
     ) -> PyResult<Self> {
-        let dtype = index_common_dtype(self.inner.dtype(), constructed_dtype(&other.inner));
+        let dtype = index_common_dtype(self.inner.dtype(), other.inner.dtype());
         let inner = index_in_dtype(self.inner.symmetric_difference(&other.inner), dtype);
         let inner = setop_sorted(inner, &self.inner, &other.inner, sort);
         Ok(PyIndex {

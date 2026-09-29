@@ -151,7 +151,13 @@ impl PartialOrd for OrderedF64 {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+/// Labels compare as pandas' do: an int and a float are one number (`1 ==
+/// 1.0`, hashed alike, as Python's), ordered by value beside each other;
+/// every other kind equals only its own kind, and kinds order as declared
+/// below with the numbers first (br-frankenpandas-l5sed: `Int64(1)` and
+/// `Float64(1.0)` were different labels, so `s.loc[2.0]` missed an int
+/// index).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum IndexLabel {
     Int64(i64),
@@ -184,6 +190,138 @@ pub enum IndexLabel {
     /// kind-SENSITIVE (None != nan != NaT), matching `ScalarKey::Null`
     /// bucket identity.
     Null(fp_types::NullKind),
+}
+
+/// `value` as the int it equals exactly, if it is one (no fraction, inside
+/// i64's range).
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)] // checked round trip
+fn exact_i64(value: f64) -> Option<i64> {
+    // 2^63 is the first float past i64's range.
+    const LIMIT: f64 = 9_223_372_036_854_775_808.0;
+    (value.fract() == 0.0 && (-LIMIT..LIMIT).contains(&value)).then_some(value as i64)
+}
+
+/// An int against a float, exactly: NaN after every number, as a float
+/// index orders it.
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)] // checked range
+fn cmp_int_float(int: i64, float: f64) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    const LIMIT: f64 = 9_223_372_036_854_775_808.0;
+    if float.is_nan() || float >= LIMIT {
+        return Ordering::Less;
+    }
+    if float < -LIMIT {
+        return Ordering::Greater;
+    }
+    let whole = float.trunc();
+    match int.cmp(&(whole as i64)) {
+        Ordering::Equal if float > whole => Ordering::Less,
+        Ordering::Equal if float < whole => Ordering::Greater,
+        other => other,
+    }
+}
+
+impl IndexLabel {
+    /// The int this label equals: an int's own value, an integral float's
+    /// (`2.0` is `2`, as pandas looks it up in an int index); None for any
+    /// other label.
+    #[must_use]
+    pub fn exact_int(&self) -> Option<i64> {
+        match self {
+            Self::Int64(value) => Some(*value),
+            Self::Float64(value) => exact_i64(value.0),
+            _ => None,
+        }
+    }
+
+    /// The label's kind in the cross-kind order: numbers first (ints and
+    /// floats together), then the kinds as declared, missing last.
+    fn kind_rank(&self) -> u8 {
+        match self {
+            Self::Int64(_) | Self::Float64(_) => 0,
+            Self::Utf8(_) => 1,
+            Self::Timedelta64(_) => 2,
+            Self::Datetime64(_) => 3,
+            Self::Bool(_) => 4,
+            Self::Object(_) => 5,
+            Self::Period(_) => 6,
+            Self::Null(_) => 7,
+        }
+    }
+}
+
+impl PartialEq for IndexLabel {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Int64(a), Self::Int64(b))
+            | (Self::Timedelta64(a), Self::Timedelta64(b))
+            | (Self::Datetime64(a), Self::Datetime64(b)) => a == b,
+            (Self::Int64(int), Self::Float64(float)) | (Self::Float64(float), Self::Int64(int)) => {
+                exact_i64(float.0) == Some(*int)
+            }
+            (Self::Float64(a), Self::Float64(b)) => a == b,
+            (Self::Utf8(a), Self::Utf8(b)) => a == b,
+            (Self::Bool(a), Self::Bool(b)) => a == b,
+            (Self::Object(a), Self::Object(b)) => a == b,
+            (Self::Period(a), Self::Period(b)) => a == b,
+            (Self::Null(a), Self::Null(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for IndexLabel {}
+
+impl std::hash::Hash for IndexLabel {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // An integral float hashes as the int it equals.
+        let integral = match self {
+            Self::Int64(value) => Some(*value),
+            Self::Float64(value) => exact_i64(value.0),
+            _ => None,
+        };
+        if let Some(value) = integral {
+            0_u8.hash(state);
+            value.hash(state);
+            return;
+        }
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Self::Int64(_) => {}
+            Self::Utf8(text) => text.hash(state),
+            Self::Timedelta64(value) | Self::Datetime64(value) => value.hash(state),
+            Self::Float64(value) => value.hash(state),
+            Self::Bool(flag) => flag.hash(state),
+            Self::Object(object) => object.hash(state),
+            Self::Period(period) => period.hash(state),
+            Self::Null(kind) => kind.hash(state),
+        }
+    }
+}
+
+impl Ord for IndexLabel {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (Self::Int64(a), Self::Int64(b))
+            | (Self::Timedelta64(a), Self::Timedelta64(b))
+            | (Self::Datetime64(a), Self::Datetime64(b)) => a.cmp(b),
+            (Self::Int64(int), Self::Float64(float)) => cmp_int_float(*int, float.0),
+            (Self::Float64(float), Self::Int64(int)) => cmp_int_float(*int, float.0).reverse(),
+            (Self::Float64(a), Self::Float64(b)) => a.cmp(b),
+            (Self::Utf8(a), Self::Utf8(b)) => a.cmp(b),
+            (Self::Bool(a), Self::Bool(b)) => a.cmp(b),
+            (Self::Object(a), Self::Object(b)) => a.cmp(b),
+            (Self::Period(a), Self::Period(b)) => a.cmp(b),
+            (Self::Null(a), Self::Null(b)) => a.cmp(b),
+            _ => self.kind_rank().cmp(&other.kind_rank()),
+        }
+    }
+}
+
+impl PartialOrd for IndexLabel {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl From<i64> for IndexLabel {
@@ -1708,10 +1846,12 @@ impl IndexLabels {
             return out;
         }
 
-        out.extend(self.as_slice().iter().map(|label| match label {
-            IndexLabel::Int64(value) => source.position(*value),
-            _ => None,
-        }));
+        // An integral float target is the int it equals (l5sed).
+        out.extend(
+            self.as_slice()
+                .iter()
+                .map(|label| label.exact_int().and_then(|value| source.position(value))),
+        );
         out
     }
 
@@ -2874,6 +3014,17 @@ impl Index {
     /// For unsorted indexes, falls back to linear scan (O(n)).
     #[must_use]
     pub fn position(&self, needle: &IndexLabel) -> Option<usize> {
+        // An integral float key is the int it equals: the int paths below
+        // match Int64 keys, and every other path compares by value
+        // (br-frankenpandas-l5sed).
+        let as_int;
+        let needle = match (needle, needle.exact_int()) {
+            (IndexLabel::Float64(_), Some(int)) => {
+                as_int = IndexLabel::Int64(int);
+                &as_int
+            }
+            _ => needle,
+        };
         if let (Some(range), IndexLabel::Int64(target)) = (self.labels.int64_affine_range(), needle)
         {
             return range.position(*target);
@@ -3654,8 +3805,9 @@ impl Index {
     /// index without building the duplicate-expansion map.
     ///
     /// `SortOrder::AscendingInt64` is strict, so the index is unique and each
-    /// requested label can yield at most one position. Missing or non-Int64
-    /// requested labels are represented as `None`; callers preserve their own
+    /// requested label can yield at most one position. Missing requested
+    /// labels, or ones equal to no int (an integral Float64 is its int), are
+    /// represented as `None`; callers preserve their own
     /// fail-closed error surface. Returns `None` only when this index is not a
     /// sorted unique Int64 index and the duplicate-aware fallback must run.
     #[must_use]
@@ -3668,12 +3820,14 @@ impl Index {
             return None;
         }
         let values = self.labels.int64_view()?;
+        // An integral Float64 selector is the int it equals (l5sed).
         Some(
             labels
                 .iter()
-                .map(|label| match label {
-                    IndexLabel::Int64(value) => values.binary_search(value).ok(),
-                    _ => None,
+                .map(|label| {
+                    label
+                        .exact_int()
+                        .and_then(|value| values.binary_search(&value).ok())
                 })
                 .collect(),
         )
@@ -3689,8 +3843,9 @@ impl Index {
     /// [`Self::sorted_unique_int64_positions`]), has duplicate labels (pandas
     /// returns every match, which needs the multimap), or is not all-Int64.
     /// The index is unique here, so each requested label yields at most one
-    /// position; missing or non-Int64 selectors map to `None` and callers
-    /// preserve their own fail-closed error surface.
+    /// position; missing selectors, or ones equal to no int (an integral
+    /// Float64 is its int), map to `None` and callers preserve their own
+    /// fail-closed error surface.
     #[must_use]
     #[doc(hidden)]
     pub fn unsorted_unique_int64_positions(
@@ -3705,12 +3860,14 @@ impl Index {
         }
         let values = self.labels.int64_view()?;
         let lookup = int64_position_lookup_cached(self.label_identity, &values);
+        // An integral Float64 selector is the int it equals (l5sed).
         Some(
             labels
                 .iter()
-                .map(|label| match label {
-                    IndexLabel::Int64(value) => lookup.get(value).copied(),
-                    _ => None,
+                .map(|label| {
+                    label
+                        .exact_int()
+                        .and_then(|value| lookup.get(&value).copied())
                 })
                 .collect(),
         )
@@ -3806,18 +3963,13 @@ impl Index {
     #[must_use]
     pub fn isin(&self, values: &[IndexLabel]) -> Vec<bool> {
         // Typed all-Int64 fast path: probe over raw `i64` keys. An all-Int64
-        // index can only match `IndexLabel::Int64` needles (the enum's Eq is
-        // variant-sensitive), so non-Int64 needles are dropped without changing
-        // membership — bit-identical to the pointer-keyed `FxHashMap` probe but
-        // without the per-label enum-pointer cache miss.
+        // index matches the needles that equal an int - an Int64, or an
+        // integral Float64 (labels compare numbers by value; l5sed) - so the
+        // others are dropped without changing membership, bit-identical to
+        // the pointer-keyed `FxHashMap` probe but without the per-label
+        // enum-pointer cache miss.
         if let Some(self_i64) = self.labels.int64_view() {
-            let needles: Vec<i64> = values
-                .iter()
-                .filter_map(|v| match v {
-                    IndexLabel::Int64(x) => Some(*x),
-                    _ => None,
-                })
-                .collect();
+            let needles: Vec<i64> = values.iter().filter_map(IndexLabel::exact_int).collect();
             return Self::isin_i64(&self_i64, &needles);
         }
         let set: FxHashMap<&IndexLabel, ()> = values.iter().map(|v| (v, ())).collect();
@@ -22374,6 +22526,62 @@ mod tests {
     fn date_offset_month_end_handles_leap_year() {
         let nanos = apply_date_offset("2024-02-10", DateOffset::MonthEnd(1)).unwrap();
         assert_eq!(nanos, 1_709_164_800_000_000_000);
+    }
+
+    #[test]
+    fn index_label_numbers_compare_by_value_l5sed() {
+        use std::hash::{BuildHasher, RandomState};
+        let hashes = RandomState::new();
+        let int = IndexLabel::Int64;
+        let float = |value: f64| IndexLabel::Float64(OrderedF64(value));
+        // An int and the float it equals are one label, hashed alike.
+        assert_eq!(int(2), float(2.0));
+        assert_eq!(hashes.hash_one(int(2)), hashes.hash_one(float(2.0)));
+        assert_eq!(int(0), float(-0.0));
+        assert_eq!(hashes.hash_one(int(0)), hashes.hash_one(float(-0.0)));
+        assert_eq!(int(2).cmp(&float(2.0)), std::cmp::Ordering::Equal);
+        // Numbers order by value, beside each other; NaN after them.
+        let mut labels = vec![
+            IndexLabel::Utf8("a".into()),
+            int(2),
+            float(f64::NAN),
+            float(1.5),
+            int(1),
+        ];
+        labels.sort();
+        assert_eq!(
+            labels,
+            vec![
+                int(1),
+                float(1.5),
+                int(2),
+                float(f64::NAN),
+                IndexLabel::Utf8("a".into())
+            ]
+        );
+        // Exact at the edges: 2^53 + 1 is no float, 2^63 no int.
+        let big = (1_i64 << 53) + 1;
+        assert_ne!(int(big), float(9_007_199_254_740_992.0));
+        assert!(int(big) > float(9_007_199_254_740_992.0));
+        assert_ne!(int(i64::MAX), float(9_223_372_036_854_775_808.0));
+        assert!(int(i64::MAX) < float(9_223_372_036_854_775_808.0));
+        assert_eq!(int(i64::MIN), float(-9_223_372_036_854_775_808.0));
+        // Lookups over an int index find an integral float key.
+        let index = Index::new(vec![int(1), int(2)]);
+        assert_eq!(index.position(&float(2.0)), Some(1));
+        assert_eq!(index.isin(&[float(1.0)]), vec![true, false]);
+        let targets = Index::new(vec![float(2.0), float(3.0)]);
+        assert_eq!(index.get_indexer(&targets), vec![Some(1), None]);
+        assert!(index.equals(&Index::new(vec![float(1.0), float(2.0)])));
+        // NEGATIVE: a fraction, text, a bool, a duration and a missing value
+        // equal no int.
+        assert_ne!(int(1), float(1.5));
+        assert_eq!(index.position(&float(1.5)), None);
+        assert_ne!(int(1), IndexLabel::Utf8("1".into()));
+        assert_ne!(int(1), IndexLabel::Bool(true));
+        assert_ne!(int(1), IndexLabel::Timedelta64(1));
+        assert_ne!(int(1), IndexLabel::Null(fp_types::NullKind::NaN));
+        assert_eq!(index.position(&IndexLabel::Utf8("2".into())), None);
     }
 
     #[test]

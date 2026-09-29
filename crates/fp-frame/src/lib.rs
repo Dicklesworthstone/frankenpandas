@@ -3830,16 +3830,6 @@ fn build_mode_column(values: Vec<Scalar>) -> Result<Column, FrameError> {
     }
 }
 
-/// Resolve `target` label positions against `src` using a dense direct-address
-/// table, valid only when every `src` label is a bounded-range `Int64`.
-///
-/// Returns `Some(positions)` where `positions[j]` is the first-occurrence index
-/// of `target[j]` in `src` (or `None` if absent), bit-identical to probing a
-/// `HashMap<IndexLabel, usize>` built first-occurrence — but with zero hashing.
-/// Returns `None` (decline the fast path) when any source label is non-Int64 or
-/// the value range is too wide to address densely, so the caller falls back to
-/// the hash path. `IndexLabel` equality is kind-sensitive, so a non-Int64
-/// target can never match an Int64 source and correctly resolves to `None`.
 /// Carry reindex source positions in the fill direction for
 /// `reindex(method='ffill'|'bfill')`.
 ///
@@ -4140,6 +4130,17 @@ fn fill_reindex_positions(
         .collect())
 }
 
+/// Resolve `target` label positions against `src` using a dense direct-address
+/// table, valid only when every `src` label is a bounded-range `Int64`.
+///
+/// Returns `Some(positions)` where `positions[j]` is the first-occurrence index
+/// of `target[j]` in `src` (or `None` if absent), bit-identical to probing a
+/// `HashMap<IndexLabel, usize>` built first-occurrence — but with zero hashing.
+/// Returns `None` (decline the fast path) when any source label is non-Int64 or
+/// the value range is too wide to address densely, so the caller falls back to
+/// the hash path. A target matches when it equals an int - an Int64, or an
+/// integral Float64, as `IndexLabel` equality compares numbers by value
+/// (br-frankenpandas-l5sed) - and any other resolves to `None`.
 fn reindex_positions_int64_direct(
     src: &[IndexLabel],
     target: &[IndexLabel],
@@ -4191,9 +4192,9 @@ fn reindex_positions_int64_direct(
     }
     let positions = target
         .iter()
-        .map(|label| match label {
-            IndexLabel::Int64(v) if *v >= min && *v <= max => {
-                let pos = table[(*v - min) as usize];
+        .map(|label| match label.exact_int() {
+            Some(v) if v >= min && v <= max => {
+                let pos = table[(v - min) as usize];
                 (pos != u32::MAX).then_some(pos as usize)
             }
             _ => None,
@@ -13260,8 +13261,9 @@ impl Series {
         // `HashMap<IndexLabel, usize>` (perf_profile reindex_str showed
         // position_map_first + Sip13 hashing at ~40% of the op). Bit-identical:
         // duplicates were rejected above so first-occurrence == only-occurrence,
-        // `IndexLabel` Eq is kind-sensitive (only Int64 targets can match Int64
-        // sources), and out-of-range / absent targets map to `None` exactly as
+        // only a target equal to an int (Int64, or an integral Float64 -
+        // `IndexLabel` compares numbers by value) can match Int64 sources, and
+        // out-of-range / absent targets map to `None` exactly as
         // `HashMap::get` returns `None`.
         // Non-bounded-Int64 fallback (Datetime64, wide/sparse Int64, Utf8):
         // route through `Index::get_indexer` instead of hand-rolling a
@@ -13275,8 +13277,8 @@ impl Series {
         // its index engine identically). Bit-identical: duplicates were rejected
         // above, so `self` is unique and get_indexer's first-occurrence ==
         // only-occurrence == the `HashMap::get` the old fallback returned;
-        // `IndexLabel` Eq is kind-sensitive, so absent/other-kind targets map to
-        // `None` exactly as before.
+        // `IndexLabel` Eq keeps kinds apart (numbers compare by value), so
+        // absent/other-kind targets map to `None` exactly as before.
         let positions: Vec<Option<usize>> =
             reindex_positions_int64_direct(self.index.labels(), new_index.labels())
                 .unwrap_or_else(|| self.index.get_indexer(&new_index));
@@ -13943,22 +13945,24 @@ impl Series {
             // v-start arithmetically, O(1) per label, no full-index hashmap and no
             // `self.index.labels()` materialization. Strictly unique, so each label
             // matches one position; the emitted label equals the request.
+            // An integral float selects the int it equals, which labels the
+            // row (pandas keeps the index's label; br-frankenpandas-l5sed).
             use_typed_int64_index = true;
             out_label_ints.reserve(labels.len());
             for requested in labels {
-                match requested {
-                    IndexLabel::Int64(v) => {
+                match requested.exact_int() {
+                    Some(v) => {
                         let off = v.wrapping_sub(start);
                         if off >= 0 && (off as u64) < len as u64 {
                             positions.push(off as usize);
-                            out_label_ints.push(*v);
+                            out_label_ints.push(v);
                         } else {
                             return Err(FrameError::CompatibilityRejected(format!(
                                 "loc label not found: {requested:?}"
                             )));
                         }
                     }
-                    _ => {
+                    None => {
                         return Err(FrameError::CompatibilityRejected(format!(
                             "loc label not found: {requested:?}"
                         )));
@@ -13969,14 +13973,15 @@ impl Series {
             // Strictly-ascending materialized Int64 indexes are unique, so list
             // loc can resolve each requested label with a raw i64 binary search
             // and avoid the duplicate-expansion map that allocates a Vec per
-            // index label. Missing/non-Int64 selectors still fail closed.
+            // index label. Missing selectors, or ones equal to no int, still
+            // fail closed.
             use_typed_int64_index = true;
             out_label_ints.reserve(labels.len());
             for (requested, position) in labels.iter().zip(resolved_positions) {
-                match (requested, position) {
-                    (IndexLabel::Int64(value), Some(position)) => {
+                match (requested.exact_int(), position) {
+                    (Some(value), Some(position)) => {
                         positions.push(position);
-                        out_label_ints.push(*value);
+                        out_label_ints.push(value);
                     }
                     _ => {
                         return Err(FrameError::CompatibilityRejected(format!(
@@ -13990,14 +13995,15 @@ impl Series {
             // Unsorted unique materialized Int64 index: resolve each requested
             // label through the identity-cached i64->position hashtable instead
             // of rebuilding the per-call pointer-key map over the whole index.
-            // Unique ⇒ one position per label; missing/non-Int64 fail closed.
+            // Unique ⇒ one position per label; missing selectors, or ones
+            // equal to no int, fail closed.
             use_typed_int64_index = true;
             out_label_ints.reserve(labels.len());
             for (requested, position) in labels.iter().zip(resolved_positions) {
-                match (requested, position) {
-                    (IndexLabel::Int64(value), Some(position)) => {
+                match (requested.exact_int(), position) {
+                    (Some(value), Some(position)) => {
                         positions.push(position);
-                        out_label_ints.push(*value);
+                        out_label_ints.push(value);
                     }
                     _ => {
                         return Err(FrameError::CompatibilityRejected(format!(
@@ -78765,23 +78771,24 @@ impl DataFrame {
             // one position (or none ⇒ fail closed, same as the map miss); the
             // emitted out_label equals the requested `Int64(v)` (off = v-start,
             // label = start+off = v), so we record the raw `v` and never touch
-            // `self.index.labels()` (br index-rematerialization family).
+            // `self.index.labels()` (br index-rematerialization family). An
+            // integral float selects the int it equals (l5sed).
             use_typed_int64_index = true;
             out_label_ints.reserve(labels.len());
             for requested in labels {
-                match requested {
-                    IndexLabel::Int64(v) => {
+                match requested.exact_int() {
+                    Some(v) => {
                         let off = v.wrapping_sub(start);
                         if off >= 0 && (off as u64) < len as u64 {
                             positions.push(off as usize);
-                            out_label_ints.push(*v);
+                            out_label_ints.push(v);
                         } else {
                             return Err(FrameError::CompatibilityRejected(format!(
                                 "loc label not found: {requested:?}"
                             )));
                         }
                     }
-                    _ => {
+                    None => {
                         return Err(FrameError::CompatibilityRejected(format!(
                             "loc label not found: {requested:?}"
                         )));
@@ -78795,10 +78802,10 @@ impl DataFrame {
             use_typed_int64_index = true;
             out_label_ints.reserve(labels.len());
             for (requested, position) in labels.iter().zip(resolved_positions) {
-                match (requested, position) {
-                    (IndexLabel::Int64(value), Some(position)) => {
+                match (requested.exact_int(), position) {
+                    (Some(value), Some(position)) => {
                         positions.push(position);
-                        out_label_ints.push(*value);
+                        out_label_ints.push(value);
                     }
                     _ => {
                         return Err(FrameError::CompatibilityRejected(format!(
@@ -78815,10 +78822,10 @@ impl DataFrame {
             use_typed_int64_index = true;
             out_label_ints.reserve(labels.len());
             for (requested, position) in labels.iter().zip(resolved_positions) {
-                match (requested, position) {
-                    (IndexLabel::Int64(value), Some(position)) => {
+                match (requested.exact_int(), position) {
+                    (Some(value), Some(position)) => {
                         positions.push(position);
-                        out_label_ints.push(*value);
+                        out_label_ints.push(value);
                     }
                     _ => {
                         return Err(FrameError::CompatibilityRejected(format!(

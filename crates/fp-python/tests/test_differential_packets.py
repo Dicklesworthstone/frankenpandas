@@ -18321,3 +18321,54 @@ _IU_CASES = {
 def test_index_operations_take_pandas_common_dtype_jnw2b(case: str) -> None:
     run = _IU_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-l5sed: an int and a float key are one number (1 == 1.0),
+# as pandas looks them up - s.loc[2.0] on an int index was KeyError, and
+# get_loc / isin / get_indexer / reindex / equals / intersection / difference
+# missed between the two.
+def _nq_series(m: Any) -> Any:
+    return m.Series([10, 20, 30], index=[1, 2, 3])
+
+
+def _nq_frame(m: Any) -> Any:
+    return m.DataFrame({"v": [10, 20, 30]}, index=[1, 2, 3])
+
+
+_NQ_CASES = {
+    "int get_loc float": lambda m: [m.Index([1, 2]).get_loc(1.0)],
+    "float get_loc int": lambda m: [m.Index([1.0, 2.0]).get_loc(1)],
+    "int isin float": lambda m: list(m.Index([1, 2]).isin([1.0])),
+    "float isin int": lambda m: list(m.Index([1.0, 2.0]).isin([1])),
+    "int get_indexer float": lambda m: list(m.Index([1, 2]).get_indexer([2.0, 3.0])),
+    "float get_indexer int": lambda m: list(m.Index([1.0, 2.0]).get_indexer([2, 3])),
+    "float get_indexer None": lambda m: list(m.Index([1.0, None]).get_indexer([None, 1])),
+    "int get_indexer pad float": lambda m: list(m.Index([1, 3]).get_indexer([2.0, 3.0], method="pad")),
+    "int equals float": lambda m: [m.Index([1, 2]).equals(m.Index([1.0, 2.0]))],
+    "int intersection float Index": lambda m: _iu_shown(m.Index([1, 2]).intersection(m.Index([1.0, 2.0]))),
+    "int difference float": lambda m: _iu_shown(m.Index([1, 2]).difference([1.0])),
+    "series loc float": lambda m: [_nq_series(m).loc[2.0]],
+    "series getitem float": lambda m: [_nq_series(m)[2.0]],
+    "series at float": lambda m: [_nq_series(m).at[2.0]],
+    "series loc floats": lambda m: _mk_shown(_nq_series(m).loc[[1.0, 3.0]]),
+    "series loc int on floats": lambda m: [m.Series([10, 20], index=[1.0, 2.0]).loc[2]],
+    "series reindex floats": lambda m: _mk_shown(_nq_series(m).reindex([2.0, 4.0])),
+    "series drop float": lambda m: _mk_shown(_nq_series(m).drop(2.0)),
+    "frame loc float": lambda m: _mk_shown(_nq_frame(m).loc[2.0]),
+    "frame loc float cell": lambda m: [_nq_frame(m).loc[3.0, "v"]],
+    "frame drop floats": lambda m: _mk_shown(_nq_frame(m).drop(index=[1.0, 3.0])),
+    "frame reindex floats": lambda m: _mk_shown(_nq_frame(m).reindex([3.0, 1.0])),
+    # Negatives: no int equals 1.5, text or a missing key.
+    "int get_loc fraction": lambda m: [m.Index([1, 2]).get_loc(1.5)],
+    "series loc text": lambda m: [_nq_series(m).loc["2"]],
+    "int isin fraction and text": lambda m: list(m.Index([1, 2]).isin([1.5, "1"])),
+    "series reindex fraction": lambda m: _mk_shown(_nq_series(m).reindex([1.5])),
+    "int get_indexer text": lambda m: list(m.Index([1, 2]).get_indexer(["1", 2])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_NQ_CASES))
+def test_int_and_float_labels_are_one_number_l5sed(case: str) -> None:
+    run = _NQ_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
