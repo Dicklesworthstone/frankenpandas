@@ -27002,7 +27002,21 @@ impl PySeries {
                 .map(|inner| PySeries { inner })
                 .map_err(frame_error_to_py);
         }
-        match series_astype_arg(&self.inner, &spec)? {
+        // pandas' integer-cast refusals, and a string column's integers as
+        // int() reads them (15crl).
+        let read = match pandas_astype_int_source(self.inner.column(), &spec) {
+            Ok(read) => read
+                .map(|column| Series::new(self.inner.name(), self.inner.index().clone(), column))
+                .transpose()
+                .map_err(frame_error_to_py)?,
+            Err(_) if errors == "ignore" => {
+                return Ok(PySeries {
+                    inner: self.inner.clone(),
+                });
+            }
+            Err(err) => return Err(err),
+        };
+        match series_astype_arg(read.as_ref().unwrap_or(&self.inner), &spec)? {
             Ok(inner) => Ok(PySeries { inner }),
             Err(_) if errors == "ignore" => Ok(PySeries {
                 inner: self.inner.clone(),
@@ -37688,6 +37702,44 @@ impl PyDataFrame {
         errors: &str,
     ) -> PyResult<PyDataFrame> {
         let _ = copy; // pandas' copy= does not change the result
+        // pandas' integer-cast refusals column by column, and the string
+        // columns' integers as int() reads them (15crl).
+        let casts: Vec<(String, Bound<'_, PyAny>)> = if let Ok(mapping) = dtype.cast::<PyDict>() {
+            column_dict_arg(&self.inner, mapping)?
+                .iter()
+                .map(|(column, spec)| Ok((column.extract::<String>()?, spec)))
+                .collect::<PyResult<_>>()?
+        } else {
+            self.inner
+                .column_names()
+                .into_iter()
+                .map(|name| (name.clone(), dtype.clone()))
+                .collect()
+        };
+        let mut read: Option<DataFrame> = None;
+        for (name, spec) in &casts {
+            let Some(column) = self.inner.column(name) else {
+                continue;
+            };
+            match pandas_astype_int_source(column, spec) {
+                Ok(Some(column)) => {
+                    let frame = read.take().unwrap_or_else(|| self.inner.clone());
+                    read = Some(
+                        frame
+                            .with_column(name.clone(), column)
+                            .map_err(frame_error_to_py)?,
+                    );
+                }
+                Ok(None) => {}
+                Err(_) if errors == "ignore" => {
+                    return Ok(PyDataFrame {
+                        inner: self.inner.clone(),
+                    });
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        let source = read.as_ref().unwrap_or(&self.inner);
         // The columns cast to pandas' `string` dtype, after the rest (fvsao.59).
         let mut strings: Vec<String> = Vec::new();
         let result = if let Ok(mapping) = dtype.cast::<PyDict>() {
@@ -37721,7 +37773,7 @@ impl PyDataFrame {
                 .map(|(column, dt)| (column.as_str(), dt.clone()))
                 .collect();
             widths.iter().fold(
-                self.inner
+                source
                     .astype_columns(&pairs)
                     .and_then(|frame| object_frame(&frame, Some(&objects))),
                 |frame, (column, width, nullable)| {
@@ -37734,10 +37786,10 @@ impl PyDataFrame {
             strings = self.inner.column_names().into_iter().cloned().collect();
             Ok(self.inner.clone())
         } else if let Some((width, nullable)) = py_width_arg(dtype) {
-            self.inner.astype_width(width, nullable)
+            source.astype_width(width, nullable)
         } else {
             let target = py_dtype_arg(dtype)?;
-            self.inner.astype(target)
+            source.astype(target)
         };
         let result = match result {
             Ok(mut frame) => {
@@ -60976,8 +61028,14 @@ fn is_object_dtype_arg(obj: &Bound<'_, PyAny>) -> bool {
 fn object_series(series: &Series) -> PyResult<Series> {
     let mut values = series.column().values().to_vec();
     // A `string` Series' missing value stays pd.NA as the object (pandas'
-    // astype(object) of one holds NAType; fvsao.59).
-    if series.column().is_pandas_string() {
+    // astype(object) of one holds NAType; fvsao.59), as a masked Int64 /
+    // Float64 / boolean one's does (it became None; br-frankenpandas-15crl).
+    if series.column().is_pandas_string()
+        || matches!(
+            series.column().dtype(),
+            DType::Int64Nullable | DType::Float64Nullable | DType::BoolNullable
+        )
+    {
         let na = Python::attach(|py| -> PyResult<Scalar> {
             Ok(Scalar::Object(fp_types::ObjectValue::Host(
                 fp_types::HostValue::new(PyHost(na_object(py)?)),
@@ -61259,6 +61317,195 @@ fn refuse_lossy_constructor_ints(
         }
     }
     Ok(())
+}
+
+/// Whether Python's `int()` reads `text`: surrounding whitespace, a sign,
+/// then digits with single underscores between them.
+fn python_int_literal(text: &str) -> bool {
+    let body = text.trim();
+    let body = body.strip_prefix(['+', '-']).unwrap_or(body);
+    !body.is_empty()
+        && !body.starts_with('_')
+        && !body.ends_with('_')
+        && !body.contains("__")
+        && body.chars().all(|c| c.is_ascii_digit() || c == '_')
+}
+
+/// The column `astype` to an integer `dtype` casts, as pandas': `None` the
+/// column itself, a string column's integers as Python's `int()` reads each
+/// (whitespace, a sign, underscores; they were refused), or pandas' refusal
+/// where the cast would change a value or keep a missing one (fp truncated
+/// 1.5 to 1 in an Int64 column and kept NaN as a missing value inside an
+/// int64 one; br-frankenpandas-15crl). To a numpy integer: a float NaN /
+/// inf is IntCastingNaNError, a negative float to an unsigned width
+/// ValueError, a masked NA "cannot convert NA to integer", and an object
+/// column's None / NaN / inf and a string `int()` does not read (or the
+/// width does not hold) are Python's `int()` errors. To a nullable
+/// integer: a float that is not whole or not held by the width is "cannot
+/// safely cast non-equivalent", naming object when the largest value is
+/// not whole (pandas casts the values to object first then), an infinite
+/// largest value OverflowError, and a string as above. Any other dtype
+/// passes.
+fn pandas_astype_int_source(column: &Column, dtype: &Bound<'_, PyAny>) -> PyResult<Option<Column>> {
+    let (name, width, nullable) = if let Some((width, nullable)) = py_width_arg(dtype) {
+        if width.is_float() {
+            return Ok(None);
+        }
+        (width.name(false).to_string(), Some(width), nullable)
+    } else {
+        match py_dtype_arg(dtype) {
+            Ok(DType::Int64) => ("int64".to_owned(), None, false),
+            Ok(DType::Int64Nullable) => ("int64".to_owned(), None, true),
+            _ => return Ok(None),
+        }
+    };
+    if column.categorical().is_some() {
+        return Ok(None);
+    }
+    let infinity = || {
+        PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+            "cannot convert float infinity to integer",
+        )
+    };
+    let non_equivalent = |source: &str| {
+        PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "cannot safely cast non-equivalent {source} to {name}"
+        ))
+    };
+    #[allow(clippy::cast_possible_truncation)] // whole and inside ±9.3e18
+    let held = |value: f64| {
+        value.fract() == 0.0
+            && match width {
+                Some(width) => value.abs() <= 9.3e18 && width.holds_int(value as i64),
+                None => {
+                    (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&value)
+                }
+            }
+    };
+    match column.dtype() {
+        DType::Float64 => {
+            let owned: Vec<f64>;
+            let floats = if let Some(floats) = column.as_f64_slice() {
+                floats
+            } else {
+                owned = column
+                    .values()
+                    .iter()
+                    .map(|value| match value {
+                        Scalar::Float64(value) => *value,
+                        _ => f64::NAN,
+                    })
+                    .collect();
+                &owned
+            };
+            if !nullable {
+                if floats.iter().any(|value| !value.is_finite()) {
+                    return Err(PyErr::new::<IntCastingNaNError, _>(
+                        "Cannot convert non-finite values (NA or inf) to integer",
+                    ));
+                }
+                if width.is_some_and(NumericWidth::is_unsigned)
+                    && floats.iter().any(|value| *value < 0.0)
+                {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Cannot losslessly cast from float64 to {name}"
+                    )));
+                }
+                return Ok(None);
+            }
+            let present = || floats.iter().copied().filter(|value| !value.is_nan());
+            let Some(largest) = present().reduce(f64::max) else {
+                return Ok(None);
+            };
+            if largest == f64::INFINITY {
+                return Err(infinity());
+            }
+            if !present().all(held) {
+                let source = if largest.fract() == 0.0 {
+                    "float64"
+                } else {
+                    "object"
+                };
+                return Err(non_equivalent(source));
+            }
+        }
+        DType::Float64Nullable | DType::Int64Nullable | DType::BoolNullable
+            if !nullable && column.has_nulls() =>
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "cannot convert NA to integer",
+            ));
+        }
+        DType::Utf8 => {
+            let missing_type = if column.is_pandas_string() {
+                "NAType"
+            } else {
+                "NoneType"
+            };
+            // The integers of a column of strings and missing values.
+            let mut ints = Some(Vec::with_capacity(column.len()));
+            for value in column.values().iter() {
+                match value {
+                    Scalar::Utf8(text) if !python_int_literal(text) => {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "invalid literal for int() with base 10: '{text}'"
+                        )));
+                    }
+                    Scalar::Float64(value) if value.is_infinite() => return Err(infinity()),
+                    Scalar::Float64(value) if value.is_nan() && !nullable => {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                            "cannot convert float NaN to integer",
+                        ));
+                    }
+                    Scalar::Float64(value) if nullable && !value.is_nan() && !held(*value) => {
+                        return Err(non_equivalent("object"));
+                    }
+                    Scalar::Null(NullKind::NaN) if !nullable && !column.is_pandas_string() => {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                            "cannot convert float NaN to integer",
+                        ));
+                    }
+                    missing if missing.is_missing() && !nullable => {
+                        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                            "int() argument must be a string, a bytes-like object or a real number, not '{missing_type}'"
+                        )));
+                    }
+                    Scalar::Utf8(text) => {
+                        let parsed = text.trim().replace('_', "").parse::<i64>().ok();
+                        if let (Some(parsed), Some(width)) = (parsed, width)
+                            && !width.holds_int(parsed)
+                        {
+                            return Err(PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+                                format!("Python integer {parsed} out of bounds for {name}"),
+                            ));
+                        }
+                        match (&mut ints, parsed) {
+                            (Some(ints), Some(parsed)) => ints.push(Scalar::Int64(parsed)),
+                            _ => ints = None,
+                        }
+                    }
+                    missing if missing.is_missing() => {
+                        if let Some(ints) = &mut ints {
+                            ints.push(Scalar::Null(NullKind::Null));
+                        }
+                    }
+                    _ => ints = None,
+                }
+            }
+            if let Some(ints) = ints {
+                let storage = if nullable {
+                    DType::Int64Nullable
+                } else {
+                    DType::Int64
+                };
+                return Column::new(storage, ints)
+                    .map(Some)
+                    .map_err(column_error_to_py);
+            }
+        }
+        _ => {}
+    }
+    Ok(None)
 }
 
 /// A failed cast as pandas raises it: `IntCastingNaNError` (a ValueError)

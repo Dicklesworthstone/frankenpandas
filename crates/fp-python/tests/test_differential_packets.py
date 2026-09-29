@@ -18779,3 +18779,77 @@ _TV_CASES = {
 def test_truth_value_and_membership_like_pandas_99npt(case: str) -> None:
     run = _TV_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-15crl: astype to an integer dtype refuses where pandas
+# does (a fraction into Int64 was truncated, a NaN into int64 kept as a
+# missing value), reads strings as int() reads them, and astype(object) of a
+# masked column keeps pd.NA (it became None). The exception is compared by
+# class name, ValueError-ness and message (pandas' IntCastingNaNError lives
+# in pandas.errors).
+def _ai_outcome(run: Any) -> Any:
+    try:
+        result = run()
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, isinstance(e, ValueError), str(e))
+    if hasattr(result, "columns"):
+        return ("ok", [(c, repr(list(result[c].astype(object))), str(result[c].dtype)) for c in result.columns])
+    return ("ok", repr(list(result.astype(object))), str(result.dtype))
+
+
+def _ai_frame(m: Any) -> Any:
+    return m.DataFrame({"a": [1.5, np.nan], "b": [1.0, 2.0]})
+
+
+_AI_CASES = {
+    "fraction to Int64": lambda m: m.Series([1.5, 2.0]).astype("Int64"),
+    "fraction largest to Int64": lambda m: m.Series([1.5, np.nan, 3.5]).astype("Int64"),
+    "fraction to Int32": lambda m: m.Series([1.5]).astype("Int32"),
+    "fraction to UInt8": lambda m: m.Series([1.5, 2.0]).astype("UInt8"),
+    "outside UInt8": lambda m: m.Series([300.0]).astype("UInt8"),
+    "too big for Int64": lambda m: m.Series([1e20]).astype("Int64"),
+    "inf to Int64": lambda m: m.Series([1.0, np.inf]).astype("Int64"),
+    "minus inf to Int64": lambda m: m.Series([1.0, -np.inf]).astype("Int64"),
+    "NaN to int64": lambda m: m.Series([1.0, np.nan]).astype("int64"),
+    "inf to int32": lambda m: m.Series([1.0, np.inf]).astype("int32"),
+    "negative to uint8": lambda m: m.Series([-2.7, 1.2]).astype("uint8"),
+    "Float64 NA to int64": lambda m: m.Series([1.0, None], dtype="Float64").astype("int64"),
+    "Int64 NA to int32": lambda m: m.Series([1, None], dtype="Int64").astype("int32"),
+    "boolean NA to int64": lambda m: m.Series([True, None], dtype="boolean").astype("int64"),
+    "object fraction to Int64": lambda m: m.Series([1.5, None], dtype=object).astype("Int64"),
+    "object None to int64": lambda m: m.Series([1, None], dtype=object).astype("int64"),
+    "object NaN to int64": lambda m: m.Series([1.0, np.nan], dtype=object).astype("int64"),
+    "object inf to Int64": lambda m: m.Series([1.0, np.inf], dtype=object).astype("Int64"),
+    "string fraction to Int64": lambda m: m.Series(["1.5"]).astype("Int64"),
+    "string whole float to int64": lambda m: m.Series(["1.0"]).astype("int64"),
+    "string None to int64": lambda m: m.Series(["1", None]).astype("int64"),
+    "string dtype NA to int64": lambda m: m.Series(["1", None], dtype="string").astype("int64"),
+    "None then junk to Int64": lambda m: m.Series([None, "x"]).astype("Int64"),
+    "strings int() reads": lambda m: m.Series([" 7 ", "+3", "-2", "1_000"]).astype("int64"),
+    "strings int() reads to Int64": lambda m: m.Series([" 7 ", None]).astype("Int64"),
+    "string outside uint8": lambda m: m.Series(["-2"]).astype("uint8"),
+    "frame to Int64": lambda m: _ai_frame(m).astype("Int64"),
+    "frame to int64": lambda m: _ai_frame(m).astype("int64"),
+    "frame dict to Int64": lambda m: _ai_frame(m).astype({"a": "Int64"}),
+    "frame strings to int64": lambda m: m.DataFrame({"s": [" 1", "2 "], "f": [1.0, 2.0]}).astype("int64"),
+    "Int64 to object": lambda m: m.Series([1, None], dtype="Int64").astype(object),
+    "Float64 to object": lambda m: m.Series([1.5, None], dtype="Float64").astype(object),
+    "boolean to object": lambda m: m.Series([True, None], dtype="boolean").astype(object),
+    "errors ignore": lambda m: m.Series([1.5]).astype("Int64", errors="ignore"),
+    # Negatives: casts pandas makes (the first two already made, their <NA>
+    # read back as None through astype(object) - the Int64 to object row).
+    "whole floats with NaN to Int64": lambda m: m.Series([1.0, np.nan, 3.0]).astype("Int64"),
+    "Float64 fraction to Int64 truncates": lambda m: m.Series([1.5, None], dtype="Float64").astype("Int64"),
+    "fraction to int64 truncates": lambda m: m.Series([1.5, -2.7]).astype("int64"),
+    "strings to Int64": lambda m: m.Series(["1", "2"]).astype("Int64"),
+    "bool to Int64": lambda m: m.Series([True, False]).astype("Int64"),
+    "frame dict whole column": lambda m: _ai_frame(m).astype({"b": "Int64"}),
+    "float to object": lambda m: m.Series([1.5, np.nan]).astype(object),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_AI_CASES))
+def test_astype_to_integers_like_pandas_15crl(case: str) -> None:
+    run = _AI_CASES[case]
+    assert _ai_outcome(lambda: run(fpd)) == _ai_outcome(lambda: run(pd)), case
