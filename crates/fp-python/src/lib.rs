@@ -18758,6 +18758,18 @@ fn groupby_pct_change_args(
     Ok((fill, limit))
 }
 
+/// Whether a column is one of numpy's numeric dtypes, as a Series'
+/// numeric_only reads it: int64, float64 or bool - but a bool column
+/// holding a missing value is pandas' object column
+/// (br-frankenpandas-ildvj: it counted as numeric).
+fn numpy_numeric(column: &Column) -> bool {
+    match column.dtype() {
+        DType::Int64 | DType::Float64 => true,
+        DType::Bool => !column.has_any_missing(),
+        _ => false,
+    }
+}
+
 /// Per-group `describe` results laid out as pandas' groupby describe
 /// (`apply(describe).unstack()`): a row per group under `index`, a column
 /// per statistic in first-seen order - a statistic a group lacks is NaN -
@@ -22582,10 +22594,7 @@ impl PySeries {
     }
 
     fn check_numeric_only(&self, name: &str) -> PyResult<()> {
-        if !matches!(
-            self.inner.dtype(),
-            DType::Int64 | DType::Float64 | DType::Bool
-        ) {
+        if !numpy_numeric(self.inner.column()) {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
                 "Series.{name} does not allow numeric_only=True with non-numeric dtypes."
             )))
@@ -24926,12 +24935,7 @@ impl PySeries {
         // A Series has axis 0 alone; anything else is pandas' ValueError.
         parse_axis_param_for_type(axis, "Series")?;
         let (method, na_option) = rank_options(py, &method, &na_option)?;
-        if numeric_only.0
-            && !matches!(
-                self.inner.dtype(),
-                DType::Int64 | DType::Float64 | DType::Bool
-            )
-        {
+        if numeric_only.0 && !numpy_numeric(self.inner.column()) {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "Series.rank does not allow numeric_only=True with non-numeric dtype.",
             ));
@@ -30722,12 +30726,14 @@ impl PyDataFrame {
 
     fn has_non_numeric(&self) -> bool {
         (0..self.inner.num_columns()).any(|position| {
-            self.inner.column_at(position).is_some_and(|col| {
-                !matches!(
-                    col.dtype(),
-                    DType::Int64 | DType::Float64 | DType::Bool | DType::Timedelta64
-                )
-            })
+            self.inner
+                .column_at(position)
+                .is_some_and(|col| match col.dtype() {
+                    // A bool column holding a missing value is pandas' object
+                    // column (br-frankenpandas-ildvj).
+                    DType::Bool => col.has_any_missing(),
+                    dtype => !matches!(dtype, DType::Int64 | DType::Float64 | DType::Timedelta64),
+                })
         })
     }
 
@@ -30833,6 +30839,12 @@ impl PyDataFrame {
         for position in 0..self.inner.num_columns() {
             if let Some(col) = self.inner.column_at(position) {
                 let dtype = col.dtype();
+                // A bool column holding a missing value is pandas' object
+                // column: numeric_only leaves it out (br-frankenpandas-ildvj).
+                let object_bool = dtype == DType::Bool && col.has_any_missing();
+                if object_bool && numeric_only {
+                    continue;
+                }
                 if matches!(dtype, DType::Int64 | DType::Float64 | DType::Bool) {
                     cols.push(position);
                 } else if dtype == DType::Timedelta64 {

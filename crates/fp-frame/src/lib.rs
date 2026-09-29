@@ -3722,6 +3722,17 @@ fn vals_are_timedelta(vals: &[Scalar]) -> bool {
     saw
 }
 
+/// The dtype a column is selected by (`select_dtypes`, numeric_only): its
+/// own, except a bool column holding a missing value, which is pandas'
+/// object column - numpy bool cannot hold NaN - and was selected as bool /
+/// numeric (br-frankenpandas-ildvj).
+fn selection_dtype(column: &Column) -> DType {
+    match column.dtype() {
+        DType::Bool if column.has_any_missing() => DType::Utf8,
+        dtype => dtype,
+    }
+}
+
 /// A group's running max (`max`) or min of datetime64 cells, a NaT kept
 /// where it sits; None unless every present cell is a datetime
 /// (br-frankenpandas-cemrq: the f64 folds read them as missing).
@@ -84818,12 +84829,13 @@ impl DataFrame {
         // by treating their ns counts as ordered numerics. The nullable
         // Int64 / Float64 / boolean columns are numeric too: they were left
         // out, silently shrinking the matrix (4qg5w.5); their <NA> is a
-        // missing value the pairwise statistics skip.
+        // missing value the pairwise statistics skip. A bool column holding
+        // a missing value is pandas' object column (ildvj).
         Ok((0..self.num_columns())
             .filter(|&pos| {
                 self.column_at(pos).is_some_and(|column| {
                     matches!(
-                        column.dtype(),
+                        selection_dtype(column),
                         DType::Bool
                             | DType::Int64
                             | DType::Float64
@@ -100597,7 +100609,7 @@ impl DataFrame {
     /// Pass empty slices to not filter on that criterion.
     pub fn select_dtypes(&self, include: &[DType], exclude: &[DType]) -> Result<Self, FrameError> {
         self.select_columns_where(|column| {
-            let dt = column.dtype();
+            let dt = selection_dtype(column);
             let included = include.is_empty() || include.contains(&dt);
             let excluded = !exclude.is_empty() && exclude.contains(&dt);
             included && !excluded
@@ -100673,7 +100685,8 @@ impl DataFrame {
             }
             let exact_64 = matches!(name, "int" | "int64" | "i8" | "float" | "float64" | "f8");
             (!exact_64 || column.width().is_none())
-                && expand_dtype_alias(name).is_ok_and(|dtypes| dtypes.contains(&column.dtype()))
+                && expand_dtype_alias(name)
+                    .is_ok_and(|dtypes| dtypes.contains(&selection_dtype(column)))
         };
         self.select_columns_where(|column| {
             let included = include.is_empty() || include.iter().any(|name| matches(column, name));
@@ -156923,6 +156936,56 @@ mod tests {
             .map(String::as_str)
             .collect();
         assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn select_dtypes_reads_bools_with_a_missing_value_as_object_ildvj() {
+        // b holds a missing value: pandas' object column. c is all-valid
+        // bools.
+        let df = DataFrame::from_dict(
+            &["b", "c", "n"],
+            vec![
+                (
+                    "b",
+                    vec![
+                        Scalar::Bool(true),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Bool(false),
+                    ],
+                ),
+                (
+                    "c",
+                    vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+                ),
+                (
+                    "n",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let names = |frame: DataFrame| -> Vec<String> {
+            frame.column_names().into_iter().cloned().collect()
+        };
+        assert_eq!(names(df.select_dtypes(&[DType::Bool], &[]).unwrap()), ["c"]);
+        assert_eq!(names(df.select_dtypes(&[DType::Utf8], &[]).unwrap()), ["b"]);
+        assert_eq!(
+            names(df.select_dtypes_by_name(&["bool"], &[]).unwrap()),
+            ["c"]
+        );
+        assert_eq!(
+            names(df.select_dtypes_by_name(&[], &["object"]).unwrap()),
+            ["c", "n"]
+        );
+        // NEGATIVE: numeric columns are selected as before.
+        assert_eq!(
+            names(df.select_dtypes(&[DType::Float64], &[]).unwrap()),
+            ["n"]
+        );
     }
 
     #[test]

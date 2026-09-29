@@ -16999,3 +16999,46 @@ _GD_CASES = {
 def test_groupby_describe_like_pandas_uy0mu(case: str) -> None:
     run = _GD_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-ildvj: a bool column holding a NaN is pandas' object
+# column (fp reported it object) but numeric_only and select_dtypes took it
+# for bool / numeric.
+def _nb_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "b": [True, np.nan, False],
+            "c": [True, False, True],
+            "n": [1.0, 2.0, np.nan],
+            "i": [1, 2, 3],
+            "t": ["x", "y", "z"],
+        }
+    )
+
+
+_NB_CASES = {
+    **{
+        f"frame {op} numeric_only": (lambda op: lambda m: _rl_shown(getattr(_nb_frame(m), op)(numeric_only=True)))(op)
+        for op in ["sum", "mean", "std", "var", "min", "max", "median", "prod", "sem", "count"]
+    },
+    "frame quantile numeric_only": lambda m: _rl_shown(_nb_frame(m).quantile(0.5, numeric_only=True)),
+    "frame corr numeric_only": lambda m: _rl_shown(_nb_frame(m).corr(numeric_only=True)),
+    "frame rank numeric_only": lambda m: _rl_shown(_nb_frame(m).rank(numeric_only=True)),
+    "frame sum axis 1 numeric_only": lambda m: _rl_shown(_nb_frame(m)[["b", "n", "i"]].sum(axis=1, numeric_only=True)),
+    "select_dtypes number": lambda m: list(_nb_frame(m).select_dtypes("number").columns),
+    "select_dtypes bool": lambda m: list(_nb_frame(m).select_dtypes("bool").columns),
+    "select_dtypes object": lambda m: list(_nb_frame(m).select_dtypes("object").columns),
+    "select_dtypes exclude object": lambda m: list(_nb_frame(m).select_dtypes(exclude="object").columns),
+    "series sum numeric_only": lambda m: [_nb_frame(m)["b"].sum(numeric_only=True)],
+    "series rank numeric_only": lambda m: _rl_shown(_nb_frame(m)["b"].rank(numeric_only=True)),
+    # NEGATIVE: an all-valid bool column is bool and counts as numeric.
+    "frame sum numeric_only, valid bools": lambda m: _rl_shown(_nb_frame(m)[["c", "i"]].sum(numeric_only=True)),
+    "series sum numeric_only, valid bools": lambda m: [_nb_frame(m)["c"].sum(numeric_only=True)],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_NB_CASES))
+def test_numeric_only_skips_object_bools_ildvj(case: str) -> None:
+    run = _NB_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
