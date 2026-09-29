@@ -17866,3 +17866,71 @@ _WT_CASES = {
 def test_weighted_windows_like_pandas_gv69z(case: str) -> None:
     run = _WT_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-gv69z (part 2): rolling(0) - every window empty, sum and
+# count 0.0, the rest NaN (fp-frame's "window must be >= 1"); a time window
+# centred on each row (it was refused).
+def _wz_times(m: Any) -> Any:
+    index = m.to_datetime(["2024-01-01", "2024-01-02", "2024-01-04", "2024-01-05", "2024-01-09"])
+    return m.Series([1.0, 2.0, np.nan, 4.0, 5.0], index=index, name="v")
+
+
+def _wz_across(m: Any) -> Any:
+    return m.DataFrame({"a": [1, 2, 3], "b": [1.5, np.nan, 2.0], "c": [4, 5, 6]})
+
+
+_WZ_OPS = ["sum", "mean", "count", "min", "max", "median", "std", "var", "sem", "skew", "kurt"]
+
+_WZ_CASES = {
+    **{
+        f"window 0 {op}": (lambda m, op=op: _mk_shown(getattr(m.Series([1.0, np.nan, 3.0], name="v").rolling(0), op)()))
+        for op in _WZ_OPS
+    },
+    **{
+        f"window 0 frame {op}": (
+            lambda m, op=op: _mk_shown(getattr(m.DataFrame({"a": [1, 2, 3], "b": [1.5, np.nan, 2.0]}).rolling(0), op)())
+        )
+        for op in ["sum", "mean", "count", "max"]
+    },
+    "window 0 quantile": lambda m: _mk_shown(m.Series([1.0, 2.0, 3.0]).rolling(0).quantile(0.5)),
+    "window 0 apply": lambda m: _mk_shown(m.Series([1.0, 2.0, 3.0]).rolling(0).apply(lambda x: x.sum())),
+    "window 0 centred": lambda m: _mk_shown(m.Series([1.0, 2.0, 3.0]).rolling(0, center=True).sum()),
+    "window 0 step": lambda m: _mk_shown(m.Series([1.0, 2.0, 3.0]).rolling(0, step=2).sum()),
+    "centred 3D sum": lambda m: _mk_shown(_wz_times(m).rolling("3D", center=True).sum()),
+    "centred 2D mean": lambda m: _mk_shown(_wz_times(m).rolling("2D", center=True).mean()),
+    "centred count": lambda m: _mk_shown(_wz_times(m).rolling("3D", center=True).count()),
+    "centred max min_periods": lambda m: _mk_shown(_wz_times(m).rolling("3D", center=True, min_periods=2).max()),
+    "centred closed both": lambda m: _mk_shown(_wz_times(m).rolling("2D", center=True, closed="both").sum()),
+    "centred closed left": lambda m: _mk_shown(_wz_times(m).rolling("2D", center=True, closed="left").sum()),
+    "centred closed neither": lambda m: _mk_shown(_wz_times(m).rolling("4D", center=True, closed="neither").sum()),
+    "centred frame": lambda m: _mk_shown(
+        _wz_times(m).to_frame().assign(w=np.arange(5.0)).rolling("3D", center=True).sum()
+    ),
+    "centred on a column": lambda m: _mk_shown(
+        _wz_times(m).reset_index().rolling("3D", on="index", center=True).sum()
+    ),
+    # axis=1: the window across a frame's number columns (bool / text left
+    # out), with pandas' FutureWarning (it was refused after it).
+    "rolling across sum": lambda m: _mk_shown(_wz_across(m).rolling(2, axis=1).sum()),
+    "rolling across mean min_periods": lambda m: _mk_shown(_wz_across(m).rolling(2, axis=1, min_periods=1).mean()),
+    "rolling across count": lambda m: _mk_shown(_wz_across(m).rolling(2, axis=1).count()),
+    "rolling across max": lambda m: _mk_shown(_wz_across(m).rolling(2, axis="columns").max()),
+    "rolling across apply": lambda m: _mk_shown(_wz_across(m).rolling(2, axis=1).apply(lambda x: x.max())),
+    "rolling across text and bools": lambda m: _mk_shown(
+        _wz_across(m).assign(t=list("xyz"), f=[True, False, True]).rolling(2, axis=1).sum()
+    ),
+    "expanding across sum": lambda m: _mk_shown(_wz_across(m).expanding(axis=1).sum()),
+    "expanding across rank": lambda m: _mk_shown(_wz_across(m).expanding(axis=1).rank()),
+    # Negatives: pandas' errors, and the uncentred windows as they were.
+    "window 0 min_periods 1": lambda m: _mk_shown(m.Series([1.0, 2.0]).rolling(0, min_periods=1).sum()),
+    "negative window": lambda m: _mk_shown(m.Series([1.0, 2.0]).rolling(-1).sum()),
+    "uncentred 3D sum": lambda m: _mk_shown(_wz_times(m).rolling("3D").sum()),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_WZ_CASES))
+def test_empty_and_centred_time_windows_like_pandas_gv69z(case: str) -> None:
+    run = _WZ_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

@@ -48488,6 +48488,9 @@ pub struct PyRolling {
     /// The columns selected from a frame windowed along `on` (the frame
     /// holds them and `on`); without `on` a selection is its own target.
     select: Option<WindowSelect>,
+    /// pandas' axis=1: `dataframe` is [`across_columns`]' transposed frame,
+    /// and a frame answer is transposed back.
+    across: bool,
 }
 
 /// pandas' `rolling(window, min_periods=None, center=False, win_type=None,
@@ -48513,7 +48516,11 @@ fn rolling_of(
     method: &str,
 ) -> PyResult<PyRolling> {
     let value_error = |message: String| PyErr::new::<pyo3::exceptions::PyValueError, _>(message);
-    window_axis(py, "rolling", axis, dataframe.is_some())?;
+    let across = window_axis(py, "rolling", axis, dataframe.is_some())?;
+    let dataframe = match dataframe {
+        Some(df) if across => Some(across_columns(&df)?),
+        other => other,
+    };
     if let Some(name) = on
         && dataframe
             .as_ref()
@@ -48591,6 +48598,7 @@ fn rolling_of(
         on: on.map(str::to_owned),
         table: method == "table",
         select: None,
+        across,
     })
 }
 
@@ -48919,11 +48927,12 @@ fn series_arg_extreme(
 
 /// pandas' deprecated `axis=` of a window (`kind`, 'rolling' / 'expanding'):
 /// read first - 0 / 'index' / 'rows', or a frame's 1 / 'columns', anything
-/// else its ValueError - then warned about; axis=1 (the window across the
-/// columns) is refused after the warning.
-fn window_axis(py: Python<'_>, kind: &str, axis: &Passed<'_>, frame: bool) -> PyResult<()> {
+/// else its ValueError - then warned about; true for axis=1, the window
+/// across the columns ([`across_columns`]; it was refused after the
+/// warning, br-frankenpandas-gv69z).
+fn window_axis(py: Python<'_>, kind: &str, axis: &Passed<'_>, frame: bool) -> PyResult<bool> {
     let Some(axis) = &axis.0 else {
-        return Ok(());
+        return Ok(false);
     };
     let owner = if frame { "DataFrame" } else { "Series" };
     let value_error = |message: String| PyErr::new::<pyo3::exceptions::PyValueError, _>(message);
@@ -48966,10 +48975,38 @@ fn window_axis(py: Python<'_>, kind: &str, axis: &Passed<'_>, frame: bool) -> Py
         &message,
         1,
     )?;
-    if columns {
-        return Err(not_implemented(&format!("{kind}(axis=1)")));
-    }
-    Ok(())
+    Ok(columns)
+}
+
+/// pandas' frame for a window across the columns (axis=1): its number
+/// columns - bool, timedelta and text left out, as pandas' - transposed, so
+/// the window runs along what were the columns.
+fn across_columns(df: &DataFrame) -> PyResult<DataFrame> {
+    let numbers: Vec<usize> = (0..df.num_columns())
+        .filter(|&position| {
+            df.column_at(position).is_some_and(|column| {
+                matches!(
+                    column.dtype(),
+                    DType::Int64 | DType::Float64 | DType::Int64Nullable | DType::Float64Nullable
+                )
+            })
+        })
+        .collect();
+    df.take_columns(&numbers)
+        .and_then(|numbers| numbers.transpose())
+        .map_err(frame_error_to_py)
+}
+
+/// A window's answer across the columns transposed back, every column
+/// float64 as pandas' (a column of NaN alone read as object).
+fn across_answer(res: &DataFrame) -> PyResult<DataFrame> {
+    let back = res.transpose().map_err(frame_error_to_py)?;
+    let names: Vec<String> = back.column_names().into_iter().cloned().collect();
+    let floats: Vec<(&str, DType)> = names
+        .iter()
+        .map(|name| (name.as_str(), DType::Float64))
+        .collect();
+    back.astype_columns(&floats).map_err(frame_error_to_py)
 }
 
 /// pandas' deprecated `axis=` of a groupby method (`owner` 'SeriesGroupBy'
@@ -49051,7 +49088,11 @@ fn expanding_of(
     axis: &Passed<'_>,
     method: &str,
 ) -> PyResult<PyExpanding> {
-    window_axis(py, "expanding", axis, dataframe.is_some())?;
+    let across = window_axis(py, "expanding", axis, dataframe.is_some())?;
+    let dataframe = match dataframe {
+        Some(df) if across => Some(across_columns(&df)?),
+        other => other,
+    };
     match method {
         "single" => {}
         "table" if series.is_some() => {
@@ -49070,6 +49111,7 @@ fn expanding_of(
         series,
         dataframe,
         min_periods,
+        across,
     })
 }
 
@@ -49125,6 +49167,7 @@ impl PyRolling {
             on: self.on.clone(),
             table: self.table,
             select: None,
+            across: self.across,
         }
     }
 
@@ -49212,12 +49255,11 @@ impl PyRolling {
                 "method='table' not applicable for Series objects.",
             ));
         }
+        // A time window centred on each row as pandas' (it was refused;
+        // br-frankenpandas-gv69z).
         match &self.offset {
             Some(offset) => {
-                if self.center {
-                    return Err(not_implemented("rolling(<time window>, center=True)"));
-                }
-                s.rolling_offset_closed(offset, self.min_periods, self.closed())
+                s.rolling_offset_centered(offset, self.min_periods, self.closed(), self.center)
             }
             None => s.rolling_closed(self.window, self.min_periods, self.center, self.closed()),
         }
@@ -49231,12 +49273,13 @@ impl PyRolling {
             return Err(not_implemented("rolling(method='table') (numba's)"));
         }
         match &self.offset {
-            Some(offset) => {
-                if self.center {
-                    return Err(not_implemented("rolling(<time window>, center=True)"));
-                }
-                df.rolling_offset(offset, self.min_periods, self.closed(), self.on.as_deref())
-            }
+            Some(offset) => df.rolling_offset_centered(
+                offset,
+                self.min_periods,
+                self.closed(),
+                self.on.as_deref(),
+                self.center,
+            ),
             None => df.rolling_closed(
                 self.window,
                 self.min_periods,
@@ -49267,6 +49310,50 @@ impl PyRolling {
         }
     }
 
+    /// pandas' windows of no row (`rolling(0)`): each empty - sum and count
+    /// 0.0, every other aggregation NaN - over the input as the
+    /// aggregation prepares it. fp-frame refuses a 0-row window; pandas
+    /// answers (br-frankenpandas-gv69z).
+    fn empty_windows(
+        &self,
+        py: Python<'_>,
+        method: &str,
+        numeric_only: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let fill = if matches!(method, "sum" | "count") {
+            0.0
+        } else {
+            f64::NAN
+        };
+        let every_dtype = method == "count";
+        if let Some(s) = &self.series {
+            let s = window_series_input(s, "Rolling", method, numeric_only, every_dtype)?;
+            let column = Column::from_f64_values(vec![fill; s.len()]);
+            let res = Series::new(s.name().clone(), s.index().clone(), column)
+                .map_err(frame_error_to_py)?;
+            return self.series_out(py, res);
+        }
+        let Some(df) = &self.dataframe else {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Empty rolling object",
+            ));
+        };
+        let df = window_frame_input(df, self.on.as_deref(), numeric_only, every_dtype)?;
+        let mut res = df.as_ref().clone();
+        for position in 0..df.num_columns() {
+            let Some(name) = df.column_name_at(position) else {
+                continue;
+            };
+            if self.on.as_deref() == Some(name.as_str()) {
+                continue;
+            }
+            res = res
+                .with_column(name, Column::from_f64_values(vec![fill; df.len()]))
+                .map_err(frame_error_to_py)?;
+        }
+        self.frame_out(py, res)
+    }
+
     /// A Series result as pandas returns it, `step=` taken.
     fn series_out(&self, py: Python<'_>, res: Series) -> PyResult<Py<PyAny>> {
         let res = match self.stepped_rows(res.len())? {
@@ -49288,6 +49375,9 @@ impl PyRolling {
         frame_op: impl for<'w> Fn(fp_frame::DataFrameRolling<'w>) -> Result<DataFrame, FrameError>,
     ) -> PyResult<Py<PyAny>> {
         let every_dtype = method == "count";
+        if self.offset.is_none() && self.window == 0 {
+            return self.empty_windows(py, method, numeric_only);
+        }
         if let Some(ref s) = self.series {
             let s = window_series_input(s, "Rolling", method, numeric_only, every_dtype)?;
             let res = series_op(self.series_window(&s)?).map_err(frame_error_to_py)?;
@@ -49316,6 +49406,9 @@ impl PyRolling {
         want_corr: bool,
     ) -> PyResult<Py<PyAny>> {
         let method = if want_corr { "corr" } else { "cov" };
+        if self.across {
+            return Err(not_implemented(&format!("rolling(axis=1).{method}")));
+        }
         self.require_count_window(method)?;
         self.require_every_row(method)?;
         let ddof = window_ddof(ddof)?;
@@ -49366,6 +49459,12 @@ impl PyRolling {
         let res = match self.stepped_rows(res.len())? {
             Some(rows) => res.take(&rows, 0).map_err(frame_error_to_py)?,
             None => res,
+        };
+        // Across the columns (axis=1) the answer is transposed back.
+        let res = if self.across {
+            across_answer(&res)?
+        } else {
+            res
         };
         let res = self.on_layout(res)?;
         if let Some(select) = self.select.as_ref().filter(|select| select.single)
@@ -49987,6 +50086,9 @@ fn window_of(
     }
     if rolling.on.is_some() {
         return Err(not_implemented("rolling(win_type=..., on=...)"));
+    }
+    if rolling.across {
+        return Err(not_implemented("rolling(win_type=..., axis=1)"));
     }
     Ok(PyWindow {
         series: rolling.series,
@@ -50790,6 +50892,8 @@ pub struct PyExpanding {
     series: Option<Series>,
     dataframe: Option<DataFrame>,
     min_periods: Option<usize>,
+    /// pandas' axis=1, as [`PyRolling`]'s.
+    across: bool,
 }
 
 impl PyExpanding {
@@ -50812,11 +50916,22 @@ impl PyExpanding {
         if let Some(ref df) = self.dataframe {
             let df = window_frame_input(df, None, numeric_only, every_dtype)?;
             let res = frame_op(df.expanding(self.min_periods)).map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+            return self.frame_out(py, res);
         }
         Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Empty expanding object",
         ))
+    }
+
+    /// A frame answer as pandas returns it, transposed back across the
+    /// columns (axis=1; br-frankenpandas-gv69z).
+    fn frame_out(&self, py: Python<'_>, res: DataFrame) -> PyResult<Py<PyAny>> {
+        let res = if self.across {
+            across_answer(&res)?
+        } else {
+            res
+        };
+        Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
     }
 
     /// pandas' expanding corr / cov (see [`PyRolling::bivariate`]; a
@@ -50831,6 +50946,9 @@ impl PyExpanding {
         want_corr: bool,
     ) -> PyResult<Py<PyAny>> {
         let method = if want_corr { "corr" } else { "cov" };
+        if self.across {
+            return Err(not_implemented(&format!("expanding(axis=1).{method}")));
+        }
         let ddof = window_ddof(ddof)?;
         let series = self
             .series
@@ -50885,6 +51003,7 @@ impl PyExpanding {
             series,
             dataframe,
             min_periods: self.min_periods,
+            across: self.across,
         })
     }
 
@@ -51111,7 +51230,7 @@ impl PyExpanding {
                 let count = windows.count().map_err(frame_error_to_py)?;
                 res = res.div_df(&count).map_err(frame_error_to_py)?;
             }
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+            return self.frame_out(py, res);
         }
         Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "Empty expanding object",
@@ -51149,11 +51268,15 @@ impl PyExpanding {
     /// fvsao.7), a frame's `{column: name}` too.
     pub fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let (Ok(spec), Some(df)) = (func.cast::<PyDict>(), &self.dataframe) {
+            if self.across {
+                return Err(not_implemented("expanding(axis=1).agg of a dict"));
+            }
             let res = window_agg_dict(py, df, spec, None, |sub, f| {
                 PyExpanding {
                     series: None,
                     dataframe: Some(sub),
                     min_periods: self.min_periods,
+                    across: false,
                 }
                 .agg(py, f)
             })?;
@@ -51202,7 +51325,7 @@ impl PyExpanding {
                     .agg(&str_slices)
                     .map_err(frame_error_to_py)?;
                 let res = func_columns(res, &df, &str_slices)?;
-                return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+                return self.frame_out(py, res);
             }
             Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Empty expanding object",
@@ -51314,7 +51437,7 @@ impl PyExpanding {
                 let res_df = DataFrame::new_with_column_order(df.index().clone(), columns, names)
                     .map_err(frame_error_to_py)?
                     .with_recorded_column_labels(df.column_labels());
-                return Ok(Py::new(py, PyDataFrame { inner: res_df })?.into_any());
+                return self.frame_out(py, res_df);
             }
         }
         Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(

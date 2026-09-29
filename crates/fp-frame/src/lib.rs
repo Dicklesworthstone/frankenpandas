@@ -29973,11 +29973,24 @@ impl Series {
         min_periods: Option<usize>,
         closed: IntervalClosed,
     ) -> Result<Rolling<'_>, FrameError> {
+        self.rolling_offset_centered(window, min_periods, closed, false)
+    }
+
+    /// [`Self::rolling_offset_closed`], each window centred on its row when
+    /// `center` ([`centered_offset_window_bounds`]; pandas'
+    /// `rolling('3D', center=True)`, br-frankenpandas-gv69z).
+    pub fn rolling_offset_centered(
+        &self,
+        window: &str,
+        min_periods: Option<usize>,
+        closed: IntervalClosed,
+        center: bool,
+    ) -> Result<Rolling<'_>, FrameError> {
         let times = self.index().labels().iter().map(|label| match label {
             IndexLabel::Datetime64(v) | IndexLabel::Timedelta64(v) => Some(*v),
             _ => None,
         });
-        let bounds = offset_window(window, times, closed)?;
+        let bounds = offset_window(window, times, closed, center)?;
         // pandas defaults min_periods to 1 for offset windows.
         Ok(Rolling::with_bounds(self, bounds, min_periods.unwrap_or(1)))
     }
@@ -31982,6 +31995,66 @@ pub fn offset_window_bounds(
     bounds
 }
 
+/// pandas' variable-window indexer centred (`rolling('3D', center=True)`)
+/// over monotonic timestamps `ts`: row `i`'s window is the interval of
+/// length `offset` centred on `ts[i]` - from `ts[i] - offset / 2` (open,
+/// closed as `closed` says) to `ts[i] + offset / 2` (closed on the right
+/// when `closed` is) - found as pandas' calculate_variable_window_bounds
+/// finds it: the first row's window starts at row 0, a start scanned
+/// forward from the previous row's, an end scanned forward from the
+/// previous row's end (br-frankenpandas-gv69z; it was refused).
+#[must_use]
+pub fn centered_offset_window_bounds(
+    ts: &[i64],
+    offset: i64,
+    closed: IntervalClosed,
+) -> Vec<(usize, usize)> {
+    let n = ts.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let left_closed = closed.left_closed();
+    let right_closed = closed.right_closed();
+    let half = offset / 2;
+    let mut start = vec![0_usize; n];
+    let mut end = vec![usize::from(right_closed); n];
+    let end_bound = ts[0].saturating_add(half);
+    for (j, &t) in ts.iter().enumerate() {
+        if t < end_bound || (t == end_bound && right_closed) {
+            end[0] = j + 1;
+        } else {
+            end[0] = j;
+            break;
+        }
+    }
+    for i in 1..n {
+        let end_bound = ts[i].saturating_add(half);
+        let mut start_bound = ts[i].saturating_sub(half);
+        if left_closed {
+            start_bound = start_bound.saturating_sub(1);
+        }
+        start[i] = i;
+        if let Some(j) = (start[i - 1]..i).find(|&j| ts[j] > start_bound) {
+            start[i] = j;
+        }
+        for j in end[i - 1]..=n {
+            if j == n {
+                end[i] = j;
+            } else if ts[j] == end_bound && right_closed {
+                end[i] = j + 1;
+            } else if ts[j] >= end_bound {
+                end[i] = j;
+                break;
+            }
+        }
+    }
+    start
+        .into_iter()
+        .zip(end)
+        .map(|(start, end)| (start.min(end), end))
+        .collect()
+}
+
 /// A time-based window's per-row bounds over `times` (a datetime-like axis,
 /// `None` where a value is not one), as pandas' `rolling('7D', closed=)`:
 /// `window` a positive duration ('180D', '12h', '90min', ISO-8601, ... as
@@ -31996,6 +32069,7 @@ fn offset_window(
     window: &str,
     times: impl IntoIterator<Item = Option<i64>>,
     closed: IntervalClosed,
+    center: bool,
 ) -> Result<Vec<(usize, usize)>, FrameError> {
     let offset_nanos = fp_types::Timedelta::parse(window).map_err(|e| {
         FrameError::CompatibilityRejected(format!("rolling: invalid offset window '{window}': {e}"))
@@ -32022,6 +32096,9 @@ fn offset_window(
         return Err(FrameError::CompatibilityRejected(
             "rolling: index values must be monotonic".to_owned(),
         ));
+    }
+    if center {
+        return Ok(centered_offset_window_bounds(&ts, offset_nanos, closed));
     }
     Ok(offset_window_bounds(&ts, offset_nanos, closed))
 }
@@ -88600,6 +88677,19 @@ impl DataFrame {
         closed: IntervalClosed,
         on: Option<&str>,
     ) -> Result<DataFrameRolling<'_>, FrameError> {
+        self.rolling_offset_centered(window, min_periods, closed, on, false)
+    }
+
+    /// [`Self::rolling_offset`], each window centred on its row when
+    /// `center` ([`centered_offset_window_bounds`]; br-frankenpandas-gv69z).
+    pub fn rolling_offset_centered(
+        &self,
+        window: &str,
+        min_periods: Option<usize>,
+        closed: IntervalClosed,
+        on: Option<&str>,
+        center: bool,
+    ) -> Result<DataFrameRolling<'_>, FrameError> {
         let on = self.rolling_on(on)?;
         let bounds = match on.as_deref().and_then(|name| self.column(name)) {
             Some(column) => offset_window(
@@ -88609,6 +88699,7 @@ impl DataFrame {
                     _ => None,
                 }),
                 closed,
+                center,
             )?,
             None => offset_window(
                 window,
@@ -88617,6 +88708,7 @@ impl DataFrame {
                     _ => None,
                 }),
                 closed,
+                center,
             )?,
         };
         let min_periods = min_periods.unwrap_or(1);
@@ -114870,13 +114962,13 @@ mod tests {
         SORTED_UNIQUE_UNION_FINGERPRINT_CACHE, SORTED_UNIQUE_UNION_FINGERPRINT_CACHE_MAX, Series,
         SortedUniqueUnionFingerprintKey, ToNumericErrors, ToNumericOptions, TzAmbiguousPolicy,
         TzLocalizeOptions, TzNonexistentPolicy, align_union, align_union_duplicate_aware,
-        align_union_sorted_unique, cut, datetime64_label_from_naive, fixed_window_bounds,
-        format_period_label, index_to_frame, index_to_series, int64_unit_range_alignment,
-        offset_window_bounds, parse_datetime64_nanos, parse_naive_datetime_value, qcut,
-        record_alignment_semantic_witness, semantic_index_identity,
-        semantic_int64_unit_range_labels_fingerprint, semantic_integer_index_labels_fingerprint,
-        semantic_sorted_unique_union_output_fingerprint, to_numeric, to_numeric_with_options,
-        typed_dense_values_already_sorted,
+        align_union_sorted_unique, centered_offset_window_bounds, cut, datetime64_label_from_naive,
+        fixed_window_bounds, format_period_label, index_to_frame, index_to_series,
+        int64_unit_range_alignment, offset_window_bounds, parse_datetime64_nanos,
+        parse_naive_datetime_value, qcut, record_alignment_semantic_witness,
+        semantic_index_identity, semantic_int64_unit_range_labels_fingerprint,
+        semantic_integer_index_labels_fingerprint, semantic_sorted_unique_union_output_fingerprint,
+        to_numeric, to_numeric_with_options, typed_dense_values_already_sorted,
     };
 
     fn assert_text_golden(golden_name: &str, actual: &str) {
@@ -126373,6 +126465,28 @@ mod tests {
         let plain = fixed(false, IntervalClosed::Right);
         assert_eq!(plain[..3], [(0, 1), (0, 2), (0, 3)]);
         assert_eq!(plain[5], (3, 6));
+    }
+
+    #[test]
+    fn centered_offset_window_bounds_as_pandas_gv69z() {
+        // Days 0, 1, 3, 4, 8 with a 3-day window centred on each row, as
+        // pandas' calculate_variable_window_bounds (its 3D centred sums of
+        // 1, 2, NaN, 4, 5 are 3, 3, 4, 4, 5).
+        let day = 86_400_000_000_000_i64;
+        let ts = [0, day, 3 * day, 4 * day, 8 * day];
+        assert_eq!(
+            centered_offset_window_bounds(&ts, 3 * day, IntervalClosed::Right),
+            [(0, 2), (0, 2), (2, 4), (2, 4), (4, 5)]
+        );
+        // closed='both' takes a row a half window away on either side.
+        let both = centered_offset_window_bounds(&ts, 2 * day, IntervalClosed::Both);
+        assert_eq!(both[1], (0, 2));
+        assert!(centered_offset_window_bounds(&[], day, IntervalClosed::Right).is_empty());
+        // NEGATIVE: the trailing window at day 3 holds days 1 and 3.
+        assert_eq!(
+            offset_window_bounds(&ts, 3 * day, IntervalClosed::Right)[2],
+            (1, 3)
+        );
     }
 
     #[test]
