@@ -27288,49 +27288,60 @@ impl Series {
         if let Some(described) = self.describe_categorical()? {
             return Ok(described);
         }
-        if self.column.dtype() == DType::Utf8 {
+        // A text, bool or all-missing Series describes as pandas'
+        // count / unique / top / freq, an object result; with nothing
+        // present top and freq are NaN. A bool Series ran the numeric
+        // summary, and nothing present gave freq 0 in an int64 result
+        // (br-frankenpandas-uy0mu).
+        if matches!(
+            self.column.dtype(),
+            DType::Utf8 | DType::Bool | DType::BoolNullable | DType::Null
+        ) {
             let values = self.column.values();
-            let mut order: Vec<String> = Vec::new();
-            let mut counts: std::collections::HashMap<String, usize> =
-                std::collections::HashMap::new();
+            let mut order: Vec<&Scalar> = Vec::new();
+            let mut counts: FxHashMap<ScalarKey<'_>, usize> = FxHashMap::default();
             for value in values {
-                if let Scalar::Utf8(text) = value {
-                    let entry = counts.entry(text.clone()).or_insert(0);
-                    if *entry == 0 {
-                        order.push(text.clone());
-                    }
-                    *entry += 1;
+                let Some(key) = scalar_key_skip_missing(value) else {
+                    continue;
+                };
+                let entry = counts.entry(key).or_insert(0);
+                if *entry == 0 {
+                    order.push(value);
                 }
+                *entry += 1;
             }
             let count: usize = counts.values().sum();
             let unique = order.len();
             // First-appearance order with a strict `>` keeps the earliest of a tie.
-            let mut top: Option<(String, usize)> = None;
-            for candidate in &order {
-                let freq = counts[candidate];
-                if top.as_ref().is_none_or(|(_, best)| freq > *best) {
-                    top = Some((candidate.clone(), freq));
+            let mut top: Option<(&Scalar, usize)> = None;
+            for &candidate in &order {
+                let freq = scalar_key_skip_missing(candidate)
+                    .and_then(|key| counts.get(&key))
+                    .copied()
+                    .unwrap_or(0);
+                if top.is_none_or(|(_, best)| freq > best) {
+                    top = Some((candidate, freq));
                 }
             }
             let labels: Vec<IndexLabel> = ["count", "unique", "top", "freq"]
                 .iter()
                 .map(|name| IndexLabel::Utf8((*name).to_string()))
                 .collect();
-            let stats = match top {
-                Some((text, freq)) => vec![
-                    Scalar::Int64(count as i64),
-                    Scalar::Int64(unique as i64),
-                    Scalar::Utf8(text),
-                    Scalar::Int64(freq as i64),
-                ],
-                None => vec![
-                    Scalar::Int64(0),
-                    Scalar::Int64(0),
-                    Scalar::Null(NullKind::NaN),
-                    Scalar::Int64(0),
-                ],
+            let (top, freq) = match top {
+                Some((value, freq)) => (value.clone(), Scalar::Int64(freq as i64)),
+                None => (Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)),
             };
-            return Self::from_values(self.name.clone(), labels, stats);
+            let stats = vec![
+                Scalar::Int64(count as i64),
+                Scalar::Int64(unique as i64),
+                top,
+                freq,
+            ];
+            return Self::new(
+                self.name.clone(),
+                Index::new(labels),
+                Column::from_object_values(stats),
+            );
         }
         let percentiles = normalize_describe_percentiles(percentiles)?;
         // A datetime/timedelta column describes in its own units, as pandas:
@@ -180538,6 +180549,72 @@ mod tests {
 
         let result = s.describe().unwrap();
         assert!(matches!(result.values()[2], Scalar::Float64(v) if v.is_nan()));
+    }
+
+    #[test]
+    fn describe_of_bools_and_of_nothing_uy0mu() {
+        let index = |n: i64| (0..n).map(Into::into).collect::<Vec<IndexLabel>>();
+        // A bool Series: count / unique / top / freq, object (it ran the
+        // numeric summary: count 3.0, mean 0.67 ...).
+        let bools = Series::from_values(
+            "b",
+            index(4),
+            vec![
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Null(NullKind::Null),
+                Scalar::Bool(true),
+            ],
+        )
+        .unwrap()
+        .describe()
+        .unwrap();
+        assert_eq!(bools.dtype(), DType::Utf8);
+        assert_eq!(
+            bools.values(),
+            &[
+                Scalar::Int64(3),
+                Scalar::Int64(2),
+                Scalar::Bool(true),
+                Scalar::Int64(2)
+            ]
+        );
+        // Nothing present: count 0, unique 0, top and freq NaN, object (freq
+        // was 0 in an int64 result).
+        let nothing = Series::from_values(
+            "t",
+            index(2),
+            vec![Scalar::Utf8("a".into()), Scalar::Null(NullKind::Null)],
+        )
+        .unwrap()
+        .take(&[1])
+        .unwrap()
+        .describe()
+        .unwrap();
+        assert_eq!(nothing.dtype(), DType::Utf8);
+        assert_eq!(nothing.values()[..2], [Scalar::Int64(0), Scalar::Int64(0)]);
+        assert!(nothing.values()[2].is_missing() && nothing.values()[3].is_missing());
+        // NEGATIVE: a text Series with values keeps its answer.
+        let text = Series::from_values(
+            "t",
+            index(3),
+            ["a", "b", "a"]
+                .into_iter()
+                .map(|t| Scalar::Utf8(t.into()))
+                .collect(),
+        )
+        .unwrap()
+        .describe()
+        .unwrap();
+        assert_eq!(
+            text.values(),
+            &[
+                Scalar::Int64(3),
+                Scalar::Int64(2),
+                Scalar::Utf8("a".into()),
+                Scalar::Int64(2)
+            ]
+        );
     }
 
     #[test]

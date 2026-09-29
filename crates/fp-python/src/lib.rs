@@ -18758,6 +18758,80 @@ fn groupby_pct_change_args(
     Ok((fill, limit))
 }
 
+/// Per-group `describe` results laid out as pandas' groupby describe
+/// (`apply(describe).unstack()`): a row per group under `index`, a column
+/// per statistic in first-seen order - a statistic a group lacks is NaN -
+/// all object when a group's result is (a text column's count / unique /
+/// top / freq), else numeric (br-frankenpandas-uy0mu).
+fn unstacked_stats(described: &[Series], index: Index) -> PyResult<DataFrame> {
+    let mut stats: Vec<IndexLabel> = Vec::new();
+    for part in described {
+        for label in part.index().labels() {
+            if !stats.contains(label) {
+                stats.push(label.clone());
+            }
+        }
+    }
+    let object = described
+        .iter()
+        .any(|part| part.column().dtype() == DType::Utf8);
+    // A float64 summary stays float64 whole, an all-NaN statistic included
+    // (include='all' gives a number column NaN unique / top / freq).
+    let float = described
+        .iter()
+        .all(|part| part.column().dtype() == DType::Float64);
+    let mut columns = BTreeMap::new();
+    let mut order = Vec::with_capacity(stats.len());
+    for stat in &stats {
+        let values: Vec<Scalar> = described
+            .iter()
+            .map(|part| {
+                part.index()
+                    .labels()
+                    .iter()
+                    .position(|label| label == stat)
+                    .map_or(Scalar::Null(NullKind::NaN), |position| {
+                        part.values()[position].clone()
+                    })
+            })
+            .map(|value| match value {
+                value if float && value.is_missing() => Scalar::Float64(f64::NAN),
+                value => value,
+            })
+            .collect();
+        let column = if object {
+            Column::from_object_values(values)
+        } else {
+            Column::from_values(values).map_err(column_error_to_py)?
+        };
+        let name = stat.to_string();
+        columns.insert(name.clone(), column);
+        order.push(name);
+    }
+    DataFrame::new_with_column_order(index, columns, order).map_err(frame_error_to_py)
+}
+
+/// pandas' groupby describe keywords as the per-group describe takes them
+/// (only the ones given).
+fn describe_kwargs<'py>(
+    py: Python<'py>,
+    percentiles: Option<&Bound<'py, PyAny>>,
+    include: Option<&Bound<'py, PyAny>>,
+    exclude: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let kwargs = PyDict::new(py);
+    for (name, value) in [
+        ("percentiles", percentiles),
+        ("include", include),
+        ("exclude", exclude),
+    ] {
+        if let Some(value) = value.filter(|value| !value.is_none()) {
+            kwargs.set_item(name, value)?;
+        }
+    }
+    Ok(kwargs)
+}
+
 /// pandas' deprecated `get_group(name, obj=...)`: the group's rows of `obj`
 /// by position, `obj.iloc[gb.indices[name]]` - a missing name is pandas'
 /// KeyError, before the FutureWarning (br-frankenpandas-n57tz: obj was
@@ -51844,13 +51918,22 @@ impl PyGroupBy {
         self.out(res)
     }
 
-    /// pandas' `describe()`: each numeric column's per-group statistics
-    /// (its SeriesGroupBy.describe) side by side under its label - columns
-    /// (column, statistic), a row per group in pandas' group order. It gave
-    /// one row per group and statistic ('a|count') under the column alone.
-    /// Several keys are refused for now (the per-column describe is single
-    /// key).
-    fn describe<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+    /// pandas' `describe(percentiles=None, include=None, exclude=None)`:
+    /// each group's rows (the key columns left out) through
+    /// `DataFrame.describe` with the keywords - which picks the columns, the
+    /// numeric ones by default or the text ones when there are none - then
+    /// each described column's statistics a row per group
+    /// ([`unstacked_stats`]), side by side under the column: columns
+    /// (column, statistic), a row per group in pandas' group order. Only the
+    /// int64 / float64 columns were described, and the keywords were
+    /// unexpected (br-frankenpandas-uy0mu). Several keys are refused for now.
+    #[pyo3(signature = (percentiles=None, include=None, exclude=None))]
+    fn describe<'py>(
+        slf: &Bound<'py, Self>,
+        percentiles: Option<&Bound<'py, PyAny>>,
+        include: Option<&Bound<'py, PyAny>>,
+        exclude: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
         let this = slf.borrow();
         this.observed_only("describe")?;
@@ -51859,34 +51942,63 @@ impl PyGroupBy {
                 "DataFrameGroupBy.describe over several keys",
             ));
         }
-        let names: Vec<String> = this
+        let kwargs = describe_kwargs(py, percentiles, include, exclude)?;
+        let values: Vec<&str> = this
             .df
             .column_names()
             .into_iter()
-            .filter(|name| {
-                !this.by.contains(name)
-                    && this
-                        .df
-                        .column(name)
-                        .is_some_and(|c| matches!(c.dtype(), DType::Int64 | DType::Float64))
-            })
-            .cloned()
+            .filter(|name| !this.by.contains(name))
+            .map(String::as_str)
             .collect();
-        let labels = names
-            .iter()
-            .map(|name| index_label_to_py(py, &this.df.column_label(name)))
-            .collect::<PyResult<Vec<_>>>()?;
+        let frame = this.df.select_columns(&values).map_err(frame_error_to_py)?;
+        let mut keys = Vec::new();
+        let mut described = Vec::new();
+        for (key, positions) in this.ordered_groups(false)? {
+            let part = Py::new(
+                py,
+                PyDataFrame {
+                    inner: frame.take_rows(&positions).map_err(frame_error_to_py)?,
+                },
+            )?;
+            let summary = part.bind(py).call_method("describe", (), Some(&kwargs))?;
+            described.push(summary.extract::<PyRef<'_, PyDataFrame>>()?.inner.clone());
+            keys.push(key);
+        }
+        let key_name = this.column_series_name(&this.by[0]);
+        let index = Index::new(keys).set_names((!key_name.is_empty()).then_some(key_name));
+        let mut names: Vec<String> = Vec::new();
+        for summary in &described {
+            for name in summary.column_names() {
+                if !names.contains(name) {
+                    names.push(name.clone());
+                }
+            }
+        }
+        let mut frames = Vec::with_capacity(names.len());
+        for name in &names {
+            let per_group = described
+                .iter()
+                .filter_map(|summary| {
+                    summary.column(name).map(|column| {
+                        Series::new(name.as_str(), summary.index().clone(), column.clone())
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(frame_error_to_py)?;
+            frames.push(
+                PyDataFrame {
+                    inner: unstacked_stats(&per_group, index.clone())?,
+                }
+                .into_bound_py_any(py)?,
+            );
+        }
         // A repeated name's stand-in back to it (47qjv).
-        let keys = names
+        let labels = names
             .iter()
             .map(|name| this.column_series_name(name).to_string())
             .collect();
         drop(this);
-        let described = labels
-            .into_iter()
-            .map(|label| slf.get_item(label)?.call_method0("describe"))
-            .collect::<PyResult<Vec<_>>>()?;
-        concat_side_by_side(py, described, keys)
+        concat_side_by_side(py, frames, labels)
     }
 
     /// `for key, group in gb`: each group's key (a tuple over several keys)
@@ -54193,17 +54305,52 @@ impl PySeriesGroupBy {
         Ok(PySeries { inner: res })
     }
 
-    fn describe(&self) -> PyResult<PyDataFrame> {
-        self.single_key("describe")?;
-        self.observed_only("describe")?;
-        let res = self
-            .series
-            .groupby(&self.by)
-            .map_err(frame_error_to_py)?
-            .describe()
-            .map_err(frame_error_to_py)?;
+    /// pandas' `describe(percentiles=None, include=None, exclude=None)`:
+    /// each group's `Series.describe` laid out a row per group
+    /// ([`unstacked_stats`]) - a text Series' count / unique / top / freq
+    /// (it read every value as a number: count 0, NaN) - and a numeric
+    /// Series without keywords through fp-frame's per-group summary
+    /// (br-frankenpandas-uy0mu).
+    #[pyo3(signature = (percentiles=None, include=None, exclude=None))]
+    fn describe(
+        slf: &Bound<'_, Self>,
+        percentiles: Option<&Bound<'_, PyAny>>,
+        include: Option<&Bound<'_, PyAny>>,
+        exclude: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        let py = slf.py();
+        let this = slf.borrow();
+        this.single_key("describe")?;
+        this.observed_only("describe")?;
+        let kwargs = describe_kwargs(py, percentiles, include, exclude)?;
+        if kwargs.is_empty() && this.series.column().dtype().is_numeric() {
+            let res = this
+                .series
+                .groupby(&this.by)
+                .map_err(frame_error_to_py)?
+                .describe()
+                .map_err(frame_error_to_py)?;
+            return Ok(PyDataFrame {
+                inner: this.ordered_group_frame(res)?,
+            });
+        }
+        let mut keys = Vec::new();
+        let mut described = Vec::new();
+        for (key, positions) in this.ordered_groups(false)? {
+            let part = Py::new(
+                py,
+                PySeries {
+                    inner: this.group_rows(&positions)?,
+                },
+            )?;
+            let summary = part.bind(py).call_method("describe", (), Some(&kwargs))?;
+            described.push(summary.extract::<PyRef<'_, PySeries>>()?.inner.clone());
+            keys.push(key);
+        }
+        let key_name = this.by.name();
+        let index = Index::new(keys).set_names((!key_name.is_empty()).then_some(key_name));
         Ok(PyDataFrame {
-            inner: self.ordered_group_frame(res)?,
+            inner: unstacked_stats(&described, index)?,
         })
     }
 

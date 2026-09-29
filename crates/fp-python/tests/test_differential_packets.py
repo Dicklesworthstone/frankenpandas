@@ -16950,3 +16950,52 @@ _GP_CASES = {
 def test_groupby_keywords_d2_like_pandas_n57tz(case: str) -> None:
     run = _GP_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-uy0mu: SeriesGroupBy.describe over text read every value
+# as a number (count 0, NaN); DataFrameGroupBy.describe described int64 /
+# float64 columns alone; neither took percentiles / include / exclude.
+def _gd_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "k": ["x", "y", "x", "x", "y", "y", "x"],
+            "v": ["a", "b", "a", None, "b", "c", "b"],
+            "n": [1.0, 2.0, np.nan, 4.0, 5.0, 3.0, 1.0],
+            "i": [1, 2, 3, 4, 5, 6, 7],
+            "b": [True, False, True, True, False, True, False],
+        }
+    )
+
+
+def _gd(m: Any) -> Any:
+    return _gd_frame(m).groupby("k")
+
+
+_GD_CASES = {
+    "series describe text": lambda m: _rl_shown(_gd(m)["v"].describe()),
+    "series describe bool": lambda m: _rl_shown(_gd(m)["b"].describe()),
+    "series describe text, a group all missing": lambda m: _rl_shown(
+        m.DataFrame({"k": ["x", "y", "y"], "v": [None, "a", "b"]}).groupby("k")["v"].describe()
+    ),
+    "series describe percentiles": lambda m: _rl_shown(_gd(m)["n"].describe(percentiles=[0.1, 0.9])),
+    "series describe int percentiles": lambda m: _rl_shown(_gd(m)["i"].describe(percentiles=[0.5])),
+    "series describe include": lambda m: _rl_shown(_gd(m)["n"].describe(include="all")),
+    "frame describe text only": lambda m: _rl_shown(_gd(m)[["v"]].describe()),
+    "frame describe numbers beside text": lambda m: _rl_shown(_gd(m)[["n", "v", "i"]].describe()),
+    "frame describe percentiles": lambda m: _rl_shown(_gd(m)[["n", "i"]].describe(percentiles=[0.2, 0.8])),
+    "frame describe include all": lambda m: _rl_shown(_gd(m)[["n", "v"]].describe(include="all")),
+    "frame describe include object": lambda m: _rl_shown(_gd(m)[["n", "v"]].describe(include=["object"])),
+    "frame describe exclude number": lambda m: _rl_shown(_gd(m)[["n", "v"]].describe(exclude="number")),
+    "frame describe include bool": lambda m: _rl_shown(_gd(m)[["n", "b"]].describe(include="bool")),
+    "frame describe whole": lambda m: _rl_shown(_gd(m).describe()),
+    # NEGATIVE: a numeric describe without keywords was already pandas'.
+    "series describe": lambda m: _rl_shown(_gd(m)["n"].describe()),
+    "frame describe": lambda m: _rl_shown(_gd(m)[["n", "i"]].describe()),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_GD_CASES))
+def test_groupby_describe_like_pandas_uy0mu(case: str) -> None:
+    run = _GD_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
