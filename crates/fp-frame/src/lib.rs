@@ -31671,6 +31671,30 @@ pub fn fixed_window_bounds(
         .collect()
 }
 
+/// pandas' window `sem(ddof=)`: `std / (count - ddof) ** 0.5` row by row
+/// over a window's ddof-1 `std` and its `count` (inf where the count is
+/// `ddof`, NaN below it or where either is missing).
+#[allow(clippy::cast_precision_loss)] // ddof is a small count
+fn sem_of(std: &Series, count: &Series, ddof: usize) -> Result<Series, FrameError> {
+    let values = std
+        .column()
+        .values()
+        .iter()
+        .zip(count.column().values())
+        .map(|(std, count)| match (std.to_f64(), count.to_f64()) {
+            (Ok(std), Ok(count)) if !std.is_nan() && !count.is_nan() => {
+                Scalar::Float64(std / (count - ddof as f64).sqrt())
+            }
+            _ => Scalar::Null(NullKind::NaN),
+        })
+        .collect();
+    Series::new(
+        std.name(),
+        std.index().clone(),
+        Column::from_values(values)?,
+    )
+}
+
 /// pandas' variable-window indexer over monotonic timestamps `ts`: row `i`'s
 /// window holds the rows whose time lies in the interval of length `offset`
 /// ending at `ts[i]`, closed as `closed` says ('right': `(t - offset, t]`),
@@ -32180,18 +32204,30 @@ impl RollingPairwiseMomentState {
         self.sum_xy -= x * y;
     }
 
+    /// pandas' window cov (`sum((x - mx)(y - my)) / (nobs - ddof)`) or corr
+    /// (the cov over the ddof standard deviations, so ddof cancels but for
+    /// NaN where `nobs <= ddof`); ddof 1 leaves one observation NaN.
+    #[allow(clippy::cast_precision_loss)] // window counts
     fn output(
         &self,
         min_periods: usize,
         want_corr: bool,
         constant_x: bool,
         constant_y: bool,
+        ddof: usize,
     ) -> Scalar {
-        if self.nobs < min_periods || self.nobs < 2 {
+        if self.nobs < min_periods || self.nobs == 0 || (self.nobs < 2 && ddof >= 1) {
+            return Scalar::Null(NullKind::NaN);
+        }
+        if want_corr && self.nobs <= ddof {
             return Scalar::Null(NullKind::NaN);
         }
         if !want_corr && (constant_x || constant_y) {
-            return Scalar::Float64(0.0);
+            return if self.nobs <= ddof {
+                Scalar::Null(NullKind::NaN)
+            } else {
+                Scalar::Float64(0.0)
+            };
         }
         if want_corr && (constant_x || constant_y) {
             return Scalar::Null(NullKind::NaN);
@@ -32212,7 +32248,7 @@ impl RollingPairwiseMomentState {
                 }
             }
         } else {
-            Scalar::Float64(cov_num / (self.nobs - 1) as f64)
+            Scalar::Float64(cov_num / (self.nobs as f64 - ddof as f64))
         }
     }
 }
@@ -33308,7 +33344,13 @@ impl Rolling<'_> {
     /// Matches `series.rolling(window).corr(other)`. Computes Pearson
     /// correlation over each rolling window.
     pub fn corr(&self, other: &Series) -> Result<Series, FrameError> {
-        self.rolling_pairwise_moment(other, true)
+        self.rolling_pairwise_moment(other, true, 1)
+    }
+
+    /// pandas' `corr(other, ddof=)`: the ddof cancels, but for NaN where a
+    /// window holds `ddof` observations or fewer.
+    pub fn corr_ddof(&self, other: &Series, ddof: usize) -> Result<Series, FrameError> {
+        self.rolling_pairwise_moment(other, true, ddof)
     }
 
     /// Rolling pairwise covariance with another Series.
@@ -33316,13 +33358,19 @@ impl Rolling<'_> {
     /// Matches `series.rolling(window).cov(other)`. Computes sample
     /// covariance (ddof=1) over each rolling window.
     pub fn cov(&self, other: &Series) -> Result<Series, FrameError> {
-        self.rolling_pairwise_moment(other, false)
+        self.rolling_pairwise_moment(other, false, 1)
+    }
+
+    /// pandas' `cov(other, ddof=)`: the co-moment over `nobs - ddof`.
+    pub fn cov_ddof(&self, other: &Series, ddof: usize) -> Result<Series, FrameError> {
+        self.rolling_pairwise_moment(other, false, ddof)
     }
 
     fn rolling_pairwise_moment(
         &self,
         other: &Series,
         want_corr: bool,
+        ddof: usize,
     ) -> Result<Series, FrameError> {
         self.validate()?;
         // Identity fast path (br-frankenpandas rolling-cov-align): co-indexed
@@ -33387,10 +33435,12 @@ impl Rolling<'_> {
                 }
                 let cx = state.nobs > 0 && run_x >= state.nobs;
                 let cy = state.nobs > 0 && run_y >= state.nobs;
-                out.push(match state.output(self.min_periods, want_corr, cx, cy) {
-                    Scalar::Float64(f) => f,
-                    _ => f64::NAN,
-                });
+                out.push(
+                    match state.output(self.min_periods, want_corr, cx, cy, ddof) {
+                        Scalar::Float64(f) => f,
+                        _ => f64::NAN,
+                    },
+                );
             }
             out
         };
@@ -33502,7 +33552,7 @@ impl Rolling<'_> {
                 }
                 let cx = state.nobs > 0 && run_x >= state.nobs;
                 let cy = state.nobs > 0 && run_y >= state.nobs;
-                out.push(state.output(self.min_periods, want_corr, cx, cy));
+                out.push(state.output(self.min_periods, want_corr, cx, cy, ddof));
             }
             let index = self.series.index().clone();
             // Float64 even when every window is undefined (all-NaN inferred
@@ -33530,7 +33580,7 @@ impl Rolling<'_> {
             }
             let cx = state.constant_x();
             let cy = state.constant_y();
-            out.push(state.output(self.min_periods, want_corr, cx, cy));
+            out.push(state.output(self.min_periods, want_corr, cx, cy, ddof));
         }
 
         // Per br-frankenpandas-yk50z: pandas rolling cov/corr preserves source
@@ -33771,6 +33821,26 @@ impl Rolling<'_> {
     /// (br-frankenpandas-g6qa2).
     pub fn sem(&self) -> Result<Series, FrameError> {
         self.rolling_var_online(1, VarOutputKind::Sem)
+    }
+
+    /// pandas' `std(ddof=)`: `sqrt(m2 / (nobs - ddof))`, NaN where
+    /// `nobs <= ddof` ([`Self::std`] is ddof 1).
+    pub fn std_ddof(&self, ddof: usize) -> Result<Series, FrameError> {
+        self.rolling_var_online(ddof, VarOutputKind::Std)
+    }
+
+    /// pandas' `var(ddof=)` ([`Self::std_ddof`] squared).
+    pub fn var_ddof(&self, ddof: usize) -> Result<Series, FrameError> {
+        self.rolling_var_online(ddof, VarOutputKind::Var)
+    }
+
+    /// pandas' `sem(ddof=)`, its own formula: the ddof-1 std over
+    /// `sqrt(count - ddof)` (the std keeps ddof 1).
+    pub fn sem_ddof(&self, ddof: usize) -> Result<Series, FrameError> {
+        if ddof == 1 {
+            return self.sem();
+        }
+        sem_of(&self.std()?, &self.count()?, ddof)
     }
 
     /// Rank the current observation within each rolling window.
@@ -34850,7 +34920,13 @@ impl Expanding<'_> {
     pub fn corr(&self, other: &Series) -> Result<Series, FrameError> {
         // Per br-frankenpandas-18xvl: pandas expanding().corr preserves
         // source axis name.
-        self.expanding_bivariate(other, true)
+        self.expanding_bivariate(other, true, 1)
+    }
+
+    /// pandas' `corr(other, ddof=)` ([`Rolling::corr_ddof`] over the
+    /// growing window).
+    pub fn corr_ddof(&self, other: &Series, ddof: usize) -> Result<Series, FrameError> {
+        self.expanding_bivariate(other, true, ddof)
     }
 
     /// Expanding sample covariance (ddof=1) with another Series.
@@ -34861,7 +34937,13 @@ impl Expanding<'_> {
     pub fn cov(&self, other: &Series) -> Result<Series, FrameError> {
         // Per br-frankenpandas-6ns0e: pandas expanding().cov preserves source
         // axis name.
-        self.expanding_bivariate(other, false)
+        self.expanding_bivariate(other, false, 1)
+    }
+
+    /// pandas' `cov(other, ddof=)` ([`Rolling::cov_ddof`] over the growing
+    /// window).
+    pub fn cov_ddof(&self, other: &Series, ddof: usize) -> Result<Series, FrameError> {
+        self.expanding_bivariate(other, false, ddof)
     }
 
     /// O(n) online bivariate sweep backing expanding `cov`/`corr`
@@ -34878,7 +34960,15 @@ impl Expanding<'_> {
     /// changes. A fully constant input leaves `M2a`/`M2b` exactly 0 (`da == 0`),
     /// so the `std == 0 -> NaN` guard is reproduced. Expanding cov/corr are
     /// tolerance-tested (no bit-goldens), so the reassociated sums are in-spec.
-    fn expanding_bivariate(&self, other: &Series, want_corr: bool) -> Result<Series, FrameError> {
+    /// `ddof` is pandas' (cov over `nobs - ddof`; corr NaN where
+    /// `nobs <= ddof`, the ddof cancelling otherwise).
+    #[allow(clippy::cast_precision_loss)] // window counts
+    fn expanding_bivariate(
+        &self,
+        other: &Series,
+        want_corr: bool,
+        ddof: usize,
+    ) -> Result<Series, FrameError> {
         if self.series.len() != other.len() {
             return Err(FrameError::LengthMismatch {
                 index_len: self.series.len(),
@@ -34909,7 +34999,7 @@ impl Expanding<'_> {
         if let (Some(av_view), Some(bv_view)) = (view(self.series.column()), view(other.column())) {
             let (a, b) = (av_view.as_ref(), bv_view.as_ref());
             let len = a.len();
-            let min_pairs = self.min_periods.max(2);
+            let min_pairs = self.min_periods.max(if ddof == 0 { 1 } else { 2 });
             let mut out = Vec::with_capacity(len);
             let mut nobs: usize = 0;
             let mut mean_a = 0.0_f64;
@@ -34931,11 +35021,11 @@ impl Expanding<'_> {
                     out.push(f64::NAN);
                     continue;
                 }
-                let denom = (nobs - 1) as f64;
+                let denom = nobs as f64 - ddof as f64;
                 if want_corr {
                     let std_a = (m2a / denom).sqrt();
                     let std_b = (m2b / denom).sqrt();
-                    if std_a == 0.0 || std_b == 0.0 {
+                    if nobs <= ddof || std_a == 0.0 || std_b == 0.0 {
                         out.push(f64::NAN);
                     } else {
                         out.push((cab / denom) / (std_a * std_b));
@@ -34950,7 +35040,7 @@ impl Expanding<'_> {
         let a_vals = self.series.column().values();
         let b_vals = other.column().values();
         let len = a_vals.len();
-        let min_pairs = self.min_periods.max(2);
+        let min_pairs = self.min_periods.max(if ddof == 0 { 1 } else { 2 });
         let mut out = Vec::with_capacity(len);
 
         let mut nobs: usize = 0;
@@ -34987,11 +35077,11 @@ impl Expanding<'_> {
                 out.push(Scalar::Null(NullKind::NaN));
                 continue;
             }
-            let denom = (nobs - 1) as f64;
+            let denom = nobs as f64 - ddof as f64;
             if want_corr {
                 let std_a = (m2a / denom).sqrt();
                 let std_b = (m2b / denom).sqrt();
-                if std_a == 0.0 || std_b == 0.0 {
+                if nobs <= ddof || std_a == 0.0 || std_b == 0.0 {
                     out.push(Scalar::Null(NullKind::NaN));
                 } else {
                     out.push(Scalar::Float64((cab / denom) / (std_a * std_b)));
@@ -35015,6 +35105,26 @@ impl Expanding<'_> {
     pub fn sem(&self) -> Result<Series, FrameError> {
         self.as_full_window_rolling()
             .rolling_var_online(1, VarOutputKind::Sem)
+    }
+
+    /// pandas' `std(ddof=)` ([`Rolling::std_ddof`] over the growing window).
+    pub fn std_ddof(&self, ddof: usize) -> Result<Series, FrameError> {
+        self.as_full_window_rolling()
+            .rolling_var_online(ddof, VarOutputKind::Std)
+    }
+
+    /// pandas' `var(ddof=)` ([`Rolling::var_ddof`] over the growing window).
+    pub fn var_ddof(&self, ddof: usize) -> Result<Series, FrameError> {
+        self.as_full_window_rolling()
+            .rolling_var_online(ddof, VarOutputKind::Var)
+    }
+
+    /// pandas' `sem(ddof=)` ([`Rolling::sem_ddof`] over the growing window).
+    pub fn sem_ddof(&self, ddof: usize) -> Result<Series, FrameError> {
+        if ddof == 1 {
+            return self.sem();
+        }
+        sem_of(&self.std()?, &self.count()?, ddof)
     }
 
     /// Rank the current observation against all observations seen so far.
@@ -35924,6 +36034,32 @@ impl Ewm<'_> {
             let index = self.series.index().clone();
             return Series::new(self.series.name(), index, Column::from_f64_values(out));
         }
+        self.cov_rows(other, false)
+    }
+
+    /// pandas' `cov(other, bias=)`: bias=True is the weighted covariance
+    /// without the debias factor ([`Self::cov`] is bias=False).
+    pub fn cov_bias(&self, other: &Series, bias: bool) -> Result<Series, FrameError> {
+        if !bias {
+            return self.cov(other);
+        }
+        if self.series.len() != other.len() {
+            return Err(FrameError::LengthMismatch {
+                index_len: self.series.len(),
+                column_len: other.len(),
+            });
+        }
+        self.cov_rows(other, true)
+    }
+
+    /// pandas' `ewmcov(x, y, bias=)` row by row (the kernel the typed arms of
+    /// [`Self::cov`] short-cut for bias=False over all-valid inputs).
+    fn cov_rows(&self, other: &Series, bias: bool) -> Result<Series, FrameError> {
+        let alpha = self
+            .alpha
+            .clone()
+            .map_err(FrameError::CompatibilityRejected)?;
+        let one_minus_alpha = 1.0 - alpha;
         let a_vals = self.series.column().values();
         let b_vals = other.column().values();
         let mut out = Vec::with_capacity(a_vals.len());
@@ -36000,9 +36136,12 @@ impl Ewm<'_> {
             }
 
             // pandas ewmcov: `NaN` until `minp` joint observations, then the
-            // debiased covariance (NaN while the debias denominator is <= 0).
+            // covariance itself under bias, else debiased (NaN while the
+            // debias denominator is <= 0).
             let numerator = sum_wt * sum_wt - sum_wt2;
-            if nobs >= minp && numerator > 0.0 {
+            if nobs >= minp && bias {
+                out.push(Scalar::Float64(cov_xy));
+            } else if nobs >= minp && numerator > 0.0 {
                 out.push(Scalar::Float64(cov_xy * (sum_wt * sum_wt) / numerator));
             } else {
                 out.push(Scalar::Null(NullKind::NaN));
@@ -36284,6 +36423,49 @@ impl Ewm<'_> {
             let index = self.series.index().clone();
             return Series::new(self.series.name(), index, Column::from_f64_values(out));
         }
+        self.var_rows(false)
+    }
+
+    /// pandas' `var(bias=)`: bias=True is the weighted variance without the
+    /// debias factor ([`Self::var`] is bias=False).
+    pub fn var_bias(&self, bias: bool) -> Result<Series, FrameError> {
+        if bias {
+            self.var_rows(true)
+        } else {
+            self.var()
+        }
+    }
+
+    /// pandas' `std(bias=)`: the square root of [`Self::var_bias`].
+    pub fn std_bias(&self, bias: bool) -> Result<Series, FrameError> {
+        if !bias {
+            return self.std();
+        }
+        let var = self.var_rows(true)?;
+        let out = var
+            .column()
+            .values()
+            .iter()
+            .map(|v| match v {
+                Scalar::Float64(f) => Scalar::Float64(f.sqrt()),
+                other => other.clone(),
+            })
+            .collect();
+        Series::new(
+            self.series.name(),
+            self.series.index().clone(),
+            Column::from_values(out)?,
+        )
+    }
+
+    /// pandas' `ewmcov(x, x, bias=)` row by row (the kernel the typed arms
+    /// of [`Self::var`] short-cut for bias=False over all-valid inputs).
+    fn var_rows(&self, bias: bool) -> Result<Series, FrameError> {
+        let alpha = self
+            .alpha
+            .clone()
+            .map_err(FrameError::CompatibilityRejected)?;
+        let one_minus_alpha = 1.0 - alpha;
         let vals = self.series.column().values();
         let mut out = Vec::with_capacity(vals.len());
 
@@ -36349,11 +36531,13 @@ impl Ewm<'_> {
                 old_wt *= one_minus_alpha;
             }
 
-            // Debiased (ddof=1) output; NaN until `minp` observations
-            // (issue #19) and while the effective sample weight does not
-            // exceed one observation.
+            // Debiased (ddof=1) output - the variance itself under bias; NaN
+            // until `minp` observations (issue #19) and, debiased, while the
+            // effective sample weight does not exceed one observation.
             let numerator = sum_wt * sum_wt - sum_wt2;
-            if nobs >= minp && numerator > 0.0 {
+            if nobs >= minp && bias {
+                out.push(Scalar::Float64(ewm_cov));
+            } else if nobs >= minp && numerator > 0.0 {
                 out.push(Scalar::Float64(ewm_cov * (sum_wt * sum_wt) / numerator));
             } else {
                 out.push(Scalar::Null(NullKind::NaN));
@@ -39626,13 +39810,26 @@ impl DataFrameRolling<'_> {
         matches!(
             self.df.column_at(pos).map(Column::dtype),
             Some(DType::Int64 | DType::Float64)
-        ) && self
-            .on
+        ) && !self.is_on(pos)
+    }
+
+    /// Whether the column at `pos` is `on`.
+    fn is_on(&self, pos: usize) -> bool {
+        self.on
             .as_deref()
-            .is_none_or(|on| self.df.column_name_at(pos).as_deref() != Some(on))
+            .is_some_and(|on| self.df.column_name_at(pos).as_deref() == Some(on))
     }
 
     /// Apply rolling aggregation to each numeric column, returning a new DataFrame.
+    fn apply_rolling<F>(&self, agg: F) -> Result<DataFrame, FrameError>
+    where
+        F: for<'s> Fn(Rolling<'s>) -> Result<Series, FrameError> + Sync,
+    {
+        self.apply_rolling_to(false, agg)
+    }
+
+    /// Apply rolling aggregation to each numeric column (every column but
+    /// `on` when `every_column`, for count), returning a new DataFrame.
     ///
     /// Column-parallel (br-frankenpandas-1q4q4): each numeric column is
     /// aggregated INDEPENDENTLY (no cross-column state), so spreading the columns
@@ -39642,16 +39839,19 @@ impl DataFrameRolling<'_> {
     /// rolling work (order statistics, moments) dominates at scale; the serial
     /// loop left all but one core idle (e.g. DataFrame.rolling.skew was 0.23×
     /// pandas). Gated so small frames keep the zero-overhead serial path.
-    fn apply_rolling<F>(&self, agg: F) -> Result<DataFrame, FrameError>
+    fn apply_rolling_to<F>(&self, every_column: bool, agg: F) -> Result<DataFrame, FrameError>
     where
         F: for<'s> Fn(Rolling<'s>) -> Result<Series, FrameError> + Sync,
     {
-        let on_position = self.on.as_deref().and_then(|on| {
-            (0..self.df.num_columns())
-                .find(|&pos| self.df.column_name_at(pos).as_deref() == Some(on))
-        });
+        let on_position = (0..self.df.num_columns()).find(|&pos| self.is_on(pos));
         let numeric_positions: Vec<usize> = (0..self.df.num_columns())
-            .filter(|&pos| self.aggregates(pos))
+            .filter(|&pos| {
+                if every_column {
+                    !self.is_on(pos)
+                } else {
+                    self.aggregates(pos)
+                }
+            })
             .collect();
 
         let agg_one = |pos: usize| -> Result<(String, Column), FrameError> {
@@ -39780,14 +39980,30 @@ impl DataFrameRolling<'_> {
         self.apply_rolling(|r| r.std())
     }
 
-    /// Rolling count of non-null values across all numeric columns.
+    /// [`Rolling::std_ddof`] across all numeric columns.
+    pub fn std_ddof(&self, ddof: usize) -> Result<DataFrame, FrameError> {
+        self.apply_rolling(|r| r.std_ddof(ddof))
+    }
+
+    /// Rolling count of non-null values in every column (but `on`), as
+    /// pandas counts text and datetimes too (only the numeric ones were).
     pub fn count(&self) -> Result<DataFrame, FrameError> {
-        self.apply_rolling(|r| r.count())
+        self.apply_rolling_to(true, |r| r.count())
     }
 
     /// Rolling variance across all numeric columns.
     pub fn var(&self) -> Result<DataFrame, FrameError> {
         self.apply_rolling(|r| r.var())
+    }
+
+    /// [`Rolling::var_ddof`] across all numeric columns.
+    pub fn var_ddof(&self, ddof: usize) -> Result<DataFrame, FrameError> {
+        self.apply_rolling(|r| r.var_ddof(ddof))
+    }
+
+    /// [`Rolling::sem_ddof`] across all numeric columns.
+    pub fn sem_ddof(&self, ddof: usize) -> Result<DataFrame, FrameError> {
+        self.apply_rolling(|r| r.sem_ddof(ddof))
     }
 
     /// Rolling median across all numeric columns.
@@ -39919,12 +40135,22 @@ impl DataFrameRolling<'_> {
         self.pairwise_rolling(|rolling, other| rolling.corr(other))
     }
 
+    /// [`Self::corr`] with pandas' `ddof` ([`Rolling::corr_ddof`]).
+    pub fn corr_ddof(&self, ddof: usize) -> Result<DataFrame, FrameError> {
+        self.pairwise_rolling(|rolling, other| rolling.corr_ddof(other, ddof))
+    }
+
     /// Rolling pairwise sample covariance (ddof=1) across numeric columns.
     ///
     /// Produces one output column per upper-triangular pair:
     /// `{left}__{right}`.
     pub fn cov(&self) -> Result<DataFrame, FrameError> {
         self.pairwise_rolling(|rolling, other| rolling.cov(other))
+    }
+
+    /// [`Self::cov`] with pandas' `ddof` ([`Rolling::cov_ddof`]).
+    pub fn cov_ddof(&self, ddof: usize) -> Result<DataFrame, FrameError> {
+        self.pairwise_rolling(|rolling, other| rolling.cov_ddof(other, ddof))
     }
 
     /// Rolling correlation of each numeric column with `other`.
@@ -40061,17 +40287,27 @@ pub struct DataFrameExpanding<'a> {
 
 impl DataFrameExpanding<'_> {
     /// Apply expanding aggregation to each numeric column, returning a new DataFrame.
-    /// Column-parallel (br-frankenpandas-1q4q4) — see `DataFrameRolling::apply_rolling`.
     fn apply_expanding<F>(&self, agg: F) -> Result<DataFrame, FrameError>
+    where
+        F: Fn(&Series, usize) -> Result<Series, FrameError> + Sync,
+    {
+        self.apply_expanding_to(false, agg)
+    }
+
+    /// Apply expanding aggregation to each numeric column (every column
+    /// when `every_column`, for count), returning a new DataFrame.
+    /// Column-parallel (br-frankenpandas-1q4q4) — see `DataFrameRolling::apply_rolling`.
+    fn apply_expanding_to<F>(&self, every_column: bool, agg: F) -> Result<DataFrame, FrameError>
     where
         F: Fn(&Series, usize) -> Result<Series, FrameError> + Sync,
     {
         let numeric_positions: Vec<usize> = (0..self.df.num_columns())
             .filter(|&pos| {
-                matches!(
-                    self.df.column_at(pos).expect("pos in bounds").dtype(),
-                    DType::Int64 | DType::Float64
-                )
+                every_column
+                    || matches!(
+                        self.df.column_at(pos).expect("pos in bounds").dtype(),
+                        DType::Int64 | DType::Float64
+                    )
             })
             .collect();
 
@@ -40180,9 +40416,19 @@ impl DataFrameExpanding<'_> {
         self.apply_expanding(|s, mp| s.expanding(Some(mp)).std())
     }
 
+    /// [`Expanding::std_ddof`] across all numeric columns.
+    pub fn std_ddof(&self, ddof: usize) -> Result<DataFrame, FrameError> {
+        self.apply_expanding(|s, mp| s.expanding(Some(mp)).std_ddof(ddof))
+    }
+
     /// Expanding variance across all numeric columns.
     pub fn var(&self) -> Result<DataFrame, FrameError> {
         self.apply_expanding(|s, mp| s.expanding(Some(mp)).var())
+    }
+
+    /// [`Expanding::var_ddof`] across all numeric columns.
+    pub fn var_ddof(&self, ddof: usize) -> Result<DataFrame, FrameError> {
+        self.apply_expanding(|s, mp| s.expanding(Some(mp)).var_ddof(ddof))
     }
 
     /// Expanding median across all numeric columns.
@@ -40190,9 +40436,10 @@ impl DataFrameExpanding<'_> {
         self.apply_expanding(|s, mp| s.expanding(Some(mp)).median())
     }
 
-    /// Expanding count of non-null values across all numeric columns.
+    /// Expanding count of non-null values in every column, as pandas
+    /// counts text and datetimes too (only the numeric ones were).
     pub fn count(&self) -> Result<DataFrame, FrameError> {
-        self.apply_expanding(|s, mp| s.expanding(Some(mp)).count())
+        self.apply_expanding_to(true, |s, mp| s.expanding(Some(mp)).count())
     }
 
     /// Expanding quantile across all numeric columns.
@@ -40290,6 +40537,11 @@ impl DataFrameExpanding<'_> {
     /// Expanding standard error of the mean across numeric columns.
     pub fn sem(&self) -> Result<DataFrame, FrameError> {
         self.apply_expanding(|s, mp| s.expanding(Some(mp)).sem())
+    }
+
+    /// [`Expanding::sem_ddof`] across numeric columns.
+    pub fn sem_ddof(&self, ddof: usize) -> Result<DataFrame, FrameError> {
+        self.apply_expanding(|s, mp| s.expanding(Some(mp)).sem_ddof(ddof))
     }
 
     /// Expanding rank across numeric columns.
@@ -40441,9 +40693,19 @@ impl DataFrameEwm<'_> {
         self.apply_ewm(|ewm| ewm.std())
     }
 
+    /// [`Ewm::std_bias`] across all numeric columns.
+    pub fn std_bias(&self, bias: bool) -> Result<DataFrame, FrameError> {
+        self.apply_ewm(|ewm| ewm.std_bias(bias))
+    }
+
     /// EWM variance across all numeric columns.
     pub fn var(&self) -> Result<DataFrame, FrameError> {
         self.apply_ewm(|ewm| ewm.var())
+    }
+
+    /// [`Ewm::var_bias`] across all numeric columns.
+    pub fn var_bias(&self, bias: bool) -> Result<DataFrame, FrameError> {
+        self.apply_ewm(|ewm| ewm.var_bias(bias))
     }
 
     /// EWM weighted sum across all numeric columns.
@@ -125283,6 +125545,55 @@ mod tests {
             df.rolling_offset("2D", None, IntervalClosed::Right, Some("zz"))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn window_ddof_bias_and_count_of_any_dtype_n57tz() {
+        // MEASURED, live pandas 2.2.3 over pd.Series([1., 2., 4., 7., 11.]):
+        // rolling(3).var(ddof=0)[2] 1.555556, .sem(ddof=0)[2] 0.881917 (the
+        // ddof-1 std over sqrt(3)), .cov(s ** 2, ddof=0)[2] 8.0, .corr(s ** 2,
+        // ddof=5) NaN; expanding().sem(ddof=2)[1] inf; ewm(span=3).var(bias=
+        // True)[1] 0.222222; a text column's rolling(2).count() counts it.
+        let s = Series::from_values(
+            "s",
+            (0..5_i64).map(Into::into).collect::<Vec<_>>(),
+            [1.0, 2.0, 4.0, 7.0, 11.0]
+                .iter()
+                .map(|v| Scalar::Float64(*v))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let squares = s.mul(&s).unwrap();
+        let at = |series: Series, row: usize| series.column().values()[row].to_f64().unwrap();
+        let close = |got: f64, want: f64| (got - want).abs() < 1e-6;
+        let windows = s.rolling(3, None);
+        assert!(close(at(windows.var_ddof(0).unwrap(), 2), 1.555_556));
+        assert!(close(at(windows.sem_ddof(0).unwrap(), 2), 0.881_917));
+        assert!(close(at(windows.cov_ddof(&squares, 0).unwrap(), 2), 8.0));
+        assert!(windows.corr_ddof(&squares, 5).unwrap().column().values()[2].is_missing());
+        assert!(at(s.expanding(None).sem_ddof(2).unwrap(), 1).is_infinite());
+        let ewm = s.ewm(Some(3.0), None);
+        assert!(close(at(ewm.var_bias(true).unwrap(), 1), 0.222_222));
+        let text = DataFrame::from_dict(
+            &["c"],
+            vec![(
+                "c",
+                vec![
+                    Scalar::Utf8("x".into()),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Utf8("z".into()),
+                ],
+            )],
+        )
+        .unwrap();
+        let count = text.rolling(2, None).count().unwrap();
+        assert_eq!(count.column_names(), vec!["c"]);
+        assert_eq!(count.column("c").unwrap().values()[1], Scalar::Float64(1.0));
+        // NEGATIVE: ddof 1 and bias False are the plain results (NaN equal
+        // NaN, as pandas' equals).
+        assert!(windows.var_ddof(1).unwrap().equals(&windows.var().unwrap()));
+        assert!(ewm.var_bias(false).unwrap().equals(&ewm.var().unwrap()));
+        assert!(!ewm.var_bias(true).unwrap().equals(&ewm.var().unwrap()));
     }
 
     #[test]

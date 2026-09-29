@@ -47129,6 +47129,148 @@ fn rolling_of(
     })
 }
 
+/// The dtypes a window aggregation reads as float64, as pandas' (bool and
+/// the nullable numbers; their frame columns were left out, a nullable Int64
+/// frame came back empty).
+fn window_reads_as_float(dtype: &DType) -> bool {
+    matches!(
+        dtype,
+        DType::Bool | DType::BoolNullable | DType::Int64Nullable | DType::Float64Nullable
+    )
+}
+
+/// pandas' window aggregation input over a frame's columns but `on`: int
+/// and float columns as they are, bool and the nullable numbers as float64,
+/// any other dtype pandas' DataError - unless `numeric_only` leaves it out,
+/// or `every_dtype` (count) takes it as it is. (Other dtypes were left out
+/// silently.)
+fn window_frame_input<'a>(
+    df: &'a DataFrame,
+    on: Option<&str>,
+    numeric_only: bool,
+    every_dtype: bool,
+) -> PyResult<std::borrow::Cow<'a, DataFrame>> {
+    let mut floats: Vec<(String, DType)> = Vec::new();
+    let mut dropped: Vec<String> = Vec::new();
+    for pos in 0..df.num_columns() {
+        let (Some(name), Some(column)) = (df.column_name_at(pos), df.column_at(pos)) else {
+            continue;
+        };
+        let dtype = column.dtype();
+        if on == Some(name.as_str())
+            || every_dtype
+            || matches!(dtype, DType::Int64 | DType::Float64)
+        {
+            continue;
+        }
+        if window_reads_as_float(&dtype) {
+            floats.push((name, DType::Float64));
+        } else if numeric_only {
+            dropped.push(name);
+        } else {
+            return Err(PyErr::new::<DataError, _>(format!(
+                "Cannot aggregate non-numeric type: {}",
+                column_pandas_dtype_name(column)
+            )));
+        }
+    }
+    if floats.is_empty() && dropped.is_empty() {
+        return Ok(std::borrow::Cow::Borrowed(df));
+    }
+    let pairs: Vec<(&str, DType)> = floats
+        .iter()
+        .map(|(name, dtype)| (name.as_str(), dtype.clone()))
+        .collect();
+    let mut frame = df.astype_columns(&pairs).map_err(frame_error_to_py)?;
+    if !dropped.is_empty() {
+        let names: Vec<&str> = dropped.iter().map(String::as_str).collect();
+        frame = frame.drop_columns(&names).map_err(frame_error_to_py)?;
+    }
+    Ok(std::borrow::Cow::Owned(frame))
+}
+
+/// pandas' window aggregation input for a Series: a number as it is, bool
+/// and the nullable numbers as float64, another dtype pandas' DataError
+/// ("No numeric types to aggregate"; its NotImplementedError under
+/// numeric_only) - but for count (`every_dtype`), which takes any.
+fn window_series_input<'a>(
+    s: &'a Series,
+    owner: &str,
+    method: &str,
+    numeric_only: bool,
+    every_dtype: bool,
+) -> PyResult<std::borrow::Cow<'a, Series>> {
+    let dtype = s.column().dtype();
+    if every_dtype || matches!(dtype, DType::Int64 | DType::Float64) {
+        return Ok(std::borrow::Cow::Borrowed(s));
+    }
+    if window_reads_as_float(&dtype) {
+        return s
+            .astype(DType::Float64)
+            .map(std::borrow::Cow::Owned)
+            .map_err(frame_error_to_py);
+    }
+    if numeric_only {
+        return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            format!("{owner}.{method} does not implement numeric_only"),
+        ));
+    }
+    Err(PyErr::new::<DataError, _>("No numeric types to aggregate"))
+}
+
+/// Refuses the numba engine (and its keywords) for a window method, as
+/// `apply` does: None or 'cython' is pandas' default path.
+fn window_engine(
+    method: &str,
+    engine: Option<&str>,
+    engine_kwargs: Option<&Bound<'_, PyAny>>,
+) -> PyResult<()> {
+    unsupported_params(
+        method,
+        &[
+            ("engine", matches!(engine, None | Some("cython"))),
+            (
+                "engine_kwargs",
+                engine_kwargs.is_none_or(|kwargs| kwargs.is_none()),
+            ),
+        ],
+    )
+}
+
+/// pandas' `pairwise` for a frame's window corr / cov, as the `other` the
+/// windows pair with: left out, it is True without `other` (every column
+/// pair) and False with it (matching columns); False without `other` pairs
+/// each column with itself; True with a frame `other` (every pair across
+/// the two) is refused. A Series ignores it.
+fn window_pairwise_other<'py>(
+    py: Python<'py>,
+    dataframe: Option<&DataFrame>,
+    other: Option<&Bound<'py, PyAny>>,
+    pairwise: Option<bool>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let other = other.filter(|other| !other.is_none());
+    let Some(df) = dataframe else {
+        return Ok(other.cloned());
+    };
+    match (other, pairwise) {
+        (None, Some(false)) => Ok(Some(
+            Py::new(py, PyDataFrame { inner: df.clone() })?
+                .into_bound(py)
+                .into_any(),
+        )),
+        (Some(other), Some(true)) if other.extract::<PyRef<'_, PyDataFrame>>().is_ok() => Err(
+            not_implemented("a window corr / cov with pairwise=True and a DataFrame other"),
+        ),
+        (other, _) => Ok(other.cloned()),
+    }
+}
+
+/// A window method's `ddof`: a count of 0 or more (a negative ddof is
+/// refused).
+fn window_ddof(ddof: i64) -> PyResult<usize> {
+    usize::try_from(ddof).map_err(|_| not_implemented("a negative ddof for a window method"))
+}
+
 /// Whether every label of `index` is a datetime or timedelta.
 fn datetime_like_labels(index: &Index) -> bool {
     index.labels().iter().all(|label| {
@@ -47215,6 +47357,89 @@ impl PyRolling {
             None => res,
         };
         Ok(Py::new(py, PySeries { inner: res })?.into_any())
+    }
+
+    /// One aggregation over the windows as pandas runs it: the input
+    /// prepared ([`window_series_input`] / [`window_frame_input`]; count
+    /// takes any dtype), `step=` taken.
+    fn run(
+        &self,
+        py: Python<'_>,
+        method: &str,
+        numeric_only: bool,
+        series_op: impl for<'w> Fn(fp_frame::Rolling<'w>) -> Result<Series, FrameError>,
+        frame_op: impl for<'w> Fn(fp_frame::DataFrameRolling<'w>) -> Result<DataFrame, FrameError>,
+    ) -> PyResult<Py<PyAny>> {
+        let every_dtype = method == "count";
+        if let Some(ref s) = self.series {
+            let s = window_series_input(s, "Rolling", method, numeric_only, every_dtype)?;
+            let res = series_op(self.series_window(&s)?).map_err(frame_error_to_py)?;
+            return self.series_out(py, res);
+        }
+        if let Some(ref df) = self.dataframe {
+            let df = window_frame_input(df, self.on.as_deref(), numeric_only, every_dtype)?;
+            let res = frame_op(self.frame_window(&df)?).map_err(frame_error_to_py)?;
+            return self.frame_out(py, res);
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty rolling object",
+        ))
+    }
+
+    /// pandas' window corr (`want_corr`) or cov with `other`: the inputs
+    /// prepared as the aggregations' are, `pairwise` resolved
+    /// ([`window_pairwise_other`]), `ddof` pandas' (br-frankenpandas-n57tz).
+    fn bivariate(
+        &self,
+        py: Python<'_>,
+        other: Option<&Bound<'_, PyAny>>,
+        pairwise: Option<bool>,
+        ddof: i64,
+        numeric_only: bool,
+        want_corr: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let method = if want_corr { "corr" } else { "cov" };
+        self.require_count_window(method)?;
+        self.require_every_row(method)?;
+        let ddof = window_ddof(ddof)?;
+        let series = self
+            .series
+            .as_ref()
+            .map(|s| window_series_input(s, "Rolling", method, numeric_only, false))
+            .transpose()?;
+        let frame = self
+            .dataframe
+            .as_ref()
+            .map(|df| window_frame_input(df, None, numeric_only, false))
+            .transpose()?;
+        let other = window_pairwise_other(py, frame.as_deref(), other, pairwise)?;
+        let (window, min_periods, center) = (self.window, self.min_periods, self.center);
+        let closed = self.closed();
+        let result = execute_window_bivariate(
+            py,
+            series.as_deref(),
+            frame.as_deref(),
+            other.as_ref(),
+            |s1, s2| {
+                let windows = s1.rolling_closed(window, min_periods, center, closed)?;
+                if want_corr {
+                    windows.corr_ddof(s2, ddof)
+                } else {
+                    windows.cov_ddof(s2, ddof)
+                }
+            },
+            Some(|df: &DataFrame| {
+                let windows = df.rolling_closed(window, min_periods, center, closed, None)?;
+                if want_corr {
+                    windows.corr_ddof(ddof)
+                } else {
+                    windows.cov_ddof(ddof)
+                }
+            }),
+            "Empty rolling object",
+            "DataFrame rolling corr without other is not supported",
+        )?;
+        pairwise_window_result(py, frame.as_deref(), other.as_ref(), result)
     }
 
     /// A DataFrame result as pandas returns it, `step=` taken.
@@ -47325,118 +47550,119 @@ fn rolling_window_arg(window: &Bound<'_, PyAny>) -> PyResult<(usize, Option<Stri
 
 #[pymethods]
 impl PyRolling {
-    pub fn sum(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = self.series_window(s)?.sum().map_err(frame_error_to_py)?;
-            return self.series_out(py, res);
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = self.frame_window(df)?.sum().map_err(frame_error_to_py)?;
-            return self.frame_out(py, res);
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty rolling object",
-        ))
+    // pandas' signatures (br-frankenpandas-n57tz): numeric_only (a frame's
+    // other columns are pandas' DataError, or left out; bool and the
+    // nullable numbers are read as float64), engine / engine_kwargs (numba
+    // refused), ddof for std / var / sem. They took no keywords.
+    #[pyo3(signature = (numeric_only=false, engine=None, engine_kwargs=None))]
+    pub fn sum(
+        &self,
+        py: Python<'_>,
+        numeric_only: bool,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        window_engine("Rolling.sum", engine, engine_kwargs)?;
+        self.run(py, "sum", numeric_only, |w| w.sum(), |w| w.sum())
     }
 
-    pub fn mean(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = self.series_window(s)?.mean().map_err(frame_error_to_py)?;
-            return self.series_out(py, res);
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = self.frame_window(df)?.mean().map_err(frame_error_to_py)?;
-            return self.frame_out(py, res);
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty rolling object",
-        ))
+    #[pyo3(signature = (numeric_only=false, engine=None, engine_kwargs=None))]
+    pub fn mean(
+        &self,
+        py: Python<'_>,
+        numeric_only: bool,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        window_engine("Rolling.mean", engine, engine_kwargs)?;
+        self.run(py, "mean", numeric_only, |w| w.mean(), |w| w.mean())
     }
 
-    pub fn min(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = self.series_window(s)?.min().map_err(frame_error_to_py)?;
-            return self.series_out(py, res);
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = self.frame_window(df)?.min().map_err(frame_error_to_py)?;
-            return self.frame_out(py, res);
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty rolling object",
-        ))
+    #[pyo3(signature = (numeric_only=false, engine=None, engine_kwargs=None))]
+    pub fn min(
+        &self,
+        py: Python<'_>,
+        numeric_only: bool,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        window_engine("Rolling.min", engine, engine_kwargs)?;
+        self.run(py, "min", numeric_only, |w| w.min(), |w| w.min())
     }
 
-    pub fn max(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = self.series_window(s)?.max().map_err(frame_error_to_py)?;
-            return self.series_out(py, res);
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = self.frame_window(df)?.max().map_err(frame_error_to_py)?;
-            return self.frame_out(py, res);
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty rolling object",
-        ))
+    #[pyo3(signature = (numeric_only=false, engine=None, engine_kwargs=None))]
+    pub fn max(
+        &self,
+        py: Python<'_>,
+        numeric_only: bool,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        window_engine("Rolling.max", engine, engine_kwargs)?;
+        self.run(py, "max", numeric_only, |w| w.max(), |w| w.max())
     }
 
-    pub fn std(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = self.series_window(s)?.std().map_err(frame_error_to_py)?;
-            return self.series_out(py, res);
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = self.frame_window(df)?.std().map_err(frame_error_to_py)?;
-            return self.frame_out(py, res);
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty rolling object",
-        ))
+    #[pyo3(signature = (ddof=1, numeric_only=false, engine=None, engine_kwargs=None))]
+    pub fn std(
+        &self,
+        py: Python<'_>,
+        ddof: i64,
+        numeric_only: bool,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        window_engine("Rolling.std", engine, engine_kwargs)?;
+        let ddof = window_ddof(ddof)?;
+        self.run(
+            py,
+            "std",
+            numeric_only,
+            |w| w.std_ddof(ddof),
+            |w| w.std_ddof(ddof),
+        )
     }
 
-    pub fn var(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = self.series_window(s)?.var().map_err(frame_error_to_py)?;
-            return self.series_out(py, res);
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = self.frame_window(df)?.var().map_err(frame_error_to_py)?;
-            return self.frame_out(py, res);
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty rolling object",
-        ))
+    #[pyo3(signature = (ddof=1, numeric_only=false, engine=None, engine_kwargs=None))]
+    pub fn var(
+        &self,
+        py: Python<'_>,
+        ddof: i64,
+        numeric_only: bool,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        window_engine("Rolling.var", engine, engine_kwargs)?;
+        let ddof = window_ddof(ddof)?;
+        self.run(
+            py,
+            "var",
+            numeric_only,
+            |w| w.var_ddof(ddof),
+            |w| w.var_ddof(ddof),
+        )
     }
 
-    pub fn count(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = self.series_window(s)?.count().map_err(frame_error_to_py)?;
-            return self.series_out(py, res);
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = self.frame_window(df)?.count().map_err(frame_error_to_py)?;
-            return self.frame_out(py, res);
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty rolling object",
-        ))
+    /// pandas' count: any dtype's non-missing values (a frame's text and
+    /// datetime columns were left out).
+    #[pyo3(signature = (numeric_only=false))]
+    pub fn count(&self, py: Python<'_>, numeric_only: bool) -> PyResult<Py<PyAny>> {
+        self.run(py, "count", numeric_only, |w| w.count(), |w| w.count())
     }
 
-    pub fn median(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = self.series_window(s)?.median().map_err(frame_error_to_py)?;
-            return self.series_out(py, res);
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = self.frame_window(df)?.median().map_err(frame_error_to_py)?;
-            return self.frame_out(py, res);
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty rolling object",
-        ))
+    #[pyo3(signature = (numeric_only=false, engine=None, engine_kwargs=None))]
+    pub fn median(
+        &self,
+        py: Python<'_>,
+        numeric_only: bool,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        window_engine("Rolling.median", engine, engine_kwargs)?;
+        self.run(py, "median", numeric_only, |w| w.median(), |w| w.median())
     }
 
+    /// Every interpolation is taken (only linear was;
+    /// br-frankenpandas-u6p7i), and numeric_only (it was refused).
     #[pyo3(signature = (q=0.5, interpolation="linear", numeric_only=false))]
     pub fn quantile(
         &self,
@@ -47445,27 +47671,14 @@ impl PyRolling {
         interpolation: Option<&str>,
         numeric_only: bool,
     ) -> PyResult<Py<PyAny>> {
-        unsupported_params("Rolling.quantile", &[("numeric_only", !numeric_only)])?;
-        // Every interpolation is taken (only linear was;
-        // br-frankenpandas-u6p7i).
         let interpolation = interpolation.unwrap_or("linear");
-        if let Some(ref s) = self.series {
-            let res = self
-                .series_window(s)?
-                .quantile_with_interpolation(q, interpolation)
-                .map_err(frame_error_to_py)?;
-            return self.series_out(py, res);
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = self
-                .frame_window(df)?
-                .quantile_with_interpolation(q, interpolation)
-                .map_err(frame_error_to_py)?;
-            return self.frame_out(py, res);
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty rolling object",
-        ))
+        self.run(
+            py,
+            "quantile",
+            numeric_only,
+            |w| w.quantile_with_interpolation(q, interpolation),
+            |w| w.quantile_with_interpolation(q, interpolation),
+        )
     }
 
     #[getter]
@@ -47473,50 +47686,31 @@ impl PyRolling {
         if self.series.is_some() { 1 } else { 2 }
     }
 
-    pub fn sem(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = self.series_window(s)?.sem().map_err(frame_error_to_py)?;
-            return self.series_out(py, res);
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = self.frame_window(df)?.sem().map_err(frame_error_to_py)?;
-            return self.frame_out(py, res);
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty rolling object",
-        ))
+    #[pyo3(signature = (ddof=1, numeric_only=false))]
+    pub fn sem(&self, py: Python<'_>, ddof: i64, numeric_only: bool) -> PyResult<Py<PyAny>> {
+        let ddof = window_ddof(ddof)?;
+        self.run(
+            py,
+            "sem",
+            numeric_only,
+            |w| w.sem_ddof(ddof),
+            |w| w.sem_ddof(ddof),
+        )
     }
 
-    pub fn skew(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = self.series_window(s)?.skew().map_err(frame_error_to_py)?;
-            return self.series_out(py, res);
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = self.frame_window(df)?.skew().map_err(frame_error_to_py)?;
-            return self.frame_out(py, res);
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty rolling object",
-        ))
+    #[pyo3(signature = (numeric_only=false))]
+    pub fn skew(&self, py: Python<'_>, numeric_only: bool) -> PyResult<Py<PyAny>> {
+        self.run(py, "skew", numeric_only, |w| w.skew(), |w| w.skew())
     }
 
-    pub fn kurt(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = self.series_window(s)?.kurt().map_err(frame_error_to_py)?;
-            return self.series_out(py, res);
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = self.frame_window(df)?.kurt().map_err(frame_error_to_py)?;
-            return self.frame_out(py, res);
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty rolling object",
-        ))
+    #[pyo3(signature = (numeric_only=false))]
+    pub fn kurt(&self, py: Python<'_>, numeric_only: bool) -> PyResult<Py<PyAny>> {
+        self.run(py, "kurt", numeric_only, |w| w.kurt(), |w| w.kurt())
     }
 
-    pub fn kurtosis(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.kurt(py)
+    #[pyo3(signature = (numeric_only=false))]
+    pub fn kurtosis(&self, py: Python<'_>, numeric_only: bool) -> PyResult<Py<PyAny>> {
+        self.kurt(py, numeric_only)
     }
 
     /// pandas' `Rolling.rank(method, ascending, pct, numeric_only)`: `pct`
@@ -47532,7 +47726,6 @@ impl PyRolling {
         pct: bool,
         numeric_only: bool,
     ) -> PyResult<Py<PyAny>> {
-        let _ = numeric_only; // the frame's windows already rank numeric columns only
         self.require_count_window("rank")?;
         let m = method.unwrap_or("average");
         // pandas' rolling rank takes only these three (fp-frame also ranks
@@ -47544,7 +47737,8 @@ impl PyRolling {
         }
         let asc = ascending.unwrap_or(true);
         if let Some(ref s) = self.series {
-            let windows = self.series_window(s)?;
+            let s = window_series_input(s, "Rolling", "rank", numeric_only, false)?;
+            let windows = self.series_window(&s)?;
             let mut res = windows.rank(m, asc, "keep").map_err(frame_error_to_py)?;
             if pct {
                 let count = windows.count().map_err(frame_error_to_py)?;
@@ -47553,7 +47747,8 @@ impl PyRolling {
             return self.series_out(py, res);
         }
         if let Some(ref df) = self.dataframe {
-            let windows = self.frame_window(df)?;
+            let df = window_frame_input(df, self.on.as_deref(), numeric_only, false)?;
+            let windows = self.frame_window(&df)?;
             let mut res = windows.rank(m, asc, "keep").map_err(frame_error_to_py)?;
             if pct {
                 let count = windows.count().map_err(frame_error_to_py)?;
@@ -47566,54 +47761,31 @@ impl PyRolling {
         ))
     }
 
-    #[pyo3(signature = (other=None))]
-    pub fn corr(&self, py: Python<'_>, other: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
-        self.require_count_window("corr")?;
-        self.require_every_row("corr")?;
-        let (window, min_periods, center) = (self.window, self.min_periods, self.center);
-        let closed = self.closed();
-        let result = execute_window_bivariate(
-            py,
-            self.series.as_ref(),
-            self.dataframe.as_ref(),
-            other,
-            |s1, s2| {
-                s1.rolling_closed(window, min_periods, center, closed)?
-                    .corr(s2)
-            },
-            Some(|df: &DataFrame| {
-                df.rolling_closed(window, min_periods, center, closed, None)?
-                    .corr()
-            }),
-            "Empty rolling object",
-            "DataFrame rolling corr without other is not supported",
-        )?;
-        pairwise_window_result(py, self.dataframe.as_ref(), other, result)
+    /// pandas' `corr(other=None, pairwise=None, ddof=1, numeric_only=False)`
+    /// ([`Self::bivariate`]; it took `other` alone).
+    #[pyo3(signature = (other=None, pairwise=None, ddof=1, numeric_only=false))]
+    pub fn corr(
+        &self,
+        py: Python<'_>,
+        other: Option<&Bound<'_, PyAny>>,
+        pairwise: Option<bool>,
+        ddof: i64,
+        numeric_only: bool,
+    ) -> PyResult<Py<PyAny>> {
+        self.bivariate(py, other, pairwise, ddof, numeric_only, true)
     }
 
-    #[pyo3(signature = (other=None))]
-    pub fn cov(&self, py: Python<'_>, other: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
-        self.require_count_window("cov")?;
-        self.require_every_row("cov")?;
-        let (window, min_periods, center) = (self.window, self.min_periods, self.center);
-        let closed = self.closed();
-        let result = execute_window_bivariate(
-            py,
-            self.series.as_ref(),
-            self.dataframe.as_ref(),
-            other,
-            |s1, s2| {
-                s1.rolling_closed(window, min_periods, center, closed)?
-                    .cov(s2)
-            },
-            Some(|df: &DataFrame| {
-                df.rolling_closed(window, min_periods, center, closed, None)?
-                    .cov()
-            }),
-            "Empty rolling object",
-            "DataFrame rolling cov without other is not supported",
-        )?;
-        pairwise_window_result(py, self.dataframe.as_ref(), other, result)
+    /// pandas' `cov(other=None, pairwise=None, ddof=1, numeric_only=False)`.
+    #[pyo3(signature = (other=None, pairwise=None, ddof=1, numeric_only=false))]
+    pub fn cov(
+        &self,
+        py: Python<'_>,
+        other: Option<&Bound<'_, PyAny>>,
+        pairwise: Option<bool>,
+        ddof: i64,
+        numeric_only: bool,
+    ) -> PyResult<Py<PyAny>> {
+        self.bivariate(py, other, pairwise, ddof, numeric_only, false)
     }
 
     /// pandas' `Rolling.agg`: a name (or a list of them) is that
@@ -47634,17 +47806,17 @@ impl PyRolling {
         }
         if let Ok(func_name) = func.extract::<String>() {
             match func_name.as_str() {
-                "sum" => self.sum(py),
-                "mean" => self.mean(py),
-                "min" => self.min(py),
-                "max" => self.max(py),
-                "std" => self.std(py),
-                "var" => self.var(py),
-                "median" => self.median(py),
-                "count" => self.count(py),
-                "sem" => self.sem(py),
-                "skew" => self.skew(py),
-                "kurt" | "kurtosis" => self.kurt(py),
+                "sum" => self.sum(py, false, None, None),
+                "mean" => self.mean(py, false, None, None),
+                "min" => self.min(py, false, None, None),
+                "max" => self.max(py, false, None, None),
+                "std" => self.std(py, 1, false, None, None),
+                "var" => self.var(py, 1, false, None, None),
+                "median" => self.median(py, false, None, None),
+                "count" => self.count(py, false),
+                "sem" => self.sem(py, 1, false),
+                "skew" => self.skew(py, false),
+                "kurt" | "kurtosis" => self.kurt(py, false),
                 other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                     "Unsupported rolling agg function '{other}'"
                 ))),
@@ -47652,18 +47824,20 @@ impl PyRolling {
         } else if let Ok(list) = func.extract::<Vec<String>>() {
             let str_slices: Vec<&str> = list.iter().map(|s| s.as_str()).collect();
             if let Some(ref s) = self.series {
+                let s = window_series_input(s, "Rolling", "agg", false, false)?;
                 let res = self
-                    .series_window(s)?
+                    .series_window(&s)?
                     .agg(&str_slices)
                     .map_err(frame_error_to_py)?;
                 return self.frame_out(py, res);
             }
             if let Some(ref df) = self.dataframe {
+                let df = window_frame_input(df, self.on.as_deref(), false, false)?;
                 let res = self
-                    .frame_window(df)?
+                    .frame_window(&df)?
                     .agg(&str_slices)
                     .map_err(frame_error_to_py)?;
-                let res = func_columns(res, df, &str_slices)?;
+                let res = func_columns(res, &df, &str_slices)?;
                 return self.frame_out(py, res);
             }
             Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -47803,168 +47977,189 @@ pub struct PyExpanding {
     min_periods: Option<usize>,
 }
 
+impl PyExpanding {
+    /// One aggregation over the growing windows as pandas runs it (see
+    /// [`PyRolling::run`]).
+    fn run(
+        &self,
+        py: Python<'_>,
+        method: &str,
+        numeric_only: bool,
+        series_op: impl for<'w> Fn(fp_frame::Expanding<'w>) -> Result<Series, FrameError>,
+        frame_op: impl for<'w> Fn(fp_frame::DataFrameExpanding<'w>) -> Result<DataFrame, FrameError>,
+    ) -> PyResult<Py<PyAny>> {
+        let every_dtype = method == "count";
+        if let Some(ref s) = self.series {
+            let s = window_series_input(s, "Expanding", method, numeric_only, every_dtype)?;
+            let res = series_op(s.expanding(self.min_periods)).map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let df = window_frame_input(df, None, numeric_only, every_dtype)?;
+            let res = frame_op(df.expanding(self.min_periods)).map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty expanding object",
+        ))
+    }
+
+    /// pandas' expanding corr / cov (see [`PyRolling::bivariate`]; a
+    /// frame's every-pair corr without `other` is refused, as before).
+    fn bivariate(
+        &self,
+        py: Python<'_>,
+        other: Option<&Bound<'_, PyAny>>,
+        pairwise: Option<bool>,
+        ddof: i64,
+        numeric_only: bool,
+        want_corr: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let method = if want_corr { "corr" } else { "cov" };
+        let ddof = window_ddof(ddof)?;
+        let series = self
+            .series
+            .as_ref()
+            .map(|s| window_series_input(s, "Expanding", method, numeric_only, false))
+            .transpose()?;
+        let frame = self
+            .dataframe
+            .as_ref()
+            .map(|df| window_frame_input(df, None, numeric_only, false))
+            .transpose()?;
+        let other = window_pairwise_other(py, frame.as_deref(), other, pairwise)?;
+        let min_periods = self.min_periods;
+        execute_window_bivariate(
+            py,
+            series.as_deref(),
+            frame.as_deref(),
+            other.as_ref(),
+            |s1, s2| {
+                let windows = s1.expanding(min_periods);
+                if want_corr {
+                    windows.corr_ddof(s2, ddof)
+                } else {
+                    windows.cov_ddof(s2, ddof)
+                }
+            },
+            None::<fn(&DataFrame) -> Result<DataFrame, FrameError>>,
+            "Empty expanding object",
+            "DataFrame expanding corr / cov without other is not supported",
+        )
+    }
+}
+
 #[pymethods]
 impl PyExpanding {
-    pub fn sum(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = s
-                .expanding(self.min_periods)
-                .sum()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = df
-                .expanding(self.min_periods)
-                .sum()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty expanding object",
-        ))
+    // pandas' signatures, as Rolling's (br-frankenpandas-n57tz).
+    #[pyo3(signature = (numeric_only=false, engine=None, engine_kwargs=None))]
+    pub fn sum(
+        &self,
+        py: Python<'_>,
+        numeric_only: bool,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        window_engine("Expanding.sum", engine, engine_kwargs)?;
+        self.run(py, "sum", numeric_only, |w| w.sum(), |w| w.sum())
     }
 
-    pub fn mean(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = s
-                .expanding(self.min_periods)
-                .mean()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = df
-                .expanding(self.min_periods)
-                .mean()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty expanding object",
-        ))
+    #[pyo3(signature = (numeric_only=false, engine=None, engine_kwargs=None))]
+    pub fn mean(
+        &self,
+        py: Python<'_>,
+        numeric_only: bool,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        window_engine("Expanding.mean", engine, engine_kwargs)?;
+        self.run(py, "mean", numeric_only, |w| w.mean(), |w| w.mean())
     }
 
-    pub fn min(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = s
-                .expanding(self.min_periods)
-                .min()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = df
-                .expanding(self.min_periods)
-                .min()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty expanding object",
-        ))
+    #[pyo3(signature = (numeric_only=false, engine=None, engine_kwargs=None))]
+    pub fn min(
+        &self,
+        py: Python<'_>,
+        numeric_only: bool,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        window_engine("Expanding.min", engine, engine_kwargs)?;
+        self.run(py, "min", numeric_only, |w| w.min(), |w| w.min())
     }
 
-    pub fn max(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = s
-                .expanding(self.min_periods)
-                .max()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = df
-                .expanding(self.min_periods)
-                .max()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty expanding object",
-        ))
+    #[pyo3(signature = (numeric_only=false, engine=None, engine_kwargs=None))]
+    pub fn max(
+        &self,
+        py: Python<'_>,
+        numeric_only: bool,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        window_engine("Expanding.max", engine, engine_kwargs)?;
+        self.run(py, "max", numeric_only, |w| w.max(), |w| w.max())
     }
 
-    pub fn std(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = s
-                .expanding(self.min_periods)
-                .std()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = df
-                .expanding(self.min_periods)
-                .std()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty expanding object",
-        ))
+    #[pyo3(signature = (ddof=1, numeric_only=false, engine=None, engine_kwargs=None))]
+    pub fn std(
+        &self,
+        py: Python<'_>,
+        ddof: i64,
+        numeric_only: bool,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        window_engine("Expanding.std", engine, engine_kwargs)?;
+        let ddof = window_ddof(ddof)?;
+        self.run(
+            py,
+            "std",
+            numeric_only,
+            |w| w.std_ddof(ddof),
+            |w| w.std_ddof(ddof),
+        )
     }
 
-    pub fn var(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = s
-                .expanding(self.min_periods)
-                .var()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = df
-                .expanding(self.min_periods)
-                .var()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty expanding object",
-        ))
+    #[pyo3(signature = (ddof=1, numeric_only=false, engine=None, engine_kwargs=None))]
+    pub fn var(
+        &self,
+        py: Python<'_>,
+        ddof: i64,
+        numeric_only: bool,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        window_engine("Expanding.var", engine, engine_kwargs)?;
+        let ddof = window_ddof(ddof)?;
+        self.run(
+            py,
+            "var",
+            numeric_only,
+            |w| w.var_ddof(ddof),
+            |w| w.var_ddof(ddof),
+        )
     }
 
-    pub fn count(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = s
-                .expanding(self.min_periods)
-                .count()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = df
-                .expanding(self.min_periods)
-                .count()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty expanding object",
-        ))
+    /// pandas' count: any dtype's non-missing values.
+    #[pyo3(signature = (numeric_only=false))]
+    pub fn count(&self, py: Python<'_>, numeric_only: bool) -> PyResult<Py<PyAny>> {
+        self.run(py, "count", numeric_only, |w| w.count(), |w| w.count())
     }
 
-    pub fn median(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = s
-                .expanding(self.min_periods)
-                .median()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = df
-                .expanding(self.min_periods)
-                .median()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty expanding object",
-        ))
+    #[pyo3(signature = (numeric_only=false, engine=None, engine_kwargs=None))]
+    pub fn median(
+        &self,
+        py: Python<'_>,
+        numeric_only: bool,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        window_engine("Expanding.median", engine, engine_kwargs)?;
+        self.run(py, "median", numeric_only, |w| w.median(), |w| w.median())
     }
 
+    /// Every interpolation is taken (only linear was;
+    /// br-frankenpandas-u6p7i), and numeric_only (it was refused).
     #[pyo3(signature = (q=0.5, interpolation="linear", numeric_only=false))]
     pub fn quantile(
         &self,
@@ -47973,27 +48168,14 @@ impl PyExpanding {
         interpolation: Option<&str>,
         numeric_only: bool,
     ) -> PyResult<Py<PyAny>> {
-        unsupported_params("Expanding.quantile", &[("numeric_only", !numeric_only)])?;
-        // Every interpolation is taken (only linear was;
-        // br-frankenpandas-u6p7i).
         let interpolation = interpolation.unwrap_or("linear");
-        if let Some(ref s) = self.series {
-            let res = s
-                .expanding(self.min_periods)
-                .quantile_with_interpolation(q, interpolation)
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = df
-                .expanding(self.min_periods)
-                .quantile_with_interpolation(q, interpolation)
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty expanding object",
-        ))
+        self.run(
+            py,
+            "quantile",
+            numeric_only,
+            |w| w.quantile_with_interpolation(q, interpolation),
+            |w| w.quantile_with_interpolation(q, interpolation),
+        )
     }
 
     #[getter]
@@ -48001,68 +48183,31 @@ impl PyExpanding {
         if self.series.is_some() { 1 } else { 2 }
     }
 
-    pub fn sem(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = s
-                .expanding(self.min_periods)
-                .sem()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = df
-                .expanding(self.min_periods)
-                .sem()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty expanding object",
-        ))
+    #[pyo3(signature = (ddof=1, numeric_only=false))]
+    pub fn sem(&self, py: Python<'_>, ddof: i64, numeric_only: bool) -> PyResult<Py<PyAny>> {
+        let ddof = window_ddof(ddof)?;
+        self.run(
+            py,
+            "sem",
+            numeric_only,
+            |w| w.sem_ddof(ddof),
+            |w| w.sem_ddof(ddof),
+        )
     }
 
-    pub fn skew(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = s
-                .expanding(self.min_periods)
-                .skew()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = df
-                .expanding(self.min_periods)
-                .skew()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty expanding object",
-        ))
+    #[pyo3(signature = (numeric_only=false))]
+    pub fn skew(&self, py: Python<'_>, numeric_only: bool) -> PyResult<Py<PyAny>> {
+        self.run(py, "skew", numeric_only, |w| w.skew(), |w| w.skew())
     }
 
-    pub fn kurt(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = s
-                .expanding(self.min_periods)
-                .kurt()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = df
-                .expanding(self.min_periods)
-                .kurt()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty expanding object",
-        ))
+    #[pyo3(signature = (numeric_only=false))]
+    pub fn kurt(&self, py: Python<'_>, numeric_only: bool) -> PyResult<Py<PyAny>> {
+        self.run(py, "kurt", numeric_only, |w| w.kurt(), |w| w.kurt())
     }
 
-    pub fn kurtosis(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.kurt(py)
+    #[pyo3(signature = (numeric_only=false))]
+    pub fn kurtosis(&self, py: Python<'_>, numeric_only: bool) -> PyResult<Py<PyAny>> {
+        self.kurt(py, numeric_only)
     }
 
     /// pandas' `Expanding.rank(method, ascending, pct, numeric_only)`; see
@@ -48076,10 +48221,10 @@ impl PyExpanding {
         pct: bool,
         numeric_only: bool,
     ) -> PyResult<Py<PyAny>> {
-        let _ = numeric_only; // the frame's windows already rank numeric columns only
         let m = method.unwrap_or("average");
         let asc = ascending.unwrap_or(true);
         if let Some(ref s) = self.series {
+            let s = window_series_input(s, "Expanding", "rank", numeric_only, false)?;
             let windows = s.expanding(self.min_periods);
             let mut res = windows.rank(m, asc, "keep").map_err(frame_error_to_py)?;
             if pct {
@@ -48089,6 +48234,7 @@ impl PyExpanding {
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
         if let Some(ref df) = self.dataframe {
+            let df = window_frame_input(df, None, numeric_only, false)?;
             let windows = df.expanding(self.min_periods);
             let mut res = windows.rank(m, asc, "keep").map_err(frame_error_to_py)?;
             if pct {
@@ -48102,34 +48248,31 @@ impl PyExpanding {
         ))
     }
 
-    #[pyo3(signature = (other=None))]
-    pub fn corr(&self, py: Python<'_>, other: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
-        let min_periods = self.min_periods;
-        execute_window_bivariate(
-            py,
-            self.series.as_ref(),
-            self.dataframe.as_ref(),
-            other,
-            |s1, s2| s1.expanding(min_periods).corr(s2),
-            None::<fn(&DataFrame) -> Result<DataFrame, FrameError>>,
-            "Empty expanding object",
-            "DataFrame expanding corr without other is not supported",
-        )
+    /// pandas' `corr(other=None, pairwise=None, ddof=1, numeric_only=False)`
+    /// (it took `other` alone).
+    #[pyo3(signature = (other=None, pairwise=None, ddof=1, numeric_only=false))]
+    pub fn corr(
+        &self,
+        py: Python<'_>,
+        other: Option<&Bound<'_, PyAny>>,
+        pairwise: Option<bool>,
+        ddof: i64,
+        numeric_only: bool,
+    ) -> PyResult<Py<PyAny>> {
+        self.bivariate(py, other, pairwise, ddof, numeric_only, true)
     }
 
-    #[pyo3(signature = (other=None))]
-    pub fn cov(&self, py: Python<'_>, other: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
-        let min_periods = self.min_periods;
-        execute_window_bivariate(
-            py,
-            self.series.as_ref(),
-            self.dataframe.as_ref(),
-            other,
-            |s1, s2| s1.expanding(min_periods).cov(s2),
-            None::<fn(&DataFrame) -> Result<DataFrame, FrameError>>,
-            "Empty expanding object",
-            "DataFrame expanding cov without other is not supported",
-        )
+    /// pandas' `cov(other=None, pairwise=None, ddof=1, numeric_only=False)`.
+    #[pyo3(signature = (other=None, pairwise=None, ddof=1, numeric_only=false))]
+    pub fn cov(
+        &self,
+        py: Python<'_>,
+        other: Option<&Bound<'_, PyAny>>,
+        pairwise: Option<bool>,
+        ddof: i64,
+        numeric_only: bool,
+    ) -> PyResult<Py<PyAny>> {
+        self.bivariate(py, other, pairwise, ddof, numeric_only, false)
     }
 
     /// pandas' `Expanding.agg`: as [`PyRolling::agg`] (callables raised;
@@ -48146,17 +48289,17 @@ impl PyExpanding {
         }
         if let Ok(func_name) = func.extract::<String>() {
             match func_name.as_str() {
-                "sum" => self.sum(py),
-                "mean" => self.mean(py),
-                "min" => self.min(py),
-                "max" => self.max(py),
-                "std" => self.std(py),
-                "var" => self.var(py),
-                "median" => self.median(py),
-                "count" => self.count(py),
-                "sem" => self.sem(py),
-                "skew" => self.skew(py),
-                "kurt" | "kurtosis" => self.kurt(py),
+                "sum" => self.sum(py, false, None, None),
+                "mean" => self.mean(py, false, None, None),
+                "min" => self.min(py, false, None, None),
+                "max" => self.max(py, false, None, None),
+                "std" => self.std(py, 1, false, None, None),
+                "var" => self.var(py, 1, false, None, None),
+                "median" => self.median(py, false, None, None),
+                "count" => self.count(py, false),
+                "sem" => self.sem(py, 1, false),
+                "skew" => self.skew(py, false),
+                "kurt" | "kurtosis" => self.kurt(py, false),
                 other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                     "Unsupported expanding agg function '{other}'"
                 ))),
@@ -48164,6 +48307,7 @@ impl PyExpanding {
         } else if let Ok(list) = func.extract::<Vec<String>>() {
             let str_slices: Vec<&str> = list.iter().map(|s| s.as_str()).collect();
             if let Some(ref s) = self.series {
+                let s = window_series_input(s, "Expanding", "agg", false, false)?;
                 let res = s
                     .expanding(self.min_periods)
                     .agg(&str_slices)
@@ -48171,11 +48315,12 @@ impl PyExpanding {
                 return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
             }
             if let Some(ref df) = self.dataframe {
+                let df = window_frame_input(df, None, false, false)?;
                 let res = df
                     .expanding(self.min_periods)
                     .agg(&str_slices)
                     .map_err(frame_error_to_py)?;
-                let res = func_columns(res, df, &str_slices)?;
+                let res = func_columns(res, &df, &str_slices)?;
                 return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
             }
             Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -48313,6 +48458,80 @@ pub struct PyExponentialMovingWindow {
     min_periods: usize,
 }
 
+impl PyExponentialMovingWindow {
+    /// One EWM aggregation as pandas runs it (see [`PyRolling::run`]).
+    fn run(
+        &self,
+        py: Python<'_>,
+        method: &str,
+        numeric_only: bool,
+        series_op: impl for<'w> Fn(fp_frame::Ewm<'w>) -> Result<Series, FrameError>,
+        frame_op: impl for<'w> Fn(fp_frame::DataFrameEwm<'w>) -> Result<DataFrame, FrameError>,
+    ) -> PyResult<Py<PyAny>> {
+        let (span, alpha, adjust, min_periods) =
+            (self.span, self.alpha, self.adjust, self.min_periods);
+        if let Some(ref s) = self.series {
+            let s = window_series_input(s, "ExponentialMovingWindow", method, numeric_only, false)?;
+            let res = series_op(s.ewm_with_options(span, alpha, adjust, min_periods))
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let df = window_frame_input(df, None, numeric_only, false)?;
+            let res = frame_op(df.ewm_with_options(span, alpha, adjust, min_periods))
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty ewm object",
+        ))
+    }
+
+    /// pandas' EWM corr / cov (`bias` for cov; see [`PyRolling::bivariate`];
+    /// a frame's every-pair result without `other` is refused, as before).
+    fn bivariate(
+        &self,
+        py: Python<'_>,
+        other: Option<&Bound<'_, PyAny>>,
+        pairwise: Option<bool>,
+        bias: bool,
+        numeric_only: bool,
+        want_corr: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let method = if want_corr { "corr" } else { "cov" };
+        let series = self
+            .series
+            .as_ref()
+            .map(|s| window_series_input(s, "ExponentialMovingWindow", method, numeric_only, false))
+            .transpose()?;
+        let frame = self
+            .dataframe
+            .as_ref()
+            .map(|df| window_frame_input(df, None, numeric_only, false))
+            .transpose()?;
+        let other = window_pairwise_other(py, frame.as_deref(), other, pairwise)?;
+        let (span, alpha, adjust, min_periods) =
+            (self.span, self.alpha, self.adjust, self.min_periods);
+        execute_window_bivariate(
+            py,
+            series.as_deref(),
+            frame.as_deref(),
+            other.as_ref(),
+            |s1, s2| {
+                let windows = s1.ewm_with_options(span, alpha, adjust, min_periods);
+                if want_corr {
+                    windows.corr(s2)
+                } else {
+                    windows.cov_bias(s2, bias)
+                }
+            },
+            None::<fn(&DataFrame) -> Result<DataFrame, FrameError>>,
+            "Empty ewm object",
+            "DataFrame EWM corr / cov without other is not supported",
+        )
+    }
+}
+
 #[pymethods]
 impl PyExponentialMovingWindow {
     #[getter]
@@ -48320,122 +48539,76 @@ impl PyExponentialMovingWindow {
         if self.series.is_some() { 1 } else { 2 }
     }
 
-    pub fn mean(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = s
-                .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
-                .mean()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = df
-                .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
-                .mean()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty ewm object",
-        ))
+    // pandas' signatures (br-frankenpandas-n57tz): numeric_only as the
+    // other windows', engine / engine_kwargs for mean / sum, bias for std /
+    // var / cov, pairwise for corr / cov. They took no keywords.
+    #[pyo3(signature = (numeric_only=false, engine=None, engine_kwargs=None))]
+    pub fn mean(
+        &self,
+        py: Python<'_>,
+        numeric_only: bool,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        window_engine("ExponentialMovingWindow.mean", engine, engine_kwargs)?;
+        self.run(py, "mean", numeric_only, |w| w.mean(), |w| w.mean())
     }
 
-    pub fn std(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = s
-                .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
-                .std()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = df
-                .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
-                .std()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty ewm object",
-        ))
-    }
-
-    pub fn var(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = s
-                .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
-                .var()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = df
-                .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
-                .var()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty ewm object",
-        ))
-    }
-
-    pub fn sum(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(ref s) = self.series {
-            let res = s
-                .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
-                .sum()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
-        }
-        if let Some(ref df) = self.dataframe {
-            let res = df
-                .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
-                .sum()
-                .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Empty ewm object",
-        ))
-    }
-
-    #[pyo3(signature = (other=None))]
-    pub fn corr(&self, py: Python<'_>, other: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
-        let (span, alpha, adjust, min_periods) =
-            (self.span, self.alpha, self.adjust, self.min_periods);
-        execute_window_bivariate(
+    #[pyo3(signature = (bias=false, numeric_only=false))]
+    pub fn std(&self, py: Python<'_>, bias: bool, numeric_only: bool) -> PyResult<Py<PyAny>> {
+        self.run(
             py,
-            self.series.as_ref(),
-            self.dataframe.as_ref(),
-            other,
-            |s1, s2| {
-                s1.ewm_with_options(span, alpha, adjust, min_periods)
-                    .corr(s2)
-            },
-            None::<fn(&DataFrame) -> Result<DataFrame, FrameError>>,
-            "Empty ewm object",
-            "DataFrame EWM corr without other is not supported",
+            "std",
+            numeric_only,
+            |w| w.std_bias(bias),
+            |w| w.std_bias(bias),
         )
     }
 
-    #[pyo3(signature = (other=None))]
-    pub fn cov(&self, py: Python<'_>, other: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
-        let (span, alpha, adjust, min_periods) =
-            (self.span, self.alpha, self.adjust, self.min_periods);
-        execute_window_bivariate(
+    #[pyo3(signature = (bias=false, numeric_only=false))]
+    pub fn var(&self, py: Python<'_>, bias: bool, numeric_only: bool) -> PyResult<Py<PyAny>> {
+        self.run(
             py,
-            self.series.as_ref(),
-            self.dataframe.as_ref(),
-            other,
-            |s1, s2| {
-                s1.ewm_with_options(span, alpha, adjust, min_periods)
-                    .cov(s2)
-            },
-            None::<fn(&DataFrame) -> Result<DataFrame, FrameError>>,
-            "Empty ewm object",
-            "DataFrame EWM cov without other is not supported",
+            "var",
+            numeric_only,
+            |w| w.var_bias(bias),
+            |w| w.var_bias(bias),
         )
+    }
+
+    #[pyo3(signature = (numeric_only=false, engine=None, engine_kwargs=None))]
+    pub fn sum(
+        &self,
+        py: Python<'_>,
+        numeric_only: bool,
+        engine: Option<&str>,
+        engine_kwargs: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        window_engine("ExponentialMovingWindow.sum", engine, engine_kwargs)?;
+        self.run(py, "sum", numeric_only, |w| w.sum(), |w| w.sum())
+    }
+
+    #[pyo3(signature = (other=None, pairwise=None, numeric_only=false))]
+    pub fn corr(
+        &self,
+        py: Python<'_>,
+        other: Option<&Bound<'_, PyAny>>,
+        pairwise: Option<bool>,
+        numeric_only: bool,
+    ) -> PyResult<Py<PyAny>> {
+        self.bivariate(py, other, pairwise, false, numeric_only, true)
+    }
+
+    #[pyo3(signature = (other=None, pairwise=None, bias=false, numeric_only=false))]
+    pub fn cov(
+        &self,
+        py: Python<'_>,
+        other: Option<&Bound<'_, PyAny>>,
+        pairwise: Option<bool>,
+        bias: bool,
+        numeric_only: bool,
+    ) -> PyResult<Py<PyAny>> {
+        self.bivariate(py, other, pairwise, bias, numeric_only, false)
     }
 
     /// pandas' `ExponentialMovingWindow.agg`: a name (or a list of them), a
@@ -48448,10 +48621,10 @@ impl PyExponentialMovingWindow {
         }
         if let Ok(func_name) = func.extract::<String>() {
             match func_name.as_str() {
-                "mean" => self.mean(py),
-                "std" => self.std(py),
-                "var" => self.var(py),
-                "sum" => self.sum(py),
+                "mean" => self.mean(py, false, None, None),
+                "std" => self.std(py, false, false),
+                "var" => self.var(py, false, false),
+                "sum" => self.sum(py, false, None, None),
                 other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                     "Unsupported ewm agg function '{other}'"
                 ))),
@@ -48459,6 +48632,7 @@ impl PyExponentialMovingWindow {
         } else if let Ok(list) = func.extract::<Vec<String>>() {
             let str_slices: Vec<&str> = list.iter().map(|s| s.as_str()).collect();
             if let Some(ref s) = self.series {
+                let s = window_series_input(s, "ExponentialMovingWindow", "agg", false, false)?;
                 let res = s
                     .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
                     .agg(&str_slices)
@@ -48466,11 +48640,12 @@ impl PyExponentialMovingWindow {
                 return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
             }
             if let Some(ref df) = self.dataframe {
+                let df = window_frame_input(df, None, false, false)?;
                 let res = df
                     .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
                     .agg(&str_slices)
                     .map_err(frame_error_to_py)?;
-                let res = func_columns(res, df, &str_slices)?;
+                let res = func_columns(res, &df, &str_slices)?;
                 return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
             }
             Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(

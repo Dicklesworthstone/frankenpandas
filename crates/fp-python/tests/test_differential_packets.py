@@ -16420,3 +16420,95 @@ _RL_CASES = {
 def test_rolling_keywords_like_pandas_n57tz(case: str) -> None:
     run = _RL_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-n57tz (scratch p14/oracle_rollmeth.py,
+# oracle_rolldtype.py vs pandas 2.2.3): the window methods took no keywords
+# (numeric_only, engine / engine_kwargs, ddof, pairwise, bias), a frame's
+# bool and nullable-number columns were left out (a nullable Int64 frame
+# came back empty) where pandas reads them as float64, its other columns
+# were left out where pandas raises DataError, and count skipped text and
+# datetimes.
+def _wk_outcome(run: Any) -> Any:
+    # As _e23_outcome (warnings compared), an error by class name: pandas'
+    # DataError is pandas.errors', ours frankenpandas.errors'.
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            values = [repr(v) for v in run()]
+        return ("ok", values, [(w.category.__name__, str(w.message)) for w in caught])
+    except NameError:
+        raise
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+def _wk_values(m: Any) -> Any:
+    return m.Series([1.0, 2.0, 4.0, 7.0, 11.0])
+
+
+def _wk_frame(m: Any) -> Any:
+    return m.DataFrame({"a": [1.0, 2.0, 4.0, 7.0], "b": [1, 3, 2, 5], "c": ["x", "y", "z", "w"]})
+
+
+_WK_CASES = {
+    "a text column": lambda m: _rl_shown(_wk_frame(m).rolling(2).sum()),
+    "a text column, numeric_only": lambda m: _rl_shown(_wk_frame(m).rolling(2).sum(numeric_only=True)),
+    "a datetime column": lambda m: _rl_shown(m.DataFrame({"a": m.to_datetime(["2024-01-01", "2024-01-02"])}).rolling(1).sum()),
+    "a category column": lambda m: _rl_shown(m.DataFrame({"a": m.Categorical(["x", "y"])}).rolling(1).mean()),
+    "a bool column": lambda m: _rl_shown(m.DataFrame({"a": [True, False, True], "b": [1, 2, 3]}).rolling(2).sum()),
+    "a nullable Int64 column": lambda m: _rl_shown(
+        m.DataFrame({"a": m.array([1, None, 3], dtype="Int64")}).rolling(2, min_periods=1).max()
+    ),
+    "count of text": lambda m: _rl_shown(m.DataFrame({"a": ["x", None, "z"], "b": [1.0, 2.0, None]}).rolling(2).count()),
+    "count of datetimes": lambda m: _rl_shown(
+        m.DataFrame({"a": m.to_datetime(["2024-01-01", None, "2024-01-03"])}).rolling(2).count()
+    ),
+    "count of a text Series": lambda m: _rl_shown(m.Series(["x", None, "z"]).rolling(2).count()),
+    "a text Series": lambda m: _rl_shown(m.Series(["x", "y"]).rolling(1).sum()),
+    "a text Series, numeric_only": lambda m: _rl_shown(m.Series(["x", "y"]).rolling(1).sum(numeric_only=True)),
+    "median numeric_only": lambda m: _rl_shown(_wk_frame(m).rolling(2).median(numeric_only=True)),
+    "quantile numeric_only": lambda m: _rl_shown(_wk_frame(m).rolling(2).quantile(0.5, numeric_only=True)),
+    "skew numeric_only": lambda m: _rl_shown(_wk_frame(m).rolling(3).skew(numeric_only=True)),
+    "rank numeric_only": lambda m: _rl_shown(_wk_frame(m).rolling(2).rank(numeric_only=True)),
+    "engine cython": lambda m: _rl_shown(_wk_values(m).rolling(2).sum(engine="cython")),
+    "std ddof 0": lambda m: _rl_shown(_wk_values(m).rolling(3).std(ddof=0)),
+    "std ddof 2": lambda m: _rl_shown(_wk_values(m).rolling(3).std(ddof=2)),
+    "var ddof 3": lambda m: _rl_shown(_wk_values(m).rolling(3).var(ddof=3)),
+    "sem ddof 0": lambda m: _rl_shown(_wk_values(m).rolling(3).sem(ddof=0)),
+    "frame std ddof 0": lambda m: _rl_shown(_wk_frame(m)[["a", "b"]].rolling(3).std(ddof=0)),
+    "expanding var ddof 0": lambda m: _rl_shown(_wk_values(m).expanding().var(ddof=0)),
+    "expanding sem ddof 2": lambda m: _rl_shown(_wk_values(m).expanding().sem(ddof=2)),
+    "expanding max numeric_only": lambda m: _rl_shown(_wk_frame(m).expanding().max(numeric_only=True)),
+    "expanding text column": lambda m: _rl_shown(_wk_frame(m).expanding().max()),
+    "cov ddof 0": lambda m: _rl_shown(_wk_values(m).rolling(3).cov(_wk_values(m) ** 2, ddof=0)),
+    "corr ddof 0": lambda m: _rl_shown(_wk_values(m).rolling(3).corr(_wk_values(m) ** 2, ddof=0)),
+    "corr ddof past the window": lambda m: _rl_shown(_wk_values(m).rolling(3).corr(_wk_values(m) ** 2, ddof=5)),
+    "expanding cov ddof 0": lambda m: _rl_shown(_wk_values(m).expanding().cov(_wk_values(m) ** 2, ddof=0)),
+    "frame corr pairwise": lambda m: _rl_shown(_wk_frame(m)[["a", "b"]].rolling(3).corr(pairwise=True)),
+    "frame corr pairwise False": lambda m: _rl_shown(_wk_frame(m)[["a", "b"]].rolling(3).corr(pairwise=False)),
+    "frame cov with other, pairwise False": lambda m: _rl_shown(
+        _wk_frame(m)[["a", "b"]].rolling(3).cov(_wk_frame(m)[["a", "b"]] * 2, pairwise=False)
+    ),
+    "series corr pairwise": lambda m: _rl_shown(_wk_values(m).rolling(3).corr(_wk_values(m) * 2, pairwise=True)),
+    "frame corr numeric_only": lambda m: _rl_shown(_wk_frame(m).rolling(3).corr(numeric_only=True)),
+    "ewm std bias": lambda m: _rl_shown(_wk_values(m).ewm(span=3).std(bias=True)),
+    "ewm var bias": lambda m: _rl_shown(_wk_values(m).ewm(span=3).var(bias=True)),
+    "ewm var bias, adjust False": lambda m: _rl_shown(_wk_values(m).ewm(span=3, adjust=False).var(bias=True)),
+    "ewm cov bias": lambda m: _rl_shown(_wk_values(m).ewm(span=3).cov(_wk_values(m) ** 2, bias=True)),
+    "ewm frame text column": lambda m: _rl_shown(_wk_frame(m).ewm(span=3).mean()),
+    "ewm frame numeric_only": lambda m: _rl_shown(_wk_frame(m).ewm(span=3).mean(numeric_only=True)),
+    "ewm frame var bias": lambda m: _rl_shown(_wk_frame(m)[["a", "b"]].ewm(span=2).var(bias=True)),
+    # NEGATIVE: the defaults are the plain results.
+    "std ddof 1": lambda m: _rl_shown(_wk_values(m).rolling(3).std(ddof=1)),
+    "numeric_only on numbers": lambda m: _rl_shown(_wk_frame(m)[["a", "b"]].rolling(2).mean(numeric_only=False)),
+    "ewm var bias False": lambda m: _rl_shown(_wk_values(m).ewm(span=3).var(bias=False)),
+    "corr pairwise None": lambda m: _rl_shown(_wk_frame(m)[["a", "b"]].rolling(3).corr(pairwise=None)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_WK_CASES))
+def test_window_method_keywords_like_pandas_n57tz(case: str) -> None:
+    run = _WK_CASES[case]
+    assert _wk_outcome(lambda: run(fpd)) == _wk_outcome(lambda: run(pd)), case
