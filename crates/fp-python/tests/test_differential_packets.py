@@ -14865,3 +14865,52 @@ _IDX_NA_WARN_CASES = {
 def test_idx_extreme_na_warns_like_pandas(case: str) -> None:
     run = _IDX_NA_WARN_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-l8rba (everyday probes 30 / 31): isocalendar's nullable
+# UInt32; sum(min_count) unmet is float64 NaN; pivot of several value
+# columns shares numpy's common dtype.
+def _l8_shown(result: Any) -> list:
+    if hasattr(result, "columns"):
+        return [
+            [str(t) for t in result.dtypes],
+            repr(result.index),
+        ] + result.to_string().split("\n")
+    return [str(result.dtype)] + result.to_string().split("\n")
+
+
+def _l8_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {"g": ["a", "b", "a", "c"], "x": [1, 2, 3, 4], "y": [0.5, np.nan, 2.5, 1.0], "z": [True, False, True, True]}
+    )
+
+
+_L8_CASES = {
+    "dt.isocalendar": lambda m: _l8_shown(
+        m.Series(m.to_datetime(["2024-02-29", None, "2023-12-31"])).dt.isocalendar()
+    ),
+    "DatetimeIndex.isocalendar": lambda m: _l8_shown(
+        m.DatetimeIndex(["2024-02-29", None, "2023-12-31"]).isocalendar()
+    ),
+    "sum min_count unmet": lambda m: _l8_shown(_l8_frame(m)[["y"]].sum(min_count=5)),
+    "int sum min_count unmet": lambda m: _l8_shown(_l8_frame(m)[["x", "y"]].sum(min_count=4)),
+    "pivot float and bool values": lambda m: _l8_shown(
+        _l8_frame(m).pivot(index="x", columns="g", values=["y", "z"])
+    ),
+    "pivot int and float values": lambda m: _l8_shown(
+        _l8_frame(m).assign(k=[10, 20, 30, 40]).pivot(index="x", columns="g", values=["k", "y"])
+    ),
+    # NEGATIVES: a met min_count keeps the int dtype; equal value dtypes
+    # keep theirs.
+    "int sum min_count met": lambda m: _l8_shown(_l8_frame(m)[["x"]].sum(min_count=4)),
+    "pivot equal value dtypes": lambda m: _l8_shown(
+        _l8_frame(m).assign(w=[5.0, 6.0, 7.0, 8.0]).pivot(index="x", columns="g", values=["y", "w"])
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_L8_CASES))
+def test_everyday30_31_like_pandas(case: str) -> None:
+    run = _L8_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

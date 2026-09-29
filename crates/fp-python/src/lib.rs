@@ -11823,6 +11823,9 @@ impl PyDatetimeIndex {
         nat_as_false(self.inner.is_year_start())
     }
 
+    /// pandas' `DatetimeIndex.isocalendar()`: the ISO year, week and day of
+    /// each instant, <NA> at NaT, in the nullable UInt32 under the index
+    /// itself (they were float cells under a default RangeIndex).
     fn isocalendar(&self) -> PyResult<PyDataFrame> {
         let cal = self.inner.isocalendar();
         let mut years = Vec::with_capacity(cal.len());
@@ -11836,14 +11839,32 @@ impl PyDatetimeIndex {
                     days.push(Scalar::Int64(d as i64));
                 }
                 None => {
-                    years.push(Scalar::Null(NullKind::NaN));
-                    weeks.push(Scalar::Null(NullKind::NaN));
-                    days.push(Scalar::Null(NullKind::NaN));
+                    years.push(Scalar::Null(NullKind::Null));
+                    weeks.push(Scalar::Null(NullKind::Null));
+                    days.push(Scalar::Null(NullKind::Null));
                 }
             }
         }
-        let cols = vec![("year", years), ("week", weeks), ("day", days)];
-        let df = DataFrame::from_dict(&["year", "week", "day"], cols).map_err(frame_error_to_py)?;
+        let names = ["year", "week", "day"];
+        let columns = [years, weeks, days]
+            .into_iter()
+            .map(|values| {
+                Column::new(DType::Int64Nullable, values)
+                    .and_then(|column| column.cast_to_width(NumericWidth::UInt32, true))
+                    .map_err(column_error_to_py)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let df = DataFrame::new_with_column_order(
+            self.as_py_index().inner,
+            fp_frame::ColumnStore::from_pairs(
+                names.iter().map(|name| (*name).to_owned()).zip(columns),
+            ),
+            names
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>(),
+        )
+        .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: df })
     }
 
@@ -30134,23 +30155,32 @@ impl PyDataFrame {
                 "min_count: the reduction and its counts cover different labels".to_owned(),
             ));
         }
-        let values = reduced
+        let below = |count: &Scalar| matches!(count, Scalar::Int64(n) if usize::try_from(*n).unwrap_or(0) < min_count);
+        let values: Vec<Scalar> = reduced
             .values()
             .iter()
             .zip(counts.values())
-            .map(|(value, count)| match count {
-                Scalar::Int64(n) if usize::try_from(*n).unwrap_or(0) < min_count => {
+            .map(|(value, count)| {
+                if below(count) {
                     Scalar::Null(NullKind::NaN)
+                } else {
+                    value.clone()
                 }
-                _ => value.clone(),
             })
             .collect();
+        // A numeric reduction that gains a NaN is float64, as numpy's (an
+        // all-NaN one was inferred object).
+        let column = if counts.values().iter().any(below)
+            && matches!(
+                reduced.column().dtype(),
+                DType::Int64 | DType::Float64 | DType::Bool
+            ) {
+            Column::new(DType::Float64, values)?
+        } else {
+            Column::from_values(values)?
+        };
         // The reduction's own index: its name and zone (fvsao.60).
-        Series::new(
-            reduced.name(),
-            reduced.index().clone(),
-            Column::from_values(values)?,
-        )
+        Series::new(reduced.name(), reduced.index().clone(), column)
     }
 
     /// pandas' skipna=False for min/max/median: a column (or row, for
@@ -36182,10 +36212,38 @@ impl PyDataFrame {
                     None,
                     None,
                 )?;
-                return Ok(side_by_side
+                let mut out = side_by_side
                     .bind(py)
                     .extract::<PyRef<'_, PyDataFrame>>()?
-                    .clone());
+                    .clone();
+                // pandas pivots the value columns as one 2-D array: differing
+                // dtypes share numpy's common one - ints beside floats
+                // float64, any other mix object (a float and a bool value
+                // column kept their own dtypes).
+                let dtypes: Vec<DType> = names
+                    .iter()
+                    .filter_map(|name| self.inner.column(name).map(Column::dtype))
+                    .collect();
+                if dtypes.windows(2).any(|pair| pair[0] != pair[1]) {
+                    let numbers = dtypes
+                        .iter()
+                        .all(|dtype| matches!(dtype, DType::Int64 | DType::Float64));
+                    for position in 0..out.inner.num_columns() {
+                        let Some(column) = out.inner.column_at(position) else {
+                            continue;
+                        };
+                        let column = if numbers {
+                            column.astype(DType::Float64).map_err(column_error_to_py)?
+                        } else {
+                            Column::from_object_values(column.values().to_vec())
+                        };
+                        out.inner = out
+                            .inner
+                            .isetitem(position, column)
+                            .map_err(frame_error_to_py)?;
+                    }
+                }
+                return Ok(out);
             }
         }
 
@@ -36215,12 +36273,31 @@ impl PyDataFrame {
         // The result's columns are the `columns` column's values, typed, and
         // named after it.
         let value_dtype = self.inner.column(&col_name).map(Column::dtype);
-        let labelled = |res: DataFrame| PyDataFrame {
-            inner: match &value_dtype {
-                Some(dtype) => res.with_value_labels(dtype),
-                None => res,
+        // A cell column no row fills is all NaN in the values' numpy dtype:
+        // float64 for numbers (it was inferred object).
+        let numeric_values = self
+            .inner
+            .column(&val_name)
+            .is_some_and(|c| matches!(c.dtype(), DType::Int64 | DType::Float64));
+        let labelled = |res: DataFrame| -> PyResult<PyDataFrame> {
+            let mut res = res;
+            if numeric_values {
+                for position in 0..res.num_columns() {
+                    if let Some(column) = res.column_at(position)
+                        && column.dtype() == DType::Null
+                    {
+                        let column = column.astype(DType::Float64).map_err(column_error_to_py)?;
+                        res = res.isetitem(position, column).map_err(frame_error_to_py)?;
+                    }
+                }
             }
-            .with_columns_name(Some(col_name.clone())),
+            Ok(PyDataFrame {
+                inner: match &value_dtype {
+                    Some(dtype) => res.with_value_labels(dtype),
+                    None => res,
+                }
+                .with_columns_name(Some(col_name.clone())),
+            })
         };
         match index {
             Some(idx_obj) if !idx_obj.is_none() => {
@@ -36229,7 +36306,7 @@ impl PyDataFrame {
                     .inner
                     .pivot(&idx_name, &col_name, &val_name)
                     .map_err(frame_error_to_py)?;
-                Ok(labelled(res))
+                labelled(res)
             }
             _ => {
                 let idx_scalars: Vec<Scalar> = self
@@ -36267,7 +36344,7 @@ impl PyDataFrame {
                 let res = df_tmp
                     .pivot(PIVOT_TEMP_INDEX, &col_name, &val_name)
                     .map_err(frame_error_to_py)?;
-                Ok(labelled(res))
+                labelled(res)
             }
         }
     }
@@ -44740,8 +44817,8 @@ impl PySeriesDatetimeAccessor {
     }
     /// pandas' `.dt.isocalendar()`: the ISO year, week and weekday (Monday
     /// 1) of each instant under its row label, <NA> at NaT (it was an
-    /// unknown attribute). pandas' columns are the nullable UInt32; these
-    /// are the nullable Int64, the narrow-dtype gap of fvsao.23.
+    /// unknown attribute), in pandas' nullable UInt32 (the width tag of
+    /// fvsao.23; they were the nullable Int64).
     fn isocalendar(&self) -> PyResult<PyDataFrame> {
         let mut frame = self.series.dt().isocalendar().map_err(frame_error_to_py)?;
         for name in ["year", "week", "day"] {
@@ -44749,6 +44826,7 @@ impl PySeriesDatetimeAccessor {
                 .column(name)
                 .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(name))?
                 .astype(DType::Int64Nullable)
+                .and_then(|column| column.cast_to_width(NumericWidth::UInt32, true))
                 .map_err(column_error_to_py)?;
             frame = frame.with_column(name, column).map_err(frame_error_to_py)?;
         }
