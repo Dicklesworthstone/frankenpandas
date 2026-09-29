@@ -14425,3 +14425,94 @@ _EVERYDAY26_CASES = {
 def test_everyday26_like_pandas(case: str) -> None:
     run = _EVERYDAY26_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-i17d4: a frame whose column keys repeat - duplicate
+# labels, or a column MultiIndex whose leaf names repeat, as a
+# multi-function agg / transform makes - was silently corrupted: round, abs,
+# arithmetic, cumsum, clip, rank, pct_change dropped the repeated columns;
+# where, map, sum, mean, describe answered with the first duplicate's data.
+def _rk_flat(m: Any) -> Any:
+    return m.DataFrame([[1.25, 5.75, 3.5], [4.5, 2.25, 6.0]], columns=["a", "a", "b"])
+
+
+def _rk_leaves(m: Any) -> Any:
+    x = m.DataFrame({"s": [1.25, 2.0], "e": [3.0, 4.5]})
+    return m.concat([x, x * -2], axis=1, keys=["p", "q"])
+
+
+def _rk_shown(result: Any) -> list:
+    if hasattr(result, "columns"):
+        return [result.shape, list(result.columns)] + result.to_string().split("\n")
+    return result.to_string().split("\n")
+
+
+_REPEATED_KEY_OPS = {
+    "round": lambda d: d.round(1),
+    "abs": lambda d: d.abs(),
+    "neg": lambda d: -d,
+    "add scalar": lambda d: d + 1,
+    "radd int": lambda d: 2 * d,
+    "times itself": lambda d: d * d,
+    "cumsum": lambda d: d.cumsum(),
+    "clip": lambda d: d.clip(upper=3),
+    "gt scalar": lambda d: d > 3,
+    "where": lambda d: d.where(d > 3),
+    "mask with other": lambda d: d.mask(d > 3, 0.0),
+    "rank": lambda d: d.rank(),
+    "pct_change": lambda d: d.pct_change(),
+    "map": lambda d: d.map(lambda v: v * 10),
+    "sum": lambda d: d.sum(),
+    "mean": lambda d: d.mean(),
+    "max": lambda d: d.max(),
+    "describe": lambda d: d.describe(),
+    "std": lambda d: d.std(),
+    "var": lambda d: d.var(),
+    "quantile": lambda d: d.quantile(0.5),
+    "idxmax": lambda d: d.idxmax(),
+    "corr": lambda d: d.corr(),
+    "eq itself": lambda d: d == d,
+    "gt a frame": lambda d: d > d.abs() - 1,
+    "sum axis1": lambda d: d.sum(axis=1),
+    "max axis1": lambda d: d.max(axis=1),
+    "mean axis1": lambda d: d.mean(axis=1),
+    "apply axis1": lambda d: d.apply(lambda row: row.iloc[1] - row.iloc[0], axis=1),
+}
+
+_REPEATED_KEY_CASES = {
+    f"{frame_name} {op_name}": (lambda make, op: lambda m: _rk_shown(op(make(m))))(make, op)
+    for frame_name, make in (("flat", _rk_flat), ("leaves", _rk_leaves))
+    for op_name, op in _REPEATED_KEY_OPS.items()
+}
+# A decimals dict rounds every column under its key.
+_REPEATED_KEY_CASES["flat round a dict"] = lambda m: _rk_shown(_rk_flat(m).round({"a": 0}))
+_REPEATED_KEY_CASES["flat idxmax axis1"] = lambda m: _rk_shown(_rk_flat(m).idxmax(axis=1))
+# nunique needs a repeated key whose columns count differently.
+_REPEATED_KEY_CASES["flat nunique"] = lambda m: _rk_shown(
+    m.DataFrame([[1, 5, 3], [2, 5, 3]], columns=["a", "a", "b"]).nunique()
+)
+# A transform with a list of functions makes repeated leaves (probe 26).
+_REPEATED_KEY_CASES["transform then round"] = lambda m: _rk_shown(
+    m.DataFrame({"a": [1.0, 4.0], "b": [9.0, 16.0]}).transform(["sqrt", "exp"]).round(3)
+)
+# NEGATIVES: unique keys, flat and MultiIndex, unchanged; a groupby agg of
+# function lists (its result's column keys are unique inside) then round.
+_REPEATED_KEY_CASES["agg lists then round"] = lambda m: _rk_shown(
+    m.DataFrame({"g": ["x", "y", "x"], "v": [1.25, 2.5, 3.75], "w": [2.0, 4.0, 6.0]})
+    .groupby("g")
+    .agg({"v": ["sum", "mean"], "w": ["sum", "mean"]})
+    .round(1)
+)
+_REPEATED_KEY_CASES["unique keys round"] = lambda m: _rk_shown(
+    m.DataFrame([[1.25, 5.75]], columns=["a", "b"]).round(1)
+)
+_REPEATED_KEY_CASES["unique leaves sum"] = lambda m: _rk_shown(
+    m.concat([m.DataFrame({"s": [1.0]}), m.DataFrame({"e": [2.0]})], axis=1, keys=["p", "q"]).sum()
+)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_REPEATED_KEY_CASES))
+def test_repeated_column_keys_like_pandas(case: str) -> None:
+    run = _REPEATED_KEY_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

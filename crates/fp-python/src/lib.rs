@@ -29270,21 +29270,24 @@ impl PyDataFrame {
         self.missing_is_nan(reduced, axis, numeric_only, skipna)
     }
 
+    /// The POSITIONS of the columns a moment reduction reads: a repeated
+    /// column key is its own column (by name every one read the first;
+    /// br-frankenpandas-i17d4).
     fn get_reduction_columns(
         &self,
         stat: &str,
         numeric_only: bool,
-    ) -> Result<Vec<String>, FrameError> {
+    ) -> Result<Vec<usize>, FrameError> {
         let mut cols = Vec::new();
-        for name in self.inner.column_names() {
-            if let Some(col) = self.inner.column(name) {
+        for position in 0..self.inner.num_columns() {
+            if let Some(col) = self.inner.column_at(position) {
                 let dtype = col.dtype();
                 if matches!(dtype, DType::Int64 | DType::Float64 | DType::Bool) {
-                    cols.push(name.clone());
+                    cols.push(position);
                 } else if dtype == DType::Timedelta64 {
                     if !numeric_only {
                         if stat == "std" {
-                            cols.push(name.clone());
+                            cols.push(position);
                         } else {
                             return Err(FrameError::CompatibilityRejected(format!(
                                 "'TimedeltaArray' with dtype timedelta64[ns] does not support reduction '{stat}'"
@@ -29328,14 +29331,14 @@ impl PyDataFrame {
                 return Series::new("".to_string(), self.inner.index().clone(), col);
             }
 
-            let has_td = candidate_cols.iter().any(|name| {
+            let has_td = candidate_cols.iter().any(|&position| {
                 self.inner
-                    .column(name)
+                    .column_at(position)
                     .is_some_and(|c| c.dtype() == DType::Timedelta64)
             });
-            let has_num = candidate_cols.iter().any(|name| {
+            let has_num = candidate_cols.iter().any(|&position| {
                 self.inner
-                    .column(name)
+                    .column_at(position)
                     .is_some_and(|c| c.dtype() != DType::Timedelta64)
             });
             if has_td && has_num {
@@ -29347,7 +29350,7 @@ impl PyDataFrame {
             let is_all_td = has_td;
             let columns: Vec<&Column> = candidate_cols
                 .iter()
-                .filter_map(|name| self.inner.column(name))
+                .filter_map(|&position| self.inner.column_at(position))
                 .collect();
 
             let mut out_values = Vec::with_capacity(row_count);
@@ -29422,11 +29425,12 @@ impl PyDataFrame {
             let mut labels = Vec::with_capacity(candidate_cols.len());
             let mut values = Vec::with_capacity(candidate_cols.len());
 
-            for name in candidate_cols {
+            let names = self.inner.column_names();
+            for position in candidate_cols {
                 // Indexed as a reduction: the columns' typed labels (0, not
                 // '0'), their range and MultiIndex levels (g3bux).
-                labels.push(self.inner.column_label(&name));
-                if let Some(col) = self.inner.column(&name) {
+                labels.push(self.inner.column_label(names[position]));
+                if let Some(col) = self.inner.column_at(position) {
                     let val = match stat {
                         "var" => col.var_skipna(ddof, skipna),
                         "std" => col.std_skipna(ddof, skipna),
@@ -37943,29 +37947,29 @@ impl PyDataFrame {
 
     fn applymap(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let (nrows, ncols) = self.inner.shape();
-        let col_names = self.inner.column_names();
-        let mut col_map = BTreeMap::new();
-        let mut column_order = Vec::with_capacity(ncols);
-        for col_name in &col_names {
-            let s = self.column_series(col_name)?;
-            let vals = s.inner.column().values();
+        // By position: a repeated column key maps its own column (every one
+        // mapped the first; br-frankenpandas-i17d4). The columns keep their
+        // labels, range and MultiIndex levels (g3bux).
+        let mut columns = Vec::with_capacity(ncols);
+        for position in 0..ncols {
+            let vals = self
+                .inner
+                .column_at(position)
+                .map(Column::values)
+                .unwrap_or_default();
             let mut out = Vec::with_capacity(nrows);
             for v in vals {
                 let py_v = scalar_to_py(py, v)?;
                 let res = func.call1((py_v,))?;
                 out.push(py_to_scalar(py, &res)?);
             }
-            let col = Column::from_values(out)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-            column_order.push((*col_name).clone());
-            col_map.insert((*col_name).clone(), col);
+            columns.push(
+                Column::from_values(out)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?,
+            );
         }
-        let df =
-            DataFrame::new_with_column_order(self.inner.index().clone(), col_map, column_order)
-                .map_err(frame_error_to_py)?;
-        // The columns keep their labels, range and MultiIndex levels (g3bux).
         Ok(PyDataFrame {
-            inner: df.with_labels_of(&self.inner),
+            inner: self.inner.with_columns_at_positions(columns),
         })
     }
 
