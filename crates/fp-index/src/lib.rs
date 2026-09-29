@@ -5922,38 +5922,15 @@ impl Index {
     /// Matches `pd.Index.putmask(cond, value)`. A shorter `cond`
     /// leaves trailing labels unchanged (pandas-style lenient
     /// alignment); a longer `cond` is silently truncated. The name
-    /// is preserved.
+    /// is preserved. It is [`Self::where_cond`] of the other labels, so an
+    /// int index given a NaN or a float turns float64 as there (it kept
+    /// int64 beside the NaN; br-frankenpandas-oq1df).
     #[must_use]
     pub fn putmask(&self, cond: &[bool], value: &IndexLabel) -> Self {
-        if let Some(values) = self.labels.int64_view()
-            && let IndexLabel::Int64(replacement) = value
-        {
-            let new_labels: Vec<i64> = values
-                .iter()
-                .enumerate()
-                .map(|(i, &label)| {
-                    if cond.get(i).copied().unwrap_or(false) {
-                        *replacement
-                    } else {
-                        label
-                    }
-                })
-                .collect();
-            return self.propagate_name(Self::from_i64_values(new_labels));
-        }
-        let new_labels: Vec<IndexLabel> = self
-            .labels
-            .iter()
-            .enumerate()
-            .map(|(i, label)| {
-                if cond.get(i).copied().unwrap_or(false) {
-                    value.clone()
-                } else {
-                    label.clone()
-                }
-            })
+        let kept: Vec<bool> = (0..self.len())
+            .map(|i| !cond.get(i).copied().unwrap_or(false))
             .collect();
-        self.propagate_name(Self::new(new_labels))
+        self.where_cond(&kept, value)
     }
 
     /// Whether any label coerces to true.
@@ -6173,15 +6150,32 @@ impl Index {
                 .collect();
             return self.propagate_name(Self::from_i64_values(new_labels));
         }
+        // An int index given a NaN or a float in place of a label is float64,
+        // as pandas' (the ints stayed beside the NaN: an int64 index holding
+        // NaN; br-frankenpandas-oq1df).
+        let replaced = (0..self.len()).any(|i| !cond.get(i).copied().unwrap_or(false));
+        let widened = replaced
+            && matches!(
+                other,
+                IndexLabel::Float64(_) | IndexLabel::Null(fp_types::NullKind::NaN)
+            )
+            && self
+                .labels
+                .iter()
+                .all(|label| matches!(label, IndexLabel::Int64(_)));
         self.propagate_name(Self::new(
             self.labels
                 .iter()
                 .enumerate()
                 .map(|(i, l)| {
-                    if cond.get(i).copied().unwrap_or(false) {
-                        l.clone()
-                    } else {
+                    if !cond.get(i).copied().unwrap_or(false) {
                         other.clone()
+                    } else if let (true, IndexLabel::Int64(value)) = (widened, l) {
+                        #[allow(clippy::cast_precision_loss)] // pandas' int64 -> float64
+                        let value = *value as f64;
+                        IndexLabel::Float64(OrderedF64(value))
+                    } else {
+                        l.clone()
                     }
                 })
                 .collect(),
@@ -26887,6 +26881,29 @@ mod tests {
         assert_eq!(result.labels()[0], IndexLabel::Utf8("a".into()));
         assert_eq!(result.labels()[1], IndexLabel::Utf8("X".into()));
         assert_eq!(result.labels()[2], IndexLabel::Utf8("c".into()));
+    }
+
+    #[test]
+    fn int_index_where_nan_is_float_oq1df() {
+        let nan = IndexLabel::Null(fp_types::NullKind::NaN);
+        let idx = Index::from_i64(vec![1, 2, 3]);
+        let result = idx.where_cond(&[false, true, true], &nan);
+        assert_eq!(
+            result.labels(),
+            &[
+                nan.clone(),
+                IndexLabel::Float64(OrderedF64(2.0)),
+                IndexLabel::Float64(OrderedF64(3.0)),
+            ]
+        );
+        let result = idx.where_cond(&[true, false, true], &IndexLabel::Float64(OrderedF64(0.5)));
+        assert_eq!(result.labels()[0], IndexLabel::Float64(OrderedF64(1.0)));
+        // Nothing replaced, or an int in place of a label: still ints.
+        let kept = idx.where_cond(&[true, true, true], &nan);
+        assert_eq!(kept.labels()[0], IndexLabel::Int64(1));
+        let ints = idx.where_cond(&[false, true, true], &IndexLabel::Int64(0));
+        assert_eq!(ints.labels()[0], IndexLabel::Int64(0));
+        assert_eq!(ints.labels()[1], IndexLabel::Int64(2));
     }
 
     #[test]

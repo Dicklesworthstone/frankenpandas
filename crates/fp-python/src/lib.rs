@@ -7771,6 +7771,41 @@ fn require_orderable_bound(index: &Index, bound: &IndexLabel) -> PyResult<()> {
     }
 }
 
+/// The label an Index's `where` / `putmask` puts in place of its labels:
+/// `value`'s, and for a missing one (left out, None, NaN, NaT) the index's
+/// own missing value, as pandas' - NaT among datetimes or durations, the
+/// value given (None when left out) in an object index, else NaN (an int
+/// index then turns float64). It was NaN for every index (a DatetimeIndex
+/// showed nan, an object Index nan for None; br-frankenpandas-oq1df).
+fn index_fill_label(index: &Index, value: Option<&Bound<'_, PyAny>>) -> PyResult<IndexLabel> {
+    let label = match value {
+        Some(value) => py_to_index_label(value)?,
+        None => IndexLabel::Null(NullKind::Null),
+    };
+    if !label.is_missing() {
+        return Ok(label);
+    }
+    let mut present = index
+        .labels()
+        .iter()
+        .filter(|label| !label.is_missing())
+        .peekable();
+    let temporal = present.peek().is_some()
+        && present.clone().all(|label| {
+            matches!(
+                label,
+                IndexLabel::Datetime64(_) | IndexLabel::Timedelta64(_)
+            )
+        });
+    if temporal {
+        return Ok(IndexLabel::Null(NullKind::NaT));
+    }
+    if present.any(|label| matches!(label, IndexLabel::Utf8(_) | IndexLabel::Object(_))) {
+        return Ok(label);
+    }
+    Ok(IndexLabel::Null(NullKind::NaN))
+}
+
 /// Convert a Python value to an IndexLabel.
 fn py_to_index_label(obj: &Bound<'_, PyAny>) -> PyResult<IndexLabel> {
     if obj.is_none() {
@@ -11482,17 +11517,14 @@ impl PyIndex {
 
     #[pyo3(signature = (cond, other=None))]
     fn r#where(&self, cond: Vec<bool>, other: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
-        let other_lbl = match other {
-            Some(o) => py_to_index_label(o)?,
-            None => IndexLabel::Null(NullKind::NaN),
-        };
+        let other_lbl = index_fill_label(&self.inner, other)?;
         Ok(PyIndex {
             inner: self.inner.where_(&cond, &other_lbl),
         })
     }
 
     fn putmask(&self, mask: Vec<bool>, value: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let val = py_to_index_label(value)?;
+        let val = index_fill_label(&self.inner, Some(value))?;
         Ok(PyIndex {
             inner: self.inner.putmask(&mask, &val),
         })
@@ -49097,20 +49129,28 @@ impl PySeriesStringAccessor {
             Ok(re.call_method1("findall", (pat, text, flags))?.unbind())
         })
     }
-    /// pandas' `partition(sep=' ', expand=True)` / `rpartition`.
+    /// pandas' `partition(sep=' ', expand=True)` / `rpartition`; with
+    /// `expand=False` each string's 3-tuple, a missing value kept (it was
+    /// refused; br-frankenpandas-oq1df).
     #[pyo3(signature = (sep=" ", expand=true))]
-    fn partition(&self, sep: &str, expand: bool) -> PyResult<PyDataFrame> {
+    fn partition(&self, py: Python<'_>, sep: &str, expand: bool) -> PyResult<Py<PyAny>> {
         if !expand {
-            return Err(not_implemented("str.partition(expand=False)"));
+            let parts = self.python_lists(py, |text| {
+                Ok(text.call_method1("partition", (sep,))?.unbind())
+            })?;
+            return Ok(Py::new(py, parts)?.into_any());
         }
-        wrap_frame(self.series.str().partition_df(sep))
+        Ok(Py::new(py, wrap_frame(self.series.str().partition_df(sep))?)?.into_any())
     }
     #[pyo3(signature = (sep=" ", expand=true))]
-    fn rpartition(&self, sep: &str, expand: bool) -> PyResult<PyDataFrame> {
+    fn rpartition(&self, py: Python<'_>, sep: &str, expand: bool) -> PyResult<Py<PyAny>> {
         if !expand {
-            return Err(not_implemented("str.rpartition(expand=False)"));
+            let parts = self.python_lists(py, |text| {
+                Ok(text.call_method1("rpartition", (sep,))?.unbind())
+            })?;
+            return Ok(Py::new(py, parts)?.into_any());
         }
-        wrap_frame(self.series.str().rpartition_df(sep))
+        Ok(Py::new(py, wrap_frame(self.series.str().rpartition_df(sep))?)?.into_any())
     }
     /// pandas' `get_dummies(sep='|')`: a 0/1 column per distinct token.
     #[pyo3(signature = (sep="|"))]
@@ -65542,6 +65582,58 @@ fn pivot_table<'py>(
     )
 }
 
+/// pandas' `cut` over an IntervalIndex `bins`: each value's interval (NaN
+/// outside them all), the intervals the ordered categories - `labels`,
+/// `right` and `include_lowest` ignored, as pandas' - a Series for a Series,
+/// else a Categorical, with the bins beside it under `retbins`; an
+/// overlapping IntervalIndex is pandas' ValueError (it was refused as
+/// non-numeric edges; br-frankenpandas-oq1df).
+fn cut_by_intervals(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    bins: &Bound<'_, PyAny>,
+    retbins: bool,
+    unlabelled_unordered: bool,
+) -> PyResult<Py<PyAny>> {
+    let (series, series_input) = binning_input(py, x)?;
+    if bins.getattr("is_overlapping")?.is_truthy()? {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Overlapping IntervalIndex is not accepted.",
+        ));
+    }
+    if unlabelled_unordered {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "'labels' must be provided if 'ordered = False'",
+        ));
+    }
+    let values = Bound::new(py, PySeries { inner: series })?;
+    let codes = bins.call_method1("get_indexer", (&values,))?;
+    let module = py.import("frankenpandas")?;
+    let ordered = PyDict::new(py);
+    ordered.set_item("ordered", true)?;
+    let dtype = module
+        .getattr("CategoricalDtype")?
+        .call((bins,), Some(&ordered))?;
+    let typed = PyDict::new(py);
+    typed.set_item("dtype", dtype)?;
+    let mut result =
+        module
+            .getattr("Categorical")?
+            .call_method("from_codes", (codes,), Some(&typed))?;
+    if series_input {
+        let placed = PyDict::new(py);
+        placed.set_item("index", values.getattr("index")?)?;
+        placed.set_item("name", values.getattr("name")?)?;
+        result = module.getattr("Series")?.call((result,), Some(&placed))?;
+    }
+    if retbins {
+        return Ok(PyTuple::new(py, [result, bins.clone()])?
+            .into_any()
+            .unbind());
+    }
+    Ok(result.unbind())
+}
+
 /// Bin values into discrete intervals (pandas `cut`) - any 1-D `x`: a
 /// Series for a Series, else a Categorical (the codes' ndarray under
 /// `labels=False`), with the edges' ndarray beside it under `retbins=True`
@@ -65566,6 +65658,10 @@ fn cut(
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
             "invalid value for 'duplicates' parameter, valid options are: raise, drop; got '{duplicates}'"
         )));
+    }
+    if bins.is_instance_of::<PyIntervalIndex>() {
+        let unlabelled_unordered = !ordered && labels.is_none_or(|labels| labels.is_none());
+        return cut_by_intervals(py, x, bins, retbins, unlabelled_unordered);
     }
     let (series, series_input) = binning_input(py, x)?;
     let (labels, codes) = bin_labels_arg(labels)?;

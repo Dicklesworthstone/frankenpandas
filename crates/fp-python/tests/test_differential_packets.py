@@ -19369,3 +19369,60 @@ _E45_CASES = {
 def test_everyday45_merge_concat_pct_change_like_pandas_5mxxn(case: str) -> None:
     run = _E45_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-oq1df: str.partition / rpartition(expand=False) give each
+# string's 3-tuple (refused), an int Index given NaN or a float by where is
+# float64 (it kept int64 beside the NaN), and cut takes an IntervalIndex as
+# its bins (refused as non-numeric edges).
+def _e46_words(m: Any) -> Any:
+    return m.Series(["apple pie", "Banana split", None, "cherry-tart 12"])
+
+
+def _e46_index(result: Any) -> list:
+    return [str(list(result)), str(result.dtype)]
+
+
+def _e46_bins(m: Any, breaks: tuple = (0, 3, 6, 9), closed: str = "right") -> Any:
+    return m.IntervalIndex.from_breaks(list(breaks), closed=closed)
+
+
+_E46_CASES = {
+    "rpartition tuples": lambda m: [_e46_words(m).str.rpartition(" ", expand=False)],
+    "partition tuples": lambda m: [_e46_words(m).str.partition("-", expand=False)],
+    "Index where NaN": lambda m: _e46_index(m.Index([1, 2, 3]).where(m.Index([1, 2, 3]) > 1)),
+    "Index where float": lambda m: _e46_index(m.Index([1, 2]).where([True, False], 0.5)),
+    "cut a Series by intervals": lambda m: [
+        m.cut(m.Series([1, 4, 7, 10, None], index=list("abcde"), name="v"), _e46_bins(m))
+    ],
+    "cut a list by intervals": lambda m: [m.cut([1, 4, 7], _e46_bins(m))],
+    "cut by intervals ignores labels": lambda m: [m.cut([1, 4], _e46_bins(m), labels=["x", "y", "z"])],
+    "cut by intervals, labels False": lambda m: [m.cut([1, 4], _e46_bins(m), labels=False)],
+    "cut by intervals, retbins": lambda m: list(m.cut([1, 4], _e46_bins(m), retbins=True)),
+    "cut by left-closed intervals": lambda m: [m.cut([0, 3], _e46_bins(m, [0, 3, 6], "left"))],
+    "cut by float intervals": lambda m: [m.cut([0.5, 2.5], _e46_bins(m, [0.0, 1.5, 3.0]))],
+    "cut by overlapping intervals": lambda m: [m.cut([1], m.IntervalIndex.from_tuples([(0, 2), (1, 3)]))],
+    "cut by intervals with a gap": lambda m: [m.cut([1, 4], m.IntervalIndex.from_tuples([(0, 2), (5, 6)]))],
+    "Index where text": lambda m: _e46_index(m.Index(["a", "b"]).where([True, False])),
+    "Index where dates": lambda m: _e46_index(m.DatetimeIndex(["2024-01-01", "2024-01-02"]).where([True, False])),
+    "Index putmask None ints": lambda m: _e46_index(m.Index([1, 2]).putmask([False, True], None)),
+    "Index putmask None floats": lambda m: _e46_index(m.Index([1.5, 2.5]).putmask([False, True], None)),
+    "Index putmask None dates": lambda m: _e46_index(
+        m.DatetimeIndex(["2024-01-01", "2024-01-02"]).putmask([False, True], None)
+    ),
+    # Negatives: already pandas'.
+    "cut by intervals unordered": lambda m: [m.cut([1], _e46_bins(m), ordered=False)],
+    "partition frame": lambda m: [_e46_words(m).str.partition(" ")],
+    "Index where all kept": lambda m: _e46_index(m.Index([1, 2]).where([True, True])),
+    "Index where an int": lambda m: _e46_index(m.Index([1, 2]).where([True, False], 0)),
+    "Index where text given NaN": lambda m: _e46_index(m.Index(["a", "b"]).where([True, False], np.nan)),
+    "Index putmask None text": lambda m: _e46_index(m.Index(["a", "b"]).putmask([False, True], None)),
+    "cut by edges": lambda m: [m.cut([1, 4], [0, 3, 6])],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E46_CASES))
+def test_everyday46_partition_where_cut_intervals_like_pandas_oq1df(case: str) -> None:
+    run = _E46_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
