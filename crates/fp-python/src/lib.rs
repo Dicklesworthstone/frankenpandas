@@ -420,7 +420,7 @@ fn index_dtype_object<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     if matches!(
         name,
-        "int64" | "float64" | "bool" | "object" | "datetime64[ns]" | "timedelta64[ns]"
+        "int64" | "int32" | "float64" | "bool" | "object" | "datetime64[ns]" | "timedelta64[ns]"
     ) {
         return py.import("numpy")?.call_method1("dtype", (name,));
     }
@@ -7362,6 +7362,15 @@ fn index_arg_freq(obj: &Bound<'_, PyAny>) -> Option<String> {
         .and_then(|dti| dti.inner.freq())
 }
 
+/// The dtype an `index=` Index is declared with where its labels read
+/// another (see [`fp_index::DeclaredDtype`]): the rows built on its labels
+/// keep it, as pandas'.
+fn index_arg_declared(obj: &Bound<'_, PyAny>) -> Option<fp_index::DeclaredDtype> {
+    obj.extract::<PyRef<'_, PyIndex>>()
+        .ok()
+        .and_then(|index| index.inner.declared_dtype())
+}
+
 /// The name an Index argument gives the Series built from it, as pandas'
 /// `Series(Index([1, 2], name='a')).name == 'a'`.
 fn py_index_arg_name(obj: &Bound<'_, PyAny>) -> Option<LabelName> {
@@ -7853,8 +7862,9 @@ fn row_keys_to_py(py: Python<'_>, index: &Index) -> PyResult<Vec<Py<PyAny>>> {
 /// `index` as the pandas object: a MultiIndex when its labels carry row
 /// MultiIndex levels, else a flat Index.
 /// A DatetimeIndex field (year, month, dayofweek, ...) as pandas returns it:
-/// an Index of ints, float64 with NaN when a NaT is present (it was a list
-/// holding None; br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.18).
+/// an Index of numpy's int32 (it was int64; br-frankenpandas-pqjzo), float64
+/// with NaN when a NaT is present (it was a list holding None;
+/// br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.18).
 fn datetime_field_index<T: Into<i64>>(values: Vec<Option<T>>) -> PyIndex {
     let any_nat = values.iter().any(Option::is_none);
     let labels = values
@@ -7865,8 +7875,9 @@ fn datetime_field_index<T: Into<i64>>(values: Vec<Option<T>>) -> PyIndex {
             None => IndexLabel::Null(NullKind::NaN),
         })
         .collect();
+    let declared = (!any_nat).then_some(fp_index::DeclaredDtype::Int32);
     PyIndex {
-        inner: Index::new(labels),
+        inner: Index::new(labels).with_declared_dtype(declared),
     }
 }
 
@@ -7977,6 +7988,31 @@ fn index_to_timestamp(
 
 fn flat_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
     let labels = index.labels();
+    // An empty index keeps its source's class (pandas' empty slice of a
+    // DatetimeIndex is one; dwyud); one declared object is a plain Index
+    // whatever it holds (pandas' astype(object); i20vm).
+    match index.declared_dtype() {
+        Some(fp_index::DeclaredDtype::Object) => {
+            return Ok(Py::new(
+                py,
+                PyIndex {
+                    inner: index.clone(),
+                },
+            )?
+            .into_any());
+        }
+        Some(fp_index::DeclaredDtype::Datetime64) if labels.is_empty() => {
+            if let Ok(inner) = DatetimeIndex::from_index(index.clone()) {
+                return Ok(Py::new(py, PyDatetimeIndex { inner })?.into_any());
+            }
+        }
+        Some(fp_index::DeclaredDtype::Timedelta64) if labels.is_empty() => {
+            if let Ok(inner) = TimedeltaIndex::from_index(index.clone()) {
+                return Ok(Py::new(py, PyTimedeltaIndex { inner })?.into_any());
+            }
+        }
+        _ => {}
+    }
     if !labels.is_empty() {
         if labels
             .iter()
@@ -9156,7 +9192,12 @@ impl PyIndex {
         if out.is(py.NotImplemented()) {
             return Ok(out.unbind());
         }
-        Ok(Py::new(py, Self::new(Some(&out), name)?)?.into_any())
+        // An object index answers one, an int32 index int32 ints (i20vm /
+        // pqjzo).
+        let inner = Self::new(Some(&out), name)?
+            .inner
+            .with_dtype_of(&self.inner);
+        Ok(Py::new(py, Self { inner })?.into_any())
     }
 
     /// `-index`, `+index`, `abs(index)`: numpy's answer as an Index.
@@ -9376,7 +9417,9 @@ impl PyIndex {
                     i += s_idx.step;
                 }
             }
-            let mut out = Index::new(sliced);
+            // The source's dtype carries (an object index stays one, an
+            // empty slice keeps int64; i20vm / dwyud).
+            let mut out = Index::new(sliced).with_dtype_of(&self.inner);
             if let Some(n) = self.inner.name() {
                 out = out.set_name(n);
             }
@@ -10111,26 +10154,30 @@ impl PyIndex {
     #[pyo3(signature = (dtype, copy=true))]
     fn astype(&self, dtype: &Bound<'_, PyAny>, copy: bool) -> PyResult<Self> {
         let _ = copy; // pandas' copy= does not change the result
-        // astype('object') keeps the values (ints stay ints in an object
-        // index); a typed index here cannot hold that, so only a string index
-        // passes through, while astype(str) converts.
-        if dtype
+        // astype(object) keeps the values - ints stay ints in an object
+        // index, declared object (the type object made them strings, the
+        // name was refused; br-frankenpandas-i20vm) - while astype(str)
+        // converts.
+        let name = if dtype
             .extract::<String>()
             .is_ok_and(|name| name == "object" || name == "O")
         {
-            if self
+            "object".to_owned()
+        } else {
+            pandas_dtype_name(&py_dtype_arg(dtype)?)
+        };
+        // str / 'str' is pandas' object dtype of the labels' text.
+        let text = dtype.is(dtype.py().get_type::<pyo3::types::PyString>().as_any())
+            || dtype.extract::<String>().is_ok_and(|name| name == "str");
+        if name == "object" && !text {
+            let inner = self
                 .inner
-                .labels()
-                .iter()
-                .all(|label| matches!(label, IndexLabel::Utf8(_)))
-            {
-                return Ok(self.clone());
-            }
-            return Err(not_implemented(
-                "Index.astype('object') of non-string labels",
-            ));
+                .clone()
+                .with_range_span(None)
+                .with_declared_dtype(Some(fp_index::DeclaredDtype::Object));
+            return Ok(Self { inner });
         }
-        self.astype_name(&pandas_dtype_name(&py_dtype_arg(dtype)?))
+        self.astype_name(&name)
     }
 
     #[getter]
@@ -10589,12 +10636,15 @@ impl PyIndex {
         PyIndex { inner: renamed }.into_py_any(py)
     }
 
-    /// pandas' `infer_objects(copy=None)`: the labels already carry their
-    /// types (copy was unexpected - br-frankenpandas-n57tz).
+    /// pandas' `infer_objects(copy=None)`: the labels' own dtype - an object
+    /// index of ints is int64 again (i20vm); copy was unexpected
+    /// (br-frankenpandas-n57tz).
     #[pyo3(signature = (copy=None))]
     fn infer_objects(&self, copy: Option<bool>) -> Self {
         let _ = copy;
-        self.clone()
+        Self {
+            inner: self.inner.clone().with_declared_dtype(None),
+        }
     }
 
     /// pandas' `Index.factorize`: codes (a numpy array; it was a list) in
@@ -14794,11 +14844,18 @@ impl PyTimedeltaIndex {
     }
 
     /// A duration field as pandas answers it: an Index of ints under the
-    /// index's name, float64 with NaN when a NaT is present.
-    fn field_index(&self, values: Vec<Option<i64>>) -> PyIndex {
+    /// index's name - int64 days, numpy's int32 for the rest (they were
+    /// int64; br-frankenpandas-pqjzo) - float64 with NaN when a NaT is
+    /// present.
+    fn field_index(&self, values: Vec<Option<i64>>, int32: bool) -> PyIndex {
         let field = datetime_field_index(values);
+        let inner = if int32 {
+            field.inner
+        } else {
+            field.inner.with_declared_dtype(None)
+        };
         PyIndex {
-            inner: field.inner.rename_index(self.inner.name()),
+            inner: inner.rename_index(self.inner.name()),
         }
     }
 
@@ -14951,22 +15008,22 @@ impl PyTimedeltaIndex {
     /// last three is int64 here, as the DatetimeIndex fields).
     #[getter]
     pub fn days(&self) -> PyIndex {
-        self.field_index(self.inner.days())
+        self.field_index(self.inner.days(), false)
     }
 
     #[getter]
     pub fn seconds(&self) -> PyIndex {
-        self.field_index(self.inner.seconds())
+        self.field_index(self.inner.seconds(), true)
     }
 
     #[getter]
     pub fn microseconds(&self) -> PyIndex {
-        self.field_index(self.inner.microseconds())
+        self.field_index(self.inner.microseconds(), true)
     }
 
     #[getter]
     pub fn nanoseconds(&self) -> PyIndex {
-        self.field_index(self.inner.nanoseconds())
+        self.field_index(self.inner.nanoseconds(), true)
     }
 
     /// pandas' `TimedeltaIndex.total_seconds()`: a float64 Index under the
@@ -24008,6 +24065,16 @@ impl PySeries {
         let series = match index.and_then(index_arg_freq) {
             Some(freq) => {
                 let index = series.index().clone().with_freq(Some(freq));
+                Series::new(series.name(), index, series.column().clone())
+                    .map_err(frame_error_to_py)?
+            }
+            None => series,
+        };
+        // ... and its dtype where its labels read another (an object Index
+        // of ints stays object; br-frankenpandas-i20vm).
+        let series = match index.and_then(index_arg_declared) {
+            Some(declared) => {
+                let index = series.index().clone().with_declared_dtype(Some(declared));
                 Series::new(series.name(), index, series.column().clone())
                     .map_err(frame_error_to_py)?
             }
@@ -33541,6 +33608,14 @@ impl PyDataFrame {
         let built = match index.and_then(index_arg_freq) {
             Some(freq) => {
                 let index = built.index().clone().with_freq(Some(freq));
+                built.with_index(index).map_err(frame_error_to_py)?
+            }
+            None => built,
+        };
+        // ... and its dtype where its labels read another (i20vm).
+        let built = match index.and_then(index_arg_declared) {
+            Some(declared) => {
+                let index = built.index().clone().with_declared_dtype(Some(declared));
                 built.with_index(index).map_err(frame_error_to_py)?
             }
             None => built,

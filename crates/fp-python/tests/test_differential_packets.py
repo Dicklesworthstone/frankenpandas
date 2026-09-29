@@ -2452,10 +2452,15 @@ def test_index_astype_casts_like_pandas() -> None:
     assert (str(got.dtype), list(got)) == (str(expected.dtype), list(expected))
     got, expected = fpd.Index(["a", "b"]).astype("object"), pd.Index(["a", "b"]).astype("object")
     assert (str(got.dtype), list(got)) == (str(expected.dtype), list(expected))
-    # pandas keeps the ints in an object index; a typed index cannot, so it
-    # refuses rather than stringifying them.
-    with pytest.raises(NotImplementedError, match="object"):
-        fpd.Index([1, 2]).astype("object")
+    # TEST-CHANGE (br-frankenpandas-i20vm): pandas keeps the ints in an
+    # object index, and so does fp now (it refused, having no way to hold
+    # them); the refusal assertion became pandas' answer.
+    for spec in ("object", object, "O"):
+        got, expected = fpd.Index([1, 2]).astype(spec), pd.Index([1, 2]).astype(spec)
+        assert (str(got.dtype), [repr(v) for v in got]) == (
+            str(expected.dtype),
+            [repr(v) for v in expected],
+        ), spec
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
@@ -17933,4 +17938,78 @@ _WZ_CASES = {
 @pytest.mark.parametrize("case", list(_WZ_CASES))
 def test_empty_and_centred_time_windows_like_pandas_gv69z(case: str) -> None:
     run = _WZ_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-i20vm / dwyud / pqjzo: an Index's declared dtype - an
+# object Index holds its numbers (they became strings), an empty slice or
+# selection keeps its source's dtype (it read object), a DatetimeIndex field
+# and a TimedeltaIndex seconds / microseconds / nanoseconds are int32 (they
+# were int64).
+def _dx_shown(index: Any) -> list:
+    return [type(index).__name__, str(index.dtype), [repr(v) for v in index.tolist()], repr(index)]
+
+
+def _dx_dates(m: Any) -> Any:
+    return m.Series([1, 2], index=m.to_datetime(["2024-01-01", "2024-01-02"]))
+
+
+_DX_CASES = {
+    "object ints": lambda m: _dx_shown(m.Index([1, 2], dtype=object)),
+    "object ints by name": lambda m: _dx_shown(m.Index([1, 2], dtype="object")),
+    "object floats": lambda m: _dx_shown(m.Index([1.5, np.nan], dtype=object)),
+    "object mixed": lambda m: _dx_shown(m.Index([1.5, "a"], dtype=object)),
+    "object bools": lambda m: _dx_shown(m.Index([True, False], dtype=object)),
+    "object with None": lambda m: _dx_shown(m.Index([1, None], dtype=object)),
+    "astype object": lambda m: _dx_shown(m.Index([1, 2]).astype(object)),
+    "astype O": lambda m: _dx_shown(m.Index([1, 2]).astype("O")),
+    "astype str": lambda m: _dx_shown(m.Index([1, 2]).astype(str)),
+    "object infer_objects": lambda m: _dx_shown(m.Index([1, 2], dtype=object).infer_objects()),
+    "object get_loc": lambda m: [m.Index([1, 2], dtype=object).get_loc(2)],
+    "object equals 1": lambda m: list(m.Index([1, 2], dtype=object) == 1),
+    "object plus 1": lambda m: _dx_shown(m.Index([1, 2], dtype=object) + 1),
+    "object take": lambda m: _dx_shown(m.Index([1, 2, 3], dtype=object)[[0, 2]]),
+    "object slice": lambda m: _dx_shown(m.Index([1, 2, 3], dtype=object)[1:]),
+    "object isin": lambda m: list(m.Index([1, 2], dtype=object).isin([2])),
+    "object unique": lambda m: _dx_shown(m.Index([1, 1, 2], dtype=object).unique()),
+    "object sorted": lambda m: _dx_shown(m.Index([3, 1, 2], dtype=object).sort_values()),
+    "object equals an int64 index": lambda m: [m.Index([1, 2], dtype=object).equals(m.Index([1, 2]))],
+    "object Series index": lambda m: _dx_shown(m.Series([10, 20], index=m.Index([1, 2], dtype=object)).index),
+    "object Series loc": lambda m: [m.Series([10, 20], index=m.Index([1, 2], dtype=object)).loc[2]],
+    "object frame index": lambda m: _dx_shown(m.DataFrame({"a": [1, 2]}, index=m.Index([1, 2], dtype=object)).index),
+    "empty int slice": lambda m: _dx_shown(m.Series([1, 2], index=[10, 11]).iloc[:0].index),
+    "empty float slice": lambda m: _dx_shown(m.Series([1, 2], index=[1.5, 2.5]).iloc[:0].index),
+    "empty datetime slice": lambda m: _dx_shown(_dx_dates(m).iloc[:0].index),
+    "empty default slice": lambda m: _dx_shown(m.Series([1, 2]).iloc[:0].index),
+    "empty text slice": lambda m: _dx_shown(m.Series([1, 2], index=["a", "b"]).iloc[:0].index),
+    "empty mask": lambda m: _dx_shown(
+        m.Series([1, 2], index=[10, 11])[m.Series([False, False], index=[10, 11])].index
+    ),
+    "head 0": lambda m: _dx_shown(m.Series([1, 2], index=[10, 11]).head(0).index),
+    "empty frame rows": lambda m: _dx_shown(m.DataFrame({"a": [1, 2]}, index=[5, 6]).iloc[:0].index),
+    "empty index slice": lambda m: _dx_shown(m.Index([1, 2])[:0]),
+    "year": lambda m: _dx_shown(m.DatetimeIndex(["2024-01-05", "2025-03-01"]).year),
+    "month with NaT": lambda m: _dx_shown(m.DatetimeIndex(["2024-01-05", None]).month),
+    "dayofweek": lambda m: _dx_shown(m.DatetimeIndex(["2024-01-05"]).dayofweek),
+    "quarter": lambda m: _dx_shown(m.DatetimeIndex(["2024-05-05"]).quarter),
+    "days_in_month": lambda m: _dx_shown(m.DatetimeIndex(["2024-02-05"]).days_in_month),
+    "timedelta days": lambda m: _dx_shown(m.to_timedelta(["1 day 3s", "2h"]).days),
+    "timedelta seconds": lambda m: _dx_shown(m.to_timedelta(["1 day 3s", "2h"]).seconds),
+    "timedelta microseconds": lambda m: _dx_shown(m.to_timedelta(["1 day 3s", "2h"]).microseconds),
+    "timedelta nanoseconds": lambda m: _dx_shown(m.to_timedelta(["1 day 3s", "2h"]).nanoseconds),
+    "timedelta seconds with NaT": lambda m: _dx_shown(m.to_timedelta(["1 day 3s", None]).seconds),
+    "year plus one": lambda m: _dx_shown(m.DatetimeIndex(["2024-01-05"]).year + 1),
+    "year halved": lambda m: _dx_shown(m.DatetimeIndex(["2024-01-05"]).year / 2),
+    # Negatives: an index's own dtype.
+    "empty Index": lambda m: _dx_shown(m.Index([])),
+    "int64 Index": lambda m: _dx_shown(m.Index([1, 2])),
+    "text object Index": lambda m: _dx_shown(m.Index(["a", "b"], dtype=object)),
+    "non-empty int slice": lambda m: _dx_shown(m.Series([1, 2], index=[10, 11]).iloc[1:].index),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_DX_CASES))
+def test_index_declared_dtypes_like_pandas_i20vm(case: str) -> None:
+    run = _DX_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

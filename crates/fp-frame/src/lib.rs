@@ -12812,7 +12812,9 @@ impl Series {
                         keep_count,
                     )
                 };
-            let index = Index::from_i64_values(labels).rename_index(self.index.name());
+            let index = Index::from_i64_values(labels)
+                .with_dtype_of(&self.index)
+                .rename_index(self.index.name());
             return Some(Self::new(
                 self.name.clone(),
                 index,
@@ -12836,7 +12838,9 @@ impl Series {
                         keep_count,
                     )
                 };
-            let index = Index::from_i64_values(labels).rename_index(self.index.name());
+            let index = Index::from_i64_values(labels)
+                .with_dtype_of(&self.index)
+                .rename_index(self.index.name());
             return Some(Self::new(
                 self.name.clone(),
                 index,
@@ -71514,6 +71518,10 @@ impl DataFrame {
             // Rows of a tz-aware index keep its zone.
             Index::new(labels).with_tz(self.index.tz())?
         };
+        // ... and its dtype where the labels read another (no row keeps an
+        // int64 index int64, an object index stays one;
+        // br-frankenpandas-dwyud / i20vm).
+        let out_index = out_index.with_dtype_of(&self.index);
 
         let row_multiindex = self
             .row_multiindex
@@ -71642,6 +71650,8 @@ impl DataFrame {
             // Rows of a tz-aware index keep its zone.
             Index::new(labels).with_tz(self.index.tz())?
         };
+        // ... and its dtype where the labels read another (dwyud / i20vm).
+        let out_index = out_index.with_dtype_of(&self.index);
 
         let row_multiindex = if let Some(multiindex) = &self.row_multiindex {
             let mut positions = Vec::with_capacity(n);
@@ -71772,6 +71782,10 @@ impl DataFrame {
             // Rows of a tz-aware index keep its zone.
             Index::new(labels).with_tz(self.index.tz())?
         };
+        // ... and its dtype where the labels read another (no row keeps an
+        // int64 index int64, an object index stays one;
+        // br-frankenpandas-dwyud / i20vm).
+        let out_index = out_index.with_dtype_of(&self.index);
 
         let row_multiindex = self
             .row_multiindex
@@ -71936,7 +71950,9 @@ impl DataFrame {
         let columns = ColumnStore::from_pairs(pairs);
 
         Some(Ok(Self {
-            index: out_index.rename_index(self.index.name()),
+            index: out_index
+                .with_dtype_of(&self.index)
+                .rename_index(self.index.name()),
             row_multiindex: None,
             columns: columns.into(),
             column_order: order.into(),
@@ -86792,14 +86808,16 @@ impl DataFrame {
     /// axis name).
     pub fn with_index(&self, index: Index) -> Result<Self, FrameError> {
         let mut out = self.set_axis(index.labels().to_vec(), 0)?;
-        // The given index's name, time zone, freq and RangeIndex origin
-        // ride along (they were dropped with the labels).
+        // The given index's name, time zone, freq, RangeIndex origin and
+        // declared dtype ride along (they were dropped with the labels;
+        // br-frankenpandas-i20vm).
         out.index = out
             .index
             .rename_index(index.name())
             .with_tz(index.tz())?
             .with_freq(index.freq().map(str::to_owned))
-            .with_range_span(index.range_span());
+            .with_range_span(index.range_span())
+            .with_declared_dtype(index.declared_dtype());
         Ok(out)
     }
 

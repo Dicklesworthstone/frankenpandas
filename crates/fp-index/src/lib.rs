@@ -1944,6 +1944,62 @@ pub struct Index {
     /// as pandas turns those into an Index. Equality ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     range: Option<(i64, i64, i64)>,
+    /// pandas' dtype where the labels alone would read another (see
+    /// [`DeclaredDtype`]): object over numbers, an empty index's source
+    /// dtype, numpy's int32. Only [`Self::with_declared_dtype`] sets it;
+    /// [`Self::propagate_name`] carries it to an index built from these
+    /// labels. Equality ignores it, as pandas' `equals` does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    declared: Option<DeclaredDtype>,
+}
+
+/// A dtype an [`Index`] is declared with where its labels alone read
+/// another: pandas' `Index([1, 2], dtype=object)` holds the ints 1 and 2
+/// under the object dtype (they became the strings '1' and '2';
+/// br-frankenpandas-i20vm); an empty index keeps the dtype it was taken
+/// from (`iloc[:0]` of an int64 index is int64, it read as object; dwyud);
+/// a DatetimeIndex field (`.year`) is numpy's int32 (it was int64; pqjzo).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeclaredDtype {
+    Object,
+    Int64,
+    Int32,
+    Float64,
+    Bool,
+    Datetime64,
+    Timedelta64,
+}
+
+impl DeclaredDtype {
+    /// pandas' name of the dtype.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Object => "object",
+            Self::Int64 => "int64",
+            Self::Int32 => "int32",
+            Self::Float64 => "float64",
+            Self::Bool => "bool",
+            Self::Datetime64 => "datetime64[ns]",
+            Self::Timedelta64 => "timedelta64[ns]",
+        }
+    }
+
+    /// The declared dtype pandas' name reads as, None for another.
+    #[must_use]
+    pub fn of_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "object" => Self::Object,
+            "int64" => Self::Int64,
+            "int32" => Self::Int32,
+            "float64" => Self::Float64,
+            "bool" => Self::Bool,
+            "datetime64[ns]" => Self::Datetime64,
+            "timedelta64[ns]" => Self::Timedelta64,
+            _ => return None,
+        })
+    }
 }
 
 /// The derived layout, with the row `MultiIndex` levels listed only when an
@@ -1971,6 +2027,9 @@ impl fmt::Debug for Index {
         }
         if let Some(range) = &self.range {
             out.field("range", range);
+        }
+        if let Some(declared) = &self.declared {
+            out.field("declared", declared);
         }
         out.finish()
     }
@@ -2116,6 +2175,7 @@ impl Index {
             tz: None,
             freq: None,
             range: None,
+            declared: None,
         }
     }
 
@@ -2176,6 +2236,7 @@ impl Index {
             tz: None,
             freq: None,
             range: None,
+            declared: None,
         };
         let _ = index.duplicate_cache.set(false);
         let _ = index.sort_order_cache.set(SortOrder::AscendingInt64);
@@ -2209,6 +2270,7 @@ impl Index {
             tz: None,
             freq: None,
             range: None,
+            declared: None,
         };
         let _ = index.duplicate_cache.set(false);
         if len <= 1 || step > 0 {
@@ -2233,6 +2295,7 @@ impl Index {
             tz: None,
             freq: None,
             range: None,
+            declared: None,
         })
     }
 
@@ -2268,6 +2331,7 @@ impl Index {
             tz: None,
             freq: None,
             range: None,
+            declared: None,
         }
     }
 
@@ -2293,6 +2357,7 @@ impl Index {
             tz: None,
             freq: None,
             range: None,
+            declared: None,
         })
     }
 
@@ -2315,6 +2380,7 @@ impl Index {
             tz: None,
             freq: None,
             range: None,
+            declared: None,
         }
     }
 
@@ -2359,6 +2425,7 @@ impl Index {
             tz: None,
             freq: None,
             range: None,
+            declared: None,
         };
         let _ = index.duplicate_cache.set(false);
         if len <= 1 || step > 0 {
@@ -2484,7 +2551,42 @@ impl Index {
         if self.tz.is_some() && other.holds_only_datetimes() {
             other.tz.clone_from(&self.tz);
         }
-        other
+        other.with_dtype_of(self)
+    }
+
+    /// These labels - selected, sliced or computed from `source`'s - under
+    /// the dtype pandas gives them: `source`'s declared object dtype (it
+    /// holds any labels), its int32 while they are ints, and for no label
+    /// at all `source`'s dtype, as pandas' empty slice or selection keeps it
+    /// (br-frankenpandas-i20vm / pqjzo / dwyud). A dtype these labels are
+    /// already declared with stays.
+    #[must_use]
+    pub fn with_dtype_of(mut self, source: &Self) -> Self {
+        if self.declared.is_none() {
+            self.declared = match source.declared {
+                Some(DeclaredDtype::Object) => Some(DeclaredDtype::Object),
+                Some(DeclaredDtype::Int32) if self.is_integer() => Some(DeclaredDtype::Int32),
+                declared if self.is_empty() => {
+                    declared.or_else(|| DeclaredDtype::of_name(source.dtype()))
+                }
+                _ => None,
+            };
+        }
+        self
+    }
+
+    /// These labels under `declared` (see [`DeclaredDtype`]); None their
+    /// own dtype.
+    #[must_use]
+    pub fn with_declared_dtype(mut self, declared: Option<DeclaredDtype>) -> Self {
+        self.declared = declared;
+        self
+    }
+
+    /// The dtype these labels are declared with, if any.
+    #[must_use]
+    pub fn declared_dtype(&self) -> Option<DeclaredDtype> {
+        self.declared
     }
 
     /// Whether every label is a datetime (NaT included) - what a time zone
@@ -4619,6 +4721,7 @@ impl Index {
             tz: None,
             freq: None,
             range: None,
+            declared: None,
         });
         sliced.freq.clone_from(&self.freq);
         // A slice of a RangeIndex is one (pandas).
@@ -6060,6 +6163,9 @@ impl Index {
     /// Pandas dtype string for this flat index.
     #[must_use]
     pub fn dtype(&self) -> &'static str {
+        if let Some(declared) = self.declared {
+            return declared.name();
+        }
         match self.inferred_type() {
             "integer" => "int64",
             "floating" => "float64",
@@ -22268,6 +22374,33 @@ mod tests {
     fn date_offset_month_end_handles_leap_year() {
         let nanos = apply_date_offset("2024-02-10", DateOffset::MonthEnd(1)).unwrap();
         assert_eq!(nanos, 1_709_164_800_000_000_000);
+    }
+
+    #[test]
+    fn declared_dtype_holds_and_carries_as_pandas_i20vm() {
+        use crate::DeclaredDtype;
+        let ints = || Index::new(vec![IndexLabel::Int64(1), IndexLabel::Int64(2)]);
+        // An object index of ints: its dtype object, its labels ints.
+        let object = ints().with_declared_dtype(Some(DeclaredDtype::Object));
+        assert_eq!(object.dtype(), "object");
+        assert_eq!(object.labels()[0], IndexLabel::Int64(1));
+        assert_eq!(object.take(&[1]).dtype(), "object");
+        assert_eq!(object.slice(0, 1).dtype(), "object");
+        // Equality ignores it, as pandas' equals.
+        assert_eq!(object, ints());
+        // No row keeps the source's dtype (dwyud).
+        assert_eq!(ints().take(&[]).dtype(), "int64");
+        assert_eq!(ints().slice(0, 0).dtype(), "int64");
+        let floats = Index::new(vec![IndexLabel::Float64(OrderedF64(1.5))]);
+        assert_eq!(floats.slice(0, 0).dtype(), "float64");
+        // int32 while the labels are ints (pqjzo).
+        let int32 = ints().with_declared_dtype(Some(DeclaredDtype::Int32));
+        assert_eq!(int32.take(&[0]).dtype(), "int32");
+        let halves = Index::new(vec![IndexLabel::Float64(OrderedF64(0.5))]);
+        assert_eq!(halves.with_dtype_of(&int32).dtype(), "float64");
+        // NEGATIVE: labels of their own read their own dtype.
+        assert_eq!(ints().take(&[0]).dtype(), "int64");
+        assert_eq!(object.with_declared_dtype(None).dtype(), "int64");
     }
 
     #[test]
