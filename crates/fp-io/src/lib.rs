@@ -671,6 +671,14 @@ fn build_csv_object_aware_column(
     raw_offsets: &[usize],
 ) -> Result<Column, IoError> {
     let column = Column::from_values(values)?;
+    // A column read as nothing but missing values is float64 NaN in pandas'
+    // parser (it was object); a header-only column (no rows) stays object.
+    if column.dtype() == DType::Null && !column.is_empty() {
+        return Ok(Column::new(
+            DType::Float64,
+            vec![Scalar::Null(NullKind::NaN); column.len()],
+        )?);
+    }
     if column.dtype() == DType::Float64 {
         let normalized = column
             .values()

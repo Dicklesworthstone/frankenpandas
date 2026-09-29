@@ -14616,3 +14616,201 @@ _Y4_CASES = {
 def test_pct_change_dot_combine_first_like_pandas(case: str) -> None:
     run = _Y4_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.12 / .17: numpy's
+# integer dtypes for bool arithmetic - bool ** 2 int8 (numpy squares), ** any
+# other non-negative integer int64, ** a negative one numpy's ValueError,
+# int ** bool int64, bool % bool int8; the nullable boolean Int8 / Int64 (they
+# were all float64 or int64).
+def _bn_shown(result: Any) -> list:
+    if hasattr(result, "columns"):
+        return [[str(t) for t in result.dtypes], result.to_numpy().tolist()]
+    return [str(result.dtype), result.tolist()]
+
+
+def _bn_s(m: Any) -> Any:
+    return m.Series([True, False, True])
+
+
+def _bn_df(m: Any) -> Any:
+    return m.DataFrame({"b": [True, False], "c": [False, False]})
+
+
+def _bn_mixed(m: Any) -> Any:
+    return m.DataFrame({"b": [True, False], "x": [1.5, 2.0], "i": [3, 4]})
+
+
+_BOOL_NUMPY_CASES = {
+    "bool ** 2": lambda m: _bn_shown(_bn_s(m) ** 2),
+    "bool ** 3": lambda m: _bn_shown(_bn_s(m) ** 3),
+    "bool ** 0": lambda m: _bn_shown(_bn_s(m) ** 0),
+    "bool ** numpy int8 3": lambda m: _bn_shown(_bn_s(m) ** np.int8(3)),
+    "bool ** numpy uint8 2": lambda m: _bn_shown(_bn_s(m) ** np.uint8(2)),
+    "bool ** -1 raises": lambda m: _bn_shown(_bn_s(m) ** -1),
+    "bool.pow(2)": lambda m: _bn_shown(_bn_s(m).pow(2)),
+    "int ** bool": lambda m: _bn_shown(2 ** _bn_s(m)),
+    "bool.rpow(3)": lambda m: _bn_shown(_bn_s(m).rpow(3)),
+    "sum of bool ** 2": lambda m: _bn_shown((_bn_s(m) ** 2).sum()),
+    "frame ** 2": lambda m: _bn_shown(_bn_df(m) ** 2),
+    "frame ** 0": lambda m: _bn_shown(_bn_df(m) ** 0),
+    "frame ** -1 raises": lambda m: _bn_shown(_bn_df(m) ** -1),
+    "mixed frame ** 2": lambda m: _bn_shown(_bn_mixed(m) ** 2),
+    "int ** mixed frame": lambda m: _bn_shown(2 ** _bn_mixed(m)),
+    "bool % bool": lambda m: _bn_shown(_bn_s(m) % m.Series([True, True, False])),
+    "bool % True": lambda m: _bn_shown(_bn_s(m) % True),
+    "True % bool": lambda m: _bn_shown(True % _bn_s(m)),
+    "frame % frame": lambda m: _bn_shown(_bn_df(m) % _bn_df(m)),
+    "mixed frame % True": lambda m: _bn_shown(_bn_mixed(m) % True),
+    "nullable % nullable": lambda m: _bn_shown(
+        m.Series([True, None, False], dtype="boolean") % m.Series([True, None, False], dtype="boolean")
+    ),
+    "nullable ** 2": lambda m: _bn_shown(m.Series([True, None, False], dtype="boolean") ** 2),
+    # NEGATIVES: a float exponent is float64, a bool exponent stays numpy's
+    # bool power, and bool % an int stays int64.
+    "bool ** 2.0": lambda m: _bn_shown(_bn_s(m) ** 2.0),
+    "bool ** True": lambda m: _bn_shown(_bn_s(m) ** True),
+    "bool % 2": lambda m: _bn_shown(_bn_s(m) % 2),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_BOOL_NUMPY_CASES))
+def test_bool_arithmetic_numpy_dtypes_like_pandas(case: str) -> None:
+    run = _BOOL_NUMPY_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-0lp6q (everyday probe 27): a resampler's attribute is its
+# column, as resample(rule)['col']; Categorical.sort_values orders by the
+# categories.
+def _e27_sales(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "units": [3, 5, 2, 7],
+            "price": [9.5, 3.25, 3.25, 9.5],
+            "day": m.to_datetime(["2024-01-02", "2024-01-05", "2024-02-11", "2024-03-01"]),
+        }
+    ).set_index("day")
+
+
+_EVERYDAY27_CASES = {
+    "resample attribute sum": lambda m: _rk_shown(_e27_sales(m).resample("MS").units.sum()),
+    "resample attribute mean": lambda m: _rk_shown(_e27_sales(m).resample("MS").price.mean()),
+    "categorical sort by categories": lambda m: [
+        list(m.Categorical(["b", "a", "c"], categories=["c", "b", "a"], ordered=True).sort_values())
+    ],
+    "categorical sort missing last": lambda m: [
+        list(m.Categorical(["b", None, "a", "b"], categories=["b", "a"]).sort_values())
+    ],
+    "categorical sort descending missing first": lambda m: [
+        list(m.Categorical(["b", None, "a"]).sort_values(ascending=False, na_position="first"))
+    ],
+    "categorical sort inplace": lambda m: (
+        lambda c: [c.sort_values(inplace=True), list(c)]
+    )(m.Categorical([3, 1, 2])),
+    # NEGATIVES: a name that is no column, and an unknown na_position.
+    "resample missing attribute raises": lambda m: [_e27_sales(m).resample("MS").nope],
+    "categorical sort bad na_position raises": lambda m: [
+        m.Categorical([1]).sort_values(na_position="middle")
+    ],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EVERYDAY27_CASES))
+def test_everyday27_like_pandas(case: str) -> None:
+    run = _EVERYDAY27_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-04y4h: read_csv makes a column of nothing but missing
+# values float64 NaN (it was object).
+def _csv_shown(m: Any, text: str, **kwargs: Any) -> list:
+    frame = m.read_csv(io.StringIO(text), **kwargs)
+    return [[str(t) for t in frame.dtypes], frame.to_numpy().tolist()]
+
+
+_CSV_MISSING_CASES = {
+    "all empty": lambda m: _csv_shown(m, "a,b\n,1\n,2\n"),
+    "all NA text": lambda m: _csv_shown(m, "a,b\nNA,1\nnan,2\n"),
+    "one row empty": lambda m: _csv_shown(m, "a,b\n,1\n"),
+    "nrows cuts to empty": lambda m: _csv_shown(m, "a,b\n,1\n5,2\n", nrows=1),
+    "skiprows leaves empty": lambda m: _csv_shown(m, "a,b\n3,1\n,2\n", skiprows=[1]),
+    # NEGATIVES: a header-only column and an empty cell read as str stay
+    # object.
+    "header only stays object": lambda m: _csv_shown(m, "a,b\n"),
+    "dtype str stays object": lambda m: _csv_shown(m, "a,b\n,1\n", dtype={"a": str}),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_CSV_MISSING_CASES))
+def test_read_csv_all_missing_column_like_pandas(case: str) -> None:
+    run = _CSV_MISSING_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-s3h1j: idxmin / idxmax along the rows over MultiIndex
+# columns answer each row's column tuple (the leaf name was answered).
+def _mi_idx_frame(m: Any) -> Any:
+    x = m.DataFrame({"s": [1.5, 4.0, 2.0], "e": [3.0, np.nan, 1.0]})
+    return m.concat([x, (x * -2).iloc[::-1].reset_index(drop=True)], axis=1, keys=["p", "q"])
+
+
+def _mi_idx_shown(result: Any) -> list:
+    return [str(result.dtype), result.to_string(), result.tolist()]
+
+
+_MI_IDX_CASES = {
+    "idxmin": lambda m: _mi_idx_shown(_mi_idx_frame(m).idxmin(axis=1)),
+    "idxmax": lambda m: _mi_idx_shown(_mi_idx_frame(m).idxmax(axis=1)),
+    "idxmax skipna False": lambda m: _mi_idx_shown(_mi_idx_frame(m).idxmax(axis=1, skipna=False)),
+    "int levels": lambda m: _mi_idx_shown(
+        (lambda x: m.concat([x, x + 10], axis=1, keys=[1, 2]))(m.DataFrame({"s": [1.0, 5.0]})).idxmax(
+            axis=1
+        )
+    ),
+    # NEGATIVES: flat columns answer their labels; along the columns the
+    # answers are row labels.
+    "flat idxmax": lambda m: _mi_idx_shown(m.DataFrame({"s": [1.0, 5.0], "e": [3.0, 2.0]}).idxmax(axis=1)),
+    "idxmax along the columns": lambda m: _mi_idx_shown(_mi_idx_frame(m).idxmax()),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_MI_IDX_CASES))
+def test_multiindex_idx_extremes_like_pandas(case: str) -> None:
+    run = _MI_IDX_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-pl9im: pandas 2.2 warns FutureWarning when an idxmax /
+# idxmin answer is NA (all-NA values, or any NA with skipna=False).
+def _pl_frame(m: Any) -> Any:
+    return m.DataFrame({"s": [1.0, np.nan], "e": [3.0, 2.0]})
+
+
+_IDX_NA_WARN_CASES = {
+    "frame along the rows skipna False": lambda m: [
+        _pl_frame(m).idxmax(axis=1, skipna=False).tolist()
+    ],
+    "frame an all-NA row": lambda m: [
+        m.DataFrame({"s": [np.nan, 1.0], "e": [np.nan, 2.0]}).idxmax(axis=1).tolist()
+    ],
+    "frame an all-NA column": lambda m: [
+        m.DataFrame({"s": [np.nan, np.nan], "e": [3.0, 2.0]}).idxmin().tolist()
+    ],
+    "series skipna False": lambda m: [_pl_frame(m).s.idxmax(skipna=False)],
+    "series all NA": lambda m: [m.Series([np.nan, np.nan]).idxmin()],
+    # NEGATIVE: an answer without NA is silent.
+    "series without NA": lambda m: [_pl_frame(m).e.idxmax()],
+    "frame without NA": lambda m: [_pl_frame(m).idxmax().tolist()],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_IDX_NA_WARN_CASES))
+def test_idx_extreme_na_warns_like_pandas(case: str) -> None:
+    run = _IDX_NA_WARN_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

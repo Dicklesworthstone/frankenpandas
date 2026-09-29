@@ -17821,6 +17821,156 @@ fn arith_result_numpy(
     Ok(that.map(|that| this.result_type(that)))
 }
 
+/// numpy's integer dtype for bool arithmetic the engine computes in floats
+/// (live pandas 2.2.3; 4qg5w.12, 4qg5w.17): bool ** 2 is int8 (numpy
+/// squares), bool ** another non-negative integer int64, int ** bool
+/// int64, bool % bool int8; the nullable boolean gives the masked Int8 /
+/// Int64 of the same.
+#[derive(Clone, Copy)]
+enum BoolNumpy {
+    Int8,
+    Int64,
+}
+
+impl BoolNumpy {
+    /// `bool ** exponent`: numpy's `square` for 2, its integer power for
+    /// the other non-negative exponents, its ValueError for a negative one.
+    fn power(exponent: i64) -> PyResult<Self> {
+        match exponent {
+            ..0 => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Integers to negative integer powers are not allowed.",
+            )),
+            2 => Ok(Self::Int8),
+            _ => Ok(Self::Int64),
+        }
+    }
+
+    fn cast(self, column: &Column) -> PyResult<Column> {
+        let nullable = column.dtype().is_nullable();
+        match self {
+            Self::Int8 => column.cast_to_width(NumericWidth::Int8, nullable),
+            Self::Int64 => column.astype(if nullable {
+                DType::Int64Nullable
+            } else {
+                DType::Int64
+            }),
+        }
+        .map_err(column_error_to_py)
+    }
+}
+
+/// The integer a Python or numpy integer scalar holds (not a bool, which
+/// numpy keeps boolean).
+fn integer_scalar(value: &Bound<'_, PyAny>) -> Option<i64> {
+    if value.is_instance_of::<pyo3::types::PyBool>() {
+        return None;
+    }
+    if value.is_instance_of::<pyo3::types::PyInt>() {
+        return value.extract().ok();
+    }
+    let numpy_integer = value.get_type().name().is_ok_and(|name| {
+        let name = name.to_string();
+        name.starts_with("int") || name.starts_with("uint")
+    });
+    if numpy_integer {
+        value.extract().ok()
+    } else {
+        None
+    }
+}
+
+/// Whether `value` is a boolean scalar or a boolean Series (numpy's
+/// bool % bool is int8).
+fn boolean_operand(value: &Bound<'_, PyAny>) -> bool {
+    if value.is_instance_of::<pyo3::types::PyBool>()
+        || value.get_type().name().is_ok_and(|name| name == "bool")
+    {
+        return true;
+    }
+    value
+        .extract::<PyRef<'_, PySeries>>()
+        .is_ok_and(|series| matches!(series.inner.dtype(), DType::Bool | DType::BoolNullable))
+}
+
+/// Whether `series` is a bool or nullable boolean Series.
+fn boolean_series(series: &Series) -> bool {
+    matches!(series.dtype(), DType::Bool | DType::BoolNullable)
+}
+
+/// bool % bool is numpy's int8 (see [`BoolNumpy`]).
+fn bool_remainder(series: &Series, other: &Bound<'_, PyAny>) -> Option<BoolNumpy> {
+    (boolean_series(series) && boolean_operand(other)).then_some(BoolNumpy::Int8)
+}
+
+/// pandas 2.2's FutureWarning when an idxmax / idxmin answer is NA (an
+/// all-NA column or row, or any NA with skipna=False): pandas 3 raises
+/// ValueError there.
+fn warn_idx_extreme_na(py: Python<'_>, owner: &str, op: &str) -> PyResult<()> {
+    let message = std::ffi::CString::new(format!(
+        "The behavior of {owner}.{op} with all-NA values, or any-NA and skipna=False, is \
+         deprecated. In a future version this will raise ValueError"
+    ))
+    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    PyErr::warn(
+        py,
+        &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+        &message,
+        1,
+    )
+}
+
+/// A DataFrame idxmax / idxmin `result`, warning as pandas when an answer is
+/// NA (see [`warn_idx_extreme_na`]).
+fn warned_idx_extremes(result: PySeries, op: &str) -> PyResult<PySeries> {
+    if result
+        .inner
+        .column()
+        .values()
+        .iter()
+        .any(Scalar::is_missing)
+    {
+        Python::attach(|py| warn_idx_extreme_na(py, "DataFrame", op))?;
+    }
+    Ok(result)
+}
+
+/// A frame result with the columns `which` picks in `target`'s dtype (see
+/// [`BoolNumpy`]).
+fn bool_numpy_columns(
+    result: PyDataFrame,
+    target: Option<BoolNumpy>,
+    which: impl Fn(usize) -> bool,
+) -> PyResult<PyDataFrame> {
+    let Some(target) = target else {
+        return Ok(result);
+    };
+    let mut inner = result.inner;
+    for position in 0..inner.num_columns() {
+        if !which(position) {
+            continue;
+        }
+        let Some(column) = inner.column_at(position) else {
+            continue;
+        };
+        let column = target.cast(column)?;
+        inner = inner
+            .isetitem(position, column)
+            .map_err(frame_error_to_py)?;
+    }
+    Ok(PyDataFrame { inner })
+}
+
+/// A Series result in `target`'s dtype (see [`BoolNumpy`]).
+fn bool_numpy_series(result: PySeries, target: Option<BoolNumpy>) -> PyResult<PySeries> {
+    let Some(target) = target else {
+        return Ok(result);
+    };
+    let column = target.cast(result.inner.column())?;
+    Series::new(result.inner.name(), result.inner.index().clone(), column)
+        .map(|inner| PySeries { inner })
+        .map_err(frame_error_to_py)
+}
+
 /// An arithmetic result in numpy's dtype for it (fvsao.23): the width of
 /// [`arith_result_numpy`] - true division of integers float64 - with the
 /// values wrapped into an integer width (int8 100 + 100 is -56, uint8
@@ -22572,11 +22722,13 @@ impl PySeries {
     }
     fn __mod__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let rhs = series_operand(py, other, &self.inner)?;
-        narrowed_arith(self.inner.remainder(&rhs), &self.inner, other, false)
+        let result = narrowed_arith(self.inner.remainder(&rhs), &self.inner, other, false)?;
+        bool_numpy_series(result, bool_remainder(&self.inner, other))
     }
     fn __rmod__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let lhs = series_operand(py, other, &self.inner)?;
-        narrowed_arith(lhs.remainder(&self.inner), &self.inner, other, false)
+        let result = narrowed_arith(lhs.remainder(&self.inner), &self.inner, other, false)?;
+        bool_numpy_series(result, bool_remainder(&self.inner, other))
     }
     /// `divmod(s, other)`: `(s // other, s % other)`, as pandas (it was a
     /// TypeError; buwrx).
@@ -22600,8 +22752,13 @@ impl PySeries {
         other: &Bound<'_, PyAny>,
         _modulo: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
+        let target = match integer_scalar(other).filter(|_| boolean_series(&self.inner)) {
+            Some(exponent) => Some(BoolNumpy::power(exponent)?),
+            None => None,
+        };
         let rhs = series_operand(py, other, &self.inner)?;
-        narrowed_arith(self.inner.power(&rhs), &self.inner, other, false)
+        let result = narrowed_arith(self.inner.power(&rhs), &self.inner, other, false)?;
+        bool_numpy_series(result, target)
     }
     fn __rpow__(
         &self,
@@ -22609,8 +22766,12 @@ impl PySeries {
         other: &Bound<'_, PyAny>,
         _modulo: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
+        let target = integer_scalar(other)
+            .filter(|_| boolean_series(&self.inner))
+            .map(|_| BoolNumpy::Int64);
         let lhs = series_operand(py, other, &self.inner)?;
-        narrowed_arith(lhs.power(&self.inner), &self.inner, other, false)
+        let result = narrowed_arith(lhs.power(&self.inner), &self.inner, other, false)?;
+        bool_numpy_series(result, target)
     }
     /// `-s`; pandas negates a bool Series as logical NOT (it raised).
     fn __neg__(&self) -> PyResult<PySeries> {
@@ -24646,7 +24807,10 @@ impl PySeries {
         };
         match found {
             Some(label) => index_scalar_to_py(py, self.inner.index(), &label),
-            None => Ok(pyo3::types::PyFloat::new(py, f64::NAN).into_any().unbind()),
+            None => {
+                warn_idx_extreme_na(py, "Series", "idxmax")?;
+                Ok(pyo3::types::PyFloat::new(py, f64::NAN).into_any().unbind())
+            }
         }
     }
 
@@ -24671,7 +24835,10 @@ impl PySeries {
         };
         match found {
             Some(label) => index_scalar_to_py(py, self.inner.index(), &label),
-            None => Ok(pyo3::types::PyFloat::new(py, f64::NAN).into_any().unbind()),
+            None => {
+                warn_idx_extreme_na(py, "Series", "idxmin")?;
+                Ok(pyo3::types::PyFloat::new(py, f64::NAN).into_any().unbind())
+            }
         }
     }
 
@@ -28913,7 +29080,18 @@ impl PyDataFrame {
             } else {
                 (&self.inner, &frame.inner)
             };
-            return wrap_frame(frame_arith(left, right, op));
+            let result = wrap_frame(frame_arith(left, right, op))?;
+            // bool % bool columns are numpy's int8 (see [`BoolNumpy`]).
+            if op == ArithmeticOp::Mod && self.inner.column_names() == frame.inner.column_names() {
+                let both = |position: usize| {
+                    [&self.inner, &frame.inner].iter().all(|side| {
+                        side.column_at(position)
+                            .is_some_and(|c| matches!(c.dtype(), DType::Bool | DType::BoolNullable))
+                    })
+                };
+                return bool_numpy_columns(result, Some(BoolNumpy::Int8), both);
+            }
+            return Ok(result);
         }
         if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
             return wrap_frame(self.inner.arith_series(&series.inner, op, 1, reflected));
@@ -28933,7 +29111,25 @@ impl PyDataFrame {
             None => {}
         }
         if let Some(scalar) = number_scalar(&unwrap_0d(other)?) {
-            return wrap_frame(self.inner.arith_scalar(&scalar, op, reflected));
+            // The bool columns in numpy's dtype (see [`BoolNumpy`]).
+            let boolean = |position: usize| {
+                self.inner
+                    .column_at(position)
+                    .is_some_and(|c| matches!(c.dtype(), DType::Bool | DType::BoolNullable))
+            };
+            let any_boolean = (0..self.inner.num_columns()).any(boolean);
+            let target = match (op, integer_scalar(other)) {
+                (ArithmeticOp::Pow, Some(exponent)) if any_boolean && !reflected => {
+                    Some(BoolNumpy::power(exponent)?)
+                }
+                (ArithmeticOp::Pow, Some(_)) if any_boolean => Some(BoolNumpy::Int64),
+                (ArithmeticOp::Mod, _) if any_boolean && boolean_operand(other) => {
+                    Some(BoolNumpy::Int8)
+                }
+                _ => None,
+            };
+            let result = wrap_frame(self.inner.arith_scalar(&scalar, op, reflected))?;
+            return bool_numpy_columns(result, target, boolean);
         }
         // A string, Timestamp, Timedelta or datetime scalar broadcasts as
         // pandas' Series arithmetic does (df + '!', df + Timedelta; they
@@ -29256,6 +29452,75 @@ impl PyDataFrame {
         )
         .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: series })
+    }
+
+    /// `idxmax` / `idxmin` along the rows over MultiIndex columns: each
+    /// row's column tuple (('q', 's')), as pandas' - the flat leaf name was
+    /// answered, which says nothing when a leaf name repeats across the
+    /// upper levels (s3h1j). The core finds each row's column POSITION on
+    /// the columns keyed by position; the tuples come from the levels.
+    fn tuple_idx_extreme(
+        &self,
+        levels: &fp_index::MultiIndex,
+        is_max: bool,
+        skipna: bool,
+        numeric_only: bool,
+    ) -> PyResult<PySeries> {
+        let keys: Vec<String> = (0..self.inner.num_columns())
+            .map(|position| position.to_string())
+            .collect();
+        let columns = (0..self.inner.num_columns())
+            .filter_map(|position| self.inner.column_at(position).cloned());
+        let mut keyed = DataFrame::new_with_column_order(
+            self.inner.index().clone(),
+            fp_frame::ColumnStore::from_pairs(keys.iter().cloned().zip(columns)),
+            keys,
+        )
+        .map_err(frame_error_to_py)?;
+        if let Some(rows) = self.inner.row_multiindex() {
+            keyed = keyed
+                .with_row_multiindex(rows.clone())
+                .map_err(frame_error_to_py)?;
+        }
+        let found = if is_max {
+            keyed.idxmax_ext(1, skipna, numeric_only)
+        } else {
+            keyed.idxmin_ext(1, skipna, numeric_only)
+        }
+        .map_err(frame_error_to_py)?;
+        Python::attach(|py| {
+            let cells = found
+                .values()
+                .iter()
+                .map(|value| {
+                    let Scalar::Utf8(key) = value else {
+                        return Ok(value.clone());
+                    };
+                    let position: usize = key.parse().map_err(|_| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "no column at position {key}"
+                        ))
+                    })?;
+                    let labels = levels
+                        .get_tuple(position)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|label| index_label_to_py(py, label))
+                        .collect::<PyResult<Vec<_>>>()?;
+                    let tuple = PyTuple::new(py, labels)?.into_any().unbind();
+                    Ok(Scalar::Object(fp_types::ObjectValue::Host(
+                        fp_types::HostValue::new(PyHost(tuple)),
+                    )))
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            Series::new(
+                found.name(),
+                found.index().clone(),
+                Column::from_object_values(cells),
+            )
+            .map(|inner| PySeries { inner })
+            .map_err(frame_error_to_py)
+        })
     }
 
     fn numeric_inner(&self) -> Result<DataFrame, FrameError> {
@@ -35174,7 +35439,14 @@ impl PyDataFrame {
         numeric_only: bool,
     ) -> PyResult<PySeries> {
         let ax = parse_axis_param(axis)?;
-        wrap_series(self.inner.idxmax_ext(ax, skipna, numeric_only))
+        let result = if ax == 1
+            && let Some(levels) = self.inner.columns_multiindex()
+        {
+            self.tuple_idx_extreme(levels, true, skipna, numeric_only)?
+        } else {
+            wrap_series(self.inner.idxmax_ext(ax, skipna, numeric_only))?
+        };
+        warned_idx_extremes(result, "idxmax")
     }
 
     /// Return index of first occurrence of minimum over requested axis.
@@ -35186,7 +35458,14 @@ impl PyDataFrame {
         numeric_only: bool,
     ) -> PyResult<PySeries> {
         let ax = parse_axis_param(axis)?;
-        wrap_series(self.inner.idxmin_ext(ax, skipna, numeric_only))
+        let result = if ax == 1
+            && let Some(levels) = self.inner.columns_multiindex()
+        {
+            self.tuple_idx_extreme(levels, false, skipna, numeric_only)?
+        } else {
+            wrap_series(self.inner.idxmin_ext(ax, skipna, numeric_only))?
+        };
+        warned_idx_extremes(result, "idxmin")
     }
 
     /// First discrete difference of element.
@@ -51463,6 +51742,30 @@ impl PyResampler {
         })
     }
 
+    /// `df.resample(...).units` for a column `units`, as pandas' attribute
+    /// access (it was an AttributeError).
+    fn __getattr__(&self, key: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let name: String = key.extract()?;
+        if let ResampleTarget::DataFrame(frame) = &self.target
+            && frame.column(&name).is_some()
+        {
+            return self.__getitem__(key);
+        }
+        // pandas names the resampler by its index's kind.
+        let index = match &self.target {
+            ResampleTarget::Series(series) => series.index(),
+            ResampleTarget::DataFrame(frame) => frame.index(),
+        };
+        let class = match index.labels().first() {
+            Some(IndexLabel::Timedelta64(_)) => "TimedeltaIndexResampler",
+            Some(IndexLabel::Datetime64(_)) | None => "DatetimeIndexResampler",
+            Some(_) => "PeriodIndexResampler",
+        };
+        Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+            format!("'{class}' object has no attribute '{name}'"),
+        ))
+    }
+
     // pandas' reductions take `numeric_only` (keyword-only here: pandas'
     // positional order differs per method, e.g. std's first is ddof).
     #[pyo3(signature = (*, numeric_only=false))]
@@ -60405,6 +60708,47 @@ impl PyCategorical {
     #[pyo3(signature = (*, skipna=true))]
     fn min(&self, py: Python<'_>, skipna: bool) -> PyResult<Py<PyAny>> {
         self.extreme(py, "min", skipna)
+    }
+
+    /// pandas' `Categorical.sort_values`: the values in the order of their
+    /// categories (not of the values themselves), missing ones at
+    /// `na_position` (it was missing).
+    #[pyo3(signature = (*, inplace=false, ascending=true, na_position="last"))]
+    fn sort_values(
+        &mut self,
+        py: Python<'_>,
+        inplace: bool,
+        ascending: bool,
+        na_position: &str,
+    ) -> PyResult<Option<Self>> {
+        if !matches!(na_position, "first" | "last") {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "invalid na_position: '{na_position}'"
+            )));
+        }
+        let series = Py::new(
+            py,
+            PySeries {
+                inner: self.inner.clone(),
+            },
+        )?
+        .into_bound(py);
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("ascending", ascending)?;
+        kwargs.set_item("na_position", na_position)?;
+        let sorted = series.call_method("sort_values", (), Some(&kwargs))?;
+        let sorted = sorted.extract::<PyRef<'_, PySeries>>()?.inner.clone();
+        let inner = Series::new(
+            sorted.name(),
+            Index::new_known_unique_int64_unit_range(0, sorted.len()),
+            sorted.column().clone(),
+        )
+        .map_err(frame_error_to_py)?;
+        if inplace {
+            self.inner = inner;
+            return Ok(None);
+        }
+        Ok(Some(Self { inner }))
     }
 }
 
