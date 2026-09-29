@@ -16737,3 +16737,136 @@ def test_shallow_copy_is_refused_n57tz() -> None:
     for obj in (fpd.Series([1.0, 2.0]), fpd.DataFrame({"a": [1.0]})):
         with pytest.raises(NotImplementedError):
             obj.copy(deep=False)
+
+
+# br-frankenpandas-cemrq: groupby cumsum / cumprod / cummax / cummin over a
+# text or datetime column were all-NaN; pandas raises (text; datetime
+# cumsum / cumprod) or runs over the datetimes (cummax / cummin).
+def _gc_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "k": ["x", "y", "x", "y", "x"],
+            "n": [1.0, 2.0, np.nan, 4.0, 0.5],
+            "t": ["p", "q", "r", "s", "u"],
+            "d": m.to_datetime(["2024-01-03", "2024-01-01", None, "2024-01-05", "2024-01-02"]),
+            "z": m.to_datetime(["2024-01-03", "2024-01-01", "2024-01-02", "2024-01-05", "2024-01-04"]).tz_localize("UTC"),
+        }
+    )
+
+
+_GC_CASES = {
+    **{
+        f"{cls} {op} {col}": (
+            lambda cls, op, col: lambda m: _rl_shown(
+                getattr(_gc_frame(m).groupby("k")[[col] if cls == "frame" else col], op)()
+            )
+        )(cls, op, col)
+        for cls in ["frame", "series"]
+        for op in ["cumsum", "cumprod", "cummax", "cummin"]
+        for col in ["t", "d"]
+    },
+    "frame cummax tz-aware": lambda m: _rl_shown(_gc_frame(m).groupby("k")[["z"]].cummax()),
+    "series cummin tz-aware": lambda m: _rl_shown(_gc_frame(m).groupby("k")["z"].cummin()),
+    "frame cummax text beside a number": lambda m: _rl_shown(_gc_frame(m).groupby("k")[["n", "t"]].cummax()),
+    # NEGATIVE: a float column was already right.
+    "frame cummax float": lambda m: _rl_shown(_gc_frame(m).groupby("k")[["n"]].cummax()),
+    "series cumsum float": lambda m: _rl_shown(_gc_frame(m).groupby("k")["n"].cumsum()),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_GC_CASES))
+def test_groupby_cumulative_dtypes_like_pandas_cemrq(case: str) -> None:
+    run = _GC_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-n57tz: GroupBy keywords pandas takes that were
+# unexpected - value_counts(normalize, sort, ascending, bins, dropna),
+# nunique(dropna), any / all(skipna), skew(axis, skipna, numeric_only),
+# cumsum / cumprod / cummax / cummin(axis, numeric_only).
+def _gk_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "k": ["x", "y", "x", "x", "y", "y", "x"],
+            "v": ["a", "b", "a", None, "b", "c", "b"],
+            "n": [1.0, 2.0, np.nan, 4.0, 5.0, 3.0, 1.0],
+            "b": [True, False, True, True, np.nan, True, False],
+            "f": [0.0, np.nan, 1.0, 1.0, 0.0, 0.0, 1.0],
+            "t": ["p", "q", "r", "s", "t", "u", "v"],
+        }
+    )
+
+
+def _gk(m: Any) -> Any:
+    return _gk_frame(m).groupby("k")
+
+
+_GK_CASES = {
+    "value_counts normalize": lambda m: _rl_shown(_gk(m)["v"].value_counts(normalize=True)),
+    "value_counts sort False": lambda m: _rl_shown(_gk(m)["v"].value_counts(sort=False)),
+    "value_counts ascending": lambda m: _rl_shown(_gk(m)["v"].value_counts(ascending=True)),
+    "value_counts dropna False": lambda m: _rl_shown(_gk(m)["v"].value_counts(dropna=False)),
+    "value_counts normalize, dropna False": lambda m: _rl_shown(_gk(m)["v"].value_counts(normalize=True, dropna=False)),
+    "value_counts sort False, dropna False": lambda m: _rl_shown(_gk(m)["v"].value_counts(sort=False, dropna=False)),
+    "value_counts bins": lambda m: _rl_shown(_gk(m)["n"].value_counts(bins=2)),
+    "value_counts bins normalize": lambda m: _rl_shown(_gk(m)["n"].value_counts(bins=2, normalize=True)),
+    "nunique dropna False": lambda m: _rl_shown(_gk(m)["v"].nunique(dropna=False)),
+    "frame nunique dropna False": lambda m: _rl_shown(_gk(m)[["v", "n"]].nunique(dropna=False)),
+    "any skipna False": lambda m: _rl_shown(_gk(m)["f"].any(skipna=False)),
+    "all skipna False": lambda m: _rl_shown(_gk(m)["f"].all(skipna=False)),
+    "frame any skipna False": lambda m: _rl_shown(_gk(m)[["f", "n"]].any(skipna=False)),
+    "frame all skipna False": lambda m: _rl_shown(_gk(m)[["f", "n"]].all(skipna=False)),
+    "skew skipna False": lambda m: _rl_shown(_gk(m)["n"].skew(skipna=False)),
+    "skew numeric_only over text": lambda m: _rl_shown(_gk(m)["v"].skew(numeric_only=True)),
+    "frame skew numeric_only": lambda m: _rl_shown(_gk(m)[["n", "t"]].skew(numeric_only=True)),
+    "frame skew skipna False": lambda m: _rl_shown(_gk(m)[["n", "f"]].skew(skipna=False)),
+    "skew axis index": lambda m: _rl_shown(_gk(m)["n"].skew(axis="index")),
+    "frame skew axis 0": lambda m: _rl_shown(_gk(m)[["n"]].skew(axis=0)),
+    "frame skew axis 2": lambda m: _rl_shown(_gk(m)[["n"]].skew(axis=2)),
+    "frame cummax numeric_only": lambda m: _rl_shown(_gk(m)[["n", "t", "b"]].cummax(numeric_only=True)),
+    "frame cumsum numeric_only": lambda m: _rl_shown(_gk(m)[["n", "t"]].cumsum(numeric_only=True)),
+    "cummin numeric_only": lambda m: _rl_shown(_gk(m)["n"].cummin(numeric_only=True)),
+    "frame cumsum axis 0": lambda m: _rl_shown(_gk(m)[["n"]].cumsum(axis=0)),
+    "frame cumprod axis index": lambda m: _rl_shown(_gk(m)[["n"]].cumprod(axis="index")),
+    "cummax axis 0": lambda m: _rl_shown(_gk(m)["n"].cummax(axis=0)),
+    "cumsum axis 1": lambda m: _rl_shown(_gk(m)["n"].cumsum(axis=1)),
+    "cumsum axis columns": lambda m: _rl_shown(_gk(m)["n"].cumsum(axis="columns")),
+    # A bool column holding a NaN is pandas' object column: numeric_only
+    # drops it (it was summed).
+    "frame sum numeric_only, bools with a NaN": lambda m: _rl_shown(_gk(m)[["b", "n"]].sum(numeric_only=True)),
+    "frame mean numeric_only, bools with a NaN": lambda m: _rl_shown(_gk(m)[["b", "f"]].mean(numeric_only=True)),
+    # Series.value_counts(bins=): no NaN bin whatever dropna says, and
+    # normalized by the length of every value (it kept a NaN bin and divided
+    # by the values counted).
+    "series value_counts bins normalize": lambda m: _rl_shown(_gk_frame(m)["n"].value_counts(bins=2, normalize=True)),
+    "series value_counts bins dropna False": lambda m: _rl_shown(_gk_frame(m)["n"].value_counts(bins=2, dropna=False)),
+    "series value_counts bins normalize, dropna False": lambda m: _rl_shown(_gk_frame(m)["n"].value_counts(bins=2, normalize=True, dropna=False)),
+    # NEGATIVE: the defaults were already pandas'.
+    "value_counts": lambda m: _rl_shown(_gk(m)["v"].value_counts()),
+    "nunique": lambda m: _rl_shown(_gk(m)["v"].nunique()),
+    "any": lambda m: _rl_shown(_gk(m)["f"].any()),
+    "skew": lambda m: _rl_shown(_gk(m)["n"].skew()),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_GK_CASES))
+def test_groupby_keywords_like_pandas_n57tz(case: str) -> None:
+    run = _GK_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_groupby_refusals_n57tz() -> None:
+    # pandas' axis=1 runs the method across each row (deprecated): refused
+    # after pandas' own FutureWarning. skipna=False over a nullable dtype is
+    # Kleene logic in pandas (<NA> answers): refused.
+    frame = fpd.DataFrame({"k": ["x", "x"], "n": [1.0, 2.0], "m": [3.0, 4.0]})
+    with pytest.warns(FutureWarning), pytest.raises(NotImplementedError):
+        frame.groupby("k")[["n", "m"]].cumsum(axis=1)
+    nullable = fpd.DataFrame({"k": ["x", "x"], "b": fpd.array([True, None], dtype="boolean")})
+    with pytest.raises(NotImplementedError):
+        nullable.groupby("k")["b"].any(skipna=False)
+    with pytest.raises(NotImplementedError):
+        nullable.groupby("k")[["b"]].all(skipna=False)

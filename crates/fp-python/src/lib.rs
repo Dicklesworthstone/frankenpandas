@@ -18014,7 +18014,10 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 || msg.starts_with("Cannot setitem on a Categorical with a new category")
                 || msg.starts_with("DataFrame columns must be unique for orient=")
                 || (msg.starts_with("cannot insert ") && msg.ends_with(", already exists"))
-                || msg.starts_with("Cannot specify 'allow_duplicates=True' when ");
+                || msg.starts_with("Cannot specify 'allow_duplicates=True' when ")
+                // pandas' groupby cumulative refusals by dtype (cemrq).
+                || msg.starts_with("function is not implemented for this dtype: [how->")
+                || msg.ends_with(" is not supported for object dtype");
             let text = if pandas_verbatim {
                 msg.clone()
             } else {
@@ -18054,6 +18057,8 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 // refusal to rank intervals (fvsao.71).
                 || lower.contains("not supported between instances of")
                 || lower.contains("rank is not supported for")
+                // SeriesGroupBy's cumulative ops over text (cemrq).
+                || lower.ends_with(" is not supported for object dtype")
                 || lower.contains("cannot perform rank with non-ordered categorical")
                 // pandas' TypeError for a fill outside the categories.
                 || lower.contains("cannot setitem on a categorical with a new category")
@@ -24237,6 +24242,7 @@ impl PySeries {
     /// bins= raised TypeError) the values are counted per `pd.cut(bins,
     /// include_lowest=True)` bin, empty bins included.
     #[pyo3(signature = (normalize=false, sort=true, ascending=false, bins=None, dropna=true))]
+    #[allow(clippy::cast_precision_loss)] // counts stay far below 2^53
     fn value_counts(
         &self,
         py: Python<'_>,
@@ -24250,9 +24256,39 @@ impl PySeries {
             Some(bins) => cut_series(py, &self.inner, bins, true, None, 3, true, "raise")?.0,
             None => self.inner.clone(),
         };
-        let r = counted
-            .value_counts_with_options(normalize, sort, ascending, dropna)
-            .map_err(frame_error_to_py)?;
+        let r = if bins.is_some_and(|bins| !bins.is_none()) {
+            // pandas counts the bins without a missing one whatever dropna
+            // says, and normalizes by the length of every value, missing
+            // ones included (value_counts_internal); it kept a NaN bin under
+            // dropna=False and divided by the values counted
+            // (br-frankenpandas-n57tz).
+            let counts = counted
+                .value_counts_with_options(false, sort, ascending, true)
+                .map_err(frame_error_to_py)?;
+            if normalize {
+                let total = self.inner.len() as f64;
+                let shares = counts
+                    .values()
+                    .iter()
+                    .map(|count| match count {
+                        Scalar::Int64(count) => Scalar::Float64(*count as f64 / total),
+                        other => other.clone(),
+                    })
+                    .collect();
+                Series::new(
+                    "proportion",
+                    counts.index().clone(),
+                    Column::from_values(shares).map_err(column_error_to_py)?,
+                )
+                .map_err(frame_error_to_py)?
+            } else {
+                counts
+            }
+        } else {
+            counted
+                .value_counts_with_options(normalize, sort, ascending, dropna)
+                .map_err(frame_error_to_py)?
+        };
         // pandas' binned counts sit on an unnamed index (the bins are not
         // the Series' values; it was named after the Series).
         let r = if bins.is_some_and(|bins| !bins.is_none()) {
@@ -47570,6 +47606,72 @@ fn window_axis(py: Python<'_>, kind: &str, axis: &Passed<'_>, frame: bool) -> Py
     Ok(())
 }
 
+/// pandas' deprecated `axis=` of a groupby method (`owner` 'SeriesGroupBy'
+/// or 'DataFrameGroupBy'): the rows (0 / 'index' / 'rows') warn and run; a
+/// frame's columns (1 / 'columns') warn and are refused (the method across
+/// each row); anything else - a Series' 1 included - is pandas' ValueError.
+/// `quiet_zero`: skew does not warn for the integer 0 (only a spelled
+/// axis), as pandas' (br-frankenpandas-n57tz: axis was unexpected).
+fn groupby_axis(
+    py: Python<'_>,
+    owner: &str,
+    method: &str,
+    axis: &Passed<'_>,
+    quiet_zero: bool,
+) -> PyResult<()> {
+    let Some(axis) = &axis.0 else {
+        return Ok(());
+    };
+    let frame = owner == "DataFrameGroupBy";
+    let integer = axis.extract::<i64>().ok();
+    let number = integer.or_else(|| {
+        axis.extract::<String>()
+            .ok()
+            .and_then(|name| match name.as_str() {
+                "index" | "rows" => Some(0),
+                "columns" if frame => Some(1),
+                _ => None,
+            })
+    });
+    let columns = match number {
+        Some(0) => false,
+        Some(1) if frame => true,
+        _ => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "No axis named {} for object type {}",
+                axis.str()?,
+                if frame { "DataFrame" } else { "Series" }
+            )));
+        }
+    };
+    if quiet_zero && integer == Some(0) {
+        return Ok(());
+    }
+    let message = if columns {
+        format!(
+            "{owner}.{method} with axis=1 is deprecated and will be removed in a future \
+             version. Operate on the un-grouped DataFrame instead"
+        )
+    } else {
+        format!(
+            "The 'axis' keyword in {owner}.{method} is deprecated and will be removed in a \
+             future version. Call without passing 'axis' instead."
+        )
+    };
+    let message = std::ffi::CString::new(message)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    PyErr::warn(
+        py,
+        &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+        &message,
+        1,
+    )?;
+    if columns {
+        return Err(not_implemented(&format!("{owner}.{method}(axis=1)")));
+    }
+    Ok(())
+}
+
 /// pandas' `expanding(min_periods=1, axis=<no_default>, method='single')`
 /// of a Series or a DataFrame: the deprecated axis as rolling's
 /// ([`window_axis`]); method='table' (numba's) is refused - a Series' is
@@ -49888,6 +49990,35 @@ pub struct PyGroupBy {
 }
 
 impl PyGroupBy {
+    /// pandas' `any` / `all` (`all`) with `skipna`: skipna=False reads a
+    /// missing value as numpy's truthy NaN (fp-frame's
+    /// `bool_reduce_with_skipna`); over pandas' nullable dtypes that is
+    /// Kleene logic (`<NA>` answers), refused here.
+    fn bool_reduce(&self, all: bool, skipna: bool) -> PyResult<PyDataFrame> {
+        let op = if all { "all" } else { "any" };
+        if !skipna
+            && self.df.column_names().into_iter().any(|name| {
+                !self.by.contains(name)
+                    && self
+                        .df
+                        .column(name)
+                        .is_some_and(|column| column.dtype().is_nullable())
+            })
+        {
+            return Err(not_implemented(&format!(
+                "DataFrameGroupBy.{op}(skipna=False) over a nullable column (pandas answers <NA>)"
+            )));
+        }
+        let result = self
+            .grouped()
+            .map_err(frame_error_to_py)?
+            .bool_reduce_with_skipna(all, skipna)
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame {
+            inner: self.restored(self.with_unused(op, result)?)?,
+        })
+    }
+
     /// A result frame back under the repeated column names (see
     /// [`RepeatedColumns::restore_frame`]); unchanged when no name repeats.
     fn restored(&self, frame: DataFrame) -> PyResult<DataFrame> {
@@ -50462,7 +50593,8 @@ impl PyGroupBy {
     /// `op` over this groupby, or with `numeric_only` over its keys and
     /// numeric columns alone, as pandas' groupby reductions select: bool and
     /// the nullable numeric dtypes count, strings and temporal columns do not
-    /// (br-frankenpandas-n57tz).
+    /// (br-frankenpandas-n57tz), nor a bool column holding a missing value -
+    /// pandas' object column (it was kept).
     fn reduce(
         &self,
         numeric_only: bool,
@@ -50477,17 +50609,20 @@ impl PyGroupBy {
             .into_iter()
             .filter(|name| {
                 self.by.contains(*name)
-                    || self.df.column(name).is_some_and(|column| {
-                        matches!(
-                            column.dtype(),
-                            DType::Int64
-                                | DType::Float64
-                                | DType::Bool
-                                | DType::Int64Nullable
-                                | DType::Float64Nullable
-                                | DType::BoolNullable
-                        )
-                    })
+                    || self
+                        .df
+                        .column(name)
+                        .is_some_and(|column| match column.dtype() {
+                            DType::Bool => !column.has_any_missing(),
+                            dtype => matches!(
+                                dtype,
+                                DType::Int64
+                                    | DType::Float64
+                                    | DType::Int64Nullable
+                                    | DType::Float64Nullable
+                                    | DType::BoolNullable
+                            ),
+                        })
             })
             .map(String::as_str)
             .collect();
@@ -50931,71 +51066,95 @@ impl PyGroupBy {
         }
     }
 
-    fn nunique(&self) -> PyResult<PyDataFrame> {
+    /// pandas' `nunique(dropna=True)`: with dropna=False a group's missing
+    /// values count as one more distinct value (the keyword was unexpected -
+    /// br-frankenpandas-n57tz).
+    #[pyo3(signature = (dropna=true))]
+    fn nunique(&self, dropna: bool) -> PyResult<PyDataFrame> {
         let result = self
             .grouped()
             .map_err(frame_error_to_py)?
-            .nunique()
+            .nunique_with_dropna(dropna)
             .map_err(frame_error_to_py)?;
         Ok(PyDataFrame {
             inner: self.restored(self.with_unused("nunique", result)?)?,
         })
     }
 
-    fn any(&self) -> PyResult<PyDataFrame> {
-        let result = self
-            .grouped()
-            .map_err(frame_error_to_py)?
-            .any()
-            .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame {
-            inner: self.restored(self.with_unused("any", result)?)?,
-        })
+    /// pandas' `any(skipna=True)` ([`Self::bool_reduce`]).
+    #[pyo3(signature = (skipna=true))]
+    fn any(&self, skipna: bool) -> PyResult<PyDataFrame> {
+        self.bool_reduce(false, skipna)
     }
 
-    fn all(&self) -> PyResult<PyDataFrame> {
-        let result = self
-            .grouped()
-            .map_err(frame_error_to_py)?
-            .all()
-            .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame {
-            inner: self.restored(self.with_unused("all", result)?)?,
-        })
+    /// pandas' `all(skipna=True)` ([`Self::bool_reduce`]).
+    #[pyo3(signature = (skipna=true))]
+    fn all(&self, skipna: bool) -> PyResult<PyDataFrame> {
+        self.bool_reduce(true, skipna)
     }
 
-    fn cumsum(&self) -> PyResult<PyDataFrame> {
+    /// pandas' `cumsum(axis=<no_default>, numeric_only=False)`: the
+    /// deprecated axis ([`groupby_axis`]); numeric_only keeps the numeric
+    /// and bool columns (the keywords were unexpected -
+    /// br-frankenpandas-n57tz).
+    #[pyo3(signature = (axis=Passed(None), numeric_only=false))]
+    fn cumsum(
+        &self,
+        py: Python<'_>,
+        axis: Passed<'_>,
+        numeric_only: bool,
+    ) -> PyResult<PyDataFrame> {
+        groupby_axis(py, "DataFrameGroupBy", "cumsum", &axis, false)?;
         let result = self
-            .grouped()
-            .map_err(frame_error_to_py)?
-            .cumsum()
+            .reduce(numeric_only, |gb| gb.cumsum())
             .map_err(frame_error_to_py)?;
         self.out(self.narrowed_frame("cumsum", result)?)
     }
 
-    fn cumprod(&self) -> PyResult<PyDataFrame> {
+    /// pandas' `cumprod(axis=<no_default>, numeric_only=False)` (see
+    /// [`Self::cumsum`]).
+    #[pyo3(signature = (axis=Passed(None), numeric_only=false))]
+    fn cumprod(
+        &self,
+        py: Python<'_>,
+        axis: Passed<'_>,
+        numeric_only: bool,
+    ) -> PyResult<PyDataFrame> {
+        groupby_axis(py, "DataFrameGroupBy", "cumprod", &axis, false)?;
         let result = self
-            .grouped()
-            .map_err(frame_error_to_py)?
-            .cumprod()
+            .reduce(numeric_only, |gb| gb.cumprod())
             .map_err(frame_error_to_py)?;
         self.out(self.narrowed_frame("cumprod", result)?)
     }
 
-    fn cummin(&self) -> PyResult<PyDataFrame> {
+    /// pandas' `cummin(axis=<no_default>, numeric_only=False)` (see
+    /// [`Self::cumsum`]).
+    #[pyo3(signature = (axis=Passed(None), numeric_only=false))]
+    fn cummin(
+        &self,
+        py: Python<'_>,
+        axis: Passed<'_>,
+        numeric_only: bool,
+    ) -> PyResult<PyDataFrame> {
+        groupby_axis(py, "DataFrameGroupBy", "cummin", &axis, false)?;
         let result = self
-            .grouped()
-            .map_err(frame_error_to_py)?
-            .cummin()
+            .reduce(numeric_only, |gb| gb.cummin())
             .map_err(frame_error_to_py)?;
         self.out(self.narrowed_frame("cummin", result)?)
     }
 
-    fn cummax(&self) -> PyResult<PyDataFrame> {
+    /// pandas' `cummax(axis=<no_default>, numeric_only=False)` (see
+    /// [`Self::cumsum`]).
+    #[pyo3(signature = (axis=Passed(None), numeric_only=false))]
+    fn cummax(
+        &self,
+        py: Python<'_>,
+        axis: Passed<'_>,
+        numeric_only: bool,
+    ) -> PyResult<PyDataFrame> {
+        groupby_axis(py, "DataFrameGroupBy", "cummax", &axis, false)?;
         let result = self
-            .grouped()
-            .map_err(frame_error_to_py)?
-            .cummax()
+            .reduce(numeric_only, |gb| gb.cummax())
             .map_err(frame_error_to_py)?;
         self.out(self.narrowed_frame("cummax", result)?)
     }
@@ -51199,12 +51358,23 @@ impl PyGroupBy {
         })
     }
 
-    fn skew(&self) -> PyResult<PyDataFrame> {
+    /// pandas' `skew(axis=<no_default>, skipna=True, numeric_only=False)`:
+    /// the deprecated axis ([`groupby_axis`]; the integer 0 is quiet, as
+    /// pandas'), skipna=False a NaN for a group holding a missing value,
+    /// numeric_only the numeric and bool columns (the keywords were
+    /// unexpected - br-frankenpandas-n57tz).
+    #[pyo3(signature = (axis=Passed(None), skipna=true, numeric_only=false))]
+    fn skew(
+        &self,
+        py: Python<'_>,
+        axis: Passed<'_>,
+        skipna: bool,
+        numeric_only: bool,
+    ) -> PyResult<PyDataFrame> {
+        groupby_axis(py, "DataFrameGroupBy", "skew", &axis, true)?;
         self.observed_only("skew")?;
         let result = self
-            .grouped()
-            .map_err(frame_error_to_py)?
-            .skew()
+            .reduce(numeric_only, |gb| gb.skew_with_skipna(skipna))
             .map_err(float_conversion_error_to_py)?;
         self.out(result)
     }
@@ -51347,13 +51517,13 @@ impl PyGroupBy {
                 "prod" => self.prod(false, 0)?,
                 "first" => self.first(false, -1, true)?,
                 "last" => self.last(false, -1, true)?,
-                "nunique" => self.nunique()?,
-                "any" => self.any()?,
-                "all" => self.all()?,
-                "cumsum" => self.cumsum()?,
-                "cumprod" => self.cumprod()?,
-                "cummin" => self.cummin()?,
-                "cummax" => self.cummax()?,
+                "nunique" => self.nunique(true)?,
+                "any" => self.any(true)?,
+                "all" => self.all(true)?,
+                "cumsum" => self.cumsum(py, Passed(None), false)?,
+                "cumprod" => self.cumprod(py, Passed(None), false)?,
+                "cummin" => self.cummin(py, Passed(None), false)?,
+                "cummax" => self.cummax(py, Passed(None), false)?,
                 "ohlc" => self.ohlc()?,
                 _ => {
                     return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -52407,10 +52577,10 @@ impl PyGroupBy {
             // pandas' transformation kernels by name are those methods
             // (fp-frame's transform broadcasts the reductions alone; sdyhq).
             let kernel = match func_str.as_str() {
-                "cumsum" => Some(self.cumsum()?),
-                "cumprod" => Some(self.cumprod()?),
-                "cummin" => Some(self.cummin()?),
-                "cummax" => Some(self.cummax()?),
+                "cumsum" => Some(self.cumsum(py, Passed(None), false)?),
+                "cumprod" => Some(self.cumprod(py, Passed(None), false)?),
+                "cummin" => Some(self.cummin(py, Passed(None), false)?),
+                "cummax" => Some(self.cummax(py, Passed(None), false)?),
                 "ffill" => Some(self.ffill(None)?),
                 "bfill" => Some(self.bfill(None)?),
                 "diff" => Some(self.diff(1)?),
@@ -52686,6 +52856,26 @@ fn missing_key_groups(by: &Series, sort: bool) -> PyResult<(Series, Index)> {
 }
 
 impl PySeriesGroupBy {
+    /// pandas' `any` / `all` (`all`) with `skipna`: skipna=False reads a
+    /// missing value as numpy's truthy NaN (fp-frame's
+    /// `bool_reduce_with_skipna`); over pandas' nullable dtypes that is
+    /// Kleene logic (`<NA>` answers), refused here.
+    fn bool_reduce(&self, all: bool, skipna: bool) -> PyResult<Py<PyAny>> {
+        let op = if all { "all" } else { "any" };
+        if !skipna && self.series.column().dtype().is_nullable() {
+            return Err(not_implemented(&format!(
+                "SeriesGroupBy.{op}(skipna=False) over a nullable dtype (pandas answers <NA>)"
+            )));
+        }
+        let res = self
+            .series
+            .groupby(&self.by)
+            .map_err(frame_error_to_py)?
+            .bool_reduce_with_skipna(all, skipna)
+            .map_err(frame_error_to_py)?;
+        self.wrap_result(op, res)
+    }
+
     /// pandas' `numeric_only=True` on a SeriesGroupBy: there is no column to
     /// drop, so it only raises pandas' TypeError when the series is not
     /// numeric (br-frankenpandas-n57tz).
@@ -53050,13 +53240,13 @@ impl PySeriesGroupBy {
             "median" => self.median(false)?,
             "prod" => self.prod(false, 0)?,
             "size" => self.size()?,
-            "nunique" => self.nunique()?,
-            "any" => self.any()?,
-            "all" => self.all()?,
-            "cumsum" => Py::new(py, self.cumsum()?)?.into_any(),
-            "cumprod" => Py::new(py, self.cumprod()?)?.into_any(),
-            "cummin" => Py::new(py, self.cummin()?)?.into_any(),
-            "cummax" => Py::new(py, self.cummax()?)?.into_any(),
+            "nunique" => self.nunique(true)?,
+            "any" => self.any(true)?,
+            "all" => self.all(true)?,
+            "cumsum" => Py::new(py, self.cumsum(py, Passed(None), false)?)?.into_any(),
+            "cumprod" => Py::new(py, self.cumprod(py, Passed(None), false)?)?.into_any(),
+            "cummin" => Py::new(py, self.cummin(py, Passed(None), false)?)?.into_any(),
+            "cummax" => Py::new(py, self.cummax(py, Passed(None), false)?)?.into_any(),
             _ => return Ok(None),
         }))
     }
@@ -53372,43 +53562,88 @@ impl PySeriesGroupBy {
         self.wrap_result("size", res)
     }
 
-    fn nunique(&self) -> PyResult<Py<PyAny>> {
+    /// pandas' `nunique(dropna=True)`: with dropna=False a group's missing
+    /// values count as one more distinct value (the keyword was unexpected -
+    /// br-frankenpandas-n57tz).
+    #[pyo3(signature = (dropna=true))]
+    fn nunique(&self, dropna: bool) -> PyResult<Py<PyAny>> {
         let res = self
             .series
             .groupby(&self.by)
             .map_err(frame_error_to_py)?
-            .nunique()
+            .nunique_with_dropna(dropna)
             .map_err(frame_error_to_py)?;
         self.wrap_result("nunique", res)
     }
 
-    fn any(&self) -> PyResult<Py<PyAny>> {
-        let res = self
-            .series
-            .groupby(&self.by)
-            .map_err(frame_error_to_py)?
-            .any()
-            .map_err(frame_error_to_py)?;
-        self.wrap_result("any", res)
+    /// pandas' `any(skipna=True)` ([`Self::bool_reduce`]).
+    #[pyo3(signature = (skipna=true))]
+    fn any(&self, skipna: bool) -> PyResult<Py<PyAny>> {
+        self.bool_reduce(false, skipna)
     }
 
-    fn all(&self) -> PyResult<Py<PyAny>> {
-        let res = self
-            .series
-            .groupby(&self.by)
-            .map_err(frame_error_to_py)?
-            .all()
-            .map_err(frame_error_to_py)?;
-        self.wrap_result("all", res)
+    /// pandas' `all(skipna=True)` ([`Self::bool_reduce`]).
+    #[pyo3(signature = (skipna=true))]
+    fn all(&self, skipna: bool) -> PyResult<Py<PyAny>> {
+        self.bool_reduce(true, skipna)
     }
 
-    fn value_counts(&self) -> PyResult<Py<PyAny>> {
+    /// pandas' `value_counts(normalize=False, sort=True, ascending=False,
+    /// bins=None, dropna=True)` of each group (the keywords were unexpected -
+    /// br-frankenpandas-n57tz). A `bins` count is pandas' own route:
+    /// `Series.value_counts` applied per group, so each group cuts its own
+    /// range.
+    #[pyo3(signature = (normalize=false, sort=true, ascending=false, bins=None, dropna=true))]
+    fn value_counts(
+        &self,
+        py: Python<'_>,
+        normalize: bool,
+        sort: bool,
+        ascending: bool,
+        bins: Option<&Bound<'_, PyAny>>,
+        dropna: bool,
+    ) -> PyResult<Py<PyAny>> {
         self.single_key("value_counts")?;
+        if let Some(bins) = bins.filter(|bins| !bins.is_none()) {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("normalize", normalize)?;
+            kwargs.set_item("sort", sort)?;
+            kwargs.set_item("ascending", ascending)?;
+            kwargs.set_item("bins", bins)?;
+            kwargs.set_item("dropna", dropna)?;
+            let method = py.get_type::<PySeries>().getattr("value_counts")?;
+            let applied = self.apply(py, &method, &PyTuple::empty(py), Some(&kwargs))?;
+            let counts = applied
+                .bind(py)
+                .extract::<PyRef<'_, PySeries>>()?
+                .inner
+                .clone();
+            // Named as pandas names it: the key, then the Series' name.
+            let label = |name: &str| (!name.is_empty()).then(|| LabelName::from(name));
+            let index = match counts.index().row_multiindex() {
+                Some(levels) => {
+                    let levels = levels.clone().set_names(vec![
+                        label(self.by.name().as_ref()),
+                        label(self.series.name().as_ref()),
+                    ]);
+                    counts
+                        .index()
+                        .clone()
+                        .with_row_multiindex(levels)
+                        .map_err(index_error_to_py)?
+                }
+                None => counts.index().clone(),
+            };
+            let name = if normalize { "proportion" } else { "count" };
+            let counts =
+                Series::new(name, index, counts.column().clone()).map_err(frame_error_to_py)?;
+            return PySeries { inner: counts }.into_py_any(py);
+        }
         let res = self
             .series
             .groupby(&self.by)
             .map_err(frame_error_to_py)?
-            .value_counts()
+            .value_counts_with_options(normalize, sort, ascending, dropna)
             .map_err(frame_error_to_py)?;
         self.wrap_result("value_counts", res)
     }
@@ -53503,7 +53738,14 @@ impl PySeriesGroupBy {
             .map_err(frame_error_to_py)
     }
 
-    fn cumsum(&self) -> PyResult<PySeries> {
+    /// pandas' `cumsum(axis=<no_default>, numeric_only=False)`: the
+    /// deprecated axis ([`groupby_axis`]); numeric_only changes nothing on
+    /// a Series, whose dtype decides (text is pandas' TypeError either
+    /// way). The keywords were unexpected (br-frankenpandas-n57tz).
+    #[pyo3(signature = (axis=Passed(None), numeric_only=false))]
+    fn cumsum(&self, py: Python<'_>, axis: Passed<'_>, numeric_only: bool) -> PyResult<PySeries> {
+        let _ = numeric_only;
+        groupby_axis(py, "SeriesGroupBy", "cumsum", &axis, false)?;
         let res = self
             .series
             .groupby(&self.by)
@@ -53513,7 +53755,12 @@ impl PySeriesGroupBy {
         Ok(PySeries { inner: res })
     }
 
-    fn cumprod(&self) -> PyResult<PySeries> {
+    /// pandas' `cumprod(axis=<no_default>, numeric_only=False)` (see
+    /// [`Self::cumsum`]).
+    #[pyo3(signature = (axis=Passed(None), numeric_only=false))]
+    fn cumprod(&self, py: Python<'_>, axis: Passed<'_>, numeric_only: bool) -> PyResult<PySeries> {
+        let _ = numeric_only;
+        groupby_axis(py, "SeriesGroupBy", "cumprod", &axis, false)?;
         let res = self
             .series
             .groupby(&self.by)
@@ -53523,7 +53770,12 @@ impl PySeriesGroupBy {
         Ok(PySeries { inner: res })
     }
 
-    fn cummin(&self) -> PyResult<PySeries> {
+    /// pandas' `cummin(axis=<no_default>, numeric_only=False)` (see
+    /// [`Self::cumsum`]).
+    #[pyo3(signature = (axis=Passed(None), numeric_only=false))]
+    fn cummin(&self, py: Python<'_>, axis: Passed<'_>, numeric_only: bool) -> PyResult<PySeries> {
+        let _ = numeric_only;
+        groupby_axis(py, "SeriesGroupBy", "cummin", &axis, false)?;
         let res = self
             .series
             .groupby(&self.by)
@@ -53533,7 +53785,12 @@ impl PySeriesGroupBy {
         Ok(PySeries { inner: res })
     }
 
-    fn cummax(&self) -> PyResult<PySeries> {
+    /// pandas' `cummax(axis=<no_default>, numeric_only=False)` (see
+    /// [`Self::cumsum`]).
+    #[pyo3(signature = (axis=Passed(None), numeric_only=false))]
+    fn cummax(&self, py: Python<'_>, axis: Passed<'_>, numeric_only: bool) -> PyResult<PySeries> {
+        let _ = numeric_only;
+        groupby_axis(py, "SeriesGroupBy", "cummax", &axis, false)?;
         let res = self
             .series
             .groupby(&self.by)
@@ -53606,12 +53863,26 @@ impl PySeriesGroupBy {
         self.wrap_result("sem", res)
     }
 
-    fn skew(&self) -> PyResult<Py<PyAny>> {
+    /// pandas' `skew(axis=<no_default>, skipna=True, numeric_only=False)`:
+    /// the deprecated axis ([`groupby_axis`]; the integer 0 is quiet, as
+    /// pandas'), skipna=False a NaN for a group holding a missing value,
+    /// numeric_only pandas' TypeError over a non-numeric Series (the
+    /// keywords were unexpected - br-frankenpandas-n57tz).
+    #[pyo3(signature = (axis=Passed(None), skipna=true, numeric_only=false))]
+    fn skew(
+        &self,
+        py: Python<'_>,
+        axis: Passed<'_>,
+        skipna: bool,
+        numeric_only: bool,
+    ) -> PyResult<Py<PyAny>> {
+        groupby_axis(py, "SeriesGroupBy", "skew", &axis, true)?;
+        self.check_numeric_only("skew", numeric_only)?;
         let res = self
             .series
             .groupby(&self.by)
             .map_err(frame_error_to_py)?
-            .skew()
+            .skew_with_skipna(skipna)
             .map_err(float_conversion_error_to_py)?;
         self.wrap_result("skew", res)
     }
@@ -71573,7 +71844,7 @@ mod tests {
         assert_eq!(last_s.inner.len(), 2);
         let size_s = as_series(sgb.size());
         assert_eq!(size_s.inner.len(), 2);
-        let nq = as_series(sgb.nunique());
+        let nq = as_series(sgb.nunique(true));
         assert_eq!(nq.inner.len(), 2);
         assert_eq!(sgb.ngroups().expect("ngroups"), 2); // ubs:ignore — test fixture
 
@@ -71623,7 +71894,7 @@ mod tests {
         })
         .expect("size"); // ubs:ignore — test fixture
         assert_eq!(gb_size.inner.len(), 2);
-        let gb_nq = gb.nunique().expect("nunique"); // ubs:ignore — test fixture
+        let gb_nq = gb.nunique(true).expect("nunique"); // ubs:ignore — test fixture
         assert_eq!(gb_nq.shape(), (2, 1));
         assert_eq!(gb.ngroups().expect("ngroups"), 2); // ubs:ignore — test fixture
 

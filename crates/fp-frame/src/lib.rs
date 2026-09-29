@@ -3722,6 +3722,30 @@ fn vals_are_timedelta(vals: &[Scalar]) -> bool {
     saw
 }
 
+/// A group's running max (`max`) or min of datetime64 cells, a NaT kept
+/// where it sits; None unless every present cell is a datetime
+/// (br-frankenpandas-cemrq: the f64 folds read them as missing).
+fn running_datetime_extreme(vals: &[Scalar], max: bool) -> Option<Vec<Scalar>> {
+    let mut present = vals.iter().filter(|v| !v.is_missing()).peekable();
+    present.peek()?;
+    if !present.all(|v| matches!(v, Scalar::Datetime64(_))) {
+        return None;
+    }
+    let mut acc: Option<i64> = None;
+    Some(
+        vals.iter()
+            .map(|v| match v {
+                Scalar::Datetime64(ns) if *ns != fp_types::Timestamp::NAT => {
+                    let next = acc.map_or(*ns, |a| if max { a.max(*ns) } else { a.min(*ns) });
+                    acc = Some(next);
+                    Scalar::Datetime64(next)
+                }
+                _ => Scalar::Datetime64(fp_types::Timestamp::NAT),
+            })
+            .collect(),
+    )
+}
+
 fn build_mode_column(values: Vec<Scalar>) -> Result<Column, FrameError> {
     if let Some(dtype) = mode_output_dtype(&values) {
         Ok(Column::new(dtype, values)?)
@@ -45029,6 +45053,39 @@ impl SeriesGroupBy<'_> {
 
     /// Per br-frankenpandas-c1bxu: true when every non-missing value in the
     /// column is Timedelta64 (and at least one is). Allows NaT/Null markers.
+    /// pandas' refusals of a cumulative op by dtype: text is its TypeError
+    /// "cumsum is not supported for object dtype", cumsum / cumprod of
+    /// datetime64 its "datetime64 type does not support" one. They were
+    /// all-NaN (br-frankenpandas-cemrq).
+    fn refuse_cum_dtype(&self, how: &str) -> Result<(), FrameError> {
+        match self.series.column.dtype() {
+            DType::Utf8 => Err(FrameError::CompatibilityRejected(format!(
+                "{how} is not supported for object dtype"
+            ))),
+            DType::Datetime64 { .. } if matches!(how, "cumsum" | "cumprod") => {
+                Err(FrameError::CompatibilityRejected(format!(
+                    "datetime64 type does not support {how} operations"
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// A datetime64 column's running max (`max`) or min per group, NaT
+    /// kept, in the column's dtype (zone included).
+    fn datetime_cum_extreme(&self, max: bool) -> Result<Series, FrameError> {
+        let dtype = self.series.column.dtype();
+        let running = self.transform_groups(|vals| {
+            running_datetime_extreme(vals, max)
+                .unwrap_or_else(|| vec![Scalar::Datetime64(fp_types::Timestamp::NAT); vals.len()])
+        })?;
+        Series::new(
+            running.name(),
+            running.index().clone(),
+            running.column().with_dtype(dtype),
+        )
+    }
+
     fn column_is_timedelta(&self) -> bool {
         let mut saw_td = false;
         for v in self.series.column.values() {
@@ -45948,6 +46005,28 @@ impl SeriesGroupBy<'_> {
         }
     }
 
+    /// pandas' `any(skipna=...)` / `all(skipna=...)`: with `skipna=false` a
+    /// missing value is read, as numpy's bool of NaN, truthy - `any` of a
+    /// group holding one is True, and `all` is unchanged, a skipped value
+    /// never having made it False (br-frankenpandas-n57tz: the keyword was
+    /// unexpected). pandas' nullable dtypes answer `<NA>` instead (Kleene
+    /// logic); callers refuse those.
+    pub fn bool_reduce_with_skipna(&self, all: bool, skipna: bool) -> Result<Series, FrameError> {
+        if all {
+            return self.all();
+        }
+        if skipna {
+            return self.any();
+        }
+        let values = self.series.column.values();
+        self.agg_scalar(self.series.name(), |indices| {
+            Scalar::Bool(indices.iter().any(|&idx| {
+                let value = &values[idx];
+                value.is_missing() || Series::scalar_truthy(value)
+            }))
+        })
+    }
+
     /// Whether any non-missing value is truthy in each group.
     pub fn any(&self) -> Result<Series, FrameError> {
         if let Some(result) = self.group_bool_reduce_dense(false) {
@@ -46112,6 +46191,29 @@ impl SeriesGroupBy<'_> {
             index,
             Column::from_values(values)?,
         )?))
+    }
+
+    /// pandas' `nunique(dropna=...)`: with `dropna=false` a group's missing
+    /// values count as one more distinct value (br-frankenpandas-n57tz: the
+    /// keyword was unexpected).
+    pub fn nunique_with_dropna(&self, dropna: bool) -> Result<Series, FrameError> {
+        if dropna {
+            return self.nunique();
+        }
+        let values = self.series.column.values();
+        self.agg_scalar(self.series.name(), |indices| {
+            let mut seen = FxHashSet::default();
+            let mut missing = false;
+            for &idx in indices {
+                match scalar_key_skip_missing(&values[idx]) {
+                    Some(key) => {
+                        seen.insert(key);
+                    }
+                    None => missing = true,
+                }
+            }
+            Scalar::Int64(i64::try_from(seen.len() + usize::from(missing)).unwrap_or(i64::MAX))
+        })
     }
 
     pub fn nunique(&self) -> Result<Series, FrameError> {
@@ -46762,6 +46864,42 @@ impl SeriesGroupBy<'_> {
             fp_types::nansem_grouped(values, 1)
         })
         .and_then(float_moment_series)
+    }
+
+    /// pandas' `skew(skipna=...)`: with `skipna=false` a group holding a
+    /// missing value is NaN (br-frankenpandas-n57tz: the keyword was
+    /// unexpected).
+    pub fn skew_with_skipna(&self, skipna: bool) -> Result<Series, FrameError> {
+        let skew = self.skew()?;
+        if skipna {
+            return Ok(skew);
+        }
+        let values = self.series.column.values();
+        let missing = self.agg_scalar(self.series.name(), |indices| {
+            Scalar::Bool(indices.iter().any(|&idx| values[idx].is_missing()))
+        })?;
+        if missing.len() != skew.len() {
+            return Err(FrameError::CompatibilityRejected(
+                "skew(skipna=False): the groups differ from skew's".to_owned(),
+            ));
+        }
+        let cells = skew
+            .values()
+            .iter()
+            .zip(missing.values())
+            .map(|(cell, missing)| {
+                if matches!(missing, Scalar::Bool(true)) {
+                    Scalar::Float64(f64::NAN)
+                } else {
+                    cell.clone()
+                }
+            })
+            .collect();
+        Series::new(
+            skew.name(),
+            skew.index().clone(),
+            Column::from_values(cells)?,
+        )
     }
 
     /// Skewness of each group.
@@ -47579,6 +47717,7 @@ impl SeriesGroupBy<'_> {
 
     /// GroupBy cumulative sum.
     pub fn cumsum(&self) -> Result<Series, FrameError> {
+        self.refuse_cum_dtype("cumsum")?;
         // Per br-frankenpandas-v6j38: Timedelta64 cumsum preserves dtype.
         // Sister to br-gqrmf (Series::cumsum) and br-c1bxu (groupby sum).
         if self.column_is_timedelta() {
@@ -47629,6 +47768,7 @@ impl SeriesGroupBy<'_> {
 
     /// GroupBy cumulative product.
     pub fn cumprod(&self) -> Result<Series, FrameError> {
+        self.refuse_cum_dtype("cumprod")?;
         // Per br-frankenpandas-v6j38: pandas raises TypeError on
         // td.groupby(...).cumprod() (Timedelta² dimensionless). Mirror
         // Series::cumprod (br-v36qy) by emitting NaT per position.
@@ -47667,6 +47807,10 @@ impl SeriesGroupBy<'_> {
 
     /// GroupBy cumulative minimum.
     pub fn cummin(&self) -> Result<Series, FrameError> {
+        self.refuse_cum_dtype("cummin")?;
+        if matches!(self.series.column.dtype(), DType::Datetime64 { .. }) {
+            return self.datetime_cum_extreme(false);
+        }
         // Per br-frankenpandas-v6j38: Timedelta64 cummin preserves dtype.
         // Sister to br-v7spg (Series::cummin) and br-tgm2i (groupby min).
         if self.column_is_timedelta() {
@@ -47716,6 +47860,10 @@ impl SeriesGroupBy<'_> {
 
     /// GroupBy cumulative maximum.
     pub fn cummax(&self) -> Result<Series, FrameError> {
+        self.refuse_cum_dtype("cummax")?;
+        if matches!(self.series.column.dtype(), DType::Datetime64 { .. }) {
+            return self.datetime_cum_extreme(true);
+        }
         // Per br-frankenpandas-v6j38: Timedelta64 cummax preserves dtype.
         if self.column_is_timedelta() {
             return self.transform_groups(|vals| {
@@ -48436,6 +48584,24 @@ impl SeriesGroupBy<'_> {
 
     /// Count non-missing values within each group.
     pub fn value_counts(&self) -> Result<Series, FrameError> {
+        self.value_counts_with_options(false, true, false, true)
+    }
+
+    /// pandas' `SeriesGroupBy.value_counts(normalize, sort, ascending,
+    /// dropna)`: the count of each (group, value), values in sorted order;
+    /// `sort` orders each group by count (descending unless `ascending`), a
+    /// tie keeping value order; `dropna=false` counts the missing values as
+    /// one NaN value, last; `normalize` divides by the group's total of what
+    /// is counted, as `proportion` (br-frankenpandas-n57tz: the keywords
+    /// were unexpected).
+    #[allow(clippy::cast_precision_loss)] // counts stay far below 2^53
+    pub fn value_counts_with_options(
+        &self,
+        normalize: bool,
+        sort: bool,
+        ascending: bool,
+        dropna: bool,
+    ) -> Result<Series, FrameError> {
         let (order, order_keys, groups) = self.build_groups();
         let values = self.series.column.values();
         let mut out_labels = Vec::new();
@@ -48447,10 +48613,16 @@ impl SeriesGroupBy<'_> {
             let group_label = &order[group_idx];
             let mut value_counts: Vec<(Scalar, i64)> = Vec::new();
             let mut index_by_key: FxHashMap<ScalarKey<'_>, usize> = FxHashMap::default();
+            // The missing values count as one value (pandas groups None with
+            // NaN), kept as the first one seen.
+            let mut missing: Option<(Scalar, i64)> = None;
 
             for &row_idx in &groups[key] {
                 let value = &values[row_idx];
                 let Some(value_key) = scalar_key_skip_missing(value) else {
+                    if !dropna {
+                        missing.get_or_insert_with(|| (value.clone(), 0)).1 += 1;
+                    }
                     continue;
                 };
                 match index_by_key.get(&value_key) {
@@ -48463,19 +48635,37 @@ impl SeriesGroupBy<'_> {
             }
             drop(index_by_key);
 
-            // pandas counts over (group, value) keys sorted by value, then
-            // sorts each group by count descending: a tie keeps value order.
-            value_counts.sort_by(|(left, left_count), (right, right_count)| {
-                right_count
-                    .cmp(left_count)
-                    .then_with(|| compare_scalars_with_na_position(left, right, true, false))
+            // pandas counts over (group, value) keys sorted by value, the
+            // missing value last, then stable-sorts by count: a tie keeps
+            // value order.
+            value_counts.sort_by(|(left, _), (right, _)| {
+                compare_scalars_with_na_position(left, right, true, false)
             });
+            value_counts.extend(missing);
+            if sort {
+                value_counts.sort_by(|(_, left), (_, right)| {
+                    if ascending {
+                        left.cmp(right)
+                    } else {
+                        right.cmp(left)
+                    }
+                });
+            }
+            let total: i64 = value_counts.iter().map(|(_, count)| count).sum();
 
             for (value, count) in value_counts {
                 out_labels.push(IndexLabel::Utf8(format!("{group_label}, {value}")));
                 group_level.push(group_label.clone());
-                value_level.push(scalar_to_index_label(&value)?);
-                out_counts.push(Scalar::Int64(count));
+                value_level.push(if value.is_missing() {
+                    scalar_to_value_counts_index_label(&value)
+                } else {
+                    scalar_to_index_label(&value)?
+                });
+                out_counts.push(if normalize {
+                    Scalar::Float64(count as f64 / total as f64)
+                } else {
+                    Scalar::Int64(count)
+                });
             }
         }
 
@@ -48498,7 +48688,11 @@ impl SeriesGroupBy<'_> {
             .rename_index(idx_name)
             .with_row_multiindex(levels)?;
         let column = Column::from_values(out_counts)?;
-        Series::new("count", index, column)
+        Series::new(
+            if normalize { "proportion" } else { "count" },
+            index,
+            column,
+        )
     }
 
     /// Summary statistics per group.
@@ -106445,6 +106639,27 @@ impl DataFrameGroupBy<'_> {
         self.aggregate_named_func("all")
     }
 
+    /// pandas' `any(skipna=...)` / `all(skipna=...)`: with `skipna=false` a
+    /// missing value is read, as numpy's bool of NaN, truthy - `any` of a
+    /// group holding one is True, and `all` is unchanged, a skipped value
+    /// never having made it False (br-frankenpandas-n57tz: the keyword was
+    /// unexpected). pandas' nullable dtypes answer `<NA>` instead (Kleene
+    /// logic); callers refuse those.
+    pub fn bool_reduce_with_skipna(
+        &self,
+        all: bool,
+        skipna: bool,
+    ) -> Result<DataFrame, FrameError> {
+        let reduced = if all { self.all()? } else { self.any()? };
+        if skipna || all {
+            return Ok(reduced);
+        }
+        self.with_missing_cells(&reduced, "any", |cell, missing| match cell {
+            Scalar::Bool(any) => Scalar::Bool(*any || missing),
+            other => other.clone(),
+        })
+    }
+
     /// GroupBy quantile.
     pub fn quantile(&self, q: f64) -> Result<DataFrame, FrameError> {
         if !(0.0..=1.0).contains(&q) {
@@ -107611,6 +107826,67 @@ impl DataFrameGroupBy<'_> {
             return Ok(df);
         }
         self.aggregate_named_func("nunique")
+    }
+
+    /// pandas' `nunique(dropna=...)`: with `dropna=false` a group's missing
+    /// values count as one more distinct value, column by column - a
+    /// column's group has one where its size passes its count
+    /// (br-frankenpandas-n57tz: the keyword was unexpected).
+    pub fn nunique_with_dropna(&self, dropna: bool) -> Result<DataFrame, FrameError> {
+        let unique = self.nunique()?;
+        if dropna {
+            return Ok(unique);
+        }
+        self.with_missing_cells(&unique, "nunique", |distinct, missing| match distinct {
+            Scalar::Int64(distinct) => Scalar::Int64(distinct + i64::from(missing)),
+            other => other.clone(),
+        })
+    }
+
+    /// `result` (one row per group, one column per value column) with each
+    /// cell passed through `combine` beside whether that group holds a
+    /// missing value in that column - a group whose size passes its count.
+    fn with_missing_cells(
+        &self,
+        result: &DataFrame,
+        op: &str,
+        combine: impl Fn(&Scalar, bool) -> Scalar,
+    ) -> Result<DataFrame, FrameError> {
+        let counts = self.count()?;
+        let sizes = self.size()?;
+        if counts.index().labels() != result.index().labels()
+            || sizes.len() != result.len()
+            || counts.num_columns() != result.num_columns()
+        {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "{op}: count and size grouped differently from the result"
+            )));
+        }
+        let mut columns = Vec::with_capacity(result.num_columns());
+        for position in 0..result.num_columns() {
+            let (Some(cells), Some(count)) =
+                (result.column_at(position), counts.column_at(position))
+            else {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "{op}: no column {position}"
+                )));
+            };
+            let values = cells
+                .values()
+                .iter()
+                .zip(count.values())
+                .zip(sizes.values())
+                .map(|((cell, count), size)| {
+                    let missing = matches!(
+                        (count, size),
+                        (Scalar::Int64(count), Scalar::Int64(size)) if size > count
+                    );
+                    combine(cell, missing)
+                })
+                .collect();
+            columns.push(Column::from_values(values)?);
+        }
+        Ok(result.with_columns_at_positions(columns))
     }
 
     /// GroupBy prod (product of non-null values per group).
@@ -110905,25 +111181,78 @@ impl DataFrameGroupBy<'_> {
     /// GroupBy cumulative sum. Matches `df.groupby(col).cumsum()`, dtype
     /// included: int64 and bool columns come back int64.
     pub fn cumsum(&self) -> Result<DataFrame, FrameError> {
+        self.refuse_cum_dtypes("cumsum")?;
         self.keep_integral_cum_columns(self.cumsum_f64()?, CumOp::Sum)
     }
 
     /// GroupBy cumulative product. Matches `df.groupby(col).cumprod()`, dtype
     /// included: int64 and bool columns come back int64.
     pub fn cumprod(&self) -> Result<DataFrame, FrameError> {
+        self.refuse_cum_dtypes("cumprod")?;
         self.keep_integral_cum_columns(self.cumprod_f64()?, CumOp::Prod)
     }
 
     /// GroupBy cumulative max. Matches `df.groupby(col).cummax()`, dtype
-    /// included: int64 stays int64 and bool stays bool.
+    /// included: int64 stays int64, bool stays bool and datetime64 keeps
+    /// its zone.
     pub fn cummax(&self) -> Result<DataFrame, FrameError> {
-        self.keep_integral_cum_columns(self.cummax_f64()?, CumOp::Max)
+        self.refuse_cum_dtypes("cummax")?;
+        let out = self.keep_integral_cum_columns(self.cummax_f64()?, CumOp::Max)?;
+        self.keep_datetime_cum_columns(out)
     }
 
     /// GroupBy cumulative min. Matches `df.groupby(col).cummin()`, dtype
-    /// included: int64 stays int64 and bool stays bool.
+    /// included: int64 stays int64, bool stays bool and datetime64 keeps
+    /// its zone.
     pub fn cummin(&self) -> Result<DataFrame, FrameError> {
-        self.keep_integral_cum_columns(self.cummin_f64()?, CumOp::Min)
+        self.refuse_cum_dtypes("cummin")?;
+        let out = self.keep_integral_cum_columns(self.cummin_f64()?, CumOp::Min)?;
+        self.keep_datetime_cum_columns(out)
+    }
+
+    /// pandas' refusals of a cumulative op by dtype: a text (object)
+    /// column is its cython NotImplementedError, and cumsum / cumprod of a
+    /// datetime64 one its TypeError. They were folded as all-NaN columns
+    /// (br-frankenpandas-cemrq).
+    fn refuse_cum_dtypes(&self, how: &str) -> Result<(), FrameError> {
+        for name in self.df.column_order.iter().filter(|c| !self.by.contains(c)) {
+            match self.df.columns[name].dtype() {
+                DType::Utf8 => {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "function is not implemented for this dtype: [how->{how},dtype->object]"
+                    )));
+                }
+                DType::Datetime64 { .. } if matches!(how, "cumsum" | "cumprod") => {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "datetime64 type does not support {how} operations"
+                    )));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// A datetime64 column's running max / min in its own dtype, zone
+    /// included (the fold's cells carry no zone).
+    fn keep_datetime_cum_columns(&self, mut out: DataFrame) -> Result<DataFrame, FrameError> {
+        let datetime: Vec<(String, DType)> = self
+            .df
+            .column_order
+            .iter()
+            .filter(|name| !self.by.contains(name))
+            .filter_map(|name| {
+                let dtype = self.df.columns[name].dtype();
+                matches!(dtype, DType::Datetime64 { .. }).then(|| (name.clone(), dtype))
+            })
+            .collect();
+        for (name, dtype) in datetime {
+            if let Some(column) = out.column(&name) {
+                let column = column.with_dtype(dtype);
+                out = out.with_column(name, column)?;
+            }
+        }
+        Ok(out)
     }
 
     /// pandas keeps an all-valid int64 column int64 through groupby
@@ -111072,8 +111401,12 @@ impl DataFrameGroupBy<'_> {
         ) {
             return Ok(df);
         }
-        // Per br-frankenpandas-ccf67: Timedelta cummax preserves dtype.
+        // Per br-frankenpandas-ccf67: Timedelta cummax preserves dtype;
+        // datetime64 too (it was all-NaN; br-frankenpandas-cemrq).
         self.transform_groups(|vals| {
+            if let Some(running) = running_datetime_extreme(vals, true) {
+                return running;
+            }
             if vals_are_timedelta(vals) {
                 let mut acc: Option<i64> = None;
                 return vals
@@ -111116,8 +111449,12 @@ impl DataFrameGroupBy<'_> {
         ) {
             return Ok(df);
         }
-        // Per br-frankenpandas-ccf67: Timedelta cummin preserves dtype.
+        // Per br-frankenpandas-ccf67: Timedelta cummin preserves dtype;
+        // datetime64 too (it was all-NaN; br-frankenpandas-cemrq).
         self.transform_groups(|vals| {
+            if let Some(running) = running_datetime_extreme(vals, false) {
+                return running;
+            }
             if vals_are_timedelta(vals) {
                 let mut acc: Option<i64> = None;
                 return vals
@@ -112506,6 +112843,23 @@ impl DataFrameGroupBy<'_> {
             column_multiindex: None,
             row_multiindex: None,
             allows_duplicate_labels: self.df.allows_duplicate_labels,
+        })
+    }
+
+    /// pandas' `skew(skipna=...)`: with `skipna=false` a group holding a
+    /// missing value in a column is NaN there (br-frankenpandas-n57tz: the
+    /// keyword was unexpected).
+    pub fn skew_with_skipna(&self, skipna: bool) -> Result<DataFrame, FrameError> {
+        let skew = self.skew()?;
+        if skipna {
+            return Ok(skew);
+        }
+        self.with_missing_cells(&skew, "skew", |cell, missing| {
+            if missing {
+                Scalar::Float64(f64::NAN)
+            } else {
+                cell.clone()
+            }
         })
     }
 
@@ -182567,6 +182921,238 @@ mod tests {
                 .row_multiindex()
                 .map(|levels| levels.names().to_vec()),
             Some(vec![Some("k".into()), None])
+        );
+
+        // br-frankenpandas-n57tz: normalize / sort / ascending / dropna.
+        let with_missing = Series::from_values(
+            "v",
+            (0_i64..5).map(Into::into).collect(),
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+            ],
+        )?;
+        let grouped = with_missing.groupby(&keys)?;
+        let value_level = |counts: &Series| -> Result<Vec<IndexLabel>, FrameError> {
+            Ok(counts
+                .index()
+                .row_multiindex()
+                .expect("(key, value) levels")
+                .get_level_values(1)?
+                .labels()
+                .to_vec())
+        };
+        let text = |value: &str| IndexLabel::Utf8(value.into());
+        // Group b (first seen) holds a, b, None, b; group a holds a: counted
+        // without the None (the default), then with it last as one NaN
+        // value.
+        let counts = grouped.value_counts_with_options(false, true, false, true)?;
+        assert_eq!(counts.values(), grouped.value_counts()?.values());
+        assert_eq!(value_level(&counts)?, [text("b"), text("a"), text("a")]);
+        let kept = grouped.value_counts_with_options(false, true, false, false)?;
+        assert_eq!(
+            value_level(&kept)?,
+            [
+                text("b"),
+                text("a"),
+                IndexLabel::Null(NullKind::NaN),
+                text("a")
+            ]
+        );
+        // Normalized by what is counted: b holds 4 values with dropna=False.
+        let shares = grouped.value_counts_with_options(true, true, false, false)?;
+        assert_eq!(shares.name(), "proportion");
+        assert_eq!(
+            shares.values(),
+            [
+                Scalar::Float64(0.5),
+                Scalar::Float64(0.25),
+                Scalar::Float64(0.25),
+                Scalar::Float64(1.0)
+            ]
+        );
+        // ascending puts the smaller counts first; sort=false keeps value
+        // order (the same here).
+        let ascending = grouped.value_counts_with_options(false, true, true, true)?;
+        assert_eq!(value_level(&ascending)?, [text("a"), text("b"), text("a")]);
+        let unsorted = grouped.value_counts_with_options(false, false, false, true)?;
+        assert_eq!(value_level(&unsorted)?, [text("a"), text("b"), text("a")]);
+        Ok(())
+    }
+
+    #[test]
+    fn groupby_missing_value_keywords_n57tz() -> Result<(), FrameError> {
+        // x: v = 1, 2, 4, NaN and f = 0, 0, 0, NaN; y: v = 1, 2, 4, f = 0s.
+        let nan = Scalar::Null(NullKind::NaN);
+        let floats = |values: [f64; 3]| values.into_iter().map(Scalar::Float64);
+        let v: Vec<Scalar> = floats([1.0, 2.0, 4.0])
+            .chain([nan.clone()])
+            .chain(floats([1.0, 2.0, 4.0]))
+            .collect();
+        let f: Vec<Scalar> = floats([0.0; 3])
+            .chain([nan])
+            .chain(floats([0.0; 3]))
+            .collect();
+        let k: Vec<Scalar> = ["x", "x", "x", "x", "y", "y", "y"]
+            .into_iter()
+            .map(|key| Scalar::Utf8(key.into()))
+            .collect();
+        let frame = DataFrame::from_dict(
+            &["k", "v", "f"],
+            vec![("k", k.clone()), ("v", v.clone()), ("f", f)],
+        )?;
+        let grouped = frame.groupby(&["k"])?;
+        let column =
+            |df: &DataFrame, name: &str| df.column(name).expect("column").values().to_vec();
+        let ints = |a: i64, b: i64| vec![Scalar::Int64(a), Scalar::Int64(b)];
+        // nunique: x's NaN is one more value with dropna=false.
+        let unique = grouped.nunique_with_dropna(true)?;
+        assert_eq!(column(&unique, "v"), ints(3, 3));
+        let with_nan = grouped.nunique_with_dropna(false)?;
+        assert_eq!(column(&with_nan, "v"), ints(4, 3));
+        assert_eq!(column(&with_nan, "f"), ints(2, 1));
+        // any(skipna=false): x's NaN is truthy; all is unchanged.
+        let bools = |a: bool, b: bool| vec![Scalar::Bool(a), Scalar::Bool(b)];
+        let any = grouped.bool_reduce_with_skipna(false, true)?;
+        assert_eq!(column(&any, "f"), bools(false, false));
+        let any_nan = grouped.bool_reduce_with_skipna(false, false)?;
+        assert_eq!(column(&any_nan, "f"), bools(true, false));
+        assert_eq!(
+            column(&grouped.bool_reduce_with_skipna(true, false)?, "f"),
+            column(&grouped.all()?, "f")
+        );
+        // skew(skipna=false): x holds a NaN; y's skew is unchanged.
+        let skew = grouped.skew_with_skipna(true)?;
+        let skew_nan = grouped.skew_with_skipna(false)?;
+        assert!(matches!(column(&skew_nan, "v")[0], Scalar::Float64(x) if x.is_nan()));
+        assert_eq!(column(&skew_nan, "v")[1], column(&skew, "v")[1]);
+        assert_eq!(column(&skew, "v")[0], column(&skew, "v")[1]);
+
+        // The SeriesGroupBy forms agree.
+        let index: Vec<IndexLabel> = (0_i64..7).map(Into::into).collect();
+        let keys = Series::from_values("k", index.clone(), k)?;
+        let series = Series::from_values("v", index, v)?;
+        let grouped = series.groupby(&keys)?;
+        assert_eq!(grouped.nunique_with_dropna(false)?.values(), ints(4, 3));
+        assert_eq!(grouped.nunique_with_dropna(true)?.values(), ints(3, 3));
+        let skew_nan = grouped.skew_with_skipna(false)?;
+        assert!(matches!(skew_nan.values()[0], Scalar::Float64(x) if x.is_nan()));
+        assert_eq!(skew_nan.values()[1], grouped.skew()?.values()[1]);
+        Ok(())
+    }
+
+    #[test]
+    fn groupby_cumulative_text_and_datetime_cemrq() -> Result<(), FrameError> {
+        let keys = || {
+            ["x", "y", "x"]
+                .into_iter()
+                .map(|key| Scalar::Utf8(key.into()))
+                .collect::<Vec<_>>()
+        };
+        let stamps = || {
+            [3_i64, 1, 2]
+                .into_iter()
+                .map(Scalar::Datetime64)
+                .collect::<Vec<_>>()
+        };
+        let refused = |result: Result<DataFrame, FrameError>, text: &str| matches!(result, Err(FrameError::CompatibilityRejected(msg)) if msg == text);
+        // Text: pandas' cython NotImplementedError, for every op.
+        let text = DataFrame::from_dict(
+            &["k", "t"],
+            vec![
+                ("k", keys()),
+                (
+                    "t",
+                    ["p", "q", "r"]
+                        .into_iter()
+                        .map(|t| Scalar::Utf8(t.into()))
+                        .collect(),
+                ),
+            ],
+        )?;
+        let grouped = text.groupby(&["k"])?;
+        assert!(refused(
+            grouped.cumsum(),
+            "function is not implemented for this dtype: [how->cumsum,dtype->object]"
+        ));
+        assert!(refused(
+            grouped.cummax(),
+            "function is not implemented for this dtype: [how->cummax,dtype->object]"
+        ));
+        // Datetime: cumsum / cumprod refused, cummax / cummin run and stay
+        // datetime64 (they were all-NaN).
+        let dates = DataFrame::from_dict(&["k", "d"], vec![("k", keys()), ("d", stamps())])?;
+        let grouped = dates.groupby(&["k"])?;
+        assert!(refused(
+            grouped.cumprod(),
+            "datetime64 type does not support cumprod operations"
+        ));
+        let running_max = grouped.cummax()?;
+        let column = running_max.column("d").expect("d");
+        assert!(matches!(column.dtype(), DType::Datetime64 { .. }));
+        assert_eq!(
+            column.values(),
+            &[
+                Scalar::Datetime64(3),
+                Scalar::Datetime64(1),
+                Scalar::Datetime64(3)
+            ]
+        );
+        assert_eq!(
+            grouped.cummin()?.column("d").expect("d").values(),
+            &[
+                Scalar::Datetime64(3),
+                Scalar::Datetime64(1),
+                Scalar::Datetime64(2)
+            ]
+        );
+        // The SeriesGroupBy forms: text is pandas' TypeError text.
+        let index: Vec<IndexLabel> = (0_i64..3).map(Into::into).collect();
+        let key_series = Series::from_values("k", index.clone(), keys())?;
+        let words = Series::from_values(
+            "t",
+            index.clone(),
+            vec![
+                Scalar::Utf8("p".into()),
+                Scalar::Utf8("q".into()),
+                Scalar::Utf8("r".into()),
+            ],
+        )?;
+        assert!(matches!(
+            words.groupby(&key_series)?.cummin(),
+            Err(FrameError::CompatibilityRejected(msg)) if msg == "cummin is not supported for object dtype"
+        ));
+        let when = Series::from_values("d", index.clone(), stamps())?;
+        let running_min = when.groupby(&key_series)?.cummin()?;
+        assert!(matches!(running_min.dtype(), DType::Datetime64 { .. }));
+        assert_eq!(
+            running_min.values(),
+            &[
+                Scalar::Datetime64(3),
+                Scalar::Datetime64(1),
+                Scalar::Datetime64(2)
+            ]
+        );
+        // NEGATIVE: a float column folds as before.
+        let numbers = Series::from_values(
+            "n",
+            index,
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(0.5),
+            ],
+        )?;
+        assert_eq!(
+            numbers.groupby(&key_series)?.cummax()?.values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(1.0)
+            ]
         );
         Ok(())
     }
