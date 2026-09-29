@@ -66547,6 +66547,21 @@ impl PyInterval {
             fp_types::Scalar::Float64(value).python_repr()
         }
     }
+
+    /// pandas' interval equality: the same endpoints and closed side (the
+    /// endpoints compare exactly, as its left / right arrays do).
+    fn same_interval(&self, other: &Self) -> bool {
+        self.closed == other.closed
+            && self.left.total_cmp(&other.left).is_eq()
+            && self.right.total_cmp(&other.right).is_eq()
+    }
+
+    /// The order pandas sorts intervals in: by left, then right endpoint.
+    fn sort_key(&self, other: &Self) -> std::cmp::Ordering {
+        self.left
+            .total_cmp(&other.left)
+            .then(self.right.total_cmp(&other.right))
+    }
 }
 
 #[pymethods]
@@ -66847,9 +66862,18 @@ impl PyIntervalIndex {
         self.name.clone()
     }
 
+    /// pandas' `length`: each interval's right - left, int64 for int
+    /// endpoints (it was the count of intervals; 4qg5w.7).
     #[getter]
-    fn length(&self) -> usize {
-        self.intervals.len()
+    fn length(&self) -> PyIndex {
+        let labels = self
+            .intervals
+            .iter()
+            .map(|iv| self.endpoint_label(iv.right - iv.left))
+            .collect();
+        PyIndex {
+            inner: Index::new(labels),
+        }
     }
 
     fn __len__(&self) -> usize {
@@ -66982,42 +67006,189 @@ impl PyIntervalIndex {
         BoolArray::from(self.to_rust().contains(point))
     }
 
-    fn get_loc(&self, point: f64) -> PyResult<usize> {
-        self.to_rust()
-            .get_loc(point)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))
-    }
-
-    #[pyo3(signature = (target))]
-    fn get_indexer(&self, target: &Bound<'_, PyAny>) -> PyResult<Vec<i64>> {
-        let rust_idx = self.to_rust();
-        let points: Vec<f64> = if let Ok(v) = target.extract::<Vec<f64>>() {
-            v
-        } else if let Ok(seq) = target.cast::<pyo3::types::PySequence>() {
-            let len = seq.len()?;
-            let mut pts = Vec::with_capacity(len);
-            for i in 0..len {
-                pts.push(seq.get_item(i)?.extract::<f64>()?);
-            }
-            pts
+    /// pandas' `get_loc(key)`: the intervals equal to `key` (an Interval,
+    /// its closed side included) or holding the point `key` - one as a numpy
+    /// int, several as a slice when they run together, else a bool mask;
+    /// none is pandas' KeyError(key). An Interval key raised TypeError and
+    /// several matches KeyError (4qg5w.7).
+    fn get_loc(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let missing = || PyErr::new::<pyo3::exceptions::PyKeyError, _>(key.clone().unbind());
+        let mask: Vec<bool> = if let Ok(interval) = key.extract::<PyInterval>() {
+            self.intervals
+                .iter()
+                .map(|iv| iv.same_interval(&interval))
+                .collect()
         } else {
-            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "target must be a sequence of floats",
-            ));
+            let point: f64 = key.extract().map_err(|_| missing())?;
+            self.to_rust().contains(point)
         };
-        Ok(rust_idx
-            .get_indexer(&points)
-            .into_iter()
-            .map(|opt| opt.map_or(-1, |u| u as i64))
-            .collect())
+        let positions: Vec<usize> = (0..mask.len()).filter(|&at| mask[at]).collect();
+        match positions.as_slice() {
+            [] => Err(missing()),
+            [only] => numpy_scalar(py, &Scalar::Int64(i64::try_from(*only).unwrap_or(i64::MAX))),
+            [first, .., last] if last - first + 1 == positions.len() => py
+                .get_type::<pyo3::types::PySlice>()
+                .call1((*first, *last + 1))?
+                .into_py_any(py),
+            _ => BoolArray::from(mask).into_py_any(py),
+        }
     }
 
-    fn get_indexer_for(&self, target: &Bound<'_, PyAny>) -> PyResult<Vec<i64>> {
+    /// pandas' `get_indexer(target)`: each target's position - an Interval
+    /// the equal interval's, a point the interval holding it's - -1 where
+    /// none, as an int64 array (a list; Interval targets raised; 4qg5w.7).
+    #[pyo3(signature = (target))]
+    fn get_indexer(&self, target: &Bound<'_, PyAny>) -> PyResult<IndexerArray> {
+        let index = self.to_rust();
+        let mut positions = Vec::new();
+        for item in target.try_iter()? {
+            let item = item?;
+            let position = if let Ok(interval) = item.extract::<PyInterval>() {
+                self.intervals
+                    .iter()
+                    .position(|iv| iv.same_interval(&interval))
+            } else {
+                let point: f64 = item.extract()?;
+                index.get_indexer(&[point]).into_iter().next().flatten()
+            };
+            positions.push(position.map_or(-1, |at| i64::try_from(at).unwrap_or(i64::MAX)));
+        }
+        Ok(positions.into_iter().collect())
+    }
+
+    fn get_indexer_for(&self, target: &Bound<'_, PyAny>) -> PyResult<IndexerArray> {
         self.get_indexer(target)
     }
 
-    fn to_tuples(&self) -> Vec<(f64, f64)> {
-        self.to_rust().to_tuples()
+    /// pandas' `to_tuples()`: an object Index of (left, right) tuples, ints
+    /// for int endpoints (it was a list of float pairs; 4qg5w.7).
+    fn to_tuples(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let tuples = self
+            .intervals
+            .iter()
+            .map(|iv| PyTuple::new(py, [iv.endpoint(py, iv.left)?, iv.endpoint(py, iv.right)?]))
+            .collect::<PyResult<Vec<_>>>()?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("tupleize_cols", false)?;
+        kwargs.set_item("name", &self.name)?;
+        Ok(py
+            .get_type::<PyIndex>()
+            .call((PyList::new(py, tuples)?,), Some(&kwargs))?
+            .unbind())
+    }
+
+    /// pandas' `values`: its IntervalArray, as `array` (there was none).
+    #[getter]
+    fn values(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        index_array(slf.as_any())
+    }
+
+    /// pandas' `is_empty`: whether each interval holds no point - equal
+    /// endpoints not closed on both sides (there was none; 4qg5w.7).
+    #[getter]
+    fn is_empty(&self) -> BoolArray {
+        BoolArray::from(
+            self.intervals
+                .iter()
+                .map(|iv| iv.left.total_cmp(&iv.right).is_eq() && iv.closed != "both")
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// pandas' `equals(other)`: another IntervalIndex of the same intervals
+    /// in the same order (there was none).
+    fn equals(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .extract::<PyRef<'_, Self>>()
+            .is_ok_and(|other| self.same_intervals(&other))
+    }
+
+    /// pandas' `sort_values(ascending=True)`: by left, then right endpoint
+    /// (there was none).
+    #[pyo3(signature = (ascending=true))]
+    fn sort_values(&self, ascending: bool) -> Self {
+        let mut intervals = self.intervals.clone();
+        intervals.sort_by(|a, b| {
+            let order = a.sort_key(b);
+            if ascending { order } else { order.reverse() }
+        });
+        Self {
+            intervals,
+            name: self.name.clone(),
+        }
+    }
+
+    /// pandas' `unique()`: each interval once, first seen first.
+    fn unique(&self) -> Self {
+        let mut intervals: Vec<PyInterval> = Vec::with_capacity(self.intervals.len());
+        for iv in &self.intervals {
+            if !intervals.iter().any(|seen| seen.same_interval(iv)) {
+                intervals.push(iv.clone());
+            }
+        }
+        Self {
+            intervals,
+            name: self.name.clone(),
+        }
+    }
+
+    /// pandas' `union(other, sort=None)`: this index's intervals, then
+    /// other's not among them, sorted unless `sort=False` or one side is
+    /// empty (there was none; 4qg5w.7).
+    #[pyo3(signature = (other, sort=None))]
+    fn union(&self, other: &Self, sort: Option<bool>) -> Self {
+        let mut intervals = self.unique().intervals;
+        for iv in &other.intervals {
+            if !intervals.iter().any(|seen| seen.same_interval(iv)) {
+                intervals.push(iv.clone());
+            }
+        }
+        self.set_result(intervals, other, sort, true)
+    }
+
+    /// pandas' `intersection(other, sort=False)`: this index's intervals
+    /// that other holds, in this index's order.
+    #[pyo3(signature = (other, sort=Some(false)))]
+    fn intersection(&self, other: &Self, sort: Option<bool>) -> Self {
+        let intervals = self
+            .unique()
+            .intervals
+            .into_iter()
+            .filter(|iv| {
+                other
+                    .intervals
+                    .iter()
+                    .any(|theirs| theirs.same_interval(iv))
+            })
+            .collect();
+        self.set_result(intervals, other, sort, false)
+    }
+
+    /// pandas' `difference(other, sort=None)`: this index's intervals that
+    /// other does not hold.
+    #[pyo3(signature = (other, sort=None))]
+    fn difference(&self, other: &Self, sort: Option<bool>) -> Self {
+        let intervals = self
+            .unique()
+            .intervals
+            .into_iter()
+            .filter(|iv| {
+                !other
+                    .intervals
+                    .iter()
+                    .any(|theirs| theirs.same_interval(iv))
+            })
+            .collect();
+        self.set_result(intervals, other, sort, true)
+    }
+
+    /// pandas' `symmetric_difference(other, sort=None)`: the intervals one
+    /// index holds and the other does not.
+    #[pyo3(signature = (other, sort=None))]
+    fn symmetric_difference(&self, other: &Self, sort: Option<bool>) -> Self {
+        let mut intervals = self.difference(other, Some(false)).intervals;
+        intervals.extend(other.difference(self, Some(false)).intervals);
+        self.set_result(intervals, other, sort, true)
     }
 
     fn to_list(&self) -> Vec<PyInterval> {
@@ -67047,7 +67218,9 @@ impl PyIntervalIndex {
         })
     }
 
-    fn overlaps(&self, other: &PyInterval) -> Vec<bool> {
+    /// Whether each interval overlaps `other`, a numpy bool array as pandas'
+    /// (it was a list).
+    fn overlaps(&self, other: &PyInterval) -> BoolArray {
         let other_closed = match other.closed.as_str() {
             "left" => fp_types::IntervalClosed::Left,
             "both" => fp_types::IntervalClosed::Both,
@@ -67055,7 +67228,7 @@ impl PyIntervalIndex {
             _ => fp_types::IntervalClosed::Right,
         };
         let other_iv = fp_types::Interval::new(other.left, other.right, other_closed);
-        self.to_rust().overlaps(&other_iv)
+        BoolArray::from(self.to_rust().overlaps(&other_iv))
     }
 
     fn to_index(&self) -> PyIndex {
@@ -67066,6 +67239,44 @@ impl PyIntervalIndex {
 }
 
 impl PyIntervalIndex {
+    /// Whether `other` holds the same intervals in the same order.
+    fn same_intervals(&self, other: &Self) -> bool {
+        other.intervals.len() == self.intervals.len()
+            && self
+                .intervals
+                .iter()
+                .zip(&other.intervals)
+                .all(|(a, b)| a.same_interval(b))
+    }
+
+    /// A set operation's `intervals` as pandas answers them: sorted when
+    /// `sort` is True, or (None) when the operation sorts by default and the
+    /// two indexes are both non-empty and different; named when both share
+    /// the name.
+    fn set_result(
+        &self,
+        mut intervals: Vec<PyInterval>,
+        other: &Self,
+        sort: Option<bool>,
+        sorts_by_default: bool,
+    ) -> Self {
+        let sorts = sort.unwrap_or_else(|| {
+            sorts_by_default
+                && !self.intervals.is_empty()
+                && !other.intervals.is_empty()
+                && !self.same_intervals(other)
+        });
+        if sorts {
+            intervals.sort_by(PyInterval::sort_key);
+        }
+        let name = if self.name == other.name {
+            self.name.clone()
+        } else {
+            None
+        };
+        Self { intervals, name }
+    }
+
     /// pandas' dtype: `interval[int64, <closed>]` when every endpoint is an
     /// int (an empty index too), else float64.
     fn interval_dtype(&self) -> PyIntervalDtype {
@@ -76492,7 +76703,11 @@ mod tests {
         assert!(pii.is_unique());
         assert!(pii.is_monotonic_increasing());
         assert!(!pii.is_monotonic_decreasing());
-        assert_eq!(pii.to_tuples(), vec![(0.0, 1.5), (1.5, 3.0)]);
+        // TEST-CHANGE (4qg5w.7): to_tuples / get_loc answer pandas' objects
+        // (an object Index of tuples, a numpy int), checked against pandas in
+        // test_interval_index_members_like_pandas_4qg5w7; the pairs and the
+        // position are read here from the Rust index they come from.
+        assert_eq!(pii.to_rust().to_tuples(), vec![(0.0, 1.5), (1.5, 3.0)]);
         assert_eq!(pii.to_list().len(), 2);
         assert_eq!(pii.tolist().len(), 2);
         assert_eq!(pii.name(), Some("iv_idx".to_string()));
@@ -76506,7 +76721,7 @@ mod tests {
 
         assert_eq!(pii.contains(1.0).0, vec![true, false]);
         assert_eq!(pii.contains(2.0).0, vec![false, true]);
-        assert_eq!(pii.get_loc(1.0).unwrap(), 0);
+        assert_eq!(pii.to_rust().get_loc(1.0).unwrap(), 0);
 
         let converted = pii.to_rust();
         assert_eq!(converted.len(), 2);
@@ -76519,7 +76734,7 @@ mod tests {
             closed: "both".to_string(),
             int_endpoints: false,
         };
-        assert_eq!(pii.overlaps(&other), vec![true, true]);
+        assert_eq!(pii.overlaps(&other).0, vec![true, true]);
 
         let closed_both = pii.set_closed("both").unwrap();
         assert_eq!(closed_both.closed(), "both");

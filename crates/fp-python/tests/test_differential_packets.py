@@ -18424,6 +18424,7 @@ _OZ_CASES = {
     "empty frame sum across": lambda m: _oz_shown(_oz_empty(m).sum(axis=1)),
     "empty frame prod across": lambda m: _oz_shown(_oz_empty(m).prod(axis=1)),
     "empty frame mean": lambda m: _oz_shown(_oz_empty(m).mean()),
+    "empty frame min": lambda m: _oz_shown(_oz_empty(m).min()),
     # Negatives: text, the typed empty frame, and pandas' refusals.
     "text sum": lambda m: _oz_shown(m.Series(["a", "b"]).sum()),
     "text mean": lambda m: _oz_shown(m.Series(["a", "b"]).mean()),
@@ -18440,4 +18441,78 @@ _OZ_CASES = {
 @pytest.mark.parametrize("case", list(_OZ_CASES))
 def test_object_reductions_like_pandas_qymo3(case: str) -> None:
     run = _OZ_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.7 (part): IntervalIndex
+# members as pandas' - length per interval (it was the count), get_loc of an
+# Interval or of a point several intervals hold (TypeError / KeyError), numpy
+# results (get_loc, get_indexer, overlaps), to_tuples an object Index, and the
+# missing values / is_empty / equals / sort_values / unique / set operations.
+def _iv_breaks(m: Any, closed: str = "right") -> Any:
+    return m.IntervalIndex.from_breaks([0, 1, 2, 3], closed=closed)
+
+
+def _iv_overlapping(m: Any) -> Any:
+    return m.IntervalIndex.from_tuples([(0, 2), (1, 3), (4, 5)])
+
+
+_IV_CASES = {
+    "length": lambda m: [repr(_iv_breaks(m).length)],
+    "float length": lambda m: [repr(m.IntervalIndex.from_breaks([0.0, 0.5, 2.0]).length)],
+    "get_loc point": lambda m: [repr(_iv_breaks(m).get_loc(1.5))],
+    "get_loc right edge": lambda m: [repr(_iv_breaks(m).get_loc(1))],
+    "get_loc left closed edge": lambda m: [repr(_iv_breaks(m, "left").get_loc(1))],
+    "get_loc interval": lambda m: [repr(_iv_breaks(m).get_loc(m.Interval(1, 2)))],
+    "get_loc overlapping run": lambda m: [repr(_iv_overlapping(m).get_loc(1.5))],
+    "get_loc overlapping mask": lambda m: [
+        repr(m.IntervalIndex.from_tuples([(0, 2), (4, 5), (1, 3)]).get_loc(1.5))
+    ],
+    "get_indexer points": lambda m: [repr(_iv_breaks(m).get_indexer([0.5, 2.5, 5]))],
+    "get_indexer intervals": lambda m: [
+        repr(_iv_breaks(m).get_indexer([m.Interval(1, 2), m.Interval(1, 2, closed="left")]))
+    ],
+    "overlaps": lambda m: [repr(_iv_breaks(m).overlaps(m.Interval(0.5, 1.5)))],
+    "contains": lambda m: [repr(_iv_breaks(m).contains(1.5))],
+    "to_tuples": lambda m: [repr(_iv_breaks(m).to_tuples())],
+    "float to_tuples": lambda m: [repr(m.IntervalIndex.from_breaks([0.0, 0.5]).to_tuples())],
+    "values": lambda m: [repr(_iv_breaks(m).values)],
+    "is_empty": lambda m: [
+        repr(m.IntervalIndex.from_tuples([(0, 0), (0, 1)], closed="right").is_empty),
+        repr(m.IntervalIndex.from_tuples([(0, 0)], closed="both").is_empty),
+    ],
+    "equals": lambda m: [_iv_breaks(m).equals(m.IntervalIndex.from_breaks([0, 1, 2, 3]))],
+    "sort_values": lambda m: [repr(m.IntervalIndex.from_tuples([(2, 3), (0, 1)]).sort_values())],
+    "sort_values descending": lambda m: [
+        repr(m.IntervalIndex.from_tuples([(0, 1), (2, 3)]).sort_values(ascending=False))
+    ],
+    "unique": lambda m: [repr(m.IntervalIndex.from_tuples([(0, 1), (0, 1), (1, 2)]).unique())],
+    "union": lambda m: [repr(_iv_breaks(m).union(m.IntervalIndex.from_breaks([3, 4])))],
+    "union unsorted": lambda m: [
+        repr(m.IntervalIndex.from_breaks([3, 4]).union(_iv_breaks(m), sort=False))
+    ],
+    "intersection": lambda m: [repr(_iv_breaks(m).intersection(m.IntervalIndex.from_breaks([1, 2, 3])))],
+    "difference": lambda m: [repr(_iv_breaks(m).difference(m.IntervalIndex.from_breaks([1, 2])))],
+    "symmetric_difference": lambda m: [
+        repr(_iv_breaks(m).symmetric_difference(m.IntervalIndex.from_breaks([2, 3, 4])))
+    ],
+    # Negatives: a point no interval holds, another closed side, the members
+    # already answered as pandas'.
+    "get_loc missing": lambda m: [repr(_iv_breaks(m).get_loc(10))],
+    "get_loc interval of another closed side": lambda m: [
+        repr(_iv_breaks(m).get_loc(m.Interval(1, 2, closed="left")))
+    ],
+    "equals another closed side": lambda m: [_iv_breaks(m).equals(_iv_breaks(m, "left"))],
+    "left right mid": lambda m: [repr(_iv_breaks(m).left), repr(_iv_breaks(m).right), repr(_iv_breaks(m).mid)],
+    "is_non_overlapping_monotonic": lambda m: [
+        _iv_breaks(m).is_non_overlapping_monotonic,
+        _iv_overlapping(m).is_non_overlapping_monotonic,
+    ],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_IV_CASES))
+def test_interval_index_members_like_pandas_4qg5w7(case: str) -> None:
+    run = _IV_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
