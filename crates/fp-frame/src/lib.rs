@@ -29833,6 +29833,8 @@ impl Series {
             alpha: validated_alpha,
             adjust,
             min_periods,
+            ignore_na: false,
+            deltas: None,
         }
     }
 
@@ -35472,6 +35474,12 @@ pub struct Ewm<'a> {
     /// `ExponentialMovingWindow.__init__` clamps with
     /// `max(int(min_periods), 1)`, so 0 and 1 behave identically.
     min_periods: usize,
+    /// pandas `ignore_na` (default false): with true a missing row does not
+    /// decay the weights ([`Ewm::ignoring_na`]).
+    ignore_na: bool,
+    /// pandas `times=` with a `halflife`: step `i`'s elapsed time over the
+    /// halflife, which `mean` decays by ([`Ewm::with_deltas`]).
+    deltas: Option<Vec<f64>>,
 }
 
 /// Typed all-observed (all-valid, no-NaN) EWM debiased variance recurrence over a
@@ -35635,6 +35643,76 @@ fn ewm_corr_all_observed(a: &[f64], b: &[f64], one_minus_alpha: f64) -> Vec<f64>
 }
 
 impl Ewm<'_> {
+    /// pandas' `ignore_na=True`: a missing row leaves the weights as they
+    /// were (with false, the default, it decays them), in every method.
+    #[must_use]
+    pub fn ignoring_na(mut self, ignore_na: bool) -> Self {
+        self.ignore_na = ignore_na;
+        self
+    }
+
+    /// pandas' `times=` with a `halflife`: `deltas[i - 1]` is the time from
+    /// row `i - 1` to row `i` over the halflife, and `mean` decays step `i`
+    /// by `(1 - alpha) ** deltas[i - 1]`. pandas' other EWM methods decay by
+    /// `1 - alpha` whatever the times, and so do these.
+    #[must_use]
+    pub fn with_deltas(mut self, deltas: Vec<f64>) -> Self {
+        self.deltas = Some(deltas);
+        self
+    }
+
+    /// pandas' `aggregations.pyx::ewm` (normalized) row by row, with
+    /// `ignore_na` and `times` deltas (the typed paths of [`Self::mean`]
+    /// are its plain case over all-valid input).
+    fn mean_rows(&self, alpha: f64) -> Result<Series, FrameError> {
+        let old_wt_factor = 1.0 - alpha;
+        let new_wt = if self.adjust { 1.0_f64 } else { alpha };
+        let minp = self.min_periods.max(1);
+        let vals = self.series.column().values();
+        let mut out = Vec::with_capacity(vals.len());
+        let mut weighted = f64::NAN;
+        let mut old_wt = 1.0_f64;
+        let mut nobs = 0_usize;
+        for (i, value) in vals.iter().enumerate() {
+            let cur = if value.is_missing() {
+                f64::NAN
+            } else {
+                value.to_f64().unwrap_or(f64::NAN)
+            };
+            let observed = !cur.is_nan();
+            nobs += usize::from(observed);
+            if i == 0 {
+                weighted = cur;
+            } else if !weighted.is_nan() {
+                if observed || !self.ignore_na {
+                    old_wt *= match &self.deltas {
+                        Some(deltas) => old_wt_factor.powf(deltas[i - 1]),
+                        None => old_wt_factor,
+                    };
+                    if observed {
+                        // Guard a constant run so the mean stays exact.
+                        if weighted != cur {
+                            weighted = (old_wt * weighted + new_wt * cur) / (old_wt + new_wt);
+                        }
+                        if self.adjust {
+                            old_wt += new_wt;
+                        } else {
+                            old_wt = 1.0;
+                        }
+                    }
+                }
+            } else if observed {
+                weighted = cur;
+            }
+            out.push(if nobs >= minp { weighted } else { f64::NAN });
+        }
+        Series::new(
+            self.series.name(),
+            self.series.index().clone(),
+            Column::from_f64_values(out),
+        )
+    }
+
     /// EWM mean.
     ///
     /// Matches `series.ewm(span=...).mean()` with `ignore_na=False`. Honors
@@ -35653,6 +35731,9 @@ impl Ewm<'_> {
             .alpha
             .clone()
             .map_err(FrameError::CompatibilityRejected)?;
+        if self.ignore_na || self.deltas.is_some() {
+            return self.mean_rows(alpha);
+        }
         let old_wt_factor = 1.0 - alpha;
         // pandas aggregations.pyx::ewm — adjust=True: every observation
         // enters with unit weight; adjust=False: it enters with weight
@@ -35919,7 +36000,7 @@ impl Ewm<'_> {
             // below can't panic on non-numeric inputs. Matches the
             // pattern used by ewm_mean and ewm_cov.
             if val.is_missing() || val.to_f64().map_or(true, |v| v.is_nan()) {
-                if nobs >= 1 {
+                if nobs >= 1 && !self.ignore_na {
                     // ignore_na=False: the gap decays the running sum, and the
                     // decayed value is what pandas emits for the gap row.
                     ewm_sum *= one_minus_alpha;
@@ -36129,7 +36210,7 @@ impl Ewm<'_> {
             } else if nobs == 0 {
                 out.push(Scalar::Null(NullKind::NaN));
                 continue;
-            } else {
+            } else if !self.ignore_na {
                 sum_wt *= one_minus_alpha;
                 sum_wt2 *= one_minus_alpha * one_minus_alpha;
                 old_wt *= one_minus_alpha;
@@ -36304,7 +36385,7 @@ impl Ewm<'_> {
             } else if nobs == 0 {
                 out.push(Scalar::Null(NullKind::NaN));
                 continue;
-            } else {
+            } else if !self.ignore_na {
                 old_wt *= one_minus_alpha;
             }
 
@@ -36524,7 +36605,7 @@ impl Ewm<'_> {
                 // No observation yet — variance undefined.
                 out.push(Scalar::Null(NullKind::NaN));
                 continue;
-            } else {
+            } else if !self.ignore_na {
                 // ignore_na=False: a gap still decays the accumulated weights.
                 sum_wt *= one_minus_alpha;
                 sum_wt2 *= one_minus_alpha * one_minus_alpha;
@@ -40582,9 +40663,27 @@ pub struct DataFrameEwm<'a> {
     /// EWM had neither).
     adjust: bool,
     min_periods: usize,
+    /// pandas `ignore_na` and `times=` deltas, per column as
+    /// [`Ewm::ignoring_na`] / [`Ewm::with_deltas`].
+    ignore_na: bool,
+    deltas: Option<Vec<f64>>,
 }
 
 impl DataFrameEwm<'_> {
+    /// [`Ewm::ignoring_na`] for every column.
+    #[must_use]
+    pub fn ignoring_na(mut self, ignore_na: bool) -> Self {
+        self.ignore_na = ignore_na;
+        self
+    }
+
+    /// [`Ewm::with_deltas`] for every column.
+    #[must_use]
+    pub fn with_deltas(mut self, deltas: Vec<f64>) -> Self {
+        self.deltas = Some(deltas);
+        self
+    }
+
     /// Apply EWM aggregation to each numeric column, returning a new DataFrame.
     /// Column-parallel (br-frankenpandas-1q4q4) — see `DataFrameRolling::apply_rolling`.
     fn apply_ewm<F>(&self, agg: F) -> Result<DataFrame, FrameError>
@@ -40680,7 +40779,13 @@ impl DataFrameEwm<'_> {
 
     /// One column's EWM with this window's span/alpha, adjust and min_periods.
     fn series_ewm<'s>(&self, series: &'s Series) -> Ewm<'s> {
-        series.ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
+        let ewm = series
+            .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
+            .ignoring_na(self.ignore_na);
+        match &self.deltas {
+            Some(deltas) => ewm.with_deltas(deltas.clone()),
+            None => ewm,
+        }
     }
 
     /// EWM mean across all numeric columns.
@@ -88032,6 +88137,8 @@ impl DataFrame {
             alpha,
             adjust,
             min_periods,
+            ignore_na: false,
+            deltas: None,
         }
     }
 
@@ -125579,6 +125686,69 @@ mod tests {
         assert!(
             df.rolling_offset("2D", None, IntervalClosed::Right, Some("zz"))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn ewm_ignore_na_and_times_deltas_e429f() {
+        // MEASURED, live pandas 2.2.3: pd.Series([1, 2, 3, nan, 5, 6])
+        // .ewm(span=2, ignore_na=True).mean() is [1, 1.75, 2.615385,
+        // 2.615385, 4.225, 5.413223] and .var() row 4 2.819231;
+        // pd.Series([10., ..., 60.]).ewm(halflife='1D', times=days 0, 1, 3,
+        // 4, 7, 8).mean() is [10, 16.666667, 26.363636, 34.444444,
+        // 47.290323, 55.206813] (com 1: alpha 0.5, decay 0.5 ** days).
+        let labels: Vec<IndexLabel> = (0..6_i64).map(Into::into).collect();
+        let gappy = Series::from_values(
+            "s",
+            labels.clone(),
+            [1.0, 2.0, 3.0, f64::NAN, 5.0, 6.0]
+                .iter()
+                .map(|v| Scalar::Float64(*v))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let close = |series: &Series, want: &[f64]| {
+            series
+                .column()
+                .values()
+                .iter()
+                .zip(want)
+                .all(|(got, want)| (got.to_f64().unwrap() - want).abs() < 1e-6)
+        };
+        let ignoring = gappy.ewm(Some(2.0), None).ignoring_na(true);
+        assert!(close(
+            &ignoring.mean().unwrap(),
+            &[1.0, 1.75, 2.615_385, 2.615_385, 4.225, 5.413_223]
+        ));
+        let var = ignoring.var().unwrap();
+        assert!((var.column().values()[4].to_f64().unwrap() - 2.819_231).abs() < 1e-6);
+        let tens = Series::from_values(
+            "w",
+            labels,
+            [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+                .iter()
+                .map(|v| Scalar::Float64(*v))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let timed = tens
+            .ewm(None, Some(0.5))
+            .with_deltas(vec![1.0, 2.0, 1.0, 3.0, 1.0]);
+        assert!(close(
+            &timed.mean().unwrap(),
+            &[
+                10.0, 16.666_667, 26.363_636, 34.444_444, 47.290_323, 55.206_813
+            ]
+        ));
+        // NEGATIVE: ignore_na=False decays through the gap (row 4 differs),
+        // and the deltas change only mean.
+        let plain = gappy.ewm(Some(2.0), None).mean().unwrap();
+        assert!((plain.column().values()[4].to_f64().unwrap() - 4.225).abs() > 1e-3);
+        assert!(
+            timed
+                .var()
+                .unwrap()
+                .equals(&tens.ewm(None, Some(0.5)).var().unwrap())
         );
     }
 

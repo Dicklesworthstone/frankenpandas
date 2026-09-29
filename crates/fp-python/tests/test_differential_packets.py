@@ -3338,9 +3338,8 @@ def test_ewm_decay_validation_matches_pandas(kwargs: Any, message: str) -> None:
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_ewm_refuses_what_it_cannot_run() -> None:
-    for kwargs in ({"span": 2, "ignore_na": True}, {"halflife": 2, "times": [1, 2, 3, 4, 5, 6]}, {"span": 2, "method": "table"}):
-        with pytest.raises(NotImplementedError):
-            _ewm_s(fpd).ewm(**kwargs)
+    with pytest.raises(NotImplementedError):
+        _ewm_s(fpd).ewm(span=2, method="table")
 
 
 def _mk(m: Any) -> Any:
@@ -16587,4 +16586,60 @@ _NK_CASES = {
 @pytest.mark.parametrize("case", list(_NK_CASES))
 def test_groupby_nlargest_keeps_the_group_level_rqeqs(case: str) -> None:
     run = _NK_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-e429f (scratch p14/oracle_ewmopts.py vs pandas 2.2.3):
+# ewm(ignore_na=True) was refused and ewm(halflife='1D', times=...) raised
+# TypeError. ignore_na leaves the weights through a gap in every method;
+# times decays mean by 0.5 ** (elapsed / halflife) (the other methods by
+# com=1, as pandas'), with pandas' errors for the times' shape.
+def _ew_gappy(m: Any) -> Any:
+    return m.Series([1.0, 2.0, 3.0, np.nan, 5.0, 6.0])
+
+
+def _ew_days(m: Any) -> Any:
+    return m.to_datetime(["2024-01-01", "2024-01-02", "2024-01-04", "2024-01-05", "2024-01-08", "2024-01-09"])
+
+
+def _ew_tens(m: Any) -> Any:
+    return m.Series([10.0, 20.0, 30.0, 40.0, 50.0, 60.0])
+
+
+_EW_CASES = {
+    **{
+        f"ignore_na {name}": (
+            lambda name: lambda m: _rl_shown(getattr(_ew_gappy(m).ewm(span=2, ignore_na=True), name)())
+        )(name)
+        for name in ["mean", "var", "std", "sum"]
+    },
+    "ignore_na mean, adjust False": lambda m: _rl_shown(_ew_gappy(m).ewm(span=2, ignore_na=True, adjust=False).mean()),
+    "ignore_na cov": lambda m: _rl_shown(_ew_gappy(m).ewm(span=2, ignore_na=True).cov(_ew_gappy(m) * 2)),
+    "ignore_na corr": lambda m: _rl_shown(_ew_gappy(m).ewm(span=2, ignore_na=True).corr(_ew_gappy(m) ** 2)),
+    "ignore_na min_periods": lambda m: _rl_shown(_ew_gappy(m).ewm(span=2, ignore_na=True, min_periods=3).mean()),
+    "ignore_na frame": lambda m: _rl_shown(m.DataFrame({"a": _ew_gappy(m), "b": _ew_tens(m)}).ewm(alpha=0.3, ignore_na=True).mean()),
+    "times mean": lambda m: _rl_shown(_ew_tens(m).ewm(halflife="1D", times=_ew_days(m)).mean()),
+    "times mean over a gap": lambda m: _rl_shown(_ew_gappy(m).ewm(halflife="2D", times=_ew_days(m)).mean()),
+    "times and ignore_na": lambda m: _rl_shown(_ew_gappy(m).ewm(halflife="2D", times=_ew_days(m), ignore_na=True).mean()),
+    "times, a Timedelta halflife": lambda m: _rl_shown(_ew_tens(m).ewm(halflife=m.Timedelta("12h"), times=_ew_days(m)).mean()),
+    "times, com too": lambda m: _rl_shown(_ew_tens(m).ewm(com=1.0, halflife="1D", times=_ew_days(m)).mean()),
+    "times var": lambda m: _rl_shown(_ew_tens(m).ewm(halflife="1D", times=_ew_days(m)).var()),
+    "times sum": lambda m: _rl_shown(_ew_tens(m).ewm(halflife="1D", times=_ew_days(m)).sum()),
+    "times frame": lambda m: _rl_shown(m.DataFrame({"a": _ew_tens(m)}).ewm(halflife="1D", times=_ew_days(m)).mean()),
+    "times, adjust False": lambda m: _rl_shown(_ew_tens(m).ewm(halflife="1D", times=_ew_days(m), adjust=False).mean()),
+    "times, no halflife": lambda m: _rl_shown(_ew_tens(m).ewm(span=2, times=_ew_days(m)).mean()),
+    "times, a float halflife": lambda m: _rl_shown(_ew_tens(m).ewm(halflife=2.0, times=_ew_days(m)).mean()),
+    "times a list": lambda m: _rl_shown(_ew_tens(m).ewm(halflife="1D", times=list(_ew_days(m))).mean()),
+    "times too short": lambda m: _rl_shown(_ew_tens(m).ewm(halflife="1D", times=_ew_days(m)[:3]).mean()),
+    "a timedelta halflife without times": lambda m: _rl_shown(_ew_tens(m).ewm(halflife="1D").mean()),
+    # NEGATIVE: ignore_na=False and a numeric halflife are the plain windows.
+    "ignore_na False": lambda m: _rl_shown(_ew_gappy(m).ewm(span=2, ignore_na=False).mean()),
+    "a numeric halflife": lambda m: _rl_shown(_ew_tens(m).ewm(halflife=2.0).mean()),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EW_CASES))
+def test_ewm_ignore_na_and_times_like_pandas_e429f(case: str) -> None:
+    run = _EW_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

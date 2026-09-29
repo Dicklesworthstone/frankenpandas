@@ -25781,7 +25781,7 @@ impl PySeries {
         &self,
         com: Option<f64>,
         span: Option<f64>,
-        halflife: Option<f64>,
+        halflife: Option<&Bound<'_, PyAny>>,
         alpha: Option<f64>,
         min_periods: usize,
         adjust: bool,
@@ -36812,7 +36812,7 @@ impl PyDataFrame {
         &self,
         com: Option<f64>,
         span: Option<f64>,
-        halflife: Option<f64>,
+        halflife: Option<&Bound<'_, PyAny>>,
         alpha: Option<f64>,
         min_periods: usize,
         adjust: bool,
@@ -48548,9 +48548,50 @@ pub struct PyExponentialMovingWindow {
     /// binding took span/alpha only).
     adjust: bool,
     min_periods: usize,
+    /// pandas' `ignore_na` and `times=`'s deltas over the halflife
+    /// (br-frankenpandas-e429f: both were refused).
+    ignore_na: bool,
+    deltas: Option<Vec<f64>>,
 }
 
 impl PyExponentialMovingWindow {
+    /// These windows over `s`: decay, adjust, min_periods, ignore_na and
+    /// the times' deltas.
+    fn series_ewm<'s>(&self, s: &'s Series) -> fp_frame::Ewm<'s> {
+        let ewm = s
+            .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
+            .ignoring_na(self.ignore_na);
+        match &self.deltas {
+            Some(deltas) => ewm.with_deltas(deltas.clone()),
+            None => ewm,
+        }
+    }
+
+    /// These windows over each of `df`'s columns (see [`Self::series_ewm`]).
+    fn frame_ewm<'d>(&self, df: &'d DataFrame) -> fp_frame::DataFrameEwm<'d> {
+        let ewm = df
+            .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
+            .ignoring_na(self.ignore_na);
+        match &self.deltas {
+            Some(deltas) => ewm.with_deltas(deltas.clone()),
+            None => ewm,
+        }
+    }
+
+    /// These windows over another frame (a dict agg's column).
+    fn with_frame(&self, dataframe: DataFrame) -> Self {
+        Self {
+            series: None,
+            dataframe: Some(dataframe),
+            span: self.span,
+            alpha: self.alpha,
+            adjust: self.adjust,
+            min_periods: self.min_periods,
+            ignore_na: self.ignore_na,
+            deltas: self.deltas.clone(),
+        }
+    }
+
     /// One EWM aggregation as pandas runs it (see [`PyRolling::run`]).
     fn run(
         &self,
@@ -48560,18 +48601,14 @@ impl PyExponentialMovingWindow {
         series_op: impl for<'w> Fn(fp_frame::Ewm<'w>) -> Result<Series, FrameError>,
         frame_op: impl for<'w> Fn(fp_frame::DataFrameEwm<'w>) -> Result<DataFrame, FrameError>,
     ) -> PyResult<Py<PyAny>> {
-        let (span, alpha, adjust, min_periods) =
-            (self.span, self.alpha, self.adjust, self.min_periods);
         if let Some(ref s) = self.series {
             let s = window_series_input(s, "ExponentialMovingWindow", method, numeric_only, false)?;
-            let res = series_op(s.ewm_with_options(span, alpha, adjust, min_periods))
-                .map_err(frame_error_to_py)?;
+            let res = series_op(self.series_ewm(&s)).map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
         if let Some(ref df) = self.dataframe {
             let df = window_frame_input(df, None, numeric_only, false)?;
-            let res = frame_op(df.ewm_with_options(span, alpha, adjust, min_periods))
-                .map_err(frame_error_to_py)?;
+            let res = frame_op(self.frame_ewm(&df)).map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
         }
         Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -48602,15 +48639,13 @@ impl PyExponentialMovingWindow {
             .map(|df| window_frame_input(df, None, numeric_only, false))
             .transpose()?;
         let other = window_pairwise_other(py, frame.as_deref(), other, pairwise)?;
-        let (span, alpha, adjust, min_periods) =
-            (self.span, self.alpha, self.adjust, self.min_periods);
         execute_window_bivariate(
             py,
             series.as_deref(),
             frame.as_deref(),
             other.as_ref(),
             |s1, s2| {
-                let windows = s1.ewm_with_options(span, alpha, adjust, min_periods);
+                let windows = self.series_ewm(s1);
                 if want_corr {
                     windows.corr(s2)
                 } else {
@@ -48708,17 +48743,8 @@ impl PyExponentialMovingWindow {
     /// frame's `{column: name}`.
     pub fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let (Ok(spec), Some(df)) = (func.cast::<PyDict>(), &self.dataframe) {
-            let res = window_agg_dict(py, df, spec, None, |sub, f| {
-                PyExponentialMovingWindow {
-                    series: None,
-                    dataframe: Some(sub),
-                    span: self.span,
-                    alpha: self.alpha,
-                    adjust: self.adjust,
-                    min_periods: self.min_periods,
-                }
-                .agg(py, f)
-            })?;
+            let res =
+                window_agg_dict(py, df, spec, None, |sub, f| self.with_frame(sub).agg(py, f))?;
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
         }
         if agg_spec_has_callable(func)
@@ -48740,16 +48766,16 @@ impl PyExponentialMovingWindow {
             let str_slices: Vec<&str> = list.iter().map(|s| s.as_str()).collect();
             if let Some(ref s) = self.series {
                 let s = window_series_input(s, "ExponentialMovingWindow", "agg", false, false)?;
-                let res = s
-                    .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
+                let res = self
+                    .series_ewm(&s)
                     .agg(&str_slices)
                     .map_err(frame_error_to_py)?;
                 return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
             }
             if let Some(ref df) = self.dataframe {
                 let df = window_agg_list_frame_input(df, None)?;
-                let res = df
-                    .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
+                let res = self
+                    .frame_ewm(&df)
                     .agg(&str_slices)
                     .map_err(frame_error_to_py)?;
                 let res = func_columns(res, &df, &str_slices)?;
@@ -48791,6 +48817,8 @@ impl PyExponentialMovingWindow {
             alpha: self.alpha,
             adjust: self.adjust,
             min_periods: self.min_periods,
+            ignore_na: self.ignore_na,
+            deltas: self.deltas.clone(),
         })
     }
 }
@@ -66492,16 +66520,83 @@ fn ewm_alpha(
     Ok(1.0 / (1.0 + com))
 }
 
+/// pandas' EWM `halflife` as a timedelta (a string, a Timedelta, a
+/// `datetime.timedelta`, a numpy timedelta64), in nanoseconds; None for
+/// anything else (a number, the halflife without `times`).
+fn ewm_halflife_nanos(halflife: &Bound<'_, PyAny>) -> PyResult<Option<i64>> {
+    if let Ok(text) = halflife.extract::<String>() {
+        return fp_types::Timedelta::parse(&text)
+            .map(Some)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()));
+    }
+    if let Ok(td) = halflife.extract::<PyRef<'_, PyTimedelta>>() {
+        return Ok(Some(td.nanos));
+    }
+    if let Ok(delta) = halflife.cast::<PyDelta>() {
+        return py_delta_nanos(delta).map(Some);
+    }
+    if halflife
+        .get_type()
+        .name()
+        .is_ok_and(|name| name == "timedelta64")
+        && let Scalar::Timedelta64(nanos) = py_to_scalar(halflife.py(), halflife)?
+    {
+        return Ok(Some(nanos));
+    }
+    Ok(None)
+}
+
+/// pandas' EWM `times=`: a datetime64 Series, DatetimeIndex or array (a
+/// list or a column name is pandas' 'times must be datetime64 dtype.') as
+/// nanoseconds, with pandas' errors for another length or a NaT.
+fn ewm_times(py: Python<'_>, times: &Bound<'_, PyAny>, len: usize) -> PyResult<Vec<i64>> {
+    let value_error =
+        |message: &str| PyErr::new::<pyo3::exceptions::PyValueError, _>(message.to_owned());
+    let column = if let Ok(s) = times.extract::<PyRef<'_, PySeries>>() {
+        Some(s.inner.column().clone())
+    } else if times.hasattr("dtype")? {
+        py_array_like_column(py, times)?
+    } else {
+        None
+    };
+    let column = column
+        .filter(|column| matches!(column.dtype(), DType::Datetime64 { .. }))
+        .ok_or_else(|| value_error("times must be datetime64 dtype."))?;
+    if column.len() != len {
+        return Err(value_error("times must be the same length as the object."));
+    }
+    column
+        .values()
+        .iter()
+        .map(|value| match value {
+            Scalar::Datetime64(nanos) if *nanos != i64::MIN => Ok(*nanos),
+            _ => Err(value_error("Cannot convert NaT values to integer")),
+        })
+        .collect()
+}
+
+/// pandas' `ewm` decay arguments as passed: com, span, halflife (a number or
+/// a timedelta) and alpha.
+type EwmDecay<'a, 'py> = (
+    Option<f64>,
+    Option<f64>,
+    Option<&'a Bound<'py, PyAny>>,
+    Option<f64>,
+);
+
 /// A Series or DataFrame EWM with pandas' full `ewm` signature: the decay
-/// becomes alpha ([`ewm_alpha`]); `adjust` and `min_periods` are honoured;
-/// `ignore_na=True`, `times` and `method='table'` are refused, and `axis`
-/// can only name the rows.
+/// becomes alpha ([`ewm_alpha`]); `adjust`, `min_periods` and `ignore_na`
+/// are honoured; `times=` with a timedelta `halflife` decays `mean` by the
+/// elapsed time, the other methods by com=1 unless com / span / alpha say
+/// otherwise, as pandas' (br-frankenpandas-e429f: ignore_na and times were
+/// refused, a timedelta halflife a TypeError). `method='table'` is refused,
+/// and `axis` can only name the rows.
 #[allow(clippy::too_many_arguments)]
 fn exponential_window(
     method_name: &str,
     series: Option<Series>,
     dataframe: Option<DataFrame>,
-    decay: (Option<f64>, Option<f64>, Option<f64>, Option<f64>),
+    decay: EwmDecay<'_, '_>,
     min_periods: usize,
     adjust: bool,
     ignore_na: bool,
@@ -66517,22 +66612,62 @@ fn exponential_window(
     if parse_axis_param_for_type(axis, kind)?.unwrap_or(0) != 0 {
         return Err(not_implemented(&format!("{method_name}(axis=1)")));
     }
-    unsupported_params(
-        method_name,
-        &[
-            ("ignore_na", !ignore_na),
-            ("times", times.is_none_or(|t| t.is_none())),
-            ("method", method == "single"),
-        ],
-    )?;
+    unsupported_params(method_name, &[("method", method == "single")])?;
+    let value_error =
+        |message: &str| PyErr::new::<pyo3::exceptions::PyValueError, _>(message.to_owned());
     let (com, span, halflife, alpha) = decay;
+    let halflife = halflife.filter(|halflife| !halflife.is_none());
+    let halflife_time = halflife.map(ewm_halflife_nanos).transpose()?.flatten();
+    let (alpha, deltas) = match times.filter(|times| !times.is_none()) {
+        Some(times) => {
+            if !adjust {
+                return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                    "times is not supported with adjust=False.",
+                ));
+            }
+            let len = series
+                .as_ref()
+                .map_or_else(|| dataframe.as_ref().map_or(0, DataFrame::len), Series::len);
+            let nanos = ewm_times(times.py(), times, len)?;
+            let Some(halflife) = halflife_time.filter(|nanos| *nanos > 0) else {
+                return Err(value_error(
+                    "halflife must be a timedelta convertible object",
+                ));
+            };
+            #[allow(clippy::cast_precision_loss)] // elapsed nanoseconds, as pandas' float64
+            let deltas = nanos
+                .windows(2)
+                .map(|pair| (pair[1] - pair[0]) as f64 / halflife as f64)
+                .collect();
+            // pandas: com / span / alpha if given, else com=1.
+            let alpha = if com.is_some() || span.is_some() || alpha.is_some() {
+                ewm_alpha(com, span, None, alpha)?
+            } else {
+                0.5
+            };
+            (alpha, Some(deltas))
+        }
+        None => {
+            if halflife_time.is_some() {
+                return Err(value_error(
+                    "halflife can only be a timedelta convertible argument if times is not None.",
+                ));
+            }
+            let halflife = halflife
+                .map(|halflife| halflife.extract::<f64>())
+                .transpose()?;
+            (ewm_alpha(com, span, halflife, alpha)?, None)
+        }
+    };
     Ok(PyExponentialMovingWindow {
         series,
         dataframe,
         span: None,
-        alpha: Some(ewm_alpha(com, span, halflife, alpha)?),
+        alpha: Some(alpha),
         adjust,
         min_periods,
+        ignore_na,
+        deltas,
     })
 }
 
