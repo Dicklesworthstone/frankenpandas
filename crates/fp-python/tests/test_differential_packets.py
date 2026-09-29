@@ -19564,3 +19564,59 @@ _E48_CASES = {
 def test_everyday48_transform_crosstab_map_concat_like_pandas_n9zpp(case: str) -> None:
     run = _E48_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-a2t82: DatetimeIndex / TimedeltaIndex / PeriodIndex
+# arithmetic is their values' (each raised TypeError, or numpy's array came
+# back), named as pandas names a result; a tick offset keeps a tick freq.
+def _e49_dates(m: Any, name: str = "d") -> Any:
+    return m.date_range("2024-01-01", periods=3, freq="D", name=name)
+
+
+def _e49_durations(m: Any, name: Any = None) -> Any:
+    return m.TimedeltaIndex(m.to_timedelta(["1h", "2h", None]), name=name)
+
+
+_E49_CASES = {
+    "dates minus dates": lambda m: [repr(_e49_dates(m) - _e49_dates(m)[::-1])],
+    "dates minus other-named dates": lambda m: [repr(_e49_dates(m) - _e49_dates(m, "e"))],
+    "dates plus durations": lambda m: [repr(_e49_dates(m) + _e49_durations(m))],
+    "dates minus durations": lambda m: [repr(_e49_dates(m) - _e49_durations(m, "d"))],
+    "durations plus dates": lambda m: [repr(_e49_durations(m) + _e49_dates(m))],
+    "dates plus a timedelta array": lambda m: [repr(_e49_dates(m) + np.array([1, 2, 3], dtype="timedelta64[h]"))],
+    "dates minus a Timestamp keeps freq": lambda m: [repr(_e49_dates(m) - m.Timestamp("2024-01-01"))],
+    "dates plus a Day offset keeps freq": lambda m: [repr(_e49_dates(m) + m.offsets.Day(2))],
+    "zoned dates minus zoned dates": lambda m: [
+        repr(_e49_dates(m).tz_localize("UTC") - _e49_dates(m).tz_localize("UTC")[::-1])
+    ],
+    "durations plus durations": lambda m: [repr(_e49_durations(m) + _e49_durations(m))],
+    "durations times two": lambda m: [repr(_e49_durations(m) * 2)],
+    "two times durations": lambda m: [repr(2 * _e49_durations(m))],
+    "durations over two": lambda m: [repr(_e49_durations(m) / 2)],
+    "durations over a Timedelta": lambda m: [repr(_e49_durations(m) / m.Timedelta(minutes=30))],
+    "durations floor-divided": lambda m: [repr(_e49_durations(m) // m.Timedelta(minutes=45))],
+    "negated durations": lambda m: [repr(-_e49_durations(m, "t"))],
+    "absolute durations": lambda m: [repr(abs(-_e49_durations(m)))],
+    "durations plus a Timestamp": lambda m: [repr(_e49_durations(m) + m.Timestamp("2024-01-01"))],
+    "periods plus one": lambda m: [repr(m.period_range("2024-01", periods=3, freq="M") + 1)],
+    "periods minus one": lambda m: [repr(m.period_range("2024-01", periods=3, freq="M") - 1)],
+    "dates times two": lambda m: [repr(_e49_dates(m) * 2)],
+    "dates over two": lambda m: [repr(_e49_dates(m) / 2)],
+    "periods times two": lambda m: [repr(m.period_range("2024-01", periods=3, freq="M") * 2)],
+    "Index of durations with NaT": lambda m: [repr(m.Index(m.Series(m.to_timedelta(["1h", None]))))],
+    "Index of a duration and NaN": lambda m: [repr(m.Index([m.Timedelta("1h"), np.nan]))],
+    # Negatives: already pandas'.
+    "dates plus a Timedelta": lambda m: [repr(_e49_dates(m) + m.Timedelta(hours=1))],
+    "dates minus a Timedelta": lambda m: [repr(_e49_dates(m) - m.Timedelta(days=1))],
+    "dates plus a month": lambda m: [repr(_e49_dates(m) + m.DateOffset(months=1))],
+    "a Series index shifted": lambda m: [repr(m.Series([1, 2, 3], index=_e49_dates(m)).index + m.Timedelta(hours=6))],
+    "ints plus one": lambda m: [repr(m.Index([1, 2]) + 1)],
+    "MultiIndex plus one": lambda m: [m.MultiIndex.from_tuples([(1, 2)]) + 1],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E49_CASES))
+def test_everyday49_datetimelike_index_arithmetic_like_pandas_a2t82(case: str) -> None:
+    run = _E49_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

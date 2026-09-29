@@ -8401,6 +8401,29 @@ fn flat_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
         {
             return Ok(Py::new(py, PyTimedeltaIndex { inner })?.into_any());
         }
+        // Durations beside missing labels (NaT, NaN, None) are a
+        // TimedeltaIndex with NaT, as pandas infers one (a plain Index of
+        // durations and nan; br-frankenpandas-a2t82).
+        if labels
+            .iter()
+            .any(|label| matches!(label, IndexLabel::Timedelta64(_)))
+            && labels
+                .iter()
+                .all(|label| matches!(label, IndexLabel::Timedelta64(_) | IndexLabel::Null(_)))
+        {
+            let durations = labels
+                .iter()
+                .map(|label| match label {
+                    IndexLabel::Null(_) => IndexLabel::Timedelta64(fp_types::Timedelta::NAT),
+                    other => other.clone(),
+                })
+                .collect();
+            if let Ok(inner) =
+                TimedeltaIndex::from_index(Index::new(durations).rename_index(index.name()))
+            {
+                return Ok(Py::new(py, PyTimedeltaIndex { inner })?.into_any());
+            }
+        }
         // Periods of one freq are a PeriodIndex (they were text; 45fzr).
         if let Some(inner) = PeriodIndex::from_index(index) {
             return Ok(Py::new(py, PyPeriodIndex { inner })?.into_any());
@@ -9216,6 +9239,81 @@ fn typed_index_object(obj: &Bound<'_, PyAny>) -> bool {
         || obj.is_instance_of::<PyMultiIndex>()
 }
 
+/// Whether `obj` is a DatetimeIndex, TimedeltaIndex or PeriodIndex, whose
+/// arithmetic is its values' (see [`datetimelike_index_arithmetic`]).
+fn datetimelike_index_object(obj: &Bound<'_, PyAny>) -> bool {
+    obj.is_instance_of::<PyDatetimeIndex>()
+        || obj.is_instance_of::<PyTimedeltaIndex>()
+        || obj.is_instance_of::<PyPeriodIndex>()
+}
+
+/// pandas' arithmetic of a datetime-like `index` with `other` (an operator
+/// `op` it inherits from Index): its values' Series arithmetic - instants
+/// minus instants are durations, durations over a duration floats, periods
+/// plus ints periods - as an Index of the results, named as pandas'
+/// `get_op_result_name` (the name both share, else none; a scalar keeps
+/// this one). Another index is read by position; a Series or frame answers
+/// itself. Each raised TypeError (br-frankenpandas-a2t82).
+fn datetimelike_index_arithmetic(
+    index: &Bound<'_, PyAny>,
+    other: &Bound<'_, PyAny>,
+    op: &str,
+) -> PyResult<Py<PyAny>> {
+    let py = index.py();
+    if other.is_instance_of::<PySeries>() || other.is_instance_of::<PyDataFrame>() {
+        return Ok(py.NotImplemented());
+    }
+    // Instants and periods do not multiply, divide or raise (pandas'
+    // make_invalid_op).
+    let scaling = matches!(
+        op,
+        "__mul__"
+            | "__rmul__"
+            | "__truediv__"
+            | "__rtruediv__"
+            | "__floordiv__"
+            | "__rfloordiv__"
+            | "__mod__"
+            | "__rmod__"
+            | "__pow__"
+            | "__rpow__"
+    );
+    if scaling && !index.is_instance_of::<PyTimedeltaIndex>() {
+        let array = if index.is_instance_of::<PyPeriodIndex>() {
+            "PeriodArray"
+        } else {
+            "DatetimeArray"
+        };
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "cannot perform {op} with this index type: {array}"
+        )));
+    }
+    let module = py.import("frankenpandas")?;
+    let series = module.getattr("Series")?;
+    let other_index = is_index_object(other);
+    let right = if other_index {
+        series.call1((other,))?
+    } else {
+        other.clone()
+    };
+    let values = series.call1((index,))?.call_method1(op, (right,))?;
+    if values.is(py.NotImplemented()) {
+        return Ok(values.unbind());
+    }
+    let name = index.getattr("name")?;
+    let name = if other_index && !name.eq(other.getattr("name")?)? {
+        py.None().into_bound(py)
+    } else {
+        name
+    };
+    let named = PyDict::new(py);
+    named.set_item("name", name)?;
+    Ok(module
+        .getattr("Index")?
+        .call((values,), Some(&named))?
+        .unbind())
+}
+
 /// `obj` as a plain Index object (an Index, a RangeIndex, a Series' or
 /// frame's `.index`), for the readers of index-like arguments: a typed
 /// index class is refused here, as before it was an Index subclass, so each
@@ -9674,6 +9772,15 @@ impl PyIndex {
     /// subclasses - since those labels are instants, periods, categories or
     /// joined tuples, not numpy's values (br-frankenpandas-myyy1).
     fn operator(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>, op: &str) -> PyResult<Py<PyAny>> {
+        if datetimelike_index_object(slf.as_any()) {
+            return datetimelike_index_arithmetic(slf.as_any(), other, op);
+        }
+        // A MultiIndex has no arithmetic: pandas' invalid-op TypeError.
+        if slf.is_instance_of::<PyMultiIndex>() {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "cannot perform {op} with this index type: MultiIndex"
+            )));
+        }
         if typed_index_object(slf.as_any()) {
             return Ok(slf.py().NotImplemented());
         }
@@ -9683,6 +9790,15 @@ impl PyIndex {
     /// A unary operator of this Index (see [`Self::operator`]): a typed
     /// index class answers Python's TypeError for a missing operator.
     fn unary_operator(slf: &Bound<'_, Self>, op: &str, operand: &str) -> PyResult<Py<PyAny>> {
+        // -tdi, +tdi, abs(tdi): the durations' own (a2t82).
+        if slf.is_instance_of::<PyTimedeltaIndex>() {
+            let py = slf.py();
+            let module = py.import("frankenpandas")?;
+            let values = module.getattr("Series")?.call1((slf,))?.call_method0(op)?;
+            let result = module.getattr("Index")?.call1((values,))?;
+            result.setattr("name", slf.getattr("name")?)?;
+            return Ok(result.unbind());
+        }
         if typed_index_object(slf.as_any()) {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
                 "bad operand type for {operand}: '{}'",
@@ -11901,13 +12017,62 @@ impl PyDatetimeIndex {
         Ok(Self { inner })
     }
 
+    /// `index - other` for a scalar: a Timestamp's durations since it (a
+    /// TimedeltaIndex keeping this freq, as pandas'), an offset or duration
+    /// moving the index back ([`Self::shifted`]); NotImplemented otherwise.
+    fn difference_or_shift(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let Ok(ts) = other.extract::<PyRef<'_, PyTimestamp>>() {
+            if ts.inner.tz.is_some() != self.inner.tz().is_some() && !ts.inner.is_nat() {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "Cannot subtract tz-naive and tz-aware datetime-like objects",
+                ));
+            }
+            let durations = self
+                .inner
+                .asi8()
+                .iter()
+                .map(|&value| {
+                    if value == Timestamp::NAT || ts.inner.is_nat() {
+                        Ok(fp_types::Timedelta::NAT)
+                    } else {
+                        value.checked_sub(ts.inner.nanos).ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyOverflowError, _>("Timedelta overflow")
+                        })
+                    }
+                })
+                .collect::<PyResult<Vec<i64>>>()?;
+            let freq = self.inner.freq().filter(|_| !ts.inner.is_nat());
+            return PyTimedeltaIndex {
+                inner: TimedeltaIndex::new(durations)
+                    .rename_index(self.inner.name())
+                    .with_freq(freq),
+            }
+            .into_py_any(py);
+        }
+        self.shifted(py, other, -1)
+    }
+
     /// This index moved `times` times by an offset, a Timedelta or a
     /// `datetime.timedelta` (NaT stays NaT); NotImplemented otherwise. A
     /// duration moves the instants; an offset the wall clock.
     fn shifted(&self, py: Python<'_>, other: &Bound<'_, PyAny>, times: i64) -> PyResult<Py<PyAny>> {
         let nanos = self.inner.asi8();
         let moved: Vec<i64> = if let Ok(offset) = other.extract::<PyRef<'_, PyDateOffset>>() {
-            return self.offset_applied(py, &offset, times)?.into_py_any(py);
+            let moved = self.offset_applied(py, &offset, times)?;
+            // A tick (Day, Hour, ...) moves every label alike, as a duration
+            // does: a tick freq holds (it was dropped; a2t82).
+            let tick = matches!(
+                offset.kind,
+                Some("Day" | "Hour" | "Minute" | "Second" | "Milli" | "Micro" | "Nano")
+            );
+            let moved = if tick {
+                Self {
+                    inner: moved.inner.with_freq(self.tick_freq()),
+                }
+            } else {
+                moved
+            };
+            return moved.into_py_any(py);
         } else {
             let step = if let Ok(td) = other.extract::<PyRef<'_, PyTimedelta>>() {
                 td.nanos
@@ -11932,15 +12097,19 @@ impl PyDatetimeIndex {
                 })
                 .collect::<PyResult<_>>()?
         };
-        // A duration moves every label alike: a tick freq holds; a calendar
-        // one (ME, W, B) no longer describes the labels (pandas).
-        let freq = self.inner.freq().filter(|freq| {
+        let inner = self.with_nanos(moved).inner.with_freq(self.tick_freq());
+        Self { inner }.into_py_any(py)
+    }
+
+    /// This index's freq when it is a tick ('D', '2h', ...): moving every
+    /// label alike keeps it; a calendar one (ME, W, B) no longer describes
+    /// the moved labels (pandas).
+    fn tick_freq(&self) -> Option<String> {
+        self.inner.freq().filter(|freq| {
             fp_index::split_freq_count(freq).is_some_and(|(_, rule)| {
                 matches!(rule, "D" | "h" | "min" | "s" | "ms" | "us" | "ns")
             })
-        });
-        let inner = self.with_nanos(moved).inner.with_freq(freq);
-        Self { inner }.into_py_any(py)
+        })
     }
 
     /// The nanoseconds a `fillna` value stands for.
@@ -13701,45 +13870,41 @@ impl PyDatetimeIndex {
         })
     }
 
-    /// `index + offset / Timedelta / datetime.timedelta` (it had no `+`).
-    fn __add__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
-        self.shifted(py, other, 1)
+    /// `index + offset / Timedelta / datetime.timedelta` (it had no `+`);
+    /// durations by position (a TimedeltaIndex, an array) are the values'
+    /// Series arithmetic (see [`datetimelike_index_arithmetic`]; a numpy
+    /// array came back, a TimedeltaIndex raised; br-frankenpandas-a2t82).
+    fn __add__<'py>(slf: &Bound<'py, Self>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        let moved = slf.borrow().shifted(slf.py(), other, 1)?;
+        if moved.is(slf.py().NotImplemented()) {
+            return datetimelike_index_arithmetic(slf.as_any(), other, "__add__");
+        }
+        Ok(moved)
     }
 
-    fn __radd__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
-        self.shifted(py, other, 1)
+    fn __radd__<'py>(slf: &Bound<'py, Self>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        let moved = slf.borrow().shifted(slf.py(), other, 1)?;
+        if moved.is(slf.py().NotImplemented()) {
+            return datetimelike_index_arithmetic(slf.as_any(), other, "__radd__");
+        }
+        Ok(moved)
     }
 
     /// `index - offset / duration` moves it; `index - Timestamp` is the
-    /// durations since that instant (a TimedeltaIndex; it raised TypeError),
-    /// aware against naive being pandas' TypeError.
-    fn __sub__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
-        if let Ok(ts) = other.extract::<PyRef<'_, PyTimestamp>>() {
-            if ts.inner.tz.is_some() != self.inner.tz().is_some() && !ts.inner.is_nat() {
-                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                    "Cannot subtract tz-naive and tz-aware datetime-like objects",
-                ));
-            }
-            let durations = self
-                .inner
-                .asi8()
-                .iter()
-                .map(|&value| {
-                    if value == Timestamp::NAT || ts.inner.is_nat() {
-                        Ok(fp_types::Timedelta::NAT)
-                    } else {
-                        value.checked_sub(ts.inner.nanos).ok_or_else(|| {
-                            PyErr::new::<pyo3::exceptions::PyOverflowError, _>("Timedelta overflow")
-                        })
-                    }
-                })
-                .collect::<PyResult<Vec<i64>>>()?;
-            return PyTimedeltaIndex {
-                inner: TimedeltaIndex::new(durations).rename_index(self.inner.name()),
-            }
-            .into_py_any(py);
+    /// durations since that instant (a TimedeltaIndex; it raised TypeError,
+    /// its freq now kept), aware against naive being pandas' TypeError;
+    /// instants or durations by position (another DatetimeIndex, an array)
+    /// the values' Series arithmetic (it raised; br-frankenpandas-a2t82).
+    fn __sub__<'py>(slf: &Bound<'py, Self>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        let moved = slf.borrow().difference_or_shift(slf.py(), other)?;
+        if moved.is(slf.py().NotImplemented()) {
+            return datetimelike_index_arithmetic(slf.as_any(), other, "__sub__");
         }
-        self.shifted(py, other, -1)
+        Ok(moved)
+    }
+
+    fn __rsub__<'py>(slf: &Bound<'py, Self>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
+        datetimelike_index_arithmetic(slf.as_any(), other, "__rsub__")
     }
 
     /// pandas' `tz_localize(tz)`: naive wall times placed in `tz` (a wall
