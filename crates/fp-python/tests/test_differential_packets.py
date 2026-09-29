@@ -3454,10 +3454,11 @@ def test_multi_key_series_reset_into_pandas_columns() -> None:
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_multi_key_series_groupby_refuses_what_it_cannot_label() -> None:
     # These results are not relabelled from group codes yet; they raise rather
-    # than come back indexed by the codes.
+    # than come back indexed by the codes. TEST-CHANGE (wsu74): unique is
+    # relabelled now and left this list; test_groupby_unique_like_pandas_wsu74
+    # checks it against pandas over two and three keys.
     for op in (
         lambda g: g.value_counts(),
-        lambda g: g.unique(),
         lambda g: g.nlargest(1),
         lambda g: g.describe(),
         lambda g: g.apply(lambda s: s.sum()),
@@ -16097,4 +16098,76 @@ _F62_CASES = {
 @pytest.mark.parametrize("case", list(_F62_CASES))
 def test_to_period_column_like_pandas_fvsao62(case: str) -> None:
     run = _F62_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-wsu74 (scratch p14/oracle_gbunique.py, oracle_uniqnan*.py
+# vs pandas 2.2.3): SeriesGroupBy.unique over several keys (or a missing key
+# kept) was refused; and Series.unique of a float column whose distinct
+# values are missing alone (a group's [nan]) was an object array.
+def _wu_frame(m: Any) -> Any:
+    return m.DataFrame({"k": ["y", "x", "y", "x", "x"], "j": [1, 1, 2, 1, 1], "v": [1.0, 2.0, 3.0, 5.0, 2.0]})
+
+
+def _wu_shown(result: Any) -> list:
+    return [str(result.dtype), repr(result.name), repr(list(result.index)), repr([list(cell) for cell in result])]
+
+
+_WU_CASES = {
+    "two keys": lambda m: _wu_shown(_wu_frame(m).groupby(["k", "j"])["v"].unique()),
+    "three keys": lambda m: _wu_shown(_wu_frame(m).assign(z=[0, 0, 0, 1, 0]).groupby(["k", "j", "z"])["v"].unique()),
+    "a missing key kept": lambda m: _wu_shown(
+        m.DataFrame({"k": ["y", None, "y", "x"], "v": [1.0, 2.0, 3.0, np.nan]}).groupby("k", dropna=False)["v"].unique()
+    ),
+    "a group of NaN": lambda m: _wu_shown(
+        m.DataFrame({"k": ["y", "x"], "v": [1.0, np.nan]}).groupby("k")["v"].unique()
+    ),
+    "Series.unique of a filtered NaN": lambda m: [
+        repr(m.DataFrame({"k": ["a", "b"], "v": [1.0, np.nan]}).query("k == 'b'")["v"].unique())
+    ],
+    "Series.unique of a text None": lambda m: [repr(m.Series(["a", None]).iloc[1:].unique())],
+    # NEGATIVE: one key, as before.
+    "one key": lambda m: _wu_shown(_wu_frame(m).groupby("k")["v"].unique()),
+    "one key unsorted": lambda m: _wu_shown(_wu_frame(m).groupby("k", sort=False)["v"].unique()),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_WU_CASES))
+def test_groupby_unique_like_pandas_wsu74(case: str) -> None:
+    run = _WU_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-gzune (scratch p14/oracle_emptydtype.py vs pandas 2.2.3):
+# an empty positional slice of a Series was object (the window rebuilt from
+# no values), and s[[]] / s.loc[[]] read the empty list as a boolean mask of
+# the wrong length (IndexError). (The empty slice's INDEX dtype is
+# br-frankenpandas-dwyud.)
+def _gz_ints(m: Any) -> Any:
+    return m.Series([1, 2, 3])
+
+
+_GZ_CASES = {
+    "iloc[:0]": lambda m: [repr(_gz_ints(m).iloc[:0])],
+    "iloc past the end": lambda m: [repr(_gz_ints(m).iloc[5:])],
+    "[:0]": lambda m: [repr(_gz_ints(m)[:0])],
+    "float iloc[:0]": lambda m: [repr(m.Series([1.5, 2.5]).iloc[:0])],
+    "text iloc[:0]": lambda m: [repr(m.Series(["a", "b"], index=[10, 11]).iloc[:0])],
+    "datetime iloc[:0]": lambda m: [repr(m.Series(m.to_datetime(["2024-01-01", "2024-01-02"])).iloc[:0])],
+    "an empty list": lambda m: [repr(_gz_ints(m)[[]])],
+    "loc an empty list": lambda m: [repr(_gz_ints(m).loc[[]])],
+    "concat after an empty slice": lambda m: [repr(m.concat([_gz_ints(m).iloc[:0], _gz_ints(m).iloc[:1]]))],
+    # NEGATIVE: non-empty slices and masks, head(0) and an empty mask.
+    "iloc[:1]": lambda m: [repr(_gz_ints(m).iloc[:1])],
+    "a mask": lambda m: [repr(_gz_ints(m)[[True, False, True]])],
+    "head(0)": lambda m: [repr(_gz_ints(m).head(0))],
+    "an empty mask": lambda m: [repr(_gz_ints(m)[_gz_ints(m) > 10])],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_GZ_CASES))
+def test_empty_series_slices_keep_the_dtype_gzune(case: str) -> None:
+    run = _GZ_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

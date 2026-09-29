@@ -14044,14 +14044,16 @@ impl Series {
         let start_pos = start.map_or(0, resolve);
         let end_pos = stop.map_or(len, resolve);
 
-        if start_pos >= end_pos || start_pos >= len {
-            return self.with_labels_and_values_preserving_name(Vec::new(), Vec::new());
-        }
-
         // perf (br-frankenpandas-qynot): zero-copy contiguous slice (typed/affine
         // backing) instead of materializing the full column/index before slicing.
-        // Bit-identical contiguous range; index name preserved.
-        let take = end_pos - start_pos;
+        // Bit-identical contiguous range; index name preserved. An empty window
+        // is a slice too, so it keeps the dtype (it was rebuilt from no values,
+        // an object Series; br-frankenpandas-gzune).
+        let (start_pos, take) = if start_pos >= end_pos || start_pos >= len {
+            (start_pos.min(len), 0)
+        } else {
+            (start_pos, end_pos - start_pos)
+        };
         let index = self
             .index
             .slice(start_pos, take)
@@ -124654,6 +124656,40 @@ mod tests {
 
         let out = s.iloc_slice(Some(5), Some(10)).unwrap();
         assert_eq!(out.len(), 0);
+    }
+
+    #[test]
+    fn series_iloc_slice_empty_keeps_the_dtype_gzune() {
+        // MEASURED, live pandas 2.2.3: pd.Series([10, 20]).iloc[:0] and
+        // .iloc[5:] are int64 (fp gave object: the empty window was rebuilt
+        // from no values), a float Series' float64.
+        let ints = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+        for (start, stop) in [(Some(0), Some(0)), (Some(5), None), (Some(1), Some(1))] {
+            let out = ints.iloc_slice(start, stop).unwrap();
+            assert_eq!(out.len(), 0);
+            assert_eq!(out.column().dtype(), DType::Int64);
+            assert_eq!(out.name(), "vals");
+        }
+        let floats =
+            Series::from_values("f", vec![0_i64.into()], vec![Scalar::Float64(1.5)]).unwrap();
+        assert_eq!(
+            floats
+                .iloc_slice(Some(0), Some(0))
+                .unwrap()
+                .column()
+                .dtype(),
+            DType::Float64
+        );
+        // NEGATIVE: a non-empty window, as before.
+        assert_eq!(
+            ints.iloc_slice(Some(1), None).unwrap().column().values(),
+            &[Scalar::Int64(20)]
+        );
     }
 
     #[test]

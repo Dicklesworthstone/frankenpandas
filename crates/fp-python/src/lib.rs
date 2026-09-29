@@ -23149,7 +23149,10 @@ impl PySeries {
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
             return Ok(Py::new(py, PySeries { inner: s })?.into_any());
         }
-        if let Ok(mask) = key.extract::<Vec<bool>>() {
+        // An empty list is no mask but no labels (gzune).
+        if let Ok(mask) = key.extract::<Vec<bool>>()
+            && !mask.is_empty()
+        {
             let s = self
                 .inner
                 .iloc_bool(&mask)
@@ -24230,10 +24233,17 @@ impl PySeries {
             return extension_array(py, distinct);
         }
         // The distinct values are the column's own: an int32 column's are an
-        // int32 array (fvsao.23).
-        let column = Column::from_values(self.inner.unique())
-            .map_err(column_error_to_py)?
-            .keeping_dtype_of(source);
+        // int32 array (fvsao.23); missing values alone (or none) keep the
+        // column's dtype - a float64 column's [nan] and an empty int64
+        // column's [] were object arrays (wsu74).
+        let distinct = self.inner.unique();
+        let column = if distinct.iter().all(Scalar::is_missing) && source.dtype() != DType::Null {
+            Column::new(source.dtype(), distinct)
+        } else {
+            Column::from_values(distinct)
+        }
+        .map_err(column_error_to_py)?
+        .keeping_dtype_of(source);
         Ok(column_ndarray(py, &column)?.unbind())
     }
 
@@ -28796,8 +28806,10 @@ impl PySeriesLoc {
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?,
             );
         }
+        // An empty list is no mask but no labels (gzune).
         if (key.cast::<PyList>().is_ok() || key.getattr("tolist").is_ok())
             && let Ok(mask) = key.extract::<Vec<bool>>()
+            && !mask.is_empty()
         {
             return series(
                 self.inner
@@ -53430,9 +53442,9 @@ impl PySeriesGroupBy {
     /// pandas' `SeriesGroupBy.unique`: one array a group - each group's
     /// distinct values in first-seen order, as `Series.unique` gives them -
     /// in an object Series indexed by the groups (it gave every value
-    /// flattened, the groups repeated).
+    /// flattened, the groups repeated) - over several keys (or a missing
+    /// key kept) their MultiIndex, the group codes relabelled (wsu74).
     fn unique(&self, py: Python<'_>) -> PyResult<PySeries> {
-        self.single_key("unique")?;
         self.observed_only("unique")?;
         let groups = self.ordered_groups(false)?;
         let mut cells = Vec::with_capacity(groups.len());
@@ -53454,7 +53466,9 @@ impl PySeriesGroupBy {
         let index = Index::new(labels).rename_index((!key.is_empty()).then_some(key.as_str()));
         let inner = Series::new(self.series.name(), index, Column::from_object_values(cells))
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner })
+        Ok(PySeries {
+            inner: self.label_groups(inner)?,
+        })
     }
 }
 
