@@ -6172,6 +6172,9 @@ fn scalar_to_py(py: Python<'_>, scalar: &Scalar) -> PyResult<Py<PyAny>> {
                 PyTimedelta { nanos: *ns }.into_py_any(py)
             }
         }
+        // A NaT period is pandas' NaT (it was Period('NaT', 'M');
+        // fvsao.62).
+        Scalar::Period(p) if p.is_nat() => nat_object(py),
         Scalar::Period(p) => PyPeriod { inner: *p }.into_py_any(py),
         // An Interval cell is an Interval (it came back None).
         Scalar::Interval(interval) => PyInterval::of(interval).into_py_any(py),
@@ -14213,6 +14216,15 @@ impl PyTimedeltaIndex {
         }
     }
 
+    /// A duration field as pandas answers it: an Index of ints under the
+    /// index's name, float64 with NaN when a NaT is present.
+    fn field_index(&self, values: Vec<Option<i64>>) -> PyIndex {
+        let field = datetime_field_index(values);
+        PyIndex {
+            inner: field.inner.rename_index(self.inner.name()),
+        }
+    }
+
     /// The nanoseconds a `fillna` value stands for.
     fn fill_nanos(label: &IndexLabel) -> PyResult<i64> {
         match label {
@@ -14356,28 +14368,42 @@ impl PyTimedeltaIndex {
         })
     }
 
+    /// pandas' `TimedeltaIndex.days` (and seconds / microseconds /
+    /// nanoseconds): an Index of ints under the index's name, float64 with
+    /// NaN when a NaT is present (they were lists; pandas' int32 for the
+    /// last three is int64 here, as the DatetimeIndex fields).
     #[getter]
-    pub fn days(&self) -> Vec<Option<i64>> {
-        self.inner.days()
+    pub fn days(&self) -> PyIndex {
+        self.field_index(self.inner.days())
     }
 
     #[getter]
-    pub fn seconds(&self) -> Vec<Option<i64>> {
-        self.inner.seconds()
+    pub fn seconds(&self) -> PyIndex {
+        self.field_index(self.inner.seconds())
     }
 
     #[getter]
-    pub fn microseconds(&self) -> Vec<Option<i64>> {
-        self.inner.microseconds()
+    pub fn microseconds(&self) -> PyIndex {
+        self.field_index(self.inner.microseconds())
     }
 
     #[getter]
-    pub fn nanoseconds(&self) -> Vec<Option<i64>> {
-        self.inner.nanoseconds()
+    pub fn nanoseconds(&self) -> PyIndex {
+        self.field_index(self.inner.nanoseconds())
     }
 
-    pub fn total_seconds(&self) -> Vec<Option<f64>> {
-        self.inner.total_seconds()
+    /// pandas' `TimedeltaIndex.total_seconds()`: a float64 Index under the
+    /// index's name, NaN at NaT (it was a list).
+    pub fn total_seconds(&self) -> PyIndex {
+        let labels = self
+            .inner
+            .total_seconds()
+            .into_iter()
+            .map(|value| IndexLabel::Float64(OrderedF64(value.unwrap_or(f64::NAN))))
+            .collect();
+        PyIndex {
+            inner: Index::new(labels).rename_index(self.inner.name()),
+        }
     }
 
     #[getter]
@@ -70000,8 +70026,19 @@ mod tests {
         assert!(!tdi.empty());
         assert_eq!(tdi.shape(), (4,));
         assert_eq!(tdi.size(), 4);
+        // TEST-CHANGE (everyday probe 34): days is an Index under the
+        // index's name, as pandas' (it was a list).
         let days = tdi.days();
-        assert_eq!(days, vec![Some(0), Some(1), Some(2), Some(3)]);
+        assert_eq!(
+            days.inner.labels(),
+            &[
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+            ]
+        );
+        assert_eq!(days.inner.name().map(|name| name.as_str()), Some("td_idx"));
 
         let shifted = tdi.shift(1, "D").expect("shift"); // ubs:ignore — test fixture
         assert_eq!(shifted.len(), 4);

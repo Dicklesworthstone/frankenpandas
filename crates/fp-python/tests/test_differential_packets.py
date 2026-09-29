@@ -16034,3 +16034,67 @@ _P45_CASES = {
 def test_period_row_index_like_pandas_45fzr(case: str) -> None:
     run = _P45_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-39jlf (everyday probe 34, scratch p14/oracle_tdfields.py
+# vs pandas 2.2.3): the TimedeltaIndex fields answered Python lists (None at
+# NaT). pandas answers an Index under the index's name, float64 with NaN
+# beside a NaT; its int32 seconds / microseconds / nanoseconds are int64
+# here (br-frankenpandas-pqjzo), so those compare their values and name.
+def _td_index(m: Any, nat: bool) -> Any:
+    values = ["1 day 3s", "2h"] + ([None] if nat else [])
+    return m.to_timedelta(values).rename("d")
+
+
+_TD_CASES = {
+    "days": lambda m: [repr(_td_index(m, False).days)],
+    "total_seconds": lambda m: [repr(_td_index(m, False).total_seconds())],
+    "days beside NaT": lambda m: [repr(_td_index(m, True).days)],
+    "seconds beside NaT": lambda m: [repr(_td_index(m, True).seconds)],
+    "microseconds beside NaT": lambda m: [repr(_td_index(m, True).microseconds)],
+    "nanoseconds beside NaT": lambda m: [repr(_td_index(m, True).nanoseconds)],
+    "total_seconds beside NaT": lambda m: [repr(_td_index(m, True).total_seconds())],
+    "seconds": lambda m: (lambda r: [type(r).__name__, r.tolist(), r.name])(_td_index(m, False).seconds),
+    "nanoseconds": lambda m: (lambda r: [type(r).__name__, r.tolist(), r.name])(_td_index(m, False).nanoseconds),
+    # NEGATIVE: the Series .dt fields, as before.
+    "Series dt.total_seconds": lambda m: [repr(m.Series(_td_index(m, True)).dt.total_seconds())],
+    "Series dt.days": lambda m: [repr(m.Series(_td_index(m, False)).dt.days)],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_TD_CASES))
+def test_timedelta_index_fields_like_pandas_39jlf(case: str) -> None:
+    run = _TD_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.62's own probe
+# (scratch p14/oracle_fvsao62.py vs pandas 2.2.3): dt.to_period's column
+# for the D / M / Q / Y freqs - its dtype, cells, + 1, == pd.Period,
+# .dt.start_time and value_counts. A NaT cell was Period('NaT', 'M') where
+# pandas answers NaT; the dtype and value_counts' PeriodIndex came with 45fzr.
+def _f62_periods(m: Any, freq: str) -> Any:
+    stamps = m.Series(m.to_datetime(["2024-03-09", "2024-05-20", "2024-05-21", None]))
+    return stamps.dt.to_period(freq)
+
+
+_F62_CASES = {
+    f"{freq} {label}": (lambda freq, op: lambda m: [repr(op(m, _f62_periods(m, freq)))])(freq, op)
+    for freq in ["D", "M", "Q", "Y"]
+    for label, op in [
+        ("dtype", lambda m, p: p.dtype),
+        ("cells", lambda m, p: p.tolist()),
+        ("plus one", lambda m, p: (p + 1).tolist()),
+        ("equal to a Period", lambda m, p: (p == m.Period("2024-05-20", p.dtype.freqstr)).tolist()),
+        ("start_time", lambda m, p: p.dt.start_time.tolist()),
+        ("value_counts", lambda m, p: p.value_counts()),
+    ]
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_F62_CASES))
+def test_to_period_column_like_pandas_fvsao62(case: str) -> None:
+    run = _F62_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
