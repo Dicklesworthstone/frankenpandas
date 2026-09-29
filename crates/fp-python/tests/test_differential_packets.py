@@ -437,7 +437,11 @@ def test_period_differential() -> None:
     p_prev_fpd = p_fpd - 2
     assert p_prev_fpd.month == p_prev_pd.month == 1
 
-    assert (p_next_fpd - p_fpd) == (p_next_pd - p_pd).n == 1
+    # Period - Period is the freq's offset, as pandas' (fp's was the int,
+    # which this compared with pandas' .n; br-frankenpandas-3x4e7).
+    difference = p_next_fpd - p_fpd
+    assert repr(difference) == repr(p_next_pd - p_pd) == "<MonthEnd>"
+    assert difference.n == (p_next_pd - p_pd).n == 1
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
@@ -18853,3 +18857,72 @@ _AI_CASES = {
 def test_astype_to_integers_like_pandas_15crl(case: str) -> None:
     run = _AI_CASES[case]
     assert _ai_outcome(lambda: run(fpd)) == _ai_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-3x4e7: the Period scalar's fields as pandas reads them - a
+# period of a day or longer at its last day, a business day or a finer
+# period at its start - strftime with pandas' own directives, and
+# Period - Period the offset of the freq (it was the int). The exception is
+# compared by class name, ValueError-ness and message (pandas'
+# IncompatibleFrequency lives in pandas._libs.tslibs.period).
+_PF_FIELDS = [
+    "year", "month", "day", "hour", "minute", "second", "quarter", "qyear", "dayofweek", "weekday",
+    "dayofyear", "week", "days_in_month", "is_leap_year", "start_time", "end_time",
+]
+
+
+def _pf_outcome(run: Any) -> Any:
+    try:
+        return ("ok", [repr(v) for v in run()])
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, isinstance(e, ValueError), str(e))
+
+
+def _pf_fields(m: Any, value: str, freq: str) -> list:
+    period = m.Period(value, freq=freq)
+    return [(field, getattr(period, field)) for field in _PF_FIELDS]
+
+
+def _pf_strftime(m: Any, value: str, freq: str) -> list:
+    period = m.Period(value, freq=freq)
+    return [period.strftime(f) for f in ["%Y-%m-%d %H:%M:%S", "%q/%F/%f", "%b %a %j", "%%Y %Y", "%l.%u.%n"]]
+
+
+def _pf_differences(m: Any, value: str, freq: str) -> list:
+    period = m.Period(value, freq=freq)
+    return [(period + k) - period for k in [0, 1, 3, -2]]
+
+
+_PF_CASES = {
+    **{
+        f"fields {freq}": (lambda value, freq: lambda m: _pf_fields(m, value, freq))(value, freq)
+        for value, freq in [
+            ("2024", "Y"), ("2024Q1", "Q"), ("2024-02-29", "W"), ("2024-03-01", "B"),
+            ("2024-02-29 13:45", "h"), ("2024-02-29 13:45:30", "min"), ("2024-12-31 23:59:58", "s"),
+        ]
+    },
+    **{
+        f"strftime {freq}": (lambda value, freq: lambda m: _pf_strftime(m, value, freq))(value, freq)
+        for value, freq in [("2024Q1", "Q"), ("2024-02", "M"), ("2024-02-29 13:45:30", "s")]
+    },
+    **{
+        f"differences {freq}": (lambda value, freq: lambda m: _pf_differences(m, value, freq))(value, freq)
+        for value, freq in [("2024", "Y"), ("2024Q1", "Q"), ("2024-02", "M"), ("2024-02-29", "W"),
+                            ("2024-02-29", "D"), ("2024-03-01", "B"), ("2024-02-29 13:00", "h")]
+    },
+    "difference n": lambda m: [(m.Period("2024-05", "M") - m.Period("2024-02", "M")).n],
+    "difference of two freqs": lambda m: [m.Period("2024-01", "M") - m.Period("2024-01-01", "D")],
+    # The monthly and daily periods had year / month / day / quarter right;
+    # the rows differ by the fields that were missing.
+    "fields M": lambda m: _pf_fields(m, "2024-02", "M"),
+    "fields D": lambda m: _pf_fields(m, "2024-02-29", "D"),
+    # Negative: already pandas'.
+    "period plus int": lambda m: [m.Period("2024-02", "M") + 3, m.Period("2024Q4", "Q") + 1],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_PF_CASES))
+def test_period_fields_like_pandas_3x4e7(case: str) -> None:
+    run = _PF_CASES[case]
+    assert _pf_outcome(lambda: run(fpd)) == _pf_outcome(lambda: run(pd)), case

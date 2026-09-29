@@ -5284,6 +5284,79 @@ pub struct PyPeriod {
     pub(crate) inner: Period,
 }
 
+impl PyPeriod {
+    /// The period's first instant, pandas' `start_time` (a week, a business
+    /// day and the freqs finer than a day were read as days).
+    fn start_nanos(&self) -> Option<i64> {
+        if self.inner.is_nat() {
+            return None;
+        }
+        fp_index::period_start_nanos(self.inner).ok()
+    }
+
+    /// The period's last instant, pandas' `end_time`: a business day's own
+    /// day's last nanosecond, any other the one before the next period.
+    fn end_nanos(&self) -> Option<i64> {
+        if self.inner.freq == PeriodFreq::Business {
+            return self.start_nanos()?.checked_add(86_399_999_999_999);
+        }
+        if self.inner.is_nat() {
+            return None;
+        }
+        fp_index::period_start_nanos(self.inner.shift(1))
+            .ok()?
+            .checked_sub(1)
+    }
+
+    /// The instant pandas reads the period's fields at (get_date_info): a
+    /// period of a day or longer its last day at midnight (2024Q1's month is
+    /// 3 and its day 31), a business day or a finer period its start
+    /// (br-frankenpandas-3x4e7).
+    fn field_stamp(&self) -> Option<Timestamp> {
+        let nanos = match self.inner.freq {
+            PeriodFreq::Business
+            | PeriodFreq::Hourly
+            | PeriodFreq::Minutely
+            | PeriodFreq::Secondly
+            | PeriodFreq::Milliseconds
+            | PeriodFreq::Microseconds
+            | PeriodFreq::Nanoseconds => self.start_nanos()?,
+            _ => {
+                let last = self.end_nanos()?;
+                last - last.rem_euclid(86_400_000_000_000)
+            }
+        };
+        Some(Timestamp::from_nanos(nanos))
+    }
+
+    fn stamp(nanos: Option<i64>) -> PyTimestamp {
+        PyTimestamp {
+            inner: nanos.map_or_else(Timestamp::nat, Timestamp::from_nanos),
+            unit: StampUnit::Ns,
+        }
+    }
+}
+
+/// The offset `n` periods of `freq` span, as pandas' Period - Period gives
+/// it (`<3 * MonthEnds>`; it was the int 3; br-frankenpandas-3x4e7).
+fn period_freq_offset(freq: PeriodFreq, n: i64) -> PyResult<PyDateOffset> {
+    Ok(match freq {
+        PeriodFreq::Annual => offset_year_end(n, false, 12)?,
+        PeriodFreq::Quarterly => offset_quarter_end(n, false, 12)?,
+        PeriodFreq::Monthly => offset_month_end(n, false),
+        PeriodFreq::Weekly => offset_week(n, false, Some(6))?,
+        PeriodFreq::Daily => offset_day(n),
+        PeriodFreq::Business => offset_business_day(n, false),
+        PeriodFreq::Hourly => offset_hour(n),
+        PeriodFreq::Minutely => offset_minute(n),
+        PeriodFreq::Secondly => offset_second(n),
+        PeriodFreq::Milliseconds => offset_milli(n),
+        PeriodFreq::Microseconds => offset_micro(n),
+        PeriodFreq::Nanoseconds => offset_nano(n),
+        _ => return Err(not_implemented("Period - Period at this freq")),
+    })
+}
+
 #[pymethods]
 impl PyPeriod {
     #[new]
@@ -5383,84 +5456,55 @@ impl PyPeriod {
         self.inner.freqstr()
     }
 
+    // The date and time fields, read where pandas reads them (see
+    // `field_stamp`; week, business-day and sub-daily periods had none, a
+    // quarter's weekday was its first day's, and days_in_month, dayofyear,
+    // hour, minute, second, qyear, week, weekday, is_leap_year were missing;
+    // br-frankenpandas-3x4e7).
     #[getter]
     fn year(&self) -> Option<i64> {
-        if self.inner.ordinal == i64::MIN {
-            return None;
-        }
-        match self.inner.freq {
-            PeriodFreq::Annual => Some(1970 + self.inner.ordinal),
-            PeriodFreq::Quarterly => Some(1970 + self.inner.ordinal.div_euclid(4)),
-            PeriodFreq::Monthly => Some(1970 + self.inner.ordinal.div_euclid(12)),
-            PeriodFreq::Daily => {
-                let ts = Timestamp::from_nanos(self.inner.ordinal * 86_400_000_000_000);
-                ts.year()
-            }
-            _ => None,
-        }
+        self.field_stamp()?.year()
     }
 
     #[getter]
     fn month(&self) -> Option<i64> {
-        if self.inner.ordinal == i64::MIN {
-            return None;
-        }
-        match self.inner.freq {
-            PeriodFreq::Annual => Some(12),
-            PeriodFreq::Quarterly => Some((self.inner.ordinal.rem_euclid(4) + 1) * 3),
-            PeriodFreq::Monthly => Some(self.inner.ordinal.rem_euclid(12) + 1),
-            PeriodFreq::Daily => {
-                let ts = Timestamp::from_nanos(self.inner.ordinal * 86_400_000_000_000);
-                ts.month()
-            }
-            _ => None,
-        }
+        self.field_stamp()?.month()
     }
 
     #[getter]
     fn day(&self) -> Option<i64> {
-        if self.inner.ordinal == i64::MIN {
-            return None;
-        }
-        match self.inner.freq {
-            PeriodFreq::Annual => Some(31),
-            PeriodFreq::Quarterly => {
-                let ts = self.end_time();
-                ts.day()
-            }
-            PeriodFreq::Monthly => {
-                let ts = self.end_time();
-                ts.day()
-            }
-            PeriodFreq::Daily => {
-                let ts = Timestamp::from_nanos(self.inner.ordinal * 86_400_000_000_000);
-                ts.day()
-            }
-            _ => None,
-        }
+        self.field_stamp()?.day()
+    }
+
+    #[getter]
+    fn hour(&self) -> Option<i64> {
+        self.field_stamp()?.hour()
+    }
+
+    #[getter]
+    fn minute(&self) -> Option<i64> {
+        self.field_stamp()?.minute()
+    }
+
+    #[getter]
+    fn second(&self) -> Option<i64> {
+        self.field_stamp()?.second()
     }
 
     #[getter]
     fn quarter(&self) -> Option<i64> {
-        if self.inner.ordinal == i64::MIN {
-            return None;
-        }
-        match self.inner.freq {
-            PeriodFreq::Quarterly => Some(self.inner.ordinal.rem_euclid(4) + 1),
-            _ => {
-                let m = self.month()?;
-                Some((m - 1) / 3 + 1)
-            }
-        }
+        self.field_stamp()?.quarter()
+    }
+
+    /// The fiscal year of the quarter (a Q-DEC year is the calendar one).
+    #[getter]
+    fn qyear(&self) -> Option<i64> {
+        self.year()
     }
 
     #[getter]
     fn day_of_week(&self) -> Option<i64> {
-        if self.inner.ordinal == i64::MIN {
-            return None;
-        }
-        let ts = self.start_time();
-        ts.day_of_week()
+        self.field_stamp()?.dayofweek()
     }
 
     #[getter]
@@ -5469,77 +5513,87 @@ impl PyPeriod {
     }
 
     #[getter]
-    fn start_time(&self) -> PyTimestamp {
-        if self.inner.ordinal == i64::MIN {
-            return PyTimestamp {
-                inner: Timestamp::nat(),
-                unit: StampUnit::Ns,
-            };
-        }
-        let nanos = match self.inner.freq {
-            PeriodFreq::Daily => self.inner.ordinal * 86_400_000_000_000,
-            PeriodFreq::Monthly => {
-                let year = 1970 + self.inner.ordinal.div_euclid(12);
-                let month = self.inner.ordinal.rem_euclid(12) + 1;
-                days_from_ymd(year, month, 1) * 86_400_000_000_000
-            }
-            PeriodFreq::Quarterly => {
-                let year = 1970 + self.inner.ordinal.div_euclid(4);
-                let quarter = self.inner.ordinal.rem_euclid(4) + 1;
-                let start_month = (quarter - 1) * 3 + 1;
-                days_from_ymd(year, start_month, 1) * 86_400_000_000_000
-            }
-            PeriodFreq::Annual => {
-                let year = 1970 + self.inner.ordinal;
-                days_from_ymd(year, 1, 1) * 86_400_000_000_000
-            }
-            _ => self.inner.ordinal * 86_400_000_000_000,
+    fn weekday(&self) -> Option<i64> {
+        self.day_of_week()
+    }
+
+    #[getter]
+    fn day_of_year(&self) -> Option<i64> {
+        self.field_stamp()?.dayofyear()
+    }
+
+    #[getter]
+    fn dayofyear(&self) -> Option<i64> {
+        self.day_of_year()
+    }
+
+    #[getter]
+    fn week(&self) -> Option<i64> {
+        self.field_stamp()?.week()
+    }
+
+    #[getter]
+    fn weekofyear(&self) -> Option<i64> {
+        self.week()
+    }
+
+    #[getter]
+    fn days_in_month(&self) -> Option<i64> {
+        self.field_stamp()?.days_in_month()
+    }
+
+    #[getter]
+    fn daysinmonth(&self) -> Option<i64> {
+        self.days_in_month()
+    }
+
+    #[getter]
+    fn is_leap_year(&self) -> Option<bool> {
+        self.field_stamp()?.is_leap_year()
+    }
+
+    /// pandas' `Period.strftime`: Python's directives read at the period's
+    /// fields, and pandas' own - %q the quarter, %F the fiscal year, %f its
+    /// last two digits, %l / %u / %n the milli-, micro- and nanoseconds (it
+    /// was missing).
+    fn strftime(&self, fmt: &str) -> String {
+        let Some(stamp) = self.field_stamp() else {
+            return "NaT".to_owned();
         };
-        PyTimestamp {
-            inner: Timestamp::from_nanos(nanos),
-            unit: StampUnit::Ns,
+        let within = stamp.value().rem_euclid(1_000_000_000);
+        let year = stamp.year().unwrap_or_default();
+        let mut own = String::with_capacity(fmt.len());
+        let mut chars = fmt.chars();
+        while let Some(c) = chars.next() {
+            if c != '%' {
+                own.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some('q') => own.push_str(&stamp.quarter().unwrap_or_default().to_string()),
+                Some('F') => own.push_str(&year.to_string()),
+                Some('f') => own.push_str(&format!("{:02}", year.rem_euclid(100))),
+                Some('l') => own.push_str(&format!("{:03}", within / 1_000_000)),
+                Some('u') => own.push_str(&format!("{:06}", within / 1_000)),
+                Some('n') => own.push_str(&format!("{within:09}")),
+                Some(other) => {
+                    own.push('%');
+                    own.push(other);
+                }
+                None => own.push('%'),
+            }
         }
+        stamp.strftime(&own)
+    }
+
+    #[getter]
+    fn start_time(&self) -> PyTimestamp {
+        Self::stamp(self.start_nanos())
     }
 
     #[getter]
     fn end_time(&self) -> PyTimestamp {
-        if self.inner.ordinal == i64::MIN {
-            return PyTimestamp {
-                inner: Timestamp::nat(),
-                unit: StampUnit::Ns,
-            };
-        }
-        let nanos = match self.inner.freq {
-            PeriodFreq::Daily => (self.inner.ordinal + 1) * 86_400_000_000_000 - 1,
-            PeriodFreq::Monthly => {
-                let year = 1970 + self.inner.ordinal.div_euclid(12);
-                let month = self.inner.ordinal.rem_euclid(12) + 1;
-                let next_year = if month == 12 { year + 1 } else { year };
-                let next_month = if month == 12 { 1 } else { month + 1 };
-                days_from_ymd(next_year, next_month, 1) * 86_400_000_000_000 - 1
-            }
-            PeriodFreq::Quarterly => {
-                let year = 1970 + self.inner.ordinal.div_euclid(4);
-                let quarter = self.inner.ordinal.rem_euclid(4) + 1;
-                let start_month = (quarter - 1) * 3 + 1;
-                let next_year = if start_month + 3 > 12 { year + 1 } else { year };
-                let next_month = if start_month + 3 > 12 {
-                    1
-                } else {
-                    start_month + 3
-                };
-                days_from_ymd(next_year, next_month, 1) * 86_400_000_000_000 - 1
-            }
-            PeriodFreq::Annual => {
-                let year = 1970 + self.inner.ordinal;
-                days_from_ymd(year + 1, 1, 1) * 86_400_000_000_000 - 1
-            }
-            _ => (self.inner.ordinal + 1) * 86_400_000_000_000 - 1,
-        };
-        PyTimestamp {
-            inner: Timestamp::from_nanos(nanos),
-            unit: StampUnit::Ns,
-        }
+        Self::stamp(self.end_nanos())
     }
 
     #[pyo3(signature = (freq, how="end"))]
@@ -5631,11 +5685,13 @@ impl PyPeriod {
             .into_py_any(py)
         } else if let Ok(other_p) = other.extract::<PyRef<'_, PyPeriod>>() {
             if let Some(diff) = self.inner.diff(&other_p.inner) {
-                diff.into_py_any(py)
+                period_freq_offset(self.inner.freq, diff)?.into_py_any(py)
             } else {
-                Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "Cannot compute difference between Periods with different frequencies",
-                ))
+                Err(IncompatibleFrequency::new_err(format!(
+                    "Input has different freq={} from Period(freq={})",
+                    other_p.inner.freqstr(),
+                    self.inner.freqstr()
+                )))
             }
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
@@ -64792,6 +64848,13 @@ pyo3::create_exception!(errors, OutOfBoundsTimedelta, pyo3::exceptions::PyValueE
 // pandas' pandas._libs.tslibs.parsing.DateParseError (a ValueError): a
 // string no date format reads.
 pyo3::create_exception!(parsing, DateParseError, pyo3::exceptions::PyValueError);
+// pandas' pandas._libs.tslibs.period.IncompatibleFrequency (a ValueError):
+// periods of two frequencies subtracted.
+pyo3::create_exception!(
+    period,
+    IncompatibleFrequency,
+    pyo3::exceptions::PyValueError
+);
 pyo3::create_exception!(errors, DataError, pyo3::exceptions::PyException);
 pyo3::create_exception!(errors, DatabaseError, pyo3::exceptions::PyOSError);
 pyo3::create_exception!(errors, DuplicateLabelError, pyo3::exceptions::PyValueError);
