@@ -15663,3 +15663,51 @@ _E32_CASES = {
 def test_everyday32_33_like_pandas(case: str) -> None:
     run = _E32_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-mzes1 (scratch p14/oracle_allnan.py, 16 calls; 2
+# matched): an index whose labels are all missing was object, inferred
+# 'empty', wherever it came from; pandas types it by them - NaN (beside None
+# too) float64, NaT a DatetimeIndex, None alone object ('mixed').
+def _mzes1_shown(index: Any) -> list:
+    return [repr(index), index.inferred_type]
+
+
+_MZES1_CASES = {
+    "Index of NaNs": lambda m: _mzes1_shown(m.Index([np.nan, np.nan])),
+    "Index of Nones": lambda m: _mzes1_shown(m.Index([None, None])),
+    "Index of NaTs": lambda m: _mzes1_shown(m.Index([m.NaT, m.NaT])),
+    "take of the NaN": lambda m: _mzes1_shown(m.Index([np.nan, 1.0]).take([0])),
+    "slice to the NaN": lambda m: _mzes1_shown(m.Index([1.0, np.nan])[1:]),
+    "factorize NaNs keeping them": lambda m: _mzes1_shown(
+        m.Index([np.nan, np.nan]).factorize(use_na_sentinel=False)[1]
+    ),
+    "value_counts of Nones": lambda m: _mzes1_shown(
+        m.Series([None, None], dtype=object).value_counts(dropna=False).index
+    ),
+    "value_counts of NaNs": lambda m: _mzes1_shown(m.Series([np.nan, np.nan]).value_counts(dropna=False).index),
+    "groupby a None key": lambda m: _mzes1_shown(
+        m.DataFrame({"k": [None, None], "v": [1, 2]}).groupby("k", dropna=False).v.sum().index
+    ),
+    "groupby a NaN key": lambda m: _mzes1_shown(
+        m.DataFrame({"k": [np.nan, np.nan], "v": [1, 2]}).groupby("k", dropna=False).v.sum().index
+    ),
+    "Series on NaN labels": lambda m: _mzes1_shown(m.Series([1, 2], index=[np.nan, np.nan]).index),
+    "unique NaNs": lambda m: _mzes1_shown(m.Index([np.nan, np.nan]).unique()),
+    "reindex to a NaN": lambda m: _mzes1_shown(m.Series([1.0], index=[1.0]).reindex([np.nan]).index),
+    # NEGATIVE: a present label types the index as before.
+    "value_counts of a text and Nones": lambda m: _mzes1_shown(
+        m.Series(["a", None, None]).value_counts(dropna=False).index
+    ),
+    "groupby a text and a None key": lambda m: _mzes1_shown(
+        m.DataFrame({"k": ["a", None], "v": [1, 2]}).groupby("k", dropna=False).v.sum().index
+    ),
+    "dropna leaves a float": lambda m: _mzes1_shown(m.Index([np.nan, 1.0]).dropna()),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_MZES1_CASES))
+def test_all_missing_index_labels_type_it_like_pandas(case: str) -> None:
+    run = _MZES1_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

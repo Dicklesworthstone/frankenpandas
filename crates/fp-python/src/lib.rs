@@ -7793,6 +7793,27 @@ fn flat_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
         {
             return Ok(Py::new(py, PyDatetimeIndex { inner })?.into_any());
         }
+        // NaT labels (alone, or beside instants) are a DatetimeIndex too,
+        // as pandas' Index([NaT, NaT]) (br-frankenpandas-mzes1).
+        if labels.iter().all(|label| {
+            matches!(
+                label,
+                IndexLabel::Datetime64(_) | IndexLabel::Null(NullKind::NaT)
+            )
+        }) {
+            let instants = labels
+                .iter()
+                .map(|label| match label {
+                    IndexLabel::Null(_) => IndexLabel::Datetime64(i64::MIN),
+                    other => other.clone(),
+                })
+                .collect();
+            if let Ok(inner) =
+                DatetimeIndex::from_index(Index::new(instants).rename_index(index.name()))
+            {
+                return Ok(Py::new(py, PyDatetimeIndex { inner })?.into_any());
+            }
+        }
         if labels
             .iter()
             .all(|label| matches!(label, IndexLabel::Timedelta64(_)))

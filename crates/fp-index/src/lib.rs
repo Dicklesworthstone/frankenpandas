@@ -6077,7 +6077,35 @@ impl Index {
         }
         let mut non_missing = self.labels.iter().filter(|label| !label.is_missing());
         let Some(first) = non_missing.next() else {
-            return "empty";
+            // Every label is missing: pandas infers NaN floating (NaN beside
+            // None too), NaT an instant and None alone mixed - an all-NaN
+            // index is float64 (it was object; br-frankenpandas-mzes1).
+            let all = |kind: fn(&IndexLabel) -> bool| self.labels.iter().all(kind);
+            return if all(|label| {
+                matches!(
+                    label,
+                    IndexLabel::Datetime64(_) | IndexLabel::Null(fp_types::NullKind::NaT)
+                )
+            }) {
+                "datetime64"
+            } else if all(|label| matches!(label, IndexLabel::Timedelta64(_))) {
+                "timedelta64"
+            } else if self.labels.iter().any(|label| {
+                matches!(
+                    label,
+                    IndexLabel::Float64(_) | IndexLabel::Null(fp_types::NullKind::NaN)
+                )
+            }) && all(|label| {
+                matches!(
+                    label,
+                    IndexLabel::Float64(_)
+                        | IndexLabel::Null(fp_types::NullKind::NaN | fp_types::NullKind::Null)
+                )
+            }) {
+                "floating"
+            } else {
+                "mixed"
+            };
         };
         let same_kind = |label: &IndexLabel| {
             matches!(
@@ -26640,6 +26668,34 @@ mod tests {
         assert_eq!(bools.dtype(), "bool");
         let texts = Index::new(vec![IndexLabel::Utf8("a".into())]);
         assert_eq!(texts.inferred_type(), "string");
+    }
+
+    #[test]
+    fn an_index_of_missing_labels_alone_is_typed_by_them_mzes1() {
+        use fp_types::NullKind;
+        // pd.Index([nan, nan]) / [nan, None]: float64 (it was object);
+        // [NaT, NaT]: datetime64[ns].
+        for labels in [
+            vec![
+                IndexLabel::Null(NullKind::NaN),
+                IndexLabel::Null(NullKind::NaN),
+            ],
+            vec![
+                IndexLabel::Null(NullKind::NaN),
+                IndexLabel::Null(NullKind::Null),
+            ],
+        ] {
+            let index = Index::new(labels);
+            assert_eq!(index.inferred_type(), "floating");
+            assert_eq!(index.dtype(), "float64");
+        }
+        let nats = Index::new(vec![IndexLabel::Null(NullKind::NaT); 2]);
+        assert_eq!(nats.dtype(), "datetime64[ns]");
+        // NEGATIVE: None alone stays object ('mixed'), and no labels 'empty'.
+        let nones = Index::new(vec![IndexLabel::Null(NullKind::Null); 2]);
+        assert_eq!(nones.inferred_type(), "mixed");
+        assert_eq!(nones.dtype(), "object");
+        assert_eq!(Index::new(Vec::new()).inferred_type(), "empty");
     }
 
     #[test]
