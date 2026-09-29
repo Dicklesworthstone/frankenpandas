@@ -7937,12 +7937,6 @@ fn iter_by_position(index: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         .unbind())
 }
 
-/// A flat index as pandas' class for its labels: instants and durations
-/// come back as pandas' DatetimeIndex / TimedeltaIndex, with their
-/// accessors (df.index.year, .month_name(), .normalize();
-/// groupby(df.index.month)); every index was a plain Index
-/// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.18) - a
-/// MultiIndex level too (br-frankenpandas-stofr).
 /// pandas' `to_period` of a row index: a DatetimeIndex as the PeriodIndex
 /// of `freq` (its own freq by default), its name kept; any other index is
 /// pandas' TypeError "unsupported Type ..." (45fzr).
@@ -7986,6 +7980,12 @@ fn index_to_timestamp(
     Ok(stamps.with_freq(inferred).into_index())
 }
 
+/// A flat index as pandas' class for its labels: instants and durations
+/// come back as pandas' DatetimeIndex / TimedeltaIndex, with their
+/// accessors (df.index.year, .month_name(), .normalize();
+/// groupby(df.index.month)); every index was a plain Index
+/// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.18) - a
+/// MultiIndex level too (br-frankenpandas-stofr).
 fn flat_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
     let labels = index.labels();
     // An empty index keeps its source's class (pandas' empty slice of a
@@ -8184,9 +8184,6 @@ fn axis_length_error_to_py(err: FrameError) -> PyErr {
     }
 }
 
-/// The row axis `obj.index = value` sets, as pandas builds it: an Index
-/// keeps its labels and name, a Series gives its values and name, a list or
-/// other iterable its items, unnamed.
 /// `frame` with `multi` as its column axis; the storage keys join each
 /// column's levels with '_'.
 fn frame_with_column_multiindex(
@@ -8211,6 +8208,9 @@ fn frame_with_column_multiindex(
         .map_err(axis_length_error_to_py)
 }
 
+/// The row axis `obj.index = value` sets, as pandas builds it: an Index
+/// keeps its labels and name, a Series gives its values and name, a list or
+/// other iterable its items, unnamed.
 fn index_from_axis_value(value: &Bound<'_, PyAny>) -> PyResult<Index> {
     if value.is_instance_of::<pyo3::types::PyString>() {
         return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
@@ -23720,6 +23720,40 @@ impl PySeries {
         row_index_to_py(py, self.inner.index())
     }
 
+    /// `groupby(level=)` over several levels of the MultiIndex: the Series
+    /// grouped as `df.groupby(level=[...])[column]` groups a frame's column,
+    /// its groups under a MultiIndex of those levels (it was refused;
+    /// fvsao.36).
+    fn levels_groupby(
+        &self,
+        level: &Bound<'_, PyAny>,
+        sort: bool,
+        dropna: bool,
+        group_keys: bool,
+    ) -> PyResult<PySeriesGroupBy> {
+        let values = "__fp_series_values__";
+        let frame = self
+            .inner
+            .to_frame(Some(values))
+            .map_err(frame_error_to_py)?;
+        let (df, by, key_names) = group_by_index_level(&frame, level)?;
+        let gb = PyGroupBy {
+            df,
+            by,
+            key_names,
+            as_index: true,
+            sort,
+            dropna,
+            group_keys,
+            unused: Vec::new(),
+            selection: None,
+            repeated: None,
+        };
+        let mut grouped = gb.column_groupby(values)?;
+        grouped.series = self.inner.clone();
+        Ok(grouped)
+    }
+
     /// `any` / `all`'s axis (a Series has only axis 0) and numpy's
     /// compatibility keywords (`np.any(s)` passes `axis=None, out=None`);
     /// datetime64 values warn as pandas.
@@ -24283,7 +24317,7 @@ impl PySeries {
             return self.__getitem__(py, &selector);
         }
         // A MultiIndex key (s['y'], s[('y', 1)]; fvsao.36).
-        if let Some(selected) = series_multiindex_loc(py, &self.inner, key)? {
+        if let Some(selected) = series_multiindex_loc(py, &self.inner, key, true)? {
             return Ok(selected);
         }
         if let Ok(slice) = key.cast::<pyo3::types::PySlice>()
@@ -27153,10 +27187,12 @@ impl PySeries {
             (None, Some(level)) => {
                 let index = self.inner.index();
                 if let Some(multi) = index.row_multiindex() {
-                    if level.is_instance_of::<PyList>() {
-                        return Err(not_implemented("Series.groupby(level=[several levels])"));
-                    }
-                    let position = multiindex_level_position(multi, level)?;
+                    let positions = groupby_level_positions(multi, level)?;
+                    let [position] = positions[..] else {
+                        return self
+                            .levels_groupby(level, sort, dropna, group_keys)?
+                            .into_py_any(py);
+                    };
                     let values: Vec<Scalar> = multi
                         .get_level_values(position)
                         .map_err(index_error_to_py)?
@@ -28811,27 +28847,56 @@ impl PySeries {
         Ok(())
     }
 
-    /// pandas' `Series.xs`. On a single-level index `drop_level` changes
-    /// nothing in pandas either; another level needs a MultiIndex.
+    /// pandas' `Series.xs`. Over a MultiIndex, the values whose `level` is
+    /// `key` - a list of levels, a tuple key's labels one each - those
+    /// levels dropped unless drop_level=False; without level=, a key selects
+    /// on the first level and a tuple as `.loc` reads it (level= was refused
+    /// and a tuple missed; fvsao.36). On a single-level index `drop_level`
+    /// changes nothing in pandas either.
     #[pyo3(signature = (key, axis=None, level=None, drop_level=true))]
     fn xs(
         &self,
+        py: Python<'_>,
         key: &Bound<'_, PyAny>,
         axis: Option<&Bound<'_, PyAny>>,
         level: Option<&Bound<'_, PyAny>>,
         drop_level: bool,
-    ) -> PyResult<PySeries> {
-        let _ = drop_level;
-        unsupported_params("Series.xs", &[("level", level.is_none())])?;
+    ) -> PyResult<Py<PyAny>> {
         let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
         if ax != 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "No axis named {ax} for object type Series"
             )));
         }
+        let level = level.filter(|level| !level.is_none());
+        if let Some(multi) = self.inner.index().row_multiindex() {
+            if level.is_none() && drop_level && key.is_instance_of::<PyTuple>() {
+                return series_multiindex_loc(py, &self.inner, key, false)?.ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyKeyError, _>(key.clone().unbind())
+                });
+            }
+            let (rows, keep) = multiindex_xs_rows(multi, key, level, drop_level)?;
+            let index = match keep {
+                None => row_multiindex_axis(multiindex_take(multi, &rows)?)?,
+                Some(keep) => match multiindex_levels_index(multi, &rows, &keep)? {
+                    (index, Some(rest)) => {
+                        index.with_row_multiindex(rest).map_err(index_error_to_py)?
+                    }
+                    (index, None) => index,
+                },
+            };
+            let taken = self
+                .inner
+                .take(&iloc_positions(&rows))
+                .map_err(frame_error_to_py)?;
+            let inner = Series::new(self.inner.name(), index, taken.column().clone())
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner })?.into_any());
+        }
+        unsupported_params("Series.xs", &[("level", level.is_none())])?;
         let lbl = py_to_index_label(key)?;
         let s = self.inner.xs(&lbl).map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: s })
+        Ok(Py::new(py, PySeries { inner: s })?.into_any())
     }
 
     /// pandas' `Series.rename_axis`: `mapper` or `index` names the index;
@@ -29671,12 +29736,30 @@ impl PySeries {
         Ok(self.clone())
     }
 
-    /// pandas needs a MultiIndex to swap levels, which a frankenpandas Series
-    /// index never is; this returned the Series unchanged.
-    #[pyo3(signature = (i=-2, j=-1, copy=None))]
-    fn swaplevel(&self, i: isize, j: isize, copy: Option<bool>) -> PyResult<PySeries> {
-        let _ = (i, j, copy);
-        Err(not_implemented("Series.swaplevel (a MultiIndex)"))
+    /// pandas' `swaplevel(i=-2, j=-1)`: levels `i` and `j` of the
+    /// MultiIndex - positions or names; None is pandas' default - swapped
+    /// (it was refused; fvsao.36). A flat index is pandas' AssertionError.
+    #[pyo3(signature = (i=None, j=None, copy=None))]
+    fn swaplevel(
+        &self,
+        py: Python<'_>,
+        i: Option<&Bound<'_, PyAny>>,
+        j: Option<&Bound<'_, PyAny>>,
+        copy: Option<bool>,
+    ) -> PyResult<PySeries> {
+        // copy= only lets pandas share buffers; a new Series satisfies it.
+        let _ = copy;
+        let Some(multi) = self.inner.index().row_multiindex() else {
+            return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(()));
+        };
+        let swapped = swapped_levels(py, multi, i, j)?;
+        let inner = Series::new(
+            self.inner.name().clone(),
+            row_multiindex_axis(swapped)?,
+            self.inner.column().clone(),
+        )
+        .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner })
     }
 }
 
@@ -30177,7 +30260,7 @@ impl PySeriesLoc {
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let key = &resolve_callable_key(self.parent.bind(py).as_any(), key)?;
         // A MultiIndex key (s.loc['y'], s.loc[('y', 1)]; fvsao.36).
-        if let Some(selected) = series_multiindex_loc(py, &self.inner, key)? {
+        if let Some(selected) = series_multiindex_loc(py, &self.inner, key, false)? {
             return Ok(selected);
         }
         let series = |s: Series| -> PyResult<Py<PyAny>> {
@@ -41972,50 +42055,37 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: df })
     }
 
-    /// Swaps the last two row levels, pandas' default; any two column levels
-    /// with `axis=1` (7m8bq); other row levels are not supported yet (they
-    /// were ignored).
-    #[pyo3(signature = (i=-2, j=-1, axis=None))]
+    /// pandas' `swaplevel(i=-2, j=-1, axis=0)`: levels `i` and `j` of the
+    /// row (or, axis=1, column; 7m8bq) MultiIndex - positions or names; None
+    /// is pandas' default - swapped. Row levels were swapped only as the
+    /// first two whatever was asked, and a flat index came back unchanged
+    /// (fvsao.36); a flat axis is pandas' TypeError.
+    #[pyo3(signature = (i=None, j=None, axis=None))]
     fn swaplevel(
         &self,
-        i: isize,
-        j: isize,
+        py: Python<'_>,
+        i: Option<&Bound<'_, PyAny>>,
+        j: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let axis = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
-        if axis == 1 {
-            let multi = self.inner.columns_multiindex().ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                    "Can only swap levels on a hierarchical axis.",
-                )
-            })?;
-            let nlevels = isize::try_from(multi.nlevels()).unwrap_or(isize::MAX);
-            let position = |level: isize| {
-                let at = if level < 0 { level + nlevels } else { level };
-                usize::try_from(at)
-                    .ok()
-                    .filter(|&at| at < multi.nlevels())
-                    .ok_or_else(|| {
-                        PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
-                            "Too many levels: Index has only {nlevels} levels, not {}",
-                            level + 1
-                        ))
-                    })
-            };
-            let swapped = multi
-                .swaplevel(position(i)?, position(j)?)
-                .map_err(index_error_to_py)?;
-            return Ok(PyDataFrame {
-                inner: self.with_column_axis(fp_index::MultiIndexOrIndex::Multi(swapped))?,
-            });
+        let multi = if axis == 1 {
+            self.inner.columns_multiindex()
+        } else {
+            self.inner.row_multiindex()
         }
-        unsupported_params(
-            "DataFrame.swaplevel",
-            &[("i", i == -2), ("j", j == -1), ("axis", axis == 0)],
-        )?;
-        Ok(PyDataFrame {
-            inner: self.inner.swaplevel(),
-        })
+        .ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Can only swap levels on a hierarchical axis.",
+            )
+        })?;
+        let swapped = swapped_levels(py, multi, i, j)?;
+        let inner = if axis == 1 {
+            self.with_column_axis(fp_index::MultiIndexOrIndex::Multi(swapped))?
+        } else {
+            with_row_axis(self.inner.clone(), &row_multiindex_axis(swapped)?)?
+        };
+        Ok(PyDataFrame { inner })
     }
 
     #[pyo3(signature = (indices, axis=None, **kwargs))]
@@ -42299,42 +42369,36 @@ impl PyDataFrame {
             return Ok(Py::new(py, PyDataFrame { inner: kept })?.into_any());
         }
         // xs(key, level=) over a row MultiIndex: the rows whose `level` is
-        // `key`, that level dropped unless drop_level=False (fvsao.36; it
-        // raised NotImplementedError).
-        // Without level=, a (non-tuple) key over a row MultiIndex selects on
-        // its first level, as pandas' (it raised KeyError).
-        let row_level = match (
-            level.filter(|level| !level.is_none()),
-            self.inner.row_multiindex(),
-        ) {
-            (Some(level), Some(multi)) if ax == 0 => Some(multiindex_level_position(multi, level)?),
-            (None, Some(_)) if ax == 0 && !key.is_instance_of::<PyTuple>() => Some(0),
-            _ => None,
-        };
-        if let Some(position) = row_level
+        // `key` - a list of levels, a tuple key's labels one each - those
+        // levels dropped unless drop_level=False (fvsao.36; one level raised
+        // NotImplementedError, a list TypeError). Without level=, a key
+        // selects on the first level (see [`multiindex_xs_rows`]), and a
+        // tuple as `.loc` reads it - a full one the row (they raised
+        // KeyError).
+        let level = level.filter(|level| !level.is_none());
+        if ax == 0
             && let Some(multi) = self.inner.row_multiindex()
         {
-            let label = py_to_index_label(key)?;
+            if level.is_none() && drop_level && key.is_instance_of::<PyTuple>() {
+                return match frame_multiindex_loc(&self.inner, key, false)? {
+                    Some(MultiLoc::Row(row)) => {
+                        Ok(Py::new(py, PySeries { inner: row })?.into_any())
+                    }
+                    Some(MultiLoc::Rows(rows)) => {
+                        Ok(Py::new(py, PyDataFrame { inner: rows })?.into_any())
+                    }
+                    None => Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                        key.clone().unbind(),
+                    )),
+                };
+            }
             // A date string on a datetime level selects its period, a slice
             // that keeps the level, as pandas' (it raised KeyError).
-            let values = multi
-                .get_level_values(position)
-                .map_err(index_error_to_py)?
-                .labels()
-                .to_vec();
-            let (rows, period) =
-                level_key_rows(&[values], std::slice::from_ref(&label), multi.len(), false);
-            if rows.is_empty() {
-                return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
-                    "{}",
-                    key.repr()?
-                )));
-            }
-            if !drop_level || !period.is_empty() {
+            let (rows, keep) = multiindex_xs_rows(multi, key, level, drop_level)?;
+            let Some(keep) = keep else {
                 let inner = frame_rows_keeping_multiindex(&self.inner, multi, &rows)?;
                 return Ok(Py::new(py, PyDataFrame { inner })?.into_any());
-            }
-            let keep: Vec<usize> = (0..multi.nlevels()).filter(|&l| l != position).collect();
+            };
             let (index, rest) = multiindex_levels_index(multi, &rows, &keep)?;
             let positions: Vec<i64> = rows.iter().map(|&row| row as i64).collect();
             let mut inner = self
@@ -44852,6 +44916,14 @@ fn resolve_iloc_positions(len: usize, key: &Bound<'_, PyAny>) -> PyResult<Vec<us
 /// The rows `s.loc[key]` writes: a label (a new label appends a row), a
 /// label list, an inclusive label slice or a boolean mask.
 fn series_loc_target(series: &Series, key: &Bound<'_, PyAny>) -> PyResult<RowTarget> {
+    // A MultiIndex key writes the rows `.loc` reads (s.loc[('y', 1)] = v,
+    // s.loc['x'] = v); they raised KeyError or appended a row labelled 'x'
+    // (fvsao.36).
+    if let Some(multi) = series.index().row_multiindex()
+        && let Some(rows) = multiindex_loc_rows(multi, key, true)?
+    {
+        return Ok(RowTarget::Rows(rows));
+    }
     let labels = series.index().labels();
     if let Some(label) = loc_new_label(labels, key)? {
         return Ok(RowTarget::Append(label));
@@ -45283,6 +45355,17 @@ fn frame_loc_write(
     key: &Bound<'_, PyAny>,
     value: &Bound<'_, PyAny>,
 ) -> PyResult<DataFrame> {
+    let every_column = || -> Vec<String> { frame.column_names().into_iter().cloned().collect() };
+    // Row MultiIndex: the rows `.loc` reads - a whole key first
+    // (df.loc[('x', 2)] = v, df.loc['y'] = v), then the row half of (rows,
+    // cols) (df.loc['y', 'w'] = v, df.loc[[('x', 1), ('y', 2)], 'w'] = v).
+    // They raised, or appended a row labelled 'y' (fvsao.36).
+    let multi = frame.row_multiindex();
+    if let Some(multi) = multi
+        && let Some(positions) = multiindex_loc_rows(multi, key, false)?
+    {
+        return Ok(loc_assign(py, frame, &positions, &every_column(), value)?.with_labels_of(frame));
+    }
     let (rows, columns) = if let Ok(tuple) = key.cast::<PyTuple>() {
         if tuple.len() != 2 {
             return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
@@ -45297,23 +45380,28 @@ fn frame_loc_write(
         };
         (tuple.get_item(0)?, columns)
     } else {
-        (
-            key.clone(),
-            frame.column_names().into_iter().cloned().collect(),
-        )
+        (key.clone(), every_column())
     };
-    let written = match loc_new_label(frame.index().labels(), &rows)? {
-        Some(label) => {
-            let whole_row = key.cast::<PyTuple>().is_err();
-            loc_enlarge(py, frame, label, &columns, whole_row, value)
-        }
-        None => {
-            let positions = resolve_loc_row_positions(
-                frame.index().labels(),
-                |start, stop| frame.loc_slice_positions(start, stop),
-                &rows,
-            )?;
-            loc_assign(py, frame, &positions, &columns, value)
+    let multi_rows = match multi {
+        Some(multi) if key.is_instance_of::<PyTuple>() => multiindex_loc_rows(multi, &rows, true)?,
+        _ => None,
+    };
+    let written = if let Some(positions) = multi_rows {
+        loc_assign(py, frame, &positions, &columns, value)
+    } else {
+        match loc_new_label(frame.index().labels(), &rows)? {
+            Some(label) => {
+                let whole_row = key.cast::<PyTuple>().is_err();
+                loc_enlarge(py, frame, label, &columns, whole_row, value)
+            }
+            None => {
+                let positions = resolve_loc_row_positions(
+                    frame.index().labels(),
+                    |start, stop| frame.loc_slice_positions(start, stop),
+                    &rows,
+                )?;
+                loc_assign(py, frame, &positions, &columns, value)
+            }
         }
     }?;
     // The frame's own columns keep their typed labels.
@@ -45600,9 +45688,14 @@ fn multiindex_level_position(
             .ok()
             .filter(|&resolved| resolved < count)
             .ok_or_else(|| {
+                // pandas names a negative level as given (it said "not -4").
+                let detail = if position < 0 {
+                    format!("{position} is not a valid level number")
+                } else {
+                    format!("not {}", position + 1)
+                };
                 PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
-                    "Too many levels: Index has only {count} levels, not {}",
-                    position + 1
+                    "Too many levels: Index has only {count} levels, {detail}"
                 ))
             });
     }
@@ -45802,6 +45895,74 @@ fn multiindex_level_positions(
     Ok(positions)
 }
 
+/// pandas' `swaplevel(i, j)` over `multi`: levels `i` and `j` - positions
+/// or names; the last two when not given - swapped.
+fn swapped_levels(
+    py: Python<'_>,
+    multi: &fp_index::MultiIndex,
+    i: Option<&Bound<'_, PyAny>>,
+    j: Option<&Bound<'_, PyAny>>,
+) -> PyResult<fp_index::MultiIndex> {
+    let position = |level: Option<&Bound<'_, PyAny>>, default: i64| match level {
+        Some(level) => multiindex_level_position(multi, level),
+        None => multiindex_level_position(multi, default.into_pyobject(py)?.as_any()),
+    };
+    multi
+        .swaplevel(position(i, -2)?, position(j, -1)?)
+        .map_err(index_error_to_py)
+}
+
+/// The items of a list or tuple `level` (pandas' list-like levels); None
+/// for one level.
+fn level_items<'py>(level: &Bound<'py, PyAny>) -> Option<Vec<Bound<'py, PyAny>>> {
+    if let Ok(list) = level.cast::<PyList>() {
+        return Some(list.iter().collect());
+    }
+    level
+        .cast::<PyTuple>()
+        .ok()
+        .map(|tuple| tuple.iter().collect())
+}
+
+/// The positions in `multi` of the levels pandas' `groupby(level=)` groups
+/// by, in the order given - a repeated level groups twice, as pandas'. A
+/// list or tuple of one level is that level; an empty one is pandas'
+/// ValueError, and a name `multi` lacks inside a list its AssertionError (a
+/// lone one is KeyError, see [`multiindex_level_position`]).
+fn groupby_level_positions(
+    multi: &fp_index::MultiIndex,
+    level: &Bound<'_, PyAny>,
+) -> PyResult<Vec<usize>> {
+    let items = match level_items(level) {
+        None => return Ok(vec![multiindex_level_position(multi, level)?]),
+        Some(items) => items,
+    };
+    match items.as_slice() {
+        [] => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "No group keys passed!",
+        )),
+        [one] => Ok(vec![multiindex_level_position(multi, one)?]),
+        several => several
+            .iter()
+            .map(|item| {
+                let named = item.extract::<String>().is_ok_and(|name| {
+                    multi
+                        .names()
+                        .iter()
+                        .flatten()
+                        .any(|candidate| *candidate == name)
+                });
+                if !named && item.extract::<i64>().is_err() {
+                    return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                        format!("Level {} not in index", item.str()?),
+                    ));
+                }
+                multiindex_level_position(multi, item)
+            })
+            .collect(),
+    }
+}
+
 /// The index `multi`'s levels `keep` make over the rows at `positions`: one
 /// level is a flat Index (with its name), several a MultiIndex over flat
 /// '|'-joined labels.
@@ -45862,18 +46023,54 @@ fn multiindex_remainder(
     multiindex_levels_index(multi, positions, &keep)
 }
 
-/// `s.loc[key]` / `s[key]` over a MultiIndex, `key` an outer label or a
-/// tuple prefix: the matching values with the keyed levels dropped, or a
-/// full key's single value. None when `series` has no MultiIndex, `key` is
-/// not such a key, or nothing matches.
+/// `s.loc[key]` / `s[key]` (`getitem`) over a MultiIndex, `key` an outer
+/// label or a tuple prefix: the matching values with the keyed levels
+/// dropped, or a full key's single value; a list of keys or an outer-label
+/// slice: those rows under the whole MultiIndex. None when `series` has no
+/// MultiIndex, `key` is not such a key, or nothing matches.
 fn series_multiindex_loc(
     py: Python<'_>,
     series: &Series,
     key: &Bound<'_, PyAny>,
+    getitem: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     let Some(multi) = series.index().row_multiindex() else {
         return Ok(None);
     };
+    // A list of keys or an outer-label slice (s.loc[['y', 'x']],
+    // s.loc[[('x', 2), ('y', 1)]], s.loc['x':'y']) keeps every level; they
+    // missed the flat labels (fvsao.36). `s[...]` reads an int slice or a
+    // list holding ints by position, and `.loc` an int slice by label only
+    // where the outer level holds ints.
+    let by_labels = match key.cast::<pyo3::types::PySlice>() {
+        Ok(slice) => {
+            !slice_is_positional(slice)?
+                || (!getitem
+                    && multi.get_level_values(0).is_ok_and(|outer| {
+                        outer
+                            .labels()
+                            .iter()
+                            .all(|label| matches!(label, IndexLabel::Int64(_)))
+                    }))
+        }
+        Err(_) => {
+            !getitem
+                || key.cast::<PyList>().is_ok_and(|list| {
+                    !list
+                        .iter()
+                        .any(|item| item.is_instance_of::<pyo3::types::PyInt>())
+                })
+        }
+    };
+    if by_labels && let Some(rows) = multiindex_rows_for(multi, key)? {
+        let index = row_multiindex_axis(multiindex_take(multi, &rows)?)?;
+        let taken = series
+            .take(&iloc_positions(&rows))
+            .map_err(frame_error_to_py)?;
+        let out =
+            Series::new(series.name(), index, taken.column().clone()).map_err(frame_error_to_py)?;
+        return Ok(Some(Py::new(py, PySeries { inner: out })?.into_any()));
+    }
     // A per-level key (s.loc[pd.IndexSlice[:, 2]]): a Series drops the
     // levels a label keyed, as pandas' get_loc_level (a frame's .loc keeps
     // them).
@@ -45907,8 +46104,10 @@ fn series_multiindex_loc(
         return Ok(None);
     }
     let full_key = labels.len() == multi.nlevels() && periods.is_empty();
+    // A full key's value is pandas' numpy scalar, as a flat label's (it was
+    // a Python one).
     if full_key && positions.len() == 1 {
-        return scalar_to_py(py, &series.values()[positions[0]]).map(Some);
+        return element_to_py(py, series.column(), &series.values()[positions[0]]).map(Some);
     }
     let rows: Vec<i64> = positions.iter().map(|&row| row as i64).collect();
     let taken = series.take(&rows).map_err(frame_error_to_py)?;
@@ -46093,6 +46292,50 @@ fn multiindex_level_key_rows(
     ))
 }
 
+/// pandas' KeyError for the keys of a `.loc` list (`listed` long) no row of
+/// `multi` holds: full tuples, when none is found, as the MultiIndex they
+/// make ("None of [MultiIndex([...])] are in the [index]"); otherwise the
+/// missing keys, each once ("[('x', 9)] not in index"). It named only the
+/// first missing key.
+fn listed_keys_missing(
+    multi: &fp_index::MultiIndex,
+    listed: usize,
+    missing: &[(Bound<'_, PyAny>, Vec<IndexLabel>)],
+) -> PyResult<PyErr> {
+    let nlevels = multi.nlevels();
+    let full_tuples = missing
+        .iter()
+        .all(|(item, labels)| item.is_instance_of::<PyTuple>() && labels.len() == nlevels);
+    if full_tuples && missing.len() == listed {
+        let arrays: Vec<Vec<IndexLabel>> = (0..nlevels)
+            .map(|level| {
+                missing
+                    .iter()
+                    .map(|(_, labels)| labels[level].clone())
+                    .collect()
+            })
+            .collect();
+        let keys = fp_index::MultiIndex::from_arrays(arrays)
+            .map_err(index_error_to_py)?
+            .set_names(multi.names().to_vec());
+        let shown = PyMultiIndex { inner: keys }.__repr__();
+        return Ok(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+            "None of [{shown}] are in the [index]"
+        )));
+    }
+    let mut shown: Vec<String> = Vec::with_capacity(missing.len());
+    for (item, _) in missing {
+        let text = item.repr()?.to_string();
+        if !shown.contains(&text) {
+            shown.push(text);
+        }
+    }
+    Ok(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+        "[{}] not in index",
+        shown.join(", ")
+    )))
+}
+
 /// The rows a list of MultiIndex keys (`[('x', 1), ('y', 2)]`, `['x',
 /// 'y']`) or an outer-level label slice (`'x':'y'`, inclusive) selects, in
 /// order; None for any other key.
@@ -46102,18 +46345,19 @@ fn multiindex_rows_for(
 ) -> PyResult<Option<Vec<usize>>> {
     if let Ok(list) = key.cast::<PyList>() {
         let mut positions = Vec::new();
+        let mut missing = Vec::new();
         for item in list.iter() {
             let Some(labels) = multiindex_key(&item, multi.nlevels())? else {
                 return Ok(None);
             };
             let (found, _) = multiindex_prefix_positions(multi, &labels, true)?;
             if found.is_empty() {
-                return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
-                    "{}",
-                    item.repr()?
-                )));
+                missing.push((item, labels));
             }
             positions.extend(found);
+        }
+        if !missing.is_empty() {
+            return Err(listed_keys_missing(multi, list.len(), &missing)?);
         }
         return Ok(Some(positions));
     }
@@ -46176,6 +46420,93 @@ fn multiindex_rows_for(
         });
     }
     Ok(None)
+}
+
+/// The rows a `.loc` row key selects over the row MultiIndex `multi`, as
+/// [`frame_multiindex_loc`] reads it for a write: a list of keys, an
+/// outer-label slice, an outer label or a tuple prefix - and, with
+/// `row_part` (the row half of `(rows, cols)`, or a Series' key), a
+/// per-level key. None when `key` is none of these or selects nothing.
+fn multiindex_loc_rows(
+    multi: &fp_index::MultiIndex,
+    key: &Bound<'_, PyAny>,
+    row_part: bool,
+) -> PyResult<Option<Vec<usize>>> {
+    if row_part && let Some(rows) = multiindex_level_key_rows(multi, key)? {
+        return Ok(Some(rows));
+    }
+    if let Some(rows) = multiindex_rows_for(multi, key)? {
+        return Ok(Some(rows));
+    }
+    let Some(labels) = multiindex_key(key, multi.nlevels())? else {
+        return Ok(None);
+    };
+    let (rows, _) = multiindex_prefix_positions(multi, &labels, false)?;
+    Ok(Some(rows).filter(|rows| !rows.is_empty()))
+}
+
+/// The rows pandas' `xs(key, level=)` selects over the row MultiIndex
+/// `multi` - `level` one level (`key` its label) or a list of them (`key` a
+/// tuple, a label each); without it the first level, or the leading levels
+/// a tuple `key` spans - and the levels the result keeps: None for all of
+/// them (drop_level=False, a date period matched, or every level keyed, as
+/// pandas'), else those not keyed. A part no row holds is pandas' KeyError
+/// naming it; a tuple of the wrong length its AssertionError.
+fn multiindex_xs_rows(
+    multi: &fp_index::MultiIndex,
+    key: &Bound<'_, PyAny>,
+    level: Option<&Bound<'_, PyAny>>,
+    drop_level: bool,
+) -> PyResult<(Vec<usize>, Option<Vec<usize>>)> {
+    let tuple = key.cast::<PyTuple>().ok();
+    let listed = level.and_then(level_items);
+    let levels: Vec<usize> = match (level, &listed, &tuple) {
+        (Some(_), Some(items), _) => items
+            .iter()
+            .map(|item| multiindex_level_position(multi, item))
+            .collect::<PyResult<_>>()?,
+        (Some(level), None, _) => vec![multiindex_level_position(multi, level)?],
+        (None, _, Some(tuple)) => (0..tuple.len().min(multi.nlevels())).collect(),
+        (None, _, None) => vec![0],
+    };
+    let parts: Vec<Bound<'_, PyAny>> = match &tuple {
+        Some(tuple) if level.is_none() || levels.len() > 1 => tuple.iter().collect(),
+        _ => vec![key.clone()],
+    };
+    if parts.len() != levels.len() {
+        return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+            "Key for location must have same length as number of levels",
+        ));
+    }
+    let labels = parts
+        .iter()
+        .map(py_to_index_label)
+        .collect::<PyResult<Vec<_>>>()?;
+    let values = levels
+        .iter()
+        .map(|&level| {
+            multi
+                .get_level_values(level)
+                .map(|values| values.labels().to_vec())
+                .map_err(index_error_to_py)
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    let (rows, periods) = level_key_rows(&values, &labels, multi.len(), false);
+    if rows.is_empty() {
+        let missing = parts
+            .iter()
+            .zip(values.iter().zip(&labels))
+            .find(|(_, (values, label))| !values.contains(label))
+            .map_or_else(|| key.clone(), |(part, _)| part.clone());
+        return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+            missing.unbind(),
+        ));
+    }
+    let keep: Vec<usize> = (0..multi.nlevels())
+        .filter(|level| !levels.contains(level))
+        .collect();
+    let dropped = drop_level && periods.is_empty() && !keep.is_empty();
+    Ok((rows, dropped.then_some(keep)))
 }
 
 /// `df.loc[key]` over a row MultiIndex, `key` an outer label or a tuple
@@ -52095,8 +52426,27 @@ fn groupby_key_column(
 }
 
 /// The labels of a flat index as a groupby key column, for `level=` 0, -1 or
-/// the index's name; levels of a MultiIndex are not supported yet.
+/// the index's name - or a list or tuple of that one level; an empty list
+/// and several levels are pandas' ValueErrors (they were refused).
 fn flat_index_level_values(index: &Index, level: &Bound<'_, PyAny>) -> PyResult<Column> {
+    let item;
+    let level = match level_items(level).as_deref() {
+        None => level,
+        Some([]) => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "No group keys passed!",
+            ));
+        }
+        Some([one]) => {
+            item = one.clone();
+            &item
+        }
+        Some(_) => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "multiple levels only valid with MultiIndex",
+            ));
+        }
+    };
     let names_this_level = match level.extract::<i64>() {
         Ok(position) => position == 0 || position == -1,
         Err(_) => level
@@ -52131,7 +52481,7 @@ fn group_by_index_level(
         let mut df = frame.clone();
         let mut keys = Vec::new();
         let mut names = Vec::new();
-        for position in multiindex_level_positions(multi, level)? {
+        for position in groupby_level_positions(multi, level)? {
             let values: Vec<Scalar> = multi
                 .get_level_values(position)
                 .map_err(index_error_to_py)?

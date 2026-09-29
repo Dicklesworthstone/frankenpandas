@@ -18013,3 +18013,166 @@ _DX_CASES = {
 def test_index_declared_dtypes_like_pandas_i20vm(case: str) -> None:
     run = _DX_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.36 remainder: over a
+# row MultiIndex, Series .loc / [] by a list of keys or an outer slice,
+# swaplevel by name (and a three-level default), Series.groupby over several
+# levels, .loc assignment through level keys, and xs over a list of levels or
+# a tuple - they raised NotImplementedError / KeyError / TypeError, appended a
+# row, or dropped the slice's last label.
+def _mx_shown(result: Any) -> list:
+    if not hasattr(result, "index"):
+        return [result]
+    return _mk_shown(result) + [list(result.index.names)]
+
+
+def _mx_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {"a": ["x", "x", "y", "y"], "b": [1, 2, 1, 2], "v": [1.0, 2.5, 3.0, 4.0], "w": [4, 5, 6, 7]}
+    ).set_index(["a", "b"])
+
+
+def _mx_frame3(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "a": ["x", "x", "x", "y", "y", "y"],
+            "b": [1, 1, 2, 1, 2, 2],
+            "c": ["p", "q", "p", "q", "p", "q"],
+            "w": [1, 2, 3, 4, 5, 6],
+        }
+    ).set_index(["a", "b", "c"])
+
+
+def _mx_flat(m: Any) -> Any:
+    return m.Series([1, 2, 3], index=m.Index(["p", "q", "p"], name="k"))
+
+
+def _mx_assign(key: Any, value: Any, column: Any = None) -> Any:
+    def run(m: Any) -> list:
+        frame = _mx_frame(m)
+        if column is None:
+            frame.loc[key] = value
+        else:
+            frame.loc[key, column] = value
+        return _mx_shown(frame)
+
+    return run
+
+
+def _mx_series_assign(key: Any, value: Any, loc: bool = True) -> Any:
+    def run(m: Any) -> list:
+        series = _mx_frame(m)["w"]
+        if loc:
+            series.loc[key] = value
+        else:
+            series[key] = value
+        return _mx_shown(series)
+
+    return run
+
+
+_MX_CASES = {
+    "s loc list outer": lambda m: _mx_shown(_mx_frame(m)["w"].loc[["y", "x"]]),
+    "s loc list tuples": lambda m: _mx_shown(_mx_frame(m)["w"].loc[[("x", 2), ("y", 1)]]),
+    "s loc slice outer": lambda m: _mx_shown(_mx_frame(m)["w"].loc["x":"y"]),
+    "s loc slice from": lambda m: _mx_shown(_mx_frame(m)["w"].loc["y":]),
+    "s getitem list tuples": lambda m: _mx_shown(_mx_frame(m)["w"][[("x", 2), ("y", 1)]]),
+    "s swaplevel": lambda m: _mx_shown(_mx_frame(m)["w"].swaplevel()),
+    "s swaplevel names": lambda m: _mx_shown(_mx_frame(m)["w"].swaplevel("a", "b")),
+    "s3 swaplevel default": lambda m: _mx_shown(_mx_frame3(m)["w"].swaplevel()),
+    "s3 swaplevel 0 2": lambda m: _mx_shown(_mx_frame3(m)["w"].swaplevel(0, 2)),
+    "df swaplevel names": lambda m: _mx_shown(_mx_frame(m).swaplevel("b", "a")),
+    "df3 swaplevel default": lambda m: _mx_shown(_mx_frame3(m).swaplevel()),
+    "df3 swaplevel names": lambda m: _mx_shown(_mx_frame3(m).swaplevel("a", "c")),
+    "s groupby two levels": lambda m: _mx_shown(_mx_frame3(m)["w"].groupby(level=["a", "b"]).sum()),
+    "s groupby two ints": lambda m: _mx_shown(_mx_frame3(m)["w"].groupby(level=[0, 2]).mean()),
+    "s groupby negative int": lambda m: _mx_shown(_mx_frame3(m)["w"].groupby(level=[-1, 0]).sum()),
+    "s groupby tuple of levels": lambda m: _mx_shown(_mx_frame3(m)["w"].groupby(level=("a", "b")).sum()),
+    "s groupby a level twice": lambda m: _mx_shown(_mx_frame3(m)["w"].groupby(level=["a", "a"]).sum()),
+    "s groupby levels count": lambda m: _mx_shown(_mx_frame3(m)["w"].groupby(level=["a", "b"]).count()),
+    "s groupby levels size": lambda m: _mx_shown(_mx_frame3(m)["w"].groupby(level=["a", "b"]).size()),
+    "s groupby levels transform": lambda m: _mx_shown(
+        _mx_frame3(m)["w"].groupby(level=["c", "a"]).transform("max")
+    ),
+    "s groupby levels cumsum": lambda m: _mx_shown(_mx_frame3(m)["w"].groupby(level=["a", "c"]).cumsum()),
+    "s groupby levels unsorted": lambda m: _mx_shown(
+        _mx_frame3(m)["w"].groupby(level=["c", "a"], sort=False).sum()
+    ),
+    "s groupby levels first": lambda m: _mx_shown(_mx_frame3(m)["w"].groupby(level=["b", "a"]).first()),
+    "s groupby levels nunique": lambda m: _mx_shown(_mx_frame3(m)["w"].groupby(level=["a", "b"]).nunique()),
+    "s groupby levels ngroups": lambda m: [_mx_frame3(m)["w"].groupby(level=["a", "b"]).ngroups],
+    "s groupby a one-level list": lambda m: _mx_shown(_mx_frame3(m)["w"].groupby(level=["b"]).sum()),
+    "df groupby a level twice": lambda m: _mx_shown(_mx_frame3(m).groupby(level=["a", "a"]).sum()),
+    "flat groupby a one-level list": lambda m: _mx_shown(_mx_flat(m).groupby(level=["k"]).sum()),
+    "flat groupby a position list": lambda m: _mx_shown(_mx_flat(m).groupby(level=[0]).sum()),
+    "flat frame groupby a one-level list": lambda m: _mx_shown(
+        _mx_flat(m).to_frame("v").groupby(level=["k"]).sum()
+    ),
+    "assign a full key": _mx_assign(("x", 2), 9),
+    "assign an outer label": _mx_assign("y", 0),
+    "assign an outer label's column": _mx_assign("y", 0, "w"),
+    "assign a full key's column": _mx_assign(("x", 1), 0.5, "v"),
+    "assign listed keys' column": _mx_assign([("x", 1), ("y", 2)], 0, "w"),
+    "s assign a full key": _mx_series_assign(("y", 1), 0),
+    "s assign an outer label": _mx_series_assign("x", 0),
+    "s setitem a full key": _mx_series_assign(("y", 1), 0, loc=False),
+    "xs two levels": lambda m: _mx_shown(_mx_frame3(m).xs(("x", "p"), level=["a", "c"])),
+    "xs two levels kept": lambda m: _mx_shown(_mx_frame3(m).xs(("x", "p"), level=["a", "c"], drop_level=False)),
+    "xs two positions": lambda m: _mx_shown(_mx_frame3(m).xs((2, "q"), level=[1, 2])),
+    "xs levels reversed": lambda m: _mx_shown(_mx_frame3(m).xs(("p", "x"), level=["c", "a"])),
+    "xs a one-level list": lambda m: _mx_shown(_mx_frame3(m).xs("x", level=["a"])),
+    "xs a tuple": lambda m: _mx_shown(_mx_frame3(m).xs(("x", 1))),
+    "xs a tuple kept": lambda m: _mx_shown(_mx_frame3(m).xs(("x", 1), drop_level=False)),
+    "xs a full tuple": lambda m: _mx_shown(_mx_frame3(m).xs(("x", 1, "q"))),
+    "xs every level listed": lambda m: _mx_shown(_mx_frame3(m).xs(("x", 1, "q"), level=["a", "b", "c"])),
+    "s xs two levels": lambda m: _mx_shown(_mx_frame3(m)["w"].xs(("y", 2), level=["a", "b"])),
+    "s xs a tuple": lambda m: _mx_shown(_mx_frame3(m)["w"].xs(("y", 2))),
+    "s xs a level": lambda m: _mx_shown(_mx_frame3(m)["w"].xs("q", level="c")),
+    "s xs a full tuple": lambda m: _mx_shown(_mx_frame(m)["w"].xs(("y", 2))),
+    # Negatives: positional reads, a flat index, and pandas' errors.
+    "s getitem positional slice": lambda m: _mx_shown(_mx_frame(m)["w"][1:3]),
+    "s loc listed key missing": lambda m: _mx_shown(_mx_frame(m)["w"].loc[[("x", 9)]]),
+    "s loc listed keys missing": lambda m: _mx_shown(_mx_frame(m)["w"].loc[[("x", 9), ("z", 1)]]),
+    "s loc one listed key missing": lambda m: _mx_shown(_mx_frame(m)["w"].loc[[("x", 1), ("x", 9), ("x", 9)]]),
+    "s loc listed outer label missing": lambda m: _mx_shown(_mx_frame(m)["w"].loc[["x", "z"]]),
+    "df loc listed key missing": lambda m: _mx_shown(_mx_frame(m).loc[[("x", 9)]]),
+    "unnamed levels listed key missing": lambda m: _mx_shown(
+        m.Series([1, 2], index=m.MultiIndex.from_tuples([("x", 1), ("y", 2)])).loc[[("x", 9)]]
+    ),
+    "s loc full key": lambda m: [_mx_frame(m)["w"].loc[("y", 2)]],
+    "s getitem full key": lambda m: [_mx_frame(m)["v"][("y", 1)]],
+    "s swaplevel flat": lambda m: _mx_shown(m.Series([1, 2]).swaplevel()),
+    "df swaplevel flat": lambda m: _mx_shown(m.DataFrame({"v": [1, 2]}).swaplevel()),
+    "s swaplevel past the levels": lambda m: _mx_shown(_mx_frame3(m)["w"].swaplevel(0, 5)),
+    "s swaplevel before the levels": lambda m: _mx_shown(_mx_frame3(m)["w"].swaplevel(-5, 0)),
+    "s swaplevel unknown name": lambda m: _mx_shown(_mx_frame3(m)["w"].swaplevel("a", "z")),
+    "s groupby unknown name in a list": lambda m: _mx_shown(_mx_frame3(m)["w"].groupby(level=["a", "z"]).sum()),
+    "s groupby a position past the levels": lambda m: _mx_shown(
+        _mx_frame3(m)["w"].groupby(level=[0, 5]).sum()
+    ),
+    "s groupby no levels": lambda m: _mx_shown(_mx_frame3(m)["w"].groupby(level=[]).sum()),
+    "s groupby unknown name": lambda m: _mx_shown(_mx_frame3(m)["w"].groupby(level="z").sum()),
+    "df groupby unknown name in a list": lambda m: _mx_shown(_mx_frame3(m).groupby(level=["a", "z"]).sum()),
+    "df groupby no levels": lambda m: _mx_shown(_mx_frame3(m).groupby(level=[]).sum()),
+    "flat groupby two levels": lambda m: _mx_shown(_mx_flat(m).groupby(level=["k", "k"]).sum()),
+    "flat groupby no levels": lambda m: _mx_shown(_mx_flat(m).groupby(level=[]).sum()),
+    "flat frame groupby two levels": lambda m: _mx_shown(_mx_flat(m).to_frame("v").groupby(level=[0, 0]).sum()),
+    "flat frame assign": lambda m: _mx_shown(_mx_flat_assign(m)),
+    "xs two levels missing": lambda m: _mx_shown(_mx_frame3(m).xs(("x", "z"), level=["a", "c"])),
+    "xs two levels short key": lambda m: _mx_shown(_mx_frame3(m).xs("x", level=["a", "c"])),
+}
+
+
+def _mx_flat_assign(m: Any) -> Any:
+    frame = m.DataFrame({"v": [1, 2]}, index=["a", "b"])
+    frame.loc["b", "v"] = 5
+    frame.loc["c"] = 7
+    return frame
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_MX_CASES))
+def test_multiindex_lists_levels_and_writes_like_pandas_fvsao36(case: str) -> None:
+    run = _MX_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
