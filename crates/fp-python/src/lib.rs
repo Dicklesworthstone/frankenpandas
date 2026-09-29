@@ -6671,6 +6671,12 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
     if let Ok(categorical) = obj.extract::<PyRef<'_, PyCategoricalIndex>>() {
         return categorical_index_column(&categorical.inner).map(Some);
     }
+    // A Categorical (pd.cut's answer) is its categorical column; a groupby
+    // keyed by one read it as one value ("Cannot convert Categorical to
+    // Scalar"; 4qg5w.7).
+    if let Ok(categorical) = obj.extract::<PyRef<'_, PyCategorical>>() {
+        return Ok(Some(categorical.inner.column().clone()));
+    }
     let temporal = |dtype: DType, nanos: Vec<Option<i64>>, wrap: fn(i64) -> Scalar| {
         let values = nanos
             .into_iter()
@@ -66548,6 +66554,22 @@ impl PyInterval {
         }
     }
 
+    /// A missing interval of an IntervalIndex closed on `closed`: NaN
+    /// endpoints, as pandas' IntervalArray holds one.
+    fn missing(closed: &str) -> Self {
+        Self {
+            left: f64::NAN,
+            right: f64::NAN,
+            closed: closed.to_owned(),
+            int_endpoints: false,
+        }
+    }
+
+    /// Whether this is a missing interval (NaN endpoints).
+    fn is_missing(&self) -> bool {
+        self.left.is_nan() && self.right.is_nan()
+    }
+
     /// pandas' interval equality: the same endpoints and closed side (the
     /// endpoints compare exactly, as its left / right arrays do).
     fn same_interval(&self, other: &Self) -> bool {
@@ -66725,11 +66747,29 @@ fn interval_endpoints(values: &Bound<'_, PyAny>) -> PyResult<(Vec<f64>, bool)> {
     let mut endpoints = Vec::new();
     for value in values.try_iter()? {
         let value = value?;
+        // A missing endpoint (None, NaN) is NaN, and makes the subtype float.
+        if value.is_none() {
+            ints = false;
+            endpoints.push(f64::NAN);
+            continue;
+        }
         ints &= value.is_instance_of::<pyo3::types::PyInt>()
             && !value.is_instance_of::<pyo3::types::PyBool>();
-        endpoints.push(value.extract::<f64>()?);
+        let endpoint = value.extract::<f64>()?;
+        ints &= !endpoint.is_nan();
+        endpoints.push(endpoint);
     }
-    Ok((endpoints, int_array || ints))
+    let whole = (int_array && !endpoints.iter().any(|e| e.is_nan())) || ints;
+    Ok((endpoints, whole))
+}
+
+/// An IntervalIndex's element as Python holds it: the Interval, or NaN for
+/// a missing one (as pandas').
+fn interval_to_py(py: Python<'_>, interval: &PyInterval) -> PyResult<Py<PyAny>> {
+    if interval.is_missing() {
+        return f64::NAN.into_py_any(py);
+    }
+    Py::new(py, interval.clone())?.into_py_any(py)
 }
 
 #[pyclass(name = "IntervalIndex", from_py_object)]
@@ -66793,7 +66833,9 @@ impl PyIntervalIndex {
         })
     }
 
-    /// Tuples of ints are interval[int64] intervals, as pandas'.
+    /// Tuples of ints are interval[int64] intervals, as pandas'; a None or
+    /// NaN in place of a tuple is a missing interval, which makes them
+    /// float64 (it raised TypeError; 4qg5w.7).
     #[classmethod]
     #[pyo3(signature = (data, closed="right", name=None))]
     fn from_tuples(
@@ -66806,7 +66848,13 @@ impl PyIntervalIndex {
         let mut pairs = Vec::new();
         let mut ints = true;
         for pair in data.try_iter()? {
-            let (endpoints, whole) = interval_endpoints(&pair?)?;
+            let pair = pair?;
+            if pair.is_none() || pair.extract::<f64>().is_ok_and(f64::is_nan) {
+                ints = false;
+                pairs.push((f64::NAN, f64::NAN));
+                continue;
+            }
+            let (endpoints, whole) = interval_endpoints(&pair)?;
             let [left, right] = endpoints[..] else {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                     "each tuple must hold a left and a right endpoint",
@@ -66817,6 +66865,10 @@ impl PyIntervalIndex {
         }
         let mut intervals = Vec::with_capacity(pairs.len());
         for (left, right) in pairs {
+            if left.is_nan() && right.is_nan() {
+                intervals.push(PyInterval::missing(closed_str));
+                continue;
+            }
             let mut interval = PyInterval::floats(left, right, closed_str)?;
             interval.int_endpoints = ints;
             intervals.push(interval);
@@ -66847,6 +66899,20 @@ impl PyIntervalIndex {
         }
         let mut intervals = Vec::with_capacity(left.len());
         for (l, r) in left.into_iter().zip(right) {
+            // Missing on both sides is a missing interval; on one side,
+            // pandas' ValueError.
+            match (l.is_nan(), r.is_nan()) {
+                (true, true) => {
+                    intervals.push(PyInterval::missing(closed_str));
+                    continue;
+                }
+                (true, false) | (false, true) => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "missing values must be missing in the same location both left and right sides",
+                    ));
+                }
+                (false, false) => {}
+            }
             let mut interval = PyInterval::floats(l, r, closed_str)?;
             interval.int_endpoints = left_ints && right_ints;
             intervals.push(interval);
@@ -66884,7 +66950,8 @@ impl PyIntervalIndex {
         iter_by_position(slf.as_any())
     }
 
-    fn __getitem__(&self, idx: isize) -> PyResult<PyInterval> {
+    /// The interval at `idx` (a missing one is NaN, as pandas').
+    fn __getitem__(&self, py: Python<'_>, idx: isize) -> PyResult<Py<PyAny>> {
         let len = self.intervals.len() as isize;
         let pos = if idx < 0 { idx + len } else { idx };
         if pos < 0 || pos >= len {
@@ -66892,14 +66959,24 @@ impl PyIntervalIndex {
                 "index out of range",
             ));
         }
-        Ok(self.intervals[pos as usize].clone())
+        interval_to_py(py, &self.intervals[pos as usize])
     }
 
     /// pandas' repr: the intervals as its Index summary lists them (right-
-    /// justified once they wrap), then dtype and name. It printed the Rust
-    /// structs.
+    /// justified once they wrap; a missing one nan), then dtype and name. It
+    /// printed the Rust structs.
     fn __repr__(&self) -> String {
-        let items: Vec<String> = self.intervals.iter().map(PyInterval::__str__).collect();
+        let items: Vec<String> = self
+            .intervals
+            .iter()
+            .map(|iv| {
+                if iv.is_missing() {
+                    "nan".to_owned()
+                } else {
+                    iv.__str__()
+                }
+            })
+            .collect();
         let mut attrs = vec![format!("dtype='{}'", self.interval_dtype().__repr__())];
         attrs.extend(self.name.as_ref().map(|name| format!("name='{name}'")));
         pandas_index_text("IntervalIndex", &items, true, attrs)
@@ -67063,6 +67140,7 @@ impl PyIntervalIndex {
     /// pandas' `to_tuples()`: an object Index of (left, right) tuples, ints
     /// for int endpoints (it was a list of float pairs; 4qg5w.7).
     fn to_tuples(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        // A missing interval is its (nan, nan) pair, as pandas'.
         let tuples = self
             .intervals
             .iter()
@@ -67107,11 +67185,17 @@ impl PyIntervalIndex {
     /// (there was none).
     #[pyo3(signature = (ascending=true))]
     fn sort_values(&self, ascending: bool) -> Self {
-        let mut intervals = self.intervals.clone();
+        // Missing intervals last either way, as pandas' na_position.
+        let (mut intervals, missing): (Vec<PyInterval>, Vec<PyInterval>) = self
+            .intervals
+            .iter()
+            .cloned()
+            .partition(|iv| !iv.is_missing());
         intervals.sort_by(|a, b| {
             let order = a.sort_key(b);
             if ascending { order } else { order.reverse() }
         });
+        intervals.extend(missing);
         Self {
             intervals,
             name: self.name.clone(),
@@ -67191,12 +67275,93 @@ impl PyIntervalIndex {
         self.set_result(intervals, other, sort, true)
     }
 
-    fn to_list(&self) -> Vec<PyInterval> {
-        self.intervals.clone()
+    fn to_list(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        self.tolist(py)
     }
 
-    fn tolist(&self) -> Vec<PyInterval> {
-        self.intervals.clone()
+    /// The intervals as Python holds them, a missing one NaN.
+    fn tolist(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        self.intervals
+            .iter()
+            .map(|iv| interval_to_py(py, iv))
+            .collect()
+    }
+
+    /// pandas' `isna()`: which intervals are missing, a bool array (there
+    /// was none; 4qg5w.7).
+    fn isna(&self) -> BoolArray {
+        BoolArray::from(
+            self.intervals
+                .iter()
+                .map(PyInterval::is_missing)
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// pandas' `notna()`: which intervals are present.
+    fn notna(&self) -> BoolArray {
+        BoolArray::from(
+            self.intervals
+                .iter()
+                .map(|iv| !iv.is_missing())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// pandas' `hasnans`: whether any interval is missing.
+    #[getter]
+    fn hasnans(&self) -> bool {
+        self.intervals.iter().any(PyInterval::is_missing)
+    }
+
+    /// pandas' `dropna()`: the present intervals.
+    #[pyo3(signature = (how="any"))]
+    fn dropna(&self, how: &str) -> PyResult<Self> {
+        if !matches!(how, "any" | "all") {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "invalid how option: {how}"
+            )));
+        }
+        Ok(Self {
+            intervals: self
+                .intervals
+                .iter()
+                .filter(|iv| !iv.is_missing())
+                .cloned()
+                .collect(),
+            name: self.name.clone(),
+        })
+    }
+
+    /// pandas' `fillna(value)`: each missing interval `value`, an Interval
+    /// of the same closed side (pandas makes an object Index of mixed
+    /// intervals for another side; refused here).
+    fn fillna(&self, value: &PyInterval) -> PyResult<Self> {
+        if value.closed != self.closed() {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "'value.closed' is not the same as self.closed",
+            ));
+        }
+        let mut intervals: Vec<PyInterval> = self
+            .intervals
+            .iter()
+            .map(|iv| {
+                if iv.is_missing() {
+                    value.clone()
+                } else {
+                    iv.clone()
+                }
+            })
+            .collect();
+        // One dtype over them: float once any endpoint is.
+        let ints = intervals.iter().all(|iv| iv.int_endpoints);
+        for iv in &mut intervals {
+            iv.int_endpoints = ints;
+        }
+        Ok(Self {
+            intervals,
+            name: self.name.clone(),
+        })
     }
 
     /// pandas' `IntervalIndex.array`: its IntervalArray (there was none).
@@ -76708,8 +76873,12 @@ mod tests {
         // test_interval_index_members_like_pandas_4qg5w7; the pairs and the
         // position are read here from the Rust index they come from.
         assert_eq!(pii.to_rust().to_tuples(), vec![(0.0, 1.5), (1.5, 3.0)]);
-        assert_eq!(pii.to_list().len(), 2);
-        assert_eq!(pii.tolist().len(), 2);
+        // TEST-CHANGE (4qg5w.7): the lists hold Python objects now (a missing
+        // interval is NaN), read through Python.
+        Python::attach(|py| {
+            assert_eq!(pii.to_list(py).unwrap().len(), 2);
+            assert_eq!(pii.tolist(py).unwrap().len(), 2);
+        });
         assert_eq!(pii.name(), Some("iv_idx".to_string()));
 
         let left = pii.left();

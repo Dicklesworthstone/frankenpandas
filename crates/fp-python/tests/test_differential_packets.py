@@ -18457,6 +18457,10 @@ def _iv_overlapping(m: Any) -> Any:
     return m.IntervalIndex.from_tuples([(0, 2), (1, 3), (4, 5)])
 
 
+def _iv_missing(m: Any) -> Any:
+    return m.IntervalIndex.from_tuples([(0, 1), None, (2, 3)])
+
+
 _IV_CASES = {
     "length": lambda m: [repr(_iv_breaks(m).length)],
     "float length": lambda m: [repr(m.IntervalIndex.from_breaks([0.0, 0.5, 2.0]).length)],
@@ -18496,6 +18500,40 @@ _IV_CASES = {
     "symmetric_difference": lambda m: [
         repr(_iv_breaks(m).symmetric_difference(m.IntervalIndex.from_breaks([2, 3, 4])))
     ],
+    "missing from_tuples": lambda m: [repr(_iv_missing(m)), str(_iv_missing(m).dtype)],
+    "missing from_tuples nan": lambda m: [repr(m.IntervalIndex.from_tuples([(0, 1), float("nan")]))],
+    "missing from_arrays": lambda m: [repr(m.IntervalIndex.from_arrays([0, float("nan")], [1, float("nan")]))],
+    "missing on one side": lambda m: [repr(m.IntervalIndex.from_arrays([0, float("nan")], [1, 2]))],
+    "missing isna notna hasnans": lambda m: [
+        repr(_iv_missing(m).isna()),
+        repr(_iv_missing(m).notna()),
+        _iv_missing(m).hasnans,
+    ],
+    "missing tolist getitem": lambda m: [repr(_iv_missing(m).tolist()), repr(_iv_missing(m)[1])],
+    "missing left length": lambda m: [repr(_iv_missing(m).left), repr(_iv_missing(m).length)],
+    "missing contains get_loc": lambda m: [repr(_iv_missing(m).contains(0.5)), repr(_iv_missing(m).get_loc(0.5))],
+    "missing to_tuples": lambda m: [repr(_iv_missing(m).to_tuples())],
+    "missing dropna fillna": lambda m: [
+        repr(_iv_missing(m).dropna()),
+        repr(_iv_missing(m).fillna(m.Interval(5, 6))),
+    ],
+    "missing sort_values": lambda m: [
+        repr(_iv_missing(m).sort_values()),
+        repr(_iv_missing(m).sort_values(ascending=False)),
+    ],
+    "no interval missing": lambda m: [
+        repr(_iv_breaks(m).isna()),
+        _iv_breaks(m).hasnans,
+    ],
+    "series groupby a cut": lambda m: _mk_shown(
+        m.Series([1, 5, 9, 2]).groupby(m.cut([1, 5, 9, 2], [0, 4, 8, 12]), observed=True).sum()
+    ),
+    "series groupby a cut, all bins": lambda m: _mk_shown(
+        m.Series([1, 5, 9, 2]).groupby(m.cut([1, 5, 9, 2], [0, 4, 8, 12, 16]), observed=False).sum()
+    ),
+    "frame groupby a cut": lambda m: _mk_shown(
+        m.DataFrame({"v": [1, 5, 9, 2]}).groupby(m.cut([1, 5, 9, 2], [0, 4, 8, 12]), observed=True)["v"].sum()
+    ),
     # Negatives: a point no interval holds, another closed side, the members
     # already answered as pandas'.
     "get_loc missing": lambda m: [repr(_iv_breaks(m).get_loc(10))],
