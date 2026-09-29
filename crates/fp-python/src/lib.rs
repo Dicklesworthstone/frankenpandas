@@ -7810,16 +7810,25 @@ fn flat_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
     .into_any())
 }
 
-/// Labels as pandas' Index holds numbers beside a missing one: float64, the
-/// missing label NaN - `Index([2.0, None, 1.0])`, and `Index([1, None])`
-/// whose ints become floats. The None stayed (printed None where pandas
-/// prints NaN). Any other mix is left as it is (an object Index keeps None).
+/// Labels as pandas' Index holds numbers beside a missing one or ints beside
+/// floats: float64, the missing label NaN - `Index([2.0, None, 1.0])`,
+/// `Index([1, None])` and `Index([1.5, 2])`, whose ints become floats. The
+/// None stayed (printed None where pandas prints NaN). Any other mix is left
+/// as it is (an object Index keeps None).
 #[allow(clippy::cast_precision_loss)] // pandas widens the ints the same way
 fn float_index_labels(labels: Vec<IndexLabel>) -> Vec<IndexLabel> {
     let numeric =
         |label: &IndexLabel| matches!(label, IndexLabel::Int64(_) | IndexLabel::Float64(_));
     let missing = |label: &IndexLabel| matches!(label, IndexLabel::Null(_));
-    if !labels.iter().any(missing)
+    // Ints beside a float are float64 too (Index([1.5, 2]) was object;
+    // br-frankenpandas-u6p7i).
+    let mixed = labels
+        .iter()
+        .any(|label| matches!(label, IndexLabel::Int64(_)))
+        && labels
+            .iter()
+            .any(|label| matches!(label, IndexLabel::Float64(_)));
+    if !(mixed || labels.iter().any(missing))
         || !labels.iter().any(numeric)
         || !labels.iter().all(|label| numeric(label) || missing(label))
     {
@@ -7833,6 +7842,22 @@ fn float_index_labels(labels: Vec<IndexLabel>) -> Vec<IndexLabel> {
             other => other,
         })
         .collect()
+}
+
+/// `index` with [`float_index_labels`] applied when they change it (a
+/// missing label, or ints beside floats), its name kept.
+fn float_labelled(index: Index) -> Index {
+    let labels = index.labels();
+    let mixed = labels
+        .iter()
+        .any(|label| matches!(label, IndexLabel::Int64(_)))
+        && labels
+            .iter()
+            .any(|label| matches!(label, IndexLabel::Float64(_)));
+    if !mixed && !index.hasnans() {
+        return index;
+    }
+    Index::new(float_index_labels(labels.to_vec())).rename_index(index.name())
 }
 
 /// Extract index labels from an optional Python object (Index, list, tuple, sequence, or None).
@@ -8932,14 +8957,8 @@ impl PyIndex {
         {
             return Ok(Py::new(py, PyMultiIndex { inner: multi })?.into_any());
         }
-        let index = Self::new(data, name)?.inner;
-        if !index.hasnans() {
-            return row_index_to_py(py, &index);
-        }
-        // Ints beside a missing label are float64 with NaN, as pandas' (an
-        // int64 Index held the None).
-        let labels = float_index_labels(index.labels().to_vec());
-        row_index_to_py(py, &Index::new(labels).rename_index(index.name()))
+        let index = float_labelled(Self::new(data, name)?.inner);
+        row_index_to_py(py, &index)
     }
 
     #[getter]
@@ -9813,8 +9832,9 @@ impl PyIndex {
         start: Option<&Bound<'_, PyAny>>,
         end: Option<&Bound<'_, PyAny>>,
         step: Option<isize>,
-    ) -> PyResult<(usize, usize)> {
-        self.slice_locs(start, end, step)
+    ) -> PyResult<Py<PyAny>> {
+        let (s, e) = self.slice_locs(start, end, step)?;
+        Python::attach(|py| slice_object(py, s, e, step))
     }
 
     /// pandas' `Index.sort_values(return_indexer=, ascending=, na_position=,
@@ -10404,7 +10424,36 @@ impl PyIndex {
         })
     }
 
+    /// pandas' `Index.map(mapper)`: a callable's result for each label, or
+    /// a dict's / Series' value under it - NaN where it has none, the index
+    /// inferred from the values (a dict or a Series raised TypeError;
+    /// br-frankenpandas-u6p7i).
     fn map(&self, py: Python<'_>, mapper: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let table = if mapper.is_instance_of::<PyDict>() {
+            Some(mapper.clone())
+        } else if mapper.extract::<PyRef<'_, PySeries>>().is_ok() {
+            Some(mapper.call_method0("to_dict")?)
+        } else {
+            None
+        };
+        if let Some(table) = table {
+            let table = table.cast::<PyDict>()?;
+            let nan = f64::NAN.into_pyobject(py)?.into_any();
+            let values = self
+                .inner
+                .labels()
+                .iter()
+                .map(|label| {
+                    let key = index_label_to_py(py, label)?;
+                    Ok(table.get_item(key)?.unwrap_or_else(|| nan.clone()))
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            let values = PyList::new(py, values)?;
+            let mapped = Self::new(Some(values.as_any()), self.inner.name().cloned())?;
+            return Ok(Self {
+                inner: float_labelled(mapped.inner),
+            });
+        }
         let mut new_labels = Vec::with_capacity(self.inner.len());
         for l in self.inner.labels() {
             let py_val = index_label_to_py(py, l)?;
@@ -10488,6 +10537,36 @@ fn datetime_labels_follow(index: &DatetimeIndex, freqstr: &str) -> PyResult<bool
 }
 
 impl PyDatetimeIndex {
+    /// A `slice_locs` bound: a date string is the period it names at its
+    /// own resolution, as pandas' partial-string slicing reads it - a start
+    /// its first instant, an end (`last`) its last, on the index's wall
+    /// clock; anything else its label. The string was compared as text
+    /// (slice_locs('2024-01-02') began at 0; br-frankenpandas-u6p7i).
+    fn slice_bound_label(
+        &self,
+        bound: Option<&Bound<'_, PyAny>>,
+        last: bool,
+    ) -> PyResult<Option<IndexLabel>> {
+        let Some(bound) = bound else {
+            return Ok(None);
+        };
+        if let Ok(text) = bound.extract::<String>()
+            && let Ok((first_ns, last_ns)) = fp_frame::partial_date_bounds(&text)
+        {
+            let wall = if last { last_ns } else { first_ns };
+            let nanos = match self.inner.tz() {
+                Some(zone) => DatetimeIndex::new(vec![wall])
+                    .tz_localize(Some(&zone))
+                    .ok()
+                    .and_then(|local| local.asi8().first().copied())
+                    .unwrap_or(wall),
+                None => wall,
+            };
+            return Ok(Some(IndexLabel::Datetime64(nanos)));
+        }
+        py_to_index_label(bound).map(Some)
+    }
+
     /// The same index (name and time zone kept) over new instants - taken,
     /// sorted, filtered or moved by a duration from this one's.
     fn with_nanos(&self, nanos: Vec<i64>) -> Self {
@@ -11431,14 +11510,8 @@ impl PyDatetimeIndex {
     ) -> PyResult<(usize, usize)> {
         // A positive step slices forward, which is what this computes.
         unsupported_params("slice_locs", &[("step", step.is_none_or(|s| s > 0))])?;
-        let s_lbl = match start {
-            Some(obj) => Some(py_to_index_label(obj)?),
-            None => None,
-        };
-        let e_lbl = match end {
-            Some(obj) => Some(py_to_index_label(obj)?),
-            None => None,
-        };
+        let s_lbl = self.slice_bound_label(start, false)?;
+        let e_lbl = self.slice_bound_label(end, true)?;
         self.inner
             .as_index()
             .slice_locs(s_lbl.as_ref(), e_lbl.as_ref())
@@ -11451,9 +11524,9 @@ impl PyDatetimeIndex {
         start: Option<&Bound<'_, PyAny>>,
         end: Option<&Bound<'_, PyAny>>,
         step: Option<isize>,
-    ) -> PyResult<(usize, usize, isize)> {
+    ) -> PyResult<Py<PyAny>> {
         let (s, e) = self.slice_locs(start, end, step)?;
-        Ok((s, e, step.unwrap_or(1)))
+        Python::attach(|py| slice_object(py, s, e, step))
     }
 
     #[pyo3(signature = (level=0))]
@@ -13564,9 +13637,9 @@ impl PyMultiIndex {
         start: Option<&Bound<'_, PyAny>>,
         end: Option<&Bound<'_, PyAny>>,
         step: Option<isize>,
-    ) -> PyResult<(usize, usize, isize)> {
+    ) -> PyResult<Py<PyAny>> {
         let (s, e) = self.slice_locs(start, end, step)?;
-        Ok((s, e, step.unwrap_or(1)))
+        Python::attach(|py| slice_object(py, s, e, step))
     }
 
     fn groupby(&self, py: Python<'_>, by: &Bound<'_, PyAny>) -> PyResult<Py<pyo3::types::PyDict>> {
@@ -14026,6 +14099,26 @@ pub struct PyTimedeltaIndex {
 }
 
 impl PyTimedeltaIndex {
+    /// A `slice_locs` bound: a duration string is the Timedelta it parses
+    /// to, anything else its label (the string was compared as text;
+    /// br-frankenpandas-u6p7i).
+    fn slice_bound_label(
+        &self,
+        bound: Option<&Bound<'_, PyAny>>,
+        last: bool,
+    ) -> PyResult<Option<IndexLabel>> {
+        let _ = last;
+        let Some(bound) = bound else {
+            return Ok(None);
+        };
+        if let Ok(text) = bound.extract::<String>()
+            && let Ok(nanos) = Timedelta::parse(&text)
+        {
+            return Ok(Some(IndexLabel::Timedelta64(nanos)));
+        }
+        py_to_index_label(bound).map(Some)
+    }
+
     /// The same index (name kept) over new nanosecond labels.
     fn with_nanos(&self, nanos: Vec<i64>) -> Self {
         Self {
@@ -14642,14 +14735,8 @@ impl PyTimedeltaIndex {
     ) -> PyResult<(usize, usize)> {
         // A positive step slices forward, which is what this computes.
         unsupported_params("slice_locs", &[("step", step.is_none_or(|s| s > 0))])?;
-        let s_lbl = match start {
-            Some(obj) => Some(py_to_index_label(obj)?),
-            None => None,
-        };
-        let e_lbl = match end {
-            Some(obj) => Some(py_to_index_label(obj)?),
-            None => None,
-        };
+        let s_lbl = self.slice_bound_label(start, false)?;
+        let e_lbl = self.slice_bound_label(end, true)?;
         self.inner
             .as_index()
             .slice_locs(s_lbl.as_ref(), e_lbl.as_ref())
@@ -14662,9 +14749,9 @@ impl PyTimedeltaIndex {
         start: Option<&Bound<'_, PyAny>>,
         end: Option<&Bound<'_, PyAny>>,
         step: Option<isize>,
-    ) -> PyResult<(usize, usize, isize)> {
+    ) -> PyResult<Py<PyAny>> {
         let (s, e) = self.slice_locs(start, end, step)?;
-        Ok((s, e, step.unwrap_or(1)))
+        Python::attach(|py| slice_object(py, s, e, step))
     }
 
     #[pyo3(signature = (level=0))]
@@ -16079,9 +16166,9 @@ impl PyPeriodIndex {
         start: Option<&Bound<'_, PyAny>>,
         end: Option<&Bound<'_, PyAny>>,
         step: Option<isize>,
-    ) -> PyResult<(usize, usize, isize)> {
+    ) -> PyResult<Py<PyAny>> {
         let (s, e) = self.slice_locs(start, end, step)?;
-        Ok((s, e, step.unwrap_or(1)))
+        Python::attach(|py| slice_object(py, s, e, step))
     }
 
     #[pyo3(signature = (level=0))]
@@ -17178,9 +17265,9 @@ impl PyCategoricalIndex {
         start: Option<&Bound<'_, PyAny>>,
         end: Option<&Bound<'_, PyAny>>,
         step: Option<isize>,
-    ) -> PyResult<(usize, usize, isize)> {
+    ) -> PyResult<Py<PyAny>> {
         let (s, e) = self.slice_locs(start, end, step)?;
-        Ok((s, e, step.unwrap_or(1)))
+        Python::attach(|py| slice_object(py, s, e, step))
     }
 
     #[pyo3(signature = (level=0))]
@@ -18928,15 +19015,51 @@ fn frame_listlike_operand(
         .map_err(frame_error_to_py)
 }
 
-/// numpy's truthiness of one value when missing values are not skipped
-/// (pandas' `any` / `all` with `skipna=False`): NaN is True, None False.
-fn missing_as_truthy(value: &Scalar) -> bool {
+/// numpy's truthiness of one value of a `dtype` column when missing values
+/// are not skipped (pandas' `any` / `all` with `skipna=False`): None is
+/// False in an object column (a bool one holding a missing value is one),
+/// NaN and NaT - every other missing value - True (a NaT was False).
+fn unskipped_truth(dtype: &DType, value: &Scalar) -> bool {
     match value {
-        Scalar::Null(NullKind::NaN) => true,
-        Scalar::Float64(value) if value.is_nan() => true,
-        Scalar::Null(_) => false,
-        value => scalar_truthy(value),
+        Scalar::Null(NullKind::Null)
+            if matches!(dtype, DType::Utf8 | DType::Null | DType::Bool) =>
+        {
+            false
+        }
+        value => value.is_missing() || scalar_truthy(value),
     }
+}
+
+/// pandas' FutureWarning for `any` / `all` (`op`) over datetime64 values.
+fn warn_datetime_logical(py: Python<'_>, op: &str) -> PyResult<()> {
+    let message = std::ffi::CString::new(format!(
+        "'{op}' with datetime64 dtypes is deprecated and will raise in a future version. \
+         Use (obj != pd.Timestamp(0)).{op}() instead."
+    ))
+    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    PyErr::warn(
+        py,
+        &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+        &message,
+        1,
+    )
+}
+
+/// With skipna=False, whether a nullable (`pd.NA`) column's `all` (else
+/// `any`) is decided by its present values - a False for all, a True for
+/// any - or is NA; None for a numpy column, whose missing values have a
+/// truth ([`unskipped_truth`]).
+fn kleene_decided(column: &Column, all: bool) -> Option<bool> {
+    matches!(
+        column.dtype(),
+        DType::BoolNullable | DType::Int64Nullable | DType::Float64Nullable
+    )
+    .then(|| {
+        column
+            .values()
+            .iter()
+            .any(|value| !value.is_missing() && scalar_truthy(value) != all)
+    })
 }
 
 /// A 0-d numpy array as the scalar it holds (numpy's `item()`).
@@ -22284,9 +22407,11 @@ impl PySeries {
     }
 
     /// `any` / `all`'s axis (a Series has only axis 0) and numpy's
-    /// compatibility keywords (`np.any(s)` passes `axis=None, out=None`).
+    /// compatibility keywords (`np.any(s)` passes `axis=None, out=None`);
+    /// datetime64 values warn as pandas.
     fn check_logical_reduction(
         &self,
+        py: Python<'_>,
         name: &str,
         axis: Option<&Bound<'_, PyAny>>,
         kwargs: Option<&Bound<'_, PyDict>>,
@@ -22297,7 +22422,11 @@ impl PySeries {
                 "No axis named {axis} for object type Series"
             )));
         }
-        numpy_compat_kwargs(name, kwargs)
+        numpy_compat_kwargs(name, kwargs)?;
+        if matches!(self.inner.column().dtype(), DType::Datetime64 { .. }) {
+            warn_datetime_logical(py, name)?;
+        }
+        Ok(())
     }
 
     /// The reductions `agg` runs by name; None for any other name (which
@@ -25742,8 +25871,9 @@ impl PySeries {
 
     /// pandas' `Series.any(axis=0, bool_only=False, skipna=True, **kwargs)`
     /// (it took no arguments, so `np.any(s)` raised): `skipna=False` reads
-    /// NaN as True and None as False, as pandas; `bool_only` is accepted and,
-    /// as pandas' Series does, ignored.
+    /// NaN and NaT as True and None as False, and a nullable Series its NA
+    /// as unknown (NA unless a True decides it), as pandas; `bool_only` is
+    /// accepted and, as pandas' Series does, ignored.
     #[pyo3(signature = (axis=None, bool_only=false, skipna=true, **kwargs))]
     fn any(
         &self,
@@ -25755,11 +25885,18 @@ impl PySeries {
     ) -> PyResult<Py<PyAny>> {
         let _ = bool_only;
         self.refuse_string_reduction("any")?;
-        self.check_logical_reduction("any", axis, kwargs)?;
-        let result = if skipna || !self.inner.column().has_nulls() {
+        self.check_logical_reduction(py, "any", axis, kwargs)?;
+        let column = self.inner.column();
+        let result = if skipna || !column.has_nulls() {
             self.inner.any().map_err(frame_error_to_py)?
+        } else if kleene_decided(column, false) == Some(false) {
+            return na_object(py);
         } else {
-            self.inner.column().values().iter().any(missing_as_truthy)
+            let dtype = column.dtype();
+            column
+                .values()
+                .iter()
+                .any(|value| unskipped_truth(&dtype, value))
         };
         // pandas' np.bool_ (it was a Python bool).
         numpy_scalar(py, &Scalar::Bool(result))
@@ -25778,11 +25915,18 @@ impl PySeries {
     ) -> PyResult<Py<PyAny>> {
         let _ = bool_only;
         self.refuse_string_reduction("all")?;
-        self.check_logical_reduction("all", axis, kwargs)?;
-        let result = if skipna || !self.inner.column().has_nulls() {
+        self.check_logical_reduction(py, "all", axis, kwargs)?;
+        let column = self.inner.column();
+        let result = if skipna || !column.has_nulls() {
             self.inner.all().map_err(frame_error_to_py)?
+        } else if kleene_decided(column, true) == Some(false) {
+            return na_object(py);
         } else {
-            self.inner.column().values().iter().all(missing_as_truthy)
+            let dtype = column.dtype();
+            column
+                .values()
+                .iter()
+                .all(|value| unskipped_truth(&dtype, value))
         };
         numpy_scalar(py, &Scalar::Bool(result))
     }
@@ -28567,6 +28711,102 @@ pub struct PyDataFrame {
 }
 
 impl PyDataFrame {
+    /// The frame `any` / `all` (`all` says which) read: the numpy bool
+    /// columns alone with `bool_only` (pandas leaves the nullable boolean
+    /// out), and with skipna=False each column its values' truth, a missing
+    /// value Python's bool of it - None False in an object column, NaN and
+    /// NaT True. Down a nullable column (not `axis1`, where it is True) an
+    /// NA must not decide the answer: a False (for all) or a True (for any)
+    /// beside it does, else pandas raises. A nullable column makes the
+    /// answer nullable boolean (it was bool; an empty frame's object), and
+    /// datetime64 values warn as pandas, once per block it would hold them
+    /// in: the naive columns together, each zoned one alone.
+    fn logical_reduction(
+        &self,
+        py: Python<'_>,
+        all: bool,
+        axis1: bool,
+        bool_only: bool,
+        skipna: bool,
+    ) -> PyResult<Series> {
+        let mut frame = self.inner.clone();
+        if bool_only {
+            let positions: Vec<usize> = (0..frame.num_columns())
+                .filter(|&position| {
+                    frame
+                        .column_at(position)
+                        .is_some_and(|column| column.dtype() == DType::Bool)
+                })
+                .collect();
+            frame = frame.take_columns(&positions).map_err(frame_error_to_py)?;
+        }
+        let dtypes: Vec<DType> = (0..frame.num_columns())
+            .filter_map(|position| frame.column_at(position))
+            .map(Column::dtype)
+            .collect();
+        let zoned = dtypes
+            .iter()
+            .filter(|dtype| matches!(dtype, DType::Datetime64 { tz: Some(_) }))
+            .count();
+        let naive = dtypes
+            .iter()
+            .any(|dtype| matches!(dtype, DType::Datetime64 { tz: None }));
+        for _ in 0..zoned + usize::from(naive) {
+            warn_datetime_logical(py, if all { "all" } else { "any" })?;
+        }
+        if !skipna {
+            let mut truths = frame.clone();
+            for position in 0..frame.num_columns() {
+                let Some(column) = frame.column_at(position).filter(|c| c.has_any_missing()) else {
+                    continue;
+                };
+                if !axis1 && kleene_decided(column, all) == Some(false) {
+                    return Err(if frame.num_columns() == 1 {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                            "cannot convert float NaN to bool",
+                        )
+                    } else {
+                        PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                            "boolean value of NA is ambiguous",
+                        )
+                    });
+                }
+                let dtype = column.dtype();
+                let values = column
+                    .values()
+                    .iter()
+                    .map(|value| Scalar::Bool(unskipped_truth(&dtype, value)))
+                    .collect();
+                let column = Column::from_values(values).map_err(column_error_to_py)?;
+                truths = truths
+                    .isetitem(position, column)
+                    .map_err(frame_error_to_py)?;
+            }
+            frame = truths;
+        }
+        let result = match (all, axis1) {
+            (true, true) => frame.all_axis1(),
+            (true, false) => frame.all(),
+            (false, true) => frame.any_axis1(),
+            (false, false) => frame.any(),
+        }
+        .map_err(frame_error_to_py)?;
+        if dtypes.iter().any(|dtype| {
+            matches!(
+                dtype,
+                DType::BoolNullable | DType::Int64Nullable | DType::Float64Nullable
+            )
+        }) {
+            result
+                .astype(DType::BoolNullable)
+                .map_err(frame_error_to_py)
+        } else if result.is_empty() {
+            result.astype(DType::Bool).map_err(frame_error_to_py)
+        } else {
+            Ok(result)
+        }
+    }
+
     /// The Python key of the column at `position`: its tuple under
     /// MultiIndex columns (g3bux), else its typed label (0, not '0';
     /// fvsao.32).
@@ -34204,6 +34444,15 @@ impl PyDataFrame {
         numpy_compat_kwargs("clip", kwargs)?;
         let result = (|| -> PyResult<PyDataFrame> {
             let ax_opt = parse_axis_param_for_type(axis, "DataFrame")?;
+            // A DataFrame bound clips each cell by the bound's cell (it was
+            // a TypeError; br-frankenpandas-u6p7i).
+            let is_frame = |b: Option<&Bound<'_, PyAny>>| {
+                b.is_some_and(|b| b.extract::<PyRef<'_, PyDataFrame>>().is_ok())
+            };
+            if is_frame(lower) || is_frame(upper) {
+                return clip_by_frames(&self.inner, lower, upper)
+                    .map(|inner| PyDataFrame { inner });
+            }
 
             let extract_bound = |b: &Bound<'_, PyAny>| -> PyResult<SeriesOrScalarBound> {
                 if let Ok(py_s) = b.extract::<PyRef<'_, PySeries>>() {
@@ -37143,24 +37392,38 @@ impl PyDataFrame {
         Ok(Self { inner: res })
     }
 
-    #[pyo3(signature = (axis=None))]
-    fn any(&self, axis: Option<usize>) -> PyResult<PySeries> {
-        let res = if axis == Some(1) {
-            self.inner.any_axis1().map_err(frame_error_to_py)?
-        } else {
-            self.inner.any().map_err(frame_error_to_py)?
-        };
-        Ok(PySeries { inner: res })
+    /// pandas' `DataFrame.any(axis=0, bool_only=False, skipna=True)`:
+    /// `bool_only` looks at the bool columns alone, and with skipna=False
+    /// a missing value counts as its Python truth (both were unknown
+    /// keywords; br-frankenpandas-u6p7i).
+    #[pyo3(signature = (axis=None, bool_only=false, skipna=true, **kwargs))]
+    fn any(
+        &self,
+        py: Python<'_>,
+        axis: Option<usize>,
+        bool_only: bool,
+        skipna: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PySeries> {
+        numpy_compat_kwargs("any", kwargs)?;
+        let inner = self.logical_reduction(py, false, axis == Some(1), bool_only, skipna)?;
+        Ok(PySeries { inner })
     }
 
-    #[pyo3(signature = (axis=None))]
-    fn all(&self, axis: Option<usize>) -> PyResult<PySeries> {
-        let res = if axis == Some(1) {
-            self.inner.all_axis1().map_err(frame_error_to_py)?
-        } else {
-            self.inner.all().map_err(frame_error_to_py)?
-        };
-        Ok(PySeries { inner: res })
+    /// pandas' `DataFrame.all(axis=0, bool_only=False, skipna=True)`
+    /// (see [`PyDataFrame::any`]).
+    #[pyo3(signature = (axis=None, bool_only=false, skipna=true, **kwargs))]
+    fn all(
+        &self,
+        py: Python<'_>,
+        axis: Option<usize>,
+        bool_only: bool,
+        skipna: bool,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PySeries> {
+        numpy_compat_kwargs("all", kwargs)?;
+        let inner = self.logical_reduction(py, true, axis == Some(1), bool_only, skipna)?;
+        Ok(PySeries { inner })
     }
 
     #[pyo3(signature = (axis=None, numeric_only=false, dropna=true))]
@@ -39826,8 +40089,105 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: out })
     }
 
-    fn update(&mut self, other: &PyDataFrame) -> PyResult<()> {
-        self.inner = self.inner.update(&other.inner).map_err(frame_error_to_py)?;
+    /// pandas' `DataFrame.update(other, join='left', overwrite=True,
+    /// filter_func=None, errors='ignore')`, in place: `other` a frame or a
+    /// Series (pandas' one-column frame under its name, 0 when unnamed; it
+    /// raised TypeError). Only the left join exists (pandas'
+    /// NotImplementedError); `overwrite=False` fills this frame's missing
+    /// cells alone, `filter_func` picks the cells that may change,
+    /// `errors='raise'` refuses cells both sides hold (the keywords were
+    /// unknown; br-frankenpandas-u6p7i).
+    #[pyo3(signature = (other, join="left", overwrite=true, filter_func=None, errors="ignore"))]
+    fn update(
+        &mut self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        join: &str,
+        overwrite: bool,
+        filter_func: Option<&Bound<'_, PyAny>>,
+        errors: &str,
+    ) -> PyResult<()> {
+        if join != "left" {
+            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                "Only left join is supported",
+            ));
+        }
+        if !matches!(errors, "ignore" | "raise") {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "The parameter errors must be either 'ignore' or 'raise'",
+            ));
+        }
+        let other = if let Ok(frame) = other.extract::<PyRef<'_, PyDataFrame>>() {
+            frame.inner.clone()
+        } else if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
+            let named = series.inner.name().clone();
+            let key = if named == LabelName::default() {
+                fp_frame::column_key(&IndexLabel::Int64(0))
+            } else {
+                named.to_string()
+            };
+            series
+                .inner
+                .to_frame(Some(&key))
+                .map_err(frame_error_to_py)?
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "'{}' object is not an instance of 'DataFrame'",
+                other.get_type().name()?
+            )));
+        };
+        let filter_func = filter_func.filter(|func| !func.is_none());
+        if overwrite && filter_func.is_none() && errors == "ignore" {
+            self.inner = self.inner.update(&other).map_err(frame_error_to_py)?;
+            return Ok(());
+        }
+        let rows = self.inner.index().labels().to_vec();
+        let mut out = self.inner.clone();
+        for name in self.inner.column_names() {
+            let (Some(this), Some(that)) = (self.inner.column(name), other.column(name)) else {
+                continue;
+            };
+            let that = Series::new(name.as_str(), other.index().clone(), that.clone())
+                .and_then(|that| that.reindex(rows.clone()))
+                .map_err(frame_error_to_py)?;
+            let (this_values, that_values) = (this.values(), that.column().values());
+            if errors == "raise"
+                && this_values
+                    .iter()
+                    .zip(that_values)
+                    .any(|(a, b)| !a.is_missing() && !b.is_missing())
+            {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Data overlaps.",
+                ));
+            }
+            // pandas' keep-this mask: where `that` is missing, and where
+            // filter_func says no / (overwrite=False) this holds a value.
+            let chosen: Vec<bool> = match filter_func {
+                Some(func) => {
+                    let this_array = column_ndarray(py, this)?;
+                    func.call1((this_array,))?
+                        .try_iter()?
+                        .map(|flag| flag?.is_truthy())
+                        .collect::<PyResult<_>>()?
+                }
+                None => vec![true; this_values.len()],
+            };
+            let values: Vec<Scalar> = this_values
+                .iter()
+                .zip(that_values)
+                .zip(&chosen)
+                .map(|((a, b), &chosen)| {
+                    let keep = b.is_missing() || !chosen || (!overwrite && !a.is_missing());
+                    if keep { a.clone() } else { b.clone() }
+                })
+                .collect();
+            let column = Column::from_values(values).map_err(column_error_to_py)?;
+            out = out
+                .with_column(name.clone(), column)
+                .map_err(frame_error_to_py)?;
+        }
+        self.inner = out;
         Ok(())
     }
 
@@ -46211,10 +46571,9 @@ impl PyRolling {
                 out.push(Scalar::Float64(f64::NAN));
             } else {
                 let arg = window_arg(py, window, &labels[start..end], s.name(), raw)?;
-                out.push(py_to_scalar(
-                    py,
-                    &call_window_func(func, arg, args, kwargs)?,
-                )?);
+                out.push(window_apply_value(&call_window_func(
+                    func, arg, args, kwargs,
+                )?)?);
             }
         }
         // The source index itself: its name and zone (bare labels came back
@@ -46233,6 +46592,20 @@ impl PyRolling {
             None => Ok(()),
         }
     }
+}
+
+/// One window's `apply(func)` answer as pandas stores it: a float64 (an int
+/// or bool answer is its float; the column came back int64 / bool), and
+/// pandas' TypeError for anything that is not a real number
+/// (br-frankenpandas-u6p7i).
+fn window_apply_value(value: &Bound<'_, PyAny>) -> PyResult<Scalar> {
+    value.extract::<f64>().map(Scalar::Float64).map_err(|_| {
+        let name = value
+            .get_type()
+            .name()
+            .map_or_else(|_| "object".to_owned(), |name| name.to_string());
+        PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!("must be real number, not {name}"))
+    })
 }
 
 /// A `rolling(window)` argument: a row count, or a time-based window as a
@@ -47145,8 +47518,7 @@ impl PyExpanding {
                         let labels = &s.index().labels()[0..=i];
                         let arg = window_arg(py, slice, labels, s.name(), raw)?;
                         let res = call_window_func(func, arg, args, kwargs)?;
-                        let res_scalar = py_to_scalar(py, &res)?;
-                        out_vals.push(res_scalar);
+                        out_vals.push(window_apply_value(&res)?);
                     }
                 }
                 // The source index itself: its name and zone (fvsao.60).
@@ -47185,8 +47557,7 @@ impl PyExpanding {
                             let labels = &df.index().labels()[0..=i];
                             let arg = window_arg(py, slice, labels, col_name, raw)?;
                             let res = call_window_func(func, arg, args, kwargs)?;
-                            let res_scalar = py_to_scalar(py, &res)?;
-                            out_vals.push(res_scalar);
+                            out_vals.push(window_apply_value(&res)?);
                         }
                     }
                     out_series_list
@@ -64220,6 +64591,132 @@ fn reindex_fill_options(
         return Ok(Some(values));
     }
     Ok(Some(vec![one(tolerance)?; targets]))
+}
+
+/// pandas' `DataFrame.clip(lower=, upper=)` with a DataFrame bound: each
+/// cell is held within the bounds' cells at its row and column, a scalar
+/// bound for every cell. A missing bound cell does not clip, but a row or
+/// column the bound frame lacks makes the cell NaN, as pandas' aligned
+/// `where` does. A Series bound beside a frame one, or a non-numeric column,
+/// is not supported.
+fn clip_by_frames(
+    frame: &DataFrame,
+    lower: Option<&Bound<'_, PyAny>>,
+    upper: Option<&Bound<'_, PyAny>>,
+) -> PyResult<DataFrame> {
+    // Each bound as a cell reader for (column, row): a frame with, per row
+    // of this frame, its own row holding that label.
+    enum ClipBound {
+        None,
+        Scalar(f64),
+        Frame(Box<DataFrame>, Vec<Option<usize>>),
+    }
+    // A bound cell: absent from the bound frame (NaN), unbounded, a limit.
+    enum Cell {
+        Absent,
+        Open,
+        Limit(f64),
+    }
+    let read = |bound: Option<&Bound<'_, PyAny>>| -> PyResult<ClipBound> {
+        let Some(bound) = bound.filter(|bound| !bound.is_none()) else {
+            return Ok(ClipBound::None);
+        };
+        if let Ok(other) = bound.extract::<PyRef<'_, PyDataFrame>>() {
+            let rows = other.inner.index().get_indexer(frame.index());
+            return Ok(ClipBound::Frame(Box::new(other.inner.clone()), rows));
+        }
+        match bound.extract::<f64>() {
+            Ok(value) => Ok(ClipBound::Scalar(value)),
+            Err(_) => Err(not_implemented(
+                "DataFrame.clip with a DataFrame bound beside a Series or dict bound",
+            )),
+        }
+    };
+    let (low, high) = (read(lower)?, read(upper)?);
+    let at = |bound: &ClipBound, name: &str, row: usize| -> Cell {
+        match bound {
+            ClipBound::None => Cell::Open,
+            ClipBound::Scalar(value) if value.is_nan() => Cell::Open,
+            ClipBound::Scalar(value) => Cell::Limit(*value),
+            ClipBound::Frame(other, rows) => {
+                let cell = other
+                    .column(name)
+                    .zip(rows[row])
+                    .and_then(|(column, at)| column.values().get(at));
+                match cell {
+                    None => Cell::Absent,
+                    Some(value) if value.is_missing() => Cell::Open,
+                    Some(value) => value.to_f64().map_or(Cell::Open, Cell::Limit),
+                }
+            }
+        }
+    };
+    let mut out = frame.clone();
+    for name in frame.column_names() {
+        let Some(column) = frame.column(name) else {
+            continue;
+        };
+        if !matches!(
+            column.dtype(),
+            DType::Int64 | DType::Float64 | DType::Int64Nullable | DType::Float64Nullable
+        ) {
+            return Err(not_implemented(
+                "DataFrame.clip with a DataFrame bound over a non-numeric column",
+            ));
+        }
+        let values: Vec<Scalar> = column
+            .values()
+            .iter()
+            .enumerate()
+            .map(|(row, value)| {
+                let (lo, hi) = (at(&low, name, row), at(&high, name, row));
+                if matches!(lo, Cell::Absent) || matches!(hi, Cell::Absent) {
+                    return Scalar::Float64(f64::NAN);
+                }
+                let Ok(v) = value.to_f64() else {
+                    return value.clone();
+                };
+                if value.is_missing() {
+                    return value.clone();
+                }
+                match (lo, hi) {
+                    (Cell::Limit(lo), _) if v < lo => bound_scalar(value, lo),
+                    (_, Cell::Limit(hi)) if v > hi => bound_scalar(value, hi),
+                    _ => value.clone(),
+                }
+            })
+            .collect();
+        let clipped = Column::from_values(values).map_err(column_error_to_py)?;
+        out = out
+            .with_column(name.clone(), clipped)
+            .map_err(frame_error_to_py)?;
+    }
+    Ok(out)
+}
+
+/// A clip bound `limit` in the place of `value`: an int stays an int when
+/// the bound is whole (pandas keeps an int64 column int64 under int bounds).
+fn bound_scalar(value: &Scalar, limit: f64) -> Scalar {
+    match value {
+        Scalar::Int64(_) if limit.fract() == 0.0 && limit.abs() < 9.0e15 => {
+            Scalar::Int64(limit as i64)
+        }
+        _ => Scalar::Float64(limit),
+    }
+}
+
+/// A Python `slice(start, stop, step)` (a None step when none is given), as
+/// pandas' `slice_indexer` answers (it was a tuple; br-frankenpandas-u6p7i).
+fn slice_object(
+    py: Python<'_>,
+    start: usize,
+    stop: usize,
+    step: Option<isize>,
+) -> PyResult<Py<PyAny>> {
+    py.import("builtins")?
+        .getattr("slice")?
+        .call1((start, stop, step))
+        .map(Bound::unbind)
 }
 
 /// numpy's `searchsorted(..., sorter=)` over `len` values: the positions

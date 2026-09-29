@@ -15488,3 +15488,178 @@ _U6C_CASES = {
 def test_interpolate_reach_merges_and_level_reindex_like_pandas_u6p7i(case: str) -> None:
     run = _U6C_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# Everyday probes 32 / 33 vs pandas 2.2.3. Probe 32 (scratch
+# p14/oracle_everyday32.py, 80 calls; 78 matched): a rolling / expanding
+# apply(func) kept func's int or bool answers (pandas stores float64), and
+# DataFrame.update refused a Series (and had none of join / overwrite /
+# filter_func / errors).
+def _e32_updated(m: Any, other: Any, **kwargs: Any) -> list:
+    frame = m.DataFrame({"a": [1.0, np.nan, 3.0], "b": ["x", "y", "z"]})
+    returned = frame.update(other(m), **kwargs)
+    return [repr(returned)] + _u6_shown(frame)
+
+
+def _e32_other(m: Any) -> Any:
+    return m.DataFrame({"a": [10.0, 20.0, np.nan], "b": [None, "Y", "Z"]})
+
+
+_E32_CASES = {
+    "expanding apply of ints": lambda m: _u6_shown(
+        m.Series([10, 20, 30], name="y").expanding().apply(lambda a: a.max() - a.min(), raw=True)
+    ),
+    "expanding apply of bools": lambda m: _u6_shown(
+        m.Series([10, 20, 30], name="y").expanding().apply(lambda a: a.sum() > 25, raw=True)
+    ),
+    "rolling apply of ints": lambda m: _u6_shown(
+        m.Series([10, 20, 30], name="y").rolling(2, min_periods=1).apply(lambda a: int(a.sum()))
+    ),
+    "frame expanding apply": lambda m: _u6_shown(
+        m.DataFrame({"y": [10, 20, 30], "z": [1, 2, 3]}).expanding().apply(lambda a: a.sum(), raw=True)
+    ),
+    "apply answering text raises": lambda m: _u6_shown(
+        m.Series([1, 2]).expanding().apply(lambda a: "x", raw=True)
+    ),
+    "update with a named Series": lambda m: _e32_updated(m, lambda m: m.Series([7.0], index=[1], name="a")),
+    "update with an unnamed Series": lambda m: _e32_updated(m, lambda m: m.Series([7.0], index=[1])),
+    "update overwrite False": lambda m: _e32_updated(m, _e32_other, overwrite=False),
+    "update filter_func": lambda m: _e32_updated(
+        m, _e32_other, filter_func=lambda v: np.array([True, False, True])
+    ),
+    "update errors raise": lambda m: _e32_updated(m, _e32_other, errors="raise"),
+    "update errors raise without overlap": lambda m: _e32_updated(
+        m, lambda m: m.DataFrame({"a": [np.nan, 5.0, np.nan]}), errors="raise"
+    ),
+    "update join outer raises": lambda m: _e32_updated(m, _e32_other, join="outer"),
+    # Everyday probe 33 (p14/oracle_everyday33.py, 65 calls; 61 matched):
+    # slice_indexer answered a tuple, Index.map refused a dict, clip refused
+    # a DataFrame bound, any / all had no bool_only / skipna; and what they
+    # exposed: Index([1.5, 2]) was object, and a DatetimeIndex compared a
+    # slice_locs date string as text. (pandas' slice_locs answers np.int64
+    # for a string bound; the positions are compared as ints.)
+    "slice_indexer": lambda m: [repr(m.Index([1, 2, 3, 4]).slice_indexer(2, 3))],
+    "slice_indexer with a step": lambda m: [repr(m.Index([1, 2, 3, 4]).slice_indexer(1, 4, 2))],
+    "Index.map a dict": lambda m: [repr(m.Index(["a", "b"]).map({"a": 1}))],
+    "Index.map a dict of every label": lambda m: [repr(m.Index(["a", "b"], name="n").map({"a": "x", "b": "y"}))],
+    "Index.map a Series": lambda m: [repr(m.Index(["a", "b"]).map(m.Series({"b": 2.5})))],
+    "Index of ints and floats": lambda m: [repr(m.Index([1.5, 2]))],
+    "frame index of ints and floats": lambda m: [repr(m.DataFrame({"a": [1, 2]}, index=[1.5, 2]).index)],
+    "clip below a frame": lambda m: _u6_shown(m.DataFrame({"a": [1, 5]}).clip(lower=m.DataFrame({"a": [2, 2]}))),
+    "clip above a frame with a missing cell": lambda m: _u6_shown(
+        m.DataFrame({"a": [1.0, 5.0], "b": [3.0, 0.0]}).clip(
+            upper=m.DataFrame({"a": [0.5, 9.0], "b": [np.nan, -1.0]})
+        )
+    ),
+    "clip between a frame and a scalar": lambda m: _u6_shown(
+        m.DataFrame({"a": [1, 5, 9]}).clip(lower=m.DataFrame({"a": [2, 2, 2]}), upper=6)
+    ),
+    "clip by a frame lacking a column": lambda m: _u6_shown(
+        m.DataFrame({"a": [1, 5], "z": [7, 8]}).clip(upper=m.DataFrame({"a": [0, 0]}))
+    ),
+    "all bool_only": lambda m: _u6_shown(
+        m.DataFrame({"a": [True, False], "b": [1, 2]}).all(bool_only=True)
+    ),
+    "any skipna False": lambda m: _u6_shown(m.DataFrame({"c": [np.nan, 0.0]}).any(skipna=False)),
+    "all along rows skipna False": lambda m: _u6_shown(
+        m.DataFrame({"b": [1, 2], "c": [np.nan, 0.0]}).all(axis=1, skipna=False)
+    ),
+    # skipna=False reads a missing value as its Python truth - None False
+    # in an object column, NaT True - and a nullable column's NA as unknown:
+    # down the column pandas raises unless a present value decides it (a
+    # Series answers NA), along the rows it is True; bool_only leaves the
+    # nullable boolean out (the param-honesty audit caught skipna ignored).
+    "all skipna False reads None as False": lambda m: _u6_shown(
+        m.DataFrame({"a": [3, 1], "b": [1.5, np.nan], "c": ["x", None]}).all(skipna=False)
+    ),
+    "all along rows skipna False reads None as False": lambda m: _u6_shown(
+        m.DataFrame({"a": [3, 1], "c": ["x", None]}).all(axis=1, skipna=False)
+    ),
+    "any of Nones skipna False": lambda m: _u6_shown(m.DataFrame({"c": [None, None]}).any(skipna=False)),
+    "all skipna False of bools and a None": lambda m: _u6_shown(
+        m.DataFrame({"b": [True, None]}).all(skipna=False)
+    ),
+    "all skipna False reads NaT as True": lambda m: _u6_shown(
+        m.DataFrame({"t": m.to_datetime(["2024-01-01", None])}).all(skipna=False)
+    ),
+    "all of an undecided nullable column raises": lambda m: _u6_shown(
+        m.DataFrame({"i": m.array([1, None], dtype="Int64")}).all(skipna=False)
+    ),
+    "all of an undecided nullable column beside another raises": lambda m: _u6_shown(
+        m.DataFrame({"i": m.array([1, None], dtype="Int64"), "f": [1.0, 2.0]}).all(skipna=False)
+    ),
+    "all of a decided nullable column": lambda m: _u6_shown(
+        m.DataFrame({"i": m.array([0, None], dtype="Int64"), "f": [1.0, 2.0]}).all(skipna=False)
+    ),
+    "any of a decided nullable boolean": lambda m: _u6_shown(
+        m.DataFrame({"b": m.array([True, None], dtype="boolean")}).any(skipna=False)
+    ),
+    "all bool_only leaves the nullable boolean out": lambda m: _u6_shown(
+        m.DataFrame({"b": m.array([True, None], dtype="boolean"), "c": [True, False]}).all(bool_only=True)
+    ),
+    "Series all skipna False reads NaT as True": lambda m: [
+        repr(m.Series(m.to_datetime(["2024-01-01", None])).all(skipna=False))
+    ],
+    "Series all of an undecided nullable Series": lambda m: [
+        repr(m.Series(m.array([1, None], dtype="Int64")).all(skipna=False))
+    ],
+    "Series any of a decided nullable boolean": lambda m: [
+        repr(m.Series(m.array([True, None], dtype="boolean")).any(skipna=False))
+    ],
+    # ...and a nullable column makes the answer boolean, an empty frame's is
+    # bool, and datetimes warn once per block (naive together, zoned alone).
+    "any along rows beside a nullable column": lambda m: _u6_shown(
+        m.DataFrame({"x": m.array([1.0, 0.0], dtype="Float64"), "j": [1, 2]}).any(axis=1)
+    ),
+    "all of an empty frame": lambda m: _u6_shown(m.DataFrame().all()),
+    "all of naive and zoned datetimes": lambda m: _u6_shown(
+        m.DataFrame(
+            {"t": m.to_datetime(["2024-01-01", None]), "u": m.to_datetime(["2024-01-01", None]).tz_localize("UTC")}
+        ).all()
+    ),
+    "DatetimeIndex slice_locs from a day": lambda m: [
+        tuple(int(p) for p in m.DatetimeIndex(["2024-01-01 10:00", "2024-01-02 09:00", "2024-02-01"]).slice_locs("2024-01-02"))
+    ],
+    "DatetimeIndex slice_locs to a day": lambda m: [
+        tuple(int(p) for p in m.DatetimeIndex(["2024-01-01 10:00", "2024-01-02 09:00", "2024-02-01"]).slice_locs(end="2024-01-02"))
+    ],
+    "DatetimeIndex slice_locs a month": lambda m: [
+        tuple(int(p) for p in m.DatetimeIndex(["2024-01-01 10:00", "2024-01-02 09:00", "2024-02-01"]).slice_locs("2024-01", "2024-01"))
+    ],
+    "zoned DatetimeIndex slice_locs to a day": lambda m: [
+        tuple(
+            int(p)
+            for p in m.DatetimeIndex(["2024-01-01 10:00", "2024-01-02 09:00"])
+            .tz_localize("US/Eastern")
+            .slice_locs(end="2024-01-01")
+        )
+    ],
+    "TimedeltaIndex slice_locs from text": lambda m: [
+        tuple(int(p) for p in m.TimedeltaIndex(["1D", "2D", "3D"]).slice_locs("2D"))
+    ],
+    # NEGATIVE: the default update and a float rolling apply; int labels
+    # stay int64; any / all without the keywords.
+    "update": lambda m: _e32_updated(m, _e32_other),
+    "rolling apply of floats": lambda m: _u6_shown(
+        m.Series([1.5, 2.5, 3.5]).rolling(2).apply(lambda a: a.mean(), raw=True)
+    ),
+    "Index of ints": lambda m: [repr(m.Index([1, 2]))],
+    "all": lambda m: _u6_shown(m.DataFrame({"a": [True, False], "b": [1, 2]}).all()),
+    # NEGATIVE: NaN in an object column stays True, an int column's None is
+    # a float NaN (True), and along the rows a nullable NA is True rather
+    # than an error.
+    "all skipna False reads an object NaN as True": lambda m: _u6_shown(
+        m.DataFrame({"c": ["x", np.nan]}).all(skipna=False)
+    ),
+    "all skipna False of ints and a None": lambda m: _u6_shown(m.DataFrame({"i": [1, None]}).all(skipna=False)),
+    "all along rows of an undecided nullable column": lambda m: _u6_shown(
+        m.DataFrame({"i": m.array([1, None], dtype="Int64"), "f": [1.0, 2.0]}).all(axis=1, skipna=False)
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E32_CASES))
+def test_everyday32_33_like_pandas(case: str) -> None:
+    run = _E32_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
