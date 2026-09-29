@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import collections.abc
 import datetime
+import fractions
 import glob
 import itertools
 import json
@@ -20360,4 +20361,47 @@ _E58_CASES = {
 @pytest.mark.parametrize("case", list(_E58_CASES))
 def test_everyday58_axis_none_compare_align_like_pandas_5mkvo(case: str) -> None:
     run = _E58_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-azgpi: DataFrame(dict of dicts) raised 'If using all
+# scalar values, you must pass an index' (with index= the cells were the
+# dicts, beside a Series the dict's rows were lost); a numpy structured /
+# record array was refused; from_records(exclude= / nrows= / coerce_float=)
+# were refused.
+def _e59_shown(frame: Any) -> list:
+    return [frame.index.tolist(), frame.columns.tolist(), frame.to_dict("list"), frame.dtypes.astype(str).tolist()]
+
+
+_E59_CASES = {
+    "dict of dicts": lambda m: _e59_shown(m.DataFrame({"a": {"r1": 1, "r2": 2}, "b": {"r2": 3}})),
+    "dict of dicts first appearance": lambda m: _e59_shown(m.DataFrame({"a": {"z": 1, "x": 2}, "b": {"y": 3, "z": 4}})),
+    "dict of dicts int keys": lambda m: _e59_shown(m.DataFrame({"a": {2: 1.5, 0: 2.5}, "b": {1: "u"}})),
+    "dict of dicts with index": lambda m: _e59_shown(m.DataFrame({"a": {"r1": 1, "r2": 2}}, index=["r2", "r3"])),
+    "dict of dicts with columns": lambda m: _e59_shown(m.DataFrame({"a": {"r1": 1}, "b": {"r1": 2}}, columns=["b", "c"])),
+    "dict beside series": lambda m: _e59_shown(m.DataFrame({"a": {"x": 1, "z": 2}, "b": m.Series({"y": 3})})),
+    "dict beside scalar": lambda m: _e59_shown(m.DataFrame({"a": {"x": 1, "y": 2}, "b": 7})),
+    "dict beside list": lambda m: _e59_shown(m.DataFrame({"a": {0: 1, 1: 2}, "b": [3, 4]})),
+    "empty inner dict": lambda m: _e59_shown(m.DataFrame({"a": {}, "b": {"x": 1}})),
+    "from_dict of dicts": lambda m: _e59_shown(m.DataFrame.from_dict({"a": {"r1": 1}, "b": {"r2": 2}})),
+    "structured array": lambda m: _e59_shown(m.DataFrame(np.array([(1, 2.0), (3, 4.0)], dtype=[("x", "i8"), ("y", "f8")]))),
+    "structured array columns": lambda m: _e59_shown(m.DataFrame(np.array([(1, 2.0)], dtype=[("x", "i8"), ("y", "f8")]), columns=["y"])),
+    "from_records record array": lambda m: _e59_shown(m.DataFrame.from_records(np.rec.array([(1, "a")], dtype=[("n", "i8"), ("s", "U1")]))),
+    "from_records exclude": lambda m: _e59_shown(m.DataFrame.from_records([{"a": 1, "b": 2, "c": 3}], index="a", exclude=["c"])),
+    "from_records exclude missing": lambda m: _e59_shown(m.DataFrame.from_records([{"a": 1, "b": 2}], exclude=["z"])),
+    "from_records iterator nrows": lambda m: _e59_shown(m.DataFrame.from_records(iter([(1,), (2,), (3,)]), columns=["a"], nrows=2)),
+    "from_records coerce_float": lambda m: _e59_shown(m.DataFrame.from_records([(fractions.Fraction(1, 2), "2.5")], columns=["f", "s"], coerce_float=True)),
+    # nrows reads an iterator only: a list is read whole (a naive cut fails).
+    "from_records list nrows": lambda m: _e59_shown(m.DataFrame.from_records([(1,), (2,), (3,)], columns=["a"], nrows=2)),
+    # Negatives: already pandas'.
+    "dict of lists": lambda m: _e59_shown(m.DataFrame({"a": [1, 2], "b": ["x", "y"]}, index=["p", "q"])),
+    "dict of series": lambda m: _e59_shown(m.DataFrame({"a": m.Series({"z": 1, "x": 2}), "b": m.Series({"y": 3, "z": 4})})),
+    "from_dict orient index": lambda m: _e59_shown(m.DataFrame.from_dict({"r1": {"a": 1, "b": 2}, "r2": {"a": 3}}, orient="index")),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E59_CASES))
+def test_everyday59_dict_of_dicts_and_records_like_pandas_azgpi(case: str) -> None:
+    run = _E59_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

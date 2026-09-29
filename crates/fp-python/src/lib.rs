@@ -21126,6 +21126,188 @@ fn is_py_collection(obj: &Bound<'_, PyAny>) -> bool {
         || obj.is_instance_of::<PyFrozenSet>()
 }
 
+/// `from_records`' rows as a frame: `index` a field name (or a list of
+/// them) to set as the index, else the labels.
+fn records_frame(
+    py: Python<'_>,
+    data: &Bound<'_, PyAny>,
+    index: Option<&Bound<'_, PyAny>>,
+    columns: Option<&Bound<'_, PyAny>>,
+) -> PyResult<PyDataFrame> {
+    // A field name, or a list of them, is where the index comes from,
+    // as pandas; any other value is the labels (a name was read as the
+    // labels and raised a length mismatch; 32791).
+    if let Some(index) = index.filter(|index| !index.is_none()) {
+        let names: Option<Vec<String>> = if index.is_instance_of::<pyo3::types::PyString>() {
+            index.extract::<String>().ok().map(|name| vec![name])
+        } else if index.is_instance_of::<PyList>() {
+            index.extract::<Vec<String>>().ok()
+        } else {
+            None
+        };
+        let built = PyDataFrame::new(py, Some(data), None, columns, None)?;
+        if let Some(names) = names.filter(|names| {
+            !names.is_empty() && names.iter().all(|name| built.inner.column(name).is_some())
+        }) {
+            let key = match names.as_slice() {
+                [one] => pyo3::types::PyString::new(py, one).into_any(),
+                several => PyList::new(py, several)?.into_any(),
+            };
+            return Bound::new(py, built)?
+                .call_method1("set_index", (key,))?
+                .extract::<PyDataFrame>()
+                .map_err(Into::into);
+        }
+    }
+    PyDataFrame::new(py, Some(data), index, columns, None)
+}
+
+/// `frame` with each object column whose values are all numbers that are
+/// not ints, floats or bools (Decimal, Fraction) cast to float64, as
+/// from_records' coerce_float=True converts them (br-frankenpandas-azgpi).
+fn decimal_columns_as_float<'py>(frame: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let py = frame.py();
+    let number = py.import("numbers")?.getattr("Number")?;
+    let plain = PyTuple::new(
+        py,
+        [
+            py.get_type::<pyo3::types::PyBool>(),
+            py.get_type::<pyo3::types::PyInt>(),
+            py.get_type::<pyo3::types::PyFloat>(),
+        ],
+    )?;
+    let out = frame.clone();
+    let names: Vec<Bound<'py, PyAny>> = frame
+        .getattr("columns")?
+        .try_iter()?
+        .collect::<PyResult<_>>()?;
+    for name in names {
+        let column = out.get_item(&name)?;
+        if column.getattr("dtype")?.str()? != "object" {
+            continue;
+        }
+        let mut coercible = false;
+        let mut every_number = true;
+        for value in column.try_iter()? {
+            let value = value?;
+            let missing = value.is_none()
+                || (value.is_instance_of::<pyo3::types::PyFloat>()
+                    && value.extract::<f64>().is_ok_and(f64::is_nan));
+            if missing {
+                continue;
+            }
+            if !value.is_instance(&number)? {
+                every_number = false;
+                break;
+            }
+            coercible |= !value.is_instance(plain.as_any())?;
+        }
+        if every_number && coercible {
+            out.set_item(&name, column.call_method1("astype", ("float64",))?)?;
+        }
+    }
+    Ok(out)
+}
+
+/// A numpy structured (or record) array as pandas reads it: a dict of its
+/// fields' arrays in field order; None for any other data.
+fn structured_array_fields<'py>(data: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let Some(names) = data
+        .getattr("dtype")
+        .and_then(|dtype| dtype.getattr("names"))
+        .ok()
+        .filter(|names| !names.is_none())
+    else {
+        return Ok(None);
+    };
+    let fields = PyDict::new(data.py());
+    for name in names.try_iter()? {
+        let name = name?;
+        fields.set_item(&name, data.get_item(&name)?)?;
+    }
+    Ok(Some(fields.into_any()))
+}
+
+/// A DataFrame dict whose values include dicts, in the form the dict of
+/// lists / Series paths read, as pandas' dict_to_mgr reads it: beside a
+/// Series each dict is a Series (their indexes united there); else the rows
+/// are `index`, or the dicts' keys in first-appearance order, each dict
+/// looked up along them (NaN where it has no key), scalars broadcast.
+/// Beside a list-like it is pandas' ValueError. None when no value is a
+/// dict. The dict raised 'If using all scalar values...' or became the cells
+/// (br-frankenpandas-azgpi).
+#[allow(clippy::type_complexity)]
+fn dict_of_dicts_data<'py>(
+    py: Python<'py>,
+    dict: &Bound<'py, PyDict>,
+    index: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Option<(Bound<'py, PyAny>, Option<Bound<'py, PyAny>>)>> {
+    let values: Vec<Bound<'py, PyAny>> = dict.values().iter().collect();
+    if !values.iter().any(|value| value.is_instance_of::<PyDict>()) {
+        return Ok(None);
+    }
+    let out = PyDict::new(py);
+    if values
+        .iter()
+        .any(|value| value.is_instance_of::<PySeries>())
+    {
+        let series = py.import("frankenpandas")?.getattr("Series")?;
+        for (key, value) in dict.iter() {
+            if value.is_instance_of::<PyDict>() {
+                out.set_item(key, series.call1((value,))?)?;
+            } else {
+                out.set_item(key, value)?;
+            }
+        }
+        return Ok(Some((out.into_any(), None)));
+    }
+    let list_like = |value: &Bound<'_, PyAny>| {
+        !value.is_instance_of::<PyDict>()
+            && !value.is_instance_of::<pyo3::types::PyString>()
+            && !value.is_instance_of::<pyo3::types::PyBytes>()
+            && value.hasattr("__len__").unwrap_or(false)
+    };
+    if values.iter().any(list_like) {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Mixing dicts with non-Series may lead to ambiguous ordering.",
+        ));
+    }
+    let labels = match index.filter(|index| !index.is_none()) {
+        Some(index) => PyList::new(py, index.try_iter()?.collect::<PyResult<Vec<_>>>()?)?,
+        None => {
+            let labels = PyList::empty(py);
+            let seen = PySet::empty(py)?;
+            for value in &values {
+                if let Ok(inner) = value.cast::<PyDict>() {
+                    for key in inner.keys() {
+                        if !seen.contains(&key)? {
+                            seen.add(&key)?;
+                            labels.append(key)?;
+                        }
+                    }
+                }
+            }
+            labels
+        }
+    };
+    for (key, value) in dict.iter() {
+        match value.cast::<PyDict>() {
+            Ok(inner) => {
+                let mut cells = Vec::with_capacity(labels.len());
+                for label in labels.iter() {
+                    cells.push(match inner.get_item(&label)? {
+                        Some(cell) => cell,
+                        None => f64::NAN.into_bound_py_any(py)?,
+                    });
+                }
+                out.set_item(key, PyList::new(py, cells)?)?;
+            }
+            Err(_) => out.set_item(key, value)?,
+        }
+    }
+    Ok(Some((out.into_any(), Some(labels.into_any()))))
+}
+
 /// pandas list inference for integers mixed with missing values: live pandas
 /// 2.2.3 gives `pd.Series([1, 2, None]).dtype == float64` with NaN (and the same
 /// for DataFrame columns and dict values). Without this the binding produced an
@@ -35594,6 +35776,13 @@ impl PyDataFrame {
                 }
             };
 
+            // A numpy structured / record array is a column per field, in
+            // field order (it raised 'Cannot convert tuple to Scalar';
+            // br-frankenpandas-azgpi).
+            if let Some(fields) = structured_array_fields(data)? {
+                return Self::new(py, Some(&fields), index, columns, dtype);
+            }
+
             // A list of Series: one row each, pandas' (fvsao.63).
             if is_series_list(data) {
                 let rows: Vec<Series> = data
@@ -35666,6 +35855,11 @@ impl PyDataFrame {
             }
 
             if let Ok(dict) = data.cast::<PyDict>() {
+                // A dict value is a column keyed by row label, as pandas'
+                // dict_to_mgr reads it (br-frankenpandas-azgpi).
+                if let Some((data, labels)) = dict_of_dicts_data(py, dict, index)? {
+                    return Self::new(py, Some(&data), labels.as_ref().or(index), columns, dtype);
+                }
                 let mut col_map = BTreeMap::new();
                 let mut detected_order = Vec::new();
                 let mut detected_nrows: Option<usize> = None;
@@ -45794,39 +45988,32 @@ impl PyDataFrame {
         coerce_float: Option<bool>,
         nrows: Option<usize>,
     ) -> PyResult<Self> {
-        unsupported_params(
-            "DataFrame.from_records",
-            &[
-                ("exclude", exclude.is_none()),
-                ("coerce_float", coerce_float != Some(true)),
-                ("nrows", nrows.is_none()),
-            ],
-        )?;
-        // A field name, or a list of them, is where the index comes from,
-        // as pandas; any other value is the labels (a name was read as the
-        // labels and raised a length mismatch; 32791).
-        if let Some(index) = index.filter(|index| !index.is_none()) {
-            let names: Option<Vec<String>> = if index.is_instance_of::<pyo3::types::PyString>() {
-                index.extract::<String>().ok().map(|name| vec![name])
-            } else if index.is_instance_of::<PyList>() {
-                index.extract::<Vec<String>>().ok()
-            } else {
-                None
-            };
-            let built = Self::new(py, Some(data), None, columns, None)?;
-            if let Some(names) = names.filter(|names| {
-                !names.is_empty() && names.iter().all(|name| built.inner.column(name).is_some())
-            }) {
-                let key = match names.as_slice() {
-                    [one] => pyo3::types::PyString::new(py, one).into_any(),
-                    several => PyList::new(py, several)?.into_any(),
-                };
-                return Ok(Bound::new(py, built)?
-                    .call_method1("set_index", (key,))?
-                    .extract::<Self>()?);
+        // exclude= drops those columns, nrows= reads an iterator's first
+        // records (a list whole, as pandas), coerce_float= turns
+        // Decimal-like objects into float64 (they were refused;
+        // br-frankenpandas-azgpi).
+        let taken;
+        let data = match nrows {
+            Some(nrows) if data.hasattr("__next__")? => {
+                let records = data.try_iter()?.take(nrows).collect::<PyResult<Vec<_>>>()?;
+                taken = PyList::new(py, records)?.into_any();
+                &taken
             }
+            _ => data,
+        };
+        let built = records_frame(py, data, index, columns)?;
+        let mut frame = Bound::new(py, built)?.into_any();
+        // A name that is no column is drop's KeyError, as pandas'.
+        if let Some(exclude) = exclude.filter(|exclude| !exclude.is_none()) {
+            let names = PyList::new(py, exclude.try_iter()?.collect::<PyResult<Vec<_>>>()?)?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("columns", names)?;
+            frame = frame.call_method("drop", (), Some(&kwargs))?;
         }
-        Self::new(py, Some(data), index, columns, None)
+        if coerce_float == Some(true) {
+            frame = decimal_columns_as_float(&frame)?;
+        }
+        frame.extract::<Self>().map_err(Into::into)
     }
 
     #[pyo3(signature = (*args, **kwargs))]
