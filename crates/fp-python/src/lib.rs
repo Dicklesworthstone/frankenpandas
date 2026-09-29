@@ -26491,6 +26491,36 @@ impl PySeries {
         ignore_index: bool,
         key: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Option<PySeries>> {
+        // A row MultiIndex sorts by its levels, as a frame's (see
+        // multiindex_sort_rows; the Series sorted its flat labels, reading
+        // an ascending list's first entry, and refused level=;
+        // br-frankenpandas-9nmry).
+        if let Some(multi) = self.inner.index().row_multiindex().cloned()
+            && key.is_none()
+            && parse_axis_param_for_type(axis, "Series")?.unwrap_or(0) == 0
+        {
+            validate_sort_kind(kind)?;
+            let rows = multiindex_sort_rows(&multi, level, ascending, sort_remaining, na_position)?;
+            let positions: Vec<i64> = rows.iter().map(|&row| row as i64).collect();
+            let taken = self.inner.take(&positions).map_err(frame_error_to_py)?;
+            // ignore_index: pandas' default RangeIndex over the sorted rows.
+            let index = if ignore_index {
+                Index::default_range(taken.len())
+            } else {
+                taken
+                    .index()
+                    .clone()
+                    .with_row_multiindex(multiindex_take(&multi, &rows)?)
+                    .map_err(index_error_to_py)?
+            };
+            let sorted = Series::new(taken.name(), index, taken.column().clone())
+                .map_err(frame_error_to_py)?;
+            return Ok(series_inplace(
+                &mut self.inner,
+                PySeries { inner: sorted },
+                inplace,
+            ));
+        }
         // A Series index is single-level: level 0 is the default order, and
         // sort_remaining only acts on the other levels of a MultiIndex, so
         // pandas ignores it here too.
@@ -36610,57 +36640,7 @@ impl PyDataFrame {
             && parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0) == 0
         {
             validate_sort_kind(kind)?;
-            let asc = parse_ascending_bool(ascending)?;
-            let mut order = match level.filter(|level| !level.is_none()) {
-                Some(level) => multiindex_level_positions(&multi, level)?,
-                None => Vec::new(),
-            };
-            if order.is_empty() || sort_remaining {
-                for position in 0..multi.nlevels() {
-                    if !order.contains(&position) {
-                        order.push(position);
-                    }
-                }
-            }
-            let levels: Vec<Vec<IndexLabel>> = (0..multi.nlevels())
-                .map(|position| {
-                    multi
-                        .get_level_values(position)
-                        .map(|values| values.labels().to_vec())
-                })
-                .collect::<Result<_, _>>()
-                .map_err(index_error_to_py)?;
-            // A missing label (NaN, NaT) goes to `na_position` in its level
-            // whatever the direction, as pandas' (it sorted by its encoding:
-            // a NaT level first).
-            let na_first = match na_position {
-                "first" => true,
-                "last" => false,
-                other => {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                        "invalid na_position: {other}"
-                    )));
-                }
-            };
-            let mut rows: Vec<usize> = (0..self.inner.len()).collect();
-            rows.sort_by(|&a, &b| {
-                for &position in &order {
-                    let (left, right) = (&levels[position][a], &levels[position][b]);
-                    let ordering = match (left.is_missing(), right.is_missing()) {
-                        (true, true) => std::cmp::Ordering::Equal,
-                        (true, false) if na_first => std::cmp::Ordering::Less,
-                        (true, false) => std::cmp::Ordering::Greater,
-                        (false, true) if na_first => std::cmp::Ordering::Greater,
-                        (false, true) => std::cmp::Ordering::Less,
-                        (false, false) if asc => left.cmp(right),
-                        (false, false) => right.cmp(left),
-                    };
-                    if ordering != std::cmp::Ordering::Equal {
-                        return ordering;
-                    }
-                }
-                std::cmp::Ordering::Equal
-            });
+            let rows = multiindex_sort_rows(&multi, level, ascending, sort_remaining, na_position)?;
             let mut sorted = frame_rows_keeping_multiindex(&self.inner, &multi, &rows)?;
             if ignore_index {
                 sorted = sorted.reset_index(true).map_err(frame_error_to_py)?;
@@ -38613,11 +38593,42 @@ impl PyDataFrame {
         self.finish_set_index(py, res, inplace, verify_integrity)
     }
 
-    /// Whether elements in DataFrame are contained in values.
-    fn isin(&self, py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    /// pandas' `DataFrame.isin(values)`: a dict per column (a column it
+    /// does not name False); a Series aligned on the rows and a DataFrame
+    /// on the rows and columns - `eq` of it reindexed like this frame, a
+    /// duplicate axis pandas' ValueError; any other list-like the values
+    /// sought in every cell, anything else pandas' TypeError. A Series was
+    /// read as values, and a DataFrame, a set, an ndarray and an Index were
+    /// refused (br-frankenpandas-9nmry).
+    fn isin(slf: &Bound<'_, Self>, values: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let py = slf.py();
+        let this = slf.borrow();
+        let series = values.extract::<PyRef<'_, PySeries>>().is_ok();
+        if series || values.extract::<PyRef<'_, PyDataFrame>>().is_ok() {
+            let unique = |axis: &str| -> PyResult<bool> {
+                values
+                    .getattr(axis)?
+                    .getattr("is_unique")?
+                    .extract::<bool>()
+            };
+            if !unique("index")? || (!series && !unique("columns")?) {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "cannot compute isin with a duplicate axis.",
+                ));
+            }
+            let like = values.call_method1("reindex_like", (slf,))?;
+            let kwargs = PyDict::new(py);
+            if series {
+                kwargs.set_item("axis", "index")?;
+            }
+            let found = slf.call_method("eq", (like,), Some(&kwargs))?;
+            return Ok(PyDataFrame {
+                inner: found.extract::<PyRef<'_, PyDataFrame>>()?.inner.clone(),
+            });
+        }
         if let Ok(dict) = values.cast::<PyDict>() {
             let mut map: BTreeMap<String, Vec<Scalar>> = BTreeMap::new();
-            for (k, v) in column_dict_arg(&self.inner, dict)?.iter() {
+            for (k, v) in column_dict_arg(&this.inner, dict)?.iter() {
                 let col_name = k.extract::<String>()?;
                 let mut scs = Vec::new();
                 // A date needle is an object cell (it raised; fvsao.67).
@@ -38636,47 +38647,34 @@ impl PyDataFrame {
                 }
                 map.insert(col_name, scs);
             }
-            let res = self
+            let res = this
                 .inner
                 .isin_dict(&map)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
             // pandas rebuilds the columns: their labels, never a RangeIndex.
             return Ok(PyDataFrame {
-                inner: res.with_typed_labels_of(&self.inner),
+                inner: res.with_typed_labels_of(&this.inner),
             });
         }
-        if let Ok(s) = values.extract::<PyRef<'_, PySeries>>() {
-            let res = self
-                .inner
-                .isin(s.inner.values())
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-            return Ok(PyDataFrame { inner: res });
-        }
-        if let Ok(list) = values.cast::<PyList>() {
-            let mut scs = Vec::with_capacity(list.len());
-            for item in list.iter() {
-                scs.push(py_to_cell(py, &item)?);
-            }
-            let res = self
-                .inner
-                .isin(&scs)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-            return Ok(PyDataFrame { inner: res });
-        }
-        if let Ok(tuple) = values.cast::<pyo3::types::PyTuple>() {
-            let mut scs = Vec::with_capacity(tuple.len());
-            for item in tuple.iter() {
-                scs.push(py_to_cell(py, &item)?);
-            }
-            let res = self
-                .inner
-                .isin(&scs)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-            return Ok(PyDataFrame { inner: res });
-        }
-        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "values must be a dict, list, tuple, or Series",
-        ))
+        let items = if values.is_instance_of::<pyo3::types::PyString>() {
+            None
+        } else {
+            values.try_iter().ok()
+        };
+        let Some(items) = items else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "only list-like or dict-like objects are allowed to be passed to DataFrame.isin(), you passed a '{}'",
+                values.get_type().name()?
+            )));
+        };
+        let scs = items
+            .map(|item| py_to_cell(py, &item?))
+            .collect::<PyResult<Vec<_>>>()?;
+        let res = this
+            .inner
+            .isin(&scs)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(PyDataFrame { inner: res })
     }
 
     /// Return the first n rows ordered by columns in descending order.
@@ -39863,11 +39861,22 @@ impl PyDataFrame {
             !values.is_none()
                 && !(values.is_instance_of::<PyList>() || values.is_instance_of::<PyTuple>())
         });
+        // A value column holding a missing value takes pandas' definition
+        // below - a cell whose values are all missing is its aggregate of
+        // nothing (sum 0, count 0), a row missing every aggregate dropped -
+        // where the kernel read such a cell as no cell (NaN, the row kept;
+        // br-frankenpandas-9nmry). With margins / sort=False, which the
+        // definition refuses, it stays on the kernel.
+        let values_missing = value_names
+            .first()
+            .and_then(|name| slf.borrow().inner.column(name).map(Column::has_any_missing))
+            .unwrap_or(false);
         let simple = single_value
             && column_keys.len() == 1
             && index_keys.len() == 1
             && aggfunc.extract::<String>().is_ok()
-            && dropna;
+            && dropna
+            && !(values_missing && sort && !margins);
         let mut table = if column_keys.is_empty() {
             aggregate(&data, &index_keys)?
         } else if simple {
@@ -47107,6 +47116,92 @@ fn multiindex_take(
 }
 
 /// The rows of `frame` at `positions`, its row MultiIndex kept whole.
+/// The row order a MultiIndex `sort_index` gives, as pandas': the levels
+/// `level` names (a position, a name or a list) first, then - with
+/// `sort_remaining` and one `ascending` bool - the others, all of them with
+/// no level; an `ascending` list pairs with `level`'s levels (as many, else
+/// pandas' ValueError, and the others keep their order) or, with no level,
+/// with the levels in order (a shorter list sorts by its levels only). The
+/// sort is stable, and a missing label (NaN, NaT) goes to `na_position` in
+/// its level whatever the direction (it sorted by its encoding: a NaT level
+/// first). A list's first entry was read for every level
+/// (br-frankenpandas-9nmry).
+fn multiindex_sort_rows(
+    multi: &fp_index::MultiIndex,
+    level: Option<&Bound<'_, PyAny>>,
+    ascending: Option<&Bound<'_, PyAny>>,
+    sort_remaining: bool,
+    na_position: &str,
+) -> PyResult<Vec<usize>> {
+    let given = match level.filter(|level| !level.is_none()) {
+        Some(level) => multiindex_level_positions(multi, level)?,
+        None => Vec::new(),
+    };
+    let listed = ascending
+        .filter(|value| !value.is_none() && value.extract::<bool>().is_err())
+        .and_then(|value| value.extract::<Vec<bool>>().ok());
+    let order: Vec<(usize, bool)> = match listed {
+        Some(list) if given.is_empty() => {
+            list.into_iter().take(multi.nlevels()).enumerate().collect()
+        }
+        Some(list) if list.len() != given.len() => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "level must have same length as ascending",
+            ));
+        }
+        Some(list) => given.into_iter().zip(list).collect(),
+        None => {
+            let asc = parse_ascending_bool(ascending)?;
+            let mut order = given;
+            if order.is_empty() || sort_remaining {
+                for position in 0..multi.nlevels() {
+                    if !order.contains(&position) {
+                        order.push(position);
+                    }
+                }
+            }
+            order.into_iter().map(|position| (position, asc)).collect()
+        }
+    };
+    let levels: Vec<Vec<IndexLabel>> = (0..multi.nlevels())
+        .map(|position| {
+            multi
+                .get_level_values(position)
+                .map(|values| values.labels().to_vec())
+        })
+        .collect::<Result<_, _>>()
+        .map_err(index_error_to_py)?;
+    let na_first = match na_position {
+        "first" => true,
+        "last" => false,
+        other => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "invalid na_position: {other}"
+            )));
+        }
+    };
+    let mut rows: Vec<usize> = (0..multi.len()).collect();
+    rows.sort_by(|&a, &b| {
+        for &(position, asc) in &order {
+            let (left, right) = (&levels[position][a], &levels[position][b]);
+            let ordering = match (left.is_missing(), right.is_missing()) {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) if na_first => std::cmp::Ordering::Less,
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) if na_first => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                (false, false) if asc => left.cmp(right),
+                (false, false) => right.cmp(left),
+            };
+            if ordering != std::cmp::Ordering::Equal {
+                return ordering;
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+    Ok(rows)
+}
+
 fn frame_rows_keeping_multiindex(
     frame: &DataFrame,
     multi: &fp_index::MultiIndex,

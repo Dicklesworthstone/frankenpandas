@@ -18926,3 +18926,75 @@ _PF_CASES = {
 def test_period_fields_like_pandas_3x4e7(case: str) -> None:
     run = _PF_CASES[case]
     assert _pf_outcome(lambda: run(fpd)) == _pf_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-9nmry: a MultiIndex sort_index pairs an ascending list
+# with its levels (it read the first entry for all, and a Series sorted its
+# flat labels); pivot_table / crosstab aggregate a cell whose values are all
+# missing as pandas (sum 0, the row of an all-missing mean dropped; it read
+# such a cell as none); DataFrame.isin aligns a Series / DataFrame and takes
+# any list-like (a Series was read as values, the others refused).
+def _e40_multi(m: Any) -> Any:
+    index = m.MultiIndex.from_tuples(
+        [("b", 1, "x"), ("a", 2, "y"), ("a", 1, "z"), ("b", 2, "w"), ("a", 1, "v")], names=["k", "n", "s"]
+    )
+    return m.DataFrame({"v": range(5)}, index=index)
+
+
+def _e40_values(m: Any) -> Any:
+    return m.DataFrame({"k": ["a", "b", "a", "c"], "c": [True, True, False, True], "v": [1.0, np.nan, 3.0, 4.0]})
+
+
+def _e40_frame(m: Any) -> Any:
+    return m.DataFrame({"x": [1.0, np.nan, 3.0, 4.0], "y": [10, 20, 30, 40]}, index=[3, 1, 2, 0])
+
+
+_E40_CASES = {
+    "sort list per level": lambda m: _e23_shown(_e40_multi(m).sort_index(ascending=[True, False, True])),
+    "sort short list": lambda m: _e23_shown(_e40_multi(m).sort_index(ascending=[False])),
+    "sort two of three": lambda m: _e23_shown(_e40_multi(m).sort_index(ascending=[True, False])),
+    "sort level list": lambda m: _e23_shown(_e40_multi(m).sort_index(level=["n", "k"], ascending=[False, True])),
+    "sort level list no remaining": lambda m: _e23_shown(_e40_multi(m).sort_index(level="n", ascending=[False])),
+    "sort level list wrong length": lambda m: _e23_shown(_e40_multi(m).sort_index(level="n", ascending=[False, True])),
+    "Series sort list": lambda m: [str(v) for v in _e40_multi(m).v.sort_index(ascending=[False, True, True]).index],
+    "Series sort level": lambda m: [str(v) for v in _e40_multi(m).v.sort_index(level="s").index],
+    "Series sort ignore_index": lambda m: _e23_shown(
+        _e40_multi(m).v.sort_index(ascending=[False, True], ignore_index=True).to_frame()
+    ),
+    "pivot sum of missing": lambda m: _e23_shown(_e40_values(m).pivot_table("v", "k", "c", aggfunc="sum")),
+    "pivot mean of missing": lambda m: _e23_shown(_e40_values(m).pivot_table("v", "k", "c", aggfunc="mean")),
+    "pivot count of missing": lambda m: _e23_shown(_e40_values(m).pivot_table("v", "k", "c", aggfunc="count")),
+    "crosstab sum of missing": lambda m: _e23_shown(
+        m.crosstab(_e40_values(m).k, _e40_values(m).c, values=_e40_values(m).v, aggfunc="sum")
+    ),
+    "isin frame": lambda m: _e23_shown(
+        _e40_frame(m).isin(m.DataFrame({"x": [1.0, 0, 3.0, 0], "y": [10, 0, 0, 40]}, index=[3, 1, 2, 0]))
+    ),
+    "isin frame other labels": lambda m: _e23_shown(
+        _e40_frame(m).isin(m.DataFrame({"y": [40, 10], "z": [1, 2]}, index=[0, 3]))
+    ),
+    "isin frame duplicate index": lambda m: _e23_shown(_e40_frame(m).isin(m.DataFrame({"x": [1.0, 2.0]}, index=[3, 3]))),
+    "isin Series aligned": lambda m: _e23_shown(_e40_frame(m).isin(m.Series([10, 3.0]))),
+    "isin Series duplicate index": lambda m: _e23_shown(_e40_frame(m).isin(m.Series([1, 2], index=[0, 0]))),
+    "isin set": lambda m: _e23_shown(_e40_frame(m).isin({10, 3.0})),
+    "isin array": lambda m: _e23_shown(_e40_frame(m).isin(np.array([10, 4.0]))),
+    "isin Index": lambda m: _e23_shown(_e40_frame(m).isin(m.Index([20, 1.0]))),
+    "isin string": lambda m: _e23_shown(_e40_frame(m).isin("abc")),
+    # Negatives: already pandas'.
+    "sort bool": lambda m: _e23_shown(_e40_multi(m).sort_index(ascending=False)),
+    "sort level bool": lambda m: _e23_shown(_e40_multi(m).sort_index(level="n", ascending=False)),
+    "pivot sum without missing": lambda m: _e23_shown(_e40_values(m).fillna(0).pivot_table("v", "k", "c", aggfunc="sum")),
+    "pivot sum keep missing keys": lambda m: _e23_shown(
+        _e40_values(m).pivot_table("v", "k", "c", aggfunc="sum", dropna=False)
+    ),
+    "crosstab counts": lambda m: _e23_shown(m.crosstab(_e40_values(m).k, _e40_values(m).c)),
+    "isin list": lambda m: _e23_shown(_e40_frame(m).isin([1.0, 40])),
+    "isin dict": lambda m: _e23_shown(_e40_frame(m).isin({"x": [3.0], "y": [20]})),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E40_CASES))
+def test_everyday40_sort_pivot_isin_like_pandas_9nmry(case: str) -> None:
+    run = _E40_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
