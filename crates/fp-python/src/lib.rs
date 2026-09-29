@@ -47989,8 +47989,9 @@ impl PySeriesStringAccessor {
         wrap_frame(self.series.str().get_dummies(sep))
     }
     /// pandas' `cat(others=None, sep=None, na_rep=None, join='left')`: with
-    /// no others, the strings joined into one; with a Series (or a list of
-    /// them) each row joined with the aligned rows.
+    /// no others, the strings joined into one; with a Series, a DataFrame's
+    /// columns or a list of Series / arrays, each row joined with the aligned
+    /// rows (a list-like of strings is one column of others).
     #[pyo3(signature = (others=None, sep=None, na_rep=None, join="left"))]
     fn cat(
         &self,
@@ -48022,12 +48023,77 @@ impl PySeriesStringAccessor {
             let joined = self.series.str().cat(sep).map_err(frame_error_to_py)?;
             return joined.into_py_any(py);
         };
+        // A list-like of strings (a list, an array, an Index) is one column
+        // of others, row by row, as pandas'; only a list of list-likes is
+        // several (each string was broadcast as a column of its own, so every
+        // row was joined with all of them).
+        let ndim = |item: &Bound<'_, PyAny>| {
+            item.getattr("ndim")
+                .and_then(|ndim| ndim.extract::<usize>())
+                .ok()
+        };
+        let frame = others.extract::<PyRef<'_, PyDataFrame>>().ok();
+        let items: Vec<Bound<'_, PyAny>> =
+            if others.extract::<PyRef<'_, PySeries>>().is_ok() || frame.is_some() {
+                Vec::new()
+            } else if ndim(others) == Some(2) {
+                // A 2-D array is its columns, by position (its rows were
+                // read as others).
+                others.getattr("T")?.try_iter()?.collect::<PyResult<_>>()?
+            } else {
+                others.try_iter()?.collect::<PyResult<_>>()?
+            };
+        let list_like = |item: &Bound<'_, PyAny>| {
+            !item.is_instance_of::<pyo3::types::PyString>() && item.len().is_ok()
+        };
+        let nested = items.iter().any(list_like);
+        // pandas' length rule for others without an index.
+        let same_length = |other: &Bound<'_, PyAny>| -> PyResult<()> {
+            if other.extract::<PyRef<'_, PySeries>>().is_err() && other.len()? != self.series.len()
+            {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "If `others` contains arrays or lists (or other list-likes without an index), these must all be of the same length as the calling Series/Index.",
+                ));
+            }
+            Ok(())
+        };
         let others: Vec<Series> = if let Ok(series) = others.extract::<PyRef<'_, PySeries>>() {
             vec![series.inner.clone()]
+        } else if let Some(frame) = frame {
+            // A DataFrame is its columns, each aligned on the index as a
+            // Series is (its column names were joined).
+            frame
+                .inner
+                .column_names()
+                .into_iter()
+                .map(|name| frame.column_series(name).map(|column| column.inner))
+                .collect::<PyResult<Vec<_>>>()?
+        } else if !nested {
+            same_length(others)?;
+            let as_list = PyList::new(py, &items)?;
+            vec![extract_or_build_series(py, as_list.as_any(), &self.series)?]
         } else {
-            others
-                .try_iter()?
-                .map(|item| item.and_then(|item| extract_or_build_series(py, &item, &self.series)))
+            // Several others must each be a Series, an Index or a 1-D array
+            // (a plain list, a DataFrame or a 2-D array among them is
+            // pandas' TypeError).
+            let array = |item: &Bound<'_, PyAny>| {
+                item.extract::<PyRef<'_, PySeries>>().is_ok()
+                    || item.extract::<PyRef<'_, PyIndex>>().is_ok()
+                    || (item.hasattr("__array__").unwrap_or(false)
+                        && item.extract::<PyRef<'_, PyDataFrame>>().is_err()
+                        && ndim(item) == Some(1))
+            };
+            if !items.iter().all(|item| list_like(item) && array(item)) {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "others must be Series, Index, DataFrame, np.ndarray or list-like (either containing only strings or containing only objects of type Series/Index/np.ndarray[1-dim])",
+                ));
+            }
+            items
+                .iter()
+                .map(|item| {
+                    same_length(item)?;
+                    extract_or_build_series(py, item, &self.series)
+                })
                 .collect::<PyResult<Vec<_>>>()?
         };
         let refs: Vec<&Series> = others.iter().collect();

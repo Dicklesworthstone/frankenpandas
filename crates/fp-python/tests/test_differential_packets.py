@@ -18604,3 +18604,67 @@ _SK_CASES = {
 def test_stack_levels_like_pandas_fvsao36(case: str) -> None:
     run = _SK_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-l5o7z: str.cat of a list-like of strings joins row by row
+# (every row was joined with the whole list), a DataFrame / 2-D array by its
+# columns (its column names / rows were joined), and to_datetime's mixed-format
+# error names the format pandas guessed from the first value ("the format of
+# the first value") or the text left over.
+def _ct_series(m: Any) -> Any:
+    return m.Series(["a", "b", None], name="t")
+
+
+def _ct_first_line(run: Any) -> Any:
+    def first(m: Any) -> list:
+        try:
+            run(m)
+        except ValueError as error:
+            return [type(error).__name__, str(error).splitlines()[0]]
+        return ["no error"]
+
+    return first
+
+
+_CT_CASES = {
+    "cat a list of strings": lambda m: _mk_shown(_ct_series(m).str.cat(["1", "2", "3"], sep="-")),
+    "cat a list with na_rep": lambda m: _mk_shown(_ct_series(m).str.cat(["1", None, "3"], sep="-", na_rep="?")),
+    "cat a tuple": lambda m: _mk_shown(_ct_series(m).str.cat(("1", "2", "3"))),
+    "cat an array": lambda m: _mk_shown(_ct_series(m).str.cat(np.array(["1", "2", "3"]), sep="+")),
+    "cat an Index": lambda m: _mk_shown(_ct_series(m).str.cat(m.Index(["x", "y", "z"]), sep=":")),
+    "cat a list of Series": lambda m: _mk_shown(
+        _ct_series(m).str.cat([m.Series(["1", "2", "3"]), m.Series(["p", "q", "r"])], sep="-")
+    ),
+    "cat a DataFrame": lambda m: _mk_shown(
+        _ct_series(m).str.cat(m.DataFrame({"x": ["1", "2", "3"], "y": ["p", "q", "r"]}), sep="-")
+    ),
+    "cat a shorter DataFrame with na_rep": lambda m: _mk_shown(
+        _ct_series(m).str.cat(m.DataFrame({"x": ["1", None]}), sep="-", na_rep="?")
+    ),
+    "cat a 2-D array": lambda m: _mk_shown(
+        _ct_series(m).str.cat(np.array([["1", "2"], ["3", "4"], ["5", "6"]]), sep="-")
+    ),
+    "datetime then date": _ct_first_line(lambda m: m.to_datetime(["2024-01-31 10:15", "2024-12-31"])),
+    "date then datetime": _ct_first_line(lambda m: m.to_datetime(["2024-01-31", "2024-02-01 10:00"])),
+    "slashes then dashes": _ct_first_line(lambda m: m.to_datetime(["2024/01/31", "2024-02-01"])),
+    "T and minutes": _ct_first_line(lambda m: m.to_datetime(["2024-01-31T10:15", "2024-02-01"])),
+    "seconds": _ct_first_line(lambda m: m.to_datetime(["2024-01-31 10:15:30", "2024-02-01"])),
+    "fraction": _ct_first_line(lambda m: m.to_datetime(["2024-01-31 10:15:30.5", "2024-02-01"])),
+    "a zone": _ct_first_line(lambda m: m.to_datetime(["2024-01-31 10:15+01:00", "2024-02-01"])),
+    # Negatives: the forms already pandas', and pandas' refusals.
+    "cat a Series": lambda m: _mk_shown(_ct_series(m).str.cat(m.Series(["1", "2", "3"]), sep="-")),
+    "cat nothing": lambda m: [_ct_series(m).str.cat(sep=","), _ct_series(m).str.cat(sep=",", na_rep="-")],
+    "cat a list of lists": lambda m: _mk_shown(_ct_series(m).str.cat([["1", "2", "3"], ["p", "q", "r"]])),
+    "cat a list of the wrong length": lambda m: _mk_shown(_ct_series(m).str.cat(["1", "2"])),
+    "cat a list holding a DataFrame": lambda m: _mk_shown(
+        _ct_series(m).str.cat([m.DataFrame({"x": ["1", "2", "3"]}), m.Series(["u", "v", "w"])])
+    ),
+    "one format throughout": _ct_first_line(lambda m: m.to_datetime(["2024-01-31", "2024-02-01"])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_CT_CASES))
+def test_str_cat_and_datetime_errors_like_pandas_l5o7z(case: str) -> None:
+    run = _CT_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

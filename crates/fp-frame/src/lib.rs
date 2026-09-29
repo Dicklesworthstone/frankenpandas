@@ -62719,6 +62719,16 @@ pub fn to_datetime_values_with_options(
         } else {
             None
         };
+    // The format the lock stands for, as pandas' mismatch error names it
+    // (it said "the format of the first value"), and the first value it was
+    // read from.
+    let lock_first = shape_lock
+        .as_ref()
+        .and_then(|_| first_datetime_string(values));
+    let lock_format = lock_first.and_then(|first| {
+        iso_format_guess(first)
+            .or_else(|| guess_day_month_format(first, options.dayfirst).map(|guess| guess.format))
+    });
     let mut converted = Vec::with_capacity(values.len());
 
     for (position, val) in values.iter().enumerate() {
@@ -62732,8 +62742,33 @@ pub fn to_datetime_values_with_options(
                 .as_deref()
                 .is_some_and(|lock| !datetime_shape_matches(text, lock))
         {
+            // A value the format reads a start of: pandas' "unconverted data
+            // remains" (the first value's length is the format's for the
+            // fixed-width forms it guesses).
+            let remainder = lock_format
+                .as_ref()
+                .zip(lock_first)
+                .and_then(|(format, first)| {
+                    (text.len() > first.len()
+                        && text.is_char_boundary(first.len())
+                        && shape_lock
+                            .as_deref()
+                            .is_some_and(|lock| datetime_shape_matches(&text[..first.len()], lock)))
+                    .then(|| (format, &text[first.len()..]))
+                });
+            let head = match (remainder, lock_format.as_ref()) {
+                (Some((format, rest)), _) => format!(
+                    "unconverted data remains when parsing with format \"{format}\": \"{rest}\""
+                ),
+                (None, Some(format)) => {
+                    format!("time data \"{text}\" doesn't match format \"{format}\"")
+                }
+                (None, None) => {
+                    format!("time data \"{text}\" doesn't match the format of the first value")
+                }
+            };
             return Err(FrameError::CompatibilityRejected(format!(
-                "time data \"{text}\" doesn't match the format of the first value, at position {position}. You might want to try:\n    - passing `format` if your strings have a consistent format;\n    - passing `format='ISO8601'` if your strings are all ISO8601 but not necessarily in exactly the same format;\n    - passing `format='mixed'`, and the format will be inferred for each element individually. You might want to use `dayfirst` alongside this."
+                "{head}, at position {position}. You might want to try:\n    - passing `format` if your strings have a consistent format;\n    - passing `format='ISO8601'` if your strings are all ISO8601 but not necessarily in exactly the same format;\n    - passing `format='mixed'`, and the format will be inferred for each element individually. You might want to use `dayfirst` alongside this."
             )));
         }
         let result = if let Some(unit) = parsed_unit {
@@ -63925,6 +63960,85 @@ fn datetime_shape_matches(value: &str, lock: &str) -> bool {
         index += 1;
     });
     matches && index == lock.len()
+}
+
+/// pandas' `guess_datetime_format` of a year-first (ISO-like) string, as its
+/// mismatch error names it: `%Y-%m-%d` (with the text's `-`, `/` or `.`),
+/// then a `T` or a space, as much of `%H:%M:%S.%f` as the text carries and a
+/// `%z` for a zone suffix (`Z`, `+01:00`, `-0500`). None for any other
+/// shape.
+fn iso_format_guess(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let digits = |from: usize, to: usize| {
+        bytes
+            .get(from..to)
+            .is_some_and(|part| part.iter().all(u8::is_ascii_digit))
+    };
+    let sep = *bytes.get(4)?;
+    if !digits(0, 4)
+        || !matches!(sep, b'-' | b'/' | b'.')
+        || bytes.get(7) != Some(&sep)
+        || !digits(5, 7)
+        || !digits(8, 10)
+    {
+        return None;
+    }
+    let sep = char::from(sep);
+    let mut format = format!("%Y{sep}%m{sep}%d");
+    let rest = &bytes[10..];
+    let Some((&time_sep, time)) = rest.split_first() else {
+        return Some(format);
+    };
+    if !matches!(time_sep, b'T' | b' ') {
+        return None;
+    }
+    let two = |at: usize| {
+        time.get(at..at + 2)
+            .is_some_and(|part| part.iter().all(u8::is_ascii_digit))
+    };
+    if !two(0) {
+        return None;
+    }
+    format.push(char::from(time_sep));
+    format.push_str("%H");
+    let mut at = 2;
+    for piece in ["%M", "%S"] {
+        if at == time.len() || matches!(time[at], b'Z' | b'+' | b'-') {
+            break;
+        }
+        if time[at] != b':' || !two(at + 1) {
+            return None;
+        }
+        format.push(':');
+        format.push_str(piece);
+        at += 3;
+    }
+    if time.get(at) == Some(&b'.') {
+        let digits = time[at + 1..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        if digits == 0 {
+            return None;
+        }
+        format.push_str(".%f");
+        at += 1 + digits;
+    }
+    let zone = &time[at..];
+    let offset = |part: &[u8]| {
+        matches!(part.len(), 5 | 6)
+            && matches!(part[0], b'+' | b'-')
+            && part[1..].iter().enumerate().all(|(i, byte)| {
+                byte.is_ascii_digit() || (part.len() == 6 && i == 2 && *byte == b':')
+            })
+    };
+    if zone.is_empty() {
+        Some(format)
+    } else if zone == b"Z" || offset(zone) {
+        Some(format + "%z")
+    } else {
+        None
+    }
 }
 
 /// The one shape a whole string column is parsed under, or `None` for no lock.
