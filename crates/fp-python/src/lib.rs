@@ -69577,7 +69577,77 @@ fn date_range(
     Ok(PyDatetimeIndex { inner: dti })
 }
 
-/// Detect missing values for an array-like object or scalar (pandas `isna`).
+/// Whether one value is missing as pandas' `isna` reads a scalar: None, NA,
+/// NaT (a Timestamp / Timedelta / Period NaT, numpy's datetime64 /
+/// timedelta64 NaT), a NaN number (a numpy float or a Decimal too).
+fn py_scalar_is_missing(item: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if item.is_none() || item.is_instance_of::<PyNAType>() || item.is_instance_of::<PyNaTType>() {
+        return Ok(true);
+    }
+    if let Ok(ts) = item.extract::<PyRef<'_, PyTimestamp>>() {
+        return Ok(ts.inner.is_nat());
+    }
+    if let Ok(td) = item.extract::<PyRef<'_, PyTimedelta>>() {
+        return Ok(td.nanos == Timedelta::NAT);
+    }
+    if let Ok(p) = item.extract::<PyRef<'_, PyPeriod>>() {
+        return Ok(p.inner.ordinal() == i64::MIN);
+    }
+    let type_name = item.get_type().name()?;
+    if matches!(type_name.to_str()?, "datetime64" | "timedelta64") {
+        return item
+            .py()
+            .import("numpy")?
+            .call_method1("isnat", (item,))?
+            .is_truthy();
+    }
+    if item.is_instance_of::<pyo3::types::PyString>()
+        || item.is_instance_of::<pyo3::types::PyBytes>()
+    {
+        return Ok(false);
+    }
+    Ok(item.extract::<f64>().is_ok_and(f64::is_nan))
+}
+
+/// pandas' `isna` of an array: a list read as numpy's object array of it,
+/// an ndarray by its kind - NaN floats, NaT datetimes / timedeltas, each
+/// object cell as [`py_scalar_is_missing`], nothing else - a bool ndarray
+/// of its shape. A list answered a list, a nested one read its rows as
+/// scalars, an ndarray the scalar False (br-frankenpandas-ab19z).
+fn array_isna<'py>(py: Python<'py>, obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let np = py.import("numpy")?;
+    let array = if obj.is_instance_of::<PyList>() {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", "object")?;
+        np.call_method("asarray", (obj,), Some(&kwargs))?
+    } else {
+        obj.clone()
+    };
+    let kind: String = array.getattr("dtype")?.getattr("kind")?.extract()?;
+    match kind.as_str() {
+        "f" | "c" => np.call_method1("isnan", (&array,)),
+        "M" | "m" => np.call_method1("isnat", (&array,)),
+        "O" => {
+            let mut mask = Vec::new();
+            for item in array.getattr("flat")?.try_iter()? {
+                mask.push(py_scalar_is_missing(&item?)?);
+            }
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("dtype", "bool")?;
+            np.call_method("array", (mask,), Some(&kwargs))?
+                .call_method1("reshape", (array.getattr("shape")?,))
+        }
+        _ => {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("dtype", "bool")?;
+            np.call_method("zeros", (array.getattr("shape")?,), Some(&kwargs))
+        }
+    }
+}
+
+/// Detect missing values for an array-like object or scalar (pandas `isna`):
+/// a DataFrame / Series its own kind, an index or array a bool ndarray, a
+/// scalar a bool.
 #[pyfunction]
 fn isna(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     if let Ok(df) = obj.extract::<PyRef<'_, PyDataFrame>>() {
@@ -69588,16 +69658,24 @@ fn isna(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let res = s.isna()?;
         return Ok(Py::new(py, res)?.into_any());
     }
-    if let Ok(idx) = plain_index_ref(obj) {
-        return Ok(idx.isna().into_pyobject(py)?.unbind());
+    if obj.extract::<PyRef<'_, PyMultiIndex>>().is_ok() {
+        return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "isna is not defined for MultiIndex",
+        ));
     }
+    let as_array = |mask: Vec<bool>| -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", "bool")?;
+        Ok(py
+            .import("numpy")?
+            .call_method("array", (mask,), Some(&kwargs))?
+            .unbind())
+    };
     if let Ok(dti) = obj.extract::<PyRef<'_, PyDatetimeIndex>>() {
-        let mask = dti.isna();
-        return Ok(PyList::new(py, mask)?.into_any().unbind());
+        return as_array(dti.isna());
     }
     if let Ok(tdi) = obj.extract::<PyRef<'_, PyTimedeltaIndex>>() {
-        let mask = tdi.isna();
-        return Ok(PyList::new(py, mask)?.into_any().unbind());
+        return as_array(tdi.isna());
     }
     if let Ok(pi) = obj.extract::<PyRef<'_, PyPeriodIndex>>() {
         let mask: Vec<bool> = (0..pi.inner.len())
@@ -69608,66 +69686,25 @@ fn isna(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
                     .is_some_and(|p| p.ordinal() == i64::MIN)
             })
             .collect();
-        return Ok(PyList::new(py, mask)?.into_any().unbind());
+        return as_array(mask);
     }
     if let Ok(ci) = obj.extract::<PyRef<'_, PyCategoricalIndex>>() {
-        let codes = ci.inner.codes();
-        let mask: Vec<bool> = codes.iter().map(Option::is_none).collect();
-        return Ok(PyList::new(py, mask)?.into_any().unbind());
+        return as_array(ci.inner.codes().iter().map(Option::is_none).collect());
     }
-    if let Ok(list) = obj.cast::<PyList>() {
-        let mut out = Vec::with_capacity(list.len());
-        for item in list.iter() {
-            if item.is_none()
-                || item.is_instance_of::<PyNAType>()
-                || item.is_instance_of::<PyNaTType>()
-            {
-                out.push(true);
-            } else if let Ok(ts) = item.extract::<PyRef<'_, PyTimestamp>>() {
-                out.push(ts.inner.is_nat());
-            } else if let Ok(td) = item.extract::<PyRef<'_, PyTimedelta>>() {
-                out.push(td.nanos == Timedelta::NAT);
-            } else if let Ok(p) = item.extract::<PyRef<'_, PyPeriod>>() {
-                out.push(p.inner.ordinal() == i64::MIN);
-            } else if let Ok(f) = item.extract::<f64>() {
-                out.push(f.is_nan());
-            } else {
-                out.push(false);
-            }
-        }
-        return Ok(PyList::new(py, out)?.into_any().unbind());
-    }
-    if obj.is_none() || obj.is_instance_of::<PyNAType>() || obj.is_instance_of::<PyNaTType>() {
-        return Ok(pyo3::types::PyBool::new(py, true)
-            .to_owned()
-            .into_any()
+    // Any other index (a plain, range or interval one) by its own isna.
+    if obj.extract::<PyRef<'_, PyIndex>>().is_ok() {
+        let mask = obj.call_method0("isna")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", "bool")?;
+        return Ok(py
+            .import("numpy")?
+            .call_method("asarray", (mask,), Some(&kwargs))?
             .unbind());
     }
-    if let Ok(ts) = obj.extract::<PyRef<'_, PyTimestamp>>() {
-        return Ok(pyo3::types::PyBool::new(py, ts.inner.is_nat())
-            .to_owned()
-            .into_any()
-            .unbind());
+    if obj.is_instance_of::<PyList>() || obj.get_type().name()?.to_str()? == "ndarray" {
+        return Ok(array_isna(py, obj)?.unbind());
     }
-    if let Ok(td) = obj.extract::<PyRef<'_, PyTimedelta>>() {
-        return Ok(pyo3::types::PyBool::new(py, td.nanos == Timedelta::NAT)
-            .to_owned()
-            .into_any()
-            .unbind());
-    }
-    if let Ok(p) = obj.extract::<PyRef<'_, PyPeriod>>() {
-        return Ok(pyo3::types::PyBool::new(py, p.inner.ordinal() == i64::MIN)
-            .to_owned()
-            .into_any()
-            .unbind());
-    }
-    if let Ok(f) = obj.extract::<f64>() {
-        return Ok(pyo3::types::PyBool::new(py, f.is_nan())
-            .to_owned()
-            .into_any()
-            .unbind());
-    }
-    Ok(pyo3::types::PyBool::new(py, false)
+    Ok(pyo3::types::PyBool::new(py, py_scalar_is_missing(obj)?)
         .to_owned()
         .into_any()
         .unbind())
@@ -69679,22 +69716,27 @@ fn isnull(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     isna(py, obj)
 }
 
-/// Detect non-missing values for an array-like object or scalar (pandas `notna`).
+/// Detect non-missing values for an array-like object or scalar (pandas
+/// `notna`): [`isna`] inverted. A Series / DataFrame is its own notna - the
+/// notna of its isna mask was all True (ab19z).
 #[pyfunction]
 fn notna(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-    let isna_val = isna(py, obj)?;
-    let bound = isna_val.bind(py);
-    if let Ok(df) = bound.extract::<PyRef<'_, PyDataFrame>>() {
+    if let Ok(df) = obj.extract::<PyRef<'_, PyDataFrame>>() {
         let inv = df.notna()?;
         return Ok(Py::new(py, inv)?.into_any());
     }
-    if let Ok(s) = bound.extract::<PyRef<'_, PySeries>>() {
+    if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
         let inv = s.notna()?;
         return Ok(Py::new(py, inv)?.into_any());
     }
-    if let Ok(list) = bound.extract::<Vec<bool>>() {
-        let inv: Vec<bool> = list.into_iter().map(|b| !b).collect();
-        return Ok(PyList::new(py, inv)?.into_any().unbind());
+    let isna_val = isna(py, obj)?;
+    let bound = isna_val.bind(py);
+    // An index's or array's mask: its bool ndarray inverted.
+    if bound.get_type().name()?.to_str()? == "ndarray" {
+        return Ok(py
+            .import("numpy")?
+            .call_method1("logical_not", (bound,))?
+            .unbind());
     }
     if let Ok(b) = bound.extract::<bool>() {
         return Ok(pyo3::types::PyBool::new(py, !b)
@@ -79497,6 +79539,74 @@ impl PyFlags {
     }
 }
 
+/// pandas' merge_asof `tolerance` checked against the left key's `dtype`
+/// (`_AsOfMerge._validate_tolerance`), as fp-join takes it: a datetime /
+/// timedelta key takes a Timedelta or `datetime.timedelta` (its
+/// nanoseconds), an integer key an integer, a float key a number; any other
+/// is pandas' MergeError "incompatible tolerance ...", a negative one
+/// "tolerance must be positive". A Timedelta was a TypeError ('must be real
+/// number'; br-frankenpandas-0u4h4).
+#[allow(clippy::cast_precision_loss)] // fp-join compares distances as f64
+fn merge_asof_tolerance(
+    key: &DType,
+    tolerance: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<f64>> {
+    let Some(tolerance) = tolerance.filter(|tolerance| !tolerance.is_none()) else {
+        return Ok(None);
+    };
+    let integer = !tolerance.is_instance_of::<pyo3::types::PyBool>()
+        && tolerance.hasattr("__index__")?
+        && !tolerance.is_instance_of::<pyo3::types::PyFloat>();
+    let (shown, value) = match key {
+        DType::Datetime64 { .. } | DType::Timedelta64 => {
+            let nanos = if let Ok(td) = tolerance.extract::<PyRef<'_, PyTimedelta>>() {
+                Some(td.nanos)
+            } else if let Ok(delta) = tolerance.cast::<PyDelta>() {
+                Some(py_delta_nanos(delta)?)
+            } else {
+                None
+            };
+            let dtype = if *key == DType::Timedelta64 {
+                "dtype('<m8[ns]')"
+            } else {
+                "dtype('<M8[ns]')"
+            };
+            (dtype, nanos.map(|nanos| nanos as f64))
+        }
+        DType::Int64 | DType::Int64Nullable => (
+            "dtype('int64')",
+            if integer {
+                Some(tolerance.extract::<i64>()? as f64)
+            } else {
+                None
+            },
+        ),
+        DType::Float64 | DType::Float64Nullable => (
+            "dtype('float64')",
+            if integer || tolerance.is_instance_of::<pyo3::types::PyFloat>() {
+                Some(tolerance.extract::<f64>()?)
+            } else {
+                None
+            },
+        ),
+        _ => {
+            return Err(MergeError::new_err(
+                "key must be integer, timestamp or float",
+            ));
+        }
+    };
+    let Some(value) = value else {
+        return Err(MergeError::new_err(format!(
+            "incompatible tolerance {}, must be compat with type {shown}",
+            tolerance.str()?
+        )));
+    };
+    if value < 0.0 {
+        return Err(MergeError::new_err("tolerance must be positive"));
+    }
+    Ok(Some(value))
+}
+
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (
@@ -79527,7 +79637,7 @@ fn merge_asof(
     left_by: Option<&Bound<'_, PyAny>>,
     right_by: Option<&Bound<'_, PyAny>>,
     suffixes: Option<(&str, &str)>,
-    tolerance: Option<f64>,
+    tolerance: Option<&Bound<'_, PyAny>>,
     allow_exact_matches: bool,
     direction: &str,
 ) -> PyResult<PyDataFrame> {
@@ -79604,7 +79714,10 @@ fn merge_asof(
 
     let mut opts = fp_join::MergeAsofOptions::new();
     opts.allow_exact_matches = allow_exact_matches;
-    opts.tolerance = tolerance;
+    opts.tolerance = match left.inner.column(on_col) {
+        Some(key) => merge_asof_tolerance(&key.dtype(), tolerance)?,
+        None => None,
+    };
 
     let by_target = by.or(left_by).or(right_by);
     if let Some(by_val) = by_target {

@@ -21842,3 +21842,92 @@ _E86_CASES = {
 def test_everyday86_to_dict_repeated_index_like_pandas_kd16w(case: str) -> None:
     run = _E86_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-0u4h4: merge_asof(tolerance=pd.Timedelta(...)) on
+# datetime keys was a TypeError; pandas' tolerance type checks.
+def _e87_asof(m: Any, tolerance: Any, *, kind: str = "datetime", direction: str = "backward") -> list:
+    if kind == "datetime":
+        left = m.DataFrame({"t": m.to_datetime(["2024-01-01 10:00", "2024-01-01 10:05", "2024-01-01 10:10"]), "x": [1, 2, 3]})
+        right = m.DataFrame({"t": m.to_datetime(["2024-01-01 09:59", "2024-01-01 10:06"]), "y": [10, 20]})
+    else:
+        cast = float if kind == "float" else int
+        left = m.DataFrame({"t": [cast(1), cast(5), cast(10)], "x": [1, 2, 3]})
+        right = m.DataFrame({"t": [cast(2), cast(6)], "y": [10, 20]})
+    return m.merge_asof(left, right, on="t", tolerance=tolerance, direction=direction)["y"].tolist()
+
+
+_E87_CASES = {
+    "timedelta backward": lambda m: _e87_asof(m, m.Timedelta("2min")),
+    "timedelta forward": lambda m: _e87_asof(m, m.Timedelta("2min"), direction="forward"),
+    "timedelta nearest": lambda m: _e87_asof(m, m.Timedelta("1min"), direction="nearest"),
+    "datetime.timedelta": lambda m: _e87_asof(m, datetime.timedelta(minutes=10)),
+    "zero timedelta": lambda m: _e87_asof(m, m.Timedelta(0)),
+    "int on datetime keys": lambda m: _e87_asof(m, 5),
+    "text on datetime keys": lambda m: _e87_asof(m, "2min"),
+    "numpy timedelta64": lambda m: _e87_asof(m, np.timedelta64(2, "m")),
+    "negative timedelta": lambda m: _e87_asof(m, m.Timedelta("-1min")),
+    "timedelta on int keys": lambda m: _e87_asof(m, m.Timedelta("1min"), kind="int"),
+    "float on int keys": lambda m: _e87_asof(m, 1.5, kind="int"),
+    "bool on int keys": lambda m: _e87_asof(m, True, kind="int"),
+    "negative int": lambda m: _e87_asof(m, -1, kind="int"),
+    # Negatives: already pandas'.
+    "int on float keys": lambda m: _e87_asof(m, 1, kind="float"),
+    "numpy int on int keys": lambda m: _e87_asof(m, np.int64(4), kind="int"),
+    "float on float keys": lambda m: _e87_asof(m, 1.5, kind="float"),
+    "no tolerance": lambda m: _e87_asof(m, None),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E87_CASES))
+def test_everyday87_merge_asof_tolerance_like_pandas_0u4h4(case: str) -> None:
+    run = _E87_CASES[case]
+    # By class name: pandas' MergeError is pandas.errors', ours
+    # frankenpandas.errors'.
+    assert _mv_outcome(lambda: run(fpd)) == _mv_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-ab19z: pd.isna / pd.notna of an ndarray answered the
+# scalar False, of a list a list, and notna of a Series all True.
+def _e88_shown(out: Any) -> list:
+    if isinstance(out, np.ndarray):
+        return ["ndarray", str(out.dtype), out.shape, out.tolist()]
+    if hasattr(out, "values") and hasattr(out, "dtypes"):
+        return [type(out).__name__, out.values.tolist()]
+    return [out]
+
+
+_E88_CASES = {
+    **{
+        f"{name} {form}": (lambda fn, make: lambda m: _e88_shown(getattr(m, fn)(make(m))))(fn, make)
+        for name, fn in [("isna", "isna"), ("notna", "notna")]
+        for form, make in {
+            "list": lambda m: [1, None, float("nan"), "x"],
+            "nested list": lambda m: [[1, None], [np.nan, 2]],
+            "empty list": lambda m: [],
+            "float ndarray": lambda m: np.array([1.0, np.nan]),
+            "int ndarray": lambda m: np.array([1, 2]),
+            "object ndarray": lambda m: np.array([1, None, "x"], dtype=object),
+            "2d ndarray": lambda m: np.array([[1.0, np.nan], [np.nan, 2.0]]),
+            "datetime64 ndarray": lambda m: np.array(["2024-01-01", "NaT"], dtype="datetime64[ns]"),
+            "numpy NaT": lambda m: np.datetime64("NaT"),
+            "list of timestamps": lambda m: [m.Timestamp("2024-01-01"), m.NaT, None],
+            "DatetimeIndex": lambda m: m.DatetimeIndex(["2024-01-01", None]),
+            "MultiIndex": lambda m: m.MultiIndex.from_tuples([("a", 1)]),
+            "Series": lambda m: m.Series([1, None]),
+            "DataFrame": lambda m: m.DataFrame({"a": [1, None]}),
+        }.items()
+    },
+    # Negatives: already pandas' (isna of a Series / DataFrame above too).
+    "isna scalar": lambda m: _e88_shown(m.isna(None)),
+    "isna text": lambda m: _e88_shown(m.isna("x")),
+    "isna tuple": lambda m: _e88_shown(m.isna((1, None))),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E88_CASES))
+def test_everyday88_isna_notna_arrays_like_pandas_ab19z(case: str) -> None:
+    run = _E88_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
