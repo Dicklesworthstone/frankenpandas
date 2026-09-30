@@ -18536,6 +18536,72 @@ impl Column {
         ))
     }
 
+    /// `self <op> scalar` (`scalar <op> self` when `scalar_left`) without the
+    /// scalar's broadcast column (br-frankenpandas-pnxo5): for an all-valid
+    /// Float64 column and a non-NaN number, + - * /, the column
+    /// [`Self::aligned_binary_f64_same_positions`] makes of `self` and that
+    /// broadcast; for an all-valid Int64 column and an Int64 scalar, + - *,
+    /// the wrapping column [`Self::binary_numeric`] makes. None for anything
+    /// else (an input NaN included) - the caller broadcasts.
+    #[must_use]
+    pub fn binary_scalar(
+        &self,
+        scalar: &Scalar,
+        op: ArithmeticOp,
+        scalar_left: bool,
+    ) -> Option<Self> {
+        match (&self.dtype, scalar) {
+            (DType::Float64, Scalar::Float64(_) | Scalar::Int64(_)) => {
+                let data = self.as_f64_slice()?;
+                let s = scalar.to_f64().ok().filter(|s| !s.is_nan())?;
+                let mut output_nan = false;
+                // One monomorphic loop per op (a fn pointer per element does
+                // not vectorize), the NaN witness folded into the sweep.
+                macro_rules! sweep {
+                    ($apply:expr) => {
+                        data.iter()
+                            .map(|&v| {
+                                let r: f64 = $apply(v);
+                                output_nan |= r.is_nan();
+                                r
+                            })
+                            .collect::<Vec<f64>>()
+                    };
+                }
+                let out = match (op, scalar_left) {
+                    (ArithmeticOp::Add, _) => sweep!(|v| v + s),
+                    (ArithmeticOp::Sub, false) => sweep!(|v| v - s),
+                    (ArithmeticOp::Sub, true) => sweep!(|v| s - v),
+                    (ArithmeticOp::Mul, _) => sweep!(|v| v * s),
+                    (ArithmeticOp::Div, false) => sweep!(|v| v / s),
+                    (ArithmeticOp::Div, true) => sweep!(|v| s / v),
+                    _ => return None,
+                };
+                if !output_nan {
+                    return Some(Self::from_f64_all_valid_with_finite_opt(out, None));
+                }
+                // + - * / propagate NaN, so only a NaN output can hide a NaN
+                // input, which the same-positions path sends to its Scalar arm.
+                if data.iter().any(|v| v.is_nan()) {
+                    return None;
+                }
+                Some(Self::from_f64_values(out))
+            }
+            (DType::Int64, Scalar::Int64(s)) => {
+                let (data, s) = (self.as_i64_slice()?, *s);
+                let out: Vec<i64> = match (op, scalar_left) {
+                    (ArithmeticOp::Add, _) => data.iter().map(|&v| v.wrapping_add(s)).collect(),
+                    (ArithmeticOp::Sub, false) => data.iter().map(|&v| v.wrapping_sub(s)).collect(),
+                    (ArithmeticOp::Sub, true) => data.iter().map(|&v| s.wrapping_sub(v)).collect(),
+                    (ArithmeticOp::Mul, _) => data.iter().map(|&v| v.wrapping_mul(s)).collect(),
+                    _ => return None,
+                };
+                Some(Self::from_i64_values_owned(out))
+            }
+            _ => None,
+        }
+    }
+
     /// Same-index Float64 arithmetic fast path.
     ///
     /// Isomorphic to calling [`Self::aligned_binary_f64`] with
@@ -38363,6 +38429,88 @@ mod tests {
             &actual.values,
             ScalarValues::LazyAllValidFloat64Vec { values, .. } if values.get().is_none()
         ));
+    }
+
+    #[test]
+    fn binary_scalar_matches_the_broadcast_operand_pnxo5() {
+        // br-frankenpandas-pnxo5: `column <op> scalar` without the scalar's
+        // broadcast column is the column the typed kernels make with it, both
+        // sides of the op, a generated NaN (inf - inf, 0 / 0) and i64 wrap
+        // included; declined where the broadcast path must answer.
+        let bits = |column: &Column| -> Vec<(Option<u64>, bool)> {
+            (0..column.len())
+                .map(|i| {
+                    let value = match &column.values()[i] {
+                        Scalar::Float64(v) => Some(v.to_bits()),
+                        Scalar::Int64(v) => Some(*v as u64),
+                        _ => None,
+                    };
+                    (value, column.validity().get(i))
+                })
+                .collect()
+        };
+        let floats = Column::from_f64_values(vec![1.5, -0.0, 0.0, f64::INFINITY, -2.0]);
+        for s in [2.0, 0.0, -0.0, f64::INFINITY, 3.0] {
+            let broadcast = Column::from_f64_values(vec![s; floats.len()]);
+            for op in [
+                ArithmeticOp::Add,
+                ArithmeticOp::Sub,
+                ArithmeticOp::Mul,
+                ArithmeticOp::Div,
+            ] {
+                let ours = floats
+                    .binary_scalar(&Scalar::Float64(s), op, false)
+                    .unwrap();
+                let theirs = floats
+                    .aligned_binary_f64_same_positions(&broadcast, op)
+                    .unwrap();
+                assert_eq!(ours.dtype(), theirs.dtype());
+                assert_eq!(bits(&ours), bits(&theirs), "{op:?} {s}");
+                let ours = floats.binary_scalar(&Scalar::Float64(s), op, true).unwrap();
+                let theirs = broadcast
+                    .aligned_binary_f64_same_positions(&floats, op)
+                    .unwrap();
+                assert_eq!(bits(&ours), bits(&theirs), "reflected {op:?} {s}");
+            }
+        }
+        let ints = Column::from_i64_values(vec![3, -7, i64::MAX, i64::MIN, 0]);
+        for s in [2, -1, i64::MAX] {
+            let broadcast = Column::from_i64_values(vec![s; ints.len()]);
+            for op in [ArithmeticOp::Add, ArithmeticOp::Sub, ArithmeticOp::Mul] {
+                let ours = ints.binary_scalar(&Scalar::Int64(s), op, false).unwrap();
+                let theirs = ints.binary_numeric(&broadcast, op).unwrap();
+                assert_eq!(ours.dtype(), theirs.dtype());
+                assert_eq!(bits(&ours), bits(&theirs), "{op:?} {s}");
+                let ours = ints.binary_scalar(&Scalar::Int64(s), op, true).unwrap();
+                let theirs = broadcast.binary_numeric(&ints, op).unwrap();
+                assert_eq!(bits(&ours), bits(&theirs), "reflected {op:?} {s}");
+            }
+        }
+        // Negatives: the broadcast path answers these.
+        assert!(
+            floats
+                .binary_scalar(&Scalar::Float64(f64::NAN), ArithmeticOp::Add, false)
+                .is_none()
+        );
+        assert!(
+            floats
+                .binary_scalar(&Scalar::Float64(2.0), ArithmeticOp::Pow, false)
+                .is_none()
+        );
+        assert!(
+            ints.binary_scalar(&Scalar::Int64(2), ArithmeticOp::Div, false)
+                .is_none()
+        );
+        assert!(
+            ints.binary_scalar(&Scalar::Float64(2.0), ArithmeticOp::Add, false)
+                .is_none()
+        );
+        let gapped = Column::from_f64_values(vec![1.0, f64::NAN]);
+        assert!(
+            gapped
+                .binary_scalar(&Scalar::Float64(2.0), ArithmeticOp::Add, false)
+                .is_none()
+        );
     }
 
     #[test]

@@ -22929,6 +22929,60 @@ fn series_operand(py: Python<'_>, other: &Bound<'_, PyAny>, like: &Series) -> Py
     Series::new(like.name(), like.index().clone(), column).map_err(frame_error_to_py)
 }
 
+/// The number a plain Python int / float `other` is to an op over `like`'s
+/// Float64 or Int64 values, as [`series_operand`] broadcasts it (an int
+/// against floats is that float); None for any other operand or column - a
+/// numpy scalar, a bool, an int past i64, a float against ints.
+fn plain_number_operand(like: &Series, other: &Bound<'_, PyAny>) -> Option<Scalar> {
+    let dtype = like.column().dtype();
+    let float_values = dtype == DType::Float64;
+    if !float_values && dtype != DType::Int64 {
+        return None;
+    }
+    if other.is_exact_instance_of::<pyo3::types::PyFloat>() && float_values {
+        return other.extract::<f64>().ok().map(Scalar::Float64);
+    }
+    if other.is_exact_instance_of::<pyo3::types::PyInt>() {
+        let value = other.extract::<i64>().ok()?;
+        return Some(if float_values {
+            Scalar::Float64(value as f64)
+        } else {
+            Scalar::Int64(value)
+        });
+    }
+    None
+}
+
+/// `like <op> other` (`other <op> like` when `scalar_left`) for a plain
+/// number `other` (see [`plain_number_operand`]) through the typed scalar
+/// kernel: the Series the broadcast operand gives, without building that
+/// 8 MB operand (br-frankenpandas-pnxo5). None when the kernel declines.
+fn scalar_arith(
+    like: &Series,
+    other: &Bound<'_, PyAny>,
+    op: ArithmeticOp,
+    scalar_left: bool,
+) -> Option<Series> {
+    let scalar = plain_number_operand(like, other)?;
+    let column = like.column().binary_scalar(&scalar, op, scalar_left)?;
+    Series::new(like.name(), like.index().clone(), column).ok()
+}
+
+/// `like <op> other` for a plain number `other` against unwidened Float64
+/// or Int64 values, through the typed compare_scalar kernel: the answer the
+/// broadcast operand gives, without it (br-frankenpandas-pnxo5).
+fn scalar_comparison(
+    like: &Series,
+    other: &Bound<'_, PyAny>,
+    op: ComparisonOp,
+) -> Option<PyResult<PySeries>> {
+    if like.column().width().is_some() {
+        return None;
+    }
+    let scalar = plain_number_operand(like, other)?;
+    Some(wrap_series(like.compare_scalar(&scalar, op)))
+}
+
 /// A comparison operand against a column of `dtype`: a string compared with
 /// a datetime/timedelta column is the Timestamp/Timedelta it names, as pandas
 /// parses it (`s > '2020-01-02'` compared str with datetime and raised;
@@ -26273,6 +26327,12 @@ impl PySeries {
             .filter(|f| !f.is_none())
             .map(|f| py_to_scalar(py, f))
             .transpose()?;
+        // A plain number broadcasts over this Series' own rows, so the
+        // operator itself answers - its operand column was built here only
+        // to be found aligned (br-frankenpandas-pnxo5).
+        if fill.is_none() && plain_number_operand(&self.inner, other).is_some() {
+            return op(self, py, other);
+        }
         let rhs = series_operand(py, other, &self.inner)?;
         // A broadcast operand shares this Series' index, which `==` answers
         // without a label compare (the labels of a million-row RangeIndex
@@ -27514,6 +27574,9 @@ impl PySeries {
         if let Some(inner) = shifted_periods(&self.inner, other, 1)? {
             return Ok(PySeries { inner });
         }
+        if let Some(result) = scalar_arith(&self.inner, other, ArithmeticOp::Add, false) {
+            return narrowed_arith(Ok(result), &self.inner, other, false);
+        }
         let rhs = series_operand(py, other, &self.inner)?;
         narrowed_arith(self.inner.add(&rhs), &self.inner, other, false)
     }
@@ -27527,6 +27590,9 @@ impl PySeries {
         }
         if let Some(inner) = shifted_periods(&self.inner, other, 1)? {
             return Ok(PySeries { inner });
+        }
+        if let Some(result) = scalar_arith(&self.inner, other, ArithmeticOp::Add, true) {
+            return narrowed_arith(Ok(result), &self.inner, other, false);
         }
         let lhs = series_operand(py, other, &self.inner)?;
         narrowed_arith(lhs.add(&self.inner), &self.inner, other, false)
@@ -27542,12 +27608,18 @@ impl PySeries {
         if let Some(inner) = shifted_periods(&self.inner, other, -1)? {
             return Ok(PySeries { inner });
         }
+        if let Some(result) = scalar_arith(&self.inner, other, ArithmeticOp::Sub, false) {
+            return narrowed_arith(Ok(result), &self.inner, other, false);
+        }
         let rhs = series_operand(py, other, &self.inner)?;
         narrowed_arith(self.inner.sub(&rhs), &self.inner, other, false)
     }
     fn __rsub__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         if let Some(res) = host_object_arith(py, &self.inner, other, "sub", true)? {
             return Ok(res);
+        }
+        if let Some(result) = scalar_arith(&self.inner, other, ArithmeticOp::Sub, true) {
+            return narrowed_arith(Ok(result), &self.inner, other, false);
         }
         let lhs = series_operand(py, other, &self.inner)?;
         narrowed_arith(lhs.sub(&self.inner), &self.inner, other, false)
@@ -27556,12 +27628,18 @@ impl PySeries {
         if let Some(res) = host_object_arith(py, &self.inner, other, "mul", false)? {
             return Ok(res);
         }
+        if let Some(result) = scalar_arith(&self.inner, other, ArithmeticOp::Mul, false) {
+            return narrowed_arith(Ok(result), &self.inner, other, false);
+        }
         let rhs = series_operand(py, other, &self.inner)?;
         narrowed_arith(self.inner.mul(&rhs), &self.inner, other, false)
     }
     fn __rmul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         if let Some(res) = host_object_arith(py, &self.inner, other, "mul", true)? {
             return Ok(res);
+        }
+        if let Some(result) = scalar_arith(&self.inner, other, ArithmeticOp::Mul, true) {
+            return narrowed_arith(Ok(result), &self.inner, other, false);
         }
         let lhs = series_operand(py, other, &self.inner)?;
         narrowed_arith(lhs.mul(&self.inner), &self.inner, other, false)
@@ -27570,12 +27648,18 @@ impl PySeries {
         if let Some(res) = host_object_arith(py, &self.inner, other, "truediv", false)? {
             return Ok(res);
         }
+        if let Some(result) = scalar_arith(&self.inner, other, ArithmeticOp::Div, false) {
+            return narrowed_arith(Ok(result), &self.inner, other, true);
+        }
         let rhs = series_operand(py, other, &self.inner)?;
         narrowed_arith(self.inner.div(&rhs), &self.inner, other, true)
     }
     fn __rtruediv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         if let Some(res) = host_object_arith(py, &self.inner, other, "truediv", true)? {
             return Ok(res);
+        }
+        if let Some(result) = scalar_arith(&self.inner, other, ArithmeticOp::Div, true) {
+            return narrowed_arith(Ok(result), &self.inner, other, true);
         }
         let lhs = series_operand(py, other, &self.inner)?;
         narrowed_arith(lhs.div(&self.inner), &self.inner, other, true)
@@ -27723,6 +27807,9 @@ impl PySeries {
         {
             return Ok(PySeries { inner });
         }
+        if let Some(result) = scalar_comparison(&self.inner, other, ComparisonOp::Gt) {
+            return result;
+        }
         let rhs = self.ordering_operand(py, other)?;
         masked_string_comparison(&self.inner, wrap_series(self.inner.gt(&rhs)))
     }
@@ -27731,6 +27818,9 @@ impl PySeries {
             period_comparison(&self.inner, other, std::cmp::Ordering::is_ge, false)?
         {
             return Ok(PySeries { inner });
+        }
+        if let Some(result) = scalar_comparison(&self.inner, other, ComparisonOp::Ge) {
+            return result;
         }
         let rhs = self.ordering_operand(py, other)?;
         masked_string_comparison(&self.inner, wrap_series(self.inner.ge(&rhs)))
@@ -27741,6 +27831,9 @@ impl PySeries {
         {
             return Ok(PySeries { inner });
         }
+        if let Some(result) = scalar_comparison(&self.inner, other, ComparisonOp::Lt) {
+            return result;
+        }
         let rhs = self.ordering_operand(py, other)?;
         masked_string_comparison(&self.inner, wrap_series(self.inner.lt(&rhs)))
     }
@@ -27749,6 +27842,9 @@ impl PySeries {
             period_comparison(&self.inner, other, std::cmp::Ordering::is_le, false)?
         {
             return Ok(PySeries { inner });
+        }
+        if let Some(result) = scalar_comparison(&self.inner, other, ComparisonOp::Le) {
+            return result;
         }
         let rhs = self.ordering_operand(py, other)?;
         masked_string_comparison(&self.inner, wrap_series(self.inner.le(&rhs)))
@@ -27759,12 +27855,18 @@ impl PySeries {
         {
             return Ok(PySeries { inner });
         }
+        if let Some(result) = scalar_comparison(&self.inner, other, ComparisonOp::Eq) {
+            return result;
+        }
         masked_string_comparison(&self.inner, self.equality(py, other, true))
     }
     fn __ne__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         if let Some(inner) = period_comparison(&self.inner, other, std::cmp::Ordering::is_ne, true)?
         {
             return Ok(PySeries { inner });
+        }
+        if let Some(result) = scalar_comparison(&self.inner, other, ComparisonOp::Ne) {
+            return result;
         }
         masked_string_comparison(&self.inner, self.equality(py, other, false))
     }

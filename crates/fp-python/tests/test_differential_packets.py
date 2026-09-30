@@ -22849,3 +22849,76 @@ _E106_CASES = {
 def test_everyday106_frame_values_like_pandas_myn6q(case: str) -> None:
     run = _E106_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-pnxo5: a Series op with a plain Python number runs a
+# scalar kernel (an 8 MB operand column was broadcast for it).
+def _e107_shown(s: Any) -> list:
+    return [str(s.dtype), repr(s.name), *s.to_string().split("\n")]
+
+
+def _e107_floats(m: Any) -> Any:
+    return m.Series([1.5, -0.0, 0.0, np.inf, -2.0, np.nan], index=list("abcdef"), name="v")
+
+
+def _e107_ints(m: Any) -> Any:
+    return m.Series([3, -7, 2**63 - 1, -(2**63), 0], name="i")
+
+
+_E107_CASES = {
+    **{
+        f"floats {op}": (lambda op: lambda m: _e107_shown(eval(f"s {op}", {"s": _e107_floats(m)})))(op)
+        for op in ["* 2", "* 2.5", "+ 1", "- 0.5", "/ 2", "/ 0", "/ -0.0", "- float('inf')"]
+    },
+    # Overflow to inf read as values (their scientific-notation to_string is
+    # br-frankenpandas-pjww1).
+    **{
+        f"floats values {op}": (lambda op: lambda m: [repr(v) for v in eval(f"s {op}", {"s": _e107_floats(m)}).tolist()])(
+            op
+        )
+        for op in ["* 1e308", "+ 1e300"]
+    },
+    **{
+        f"reflected {op}": (lambda op: lambda m: _e107_shown(eval(f"{op} s", {"s": _e107_floats(m)})))(op)
+        for op in ["2 *", "1 -", "1 /", "0 /", "3 +"]
+    },
+    **{
+        f"ints {op}": (lambda op: lambda m: _e107_shown(eval(f"s {op}", {"s": _e107_ints(m)})))(op)
+        for op in ["* 2", "+ 1", "- 1", "* -1", "/ 2", "// 2", "% 3", "** 2", "* 0.5"]
+    },
+    **{
+        f"ints reflected {op}": (lambda op: lambda m: _e107_shown(eval(f"{op} s", {"s": _e107_ints(m)})))(op)
+        for op in ["2 *", "10 -", "1 +"]
+    },
+    **{
+        f"compare floats {op}": (lambda op: lambda m: _e107_shown(eval(f"s {op}", {"s": _e107_floats(m), "np": np})))(op)
+        for op in ["> 0.5", ">= 0", "< 1", "<= -0.0", "== 0", "!= 0", "== np.inf", "> float('nan')", "!= float('nan')", "> 1"]
+    },
+    **{
+        f"compare ints {op}": (lambda op: lambda m: _e107_shown(eval(f"s {op}", {"s": _e107_ints(m)})))(op)
+        for op in ["> 0", "== 3", "!= 3", "<= -7", "> 0.5", "== 2**63 - 1"]
+    },
+    "flex mul": lambda m: _e107_shown(_e107_floats(m).mul(2)),
+    "flex rsub": lambda m: _e107_shown(_e107_ints(m).rsub(10)),
+    "flex pow": lambda m: _e107_shown(_e107_floats(m).pow(2)),
+    "flex floordiv": lambda m: _e107_shown(_e107_ints(m).floordiv(2)),
+    "flex add fill_value": lambda m: _e107_shown(_e107_floats(m).add(1, fill_value=0)),
+    "ops after": lambda m: [str((_e107_floats(m) * 2).sum()), str((_e107_ints(m) + 1).isna().tolist())],
+    # Negatives: other operands keep the broadcast path (a float32 Series
+    # against a Python float compares in f64: br-frankenpandas-czode; an int
+    # past int64: br-frankenpandas-p5tih; object numbers: 47dus).
+    "float32 * 2.5": lambda m: _e107_shown(m.Series(np.array([1.5, 2.25], dtype="float32")) * 2.5),
+    "float32 > 0.5": lambda m: _e107_shown(m.Series(np.array([0.25, 0.75], dtype="float32")) > 0.5),
+    "int8 + 1": lambda m: _e107_shown(m.Series(np.array([127, 1], dtype="int8")) + 1),
+    "numpy scalar": lambda m: _e107_shown(_e107_floats(m) * np.float32(2)),
+    "bool operand": lambda m: _e107_shown(_e107_ints(m) + True),
+    "nullable Int64": lambda m: _e107_shown(m.Series([1, None, 3], dtype="Int64") * 2),
+    "bool Series": lambda m: _e107_shown(m.Series([True, False]) * 2),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E107_CASES))
+def test_everyday107_series_scalar_ops_like_pandas_pnxo5(case: str) -> None:
+    run = _E107_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
