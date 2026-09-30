@@ -22375,3 +22375,106 @@ _E96_CASES = {
 def test_everyday96_series_where_mask_like_pandas_qswpf(case: str) -> None:
     run = _E96_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-ygb4e: a nullable Series / column whose where / mask
+# left nothing present turned object; pandas keeps the masked dtype, all NA.
+def _e97_shown(series: Any) -> list:
+    return [str(series.dtype), series.tolist()]
+
+
+def _e97_frame(frame: Any) -> list:
+    return [[str(t) for t in frame.dtypes], frame.to_dict("list")]
+
+
+_E97_CASES = {
+    "Float64 where": lambda m: _e97_shown(m.Series([1.5, None], dtype="Float64").where(m.Series([False, True]))),
+    "Int64 where": lambda m: _e97_shown(m.Series([1, None], dtype="Int64").where(m.Series([False, True]))),
+    "Float64 all NA kept": lambda m: _e97_shown(m.Series([None, None], dtype="Float64").where(m.Series([True, True]))),
+    "boolean where": lambda m: _e97_shown(m.Series([True, None], dtype="boolean").where(m.Series([False, True]))),
+    "Float64 mask": lambda m: _e97_shown(m.Series([1.5, None], dtype="Float64").mask(m.Series([True, False]))),
+    "frame where": lambda m: _e97_frame(
+        m.DataFrame({"a": m.Series([1.5, None], dtype="Float64"), "b": m.Series([1, 2], dtype="Int64")}).where(
+            m.DataFrame({"a": [False, True], "b": [False, False]})
+        )
+    ),
+    "frame mask": lambda m: _e97_frame(
+        m.DataFrame({"a": m.Series([1, None], dtype="Int64")}).mask(m.DataFrame({"a": [True, True]}))
+    ),
+    # Negatives: a present value, and a numpy float column (float64 NaN).
+    "Float64 partial": lambda m: _e97_shown(m.Series([1.5, 2.5], dtype="Float64").where(m.Series([False, True]))),
+    "float64 all NaN": lambda m: _e97_shown(m.Series([1.5, np.nan]).where(m.Series([False, True]))),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E97_CASES))
+def test_everyday97_nullable_all_missing_where_like_pandas_ygb4e(case: str) -> None:
+    run = _E97_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-oie6x: numpy's power reads a missing float as NaN, and
+# NaN ** 0 / 1 ** NaN are 1; fp's kernels kept them missing.
+def _e98_shown(series: Any) -> list:
+    return [str(series.dtype), series.tolist()]
+
+
+def _e98_nan(m: Any) -> Any:
+    return m.Series([np.nan, 2.0, 1.0])
+
+
+_E98_CASES = {
+    "s ** 0": lambda m: _e98_shown(_e98_nan(m) ** 0),
+    "s ** 0.0": lambda m: _e98_shown(_e98_nan(m) ** 0.0),
+    "1 ** s": lambda m: _e98_shown(1 ** _e98_nan(m)),
+    "1.0 ** s": lambda m: _e98_shown(1.0 ** _e98_nan(m)),
+    "s.pow(0)": lambda m: _e98_shown(_e98_nan(m).pow(0)),
+    "s.rpow(1)": lambda m: _e98_shown(_e98_nan(m).rpow(1)),
+    "s ** Series": lambda m: _e98_shown(_e98_nan(m) ** m.Series([0.0, np.nan, np.nan])),
+    "s ** int Series": lambda m: _e98_shown(_e98_nan(m) ** m.Series([0, 3, 5])),
+    "s ** misaligned": lambda m: _e98_shown(m.Series([2.0], index=[0]) ** m.Series([0.0], index=[1])),
+    # (A list around each dict: _e23_outcome iterates the result, and a dict
+    # iterates its keys only.)
+    "df ** 0": lambda m: [(m.DataFrame({"a": [np.nan, 2.0], "b": [1, 2]}) ** 0).to_dict("list")],
+    "float df ** 0": lambda m: [(m.DataFrame({"a": [np.nan, 2.0]}) ** 0).to_dict("list")],
+    "1 ** df": lambda m: [(1 ** m.DataFrame({"a": [np.nan, 2.0]})).to_dict("list")],
+    "df ** df": lambda m: [(m.DataFrame({"a": [np.nan, 1.0]}) ** m.DataFrame({"a": [0.0, np.nan]})).to_dict("list")],
+    "s ** nan": lambda m: _e98_shown(_e98_nan(m) ** np.nan),
+    # Negatives: any other power / op of a missing float stays missing.
+    "s ** 2": lambda m: _e98_shown(_e98_nan(m) ** 2),
+    "s + 1": lambda m: _e98_shown(_e98_nan(m) + 1),
+    "Float64 ** 0": lambda m: _e98_shown(m.Series([None, 2.0], dtype="Float64") ** 0),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E98_CASES))
+def test_everyday98_power_of_missing_float_like_pandas_oie6x(case: str) -> None:
+    run = _E98_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-mhuqn: s1 ** s2 paired two Series by position under the
+# base's labels; pandas aligns them by label, as every other operator.
+def _e99_shown(series: Any) -> list:
+    return [str(series.dtype), list(series.index), series.tolist()]
+
+
+_E99_CASES = {
+    "misaligned": lambda m: _e99_shown(m.Series([2.0, 3.0], index=[0, 1]) ** m.Series([2.0, 0.0], index=[1, 2])),
+    "one row each": lambda m: _e99_shown(m.Series([2.0], index=[0]) ** m.Series([0.0], index=[1])),
+    "ints": lambda m: _e99_shown(m.Series([2, 3], index=[0, 1]) ** m.Series([2, 0], index=[1, 2])),
+    "text labels": lambda m: _e99_shown(m.Series([2.0, 3.0], index=["a", "b"]) ** m.Series([3.0], index=["b"])),
+    "duplicate labels": lambda m: _e99_shown(m.Series([2.0, 3.0], index=[0, 0]) ** m.Series([2.0], index=[0])),
+    # Negatives: the same labels, and bool ** bool's refusal.
+    "same labels": lambda m: _e99_shown(m.Series([2.0, 3.0]) ** m.Series([3.0, 0.5])),
+    "bool ** bool": lambda m: _e99_shown(m.Series([True, False]) ** m.Series([True, True])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E99_CASES))
+def test_everyday99_series_power_aligns_like_pandas_mhuqn(case: str) -> None:
+    run = _E99_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

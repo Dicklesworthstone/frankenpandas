@@ -1994,12 +1994,12 @@ fn vectorized_binary_f64(
     right_validity: &ValidityMask,
     op: ArithmeticOp,
 ) -> (Vec<f64>, ValidityMask) {
-    let combined = left_validity.and_mask(right_validity);
+    let mut combined = left_validity.and_mask(right_validity);
 
     // Zip iterators over contiguous slices — auto-vectorizable by LLVM.
     let apply = binary_f64_apply(op);
 
-    let out: Vec<f64> = left
+    let mut out: Vec<f64> = left
         .iter()
         .zip(right.iter())
         .enumerate()
@@ -2011,6 +2011,32 @@ fn vectorized_binary_f64(
             }
         })
         .collect();
+
+    // A missing float is NaN to numpy's power, which answers NaN ** 0 and
+    // 1 ** NaN with 1 (they were missing; br-frankenpandas-oie6x). Every other
+    // op of a NaN is NaN.
+    if matches!(op, ArithmeticOp::Pow) && !combined.all() {
+        for (i, slot) in out.iter_mut().enumerate() {
+            if combined.get(i) {
+                continue;
+            }
+            let base = if left_validity.get(i) {
+                left[i]
+            } else {
+                f64::NAN
+            };
+            let exponent = if right_validity.get(i) {
+                right[i]
+            } else {
+                f64::NAN
+            };
+            let power = apply(base, exponent);
+            if !power.is_nan() {
+                *slot = power;
+                combined.set(i, true);
+            }
+        }
+    }
 
     (out, combined)
 }
@@ -2284,6 +2310,38 @@ fn apply_f64_slices_nan_tracked_into(
 
 fn unit_range_len(start: i64, end: i64) -> Option<usize> {
     usize::try_from(end.checked_sub(start)?.checked_add(1)?).ok()
+}
+
+/// The position of `label` in the unit range `start..=end` when its value is
+/// present there.
+fn unit_range_slot(valid: &ValidityMask, start: i64, end: i64, label: i64) -> Option<usize> {
+    let at = usize::try_from(label.checked_sub(start)?).ok()?;
+    (label <= end && valid.get(at)).then_some(at)
+}
+
+/// numpy's power over the result slots a unit-range kernel left missing
+/// (`words` clear): a side missing there, or whose range lacks the label, is
+/// NaN, and NaN ** 0 / 1 ** NaN are 1 (they stayed missing;
+/// br-frankenpandas-oie6x). `left` / `right` give a label's present value.
+fn fill_unit_range_pow_identities(
+    data: &mut [f64],
+    words: &mut [u64],
+    union_start: i64,
+    left: impl Fn(i64) -> Option<f64>,
+    right: impl Fn(i64) -> Option<f64>,
+) {
+    for (out_idx, (slot, label)) in data.iter_mut().zip(union_start..).enumerate() {
+        if (words[out_idx / 64] >> (out_idx % 64)) & 1 == 1 {
+            continue;
+        }
+        let power = left(label)
+            .unwrap_or(f64::NAN)
+            .powf(right(label).unwrap_or(f64::NAN));
+        if !power.is_nan() {
+            *slot = power;
+            words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+        }
+    }
 }
 
 // br-frankenpandas-7yiuz. Counts entries into the SLOW arm, in test builds only.
@@ -18191,6 +18249,13 @@ impl Column {
         let rvalid = &right.validity;
 
         let apply = binary_f64_apply(op);
+        let pow = matches!(op, ArithmeticOp::Pow);
+        // A present operand's value, else NaN (missing, or a label its side
+        // lacks).
+        let operand = |slot: Option<usize>, valid: &ValidityMask, src: &[f64]| {
+            slot.filter(|&p| valid.get(p) && !src[p].is_nan())
+                .map_or(f64::NAN, |p| src[p])
+        };
 
         let mut data = Vec::with_capacity(out_len);
         let mut words = vec![0_u64; out_len.div_ceil(64)];
@@ -18211,8 +18276,24 @@ impl Column {
                     words[k / 64] |= 1_u64 << (k % 64);
                 }
             } else {
-                data.push(0.0);
-                all_valid = false;
+                // A missing float is NaN to numpy's power, which answers
+                // NaN ** 0 and 1 ** NaN with 1 (they were missing;
+                // br-frankenpandas-oie6x). Every other op of a NaN is NaN.
+                let power = if pow {
+                    apply(
+                        operand(*left_slot, lvalid, &lsrc[..]),
+                        operand(right_positions.get(k).copied().flatten(), rvalid, &rsrc[..]),
+                    )
+                } else {
+                    f64::NAN
+                };
+                if power.is_nan() {
+                    data.push(0.0);
+                    all_valid = false;
+                } else {
+                    data.push(power);
+                    words[k / 64] |= 1_u64 << (k % 64);
+                }
             }
         }
         if all_valid {
@@ -18309,6 +18390,15 @@ impl Column {
         if all_valid {
             return Ok(Self::from_f64_values(data));
         }
+        if matches!(op, ArithmeticOp::Pow) {
+            fill_unit_range_pow_identities(
+                &mut data,
+                &mut words,
+                union_start,
+                |label| unit_range_slot(&lvalid, left_start, left_end, label).map(|at| lsrc[at]),
+                |label| unit_range_slot(&rvalid, right_start, right_end, label).map(|at| rsrc[at]),
+            );
+        }
         Ok(Self::from_f64_values_with_validity(
             data,
             ValidityMask::from_words(words, out_len),
@@ -18398,6 +18488,19 @@ impl Column {
             }
         }
 
+        if matches!(op, ArithmeticOp::Pow) {
+            fill_unit_range_pow_identities(
+                &mut data,
+                &mut words,
+                union_start,
+                |label| {
+                    unit_range_slot(lvalid, left_start, left_end, label).map(|at| lsrc[at] as f64)
+                },
+                |label| {
+                    unit_range_slot(rvalid, right_start, right_end, label).map(|at| rsrc[at] as f64)
+                },
+            );
+        }
         Ok(Self::from_f64_values_with_validity(
             data,
             ValidityMask::from_words(words, out_len),
@@ -18491,11 +18594,24 @@ impl Column {
         // locked by `aligned_binary_f64_same_positions_matches_general_path`.
         let mut data = vec![0.0_f64; out_len];
         let mut valid_words = vec![0_u64; out_len.div_ceil(64)];
+        let pow = matches!(op, ArithmeticOp::Pow);
         for i in 0..out_len {
-            if lvalid.get(i) && rvalid.get(i) {
+            let (left_valid, right_valid) = (lvalid.get(i), rvalid.get(i));
+            if left_valid && right_valid {
                 let r = apply(lsrc[i], rsrc[i]);
                 data[i] = r;
                 if !r.is_nan() {
+                    valid_words[i / 64] |= 1_u64 << (i % 64);
+                }
+            } else if pow {
+                // A missing float is NaN to numpy's power, which answers
+                // NaN ** 0 and 1 ** NaN with 1 (they were missing;
+                // br-frankenpandas-oie6x). Every other op of a NaN is NaN.
+                let base = if left_valid { lsrc[i] } else { f64::NAN };
+                let exponent = if right_valid { rsrc[i] } else { f64::NAN };
+                let r = apply(base, exponent);
+                if !r.is_nan() {
+                    data[i] = r;
                     valid_words[i / 64] |= 1_u64 << (i % 64);
                 }
             }
@@ -18731,6 +18847,24 @@ impl Column {
             .iter()
             .zip(&right.values)
             .map(|(left, right)| {
+                // A missing float is NaN to numpy's power, which answers
+                // NaN ** 0 and 1 ** NaN with 1 (br-frankenpandas-oie6x).
+                if matches!(op, ArithmeticOp::Pow)
+                    && matches!(out_dtype, DType::Float64)
+                    && (left.is_missing() || right.is_missing())
+                {
+                    let as_f64 = |value: &Scalar| {
+                        if value.is_missing() {
+                            Ok(f64::NAN)
+                        } else {
+                            value.to_f64()
+                        }
+                    };
+                    let power = as_f64(left)?.powf(as_f64(right)?);
+                    if !power.is_nan() {
+                        return Ok(Scalar::Float64(power));
+                    }
+                }
                 if left.is_missing() || right.is_missing() {
                     return Ok::<_, ColumnError>(if left.is_nan() || right.is_nan() {
                         Scalar::Null(NullKind::NaN)
@@ -38205,8 +38339,10 @@ mod tests {
         // op across NaN inputs, inf±inf generated NaN, and the `Pow` identity
         // slots (`NaN**0`, `1**NaN`). This pins the parity that makes the two
         // input NaN pre-scans NON-removable: an input NaN must surface as
-        // `Scalar::Null(NaN)` (not `Float64(NaN)`), and `NaN**0 == 1.0` must stay
-        // missing — exactly what routing NaN inputs to the general arm preserves.
+        // `Scalar::Null(NaN)` (not `Float64(NaN)`) - exactly what routing NaN
+        // inputs to the general arm preserves - while `NaN**0` and `1**NaN` are
+        // numpy's 1.0 on both paths (they were kept missing on both, unlike
+        // pandas; br-frankenpandas-oie6x).
         // Build pathological all-valid columns whose f64 data still contains NaN.
         // (Normal constructors mark a NaN slot invalid, so the `validity.all()`
         // fast path would never see a NaN; a strided/aliased lazy view can,
@@ -38266,6 +38402,75 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn pow_of_a_missing_float_is_numpy_power_oie6x() {
+        // numpy's power reads a missing float as NaN: NaN ** 0 and 1 ** NaN
+        // are 1, any other power of a NaN is NaN - on the same-position, the
+        // aligned (a label one side lacks is NaN too) and the mixed-dtype
+        // paths (br-frankenpandas-oie6x).
+        let base = Column::from_f64_values(vec![f64::NAN, 2.0, 1.0, f64::NAN]);
+        let exponent = Column::from_f64_values(vec![0.0, f64::NAN, f64::NAN, 2.0]);
+        let same = base
+            .aligned_binary_f64_same_positions(&exponent, ArithmeticOp::Pow)
+            .unwrap();
+        let expect = [
+            Scalar::Float64(1.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(1.0),
+            Scalar::Null(NullKind::NaN),
+        ];
+        assert_eq!(same.values(), &expect);
+        let positions: Vec<Option<usize>> = (0..4).map(Some).collect();
+        let aligned = base
+            .aligned_binary_f64(&exponent, &positions, &positions, ArithmeticOp::Pow)
+            .unwrap();
+        assert_eq!(aligned.values(), &expect);
+        // A label only the exponent side has: NaN ** 0 is 1.
+        let absent = base
+            .aligned_binary_f64(&exponent, &[None], &[Some(0)], ArithmeticOp::Pow)
+            .unwrap();
+        assert_eq!(absent.values(), &[Scalar::Float64(1.0)]);
+        // Float base, int exponent: the mixed-dtype kernel.
+        let ints = Column::from_i64_values(vec![0, 3, 0, 5]);
+        let mixed = base.binary_numeric(&ints, ArithmeticOp::Pow).unwrap();
+        assert_eq!(mixed.values()[0], Scalar::Float64(1.0));
+        assert_eq!(mixed.values()[1], Scalar::Float64(8.0));
+        assert!(mixed.values()[3].is_missing());
+        // Integer-range labels [0, 1] ** [1, 2]: label 2's absent base is NaN,
+        // and NaN ** 0 is 1; label 0's absent exponent stays missing.
+        let expect_ranges = [
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(9.0),
+            Scalar::Float64(1.0),
+        ];
+        let floats = Column::from_f64_values(vec![2.0, 3.0])
+            .aligned_binary_f64_int64_unit_ranges(
+                &Column::from_f64_values(vec![2.0, 0.0]),
+                (0, 1),
+                (1, 2),
+                (0, 2),
+                ArithmeticOp::Pow,
+            )
+            .unwrap();
+        assert_eq!(floats.values(), &expect_ranges);
+        let ints = Column::from_i64_values(vec![2, 3])
+            .aligned_binary_i64_int64_unit_ranges(
+                &Column::from_i64_values(vec![2, 0]),
+                (0, 1),
+                (1, 2),
+                (0, 2),
+                ArithmeticOp::Pow,
+            )
+            .unwrap();
+        assert_eq!(ints.values(), &expect_ranges);
+        // Negative: every other op of a missing float stays missing.
+        let sum = base
+            .aligned_binary_f64_same_positions(&exponent, ArithmeticOp::Add)
+            .unwrap();
+        assert!(sum.values()[0].is_missing());
+        assert!(sum.values()[2].is_missing());
     }
 
     #[test]

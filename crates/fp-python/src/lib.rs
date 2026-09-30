@@ -21163,6 +21163,16 @@ fn keep_masked_dtype(original: &Column, result: Series) -> PyResult<Series> {
     result.astype(dtype).map_err(|e| astype_error_to_py(&e))
 }
 
+/// `base ** exponent` aligned by label, as every other operator: `**` paired
+/// two Series by position under the base's labels (br-frankenpandas-mhuqn).
+/// bool ** bool keeps `power`'s NotImplementedError.
+fn aligned_power(base: &Series, exponent: &Series) -> Result<Series, fp_frame::FrameError> {
+    if base.dtype() == DType::Bool && exponent.dtype() == DType::Bool {
+        return base.power(exponent);
+    }
+    base.pow(exponent)
+}
+
 /// pandas' masked power identities in a `**` result: NA ** 0 and 1 ** NA
 /// are 1 (they were <NA>; br-frankenpandas-tdafd). `base` and `exponent`
 /// are the operands, applied where they sit on the result's rows.
@@ -27570,7 +27580,7 @@ impl PySeries {
             None => None,
         };
         let rhs = series_operand(py, other, &self.inner)?;
-        let result = narrowed_arith(self.inner.power(&rhs), &self.inner, other, false)?;
+        let result = narrowed_arith(aligned_power(&self.inner, &rhs), &self.inner, other, false)?;
         let result = masked_pow_ones(&self.inner, &rhs, result)?;
         bool_numpy_series(result, target)
     }
@@ -27587,7 +27597,7 @@ impl PySeries {
             .filter(|_| boolean_series(&self.inner))
             .map(|_| BoolNumpy::Int64);
         let lhs = series_operand(py, other, &self.inner)?;
-        let result = narrowed_arith(lhs.power(&self.inner), &self.inner, other, false)?;
+        let result = narrowed_arith(aligned_power(&lhs, &self.inner), &self.inner, other, false)?;
         let result = masked_pow_ones(&lhs, &self.inner, result)?;
         bool_numpy_series(result, target)
     }

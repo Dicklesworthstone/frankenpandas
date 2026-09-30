@@ -8558,6 +8558,31 @@ fn fuzz_expected_column_arith_dtype(
     Ok(out_dtype)
 }
 
+/// numpy's power identities over a missing float operand, the one place a
+/// missing operand gives a present value: numpy reads the missing float as
+/// NaN, and NaN ** 0 / 1 ** NaN are 1 (live pandas 2.2.3:
+/// `Series([nan, 2.0]) ** 0` is `[1.0, 1.0]`, `1 ** Series([nan])` `[1.0]`;
+/// br-frankenpandas-oie6x). Only a numpy Float64 result, only the slot whose
+/// other operand is a present 0 exponent / 1 base; None anywhere else, where
+/// missing still propagates.
+fn fuzz_numpy_pow_identity(
+    left: &Scalar,
+    right: &Scalar,
+    op: ArithmeticOp,
+    out_dtype: &DType,
+) -> Option<Scalar> {
+    if !matches!(op, ArithmeticOp::Pow)
+        || !matches!(out_dtype, DType::Float64)
+        || !(left.is_missing() || right.is_missing())
+    {
+        return None;
+    }
+    let present_equal = |value: &Scalar, wanted: f64| {
+        !value.is_missing() && value.to_f64().is_ok_and(|value| value == wanted)
+    };
+    (present_equal(right, 0.0) || present_equal(left, 1.0)).then_some(Scalar::Float64(1.0))
+}
+
 fn fuzz_column_arith_oracle_scalar(
     left: &Scalar,
     right: &Scalar,
@@ -8565,6 +8590,9 @@ fn fuzz_column_arith_oracle_scalar(
     out_dtype: DType,
     preserves_nan_missing: bool,
 ) -> Result<Scalar, String> {
+    if let Some(one) = fuzz_numpy_pow_identity(left, right, op, &out_dtype) {
+        return Ok(one);
+    }
     if left.is_missing() || right.is_missing() {
         return Ok(
             if preserves_nan_missing && (left.is_nan() || right.is_nan()) {
@@ -8889,7 +8917,13 @@ pub fn fuzz_column_arith_bytes(input: &[u8]) -> Result<(), String> {
             ));
         }
 
-        if (left_value.is_missing() || right_value.is_missing()) && !actual.is_missing() {
+        // Missing propagates everywhere but numpy's power identities.
+        let pow_identity =
+            fuzz_numpy_pow_identity(left_value, right_value, op, &expected_dtype).is_some();
+        if (left_value.is_missing() || right_value.is_missing())
+            && !actual.is_missing()
+            && !pow_identity
+        {
             return Err(format!(
                 "missing propagation failed at index={index}: op={op:?} left={left_value:?} right={right_value:?} actual={actual:?}"
             ));
@@ -8897,6 +8931,7 @@ pub fn fuzz_column_arith_bytes(input: &[u8]) -> Result<(), String> {
         if preserves_nan_missing
             && (left_value.is_nan() || right_value.is_nan())
             && !actual.is_nan()
+            && !pow_identity
         {
             return Err(format!(
                 "NaN propagation failed at index={index}: op={op:?} left={left_value:?} right={right_value:?} actual={actual:?}"

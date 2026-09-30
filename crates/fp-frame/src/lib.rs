@@ -7743,7 +7743,8 @@ where
                     out_valid.set(i, false);
                 }
             } else {
-                out_valid.set(i, false);
+                let (l, r) = (lok.then_some(ld[i]), rok.then_some(rd[i]));
+                missing_operand_op(op, l, r, &mut out[i], &mut out_valid, i);
             }
         }
         return Ok(Column::from_f64_values_with_validity(out, out_valid));
@@ -7764,7 +7765,9 @@ where
                     out_valid.set(i, false);
                 }
             } else {
-                out_valid.set(i, false);
+                let l = lv.get(i).then_some(ld[i] as f64);
+                let r = rv.get(i).then_some(rd[i] as f64);
+                missing_operand_op(op, l, r, &mut out[i], &mut out_valid, i);
             }
         }
         return Ok(Column::from_f64_values_with_validity(out, out_valid));
@@ -7775,7 +7778,16 @@ where
         .zip(rc.values())
         .map(|(lv, rv)| match (lv.to_f64(), rv.to_f64()) {
             (Ok(l), Ok(r)) => Scalar::Float64(op(l, r)),
-            _ => Scalar::Null(NullKind::NaN),
+            // A missing float is NaN to numpy's operator: NaN for every op
+            // but power (br-frankenpandas-oie6x).
+            (l, r) => {
+                let value = op(l.unwrap_or(f64::NAN), r.unwrap_or(f64::NAN));
+                if value.is_nan() {
+                    Scalar::Null(NullKind::NaN)
+                } else {
+                    Scalar::Float64(value)
+                }
+            }
         })
         .collect();
     Ok(Column::from_values(vals)?)
@@ -7789,6 +7801,27 @@ where
 /// a valid-NaN — to_f64 is Ok for Float64(NaN)); the op runs iff both present,
 /// else Null(NaN). Bit-identical to reindex + binary_col_op_numeric. Falls back to
 /// reindex + Scalar for a mixed f64/i64 or non-numeric pair.
+/// Row `i` of a typed float op whose operand `l` or `r` is missing: a
+/// missing float is NaN to numpy's operator, which answers NaN for every op
+/// but power, whose NaN ** 0 and 1 ** NaN are 1 (br-frankenpandas-oie6x).
+fn missing_operand_op<F>(
+    op: &F,
+    l: Option<f64>,
+    r: Option<f64>,
+    out: &mut f64,
+    valid: &mut fp_columnar::ValidityMask,
+    i: usize,
+) where
+    F: Fn(f64, f64) -> f64,
+{
+    let value = op(l.unwrap_or(f64::NAN), r.unwrap_or(f64::NAN));
+    if value.is_nan() {
+        valid.set(i, false);
+    } else {
+        *out = value;
+    }
+}
+
 fn binary_gather_op_numeric<F>(
     lc: &Column,
     lpos: &[Option<usize>],
@@ -7820,7 +7853,7 @@ where
                     valid.set(i, false);
                 }
             } else {
-                valid.set(i, false);
+                missing_operand_op(op, l, r, &mut out[i], &mut valid, i);
             }
         }
         return Ok(Column::from_f64_values_with_validity(out, valid));
@@ -7841,7 +7874,7 @@ where
                     valid.set(i, false);
                 }
             } else {
-                valid.set(i, false);
+                missing_operand_op(op, l, r, &mut out[i], &mut valid, i);
             }
         }
         return Ok(Column::from_f64_values_with_validity(out, valid));
@@ -66586,13 +66619,19 @@ fn concat_nullable_dtype(frames: &[&DataFrame], col_name: &str) -> Option<DType>
 /// all-missing `result` of such an int or of a float `source` (df.where over
 /// an int column reported int64 beside NaN, an all-NaN float column object;
 /// br-frankenpandas-vzoct). An int64 source that already held a missing
-/// value keeps its dtype, so where(cond, self) stays the identity. Anything
-/// else is `result`.
+/// value keeps its dtype, so where(cond, self) stays the identity. An
+/// all-missing `result` of a nullable source is that dtype's NA throughout
+/// (it was object; br-frankenpandas-ygb4e). Anything else is `result`.
 fn nullable_kept(source: &Column, result: Column) -> Result<Column, FrameError> {
     let dtype = source.dtype();
     let numpy_int_gained_missing = dtype == DType::Int64 && !source.has_any_missing();
     if dtype.is_nullable() && result.dtype() == dtype.to_non_nullable() {
         Ok(result.with_dtype(dtype))
+    } else if dtype.is_nullable() && result.dtype() == DType::Null {
+        Ok(Column::new(
+            dtype,
+            vec![Scalar::Null(NullKind::Null); result.len()],
+        )?)
     } else if (result.dtype() == DType::Int64
         && result.has_any_missing()
         && numpy_int_gained_missing)
@@ -98468,7 +98507,18 @@ impl DataFrame {
                                     out_valid.set(i, false);
                                 }
                             } else {
-                                out_valid.set(i, false);
+                                // A missing float is NaN to numpy's operator:
+                                // NaN for every op but power, whose NaN ** 0 and
+                                // 1 ** NaN are 1 (br-frankenpandas-oie6x).
+                                let r = op(
+                                    if lok { ld[i] } else { f64::NAN },
+                                    if rok { rd[i] } else { f64::NAN },
+                                );
+                                if r.is_nan() {
+                                    out_valid.set(i, false);
+                                } else {
+                                    out[i] = r;
+                                }
                             }
                         }
                         return Ok(Column::from_f64_values_with_validity(out, out_valid));
@@ -98503,7 +98553,16 @@ impl DataFrame {
                         .zip(rc.values())
                         .map(|(lv, rv)| match (lv.to_f64(), rv.to_f64()) {
                             (Ok(l), Ok(r)) => Scalar::Float64(op(l, r)),
-                            _ => Scalar::Null(NullKind::NaN),
+                            // A missing float is NaN to numpy's operator: NaN
+                            // for every op but power (br-frankenpandas-oie6x).
+                            (l, r) => {
+                                let value = op(l.unwrap_or(f64::NAN), r.unwrap_or(f64::NAN));
+                                if value.is_nan() {
+                                    Scalar::Null(NullKind::NaN)
+                                } else {
+                                    Scalar::Float64(value)
+                                }
+                            }
                         })
                         .collect();
                     // Float64 even when every row is NaN, which from_values
@@ -99946,6 +100005,10 @@ impl DataFrame {
         F: Fn(f64, f64) -> f64 + Sync,
     {
         let par_inner = compute_bound && self.column_order.len() <= 2;
+        // A missing float is NaN to numpy's operator: its answer for one is
+        // NaN - missing - for every op but power, whose NaN ** 0 and 1 ** NaN
+        // are 1 (they stayed missing; br-frankenpandas-oie6x).
+        let missing_result = op(f64::NAN, scalar);
         // By position: a repeated column key is its own column (i17d4).
         let computed = self.par_map_column_positions_min(16_384, |pos| {
             let col = self.column_at(pos).expect("column in bounds");
@@ -99996,6 +100059,9 @@ impl DataFrame {
                         if !r.is_nan() {
                             valid_words[i / 64] |= 1_u64 << (i % 64);
                         }
+                    } else if !missing_result.is_nan() {
+                        out[i] = missing_result;
+                        valid_words[i / 64] |= 1_u64 << (i % 64);
                     }
                 }
                 let validity = fp_columnar::ValidityMask::from_words(valid_words, len);
@@ -100021,6 +100087,9 @@ impl DataFrame {
                         if !r.is_nan() {
                             valid_words[i / 64] |= 1_u64 << (i % 64);
                         }
+                    } else if !missing_result.is_nan() {
+                        out[i] = missing_result;
+                        valid_words[i / 64] |= 1_u64 << (i % 64);
                     }
                 }
                 let validity = fp_columnar::ValidityMask::from_words(valid_words, len);
@@ -100032,7 +100101,11 @@ impl DataFrame {
                     .iter()
                     .map(|v| {
                         if v.is_missing() {
-                            Scalar::Null(NullKind::NaN)
+                            if missing_result.is_nan() {
+                                Scalar::Null(NullKind::NaN)
+                            } else {
+                                Scalar::Float64(missing_result)
+                            }
                         } else {
                             match v.to_f64() {
                                 Ok(f) => Scalar::Float64(op(f, scalar)),
@@ -183570,6 +183643,52 @@ mod tests {
         assert_eq!(scaled.values()[1], Scalar::Timedelta64(40));
         assert!(scaled.values()[2].is_missing());
         assert_eq!(scaled.values()[3], Scalar::Timedelta64(160));
+    }
+
+    #[test]
+    fn nullable_where_all_missing_keeps_its_dtype_ygb4e() {
+        // A nullable Series whose where / mask leaves nothing present keeps
+        // its masked dtype, all NA, as pandas' (it was object;
+        // br-frankenpandas-ygb4e).
+        let index = Index::from_range(0, 2, 1);
+        let cond = Series::new(
+            "c",
+            index.clone(),
+            Column::from_bool_values(vec![false, true]),
+        )
+        .unwrap();
+        for (dtype, present) in [
+            (DType::Float64Nullable, Scalar::Float64(1.5)),
+            (DType::Int64Nullable, Scalar::Int64(1)),
+            (DType::BoolNullable, Scalar::Bool(true)),
+        ] {
+            let source = Series::new(
+                "s",
+                index.clone(),
+                Column::new(dtype.clone(), vec![present, Scalar::Null(NullKind::Null)]).unwrap(),
+            )
+            .unwrap();
+            let kept = source.where_cond(&cond, None).unwrap();
+            assert_eq!(kept.dtype(), dtype, "{dtype:?}");
+            assert!(kept.values().iter().all(Scalar::is_missing), "{dtype:?}");
+            let masked = source.mask(&cond.not().unwrap(), None).unwrap();
+            assert_eq!(masked.dtype(), dtype, "{dtype:?}");
+        }
+        // Negative: a present value keeps the path it had.
+        let partial = Series::new(
+            "s",
+            index,
+            Column::new(
+                DType::Float64Nullable,
+                vec![Scalar::Float64(1.5), Scalar::Float64(2.5)],
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .where_cond(&cond, None)
+        .unwrap();
+        assert_eq!(partial.dtype(), DType::Float64Nullable);
+        assert_eq!(partial.values()[1], Scalar::Float64(2.5));
     }
 
     #[test]
