@@ -13915,6 +13915,12 @@ impl Series {
     // --- Logical Boolean Operators ---
 
     fn ensure_boolean_series(&self, op_name: &str) -> Result<(), FrameError> {
+        // A bool column holds only bools and missing values (the casts refuse
+        // any other cell): no scan, which built its Scalar view
+        // (br-frankenpandas-qswpf).
+        if self.column.dtype().is_bool() {
+            return Ok(());
+        }
         if let Some(offending) = self
             .values()
             .iter()
@@ -14011,6 +14017,17 @@ impl Series {
     /// Missing values remain missing.
     pub fn not(&self) -> Result<Self, FrameError> {
         self.ensure_boolean_series("not")?;
+
+        // All-valid booleans negate their buffer: the Scalar map below built
+        // and read back a Bool per row (23 ms at 1M rows - Python's `mask`
+        // negates its condition here; br-frankenpandas-qswpf).
+        if let Some(flags) = self.column.as_bool_slice() {
+            return Self::new(
+                format!("~{}", self.name),
+                self.index.clone(),
+                Column::from_bool_values(flags.iter().map(|flag| !flag).collect()),
+            );
+        }
 
         let values: Vec<Scalar> = self
             .values()
@@ -23781,6 +23798,42 @@ impl Series {
                     Column::from_f64_values_owned(out),
                 );
             }
+            // The default `other` (NaN) over all-valid Float64 values: out[i] =
+            // cond[i] ? data[i] : missing, built as the Scalar map below builds
+            // its Float64 / Null(NaN) cells - from_values' float column, a 0.0
+            // datum under a cleared validity bit, or from_f64_values when every
+            // row is kept. `s.where(cond)` / `s.mask(cond)` without `other` took
+            // that map (35 ms at 1M rows; br-frankenpandas-qswpf).
+            if let (Some(data), Some(cmask)) =
+                (self.column.as_f64_slice(), cond.column.as_bool_slice())
+                && matches!(fill, Scalar::Null(NullKind::NaN))
+                && !data.is_empty()
+            {
+                let len = data.len();
+                let column = if cmask.iter().all(|&keep| keep) {
+                    Column::from_f64_values(data.to_vec())
+                } else {
+                    let mut valid_words = vec![0_u64; len.div_ceil(64)];
+                    let out: Vec<f64> = data
+                        .iter()
+                        .zip(cmask)
+                        .enumerate()
+                        .map(|(i, (&v, &keep))| {
+                            if keep {
+                                valid_words[i / 64] |= 1_u64 << (i % 64);
+                                v
+                            } else {
+                                0.0
+                            }
+                        })
+                        .collect();
+                    Column::from_f64_values_with_validity(
+                        out,
+                        fp_columnar::ValidityMask::from_words(valid_words, len),
+                    )
+                };
+                return Series::new(self.name.clone(), self.index.clone(), column);
+            }
             // Typed Int64 select: all-valid Int64 self + all-valid Bool cond + Int64
             // fill ⇒ out[i] = cond[i] ? data[i] : fill (Int64 has no NaN sentinel, so
             // the output is pure all-valid Int64). Bit-identical to the Scalar map
@@ -24234,6 +24287,38 @@ impl Series {
                     self.index.clone(),
                     Column::from_f64_values_owned(out),
                 );
+            }
+            // The default `other` (NaN), mirror of where_cond's: a row whose
+            // condition holds goes missing (br-frankenpandas-qswpf).
+            if let (Some(data), Some(cmask)) =
+                (self.column.as_f64_slice(), cond.column.as_bool_slice())
+                && matches!(fill, Scalar::Null(NullKind::NaN))
+                && !data.is_empty()
+            {
+                let len = data.len();
+                let column = if cmask.iter().all(|&masked| !masked) {
+                    Column::from_f64_values(data.to_vec())
+                } else {
+                    let mut valid_words = vec![0_u64; len.div_ceil(64)];
+                    let out: Vec<f64> = data
+                        .iter()
+                        .zip(cmask)
+                        .enumerate()
+                        .map(|(i, (&v, &masked))| {
+                            if masked {
+                                0.0
+                            } else {
+                                valid_words[i / 64] |= 1_u64 << (i % 64);
+                                v
+                            }
+                        })
+                        .collect();
+                    Column::from_f64_values_with_validity(
+                        out,
+                        fp_columnar::ValidityMask::from_words(valid_words, len),
+                    )
+                };
+                return Series::new(self.name.clone(), self.index.clone(), column);
             }
             // Typed Int64 select (mirror of where_cond): cond true ⇒ fill, false ⇒
             // data. Pure all-valid Int64 output, bit-identical to the Scalar map;
@@ -63163,16 +63248,24 @@ pub fn to_datetime_values_with_options(
                         // unparseable; br-frankenpandas-6kaxp). A string with
                         // a zone has no such guess and reads below.
                         parse_datetime_string(s, Some(&guess.format))
-                    } else if let Some(pattern) = inferred_timezone_pattern {
-                        parse_datetime_string_with_timezone_pattern(s, pattern)
                     } else if !options.utc
                         && options.format.is_none()
+                        && !matches!(
+                            inferred_timezone_pattern,
+                            Some(DatetimeTimezonePattern::Aware)
+                        )
                         && let Some(nanos) = fast_iso_datetime_nanos(s)
                     {
                         // Fast path emits Datetime64 directly; the
                         // datetime64_scalar_from_parsed_datetime wrapper below
-                        // passes a Datetime64 through unchanged.
+                        // passes a Datetime64 through unchanged. Its forms
+                        // carry no zone, so a naive column's pattern reads
+                        // them the same; tried first, as the default
+                        // timezone inference made every row skip it
+                        // (br-frankenpandas-ogi15).
                         Scalar::Datetime64(nanos)
+                    } else if let Some(pattern) = inferred_timezone_pattern {
+                        parse_datetime_string_with_timezone_pattern(s, pattern)
                     } else {
                         parse_datetime_string(s, options.format)
                     }
@@ -63874,14 +63967,15 @@ fn iso_four_digits(b: &[u8], i: usize) -> Option<i64> {
     Some(v)
 }
 
-/// Fast ISO-8601 `YYYY-MM-DD` / `YYYY-MM-DD[ T]HH:MM:SS` -> UTC epoch-nanos
-/// (br-frankenpandas-j5150). The general `parse_datetime_string` path tries
+/// Fast ISO-8601 `YYYY-MM-DD` / `YYYY-MM-DD[ T]HH:MM` /
+/// `YYYY-MM-DD[ T]HH:MM:SS` -> UTC epoch-nanos (br-frankenpandas-j5150,
+/// br-frankenpandas-ogi15). The general `parse_datetime_string` path tries
 /// 2–3 `chrono::parse_from_str` formats per string (most failing), then renders
 /// a `Scalar::Utf8` that is re-parsed to `Datetime64` — a triple pass with
 /// allocations per row, ~13x slower than `pd.to_datetime`. This reads the
 /// digits directly and computes the same nanos chrono produces.
 ///
-/// Bit-identical: returns `None` for any shape other than these two exact
+/// Bit-identical: returns `None` for any shape other than these three exact
 /// fixed-width forms OR an out-of-range calendar date/time, so the general
 /// parser handles those (an invalid date renders `NaT` there, matching). For a
 /// valid date the days count is Howard Hinnant's proleptic-Gregorian
@@ -63903,6 +63997,21 @@ fn fast_iso_datetime_nanos(s: &str) -> Option<i64> {
                 iso_two_digits(b, 8)?,
                 0,
                 0,
+                0,
+            )
+        }
+        // YYYY-MM-DD[ T]HH:MM, chrono's "%Y-%m-%d %H:%M" / "%Y-%m-%dT%H:%M"
+        // (br-frankenpandas-ogi15).
+        16 => {
+            if b[4] != b'-' || b[7] != b'-' || (b[10] != b' ' && b[10] != b'T') || b[13] != b':' {
+                return None;
+            }
+            (
+                iso_four_digits(b, 0)?,
+                iso_two_digits(b, 5)?,
+                iso_two_digits(b, 8)?,
+                iso_two_digits(b, 11)?,
+                iso_two_digits(b, 14)?,
                 0,
             )
         }
@@ -183464,6 +183573,91 @@ mod tests {
     }
 
     #[test]
+    fn series_where_default_nan_other_stays_typed_qswpf() {
+        // `s.where(cond)` with pandas' default NaN `other` over float values
+        // selects typed (the Scalar map read every value) and answers as that
+        // map did: the replaced rows missing NaN, a float64 column
+        // (br-frankenpandas-qswpf).
+        let index = Index::from_range(0, 4, 1);
+        let values = Series::new(
+            "v",
+            index.clone(),
+            Column::from_f64_values(vec![1.5, -2.0, 0.25, 4.0]),
+        )
+        .unwrap();
+        let cond = Series::new(
+            "c",
+            index.clone(),
+            Column::from_bool_values(vec![true, false, true, false]),
+        )
+        .unwrap();
+        let nan = Scalar::Null(NullKind::NaN);
+        let kept = values.where_cond(&cond, Some(&nan)).unwrap();
+        assert!(!values.column().scalar_cache_is_materialized());
+        assert_eq!(kept.dtype(), DType::Float64);
+        assert_eq!(
+            kept.values(),
+            &[
+                Scalar::Float64(1.5),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(0.25),
+                Scalar::Null(NullKind::NaN),
+            ]
+        );
+        assert_eq!(kept.column().validity().count_valid(), 2);
+        // Every row kept is the values themselves; none left is empty.
+        let all = Series::new("c", index, Column::from_bool_values(vec![true; 4])).unwrap();
+        assert_eq!(
+            values.where_cond(&all, None).unwrap().values(),
+            values.values()
+        );
+        let empty = Series::new(
+            "v",
+            Index::from_range(0, 0, 1),
+            Column::from_f64_values(vec![]),
+        )
+        .unwrap();
+        let none = Series::new(
+            "c",
+            Index::from_range(0, 0, 1),
+            Column::from_bool_values(vec![]),
+        )
+        .unwrap();
+        assert_eq!(empty.where_cond(&none, None).unwrap().len(), 0);
+        // mask, its mirror: the rows whose condition holds go missing.
+        let masked = values.mask(&cond, None).unwrap();
+        assert_eq!(
+            masked.values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(-2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(4.0),
+            ]
+        );
+        let fresh = Series::new(
+            "v",
+            Index::from_range(0, 4, 1),
+            Column::from_f64_values(vec![1.5, -2.0, 0.25, 4.0]),
+        )
+        .unwrap();
+        fresh.mask(&cond, None).unwrap();
+        assert!(!fresh.column().scalar_cache_is_materialized());
+        // not() - Python's mask negates its condition - stays typed too.
+        let flipped = cond.not().unwrap();
+        assert!(!cond.column().scalar_cache_is_materialized());
+        assert_eq!(
+            flipped.values(),
+            &[
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+            ]
+        );
+    }
+
+    #[test]
     fn to_records_parallel_matches_serial_prefix_ironquail() {
         // Record i = [Int64(i), col vals] depends only on i. The 40k frame builds via
         // the SERIAL path (< TORECORDS_PAR_MIN_ROWS); the 60k via the CHUNKED-PARALLEL
@@ -194730,6 +194924,57 @@ mod tests {
         .unwrap();
         let result = super::to_datetime(&s).unwrap();
         assert_eq!(result.values()[0], datetime64_scalar("2024-01-15 10:30:45"));
+    }
+
+    #[test]
+    fn to_datetime_fast_iso_matches_general_parse_ogi15() {
+        // The fast ISO parse - now tried first under the default (naive)
+        // timezone inference, and knowing YYYY-MM-DD HH:MM - gives what the
+        // general chrono parse gives, and declines what it rejects
+        // (br-frankenpandas-ogi15).
+        for text in [
+            "2024-01-15",
+            "2024-01-15 10:30",
+            "2024-01-15T10:30",
+            "2024-01-15 10:30:45",
+            "2024-02-29 23:59",
+            "1969-12-31 23:59",
+        ] {
+            let general = super::datetime64_scalar_from_parsed_datetime(
+                super::parse_datetime_string(text, None),
+            );
+            let fast = super::fast_iso_datetime_nanos(text).map(Scalar::Datetime64);
+            assert_eq!(fast, Some(general), "{text}");
+        }
+        // Declined, so the general parse keeps answering them (an invalid
+        // date's pass-through is br-frankenpandas-h9cug's).
+        for text in [
+            "2023-02-29 10:00",
+            "2024-01-15 24:00",
+            "2024-01-15 10:60",
+            "2024-13-01 00:00",
+            "2024-01-15x10:30",
+        ] {
+            assert_eq!(super::fast_iso_datetime_nanos(text), None, "{text}");
+        }
+        // A column of them, a missing row and a second shape (NaT under the
+        // first row's lock, as pandas' one guessed format).
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15 10:30".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("2024-01-16 11:45".into()),
+                Scalar::Utf8("2024-01-16 11:45:30".into()),
+            ],
+        )
+        .unwrap();
+        let result = super::to_datetime(&s).unwrap();
+        assert_eq!(result.values()[0], datetime64_scalar("2024-01-15 10:30:00"));
+        assert!(result.values()[1].is_missing());
+        assert_eq!(result.values()[2], datetime64_scalar("2024-01-16 11:45:00"));
+        assert!(result.values()[3].is_missing());
     }
 
     #[test]

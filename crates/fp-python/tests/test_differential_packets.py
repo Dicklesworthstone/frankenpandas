@@ -22295,3 +22295,83 @@ _E94_CASES = {
 def test_everyday94_series_operators_like_pandas_w1nrd(case: str) -> None:
     run = _E94_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-ogi15: to_datetime's fast ISO parse was never reached
+# under the default timezone inference and knew no YYYY-MM-DD HH:MM form.
+# Every answer stays pandas'.
+def _e95_parsed(m: Any, values: list, **kwargs: Any) -> list:
+    result = m.to_datetime(m.Series(values), **kwargs)
+    return [str(result.dtype), result.tolist()]
+
+
+_E95_CASES = {
+    "minutes": lambda m: _e95_parsed(m, ["2024-01-15 10:30", "2024-01-16 11:45"]),
+    "minutes T": lambda m: _e95_parsed(m, ["2024-01-15T10:30", "2024-01-16T00:00"]),
+    "seconds": lambda m: _e95_parsed(m, ["2024-01-15 10:30:45", "1969-12-31 23:59:59"]),
+    "dates": lambda m: _e95_parsed(m, ["2024-01-15", "2024-02-29"]),
+    "leap minute": lambda m: _e95_parsed(m, ["2024-02-29 23:59", "1969-12-31 23:59"]),
+    "with None": lambda m: _e95_parsed(m, ["2024-01-15 10:30", None, "2024-01-17 09:05"]),
+    "second shape coerced": lambda m: _e95_parsed(m, ["2024-01-15 10:30", "2024-01-15 10:30:45"], errors="coerce"),
+    "utc": lambda m: _e95_parsed(m, ["2024-01-15 10:30", "2024-01-16 11:45"], utc=True),
+    "format": lambda m: _e95_parsed(m, ["15/01/2024 10:30"], format="%d/%m/%Y %H:%M"),
+    "dayfirst": lambda m: _e95_parsed(m, ["15/01/2024", "16/01/2024"], dayfirst=True),
+    "list": lambda m: list(m.to_datetime(["2024-01-15 10:30", "2024-01-16 11:45"])),
+    # Negatives: a zone keeps its path; a naive column's zoned row is NaT.
+    "aware": lambda m: _e95_parsed(m, ["2024-01-15 10:30+02:00", "2024-01-16 10:30+02:00"]),
+    "naive then zoned": lambda m: _e95_parsed(m, ["2024-01-15 10:30", "2024-01-15 10:30+02:00"], errors="coerce"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E95_CASES))
+def test_everyday95_to_datetime_iso_like_pandas_ogi15(case: str) -> None:
+    run = _E95_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-qswpf: Series.where / mask with the default NaN other
+# took the per-element Scalar map; float values now select typed. Every
+# answer stays pandas'.
+def _e96_shown(series: Any) -> list:
+    return [str(series.dtype), series.tolist(), series.isna().tolist()]
+
+
+def _e96_floats(m: Any) -> Any:
+    return m.Series([1.5, -2.0, 0.25, 4.0], index=[10, 11, 12, 13])
+
+
+_E96_CASES = {
+    "where": lambda m: _e96_shown(_e96_floats(m).where(_e96_floats(m) > 0.1)),
+    "mask": lambda m: _e96_shown(_e96_floats(m).mask(_e96_floats(m) > 0.1)),
+    "where other nan": lambda m: _e96_shown(_e96_floats(m).where(_e96_floats(m) > 0.1, np.nan)),
+    "where other 0": lambda m: _e96_shown(_e96_floats(m).where(_e96_floats(m) > 0.1, 0.0)),
+    "where all kept": lambda m: _e96_shown(_e96_floats(m).where(_e96_floats(m) > -10)),
+    "where none kept": lambda m: _e96_shown(_e96_floats(m).where(_e96_floats(m) > 10)),
+    "where then fillna": lambda m: _e96_shown(_e96_floats(m).where(_e96_floats(m) > 0.1).fillna(0)),
+    "where then sum": lambda m: [_e96_floats(m).where(_e96_floats(m) > 0.1).sum()],
+    "where ndarray cond": lambda m: _e96_shown(_e96_floats(m).where(np.array([True, False, True, True]))),
+    "where with NaN": lambda m: _e96_shown(m.Series([1.5, np.nan, 3.0]).where(m.Series([True, True, False]))),
+    "ints replaced": lambda m: _e96_shown(m.Series([1, 2, 3]).where(m.Series([True, False, True]))),
+    "ints all kept": lambda m: _e96_shown(m.Series([1, 2, 3]).where(m.Series([True, True, True]))),
+    "float32": lambda m: _e96_shown(m.Series([1.5, 2.5], dtype="float32").where(m.Series([True, False]))),
+    # (An all-missing nullable result is br-frankenpandas-ygb4e's.)
+    "Float64": lambda m: _e96_shown(m.Series([1.5, 2.5], dtype="Float64").where(m.Series([False, True]))),
+    "empty": lambda m: _e96_shown(m.Series([], dtype="float64").where(m.Series([], dtype=bool))),
+    # Negative: a condition on other labels aligns (a missing label is False).
+    "misaligned cond": lambda m: _e96_shown(_e96_floats(m).where(m.Series([True, True], index=[10, 12]))),
+    # The boolean operators sharing not() / the boolean check.
+    "invert": lambda m: _e96_shown(~(_e96_floats(m) > 0.1)),
+    "and": lambda m: _e96_shown((_e96_floats(m) > 0.1) & (_e96_floats(m) < 3)),
+    "or": lambda m: _e96_shown((_e96_floats(m) > 3) | (_e96_floats(m) < 0)),
+    "xor": lambda m: _e96_shown((_e96_floats(m) > 0.1) ^ (_e96_floats(m) < 3)),
+    "invert boolean": lambda m: _e96_shown(~m.Series([True, None, False], dtype="boolean")),
+    "and unaligned": lambda m: _e96_shown(m.Series([True, False], index=[0, 1]) & m.Series([True, True], index=[1, 2])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E96_CASES))
+def test_everyday96_series_where_mask_like_pandas_qswpf(case: str) -> None:
+    run = _E96_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
