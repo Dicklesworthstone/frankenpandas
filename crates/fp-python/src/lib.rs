@@ -70909,9 +70909,70 @@ fn api_union_categoricals(
     )
 }
 
+/// pandas' `pandas_dtype(dtype)`: the dtype object an argument names - a
+/// numpy dtype for numpy's names and types ('int64', int, np.int32, 'O',
+/// 'M8[ns]'), pandas' extension dtype for its names ('Int64', 'boolean',
+/// 'string[python]', 'category', 'datetime64[ns, UTC]', 'period[M]',
+/// 'interval[int64, right]', 'Sparse[int64]'); a dtype object as it is, a
+/// Series its dtype, None float64; any other name numpy's TypeError. It
+/// returned the argument unchanged (br-frankenpandas-0uavl).
 #[pyfunction(name = "pandas_dtype")]
-fn api_pandas_dtype(dtype: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-    Ok(dtype.clone().into_any().unbind())
+fn api_pandas_dtype<'py>(dtype: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let py = dtype.py();
+    let module = py.import("frankenpandas")?;
+    let numpy_dtype = |spec: &Bound<'py, PyAny>| py.import("numpy")?.call_method1("dtype", (spec,));
+    if dtype.is_none() {
+        return numpy_dtype(&"float64".into_bound_py_any(py)?);
+    }
+    if dtype.is_instance_of::<PySeries>() {
+        return dtype.getattr("dtype");
+    }
+    let Ok(name) = dtype.extract::<String>() else {
+        // A dtype object (numpy's or pandas') is itself; a type numpy's.
+        if !dtype.is_instance_of::<pyo3::types::PyType>() && dtype.hasattr("kind")? {
+            return Ok(dtype.clone());
+        }
+        return numpy_dtype(dtype);
+    };
+    let bracketed = |prefix: &str| {
+        name.strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix(']'))
+            .map(|inner| inner.split(',').map(str::trim).collect::<Vec<&str>>())
+    };
+    match name.as_str() {
+        "Int8" | "Int16" | "Int32" | "Int64" | "UInt8" | "UInt16" | "UInt32" | "UInt64"
+        | "Float32" | "Float64" => return module.getattr(format!("{name}Dtype").as_str())?.call0(),
+        "boolean" => return module.getattr("BooleanDtype")?.call0(),
+        "category" => return module.getattr("CategoricalDtype")?.call0(),
+        "interval" => return module.getattr("IntervalDtype")?.call0(),
+        _ => {}
+    }
+    if name == "string" || name.starts_with("string[") {
+        return module
+            .getattr("StringDtype")?
+            .call_method1("construct_from_string", (name.as_str(),));
+    }
+    if let Some(parts) = bracketed("datetime64[")
+        && let [unit, zone] = parts.as_slice()
+    {
+        return module.getattr("DatetimeTZDtype")?.call1((*unit, *zone));
+    }
+    if let Some(parts) = bracketed("period[")
+        && let [freq] = parts.as_slice()
+    {
+        return module.getattr("PeriodDtype")?.call1((*freq,));
+    }
+    if let Some(parts) = bracketed("interval[") {
+        let subtype = parts.first().copied();
+        let closed = parts.get(1).copied();
+        return module.getattr("IntervalDtype")?.call1((subtype, closed));
+    }
+    if let Some(parts) = bracketed("Sparse[") {
+        return module
+            .getattr("SparseDtype")?
+            .call1((parts.first().copied(),));
+    }
+    numpy_dtype(dtype)
 }
 
 fn scalar_to_label_str(s: &Scalar) -> String {

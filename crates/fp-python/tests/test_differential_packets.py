@@ -20905,3 +20905,36 @@ _E67_CASES = {
 def test_everyday67_str_flags_index_and_non_text_like_pandas_fvwrq(case: str) -> None:
     run = _E67_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-0uavl: api.types.pandas_dtype returned its argument
+# unchanged (a str stayed a str, an unknown name passed).
+def _e68_dtype(m: Any, spec: Any) -> list:
+    dtype = m.api.types.pandas_dtype(spec)
+    return [repr(dtype), type(dtype).__name__]
+
+
+_E68_CASES = {
+    "numpy names": lambda m: [_e68_dtype(m, spec) for spec in ["int64", "int32", "float", "bool", "O", "str", "i8"]],
+    "numpy dates": lambda m: [_e68_dtype(m, spec) for spec in ["datetime64[ns]", "timedelta64[ns]", "M8[ns]"]],
+    "types": lambda m: [_e68_dtype(m, spec) for spec in [int, float, str, object, np.int32]],
+    "masked names": lambda m: [_e68_dtype(m, spec) for spec in ["Int64", "UInt16", "Float32", "boolean"]],
+    "string names": lambda m: [_e68_dtype(m, spec) for spec in ["string", "string[python]"]],
+    "zoned datetime": lambda m: [_e68_dtype(m, "datetime64[ns, UTC]")],
+    "period": lambda m: [_e68_dtype(m, "period[M]")],
+    "interval": lambda m: [_e68_dtype(m, "interval"), _e68_dtype(m, "interval[int64, right]")],
+    "unknown name": lambda m: [_e68_dtype(m, "foo")],
+    "None": lambda m: [_e68_dtype(m, None)],
+    "series": lambda m: [_e68_dtype(m, m.Series([1]))],
+    # Negatives: already pandas'.
+    "equals numpy": lambda m: [m.api.types.pandas_dtype("int64") == np.dtype("int64")],
+    "numpy dtype object": lambda m: [_e68_dtype(m, np.dtype("int16"))],
+    "masked dtype object": lambda m: [_e68_dtype(m, m.Int64Dtype())],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E68_CASES))
+def test_everyday68_pandas_dtype_like_pandas_0uavl(case: str) -> None:
+    run = _E68_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
