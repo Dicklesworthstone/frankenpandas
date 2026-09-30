@@ -79751,6 +79751,37 @@ impl DataFrame {
                     }
                 }
             }
+        } else if labels.len() <= 8
+            && let Some(keys) = labels
+                .iter()
+                .map(|label| match label {
+                    IndexLabel::Int64(key) => Some(*key),
+                    _ => None,
+                })
+                .collect::<Option<Vec<i64>>>()
+            && let Some(values) = self.index.int64_label_values()
+        {
+            // A few Int64 keys against a duplicated Int64 index: one scan of
+            // the raw i64 labels per key, its every position in index order -
+            // the map below, without hashing a million labels into it on
+            // every call (br-frankenpandas-63xxx).
+            out_labels.reserve(labels.len());
+            for (requested, key) in labels.iter().zip(keys) {
+                let before = positions.len();
+                positions.extend(
+                    values
+                        .iter()
+                        .enumerate()
+                        .filter(|&(_, &value)| value == key)
+                        .map(|(position, _)| position),
+                );
+                if positions.len() == before {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "loc label not found: {requested:?}"
+                    )));
+                }
+                out_labels.resize(positions.len(), requested.clone());
+            }
         } else {
             out_labels.reserve(labels.len());
             let index_labels = self.index.labels();
@@ -183749,6 +183780,49 @@ mod tests {
         assert_eq!(scaled.values()[1], Scalar::Timedelta64(40));
         assert!(scaled.values()[2].is_missing());
         assert_eq!(scaled.values()[3], Scalar::Timedelta64(160));
+    }
+
+    #[test]
+    fn loc_of_int_keys_on_a_duplicated_int_index_63xxx() {
+        // A few Int64 keys against a duplicated Int64 index take every
+        // position of each key in index order, keys in the order asked,
+        // without the label map (br-frankenpandas-63xxx).
+        let keys = [5_i64, 7, 5, 9, 7, 5];
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "v".to_string(),
+            Column::from_f64_values((0..keys.len()).map(|p| p as f64).collect()),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64_values(keys.to_vec()),
+            columns,
+            vec!["v".to_string()],
+        )
+        .unwrap();
+        let picked = |asked: &[IndexLabel]| {
+            let out = frame.loc_with_columns(asked, None).unwrap();
+            let values = out.column("v").unwrap().values().to_vec();
+            (out.index().labels().to_vec(), values)
+        };
+        let (labels, values) = picked(&[IndexLabel::Int64(7), IndexLabel::Int64(5)]);
+        assert_eq!(labels, [7, 7, 5, 5, 5].map(IndexLabel::Int64));
+        assert_eq!(values, [1.0, 4.0, 0.0, 2.0, 5.0].map(Scalar::Float64));
+        let (labels, values) = picked(&[IndexLabel::Int64(9), IndexLabel::Int64(9)]);
+        assert_eq!(labels, [9, 9].map(IndexLabel::Int64));
+        assert_eq!(values, [3.0, 3.0].map(Scalar::Float64));
+        // Negatives: a missing key fails closed; a float key keeps the map.
+        assert!(
+            frame
+                .loc_with_columns(&[IndexLabel::Int64(6)], None)
+                .is_err()
+        );
+        let float_key = IndexLabel::Float64(fp_index::OrderedF64(9.0));
+        assert_eq!(
+            frame
+                .loc_with_columns(std::slice::from_ref(&float_key), None)
+                .is_ok(),
+            frame.index().labels().contains(&float_key)
+        );
     }
 
     #[test]

@@ -22963,3 +22963,42 @@ _E108_CASES = {
 def test_everyday108_object_text_array_like_pandas_djbjt(case: str) -> None:
     run = _E108_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-63xxx: loc of a few int keys on a duplicated int index
+# scans the raw labels (every call hashed them all into a position map).
+def _e109_frame(m: Any, **kwargs: Any) -> Any:
+    keys = [5, 7, 5, 9, 7, 5]
+    frame = m.DataFrame({"v": [float(p) for p in range(6)], "s": list("abcdef")}, index=m.Index(keys, **kwargs))
+    return frame
+
+
+def _e109_shown(result: Any) -> list:
+    return [str(type(result).__name__), *result.to_string().split("\n")]
+
+
+_E109_CASES = {
+    "one key": lambda m: _e109_shown(_e109_frame(m).loc[5]),
+    "key in the middle": lambda m: _e109_shown(_e109_frame(m).loc[7]),
+    "key held once": lambda m: _e109_shown(_e109_frame(m).loc[9]),
+    "missing key": lambda m: _e109_shown(_e109_frame(m).loc[6]),
+    "list with repeats": lambda m: _e109_shown(_e109_frame(m).loc[[7, 5, 7]]),
+    "reverse list": lambda m: _e109_shown(_e109_frame(m).loc[[9, 5]]),
+    "key and column": lambda m: _e109_shown(_e109_frame(m).loc[5, "v"]),
+    "key and columns": lambda m: _e109_shown(_e109_frame(m).loc[7, ["s", "v"]]),
+    "float key": lambda m: _e109_shown(_e109_frame(m).loc[5.0]),
+    "named index": lambda m: _e109_shown(_e109_frame(m, name="k").loc[[5, 9]]),
+    "object index": lambda m: _e109_shown(_e109_frame(m, dtype=object).loc[5]),
+    "series loc": lambda m: _e109_shown(_e109_frame(m)["v"].loc[5]),
+    "unique int index": lambda m: _e109_shown(m.DataFrame({"v": [1.0, 2.0]}, index=[10, 20]).loc[[20]]),
+    "set_index then loc": lambda m: _e109_shown(
+        m.DataFrame({"k": [3, 1, 3, 2], "v": [1.5, 2.5, 3.5, 4.5]}).set_index("k").loc[3]
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E109_CASES))
+def test_everyday109_loc_on_a_duplicated_int_index_like_pandas_63xxx(case: str) -> None:
+    run = _E109_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
