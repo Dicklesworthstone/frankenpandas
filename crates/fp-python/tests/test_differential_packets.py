@@ -21573,3 +21573,72 @@ _E81_CASES = {
 def test_everyday81_index_holds_intervals_like_pandas_c27hq(case: str) -> None:
     run = _E81_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-tjfdd: IntervalIndex stood outside the Index class with
+# most of the Index surface missing (take, isin, astype, to_series, ...).
+def _e82_ii(m: Any) -> Any:
+    return m.interval_range(0, 3, name="b")
+
+
+def _e82_shown(out: Any) -> Any:
+    if hasattr(out, "tolist") and hasattr(out, "dtype"):
+        return [type(out).__name__, repr(out)]
+    if isinstance(out, tuple):
+        return [_e82_shown(part) for part in out]
+    return repr(out)
+
+
+_E82_CASES = {
+    **{
+        name: (lambda call: lambda m: _e82_shown(call(_e82_ii(m), m)))(call)
+        for name, call in {
+            "take": lambda ii, m: ii.take([2, 0]),
+            "delete": lambda ii, m: ii.delete(0),
+            "insert": lambda ii, m: ii.insert(0, m.Interval(-1, 0)),
+            "repeat": lambda ii, m: ii.repeat(2),
+            "where": lambda ii, m: ii.where([True, False, True]),
+            "putmask": lambda ii, m: ii.putmask([True, False, False], m.Interval(9, 10)),
+            "append": lambda ii, m: ii.append(ii),
+            "copy": lambda ii, m: ii.copy(),
+            "rename": lambda ii, m: ii.rename("z"),
+            "drop_duplicates": lambda ii, m: ii.append(ii).drop_duplicates(),
+            "map": lambda ii, m: ii.map(lambda iv: iv.mid),
+            "astype object": lambda ii, m: ii.astype(object),
+            "astype str": lambda ii, m: ii.astype(str),
+            "to_series": lambda ii, m: ii.to_series(),
+            "value_counts": lambda ii, m: ii.value_counts(),
+            "isin": lambda ii, m: ii.isin([m.Interval(0, 1)]),
+            "min max": lambda ii, m: (ii.min(), ii.max()),
+            "sortlevel": lambda ii, m: ii.sortlevel(ascending=False),
+            "to_numpy": lambda ii, m: ii.to_numpy(),
+            "item": lambda ii, m: ii[:1].item(),
+            "getitem list": lambda ii, m: ii[[0, 2]],
+            "getitem mask": lambda ii, m: ii[[True, False, True]],
+            "shape size empty": lambda ii, m: (ii.shape, ii.size, ii.empty, ii.nlevels),
+            "inferred_type": lambda ii, m: ii.inferred_type,
+            "isinstance Index": lambda ii, m: isinstance(ii, m.Index),
+            "Index of it": lambda ii, m: m.Index(ii),
+            "any": lambda ii, m: ii.any(),
+            "name setter": lambda ii, m: (setattr(ii, "name", "q"), ii.to_series().name)[1],
+            "compare indexes": lambda ii, m: (ii < ii.take([2, 0, 1])).tolist(),
+            "order intervals": lambda ii, m: (
+                m.Interval(0, 1) < m.Interval(0, 2),
+                m.Interval(0, 2) < m.Interval(1, 2),
+                m.Interval(0, 1, closed="left") < m.Interval(0, 1),
+                m.Interval(0, 1) <= m.Interval(0, 1),
+            ),
+            # Negatives: already pandas'.
+            "left right mid": lambda ii, m: (ii.left, ii.right, ii.mid),
+            "get_loc": lambda ii, m: ii.get_loc(m.Interval(1, 2)),
+            "is_non_overlapping_monotonic": lambda ii, m: ii.is_non_overlapping_monotonic,
+        }.items()
+    },
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E82_CASES))
+def test_everyday82_interval_index_is_an_index_like_pandas_tjfdd(case: str) -> None:
+    run = _E82_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

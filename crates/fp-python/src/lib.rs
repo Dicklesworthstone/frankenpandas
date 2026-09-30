@@ -8637,16 +8637,30 @@ fn flat_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
         if let Some(inner) = PeriodIndex::from_index(index) {
             return Ok(Py::new(py, PyPeriodIndex { inner })?.into_any());
         }
-        // Intervals are an IntervalIndex (they were text; c27hq).
-        if labels
-            .iter()
-            .all(|label| matches!(label, IndexLabel::Interval(_)))
+        // Intervals are an IntervalIndex (they were text; c27hq), a missing
+        // label beside them a missing interval on their closed side (a
+        // where / reindex over one; tjfdd).
+        let closed = labels.iter().find_map(|label| match label {
+            IndexLabel::Interval(interval) => Some(interval.closed.to_string()),
+            _ => None,
+        });
+        if let Some(closed) = closed
+            && labels
+                .iter()
+                .all(|label| matches!(label, IndexLabel::Interval(_) | IndexLabel::Null(_)))
         {
+            // A missing one makes the subtype float64, as pandas' (int
+            // endpoints print as floats then).
+            let gap = labels.iter().any(IndexLabel::is_missing);
             let intervals = labels
                 .iter()
-                .filter_map(|label| match label {
-                    IndexLabel::Interval(interval) => Some(PyInterval::of(interval)),
-                    _ => None,
+                .map(|label| match label {
+                    IndexLabel::Interval(interval) => {
+                        let mut interval = PyInterval::of(interval);
+                        interval.int_endpoints &= !gap;
+                        interval
+                    }
+                    _ => PyInterval::missing(&closed),
                 })
                 .collect();
             return Ok(Py::new(
@@ -74173,6 +74187,28 @@ pub struct PyInterval {
 }
 
 impl PyInterval {
+    /// `other` against this Interval as pandas orders them - (left, right,
+    /// closed) - through `test`; NotImplemented for another operand or a
+    /// NaN endpoint's unordered pair (False).
+    fn ordered(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        test: fn(std::cmp::Ordering) -> bool,
+    ) -> PyResult<Py<PyAny>> {
+        let Ok(other) = other.extract::<PyRef<'_, Self>>() else {
+            return Ok(py.NotImplemented());
+        };
+        let order = match self.left.partial_cmp(&other.left) {
+            Some(std::cmp::Ordering::Equal) => self
+                .right
+                .partial_cmp(&other.right)
+                .map(|right| right.then_with(|| self.closed.cmp(&other.closed))),
+            order => order,
+        };
+        order.is_some_and(test).into_py_any(py)
+    }
+
     /// A float64 interval from Rust endpoints, the closed side checked.
     fn floats(left: f64, right: f64, closed: &str) -> PyResult<Self> {
         if !["right", "left", "both", "neither"].contains(&closed) {
@@ -74392,6 +74428,26 @@ impl PyInterval {
         hasher.finish()
     }
 
+    /// pandas orders Intervals as their (left, right, closed) tuples, the
+    /// closed side by its name; another operand is unordered (Python's
+    /// TypeError). They raised TypeError, so an IntervalIndex could not be
+    /// compared either (br-frankenpandas-tjfdd).
+    fn __lt__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.ordered(py, other, std::cmp::Ordering::is_lt)
+    }
+
+    fn __le__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.ordered(py, other, std::cmp::Ordering::is_le)
+    }
+
+    fn __gt__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.ordered(py, other, std::cmp::Ordering::is_gt)
+    }
+
+    fn __ge__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        self.ordered(py, other, std::cmp::Ordering::is_ge)
+    }
+
     fn __contains__(&self, val: f64) -> bool {
         match self.closed.as_str() {
             "right" => val > self.left && val <= self.right,
@@ -74466,12 +74522,17 @@ fn interval_to_py(py: Python<'_>, interval: &PyInterval) -> PyResult<Py<PyAny>> 
     Py::new(py, interval.clone())?.into_py_any(py)
 }
 
-#[pyclass(name = "IntervalIndex", from_py_object)]
+/// pandas' IntervalIndex, an Index subclass over interval labels (it stood
+/// outside the Index class, with most of its methods missing;
+/// br-frankenpandas-tjfdd).
+#[pyclass(extends = PyIndex, name = "IntervalIndex", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyIntervalIndex {
     pub intervals: Vec<PyInterval>,
     pub name: Option<String>,
 }
+
+index_subclass_object!(PyIntervalIndex);
 
 #[pymethods]
 impl PyIntervalIndex {
@@ -74640,12 +74701,199 @@ impl PyIntervalIndex {
     /// pandas' `name` is writable (crosstab names its index so; it was
     /// refused, br-frankenpandas-c27hq).
     #[setter]
-    fn set_name(&mut self, name: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
-        self.name = match name.filter(|name| !name.is_none()) {
+    fn set_name(mut slf: PyRefMut<'_, Self>, name: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        slf.name = match name.filter(|name| !name.is_none()) {
             Some(name) => Some(name.str()?.to_string()),
             None => None,
         };
+        // The base Index's labels carry the name too (its methods read it).
+        let base = slf.as_py_index();
+        slf.as_super().inner = base.inner;
         Ok(())
+    }
+
+    /// pandas' Index methods that keep an IntervalIndex an IntervalIndex,
+    /// run over its labels (see [`PyIntervalIndex::via_flat`]; they were
+    /// missing, br-frankenpandas-tjfdd).
+    #[pyo3(signature = (*args, **kwargs))]
+    fn take(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.via_flat(py, "take", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn delete(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.via_flat(py, "delete", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn insert(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.via_flat(py, "insert", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn repeat(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.via_flat(py, "repeat", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn r#where(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.via_flat(py, "where", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn putmask(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.via_flat(py, "putmask", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn append(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.via_flat(py, "append", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn copy(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.via_flat(py, "copy", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn rename(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.via_flat(py, "rename", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn set_names(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.via_flat(py, "set_names", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn drop_duplicates(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.via_flat(py, "drop_duplicates", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn droplevel(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.via_flat(py, "droplevel", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn ravel(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.via_flat(py, "ravel", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn view(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.via_flat(py, "view", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn transpose(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.via_flat(py, "transpose", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn sortlevel(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.via_flat(py, "sortlevel", args, kwargs)
+    }
+
+    /// pandas refuses an IntervalIndex's any / all with this TypeError.
+    #[pyo3(signature = (*args, **kwargs))]
+    fn any(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<bool> {
+        let _ = (args, kwargs);
+        Err(interval_reduction_error(slf.as_any(), "any"))
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn all(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<bool> {
+        let _ = (args, kwargs);
+        Err(interval_reduction_error(slf.as_any(), "all"))
     }
 
     /// pandas' `length`: each interval's right - left, int64 for int
@@ -74675,8 +74923,14 @@ impl PyIntervalIndex {
         Err(ambiguous_truth_value(slf.as_any()))
     }
 
-    /// The interval at `idx` (a missing one is NaN, as pandas').
-    fn __getitem__(&self, py: Python<'_>, idx: isize) -> PyResult<Py<PyAny>> {
+    /// The interval at an int `key` (a missing one is NaN, as pandas'); a
+    /// slice, list of positions or mask is the IntervalIndex of those
+    /// intervals (they were a TypeError; br-frankenpandas-tjfdd).
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if key.is_instance_of::<pyo3::types::PyBool>() || key.extract::<isize>().is_err() {
+            return self.via_flat(py, "__getitem__", &PyTuple::new(py, [key])?, None);
+        }
+        let idx = key.extract::<isize>()?;
         let len = self.intervals.len() as isize;
         let pos = if idx < 0 { idx + len } else { idx };
         if pos < 0 || pos >= len {
@@ -75128,7 +75382,79 @@ impl PyIntervalIndex {
     }
 }
 
+/// pandas' TypeError for a reduction an IntervalIndex does not support
+/// (`any`, `all`), naming its dtype.
+fn interval_reduction_error(index: &Bound<'_, PyAny>, reduction: &str) -> PyErr {
+    let dtype = index
+        .getattr("dtype")
+        .and_then(|dtype| dtype.str().map(|text| text.to_string()))
+        .unwrap_or_else(|_| "interval".to_owned());
+    PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        "'IntervalArray' with dtype {dtype} does not support reduction '{reduction}'"
+    ))
+}
+
 impl PyIntervalIndex {
+    /// The base Index's labels: each interval a label (a missing one NaN),
+    /// named as this index.
+    fn as_py_index(&self) -> PyIndex {
+        let labels = self
+            .intervals
+            .iter()
+            .map(|interval| {
+                if interval.is_missing() {
+                    IndexLabel::Null(NullKind::NaN)
+                } else {
+                    IndexLabel::Interval(interval.core())
+                }
+            })
+            .collect();
+        let index = Index::new(labels);
+        PyIndex {
+            inner: match &self.name {
+                Some(name) => index.set_name(name),
+                None => index,
+            },
+        }
+    }
+
+    /// pandas' answer of the Index method `method` over these intervals:
+    /// the method run on the flat Index of their labels, an Index result
+    /// (or a tuple's first item) made an IntervalIndex again where it holds
+    /// intervals - take / delete / insert / repeat / where / putmask /
+    /// append / copy / rename keep the class, as pandas'.
+    fn via_flat(
+        &self,
+        py: Python<'_>,
+        method: &str,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let flat = Bound::new(py, self.as_py_index())?;
+        let result = flat.call_method(method, args, kwargs)?;
+        let rewrap = |item: &Bound<'_, PyAny>| -> PyResult<Py<PyAny>> {
+            match plain_index_ref(item) {
+                Ok(index) => flat_index_to_py(py, &index.inner),
+                Err(_) => Ok(item.clone().unbind()),
+            }
+        };
+        if let Ok(tuple) = result.cast::<PyTuple>() {
+            let items = tuple
+                .iter()
+                .enumerate()
+                .map(|(position, item)| {
+                    if position == 0 {
+                        rewrap(&item)
+                    } else {
+                        Ok(item.unbind())
+                    }
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            return PyTuple::new(py, items)?.into_py_any(py);
+        }
+        rewrap(&result)
+    }
+
     /// Whether `other` holds the same intervals in the same order.
     fn same_intervals(&self, other: &Self) -> bool {
         other.intervals.len() == self.intervals.len()

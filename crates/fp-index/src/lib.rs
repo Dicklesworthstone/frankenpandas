@@ -6496,6 +6496,9 @@ impl Index {
             ) || matches!(
                 (first, label),
                 (IndexLabel::Period(a), IndexLabel::Period(b)) if a.freq == b.freq
+            ) || matches!(
+                (first, label),
+                (IndexLabel::Interval(_), IndexLabel::Interval(_))
             )
         };
         if !non_missing.all(same_kind) {
