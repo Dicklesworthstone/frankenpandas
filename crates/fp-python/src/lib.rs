@@ -14201,6 +14201,40 @@ pub struct PyMultiIndex {
 index_subclass_object!(PyMultiIndex);
 
 impl PyMultiIndex {
+    /// The position of the first largest (`largest`) or smallest tuple,
+    /// tuples compared level by level as pandas' object values compare;
+    /// None when empty. The flat text compared ('a/10' < 'a/9'; hp180).
+    fn extreme(&self, largest: bool) -> Option<usize> {
+        let mut best: Option<(usize, Vec<&IndexLabel>)> = None;
+        for position in 0..self.inner.len() {
+            let tuple = self.inner.get_tuple(position)?;
+            let better = best.as_ref().is_none_or(|(_, have)| {
+                if largest {
+                    tuple > *have
+                } else {
+                    tuple < *have
+                }
+            });
+            if better {
+                best = Some((position, tuple));
+            }
+        }
+        best.map(|(position, _)| position)
+    }
+
+    /// The tuple at `position` as pandas' max / min answer it: its numbers
+    /// numpy scalars.
+    fn numpy_tuple(&self, py: Python<'_>, position: usize) -> PyResult<Py<PyAny>> {
+        let items = self
+            .inner
+            .get_tuple(position)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|label| numpy_scalar(py, &index_label_to_scalar(label)))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyTuple::new(py, items)?.into_any().unbind())
+    }
+
     /// The base Index's labels: the tuples flattened with the levels
     /// attached, as an axis holding this MultiIndex keeps it.
     fn as_py_index(&self) -> PyIndex {
@@ -14627,6 +14661,60 @@ impl PyMultiIndex {
         self.to_list(py)
     }
 
+    /// pandas' `MultiIndex.map(mapper, na_action=None)`: the mapper reads
+    /// each label as its tuple - a callable's result, a dict's or Series'
+    /// value under it (NaN where it has none) - and tuples come back a
+    /// MultiIndex keeping the names, other values an Index inferred from
+    /// them. It read the base Index's flat text ('v/x'), so
+    /// `columns.map('_'.join)` joined characters (br-frankenpandas-hp180).
+    #[pyo3(signature = (mapper, na_action=None))]
+    fn map(
+        &self,
+        py: Python<'_>,
+        mapper: &Bound<'_, PyAny>,
+        na_action: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        if let Some(other) = na_action.filter(|action| *action != "ignore") {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "na_action must either be 'ignore' or None, {other} was passed"
+            )));
+        }
+        let table = if mapper.is_instance_of::<PyDict>() {
+            Some(mapper.clone())
+        } else if mapper.extract::<PyRef<'_, PySeries>>().is_ok() {
+            Some(mapper.call_method0("to_dict")?)
+        } else {
+            None
+        };
+        let nan = f64::NAN.into_bound_py_any(py)?;
+        let mut values = Vec::with_capacity(self.inner.len());
+        for label in self.to_list(py)?.bind(py).iter() {
+            values.push(match &table {
+                Some(table) => table
+                    .cast::<PyDict>()?
+                    .get_item(&label)?
+                    .unwrap_or_else(|| nan.clone()),
+                None => mapper.call1((label,))?,
+            });
+        }
+        let module = py.import("frankenpandas")?;
+        if values
+            .first()
+            .is_some_and(|value| value.is_instance_of::<PyTuple>())
+        {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("names", self.names(py)?)?;
+            return Ok(module
+                .getattr("MultiIndex")?
+                .call_method("from_tuples", (PyList::new(py, values)?,), Some(&kwargs))?
+                .unbind());
+        }
+        Ok(module
+            .getattr("Index")?
+            .call1((PyList::new(py, values)?,))?
+            .unbind())
+    }
+
     fn copy(&self) -> Self {
         self.clone()
     }
@@ -15013,39 +15101,28 @@ impl PyMultiIndex {
         }
     }
 
+    /// pandas' `MultiIndex.to_series(index=None, name=None)`: the tuples
+    /// as object values, indexed by this MultiIndex (or `index`). They were
+    /// the flat text on a flat index (hp180).
     #[pyo3(signature = (index=None, name=None))]
     fn to_series(
-        &self,
+        slf: &Bound<'_, Self>,
         index: Option<&Bound<'_, PyAny>>,
         name: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PySeries> {
-        let s_name = name
-            .filter(|name| !name.is_none())
-            .map(py_series_name)
-            .transpose()?
-            .unwrap_or_default();
-        let idx = if let Some(i_obj) = index {
-            if let Ok(py_idx) = plain_index_ref(i_obj) {
-                py_idx.inner.clone()
-            } else {
-                self.inner.to_flat_index("/")
-            }
-        } else {
-            self.inner.to_flat_index("/")
-        };
-        let flat = self.inner.to_flat_index("/");
-        let vals: Vec<Scalar> = flat
-            .labels()
-            .iter()
-            .map(|l| match l {
-                IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
-                _ => Scalar::Null(NullKind::NaN),
-            })
-            .collect();
-        let col = Column::from_values(vals)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        let s = Series::new(s_name, idx, col).map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: s })
+    ) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let kwargs = PyDict::new(py);
+        match index.filter(|index| !index.is_none()) {
+            Some(index) => kwargs.set_item("index", index)?,
+            None => kwargs.set_item("index", slf)?,
+        }
+        kwargs.set_item("name", name)?;
+        kwargs.set_item("dtype", "object")?;
+        Ok(py
+            .import("frankenpandas")?
+            .getattr("Series")?
+            .call((slf.borrow().to_list(py)?,), Some(&kwargs))?
+            .unbind())
     }
 
     #[pyo3(signature = (index=true, name=None))]
@@ -15096,35 +15173,78 @@ impl PyMultiIndex {
         Ok(PyDataFrame { inner: df })
     }
 
+    /// pandas' `MultiIndex.value_counts`: each distinct tuple's count (its
+    /// share when `normalize`) indexed by a MultiIndex of the tuples under
+    /// this one's names - first-seen order, then by count (largest first
+    /// unless `ascending`) when `sort`. A tuple is never missing, so
+    /// `dropna` changes nothing, as pandas'. The index was text '(a, 9)',
+    /// and every other parameter refused (hp180).
     #[pyo3(signature = (normalize=false, sort=true, ascending=false, dropna=true))]
+    #[allow(clippy::cast_precision_loss)] // pandas divides the counts as float64
     fn value_counts(
         &self,
+        py: Python<'_>,
         normalize: bool,
         sort: bool,
         ascending: bool,
         dropna: bool,
-    ) -> PyResult<PySeries> {
-        unsupported_params(
-            "MultiIndex.value_counts",
-            &[
-                ("normalize", !normalize),
-                ("sort", sort),
-                ("ascending", !ascending),
-                ("dropna", dropna),
-            ],
-        )?;
-        let pairs = self.inner.value_counts();
-        let mut labels = Vec::with_capacity(pairs.len());
-        let mut counts = Vec::with_capacity(pairs.len());
-        for (tuple, cnt) in pairs {
-            let parts: Vec<String> = tuple.into_iter().map(|l| l.to_string()).collect();
-            labels.push(IndexLabel::Utf8(format!("({})", parts.join(", "))));
-            counts.push(Scalar::Int64(cnt as i64));
+    ) -> PyResult<Py<PyAny>> {
+        let _ = dropna;
+        let mut order: Vec<Vec<&IndexLabel>> = Vec::new();
+        let mut counts: HashMap<Vec<&IndexLabel>, usize> = HashMap::new();
+        for position in 0..self.inner.len() {
+            let tuple = self.inner.get_tuple(position).unwrap_or_default();
+            let count = counts.entry(tuple.clone()).or_insert(0);
+            if *count == 0 {
+                order.push(tuple);
+            }
+            *count += 1;
         }
-        let col = Column::from_values(counts)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        let s = Series::new("count", Index::new(labels), col).map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: s })
+        if sort {
+            // Stable: equal counts keep their first-seen order.
+            order.sort_by(|left, right| {
+                let by_count = counts[left].cmp(&counts[right]);
+                if ascending {
+                    by_count
+                } else {
+                    by_count.reverse()
+                }
+            });
+        }
+        let total = self.inner.len();
+        let mut tuples = Vec::with_capacity(order.len());
+        let mut values = Vec::with_capacity(order.len());
+        for tuple in &order {
+            let items = tuple
+                .iter()
+                .map(|label| index_label_to_py(py, label))
+                .collect::<PyResult<Vec<_>>>()?;
+            tuples.push(PyTuple::new(py, items)?);
+            let count = counts[tuple];
+            values.push(if normalize {
+                (count as f64 / total as f64).into_py_any(py)?
+            } else {
+                count.into_py_any(py)?
+            });
+        }
+        let module = py.import("frankenpandas")?;
+        let names = PyDict::new(py);
+        names.set_item("names", self.names(py)?)?;
+        let index = module.getattr("MultiIndex")?.call_method(
+            "from_tuples",
+            (PyList::new(py, tuples)?,),
+            Some(&names),
+        )?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("index", index)?;
+        kwargs.set_item("name", if normalize { "proportion" } else { "count" })?;
+        if !normalize {
+            kwargs.set_item("dtype", "int64")?;
+        }
+        Ok(module
+            .getattr("Series")?
+            .call((PyList::new(py, values)?,), Some(&kwargs))?
+            .unbind())
     }
 
     fn sort_values(&self) -> Self {
@@ -15165,12 +15285,19 @@ impl PyMultiIndex {
         })
     }
 
-    fn all(&self) -> bool {
-        self.inner.to_flat_index("/").all()
+    /// pandas' TypeError: a MultiIndex has no truth reduction (it reduced
+    /// the flat text; br-frankenpandas-hp180).
+    fn all(&self) -> PyResult<bool> {
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "cannot perform all with this index type: MultiIndex",
+        ))
     }
 
-    fn any(&self) -> bool {
-        self.inner.to_flat_index("/").any()
+    /// See [`Self::all`].
+    fn any(&self) -> PyResult<bool> {
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "cannot perform any with this index type: MultiIndex",
+        ))
     }
 
     fn append(&self, other: &PyMultiIndex) -> PyResult<Self> {
@@ -15180,21 +15307,37 @@ impl PyMultiIndex {
             .map_err(index_error_to_py)
     }
 
+    /// The position of the first largest tuple (see [`Self::extreme`]); a
+    /// tuple is never missing, so `skipna` changes nothing, as pandas'.
     #[pyo3(signature = (axis=None, skipna=true))]
     fn argmax(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
-        let flat = self.inner.to_flat_index("/");
-        index_arg_extreme(py, &flat, "MultiIndex", true, axis, skipna)
+        let _ = skipna;
+        one_dim_axis(axis)?;
+        let at = self.extreme(true).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "attempt to get argmax of an empty sequence",
+            )
+        })?;
+        NumpyInt64::from(at).into_py_any(py)
     }
 
+    /// See [`Self::argmax`].
     #[pyo3(signature = (axis=None, skipna=true))]
     fn argmin(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
-        let flat = self.inner.to_flat_index("/");
-        index_arg_extreme(py, &flat, "MultiIndex", false, axis, skipna)
+        let _ = skipna;
+        one_dim_axis(axis)?;
+        let at = self.extreme(false).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "attempt to get argmin of an empty sequence",
+            )
+        })?;
+        NumpyInt64::from(at).into_py_any(py)
     }
 
+    /// The positions sorting the tuples (level by level, as pandas'); the
+    /// flat text put ('a', 10) before ('a', 9) (hp180).
     fn argsort(&self) -> IndexerArray {
-        let flat = self.inner.to_flat_index("/");
-        PyIndex { inner: flat }.argsort()
+        self.inner.argsort().into()
     }
 
     /// pandas' `Index.array` (see [`index_array`]; it was a method
@@ -15269,10 +15412,22 @@ impl PyMultiIndex {
             .map_err(index_error_to_py)
     }
 
+    /// pandas subtracts the tuples, a TypeError once any pair meets (it
+    /// subtracted the flat text into NaN; hp180); too short to pair, all
+    /// NaN.
     #[pyo3(signature = (periods=1))]
     fn diff(&self, periods: i64) -> PyResult<PyIndex> {
-        let flat = self.inner.to_flat_index("/");
-        PyIndex { inner: flat }.diff(periods)
+        if usize::try_from(periods.unsigned_abs()).is_ok_and(|lag| lag < self.inner.len()) {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "unsupported operand type(s) for -: 'tuple' and 'tuple'",
+            ));
+        }
+        Ok(PyIndex {
+            inner: Index::new(vec![
+                IndexLabel::Float64(OrderedF64(f64::NAN));
+                self.inner.len()
+            ]),
+        })
     }
 
     fn drop(&self, labels: &Bound<'_, PyAny>) -> PyResult<Self> {
@@ -15512,13 +15667,29 @@ impl PyMultiIndex {
             .map(Bound::unbind)
     }
 
+    /// pandas' `Index.groupby(values)`: each distinct value of `values`
+    /// (sorted, a missing one left out) to the MultiIndex of the tuples at
+    /// its positions (they were an Index of the flat text; hp180).
     fn groupby(
         &self,
         py: Python<'_>,
         values: &Bound<'_, PyAny>,
     ) -> PyResult<Py<pyo3::types::PyDict>> {
-        let flat = self.inner.to_flat_index("/");
-        PyIndex { inner: flat }.groupby(py, values)
+        let mut groups: BTreeMap<IndexLabel, Vec<usize>> = BTreeMap::new();
+        for (position, item) in values.try_iter()?.enumerate().take(self.inner.len()) {
+            let key = py_to_index_label(&item?)?;
+            if !key.is_missing() {
+                groups.entry(key).or_default().push(position);
+            }
+        }
+        let dict = PyDict::new(py);
+        for (key, positions) in groups {
+            let members = Self {
+                inner: self.inner.take(&positions).map_err(index_error_to_py)?,
+            };
+            dict.set_item(index_label_to_py(py, &key)?, Bound::new(py, members)?)?;
+        }
+        Ok(dict.unbind())
     }
 
     fn identical(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -15635,27 +15806,27 @@ impl PyMultiIndex {
             .map_err(index_error_to_py)
     }
 
-    #[pyo3(signature = (mapper, na_action=None))]
-    fn map(
-        &self,
-        py: Python<'_>,
-        mapper: &Bound<'_, PyAny>,
-        na_action: Option<&str>,
-    ) -> PyResult<PyIndex> {
-        let flat = self.inner.to_flat_index("/");
-        PyIndex { inner: flat }.map(py, mapper, na_action)
-    }
-
+    /// pandas' largest tuple (its numbers numpy scalars; NaN when empty);
+    /// it was the flat text ('b/1'), ordered as text (hp180).
     #[pyo3(signature = (axis=None, skipna=true))]
     fn max(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
-        let flat = self.inner.to_flat_index("/");
-        PyIndex { inner: flat }.max(py, axis, skipna)
+        let _ = skipna;
+        one_dim_axis(axis)?;
+        match self.extreme(true) {
+            Some(at) => self.numpy_tuple(py, at),
+            None => f64::NAN.into_py_any(py),
+        }
     }
 
+    /// See [`Self::max`].
     #[pyo3(signature = (axis=None, skipna=true))]
     fn min(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
-        let flat = self.inner.to_flat_index("/");
-        PyIndex { inner: flat }.min(py, axis, skipna)
+        let _ = skipna;
+        one_dim_axis(axis)?;
+        match self.extreme(false) {
+            Some(at) => self.numpy_tuple(py, at),
+            None => f64::NAN.into_py_any(py),
+        }
     }
 
     #[getter]
@@ -41103,10 +41274,13 @@ impl PyDataFrame {
             .map(|position| self.column_key_py(py, position))
             .collect::<PyResult<Vec<_>>>()?;
 
-        if self.inner.index().has_duplicates() && (orient == "dict" || orient == "index") {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "DataFrame.index must be unique for orient='{orient}'"
-            )));
+        // Only orient='index' needs unique row keys: 'dict' is each column's
+        // Series.to_dict, the last row under a repeated label winning, as
+        // pandas' (it raised too; br-frankenpandas-kd16w).
+        if self.inner.index().has_duplicates() && orient == "index" {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "DataFrame index must be unique for orient='index'.",
+            ));
         }
         // Every column by position: under a repeated key each column is its
         // own (the dict keeps the last, as pandas', which warns so).

@@ -21727,3 +21727,118 @@ _E83_CASES = {
 def test_everyday83_points_over_an_interval_index_like_pandas_l0cqv(case: str) -> None:
     run = _E83_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-hp180: MultiIndex.map handed the mapper the flat label
+# text ('v/x'), so columns.map('_'.join) joined its characters.
+def _e84_mi(m: Any) -> Any:
+    return m.MultiIndex.from_tuples([("v", "x"), ("w", 1)], names=["a", "b"])
+
+
+def _e84_shown(out: Any) -> list:
+    return [type(out).__name__, out.tolist(), str(out.dtype), list(out.names)]
+
+
+def _e84_ordered(m: Any) -> Any:
+    return m.MultiIndex.from_tuples([("a", 9), ("a", 10), ("b", 1)], names=["k", "n"])
+
+
+_E84_CASES = {
+    "join text": lambda m: _e84_shown(m.MultiIndex.from_tuples([("v", "x"), ("w", "y")]).map("_".join)),
+    "pivot columns join": lambda m: _e84_shown(
+        m.DataFrame({"k": ["a", "a", "b"], "t": ["x", "y", "x"], "v": [1, 2, 3], "w": [4, 5, 6]})
+        .pivot(index="k", columns="t", values=["v", "w"])
+        .columns.map("_".join)
+    ),
+    "tuple result": lambda m: _e84_shown(_e84_mi(m).map(lambda t: (t[1], t[0]))),
+    "dict": lambda m: _e84_shown(_e84_mi(m).map({("v", "x"): 1, ("w", 1): 2})),
+    "series": lambda m: _e84_shown(_e84_mi(m).map(m.Series({("v", "x"): 10}))),
+    "element lambda": lambda m: _e84_shown(_e84_mi(m).map(lambda t: f"{t[0]}{t[1]}")),
+    # The other methods that read the flat text: tuples order level by
+    # level (('a', 9) before ('a', 10)).
+    "max min": lambda m: [_e84_ordered(m).max(), _e84_ordered(m).min()],
+    "argmax argmin": lambda m: [_e84_ordered(m).argmax(), _e84_ordered(m).argmin()],
+    "argsort": lambda m: [_e84_ordered(m).argsort().tolist()],
+    "to_series": lambda m: (lambda s: [type(s.index).__name__, s.index.tolist(), s.tolist(), str(s.dtype)])(
+        _e84_ordered(m).to_series()
+    ),
+    "groupby": lambda m: [{k: v.tolist() for k, v in _e84_ordered(m).groupby(np.array([1, 1, 2])).items()}],
+    "value_counts": lambda m: (lambda s: [s.index.tolist(), list(s.index.names), s.tolist(), s.name])(
+        _e84_ordered(m).append(m.MultiIndex.from_tuples([("b", 1)])).value_counts()
+    ),
+    "value_counts normalize unsorted": lambda m: (lambda s: [s.index.tolist(), s.tolist(), s.name])(
+        _e84_ordered(m).append(m.MultiIndex.from_tuples([("b", 1)])).value_counts(normalize=True, sort=False)
+    ),
+    "diff": lambda m: [_e84_ordered(m).diff()],
+    "any": lambda m: [_e84_ordered(m).any()],
+    # Negatives: already pandas'.
+    "bad na_action": lambda m: _e84_shown(_e84_mi(m).map(str, na_action="x")),
+    "sort_values": lambda m: [_e84_ordered(m).sort_values().tolist()],
+    "first character": lambda m: _e84_shown(_e84_mi(m).map(lambda t: t[0])),
+    "tolist": lambda m: [_e84_mi(m).tolist()],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E84_CASES))
+def test_everyday84_multiindex_map_reads_tuples_like_pandas_hp180(case: str) -> None:
+    run = _E84_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-fsf9r: mode(axis=1) labelled its columns '0', '1'.
+def _e85_shown(frame: Any) -> list:
+    return [frame.columns.tolist(), [str(t) for t in frame.dtypes], frame.values.tolist()]
+
+
+_E85_CASES = {
+    "columns": lambda m: [m.DataFrame({"a": [1, 2], "b": [1, 3], "c": [2, 3]}).mode(axis=1).columns.tolist()],
+    "columns type": lambda m: [type(m.DataFrame({"a": [1, 2], "b": [1, 3]}).mode(axis=1).columns).__name__],
+    "ties": lambda m: _e85_shown(m.DataFrame({"a": [1, 2], "b": [2, 3], "c": [3, 3]}).mode(axis=1)),
+    "select by integer": lambda m: m.DataFrame({"a": [1, 2], "b": [1, 3]}).mode(axis=1)[0].tolist(),
+    # A row with fewer modes pads: numpy numbers float64 throughout, masked
+    # Int64 kept (with <NA>).
+    "padded ints": lambda m: _e85_shown(m.DataFrame({"a": [1, 2], "b": [1, 3]}).mode(axis=1)),
+    "padded masked": lambda m: _e85_shown(
+        m.DataFrame({"a": m.array([1, 2], dtype="Int64"), "b": m.array([1, 3], dtype="Int64")}).mode(axis=1)
+    ),
+    "masked not padded": lambda m: _e85_shown(
+        m.DataFrame({"a": m.array([1, 2], dtype="Int64"), "b": m.array([1, 2], dtype="Int64")}).mode(axis=1)
+    ),
+    "numeric_only": lambda m: _e85_shown(
+        m.DataFrame({"a": [1, 2], "b": [1, 3], "s": ["x", "y"]}).mode(axis=1, numeric_only=True)
+    ),
+    # Negatives: mode over the rows keeps the source columns; ints not
+    # padded stay int64; text beside ints keeps them ints.
+    "axis 0 columns": lambda m: [m.DataFrame({"a": [1, 1], "b": [2, 3]}).mode().columns.tolist()],
+    "ints not padded": lambda m: _e85_shown(m.DataFrame({"a": [1, 2], "b": [1, 2]}).mode(axis=1)),
+    "ints beside text": lambda m: _e85_shown(m.DataFrame({"a": [1, "x"], "b": [1, "x"]}).mode(axis=1)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E85_CASES))
+def test_everyday85_mode_axis1_integer_columns_like_pandas_fsf9r(case: str) -> None:
+    run = _E85_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-kd16w: to_dict('dict') refused a repeated index.
+def _e86_dup(m: Any) -> Any:
+    return m.DataFrame({"a": [1, 2], "b": [3, 4]}, index=["x", "x"])
+
+
+_E86_CASES = {
+    "dict repeated index": lambda m: [_e86_dup(m).to_dict()],
+    "index repeated index": lambda m: [_e86_dup(m).to_dict("index")],
+    # Negatives: already pandas'.
+    "list repeated index": lambda m: [_e86_dup(m).to_dict("list")],
+    "records repeated index": lambda m: [_e86_dup(m).to_dict("records")],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E86_CASES))
+def test_everyday86_to_dict_repeated_index_like_pandas_kd16w(case: str) -> None:
+    run = _E86_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

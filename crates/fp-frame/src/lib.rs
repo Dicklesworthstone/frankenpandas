@@ -94019,7 +94019,8 @@ impl DataFrame {
     }
 
     fn mode_axis1(&self, numeric_only: bool, dropna: bool) -> Result<Self, FrameError> {
-        // Per br-frankenpandas-uy9z2: include Timedelta64 in numeric_only.
+        // Per br-frankenpandas-uy9z2: include Timedelta64 in numeric_only;
+        // masked numbers too (fsf9r).
         let selected_columns = self
             .column_order
             .iter()
@@ -94027,7 +94028,13 @@ impl DataFrame {
                 !numeric_only
                     || matches!(
                         self.columns[name.as_str()].dtype(),
-                        DType::Bool | DType::Int64 | DType::Float64 | DType::Timedelta64
+                        DType::Bool
+                            | DType::Int64
+                            | DType::Float64
+                            | DType::Timedelta64
+                            | DType::Int64Nullable
+                            | DType::Float64Nullable
+                            | DType::BoolNullable
                     )
             })
             .cloned()
@@ -94054,6 +94061,36 @@ impl DataFrame {
         }
 
         let mode_columns = (0..max_modes).map(|i| i.to_string()).collect::<Vec<_>>();
+        // pandas frames the rows' modes, so a row with fewer modes than
+        // another is padded with a missing value: numpy numbers are then
+        // float64 throughout, and masked columns keep their masked dtype
+        // (Int64 with <NA>; Float64 beside a Float64 column). They were an
+        // int64 column holding NaN (br-frankenpandas-fsf9r).
+        let padded = row_modes.iter().any(|modes| modes.len() < max_modes);
+        let source_dtypes: Vec<DType> = selected_columns
+            .iter()
+            .map(|name| self.columns[name.as_str()].dtype())
+            .collect();
+        let numpy_numbers = source_dtypes
+            .iter()
+            .all(|dtype| matches!(dtype, DType::Int64 | DType::Float64));
+        let masked = if source_dtypes
+            .iter()
+            .all(|dtype| *dtype == DType::BoolNullable)
+        {
+            Some(DType::BoolNullable)
+        } else if source_dtypes
+            .iter()
+            .all(|dtype| matches!(dtype, DType::Int64Nullable | DType::Float64Nullable))
+        {
+            Some(if source_dtypes.contains(&DType::Float64Nullable) {
+                DType::Float64Nullable
+            } else {
+                DType::Int64Nullable
+            })
+        } else {
+            None
+        };
         let padded_rows = row_modes
             .into_iter()
             .map(|mut modes| {
@@ -94074,22 +94111,33 @@ impl DataFrame {
         let any_source_is_float = selected_columns
             .iter()
             .any(|name| matches!(self.columns[name.as_str()].dtype(), DType::Float64));
+        let to_float = masked.is_none() && (any_source_is_float || (padded && numpy_numbers));
 
         let mut result_cols = BTreeMap::new();
         for (col_idx, name) in mode_columns.iter().enumerate() {
             let mut values: Vec<Scalar> =
                 padded_rows.iter().map(|row| row[col_idx].clone()).collect();
-            if any_source_is_float {
+            if to_float {
                 for value in &mut values {
                     if let Scalar::Int64(v) = *value {
                         *value = Scalar::Float64(v as f64);
                     }
                 }
             }
-            result_cols.insert(name.clone(), build_mode_column(values)?);
+            let column = match &masked {
+                Some(dtype) => Column::new(dtype.clone(), values)?,
+                None => build_mode_column(values)?,
+            };
+            result_cols.insert(name.clone(), column);
         }
 
-        Self::new_with_axis(self.index.clone(), result_cols, mode_columns)
+        // The columns are pandas' RangeIndex 0..n (they were the text '0',
+        // '1'; br-frankenpandas-fsf9r).
+        let span = (0, i64::try_from(max_modes).unwrap_or(i64::MAX), 1);
+        Ok(
+            Self::new_with_axis(self.index.clone(), result_cols, mode_columns)?
+                .with_column_range(span),
+        )
     }
 
     /// Internal: reduce each numeric column to a single scalar via the named function.
@@ -173523,6 +173571,39 @@ mod tests {
                 Scalar::Null(NullKind::NaN),
             ]
         );
+    }
+
+    /// pandas 2.2.3: mode(axis=1)'s columns are the RangeIndex 0..n, and a
+    /// row padded with a missing mode makes numpy ints float64 throughout
+    /// (br-frankenpandas-fsf9r).
+    #[test]
+    fn df_mode_axis1_range_columns_and_padded_float_fsf9r() {
+        let frame = |b: i64| {
+            DataFrame::from_dict(
+                &["a", "b"],
+                vec![
+                    ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                    ("b", vec![Scalar::Int64(1), Scalar::Int64(b)]),
+                ],
+            )
+            .unwrap()
+        };
+        let padded = frame(3).mode_with_options(1, false, true).unwrap();
+        assert_eq!(
+            padded.column_labels(),
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)]
+        );
+        assert_eq!(padded.column_range_span(), Some((0, 2, 1)));
+        let first = padded.column("0").unwrap();
+        assert_eq!(first.dtype(), DType::Float64);
+        assert_eq!(
+            first.values(),
+            &[Scalar::Float64(1.0), Scalar::Float64(2.0)]
+        );
+        // No row padded: the ints stay int64.
+        let even = frame(2).mode_with_options(1, false, true).unwrap();
+        assert_eq!(even.column("0").unwrap().dtype(), DType::Int64);
+        assert_eq!(even.column_labels(), vec![IndexLabel::Int64(0)]);
     }
 
     #[test]
