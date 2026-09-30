@@ -20988,3 +20988,37 @@ _E69_CASES = {
 def test_everyday69_tz_aware_cells_keep_their_zone_like_pandas_wuize(case: str) -> None:
     run = _E69_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-o2e2r: .dt.unit / as_unit / freq / to_pydatetime and a
+# timedelta's .dt.to_pytimedelta were missing.
+def _e70_dates(m: Any) -> Any:
+    return m.Series(m.to_datetime(["2024-01-15 10:30", None, "2024-12-31 00:00"]), name="t")
+
+
+_E70_CASES = {
+    "unit": lambda m: [
+        _e70_dates(m).dt.unit,
+        m.Series(m.to_timedelta(["1 days"])).dt.unit,
+        _e70_dates(m).dt.tz_localize("UTC").dt.unit,
+    ],
+    "as_unit ns": lambda m: [str(_e70_dates(m).dt.as_unit("ns").dtype)],
+    "freq": lambda m: [
+        m.Series(m.date_range("2024-01-01", periods=4, freq="D")).dt.freq,
+        m.Series(m.date_range("2024-01-01", periods=2, freq="D")).dt.freq,
+        _e70_dates(m).dt.freq,
+    ],
+    "to_pydatetime": lambda m: [_e70_dates(m).dt.to_pydatetime().tolist()],
+    "to_pydatetime zone": lambda m: [str(x) for x in _e70_dates(m).dt.tz_localize("UTC").dt.to_pydatetime()],
+    "to_pytimedelta": lambda m: [m.Series(m.to_timedelta(["1 days 02:03:04", None])).dt.to_pytimedelta().tolist()],
+    # Negatives: already pandas'.
+    "hour": lambda m: [_e70_dates(m).dt.hour.tolist()],
+    "total_seconds": lambda m: [m.Series(m.to_timedelta(["1 days"])).dt.total_seconds().tolist()],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E70_CASES))
+def test_everyday70_dt_unit_freq_python_objects_like_pandas_o2e2r(case: str) -> None:
+    run = _E70_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

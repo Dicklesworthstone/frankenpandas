@@ -52346,6 +52346,55 @@ impl PySeriesDatetimeAccessor {
     fn normalize(&self) -> PyResult<PySeries> {
         self.wrap(|dt| dt.normalize())
     }
+    /// pandas' `.dt.unit`: the values' resolution - nanoseconds here (it
+    /// was missing; br-frankenpandas-o2e2r).
+    #[getter]
+    fn unit(&self) -> &'static str {
+        "ns"
+    }
+    /// pandas' `.dt.as_unit(unit)`: 'ns' is the Series as it is; another
+    /// resolution is refused (every column holds nanoseconds).
+    fn as_unit(&self, unit: &str) -> PyResult<PySeries> {
+        if unit != "ns" {
+            return Err(not_implemented(&format!(
+                "dt.as_unit('{unit}') (nanosecond resolution only)"
+            )));
+        }
+        Ok(PySeries {
+            inner: self.series.clone(),
+        })
+    }
+    /// pandas' `.dt.freq`: the frequency the instants infer (None under
+    /// three values, with a NaT or with no regular step).
+    #[getter]
+    fn freq(&self) -> Option<String> {
+        let nanos: Option<Vec<i64>> = self
+            .series
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Datetime64(nanos) if *nanos != Timestamp::NAT => Some(*nanos),
+                _ => None,
+            })
+            .collect();
+        fp_index::infer_freq_from_nanos(&nanos?).ok().flatten()
+    }
+    /// pandas' `.dt.to_pydatetime()`: an object ndarray of datetime.datetime
+    /// (a zone kept, NaT kept), with pandas 2.2's FutureWarning.
+    fn to_pydatetime<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        PyErr::warn(
+            py,
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            c"The behavior of DatetimeProperties.to_pydatetime is deprecated, in a future version this will return a Series containing python datetime objects instead of an ndarray. To retain the old behavior, call `np.array` on the result",
+            1,
+        )?;
+        self.python_objects(py, "to_pydatetime")
+    }
+    /// pandas' `.dt.to_pytimedelta()`: an object ndarray of
+    /// datetime.timedelta, NaT kept.
+    fn to_pytimedelta<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.python_objects(py, "to_pytimedelta")
+    }
     /// pandas' `.dt.isocalendar()`: the ISO year, week and weekday (Monday
     /// 1) of each instant under its row label, <NA> at NaT (it was an
     /// unknown attribute), in pandas' nullable UInt32 (the width tag of
@@ -52500,6 +52549,27 @@ impl PySeriesDatetimeAccessor {
 }
 
 impl PySeriesDatetimeAccessor {
+    /// Each value's scalar `method()` (Timestamp.to_pydatetime,
+    /// Timedelta.to_pytimedelta) in an object ndarray, NaT kept.
+    fn python_objects<'py>(&self, py: Python<'py>, method: &str) -> PyResult<Bound<'py, PyAny>> {
+        let column = self.series.column();
+        let items = column
+            .values()
+            .iter()
+            .map(|value| {
+                let cell = cell_to_py(py, column, value)?;
+                if value.is_missing() {
+                    return Ok(cell);
+                }
+                Ok(cell.bind(py).call_method0(method)?.unbind())
+            })
+            .collect::<PyResult<Vec<Py<PyAny>>>>()?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", "object")?;
+        py.import("numpy")?
+            .call_method("array", (PyList::new(py, items)?,), Some(&kwargs))
+    }
+
     /// Each instant's Timestamp `method()` (`date` / `time` / `timetz`) as an
     /// object cell, NaT kept NaT. As pandas re-infers an object column that
     /// is all NaT, a non-empty all-NaT result is datetime64[ns]. A duration or
