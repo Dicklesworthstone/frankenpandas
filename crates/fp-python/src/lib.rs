@@ -7073,6 +7073,52 @@ fn contiguous_text_column<'py>(
     (offsets.len() > 1).then(|| Column::from_utf8_contiguous(bytes, offsets))
 }
 
+/// A list of narrow numpy number scalars (np.float32, np.int8, np.uint16:
+/// widths the engine tags) as numpy's array of them, in the dtype numpy
+/// promotes them to while that stays narrow (int8 with int16 is int16), as
+/// pandas infers it (each item was read through py_to_scalar into a 64-bit
+/// column; br-frankenpandas-mwuhp). None for any other list, and for signed
+/// with unsigned ints among them, which pandas keeps as objects.
+fn narrow_numpy_list_column(py: Python<'_>, list: &Bound<'_, PyList>) -> PyResult<Option<Column>> {
+    // The numpy kind ('i', 'u', 'f') of a narrow numpy number scalar.
+    let narrow_kind = |item: &Bound<'_, PyAny>| -> PyResult<Option<String>> {
+        if item.get_type().module()?.to_str()? != "numpy" {
+            return Ok(None);
+        }
+        let Ok(dtype) = item.getattr("dtype") else {
+            return Ok(None);
+        };
+        if NumericWidth::parse(&dtype.getattr("name")?.extract::<String>()?).is_none() {
+            return Ok(None);
+        }
+        Ok(Some(dtype.getattr("kind")?.extract::<String>()?))
+    };
+    if list.is_empty() {
+        return Ok(None);
+    }
+    let (mut signed, mut unsigned) = (false, false);
+    for item in list.iter() {
+        match narrow_kind(&item)?.as_deref() {
+            Some("i") => signed = true,
+            Some("u") => unsigned = true,
+            Some(_) => {}
+            None => return Ok(None),
+        }
+    }
+    if signed && unsigned {
+        return Ok(None);
+    }
+    let array = py.import("numpy")?.call_method1("array", (list,))?;
+    let name = array
+        .getattr("dtype")?
+        .getattr("name")?
+        .extract::<String>()?;
+    if NumericWidth::parse(&name).is_none() {
+        return Ok(None);
+    }
+    py_array_like_column(py, &array)
+}
+
 /// A native-order numpy array's elements through the buffer protocol: one
 /// copy, a strided view gathered by `PyBuffer_ToContiguous`. The caller
 /// checks the byte order (see [`py_array_like_column`]).
@@ -26990,8 +27036,13 @@ impl PySeries {
 
         if let Ok(list) = data.cast::<PyList>() {
             // A list of text is one contiguous Utf8 column (and, with no
-            // index=, the default range built as one; br-frankenpandas-mf3tj).
-            if let Some(column) = contiguous_text_column(list.iter()) {
+            // index=, the default range built as one; br-frankenpandas-mf3tj);
+            // a list of one narrow numpy scalar type keeps its width (mwuhp).
+            let typed = match narrow_numpy_list_column(py, list)? {
+                Some(column) => Some(column),
+                None => contiguous_text_column(list.iter()),
+            };
+            if let Some(column) = typed {
                 let rows = match index {
                     None => Index::default_range(column.len()),
                     Some(index) => index_arg_rows(index, column.len())?,
@@ -37706,8 +37757,13 @@ impl PyDataFrame {
                             detected_nrows = Some(list.len());
                         }
                         // A list of text is one contiguous Utf8 column
-                        // (br-frankenpandas-mf3tj).
-                        match contiguous_text_column(list.iter()) {
+                        // (br-frankenpandas-mf3tj); a list of one narrow
+                        // numpy scalar type keeps its width (mwuhp).
+                        let typed = match narrow_numpy_list_column(py, list)? {
+                            Some(column) => Some(column),
+                            None => contiguous_text_column(list.iter()),
+                        };
+                        match typed {
                             Some(column) => column,
                             None => {
                                 let scalars: Vec<Scalar> = list

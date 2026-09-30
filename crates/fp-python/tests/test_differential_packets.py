@@ -23067,3 +23067,39 @@ _E111_CASES = {
 def test_everyday111_float32_meets_python_numbers_like_pandas_czode(case: str) -> None:
     run = _E111_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-mwuhp: a list of one narrow numpy scalar type keeps that
+# dtype (each item was read as a Python number into a 64-bit column).
+def _e112_shown(s: Any) -> list:
+    return [str(s.dtype), repr(s.tolist())]
+
+
+_E112_CASES = {
+    "float32": lambda m: _e112_shown(m.Series([np.float32(1.5), np.float32(2)])),
+    "int32": lambda m: _e112_shown(m.Series([np.int32(7), np.int32(-8)])),
+    "int8": lambda m: _e112_shown(m.Series([np.int8(127), np.int8(-128)])),
+    "uint16": lambda m: _e112_shown(m.Series([np.uint16(65535), np.uint16(1)])),
+    "float32 with index": lambda m: m.Series([np.float32(0.1), np.float32(0.2)], index=["a", "b"]).to_string().split("\n"),
+    "frame column": lambda m: [str(t) for t in m.DataFrame({"a": [np.int16(1), np.int16(2)], "b": [1.0, 2.0]}).dtypes],
+    "float32 ops after": lambda m: _e112_shown(m.Series([np.float32(0.1), np.float32(0.7)]) * 3),
+    "float32 nan": lambda m: _e112_shown(m.Series([np.float32(1.0), np.float32("nan")])),
+    "int8 and int16": lambda m: _e112_shown(m.Series([np.int8(1), np.int16(2)])),
+    "int8 and float32": lambda m: _e112_shown(m.Series([np.int8(1), np.float32(2.5)])),
+    # Negatives: a Python number among them, 64-bit scalars and an empty list
+    # keep the list path. (Signed with unsigned numpy ints is pandas' object
+    # column of the scalars; the list path's int64 there is
+    # br-frankenpandas-exm3i.)
+    "float32 and float": lambda m: _e112_shown(m.Series([np.float32(1.5), 2.0])),
+    "float64 scalars": lambda m: _e112_shown(m.Series([np.float64(1.5), np.float64(2)])),
+    "int64 scalars": lambda m: _e112_shown(m.Series([np.int64(1), np.int64(2)])),
+    "empty list": lambda m: _e112_shown(m.Series([], dtype=float)),
+    "bool scalars": lambda m: _e112_shown(m.Series([np.bool_(True), np.bool_(False)])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E112_CASES))
+def test_everyday112_narrow_numpy_scalar_list_like_pandas_mwuhp(case: str) -> None:
+    run = _E112_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
