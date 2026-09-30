@@ -20816,3 +20816,40 @@ _E65_CASES = {
 def test_everyday65_string_dtype_storage_like_pandas_doa3k(case: str) -> None:
     run = _E65_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-p9csw: the frames str.split / rsplit(expand=True),
+# partition / rpartition and extract / extractall build labelled their
+# columns '0', '1', so s.str.split(' ', expand=True)[0] raised KeyError.
+def _e66_names(m: Any) -> Any:
+    return m.Series(["Alice Smith", "bob jones", None, "dave"], name="n")
+
+
+_E66_CASES = {
+    "split expand first column": lambda m: [_e66_names(m).str.split(" ", expand=True)[0].tolist()],
+    "split expand columns": lambda m: [
+        (lambda f: (f.columns.tolist(), str(f.columns.dtype)))(_e66_names(m).str.split(" ", expand=True))
+    ],
+    "split n expand": lambda m: [_e66_names(m).str.split(" ", n=1, expand=True).to_dict()],
+    "rsplit expand": lambda m: [_e66_names(m).str.rsplit(" ", n=1, expand=True)[1].tolist()],
+    "partition": lambda m: [_e66_names(m).str.partition(" ")[2].tolist()],
+    "rpartition columns": lambda m: [_e66_names(m).str.rpartition(" ").columns.tolist()],
+    "extract unnamed": lambda m: [(lambda f: (f.columns.tolist(), f[1].tolist()))(_e66_names(m).str.extract(r"(\w)(\w)"))],
+    "extract named and unnamed": lambda m: [_e66_names(m).str.extract(r"(?P<first>\w)(\w)").columns.tolist()],
+    "extractall columns": lambda m: [_e66_names(m).str.extractall(r"(\w)").columns.tolist()],
+    "assign from split": lambda m: [
+        m.DataFrame({"n": _e66_names(m)}).assign(first=lambda d: d["n"].str.split(" ", expand=True)[0])["first"].tolist()
+    ],
+    # Negatives: already pandas'.
+    "extract named": lambda m: [_e66_names(m).str.extract(r"(?P<a>\w)(?P<b>\w)").columns.tolist()],
+    "split whitespace expand": lambda m: [_e66_names(m).str.split(expand=True).columns.tolist()],
+    "split regex expand": lambda m: [_e66_names(m).str.split(r"\s", regex=True, expand=True)[1].tolist()],
+    "get_dummies columns": lambda m: [m.Series(["a|b", "b"]).str.get_dummies().columns.tolist()],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E66_CASES))
+def test_everyday66_str_expand_column_labels_like_pandas_p9csw(case: str) -> None:
+    run = _E66_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

@@ -51093,7 +51093,9 @@ impl PySeriesStringAccessor {
         let frame = DataFrame::new_with_column_order(flat, columns, names)
             .and_then(|frame| frame.with_row_multiindex(levels))
             .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: frame })
+        Ok(PyDataFrame {
+            inner: group_column_labels(frame),
+        })
     }
 
     // The rest of pandas' string methods over fp-frame's StringAccessor; the
@@ -51296,7 +51298,8 @@ impl PySeriesStringAccessor {
             let s = self.series.str().extract(pat).map_err(frame_error_to_py)?;
             return Ok(Py::new(py, self.finish(s)?)?.into_any());
         }
-        Ok(Py::new(py, PyDataFrame { inner: df })?.into_any())
+        let inner = group_column_labels(df);
+        Ok(Py::new(py, PyDataFrame { inner })?.into_any())
     }
     /// pandas' `split(pat=None, n=-1, expand=False, regex=None)`: a Series of
     /// Python lists, or with `expand=True` a DataFrame of the pieces. As
@@ -51319,7 +51322,8 @@ impl PySeriesStringAccessor {
                 .str()
                 .split_expand_n(literal, parts)
                 .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: df })?.into_any());
+            let inner = positional_column_range(df)?;
+            return Ok(Py::new(py, PyDataFrame { inner })?.into_any());
         }
         let re = py.import("re")?;
         let lists = self.python_lists(py, |text| {
@@ -51354,7 +51358,8 @@ impl PySeriesStringAccessor {
                 .str()
                 .rsplit_df(literal, parts)
                 .map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: df })?.into_any());
+            let inner = positional_column_range(df)?;
+            return Ok(Py::new(py, PyDataFrame { inner })?.into_any());
         }
         let lists = self.python_lists(py, |text| {
             Ok(text.call_method1("rsplit", (pat, n))?.unbind())
@@ -51381,7 +51386,13 @@ impl PySeriesStringAccessor {
             })?;
             return Ok(Py::new(py, parts)?.into_any());
         }
-        Ok(Py::new(py, wrap_frame(self.series.str().partition_df(sep))?)?.into_any())
+        let frame = self
+            .series
+            .str()
+            .partition_df(sep)
+            .map_err(frame_error_to_py)?;
+        let inner = positional_column_range(frame)?;
+        Ok(Py::new(py, PyDataFrame { inner })?.into_any())
     }
     #[pyo3(signature = (sep=" ", expand=true))]
     fn rpartition(&self, py: Python<'_>, sep: &str, expand: bool) -> PyResult<Py<PyAny>> {
@@ -51391,7 +51402,13 @@ impl PySeriesStringAccessor {
             })?;
             return Ok(Py::new(py, parts)?.into_any());
         }
-        Ok(Py::new(py, wrap_frame(self.series.str().rpartition_df(sep))?)?.into_any())
+        let frame = self
+            .series
+            .str()
+            .rpartition_df(sep)
+            .map_err(frame_error_to_py)?;
+        let inner = positional_column_range(frame)?;
+        Ok(Py::new(py, PyDataFrame { inner })?.into_any())
     }
     /// pandas' `get_dummies(sep='|')`: a 0/1 column per distinct token.
     #[pyo3(signature = (sep="|"))]
@@ -51645,6 +51662,31 @@ impl PySeriesStringAccessor {
             .map_err(frame_error_to_py)?;
         self.finish(inner)
     }
+}
+
+/// `frame`'s columns as the RangeIndex pandas gives the frames str.split /
+/// rsplit / partition / rpartition build by position (they were the text
+/// '0', '1', so `s.str.split(' ', expand=True)[0]` raised KeyError;
+/// br-frankenpandas-p9csw).
+fn positional_column_range(frame: DataFrame) -> PyResult<DataFrame> {
+    let stop = i64::try_from(frame.num_columns())
+        .map_err(|_| PyErr::new::<pyo3::exceptions::PyOverflowError, _>("too many columns"))?;
+    Ok(frame.with_column_range((0, stop, 1)))
+}
+
+/// `frame`'s columns as pandas labels str.extract's groups: a named group
+/// by its name, any other by its number, an int (it was the text '0'; a
+/// Python group name cannot be a number; br-frankenpandas-p9csw).
+fn group_column_labels(frame: DataFrame) -> DataFrame {
+    let labels: Vec<IndexLabel> = frame
+        .column_names()
+        .into_iter()
+        .map(|name| match name.parse::<i64>() {
+            Ok(number) if number.to_string() == *name => IndexLabel::Int64(number),
+            _ => IndexLabel::Utf8(name.clone()),
+        })
+        .collect();
+    frame.with_recorded_column_labels(labels)
 }
 
 /// A split's list cells as that Series, or with `expand` widened into
