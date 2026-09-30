@@ -625,6 +625,11 @@ fn pandas_float_cells(values: &[Option<f64>]) -> Vec<String> {
     };
     let fixed = |value: f64| signed(format!("{:.digits$}", value.abs()), value);
     let scientific = |value: f64| {
+        // inf / NaN have no exponent: pandas shows them as the fixed form
+        // does (they came out 'infe+00'; br-frankenpandas-pjww1).
+        if !value.is_finite() {
+            return fixed(value);
+        }
         let text = format!("{:.digits$e}", value.abs());
         let (mantissa, exponent) = text.split_once('e').unwrap_or((text.as_str(), "0"));
         let exponent: i32 = exponent.parse().unwrap_or(0);
@@ -22927,6 +22932,7 @@ fn series_operand(py: Python<'_>, other: &Bound<'_, PyAny>, like: &Series) -> Py
         }
         scalar => scalar,
     };
+    let scalar = weak_float32(like, other, scalar);
     let column = broadcast_column(scalar, like.len())?;
     Series::new(like.name(), like.index().clone(), column).map_err(frame_error_to_py)
 }
@@ -22942,17 +22948,37 @@ fn plain_number_operand(like: &Series, other: &Bound<'_, PyAny>) -> Option<Scala
         return None;
     }
     if other.is_exact_instance_of::<pyo3::types::PyFloat>() && float_values {
-        return other.extract::<f64>().ok().map(Scalar::Float64);
+        return other
+            .extract::<f64>()
+            .ok()
+            .map(|value| weak_float32(like, other, Scalar::Float64(value)));
     }
     if other.is_exact_instance_of::<pyo3::types::PyInt>() {
         let value = other.extract::<i64>().ok()?;
         return Some(if float_values {
-            Scalar::Float64(value as f64)
+            weak_float32(like, other, Scalar::Float64(value as f64))
         } else {
             Scalar::Int64(value)
         });
     }
     None
+}
+
+/// numpy's NEP 50: a Python int / float meeting float32 values is a
+/// float32 - rounded to it before the op, so `s * 0.1` multiplies by
+/// float32(0.1) and `s > 0.1` compares with it (they used the float64 and
+/// only the result was narrowed; br-frankenpandas-czode). Float32 values
+/// held as f64 then combine exactly and narrow once, as numpy's float32
+/// loops round. Any other scalar or column as it is.
+fn weak_float32(like: &Series, other: &Bound<'_, PyAny>, scalar: Scalar) -> Scalar {
+    let weak = other.is_exact_instance_of::<pyo3::types::PyFloat>()
+        || other.is_exact_instance_of::<pyo3::types::PyInt>();
+    match scalar {
+        Scalar::Float64(value) if weak && like.column().width() == Some(NumericWidth::Float32) => {
+            Scalar::Float64(f64::from(value as f32))
+        }
+        scalar => scalar,
+    }
 }
 
 /// `like <op> other` (`other <op> like` when `scalar_left`) for a plain
@@ -22971,14 +22997,19 @@ fn scalar_arith(
 }
 
 /// `like <op> other` for a plain number `other` against unwidened Float64
-/// or Int64 values, through the typed compare_scalar kernel: the answer the
-/// broadcast operand gives, without it (br-frankenpandas-pnxo5).
+/// or Int64 values, or float32 ones (the number a float32 there; see
+/// [`weak_float32`]), through the typed compare_scalar kernel: the answer
+/// the broadcast operand gives, without it (br-frankenpandas-pnxo5).
 fn scalar_comparison(
     like: &Series,
     other: &Bound<'_, PyAny>,
     op: ComparisonOp,
 ) -> Option<PyResult<PySeries>> {
-    if like.column().width().is_some() {
+    if like
+        .column()
+        .width()
+        .is_some_and(|width| width != NumericWidth::Float32)
+    {
         return None;
     }
     let scalar = plain_number_operand(like, other)?;
@@ -89709,6 +89740,17 @@ mod tests {
         assert_eq!(
             cells(&[Some(0.000_012_345), Some(1.0)]),
             [" 0.000012", " 1.000000"]
+        );
+        // inf in a scientific column is 'inf', as pandas (it was 'infe+00';
+        // br-frankenpandas-pjww1).
+        assert_eq!(
+            cells(&[
+                Some(1.5e308),
+                Some(f64::INFINITY),
+                Some(f64::NEG_INFINITY),
+                None
+            ]),
+            [" 1.500000e+308", " inf", "-inf", "NaN"]
         );
         // Timedeltas: whole days print as days only when the column allows.
         const HOUR: i64 = 3_600_000_000_000;

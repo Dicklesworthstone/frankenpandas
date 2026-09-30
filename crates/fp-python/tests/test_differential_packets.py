@@ -23002,3 +23002,68 @@ _E109_CASES = {
 def test_everyday109_loc_on_a_duplicated_int_index_like_pandas_63xxx(case: str) -> None:
     run = _E109_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-pjww1: a float column printed in scientific notation
+# showed inf as 'infe+00'.
+_E110_CASES = {
+    "series inf": lambda m: m.Series([1.5e308, np.inf, -2.0, np.nan], index=list("abcd")).to_string().split("\n"),
+    "series -inf": lambda m: m.Series([1e-9, -np.inf, 3.0]).to_string().split("\n"),
+    "series repr": lambda m: repr(m.Series([1e10, np.inf], name="v")).split("\n"),
+    "frame column": lambda m: m.DataFrame({"a": [1.5e308, -np.inf], "b": [1.0, 2.0]}).to_string().split("\n"),
+    "frame repr": lambda m: repr(m.DataFrame({"a": [2e-8, np.inf, np.nan]})).split("\n"),
+    "float32": lambda m: m.Series(np.array([1e-9, np.inf], dtype="float32")).to_string().split("\n"),
+    "only inf": lambda m: m.Series([np.inf, -np.inf]).to_string().split("\n"),
+    # Negatives: fixed notation keeps its inf; no inf in scientific.
+    "fixed with inf": lambda m: m.Series([1.5, np.inf]).to_string().split("\n"),
+    "scientific no inf": lambda m: m.Series([1.5e308, 2.0]).to_string().split("\n"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E110_CASES))
+def test_everyday110_scientific_float_inf_like_pandas_pjww1(case: str) -> None:
+    run = _E110_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-czode: a Python number meeting float32 values is a
+# float32 (numpy's NEP 50) - it was used as the float64 and only the result
+# narrowed, so s * 0.1 differed in 1 cell of 5 and s > 0.1 at 0.1 itself.
+def _e111_values(m: Any) -> Any:
+    values = (np.random.default_rng(3).random(300) * 100).astype("float32")
+    return m.Series(np.concatenate([values, np.array([0.1, 0.2, 1 / 3, 16777216.0], dtype="float32")]))
+
+
+def _e111_cells(s: Any) -> list:
+    return [str(s.dtype), repr(s.tolist())]
+
+
+_E111_CASES = {
+    **{
+        f"float32 {op}": (lambda op: lambda m: _e111_cells(eval(f"s {op}", {"s": _e111_values(m)})))(op)
+        for op in ["* 0.1", "+ 0.1", "- 1e-3", "/ 0.3", "* 3", "+ 16777217", "* 1e300"]
+    },
+    **{
+        f"float32 reflected {op}": (lambda op: lambda m: _e111_cells(eval(f"{op} s", {"s": _e111_values(m)})))(op)
+        for op in ["0.7 -", "1 /", "0.1 *"]
+    },
+    **{
+        f"float32 compare {op}": (lambda op: lambda m: _e111_cells(eval(f"s {op}", {"s": _e111_values(m)})))(op)
+        for op in ["> 0.1", ">= 0.2", "< 1 / 3", "<= 50.5", "== 0.1", "!= 0.2", "== 16777217", "< 1e30"]
+    },
+    "flex mul": lambda m: _e111_cells(_e111_values(m).mul(0.1)),
+    # Negatives: a numpy float32 scalar is float32 already; float64 values
+    # take the Python float as it is. (A float32 flex op with fill_value
+    # loses the width, br-frankenpandas-ajyln; np.float64 against float32
+    # values, br-frankenpandas-yxqee.)
+    "np.float32 scalar": lambda m: _e111_cells(_e111_values(m) * np.float32(0.1)),
+    "float64 values": lambda m: _e111_cells(_e111_values(m).astype("float64") * 0.1),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E111_CASES))
+def test_everyday111_float32_meets_python_numbers_like_pandas_czode(case: str) -> None:
+    run = _E111_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
