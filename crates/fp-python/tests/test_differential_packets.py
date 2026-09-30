@@ -22626,3 +22626,73 @@ _E103_CASES = {
 def test_everyday103_text_gap_marker_survives_a_take_like_pandas_o2ute(case: str) -> None:
     run = _E103_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-5muaw: concat of frames whose text columns are contiguous
+# (a text list, a unicode array, a str-op output) joins their bytes instead
+# of building every cell.
+def _e104_frame(m: Any, words: list, start: int = 0) -> Any:
+    return m.DataFrame({"n": list(range(start, start + len(words))), "s": words}, index=range(start, start + len(words)))
+
+
+def _e104_shown(frame: Any) -> list:
+    return [str(frame.dtypes.tolist()), *frame.to_string().split("\n")]
+
+
+_E104_CASES = {
+    "two text frames": lambda m: _e104_shown(m.concat([_e104_frame(m, ["a", "", "é"]), _e104_frame(m, ["x", "yz"])])),
+    "ignore_index": lambda m: _e104_shown(
+        m.concat([_e104_frame(m, ["a", "bb"]), _e104_frame(m, ["c"], 5)], ignore_index=True)
+    ),
+    "sliced piece": lambda m: _e104_shown(m.concat([_e104_frame(m, ["a", "b", "c"]).iloc[1:], _e104_frame(m, ["d"])])),
+    "tail then head": lambda m: _e104_shown(
+        m.concat([_e104_frame(m, ["a", "bb", "ccc", "d"]).tail(2), _e104_frame(m, ["a", "bb", "ccc", "d"]).head(3)])
+    ),
+    "series slices": lambda m: m.concat([m.Series(["ab", "c", "dé"]).iloc[1:], m.Series(["x", "y"]).iloc[:1]])
+    .to_string()
+    .split("\n"),
+    "category pieces": lambda m: _e104_shown(
+        m.concat(
+            [m.DataFrame({"s": m.Series(["a", "b"], dtype="category")}), m.DataFrame({"s": m.Series(["b"], dtype="category")})]
+        )
+    ),
+    "str-op pieces": lambda m: _e104_shown(
+        m.concat([m.DataFrame({"s": m.Series(["A", "B"]).str.lower()}), m.DataFrame({"s": m.Series([" C "]).str.strip()})])
+    ),
+    "unicode arrays": lambda m: _e104_shown(
+        m.concat([m.DataFrame({"s": np.array(["ab", "c"])}), m.DataFrame({"s": np.array(["dé"])})])
+    ),
+    "ops on the result": lambda m: [
+        repr(v)
+        for v in m.concat([_e104_frame(m, ["a", "bb"]), _e104_frame(m, ["bb", "c"], 2)])["s"].str.upper().tolist()
+    ]
+    + [str(m.concat([_e104_frame(m, ["a", "bb"]), _e104_frame(m, ["bb"], 2)])["s"].value_counts().to_dict())],
+    "four pieces take": lambda m: m.concat([_e104_frame(m, ["a", "b"])] * 4)["s"].iloc[[0, 3, 7]].tolist(),
+    "series pieces": lambda m: m.concat([m.Series(["a", "é"], name="s"), m.Series(["", "b"], name="s")])
+    .to_string()
+    .split("\n"),
+    "series ignore_index with empty": lambda m: m.concat(
+        [m.Series(np.array(["ab", "c"])), m.Series([], dtype=object), m.Series(["d"]).str.upper()], ignore_index=True
+    )
+    .to_string()
+    .split("\n"),
+    "string dtype series": lambda m: str(
+        m.concat([m.Series(["a"], dtype="string"), m.Series(["b"], dtype="string")]).dtype
+    ),
+    "series None piece": lambda m: m.concat([m.Series(["a"]), m.Series([None, "b"])]).to_string().split("\n"),
+    # Negatives: a None cell, a missing column (an invented NaN gap), a number
+    # among the text and an outer column set take the generic path as before.
+    "None cell": lambda m: _e104_shown(m.concat([_e104_frame(m, ["a", None]), _e104_frame(m, ["c"], 2)])),
+    "missing column": lambda m: _e104_shown(m.concat([_e104_frame(m, ["a"]), m.DataFrame({"n": [7]}, index=[1])])),
+    "number among text": lambda m: _e104_shown(m.concat([_e104_frame(m, ["a"]), m.DataFrame({"n": [1], "s": [2]})])),
+    "join inner": lambda m: _e104_shown(
+        m.concat([_e104_frame(m, ["a"]), m.DataFrame({"s": ["b"], "t": ["c"]}, index=[3])], join="inner")
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E104_CASES))
+def test_everyday104_concat_of_text_frames_like_pandas_5muaw(case: str) -> None:
+    run = _E104_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

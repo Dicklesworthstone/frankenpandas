@@ -66443,11 +66443,42 @@ fn concat_series_columns_storage(
         }
         return Ok(Column::from_i64_values_owned(out));
     }
+    if let Some(column) =
+        concat_contiguous_text(series_list.iter().map(|s| Some(s.column())), total_len)
+    {
+        return Ok(column);
+    }
     let mut values = Vec::with_capacity(total_len);
     for s in series_list {
         values.extend_from_slice(s.values());
     }
     Ok(Column::from_values(values)?)
+}
+
+/// Pieces that are all-valid contiguous Utf8 columns (or row-range views of
+/// one) joined end to end: their bytes, each piece's offsets rebased - the
+/// column `from_values` makes of the same strings, without building any
+/// piece's Scalar view (br-frankenpandas-5muaw). None when a piece is
+/// absent (a concat gap) or any other column.
+fn concat_contiguous_text<'a>(
+    pieces: impl Iterator<Item = Option<&'a Column>>,
+    total_len: usize,
+) -> Option<Column> {
+    let pieces = pieces
+        .map(|column| column.and_then(Column::as_utf8_window))
+        .collect::<Option<Vec<_>>>()?;
+    let mut bytes = Vec::new();
+    let mut offsets = Vec::with_capacity(total_len + 1);
+    offsets.push(0);
+    for (source, source_offsets) in pieces {
+        // A row-less piece (offsets [0]) adds nothing.
+        if let [first, .., last] = *source_offsets {
+            let base = bytes.len();
+            bytes.extend_from_slice(&source[first..last]);
+            offsets.extend(source_offsets[1..].iter().map(|&at| at - first + base));
+        }
+    }
+    Some(Column::from_utf8_contiguous(bytes, offsets))
 }
 
 pub fn concat_series_with_ignore_index(
@@ -66873,6 +66904,14 @@ pub fn concat_dataframes_with_ignore_index(
                 }
                 columns.insert(col_name.clone(), Column::from_i64_values_owned(out));
             }
+            continue;
+        }
+        // Typed TEXT sibling: every frame has this column as all-valid
+        // contiguous Utf8 (no null-fill).
+        if let Some(column) =
+            concat_contiguous_text(frames.iter().map(|frame| frame.column(col_name)), total_len)
+        {
+            columns.insert(col_name.clone(), column);
             continue;
         }
         // FIRST PASS decides the KIND of the gaps before any are minted. A source
@@ -183667,6 +183706,66 @@ mod tests {
         assert_eq!(scaled.values()[1], Scalar::Timedelta64(40));
         assert!(scaled.values()[2].is_missing());
         assert_eq!(scaled.values()[3], Scalar::Timedelta64(160));
+    }
+
+    #[test]
+    fn concat_of_contiguous_text_frames_joins_their_bytes_5muaw() {
+        // Frames whose text column is contiguous concatenate it as bytes -
+        // one piece a row slice whose offsets do not start at zero - and
+        // answer the strings a Scalar-backed concat gives
+        // (br-frankenpandas-5muaw).
+        let text = |values: &[&str]| {
+            let mut bytes = Vec::new();
+            let mut offsets = vec![0];
+            for value in values {
+                bytes.extend_from_slice(value.as_bytes());
+                offsets.push(bytes.len());
+            }
+            Column::from_utf8_contiguous(bytes, offsets)
+        };
+        let frame = |column: Column| {
+            let len = column.len();
+            let mut columns = BTreeMap::new();
+            columns.insert("s".to_string(), column);
+            DataFrame::new_with_column_order(
+                Index::from_range(0, len as i64, 1),
+                columns,
+                vec!["s".to_string()],
+            )
+            .unwrap()
+        };
+        let first = frame(text(&["ab", "", "é"]));
+        let second = frame(text(&["x", "yz", "w"]))
+            .iloc_slice(Some(1), None)
+            .unwrap();
+        let (_, second_offsets) = second.column("s").unwrap().as_utf8_window().unwrap();
+        assert_eq!(second_offsets, &[1, 3, 4]);
+        let joined = concat_dataframes(&[&first, &second]).unwrap();
+        assert!(joined.column("s").unwrap().as_utf8_contiguous().is_some());
+        let expect: Vec<Scalar> = ["ab", "", "é", "yz", "w"]
+            .iter()
+            .map(|&value| Scalar::Utf8(value.into()))
+            .collect();
+        assert_eq!(joined.column("s").unwrap().values(), expect.as_slice());
+        // Negative: a Scalar-backed piece takes the generic path, same strings.
+        let scalar = frame(
+            Column::from_values(vec![Scalar::Utf8("yz".into()), Scalar::Utf8("w".into())]).unwrap(),
+        );
+        let mixed = concat_dataframes(&[&first, &scalar]).unwrap();
+        assert_eq!(mixed.column("s").unwrap().values(), expect.as_slice());
+        // Series pieces, one row-less.
+        let series = |column: Column| {
+            let len = column.len();
+            Series::new("s", Index::from_range(0, len as i64, 1), column).unwrap()
+        };
+        let joined = crate::concat_series(&[
+            &series(text(&["ab", "", "é"])),
+            &series(text(&[])),
+            &series(text(&["yz", "w"])),
+        ])
+        .unwrap();
+        assert!(joined.column().as_utf8_contiguous().is_some());
+        assert_eq!(joined.values(), expect.as_slice());
     }
 
     #[test]

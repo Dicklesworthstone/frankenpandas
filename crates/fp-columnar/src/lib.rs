@@ -14590,6 +14590,30 @@ impl Column {
         }
     }
 
+    /// [`Self::as_utf8_contiguous`] that also borrows a row-range view of
+    /// such a column (`iloc[a:b]`, `head`, `tail`): the source's bytes and
+    /// this column's `len + 1` offsets into them, which need not start at
+    /// zero (br-frankenpandas-5muaw).
+    #[must_use]
+    #[doc(hidden)]
+    pub fn as_utf8_window(&self) -> Option<(&[u8], &[usize])> {
+        if let ScalarValues::LazyUtf8Slice {
+            bytes,
+            offsets,
+            start,
+            len,
+            ..
+        } = &self.values
+            && self.dtype == DType::Utf8
+            && self.validity.all()
+        {
+            return offsets
+                .get(*start..=*start + *len)
+                .map(|window| (bytes.as_ref(), window));
+        }
+        self.as_utf8_contiguous()
+    }
+
     /// Owned `Arc` handles to the same contiguous Utf8 backing that
     /// [`Self::as_utf8_contiguous`] exposes by reference.
     ///
