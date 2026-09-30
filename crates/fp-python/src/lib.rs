@@ -31008,6 +31008,8 @@ impl PySeries {
         };
         let out = match rows {
             Some(rows) => {
+                // A point over an IntervalIndex drops the intervals holding it.
+                let rows = interval_drop_labels(py, self.inner.index(), &rows)?;
                 let wanted = py_label_list(&rows)?;
                 let present: HashSet<&IndexLabel> = self.inner.index().labels().iter().collect();
                 let (found, missing): (Vec<IndexLabel>, Vec<IndexLabel>) = wanted
@@ -31839,6 +31841,35 @@ impl PySeries {
         // Any index-like target (a DatetimeIndex raised TypeError).
         let target = idx_obj.extract::<IndexArg>()?;
         let labels = target.inner.labels().to_vec();
+        // Points over an IntervalIndex take the rows of the intervals
+        // holding them, under the points themselves (pandas' pointwise
+        // get_indexer; they were all NaN, br-frankenpandas-s08y7).
+        if let Some(mapped) = interval_point_targets(self.inner.index(), &labels)? {
+            let mapped = Bound::new(
+                py,
+                PyIndex {
+                    inner: Index::new(mapped),
+                },
+            )?;
+            let out = self.reindex(
+                py,
+                Some(mapped.as_any()),
+                axis,
+                method,
+                copy,
+                level,
+                fill_value,
+                limit,
+                tolerance,
+            )?;
+            let inner = Series::new(
+                out.inner.name(),
+                target.inner.clone(),
+                out.inner.column().clone(),
+            )
+            .map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner });
+        }
         // `level`: the target orders that level of a MultiIndex (see
         // level_reindex_positions; it was refused, br-frankenpandas-u6p7i);
         // a flat index's only level reindexes as without it.
@@ -40043,6 +40074,8 @@ impl PyDataFrame {
         let ignore = errors == "ignore";
         let mut out = self.inner.clone();
         if let Some(rows) = rows {
+            // A point over an IntervalIndex drops the intervals holding it.
+            let rows = interval_drop_labels(rows.py(), out.index(), &rows)?;
             let wanted = py_label_list(&rows)?;
             let present: HashSet<&IndexLabel> = out.index().labels().iter().collect();
             let missing: Vec<IndexLabel> = wanted
@@ -45888,6 +45921,35 @@ impl PyDataFrame {
         if let Some(idx_obj) = target_index {
             // Any index-like target (a DatetimeIndex raised TypeError).
             let target = idx_obj.extract::<IndexArg>()?;
+            // Points over an IntervalIndex take the rows of the intervals
+            // holding them, under the points (they were all NaN; s08y7).
+            if let Some(mapped) = interval_point_targets(self.inner.index(), target.inner.labels())?
+            {
+                let mapped = Bound::new(
+                    py,
+                    PyIndex {
+                        inner: Index::new(mapped),
+                    },
+                )?;
+                let out = self.reindex(
+                    py,
+                    None,
+                    Some(mapped.as_any()),
+                    columns,
+                    None,
+                    method,
+                    copy,
+                    level,
+                    fill_value,
+                    limit,
+                    tolerance,
+                )?;
+                let inner = out
+                    .inner
+                    .with_index(target.inner.clone())
+                    .map_err(frame_error_to_py)?;
+                return Ok(PyDataFrame { inner });
+            }
             let row_labels = target.inner.labels().to_vec();
             // `level`: the target orders that level of a row MultiIndex
             // (level_reindex_positions; it was refused,
@@ -48866,6 +48928,96 @@ fn interval_point_key<'py>(
         return Ok(key.clone());
     }
     Ok(PyList::new(py, expanded)?.into_any())
+}
+
+/// The intervals of an IntervalIndex sorted by their ends, and whether any
+/// two overlap (sorted by left end, an overlap shows in a neighbouring
+/// pair), as pandas' `is_overlapping`.
+fn index_intervals(index: &Index) -> (Vec<fp_types::Interval>, bool) {
+    let mut intervals: Vec<fp_types::Interval> = index
+        .labels()
+        .iter()
+        .filter_map(|label| match label {
+            IndexLabel::Interval(interval) => Some(*interval),
+            _ => None,
+        })
+        .collect();
+    intervals.sort_by(|a, b| a.left.total_cmp(&b.left).then(a.right.total_cmp(&b.right)));
+    let overlapping = intervals.windows(2).any(|pair| pair[0].overlaps(&pair[1]));
+    (intervals, overlapping)
+}
+
+/// A number label as the point pandas compares with interval ends.
+#[allow(clippy::cast_precision_loss)] // an integer point is compared as pandas' float
+fn label_point(label: &IndexLabel) -> Option<f64> {
+    match label {
+        IndexLabel::Int64(v) => Some(*v as f64),
+        IndexLabel::Float64(v) => Some(v.0),
+        _ => None,
+    }
+}
+
+/// Reindex targets over an IntervalIndex as pandas' pointwise get_indexer
+/// reads them: each number the interval holding it (a point none holds
+/// stays, a missing row), any other target itself; None when `index` holds
+/// no intervals or no number target is held. An overlapping index is
+/// pandas' "cannot reindex on an axis with duplicate labels" (s08y7).
+fn interval_point_targets(
+    index: &Index,
+    targets: &[IndexLabel],
+) -> PyResult<Option<Vec<IndexLabel>>> {
+    if !holds_intervals(index) || !targets.iter().any(|label| label_point(label).is_some()) {
+        return Ok(None);
+    }
+    let (intervals, overlapping) = index_intervals(index);
+    if overlapping {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "cannot reindex on an axis with duplicate labels",
+        ));
+    }
+    let point = label_point;
+    let mapped: Vec<IndexLabel> = targets
+        .iter()
+        .map(|label| {
+            point(label)
+                .and_then(|p| intervals.iter().find(|interval| interval.contains(p)))
+                .map_or_else(|| label.clone(), |interval| IndexLabel::Interval(*interval))
+        })
+        .collect();
+    // No point held by an interval: nothing to read pointwise (and the
+    // caller's reindex over the mapped targets ends here).
+    Ok((mapped.as_slice() != targets).then_some(mapped))
+}
+
+/// Labels to drop from an IntervalIndex: a number (or each number of a
+/// list-like) is the intervals holding it, as pandas' get_indexer reads
+/// points; any other labels as they are. `s.drop(1.5)` was "[1.5] not
+/// found in axis" (s08y7).
+fn interval_drop_labels<'py>(
+    py: Python<'py>,
+    index: &Index,
+    labels: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    if !holds_intervals(index) {
+        return Ok(labels.clone());
+    }
+    let listed = if labels.is_instance_of::<pyo3::types::PyString>() || labels.try_iter().is_err() {
+        PyList::new(py, [labels])?.into_any()
+    } else {
+        labels.clone()
+    };
+    // Points over an overlapping index are pandas' InvalidIndexError.
+    let has_point = listed.try_iter()?.any(|item| {
+        item.is_ok_and(|item| {
+            py_to_index_label(&item).is_ok_and(|label| label_point(&label).is_some())
+        })
+    });
+    if has_point && index_intervals(index).1 {
+        return Err(InvalidIndexError::new_err(
+            "cannot handle overlapping indices; use IntervalIndex.get_indexer_non_unique",
+        ));
+    }
+    interval_point_key(py, index, &listed, false)
 }
 
 /// Whether `index` is an IntervalIndex: every label an interval.

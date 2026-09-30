@@ -22001,3 +22001,40 @@ _E89_CASES = {
 def test_everyday89_categorical_index_any_labels_like_pandas_lztvp(case: str) -> None:
     run = _E89_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-s08y7: drop / reindex by points over an IntervalIndex
+# (pandas' pointwise get_indexer); drop was a KeyError, reindex all NaN.
+_E90_CASES = {
+    "drop point": lambda m: _e81_shown(_e83_series(m).drop(1.5)),
+    "drop points": lambda m: _e81_shown(_e83_series(m).drop([0.5, 2.5])),
+    "frame drop point": lambda m: _e81_shown(_e83_frame(m).drop(1.5)),
+    "frame drop index points": lambda m: _e81_shown(_e83_frame(m).drop(index=[0.5])),
+    "drop overlapping point": lambda m: _e81_shown(
+        m.Series([1, 2], index=m.IntervalIndex.from_tuples([(0, 2), (1, 3)])).drop(1.5)
+    ),
+    "reindex points": lambda m: _e81_shown(_e83_series(m).reindex([0.5, 2.5])),
+    "reindex point outside": lambda m: _e81_shown(_e83_series(m).reindex([0.5, 7])),
+    "reindex int points": lambda m: _e81_shown(_e83_series(m).reindex([1, 3])),
+    "reindex fill_value": lambda m: _e81_shown(_e83_series(m).reindex([0.5, 7], fill_value=0)),
+    "reindex overlapping": lambda m: _e81_shown(
+        m.Series([1, 2], index=m.IntervalIndex.from_tuples([(0, 2), (1, 3)])).reindex([0.5])
+    ),
+    "frame reindex points": lambda m: _e81_shown(_e83_frame(m).reindex([0.5, 2.5])),
+    "frame reindex index kw": lambda m: _e81_shown(_e83_frame(m).reindex(index=[1.5])),
+    # Negatives: already pandas'.
+    "drop interval": lambda m: _e81_shown(_e83_series(m).drop(m.Interval(0, 1))),
+    "drop missing point": lambda m: _e81_shown(_e83_series(m).drop(7)),
+    "drop missing ignore": lambda m: _e81_shown(_e83_series(m).drop(7, errors="ignore")),
+    "reindex intervals": lambda m: _e81_shown(_e83_series(m).reindex([m.Interval(1, 2)])),
+    "float index reindex": lambda m: _e81_shown(m.Series([1, 2], index=[0.5, 1.5]).reindex([1.5, 9.5])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E90_CASES))
+def test_everyday90_interval_drop_reindex_points_like_pandas_s08y7(case: str) -> None:
+    run = _E90_CASES[case]
+    # By class name: pandas' InvalidIndexError is pandas.errors', ours
+    # frankenpandas.errors'.
+    assert _mv_outcome(lambda: run(fpd)) == _mv_outcome(lambda: run(pd)), case
