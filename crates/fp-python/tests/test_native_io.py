@@ -148,7 +148,9 @@ def test_reader_on_corrupt_file_raises_instead_of_returning_empty(reader, payloa
         lambda p: fpd.read_hdf(str(p / "x.h5"), "k"),
         lambda p: fpd.read_spss(str(p / "x.sav")),
         lambda p: fpd.HDFStore(str(p / "x.h5")),
-        lambda p: fpd.ExcelWriter(str(p / "x.xlsx")),
+        # TEST-CHANGE (br-frankenpandas-0gmqq): ExcelWriter writes workbooks
+        # now (test_everyday63_...); appending to one (mode='a') stays refused.
+        lambda p: fpd.ExcelWriter(str(p / "x.xlsx"), mode="a"),
         lambda p: _frame().to_hdf(str(p / "x.h5"), key="k"),
         lambda p: _frame().to_orc(str(p / "x.orc")),
         lambda p: _frame().to_gbq("dataset.table"),
@@ -160,7 +162,7 @@ def test_reader_on_corrupt_file_raises_instead_of_returning_empty(reader, payloa
         "read_hdf",
         "read_spss",
         "HDFStore",
-        "ExcelWriter",
+        "ExcelWriter mode a",
         "to_hdf",
         "to_orc",
         "to_gbq",

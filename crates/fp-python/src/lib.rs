@@ -31860,21 +31860,13 @@ impl PySeries {
         protocol: i32,
         storage_options: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
-        unsupported_params(
-            "Series.to_pickle",
-            &[
-                (
-                    "compression",
-                    compression_is_plain(compression, Some(path))?,
-                ),
-                ("storage_options", storage_options.is_none()),
-            ],
-        )?;
         to_pickle(
             py,
             &self.clone().into_bound_py_any(py)?,
             path,
+            compression,
             Some(protocol),
+            storage_options,
         )
     }
 
@@ -46584,16 +46576,18 @@ impl PyDataFrame {
         }
         reject_unsupported_kwargs("to_excel", kwargs, &["engine"])?;
         let frame = select_columns_arg(self.inner.clone(), columns)?;
-        let bytes = fp_io::write_excel_bytes_with_options(
-            &frame,
-            &fp_io::ExcelWriteOptions {
-                sheet_name: sheet_name.to_owned(),
-                index,
-                index_label,
-                header,
-            },
-        )
-        .map_err(io_error_to_py)?;
+        let options = fp_io::ExcelWriteOptions {
+            sheet_name: sheet_name.to_owned(),
+            index,
+            index_label,
+            header,
+        };
+        // An ExcelWriter takes the frame as one sheet of its workbook.
+        if let Ok(writer) = excel_writer.cast::<PyExcelWriter>() {
+            return writer.borrow().add_sheet(frame, options);
+        }
+        let bytes =
+            fp_io::write_excel_bytes_with_options(&frame, &options).map_err(io_error_to_py)?;
         py_output_bytes(py, Some(excel_writer), bytes).map(|_| ())
     }
 
@@ -46846,21 +46840,13 @@ impl PyDataFrame {
         protocol: i32,
         storage_options: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
-        unsupported_params(
-            "DataFrame.to_pickle",
-            &[
-                (
-                    "compression",
-                    compression_is_plain(compression, Some(path))?,
-                ),
-                ("storage_options", storage_options.is_none()),
-            ],
-        )?;
         to_pickle(
             py,
             &self.clone().into_bound_py_any(py)?,
             path,
+            compression,
             Some(protocol),
+            storage_options,
         )
     }
 
@@ -64944,6 +64930,188 @@ fn csv_records(text: &str, delimiter: u8, quote: u8) -> Vec<&str> {
     records
 }
 
+/// The file positions `index_col` names under `header=[...]`: none, one
+/// position or a list of them (names are refused there).
+fn csv_index_positions(index_col: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<usize>> {
+    let Some(index_col) = index_col.filter(|index_col| !index_col.is_none()) else {
+        return Ok(Vec::new());
+    };
+    if index_col.extract::<bool>().is_ok_and(|keep| !keep) {
+        return Ok(Vec::new());
+    }
+    let positions = match index_col.extract::<usize>() {
+        Ok(position) => Ok(vec![position]),
+        Err(_) => index_col.extract::<Vec<usize>>(),
+    };
+    positions.map_err(|_| not_implemented("read_csv(header=<list>, index_col=<name>)"))
+}
+
+/// The rows `read_csv(header=[...])` takes out of the text
+/// ([`csv_multi_header`]), as verbatim text.
+struct CsvHeaderLevels {
+    /// Each column level's row.
+    levels: Vec<Vec<String>>,
+    /// The row naming the index, when the file has one.
+    index_names: Option<Vec<String>>,
+    /// The file positions of the index columns.
+    index_positions: Vec<usize>,
+}
+
+/// pandas' `read_csv(header=[0, 1, ...])`: the rows listed (counted after
+/// the first `skip` records) are the column MultiIndex's levels, a row
+/// between them not listed is dropped, and the data starts after the last.
+/// With index columns the row after the levels names the index when its
+/// other cells are blank, as pandas' parser tells that row from data.
+/// Returns those rows and `text` without them.
+fn csv_multi_header(
+    text: &str,
+    rows: &[usize],
+    skip: usize,
+    index_positions: Vec<usize>,
+    opts: &fp_io::CsvReadOptions,
+) -> PyResult<(CsvHeaderLevels, String)> {
+    let records = csv_records(text, opts.delimiter, opts.quotechar);
+    let body = records.get(skip..).unwrap_or_default();
+    let last = rows.iter().copied().max().unwrap_or(0);
+    if body.len() <= last {
+        let listed: Vec<String> = rows.iter().map(ToString::to_string).collect();
+        return Err(PyErr::new::<ParserError, _>(format!(
+            "Passed header=[{}], len of {}, but only {} lines in file",
+            listed.join(","),
+            rows.len(),
+            body.len()
+        )));
+    }
+    let first_row = |record: &str| -> PyResult<Vec<String>> {
+        Ok(csv_text_rows(record, opts)?
+            .into_iter()
+            .next()
+            .unwrap_or_default())
+    };
+    let levels = rows
+        .iter()
+        .map(|&row| first_row(body[row]))
+        .collect::<PyResult<Vec<Vec<String>>>>()?;
+    let mut consumed = last + 1;
+    let mut index_names = None;
+    if !index_positions.is_empty()
+        && let Some(next) = body.get(consumed)
+    {
+        let row = first_row(next)?;
+        let blanks = row.iter().filter(|cell| cell.is_empty()).count();
+        if row.len().saturating_sub(index_positions.len()) <= blanks {
+            index_names = Some(row);
+            consumed += 1;
+        }
+    }
+    let rest: String = records[..skip.min(records.len())]
+        .iter()
+        .chain(&body[consumed..])
+        .copied()
+        .collect();
+    let header = CsvHeaderLevels {
+        levels,
+        index_names,
+        index_positions,
+    };
+    Ok((header, rest))
+}
+
+/// CSV `records` read as their verbatim text, a row of fields per record
+/// (as pandas reads a header row: no missing values, no types).
+fn csv_text_rows(records: &str, opts: &fp_io::CsvReadOptions) -> PyResult<Vec<Vec<String>>> {
+    let raw = fp_io::CsvReadOptions {
+        delimiter: opts.delimiter,
+        quotechar: opts.quotechar,
+        escapechar: opts.escapechar,
+        doublequote: opts.doublequote,
+        skipinitialspace: opts.skipinitialspace,
+        lineterminator: opts.lineterminator,
+        comment: opts.comment,
+        has_headers: false,
+        na_filter: false,
+        keep_default_na: false,
+        ..fp_io::CsvReadOptions::default()
+    };
+    let width = fp_io::read_csv_with_options(records, &raw)
+        .map_err(io_error_to_py)?
+        .num_columns();
+    let text = fp_io::CsvReadOptions {
+        dtype: Some(
+            (0..width)
+                .map(|position| (position.to_string(), DType::Utf8))
+                .collect(),
+        ),
+        ..raw
+    };
+    let frame = fp_io::read_csv_with_options(records, &text).map_err(io_error_to_py)?;
+    let text_at = |position: usize, row: usize| -> String {
+        match frame.column_at(position).and_then(|c| c.value(row)) {
+            Some(Scalar::Utf8(cell)) => cell.clone(),
+            _ => String::new(),
+        }
+    };
+    Ok((0..frame.index().len())
+        .map(|row| (0..width).map(|position| text_at(position, row)).collect())
+        .collect())
+}
+
+/// The axes pandas builds from `header=[...]`'s rows ([`csv_multi_header`])
+/// over the frame read without them: the columns a MultiIndex of each
+/// non-index column's cells down the rows (a blank one
+/// `Unnamed: {i}_level_{level}`), its levels named by the first index
+/// column's cells, and the index named by the index-names row.
+fn csv_multi_header_axes(frame: DataFrame, header: &CsvHeaderLevels) -> PyResult<DataFrame> {
+    let CsvHeaderLevels {
+        levels,
+        index_names,
+        index_positions,
+    } = header;
+    let named = |cell: Option<&String>| {
+        cell.filter(|cell| !cell.is_empty())
+            .map(|cell| LabelName::from(cell.as_str()))
+    };
+    let width = levels.iter().map(Vec::len).max().unwrap_or(0);
+    let tuples: Vec<Vec<IndexLabel>> = (0..width)
+        .filter(|position| !index_positions.contains(position))
+        .map(|position| {
+            levels
+                .iter()
+                .enumerate()
+                .map(|(level, row)| {
+                    IndexLabel::Utf8(match row.get(position).filter(|cell| !cell.is_empty()) {
+                        Some(cell) => cell.clone(),
+                        None => format!("Unnamed: {position}_level_{level}"),
+                    })
+                })
+                .collect()
+        })
+        .collect();
+    let level_names = levels
+        .iter()
+        .map(|row| index_positions.first().and_then(|&at| named(row.get(at))))
+        .collect();
+    let multi = MultiIndex::from_tuples(tuples)
+        .map_err(index_error_to_py)?
+        .set_names(level_names);
+    let frame = frame_with_column_multiindex(&frame, multi)?;
+    let names: Vec<Option<LabelName>> = index_positions
+        .iter()
+        .map(|&at| index_names.as_ref().and_then(|row| named(row.get(at))))
+        .collect();
+    match (names.as_slice(), frame.row_multiindex().cloned()) {
+        ([], _) => Ok(frame),
+        (_, Some(rows)) => frame
+            .with_row_multiindex(rows.set_names(names))
+            .map_err(frame_error_to_py),
+        ([name], None) => {
+            let index = frame.index().rename_index(name.clone());
+            frame.with_index(index).map_err(frame_error_to_py)
+        }
+        (_, None) => Ok(frame),
+    }
+}
+
 /// One column label from a pandas position-or-name argument.
 fn csv_column_ref(frame: &DataFrame, item: &Bound<'_, PyAny>) -> PyResult<String> {
     if let Ok(position) = item.extract::<usize>() {
@@ -64973,6 +65141,9 @@ fn read_csv_impl(
     // `header` comes through **kwargs so an explicit header=None differs from
     // pandas' default 'infer' (0, or no header row when `names` is given).
     let mut header_row: Option<usize> = if args.names.is_some() { None } else { Some(0) };
+    // header=[0, 1, ...]: the column MultiIndex's rows (see
+    // `csv_multi_header`); the data is then read without a header.
+    let mut header_levels: Option<Vec<usize>> = None;
     if let Some(kwargs) = args.kwargs
         && let Some(header) = kwargs.get_item("header")?
     {
@@ -64983,7 +65154,14 @@ fn read_csv_impl(
         } else if header.extract::<String>().is_ok_and(|s| s == "infer") {
             header_row
         } else {
-            return Err(not_implemented("read_csv(header=<list>)"));
+            match header.extract::<Vec<usize>>()?.as_slice() {
+                [row] => Some(*row),
+                [] => return Err(not_implemented("read_csv(header=[])")),
+                rows => {
+                    header_levels = Some(rows.to_vec());
+                    None
+                }
+            }
         };
         kwargs.del_item("header")?;
     }
@@ -65223,6 +65401,32 @@ fn read_csv_impl(
     } else {
         Vec::new()
     };
+    // header=[...]: its rows leave the text for the column MultiIndex (see
+    // `csv_multi_header`) and the rest reads as header=None. Naming columns
+    // by label alongside stays refused.
+    let multi_header = match &header_levels {
+        None => None,
+        Some(rows) => {
+            if args.names.is_some()
+                || args.usecols.is_some_and(|usecols| !usecols.is_none())
+                || opts.dtype.is_some()
+                || opts.parse_dates.is_some()
+                || !later_dates.is_empty()
+                || converters.is_some()
+                || !categoricals.is_empty()
+                || refinements.iter().any(|(column, _)| column.is_some())
+            {
+                return Err(not_implemented(
+                    "read_csv(header=<list>) with names / usecols / a dtype mapping / parse_dates / converters",
+                ));
+            }
+            let index_positions = csv_index_positions(args.index_col)?;
+            let (header, rest) =
+                csv_multi_header(&text, rows, opts.skiprows, index_positions, &opts)?;
+            text = rest;
+            Some(header)
+        }
+    };
     let mut frame = fp_io::read_csv_with_options(&text, &opts).map_err(io_error_to_py)?;
     if let Some(converters) = &converters {
         frame = apply_csv_converters(py, frame, &text, &opts, converters)?;
@@ -65386,7 +65590,9 @@ fn read_csv_impl(
     // Without a header row or names the columns are pandas' integer labels
     // 0, 1, ... (they were the text '0', '1', so df[0] raised KeyError;
     // br-frankenpandas-jn2nd).
-    if header_row.is_none() && args.names.is_none() {
+    if let Some(header) = &multi_header {
+        frame = csv_multi_header_axes(frame, header)?;
+    } else if header_row.is_none() && args.names.is_none() {
         let labels: Vec<IndexLabel> = frame
             .column_names()
             .into_iter()
@@ -76438,42 +76644,68 @@ pub fn read_table(
     read_csv_impl(py, filepath_or_buffer, b'\t', &args)?.into_py_any(py)
 }
 
+/// pandas' `to_pickle`: `obj` pickled under `protocol` to a path or a
+/// binary file object, compressed as `compression` says - 'infer' by the
+/// path's extension, so `a.pkl.gz` is gzip (it was written raw, and
+/// DataFrame / Series.to_pickle refused it; br-frankenpandas-0gmqq).
 #[pyfunction]
-#[pyo3(signature = (obj, filepath_or_buffer, protocol=5))]
+#[pyo3(signature = (obj, filepath_or_buffer, compression=Some("infer"), protocol=5, storage_options=None))]
 pub fn to_pickle(
     py: Python<'_>,
     obj: &Bound<'_, PyAny>,
     filepath_or_buffer: &Bound<'_, PyAny>,
+    compression: Option<&str>,
     protocol: Option<i32>,
+    storage_options: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<()> {
-    let pickle = py.import("pickle")?;
-    let protocol = protocol.unwrap_or(5);
-    if let Ok(path_str) = filepath_or_buffer.extract::<String>() {
-        let builtins = py.import("builtins")?;
-        let file = builtins.call_method1("open", (path_str, "wb"))?;
-        let res = pickle.call_method1("dump", (obj, &file, protocol));
-        let _ = file.call_method0("close");
-        res?;
-    } else {
-        pickle.call_method1("dump", (obj, filepath_or_buffer, protocol))?;
+    unsupported_params(
+        "to_pickle",
+        &[(
+            "storage_options",
+            storage_options.is_none_or(|options| options.is_none()),
+        )],
+    )?;
+    let data = py
+        .import("pickle")?
+        .call_method1("dumps", (obj, protocol.unwrap_or(5)))?;
+    let data = data.cast::<pyo3::types::PyBytes>()?.as_bytes();
+    if let Some((path, method)) =
+        compressed_write_target("to_pickle", compression, filepath_or_buffer)?
+    {
+        let data = compressed(py, data, &method, &path)?;
+        return std::fs::write(&path, data).map_err(|e| io_error_to_py(fp_io::IoError::Io(e)));
     }
-    Ok(())
+    if filepath_or_buffer.hasattr("write")? {
+        filepath_or_buffer.call_method1("write", (pyo3::types::PyBytes::new(py, data),))?;
+        return Ok(());
+    }
+    std::fs::write(py_fspath(filepath_or_buffer)?, data)
+        .map_err(|e| io_error_to_py(fp_io::IoError::Io(e)))
 }
 
+/// pandas' `read_pickle`: the object pickled at a path or in a binary file
+/// object, decompressed as `compression` says ('infer' by the path's
+/// extension; a .gz was unpickled raw).
 #[pyfunction]
-#[pyo3(signature = (filepath_or_buffer))]
-pub fn read_pickle(py: Python<'_>, filepath_or_buffer: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-    let pickle = py.import("pickle")?;
-    if let Ok(path_str) = filepath_or_buffer.extract::<String>() {
-        let builtins = py.import("builtins")?;
-        let file = builtins.call_method1("open", (path_str, "rb"))?;
-        let res = pickle.call_method1("load", (&file,));
-        let _ = file.call_method0("close");
-        Ok(res?.unbind())
-    } else {
-        let res = pickle.call_method1("load", (filepath_or_buffer,))?;
-        Ok(res.unbind())
-    }
+#[pyo3(signature = (filepath_or_buffer, compression=Some("infer"), storage_options=None))]
+pub fn read_pickle(
+    py: Python<'_>,
+    filepath_or_buffer: &Bound<'_, PyAny>,
+    compression: Option<&str>,
+    storage_options: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    unsupported_params(
+        "read_pickle",
+        &[(
+            "storage_options",
+            storage_options.is_none_or(|options| options.is_none()),
+        )],
+    )?;
+    let data = py_input_bytes_as(filepath_or_buffer, compression)?;
+    Ok(py
+        .import("pickle")?
+        .call_method1("loads", (pyo3::types::PyBytes::new(py, &data),))?
+        .unbind())
 }
 
 #[pyfunction]
@@ -77650,7 +77882,7 @@ impl PyExcelFile {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (sheet_name=SheetSelector::Position(0), header=Some(0), names=None, index_col=None, usecols=None, skiprows=None, **kwargs))]
+    #[pyo3(signature = (sheet_name=SheetSelector::Position(0), header=Some(0), names=None, index_col=None, usecols=None, skiprows=None, dtype=None, nrows=None, **kwargs))]
     fn parse(
         &self,
         py: Python<'_>,
@@ -77659,7 +77891,9 @@ impl PyExcelFile {
         names: Option<Vec<String>>,
         index_col: Option<&Bound<'_, PyAny>>,
         usecols: Option<Vec<String>>,
-        skiprows: Option<usize>,
+        skiprows: Option<&Bound<'_, PyAny>>,
+        dtype: Option<&Bound<'_, PyAny>>,
+        nrows: Option<usize>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         read_excel(
@@ -77671,6 +77905,8 @@ impl PyExcelFile {
             index_col,
             usecols,
             skiprows,
+            dtype,
+            nrows,
             kwargs,
         )
     }
@@ -77693,11 +77929,20 @@ impl PyExcelFile {
     }
 }
 
-/// Not constructible yet: its `close()`/`sheets`/`book` were stubs, so
-/// `with ExcelWriter(p) as w: df.to_excel(w)` produced no file.
+/// pandas' `ExcelWriter(path)`: each `df.to_excel(writer, sheet_name=...)`
+/// adds a sheet, and `close()` - or leaving `with ExcelWriter(p) as w:` -
+/// writes the workbook to `path` (a path or a binary buffer). It refused to
+/// be built (br-frankenpandas-0gmqq); appending to an existing workbook
+/// (mode='a') and writing one sheet twice (pandas overlays the cells) stay
+/// refused.
 #[pyclass(name = "ExcelWriter", module = "frankenpandas", skip_from_py_object)]
-#[derive(Clone)]
-pub struct PyExcelWriter;
+pub struct PyExcelWriter {
+    path: Py<PyAny>,
+    /// The sheets queued so far; `None` once the workbook is written.
+    queued: Mutex<ExcelSheetQueue>,
+}
+
+type ExcelSheetQueue = Option<Vec<(DataFrame, fp_io::ExcelWriteOptions)>>;
 
 #[pymethods]
 impl PyExcelWriter {
@@ -77714,19 +77959,96 @@ impl PyExcelWriter {
         if_sheet_exists: Option<&str>,
         engine_kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        let _ = (
-            path,
-            engine,
-            date_format,
-            datetime_format,
-            mode,
-            storage_options,
-            if_sheet_exists,
-            engine_kwargs,
-        );
-        Err(not_implemented(
-            "ExcelWriter (multi-sheet workbooks); use DataFrame.to_excel(path) for one sheet",
-        ))
+        let _ = (engine, engine_kwargs, if_sheet_exists);
+        unsupported_params(
+            "ExcelWriter",
+            &[
+                ("mode", mode == "w"),
+                ("date_format", date_format.is_none()),
+                ("datetime_format", datetime_format.is_none()),
+                ("storage_options", storage_options.is_none()),
+            ],
+        )?;
+        Ok(Self {
+            path: path.clone().unbind(),
+            queued: Mutex::new(Some(Vec::new())),
+        })
+    }
+
+    /// The sheets written so far keyed by name, as pandas' `writer.sheets`
+    /// (whose values are the engine's worksheet objects; here None).
+    #[getter]
+    fn sheets<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let out = PyDict::new(py);
+        for (_, options) in self.queue()?.iter().flatten() {
+            out.set_item(&options.sheet_name, py.None())?;
+        }
+        Ok(out)
+    }
+
+    /// Writes the workbook. As pandas': a writer with no sheet is
+    /// IndexError, and a second close is ValueError.
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
+        let Some(sheets) = self.queue()?.take() else {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "I/O operation on closed file",
+            ));
+        };
+        if sheets.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                "At least one sheet must be visible",
+            ));
+        }
+        let borrowed: Vec<(&DataFrame, fp_io::ExcelWriteOptions)> = sheets
+            .iter()
+            .map(|(frame, options)| (frame, options.clone()))
+            .collect();
+        let bytes = fp_io::write_excel_workbook_bytes(&borrowed).map_err(io_error_to_py)?;
+        py_output_bytes(py, Some(self.path.bind(py)), bytes).map(|_| ())
+    }
+
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    #[pyo3(signature = (_exc_type=None, _exc=None, _traceback=None))]
+    fn __exit__(
+        &self,
+        py: Python<'_>,
+        _exc_type: Option<&Bound<'_, PyAny>>,
+        _exc: Option<&Bound<'_, PyAny>>,
+        _traceback: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<bool> {
+        self.close(py)?;
+        Ok(false)
+    }
+}
+
+impl PyExcelWriter {
+    fn queue(&self) -> PyResult<std::sync::MutexGuard<'_, ExcelSheetQueue>> {
+        self.queued
+            .lock()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+    }
+
+    /// Queues `frame` as the sheet `options.sheet_name`.
+    fn add_sheet(&self, frame: DataFrame, options: fp_io::ExcelWriteOptions) -> PyResult<()> {
+        let mut queue = self.queue()?;
+        let Some(sheets) = queue.as_mut() else {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "I/O operation on closed file",
+            ));
+        };
+        if sheets
+            .iter()
+            .any(|(_, existing)| existing.sheet_name == options.sheet_name)
+        {
+            return Err(not_implemented(
+                "to_excel into a sheet this ExcelWriter already wrote (pandas overlays the cells)",
+            ));
+        }
+        sheets.push((frame, options));
+        Ok(())
     }
 }
 
@@ -77755,6 +78077,17 @@ fn io_error_to_py(e: fp_io::IoError) -> PyErr {
         fp_io::IoError::CsvFieldCount { .. } | fp_io::IoError::CsvUnterminatedQuote => {
             PyErr::new::<ParserError, _>(e.to_string())
         }
+        // Python's csv.Error, as pandas' writer raises it.
+        fp_io::IoError::CsvDialect(message) => Python::attach(|py| {
+            match py
+                .import("csv")
+                .and_then(|csv| csv.getattr("Error"))
+                .and_then(|class| class.call1((message.clone(),)))
+            {
+                Ok(exception) => PyErr::from_value(exception),
+                Err(err) => err,
+            }
+        }),
         _ => PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()),
     }
 }
@@ -79277,18 +79610,18 @@ fn write_csv_py(
                 args.encoding
                     .is_none_or(|e| matches!(e.to_ascii_lowercase().as_str(), "utf-8" | "utf8")),
             ),
-            // QUOTE_NONE (3) and later need pandas' own escaping rules.
-            ("quoting", matches!(args.quoting, None | Some(0..=2))),
+            // QUOTE_STRINGS / QUOTE_NOTNULL (4, 5) are Python 3.12's.
+            ("quoting", matches!(args.quoting, None | Some(0..=3))),
             ("quotechar", one_byte(args.quotechar).is_some()),
             (
                 "lineterminator",
                 args.lineterminator
                     .is_none_or(|t| t == "\r\n" || one_byte(t).is_some()),
             ),
-            // Python's csv writes an escaped quote unquoted (q\"r); the
-            // writer here would quote the field - measured, so refused.
-            ("doublequote", args.doublequote),
-            ("escapechar", args.escapechar.is_none()),
+            (
+                "escapechar",
+                args.escapechar.is_none_or(|e| one_byte(e).is_some()),
+            ),
             ("decimal", one_byte(args.decimal).is_some()),
             ("storage_options", args.storage_options.is_none()),
         ],
@@ -79404,42 +79737,28 @@ fn write_csv_py(
                 [only] => Some(only.clone()),
                 _ => None,
             }),
+        // QUOTE_NONE, an escapechar and doublequote=False write as Python's
+        // csv does (they were refused; br-frankenpandas-0gmqq).
         quoting: match args.quoting {
             Some(1) => fp_io::CsvQuoting::All,
             Some(2) => fp_io::CsvQuoting::NonNumeric,
+            Some(3) => fp_io::CsvQuoting::None,
             _ => fp_io::CsvQuoting::Minimal,
         },
         quote: one_byte(args.quotechar).unwrap_or(b'"'),
         line_terminator: args.lineterminator.unwrap_or("\n").to_owned(),
         decimal: one_byte(args.decimal).unwrap_or(b'.'),
         header_aliases: aliases,
+        escapechar: args.escapechar.and_then(one_byte),
+        doublequote: args.doublequote,
     };
     // MultiIndex columns: pandas writes one header row per level - the
     // level's name (or '') where the index goes, then that level's labels -
     // and after them a row of the index names when any is set (only the
     // flat leaf names were written; i17d4).
     let mut header = String::new();
-    let quote = |field: String| -> String {
-        let quote = char::from(options.quote);
-        let needs = match options.quoting {
-            fp_io::CsvQuoting::Minimal => {
-                field.contains(char::from(options.delimiter))
-                    || field.contains(quote)
-                    || field.contains(['\n', '\r'])
-            }
-            _ => true,
-        };
-        if needs {
-            let doubled = field.replace(quote, &format!("{quote}{quote}"));
-            format!("{quote}{doubled}{quote}")
-        } else {
-            field
-        }
-    };
-    let row_text = |row: Vec<String>| -> String {
-        let fields: Vec<String> = row.into_iter().map(&quote).collect();
-        fields.join(&char::from(options.delimiter).to_string()) + &options.line_terminator
-    };
+    let row_text =
+        |row: Vec<String>| fp_io::csv_record_text(&row, &options).map_err(io_error_to_py);
     let mut write_own_header = false;
     if options.header
         && options.header_aliases.is_none()
@@ -79458,7 +79777,10 @@ fn write_csv_py(
         } else {
             vec![text_of(frame.index().name())]
         };
-        let mut push_row = |row: Vec<String>| header.push_str(&row_text(row));
+        let mut push_row = |row: Vec<String>| -> PyResult<()> {
+            header.push_str(&row_text(row)?);
+            Ok(())
+        };
         for level in 0..levels.nlevels() {
             let mut row = Vec::with_capacity(levels.len() + index_names.len());
             if options.include_index {
@@ -79474,12 +79796,12 @@ fn write_csv_py(
                     .and_then(|labels| labels.get(level).map(ToString::to_string))
                     .unwrap_or_default()
             }));
-            push_row(row);
+            push_row(row)?;
         }
         if index_names.iter().any(|name| !name.is_empty()) {
             let mut row = index_names;
             row.extend(std::iter::repeat_n(String::new(), levels.len()));
-            push_row(row);
+            push_row(row)?;
         }
         write_own_header = true;
     } else if options.header
@@ -79496,7 +79818,7 @@ fn write_csv_py(
                 .clone()
                 .unwrap_or_else(|| frame.column_names().into_iter().cloned().collect()),
         );
-        header.push_str(&row_text(row));
+        header.push_str(&row_text(row)?);
         write_own_header = true;
     }
     if write_own_header {
@@ -79507,7 +79829,7 @@ fn write_csv_py(
     // method given - is the text compressed as pandas writes it (it was
     // refused; br-frankenpandas-jn2nd).
     if let Some(target) = path_or_buf.filter(|target| !target.is_none())
-        && let Some((path, method)) = csv_compression_target(args.compression, target)?
+        && let Some((path, method)) = compressed_write_target("to_csv", args.compression, target)?
     {
         if args.mode == "a" {
             return Err(not_implemented("to_csv(mode='a') to a compressed file"));
@@ -79977,20 +80299,21 @@ fn index_deep_bytes(py: Python<'_>, index: &Index) -> PyResult<Option<usize>> {
     Ok(Some(bytes))
 }
 
-/// pandas' `compression='infer'` compresses a path ending in a compression
-/// extension. frankenpandas writes plain text, so that case (and any explicit
-/// compression) is refused rather than written uncompressed (fvsao.5).
-/// The path and compression method a `to_csv` target is written with:
-/// 'infer' by the path's extension, a method as given, None or no
-/// extension none; a compressed write to a file object stays refused.
-fn csv_compression_target(
+/// The path and compression method the writer `what` (to_csv, to_pickle)
+/// writes a target with: 'infer' by the path's extension, a method as
+/// given, None or no extension none; a compressed write to a file object
+/// stays refused.
+fn compressed_write_target(
+    what: &str,
     compression: Option<&str>,
     target: &Bound<'_, PyAny>,
 ) -> PyResult<Option<(String, String)>> {
     if target.hasattr("write")? {
         return match compression {
             None | Some("infer") => Ok(None),
-            Some(_) => Err(not_implemented("to_csv(compression=...) to a file object")),
+            Some(_) => Err(not_implemented(&format!(
+                "{what}(compression=...) to a file object"
+            ))),
         };
     }
     let path = py_fspath(target)?;
@@ -80085,11 +80408,13 @@ impl<'a, 'py> FromPyObject<'a, 'py> for SheetSelector {
 }
 
 /// `pd.read_excel` on fp-io's calamine reader. sheet_name: str, int (position)
-/// or None (dict of every sheet). `engine` is accepted and ignored (there is one
-/// engine); other unsupported options raise NotImplementedError.
+/// or None (dict of every sheet). skiprows: a count of leading rows or the
+/// sheet rows to leave out; nrows and dtype as pandas' (all three were
+/// refused; br-frankenpandas-0gmqq). `engine` is accepted and ignored (there
+/// is one engine); other unsupported options raise NotImplementedError.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (io, sheet_name=SheetSelector::Position(0), header=Some(0), names=None, index_col=None, usecols=None, skiprows=None, **kwargs))]
+#[pyo3(signature = (io, sheet_name=SheetSelector::Position(0), header=Some(0), names=None, index_col=None, usecols=None, skiprows=None, dtype=None, nrows=None, **kwargs))]
 fn read_excel(
     py: Python<'_>,
     io: &Bound<'_, PyAny>,
@@ -80098,22 +80423,51 @@ fn read_excel(
     names: Option<Vec<String>>,
     index_col: Option<&Bound<'_, PyAny>>,
     usecols: Option<Vec<String>>,
-    skiprows: Option<usize>,
+    skiprows: Option<&Bound<'_, PyAny>>,
+    dtype: Option<&Bound<'_, PyAny>>,
+    nrows: Option<usize>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     reject_unsupported_kwargs("read_excel", kwargs, &["engine"])?;
     let bytes = py_input_bytes(io)?;
+    let (skip_rows, skip_row_numbers) = match skiprows.filter(|rows| !rows.is_none()) {
+        None => (0, Vec::new()),
+        Some(rows) if rows.is_callable() => {
+            return Err(not_implemented("read_excel(skiprows=<callable>)"));
+        }
+        Some(rows) => match rows.extract::<usize>() {
+            Ok(count) => (count, Vec::new()),
+            Err(_) => (
+                0,
+                rows.try_iter()?
+                    .map(|row| row?.extract::<usize>())
+                    .collect::<PyResult<Vec<usize>>>()?,
+            ),
+        },
+    };
     let options = fp_io::ExcelReadOptions {
         sheet_name: None,
         has_headers: header.is_some(),
         usecols,
         names,
         index_col: None,
-        skip_rows: skiprows.unwrap_or(0) + header.unwrap_or(0),
+        skip_rows: skip_rows + header.unwrap_or(0),
+        skip_row_numbers,
+        nrows,
     };
-    let finish = |frame: DataFrame| -> PyResult<DataFrame> {
-        match index_col.filter(|c| !c.is_none()) {
-            None => Ok(frame),
+    let dtype = dtype.filter(|dtype| !dtype.is_none());
+    // header=None without names: pandas' integer column labels 0, 1, ...,
+    // an index_col named by its integer too (they were the text '0', '1';
+    // br-frankenpandas-0gmqq).
+    let integer_labels = !options.has_headers && options.names.is_none();
+    let parse = |frame: DataFrame| -> PyResult<DataFrame> {
+        let frame = excel_object_dates(py, frame)?;
+        let frame = match dtype {
+            Some(dtype) => excel_dtype(py, frame, dtype)?,
+            None => frame,
+        };
+        let frame = match index_col.filter(|c| !c.is_none()) {
+            None => frame,
             Some(col) => {
                 let name = if let Ok(pos) = col.extract::<usize>() {
                     frame
@@ -80124,9 +80478,33 @@ fn read_excel(
                 } else {
                     col.extract::<String>()?
                 };
-                frame.set_index(&name, true).map_err(frame_error_to_py)
+                let frame = frame.set_index(&name, true).map_err(frame_error_to_py)?;
+                match name.parse::<i64>() {
+                    Ok(position) if integer_labels => {
+                        let index = frame
+                            .index()
+                            .rename_index(Some(LabelName::typed(IndexLabel::Int64(position))));
+                        frame.with_index(index).map_err(frame_error_to_py)?
+                    }
+                    _ => frame,
+                }
             }
+        };
+        if !integer_labels {
+            return Ok(frame);
         }
+        let labels: Vec<IndexLabel> = frame
+            .column_names()
+            .into_iter()
+            .map(|name| match name.parse::<i64>() {
+                Ok(position) => IndexLabel::Int64(position),
+                Err(_) => IndexLabel::Utf8(name.clone()),
+            })
+            .collect();
+        Ok(frame.with_recorded_column_labels(labels))
+    };
+    let finish = |frame: DataFrame, sheet: &str| -> PyResult<DataFrame> {
+        parse(frame).map_err(|err| excel_sheet_error(py, err, sheet))
     };
     let sheets =
         fp_io::read_excel_sheets_ordered_bytes(&bytes, None, &options).map_err(io_error_to_py)?;
@@ -80134,37 +80512,185 @@ fn read_excel(
         SheetSelector::All => {
             let out = PyDict::new(py);
             for (name, frame) in sheets {
-                out.set_item(
-                    name,
-                    Py::new(
-                        py,
-                        PyDataFrame {
-                            inner: finish(frame)?,
-                        },
-                    )?,
-                )?;
+                let inner = finish(frame, &name)?;
+                out.set_item(name, Py::new(py, PyDataFrame { inner })?)?;
             }
             return Ok(out.into_any().unbind());
         }
         SheetSelector::Position(pos) => (
-            sheets.into_iter().nth(pos).map(|(_, f)| f),
+            sheets
+                .into_iter()
+                .nth(pos)
+                .map(|(_, f)| (f, pos.to_string())),
             format!("index {pos}"),
         ),
         SheetSelector::Name(want) => {
-            let found = sheets.into_iter().find(|(n, _)| *n == want).map(|(_, f)| f);
+            let found = sheets
+                .into_iter()
+                .find(|(n, _)| *n == want)
+                .map(|(_, f)| (f, want.clone()));
             (found, format!("named '{want}'"))
         }
     };
-    let frame = found.ok_or_else(|| {
+    let (frame, sheet) = found.ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Worksheet {wanted} not found"))
     })?;
     Ok(Py::new(
         py,
         PyDataFrame {
-            inner: finish(frame)?,
+            inner: finish(frame, &sheet)?,
         },
     )?
     .into_any())
+}
+
+/// pandas' `read_excel(dtype=...)` over a sheet read: `str` makes each
+/// cell the text pandas' reader gives it ([`excel_text_column`]), `object`
+/// keeps the cells as that reader reads them ([`excel_object_column`]);
+/// another dtype is `Series.astype`'s, pandas' ValueError naming a column
+/// it cannot convert. A dict names the columns by label or position; a
+/// name the sheet lacks is ignored.
+fn excel_dtype(py: Python<'_>, frame: DataFrame, dtype: &Bound<'_, PyAny>) -> PyResult<DataFrame> {
+    let mut specs: Vec<(String, Bound<'_, PyAny>)> = Vec::new();
+    if let Ok(mapping) = dtype.cast::<PyDict>() {
+        for (key, spec) in mapping.iter() {
+            let name = match key.extract::<String>() {
+                Ok(name) => Some(name),
+                Err(_) => frame
+                    .column_names()
+                    .get(key.extract::<usize>()?)
+                    .map(|name| name.to_string()),
+            };
+            if let Some(name) = name.filter(|name| frame.column(name).is_some()) {
+                specs.push((name, spec));
+            }
+        }
+    } else {
+        for name in frame.column_names() {
+            specs.push((name.to_string(), dtype.clone()));
+        }
+    }
+    let mut out = frame;
+    for (name, spec) in specs {
+        let target = index_astype_name(&spec)?;
+        let column = out.column(&name).ok_or_else(|| loc_key_error(&name))?;
+        let cast = if target == "str" {
+            excel_text_column(py, column)?
+        } else if is_object_dtype_arg(&spec) {
+            excel_object_column(py, column)?
+        } else {
+            let inner = Series::new(name.as_str(), out.index().clone(), column.clone())
+                .map_err(frame_error_to_py)?;
+            match (PySeries { inner }).astype(&spec, None, "raise") {
+                Ok(cast) => cast.inner.column().clone(),
+                Err(err) if err.is_instance_of::<pyo3::exceptions::PyValueError>(py) => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Unable to convert column {name} to type {target}"
+                    )));
+                }
+                Err(err) => return Err(err),
+            }
+        };
+        out = out.with_column(name, cast).map_err(frame_error_to_py)?;
+    }
+    Ok(out)
+}
+
+/// An object column's cells as pandas' Excel reader gives them: a whole
+/// number an int, a date a `datetime.datetime` (not a Timestamp).
+fn excel_object_column(py: Python<'_>, column: &Column) -> PyResult<Column> {
+    let cells = column
+        .values()
+        .iter()
+        .map(|cell| {
+            Ok(match cell {
+                Scalar::Float64(v) => {
+                    excel_whole_number(*v).map_or_else(|| cell.clone(), Scalar::Int64)
+                }
+                Scalar::Datetime64(_) if !cell.is_missing() => {
+                    let date = scalar_to_py(py, cell)?
+                        .bind(py)
+                        .call_method0("to_pydatetime")?
+                        .unbind();
+                    Scalar::Object(fp_types::ObjectValue::Host(fp_types::HostValue::new(
+                        PyHost(date),
+                    )))
+                }
+                other => other.clone(),
+            })
+        })
+        .collect::<PyResult<Vec<Scalar>>>()?;
+    Ok(Column::from_object_values(cells))
+}
+
+/// A sheet's frame as pandas' Excel parser leaves it: an object column
+/// holding dates holds them as `datetime.datetime` ([`excel_object_column`];
+/// they were Timestamps).
+fn excel_object_dates(py: Python<'_>, frame: DataFrame) -> PyResult<DataFrame> {
+    let mut out = frame.clone();
+    for name in frame.column_names() {
+        let Some(column) = frame.column(name) else {
+            continue;
+        };
+        if !column.dtype().is_datetime()
+            && column
+                .values()
+                .iter()
+                .any(|cell| matches!(cell, Scalar::Datetime64(_)) && !cell.is_missing())
+        {
+            out = out
+                .with_column(name.clone(), excel_object_column(py, column)?)
+                .map_err(frame_error_to_py)?;
+        }
+    }
+    Ok(out)
+}
+
+/// `err` with pandas' ` (sheet: {sheet})` after its message, as
+/// `ExcelFile.parse` tags any error raised parsing a sheet.
+fn excel_sheet_error(py: Python<'_>, err: PyErr, sheet: &str) -> PyErr {
+    let value = err.value(py);
+    let tagged = value
+        .getattr("args")
+        .and_then(|args| args.get_item(0))
+        .and_then(|first| first.str())
+        .map(|first| format!("{first} (sheet: {sheet})"));
+    // The tag is the message only; an error whose args cannot be read or
+    // set goes up as it was.
+    if let Ok(message) = tagged {
+        value.setattr("args", (message,)).ok();
+    }
+    err
+}
+
+/// A column's cells as text, as pandas' Excel reader makes them under
+/// `dtype=str`: `str()` of the value it reads - a whole number is an int
+/// there, so 3 not '3.0' - and a missing cell stays NaN.
+fn excel_text_column(py: Python<'_>, column: &Column) -> PyResult<Column> {
+    let cells = column
+        .values()
+        .iter()
+        .map(|cell| {
+            let text = match cell {
+                missing if missing.is_missing() => return Ok(Scalar::Null(NullKind::NaN)),
+                Scalar::Utf8(text) => text.clone(),
+                Scalar::Int64(v) => v.to_string(),
+                Scalar::Float64(v) => match excel_whole_number(*v) {
+                    Some(whole) => whole.to_string(),
+                    None => scalar_to_py(py, cell)?.bind(py).str()?.to_string(),
+                },
+                other => scalar_to_py(py, other)?.bind(py).str()?.to_string(),
+            };
+            Ok(Scalar::Utf8(text))
+        })
+        .collect::<PyResult<Vec<Scalar>>>()?;
+    Column::new(DType::Utf8, cells).map_err(column_error_to_py)
+}
+
+/// A number cell pandas' Excel reader reads as an int: a whole one.
+#[allow(clippy::cast_possible_truncation)]
+fn excel_whole_number(value: f64) -> Option<i64> {
+    (value.fract() == 0.0 && value.abs() < 9.2e18).then_some(value as i64)
 }
 
 /// `pd.HDFStore` exists so `isinstance`/import checks resolve, but it cannot be

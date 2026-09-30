@@ -6803,6 +6803,7 @@ const FP_IO_EXPORTED_IO_FNS: &[&str] = &[
     "write_excel_bytes",
     "write_excel_bytes_with_options",
     "write_excel_with_options",
+    "write_excel_workbook_bytes",
     "write_feather",
     "write_feather_bytes",
     "write_hdf",

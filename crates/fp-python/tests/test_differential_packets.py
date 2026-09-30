@@ -12,6 +12,7 @@ import itertools
 import json
 import math
 import os
+import tempfile
 import warnings
 from pathlib import Path
 from typing import Any
@@ -2245,8 +2246,10 @@ def test_read_csv_unsupported_keyword_is_not_silently_ignored() -> None:
     # (converters= and then chunksize= were the example until they were
     # implemented; see test_read_csv_parser_options_and_groupby_nth_match_pandas
     # and test_read_csv_chunks_and_date_format_like_pandas_9c1ss.)
+    # TEST-CHANGE (br-frankenpandas-0gmqq): header=[0, 1] reads a column
+    # MultiIndex now (test_everyday63_...); alongside usecols it stays refused.
     with pytest.raises(NotImplementedError, match="header"):
-        fpd.read_csv(io.StringIO(_CSV), header=[0, 1])
+        fpd.read_csv(io.StringIO(_CSV), header=[0, 1], usecols=[0])
     with pytest.raises(ValueError, match="only specify one"):
         fpd.read_csv(io.StringIO(_CSV), sep=",", delimiter=",")
 
@@ -2720,12 +2723,20 @@ def test_to_csv_keywords_and_targets_match_pandas(tmp_path: Path) -> None:
     pdf.to_csv(tmp_path / "b.csv")
     pdf.to_csv(tmp_path / "b.csv", mode="a", header=False)
     assert (tmp_path / "a.csv").read_text() == (tmp_path / "b.csv").read_text()
-    # NEGATIVE: keywords the writer cannot honour raise instead of vanishing
-    # (QUOTE_NONE and doublequote=False / escapechar: Python's csv escaping).
-    for kw in ({"quoting": 3}, {"doublequote": False, "escapechar": "\\"}, {"escapechar": "\\"},
-               {"lineterminator": "||"}):
-        with pytest.raises(NotImplementedError):
-            fdf.to_csv(**kw)
+    # TEST-CHANGE (br-frankenpandas-0gmqq): QUOTE_NONE, doublequote=False and
+    # escapechar write as pandas' (Python's csv escaping; they were refused),
+    # and QUOTE_NONE with no escapechar is pandas' csv.Error.
+    for kw in ({"quoting": 3, "escapechar": "\\"}, {"doublequote": False, "escapechar": "\\"},
+               {"escapechar": "\\"}):
+        assert fdf.to_csv(**kw) == pdf.to_csv(**kw), kw
+    import csv
+
+    for frame in (fdf, pdf):
+        with pytest.raises(csv.Error, match="need to escape"):
+            frame.to_csv(quoting=3)
+    # NEGATIVE: a keyword the writer cannot honour raises instead of vanishing.
+    with pytest.raises(NotImplementedError):
+        fdf.to_csv(lineterminator="||")
     # TEST-CHANGE (jn2nd): a .gz path is written gzip-compressed, as pandas
     # writes it (it was refused): the decompressed text is pandas'.
     import gzip
@@ -20559,4 +20570,143 @@ _E62_CASES = {
 @pytest.mark.parametrize("case", list(_E62_CASES))
 def test_everyday62_groupby_list_nth_quantile_like_pandas_qgd75(case: str) -> None:
     run = _E62_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-0gmqq: ExcelWriter could not be built; read_excel refused
+# dtype / nrows / a skiprows list; pickle compression, to_csv's QUOTE_NONE /
+# escapechar / doublequote=False and read_csv(header=[0, 1]) were refused.
+def _e63_path(name: str) -> str:
+    return os.path.join(tempfile.mkdtemp(), name)
+
+
+def _e63_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "i": [1, 2, 3],
+            "f": [1.5, None, 3.0],
+            "s": ["a", "b", None],
+            "t": m.to_datetime(["2024-01-01", "2024-02-01", "2024-03-01"]),
+            "e": [None, None, None],
+        }
+    )
+
+
+def _e63_xlsx(m: Any) -> str:
+    path = _e63_path("a.xlsx")
+    _e63_frame(m).to_excel(path, index=False)
+    return path
+
+
+def _e63_skiprows_int(m: Any) -> list:
+    path = _e63_path("t.xlsx")
+    m.DataFrame({"a": ["x", "y", "z"], "b": ["p", "q", "r"]}).to_excel(path, index=False)
+    return _e63_shown(m.read_excel(path, skiprows=1))
+
+
+def _e63_shown(frame: Any) -> list:
+    return [
+        frame.index.tolist(),
+        list(frame.index.names),
+        frame.columns.tolist(),
+        list(frame.columns.names),
+        [[repr(v) for v in row] for row in frame.values.tolist()],
+        [str(t) for t in frame.dtypes],
+    ]
+
+
+def _e63_writer_sheets(m: Any) -> list:
+    path = _e63_path("w.xlsx")
+    with m.ExcelWriter(path) as writer:
+        _e63_frame(m).to_excel(writer, sheet_name="one", index=False)
+        _e63_frame(m).head(1)[["i", "s"]].to_excel(writer, sheet_name="two")
+        names = sorted(writer.sheets)
+    sheets = m.read_excel(path, sheet_name=None)
+    return [names] + [(name, _e63_shown(sheets[name])) for name in sorted(sheets)]
+
+
+def _e63_writer_buffer(m: Any) -> list:
+    buffer = io.BytesIO()
+    with m.ExcelWriter(buffer) as writer:
+        m.Series([1, 2], name="n").to_excel(writer)
+    return _e63_shown(m.read_excel(io.BytesIO(buffer.getvalue())))
+
+
+def _e63_writer_close(m: Any, times: int) -> list:
+    writer = m.ExcelWriter(_e63_path("c.xlsx"))
+    if times == 2:
+        _e63_frame(m).to_excel(writer)
+    for _ in range(times):
+        writer.close()
+    return []
+
+
+def _e63_pickle(m: Any, name: str, **kw: Any) -> list:
+    path = _e63_path(name)
+    _e63_frame(m).to_pickle(path, **kw)
+    with open(path, "rb") as handle:
+        magic = handle.read(2)
+    return [magic] + _e63_shown(m.read_pickle(path, **kw))
+
+
+def _e63_csv_header(m: Any, text: str, **kw: Any) -> list:
+    return _e63_shown(m.read_csv(io.StringIO(text), **kw))
+
+
+def _e63_csv_round_trip(m: Any) -> list:
+    frame = m.DataFrame(
+        [[1, 2.5], [3, 4.5]],
+        index=m.Index([7, 8], name="k"),
+        columns=m.MultiIndex.from_tuples([("a", "x"), ("a", "y")], names=["top", "sub"]),
+    )
+    return _e63_shown(m.read_csv(io.StringIO(frame.to_csv()), header=[0, 1], index_col=0))
+
+
+_E63_TEXT = {"b": ["x", "y,z", 'q"r', "p\\s"]}
+
+_E63_CASES = {
+    "ExcelWriter sheets": _e63_writer_sheets,
+    "ExcelWriter buffer": _e63_writer_buffer,
+    "ExcelWriter empty close": lambda m: _e63_writer_close(m, 1),
+    "ExcelWriter close twice": lambda m: _e63_writer_close(m, 2),
+    "read_excel dtype float": lambda m: _e63_shown(m.read_excel(_e63_xlsx(m), dtype={"i": float})),
+    "read_excel dtype str": lambda m: _e63_shown(m.read_excel(_e63_xlsx(m), dtype={"i": str, "f": str})),
+    "read_excel dtype str all": lambda m: _e63_shown(m.read_excel(_e63_xlsx(m), dtype=str)),
+    "read_excel dtype position": lambda m: _e63_shown(m.read_excel(_e63_xlsx(m), dtype={1: "Int64"})),
+    "read_excel dtype cannot convert": lambda m: _e63_shown(m.read_excel(_e63_xlsx(m), dtype={"f": "int64"})),
+    "read_excel skiprows list": lambda m: _e63_shown(m.read_excel(_e63_xlsx(m), skiprows=[2])),
+    "read_excel nrows": lambda m: _e63_shown(m.read_excel(_e63_xlsx(m), nrows=1)),
+    "read_excel nrows 0": lambda m: _e63_shown(m.read_excel(_e63_xlsx(m), nrows=0)),
+    "read_excel header none": lambda m: _e63_shown(m.read_excel(_e63_xlsx(m), header=None, index_col=0)),
+    "pickle gz": lambda m: _e63_pickle(m, "a.pkl.gz"),
+    "pickle bz2 given": lambda m: _e63_pickle(m, "a.pkl", compression="bz2"),
+    "to_csv quote none": lambda m: [m.DataFrame(_E63_TEXT).to_csv(quoting=3, escapechar="\\")],
+    "to_csv quote none no escapechar": lambda m: [m.DataFrame(_E63_TEXT).to_csv(index=False, quoting=3)],
+    "to_csv doublequote false": lambda m: [
+        m.DataFrame(_E63_TEXT).to_csv(index=False, doublequote=False, escapechar="\\")
+    ],
+    "to_csv header levels quote none": lambda m: [
+        m.DataFrame([[1]], columns=m.MultiIndex.from_tuples([("a,b", "x")])).to_csv(quoting=3, escapechar="\\")
+    ],
+    "read_csv header levels": lambda m: _e63_csv_header(m, "a,,b\nx,y,\n1,2,3\n", header=[0, 1]),
+    "read_csv header rows between": lambda m: _e63_csv_header(m, "a,b\nskip,me\nx,y\n1,2\n", header=[0, 2]),
+    "read_csv header index names": lambda m: _e63_csv_header(
+        m, "L0,a,a\nL1,x,y\nidx,,\n0,1,2\n", header=[0, 1], index_col=0
+    ),
+    "read_csv header round trip": _e63_csv_round_trip,
+    "read_excel blank column": lambda m: _e63_shown(m.read_excel(_e63_xlsx(m))),
+    "to_csv escapechar only": lambda m: [m.DataFrame(_E63_TEXT).to_csv(index=False, escapechar="\\")],
+    # Negatives: already pandas'.
+    "read_csv header one row": lambda m: _e63_csv_header(m, "a,b\n1,2\n", header=0),
+    "to_csv default dialect": lambda m: [m.DataFrame(_E63_TEXT).to_csv(index=False)],
+    "pickle plain": lambda m: _e63_pickle(m, "a.pkl"),
+    "read_excel usecols": lambda m: _e63_shown(m.read_excel(_e63_xlsx(m), usecols=["i", "s"])),
+    "read_excel skiprows int": _e63_skiprows_int,
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E63_CASES))
+def test_everyday63_io_writers_and_reader_options_like_pandas_0gmqq(case: str) -> None:
+    run = _E63_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

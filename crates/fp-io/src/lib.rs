@@ -203,6 +203,10 @@ pub enum IoError {
     Sql(String),
     #[error("clipboard error: {0}")]
     Clipboard(String),
+    /// A record Python's csv writer refuses in the dialect asked for (its
+    /// `csv.Error` text): a field needing an escape without an escapechar.
+    #[error("{0}")]
+    CsvDialect(String),
     #[error(transparent)]
     Csv(#[from] csv::Error),
     #[error(transparent)]
@@ -1883,6 +1887,12 @@ pub struct CsvWriteOptions {
     /// Header names written in place of the column labels, one per column.
     /// Matches pandas `header=[...]`. Default: none (the labels).
     pub header_aliases: Option<Vec<String>>,
+    /// The character written before a character a field cannot hold
+    /// otherwise, as pandas' `escapechar`. Default: none.
+    pub escapechar: Option<u8>,
+    /// Whether a quote inside a quoted field is doubled (true) or escaped
+    /// with `escapechar`, as pandas' `doublequote`. Default: true.
+    pub doublequote: bool,
 }
 
 /// Which fields `to_csv` quotes, as pandas' `quoting` (`csv.QUOTE_*`).
@@ -1896,6 +1906,10 @@ pub enum CsvQuoting {
     All,
     /// Every field that is not a number. `csv.QUOTE_NONNUMERIC` (2).
     NonNumeric,
+    /// No field; a delimiter, quote or line break in one is written after
+    /// the `escapechar` (Python's csv.Error without one). `csv.QUOTE_NONE`
+    /// (3).
+    None,
 }
 
 impl Default for CsvWriteOptions {
@@ -1911,6 +1925,8 @@ impl Default for CsvWriteOptions {
             line_terminator: "\n".to_owned(),
             decimal: b'.',
             header_aliases: None,
+            escapechar: None,
+            doublequote: true,
         }
     }
 }
@@ -1924,6 +1940,14 @@ impl CsvWriteOptions {
             && self.line_terminator == "\n"
             && self.decimal == b'.'
             && self.header_aliases.is_none()
+            && !self.escapes()
+    }
+
+    /// Whether the dialect escapes: QUOTE_NONE, an escapechar, or
+    /// doublequote=False - Python's csv rules, which the csv crate's writer
+    /// does not follow (it quotes a field Python escapes: `q\"r` unquoted).
+    fn escapes(&self) -> bool {
+        self.quoting == CsvQuoting::None || self.escapechar.is_some() || !self.doublequote
     }
 
     /// The header names for `labels`: the aliases when given (pandas' error
@@ -1944,7 +1968,10 @@ impl CsvWriteOptions {
     }
 
     /// A CSV writer in these options' dialect.
-    fn writer(&self) -> Result<csv::Writer<Vec<u8>>, IoError> {
+    fn writer(&self) -> Result<CsvRecordSink, IoError> {
+        if self.escapes() {
+            return Ok(CsvRecordSink::Python(String::new()));
+        }
         let terminator = match self.line_terminator.as_bytes() {
             b"\r\n" => csv::Terminator::CRLF,
             [byte] => csv::Terminator::Any(*byte),
@@ -1958,19 +1985,21 @@ impl CsvWriteOptions {
                 )));
             }
         };
-        // doublequote=False / escapechar are not offered: Python's csv writes
-        // an escaped quote unquoted (q\"r) where this writer quotes the field
-        // ("q\"r") - measured, so the binding refuses them.
-        Ok(WriterBuilder::new()
-            .delimiter(self.delimiter)
-            .quote(self.quote)
-            .terminator(terminator)
-            .quote_style(match self.quoting {
-                CsvQuoting::Minimal => csv::QuoteStyle::Necessary,
-                CsvQuoting::All => csv::QuoteStyle::Always,
-                CsvQuoting::NonNumeric => csv::QuoteStyle::NonNumeric,
-            })
-            .from_writer(Vec::new()))
+        // An escaping dialect took Python's rules above: this writer would
+        // quote a field Python escapes ("q\"r" for q\"r).
+        Ok(CsvRecordSink::Crate(Box::new(
+            WriterBuilder::new()
+                .delimiter(self.delimiter)
+                .quote(self.quote)
+                .terminator(terminator)
+                .quote_style(match self.quoting {
+                    CsvQuoting::Minimal => csv::QuoteStyle::Necessary,
+                    CsvQuoting::All => csv::QuoteStyle::Always,
+                    CsvQuoting::NonNumeric => csv::QuoteStyle::NonNumeric,
+                    CsvQuoting::None => csv::QuoteStyle::Never,
+                })
+                .from_writer(Vec::new()),
+        )))
     }
 
     /// A float cell's text with pandas' `decimal` separator.
@@ -1981,6 +2010,117 @@ impl CsvWriteOptions {
             text.replace('.', &char::from(self.decimal).to_string())
         }
     }
+}
+
+/// Where `to_csv` writes its records: the csv crate's writer, or - for an
+/// escaping dialect ([`CsvWriteOptions::escapes`]) - [`csv_record_text`].
+enum CsvRecordSink {
+    Crate(Box<csv::Writer<Vec<u8>>>),
+    Python(String),
+}
+
+impl CsvRecordSink {
+    fn write_record(
+        &mut self,
+        fields: &[String],
+        options: &CsvWriteOptions,
+    ) -> Result<(), IoError> {
+        match self {
+            Self::Crate(writer) => Ok(writer.write_record(fields)?),
+            Self::Python(text) => {
+                text.push_str(&csv_record_text(fields, options)?);
+                Ok(())
+            }
+        }
+    }
+
+    fn into_string(self) -> Result<String, IoError> {
+        match self {
+            Self::Crate(writer) => Ok(String::from_utf8(
+                (*writer).into_inner().map_err(|err| err.into_error())?,
+            )?),
+            Self::Python(text) => Ok(text),
+        }
+    }
+}
+
+/// One CSV record, line terminator included, as Python's csv writer -
+/// pandas' - writes it in `options`' dialect. A field holding the
+/// delimiter, the quotechar, the escapechar or a line break is quoted under
+/// QUOTE_MINIMAL, with a quote doubled (`doublequote`) or else escaped;
+/// under QUOTE_NONE each such character is escaped instead, the quotechar
+/// aside (pandas passes none there, so `q"r` stays). QUOTE_ALL quotes every
+/// field and QUOTE_NONNUMERIC every one that is not a number. An escape
+/// without an `escapechar`, and a record of one empty field under
+/// QUOTE_NONE, are Python's csv.Error.
+pub fn csv_record_text(fields: &[String], options: &CsvWriteOptions) -> Result<String, IoError> {
+    let quote = char::from(options.quote);
+    let quote_is_special = options.quoting != CsvQuoting::None;
+    let delimiter = char::from(options.delimiter);
+    let escape = options.escapechar.map(char::from);
+    if let [only] = fields
+        && only.is_empty()
+    {
+        if options.quoting == CsvQuoting::None {
+            return Err(IoError::CsvDialect(
+                "single empty field record must be quoted".to_owned(),
+            ));
+        }
+        return Ok(format!("{quote}{quote}{}", options.line_terminator));
+    }
+    let mut line = String::new();
+    for (position, field) in fields.iter().enumerate() {
+        if position > 0 {
+            line.push(delimiter);
+        }
+        let mut quoted = match options.quoting {
+            CsvQuoting::All => true,
+            CsvQuoting::NonNumeric => field.parse::<f64>().is_err(),
+            CsvQuoting::Minimal | CsvQuoting::None => false,
+        };
+        let mut body = String::with_capacity(field.len());
+        for c in field.chars() {
+            let special = c == delimiter
+                || (quote_is_special && c == quote)
+                || Some(c) == escape
+                || c == '\n'
+                || c == '\r'
+                || options.line_terminator.contains(c);
+            if special {
+                let mut want_escape = options.quoting == CsvQuoting::None;
+                if !want_escape {
+                    if c == quote {
+                        if options.doublequote {
+                            body.push(quote);
+                        } else {
+                            want_escape = true;
+                        }
+                    } else if Some(c) == escape {
+                        want_escape = true;
+                    }
+                    quoted |= !want_escape;
+                }
+                if want_escape {
+                    let Some(escape) = escape else {
+                        return Err(IoError::CsvDialect(
+                            "need to escape, but no escapechar set".to_owned(),
+                        ));
+                    };
+                    body.push(escape);
+                }
+            }
+            body.push(c);
+        }
+        if quoted {
+            line.push(quote);
+            line.push_str(&body);
+            line.push(quote);
+        } else {
+            line.push_str(&body);
+        }
+    }
+    line.push_str(&options.line_terminator);
+    Ok(line)
 }
 
 /// Options controlling Markdown table serialization.
@@ -2764,9 +2904,8 @@ pub fn write_csv_string_with_options(
         let mut header = level_names;
         header.extend(column_names);
         let mut writer = options.writer()?;
-        writer.write_record(&header)?;
-        let header_line = String::from_utf8(writer.into_inner().map_err(|err| err.into_error())?)?;
-        return Ok(header_line + &body);
+        writer.write_record(&header, options)?;
+        return Ok(writer.into_string()? + &body);
     }
 
     // Typed fast path (br-frankenpandas-qk2i9): when every column is an all-valid
@@ -2799,7 +2938,7 @@ pub fn write_csv_string_with_options(
             header_row.push(resolve_csv_index_header(frame, options));
         }
         header_row.extend(options.header_names(headers.clone())?);
-        writer.write_record(&header_row)?;
+        writer.write_record(&header_row, options)?;
     }
 
     // Every column by position: a repeated column key writes its own cells
@@ -2855,11 +2994,10 @@ pub fn write_csv_string_with_options(
                 None => options.na_rep.clone(),
             }
         }));
-        writer.write_record(&row)?;
+        writer.write_record(&row, options)?;
     }
 
-    let bytes = writer.into_inner().map_err(|err| err.into_error())?;
-    Ok(String::from_utf8(bytes)?)
+    writer.into_string()
 }
 
 /// Serialize a DataFrame to a GitHub-style Markdown table.
@@ -11123,6 +11261,12 @@ pub struct ExcelReadOptions {
     pub index_col: Option<String>,
     /// Number of initial rows to skip before reading headers/data.
     pub skip_rows: usize,
+    /// Sheet rows (0-based, counted before `skip_rows`) left out, as
+    /// pandas' `skiprows=[...]`.
+    pub skip_row_numbers: Vec<usize>,
+    /// At most this many data rows after the header, as pandas' `nrows`
+    /// (the dtypes are those rows').
+    pub nrows: Option<usize>,
 }
 
 impl Default for ExcelReadOptions {
@@ -11134,8 +11278,30 @@ impl Default for ExcelReadOptions {
             names: None,
             index_col: None,
             skip_rows: 0,
+            skip_row_numbers: Vec::new(),
+            nrows: None,
         }
     }
+}
+
+/// The rows of a sheet [`parse_excel_rows`] reads: without the rows
+/// `skip_row_numbers` lists, then without the first `skip_rows`, then the
+/// header and at most `nrows` data rows.
+fn excel_range_rows(
+    range: &calamine::Range<calamine::Data>,
+    options: &ExcelReadOptions,
+) -> Vec<Vec<calamine::Data>> {
+    let keep = options.nrows.map_or(usize::MAX, |nrows| {
+        nrows.saturating_add(usize::from(options.has_headers))
+    });
+    range
+        .rows()
+        .enumerate()
+        .filter(|(position, _)| !options.skip_row_numbers.contains(position))
+        .skip(options.skip_rows)
+        .take(keep)
+        .map(|(_, row)| row.to_vec())
+        .collect()
 }
 
 /// Convert a calamine `Data` cell value to a `Scalar`.
@@ -11349,7 +11515,17 @@ fn parse_excel_rows(
                 }
             }
         }
-        let mut column = Column::from_values(values)?;
+        // A column of blank cells only is pandas' float64 of NaN (it read
+        // as object; br-frankenpandas-0gmqq); with no rows it stays object.
+        let all_blank = !values.is_empty()
+            && values
+                .iter()
+                .all(|value| matches!(value, Scalar::Null(NullKind::NaN)));
+        let mut column = if all_blank {
+            Column::new(DType::Float64, values)?
+        } else {
+            Column::from_values(values)?
+        };
         // pandas reads a whole-number column with a blank cell as float64 (NaN);
         // the default Int64-with-validity inference (DISC-011) kept int64 here
         // (br-frankenpandas-audiv).
@@ -11403,13 +11579,7 @@ pub fn read_excel(path: &Path, options: &ExcelReadOptions) -> Result<DataFrame, 
         .worksheet_range(&sheet_name)
         .map_err(|e| IoError::Excel(format!("cannot read sheet '{sheet_name}': {e}")))?;
 
-    let rows: Vec<Vec<calamine::Data>> = range
-        .rows()
-        .skip(options.skip_rows)
-        .map(|r| r.to_vec())
-        .collect();
-
-    parse_excel_rows(rows, options)
+    parse_excel_rows(excel_range_rows(&range, options), options)
 }
 
 pub fn read_excel_with_index_cols(
@@ -11443,13 +11613,7 @@ pub fn read_excel_bytes(data: &[u8], options: &ExcelReadOptions) -> Result<DataF
         .worksheet_range(&sheet_name)
         .map_err(|e| IoError::Excel(format!("cannot read sheet '{sheet_name}': {e}")))?;
 
-    let rows: Vec<Vec<calamine::Data>> = range
-        .rows()
-        .skip(options.skip_rows)
-        .map(|r| r.to_vec())
-        .collect();
-
-    parse_excel_rows(rows, options)
+    parse_excel_rows(excel_range_rows(&range, options), options)
 }
 
 pub fn read_excel_bytes_with_index_cols(
@@ -11513,12 +11677,7 @@ pub fn read_excel_sheets_ordered(
         let range = workbook
             .worksheet_range(sheet)
             .map_err(|e| IoError::Excel(format!("cannot read sheet {sheet:?}: {e}")))?;
-        let rows: Vec<Vec<calamine::Data>> = range
-            .rows()
-            .skip(options.skip_rows)
-            .map(|r| r.to_vec())
-            .collect();
-        let frame = parse_excel_rows(rows, options)?;
+        let frame = parse_excel_rows(excel_range_rows(&range, options), options)?;
         out.push((sheet.clone(), frame));
     }
     Ok(out)
@@ -11560,12 +11719,7 @@ pub fn read_excel_sheets_ordered_bytes(
         let range = workbook
             .worksheet_range(sheet)
             .map_err(|e| IoError::Excel(format!("cannot read sheet {sheet:?}: {e}")))?;
-        let rows: Vec<Vec<calamine::Data>> = range
-            .rows()
-            .skip(options.skip_rows)
-            .map(|r| r.to_vec())
-            .collect();
-        let frame = parse_excel_rows(rows, options)?;
+        let frame = parse_excel_rows(excel_range_rows(&range, options), options)?;
         out.push((sheet.clone(), frame));
     }
     Ok(out)
@@ -11606,12 +11760,7 @@ pub fn read_excel_sheets(
         let range = workbook
             .worksheet_range(sheet)
             .map_err(|e| IoError::Excel(format!("cannot read sheet {sheet:?}: {e}")))?;
-        let rows: Vec<Vec<calamine::Data>> = range
-            .rows()
-            .skip(options.skip_rows)
-            .map(|r| r.to_vec())
-            .collect();
-        let frame = parse_excel_rows(rows, options)?;
+        let frame = parse_excel_rows(excel_range_rows(&range, options), options)?;
         out.insert(sheet.clone(), frame);
     }
     Ok(out)
@@ -11656,12 +11805,7 @@ pub fn read_excel_sheets_bytes(
         let range = workbook
             .worksheet_range(sheet)
             .map_err(|e| IoError::Excel(format!("cannot read sheet {sheet:?}: {e}")))?;
-        let rows: Vec<Vec<calamine::Data>> = range
-            .rows()
-            .skip(options.skip_rows)
-            .map(|r| r.to_vec())
-            .collect();
-        let frame = parse_excel_rows(rows, options)?;
+        let frame = parse_excel_rows(excel_range_rows(&range, options), options)?;
         out.insert(sheet.clone(), frame);
     }
     Ok(out)
@@ -11936,15 +12080,43 @@ pub fn write_excel_bytes_with_options(
     frame: &DataFrame,
     options: &ExcelWriteOptions,
 ) -> Result<Vec<u8>, IoError> {
+    write_excel_workbook_bytes(&[(frame, options.clone())])
+}
+
+/// Serialize frames as the sheets of one workbook, in order - pandas'
+/// `ExcelWriter`, each `to_excel(writer, sheet_name=...)` a sheet
+/// (br-frankenpandas-0gmqq). No sheet at all is pandas' refusal.
+pub fn write_excel_workbook_bytes(
+    sheets: &[(&DataFrame, ExcelWriteOptions)],
+) -> Result<Vec<u8>, IoError> {
+    if sheets.is_empty() {
+        return Err(IoError::Excel(
+            "At least one sheet must be visible".to_owned(),
+        ));
+    }
+    let mut workbook = rust_xlsxwriter::Workbook::new();
+    for (frame, options) in sheets {
+        write_excel_sheet(&mut workbook, frame, options)?;
+    }
+    workbook
+        .save_to_buffer()
+        .map_err(|e| IoError::Excel(format!("save workbook: {e}")))
+}
+
+/// One frame as a new sheet of `workbook` (see
+/// [`write_excel_bytes_with_options`]).
+fn write_excel_sheet(
+    workbook: &mut rust_xlsxwriter::Workbook,
+    frame: &DataFrame,
+    options: &ExcelWriteOptions,
+) -> Result<(), IoError> {
     if options.index && frame.row_multiindex().is_some() {
         let materialized = materialize_named_row_multiindex_columns(frame)?;
         let mut nested_options = options.clone();
         nested_options.index = false;
         nested_options.index_label = None;
-        return write_excel_bytes_with_options(&materialized, &nested_options);
+        return write_excel_sheet(workbook, &materialized, &nested_options);
     }
-
-    use rust_xlsxwriter::Workbook;
 
     let col_names: Vec<String> = frame.column_names().into_iter().cloned().collect();
     // pandas refuses before writing anything; Excel cells carry no zone.
@@ -11961,7 +12133,6 @@ pub fn write_excel_bytes_with_options(
     }
     let formats = ExcelTemporalFormats::new();
 
-    let mut workbook = Workbook::new();
     let worksheet = workbook.add_worksheet();
     worksheet
         .set_name(options.sheet_name.as_str())
@@ -12012,12 +12183,7 @@ pub fn write_excel_bytes_with_options(
             }
         }
     }
-
-    let buf = workbook
-        .save_to_buffer()
-        .map_err(|e| IoError::Excel(format!("save workbook: {e}")))?;
-
-    Ok(buf)
+    Ok(())
 }
 
 /// File-based counterpart to `write_excel_bytes_with_options`.
@@ -19080,6 +19246,57 @@ mod tests {
             write(CsvWriteOptions::default()).unwrap(),
             "a,b\n1.5,x\n,\"y,z\"\n3.25,\"q\"\"r\"\n"
         );
+
+        // Python's csv escaping, pandas 2.2.3's text for the same frame
+        // (br-frankenpandas-0gmqq). QUOTE_NONE escapes the delimiter and
+        // leaves the quote (pandas passes no quotechar there).
+        let escaping = |quoting, escapechar, doublequote| {
+            write(CsvWriteOptions {
+                quoting,
+                escapechar,
+                doublequote,
+                ..CsvWriteOptions::default()
+            })
+        };
+        assert_eq!(
+            escaping(CsvQuoting::None, Some(b'\\'), true).unwrap(),
+            "a,b\n1.5,x\n,y\\,z\n3.25,q\"r\n"
+        );
+        // doublequote=False escapes the quote and leaves that field
+        // unquoted, where the csv crate's writer would quote it.
+        assert_eq!(
+            escaping(CsvQuoting::Minimal, Some(b'\\'), false).unwrap(),
+            "a,b\n1.5,x\n,\"y,z\"\n3.25,q\\\"r\n"
+        );
+        // An escapechar alone changes nothing here: the quote is doubled.
+        assert_eq!(
+            escaping(CsvQuoting::Minimal, Some(b'\\'), true).unwrap(),
+            "a,b\n1.5,x\n,\"y,z\"\n3.25,\"q\"\"r\"\n"
+        );
+        assert_eq!(
+            escaping(CsvQuoting::NonNumeric, Some(b'\\'), true).unwrap(),
+            "\"a\",\"b\"\n1.5,\"x\"\n\"\",\"y,z\"\n3.25,\"q\"\"r\"\n"
+        );
+        // NEGATIVE: an escape with no escapechar is Python's csv.Error.
+        for (quoting, doublequote) in [(CsvQuoting::None, true), (CsvQuoting::Minimal, false)] {
+            assert!(matches!(
+                escaping(quoting, None, doublequote),
+                Err(super::IoError::CsvDialect(message)) if message == "need to escape, but no escapechar set"
+            ));
+        }
+        // The escapechar itself and a line break under QUOTE_NONE; one
+        // empty field alone is Python's refusal there.
+        let fields = ["x\\y".to_owned(), "p\nq".to_owned()];
+        let none = CsvWriteOptions {
+            quoting: CsvQuoting::None,
+            escapechar: Some(b'\\'),
+            ..CsvWriteOptions::default()
+        };
+        assert_eq!(
+            super::csv_record_text(&fields, &none).unwrap(),
+            "x\\\\y,p\\\nq\n"
+        );
+        assert!(super::csv_record_text(&[String::new()], &none).is_err());
     }
 
     /// SUPERSEDES the rejection contract br-frankenpandas-4hpid recorded here.
@@ -26346,6 +26563,67 @@ mod tests {
         // (GOLDEN-CHANGE 4qg5w.19: was "column_0").
         assert_eq!(frame2.index().len(), 2);
         assert_eq!(frame2.column_names(), vec!["0", "1"]);
+    }
+
+    #[test]
+    fn excel_skip_row_numbers_and_nrows_read_before_inference_0gmqq() {
+        use fp_types::DType;
+
+        // a | m | e  /  1 | 1  /  2 | "x"  /  3 | 2.5  (e: blank cells only)
+        let mut workbook = rust_xlsxwriter::Workbook::new();
+        let sheet = workbook.add_worksheet();
+        sheet.write_string(0, 0, "a").unwrap();
+        sheet.write_string(0, 1, "m").unwrap();
+        sheet.write_string(0, 2, "e").unwrap();
+        for (row, a) in [(1, 1.0), (2, 2.0), (3, 3.0)] {
+            sheet.write_number(row, 0, a).unwrap();
+        }
+        sheet.write_number(1, 1, 1.0).unwrap();
+        sheet.write_string(2, 1, "x").unwrap();
+        sheet.write_number(3, 1, 2.5).unwrap();
+        let bytes = workbook.save_to_buffer().unwrap();
+        let read = |options: super::ExcelReadOptions| {
+            super::read_excel_bytes(&bytes, &options).expect("read excel")
+        };
+
+        // skiprows=[2] drops the "x" row before the column is typed, so m
+        // is float64 (dropping it afterwards would leave object).
+        let frame = read(super::ExcelReadOptions {
+            skip_row_numbers: vec![2],
+            ..Default::default()
+        });
+        assert_eq!(
+            frame.column("a").unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(3)]
+        );
+        assert_eq!(frame.column("m").unwrap().dtype(), DType::Float64);
+        // Blank cells only: float64 of NaN, as pandas reads them.
+        assert_eq!(frame.column("e").unwrap().dtype(), DType::Float64);
+
+        // nrows=1: the first data row only, typed alone (int64).
+        let frame = read(super::ExcelReadOptions {
+            nrows: Some(1),
+            ..Default::default()
+        });
+        assert_eq!(frame.index().len(), 1);
+        assert_eq!(frame.column("m").unwrap().dtype(), DType::Int64);
+
+        // Leaving out row 0 makes the next row the header.
+        let frame = read(super::ExcelReadOptions {
+            skip_row_numbers: vec![0],
+            ..Default::default()
+        });
+        assert_eq!(frame.column_names(), vec!["1", "1.1", "Unnamed: 2"]);
+        assert_eq!(frame.index().len(), 2);
+
+        // nrows=0: the header's columns, no rows (and no float64 guess).
+        let frame = read(super::ExcelReadOptions {
+            nrows: Some(0),
+            ..Default::default()
+        });
+        assert_eq!(frame.column_names(), vec!["a", "m", "e"]);
+        assert_eq!(frame.index().len(), 0);
+        assert_ne!(frame.column("e").unwrap().dtype(), DType::Float64);
     }
 
     #[test]
