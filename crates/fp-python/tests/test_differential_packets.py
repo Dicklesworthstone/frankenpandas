@@ -21022,3 +21022,52 @@ _E70_CASES = {
 def test_everyday70_dt_unit_freq_python_objects_like_pandas_o2e2r(case: str) -> None:
     run = _E70_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-w932f: merge refused a named Series (TypeError) and an
+# `on` key naming an index level ('missing key column').
+def _e71_sides(m: Any) -> tuple:
+    return (
+        m.DataFrame({"k": ["a", "b", "c"], "v": [1, 2, 3]}),
+        m.DataFrame({"k": ["b", "c", "d"], "w": [10.0, 20.0, 30.0]}),
+    )
+
+
+def _e71_shown(frame: Any) -> list:
+    return [frame.index.tolist(), list(frame.index.names), frame.columns.tolist(), frame.values.tolist()]
+
+
+def _e71_merge(m: Any, build: Any) -> list:
+    left, right = _e71_sides(m)
+    return _e71_shown(build(m, left, right))
+
+
+_E71_CASES = {
+    "frame merge named series": lambda m: _e71_merge(
+        m, lambda m, l, r: l.merge(r.set_index("k")["w"], left_on="k", right_index=True)
+    ),
+    "pd.merge series left": lambda m: _e71_merge(
+        m, lambda m, l, r: m.merge(r.set_index("k")["w"], l, left_index=True, right_on="k")
+    ),
+    "merge series on": lambda m: _e71_merge(m, lambda m, l, r: l.merge(m.Series(["x", "b"], name="k"), on="k", how="outer")),
+    "unnamed series": lambda m: _e71_merge(m, lambda m, l, r: l.merge(m.Series([1, 2]), left_index=True, right_index=True)),
+    "merge a list": lambda m: _e71_merge(m, lambda m, l, r: l.merge([1, 2])),
+    "on left level": lambda m: _e71_merge(m, lambda m, l, r: l.set_index("k").merge(r, on="k")),
+    "on right level": lambda m: _e71_merge(m, lambda m, l, r: l.merge(r.set_index("k"), on="k", how="left")),
+    "on both levels": lambda m: _e71_merge(m, lambda m, l, r: l.set_index("k").merge(r.set_index("k"), on="k")),
+    "on level and column": lambda m: _e71_merge(
+        m, lambda m, l, r: l.assign(j=1).set_index("k").merge(r.assign(j=1), on=["k", "j"])
+    ),
+    # Negatives: already pandas'.
+    "frames on column": lambda m: _e71_merge(m, lambda m, l, r: l.merge(r, on="k", how="outer")),
+    "frames on indexes": lambda m: _e71_merge(
+        m, lambda m, l, r: l.set_index("k").merge(r.set_index("k"), left_index=True, right_index=True)
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E71_CASES))
+def test_everyday71_merge_series_and_index_levels_like_pandas_w932f(case: str) -> None:
+    run = _E71_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

@@ -39495,7 +39495,7 @@ impl PyDataFrame {
     #[allow(clippy::too_many_arguments)]
     fn merge(
         &self,
-        right: &PyDataFrame,
+        right: &Bound<'_, PyAny>,
         how: &str,
         on: Option<&Bound<'_, PyAny>>,
         left_on: Option<&Bound<'_, PyAny>>,
@@ -39509,6 +39509,7 @@ impl PyDataFrame {
         validate: Option<&str>,
     ) -> PyResult<PyDataFrame> {
         let _ = copy; // pandas' copy= does not change the result
+        let right = merge_side_frame(right)?;
         let args = MergeArgs {
             how,
             on,
@@ -39522,7 +39523,7 @@ impl PyDataFrame {
             validate,
         };
         Ok(PyDataFrame {
-            inner: merge_impl(&self.inner, &right.inner, &args)?,
+            inner: merge_sides(&self.inner, &right, &args)?,
         })
     }
 
@@ -67365,6 +67366,90 @@ fn merge_side_with_key_levels(
     Ok(Some((reset, levels)))
 }
 
+/// A side of a merge: a frame, or a named Series as its one-column frame,
+/// as pandas' (a Series was a TypeError; an unnamed one is pandas'
+/// ValueError; br-frankenpandas-w932f).
+fn merge_side_frame(side: &Bound<'_, PyAny>) -> PyResult<DataFrame> {
+    if let Ok(frame) = side.extract::<PyRef<'_, PyDataFrame>>() {
+        return Ok(frame.inner.clone());
+    }
+    if side.is_instance_of::<PySeries>() {
+        if side.getattr("name")?.is_none() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Cannot merge a Series without a name",
+            ));
+        }
+        let frame = side.call_method0("to_frame")?;
+        return Ok(frame.extract::<PyRef<'_, PyDataFrame>>()?.inner.clone());
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        "Can only merge Series or DataFrame objects, a {} was passed",
+        side.get_type().repr()?
+    )))
+}
+
+/// pandas' merge of two sides ([`merge_side_frame`]), a key `on` names
+/// that is one side's index level read as that level
+/// ([`index_level_keys_as_columns`]).
+fn merge_sides(
+    left: &DataFrame,
+    right: &DataFrame,
+    args: &MergeArgs<'_, '_>,
+) -> PyResult<DataFrame> {
+    let Some(on) = args.on.filter(|on| !on.is_none()) else {
+        return merge_impl(left, right, args);
+    };
+    // One key both sides hold only as their index: pandas merges on the
+    // indexes, the result indexed by that level.
+    if let Ok(key) = on.extract::<String>()
+        && index_level_only(left, &key)
+        && index_level_only(right, &key)
+    {
+        let by_index = MergeArgs {
+            how: args.how,
+            on: None,
+            left_on: None,
+            right_on: None,
+            left_index: true,
+            right_index: true,
+            sort: args.sort,
+            suffixes: args.suffixes,
+            indicator: args.indicator,
+            validate: args.validate,
+        };
+        return merge_impl(left, right, &by_index);
+    }
+    merge_impl(
+        &index_level_keys_as_columns(left, on)?,
+        &index_level_keys_as_columns(right, on)?,
+        args,
+    )
+}
+
+/// Whether `frame` holds `key` only as the name of its flat index.
+fn index_level_only(frame: &DataFrame, key: &str) -> bool {
+    frame.row_multiindex().is_none()
+        && frame.column(key).is_none()
+        && frame
+            .index()
+            .name()
+            .is_some_and(|name| name.as_str() == key)
+}
+
+/// `frame` with an `on` key it holds only as the name of its (flat) index
+/// moved into a column, as pandas' merge reads an index level named by
+/// `on` (it was 'missing key column'; br-frankenpandas-w932f).
+fn index_level_keys_as_columns(frame: &DataFrame, on: &Bound<'_, PyAny>) -> PyResult<DataFrame> {
+    let keys: Vec<String> = match on.extract::<String>() {
+        Ok(key) => vec![key],
+        Err(_) => on.extract::<Vec<String>>().unwrap_or_default(),
+    };
+    if !keys.iter().any(|key| index_level_only(frame, key)) {
+        return Ok(frame.clone());
+    }
+    frame.reset_index(false).map_err(frame_error_to_py)
+}
+
 /// pandas `merge` over fp-join (suffixes, indicator, validate and sort
 /// included); left_index/right_index merges join on the index labels moved
 /// into a key column and restore them as the result index.
@@ -67746,8 +67831,8 @@ fn merge_impl(
 ))]
 #[allow(clippy::too_many_arguments)]
 fn merge(
-    left: &PyDataFrame,
-    right: &PyDataFrame,
+    left: &Bound<'_, PyAny>,
+    right: &Bound<'_, PyAny>,
     how: &str,
     on: Option<&Bound<'_, PyAny>>,
     left_on: Option<&Bound<'_, PyAny>>,
@@ -67773,8 +67858,10 @@ fn merge(
         indicator,
         validate,
     };
+    // Either side may be a named Series, `on` an index level, as pandas'
+    // (br-frankenpandas-w932f).
     Ok(PyDataFrame {
-        inner: merge_impl(&left.inner, &right.inner, &args)?,
+        inner: merge_sides(&merge_side_frame(left)?, &merge_side_frame(right)?, &args)?,
     })
 }
 
