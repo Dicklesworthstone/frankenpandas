@@ -26245,12 +26245,21 @@ mod tests {
 
     #[test]
     fn write_excel_with_options_default_matches_write_excel_bytes() {
+        // TEST-CHANGE (br-frankenpandas-6742l): the two workbooks are compared
+        // by what they hold, not byte for byte - rust_xlsxwriter stamps
+        // docProps/core.xml with utc_now() to the second, so two writes a
+        // second apart differed and this failed under load. The same frame
+        // read back from each is the claim that survives (not even the size:
+        // the compressed stamp's length can move with its digits).
         let frame = make_test_dataframe();
         let default_bytes = super::write_excel_bytes(&frame).expect("default");
         let options_bytes =
             super::write_excel_bytes_with_options(&frame, &super::ExcelWriteOptions::default())
                 .expect("options");
-        assert_eq!(default_bytes, options_bytes);
+        let read = |bytes: &[u8]| {
+            super::read_excel_bytes(bytes, &super::ExcelReadOptions::default()).expect("read")
+        };
+        assert!(read(&default_bytes).equals(&read(&options_bytes)));
     }
 
     #[test]
