@@ -20405,3 +20405,55 @@ _E59_CASES = {
 def test_everyday59_dict_of_dicts_and_records_like_pandas_azgpi(case: str) -> None:
     run = _E59_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-di8vx: convert_dtypes' switches (infer_objects,
+# convert_string, convert_integer, convert_boolean, convert_floating) were
+# refused; pandas' per-column rules apply them (bools without
+# convert_boolean become Int64, whole floats Int64, extension dtypes kept).
+def _e60_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "i": [1, None],
+            "s": ["a", None],
+            "f": [1.5, 2.0],
+            "b": [True, False],
+            "o": m.Series([1, 2], dtype=object),
+        }
+    )
+
+
+def _e60_dtypes(m: Any, **kwargs: Any) -> list:
+    return _e60_frame(m).convert_dtypes(**kwargs).dtypes.astype(str).tolist()
+
+
+_E60_CASES = {
+    "no convert_string": lambda m: _e60_dtypes(m, convert_string=False),
+    "no convert_integer": lambda m: _e60_dtypes(m, convert_integer=False),
+    "no convert_boolean": lambda m: _e60_dtypes(m, convert_boolean=False),
+    "no convert_floating": lambda m: _e60_dtypes(m, convert_floating=False),
+    "neither integer nor floating": lambda m: _e60_dtypes(m, convert_integer=False, convert_floating=False),
+    "no infer_objects": lambda m: _e60_dtypes(m, infer_objects=False),
+    "series switch": lambda m: [str(m.Series([1.0, 2.0]).convert_dtypes(convert_integer=False).dtype)],
+    "object bools no convert_boolean": lambda m: [
+        str(m.Series([True, None]).convert_dtypes(convert_boolean=False).dtype),
+        str(m.Series([True, None]).convert_dtypes().dtype),
+    ],
+    "narrow widths": lambda m: [
+        str(m.Series([1, 2], dtype="int32").convert_dtypes().dtype),
+        str(m.Series([1.5, 2.0], dtype="float32").convert_dtypes().dtype),
+    ],
+    "masked kept": lambda m: [str(m.Series([1.0, None], dtype="Float64").convert_dtypes().dtype)],
+    "dtype_backend invalid": lambda m: [m.Series([1]).convert_dtypes(dtype_backend="numpy")],
+    # An extension dtype stays what it is whatever the switch says.
+    "string kept": lambda m: [str(m.Series(["a", None], dtype="string").convert_dtypes(convert_string=False).dtype)],
+    # Negatives: already pandas'.
+    "defaults": lambda m: _e60_dtypes(m),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E60_CASES))
+def test_everyday60_convert_dtypes_switches_like_pandas_di8vx(case: str) -> None:
+    run = _E60_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

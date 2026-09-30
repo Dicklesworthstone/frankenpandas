@@ -21209,6 +21209,35 @@ fn decimal_columns_as_float<'py>(frame: &Bound<'py, PyAny>) -> PyResult<Bound<'p
     Ok(out)
 }
 
+/// `convert_dtypes`' keywords as fp-frame's switches; dtype_backend
+/// 'pyarrow' is refused (numpy_nullable is what fp-frame builds), any other
+/// value pandas' ValueError.
+fn convert_dtypes_options(
+    infer_objects: bool,
+    convert_string: bool,
+    convert_integer: bool,
+    convert_boolean: bool,
+    convert_floating: bool,
+    dtype_backend: &str,
+) -> PyResult<fp_frame::ConvertDtypes> {
+    match dtype_backend {
+        "numpy_nullable" => {}
+        "pyarrow" => return Err(not_implemented("convert_dtypes(dtype_backend='pyarrow')")),
+        other => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "dtype_backend {other} is invalid, only 'numpy_nullable' and 'pyarrow' are allowed."
+            )));
+        }
+    }
+    Ok(fp_frame::ConvertDtypes {
+        infer_objects,
+        convert_string,
+        convert_integer,
+        convert_boolean,
+        convert_floating,
+    })
+}
+
 /// A numpy structured (or record) array as pandas reads it: a dict of its
 /// fields' arrays in field order; None for any other data.
 fn structured_array_fields<'py>(data: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
@@ -30078,8 +30107,32 @@ impl PySeries {
         .into_py_any(py)
     }
 
-    fn convert_dtypes(&self) -> PyResult<PySeries> {
-        let res = self.inner.convert_dtypes().map_err(frame_error_to_py)?;
+    /// pandas' `convert_dtypes(infer_objects=True, convert_string=True,
+    /// convert_integer=True, convert_boolean=True, convert_floating=True,
+    /// dtype_backend='numpy_nullable')` (the keywords were refused;
+    /// br-frankenpandas-di8vx).
+    #[pyo3(signature = (infer_objects=true, convert_string=true, convert_integer=true, convert_boolean=true, convert_floating=true, dtype_backend="numpy_nullable"))]
+    fn convert_dtypes(
+        &self,
+        infer_objects: bool,
+        convert_string: bool,
+        convert_integer: bool,
+        convert_boolean: bool,
+        convert_floating: bool,
+        dtype_backend: &str,
+    ) -> PyResult<PySeries> {
+        let options = convert_dtypes_options(
+            infer_objects,
+            convert_string,
+            convert_integer,
+            convert_boolean,
+            convert_floating,
+            dtype_backend,
+        )?;
+        let res = self
+            .inner
+            .convert_dtypes_with(options)
+            .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
     }
 
@@ -43340,8 +43393,29 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: res })
     }
 
-    fn convert_dtypes(&self) -> PyResult<PyDataFrame> {
-        let res = self.inner.convert_dtypes().map_err(frame_error_to_py)?;
+    /// pandas' `convert_dtypes(...)` (see Series'; br-frankenpandas-di8vx).
+    #[pyo3(signature = (infer_objects=true, convert_string=true, convert_integer=true, convert_boolean=true, convert_floating=true, dtype_backend="numpy_nullable"))]
+    fn convert_dtypes(
+        &self,
+        infer_objects: bool,
+        convert_string: bool,
+        convert_integer: bool,
+        convert_boolean: bool,
+        convert_floating: bool,
+        dtype_backend: &str,
+    ) -> PyResult<PyDataFrame> {
+        let options = convert_dtypes_options(
+            infer_objects,
+            convert_string,
+            convert_integer,
+            convert_boolean,
+            convert_floating,
+            dtype_backend,
+        )?;
+        let res = self
+            .inner
+            .convert_dtypes_with(options)
+            .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: res })
     }
 

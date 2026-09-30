@@ -29490,7 +29490,14 @@ impl Series {
         // br-frankenpandas-fixture-divergence-triage-9s0c4 kept it object),
         // and numbers and bools take pandas' nullable dtypes (see
         // `convert_column_dtypes`; they were returned unchanged).
-        let column = convert_column_dtypes(&self.column)?;
+        self.convert_dtypes_with(ConvertDtypes::default())
+    }
+
+    /// Matches `pd.Series.convert_dtypes(infer_objects=, convert_string=,
+    /// convert_integer=, convert_boolean=, convert_floating=)` (see
+    /// [`convert_column_dtypes_with`]; br-frankenpandas-di8vx).
+    pub fn convert_dtypes_with(&self, options: ConvertDtypes) -> Result<Self, FrameError> {
+        let column = convert_column_dtypes_with(&self.column, options)?;
         Self::new(self.name.clone(), self.index.clone(), column)
     }
 
@@ -65387,42 +65394,117 @@ pub fn cut_bins_with_precision(
     binned_categorical(series, bin_indices, &categories)
 }
 
-/// A column as pandas' `convert_dtypes` retypes it (live pandas 2.2.3): ints
-/// to the nullable Int64; floats to Int64 when every present value is a
-/// whole number (none present included), else to Float64; bools, and an
-/// object column of bools beside missing values, to boolean; an object
-/// column of numbers as those numbers would. Text stays text (pandas'
-/// `string` dtype has no separate form here), as do mixed object columns,
-/// empty or all-missing object columns, datetimes and categoricals.
-fn convert_column_dtypes(column: &Column) -> Result<Column, FrameError> {
+/// pandas' `convert_dtypes` switches (`infer_objects`, `convert_string`,
+/// `convert_integer`, `convert_boolean`, `convert_floating`), all on by
+/// default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ConvertDtypes {
+    pub infer_objects: bool,
+    pub convert_string: bool,
+    pub convert_integer: bool,
+    pub convert_boolean: bool,
+    pub convert_floating: bool,
+}
+
+impl Default for ConvertDtypes {
+    fn default() -> Self {
+        Self {
+            infer_objects: true,
+            convert_string: true,
+            convert_integer: true,
+            convert_boolean: true,
+            convert_floating: true,
+        }
+    }
+}
+
+/// pandas' convert_dtypes (pandas.core.dtypes.cast) for one column: with
+/// `infer_objects` the column's object values inferred first; nullable,
+/// `string`, categorical and datetime columns kept; then, in pandas' order,
+/// text to `string` (convert_string); int kinds to Int64, float and bool
+/// kinds whose present values are all whole to Int64 (convert_integer); float
+/// and bool kinds to Float64 - Int64 when whole and convert_integer
+/// (convert_floating); bools, and an object column of bools, to boolean
+/// (convert_boolean) - so bools without convert_boolean become Int64, as
+/// pandas'. What no switch retypes keeps its dtype. The switches were not
+/// taken (br-frankenpandas-di8vx).
+pub fn convert_column_dtypes_with(
+    column: &Column,
+    options: ConvertDtypes,
+) -> Result<Column, FrameError> {
+    let inferred = if options.infer_objects {
+        inferred_object_column(column)?
+    } else {
+        None
+    };
+    let column = inferred.as_ref().unwrap_or(column);
+    // numpy's kind; bools beside a missing value are pandas' object column.
+    let kind = match column.dtype() {
+        DType::Int64 => 'i',
+        DType::Float64 => 'f',
+        DType::Bool if column.count() == column.len() => 'b',
+        DType::Bool => 'O',
+        DType::Utf8 if !column.is_pandas_string() => 'O',
+        _ => return Ok(column.clone()),
+    };
     let values = column.values();
-    let whole = |value: &Scalar| match value {
-        Scalar::Int64(_) => true,
+    let present: Vec<&Scalar> = values.iter().filter(|value| !value.is_missing()).collect();
+    // pandas' infer_dtype of an object column's present values.
+    let code = (kind == 'O').then(|| {
+        let all =
+            |test: fn(&Scalar) -> bool| !present.is_empty() && present.iter().all(|v| test(v));
+        if all(|value| matches!(value, Scalar::Utf8(_))) {
+            "string"
+        } else if all(|value| matches!(value, Scalar::Bool(_))) {
+            "boolean"
+        } else if all(|value| matches!(value, Scalar::Int64(_))) {
+            "integer"
+        } else if all(|value| matches!(value, Scalar::Int64(_) | Scalar::Float64(_))) {
+            "mixed-integer-float"
+        } else {
+            "mixed"
+        }
+    });
+    let whole = present.iter().all(|value| match value {
+        Scalar::Int64(_) | Scalar::Bool(_) => true,
         Scalar::Float64(v) => v.is_finite() && v.fract() == 0.0,
         _ => false,
-    };
-    let numbers = |present: &mut dyn Iterator<Item = &Scalar>| {
-        let mut all_whole = true;
-        for value in present {
-            match value {
-                Scalar::Int64(_) | Scalar::Float64(_) => all_whole &= whole(value),
-                _ => return None,
-            }
+    });
+    let numeric_kind = matches!(kind, 'f' | 'b');
+    let mut target: Option<DType> = None;
+    let mut text = false;
+    if code == Some("string") && options.convert_string {
+        text = true;
+    }
+    if options.convert_integer {
+        if kind == 'i'
+            || (numeric_kind && whole)
+            || (options.infer_objects && code == Some("integer"))
+        {
+            target = Some(DType::Int64Nullable);
+        } else if numeric_kind {
+            target = None;
         }
-        Some(if all_whole {
-            DType::Int64Nullable
-        } else {
-            DType::Float64Nullable
-        })
-    };
-    // A text column is pandas' `string` dtype, its missing value pd.NA
-    // (pd.Series(['a', None]).convert_dtypes() is string [a, <NA>]; fvsao.59).
-    let mut texts = values.iter().filter(|value| !value.is_missing()).peekable();
-    if column.dtype() == DType::Utf8
-        && !column.is_pandas_string()
-        && texts.peek().is_some()
-        && texts.all(|value| matches!(value, Scalar::Utf8(_)))
-    {
+    }
+    if options.convert_floating {
+        if numeric_kind {
+            target = Some(if options.convert_integer && whole {
+                DType::Int64Nullable
+            } else {
+                DType::Float64Nullable
+            });
+        } else if options.infer_objects && code == Some("mixed-integer-float") {
+            target = Some(DType::Float64Nullable);
+        }
+    }
+    if options.convert_boolean && (kind == 'b' || code == Some("boolean")) {
+        target = Some(DType::BoolNullable);
+    }
+    if text {
+        // A text column is pandas' `string` dtype, its missing value pd.NA
+        // (pd.Series(['a', None]).convert_dtypes() is string [a, <NA>];
+        // fvsao.59).
         let normalized = values
             .iter()
             .map(|value| {
@@ -65435,28 +65517,16 @@ fn convert_column_dtypes(column: &Column) -> Result<Column, FrameError> {
             .collect();
         return Ok(Column::new(DType::Utf8, normalized)?.as_pandas_string());
     }
-    let mut present = values.iter().filter(|value| !value.is_missing());
-    let target = match column.dtype() {
-        DType::Int64 | DType::Int64Nullable => Some(DType::Int64Nullable),
-        DType::Bool | DType::BoolNullable
-            if present
-                .clone()
-                .all(|value| matches!(value, Scalar::Bool(_))) =>
-        {
-            Some(DType::BoolNullable)
+    // A narrow int keeps its width (int32 -> Int32), float32 too (-> Float32).
+    let width = column.width();
+    match (target, width) {
+        (Some(DType::Int64Nullable), Some(width)) if kind == 'i' => {
+            Ok(column.cast_to_width(width, true)?)
         }
-        DType::Float64 | DType::Float64Nullable => numbers(&mut present),
-        DType::Utf8 => match present.clone().next() {
-            None => None,
-            Some(Scalar::Bool(_)) => present
-                .all(|value| matches!(value, Scalar::Bool(_)))
-                .then_some(DType::BoolNullable),
-            Some(_) => numbers(&mut present),
-        },
-        _ => None,
-    };
-    match target {
-        Some(target) if target != column.dtype() => Ok(column.astype(target)?),
+        (Some(DType::Float64Nullable), Some(NumericWidth::Float32)) => {
+            Ok(column.cast_to_width(NumericWidth::Float32, true)?)
+        }
+        (Some(target), _) if target != column.dtype() => Ok(column.astype(target)?),
         _ => Ok(column.clone()),
     }
 }
@@ -99708,9 +99778,20 @@ impl DataFrame {
     /// into numbers (pandas keeps `['1', '2']` as strings; only to_numeric
     /// parses) and left numbers unchanged.
     pub fn convert_dtypes(&self) -> Result<Self, FrameError> {
+        self.convert_dtypes_with(ConvertDtypes::default())
+    }
+
+    /// Matches `pd.DataFrame.convert_dtypes(infer_objects=,
+    /// convert_string=, convert_integer=, convert_boolean=,
+    /// convert_floating=)`: each column as [`convert_column_dtypes_with`]
+    /// retypes it (br-frankenpandas-di8vx).
+    pub fn convert_dtypes_with(&self, options: ConvertDtypes) -> Result<Self, FrameError> {
         let mut result_cols = BTreeMap::new();
         for name in &self.column_order {
-            result_cols.insert(name.clone(), convert_column_dtypes(&self.columns[name])?);
+            result_cols.insert(
+                name.clone(),
+                convert_column_dtypes_with(&self.columns[name], options)?,
+            );
         }
         Ok(Self {
             columns: result_cols.into(),
@@ -176931,6 +177012,54 @@ mod tests {
         .unwrap();
         let kept = super::downcast_numeric(&plain, "integer").unwrap();
         assert_eq!(kept.column().width(), plain.column().width());
+    }
+
+    #[test]
+    fn convert_dtypes_switches_follow_pandas_di8vx() {
+        use super::{ConvertDtypes, convert_column_dtypes_with};
+        let all = ConvertDtypes::default();
+        let convert =
+            |column: &Column, options| convert_column_dtypes_with(column, options).unwrap();
+        let bools = Column::from_values(vec![Scalar::Bool(true), Scalar::Bool(false)]).unwrap();
+        assert_eq!(convert(&bools, all).dtype(), DType::BoolNullable);
+        // Without convert_boolean pandas makes bools Int64 (a bool is whole).
+        let no_boolean = ConvertDtypes {
+            convert_boolean: false,
+            ..all
+        };
+        assert_eq!(convert(&bools, no_boolean).dtype(), DType::Int64Nullable);
+        // Whole floats: Int64; without convert_integer Float64; without both
+        // kept float64.
+        let floats =
+            Column::from_values(vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN)]).unwrap();
+        assert_eq!(convert(&floats, all).dtype(), DType::Int64Nullable);
+        let no_integer = ConvertDtypes {
+            convert_integer: false,
+            ..all
+        };
+        assert_eq!(convert(&floats, no_integer).dtype(), DType::Float64Nullable);
+        let neither = ConvertDtypes {
+            convert_integer: false,
+            convert_floating: false,
+            ..all
+        };
+        assert_eq!(convert(&floats, neither).dtype(), DType::Float64);
+        // Text is `string` unless convert_string is off.
+        let text = Column::from_values(vec![
+            Scalar::Utf8("a".to_owned()),
+            Scalar::Null(NullKind::Null),
+        ])
+        .unwrap();
+        assert!(convert(&text, all).is_pandas_string());
+        let no_string = ConvertDtypes {
+            convert_string: false,
+            ..all
+        };
+        assert!(!convert(&text, no_string).is_pandas_string());
+        // Negative: a nullable Float64 of whole numbers is kept, as pandas
+        // keeps extension arrays.
+        let masked = floats.astype(DType::Float64Nullable).unwrap();
+        assert_eq!(convert(&masked, all).dtype(), DType::Float64Nullable);
     }
 
     #[test]
