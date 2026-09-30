@@ -1804,6 +1804,45 @@ fn f64_argmin_first_index(data: &[f64]) -> Option<usize> {
     Some(best_index)
 }
 
+/// Each label's sort rank under a categorical index: its category's
+/// position (pandas sorts a CategoricalIndex by its categories, not its
+/// labels; br-frankenpandas-cld41); None for any other index.
+fn category_ranks(index: &Index) -> Option<Vec<usize>> {
+    let categories = index.categories()?;
+    let ranks: std::collections::HashMap<&IndexLabel, usize> =
+        categories.categories.iter().zip(0_usize..).collect();
+    Some(
+        index
+            .labels()
+            .iter()
+            .map(|label| ranks.get(label).copied().unwrap_or(usize::MAX))
+            .collect(),
+    )
+}
+
+/// The category column a categorical index's labels make: each label its
+/// category's code, a missing one -1 - pandas' reset_index of a
+/// CategoricalIndex (br-frankenpandas-cld41).
+fn categorical_index_column(
+    index: &Index,
+    categories: &fp_index::IndexCategories,
+) -> Result<Column, FrameError> {
+    let ranks: std::collections::HashMap<&IndexLabel, i64> =
+        categories.categories.iter().zip(0_i64..).collect();
+    let codes: Vec<i64> = index
+        .labels()
+        .iter()
+        .map(|label| ranks.get(label).copied().unwrap_or(-1))
+        .collect();
+    let meta = CategoricalMetadata {
+        categories: DataFrame::index_labels_to_scalars(&categories.categories),
+        ordered: categories.ordered,
+    };
+    let positions = Index::new_known_unique_int64_unit_range(0, codes.len());
+    Series::categorical_from_code_parts("", positions, &codes, meta)
+        .map(|series| series.column().clone())
+}
+
 fn scalar_to_index_label(value: &Scalar) -> Result<IndexLabel, FrameError> {
     match value {
         Scalar::Int64(v) => Ok(IndexLabel::Int64(*v)),
@@ -14323,7 +14362,11 @@ impl Series {
             }
         }
         let na_first = na_position == "first";
-        if !na_first && let Some(values) = self.index.int64_label_values() {
+        let ranks = category_ranks(&self.index);
+        if !na_first
+            && ranks.is_none()
+            && let Some(values) = self.index.int64_label_values()
+        {
             let order = fp_columnar::radix_argsort_i64(&values, ascending);
             return self.sorted_by_positions(&order);
         }
@@ -14349,10 +14392,14 @@ impl Series {
                     }
                 }
                 (false, false) => {
-                    if ascending {
-                        labels[left].cmp(&labels[right])
+                    let (left, right) = if ascending {
+                        (left, right)
                     } else {
-                        labels[right].cmp(&labels[left])
+                        (right, left)
+                    };
+                    match &ranks {
+                        Some(ranks) => ranks[left].cmp(&ranks[right]),
+                        None => labels[left].cmp(&labels[right]),
                     }
                 }
             }
@@ -26941,6 +26988,11 @@ impl Series {
         // A tz-aware index comes back as a column of its dtype.
         let index_column = match self.index.tz() {
             Some(zone) => index_column.with_dtype(DType::datetime64_tz(zone)),
+            None => index_column,
+        };
+        // A categorical index as a category column (cld41).
+        let index_column = match self.index.categories() {
+            Some(categories) => categorical_index_column(&self.index, categories)?,
             None => index_column,
         };
         // In order, so an index column sharing the value column's label
@@ -78159,6 +78211,19 @@ impl DataFrame {
             DType::Datetime64 { tz: Some(zone) } => index.with_tz(Some(&zone))?,
             _ => index,
         };
+        // A categorical column's categories ride on it too (pandas: a
+        // CategoricalIndex; it was a plain Index; br-frankenpandas-cld41).
+        let index = match source.categorical() {
+            Some(meta) => index.with_categories(Some(fp_index::IndexCategories {
+                categories: meta
+                    .categories
+                    .iter()
+                    .map(scalar_to_index_label)
+                    .collect::<Result<_, _>>()?,
+                ordered: meta.ordered,
+            }))?,
+            None => index,
+        };
 
         if verify_integrity && index.has_duplicates() {
             return Err(FrameError::CompatibilityRejected(
@@ -78525,6 +78590,12 @@ impl DataFrame {
             Some(zone) => index_column.with_dtype(DType::datetime64_tz(zone)),
             None => index_column,
         };
+        // A categorical index comes back as a category column, as pandas'
+        // (it came back object; br-frankenpandas-cld41).
+        let index_column = match self.index.categories() {
+            Some(categories) => categorical_index_column(&self.index, categories)?,
+            None => index_column,
+        };
 
         let column_multiindex =
             self.column_multiindex_with_leading(std::slice::from_ref(&index_column_name))?;
@@ -78652,7 +78723,9 @@ impl DataFrame {
             }
         }
         let na_first = na_position == "first";
-        if !na_first {
+        // A categorical index sorts by its categories (cld41).
+        let ranks = category_ranks(&self.index);
+        if !na_first && ranks.is_none() {
             // Already-sorted short-circuit
             if (ascending && self.index.is_monotonic_increasing())
                 || (!ascending && self.index.is_monotonic_decreasing())
@@ -78686,10 +78759,14 @@ impl DataFrame {
                     }
                 }
                 (false, false) => {
-                    if ascending {
-                        labels[left].cmp(&labels[right])
+                    let (left, right) = if ascending {
+                        (left, right)
                     } else {
-                        labels[right].cmp(&labels[left])
+                        (right, left)
+                    };
+                    match &ranks {
+                        Some(ranks) => ranks[left].cmp(&ranks[right]),
+                        None => labels[left].cmp(&labels[right]),
                     }
                 }
             }
@@ -87104,16 +87181,17 @@ impl DataFrame {
     /// axis name).
     pub fn with_index(&self, index: Index) -> Result<Self, FrameError> {
         let mut out = self.set_axis(index.labels().to_vec(), 0)?;
-        // The given index's name, time zone, freq, RangeIndex origin and
-        // declared dtype ride along (they were dropped with the labels;
-        // br-frankenpandas-i20vm).
+        // The given index's name, time zone, freq, RangeIndex origin,
+        // declared dtype and categories ride along (they were dropped with
+        // the labels; br-frankenpandas-i20vm, br-frankenpandas-cld41).
         out.index = out
             .index
             .rename_index(index.name())
             .with_tz(index.tz())?
             .with_freq(index.freq().map(str::to_owned))
             .with_range_span(index.range_span())
-            .with_declared_dtype(index.declared_dtype());
+            .with_declared_dtype(index.declared_dtype())
+            .with_categories(index.categories().cloned())?;
         Ok(out)
     }
 
@@ -177012,6 +177090,64 @@ mod tests {
         .unwrap();
         let kept = super::downcast_numeric(&plain, "integer").unwrap();
         assert_eq!(kept.column().width(), plain.column().width());
+    }
+
+    #[test]
+    fn categorical_index_set_sort_reset_like_pandas_cld41() {
+        // k = Categorical(['b', 'a', 'b', 'c'], categories=['c', 'b', 'a'])
+        let text = |value: &str| Scalar::Utf8(value.to_owned());
+        let key = Series::from_categorical_codes(
+            "k",
+            vec![1, 2, 1, 0],
+            vec![text("c"), text("b"), text("a")],
+            false,
+        )
+        .unwrap();
+        let values = Column::from_values((1..=4).map(Scalar::Int64).collect()).unwrap();
+        let mut columns = std::collections::BTreeMap::new();
+        columns.insert("k".to_owned(), key.column().clone());
+        columns.insert("v".to_owned(), values);
+        let frame = DataFrame::new_with_column_order(
+            key.index().clone(),
+            columns,
+            vec!["k".to_owned(), "v".to_owned()],
+        )
+        .unwrap();
+        // set_index keeps the categories on the index.
+        let indexed = frame.set_index("k", true).unwrap();
+        let categories = indexed.index().categories().expect("a categorical index");
+        assert_eq!(
+            categories.categories,
+            vec![
+                IndexLabel::Utf8("c".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("a".into())
+            ]
+        );
+        // sort_index orders by the categories (c, b, b, a), not the text.
+        let sorted = indexed.sort_index(true).unwrap();
+        assert_eq!(
+            sorted.column("v").unwrap().values(),
+            &[
+                Scalar::Int64(4),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+                Scalar::Int64(2)
+            ]
+        );
+        // reset_index gives the categorical column back.
+        let reset = indexed.reset_index(false).unwrap();
+        assert!(reset.column("k").unwrap().categorical().is_some());
+        // NEGATIVE: a text column's index is not categorical.
+        let plain = DataFrame::from_dict(&["k"], vec![("k", vec![text("b"), text("a")])]).unwrap();
+        assert!(
+            plain
+                .set_index("k", true)
+                .unwrap()
+                .index()
+                .categories()
+                .is_none()
+        );
     }
 
     #[test]

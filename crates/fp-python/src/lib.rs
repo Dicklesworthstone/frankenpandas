@@ -7724,6 +7724,22 @@ fn index_arg_declared(obj: &Bound<'_, PyAny>) -> Option<fp_index::DeclaredDtype>
         .and_then(|index| index.inner.declared_dtype())
 }
 
+/// The categories an index argument carries when it is a CategoricalIndex
+/// (a Series / frame built on it keeps them; br-frankenpandas-cld41).
+fn index_arg_categories(obj: &Bound<'_, PyAny>) -> Option<fp_index::IndexCategories> {
+    let categorical = obj.extract::<PyRef<'_, PyCategoricalIndex>>().ok()?;
+    Some(fp_index::IndexCategories {
+        categories: categorical
+            .inner
+            .categories()
+            .iter()
+            .cloned()
+            .map(IndexLabel::Utf8)
+            .collect(),
+        ordered: categorical.inner.ordered(),
+    })
+}
+
 /// The name an Index argument gives the Series built from it, as pandas'
 /// `Series(Index([1, 2], name='a')).name == 'a'`.
 fn py_index_arg_name(obj: &Bound<'_, PyAny>) -> Option<LabelName> {
@@ -7733,6 +7749,9 @@ fn py_index_arg_name(obj: &Bound<'_, PyAny>) -> Option<LabelName> {
         dti.inner.name().cloned()
     } else if let Ok(tdi) = obj.extract::<PyRef<'_, PyTimedeltaIndex>>() {
         tdi.inner.name().cloned()
+    } else if let Ok(categorical) = obj.extract::<PyRef<'_, PyCategoricalIndex>>() {
+        // A CategoricalIndex's name too (it was dropped; cld41).
+        categorical.inner.name().cloned()
     } else if let Ok(series) = obj.extract::<PyRef<'_, PySeries>>() {
         let name = series.inner.name();
         (!name.is_empty()).then(|| name.clone())
@@ -8334,7 +8353,29 @@ fn row_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
     if index.range_span().is_some() {
         return Ok(Py::new(py, PyRangeIndex::initializer(index.clone()))?.into_any());
     }
+    // A categorical index (a CategoricalIndex given, set_index of a
+    // category column, a categorical groupby key) is pandas'
+    // CategoricalIndex (it was a plain Index; br-frankenpandas-cld41).
+    if let Some(categorical) = categorical_index_of(index) {
+        return Ok(Py::new(py, PyCategoricalIndex { inner: categorical })?.into_any());
+    }
     flat_index_to_py(py, index)
+}
+
+/// `index` as the CategoricalIndex its category metadata describes, when
+/// the core's CategoricalIndex can hold it (text labels and categories, no
+/// missing label); None for any other index.
+fn categorical_index_of(index: &Index) -> Option<CategoricalIndex> {
+    let categories = index.categories()?;
+    let text = |label: &IndexLabel| match label {
+        IndexLabel::Utf8(text) => Some(text.clone()),
+        _ => None,
+    };
+    let labels: Option<Vec<String>> = index.labels().iter().map(text).collect();
+    let names: Option<Vec<String>> = categories.categories.iter().map(text).collect();
+    let categorical =
+        CategoricalIndex::with_categories(labels?, names?, categories.ordered).ok()?;
+    Some(categorical.set_names(index.name().cloned()))
 }
 
 /// pandas' refusal of a container's truth value - `bool(s)`, `if df:`,
@@ -26247,6 +26288,20 @@ impl PySeries {
             }
             None => series,
         };
+        // ... and its categories, a CategoricalIndex given (it was a plain
+        // Index; br-frankenpandas-cld41).
+        let series = match index.and_then(index_arg_categories) {
+            Some(categories) => {
+                let index = series
+                    .index()
+                    .clone()
+                    .with_categories(Some(categories))
+                    .map_err(index_error_to_py)?;
+                Series::new(series.name(), index, series.column().clone())
+                    .map_err(frame_error_to_py)?
+            }
+            None => series,
+        };
         // Rows with no index of their own are pandas' RangeIndex (fvsao.18).
         let series = match constructor_range_span(data, index, false, series.index()) {
             Some(span) => series.with_range_span(Some(span)),
@@ -27771,6 +27826,12 @@ impl PySeries {
             let r = Series::new(r.name(), index, column).map_err(frame_error_to_py)?;
             return Ok(PySeries { inner: r });
         }
+        // A categorical's counts sit on a CategoricalIndex (cld41).
+        let r = if bins.is_none_or(|bins| bins.is_none()) {
+            with_key_categories(r, self.inner.column())?
+        } else {
+            r
+        };
         Ok(PySeries { inner: r })
     }
 
@@ -36925,6 +36986,18 @@ impl PyDataFrame {
             }
             None => built,
         };
+        // ... and its categories, a CategoricalIndex given (cld41).
+        let built = match index.and_then(index_arg_categories) {
+            Some(categories) => {
+                let index = built
+                    .index()
+                    .clone()
+                    .with_categories(Some(categories))
+                    .map_err(index_error_to_py)?;
+                built.with_index(index).map_err(frame_error_to_py)?
+            }
+            None => built,
+        };
         // ... and its dtype where its labels read another (i20vm).
         let built = match index.and_then(index_arg_declared) {
             Some(declared) => {
@@ -42320,7 +42393,6 @@ impl PyDataFrame {
         sort: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
-        let _ = observed;
         // Array-like keys pivot a copy carrying them as columns; the table's
         // axes take the keys' names.
         let array_keys = pivot_array_keys(py, &slf.borrow().inner, index, columns)?;
@@ -42513,11 +42585,30 @@ impl PyDataFrame {
         };
         let key_names: Vec<&String> = index_keys.iter().chain(&column_keys).collect();
         let data = rows_with_every(&key_names)?;
+        // pandas groups with observed=False when it is not given, and then
+        // warns of its own when a key is a category; the groupby's warning
+        // (it ran with observed unset) is not pandas' (cld41).
+        if observed.is_none()
+            && key_names.iter().any(|key| {
+                slf.borrow()
+                    .inner
+                    .column(key)
+                    .is_some_and(|column| column.categorical().is_some())
+            })
+        {
+            PyErr::warn(
+                py,
+                &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+                c"The default value of observed=False is deprecated and will change to observed=True in a future version of pandas. Specify observed=False to silence this warning and retain the current behavior",
+                1,
+            )?;
+        }
         let aggregate =
             |source: &Bound<'py, PyAny>, keys: &[String]| -> PyResult<Bound<'py, PyAny>> {
                 let groupby_kwargs = PyDict::new(py);
                 groupby_kwargs.set_item("sort", sort)?;
                 groupby_kwargs.set_item("dropna", dropna)?;
+                groupby_kwargs.set_item("observed", observed.unwrap_or(false))?;
                 source
                     .call_method("groupby", (key_list(keys)?,), Some(&groupby_kwargs))?
                     .get_item(&values_list)?
@@ -52724,6 +52815,39 @@ fn check_category_keys(
     Ok(Vec::new())
 }
 
+/// `series` indexed by a category key's values - a groupby's groups, a
+/// value_counts' - its index carrying the key's categories: pandas'
+/// CategoricalIndex (it was a plain Index; br-frankenpandas-cld41). A
+/// MultiIndex result or labels outside the categories stay as they are.
+fn with_key_categories(series: Series, key: &Column) -> PyResult<Series> {
+    match key_categorized_index(series.index(), key) {
+        Some(index) => {
+            Series::new(series.name(), index, series.column().clone()).map_err(frame_error_to_py)
+        }
+        None => Ok(series),
+    }
+}
+
+/// `index` carrying a category key's categories (see
+/// [`with_key_categories`]); None when the key is not categorical, the
+/// index is a MultiIndex or its labels fall outside the categories (a
+/// transform's rows).
+fn key_categorized_index(index: &Index, key: &Column) -> Option<Index> {
+    let meta = key.categorical()?;
+    if index.row_multiindex().is_some() {
+        return None;
+    }
+    let categories = fp_index::IndexCategories {
+        categories: meta
+            .categories
+            .iter()
+            .map(scalar_to_index_label_converter)
+            .collect(),
+        ordered: meta.ordered,
+    };
+    index.clone().with_categories(Some(categories)).ok()
+}
+
 /// A per-group reduction `op` with a row added for each unused category
 /// (`unused`, groupby observed=False: pandas' 2.2 default) holding pandas'
 /// answer over no rows - 0 for sum/count/size/nunique, 1 for prod,
@@ -56936,6 +57060,29 @@ fn flat_index_level_values(index: &Index, level: &Bound<'_, PyAny>) -> PyResult<
             "groupby(level=...) other than the single level of a flat index",
         ));
     }
+    // A categorical index keys its groups as its categories (observed=False
+    // adds the unused ones, in category order; they were its labels;
+    // br-frankenpandas-cld41).
+    if let Some(categories) = index.categories() {
+        let ranks: HashMap<&IndexLabel, i64> = categories.categories.iter().zip(0_i64..).collect();
+        let codes = index
+            .labels()
+            .iter()
+            .map(|label| ranks.get(label).copied().unwrap_or(-1))
+            .collect();
+        let series = Series::from_categorical_codes(
+            "",
+            codes,
+            categories
+                .categories
+                .iter()
+                .map(index_label_to_scalar)
+                .collect(),
+            categories.ordered,
+        )
+        .map_err(frame_error_to_py)?;
+        return Ok(series.column().clone());
+    }
     let values = index.labels().iter().map(index_label_to_scalar).collect();
     let column = Column::from_values(values).map_err(column_error_to_py)?;
     // A tz-aware index keys its groups in its zone (they came back naive
@@ -57564,8 +57711,21 @@ impl PyGroupBy {
     /// A result frame back under the repeated column names (see
     /// [`RepeatedColumns::restore_frame`]); unchanged when no name repeats.
     fn restored(&self, frame: DataFrame) -> PyResult<DataFrame> {
-        match &self.repeated {
-            Some(repeated) => repeated.restore_frame(frame),
+        let frame = match &self.repeated {
+            Some(repeated) => repeated.restore_frame(frame)?,
+            None => frame,
+        };
+        // One category key's groups are a CategoricalIndex (it was a plain
+        // Index; br-frankenpandas-cld41).
+        let categorized = match self.by.as_slice() {
+            [key] => self
+                .df
+                .column(key)
+                .and_then(|column| key_categorized_index(frame.index(), column)),
+            _ => None,
+        };
+        match categorized {
+            Some(index) => frame.with_index(index).map_err(frame_error_to_py),
             None => Ok(frame),
         }
     }
@@ -60979,6 +61139,8 @@ impl PySeriesGroupBy {
         // A tz-aware column's groups (first, last, min, max) in its zone
         // (they were the naive UTC instants; br-frankenpandas-wuize).
         let res = rezoned(res, self.series.column().timezone())?;
+        // A category key's groups are a CategoricalIndex (cld41).
+        let res = with_key_categories(res, self.by.column())?;
         Python::attach(|py| {
             if self.as_index {
                 return Ok(Py::new(py, PySeries { inner: res })?.into_any());
@@ -64255,7 +64417,56 @@ fn concat(
         Ok(mapping) => mapping.values().iter().collect(),
         Err(_) => objs.try_iter()?.collect::<PyResult<_>>()?,
     };
-    concat_kept_dtypes(&pieces, result.bind(py)).map(Bound::unbind)
+    let result = concat_kept_dtypes(&pieces, result.bind(py))?;
+    concat_kept_categories(&pieces, &result).map(Bound::unbind)
+}
+
+/// Pieces stacked on CategoricalIndexes of the same categories keep one
+/// on the result, as pandas' concat does (it became a plain Index;
+/// br-frankenpandas-cld41); any other result as it is.
+fn concat_kept_categories<'py>(
+    pieces: &[Bound<'py, PyAny>],
+    result: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let piece_index = |piece: &Bound<'py, PyAny>| -> Option<Index> {
+        if let Ok(series) = piece.extract::<PyRef<'_, PySeries>>() {
+            return Some(series.inner.index().clone());
+        }
+        piece
+            .extract::<PyRef<'_, PyDataFrame>>()
+            .ok()
+            .map(|frame| frame.inner.index().clone())
+    };
+    let indexes: Option<Vec<Index>> = pieces.iter().map(piece_index).collect();
+    let Some(indexes) = indexes else {
+        return Ok(result.clone());
+    };
+    let Some(shared) = indexes.first().and_then(Index::categories).cloned() else {
+        return Ok(result.clone());
+    };
+    if !indexes
+        .iter()
+        .all(|index| index.categories() == Some(&shared))
+    {
+        return Ok(result.clone());
+    }
+    let py = result.py();
+    if let Ok(series) = result.extract::<PyRef<'_, PySeries>>() {
+        let Ok(index) = series.inner.index().clone().with_categories(Some(shared)) else {
+            return Ok(result.clone());
+        };
+        let inner = Series::new(series.inner.name(), index, series.inner.column().clone())
+            .map_err(frame_error_to_py)?;
+        return PySeries { inner }.into_bound_py_any(py);
+    }
+    if let Ok(frame) = result.extract::<PyRef<'_, PyDataFrame>>() {
+        let Ok(index) = frame.inner.index().clone().with_categories(Some(shared)) else {
+            return Ok(result.clone());
+        };
+        let inner = frame.inner.with_index(index).map_err(frame_error_to_py)?;
+        return PyDataFrame { inner }.into_bound_py_any(py);
+    }
+    Ok(result.clone())
 }
 
 /// The dtypes pandas' concat keeps stacking `pieces`, set on `result` (they

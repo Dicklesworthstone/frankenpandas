@@ -21071,3 +21071,60 @@ _E71_CASES = {
 def test_everyday71_merge_series_and_index_levels_like_pandas_w932f(case: str) -> None:
     run = _E71_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-cld41: a Series / DataFrame index could not be
+# categorical - index=CategoricalIndex, set_index of a category column, a
+# category groupby key and value_counts gave a plain Index.
+def _e72_shown(obj: Any) -> list:
+    index = obj.index
+    return [
+        type(index).__name__,
+        index.tolist(),
+        list(getattr(index, "categories", [])),
+        getattr(index, "ordered", None),
+        index.name,
+        obj.values.tolist(),
+    ]
+
+
+def _e72_frame(m: Any) -> Any:
+    return m.DataFrame({"k": m.Categorical(["b", "a", "b", "c"], categories=["c", "b", "a"]), "v": [1, 2, 3, 4]})
+
+
+def _e72_series(m: Any) -> Any:
+    index = m.CategoricalIndex(["x", "y", "x"], categories=["y", "x", "z"], ordered=True, name="c")
+    return m.Series([1, 2, 3], index=index)
+
+
+_E72_CASES = {
+    "series on CategoricalIndex": lambda m: _e72_shown(_e72_series(m)),
+    "frame on CategoricalIndex": lambda m: _e72_shown(
+        m.DataFrame({"v": [1, 2]}, index=m.CategoricalIndex(["a", "b"], categories=["b", "a", "c"]))
+    ),
+    "set_index category": lambda m: _e72_shown(_e72_frame(m).set_index("k")),
+    "sort_index by categories": lambda m: _e72_shown(_e72_frame(m).set_index("k").sort_index()),
+    "series sort_index": lambda m: _e72_shown(_e72_series(m).sort_index()),
+    "reset_index category": lambda m: [str(_e72_series(m).reset_index()["c"].dtype)],
+    "series groupby key": lambda m: _e72_shown(_e72_frame(m).groupby("k", observed=False)["v"].sum()),
+    "frame groupby key": lambda m: _e72_shown(_e72_frame(m).groupby("k", observed=False).sum()),
+    "groupby level": lambda m: _e72_shown(_e72_series(m).groupby(level=0, observed=False).sum()),
+    "value_counts": lambda m: _e72_shown(_e72_frame(m)["k"].value_counts()),
+    "concat same categories": lambda m: _e72_shown(m.concat([_e72_series(m), _e72_series(m)])),
+    "pivot_table": lambda m: _e72_shown(_e72_frame(m).pivot_table(index="k", values="v", aggfunc="sum", observed=False)),
+    "pivot_table observed unset": lambda m: _e72_shown(_e72_frame(m).pivot_table(index="k", values="v", aggfunc="sum")),
+    "head keeps": lambda m: _e72_shown(_e72_series(m).head(2)),
+    # Negatives: already pandas'.
+    "object index": lambda m: _e72_shown(m.Series([1, 2], index=["a", "b"])),
+    "text set_index": lambda m: _e72_shown(m.DataFrame({"k": ["b", "a"], "v": [1, 2]}).set_index("k")),
+    "concat different categories": lambda m: _e72_shown(
+        m.concat([_e72_series(m), m.Series([9], index=m.CategoricalIndex(["q"]))])
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E72_CASES))
+def test_everyday72_categorical_index_like_pandas_cld41(case: str) -> None:
+    run = _E72_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

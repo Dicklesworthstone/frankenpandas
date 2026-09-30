@@ -2091,6 +2091,23 @@ pub struct Index {
     /// labels. Equality ignores it, as pandas' `equals` does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     declared: Option<DeclaredDtype>,
+    /// pandas' `CategoricalIndex` metadata (see [`IndexCategories`]) when
+    /// these labels are one: a Series' or frame's index can be categorical
+    /// (it was a plain Index; br-frankenpandas-cld41). Only
+    /// [`Self::with_categories`] sets it; [`Self::propagate_name`] carries
+    /// it while every label is still one of the categories. Runtime
+    /// metadata, as the label identity; equality ignores it.
+    #[serde(skip)]
+    categories: Option<Arc<IndexCategories>>,
+}
+
+/// The categories a categorical [`Index`]'s labels are drawn from, in
+/// their order, and whether that order ranks them - pandas'
+/// `CategoricalIndex.categories` / `.ordered`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexCategories {
+    pub categories: Vec<IndexLabel>,
+    pub ordered: bool,
 }
 
 /// A dtype an [`Index`] is declared with where its labels alone read
@@ -2170,6 +2187,9 @@ impl fmt::Debug for Index {
         }
         if let Some(declared) = &self.declared {
             out.field("declared", declared);
+        }
+        if let Some(categories) = &self.categories {
+            out.field("categories", categories);
         }
         out.finish()
     }
@@ -2316,6 +2336,7 @@ impl Index {
             freq: None,
             range: None,
             declared: None,
+            categories: None,
         }
     }
 
@@ -2377,6 +2398,7 @@ impl Index {
             freq: None,
             range: None,
             declared: None,
+            categories: None,
         };
         let _ = index.duplicate_cache.set(false);
         let _ = index.sort_order_cache.set(SortOrder::AscendingInt64);
@@ -2411,6 +2433,7 @@ impl Index {
             freq: None,
             range: None,
             declared: None,
+            categories: None,
         };
         let _ = index.duplicate_cache.set(false);
         if len <= 1 || step > 0 {
@@ -2436,6 +2459,7 @@ impl Index {
             freq: None,
             range: None,
             declared: None,
+            categories: None,
         })
     }
 
@@ -2472,6 +2496,7 @@ impl Index {
             freq: None,
             range: None,
             declared: None,
+            categories: None,
         }
     }
 
@@ -2498,6 +2523,7 @@ impl Index {
             freq: None,
             range: None,
             declared: None,
+            categories: None,
         })
     }
 
@@ -2521,6 +2547,7 @@ impl Index {
             freq: None,
             range: None,
             declared: None,
+            categories: None,
         }
     }
 
@@ -2566,6 +2593,7 @@ impl Index {
             freq: None,
             range: None,
             declared: None,
+            categories: None,
         };
         let _ = index.duplicate_cache.set(false);
         if len <= 1 || step > 0 {
@@ -2691,7 +2719,45 @@ impl Index {
         if self.tz.is_some() && other.holds_only_datetimes() {
             other.tz.clone_from(&self.tz);
         }
+        if let Some(categories) = &self.categories
+            && other.labels_within(categories)
+        {
+            other.categories = Some(Arc::clone(categories));
+        }
         other.with_dtype_of(self)
+    }
+
+    /// Whether every label (a missing one aside) is one of `categories`.
+    fn labels_within(&self, categories: &IndexCategories) -> bool {
+        let known: std::collections::HashSet<&IndexLabel> = categories.categories.iter().collect();
+        self.labels()
+            .iter()
+            .all(|label| label.is_missing() || known.contains(label))
+    }
+
+    /// pandas' `CategoricalIndex` metadata of these labels, None for an
+    /// index that is not categorical.
+    #[must_use]
+    pub fn categories(&self) -> Option<&IndexCategories> {
+        self.categories.as_deref()
+    }
+
+    /// These labels as a categorical index drawn from `categories` (None:
+    /// not categorical). A label outside the categories is an error, as a
+    /// CategoricalIndex cannot hold one.
+    pub fn with_categories(
+        mut self,
+        categories: Option<IndexCategories>,
+    ) -> Result<Self, IndexError> {
+        if let Some(categories) = &categories
+            && !self.labels_within(categories)
+        {
+            return Err(IndexError::InvalidArgument(
+                "a categorical index's labels must be among its categories".to_owned(),
+            ));
+        }
+        self.categories = categories.map(Arc::new);
+        Ok(self)
     }
 
     /// These labels - selected, sliced or computed from `source`'s - under
@@ -4874,6 +4940,7 @@ impl Index {
             freq: None,
             range: None,
             declared: None,
+            categories: None,
         });
         sliced.freq.clone_from(&self.freq);
         // A slice of a RangeIndex is one (pandas).
@@ -22234,6 +22301,38 @@ mod tests {
     use fp_types::{Period, PeriodFreq, Scalar, Timedelta};
 
     use crate::{Int64TwoAffineLabels, OrderedF64};
+
+    #[test]
+    fn index_categories_ride_selection_and_refuse_outsiders_cld41() {
+        let text = |values: &[&str]| -> Vec<IndexLabel> {
+            values
+                .iter()
+                .map(|value| IndexLabel::Utf8((*value).to_owned()))
+                .collect()
+        };
+        let categories = super::IndexCategories {
+            categories: text(&["y", "x", "z"]),
+            ordered: true,
+        };
+        let index = Index::new(text(&["x", "y", "x"]))
+            .with_categories(Some(categories.clone()))
+            .expect("labels among the categories");
+        assert_eq!(index.categories(), Some(&categories));
+        // A selection of the labels keeps them (take, slice, clone).
+        assert_eq!(index.take(&[2, 0]).categories(), Some(&categories));
+        assert_eq!(index.slice(1, 2).categories(), Some(&categories));
+        assert_eq!(index.clone().categories(), Some(&categories));
+        // Equality ignores them, as the zone-free label comparison does.
+        assert_eq!(index, Index::new(text(&["x", "y", "x"])));
+        // NEGATIVE: a label outside the categories is refused, and a plain
+        // index has none.
+        assert!(
+            Index::new(text(&["x", "w"]))
+                .with_categories(Some(categories))
+                .is_err()
+        );
+        assert!(Index::new(text(&["x"])).categories().is_none());
+    }
 
     #[test]
     fn unsorted_unique_int64_positions_gating_and_resolution() {
