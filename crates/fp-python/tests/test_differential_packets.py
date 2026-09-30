@@ -22922,3 +22922,44 @@ _E107_CASES = {
 def test_everyday107_series_scalar_ops_like_pandas_pnxo5(case: str) -> None:
     run = _E107_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-djbjt: an object ndarray holding only str builds one
+# contiguous text column (each cell went through py_to_scalar).
+class _E108Str(str):
+    pass
+
+
+def _e108_objects(*items: Any) -> Any:
+    array = np.empty(len(items), dtype=object)
+    array[:] = list(items)
+    return array
+
+
+def _e108_shown(s: Any) -> list:
+    return [str(s.dtype), *s.to_string().split("\n"), repr(s.tolist())]
+
+
+_E108_CASES = {
+    "all str": lambda m: _e108_shown(m.Series(_e108_objects("a", "", "é", "x y"))),
+    "str with None": lambda m: _e108_shown(m.Series(_e108_objects("a", None, "c"))),
+    "str with NaN": lambda m: _e108_shown(m.Series(_e108_objects("a", np.nan))),
+    "str then number": lambda m: _e108_shown(m.Series(_e108_objects("a", 1))),
+    "number then str": lambda m: _e108_shown(m.Series(_e108_objects(1.5, "b"))),
+    "empty": lambda m: _e108_shown(m.Series(_e108_objects())),
+    "one element": lambda m: _e108_shown(m.Series(_e108_objects("only"))),
+    "str subclass": lambda m: _e108_shown(m.Series(_e108_objects(_E108Str("s"), "t"))),
+    "frame column": lambda m: m.DataFrame({"s": _e108_objects("a", "b"), "n": [1, 2]}).to_string().split("\n"),
+    "str accessor": lambda m: m.Series(_e108_objects("Ab", "cD")).str.lower().tolist(),
+    "to_datetime": lambda m: [str(t) for t in m.to_datetime(m.Series(_e108_objects("2024-01-02 03:04", "2024-02-03 04:05")))],
+    "value_counts": lambda m: m.Series(_e108_objects("a", "b", "a")).value_counts().to_dict().items(),
+    "isna": lambda m: m.Series(_e108_objects("a", "")).isna().tolist(),
+    "index=": lambda m: _e108_shown(m.Series(_e108_objects("a", "b"), index=[10, 20])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E108_CASES))
+def test_everyday108_object_text_array_like_pandas_djbjt(case: str) -> None:
+    run = _E108_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

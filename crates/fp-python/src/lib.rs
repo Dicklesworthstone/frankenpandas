@@ -7277,8 +7277,10 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
                 .call_method0("tolist")?
                 .try_iter()?
                 .collect::<PyResult<Vec<_>>>()?;
-            // Text (numpy's unicode kind) laid out contiguously.
-            let text = (kind == "U").then(|| contiguous_text_column(items.iter().cloned()));
+            // Text (numpy's unicode kind, or an object array holding only
+            // str; br-frankenpandas-djbjt) laid out contiguously.
+            let text = matches!(kind.as_str(), "U" | "O")
+                .then(|| contiguous_text_column(items.iter().cloned()));
             match text.flatten() {
                 Some(column) => column,
                 None => {
