@@ -12,6 +12,7 @@ import itertools
 import json
 import math
 import os
+import re
 import tempfile
 import warnings
 from pathlib import Path
@@ -4640,8 +4641,14 @@ def test_str_methods_match_pandas(case: str) -> None:
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_str_refusals() -> None:
+    # TEST-CHANGE (br-frankenpandas-fvwrq): flags=re.IGNORECASE is read now
+    # (it was refused) and matches pandas; re.ASCII stays refused.
+    assert (
+        fpd.Series(["A,b"]).str.contains("a", flags=2).tolist()
+        == pd.Series(["A,b"]).str.contains("a", flags=2).tolist()
+    )
     with pytest.raises(NotImplementedError):
-        fpd.Series(["a,b"]).str.contains("a", flags=2)
+        fpd.Series(["a,b"]).str.contains("a", flags=256)
     # NEGATIVE: an all-present bool result stays bool, as pandas.
     for m in (pd, fpd):
         assert str(m.Series(["ab", "c"]).str.contains("a").dtype) == "bool"
@@ -20852,4 +20859,49 @@ _E66_CASES = {
 @pytest.mark.parametrize("case", list(_E66_CASES))
 def test_everyday66_str_expand_column_labels_like_pandas_p9csw(case: str) -> None:
     run = _E66_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-fvwrq: regex flags were refused, str.index / rindex were
+# missing, .str over numbers was built, and a number in an object column
+# passed through a string method (pandas NaN).
+def _e67_names(m: Any) -> Any:
+    return m.Series(["Alice Smith", "bob jones", None, "BOB"], name="n")
+
+
+_E67_CASES = {
+    "contains ignorecase": lambda m: [_e67_names(m).str.contains("^b", flags=re.IGNORECASE).tolist()],
+    "match ignorecase": lambda m: [_e67_names(m).str.match("alice", flags=re.I).tolist()],
+    "fullmatch ignorecase": lambda m: [_e67_names(m).str.fullmatch("bob", flags=re.I).tolist()],
+    "extract ignorecase": lambda m: [_e67_names(m).str.extract("(b)o", flags=re.I)[0].tolist()],
+    "count ignorecase": lambda m: [_e67_names(m).str.count("b", flags=re.I).tolist()],
+    "contains multiline dotall": lambda m: [
+        m.Series(["a\nb", "ab"]).str.contains("^b", flags=re.M).tolist(),
+        m.Series(["a\nb", "ab"]).str.contains("a.b", flags=re.S).tolist(),
+    ],
+    "index": lambda m: [m.Series(["abc", "cab"]).str.index("a").tolist()],
+    "rindex": lambda m: [m.Series(["abca", "a"]).str.rindex("a").tolist()],
+    "index start": lambda m: [m.Series(["abab"]).str.index("a", 1).tolist()],
+    "index missing": lambda m: [m.Series(["abc", "x"]).str.index("a")],
+    "str on ints": lambda m: [m.Series([1, 2]).str],
+    "str on floats": lambda m: [m.Series([1.5, None]).str.len()],
+    "str on bools": lambda m: [m.Series([True]).str.upper()],
+    "str on dates": lambda m: [m.Series(m.to_datetime(["2024-01-01"])).str.len()],
+    "mixed upper": lambda m: [m.Series(["a", 1, None, 2.5]).str.upper().tolist()],
+    "mixed contains": lambda m: [m.Series(["ab", 1, None]).str.contains("a").tolist()],
+    "mixed startswith": lambda m: [m.Series(["ab", True]).str.startswith("a").tolist()],
+    "index split expand": lambda m: [m.Index(["a b", "c"]).str.split(" ", expand=True).tolist()],
+    # Negatives: already pandas'.
+    "contains no flags": lambda m: [_e67_names(m).str.contains("b").tolist()],
+    "all None upper": lambda m: [m.Series([None, None]).str.upper().tolist()],
+    "mixed len": lambda m: [m.Series(["ab", 1, None]).str.len().tolist()],
+    "category str": lambda m: [m.Series(["a", "b"], dtype="category").str.upper().tolist()],
+    "find missing": lambda m: [m.Series(["abc", "x"]).str.find("a").tolist()],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E67_CASES))
+def test_everyday67_str_flags_index_and_non_text_like_pandas_fvwrq(case: str) -> None:
+    run = _E67_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

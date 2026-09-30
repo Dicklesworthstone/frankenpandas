@@ -8874,9 +8874,29 @@ impl PyIndexStrMethod {
             if matches!(self.name.as_str(), "extract" | "extractall") {
                 return Ok(result.unbind());
             }
-            let frame = PyDataFrame {
-                inner: frame.inner.clone(),
-            };
+            // A split's short row is padded with NaN over an Index (None
+            // over a Series; it was None; br-frankenpandas-fvwrq).
+            let mut inner = frame.inner.clone();
+            if matches!(self.name.as_str(), "split" | "rsplit") {
+                for name in frame.inner.column_names() {
+                    let Some(column) = frame.inner.column(name) else {
+                        continue;
+                    };
+                    let cells = column
+                        .values()
+                        .iter()
+                        .map(|cell| match cell {
+                            Scalar::Null(NullKind::Null) => Scalar::Null(NullKind::NaN),
+                            other => other.clone(),
+                        })
+                        .collect();
+                    let padded = Column::from_values(cells).map_err(column_error_to_py)?;
+                    inner = inner
+                        .with_column(name.clone(), padded)
+                        .map_err(frame_error_to_py)?;
+                }
+            }
+            let frame = PyDataFrame { inner };
             let mut multi = py
                 .get_type::<PyMultiIndex>()
                 .call_method1("from_frame", (frame,))?
@@ -31653,8 +31673,25 @@ impl PySeries {
         })
     }
 
+    /// pandas' `.str`: only over text - an object or string column whose
+    /// values infer as strings, a mix, or nothing (a categorical by its
+    /// values); numbers, bools and dates are pandas' AttributeError (the
+    /// accessor was built, its methods NaN; br-frankenpandas-fvwrq).
     #[getter]
     fn r#str(&self) -> PyResult<PySeriesStringAccessor> {
+        let column = self.inner.column();
+        let text = matches!(
+            column.dtype(),
+            DType::Utf8 | DType::Categorical | DType::Null
+        ) && matches!(
+            fp_types::api::types::infer_dtype(column.values(), true),
+            "string" | "empty" | "mixed"
+        );
+        if !text {
+            return Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                "Can only use .str accessor with string values!",
+            ));
+        }
         Ok(PySeriesStringAccessor {
             series: self.inner.clone(),
         })
@@ -50823,8 +50860,13 @@ impl PySeriesStringAccessor {
         na: Option<bool>,
         regex: bool,
     ) -> PyResult<PySeries> {
-        require_no_regex_flags(flags)?;
-        self.wrap(|s| s.contains_with_options(pat, case, na, regex))
+        // A literal pattern takes no flags (pandas ignores them there).
+        let pat = if regex {
+            regex_with_flags(pat, flags)?
+        } else {
+            pat.to_owned()
+        };
+        self.wrap(|s| s.contains_with_options(&pat, case, na, regex))
     }
 
     /// pandas' `replace(pat, repl, n=-1, case=None, flags=0, regex=False)`.
@@ -51207,8 +51249,8 @@ impl PySeriesStringAccessor {
     /// pandas' `count(pat, flags=0)`: regex matches per string.
     #[pyo3(signature = (pat, flags=0))]
     fn count(&self, pat: &str, flags: i64) -> PyResult<PySeries> {
-        require_no_regex_flags(flags)?;
-        self.wrap(|s| s.count(pat))
+        let pat = regex_with_flags(pat, flags)?;
+        self.wrap(|s| s.count(&pat))
     }
     #[pyo3(signature = (sub, start=0, end=None))]
     fn find(&self, sub: &str, start: i64, end: Option<i64>) -> PyResult<PySeries> {
@@ -51217,6 +51259,17 @@ impl PySeriesStringAccessor {
     #[pyo3(signature = (sub, start=0, end=None))]
     fn rfind(&self, sub: &str, start: i64, end: Option<i64>) -> PyResult<PySeries> {
         self.wrap(|s| s.rfind_with_bounds(sub, start, end))
+    }
+    /// pandas' `index(sub, start=0, end=None)`: `find`, a string without
+    /// `sub` Python's ValueError (it was missing; br-frankenpandas-fvwrq).
+    #[pyo3(signature = (sub, start=0, end=None))]
+    fn index(&self, sub: &str, start: i64, end: Option<i64>) -> PyResult<PySeries> {
+        found_or_value_error(self.find(sub, start, end)?)
+    }
+    /// pandas' `rindex(sub, start=0, end=None)`: `rfind`, as `index`.
+    #[pyo3(signature = (sub, start=0, end=None))]
+    fn rindex(&self, sub: &str, start: i64, end: Option<i64>) -> PyResult<PySeries> {
+        found_or_value_error(self.rfind(sub, start, end)?)
     }
     /// pandas' `get(i)`: the i-th character (NaN past the end).
     fn get(&self, i: i64) -> PyResult<PySeries> {
@@ -51264,8 +51317,8 @@ impl PySeriesStringAccessor {
     /// pandas' `fullmatch(pat, case=True, flags=0, na=None)`.
     #[pyo3(signature = (pat, case=true, flags=0, na=None))]
     fn fullmatch(&self, pat: &str, case: bool, flags: i64, na: Option<bool>) -> PyResult<PySeries> {
-        require_no_regex_flags(flags)?;
-        self.wrap(|s| s.fullmatch_with_options(pat, case, na))
+        let pat = regex_with_flags(pat, flags)?;
+        self.wrap(|s| s.fullmatch_with_options(&pat, case, na))
     }
     /// pandas' `match(pat, case=True, flags=0, na=None)`: a match at the start.
     #[pyo3(name = "match", signature = (pat, case=true, flags=0, na=None))]
@@ -51276,14 +51329,14 @@ impl PySeriesStringAccessor {
         flags: i64,
         na: Option<bool>,
     ) -> PyResult<PySeries> {
-        require_no_regex_flags(flags)?;
-        self.wrap(|s| s.match_regex_with_options(pat, case, na))
+        let pat = regex_with_flags(pat, flags)?;
+        self.wrap(|s| s.match_regex_with_options(&pat, case, na))
     }
     /// pandas' `extract(pat, flags=0, expand=True)`: a DataFrame of the
     /// groups, or with `expand=False` and one group a Series.
     #[pyo3(signature = (pat, flags=0, expand=true))]
     fn extract(&self, py: Python<'_>, pat: &str, flags: i64, expand: bool) -> PyResult<Py<PyAny>> {
-        require_no_regex_flags(flags)?;
+        let pat = &regex_with_flags(pat, flags)?;
         let df = self
             .series
             .str()
@@ -51545,12 +51598,48 @@ impl PySeriesStringAccessor {
     /// A str method's result as pandas gives it over a `string` column
     /// (fvsao.59): text stays `string`, a count (len, count, find) is Int64
     /// and a test (contains, startswith, isdigit) boolean, each with pd.NA
-    /// where the source is missing; anything else (split's lists) as it is,
-    /// and every result of an object column as it is.
+    /// where the source is missing; anything else (split's lists) as it is.
+    /// Over an object column a number, bool or date cell has no string
+    /// method, so its result is NaN, as pandas' object loop gives it (it
+    /// was passed through: Series(['a', 1]).str.upper() kept 1;
+    /// br-frankenpandas-fvwrq); any other result as it is.
     fn finish(&self, inner: Series) -> PyResult<PySeries> {
         let source = self.series.column();
-        if !source.is_pandas_string() || inner.len() != source.len() {
+        if inner.len() != source.len() {
             return Ok(PySeries { inner });
+        }
+        if !source.is_pandas_string() {
+            let not_text = |cell: &Scalar| {
+                !cell.is_missing()
+                    && matches!(
+                        cell,
+                        Scalar::Int64(_)
+                            | Scalar::Float64(_)
+                            | Scalar::Bool(_)
+                            | Scalar::Datetime64(_)
+                            | Scalar::Timedelta64(_)
+                            | Scalar::Period(_)
+                    )
+            };
+            if !source.values().iter().any(not_text) {
+                return Ok(PySeries { inner });
+            }
+            let cells: Vec<Scalar> = inner
+                .values()
+                .iter()
+                .zip(source.values())
+                .map(|(value, cell)| {
+                    if not_text(cell) {
+                        Scalar::Null(NullKind::NaN)
+                    } else {
+                        value.clone()
+                    }
+                })
+                .collect();
+            let column = Column::from_values(cells).map_err(column_error_to_py)?;
+            return Series::new(inner.name(), inner.index().clone(), column)
+                .map(|inner| PySeries { inner })
+                .map_err(frame_error_to_py);
         }
         let values = inner.column().values();
         let only = |test: fn(&Scalar) -> bool| {
@@ -51759,12 +51848,45 @@ fn str_patterns(pat: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
 }
 
 /// pandas' `flags=` (re module flags) are not modelled; only 0 is taken.
-fn require_no_regex_flags(flags: i64) -> PyResult<()> {
-    if flags == 0 {
-        Ok(())
-    } else {
-        Err(not_implemented("string methods with regex flags"))
+/// A find / rfind result as str.index / rindex return it: a string where
+/// the substring was not found (-1) is Python's ValueError.
+fn found_or_value_error(found: PySeries) -> PyResult<PySeries> {
+    let missing = found.inner.values().iter().any(|value| match value {
+        Scalar::Int64(at) => *at < 0,
+        Scalar::Float64(at) => *at < 0.0,
+        _ => false,
+    });
+    if missing {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "substring not found",
+        ));
     }
+    Ok(found)
+}
+
+/// `pat` under Python's `re` flags, as the inline group the core's regex
+/// reads: IGNORECASE (?i), MULTILINE (?m), DOTALL (?s), VERBOSE (?x);
+/// UNICODE is the default already. ASCII and LOCALE stay refused (every
+/// flag was; br-frankenpandas-fvwrq).
+fn regex_with_flags(pat: &str, flags: i64) -> PyResult<String> {
+    const INLINE: [(i64, char); 4] = [(2, 'i'), (8, 'm'), (16, 's'), (64, 'x')];
+    const UNICODE: i64 = 32;
+    let known = INLINE.iter().fold(UNICODE, |known, (bit, _)| known | bit);
+    if flags & !known != 0 {
+        return Err(not_implemented(&format!(
+            "string methods with regex flags {flags} (re.ASCII / re.LOCALE)"
+        )));
+    }
+    let letters: String = INLINE
+        .iter()
+        .filter(|(bit, _)| flags & bit != 0)
+        .map(|(_, letter)| *letter)
+        .collect();
+    Ok(if letters.is_empty() {
+        pat.to_owned()
+    } else {
+        format!("(?{letters}){pat}")
+    })
 }
 
 /// Python wrapper for Series datetime properties.
