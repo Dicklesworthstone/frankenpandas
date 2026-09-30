@@ -69,7 +69,9 @@ use fp_columnar::{Column, ColumnError};
 use fp_frame::{FrameError, Series};
 use fp_index::{Index, IndexError, IndexLabel, align_union, validate_alignment_plan};
 use fp_runtime::{EvidenceLedger, RuntimePolicy};
-use fp_types::{DType, IntervalClosed, NullKind, PeriodFreq, Scalar, Timedelta, Timestamp};
+use fp_types::{
+    DType, IntervalClosed, KahanSum, NullKind, PeriodFreq, Scalar, Timedelta, Timestamp, WelfordVar,
+};
 // Group accumulation maps key on GroupKeyRef and read group ORDER from a
 // separate `ordering` Vec (first-seen order), never from map iteration. So the
 // hasher is observationally invisible: swapping SipHash -> FxHash changes only
@@ -475,8 +477,9 @@ fn groupby_sum_with_global_allocator(
 
     // AG-08: Store (source_index, sum) instead of (Scalar, sum) to eliminate
     // per-group key.clone() allocations. Reconstruct IndexLabel at output phase.
+    // The sum is compensated, as pandas' group_sum (br-frankenpandas-xhogl).
     let mut ordering = Vec::<GroupKeyRef<'_>>::new();
-    let mut slot = FxHashMap::<GroupKeyRef<'_>, (usize, f64)>::default();
+    let mut slot = FxHashMap::<GroupKeyRef<'_>, (usize, KahanSum)>::default();
 
     for (pos, (key, value)) in aligned_keys_values
         .iter()
@@ -490,7 +493,7 @@ fn groupby_sum_with_global_allocator(
         let key_id = GroupKeyRef::from_scalar(key);
         let entry = slot.entry(key_id.clone()).or_insert_with(|| {
             ordering.push(key_id.clone());
-            (pos, 0.0)
+            (pos, KahanSum::default())
         });
 
         if value.is_missing() {
@@ -498,7 +501,7 @@ fn groupby_sum_with_global_allocator(
         }
 
         if let Ok(v) = value.to_f64() {
-            entry.1 += v;
+            entry.1.add(v);
         }
     }
 
@@ -553,7 +556,7 @@ fn groupby_sum_with_arena(
     // instead of cloned Scalar to eliminate per-group allocations.
     let arena = Bump::new();
     let mut ordering = BumpVec::<GroupKeyRef<'_>>::new_in(&arena);
-    let mut slot = FxHashMap::<GroupKeyRef<'_>, (usize, f64)>::default();
+    let mut slot = FxHashMap::<GroupKeyRef<'_>, (usize, KahanSum)>::default();
 
     for (pos, (key, value)) in aligned_keys_values
         .iter()
@@ -567,7 +570,7 @@ fn groupby_sum_with_arena(
         let key_id = GroupKeyRef::from_scalar(key);
         let entry = slot.entry(key_id.clone()).or_insert_with(|| {
             ordering.push(key_id.clone());
-            (pos, 0.0)
+            (pos, KahanSum::default())
         });
 
         if value.is_missing() {
@@ -575,7 +578,7 @@ fn groupby_sum_with_arena(
         }
 
         if let Ok(v) = value.to_f64() {
-            entry.1 += v;
+            entry.1.add(v);
         }
     }
 
@@ -595,7 +598,7 @@ fn groupby_sum_with_arena(
 fn emit_groupby_result<'a>(
     source_keys: &[Scalar],
     ordering: &[GroupKeyRef<'a>],
-    slot: &mut FxHashMap<GroupKeyRef<'a>, (usize, f64)>,
+    slot: &mut FxHashMap<GroupKeyRef<'a>, (usize, KahanSum)>,
 ) -> Result<Series, GroupByError> {
     let mut out_index = Vec::with_capacity(ordering.len());
     let mut out_values = Vec::with_capacity(ordering.len());
@@ -624,7 +627,7 @@ fn emit_groupby_result<'a>(
             Scalar::Interval(iv) => IndexLabel::Interval(*iv),
             Scalar::Object(object) => IndexLabel::Object(object.clone()),
         });
-        out_values.push(Scalar::Float64(sum));
+        out_values.push(Scalar::Float64(sum.sum()));
     }
 
     let out_column = Column::from_values(out_values)?;
@@ -1081,8 +1084,9 @@ fn try_groupby_sum_dense_int64_slices(
 ///
 /// This is the raw-slice equivalent of the `AggFunc::Mean` arm in
 /// `try_groupby_agg_dense_int64`: it casts each value to f64, folds in row
-/// order, and divides by the same per-bucket count. Keeping it before
-/// `Series::values()` avoids materializing both input columns as Scalars.
+/// order with pandas' compensated sum (br-frankenpandas-xhogl), and divides by
+/// the same per-bucket count. Keeping it before `Series::values()` avoids
+/// materializing both input columns as Scalars.
 fn try_groupby_mean_dense_int64_slices(
     keys: &[i64],
     values: &[i64],
@@ -1108,7 +1112,7 @@ fn try_groupby_mean_dense_int64_slices(
     }
 
     let bucket_len = usize::try_from(span).ok()?;
-    let mut sums = vec![0.0_f64; bucket_len];
+    let mut sums = vec![KahanSum::default(); bucket_len];
     let mut counts = vec![0_i64; bucket_len];
     let mut seen = vec![false; bucket_len];
     let mut ordering = Vec::<i64>::new();
@@ -1119,7 +1123,7 @@ fn try_groupby_mean_dense_int64_slices(
             seen[bucket] = true;
             ordering.push(key);
         }
-        sums[bucket] += value as f64;
+        sums[bucket].add(value as f64);
         counts[bucket] += 1;
     }
 
@@ -1133,7 +1137,7 @@ fn try_groupby_mean_dense_int64_slices(
         let raw = i128::from(key) - i128::from(min_key);
         let bucket = usize::try_from(raw).ok()?;
         out_index.push(IndexLabel::Int64(key));
-        out_values.push(Scalar::Float64(sums[bucket] / counts[bucket] as f64));
+        out_values.push(Scalar::Float64(sums[bucket].sum() / counts[bucket] as f64));
     }
 
     Some((out_index, out_values))
@@ -1260,7 +1264,8 @@ fn try_groupby_sum_dense_int64(
     }
 
     let bucket_len = usize::try_from(span).ok()?;
-    let mut sums = vec![0.0f64; bucket_len];
+    // Compensated, as pandas' group_sum (br-frankenpandas-xhogl).
+    let mut sums = vec![KahanSum::default(); bucket_len];
     let mut seen = vec![false; bucket_len];
     let mut ordering = Vec::<i64>::new();
 
@@ -1282,7 +1287,7 @@ fn try_groupby_sum_dense_int64(
             continue;
         }
         if let Ok(v) = value.to_f64() {
-            sums[bucket] += v;
+            sums[bucket].add(v);
         }
     }
 
@@ -1295,14 +1300,14 @@ fn try_groupby_sum_dense_int64(
             }
             let key = min_key.checked_add(i64::try_from(bucket).ok()?)?;
             out_index.push(IndexLabel::Int64(key));
-            out_values.push(Scalar::Float64(sums[bucket]));
+            out_values.push(Scalar::Float64(sums[bucket].sum()));
         }
     } else {
         for key in ordering {
             let raw = i128::from(key) - i128::from(min_key);
             let bucket = usize::try_from(raw).ok()?;
             out_index.push(IndexLabel::Int64(key));
-            out_values.push(Scalar::Float64(sums[bucket]));
+            out_values.push(Scalar::Float64(sums[bucket].sum()));
         }
     }
 
@@ -1331,8 +1336,9 @@ fn try_groupby_sum_dense_int64_arena(
     let bucket_len = usize::try_from(span).ok()?;
     let arena = Bump::new();
 
-    let mut sums = BumpVec::<f64>::with_capacity_in(bucket_len, &arena);
-    sums.resize(bucket_len, 0.0f64);
+    // Compensated, as pandas' group_sum (br-frankenpandas-xhogl).
+    let mut sums = BumpVec::<KahanSum>::with_capacity_in(bucket_len, &arena);
+    sums.resize(bucket_len, KahanSum::default());
     let mut seen = BumpVec::<bool>::with_capacity_in(bucket_len, &arena);
     seen.resize(bucket_len, false);
     let mut ordering = BumpVec::<i64>::new_in(&arena);
@@ -1355,7 +1361,7 @@ fn try_groupby_sum_dense_int64_arena(
             continue;
         }
         if let Ok(v) = value.to_f64() {
-            sums[bucket] += v;
+            sums[bucket].add(v);
         }
     }
 
@@ -1369,14 +1375,14 @@ fn try_groupby_sum_dense_int64_arena(
             }
             let key = min_key.checked_add(i64::try_from(bucket).ok()?)?;
             out_index.push(IndexLabel::Int64(key));
-            out_values.push(Scalar::Float64(sums[bucket]));
+            out_values.push(Scalar::Float64(sums[bucket].sum()));
         }
     } else {
         for key in ordering.iter().copied() {
             let raw = i128::from(key) - i128::from(min_key);
             let bucket = usize::try_from(raw).ok()?;
             out_index.push(IndexLabel::Int64(key));
-            out_values.push(Scalar::Float64(sums[bucket]));
+            out_values.push(Scalar::Float64(sums[bucket].sum()));
         }
     }
 
@@ -1417,8 +1423,9 @@ pub enum AggFunc {
 /// Dense direct-address streaming `groupby_agg` for bounded all-valid `Int64`
 /// keys and numeric (`Int64`/`Float64`) values, for the aggregations whose
 /// result is a fold over each group's in-order non-missing values:
-/// `Mean`, `Count`, `Size`, `First`, `Last`, `Min`, `Max`, `Prod` (single
-/// pass), plus `Var`/`Std` (a second pass for the squared deviations).
+/// `Mean`, `Count`, `Size`, `First`, `Last`, `Min`, `Max`, `Prod`, `Var` and
+/// `Std`, all in one pass (mean compensated and var / std Welford, as pandas'
+/// group kernels; br-frankenpandas-xhogl).
 ///
 /// Replaces the generic path's `FxHashMap<GroupKeyRef, (usize, Vec<Scalar>,
 /// usize)>` — which hashes every row AND clones every value into a per-group
@@ -1427,8 +1434,9 @@ pub enum AggFunc {
 ///
 /// Bit-identical to the generic path: rows are scanned in input order so each
 /// bucket folds the same values in the same order the group `Vec` would hold,
-/// and `nanmean`/`nancount` are themselves in-order folds of the non-missing
-/// `to_f64()` values (`mean = Σ/​count`, `count` = non-missing count). `Size`
+/// and `nanmean_grouped`/`nancount` are themselves in-order folds of the
+/// non-missing `to_f64()` values (`mean = Σ/​count`, `count` = non-missing
+/// count). `Size`
 /// counts all rows; `First`/`Last` take the first/last non-missing value
 /// (dtype preserved). Group order is first-seen, or ascending key under `sort`
 /// (matching `compare_group_labels` on non-missing `Int64` labels). Returns
@@ -1483,8 +1491,7 @@ fn try_groupby_agg_dense_int64(
     let bucket_len = usize::try_from(span).ok()?;
 
     let needs_var = matches!(func, AggFunc::Var | AggFunc::Std);
-    // Var/Std need the per-bucket mean first, so they also accumulate `sum`.
-    let needs_mean = matches!(func, AggFunc::Mean) || needs_var;
+    let needs_mean = matches!(func, AggFunc::Mean);
     let needs_prod = matches!(func, AggFunc::Prod);
     // First/Last/Min/Max all retain a representative scalar per bucket.
     let needs_value = matches!(
@@ -1492,7 +1499,8 @@ fn try_groupby_agg_dense_int64(
         AggFunc::First | AggFunc::Last | AggFunc::Min | AggFunc::Max
     );
 
-    let mut sum = vec![0.0_f64; bucket_len];
+    let mut sum = vec![KahanSum::default(); if needs_mean { bucket_len } else { 0 }];
+    let mut moments = vec![WelfordVar::default(); if needs_var { bucket_len } else { 0 }];
     let mut prod = if needs_prod {
         vec![1.0_f64; bucket_len]
     } else {
@@ -1524,11 +1532,15 @@ fn try_groupby_agg_dense_int64(
             continue;
         }
         non_missing[bucket] += 1;
-        if needs_mean {
+        if needs_mean || needs_var {
             // Bail to the generic path on any non-numeric value (nanmean has a
             // separate Timedelta accumulator we would not reproduce here).
             let x = value.to_f64().ok()?;
-            sum[bucket] += x;
+            if needs_mean {
+                sum[bucket].add(x);
+            } else {
+                moments[bucket].add(x);
+            }
         }
         if needs_prod {
             // nanprod multiplies to_f64() of every non-missing value in order.
@@ -1571,30 +1583,6 @@ fn try_groupby_agg_dense_int64(
         }
     }
 
-    // Second pass for Var/Std: nanvar is two-pass (mean, then Σ(x-mean)²). With
-    // the per-bucket mean known from pass 1, re-scan and accumulate squared
-    // deviations per bucket in input order — bit-identical to
-    // `nums.iter().map(|x| (x-mean).powi(2)).sum()` (same finite values, same
-    // order). No per-group Vec, just one extra O(n) scan.
-    let mut sum_sq = Vec::new();
-    if needs_var {
-        sum_sq = vec![0.0_f64; bucket_len];
-        for (key, value) in keys.iter().zip(values.iter()) {
-            let key = match key {
-                Scalar::Int64(v) => *v,
-                Scalar::Null(_) if dropna => continue,
-                _ => return None,
-            };
-            if value.is_missing() {
-                continue;
-            }
-            let bucket = (i128::from(key) - i128::from(min_key)) as usize;
-            let mean = sum[bucket] / non_missing[bucket] as f64;
-            let x = value.to_f64().ok()?;
-            sum_sq[bucket] += (x - mean).powi(2);
-        }
-    }
-
     if sort {
         ordering.sort_unstable();
     }
@@ -1609,7 +1597,7 @@ fn try_groupby_agg_dense_int64(
                 if non_missing[bucket] == 0 {
                     Scalar::Null(NullKind::NaN)
                 } else {
-                    Scalar::Float64(sum[bucket] / non_missing[bucket] as f64)
+                    Scalar::Float64(sum[bucket].sum() / non_missing[bucket] as f64)
                 }
             }
             AggFunc::Count => Scalar::Int64(non_missing[bucket]),
@@ -1619,20 +1607,15 @@ fn try_groupby_agg_dense_int64(
                 .unwrap_or(Scalar::Null(NullKind::NaN)),
             // nanprod over all-missing / empty group is the 1.0 identity.
             AggFunc::Prod => Scalar::Float64(prod[bucket]),
-            // nanvar/nanstd with ddof=1: Null(NaN) when n <= 1, else
-            // sum_sq/(n-1) (and its sqrt for Std).
+            // nanvar_grouped/nanstd_grouped with ddof=1: Null(NaN) when
+            // n <= 1, else m2/(n-1) (and its sqrt for Std).
             AggFunc::Var | AggFunc::Std => {
-                let n = non_missing[bucket];
-                if n <= 1 {
-                    Scalar::Null(NullKind::NaN)
+                let spread = if matches!(func, AggFunc::Std) {
+                    moments[bucket].std(1)
                 } else {
-                    let var = sum_sq[bucket] / (n - 1) as f64;
-                    Scalar::Float64(if matches!(func, AggFunc::Std) {
-                        var.sqrt()
-                    } else {
-                        var
-                    })
-                }
+                    moments[bucket].var(1)
+                };
+                spread.map_or(Scalar::Null(NullKind::NaN), Scalar::Float64)
             }
             _ => unreachable!("dense path gated to the supported aggregations"),
         };
@@ -1964,8 +1947,9 @@ fn try_groupby_mean_numeric_counter(
     dropna: bool,
     sort: bool,
 ) -> Option<(Vec<IndexLabel>, Vec<Scalar>)> {
+    // The sum is compensated, as pandas' group_mean (br-frankenpandas-xhogl).
     let mut ordering = Vec::<GroupKeyRef<'_>>::new();
-    let mut groups = FxHashMap::<GroupKeyRef<'_>, (usize, f64, usize)>::default();
+    let mut groups = FxHashMap::<GroupKeyRef<'_>, (usize, KahanSum, usize)>::default();
 
     for (pos, (key, value)) in keys.iter().zip(values.iter()).enumerate() {
         if dropna && key.is_missing() {
@@ -1975,14 +1959,14 @@ fn try_groupby_mean_numeric_counter(
         let key_id = GroupKeyRef::from_scalar(key);
         let entry = groups.entry(key_id.clone()).or_insert_with(|| {
             ordering.push(key_id.clone());
-            (pos, 0.0, 0)
+            (pos, KahanSum::default(), 0)
         });
 
         if value.is_missing() {
             continue;
         }
         let value = value.to_f64().ok()?;
-        entry.1 += value;
+        entry.1.add(value);
         entry.2 += 1;
     }
 
@@ -2018,7 +2002,7 @@ fn try_groupby_mean_numeric_counter(
         out_values.push(if *count == 0 {
             Scalar::Null(NullKind::NaN)
         } else {
-            Scalar::Float64(*sum / *count as f64)
+            Scalar::Float64(sum.sum() / *count as f64)
         });
     }
 
@@ -2028,20 +2012,19 @@ fn try_groupby_mean_numeric_counter(
 #[derive(Debug, Clone)]
 struct VarStdScalarAccumulator {
     source_idx: usize,
-    sum: f64,
-    count: usize,
-    sum_sq: f64,
+    moments: WelfordVar,
 }
 
 /// Numeric generic-key path for `groupby.var()` and `groupby.std()`.
 ///
 /// The generic fallback hashes the same keys, clones every non-missing value
-/// into a per-group `Vec<Scalar>`, then `nanvar`/`nanstd` performs a two-pass
-/// numeric scan. This helper keeps the same group map and performs those two
-/// passes directly over the input rows, avoiding per-group value vectors while
-/// preserving the ddof=1 NaN boundary and output ordering. Timedelta and
-/// non-numeric values fall back to the existing vector path so dtype-specific
-/// pandas compatibility stays untouched.
+/// into a per-group `Vec<Scalar>`, then `nanvar_grouped`/`nanstd_grouped` fold
+/// Welford's update (pandas' group_var; br-frankenpandas-xhogl). This helper
+/// keeps the same group map and folds that update directly over the input
+/// rows, avoiding per-group value vectors while preserving the ddof=1 NaN
+/// boundary and output ordering. Timedelta and non-numeric values fall back to
+/// the existing vector path so dtype-specific pandas compatibility stays
+/// untouched.
 fn try_groupby_var_std_numeric_counter(
     keys: &[Scalar],
     values: &[Scalar],
@@ -2066,9 +2049,7 @@ fn try_groupby_var_std_numeric_counter(
             ordering.push(key_id.clone());
             VarStdScalarAccumulator {
                 source_idx: pos,
-                sum: 0.0,
-                count: 0,
-                sum_sq: 0.0,
+                moments: WelfordVar::default(),
             }
         });
 
@@ -2079,27 +2060,7 @@ fn try_groupby_var_std_numeric_counter(
             return None;
         }
         let value = value.to_f64().ok()?;
-        entry.sum += value;
-        entry.count += 1;
-    }
-
-    for (key, value) in keys.iter().zip(values.iter()) {
-        if dropna && key.is_missing() {
-            continue;
-        }
-        if value.is_missing() {
-            continue;
-        }
-        if matches!(value, Scalar::Timedelta64(_)) {
-            return None;
-        }
-        let value = value.to_f64().ok()?;
-        let key_id = GroupKeyRef::from_scalar(key);
-        let entry = groups
-            .get_mut(&key_id)
-            .expect("second pass references only first-pass groups");
-        let mean = entry.sum / entry.count as f64;
-        entry.sum_sq += (value - mean).powi(2);
+        entry.moments.add(value);
     }
 
     if sort {
@@ -2131,16 +2092,12 @@ fn try_groupby_var_std_numeric_counter(
             Scalar::Interval(iv) => IndexLabel::Interval(*iv),
             Scalar::Object(object) => IndexLabel::Object(object.clone()),
         });
-        out_values.push(if group.count <= 1 {
-            Scalar::Null(NullKind::NaN)
+        let spread = if matches!(func, AggFunc::Std) {
+            group.moments.std(1)
         } else {
-            let var = group.sum_sq / (group.count - 1) as f64;
-            Scalar::Float64(if matches!(func, AggFunc::Std) {
-                var.sqrt()
-            } else {
-                var
-            })
-        });
+            group.moments.var(1)
+        };
+        out_values.push(spread.map_or(Scalar::Null(NullKind::NaN), Scalar::Float64));
     }
 
     Some((out_index, out_values))
@@ -2581,7 +2538,7 @@ struct SumProdScalarAccumulator {
 #[derive(Debug, Clone)]
 struct SumProdFloatAccumulator {
     source_idx: usize,
-    sum: f64,
+    sum: KahanSum,
     prod: f64,
 }
 
@@ -2690,8 +2647,9 @@ fn try_groupby_sum_prod_integer_counter(
 /// `groupby.prod()`.
 ///
 /// The scalar fallback clones every non-missing Float64 into a per-group
-/// `Vec<Scalar>` before calling `nansum`/`nanprod`. Those reducers are already
-/// streaming f64 folds, so keep only the per-group accumulator state here.
+/// `Vec<Scalar>` before calling `nansum_grouped`/`nanprod`. Those reducers are
+/// already streaming f64 folds (the sum compensated, as pandas' group_sum), so
+/// keep only the per-group accumulator state here.
 fn try_groupby_sum_prod_float_counter(
     keys: &[Scalar],
     values: &[Scalar],
@@ -2718,7 +2676,7 @@ fn try_groupby_sum_prod_float_counter(
             ordering.push(key_id.clone());
             SumProdFloatAccumulator {
                 source_idx: pos,
-                sum: 0.0,
+                sum: KahanSum::default(),
                 prod: 1.0,
             }
         });
@@ -2730,7 +2688,7 @@ fn try_groupby_sum_prod_float_counter(
             return None;
         };
         if take_sum {
-            entry.sum += *x;
+            entry.sum.add(*x);
         } else {
             entry.prod *= *x;
         }
@@ -2766,7 +2724,7 @@ fn try_groupby_sum_prod_float_counter(
             Scalar::Object(object) => IndexLabel::Object(object.clone()),
         });
         out_values.push(Scalar::Float64(if take_sum {
-            group.sum
+            group.sum.sum()
         } else {
             group.prod
         }));
@@ -2879,8 +2837,9 @@ pub fn groupby_agg(
         return Ok(Series::new(agg_name, Index::new(out_index), out_column)?);
     }
 
-    // Generic string/object-key var/std use the same two-pass numeric formula
-    // as nanvar/nanstd, but do not need a cloned Vec<Scalar> per group.
+    // Generic string/object-key var/std fold the same Welford update as
+    // nanvar_grouped/nanstd_grouped, but do not need a cloned Vec<Scalar> per
+    // group.
     if matches!(func, AggFunc::Var | AggFunc::Std)
         && let Some((out_index, out_values)) = try_groupby_var_std_numeric_counter(
             key_vals,
@@ -2961,7 +2920,8 @@ pub fn groupby_agg(
     }
 
     // Generic string/object-key Float64 sum/prod use the same left-to-right f64
-    // fold as nansum/nanprod, but avoid cloning per-group Scalar vectors.
+    // folds as nansum_grouped/nanprod, but avoid cloning per-group Scalar
+    // vectors.
     if matches!(func, AggFunc::Sum | AggFunc::Prod)
         && let Some((out_index, out_values)) = try_groupby_sum_prod_float_counter(
             key_vals,
@@ -3068,8 +3028,10 @@ pub fn groupby_agg(
                     Err(_) => Scalar::Float64(total as f64),
                 }
             }
-            AggFunc::Sum => fp_types::nansum(vals),
-            AggFunc::Mean => fp_types::nanmean(vals),
+            // pandas' group kernels: sum / mean compensated, var / std
+            // Welford (br-frankenpandas-xhogl).
+            AggFunc::Sum => fp_types::nansum_grouped(vals),
+            AggFunc::Mean => fp_types::nanmean_grouped(vals),
             AggFunc::Count => fp_types::nancount(vals),
             // pandas groupby.min()/.max() preserve the source column dtype
             // — Int64 stays Int64 (and Timedelta64 stays Timedelta64 via
@@ -3099,8 +3061,8 @@ pub fn groupby_agg(
                     vals[vals.len() - 1].clone()
                 }
             }
-            AggFunc::Var => fp_types::nanvar(vals, 1),
-            AggFunc::Std => fp_types::nanstd(vals, 1),
+            AggFunc::Var => fp_types::nanvar_grouped(vals, 1),
+            AggFunc::Std => fp_types::nanstd_grouped(vals, 1),
             AggFunc::Median => fp_types::nanmedian(vals),
             AggFunc::Nunique => fp_types::nannunique(vals),
             // pandas groupby.prod() preserves Int64 for integer/bool input,
@@ -4733,6 +4695,83 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn group_kernels_add_as_pandas_xhogl() {
+        // pandas 2.2.3 group_sum / group_mean add with Kahan compensation and
+        // group_var runs Welford (br-frankenpandas-xhogl). Keys [1 x10, 2 x3],
+        // values [0.1 x10, 1e16, 1, 1]: sum [1.0, 1.0000000000000002e16],
+        // mean [0.1, 3333333333333334.0], var [0.0, 3.333333333333333e31] - a
+        // plain fold gives 0.9999999999999999 and 1e16, two-pass var 2.1e-34.
+        fn bits(series: &Series) -> Vec<Option<u64>> {
+            series
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Float64(v) => Some(v.to_bits()),
+                    _ => None,
+                })
+                .collect()
+        }
+        fn want(values: &[f64]) -> Vec<Option<u64>> {
+            values.iter().map(|v| Some(v.to_bits())).collect()
+        }
+        let idx: Vec<IndexLabel> = (0..13_i64).map(IndexLabel::Int64).collect();
+        let mut raw = vec![0.1; 10];
+        raw.extend([1e16, 1.0, 1.0]);
+        let values = Series::from_values(
+            "v",
+            idx.clone(),
+            raw.into_iter().map(Scalar::Float64).collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let int_keys: Vec<Scalar> = (0..13).map(|i| Scalar::Int64(1 + i / 10)).collect();
+        let text_keys: Vec<Scalar> = (0..13)
+            .map(|i| Scalar::Utf8(if i < 10 { "a" } else { "b" }.into()))
+            .collect();
+        let pol = RuntimePolicy::strict();
+        let mut led = EvidenceLedger::new();
+        let opts = GroupByOptions::default();
+        for keys in [int_keys, text_keys] {
+            let keys = Series::from_values("k", idx.clone(), keys).unwrap();
+            for use_arena in [true, false] {
+                let exec = GroupByExecutionOptions {
+                    use_arena,
+                    ..GroupByExecutionOptions::default()
+                };
+                let sum =
+                    groupby_sum_with_options(&keys, &values, opts, &pol, &mut led, exec).unwrap();
+                assert_eq!(bits(&sum), want(&[1.0, 1.000_000_000_000_000_2e16]));
+            }
+            let mut run = |func| groupby_agg(&keys, &values, func, opts, &pol, &mut led).unwrap();
+            assert_eq!(
+                bits(&run(AggFunc::Sum)),
+                want(&[1.0, 1.000_000_000_000_000_2e16])
+            );
+            assert_eq!(
+                bits(&run(AggFunc::Mean)),
+                want(&[0.1, 3_333_333_333_333_334.0])
+            );
+            assert_eq!(
+                bits(&run(AggFunc::Var)),
+                want(&[0.0, 3.333_333_333_333_333e31])
+            );
+            assert_eq!(
+                bits(&run(AggFunc::Std)),
+                want(&[0.0, 5_773_502_691_896_257.0])
+            );
+        }
+        // NEGATIVE: integer sums stay exact Int64 past 2**53.
+        let keys = Series::from_values("k", idx[..2].to_vec(), vec![Scalar::Int64(1); 2]).unwrap();
+        let ints = Series::from_values(
+            "v",
+            idx[..2].to_vec(),
+            vec![Scalar::Int64(1 << 53), Scalar::Int64(1)],
+        )
+        .unwrap();
+        let summed = groupby_sum(&keys, &ints, opts, &pol, &mut led).unwrap();
+        assert_eq!(summed.values(), &[Scalar::Int64((1 << 53) + 1)]);
     }
 
     #[test]
