@@ -7895,6 +7895,78 @@ impl WelfordVar {
     }
 }
 
+/// pandas' online skewness: its cython `group_skew` folds each float into
+/// running moments (`delta = v - m1; delta_n = delta / n; term1 = delta *
+/// delta_n * (n - 1); m1 += delta_n; m3 += term1 * delta_n * (n - 2) -
+/// 3 * delta_n * m2; m2 += term1`) and answers
+/// `n * (n - 1) ** 0.5 / (n - 2) * (m3 / m2 ** 1.5)` - 0 when `m2` is 0,
+/// missing below 3 values - where the two-pass [`nanskew`] (Series.skew)
+/// differs in the last bits (br-frankenpandas-vjfq9).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SkewMoments {
+    count: usize,
+    m1: f64,
+    m2: f64,
+    m3: f64,
+}
+
+impl SkewMoments {
+    /// `value` folded in.
+    #[inline]
+    pub fn add(&mut self, value: f64) {
+        let before = self.count as f64;
+        self.count += 1;
+        let n = self.count as f64;
+        let delta = value - self.m1;
+        let delta_n = delta / n;
+        let term1 = delta * delta_n * before;
+        self.m1 += delta_n;
+        self.m3 += term1 * delta_n * (n - 2.0) - 3.0 * delta_n * self.m2;
+        self.m2 += term1;
+    }
+
+    /// The values folded in.
+    #[must_use]
+    pub fn count(self) -> usize {
+        self.count
+    }
+
+    /// The bias-corrected skewness; None below 3 values.
+    #[must_use]
+    pub fn skew(self) -> Option<f64> {
+        if self.count < 3 {
+            return None;
+        }
+        if self.m2 == 0.0 {
+            return Some(0.0);
+        }
+        let n = self.count as f64;
+        // pandas raises with libm pow: pow(n - 1, 0.5) is not always sqrt's
+        // correctly rounded answer (n = 2922 differs), and a constant 0.5
+        // exponent would let LLVM substitute sqrt.
+        let half = std::hint::black_box(0.5);
+        Some((n * (n - 1.0).powf(half) / (n - 2.0)) * (self.m3 / self.m2.powf(1.5)))
+    }
+}
+
+/// [`nanskew`] as pandas' grouped skew: [`SkewMoments`] over the present
+/// values.
+#[must_use]
+pub fn nanskew_grouped(values: &[Scalar]) -> Scalar {
+    let mut moments = SkewMoments::default();
+    for value in values {
+        if value.is_missing() {
+            continue;
+        }
+        if let Ok(x) = value.to_f64() {
+            moments.add(x);
+        }
+    }
+    moments
+        .skew()
+        .map_or(Scalar::Null(NullKind::NaN), Scalar::Float64)
+}
+
 /// The present values' Welford moments, as [`nanvar_grouped`] reads them.
 fn grouped_moments(values: &[Scalar]) -> WelfordVar {
     let mut moments = WelfordVar::default();
@@ -15882,6 +15954,38 @@ mod tests {
         // Timedelta input keeps the exact integer paths.
         let spans = [Scalar::Timedelta64(1), Scalar::Timedelta64(2)];
         assert_eq!(super::nansum_grouped(&spans), super::nansum(&spans));
+    }
+
+    #[test]
+    fn grouped_skew_is_pandas_online_group_skew_vjfq9() {
+        // pandas 2.2.3 groupby skew of [1, 4, 8] is 0.42327316026800615 - a
+        // two-pass form gives 0.4232731602680071 (br-frankenpandas-vjfq9).
+        let group = [
+            Scalar::Float64(1.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(4.0),
+            Scalar::Float64(8.0),
+        ];
+        assert_eq!(
+            super::nanskew_grouped(&group),
+            Scalar::Float64(0.423_273_160_268_006_15)
+        );
+        // 2922 values: pandas raises (n - 1) ** 0.5 with libm pow, which is not
+        // sqrt's answer for n - 1 = 2921 (sqrt gives -0.002284383734800802).
+        let long: Vec<Scalar> = (0..2922_i32)
+            .map(|i| Scalar::Float64(f64::from((i * 7919) % 1000) / 7.0))
+            .collect();
+        assert_eq!(
+            super::nanskew_grouped(&long),
+            Scalar::Float64(-0.002_284_383_734_800_801_4)
+        );
+        // A constant group is 0; below 3 values missing; an inf poisons its
+        // group (pandas skips only NaN), where dropping it would leave [1, 2, 5].
+        let constant = [7.0; 3].map(Scalar::Float64);
+        assert_eq!(super::nanskew_grouped(&constant), Scalar::Float64(0.0));
+        assert!(super::nanskew_grouped(&group[..2]).is_missing());
+        let with_inf = [1.0, f64::INFINITY, 2.0, 5.0].map(Scalar::Float64);
+        assert!(super::nanskew_grouped(&with_inf).is_missing());
     }
 
     #[test]

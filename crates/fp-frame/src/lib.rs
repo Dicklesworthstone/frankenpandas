@@ -2526,14 +2526,15 @@ fn pivot_table_agg_value(aggfunc: &str, vals: &[f64]) -> Result<f64, FrameError>
         // Delegate sem/skew to the audited fp_types kernels rather than inlining
         // the formula (an inline groupby copy of skew/kurtosis was the f4dc5540
         // bug). nansem_grouped(ddof=1) = sqrt(var/n), pandas' groupby sem
-        // (br-frankenpandas-7hxqv); nanskew = adjusted Fisher-Pearson G1. Both
+        // (br-frankenpandas-7hxqv); nanskew_grouped = adjusted Fisher-Pearson
+        // G1 by pandas' online group_skew (br-frankenpandas-vjfq9). Both
         // return NaN below their min sample size, matching pandas.
         "sem" | "skew" => {
             let scalars: Vec<Scalar> = vals.iter().map(|&v| Scalar::Float64(v)).collect();
             let agg = if aggfunc == "sem" {
                 fp_types::nansem_grouped(&scalars, 1)
             } else {
-                fp_types::nanskew(&scalars)
+                fp_types::nanskew_grouped(&scalars)
             };
             agg.to_f64().unwrap_or(f64::NAN)
         }
@@ -42327,6 +42328,33 @@ fn welford_moments(values: &[f64]) -> fp_types::WelfordVar {
     moments
 }
 
+/// A per-group online moment state pandas' group kernels fold row by row:
+/// group_var's Welford update, group_skew's third-moment update.
+trait GroupMoments: Copy + Default {
+    fn add(&mut self, value: f64);
+    fn count(&self) -> usize;
+}
+
+impl GroupMoments for fp_types::WelfordVar {
+    fn add(&mut self, value: f64) {
+        Self::add(self, value);
+    }
+
+    fn count(&self) -> usize {
+        Self::count(*self)
+    }
+}
+
+impl GroupMoments for fp_types::SkewMoments {
+    fn add(&mut self, value: f64) {
+        Self::add(self, value);
+    }
+
+    fn count(&self) -> usize {
+        Self::count(*self)
+    }
+}
+
 /// GroupBy for Series, grouping by values of another Series.
 ///
 /// Created by `Series::groupby(by)`. Supports standard aggregation
@@ -46622,15 +46650,16 @@ impl SeriesGroupBy<'_> {
     /// Dense one-pass groupby moments over a dense gid layout (int64 OR
     /// contiguous-Utf8 key) and an Int64/Float64/nullable-Float64 value column -
     /// no per-group `Vec<f64>` buckets + closure re-scan. Each gid folds its
-    /// values in row order as pandas' group_var does, Welford (skipna: only
-    /// non-missing values; br-frankenpandas-xhogl), and `emit` answers each
-    /// group's [`fp_types::WelfordVar`] (an all-missing group is `Null(NaN)`).
+    /// values in row order as pandas' group kernels do - Welford for var
+    /// (br-frankenpandas-xhogl), the third-moment update for skew
+    /// (br-frankenpandas-vjfq9); skipna: only non-missing values - and `emit`
+    /// answers each group's moments (an all-missing group is `Null(NaN)`).
     /// `None` if the dense/typed gates miss (caller falls back to
     /// `agg_numeric` / `agg_values_scalar`), with first-seen gids/labels as
     /// those give them.
-    fn dense_group_moments(
+    fn dense_group_moments<M: GroupMoments>(
         &self,
-        emit: impl Fn(fp_types::WelfordVar) -> Scalar,
+        emit: impl Fn(M) -> Scalar,
     ) -> Option<Result<Series, FrameError>> {
         let (gids, ngroups) = self.dense_group_ids()?;
         let vf = self.series.column.as_f64_slice();
@@ -46644,9 +46673,7 @@ impl SeriesGroupBy<'_> {
             return None;
         }
         let order = self.dense_group_labels(&gids, ngroups)?;
-        // One Welford pass per group, as pandas' group_var folds
-        // (br-frankenpandas-xhogl).
-        let mut moments = vec![fp_types::WelfordVar::default(); ngroups];
+        let mut moments = vec![M::default(); ngroups];
         for (i, &g) in gids.iter().enumerate() {
             if let Some(f) = vf {
                 moments[g].add(f[i]);
@@ -47548,12 +47575,12 @@ impl SeriesGroupBy<'_> {
         })
     }
 
-    /// Standard error of the mean for each group.
     /// Cache-hot dense group moments for an all-valid Float64 value column keyed
-    /// by a single bounded-Int64 column (br-frankenpandas-1q4q4). sem/skew/kurt
-    /// go through `agg_values_scalar`, which materializes a `Vec<Scalar>` per
-    /// group (cloning every value) then `nansem`/`nanskew`/`nankurt` over Scalars
-    /// (sem was 0.08× pandas, skew 0.14×). This computes the same TWO-PASS
+    /// by a single bounded-Int64 column (br-frankenpandas-1q4q4) - kurt's; sem
+    /// and skew fold online in `dense_group_moments`, as pandas' group kernels.
+    /// kurt goes through `agg_values_scalar`, which materializes a `Vec<Scalar>`
+    /// per group (cloning every value) then `nankurt` over Scalars (sem was
+    /// 0.08× pandas, skew 0.14× that way). This computes the same TWO-PASS
     /// mean-centered moments typed and in row order: pass 1 = per-group sum +
     /// finite count → mean; pass 2 = Σ(x−mean).powi(2/3/4). `finalize(n, m2, m3,
     /// m4)` reproduces each op's exact formula. BIT-IDENTICAL: same `collect_finite`
@@ -47656,11 +47683,12 @@ impl SeriesGroupBy<'_> {
         }
     }
 
+    /// Standard error of the mean for each group.
     pub fn sem(&self) -> Result<Series, FrameError> {
         self.refuse_text("sem")?;
         // pandas' group_var sem, Welford: sqrt(var / n) (br-frankenpandas-7hxqv,
         // br-frankenpandas-xhogl); a group of one is missing.
-        if let Some(result) = self.dense_group_moments(|group| {
+        if let Some(result) = self.dense_group_moments(|group: fp_types::WelfordVar| {
             group
                 .sem(1)
                 .map_or(Scalar::Null(NullKind::NaN), Scalar::Float64)
@@ -47712,19 +47740,16 @@ impl SeriesGroupBy<'_> {
     /// Skewness of each group.
     pub fn skew(&self) -> Result<Series, FrameError> {
         self.refuse_text("skew")?;
-        if let Some(result) = self.group_moment_dense(|n, m2, m3, _| {
-            if n < 3.0 {
-                return Scalar::Null(NullKind::NaN);
-            }
-            let s2 = m2 / (n - 1.0);
-            if s2 == 0.0 {
-                return Scalar::Float64(0.0);
-            }
-            Scalar::Float64((n / ((n - 1.0) * (n - 2.0))) * (m3 / s2.powf(1.5)))
+        // pandas' group_skew: an online third-moment update per group
+        // (br-frankenpandas-vjfq9); an inf value makes its group NaN.
+        if let Some(result) = self.dense_group_moments(|group: fp_types::SkewMoments| {
+            group
+                .skew()
+                .map_or(Scalar::Null(NullKind::NaN), Scalar::Float64)
         }) {
             return result.and_then(float_moment_series);
         }
-        self.agg_values_scalar(self.series.name(), fp_types::nanskew)
+        self.agg_values_scalar(self.series.name(), fp_types::nanskew_grouped)
             .and_then(float_moment_series)
     }
 
@@ -48263,9 +48288,9 @@ impl SeriesGroupBy<'_> {
         // all-valid std re-scanned agg_numeric's per-group bucket, and a nullable
         // column fell to the generic build_groups gather. Both are pandas'
         // group_var: Welford (br-frankenpandas-xhogl).
-        if let Some(r) =
-            self.dense_group_moments(|group| Scalar::Float64(group.std(1).unwrap_or(f64::NAN)))
-        {
+        if let Some(r) = self.dense_group_moments(|group: fp_types::WelfordVar| {
+            Scalar::Float64(group.std(1).unwrap_or(f64::NAN))
+        }) {
             return r;
         }
         self.agg_numeric(
@@ -48300,9 +48325,9 @@ impl SeriesGroupBy<'_> {
         // Dense fast path (shared with std / sem + nullable via
         // dense_group_moments): one pass over the dense gids, no per-group
         // buckets. Both are pandas' group_var: Welford (br-frankenpandas-xhogl).
-        if let Some(r) =
-            self.dense_group_moments(|group| Scalar::Float64(group.var(1).unwrap_or(f64::NAN)))
-        {
+        if let Some(r) = self.dense_group_moments(|group: fp_types::WelfordVar| {
+            Scalar::Float64(group.var(1).unwrap_or(f64::NAN))
+        }) {
             return r;
         }
         self.agg_numeric(
@@ -49952,8 +49977,9 @@ impl SeriesGroupBy<'_> {
                 ),
                 // Statistical moments broadcast the per-group scalar to all rows,
                 // matching pandas groupby.transform('skew'/'kurt'/'sem').
-                // br-frankenpandas-e96wv (same kernels as the agg dispatch).
-                "skew" => fp_types::nanskew(&group_vals),
+                // br-frankenpandas-e96wv (same kernels as the agg dispatch;
+                // skew is pandas' online group_skew, br-frankenpandas-vjfq9).
+                "skew" => fp_types::nanskew_grouped(&group_vals),
                 "kurt" | "kurtosis" => fp_types::nankurt(&group_vals),
                 "sem" => fp_types::nansem_grouped(&group_vals, 1),
                 other => {
@@ -105298,7 +105324,8 @@ impl DataFrameGroupBy<'_> {
                     "all" => fp_types::nanall(&group_vals),
                     // Statistical moments (br-frankenpandas-zge5s) — not in the
                     // dense gate, so they reach this generic per-group path.
-                    "skew" => fp_types::nanskew(&group_vals),
+                    // skew is pandas' online group_skew (br-frankenpandas-vjfq9).
+                    "skew" => fp_types::nanskew_grouped(&group_vals),
                     "kurt" | "kurtosis" => fp_types::nankurt(&group_vals),
                     "sem" => fp_types::nansem_grouped(&group_vals, 1),
                     // br-frankenpandas-groupby-idxmax-idxmin: pandas' idxmax/idxmin
@@ -109821,8 +109848,9 @@ impl DataFrameGroupBy<'_> {
     /// int64-dense bypass, `go_gid` for the build_groups path). Bit-identical to
     /// the per-group `apply_agg_func` reduce: a compensated sum/count fold and a
     /// Welford update for var/std (ddof=1, n<=1 ⇒ Null), as pandas' group
-    /// kernels (br-frankenpandas-xhogl); skew/kurt keep their plain sum and
-    /// second mean-centered pass.
+    /// kernels (br-frankenpandas-xhogl), skew group_skew's online third-moment
+    /// update (br-frankenpandas-vjfq9); kurt keeps its plain sum and second
+    /// mean-centered pass.
     fn moments_by_pair(
         &self,
         specs: &[(String, String)],
@@ -109877,11 +109905,13 @@ impl DataFrameGroupBy<'_> {
             let want_last = needs("last");
             let want_minmax = needs("min") || needs("max");
             let want_prod = needs("prod");
-            // sum / mean compensated and var / std / sem Welford, as pandas'
-            // group kernels (br-frankenpandas-xhogl); `sum` stays the plain
-            // fold the two-pass skew / kurt moments centre on.
+            // sum / mean compensated, var / std / sem Welford and skew the
+            // online third-moment update, as pandas' group kernels
+            // (br-frankenpandas-xhogl, br-frankenpandas-vjfq9); `sum` stays the
+            // plain fold kurt's two-pass moments centre on.
             let want_kahan = needs("sum") || needs("mean");
             let want_welford = needs("var") || needs("std") || needs("sem");
+            let want_skew = needs("skew");
             let mut kahan = if want_kahan {
                 vec![fp_types::KahanSum::default(); ngroups]
             } else {
@@ -109889,6 +109919,11 @@ impl DataFrameGroupBy<'_> {
             };
             let mut welford = if want_welford {
                 vec![fp_types::WelfordVar::default(); ngroups]
+            } else {
+                Vec::new()
+            };
+            let mut skew_moments = if want_skew {
+                vec![fp_types::SkewMoments::default(); ngroups]
             } else {
                 Vec::new()
             };
@@ -109938,6 +109973,9 @@ impl DataFrameGroupBy<'_> {
                 }
                 if want_welford {
                     welford[g].add(v);
+                }
+                if want_skew {
+                    skew_moments[g].add(v);
                 }
                 if want_minmax {
                     mn[g] = mn[g].min(v);
@@ -110020,44 +110058,28 @@ impl DataFrameGroupBy<'_> {
                 || needs("kurt")
                 || needs("kurtosis")
             {
-                let means: Vec<f64> = (0..ngroups).map(|g| sum[g] / cnt[g] as f64).collect();
-                let mut sumsq = vec![0.0_f64; ngroups];
-                let need_m3 = needs("skew");
                 let need_m4 = needs("kurt") || needs("kurtosis");
-                // Allocation follows the same demand flags the loop already used.
-                // m3v is read only under `needs("skew")` (== need_m3) and m4v only
-                // under `need_m4`, so an unrequested moment costs nothing at all now
-                // rather than an ngroups-sized zeroed Vec.
-                let mut m3v = if need_m3 {
-                    vec![0.0_f64; ngroups]
-                } else {
-                    Vec::new()
-                };
-                let mut m4v = if need_m4 {
-                    vec![0.0_f64; ngroups]
-                } else {
-                    Vec::new()
-                };
-                for (row, &v) in vals.iter().enumerate() {
-                    let g = gid_per_row[row];
-                    let d = v - means[g];
-                    // d2 reuse; see group_moment_dense. When only sumsq is wanted the
-                    // cost is unchanged (one multiply either way), so the gated arms
-                    // below lose nothing by it.
-                    let d2 = d * d;
-                    sumsq[g] += d2;
-                    if need_m3 {
-                        m3v[g] += d2 * d;
-                    }
-                    if need_m4 {
+                // kurt's second, mean-centered pass - the only moment still taken
+                // in two passes - runs only when kurt is asked for.
+                let mut sumsq = Vec::new();
+                let mut m4v = Vec::new();
+                if need_m4 {
+                    let means: Vec<f64> = (0..ngroups).map(|g| sum[g] / cnt[g] as f64).collect();
+                    sumsq = vec![0.0_f64; ngroups];
+                    m4v = vec![0.0_f64; ngroups];
+                    for (row, &v) in vals.iter().enumerate() {
+                        let g = gid_per_row[row];
+                        let d = v - means[g];
+                        // d2 reuse; see group_moment_dense.
+                        let d2 = d * d;
+                        sumsq[g] += d2;
                         m4v[g] += d2 * d2;
                     }
                 }
-                // sem / skew / kurt reproduce fp_types::nansem_grouped/nanskew/
-                // nankurt exactly (two-pass mean-centered moments over the same
-                // finite ascending-row values; here the column is all-valid f64 so
-                // every value is included). Bit-identical to the agg_values_scalar
-                // path.
+                // sem / skew / kurt reproduce fp_types::nansem_grouped/
+                // nanskew_grouped/nankurt exactly (the same row-order folds over
+                // the same values; here the column is all-valid f64 so every value
+                // is included). Bit-identical to the agg_values_scalar path.
                 if needs("sem") {
                     let out: Vec<Scalar> = emit
                         .iter()
@@ -110072,19 +110094,13 @@ impl DataFrameGroupBy<'_> {
                         Column::from_values(out)?,
                     );
                 }
-                if needs("skew") {
+                if want_skew {
                     let out: Vec<Scalar> = emit
                         .iter()
                         .map(|&g| {
-                            let n = cnt[g] as f64;
-                            if n < 3.0 {
-                                return Scalar::Null(NullKind::NaN);
-                            }
-                            let s2 = sumsq[g] / (n - 1.0);
-                            if s2 == 0.0 {
-                                return Scalar::Float64(0.0);
-                            }
-                            Scalar::Float64((n / ((n - 1.0) * (n - 2.0))) * (m3v[g] / s2.powf(1.5)))
+                            skew_moments[g]
+                                .skew()
+                                .map_or(Scalar::Null(NullKind::NaN), Scalar::Float64)
                         })
                         .collect();
                     by_pair.insert(
@@ -110455,8 +110471,9 @@ impl DataFrameGroupBy<'_> {
                 .unwrap_or(Scalar::Null(NullKind::NaN))),
             "nunique" => Ok(fp_types::nannunique(group_vals)),
             "prod" => Ok(fp_types::nanprod(group_vals)),
-            // Statistical moments (br-frankenpandas-zge5s).
-            "skew" => Ok(fp_types::nanskew(group_vals)),
+            // Statistical moments (br-frankenpandas-zge5s); skew is pandas'
+            // online group_skew (br-frankenpandas-vjfq9).
+            "skew" => Ok(fp_types::nanskew_grouped(group_vals)),
             "kurt" | "kurtosis" => Ok(fp_types::nankurt(group_vals)),
             "sem" => Ok(fp_types::nansem_grouped(group_vals, 1)),
             other => Err(FrameError::CompatibilityRejected(format!(
@@ -113904,12 +113921,13 @@ impl DataFrameGroupBy<'_> {
     /// Dense moment fast path for the named DataFrameGroupBy moment reducers
     /// (br-frankenpandas-1q4q4): when every non-key numeric column is all-valid
     /// Float64, route through `agg_typed_pairs_dense_f64_moments` (the same
-    /// two-pass mean-centered moments the dict/list agg uses, now extended with
-    /// sem/skew/kurt) and rename its `{col}_{func}` outputs to the bare `{col}`.
+    /// moments the dict/list agg uses, extended with sem/skew/kurt) and rename
+    /// its `{col}_{func}` outputs to the bare `{col}`.
     /// Bails (→ generic `build_groups` path) when any non-key Int64/Timedelta64
     /// column is present (the f64-only dense path would silently drop it).
-    /// BIT-IDENTICAL: `moments_by_pair` reproduces `nansem`/`nanskew`/`nankurt`
-    /// exactly and `int64_dense_grouping` matches `build_groups`' group order.
+    /// BIT-IDENTICAL: `moments_by_pair` reproduces `nansem_grouped`/
+    /// `nanskew_grouped`/`nankurt` exactly and `int64_dense_grouping` matches
+    /// `build_groups`' group order.
     fn try_moment_dense(&self, func: &str) -> Result<Option<DataFrame>, FrameError> {
         // Float64 AND all-valid Int64 value columns are eligible: `try_moment_dense`
         // is only ever called with skew/sem/kurt, all of which widen an Int64 column
@@ -114099,13 +114117,14 @@ impl DataFrameGroupBy<'_> {
                 // population third moment (m3/n) with a sample variance
                 // (m2/(n-1)), yielding results off by a factor of (n/(n-1))^1.5
                 // — e.g. 0.9428 instead of pandas' 1.7320 for [10,10,40].
-                // nanskew also handles n<3 → NaN and zero-variance groups → 0.0,
-                // keeping groupby.skew consistent with Series/resample/rolling.
+                // nanskew also handles n<3 → NaN and zero-variance groups → 0.0.
+                // The grouped form is pandas' online group_skew
+                // (br-frankenpandas-vjfq9), which Series.skew is not.
                 let group_values: Vec<Scalar> = groups[gkey]
                     .iter()
                     .map(|&i| col.values()[i].clone())
                     .collect();
-                vals.push(fp_types::nanskew(&group_values));
+                vals.push(fp_types::nanskew_grouped(&group_values));
             }
 
             result_cols.insert(col_name.clone(), Column::from_values(vals)?);
@@ -200971,6 +200990,83 @@ mod tests {
             summed.columns["v"].values(),
             &[Scalar::Int64((1 << 53) + 1)]
         );
+    }
+
+    #[test]
+    fn groupby_skew_is_pandas_online_group_skew_vjfq9() {
+        // pandas 2.2.3 group_skew folds running moments per group
+        // (br-frankenpandas-vjfq9): keys [1 x4, 2 x3, 3 x3, 4 x4], values
+        // [1, 2, 4, 8.5 | 1e9, 1e9 + 1, 1e9 + 3 | 7, 7, 7 | 1, inf, 2, 5] ->
+        // [1.2425515694555238, 0.9352195295828247, 0.0, NaN] - the two-pass
+        // form gives 0.9352192954604264 for the offset group, and dropping the
+        // inf would leave [1, 2, 5] a finite skew.
+        let values = [
+            1.0,
+            2.0,
+            4.0,
+            8.5,
+            1e9,
+            1e9 + 1.0,
+            1e9 + 3.0,
+            7.0,
+            7.0,
+            7.0,
+            1.0,
+            f64::INFINITY,
+            2.0,
+            5.0,
+        ];
+        let keys = [1, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 4];
+        let expected: [Option<f64>; 4] = [
+            Some(1.242_551_569_455_523_8),
+            Some(0.935_219_529_582_824_7),
+            Some(0.0),
+            None,
+        ];
+        let check = |got: &[Scalar], what: &str| {
+            assert_eq!(got.len(), expected.len(), "{what}");
+            for (cell, want) in got.iter().zip(&expected) {
+                match (cell, want) {
+                    (Scalar::Float64(g), Some(w)) => {
+                        assert_eq!(g.to_bits(), w.to_bits(), "{what}: {g} vs {w}");
+                    }
+                    (cell, None) => assert!(cell.is_missing(), "{what}: {cell:?}"),
+                    (cell, Some(w)) => panic!("{what}: {cell:?} vs {w}"),
+                }
+            }
+        };
+        let int_keys: Vec<Scalar> = keys.iter().map(|&k| Scalar::Int64(k)).collect();
+        let text_keys: Vec<Scalar> = keys.iter().map(|k| Scalar::Utf8(format!("g{k}"))).collect();
+        for keys in [int_keys, text_keys] {
+            let df = DataFrame::from_dict(
+                &["k", "v"],
+                vec![
+                    ("k", keys),
+                    ("v", values.iter().map(|&v| Scalar::Float64(v)).collect()),
+                ],
+            )
+            .unwrap();
+            let grouped = df.groupby(&["k"]).unwrap();
+            check(
+                grouped.skew().unwrap().columns["v"].values(),
+                "DataFrameGroupBy.skew",
+            );
+            let listed = grouped.agg_list(&["skew"]).unwrap();
+            check(
+                listed.columns[&listed.column_order[0]].values(),
+                "agg(['skew'])",
+            );
+            let series = df.column_as_series("v").unwrap();
+            let key = df.column_as_series("k").unwrap();
+            let by_key = series.groupby(&key).unwrap();
+            check(by_key.skew().unwrap().values(), "SeriesGroupBy.skew");
+            let broadcast = by_key.transform("skew").unwrap();
+            let group_starts: Vec<Scalar> = [0, 4, 7, 10]
+                .iter()
+                .map(|&row| broadcast.values()[row].clone())
+                .collect();
+            check(&group_starts, "transform('skew')");
+        }
     }
 
     #[test]

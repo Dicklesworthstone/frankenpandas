@@ -23161,3 +23161,48 @@ _E113_CASES = {
 def test_everyday113_group_kernels_add_like_pandas_xhogl(case: str) -> None:
     run = _E113_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-vjfq9: pandas' group_skew folds running moments per group
+# (not the two-pass Series.skew), raises (n - 1) ** 0.5 with libm pow, and
+# lets an inf make its group NaN.
+def _e114_frame(m: Any, keys: Any = None) -> Any:
+    keys = [1, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 4] if keys is None else keys
+    values = [1.0, 2.0, 4.0, 8.5, 1e9, 1e9 + 1, 1e9 + 3, 7.0, 7.0, 7.0, 1.0, np.inf, 2.0, 5.0]
+    return m.DataFrame({"k": keys, "v": values, "w": [v * 3 for v in values]})
+
+
+def _e114_wide(m: Any) -> Any:
+    rng = np.random.default_rng(3)
+    values = 1e9 + rng.integers(0, 50, 5000) + rng.random(5000)
+    values[rng.random(5000) < 0.05] = np.nan
+    return m.DataFrame({"k": rng.integers(0, 7, 5000), "v": values})
+
+
+_E114_CASES = {
+    "SeriesGroupBy": lambda m: _e114_frame(m).groupby("k")["v"].skew().tolist(),
+    "DataFrameGroupBy": lambda m: _e114_frame(m).groupby("k").skew().values.tolist(),
+    "text keys": lambda m: _e114_frame(m, list("aaaabbbcccdddd")).groupby("k")["v"].skew().tolist(),
+    "agg list": lambda m: _e114_frame(m).groupby("k")["v"].agg(["mean", "skew"]).values.tolist(),
+    "agg dict": lambda m: _e114_frame(m).groupby("k").agg({"v": "skew", "w": ["skew", "sum"]}).values.tolist(),
+    "named agg": lambda m: _e114_frame(m).groupby("k").agg(s=("v", "skew")).values.tolist(),
+    "transform": lambda m: _e114_frame(m).groupby("k")["v"].transform("skew").tolist(),
+    "frame transform": lambda m: _e114_frame(m).groupby("k").transform("skew").values.tolist(),
+    "pivot_table": lambda m: _e114_frame(m).head(10).assign(c=0).pivot_table(index="k", columns="c", values="v", aggfunc="skew").values.tolist(),
+    "large offset with NaN": lambda m: _e114_wide(m).groupby("k")["v"].skew().tolist(),
+    "large offset frame": lambda m: _e114_wide(m).groupby("k").skew().values.tolist(),
+    "int values": lambda m: m.DataFrame({"k": [0, 0, 0, 1, 1, 1, 1], "v": [3, 10**9, 7, 1, 2, 2, 50]}).groupby("k")["v"].skew().tolist(),
+    "2922 rows": lambda m: m.DataFrame({"k": [0] * 2922, "v": [((i * 7919) % 1000) / 7.0 for i in range(2922)]}).groupby("k")["v"].skew().tolist(),
+    "skipna=False": lambda m: m.DataFrame({"k": [1, 1, 1, 2, 2, 2, 2], "v": [1e9, 1e9 + 1, 1e9 + 3, 1.0, np.nan, 2.0, 4.0]}).groupby("k")["v"].skew(skipna=False).tolist(),
+    # Negatives: a group below 3 values is NaN and a constant group 0.0 in
+    # both forms; var stays Welford.
+    "short and constant": lambda m: m.DataFrame({"k": [1, 1, 2, 2, 2], "v": [1.0, 5.0, 4.0, 4.0, 4.0]}).groupby("k")["v"].skew().tolist(),
+    "var unchanged": lambda m: _e114_wide(m).groupby("k")["v"].var().tolist(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E114_CASES))
+def test_everyday114_groupby_skew_like_pandas_vjfq9(case: str) -> None:
+    run = _E114_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
