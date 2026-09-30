@@ -22038,3 +22038,73 @@ def test_everyday90_interval_drop_reindex_points_like_pandas_s08y7(case: str) ->
     # By class name: pandas' InvalidIndexError is pandas.errors', ours
     # frankenpandas.errors'.
     assert _mv_outcome(lambda: run(fpd)) == _mv_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-n42jc: pd.tseries.frequencies.to_offset was missing.
+def _e91_offset(m: Any, freq: Any) -> list:
+    offset = m.tseries.frequencies.to_offset(freq)
+    return [repr(offset), getattr(offset, "n", None), getattr(offset, "freqstr", None)]
+
+
+_E91_CASES = {
+    **{
+        f"to_offset {freq}": (lambda freq: lambda m: _e91_offset(m, freq))(freq)
+        for freq in ["15min", "2D", "W", "W-SUN", "ME", "QE-DEC", "1h30min", "-2D", "B", "h", "3s", "ms", "YE"]
+    },
+    "to_offset Timedelta": lambda m: _e91_offset(m, m.Timedelta("90min")),
+    "to_offset datetime.timedelta": lambda m: _e91_offset(m, datetime.timedelta(days=2)),
+    "to_offset offset": lambda m: _e91_offset(m, m.offsets.Day(3)),
+    "to_offset None": lambda m: _e91_offset(m, None),
+    "to_offset empty": lambda m: _e91_offset(m, ""),
+    "to_offset int": lambda m: _e91_offset(m, 5),
+    "infer_freq": lambda m: [m.tseries.frequencies.infer_freq(m.date_range("2024-01-01", periods=4, freq="D"))],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E91_CASES))
+def test_everyday91_to_offset_like_pandas_n42jc(case: str) -> None:
+    run = _E91_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-18pyl: read_stata ignored preserve_dtypes (pandas'
+# default True): every number came back int64 / float64.
+def _e92_pandas_file() -> str:
+    path = os.path.join(tempfile.mkdtemp(), "typed.dta")
+    pd.DataFrame(
+        {
+            "i8": np.array([1, 2], dtype=np.int8),
+            "i16": np.array([300, 2], dtype=np.int16),
+            "i64": [1, 2],
+            "f32": np.array([1.5, 2], dtype=np.float32),
+            "f": [1.5, 2.5],
+            "s": ["x", "y"],
+        }
+    ).to_stata(path, write_index=False)
+    return path
+
+
+def _e92_shown(frame: Any) -> list:
+    return [[str(t) for t in frame.dtypes], frame.values.tolist()]
+
+
+def _e92_roundtrip(m: Any) -> list:
+    path = os.path.join(tempfile.mkdtemp(), "round.dta")
+    m.DataFrame({"a": [1, 2], "b": [1.5, 2.5]}).to_stata(path, write_index=False)
+    return _e92_shown(m.read_stata(path))
+
+
+_E92_CASES = {
+    "pandas file": lambda m: _e92_shown(m.read_stata(_e92_pandas_file())),
+    "round trip int64": _e92_roundtrip,
+    # Negative: preserve_dtypes=False widens (already pandas').
+    "widened": lambda m: _e92_shown(m.read_stata(_e92_pandas_file(), preserve_dtypes=False)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E92_CASES))
+def test_everyday92_read_stata_preserve_dtypes_like_pandas_18pyl(case: str) -> None:
+    run = _E92_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

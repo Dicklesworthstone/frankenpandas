@@ -79237,6 +79237,92 @@ fn offset_business_day(n: i64, normalize: bool) -> PyDateOffset {
     PyDateOffset::anchored("BusinessDay", "B".to_owned(), n, normalize, None)
 }
 
+/// pandas' `tseries.frequencies.to_offset(freq)`: None is None, an offset
+/// is itself, a freq string its offset ('15min' `<15 * Minutes>`, 'W'
+/// `<Week: weekday=6>`, 'YE' `<YearEnd: month=12>`, '1h30min' `<90 *
+/// Minutes>`, '-2D'), a Timedelta or `datetime.timedelta` the tick of its
+/// length; anything else pandas' ValueError "Invalid frequency: ..." (it
+/// was missing; br-frankenpandas-n42jc).
+#[pyfunction]
+fn to_offset(py: Python<'_>, freq: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    if freq.is_none() {
+        return Ok(py.None());
+    }
+    if freq.extract::<PyRef<'_, PyDateOffset>>().is_ok() {
+        return Ok(freq.clone().unbind());
+    }
+    let offset = if let Ok(text) = freq.extract::<String>() {
+        let named = match fp_index::canonical_freq(&text) {
+            Some(canonical) => offset_for_freqstr(&canonical)?,
+            None => None,
+        };
+        named.or_else(|| compound_tick_nanos(text.trim()).map(tick_offset))
+    } else if let Ok(td) = freq.extract::<PyRef<'_, PyTimedelta>>() {
+        Some(tick_offset(td.nanos))
+    } else if let Ok(delta) = freq.cast::<PyDelta>() {
+        Some(tick_offset(py_delta_nanos(delta)?))
+    } else {
+        None
+    };
+    match offset {
+        Some(offset) => Ok(Py::new(py, offset)?.into_any()),
+        None => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "Invalid frequency: {}",
+            freq.str()?
+        ))),
+    }
+}
+
+/// A tick frequency string ('15min', '1h30min', '-2D') in nanoseconds:
+/// each count and fixed unit summed, a leading '-' negating; None for
+/// anything else (an anchored or unknown unit).
+fn compound_tick_nanos(text: &str) -> Option<i64> {
+    let (sign, mut rest) = match text.strip_prefix('-') {
+        Some(rest) => (-1_i64, rest),
+        None => (1_i64, text),
+    };
+    if rest.is_empty() {
+        return None;
+    }
+    let mut total: i64 = 0;
+    while !rest.is_empty() {
+        let digits = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        let (count, tail) = rest.split_at(digits);
+        let unit_len = tail
+            .find(|c: char| c.is_ascii_digit())
+            .unwrap_or(tail.len());
+        let (unit, next) = tail.split_at(unit_len);
+        if unit.is_empty() {
+            return None;
+        }
+        total = total.checked_add(parse_freq_to_nanos(&format!("{count}{unit}")).ok()?)?;
+        rest = next;
+    }
+    total.checked_mul(sign)
+}
+
+/// A tick unit's length in nanoseconds and its offset's constructor.
+type TickUnit = (i64, fn(i64) -> PyDateOffset);
+
+/// The tick offset of a length: its largest whole unit - days, hours,
+/// minutes, seconds, milli-, micro-, nanoseconds - as pandas' `Tick`s.
+fn tick_offset(nanos: i64) -> PyDateOffset {
+    const UNITS: [TickUnit; 6] = [
+        (86_400_000_000_000, offset_day),
+        (3_600_000_000_000, offset_hour),
+        (60_000_000_000, offset_minute),
+        (1_000_000_000, offset_second),
+        (1_000_000, offset_milli),
+        (1_000, offset_micro),
+    ];
+    UNITS
+        .iter()
+        .find(|(unit, _)| nanos % unit == 0)
+        .map_or_else(|| offset_nano(nanos), |(unit, make)| make(nanos / unit))
+}
+
 /// The pandas offset a freqstr names ('D' -> `<Day>`, '12h' -> `<12 *
 /// Hours>`, 'W-SUN' -> `<Week: weekday=6>`, 'QE-DEC' -> `<QuarterEnd:
 /// startingMonth=12>`) - what `DatetimeIndex.freq` returns; None for a
@@ -84052,7 +84138,6 @@ fn read_stata(
         py,
         convert_dates,
         convert_categoricals,
-        preserve_dtypes,
         order_categoricals,
         compression,
     );
@@ -84061,8 +84146,10 @@ fn read_stata(
             "read_stata(convert_missing/chunksize/iterator/storage_options=...)",
         ));
     }
-    let frame =
-        fp_io::read_stata_bytes(&py_input_bytes(filepath_or_buffer)?).map_err(io_error_to_py)?;
+    // preserve_dtypes keeps each numeric column's Stata width (it was
+    // ignored: every number came back int64 / float64; 18pyl).
+    let frame = fp_io::read_stata_bytes(&py_input_bytes(filepath_or_buffer)?, preserve_dtypes)
+        .map_err(io_error_to_py)?;
     let frame = select_columns_arg(frame, columns)?;
     let frame = match index_col.filter(|i| !i.is_none()) {
         None => frame,
@@ -85377,6 +85464,16 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let tseries_mod = PyModule::new(m.py(), "tseries")?;
     tseries_mod.add_submodule(&offsets_mod)?;
     tseries_mod.add("offsets", &offsets_mod)?;
+    // pandas.tseries.frequencies: to_offset and infer_freq (n42jc).
+    let frequencies_mod = PyModule::new(m.py(), "frequencies")?;
+    frequencies_mod.add_function(wrap_pyfunction!(to_offset, &frequencies_mod)?)?;
+    frequencies_mod.add("infer_freq", m.getattr("infer_freq")?)?;
+    tseries_mod.add_submodule(&frequencies_mod)?;
+    tseries_mod.add("frequencies", &frequencies_mod)?;
+    m.py()
+        .import("sys")?
+        .getattr("modules")?
+        .set_item("frankenpandas.tseries.frequencies", &frequencies_mod)?;
     m.add_submodule(&tseries_mod)?;
     m.py()
         .import("sys")?

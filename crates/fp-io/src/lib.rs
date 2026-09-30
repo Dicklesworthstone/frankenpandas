@@ -3660,8 +3660,34 @@ pub fn write_stata_bytes_with_options(
         .into_inner())
 }
 
-/// Read a DataFrame from Stata DTA bytes.
-pub fn read_stata_bytes(input: &[u8]) -> Result<DataFrame, IoError> {
+/// A Stata numeric column at its storage width, as pandas' read_stata
+/// with `preserve_dtypes`: byte int8, int int16, long int32, float
+/// float32; an integer column holding a missing value stays widened (its
+/// NaN needs float64, as pandas'), any other column as it is.
+fn stata_storage_width(column: Column, variable_type: VariableType) -> Result<Column, IoError> {
+    let width = match variable_type {
+        VariableType::Byte => fp_types::NumericWidth::Int8,
+        VariableType::Int => fp_types::NumericWidth::Int16,
+        VariableType::Long => fp_types::NumericWidth::Int32,
+        VariableType::Float => fp_types::NumericWidth::Float32,
+        VariableType::Double | VariableType::FixedString(_) | VariableType::LongString => {
+            return Ok(column);
+        }
+    };
+    let numeric = matches!(column.dtype(), DType::Int64 | DType::Float64);
+    let missing = column.values().iter().any(Scalar::is_missing);
+    if !numeric || (missing && !width.is_float()) {
+        return Ok(column);
+    }
+    Ok(column.cast_to_width(width, false)?)
+}
+
+/// Read a DataFrame from Stata DTA bytes. With `preserve_dtypes` (pandas'
+/// default) a numeric column keeps its Stata storage width - byte int8,
+/// int int16, long int32, float float32, an integer column holding a
+/// missing value widened; without it every number is int64 / float64
+/// (they always were, the flag ignored; br-frankenpandas-18pyl).
+pub fn read_stata_bytes(input: &[u8], preserve_dtypes: bool) -> Result<DataFrame, IoError> {
     let mut characteristic_reader = DtaReader::new()
         .from_reader(Cursor::new(input))
         .read_header()
@@ -3685,6 +3711,12 @@ pub fn read_stata_bytes(input: &[u8]) -> Result<DataFrame, IoError> {
         .iter()
         .map(|variable| variable.format().to_owned())
         .collect::<Vec<_>>();
+    let variable_types = record_reader
+        .schema()
+        .variables()
+        .iter()
+        .map(Variable::variable_type)
+        .collect::<Vec<_>>();
     reject_duplicate_headers(&column_order)?;
 
     let mut columns = column_order
@@ -3706,7 +3738,7 @@ pub fn read_stata_bytes(input: &[u8]) -> Result<DataFrame, IoError> {
     }
 
     let mut out = BTreeMap::new();
-    for (name, format) in column_order.iter().zip(&formats) {
+    for ((name, format), variable_type) in column_order.iter().zip(&formats).zip(variable_types) {
         let values = columns
             .remove(name)
             .ok_or_else(|| IoError::Stata(format!("missing Stata column '{name}'")))?;
@@ -3714,6 +3746,9 @@ pub fn read_stata_bytes(input: &[u8]) -> Result<DataFrame, IoError> {
         // (float milliseconds since 1960). (4qg5w.20)
         let column = match stata_dates_column(&values, format)? {
             Some(dates) => dates,
+            None if preserve_dtypes => {
+                stata_storage_width(Column::from_values(values)?, variable_type)?
+            }
             None => Column::from_values(values)?,
         };
         out.insert(name.clone(), column);
@@ -9834,10 +9869,11 @@ fn hdf5_feature_disabled<T>() -> Result<T, IoError> {
 
 // ── File-based Stata ───────────────────────────────────────────────────
 
-/// Read a DataFrame from a Stata DTA file.
+/// Read a DataFrame from a Stata DTA file, its numeric columns at their
+/// storage widths (pandas' default `preserve_dtypes`).
 pub fn read_stata(path: &Path) -> Result<DataFrame, IoError> {
     let content = std::fs::read(path)?;
-    read_stata_bytes(&content)
+    read_stata_bytes(&content, true)
 }
 
 /// Write a DataFrame to a Stata DTA file.
@@ -20789,7 +20825,7 @@ mod tests {
         let bytes = write_stata_bytes(&source).expect("write stata bytes");
         assert!(!bytes.is_empty());
 
-        let roundtrip = read_stata_bytes(&bytes).expect("read stata bytes");
+        let roundtrip = read_stata_bytes(&bytes, false).expect("read stata bytes");
 
         assert_eq!(
             roundtrip
@@ -20877,7 +20913,8 @@ mod tests {
             ]
         );
 
-        let back = read_stata_bytes(&write_stata_bytes(&frame).expect("write")).expect("read");
+        let back =
+            read_stata_bytes(&write_stata_bytes(&frame).expect("write"), false).expect("read");
         assert_eq!(
             back.column("index").expect("index").values(),
             &[Scalar::Int64(0), Scalar::Int64(1)]
@@ -20889,6 +20926,24 @@ mod tests {
         assert_eq!(
             back.column("big").expect("big").values(),
             &[Scalar::Float64(1.0), Scalar::Float64(2_147_483_621.0)]
+        );
+        assert_eq!(back.column("b").expect("b").width(), None);
+        // pandas' default preserve_dtypes: each column at its Stata storage
+        // width - byte int8, long int32, a double float64 (18pyl).
+        let kept =
+            read_stata_bytes(&write_stata_bytes(&frame).expect("write"), true).expect("read");
+        assert_eq!(
+            kept.column("b").expect("b").width(),
+            Some(fp_types::NumericWidth::Int8)
+        );
+        assert_eq!(
+            kept.column("small").expect("small").width(),
+            Some(fp_types::NumericWidth::Int32)
+        );
+        assert_eq!(kept.column("big").expect("big").width(), None);
+        assert_eq!(
+            kept.column("b").expect("b").values(),
+            &[Scalar::Int64(1), Scalar::Int64(0)]
         );
 
         // pandas raises ValueError("Column f contains infinity or -infinity...").
@@ -20956,7 +21011,8 @@ mod tests {
         assert!(t_field.datetime);
         assert_eq!(t_field.variable_type, VariableType::Double);
 
-        let back = read_stata_bytes(&write_stata_bytes(&frame).expect("write")).expect("read");
+        let back =
+            read_stata_bytes(&write_stata_bytes(&frame).expect("write"), false).expect("read");
         let t = back.column("t").expect("t");
         assert_eq!(t.dtype(), DType::datetime64_naive());
         assert_eq!(t.values()[0], Scalar::Datetime64(1_704_164_645_000_000_000));
@@ -20995,9 +21051,11 @@ mod tests {
         write_stata(&source, &path).expect("write stata path");
 
         let via_path = read_stata(&path).expect("read stata path");
-        let via_bytes =
-            read_stata_bytes(&std::fs::read(&path).expect("read stata bytes from path"))
-                .expect("read stata bytes");
+        let via_bytes = read_stata_bytes(
+            &std::fs::read(&path).expect("read stata bytes from path"),
+            true,
+        )
+        .expect("read stata bytes");
 
         assert_eq!(via_path.column_names(), via_bytes.column_names());
         for name in via_path.column_names() {
@@ -21020,7 +21078,7 @@ mod tests {
         let bytes = source
             .to_stata_bytes_with_options(&options)
             .expect("trait stata bytes without index");
-        let roundtrip = read_stata_bytes(&bytes).expect("read no-index stata");
+        let roundtrip = read_stata_bytes(&bytes, false).expect("read no-index stata");
 
         assert_eq!(
             roundtrip
@@ -21082,7 +21140,7 @@ mod tests {
             IoError::Stata(message) if message.contains("first character")
         ));
 
-        let err = read_stata_bytes(b"not a dta").expect_err("malformed stata");
+        let err = read_stata_bytes(b"not a dta", true).expect_err("malformed stata");
         assert!(matches!(err, IoError::Stata(_)));
     }
 
