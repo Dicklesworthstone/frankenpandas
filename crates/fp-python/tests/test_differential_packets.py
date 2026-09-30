@@ -20457,3 +20457,75 @@ _E60_CASES = {
 def test_everyday60_convert_dtypes_switches_like_pandas_di8vx(case: str) -> None:
     run = _E60_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-8dqrn: arithmetic on an object column of Python objects
+# gave NaN (s * 2, s + s), '' (sum) or a coercion error (s + 5); pandas runs
+# each element's own operator (numpy's object loop, then the masked form).
+class _E61Money:
+    def __init__(self, cents: Any) -> None:
+        self.cents = cents
+
+    def __add__(self, other: Any) -> Any:
+        return _E61Money(self.cents + (other.cents if isinstance(other, _E61Money) else other))
+
+    __radd__ = __add__
+
+    def __sub__(self, other: Any) -> Any:
+        return _E61Money(self.cents - (other.cents if isinstance(other, _E61Money) else other))
+
+    def __rsub__(self, other: Any) -> Any:
+        return _E61Money(other - self.cents)
+
+    def __mul__(self, k: Any) -> Any:
+        return _E61Money(self.cents * k)
+
+    __rmul__ = __mul__
+
+    def __eq__(self, other: Any) -> bool:
+        return isinstance(other, _E61Money) and self.cents == other.cents
+
+    def __hash__(self) -> int:
+        return hash(self.cents)
+
+    def __repr__(self) -> str:
+        return f"Money({self.cents})"
+
+
+def _e61_money(m: Any) -> Any:
+    return m.Series([_E61Money(100), _E61Money(250), None], name="m")
+
+
+def _e61_raised(run: Any) -> list:
+    try:
+        return run()
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return [type(e).__name__, str(e)]
+
+
+_E61_CASES = {
+    "mul": lambda m: [(_e61_money(m) * 2).tolist(), str((_e61_money(m) * 2).dtype), (_e61_money(m) * 2).name],
+    "add scalar and series": lambda m: [(_e61_money(m).iloc[:2] + 5).tolist(), (_e61_money(m) + _e61_money(m)).tolist()],
+    "reflected": lambda m: [(1000 - _e61_money(m).iloc[:2]).tolist(), (3 * _e61_money(m).iloc[:2]).tolist()],
+    "list operand": lambda m: [(_e61_money(m).iloc[:2] + [_E61Money(1), _E61Money(2)]).tolist()],
+    "names differ": lambda m: [(_e61_money(m).iloc[:2] + m.Series([_E61Money(1), _E61Money(2)], name="n")).name],
+    "sum": lambda m: [_e61_money(m).sum(), _e61_money(m).sum(min_count=3), m.Series([_E61Money(2)]).iloc[:0].sum()],
+    "sum skipna false": lambda m: _e61_raised(lambda: [_e61_money(m).sum(skipna=False)]),
+    "list cells": lambda m: [(m.Series([[1], [2, 3]]) + m.Series([[9], [8]])).tolist(), (m.Series([[1], [2, 3]]) * 2).tolist()],
+    "dict cells": lambda m: _e61_raised(lambda: [(m.Series([{"a": 1}]) * 2).tolist()]),
+    "tuple operand": lambda m: _e61_raised(lambda: [(_e61_money(m) + (3,)).tolist()]),
+    "mixed object column": lambda m: [(m.Series([1, "a"], dtype=object) * 2).tolist()],
+    "frame mul": lambda m: [(m.DataFrame({"m": _e61_money(m).iloc[:2], "i": [1, 2]}) * 2).to_dict("list")],
+    "frame sum": lambda m: [m.DataFrame({"m": _e61_money(m).iloc[:2]}).sum().tolist()],
+    # Negatives: already pandas'.
+    "numbers": lambda m: [(m.Series([1, 2]) * 2).tolist(), str((m.Series([1, 2]) * 2).dtype)],
+    "text": lambda m: [(m.Series(["a", "b"]) + "x").tolist(), (m.Series(["a", "b"]) * 2).tolist()],
+    "max and sort": lambda m: [m.Series([3, 1, 2], dtype=object).max()],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E61_CASES))
+def test_everyday61_object_arithmetic_like_pandas_8dqrn(case: str) -> None:
+    run = _E61_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

@@ -21775,6 +21775,161 @@ fn series_over_index(
     Series::new(name, index.clone(), column).map_err(frame_error_to_py)
 }
 
+/// Whether pandas' arithmetic over `column` runs through the cells' own
+/// Python operators: it holds a Python-object cell (a host object, a list,
+/// bytes), or it is an object column mixing text with other values (an
+/// all-text or all-number column keeps its kernels).
+fn has_object_cells(column: &Column) -> bool {
+    let values = column.values();
+    values
+        .iter()
+        .any(|value| matches!(value, Scalar::Object(_)))
+        || (is_object_column(column)
+            && values.iter().any(|value| matches!(value, Scalar::Utf8(_)))
+            && values
+                .iter()
+                .any(|value| !value.is_missing() && !matches!(value, Scalar::Utf8(_))))
+}
+
+/// pandas' object arithmetic when either operand column holds such cells
+/// (see [`has_object_cells`]): numpy's object loop - `op` (an `operator`
+/// function) on each aligned pair, missing values included, `reflected`
+/// swapping the sides - and, when that raises TypeError, _masked_arith_op:
+/// NaN where either side is missing, `op` on the rest. The other operand is
+/// a Series (aligned), a list-like (by position) or a scalar; the results an
+/// object column; Python's other exceptions propagate. None when neither
+/// column holds such cells. fp's kernels read those cells as missing or
+/// text, so s * 2 was [nan, nan], s + 5 a coercion error and a dict * 2 NaN
+/// (br-frankenpandas-8dqrn).
+fn host_object_arith(
+    py: Python<'_>,
+    left: &Series,
+    other: &Bound<'_, PyAny>,
+    op: &str,
+    reflected: bool,
+) -> PyResult<Option<PySeries>> {
+    let other_series = match other.extract::<PyRef<'_, PySeries>>() {
+        Ok(series) => Some(series.inner.clone()),
+        Err(_) => None,
+    };
+    let right_has = other_series
+        .as_ref()
+        .is_some_and(|series| has_object_cells(series.column()));
+    if !has_object_cells(left.column()) && !right_has {
+        return Ok(None);
+    }
+    // A tuple is no operand pandas broadcasts.
+    if other.is_instance_of::<PyTuple>() {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "Cannot broadcast np.ndarray with operand of type <class 'tuple'>",
+        ));
+    }
+    // The other side by position: (its Python value, whether missing).
+    type Paired = Vec<(Py<PyAny>, bool)>;
+    let (left, theirs): (Series, Option<Paired>) = match &other_series {
+        Some(right) => {
+            let (left, right) = left
+                .align(right, AlignMode::Outer)
+                .map_err(frame_error_to_py)?;
+            let column = right.column();
+            let values = column
+                .values()
+                .iter()
+                .map(|value| Ok((cell_to_py(py, column, value)?, value.is_missing())))
+                .collect::<PyResult<Vec<_>>>()?;
+            (left, Some(values))
+        }
+        None if other.is_instance_of::<PyList>()
+            || other.getattr("tolist").is_ok()
+                && !other.is_instance_of::<pyo3::types::PyString>() =>
+        {
+            let items = other.try_iter()?.collect::<PyResult<Vec<_>>>()?;
+            if items.len() != left.len() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Lengths must match",
+                ));
+            }
+            let values = items
+                .iter()
+                .map(|item| Ok((item.clone().unbind(), py_to_cell(py, item)?.is_missing())))
+                .collect::<PyResult<Vec<_>>>()?;
+            (left.clone(), Some(values))
+        }
+        None => (left.clone(), None),
+    };
+    let scalar_missing = theirs.is_none() && py_to_cell(py, other)?.is_missing();
+    let operator = py.import("operator")?.getattr(op)?;
+    let column = left.column();
+    let pairwise = |masked: bool| -> PyResult<Vec<Scalar>> {
+        let mut cells = Vec::with_capacity(left.len());
+        for (position, value) in column.values().iter().enumerate() {
+            let (their, their_missing) = match &theirs {
+                Some(theirs) => (theirs[position].0.bind(py).clone(), theirs[position].1),
+                None => (other.clone(), scalar_missing),
+            };
+            if masked && (value.is_missing() || their_missing) {
+                cells.push(Scalar::Null(NullKind::NaN));
+                continue;
+            }
+            let mine = cell_to_py(py, column, value)?;
+            let result = if reflected {
+                operator.call1((their, mine))?
+            } else {
+                operator.call1((mine, their))?
+            };
+            cells.push(py_to_cell(py, &result)?);
+        }
+        Ok(cells)
+    };
+    let cells = match pairwise(false) {
+        Ok(cells) => cells,
+        Err(err) if err.is_instance_of::<pyo3::exceptions::PyTypeError>(py) => pairwise(true)?,
+        Err(err) => return Err(err),
+    };
+    // A name the two share, else none (pandas' get_op_result_name).
+    let name = match &other_series {
+        Some(right) if right.name() != left.name() => LabelName::default(),
+        _ => left.name().clone(),
+    };
+    let inner = Series::new(
+        name,
+        left.index().clone(),
+        Column::from_object_values(cells),
+    )
+    .map_err(frame_error_to_py)?;
+    Ok(Some(PySeries { inner }))
+}
+
+/// pandas' sum / prod over such cells (numpy's object add.reduce /
+/// multiply.reduce): folded with `op` from the first - the present ones, or
+/// with skipna=False every one (a missing one as Python sees it, so a None
+/// is Python's TypeError) - the identity (0 / 1) over none, NaN under
+/// min_count (br-frankenpandas-8dqrn).
+fn object_cells_reduce(
+    py: Python<'_>,
+    series: &Series,
+    op: &str,
+    skipna: bool,
+    min_count: usize,
+) -> PyResult<Py<PyAny>> {
+    let column = series.column();
+    let values = column.values();
+    let counted = values.iter().filter(|value| !value.is_missing()).count();
+    if counted < min_count {
+        return f64::NAN.into_py_any(py);
+    }
+    let operator = py.import("operator")?.getattr(op)?;
+    let mut cells = values.iter().filter(|value| !skipna || !value.is_missing());
+    let Some(first) = cells.next() else {
+        return if op == "mul" { 1 } else { 0 }.into_py_any(py);
+    };
+    let mut total = cell_to_py(py, column, first)?.into_bound(py);
+    for cell in cells {
+        total = operator.call1((total, cell_to_py(py, column, cell)?))?;
+    }
+    Ok(total.unbind())
+}
+
 fn series_operand(py: Python<'_>, other: &Bound<'_, PyAny>, like: &Series) -> PyResult<Series> {
     if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
         return Ok(series.inner.clone());
@@ -26267,6 +26422,9 @@ impl PySeries {
     // Series' index). Comparisons return a bool Series, as in pandas, so
     // `__eq__`/`__ne__` deliberately do not return a Python bool.
     fn __add__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        if let Some(res) = host_object_arith(py, &self.inner, other, "add", false)? {
+            return Ok(res);
+        }
         if let Ok(offset) = other.extract::<PyRef<'_, PyDateOffset>>() {
             let inner = series_apply_offset(py, &self.inner, &offset, 1)?;
             return Ok(PySeries { inner });
@@ -26278,6 +26436,9 @@ impl PySeries {
         narrowed_arith(self.inner.add(&rhs), &self.inner, other, false)
     }
     fn __radd__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        if let Some(res) = host_object_arith(py, &self.inner, other, "add", true)? {
+            return Ok(res);
+        }
         if let Ok(offset) = other.extract::<PyRef<'_, PyDateOffset>>() {
             let inner = series_apply_offset(py, &self.inner, &offset, 1)?;
             return Ok(PySeries { inner });
@@ -26289,6 +26450,9 @@ impl PySeries {
         narrowed_arith(lhs.add(&self.inner), &self.inner, other, false)
     }
     fn __sub__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        if let Some(res) = host_object_arith(py, &self.inner, other, "sub", false)? {
+            return Ok(res);
+        }
         if let Ok(offset) = other.extract::<PyRef<'_, PyDateOffset>>() {
             let inner = series_apply_offset(py, &self.inner, &offset, -1)?;
             return Ok(PySeries { inner });
@@ -26300,39 +26464,66 @@ impl PySeries {
         narrowed_arith(self.inner.sub(&rhs), &self.inner, other, false)
     }
     fn __rsub__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        if let Some(res) = host_object_arith(py, &self.inner, other, "sub", true)? {
+            return Ok(res);
+        }
         let lhs = series_operand(py, other, &self.inner)?;
         narrowed_arith(lhs.sub(&self.inner), &self.inner, other, false)
     }
     fn __mul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        if let Some(res) = host_object_arith(py, &self.inner, other, "mul", false)? {
+            return Ok(res);
+        }
         let rhs = series_operand(py, other, &self.inner)?;
         narrowed_arith(self.inner.mul(&rhs), &self.inner, other, false)
     }
     fn __rmul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        if let Some(res) = host_object_arith(py, &self.inner, other, "mul", true)? {
+            return Ok(res);
+        }
         let lhs = series_operand(py, other, &self.inner)?;
         narrowed_arith(lhs.mul(&self.inner), &self.inner, other, false)
     }
     fn __truediv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        if let Some(res) = host_object_arith(py, &self.inner, other, "truediv", false)? {
+            return Ok(res);
+        }
         let rhs = series_operand(py, other, &self.inner)?;
         narrowed_arith(self.inner.div(&rhs), &self.inner, other, true)
     }
     fn __rtruediv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        if let Some(res) = host_object_arith(py, &self.inner, other, "truediv", true)? {
+            return Ok(res);
+        }
         let lhs = series_operand(py, other, &self.inner)?;
         narrowed_arith(lhs.div(&self.inner), &self.inner, other, true)
     }
     fn __floordiv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        if let Some(res) = host_object_arith(py, &self.inner, other, "floordiv", false)? {
+            return Ok(res);
+        }
         let rhs = series_operand(py, other, &self.inner)?;
         narrowed_arith(self.inner.floordiv(&rhs), &self.inner, other, false)
     }
     fn __rfloordiv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        if let Some(res) = host_object_arith(py, &self.inner, other, "floordiv", true)? {
+            return Ok(res);
+        }
         let lhs = series_operand(py, other, &self.inner)?;
         narrowed_arith(lhs.floordiv(&self.inner), &self.inner, other, false)
     }
     fn __mod__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        if let Some(res) = host_object_arith(py, &self.inner, other, "mod", false)? {
+            return Ok(res);
+        }
         let rhs = series_operand(py, other, &self.inner)?;
         let result = narrowed_arith(self.inner.remainder(&rhs), &self.inner, other, false)?;
         bool_numpy_series(result, bool_remainder(&self.inner, other))
     }
     fn __rmod__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        if let Some(res) = host_object_arith(py, &self.inner, other, "mod", true)? {
+            return Ok(res);
+        }
         let lhs = series_operand(py, other, &self.inner)?;
         let result = narrowed_arith(lhs.remainder(&self.inner), &self.inner, other, false)?;
         bool_numpy_series(result, bool_remainder(&self.inner, other))
@@ -26359,6 +26550,9 @@ impl PySeries {
         other: &Bound<'_, PyAny>,
         _modulo: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
+        if let Some(res) = host_object_arith(py, &self.inner, other, "pow", false)? {
+            return Ok(res);
+        }
         let target = match integer_scalar(other).filter(|_| boolean_series(&self.inner)) {
             Some(exponent) => Some(BoolNumpy::power(exponent)?),
             None => None,
@@ -26374,6 +26568,9 @@ impl PySeries {
         other: &Bound<'_, PyAny>,
         _modulo: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
+        if let Some(res) = host_object_arith(py, &self.inner, other, "pow", true)? {
+            return Ok(res);
+        }
         let target = integer_scalar(other)
             .filter(|_| boolean_series(&self.inner))
             .map(|_| BoolNumpy::Int64);
@@ -26789,6 +26986,13 @@ impl PySeries {
         if numeric_only {
             self.check_numeric_only("sum")?;
         }
+        // Python-object cells sum with their own + (they were joined as
+        // text, ''; br-frankenpandas-8dqrn).
+        if has_object_cells(self.inner.column()) {
+            return Python::attach(|py| {
+                object_cells_reduce(py, &self.inner, "add", skipna, min_count)
+            });
+        }
         // An object column of numbers sums as Python does: a Python number,
         // 0 over none (it was a numpy one; qymo3).
         if let Some(numbers) = self.object_numbers() {
@@ -27086,6 +27290,11 @@ impl PySeries {
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("prod")?;
+        } else if has_object_cells(self.inner.column()) {
+            // Python-object cells multiply with their own * (br-frankenpandas-8dqrn).
+            return Python::attach(|py| {
+                object_cells_reduce(py, &self.inner, "mul", skipna, min_count.unwrap_or(0))
+            });
         } else if let Some(numbers) = self.object_numbers() {
             // An object column of numbers multiplies as Python does: a
             // Python number, 1 over none (it was refused; qymo3).
@@ -33911,6 +34120,56 @@ impl PyDataFrame {
         reflected: bool,
         symbol: &str,
     ) -> PyResult<PyDataFrame> {
+        // Columns of Python-object cells against a scalar run the cells' own
+        // operators, as a Series of them does (they were NaN / a coercion
+        // error; br-frankenpandas-8dqrn); the other columns their kernels.
+        let scalar = !other.is_instance_of::<PyDataFrame>()
+            && !other.is_instance_of::<PySeries>()
+            && !other.is_instance_of::<PyList>()
+            && !other.is_instance_of::<PyTuple>()
+            && other.getattr("tolist").is_err();
+        let objects: Vec<usize> = (0..self.inner.num_columns())
+            .filter(|&position| self.inner.column_at(position).is_some_and(has_object_cells))
+            .collect();
+        if scalar && !objects.is_empty() {
+            let py = other.py();
+            let operator = match op {
+                ArithmeticOp::Add => "add",
+                ArithmeticOp::Sub => "sub",
+                ArithmeticOp::Mul => "mul",
+                ArithmeticOp::Div => "truediv",
+                ArithmeticOp::FloorDiv => "floordiv",
+                ArithmeticOp::Mod => "mod",
+                ArithmeticOp::Pow => "pow",
+            };
+            let names: Vec<String> = self.inner.column_names().into_iter().cloned().collect();
+            let mut base = self.inner.clone();
+            let mut computed = Vec::with_capacity(objects.len());
+            for &position in &objects {
+                let series = self.column_series_at(position)?.inner;
+                let result = host_object_arith(py, &series, other, operator, reflected)?
+                    .map(|result| result.inner.column().clone())
+                    .ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>("object column")
+                    })?;
+                let missing =
+                    Column::new(DType::Float64, vec![Scalar::Float64(f64::NAN); base.len()])
+                        .map_err(column_error_to_py)?;
+                base = base
+                    .with_column(names[position].clone(), missing)
+                    .map_err(frame_error_to_py)?;
+                computed.push((names[position].clone(), result));
+            }
+            let mut result = PyDataFrame { inner: base }
+                .arith_operator(other, op, reflected, symbol)?
+                .inner;
+            for (name, column) in computed {
+                result = result
+                    .with_column(name, column)
+                    .map_err(frame_error_to_py)?;
+            }
+            return Ok(PyDataFrame { inner: result });
+        }
         if let Ok(frame) = other.extract::<PyRef<'_, PyDataFrame>>() {
             let (left, right) = if reflected {
                 (&frame.inner, &self.inner)
@@ -37818,11 +38077,52 @@ impl PyDataFrame {
             return Ok(answer);
         }
         let summed = self.sum_internal(ax, skipna, numeric_only);
-        wrap_series(
+        let summed = wrap_series(
             summed.and_then(|s| self.below_min_count_is_nan(s, ax, numeric_only, min_count)),
         )
         .and_then(|s| self.masked_answer("sum", ax, numeric_only, s))
-        .and_then(|s| self.empty_object_identities("sum", numeric_only, min_count, s))
+        .and_then(|s| self.empty_object_identities("sum", numeric_only, min_count, s))?;
+        self.object_cell_totals(py, summed, ax, numeric_only, skipna, min_count, "add")
+    }
+
+    /// A column reduction `result` with each column of Python-object cells'
+    /// total the cells' own `op` fold (see [`object_cells_reduce`]) and the
+    /// result an object Series, as pandas' (their text was joined, '';
+    /// br-frankenpandas-8dqrn). Rows (axis=1) and numeric_only keep `result`.
+    #[allow(clippy::too_many_arguments)]
+    fn object_cell_totals(
+        &self,
+        py: Python<'_>,
+        result: PySeries,
+        axis: usize,
+        numeric_only: bool,
+        skipna: bool,
+        min_count: usize,
+        op: &str,
+    ) -> PyResult<PySeries> {
+        let objects: Vec<usize> = (0..self.inner.num_columns())
+            .filter(|&position| self.inner.column_at(position).is_some_and(has_object_cells))
+            .collect();
+        if axis != 0
+            || numeric_only
+            || objects.is_empty()
+            || result.inner.len() != self.inner.num_columns()
+        {
+            return Ok(result);
+        }
+        let mut values = result.inner.values().to_vec();
+        for position in objects {
+            let column = self.column_series_at(position)?.inner;
+            let total = object_cells_reduce(py, &column, op, skipna, min_count)?;
+            values[position] = py_to_cell(py, total.bind(py))?;
+        }
+        let inner = Series::new(
+            result.inner.name(),
+            result.inner.index().clone(),
+            Column::from_object_values(values),
+        )
+        .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner })
     }
 
     /// Return the mean of each column or row.
