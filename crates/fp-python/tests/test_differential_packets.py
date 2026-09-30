@@ -20938,3 +20938,53 @@ _E68_CASES = {
 def test_everyday68_pandas_dtype_like_pandas_0uavl(case: str) -> None:
     run = _E68_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-wuize: a tz-aware column's instants came back as naive
+# UTC Timestamps (the wall clock shifted by the offset, the zone dropped)
+# from to_dict, rows, values, mode, groupby.first, apply and describe.
+def _e69_series(m: Any) -> Any:
+    return m.Series(m.to_datetime(["2024-01-15 10:30", None, "2024-07-01 08:00"]), name="t").dt.tz_localize(
+        "US/Eastern"
+    )
+
+
+def _e69_frame(m: Any) -> Any:
+    return m.DataFrame({"t": _e69_series(m), "x": [1, 2, 1]})
+
+
+_E69_CASES = {
+    "series to_dict": lambda m: [_e69_series(m).to_dict()],
+    "frame to_dict orients": lambda m: [
+        _e69_frame(m).to_dict(orient) for orient in ["dict", "list", "records", "index", "split"]
+    ],
+    "iterrows": lambda m: [row["t"] for _, row in _e69_frame(m).iterrows()],
+    "values": lambda m: [_e69_frame(m).values.tolist(), _e69_frame(m)[["t"]].values.tolist()],
+    "iloc row": lambda m: [_e69_frame(m).iloc[0]["t"], _e69_frame(m).iloc[0, :]["t"]],
+    "loc row": lambda m: [_e69_frame(m).loc[2]["t"]],
+    "row of one zone": lambda m: [
+        (lambda row: (str(row.dtype), row.tolist()))(
+            m.DataFrame({"a": _e69_series(m), "b": _e69_series(m)}).iloc[2]
+        )
+    ],
+    "mode": lambda m: [_e69_series(m).mode().tolist()],
+    "groupby first max": lambda m: [
+        _e69_frame(m).groupby("x")["t"].first().tolist(),
+        _e69_frame(m).groupby("x")["t"].max().tolist(),
+    ],
+    "apply identity": lambda m: [(lambda s: (str(s.dtype), s.tolist()))(_e69_series(m).apply(lambda v: v))],
+    "map callable": lambda m: [_e69_series(m).map(lambda v: v).tolist()],
+    "describe": lambda m: [_e69_series(m).describe().to_dict()],
+    # Negatives: already pandas'.
+    "tolist": lambda m: [_e69_series(m).tolist()],
+    "iloc scalar": lambda m: [_e69_series(m).iloc[0]],
+    "max": lambda m: [_e69_series(m).max()],
+    "naive to_dict": lambda m: [m.Series(m.to_datetime(["2024-01-15 10:30"])).to_dict()],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E69_CASES))
+def test_everyday69_tz_aware_cells_keep_their_zone_like_pandas_wuize(case: str) -> None:
+    run = _E69_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

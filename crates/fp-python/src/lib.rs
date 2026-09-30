@@ -6224,6 +6224,67 @@ fn cell_to_py(py: Python<'_>, column: &Column, value: &Scalar) -> PyResult<Py<Py
     scalar_to_py(py, value)
 }
 
+/// A cell as pandas' `to_dict` boxes it: a tz-aware instant a Timestamp in
+/// its zone (it was the naive UTC wall clock; br-frankenpandas-wuize), any
+/// other value its Python scalar - a masked or `string` column's missing
+/// value None, as pandas' to_dict gives it.
+fn to_dict_cell(py: Python<'_>, column: &Column, value: &Scalar) -> PyResult<Py<PyAny>> {
+    if column.timezone().is_some() && !value.is_missing() {
+        return cell_to_py(py, column, value);
+    }
+    scalar_to_py(py, value)
+}
+
+/// A row the core read from `frame` (iloc_row / loc_row), each tz-aware
+/// column's instant a tz-aware Timestamp in its zone, as pandas' object
+/// row holds it: the core's interleaved cell is the naive UTC instant
+/// (df.iloc[0]['t'], iterrows, df.loc[k] gave 15:30 for 10:30-05:00;
+/// br-frankenpandas-wuize). A row that kept a tz-aware dtype is as it is.
+fn zoned_row(py: Python<'_>, frame: &DataFrame, row: Series) -> PyResult<Series> {
+    let columns: Vec<Option<&Column>> = (0..frame.num_columns())
+        .map(|position| frame.column_at(position))
+        .collect();
+    let zoned = |column: &Option<&Column>| column.is_some_and(|c| c.timezone().is_some());
+    if row.len() != columns.len() || row.column().timezone().is_some() || !columns.iter().any(zoned)
+    {
+        return Ok(row);
+    }
+    // Every column in one zone: the row is that tz-aware dtype, as pandas'.
+    let first_zone = columns
+        .first()
+        .copied()
+        .flatten()
+        .and_then(Column::timezone);
+    if let Some(zone) = first_zone
+        && columns
+            .iter()
+            .all(|column| column.and_then(Column::timezone) == Some(zone))
+    {
+        let column = Column::new(DType::datetime64_tz(zone), row.values().to_vec())
+            .map_err(column_error_to_py)?;
+        return Series::new(row.name(), row.index().clone(), column).map_err(frame_error_to_py);
+    }
+    let cells = row
+        .values()
+        .iter()
+        .zip(&columns)
+        .map(|(cell, column)| match column {
+            Some(column) if column.timezone().is_some() && !cell.is_missing() => {
+                Ok(Scalar::Object(fp_types::ObjectValue::Host(
+                    fp_types::HostValue::new(PyHost(cell_to_py(py, column, cell)?)),
+                )))
+            }
+            _ => Ok(cell.clone()),
+        })
+        .collect::<PyResult<Vec<Scalar>>>()?;
+    Series::new(
+        row.name(),
+        row.index().clone(),
+        Column::from_object_values(cells),
+    )
+    .map_err(frame_error_to_py)
+}
+
 /// Whether `dtype` is one of pandas' nullable extension dtypes (Int64 /
 /// Float64 / boolean), whose missing value is `pd.NA`.
 fn is_nullable_extension(dtype: &DType) -> bool {
@@ -21795,6 +21856,52 @@ fn series_over_index(
     Series::new(name, index.clone(), column).map_err(frame_error_to_py)
 }
 
+/// The zone the Python results of a per-value function share when every
+/// present one is a tz-aware Timestamp of it (None / NaT aside): a Series
+/// of them is that tz-aware dtype, where their scalars keep only the UTC
+/// instant (br-frankenpandas-wuize).
+fn shared_result_zone(results: &[Bound<'_, PyAny>]) -> Option<String> {
+    let mut zone: Option<String> = None;
+    for result in results {
+        // A missing result (None, NaT, NaN) takes no part.
+        if py_to_scalar(result.py(), result).is_ok_and(|scalar| scalar.is_missing()) {
+            continue;
+        }
+        let stamp = result.extract::<PyRef<'_, PyTimestamp>>().ok()?;
+        let here = stamp.inner.tz.clone()?;
+        match &zone {
+            Some(seen) if *seen != here => return None,
+            _ => zone = Some(here),
+        }
+    }
+    zone
+}
+
+/// `series` with its naive datetime column tagged `zone`: its values are
+/// the UTC instants a tz-aware source gave (a result the core built
+/// without the zone), a missing one NaT. Any other series as it is.
+fn rezoned(series: Series, zone: Option<&str>) -> PyResult<Series> {
+    match (zone, series.column().dtype()) {
+        (Some(zone), DType::Datetime64 { tz: None }) => {
+            let values = series
+                .values()
+                .iter()
+                .map(|value| {
+                    if value.is_missing() {
+                        Scalar::Null(NullKind::NaT)
+                    } else {
+                        value.clone()
+                    }
+                })
+                .collect();
+            let column =
+                Column::new(DType::datetime64_tz(zone), values).map_err(column_error_to_py)?;
+            Series::new(series.name(), series.index().clone(), column).map_err(frame_error_to_py)
+        }
+        _ => Ok(series),
+    }
+}
+
 /// Whether pandas' arithmetic over `column` runs through the cells' own
 /// Python operators: it holds a Python-object cell (a host object, a list,
 /// bytes), or it is an object column mixing text with other values (an
@@ -29186,8 +29293,11 @@ impl PySeries {
     fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let dict = PyDict::new(py);
         let keys = row_keys_to_py(py, self.inner.index())?;
+        // A cell as its column holds it: a tz-aware instant in its zone (it
+        // was the naive UTC wall clock; br-frankenpandas-wuize).
+        let column = self.inner.column();
         for (k, val) in keys.into_iter().zip(self.inner.values().iter()) {
-            let v = scalar_to_py(py, val)?;
+            let v = to_dict_cell(py, column, val)?;
             dict.set_item(k, v)?;
         }
         Ok(dict.into_any().unbind())
@@ -29864,6 +29974,8 @@ impl PySeries {
             .mode_with_dropna(dropna)
             .map_err(frame_error_to_py)?;
         let res = keep_masked_dtype(self.inner.column(), res)?;
+        // A tz-aware column's modes in its zone (br-frankenpandas-wuize).
+        let res = rezoned(res, self.inner.column().timezone())?;
         // The modes are numbered by pandas' RangeIndex.
         let span = res.index().int64_range_span();
         Ok(PySeries {
@@ -30499,10 +30611,14 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
         unsupported_params("Series.apply", &[("convert_dtype", convert_dtype)])?;
-        let vals = self.inner.column().values();
+        let column = self.inner.column();
+        let vals = column.values();
         let mut out = Vec::with_capacity(vals.len());
+        let mut results = Vec::with_capacity(vals.len());
         for v in vals {
-            let py_val = scalar_to_py(py, v)?;
+            // A tz-aware value reaches the function in its zone (it was the
+            // naive UTC wall clock; br-frankenpandas-wuize).
+            let py_val = cell_to_py(py, column, v)?;
             let res = if let Some(extra_args) = args {
                 let mut full_args = Vec::with_capacity(1 + extra_args.len());
                 full_args.push(py_val);
@@ -30518,10 +30634,13 @@ impl PySeries {
                 func.call1((py_val,))?
             };
             out.push(py_to_scalar(py, &res)?);
+            results.push(res);
         }
         // The same index (its name and a tz-aware zone kept).
         let s = series_over_index(self.inner.name(), self.inner.index(), out)?;
-        Ok(PySeries { inner: s })
+        Ok(PySeries {
+            inner: rezoned(s, shared_result_zone(&results).as_deref())?,
+        })
     }
 
     #[pyo3(signature = (arg, na_action=None))]
@@ -30540,6 +30659,7 @@ impl PySeries {
         let index = self.inner.index();
         if arg.is_callable() {
             let mut out = Vec::with_capacity(vals.len());
+            let mut results = Vec::with_capacity(vals.len());
             for v in vals {
                 if ignore_na && (v.is_null() || matches!(v, Scalar::Float64(f) if f.is_nan())) {
                     out.push(v.clone());
@@ -30557,15 +30677,19 @@ impl PySeries {
                     continue;
                 }
                 out.push(py_to_scalar(py, &res)?);
+                results.push(res);
             }
             // Ints beside a missing value are float64 with NaN, as pandas
-            // infers the results (they were an int64 Series holding NaN).
+            // infers the results (they were an int64 Series holding NaN);
+            // tz-aware results keep their zone (br-frankenpandas-wuize).
             let s = series_over_index(
                 self.inner.name(),
                 index,
                 pandas_promote_int_with_missing(out),
             )?;
-            Ok(PySeries { inner: s })
+            Ok(PySeries {
+                inner: rezoned(s, shared_result_zone(&results).as_deref())?,
+            })
         } else if let Ok(dict) = arg.cast::<PyDict>() {
             // A dict subclass with __missing__ (a defaultdict) answers its
             // default for a missing key, as pandas subscripts it (it was NaN;
@@ -30663,6 +30787,33 @@ impl PySeries {
                 .astype(DType::Float64Nullable)
                 .map_err(column_error_to_py)?;
             let s = Series::new(s.name(), s.index().clone(), column).map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner: s });
+        }
+        // A tz-aware Series' dates (mean, min, quartiles, max) in its zone,
+        // as pandas' (they were the naive UTC instants;
+        // br-frankenpandas-wuize).
+        if let Some(zone) = self.inner.column().timezone() {
+            let zoned =
+                Column::new(DType::datetime64_tz(zone), Vec::new()).map_err(column_error_to_py)?;
+            let cells = Python::attach(|py| {
+                s.values()
+                    .iter()
+                    .map(|cell| match cell {
+                        Scalar::Datetime64(nanos) if *nanos != Timestamp::NAT => {
+                            Ok(Scalar::Object(fp_types::ObjectValue::Host(
+                                fp_types::HostValue::new(PyHost(cell_to_py(py, &zoned, cell)?)),
+                            )))
+                        }
+                        other => Ok(other.clone()),
+                    })
+                    .collect::<PyResult<Vec<Scalar>>>()
+            })?;
+            let s = Series::new(
+                s.name(),
+                s.index().clone(),
+                Column::from_object_values(cells),
+            )
+            .map_err(frame_error_to_py)?;
             return Ok(PySeries { inner: s });
         }
         Ok(PySeries { inner: s })
@@ -32452,7 +32603,19 @@ fn frame_ndarray<'py>(py: Python<'py>, frame: &DataFrame) -> PyResult<Bound<'py,
     let columns: Vec<&Column> = (0..width)
         .filter_map(|position| frame.column_at(position))
         .collect();
-    let kinds: Vec<Option<&str>> = columns.iter().map(|column| numpy_kind(column)).collect();
+    // A tz-aware column is object Timestamps in its zone, as pandas' values
+    // (it was the datetime64 buffer: the naive UTC instants;
+    // br-frankenpandas-wuize).
+    let kinds: Vec<Option<&str>> = columns
+        .iter()
+        .map(|column| {
+            if column.timezone().is_some() {
+                None
+            } else {
+                numpy_kind(column)
+            }
+        })
+        .collect();
     let common = match kinds.first() {
         None => Some("float64"),
         Some(first) if kinds.iter().all(|kind| kind == first) => *first,
@@ -32503,7 +32666,16 @@ fn frame_ndarray<'py>(py: Python<'py>, frame: &DataFrame) -> PyResult<Bound<'py,
     kwargs.set_item("dtype", "object")?;
     let array = np.call_method("empty", ((rows, width),), Some(&kwargs))?;
     for (position, column) in columns.iter().enumerate() {
-        let cells = object_ndarray(py, &np, column.values())?;
+        let cells = if column.timezone().is_some() {
+            let items = column
+                .values()
+                .iter()
+                .map(|value| cell_to_py(py, column, value))
+                .collect::<PyResult<Vec<_>>>()?;
+            np.call_method("array", (PyList::new(py, items)?,), Some(&kwargs))?
+        } else {
+            object_ndarray(py, &np, column.values())?
+        };
         array.set_item((pyo3::types::PySlice::full(py), position), cells)?;
     }
     Ok(array)
@@ -40616,7 +40788,7 @@ impl PyDataFrame {
                     let col = column_at(position)?;
                     let inner_dict = PyDict::new(py);
                     for (key, val) in row_keys.iter().zip(col.values()) {
-                        inner_dict.set_item(key, scalar_to_py(py, val)?)?;
+                        inner_dict.set_item(key, to_dict_cell(py, col, val)?)?;
                     }
                     out.set_item(key, inner_dict)?;
                 }
@@ -40629,7 +40801,7 @@ impl PyDataFrame {
                     let values: Vec<Py<PyAny>> = col
                         .values()
                         .iter()
-                        .map(|s| scalar_to_py(py, s))
+                        .map(|s| to_dict_cell(py, col, s))
                         .collect::<PyResult<Vec<_>>>()?;
                     out.set_item(key, PyList::new(py, values)?)?;
                 }
@@ -40641,7 +40813,7 @@ impl PyDataFrame {
                     let row_dict = PyDict::new(py);
                     for (position, key) in keys.iter().enumerate() {
                         let col = column_at(position)?;
-                        let v = scalar_to_py(py, &col.values()[row_idx])?;
+                        let v = to_dict_cell(py, col, &col.values()[row_idx])?;
                         row_dict.set_item(key, v)?;
                     }
                     rows_list.push(row_dict);
@@ -40654,7 +40826,7 @@ impl PyDataFrame {
                     let row_dict = PyDict::new(py);
                     for (position, key) in keys.iter().enumerate() {
                         let col = column_at(position)?;
-                        let v = scalar_to_py(py, &col.values()[row_idx])?;
+                        let v = to_dict_cell(py, col, &col.values()[row_idx])?;
                         row_dict.set_item(key, v)?;
                     }
                     out.set_item(k, row_dict)?;
@@ -40682,7 +40854,7 @@ impl PyDataFrame {
                 for row_idx in 0..n_rows {
                     let mut row_vals = Vec::with_capacity(columns.len());
                     for col in &columns {
-                        row_vals.push(scalar_to_py(py, &col.values()[row_idx])?);
+                        row_vals.push(to_dict_cell(py, col, &col.values()[row_idx])?);
                     }
                     data_rows.push(PyList::new(py, row_vals)?);
                 }
@@ -43466,6 +43638,7 @@ impl PyDataFrame {
                 .inner
                 .iloc_row(i64::try_from(position).unwrap_or(i64::MAX))
                 .map_err(frame_error_to_py)?;
+            let row = zoned_row(py, &self.inner, row)?;
             let py_s = Py::new(py, PySeries { inner: row })?;
             list.push(pyo3::types::PyTuple::new(py, &[py_label, py_s.into_any()])?);
         }
@@ -44304,12 +44477,15 @@ impl PyDataFrame {
                 // A row takes the columns' common dtype, as pandas' (an
                 // object row keeps an int an int beside text and a float;
                 // its values' own inference made [None, 4, 3.5] float64).
-                (None, _) => PySeries {
-                    inner: frame
+                (None, _) => {
+                    let row = frame
                         .iloc_row(i64::try_from(position).unwrap_or(i64::MAX))
-                        .map_err(frame_error_to_py)?,
+                        .map_err(frame_error_to_py)?;
+                    PySeries {
+                        inner: zoned_row(py, &frame, row)?,
+                    }
+                    .into_bound_py_any(py)?
                 }
-                .into_bound_py_any(py)?,
             };
             results.push(func.call(prepend_arg(piece, Some(&args))?, kwargs)?);
         }
@@ -46029,6 +46205,7 @@ impl PyDataFrame {
             0 => Err(absent()),
             1 => {
                 let row = self.inner.loc_row(&label).map_err(frame_error_to_py)?;
+                let row = zoned_row(py, &self.inner, row)?;
                 Ok(Py::new(py, PySeries { inner: row })?.into_any())
             }
             _ => {
@@ -47638,6 +47815,7 @@ impl PyDataFrameILoc {
                     .inner
                     .iloc_row(r)
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
+                let row_series = zoned_row(py, &self.inner, row_series)?;
                 if let Ok(col_slice) = col_key.cast::<pyo3::types::PySlice>() {
                     let sub = slice_rows(col_slice, self.inner.num_columns())?
                         .of_series(&row_series)
@@ -47756,6 +47934,7 @@ impl PyDataFrameILoc {
                 .inner
                 .iloc_row(pos)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
+            let row = zoned_row(py, &self.inner, row)?;
             return Ok(Py::new(py, PySeries { inner: row })?.into_any());
         }
         if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
@@ -50449,10 +50628,10 @@ fn frame_multiindex_loc(
     if labels.len() == multi.nlevels() && periods.is_empty() {
         if positions.len() == 1 {
             let flat = frame.index().labels()[positions[0]].clone();
-            let row = frame.loc_row(&flat).map_err(loc_key_error)?;
+            let py = key.py();
+            let row = zoned_row(py, frame, frame.loc_row(&flat).map_err(loc_key_error)?)?;
             // The row is named by its key, a tuple, as pandas' (it was the
             // tuple's text).
-            let py = key.py();
             let items = labels
                 .iter()
                 .map(|label| index_label_to_py(py, label))
@@ -50632,6 +50811,7 @@ impl PyDataFrameLoc {
                 {
                     let col_name = col_key.extract::<String>()?;
                     let row_series = self.inner.loc_row(&label).map_err(loc_key_error)?;
+                    let row_series = zoned_row(py, &self.inner, row_series)?;
                     let sub = row_series
                         .loc(&[self.inner.column_label(&col_name)])
                         .map_err(loc_key_error)?;
@@ -50660,6 +50840,7 @@ impl PyDataFrameLoc {
                 // df.loc['r', ['c1', 'c2']] with a unique label -> row Series
                 (LocRows::Label(label), Some(col_names)) => {
                     let row_series = self.inner.loc_row(&label).map_err(loc_key_error)?;
+                    let row_series = zoned_row(py, &self.inner, row_series)?;
                     // The row's labels are the columns' typed labels.
                     let col_labels: Vec<IndexLabel> = col_names
                         .iter()
@@ -50681,6 +50862,7 @@ impl PyDataFrameLoc {
             match resolve_loc_rows(&self.inner, key)? {
                 LocRows::Label(label) => {
                     let row = self.inner.loc_row(&label).map_err(loc_key_error)?;
+                    let row = zoned_row(py, &self.inner, row)?;
                     Ok(Py::new(py, PySeries { inner: row })?.into_any())
                 }
                 LocRows::Frame(frame) => Ok(Py::new(py, PyDataFrame { inner: *frame })?.into_any()),
@@ -60723,6 +60905,9 @@ impl PySeriesGroupBy {
             }
             None => res,
         };
+        // A tz-aware column's groups (first, last, min, max) in its zone
+        // (they were the naive UTC instants; br-frankenpandas-wuize).
+        let res = rezoned(res, self.series.column().timezone())?;
         Python::attach(|py| {
             if self.as_index {
                 return Ok(Py::new(py, PySeries { inner: res })?.into_any());
