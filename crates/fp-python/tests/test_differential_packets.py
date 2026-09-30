@@ -20771,3 +20771,48 @@ _E64_CASES = {
 def test_everyday64_series_int_keys_labels_or_positions_like_pandas_0fi7r(case: str) -> None:
     run = _E64_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-doa3k: 'string[python]' / 'string[pyarrow]' were not
+# understood, StringDtype took no storage and was unhashable, and a masked
+# dtype equalled its numpy name case-blind (Int64Dtype() == 'int64').
+_E65_CASES = {
+    "series string[python]": lambda m: [
+        (lambda s: (str(s.dtype), repr(s.dtype), s.tolist()))(m.Series(["a", None], dtype="string[python]"))
+    ],
+    "series string[pyarrow] values": lambda m: [
+        (lambda s: (str(s.dtype), s.isna().tolist()))(m.Series(["a", None], dtype="string[pyarrow]"))
+    ],
+    "astype string[python]": lambda m: [m.Series(["x", None]).astype("string[python]").isna().tolist()],
+    "read_csv string[python]": lambda m: [str(m.read_csv(io.StringIO("a\nx\n"), dtype="string[python]")["a"].dtype)],
+    "StringDtype storage": lambda m: [m.StringDtype("pyarrow").storage, m.StringDtype().storage],
+    "StringDtype storage keyword": lambda m: [repr(m.StringDtype(storage="pyarrow"))],
+    "StringDtype bad storage": lambda m: [m.StringDtype("foo")],
+    "StringDtype na_value": lambda m: [m.StringDtype().na_value is m.NA],
+    "StringDtype equality": lambda m: [
+        m.StringDtype() == "string[python]",
+        m.StringDtype() == "string[pyarrow]",
+        m.StringDtype("pyarrow") == "string",
+        m.StringDtype("python") == m.StringDtype("pyarrow"),
+    ],
+    "StringDtype hashable": lambda m: [len({m.StringDtype(), m.StringDtype("python")})],
+    "StringDtype from string": lambda m: [repr(m.StringDtype.construct_from_string("string[pyarrow]"))],
+    "is_string_dtype storage": lambda m: [m.api.types.is_string_dtype("string[python]")],
+    "masked dtype eq numpy name": lambda m: [
+        m.Int64Dtype() == "int64",
+        m.Float64Dtype() == "float64",
+        m.Series([1], dtype="Int64").dtype == "int64",
+    ],
+    "masked dtype hashable": lambda m: [{m.Int64Dtype(): 1}[m.Int64Dtype()]],
+    # Negatives: already pandas'.
+    "StringDtype repr": lambda m: [repr(m.StringDtype()), str(m.StringDtype())],
+    "masked dtype eq own name": lambda m: [m.Int64Dtype() == "Int64", m.BooleanDtype() == "boolean"],
+    "series string": lambda m: [str(m.Series(["a"], dtype="string").dtype)],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E65_CASES))
+def test_everyday65_string_dtype_storage_like_pandas_doa3k(case: str) -> None:
+    run = _E65_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

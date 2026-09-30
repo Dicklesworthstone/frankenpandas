@@ -453,7 +453,7 @@ fn column_pandas_dtype<'py>(py: Python<'py>, column: &Column) -> PyResult<Bound<
         };
     }
     if column.is_pandas_string() {
-        return PyStringDtype.into_bound_py_any(py);
+        return PyStringDtype::default().into_bound_py_any(py);
     }
     if matches!(
         name.as_str(),
@@ -64396,7 +64396,7 @@ fn object_frame(frame: &DataFrame, only: Option<&[String]>) -> Result<DataFrame,
 /// was False and str.upper() gave 'NONE'. `None` for any other dtype.
 fn string_dtype_series(series: &Series, dtype: &Bound<'_, PyAny>) -> PyResult<Option<Series>> {
     let name = match dtype.extract::<String>() {
-        Ok(name) => Some(name),
+        Ok(name) => Some(without_string_storage(name)),
         Err(_) if !dtype.is_instance_of::<pyo3::types::PyType>() => dtype
             .getattr("name")
             .and_then(|name| name.extract::<String>())
@@ -64535,12 +64535,24 @@ fn py_dtype_arg(obj: &Bound<'_, PyAny>) -> PyResult<DType> {
     parse_dtype(&dtype_arg_text(obj)?)
 }
 
-/// The dtype name a dtype argument spells: a str as given, a type's name
+/// A dtype name with pandas' string storage spelled out - 'string[python]',
+/// 'string[pyarrow]' - as the `string` dtype it names (one storage here;
+/// they were not understood; br-frankenpandas-doa3k). 'string[pyarrow_numpy]'
+/// (NaN for a missing value, numpy results) stays as written.
+fn without_string_storage(name: String) -> String {
+    match name.as_str() {
+        "string[python]" | "string[pyarrow]" => "string".to_owned(),
+        _ => name,
+    }
+}
+
+/// The dtype name a dtype argument spells: a str as given (a string
+/// storage dropped, [`without_string_storage`]), a type's name
 /// (`np.int32` -> 'int32'), a dtype object's `name` ('Int32'), else its
 /// `str`.
 fn dtype_arg_text(obj: &Bound<'_, PyAny>) -> PyResult<String> {
     if let Ok(name) = obj.extract::<String>() {
-        return Ok(name);
+        return Ok(without_string_storage(name));
     }
     if let Ok(ty) = obj.cast::<pyo3::types::PyType>() {
         return ty.name()?.extract::<String>();
@@ -70024,7 +70036,7 @@ fn dtype_spelling(obj: &Bound<'_, PyAny>) -> Option<String> {
         return Some(series.dtype_name());
     }
     if let Ok(text) = obj.extract::<String>() {
-        return Some(text);
+        return Some(without_string_storage(text));
     }
     if let Ok(kind) = obj.cast::<pyo3::types::PyType>() {
         let name = kind.name().ok()?.to_string();
@@ -71770,8 +71782,6 @@ macro_rules! define_simple_dtype {
             fn __repr__(&self) -> String {
                 if $dtype_name == "boolean" {
                     "BooleanDtype".to_string()
-                } else if $dtype_name == "string" {
-                    "string[python]".to_string()
                 } else {
                     format!("{}()", $class_name)
                 }
@@ -71781,17 +71791,33 @@ macro_rules! define_simple_dtype {
                 $dtype_name
             }
 
+            /// Its own name only, as pandas': Int64Dtype() == 'int64' is
+            /// False (the numpy dtype; it compared case-blind, so a masked
+            /// Series' dtype equalled 'int64'; br-frankenpandas-doa3k).
             fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
                 if let Ok(other_self) = other.extract::<Self>() {
                     return *self == other_self;
                 }
-                if let Ok(s) = other.extract::<String>() {
-                    return s == $dtype_name || s.to_lowercase() == $dtype_name.to_lowercase();
-                }
-                false
+                other
+                    .extract::<String>()
+                    .is_ok_and(|name| name == $dtype_name)
+            }
+
+            /// Hashable, as pandas' dtypes are (a set or dict key raised
+            /// TypeError).
+            fn __hash__(&self) -> u64 {
+                dtype_name_hash($dtype_name)
             }
         }
     };
+}
+
+/// The hash of a dtype named `name` (pandas hashes a dtype by its name).
+fn dtype_name_hash(name: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    name.hash(&mut hasher);
+    hasher.finish()
 }
 
 define_simple_dtype!(PyBooleanDtype, "BooleanDtype", "boolean", "b");
@@ -71805,7 +71831,100 @@ define_simple_dtype!(PyUInt32Dtype, "UInt32Dtype", "UInt32", "u");
 define_simple_dtype!(PyUInt64Dtype, "UInt64Dtype", "UInt64", "u");
 define_simple_dtype!(PyFloat32Dtype, "Float32Dtype", "Float32", "f");
 define_simple_dtype!(PyFloat64Dtype, "Float64Dtype", "Float64", "f");
-define_simple_dtype!(PyStringDtype, "StringDtype", "string", "O");
+
+/// pandas' `StringDtype(storage=None)`: the `string` extension dtype, its
+/// storage 'python' (pandas' default) or 'pyarrow' kept for `storage`, the
+/// repr and equality - the values have one representation here, so a
+/// Series of either storage reports 'python'. 'pyarrow_numpy' (NaN for a
+/// missing value, numpy results) is refused. It took no storage
+/// (br-frankenpandas-doa3k).
+#[pyclass(name = "StringDtype", from_py_object)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PyStringDtype {
+    storage: &'static str,
+}
+
+impl Default for PyStringDtype {
+    fn default() -> Self {
+        Self { storage: "python" }
+    }
+}
+
+#[pymethods]
+impl PyStringDtype {
+    #[new]
+    #[pyo3(signature = (storage=None))]
+    fn new(storage: Option<&str>) -> PyResult<Self> {
+        match storage.unwrap_or("python") {
+            "python" => Ok(Self { storage: "python" }),
+            "pyarrow" => Ok(Self { storage: "pyarrow" }),
+            "pyarrow_numpy" => Err(not_implemented("StringDtype('pyarrow_numpy')")),
+            other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Storage must be 'python', 'pyarrow' or 'pyarrow_numpy'. Got {other} instead."
+            ))),
+        }
+    }
+
+    /// The dtype a 'string[storage]' spelling names, as pandas'.
+    #[classmethod]
+    fn construct_from_string(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        string: &str,
+    ) -> PyResult<Self> {
+        match string {
+            "string" => Ok(Self::default()),
+            "string[python]" => Self::new(Some("python")),
+            "string[pyarrow]" => Self::new(Some("pyarrow")),
+            "string[pyarrow_numpy]" => Self::new(Some("pyarrow_numpy")),
+            other => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "Cannot construct a 'StringDtype' from '{other}'"
+            ))),
+        }
+    }
+
+    #[getter]
+    fn name(&self) -> &'static str {
+        "string"
+    }
+
+    #[getter]
+    fn kind(&self) -> &'static str {
+        "O"
+    }
+
+    #[getter]
+    fn storage(&self) -> &'static str {
+        self.storage
+    }
+
+    #[getter]
+    fn na_value(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        na_object(py)
+    }
+
+    fn __repr__(&self) -> String {
+        format!("string[{}]", self.storage)
+    }
+
+    fn __str__(&self) -> &'static str {
+        "string"
+    }
+
+    /// pandas' equality: 'string' names any storage, 'string[s]' and a
+    /// StringDtype this storage only.
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        if let Ok(other) = other.extract::<Self>() {
+            return other.storage == self.storage;
+        }
+        other
+            .extract::<String>()
+            .is_ok_and(|name| name == "string" || name == self.__repr__())
+    }
+
+    fn __hash__(&self) -> u64 {
+        dtype_name_hash("string")
+    }
+}
 
 /// pandas' `CategoricalDtype`. The categories are values of their own
 /// kind: they were their text, so `CategoricalDtype([1, 2])` matched no int
