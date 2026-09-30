@@ -2912,11 +2912,12 @@ proptest! {
                     | IndexLabel::Float64(_)
                     | IndexLabel::Bool(_)
                     | IndexLabel::Object(_) => {}
+                    IndexLabel::Period(period) if !period.is_nat() => {}
                     // All labels must be non-null when dropna=true. This used
                     // to be vacuous (IndexLabel had no null variant); since
                     // br-frankenpandas-joeff added IndexLabel::Null it is a
-                    // real invariant.
-                    IndexLabel::Null(_) => prop_assert!(
+                    // real invariant. A NaT period label is missing too.
+                    IndexLabel::Period(_) | IndexLabel::Null(_) => prop_assert!(
                         false,
                         "dropna=true must drop null group keys, found null label at {}",
                         i

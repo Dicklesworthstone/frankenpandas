@@ -1043,9 +1043,10 @@ fn join_component_rank(c: &JoinKeyComponent) -> u8 {
         Present(IndexLabel::Timedelta64(_)) => 4,
         Present(IndexLabel::Datetime64(_)) => 5,
         Present(IndexLabel::Object(_)) => 6,
-        Present(IndexLabel::Null(_)) => 7,
-        FloatBits(_) => 8,
-        Missing => 9,
+        Present(IndexLabel::Period(_)) => 7,
+        Present(IndexLabel::Null(_)) => 8,
+        FloatBits(_) => 9,
+        Missing => 10,
     }
 }
 
@@ -1144,6 +1145,11 @@ fn has_duplicate_composite_keys(keys: &[CompositeJoinKey]) -> bool {
     false
 }
 
+/// validate='one_to_one' with repeated keys on both sides, which pandas
+/// reports as 'not unique in either left or right dataset'.
+const ONE_TO_ONE_BOTH_SIDES_DUPLICATED: &str =
+    "merge validate='one_to_one' failed: left and right keys are not unique";
+
 fn validate_merge_cardinality(
     validate_mode: MergeValidateMode,
     left_keys: &[CompositeJoinKey],
@@ -1157,14 +1163,22 @@ fn validate_merge_cardinality(
 
     match validate_mode {
         MergeValidateMode::OneToOne => {
-            // Preserve pandas's left-first failure precedence when both sides
-            // duplicate while avoiding an unnecessary right-side scan on a
-            // left-side failure.
-            if has_duplicate_composite_keys(left_keys) {
-                return fail("merge validate='one_to_one' failed: left keys are not unique");
-            }
-            if has_duplicate_composite_keys(right_keys) {
-                return fail("merge validate='one_to_one' failed: right keys are not unique");
+            // pandas names both sides when neither is unique ('not unique in
+            // either left or right dataset'), else the one that is not (the
+            // left failure was reported first whatever the right held;
+            // br-frankenpandas-z6jxh).
+            match (
+                has_duplicate_composite_keys(left_keys),
+                has_duplicate_composite_keys(right_keys),
+            ) {
+                (true, true) => return fail(ONE_TO_ONE_BOTH_SIDES_DUPLICATED),
+                (true, false) => {
+                    return fail("merge validate='one_to_one' failed: left keys are not unique");
+                }
+                (false, true) => {
+                    return fail("merge validate='one_to_one' failed: right keys are not unique");
+                }
+                (false, false) => {}
             }
         }
         MergeValidateMode::OneToMany => {
@@ -1252,9 +1266,9 @@ fn typed_validate_merge_cardinality(
             }
         }
         MergeValidateMode::OneToOne => {
-            // Both sides must be typed before deciding anything: a left-side
-            // failure outranks a right-side one, so answering from the right
-            // alone could surface the wrong message.
+            // Both sides must be typed before deciding anything: the failure
+            // names each side that repeats, so answering from one side alone
+            // could surface the wrong message.
             let Some(left_duplicated) = typed_single_int64_key_has_duplicates(left_key_columns)
             else {
                 return Ok(false);
@@ -1263,13 +1277,16 @@ fn typed_validate_merge_cardinality(
             else {
                 return Ok(false);
             };
-            if left_duplicated {
-                return fail("merge validate='one_to_one' failed: left keys are not unique");
+            match (left_duplicated, right_duplicated) {
+                (true, true) => fail(ONE_TO_ONE_BOTH_SIDES_DUPLICATED),
+                (true, false) => {
+                    fail("merge validate='one_to_one' failed: left keys are not unique")
+                }
+                (false, true) => {
+                    fail("merge validate='one_to_one' failed: right keys are not unique")
+                }
+                (false, false) => Ok(true),
             }
-            if right_duplicated {
-                return fail("merge validate='one_to_one' failed: right keys are not unique");
-            }
-            Ok(true)
         }
     }
 }
@@ -9170,10 +9187,111 @@ pub fn merge_dataframes_on_with_options(
     options: MergeExecutionOptions,
 ) -> Result<MergedDataFrame, JoinError> {
     let suffixes = resolve_merge_suffixes(options.suffixes.clone());
+    // A column key a side repeats (['a', 'a']; not a join key) rides through
+    // the merge under stand-in keys and comes back under its own name, each
+    // column its own - by name every copy read the first column (i17d4). A
+    // name the other side also has takes each side's suffix, as pandas'
+    // (a_x, a_x beside a_y).
+    let left_stand_in = stand_in_repeated_keys(left, left_on, 'l')?;
+    let right_stand_in = stand_in_repeated_keys(right, right_on, 'r')?;
     let merged = merge_dataframes_on_with_options_storage(
-        left, right, left_on, right_on, join_type, options,
+        left_stand_in.as_ref().map_or(left, |(frame, _)| frame),
+        right_stand_in.as_ref().map_or(right, |(frame, _)| frame),
+        left_on,
+        right_on,
+        join_type,
+        options,
     )?;
+    let suffixed = |name: &str, suffix: Option<&String>| {
+        format!("{name}{}", suffix.map_or("", String::as_str))
+    };
+    let mut restored: FxHashMap<String, String> = FxHashMap::default();
+    for (stand_in, own_suffix, other, other_on, other_suffix) in [
+        (
+            &left_stand_in,
+            suffixes.left.as_ref(),
+            right,
+            right_on,
+            suffixes.right.as_ref(),
+        ),
+        (
+            &right_stand_in,
+            suffixes.right.as_ref(),
+            left,
+            left_on,
+            suffixes.left.as_ref(),
+        ),
+    ] {
+        for (key, name) in stand_in.iter().flat_map(|(_, names)| names) {
+            if other.column_occurrences(name) == 0 || other_on.contains(&name.as_str()) {
+                restored.insert(key.clone(), name.clone());
+                continue;
+            }
+            restored.insert(key.clone(), suffixed(name, own_suffix));
+            // The other side's own (not stood-in) copy keeps its name in the
+            // merge: it takes that side's suffix.
+            restored
+                .entry(name.clone())
+                .or_insert_with(|| suffixed(name, other_suffix));
+        }
+    }
+    let merged = if restored.is_empty() {
+        merged
+    } else {
+        let restore = |name: &str| {
+            restored
+                .get(name)
+                .map_or_else(|| name.to_owned(), Clone::clone)
+        };
+        MergedDataFrame {
+            index: merged.index,
+            columns: ColumnStore::from_pairs(
+                merged
+                    .columns
+                    .iter_positional()
+                    .map(|(name, column)| (restore(name), column.clone())),
+            ),
+            column_order: merged
+                .column_order
+                .iter()
+                .map(|name| restore(name))
+                .collect(),
+        }
+    };
     Ok(keeping_source_widths(merged, left, right, &suffixes))
+}
+
+/// A frame keyed by stand-ins and each stand-in with the name it stands for.
+type StoodIn = (fp_frame::DataFrame, Vec<(String, String)>);
+
+/// `frame` with each column under a repeated key (not one of `on`) keyed by
+/// a stand-in, and the stand-ins with their names; None when no key repeats
+/// so.
+fn stand_in_repeated_keys(
+    frame: &fp_frame::DataFrame,
+    on: &[&str],
+    side: char,
+) -> Result<Option<StoodIn>, JoinError> {
+    let names = frame.column_names();
+    let repeated = |name: &str| frame.column_occurrences(name) > 1 && !on.contains(&name);
+    if !names.iter().any(|name| repeated(name)) {
+        return Ok(None);
+    }
+    let mut stand_ins = Vec::new();
+    let keys = names
+        .iter()
+        .enumerate()
+        .map(|(position, name)| {
+            if repeated(name) {
+                let key = format!("\u{1}i17d4-{side}{position}");
+                stand_ins.push((key.clone(), (*name).clone()));
+                key
+            } else {
+                (*name).clone()
+            }
+        })
+        .collect();
+    Ok(Some((frame.with_column_keys(keys)?, stand_ins)))
 }
 
 /// `merged` with each output column in the numpy width of the left or
@@ -19405,7 +19523,70 @@ mod tests {
     }
 
     #[test]
-    fn merge_validate_one_to_one_keeps_left_error_precedence_when_both_sides_duplicate() {
+    fn repeated_non_key_columns_keep_their_own_data_through_merge_i17d4() {
+        // pandas 2.2.3: merging a frame whose columns are ['a', 'a', 'k'] on
+        // 'k' keeps both 'a' columns, each its own data (the first was read
+        // for both); when the other side has an 'a' too, each copy takes its
+        // side's suffix (a_x, a_x beside a_y).
+        let f = Scalar::Float64;
+        let column = |values: [f64; 2]| {
+            Column::new(DType::Float64, values.iter().map(|v| f(*v)).collect()).expect("column")
+        };
+        let left = DataFrame::new_with_column_order(
+            Index::new(vec![0_i64.into(), 1_i64.into()]),
+            ColumnStore::from_pairs(vec![
+                ("a".to_owned(), column([1.0, 4.0])),
+                ("a".to_owned(), column([5.75, 2.25])),
+                ("k".to_owned(), column([1.0, 2.0])),
+            ]),
+            vec!["a".to_owned(), "a".to_owned(), "k".to_owned()],
+        )
+        .expect("left frame");
+        let right = |other: &str| {
+            DataFrame::from_dict(
+                &["k", other],
+                vec![("k", vec![f(1.0), f(2.0)]), (other, vec![f(5.0), f(6.0)])],
+            )
+            .expect("right frame")
+        };
+        let merge = |right: &DataFrame| {
+            merge_dataframes_on_with_options(
+                &left,
+                right,
+                &["k"],
+                &["k"],
+                JoinType::Inner,
+                MergeExecutionOptions::default(),
+            )
+            .expect("merge")
+        };
+        let merged = merge(&right("z"));
+        assert_eq!(merged.column_order, vec!["a", "a", "k", "z"]);
+        let second_a = merged.columns.get_all("a").nth(1).expect("second a");
+        assert_eq!(second_a.values(), &[f(5.75), f(2.25)]);
+
+        let suffixed = merge(&right("a"));
+        assert_eq!(suffixed.column_order, vec!["a_x", "a_x", "k", "a_y"]);
+        let second_x = suffixed.columns.get_all("a_x").nth(1).expect("second a_x");
+        assert_eq!(second_x.values(), &[f(5.75), f(2.25)]);
+        let right_a = suffixed.columns.get("a_y").expect("a_y");
+        assert_eq!(right_a.values(), &[f(5.0), f(6.0)]);
+
+        // NEGATIVE: unique keys merge under their own names, unsuffixed.
+        let plain = merge_dataframes_on_with_options(
+            &right("q"),
+            &right("z"),
+            &["k"],
+            &["k"],
+            JoinType::Inner,
+            MergeExecutionOptions::default(),
+        )
+        .expect("plain merge");
+        assert_eq!(plain.column_order, vec!["k", "q", "z"]);
+    }
+
+    #[test]
+    fn merge_validate_one_to_one_names_both_sides_when_both_duplicate_z6jxh() {
         let left = DataFrame::from_dict(
             &["id", "left_v"],
             vec![
@@ -19434,8 +19615,48 @@ mod tests {
                 ..MergeExecutionOptions::default()
             },
         )
-        .expect_err("one_to_one must reject duplicate left keys before right keys");
-        assert!(format!("{err}").contains("left keys are not unique"));
+        .expect_err("one_to_one must reject keys repeated on both sides");
+        // pandas 2.2.3: 'Merge keys are not unique in either left or right
+        // dataset' - both sides named, not the left first (z6jxh).
+        assert!(format!("{err}").contains("left and right keys are not unique"));
+
+        // The composite-key path (text keys) answers alike; NEGATIVE: with
+        // only the right side repeating, only the right is named.
+        let text_keys = |values: [&str; 2]| {
+            DataFrame::from_dict(
+                &["id"],
+                vec![(
+                    "id",
+                    values.iter().map(|v| Scalar::Utf8((*v).into())).collect(),
+                )],
+            )
+            .expect("text-keyed frame")
+        };
+        let validate = |left: &DataFrame, right: &DataFrame| {
+            merge_dataframes_on_with_options(
+                left,
+                right,
+                &["id"],
+                &["id"],
+                JoinType::Inner,
+                MergeExecutionOptions {
+                    validate_mode: Some(MergeValidateMode::OneToOne),
+                    ..MergeExecutionOptions::default()
+                },
+            )
+            .expect_err("one_to_one must reject a repeated key")
+            .to_string()
+        };
+        let both = validate(&text_keys(["a", "a"]), &text_keys(["a", "a"]));
+        assert!(
+            both.contains("left and right keys are not unique"),
+            "{both}"
+        );
+        let right_only = validate(&text_keys(["a", "b"]), &text_keys(["a", "a"]));
+        assert!(
+            right_only.contains(": right keys are not unique"),
+            "{right_only}"
+        );
     }
 
     #[test]
@@ -21400,23 +21621,21 @@ mod typed_validate_cardinality_uza04 {
         );
     }
 
-    /// PRECEDENCE. With BOTH sides duplicated under `one_to_one`, pandas — and
-    /// the generic checker — report the LEFT failure. The typed checker must
-    /// not answer from whichever side it happened to inspect first.
+    /// PRECEDENCE. With BOTH sides duplicated under `one_to_one`, pandas —
+    /// and the generic checker — name BOTH sides ('not unique in either left
+    /// or right dataset'; this pinned a left-first report pandas 2.2.3 does
+    /// not make, z6jxh). The typed checker must not answer from whichever
+    /// side it happened to inspect first.
     #[test]
-    fn one_to_one_reports_the_left_failure_first_uza04() {
+    fn one_to_one_names_both_sides_when_both_repeat_uza04() {
         let left = int_frame("left_v", vec![1, 1, 2], vec![10, 11, 20]);
         let right = int_frame("right_v", vec![1, 1, 2], vec![100, 101, 200]);
         let error = merge(&left, &right, Some(MergeValidateMode::OneToOne))
             .expect_err("both sides duplicated must be rejected");
         let message = format!("{error}");
         assert!(
-            message.contains("left keys are not unique"),
-            "left-before-right precedence must hold, got: {message}"
-        );
-        assert!(
-            !message.contains("right keys are not unique"),
-            "the right-side message must not pre-empt the left one, got: {message}"
+            message.contains("left and right keys are not unique"),
+            "both sides must be named, got: {message}"
         );
     }
 

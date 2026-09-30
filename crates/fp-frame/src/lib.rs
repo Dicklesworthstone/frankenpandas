@@ -1282,7 +1282,7 @@ pub(crate) fn format_plot_index_label(l: &IndexLabel) -> String {
         IndexLabel::Utf8(s) => s.clone(),
         IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
         IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-        f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+        f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => f.to_string(),
         IndexLabel::Object(object) => object.to_string(),
         IndexLabel::Null(_) => l.to_string(),
     }
@@ -1558,19 +1558,59 @@ fn dtype_memory_width(dtype: DType) -> usize {
     }
 }
 
+/// The column dtypes a pandas select_dtypes name takes. numpy's abstract
+/// number and integer kinds hold timedelta64 (a signed integer), so
+/// 'number' / 'integer' take those columns (they were left out); 'object'
+/// and 'string' tell pandas' string columns apart in the matcher; 'str' is
+/// pandas' TypeError and 'numeric' / 'categorical' are no pandas names
+/// (they were accepted), 'datetime' / 'complex' / 'timedelta64[ns]' are
+/// (they were refused; br-frankenpandas-cmv2p).
 fn expand_dtype_alias(name: &str) -> Result<&'static [DType], FrameError> {
     match name {
-        "number" | "numeric" => Ok(&[DType::Int64, DType::Float64]),
-        "integer" | "int" | "int64" | "i8" => Ok(&[DType::Int64]),
-        "floating" | "float" | "float64" | "f8" => Ok(&[DType::Float64]),
+        "number" => Ok(&[DType::Int64, DType::Float64, DType::Timedelta64]),
+        "integer" => Ok(&[DType::Int64, DType::Timedelta64]),
+        // The masked names select the numpy kind too, as pandas' (8u5eh).
+        "int" | "int64" | "i8" | "Int64" => Ok(&[DType::Int64]),
+        "floating" | "float" | "float64" | "f8" | "Float64" => Ok(&[DType::Float64]),
         "bool" | "boolean" | "?" => Ok(&[DType::Bool]),
-        "object" | "string" | "str" | "O" => Ok(&[DType::Utf8]),
-        "category" | "categorical" => Ok(&[DType::Categorical]),
-        "timedelta" | "timedelta64" | "m8" => Ok(&[DType::Timedelta64]),
+        "object" | "O" | "string" => Ok(&[DType::Utf8]),
+        "category" => Ok(&[DType::Categorical]),
+        "timedelta" | "timedelta64" | "m8" | "timedelta64[ns]" | "m8[ns]" => {
+            Ok(&[DType::Timedelta64])
+        }
+        "datetime" | "datetime64" | "datetime64[ns]" | "M8" | "M8[ns]" => {
+            Ok(&[DType::Datetime64 { tz: None }])
+        }
+        // A kind no column here holds.
+        "complex" | "complex128" | "c16" => Ok(&[]),
+        "str" | "U" => Err(FrameError::CompatibilityRejected(
+            "string dtypes are not allowed, use 'object' instead".to_owned(),
+        )),
         other => Err(FrameError::CompatibilityRejected(format!(
             "data type '{other}' not understood"
         ))),
     }
+}
+
+/// pandas' canonical type of a select_dtypes name - the numpy scalar type
+/// it resolves to ('int' / 'int64' / 'Int64' one type, 'integer' another):
+/// include and exclude overlap only on the same one (br-frankenpandas-cmv2p).
+#[must_use]
+pub fn select_dtype_canonical(name: &str) -> String {
+    if let Some((width, _)) = NumericWidth::parse(name) {
+        return width.name(false).to_owned();
+    }
+    match name {
+        "int" | "int64" | "i8" | "Int64" => "int64",
+        "float" | "float64" | "f8" | "Float64" => "float64",
+        "bool" | "boolean" | "?" => "bool",
+        "object" | "O" => "object",
+        "timedelta" | "timedelta64" | "m8" | "timedelta64[ns]" | "m8[ns]" => "timedelta64",
+        "datetime" | "datetime64" | "datetime64[ns]" | "M8" | "M8[ns]" => "datetime64",
+        "complex" | "complex128" | "c16" => "complex128",
+        other => other,
+    }
+    .to_owned()
 }
 
 fn expand_dtype_aliases(names: &[&str]) -> Result<Vec<DType>, FrameError> {
@@ -1620,6 +1660,7 @@ fn index_label_memory_usage_bytes_with_deep(label: &IndexLabel, deep: bool) -> u
         | IndexLabel::Timedelta64(_)
         | IndexLabel::Datetime64(_)
         | IndexLabel::Object(_)
+        | IndexLabel::Period(_)
         | IndexLabel::Null(_) => 8,
         IndexLabel::Bool(_) => 1,
         IndexLabel::Utf8(text) if deep => text.len(),
@@ -1783,11 +1824,14 @@ fn scalar_to_index_label(value: &Scalar) -> Result<IndexLabel, FrameError> {
         Scalar::Bool(b) => Ok(IndexLabel::Bool(*b)),
         // An object cell (a datetime.date) is its own label (fvsao.66).
         Scalar::Object(object) => Ok(IndexLabel::Object(object.clone())),
+        // A period is its own label: set_index of a period column is a
+        // PeriodIndex (45fzr).
+        Scalar::Period(period) => Ok(IndexLabel::Period(*period)),
         Scalar::Null(_) => Err(FrameError::CompatibilityRejected(
             "set_index does not support missing label values".to_owned(),
         )),
-        // Period/Interval indexes need IndexLabel variants that do not yet
-        // exist (tracked separately); reject explicitly for now.
+        // Interval indexes need an IndexLabel variant that does not yet
+        // exist; reject explicitly for now.
         _ => Err(FrameError::CompatibilityRejected(format!(
             "set_index currently supports Int64/Float64/Bool/Utf8/Datetime64/Timedelta64 labels; found {:?}",
             value.dtype()
@@ -1906,7 +1950,9 @@ fn scalar_to_value_counts_index_label(value: &Scalar) -> IndexLabel {
         Scalar::Float64(v) => IndexLabel::Utf8(format!("{v:?}")),
         Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
         Scalar::Datetime64(v) => IndexLabel::Utf8(format_datetime_ns(*v)),
-        Scalar::Period(ordinal) => IndexLabel::Utf8(ordinal.calendar_string()),
+        // A period labels as itself: value_counts / groupby over periods
+        // answer a PeriodIndex (it was their text; 45fzr).
+        Scalar::Period(period) => IndexLabel::Period(*period),
         Scalar::Interval(interval) => IndexLabel::Utf8(format!("{interval}")),
         // An object cell labels as itself (value_counts of s.dt.date; fvsao.66).
         Scalar::Object(object) => IndexLabel::Object(object.clone()),
@@ -2365,7 +2411,7 @@ fn pivot_label_to_column_name(label: &IndexLabel) -> String {
         IndexLabel::Utf8(s) => s.clone(),
         IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
         IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-        f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+        f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => f.to_string(),
         IndexLabel::Object(object) => object.to_string(),
         IndexLabel::Null(_) => label.to_string(),
     }
@@ -3118,6 +3164,20 @@ enum QuantileInterpolation {
     Midpoint,
 }
 
+/// The [`QuantileInterpolation`] pandas' `interpolation=` names.
+fn parse_quantile_interpolation(interpolation: &str) -> Result<QuantileInterpolation, FrameError> {
+    match interpolation {
+        "linear" => Ok(QuantileInterpolation::Linear),
+        "lower" => Ok(QuantileInterpolation::Lower),
+        "higher" => Ok(QuantileInterpolation::Higher),
+        "nearest" => Ok(QuantileInterpolation::Nearest),
+        "midpoint" => Ok(QuantileInterpolation::Midpoint),
+        other => Err(FrameError::CompatibilityRejected(format!(
+            "quantile: interpolation must be one of 'linear', 'lower', 'higher', 'nearest', 'midpoint', got {other:?}"
+        ))),
+    }
+}
+
 /// The rank of the `q` quantile in `n` sorted values as pandas' Series /
 /// DataFrame quantile finds it: numpy's `percentile(values, q * 100)`
 /// (pandas' `_nanpercentile` scales `q` by 100 and numpy divides it back,
@@ -3702,6 +3762,66 @@ fn vals_are_timedelta(vals: &[Scalar]) -> bool {
     saw
 }
 
+/// The dtype a column is selected by (`select_dtypes`, numeric_only): its
+/// own, except a bool column holding a missing value, which is pandas'
+/// object column - numpy bool cannot hold NaN - and was selected as bool /
+/// numeric (br-frankenpandas-ildvj).
+fn selection_dtype(column: &Column) -> DType {
+    match column.dtype() {
+        DType::Bool if column.has_any_missing() => DType::Utf8,
+        // A masked column is selected with its numpy kind, as pandas'
+        // select_dtypes (Int64 under 'int64' / 'integer' / 'number', boolean
+        // under 'bool'); they matched nothing (br-frankenpandas-8u5eh).
+        DType::Int64Nullable => DType::Int64,
+        DType::Float64Nullable => DType::Float64,
+        DType::BoolNullable => DType::Bool,
+        dtype => dtype,
+    }
+}
+
+/// A column describe reads as a number: int64 / float64 and pandas' masked
+/// Int64 / Float64 (br-frankenpandas-8u5eh).
+fn is_describe_number(column: &Column) -> bool {
+    matches!(
+        column.dtype(),
+        DType::Int64 | DType::Float64 | DType::Int64Nullable | DType::Float64Nullable
+    )
+}
+
+/// A described column's statistics, in pandas' masked Float64 for a masked
+/// column (a missing statistic its NA; br-frankenpandas-8u5eh).
+fn describe_stats_column(source: &Column, stats: Vec<Scalar>) -> Result<Column, FrameError> {
+    let column = Column::from_values(stats)?;
+    if source.dtype().is_nullable() {
+        return Ok(column.astype(DType::Float64Nullable)?);
+    }
+    Ok(column)
+}
+
+/// A group's running max (`max`) or min of datetime64 cells, a NaT kept
+/// where it sits; None unless every present cell is a datetime
+/// (br-frankenpandas-cemrq: the f64 folds read them as missing).
+fn running_datetime_extreme(vals: &[Scalar], max: bool) -> Option<Vec<Scalar>> {
+    let mut present = vals.iter().filter(|v| !v.is_missing()).peekable();
+    present.peek()?;
+    if !present.all(|v| matches!(v, Scalar::Datetime64(_))) {
+        return None;
+    }
+    let mut acc: Option<i64> = None;
+    Some(
+        vals.iter()
+            .map(|v| match v {
+                Scalar::Datetime64(ns) if *ns != fp_types::Timestamp::NAT => {
+                    let next = acc.map_or(*ns, |a| if max { a.max(*ns) } else { a.min(*ns) });
+                    acc = Some(next);
+                    Scalar::Datetime64(next)
+                }
+                _ => Scalar::Datetime64(fp_types::Timestamp::NAT),
+            })
+            .collect(),
+    )
+}
+
 fn build_mode_column(values: Vec<Scalar>) -> Result<Column, FrameError> {
     if let Some(dtype) = mode_output_dtype(&values) {
         Ok(Column::new(dtype, values)?)
@@ -3710,16 +3830,6 @@ fn build_mode_column(values: Vec<Scalar>) -> Result<Column, FrameError> {
     }
 }
 
-/// Resolve `target` label positions against `src` using a dense direct-address
-/// table, valid only when every `src` label is a bounded-range `Int64`.
-///
-/// Returns `Some(positions)` where `positions[j]` is the first-occurrence index
-/// of `target[j]` in `src` (or `None` if absent), bit-identical to probing a
-/// `HashMap<IndexLabel, usize>` built first-occurrence — but with zero hashing.
-/// Returns `None` (decline the fast path) when any source label is non-Int64 or
-/// the value range is too wide to address densely, so the caller falls back to
-/// the hash path. `IndexLabel` equality is kind-sensitive, so a non-Int64
-/// target can never match an Int64 source and correctly resolves to `None`.
 /// Carry reindex source positions in the fill direction for
 /// `reindex(method='ffill'|'bfill')`.
 ///
@@ -3742,16 +3852,156 @@ fn build_mode_column(values: Vec<Scalar>) -> Result<Column, FrameError> {
 /// Numeric value of a label, for `reindex(method="nearest")` distance.
 ///
 /// br-frankenpandas-reindex-nearest. Only the ORDERED NUMERIC labels have a
-/// meaningful distance. pandas will happily do `nearest` on a datetime index too
-/// (the distance is the timedelta), and this returns `None` for those and for
-/// strings so the caller can refuse explicitly rather than invent an order.
-/// Extending it to Datetime64/Timedelta64 is a follow-up, not an oversight.
+/// meaningful distance: numbers, and a datetime / timedelta label's
+/// nanoseconds (pandas' distance there is the timedelta; they were refused,
+/// br-frankenpandas-u6p7i). Strings and NaT have none, so the caller can
+/// refuse explicitly rather than invent an order.
 fn nearest_label_value(label: &IndexLabel) -> Option<f64> {
     match label {
         IndexLabel::Int64(v) => Some(*v as f64),
         IndexLabel::Float64(v) => Some(v.0),
+        IndexLabel::Datetime64(v) | IndexLabel::Timedelta64(v) if *v != i64::MIN => Some(*v as f64),
         _ => None,
     }
+}
+
+/// The distance between two labels for a reindex `tolerance`: exact in
+/// integers (nanoseconds for datetimes and timedeltas), else in floats;
+/// None where a label has no numeric value.
+fn reindex_label_distance(a: &IndexLabel, b: &IndexLabel) -> Option<f64> {
+    let integer = |label: &IndexLabel| match label {
+        IndexLabel::Int64(v) | IndexLabel::Datetime64(v) | IndexLabel::Timedelta64(v)
+            if *v != i64::MIN || matches!(label, IndexLabel::Int64(_)) =>
+        {
+            Some(i128::from(*v))
+        }
+        _ => None,
+    };
+    match (integer(a), integer(b)) {
+        (Some(x), Some(y)) => Some((x - y).unsigned_abs() as f64),
+        _ => Some((nearest_label_value(a)? - nearest_label_value(b)?).abs()),
+    }
+}
+
+/// pandas' `Index.get_indexer(target, method, limit, tolerance)` with a fill
+/// method: each target label's position in `source` - its own when present,
+/// else by `method` ('pad' / 'ffill', 'backfill' / 'bfill', 'nearest')
+/// under `limit` and `tolerance` (one per target label), as
+/// `reindex(method=)` resolves them. pandas' uniqueness and monotonicity
+/// checks are the caller's (br-frankenpandas-n57tz: the keywords were
+/// unexpected).
+pub fn get_indexer_with_method(
+    source: &Index,
+    target: &Index,
+    method: &str,
+    limit: Option<usize>,
+    tolerance: Option<&[f64]>,
+) -> Result<Vec<Option<usize>>, FrameError> {
+    let positions = source.get_indexer(target);
+    method_reindex_positions(
+        source.labels(),
+        target.labels(),
+        &positions,
+        method,
+        limit,
+        tolerance,
+    )
+}
+
+/// Each target label's source row for a method reindex: its own row when
+/// present, else by `method` (pad / backfill: [`fill_reindex_positions`];
+/// nearest: [`nearest_reindex_positions`]), then pandas' `limit` - at most
+/// that many absent labels take each source row, counted outward from it
+/// (nearest takes the nearer of the limited pad and backfill rows, the
+/// greater label on a tie) - and `tolerance` - a row whose label is further
+/// than the target's tolerance from it is dropped (br-frankenpandas-u6p7i:
+/// both were refused).
+fn method_reindex_positions(
+    source: &[IndexLabel],
+    target: &[IndexLabel],
+    positions: &[Option<usize>],
+    method: &str,
+    limit: Option<usize>,
+    tolerance: Option<&[f64]>,
+) -> Result<Vec<Option<usize>>, FrameError> {
+    let forward = match method {
+        "ffill" | "pad" => Some(true),
+        "bfill" | "backfill" => Some(false),
+        "nearest" => None,
+        other => {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "unsupported reindex method: '{other}'"
+            )));
+        }
+    };
+    let limited = |direction: bool| -> Result<Vec<Option<usize>>, FrameError> {
+        let mut filled = fill_reindex_positions(source, target, positions, direction)?;
+        if let Some(limit) = limit {
+            let mut taken: HashMap<usize, usize> = HashMap::new();
+            let order: Vec<usize> = if direction {
+                (0..target.len()).collect()
+            } else {
+                (0..target.len()).rev().collect()
+            };
+            for j in order {
+                if positions[j].is_some() {
+                    continue;
+                }
+                if let Some(row) = filled[j] {
+                    let count = taken.entry(row).or_default();
+                    if *count >= limit {
+                        filled[j] = None;
+                    } else {
+                        *count += 1;
+                    }
+                }
+            }
+        }
+        Ok(filled)
+    };
+    let mut filled = match (forward, limit) {
+        (Some(direction), _) => limited(direction)?,
+        (None, None) => nearest_reindex_positions(source, target, positions)?,
+        (None, Some(_)) => {
+            let (below, above) = (limited(true)?, limited(false)?);
+            below
+                .iter()
+                .zip(&above)
+                .zip(target)
+                .map(|((&low, &high), label)| match (low, high) {
+                    (Some(low), Some(high)) => {
+                        let far = |row: usize| reindex_label_distance(&source[row], label);
+                        match far(low).partial_cmp(&far(high)) {
+                            Some(Ordering::Less) => Some(low),
+                            Some(Ordering::Greater) => Some(high),
+                            _ => Some(if source[low] > source[high] {
+                                low
+                            } else {
+                                high
+                            }),
+                        }
+                    }
+                    (low, None) => low,
+                    (None, high) => high,
+                })
+                .collect()
+        }
+    };
+    if let Some(tolerance) = tolerance {
+        for (slot, (label, &allowed)) in filled.iter_mut().zip(target.iter().zip(tolerance)) {
+            if let Some(row) = *slot {
+                let distance = reindex_label_distance(&source[row], label).ok_or_else(|| {
+                    FrameError::CompatibilityRejected(
+                        "reindex tolerance needs a numeric or datetime index".to_owned(),
+                    )
+                })?;
+                if distance > allowed || allowed.is_nan() {
+                    *slot = None;
+                }
+            }
+        }
+    }
+    Ok(filled)
 }
 
 /// Resolve absent labels to the CLOSEST source label, as `reindex(method="nearest")`.
@@ -3803,6 +4053,11 @@ fn nearest_reindex_positions(
             continue;
         }
         let Some(want) = nearest_label_value(label) else {
+            // A missing target label (NaN, NaT) has no nearest row.
+            if label.is_missing() {
+                out.push(None);
+                continue;
+            }
             return Err(FrameError::CompatibilityRejected(
                 "reindex method 'nearest' needs a numeric index".to_owned(),
             ));
@@ -3875,6 +4130,17 @@ fn fill_reindex_positions(
         .collect())
 }
 
+/// Resolve `target` label positions against `src` using a dense direct-address
+/// table, valid only when every `src` label is a bounded-range `Int64`.
+///
+/// Returns `Some(positions)` where `positions[j]` is the first-occurrence index
+/// of `target[j]` in `src` (or `None` if absent), bit-identical to probing a
+/// `HashMap<IndexLabel, usize>` built first-occurrence — but with zero hashing.
+/// Returns `None` (decline the fast path) when any source label is non-Int64 or
+/// the value range is too wide to address densely, so the caller falls back to
+/// the hash path. A target matches when it equals an int - an Int64, or an
+/// integral Float64, as `IndexLabel` equality compares numbers by value
+/// (br-frankenpandas-l5sed) - and any other resolves to `None`.
 fn reindex_positions_int64_direct(
     src: &[IndexLabel],
     target: &[IndexLabel],
@@ -3926,9 +4192,9 @@ fn reindex_positions_int64_direct(
     }
     let positions = target
         .iter()
-        .map(|label| match label {
-            IndexLabel::Int64(v) if *v >= min && *v <= max => {
-                let pos = table[(*v - min) as usize];
+        .map(|label| match label.exact_int() {
+            Some(v) if v >= min && v <= max => {
+                let pos = table[(v - min) as usize];
                 (pos != u32::MAX).then_some(pos as usize)
             }
             _ => None,
@@ -4264,6 +4530,9 @@ fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
         IndexLabel::Datetime64(ns) => Scalar::Datetime64(*ns),
         // An object label is its cell again (fvsao.66).
         IndexLabel::Object(object) => Scalar::Object(object.clone()),
+        // A period label is its period again: reset_index of a PeriodIndex
+        // is a period column (45fzr).
+        IndexLabel::Period(period) => Scalar::Period(*period),
         // The natural bijection: a typed-null label round-trips to the
         // same-kind missing scalar.
         IndexLabel::Null(kind) => Scalar::Null(*kind),
@@ -4278,7 +4547,7 @@ fn index_label_to_utf8_scalar(label: &IndexLabel) -> Scalar {
         IndexLabel::Timedelta64(ns) => Scalar::Utf8(Timedelta::format(*ns)),
         IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
         IndexLabel::Object(object) => Scalar::Utf8(object.to_string()),
-        IndexLabel::Null(_) => Scalar::Utf8(label.to_string()),
+        IndexLabel::Period(_) | IndexLabel::Null(_) => Scalar::Utf8(label.to_string()),
     }
 }
 
@@ -4809,6 +5078,9 @@ fn index_label_to_json_value(label: &IndexLabel) -> Value {
         IndexLabel::Utf8(v) => Value::String(v.clone()),
         IndexLabel::Timedelta64(ns) | IndexLabel::Datetime64(ns) => epoch_ms_json(*ns),
         IndexLabel::Object(object) => scalar_to_json_value(&Scalar::Object(object.clone())),
+        // A period as its text (NaT null), as pandas writes one.
+        IndexLabel::Period(period) if period.is_nat() => Value::Null,
+        IndexLabel::Period(period) => Value::String(period.to_string()),
         // pandas to_json renders a missing label as JSON null.
         IndexLabel::Null(_) => Value::Null,
     }
@@ -4824,7 +5096,7 @@ fn index_label_to_json_key(label: &IndexLabel) -> String {
             "null".to_owned()
         }
         IndexLabel::Timedelta64(ns) | IndexLabel::Datetime64(ns) => (*ns / 1_000_000).to_string(),
-        f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+        f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => f.to_string(),
         IndexLabel::Object(object) => object.to_string(),
         IndexLabel::Null(_) => label.to_string(),
     }
@@ -4859,7 +5131,8 @@ fn index_label_to_table_schema_type(label: &IndexLabel) -> &'static str {
         // pandas' table schema calls any object column "string".
         IndexLabel::Utf8(_) | IndexLabel::Object(_) => "string",
         IndexLabel::Timedelta64(_) => "duration",
-        IndexLabel::Datetime64(_) => "datetime",
+        // pandas' table schema calls a period a datetime too.
+        IndexLabel::Datetime64(_) | IndexLabel::Period(_) => "datetime",
         // Same convention as DType::Null in dtype_to_table_schema_type.
         IndexLabel::Null(_) => "any",
     }
@@ -5096,6 +5369,7 @@ fn add_offset_to_label(label: &IndexLabel, offset: &str) -> Result<IndexLabel, F
         | IndexLabel::Bool(_)
         | IndexLabel::Timedelta64(_)
         | IndexLabel::Object(_)
+        | IndexLabel::Period(_)
         | IndexLabel::Null(_) => {
             return Err(FrameError::CompatibilityRejected(
                 "first/last offset requires string (date) index".into(),
@@ -5117,6 +5391,7 @@ fn sub_offset_from_label(label: &IndexLabel, offset: &str) -> Result<IndexLabel,
         | IndexLabel::Bool(_)
         | IndexLabel::Timedelta64(_)
         | IndexLabel::Object(_)
+        | IndexLabel::Period(_)
         | IndexLabel::Null(_) => {
             return Err(FrameError::CompatibilityRejected(
                 "first/last offset requires string (date) index".into(),
@@ -7021,6 +7296,7 @@ fn semantic_integer_label_kind_value(label: &IndexLabel) -> Option<(&'static [u8
         | IndexLabel::Bool(_)
         | IndexLabel::Utf8(_)
         | IndexLabel::Object(_)
+        | IndexLabel::Period(_)
         | IndexLabel::Null(_) => None,
     }
 }
@@ -7128,6 +7404,7 @@ fn sorted_int64_unit_range_labels(labels: &[IndexLabel]) -> Option<(i64, i64)> {
         | IndexLabel::Timedelta64(_)
         | IndexLabel::Datetime64(_)
         | IndexLabel::Object(_)
+        | IndexLabel::Period(_)
         | IndexLabel::Null(_) => {
             return None;
         }
@@ -7140,6 +7417,7 @@ fn sorted_int64_unit_range_labels(labels: &[IndexLabel]) -> Option<(i64, i64)> {
         | IndexLabel::Timedelta64(_)
         | IndexLabel::Datetime64(_)
         | IndexLabel::Object(_)
+        | IndexLabel::Period(_)
         | IndexLabel::Null(_) => {
             return None;
         }
@@ -8412,6 +8690,86 @@ fn forward_fill_scalars(vals: &[Scalar]) -> Vec<Scalar> {
     out
 }
 
+/// `vals` filled as pandas' groupby fill methods fill one group: forward
+/// (`ffill` / `pad`) or backward (`bfill` / `backfill`) from the nearest
+/// value, at most `limit` missing values in a row.
+fn fill_scalars_limited(vals: &[Scalar], forward: bool, limit: Option<usize>) -> Vec<Scalar> {
+    let mut out = vals.to_vec();
+    if !forward {
+        out.reverse();
+    }
+    let mut last: Option<Scalar> = None;
+    let mut run = 0_usize;
+    for cell in &mut out {
+        if cell.is_missing() {
+            if let Some(fill) = &last
+                && limit.is_none_or(|limit| run < limit)
+            {
+                *cell = fill.clone();
+            }
+            run += 1;
+        } else {
+            last = Some(cell.clone());
+            run = 0;
+        }
+    }
+    if !forward {
+        out.reverse();
+    }
+    out
+}
+
+/// One group's pandas `pct_change` over its (already filled) values:
+/// `filled / filled.shift(periods) - 1`. No zero guard - a zero divisor is
+/// inf (NaN for 0/0), as pandas' division (fvsao.13); a timedelta pair
+/// divides its nanoseconds. The DataFrameGroupBy path answered NaN for a
+/// zero divisor and computed `(v - prev) / prev`, off in the last bits
+/// (br-frankenpandas-n57tz).
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_wrap)] // row offsets and nanoseconds
+fn group_pct_change(vals: &[Scalar], periods: i64) -> Vec<Scalar> {
+    let group_len = vals.len() as i64;
+    vals.iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            let prev_idx = (idx as i64).checked_sub(periods).unwrap_or(-1);
+            if prev_idx < 0 || prev_idx >= group_len {
+                return Scalar::Null(NullKind::NaN);
+            }
+            let previous = &vals[prev_idx as usize];
+            if value.is_missing() || previous.is_missing() {
+                return Scalar::Null(NullKind::NaN);
+            }
+            // Per br-frankenpandas-dj6rv: Timedelta64 pct_change matches
+            // pandas - ns deltas divide as dimensionless f64.
+            if let (Scalar::Timedelta64(cur_ns), Scalar::Timedelta64(prev_ns)) = (value, previous) {
+                if *cur_ns == Timedelta::NAT || *prev_ns == Timedelta::NAT {
+                    return Scalar::Null(NullKind::NaN);
+                }
+                return Scalar::Float64(*cur_ns as f64 / *prev_ns as f64 - 1.0);
+            }
+            if let (Ok(current), Ok(prev)) = (value.to_f64(), previous.to_f64()) {
+                Scalar::Float64(current / prev - 1.0)
+            } else {
+                Scalar::Null(NullKind::NaN)
+            }
+        })
+        .collect()
+}
+
+/// pandas' groupby `pct_change` fill method as a direction: forward for
+/// `ffill` / `pad`, backward for `bfill` / `backfill`, None for no fill
+/// (fill_method=None).
+fn pct_change_fill_direction(fill_method: Option<&str>) -> Result<Option<bool>, FrameError> {
+    match fill_method {
+        None => Ok(None),
+        Some("ffill" | "pad") => Ok(Some(true)),
+        Some("bfill" | "backfill") => Ok(Some(false)),
+        Some(other) => Err(FrameError::CompatibilityRejected(format!(
+            "pct_change: unknown fill_method {other:?}"
+        ))),
+    }
+}
+
 /// A timedelta reduction's result back as the datetime it stands for: the
 /// same nanoseconds (NaT stays NaT); see `Series::datetime_as_timedelta`.
 fn datetime_from_timedelta_result(result: Scalar) -> Scalar {
@@ -9559,6 +9917,48 @@ fn compare_categorical_codes_with_na_position(
     }
 }
 
+/// `column` with its missing values filled by `fill_value`: a categorical
+/// column by that category, keeping its categories and ordering (a value
+/// outside them is pandas' TypeError; the fill raised 'cannot cast scalar
+/// of dtype Utf8 to Categorical' for any value; br-frankenpandas-k2bwx),
+/// any other as `Column::fillna` fills.
+pub fn fill_column(column: &Column, fill_value: &Scalar) -> Result<Column, FrameError> {
+    let Some(meta) = column.categorical() else {
+        return Ok(column.fillna(fill_value)?);
+    };
+    if fill_value.is_missing() || !column.has_any_missing() {
+        return Ok(column.clone());
+    }
+    let code_of = |value: &Scalar| {
+        meta.categories
+            .iter()
+            .position(|category| category == value)
+            .map(|position| position as i64)
+    };
+    let Some(fill_code) = code_of(fill_value) else {
+        let shown = match fill_value {
+            Scalar::Utf8(text) => text.clone(),
+            other => other.to_string(),
+        };
+        return Err(FrameError::CompatibilityRejected(format!(
+            "Cannot setitem on a Categorical with a new category ({shown}), set the categories first"
+        )));
+    };
+    let codes = column
+        .values()
+        .iter()
+        .map(|value| {
+            if value.is_missing() {
+                fill_code
+            } else {
+                code_of(value).unwrap_or(-1)
+            }
+        })
+        .collect();
+    let filled = Series::from_categorical_codes("", codes, meta.categories.clone(), meta.ordered)?;
+    Ok(filled.column().clone())
+}
+
 impl Series {
     pub fn new(
         name: impl Into<LabelName>,
@@ -9661,7 +10061,7 @@ impl Series {
     /// `result` with its column in this Series' nullable dtype, as
     /// [`nullable_kept`] (`where`, `mask`).
     fn keep_nullable(&self, result: Self) -> Result<Self, FrameError> {
-        let column = nullable_kept(&self.column, result.column.clone());
+        let column = nullable_kept(&self.column, result.column.clone())?;
         Self::new(result.name.clone(), result.index.clone(), column)
     }
 
@@ -10727,9 +11127,10 @@ impl Series {
                 IndexLabel::Utf8(s) => s.len(),
                 IndexLabel::Timedelta64(ns) => Timedelta::format(*ns).len(),
                 IndexLabel::Datetime64(ns) => format_datetime_ns(*ns).len(),
-                f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
-                    f.to_string().len()
-                }
+                f @ (IndexLabel::Float64(_)
+                | IndexLabel::Bool(_)
+                | IndexLabel::Object(_)
+                | IndexLabel::Period(_)) => f.to_string().len(),
                 IndexLabel::Null(_) => l.to_string().len(),
             })
             .max()
@@ -10741,9 +11142,10 @@ impl Series {
                 IndexLabel::Utf8(s) => s.clone(),
                 IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                 IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
-                    f.to_string()
-                }
+                f @ (IndexLabel::Float64(_)
+                | IndexLabel::Bool(_)
+                | IndexLabel::Object(_)
+                | IndexLabel::Period(_)) => f.to_string(),
                 IndexLabel::Null(_) => label.to_string(),
             };
             let val_str = match val {
@@ -12411,7 +12813,9 @@ impl Series {
                         keep_count,
                     )
                 };
-            let index = Index::from_i64_values(labels).rename_index(self.index.name());
+            let index = Index::from_i64_values(labels)
+                .with_dtype_of(&self.index)
+                .rename_index(self.index.name());
             return Some(Self::new(
                 self.name.clone(),
                 index,
@@ -12435,7 +12839,9 @@ impl Series {
                         keep_count,
                     )
                 };
-            let index = Index::from_i64_values(labels).rename_index(self.index.name());
+            let index = Index::from_i64_values(labels)
+                .with_dtype_of(&self.index)
+                .rename_index(self.index.name());
             return Some(Self::new(
                 self.name.clone(),
                 index,
@@ -12855,8 +13261,9 @@ impl Series {
         // `HashMap<IndexLabel, usize>` (perf_profile reindex_str showed
         // position_map_first + Sip13 hashing at ~40% of the op). Bit-identical:
         // duplicates were rejected above so first-occurrence == only-occurrence,
-        // `IndexLabel` Eq is kind-sensitive (only Int64 targets can match Int64
-        // sources), and out-of-range / absent targets map to `None` exactly as
+        // only a target equal to an int (Int64, or an integral Float64 -
+        // `IndexLabel` compares numbers by value) can match Int64 sources, and
+        // out-of-range / absent targets map to `None` exactly as
         // `HashMap::get` returns `None`.
         // Non-bounded-Int64 fallback (Datetime64, wide/sparse Int64, Utf8):
         // route through `Index::get_indexer` instead of hand-rolling a
@@ -12870,8 +13277,8 @@ impl Series {
         // its index engine identically). Bit-identical: duplicates were rejected
         // above, so `self` is unique and get_indexer's first-occurrence ==
         // only-occurrence == the `HashMap::get` the old fallback returned;
-        // `IndexLabel` Eq is kind-sensitive, so absent/other-kind targets map to
-        // `None` exactly as before.
+        // `IndexLabel` Eq keeps kinds apart (numbers compare by value), so
+        // absent/other-kind targets map to `None` exactly as before.
         let positions: Vec<Option<usize>> =
             reindex_positions_int64_direct(self.index.labels(), new_index.labels())
                 .unwrap_or_else(|| self.index.get_indexer(&new_index));
@@ -12882,7 +13289,7 @@ impl Series {
 
     /// Reindex to new labels with a fill method for introduced NaN.
     ///
-    /// Matches `s.reindex(new_labels, method='ffill'|'bfill')`.
+    /// Matches `s.reindex(new_labels, method='ffill'|'bfill'|'nearest')`.
     ///
     /// Single-pass, label-presence driven: only labels ABSENT from the source
     /// are filled from the nearest source label in the fill direction; labels
@@ -12894,25 +13301,24 @@ impl Series {
         new_labels: Vec<IndexLabel>,
         method: &str,
     ) -> Result<Self, FrameError> {
+        self.reindex_with_method_options(new_labels, method, None, None)
+    }
+
+    /// [`Self::reindex_with_method`] with pandas' `limit` and `tolerance`
+    /// (one per new label, in the labels' units: nanoseconds for datetimes;
+    /// see `method_reindex_positions`).
+    pub fn reindex_with_method_options(
+        &self,
+        new_labels: Vec<IndexLabel>,
+        method: &str,
+        limit: Option<usize>,
+        tolerance: Option<&[f64]>,
+    ) -> Result<Self, FrameError> {
         if self.index.has_duplicates() {
             return Err(FrameError::CompatibilityRejected(
                 "reindex cannot handle duplicate index labels".to_owned(),
             ));
         }
-        // br-frankenpandas-reindex-nearest: 'nearest' is pandas' third method and
-        // was rejected here as unsupported. It is not a direction, so it cannot be
-        // folded into `forward` — it resolves each absent label to the CLOSEST
-        // source label instead of the closest one in a direction.
-        let forward = match method {
-            "ffill" | "pad" => Some(true),
-            "bfill" | "backfill" => Some(false),
-            "nearest" => None,
-            other => {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "unsupported reindex method: '{other}'"
-                )));
-            }
-        };
         // Preserve the index name on a flat label list (mirrors `reindex`).
         let new_index = Index::new(new_labels).rename_index(self.index.name());
         // Resolve each new label to its source position (`None` = absent),
@@ -12920,22 +13326,36 @@ impl Series {
         let positions: Vec<Option<usize>> =
             reindex_positions_int64_direct(self.index.labels(), new_index.labels())
                 .unwrap_or_else(|| self.index.get_indexer(&new_index));
-        // Absent labels inherit the nearest present source position in the fill
-        // direction; present labels (incl. source NaNs) keep their own position.
-        let filled = match forward {
-            Some(direction) => fill_reindex_positions(
-                self.index.labels(),
-                new_index.labels(),
-                &positions,
-                direction,
-            )?,
-            None => nearest_reindex_positions(self.index.labels(), new_index.labels(), &positions)?,
-        };
-        let col = self.column.reindex_by_positions(&filled)?;
+        // Absent labels inherit a present source position by the method;
+        // present labels (incl. source NaNs) keep their own position.
+        let filled = method_reindex_positions(
+            self.index.labels(),
+            new_index.labels(),
+            &positions,
+            method,
+            limit,
+            tolerance,
+        )?;
+        // A label no row fills is a gap pandas invents, as plain `reindex`'s
+        // (an int Series became float64 there but stayed int64 holding a
+        // missing value here).
+        let col = reindex_column_with_invented_gaps(&self.column, &filled)?;
         Self::new(self.name.clone(), new_index, col)
     }
 
     // --- Comparison Operators ---
+
+    /// The name of a result of this Series and `other`, as pandas names it:
+    /// theirs when both share it, else none. (Comparisons were named 'a==b'
+    /// and the numpy-style power / remainder / fmod / floor_divide kept this
+    /// Series' name; br-frankenpandas-u6p7i.)
+    fn shared_name(&self, other: &Self) -> LabelName {
+        if self.name == other.name {
+            self.name.clone()
+        } else {
+            LabelName::default()
+        }
+    }
 
     /// Core comparison: align indexes, reindex columns, apply comparison.
     /// Returns a Bool-typed Series.
@@ -12945,20 +13365,7 @@ impl Series {
             return self.categorical_ordering_comparison_op(other, op);
         }
 
-        let op_symbol = match op {
-            ComparisonOp::Gt => ">",
-            ComparisonOp::Lt => "<",
-            ComparisonOp::Eq => "==",
-            ComparisonOp::Ne => "!=",
-            ComparisonOp::Ge => ">=",
-            ComparisonOp::Le => "<=",
-        };
-
-        let out_name = if self.name == other.name {
-            self.name.clone()
-        } else {
-            format!("{}{op_symbol}{}", self.name, other.name).into()
-        };
+        let out_name = self.shared_name(other);
 
         // Identity fast path (mirrors `binary_op_with_policy`'s arithmetic
         // handling): when the two indexes are equal, alignment is purely
@@ -13069,21 +13476,8 @@ impl Series {
             })
             .collect();
 
-        let op_symbol = match op {
-            ComparisonOp::Gt => ">",
-            ComparisonOp::Lt => "<",
-            ComparisonOp::Eq => "==",
-            ComparisonOp::Ne => "!=",
-            ComparisonOp::Ge => ">=",
-            ComparisonOp::Le => "<=",
-        };
-        let out_name = if self.name == other.name {
-            self.name.clone()
-        } else {
-            format!("{}{op_symbol}{}", self.name, other.name).into()
-        };
         Self::new(
-            out_name,
+            self.shared_name(other),
             plan.union_index,
             Column::new(DType::Bool, values)?,
         )
@@ -13551,22 +13945,24 @@ impl Series {
             // v-start arithmetically, O(1) per label, no full-index hashmap and no
             // `self.index.labels()` materialization. Strictly unique, so each label
             // matches one position; the emitted label equals the request.
+            // An integral float selects the int it equals, which labels the
+            // row (pandas keeps the index's label; br-frankenpandas-l5sed).
             use_typed_int64_index = true;
             out_label_ints.reserve(labels.len());
             for requested in labels {
-                match requested {
-                    IndexLabel::Int64(v) => {
+                match requested.exact_int() {
+                    Some(v) => {
                         let off = v.wrapping_sub(start);
                         if off >= 0 && (off as u64) < len as u64 {
                             positions.push(off as usize);
-                            out_label_ints.push(*v);
+                            out_label_ints.push(v);
                         } else {
                             return Err(FrameError::CompatibilityRejected(format!(
                                 "loc label not found: {requested:?}"
                             )));
                         }
                     }
-                    _ => {
+                    None => {
                         return Err(FrameError::CompatibilityRejected(format!(
                             "loc label not found: {requested:?}"
                         )));
@@ -13577,14 +13973,15 @@ impl Series {
             // Strictly-ascending materialized Int64 indexes are unique, so list
             // loc can resolve each requested label with a raw i64 binary search
             // and avoid the duplicate-expansion map that allocates a Vec per
-            // index label. Missing/non-Int64 selectors still fail closed.
+            // index label. Missing selectors, or ones equal to no int, still
+            // fail closed.
             use_typed_int64_index = true;
             out_label_ints.reserve(labels.len());
             for (requested, position) in labels.iter().zip(resolved_positions) {
-                match (requested, position) {
-                    (IndexLabel::Int64(value), Some(position)) => {
+                match (requested.exact_int(), position) {
+                    (Some(value), Some(position)) => {
                         positions.push(position);
-                        out_label_ints.push(*value);
+                        out_label_ints.push(value);
                     }
                     _ => {
                         return Err(FrameError::CompatibilityRejected(format!(
@@ -13598,14 +13995,15 @@ impl Series {
             // Unsorted unique materialized Int64 index: resolve each requested
             // label through the identity-cached i64->position hashtable instead
             // of rebuilding the per-call pointer-key map over the whole index.
-            // Unique ⇒ one position per label; missing/non-Int64 fail closed.
+            // Unique ⇒ one position per label; missing selectors, or ones
+            // equal to no int, fail closed.
             use_typed_int64_index = true;
             out_label_ints.reserve(labels.len());
             for (requested, position) in labels.iter().zip(resolved_positions) {
-                match (requested, position) {
-                    (IndexLabel::Int64(value), Some(position)) => {
+                match (requested.exact_int(), position) {
+                    (Some(value), Some(position)) => {
                         positions.push(position);
-                        out_label_ints.push(*value);
+                        out_label_ints.push(value);
                     }
                     _ => {
                         return Err(FrameError::CompatibilityRejected(format!(
@@ -13861,14 +14259,16 @@ impl Series {
         let start_pos = start.map_or(0, resolve);
         let end_pos = stop.map_or(len, resolve);
 
-        if start_pos >= end_pos || start_pos >= len {
-            return self.with_labels_and_values_preserving_name(Vec::new(), Vec::new());
-        }
-
         // perf (br-frankenpandas-qynot): zero-copy contiguous slice (typed/affine
         // backing) instead of materializing the full column/index before slicing.
-        // Bit-identical contiguous range; index name preserved.
-        let take = end_pos - start_pos;
+        // Bit-identical contiguous range; index name preserved. An empty window
+        // is a slice too, so it keeps the dtype (it was rebuilt from no values,
+        // an object Series; br-frankenpandas-gzune).
+        let (start_pos, take) = if start_pos >= end_pos || start_pos >= len {
+            (start_pos.min(len), 0)
+        } else {
+            (start_pos, end_pos - start_pos)
+        };
         let index = self
             .index
             .slice(start_pos, take)
@@ -14088,7 +14488,7 @@ impl Series {
     ///
     /// Matches `pd.Series.fillna(value)`.
     pub fn fillna(&self, fill_value: &Scalar) -> Result<Self, FrameError> {
-        let column = self.column.fillna(fill_value)?;
+        let column = fill_column(&self.column, fill_value)?;
         Self::new(self.name.clone(), self.index.clone(), column)
     }
 
@@ -14571,6 +14971,40 @@ impl Series {
         limit_direction: &str,
         limit_area: Option<&str>,
     ) -> Result<Self, FrameError> {
+        let vals = self.column.values();
+        let mut out = vals.to_vec();
+        for (i, anchors) in self
+            .interpolation_anchors(limit, limit_direction, limit_area)?
+            .into_iter()
+            .enumerate()
+        {
+            out[i] = match anchors {
+                Some((Some(li), Some(ri))) => {
+                    let lv = vals[li].to_f64().map_err(ColumnError::from)?;
+                    let rv = vals[ri].to_f64().map_err(ColumnError::from)?;
+                    let t = (i - li) as f64 / (ri - li) as f64;
+                    Scalar::Float64(lv + t * (rv - lv))
+                }
+                Some((Some(li), None)) => vals[li].clone(),
+                Some((None, Some(ri))) => vals[ri].clone(),
+                _ => continue,
+            };
+        }
+        self.with_values_preserving_index(out)
+    }
+
+    /// For each position, the valid values bounding its gap (`(left,
+    /// right)`) when pandas' `interpolate` may fill it - a valid value within
+    /// `limit` in the `limit_direction` ('forward' the left one, 'backward'
+    /// the right one, 'both' either), an interior gap (both) or an edge gap
+    /// (one) as `limit_area` asks - else None (a valid value, too). pandas'
+    /// `interpolate_1d` preserve set, as a reach test.
+    fn interpolation_anchors(
+        &self,
+        limit: Option<usize>,
+        limit_direction: &str,
+        limit_area: Option<&str>,
+    ) -> Result<Vec<Option<(Option<usize>, Option<usize>)>>, FrameError> {
         let (use_fwd, use_bwd) = match limit_direction {
             "forward" => (true, false),
             "backward" => (false, true),
@@ -14616,49 +15050,68 @@ impl Series {
         }
 
         let within = |dist: usize| limit.is_none_or(|lim| dist <= lim);
-        let mut out = vals.to_vec();
-        for i in 0..n {
-            if !vals[i].is_missing() {
-                continue;
-            }
-            let left = prev_valid[i];
-            let right = next_valid[i];
-            // limit_area: an interior gap has both anchors; an edge gap exactly
-            // one. A gap with neither anchor is never fillable.
-            let area_ok = match area {
-                None => true,
-                Some(true) => left.is_some() && right.is_some(),
-                Some(false) => left.is_some() != right.is_some(),
-            };
-            let fwd_ok = use_fwd && left.is_some_and(|li| within(i - li));
-            let bwd_ok = use_bwd && right.is_some_and(|ri| within(ri - i));
-            if !area_ok || !(fwd_ok || bwd_ok) {
-                continue; // unreachable / wrong area -> stays missing
-            }
-            out[i] = match (left, right) {
-                (Some(li), Some(ri)) => {
-                    let lv = vals[li].to_f64().map_err(ColumnError::from)?;
-                    let rv = vals[ri].to_f64().map_err(ColumnError::from)?;
-                    let t = (i - li) as f64 / (ri - li) as f64;
-                    Scalar::Float64(lv + t * (rv - lv))
+        Ok((0..n)
+            .map(|i| {
+                if !vals[i].is_missing() {
+                    return None;
                 }
-                (Some(li), None) => vals[li].clone(),
-                (None, Some(ri)) => vals[ri].clone(),
-                (None, None) => continue,
-            };
-        }
+                let (left, right) = (prev_valid[i], next_valid[i]);
+                // limit_area: an interior gap has both anchors; an edge gap
+                // exactly one. A gap with neither anchor is never fillable.
+                let area_ok = match area {
+                    None => true,
+                    Some(true) => left.is_some() && right.is_some(),
+                    Some(false) => left.is_some() != right.is_some(),
+                };
+                let fwd_ok = use_fwd && left.is_some_and(|li| within(i - li));
+                let bwd_ok = use_bwd && right.is_some_and(|ri| within(ri - i));
+                (area_ok && (fwd_ok || bwd_ok)).then_some((left, right))
+            })
+            .collect())
+    }
+
+    /// A method other than linear / pad under pandas' `interpolate_1d`: the
+    /// method's fill ([`interpolate_method`](Self::interpolate_method))
+    /// where [`interpolation_anchors`](Self::interpolation_anchors) says the
+    /// gap may be filled and the method reaches it - `index` / `values` /
+    /// `time` carry the edge value out as numpy's interp does, the scipy
+    /// methods (nearest, zero) fill only between two valid values (they
+    /// filled the leading and trailing gaps too; br-frankenpandas-u6p7i).
+    fn interpolate_within_reach(
+        &self,
+        method: &str,
+        limit: Option<usize>,
+        limit_direction: &str,
+        limit_area: Option<&str>,
+    ) -> Result<Self, FrameError> {
+        let extrapolates = matches!(method, "index" | "values" | "time");
+        let anchors = self.interpolation_anchors(limit, limit_direction, limit_area)?;
+        let full = self.interpolate_method(method)?;
+        let (vals, filled) = (self.column.values(), full.column.values());
+        let out = anchors
+            .into_iter()
+            .enumerate()
+            .map(|(i, anchors)| match anchors {
+                Some((Some(_), Some(_))) => filled[i].clone(),
+                Some((Some(_), None)) if extrapolates => filled[i].clone(),
+                // numpy's interp carries the first value back over a
+                // leading gap (the method's own fill leaves it).
+                Some((None, Some(ri))) if extrapolates => vals[ri].clone(),
+                _ => vals[i].clone(),
+            })
+            .collect();
         self.with_values_preserving_index(out)
     }
 
     /// Whether [`interpolate_with`](Self::interpolate_with) implements this
-    /// combination: linear takes every option, the other methods only `limit`
-    /// in the forward direction.
+    /// combination: every method takes every option but `pad`, a forward fill
+    /// (pandas refuses any other direction) without `limit_area`.
     pub fn interpolate_supports(
         method: &str,
         limit_direction: Option<&str>,
         limit_area: Option<&str>,
     ) -> bool {
-        method == "linear"
+        method != "pad"
             || (matches!(limit_direction, None | Some("forward")) && limit_area.is_none())
     }
 
@@ -14688,8 +15141,14 @@ impl Series {
                 limit_direction.unwrap_or("forward"),
                 limit_area,
             ),
-            (other, None) => self.interpolate_method(other),
-            (other, Some(l)) => self.interpolate_with_limit(other, l),
+            ("pad", None) => self.interpolate_method("pad"),
+            ("pad", Some(l)) => self.interpolate_with_limit("pad", l),
+            (other, _) => self.interpolate_within_reach(
+                other,
+                limit,
+                limit_direction.unwrap_or("forward"),
+                limit_area,
+            ),
         }
     }
 
@@ -14843,7 +15302,10 @@ impl Series {
             // x-axis instead of integer positions, so irregularly-spaced gaps
             // weight by real distance. Edge handling matches `linear`: leading
             // gaps stay missing, trailing gaps forward-carry the last value.
-            "index" | "values" | "time" => {
+            // scipy's `slinear` is the same line between the two valid values
+            // around a gap (interpolate_with leaves its edges missing; it was
+            // unsupported, br-frankenpandas-u6p7i).
+            "index" | "values" | "time" | "slinear" => {
                 let vals = self.column.values();
                 let n = vals.len();
                 let xs: Vec<f64> = self
@@ -16957,7 +17419,137 @@ impl Series {
     ///
     /// Matches `pd.Series.replace(to_replace, value)` for scalar pairs.
     pub fn replace(&self, replacements: &[(Scalar, Scalar)]) -> Result<Self, FrameError> {
-        self.keeping_width(self.replace_storage(replacements), false)
+        let replacements = self.replace_keys_by_value(replacements);
+        let out = self.keeping_width(self.replace_storage(&replacements), false)?;
+        let writes_missing = replacements.iter().any(|(_, value)| value.is_missing());
+        self.holding_replaced(out, writes_missing, |before| {
+            replacements
+                .iter()
+                .find(|(key, _)| key.semantic_eq(before))
+                .map(|(_, value)| value.clone())
+        })
+    }
+
+    /// The replace keys as this column compares them: pandas matches by
+    /// value, so the key 1 finds a float column's 1.0 and the key 1.0 an int
+    /// column's 1 (neither was replaced; br-frankenpandas-y1092).
+    #[allow(clippy::cast_precision_loss)] // an int key compares as float64, as pandas'
+    fn replace_keys_by_value<'a>(
+        &self,
+        replacements: &'a [(Scalar, Scalar)],
+    ) -> std::borrow::Cow<'a, [(Scalar, Scalar)]> {
+        let dtype = self.column.dtype();
+        let float_column = matches!(dtype, DType::Float64 | DType::Float64Nullable);
+        let int_column = matches!(dtype, DType::Int64 | DType::Int64Nullable);
+        let key_for = |key: &Scalar| match key {
+            Scalar::Int64(v) if float_column => Some(Scalar::Float64(*v as f64)),
+            Scalar::Float64(v) if int_column => dense_i64_key_from_f64(*v).map(Scalar::Int64),
+            _ => None,
+        };
+        if !replacements.iter().any(|(key, _)| key_for(key).is_some()) {
+            return std::borrow::Cow::Borrowed(replacements);
+        }
+        std::borrow::Cow::Owned(
+            replacements
+                .iter()
+                .map(|(key, value)| (key_for(key).unwrap_or_else(|| key.clone()), value.clone()))
+                .collect(),
+        )
+    }
+
+    /// pandas' dtype for what a replace wrote into this column (its block
+    /// coercion), `written` naming the value a replaced cell took (looked at
+    /// only when `writes_missing`, some replacement value being missing). A
+    /// nullable column keeps its dtype while its values are its kind (a
+    /// missing value is <NA>). A missing value written where a value was: a
+    /// numpy int64 / float64 column cannot hold None, so it becomes object,
+    /// and int64 holds a NaN only as float64; a datetime / timedelta
+    /// column's missing is NaT; text replaced by nothing but NaN is float64.
+    /// Inference over the replaced values skipped the missing and the
+    /// nullable flag, so Int64 came back int64 and int64 held None or NaN
+    /// (br-frankenpandas-y1092).
+    fn holding_replaced(
+        &self,
+        out: Self,
+        writes_missing: bool,
+        written: impl Fn(&Scalar) -> Option<Scalar>,
+    ) -> Result<Self, FrameError> {
+        let source = self.column.dtype();
+        let kind = match source {
+            DType::Int64Nullable => Some(DType::Int64),
+            DType::Float64Nullable => Some(DType::Float64),
+            DType::BoolNullable => Some(DType::Bool),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            let result = out.column.dtype();
+            if result == source || (result != kind && result != DType::Null) {
+                return Ok(out);
+            }
+            let column = Column::new(source, out.column.values().to_vec())?;
+            return Self::new(out.name.clone(), out.index.clone(), column);
+        }
+        if !writes_missing
+            || !matches!(
+                source,
+                DType::Int64
+                    | DType::Float64
+                    | DType::Datetime64 { .. }
+                    | DType::Timedelta64
+                    | DType::Utf8
+            )
+        {
+            return Ok(out);
+        }
+        let before = self.column.values();
+        let after = out.column.values();
+        let mut values: Option<Vec<Scalar>> = None;
+        let (mut wrote_none, mut wrote_nan) = (false, false);
+        for (pos, (old, new)) in before.iter().zip(after).enumerate() {
+            if old.is_missing() || !new.is_missing() {
+                continue;
+            }
+            let value = written(old).unwrap_or(Scalar::Null(NullKind::NaN));
+            if matches!(value, Scalar::Null(NullKind::NaN))
+                || matches!(value, Scalar::Float64(v) if v.is_nan())
+            {
+                wrote_nan = true;
+            } else {
+                wrote_none = true;
+            }
+            values.get_or_insert_with(|| after.to_vec())[pos] = value;
+        }
+        let Some(mut values) = values else {
+            return Ok(out);
+        };
+        let result = out.column.dtype();
+        let numeric = matches!(result, DType::Int64 | DType::Float64 | DType::Null);
+        let column = match source {
+            DType::Int64 | DType::Float64 if wrote_none && numeric => {
+                Column::from_object_values(values)
+            }
+            DType::Int64 if numeric => {
+                for value in &mut values {
+                    if value.is_missing() {
+                        *value = Scalar::Null(NullKind::NaN);
+                    }
+                }
+                Column::new(DType::Float64, values)?
+            }
+            DType::Datetime64 { .. } | DType::Timedelta64 if result == source => {
+                for value in &mut values {
+                    if value.is_missing() {
+                        *value = Scalar::Null(NullKind::NaT);
+                    }
+                }
+                Column::new(source, values)?
+            }
+            DType::Utf8 if wrote_nan && !wrote_none && values.iter().all(Scalar::is_missing) => {
+                Column::from_f64_values(vec![f64::NAN; values.len()])
+            }
+            _ => return Ok(out),
+        };
+        Self::new(out.name.clone(), out.index.clone(), column)
     }
 
     fn replace_storage(&self, replacements: &[(Scalar, Scalar)]) -> Result<Self, FrameError> {
@@ -17147,6 +17739,29 @@ impl Series {
         self.with_values_preserving_index(out)
     }
 
+    /// pandas' regex replace with a non-string `value` (NaN, None, a
+    /// number): every string cell the pattern finds (`re.search`) becomes
+    /// `value` whole, of its own type; any other cell is unchanged. (A
+    /// string value is a substitution - [`Self::replace_regex`]; this one
+    /// was written as its text, so NaN came back as the string 'nan';
+    /// br-frankenpandas-otatv.)
+    pub fn replace_regex_cells(&self, pat: &str, value: &Scalar) -> Result<Self, FrameError> {
+        let re = regex::Regex::new(pat)
+            .map_err(|e| FrameError::CompatibilityRejected(format!("invalid regex: {e}")))?;
+        let hit = |val: &Scalar| matches!(val, Scalar::Utf8(s) if re.is_match(s));
+        if !self.column.values().iter().any(hit) {
+            return Ok(self.clone());
+        }
+        let out = self
+            .column
+            .values()
+            .iter()
+            .map(|val| if hit(val) { value.clone() } else { val.clone() })
+            .collect();
+        let out = self.with_values_preserving_index(out)?;
+        self.holding_replaced(out, value.is_missing(), |_| Some(value.clone()))
+    }
+
     /// Compute the q-th quantile (0.0 to 1.0) using linear interpolation.
     ///
     /// Matches `pd.Series.quantile(q)`.
@@ -17168,18 +17783,7 @@ impl Series {
                 "quantile must be between 0 and 1, got {q}"
             )));
         }
-        let mode = match interpolation {
-            "linear" => QuantileInterpolation::Linear,
-            "lower" => QuantileInterpolation::Lower,
-            "higher" => QuantileInterpolation::Higher,
-            "nearest" => QuantileInterpolation::Nearest,
-            "midpoint" => QuantileInterpolation::Midpoint,
-            other => {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "quantile: interpolation must be one of 'linear', 'lower', 'higher', 'nearest', 'midpoint', got {other:?}"
-                )));
-            }
-        };
+        let mode = parse_quantile_interpolation(interpolation)?;
         if let Some(nanos) = self.datetime_as_timedelta()? {
             return nanos
                 .quantile_with_interpolation(q, interpolation)
@@ -18850,7 +19454,7 @@ impl Series {
     /// Matches `np.floor_divide(s1, s2)` / `s1 // s2`.
     pub fn floor_divide(&self, other: &Self) -> Result<Self, FrameError> {
         Self::new(
-            self.name.clone(),
+            self.shared_name(other),
             self.index.clone(),
             self.column.floor_divide(other.column())?,
         )
@@ -18861,7 +19465,7 @@ impl Series {
     /// Matches `np.fmod(s1, s2)`.
     pub fn fmod(&self, other: &Self) -> Result<Self, FrameError> {
         Self::new(
-            self.name.clone(),
+            self.shared_name(other),
             self.index.clone(),
             self.column.fmod(other.column())?,
         )
@@ -18878,7 +19482,7 @@ impl Series {
             ));
         }
         Self::new(
-            self.name.clone(),
+            self.shared_name(other),
             self.index.clone(),
             self.column.power(other.column())?,
         )
@@ -18895,10 +19499,10 @@ impl Series {
             && let Some(column) =
                 self.timedelta_scaled_binary_same_index(other, ArithmeticOp::Mod)?
         {
-            return Self::new(self.name.clone(), self.index.clone(), column);
+            return Self::new(self.shared_name(other), self.index.clone(), column);
         }
         Self::new(
-            self.name.clone(),
+            self.shared_name(other),
             self.index.clone(),
             self.column.remainder(other.column())?,
         )
@@ -26223,6 +26827,19 @@ impl Series {
         drop: bool,
         name: Option<&str>,
     ) -> Result<SeriesResetIndexResult, FrameError> {
+        self.reset_index_allow_duplicates(drop, name, false)
+    }
+
+    /// `pd.Series.reset_index(drop=..., name=..., allow_duplicates=...)`:
+    /// with `allow_duplicates` an index column may share the value column's
+    /// label, where without it that is pandas' "cannot insert X, already
+    /// exists" (br-frankenpandas-n57tz: allow_duplicates was refused).
+    pub fn reset_index_allow_duplicates(
+        &self,
+        drop: bool,
+        name: Option<&str>,
+        allow_duplicates: bool,
+    ) -> Result<SeriesResetIndexResult, FrameError> {
         if drop {
             let index = range_index(self.column.len())?;
             let series = Self::new(self.name.clone(), index, self.column.clone())?;
@@ -26241,7 +26858,9 @@ impl Series {
         // level or `level_i`, as pandas does
         // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
         if let Some(levels) = self.index.row_multiindex() {
-            let mut columns = BTreeMap::new();
+            // The store keeps its pairs in order, repeated labels apart
+            // (allow_duplicates).
+            let mut columns = Vec::with_capacity(levels.nlevels() + 1);
             let mut order = Vec::with_capacity(levels.nlevels() + 1);
             // Each level's column is labelled by its typed name (fvsao.64).
             let mut labels = Vec::with_capacity(levels.nlevels() + 1);
@@ -26251,29 +26870,35 @@ impl Series {
                     LabelName::label,
                 );
                 let level_name = column_key(&level_label);
-                if level_name == value_column_name || order.contains(&level_name) {
+                if !allow_duplicates
+                    && (level_name == value_column_name || order.contains(&level_name))
+                {
                     return Err(FrameError::CompatibilityRejected(format!(
                         "cannot insert {level_name}, already exists"
                     )));
                 }
                 let values =
                     index_labels_to_column_scalars(levels.get_level_values(level)?.labels());
-                columns.insert(level_name.clone(), Column::from_values(values)?);
+                columns.push((level_name.clone(), Column::from_values(values)?));
                 order.push(level_name);
                 labels.push(level_label);
             }
-            columns.insert(value_column_name.clone(), self.column.clone());
+            columns.push((value_column_name.clone(), self.column.clone()));
             order.push(value_column_name);
             labels.push(value_label);
-            let frame = DataFrame::new_with_column_order(range_index(self.len())?, columns, order)?
-                .with_recorded_column_labels(labels);
+            let frame = DataFrame::new_with_column_order(
+                range_index(self.len())?,
+                ColumnStore::from_pairs(columns),
+                order,
+            )?
+            .with_recorded_column_labels(labels);
             return Ok(SeriesResetIndexResult::DataFrame(frame));
         }
         // The index column is labelled by the index's typed name (0 stays
         // the integer 0; fvsao.64), else 'index' / 'level_0'.
         let index_label = match self.index.name() {
             Some(name) => {
-                if *name == value_column_name {
+                if *name == value_column_name && !allow_duplicates {
                     return Err(FrameError::CompatibilityRejected(format!(
                         "cannot insert {name}, already exists"
                     )));
@@ -26293,9 +26918,12 @@ impl Series {
             Some(zone) => index_column.with_dtype(DType::datetime64_tz(zone)),
             None => index_column,
         };
-        let mut columns = BTreeMap::new();
-        columns.insert(index_column_name.clone(), index_column);
-        columns.insert(value_column_name.clone(), self.column.clone());
+        // In order, so an index column sharing the value column's label
+        // (allow_duplicates) stays its own column.
+        let columns = ColumnStore::from_pairs([
+            (index_column_name.clone(), index_column),
+            (value_column_name.clone(), self.column.clone()),
+        ]);
 
         let frame = DataFrame::new_with_column_order(
             range_index(self.len())?,
@@ -26532,7 +27160,10 @@ impl Series {
             }
         }
 
-        self.with_values_preserving_index(out)
+        // A change is float64 even when every row is missing (pandas'
+        // all-NaN change of an all-NaN column; inferred, it was object).
+        let column = Column::new(DType::Float64, out)?;
+        Series::new(self.name.clone(), self.index.clone(), column)
     }
 
     /// Percentage change with optional null fill before computation.
@@ -26768,49 +27399,60 @@ impl Series {
         if let Some(described) = self.describe_categorical()? {
             return Ok(described);
         }
-        if self.column.dtype() == DType::Utf8 {
+        // A text, bool or all-missing Series describes as pandas'
+        // count / unique / top / freq, an object result; with nothing
+        // present top and freq are NaN. A bool Series ran the numeric
+        // summary, and nothing present gave freq 0 in an int64 result
+        // (br-frankenpandas-uy0mu).
+        if matches!(
+            self.column.dtype(),
+            DType::Utf8 | DType::Bool | DType::BoolNullable | DType::Null
+        ) {
             let values = self.column.values();
-            let mut order: Vec<String> = Vec::new();
-            let mut counts: std::collections::HashMap<String, usize> =
-                std::collections::HashMap::new();
+            let mut order: Vec<&Scalar> = Vec::new();
+            let mut counts: FxHashMap<ScalarKey<'_>, usize> = FxHashMap::default();
             for value in values {
-                if let Scalar::Utf8(text) = value {
-                    let entry = counts.entry(text.clone()).or_insert(0);
-                    if *entry == 0 {
-                        order.push(text.clone());
-                    }
-                    *entry += 1;
+                let Some(key) = scalar_key_skip_missing(value) else {
+                    continue;
+                };
+                let entry = counts.entry(key).or_insert(0);
+                if *entry == 0 {
+                    order.push(value);
                 }
+                *entry += 1;
             }
             let count: usize = counts.values().sum();
             let unique = order.len();
             // First-appearance order with a strict `>` keeps the earliest of a tie.
-            let mut top: Option<(String, usize)> = None;
-            for candidate in &order {
-                let freq = counts[candidate];
-                if top.as_ref().is_none_or(|(_, best)| freq > *best) {
-                    top = Some((candidate.clone(), freq));
+            let mut top: Option<(&Scalar, usize)> = None;
+            for &candidate in &order {
+                let freq = scalar_key_skip_missing(candidate)
+                    .and_then(|key| counts.get(&key))
+                    .copied()
+                    .unwrap_or(0);
+                if top.is_none_or(|(_, best)| freq > best) {
+                    top = Some((candidate, freq));
                 }
             }
             let labels: Vec<IndexLabel> = ["count", "unique", "top", "freq"]
                 .iter()
                 .map(|name| IndexLabel::Utf8((*name).to_string()))
                 .collect();
-            let stats = match top {
-                Some((text, freq)) => vec![
-                    Scalar::Int64(count as i64),
-                    Scalar::Int64(unique as i64),
-                    Scalar::Utf8(text),
-                    Scalar::Int64(freq as i64),
-                ],
-                None => vec![
-                    Scalar::Int64(0),
-                    Scalar::Int64(0),
-                    Scalar::Null(NullKind::NaN),
-                    Scalar::Int64(0),
-                ],
+            let (top, freq) = match top {
+                Some((value, freq)) => (value.clone(), Scalar::Int64(freq as i64)),
+                None => (Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)),
             };
-            return Self::from_values(self.name.clone(), labels, stats);
+            let stats = vec![
+                Scalar::Int64(count as i64),
+                Scalar::Int64(unique as i64),
+                top,
+                freq,
+            ];
+            return Self::new(
+                self.name.clone(),
+                Index::new(labels),
+                Column::from_object_values(stats),
+            );
         }
         let percentiles = normalize_describe_percentiles(percentiles)?;
         // A datetime/timedelta column describes in its own units, as pandas:
@@ -27198,10 +27840,14 @@ impl Series {
                 })
                 .collect();
             // pandas upcasts a numeric source with missing cells to float64
-            // for EVERY column; an all-missing one inferred object.
+            // for EVERY column, and a float source stays float64 though a
+            // column holds only its NaN cells; an all-missing one inferred
+            // object (fvsao.36).
             let column = if nullable {
                 Column::new(self.column.dtype(), values)?
-            } else if any_missing && matches!(self.column.dtype(), DType::Int64 | DType::Float64) {
+            } else if self.column.dtype() == DType::Float64
+                || (any_missing && self.column.dtype() == DType::Int64)
+            {
                 Column::new(DType::Float64, values)?
             } else {
                 Column::from_values(values)?
@@ -27350,7 +27996,10 @@ impl Series {
                         scratch = format_datetime_ns(*ns);
                         &scratch
                     }
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
+                    f @ (IndexLabel::Float64(_)
+                    | IndexLabel::Bool(_)
+                    | IndexLabel::Object(_)
+                    | IndexLabel::Period(_)) => {
                         scratch = f.to_string();
                         &scratch
                     }
@@ -27628,7 +28277,7 @@ impl Series {
                     IndexLabel::Utf8(s) => csv_escape(s, sep),
                     IndexLabel::Timedelta64(ns) => csv_escape(&Timedelta::format(*ns), sep),
                     IndexLabel::Datetime64(ns) => csv_escape(&format_datetime_ns(*ns), sep),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => {
+                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
                         csv_escape(&f.to_string(), sep)
                     }
                     IndexLabel::Object(object) => csv_escape(&object.to_string(), sep),
@@ -27751,7 +28400,7 @@ impl Series {
                     IndexLabel::Utf8(s) => quote_str(s, false),
                     IndexLabel::Timedelta64(ns) => quote_str(&Timedelta::format(*ns), false),
                     IndexLabel::Datetime64(ns) => quote_str(&format_datetime_ns(*ns), false),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => {
+                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
                         quote_str(&f.to_string(), false)
                     }
                     IndexLabel::Object(object) => quote_str(&object.to_string(), false),
@@ -28983,7 +29632,12 @@ impl Series {
         // format used for datetime indices in this crate).
         require_datetime_index(self.index.labels(), "at_time")?;
         let target = time_argument(time, "at_time")?;
-        let keep = between_time_positions(&wall_clock_labels(&self.index), target, target);
+        let keep = between_time_positions(
+            &wall_clock_labels(&self.index),
+            target,
+            target,
+            IntervalClosed::Both,
+        );
 
         // A temporal selector builds a datetime index from string input, so the
         // result renders the parsed Timestamp rather than echoing the caller's
@@ -29001,12 +29655,24 @@ impl Series {
     ///
     /// Matches `s.between_time(start_time, end_time)`.
     pub fn between_time(&self, start: &str, end: &str) -> Result<Self, FrameError> {
+        self.between_time_inclusive(start, end, IntervalClosed::Both)
+    }
+
+    /// [`Self::between_time`] with pandas' `inclusive=` (which ends of the
+    /// time range are kept; 'both' the default).
+    pub fn between_time_inclusive(
+        &self,
+        start: &str,
+        end: &str,
+        inclusive: IntervalClosed,
+    ) -> Result<Self, FrameError> {
         // Per br-frankenpandas-g3jqn: see Series::at_time.
         require_datetime_index(self.index.labels(), "between_time")?;
         let keep = between_time_positions(
             &wall_clock_labels(&self.index),
             time_argument(start, "between_time")?,
             time_argument(end, "between_time")?,
+            inclusive,
         );
 
         // See `Series::at_time` (br-frankenpandas-2und8).
@@ -29259,8 +29925,32 @@ impl Series {
             window,
             min_periods: min_periods.unwrap_or(window),
             center: false,
-            offset_starts: None,
+            bounds: None,
         }
+    }
+
+    /// A count window closed as pandas' `rolling(window, center=, closed=)`
+    /// says ([`fixed_window_bounds`]; 'right', the default, is
+    /// [`Self::rolling_with_center`]). `min_periods` defaults to `window`
+    /// and must not exceed it, as pandas.
+    pub fn rolling_closed(
+        &self,
+        window: usize,
+        min_periods: Option<usize>,
+        center: bool,
+        closed: IntervalClosed,
+    ) -> Result<Rolling<'_>, FrameError> {
+        let min_periods = min_periods.unwrap_or(window);
+        if min_periods > window {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "rolling: min_periods {min_periods} must be <= window {window}"
+            )));
+        }
+        if closed == IntervalClosed::Right {
+            return Ok(self.rolling_with_center(window, Some(min_periods), center));
+        }
+        let bounds = fixed_window_bounds(self.len(), window, center, closed);
+        Ok(Rolling::with_bounds(self, bounds, min_periods))
     }
 
     /// Create a time-based/offset rolling window view of this Series
@@ -29286,66 +29976,37 @@ impl Series {
         window: &str,
         min_periods: Option<usize>,
     ) -> Result<Rolling<'_>, FrameError> {
-        let offset_nanos = fp_types::Timedelta::parse(window).map_err(|e| {
-            FrameError::CompatibilityRejected(format!(
-                "rolling: invalid offset window '{window}': {e}"
-            ))
-        })?;
-        if offset_nanos == fp_types::Timedelta::NAT || offset_nanos <= 0 {
-            return Err(FrameError::CompatibilityRejected(format!(
-                "rolling: offset window '{window}' must be a positive duration"
-            )));
-        }
-        let labels = self.index().labels();
-        let mut ts: Vec<i64> = Vec::with_capacity(labels.len());
-        for label in labels {
-            match label {
-                IndexLabel::Datetime64(v) | IndexLabel::Timedelta64(v) if *v != i64::MIN => {
-                    ts.push(*v);
-                }
-                _ => {
-                    // pandas: ValueError("window must be an integer 0 or
-                    // greater") when a non-datetime index meets a freq window.
-                    return Err(FrameError::CompatibilityRejected(format!(
-                        "rolling: offset window '{window}' requires a datetime-like \
-                         (Datetime64/Timedelta64, non-NaT) index; pandas raises \
-                         'window must be an integer 0 or greater'"
-                    )));
-                }
-            }
-        }
-        if ts.windows(2).any(|w| w[0] > w[1]) {
-            // pandas: ValueError("index values must be monotonic").
-            return Err(FrameError::CompatibilityRejected(
-                "rolling: index values must be monotonic".to_owned(),
-            ));
-        }
-        // Two-pointer left bound: starts[i] = first j with ts[j] > ts[i] -
-        // offset (left-open). Monotonic input ⇒ non-decreasing starts, which
-        // every window_bounds-driven kernel requires.
-        let mut starts = Vec::with_capacity(ts.len());
-        let mut j = 0_usize;
-        for (i, &t) in ts.iter().enumerate() {
-            let start_bound = t.saturating_sub(offset_nanos);
-            while ts[j] <= start_bound {
-                j += 1;
-            }
-            debug_assert!(j <= i);
-            starts.push(j);
-        }
+        self.rolling_offset_closed(window, min_periods, IntervalClosed::Right)
+    }
+
+    /// [`Self::rolling_offset`] closed as pandas' `closed=` says
+    /// ([`offset_window_bounds`]).
+    pub fn rolling_offset_closed(
+        &self,
+        window: &str,
+        min_periods: Option<usize>,
+        closed: IntervalClosed,
+    ) -> Result<Rolling<'_>, FrameError> {
+        self.rolling_offset_centered(window, min_periods, closed, false)
+    }
+
+    /// [`Self::rolling_offset_closed`], each window centred on its row when
+    /// `center` ([`centered_offset_window_bounds`]; pandas'
+    /// `rolling('3D', center=True)`, br-frankenpandas-gv69z).
+    pub fn rolling_offset_centered(
+        &self,
+        window: &str,
+        min_periods: Option<usize>,
+        closed: IntervalClosed,
+        center: bool,
+    ) -> Result<Rolling<'_>, FrameError> {
+        let times = self.index().labels().iter().map(|label| match label {
+            IndexLabel::Datetime64(v) | IndexLabel::Timedelta64(v) => Some(*v),
+            _ => None,
+        });
+        let bounds = offset_window(window, times, closed, center)?;
         // pandas defaults min_periods to 1 for offset windows.
-        let min_periods = min_periods.unwrap_or(1);
-        Ok(Rolling {
-            series: self,
-            // Count-window stand-in (the expanding trick): keeps
-            // `validate()` (window >= 1, min_periods <= window) and the
-            // kernel-selection thresholds well-defined; bounds always come
-            // from `offset_starts` via `window_bounds`.
-            window: self.len().max(min_periods).max(1),
-            min_periods,
-            center: false,
-            offset_starts: Some(starts),
-        })
+        Ok(Rolling::with_bounds(self, bounds, min_periods.unwrap_or(1)))
     }
 
     /// Create a rolling window with explicit center parameter.
@@ -29362,7 +30023,7 @@ impl Series {
             window,
             min_periods: min_periods.unwrap_or(window),
             center,
-            offset_starts: None,
+            bounds: None,
         }
     }
 
@@ -29375,7 +30036,7 @@ impl Series {
             window,
             min_periods: min_periods.unwrap_or(window),
             center: true,
-            offset_starts: None,
+            bounds: None,
         }
     }
 
@@ -29456,6 +30117,8 @@ impl Series {
             alpha: validated_alpha,
             adjust,
             min_periods,
+            ignore_na: false,
+            deltas: None,
         }
     }
 
@@ -31162,11 +31825,49 @@ impl Series {
 /// to a tiny `sort_by`, so the original path is kept.
 const ROLLING_ORDER_STAT_MIN_WINDOW: usize = 32;
 
-/// Selector for the rolling order-statistic kernel (median or a quantile).
+/// Selector for the rolling order-statistic kernel (median or a quantile
+/// with its interpolation).
 #[derive(Clone, Copy)]
 enum RollingOrderStat {
     Median,
-    Quantile(f64),
+    Quantile(f64, QuantileInterpolation),
+}
+
+/// pandas' rolling / expanding quantile of a window's `count` values,
+/// `kth(k)` the k-th smallest: the rank `q * (count - 1)`, its value when
+/// the rank is whole, else its two neighbours combined by `mode` - linear
+/// as `lo + (hi - lo) * frac` (not numpy's lerp), nearest to the even rank
+/// on a tie, midpoint their mean (br-frankenpandas-u6p7i: only linear was
+/// taken).
+fn window_quantile<F: Fn(usize) -> f64>(
+    count: usize,
+    q: f64,
+    mode: QuantileInterpolation,
+    kth: &F,
+) -> f64 {
+    let pos = q * (count - 1) as f64;
+    let lo = pos.floor() as usize;
+    let hi = pos.ceil() as usize;
+    if lo == hi || hi >= count {
+        return kth(lo);
+    }
+    let frac = pos - lo as f64;
+    let (low, high) = (kth(lo), kth(hi));
+    match mode {
+        QuantileInterpolation::Linear => low + (high - low) * frac,
+        QuantileInterpolation::Lower => low,
+        QuantileInterpolation::Higher => high,
+        QuantileInterpolation::Nearest => {
+            if frac < 0.5 {
+                low
+            } else if frac > 0.5 || !lo.is_multiple_of(2) {
+                high
+            } else {
+                low
+            }
+        }
+        QuantileInterpolation::Midpoint => (low + high) / 2.0,
+    }
 }
 
 impl RollingOrderStat {
@@ -31182,15 +31883,8 @@ impl RollingOrderStat {
                     sorted[mid]
                 }
             }
-            RollingOrderStat::Quantile(q) => {
-                let pos = q * (sorted.len() - 1) as f64;
-                let lo = pos.floor() as usize;
-                let hi = pos.ceil() as usize;
-                if lo == hi || hi >= sorted.len() {
-                    sorted[lo]
-                } else {
-                    sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo as f64)
-                }
+            RollingOrderStat::Quantile(q, mode) => {
+                window_quantile(sorted.len(), q, mode, &|k| sorted[k])
             }
         }
     }
@@ -31208,18 +31902,7 @@ impl RollingOrderStat {
                     kth(mid)
                 }
             }
-            RollingOrderStat::Quantile(q) => {
-                let pos = q * (count - 1) as f64;
-                let lo = pos.floor() as usize;
-                let hi = pos.ceil() as usize;
-                if lo == hi || hi >= count {
-                    kth(lo)
-                } else {
-                    let l = kth(lo);
-                    let h = kth(hi);
-                    l + (h - l) * (pos - lo as f64)
-                }
-            }
+            RollingOrderStat::Quantile(q, mode) => window_quantile(count, q, mode, kth),
         }
     }
 }
@@ -31234,18 +31917,204 @@ pub struct Rolling<'a> {
     window: usize,
     min_periods: usize,
     center: bool,
-    /// Per-row window starts for a time-based/offset window (issue #20),
-    /// e.g. `rolling("180D")` over a datetime index. `starts[i]` is the first
-    /// row position inside the left-open right-closed interval
-    /// `(t_i - offset, t_i]` — pandas' default `closed='right'` for offset
-    /// windows. `None` for ordinary count windows. Built by
-    /// [`Series::rolling_offset`] over a monotonic non-decreasing
-    /// datetime-like index, so the starts are non-decreasing and every
+    /// Per-row window bounds `[start, end)` for a time-based/offset window
+    /// (issue #20), e.g. `rolling("180D")` over a datetime index, or for a
+    /// count window closed other than pandas' default 'right'
+    /// ([`offset_window_bounds`], [`fixed_window_bounds`]). `None` for an
+    /// ordinary count window. Both bounds are non-decreasing, so every
     /// two-pointer kernel that consumes [`Rolling::window_bounds`] slides
     /// across them unchanged. When `Some`, `window` is a count-window
     /// stand-in of `len.max(min_periods).max(1)` (the expanding trick) so
     /// `validate` and the kernel-selection thresholds stay well-defined.
-    offset_starts: Option<Vec<usize>>,
+    bounds: Option<Vec<(usize, usize)>>,
+}
+
+/// pandas' fixed-window indexer: row `i`'s window for a count `window`,
+/// trailing or centred, with `closed` saying which ends of the interval
+/// `(i - window, i]` (shifted by half a window when centred) it holds.
+pub fn fixed_window_bounds(
+    len: usize,
+    window: usize,
+    center: bool,
+    closed: IntervalClosed,
+) -> Vec<(usize, usize)> {
+    let offset = if center {
+        window.saturating_sub(1) / 2
+    } else {
+        0
+    };
+    let left_closed = closed.left_closed();
+    let right_open = !closed.right_closed();
+    (0..len)
+        .map(|i| {
+            // pandas: end = i + 1 + offset, start = end - window; a closed
+            // left end takes one row more before, an open right end drops
+            // the row itself; both clipped to the rows.
+            let end = i + 1 + offset - usize::from(right_open);
+            let start = (i + 1 + offset).saturating_sub(window + usize::from(left_closed));
+            (start.min(len), end.min(len))
+        })
+        .collect()
+}
+
+/// pandas' window `sem(ddof=)`: `std / (count - ddof) ** 0.5` row by row
+/// over a window's ddof-1 `std` and its `count` (inf where the count is
+/// `ddof`, NaN below it or where either is missing).
+#[allow(clippy::cast_precision_loss)] // ddof is a small count
+fn sem_of(std: &Series, count: &Series, ddof: usize) -> Result<Series, FrameError> {
+    let values = std
+        .column()
+        .values()
+        .iter()
+        .zip(count.column().values())
+        .map(|(std, count)| match (std.to_f64(), count.to_f64()) {
+            (Ok(std), Ok(count)) if !std.is_nan() && !count.is_nan() => {
+                Scalar::Float64(std / (count - ddof as f64).sqrt())
+            }
+            _ => Scalar::Null(NullKind::NaN),
+        })
+        .collect();
+    Series::new(
+        std.name(),
+        std.index().clone(),
+        Column::from_values(values)?,
+    )
+}
+
+/// pandas' variable-window indexer over monotonic timestamps `ts`: row `i`'s
+/// window holds the rows whose time lies in the interval of length `offset`
+/// ending at `ts[i]`, closed as `closed` says ('right': `(t - offset, t]`),
+/// and a closed right end stops at the row itself (a later row at the same
+/// time is not in it), an open one before the first row at `t`.
+pub fn offset_window_bounds(
+    ts: &[i64],
+    offset: i64,
+    closed: IntervalClosed,
+) -> Vec<(usize, usize)> {
+    let left_closed = closed.left_closed();
+    let right_closed = closed.right_closed();
+    let mut bounds = Vec::with_capacity(ts.len());
+    let (mut start, mut first_at) = (0_usize, 0_usize);
+    for (i, &t) in ts.iter().enumerate() {
+        let start_bound = t.saturating_sub(offset);
+        while start < i && (ts[start] < start_bound || (!left_closed && ts[start] == start_bound)) {
+            start += 1;
+        }
+        while ts[first_at] < t {
+            first_at += 1;
+        }
+        let end = if right_closed { i + 1 } else { first_at };
+        bounds.push((start.min(end), end));
+    }
+    bounds
+}
+
+/// pandas' variable-window indexer centred (`rolling('3D', center=True)`)
+/// over monotonic timestamps `ts`: row `i`'s window is the interval of
+/// length `offset` centred on `ts[i]` - from `ts[i] - offset / 2` (open,
+/// closed as `closed` says) to `ts[i] + offset / 2` (closed on the right
+/// when `closed` is) - found as pandas' calculate_variable_window_bounds
+/// finds it: the first row's window starts at row 0, a start scanned
+/// forward from the previous row's, an end scanned forward from the
+/// previous row's end (br-frankenpandas-gv69z; it was refused).
+#[must_use]
+pub fn centered_offset_window_bounds(
+    ts: &[i64],
+    offset: i64,
+    closed: IntervalClosed,
+) -> Vec<(usize, usize)> {
+    let n = ts.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let left_closed = closed.left_closed();
+    let right_closed = closed.right_closed();
+    let half = offset / 2;
+    let mut start = vec![0_usize; n];
+    let mut end = vec![usize::from(right_closed); n];
+    let end_bound = ts[0].saturating_add(half);
+    for (j, &t) in ts.iter().enumerate() {
+        if t < end_bound || (t == end_bound && right_closed) {
+            end[0] = j + 1;
+        } else {
+            end[0] = j;
+            break;
+        }
+    }
+    for i in 1..n {
+        let end_bound = ts[i].saturating_add(half);
+        let mut start_bound = ts[i].saturating_sub(half);
+        if left_closed {
+            start_bound = start_bound.saturating_sub(1);
+        }
+        start[i] = i;
+        if let Some(j) = (start[i - 1]..i).find(|&j| ts[j] > start_bound) {
+            start[i] = j;
+        }
+        for j in end[i - 1]..=n {
+            if j == n {
+                end[i] = j;
+            } else if ts[j] == end_bound && right_closed {
+                end[i] = j + 1;
+            } else if ts[j] >= end_bound {
+                end[i] = j;
+                break;
+            }
+        }
+    }
+    start
+        .into_iter()
+        .zip(end)
+        .map(|(start, end)| (start.min(end), end))
+        .collect()
+}
+
+/// A time-based window's per-row bounds over `times` (a datetime-like axis,
+/// `None` where a value is not one), as pandas' `rolling('7D', closed=)`:
+/// `window` a positive duration ('180D', '12h', '90min', ISO-8601, ... as
+/// [`fp_types::Timedelta::parse`] reads them) over monotonic times.
+///
+/// Errors (as `CompatibilityRejected`) when the window does not parse or is
+/// not strictly positive, when a time is missing or not datetime-like
+/// (pandas: `ValueError: window must be an integer 0 or greater`), or when
+/// the times are not monotonic non-decreasing (pandas: `ValueError: index
+/// values must be monotonic`).
+fn offset_window(
+    window: &str,
+    times: impl IntoIterator<Item = Option<i64>>,
+    closed: IntervalClosed,
+    center: bool,
+) -> Result<Vec<(usize, usize)>, FrameError> {
+    let offset_nanos = fp_types::Timedelta::parse(window).map_err(|e| {
+        FrameError::CompatibilityRejected(format!("rolling: invalid offset window '{window}': {e}"))
+    })?;
+    if offset_nanos == fp_types::Timedelta::NAT || offset_nanos <= 0 {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "rolling: offset window '{window}' must be a positive duration"
+        )));
+    }
+    let mut ts: Vec<i64> = Vec::new();
+    for time in times {
+        match time {
+            Some(v) if v != i64::MIN => ts.push(v),
+            _ => {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "rolling: offset window '{window}' requires a datetime-like \
+                     (Datetime64/Timedelta64, non-NaT) index; pandas raises \
+                     'window must be an integer 0 or greater'"
+                )));
+            }
+        }
+    }
+    if ts.windows(2).any(|w| w[0] > w[1]) {
+        return Err(FrameError::CompatibilityRejected(
+            "rolling: index values must be monotonic".to_owned(),
+        ));
+    }
+    if center {
+        return Ok(centered_offset_window_bounds(&ts, offset_nanos, closed));
+    }
+    Ok(offset_window_bounds(&ts, offset_nanos, closed))
 }
 
 /// Which scalar the compensated online variance state emits: raw variance,
@@ -31685,18 +32554,30 @@ impl RollingPairwiseMomentState {
         self.sum_xy -= x * y;
     }
 
+    /// pandas' window cov (`sum((x - mx)(y - my)) / (nobs - ddof)`) or corr
+    /// (the cov over the ddof standard deviations, so ddof cancels but for
+    /// NaN where `nobs <= ddof`); ddof 1 leaves one observation NaN.
+    #[allow(clippy::cast_precision_loss)] // window counts
     fn output(
         &self,
         min_periods: usize,
         want_corr: bool,
         constant_x: bool,
         constant_y: bool,
+        ddof: usize,
     ) -> Scalar {
-        if self.nobs < min_periods || self.nobs < 2 {
+        if self.nobs < min_periods || self.nobs == 0 || (self.nobs < 2 && ddof >= 1) {
+            return Scalar::Null(NullKind::NaN);
+        }
+        if want_corr && self.nobs <= ddof {
             return Scalar::Null(NullKind::NaN);
         }
         if !want_corr && (constant_x || constant_y) {
-            return Scalar::Float64(0.0);
+            return if self.nobs <= ddof {
+                Scalar::Null(NullKind::NaN)
+            } else {
+                Scalar::Float64(0.0)
+            };
         }
         if want_corr && (constant_x || constant_y) {
             return Scalar::Null(NullKind::NaN);
@@ -31717,7 +32598,7 @@ impl RollingPairwiseMomentState {
                 }
             }
         } else {
-            Scalar::Float64(cov_num / (self.nobs - 1) as f64)
+            Scalar::Float64(cov_num / (self.nobs as f64 - ddof as f64))
         }
     }
 }
@@ -31727,6 +32608,22 @@ impl RollingPairwiseMomentState {
 /// `rolling_order_stat`). Above this the O(w) per-slide insert cost overtakes the
 /// global-`u` Fenwick, so wide windows keep the Fenwick.
 const ROLLING_SORTED_WINDOW_MAX_W: usize = 4096;
+
+impl<'a> Rolling<'a> {
+    /// A window over `series` whose rows for each output row are `bounds`
+    /// (a time-based or closed window), the count window a stand-in of
+    /// `len.max(min_periods).max(1)` (the expanding trick) that keeps
+    /// `validate()` and the kernel-selection thresholds well-defined.
+    fn with_bounds(series: &'a Series, bounds: Vec<(usize, usize)>, min_periods: usize) -> Self {
+        Rolling {
+            series,
+            window: series.len().max(min_periods).max(1),
+            min_periods,
+            center: false,
+            bounds: Some(bounds),
+        }
+    }
+}
 
 impl Rolling<'_> {
     fn validate(&self) -> Result<(), FrameError> {
@@ -32061,10 +32958,10 @@ impl Rolling<'_> {
     /// bounds are non-decreasing in `i` for trailing AND centered windows, so a
     /// two-pointer sweep can slide an incremental structure across them.
     pub fn window_bounds(&self, i: usize, len: usize) -> (usize, usize) {
-        // Offset (time-based) window: per-row starts precomputed from the
-        // datetime index (issue #20); trailing right-closed, so end = i + 1.
-        if let Some(starts) = &self.offset_starts {
-            return (starts[i], i + 1);
+        // Offset (time-based) or closed window: per-row bounds precomputed
+        // (issue #20, `closed=`).
+        if let Some(bounds) = &self.bounds {
+            return bounds[i];
         }
         if self.center {
             let half = self.window / 2;
@@ -32572,10 +33469,23 @@ impl Rolling<'_> {
     ///
     /// Matches `series.rolling(window).quantile(q)`.
     pub fn quantile(&self, q: f64) -> Result<Series, FrameError> {
+        self.quantile_with_interpolation(q, "linear")
+    }
+
+    /// Rolling quantile with pandas' `interpolation` ('linear', 'lower',
+    /// 'higher', 'nearest', 'midpoint'; see `window_quantile`).
+    ///
+    /// Matches `series.rolling(window).quantile(q, interpolation)`.
+    pub fn quantile_with_interpolation(
+        &self,
+        q: f64,
+        interpolation: &str,
+    ) -> Result<Series, FrameError> {
         self.validate()?;
         require_window_quantile(q)?;
+        let mode = parse_quantile_interpolation(interpolation)?;
         if self.window >= ROLLING_ORDER_STAT_MIN_WINDOW {
-            return self.rolling_order_stat(RollingOrderStat::Quantile(q));
+            return self.rolling_order_stat(RollingOrderStat::Quantile(q, mode));
         }
         self.apply_rolling(
             |nums| {
@@ -32584,14 +33494,7 @@ impl Rolling<'_> {
                 }
                 let mut sorted = nums.to_vec();
                 sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let pos = q * (sorted.len() - 1) as f64;
-                let lo = pos.floor() as usize;
-                let hi = pos.ceil() as usize;
-                if lo == hi || hi >= sorted.len() {
-                    sorted[lo]
-                } else {
-                    sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo as f64)
-                }
+                window_quantile(sorted.len(), q, mode, &|k| sorted[k])
             },
             self.series.name(),
         )
@@ -32791,7 +33694,13 @@ impl Rolling<'_> {
     /// Matches `series.rolling(window).corr(other)`. Computes Pearson
     /// correlation over each rolling window.
     pub fn corr(&self, other: &Series) -> Result<Series, FrameError> {
-        self.rolling_pairwise_moment(other, true)
+        self.rolling_pairwise_moment(other, true, 1)
+    }
+
+    /// pandas' `corr(other, ddof=)`: the ddof cancels, but for NaN where a
+    /// window holds `ddof` observations or fewer.
+    pub fn corr_ddof(&self, other: &Series, ddof: usize) -> Result<Series, FrameError> {
+        self.rolling_pairwise_moment(other, true, ddof)
     }
 
     /// Rolling pairwise covariance with another Series.
@@ -32799,13 +33708,19 @@ impl Rolling<'_> {
     /// Matches `series.rolling(window).cov(other)`. Computes sample
     /// covariance (ddof=1) over each rolling window.
     pub fn cov(&self, other: &Series) -> Result<Series, FrameError> {
-        self.rolling_pairwise_moment(other, false)
+        self.rolling_pairwise_moment(other, false, 1)
+    }
+
+    /// pandas' `cov(other, ddof=)`: the co-moment over `nobs - ddof`.
+    pub fn cov_ddof(&self, other: &Series, ddof: usize) -> Result<Series, FrameError> {
+        self.rolling_pairwise_moment(other, false, ddof)
     }
 
     fn rolling_pairwise_moment(
         &self,
         other: &Series,
         want_corr: bool,
+        ddof: usize,
     ) -> Result<Series, FrameError> {
         self.validate()?;
         // Identity fast path (br-frankenpandas rolling-cov-align): co-indexed
@@ -32870,10 +33785,12 @@ impl Rolling<'_> {
                 }
                 let cx = state.nobs > 0 && run_x >= state.nobs;
                 let cy = state.nobs > 0 && run_y >= state.nobs;
-                out.push(match state.output(self.min_periods, want_corr, cx, cy) {
-                    Scalar::Float64(f) => f,
-                    _ => f64::NAN,
-                });
+                out.push(
+                    match state.output(self.min_periods, want_corr, cx, cy, ddof) {
+                        Scalar::Float64(f) => f,
+                        _ => f64::NAN,
+                    },
+                );
             }
             out
         };
@@ -32985,7 +33902,7 @@ impl Rolling<'_> {
                 }
                 let cx = state.nobs > 0 && run_x >= state.nobs;
                 let cy = state.nobs > 0 && run_y >= state.nobs;
-                out.push(state.output(self.min_periods, want_corr, cx, cy));
+                out.push(state.output(self.min_periods, want_corr, cx, cy, ddof));
             }
             let index = self.series.index().clone();
             // Float64 even when every window is undefined (all-NaN inferred
@@ -33013,7 +33930,7 @@ impl Rolling<'_> {
             }
             let cx = state.constant_x();
             let cy = state.constant_y();
-            out.push(state.output(self.min_periods, want_corr, cx, cy));
+            out.push(state.output(self.min_periods, want_corr, cx, cy, ddof));
         }
 
         // Per br-frankenpandas-yk50z: pandas rolling cov/corr preserves source
@@ -33254,6 +34171,26 @@ impl Rolling<'_> {
     /// (br-frankenpandas-g6qa2).
     pub fn sem(&self) -> Result<Series, FrameError> {
         self.rolling_var_online(1, VarOutputKind::Sem)
+    }
+
+    /// pandas' `std(ddof=)`: `sqrt(m2 / (nobs - ddof))`, NaN where
+    /// `nobs <= ddof` ([`Self::std`] is ddof 1).
+    pub fn std_ddof(&self, ddof: usize) -> Result<Series, FrameError> {
+        self.rolling_var_online(ddof, VarOutputKind::Std)
+    }
+
+    /// pandas' `var(ddof=)` ([`Self::std_ddof`] squared).
+    pub fn var_ddof(&self, ddof: usize) -> Result<Series, FrameError> {
+        self.rolling_var_online(ddof, VarOutputKind::Var)
+    }
+
+    /// pandas' `sem(ddof=)`, its own formula: the ddof-1 std over
+    /// `sqrt(count - ddof)` (the std keeps ddof 1).
+    pub fn sem_ddof(&self, ddof: usize) -> Result<Series, FrameError> {
+        if ddof == 1 {
+            return self.sem();
+        }
+        sem_of(&self.std()?, &self.count()?, ddof)
     }
 
     /// Rank the current observation within each rolling window.
@@ -34012,7 +34949,7 @@ impl Expanding<'_> {
             window: len.max(self.min_periods).max(1),
             min_periods: self.min_periods,
             center: false,
-            offset_starts: None,
+            bounds: None,
         }
     }
 
@@ -34185,9 +35122,22 @@ impl Expanding<'_> {
     ///
     /// Matches `series.expanding().quantile(q)`.
     pub fn quantile(&self, q: f64) -> Result<Series, FrameError> {
+        self.quantile_with_interpolation(q, "linear")
+    }
+
+    /// Expanding quantile with pandas' `interpolation` (see
+    /// `window_quantile`).
+    ///
+    /// Matches `series.expanding().quantile(q, interpolation)`.
+    pub fn quantile_with_interpolation(
+        &self,
+        q: f64,
+        interpolation: &str,
+    ) -> Result<Series, FrameError> {
         require_window_quantile(q)?;
+        let mode = parse_quantile_interpolation(interpolation)?;
         if self.series.column().len() >= ROLLING_ORDER_STAT_MIN_WINDOW {
-            return self.expanding_order_stat(RollingOrderStat::Quantile(q));
+            return self.expanding_order_stat(RollingOrderStat::Quantile(q, mode));
         }
         self.apply_expanding(
             |nums| {
@@ -34196,14 +35146,7 @@ impl Expanding<'_> {
                 }
                 let mut sorted = nums.to_vec();
                 sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let pos = q * (sorted.len() - 1) as f64;
-                let lo = pos.floor() as usize;
-                let hi = pos.ceil() as usize;
-                if lo == hi || hi >= sorted.len() {
-                    sorted[lo]
-                } else {
-                    sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo as f64)
-                }
+                window_quantile(sorted.len(), q, mode, &|k| sorted[k])
             },
             self.series.name(),
         )
@@ -34327,7 +35270,13 @@ impl Expanding<'_> {
     pub fn corr(&self, other: &Series) -> Result<Series, FrameError> {
         // Per br-frankenpandas-18xvl: pandas expanding().corr preserves
         // source axis name.
-        self.expanding_bivariate(other, true)
+        self.expanding_bivariate(other, true, 1)
+    }
+
+    /// pandas' `corr(other, ddof=)` ([`Rolling::corr_ddof`] over the
+    /// growing window).
+    pub fn corr_ddof(&self, other: &Series, ddof: usize) -> Result<Series, FrameError> {
+        self.expanding_bivariate(other, true, ddof)
     }
 
     /// Expanding sample covariance (ddof=1) with another Series.
@@ -34338,7 +35287,13 @@ impl Expanding<'_> {
     pub fn cov(&self, other: &Series) -> Result<Series, FrameError> {
         // Per br-frankenpandas-6ns0e: pandas expanding().cov preserves source
         // axis name.
-        self.expanding_bivariate(other, false)
+        self.expanding_bivariate(other, false, 1)
+    }
+
+    /// pandas' `cov(other, ddof=)` ([`Rolling::cov_ddof`] over the growing
+    /// window).
+    pub fn cov_ddof(&self, other: &Series, ddof: usize) -> Result<Series, FrameError> {
+        self.expanding_bivariate(other, false, ddof)
     }
 
     /// O(n) online bivariate sweep backing expanding `cov`/`corr`
@@ -34355,7 +35310,15 @@ impl Expanding<'_> {
     /// changes. A fully constant input leaves `M2a`/`M2b` exactly 0 (`da == 0`),
     /// so the `std == 0 -> NaN` guard is reproduced. Expanding cov/corr are
     /// tolerance-tested (no bit-goldens), so the reassociated sums are in-spec.
-    fn expanding_bivariate(&self, other: &Series, want_corr: bool) -> Result<Series, FrameError> {
+    /// `ddof` is pandas' (cov over `nobs - ddof`; corr NaN where
+    /// `nobs <= ddof`, the ddof cancelling otherwise).
+    #[allow(clippy::cast_precision_loss)] // window counts
+    fn expanding_bivariate(
+        &self,
+        other: &Series,
+        want_corr: bool,
+        ddof: usize,
+    ) -> Result<Series, FrameError> {
         if self.series.len() != other.len() {
             return Err(FrameError::LengthMismatch {
                 index_len: self.series.len(),
@@ -34386,7 +35349,7 @@ impl Expanding<'_> {
         if let (Some(av_view), Some(bv_view)) = (view(self.series.column()), view(other.column())) {
             let (a, b) = (av_view.as_ref(), bv_view.as_ref());
             let len = a.len();
-            let min_pairs = self.min_periods.max(2);
+            let min_pairs = self.min_periods.max(if ddof == 0 { 1 } else { 2 });
             let mut out = Vec::with_capacity(len);
             let mut nobs: usize = 0;
             let mut mean_a = 0.0_f64;
@@ -34408,11 +35371,11 @@ impl Expanding<'_> {
                     out.push(f64::NAN);
                     continue;
                 }
-                let denom = (nobs - 1) as f64;
+                let denom = nobs as f64 - ddof as f64;
                 if want_corr {
                     let std_a = (m2a / denom).sqrt();
                     let std_b = (m2b / denom).sqrt();
-                    if std_a == 0.0 || std_b == 0.0 {
+                    if nobs <= ddof || std_a == 0.0 || std_b == 0.0 {
                         out.push(f64::NAN);
                     } else {
                         out.push((cab / denom) / (std_a * std_b));
@@ -34427,7 +35390,7 @@ impl Expanding<'_> {
         let a_vals = self.series.column().values();
         let b_vals = other.column().values();
         let len = a_vals.len();
-        let min_pairs = self.min_periods.max(2);
+        let min_pairs = self.min_periods.max(if ddof == 0 { 1 } else { 2 });
         let mut out = Vec::with_capacity(len);
 
         let mut nobs: usize = 0;
@@ -34464,11 +35427,11 @@ impl Expanding<'_> {
                 out.push(Scalar::Null(NullKind::NaN));
                 continue;
             }
-            let denom = (nobs - 1) as f64;
+            let denom = nobs as f64 - ddof as f64;
             if want_corr {
                 let std_a = (m2a / denom).sqrt();
                 let std_b = (m2b / denom).sqrt();
-                if std_a == 0.0 || std_b == 0.0 {
+                if nobs <= ddof || std_a == 0.0 || std_b == 0.0 {
                     out.push(Scalar::Null(NullKind::NaN));
                 } else {
                     out.push(Scalar::Float64((cab / denom) / (std_a * std_b)));
@@ -34492,6 +35455,26 @@ impl Expanding<'_> {
     pub fn sem(&self) -> Result<Series, FrameError> {
         self.as_full_window_rolling()
             .rolling_var_online(1, VarOutputKind::Sem)
+    }
+
+    /// pandas' `std(ddof=)` ([`Rolling::std_ddof`] over the growing window).
+    pub fn std_ddof(&self, ddof: usize) -> Result<Series, FrameError> {
+        self.as_full_window_rolling()
+            .rolling_var_online(ddof, VarOutputKind::Std)
+    }
+
+    /// pandas' `var(ddof=)` ([`Rolling::var_ddof`] over the growing window).
+    pub fn var_ddof(&self, ddof: usize) -> Result<Series, FrameError> {
+        self.as_full_window_rolling()
+            .rolling_var_online(ddof, VarOutputKind::Var)
+    }
+
+    /// pandas' `sem(ddof=)` ([`Rolling::sem_ddof`] over the growing window).
+    pub fn sem_ddof(&self, ddof: usize) -> Result<Series, FrameError> {
+        if ddof == 1 {
+            return self.sem();
+        }
+        sem_of(&self.std()?, &self.count()?, ddof)
     }
 
     /// Rank the current observation against all observations seen so far.
@@ -34839,6 +35822,12 @@ pub struct Ewm<'a> {
     /// `ExponentialMovingWindow.__init__` clamps with
     /// `max(int(min_periods), 1)`, so 0 and 1 behave identically.
     min_periods: usize,
+    /// pandas `ignore_na` (default false): with true a missing row does not
+    /// decay the weights ([`Ewm::ignoring_na`]).
+    ignore_na: bool,
+    /// pandas `times=` with a `halflife`: step `i`'s elapsed time over the
+    /// halflife, which `mean` decays by ([`Ewm::with_deltas`]).
+    deltas: Option<Vec<f64>>,
 }
 
 /// Typed all-observed (all-valid, no-NaN) EWM debiased variance recurrence over a
@@ -35002,6 +35991,76 @@ fn ewm_corr_all_observed(a: &[f64], b: &[f64], one_minus_alpha: f64) -> Vec<f64>
 }
 
 impl Ewm<'_> {
+    /// pandas' `ignore_na=True`: a missing row leaves the weights as they
+    /// were (with false, the default, it decays them), in every method.
+    #[must_use]
+    pub fn ignoring_na(mut self, ignore_na: bool) -> Self {
+        self.ignore_na = ignore_na;
+        self
+    }
+
+    /// pandas' `times=` with a `halflife`: `deltas[i - 1]` is the time from
+    /// row `i - 1` to row `i` over the halflife, and `mean` decays step `i`
+    /// by `(1 - alpha) ** deltas[i - 1]`. pandas' other EWM methods decay by
+    /// `1 - alpha` whatever the times, and so do these.
+    #[must_use]
+    pub fn with_deltas(mut self, deltas: Vec<f64>) -> Self {
+        self.deltas = Some(deltas);
+        self
+    }
+
+    /// pandas' `aggregations.pyx::ewm` (normalized) row by row, with
+    /// `ignore_na` and `times` deltas (the typed paths of [`Self::mean`]
+    /// are its plain case over all-valid input).
+    fn mean_rows(&self, alpha: f64) -> Result<Series, FrameError> {
+        let old_wt_factor = 1.0 - alpha;
+        let new_wt = if self.adjust { 1.0_f64 } else { alpha };
+        let minp = self.min_periods.max(1);
+        let vals = self.series.column().values();
+        let mut out = Vec::with_capacity(vals.len());
+        let mut weighted = f64::NAN;
+        let mut old_wt = 1.0_f64;
+        let mut nobs = 0_usize;
+        for (i, value) in vals.iter().enumerate() {
+            let cur = if value.is_missing() {
+                f64::NAN
+            } else {
+                value.to_f64().unwrap_or(f64::NAN)
+            };
+            let observed = !cur.is_nan();
+            nobs += usize::from(observed);
+            if i == 0 {
+                weighted = cur;
+            } else if !weighted.is_nan() {
+                if observed || !self.ignore_na {
+                    old_wt *= match &self.deltas {
+                        Some(deltas) => old_wt_factor.powf(deltas[i - 1]),
+                        None => old_wt_factor,
+                    };
+                    if observed {
+                        // Guard a constant run so the mean stays exact.
+                        if weighted != cur {
+                            weighted = (old_wt * weighted + new_wt * cur) / (old_wt + new_wt);
+                        }
+                        if self.adjust {
+                            old_wt += new_wt;
+                        } else {
+                            old_wt = 1.0;
+                        }
+                    }
+                }
+            } else if observed {
+                weighted = cur;
+            }
+            out.push(if nobs >= minp { weighted } else { f64::NAN });
+        }
+        Series::new(
+            self.series.name(),
+            self.series.index().clone(),
+            Column::from_f64_values(out),
+        )
+    }
+
     /// EWM mean.
     ///
     /// Matches `series.ewm(span=...).mean()` with `ignore_na=False`. Honors
@@ -35020,6 +36079,9 @@ impl Ewm<'_> {
             .alpha
             .clone()
             .map_err(FrameError::CompatibilityRejected)?;
+        if self.ignore_na || self.deltas.is_some() {
+            return self.mean_rows(alpha);
+        }
         let old_wt_factor = 1.0 - alpha;
         // pandas aggregations.pyx::ewm — adjust=True: every observation
         // enters with unit weight; adjust=False: it enters with weight
@@ -35286,7 +36348,7 @@ impl Ewm<'_> {
             // below can't panic on non-numeric inputs. Matches the
             // pattern used by ewm_mean and ewm_cov.
             if val.is_missing() || val.to_f64().map_or(true, |v| v.is_nan()) {
-                if nobs >= 1 {
+                if nobs >= 1 && !self.ignore_na {
                     // ignore_na=False: the gap decays the running sum, and the
                     // decayed value is what pandas emits for the gap row.
                     ewm_sum *= one_minus_alpha;
@@ -35401,6 +36463,32 @@ impl Ewm<'_> {
             let index = self.series.index().clone();
             return Series::new(self.series.name(), index, Column::from_f64_values(out));
         }
+        self.cov_rows(other, false)
+    }
+
+    /// pandas' `cov(other, bias=)`: bias=True is the weighted covariance
+    /// without the debias factor ([`Self::cov`] is bias=False).
+    pub fn cov_bias(&self, other: &Series, bias: bool) -> Result<Series, FrameError> {
+        if !bias {
+            return self.cov(other);
+        }
+        if self.series.len() != other.len() {
+            return Err(FrameError::LengthMismatch {
+                index_len: self.series.len(),
+                column_len: other.len(),
+            });
+        }
+        self.cov_rows(other, true)
+    }
+
+    /// pandas' `ewmcov(x, y, bias=)` row by row (the kernel the typed arms of
+    /// [`Self::cov`] short-cut for bias=False over all-valid inputs).
+    fn cov_rows(&self, other: &Series, bias: bool) -> Result<Series, FrameError> {
+        let alpha = self
+            .alpha
+            .clone()
+            .map_err(FrameError::CompatibilityRejected)?;
+        let one_minus_alpha = 1.0 - alpha;
         let a_vals = self.series.column().values();
         let b_vals = other.column().values();
         let mut out = Vec::with_capacity(a_vals.len());
@@ -35470,16 +36558,19 @@ impl Ewm<'_> {
             } else if nobs == 0 {
                 out.push(Scalar::Null(NullKind::NaN));
                 continue;
-            } else {
+            } else if !self.ignore_na {
                 sum_wt *= one_minus_alpha;
                 sum_wt2 *= one_minus_alpha * one_minus_alpha;
                 old_wt *= one_minus_alpha;
             }
 
             // pandas ewmcov: `NaN` until `minp` joint observations, then the
-            // debiased covariance (NaN while the debias denominator is <= 0).
+            // covariance itself under bias, else debiased (NaN while the
+            // debias denominator is <= 0).
             let numerator = sum_wt * sum_wt - sum_wt2;
-            if nobs >= minp && numerator > 0.0 {
+            if nobs >= minp && bias {
+                out.push(Scalar::Float64(cov_xy));
+            } else if nobs >= minp && numerator > 0.0 {
                 out.push(Scalar::Float64(cov_xy * (sum_wt * sum_wt) / numerator));
             } else {
                 out.push(Scalar::Null(NullKind::NaN));
@@ -35642,7 +36733,7 @@ impl Ewm<'_> {
             } else if nobs == 0 {
                 out.push(Scalar::Null(NullKind::NaN));
                 continue;
-            } else {
+            } else if !self.ignore_na {
                 old_wt *= one_minus_alpha;
             }
 
@@ -35761,6 +36852,49 @@ impl Ewm<'_> {
             let index = self.series.index().clone();
             return Series::new(self.series.name(), index, Column::from_f64_values(out));
         }
+        self.var_rows(false)
+    }
+
+    /// pandas' `var(bias=)`: bias=True is the weighted variance without the
+    /// debias factor ([`Self::var`] is bias=False).
+    pub fn var_bias(&self, bias: bool) -> Result<Series, FrameError> {
+        if bias {
+            self.var_rows(true)
+        } else {
+            self.var()
+        }
+    }
+
+    /// pandas' `std(bias=)`: the square root of [`Self::var_bias`].
+    pub fn std_bias(&self, bias: bool) -> Result<Series, FrameError> {
+        if !bias {
+            return self.std();
+        }
+        let var = self.var_rows(true)?;
+        let out = var
+            .column()
+            .values()
+            .iter()
+            .map(|v| match v {
+                Scalar::Float64(f) => Scalar::Float64(f.sqrt()),
+                other => other.clone(),
+            })
+            .collect();
+        Series::new(
+            self.series.name(),
+            self.series.index().clone(),
+            Column::from_values(out)?,
+        )
+    }
+
+    /// pandas' `ewmcov(x, x, bias=)` row by row (the kernel the typed arms
+    /// of [`Self::var`] short-cut for bias=False over all-valid inputs).
+    fn var_rows(&self, bias: bool) -> Result<Series, FrameError> {
+        let alpha = self
+            .alpha
+            .clone()
+            .map_err(FrameError::CompatibilityRejected)?;
+        let one_minus_alpha = 1.0 - alpha;
         let vals = self.series.column().values();
         let mut out = Vec::with_capacity(vals.len());
 
@@ -35819,18 +36953,20 @@ impl Ewm<'_> {
                 // No observation yet — variance undefined.
                 out.push(Scalar::Null(NullKind::NaN));
                 continue;
-            } else {
+            } else if !self.ignore_na {
                 // ignore_na=False: a gap still decays the accumulated weights.
                 sum_wt *= one_minus_alpha;
                 sum_wt2 *= one_minus_alpha * one_minus_alpha;
                 old_wt *= one_minus_alpha;
             }
 
-            // Debiased (ddof=1) output; NaN until `minp` observations
-            // (issue #19) and while the effective sample weight does not
-            // exceed one observation.
+            // Debiased (ddof=1) output - the variance itself under bias; NaN
+            // until `minp` observations (issue #19) and, debiased, while the
+            // effective sample weight does not exceed one observation.
             let numerator = sum_wt * sum_wt - sum_wt2;
-            if nobs >= minp && numerator > 0.0 {
+            if nobs >= minp && bias {
+                out.push(Scalar::Float64(ewm_cov));
+            } else if nobs >= minp && numerator > 0.0 {
                 out.push(Scalar::Float64(ewm_cov * (sum_wt * sum_wt) / numerator));
             } else {
                 out.push(Scalar::Null(NullKind::NaN));
@@ -36130,6 +37266,8 @@ fn resample_label_to_ns(label: &IndexLabel) -> Option<i64> {
             }
             None
         }
+        // A period at its start instant (45fzr); NaT none.
+        IndexLabel::Period(period) => fp_index::period_start_nanos(*period).ok(),
         IndexLabel::Int64(_)
         | IndexLabel::Float64(_)
         | IndexLabel::Bool(_)
@@ -36194,6 +37332,10 @@ fn resample_label_to_month_ordinal(label: &IndexLabel) -> Option<i64> {
                 None
             }
         }
+        // A period at its start instant (45fzr); NaT none.
+        IndexLabel::Period(period) => resample_label_to_month_ordinal(&IndexLabel::Datetime64(
+            fp_index::period_start_nanos(*period).ok()?,
+        )),
         IndexLabel::Int64(_)
         | IndexLabel::Float64(_)
         | IndexLabel::Bool(_)
@@ -36221,6 +37363,10 @@ fn resample_label_to_date(label: &IndexLabel) -> Option<NaiveDate> {
             let secs = ns.div_euclid(1_000_000_000);
             DateTime::from_timestamp(secs, 0).map(|dt| dt.naive_utc().date())
         }
+        // A period at its start instant (45fzr); NaT none.
+        IndexLabel::Period(period) => resample_label_to_date(&IndexLabel::Datetime64(
+            fp_index::period_start_nanos(*period).ok()?,
+        )),
         IndexLabel::Int64(_)
         | IndexLabel::Float64(_)
         | IndexLabel::Bool(_)
@@ -39071,10 +40217,48 @@ pub struct DataFrameRolling<'a> {
     /// pandas' `rolling(center=True)`: each window centred on its row (the
     /// DataFrame windows were trailing only).
     center: bool,
+    /// Every column's per-row window bounds for a time-based or closed
+    /// window (see [`Rolling`]'s), computed once from the index or `on`.
+    bounds: Option<Vec<(usize, usize)>>,
+    /// pandas' `rolling(on=)`: the column the windows run over, which is
+    /// not aggregated and comes back as it was, in its place.
+    on: Option<String>,
 }
 
 impl DataFrameRolling<'_> {
+    /// One column's window: the frame's shared bounds, or its count window.
+    fn column_window<'s>(&self, series: &'s Series) -> Rolling<'s> {
+        match &self.bounds {
+            Some(bounds) => Rolling::with_bounds(series, bounds.clone(), self.min_periods),
+            None => series.rolling_with_center(self.window, Some(self.min_periods), self.center),
+        }
+    }
+
+    /// Whether the column at `pos` is aggregated: numeric, and not `on`.
+    fn aggregates(&self, pos: usize) -> bool {
+        matches!(
+            self.df.column_at(pos).map(Column::dtype),
+            Some(DType::Int64 | DType::Float64)
+        ) && !self.is_on(pos)
+    }
+
+    /// Whether the column at `pos` is `on`.
+    fn is_on(&self, pos: usize) -> bool {
+        self.on
+            .as_deref()
+            .is_some_and(|on| self.df.column_name_at(pos).as_deref() == Some(on))
+    }
+
     /// Apply rolling aggregation to each numeric column, returning a new DataFrame.
+    fn apply_rolling<F>(&self, agg: F) -> Result<DataFrame, FrameError>
+    where
+        F: for<'s> Fn(Rolling<'s>) -> Result<Series, FrameError> + Sync,
+    {
+        self.apply_rolling_to(false, agg)
+    }
+
+    /// Apply rolling aggregation to each numeric column (every column but
+    /// `on` when `every_column`, for count), returning a new DataFrame.
     ///
     /// Column-parallel (br-frankenpandas-1q4q4): each numeric column is
     /// aggregated INDEPENDENTLY (no cross-column state), so spreading the columns
@@ -39084,16 +40268,18 @@ impl DataFrameRolling<'_> {
     /// rolling work (order statistics, moments) dominates at scale; the serial
     /// loop left all but one core idle (e.g. DataFrame.rolling.skew was 0.23×
     /// pandas). Gated so small frames keep the zero-overhead serial path.
-    fn apply_rolling<F>(&self, agg: F) -> Result<DataFrame, FrameError>
+    fn apply_rolling_to<F>(&self, every_column: bool, agg: F) -> Result<DataFrame, FrameError>
     where
         F: for<'s> Fn(Rolling<'s>) -> Result<Series, FrameError> + Sync,
     {
+        let on_position = (0..self.df.num_columns()).find(|&pos| self.is_on(pos));
         let numeric_positions: Vec<usize> = (0..self.df.num_columns())
             .filter(|&pos| {
-                matches!(
-                    self.df.column_at(pos).expect("pos in bounds").dtype(),
-                    DType::Int64 | DType::Float64
-                )
+                if every_column {
+                    !self.is_on(pos)
+                } else {
+                    self.aggregates(pos)
+                }
             })
             .collect();
 
@@ -39101,8 +40287,7 @@ impl DataFrameRolling<'_> {
             let col = self.df.column_at(pos).expect("pos in bounds");
             let name = self.df.column_name_at(pos).expect("pos in bounds");
             let series = Series::new(&name, self.df.index.clone(), col.clone())?;
-            let result =
-                agg(series.rolling_with_center(self.window, Some(self.min_periods), self.center))?;
+            let result = agg(self.column_window(&series))?;
             Ok((name, result.column().clone()))
         };
 
@@ -39169,6 +40354,22 @@ impl DataFrameRolling<'_> {
             }
             (pairs, order)
         };
+        // The `on` column comes back as it was, in its place among them.
+        let (pairs, col_order) = match on_position {
+            Some(on_pos) => {
+                let name = self.df.column_name_at(on_pos).expect("pos in bounds");
+                let before = numeric_positions
+                    .iter()
+                    .filter(|&&pos| pos < on_pos)
+                    .count();
+                let (mut pairs, mut col_order) = (pairs, col_order);
+                let column = self.df.column_at(on_pos).expect("pos in bounds").clone();
+                pairs.push((name.clone(), column));
+                col_order.insert(before, name);
+                (pairs, col_order)
+            }
+            None => (pairs, col_order),
+        };
 
         let mut out = DataFrame::new_with_axes(
             self.df.index.clone(),
@@ -39208,14 +40409,30 @@ impl DataFrameRolling<'_> {
         self.apply_rolling(|r| r.std())
     }
 
-    /// Rolling count of non-null values across all numeric columns.
+    /// [`Rolling::std_ddof`] across all numeric columns.
+    pub fn std_ddof(&self, ddof: usize) -> Result<DataFrame, FrameError> {
+        self.apply_rolling(|r| r.std_ddof(ddof))
+    }
+
+    /// Rolling count of non-null values in every column (but `on`), as
+    /// pandas counts text and datetimes too (only the numeric ones were).
     pub fn count(&self) -> Result<DataFrame, FrameError> {
-        self.apply_rolling(|r| r.count())
+        self.apply_rolling_to(true, |r| r.count())
     }
 
     /// Rolling variance across all numeric columns.
     pub fn var(&self) -> Result<DataFrame, FrameError> {
         self.apply_rolling(|r| r.var())
+    }
+
+    /// [`Rolling::var_ddof`] across all numeric columns.
+    pub fn var_ddof(&self, ddof: usize) -> Result<DataFrame, FrameError> {
+        self.apply_rolling(|r| r.var_ddof(ddof))
+    }
+
+    /// [`Rolling::sem_ddof`] across all numeric columns.
+    pub fn sem_ddof(&self, ddof: usize) -> Result<DataFrame, FrameError> {
+        self.apply_rolling(|r| r.sem_ddof(ddof))
     }
 
     /// Rolling median across all numeric columns.
@@ -39270,6 +40487,16 @@ impl DataFrameRolling<'_> {
         self.apply_rolling(move |r| r.quantile(q))
     }
 
+    /// Rolling quantile with pandas' `interpolation` across all numeric
+    /// columns (see [`Rolling::quantile_with_interpolation`]).
+    pub fn quantile_with_interpolation(
+        &self,
+        q: f64,
+        interpolation: &str,
+    ) -> Result<DataFrame, FrameError> {
+        self.apply_rolling(move |r| r.quantile_with_interpolation(q, interpolation))
+    }
+
     fn pairwise_rolling<F>(&self, agg: F) -> Result<DataFrame, FrameError>
     where
         F: Fn(&Rolling<'_>, &Series) -> Result<Series, FrameError>,
@@ -39310,11 +40537,7 @@ impl DataFrameRolling<'_> {
                     .expect("numeric column in bounds");
                 let right_series = Series::new(&right_name, self.df.index.clone(), right_col)?;
 
-                let rolling = left_series.rolling_with_center(
-                    self.window,
-                    Some(self.min_periods),
-                    self.center,
-                );
+                let rolling = self.column_window(&left_series);
                 let pair = agg(&rolling, &right_series)?;
                 let pair_name = format!("{left_name}__{right_name}");
                 pairs.push((pair_name.clone(), pair.column().clone()));
@@ -39341,12 +40564,22 @@ impl DataFrameRolling<'_> {
         self.pairwise_rolling(|rolling, other| rolling.corr(other))
     }
 
+    /// [`Self::corr`] with pandas' `ddof` ([`Rolling::corr_ddof`]).
+    pub fn corr_ddof(&self, ddof: usize) -> Result<DataFrame, FrameError> {
+        self.pairwise_rolling(|rolling, other| rolling.corr_ddof(other, ddof))
+    }
+
     /// Rolling pairwise sample covariance (ddof=1) across numeric columns.
     ///
     /// Produces one output column per upper-triangular pair:
     /// `{left}__{right}`.
     pub fn cov(&self) -> Result<DataFrame, FrameError> {
         self.pairwise_rolling(|rolling, other| rolling.cov(other))
+    }
+
+    /// [`Self::cov`] with pandas' `ddof` ([`Rolling::cov_ddof`]).
+    pub fn cov_ddof(&self, ddof: usize) -> Result<DataFrame, FrameError> {
+        self.pairwise_rolling(|rolling, other| rolling.cov_ddof(other, ddof))
     }
 
     /// Rolling correlation of each numeric column with `other`.
@@ -39378,15 +40611,13 @@ impl DataFrameRolling<'_> {
         let mut col_order = Vec::new();
 
         for pos in 0..n_cols {
-            let col = self.df.column_at(pos).expect("pos in bounds");
-            let dt = col.dtype();
-            if dt != DType::Int64 && dt != DType::Float64 {
+            if !self.aggregates(pos) {
                 continue;
             }
+            let col = self.df.column_at(pos).expect("pos in bounds");
             let col_name = self.df.column_name_at(pos).expect("pos in bounds");
             let left_series = Series::new(&col_name, self.df.index.clone(), col.clone())?;
-            let rolling =
-                left_series.rolling_with_center(self.window, Some(self.min_periods), self.center);
+            let rolling = self.column_window(&left_series);
             let paired = agg(&rolling, other)?;
             pairs.push((col_name.clone(), paired.column().clone()));
             col_order.push(col_name);
@@ -39413,17 +40644,13 @@ impl DataFrameRolling<'_> {
         let mut col_order = Vec::new();
 
         for pos in 0..n_cols {
-            let col = self.df.column_at(pos).expect("pos in bounds");
-            let dt = col.dtype();
-            if dt != DType::Int64 && dt != DType::Float64 {
+            if !self.aggregates(pos) {
                 continue;
             }
-
+            let col = self.df.column_at(pos).expect("pos in bounds");
             let col_name = self.df.column_name_at(pos).expect("pos in bounds");
             let series = Series::new(&col_name, self.df.index.clone(), col.clone())?;
-            let rolled = series
-                .rolling_with_center(self.window, Some(self.min_periods), self.center)
-                .agg(funcs)?;
+            let rolled = self.column_window(&series).agg(funcs)?;
             for func in funcs {
                 let out_name = format!("{col_name}_{func}");
                 pairs.push((out_name.clone(), rolled.columns()[*func].clone()));
@@ -39489,17 +40716,27 @@ pub struct DataFrameExpanding<'a> {
 
 impl DataFrameExpanding<'_> {
     /// Apply expanding aggregation to each numeric column, returning a new DataFrame.
-    /// Column-parallel (br-frankenpandas-1q4q4) — see `DataFrameRolling::apply_rolling`.
     fn apply_expanding<F>(&self, agg: F) -> Result<DataFrame, FrameError>
+    where
+        F: Fn(&Series, usize) -> Result<Series, FrameError> + Sync,
+    {
+        self.apply_expanding_to(false, agg)
+    }
+
+    /// Apply expanding aggregation to each numeric column (every column
+    /// when `every_column`, for count), returning a new DataFrame.
+    /// Column-parallel (br-frankenpandas-1q4q4) — see `DataFrameRolling::apply_rolling`.
+    fn apply_expanding_to<F>(&self, every_column: bool, agg: F) -> Result<DataFrame, FrameError>
     where
         F: Fn(&Series, usize) -> Result<Series, FrameError> + Sync,
     {
         let numeric_positions: Vec<usize> = (0..self.df.num_columns())
             .filter(|&pos| {
-                matches!(
-                    self.df.column_at(pos).expect("pos in bounds").dtype(),
-                    DType::Int64 | DType::Float64
-                )
+                every_column
+                    || matches!(
+                        self.df.column_at(pos).expect("pos in bounds").dtype(),
+                        DType::Int64 | DType::Float64
+                    )
             })
             .collect();
 
@@ -39608,9 +40845,19 @@ impl DataFrameExpanding<'_> {
         self.apply_expanding(|s, mp| s.expanding(Some(mp)).std())
     }
 
+    /// [`Expanding::std_ddof`] across all numeric columns.
+    pub fn std_ddof(&self, ddof: usize) -> Result<DataFrame, FrameError> {
+        self.apply_expanding(|s, mp| s.expanding(Some(mp)).std_ddof(ddof))
+    }
+
     /// Expanding variance across all numeric columns.
     pub fn var(&self) -> Result<DataFrame, FrameError> {
         self.apply_expanding(|s, mp| s.expanding(Some(mp)).var())
+    }
+
+    /// [`Expanding::var_ddof`] across all numeric columns.
+    pub fn var_ddof(&self, ddof: usize) -> Result<DataFrame, FrameError> {
+        self.apply_expanding(|s, mp| s.expanding(Some(mp)).var_ddof(ddof))
     }
 
     /// Expanding median across all numeric columns.
@@ -39618,14 +40865,28 @@ impl DataFrameExpanding<'_> {
         self.apply_expanding(|s, mp| s.expanding(Some(mp)).median())
     }
 
-    /// Expanding count of non-null values across all numeric columns.
+    /// Expanding count of non-null values in every column, as pandas
+    /// counts text and datetimes too (only the numeric ones were).
     pub fn count(&self) -> Result<DataFrame, FrameError> {
-        self.apply_expanding(|s, mp| s.expanding(Some(mp)).count())
+        self.apply_expanding_to(true, |s, mp| s.expanding(Some(mp)).count())
     }
 
     /// Expanding quantile across all numeric columns.
     pub fn quantile(&self, q: f64) -> Result<DataFrame, FrameError> {
         self.apply_expanding(move |s, mp| s.expanding(Some(mp)).quantile(q))
+    }
+
+    /// Expanding quantile with pandas' `interpolation` across all numeric
+    /// columns (see [`Expanding::quantile_with_interpolation`]).
+    pub fn quantile_with_interpolation(
+        &self,
+        q: f64,
+        interpolation: &str,
+    ) -> Result<DataFrame, FrameError> {
+        self.apply_expanding(move |s, mp| {
+            s.expanding(Some(mp))
+                .quantile_with_interpolation(q, interpolation)
+        })
     }
 
     /// Expanding sample skewness (Fisher-Pearson) across all numeric
@@ -39707,6 +40968,11 @@ impl DataFrameExpanding<'_> {
         self.apply_expanding(|s, mp| s.expanding(Some(mp)).sem())
     }
 
+    /// [`Expanding::sem_ddof`] across numeric columns.
+    pub fn sem_ddof(&self, ddof: usize) -> Result<DataFrame, FrameError> {
+        self.apply_expanding(|s, mp| s.expanding(Some(mp)).sem_ddof(ddof))
+    }
+
     /// Expanding rank across numeric columns.
     pub fn rank(
         &self,
@@ -39745,9 +41011,27 @@ pub struct DataFrameEwm<'a> {
     /// EWM had neither).
     adjust: bool,
     min_periods: usize,
+    /// pandas `ignore_na` and `times=` deltas, per column as
+    /// [`Ewm::ignoring_na`] / [`Ewm::with_deltas`].
+    ignore_na: bool,
+    deltas: Option<Vec<f64>>,
 }
 
 impl DataFrameEwm<'_> {
+    /// [`Ewm::ignoring_na`] for every column.
+    #[must_use]
+    pub fn ignoring_na(mut self, ignore_na: bool) -> Self {
+        self.ignore_na = ignore_na;
+        self
+    }
+
+    /// [`Ewm::with_deltas`] for every column.
+    #[must_use]
+    pub fn with_deltas(mut self, deltas: Vec<f64>) -> Self {
+        self.deltas = Some(deltas);
+        self
+    }
+
     /// Apply EWM aggregation to each numeric column, returning a new DataFrame.
     /// Column-parallel (br-frankenpandas-1q4q4) — see `DataFrameRolling::apply_rolling`.
     fn apply_ewm<F>(&self, agg: F) -> Result<DataFrame, FrameError>
@@ -39843,7 +41127,13 @@ impl DataFrameEwm<'_> {
 
     /// One column's EWM with this window's span/alpha, adjust and min_periods.
     fn series_ewm<'s>(&self, series: &'s Series) -> Ewm<'s> {
-        series.ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
+        let ewm = series
+            .ewm_with_options(self.span, self.alpha, self.adjust, self.min_periods)
+            .ignoring_na(self.ignore_na);
+        match &self.deltas {
+            Some(deltas) => ewm.with_deltas(deltas.clone()),
+            None => ewm,
+        }
     }
 
     /// EWM mean across all numeric columns.
@@ -39856,9 +41146,19 @@ impl DataFrameEwm<'_> {
         self.apply_ewm(|ewm| ewm.std())
     }
 
+    /// [`Ewm::std_bias`] across all numeric columns.
+    pub fn std_bias(&self, bias: bool) -> Result<DataFrame, FrameError> {
+        self.apply_ewm(|ewm| ewm.std_bias(bias))
+    }
+
     /// EWM variance across all numeric columns.
     pub fn var(&self) -> Result<DataFrame, FrameError> {
         self.apply_ewm(|ewm| ewm.var())
+    }
+
+    /// [`Ewm::var_bias`] across all numeric columns.
+    pub fn var_bias(&self, bias: bool) -> Result<DataFrame, FrameError> {
+        self.apply_ewm(|ewm| ewm.var_bias(bias))
     }
 
     /// EWM weighted sum across all numeric columns.
@@ -42233,7 +43533,8 @@ impl SeriesGroupBy<'_> {
                     // groups stay DISTINCT; the old `"NaN"` collapse gave
                     // every unlisted key the SAME label. Missing values never
                     // reach here (skipped above), so this is not the null path.
-                    Scalar::Period(period) => IndexLabel::Utf8(period.calendar_string()),
+                    // A period is its own label (45fzr).
+                    Scalar::Period(period) => IndexLabel::Period(*period),
                     Scalar::Interval(interval) => IndexLabel::Utf8(interval.to_string()),
                     other => IndexLabel::Utf8(format!("{other:?}")),
                 };
@@ -44035,6 +45336,39 @@ impl SeriesGroupBy<'_> {
 
     /// Per br-frankenpandas-c1bxu: true when every non-missing value in the
     /// column is Timedelta64 (and at least one is). Allows NaT/Null markers.
+    /// pandas' refusals of a cumulative op by dtype: text is its TypeError
+    /// "cumsum is not supported for object dtype", cumsum / cumprod of
+    /// datetime64 its "datetime64 type does not support" one. They were
+    /// all-NaN (br-frankenpandas-cemrq).
+    fn refuse_cum_dtype(&self, how: &str) -> Result<(), FrameError> {
+        match self.series.column.dtype() {
+            DType::Utf8 => Err(FrameError::CompatibilityRejected(format!(
+                "{how} is not supported for object dtype"
+            ))),
+            DType::Datetime64 { .. } if matches!(how, "cumsum" | "cumprod") => {
+                Err(FrameError::CompatibilityRejected(format!(
+                    "datetime64 type does not support {how} operations"
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// A datetime64 column's running max (`max`) or min per group, NaT
+    /// kept, in the column's dtype (zone included).
+    fn datetime_cum_extreme(&self, max: bool) -> Result<Series, FrameError> {
+        let dtype = self.series.column.dtype();
+        let running = self.transform_groups(|vals| {
+            running_datetime_extreme(vals, max)
+                .unwrap_or_else(|| vec![Scalar::Datetime64(fp_types::Timestamp::NAT); vals.len()])
+        })?;
+        Series::new(
+            running.name(),
+            running.index().clone(),
+            running.column().with_dtype(dtype),
+        )
+    }
+
     fn column_is_timedelta(&self) -> bool {
         let mut saw_td = false;
         for v in self.series.column.values() {
@@ -44954,6 +46288,28 @@ impl SeriesGroupBy<'_> {
         }
     }
 
+    /// pandas' `any(skipna=...)` / `all(skipna=...)`: with `skipna=false` a
+    /// missing value is read, as numpy's bool of NaN, truthy - `any` of a
+    /// group holding one is True, and `all` is unchanged, a skipped value
+    /// never having made it False (br-frankenpandas-n57tz: the keyword was
+    /// unexpected). pandas' nullable dtypes answer `<NA>` instead (Kleene
+    /// logic); callers refuse those.
+    pub fn bool_reduce_with_skipna(&self, all: bool, skipna: bool) -> Result<Series, FrameError> {
+        if all {
+            return self.all();
+        }
+        if skipna {
+            return self.any();
+        }
+        let values = self.series.column.values();
+        self.agg_scalar(self.series.name(), |indices| {
+            Scalar::Bool(indices.iter().any(|&idx| {
+                let value = &values[idx];
+                value.is_missing() || Series::scalar_truthy(value)
+            }))
+        })
+    }
+
     /// Whether any non-missing value is truthy in each group.
     pub fn any(&self) -> Result<Series, FrameError> {
         if let Some(result) = self.group_bool_reduce_dense(false) {
@@ -45118,6 +46474,29 @@ impl SeriesGroupBy<'_> {
             index,
             Column::from_values(values)?,
         )?))
+    }
+
+    /// pandas' `nunique(dropna=...)`: with `dropna=false` a group's missing
+    /// values count as one more distinct value (br-frankenpandas-n57tz: the
+    /// keyword was unexpected).
+    pub fn nunique_with_dropna(&self, dropna: bool) -> Result<Series, FrameError> {
+        if dropna {
+            return self.nunique();
+        }
+        let values = self.series.column.values();
+        self.agg_scalar(self.series.name(), |indices| {
+            let mut seen = FxHashSet::default();
+            let mut missing = false;
+            for &idx in indices {
+                match scalar_key_skip_missing(&values[idx]) {
+                    Some(key) => {
+                        seen.insert(key);
+                    }
+                    None => missing = true,
+                }
+            }
+            Scalar::Int64(i64::try_from(seen.len() + usize::from(missing)).unwrap_or(i64::MAX))
+        })
     }
 
     pub fn nunique(&self) -> Result<Series, FrameError> {
@@ -45422,18 +46801,22 @@ impl SeriesGroupBy<'_> {
             .column
             .as_f64_slice()
             .filter(|values| !values.iter().any(|value| value.is_nan()));
-        let i64_values = self.series.column.as_i64_slice();
+        let i64_values = self
+            .series
+            .column
+            .as_i64_slice()
+            .filter(|_| !self.series.column.has_any_missing());
         if (f64_values.is_some() || i64_values.is_some())
             && let Some((gids, ngroups)) = self.dense_group_ids()
             && let Some(order) = self.dense_group_labels(&gids, ngroups)
         {
-            let mut opens = vec![0.0; ngroups];
-            let mut highs = vec![f64::NEG_INFINITY; ngroups];
-            let mut lows = vec![f64::INFINITY; ngroups];
-            let mut closes = vec![0.0; ngroups];
-            let mut seen = vec![false; ngroups];
-
+            let mut columns = BTreeMap::new();
             if let Some(values) = f64_values {
+                let mut opens = vec![0.0; ngroups];
+                let mut highs = vec![f64::NEG_INFINITY; ngroups];
+                let mut lows = vec![f64::INFINITY; ngroups];
+                let mut closes = vec![0.0; ngroups];
+                let mut seen = vec![false; ngroups];
                 for (row, &group) in gids.iter().enumerate() {
                     let value = values[row];
                     if !seen[group] {
@@ -45444,9 +46827,20 @@ impl SeriesGroupBy<'_> {
                     lows[group] = lows[group].min(value);
                     closes[group] = value;
                 }
+                columns.insert("open".to_owned(), Column::from_f64_values_owned(opens));
+                columns.insert("high".to_owned(), Column::from_f64_values_owned(highs));
+                columns.insert("low".to_owned(), Column::from_f64_values_owned(lows));
+                columns.insert("close".to_owned(), Column::from_f64_values_owned(closes));
             } else if let Some(values) = i64_values {
+                // An int column keeps int64, as pandas (every group holds a
+                // row; it was float64, c90rr).
+                let mut opens = vec![0_i64; ngroups];
+                let mut highs = vec![i64::MIN; ngroups];
+                let mut lows = vec![i64::MAX; ngroups];
+                let mut closes = vec![0_i64; ngroups];
+                let mut seen = vec![false; ngroups];
                 for (row, &group) in gids.iter().enumerate() {
-                    let value = values[row] as f64;
+                    let value = values[row];
                     if !seen[group] {
                         opens[group] = value;
                         seen[group] = true;
@@ -45455,13 +46849,11 @@ impl SeriesGroupBy<'_> {
                     lows[group] = lows[group].min(value);
                     closes[group] = value;
                 }
+                columns.insert("open".to_owned(), Column::from_i64_values_owned(opens));
+                columns.insert("high".to_owned(), Column::from_i64_values_owned(highs));
+                columns.insert("low".to_owned(), Column::from_i64_values_owned(lows));
+                columns.insert("close".to_owned(), Column::from_i64_values_owned(closes));
             }
-
-            let mut columns = BTreeMap::new();
-            columns.insert("open".to_owned(), Column::from_f64_values_owned(opens));
-            columns.insert("high".to_owned(), Column::from_f64_values_owned(highs));
-            columns.insert("low".to_owned(), Column::from_f64_values_owned(lows));
-            columns.insert("close".to_owned(), Column::from_f64_values_owned(closes));
 
             let by_name = self.by.name();
             let idx_name = if by_name.is_empty() {
@@ -45487,8 +46879,32 @@ impl SeriesGroupBy<'_> {
         let mut highs = Vec::with_capacity(order_keys.len());
         let mut lows = Vec::with_capacity(order_keys.len());
         let mut closes = Vec::with_capacity(order_keys.len());
+        // An int column holding no missing value keeps int64 (c90rr).
+        let keep_int =
+            self.series.column.dtype() == DType::Int64 && !self.series.column.has_any_missing();
 
         for key in &order_keys {
+            if keep_int {
+                let ints: Vec<i64> = groups[key]
+                    .iter()
+                    .filter_map(|&idx| match values[idx] {
+                        Scalar::Int64(value) => Some(value),
+                        _ => None,
+                    })
+                    .collect();
+                if let (Some(&open), Some(&close), Some(&high), Some(&low)) = (
+                    ints.first(),
+                    ints.last(),
+                    ints.iter().max(),
+                    ints.iter().min(),
+                ) {
+                    opens.push(Scalar::Int64(open));
+                    highs.push(Scalar::Int64(high));
+                    lows.push(Scalar::Int64(low));
+                    closes.push(Scalar::Int64(close));
+                    continue;
+                }
+            }
             let group_values: Vec<f64> = groups[key]
                 .iter()
                 .filter_map(|&idx| {
@@ -45731,6 +47147,42 @@ impl SeriesGroupBy<'_> {
             fp_types::nansem_grouped(values, 1)
         })
         .and_then(float_moment_series)
+    }
+
+    /// pandas' `skew(skipna=...)`: with `skipna=false` a group holding a
+    /// missing value is NaN (br-frankenpandas-n57tz: the keyword was
+    /// unexpected).
+    pub fn skew_with_skipna(&self, skipna: bool) -> Result<Series, FrameError> {
+        let skew = self.skew()?;
+        if skipna {
+            return Ok(skew);
+        }
+        let values = self.series.column.values();
+        let missing = self.agg_scalar(self.series.name(), |indices| {
+            Scalar::Bool(indices.iter().any(|&idx| values[idx].is_missing()))
+        })?;
+        if missing.len() != skew.len() {
+            return Err(FrameError::CompatibilityRejected(
+                "skew(skipna=False): the groups differ from skew's".to_owned(),
+            ));
+        }
+        let cells = skew
+            .values()
+            .iter()
+            .zip(missing.values())
+            .map(|(cell, missing)| {
+                if matches!(missing, Scalar::Bool(true)) {
+                    Scalar::Float64(f64::NAN)
+                } else {
+                    cell.clone()
+                }
+            })
+            .collect();
+        Series::new(
+            skew.name(),
+            skew.index().clone(),
+            Column::from_values(cells)?,
+        )
     }
 
     /// Skewness of each group.
@@ -46548,6 +48000,7 @@ impl SeriesGroupBy<'_> {
 
     /// GroupBy cumulative sum.
     pub fn cumsum(&self) -> Result<Series, FrameError> {
+        self.refuse_cum_dtype("cumsum")?;
         // Per br-frankenpandas-v6j38: Timedelta64 cumsum preserves dtype.
         // Sister to br-gqrmf (Series::cumsum) and br-c1bxu (groupby sum).
         if self.column_is_timedelta() {
@@ -46598,6 +48051,7 @@ impl SeriesGroupBy<'_> {
 
     /// GroupBy cumulative product.
     pub fn cumprod(&self) -> Result<Series, FrameError> {
+        self.refuse_cum_dtype("cumprod")?;
         // Per br-frankenpandas-v6j38: pandas raises TypeError on
         // td.groupby(...).cumprod() (Timedelta² dimensionless). Mirror
         // Series::cumprod (br-v36qy) by emitting NaT per position.
@@ -46636,6 +48090,10 @@ impl SeriesGroupBy<'_> {
 
     /// GroupBy cumulative minimum.
     pub fn cummin(&self) -> Result<Series, FrameError> {
+        self.refuse_cum_dtype("cummin")?;
+        if matches!(self.series.column.dtype(), DType::Datetime64 { .. }) {
+            return self.datetime_cum_extreme(false);
+        }
         // Per br-frankenpandas-v6j38: Timedelta64 cummin preserves dtype.
         // Sister to br-v7spg (Series::cummin) and br-tgm2i (groupby min).
         if self.column_is_timedelta() {
@@ -46685,6 +48143,10 @@ impl SeriesGroupBy<'_> {
 
     /// GroupBy cumulative maximum.
     pub fn cummax(&self) -> Result<Series, FrameError> {
+        self.refuse_cum_dtype("cummax")?;
+        if matches!(self.series.column.dtype(), DType::Datetime64 { .. }) {
+            return self.datetime_cum_extreme(true);
+        }
         // Per br-frankenpandas-v6j38: Timedelta64 cummax preserves dtype.
         if self.column_is_timedelta() {
             return self.transform_groups(|vals| {
@@ -47043,41 +48505,31 @@ impl SeriesGroupBy<'_> {
                 }
             }
         }
-        self.transform_groups(|vals| {
-            // pandas groupby.pct_change default fill_method='ffill' forward-fills
-            // within each group before computing. (br-frankenpandas-c3zld)
-            let vals = forward_fill_scalars(vals);
-            let group_len = vals.len() as i64;
-            vals.iter()
-                .enumerate()
-                .map(|(idx, value)| {
-                    let prev_idx = idx as i64 - periods;
-                    if prev_idx < 0 || prev_idx >= group_len {
-                        return Scalar::Null(NullKind::NaN);
-                    }
-                    let previous = &vals[prev_idx as usize];
-                    if value.is_missing() || previous.is_missing() {
-                        return Scalar::Null(NullKind::NaN);
-                    }
-                    // Per br-frankenpandas-dj6rv: Timedelta64 pct_change
-                    // matches pandas — ns deltas divide as dimensionless f64.
-                    if let (Scalar::Timedelta64(cur_ns), Scalar::Timedelta64(prev_ns)) =
-                        (value, previous)
-                    {
-                        if *cur_ns == Timedelta::NAT || *prev_ns == Timedelta::NAT {
-                            return Scalar::Null(NullKind::NaN);
-                        }
-                        // pandas' `filled / shifted - 1`, no zero guard: a zero
-                        // divisor is inf (or NaN for 0/0), as pandas (fvsao.13).
-                        return Scalar::Float64(*cur_ns as f64 / *prev_ns as f64 - 1.0);
-                    }
-                    if let (Ok(current), Ok(prev)) = (value.to_f64(), previous.to_f64()) {
-                        Scalar::Float64(current / prev - 1.0)
-                    } else {
-                        Scalar::Null(NullKind::NaN)
-                    }
-                })
-                .collect()
+        // pandas groupby.pct_change default fill_method='ffill' forward-fills
+        // within each group before computing. (br-frankenpandas-c3zld)
+        self.transform_groups(|vals| group_pct_change(&forward_fill_scalars(vals), periods))
+    }
+
+    /// pandas' `pct_change(periods, fill_method, limit)` of each group: the
+    /// group filled forward (`ffill` / `pad`) or backward (`bfill` /
+    /// `backfill`) up to `limit`, or not at all (None), then `filled /
+    /// filled.shift(periods) - 1` within it. fill_method=None forward-filled
+    /// like the default, and a method or limit was refused
+    /// (br-frankenpandas-n57tz).
+    pub fn pct_change_with_fill(
+        &self,
+        periods: i64,
+        fill_method: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Series, FrameError> {
+        let direction = pct_change_fill_direction(fill_method)?;
+        if direction == Some(true) && limit.is_none() {
+            return self.pct_change(periods);
+        }
+        let periods = clamp_periods(periods, self.series.len());
+        self.transform_groups(|vals| match direction {
+            Some(forward) => group_pct_change(&fill_scalars_limited(vals, forward, limit), periods),
+            None => group_pct_change(vals, periods),
         })
     }
 
@@ -47323,9 +48775,28 @@ impl SeriesGroupBy<'_> {
         }
     }
 
-    fn select_extreme_positions(&self, n: usize, largest: bool) -> Vec<usize> {
+    /// Each group's `n` largest (`largest`) or smallest non-missing values
+    /// under pandas' `keep`: 'first' breaks a tie by the earlier row,
+    /// 'last' by the later one (listing it first), 'all' keeps every row
+    /// tied with the n-th value (br-frankenpandas-n57tz: keep was
+    /// unexpected).
+    fn select_extreme_positions(
+        &self,
+        n: usize,
+        largest: bool,
+        keep: &str,
+    ) -> Result<Vec<usize>, FrameError> {
+        let last = match keep {
+            "first" | "all" => false,
+            "last" => true,
+            _ => {
+                return Err(FrameError::CompatibilityRejected(
+                    r#"keep must be either "first", "last" or "all""#.to_owned(),
+                ));
+            }
+        };
         if n == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         let (_order, order_keys, groups) = self.build_groups();
@@ -47344,32 +48815,106 @@ impl SeriesGroupBy<'_> {
                 } else {
                     values[*left].semantic_cmp(&values[*right])
                 };
-                if ordering == Ordering::Equal {
-                    left.cmp(right)
-                } else {
-                    ordering
+                match ordering {
+                    Ordering::Equal if last => right.cmp(left),
+                    Ordering::Equal => left.cmp(right),
+                    ordering => ordering,
                 }
             });
-            selected.extend(group_positions.into_iter().take(n));
+            let mut take = n.min(group_positions.len());
+            if keep == "all" && take > 0 {
+                let boundary = &values[group_positions[take - 1]];
+                while take < group_positions.len()
+                    && values[group_positions[take]].semantic_cmp(boundary) == Ordering::Equal
+                {
+                    take += 1;
+                }
+            }
+            selected.extend(group_positions.into_iter().take(take));
         }
 
-        selected
+        Ok(selected)
     }
 
-    /// Return up to `n` largest non-missing values from each group.
+    /// Return up to `n` largest non-missing values from each group, indexed
+    /// by (group key, row label) as pandas'.
     pub fn nlargest(&self, n: usize) -> Result<Series, FrameError> {
-        let positions = self.select_extreme_positions(n, true);
-        self.take_positions(&positions)
+        self.nlargest_keep(n, "first")
     }
 
-    /// Return up to `n` smallest non-missing values from each group.
+    /// Return up to `n` smallest non-missing values from each group, indexed
+    /// by (group key, row label) as pandas'.
     pub fn nsmallest(&self, n: usize) -> Result<Series, FrameError> {
-        let positions = self.select_extreme_positions(n, false);
-        self.take_positions(&positions)
+        self.nsmallest_keep(n, "first")
+    }
+
+    /// pandas' `nlargest(n, keep)` of each group ([`Self::nlargest`] with
+    /// 'first').
+    pub fn nlargest_keep(&self, n: usize, keep: &str) -> Result<Series, FrameError> {
+        let positions = self.select_extreme_positions(n, true, keep)?;
+        self.keyed_by_group(&positions)
+    }
+
+    /// pandas' `nsmallest(n, keep)` of each group ([`Self::nsmallest`] with
+    /// 'first').
+    pub fn nsmallest_keep(&self, n: usize, keep: &str) -> Result<Series, FrameError> {
+        let positions = self.select_extreme_positions(n, false, keep)?;
+        self.keyed_by_group(&positions)
+    }
+
+    /// The rows at `positions` under pandas' index for a per-group result
+    /// that is not a filter: the group key level (named as the grouping)
+    /// before the row's own label (the group level was dropped;
+    /// br-frankenpandas-rqeqs).
+    fn keyed_by_group(&self, positions: &[usize]) -> Result<Series, FrameError> {
+        let taken = self.take_positions(positions)?;
+        let keys = self.by.column().values();
+        let labels = self.series.index().labels();
+        let mut flat = Vec::with_capacity(positions.len());
+        let mut group_level = Vec::with_capacity(positions.len());
+        let mut row_level = Vec::with_capacity(positions.len());
+        for &pos in positions {
+            let key = scalar_to_index_label(&keys[pos])?;
+            let label = labels[pos].clone();
+            flat.push(IndexLabel::Utf8(format!("{key}, {label}")));
+            group_level.push(key);
+            row_level.push(label);
+        }
+        let by_name = self.by.name();
+        let levels = fp_index::MultiIndex::from_frame(vec![
+            (
+                (!by_name.is_empty()).then(|| by_name.to_string()),
+                group_level,
+            ),
+            (
+                self.series.index().name().map(ToString::to_string),
+                row_level,
+            ),
+        ])?;
+        let index = Index::new(flat).with_row_multiindex(levels)?;
+        Series::new(self.series.name(), index, taken.column().clone())
     }
 
     /// Count non-missing values within each group.
     pub fn value_counts(&self) -> Result<Series, FrameError> {
+        self.value_counts_with_options(false, true, false, true)
+    }
+
+    /// pandas' `SeriesGroupBy.value_counts(normalize, sort, ascending,
+    /// dropna)`: the count of each (group, value), values in sorted order;
+    /// `sort` orders each group by count (descending unless `ascending`), a
+    /// tie keeping value order; `dropna=false` counts the missing values as
+    /// one NaN value, last; `normalize` divides by the group's total of what
+    /// is counted, as `proportion` (br-frankenpandas-n57tz: the keywords
+    /// were unexpected).
+    #[allow(clippy::cast_precision_loss)] // counts stay far below 2^53
+    pub fn value_counts_with_options(
+        &self,
+        normalize: bool,
+        sort: bool,
+        ascending: bool,
+        dropna: bool,
+    ) -> Result<Series, FrameError> {
         let (order, order_keys, groups) = self.build_groups();
         let values = self.series.column.values();
         let mut out_labels = Vec::new();
@@ -47381,10 +48926,16 @@ impl SeriesGroupBy<'_> {
             let group_label = &order[group_idx];
             let mut value_counts: Vec<(Scalar, i64)> = Vec::new();
             let mut index_by_key: FxHashMap<ScalarKey<'_>, usize> = FxHashMap::default();
+            // The missing values count as one value (pandas groups None with
+            // NaN), kept as the first one seen.
+            let mut missing: Option<(Scalar, i64)> = None;
 
             for &row_idx in &groups[key] {
                 let value = &values[row_idx];
                 let Some(value_key) = scalar_key_skip_missing(value) else {
+                    if !dropna {
+                        missing.get_or_insert_with(|| (value.clone(), 0)).1 += 1;
+                    }
                     continue;
                 };
                 match index_by_key.get(&value_key) {
@@ -47397,19 +48948,37 @@ impl SeriesGroupBy<'_> {
             }
             drop(index_by_key);
 
-            // pandas counts over (group, value) keys sorted by value, then
-            // sorts each group by count descending: a tie keeps value order.
-            value_counts.sort_by(|(left, left_count), (right, right_count)| {
-                right_count
-                    .cmp(left_count)
-                    .then_with(|| compare_scalars_with_na_position(left, right, true, false))
+            // pandas counts over (group, value) keys sorted by value, the
+            // missing value last, then stable-sorts by count: a tie keeps
+            // value order.
+            value_counts.sort_by(|(left, _), (right, _)| {
+                compare_scalars_with_na_position(left, right, true, false)
             });
+            value_counts.extend(missing);
+            if sort {
+                value_counts.sort_by(|(_, left), (_, right)| {
+                    if ascending {
+                        left.cmp(right)
+                    } else {
+                        right.cmp(left)
+                    }
+                });
+            }
+            let total: i64 = value_counts.iter().map(|(_, count)| count).sum();
 
             for (value, count) in value_counts {
                 out_labels.push(IndexLabel::Utf8(format!("{group_label}, {value}")));
                 group_level.push(group_label.clone());
-                value_level.push(scalar_to_index_label(&value)?);
-                out_counts.push(Scalar::Int64(count));
+                value_level.push(if value.is_missing() {
+                    scalar_to_value_counts_index_label(&value)
+                } else {
+                    scalar_to_index_label(&value)?
+                });
+                out_counts.push(if normalize {
+                    Scalar::Float64(count as f64 / total as f64)
+                } else {
+                    Scalar::Int64(count)
+                });
             }
         }
 
@@ -47432,7 +49001,11 @@ impl SeriesGroupBy<'_> {
             .rename_index(idx_name)
             .with_row_multiindex(levels)?;
         let column = Column::from_values(out_counts)?;
-        Series::new("count", index, column)
+        Series::new(
+            if normalize { "proportion" } else { "count" },
+            index,
+            column,
+        )
     }
 
     /// Summary statistics per group.
@@ -61095,6 +62668,7 @@ pub fn to_datetime_values_with_options(
     // column format); they used to be read as strftime patterns that match
     // nothing, so every value came back NaT.
     let per_element = matches!(options.format, Some("mixed" | "ISO8601"));
+    let mixed = options.format == Some("mixed");
     let options = ToDatetimeOptions {
         format: options.format.filter(|_| !per_element),
         ..options
@@ -61146,6 +62720,16 @@ pub fn to_datetime_values_with_options(
         } else {
             None
         };
+    // The format the lock stands for, as pandas' mismatch error names it
+    // (it said "the format of the first value"), and the first value it was
+    // read from.
+    let lock_first = shape_lock
+        .as_ref()
+        .and_then(|_| first_datetime_string(values));
+    let lock_format = lock_first.and_then(|first| {
+        iso_format_guess(first)
+            .or_else(|| guess_day_month_format(first, options.dayfirst).map(|guess| guess.format))
+    });
     let mut converted = Vec::with_capacity(values.len());
 
     for (position, val) in values.iter().enumerate() {
@@ -61159,8 +62743,33 @@ pub fn to_datetime_values_with_options(
                 .as_deref()
                 .is_some_and(|lock| !datetime_shape_matches(text, lock))
         {
+            // A value the format reads a start of: pandas' "unconverted data
+            // remains" (the first value's length is the format's for the
+            // fixed-width forms it guesses).
+            let remainder = lock_format
+                .as_ref()
+                .zip(lock_first)
+                .and_then(|(format, first)| {
+                    (text.len() > first.len()
+                        && text.is_char_boundary(first.len())
+                        && shape_lock
+                            .as_deref()
+                            .is_some_and(|lock| datetime_shape_matches(&text[..first.len()], lock)))
+                    .then(|| (format, &text[first.len()..]))
+                });
+            let head = match (remainder, lock_format.as_ref()) {
+                (Some((format, rest)), _) => format!(
+                    "unconverted data remains when parsing with format \"{format}\": \"{rest}\""
+                ),
+                (None, Some(format)) => {
+                    format!("time data \"{text}\" doesn't match format \"{format}\"")
+                }
+                (None, None) => {
+                    format!("time data \"{text}\" doesn't match the format of the first value")
+                }
+            };
             return Err(FrameError::CompatibilityRejected(format!(
-                "time data \"{text}\" doesn't match the format of the first value, at position {position}. You might want to try:\n    - passing `format` if your strings have a consistent format;\n    - passing `format='ISO8601'` if your strings are all ISO8601 but not necessarily in exactly the same format;\n    - passing `format='mixed'`, and the format will be inferred for each element individually. You might want to use `dayfirst` alongside this."
+                "{head}, at position {position}. You might want to try:\n    - passing `format` if your strings have a consistent format;\n    - passing `format='ISO8601'` if your strings are all ISO8601 but not necessarily in exactly the same format;\n    - passing `format='mixed'`, and the format will be inferred for each element individually. You might want to use `dayfirst` alongside this."
             )));
         }
         let result = if let Some(unit) = parsed_unit {
@@ -61176,6 +62785,18 @@ pub fn to_datetime_values_with_options(
                         // A row the column's ONE guessed format cannot parse.
                         // (br-frankenpandas-hzayc)
                         Scalar::Null(NullKind::NaT)
+                    } else if mixed
+                        && let Some(guess) = guess_day_month_format(s, options.dayfirst)
+                            .filter(|guess| !guess.format.starts_with("%Y"))
+                    {
+                        // format='mixed': each numeric day/month string read
+                        // as its own guess - day first with dayfirst, or when
+                        // only that reads (13/02/2024) - as pandas'
+                        // per-element parser reads it (05/02/2024 with
+                        // dayfirst was May 2, 13/02/2024 and 05.02.2024
+                        // unparseable; br-frankenpandas-6kaxp). A string with
+                        // a zone has no such guess and reads below.
+                        parse_datetime_string(s, Some(&guess.format))
                     } else if let Some(pattern) = inferred_timezone_pattern {
                         parse_datetime_string_with_timezone_pattern(s, pattern)
                     } else if !options.utc
@@ -61320,19 +62941,38 @@ fn label_time_of_day(label: &IndexLabel) -> Option<i64> {
     }
 }
 
-/// The positions `between_time(start, end)` keeps: start <= t <= end, or,
-/// when start is after end, the times past start or before end (pandas'
-/// wrap past midnight).
-fn between_time_positions(labels: &[IndexLabel], start: i64, end: i64) -> Vec<usize> {
+/// The positions `between_time(start, end, inclusive=)` keeps: start <= t
+/// <= end (each end closed as `inclusive` says), or, when start is after
+/// end, the times past start or before end (pandas' wrap past midnight).
+fn between_time_positions(
+    labels: &[IndexLabel],
+    start: i64,
+    end: i64,
+    inclusive: IntervalClosed,
+) -> Vec<usize> {
+    let after_start = |time: i64| {
+        if inclusive.left_closed() {
+            start <= time
+        } else {
+            start < time
+        }
+    };
+    let before_end = |time: i64| {
+        if inclusive.right_closed() {
+            time <= end
+        } else {
+            time < end
+        }
+    };
     labels
         .iter()
         .enumerate()
         .filter(|(_, label)| {
             label_time_of_day(label).is_some_and(|time| {
                 if start <= end {
-                    start <= time && time <= end
+                    after_start(time) && before_end(time)
                 } else {
-                    time >= start || time <= end
+                    after_start(time) || before_end(time)
                 }
             })
         })
@@ -62335,6 +63975,85 @@ fn datetime_shape_matches(value: &str, lock: &str) -> bool {
     matches && index == lock.len()
 }
 
+/// pandas' `guess_datetime_format` of a year-first (ISO-like) string, as its
+/// mismatch error names it: `%Y-%m-%d` (with the text's `-`, `/` or `.`),
+/// then a `T` or a space, as much of `%H:%M:%S.%f` as the text carries and a
+/// `%z` for a zone suffix (`Z`, `+01:00`, `-0500`). None for any other
+/// shape.
+fn iso_format_guess(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let digits = |from: usize, to: usize| {
+        bytes
+            .get(from..to)
+            .is_some_and(|part| part.iter().all(u8::is_ascii_digit))
+    };
+    let sep = *bytes.get(4)?;
+    if !digits(0, 4)
+        || !matches!(sep, b'-' | b'/' | b'.')
+        || bytes.get(7) != Some(&sep)
+        || !digits(5, 7)
+        || !digits(8, 10)
+    {
+        return None;
+    }
+    let sep = char::from(sep);
+    let mut format = format!("%Y{sep}%m{sep}%d");
+    let rest = &bytes[10..];
+    let Some((&time_sep, time)) = rest.split_first() else {
+        return Some(format);
+    };
+    if !matches!(time_sep, b'T' | b' ') {
+        return None;
+    }
+    let two = |at: usize| {
+        time.get(at..at + 2)
+            .is_some_and(|part| part.iter().all(u8::is_ascii_digit))
+    };
+    if !two(0) {
+        return None;
+    }
+    format.push(char::from(time_sep));
+    format.push_str("%H");
+    let mut at = 2;
+    for piece in ["%M", "%S"] {
+        if at == time.len() || matches!(time[at], b'Z' | b'+' | b'-') {
+            break;
+        }
+        if time[at] != b':' || !two(at + 1) {
+            return None;
+        }
+        format.push(':');
+        format.push_str(piece);
+        at += 3;
+    }
+    if time.get(at) == Some(&b'.') {
+        let digits = time[at + 1..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        if digits == 0 {
+            return None;
+        }
+        format.push_str(".%f");
+        at += 1 + digits;
+    }
+    let zone = &time[at..];
+    let offset = |part: &[u8]| {
+        matches!(part.len(), 5 | 6)
+            && matches!(part[0], b'+' | b'-')
+            && part[1..].iter().enumerate().all(|(i, byte)| {
+                byte.is_ascii_digit() || (part.len() == 6 && i == 2 && *byte == b':')
+            })
+    };
+    if zone.is_empty() {
+        Some(format)
+    } else if zone == b"Z" || offset(zone) {
+        Some(format + "%z")
+    } else {
+        None
+    }
+}
+
 /// The one shape a whole string column is parsed under, or `None` for no lock.
 ///
 /// `None` is not "every row is free" by accident — it is pandas' own behaviour
@@ -62869,8 +64588,9 @@ fn cut_round_frac(x: f64, precision: i32) -> f64 {
     if !x.is_finite() || x == 0.0 {
         return x;
     }
+    // numpy's `around`: half to even.
     let factor = 10f64.powi(cut_frac_digits(x, precision));
-    (x * factor).round() / factor
+    (x * factor).round_ties_even() / factor
 }
 
 /// The decimals `cut_round_frac` keeps for `x`: `precision` when it has a
@@ -62884,10 +64604,11 @@ fn cut_frac_digits(x: f64, precision: i32) -> i32 {
     }
 }
 
-/// pandas' `_infer_precision`: the smallest precision from 3 up at which the
-/// rounded edges are all distinct (3 when none is).
-fn cut_infer_precision(edges: &[f64]) -> i32 {
-    (3..20)
+/// pandas' `_infer_precision`: the smallest precision from `base` (cut /
+/// qcut's `precision`, 3 by default) up at which the rounded edges are all
+/// distinct (`base` when none is).
+fn cut_infer_precision(edges: &[f64], base: i32) -> i32 {
+    (base..20)
         .find(|&precision| {
             let mut levels: Vec<f64> = edges
                 .iter()
@@ -62897,7 +64618,7 @@ fn cut_infer_precision(edges: &[f64]) -> i32 {
             levels.dedup();
             levels.len() == edges.len()
         })
-        .unwrap_or(3)
+        .unwrap_or(base)
 }
 
 /// pandas' `_format_labels` intervals between `edges` - the Intervals its
@@ -62911,19 +64632,18 @@ fn cut_intervals(
     right: bool,
     include_lowest: bool,
     integer_edges: bool,
+    base_precision: i32,
 ) -> Vec<Interval> {
-    let precision = cut_infer_precision(edges);
+    let precision = cut_infer_precision(edges, base_precision);
     let mut breaks: Vec<f64> = edges
         .iter()
         .map(|&edge| cut_round_frac(edge, precision))
         .collect();
     let lowered = right && include_lowest;
     if lowered && let Some(first) = breaks.first_mut() {
-        // Exact decimal subtraction: both terms have at most `digits`
-        // decimals, so rounding there only removes binary noise.
-        let digits = cut_frac_digits(*first, precision).max(precision);
-        let step = 10f64.powi(digits);
-        *first = ((*first - 10f64.powi(-precision)) * step).round() / step;
+        // pandas' plain float `x - 10 ** -precision`, binary noise and all
+        // (1.2 - 0.1 is (1.0999999999999999, ...]); it was rounded away here.
+        *first -= 1.0 / 10f64.powi(precision);
     }
     let closed = if right {
         IntervalClosed::Right
@@ -62971,8 +64691,14 @@ impl BinCategories {
 /// the first edge lowered by 0.1% of the range, or, for one repeated
 /// value, the range padded by 0.1% of it (0.001 at zero) - the constant
 /// case printed (5.0, 5.0]. Returns the base and width a value's bin is
-/// computed from (`ceil((v - base) / width) - 1`, clamped) and the bins.
-fn cut_equal_width(min_val: f64, max_val: f64, bins: usize) -> (f64, f64, BinCategories) {
+/// computed from (`ceil((v - base) / width) - 1`, clamped) and the bins,
+/// labelled at `precision` (pandas' `precision=`, see `cut_intervals`).
+fn cut_equal_width(
+    min_val: f64,
+    max_val: f64,
+    bins: usize,
+    precision: i32,
+) -> (EqualWidthBins, BinCategories) {
     let constant = min_val == max_val;
     let pad = |v: f64| if v == 0.0 { 0.001 } else { 0.001 * v.abs() };
     let (lo, hi) = if constant {
@@ -62986,11 +64712,37 @@ fn cut_equal_width(min_val: f64, max_val: f64, bins: usize) -> (f64, f64, BinCat
     if !constant {
         edges[0] -= 0.001 * (hi - lo);
     }
-    (
-        lo,
-        width,
-        BinCategories::Intervals(cut_intervals(&edges, true, false, false)),
-    )
+    let categories = BinCategories::Intervals(cut_intervals(&edges, true, false, false, precision));
+    (EqualWidthBins { lo, width, edges }, categories)
+}
+
+/// The equal-width bins of [`cut_equal_width`]: a value's bin is guessed
+/// from `lo` and `width` and settled against the edges themselves, as
+/// pandas' right-closed searchsorted places it (the guess alone put a value
+/// lying on an inner edge, 2.3456 of [1.2345, 2.3456, 3.4567] in two bins,
+/// in the bin above it; br-frankenpandas-u6p7i).
+struct EqualWidthBins {
+    lo: f64,
+    width: f64,
+    edges: Vec<f64>,
+}
+
+impl EqualWidthBins {
+    fn bin(&self, value: f64) -> usize {
+        let last = self.edges.len().saturating_sub(2);
+        if self.width == 0.0 {
+            return 0;
+        }
+        let guess = ((value - self.lo) / self.width).ceil() as i64 - 1;
+        let mut bin = usize::try_from(guess.max(0)).unwrap_or(0).min(last);
+        while bin > 0 && value <= self.edges[bin] {
+            bin -= 1;
+        }
+        while bin < last && value > self.edges[bin + 1] {
+            bin += 1;
+        }
+        bin
+    }
 }
 
 /// A cut/qcut result as pandas returns it from each value's bin (`None`:
@@ -63324,6 +65076,16 @@ pub fn array(data: &[Scalar], dtype: Option<DType>) -> Result<Series, FrameError
 }
 
 pub fn cut(series: &Series, bins: usize) -> Result<Series, FrameError> {
+    cut_with_precision(series, bins, 3)
+}
+
+/// [`cut`] with pandas' `precision=` (the digits of the interval labels;
+/// 3 in [`cut`]).
+pub fn cut_with_precision(
+    series: &Series,
+    bins: usize,
+    precision: i32,
+) -> Result<Series, FrameError> {
     if bins == 0 {
         return Err(FrameError::CompatibilityRejected(
             "cut: bins must be > 0".to_string(),
@@ -63363,14 +65125,8 @@ pub fn cut(series: &Series, bins: usize) -> Result<Series, FrameError> {
                         .fold(f64::NEG_INFINITY, f64::max),
                 ),
             };
-            let (base, width, categories) = cut_equal_width(min_val, max_val, bins);
-            let bin_idx = |f: f64| -> Option<usize> {
-                Some(if width == 0.0 {
-                    0
-                } else {
-                    (((f - base) / width).ceil() as i64 - 1).clamp(0, (bins as i64) - 1) as usize
-                })
-            };
+            let (binning, categories) = cut_equal_width(min_val, max_val, bins, precision);
+            let bin_idx = |f: f64| -> Option<usize> { Some(binning.bin(f)) };
             return match &ts {
                 CutTyped::F64(d) => {
                     binned_categorical(series, d.iter().map(|&f| bin_idx(f)), &categories)
@@ -63426,37 +65182,13 @@ pub fn cut(series: &Series, bins: usize) -> Result<Series, FrameError> {
     // index in O(1) per value. Was O(n × bins) inner scan plus n redundant
     // String allocations. pandas' edges, padding and label precision: see
     // cut_equal_width (br-frankenpandas-4rfy1).
-    let (base, width, categories) = cut_equal_width(min_val, max_val, bins);
+    let (binning, categories) = cut_equal_width(min_val, max_val, bins, precision);
 
-    let bin_indices = floats.iter().map(|v| {
-        v.map(|f| {
-            // Compute bucket index directly from uniform bin width
-            // from `base` (min_val, or the padded min of a constant
-            // range, whose single value then falls in its middle bin
-            // as pandas' searchsorted places it).
-            // Edge cases:
-            // - Value == min_val: pandas's first-bin-inclusive on
-            //   both sides means bin 0 (the floor formula gives 0).
-            // - Value == max_val: floor((max - min) / width) == bins,
-            //   which we clamp to bins - 1.
-            // - Value just above max (shouldn't happen since min/max
-            //   come from this same set, but float rounding can put
-            //   things slightly outside): clamp to bins - 1.
-            if width == 0.0 {
-                0
-            } else {
-                // Right-closed intervals (left, right]: a value at
-                // exactly bin_idx * width + min belongs to bin
-                // (bin_idx - 1), not bin_idx. Hence ceil - 1 rather
-                // than floor. The first bin is inclusive on the
-                // left edge too — handled by clamping the raw
-                // result to [0, bins-1] (a value at min gives -1
-                // before clamping).
-                let raw = ((f - base) / width).ceil() as i64 - 1;
-                raw.clamp(0, (bins as i64) - 1) as usize
-            }
-        })
-    });
+    // Each value's right-closed bin (EqualWidthBins::bin): the first bin
+    // takes the minimum (its edge is lowered), the last the maximum, and a
+    // constant range's single value its middle bin, as pandas' searchsorted
+    // places them.
+    let bin_indices = floats.iter().map(|v| v.map(|f| binning.bin(f)));
 
     // Per br-frankenpandas-23d91: pandas pd.cut preserves source axis name.
     binned_categorical(series, bin_indices, &categories)
@@ -63477,6 +65209,19 @@ pub fn cut_bins(
     right: bool,
     labels: Option<&[&str]>,
     include_lowest: bool,
+) -> Result<Series, FrameError> {
+    cut_bins_with_precision(series, edges, right, labels, include_lowest, 3)
+}
+
+/// [`cut_bins`] with pandas' `precision=` (the digits of the interval
+/// labels; 3 in [`cut_bins`]).
+pub fn cut_bins_with_precision(
+    series: &Series,
+    edges: &[Scalar],
+    right: bool,
+    labels: Option<&[&str]>,
+    include_lowest: bool,
+    precision: i32,
 ) -> Result<Series, FrameError> {
     if edges.len() < 2 {
         return Err(FrameError::CompatibilityRejected(
@@ -63513,7 +65258,13 @@ pub fn cut_bins(
             }
             BinCategories::Labels(custom.iter().map(|s| (*s).to_string()).collect())
         }
-        None => BinCategories::Intervals(cut_intervals(&edge_vals, right, lowest, integer_edges)),
+        None => BinCategories::Intervals(cut_intervals(
+            &edge_vals,
+            right,
+            lowest,
+            integer_edges,
+            precision,
+        )),
     };
 
     let (first, last) = (edge_vals[0], edge_vals[n_bins]);
@@ -63681,6 +65432,18 @@ pub fn qcut_with_edges(
     labels: Option<&[&str]>,
     drop_duplicate_edges: bool,
 ) -> Result<(Series, Vec<f64>), FrameError> {
+    qcut_with_edges_precision(series, quantiles, labels, drop_duplicate_edges, 3)
+}
+
+/// [`qcut_with_edges`] with pandas' `precision=` (the digits of the
+/// interval labels; 3 in [`qcut_with_edges`]).
+pub fn qcut_with_edges_precision(
+    series: &Series,
+    quantiles: &[f64],
+    labels: Option<&[&str]>,
+    drop_duplicate_edges: bool,
+    precision: i32,
+) -> Result<(Series, Vec<f64>), FrameError> {
     if quantiles.len() < 2 {
         return Err(FrameError::CompatibilityRejected(
             "qcut: q must list at least 2 quantiles".to_string(),
@@ -63815,7 +65578,7 @@ pub fn qcut_with_edges(
             }
             BinCategories::Labels(custom.iter().map(|s| (*s).to_string()).collect())
         }
-        None => BinCategories::Intervals(cut_intervals(&edges, true, true, false)),
+        None => BinCategories::Intervals(cut_intervals(&edges, true, true, false, precision)),
     };
 
     // Per br-frankenpandas-6bslt: pandas pd.qcut preserves source axis name
@@ -63846,6 +65609,7 @@ pub fn index_to_frame(index: &Index, name: Option<&str>) -> Result<DataFrame, Fr
             IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
             IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
             IndexLabel::Object(object) => Scalar::Object(object.clone()),
+            IndexLabel::Period(period) => Scalar::Period(*period),
             // Typed-null label round-trips to the same-kind missing scalar.
             IndexLabel::Null(kind) => Scalar::Null(*kind),
         })
@@ -63875,6 +65639,7 @@ pub fn index_to_series(index: &Index, name: Option<&str>) -> Result<Series, Fram
             IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
             IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
             IndexLabel::Object(object) => Scalar::Object(object.clone()),
+            IndexLabel::Period(period) => Scalar::Period(*period),
             // Typed-null label round-trips to the same-kind missing scalar.
             IndexLabel::Null(kind) => Scalar::Null(*kind),
         })
@@ -64258,13 +66023,26 @@ fn concat_nullable_dtype(frames: &[&DataFrame], col_name: &str) -> Option<DType>
 /// `source` is nullable and `result` holds the same kind of values: pandas'
 /// masked arrays keep their dtype through a selection or a fill (`where`,
 /// `mask`), where rebuilding from values made a nullable Int64 a plain int64
-/// holding the NA (4qg5w.11). Anything else is `result`.
-fn nullable_kept(source: &Column, result: Column) -> Column {
+/// holding the NA (4qg5w.11). A plain int64 column that held no missing value
+/// and gained one is float64, as numpy's int64 holds no NaN, and so is an
+/// all-missing `result` of such an int or of a float `source` (df.where over
+/// an int column reported int64 beside NaN, an all-NaN float column object;
+/// br-frankenpandas-vzoct). An int64 source that already held a missing
+/// value keeps its dtype, so where(cond, self) stays the identity. Anything
+/// else is `result`.
+fn nullable_kept(source: &Column, result: Column) -> Result<Column, FrameError> {
     let dtype = source.dtype();
+    let numpy_int_gained_missing = dtype == DType::Int64 && !source.has_any_missing();
     if dtype.is_nullable() && result.dtype() == dtype.to_non_nullable() {
-        result.with_dtype(dtype)
+        Ok(result.with_dtype(dtype))
+    } else if (result.dtype() == DType::Int64
+        && result.has_any_missing()
+        && numpy_int_gained_missing)
+        || (result.dtype() == DType::Null && (numpy_int_gained_missing || dtype == DType::Float64))
+    {
+        Ok(result.astype(DType::Float64)?)
     } else {
-        result
+        Ok(result)
     }
 }
 
@@ -64323,6 +66101,35 @@ pub fn concat_dataframes_with_ignore_index(
 ) -> Result<DataFrame, FrameError> {
     if frames.is_empty() {
         return DataFrame::new(Index::new(Vec::new()), BTreeMap::new());
+    }
+    // Identically keyed frames whose column keys repeat (['a', 'a', 'b'], or
+    // MultiIndex columns whose leaf names repeat) concatenate column by
+    // column, as pandas' concat of equal axes: keyed by position here, then
+    // under the first frame's axis (by name the repeats collapsed into one
+    // column; i17d4).
+    let first = frames[0];
+    if first.has_repeated_column_keys()
+        && frames
+            .iter()
+            .all(|frame| frame.column_order == first.column_order)
+    {
+        let keyed = frames
+            .iter()
+            .map(|frame| frame.with_positional_keys())
+            .collect::<Result<Vec<_>, _>>()?;
+        let refs: Vec<&DataFrame> = keyed.iter().collect();
+        let out = concat_dataframes_with_ignore_index(&refs, ignore_index)?;
+        let columns = (0..out.num_columns())
+            .filter_map(|position| out.column_at(position).cloned())
+            .collect();
+        return Ok(first.with_index_and_columns_at_positions(out.index.clone(), columns));
+    }
+    // Differing axes where a frame repeats a column key cannot be aligned:
+    // pandas' InvalidIndexError (the repeats collapsed into one column).
+    if frames.iter().any(|frame| frame.has_repeated_column_keys()) {
+        return Err(FrameError::CompatibilityRejected(
+            "Reindexing only valid with uniquely valued Index objects".to_owned(),
+        ));
     }
 
     // Build index.
@@ -64662,7 +66469,10 @@ pub fn concat_dataframes_with_keys(
                 IndexLabel::Utf8(s) => format!("{key}|{s}"),
                 IndexLabel::Timedelta64(ns) => format!("{key}|{}", Timedelta::format(*ns)),
                 IndexLabel::Datetime64(ns) => format!("{key}|{}", format_datetime_ns(*ns)),
-                f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
+                f @ (IndexLabel::Float64(_)
+                | IndexLabel::Bool(_)
+                | IndexLabel::Object(_)
+                | IndexLabel::Period(_)) => {
                     format!("{key}|{f}")
                 }
                 IndexLabel::Null(_) => format!("{key}|{label}"),
@@ -64787,6 +66597,18 @@ pub fn concat_dataframes_with_keys(
 fn concat_dataframes_axis0_inner(frames: &[&DataFrame]) -> Result<DataFrame, FrameError> {
     if frames.is_empty() {
         return DataFrame::new(Index::new(Vec::new()), BTreeMap::new());
+    }
+    // Equal column axes share every column: the inner join is the outer one,
+    // which keeps repeated column keys apart (i17d4).
+    if frames.iter().any(|frame| frame.has_repeated_column_keys()) {
+        // pandas intersects the column axes (to their unique labels) and
+        // cannot reindex a repeated key into that: InvalidIndexError (the
+        // repeats collapsed; i17d4). Only frames sharing one axis object
+        // skip the intersection - the Python binding routes those to the
+        // outer concat.
+        return Err(FrameError::CompatibilityRejected(
+            "Reindexing only valid with uniquely valued Index objects".to_owned(),
+        ));
     }
 
     let mut shared_columns: Vec<String> = frames[0].column_names().into_iter().cloned().collect();
@@ -67999,7 +69821,9 @@ impl<'a> StyledDataFrame<'a> {
                     IndexLabel::Utf8(s) => Self::escape_html_text(s),
                     IndexLabel::Timedelta64(ns) => Self::escape_html_text(&Timedelta::format(*ns)),
                     IndexLabel::Datetime64(ns) => Self::escape_html_text(&format_datetime_ns(*ns)),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
+                        f.to_string()
+                    }
                     IndexLabel::Object(object) => Self::escape_html_text(&object.to_string()),
                     IndexLabel::Null(_) => label.to_string(),
                 };
@@ -69328,6 +71152,7 @@ impl DataFrame {
             // Timedelta64); pandas reset_index on a DatetimeIndex -> datetime64.
             IndexLabel::Datetime64(ns) => Scalar::Datetime64(*ns),
             IndexLabel::Object(object) => Scalar::Object(object.clone()),
+            IndexLabel::Period(period) => Scalar::Period(*period),
             // Typed-null label round-trips to the same-kind missing scalar.
             IndexLabel::Null(kind) => Scalar::Null(*kind),
         }
@@ -69830,6 +71655,10 @@ impl DataFrame {
             // Rows of a tz-aware index keep its zone.
             Index::new(labels).with_tz(self.index.tz())?
         };
+        // ... and its dtype where the labels read another (no row keeps an
+        // int64 index int64, an object index stays one;
+        // br-frankenpandas-dwyud / i20vm).
+        let out_index = out_index.with_dtype_of(&self.index);
 
         let row_multiindex = self
             .row_multiindex
@@ -69958,6 +71787,8 @@ impl DataFrame {
             // Rows of a tz-aware index keep its zone.
             Index::new(labels).with_tz(self.index.tz())?
         };
+        // ... and its dtype where the labels read another (dwyud / i20vm).
+        let out_index = out_index.with_dtype_of(&self.index);
 
         let row_multiindex = if let Some(multiindex) = &self.row_multiindex {
             let mut positions = Vec::with_capacity(n);
@@ -70088,6 +71919,10 @@ impl DataFrame {
             // Rows of a tz-aware index keep its zone.
             Index::new(labels).with_tz(self.index.tz())?
         };
+        // ... and its dtype where the labels read another (no row keeps an
+        // int64 index int64, an object index stays one;
+        // br-frankenpandas-dwyud / i20vm).
+        let out_index = out_index.with_dtype_of(&self.index);
 
         let row_multiindex = self
             .row_multiindex
@@ -70252,7 +72087,9 @@ impl DataFrame {
         let columns = ColumnStore::from_pairs(pairs);
 
         Some(Ok(Self {
-            index: out_index.rename_index(self.index.name()),
+            index: out_index
+                .with_dtype_of(&self.index)
+                .rename_index(self.index.name()),
             row_multiindex: None,
             columns: columns.into(),
             column_order: order.into(),
@@ -70349,47 +72186,51 @@ impl DataFrame {
         }
     }
 
-    fn reset_index_column_name(&self) -> Result<String, FrameError> {
+    fn reset_index_column_name(&self, allow_duplicates: bool) -> Result<String, FrameError> {
         // Named index: pandas restores the former index under the index's NAME
-        // (df.set_index('t').reset_index() -> column 't'). A collision with an
-        // existing column is a ValueError ("cannot insert X, already exists").
-        if let Some(name) = self.index.name() {
-            if self.columns.contains_key(name) {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "cannot insert {name}, already exists"
-                )));
-            }
-            return Ok(name.to_string());
+        // (df.set_index('t').reset_index() -> column 't'); unnamed, under
+        // 'index', or 'level_0' when a column is 'index'. A collision with an
+        // existing column is a ValueError ("cannot insert X, already exists")
+        // unless allow_duplicates (it said "both 'index' and 'level_0'
+        // already exist").
+        let name = match self.index.name() {
+            Some(name) => name.to_string(),
+            None if self.columns.contains_key("index") => "level_0".to_owned(),
+            None => "index".to_owned(),
+        };
+        if !allow_duplicates && self.columns.contains_key(&name) {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "cannot insert {name}, already exists"
+            )));
         }
-        // Unnamed index: fall back to 'index', then 'level_0' on collision.
-        if !self.columns.contains_key("index") {
-            return Ok("index".to_owned());
-        }
-        if !self.columns.contains_key("level_0") {
-            return Ok("level_0".to_owned());
-        }
-        Err(FrameError::CompatibilityRejected(
-            "reset_index cannot insert index column because both 'index' and 'level_0' already exist"
-                .to_owned(),
-        ))
+        Ok(name)
     }
 
     fn reset_index_multi_column_names(
         &self,
         row_multiindex: &fp_index::MultiIndex,
+        allow_duplicates: bool,
     ) -> Result<Vec<String>, FrameError> {
-        let mut names = Vec::with_capacity(row_multiindex.nlevels());
-        let mut used = self.columns.keys().cloned().collect::<BTreeSet<_>>();
-        for (level, name) in row_multiindex.names().iter().enumerate() {
-            let candidate = name
-                .as_ref()
-                .map_or_else(|| format!("level_{level}"), ToString::to_string);
-            if !used.insert(candidate.clone()) {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "cannot insert {candidate}, already exists"
-                )));
+        let names: Vec<String> = row_multiindex
+            .names()
+            .iter()
+            .enumerate()
+            .map(|(level, name)| {
+                name.as_ref()
+                    .map_or_else(|| format!("level_{level}"), ToString::to_string)
+            })
+            .collect();
+        if !allow_duplicates {
+            // pandas inserts the levels last first, so the clash it names is
+            // the last level's (it named the first).
+            let mut used = self.columns.keys().cloned().collect::<BTreeSet<_>>();
+            for candidate in names.iter().rev() {
+                if !used.insert(candidate.clone()) {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "cannot insert {candidate}, already exists"
+                    )));
+                }
             }
-            names.push(candidate);
         }
         Ok(names)
     }
@@ -73575,7 +75416,7 @@ impl DataFrame {
                     Scalar::Null(kind) => IndexLabel::Null(kind),
                     Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(v)),
                     Scalar::Datetime64(v) => IndexLabel::Utf8(format_datetime_ns(v)),
-                    Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
+                    Scalar::Period(v) => IndexLabel::Period(v),
                     Scalar::Interval(interval) => IndexLabel::Utf8(format!("{interval}")),
                     Scalar::Object(object) => IndexLabel::Object(object),
                 })
@@ -74637,10 +76478,7 @@ impl DataFrame {
         // scope workers. Bit-identical — same Column::fillna per column, reassembled in
         // column order.
         let filled = self.par_map_column_positions_min(16_384, |pos| {
-            Ok(self
-                .column_at(pos)
-                .expect("column in bounds")
-                .fillna(fill_value)?)
+            fill_column(self.column_at(pos).expect("column in bounds"), fill_value)
         })?;
         let pairs: Vec<(String, Column)> = self
             .column_names()
@@ -76403,7 +78241,7 @@ impl DataFrame {
                                     IndexLabel::Datetime64(*v)
                                 }
                                 Scalar::Datetime64(v) => IndexLabel::Utf8(format_datetime_ns(*v)),
-                                Scalar::Period(v) => IndexLabel::Utf8(v.calendar_string()),
+                                Scalar::Period(v) => IndexLabel::Period(*v),
                                 Scalar::Interval(interval) => {
                                     IndexLabel::Utf8(format!("{interval}"))
                                 }
@@ -76432,6 +78270,19 @@ impl DataFrame {
     ///
     /// Matches `df.reset_index(drop=...)` for the single-index DataFrame model.
     pub fn reset_index(&self, drop: bool) -> Result<Self, FrameError> {
+        self.reset_index_allow_duplicates(drop, false)
+    }
+
+    /// `df.reset_index(drop=..., allow_duplicates=...)`: with
+    /// `allow_duplicates` an index column may take a label a column already
+    /// has (pandas' insert rule), where without it that is pandas' "cannot
+    /// insert X, already exists" (br-frankenpandas-n57tz: allow_duplicates
+    /// was refused).
+    pub fn reset_index_allow_duplicates(
+        &self,
+        drop: bool,
+        allow_duplicates: bool,
+    ) -> Result<Self, FrameError> {
         let index = range_index(self.len())?;
         if drop {
             let mut out = Self::new_with_axes(
@@ -76444,10 +78295,18 @@ impl DataFrame {
             out.allows_duplicate_labels = self.allows_duplicate_labels;
             return Ok(out.with_labels_of(self));
         }
+        // pandas' insert of the index columns refuses the keyword itself on
+        // a frame whose flags refuse duplicate labels.
+        if allow_duplicates && !self.allows_duplicate_labels {
+            return Err(FrameError::CompatibilityRejected(
+                "Cannot specify 'allow_duplicates=True' when 'self.flags.allows_duplicate_labels' is False.".to_string(),
+            ));
+        }
 
         if let Some(row_multiindex) = self.row_multiindex.as_ref() {
-            let mut columns = self.columns.clone();
-            let mut column_order = self.reset_index_multi_column_names(row_multiindex)?;
+            let mut column_order =
+                self.reset_index_multi_column_names(row_multiindex, allow_duplicates)?;
+            let mut level_columns = Vec::with_capacity(column_order.len());
             for (level, column_name) in column_order.iter().enumerate() {
                 let level_index = row_multiindex.get_level_values(level)?;
                 // perf (br-frankenpandas-bp6k7): typed Int64 level -> column without
@@ -76458,12 +78317,28 @@ impl DataFrame {
                         Column::from_values(Self::index_labels_to_scalars(level_index.labels()))?
                     }
                 };
-                columns.insert(column_name.clone(), level_column);
+                level_columns.push((column_name.clone(), level_column));
             }
             let column_multiindex = self.column_multiindex_with_leading(&column_order)?;
             column_order.extend(self.column_order.iter().cloned());
-            let mut out =
-                Self::new_with_axes(index, None, columns, column_order, column_multiindex)?;
+            let mut out = if level_columns
+                .iter()
+                .any(|(name, _)| self.columns.contains_key(name))
+            {
+                Self::new_with_axes(
+                    index,
+                    None,
+                    self.column_store_led_by(level_columns),
+                    column_order,
+                    column_multiindex,
+                )?
+            } else {
+                let mut columns = self.columns.clone();
+                for (name, column) in level_columns {
+                    columns.insert(name, column);
+                }
+                Self::new_with_axes(index, None, columns, column_order, column_multiindex)?
+            };
             out.allows_duplicate_labels = self.allows_duplicate_labels;
             // The level columns are labelled by the levels' typed names
             // (fvsao.64).
@@ -76477,7 +78352,7 @@ impl DataFrame {
                 .with_recorded_column_labels(level_labels));
         }
 
-        let index_column_name = self.reset_index_column_name()?;
+        let index_column_name = self.reset_index_column_name(allow_duplicates)?;
         // perf (br-frankenpandas-bp6k7): typed Int64 index -> column without the
         // per-label Scalar materialize + re-validation. An all-Int64 index (default
         // RangeIndex / int indexes) has no missing labels, so from_i64_values is
@@ -76493,15 +78368,25 @@ impl DataFrame {
             None => index_column,
         };
 
-        let mut columns = self.columns.clone();
-        columns.insert(index_column_name.clone(), index_column);
         let column_multiindex =
             self.column_multiindex_with_leading(std::slice::from_ref(&index_column_name))?;
         let mut column_order = Vec::with_capacity(self.column_order.len() + 1);
-        column_order.push(index_column_name);
+        column_order.push(index_column_name.clone());
         column_order.extend(self.column_order.iter().cloned());
 
-        let mut out = Self::new_with_axes(index, None, columns, column_order, column_multiindex)?;
+        let mut out = if self.columns.contains_key(&index_column_name) {
+            Self::new_with_axes(
+                index,
+                None,
+                self.column_store_led_by(vec![(index_column_name, index_column)]),
+                column_order,
+                column_multiindex,
+            )?
+        } else {
+            let mut columns = self.columns.clone();
+            columns.insert(index_column_name, index_column);
+            Self::new_with_axes(index, None, columns, column_order, column_multiindex)?
+        };
         out.allows_duplicate_labels = self.allows_duplicate_labels;
         // The index column is labelled by the index's typed name: 0 stays
         // the integer 0 (fvsao.64).
@@ -76509,6 +78394,20 @@ impl DataFrame {
         Ok(out
             .with_labels_of(self)
             .with_recorded_column_labels(index_label))
+    }
+
+    /// A column store of `leading` then the frame's own columns, in the
+    /// frame's order and with repeated labels kept apart: an index column
+    /// that repeats a column's label (reset_index(allow_duplicates=True))
+    /// would replace that column if inserted into the store.
+    fn column_store_led_by(&self, leading: Vec<(String, Column)>) -> ColumnStore {
+        let own = (0..self.num_columns()).filter_map(|position| {
+            Some((
+                self.column_name_at(position)?,
+                self.column_at(position)?.clone(),
+            ))
+        });
+        ColumnStore::from_pairs(leading.into_iter().chain(own))
     }
 
     /// The column MultiIndex with `names` in front, each as `(name, '', ...)`,
@@ -76672,14 +78571,13 @@ impl DataFrame {
                 keys[b].cmp(&keys[a])
             }
         });
-        // select_columns takes every column a name keys, so each name once.
-        let mut seen = FxHashSet::default();
-        let names: Vec<&str> = order
-            .iter()
-            .map(|&position| self.column_order[position].as_str())
-            .filter(|name| seen.insert(*name))
-            .collect();
-        self.select_columns(&names)
+        // By position: each column moves on its own, so MultiIndex columns
+        // whose leaf names repeat sort by their whole tuples (i17d4; by name
+        // the repeated leaves were gathered together). A new Index, as the
+        // name selection made.
+        let mut out = self.take_columns(&order)?;
+        out.column_order.range = None;
+        Ok(out)
     }
 
     /// Return a new DataFrame sorted by a column's values.
@@ -76795,12 +78693,46 @@ impl DataFrame {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        self.sort_rows_by_columns(&sort_cols, ascending, na_position)
+    }
 
-        // Pad ascending to match by length (default true)
-        let asc: Vec<bool> = by
+    /// Sort by the columns AT `positions` (per-key ascending flags): a key
+    /// under a repeated column key - a MultiIndex column whose leaf name
+    /// repeats, ('q', 'e') beside ('p', 'e') - sorts by its own column
+    /// (i17d4; by name it sorted by the first).
+    pub fn sort_values_at(
+        &self,
+        positions: &[usize],
+        ascending: &[bool],
+        na_position: &str,
+    ) -> Result<Self, FrameError> {
+        if positions.is_empty() {
+            return Ok(self.clone());
+        }
+        let sort_cols: Vec<&Column> = positions
             .iter()
-            .enumerate()
-            .map(|(i, _)| ascending.get(i).copied().unwrap_or(true))
+            .map(|&position| {
+                self.column_at(position).ok_or_else(|| {
+                    FrameError::CompatibilityRejected(format!(
+                        "column position {position} out of range"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.sort_rows_by_columns(&sort_cols, ascending, na_position)
+    }
+
+    /// The rows in the lexicographic order of `sort_cols` (see
+    /// [`Self::sort_values_multi`]).
+    fn sort_rows_by_columns(
+        &self,
+        sort_cols: &[&Column],
+        ascending: &[bool],
+        na_position: &str,
+    ) -> Result<Self, FrameError> {
+        // Pad ascending to match by length (default true)
+        let asc: Vec<bool> = (0..sort_cols.len())
+            .map(|i| ascending.get(i).copied().unwrap_or(true))
             .collect();
         // Per br-frankenpandas-2ca7d.
         match na_position {
@@ -76970,23 +78902,24 @@ impl DataFrame {
             // one position (or none ⇒ fail closed, same as the map miss); the
             // emitted out_label equals the requested `Int64(v)` (off = v-start,
             // label = start+off = v), so we record the raw `v` and never touch
-            // `self.index.labels()` (br index-rematerialization family).
+            // `self.index.labels()` (br index-rematerialization family). An
+            // integral float selects the int it equals (l5sed).
             use_typed_int64_index = true;
             out_label_ints.reserve(labels.len());
             for requested in labels {
-                match requested {
-                    IndexLabel::Int64(v) => {
+                match requested.exact_int() {
+                    Some(v) => {
                         let off = v.wrapping_sub(start);
                         if off >= 0 && (off as u64) < len as u64 {
                             positions.push(off as usize);
-                            out_label_ints.push(*v);
+                            out_label_ints.push(v);
                         } else {
                             return Err(FrameError::CompatibilityRejected(format!(
                                 "loc label not found: {requested:?}"
                             )));
                         }
                     }
-                    _ => {
+                    None => {
                         return Err(FrameError::CompatibilityRejected(format!(
                             "loc label not found: {requested:?}"
                         )));
@@ -77000,10 +78933,10 @@ impl DataFrame {
             use_typed_int64_index = true;
             out_label_ints.reserve(labels.len());
             for (requested, position) in labels.iter().zip(resolved_positions) {
-                match (requested, position) {
-                    (IndexLabel::Int64(value), Some(position)) => {
+                match (requested.exact_int(), position) {
+                    (Some(value), Some(position)) => {
                         positions.push(position);
-                        out_label_ints.push(*value);
+                        out_label_ints.push(value);
                     }
                     _ => {
                         return Err(FrameError::CompatibilityRejected(format!(
@@ -77020,10 +78953,10 @@ impl DataFrame {
             use_typed_int64_index = true;
             out_label_ints.reserve(labels.len());
             for (requested, position) in labels.iter().zip(resolved_positions) {
-                match (requested, position) {
-                    (IndexLabel::Int64(value), Some(position)) => {
+                match (requested.exact_int(), position) {
+                    (Some(value), Some(position)) => {
                         positions.push(position);
-                        out_label_ints.push(*value);
+                        out_label_ints.push(value);
                     }
                     _ => {
                         return Err(FrameError::CompatibilityRejected(format!(
@@ -77604,9 +79537,10 @@ impl DataFrame {
         let mut values = Vec::with_capacity(self.column_order.len());
         let mut dtypes: Vec<DType> = Vec::with_capacity(self.column_order.len());
 
-        for name in &self.column_order {
+        // By position: each repeated column key gives its own cell (i17d4).
+        for (at, name) in self.column_order.iter().enumerate() {
             labels.push(self.column_label(name));
-            let col = self.columns.get(name).ok_or_else(|| {
+            let col = self.column_at(at).ok_or_else(|| {
                 FrameError::CompatibilityRejected(format!("column '{name}' not found"))
             })?;
             values.push(col.values()[position].clone());
@@ -78577,12 +80511,33 @@ impl DataFrame {
                 "rename: duplicate labels are present".to_owned(),
             ));
         }
+        // A function renames every level of MultiIndex columns, as pandas'
+        // (add_prefix('x_') of (p, s) is (x_p, x_s); the levels kept their
+        // labels while the leaf names changed underneath).
+        let column_multiindex = match &self.column_multiindex {
+            Some(levels) => Some(
+                fp_index::MultiIndex::from_tuples(
+                    (0..levels.len())
+                        .map(|position| {
+                            levels
+                                .get_tuple(position)
+                                .unwrap_or_default()
+                                .into_iter()
+                                .map(|label| IndexLabel::Utf8(func(&label.to_string())))
+                                .collect()
+                        })
+                        .collect(),
+                )?
+                .set_names(levels.names().to_vec()),
+            ),
+            None => None,
+        };
         let mut out = Self::new_with_axes(
             self.index.clone(),
             self.row_multiindex.clone(),
             columns,
             column_order,
-            self.column_multiindex.clone(),
+            column_multiindex,
         )?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
         Ok(out.with_labels_of(self))
@@ -78733,24 +80688,16 @@ impl DataFrame {
         // quantile_select passes + mean/var folds — so spreading columns across
         // the par_map_columns scope workers is bit-identical (identical per-column
         // arithmetic, results reassembled in column_order). The serial loop left
-        // all but one core idle.
-        let out_order: Vec<String> = self
-            .column_order
-            .iter()
-            .filter(|name| {
-                matches!(
-                    self.columns[name.as_str()].dtype(),
-                    DType::Int64 | DType::Float64
-                )
-            })
-            .cloned()
+        // all but one core idle. The numeric columns are taken by POSITION: a
+        // repeated column key describes its own column (i17d4); a masked
+        // Int64 / Float64 column is one (it was described as text; 8u5eh).
+        let numeric_positions: Vec<usize> = (0..self.num_columns())
+            .filter(|&pos| self.column_at(pos).is_some_and(is_describe_number))
             .collect();
+        let numeric = self.take_columns(&numeric_positions)?;
 
-        let stat_columns = self.par_map_columns(&out_order, |name| {
-            let col = self
-                .columns
-                .get(name)
-                .expect("column name listed in order must exist");
+        let stat_columns = numeric.par_map_column_positions_min(16_384, |pos| {
+            let col = numeric.column_at(pos).expect("column in bounds");
 
             // Typed Float64 extraction (br-frankenpandas-c6yf1): collect present
             // values straight from the f64 + validity slices (validity set AND
@@ -78857,16 +80804,10 @@ impl DataFrame {
                 Scalar::Float64(max),
             ];
 
-            Ok(Column::from_values(stats)?)
+            describe_stats_column(col, stats)
         })?;
 
-        let mut out_columns = BTreeMap::new();
-        for (name, column) in out_order.iter().zip(stat_columns) {
-            out_columns.insert(name.clone(), column);
-        }
-
-        Self::new_with_axis(out_index, out_columns, out_order)
-            .map(|out| out.with_typed_labels_of(self))
+        Ok(numeric.with_index_and_columns_at_positions(out_index, stat_columns))
     }
 
     /// Describe with custom percentiles.
@@ -78893,21 +80834,16 @@ impl DataFrame {
         // so spreading columns across the par_map_columns scope workers is
         // bit-identical — every column runs the identical extraction + sort +
         // percentile_linear and the result columns are reassembled in
-        // column_order. The serial loop left all but one core idle.
-        let out_order: Vec<String> = self
-            .column_order
-            .iter()
-            .filter(|name| {
-                matches!(
-                    self.columns[name.as_str()].dtype(),
-                    DType::Int64 | DType::Float64
-                )
-            })
-            .cloned()
+        // column_order. The serial loop left all but one core idle. The numeric
+        // columns are taken by POSITION (i17d4), a masked number among them
+        // (8u5eh).
+        let numeric_positions: Vec<usize> = (0..self.num_columns())
+            .filter(|&pos| self.column_at(pos).is_some_and(is_describe_number))
             .collect();
+        let numeric = self.take_columns(&numeric_positions)?;
 
-        let stat_columns = self.par_map_columns(&out_order, |name| {
-            let col = &self.columns[name];
+        let stat_columns = numeric.par_map_column_positions_min(16_384, |pos| {
+            let col = numeric.column_at(pos).expect("column in bounds");
             let mut nums: Vec<f64> = col
                 .values()
                 .iter()
@@ -78947,16 +80883,10 @@ impl DataFrame {
                 stats.push(Scalar::Float64(nums[nums.len() - 1]));
             }
 
-            Ok(Column::from_values(stats)?)
+            describe_stats_column(col, stats)
         })?;
 
-        let mut out_columns = BTreeMap::new();
-        for (name, column) in out_order.iter().zip(stat_columns) {
-            out_columns.insert(name.clone(), column);
-        }
-
-        Self::new_with_axis(out_index, out_columns, out_order)
-            .map(|out| out.with_typed_labels_of(self))
+        Ok(numeric.with_index_and_columns_at_positions(out_index, stat_columns))
     }
 
     /// Describe with include/exclude dtype filters.
@@ -79084,15 +81014,16 @@ impl DataFrame {
         // spread the columns across par_map_columns scope workers. Bit-identical —
         // identical per-column extraction/select, reassembled in column_order.
         // The nullable Int64 / Float64 columns are numeric too: they were
-        // left out of the result (4qg5w.5).
-        let allowed: Vec<String> = self
-            .column_order
-            .iter()
-            .filter(|name| self.columns[name.as_str()].dtype().is_numeric())
-            .cloned()
+        // left out of the result (4qg5w.5). By position, so a repeated
+        // column key answers for its own column (i17d4).
+        let allowed: Vec<usize> = (0..self.num_columns())
+            .filter(|&pos| self.column_at(pos).is_some_and(|c| c.dtype().is_numeric()))
             .collect();
-        let values = self.par_map_columns(&allowed, |name| {
-            let col = &self.columns[name];
+        let values = self.par_map_column_positions_min(16_384, |pos| {
+            let col = self.column_at(pos).expect("column in bounds");
+            if !col.dtype().is_numeric() {
+                return Ok(None);
+            }
             // Typed Float64 fast path (br-frankenpandas-zjc5z): collect the
             // present values straight from the f64 + validity slices, skipping the
             // col.values() Vec<Scalar> materialization + per-element to_f64. A
@@ -79129,13 +81060,17 @@ impl DataFrame {
                     }
                 }
             }
-            Ok(if nums.is_empty() {
+            Ok(Some(if nums.is_empty() {
                 Scalar::Float64(f64::NAN)
             } else {
                 Scalar::Float64(Self::quantile_select(&mut nums, q))
-            })
+            }))
         })?;
-        let labels: Vec<IndexLabel> = allowed.iter().map(|name| self.column_label(name)).collect();
+        let values: Vec<Scalar> = values.into_iter().flatten().collect();
+        let labels: Vec<IndexLabel> = allowed
+            .iter()
+            .map(|&pos| self.column_label(&self.column_order[pos]))
+            .collect();
         // Named after q, the float (pandas' name is 0.5, not the text '0.5').
         self.columns_series(
             LabelName::typed(IndexLabel::Float64(fp_index::OrderedF64(q))),
@@ -79861,7 +81796,9 @@ impl DataFrame {
                 IndexLabel::Utf8(v) => v.clone(),
                 IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                 IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+                f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
+                    f.to_string()
+                }
                 IndexLabel::Object(object) => object.to_string(),
                 null @ IndexLabel::Null(_) => null.to_string(),
             }
@@ -80316,7 +82253,12 @@ impl DataFrame {
         let &Scalar::Float64(fill) = other? else {
             return None;
         };
-        if !fill.is_finite() || self.index != cond.index || !self.index.is_unique() {
+        // Keyed by name: a repeated column key takes the positional path (i17d4).
+        if !fill.is_finite()
+            || self.index != cond.index
+            || !self.index.is_unique()
+            || self.has_repeated_column_keys()
+        {
             return None;
         }
         for name in &self.column_order {
@@ -80449,7 +82391,8 @@ impl DataFrame {
         let &Scalar::Int64(fill) = other? else {
             return None;
         };
-        if self.index != cond.index || !self.index.is_unique() {
+        // Keyed by name: a repeated column key takes the positional path (i17d4).
+        if self.index != cond.index || !self.index.is_unique() || self.has_repeated_column_keys() {
             return None;
         }
         for name in &self.column_order {
@@ -80534,12 +82477,11 @@ impl DataFrame {
     ///
     /// (br-frankenpandas-xg7hf)
     fn aligned_condition_cells(
-        cond: &Self,
-        col_name: &str,
+        cond_col: Option<&Column>,
         positions: &[Option<usize>],
         rows: usize,
     ) -> Result<Vec<Option<bool>>, FrameError> {
-        let Some(cond_col) = cond.columns.get(col_name) else {
+        let Some(cond_col) = cond_col else {
             return Ok(vec![None; rows]);
         };
         let aligned = cond_col.reindex_by_positions(positions)?;
@@ -80551,6 +82493,67 @@ impl DataFrame {
                 _ => None,
             })
             .collect())
+    }
+
+    /// `partner`'s column matching this frame's column at `pos` (keyed
+    /// `name`): the one at the same position when `partner` has these very
+    /// column keys - so a repeated key pairs with its own column - else the
+    /// first keyed `name` (every repeated key read the first; i17d4).
+    /// Whether a column key repeats (pandas' duplicate column labels, or a
+    /// column MultiIndex whose leaf keys repeat): the name-keyed fast paths
+    /// assume they do not (i17d4).
+    /// This frame's columns keyed by their positions ("0", "1", ...), over the
+    /// same rows: an operation that keys columns by name then keeps repeated
+    /// keys apart, and its result goes back under the original axis
+    /// ([`Self::with_index_and_columns_at_positions`]; i17d4).
+    fn with_positional_keys(&self) -> Result<Self, FrameError> {
+        self.with_column_keys(
+            (0..self.num_columns())
+                .map(|position| position.to_string())
+                .collect(),
+        )
+    }
+
+    /// This frame with its columns keyed `keys`, position for position, over
+    /// the same rows and row MultiIndex (the typed column labels, column
+    /// MultiIndex and axis name dropped): stand-in keys for an operation
+    /// that finds columns by name, so repeated keys stay apart (i17d4).
+    ///
+    /// # Errors
+    /// `LengthMismatch` when `keys` does not name every column.
+    pub fn with_column_keys(&self, keys: Vec<String>) -> Result<Self, FrameError> {
+        if keys.len() != self.num_columns() {
+            return Err(FrameError::LengthMismatch {
+                index_len: keys.len(),
+                column_len: self.num_columns(),
+            });
+        }
+        let columns =
+            (0..self.num_columns()).filter_map(|position| self.column_at(position).cloned());
+        let mut out = Self::new_with_column_order(
+            self.index.clone(),
+            ColumnStore::from_pairs(keys.iter().cloned().zip(columns)),
+            keys,
+        )?;
+        out.row_multiindex = self.row_multiindex.clone();
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out)
+    }
+
+    fn has_repeated_column_keys(&self) -> bool {
+        let mut seen = HashSet::with_capacity(self.column_order.len());
+        !self
+            .column_order
+            .iter()
+            .all(|name| seen.insert(name.as_str()))
+    }
+
+    fn partner_column<'a>(&self, partner: &'a Self, pos: usize, name: &str) -> Option<&'a Column> {
+        if partner.column_order.as_slice() == self.column_order.as_slice() {
+            partner.column_at(pos)
+        } else {
+            partner.columns.get(name)
+        }
     }
 
     /// Matches `df.where(cond, other)`. Applies element-wise to each column.
@@ -80570,21 +82573,18 @@ impl DataFrame {
         let fill = other.cloned().unwrap_or(Scalar::Null(NullKind::NaN));
         let plan = align(&self.index, &cond.index, AlignMode::Left);
         validate_alignment_plan(&plan)?;
-        let mut new_columns = BTreeMap::new();
+        let mut new_columns = Vec::with_capacity(self.num_columns());
 
-        for col_name in &self.column_order {
-            let data_col = self
-                .columns
-                .get(col_name)
-                .expect("column in order must exist");
+        // By position: a repeated column key is its own column (i17d4).
+        for (pos, col_name) in self.column_order.iter().enumerate() {
+            let data_col = self.column_at(pos).expect("column in order must exist");
             // Keep iff the condition is PRESENT and True; absent/undecidable
             // takes `other`, and a missing column is all-absent rather than an
             // error. The old `Scalar::Null(_) => Null(NaN)` arm answered NaN
             // where pandas answers `other` — invisible whenever `other` is None,
             // because then the fill IS NaN. (br-frankenpandas-xg7hf)
             let cond_cells = Self::aligned_condition_cells(
-                cond,
-                col_name,
+                self.partner_column(cond, pos, col_name),
                 &plan.right_positions,
                 data_col.len(),
             )?;
@@ -80602,14 +82602,10 @@ impl DataFrame {
                 })
                 .collect();
 
-            new_columns.insert(
-                col_name.clone(),
-                nullable_kept(data_col, Column::from_values(values)?),
-            );
+            new_columns.push(nullable_kept(data_col, Column::from_values(values)?)?);
         }
 
-        Self::new_with_axis(self.index.clone(), new_columns, self.column_order.clone())
-            .map(|out| out.with_labels_of(self))
+        Ok(self.with_columns_at_positions(new_columns))
     }
 
     /// pandas-named alias for [`Self::where_cond`]. Matches `df.where(cond, other)`.
@@ -80635,20 +82631,17 @@ impl DataFrame {
         let fill = other.cloned().unwrap_or(Scalar::Null(NullKind::NaN));
         let plan = align(&self.index, &cond.index, AlignMode::Left);
         validate_alignment_plan(&plan)?;
-        let mut new_columns = BTreeMap::new();
+        let mut new_columns = Vec::with_capacity(self.num_columns());
 
-        for col_name in &self.column_order {
-            let data_col = self
-                .columns
-                .get(col_name)
-                .expect("column in order must exist");
+        // By position: a repeated column key is its own column (i17d4).
+        for (pos, col_name) in self.column_order.iter().enumerate() {
+            let data_col = self.column_at(pos).expect("column in order must exist");
             // mask keeps on a PRESENT False; everything else — True, absent, or
             // undecidable — takes `other`. Sibling of `where_cond` above, and
             // the only difference is which present value keeps.
             // (br-frankenpandas-xg7hf)
             let cond_cells = Self::aligned_condition_cells(
-                cond,
-                col_name,
+                self.partner_column(cond, pos, col_name),
                 &plan.right_positions,
                 data_col.len(),
             )?;
@@ -80666,14 +82659,10 @@ impl DataFrame {
                 })
                 .collect();
 
-            new_columns.insert(
-                col_name.clone(),
-                nullable_kept(data_col, Column::from_values(values)?),
-            );
+            new_columns.push(nullable_kept(data_col, Column::from_values(values)?)?);
         }
 
-        Self::new_with_axis(self.index.clone(), new_columns, self.column_order.clone())
-            .map(|out| out.with_labels_of(self))
+        Ok(self.with_columns_at_positions(new_columns))
     }
 
     /// Keep values where `cond` is True, replacing False positions with
@@ -80688,11 +82677,15 @@ impl DataFrame {
         // pandas). Select straight from the f64 + validity slices via the bool
         // slice into a typed output. Bit-identical to the per-cell Scalar select:
         // cond True keeps self (present iff self valid), cond False takes other
-        // (present iff other valid); an all-valid cond has no Null cell.
+        // (present iff other valid); an all-valid cond has no Null cell. The
+        // fast paths key columns by name, so a repeated key takes the general
+        // path, which pairs by position (i17d4).
+        let repeated_keys = self.has_repeated_column_keys();
         if self.index == cond.index
             && self.index == other.index
             && self.index.is_unique()
             && self.row_multiindex.is_none()
+            && !repeated_keys
             && self.column_order.iter().all(|name| {
                 self.columns[name].as_f64_slice_with_validity().is_some()
                     && cond
@@ -80761,6 +82754,7 @@ impl DataFrame {
             && self.index.is_unique()
             && cond.index.is_unique()
             && other.index.is_unique()
+            && !repeated_keys
             && self.column_order.iter().all(|name| {
                 cond.columns.contains_key(name)
                     && self.columns[name].as_f64_slice_with_validity().is_some()
@@ -80797,21 +82791,19 @@ impl DataFrame {
             }
         }
 
-        let mut new_columns = BTreeMap::new();
-
-        for col_name in &self.column_order {
-            let data_col = &self.columns[col_name];
+        // By position: a repeated column key is its own column (i17d4).
+        let mut new_columns = Vec::with_capacity(self.num_columns());
+        for (pos, col_name) in self.column_order.iter().enumerate() {
+            let data_col = self.column_at(pos).expect("column in order must exist");
             // A missing cond COLUMN is all-absent, not an error
             // (br-frankenpandas-xg7hf); the NON-TRUE rule below is unchanged.
             let cond_cells = Self::aligned_condition_cells(
-                cond,
-                col_name,
+                self.partner_column(cond, pos, col_name),
                 &cond_plan.right_positions,
                 data_col.len(),
             )?;
-            let aligned_other = other
-                .columns
-                .get(col_name)
+            let aligned_other = self
+                .partner_column(other, pos, col_name)
                 .map(|col| col.reindex_by_positions(&other_plan.right_positions))
                 .transpose()?;
 
@@ -80838,14 +82830,10 @@ impl DataFrame {
                 })
                 .collect();
 
-            new_columns.insert(
-                col_name.clone(),
-                nullable_kept(data_col, Column::from_values(values)?),
-            );
+            new_columns.push(nullable_kept(data_col, Column::from_values(values)?)?);
         }
 
-        Self::new_with_axis(self.index.clone(), new_columns, self.column_order.clone())
-            .map(|out| out.with_labels_of(self))
+        Ok(self.with_columns_at_positions(new_columns))
     }
 
     /// Replace values where `cond` is True with corresponding values from
@@ -80855,10 +82843,13 @@ impl DataFrame {
     pub fn mask_df_other(&self, cond: &Self, other: &Self) -> Result<Self, FrameError> {
         // Typed select fast path — inverse of where_cond_df's (cond True -> OTHER,
         // False -> self). Same gate/semantics; avoids the per-cell Scalar select.
+        // A repeated column key takes the positional general path (i17d4).
+        let repeated_keys = self.has_repeated_column_keys();
         if self.index == cond.index
             && self.index == other.index
             && self.index.is_unique()
             && self.row_multiindex.is_none()
+            && !repeated_keys
             && self.column_order.iter().all(|name| {
                 self.columns[name].as_f64_slice_with_validity().is_some()
                     && cond
@@ -80923,6 +82914,7 @@ impl DataFrame {
             && self.index.is_unique()
             && cond.index.is_unique()
             && other.index.is_unique()
+            && !repeated_keys
             && self.column_order.iter().all(|name| {
                 cond.columns.contains_key(name)
                     && self.columns[name].as_f64_slice_with_validity().is_some()
@@ -80959,21 +82951,19 @@ impl DataFrame {
             }
         }
 
-        let mut new_columns = BTreeMap::new();
-
-        for col_name in &self.column_order {
-            let data_col = &self.columns[col_name];
+        // By position: a repeated column key is its own column (i17d4).
+        let mut new_columns = Vec::with_capacity(self.num_columns());
+        for (pos, col_name) in self.column_order.iter().enumerate() {
+            let data_col = self.column_at(pos).expect("column in order must exist");
             // A missing cond COLUMN is all-absent, not an error
             // (br-frankenpandas-xg7hf); the MISSING rule below is unchanged.
             let cond_cells = Self::aligned_condition_cells(
-                cond,
-                col_name,
+                self.partner_column(cond, pos, col_name),
                 &cond_plan.right_positions,
                 data_col.len(),
             )?;
-            let aligned_other = other
-                .columns
-                .get(col_name)
+            let aligned_other = self
+                .partner_column(other, pos, col_name)
                 .map(|col| col.reindex_by_positions(&other_plan.right_positions))
                 .transpose()?;
 
@@ -81004,14 +82994,10 @@ impl DataFrame {
                 })
                 .collect();
 
-            new_columns.insert(
-                col_name.clone(),
-                nullable_kept(data_col, Column::from_values(values)?),
-            );
+            new_columns.push(nullable_kept(data_col, Column::from_values(values)?)?);
         }
 
-        Self::new_with_axis(self.index.clone(), new_columns, self.column_order.clone())
-            .map(|out| out.with_labels_of(self))
+        Ok(self.with_columns_at_positions(new_columns))
     }
 
     /// Symmetry alias for `where_cond_df` (br-frankenpandas-df9v7 /
@@ -81039,7 +83025,8 @@ impl DataFrame {
         let cols: Vec<(&str, Option<&[Scalar]>)> = self
             .column_order
             .iter()
-            .map(|name| (name.as_str(), self.columns.get(name).map(Column::values)))
+            .enumerate()
+            .map(|(pos, name)| (name.as_str(), self.column_at(pos).map(Column::values)))
             .collect();
         let mut rows = Vec::with_capacity(self.len());
         for i in 0..self.len() {
@@ -81064,11 +83051,10 @@ impl DataFrame {
     pub fn itertuples(&self) -> Vec<(IndexLabel, Vec<Scalar>)> {
         // Resolve each column's Scalar slice ONCE (per-cell BTreeMap
         // anti-pattern, n*m tree traversals). Bit-identical. Measured 2.57x on
-        // df_itertuples (100k x10).
-        let cols: Vec<Option<&[Scalar]>> = self
-            .column_order
-            .iter()
-            .map(|name| self.columns.get(name).map(Column::values))
+        // df_itertuples (100k x10). By position: a repeated column key gives
+        // its own cells (i17d4).
+        let cols: Vec<Option<&[Scalar]>> = (0..self.num_columns())
+            .map(|pos| self.column_at(pos).map(Column::values))
             .collect();
         let mut rows = Vec::with_capacity(self.len());
         for i in 0..self.len() {
@@ -81113,11 +83099,9 @@ impl DataFrame {
         }
 
         let labels = self.index.labels();
-        let col_values: Vec<Option<RecordColumn<'_>>> = self
-            .column_order
-            .iter()
-            .map(|name| {
-                self.columns.get(name).map(|column| {
+        let col_values: Vec<Option<RecordColumn<'_>>> = (0..self.num_columns())
+            .map(|pos| {
+                self.column_at(pos).map(|column| {
                     if let Some(values) = column.as_f64_slice() {
                         RecordColumn::Float64(values)
                     } else if let Some(values) = column.as_i64_slice() {
@@ -81153,6 +83137,7 @@ impl DataFrame {
                     IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
                     IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
                     IndexLabel::Object(object) => Scalar::Object(object.clone()),
+                    IndexLabel::Period(period) => Scalar::Period(*period),
                     IndexLabel::Null(kind) => Scalar::Null(*kind),
                 });
                 for col_vals in &col_values {
@@ -81369,75 +83354,22 @@ impl DataFrame {
         // keyed by column name, so execution order cannot change the output.
         // Ranking is per-column O(n log n) / O(n) compute, the dominant cost at
         // scale; on a many-core box the serial loop left all but one core idle.
-        // Gated so small frames keep the zero-overhead serial path.
-        const RANK_PAR_MIN_COLS: usize = 2;
-        const RANK_PAR_MIN_VALUES: usize = 16_384;
-
-        let rank_one = |col_name: &str| -> Result<(String, Column), FrameError> {
-            let col = self.columns.get(col_name).ok_or_else(|| {
-                FrameError::CompatibilityRejected(format!("missing column: {col_name}"))
-            })?;
-            let series = Series::new(col_name, self.index.clone(), col.clone())?;
-            let ranked = series.rank_with_pct(method, ascending, na_option, pct)?;
-            Ok((col_name.to_string(), ranked.column().clone()))
-        };
-
-        let ncols = self.column_order.len();
-        let worker_count = if ncols >= RANK_PAR_MIN_COLS
-            && ncols.saturating_mul(self.len()) >= RANK_PAR_MIN_VALUES
-        {
-            fp_columnar::cached_available_parallelism().min(ncols)
-        } else {
-            1
-        };
-
-        let ranked_cols: BTreeMap<String, Column> = if worker_count >= 2 {
-            let next = std::sync::atomic::AtomicUsize::new(0);
-            std::thread::scope(|scope| -> Result<BTreeMap<String, Column>, FrameError> {
-                let mut handles = Vec::with_capacity(worker_count);
-                for _ in 0..worker_count {
-                    let next = &next;
-                    let rank_one = &rank_one;
-                    handles.push(scope.spawn(
-                        move || -> Result<Vec<(String, Column)>, FrameError> {
-                            let mut out = Vec::new();
-                            loop {
-                                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                if i >= self.column_order.len() {
-                                    break;
-                                }
-                                out.push(rank_one(&self.column_order[i])?);
-                            }
-                            Ok(out)
-                        },
-                    ));
-                }
-                let mut ranked_cols = BTreeMap::new();
-                for handle in handles {
-                    let worker_out = handle.join().map_err(|_| {
-                        FrameError::CompatibilityRejected("rank worker thread panicked".into())
-                    })??;
-                    ranked_cols.extend(worker_out);
-                }
-                Ok(ranked_cols)
-            })?
-        } else {
-            let mut ranked_cols = BTreeMap::new();
-            for col_name in &self.column_order {
-                let (name, col) = rank_one(col_name)?;
-                ranked_cols.insert(name, col);
-            }
-            ranked_cols
-        };
-
-        Ok(Self {
-            columns: ranked_cols.into(),
-            column_order: self.column_order.clone(),
-            index: self.index.clone(),
-            column_multiindex: self.column_multiindex.clone(),
-            row_multiindex: self.row_multiindex.clone(),
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        // Gated so small frames keep the zero-overhead serial path. By
+        // position: a repeated column key ranks its own column (a name-keyed
+        // map kept one; i17d4).
+        let ranked = self.par_map_column_positions_min(16_384, |pos| {
+            let col = self.column_at(pos).expect("column in bounds");
+            let series = Series::new(
+                self.column_order[pos].as_str(),
+                self.index.clone(),
+                col.clone(),
+            )?;
+            Ok(series
+                .rank_with_pct(method, ascending, na_option, pct)?
+                .column()
+                .clone())
+        })?;
+        Ok(self.with_columns_at_positions(ranked))
     }
 
     /// Ranks values across columns for each row independently.
@@ -81466,6 +83398,8 @@ impl DataFrame {
         if n_cols == 0 {
             return Ok(self.clone());
         }
+        // By position: each repeated column key ranks its own cells (i17d4).
+        let columns: Vec<&Column> = (0..n_cols).filter_map(|pos| self.column_at(pos)).collect();
 
         // Vectorized average-rank fast path: for the common case (method=
         // "average", not pct, all columns all-valid Float64 with no NaN), rank
@@ -81489,8 +83423,7 @@ impl DataFrame {
             // Any other-dtype column (Utf8, nullable) breaks to the generic path.
             let mut owned: Vec<Vec<f64>> = Vec::new();
             let mut is_owned: Vec<bool> = Vec::with_capacity(n_cols);
-            for name in &self.column_order {
-                let col = &self.columns[name];
+            for &col in &columns {
                 if col.as_f64_slice().is_some() {
                     is_owned.push(false);
                 } else if let Some(d) = col.as_i64_slice() {
@@ -81501,19 +83434,17 @@ impl DataFrame {
                 }
             }
             let mut owned_iter = owned.iter();
-            let col_f64: Vec<&[f64]> = self
-                .column_order
+            let col_f64: Vec<&[f64]> = columns
                 .iter()
                 .zip(&is_owned)
-                .map(|(name, &owned_flag)| {
+                .map(|(&col, &owned_flag)| {
                     if owned_flag {
                         owned_iter
                             .next()
                             .expect("one owned vec per Int64 column")
                             .as_slice()
                     } else {
-                        self.columns[name]
-                            .as_f64_slice()
+                        col.as_f64_slice()
                             .expect("Float64 column checked all-valid above")
                     }
                 })
@@ -81578,7 +83509,7 @@ impl DataFrame {
             } else {
                 1
             };
-            let mut out: Vec<Vec<f64>> = if rank_workers >= 2 {
+            let out: Vec<Vec<f64>> = if rank_workers >= 2 {
                 let chunk = n_rows.div_ceil(rank_workers);
                 let rank_range = &rank_range;
                 let parts: Vec<Vec<Vec<f64>>> = std::thread::scope(|scope| {
@@ -81605,21 +83536,8 @@ impl DataFrame {
             } else {
                 rank_range(0, n_rows)
             };
-            let mut out_columns = BTreeMap::new();
-            for (i, name) in self.column_order.iter().enumerate() {
-                out_columns.insert(
-                    name.clone(),
-                    Column::from_f64_values(std::mem::take(&mut out[i])),
-                );
-            }
-            return Ok(Self {
-                columns: out_columns.into(),
-                column_order: self.column_order.clone(),
-                index: self.index.clone(),
-                column_multiindex: self.column_multiindex.clone(),
-                row_multiindex: self.row_multiindex.clone(),
-                allows_duplicate_labels: self.allows_duplicate_labels,
-            });
+            let ranked = out.into_iter().map(Column::from_f64_values).collect();
+            return Ok(self.with_columns_at_positions(ranked));
         }
 
         let mut out_cols_data: Vec<Vec<Scalar>> =
@@ -81628,8 +83546,8 @@ impl DataFrame {
         for row_idx in 0..n_rows {
             // Collect row values
             let mut row_vals = Vec::with_capacity(n_cols);
-            for col_name in &self.column_order {
-                row_vals.push(self.columns[col_name].values()[row_idx].clone());
+            for col in &columns {
+                row_vals.push(col.values()[row_idx].clone());
             }
 
             // Rank the row (using a temporary Series to access the same logic)
@@ -81645,20 +83563,11 @@ impl DataFrame {
             }
         }
 
-        let mut out_columns = BTreeMap::new();
-        for (i, name) in self.column_order.iter().enumerate() {
-            let col = Column::from_values(std::mem::take(&mut out_cols_data[i]))?;
-            out_columns.insert(name.clone(), col);
-        }
-
-        Ok(Self {
-            columns: out_columns.into(),
-            column_order: self.column_order.clone(),
-            index: self.index.clone(),
-            column_multiindex: self.column_multiindex.clone(),
-            row_multiindex: self.row_multiindex.clone(),
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        let ranked = out_cols_data
+            .into_iter()
+            .map(Column::from_values)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(self.with_columns_at_positions(ranked))
     }
 
     /// Unpivot (melt) a DataFrame from wide to long format.
@@ -81681,13 +83590,15 @@ impl DataFrame {
         let sources: Vec<&Column> = if value_vars.is_empty() {
             self.column_order
                 .iter()
-                .filter(|name| !id_vars.contains(&name.as_str()))
-                .filter_map(|name| self.columns.get(name))
+                .enumerate()
+                .filter(|(_, name)| !id_vars.contains(&name.as_str()))
+                .filter_map(|(position, _)| self.column_at(position))
                 .collect()
         } else {
             value_vars
                 .iter()
-                .filter_map(|name| self.columns.get(name))
+                .flat_map(|name| self.columns.positions_of(name).iter())
+                .filter_map(|&position| self.column_at(position))
                 .collect()
         };
         let width = sources
@@ -81758,17 +83669,6 @@ impl DataFrame {
         let var_col_name = var_name.unwrap_or("variable");
         let val_col_name = value_name.unwrap_or("value");
 
-        // Determine value_vars: if empty, use all non-id columns
-        let actual_value_vars: Vec<String> = if value_vars.is_empty() {
-            self.column_order
-                .iter()
-                .filter(|c| !id_vars.contains(&c.as_str()))
-                .cloned()
-                .collect()
-        } else {
-            value_vars.iter().map(|s| (*s).to_string()).collect()
-        };
-
         // Validate columns exist
         for col in id_vars {
             if !self.columns.contains_key(col) {
@@ -81777,13 +83677,38 @@ impl DataFrame {
                 )));
             }
         }
-        for col in &actual_value_vars {
-            if !self.columns.contains_key(col) {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "missing column: {col}"
-                )));
+        // The value vars by POSITION - if none are named, every non-id column
+        // - so each column under a repeated key melts its own values, and a
+        // named repeated key melts all its columns, as pandas (the first
+        // column's values were melted for each; i17d4).
+        let mut value_positions: Vec<usize> = Vec::new();
+        if value_vars.is_empty() {
+            value_positions.extend(
+                self.column_order
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, name)| !id_vars.contains(&name.as_str()))
+                    .map(|(position, _)| position),
+            );
+        } else {
+            for col in value_vars {
+                let positions = self.columns.positions_of(col);
+                if positions.is_empty() {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "missing column: {col}"
+                    )));
+                }
+                value_positions.extend_from_slice(positions);
             }
         }
+        let actual_value_vars: Vec<String> = value_positions
+            .iter()
+            .map(|&position| self.column_order[position].clone())
+            .collect();
+        let value_columns: Vec<&Column> = value_positions
+            .iter()
+            .map(|&position| self.column_at(position).expect("column in bounds"))
+            .collect();
 
         let n_rows = self.index.len();
         let n_value_vars = actual_value_vars.len();
@@ -81941,10 +83866,9 @@ impl DataFrame {
                 at += take;
             }
         }
-        let numeric_slices: Option<Vec<NumSlice>> = actual_value_vars
+        let numeric_slices: Option<Vec<NumSlice>> = value_columns
             .iter()
-            .map(|name| {
-                let c = &self.columns[name];
+            .map(|&c| {
                 if let Some(s) = c.as_f64_slice() {
                     Some(NumSlice::F64(s))
                 } else if let Some(s) = c.as_i64_slice() {
@@ -82021,18 +83945,17 @@ impl DataFrame {
             }
         } else {
             let mut value_vals = Vec::with_capacity(total_rows);
-            for vv in &actual_value_vars {
-                let src = &self.columns[vv];
+            for src in &value_columns {
                 value_vals.extend_from_slice(src.values());
             }
             // Determine a common dtype across all melted value columns so mixed
             // numeric inputs promote the same way pandas does.
-            let value_dtype = if actual_value_vars.is_empty() {
+            let value_dtype = if value_columns.is_empty() {
                 Ok(DType::Float64)
             } else {
-                actual_value_vars
+                value_columns
                     .iter()
-                    .map(|name| self.columns[name].dtype())
+                    .map(|column| column.dtype())
                     .try_fold(DType::Null, common_dtype)
             };
             match value_dtype {
@@ -82200,7 +84123,9 @@ impl DataFrame {
                     IndexLabel::Utf8(s) => s,
                     IndexLabel::Timedelta64(ns) => Timedelta::format(ns),
                     IndexLabel::Datetime64(ns) => format_datetime_ns(ns),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
+                        f.to_string()
+                    }
                     IndexLabel::Object(object) => object.to_string(),
                     null @ IndexLabel::Null(_) => null.to_string(),
                 };
@@ -82981,20 +84906,14 @@ impl DataFrame {
     where
         F: Fn(&Scalar) -> Scalar,
     {
-        let mut result_cols = BTreeMap::new();
-        for col_name in &self.column_order {
-            let col = &self.columns[col_name];
+        // By position: a repeated column key maps its own column (i17d4).
+        let mut columns = Vec::with_capacity(self.num_columns());
+        for pos in 0..self.num_columns() {
+            let col = self.column_at(pos).expect("column in bounds");
             let new_vals: Vec<Scalar> = col.values().iter().map(&func).collect();
-            result_cols.insert(col_name.clone(), Column::from_values(new_vals)?);
+            columns.push(Column::from_values(new_vals)?);
         }
-        Ok(Self {
-            columns: result_cols.into(),
-            column_order: self.column_order.clone(),
-            index: self.index.clone(),
-            column_multiindex: self.column_multiindex.clone(),
-            row_multiindex: self.row_multiindex.clone(),
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        Ok(self.with_columns_at_positions(columns))
     }
 
     /// pandas-2.1+ alias for [`Self::applymap`]. Matches `df.map(func)`.
@@ -83018,24 +84937,18 @@ impl DataFrame {
     where
         F: Fn(&Scalar) -> Scalar,
     {
-        let mut result_cols = BTreeMap::new();
-        for col_name in &self.column_order {
-            let col = &self.columns[col_name];
+        // By position: a repeated column key maps its own column (i17d4).
+        let mut columns = Vec::with_capacity(self.num_columns());
+        for pos in 0..self.num_columns() {
+            let col = self.column_at(pos).expect("column in bounds");
             let new_vals: Vec<Scalar> = col
                 .values()
                 .iter()
                 .map(|v| if v.is_missing() { v.clone() } else { func(v) })
                 .collect();
-            result_cols.insert(col_name.clone(), Column::from_values(new_vals)?);
+            columns.push(Column::from_values(new_vals)?);
         }
-        Ok(Self {
-            columns: result_cols.into(),
-            column_order: self.column_order.clone(),
-            index: self.index.clone(),
-            column_multiindex: self.column_multiindex.clone(),
-            row_multiindex: self.row_multiindex.clone(),
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        Ok(self.with_columns_at_positions(columns))
     }
 
     /// Apply a function element-wise (pandas 2.0 name for `applymap`).
@@ -83203,8 +85116,7 @@ impl DataFrame {
     /// silent-wrong answer (reality-check finding). `numeric_only=true` keeps
     /// the old filtering behaviour, which is what pandas does for `True`.
     fn reject_non_numeric_for_pairwise_stat(&self) -> Result<(), FrameError> {
-        for name in &self.column_order {
-            let column = &self.columns[name.as_str()];
+        for column in (0..self.num_columns()).filter_map(|pos| self.column_at(pos)) {
             if matches!(column.dtype(), DType::Utf8 | DType::Categorical) {
                 let witness = column
                     .values()
@@ -83223,7 +85135,9 @@ impl DataFrame {
         Ok(())
     }
 
-    fn corr_candidate_columns(&self, numeric_only: bool) -> Result<Vec<String>, FrameError> {
+    /// The positions of the columns corr / cov take, so a repeated label
+    /// keeps its own column (i17d4).
+    fn corr_candidate_columns(&self, numeric_only: bool) -> Result<Vec<usize>, FrameError> {
         if !numeric_only {
             self.reject_non_numeric_for_pairwise_stat()?;
         }
@@ -83232,24 +85146,58 @@ impl DataFrame {
         // by treating their ns counts as ordered numerics. The nullable
         // Int64 / Float64 / boolean columns are numeric too: they were left
         // out, silently shrinking the matrix (4qg5w.5); their <NA> is a
-        // missing value the pairwise statistics skip.
-        Ok(self
-            .column_order
-            .iter()
-            .filter(|name| {
-                matches!(
-                    self.columns[name.as_str()].dtype(),
-                    DType::Bool
-                        | DType::Int64
-                        | DType::Float64
-                        | DType::Timedelta64
-                        | DType::BoolNullable
-                        | DType::Int64Nullable
-                        | DType::Float64Nullable
-                )
+        // missing value the pairwise statistics skip. A bool column holding
+        // a missing value is pandas' object column (ildvj).
+        Ok((0..self.num_columns())
+            .filter(|&pos| {
+                self.column_at(pos).is_some_and(|column| {
+                    matches!(
+                        selection_dtype(column),
+                        DType::Bool
+                            | DType::Int64
+                            | DType::Float64
+                            | DType::Timedelta64
+                            | DType::BoolNullable
+                            | DType::Int64Nullable
+                            | DType::Float64Nullable
+                    )
+                })
             })
-            .cloned()
             .collect())
+    }
+
+    /// The corr / cov matrix frame: `result_cols[j]` is the column of the
+    /// `positions[j]`-th source column, indexed and labelled by those
+    /// columns' labels (repeats kept).
+    // The store is the lazy store under lazy-transpose-view, a ColumnStore
+    // without.
+    #[allow(clippy::useless_conversion)]
+    fn pairwise_result_frame(
+        &self,
+        positions: &[usize],
+        numeric_cols: Vec<String>,
+        result_cols: Vec<Column>,
+    ) -> Self {
+        // Indexed and labelled by the columns' typed labels - a RangeIndex
+        // both ways when they are every column of one (fvsao.32).
+        let labels: Vec<IndexLabel> = numeric_cols.iter().map(|s| self.column_label(s)).collect();
+        let span = self
+            .column_range_span()
+            .filter(|_| positions.len() == self.column_order.len());
+        // MultiIndex columns index the rows by the same levels, as pandas'.
+        let row_multiindex = self
+            .column_multiindex
+            .as_ref()
+            .and_then(|levels| levels.take(positions).ok());
+        Self {
+            columns: ColumnStore::from_pairs(numeric_cols.iter().cloned().zip(result_cols)).into(),
+            column_order: numeric_cols.into(),
+            index: Index::new(labels).with_range_span(span),
+            column_multiindex: None,
+            row_multiindex,
+            allows_duplicate_labels: self.allows_duplicate_labels,
+        }
+        .with_labels_of(self)
     }
 
     fn pairwise_numeric_column_values(col: &Column, len: usize) -> std::borrow::Cow<'_, [f64]> {
@@ -83326,12 +85274,12 @@ impl DataFrame {
         stat: PairwiseFloat64Stat,
         min_periods: usize,
         len: usize,
-    ) -> Option<BTreeMap<String, Column>> {
+    ) -> Option<Vec<Column>> {
         if numeric_cols.len() != col_data.len() {
             return None;
         }
         if numeric_cols.is_empty() {
-            return Some(BTreeMap::new());
+            return Some(Vec::new());
         }
         if len < min_periods.max(2) {
             return None;
@@ -83374,17 +85322,12 @@ impl DataFrame {
             return None;
         }
 
-        let columns = Column::from_f64_all_valid_pairwise_stat_matrix_columns(
+        Some(Column::from_f64_all_valid_pairwise_stat_matrix_columns(
             col_data.to_vec(),
             len,
             stat,
             min_periods,
-        );
-        let mut result_cols = BTreeMap::new();
-        for (name, column) in numeric_cols.iter().cloned().zip(columns) {
-            result_cols.insert(name, column);
-        }
-        Some(result_cols)
+        ))
     }
 
     /// Compute a pairwise matrix when every column shares one missing-value mask.
@@ -83399,10 +85342,10 @@ impl DataFrame {
         col_data: &[std::borrow::Cow<'_, [f64]>],
         stat: &str,
         min_periods: usize,
-    ) -> Result<Option<BTreeMap<String, Column>>, FrameError> {
+    ) -> Result<Option<Vec<Column>>, FrameError> {
         let n = numeric_cols.len();
         let Some(first) = col_data.first() else {
-            return Ok(Some(BTreeMap::new()));
+            return Ok(Some(Vec::new()));
         };
         let len = first.len();
         if n != col_data.len() || !first.iter().any(|value| value.is_nan()) {
@@ -83524,11 +85467,12 @@ impl DataFrame {
             }
         }
 
-        let mut result_cols = BTreeMap::new();
-        for (j, name) in numeric_cols.iter().enumerate() {
-            let vals = (0..n).map(|i| Scalar::Float64(mat[i * n + j])).collect();
-            result_cols.insert(name.clone(), Column::new(DType::Float64, vals)?);
-        }
+        let result_cols = (0..n)
+            .map(|j| {
+                let vals = (0..n).map(|i| Scalar::Float64(mat[i * n + j])).collect();
+                Column::new(DType::Float64, vals)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Some(result_cols))
     }
 
@@ -83593,7 +85537,7 @@ impl DataFrame {
         col_data: &[std::borrow::Cow<'_, [f64]>],
         stat: &str,
         min_periods: usize,
-    ) -> Result<BTreeMap<String, Column>, FrameError> {
+    ) -> Result<Vec<Column>, FrameError> {
         let n = numeric_cols.len();
         let len = col_data.first().map_or(0, |c| c.len());
 
@@ -83936,13 +85880,13 @@ impl DataFrame {
 
         // Result column `j` holds stat(i, j) at row i — matching the historical
         // `vals[i]` / insert(col_j) layout exactly.
-        let mut result_cols = BTreeMap::new();
-        for (j, name) in numeric_cols.iter().enumerate() {
+        let mut result_cols = Vec::with_capacity(n);
+        for j in 0..n {
             let mut vals = Vec::with_capacity(n);
             for i in 0..n {
                 vals.push(Scalar::Float64(mat[i * n + j]));
             }
-            result_cols.insert(name.clone(), Column::new(DType::Float64, vals)?);
+            result_cols.push(Column::new(DType::Float64, vals)?);
         }
         Ok(result_cols)
     }
@@ -83954,11 +85898,16 @@ impl DataFrame {
         numeric_only: bool,
     ) -> Result<Self, FrameError> {
         let len = self.index.len();
-        let numeric_cols = self.corr_candidate_columns(numeric_only)?;
-
-        let col_arcs: Vec<(Arc<[f64]>, usize)> = numeric_cols
+        let positions = self.corr_candidate_columns(numeric_only)?;
+        let numeric_cols: Vec<String> = positions
             .iter()
-            .map(|name| Self::pairwise_numeric_column_arc_values(&self.columns[name], len))
+            .map(|&pos| self.column_order[pos].clone())
+            .collect();
+
+        let col_arcs: Vec<(Arc<[f64]>, usize)> = positions
+            .iter()
+            .filter_map(|&pos| self.column_at(pos))
+            .map(|column| Self::pairwise_numeric_column_arc_values(column, len))
             .collect();
 
         let lazy_stat = match stat {
@@ -83990,22 +85939,7 @@ impl DataFrame {
             Self::pairwise_stat_matrix(&numeric_cols, &col_data, stat, min_periods)?
         };
 
-        // Indexed and labelled by the columns' typed labels - a RangeIndex
-        // both ways when they are every column of one (fvsao.32).
-        let labels: Vec<IndexLabel> = numeric_cols.iter().map(|s| self.column_label(s)).collect();
-        let span = self
-            .column_range_span()
-            .filter(|_| numeric_cols.len() == self.column_order.len());
-
-        Ok(Self {
-            columns: result_cols.into(),
-            column_order: numeric_cols.into(),
-            index: Index::new(labels).with_range_span(span),
-            column_multiindex: None,
-            row_multiindex: None,
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        }
-        .with_labels_of(self))
+        Ok(self.pairwise_result_frame(&positions, numeric_cols, result_cols))
     }
 
     /// Internal helper for corr/cov pairwise matrix computation.
@@ -84021,21 +85955,25 @@ impl DataFrame {
             self.reject_non_numeric_for_pairwise_stat()?;
         }
         let len = self.index.len();
-        let numeric_cols: Vec<String> = self
-            .column_order
-            .iter()
-            .filter(|name| {
-                matches!(
-                    self.columns[name.as_str()].dtype(),
-                    DType::Bool | DType::Int64 | DType::Float64 | DType::Timedelta64
-                )
+        let positions: Vec<usize> = (0..self.num_columns())
+            .filter(|&pos| {
+                self.column_at(pos).is_some_and(|column| {
+                    matches!(
+                        column.dtype(),
+                        DType::Bool | DType::Int64 | DType::Float64 | DType::Timedelta64
+                    )
+                })
             })
-            .cloned()
+            .collect();
+        let numeric_cols: Vec<String> = positions
+            .iter()
+            .map(|&pos| self.column_order[pos].clone())
             .collect();
 
-        let col_arcs: Vec<(Arc<[f64]>, usize)> = numeric_cols
+        let col_arcs: Vec<(Arc<[f64]>, usize)> = positions
             .iter()
-            .map(|name| Self::pairwise_numeric_column_arc_values(&self.columns[name], len))
+            .filter_map(|&pos| self.column_at(pos))
+            .map(|column| Self::pairwise_numeric_column_arc_values(column, len))
             .collect();
 
         let lazy_stat = match stat {
@@ -84067,28 +86005,17 @@ impl DataFrame {
             Self::pairwise_stat_matrix(&numeric_cols, &col_data, stat, min_periods)?
         };
 
-        // Indexed and labelled by the columns' typed labels - a RangeIndex
-        // both ways when they are every column of one (fvsao.32).
-        let labels: Vec<IndexLabel> = numeric_cols.iter().map(|s| self.column_label(s)).collect();
-        let span = self
-            .column_range_span()
-            .filter(|_| numeric_cols.len() == self.column_order.len());
-
-        Ok(Self {
-            columns: result_cols.into(),
-            column_order: numeric_cols.into(),
-            index: Index::new(labels).with_range_span(span),
-            column_multiindex: None,
-            row_multiindex: None,
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        }
-        .with_labels_of(self))
+        Ok(self.pairwise_result_frame(&positions, numeric_cols, result_cols))
     }
 
     /// Compute pairwise Spearman or Kendall correlation matrix between numeric columns.
     fn pairwise_rank_corr(&self, method: &str, numeric_only: bool) -> Result<Self, FrameError> {
         let len = self.index.len();
-        let numeric_cols = self.corr_candidate_columns(numeric_only)?;
+        let positions = self.corr_candidate_columns(numeric_only)?;
+        let numeric_cols: Vec<String> = positions
+            .iter()
+            .map(|&pos| self.column_order[pos].clone())
+            .collect();
 
         let n = numeric_cols.len();
 
@@ -84099,10 +86026,11 @@ impl DataFrame {
         // column (n·len allocations — ~65ms of the spearman path at n=64,
         // len=100000). Correlation operates on column VALUES by position, so the
         // index labels never enter any cell — bit-identical output.
-        let series_list: Vec<Series> = numeric_cols
+        let series_list: Vec<Series> = positions
             .iter()
-            .map(|name| {
-                let col = &self.columns[name];
+            .zip(&numeric_cols)
+            .filter_map(|(&pos, name)| self.column_at(pos).map(|col| (name, col)))
+            .map(|(name, col)| {
                 Series::new(
                     name,
                     Index::new_known_unique_int64_unit_range(0, len),
@@ -84275,31 +86203,16 @@ impl DataFrame {
             mat
         });
 
-        let mut result_cols = BTreeMap::new();
-        for (j, col_j_name) in numeric_cols.iter().enumerate() {
+        let mut result_cols = Vec::with_capacity(n);
+        for j in 0..n {
             let mut vals = Vec::with_capacity(n);
             for i in 0..n {
                 vals.push(Scalar::Float64(mat[i * n + j]));
             }
-            result_cols.insert(col_j_name.clone(), Column::new(DType::Float64, vals)?);
+            result_cols.push(Column::new(DType::Float64, vals)?);
         }
 
-        // Indexed and labelled by the columns' typed labels - a RangeIndex
-        // both ways when they are every column of one (fvsao.32).
-        let labels: Vec<IndexLabel> = numeric_cols.iter().map(|s| self.column_label(s)).collect();
-        let span = self
-            .column_range_span()
-            .filter(|_| numeric_cols.len() == self.column_order.len());
-
-        Ok(Self {
-            columns: result_cols.into(),
-            column_order: numeric_cols.into(),
-            index: Index::new(labels).with_range_span(span),
-            column_multiindex: None,
-            row_multiindex: None,
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        }
-        .with_labels_of(self))
+        Ok(self.pairwise_result_frame(&positions, numeric_cols, result_cols))
     }
 
     /// Column-wise correlation with another DataFrame.
@@ -84474,6 +86387,9 @@ impl DataFrame {
     ///
     /// Matches `df.dot(other)`. Computes matrix multiplication where
     /// self's columns are matched to other's index.
+    // The store is the lazy store under lazy-transpose-view, a ColumnStore
+    // without.
+    #[allow(clippy::useless_conversion)]
     pub fn dot(&self, other: &Self) -> Result<Self, FrameError> {
         // self: (m x k), other: (k x n) → result: (m x n)
         let m = self.len();
@@ -84507,9 +86423,10 @@ impl DataFrame {
 
         let collect_finite_float64_views =
             |frame: &Self, row_len: usize| -> Option<Vec<(Arc<[f64]>, usize)>> {
+                // By position: a repeated column key is its own column (i17d4).
                 let mut views = Vec::with_capacity(frame.num_columns());
-                for name in &frame.column_order {
-                    let col = frame.columns.get(name)?;
+                for position in 0..frame.num_columns() {
+                    let col = frame.column_at(position)?;
                     let (data, start) = finite_f64_view(col, row_len)?;
                     views.push((data, start));
                 }
@@ -84517,7 +86434,7 @@ impl DataFrame {
             };
 
         if let Some(a_views) = collect_finite_float64_views(self, m) {
-            let mut result_cols = BTreeMap::new();
+            let mut result_cols = Vec::with_capacity(n);
             let mut col_order = Vec::with_capacity(n);
             let mut b_values_by_column: Vec<Arc<[f64]>> = Vec::with_capacity(n);
             let mut all_b_finite = true;
@@ -84526,8 +86443,8 @@ impl DataFrame {
             // a fresh Arc<[..]> for every one of the n columns (an O(n·k)
             // construction tax).
             let a_panel = fp_columnar::Float64DotAPanel::new(a_views, m);
-            for name in &other.column_order {
-                let col = &other.columns[name];
+            for (position, name) in other.column_order.iter().enumerate() {
+                let col = other.column_at(position).expect("column in bounds");
                 let Some((data, start)) = finite_f64_view(col, k) else {
                     all_b_finite = false;
                     break;
@@ -84628,12 +86545,12 @@ impl DataFrame {
                     .into_iter()
                     .flatten()
                     .collect();
-                for (name, data) in col_order.iter().zip(produced) {
+                for data in produced {
                     // The pooled kernel just produced this owned buffer. Keep it
                     // in the typed backing instead of copying it into Arc<[f64]>.
                     // `from_f64_values_owned` still routes a NaN output through
                     // the canonical missing-value constructor.
-                    result_cols.insert(name.clone(), Column::from_f64_values_owned(data));
+                    result_cols.push(Column::from_f64_values_owned(data));
                 }
 
                 // Materialize the n output columns in ONE scope, parallel
@@ -84656,20 +86573,21 @@ impl DataFrame {
                 // exactly-once semantics, so a concurrent reader sees the same
                 // bytes either way — which also means this is safe to skip
                 // (`FP_DOT_SERIAL=1`) without changing any result.
-                let pending: Vec<&Column> = col_order
-                    .iter()
-                    .filter_map(|name| result_cols.get(name))
-                    .collect();
+                let pending: Vec<&Column> = result_cols.iter().collect();
                 Column::materialize_dot_columns_parallel(&pending);
 
+                // Labelled by `other`'s columns, typed (pandas' columns=
+                // other.columns: the 0..n of an ndarray's frame were text).
                 return Ok(Self {
-                    columns: result_cols.into(),
+                    columns: ColumnStore::from_pairs(col_order.iter().cloned().zip(result_cols))
+                        .into(),
                     column_order: col_order.into(),
                     index: self.index.clone(),
                     column_multiindex: None,
                     row_multiindex: None,
                     allows_duplicate_labels: self.allows_duplicate_labels,
-                });
+                }
+                .with_labels_of(other));
             }
         }
 
@@ -84699,11 +86617,9 @@ impl DataFrame {
         // the transpose vanishes. Non-f64 / nullable columns materialize once
         // (identical operands). `a_cols[l][i] == old a[i*k+l] == self[i][l]`, so
         // every C[i][j] fold is byte-identical.
-        let a_cols: Vec<std::borrow::Cow<'_, [f64]>> = self
-            .column_order
-            .iter()
-            .map(|name| {
-                let col = &self.columns[name];
+        let a_cols: Vec<std::borrow::Cow<'_, [f64]>> = (0..k)
+            .map(|position| {
+                let col = self.column_at(position).expect("column in bounds");
                 if let Some(s) = col.as_f64_slice() {
                     std::borrow::Cow::Borrowed(s)
                 } else {
@@ -84718,8 +86634,8 @@ impl DataFrame {
             .collect();
         let a_cols_ref: &[std::borrow::Cow<'_, [f64]>] = &a_cols;
         let mut b = vec![0.0_f64; n * k];
-        for (j, name) in other.column_order.iter().enumerate() {
-            let col = &other.columns[name];
+        for j in 0..n {
+            let col = other.column_at(j).expect("column in bounds");
             if let Some(s) = col.as_f64_slice() {
                 b[j * k..j * k + k].copy_from_slice(s);
             } else {
@@ -84945,22 +86861,17 @@ impl DataFrame {
             columns.extend((0..n).map(build_col));
         }
 
-        // Assemble result columns in `other.column_order`.
-        let mut result_cols = BTreeMap::new();
-        let mut col_order = Vec::with_capacity(n);
-        for (col, other_col_name) in columns.into_iter().zip(other.column_order.iter()) {
-            result_cols.insert(other_col_name.clone(), col);
-            col_order.push(other_col_name.clone());
-        }
-
+        // Assemble result columns in `other.column_order`, by position.
+        let col_order: Vec<String> = other.column_order.to_vec();
         Ok(Self {
-            columns: result_cols.into(),
+            columns: ColumnStore::from_pairs(col_order.iter().cloned().zip(columns)).into(),
             column_order: col_order.into(),
             index: self.index.clone(),
             column_multiindex: None,
             row_multiindex: None,
             allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        }
+        .with_labels_of(other))
     }
 
     /// Compute the number of unique values per column.
@@ -85035,14 +86946,16 @@ impl DataFrame {
     /// axis name).
     pub fn with_index(&self, index: Index) -> Result<Self, FrameError> {
         let mut out = self.set_axis(index.labels().to_vec(), 0)?;
-        // The given index's name, time zone, freq and RangeIndex origin
-        // ride along (they were dropped with the labels).
+        // The given index's name, time zone, freq, RangeIndex origin and
+        // declared dtype ride along (they were dropped with the labels;
+        // br-frankenpandas-i20vm).
         out.index = out
             .index
             .rename_index(index.name())
             .with_tz(index.tz())?
             .with_freq(index.freq().map(str::to_owned))
-            .with_range_span(index.range_span());
+            .with_range_span(index.range_span())
+            .with_declared_dtype(index.declared_dtype());
         Ok(out)
     }
 
@@ -86160,25 +88073,23 @@ impl DataFrame {
         new_labels: Vec<IndexLabel>,
         method: &str,
     ) -> Result<Self, FrameError> {
+        self.reindex_with_method_options(new_labels, method, None, None)
+    }
+
+    /// [`Self::reindex_with_method`] with pandas' `limit` and `tolerance`
+    /// (one per new label; see `method_reindex_positions`).
+    pub fn reindex_with_method_options(
+        &self,
+        new_labels: Vec<IndexLabel>,
+        method: &str,
+        limit: Option<usize>,
+        tolerance: Option<&[f64]>,
+    ) -> Result<Self, FrameError> {
         if self.index.has_duplicates() {
             return Err(FrameError::CompatibilityRejected(
                 "reindex cannot handle duplicate index labels".to_owned(),
             ));
         }
-        // br-frankenpandas-reindex-nearest: 'nearest' is pandas' third method and
-        // was rejected here as unsupported. It is not a direction, so it cannot be
-        // folded into `forward` — it resolves each absent label to the CLOSEST
-        // source label instead of the closest one in a direction.
-        let forward = match method {
-            "ffill" | "pad" => Some(true),
-            "bfill" | "backfill" => Some(false),
-            "nearest" => None,
-            other => {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "unsupported reindex method: '{other}'"
-                )));
-            }
-        };
         // Preserve the index name on a flat label list (mirrors `reindex`).
         let new_index = Index::new(new_labels).rename_index(self.index.name());
         // Resolve each new label to its source row position (`None` = absent),
@@ -86203,28 +88114,25 @@ impl DataFrame {
             } else {
                 self.index.get_indexer(&new_index)
             };
-        // Absent labels inherit the nearest present source position in the fill
-        // direction; present labels (incl. source NaNs) keep their own position.
-        let filled = match forward {
-            Some(direction) => fill_reindex_positions(
-                self.index.labels(),
-                new_index.labels(),
-                &positions,
-                direction,
-            )?,
-            None => nearest_reindex_positions(self.index.labels(), new_index.labels(), &positions)?,
-        };
+        // Absent labels inherit a present source position by the method;
+        // present labels (incl. source NaNs) keep their own position.
+        let filled = method_reindex_positions(
+            self.index.labels(),
+            new_index.labels(),
+            &positions,
+            method,
+            limit,
+            tolerance,
+        )?;
         // Gather each column from the carried positions. Remaining `None` slots
-        // (leading gap for ffill / trailing gap for bfill) become the column's
-        // dtype-appropriate missing sentinel — `Null(NaN)` for Float64, but
-        // `Null(Null)` for Int64/Utf8/Bool and `NaT` for temporal — exactly as
-        // plain `reindex` and the `Series` variant do (both use
-        // `reindex_by_positions`, which fills `None` via `missing_for_dtype`).
-        // Hardcoding `Null(NaN)` here diverged from those paths on non-Float64
-        // columns.
+        // (leading gap for ffill / trailing gap for bfill, a limit or a
+        // tolerance) are gaps pandas invents, as plain `reindex` and the
+        // `Series` variant fill them (`reindex_column_with_invented_gaps`: an
+        // all-valid int column widens to float64, a missing text cell is NaN;
+        // they stayed int64 / None here, br-frankenpandas-u6p7i).
         let mut result_cols = BTreeMap::new();
         for name in &self.column_order {
-            let col = self.columns[name].reindex_by_positions(&filled)?;
+            let col = reindex_column_with_invented_gaps(&self.columns[name], &filled)?;
             result_cols.insert(name.clone(), col);
         }
         Self::validate_duplicate_label_policy(
@@ -86402,22 +88310,54 @@ impl DataFrame {
     /// Analogous to `pandas.DataFrame.combine_first(other)`. Uses union
     /// of indices and columns. For overlapping positions, uses self's value
     /// if non-null, else other's value.
+    // The store is the lazy store under lazy-transpose-view, a ColumnStore
+    // without.
+    #[allow(clippy::useless_conversion)]
     pub fn combine_first(&self, other: &Self) -> Result<Self, FrameError> {
-        // Build the union of columns. pandas combine_first sorts the column
-        // union (e.g. [b, a] -> [a, b]). Verified vs live pandas 2.2.3.
-        let mut col_order = Vec::new();
-        let mut col_set = std::collections::HashSet::new();
-        for name in &self.column_order {
-            if col_set.insert(name.clone()) {
-                col_order.push(name.clone());
+        // The output columns, each with its self and other column. Identical
+        // column axes keep their order and pair by position, as pandas' align
+        // of equal axes (it neither sorts them nor collapses a repeated key:
+        // [b, a] stayed [b, a], and MultiIndex columns whose leaf names repeat
+        // combine their own columns; i17d4). Otherwise pandas sorts the column
+        // union (e.g. [b, a] and [a, c] -> [a, b, c]). Verified vs live pandas
+        // 2.2.3.
+        let same_columns = self.column_order == other.column_order;
+        let slots: Vec<(String, Option<&Column>, Option<&Column>)> = if same_columns {
+            (0..self.num_columns())
+                .map(|pos| {
+                    (
+                        self.column_order[pos].clone(),
+                        self.column_at(pos),
+                        other.column_at(pos),
+                    )
+                })
+                .collect()
+        } else {
+            let mut col_order = Vec::new();
+            let mut col_set = std::collections::HashSet::new();
+            for name in self.column_order.iter().chain(other.column_order.iter()) {
+                if col_set.insert(name.clone()) {
+                    col_order.push(name.clone());
+                }
             }
-        }
-        for name in &other.column_order {
-            if col_set.insert(name.clone()) {
-                col_order.push(name.clone());
-            }
-        }
-        col_order.sort();
+            col_order.sort();
+            col_order
+                .into_iter()
+                .map(|name| {
+                    let (sc, oc) = (self.columns.get(&name), other.columns.get(&name));
+                    (name, sc, oc)
+                })
+                .collect()
+        };
+        let col_order: Vec<String> = slots.iter().map(|(name, _, _)| name.clone()).collect();
+        let two_sided_f64 = |slot: &(String, Option<&Column>, Option<&Column>)| {
+            matches!((slot.1, slot.2),
+                (Some(sc), Some(oc))
+                    if matches!(sc.dtype(), DType::Float64)
+                        && matches!(oc.dtype(), DType::Float64)
+                        && sc.as_f64_slice_with_validity().is_some()
+                        && oc.as_f64_slice_with_validity().is_some())
+        };
 
         // Positional fast path is valid only when the two indexes are identical
         // (so union order == self order and label i maps to row i on both sides)
@@ -86427,15 +88367,14 @@ impl DataFrame {
         // When every output column is two-sided Float64, all of them take the
         // typed positional fast path below, so the O(n log n) per-cell label
         // maps are never consulted — skip building them (br-frankenpandas-apyf4).
-        let all_typed = positional
-            && col_order.iter().all(|name| {
-                matches!((self.columns.get(name), other.columns.get(name)),
-                    (Some(sc), Some(oc))
-                        if matches!(sc.dtype(), DType::Float64)
-                            && matches!(oc.dtype(), DType::Float64)
-                            && sc.as_f64_slice_with_validity().is_some()
-                            && oc.as_f64_slice_with_validity().is_some())
-            });
+        let all_typed = positional && slots.iter().all(two_sided_f64);
+        // MultiIndex columns ride along only when the axes are the same (the
+        // sorted union reorders them).
+        let column_multiindex = if same_columns {
+            self.column_multiindex.clone()
+        } else {
+            None
+        };
 
         // Typed UNALIGNED fast path (br-frankenpandas-combinefirst-unaligned):
         // indexes DIFFER (so the positional path bails) but both are unique and
@@ -86453,32 +88392,26 @@ impl DataFrame {
             && other.index.is_unique()
             && self.row_multiindex.is_none()
             && other.row_multiindex.is_none()
-            && col_order.len() == self.column_order.len()
-            && col_order.iter().all(|name| {
-                matches!((self.columns.get(name), other.columns.get(name)),
-                    (Some(sc), Some(oc))
-                        if matches!(sc.dtype(), DType::Float64)
-                            && matches!(oc.dtype(), DType::Float64)
-                            && sc.as_f64_slice_with_validity().is_some()
-                            && oc.as_f64_slice_with_validity().is_some())
-            })
+            && slots.len() == self.column_order.len()
+            && slots.iter().all(two_sided_f64)
         {
             let AlignmentPlan {
                 union_index,
                 left_positions,
                 right_positions,
             } = align_union_sorted_plan(&self.index, &other.index);
-            let computed = self.par_map_columns(&col_order, |name| {
+            let computed = self.par_map_indices_min(slots.len(), 16_384, |i| {
                 // Gather TYPED straight from the source f64+validity slices via the
                 // union position vectors (reindex_by_positions would go Scalar for a
                 // nullable source). A union row takes self's value iff its self
                 // position is present-and-valid, else other's (present/missing) —
                 // same first-non-null coalesce as the positional arm.
-                let (sx, sv) = self.columns[name]
-                    .as_f64_slice_with_validity()
+                let (_, self_col, other_col) = &slots[i];
+                let (sx, sv) = self_col
+                    .and_then(Column::as_f64_slice_with_validity)
                     .expect("gated to two-sided Float64 with f64+validity");
-                let (ox, ov) = other.columns[name]
-                    .as_f64_slice_with_validity()
+                let (ox, ov) = other_col
+                    .and_then(Column::as_f64_slice_with_validity)
                     .expect("gated to two-sided Float64 with f64+validity");
                 let len = left_positions.len();
                 let mut out = vec![0.0_f64; len];
@@ -86505,15 +88438,11 @@ impl DataFrame {
                 }
                 Ok(Column::from_f64_values_with_validity(out, validity))
             })?;
-            let mut result_cols = BTreeMap::new();
-            for (name, column) in col_order.iter().zip(computed) {
-                result_cols.insert(name.clone(), column);
-            }
             return Ok(Self {
-                columns: result_cols.into(),
+                columns: ColumnStore::from_pairs(col_order.iter().cloned().zip(computed)).into(),
                 column_order: col_order.into(),
                 index: union_index,
-                column_multiindex: self.column_multiindex.clone(),
+                column_multiindex,
                 row_multiindex: None,
                 allows_duplicate_labels: self.allows_duplicate_labels,
             });
@@ -86585,9 +88514,8 @@ impl DataFrame {
         // column is selected independently, so spread the columns across
         // par_map_columns scope workers. Bit-identical — identical per-column
         // typed/Scalar select arms, reassembled in col_order.
-        let computed = self.par_map_columns(&col_order, |col_name| {
-            let self_col = self.columns.get(col_name);
-            let other_col = other.columns.get(col_name);
+        let computed = self.par_map_indices_min(slots.len(), 16_384, |i| {
+            let (self_col, other_col) = (slots[i].1, slots[i].2);
 
             // Typed Float64 fast path (br-frankenpandas-apyf4): identical+unique
             // index and both sides Float64 — select positionally from raw f64 +
@@ -86664,10 +88592,6 @@ impl DataFrame {
             // Create column with explicit target dtype to ensure associativity
             Ok(Column::new(target_dtype, vals)?)
         })?;
-        let mut result_cols = BTreeMap::new();
-        for (name, column) in col_order.iter().zip(computed) {
-            result_cols.insert(name.clone(), column);
-        }
 
         // Per br-frankenpandas-25zlp: pandas combine_first preserves shared
         // index name (preserved when both operands agree, None otherwise).
@@ -86687,10 +88611,10 @@ impl DataFrame {
             Index::new(union_labels).rename_index(shared_name)
         };
         Ok(Self {
-            columns: result_cols.into(),
+            columns: ColumnStore::from_pairs(col_order.iter().cloned().zip(computed)).into(),
             column_order: col_order.into(),
             index,
-            column_multiindex: None,
+            column_multiindex,
             row_multiindex: None,
             allows_duplicate_labels: self.allows_duplicate_labels,
         })
@@ -86862,6 +88786,107 @@ impl DataFrame {
             window,
             min_periods: min_periods.unwrap_or(window),
             center,
+            bounds: None,
+            on: None,
+        }
+    }
+
+    /// [`Self::rolling_with_center`] closed as pandas' `closed=` says
+    /// ([`fixed_window_bounds`]), and with pandas' `on=` a column passed
+    /// through as it was rather than aggregated. `min_periods` defaults to
+    /// `window` and must not exceed it.
+    pub fn rolling_closed(
+        &self,
+        window: usize,
+        min_periods: Option<usize>,
+        center: bool,
+        closed: IntervalClosed,
+        on: Option<&str>,
+    ) -> Result<DataFrameRolling<'_>, FrameError> {
+        let min_periods = min_periods.unwrap_or(window);
+        if min_periods > window {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "rolling: min_periods {min_periods} must be <= window {window}"
+            )));
+        }
+        let on = self.rolling_on(on)?;
+        let bounds = (closed != IntervalClosed::Right)
+            .then(|| fixed_window_bounds(self.len(), window, center, closed));
+        Ok(DataFrameRolling {
+            df: self,
+            window,
+            min_periods,
+            center,
+            bounds,
+            on,
+        })
+    }
+
+    /// A time-based window (pandas' `df.rolling('7D', on=, closed=)`) over
+    /// the datetime index or, with `on`, over that datetime column, which
+    /// is passed through as it was ([`offset_window_bounds`]); `min_periods`
+    /// defaults to 1, as pandas'.
+    pub fn rolling_offset(
+        &self,
+        window: &str,
+        min_periods: Option<usize>,
+        closed: IntervalClosed,
+        on: Option<&str>,
+    ) -> Result<DataFrameRolling<'_>, FrameError> {
+        self.rolling_offset_centered(window, min_periods, closed, on, false)
+    }
+
+    /// [`Self::rolling_offset`], each window centred on its row when
+    /// `center` ([`centered_offset_window_bounds`]; br-frankenpandas-gv69z).
+    pub fn rolling_offset_centered(
+        &self,
+        window: &str,
+        min_periods: Option<usize>,
+        closed: IntervalClosed,
+        on: Option<&str>,
+        center: bool,
+    ) -> Result<DataFrameRolling<'_>, FrameError> {
+        let on = self.rolling_on(on)?;
+        let bounds = match on.as_deref().and_then(|name| self.column(name)) {
+            Some(column) => offset_window(
+                window,
+                column.values().iter().map(|value| match value {
+                    Scalar::Datetime64(v) | Scalar::Timedelta64(v) => Some(*v),
+                    _ => None,
+                }),
+                closed,
+                center,
+            )?,
+            None => offset_window(
+                window,
+                self.index.labels().iter().map(|label| match label {
+                    IndexLabel::Datetime64(v) | IndexLabel::Timedelta64(v) => Some(*v),
+                    _ => None,
+                }),
+                closed,
+                center,
+            )?,
+        };
+        let min_periods = min_periods.unwrap_or(1);
+        Ok(DataFrameRolling {
+            df: self,
+            window: self.len().max(min_periods).max(1),
+            min_periods,
+            center: false,
+            bounds: Some(bounds),
+            on,
+        })
+    }
+
+    /// pandas' `rolling(on=)`: a column of the frame, or its error.
+    fn rolling_on(&self, on: Option<&str>) -> Result<Option<String>, FrameError> {
+        match on {
+            None => Ok(None),
+            Some(name) if self.column(name).is_some() => Ok(Some(name.to_owned())),
+            Some(name) => Err(FrameError::CompatibilityRejected(format!(
+                "invalid on specified as {name}, must be a column (of DataFrame), an Index \
+                 or None"
+            ))),
         }
     }
 
@@ -86898,6 +88923,8 @@ impl DataFrame {
             alpha,
             adjust,
             min_periods,
+            ignore_na: false,
+            deltas: None,
         }
     }
 
@@ -87020,12 +89047,23 @@ impl DataFrame {
     /// Matches `df.between_time(start_time, end_time)`.
     /// Index labels should be datetime-like strings with time component (HH:MM or HH:MM:SS).
     pub fn between_time(&self, start: &str, end: &str) -> Result<Self, FrameError> {
+        self.between_time_inclusive(start, end, IntervalClosed::Both)
+    }
+
+    /// [`Self::between_time`] with pandas' `inclusive=`.
+    pub fn between_time_inclusive(
+        &self,
+        start: &str,
+        end: &str,
+        inclusive: IntervalClosed,
+    ) -> Result<Self, FrameError> {
         // Per br-frankenpandas-g3jqn: pandas raises TypeError on non-DatetimeIndex.
         require_datetime_index(self.index.labels(), "between_time")?;
         let keep = between_time_positions(
             &wall_clock_labels(&self.index),
             time_argument(start, "between_time")?,
             time_argument(end, "between_time")?,
+            inclusive,
         );
 
         let mut selected = self.take_rows_by_positions(&keep)?;
@@ -87041,7 +89079,12 @@ impl DataFrame {
         // Per br-frankenpandas-g3jqn: pandas raises TypeError on non-DatetimeIndex.
         require_datetime_index(self.index.labels(), "at_time")?;
         let target = time_argument(time, "at_time")?;
-        let keep = between_time_positions(&wall_clock_labels(&self.index), target, target);
+        let keep = between_time_positions(
+            &wall_clock_labels(&self.index),
+            target,
+            target,
+            IntervalClosed::Both,
+        );
 
         let mut selected = self.take_rows_by_positions(&keep)?;
         let freq = fp_index::take_freq(self.index.freq().map(str::to_owned), &keep);
@@ -87121,7 +89164,9 @@ impl DataFrame {
                     IndexLabel::Utf8(s) => s.clone(),
                     IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                     IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
+                        f.to_string()
+                    }
                     IndexLabel::Object(object) => object.to_string(),
                     IndexLabel::Null(_) => label.to_string(),
                 });
@@ -87218,7 +89263,9 @@ impl DataFrame {
                     IndexLabel::Utf8(s) => escape_html(s),
                     IndexLabel::Timedelta64(ns) => escape_html(&Timedelta::format(*ns)),
                     IndexLabel::Datetime64(ns) => escape_html(&format_datetime_ns(*ns)),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
+                        f.to_string()
+                    }
                     IndexLabel::Object(object) => escape_html(&object.to_string()),
                     IndexLabel::Null(_) => label.to_string(),
                 };
@@ -87509,10 +89556,9 @@ impl DataFrame {
             "records" => {
                 // Shared-key build: carry the column names ONCE and store only the row
                 // values (`rows[i][j]`). Hoist the per-column `values()` once.
-                let col_values: Vec<&[Scalar]> = self
-                    .column_order
-                    .iter()
-                    .map(|name| self.columns[name].values())
+                let col_values: Vec<&[Scalar]> = (0..self.num_columns())
+                    .filter_map(|pos| self.column_at(pos))
+                    .map(Column::values)
                     .collect();
                 let columns = self.column_order.to_vec();
                 let n = self.len();
@@ -87648,6 +89694,7 @@ impl DataFrame {
                         IndexLabel::Timedelta64(ns) => Scalar::Timedelta64(*ns),
                         IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
                         IndexLabel::Object(object) => Scalar::Object(object.clone()),
+                        IndexLabel::Period(period) => Scalar::Period(*period),
                         IndexLabel::Null(kind) => Scalar::Null(*kind),
                     })
                     .collect();
@@ -87792,7 +89839,7 @@ impl DataFrame {
                     IndexLabel::Datetime64(ns) => {
                         out.push_str(&csv_escape(&format_datetime_ns(*ns), sep))
                     }
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => {
+                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
                         out.push_str(&csv_escape(&f.to_string(), sep))
                     }
                     IndexLabel::Object(object) => {
@@ -87889,7 +89936,7 @@ impl DataFrame {
                     IndexLabel::Datetime64(ns) => {
                         out.push_str(&csv_escape(&format_datetime_ns(*ns), sep))
                     }
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => {
+                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
                         out.push_str(&csv_escape(&f.to_string(), sep))
                     }
                     IndexLabel::Object(object) => {
@@ -88040,7 +90087,7 @@ impl DataFrame {
                     IndexLabel::Datetime64(ns) => {
                         out.push_str(&quote_str(&format_datetime_ns(*ns), false))
                     }
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => {
+                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
                         out.push_str(&quote_str(&f.to_string(), false))
                     }
                     IndexLabel::Object(object) => {
@@ -88102,16 +90149,22 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.to_json(orient=...)`.
     pub fn to_json(&self, orient: &str) -> Result<String, FrameError> {
+        // A key names one column in these orients, so pandas refuses repeated
+        // column keys (i17d4: the first duplicate's data was written for each).
+        if matches!(orient, "records" | "columns" | "index") && self.has_repeated_column_keys() {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "DataFrame columns must be unique for orient='{orient}'."
+            )));
+        }
         match orient {
             "records" => {
                 // Stream rows directly to the JSON buffer (RecordsJson), skipping
                 // the Vec<Value::Object> tree: no n*m Value allocs, no n*m
                 // column-name String clones, no n Map allocs. Bit-identical to the
                 // old serialize_json_value(Value::Array(rows)).
-                let col_values: Vec<&[Scalar]> = self
-                    .column_order
-                    .iter()
-                    .map(|name| self.columns[name].values())
+                let col_values: Vec<&[Scalar]> = (0..self.num_columns())
+                    .filter_map(|pos| self.column_at(pos))
+                    .map(Column::values)
                     .collect();
                 let record = RecordsJson {
                     column_order: &self.column_order,
@@ -88153,10 +90206,9 @@ impl DataFrame {
                     .iter()
                     .map(index_label_to_json_key)
                     .collect();
-                let col_values: Vec<&[Scalar]> = self
-                    .column_order
-                    .iter()
-                    .map(|name| self.columns[name].values())
+                let col_values: Vec<&[Scalar]> = (0..self.num_columns())
+                    .filter_map(|pos| self.column_at(pos))
+                    .map(Column::values)
                     .collect();
                 // Column-major: the outer map has only `m` entries, so parallelize
                 // WITHIN each column — its n `"key":value` entries are independent.
@@ -88201,10 +90253,9 @@ impl DataFrame {
                     .iter()
                     .map(index_label_to_json_key)
                     .collect();
-                let col_values: Vec<&[Scalar]> = self
-                    .column_order
-                    .iter()
-                    .map(|name| self.columns[name].values())
+                let col_values: Vec<&[Scalar]> = (0..self.num_columns())
+                    .filter_map(|pos| self.column_at(pos))
+                    .map(Column::values)
                     .collect();
                 let record = RecordsJson {
                     column_order: &self.column_order,
@@ -88240,10 +90291,9 @@ impl DataFrame {
                     .iter()
                     .map(index_label_to_json_value)
                     .collect();
-                let col_values: Vec<&[Scalar]> = self
-                    .column_order
-                    .iter()
-                    .map(|name| self.columns[name].values())
+                let col_values: Vec<&[Scalar]> = (0..self.num_columns())
+                    .filter_map(|pos| self.column_at(pos))
+                    .map(Column::values)
                     .collect();
                 // Only `data` is O(n*m); `columns`/`index` stay serial. Emitting the
                 // three entries in SplitJson's order with literal `"columns":` /
@@ -88274,10 +90324,9 @@ impl DataFrame {
             "values" => {
                 // Stream rows-of-arrays directly (DataArrayJson), skipping the
                 // n*m Value tree + the per-cell columns[name].values() lookup.
-                let col_values: Vec<&[Scalar]> = self
-                    .column_order
-                    .iter()
-                    .map(|name| self.columns[name].values())
+                let col_values: Vec<&[Scalar]> = (0..self.num_columns())
+                    .filter_map(|pos| self.column_at(pos))
+                    .map(Column::values)
                     .collect();
                 // Each row's `[...]` array is independent; wrapping the comma-joined
                 // bodies in `[`..`]` reproduces DataArrayJson's SerializeSeq exactly.
@@ -88310,7 +90359,7 @@ impl DataFrame {
                         }
                         name.to_string()
                     }
-                    None => self.reset_index_column_name()?,
+                    None => self.reset_index_column_name(false)?,
                 };
 
                 let mut fields = Vec::with_capacity(self.column_order.len() + 1);
@@ -88550,9 +90599,10 @@ impl DataFrame {
                     IndexLabel::Utf8(s) => s.clone(),
                     IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                     IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
-                        f.to_string()
-                    }
+                    f @ (IndexLabel::Float64(_)
+                    | IndexLabel::Bool(_)
+                    | IndexLabel::Object(_)
+                    | IndexLabel::Period(_)) => f.to_string(),
                     IndexLabel::Null(_) => l.to_string(),
                 })
                 .collect();
@@ -88698,9 +90748,10 @@ impl DataFrame {
                     IndexLabel::Utf8(s) => s.clone(),
                     IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                     IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
-                        f.to_string()
-                    }
+                    f @ (IndexLabel::Float64(_)
+                    | IndexLabel::Bool(_)
+                    | IndexLabel::Object(_)
+                    | IndexLabel::Period(_)) => f.to_string(),
                     null @ IndexLabel::Null(_) => null.to_string(),
                 });
             }
@@ -88765,9 +90816,10 @@ impl DataFrame {
                     IndexLabel::Utf8(s) => s.clone(),
                     IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                     IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
-                        f.to_string()
-                    }
+                    f @ (IndexLabel::Float64(_)
+                    | IndexLabel::Bool(_)
+                    | IndexLabel::Object(_)
+                    | IndexLabel::Period(_)) => f.to_string(),
                     IndexLabel::Null(_) => l.to_string(),
                 })
                 .collect();
@@ -89282,10 +91334,9 @@ impl DataFrame {
         // cell). Composite labels stay format!-per-cell (each is unique — pandas
         // dodges this with a MultiIndex; see the structural note below).
         let labels = self.index.labels();
-        let col_refs: Vec<&Column> = self
-            .column_order
-            .iter()
-            .map(|name| &self.columns[name])
+        // By position: a repeated column key stacks its own values (i17d4).
+        let col_refs: Vec<&Column> = (0..n_cols)
+            .filter_map(|position| self.column_at(position))
             .collect();
 
         // Build the n*m composite labels into ONE contiguous Utf8 buffer +
@@ -89316,9 +91367,10 @@ impl DataFrame {
                     IndexLabel::Utf8(v) => row_part.push_str(v),
                     IndexLabel::Timedelta64(ns) => row_part.push_str(&Timedelta::format(*ns)),
                     IndexLabel::Datetime64(ns) => row_part.push_str(&format_datetime_ns(*ns)),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
-                        row_part.push_str(&format!("{f}"))
-                    }
+                    f @ (IndexLabel::Float64(_)
+                    | IndexLabel::Bool(_)
+                    | IndexLabel::Object(_)
+                    | IndexLabel::Period(_)) => row_part.push_str(&format!("{f}")),
                     l @ IndexLabel::Null(_) => row_part.push_str(&format!("{l}")),
                 }
                 for col_name in col_names {
@@ -89631,9 +91683,10 @@ impl DataFrame {
                 IndexLabel::Int64(v) => v.to_string(),
                 IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                 IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
-                    f.to_string()
-                }
+                f @ (IndexLabel::Float64(_)
+                | IndexLabel::Bool(_)
+                | IndexLabel::Object(_)
+                | IndexLabel::Period(_)) => f.to_string(),
                 IndexLabel::Null(_) => label.to_string(),
             };
             let sep_pos = label_str.rfind('|').ok_or_else(|| {
@@ -89726,10 +91779,9 @@ impl DataFrame {
         } else {
             // Row-wise: apply func to each row. Hoist the per-cell
             // columns[name].values() (n*m BTreeMap lookups) to once-per-column.
-            let col_values: Vec<&[Scalar]> = self
-                .column_order
-                .iter()
-                .map(|name| self.columns[name].values())
+            let col_values: Vec<&[Scalar]> = (0..self.num_columns())
+                .filter_map(|pos| self.column_at(pos))
+                .map(Column::values)
                 .collect();
             // Reuse ONE row buffer across all rows (br-frankenpandas-applyrow-reuse):
             // the old form `collect()`-ed a fresh `Vec<Scalar>` per row — n heap
@@ -90383,8 +92435,8 @@ impl DataFrame {
         // count is independent, so spread the columns across par_map_columns
         // scope workers. Bit-identical — identical per-column typed/hashed arms,
         // reassembled in column_order.
-        let values: Vec<Scalar> = self.par_map_columns(&self.column_order, |n| {
-            let col = &self.columns[n];
+        let values: Vec<Scalar> = self.par_map_column_positions_min(16_384, |pos| {
+            let col = self.column_at(pos).expect("column in bounds");
             // Typed Float64 fast path (br-frankenpandas-zl16n): dedup the
             // present values straight from the f64 + validity slices into an
             // Fx-hashed set of normalized bits, skipping the col.values()
@@ -90528,10 +92580,9 @@ impl DataFrame {
         // per-row `distinct_values` (cross-dtype grouped_scalar_eq) is unchanged,
         // so the result is bit-identical.
         let n = self.len();
-        let col_values: Vec<&[Scalar]> = self
-            .column_order
-            .iter()
-            .map(|name| self.columns[name].values())
+        let col_values: Vec<&[Scalar]> = (0..self.num_columns())
+            .filter_map(|pos| self.column_at(pos))
+            .map(Column::values)
             .collect();
         let compute = |row: usize| -> Scalar {
             let row_values: Vec<Scalar> = col_values.iter().map(|cv| cv[row].clone()).collect();
@@ -90678,17 +92729,18 @@ impl DataFrame {
         numeric_only: bool,
     ) -> Result<Series, FrameError> {
         let op_name = if is_max { "idxmax" } else { "idxmin" };
-        let candidate_cols: Vec<&String> = if numeric_only {
-            self.column_order
-                .iter()
-                .filter(|name| {
-                    let dt = self.columns[*name].dtype();
-                    dt.is_numeric() || dt == DType::Bool
-                })
-                .collect()
-        } else {
-            self.column_order.iter().collect()
-        };
+        // (position, label, column) triples, so repeated labels keep their
+        // own columns (i17d4).
+        let candidate_cols: Vec<(usize, &String, &Column)> = self
+            .column_order
+            .iter()
+            .enumerate()
+            .filter_map(|(pos, name)| self.column_at(pos).map(|col| (pos, name, col)))
+            .filter(|(_, _, col)| {
+                let dt = col.dtype();
+                !numeric_only || dt.is_numeric() || dt == DType::Bool
+            })
+            .collect();
 
         match axis {
             0 => {
@@ -90703,12 +92755,13 @@ impl DataFrame {
                     )));
                 }
 
-                let labels: Vec<IndexLabel> =
-                    candidate_cols.iter().map(|n| n.as_str().into()).collect();
+                let labels: Vec<IndexLabel> = candidate_cols
+                    .iter()
+                    .map(|(_, n, _)| n.as_str().into())
+                    .collect();
                 let mut values = Vec::with_capacity(labels.len());
 
-                for name in &candidate_cols {
-                    let col = &self.columns[*name];
+                for &(pos, name, col) in &candidate_cols {
                     if Self::idx_extreme_is_all_missing(col) {
                         values.push(Scalar::Null(NullKind::NaN));
                         continue;
@@ -90719,7 +92772,7 @@ impl DataFrame {
                              mutually orderable"
                         )));
                     }
-                    let s = self.column_as_series(name)?;
+                    let s = self.column_at_as_series(pos)?;
                     let res = if is_max {
                         s.idxmax_ext(skipna)
                     } else {
@@ -90772,7 +92825,7 @@ impl DataFrame {
                     if !skipna
                         && candidate_cols
                             .iter()
-                            .any(|col_name| self.columns[*col_name].values()[row_idx].is_missing())
+                            .any(|(_, _, col)| col.values()[row_idx].is_missing())
                     {
                         values.push(Scalar::Null(NullKind::NaN));
                         continue;
@@ -90781,8 +92834,8 @@ impl DataFrame {
                     let mut best_col: Option<&str> = None;
                     let mut best_val: Option<&Scalar> = None;
 
-                    for col_name in &candidate_cols {
-                        let val = &self.columns[*col_name].values()[row_idx];
+                    for &(_, col_name, col) in &candidate_cols {
+                        let val = &col.values()[row_idx];
                         if val.is_missing() {
                             continue;
                         }
@@ -90928,6 +92981,9 @@ impl DataFrame {
         // Typed-f64 fast path (sister to idxmax_axis1): all all-valid Float64
         // columns -> raw f64 compare over hoisted slices, first-min-wins, NaN
         // skipped. Bit-identical to the generic to_f64 path.
+        let columns: Vec<&Column> = (0..self.num_columns())
+            .filter_map(|pos| self.column_at(pos))
+            .collect();
         'f64: {
             // Each column is an all-valid Float64 (borrow its slice; the per-row
             // kernel below skips NaN inline, so a valid NaN is handled exactly as the
@@ -90937,9 +92993,8 @@ impl DataFrame {
             // bit-identical; the Utf8/label output is independent of input dtype.
             // Nullable / Timedelta / other-dtype columns break to the generic path.
             let mut owned: Vec<Vec<f64>> = Vec::new();
-            let mut is_owned: Vec<bool> = Vec::with_capacity(self.column_order.len());
-            for name in &self.column_order {
-                let col = &self.columns[name];
+            let mut is_owned: Vec<bool> = Vec::with_capacity(columns.len());
+            for &col in &columns {
                 if col.as_f64_slice().is_some() {
                     is_owned.push(false);
                 } else if let Some(d) = col.as_i64_slice() {
@@ -90953,19 +93008,17 @@ impl DataFrame {
                 break 'f64;
             }
             let mut owned_iter = owned.iter();
-            let col_f64: Vec<&[f64]> = self
-                .column_order
+            let col_f64: Vec<&[f64]> = columns
                 .iter()
                 .zip(&is_owned)
-                .map(|(name, &owned_flag)| {
+                .map(|(&col, &owned_flag)| {
                     if owned_flag {
                         owned_iter
                             .next()
                             .expect("one owned vec per Int64 column")
                             .as_slice()
                     } else {
-                        self.columns[name]
-                            .as_f64_slice()
+                        col.as_f64_slice()
                             .expect("Float64 column checked all-valid above")
                     }
                 })
@@ -90994,8 +93047,8 @@ impl DataFrame {
             let mut best_col: Option<&str> = None;
             if all_td {
                 let mut best_ns: i64 = i64::MAX;
-                for col_name in &self.column_order {
-                    if let Scalar::Timedelta64(ns) = &self.columns[col_name].values()[row_idx] {
+                for (col_name, column) in self.column_order.iter().zip(&columns) {
+                    if let Scalar::Timedelta64(ns) = &column.values()[row_idx] {
                         if *ns == Timedelta::NAT {
                             continue;
                         }
@@ -91007,8 +93060,8 @@ impl DataFrame {
                 }
             } else {
                 let mut best_val = f64::INFINITY;
-                for col_name in &self.column_order {
-                    let val = &self.columns[col_name].values()[row_idx];
+                for (col_name, column) in self.column_order.iter().zip(&columns) {
+                    let val = &column.values()[row_idx];
                     if val.is_missing() {
                         continue;
                     }
@@ -91042,15 +93095,17 @@ impl DataFrame {
         // over hoisted &[f64] views (no per-cell BTreeMap lookup, no Scalar +
         // to_f64 dispatch). First (earliest-column) max wins on ties (strict >),
         // NaN skipped — bit-identical to the generic to_f64 path below.
+        let columns: Vec<&Column> = (0..self.num_columns())
+            .filter_map(|pos| self.column_at(pos))
+            .collect();
         'f64: {
             // Sister to idxmin_axis1's widened gather: all-valid Float64 columns
             // borrow (the kernel skips NaN inline), all-valid Int64 columns take a
             // `v as f64` view (never NaN); the label output is dtype-independent and
             // bit-identical. Nullable / Timedelta / other-dtype columns break out.
             let mut owned: Vec<Vec<f64>> = Vec::new();
-            let mut is_owned: Vec<bool> = Vec::with_capacity(self.column_order.len());
-            for name in &self.column_order {
-                let col = &self.columns[name];
+            let mut is_owned: Vec<bool> = Vec::with_capacity(columns.len());
+            for &col in &columns {
                 if col.as_f64_slice().is_some() {
                     is_owned.push(false);
                 } else if let Some(d) = col.as_i64_slice() {
@@ -91064,19 +93119,17 @@ impl DataFrame {
                 break 'f64;
             }
             let mut owned_iter = owned.iter();
-            let col_f64: Vec<&[f64]> = self
-                .column_order
+            let col_f64: Vec<&[f64]> = columns
                 .iter()
                 .zip(&is_owned)
-                .map(|(name, &owned_flag)| {
+                .map(|(&col, &owned_flag)| {
                     if owned_flag {
                         owned_iter
                             .next()
                             .expect("one owned vec per Int64 column")
                             .as_slice()
                     } else {
-                        self.columns[name]
-                            .as_f64_slice()
+                        col.as_f64_slice()
                             .expect("Float64 column checked all-valid above")
                     }
                 })
@@ -91105,8 +93158,8 @@ impl DataFrame {
             let mut best_col: Option<&str> = None;
             if all_td {
                 let mut best_ns: i64 = i64::MIN;
-                for col_name in &self.column_order {
-                    if let Scalar::Timedelta64(ns) = &self.columns[col_name].values()[row_idx] {
+                for (col_name, column) in self.column_order.iter().zip(&columns) {
+                    if let Scalar::Timedelta64(ns) = &column.values()[row_idx] {
                         if *ns == Timedelta::NAT {
                             continue;
                         }
@@ -91118,8 +93171,8 @@ impl DataFrame {
                 }
             } else {
                 let mut best_val = f64::NEG_INFINITY;
-                for col_name in &self.column_order {
-                    let val = &self.columns[col_name].values()[row_idx];
+                for (col_name, column) in self.column_order.iter().zip(&columns) {
+                    let val = &column.values()[row_idx];
                     if val.is_missing() {
                         continue;
                     }
@@ -91153,8 +93206,8 @@ impl DataFrame {
             .map(|n| n.as_str().into())
             .collect();
         let mut values = Vec::with_capacity(labels.len());
-        for name in &self.column_order {
-            let s = self.column_as_series(name)?;
+        for pos in 0..self.num_columns() {
+            let s = self.column_at_as_series(pos)?;
             values.push(Scalar::Bool(s.all()?));
         }
         self.columns_series(String::new(), labels, values)
@@ -91170,8 +93223,8 @@ impl DataFrame {
             .map(|n| n.as_str().into())
             .collect();
         let mut values = Vec::with_capacity(labels.len());
-        for name in &self.column_order {
-            let s = self.column_as_series(name)?;
+        for pos in 0..self.num_columns() {
+            let s = self.column_at_as_series(pos)?;
             values.push(Scalar::Bool(s.any()?));
         }
         self.columns_series(String::new(), labels, values)
@@ -91290,8 +93343,8 @@ impl DataFrame {
     pub fn std_agg_ddof(&self, ddof: usize) -> Result<Series, FrameError> {
         let mut labels = Vec::new();
         let mut values = Vec::new();
-        for name in &self.column_order {
-            let col = &self.columns[name];
+        for (pos, name) in self.column_order.iter().enumerate() {
+            let col = self.column_at(pos).expect("column in bounds");
             // Per br-frankenpandas-qin9h: Series::std_ddof preserves
             // Timedelta64 dtype (br-e686u); allow Timedelta64 columns
             // through. Sister to reduce_numeric br-vpeoh.
@@ -91301,7 +93354,7 @@ impl DataFrame {
             ) {
                 continue;
             }
-            let s = self.column_as_series(name)?;
+            let s = self.column_at_as_series(pos)?;
             labels.push(self.column_label(name));
             values.push(s.std_ddof(ddof)?);
         }
@@ -91314,8 +93367,8 @@ impl DataFrame {
     pub fn var_agg_ddof(&self, ddof: usize) -> Result<Series, FrameError> {
         let mut labels = Vec::new();
         let mut values = Vec::new();
-        for name in &self.column_order {
-            let col = &self.columns[name];
+        for (pos, name) in self.column_order.iter().enumerate() {
+            let col = self.column_at(pos).expect("column in bounds");
             // Per br-frankenpandas-qin9h: sister to std_agg_ddof above.
             if !matches!(
                 col.dtype(),
@@ -91323,7 +93376,7 @@ impl DataFrame {
             ) {
                 continue;
             }
-            let s = self.column_as_series(name)?;
+            let s = self.column_at_as_series(pos)?;
             labels.push(self.column_label(name));
             values.push(s.var_ddof(ddof)?);
         }
@@ -91377,105 +93430,74 @@ impl DataFrame {
         // Per br-frankenpandas-uy9z2: include Timedelta64 in numeric_only.
         // pandas df.mode(numeric_only=True) covers Timedelta — it's a
         // numeric-style dtype, not object.
-        let selected_columns = self
-            .column_order
-            .iter()
-            .filter(|name| {
+        // By position, so a repeated column key keeps its own modes (i17d4).
+        let selected: Vec<usize> = (0..self.num_columns())
+            .filter(|&pos| {
                 !numeric_only
-                    || matches!(
-                        self.columns[name.as_str()].dtype(),
-                        DType::Bool | DType::Int64 | DType::Float64 | DType::Timedelta64
-                    )
+                    || self.column_at(pos).is_some_and(|column| {
+                        matches!(
+                            column.dtype(),
+                            DType::Bool | DType::Int64 | DType::Float64 | DType::Timedelta64
+                        )
+                    })
             })
-            .cloned()
-            .collect::<Vec<_>>();
+            .collect();
+        let selected_columns: Vec<String> = selected
+            .iter()
+            .map(|&pos| self.column_order[pos].clone())
+            .collect();
+        let column_multiindex = self
+            .column_multiindex
+            .as_ref()
+            .map(|levels| levels.take(&selected))
+            .transpose()?;
+        let finish = |index: Index, columns: Vec<Column>| -> Result<Self, FrameError> {
+            Self::new_with_axes(
+                index,
+                None,
+                ColumnStore::from_pairs(selected_columns.iter().cloned().zip(columns)),
+                selected_columns.clone(),
+                column_multiindex.clone(),
+            )
+        };
 
         // Column-parallel mode (br-frankenpandas-mode-par): each column's mode
         // (a value tally over independent data) is computed by the EXACT same
-        // Series::mode_with_dropna, so spreading columns across std::thread::scope
-        // workers is bit-identical — results are reassembled in selected_columns
-        // order and the downstream max_modes/padding is order-independent. The
-        // serial loop left all but one of the box's cores idle. Gated so small
+        // Series::mode_with_dropna, so spreading columns across scope workers
+        // is bit-identical — results are reassembled in column order and the
+        // downstream max_modes/padding is order-independent. Gated so small
         // frames keep the zero-overhead serial path.
-        const MODE_PAR_MIN_COLS: usize = 2;
-        const MODE_PAR_MIN_VALUES: usize = 16_384;
-
-        let mode_one = |name: &str| -> Result<(String, Series), FrameError> {
-            let series = self.column_as_series(name)?;
-            let modes = series.mode_with_dropna(dropna)?;
-            Ok((name.to_string(), modes))
-        };
-
-        let ncols = selected_columns.len();
-        let worker_count = if ncols >= MODE_PAR_MIN_COLS
-            && ncols.saturating_mul(self.len()) >= MODE_PAR_MIN_VALUES
-        {
-            fp_columnar::cached_available_parallelism().min(ncols)
-        } else {
-            1
-        };
-
-        let column_modes: Vec<(String, Series)> = if worker_count >= 2 {
-            let next = std::sync::atomic::AtomicUsize::new(0);
-            std::thread::scope(|scope| -> Result<Vec<(String, Series)>, FrameError> {
-                let mut handles = Vec::with_capacity(worker_count);
-                for _ in 0..worker_count {
-                    let next = &next;
-                    let mode_one = &mode_one;
-                    let selected = &selected_columns;
-                    handles.push(scope.spawn(
-                        move || -> Result<Vec<(usize, String, Series)>, FrameError> {
-                            let mut out = Vec::new();
-                            loop {
-                                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                if i >= selected.len() {
-                                    break;
-                                }
-                                let (name, modes) = mode_one(&selected[i])?;
-                                out.push((i, name, modes));
-                            }
-                            Ok(out)
-                        },
-                    ));
+        let wanted: Vec<bool> = (0..self.num_columns())
+            .map(|pos| selected.binary_search(&pos).is_ok())
+            .collect();
+        let column_modes: Vec<Series> = self
+            .par_map_column_positions_min(16_384, |pos| {
+                if !wanted[pos] {
+                    return Ok(None);
                 }
-                let mut slots: Vec<Option<(String, Series)>> = (0..ncols).map(|_| None).collect();
-                for handle in handles {
-                    let worker_out = handle.join().map_err(|_| {
-                        FrameError::CompatibilityRejected("mode worker thread panicked".into())
-                    })??;
-                    for (i, name, modes) in worker_out {
-                        slots[i] = Some((name, modes));
-                    }
-                }
-                Ok(slots
-                    .into_iter()
-                    .map(|slot| slot.expect("every column index is assigned to exactly one worker"))
-                    .collect())
+                self.column_at_as_series(pos)?
+                    .mode_with_dropna(dropna)
+                    .map(Some)
             })?
-        } else {
-            let mut v = Vec::with_capacity(ncols);
-            for name in &selected_columns {
-                v.push(mode_one(name)?);
-            }
-            v
-        };
+            .into_iter()
+            .flatten()
+            .collect();
 
-        let max_modes = column_modes
-            .iter()
-            .map(|(_, modes)| modes.len())
-            .max()
-            .unwrap_or(0);
+        let max_modes = column_modes.iter().map(Series::len).max().unwrap_or(0);
 
-        let mut result_cols = BTreeMap::new();
         if max_modes == 0 {
-            for name in &selected_columns {
-                let dtype = self.columns[name.as_str()].dtype();
-                result_cols.insert(name.clone(), Column::new(dtype, Vec::new())?);
-            }
-            return Self::new_with_axis(Index::new(Vec::new()), result_cols, selected_columns);
+            let columns = selected
+                .iter()
+                .map(|&pos| {
+                    let dtype = self.column_at(pos).expect("column in bounds").dtype();
+                    Column::new(dtype, Vec::new())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            return finish(Index::new(Vec::new()), columns);
         }
 
-        for (name, modes) in column_modes {
+        let mut result_cols = Vec::with_capacity(column_modes.len());
+        for modes in column_modes {
             // No-padding passthrough: a column whose mode count already equals
             // max_modes needs no NaN padding and no dtype change, so reuse its
             // typed column directly instead of round-tripping through
@@ -91486,7 +93508,7 @@ impl DataFrame {
             // for high-cardinality columns (every column contributes max_modes
             // modes), where the re-materialization dominated.
             if modes.len() == max_modes {
-                result_cols.insert(name, modes.column().clone());
+                result_cols.push(modes.column().clone());
                 continue;
             }
             let mut values = modes.column().values().to_vec();
@@ -91505,14 +93527,14 @@ impl DataFrame {
                         other => other,
                     })
                     .collect();
-                result_cols.insert(name, Column::new(DType::Float64, float_values)?);
+                result_cols.push(Column::new(DType::Float64, float_values)?);
             } else {
-                result_cols.insert(name, build_mode_column(values)?);
+                result_cols.push(build_mode_column(values)?);
             }
         }
 
         let labels: Vec<IndexLabel> = (0..max_modes).map(|i| (i as i64).into()).collect();
-        Self::new_with_axis(Index::new(labels), result_cols, selected_columns)
+        finish(Index::new(labels), result_cols)
     }
 
     fn mode_axis1(&self, numeric_only: bool, dropna: bool) -> Result<Self, FrameError> {
@@ -91684,9 +93706,23 @@ impl DataFrame {
         T: Send,
         F: Fn(usize) -> Result<T, FrameError> + Sync,
     {
+        self.par_map_indices_min(self.columns.len(), par_min_values, f)
+    }
+
+    /// [`Self::par_map_column_positions_min`] over `0..ncols` output columns
+    /// of this frame's height (a union of two frames' columns).
+    fn par_map_indices_min<T, F>(
+        &self,
+        ncols: usize,
+        par_min_values: usize,
+        f: F,
+    ) -> Result<Vec<T>, FrameError>
+    where
+        T: Send,
+        F: Fn(usize) -> Result<T, FrameError> + Sync,
+    {
         const PAR_MIN_COLS: usize = 2;
 
-        let ncols = self.columns.len();
         let worker_count =
             if ncols >= PAR_MIN_COLS && ncols.saturating_mul(self.len()) >= par_min_values {
                 fp_columnar::cached_available_parallelism().min(ncols)
@@ -91821,11 +93857,12 @@ impl DataFrame {
                     | DType::BoolNullable
             )
         };
-        let allowed: Vec<String> = self
-            .column_order
-            .iter()
-            .filter(|name| {
-                let dt = self.columns[name.as_str()].dtype();
+        // By position: a repeated column key reduces its own column (every
+        // one reduced the first; i17d4).
+        let column_at = |pos: usize| self.column_at(pos).expect("column in bounds");
+        let allowed: Vec<usize> = (0..self.num_columns())
+            .filter(|&pos| {
+                let dt = column_at(pos).dtype();
                 if numeric_dtype(&dt) || (timedelta_safe && matches!(dt, DType::Timedelta64)) {
                     return true;
                 }
@@ -91833,7 +93870,6 @@ impl DataFrame {
                 // answer for them, and RAISES for the rest (handled below).
                 !numeric_only
             })
-            .cloned()
             .collect();
 
         if !numeric_only && !includes_non_numeric {
@@ -91855,20 +93891,28 @@ impl DataFrame {
             // the metamorphic properties, whose generator produces all-null
             // columns that infer DType::Null — 14 of them went red on the first
             // version of this flip. (br-frankenpandas-reductions-numeric-only-default-zx21n)
-            if let Some(offender) = allowed.iter().find(|name| {
-                let column = &self.columns[name.as_str()];
+            if let Some(&offender) = allowed.iter().find(|&&pos| {
+                let column = column_at(pos);
                 let dt = column.dtype();
                 !(numeric_dtype(&dt) || matches!(dt, DType::Timedelta64))
                     && column.values().iter().any(|v| !v.is_missing())
             }) {
+                let offender = &self.column_order[offender];
                 return Err(FrameError::CompatibilityRejected(format!(
                     "could not convert column '{offender}' to numeric for {func}"
                 )));
             }
         }
 
-        let values = self.par_map_columns(&allowed, |name| {
-            let column = &self.columns[name];
+        let is_allowed: Vec<bool> = (0..self.num_columns())
+            .map(|pos| allowed.contains(&pos))
+            .collect();
+        let values = self.par_map_column_positions_min(16_384, |pos| {
+            if !is_allowed[pos] {
+                return Ok(None);
+            }
+            let column = column_at(pos);
+            let name = &self.column_order[pos];
             let dt = column.dtype();
             let is_numeric = numeric_dtype(&dt) || matches!(dt, DType::Timedelta64);
             // Object-column semantics for the include-ops, measured on pandas
@@ -91878,7 +93922,7 @@ impl DataFrame {
             if !is_numeric && !numeric_only {
                 let present: Vec<&Scalar> =
                     column.values().iter().filter(|v| !v.is_missing()).collect();
-                return Ok(match func {
+                return Ok(Some(match func {
                     // An all-missing column sums to the integer 0, NOT to the
                     // empty concatenation. MEASURED, live pandas 2.2.3, on
                     // pd.DataFrame({'a': [None, None]}) with 'a' object:
@@ -91937,11 +93981,11 @@ impl DataFrame {
                             "{func} cannot reduce non-numeric column '{name}'"
                         )));
                     }
-                });
+                }));
             }
 
-            let s = self.column_as_series(name)?;
-            Ok(match func {
+            let s = self.column_at_as_series(pos)?;
+            Ok(Some(match func {
                 "sum" => s.sum()?,
                 "mean" => s.mean()?,
                 "min" => s.min()?,
@@ -91958,9 +94002,13 @@ impl DataFrame {
                         "unknown reduce function: {func}"
                     )));
                 }
-            })
+            }))
         })?;
-        let labels: Vec<IndexLabel> = allowed.iter().map(|name| self.column_label(name)).collect();
+        let values: Vec<Scalar> = values.into_iter().flatten().collect();
+        let labels: Vec<IndexLabel> = allowed
+            .iter()
+            .map(|&pos| self.column_label(&self.column_order[pos]))
+            .collect();
         self.columns_series(String::new(), labels, values)
     }
 
@@ -91969,21 +94017,31 @@ impl DataFrame {
         // Per br-frankenpandas-4zg55: skipna variants delegate to sum/mean/etc
         // which now preserve Timedelta64 (br-28lgk family). Allow Timedelta64
         // columns through. Sister to br-vpeoh and br-qin9h.
-        let allowed: Vec<String> = self
-            .column_order
-            .iter()
-            .filter(|name| {
-                matches!(
-                    self.columns[name.as_str()].dtype(),
-                    DType::Int64 | DType::Float64 | DType::Timedelta64
-                )
+        // By position: a repeated column key reduces its own column (i17d4);
+        // a masked Int64 / Float64 / boolean column is reduced too (it was
+        // left out of skipna=False's answer; br-frankenpandas-8u5eh).
+        let allowed: Vec<bool> = (0..self.num_columns())
+            .map(|pos| {
+                self.column_at(pos).is_some_and(|column| {
+                    matches!(
+                        column.dtype(),
+                        DType::Int64
+                            | DType::Float64
+                            | DType::Timedelta64
+                            | DType::Int64Nullable
+                            | DType::Float64Nullable
+                            | DType::BoolNullable
+                    )
+                })
             })
-            .cloned()
             .collect();
 
-        let values = self.par_map_columns(&allowed, |name| {
-            let s = self.column_as_series(name)?;
-            Ok(match func {
+        let values = self.par_map_column_positions_min(16_384, |pos| {
+            if !allowed[pos] {
+                return Ok(None);
+            }
+            let s = self.column_at_as_series(pos)?;
+            Ok(Some(match func {
                 "sum" => s.sum_skipna(skipna)?,
                 "mean" => s.mean_skipna(skipna)?,
                 "min" => s.min_skipna(skipna)?,
@@ -91997,9 +94055,13 @@ impl DataFrame {
                         "unknown reduce function: {func}"
                     )));
                 }
-            })
+            }))
         })?;
-        let labels: Vec<IndexLabel> = allowed.iter().map(|name| self.column_label(name)).collect();
+        let values: Vec<Scalar> = values.into_iter().flatten().collect();
+        let labels: Vec<IndexLabel> = (0..self.num_columns())
+            .filter(|&pos| allowed[pos])
+            .map(|pos| self.column_label(&self.column_order[pos]))
+            .collect();
         self.columns_series(String::new(), labels, values)
     }
 
@@ -92118,14 +94180,26 @@ impl DataFrame {
 
     // ── Row-axis (axis=1) aggregations ──
 
-    fn numeric_row_reduction_columns(&self) -> Vec<&str> {
-        self.column_order
-            .iter()
-            .filter(|c| {
-                let dt = self.columns[c.as_str()].dtype();
-                dt == DType::Int64 || dt == DType::Float64 || dt == DType::Bool
+    /// The columns a row reduction reads, in order - by POSITION, so a
+    /// repeated column key is its own column (by name every one read the
+    /// first; i17d4).
+    fn numeric_row_reduction_columns(&self) -> Vec<&Column> {
+        // pandas' masked Int64 / Float64 / boolean are numbers across a row
+        // too (their cells were left out; br-frankenpandas-8u5eh); the typed
+        // fast paths take numpy columns alone, so these reduce generically.
+        (0..self.num_columns())
+            .filter_map(|pos| self.column_at(pos))
+            .filter(|column| {
+                matches!(
+                    column.dtype(),
+                    DType::Int64
+                        | DType::Float64
+                        | DType::Bool
+                        | DType::Int64Nullable
+                        | DType::Float64Nullable
+                        | DType::BoolNullable
+                )
             })
-            .map(|s| s.as_str())
             .collect()
     }
 
@@ -92140,8 +94214,7 @@ impl DataFrame {
 
         let Some(int_cols) = numeric_cols
             .iter()
-            .map(|&col_name| {
-                let column = &self.columns[col_name];
+            .map(|&column| {
                 if column.dtype() == DType::Int64 {
                     column.as_i64_slice()
                 } else {
@@ -92194,8 +94267,7 @@ impl DataFrame {
         // / other-dtype columns return None (generic path).
         let mut owned: Vec<Vec<f64>> = Vec::new();
         let mut is_owned: Vec<bool> = Vec::with_capacity(numeric_cols.len());
-        for &col_name in &numeric_cols {
-            let column = &self.columns[col_name];
+        for &column in &numeric_cols {
             if column.dtype() == DType::Float64 {
                 if column.as_f64_slice().is_none() {
                     return Ok(None);
@@ -92215,14 +94287,14 @@ impl DataFrame {
         let f64_cols: Vec<&[f64]> = numeric_cols
             .iter()
             .zip(&is_owned)
-            .map(|(&col_name, &owned_flag)| {
+            .map(|(&column, &owned_flag)| {
                 if owned_flag {
                     owned_iter
                         .next()
                         .expect("one owned vec per Int64 column")
                         .as_slice()
                 } else {
-                    self.columns[col_name]
+                    column
                         .as_f64_slice()
                         .expect("Float64 column checked all-valid above")
                 }
@@ -92288,8 +94360,7 @@ impl DataFrame {
         // dispatch. Any nullable/other-dtype column returns None (generic path).
         let mut owned: Vec<Vec<f64>> = Vec::new();
         let mut is_owned: Vec<bool> = Vec::with_capacity(numeric_cols.len());
-        for &c in &numeric_cols {
-            let col = &self.columns[c];
+        for &col in &numeric_cols {
             if col.dtype() == DType::Float64 {
                 if col.as_f64_slice().is_none() {
                     return Ok(None);
@@ -92309,15 +94380,14 @@ impl DataFrame {
         let f64_cols: Vec<&[f64]> = numeric_cols
             .iter()
             .zip(&is_owned)
-            .map(|(&c, &owned_flag)| {
+            .map(|(&col, &owned_flag)| {
                 if owned_flag {
                     owned_iter
                         .next()
                         .expect("one owned vec per Int64 column")
                         .as_slice()
                 } else {
-                    self.columns[c]
-                        .as_f64_slice()
+                    col.as_f64_slice()
                         .expect("Float64 column checked all-valid above")
                 }
             })
@@ -92359,8 +94429,7 @@ impl DataFrame {
         }
         let Some(f64_cols) = numeric_cols
             .iter()
-            .map(|&column_name| {
-                let column = &self.columns[column_name];
+            .map(|&column| {
                 if column.dtype() == DType::Float64 {
                     column.as_f64_slice()
                 } else {
@@ -92470,8 +94539,7 @@ impl DataFrame {
             let mut is_owned: Vec<bool> = Vec::with_capacity(numeric_cols.len());
             let mut has_i64 = false;
             let mut ok = true;
-            for &c in &numeric_cols {
-                let col = &self.columns[c];
+            for &col in &numeric_cols {
                 if col.dtype() == DType::Float64 {
                     if col.as_f64_slice().is_none() {
                         ok = false;
@@ -92500,15 +94568,14 @@ impl DataFrame {
                 let f64_cols: Vec<&[f64]> = numeric_cols
                     .iter()
                     .zip(&is_owned)
-                    .map(|(&c, &owned_flag)| {
+                    .map(|(&col, &owned_flag)| {
                         if owned_flag {
                             owned_iter
                                 .next()
                                 .expect("one owned vec per Int64 column")
                                 .as_slice()
                         } else {
-                            self.columns[c]
-                                .as_f64_slice()
+                            col.as_f64_slice()
                                 .expect("Float64 column checked all-valid above")
                         }
                     })
@@ -92546,10 +94613,10 @@ impl DataFrame {
         if !numeric_cols.is_empty()
             && numeric_cols
                 .iter()
-                .all(|&c| self.columns[c].dtype() == DType::Float64)
+                .all(|&col| col.dtype() == DType::Float64)
             && let Some(typed) = numeric_cols
                 .iter()
-                .map(|&c| self.columns[c].as_f64_slice_with_validity())
+                .map(|&col| col.as_f64_slice_with_validity())
                 .collect::<Option<Vec<_>>>()
         {
             let mut values = Vec::with_capacity(self.len());
@@ -92585,8 +94652,8 @@ impl DataFrame {
             // pandas' min_count=0 identity / all-NaN-yields-NaN behavior).
             let row_vals: Vec<f64> = numeric_cols
                 .iter()
-                .filter_map(|&col_name| {
-                    let v = &self.columns[col_name].values()[row_idx];
+                .filter_map(|&col| {
+                    let v = &col.values()[row_idx];
                     if v.is_missing() {
                         None
                     } else {
@@ -92716,8 +94783,7 @@ impl DataFrame {
         if !numeric_cols.is_empty()
             && let Some(f64_cols) = numeric_cols
                 .iter()
-                .map(|&c| {
-                    let col = &self.columns[c];
+                .map(|&col| {
                     if col.dtype() == DType::Float64 {
                         col.as_f64_slice()
                     } else {
@@ -92793,12 +94859,14 @@ impl DataFrame {
     where
         F: Fn(&[Scalar]) -> Scalar,
     {
+        let columns: Vec<&Column> = (0..self.num_columns())
+            .filter_map(|pos| self.column_at(pos))
+            .collect();
         let mut values = Vec::with_capacity(self.len());
         for row_idx in 0..self.len() {
-            let row: Vec<Scalar> = self
-                .column_order
+            let row: Vec<Scalar> = columns
                 .iter()
-                .map(|col_name| self.columns[col_name].values()[row_idx].clone())
+                .map(|column| column.values()[row_idx].clone())
                 .collect();
             values.push(func(&row));
         }
@@ -92842,8 +94910,8 @@ impl DataFrame {
         let mut values = Vec::with_capacity(self.len());
         for row_idx in 0..self.len() {
             let mut ns_vals: Vec<i64> = Vec::with_capacity(self.column_order.len());
-            for col_name in &self.column_order {
-                if let Scalar::Timedelta64(ns) = &self.columns[col_name].values()[row_idx]
+            for column in (0..self.num_columns()).filter_map(|pos| self.column_at(pos)) {
+                if let Scalar::Timedelta64(ns) = &column.values()[row_idx]
                     && *ns != Timedelta::NAT
                 {
                     ns_vals.push(*ns);
@@ -92933,25 +95001,27 @@ impl DataFrame {
         // all valid), then NO cell is missing, so every row's non-missing count is exactly
         // the column count — return a constant Int64 column. Bit-identical to the per-cell
         // `is_missing` scan below (same value for every row), skipping 5M is_missing checks.
-        if !self.column_order.is_empty()
-            && self.column_order.iter().all(|c| {
-                let col = &self.columns[c.as_str()];
+        // By position: each repeated column key counts its own cells (i17d4).
+        let columns: Vec<&Column> = (0..self.num_columns())
+            .filter_map(|pos| self.column_at(pos))
+            .collect();
+        if !columns.is_empty()
+            && columns.iter().all(|col| {
                 col.as_f64_slice().is_some()
                     || col.as_i64_slice().is_some()
                     || col.as_bool_slice().is_some()
             })
         {
-            let cnt = self.column_order.len() as i64;
+            let cnt = columns.len() as i64;
             let index = self.index.clone();
             let column = Column::from_i64_values_owned(vec![cnt; self.len()]);
             return Series::new("", index, column);
         }
         let mut values = Vec::with_capacity(self.len());
         for row_idx in 0..self.len() {
-            let cnt = self
-                .column_order
+            let cnt = columns
                 .iter()
-                .filter(|col_name| !self.columns[col_name.as_str()].values()[row_idx].is_missing())
+                .filter(|col| !col.values()[row_idx].is_missing())
                 .count();
             values.push(Scalar::Int64(cnt as i64));
         }
@@ -92969,12 +95039,14 @@ impl DataFrame {
         // no-NaN Float64 (`as_f64_slice`) ⇒ the Scalar truthy arm `v != 0.0 && !v.is_nan()`
         // reduces to `v != 0.0` (no NaN, no missing) — bit-identical — reading contiguous f64
         // buffers instead of materializing 5M Scalars via per-cell `values()`.
-        if !self.column_order.is_empty()
-            && let Some(f64_cols) = self
-                .column_order
+        // By position: each repeated column key tests its own cells (i17d4).
+        let columns: Vec<&Column> = (0..self.num_columns())
+            .filter_map(|pos| self.column_at(pos))
+            .collect();
+        if !columns.is_empty()
+            && let Some(f64_cols) = columns
                 .iter()
-                .map(|c| {
-                    let col = &self.columns[c.as_str()];
+                .map(|col| {
                     if col.dtype() == DType::Float64 {
                         col.as_f64_slice()
                     } else {
@@ -92993,8 +95065,8 @@ impl DataFrame {
         }
         let mut values = Vec::with_capacity(self.len());
         for row_idx in 0..self.len() {
-            let result = self.column_order.iter().all(|col_name| {
-                let val = &self.columns[col_name.as_str()].values()[row_idx];
+            let result = columns.iter().all(|col| {
+                let val = &col.values()[row_idx];
                 match val {
                     Scalar::Null(_) => true, // NaN is ignored in all()
                     Scalar::Bool(b) => *b,
@@ -93024,12 +95096,14 @@ impl DataFrame {
         // Float64 (`as_f64_slice`) ⇒ the Scalar truthy arm `v != 0.0 && !v.is_nan()` reduces
         // to `v != 0.0` (no NaN, no missing) — bit-identical — reading contiguous f64 buffers
         // instead of materializing 5M Scalars via per-cell `values()`.
-        if !self.column_order.is_empty()
-            && let Some(f64_cols) = self
-                .column_order
+        // By position: each repeated column key tests its own cells (i17d4).
+        let columns: Vec<&Column> = (0..self.num_columns())
+            .filter_map(|pos| self.column_at(pos))
+            .collect();
+        if !columns.is_empty()
+            && let Some(f64_cols) = columns
                 .iter()
-                .map(|c| {
-                    let col = &self.columns[c.as_str()];
+                .map(|col| {
                     if col.dtype() == DType::Float64 {
                         col.as_f64_slice()
                     } else {
@@ -93048,8 +95122,8 @@ impl DataFrame {
         }
         let mut values = Vec::with_capacity(self.len());
         for row_idx in 0..self.len() {
-            let result = self.column_order.iter().any(|col_name| {
-                let val = &self.columns[col_name.as_str()].values()[row_idx];
+            let result = columns.iter().any(|col| {
+                let val = &col.values()[row_idx];
                 match val {
                     Scalar::Null(_) => false,
                     Scalar::Bool(b) => *b,
@@ -93094,12 +95168,15 @@ impl DataFrame {
         // and emitting Null(NaN). Sister to the cum*_axis1 (br-bktp1) and
         // sum/mean/min/max_axis1 (br-c0g3x) Timedelta surgeries.
         let all_td = self.all_columns_timedelta();
+        let columns: Vec<&Column> = (0..self.num_columns())
+            .filter_map(|pos| self.column_at(pos))
+            .collect();
         let mut out = Vec::with_capacity(len);
         for row_idx in 0..len {
             if all_td {
                 let mut td_vals: Vec<f64> = Vec::new();
-                for name in &self.column_order {
-                    if let Scalar::Timedelta64(ns) = &self.columns[name].values()[row_idx]
+                for col in &columns {
+                    if let Scalar::Timedelta64(ns) = &col.values()[row_idx]
                         && *ns != Timedelta::NAT
                     {
                         td_vals.push(*ns as f64);
@@ -93129,8 +95206,7 @@ impl DataFrame {
                 continue;
             }
             let mut nums: Vec<f64> = Vec::new();
-            for name in &self.column_order {
-                let col = &self.columns[name];
+            for &col in &columns {
                 // A row mixes the columns into one float row, a bool as 0 / 1
                 // (pandas' [2.0, False] has median 1.0; the bool cells were
                 // skipped, o46uo), the nullable numbers as numbers.
@@ -93196,6 +95272,9 @@ impl DataFrame {
         // per-cell BTreeMap + Scalar + to_f64). First-wins on ties, NaN skipped.
         // Bit-identical to the generic numeric path (all-Float64 => nothing
         // skipped as non-numeric).
+        let columns: Vec<&Column> = (0..self.num_columns())
+            .filter_map(|pos| self.column_at(pos))
+            .collect();
         'f64: {
             // Each column is an all-valid Float64 (borrow; the kernel skips NaN
             // inline, matching the generic `is_missing()` skip) or an all-valid Int64
@@ -93204,9 +95283,8 @@ impl DataFrame {
             // makes, so it is bit-identical; the label output is dtype-independent.
             // Nullable / other-dtype columns break to the generic path.
             let mut owned: Vec<Vec<f64>> = Vec::new();
-            let mut is_owned: Vec<bool> = Vec::with_capacity(self.column_order.len());
-            for name in &self.column_order {
-                let col = &self.columns[name];
+            let mut is_owned: Vec<bool> = Vec::with_capacity(columns.len());
+            for &col in &columns {
                 if col.as_f64_slice().is_some() {
                     is_owned.push(false);
                 } else if let Some(d) = col.as_i64_slice() {
@@ -93220,19 +95298,17 @@ impl DataFrame {
                 break 'f64;
             }
             let mut owned_iter = owned.iter();
-            let col_f64: Vec<&[f64]> = self
-                .column_order
+            let col_f64: Vec<&[f64]> = columns
                 .iter()
                 .zip(&is_owned)
-                .map(|(name, &owned_flag)| {
+                .map(|(&col, &owned_flag)| {
                     if owned_flag {
                         owned_iter
                             .next()
                             .expect("one owned vec per Int64 column")
                             .as_slice()
                     } else {
-                        self.columns[name]
-                            .as_f64_slice()
+                        col.as_f64_slice()
                             .expect("Float64 column checked all-valid above")
                     }
                 })
@@ -93263,8 +95339,7 @@ impl DataFrame {
         let mut out = Vec::with_capacity(len);
         for row_idx in 0..len {
             let mut best: Option<(&str, f64)> = None;
-            for name in &self.column_order {
-                let col = &self.columns[name];
+            for (name, &col) in self.column_order.iter().zip(&columns) {
                 if col.dtype() != DType::Int64 && col.dtype() != DType::Float64 {
                     continue;
                 }
@@ -93375,8 +95450,7 @@ impl DataFrame {
         // dispatch. Nullable / other-dtype columns return None (generic path).
         let mut owned: Vec<Vec<f64>> = Vec::new();
         let mut is_owned: Vec<bool> = Vec::with_capacity(numeric_cols.len());
-        for &c in &numeric_cols {
-            let col = &self.columns[c];
+        for &col in &numeric_cols {
             if col.dtype() == DType::Float64 {
                 if col.as_f64_slice().is_none() {
                     return Ok(None);
@@ -93396,15 +95470,14 @@ impl DataFrame {
         let f64_cols: Vec<&[f64]> = numeric_cols
             .iter()
             .zip(&is_owned)
-            .map(|(&c, &owned_flag)| {
+            .map(|(&col, &owned_flag)| {
                 if owned_flag {
                     owned_iter
                         .next()
                         .expect("one owned vec per Int64 column")
                         .as_slice()
                 } else {
-                    self.columns[c]
-                        .as_f64_slice()
+                    col.as_f64_slice()
                         .expect("Float64 column checked all-valid above")
                 }
             })
@@ -94003,6 +96076,21 @@ impl DataFrame {
             });
 
         let is_temporal = all_timedelta || all_datetime;
+        // pandas' diff(axis=1) is `self - self.shift(periods, axis=1)`: an
+        // int64 pair stays int64 (wrapping, as numpy), a pair with a nullable
+        // Int64 side is Int64, and a column without a partner subtracts the
+        // edge column shifted out - all-NA Int64 when that column is Int64,
+        // else NaN (every column was float64; br-frankenpandas-c5b7x).
+        // periods=0 is pandas' axis=0 diff, which is float.
+        let int_dtype = |col: &Column| {
+            (periods != 0 && matches!(col.dtype(), DType::Int64 | DType::Int64Nullable))
+                .then(|| col.dtype())
+        };
+        let edge_nullable = n_cols > 0
+            && int_dtype(
+                self.column_at(if periods >= 0 { 0 } else { n_cols - 1 })
+                    .expect("column in bounds"),
+            ) == Some(DType::Int64Nullable);
 
         let mut pairs = Vec::with_capacity(n_cols);
         let mut column_order = Vec::with_capacity(n_cols);
@@ -94019,10 +96107,38 @@ impl DataFrame {
                     _ => None,
                 }
             };
+            let current_int = int_dtype(self.column_at(j).expect("column in bounds"));
 
             if let Some(p_idx) = prev_idx {
                 let current_col = self.column_at(j).expect("column in bounds");
                 let prev_col = self.column_at(p_idx).expect("column in bounds");
+                let int_out = match (current_int, int_dtype(prev_col)) {
+                    (Some(DType::Int64), Some(DType::Int64))
+                        if !current_col.has_any_missing() && !prev_col.has_any_missing() =>
+                    {
+                        Some(DType::Int64)
+                    }
+                    (Some(_), Some(_))
+                        if current_col.dtype() == DType::Int64Nullable
+                            || prev_col.dtype() == DType::Int64Nullable =>
+                    {
+                        Some(DType::Int64Nullable)
+                    }
+                    _ => None,
+                };
+                if let Some(dtype) = int_out {
+                    for (curr_val, prev_val) in current_col.values().iter().zip(prev_col.values()) {
+                        vals.push(match (curr_val, prev_val) {
+                            (Scalar::Int64(c), Scalar::Int64(p)) => {
+                                Scalar::Int64(c.wrapping_sub(*p))
+                            }
+                            _ => Scalar::missing_for_dtype(dtype.clone()),
+                        });
+                    }
+                    pairs.push((name.clone(), Column::new(dtype, vals)?));
+                    column_order.push(name);
+                    continue;
+                }
 
                 for i in 0..n_rows {
                     let curr_val = &current_col.values()[i];
@@ -94070,6 +96186,11 @@ impl DataFrame {
                         _ => vals.push(Scalar::Null(NullKind::NaN)),
                     }
                 }
+            } else if current_int.is_some() && edge_nullable {
+                vals.resize(n_rows, Scalar::missing_for_dtype(DType::Int64Nullable));
+                pairs.push((name.clone(), Column::new(DType::Int64Nullable, vals)?));
+                column_order.push(name);
+                continue;
             } else if is_temporal {
                 vals.resize(n_rows, Scalar::Null(NullKind::NaT));
             } else {
@@ -94612,25 +96733,25 @@ impl DataFrame {
     /// UNCHANGED (pandas only rounds the listed columns); a listed non-numeric
     /// column is also left unchanged (rounding is a no-op on object dtype).
     pub fn round_columns(&self, decimals: &BTreeMap<String, i32>) -> Result<Self, FrameError> {
-        let mut result_cols = BTreeMap::new();
-        for name in &self.column_order {
-            let col = &self.columns[name];
-            let new_col = match decimals.get(name) {
-                Some(&d) if matches!(col.dtype(), DType::Int64 | DType::Float64 | DType::Bool) => {
-                    self.column_as_series(name)?.round(d)?.column().clone()
-                }
-                _ => col.clone(),
-            };
-            result_cols.insert(name.clone(), new_col);
-        }
-        Ok(Self {
-            columns: result_cols.into(),
-            column_order: self.column_order.clone(),
-            index: self.index.clone(),
-            column_multiindex: self.column_multiindex.clone(),
-            row_multiindex: self.row_multiindex.clone(),
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        // By position: every column under a repeated key rounds its own
+        // values (i17d4).
+        let columns = self
+            .column_order
+            .iter()
+            .enumerate()
+            .map(|(pos, name)| {
+                let col = self.column_at(pos).expect("column in bounds");
+                Ok(match decimals.get(name) {
+                    Some(&d)
+                        if matches!(col.dtype(), DType::Int64 | DType::Float64 | DType::Bool) =>
+                    {
+                        self.column_at_as_series(pos)?.round(d)?.column().clone()
+                    }
+                    _ => col.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, FrameError>>()?;
+        Ok(self.with_columns_at_positions(columns))
     }
 
     /// Floor each numeric element (round toward negative infinity).
@@ -95031,21 +97152,26 @@ impl DataFrame {
         combine: impl Fn(&Series, &Series) -> Result<Series, FrameError>,
     ) -> Result<Self, FrameError> {
         let as_series = |name: &str, column: Column| Series::new(name, self.index.clone(), column);
-        let mut columns = BTreeMap::new();
+        // Each column's own data, by position: a repeated column key keeps
+        // its own column (i17d4).
+        let own_columns = |columns: Vec<Column>| {
+            ColumnStore::from_pairs(self.column_order.iter().cloned().zip(columns))
+        };
         if axis == 0 {
             let mut index = None;
-            for name in &self.column_order {
-                let column = as_series(name, self.columns[name.as_str()].clone())?;
-                let out = combine(&column, series)?;
+            let mut out_columns = Vec::with_capacity(self.num_columns());
+            for (pos, name) in self.column_order.iter().enumerate() {
+                let own = self.column_at(pos).expect("column in bounds").clone();
+                let out = combine(&as_series(name, own)?, series)?;
                 index.get_or_insert_with(|| out.index().clone());
-                columns.insert(name.clone(), out.column().clone());
+                out_columns.push(out.column().clone());
             }
             let index = index.unwrap_or_else(|| self.index.clone());
             // The columns are untouched: their axis whole - typed labels,
             // name, MultiIndex levels (g3bux) - rides along (they came back
             // as text, unnamed: df.div(s, axis=0), crosstab(normalize='index')
             // lost both).
-            return self.over_own_columns(index, columns);
+            return self.over_own_columns(index, own_columns(out_columns));
         }
         let labels: Vec<String> = series
             .index()
@@ -95053,59 +97179,59 @@ impl DataFrame {
             .iter()
             .map(ToString::to_string)
             .collect();
+        let n = self.len();
+        let values = series.values();
+        // One column with the operand's value for it (missing: NaN).
+        let combine_value = |name: &str, own: Option<&Column>, value: Option<&Scalar>| {
+            let nan = || Column::new(DType::Float64, vec![Scalar::Null(NullKind::NaN); n]);
+            let operand = match value {
+                Some(value) if !value.is_missing() => Column::from_values(vec![value.clone(); n])?,
+                _ => nan()?,
+            };
+            // A label the frame lacks: the column is all missing, and the
+            // combination with it all NaN (comparisons: all False or, under
+            // !=, all True - combine decides).
+            let left = match own {
+                Some(column) => column.clone(),
+                None => nan()?,
+            };
+            Ok::<Column, FrameError>(
+                combine(&as_series(name, left)?, &as_series(name, operand)?)?
+                    .column()
+                    .clone(),
+            )
+        };
+        // pandas keeps the columns - typed labels, axis name - when the
+        // Series' labels are exactly the columns, and pairs them by position.
+        if self.column_order.as_slice() == labels.as_slice() {
+            let out_columns = self
+                .column_order
+                .iter()
+                .enumerate()
+                .map(|(pos, name)| combine_value(name, self.column_at(pos), Some(&values[pos])))
+                .collect::<Result<Vec<_>, _>>()?;
+            return self.over_own_columns(self.index.clone(), own_columns(out_columns));
+        }
         let mut names: Vec<String> = self.column_order.to_vec();
         for label in &labels {
             if !self.columns.contains_key(label) && !names.contains(label) {
                 names.push(label.clone());
             }
         }
-        if self.column_order.as_slice() != labels.as_slice() {
-            names.sort();
-        }
-        let n = self.len();
-        let values = series.values();
+        names.sort();
+        let mut columns = BTreeMap::new();
         for name in &names {
             let value = labels
                 .iter()
                 .position(|label| label == name)
                 .map(|i| &values[i]);
-            let column = match (self.columns.get(name.as_str()), value) {
-                (Some(column), Some(value)) if !value.is_missing() => {
-                    let left = as_series(name, column.clone())?;
-                    let right = as_series(name, Column::from_values(vec![value.clone(); n])?)?;
-                    combine(&left, &right)?.column().clone()
-                }
-                (Some(column), _) => {
-                    let left = as_series(name, column.clone())?;
-                    let nan = vec![Scalar::Null(NullKind::NaN); n];
-                    let right = as_series(name, Column::new(DType::Float64, nan)?)?;
-                    combine(&left, &right)?.column().clone()
-                }
-                (None, _) => {
-                    // A label the frame lacks: the column is all missing, and
-                    // the combination with it all NaN (comparisons: all False
-                    // or, under !=, all True - combine decides).
-                    let nan = vec![Scalar::Null(NullKind::NaN); n];
-                    let missing = as_series(name, Column::new(DType::Float64, nan.clone())?)?;
-                    let other = match value {
-                        Some(value) if !value.is_missing() => {
-                            Column::from_values(vec![value.clone(); n])?
-                        }
-                        _ => Column::new(DType::Float64, nan)?,
-                    };
-                    combine(&missing, &as_series(name, other)?)?
-                        .column()
-                        .clone()
-                }
-            };
-            columns.insert(name.clone(), column);
+            columns.insert(
+                name.clone(),
+                combine_value(name, self.columns.get(name.as_str()), value)?,
+            );
         }
-        // pandas keeps the columns - typed labels, axis name - when the
-        // Series' labels are exactly the columns; a union of the two keeps a
-        // name only both share. Both were always dropped.
-        if self.column_order.as_slice() == labels.as_slice() {
-            return self.over_own_columns(self.index.clone(), columns);
-        }
+        // A union of the columns and the Series' labels keeps an axis name
+        // only both share.
         let axis_name = (series.index().name() == self.columns_name())
             .then(|| self.columns_name().cloned())
             .flatten();
@@ -95130,33 +97256,26 @@ impl DataFrame {
         // with the scalar broadcast: `str * 2`, `str + '!'`, `dt + td`,
         // `bool + True` are pandas' Series arithmetic. The f64 paths below
         // passed such a column through unchanged (fvsao.35 sweep).
+        // Every column is read and rebuilt by POSITION, so a repeated column
+        // key keeps its own data (i17d4).
         let plain_numeric =
             |dtype: DType| matches!(dtype, DType::Int64 | DType::Float64 | DType::Null);
+        let n_cols = self.num_columns();
+        let column_at = |pos: usize| self.column_at(pos).expect("column in bounds");
         if !matches!(scalar, Scalar::Int64(_) | Scalar::Float64(_))
-            || self
-                .column_order
-                .iter()
-                .any(|name| !plain_numeric(self.columns[name.as_str()].dtype()))
+            || (0..n_cols).any(|pos| !plain_numeric(column_at(pos).dtype()))
         {
             let broadcast = Column::from_values(vec![scalar.clone(); self.len()])?;
-            let mut columns = BTreeMap::new();
-            for name in self.column_order.iter() {
-                let column = &self.columns[name.as_str()];
-                let out = if reflected {
+            let mut columns = Vec::with_capacity(n_cols);
+            for pos in 0..n_cols {
+                let column = column_at(pos);
+                columns.push(if reflected {
                     Self::column_pair_arith(&broadcast, column, op)?
                 } else {
                     Self::column_pair_arith(column, &broadcast, op)?
-                };
-                columns.insert(name.clone(), out);
+                });
             }
-            return Ok(Self {
-                columns: columns.into(),
-                column_order: self.column_order.clone(),
-                index: self.index.clone(),
-                column_multiindex: self.column_multiindex.clone(),
-                row_multiindex: self.row_multiindex.clone(),
-                allows_duplicate_labels: self.allows_duplicate_labels,
-            });
+            return Ok(self.with_columns_at_positions(columns));
         }
         let value = scalar.to_f64().map_err(ColumnError::from)?;
         // A bool column computes as 0/1 floats, as in pandas (bool / 2, bool +
@@ -95166,10 +97285,8 @@ impl DataFrame {
         let f64_path = |df: &Self| -> Result<Self, FrameError> {
             let promoted;
             let df = if promote_bools
-                && df
-                    .column_order
-                    .iter()
-                    .any(|name| df.columns[name.as_str()].dtype() == DType::Bool)
+                && (0..df.num_columns())
+                    .any(|pos| df.column_at(pos).is_some_and(|c| c.dtype() == DType::Bool))
             {
                 promoted = df.apply_per_column(|s| {
                     if s.dtype() == DType::Bool {
@@ -95214,59 +97331,51 @@ impl DataFrame {
                 | ArithmeticOp::FloorDiv
                 | ArithmeticOp::Mod
         );
-        let integral: Vec<&String> = self
-            .column_order
-            .iter()
-            .filter(|name| {
-                let column = &self.columns[name.as_str()];
+        let integral: Vec<bool> = (0..n_cols)
+            .map(|pos| {
+                let column = column_at(pos);
                 column.validity().all()
                     && (column.dtype() == DType::Int64
                         || (bool_ok && column.dtype() == DType::Bool))
             })
             .collect();
-        if integral.is_empty() {
+        if !integral.contains(&true) {
             return f64_path(self);
         }
-        let rest: Vec<&str> = self
-            .column_order
-            .iter()
-            .filter(|name| !integral.contains(name))
-            .map(String::as_str)
-            .collect();
+        // The other columns take the f64 path as one frame of them, in order.
+        let rest: Vec<usize> = (0..n_cols).filter(|&pos| !integral[pos]).collect();
         let rest_out = if rest.is_empty() {
             None
         } else {
-            Some(f64_path(&self.select_columns(&rest)?)?)
+            Some(f64_path(&self.take_columns(&rest)?)?)
         };
         let broadcast = Column::from_i64_values(vec![integer; self.len()]);
         // The integer columns run in parallel, as the f64 kernels do.
-        let integral_names: Vec<String> = integral.iter().map(|name| (*name).clone()).collect();
-        let integral_out = self.par_map_columns(&integral_names, |name| {
-            let column = &self.columns[name];
-            Ok(if reflected {
+        let mut columns = self.par_map_column_positions_min(16_384, |pos| {
+            if !integral[pos] {
+                return Ok(None);
+            }
+            let column = column_at(pos);
+            Ok(Some(if reflected {
                 broadcast.binary_numeric(column, op)?
             } else {
                 column.binary_numeric(&broadcast, op)?
-            })
+            }))
         })?;
-        let mut columns: BTreeMap<String, Column> =
-            integral_names.into_iter().zip(integral_out).collect();
         if let Some(out) = rest_out {
-            for name in rest {
-                let column = out.columns.get(name).cloned().ok_or_else(|| {
-                    FrameError::CompatibilityRejected(format!("arith_scalar lost column {name}"))
-                })?;
-                columns.insert(name.to_owned(), column);
+            for (slot, &pos) in rest.iter().enumerate() {
+                columns[pos] = out.column_at(slot).cloned();
             }
         }
-        Ok(Self {
-            columns: columns.into(),
-            column_order: self.column_order.clone(),
-            index: self.index.clone(),
-            column_multiindex: self.column_multiindex.clone(),
-            row_multiindex: self.row_multiindex.clone(),
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        let columns = columns
+            .into_iter()
+            .map(|column| {
+                column.ok_or_else(|| {
+                    FrameError::CompatibilityRejected("arith_scalar lost a column".to_owned())
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(self.with_columns_at_positions(columns))
     }
 
     /// Subtract a scalar from all numeric columns.
@@ -95666,10 +97775,12 @@ impl DataFrame {
             // Column-parallel (br-frankenpandas-binop-par): each column's op is
             // independent, so spread the columns across par_map_columns scope
             // workers. Bit-identical — identical per-column typed/Scalar arms,
-            // reassembled in column_order.
-            let computed = self.par_map_columns(&self.column_order, |col_name| {
-                let lc = &self.columns[col_name];
-                let rc = &other.columns[col_name];
+            // reassembled in column order. The column keys are equal, so the
+            // columns pair by POSITION: a repeated key pairs with its own
+            // column (by name every one paired the first; i17d4).
+            let computed = self.par_map_column_positions_min(16_384, |pos| {
+                let lc = self.column_at(pos).expect("column in bounds");
+                let rc = other.column_at(pos).expect("equal column keys");
                 let left_numlike =
                     matches!(lc.dtype(), DType::Int64 | DType::Float64 | DType::Null);
                 let right_numlike =
@@ -95758,18 +97869,7 @@ impl DataFrame {
                     Self::column_pair_arith(lc, rc, Self::arithmetic_op_named(name)?)
                 }
             })?;
-            let mut result_cols = BTreeMap::new();
-            for (name, column) in self.column_order.iter().zip(computed) {
-                result_cols.insert(name.clone(), column);
-            }
-            return Ok(Self {
-                columns: result_cols.into(),
-                column_order: self.column_order.clone(),
-                index: self.index.clone(),
-                column_multiindex: self.column_multiindex.clone(),
-                row_multiindex: self.row_multiindex.clone(),
-                allows_duplicate_labels: self.allows_duplicate_labels,
-            });
+            return Ok(self.with_columns_at_positions(computed));
         }
 
         // Typed UNALIGNED fast path (br-frankenpandas-unaligned-scalar-tax): when
@@ -95992,24 +98092,25 @@ impl DataFrame {
         let same_rows = self.index == other.index;
         // (df.add(fill_value=) unaligned was 0.14x pandas). Bit-identical to the
         // Scalar per-cell fill loop below.
+        // Identically keyed columns pair by position, so a repeated column
+        // key combines its own columns (i17d4).
+        let numlike = |column: Option<&Column>| {
+            column.is_some_and(|c| matches!(c.dtype(), DType::Int64 | DType::Float64 | DType::Null))
+        };
         if self.row_multiindex.is_none()
             && other.row_multiindex.is_none()
             && self.column_order == other.column_order
-            && self.column_order.iter().all(|n| {
-                let l = &self.columns[n];
-                other.columns.get(n).is_some_and(|r| {
-                    matches!(l.dtype(), DType::Int64 | DType::Float64 | DType::Null)
-                        && matches!(r.dtype(), DType::Int64 | DType::Float64 | DType::Null)
-                })
-            })
+            && (0..self.num_columns())
+                .all(|pos| numlike(self.column_at(pos)) && numlike(other.column_at(pos)))
         {
             let AlignmentPlan {
                 union_index,
                 left_positions,
                 right_positions,
             } = align_union_sorted_plan(&self.index, &other.index);
-            let computed = self.par_map_columns(&self.column_order, |name| {
-                let (lc, rc) = (&self.columns[name], &other.columns[name]);
+            let computed = self.par_map_column_positions_min(16_384, |pos| {
+                let lc = self.column_at(pos).expect("column in bounds");
+                let rc = other.column_at(pos).expect("column in bounds");
                 if same_rows && let Some(int_op) = int_pair(lc, rc) {
                     return Ok(lc.binary_numeric(rc, int_op)?);
                 }
@@ -96022,18 +98123,9 @@ impl DataFrame {
                     fill_value,
                 )
             })?;
-            let mut result_cols = BTreeMap::new();
-            for (name, column) in self.column_order.iter().zip(computed) {
-                result_cols.insert(name.clone(), column);
-            }
-            return Ok(Self {
-                columns: result_cols.into(),
-                column_order: self.column_order.clone(),
-                index: union_index,
-                column_multiindex: self.column_multiindex.clone(),
-                row_multiindex: None,
-                allows_duplicate_labels: self.allows_duplicate_labels,
-            });
+            let mut out = self.with_columns_at_positions(computed);
+            out.index = union_index;
+            return Ok(out);
         }
 
         let (left, right) = self.align_on_index(other, AlignMode::Outer)?;
@@ -96172,16 +98264,16 @@ impl DataFrame {
         // same `to_f64` numeric arm. The Bool column is built the same way
         // (from_values of the [Bool/Null] vector; from_bool_values when no pair is
         // missing yields an all-valid Bool that materializes identically).
-        if self.index == other.index
+        // Identically labelled frames pair their columns by position, so a
+        // repeated column key compares its own columns (i17d4).
+        let same_labels = self.index == other.index && self.column_order == other.column_order;
+        if same_labels
             && self.index.is_unique()
-            && self.column_order == other.column_order
-            && self.column_order.iter().all(|name| {
-                self.columns
-                    .get(name)
+            && (0..self.num_columns()).all(|pos| {
+                self.column_at(pos)
                     .is_some_and(|c| matches!(c.dtype(), DType::Float64 | DType::Int64))
                     && other
-                        .columns
-                        .get(name)
+                        .column_at(pos)
                         .is_some_and(|c| matches!(c.dtype(), DType::Float64 | DType::Int64))
             })
         {
@@ -96194,9 +98286,9 @@ impl DataFrame {
             // in parallel. Bit-identical: identical per-column arms reassembled in
             // column_order.
             let computed: Vec<Option<Column>> =
-                self.par_map_columns(&self.column_order, |name| {
-                    let lc = &self.columns[name];
-                    let rc = &other.columns[name];
+                self.par_map_column_positions_min(16_384, |pos| {
+                    let lc = self.column_at(pos).expect("column in bounds");
+                    let rc = other.column_at(pos).expect("column in bounds");
                     if let (Some((ld, lv)), Some((rd, rv))) = (
                         lc.as_f64_slice_with_validity(),
                         rc.as_f64_slice_with_validity(),
@@ -96253,28 +98345,13 @@ impl DataFrame {
                         Ok(None)
                     }
                 })?;
-            if computed.iter().all(Option::is_some) {
-                let mut result_cols = BTreeMap::new();
-                for (name, column) in self.column_order.iter().zip(computed) {
-                    result_cols.insert(name.clone(), column.expect("all columns checked is_some"));
-                }
-                return Ok(Self {
-                    columns: result_cols.into(),
-                    column_order: self.column_order.clone(),
-                    index: self.index.clone(),
-                    column_multiindex: self.column_multiindex.clone(),
-                    row_multiindex: self.row_multiindex.clone(),
-                    allows_duplicate_labels: self.allows_duplicate_labels,
-                });
+            if let Some(columns) = computed.into_iter().collect::<Option<Vec<_>>>() {
+                return Ok(self.with_columns_at_positions(columns));
             }
         }
 
-        let (left, right) = self.align_on_index(other, AlignMode::Outer)?;
-
-        let mut result_cols = BTreeMap::new();
-        for col_name in &left.column_order {
-            let lc = &left.columns[col_name];
-            let rc = &right.columns[col_name];
+        // The general per-pair compare.
+        let compare = |lc: &Column, rc: &Column| -> Result<Column, FrameError> {
             // pd.NA propagates only through the nullable extension dtypes; a
             // numpy-backed missing value compares False, True under !=
             // (br-frankenpandas-zwfz3).
@@ -96317,7 +98394,28 @@ impl DataFrame {
                     }
                 })
                 .collect();
-            result_cols.insert(col_name.clone(), Column::from_values(vals)?);
+            Ok(Column::from_values(vals)?)
+        };
+
+        if same_labels {
+            let columns = (0..self.num_columns())
+                .map(|pos| {
+                    let lc = self.column_at(pos).expect("column in bounds");
+                    let rc = other.column_at(pos).expect("column in bounds");
+                    compare(lc, rc)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(self.with_columns_at_positions(columns));
+        }
+
+        let (left, right) = self.align_on_index(other, AlignMode::Outer)?;
+
+        let mut result_cols = BTreeMap::new();
+        for col_name in &left.column_order {
+            result_cols.insert(
+                col_name.clone(),
+                compare(&left.columns[col_name], &right.columns[col_name])?,
+            );
         }
 
         Ok(Self {
@@ -96376,9 +98474,10 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.eq(scalar)` etc.
     pub fn compare_scalar_df(&self, scalar: &Scalar, op: ComparisonOp) -> Result<Self, FrameError> {
-        let mut result_cols = BTreeMap::new();
-        for col_name in &self.column_order {
-            let col = &self.columns[col_name];
+        // By position: a repeated column key compares its own column (i17d4).
+        let mut result_cols = Vec::with_capacity(self.num_columns());
+        for pos in 0..self.num_columns() {
+            let col = self.column_at(pos).expect("column in bounds");
             // Fast path: an all-valid contiguous Float64 column vs a numeric
             // scalar reduces, in the per-cell branch below, to `v <op>
             // scalar.to_f64()` (since `v.to_f64() == v` for Float64 and no cell
@@ -96396,7 +98495,7 @@ impl DataFrame {
             // (missing_for_dtype(Bool) == Null(Null) == the loop's is_missing arm).
             // Int64 stays on the loop so its f64-promotion semantics are unchanged.
             if col.dtype() == DType::Float64 && !scalar.is_missing() && scalar.to_f64().is_ok() {
-                result_cols.insert(col_name.clone(), col.compare_scalar(scalar, op)?);
+                result_cols.push(col.compare_scalar(scalar, op)?);
                 continue;
             }
             // Typed Int64 arm: the per-cell loop below f64-PROMOTES an Int64 column
@@ -96429,7 +98528,7 @@ impl DataFrame {
                         *b = op == ComparisonOp::Ne;
                     }
                 }
-                result_cols.insert(col_name.clone(), Column::from_bool_values(bools));
+                result_cols.push(Column::from_bool_values(bools));
                 continue;
             }
             // pd.NA propagates only through the nullable extension dtypes; a
@@ -96471,17 +98570,10 @@ impl DataFrame {
                     }
                 })
                 .collect();
-            result_cols.insert(col_name.clone(), Column::from_values(vals)?);
+            result_cols.push(Column::from_values(vals)?);
         }
 
-        Ok(Self {
-            columns: result_cols.into(),
-            column_order: self.column_order.clone(),
-            index: self.index.clone(),
-            column_multiindex: self.column_multiindex.clone(),
-            row_multiindex: self.row_multiindex.clone(),
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        Ok(self.with_columns_at_positions(result_cols))
     }
 
     /// Element-wise `== scalar` for all columns.
@@ -97115,16 +99207,16 @@ impl DataFrame {
     pub fn where_mask_df(&self, cond_df: &Self, other: &Scalar) -> Result<Self, FrameError> {
         let cond_plan = align(&self.index, &cond_df.index, AlignMode::Left);
         validate_alignment_plan(&cond_plan)?;
-        let mut result_cols = BTreeMap::new();
-        for col_name in &self.column_order {
-            let data_col = &self.columns[col_name];
+        // By position: a repeated column key is its own column (i17d4).
+        let mut result_cols = Vec::with_capacity(self.num_columns());
+        for (pos, col_name) in self.column_order.iter().enumerate() {
+            let data_col = self.column_at(pos).expect("column in order must exist");
             // Keep iff PRESENT and True. Two fixes here
             // (br-frankenpandas-xg7hf): a missing cond COLUMN is all-absent
             // rather than an error, and the old `_ => val.clone()` arm KEPT the
             // value for an absent/undecidable cell where pandas takes `other`.
             let cond_cells = Self::aligned_condition_cells(
-                cond_df,
-                col_name,
+                self.partner_column(cond_df, pos, col_name),
                 &cond_plan.right_positions,
                 data_col.len(),
             )?;
@@ -97140,16 +99232,9 @@ impl DataFrame {
                     }
                 })
                 .collect();
-            result_cols.insert(col_name.clone(), Column::from_values(vals)?);
+            result_cols.push(Column::from_values(vals)?);
         }
-        Ok(Self {
-            columns: result_cols.into(),
-            column_order: self.column_order.clone(),
-            index: self.index.clone(),
-            column_multiindex: self.column_multiindex.clone(),
-            row_multiindex: self.row_multiindex.clone(),
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        Ok(self.with_columns_at_positions(result_cols))
     }
 
     /// Replace values where condition DataFrame is False with `other`.
@@ -97159,10 +99244,11 @@ impl DataFrame {
     pub fn mask_df(&self, cond_df: &Self, other: &Scalar) -> Result<Self, FrameError> {
         let cond_plan = align(&self.index, &cond_df.index, AlignMode::Left);
         validate_alignment_plan(&cond_plan)?;
-        let mut result_cols = BTreeMap::new();
-        for col_name in &self.column_order {
-            let data_col = &self.columns[col_name];
-            let cond_col = cond_df.columns.get(col_name).ok_or_else(|| {
+        // By position: a repeated column key is its own column (i17d4).
+        let mut result_cols = Vec::with_capacity(self.num_columns());
+        for (pos, col_name) in self.column_order.iter().enumerate() {
+            let data_col = self.column_at(pos).expect("column in order must exist");
+            let cond_col = self.partner_column(cond_df, pos, col_name).ok_or_else(|| {
                 FrameError::CompatibilityRejected(format!(
                     "mask_df: condition missing column '{col_name}'"
                 ))
@@ -97178,16 +99264,9 @@ impl DataFrame {
                     _ => val.clone(),
                 })
                 .collect();
-            result_cols.insert(col_name.clone(), Column::from_values(vals)?);
+            result_cols.push(Column::from_values(vals)?);
         }
-        Ok(Self {
-            columns: result_cols.into(),
-            column_order: self.column_order.clone(),
-            index: self.index.clone(),
-            column_multiindex: self.column_multiindex.clone(),
-            row_multiindex: self.row_multiindex.clone(),
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        Ok(self.with_columns_at_positions(result_cols))
     }
 
     /// Set or replace a column by name with given values.
@@ -97223,8 +99302,9 @@ impl DataFrame {
         F: Fn(f64, f64) -> f64 + Sync,
     {
         let par_inner = compute_bound && self.column_order.len() <= 2;
-        let computed = self.par_map_columns(&self.column_order, |name| {
-            let col = &self.columns[name];
+        // By position: a repeated column key is its own column (i17d4).
+        let computed = self.par_map_column_positions_min(16_384, |pos| {
+            let col = self.column_at(pos).expect("column in bounds");
             // Typed fast path: an all-valid Int64/Float64 column applies the op
             // over its contiguous buffer (Int64 promoted to f64, matching the
             // to_f64 path) and re-ingests typed via from_f64_values — skips the
@@ -97322,18 +99402,7 @@ impl DataFrame {
                 Ok(col.clone())
             }
         })?;
-        let mut result_cols = BTreeMap::new();
-        for (name, column) in self.column_order.iter().zip(computed) {
-            result_cols.insert(name.clone(), column);
-        }
-        Ok(Self {
-            columns: result_cols.into(),
-            column_order: self.column_order.clone(),
-            index: self.index.clone(),
-            column_multiindex: self.column_multiindex.clone(),
-            row_multiindex: self.row_multiindex.clone(),
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        Ok(self.with_columns_at_positions(computed))
     }
 
     /// Percentage change per column.
@@ -97697,6 +99766,48 @@ impl DataFrame {
         })
     }
 
+    /// This frame with its columns replaced, position for position, by
+    /// `columns` (names, order, axes and labels kept). Rebuilding by POSITION
+    /// keeps repeated column keys apart: a name-keyed map kept one column per
+    /// key, so df.round() of columns ['a', 'a', 'b'] - or of a column
+    /// MultiIndex whose leaf names repeat, as a multi-function agg makes -
+    /// lost columns (br-frankenpandas-i17d4).
+    #[must_use]
+    // The store is the lazy store under lazy-transpose-view, a ColumnStore
+    // without.
+    #[allow(clippy::useless_conversion)]
+    pub fn with_columns_at_positions(&self, columns: Vec<Column>) -> Self {
+        Self {
+            columns: ColumnStore::from_pairs(self.column_order.iter().cloned().zip(columns)).into(),
+            column_order: self.column_order.clone(),
+            index: self.index.clone(),
+            column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: self.row_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
+        }
+    }
+
+    /// This frame's columns (names, order, labels, column MultiIndex) over a
+    /// new row `index`, holding `columns` position for position - a
+    /// reduction's shape (describe). By position, as
+    /// [`Self::with_columns_at_positions`] (i17d4). pandas concatenates the
+    /// per-column answers, so the columns are a new Index, never a RangeIndex.
+    // The store is the lazy store under lazy-transpose-view, a ColumnStore
+    // without.
+    #[allow(clippy::useless_conversion)]
+    fn with_index_and_columns_at_positions(&self, index: Index, columns: Vec<Column>) -> Self {
+        let mut axis = self.column_order.clone();
+        axis.range = None;
+        Self {
+            columns: ColumnStore::from_pairs(self.column_order.iter().cloned().zip(columns)).into(),
+            column_order: axis,
+            index,
+            column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
+        }
+    }
+
     /// Internal: apply a closure to ALL columns (not just numeric), returning a new DataFrame.
     fn apply_all_columns<F>(&self, func: F) -> Result<Self, FrameError>
     where
@@ -97706,24 +99817,14 @@ impl DataFrame {
         // helper behind DataFrame fillna/ffill/bfill (every column, no dtype
         // gate). Each column is transformed INDEPENDENTLY by the same `func`, so
         // spreading columns across par_map_columns scope workers is bit-identical
-        // — results are reassembled in column_order. The serial loop left all but
-        // one core idle.
-        let transformed = self.par_map_columns(&self.column_order, |name| {
-            let s = self.column_as_series(name)?;
+        // — results are reassembled in column order. The serial loop left all but
+        // one core idle. By position: a repeated column key is its own column
+        // (i17d4).
+        let transformed = self.par_map_column_positions_min(16_384, |pos| {
+            let s = self.column_at_as_series(pos)?;
             Ok(func(&s)?.column().clone())
         })?;
-        let mut result_cols = BTreeMap::new();
-        for (name, column) in self.column_order.iter().zip(transformed) {
-            result_cols.insert(name.clone(), column);
-        }
-        Ok(Self {
-            columns: result_cols.into(),
-            column_order: self.column_order.clone(),
-            index: self.index.clone(),
-            column_multiindex: self.column_multiindex.clone(),
-            row_multiindex: self.row_multiindex.clone(),
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        Ok(self.with_columns_at_positions(transformed))
     }
 
     /// Internal: apply a closure to each numeric column, returning a new DataFrame.
@@ -97836,8 +99937,10 @@ impl DataFrame {
     where
         S: Fn(&Series) -> Result<Series, FrameError> + Sync,
     {
-        let transformed = self.par_map_columns_min(&self.column_order, 16_384, |name| {
-            let col = &self.columns[name];
+        // By position: a repeated column key is its own column (i17d4).
+        let transformed = self.par_map_column_positions_min(16_384, |pos| {
+            let col = self.column_at(pos).expect("column in bounds");
+            let name = &self.column_order[pos];
             if col.dtype() == DType::Float64
                 && let Some((data, validity)) = col.as_f64_slice_with_validity()
             {
@@ -97867,21 +99970,10 @@ impl DataFrame {
                 // returned UNCHANGED here: df.cummax() on a timedelta column and
                 // df.cumsum() on a Float64Nullable column were silent no-ops
                 // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.18).
-                Ok(series_op(&self.column_as_series(name)?)?.column().clone())
+                Ok(series_op(&self.column_at_as_series(pos)?)?.column().clone())
             }
         })?;
-        let mut result_cols = BTreeMap::new();
-        for (name, column) in self.column_order.iter().zip(transformed) {
-            result_cols.insert(name.clone(), column);
-        }
-        Ok(Self {
-            columns: result_cols.into(),
-            column_order: self.column_order.clone(),
-            index: self.index.clone(),
-            column_multiindex: self.column_multiindex.clone(),
-            row_multiindex: self.row_multiindex.clone(),
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        Ok(self.with_columns_at_positions(transformed))
     }
 
     /// `apply_per_column` with an explicit parallelism floor (total cells before
@@ -97908,23 +100000,13 @@ impl DataFrame {
         // column left -2.5 in place
         // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.18). The one op
         // pandas does skip non-numeric columns for, DataFrame.round, uses
-        // `apply_per_numeric_column`.
-        let transformed = self.par_map_columns_min(&self.column_order, par_min_values, |name| {
-            let s = self.column_as_series(name)?;
+        // `apply_per_numeric_column`. By position: a repeated column key is its
+        // own column (i17d4).
+        let transformed = self.par_map_column_positions_min(par_min_values, |pos| {
+            let s = self.column_at_as_series(pos)?;
             Ok(func(&s)?.column().clone())
         })?;
-        let mut result_cols = BTreeMap::new();
-        for (name, column) in self.column_order.iter().zip(transformed) {
-            result_cols.insert(name.clone(), column);
-        }
-        Ok(Self {
-            columns: result_cols.into(),
-            column_order: self.column_order.clone(),
-            index: self.index.clone(),
-            column_multiindex: self.column_multiindex.clone(),
-            row_multiindex: self.row_multiindex.clone(),
-            allows_duplicate_labels: self.allows_duplicate_labels,
-        })
+        Ok(self.with_columns_at_positions(transformed))
     }
 
     /// Drop labels from rows or columns.
@@ -98437,6 +100519,39 @@ impl DataFrame {
         Ok(out.with_labels_of(self))
     }
 
+    /// [`Series::replace_regex_cells`] over every text column: a string
+    /// cell the pattern finds becomes the non-string `value` whole
+    /// (br-frankenpandas-otatv).
+    pub fn replace_regex_cells(&self, pat: &str, value: &Scalar) -> Result<Self, FrameError> {
+        regex::Regex::new(pat)
+            .map_err(|e| FrameError::CompatibilityRejected(format!("invalid regex: {e}")))?;
+        let n_cols = self.num_columns();
+        let mut pairs = Vec::with_capacity(n_cols);
+        let mut column_order = Vec::with_capacity(n_cols);
+        for pos in 0..n_cols {
+            let name = self.column_name_at(pos).expect("column in bounds");
+            let col = self.column_at(pos).expect("column in bounds");
+            if col.dtype() == DType::Utf8 {
+                let replaced = Series::new(name.clone(), self.index.clone(), col.clone())?
+                    .replace_regex_cells(pat, value)?;
+                pairs.push((name.clone(), replaced.column().clone()));
+            } else {
+                pairs.push((name.clone(), col.clone()));
+            }
+            column_order.push(name.clone());
+        }
+        let columns = ColumnStore::from_pairs(pairs);
+        let mut out = Self::new_with_axes(
+            self.index.clone(),
+            self.row_multiindex.clone(),
+            columns,
+            column_order,
+            self.column_multiindex.clone(),
+        )?;
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        Ok(out.with_labels_of(self))
+    }
+
     /// Align two DataFrames on their indices.
     ///
     /// Matches `df1.align(df2, join='outer'|'inner'|'left'|'right')`.
@@ -98845,7 +100960,7 @@ impl DataFrame {
     /// Pass empty slices to not filter on that criterion.
     pub fn select_dtypes(&self, include: &[DType], exclude: &[DType]) -> Result<Self, FrameError> {
         self.select_columns_where(|column| {
-            let dt = column.dtype();
+            let dt = selection_dtype(column);
             let included = include.is_empty() || include.contains(&dt);
             let excluded = !exclude.is_empty() && exclude.contains(&dt);
             included && !excluded
@@ -98855,19 +100970,22 @@ impl DataFrame {
     /// The columns `keep` accepts, in order; none is still this frame's
     /// axis (its name, an empty MultiIndex of its level names).
     fn select_columns_where(&self, keep: impl Fn(&Column) -> bool) -> Result<Self, FrameError> {
-        let mut selected = Vec::new();
-        for name in &self.column_order {
-            if keep(&self.columns[name]) {
-                selected.push(name.as_str());
-            }
-        }
+        // By position: each column under a repeated key is kept or left on
+        // its own (selecting the kept names took every column under a name
+        // once per column; i17d4).
+        let selected: Vec<usize> = (0..self.num_columns())
+            .filter(|&pos| self.column_at(pos).is_some_and(&keep))
+            .collect();
         if selected.is_empty() {
             // No column: still this axis - its name, an empty MultiIndex of
             // its level names (7m8bq).
             return Self::new(self.index.clone(), BTreeMap::new())
                 .map(|out| out.with_typed_labels_of(self));
         }
-        self.select_columns(&selected)
+        // A selection is a new column Index, never a RangeIndex.
+        let mut out = self.take_columns(&selected)?;
+        out.column_order.range = None;
+        Ok(out)
     }
 
     /// Select columns by pandas-style dtype alias names.
@@ -98877,18 +100995,24 @@ impl DataFrame {
     /// set of `DType` variants; unknown aliases return an error consistent
     /// with pandas' `TypeError: data type '...' not understood`.
     ///
-    /// Recognized aliases:
-    /// - `"number"`, `"numeric"` → Int64 + Float64
-    /// - `"integer"`, `"int"`, `"int64"` → Int64
-    /// - `"floating"`, `"float"`, `"float64"` → Float64
+    /// Recognized aliases (the crate's `expand_dtype_alias` table):
+    /// - `"number"` → Int64 + Float64 + Timedelta64, `"integer"` → Int64 +
+    ///   Timedelta64 (numpy's timedelta64 is a signed integer)
+    /// - `"int"`, `"int64"`, `"Int64"` → Int64
+    /// - `"floating"`, `"float"`, `"float64"`, `"Float64"` → Float64
     /// - `"bool"`, `"boolean"` → Bool
-    /// - `"object"`, `"string"`, `"str"` → Utf8
-    /// - `"timedelta"`, `"timedelta64"` → Timedelta64
+    /// - `"object"` → the object columns, `"string"` pandas' string ones
+    /// - `"category"`, `"timedelta"`, `"datetime"` (naive), `"complex"`
     /// - a narrow numpy name (`"int32"`, `"uint8"`, `"float32"`) or its
     ///   masked form (`"Int32"`) → the columns of exactly that width, while
     ///   the exact 64-bit names (`"int64"`, `"int"`, `"float64"`, `"float"`)
     ///   leave those out and the abstract ones (`"number"`, `"integer"`,
     ///   `"floating"`) keep them (fvsao.23).
+    ///
+    /// Include and exclude overlap - pandas' error - only on one canonical
+    /// type ([`select_dtype_canonical`]): 'int' beside 'integer' selects
+    /// the int64 columns that are not integers, none (it was refused;
+    /// br-frankenpandas-cmv2p).
     pub fn select_dtypes_by_name(
         &self,
         include: &[&str],
@@ -98901,24 +101025,43 @@ impl DataFrame {
                 .filter(|name| NumericWidth::parse(name).is_none())
                 .collect()
         }
-        let include_set = expand_dtype_aliases(&storage_names(include))?;
-        let exclude_set = expand_dtype_aliases(&storage_names(exclude))?;
-        let overlap = include_set.iter().any(|dt| exclude_set.contains(dt))
-            || include
-                .iter()
-                .any(|name| NumericWidth::parse(name).is_some() && exclude.contains(name));
-        if overlap {
-            return Err(FrameError::CompatibilityRejected(
-                "include and exclude overlap".to_owned(),
-            ));
+        expand_dtype_aliases(&storage_names(include))?;
+        expand_dtype_aliases(&storage_names(exclude))?;
+        let excluded: Vec<String> = exclude
+            .iter()
+            .map(|name| select_dtype_canonical(name))
+            .collect();
+        let overlap: Vec<String> = include
+            .iter()
+            .map(|name| select_dtype_canonical(name))
+            .filter(|canonical| excluded.contains(canonical))
+            .collect();
+        if !overlap.is_empty() {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "include and exclude overlap on {}",
+                overlap.join(", ")
+            )));
         }
         let matches = |column: &Column, name: &str| {
-            if let Some((width, nullable)) = NumericWidth::parse(name) {
-                return column.width() == Some(width) && column.dtype().is_nullable() == nullable;
+            // A width name takes the numpy and the masked column of that
+            // width alike, as pandas' ('Int32' took the masked one alone;
+            // br-frankenpandas-8u5eh).
+            if let Some((width, _)) = NumericWidth::parse(name) {
+                return column.width() == Some(width);
             }
-            let exact_64 = matches!(name, "int" | "int64" | "i8" | "float" | "float64" | "f8");
+            // pandas' string dtype is 'string', not 'object' (cmv2p).
+            match name {
+                "string" => return column.is_pandas_string(),
+                "object" | "O" if column.is_pandas_string() => return false,
+                _ => {}
+            }
+            let exact_64 = matches!(
+                name,
+                "int" | "int64" | "i8" | "Int64" | "float" | "float64" | "f8" | "Float64"
+            );
             (!exact_64 || column.width().is_none())
-                && expand_dtype_alias(name).is_ok_and(|dtypes| dtypes.contains(&column.dtype()))
+                && expand_dtype_alias(name)
+                    .is_ok_and(|dtypes| dtypes.contains(&selection_dtype(column)))
         };
         self.select_columns_where(|column| {
             let included = include.is_empty() || include.iter().any(|name| matches(column, name));
@@ -98999,14 +101142,18 @@ impl DataFrame {
         // column_order. par_map_columns keeps small/single-column frames serial
         // (16384-cell, >=2-col floor).
         // Measured 200k×8: 4.79 ms serial -> 1.42 ms threaded (3.37x).
-        let columns = self.par_map_columns(&self.column_order, |name| {
-            isin_apply_column(&self.columns[name], &idx, bitset.as_ref())
+        // By position: a repeated column key tests its own column (i17d4).
+        let columns = self.par_map_column_positions_min(16_384, |pos| {
+            isin_apply_column(
+                self.column_at(pos).expect("column in bounds"),
+                &idx,
+                bitset.as_ref(),
+            )
         })?;
-        let mut new_cols = BTreeMap::new();
-        for (name, column) in self.column_order.iter().zip(columns) {
-            new_cols.insert(name.clone(), column);
-        }
-        self.over_own_columns(self.index.clone(), new_cols)
+        self.over_own_columns(
+            self.index.clone(),
+            ColumnStore::from_pairs(self.column_order.iter().cloned().zip(columns)),
+        )
     }
 
     /// Element-wise membership test with per-column value sets.
@@ -99024,9 +101171,9 @@ impl DataFrame {
         // column-parallel helper as `isin`; the result is reassembled in the
         // original column order below. Missing dictionary entries retain the
         // all-False column required by pandas `DataFrame.isin(dict)`.
-        let columns = self.par_map_columns(&self.column_order, |name| {
-            let col = &self.columns[name];
-            if let Some(allowed) = per_column.get(name) {
+        let columns = self.par_map_column_positions_min(16_384, |pos| {
+            let col = self.column_at(pos).expect("column in bounds");
+            if let Some(allowed) = per_column.get(&self.column_order[pos]) {
                 let idx = IsinIndex::build(allowed);
                 let bitset = int_needle_membership_bitset(allowed);
                 isin_apply_column(col, &idx, bitset.as_ref())
@@ -99034,15 +101181,15 @@ impl DataFrame {
                 Ok(Column::from_bool_values(vec![false; col.len()]))
             }
         })?;
-        let mut new_cols = BTreeMap::new();
-        for (name, column) in self.column_order.iter().zip(columns) {
-            new_cols.insert(name.clone(), column);
-        }
         // pandas concatenates the per-column answers: the same labels, a new
         // Index (never a RangeIndex).
         let mut axis = self.column_order.clone();
         axis.range = None;
-        Self::new_with_axis(self.index.clone(), new_cols, axis)
+        Self::new_with_axis(
+            self.index.clone(),
+            ColumnStore::from_pairs(self.column_order.iter().cloned().zip(columns)),
+            axis,
+        )
     }
 
     /// Check whether this DataFrame is identical to another.
@@ -100866,11 +103013,12 @@ impl DataFrameGroupBy<'_> {
             // An object key (a datetime.date from s.dt.date) labels its group
             // as itself; it rendered as "Object(datetime.date(...))" (fvsao.66).
             Scalar::Object(object) => IndexLabel::Object(object.clone()),
-            // PERIOD and INTERVAL keys, which `IndexLabel` has no variant
-            // for (a representation gap, br-frankenpandas-no6s4), label as
-            // pandas prints them: a groupby over pd.cut printed
-            // 'Interval(Interval { .. })' (fvsao.54).
-            Scalar::Period(period) => IndexLabel::Utf8(period.calendar_string()),
+            // A PERIOD key is its own label, so the result is on a
+            // PeriodIndex (45fzr); an INTERVAL key, which `IndexLabel` has no
+            // variant for (br-frankenpandas-no6s4), labels as pandas prints
+            // it: a groupby over pd.cut printed 'Interval(Interval { .. })'
+            // (fvsao.54).
+            Scalar::Period(period) => IndexLabel::Period(*period),
             Scalar::Interval(interval) => IndexLabel::Utf8(interval.to_string()),
         }
     }
@@ -101059,7 +103207,12 @@ impl DataFrameGroupBy<'_> {
         }
     }
 
-    fn combine_group_stat_frames<F>(&self, stat: F) -> Result<DataFrame, FrameError>
+    /// `stat` of every group's frame (its value columns) stacked under the
+    /// group keys: pandas' `DataFrameGroupBy.corr` / `cov` shape, the inner
+    /// level keeping the stat frame's own index name (pandas' None; it was
+    /// 'index', c90rr). A caller with the options of its own stat runs it
+    /// here.
+    pub fn combine_group_stat_frames<F>(&self, stat: F) -> Result<DataFrame, FrameError>
     where
         F: Fn(&DataFrame) -> Result<DataFrame, FrameError>,
     {
@@ -101122,7 +103275,7 @@ impl DataFrameGroupBy<'_> {
             .map(|(name, values)| Ok((name, Column::from_values(values)?)))
             .collect::<Result<_, FrameError>>()?;
         let mut names: Vec<Option<LabelName>> = self.key_names.clone();
-        names.push(Some("index".into()));
+        names.push(stat_frames[0].index.name().cloned());
 
         DataFrame::new_with_axes(
             Index::new(flat_labels),
@@ -104995,6 +107148,27 @@ impl DataFrameGroupBy<'_> {
         self.aggregate_named_func("all")
     }
 
+    /// pandas' `any(skipna=...)` / `all(skipna=...)`: with `skipna=false` a
+    /// missing value is read, as numpy's bool of NaN, truthy - `any` of a
+    /// group holding one is True, and `all` is unchanged, a skipped value
+    /// never having made it False (br-frankenpandas-n57tz: the keyword was
+    /// unexpected). pandas' nullable dtypes answer `<NA>` instead (Kleene
+    /// logic); callers refuse those.
+    pub fn bool_reduce_with_skipna(
+        &self,
+        all: bool,
+        skipna: bool,
+    ) -> Result<DataFrame, FrameError> {
+        let reduced = if all { self.all()? } else { self.any()? };
+        if skipna || all {
+            return Ok(reduced);
+        }
+        self.with_missing_cells(&reduced, "any", |cell, missing| match cell {
+            Scalar::Bool(any) => Scalar::Bool(*any || missing),
+            other => other.clone(),
+        })
+    }
+
     /// GroupBy quantile.
     pub fn quantile(&self, q: f64) -> Result<DataFrame, FrameError> {
         if !(0.0..=1.0).contains(&q) {
@@ -106161,6 +108335,67 @@ impl DataFrameGroupBy<'_> {
             return Ok(df);
         }
         self.aggregate_named_func("nunique")
+    }
+
+    /// pandas' `nunique(dropna=...)`: with `dropna=false` a group's missing
+    /// values count as one more distinct value, column by column - a
+    /// column's group has one where its size passes its count
+    /// (br-frankenpandas-n57tz: the keyword was unexpected).
+    pub fn nunique_with_dropna(&self, dropna: bool) -> Result<DataFrame, FrameError> {
+        let unique = self.nunique()?;
+        if dropna {
+            return Ok(unique);
+        }
+        self.with_missing_cells(&unique, "nunique", |distinct, missing| match distinct {
+            Scalar::Int64(distinct) => Scalar::Int64(distinct + i64::from(missing)),
+            other => other.clone(),
+        })
+    }
+
+    /// `result` (one row per group, one column per value column) with each
+    /// cell passed through `combine` beside whether that group holds a
+    /// missing value in that column - a group whose size passes its count.
+    fn with_missing_cells(
+        &self,
+        result: &DataFrame,
+        op: &str,
+        combine: impl Fn(&Scalar, bool) -> Scalar,
+    ) -> Result<DataFrame, FrameError> {
+        let counts = self.count()?;
+        let sizes = self.size()?;
+        if counts.index().labels() != result.index().labels()
+            || sizes.len() != result.len()
+            || counts.num_columns() != result.num_columns()
+        {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "{op}: count and size grouped differently from the result"
+            )));
+        }
+        let mut columns = Vec::with_capacity(result.num_columns());
+        for position in 0..result.num_columns() {
+            let (Some(cells), Some(count)) =
+                (result.column_at(position), counts.column_at(position))
+            else {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "{op}: no column {position}"
+                )));
+            };
+            let values = cells
+                .values()
+                .iter()
+                .zip(count.values())
+                .zip(sizes.values())
+                .map(|((cell, count), size)| {
+                    let missing = matches!(
+                        (count, size),
+                        (Scalar::Int64(count), Scalar::Int64(size)) if size > count
+                    );
+                    combine(cell, missing)
+                })
+                .collect();
+            columns.push(Column::from_values(values)?);
+        }
+        Ok(result.with_columns_at_positions(columns))
     }
 
     /// GroupBy prod (product of non-null values per group).
@@ -107491,8 +109726,9 @@ impl DataFrameGroupBy<'_> {
                 "False".to_owned()
             }),
             Scalar::Object(object) => IndexLabel::Object(object.clone()),
-            // As pandas prints them (group_key_label; fvsao.54).
-            Scalar::Period(period) => IndexLabel::Utf8(period.calendar_string()),
+            // A period is its own label (45fzr); an interval as pandas
+            // prints it (group_key_label; fvsao.54).
+            Scalar::Period(period) => IndexLabel::Period(*period),
             Scalar::Interval(interval) => IndexLabel::Utf8(interval.to_string()),
             other => IndexLabel::Utf8(format!("{other:?}")),
         }
@@ -107517,12 +109753,11 @@ impl DataFrameGroupBy<'_> {
         let mut group_col_order = Vec::with_capacity(selected_cols.len());
 
         for col_name in selected_cols {
+            // A gather keeps the column's dtype: a float column whose group
+            // holds only NaN stays float64 (it was re-inferred from the
+            // values, and corr(numeric_only=True) then dropped it; c90rr).
             let col = &self.df.columns[col_name];
-            let group_vals: Vec<Scalar> = row_indices
-                .iter()
-                .map(|&i| col.values()[i].clone())
-                .collect();
-            group_cols.insert(col_name.clone(), Column::from_values(group_vals)?);
+            group_cols.insert(col_name.clone(), col.take_positions(row_indices));
             group_col_order.push(col_name.clone());
         }
 
@@ -109455,25 +111690,78 @@ impl DataFrameGroupBy<'_> {
     /// GroupBy cumulative sum. Matches `df.groupby(col).cumsum()`, dtype
     /// included: int64 and bool columns come back int64.
     pub fn cumsum(&self) -> Result<DataFrame, FrameError> {
+        self.refuse_cum_dtypes("cumsum")?;
         self.keep_integral_cum_columns(self.cumsum_f64()?, CumOp::Sum)
     }
 
     /// GroupBy cumulative product. Matches `df.groupby(col).cumprod()`, dtype
     /// included: int64 and bool columns come back int64.
     pub fn cumprod(&self) -> Result<DataFrame, FrameError> {
+        self.refuse_cum_dtypes("cumprod")?;
         self.keep_integral_cum_columns(self.cumprod_f64()?, CumOp::Prod)
     }
 
     /// GroupBy cumulative max. Matches `df.groupby(col).cummax()`, dtype
-    /// included: int64 stays int64 and bool stays bool.
+    /// included: int64 stays int64, bool stays bool and datetime64 keeps
+    /// its zone.
     pub fn cummax(&self) -> Result<DataFrame, FrameError> {
-        self.keep_integral_cum_columns(self.cummax_f64()?, CumOp::Max)
+        self.refuse_cum_dtypes("cummax")?;
+        let out = self.keep_integral_cum_columns(self.cummax_f64()?, CumOp::Max)?;
+        self.keep_datetime_cum_columns(out)
     }
 
     /// GroupBy cumulative min. Matches `df.groupby(col).cummin()`, dtype
-    /// included: int64 stays int64 and bool stays bool.
+    /// included: int64 stays int64, bool stays bool and datetime64 keeps
+    /// its zone.
     pub fn cummin(&self) -> Result<DataFrame, FrameError> {
-        self.keep_integral_cum_columns(self.cummin_f64()?, CumOp::Min)
+        self.refuse_cum_dtypes("cummin")?;
+        let out = self.keep_integral_cum_columns(self.cummin_f64()?, CumOp::Min)?;
+        self.keep_datetime_cum_columns(out)
+    }
+
+    /// pandas' refusals of a cumulative op by dtype: a text (object)
+    /// column is its cython NotImplementedError, and cumsum / cumprod of a
+    /// datetime64 one its TypeError. They were folded as all-NaN columns
+    /// (br-frankenpandas-cemrq).
+    fn refuse_cum_dtypes(&self, how: &str) -> Result<(), FrameError> {
+        for name in self.df.column_order.iter().filter(|c| !self.by.contains(c)) {
+            match self.df.columns[name].dtype() {
+                DType::Utf8 => {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "function is not implemented for this dtype: [how->{how},dtype->object]"
+                    )));
+                }
+                DType::Datetime64 { .. } if matches!(how, "cumsum" | "cumprod") => {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "datetime64 type does not support {how} operations"
+                    )));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// A datetime64 column's running max / min in its own dtype, zone
+    /// included (the fold's cells carry no zone).
+    fn keep_datetime_cum_columns(&self, mut out: DataFrame) -> Result<DataFrame, FrameError> {
+        let datetime: Vec<(String, DType)> = self
+            .df
+            .column_order
+            .iter()
+            .filter(|name| !self.by.contains(name))
+            .filter_map(|name| {
+                let dtype = self.df.columns[name].dtype();
+                matches!(dtype, DType::Datetime64 { .. }).then(|| (name.clone(), dtype))
+            })
+            .collect();
+        for (name, dtype) in datetime {
+            if let Some(column) = out.column(&name) {
+                let column = column.with_dtype(dtype);
+                out = out.with_column(name, column)?;
+            }
+        }
+        Ok(out)
     }
 
     /// pandas keeps an all-valid int64 column int64 through groupby
@@ -109622,8 +111910,12 @@ impl DataFrameGroupBy<'_> {
         ) {
             return Ok(df);
         }
-        // Per br-frankenpandas-ccf67: Timedelta cummax preserves dtype.
+        // Per br-frankenpandas-ccf67: Timedelta cummax preserves dtype;
+        // datetime64 too (it was all-NaN; br-frankenpandas-cemrq).
         self.transform_groups(|vals| {
+            if let Some(running) = running_datetime_extreme(vals, true) {
+                return running;
+            }
             if vals_are_timedelta(vals) {
                 let mut acc: Option<i64> = None;
                 return vals
@@ -109666,8 +111958,12 @@ impl DataFrameGroupBy<'_> {
         ) {
             return Ok(df);
         }
-        // Per br-frankenpandas-ccf67: Timedelta cummin preserves dtype.
+        // Per br-frankenpandas-ccf67: Timedelta cummin preserves dtype;
+        // datetime64 too (it was all-NaN; br-frankenpandas-cemrq).
         self.transform_groups(|vals| {
+            if let Some(running) = running_datetime_extreme(vals, false) {
+                return running;
+            }
             if vals_are_timedelta(vals) {
                 let mut acc: Option<i64> = None;
                 return vals
@@ -110233,45 +112529,27 @@ impl DataFrameGroupBy<'_> {
         if let Some(df) = self.try_pct_change_dense(periods) {
             return Ok(df);
         }
-        self.transform_groups(|vals| {
-            // pandas groupby.pct_change default fill_method='ffill' forward-fills
-            // within each group before computing. (br-frankenpandas-c3zld)
-            let vals = forward_fill_scalars(vals);
-            let group_len = vals.len() as i64;
-            vals.iter()
-                .enumerate()
-                .map(|(i, v)| {
-                    let prev_idx = (i as i64).checked_sub(periods).unwrap_or(-1);
-                    if prev_idx < 0 || prev_idx >= group_len {
-                        return Scalar::Null(NullKind::NaN);
-                    }
-                    let prev = &vals[prev_idx as usize];
-                    if v.is_missing() || prev.is_missing() {
-                        return Scalar::Null(NullKind::NaN);
-                    }
-                    // Per br-frankenpandas-dj6rv: Timedelta64 pct_change
-                    // matches pandas — ns deltas divide as dimensionless f64.
-                    if let (Scalar::Timedelta64(cur_ns), Scalar::Timedelta64(prev_ns)) = (v, prev) {
-                        if *cur_ns == Timedelta::NAT || *prev_ns == Timedelta::NAT {
-                            return Scalar::Null(NullKind::NaN);
-                        }
-                        let prev_f = *prev_ns as f64;
-                        if prev_f.abs() < f64::EPSILON {
-                            return Scalar::Null(NullKind::NaN);
-                        }
-                        return Scalar::Float64((*cur_ns as f64 - prev_f) / prev_f);
-                    }
-                    if let (Ok(curr), Ok(prv)) = (v.to_f64(), prev.to_f64()) {
-                        if prv.abs() < f64::EPSILON {
-                            Scalar::Null(NullKind::NaN)
-                        } else {
-                            Scalar::Float64((curr - prv) / prv)
-                        }
-                    } else {
-                        Scalar::Null(NullKind::NaN)
-                    }
-                })
-                .collect()
+        // pandas groupby.pct_change default fill_method='ffill' forward-fills
+        // within each group before computing. (br-frankenpandas-c3zld)
+        self.transform_groups(|vals| group_pct_change(&forward_fill_scalars(vals), periods))
+    }
+
+    /// pandas' `pct_change(periods, fill_method, limit)` of each group, column
+    /// by column (see `SeriesGroupBy::pct_change_with_fill`).
+    pub fn pct_change_with_fill(
+        &self,
+        periods: i64,
+        fill_method: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<DataFrame, FrameError> {
+        let direction = pct_change_fill_direction(fill_method)?;
+        if direction == Some(true) && limit.is_none() {
+            return self.pct_change(periods);
+        }
+        let periods = clamp_periods(periods, self.df.len());
+        self.transform_groups(|vals| match direction {
+            Some(forward) => group_pct_change(&fill_scalars_limited(vals, forward, limit), periods),
+            None => group_pct_change(vals, periods),
         })
     }
 
@@ -110549,7 +112827,10 @@ impl DataFrameGroupBy<'_> {
                     IndexLabel::Int64(g) => format!("{g}|{stat}"),
                     IndexLabel::Timedelta64(ns) => format!("{}|{stat}", Timedelta::format(*ns)),
                     IndexLabel::Datetime64(ns) => format!("{}|{stat}", format_datetime_ns(*ns)),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
+                    f @ (IndexLabel::Float64(_)
+                    | IndexLabel::Bool(_)
+                    | IndexLabel::Object(_)
+                    | IndexLabel::Period(_)) => {
                         format!("{f}|{stat}")
                     }
                     IndexLabel::Null(_) => format!("{group_label}|{stat}"),
@@ -110657,9 +112938,10 @@ impl DataFrameGroupBy<'_> {
                 IndexLabel::Int64(v) => v.to_string(),
                 IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                 IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Object(_)) => {
-                    f.to_string()
-                }
+                f @ (IndexLabel::Float64(_)
+                | IndexLabel::Bool(_)
+                | IndexLabel::Object(_)
+                | IndexLabel::Period(_)) => f.to_string(),
                 IndexLabel::Null(_) => label.to_string(),
             };
             if label_str == name {
@@ -111055,6 +113337,23 @@ impl DataFrameGroupBy<'_> {
         })
     }
 
+    /// pandas' `skew(skipna=...)`: with `skipna=false` a group holding a
+    /// missing value in a column is NaN there (br-frankenpandas-n57tz: the
+    /// keyword was unexpected).
+    pub fn skew_with_skipna(&self, skipna: bool) -> Result<DataFrame, FrameError> {
+        let skew = self.skew()?;
+        if skipna {
+            return Ok(skew);
+        }
+        self.with_missing_cells(&skew, "skew", |cell, missing| {
+            if missing {
+                Scalar::Float64(f64::NAN)
+            } else {
+                cell.clone()
+            }
+        })
+    }
+
     /// Skewness per group (Fisher's definition, bias=False).
     ///
     /// Matches `groupby.skew()`.
@@ -111226,9 +113525,33 @@ impl DataFrameGroupBy<'_> {
             let mut highs = Vec::with_capacity(group_order.len());
             let mut lows = Vec::with_capacity(group_order.len());
             let mut closes = Vec::with_capacity(group_order.len());
+            // An int column holding no missing value keeps int64, as pandas
+            // (every group has a value; it was float64, c90rr).
+            let keep_int = col.dtype() == DType::Int64 && !col.has_any_missing();
 
             for gkey in &group_order {
                 let row_indices = &groups[gkey];
+                if keep_int {
+                    let ints: Vec<i64> = row_indices
+                        .iter()
+                        .filter_map(|&i| match col.values()[i] {
+                            Scalar::Int64(value) => Some(value),
+                            _ => None,
+                        })
+                        .collect();
+                    if let (Some(&open), Some(&close), Some(&high), Some(&low)) = (
+                        ints.first(),
+                        ints.last(),
+                        ints.iter().max(),
+                        ints.iter().min(),
+                    ) {
+                        opens.push(Scalar::Int64(open));
+                        highs.push(Scalar::Int64(high));
+                        lows.push(Scalar::Int64(low));
+                        closes.push(Scalar::Int64(close));
+                        continue;
+                    }
+                }
                 let gv: Vec<f64> = row_indices
                     .iter()
                     .filter_map(|&i| {
@@ -112795,8 +115118,9 @@ mod tests {
         SORTED_UNIQUE_UNION_FINGERPRINT_CACHE, SORTED_UNIQUE_UNION_FINGERPRINT_CACHE_MAX, Series,
         SortedUniqueUnionFingerprintKey, ToNumericErrors, ToNumericOptions, TzAmbiguousPolicy,
         TzLocalizeOptions, TzNonexistentPolicy, align_union, align_union_duplicate_aware,
-        align_union_sorted_unique, cut, datetime64_label_from_naive, format_period_label,
-        index_to_frame, index_to_series, int64_unit_range_alignment, parse_datetime64_nanos,
+        align_union_sorted_unique, centered_offset_window_bounds, cut, datetime64_label_from_naive,
+        fixed_window_bounds, format_period_label, index_to_frame, index_to_series,
+        int64_unit_range_alignment, offset_window_bounds, parse_datetime64_nanos,
         parse_naive_datetime_value, qcut, record_alignment_semantic_witness,
         semantic_index_identity, semantic_int64_unit_range_labels_fingerprint,
         semantic_integer_index_labels_fingerprint, semantic_sorted_unique_union_output_fingerprint,
@@ -119059,15 +121383,21 @@ mod tests {
     }
 
     #[test]
-    fn dataframe_reindex_with_method_absent_uses_column_dtype_missing_sentinel() {
-        // A genuinely-absent label (a leading gap under ffill) must be filled
-        // with the column's dtype-appropriate missing sentinel, matching plain
-        // `reindex` and the Series variant — NOT a hardcoded Float64 NaN. For an
-        // Int64 column `missing_for_dtype` is `Null(NullKind::Null)`. The old
-        // DataFrame path hardcoded `Null(NullKind::NaN)`, diverging on non-float
-        // columns.
+    fn dataframe_reindex_with_method_absent_is_an_invented_gap() {
+        // A genuinely-absent label (a leading gap under ffill) is a gap pandas
+        // invents, as plain `reindex` fills it: measured on pandas 2.2.3,
+        // DataFrame({'n': [10, 20], 's': ['a', 'b']}, index=[18, 19])
+        // .reindex([17, 18, 19], method='ffill') is n float64 [NaN, 10.0,
+        // 20.0] and s object [nan, 'a', 'b']. (This test pinned an int64
+        // column holding a Null gap, which pandas cannot hold.)
         let df = DataFrame::from_dict_with_index(
-            vec![("n", vec![Scalar::Int64(10), Scalar::Int64(20)])],
+            vec![
+                ("n", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+                (
+                    "s",
+                    vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into())],
+                ),
+            ],
             vec![18_i64.into(), 19_i64.into()],
         )
         .unwrap();
@@ -119077,16 +121407,96 @@ mod tests {
         let result = df
             .reindex_with_method(vec![17_i64.into(), 18_i64.into(), 19_i64.into()], "ffill")
             .unwrap();
-        let v = result.column("n").unwrap().values();
-        assert_eq!(v.len(), 3);
-        // Dtype-appropriate missing sentinel for the absent slot, not NaN.
-        assert_eq!(v[0], Scalar::Null(NullKind::Null));
-        assert_ne!(v[0], Scalar::Null(NullKind::NaN));
-        assert_eq!(v[1], Scalar::Int64(10));
-        assert_eq!(v[2], Scalar::Int64(20));
+        let n = result.column("n").unwrap();
+        assert_eq!(n.dtype(), DType::Float64);
+        assert!(n.values()[0].is_missing());
+        assert_eq!(n.values()[1], Scalar::Float64(10.0));
+        assert_eq!(n.values()[2], Scalar::Float64(20.0));
+        let s = result.column("s").unwrap().values();
+        assert_eq!(s[0], Scalar::Null(NullKind::NaN));
+        assert_eq!(s[1], Scalar::Utf8("a".into()));
+    }
+
+    #[test]
+    fn reindex_with_method_limit_and_tolerance_bound_the_fill_u6p7i() {
+        // Measured on pandas 2.2.3 over Series([1.0, 2.0, 3.0], index=[0, 5,
+        // 10]) and target [0, 1, 2, 3, 4, 6, 9, 11, 14, 20].
+        let s = Series::from_values(
+            "x",
+            vec![0_i64.into(), 5_i64.into(), 10_i64.into()],
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0),
+            ],
+        )
+        .unwrap();
+        let target: Vec<IndexLabel> = [0_i64, 1, 2, 3, 4, 6, 9, 11, 14, 20]
+            .into_iter()
+            .map(IndexLabel::from)
+            .collect();
+        let values = |method: &str, limit: Option<usize>, tolerance: Option<f64>| {
+            let tolerance = tolerance.map(|t| vec![t; target.len()]);
+            s.reindex_with_method_options(target.clone(), method, limit, tolerance.as_deref())
+                .unwrap()
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Float64(x) if !x.is_nan() => Some(*x),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let (n, a, b, c) = (None, Some(1.0), Some(2.0), Some(3.0));
+        // limit counts outward from each source row; exact labels do not count.
+        assert_eq!(values("pad", Some(2), None), [a, a, a, n, n, b, b, c, c, n]);
+        assert_eq!(
+            values("bfill", Some(1), None),
+            [a, n, n, n, b, n, c, n, n, n]
+        );
+        assert_eq!(
+            values("nearest", Some(1), None),
+            [a, a, n, n, b, b, c, c, n, n]
+        );
+        // tolerance keeps a row at most that far from the target label.
+        assert_eq!(
+            values("pad", None, Some(2.0)),
+            [a, a, a, n, n, b, n, c, n, n]
+        );
+        assert_eq!(
+            values("nearest", None, Some(2.5)),
+            [a, a, a, b, b, b, c, c, n, n]
+        );
+        // NEGATIVE: without limit or tolerance every label past the first fills.
+        assert_eq!(values("pad", None, None), [a, a, a, a, a, b, b, c, c, c]);
     }
 
     // ---- Series comparison operator tests ----
+
+    #[test]
+    fn two_series_results_share_a_name_or_have_none_u6p7i() {
+        // Measured on pandas 2.2.3: Series([1, 2], name='a') compared with or
+        // raised to a Series named 'b' is unnamed (fp named them 'a==b' / 'a');
+        // with a Series named 'a' it keeps 'a'.
+        let named = |name: &str, values: [i64; 2]| {
+            Series::from_values(
+                name,
+                vec![0_i64.into(), 1_i64.into()],
+                values.into_iter().map(Scalar::Int64).collect(),
+            )
+            .unwrap()
+        };
+        let (a, b) = (named("a", [1, 2]), named("b", [1, 3]));
+        let unnamed = super::LabelName::default();
+        assert_eq!(a.eq_series(&b).unwrap().name(), &unnamed);
+        assert_eq!(a.lt(&b).unwrap().name(), &unnamed);
+        assert_eq!(a.power(&b).unwrap().name(), &unnamed);
+        assert_eq!(a.remainder(&b).unwrap().name(), &unnamed);
+        // NEGATIVE: a shared name is kept.
+        let same = named("a", [1, 3]);
+        assert_eq!(a.eq_series(&same).unwrap().name(), a.name());
+        assert_eq!(a.power(&same).unwrap().name(), a.name());
+    }
 
     #[test]
     fn series_gt_basic() {
@@ -124037,6 +126447,415 @@ mod tests {
     }
 
     #[test]
+    fn series_iloc_slice_empty_keeps_the_dtype_gzune() {
+        // MEASURED, live pandas 2.2.3: pd.Series([10, 20]).iloc[:0] and
+        // .iloc[5:] are int64 (fp gave object: the empty window was rebuilt
+        // from no values), a float Series' float64.
+        let ints = Series::from_values(
+            "vals",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .unwrap();
+        for (start, stop) in [(Some(0), Some(0)), (Some(5), None), (Some(1), Some(1))] {
+            let out = ints.iloc_slice(start, stop).unwrap();
+            assert_eq!(out.len(), 0);
+            assert_eq!(out.column().dtype(), DType::Int64);
+            assert_eq!(out.name(), "vals");
+        }
+        let floats =
+            Series::from_values("f", vec![0_i64.into()], vec![Scalar::Float64(1.5)]).unwrap();
+        assert_eq!(
+            floats
+                .iloc_slice(Some(0), Some(0))
+                .unwrap()
+                .column()
+                .dtype(),
+            DType::Float64
+        );
+        // NEGATIVE: a non-empty window, as before.
+        assert_eq!(
+            ints.iloc_slice(Some(1), None).unwrap().column().values(),
+            &[Scalar::Int64(20)]
+        );
+    }
+
+    #[test]
+    fn series_replace_holds_what_it_writes_y1092() {
+        // MEASURED, live pandas 2.2.3: pd.Series([1, 2, 1]).replace(1, np.nan)
+        // is float64, .replace(1, None) object; a float column's None is
+        // object; Int64 stays Int64; the key 1 finds 1.0. fp kept int64
+        // holding the missing, dropped Int64, and missed 1.0.
+        let labels = vec![0_i64.into(), 1_i64.into(), 2_i64.into()];
+        let ints = Series::from_values(
+            "v",
+            labels.clone(),
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1)],
+        )
+        .unwrap();
+        let nan = ints
+            .replace(&[(Scalar::Int64(1), Scalar::Null(NullKind::NaN))])
+            .unwrap();
+        assert_eq!(nan.column().dtype(), DType::Float64);
+        assert_eq!(nan.column().values()[1], Scalar::Float64(2.0));
+        assert!(nan.column().values()[0].is_missing());
+        let none = ints
+            .replace(&[(Scalar::Int64(1), Scalar::Null(NullKind::Null))])
+            .unwrap();
+        assert_eq!(none.column().dtype(), DType::Utf8); // object
+        assert_eq!(none.column().values()[0], Scalar::Null(NullKind::Null));
+        assert_eq!(none.column().values()[1], Scalar::Int64(2));
+        let floats = Series::from_values(
+            "f",
+            labels[..2].to_vec(),
+            vec![Scalar::Float64(1.5), Scalar::Float64(1.0)],
+        )
+        .unwrap();
+        assert_eq!(
+            floats
+                .replace(&[(Scalar::Int64(1), Scalar::Float64(0.0))])
+                .unwrap()
+                .column()
+                .values(),
+            &[Scalar::Float64(1.5), Scalar::Float64(0.0)]
+        );
+        assert_eq!(
+            floats
+                .replace(&[(Scalar::Float64(1.5), Scalar::Null(NullKind::Null))])
+                .unwrap()
+                .column()
+                .dtype(),
+            DType::Utf8
+        );
+        let nullable = Series::new(
+            "n",
+            Index::new(labels[..2].to_vec()),
+            Column::new(
+                DType::Int64Nullable,
+                vec![Scalar::Int64(1), Scalar::Int64(2)],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        for value in [Scalar::Int64(5), Scalar::Null(NullKind::Null)] {
+            let out = nullable.replace(&[(Scalar::Int64(1), value)]).unwrap();
+            assert_eq!(out.column().dtype(), DType::Int64Nullable);
+        }
+        // NEGATIVE: no hit keeps int64; a NaN written into float64 stays.
+        let missed = ints
+            .replace(&[(Scalar::Int64(9), Scalar::Null(NullKind::Null))])
+            .unwrap();
+        assert_eq!(missed.column().dtype(), DType::Int64);
+        assert_eq!(
+            floats
+                .replace(&[(Scalar::Float64(1.5), Scalar::Null(NullKind::NaN))])
+                .unwrap()
+                .column()
+                .dtype(),
+            DType::Float64
+        );
+    }
+
+    #[test]
+    fn series_replace_regex_cells_writes_the_value_whole_otatv() {
+        // MEASURED, live pandas 2.2.3: pd.Series(['34', 'x', 'y1'])
+        // .replace(r'^\D+$', np.nan, regex=True) is ['34', nan, 'y1'] (fp
+        // stored the text 'nan'); r'\d' finds '34' and 'y1' whole; every cell
+        // NaN is float64.
+        let text = Series::from_values(
+            "t",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Utf8("34".into()),
+                Scalar::Utf8("x".into()),
+                Scalar::Utf8("y1".into()),
+            ],
+        )
+        .unwrap();
+        let nan = Scalar::Null(NullKind::NaN);
+        let out = text.replace_regex_cells(r"^\D+$", &nan).unwrap();
+        assert_eq!(out.column().values()[0], Scalar::Utf8("34".into()));
+        assert!(out.column().values()[1].is_missing());
+        let found = text.replace_regex_cells(r"\d", &Scalar::Int64(0)).unwrap();
+        assert_eq!(
+            found.column().values(),
+            &[Scalar::Int64(0), Scalar::Utf8("x".into()), Scalar::Int64(0)]
+        );
+        let all = text.replace_regex_cells(r".*", &nan).unwrap();
+        assert_eq!(all.column().dtype(), DType::Float64);
+        // NEGATIVE: no match leaves the Series as it was.
+        let none = text.replace_regex_cells(r"^zzz$", &nan).unwrap();
+        assert_eq!(none.column().values(), text.column().values());
+    }
+
+    #[test]
+    fn rolling_window_indexers_close_as_pandas_n57tz() {
+        // MEASURED, live pandas 2.2.3: pd.Series([1..6]).rolling(3,
+        // closed=c, min_periods=1).sum() - left [nan,1,3,6,9,12], both
+        // [1,3,6,10,14,18], neither [nan,1,3,5,7,9]; centred closed='both'
+        // at row 1 sums rows 0..=2.
+        let fixed = |center, closed| fixed_window_bounds(6, 3, center, closed);
+        assert_eq!(
+            fixed(false, IntervalClosed::Left)[..4],
+            [(0, 0), (0, 1), (0, 2), (0, 3)]
+        );
+        assert_eq!(fixed(false, IntervalClosed::Both)[3], (0, 4));
+        assert_eq!(fixed(false, IntervalClosed::Neither)[3], (1, 3));
+        assert_eq!(fixed(true, IntervalClosed::Both)[1], (0, 3));
+        assert_eq!(fixed(true, IntervalClosed::Left)[5], (3, 6));
+        // Times 00:00, 01:00 x3, 02:00, 02:30 with a 1h window: closed='left'
+        // at the second 01:00 holds 00:00 only (the other 01:00 rows are
+        // not before it); 'right' at the first 01:00 stops at itself.
+        let hour = 3_600_000_000_000_i64;
+        let ts = [0, hour, hour, hour, 2 * hour, 5 * hour / 2];
+        let left = offset_window_bounds(&ts, hour, IntervalClosed::Left);
+        assert_eq!(left[2], (0, 1));
+        assert_eq!(left[4], (1, 4));
+        let right = offset_window_bounds(&ts, hour, IntervalClosed::Right);
+        assert_eq!(right[1], (1, 2));
+        assert_eq!(right[4], (4, 5));
+        let neither = offset_window_bounds(&ts, hour, IntervalClosed::Neither);
+        assert_eq!(neither[4], (4, 4));
+        assert_eq!(neither[5], (4, 5));
+        // NEGATIVE: 'right' is the plain trailing window.
+        let plain = fixed(false, IntervalClosed::Right);
+        assert_eq!(plain[..3], [(0, 1), (0, 2), (0, 3)]);
+        assert_eq!(plain[5], (3, 6));
+    }
+
+    #[test]
+    fn centered_offset_window_bounds_as_pandas_gv69z() {
+        // Days 0, 1, 3, 4, 8 with a 3-day window centred on each row, as
+        // pandas' calculate_variable_window_bounds (its 3D centred sums of
+        // 1, 2, NaN, 4, 5 are 3, 3, 4, 4, 5).
+        let day = 86_400_000_000_000_i64;
+        let ts = [0, day, 3 * day, 4 * day, 8 * day];
+        assert_eq!(
+            centered_offset_window_bounds(&ts, 3 * day, IntervalClosed::Right),
+            [(0, 2), (0, 2), (2, 4), (2, 4), (4, 5)]
+        );
+        // closed='both' takes a row a half window away on either side.
+        let both = centered_offset_window_bounds(&ts, 2 * day, IntervalClosed::Both);
+        assert_eq!(both[1], (0, 2));
+        assert!(centered_offset_window_bounds(&[], day, IntervalClosed::Right).is_empty());
+        // NEGATIVE: the trailing window at day 3 holds days 1 and 3.
+        assert_eq!(
+            offset_window_bounds(&ts, 3 * day, IntervalClosed::Right)[2],
+            (1, 3)
+        );
+    }
+
+    #[test]
+    fn dataframe_rolling_along_on_passes_it_through_n57tz() {
+        // MEASURED, live pandas 2.2.3: df.rolling('2D', on='t').sum() keeps
+        // t as it was, in its place, and sums a within two days of t.
+        let day = 86_400_000_000_000_i64;
+        let df = DataFrame::from_dict(
+            &["t", "a"],
+            vec![
+                (
+                    "t",
+                    vec![
+                        Scalar::Datetime64(0),
+                        Scalar::Datetime64(day),
+                        Scalar::Datetime64(3 * day),
+                    ],
+                ),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let out = df
+            .rolling_offset("2D", None, IntervalClosed::Right, Some("t"))
+            .unwrap()
+            .sum()
+            .unwrap();
+        assert_eq!(out.column_names(), vec!["t", "a"]);
+        assert_eq!(
+            out.column("t").unwrap().values(),
+            df.column("t").unwrap().values()
+        );
+        assert_eq!(
+            out.column("a").unwrap().values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(3.0)
+            ]
+        );
+        // NEGATIVE: no such column is pandas' error.
+        assert!(
+            df.rolling_offset("2D", None, IntervalClosed::Right, Some("zz"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn ewm_ignore_na_and_times_deltas_e429f() {
+        // MEASURED, live pandas 2.2.3: pd.Series([1, 2, 3, nan, 5, 6])
+        // .ewm(span=2, ignore_na=True).mean() is [1, 1.75, 2.615385,
+        // 2.615385, 4.225, 5.413223] and .var() row 4 2.819231;
+        // pd.Series([10., ..., 60.]).ewm(halflife='1D', times=days 0, 1, 3,
+        // 4, 7, 8).mean() is [10, 16.666667, 26.363636, 34.444444,
+        // 47.290323, 55.206813] (com 1: alpha 0.5, decay 0.5 ** days).
+        let labels: Vec<IndexLabel> = (0..6_i64).map(Into::into).collect();
+        let gappy = Series::from_values(
+            "s",
+            labels.clone(),
+            [1.0, 2.0, 3.0, f64::NAN, 5.0, 6.0]
+                .iter()
+                .map(|v| Scalar::Float64(*v))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let close = |series: &Series, want: &[f64]| {
+            series
+                .column()
+                .values()
+                .iter()
+                .zip(want)
+                .all(|(got, want)| (got.to_f64().unwrap() - want).abs() < 1e-6)
+        };
+        let ignoring = gappy.ewm(Some(2.0), None).ignoring_na(true);
+        assert!(close(
+            &ignoring.mean().unwrap(),
+            &[1.0, 1.75, 2.615_385, 2.615_385, 4.225, 5.413_223]
+        ));
+        let var = ignoring.var().unwrap();
+        assert!((var.column().values()[4].to_f64().unwrap() - 2.819_231).abs() < 1e-6);
+        let tens = Series::from_values(
+            "w",
+            labels,
+            [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+                .iter()
+                .map(|v| Scalar::Float64(*v))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let timed = tens
+            .ewm(None, Some(0.5))
+            .with_deltas(vec![1.0, 2.0, 1.0, 3.0, 1.0]);
+        assert!(close(
+            &timed.mean().unwrap(),
+            &[
+                10.0, 16.666_667, 26.363_636, 34.444_444, 47.290_323, 55.206_813
+            ]
+        ));
+        // NEGATIVE: ignore_na=False decays through the gap (row 4 differs),
+        // and the deltas change only mean.
+        let plain = gappy.ewm(Some(2.0), None).mean().unwrap();
+        assert!((plain.column().values()[4].to_f64().unwrap() - 4.225).abs() > 1e-3);
+        assert!(
+            timed
+                .var()
+                .unwrap()
+                .equals(&tens.ewm(None, Some(0.5)).var().unwrap())
+        );
+    }
+
+    #[test]
+    fn series_groupby_nlargest_keeps_the_group_level_rqeqs() {
+        // MEASURED, live pandas 2.2.3: df.groupby('g').w.nlargest(1) for
+        // g = [a, a, b, a, b, b], w = [10, ..., 60] is (a, 3) 40, (b, 5) 60,
+        // the levels named ['g', None]; fp dropped the group level.
+        let labels: Vec<IndexLabel> = (0..6_i64).map(Into::into).collect();
+        let w = Series::from_values(
+            "w",
+            labels.clone(),
+            (1..=6_i64)
+                .map(|v| Scalar::Int64(v * 10))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let g = Series::from_values(
+            "g",
+            labels,
+            ["a", "a", "b", "a", "b", "b"]
+                .iter()
+                .map(|k| Scalar::Utf8((*k).into()))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let out = w.groupby(&g).unwrap().nlargest(1).unwrap();
+        assert_eq!(
+            out.column().values(),
+            &[Scalar::Int64(40), Scalar::Int64(60)]
+        );
+        let levels = out.index().row_multiindex().expect("a MultiIndex");
+        assert_eq!(
+            levels.get_level_values(0).unwrap().labels(),
+            &[IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())]
+        );
+        assert_eq!(
+            levels.get_level_values(1).unwrap().labels(),
+            &[IndexLabel::Int64(3), IndexLabel::Int64(5)]
+        );
+        assert_eq!(
+            levels.names()[0].as_ref().map(ToString::to_string),
+            Some("g".to_owned())
+        );
+        // NEGATIVE: head keeps the rows' own labels (a filter).
+        let head = w.groupby(&g).unwrap().head(1).unwrap();
+        assert!(head.index().row_multiindex().is_none());
+    }
+
+    #[test]
+    fn window_ddof_bias_and_count_of_any_dtype_n57tz() {
+        // MEASURED, live pandas 2.2.3 over pd.Series([1., 2., 4., 7., 11.]):
+        // rolling(3).var(ddof=0)[2] 1.555556, .sem(ddof=0)[2] 0.881917 (the
+        // ddof-1 std over sqrt(3)), .cov(s ** 2, ddof=0)[2] 8.0, .corr(s ** 2,
+        // ddof=5) NaN; expanding().sem(ddof=2)[1] inf; ewm(span=3).var(bias=
+        // True)[1] 0.222222; a text column's rolling(2).count() counts it.
+        let s = Series::from_values(
+            "s",
+            (0..5_i64).map(Into::into).collect::<Vec<_>>(),
+            [1.0, 2.0, 4.0, 7.0, 11.0]
+                .iter()
+                .map(|v| Scalar::Float64(*v))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let squares = s.mul(&s).unwrap();
+        let at = |series: Series, row: usize| series.column().values()[row].to_f64().unwrap();
+        let close = |got: f64, want: f64| (got - want).abs() < 1e-6;
+        let windows = s.rolling(3, None);
+        assert!(close(at(windows.var_ddof(0).unwrap(), 2), 1.555_556));
+        assert!(close(at(windows.sem_ddof(0).unwrap(), 2), 0.881_917));
+        assert!(close(at(windows.cov_ddof(&squares, 0).unwrap(), 2), 8.0));
+        assert!(windows.corr_ddof(&squares, 5).unwrap().column().values()[2].is_missing());
+        assert!(at(s.expanding(None).sem_ddof(2).unwrap(), 1).is_infinite());
+        let ewm = s.ewm(Some(3.0), None);
+        assert!(close(at(ewm.var_bias(true).unwrap(), 1), 0.222_222));
+        let text = DataFrame::from_dict(
+            &["c"],
+            vec![(
+                "c",
+                vec![
+                    Scalar::Utf8("x".into()),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Utf8("z".into()),
+                ],
+            )],
+        )
+        .unwrap();
+        let count = text.rolling(2, None).count().unwrap();
+        assert_eq!(count.column_names(), vec!["c"]);
+        assert_eq!(count.column("c").unwrap().values()[1], Scalar::Float64(1.0));
+        // NEGATIVE: ddof 1 and bias False are the plain results (NaN equal
+        // NaN, as pandas' equals).
+        assert!(windows.var_ddof(1).unwrap().equals(&windows.var().unwrap()));
+        assert!(ewm.var_bias(false).unwrap().equals(&ewm.var().unwrap()));
+        assert!(!ewm.var_bias(true).unwrap().equals(&ewm.var().unwrap()));
+    }
+
+    #[test]
     fn series_sort_index_ascending_orders_labels_and_keeps_values_aligned() {
         let s = Series::from_values(
             "vals",
@@ -126330,7 +129149,9 @@ mod tests {
             IndexLabel::Float64(_)
         ));
 
-        // Period labels still have no IndexLabel variant and remain rejected.
+        // TEST-CHANGE (45fzr): a period column is a PeriodIndex's labels,
+        // as pandas' set_index (it was rejected: IndexLabel had no Period
+        // variant). The rejection still holds for an interval column.
         let df_period = DataFrame::from_dict(
             &["id", "v"],
             vec![
@@ -126345,7 +129166,29 @@ mod tests {
             ],
         )
         .unwrap();
-        let err = df_period.set_index("id", true).unwrap_err();
+        let indexed = df_period.set_index("id", true).unwrap();
+        assert_eq!(
+            indexed.index().labels(),
+            &[
+                IndexLabel::Period(Period::new(0, PeriodFreq::Daily)),
+                IndexLabel::Period(Period::new(1, PeriodFreq::Daily)),
+            ]
+        );
+        let df_interval = DataFrame::from_dict(
+            &["id", "v"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Interval(fp_types::Interval::new(0.0, 1.0, IntervalClosed::Right)),
+                        Scalar::Interval(fp_types::Interval::new(1.0, 2.0, IntervalClosed::Right)),
+                    ],
+                ),
+                ("v", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+        )
+        .unwrap();
+        let err = df_interval.set_index("id", true).unwrap_err();
         assert!(
             matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("set_index currently supports"))
         );
@@ -126480,7 +129323,87 @@ mod tests {
         .unwrap();
         let err = collision.reset_index(false).unwrap_err();
         assert!(
-            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("both 'index' and 'level_0'"))
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg == "cannot insert level_0, already exists")
+        );
+    }
+
+    #[test]
+    fn dataframe_reset_index_allow_duplicates_n57tz() {
+        // Index 'a' = [5, 6] beside column 'a' = [1, 2].
+        let named = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Int64(5), Scalar::Int64(6)]),
+                ("b", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+        )
+        .unwrap()
+        .set_index("a", true)
+        .unwrap()
+        .rename_columns(&[("b", "a")])
+        .unwrap();
+        // NEGATIVE: without allow_duplicates the clash is pandas' ValueError.
+        let err = named
+            .reset_index_allow_duplicates(false, false)
+            .unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg == "cannot insert a, already exists")
+        );
+        // With it, the index column leads and the column keeps its values.
+        let out = named.reset_index_allow_duplicates(false, true).unwrap();
+        assert_eq!(out.column_names(), vec!["a", "a"]);
+        assert_eq!(
+            out.column_at(0).unwrap().values(),
+            &[Scalar::Int64(5), Scalar::Int64(6)]
+        );
+        assert_eq!(
+            out.column_at(1).unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+
+        // An unnamed index beside 'index' and 'level_0' repeats 'level_0'.
+        let both = DataFrame::from_dict_with_index(
+            vec![
+                ("index", vec![Scalar::Int64(1)]),
+                ("level_0", vec![Scalar::Int64(2)]),
+            ],
+            vec![IndexLabel::from(0_i64)],
+        )
+        .unwrap();
+        let out = both.reset_index_allow_duplicates(false, true).unwrap();
+        assert_eq!(out.column_names(), vec!["level_0", "index", "level_0"]);
+        assert_eq!(out.column_at(2).unwrap().values(), &[Scalar::Int64(2)]);
+
+        // A row MultiIndex names its LAST clashing level, as pandas inserts
+        // the levels last first; allowed, every level column leads.
+        let frame = DataFrame::from_dict(
+            &["a", "v"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("v", vec![Scalar::Int64(3), Scalar::Int64(4)]),
+            ],
+        )
+        .unwrap();
+        let multi = frame.set_index_multi(&["a", "v"], false, "|").unwrap();
+        let err = multi.reset_index(false).unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg == "cannot insert v, already exists")
+        );
+        let out = multi.reset_index_allow_duplicates(false, true).unwrap();
+        assert_eq!(out.column_names(), vec!["a", "v", "a", "v"]);
+        assert_eq!(
+            out.column_at(3).unwrap().values(),
+            &[Scalar::Int64(3), Scalar::Int64(4)]
+        );
+
+        // Flags that refuse duplicate labels refuse the keyword itself.
+        let mut strict = named.clone();
+        strict.allows_duplicate_labels = false;
+        let err = strict
+            .reset_index_allow_duplicates(false, true)
+            .unwrap_err();
+        assert!(
+            matches!(err, FrameError::CompatibilityRejected(msg) if msg.starts_with("Cannot specify 'allow_duplicates=True'"))
         );
     }
 
@@ -127073,6 +129996,261 @@ mod tests {
             err,
             FrameError::CompatibilityRejected(msg) if msg.contains("loc: duplicate labels are present")
         ));
+    }
+
+    #[test]
+    fn repeated_column_keys_keep_their_own_data_i17d4() {
+        // pandas 2.2.3 over DataFrame([[1.0, 5.75, 3.0], [4.0, 2.25, 6.0]],
+        // columns=['a', 'a', 'b']): every per-column op keeps three columns,
+        // the second 'a' its own data (they collapsed to one 'a', or read the
+        // first 'a' for both). The second 'a' runs opposite to the first, so
+        // a first-duplicate read shows in every assertion.
+        let column = |values: [f64; 2]| {
+            Column::new(
+                DType::Float64,
+                values.iter().map(|v| Scalar::Float64(*v)).collect(),
+            )
+            .unwrap()
+        };
+        let store = crate::ColumnStore::from_pairs(vec![
+            ("a".to_owned(), column([1.0, 4.0])),
+            ("a".to_owned(), column([5.75, 2.25])),
+            ("b".to_owned(), column([3.0, 6.0])),
+        ]);
+        let df = DataFrame::new_with_column_order(
+            Index::new(vec![0_i64.into(), 1_i64.into()]),
+            store,
+            vec!["a".to_owned(), "a".to_owned(), "b".to_owned()],
+        )
+        .unwrap();
+        let f = Scalar::Float64;
+        let second = |frame: &DataFrame| {
+            assert_eq!(frame.num_columns(), 3, "a repeated key was lost");
+            frame.column_at(1).unwrap().values().to_vec()
+        };
+
+        assert_eq!(second(&df.abs().unwrap()), vec![f(5.75), f(2.25)]);
+        assert_eq!(second(&df.cumsum().unwrap()), vec![f(5.75), f(8.0)]);
+        assert_eq!(
+            second(
+                &df.arith_scalar(&f(1.0), fp_columnar::ArithmeticOp::Add, false)
+                    .unwrap()
+            ),
+            vec![f(6.75), f(3.25)]
+        );
+        assert_eq!(
+            second(&df.mul_df(&df).unwrap()),
+            vec![f(33.0625), f(5.0625)]
+        );
+        assert_eq!(
+            second(&df.rank("average", true, "keep").unwrap()),
+            vec![f(2.0), f(1.0)]
+        );
+        let cond = df
+            .compare_scalar_df(&f(3.0), fp_columnar::ComparisonOp::Gt)
+            .unwrap();
+        assert_eq!(second(&cond), vec![Scalar::Bool(true), Scalar::Bool(false)]);
+        let kept = df.where_cond(&cond, None).unwrap();
+        assert_eq!(kept.column_at(1).unwrap().values()[0], f(5.75));
+        assert!(kept.column_at(1).unwrap().values()[1].is_missing());
+        assert_eq!(
+            df.sum().unwrap().values(),
+            &[f(5.0), f(8.0), f(9.0)],
+            "each repeated key sums its own column"
+        );
+        let described = df.describe().unwrap();
+        assert_eq!(described.num_columns(), 3);
+        assert_eq!(described.column_at(1).unwrap().values()[1], f(4.0));
+
+        // Reductions, axis=1 reducers, frame comparisons, corr and a
+        // decimals dict read each repeated key's own column too.
+        assert_eq!(
+            df.quantile(0.5).unwrap().values(),
+            &[f(2.5), f(4.0), f(4.5)]
+        );
+        assert_eq!(
+            df.idxmax().unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(1)]
+        );
+        assert_eq!(df.sum_axis1().unwrap().values(), &[f(9.75), f(12.25)]);
+        assert_eq!(df.max_axis1().unwrap().values(), &[f(5.75), f(6.0)]);
+        assert_eq!(
+            df.idxmax_axis1().unwrap().values(),
+            &[Scalar::Utf8("a".into()), Scalar::Utf8("b".into())]
+        );
+        assert_eq!(df.iloc_row(0).unwrap().values(), &[f(1.0), f(5.75), f(3.0)]);
+        let bar = DataFrame::new_with_column_order(
+            Index::new(vec![0_i64.into(), 1_i64.into()]),
+            crate::ColumnStore::from_pairs(vec![
+                ("a".to_owned(), column([0.0, 0.0])),
+                ("a".to_owned(), column([9.0, 9.0])),
+                ("b".to_owned(), column([0.0, 0.0])),
+            ]),
+            vec!["a".to_owned(), "a".to_owned(), "b".to_owned()],
+        )
+        .unwrap();
+        assert_eq!(
+            second(&df.gt_df(&bar).unwrap()),
+            vec![Scalar::Bool(false), Scalar::Bool(false)]
+        );
+        let corr = df.corr().unwrap();
+        assert_eq!(corr.num_columns(), 3);
+        assert_eq!(corr.len(), 3);
+        let corr_second = second(&corr);
+        assert!((corr_second[0].to_f64().unwrap() + 1.0).abs() < 1e-12);
+        assert!((corr_second[1].to_f64().unwrap() - 1.0).abs() < 1e-12);
+        let decimals = BTreeMap::from([("a".to_owned(), 0)]);
+        assert_eq!(
+            second(&df.round_columns(&decimals).unwrap()),
+            vec![f(6.0), f(2.0)]
+        );
+
+        // Part 2: mode, all, count / rank along axis=1, isin, fill_value
+        // arithmetic, row tuples, dtype selection, a positional sort,
+        // combine_first and dot.
+        assert_eq!(second(&df.mode().unwrap()), vec![f(2.25), f(5.75)]);
+        let above_two = df
+            .compare_scalar_df(&f(2.0), fp_columnar::ComparisonOp::Gt)
+            .unwrap();
+        assert_eq!(
+            above_two.all().unwrap().values(),
+            &[Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(true)]
+        );
+        assert_eq!(
+            df.where_cond(&above_two, None)
+                .unwrap()
+                .count_axis1()
+                .unwrap()
+                .values(),
+            &[Scalar::Int64(2), Scalar::Int64(3)]
+        );
+        assert_eq!(
+            second(&df.rank_axis1("average", true, "keep").unwrap()),
+            vec![f(3.0), f(1.0)]
+        );
+        assert_eq!(
+            second(&df.isin(&[f(5.75)]).unwrap()),
+            vec![Scalar::Bool(true), Scalar::Bool(false)]
+        );
+        assert_eq!(
+            second(&df.add_df_fill(&df, 0.0).unwrap()),
+            vec![f(11.5), f(4.5)]
+        );
+        assert_eq!(df.itertuples()[0].1, vec![f(1.0), f(5.75), f(3.0)]);
+        assert_eq!(
+            df.select_dtypes(&[DType::Float64], &[])
+                .unwrap()
+                .num_columns(),
+            3,
+            "a repeated key is selected once per column"
+        );
+        let by_second = df.sort_values_at(&[1], &[true], "last").unwrap();
+        assert_eq!(by_second.column_at(0).unwrap().values(), &[f(4.0), f(1.0)]);
+        let above_three = df
+            .compare_scalar_df(&f(3.0), fp_columnar::ComparisonOp::Gt)
+            .unwrap();
+        let holes = df.where_cond(&above_three, None).unwrap();
+        assert_eq!(
+            second(&holes.combine_first(&bar).unwrap()),
+            vec![f(5.75), f(9.0)]
+        );
+        let weights = DataFrame::new_with_column_order(
+            Index::new(vec![0_i64.into(), 1_i64.into(), 2_i64.into()]),
+            crate::ColumnStore::from_pairs(vec![(
+                "p".to_owned(),
+                Column::new(DType::Float64, vec![f(1.0), f(10.0), f(100.0)]).unwrap(),
+            )]),
+            vec!["p".to_owned()],
+        )
+        .unwrap();
+        assert_eq!(
+            df.dot(&weights).unwrap().column_at(0).unwrap().values(),
+            &[f(358.5), f(626.5)]
+        );
+
+        // Part 3: a row concat of equal axes, melt and stack by position; a
+        // row concat of differing axes is pandas' InvalidIndexError.
+        let rows = crate::concat_dataframes(&[&df, &df]).unwrap();
+        assert_eq!(second(&rows), vec![f(5.75), f(2.25), f(5.75), f(2.25)]);
+        let only_b = df.take_columns(&[2]).unwrap();
+        let err = crate::concat_dataframes(&[&df, &only_b]).unwrap_err();
+        assert!(matches!(
+            err,
+            FrameError::CompatibilityRejected(msg) if msg.contains("uniquely valued")
+        ));
+        let melted = df.melt(&[], &[], None, None).unwrap();
+        assert_eq!(
+            melted.column("value").unwrap().values(),
+            &[f(1.0), f(4.0), f(5.75), f(2.25), f(3.0), f(6.0)]
+        );
+        assert_eq!(
+            df.stack().unwrap().column_at(0).unwrap().values(),
+            &[f(1.0), f(5.75), f(3.0), f(4.0), f(2.25), f(6.0)]
+        );
+
+        // NEGATIVE: unique keys are untouched by the positional rebuild.
+        let unique = DataFrame::from_dict(
+            &["x", "y"],
+            vec![("x", vec![f(-1.0), f(2.0)]), ("y", vec![f(3.0), f(-4.0)])],
+        )
+        .unwrap();
+        let abs = unique.abs().unwrap();
+        assert_eq!(abs.column_names(), vec!["x", "y"]);
+        assert_eq!(abs.column("y").unwrap().values(), &[f(3.0), f(4.0)]);
+    }
+
+    #[test]
+    fn all_missing_pct_change_is_float64_and_combine_first_keeps_equal_axes_y4f13() {
+        let f = Scalar::Float64;
+        let nan = Scalar::Null(NullKind::NaN);
+        let index = || Index::new(vec![0_i64.into(), 1_i64.into()]);
+        // pandas: the change of an all-NaN float column is float64 (it was
+        // inferred object).
+        let empty = Series::new(
+            "y",
+            index(),
+            Column::new(DType::Float64, vec![nan.clone(), nan.clone()]).unwrap(),
+        )
+        .unwrap();
+        let change = empty.pct_change_with_fill(1, None, None).unwrap();
+        assert_eq!(change.column().dtype(), DType::Float64);
+        assert!(change.values().iter().all(Scalar::is_missing));
+
+        // combine_first of identical, unsorted columns keeps their order.
+        let frame = |names: [&str; 2], values: [[Scalar; 2]; 2]| {
+            let [first, second] = values;
+            DataFrame::new_with_column_order(
+                index(),
+                crate::ColumnStore::from_pairs(vec![
+                    (
+                        names[0].to_owned(),
+                        Column::new(DType::Float64, first.to_vec()).unwrap(),
+                    ),
+                    (
+                        names[1].to_owned(),
+                        Column::new(DType::Float64, second.to_vec()).unwrap(),
+                    ),
+                ]),
+                names
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+        };
+        let left = frame(["b", "a"], [[f(1.0), nan.clone()], [nan.clone(), f(2.0)]]);
+        let right = frame(["b", "a"], [[f(9.0), f(9.0)], [f(8.0), f(8.0)]]);
+        let combined = left.combine_first(&right).unwrap();
+        assert_eq!(combined.column_names(), vec!["b", "a"]);
+        assert_eq!(combined.column("b").unwrap().values(), &[f(1.0), f(9.0)]);
+        assert_eq!(combined.column("a").unwrap().values(), &[f(8.0), f(2.0)]);
+
+        // NEGATIVE: a union of different column sets is still sorted.
+        let other = frame(["c", "a"], [[f(9.0), f(9.0)], [f(8.0), f(8.0)]]);
+        assert_eq!(
+            left.combine_first(&other).unwrap().column_names(),
+            vec!["a", "b", "c"]
+        );
     }
 
     #[test]
@@ -130672,10 +133850,46 @@ mod tests {
         .unwrap();
 
         let result = df.where_cond(&cond, None).unwrap();
-        assert_eq!(result.column("a").unwrap().values()[0], Scalar::Int64(1));
+        // numpy's int64 holds no NaN: pandas makes both columns float64
+        // (they stayed int64 beside the NaN; vzoct).
+        assert_eq!(result.column("a").unwrap().dtype(), DType::Float64);
+        assert_eq!(
+            result.column("a").unwrap().values()[0],
+            Scalar::Float64(1.0)
+        );
         assert!(result.column("a").unwrap().values()[1].is_missing());
         assert!(result.column("b").unwrap().values()[0].is_missing());
-        assert_eq!(result.column("b").unwrap().values()[1], Scalar::Int64(4));
+        assert_eq!(
+            result.column("b").unwrap().values()[1],
+            Scalar::Float64(4.0)
+        );
+
+        // NEGATIVE: an int `other` fills without a NaN, and int64 stays.
+        let filled = df.where_cond(&cond, Some(&Scalar::Int64(0))).unwrap();
+        assert_eq!(filled.column("a").unwrap().dtype(), DType::Int64);
+
+        // mask leaving a float column all NaN keeps it float64 (it was
+        // inferred object).
+        let floats = DataFrame::from_dict(
+            &["f"],
+            vec![("f", vec![Scalar::Float64(4.0), Scalar::Float64(5.0)])],
+        )
+        .unwrap();
+        let everywhere = DataFrame::from_dict(
+            &["f"],
+            vec![("f", vec![Scalar::Bool(true), Scalar::Bool(true)])],
+        )
+        .unwrap();
+        let masked = floats.mask(&everywhere, None).unwrap();
+        assert_eq!(masked.column("f").unwrap().dtype(), DType::Float64);
+        assert!(
+            masked
+                .column("f")
+                .unwrap()
+                .values()
+                .iter()
+                .all(Scalar::is_missing)
+        );
     }
 
     #[test]
@@ -130698,7 +133912,11 @@ mod tests {
         let result = df.where_cond(&cond, None).unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result.index().labels(), df.index().labels());
-        assert_eq!(result.column("a").unwrap().values()[0], Scalar::Int64(1));
+        // float64 beside the NaN, as pandas' (vzoct).
+        assert_eq!(
+            result.column("a").unwrap().values()[0],
+            Scalar::Float64(1.0)
+        );
         assert!(result.column("a").unwrap().values()[1].is_missing());
     }
 
@@ -150644,6 +153862,70 @@ mod tests {
     }
 
     #[test]
+    fn dataframe_diff_axis1_keeps_int_pairs_int_c5b7x() {
+        // pandas 2.2.3: DataFrame({'a': [1, 2], 'b': [5, 7], 'c': [1.5, 2.0]})
+        // .diff(axis=1) is float64 / int64 / float64 - an int pair stays int.
+        let df = DataFrame::from_dict(
+            &["a", "b", "c"],
+            vec![
+                ("a", vec![Scalar::Int64(1), Scalar::Int64(i64::MIN)]),
+                ("b", vec![Scalar::Int64(5), Scalar::Int64(i64::MAX)]),
+                ("c", vec![Scalar::Float64(1.5), Scalar::Float64(2.0)]),
+            ],
+        )
+        .unwrap();
+        let out = df.diff_axis1(1).unwrap();
+        assert_eq!(out.column("a").unwrap().dtype(), DType::Float64);
+        let b = out.column("b").unwrap();
+        assert_eq!(b.dtype(), DType::Int64);
+        // numpy's wrapping int64 subtraction.
+        assert_eq!(b.values(), &[Scalar::Int64(4), Scalar::Int64(-1)]);
+        // NEGATIVE: a float partner is float64; periods=0 (pandas' axis=0
+        // diff) is float64 even for the int pair.
+        assert_eq!(out.column("c").unwrap().dtype(), DType::Float64);
+        let zero = df.diff_axis1(0).unwrap();
+        assert_eq!(zero.column("b").unwrap().dtype(), DType::Float64);
+        let backward = df.diff_axis1(-1).unwrap();
+        assert_eq!(backward.column("a").unwrap().dtype(), DType::Int64);
+        assert_eq!(backward.column("b").unwrap().dtype(), DType::Float64);
+
+        // A nullable Int64 pair is Int64 with <NA>, and so is the edge column
+        // whose shifted-out partner is Int64.
+        let two_rows =
+            DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(0); 2])]).unwrap();
+        let nullable = two_rows
+            .with_column(
+                "a",
+                Column::new(
+                    DType::Int64Nullable,
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::missing_for_dtype(DType::Int64Nullable),
+                    ],
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .with_column(
+                "b",
+                Column::new(
+                    DType::Int64Nullable,
+                    vec![Scalar::Int64(5), Scalar::Int64(7)],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let out = nullable.diff_axis1(1).unwrap();
+        let a = out.column("a").unwrap();
+        assert_eq!(a.dtype(), DType::Int64Nullable);
+        assert!(a.values().iter().all(Scalar::is_missing));
+        let b = out.column("b").unwrap();
+        assert_eq!(b.dtype(), DType::Int64Nullable);
+        assert_eq!(b.values()[0], Scalar::Int64(4));
+        assert!(b.values()[1].is_missing());
+    }
+
+    #[test]
     fn dataframe_diff_temporal_preserves_timedelta64_2z1sp() {
         let one_sec = 1_000_000_000_i64;
         let base_dt = 1_700_000_000_000_000_000_i64;
@@ -154054,6 +157336,136 @@ mod tests {
     }
 
     #[test]
+    fn select_dtypes_reads_bools_with_a_missing_value_as_object_ildvj() {
+        // b holds a missing value: pandas' object column. c is all-valid
+        // bools.
+        let df = DataFrame::from_dict(
+            &["b", "c", "n"],
+            vec![
+                (
+                    "b",
+                    vec![
+                        Scalar::Bool(true),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Bool(false),
+                    ],
+                ),
+                (
+                    "c",
+                    vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+                ),
+                (
+                    "n",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let names = |frame: DataFrame| -> Vec<String> {
+            frame.column_names().into_iter().cloned().collect()
+        };
+        assert_eq!(names(df.select_dtypes(&[DType::Bool], &[]).unwrap()), ["c"]);
+        assert_eq!(names(df.select_dtypes(&[DType::Utf8], &[]).unwrap()), ["b"]);
+        assert_eq!(
+            names(df.select_dtypes_by_name(&["bool"], &[]).unwrap()),
+            ["c"]
+        );
+        assert_eq!(
+            names(df.select_dtypes_by_name(&[], &["object"]).unwrap()),
+            ["c", "n"]
+        );
+        // NEGATIVE: numeric columns are selected as before.
+        assert_eq!(
+            names(df.select_dtypes(&[DType::Float64], &[]).unwrap()),
+            ["n"]
+        );
+    }
+
+    #[test]
+    fn masked_columns_select_describe_and_reduce_as_numbers_8u5eh() {
+        // I is pandas' masked Int64 [1, <NA>, 3], B its boolean [True, <NA>,
+        // False].
+        let df = DataFrame::from_dict(
+            &["i", "n"],
+            vec![
+                (
+                    "i",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+                ),
+                (
+                    "n",
+                    vec![
+                        Scalar::Float64(1.5),
+                        Scalar::Float64(2.5),
+                        Scalar::Float64(3.5),
+                    ],
+                ),
+            ],
+        )
+        .unwrap()
+        .with_column(
+            "I",
+            Column::new(
+                DType::Int64Nullable,
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Int64(3),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .with_column(
+            "B",
+            Column::new(
+                DType::BoolNullable,
+                vec![
+                    Scalar::Bool(true),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Bool(false),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let names = |frame: DataFrame| -> Vec<String> {
+            frame.column_names().into_iter().cloned().collect()
+        };
+        assert_eq!(
+            names(df.select_dtypes_by_name(&["number"], &[]).unwrap()),
+            ["i", "n", "I"]
+        );
+        assert_eq!(
+            names(df.select_dtypes_by_name(&["Int64"], &[]).unwrap()),
+            ["i", "I"]
+        );
+        assert_eq!(
+            names(df.select_dtypes_by_name(&["bool"], &[]).unwrap()),
+            ["B"]
+        );
+        // describe reads I as a number, its statistics Float64.
+        let described = df.describe().unwrap();
+        assert_eq!(names(described.clone()), ["i", "n", "I"]);
+        let stats = described.column("I").unwrap();
+        assert_eq!(stats.dtype(), DType::Float64Nullable);
+        assert_eq!(stats.values()[0], Scalar::Float64(2.0));
+        // Across a row the masked cells count: 1 + 1.5 + 1 + True.
+        let rows = df.sum_axis1().unwrap();
+        assert_eq!(rows.values()[0], Scalar::Float64(4.5));
+        // skipna=False keeps the masked columns, missing where one holds NA.
+        let summed = df.sum_skipna(false).unwrap();
+        assert_eq!(summed.len(), 4);
+        assert!(summed.values()[2].is_missing());
+        // NEGATIVE: a width name takes its own width alone.
+        assert!(names(df.select_dtypes_by_name(&["int32"], &[]).unwrap()).is_empty());
+    }
+
+    #[test]
     fn dataframe_select_dtypes_exclude() {
         let df = DataFrame::from_dict(
             &["a", "b"],
@@ -154115,18 +157527,35 @@ mod tests {
     fn dataframe_select_dtypes_by_name_unknown_alias_errors() {
         let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(1)])]).unwrap();
 
-        let err = df.select_dtypes_by_name(&["complex"], &[]).unwrap_err();
+        // TEST-CHANGE (cmv2p): 'complex' is a pandas name (it selects no
+        // column here), so the unknown name is one pandas does not know.
+        let err = df.select_dtypes_by_name(&["bogus"], &[]).unwrap_err();
         assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+        assert_eq!(
+            df.select_dtypes_by_name(&["complex"], &[])
+                .unwrap()
+                .num_columns(),
+            0
+        );
+        // 'numeric' and 'categorical' are not pandas names; 'str' is its
+        // string-dtype error.
+        assert!(df.select_dtypes_by_name(&["numeric"], &[]).is_err());
+        assert!(df.select_dtypes_by_name(&["categorical"], &[]).is_err());
+        assert!(df.select_dtypes_by_name(&["str"], &[]).is_err());
     }
 
     #[test]
     fn dataframe_select_dtypes_by_name_overlap_errors() {
         let df = DataFrame::from_dict(&["a"], vec![("a", vec![Scalar::Int64(1)])]).unwrap();
 
-        let err = df
-            .select_dtypes_by_name(&["int"], &["integer"])
-            .unwrap_err();
+        // TEST-CHANGE (cmv2p): pandas' overlap is one canonical type -
+        // 'int' and 'int64' are np.int64 - while 'int' beside 'integer'
+        // (np.int64, np.integer) selects the int64 columns that are not
+        // integers: none (pandas 2.2.3; it was refused here).
+        let err = df.select_dtypes_by_name(&["int"], &["int64"]).unwrap_err();
         assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+        let none = df.select_dtypes_by_name(&["int"], &["integer"]).unwrap();
+        assert_eq!(none.num_columns(), 0);
     }
 
     #[test]
@@ -156426,6 +159855,63 @@ mod tests {
     }
 
     #[test]
+    fn interpolate_methods_fill_only_what_pandas_reaches_u6p7i() {
+        // Measured on pandas 2.2.3 over [NaN, 1, NaN, NaN, 4, NaN, NaN]:
+        // nearest / zero / slinear fill only between two valid values;
+        // index carries the edge value out as numpy's interp.
+        let series = Series::from_values(
+            "x",
+            (0..7_i64).map(IndexLabel::from).collect::<Vec<_>>(),
+            [f64::NAN, 1.0, f64::NAN, f64::NAN, 4.0, f64::NAN, f64::NAN]
+                .into_iter()
+                .map(|v| {
+                    if v.is_nan() {
+                        Scalar::Null(NullKind::NaN)
+                    } else {
+                        Scalar::Float64(v)
+                    }
+                })
+                .collect(),
+        )
+        .unwrap();
+        let run =
+            |method: &str, limit: Option<usize>, direction: Option<&str>, area: Option<&str>| {
+                series
+                    .interpolate_with(method, limit, direction, area)
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .map(|v| v.to_f64().ok().filter(|x| !x.is_nan()))
+                    .collect::<Vec<_>>()
+            };
+        let (n, a, d) = (None, Some(1.0), Some(4.0));
+        assert_eq!(run("nearest", None, None, None), [n, a, a, d, d, n, n]);
+        assert_eq!(run("nearest", Some(1), None, None), [n, a, a, n, d, n, n]);
+        assert_eq!(
+            run("nearest", None, Some("both"), None),
+            [n, a, a, d, d, n, n]
+        );
+        assert_eq!(
+            run("nearest", None, None, Some("outside")),
+            [n, a, n, n, d, n, n]
+        );
+        assert_eq!(run("zero", None, None, None), [n, a, a, a, d, n, n]);
+        assert_eq!(
+            run("slinear", None, None, None),
+            [n, a, Some(2.0), Some(3.0), d, n, n]
+        );
+        assert_eq!(
+            run("index", None, Some("both"), None),
+            [a, a, Some(2.0), Some(3.0), d, d, d]
+        );
+        // NEGATIVE: linear keeps its forward trailing carry.
+        assert_eq!(
+            run("linear", None, None, None),
+            [n, a, Some(2.0), Some(3.0), d, d, d]
+        );
+    }
+
+    #[test]
     fn interpolate_with_dispatches_every_option_fvsao5() {
         // fvsao.5: the Python binding dropped method/limit/limit_direction/
         // limit_area. Values verified vs pandas 2.2.3:
@@ -156483,13 +159969,17 @@ mod tests {
                 .unwrap()),
             m(&long_gap.interpolate().unwrap())
         );
-        // A non-linear method with a direction is not implemented; it is
-        // rejected rather than interpolated some other way.
-        assert!(!Series::interpolate_supports("nearest", Some("both"), None));
-        assert!(
-            edges
+        // A non-linear method takes a direction (TEST-CHANGE u6p7i: this
+        // pinned its refusal): pandas 2.2.3's nearest fills only between two
+        // valid values, [NaN, 1, 1, 3, NaN] for limit_direction='both'; pad
+        // is a forward fill alone.
+        assert!(Series::interpolate_supports("nearest", Some("both"), None));
+        assert!(!Series::interpolate_supports("pad", Some("both"), None));
+        assert_eq!(
+            m(&edges
                 .interpolate_with("nearest", None, Some("both"), None)
-                .is_err()
+                .unwrap()),
+            vec![None, Some(1.0), Some(1.0), Some(3.0), None]
         );
         // Per column on a frame, with the object-column rule kept.
         let frame = DataFrame::from_series(vec![long_gap.clone()]).unwrap();
@@ -156738,6 +160228,51 @@ mod tests {
             &["2024-01-01 12:30:00".into(), "2024-01-01 15:00:00".into()]
         );
         assert_eq!(result.values(), &[Scalar::Int64(2), Scalar::Int64(3)]);
+    }
+
+    #[test]
+    fn series_between_time_inclusive_n57tz() {
+        let s = Series::from_values(
+            "x",
+            vec![
+                "2024-01-01T09:00:00".into(),
+                "2024-01-01T10:00:00".into(),
+                "2024-01-01T11:00:00".into(),
+                "2024-01-01T12:00:00".into(),
+            ],
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+        )
+        .unwrap();
+        let kept = |start: &str, end: &str, inclusive: IntervalClosed| {
+            s.between_time_inclusive(start, end, inclusive)
+                .unwrap()
+                .values()
+                .to_vec()
+        };
+        let ints = |values: &[i64]| {
+            values
+                .iter()
+                .copied()
+                .map(Scalar::Int64)
+                .collect::<Vec<_>>()
+        };
+        // NEGATIVE: 'both' is between_time as it was.
+        assert_eq!(
+            kept("09:00", "11:00", IntervalClosed::Both),
+            ints(&[1, 2, 3])
+        );
+        assert_eq!(kept("09:00", "11:00", IntervalClosed::Neither), ints(&[2]));
+        assert_eq!(kept("09:00", "11:00", IntervalClosed::Left), ints(&[1, 2]));
+        assert_eq!(kept("09:00", "11:00", IntervalClosed::Right), ints(&[2, 3]));
+        // Past midnight (start after end) the ends swap roles, as pandas':
+        // left keeps 11:00 and drops 09:00, right the other way round.
+        assert_eq!(kept("11:00", "09:00", IntervalClosed::Left), ints(&[3, 4]));
+        assert_eq!(kept("11:00", "09:00", IntervalClosed::Right), ints(&[1, 4]));
     }
 
     #[test]
@@ -166837,6 +170372,36 @@ mod tests {
     }
 
     #[test]
+    fn series_reset_index_allow_duplicates_n57tz() {
+        let index = Index::new(vec![IndexLabel::Int64(5), IndexLabel::Int64(6)]).set_name("a");
+        let s = Series::new(
+            "a".to_owned(),
+            index,
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap(),
+        )
+        .unwrap();
+        // NEGATIVE: the clash is pandas' ValueError without the keyword.
+        assert!(matches!(
+            s.reset_index_allow_duplicates(false, None, false),
+            Err(FrameError::CompatibilityRejected(msg)) if msg == "cannot insert a, already exists"
+        ));
+        let super::SeriesResetIndexResult::DataFrame(out) =
+            s.reset_index_allow_duplicates(false, None, true).unwrap()
+        else {
+            panic!("reset_index(drop=False) gives a frame");
+        };
+        assert_eq!(out.column_names(), vec!["a", "a"]);
+        assert_eq!(
+            out.column_at(0).unwrap().values(),
+            &[Scalar::Int64(5), Scalar::Int64(6)]
+        );
+        assert_eq!(
+            out.column_at(1).unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+    }
+
+    #[test]
     fn series_reset_index_with_name_uses_level_0_when_value_name_is_index() {
         let s = Series::from_values(
             "",
@@ -167532,6 +171097,107 @@ mod tests {
         let result = s.rolling(3, None).quantile(0.5).unwrap();
         // quantile(0.5) of [0,5,10] = 5.0
         assert_eq!(result.values()[2], Scalar::Float64(5.0));
+    }
+
+    #[test]
+    fn rolling_and_expanding_quantile_interpolation_like_pandas_u6p7i() {
+        // Measured on pandas 2.2.3: a small window (the per-window sort) and a
+        // 33-wide one (the order-statistic path), q off a rank and on a .5
+        // tie at an odd and an even lower rank.
+        let series = |values: Vec<f64>| {
+            let len = i64::try_from(values.len()).unwrap();
+            let labels = (0..len).map(IndexLabel::from).collect();
+            Series::from_values(
+                "x",
+                labels,
+                values.into_iter().map(Scalar::Float64).collect(),
+            )
+            .unwrap()
+        };
+        let floats = |result: Series| -> Vec<f64> {
+            result
+                .values()
+                .iter()
+                .map(|v| v.to_f64().unwrap_or(f64::NAN))
+                .collect()
+        };
+        let small = series(vec![1.0, 4.0, 2.0, 8.0, 5.0]);
+        let big = series((0..40).map(f64::from).collect());
+        let cases: [(&str, [f64; 2], [f64; 2], [f64; 2], [f64; 2], [f64; 5]); 5] = [
+            (
+                "linear",
+                [3.0, 4.5],
+                [9.6, 10.6],
+                [9.5, 10.5],
+                [10.5, 11.5],
+                [1.0, 2.5, 2.0, 3.0, 4.0],
+            ),
+            (
+                "lower",
+                [2.0, 4.0],
+                [9.0, 10.0],
+                [9.0, 10.0],
+                [10.0, 11.0],
+                [1.0, 1.0, 2.0, 2.0, 4.0],
+            ),
+            (
+                "higher",
+                [4.0, 5.0],
+                [10.0, 11.0],
+                [10.0, 11.0],
+                [11.0, 12.0],
+                [1.0, 4.0, 2.0, 4.0, 4.0],
+            ),
+            (
+                "nearest",
+                [4.0, 5.0],
+                [10.0, 11.0],
+                [10.0, 11.0],
+                [10.0, 11.0],
+                [1.0, 1.0, 2.0, 4.0, 4.0],
+            ),
+            (
+                "midpoint",
+                [3.0, 4.5],
+                [9.5, 10.5],
+                [9.5, 10.5],
+                [10.5, 11.5],
+                [1.0, 2.5, 2.0, 3.0, 4.0],
+            ),
+        ];
+        for (mode, small_w4, big_q3, big_tie_odd, big_tie_even, expanding) in cases {
+            let rolled = |s: &Series, w: usize, q: f64| {
+                floats(
+                    s.rolling(w, None)
+                        .quantile_with_interpolation(q, mode)
+                        .unwrap(),
+                )
+            };
+            assert_eq!(rolled(&small, 4, 0.5)[3..], small_w4, "{mode} small");
+            assert_eq!(rolled(&big, 33, 0.3)[32..34], big_q3, "{mode} big");
+            assert_eq!(
+                rolled(&big, 33, 0.296_875)[32..34],
+                big_tie_odd,
+                "{mode} odd tie"
+            );
+            assert_eq!(
+                rolled(&big, 33, 0.328_125)[32..34],
+                big_tie_even,
+                "{mode} even tie"
+            );
+            let grown = small
+                .expanding(None)
+                .quantile_with_interpolation(0.5, mode)
+                .unwrap();
+            assert_eq!(floats(grown), expanding, "{mode} expanding");
+        }
+        // NEGATIVE: an unknown interpolation is refused.
+        assert!(
+            small
+                .rolling(2, None)
+                .quantile_with_interpolation(0.5, "cubic")
+                .is_err()
+        );
     }
 
     #[test]
@@ -168349,6 +172015,106 @@ mod tests {
             ]
         );
         assert_eq!(result.column_order.len(), axis.len());
+    }
+
+    #[test]
+    fn groupby_ohlc_keeps_an_int_column_int_c90rr() {
+        // MEASURED, live pandas 2.2.3: DataFrame({'k': [1, 2, 1, 2], 'c': [5,
+        // 6, 7, 8]}).groupby('k').ohlc() and gb['c'].ohlc() are int64 (fp
+        // answered float64).
+        let ints = |values: &[i64]| values.iter().map(|&v| Scalar::Int64(v)).collect();
+        let df = DataFrame::from_dict(
+            &["k", "c"],
+            vec![("k", ints(&[1, 2, 1, 2])), ("c", ints(&[5, 6, 7, 8]))],
+        )
+        .unwrap();
+        let frame = df.groupby(&["k"]).unwrap().ohlc().unwrap();
+        assert_eq!(
+            frame.columns()["c_open"].values(),
+            &[Scalar::Int64(5), Scalar::Int64(6)]
+        );
+        assert_eq!(
+            frame.columns()["c_high"].values(),
+            &[Scalar::Int64(7), Scalar::Int64(8)]
+        );
+        assert_eq!(frame.columns()["c_close"].dtype(), DType::Int64);
+        let rows: Vec<IndexLabel> = (0..4_i64).map(IndexLabel::Int64).collect();
+        let series = Series::from_values("c", rows.clone(), ints(&[5, 6, 7, 8])).unwrap();
+        let by = Series::from_values("k", rows, ints(&[1, 2, 1, 2])).unwrap();
+        let flat = series.groupby(&by).unwrap().ohlc().unwrap();
+        assert_eq!(
+            flat.columns()["low"].values(),
+            &[Scalar::Int64(5), Scalar::Int64(6)]
+        );
+        // NEGATIVE: an int column holding a missing value is pandas' float64.
+        let holed = DataFrame::from_dict(
+            &["k", "c"],
+            vec![
+                ("k", ints(&[1, 2, 1, 2])),
+                (
+                    "c",
+                    vec![
+                        Scalar::Int64(5),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Int64(7),
+                        Scalar::Int64(8),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let frame = holed.groupby(&["k"]).unwrap().ohlc().unwrap();
+        assert_eq!(frame.columns()["c_open"].dtype(), DType::Float64);
+    }
+
+    #[test]
+    fn groupby_corr_inner_level_is_unnamed_c90rr() {
+        // MEASURED, live pandas 2.2.3: df.groupby('k').corr().index.names is
+        // ['k', None] (fp named the inner level 'index').
+        let df = DataFrame::from_dict(
+            &["k", "a", "b"],
+            vec![
+                (
+                    "k",
+                    vec![
+                        Scalar::Int64(1),
+                        Scalar::Int64(1),
+                        Scalar::Int64(2),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "a",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(3.0),
+                        Scalar::Float64(5.0),
+                    ],
+                ),
+                (
+                    "b",
+                    vec![
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(4.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Float64(1.5),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let out = df.groupby(&["k"]).unwrap().corr().unwrap();
+        let levels = out
+            .row_multiindex()
+            .expect("groupby corr rows are two-level");
+        assert_eq!(levels.names(), &[Some("k".into()), None]);
+        // NEGATIVE: the values stay each group's corr (group 1: a and b on a
+        // line).
+        let Scalar::Float64(ab) = out.columns()["b"].values()[0] else {
+            panic!("corr is float64");
+        };
+        assert!((ab - 1.0).abs() < 1e-12);
     }
 
     #[test]
@@ -177343,6 +181109,72 @@ mod tests {
     }
 
     #[test]
+    fn describe_of_bools_and_of_nothing_uy0mu() {
+        let index = |n: i64| (0..n).map(Into::into).collect::<Vec<IndexLabel>>();
+        // A bool Series: count / unique / top / freq, object (it ran the
+        // numeric summary: count 3.0, mean 0.67 ...).
+        let bools = Series::from_values(
+            "b",
+            index(4),
+            vec![
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Null(NullKind::Null),
+                Scalar::Bool(true),
+            ],
+        )
+        .unwrap()
+        .describe()
+        .unwrap();
+        assert_eq!(bools.dtype(), DType::Utf8);
+        assert_eq!(
+            bools.values(),
+            &[
+                Scalar::Int64(3),
+                Scalar::Int64(2),
+                Scalar::Bool(true),
+                Scalar::Int64(2)
+            ]
+        );
+        // Nothing present: count 0, unique 0, top and freq NaN, object (freq
+        // was 0 in an int64 result).
+        let nothing = Series::from_values(
+            "t",
+            index(2),
+            vec![Scalar::Utf8("a".into()), Scalar::Null(NullKind::Null)],
+        )
+        .unwrap()
+        .take(&[1])
+        .unwrap()
+        .describe()
+        .unwrap();
+        assert_eq!(nothing.dtype(), DType::Utf8);
+        assert_eq!(nothing.values()[..2], [Scalar::Int64(0), Scalar::Int64(0)]);
+        assert!(nothing.values()[2].is_missing() && nothing.values()[3].is_missing());
+        // NEGATIVE: a text Series with values keeps its answer.
+        let text = Series::from_values(
+            "t",
+            index(3),
+            ["a", "b", "a"]
+                .into_iter()
+                .map(|t| Scalar::Utf8(t.into()))
+                .collect(),
+        )
+        .unwrap()
+        .describe()
+        .unwrap();
+        assert_eq!(
+            text.values(),
+            &[
+                Scalar::Int64(3),
+                Scalar::Int64(2),
+                Scalar::Utf8("a".into()),
+                Scalar::Int64(2)
+            ]
+        );
+    }
+
+    #[test]
     fn describe_of_a_categorical_counts_its_categories_ba9pc() {
         let text = |t: &str| Scalar::Utf8(t.to_owned());
         // count / unique / top / freq, a tie to the EARLIER category ('b'
@@ -179621,14 +183453,27 @@ mod tests {
         )?;
         let gb = values.groupby(&groups)?;
 
+        // TEST-CHANGE (br-frankenpandas-rqeqs): the rows' own labels are the
+        // second level after the group key, as pandas' (a, 10), (a, 12),
+        // (b, 17), (b, 13); the flat index pinned the dropped group level.
         let largest = gb.nlargest(2)?;
+        let levels = largest.index().row_multiindex().expect("a MultiIndex");
         assert_eq!(
-            largest.index().labels(),
+            levels.get_level_values(1).unwrap().labels(),
             &[
                 IndexLabel::Int64(10),
                 IndexLabel::Int64(12),
                 IndexLabel::Int64(17),
                 IndexLabel::Int64(13),
+            ]
+        );
+        assert_eq!(
+            levels.get_level_values(0).unwrap().labels(),
+            &[
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("a".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("b".into()),
             ]
         );
         assert_eq!(
@@ -179643,7 +183488,13 @@ mod tests {
 
         let smallest = gb.nsmallest(2)?;
         assert_eq!(
-            smallest.index().labels(),
+            smallest
+                .index()
+                .row_multiindex()
+                .expect("a MultiIndex")
+                .get_level_values(1)
+                .unwrap()
+                .labels(),
             &[
                 IndexLabel::Int64(14),
                 IndexLabel::Int64(10),
@@ -179796,6 +183647,367 @@ mod tests {
                 .row_multiindex()
                 .map(|levels| levels.names().to_vec()),
             Some(vec![Some("k".into()), None])
+        );
+
+        // br-frankenpandas-n57tz: normalize / sort / ascending / dropna.
+        let with_missing = Series::from_values(
+            "v",
+            (0_i64..5).map(Into::into).collect(),
+            vec![
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("a".into()),
+            ],
+        )?;
+        let grouped = with_missing.groupby(&keys)?;
+        let value_level = |counts: &Series| -> Result<Vec<IndexLabel>, FrameError> {
+            Ok(counts
+                .index()
+                .row_multiindex()
+                .expect("(key, value) levels")
+                .get_level_values(1)?
+                .labels()
+                .to_vec())
+        };
+        let text = |value: &str| IndexLabel::Utf8(value.into());
+        // Group b (first seen) holds a, b, None, b; group a holds a: counted
+        // without the None (the default), then with it last as one NaN
+        // value.
+        let counts = grouped.value_counts_with_options(false, true, false, true)?;
+        assert_eq!(counts.values(), grouped.value_counts()?.values());
+        assert_eq!(value_level(&counts)?, [text("b"), text("a"), text("a")]);
+        let kept = grouped.value_counts_with_options(false, true, false, false)?;
+        assert_eq!(
+            value_level(&kept)?,
+            [
+                text("b"),
+                text("a"),
+                IndexLabel::Null(NullKind::NaN),
+                text("a")
+            ]
+        );
+        // Normalized by what is counted: b holds 4 values with dropna=False.
+        let shares = grouped.value_counts_with_options(true, true, false, false)?;
+        assert_eq!(shares.name(), "proportion");
+        assert_eq!(
+            shares.values(),
+            [
+                Scalar::Float64(0.5),
+                Scalar::Float64(0.25),
+                Scalar::Float64(0.25),
+                Scalar::Float64(1.0)
+            ]
+        );
+        // ascending puts the smaller counts first; sort=false keeps value
+        // order (the same here).
+        let ascending = grouped.value_counts_with_options(false, true, true, true)?;
+        assert_eq!(value_level(&ascending)?, [text("a"), text("b"), text("a")]);
+        let unsorted = grouped.value_counts_with_options(false, false, false, true)?;
+        assert_eq!(value_level(&unsorted)?, [text("a"), text("b"), text("a")]);
+        Ok(())
+    }
+
+    #[test]
+    fn groupby_missing_value_keywords_n57tz() -> Result<(), FrameError> {
+        // x: v = 1, 2, 4, NaN and f = 0, 0, 0, NaN; y: v = 1, 2, 4, f = 0s.
+        let nan = Scalar::Null(NullKind::NaN);
+        let floats = |values: [f64; 3]| values.into_iter().map(Scalar::Float64);
+        let v: Vec<Scalar> = floats([1.0, 2.0, 4.0])
+            .chain([nan.clone()])
+            .chain(floats([1.0, 2.0, 4.0]))
+            .collect();
+        let f: Vec<Scalar> = floats([0.0; 3])
+            .chain([nan])
+            .chain(floats([0.0; 3]))
+            .collect();
+        let k: Vec<Scalar> = ["x", "x", "x", "x", "y", "y", "y"]
+            .into_iter()
+            .map(|key| Scalar::Utf8(key.into()))
+            .collect();
+        let frame = DataFrame::from_dict(
+            &["k", "v", "f"],
+            vec![("k", k.clone()), ("v", v.clone()), ("f", f)],
+        )?;
+        let grouped = frame.groupby(&["k"])?;
+        let column =
+            |df: &DataFrame, name: &str| df.column(name).expect("column").values().to_vec();
+        let ints = |a: i64, b: i64| vec![Scalar::Int64(a), Scalar::Int64(b)];
+        // nunique: x's NaN is one more value with dropna=false.
+        let unique = grouped.nunique_with_dropna(true)?;
+        assert_eq!(column(&unique, "v"), ints(3, 3));
+        let with_nan = grouped.nunique_with_dropna(false)?;
+        assert_eq!(column(&with_nan, "v"), ints(4, 3));
+        assert_eq!(column(&with_nan, "f"), ints(2, 1));
+        // any(skipna=false): x's NaN is truthy; all is unchanged.
+        let bools = |a: bool, b: bool| vec![Scalar::Bool(a), Scalar::Bool(b)];
+        let any = grouped.bool_reduce_with_skipna(false, true)?;
+        assert_eq!(column(&any, "f"), bools(false, false));
+        let any_nan = grouped.bool_reduce_with_skipna(false, false)?;
+        assert_eq!(column(&any_nan, "f"), bools(true, false));
+        assert_eq!(
+            column(&grouped.bool_reduce_with_skipna(true, false)?, "f"),
+            column(&grouped.all()?, "f")
+        );
+        // skew(skipna=false): x holds a NaN; y's skew is unchanged.
+        let skew = grouped.skew_with_skipna(true)?;
+        let skew_nan = grouped.skew_with_skipna(false)?;
+        assert!(matches!(column(&skew_nan, "v")[0], Scalar::Float64(x) if x.is_nan()));
+        assert_eq!(column(&skew_nan, "v")[1], column(&skew, "v")[1]);
+        assert_eq!(column(&skew, "v")[0], column(&skew, "v")[1]);
+
+        // The SeriesGroupBy forms agree.
+        let index: Vec<IndexLabel> = (0_i64..7).map(Into::into).collect();
+        let keys = Series::from_values("k", index.clone(), k)?;
+        let series = Series::from_values("v", index, v)?;
+        let grouped = series.groupby(&keys)?;
+        assert_eq!(grouped.nunique_with_dropna(false)?.values(), ints(4, 3));
+        assert_eq!(grouped.nunique_with_dropna(true)?.values(), ints(3, 3));
+        let skew_nan = grouped.skew_with_skipna(false)?;
+        assert!(matches!(skew_nan.values()[0], Scalar::Float64(x) if x.is_nan()));
+        assert_eq!(skew_nan.values()[1], grouped.skew()?.values()[1]);
+        Ok(())
+    }
+
+    #[test]
+    fn groupby_pct_change_fill_and_nlargest_keep_n57tz() -> Result<(), FrameError> {
+        // One group: 1, NaN, NaN, 4.
+        let nan = Scalar::Null(NullKind::NaN);
+        let index: Vec<IndexLabel> = (0_i64..4).map(Into::into).collect();
+        let keys = Series::from_values("k", index.clone(), vec![Scalar::Utf8("x".into()); 4])?;
+        let values = Series::from_values(
+            "v",
+            index,
+            vec![
+                Scalar::Float64(1.0),
+                nan.clone(),
+                nan.clone(),
+                Scalar::Float64(4.0),
+            ],
+        )?;
+        let grouped = values.groupby(&keys)?;
+        let shown = |series: Series| -> Vec<Option<f64>> {
+            series
+                .values()
+                .iter()
+                .map(|value| value.to_f64().ok().filter(|x| !x.is_nan()))
+                .collect()
+        };
+        // NEGATIVE: ffill with no limit is the default.
+        assert_eq!(
+            shown(grouped.pct_change_with_fill(1, Some("ffill"), None)?),
+            shown(grouped.pct_change(1)?)
+        );
+        assert_eq!(
+            shown(grouped.pct_change(1)?),
+            [None, Some(0.0), Some(0.0), Some(3.0)]
+        );
+        // No fill: every change beside a NaN is NaN.
+        assert_eq!(
+            shown(grouped.pct_change_with_fill(1, None, None)?),
+            [None, None, None, None]
+        );
+        // ffill up to one missing value: the second NaN stays.
+        assert_eq!(
+            shown(grouped.pct_change_with_fill(1, Some("ffill"), Some(1))?),
+            [None, Some(0.0), None, None]
+        );
+        // bfill: 1, 4, 4, 4.
+        assert_eq!(
+            shown(grouped.pct_change_with_fill(1, Some("bfill"), None)?),
+            [None, Some(3.0), Some(0.0), Some(0.0)]
+        );
+        assert!(
+            grouped
+                .pct_change_with_fill(1, Some("nearest"), None)
+                .is_err()
+        );
+
+        // A zero divisor is inf in the frame form too (it was NaN on the
+        // generic path, which the trailing NaN keeps this column on).
+        let frame = DataFrame::from_dict(
+            &["k", "z"],
+            vec![
+                ("k", vec![Scalar::Utf8("x".into()); 4]),
+                (
+                    "z",
+                    vec![
+                        Scalar::Float64(0.0),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(0.0),
+                        nan,
+                    ],
+                ),
+            ],
+        )?;
+        let changes = frame.groupby(&["k"])?.pct_change(1)?;
+        let z = changes.column("z").expect("z").values();
+        assert!(matches!(z[1], Scalar::Float64(x) if x == f64::INFINITY));
+        assert_eq!(z[2], Scalar::Float64(-1.0));
+
+        // nlargest keep: group 0 is 3, 3, 1 at a, b, c.
+        let ties = Series::from_values(
+            "v",
+            ["a", "b", "c", "d"].into_iter().map(Into::into).collect(),
+            vec![
+                Scalar::Int64(3),
+                Scalar::Int64(3),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+            ],
+        )?;
+        let groups = Series::from_values(
+            "g",
+            ["a", "b", "c", "d"].into_iter().map(Into::into).collect(),
+            vec![
+                Scalar::Int64(0),
+                Scalar::Int64(0),
+                Scalar::Int64(0),
+                Scalar::Int64(1),
+            ],
+        )?;
+        let grouped = ties.groupby(&groups)?;
+        let rows = |series: Series| -> Result<Vec<IndexLabel>, FrameError> {
+            Ok(series
+                .index()
+                .row_multiindex()
+                .expect("(group, row) levels")
+                .get_level_values(1)?
+                .labels()
+                .to_vec())
+        };
+        let text = |label: &str| IndexLabel::Utf8(label.into());
+        // NEGATIVE: 'first' is nlargest as it was.
+        assert_eq!(rows(grouped.nlargest(1)?)?, [text("a"), text("d")]);
+        assert_eq!(
+            rows(grouped.nlargest_keep(1, "last")?)?,
+            [text("b"), text("d")]
+        );
+        assert_eq!(
+            rows(grouped.nlargest_keep(1, "all")?)?,
+            [text("a"), text("b"), text("d")]
+        );
+        assert_eq!(
+            rows(grouped.nlargest_keep(2, "last")?)?,
+            [text("b"), text("a"), text("d")]
+        );
+        assert!(matches!(
+            grouped.nsmallest_keep(1, "x"),
+            Err(FrameError::CompatibilityRejected(msg)) if msg == r#"keep must be either "first", "last" or "all""#
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn groupby_cumulative_text_and_datetime_cemrq() -> Result<(), FrameError> {
+        let keys = || {
+            ["x", "y", "x"]
+                .into_iter()
+                .map(|key| Scalar::Utf8(key.into()))
+                .collect::<Vec<_>>()
+        };
+        let stamps = || {
+            [3_i64, 1, 2]
+                .into_iter()
+                .map(Scalar::Datetime64)
+                .collect::<Vec<_>>()
+        };
+        let refused = |result: Result<DataFrame, FrameError>, text: &str| matches!(result, Err(FrameError::CompatibilityRejected(msg)) if msg == text);
+        // Text: pandas' cython NotImplementedError, for every op.
+        let text = DataFrame::from_dict(
+            &["k", "t"],
+            vec![
+                ("k", keys()),
+                (
+                    "t",
+                    ["p", "q", "r"]
+                        .into_iter()
+                        .map(|t| Scalar::Utf8(t.into()))
+                        .collect(),
+                ),
+            ],
+        )?;
+        let grouped = text.groupby(&["k"])?;
+        assert!(refused(
+            grouped.cumsum(),
+            "function is not implemented for this dtype: [how->cumsum,dtype->object]"
+        ));
+        assert!(refused(
+            grouped.cummax(),
+            "function is not implemented for this dtype: [how->cummax,dtype->object]"
+        ));
+        // Datetime: cumsum / cumprod refused, cummax / cummin run and stay
+        // datetime64 (they were all-NaN).
+        let dates = DataFrame::from_dict(&["k", "d"], vec![("k", keys()), ("d", stamps())])?;
+        let grouped = dates.groupby(&["k"])?;
+        assert!(refused(
+            grouped.cumprod(),
+            "datetime64 type does not support cumprod operations"
+        ));
+        let running_max = grouped.cummax()?;
+        let column = running_max.column("d").expect("d");
+        assert!(matches!(column.dtype(), DType::Datetime64 { .. }));
+        assert_eq!(
+            column.values(),
+            &[
+                Scalar::Datetime64(3),
+                Scalar::Datetime64(1),
+                Scalar::Datetime64(3)
+            ]
+        );
+        assert_eq!(
+            grouped.cummin()?.column("d").expect("d").values(),
+            &[
+                Scalar::Datetime64(3),
+                Scalar::Datetime64(1),
+                Scalar::Datetime64(2)
+            ]
+        );
+        // The SeriesGroupBy forms: text is pandas' TypeError text.
+        let index: Vec<IndexLabel> = (0_i64..3).map(Into::into).collect();
+        let key_series = Series::from_values("k", index.clone(), keys())?;
+        let words = Series::from_values(
+            "t",
+            index.clone(),
+            vec![
+                Scalar::Utf8("p".into()),
+                Scalar::Utf8("q".into()),
+                Scalar::Utf8("r".into()),
+            ],
+        )?;
+        assert!(matches!(
+            words.groupby(&key_series)?.cummin(),
+            Err(FrameError::CompatibilityRejected(msg)) if msg == "cummin is not supported for object dtype"
+        ));
+        let when = Series::from_values("d", index.clone(), stamps())?;
+        let running_min = when.groupby(&key_series)?.cummin()?;
+        assert!(matches!(running_min.dtype(), DType::Datetime64 { .. }));
+        assert_eq!(
+            running_min.values(),
+            &[
+                Scalar::Datetime64(3),
+                Scalar::Datetime64(1),
+                Scalar::Datetime64(2)
+            ]
+        );
+        // NEGATIVE: a float column folds as before.
+        let numbers = Series::from_values(
+            "n",
+            index,
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(0.5),
+            ],
+        )?;
+        assert_eq!(
+            numbers.groupby(&key_series)?.cummax()?.values(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(5.0),
+                Scalar::Float64(1.0)
+            ]
         );
         Ok(())
     }

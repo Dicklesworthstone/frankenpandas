@@ -671,6 +671,14 @@ fn build_csv_object_aware_column(
     raw_offsets: &[usize],
 ) -> Result<Column, IoError> {
     let column = Column::from_values(values)?;
+    // A column read as nothing but missing values is float64 NaN in pandas'
+    // parser (it was object); a header-only column (no rows) stays object.
+    if column.dtype() == DType::Null && !column.is_empty() {
+        return Ok(Column::new(
+            DType::Float64,
+            vec![Scalar::Null(NullKind::NaN); column.len()],
+        )?);
+    }
     if column.dtype() == DType::Float64 {
         let normalized = column
             .values()
@@ -2415,8 +2423,9 @@ fn try_write_csv_typed(frame: &DataFrame, options: &CsvWriteOptions) -> Option<S
         F32(&'a [f64], Option<&'a fp_columnar::ValidityMask>),
     }
     let mut cols: Vec<FastCol<'_>> = Vec::with_capacity(headers.len());
-    for name in &headers {
-        let column = frame.column(name)?;
+    // By position: a repeated column key writes its own cells (i17d4).
+    for position in 0..headers.len() {
+        let column = frame.column_at(position)?;
         let single = column.width() == Some(fp_types::NumericWidth::Float32);
         if let Some(s) = column.as_f64_slice() {
             if s.len() != n {
@@ -2783,12 +2792,17 @@ pub fn write_csv_string_with_options(
         writer.write_record(&header_row)?;
     }
 
+    // Every column by position: a repeated column key writes its own cells
+    // (i17d4).
+    let columns: Vec<Option<&Column>> = (0..headers.len())
+        .map(|position| frame.column_at(position))
+        .collect();
     // Pre-compute each datetime column's column-uniform to_csv format (pandas
     // renders a datetime column with one date-only/seconds/sub-second form).
-    let dt_formats: Vec<Option<DatetimeCsvFormat>> = headers
+    let dt_formats: Vec<Option<DatetimeCsvFormat>> = columns
         .iter()
-        .map(|name| {
-            frame.column(name).and_then(|column| {
+        .map(|column| {
+            column.and_then(|column| {
                 column
                     .dtype()
                     .is_datetime()
@@ -2803,12 +2817,10 @@ pub fn write_csv_string_with_options(
         None
     };
     // A float32 column writes numpy's float32 spelling (fvsao.23).
-    let singles: Vec<bool> = headers
+    let singles: Vec<bool> = columns
         .iter()
-        .map(|name| {
-            frame
-                .column(name)
-                .is_some_and(|column| column.width() == Some(fp_types::NumericWidth::Float32))
+        .map(|column| {
+            column.is_some_and(|column| column.width() == Some(fp_types::NumericWidth::Float32))
         })
         .collect();
 
@@ -2817,8 +2829,8 @@ pub fn write_csv_string_with_options(
         if options.include_index {
             row.push(index_label_csv_string(frame, row_idx, index_dt_format)?);
         }
-        row.extend(headers.iter().enumerate().map(|(col_idx, name)| {
-            let value = frame.column(name).and_then(|column| column.value(row_idx));
+        row.extend(columns.iter().enumerate().map(|(col_idx, column)| {
+            let value = column.and_then(|column| column.value(row_idx));
             match value {
                 Some(Scalar::Float64(v)) if !v.is_nan() && singles[col_idx] => {
                     let mut text = String::new();
@@ -3087,7 +3099,7 @@ fn html_index_label_string(
         IndexLabel::Utf8(s) => s.clone(),
         IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
         IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-        f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_)) => f.to_string(),
+        f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => f.to_string(),
         IndexLabel::Object(object) => object.to_string(),
         IndexLabel::Null(_) => label.to_string(),
     };
@@ -7209,6 +7221,9 @@ fn index_label_to_json(label: &IndexLabel) -> serde_json::Value {
             }
         }
         IndexLabel::Object(object) => scalar_to_json(&Scalar::Object(object.clone())),
+        // A period as its text, NaT null (45fzr).
+        IndexLabel::Period(period) if period.is_nat() => serde_json::Value::Null,
+        IndexLabel::Period(period) => serde_json::Value::String(period.to_string()),
         // pandas to_json renders a missing label as JSON null.
         IndexLabel::Null(_) => serde_json::Value::Null,
     }
@@ -7249,6 +7264,7 @@ fn index_label_to_scalar_value(label: &IndexLabel) -> Scalar {
         // datetime format. (br-frankenpandas-mdt64)
         IndexLabel::Datetime64(v) => Scalar::Datetime64(*v),
         IndexLabel::Object(object) => Scalar::Object(object.clone()),
+        IndexLabel::Period(period) => Scalar::Period(*period),
         // Typed-null label round-trips to the same-kind missing scalar.
         IndexLabel::Null(kind) => Scalar::Null(*kind),
     }
@@ -8728,8 +8744,9 @@ fn extract_typed_value_columns(frame: &DataFrame) -> Option<(Vec<JCol<'_>>, Vec<
     let n = frame.index().len();
     let mut cols: Vec<JCol<'_>> = Vec::with_capacity(headers.len());
     let mut keys: Vec<String> = Vec::with_capacity(headers.len());
-    for name in &headers {
-        let column = frame.column(name.as_str())?;
+    // By position: a repeated column key writes its own cells (i17d4).
+    for (position, name) in headers.iter().enumerate() {
+        let column = frame.column_at(position)?;
         let jc = if let Some(s) = column.as_i64_slice() {
             (s.len() == n).then_some(JCol::I(s))?
         } else if let Some(s) = column.as_f64_slice() {
@@ -9136,6 +9153,27 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
     }
 
     let row_count = frame.index().len();
+    // A key names one column in these orients, so pandas refuses repeated
+    // column keys (i17d4: the first duplicate's data was written twice).
+    let keyed = match orient {
+        JsonOrient::Records => Some("records"),
+        JsonOrient::Columns => Some("columns"),
+        JsonOrient::Index => Some("index"),
+        JsonOrient::Split | JsonOrient::Values => None,
+    };
+    if let Some(keyed) = keyed {
+        let names = frame.column_names();
+        let mut seen = std::collections::HashSet::with_capacity(names.len());
+        if !names.iter().all(|name| seen.insert(name.as_str())) {
+            return Err(IoError::JsonFormat(format!(
+                "DataFrame columns must be unique for orient='{keyed}'."
+            )));
+        }
+    }
+    // Every column by position (split / values keep repeated keys apart).
+    let columns: Vec<Option<&Column>> = (0..frame.num_columns())
+        .map(|position| frame.column_at(position))
+        .collect();
 
     match orient {
         JsonOrient::Records => {
@@ -9240,10 +9278,10 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
                 return Ok(s);
             }
             let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
-            let column_float_promotions = headers
+            let column_float_promotions = columns
                 .iter()
-                .map(|name| {
-                    frame.column(name).is_some_and(|column| {
+                .map(|column| {
+                    column.is_some_and(|column| {
                         column_promotes_int_json_values_to_float(column.values())
                     })
                 })
@@ -9261,12 +9299,11 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
 
             let mut data = Vec::with_capacity(row_count);
             for row_idx in 0..row_count {
-                let row: Vec<serde_json::Value> = headers
+                let row: Vec<serde_json::Value> = columns
                     .iter()
                     .zip(column_float_promotions.iter())
-                    .map(|(name, promote_int_to_float)| {
-                        frame
-                            .column(name)
+                    .map(|(column, promote_int_to_float)| {
+                        column
                             .and_then(|c| c.value(row_idx))
                             .map(|value| {
                                 scalar_to_json_with_column_promotion(value, *promote_int_to_float)
@@ -9288,23 +9325,21 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
             if let Some(s) = try_write_json_values_typed(frame) {
                 return Ok(s);
             }
-            let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
-            let column_float_promotions = headers
+            let column_float_promotions = columns
                 .iter()
-                .map(|name| {
-                    frame.column(name).is_some_and(|column| {
+                .map(|column| {
+                    column.is_some_and(|column| {
                         column_promotes_int_json_values_to_float(column.values())
                     })
                 })
                 .collect::<Vec<_>>();
             let mut data = Vec::with_capacity(row_count);
             for row_idx in 0..row_count {
-                let row: Vec<serde_json::Value> = headers
+                let row: Vec<serde_json::Value> = columns
                     .iter()
                     .zip(column_float_promotions.iter())
-                    .map(|(name, promote_int_to_float)| {
-                        frame
-                            .column(name)
+                    .map(|(column, promote_int_to_float)| {
+                        column
                             .and_then(|c| c.value(row_idx))
                             .map(|value| {
                                 scalar_to_json_with_column_promotion(value, *promote_int_to_float)
@@ -11756,6 +11791,13 @@ fn write_excel_index_label(
                 .write_string(excel_row, excel_col, object.to_string())
                 .map_err(|e| IoError::Excel(format!("write index object: {e}")))?;
         }
+        // A period as its text, NaT a blank cell (45fzr).
+        IndexLabel::Period(period) if period.is_nat() => {}
+        IndexLabel::Period(period) => {
+            worksheet
+                .write_string(excel_row, excel_col, period.to_string())
+                .map_err(|e| IoError::Excel(format!("write index period: {e}")))?;
+        }
         IndexLabel::Null(_) => {}
     }
     Ok(())
@@ -13215,6 +13257,7 @@ fn scalar_from_index_label(label: &IndexLabel) -> Scalar {
         IndexLabel::Bool(b) => Scalar::Bool(*b),
         IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
         IndexLabel::Object(object) => Scalar::Object(object.clone()),
+        IndexLabel::Period(period) => Scalar::Period(*period),
         // Typed-null label round-trips to the same-kind missing scalar.
         IndexLabel::Null(kind) => Scalar::Null(*kind),
         IndexLabel::Timedelta64(v) => {

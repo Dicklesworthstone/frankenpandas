@@ -9214,8 +9214,10 @@ impl std::fmt::Display for PeriodFreq {
 ///
 /// Stored as an integer ordinal on a frequency-specific axis plus the
 /// frequency code. Two Periods with different `freq` are incompatible —
-/// arithmetic and comparison require same-freq operands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// arithmetic and comparison require same-freq operands. The derived order
+/// (ordinal, then freq) is a total one for index labels (45fzr): within one
+/// freq it is the periods' own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Period {
     pub ordinal: i64,
     pub freq: PeriodFreq,
@@ -9225,6 +9227,13 @@ impl Period {
     #[must_use]
     pub const fn new(ordinal: i64, freq: PeriodFreq) -> Self {
         Self { ordinal, freq }
+    }
+
+    /// Whether this is NaT: the missing period, ordinal `i64::MIN` (what a
+    /// missing element of a PeriodIndex holds and what renders `NaT`).
+    #[must_use]
+    pub const fn is_nat(&self) -> bool {
+        self.ordinal == i64::MIN
     }
 
     /// Integer position on this period's frequency axis, matching

@@ -1,4 +1,4 @@
 0    False
 1    True
 2    False
-Name: x!=y, Length: 3, dtype: Bool
+Name: , Length: 3, dtype: Bool

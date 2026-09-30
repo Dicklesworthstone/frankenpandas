@@ -151,7 +151,13 @@ impl PartialOrd for OrderedF64 {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+/// Labels compare as pandas' do: an int and a float are one number (`1 ==
+/// 1.0`, hashed alike, as Python's), ordered by value beside each other;
+/// every other kind equals only its own kind, and kinds order as declared
+/// below with the numbers first (br-frankenpandas-l5sed: `Int64(1)` and
+/// `Float64(1.0)` were different labels, so `s.loc[2.0]` missed an int
+/// index).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum IndexLabel {
     Int64(i64),
@@ -169,6 +175,12 @@ pub enum IndexLabel {
     /// Ordered by [`fp_types::ObjectValue::total_cmp`] (Python's own order
     /// where it has one); before `Null` so null labels still sort last.
     Object(fp_types::ObjectValue),
+    /// A period, a PeriodIndex's label (br-frankenpandas-45fzr): a Series /
+    /// DataFrame row index, groupby keys and value_counts over periods keep
+    /// them (they were their text). Ordered by ordinal (then freq); NaT
+    /// (ordinal `i64::MIN`) is missing. Before `Null` so null labels still
+    /// sort last.
+    Period(fp_types::Period),
     /// Typed missing label (br-frankenpandas-joeff): lets value_counts
     /// (dropna=False) and friends keep pandas' distinct None / nan / NaT
     /// buckets instead of collapsing them or colliding with genuine
@@ -178,6 +190,138 @@ pub enum IndexLabel {
     /// kind-SENSITIVE (None != nan != NaT), matching `ScalarKey::Null`
     /// bucket identity.
     Null(fp_types::NullKind),
+}
+
+/// `value` as the int it equals exactly, if it is one (no fraction, inside
+/// i64's range).
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)] // checked round trip
+fn exact_i64(value: f64) -> Option<i64> {
+    // 2^63 is the first float past i64's range.
+    const LIMIT: f64 = 9_223_372_036_854_775_808.0;
+    (value.fract() == 0.0 && (-LIMIT..LIMIT).contains(&value)).then_some(value as i64)
+}
+
+/// An int against a float, exactly: NaN after every number, as a float
+/// index orders it.
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)] // checked range
+fn cmp_int_float(int: i64, float: f64) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    const LIMIT: f64 = 9_223_372_036_854_775_808.0;
+    if float.is_nan() || float >= LIMIT {
+        return Ordering::Less;
+    }
+    if float < -LIMIT {
+        return Ordering::Greater;
+    }
+    let whole = float.trunc();
+    match int.cmp(&(whole as i64)) {
+        Ordering::Equal if float > whole => Ordering::Less,
+        Ordering::Equal if float < whole => Ordering::Greater,
+        other => other,
+    }
+}
+
+impl IndexLabel {
+    /// The int this label equals: an int's own value, an integral float's
+    /// (`2.0` is `2`, as pandas looks it up in an int index); None for any
+    /// other label.
+    #[must_use]
+    pub fn exact_int(&self) -> Option<i64> {
+        match self {
+            Self::Int64(value) => Some(*value),
+            Self::Float64(value) => exact_i64(value.0),
+            _ => None,
+        }
+    }
+
+    /// The label's kind in the cross-kind order: numbers first (ints and
+    /// floats together), then the kinds as declared, missing last.
+    fn kind_rank(&self) -> u8 {
+        match self {
+            Self::Int64(_) | Self::Float64(_) => 0,
+            Self::Utf8(_) => 1,
+            Self::Timedelta64(_) => 2,
+            Self::Datetime64(_) => 3,
+            Self::Bool(_) => 4,
+            Self::Object(_) => 5,
+            Self::Period(_) => 6,
+            Self::Null(_) => 7,
+        }
+    }
+}
+
+impl PartialEq for IndexLabel {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Int64(a), Self::Int64(b))
+            | (Self::Timedelta64(a), Self::Timedelta64(b))
+            | (Self::Datetime64(a), Self::Datetime64(b)) => a == b,
+            (Self::Int64(int), Self::Float64(float)) | (Self::Float64(float), Self::Int64(int)) => {
+                exact_i64(float.0) == Some(*int)
+            }
+            (Self::Float64(a), Self::Float64(b)) => a == b,
+            (Self::Utf8(a), Self::Utf8(b)) => a == b,
+            (Self::Bool(a), Self::Bool(b)) => a == b,
+            (Self::Object(a), Self::Object(b)) => a == b,
+            (Self::Period(a), Self::Period(b)) => a == b,
+            (Self::Null(a), Self::Null(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for IndexLabel {}
+
+impl std::hash::Hash for IndexLabel {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // An integral float hashes as the int it equals.
+        let integral = match self {
+            Self::Int64(value) => Some(*value),
+            Self::Float64(value) => exact_i64(value.0),
+            _ => None,
+        };
+        if let Some(value) = integral {
+            0_u8.hash(state);
+            value.hash(state);
+            return;
+        }
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Self::Int64(_) => {}
+            Self::Utf8(text) => text.hash(state),
+            Self::Timedelta64(value) | Self::Datetime64(value) => value.hash(state),
+            Self::Float64(value) => value.hash(state),
+            Self::Bool(flag) => flag.hash(state),
+            Self::Object(object) => object.hash(state),
+            Self::Period(period) => period.hash(state),
+            Self::Null(kind) => kind.hash(state),
+        }
+    }
+}
+
+impl Ord for IndexLabel {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (Self::Int64(a), Self::Int64(b))
+            | (Self::Timedelta64(a), Self::Timedelta64(b))
+            | (Self::Datetime64(a), Self::Datetime64(b)) => a.cmp(b),
+            (Self::Int64(int), Self::Float64(float)) => cmp_int_float(*int, float.0),
+            (Self::Float64(float), Self::Int64(int)) => cmp_int_float(*int, float.0).reverse(),
+            (Self::Float64(a), Self::Float64(b)) => a.cmp(b),
+            (Self::Utf8(a), Self::Utf8(b)) => a.cmp(b),
+            (Self::Bool(a), Self::Bool(b)) => a.cmp(b),
+            (Self::Object(a), Self::Object(b)) => a.cmp(b),
+            (Self::Period(a), Self::Period(b)) => a.cmp(b),
+            (Self::Null(a), Self::Null(b)) => a.cmp(b),
+            _ => self.kind_rank().cmp(&other.kind_rank()),
+        }
+    }
+}
+
+impl PartialOrd for IndexLabel {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl From<i64> for IndexLabel {
@@ -205,6 +349,7 @@ impl IndexLabel {
             Self::Timedelta64(value) => *value == Timedelta::NAT,
             Self::Datetime64(value) => *value == i64::MIN,
             Self::Float64(v) => v.0.is_nan(),
+            Self::Period(period) => period.is_nat(),
             Self::Int64(_) | Self::Utf8(_) | Self::Bool(_) | Self::Object(_) => false,
             Self::Null(_) => true,
         }
@@ -269,6 +414,8 @@ fn index_label_is_truthy(label: &IndexLabel) -> bool {
         IndexLabel::Datetime64(v) => *v != 0,
         // Python truth: an empty list is false, any other object true.
         IndexLabel::Object(object) => object.as_list().is_none_or(|items| !items.is_empty()),
+        // A Period object is true (its NaT was missing above).
+        IndexLabel::Period(_) => true,
         // Unreachable: is_missing() returned true above for every Null.
         IndexLabel::Null(_) => false,
     }
@@ -331,6 +478,8 @@ impl fmt::Display for IndexLabel {
             Self::Datetime64(v) => write!(f, "{}", format_datetime_ns(*v)),
             // pandas prints an object label as its cell (`2020-01-05`).
             Self::Object(object) => f.write_str(&object.pprint()),
+            // A period as its calendar text (`2024-03`, `2024Q1`, NaT).
+            Self::Period(period) => write!(f, "{period}"),
             // Matches pandas' REPR of missing labels in an index (None / NaN /
             // NaT — note uppercase NaN: the formatter surface, unlike
             // str(nan)=='nan' which astype(str) uses). Verified pandas 2.2.3.
@@ -612,11 +761,13 @@ fn detect_sort_order(labels: &[IndexLabel]) -> SortOrder {
             Some(IndexLabel::Utf8(_)) => SortOrder::AscendingUtf8,
             Some(IndexLabel::Timedelta64(_)) => SortOrder::AscendingTimedelta64,
             Some(IndexLabel::Datetime64(_)) => SortOrder::AscendingDatetime64,
-            // Float64/Bool/Object/Null labels use the general (non-typed) backend.
+            // Float64/Bool/Object/Period/Null labels use the general
+            // (non-typed) backend.
             Some(
                 IndexLabel::Float64(_)
                 | IndexLabel::Bool(_)
                 | IndexLabel::Object(_)
+                | IndexLabel::Period(_)
                 | IndexLabel::Null(_),
             ) => SortOrder::Unsorted,
         };
@@ -1695,10 +1846,12 @@ impl IndexLabels {
             return out;
         }
 
-        out.extend(self.as_slice().iter().map(|label| match label {
-            IndexLabel::Int64(value) => source.position(*value),
-            _ => None,
-        }));
+        // An integral float target is the int it equals (l5sed).
+        out.extend(
+            self.as_slice()
+                .iter()
+                .map(|label| label.exact_int().and_then(|value| source.position(value))),
+        );
         out
     }
 
@@ -1931,6 +2084,62 @@ pub struct Index {
     /// as pandas turns those into an Index. Equality ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     range: Option<(i64, i64, i64)>,
+    /// pandas' dtype where the labels alone would read another (see
+    /// [`DeclaredDtype`]): object over numbers, an empty index's source
+    /// dtype, numpy's int32. Only [`Self::with_declared_dtype`] sets it;
+    /// [`Self::propagate_name`] carries it to an index built from these
+    /// labels. Equality ignores it, as pandas' `equals` does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    declared: Option<DeclaredDtype>,
+}
+
+/// A dtype an [`Index`] is declared with where its labels alone read
+/// another: pandas' `Index([1, 2], dtype=object)` holds the ints 1 and 2
+/// under the object dtype (they became the strings '1' and '2';
+/// br-frankenpandas-i20vm); an empty index keeps the dtype it was taken
+/// from (`iloc[:0]` of an int64 index is int64, it read as object; dwyud);
+/// a DatetimeIndex field (`.year`) is numpy's int32 (it was int64; pqjzo).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeclaredDtype {
+    Object,
+    Int64,
+    Int32,
+    Float64,
+    Bool,
+    Datetime64,
+    Timedelta64,
+}
+
+impl DeclaredDtype {
+    /// pandas' name of the dtype.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Object => "object",
+            Self::Int64 => "int64",
+            Self::Int32 => "int32",
+            Self::Float64 => "float64",
+            Self::Bool => "bool",
+            Self::Datetime64 => "datetime64[ns]",
+            Self::Timedelta64 => "timedelta64[ns]",
+        }
+    }
+
+    /// The declared dtype pandas' name reads as, None for another.
+    #[must_use]
+    pub fn of_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "object" => Self::Object,
+            "int64" => Self::Int64,
+            "int32" => Self::Int32,
+            "float64" => Self::Float64,
+            "bool" => Self::Bool,
+            "datetime64[ns]" => Self::Datetime64,
+            "timedelta64[ns]" => Self::Timedelta64,
+            _ => return None,
+        })
+    }
 }
 
 /// The derived layout, with the row `MultiIndex` levels listed only when an
@@ -1958,6 +2167,9 @@ impl fmt::Debug for Index {
         }
         if let Some(range) = &self.range {
             out.field("range", range);
+        }
+        if let Some(declared) = &self.declared {
+            out.field("declared", declared);
         }
         out.finish()
     }
@@ -2103,6 +2315,7 @@ impl Index {
             tz: None,
             freq: None,
             range: None,
+            declared: None,
         }
     }
 
@@ -2163,6 +2376,7 @@ impl Index {
             tz: None,
             freq: None,
             range: None,
+            declared: None,
         };
         let _ = index.duplicate_cache.set(false);
         let _ = index.sort_order_cache.set(SortOrder::AscendingInt64);
@@ -2196,6 +2410,7 @@ impl Index {
             tz: None,
             freq: None,
             range: None,
+            declared: None,
         };
         let _ = index.duplicate_cache.set(false);
         if len <= 1 || step > 0 {
@@ -2220,6 +2435,7 @@ impl Index {
             tz: None,
             freq: None,
             range: None,
+            declared: None,
         })
     }
 
@@ -2255,6 +2471,7 @@ impl Index {
             tz: None,
             freq: None,
             range: None,
+            declared: None,
         }
     }
 
@@ -2280,6 +2497,7 @@ impl Index {
             tz: None,
             freq: None,
             range: None,
+            declared: None,
         })
     }
 
@@ -2302,6 +2520,7 @@ impl Index {
             tz: None,
             freq: None,
             range: None,
+            declared: None,
         }
     }
 
@@ -2346,6 +2565,7 @@ impl Index {
             tz: None,
             freq: None,
             range: None,
+            declared: None,
         };
         let _ = index.duplicate_cache.set(false);
         if len <= 1 || step > 0 {
@@ -2471,7 +2691,42 @@ impl Index {
         if self.tz.is_some() && other.holds_only_datetimes() {
             other.tz.clone_from(&self.tz);
         }
-        other
+        other.with_dtype_of(self)
+    }
+
+    /// These labels - selected, sliced or computed from `source`'s - under
+    /// the dtype pandas gives them: `source`'s declared object dtype (it
+    /// holds any labels), its int32 while they are ints, and for no label
+    /// at all `source`'s dtype, as pandas' empty slice or selection keeps it
+    /// (br-frankenpandas-i20vm / pqjzo / dwyud). A dtype these labels are
+    /// already declared with stays.
+    #[must_use]
+    pub fn with_dtype_of(mut self, source: &Self) -> Self {
+        if self.declared.is_none() {
+            self.declared = match source.declared {
+                Some(DeclaredDtype::Object) => Some(DeclaredDtype::Object),
+                Some(DeclaredDtype::Int32) if self.is_integer() => Some(DeclaredDtype::Int32),
+                declared if self.is_empty() => {
+                    declared.or_else(|| DeclaredDtype::of_name(source.dtype()))
+                }
+                _ => None,
+            };
+        }
+        self
+    }
+
+    /// These labels under `declared` (see [`DeclaredDtype`]); None their
+    /// own dtype.
+    #[must_use]
+    pub fn with_declared_dtype(mut self, declared: Option<DeclaredDtype>) -> Self {
+        self.declared = declared;
+        self
+    }
+
+    /// The dtype these labels are declared with, if any.
+    #[must_use]
+    pub fn declared_dtype(&self) -> Option<DeclaredDtype> {
+        self.declared
     }
 
     /// Whether every label is a datetime (NaT included) - what a time zone
@@ -2759,6 +3014,17 @@ impl Index {
     /// For unsorted indexes, falls back to linear scan (O(n)).
     #[must_use]
     pub fn position(&self, needle: &IndexLabel) -> Option<usize> {
+        // An integral float key is the int it equals: the int paths below
+        // match Int64 keys, and every other path compares by value
+        // (br-frankenpandas-l5sed).
+        let as_int;
+        let needle = match (needle, needle.exact_int()) {
+            (IndexLabel::Float64(_), Some(int)) => {
+                as_int = IndexLabel::Int64(int);
+                &as_int
+            }
+            _ => needle,
+        };
         if let (Some(range), IndexLabel::Int64(target)) = (self.labels.int64_affine_range(), needle)
         {
             return range.position(*target);
@@ -3539,8 +3805,9 @@ impl Index {
     /// index without building the duplicate-expansion map.
     ///
     /// `SortOrder::AscendingInt64` is strict, so the index is unique and each
-    /// requested label can yield at most one position. Missing or non-Int64
-    /// requested labels are represented as `None`; callers preserve their own
+    /// requested label can yield at most one position. Missing requested
+    /// labels, or ones equal to no int (an integral Float64 is its int), are
+    /// represented as `None`; callers preserve their own
     /// fail-closed error surface. Returns `None` only when this index is not a
     /// sorted unique Int64 index and the duplicate-aware fallback must run.
     #[must_use]
@@ -3553,12 +3820,14 @@ impl Index {
             return None;
         }
         let values = self.labels.int64_view()?;
+        // An integral Float64 selector is the int it equals (l5sed).
         Some(
             labels
                 .iter()
-                .map(|label| match label {
-                    IndexLabel::Int64(value) => values.binary_search(value).ok(),
-                    _ => None,
+                .map(|label| {
+                    label
+                        .exact_int()
+                        .and_then(|value| values.binary_search(&value).ok())
                 })
                 .collect(),
         )
@@ -3574,8 +3843,9 @@ impl Index {
     /// [`Self::sorted_unique_int64_positions`]), has duplicate labels (pandas
     /// returns every match, which needs the multimap), or is not all-Int64.
     /// The index is unique here, so each requested label yields at most one
-    /// position; missing or non-Int64 selectors map to `None` and callers
-    /// preserve their own fail-closed error surface.
+    /// position; missing selectors, or ones equal to no int (an integral
+    /// Float64 is its int), map to `None` and callers preserve their own
+    /// fail-closed error surface.
     #[must_use]
     #[doc(hidden)]
     pub fn unsorted_unique_int64_positions(
@@ -3590,12 +3860,14 @@ impl Index {
         }
         let values = self.labels.int64_view()?;
         let lookup = int64_position_lookup_cached(self.label_identity, &values);
+        // An integral Float64 selector is the int it equals (l5sed).
         Some(
             labels
                 .iter()
-                .map(|label| match label {
-                    IndexLabel::Int64(value) => lookup.get(value).copied(),
-                    _ => None,
+                .map(|label| {
+                    label
+                        .exact_int()
+                        .and_then(|value| lookup.get(&value).copied())
                 })
                 .collect(),
         )
@@ -3691,18 +3963,13 @@ impl Index {
     #[must_use]
     pub fn isin(&self, values: &[IndexLabel]) -> Vec<bool> {
         // Typed all-Int64 fast path: probe over raw `i64` keys. An all-Int64
-        // index can only match `IndexLabel::Int64` needles (the enum's Eq is
-        // variant-sensitive), so non-Int64 needles are dropped without changing
-        // membership — bit-identical to the pointer-keyed `FxHashMap` probe but
-        // without the per-label enum-pointer cache miss.
+        // index matches the needles that equal an int - an Int64, or an
+        // integral Float64 (labels compare numbers by value; l5sed) - so the
+        // others are dropped without changing membership, bit-identical to
+        // the pointer-keyed `FxHashMap` probe but without the per-label
+        // enum-pointer cache miss.
         if let Some(self_i64) = self.labels.int64_view() {
-            let needles: Vec<i64> = values
-                .iter()
-                .filter_map(|v| match v {
-                    IndexLabel::Int64(x) => Some(*x),
-                    _ => None,
-                })
-                .collect();
+            let needles: Vec<i64> = values.iter().filter_map(IndexLabel::exact_int).collect();
             return Self::isin_i64(&self_i64, &needles);
         }
         let set: FxHashMap<&IndexLabel, ()> = values.iter().map(|v| (v, ())).collect();
@@ -4606,6 +4873,7 @@ impl Index {
             tz: None,
             freq: None,
             range: None,
+            declared: None,
         });
         sliced.freq.clone_from(&self.freq);
         // A slice of a RangeIndex is one (pandas).
@@ -4976,6 +5244,8 @@ impl Index {
                         .map_or_else(|_| l.clone(), IndexLabel::Int64),
                     IndexLabel::Timedelta64(ns) => IndexLabel::Int64(*ns),
                     IndexLabel::Datetime64(ns) => IndexLabel::Int64(*ns),
+                    // A period is its ordinal (NaT's too), as pandas'.
+                    IndexLabel::Period(period) => IndexLabel::Int64(period.ordinal),
                     // Missing labels and objects have no integer form;
                     // preserved like unparseable strings (pandas astype(int)
                     // raises on NaN — callers reject before reaching here).
@@ -5009,6 +5279,11 @@ impl Index {
                             "Cannot cast a datetime-like Index to dtype float64".to_owned(),
                         ));
                     }
+                    IndexLabel::Period(_) => {
+                        return Err(IndexError::InvalidArgument(
+                            "Cannot cast PeriodIndex to dtype float64".to_owned(),
+                        ));
+                    }
                     IndexLabel::Object(object) => {
                         return Err(IndexError::InvalidArgument(format!(
                             "float() argument must be a string or a real number, not {}",
@@ -5036,6 +5311,8 @@ impl Index {
                     IndexLabel::Bool(b) => *b,
                     IndexLabel::Utf8(s) => !s.is_empty(),
                     IndexLabel::Object(_) => index_label_is_truthy(label),
+                    // NaT is false, a period true (pandas').
+                    IndexLabel::Period(period) => !period.is_nat(),
                     IndexLabel::Null(_)
                     | IndexLabel::Timedelta64(_)
                     | IndexLabel::Datetime64(_) => {
@@ -5087,6 +5364,8 @@ impl Index {
                     IndexLabel::Timedelta64(ns) => IndexLabel::Utf8(Timedelta::format(*ns)),
                     IndexLabel::Datetime64(ns) => IndexLabel::Utf8(format_datetime_ns(*ns)),
                     IndexLabel::Object(object) => IndexLabel::Utf8(object.to_string()),
+                    // A period's calendar text, NaT's 'NaT'.
+                    IndexLabel::Period(period) => IndexLabel::Utf8(period.to_string()),
                     // astype(str) uses Python str() forms: str(None)=='None',
                     // str(nan)=='nan' (LOWERCASE, unlike the repr surface),
                     // str(NaT)=='NaT'. Verified pandas 2.2.3.
@@ -5591,6 +5870,7 @@ impl Index {
                 | IndexLabel::Timedelta64(_)
                 | IndexLabel::Datetime64(_)
                 | IndexLabel::Object(_)
+                | IndexLabel::Period(_)
                 | IndexLabel::Null(_) => 8,
                 IndexLabel::Bool(_) => 1,
                 IndexLabel::Utf8(s) => {
@@ -6035,6 +6315,9 @@ impl Index {
     /// Pandas dtype string for this flat index.
     #[must_use]
     pub fn dtype(&self) -> &'static str {
+        if let Some(declared) = self.declared {
+            return declared.name();
+        }
         match self.inferred_type() {
             "integer" => "int64",
             "floating" => "float64",
@@ -6077,7 +6360,38 @@ impl Index {
         }
         let mut non_missing = self.labels.iter().filter(|label| !label.is_missing());
         let Some(first) = non_missing.next() else {
-            return "empty";
+            // Every label is missing: pandas infers NaN floating (NaN beside
+            // None too), NaT an instant and None alone mixed - an all-NaN
+            // index is float64 (it was object; br-frankenpandas-mzes1).
+            let all = |kind: fn(&IndexLabel) -> bool| self.labels.iter().all(kind);
+            return if all(|label| {
+                matches!(
+                    label,
+                    IndexLabel::Datetime64(_) | IndexLabel::Null(fp_types::NullKind::NaT)
+                )
+            }) {
+                "datetime64"
+            } else if all(|label| matches!(label, IndexLabel::Timedelta64(_))) {
+                "timedelta64"
+            } else if all(|label| matches!(label, IndexLabel::Period(_))) {
+                // A PeriodIndex of NaT alone is still one (45fzr).
+                "period"
+            } else if self.labels.iter().any(|label| {
+                matches!(
+                    label,
+                    IndexLabel::Float64(_) | IndexLabel::Null(fp_types::NullKind::NaN)
+                )
+            }) && all(|label| {
+                matches!(
+                    label,
+                    IndexLabel::Float64(_)
+                        | IndexLabel::Null(fp_types::NullKind::NaN | fp_types::NullKind::Null)
+                )
+            }) {
+                "floating"
+            } else {
+                "mixed"
+            };
         };
         let same_kind = |label: &IndexLabel| {
             matches!(
@@ -6088,6 +6402,9 @@ impl Index {
                     | (IndexLabel::Utf8(_), IndexLabel::Utf8(_))
                     | (IndexLabel::Timedelta64(_), IndexLabel::Timedelta64(_))
                     | (IndexLabel::Datetime64(_), IndexLabel::Datetime64(_))
+            ) || matches!(
+                (first, label),
+                (IndexLabel::Period(a), IndexLabel::Period(b)) if a.freq == b.freq
             )
         };
         if !non_missing.all(same_kind) {
@@ -6110,6 +6427,9 @@ impl Index {
             IndexLabel::Utf8(_) => beside_missing("string"),
             IndexLabel::Timedelta64(_) => "timedelta64",
             IndexLabel::Datetime64(_) => "datetime64",
+            // Periods of one freq (a NaT beside them too); another freq
+            // among them was mixed above.
+            IndexLabel::Period(_) => "period",
             // The core cannot read an object's kind (pandas says "date" for
             // datetime.date labels); and unreachable for Null: `first` comes
             // from the non-missing iterator and every Null label is_missing.
@@ -6729,6 +7049,7 @@ impl<'a> IndexStringAccessor<'a> {
                 | IndexLabel::Timedelta64(_)
                 | IndexLabel::Datetime64(_)
                 | IndexLabel::Object(_)
+                | IndexLabel::Period(_)
                 | IndexLabel::Null(_) => None,
             })
             .collect()
@@ -6899,6 +7220,7 @@ where
             | IndexLabel::Utf8(_)
             | IndexLabel::Timedelta64(_)
             | IndexLabel::Object(_)
+            | IndexLabel::Period(_)
             | IndexLabel::Null(_) => None,
         })
         .collect()
@@ -6932,6 +7254,7 @@ fn datetime_label_time_nanos(label: &IndexLabel) -> Option<i64> {
         | IndexLabel::Utf8(_)
         | IndexLabel::Timedelta64(_)
         | IndexLabel::Object(_)
+        | IndexLabel::Period(_)
         | IndexLabel::Null(_) => None,
     }
 }
@@ -6971,6 +7294,7 @@ where
             | IndexLabel::Timedelta64(_)
             | IndexLabel::Datetime64(_)
             | IndexLabel::Object(_)
+            | IndexLabel::Period(_)
             | IndexLabel::Null(_) => None,
         })
         .collect()
@@ -7174,7 +7498,11 @@ fn period_business_date(ordinal: i64) -> Result<chrono::NaiveDate, IndexError> {
     period_add_days(period_epoch_date(1970, 1, 1)?, calendar_days)
 }
 
-fn period_start_nanos(period: Period) -> Result<i64, IndexError> {
+/// The instant (epoch nanoseconds) a period starts at, pandas'
+/// `Period.start_time`: fp-frame reads a period label there where a
+/// datetime label's own instant is read (45fzr). NaT and an ordinal past
+/// the calendar are errors.
+pub fn period_start_nanos(period: Period) -> Result<i64, IndexError> {
     match period.freq {
         PeriodFreq::Annual => {
             let month_ordinal = period
@@ -8010,6 +8338,7 @@ impl DatetimeIndex {
                 | IndexLabel::Timedelta64(_)
                 | IndexLabel::Datetime64(_)
                 | IndexLabel::Object(_)
+                | IndexLabel::Period(_)
                 | IndexLabel::Null(_) => None,
             })
             .collect()
@@ -8055,6 +8384,7 @@ impl DatetimeIndex {
                 | IndexLabel::Utf8(_)
                 | IndexLabel::Timedelta64(_)
                 | IndexLabel::Object(_)
+                | IndexLabel::Period(_)
                 | IndexLabel::Null(_) => i64::MIN,
             })
             .collect()
@@ -10034,6 +10364,7 @@ impl TimedeltaIndex {
                 | IndexLabel::Utf8(_)
                 | IndexLabel::Datetime64(_)
                 | IndexLabel::Object(_)
+                | IndexLabel::Period(_)
                 | IndexLabel::Null(_) => Timedelta::NAT,
             })
             .collect()
@@ -11284,19 +11615,17 @@ impl PeriodIndex {
         vec![self.dtype()]
     }
 
-    /// Whether any period label is missing.
-    ///
-    /// FrankenPandas `Period` currently has no NaT sentinel, so this is
-    /// always false until native period missing values are introduced.
+    /// Whether any period label is missing (NaT, [`Period::is_nat`]; this
+    /// was always false, br-frankenpandas-u6p7i).
     #[must_use]
     pub fn hasnans(&self) -> bool {
-        false
+        self.values.iter().any(Period::is_nat)
     }
 
     /// Missing-value mask, matching `pd.PeriodIndex.isna()`.
     #[must_use]
     pub fn isna(&self) -> Vec<bool> {
-        vec![false; self.len()]
+        self.values.iter().map(Period::is_nat).collect()
     }
 
     /// Alias for [`isna`](Self::isna), matching `pd.PeriodIndex.isnull()`.
@@ -11308,7 +11637,7 @@ impl PeriodIndex {
     /// Non-missing mask, matching `pd.PeriodIndex.notna()`.
     #[must_use]
     pub fn notna(&self) -> Vec<bool> {
-        vec![true; self.len()]
+        self.values.iter().map(|period| !period.is_nat()).collect()
     }
 
     /// Alias for [`notna`](Self::notna), matching `pd.PeriodIndex.notnull()`.
@@ -11505,8 +11834,38 @@ impl PeriodIndex {
 
     #[must_use]
     pub fn to_index(&self) -> Index {
-        Index::from_utf8(self.values.iter().map(Period::to_string).collect())
-            .set_names(self.name.as_deref())
+        // Period labels, so a Series / DataFrame on this index keeps it (it
+        // was their text; 45fzr).
+        Index::new(
+            self.values
+                .iter()
+                .copied()
+                .map(IndexLabel::Period)
+                .collect(),
+        )
+        .set_names(self.name.clone())
+    }
+
+    /// The PeriodIndex `index` holds: its labels periods of one freq (NaT
+    /// among them), or None for any other label (45fzr).
+    #[must_use]
+    pub fn from_index(index: &Index) -> Option<Self> {
+        let mut freq = None;
+        let values = index
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Period(period) if freq.is_none_or(|freq| freq == period.freq) => {
+                    freq = Some(period.freq);
+                    Some(*period)
+                }
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self {
+            values,
+            name: index.name().cloned(),
+        })
     }
 
     /// First-seen unique periods, matching `pd.PeriodIndex.unique()`.
@@ -12418,10 +12777,11 @@ impl PeriodIndex {
         self.to_flat_index().to_series()
     }
 
-    /// Whether any period label coerces to true.
+    /// Whether any period label coerces to true: the flat index's answer, a
+    /// NaT being missing there (pandas raises TypeError for either; 45fzr).
     #[must_use]
     pub fn any(&self) -> bool {
-        !self.values.is_empty()
+        self.to_flat_index().any()
     }
 
     /// Whether all period labels coerce to true.
@@ -19203,6 +19563,7 @@ impl MultiIndex {
             Some(IndexLabel::Null(fp_types::NullKind::Null)) => "NoneType",
             Some(IndexLabel::Null(fp_types::NullKind::NaN)) => "float",
             Some(IndexLabel::Null(fp_types::NullKind::NaT)) => "NaTType",
+            Some(IndexLabel::Period(_)) => "Period",
             Some(IndexLabel::Object(_)) | None => "object",
         }
     }
@@ -19623,6 +19984,7 @@ impl MultiIndex {
                 | IndexLabel::Timedelta64(_)
                 | IndexLabel::Datetime64(_)
                 | IndexLabel::Object(_)
+                | IndexLabel::Period(_)
                 | IndexLabel::Null(_) => 8,
                 IndexLabel::Bool(_) => 1,
                 IndexLabel::Utf8(value) => {
@@ -22167,6 +22529,89 @@ mod tests {
     }
 
     #[test]
+    fn index_label_numbers_compare_by_value_l5sed() {
+        use std::hash::{BuildHasher, RandomState};
+        let hashes = RandomState::new();
+        let int = IndexLabel::Int64;
+        let float = |value: f64| IndexLabel::Float64(OrderedF64(value));
+        // An int and the float it equals are one label, hashed alike.
+        assert_eq!(int(2), float(2.0));
+        assert_eq!(hashes.hash_one(int(2)), hashes.hash_one(float(2.0)));
+        assert_eq!(int(0), float(-0.0));
+        assert_eq!(hashes.hash_one(int(0)), hashes.hash_one(float(-0.0)));
+        assert_eq!(int(2).cmp(&float(2.0)), std::cmp::Ordering::Equal);
+        // Numbers order by value, beside each other; NaN after them.
+        let mut labels = vec![
+            IndexLabel::Utf8("a".into()),
+            int(2),
+            float(f64::NAN),
+            float(1.5),
+            int(1),
+        ];
+        labels.sort();
+        assert_eq!(
+            labels,
+            vec![
+                int(1),
+                float(1.5),
+                int(2),
+                float(f64::NAN),
+                IndexLabel::Utf8("a".into())
+            ]
+        );
+        // Exact at the edges: 2^53 + 1 is no float, 2^63 no int.
+        let big = (1_i64 << 53) + 1;
+        assert_ne!(int(big), float(9_007_199_254_740_992.0));
+        assert!(int(big) > float(9_007_199_254_740_992.0));
+        assert_ne!(int(i64::MAX), float(9_223_372_036_854_775_808.0));
+        assert!(int(i64::MAX) < float(9_223_372_036_854_775_808.0));
+        assert_eq!(int(i64::MIN), float(-9_223_372_036_854_775_808.0));
+        // Lookups over an int index find an integral float key.
+        let index = Index::new(vec![int(1), int(2)]);
+        assert_eq!(index.position(&float(2.0)), Some(1));
+        assert_eq!(index.isin(&[float(1.0)]), vec![true, false]);
+        let targets = Index::new(vec![float(2.0), float(3.0)]);
+        assert_eq!(index.get_indexer(&targets), vec![Some(1), None]);
+        assert!(index.equals(&Index::new(vec![float(1.0), float(2.0)])));
+        // NEGATIVE: a fraction, text, a bool, a duration and a missing value
+        // equal no int.
+        assert_ne!(int(1), float(1.5));
+        assert_eq!(index.position(&float(1.5)), None);
+        assert_ne!(int(1), IndexLabel::Utf8("1".into()));
+        assert_ne!(int(1), IndexLabel::Bool(true));
+        assert_ne!(int(1), IndexLabel::Timedelta64(1));
+        assert_ne!(int(1), IndexLabel::Null(fp_types::NullKind::NaN));
+        assert_eq!(index.position(&IndexLabel::Utf8("2".into())), None);
+    }
+
+    #[test]
+    fn declared_dtype_holds_and_carries_as_pandas_i20vm() {
+        use crate::DeclaredDtype;
+        let ints = || Index::new(vec![IndexLabel::Int64(1), IndexLabel::Int64(2)]);
+        // An object index of ints: its dtype object, its labels ints.
+        let object = ints().with_declared_dtype(Some(DeclaredDtype::Object));
+        assert_eq!(object.dtype(), "object");
+        assert_eq!(object.labels()[0], IndexLabel::Int64(1));
+        assert_eq!(object.take(&[1]).dtype(), "object");
+        assert_eq!(object.slice(0, 1).dtype(), "object");
+        // Equality ignores it, as pandas' equals.
+        assert_eq!(object, ints());
+        // No row keeps the source's dtype (dwyud).
+        assert_eq!(ints().take(&[]).dtype(), "int64");
+        assert_eq!(ints().slice(0, 0).dtype(), "int64");
+        let floats = Index::new(vec![IndexLabel::Float64(OrderedF64(1.5))]);
+        assert_eq!(floats.slice(0, 0).dtype(), "float64");
+        // int32 while the labels are ints (pqjzo).
+        let int32 = ints().with_declared_dtype(Some(DeclaredDtype::Int32));
+        assert_eq!(int32.take(&[0]).dtype(), "int32");
+        let halves = Index::new(vec![IndexLabel::Float64(OrderedF64(0.5))]);
+        assert_eq!(halves.with_dtype_of(&int32).dtype(), "float64");
+        // NEGATIVE: labels of their own read their own dtype.
+        assert_eq!(ints().take(&[0]).dtype(), "int64");
+        assert_eq!(object.with_declared_dtype(None).dtype(), "int64");
+    }
+
+    #[test]
     fn infer_freq_detects_fixed_and_calendar_offsets() {
         assert_eq!(
             infer_freq_from_timestamps(&["2024-01-01", "2024-01-03", "2024-01-05"]).unwrap(),
@@ -23046,13 +23491,11 @@ mod tests {
         let td = TimedeltaIndex::new(vec![90_061_000_000_000]);
         assert_eq!(td.r#str().contains("day"), vec![None]);
 
+        // TEST-CHANGE (45fzr): period labels are periods now, not text, so
+        // the str accessor reads them as the instants and durations above
+        // do (pandas raises AttributeError for PeriodIndex.str).
         let period = PeriodIndex::from_range(Period::new(10, PeriodFreq::Monthly), 2);
-        let expected_period_lower: Vec<Option<String>> = period
-            .format()
-            .into_iter()
-            .map(|label| Some(label.to_lowercase()))
-            .collect();
-        assert_eq!(period.r#str().lower(), expected_period_lower);
+        assert_eq!(period.r#str().lower(), vec![None, None]);
 
         let categorical = CategoricalIndex::from_values(
             vec!["Low".to_owned(), "HIGH".to_owned(), String::new()],
@@ -26642,6 +27085,67 @@ mod tests {
         assert_eq!(bools.dtype(), "bool");
         let texts = Index::new(vec![IndexLabel::Utf8("a".into())]);
         assert_eq!(texts.inferred_type(), "string");
+    }
+
+    #[test]
+    fn an_index_of_missing_labels_alone_is_typed_by_them_mzes1() {
+        use fp_types::NullKind;
+        // pd.Index([nan, nan]) / [nan, None]: float64 (it was object);
+        // [NaT, NaT]: datetime64[ns].
+        for labels in [
+            vec![
+                IndexLabel::Null(NullKind::NaN),
+                IndexLabel::Null(NullKind::NaN),
+            ],
+            vec![
+                IndexLabel::Null(NullKind::NaN),
+                IndexLabel::Null(NullKind::Null),
+            ],
+        ] {
+            let index = Index::new(labels);
+            assert_eq!(index.inferred_type(), "floating");
+            assert_eq!(index.dtype(), "float64");
+        }
+        let nats = Index::new(vec![IndexLabel::Null(NullKind::NaT); 2]);
+        assert_eq!(nats.dtype(), "datetime64[ns]");
+        // NEGATIVE: None alone stays object ('mixed'), and no labels 'empty'.
+        let nones = Index::new(vec![IndexLabel::Null(NullKind::Null); 2]);
+        assert_eq!(nones.inferred_type(), "mixed");
+        assert_eq!(nones.dtype(), "object");
+        assert_eq!(Index::new(Vec::new()).inferred_type(), "empty");
+    }
+
+    #[test]
+    fn period_labels_make_a_period_index_45fzr() {
+        use fp_types::{Period, PeriodFreq};
+        // Ordinal 648 is 2024-01 monthly (54 years of 12 months).
+        let jan = Period::new(648, PeriodFreq::Monthly);
+        let feb = Period::new(649, PeriodFreq::Monthly);
+        let nat = Period::new(i64::MIN, PeriodFreq::Monthly);
+        let index = Index::new(vec![
+            IndexLabel::Period(feb),
+            IndexLabel::Period(jan),
+            IndexLabel::Period(nat),
+        ]);
+        assert_eq!(index.labels()[0].to_string(), "2024-02");
+        assert_eq!(index.labels()[2].to_string(), "NaT");
+        assert!(index.labels()[2].is_missing());
+        assert!(!index.labels()[0].is_missing());
+        assert_eq!(index.inferred_type(), "period");
+        assert!(IndexLabel::Period(jan) < IndexLabel::Period(feb));
+        // A PeriodIndex and its labels round-trip.
+        let periods = PeriodIndex::from_index(&index).expect("periods of one freq");
+        assert_eq!(periods.freqstr().as_deref(), Some("M"));
+        assert_eq!(periods.to_index().labels(), index.labels());
+        // NEGATIVE: text that reads as periods is no PeriodIndex, nor are
+        // periods of two freqs (an object index there, as pandas').
+        assert!(PeriodIndex::from_index(&Index::from_utf8(vec!["2024-01".to_owned()])).is_none());
+        let mixed = Index::new(vec![
+            IndexLabel::Period(jan),
+            IndexLabel::Period(Period::new(0, PeriodFreq::Daily)),
+        ]);
+        assert!(PeriodIndex::from_index(&mixed).is_none());
+        assert_eq!(mixed.inferred_type(), "mixed");
     }
 
     #[test]
@@ -32946,10 +33450,16 @@ mod tests {
         assert_eq!(td.to_series(), td_flat.to_series());
 
         use fp_types::{Period, PeriodFreq};
+        // TEST-CHANGE (45fzr): the flat labels are the periods themselves
+        // (they were their text; pandas' PeriodIndex.to_flat_index is the
+        // PeriodIndex).
         let pi = super::PeriodIndex::new(vec![Period::new(10, PeriodFreq::Monthly)]).set_name("p");
         let pi_flat = pi.to_flat_index();
         assert_eq!(pi_flat.len(), 1);
-        assert!(matches!(pi_flat.labels()[0], super::IndexLabel::Utf8(_)));
+        assert_eq!(
+            pi_flat.labels()[0],
+            super::IndexLabel::Period(Period::new(10, PeriodFreq::Monthly))
+        );
         assert_eq!(pi.to_frame(), pi_flat.to_frame());
         assert_eq!(pi.to_series(), pi_flat.to_series());
 
@@ -33000,9 +33510,12 @@ mod tests {
         assert_eq!(empty_pi.any(), empty_pi.to_flat_index().any());
         assert!(!empty_pi.any());
 
+        // TEST-CHANGE (45fzr): a NaT period label is missing in the flat
+        // index now (it was its text 'NaT', truthy), so a NaT-only index
+        // is not any (pandas raises TypeError for PeriodIndex.any).
         let nat_pi = super::PeriodIndex::new(vec![Period::new(i64::MIN, PeriodFreq::Daily)]);
         assert_eq!(nat_pi.any(), nat_pi.to_flat_index().any());
-        assert!(nat_pi.any());
+        assert!(!nat_pi.any());
 
         let range = super::RangeIndex::new(0, 3, 1).unwrap();
         let range_flat = range.to_flat_index();
@@ -33824,16 +34337,22 @@ mod tests {
             ]
         );
 
-        // to_index / to_flat_index render through the same Display, so the
-        // weekly range has to survive the trip into a flat Utf8 Index too.
+        // to_index / to_flat_index labels render through the same Display,
+        // so the weekly range has to survive the trip into a flat Index too.
+        // TEST-CHANGE (45fzr): the flat labels are periods (they were Utf8
+        // text); their text is compared.
         assert_eq!(
-            dt.to_period("W")?.to_flat_index().labels(),
-            super::Index::from_utf8(vec![
+            dt.to_period("W")?
+                .to_flat_index()
+                .labels()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec![
                 "1969-12-29/1970-01-04".to_owned(),
                 "1969-12-29/1970-01-04".to_owned(),
                 "2024-02-26/2024-03-03".to_owned(),
-            ])
-            .labels()
+            ]
         );
 
         Ok(())
