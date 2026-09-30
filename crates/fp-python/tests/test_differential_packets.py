@@ -22564,3 +22564,29 @@ _E101_CASES = {
 def test_everyday101_text_and_float_scalar_ingest_like_pandas_mf3tj(case: str) -> None:
     run = _E101_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-gwtxd: to_datetime's contiguous-text fast path ignored
+# dayfirst=True, so a str-op output parsed month first.
+def _e102_parsed(m: Any, series: Any, **kwargs: Any) -> list:
+    return [str(t) for t in m.to_datetime(series, **kwargs)]
+
+
+_E102_CASES = {
+    "dayfirst str-op output": lambda m: _e102_parsed(
+        m, m.Series([" 2024-01-02", "2024-03-04 "]).str.strip(), dayfirst=True
+    ),
+    "dayfirst slashes str-op output": lambda m: _e102_parsed(
+        m, m.Series(["05/02/2024 ", "13/02/2024 "]).str.strip(), dayfirst=True
+    ),
+    # Negatives: the fast path still serves the default and a list.
+    "no dayfirst str-op output": lambda m: _e102_parsed(m, m.Series([" 2024-01-02", "2024-03-04 "]).str.strip()),
+    "dayfirst list": lambda m: _e102_parsed(m, m.Series(["2024-01-02", "2024-03-04"]), dayfirst=True),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E102_CASES))
+def test_everyday102_to_datetime_dayfirst_contiguous_like_pandas_gwtxd(case: str) -> None:
+    run = _E102_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

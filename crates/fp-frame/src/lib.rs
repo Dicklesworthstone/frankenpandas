@@ -63046,10 +63046,14 @@ pub fn to_datetime_with_options(
     // any span that is NOT a plain ISO form (tz suffix, slashes, text month,
     // invalid date, etc.) bails the WHOLE column to the general path, so
     // timezone inference / mixed-tz-object / every other shape is unchanged.
+    // dayfirst reads a day before the month, which this ISO parse does not;
+    // a text column that happened to be contiguous (a str-op output)
+    // parsed month first under dayfirst=True (br-frankenpandas-gwtxd).
     if options.unit.is_none()
         && options.format.is_none()
         && options.origin.is_none()
         && !options.utc
+        && !options.dayfirst
         && let Some((bytes, offsets)) = series.column().as_utf8_contiguous()
     {
         let nrows = offsets.len() - 1;
@@ -195090,6 +195094,48 @@ mod tests {
         .unwrap();
         let result = super::to_datetime(&s).unwrap();
         assert_eq!(result.values()[0], datetime64_scalar("2024-01-15 10:30:45"));
+    }
+
+    #[test]
+    fn to_datetime_dayfirst_reads_a_contiguous_column_as_a_scalar_one_gwtxd() {
+        // dayfirst=True over the same ISO text answers alike whether the
+        // column is contiguous (a str-op output) or Scalar-backed: the
+        // contiguous fast path ignored dayfirst (br-frankenpandas-gwtxd).
+        let texts = ["2024-01-02", "2024-03-04"];
+        let mut bytes = Vec::new();
+        let mut offsets = vec![0];
+        for text in texts {
+            bytes.extend_from_slice(text.as_bytes());
+            offsets.push(bytes.len());
+        }
+        let contiguous = Series::new(
+            "d",
+            Index::from_range(0, 2, 1),
+            Column::from_utf8_contiguous(bytes, offsets),
+        )
+        .unwrap();
+        let scalar = Series::from_values(
+            "d",
+            vec![0_i64.into(), 1_i64.into()],
+            texts.iter().map(|&t| Scalar::Utf8(t.into())).collect(),
+        )
+        .unwrap();
+        let options = super::ToDatetimeOptions {
+            dayfirst: true,
+            ..super::ToDatetimeOptions::default()
+        };
+        let from_contiguous = super::to_datetime_with_options(&contiguous, options).unwrap();
+        let from_scalar = super::to_datetime_with_options(&scalar, options).unwrap();
+        assert_eq!(from_contiguous.values(), from_scalar.values());
+        assert_eq!(
+            from_contiguous.values()[0],
+            datetime64_scalar("2024-02-01 00:00:00")
+        );
+        // Negative: without dayfirst the ISO order stands.
+        let plain =
+            super::to_datetime_with_options(&contiguous, super::ToDatetimeOptions::default())
+                .unwrap();
+        assert_eq!(plain.values()[0], datetime64_scalar("2024-01-02 00:00:00"));
     }
 
     #[test]
