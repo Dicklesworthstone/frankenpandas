@@ -15722,10 +15722,14 @@ impl Column {
         // missing_for_dtype(Utf8)` — exactly what `LazyNullableUtf8` emits and what
         // `from_utf8_values_with_validity` rebuilds — and the output validity word is set
         // iff `validity.get(pos)`, matching the generic `!value.is_missing()`.
+        // The missing rows keep the source's marker (`gap`): a gap a merge /
+        // align invented is NaN, and a take (to_string's rows, head, iloc)
+        // turned it None (br-frankenpandas-o2ute).
         if let ScalarValues::LazyNullableUtf8 {
             bytes,
             offsets,
             validity,
+            gap,
             ..
         } = &self.values
         {
@@ -15740,10 +15744,11 @@ impl Column {
                     words[out_idx / 64] |= 1_u64 << (out_idx % 64);
                 }
             }
-            return Self::from_utf8_values_with_validity(
+            return Self::from_utf8_values_with_gap(
                 new_bytes,
                 new_offsets,
                 ValidityMask::from_words(words, n),
+                *gap,
             );
         }
 
@@ -28174,11 +28179,14 @@ impl Column {
         // in the na-last suffix), and `from_utf8_values_with_validity` materializes a
         // present slot as `Scalar::Utf8(span)` and a missing slot as
         // `Null(Null) == missing_for_dtype(Utf8)` — exactly the comparator path's clone of
-        // a sorted present value / a na-last `Null(Null)`.
+        // a sorted present value / a na-last `Null(Null)`. The missing rows
+        // keep the source's marker (`gap`: NaN for an invented gap; it turned
+        // None; br-frankenpandas-o2ute).
         if let ScalarValues::LazyNullableUtf8 {
             bytes,
             offsets,
             validity,
+            gap,
             ..
         } = &self.values
         {
@@ -28203,10 +28211,11 @@ impl Column {
                 out_offsets.push(out_bytes.len());
                 out_valid.set(j, false);
             }
-            return Ok(Self::from_utf8_values_with_validity(
+            return Ok(Self::from_utf8_values_with_gap(
                 out_bytes,
                 out_offsets,
                 out_valid,
+                *gap,
             ));
         }
         // Nullable / NaN / NaT typed columns (Int64, Float64, Datetime64,
@@ -38401,6 +38410,42 @@ mod tests {
                     "validity op={op:?} slot={i}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn nullable_utf8_take_and_sort_keep_the_gap_marker_o2ute() {
+        // A text column whose gap a merge / align invented materializes NaN;
+        // a take (to_string's rows, head, iloc) and a sort turned it None
+        // (br-frankenpandas-o2ute). A supplied None (a Null gap) stays None.
+        let bytes = b"ba".to_vec();
+        let offsets = vec![0, 1, 1, 2];
+        let mut validity = ValidityMask::all_valid(3);
+        validity.set(1, false);
+        for gap in [NullKind::NaN, NullKind::Null] {
+            let column = Column::from_utf8_values_with_gap(
+                bytes.clone(),
+                offsets.clone(),
+                validity.clone(),
+                gap,
+            );
+            assert_eq!(column.values()[1], Scalar::Null(gap), "{gap:?}");
+            let taken = column.take_positions(&[1, 0]);
+            assert_eq!(
+                taken.values(),
+                &[Scalar::Null(gap), Scalar::Utf8("b".into())],
+                "{gap:?}"
+            );
+            let sorted = column.sort_values(true).unwrap();
+            assert_eq!(
+                sorted.values(),
+                &[
+                    Scalar::Utf8("a".into()),
+                    Scalar::Utf8("b".into()),
+                    Scalar::Null(gap),
+                ],
+                "{gap:?}"
+            );
         }
     }
 

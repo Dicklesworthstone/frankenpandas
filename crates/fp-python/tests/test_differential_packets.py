@@ -22590,3 +22590,39 @@ _E102_CASES = {
 def test_everyday102_to_datetime_dayfirst_contiguous_like_pandas_gwtxd(case: str) -> None:
     run = _E102_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-o2ute: a text column with a gap a merge / align invented
+# (NaN) showed None once a take (to_string's rows, head, iloc) or a sort
+# rebuilt it. A str-op output is such a typed text column.
+def _e103_merged(m: Any) -> Any:
+    right = m.DataFrame({"k2": m.Series(["B", "C", "D"]).str.lower(), "w": [4, 5, 6]})
+    left = m.DataFrame({"k": ["a", "b", "c"], "v": [1, 2, 3]})
+    return left.merge(right, how="left", left_on="k", right_on="k2")
+
+
+_E103_CASES = {
+    "merge to_string": lambda m: _e103_merged(m).to_string().split("\n"),
+    "merge column to_string": lambda m: _e103_merged(m)["k2"].to_string().split("\n"),
+    "merge head": lambda m: [repr(v) for v in _e103_merged(m)["k2"].head(2).tolist()],
+    "merge iloc": lambda m: [repr(v) for v in _e103_merged(m)["k2"].iloc[[0, 1]].tolist()],
+    "merge sort_values": lambda m: _e103_merged(m)["k2"].sort_values().to_string().split("\n"),
+    "reindex str-op": lambda m: m.Series(["X", "Y"]).str.lower().reindex([0, 1, 2]).to_string().split("\n"),
+    "outer merge text": lambda m: m.DataFrame({"k": m.Series(["A", "B"]).str.lower()})
+    .merge(m.DataFrame({"k": ["b", "c"], "w": [1, 2]}), on="k", how="outer")
+    .to_string()
+    .split("\n"),
+    # Negatives: a supplied None stays None; a list-built frame as it was.
+    "supplied None": lambda m: m.Series(["a", None]).str.lower().to_string().split("\n"),
+    "list merge": lambda m: m.DataFrame({"k": ["a", "b"]})
+    .merge(m.DataFrame({"k2": ["b"], "w": [1]}), how="left", left_on="k", right_on="k2")
+    .to_string()
+    .split("\n"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E103_CASES))
+def test_everyday103_text_gap_marker_survives_a_take_like_pandas_o2ute(case: str) -> None:
+    run = _E103_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
