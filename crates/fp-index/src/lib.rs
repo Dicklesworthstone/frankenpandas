@@ -6808,12 +6808,68 @@ impl Index {
         }
     }
 
-    /// Bound for a label slice, matching `pd.Index.get_slice_bound`.
+    /// Bound for a label slice, matching `pd.Index.get_slice_bound(label,
+    /// side)`: over an increasing index where the label sorts; else the
+    /// label's own position (one past it for the right side; a run of equal
+    /// labels bounds by its ends), else where it sorts in a decreasing index.
+    /// A label an unsorted index does not hold is pandas' KeyError of it
+    /// ([`IndexError::LabelNotFound`]), one it holds apart from one run
+    /// pandas' non-unique KeyError. It was a bare searchsorted, wrong on a
+    /// decreasing or unsorted index (br-frankenpandas-h1kl9).
     pub fn get_slice_bound(&self, label: &IndexLabel, side: &str) -> Result<usize, IndexError> {
-        self.searchsorted(label, side)
+        let left = match side {
+            "left" => true,
+            "right" => false,
+            other => {
+                return Err(IndexError::InvalidArgument(format!(
+                    "Invalid value for side kwarg, must be either 'left' or 'right': {other}"
+                )));
+            }
+        };
+        if self.is_monotonic_increasing() {
+            return self.searchsorted(label, side);
+        }
+        let labels = self.labels();
+        let matches: Vec<usize> = labels
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| *candidate == label)
+            .map(|(position, _)| position)
+            .collect();
+        if let (Some(&first), Some(&last)) = (matches.first(), matches.last()) {
+            // Ascending positions are one run exactly when they span their
+            // count.
+            if last - first + 1 != matches.len() {
+                let shown = match label {
+                    IndexLabel::Utf8(text) => format!("'{text}'"),
+                    other => other.to_string(),
+                };
+                return Err(IndexError::KeyError(format!(
+                    "Cannot get {side} slice bound for non-unique label: {shown}"
+                )));
+            }
+            return Ok(if left { first } else { last + 1 });
+        }
+        if self.is_monotonic_decreasing() && !label.is_missing() {
+            // The labels above the label (left) or not below it (right).
+            return Ok(labels
+                .iter()
+                .filter(|candidate| {
+                    if left {
+                        *candidate > label
+                    } else {
+                        *candidate >= label
+                    }
+                })
+                .count());
+        }
+        Err(IndexError::LabelNotFound(label.clone()))
     }
 
-    /// Return `(start, stop)` bounds for a label slice. Stop is exclusive.
+    /// Return `(start, stop)` bounds for a label slice, as pandas'
+    /// `Index.slice_locs(start, end)`: each bound's [`Self::get_slice_bound`],
+    /// stop exclusive and not raised to the start (a stop before the start
+    /// slices nothing; it was clamped to the start).
     pub fn slice_locs(
         &self,
         start: Option<&IndexLabel>,
@@ -6827,11 +6883,7 @@ impl Index {
             Some(label) => self.get_slice_bound(label, "right")?,
             None => self.len(),
         };
-        Ok(if end < start {
-            (start, start)
-        } else {
-            (start, end)
-        })
+        Ok((start, end))
     }
 
     /// Alias for `slice_locs`, matching `pd.Index.slice_indexer`.
@@ -17945,6 +17997,13 @@ pub enum IndexError {
     },
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
+    /// A label the index does not hold where it must: pandas'
+    /// `KeyError(label)`.
+    #[error("{0}")]
+    LabelNotFound(IndexLabel),
+    /// pandas' `KeyError(message)`.
+    #[error("{0}")]
+    KeyError(String),
     /// An unknown zone, or a wall time a DST change skips or repeats.
     #[error(transparent)]
     TimeZone(#[from] fp_types::TimeZoneError),
@@ -22332,6 +22391,55 @@ mod tests {
                 .is_err()
         );
         assert!(Index::new(text(&["x"])).categories().is_none());
+    }
+
+    #[test]
+    fn slice_bounds_read_decreasing_and_unsorted_like_pandas_h1kl9() {
+        let int = IndexLabel::Int64;
+        let float = |value: f64| IndexLabel::Float64(OrderedF64(value));
+        // A decreasing index: a held label bounds by its position, one
+        // between labels by the count above (left) or not below (right).
+        let decreasing = Index::from_i64(vec![4, 3, 2, 1]);
+        assert_eq!(
+            decreasing.slice_locs(Some(&int(2)), Some(&int(3))),
+            Ok((2, 2))
+        );
+        assert_eq!(
+            decreasing.slice_locs(Some(&float(2.5)), Some(&float(1.5))),
+            Ok((2, 3))
+        );
+        // A stop before the start is kept (pandas slices nothing with it).
+        assert_eq!(
+            decreasing.slice_locs(Some(&int(0)), Some(&int(5))),
+            Ok((4, 0))
+        );
+        // An unsorted index finds a held label; one it cannot place, or one
+        // held apart from one run, is pandas' KeyError.
+        let unsorted = Index::from_i64(vec![3, 1, 2]);
+        assert_eq!(
+            unsorted.slice_locs(Some(&int(1)), Some(&int(2))),
+            Ok((1, 3))
+        );
+        assert_eq!(
+            unsorted.get_slice_bound(&int(5), "left"),
+            Err(IndexError::LabelNotFound(int(5)))
+        );
+        assert_eq!(
+            Index::from_i64(vec![1, 2, 1]).get_slice_bound(&int(1), "left"),
+            Err(IndexError::KeyError(
+                "Cannot get left slice bound for non-unique label: 1".to_owned()
+            ))
+        );
+        // NEGATIVE: an increasing index keeps its searchsorted bounds, a run
+        // of equal labels bounding by its ends, and an unknown side is an
+        // error.
+        let increasing = Index::from_i64(vec![1, 2, 2, 3]);
+        assert_eq!(
+            increasing.slice_locs(Some(&int(2)), Some(&int(2))),
+            Ok((1, 3))
+        );
+        assert_eq!(increasing.get_slice_bound(&float(2.5), "right"), Ok(3));
+        assert!(increasing.get_slice_bound(&int(2), "middle").is_err());
     }
 
     #[test]

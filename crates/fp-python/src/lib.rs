@@ -11221,26 +11221,26 @@ impl PyIndex {
             .collect())
     }
 
+    /// pandas' `slice_locs(start, end, step)` (see [`stepped_slice_locs`]).
     #[pyo3(signature = (start=None, end=None, step=None))]
     fn slice_locs(
         &self,
         start: Option<&Bound<'_, PyAny>>,
         end: Option<&Bound<'_, PyAny>>,
         step: Option<isize>,
-    ) -> PyResult<(usize, usize)> {
-        // A positive step slices forward, which is what this computes.
-        unsupported_params("slice_locs", &[("step", step.is_none_or(|s| s > 0))])?;
-        let s_lbl = match start {
-            Some(obj) => Some(py_to_index_label(obj)?),
-            None => None,
-        };
-        let e_lbl = match end {
-            Some(obj) => Some(py_to_index_label(obj)?),
-            None => None,
-        };
-        self.inner
-            .slice_locs(s_lbl.as_ref(), e_lbl.as_ref())
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))
+    ) -> PyResult<(i64, i64)> {
+        stepped_slice_locs(start, end, step, self.inner.len(), |start, end| {
+            let s_lbl = start.map(py_to_index_label).transpose()?;
+            let e_lbl = end.map(py_to_index_label).transpose()?;
+            self.inner
+                .slice_locs(s_lbl.as_ref(), e_lbl.as_ref())
+                .map_err(|err| match err {
+                    fp_index::IndexError::LabelNotFound(_) | fp_index::IndexError::KeyError(_) => {
+                        index_error_to_py(err)
+                    }
+                    other => PyErr::new::<pyo3::exceptions::PyKeyError, _>(other.to_string()),
+                })
+        })
     }
 
     #[pyo3(signature = (start=None, end=None, step=None))]
@@ -11269,15 +11269,7 @@ impl PyIndex {
         na_position: &str,
         key: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let na_first = match na_position {
-            "first" => true,
-            "last" => false,
-            other => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "invalid na_position: {other}"
-                )));
-            }
-        };
+        let na_first = na_position_first(na_position)?;
         let order = match key.filter(|key| !key.is_none()) {
             Some(key) => {
                 let keyed = key
@@ -11297,11 +11289,7 @@ impl PyIndex {
         let sorted = PyIndex {
             inner: self.inner.take(&order),
         };
-        if return_indexer {
-            (sorted, IndexerArray::from(order)).into_py_any(py)
-        } else {
-            sorted.into_py_any(py)
-        }
+        sorted_index_result(py, sorted, order, return_indexer)
     }
 
     fn sort(&self) -> Self {
@@ -11310,19 +11298,11 @@ impl PyIndex {
         }
     }
 
-    /// pandas refuses to drop the only level of a flat index (it returned
-    /// the index); a level past it is pandas' IndexError.
+    /// pandas' `droplevel(level=0)` of a flat index (see [`flat_droplevel`]).
     #[pyo3(signature = (level=None))]
-    fn droplevel(&self, level: Option<usize>) -> PyResult<Self> {
-        if let Some(l) = level
-            && l != 0
-        {
-            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
-                "Too many levels: Index has only 1 level, not {}",
-                l.saturating_add(1)
-            )));
-        }
-        Err(flat_droplevel_error())
+    fn droplevel(slf: &Bound<'_, Self>, level: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        flat_droplevel(slf.as_any(), level)?;
+        Ok(slf.borrow().clone())
     }
 
     fn get_level_values(&self, level: usize) -> PyResult<Self> {
@@ -11754,83 +11734,21 @@ impl PyIndex {
     }
 
     /// pandas' `Index.sortlevel(level=None, ascending=True,
-    /// sort_remaining=None, na_position='first')` of a flat index: the
-    /// labels sorted (stably; descending keeps tied labels in their order)
-    /// with the missing ones first or last, and the sorting indexer as a
-    /// numpy array. ascending=False and na_position were refused and the
-    /// indexer was a list (br-frankenpandas-u6p7i).
+    /// sort_remaining=None, na_position='first')` of a flat index (see
+    /// [`flat_sortlevel`]). ascending=False and na_position were refused and
+    /// the indexer was a list (br-frankenpandas-u6p7i); a level past 0 was
+    /// refused, where pandas reads none (br-frankenpandas-h1kl9).
     #[pyo3(signature = (level=None, ascending=None, sort_remaining=None, na_position="first"))]
     fn sortlevel(
-        &self,
-        level: Option<usize>,
+        slf: &Bound<'_, Self>,
+        level: Option<&Bound<'_, PyAny>>,
         ascending: Option<&Bound<'_, PyAny>>,
-        sort_remaining: Option<bool>,
+        sort_remaining: Option<&Bound<'_, PyAny>>,
         na_position: &str,
-    ) -> PyResult<(Self, IndexerArray)> {
-        // A flat index has only level 0, where sort_remaining has nothing
-        // left to sort.
-        let _ = sort_remaining;
-        unsupported_params(
-            "Index.sortlevel",
-            &[("level", level.is_none_or(|l| l == 0))],
-        )?;
-        let type_error =
-            |message: &str| PyErr::new::<pyo3::exceptions::PyTypeError, _>(message.to_owned());
-        let ascending = match ascending {
-            None => true,
-            Some(flag) if flag.is_instance_of::<pyo3::types::PyBool>() => flag.extract::<bool>()?,
-            Some(flags) if flags.is_instance_of::<PyList>() => {
-                let flags = flags.extract::<Vec<Bound<'_, PyAny>>>()?;
-                match flags.as_slice() {
-                    [flag] if flag.is_instance_of::<pyo3::types::PyBool>() => {
-                        flag.extract::<bool>()?
-                    }
-                    _ => {
-                        return Err(type_error(
-                            "ascending must be a list of bool values of length 1",
-                        ));
-                    }
-                }
-            }
-            Some(_) => {
-                return Err(type_error(
-                    "ascending must be a single bool value ora list of bool values of length 1",
-                ));
-            }
-        };
-        let na_first = match na_position {
-            "first" => true,
-            "last" => false,
-            other => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "invalid na_position: {other}"
-                )));
-            }
-        };
-        let labels = self.inner.labels();
-        let (missing, mut present): (Vec<usize>, Vec<usize>) =
-            (0..labels.len()).partition(|&position| labels[position].is_missing());
-        if ascending && missing.is_empty() {
-            // The typed (stable) argsort.
-            let (sorted, order) = self.inner.sortlevel();
-            return Ok((PyIndex { inner: sorted }, IndexerArray::from(order)));
-        }
-        if ascending {
-            present.sort_by(|&a, &b| labels[a].cmp(&labels[b]));
-        } else {
-            present.sort_by(|&a, &b| labels[b].cmp(&labels[a]));
-        }
-        let order: Vec<usize> = if na_first {
-            missing.into_iter().chain(present).collect()
-        } else {
-            present.into_iter().chain(missing).collect()
-        };
-        Ok((
-            PyIndex {
-                inner: self.inner.take(&order),
-            },
-            IndexerArray::from(order),
-        ))
+    ) -> PyResult<Py<PyAny>> {
+        // pandas' flat sortlevel reads neither.
+        let _ = (level, sort_remaining);
+        flat_sortlevel(slf.as_any(), ascending, na_position)
     }
 
     /// pandas' `Index.join(other, how='left', level=None,
@@ -13232,21 +13150,22 @@ impl PyDatetimeIndex {
             .collect()
     }
 
+    /// pandas' `slice_locs(start, end, step)` (see [`stepped_slice_locs`]).
     #[pyo3(signature = (start=None, end=None, step=None))]
     fn slice_locs(
         &self,
         start: Option<&Bound<'_, PyAny>>,
         end: Option<&Bound<'_, PyAny>>,
         step: Option<isize>,
-    ) -> PyResult<(usize, usize)> {
-        // A positive step slices forward, which is what this computes.
-        unsupported_params("slice_locs", &[("step", step.is_none_or(|s| s > 0))])?;
-        let s_lbl = self.slice_bound_label(start, false)?;
-        let e_lbl = self.slice_bound_label(end, true)?;
-        self.inner
-            .as_index()
-            .slice_locs(s_lbl.as_ref(), e_lbl.as_ref())
-            .map_err(index_error_to_py)
+    ) -> PyResult<(i64, i64)> {
+        stepped_slice_locs(start, end, step, self.inner.len(), |start, end| {
+            let s_lbl = self.slice_bound_label(start, false)?;
+            let e_lbl = self.slice_bound_label(end, true)?;
+            self.inner
+                .as_index()
+                .slice_locs(s_lbl.as_ref(), e_lbl.as_ref())
+                .map_err(index_error_to_py)
+        })
     }
 
     #[pyo3(signature = (start=None, end=None, step=None))]
@@ -13260,12 +13179,13 @@ impl PyDatetimeIndex {
         Python::attach(|py| slice_object(py, s, e, step))
     }
 
-    #[pyo3(signature = (level=0))]
-    /// pandas refuses to drop the only level of a flat index; this returned
-    /// a plain Index whatever level was asked for (fvsao.5).
-    fn droplevel(&self, level: usize) -> PyResult<PyIndex> {
-        let _ = level;
-        Err(flat_droplevel_error())
+    /// pandas' `droplevel(level=0)` of a flat index (see [`flat_droplevel`]);
+    /// it returned a plain Index whatever level was asked for (fvsao.5),
+    /// then took only an int and refused every one.
+    #[pyo3(signature = (level=None))]
+    fn droplevel(slf: &Bound<'_, Self>, level: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        flat_droplevel(slf.as_any(), level)?;
+        Ok(slf.borrow().clone())
     }
 
     #[pyo3(signature = (level=0))]
@@ -13354,28 +13274,36 @@ impl PyDatetimeIndex {
         Ok(PySeries { inner: s })
     }
 
-    /// Sorted labels; an order already sorted keeps the freq and an exact
-    /// reversal negates it ('-1D'), as pandas (it was dropped).
-    #[pyo3(signature = (ascending=true, na_position="last"))]
-    fn sort_values(&self, ascending: bool, na_position: &str) -> PyResult<Self> {
-        let original = self.inner.asi8();
-        let sorted = sort_nanos_na(&original, ascending, na_position)?;
-        let freq = self.inner.freq().and_then(|freq| {
-            if sorted == original {
-                Some(freq)
-            } else if sorted.iter().eq(original.iter().rev()) {
-                fp_index::scale_freq(&freq, -1)
-            } else {
-                None
-            }
-        });
-        Ok(Self {
-            inner: self.with_nanos(sorted).inner.with_freq(freq),
-        })
+    /// pandas' `sort_values(*, return_indexer=False, ascending=True,
+    /// na_position='last', key=None)` (see [`typed_sort_order`]); the take
+    /// keeps the freq of an order already sorted and negates it for an exact
+    /// reversal ('-1D'), as pandas (the freq was dropped; return_indexer and
+    /// key were not taken, br-frankenpandas-h1kl9).
+    #[pyo3(signature = (*, return_indexer=false, ascending=true, na_position="last", key=None))]
+    fn sort_values(
+        slf: &Bound<'_, Self>,
+        return_indexer: bool,
+        ascending: bool,
+        na_position: &str,
+        key: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let this = slf.borrow();
+        let order = typed_sort_order(
+            slf.as_any(),
+            this.inner.len(),
+            ascending,
+            na_position,
+            key,
+            || nat_sort_keys(&this.inner.asi8()),
+        )?;
+        let inner = this.inner.take(&order).map_err(index_error_to_py)?;
+        sorted_index_result(slf.py(), Self { inner }, order, return_indexer)
     }
 
     fn sort(&self) -> PyResult<Self> {
-        self.sort_values(true, "last")
+        let order = nargsort_keys(&nat_sort_keys(&self.inner.asi8()), true, false);
+        let inner = self.inner.take(&order).map_err(index_error_to_py)?;
+        Ok(Self { inner })
     }
 
     #[getter]
@@ -13941,17 +13869,21 @@ impl PyDatetimeIndex {
         Ok(self.clone())
     }
 
-    #[pyo3(signature = (level=None, ascending=true, sort_remaining=None))]
+    /// pandas' `Index.sortlevel(level=None, ascending=True,
+    /// sort_remaining=None, na_position='first')` of a flat index (see
+    /// [`flat_sortlevel`]). It returned the index unsorted with the identity
+    /// order (fvsao.5), then refused (br-frankenpandas-h1kl9).
+    #[pyo3(signature = (level=None, ascending=None, sort_remaining=None, na_position="first"))]
     fn sortlevel(
-        &self,
-        level: Option<usize>,
-        ascending: bool,
-        sort_remaining: Option<bool>,
-    ) -> PyResult<(Self, Vec<usize>)> {
-        // This returned the index unsorted with the identity order, whatever
-        // the labels were (fvsao.5).
-        let _ = (level, ascending, sort_remaining);
-        Err(not_implemented("sortlevel on this index type"))
+        slf: &Bound<'_, Self>,
+        level: Option<&Bound<'_, PyAny>>,
+        ascending: Option<&Bound<'_, PyAny>>,
+        sort_remaining: Option<&Bound<'_, PyAny>>,
+        na_position: &str,
+    ) -> PyResult<Py<PyAny>> {
+        // pandas' flat sortlevel reads neither.
+        let _ = (level, sort_remaining);
+        flat_sortlevel(slf.as_any(), ascending, na_position)
     }
 
     #[getter]
@@ -14236,6 +14168,32 @@ impl PyMultiIndex {
                 .with_row_multiindex(self.inner.clone())
                 .unwrap_or(flat),
         }
+    }
+
+    /// [`PyMultiIndex::slice_locs`]' positions (see [`stepped_slice_locs`]).
+    fn stepped_bounds(
+        &self,
+        start: Option<&Bound<'_, PyAny>>,
+        end: Option<&Bound<'_, PyAny>>,
+        step: Option<isize>,
+    ) -> PyResult<(i64, i64)> {
+        let labels = |bound: &Bound<'_, PyAny>| -> PyResult<Vec<IndexLabel>> {
+            if bound.is_instance_of::<PyTuple>() || bound.is_instance_of::<PyList>() {
+                bound
+                    .try_iter()?
+                    .map(|label| py_to_index_label(&label?))
+                    .collect()
+            } else {
+                Ok(vec![py_to_index_label(bound)?])
+            }
+        };
+        stepped_slice_locs(start, end, step, self.inner.len(), |start, end| {
+            let s_lbls = start.map(labels).transpose()?;
+            let e_lbls = end.map(labels).transpose()?;
+            self.inner
+                .slice_locs(s_lbls.as_deref(), e_lbls.as_deref())
+                .map_err(index_error_to_py)
+        })
     }
 }
 
@@ -15457,56 +15415,43 @@ impl PyMultiIndex {
             .map_err(index_error_to_py)
     }
 
+    /// pandas' `MultiIndex.slice_locs(start, end, step)` (see
+    /// [`stepped_slice_locs`]): a bound is a tuple of leading-level labels
+    /// or one label (a string was read as its characters; the step was
+    /// discarded, br-frankenpandas-h1kl9). A bound a label gives is pandas'
+    /// searchsorted np.int64, an open one an int.
     #[pyo3(signature = (start=None, end=None, step=None))]
     fn slice_locs(
         &self,
+        py: Python<'_>,
         start: Option<&Bound<'_, PyAny>>,
         end: Option<&Bound<'_, PyAny>>,
         step: Option<isize>,
-    ) -> PyResult<(usize, usize)> {
-        let _ = step;
-        let s_lbls = match start {
-            Some(obj) => {
-                if let Ok(seq) = obj.cast::<pyo3::types::PySequence>() {
-                    let mut r = Vec::new();
-                    for i in 0..seq.len()? {
-                        r.push(py_to_index_label(&seq.get_item(i)?)?);
-                    }
-                    Some(r)
-                } else {
-                    Some(vec![py_to_index_label(obj)?])
-                }
+    ) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
+        let (left, right) = self.stepped_bounds(start, end, step)?;
+        let bound = |value: i64, searched: bool| {
+            if searched {
+                numpy_scalar(py, &Scalar::Int64(value))
+            } else {
+                value.into_py_any(py)
             }
-            None => None,
         };
-        let e_lbls = match end {
-            Some(obj) => {
-                if let Ok(seq) = obj.cast::<pyo3::types::PySequence>() {
-                    let mut r = Vec::new();
-                    for i in 0..seq.len()? {
-                        r.push(py_to_index_label(&seq.get_item(i)?)?);
-                    }
-                    Some(r)
-                } else {
-                    Some(vec![py_to_index_label(obj)?])
-                }
-            }
-            None => None,
-        };
-        self.inner
-            .slice_locs(s_lbls.as_deref(), e_lbls.as_deref())
-            .map_err(index_error_to_py)
+        Ok((bound(left, start.is_some())?, bound(right, end.is_some())?))
     }
 
     #[pyo3(signature = (start=None, end=None, step=None))]
     fn slice_indexer(
         &self,
+        py: Python<'_>,
         start: Option<&Bound<'_, PyAny>>,
         end: Option<&Bound<'_, PyAny>>,
         step: Option<isize>,
     ) -> PyResult<Py<PyAny>> {
-        let (s, e) = self.slice_locs(start, end, step)?;
-        Python::attach(|py| slice_object(py, s, e, step))
+        let (left, right) = self.slice_locs(py, start, end, step)?;
+        py.import("builtins")?
+            .getattr("slice")?
+            .call1((left, right, step))
+            .map(Bound::unbind)
     }
 
     fn groupby(
@@ -16715,21 +16660,22 @@ impl PyTimedeltaIndex {
             .collect()
     }
 
+    /// pandas' `slice_locs(start, end, step)` (see [`stepped_slice_locs`]).
     #[pyo3(signature = (start=None, end=None, step=None))]
     fn slice_locs(
         &self,
         start: Option<&Bound<'_, PyAny>>,
         end: Option<&Bound<'_, PyAny>>,
         step: Option<isize>,
-    ) -> PyResult<(usize, usize)> {
-        // A positive step slices forward, which is what this computes.
-        unsupported_params("slice_locs", &[("step", step.is_none_or(|s| s > 0))])?;
-        let s_lbl = self.slice_bound_label(start, false)?;
-        let e_lbl = self.slice_bound_label(end, true)?;
-        self.inner
-            .as_index()
-            .slice_locs(s_lbl.as_ref(), e_lbl.as_ref())
-            .map_err(index_error_to_py)
+    ) -> PyResult<(i64, i64)> {
+        stepped_slice_locs(start, end, step, self.inner.len(), |start, end| {
+            let s_lbl = self.slice_bound_label(start, false)?;
+            let e_lbl = self.slice_bound_label(end, true)?;
+            self.inner
+                .as_index()
+                .slice_locs(s_lbl.as_ref(), e_lbl.as_ref())
+                .map_err(index_error_to_py)
+        })
     }
 
     #[pyo3(signature = (start=None, end=None, step=None))]
@@ -16743,12 +16689,13 @@ impl PyTimedeltaIndex {
         Python::attach(|py| slice_object(py, s, e, step))
     }
 
-    #[pyo3(signature = (level=0))]
-    /// pandas refuses to drop the only level of a flat index; this returned
-    /// a plain Index whatever level was asked for (fvsao.5).
-    fn droplevel(&self, level: usize) -> PyResult<PyIndex> {
-        let _ = level;
-        Err(flat_droplevel_error())
+    /// pandas' `droplevel(level=0)` of a flat index (see [`flat_droplevel`]);
+    /// it returned a plain Index whatever level was asked for (fvsao.5),
+    /// then took only an int and refused every one.
+    #[pyo3(signature = (level=None))]
+    fn droplevel(slf: &Bound<'_, Self>, level: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        flat_droplevel(slf.as_any(), level)?;
+        Ok(slf.borrow().clone())
     }
 
     #[pyo3(signature = (level=0))]
@@ -16858,18 +16805,34 @@ impl PyTimedeltaIndex {
         Ok(PySeries { inner: s })
     }
 
-    #[pyo3(signature = (ascending=true, na_position="last"))]
-    fn sort_values(&self, ascending: bool, na_position: &str) -> PyResult<Self> {
-        let sorted = sort_nanos_na(&self.inner.asi8(), ascending, na_position)?;
-        let mut out = TimedeltaIndex::new(sorted);
-        if let Some(n) = self.inner.name() {
-            out = out.set_name(n);
-        }
-        Ok(Self { inner: out })
+    /// pandas' `sort_values(*, return_indexer=False, ascending=True,
+    /// na_position='last', key=None)` (see [`typed_sort_order`]; the
+    /// indexer and key were not taken, br-frankenpandas-h1kl9).
+    #[pyo3(signature = (*, return_indexer=false, ascending=true, na_position="last", key=None))]
+    fn sort_values(
+        slf: &Bound<'_, Self>,
+        return_indexer: bool,
+        ascending: bool,
+        na_position: &str,
+        key: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let this = slf.borrow();
+        let order = typed_sort_order(
+            slf.as_any(),
+            this.inner.len(),
+            ascending,
+            na_position,
+            key,
+            || nat_sort_keys(&this.inner.asi8()),
+        )?;
+        let inner = this.inner.take(&order).map_err(index_error_to_py)?;
+        sorted_index_result(slf.py(), Self { inner }, order, return_indexer)
     }
 
     fn sort(&self) -> PyResult<Self> {
-        self.sort_values(true, "last")
+        let order = nargsort_keys(&nat_sort_keys(&self.inner.asi8()), true, false);
+        let inner = self.inner.take(&order).map_err(index_error_to_py)?;
+        Ok(Self { inner })
     }
 
     #[getter]
@@ -17226,17 +17189,21 @@ impl PyTimedeltaIndex {
         Ok(Self { inner: res })
     }
 
-    #[pyo3(signature = (level=None, ascending=true, sort_remaining=None))]
+    /// pandas' `Index.sortlevel(level=None, ascending=True,
+    /// sort_remaining=None, na_position='first')` of a flat index (see
+    /// [`flat_sortlevel`]). It returned the index unsorted with the identity
+    /// order (fvsao.5), then refused (br-frankenpandas-h1kl9).
+    #[pyo3(signature = (level=None, ascending=None, sort_remaining=None, na_position="first"))]
     fn sortlevel(
-        &self,
-        level: Option<usize>,
-        ascending: bool,
-        sort_remaining: Option<bool>,
-    ) -> PyResult<(Self, Vec<usize>)> {
-        // This returned the index unsorted with the identity order, whatever
-        // the labels were (fvsao.5).
-        let _ = (level, ascending, sort_remaining);
-        Err(not_implemented("sortlevel on this index type"))
+        slf: &Bound<'_, Self>,
+        level: Option<&Bound<'_, PyAny>>,
+        ascending: Option<&Bound<'_, PyAny>>,
+        sort_remaining: Option<&Bound<'_, PyAny>>,
+        na_position: &str,
+    ) -> PyResult<Py<PyAny>> {
+        // pandas' flat sortlevel reads neither.
+        let _ = (level, sort_remaining);
+        flat_sortlevel(slf.as_any(), ascending, na_position)
     }
 
     #[getter]
@@ -17765,6 +17732,11 @@ impl PyPeriodIndex {
         let periods = self.inner.values().iter().copied().map(Scalar::Period);
         Column::from_values(periods.collect()).map_err(column_error_to_py)
     }
+
+    /// Its sort keys: the period ordinals, NaT missing.
+    fn sort_keys(&self) -> Vec<Option<i64>> {
+        nat_sort_keys(&self.inner.asi8())
+    }
 }
 
 #[pymethods]
@@ -17935,22 +17907,23 @@ impl PyPeriodIndex {
     }
 
     /// The Periods themselves, as pandas returns them (it yielded the raw
-    /// ordinals, '648' for 2024-01; fvsao.4).
-    pub fn tolist(&self) -> Vec<PyPeriod> {
+    /// ordinals, '648' for 2024-01; fvsao.4), a NaT one pandas' NaT (it was
+    /// Period('NaT', 'M'), br-frankenpandas-h1kl9).
+    pub fn tolist(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         self.inner
             .values()
             .iter()
-            .map(|p| PyPeriod { inner: *p })
+            .map(|period| scalar_to_py(py, &Scalar::Period(*period)))
             .collect()
     }
 
-    pub fn to_list(&self) -> Vec<PyPeriod> {
-        self.tolist()
+    pub fn to_list(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        self.tolist(py)
     }
 
     #[getter]
-    pub fn values(&self) -> Vec<PyPeriod> {
-        self.tolist()
+    pub fn values(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        self.tolist(py)
     }
 
     pub fn copy(&self) -> Self {
@@ -18039,8 +18012,8 @@ impl PyPeriodIndex {
                     "index out of bounds",
                 ));
             }
-            let p = self.inner.values()[pos as usize];
-            return PyPeriod { inner: p }.into_py_any(py);
+            // A NaT period is pandas' NaT (it was Period('NaT', 'M')).
+            return scalar_to_py(py, &Scalar::Period(self.inner.values()[pos as usize]));
         }
         if let Ok(slice) = item.cast::<pyo3::types::PySlice>() {
             let indices = slice.indices(self.inner.len() as isize)?;
@@ -18220,27 +18193,22 @@ impl PyPeriodIndex {
             .collect()
     }
 
+    /// pandas' `slice_locs(start, end, step)` (see [`stepped_slice_locs`]).
     #[pyo3(signature = (start=None, end=None, step=None))]
     pub fn slice_locs(
         &self,
         start: Option<&Bound<'_, PyAny>>,
         end: Option<&Bound<'_, PyAny>>,
         step: Option<isize>,
-    ) -> PyResult<(usize, usize)> {
-        // A positive step slices forward, which is what this computes.
-        unsupported_params("slice_locs", &[("step", step.is_none_or(|s| s > 0))])?;
-        let s_lbl = match start {
-            Some(obj) => Some(py_to_index_label(obj)?),
-            None => None,
-        };
-        let e_lbl = match end {
-            Some(obj) => Some(py_to_index_label(obj)?),
-            None => None,
-        };
-        self.inner
-            .to_index()
-            .slice_locs(s_lbl.as_ref(), e_lbl.as_ref())
-            .map_err(index_error_to_py)
+    ) -> PyResult<(i64, i64)> {
+        stepped_slice_locs(start, end, step, self.inner.len(), |start, end| {
+            let s_lbl = start.map(py_to_index_label).transpose()?;
+            let e_lbl = end.map(py_to_index_label).transpose()?;
+            self.inner
+                .to_index()
+                .slice_locs(s_lbl.as_ref(), e_lbl.as_ref())
+                .map_err(index_error_to_py)
+        })
     }
 
     #[pyo3(signature = (start=None, end=None, step=None))]
@@ -18254,12 +18222,13 @@ impl PyPeriodIndex {
         Python::attach(|py| slice_object(py, s, e, step))
     }
 
-    #[pyo3(signature = (level=0))]
-    /// pandas refuses to drop the only level of a flat index; this returned
-    /// a plain Index whatever level was asked for (fvsao.5).
-    pub fn droplevel(&self, level: usize) -> PyResult<PyIndex> {
-        let _ = level;
-        Err(flat_droplevel_error())
+    /// pandas' `droplevel(level=0)` of a flat index (see [`flat_droplevel`]);
+    /// it returned a plain Index whatever level was asked for (fvsao.5),
+    /// then took only an int and refused every one.
+    #[pyo3(signature = (level=None))]
+    pub fn droplevel(slf: &Bound<'_, Self>, level: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        flat_droplevel(slf.as_any(), level)?;
+        Ok(slf.borrow().clone())
     }
 
     #[pyo3(signature = (level=0))]
@@ -18351,16 +18320,36 @@ impl PyPeriodIndex {
         Ok(PySeries { inner: s })
     }
 
-    #[pyo3(signature = (ascending=true, na_position="last"))]
-    pub fn sort_values(&self, ascending: bool, na_position: &str) -> PyResult<PyIndex> {
-        let idx = self.inner.to_index().rename_index(self.inner.name());
-        Ok(PyIndex {
-            inner: sort_labels_na(&idx, ascending, na_position)?,
-        })
+    /// pandas' `sort_values(*, return_indexer=False, ascending=True,
+    /// na_position='last', key=None)` (see [`typed_sort_order`]) over the
+    /// index's own sort keys (period ordinals, category codes), keeping its
+    /// class - it was a plain Index, a categorical one sorted by text; the
+    /// indexer and key were not taken (br-frankenpandas-h1kl9).
+    #[pyo3(signature = (*, return_indexer=false, ascending=true, na_position="last", key=None))]
+    pub fn sort_values(
+        slf: &Bound<'_, Self>,
+        return_indexer: bool,
+        ascending: bool,
+        na_position: &str,
+        key: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let this = slf.borrow();
+        let order = typed_sort_order(
+            slf.as_any(),
+            this.inner.len(),
+            ascending,
+            na_position,
+            key,
+            || this.sort_keys(),
+        )?;
+        let inner = this.inner.take(&order).map_err(index_error_to_py)?;
+        sorted_index_result(slf.py(), Self { inner }, order, return_indexer)
     }
 
-    pub fn sort(&self) -> PyResult<PyIndex> {
-        self.sort_values(true, "last")
+    pub fn sort(&self) -> PyResult<Self> {
+        let order = nargsort_keys(&self.sort_keys(), true, false);
+        let inner = self.inner.take(&order).map_err(index_error_to_py)?;
+        Ok(Self { inner })
     }
 
     #[getter]
@@ -18904,17 +18893,21 @@ impl PyPeriodIndex {
         Self { inner: out }
     }
 
-    #[pyo3(signature = (level=None, ascending=true, sort_remaining=None))]
+    /// pandas' `Index.sortlevel(level=None, ascending=True,
+    /// sort_remaining=None, na_position='first')` of a flat index (see
+    /// [`flat_sortlevel`]). It returned the index unsorted with the identity
+    /// order (fvsao.5), then refused (br-frankenpandas-h1kl9).
+    #[pyo3(signature = (level=None, ascending=None, sort_remaining=None, na_position="first"))]
     fn sortlevel(
-        &self,
-        level: Option<usize>,
-        ascending: bool,
-        sort_remaining: Option<bool>,
-    ) -> PyResult<(Self, Vec<usize>)> {
-        // This returned the index unsorted with the identity order, whatever
-        // the labels were (fvsao.5).
-        let _ = (level, ascending, sort_remaining);
-        Err(not_implemented("sortlevel on this index type"))
+        slf: &Bound<'_, Self>,
+        level: Option<&Bound<'_, PyAny>>,
+        ascending: Option<&Bound<'_, PyAny>>,
+        sort_remaining: Option<&Bound<'_, PyAny>>,
+        na_position: &str,
+    ) -> PyResult<Py<PyAny>> {
+        // pandas' flat sortlevel reads neither.
+        let _ = (level, sort_remaining);
+        flat_sortlevel(slf.as_any(), ascending, na_position)
     }
 
     #[getter]
@@ -19009,6 +19002,15 @@ impl PyCategoricalIndex {
     fn series_column(&self) -> PyResult<Column> {
         categorical_index_column(&self.inner)
     }
+
+    /// Its sort keys: the category codes, as pandas orders a categorical.
+    fn sort_keys(&self) -> Vec<Option<i64>> {
+        self.inner
+            .codes()
+            .into_iter()
+            .map(|code| code.and_then(|code| i64::try_from(code).ok()))
+            .collect()
+    }
 }
 
 #[pymethods]
@@ -19077,9 +19079,19 @@ impl PyCategoricalIndex {
         Ok(Self { inner })
     }
 
+    /// pandas' `CategoricalIndex.categories`: an Index (it was a list,
+    /// br-frankenpandas-h1kl9).
     #[getter]
-    pub fn categories(&self) -> Vec<String> {
-        self.inner.categories().to_vec()
+    pub fn categories(&self) -> PyIndex {
+        PyIndex {
+            inner: Index::new(
+                self.inner
+                    .categories()
+                    .iter()
+                    .map(|category| IndexLabel::Utf8(category.clone()))
+                    .collect(),
+            ),
+        }
     }
 
     #[getter]
@@ -19387,27 +19399,22 @@ impl PyCategoricalIndex {
             .collect()
     }
 
+    /// pandas' `slice_locs(start, end, step)` (see [`stepped_slice_locs`]).
     #[pyo3(signature = (start=None, end=None, step=None))]
     pub fn slice_locs(
         &self,
         start: Option<&Bound<'_, PyAny>>,
         end: Option<&Bound<'_, PyAny>>,
         step: Option<isize>,
-    ) -> PyResult<(usize, usize)> {
-        // A positive step slices forward, which is what this computes.
-        unsupported_params("slice_locs", &[("step", step.is_none_or(|s| s > 0))])?;
-        let s_lbl = match start {
-            Some(obj) => Some(py_to_index_label(obj)?),
-            None => None,
-        };
-        let e_lbl = match end {
-            Some(obj) => Some(py_to_index_label(obj)?),
-            None => None,
-        };
-        self.inner
-            .to_index()
-            .slice_locs(s_lbl.as_ref(), e_lbl.as_ref())
-            .map_err(index_error_to_py)
+    ) -> PyResult<(i64, i64)> {
+        stepped_slice_locs(start, end, step, self.inner.len(), |start, end| {
+            let s_lbl = start.map(py_to_index_label).transpose()?;
+            let e_lbl = end.map(py_to_index_label).transpose()?;
+            self.inner
+                .to_index()
+                .slice_locs(s_lbl.as_ref(), e_lbl.as_ref())
+                .map_err(index_error_to_py)
+        })
     }
 
     #[pyo3(signature = (start=None, end=None, step=None))]
@@ -19421,12 +19428,13 @@ impl PyCategoricalIndex {
         Python::attach(|py| slice_object(py, s, e, step))
     }
 
-    #[pyo3(signature = (level=0))]
-    /// pandas refuses to drop the only level of a flat index; this returned
-    /// a plain Index whatever level was asked for (fvsao.5).
-    pub fn droplevel(&self, level: usize) -> PyResult<PyIndex> {
-        let _ = level;
-        Err(flat_droplevel_error())
+    /// pandas' `droplevel(level=0)` of a flat index (see [`flat_droplevel`]);
+    /// it returned a plain Index whatever level was asked for (fvsao.5),
+    /// then took only an int and refused every one.
+    #[pyo3(signature = (level=None))]
+    pub fn droplevel(slf: &Bound<'_, Self>, level: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        flat_droplevel(slf.as_any(), level)?;
+        Ok(slf.borrow().clone())
     }
 
     #[pyo3(signature = (level=0))]
@@ -19518,16 +19526,36 @@ impl PyCategoricalIndex {
         Ok(PySeries { inner: s })
     }
 
-    #[pyo3(signature = (ascending=true, na_position="last"))]
-    pub fn sort_values(&self, ascending: bool, na_position: &str) -> PyResult<PyIndex> {
-        let idx = self.inner.to_index().rename_index(self.inner.name());
-        Ok(PyIndex {
-            inner: sort_labels_na(&idx, ascending, na_position)?,
-        })
+    /// pandas' `sort_values(*, return_indexer=False, ascending=True,
+    /// na_position='last', key=None)` (see [`typed_sort_order`]) over the
+    /// index's own sort keys (period ordinals, category codes), keeping its
+    /// class - it was a plain Index, a categorical one sorted by text; the
+    /// indexer and key were not taken (br-frankenpandas-h1kl9).
+    #[pyo3(signature = (*, return_indexer=false, ascending=true, na_position="last", key=None))]
+    pub fn sort_values(
+        slf: &Bound<'_, Self>,
+        return_indexer: bool,
+        ascending: bool,
+        na_position: &str,
+        key: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let this = slf.borrow();
+        let order = typed_sort_order(
+            slf.as_any(),
+            this.inner.len(),
+            ascending,
+            na_position,
+            key,
+            || this.sort_keys(),
+        )?;
+        let inner = this.inner.take(&order).map_err(index_error_to_py)?;
+        sorted_index_result(slf.py(), Self { inner }, order, return_indexer)
     }
 
-    pub fn sort(&self) -> PyResult<PyIndex> {
-        self.sort_values(true, "last")
+    pub fn sort(&self) -> PyResult<Self> {
+        let order = nargsort_keys(&self.sort_keys(), true, false);
+        let inner = self.inner.take(&order).map_err(index_error_to_py)?;
+        Ok(Self { inner })
     }
 
     #[getter]
@@ -19685,11 +19713,13 @@ impl PyCategoricalIndex {
         self.as_py_index().delete(loc)
     }
 
+    /// pandas refuses a categorical's diff whatever the periods, with this
+    /// TypeError (its text was fp's own, br-frankenpandas-h1kl9).
     #[pyo3(signature = (periods=1))]
     fn diff(&self, periods: i64) -> PyResult<PyIndex> {
         let _ = periods;
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "cannot perform diff on CategoricalIndex",
+            "Categorical has no 'diff' method. Convert to a suitable dtype prior to calling 'diff'.",
         ))
     }
 
@@ -19956,17 +19986,21 @@ impl PyCategoricalIndex {
         ))
     }
 
-    #[pyo3(signature = (level=None, ascending=true, sort_remaining=None))]
+    /// pandas' `Index.sortlevel(level=None, ascending=True,
+    /// sort_remaining=None, na_position='first')` of a flat index (see
+    /// [`flat_sortlevel`]). It returned the index unsorted with the identity
+    /// order (fvsao.5), then refused (br-frankenpandas-h1kl9).
+    #[pyo3(signature = (level=None, ascending=None, sort_remaining=None, na_position="first"))]
     fn sortlevel(
-        &self,
-        level: Option<usize>,
-        ascending: bool,
-        sort_remaining: Option<bool>,
-    ) -> PyResult<(Self, Vec<usize>)> {
-        // This returned the index unsorted with the identity order, whatever
-        // the labels were (fvsao.5).
-        let _ = (level, ascending, sort_remaining);
-        Err(not_implemented("sortlevel on this index type"))
+        slf: &Bound<'_, Self>,
+        level: Option<&Bound<'_, PyAny>>,
+        ascending: Option<&Bound<'_, PyAny>>,
+        sort_remaining: Option<&Bound<'_, PyAny>>,
+        na_position: &str,
+    ) -> PyResult<Py<PyAny>> {
+        // pandas' flat sortlevel reads neither.
+        let _ = (level, sort_remaining);
+        flat_sortlevel(slf.as_any(), ascending, na_position)
     }
 
     #[getter]
@@ -20162,6 +20196,13 @@ fn index_error_to_py(err: fp_index::IndexError) -> PyErr {
             PyErr::new::<pyo3::exceptions::PyTypeError, _>(msg)
         }
         fp_index::IndexError::TimeZone(err) => Python::attach(|py| tz_error_to_py(py, err)),
+        fp_index::IndexError::LabelNotFound(label) => {
+            Python::attach(|py| match index_label_to_py(py, &label) {
+                Ok(label) => PyErr::new::<pyo3::exceptions::PyKeyError, _>(label),
+                Err(err) => err,
+            })
+        }
+        fp_index::IndexError::KeyError(msg) => PyErr::new::<pyo3::exceptions::PyKeyError, _>(msg),
         other => PyErr::new::<pyo3::exceptions::PyValueError, _>(other.to_string()),
     }
 }
@@ -79488,12 +79529,7 @@ fn bound_scalar(value: &Scalar, limit: f64) -> Scalar {
 
 /// A Python `slice(start, stop, step)` (a None step when none is given), as
 /// pandas' `slice_indexer` answers (it was a tuple; br-frankenpandas-u6p7i).
-fn slice_object(
-    py: Python<'_>,
-    start: usize,
-    stop: usize,
-    step: Option<isize>,
-) -> PyResult<Py<PyAny>> {
+fn slice_object(py: Python<'_>, start: i64, stop: i64, step: Option<isize>) -> PyResult<Py<PyAny>> {
     py.import("builtins")?
         .getattr("slice")?
         .call1((start, stop, step))
@@ -80201,59 +80237,195 @@ fn positions_from_labels(labels: &[IndexLabel]) -> PyResult<Vec<i64>> {
         .collect()
 }
 
-/// pandas' `sort_values` on nanosecond labels: NaT (the `i64::MIN`
-/// sentinel) goes to `na_position` and the rest sort by value (fvsao.5:
-/// na_position was dropped and NaT, the smallest i64, always sorted first).
-fn sort_nanos_na(values: &[i64], ascending: bool, na_position: &str) -> PyResult<Vec<i64>> {
-    let (mut valid, nat): (Vec<i64>, Vec<i64>) = values.iter().partition(|&&v| v != i64::MIN);
-    if ascending {
-        valid.sort_unstable();
-    } else {
-        valid.sort_unstable_by(|a, b| b.cmp(a));
-    }
-    match na_position {
-        "last" => {
-            valid.extend(nat);
-            Ok(valid)
+/// pandas' `droplevel(level)` of a flat index: each level named (an int,
+/// a name, or a list of them) must be 0, -1 or the index's name, else
+/// pandas' IndexError / KeyError; naming none leaves the index as it is
+/// (Ok), and dropping its one level is pandas' ValueError. The classes took
+/// only an int and refused every one (br-frankenpandas-h1kl9).
+fn flat_droplevel(index: &Bound<'_, PyAny>, level: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+    let levels: Vec<Bound<'_, PyAny>> = match level {
+        None => vec![0_i64.into_pyobject(index.py())?.into_any()],
+        Some(level) if level.is_instance_of::<PyList>() || level.is_instance_of::<PyTuple>() => {
+            level.try_iter()?.collect::<PyResult<_>>()?
         }
-        "first" => Ok(nat.into_iter().chain(valid).collect()),
+        Some(level) => vec![level.clone()],
+    };
+    let name = index.getattr("name")?;
+    for level in &levels {
+        if level.is_instance_of::<pyo3::types::PyInt>() {
+            let number = level.extract::<i64>()?;
+            if number < -1 {
+                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                    "Too many levels: Index has only 1 level, {number} is not a valid level number"
+                )));
+            }
+            if number > 0 {
+                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                    "Too many levels: Index has only 1 level, not {}",
+                    number.saturating_add(1)
+                )));
+            }
+        } else if level.ne(&name)? {
+            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Requested level ({}) does not match index name ({})",
+                level.str()?,
+                name.str()?
+            )));
+        }
+    }
+    if levels.is_empty() {
+        return Ok(());
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+        "Cannot remove {} levels from an index with 1 levels: at least one level must be left.",
+        levels.len()
+    )))
+}
+
+/// pandas' `slice_locs(start, end, step)` from the forward search `forward`
+/// (the start's left bound, the end's right bound): a negative step
+/// searches the swapped bounds, then moves each back one - a bound before
+/// the first label is `-1 - len`, so a slice does not read it as the last.
+/// A negative step was refused, and discarded by MultiIndex
+/// (br-frankenpandas-h1kl9).
+fn stepped_slice_locs<T: Copy>(
+    start: Option<T>,
+    end: Option<T>,
+    step: Option<isize>,
+    len: usize,
+    forward: impl FnOnce(Option<T>, Option<T>) -> PyResult<(usize, usize)>,
+) -> PyResult<(i64, i64)> {
+    let as_i64 = |bound: usize| i64::try_from(bound).unwrap_or(i64::MAX);
+    if step.is_none_or(|step| step >= 0) {
+        let (start, end) = forward(start, end)?;
+        return Ok((as_i64(start), as_i64(end)));
+    }
+    let (left, right) = forward(end, start)?;
+    let back = |bound: usize| match as_i64(bound) - 1 {
+        -1 => -1 - as_i64(len),
+        bound => bound,
+    };
+    Ok((back(right), back(left)))
+}
+
+/// pandas' `nargsort` over integer sort keys (None missing): the present
+/// positions stably ascending, or descending with tied positions kept in
+/// order, and the missing ones, in order, first or last.
+fn nargsort_keys(keys: &[Option<i64>], ascending: bool, na_first: bool) -> Vec<usize> {
+    let (missing, mut present): (Vec<usize>, Vec<usize>) =
+        (0..keys.len()).partition(|&position| keys[position].is_none());
+    if ascending {
+        present.sort_by_key(|&position| keys[position]);
+    } else {
+        present.sort_by(|&left, &right| keys[right].cmp(&keys[left]));
+    }
+    if na_first {
+        [missing, present].concat()
+    } else {
+        [present, missing].concat()
+    }
+}
+
+/// Nanosecond (or period-ordinal) sort keys, NaT missing.
+fn nat_sort_keys(values: &[i64]) -> Vec<Option<i64>> {
+    values
+        .iter()
+        .map(|&value| (value != i64::MIN).then_some(value))
+        .collect()
+}
+
+/// Whether pandas' `na_position` puts the missing labels first.
+fn na_position_first(na_position: &str) -> PyResult<bool> {
+    match na_position {
+        "first" => Ok(true),
+        "last" => Ok(false),
         other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
             "invalid na_position: {other}"
         ))),
     }
 }
 
-/// pandas' `Index.sort_values(ascending, na_position)` over labels: missing
-/// labels go to `na_position` and the rest sort ascending or descending
-/// (fvsao.5: na_position was dropped, and reversing an ascending sort put the
-/// missing labels first for a descending one).
-fn sort_labels_na(index: &Index, ascending: bool, na_position: &str) -> PyResult<Index> {
-    let (valid, missing): (Vec<IndexLabel>, Vec<IndexLabel>) = index
-        .labels()
-        .iter()
-        .cloned()
-        .partition(|l| !l.is_missing());
-    let mut sorted = Index::new(valid).sort_values().labels().to_vec();
-    if !ascending {
-        sorted.reverse();
-    }
-    let labels = match na_position {
-        "last" => sorted.into_iter().chain(missing).collect(),
-        "first" => missing.into_iter().chain(sorted).collect(),
-        other => {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "invalid na_position: {other}"
-            )));
+/// pandas' `Index.sort_values(ascending=, na_position=, key=)` order of a
+/// typed index `index` (`len` labels): with a `key`, its labels mapped by
+/// it (see [`nargsort`]), else `keys`, the index's own sort keys.
+fn typed_sort_order(
+    index: &Bound<'_, PyAny>,
+    len: usize,
+    ascending: bool,
+    na_position: &str,
+    key: Option<&Bound<'_, PyAny>>,
+    keys: impl FnOnce() -> Vec<Option<i64>>,
+) -> PyResult<Vec<usize>> {
+    let na_first = na_position_first(na_position)?;
+    match key.filter(|key| !key.is_none()) {
+        Some(key) => {
+            let keyed = key.call1((index,))?.extract::<IndexArg>()?.inner.clone();
+            if keyed.len() != len {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "User-provided `key` function must not change the shape of the array.",
+                ));
+            }
+            Ok(nargsort(&keyed, ascending, na_first))
         }
-    };
-    Ok(Index::new(labels).rename_index(index.name()))
+        None => Ok(nargsort_keys(&keys(), ascending, na_first)),
+    }
 }
 
-/// A flat index has one level; pandas' `droplevel` refuses to remove it.
-fn flat_droplevel_error() -> PyErr {
-    PyErr::new::<pyo3::exceptions::PyValueError, _>(
-        "Cannot remove 1 levels from an index with 1 levels: at least one level must be left.",
-    )
+/// `sort_values`' result: the sorted index, with the order as an int64
+/// array under `return_indexer`.
+fn sorted_index_result<T: for<'py> IntoPyObject<'py>>(
+    py: Python<'_>,
+    sorted: T,
+    order: Vec<usize>,
+    return_indexer: bool,
+) -> PyResult<Py<PyAny>> {
+    if return_indexer {
+        (sorted, IndexerArray::from(order)).into_py_any(py)
+    } else {
+        sorted.into_py_any(py)
+    }
+}
+
+/// pandas' `Index.sortlevel` of a flat index: `sort_values(return_indexer=
+/// True, ascending=, na_position=)`, `ascending` a bool or a list of one
+/// (pandas reads neither `level` nor `sort_remaining` there). The
+/// datetime, timedelta, period and categorical indexes refused it
+/// (br-frankenpandas-h1kl9).
+fn flat_sortlevel(
+    index: &Bound<'_, PyAny>,
+    ascending: Option<&Bound<'_, PyAny>>,
+    na_position: &str,
+) -> PyResult<Py<PyAny>> {
+    let type_error =
+        |message: &str| PyErr::new::<pyo3::exceptions::PyTypeError, _>(message.to_owned());
+    let ascending = match ascending {
+        None => true,
+        Some(flag) if flag.is_instance_of::<pyo3::types::PyBool>() => flag.extract::<bool>()?,
+        Some(flags) if flags.is_instance_of::<PyList>() => {
+            let flags = flags.extract::<Vec<Bound<'_, PyAny>>>()?;
+            match flags.as_slice() {
+                [flag] if flag.is_instance_of::<pyo3::types::PyBool>() => flag.extract::<bool>()?,
+                [_] => return Err(type_error("ascending must be a bool value")),
+                _ => {
+                    return Err(type_error(
+                        "ascending must be a list of bool values of length 1",
+                    ));
+                }
+            }
+        }
+        Some(_) => {
+            return Err(type_error(
+                "ascending must be a single bool value ora list of bool values of length 1",
+            ));
+        }
+    };
+    let kwargs = PyDict::new(index.py());
+    kwargs.set_item("return_indexer", true)?;
+    kwargs.set_item("ascending", ascending)?;
+    kwargs.set_item("na_position", na_position)?;
+    index
+        .call_method("sort_values", (), Some(&kwargs))
+        .map(Bound::unbind)
 }
 
 /// `take` positions over `len` rows, negative from the end, as numpy reads
@@ -84740,7 +84912,13 @@ mod tests {
         let py_ci = PyCategoricalIndex { inner: ci };
         assert_eq!(py_ci.len(), 4);
         assert_eq!(name_text(|py| py_ci.name(py)), None);
-        assert_eq!(py_ci.categories(), vec!["cat", "dog"]);
+        assert_eq!(
+            py_ci.categories().inner.labels(),
+            &[
+                IndexLabel::Utf8("cat".to_owned()),
+                IndexLabel::Utf8("dog".to_owned())
+            ]
+        );
         assert_eq!(py_ci.codes(), vec![Some(0), Some(1), Some(0), Some(1)]);
         assert!(!py_ci.ordered());
     }

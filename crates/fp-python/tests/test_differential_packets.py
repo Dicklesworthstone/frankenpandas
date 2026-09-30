@@ -21128,3 +21128,95 @@ _E72_CASES = {
 def test_everyday72_categorical_index_like_pandas_cld41(case: str) -> None:
     run = _E72_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-h1kl9: the datetime / timedelta / period / categorical
+# indexes refused sortlevel, sort_values took no return_indexer and lost the
+# period or categorical class (categories sorted by text), droplevel took
+# only an int, slice_locs refused a negative step (MultiIndex discarded it)
+# and searched a decreasing or unsorted index as a sorted one.
+def _e73_shown(out: Any) -> Any:
+    if isinstance(out, tuple):
+        return [_e73_shown(part) for part in out]
+    if isinstance(out, np.ndarray):
+        return ["ndarray", out.tolist()]
+    if hasattr(out, "tolist") and hasattr(out, "dtype"):
+        categories = getattr(out, "categories", None)
+        return [type(out).__name__, out.tolist(), None if categories is None else categories.tolist()]
+    return out
+
+
+def _e73_indexes(m: Any) -> dict:
+    return {
+        "dti": m.DatetimeIndex(["2020-01-02", None, "2020-01-01", "2020-01-02"], name="d"),
+        "tdi": m.to_timedelta(["2D", None, "1D", "2D"]),
+        "pi": m.PeriodIndex(["2020-03", None, "2020-01", "2020-03"], freq="M"),
+        "ci": m.CategoricalIndex(["b", "a", "c", "a"], categories=["c", "b", "a"]),
+    }
+
+
+def _e73(m: Any, which: str, act: Any) -> list:
+    return [_e73_shown(act(_e73_indexes(m)[which]))]
+
+
+def _e73_positions(bounds: tuple) -> list:
+    return [int(bound) for bound in bounds]
+
+
+_E73_CASES = {
+    "datetime sortlevel": lambda m: _e73(m, "dti", lambda i: i.sortlevel()),
+    "datetime sortlevel descending list": lambda m: _e73(m, "dti", lambda i: i.sortlevel(ascending=[False])),
+    "timedelta sortlevel na last": lambda m: _e73(m, "tdi", lambda i: i.sortlevel(na_position="last")),
+    "period sortlevel descending": lambda m: _e73(m, "pi", lambda i: i.sortlevel(ascending=False)),
+    "categorical sortlevel level 1": lambda m: _e73(m, "ci", lambda i: i.sortlevel(level=1)),
+    "period sort_values": lambda m: _e73(m, "pi", lambda i: i.sort_values()),
+    "categorical sort_values category order": lambda m: _e73(m, "ci", lambda i: i.sort_values()),
+    "categorical sort_values indexer": lambda m: _e73(
+        m, "ci", lambda i: i.sort_values(return_indexer=True, ascending=False)
+    ),
+    "datetime sort_values indexer": lambda m: _e73(m, "dti", lambda i: i.sort_values(return_indexer=True)),
+    "period NaT element": lambda m: _e73(m, "pi", lambda i: (i.tolist(), i[1])),
+    "categorical categories": lambda m: [_e73_shown(_e73_indexes(m)["ci"].categories)],
+    "categorical diff": lambda m: _e73(m, "ci", lambda i: i.diff()),
+    "droplevel empty list": lambda m: _e73(m, "dti", lambda i: i.droplevel([])),
+    "droplevel own name": lambda m: _e73(m, "dti", lambda i: i.droplevel("d")),
+    "droplevel other name": lambda m: _e73(m, "dti", lambda i: i.droplevel("z")),
+    "droplevel minus one": lambda m: _e73(m, "tdi", lambda i: i.droplevel(-1)),
+    "droplevel minus two": lambda m: [m.Index([1, 2]).droplevel(-2)],
+    "droplevel past": lambda m: _e73(m, "pi", lambda i: i.droplevel(1)),
+    "slice_locs reversed": lambda m: [m.Index([1, 2, 3, 4]).slice_locs(3, 2, step=-1)],
+    "slice_indexer reversed": lambda m: [m.Index(["a", "b", "c"]).slice_indexer("c", "a", step=-1)],
+    "slice_locs reversed open": lambda m: [m.Index(["a", "b", "c"]).slice_locs("b", None, step=-1)],
+    # A bound's numpy-or-int type follows pandas' lookup path (an engine
+    # hit, a searchsorted, a parsed date string), which fp does not model on
+    # a flat index: these compare the positions.
+    "slice_locs decreasing": lambda m: [
+        _e73_positions(m.Index([4, 3, 2, 1]).slice_locs(2, 3)),
+        _e73_positions(m.Index([4, 3, 2, 1]).slice_locs(0, 5)),
+    ],
+    "slice_locs decreasing between": lambda m: [_e73_positions(m.Index([4, 3, 2, 1]).slice_locs(2.5, 1.5))],
+    "slice_locs unsorted": lambda m: [m.Index([3, 1, 2]).slice_locs(1, 2)],
+    "slice_locs unsorted missing": lambda m: [m.Index([3, 1, 2]).slice_locs(5, 6)],
+    "slice_locs split run": lambda m: [m.Index([1, 2, 1]).slice_locs(1, 2)],
+    "datetime slice_locs reversed": lambda m: [
+        _e73_positions(m.date_range("2020-01-01", periods=4).slice_locs("2020-01-03", "2020-01-02", step=-1))
+    ],
+    "multiindex slice_locs reversed": lambda m: [
+        m.MultiIndex.from_tuples([("a", 1), ("a", 2), ("b", 1), ("b", 2)]).slice_locs(("b",), ("a",), step=-1)
+    ],
+    "multiindex slice_locs forward": lambda m: [
+        m.MultiIndex.from_tuples([("a", 1), ("a", 2), ("b", 1), ("b", 2)]).slice_locs(("a", 2), ("b", 1))
+    ],
+    # Negatives: already pandas'.
+    "slice_locs forward": lambda m: [m.Index([1, 2, 3, 4]).slice_locs(2, 3)],
+    "slice_locs run forward": lambda m: [m.Index([1, 2, 2, 3]).slice_locs(2, 2)],
+    "droplevel zero": lambda m: [m.Index([1, 2]).droplevel(0)],
+    "descending keeps freq": lambda m: [m.date_range("2020-01-01", periods=3).sort_values(ascending=False).freqstr],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E73_CASES))
+def test_everyday73_flat_index_level_methods_like_pandas_h1kl9(case: str) -> None:
+    run = _E73_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
