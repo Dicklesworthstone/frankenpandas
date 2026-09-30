@@ -21317,3 +21317,112 @@ _E74_CASES = {
 def test_everyday74_discarded_parameters_like_pandas_cnpw1(case: str) -> None:
     run = _E74_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-xxryq: explode of a Series holding no list-like (a
+# float / int / Int64 one) came back object; pandas keeps the dtype.
+def _e75_exploded(series: Any, **kwargs: Any) -> list:
+    out = series.explode(**kwargs)
+    return [str(out.dtype), out.index.tolist(), out.tolist()]
+
+
+_E75_CASES = {
+    "floats": lambda m: _e75_exploded(m.Series([3.0, np.nan], index=[4, 3])),
+    "ints": lambda m: _e75_exploded(m.Series([3, 4], index=[4, 3])),
+    "nullable ints": lambda m: _e75_exploded(m.Series([1, None], dtype="Int64")),
+    "floats ignore_index": lambda m: _e75_exploded(m.Series([3.0, 1.0], index=[4, 3]), ignore_index=True),
+    "frame float column": lambda m: [
+        str(t) for t in m.DataFrame({"a": [1.0, 2.0], "b": [[1], [2, 3]]}).explode("a").dtypes
+    ],
+    # Negatives: already pandas'.
+    "strings": lambda m: _e75_exploded(m.Series(["a", "b"])),
+    "lists": lambda m: _e75_exploded(m.Series([[1, 2], [3]], index=[5, 6])),
+    "frame list column": lambda m: [
+        str(t) for t in m.DataFrame({"a": [1.0, 2.0], "b": [[1], [2, 3]]}).explode("b").dtypes
+    ],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E75_CASES))
+def test_everyday75_explode_keeps_a_non_object_dtype_like_pandas_xxryq(case: str) -> None:
+    run = _E75_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-un0ea: a frame's masked (Int64 / Float64 / boolean) or
+# `string` missing values materialized as None in values / to_numpy; pandas
+# holds pd.NA (a lone Int64 column's array is float64 NaN).
+def _e76_array(array: Any) -> list:
+    return [str(array.dtype), [repr(value) for value in array.ravel().tolist()]]
+
+
+def _e76_frame(m: Any, **columns: Any) -> Any:
+    kinds = {
+        "a": lambda: m.array([1, None], dtype="Int64"),
+        "f": lambda: m.array([1.5, None], dtype="Float64"),
+        "b": lambda: m.array([True, None], dtype="boolean"),
+        "s": lambda: m.array(["x", None], dtype="string"),
+        "o": lambda: ["x", None],
+        "n": lambda: [1.0, np.nan],
+        "i": lambda: m.array([1, 2], dtype="Int64"),
+    }
+    return m.DataFrame({name: kinds[name]() for name in columns["names"]})
+
+
+_E76_CASES = {
+    "Int64 and object values": lambda m: _e76_array(_e76_frame(m, names=["a", "o"]).values),
+    "Int64 and string values": lambda m: _e76_array(_e76_frame(m, names=["a", "s"]).values),
+    "Int64 alone values": lambda m: _e76_array(_e76_frame(m, names=["a"]).values),
+    "Float64 alone to_numpy": lambda m: _e76_array(_e76_frame(m, names=["f"]).to_numpy()),
+    "boolean alone values": lambda m: _e76_array(_e76_frame(m, names=["b"]).values),
+    "Int64 and Float64 values": lambda m: _e76_array(_e76_frame(m, names=["a", "f"]).values),
+    "string alone to_numpy": lambda m: _e76_array(_e76_frame(m, names=["s"]).to_numpy()),
+    "Int64 without gaps": lambda m: _e76_array(_e76_frame(m, names=["i"]).values),
+    # Negatives: already pandas'.
+    "object alone values": lambda m: _e76_array(_e76_frame(m, names=["o"]).values),
+    "float alone values": lambda m: _e76_array(_e76_frame(m, names=["n"]).values),
+    "to_numpy na_value None": lambda m: _e76_array(_e76_frame(m, names=["a", "s"]).to_numpy(na_value=None)),
+    "to_numpy na_value zero": lambda m: _e76_array(_e76_frame(m, names=["a", "n"]).to_numpy(na_value=0)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E76_CASES))
+def test_everyday76_masked_gaps_materialize_as_na_like_pandas_un0ea(case: str) -> None:
+    run = _E76_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-5thmj: a mode that is the missing value (dropna=False)
+# came back int64 whatever the column, an all-NaN column's empty mode
+# object; pandas keeps the source dtype.
+def _e77_modes(out: Any) -> list:
+    if hasattr(out, "columns"):
+        return [[str(t) for t in out.dtypes], out.values.tolist()]
+    return [str(out.dtype), out.tolist()]
+
+
+_E77_CASES = {
+    "float missing mode": lambda m: _e77_modes(m.Series([np.nan, np.nan, 1.0]).mode(dropna=False)),
+    "object missing mode": lambda m: _e77_modes(m.Series(["a", None, None]).mode(dropna=False)),
+    "datetime missing mode": lambda m: _e77_modes(
+        m.Series(m.to_datetime(["2024-01-01", None, None])).mode(dropna=False)
+    ),
+    "all nan empty mode": lambda m: _e77_modes(m.Series([np.nan, np.nan]).mode()),
+    "frame missing mode": lambda m: _e77_modes(
+        m.DataFrame({"a": [np.nan, np.nan, 1.0], "b": [1, 1, 2]}).mode(dropna=False)
+    ),
+    # Negatives: already pandas'.
+    "int mode": lambda m: _e77_modes(m.Series([1, 2, 2]).mode()),
+    "float tie with missing": lambda m: _e77_modes(m.Series([np.nan, 1.0]).mode(dropna=False)),
+    "nullable int missing mode": lambda m: _e77_modes(m.Series([1, None, None], dtype="Int64").mode(dropna=False)),
+    "frame mode": lambda m: _e77_modes(m.DataFrame({"a": [1.0, 2.0, 2.0], "b": [1, 3, 3]}).mode()),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E77_CASES))
+def test_everyday77_mode_keeps_the_source_dtype_like_pandas_5thmj(case: str) -> None:
+    run = _E77_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

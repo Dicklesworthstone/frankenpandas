@@ -21937,11 +21937,18 @@ impl Series {
         });
 
         let labels: Vec<IndexLabel> = (0..modes.len()).map(|i| (i as i64).into()).collect();
-        Self::new(
-            self.name.clone(),
-            Index::new(labels),
-            build_mode_column(modes)?,
-        )
+        // The modes are the column's own values (or its missing marker), so
+        // the result keeps its dtype and narrow width, as pandas': a mode
+        // that is the missing value was Int64, an empty one object
+        // (br-frankenpandas-5thmj).
+        let column = match Column::new(self.column.dtype(), modes.clone()) {
+            Ok(column) => match self.column.width() {
+                Some(width) => column.cast_to_width(width, self.column.dtype().is_nullable())?,
+                None => column,
+            },
+            Err(_) => build_mode_column(modes)?,
+        };
+        Self::new(self.name.clone(), Index::new(labels), column)
     }
 
     /// High-cardinality sort-scan mode for an all-valid, no-NaN, **zero-free**
@@ -29861,8 +29868,10 @@ impl Series {
 
     /// pandas' `s.explode(ignore_index)` over list cells (fvsao.33): a list
     /// cell becomes one row per item (an empty list one row of NaN), any
-    /// other value stays one row; the result is object, as pandas', and the
-    /// index repeats its labels (a fresh RangeIndex with `ignore_index`).
+    /// other value stays one row; an object Series' result is object and
+    /// another dtype's keeps it (see [`DataFrame::explode_lists`]), as
+    /// pandas', and the index repeats its labels (a fresh RangeIndex with
+    /// `ignore_index`).
     pub fn explode_lists(&self, ignore_index: bool) -> Result<Self, FrameError> {
         let frame = self.to_frame(Some("values"))?;
         let exploded = frame.explode_lists(&["values"], ignore_index)?;
@@ -102117,8 +102126,10 @@ impl DataFrame {
     /// per item (an empty list one row of NaN), a non-list value stays one
     /// row; several columns must hold lists of the same length in each row
     /// (pandas' ValueError otherwise). The other columns repeat with their
-    /// dtypes, the exploded ones are object, as pandas', and the index
-    /// repeats its labels (a fresh RangeIndex with `ignore_index`).
+    /// dtypes, the exploded object ones are object, as pandas', and the index
+    /// repeats its labels (a fresh RangeIndex with `ignore_index`). A column
+    /// of another dtype holds no list and keeps its dtype, as pandas' (it
+    /// came back object, br-frankenpandas-xxryq).
     pub fn explode_lists(&self, columns: &[&str], ignore_index: bool) -> Result<Self, FrameError> {
         if columns.is_empty() {
             return Err(FrameError::CompatibilityRejected(
@@ -102161,8 +102172,12 @@ impl DataFrame {
             }
         }
         let mut out = self.take_rows_by_positions(&rows)?;
-        for (name, values) in columns.iter().zip(exploded) {
-            out = out.with_column(*name, Column::from_object_values(values))?;
+        for ((name, values), source) in columns.iter().zip(exploded).zip(&sources) {
+            // Only an object column holds lists; another keeps the taken
+            // column, dtype and all.
+            if matches!(source.dtype(), DType::Utf8 | DType::Null) {
+                out = out.with_column(*name, Column::from_object_values(values))?;
+            }
         }
         let out = out.with_labels_of(self);
         if ignore_index {
@@ -132841,6 +132856,110 @@ mod tests {
         };
         assert!(concat(&[&ints, &text]).is_err());
         assert!(concat(&[&ints, &ints]).is_ok());
+    }
+
+    #[test]
+    fn explode_keeps_a_non_object_dtype_like_pandas_xxryq() {
+        use fp_types::ObjectValue;
+        let labels = vec![IndexLabel::Int64(4), IndexLabel::Int64(3)];
+        // A float / int / Int64 Series holds no list: pandas returns it,
+        // dtype and all (it came back object).
+        for (values, dtype) in [
+            (
+                vec![Scalar::Float64(3.0), Scalar::Null(NullKind::NaN)],
+                DType::Float64,
+            ),
+            (vec![Scalar::Int64(3), Scalar::Int64(4)], DType::Int64),
+        ] {
+            let series = Series::from_values("s", labels.clone(), values).unwrap();
+            let exploded = series.explode_lists(false).unwrap();
+            assert_eq!(exploded.column().dtype(), dtype);
+            assert_eq!(exploded.index().labels(), labels.as_slice());
+            let renumbered = series.explode_lists(true).unwrap();
+            assert_eq!(renumbered.column().dtype(), dtype);
+            assert_eq!(renumbered.index().labels()[1], IndexLabel::Int64(1));
+        }
+        // A frame's float column exploded beside a list column keeps float64
+        // when it is the one exploded alone.
+        let list = |items: Vec<Scalar>| Scalar::Object(ObjectValue::list(items));
+        let frame = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                (
+                    "b",
+                    vec![
+                        list(vec![Scalar::Int64(1)]),
+                        list(vec![Scalar::Int64(2), Scalar::Int64(3)]),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let by_a = frame.explode_lists(&["a"], false).unwrap();
+        assert_eq!(by_a.column("a").unwrap().dtype(), DType::Float64);
+        assert_eq!(by_a.len(), 2);
+        // NEGATIVE: the object list column still explodes to object rows,
+        // the float column repeating with its dtype.
+        let by_b = frame.explode_lists(&["b"], false).unwrap();
+        assert_eq!(by_b.len(), 3);
+        assert_eq!(by_b.column("b").unwrap().dtype(), DType::Utf8);
+        assert_eq!(by_b.column("a").unwrap().dtype(), DType::Float64);
+    }
+
+    #[test]
+    fn mode_keeps_the_source_dtype_like_pandas_5thmj() {
+        let labels = |n: i64| (0..n).map(IndexLabel::Int64).collect::<Vec<_>>();
+        // The missing value as the mode keeps the column's dtype (it was
+        // Int64 whatever the column).
+        let floats = Series::from_values(
+            "f",
+            labels(3),
+            vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(1.0),
+            ],
+        )
+        .unwrap();
+        let modes = floats.mode_with_dropna(false).unwrap();
+        assert_eq!(modes.column().dtype(), DType::Float64);
+        assert_eq!(modes.len(), 1);
+        assert!(modes.values()[0].is_missing());
+        let text = Series::from_values(
+            "t",
+            labels(3),
+            vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::Null),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            text.mode_with_dropna(false).unwrap().column().dtype(),
+            DType::Utf8
+        );
+        // An all-missing column's empty mode keeps it too (it was object).
+        let gaps = Series::from_values(
+            "g",
+            labels(2),
+            vec![Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)],
+        )
+        .unwrap();
+        let empty = gaps.mode_with_dropna(true).unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(empty.column().dtype(), gaps.column().dtype());
+        // NEGATIVE: a present int mode stays Int64.
+        let ints = Series::from_values(
+            "i",
+            labels(3),
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let int_modes = ints.mode_with_dropna(true).unwrap();
+        assert_eq!(int_modes.column().dtype(), DType::Int64);
+        assert_eq!(int_modes.values(), &[Scalar::Int64(2)]);
     }
 
     #[test]

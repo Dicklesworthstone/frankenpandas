@@ -32809,6 +32809,20 @@ fn frame_ndarray<'py>(py: Python<'py>, frame: &DataFrame) -> PyResult<Bound<'py,
     let columns: Vec<&Column> = (0..width)
         .filter_map(|position| frame.column_at(position))
         .collect();
+    // One masked or `string` column is pandas' single extension block: its
+    // own to_numpy (float64 NaN for a gap in Int64 / Float64, pd.NA in an
+    // object array for boolean / string), as a column (it was an object
+    // array of None; br-frankenpandas-un0ea).
+    if let [column] = columns.as_slice()
+        && column.timezone().is_none()
+        && (is_nullable_extension(&column.dtype()) || column.is_pandas_string())
+    {
+        let array = match pandas_default_ndarray(py, column)? {
+            Some(array) => array,
+            None => column_ndarray(py, column)?,
+        };
+        return array.call_method1("reshape", ((rows, 1),));
+    }
     // A tz-aware column is object Timestamps in its zone, as pandas' values
     // (it was the datetime64 buffer: the naive UTC instants;
     // br-frankenpandas-wuize).
@@ -32872,7 +32886,12 @@ fn frame_ndarray<'py>(py: Python<'py>, frame: &DataFrame) -> PyResult<Bound<'py,
     kwargs.set_item("dtype", "object")?;
     let array = np.call_method("empty", ((rows, width),), Some(&kwargs))?;
     for (position, column) in columns.iter().enumerate() {
-        let cells = if column.timezone().is_some() {
+        // A zoned column's instants are Timestamps in its zone, a masked or
+        // `string` column's gaps pd.NA (they were None; un0ea).
+        let cells = if column.timezone().is_some()
+            || is_nullable_extension(&column.dtype())
+            || column.is_pandas_string()
+        {
             let items = column
                 .values()
                 .iter()
@@ -37385,15 +37404,19 @@ impl PyDataFrame {
     /// pandas' `DataFrame.to_numpy(dtype=None, copy=False, na_value=...)`:
     /// a 2-D numpy array in the columns' common dtype (see
     /// [`frame_ndarray`]) - it was a list of row lists, built cell by cell.
-    #[pyo3(signature = (dtype=None, copy=false, na_value=None))]
+    /// `na_value` fills the missing cells when passed - None included,
+    /// which pandas tells apart from its default (a masked column's gap
+    /// stays pd.NA without it; br-frankenpandas-un0ea).
+    #[pyo3(signature = (dtype=None, copy=false, na_value=Passed(None)))]
     fn to_numpy<'py>(
         &self,
         py: Python<'py>,
         dtype: Option<&Bound<'py, PyAny>>,
         copy: bool,
-        na_value: Option<&Bound<'py, PyAny>>,
+        na_value: Passed<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let _ = copy; // the array is always a fresh copy
+        let na_value = na_value.0.as_ref();
         let missing = match na_value {
             Some(_) => {
                 let columns: Vec<&Column> = (0..self.inner.num_columns())
