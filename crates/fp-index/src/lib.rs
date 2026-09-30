@@ -8555,6 +8555,23 @@ impl DatetimeIndex {
             .collect()
     }
 
+    /// The one element of [`Self::asi8`] at `pos` (`None` past the end),
+    /// without building the rest: reading element by element through `asi8()`
+    /// made iterating a DatetimeIndex quadratic (br-frankenpandas-tumiz).
+    #[must_use]
+    pub fn asi8_at(&self, pos: usize) -> Option<i64> {
+        if pos >= self.index.len() {
+            return None;
+        }
+        if let Some(range) = self.index.labels.datetime64_affine_range() {
+            return Some(range.value_at(pos));
+        }
+        Some(match self.index.labels().get(pos)? {
+            IndexLabel::Datetime64(nanos) => *nanos,
+            _ => i64::MIN,
+        })
+    }
+
     /// Convert datetime labels to period ordinals at the requested frequency,
     /// matching `pd.DatetimeIndex.to_period(freq)` for supported fixed
     /// calendar frequencies.
@@ -22820,6 +22837,25 @@ mod tests {
         assert_eq!(clone.labels().len(), 4);
         assert!(original.labels.materialized.get().is_some());
         assert_eq!(original.labels(), clone.labels());
+    }
+
+    #[test]
+    fn datetime_index_reads_one_stamp_at_a_position_tumiz() {
+        // asi8_at is asi8()[pos] without the rest - a lazy range answers
+        // from its arithmetic, labels unmade (br-frankenpandas-tumiz).
+        let (start, step) = (1_704_067_200_000_000_000, -3_600 * Timedelta::NANOS_PER_SEC);
+        let lazy =
+            DatetimeIndex::from_index(Index::from_datetime64_affine_range(start, step, 5).unwrap())
+                .unwrap();
+        let listed = DatetimeIndex::new(vec![start, i64::MIN, start - 7]);
+        for dti in [&lazy, &listed] {
+            let all = dti.asi8();
+            let each: Vec<i64> = (0..all.len()).filter_map(|pos| dti.asi8_at(pos)).collect();
+            assert_eq!(each, all);
+            // NEGATIVE: past the end is None, not a stamp.
+            assert_eq!(dti.asi8_at(all.len()), None);
+        }
+        assert!(lazy.as_index().labels.materialized.get().is_none());
     }
 
     #[test]

@@ -13278,20 +13278,23 @@ impl PyDatetimeIndex {
 
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(idx) = key.extract::<i64>() {
+            let len = self.inner.len();
             let pos = if idx < 0 {
-                (self.inner.len() as i64 + idx) as usize
+                i64::try_from(len)
+                    .ok()
+                    .and_then(|len| usize::try_from(len + idx).ok())
             } else {
-                idx as usize
+                usize::try_from(idx).ok()
             };
-            if pos >= self.inner.len() {
-                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
-                    "index out of bounds",
-                ));
-            }
             // A Timestamp in the index's zone (NaT for the sentinel), as
             // pandas; iteration goes through here too (it gave the formatted
-            // string; fvsao.18).
-            let nanos = self.inner.asi8()[pos];
+            // string; fvsao.18), so it reads the one stamp - the whole asi8
+            // per element was quadratic (br-frankenpandas-tumiz).
+            let Some(nanos) = pos.and_then(|pos| self.inner.asi8_at(pos)) else {
+                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                    "index {idx} is out of bounds for axis 0 with size {len}"
+                )));
+            };
             return self.timestamp_object(py, nanos);
         }
         if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
@@ -64803,7 +64806,7 @@ impl PyResampler {
             self.label.as_deref(),
             self.origin.as_deref(),
         );
-        let (sizes, mut rows) = match &self.target {
+        let (sizes, rows) = match &self.target {
             ResampleTarget::Series(s) => {
                 let resampler = s.resample_ext(&self.freq, closed, label, origin);
                 (resampler.size(), resampler.indices())
@@ -64814,6 +64817,7 @@ impl PyResampler {
             }
         };
         let sizes = sizes.map_err(frame_error_to_py)?;
+        let mut rows = rows.map_err(frame_error_to_py)?;
         let positions = sizes
             .index()
             .labels()
@@ -64898,7 +64902,7 @@ impl PyResampler {
             self.origin.as_deref(),
         );
         let bins = resampler.size().map_err(frame_error_to_py)?;
-        let indices = resampler.indices();
+        let indices = resampler.indices().map_err(frame_error_to_py)?;
         let mut answers = Vec::with_capacity(bins.len());
         for label in bins.index().labels() {
             let rows = indices.get(label).cloned().unwrap_or_default();

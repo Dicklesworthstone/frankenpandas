@@ -37943,7 +37943,7 @@ fn resample_build_groups_with_options(
         else {
             return ResampleGrouping::empty();
         };
-        if buckets > 1_000_000 {
+        if buckets > RESAMPLE_MAX_BINS as usize {
             return ResampleGrouping::empty();
         }
         let mut dense: Vec<Vec<usize>> = vec![Vec::new(); buckets];
@@ -38027,7 +38027,7 @@ fn resample_build_groups_with_options(
         let mut lattice: Vec<(String, i64)> = Vec::new();
         let mut cursor = first;
         while cursor <= last {
-            if bucket_keys.len() >= 1_000_000 {
+            if bucket_keys.len() > RESAMPLE_MAX_BINS as usize {
                 return ResampleGrouping::empty();
             }
             let key = match label {
@@ -38106,7 +38106,7 @@ fn resample_build_groups_with_options(
             std::collections::HashMap::new();
         let mut lattice: Vec<(String, i64)> = Vec::new();
         for ord in min..=max {
-            if order.len() >= 1_000_000 {
+            if order.len() > RESAMPLE_MAX_BINS as usize {
                 return ResampleGrouping::empty();
             }
             let Some(date) =
@@ -38193,7 +38193,7 @@ fn resample_build_groups_with_options(
             Some(format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day()))
         };
         let num_bins = ((max_bin_end - min) / step + 1) as usize;
-        if num_bins >= 1_000_000 {
+        if num_bins > RESAMPLE_MAX_BINS as usize {
             return ResampleGrouping::empty();
         }
         let mut dense: Vec<Vec<usize>> = vec![Vec::new(); num_bins];
@@ -38359,7 +38359,8 @@ fn resample_build_groups_with_options(
             return ResampleGrouping::empty();
         }
         let num_bins_i64 = (lresult - fresult).div_euclid(step_ns);
-        if num_bins_i64 <= 0 || num_bins_i64 >= 1_000_000 {
+        // Past the cap the callers' validate has already refused the rule.
+        if num_bins_i64 <= 0 || num_bins_i64 > RESAMPLE_MAX_BINS {
             return ResampleGrouping::empty();
         }
         let num_bins = num_bins_i64 as usize;
@@ -38441,6 +38442,63 @@ fn resample_build_groups_with_options(
 
     // Fallback: unknown frequency, return empty
     ResampleGrouping::empty()
+}
+
+/// The most resample bins frankenpandas builds. pandas has no cap (its
+/// output has one row per bin, dataless ones included); fp's grouping keeps
+/// a formatted label and a row list per bin, some 300 bytes, so a finer rule
+/// over a long span fails closed with an error here - it returned an EMPTY
+/// result past a million bins (br-frankenpandas-effk4).
+const RESAMPLE_MAX_BINS: i64 = 1 << 24;
+
+/// Refuse a resample whose bins would pass [`RESAMPLE_MAX_BINS`], by the
+/// bound `span / step + 2` - never below the builders' exact count (their
+/// first and last edges lie within a step of the first and last stamps).
+/// Calendar, daily and hourly rules stay under the cap across the whole
+/// datetime64 range, so only minute-and-finer rules look at the labels.
+fn check_resample_bin_count(index: &Index, freq: &str) -> Result<(), FrameError> {
+    let (mult, unit) = parse_resample_freq(freq).unwrap_or((1, freq.to_string()));
+    // 'MS' is month start, not milliseconds - the builders test it first too.
+    if resample_is_period_start(&unit) {
+        return Ok(());
+    }
+    let ns_per_unit: i64 = match unit.to_lowercase().as_str() {
+        "min" | "t" => 60_000_000_000,
+        "s" => 1_000_000_000,
+        "ms" | "l" => 1_000_000,
+        "us" | "u" => 1_000,
+        "ns" | "n" => 1,
+        _ => return Ok(()),
+    };
+    let Some(step) = mult.checked_mul(ns_per_unit).filter(|step| *step > 0) else {
+        return Ok(());
+    };
+    let bounds = if let Some((start, stride, len)) = index.datetime64_affine_labels() {
+        let end = i64::try_from(len.saturating_sub(1))
+            .ok()
+            .and_then(|last| stride.checked_mul(last))
+            .and_then(|offset| start.checked_add(offset));
+        end.map(|end| (start.min(end), start.max(end)))
+    } else {
+        index
+            .labels()
+            .iter()
+            .filter_map(resample_label_to_ns)
+            .fold(None, |acc, ns| {
+                Some(acc.map_or((ns, ns), |(lo, hi): (i64, i64)| (lo.min(ns), hi.max(ns))))
+            })
+    };
+    let Some((first, last)) = bounds else {
+        return Ok(());
+    };
+    let bins = (i128::from(last) - i128::from(first)) / i128::from(step) + 2;
+    if bins > i128::from(RESAMPLE_MAX_BINS) {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "resample('{freq}') would build {bins} bins, more than the {RESAMPLE_MAX_BINS} \
+             frankenpandas supports"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_resample_options(
@@ -38558,8 +38616,14 @@ impl Resample<'_> {
         )
     }
 
-    /// Build groups: returns (bucket_keys_in_order, bucket->row_indices).
-    fn build_groups(&self) -> (Vec<String>, std::collections::HashMap<String, Vec<usize>>) {
+    /// Build groups: returns (bucket_keys_in_order, bucket->row_indices), or
+    /// the refusal of a rule past [`RESAMPLE_MAX_BINS`] bins
+    /// (br-frankenpandas-effk4) - checked here, where the grouping is built,
+    /// so the single-pass kernels (bins bounded by their rows) skip its scan.
+    fn build_groups(
+        &self,
+    ) -> Result<(Vec<String>, std::collections::HashMap<String, Vec<usize>>), FrameError> {
+        check_resample_bin_count(self.series.index(), &self.freq)?;
         let g = resample_build_groups_with_options(
             self.series.index().labels(),
             &self.freq,
@@ -38567,7 +38631,7 @@ impl Resample<'_> {
             self.label.as_deref(),
             self.origin.as_deref(),
         );
-        (g.order, g.groups)
+        Ok((g.order, g.groups))
     }
 
     /// Aggregate each time bucket using a function.
@@ -38577,7 +38641,7 @@ impl Resample<'_> {
     {
         // Per br-frankenpandas-7bc60.
         self.validate()?;
-        let (order, groups) = self.build_groups();
+        let (order, groups) = self.build_groups()?;
         let vals = self.series.column().values();
 
         let mut out_labels = Vec::with_capacity(order.len());
@@ -38609,7 +38673,7 @@ impl Resample<'_> {
         F: Fn(&Series) -> Result<Scalar, FrameError>,
     {
         self.validate()?;
-        let (order, groups) = self.build_groups();
+        let (order, groups) = self.build_groups()?;
         let mut labels = Vec::with_capacity(order.len());
         let mut values = Vec::with_capacity(order.len());
         for key in &order {
@@ -38816,7 +38880,7 @@ impl Resample<'_> {
             if let Some(r) = self.resample_reduce_single_pass(vals, true) {
                 return r;
             }
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out_f64 = Vec::with_capacity(order.len());
             for key in &order {
@@ -38862,7 +38926,7 @@ impl Resample<'_> {
                     });
                 }
             }
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out_i64 = Vec::with_capacity(order.len());
             for key in &order {
@@ -38913,7 +38977,7 @@ impl Resample<'_> {
             if let Some(r) = self.resample_reduce_single_pass(vals, false) {
                 return r;
             }
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out_f64 = Vec::with_capacity(order.len());
             for key in &order {
@@ -38946,7 +39010,7 @@ impl Resample<'_> {
             if let Some(r) = self.resample_reduce_single_pass(&vals, false) {
                 return r;
             }
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out_f64 = Vec::with_capacity(order.len());
             for key in &order {
@@ -38970,9 +39034,9 @@ impl Resample<'_> {
     /// (2 passes). VERBATIM the "D" path of `resample_build_groups` for the day
     /// ords + key_of + contiguous min..=max bin order + empty-bin NaN, so the
     /// emitted index and `sum/count` (== `nanmean_grouped` for no-NaN, the
-    /// row-order compensated sum) are bit-identical. `None` (caller falls back) for an empty/all-NaT input or a
-    /// more-than-1e6-day span (matching build_groups' cap), or any
-    /// non-Datetime64/Date label.
+    /// row-order compensated sum) are bit-identical. `None` (caller falls back)
+    /// for an empty/all-NaT input, a more-than-1e6-day span (past datetime64's
+    /// range), or any non-Datetime64/Date label.
     /// Dispatch the daily / sub-daily one-pass resample reduce (mean if `is_sum`
     /// is false, sum if true). `None` (caller uses build_groups) for non-D/sub-day
     /// freqs or when a helper bails (empty / sparse / non-datetime label).
@@ -39434,7 +39498,7 @@ impl Resample<'_> {
         // SAME `build_groups` + label construction, so the bucket axis is identical.
         if self.series.column().as_i64_slice().is_some() {
             self.validate()?;
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out = Vec::with_capacity(order.len());
             for key in &order {
@@ -39509,7 +39573,7 @@ impl Resample<'_> {
                     return r;
                 }
             }
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out = Vec::with_capacity(order.len());
             for key in &order {
@@ -39550,7 +39614,7 @@ impl Resample<'_> {
         let data = self.series.column().as_i64_slice()?;
         Some((|| -> Result<Series, FrameError> {
             self.validate()?;
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out = Vec::with_capacity(order.len());
             for key in &order {
@@ -39588,7 +39652,7 @@ impl Resample<'_> {
         let data = self.series.column().as_i64_slice()?;
         Some((|| -> Result<Series, FrameError> {
             self.validate()?;
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out = Vec::with_capacity(order.len());
             for key in &order {
@@ -39662,7 +39726,7 @@ impl Resample<'_> {
     {
         // Per br-frankenpandas-7bc60.
         self.validate()?;
-        let (order, groups) = self.build_groups();
+        let (order, groups) = self.build_groups()?;
         let vals = self.series.column().values();
 
         let mut out_labels = Vec::with_capacity(order.len());
@@ -39735,7 +39799,7 @@ impl Resample<'_> {
         };
         Some((|| -> Result<Series, FrameError> {
             self.validate()?;
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out = Vec::with_capacity(order.len());
             for key in &order {
@@ -39787,7 +39851,7 @@ impl Resample<'_> {
         };
         if let Some(vals) = typed {
             self.validate()?;
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             if order.iter().all(|k| !groups[k].is_empty()) {
                 let mut out_labels = Vec::with_capacity(order.len());
                 let mut out_f64 = Vec::with_capacity(order.len());
@@ -39833,7 +39897,7 @@ impl Resample<'_> {
             // wrapping on overflow as numpy does (this was Float64;
             // br-frankenpandas-0yilt).
             self.validate()?;
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out_i64 = Vec::with_capacity(order.len());
             for key in &order {
@@ -39896,7 +39960,7 @@ impl Resample<'_> {
     pub fn agg(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
         // Per br-frankenpandas-7bc60.
         self.validate()?;
-        let (order, groups) = self.build_groups();
+        let (order, groups) = self.build_groups()?;
         // Buckets-once fast path (br-frankenpandas-833wx): the per-func loop below
         // calls aggregate_named per func, each REBUILDING the bins — N+1 builds.
         // For the f64-bucket reductions over an all-valid no-NaN column with no
@@ -39981,26 +40045,24 @@ impl Resample<'_> {
         self.agg(funcs)
     }
 
-    /// Bucket labels in first-observed order.
-    #[must_use]
-    pub fn keys(&self) -> Vec<IndexLabel> {
-        let (order, _) = self.build_groups();
-        order.iter().map(|key| resample_bin_label(key)).collect()
+    /// Bucket labels in first-observed order; a rule past the bin cap is
+    /// refused (br-frankenpandas-effk4).
+    pub fn keys(&self) -> Result<Vec<IndexLabel>, FrameError> {
+        let (order, _) = self.build_groups()?;
+        Ok(order.iter().map(|key| resample_bin_label(key)).collect())
     }
 
     /// Mapping from bucket labels to source row positions.
-    #[must_use]
-    pub fn indices(&self) -> HashMap<IndexLabel, Vec<usize>> {
-        let (order, groups) = self.build_groups();
-        order
+    pub fn indices(&self) -> Result<HashMap<IndexLabel, Vec<usize>>, FrameError> {
+        let (order, groups) = self.build_groups()?;
+        Ok(order
             .iter()
             .map(|key| (resample_bin_label(key), groups[key].clone()))
-            .collect()
+            .collect())
     }
 
     /// Alias for [`Self::indices`].
-    #[must_use]
-    pub fn groups(&self) -> HashMap<IndexLabel, Vec<usize>> {
+    pub fn groups(&self) -> Result<HashMap<IndexLabel, Vec<usize>>, FrameError> {
         self.indices()
     }
 
@@ -40017,10 +40079,9 @@ impl Resample<'_> {
     }
 
     /// Number of non-empty resample buckets.
-    #[must_use]
-    pub fn ngroups(&self) -> usize {
-        let (order, _) = self.build_groups();
-        order.len()
+    pub fn ngroups(&self) -> Result<usize, FrameError> {
+        let (order, _) = self.build_groups()?;
+        Ok(order.len())
     }
 
     /// Series resampler dimensionality.
@@ -40039,7 +40100,7 @@ impl Resample<'_> {
     pub fn get_group(&self, name: &str) -> Result<Series, FrameError> {
         // Per br-frankenpandas-7bc60.
         self.validate()?;
-        let (_order, groups) = self.build_groups();
+        let (_order, groups) = self.build_groups()?;
         let positions = groups.get(name).ok_or_else(|| {
             FrameError::CompatibilityRejected(format!("resample group '{name}' not found"))
         })?;
@@ -40064,6 +40125,7 @@ impl Resample<'_> {
     /// origin anchoring here.
     fn bin_lattice(&self) -> Result<Vec<(String, i64)>, FrameError> {
         self.validate()?;
+        check_resample_bin_count(self.series.index(), &self.freq)?;
         let grouping = resample_build_groups_with_options(
             self.series.index().labels(),
             &self.freq,
@@ -40296,7 +40358,7 @@ impl Resample<'_> {
         };
         if let Some(vals) = typed {
             self.validate()?;
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             if order.iter().all(|k| !groups[k].is_empty()) {
                 let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
                 let mut out_labels = Vec::with_capacity(order.len());
@@ -40357,7 +40419,7 @@ impl Resample<'_> {
         };
         if let Some(vals) = typed {
             self.validate()?;
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out = Vec::with_capacity(order.len());
             for key in &order {
@@ -40426,7 +40488,7 @@ impl Resample<'_> {
     pub fn ohlc(&self) -> Result<DataFrame, FrameError> {
         // Per br-frankenpandas-7bc60.
         self.validate()?;
-        let (order, groups) = self.build_groups();
+        let (order, groups) = self.build_groups()?;
         let vals = self.series.values();
         let mut labels = Vec::with_capacity(order.len());
         let mut opens = Vec::with_capacity(order.len());
@@ -40573,7 +40635,7 @@ impl Resample<'_> {
     pub fn transform(&self, func: &str) -> Result<Series, FrameError> {
         // Per br-frankenpandas-7bc60.
         self.validate()?;
-        let (order, groups) = self.build_groups();
+        let (order, groups) = self.build_groups()?;
         let vals = self.series.values();
         let mut out = vec![Scalar::Null(NullKind::NaN); self.series.len()];
 
@@ -41696,10 +41758,12 @@ impl<'a> DataFrameResample<'a> {
         )
     }
 
-    fn build_groups(&self) -> (Vec<String>, HashMap<String, Vec<usize>>) {
+    fn build_groups(&self) -> Result<(Vec<String>, HashMap<String, Vec<usize>>), FrameError> {
         // Per gauntlet CONF-RC2: share the origin-anchored N-day bucketing
         // with the Series resample path so multiplied frequencies (e.g. "2D")
-        // bucket identically here.
+        // bucket identically here. A rule past RESAMPLE_MAX_BINS is refused
+        // (br-frankenpandas-effk4).
+        check_resample_bin_count(&self.df.index, &self.freq)?;
         let g = resample_build_groups_with_options(
             self.df.index.labels(),
             &self.freq,
@@ -41707,7 +41771,7 @@ impl<'a> DataFrameResample<'a> {
             self.label.as_deref(),
             self.origin.as_deref(),
         );
-        (g.order, g.groups)
+        Ok((g.order, g.groups))
     }
 
     fn series_resample<'s>(&self, series: &'s Series) -> Resample<'s> {
@@ -41977,26 +42041,24 @@ impl<'a> DataFrameResample<'a> {
         self.agg(funcs)
     }
 
-    /// Bucket labels in first-observed order.
-    #[must_use]
-    pub fn keys(&self) -> Vec<IndexLabel> {
-        let (order, _) = self.build_groups();
-        order.iter().map(|key| resample_bin_label(key)).collect()
+    /// Bucket labels in first-observed order; a rule past the bin cap is
+    /// refused (br-frankenpandas-effk4).
+    pub fn keys(&self) -> Result<Vec<IndexLabel>, FrameError> {
+        let (order, _) = self.build_groups()?;
+        Ok(order.iter().map(|key| resample_bin_label(key)).collect())
     }
 
     /// Mapping from bucket labels to source row positions.
-    #[must_use]
-    pub fn indices(&self) -> HashMap<IndexLabel, Vec<usize>> {
-        let (order, groups) = self.build_groups();
-        order
+    pub fn indices(&self) -> Result<HashMap<IndexLabel, Vec<usize>>, FrameError> {
+        let (order, groups) = self.build_groups()?;
+        Ok(order
             .iter()
             .map(|key| (resample_bin_label(key), groups[key].clone()))
-            .collect()
+            .collect())
     }
 
     /// Alias for [`Self::indices`].
-    #[must_use]
-    pub fn groups(&self) -> HashMap<IndexLabel, Vec<usize>> {
+    pub fn groups(&self) -> Result<HashMap<IndexLabel, Vec<usize>>, FrameError> {
         self.indices()
     }
 
@@ -42013,10 +42075,9 @@ impl<'a> DataFrameResample<'a> {
     }
 
     /// Number of non-empty resample buckets.
-    #[must_use]
-    pub fn ngroups(&self) -> usize {
-        let (order, _) = self.build_groups();
-        order.len()
+    pub fn ngroups(&self) -> Result<usize, FrameError> {
+        let (order, _) = self.build_groups()?;
+        Ok(order.len())
     }
 
     /// DataFrame resampler dimensionality.
@@ -42034,7 +42095,7 @@ impl<'a> DataFrameResample<'a> {
     /// Return all source rows for one resample bucket.
     pub fn get_group(&self, name: &str) -> Result<DataFrame, FrameError> {
         self.validate()?;
-        let (_, groups) = self.build_groups();
+        let (_, groups) = self.build_groups()?;
         let positions = groups.get(name).ok_or_else(|| {
             FrameError::CompatibilityRejected(format!("resample group '{name}' not found"))
         })?;
@@ -42095,7 +42156,7 @@ impl<'a> DataFrameResample<'a> {
     /// Count source rows in each resample bucket.
     pub fn size(&self) -> Result<Series, FrameError> {
         self.validate()?;
-        let (order, groups) = self.build_groups();
+        let (order, groups) = self.build_groups()?;
         // Timestamp bins, as every other resample result (they were the bin
         // keys' text; br-frankenpandas-0yilt).
         let labels: Vec<IndexLabel> = order.iter().map(|key| resample_bin_label(key)).collect();
@@ -168509,13 +168570,16 @@ mod tests {
         // Bins are Timestamps, as pandas keys them (br-frankenpandas-0yilt).
         let bin = |date: &str| IndexLabel::Datetime64(parse_datetime64_nanos(date).unwrap());
 
-        assert_eq!(resample.keys(), vec![bin("2024-01-31"), bin("2024-02-29")]);
-        assert_eq!(resample.ngroups(), 2);
+        assert_eq!(
+            resample.keys().unwrap(),
+            vec![bin("2024-01-31"), bin("2024-02-29")]
+        );
+        assert_eq!(resample.ngroups().unwrap(), 2);
         assert_eq!(resample.ndim(), 1);
         assert_eq!(resample.grouper(), "M");
         assert!(resample.exclusions().is_empty());
         assert_eq!(
-            resample.indices().get(&bin("2024-01-31")),
+            resample.indices().unwrap().get(&bin("2024-01-31")),
             Some(&vec![0, 1])
         );
         assert_eq!(resample.get_group("2024-02-29").unwrap().len(), 3);
@@ -168572,7 +168636,7 @@ mod tests {
             ohlc.columns()["close"].values(),
             &[Scalar::Float64(3.0), Scalar::Float64(5.0)]
         );
-        assert_eq!(resample.pipe(|r| Ok(r.ngroups())).unwrap(), 2);
+        assert_eq!(resample.pipe(|r| r.ngroups()).unwrap(), 2);
         assert_eq!(
             resample.asfreq().unwrap().values(),
             &[Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)]
@@ -169884,12 +169948,12 @@ mod tests {
         .unwrap();
         let resample = df.resample("M");
 
-        assert_eq!(resample.ngroups(), 2);
+        assert_eq!(resample.ngroups().unwrap(), 2);
         assert_eq!(resample.ndim(), 2);
         assert_eq!(resample.level(), "M");
         // Bins are Timestamps, as pandas keys them (br-frankenpandas-0yilt).
         let february = IndexLabel::Datetime64(parse_datetime64_nanos("2024-02-29").unwrap());
-        assert_eq!(resample.groups().get(&february), Some(&vec![2, 3]));
+        assert_eq!(resample.groups().unwrap().get(&february), Some(&vec![2, 3]));
         assert_eq!(resample.get_group("2024-01-31").unwrap().len(), 2);
 
         let aggregate = resample
@@ -218771,6 +218835,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn resample_past_a_million_bins_answers_or_refuses_effk4() {
+        // Three stamps 1,050,000 s apart resample('s') into 1,050,001 bins -
+        // the grouping returned an EMPTY result from a million bins on
+        // (br-frankenpandas-effk4); pandas answers every bin.
+        const SECOND: i64 = 1_000_000_000;
+        let day = 1_704_067_200_000_000_000_i64; // 2024-01-01T00:00
+        let stamps = vec![day, day + 7 * SECOND, day + 1_050_000 * SECOND];
+        let series = Series::new(
+            "v",
+            Index::from_datetime64(stamps),
+            Column::from_f64_values(vec![1.0, 2.0, 4.0]),
+        )
+        .unwrap();
+        let sums = series.resample("s").sum().unwrap();
+        assert_eq!(sums.len(), 1_050_001);
+        assert_eq!(sums.values()[7], Scalar::Float64(2.0));
+        assert_eq!(sums.values()[1_050_000], Scalar::Float64(4.0));
+        // An 'ms' rule over a year would be 3e10 bins: refused, never empty.
+        let year = Series::new(
+            "v",
+            Index::from_datetime64(vec![day, day + 366 * 86_400 * SECOND]),
+            Column::from_f64_values(vec![1.0, 2.0]),
+        )
+        .unwrap();
+        let refused = year.resample("ms").sum().unwrap_err().to_string();
+        assert!(refused.contains("bins"), "{refused}");
+        // NEGATIVE: the same year by hour stays under the cap.
+        assert_eq!(year.resample("h").sum().unwrap().len(), 366 * 24 + 1);
     }
 
     #[test]

@@ -23206,3 +23206,55 @@ _E114_CASES = {
 def test_everyday114_groupby_skew_like_pandas_vjfq9(case: str) -> None:
     run = _E114_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-effk4: a resample past a million bins answered an EMPTY
+# result (transform raised); three stamps 1,050,000 s apart by second.
+def _e115_series(m: Any) -> Any:
+    stamps = ["2024-01-01 00:00:00", "2024-01-01 00:00:07", "2024-01-13 03:40:00"]
+    return m.Series([1.0, 2.0, 4.0], index=m.to_datetime(stamps))
+
+
+def _e115_summary(out: Any) -> list:
+    values = out.tolist()
+    return [len(values), str(out.index[0]), str(out.index[-1]), repr(values[7]), repr(values[-1]),
+            sum(1 for v in values if v == v)]
+
+
+_E115_CASES = {
+    "sum": lambda m: _e115_summary(_e115_series(m).resample("s").sum()),
+    "mean": lambda m: _e115_summary(_e115_series(m).resample("s").mean()),
+    "var": lambda m: _e115_summary(_e115_series(m).resample("s").var()),
+    "count": lambda m: _e115_summary(_e115_series(m).resample("s").count()),
+    "agg std": lambda m: _e115_summary(_e115_series(m).resample("s").agg(["sum", "std"])["std"]),
+    "transform": lambda m: _e115_series(m).resample("s").transform("mean").tolist(),
+    # Negative: a coarser rule over the same span is unchanged.
+    "by hour": lambda m: _e115_series(m).resample("h").sum().tolist(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E115_CASES))
+def test_everyday115_resample_past_a_million_bins_like_pandas_effk4(case: str) -> None:
+    run = _E115_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-tumiz: a DatetimeIndex's element access and iteration read
+# one stamp (they rebuilt every stamp per element - quadratic).
+_E116_CASES = {
+    "date_range": lambda m: [str(t) for t in m.date_range("2024-01-01", periods=3000, freq="37min")],
+    "tz-aware": lambda m: [str(t) for t in m.date_range("2024-03-30", periods=100, freq="h", tz="Europe/Berlin")],
+    "listed with NaT": lambda m: [str(t) for t in m.DatetimeIndex(["2024-01-02", None, "2023-12-31"])],
+    "negative position": lambda m: [str(m.date_range("2024-01-01", periods=10, freq="D")[-1])],
+    "descending": lambda m: [str(t) for t in m.date_range("2024-01-01", periods=5, freq="D")[::-1]],
+    "out of bounds": lambda m: [m.date_range("2024-01-01", periods=3, freq="D")[3]],
+    "negative out of bounds": lambda m: [m.date_range("2024-01-01", periods=3, freq="D")[-4]],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E116_CASES))
+def test_everyday116_datetimeindex_iteration_like_pandas_tumiz(case: str) -> None:
+    run = _E116_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
