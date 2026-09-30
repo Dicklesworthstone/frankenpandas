@@ -7046,6 +7046,28 @@ fn categorical_index_column(index: &CategoricalIndex) -> PyResult<Column> {
         .map_err(frame_error_to_py)
 }
 
+/// `items` as one Utf8 column when each is an exact `str`: their UTF-8 bytes
+/// end to end, the column `Column::from_values` makes of them without a
+/// String and a Scalar per cell (a million strings from a list took ~70 ms;
+/// br-frankenpandas-mf3tj). None for any other item - a str with lone
+/// surrogates too - or no items: the caller's path decides those.
+fn contiguous_text_column<'py>(
+    items: impl IntoIterator<Item = Bound<'py, PyAny>>,
+) -> Option<Column> {
+    let mut bytes = Vec::new();
+    let mut offsets = vec![0];
+    for item in items {
+        let text = item
+            .cast_exact::<pyo3::types::PyString>()
+            .ok()?
+            .to_str()
+            .ok()?;
+        bytes.extend_from_slice(text.as_bytes());
+        offsets.push(bytes.len());
+    }
+    (offsets.len() > 1).then(|| Column::from_utf8_contiguous(bytes, offsets))
+}
+
 /// A native-order numpy array's elements through the buffer protocol: one
 /// copy, a strided view gathered by `PyBuffer_ToContiguous`. The caller
 /// checks the byte order (see [`py_array_like_column`]).
@@ -7244,12 +7266,22 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
                 .collect(),
         ),
         _ => {
-            let values = obj
+            let items = obj
                 .call_method0("tolist")?
                 .try_iter()?
-                .map(|v| v.and_then(|v| py_to_scalar(py, &v)))
                 .collect::<PyResult<Vec<_>>>()?;
-            Column::from_values(values).map_err(column_error_to_py)?
+            // Text (numpy's unicode kind) laid out contiguously.
+            let text = (kind == "U").then(|| contiguous_text_column(items.iter().cloned()));
+            match text.flatten() {
+                Some(column) => column,
+                None => {
+                    let values = items
+                        .iter()
+                        .map(|v| py_to_scalar(py, v))
+                        .collect::<PyResult<Vec<_>>>()?;
+                    Column::from_values(values).map_err(column_error_to_py)?
+                }
+            }
         }
     };
     Ok(Some(column))
@@ -26849,6 +26881,27 @@ impl PySeries {
         }
 
         if let Ok(list) = data.cast::<PyList>() {
+            // A list of text is one contiguous Utf8 column (and, with no
+            // index=, the default range built as one; br-frankenpandas-mf3tj).
+            if let Some(column) = contiguous_text_column(list.iter()) {
+                let rows = match index {
+                    None => Index::default_range(column.len()),
+                    Some(_) => {
+                        let labels = extract_index_labels(index, column.len())?;
+                        if labels.len() != column.len() {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "Length of values ({}) does not match length of index ({})",
+                                column.len(),
+                                labels.len()
+                            )));
+                        }
+                        Index::new(labels)
+                    }
+                };
+                let series = Series::new(series_name, rows, column)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                return Ok(PySeries { inner: series });
+            }
             let scalars: Vec<Scalar> = pandas_promote_int_with_missing(
                 list.iter()
                     .map(|v| py_to_cell(py, &v))
@@ -37431,25 +37484,33 @@ impl PyDataFrame {
                         }
                         column
                     } else if let Ok(list) = value.cast::<PyList>() {
-                        let scalars: Vec<Scalar> = list
-                            .iter()
-                            .map(|v| py_to_cell(py, &v))
-                            .collect::<PyResult<Vec<_>>>()?;
                         if let Some(nr) = detected_nrows {
-                            if scalars.len() != nr {
+                            if list.len() != nr {
                                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                                     "All arrays must be of the same length",
                                 ));
                             }
                         } else {
-                            detected_nrows = Some(scalars.len());
+                            detected_nrows = Some(list.len());
                         }
-                        // ints with a missing value are float64 with NaN, as
-                        // the Series constructor already made them (the frame
-                        // kept int64 with a null; DISC-011).
-                        sequence_column(scalars).map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                        })?
+                        // A list of text is one contiguous Utf8 column
+                        // (br-frankenpandas-mf3tj).
+                        match contiguous_text_column(list.iter()) {
+                            Some(column) => column,
+                            None => {
+                                let scalars: Vec<Scalar> = list
+                                    .iter()
+                                    .map(|v| py_to_cell(py, &v))
+                                    .collect::<PyResult<Vec<_>>>()?;
+                                // ints with a missing value are float64 with
+                                // NaN, as the Series constructor already made
+                                // them (the frame kept int64 with a null;
+                                // DISC-011).
+                                sequence_column(scalars).map_err(|e| {
+                                    PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                                })?
+                            }
+                        }
                     } else if let Ok(tuple) = value.cast::<PyTuple>() {
                         let scalars: Vec<Scalar> = tuple
                             .iter()
