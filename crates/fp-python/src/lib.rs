@@ -38359,8 +38359,13 @@ impl PyDataFrame {
             }
             return Ok(Py::new(py, self.column_series(&col)?)?.into_any());
         }
-        // `df[["a", "b"]]` -> DataFrame with those columns in that order
-        if let Ok(cols) = key.extract::<Vec<String>>() {
+        // `df[["a", "b"]]` -> DataFrame with those columns in that order. A
+        // boolean Series is a row mask (below): extracting it as names built
+        // a Python list of all its rows first (br-frankenpandas-sj5bn).
+        let bool_mask = key
+            .extract::<PyRef<'_, PySeries>>()
+            .is_ok_and(|mask| mask.inner.dtype().is_bool());
+        if !bool_mask && let Ok(cols) = key.extract::<Vec<String>>() {
             for col in &cols {
                 if self.inner.column(col).is_none() {
                     return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(col.clone()));
@@ -49190,6 +49195,11 @@ fn interval_drop_labels<'py>(
 
 /// Whether `index` is an IntervalIndex: every label an interval.
 fn holds_intervals(index: &Index) -> bool {
+    // A RangeIndex holds ints: its labels were built to be asked, on every
+    // `.loc` (br-frankenpandas-sj5bn).
+    if index.range_span().is_some() {
+        return false;
+    }
     let labels = index.labels();
     !labels.is_empty()
         && labels
@@ -52050,12 +52060,36 @@ impl PyDataFrameLoc {
                     .get_item(tuple.get_item(0)?)
                     .map(Bound::unbind);
             }
-            let rows = resolve_loc_rows(&self.inner, &tuple.get_item(0)?)?;
+            // A boolean Series of rows with one plain column label takes just
+            // that column's rows: every column was filtered first
+            // (br-frankenpandas-sj5bn). A callable row key reads the whole
+            // frame, so it keeps it.
+            let row_key = tuple.get_item(0)?;
+            let columns_key = tuple.get_item(1)?;
+            let one_column = columns_key.extract::<String>().ok().filter(|name| {
+                self.inner.columns_multiindex().is_none()
+                    && self.inner.column_occurrences(name) == 1
+                    && matches!(self.inner.column_label(name), IndexLabel::Utf8(_))
+            });
+            let mask_rows = row_key
+                .extract::<PyRef<'_, PySeries>>()
+                .is_ok_and(|mask| mask.inner.dtype().is_bool());
+            let narrowed;
+            let source = match one_column.filter(|_| mask_rows) {
+                Some(name) => {
+                    narrowed = self
+                        .inner
+                        .select_columns(&[name.as_str()])
+                        .map_err(loc_key_error)?;
+                    &narrowed
+                }
+                None => &self.inner,
+            };
+            let rows = resolve_loc_rows(source, &row_key)?;
             // Under MultiIndex columns the column key of a rows selection
             // reads as `df[key]` does: a top-level label its sub-columns, a
             // tuple its column, a list of tuples those columns (KeyError /
             // TypeError; 7m8bq).
-            let columns_key = tuple.get_item(1)?;
             if let LocRows::Frame(sub) = &rows
                 && self.inner.columns_multiindex().is_some()
                 && (columns_key.is_instance_of::<pyo3::types::PyString>()

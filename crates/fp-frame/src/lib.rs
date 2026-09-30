@@ -72244,6 +72244,16 @@ impl DataFrame {
                 gathered.push(values[pos]);
             }
             Index::from_i64_values(gathered)
+        } else if let Some((start, _, step)) = self.index.range_span() {
+            // A RangeIndex's row at `pos` is start + pos * step (see
+            // take_rows_by_positions_with_affine_certificate_unchecked;
+            // br-frankenpandas-sj5bn).
+            Index::from_i64_values(
+                positions
+                    .iter()
+                    .map(|&pos| start + pos as i64 * step)
+                    .collect(),
+            )
         } else {
             let index_labels = self.index.labels();
 
@@ -72509,6 +72519,16 @@ impl DataFrame {
                 gathered.push(values[pos]);
             }
             Index::from_i64_values(gathered)
+        } else if let Some((start, _, step)) = self.index.range_span() {
+            // A RangeIndex's row at `pos` is start + pos * step, the int64
+            // labels the typed view gathers: a small selection built all of
+            // its labels first (br-frankenpandas-sj5bn).
+            Index::from_i64_values(
+                positions
+                    .iter()
+                    .map(|&pos| start + pos as i64 * step)
+                    .collect(),
+            )
         } else {
             let index_labels = self.index.labels();
 
@@ -183643,6 +183663,33 @@ mod tests {
         assert_eq!(scaled.values()[1], Scalar::Timedelta64(40));
         assert!(scaled.values()[2].is_missing());
         assert_eq!(scaled.values()[3], Scalar::Timedelta64(160));
+    }
+
+    #[test]
+    fn range_index_row_take_gathers_its_labels_sj5bn() {
+        // A small selection of a RangeIndex's rows reads their labels as
+        // start + position * step - it built every label first - and they
+        // are the labels the label vector gave (br-frankenpandas-sj5bn).
+        // 16 rows, 2 taken: under a quarter, the branch without a typed view.
+        for (start, stop, step) in [(0, 16, 1), (10, 170, 10), (7, -25, -2)] {
+            let index = Index::from_range(start, stop, step);
+            let len = index.len();
+            let mut columns = BTreeMap::new();
+            columns.insert("v".to_string(), Column::from_i64_values((0..16).collect()));
+            let frame =
+                DataFrame::new_with_column_order(index.clone(), columns, vec!["v".to_string()])
+                    .unwrap();
+            let mut mask = vec![false; len];
+            mask[1] = true;
+            mask[len - 1] = true;
+            let taken = frame.iloc_bool(&mask).unwrap();
+            let expect = [index.labels()[1].clone(), index.labels()[len - 1].clone()];
+            assert_eq!(taken.index().labels(), &expect, "{start} {stop} {step}");
+            assert_eq!(
+                taken.column("v").unwrap().values(),
+                &[Scalar::Int64(1), Scalar::Int64(15)]
+            );
+        }
     }
 
     #[test]

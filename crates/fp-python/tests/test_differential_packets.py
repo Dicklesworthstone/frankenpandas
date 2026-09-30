@@ -22478,3 +22478,45 @@ _E99_CASES = {
 def test_everyday99_series_power_aligns_like_pandas_mhuqn(case: str) -> None:
     run = _E99_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-sj5bn: df[bool Series] turned the mask into a Python
+# list first; .loc[mask, col] built the RangeIndex's labels and filtered
+# every column. Every answer stays pandas'.
+def _e100_frame(m: Any) -> Any:
+    return m.DataFrame({"k": [5, 1, 7, 3], "v": [0.5, 1.5, 2.5, 3.5], "s": ["a", "b", "c", "d"]})
+
+
+def _e100_shown(obj: Any) -> list:
+    if hasattr(obj, "columns"):
+        return [list(obj.columns), list(obj.index), obj.to_dict("list")]
+    return [str(obj.dtype), list(obj.index), obj.tolist(), obj.name]
+
+
+_E100_CASES = {
+    "df[mask]": lambda m: _e100_shown(_e100_frame(m)[_e100_frame(m)["k"] > 2]),
+    "df[bool list]": lambda m: _e100_shown(_e100_frame(m)[[True, False, True, False]]),
+    "df[str Series of names]": lambda m: _e100_shown(_e100_frame(m)[m.Series(["v", "k"])]),
+    "loc mask col": lambda m: _e100_shown(_e100_frame(m).loc[_e100_frame(m)["k"] > 2, "v"]),
+    "loc mask text col": lambda m: _e100_shown(_e100_frame(m).loc[_e100_frame(m)["k"] > 2, "s"]),
+    "loc mask cols": lambda m: _e100_shown(_e100_frame(m).loc[_e100_frame(m)["k"] > 2, ["v", "s"]]),
+    "loc mask all": lambda m: _e100_shown(_e100_frame(m).loc[_e100_frame(m)["k"] > 2]),
+    "loc mask none": lambda m: _e100_shown(_e100_frame(m).loc[_e100_frame(m)["k"] > 100, "v"]),
+    "loc mask on labels": lambda m: _e100_shown(
+        _e100_frame(m).set_index(m.Index([10, 20, 30, 40])).loc[lambda d: d["k"] > 2, "v"]
+    ),
+    "loc callable col": lambda m: _e100_shown(_e100_frame(m).loc[lambda d: d["v"] > 1, "k"]),
+    "loc reordered mask": lambda m: _e100_shown(
+        _e100_frame(m).loc[m.Series([True, False, True, True], index=[3, 2, 1, 0]), "v"]
+    ),
+    # Negative: a missing column keeps pandas' KeyError.
+    "loc mask missing col": lambda m: _e100_shown(_e100_frame(m).loc[_e100_frame(m)["k"] > 2, "zz"]),
+    "range index from filter": lambda m: [repr(_e100_frame(m)[_e100_frame(m)["k"] > 2].index)],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E100_CASES))
+def test_everyday100_boolean_row_selection_like_pandas_sj5bn(case: str) -> None:
+    run = _E100_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
