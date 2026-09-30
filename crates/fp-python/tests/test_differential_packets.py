@@ -22520,3 +22520,47 @@ _E100_CASES = {
 def test_everyday100_boolean_row_selection_like_pandas_sj5bn(case: str) -> None:
     run = _E100_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-mf3tj: a list of numpy float64 scalars took the slow
+# conversion, and a ragged frame's error was fp's own words. The text cases
+# lock the ingest a contiguous text backing will have to match (it is
+# blocked on gap-kind bugs of that backing).
+def _e101_shown(series: Any) -> list:
+    return [str(series.dtype), series.tolist(), series.isna().tolist(), list(series.index)]
+
+
+_E101_CASES = {
+    "text list": lambda m: _e101_shown(m.Series(["a", "bb", "ccc"])),
+    "non-ascii": lambda m: _e101_shown(m.Series(["é", "日本", "a"])),
+    "empty strings": lambda m: _e101_shown(m.Series(["", "x", ""])),
+    "text and None": lambda m: _e101_shown(m.Series(["a", None])),
+    "text and nan": lambda m: _e101_shown(m.Series(["a", float("nan")])),
+    "text and int": lambda m: _e101_shown(m.Series(["a", 1])),
+    "lone surrogate": lambda m: _e101_shown(m.Series(["a", "\ud800"])),
+    "numpy float64 scalars": lambda m: _e101_shown(m.Series([np.float64(1.5), np.float64(np.nan)])),
+    # (A list of numpy float32 scalars' width is br-frankenpandas-mwuhp's.)
+    "unicode array": lambda m: _e101_shown(m.Series(np.array(["a", "bb", "é"]))),
+    "unicode array empty": lambda m: _e101_shown(m.Series(np.array([], dtype="<U1"))),
+    "text list index": lambda m: _e101_shown(m.Series(["a", "b"], index=[10, 20])),
+    "text list short index": lambda m: _e101_shown(m.Series(["a", "b"], index=[10])),
+    "frame text list": lambda m: [m.DataFrame({"a": ["x", "y"], "b": [1, 2]}).to_dict("list")],
+    "frame text list ragged": lambda m: [m.DataFrame({"b": [1, 2], "a": ["x"]}).to_dict("list")],
+    "frame tuple ragged": lambda m: [m.DataFrame({"b": [1, 2], "a": ("x",)}).to_dict("list")],
+    "frame categorical ragged": lambda m: [
+        m.DataFrame({"b": [1, 2], "a": m.Categorical(["x"])}).to_dict("list")
+    ],
+    "frame unicode array": lambda m: [m.DataFrame({"a": np.array(["x", "y"]), "b": [1.5, 2.5]}).dtypes.astype(str).tolist()],
+    # The contiguous column under the ops that read it.
+    "str.upper": lambda m: m.Series(["a", "bb"]).str.upper().tolist(),
+    "== text": lambda m: (m.Series(["a", "bb", "a"]) == "a").tolist(),
+    "value_counts": lambda m: [m.Series(["a", "bb", "a"]).value_counts().to_dict()],
+    "sort_values": lambda m: m.Series(["b", "a", "c"]).sort_values().tolist(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E101_CASES))
+def test_everyday101_text_and_float_scalar_ingest_like_pandas_mf3tj(case: str) -> None:
+    run = _E101_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

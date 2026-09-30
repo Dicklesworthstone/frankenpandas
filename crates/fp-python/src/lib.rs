@@ -6124,7 +6124,9 @@ fn py_to_scalar(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
     // a float or a str reached its extraction through a dozen failed ones,
     // raising and formatting a TypeError on the way (a million floats from a
     // list took ~0.3 s; br-frankenpandas-1ze1o). An int past int64 goes on.
-    if obj.is_exact_instance_of::<pyo3::types::PyFloat>() {
+    // A float subclass (numpy's float64 scalar) reads as its float, where the
+    // checks below led it too (a list of them; br-frankenpandas-mf3tj).
+    if obj.is_instance_of::<pyo3::types::PyFloat>() {
         let value = obj.extract::<f64>()?;
         return Ok(if value.is_nan() {
             Scalar::Null(fp_types::NullKind::NaN)
@@ -6600,7 +6602,7 @@ fn py_to_cell(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
     // conversion; fvsao.69). A float, str, bool or int skips the check,
     // which built its type's name as a new str (30% of a Series of a
     // million strings; br-frankenpandas-1ze1o).
-    let everyday = obj.is_exact_instance_of::<pyo3::types::PyFloat>()
+    let everyday = obj.is_instance_of::<pyo3::types::PyFloat>()
         || obj.is_exact_instance_of::<pyo3::types::PyString>()
         || obj.is_exact_instance_of::<pyo3::types::PyBool>()
         || obj.is_exact_instance_of::<pyo3::types::PyInt>();
@@ -37410,7 +37412,7 @@ impl PyDataFrame {
                         if let Some(nr) = detected_nrows {
                             if column.len() != nr {
                                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                                    "All columns must have the same length",
+                                    "All arrays must be of the same length",
                                 ));
                             }
                         } else {
@@ -37436,7 +37438,7 @@ impl PyDataFrame {
                         if let Some(nr) = detected_nrows {
                             if scalars.len() != nr {
                                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                                    "All columns must have the same length",
+                                    "All arrays must be of the same length",
                                 ));
                             }
                         } else {
@@ -37456,7 +37458,7 @@ impl PyDataFrame {
                         if let Some(nr) = detected_nrows {
                             if scalars.len() != nr {
                                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                                    "All columns must have the same length",
+                                    "All arrays must be of the same length",
                                 ));
                             }
                         } else {
