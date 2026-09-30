@@ -23103,3 +23103,61 @@ _E112_CASES = {
 def test_everyday112_narrow_numpy_scalar_list_like_pandas_mwuhp(case: str) -> None:
     run = _E112_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-xhogl: pandas' group kernels (groupby, resample, pivot_table
+# cells) sum with Kahan compensation and take var/std/sem by Welford; ten 0.1
+# summed to 0.9999999999999999, not 1.0.
+def _e113_frame(m: Any, keys: Any = None) -> Any:
+    keys = [1] * 10 + [2] * 3 if keys is None else keys
+    return m.DataFrame({"k": keys, "v": [0.1] * 10 + [1e16, 1.0, 1.0]})
+
+
+def _e113_wide(m: Any) -> Any:
+    rng = np.random.default_rng(5)
+    values = rng.normal(0, 1, 3000) * 10.0 ** rng.integers(-3, 12, 3000)
+    values[rng.random(3000) < 0.02] = np.nan
+    return m.DataFrame({"k": rng.integers(0, 20, 3000), "v": values})
+
+
+def _e113_hourly(m: Any) -> Any:
+    return m.Series([0.1] * 30, index=m.date_range("2024-01-01", periods=30, freq="h"))
+
+
+_E113_CASES = {
+    "sum": lambda m: _e113_frame(m).groupby("k")["v"].sum().tolist(),
+    "mean": lambda m: _e113_frame(m).groupby("k")["v"].mean().tolist(),
+    "var": lambda m: _e113_frame(m).groupby("k")["v"].var().tolist(),
+    "std": lambda m: _e113_frame(m).groupby("k")["v"].std().tolist(),
+    "sem": lambda m: _e113_frame(m).groupby("k")["v"].sem().tolist(),
+    "frame sum text keys": lambda m: _e113_frame(m, ["a"] * 10 + ["b"] * 3).groupby("k").sum().values.tolist(),
+    "frame var text keys": lambda m: _e113_frame(m, ["a"] * 10 + ["b"] * 3).groupby("k").var().values.tolist(),
+    "cumsum": lambda m: _e113_frame(m).groupby("k")["v"].cumsum().tolist(),
+    "transform sum": lambda m: _e113_frame(m).groupby("k")["v"].transform("sum").tolist(),
+    "transform std": lambda m: _e113_frame(m).groupby("k").transform("std").values.tolist(),
+    "agg list": lambda m: _e113_frame(m).groupby("k")["v"].agg(["sum", "mean", "var"]).values.tolist(),
+    "named agg": lambda m: _e113_frame(m).groupby("k").agg(t=("v", "sum"), s=("v", "std")).values.tolist(),
+    "wide sum": lambda m: _e113_wide(m).groupby("k")["v"].sum().tolist(),
+    "wide mean": lambda m: _e113_wide(m).groupby("k").mean().values.tolist(),
+    "wide var": lambda m: _e113_wide(m).groupby("k")["v"].var().tolist(),
+    "wide cumsum": lambda m: _e113_wide(m).groupby("k")["v"].cumsum().tolist(),
+    "resample sum": lambda m: _e113_hourly(m).resample("D").sum().tolist(),
+    "resample mean": lambda m: _e113_hourly(m).resample("D").mean().tolist(),
+    "resample var": lambda m: _e113_hourly(m).resample("D").var().tolist(),
+    "pivot sum": lambda m: _e113_frame(m).assign(c=0).pivot_table(index="k", columns="c", values="v", aggfunc="sum").values.tolist(),
+    "pivot var text keys": lambda m: _e113_frame(m, ["a"] * 10 + ["b"] * 3).assign(c="x").pivot_table(index="k", columns="c", values="v", aggfunc="var").values.tolist(),
+    # Negatives: a Series reduction is numpy's fold, not a group kernel;
+    # integer sums stay exact; inf survives the compensation, inf - inf is NaN;
+    # an all-NaN group sums to 0.0.
+    "Series.sum": lambda m: [m.Series([1e16, 1.0, 1.0]).sum()],
+    "int sum": lambda m: m.DataFrame({"k": [1, 1], "v": [2**53, 1]}).groupby("k")["v"].sum().tolist(),
+    "inf": lambda m: m.DataFrame({"k": [1, 1, 1, 2, 2], "v": [1.0, np.inf, 2.0, np.inf, -np.inf]}).groupby("k")["v"].sum().tolist(),
+    "all nan": lambda m: m.DataFrame({"k": [1, 1], "v": [np.nan, np.nan]}).groupby("k")["v"].sum().tolist(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E113_CASES))
+def test_everyday113_group_kernels_add_like_pandas_xhogl(case: str) -> None:
+    run = _E113_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
