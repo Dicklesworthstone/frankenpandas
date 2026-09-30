@@ -60213,14 +60213,14 @@ impl DatetimeAccessor<'_> {
     /// Matches `pd.Series.dt.floor(freq)`. Supported frequencies:
     /// "D", "h"/"H", "min"/"T", "s"/"S", "ms", "us", "ns".
     pub fn floor(&self, freq: &str) -> Result<Series, FrameError> {
-        self.round_to_freq(freq, DtRoundMode::Floor)
+        self.floor_with_options(freq, TzLocalizeOptions::default())
     }
 
     /// Round each datetime up (ceil) to the given frequency.
     ///
     /// Matches `pd.Series.dt.ceil(freq)`. Same frequencies as `floor`.
     pub fn ceil(&self, freq: &str) -> Result<Series, FrameError> {
-        self.round_to_freq(freq, DtRoundMode::Ceil)
+        self.ceil_with_options(freq, TzLocalizeOptions::default())
     }
 
     /// Round each datetime to the nearest given frequency.
@@ -60228,7 +60228,38 @@ impl DatetimeAccessor<'_> {
     /// Matches `pd.Series.dt.round(freq)`. Ties round half-to-even on the
     /// frequency-unit count, like pandas. Same frequencies as `floor`.
     pub fn round(&self, freq: &str) -> Result<Series, FrameError> {
-        self.round_to_freq(freq, DtRoundMode::Round)
+        self.round_with_options(freq, TzLocalizeOptions::default())
+    }
+
+    /// `floor` with pandas' `ambiguous` / `nonexistent`: a tz-aware
+    /// column's rounded wall clock goes back into its zone under them (a
+    /// DST gap or repeat was always an error; br-frankenpandas-cnpw1).
+    pub fn floor_with_options(
+        &self,
+        freq: &str,
+        options: TzLocalizeOptions,
+    ) -> Result<Series, FrameError> {
+        self.round_to_freq(freq, DtRoundMode::Floor, options)
+    }
+
+    /// `ceil` with pandas' `ambiguous` / `nonexistent` (see
+    /// [`Self::floor_with_options`]).
+    pub fn ceil_with_options(
+        &self,
+        freq: &str,
+        options: TzLocalizeOptions,
+    ) -> Result<Series, FrameError> {
+        self.round_to_freq(freq, DtRoundMode::Ceil, options)
+    }
+
+    /// `round` with pandas' `ambiguous` / `nonexistent` (see
+    /// [`Self::floor_with_options`]).
+    pub fn round_with_options(
+        &self,
+        freq: &str,
+        options: TzLocalizeOptions,
+    ) -> Result<Series, FrameError> {
+        self.round_to_freq(freq, DtRoundMode::Round, options)
     }
 
     /// Internal: floor/ceil/round each datetime to `freq` by working in
@@ -60236,15 +60267,22 @@ impl DatetimeAccessor<'_> {
     /// back. Operating on the i64-ns value rather than the second-granular
     /// string repr fixes sub-second frequencies (ms/us/ns) and exact half-unit
     /// ties at any frequency. Per br-frankenpandas-cm5fy.
-    fn round_to_freq(&self, freq: &str, mode: DtRoundMode) -> Result<Series, FrameError> {
+    fn round_to_freq(
+        &self,
+        freq: &str,
+        mode: DtRoundMode,
+        options: TzLocalizeOptions,
+    ) -> Result<Series, FrameError> {
         use fp_types::{Timedelta, Timestamp};
         // A tz-aware column rounds its wall clock and the result goes back
-        // into the zone, as pandas (it rounded the UTC clock and dropped the
-        // zone).
+        // into the zone under `options`, as pandas (it rounded the UTC clock
+        // and dropped the zone).
         if let Some(zone) = self.series.column().timezone().map(str::to_owned) {
             let wall = self.tz_localize(None)?;
-            let rounded = wall.dt().round_to_freq(freq, mode)?;
-            return rounded.dt().tz_localize(Some(&zone));
+            let rounded = wall
+                .dt()
+                .round_to_freq(freq, mode, TzLocalizeOptions::default())?;
+            return rounded.dt().tz_localize_with_options(Some(&zone), options);
         }
         let freq_ns = resolve_fixed_frequency(freq)?;
         // A duration column rounds its durations, pandas' TimedeltaProperties
@@ -233450,6 +233488,44 @@ mod dt_timezone_census_gmp9c {
             first(&naive.dt().round("H").expect("round")),
             "2024-01-15 10:00:00"
         );
+    }
+
+    /// A zoned column floored into a DST gap goes back into its zone under
+    /// pandas' `nonexistent` (live pandas 2.2.3: 2020-03-08 03:30 US/Central
+    /// floored to 2h is 03:00-05:00 with shift_forward, NonExistentTimeError
+    /// by default); it was always the error (br-frankenpandas-cnpw1).
+    #[test]
+    fn zone_aware_floor_reads_nonexistent_like_pandas_cnpw1() {
+        use super::{TzAmbiguousPolicy, TzLocalizeOptions, TzNonexistentPolicy};
+        // 2020-03-08 03:30 wall clock (naive nanoseconds).
+        let naive = Series::from_values(
+            "ts",
+            vec![0_i64.into()],
+            vec![Scalar::Datetime64(1_583_638_200_000_000_000)],
+        )
+        .expect("naive series");
+        let zoned = naive
+            .dt()
+            .tz_localize(Some("US/Central"))
+            .expect("03:30 CDT exists");
+        let shifted = zoned
+            .dt()
+            .floor_with_options(
+                "2h",
+                TzLocalizeOptions {
+                    ambiguous: TzAmbiguousPolicy::Raise,
+                    nonexistent: TzNonexistentPolicy::ShiftForward,
+                },
+            )
+            .expect("shift_forward places the gap's 02:00");
+        // 03:00 CDT is 08:00 UTC.
+        assert_eq!(
+            shifted.values()[0],
+            Scalar::Datetime64(1_583_654_400_000_000_000)
+        );
+        assert_eq!(shifted.column().timezone(), Some("US/Central"));
+        // NEGATIVE: pandas' default nonexistent='raise' still refuses the gap.
+        assert!(zoned.dt().floor("2h").is_err());
     }
 }
 

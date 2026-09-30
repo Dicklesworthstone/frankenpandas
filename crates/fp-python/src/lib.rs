@@ -18622,13 +18622,117 @@ impl PyPeriodIndex {
         self.inner.values().first().map(|p| p.freq.alias())
     }
 
+    /// pandas' keyword-only `from_fields(*, year=, quarter=, month=, day=,
+    /// hour=, minute=, second=, freq=)`: each field a list-like or one value
+    /// for every period (lists of other lengths are pandas' ValueError);
+    /// with `quarter`, quarterly periods (freq 'Q' unless given, which must
+    /// be quarterly), else the periods of `freq` holding each year / month /
+    /// day (1) / hour / minute / second (0). It returned an empty
+    /// PeriodIndex, then refused (br-frankenpandas-cnpw1).
     #[staticmethod]
-    /// pandas' keyword-only `from_fields(*, year=, quarter=, ...)`. This
-    /// returned an empty PeriodIndex whatever fields it was given.
-    #[pyo3(signature = (**fields))]
-    fn from_fields(fields: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        let _ = fields;
-        Err(not_implemented("PeriodIndex.from_fields"))
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (*, year=None, quarter=None, month=None, day=None, hour=None, minute=None, second=None, freq=None))]
+    fn from_fields(
+        py: Python<'_>,
+        year: Option<&Bound<'_, PyAny>>,
+        quarter: Option<&Bound<'_, PyAny>>,
+        month: Option<&Bound<'_, PyAny>>,
+        day: Option<&Bound<'_, PyAny>>,
+        hour: Option<&Bound<'_, PyAny>>,
+        minute: Option<&Bound<'_, PyAny>>,
+        second: Option<&Bound<'_, PyAny>>,
+        freq: Option<&str>,
+    ) -> PyResult<Self> {
+        let fields = [year, quarter, month, day, hour, minute, second];
+        let mut length = None;
+        for field in fields.iter().flatten() {
+            if field.is_instance_of::<pyo3::types::PyString>() || !field.hasattr("__len__")? {
+                continue;
+            }
+            let len = field.len()?;
+            match length {
+                Some(known) if known != len => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "Mismatched Period array lengths",
+                    ));
+                }
+                _ => length = Some(len),
+            }
+        }
+        let length = length.unwrap_or(1);
+        let missing = || PyErr::new::<pyo3::exceptions::PyTypeError, _>("an integer is required");
+        let values = |field: Option<&Bound<'_, PyAny>>, default: Option<i64>| match field {
+            Some(field) if field.hasattr("__len__")? => field.extract::<Vec<i64>>(),
+            Some(field) => Ok(vec![field.extract::<i64>()?; length]),
+            None => default.map(|value| vec![value; length]).ok_or_else(missing),
+        };
+        let invalid = |freq: Option<&str>| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Invalid frequency: {}",
+                freq.unwrap_or("None")
+            ))
+        };
+        let (period_freq, starts): (PeriodFreq, Vec<[i64; 7]>) = if quarter.is_some() {
+            let period_freq =
+                PeriodFreq::parse(freq.unwrap_or("Q")).ok_or_else(|| invalid(freq))?;
+            if period_freq != PeriodFreq::Quarterly {
+                return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                    "base must equal FR_QTR",
+                ));
+            }
+            let years = values(year, None)?;
+            let quarters = values(quarter, None)?;
+            let starts = years
+                .into_iter()
+                .zip(quarters)
+                .map(|(year, quarter)| {
+                    if (1..=4).contains(&quarter) {
+                        Ok([year, (quarter - 1) * 3 + 1, 1, 0, 0, 0, 0])
+                    } else {
+                        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                            "Quarter must be 1 <= q <= 4",
+                        ))
+                    }
+                })
+                .collect::<PyResult<_>>()?;
+            (period_freq, starts)
+        } else {
+            let period_freq = freq
+                .and_then(PeriodFreq::parse)
+                .ok_or_else(|| invalid(freq))?;
+            let columns = [
+                values(year, None)?,
+                values(month, None)?,
+                values(day, Some(1))?,
+                values(hour, Some(0))?,
+                values(minute, Some(0))?,
+                values(second, Some(0))?,
+            ];
+            let starts = (0..length)
+                .map(|at| {
+                    [
+                        columns[0][at],
+                        columns[1][at],
+                        columns[2][at],
+                        columns[3][at],
+                        columns[4][at],
+                        columns[5][at],
+                        0,
+                    ]
+                })
+                .collect();
+            (period_freq, starts)
+        };
+        let periods = starts
+            .into_iter()
+            .map(|start| {
+                let nanos = civil_nanos(py, start, 0)?;
+                fp_index::datetime_nanos_to_period(nanos, period_freq).map_err(index_error_to_py)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(Self {
+            inner: PeriodIndex::new(periods),
+        })
     }
 
     #[staticmethod]
@@ -39090,13 +39194,16 @@ impl PyDataFrame {
     }
 
     /// Reset the index to a default integer range, returning a new DataFrame.
-    /// `allow_duplicates` lets an index column repeat a column's label.
+    /// `allow_duplicates` lets an index column repeat a column's label;
+    /// `col_level` / `col_fill` label the new columns of MultiIndex columns
+    /// (see [`reset_index_column_levels`]; col_fill was discarded and
+    /// col_level refused, br-frankenpandas-cnpw1).
     #[pyo3(signature = (
         level = None,
         drop = false,
         inplace = false,
-        col_level = 0,
-        col_fill = None,
+        col_level = None,
+        col_fill = Passed(None),
         allow_duplicates = false,
         names = None
     ))]
@@ -39106,19 +39213,21 @@ impl PyDataFrame {
         level: Option<&Bound<'_, PyAny>>,
         drop: bool,
         inplace: bool,
-        col_level: usize,
-        col_fill: Option<&Bound<'_, PyAny>>,
+        col_level: Option<&Bound<'_, PyAny>>,
+        col_fill: Passed<'_>,
         allow_duplicates: bool,
         names: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Option<PyDataFrame>> {
-        // Columns are single-level, where pandas never reads col_fill.
-        let _ = col_fill;
+        let columns_before = self.inner.num_columns();
+        let relabel = |frame: DataFrame| {
+            let inserted = frame.num_columns().saturating_sub(columns_before);
+            reset_index_column_levels(frame, inserted, col_level, col_fill.0.as_ref())
+        };
         // reset_index(level=) over a row MultiIndex: those levels become the
         // leading columns (dropped with drop=True), the rest stay the index
         // (fvsao.36; it raised NotImplementedError).
         if let Some(level) = level.filter(|level| !level.is_none())
             && let Some(multi) = self.inner.row_multiindex().cloned()
-            && col_level == 0
             && names.is_none_or(|names| names.is_none())
         {
             // pandas moves the levels in index order, whatever order named.
@@ -39161,7 +39270,9 @@ impl PyDataFrame {
                 }
                 return Ok(frame_inplace(
                     &mut self.inner,
-                    PyDataFrame { inner: out },
+                    PyDataFrame {
+                        inner: relabel(out)?,
+                    },
                     inplace,
                 ));
             }
@@ -39169,10 +39280,7 @@ impl PyDataFrame {
         let level_is_default = level.is_none_or(|l| {
             matches!(l.extract::<i64>(), Ok(0)) || self.inner.row_multiindex().is_some()
         });
-        unsupported_params(
-            "DataFrame.reset_index",
-            &[("level", level_is_default), ("col_level", col_level == 0)],
-        )?;
+        unsupported_params("DataFrame.reset_index", &[("level", level_is_default)])?;
         let reset = (|| -> PyResult<PyDataFrame> {
             let mut result = self
                 .inner
@@ -39201,7 +39309,9 @@ impl PyDataFrame {
                     }
                 }
             }
-            Ok(PyDataFrame { inner: result })
+            Ok(PyDataFrame {
+                inner: relabel(result)?,
+            })
         })()?;
         Ok(frame_inplace(&mut self.inner, reset, inplace))
     }
@@ -49999,6 +50109,58 @@ fn level_reindex_positions(
         .collect())
 }
 
+/// pandas' `reset_index(col_level=, col_fill=)` over MultiIndex columns:
+/// each of the `inserted` leading columns (named at level 0) is labelled
+/// its name at `col_level` (a position or a level name; 0 when not given)
+/// and `col_fill` at the other levels - '' when not given, the name itself
+/// for an explicit None. Flat columns read neither, as pandas.
+fn reset_index_column_levels(
+    frame: DataFrame,
+    inserted: usize,
+    col_level: Option<&Bound<'_, PyAny>>,
+    col_fill: Option<&Bound<'_, PyAny>>,
+) -> PyResult<DataFrame> {
+    let Some(multi) = frame.column_multiindex().cloned() else {
+        return Ok(frame);
+    };
+    if inserted == 0 {
+        return Ok(frame);
+    }
+    let level = match col_level.filter(|level| !level.is_none()) {
+        Some(level) => multiindex_level_position(&multi, level)?,
+        None => 0,
+    };
+    let fill = match col_fill {
+        None => Some(IndexLabel::Utf8(String::new())),
+        Some(fill) if fill.is_none() => None,
+        Some(fill) => Some(py_to_index_label(fill)?),
+    };
+    let mut arrays = (0..multi.nlevels())
+        .map(|position| {
+            multi
+                .get_level_values(position)
+                .map(|values| values.labels().to_vec())
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(index_error_to_py)?;
+    for column in 0..inserted.min(multi.len()) {
+        let name = arrays[0][column].clone();
+        for (position, labels) in arrays.iter_mut().enumerate() {
+            labels[column] = if position == level {
+                name.clone()
+            } else {
+                fill.clone().unwrap_or_else(|| name.clone())
+            };
+        }
+    }
+    let relabelled = fp_index::MultiIndex::from_arrays(arrays)
+        .map_err(index_error_to_py)?
+        .set_names(multi.names().to_vec());
+    frame
+        .with_columns_multiindex(Some(relabelled))
+        .map_err(frame_error_to_py)
+}
+
 /// The positions of `level` - one level or a list of them - in `multi`, in
 /// the order given, without repeats.
 fn multiindex_level_positions(
@@ -52647,8 +52809,10 @@ impl PySeriesDatetimeAccessor {
             .map(|inner| PySeries { inner })
             .map_err(frame_error_to_py)
     }
-    // `ambiguous`/`nonexistent` only decide DST edges of a tz-aware column;
-    // the columns reached here are tz-naive, so pandas' defaults hold.
+    /// pandas' `dt.floor(freq, ambiguous=, nonexistent=)`: a tz-aware
+    /// column's floored wall clock goes back into its zone under them, as
+    /// `tz_localize` reads them (they were discarded: a DST gap raised where
+    /// pandas shifts, br-frankenpandas-cnpw1).
     #[pyo3(signature = (freq, ambiguous=None, nonexistent=None))]
     fn floor(
         &self,
@@ -52656,9 +52820,10 @@ impl PySeriesDatetimeAccessor {
         ambiguous: Option<&Bound<'_, PyAny>>,
         nonexistent: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        let _ = (ambiguous, nonexistent);
-        self.wrap(|dt| dt.floor(freq))
+        let options = self.rounding_options(ambiguous, nonexistent)?;
+        self.wrap(|dt| dt.floor_with_options(freq, options))
     }
+    /// pandas' `dt.ceil(freq, ambiguous=, nonexistent=)` (see `floor`).
     #[pyo3(signature = (freq, ambiguous=None, nonexistent=None))]
     fn ceil(
         &self,
@@ -52666,9 +52831,10 @@ impl PySeriesDatetimeAccessor {
         ambiguous: Option<&Bound<'_, PyAny>>,
         nonexistent: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        let _ = (ambiguous, nonexistent);
-        self.wrap(|dt| dt.ceil(freq))
+        let options = self.rounding_options(ambiguous, nonexistent)?;
+        self.wrap(|dt| dt.ceil_with_options(freq, options))
     }
+    /// pandas' `dt.round(freq, ambiguous=, nonexistent=)` (see `floor`).
     #[pyo3(signature = (freq, ambiguous=None, nonexistent=None))]
     fn round(
         &self,
@@ -52676,8 +52842,8 @@ impl PySeriesDatetimeAccessor {
         ambiguous: Option<&Bound<'_, PyAny>>,
         nonexistent: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        let _ = (ambiguous, nonexistent);
-        self.wrap(|dt| dt.round(freq))
+        let options = self.rounding_options(ambiguous, nonexistent)?;
+        self.wrap(|dt| dt.round_with_options(freq, options))
     }
 }
 
@@ -52748,6 +52914,21 @@ impl PySeriesDatetimeAccessor {
         op(&self.series.dt())
             .map(|inner| PySeries { inner })
             .map_err(frame_error_to_py)
+    }
+
+    /// floor / ceil / round's `ambiguous` / `nonexistent` as tz_localize
+    /// reads them ([`tz_localize_options`]); a tz-aware column's ambiguous
+    /// mask holds one per value (a naive column never localizes).
+    fn rounding_options(
+        &self,
+        ambiguous: Option<&Bound<'_, PyAny>>,
+        nonexistent: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<fp_frame::TzLocalizeOptions> {
+        let options = tz_localize_options(ambiguous, nonexistent)?;
+        if self.series.column().timezone().is_some() {
+            check_ambiguous_mask(&options, self.series.len())?;
+        }
+        Ok(options)
     }
 }
 
@@ -53805,6 +53986,48 @@ fn window_agg_list_frame_input<'a>(
         .map_err(|_| PyErr::new::<DataError, _>("No numeric types to aggregate"))
 }
 
+/// pandas' window `aggregate(func, *args, **kwargs)` given extra arguments
+/// (None without any, where the name / list / dict aggregation runs): a
+/// name is that method of `window` called with them, a callable - a numpy
+/// reduction included - `apply(func, raw=False, args=, kwargs=)`, as
+/// pandas' ResamplerWindowApply. A list or dict with extra arguments is
+/// refused. They were refused as unexpected (br-frankenpandas-cnpw1).
+fn window_agg_with_args(
+    window: &Bound<'_, PyAny>,
+    kind: &str,
+    func: &Bound<'_, PyAny>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if args.is_empty() && kwargs.is_none_or(|kwargs| kwargs.is_empty()) {
+        return Ok(None);
+    }
+    if let Ok(name) = func.extract::<String>() {
+        let Ok(method) = window.getattr(name.as_str()) else {
+            return Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                format!("'{name}' is not a valid function for '{kind}' object"),
+            ));
+        };
+        return method.call(args, kwargs).map(|out| Some(out.unbind()));
+    }
+    if func.is_callable() {
+        let py = window.py();
+        let options = PyDict::new(py);
+        options.set_item("raw", false)?;
+        options.set_item("args", args)?;
+        match kwargs {
+            Some(kwargs) => options.set_item("kwargs", kwargs)?,
+            None => options.set_item("kwargs", PyDict::new(py))?,
+        }
+        return window
+            .call_method("apply", (func,), Some(&options))
+            .map(|out| Some(out.unbind()));
+    }
+    Err(not_implemented(&format!(
+        "{kind}.agg of a list or dict with extra arguments"
+    )))
+}
+
 /// pandas' window `agg({column: name})` over a frame: each named column its
 /// own aggregation, in the dict's order, as a frame (it raised TypeError
 /// 'func must be a string or list of strings'). `agg_one` runs one name
@@ -54200,6 +54423,75 @@ fn datetime_like_labels(index: &Index) -> bool {
 impl PyRolling {
     fn closed(&self) -> IntervalClosed {
         self.closed.unwrap_or(IntervalClosed::Right)
+    }
+
+    /// pandas' `Rolling.agg` without extra arguments: a name (or a list of
+    /// them) is that aggregation, a `_cython_table` callable its name, any
+    /// other callable `apply(func, raw=False)`; callables raised (fvsao.7).
+    /// Names run over any window (a time-based one was refused); a callable
+    /// over count windows; a frame's `{column: name}` column by column
+    /// ([`window_agg_dict`]).
+    fn agg_func(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let (Ok(spec), Some(df)) = (func.cast::<PyDict>(), &self.dataframe) {
+            let res = window_agg_dict(py, df, spec, self.on.as_deref(), |sub, f| {
+                self.with_frame(sub).agg_func(py, f)
+            })?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        if agg_spec_has_callable(func) {
+            self.require_count_window("agg")?;
+            return match named_agg_spec(func, "Rolling")? {
+                Some(named) => self.agg_func(py, &named),
+                None if func.is_callable() => self.apply(py, func, false, None, None, None, None),
+                None => Err(not_implemented(
+                    "Rolling.agg with a list holding a callable pandas runs per window",
+                )),
+            };
+        }
+        if let Ok(func_name) = func.extract::<String>() {
+            match func_name.as_str() {
+                "sum" => self.sum(py, false, None, None),
+                "mean" => self.mean(py, false, None, None),
+                "min" => self.min(py, false, None, None),
+                "max" => self.max(py, false, None, None),
+                "std" => self.std(py, 1, false, None, None),
+                "var" => self.var(py, 1, false, None, None),
+                "median" => self.median(py, false, None, None),
+                "count" => self.count(py, false),
+                "sem" => self.sem(py, 1, false),
+                "skew" => self.skew(py, false),
+                "kurt" | "kurtosis" => self.kurt(py, false),
+                other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Unsupported rolling agg function '{other}'"
+                ))),
+            }
+        } else if let Ok(list) = func.extract::<Vec<String>>() {
+            let str_slices: Vec<&str> = list.iter().map(|s| s.as_str()).collect();
+            if let Some(ref s) = self.series {
+                let s = window_series_input(s, "Rolling", "agg", false, false)?;
+                let res = self
+                    .series_window(&s)?
+                    .agg(&str_slices)
+                    .map_err(frame_error_to_py)?;
+                return self.frame_out(py, res);
+            }
+            if let Some(ref df) = self.dataframe {
+                let df = window_agg_list_frame_input(df, self.on.as_deref())?;
+                let res = self
+                    .frame_window(&df)?
+                    .agg(&str_slices)
+                    .map_err(frame_error_to_py)?;
+                let res = func_columns(res, &df, &str_slices)?;
+                return self.frame_out(py, res);
+            }
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Empty rolling object",
+            ))
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "func must be a string or list of strings",
+            ))
+        }
     }
 
     /// These windows over another frame (a dict agg's column and `on`).
@@ -55391,20 +55683,25 @@ impl PyWindow {
     }
 
     /// pandas' `agg`: a name (sum / mean / var / std) or a list of them,
-    /// one column each.
+    /// one column each; extra arguments go to the named method
+    /// ([`window_agg_with_args`]; they were discarded,
+    /// br-frankenpandas-cnpw1).
     #[pyo3(signature = (func, *args, **kwargs))]
     fn agg(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         func: &Bound<'_, PyAny>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = args;
+        if let Some(out) = window_agg_with_args(slf.as_any(), "Window", func, args, kwargs)? {
+            return Ok(out);
+        }
+        let py = slf.py();
         if let Ok(name) = func.extract::<String>() {
+            let this = slf.borrow();
             return match name.as_str() {
-                "sum" | "mean" => self.run(py, &name, 0, false, kwargs),
-                "var" | "std" => self.run(py, &name, 1, false, kwargs),
+                "sum" | "mean" => this.run(py, &name, 0, false, None),
+                "var" | "std" => this.run(py, &name, 1, false, None),
                 other => Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
                     format!("'Window' object has no attribute '{other}'"),
                 )),
@@ -55414,7 +55711,7 @@ impl PyWindow {
             let mut results = Vec::with_capacity(names.len());
             for name in &names {
                 let name = pyo3::types::PyString::new(py, name);
-                results.push(self.agg(py, name.as_any(), args, kwargs)?.into_bound(py));
+                results.push(Self::agg(slf, name.as_any(), args, kwargs)?.into_bound(py));
             }
             return Ok(concat_side_by_side(py, results, names)?.unbind());
         }
@@ -55423,13 +55720,12 @@ impl PyWindow {
 
     #[pyo3(signature = (func, *args, **kwargs))]
     fn aggregate(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         func: &Bound<'_, PyAny>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        self.agg(py, func, args, kwargs)
+        Self::agg(slf, func, args, kwargs)
     }
 }
 
@@ -55748,77 +56044,30 @@ impl PyRolling {
         self.bivariate(py, other, pairwise, ddof, numeric_only, false)
     }
 
-    /// pandas' `Rolling.agg`: a name (or a list of them) is that
-    /// aggregation, a `_cython_table` callable its name, any other callable
-    /// `apply(func, raw=False)`; callables raised (fvsao.7). Names run
-    /// over any window (a time-based one was refused); a callable over
-    /// count windows; a frame's `{column: name}` column by column
-    /// ([`window_agg_dict`]).
-    pub fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        if let (Ok(spec), Some(df)) = (func.cast::<PyDict>(), &self.dataframe) {
-            let res = window_agg_dict(py, df, spec, self.on.as_deref(), |sub, f| {
-                self.with_frame(sub).agg(py, f)
-            })?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+    /// pandas' `Rolling.agg(func, *args, **kwargs)`: extra arguments go to
+    /// the named method or the callable ([`window_agg_with_args`]), else
+    /// [`PyRolling::agg_func`].
+    #[pyo3(signature = (func, *args, **kwargs))]
+    pub fn agg(
+        slf: &Bound<'_, Self>,
+        func: &Bound<'_, PyAny>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        if let Some(out) = window_agg_with_args(slf.as_any(), "Rolling", func, args, kwargs)? {
+            return Ok(out);
         }
-        if agg_spec_has_callable(func) {
-            self.require_count_window("agg")?;
-            return match named_agg_spec(func, "Rolling")? {
-                Some(named) => self.agg(py, &named),
-                None if func.is_callable() => self.apply(py, func, false, None, None, None, None),
-                None => Err(not_implemented(
-                    "Rolling.agg with a list holding a callable pandas runs per window",
-                )),
-            };
-        }
-        if let Ok(func_name) = func.extract::<String>() {
-            match func_name.as_str() {
-                "sum" => self.sum(py, false, None, None),
-                "mean" => self.mean(py, false, None, None),
-                "min" => self.min(py, false, None, None),
-                "max" => self.max(py, false, None, None),
-                "std" => self.std(py, 1, false, None, None),
-                "var" => self.var(py, 1, false, None, None),
-                "median" => self.median(py, false, None, None),
-                "count" => self.count(py, false),
-                "sem" => self.sem(py, 1, false),
-                "skew" => self.skew(py, false),
-                "kurt" | "kurtosis" => self.kurt(py, false),
-                other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Unsupported rolling agg function '{other}'"
-                ))),
-            }
-        } else if let Ok(list) = func.extract::<Vec<String>>() {
-            let str_slices: Vec<&str> = list.iter().map(|s| s.as_str()).collect();
-            if let Some(ref s) = self.series {
-                let s = window_series_input(s, "Rolling", "agg", false, false)?;
-                let res = self
-                    .series_window(&s)?
-                    .agg(&str_slices)
-                    .map_err(frame_error_to_py)?;
-                return self.frame_out(py, res);
-            }
-            if let Some(ref df) = self.dataframe {
-                let df = window_agg_list_frame_input(df, self.on.as_deref())?;
-                let res = self
-                    .frame_window(&df)?
-                    .agg(&str_slices)
-                    .map_err(frame_error_to_py)?;
-                let res = func_columns(res, &df, &str_slices)?;
-                return self.frame_out(py, res);
-            }
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Empty rolling object",
-            ))
-        } else {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "func must be a string or list of strings",
-            ))
-        }
+        slf.borrow().agg_func(slf.py(), func)
     }
 
-    pub fn aggregate(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.agg(py, func)
+    #[pyo3(signature = (func, *args, **kwargs))]
+    pub fn aggregate(
+        slf: &Bound<'_, Self>,
+        func: &Bound<'_, PyAny>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        Self::agg(slf, func, args, kwargs)
     }
 
     #[getter]
@@ -55851,7 +56100,7 @@ impl PyRolling {
         )?;
         self.require_count_window("apply")?;
         if func.extract::<String>().is_ok() {
-            return self.agg(py, func);
+            return self.agg_func(py, func);
         }
         if func.is_callable() {
             if let Some(ref s) = self.series {
@@ -55946,6 +56195,80 @@ pub struct PyExpanding {
 }
 
 impl PyExpanding {
+    /// pandas' `Expanding.agg` without extra arguments: as
+    /// [`PyRolling::agg_func`] (callables raised; fvsao.7), a frame's
+    /// `{column: name}` too.
+    fn agg_func(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let (Ok(spec), Some(df)) = (func.cast::<PyDict>(), &self.dataframe) {
+            if self.across {
+                return Err(not_implemented("expanding(axis=1).agg of a dict"));
+            }
+            let res = window_agg_dict(py, df, spec, None, |sub, f| {
+                PyExpanding {
+                    series: None,
+                    dataframe: Some(sub),
+                    min_periods: self.min_periods,
+                    across: false,
+                }
+                .agg_func(py, f)
+            })?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        if agg_spec_has_callable(func) {
+            return match named_agg_spec(func, "Expanding")? {
+                Some(named) => self.agg_func(py, &named),
+                None if func.is_callable() => self.apply(py, func, false, None, None, None, None),
+                None => Err(not_implemented(
+                    "Expanding.agg with a list holding a callable pandas runs per window",
+                )),
+            };
+        }
+        if let Ok(func_name) = func.extract::<String>() {
+            match func_name.as_str() {
+                "sum" => self.sum(py, false, None, None),
+                "mean" => self.mean(py, false, None, None),
+                "min" => self.min(py, false, None, None),
+                "max" => self.max(py, false, None, None),
+                "std" => self.std(py, 1, false, None, None),
+                "var" => self.var(py, 1, false, None, None),
+                "median" => self.median(py, false, None, None),
+                "count" => self.count(py, false),
+                "sem" => self.sem(py, 1, false),
+                "skew" => self.skew(py, false),
+                "kurt" | "kurtosis" => self.kurt(py, false),
+                other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Unsupported expanding agg function '{other}'"
+                ))),
+            }
+        } else if let Ok(list) = func.extract::<Vec<String>>() {
+            let str_slices: Vec<&str> = list.iter().map(|s| s.as_str()).collect();
+            if let Some(ref s) = self.series {
+                let s = window_series_input(s, "Expanding", "agg", false, false)?;
+                let res = s
+                    .expanding(self.min_periods)
+                    .agg(&str_slices)
+                    .map_err(frame_error_to_py)?;
+                return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+            }
+            if let Some(ref df) = self.dataframe {
+                let df = window_agg_list_frame_input(df, None)?;
+                let res = df
+                    .expanding(self.min_periods)
+                    .agg(&str_slices)
+                    .map_err(frame_error_to_py)?;
+                let res = func_columns(res, &df, &str_slices)?;
+                return self.frame_out(py, res);
+            }
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Empty expanding object",
+            ))
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "func must be a string or list of strings",
+            ))
+        }
+    }
+
     /// One aggregation over the growing windows as pandas runs it (see
     /// [`PyRolling::run`]).
     fn run(
@@ -56313,81 +56636,30 @@ impl PyExpanding {
         self.bivariate(py, other, pairwise, ddof, numeric_only, false)
     }
 
-    /// pandas' `Expanding.agg`: as [`PyRolling::agg`] (callables raised;
-    /// fvsao.7), a frame's `{column: name}` too.
-    pub fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        if let (Ok(spec), Some(df)) = (func.cast::<PyDict>(), &self.dataframe) {
-            if self.across {
-                return Err(not_implemented("expanding(axis=1).agg of a dict"));
-            }
-            let res = window_agg_dict(py, df, spec, None, |sub, f| {
-                PyExpanding {
-                    series: None,
-                    dataframe: Some(sub),
-                    min_periods: self.min_periods,
-                    across: false,
-                }
-                .agg(py, f)
-            })?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+    /// pandas' `Expanding.agg(func, *args, **kwargs)`: extra arguments go
+    /// to the named method or the callable ([`window_agg_with_args`]), else
+    /// [`PyExpanding::agg_func`].
+    #[pyo3(signature = (func, *args, **kwargs))]
+    pub fn agg(
+        slf: &Bound<'_, Self>,
+        func: &Bound<'_, PyAny>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        if let Some(out) = window_agg_with_args(slf.as_any(), "Expanding", func, args, kwargs)? {
+            return Ok(out);
         }
-        if agg_spec_has_callable(func) {
-            return match named_agg_spec(func, "Expanding")? {
-                Some(named) => self.agg(py, &named),
-                None if func.is_callable() => self.apply(py, func, false, None, None, None, None),
-                None => Err(not_implemented(
-                    "Expanding.agg with a list holding a callable pandas runs per window",
-                )),
-            };
-        }
-        if let Ok(func_name) = func.extract::<String>() {
-            match func_name.as_str() {
-                "sum" => self.sum(py, false, None, None),
-                "mean" => self.mean(py, false, None, None),
-                "min" => self.min(py, false, None, None),
-                "max" => self.max(py, false, None, None),
-                "std" => self.std(py, 1, false, None, None),
-                "var" => self.var(py, 1, false, None, None),
-                "median" => self.median(py, false, None, None),
-                "count" => self.count(py, false),
-                "sem" => self.sem(py, 1, false),
-                "skew" => self.skew(py, false),
-                "kurt" | "kurtosis" => self.kurt(py, false),
-                other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Unsupported expanding agg function '{other}'"
-                ))),
-            }
-        } else if let Ok(list) = func.extract::<Vec<String>>() {
-            let str_slices: Vec<&str> = list.iter().map(|s| s.as_str()).collect();
-            if let Some(ref s) = self.series {
-                let s = window_series_input(s, "Expanding", "agg", false, false)?;
-                let res = s
-                    .expanding(self.min_periods)
-                    .agg(&str_slices)
-                    .map_err(frame_error_to_py)?;
-                return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
-            }
-            if let Some(ref df) = self.dataframe {
-                let df = window_agg_list_frame_input(df, None)?;
-                let res = df
-                    .expanding(self.min_periods)
-                    .agg(&str_slices)
-                    .map_err(frame_error_to_py)?;
-                let res = func_columns(res, &df, &str_slices)?;
-                return self.frame_out(py, res);
-            }
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Empty expanding object",
-            ))
-        } else {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "func must be a string or list of strings",
-            ))
-        }
+        slf.borrow().agg_func(slf.py(), func)
     }
 
-    pub fn aggregate(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.agg(py, func)
+    #[pyo3(signature = (func, *args, **kwargs))]
+    pub fn aggregate(
+        slf: &Bound<'_, Self>,
+        func: &Bound<'_, PyAny>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        Self::agg(slf, func, args, kwargs)
     }
 
     #[getter]
@@ -56419,7 +56691,7 @@ impl PyExpanding {
             ],
         )?;
         if func.extract::<String>().is_ok() {
-            return self.agg(py, func);
+            return self.agg_func(py, func);
         }
         if func.is_callable() {
             if let Some(ref s) = self.series {
@@ -56513,6 +56785,60 @@ pub struct PyExponentialMovingWindow {
 }
 
 impl PyExponentialMovingWindow {
+    /// pandas' `ExponentialMovingWindow.agg` without extra arguments: a name
+    /// (or a list of them), a `_cython_table` callable as its name
+    /// (callables raised; fvsao.7), a frame's `{column: name}`.
+    fn agg_func(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        if let (Ok(spec), Some(df)) = (func.cast::<PyDict>(), &self.dataframe) {
+            let res = window_agg_dict(py, df, spec, None, |sub, f| {
+                self.with_frame(sub).agg_func(py, f)
+            })?;
+            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+        }
+        if agg_spec_has_callable(func)
+            && let Some(named) = named_agg_spec(func, "ExponentialMovingWindow")?
+        {
+            return self.agg_func(py, &named);
+        }
+        if let Ok(func_name) = func.extract::<String>() {
+            match func_name.as_str() {
+                "mean" => self.mean(py, false, None, None),
+                "std" => self.std(py, false, false),
+                "var" => self.var(py, false, false),
+                "sum" => self.sum(py, false, None, None),
+                other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Unsupported ewm agg function '{other}'"
+                ))),
+            }
+        } else if let Ok(list) = func.extract::<Vec<String>>() {
+            let str_slices: Vec<&str> = list.iter().map(|s| s.as_str()).collect();
+            if let Some(ref s) = self.series {
+                let s = window_series_input(s, "ExponentialMovingWindow", "agg", false, false)?;
+                let res = self
+                    .series_ewm(&s)
+                    .agg(&str_slices)
+                    .map_err(frame_error_to_py)?;
+                return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+            }
+            if let Some(ref df) = self.dataframe {
+                let df = window_agg_list_frame_input(df, None)?;
+                let res = self
+                    .frame_ewm(&df)
+                    .agg(&str_slices)
+                    .map_err(frame_error_to_py)?;
+                let res = func_columns(res, &df, &str_slices)?;
+                return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+            }
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Empty ewm object",
+            ))
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "func must be a string or list of strings",
+            ))
+        }
+    }
+
     /// These windows over `s`: decay, adjust, min_periods, ignore_na and
     /// the times' deltas.
     fn series_ewm<'s>(&self, s: &'s Series) -> fp_frame::Ewm<'s> {
@@ -56739,61 +57065,31 @@ impl PyExponentialMovingWindow {
         self.bivariate(py, other, pairwise, bias, numeric_only, false)
     }
 
-    /// pandas' `ExponentialMovingWindow.agg`: a name (or a list of them), a
-    /// `_cython_table` callable as its name (callables raised; fvsao.7), a
-    /// frame's `{column: name}`.
-    pub fn agg(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        if let (Ok(spec), Some(df)) = (func.cast::<PyDict>(), &self.dataframe) {
-            let res =
-                window_agg_dict(py, df, spec, None, |sub, f| self.with_frame(sub).agg(py, f))?;
-            return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
+    /// pandas' `ExponentialMovingWindow.agg(func, *args, **kwargs)`: extra
+    /// arguments go to the named method ([`window_agg_with_args`]), else
+    /// [`PyExponentialMovingWindow::agg_func`].
+    #[pyo3(signature = (func, *args, **kwargs))]
+    pub fn agg(
+        slf: &Bound<'_, Self>,
+        func: &Bound<'_, PyAny>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let kind = "ExponentialMovingWindow";
+        if let Some(out) = window_agg_with_args(slf.as_any(), kind, func, args, kwargs)? {
+            return Ok(out);
         }
-        if agg_spec_has_callable(func)
-            && let Some(named) = named_agg_spec(func, "ExponentialMovingWindow")?
-        {
-            return self.agg(py, &named);
-        }
-        if let Ok(func_name) = func.extract::<String>() {
-            match func_name.as_str() {
-                "mean" => self.mean(py, false, None, None),
-                "std" => self.std(py, false, false),
-                "var" => self.var(py, false, false),
-                "sum" => self.sum(py, false, None, None),
-                other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Unsupported ewm agg function '{other}'"
-                ))),
-            }
-        } else if let Ok(list) = func.extract::<Vec<String>>() {
-            let str_slices: Vec<&str> = list.iter().map(|s| s.as_str()).collect();
-            if let Some(ref s) = self.series {
-                let s = window_series_input(s, "ExponentialMovingWindow", "agg", false, false)?;
-                let res = self
-                    .series_ewm(&s)
-                    .agg(&str_slices)
-                    .map_err(frame_error_to_py)?;
-                return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
-            }
-            if let Some(ref df) = self.dataframe {
-                let df = window_agg_list_frame_input(df, None)?;
-                let res = self
-                    .frame_ewm(&df)
-                    .agg(&str_slices)
-                    .map_err(frame_error_to_py)?;
-                let res = func_columns(res, &df, &str_slices)?;
-                return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
-            }
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "Empty ewm object",
-            ))
-        } else {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "func must be a string or list of strings",
-            ))
-        }
+        slf.borrow().agg_func(slf.py(), func)
     }
 
-    pub fn aggregate(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        self.agg(py, func)
+    #[pyo3(signature = (func, *args, **kwargs))]
+    pub fn aggregate(
+        slf: &Bound<'_, Self>,
+        func: &Bound<'_, PyAny>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        Self::agg(slf, func, args, kwargs)
     }
 
     #[getter]
@@ -76314,10 +76610,25 @@ impl PyCategorical {
         self.with_codes(taken)
     }
 
-    /// Each value `repeats` times in turn.
+    /// Each value `repeats` times in turn; `axis` is numpy's over the one
+    /// dimension, 0 or -1 (another was discarded, br-frankenpandas-cnpw1).
     #[pyo3(signature = (repeats, axis=None))]
-    fn repeat(&self, repeats: usize, axis: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
-        let _ = axis;
+    fn repeat(
+        &self,
+        py: Python<'_>,
+        repeats: usize,
+        axis: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        if let Some(axis) = axis.filter(|axis| !axis.is_none()) {
+            let number = axis.extract::<i64>()?;
+            if number != 0 && number != -1 {
+                let axis_error = py
+                    .import("numpy")?
+                    .getattr("exceptions")?
+                    .getattr("AxisError")?;
+                return Err(PyErr::from_value(axis_error.call1((number, 1))?));
+            }
+        }
         let codes = self
             .code_values()?
             .into_iter()

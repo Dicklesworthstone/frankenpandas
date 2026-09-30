@@ -2853,8 +2853,11 @@ def test_numpy_keywords_follow_pandas_rule() -> None:
         # (test_interpolate_reach_merges_and_level_reindex_like_pandas_u6p7i).
         # TEST-CHANGE (xn05q): Series.to_string(float_format=) left this list;
         # it formats as pandas now (test_to_string_keywords_like_pandas).
+        # TEST-CHANGE (cnpw1): PeriodIndex.from_fields(year=[2024]) left this
+        # list; it builds periods as pandas does now, and this call is pandas'
+        # ValueError 'Invalid frequency: None'
+        # (test_everyday74_discarded_parameters_like_pandas_cnpw1).
         lambda: _hs(fpd).view("int64"),
-        lambda: fpd.PeriodIndex.from_fields(year=[2024]),
         lambda: _hg(fpd).groupby("k").transform("shift", periods=2),
     ],
 )
@@ -21219,4 +21222,98 @@ _E73_CASES = {
 @pytest.mark.parametrize("case", list(_E73_CASES))
 def test_everyday73_flat_index_level_methods_like_pandas_h1kl9(case: str) -> None:
     run = _E73_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-cnpw1: parameters accepted and discarded (or refused as
+# unexpected) - window agg's *args / **kwargs, reset_index's col_level /
+# col_fill over MultiIndex columns, dt.floor / ceil / round's nonexistent /
+# ambiguous, Categorical.repeat's axis, PeriodIndex.from_fields.
+def _e74_values(out: Any) -> list:
+    if hasattr(out, "columns"):
+        return [out.columns.tolist(), out.values.tolist()]
+    return [out.tolist()]
+
+
+def _e74_series(m: Any) -> Any:
+    return m.Series([1.0, 2.0, 3.0])
+
+
+def _e74_multi_columns(m: Any) -> Any:
+    columns = m.MultiIndex.from_tuples([("a", "x"), ("b", "y")], names=["top", "low"])
+    return m.DataFrame([[1, 2]], columns=columns, index=m.Index([7], name="k"))
+
+
+def _e74_zoned(m: Any, text: str) -> Any:
+    return m.Series(m.to_datetime([text])).dt.tz_localize("US/Central")
+
+
+def _e74_periods(m: Any, **fields: Any) -> list:
+    return [str(period) for period in m.PeriodIndex.from_fields(**fields)]
+
+
+_E74_CASES = {
+    "rolling agg callable args": lambda m: _e74_values(
+        _e74_series(m).rolling(2).agg(lambda window, k: window.sum() + k, 10)
+    ),
+    "rolling agg callable kwargs": lambda m: _e74_values(
+        _e74_series(m).rolling(2).agg(lambda window, k: window.sum() + k, k=10)
+    ),
+    "rolling aggregate args": lambda m: _e74_values(
+        _e74_series(m).rolling(2).aggregate(lambda window, k: window.sum() + k, 10)
+    ),
+    "rolling agg name kwargs": lambda m: _e74_values(_e74_series(m).rolling(2).agg("sum", numeric_only=True)),
+    "expanding agg args": lambda m: _e74_values(
+        _e74_series(m).expanding().agg(lambda window, k: window.sum() + k, 10)
+    ),
+    "frame rolling agg args": lambda m: _e74_values(
+        m.DataFrame({"a": [1.0, 2.0, 3.0]}).rolling(2).agg(lambda window, k: window.sum() + k, 10)
+    ),
+    "ewm agg name kwargs": lambda m: _e74_values(_e74_series(m).ewm(span=2).agg("mean", numeric_only=True)),
+    "reset_index col_fill": lambda m: [_e74_multi_columns(m).reset_index(col_fill="z").columns.tolist()],
+    "reset_index col_fill None": lambda m: [_e74_multi_columns(m).reset_index(col_fill=None).columns.tolist()],
+    "reset_index col_level": lambda m: [_e74_multi_columns(m).reset_index(col_level=1).columns.tolist()],
+    "reset_index col_level name fill": lambda m: [
+        _e74_multi_columns(m).reset_index(col_level="low", col_fill="q").columns.tolist()
+    ],
+    "reset_index flat col_level": lambda m: [
+        m.DataFrame({"a": [1]}, index=m.Index([7], name="k")).reset_index(col_level=1).columns.tolist()
+    ],
+    "floor nonexistent shift_forward": lambda m: _e74_values(
+        _e74_zoned(m, "2020-03-08 03:30").dt.floor("2h", nonexistent="shift_forward")
+    ),
+    "ceil nonexistent NaT": lambda m: _e74_values(
+        _e74_zoned(m, "2020-03-08 01:30").dt.ceil("2h", nonexistent="NaT")
+    ),
+    "round ambiguous NaT": lambda m: _e74_values(
+        m.Series(m.to_datetime(["2020-11-01 00:50"]))
+        .dt.tz_localize("US/Central")
+        .dt.round("h", ambiguous="NaT")
+    ),
+    "categorical repeat axis 1": lambda m: [m.Categorical(["a"]).repeat(2, axis=1).tolist()],
+    "from_fields quarter": lambda m: _e74_periods(m, year=[2020, 2021], quarter=[1, 2]),
+    "from_fields quarter scalar year": lambda m: _e74_periods(m, year=2020, quarter=[1, 4], freq="Q"),
+    "from_fields month": lambda m: _e74_periods(m, year=[2020, 2021], month=[2, 12], freq="M"),
+    "from_fields seconds": lambda m: _e74_periods(
+        m, year=[2020], month=[2], day=[3], hour=[4], minute=[5], second=[6], freq="s"
+    ),
+    "from_fields quarter out of range": lambda m: _e74_periods(m, year=[2020], quarter=[5]),
+    "from_fields quarter monthly freq": lambda m: _e74_periods(m, year=[2020], quarter=[1], freq="M"),
+    "from_fields no freq": lambda m: _e74_periods(m, year=[2020], month=[2]),
+    "from_fields lengths": lambda m: _e74_periods(m, year=[2020, 2021], month=[1], freq="M"),
+    # Negatives: already pandas'.
+    "rolling agg name": lambda m: _e74_values(_e74_series(m).rolling(2).agg("sum")),
+    "reset_index flat col_fill": lambda m: [
+        m.DataFrame({"a": [1]}, index=m.Index([7], name="k")).reset_index(col_fill="z").columns.tolist()
+    ],
+    "floor nonexistent default": lambda m: _e74_values(_e74_zoned(m, "2020-03-08 03:30").dt.floor("2h")),
+    "floor naive": lambda m: _e74_values(m.Series(m.to_datetime(["2020-03-08 03:30"])).dt.floor("2h")),
+    "categorical repeat axis 0": lambda m: [m.Categorical(["a"]).repeat(2, axis=0).tolist()],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E74_CASES))
+def test_everyday74_discarded_parameters_like_pandas_cnpw1(case: str) -> None:
+    run = _E74_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
