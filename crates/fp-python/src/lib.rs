@@ -14775,14 +14775,29 @@ impl PyMultiIndex {
         frozen_list(py, levels)
     }
 
-    /// pandas' FrozenList of each level's codes.
+    /// pandas' FrozenList of each level's codes: a read-only numpy array in
+    /// the smallest int dtype holding the level's size (int8 below 128
+    /// labels), as pandas' coerce_indexer_dtype (they were lists;
+    /// br-frankenpandas-bl9gf).
     #[getter]
     fn codes(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let np = py.import("numpy")?;
         let codes = self
             .inner
             .codes()
             .into_iter()
-            .map(|level| level.into_py_any(py))
+            .zip(self.inner.levshape())
+            .map(|(level, size)| {
+                let dtype = match size {
+                    size if size < 1 << 7 => "int8",
+                    size if size < 1 << 15 => "int16",
+                    size if size < 1 << 31 => "int32",
+                    _ => "int64",
+                };
+                let array = np.call_method1("array", (level, dtype))?;
+                array.getattr("flags")?.setattr("writeable", false)?;
+                Ok(array.unbind())
+            })
             .collect::<PyResult<Vec<_>>>()?;
         frozen_list(py, codes)
     }
@@ -45680,6 +45695,11 @@ impl PyDataFrame {
         }
         let suffixes = PyTuple::new(py, [lsuffix, rsuffix])?;
         let Some(keys) = on_keys else {
+            // A MultiIndex frame and a flat one join on the level named as
+            // the flat index (see [`join_on_level`]).
+            if let Some(inner) = join_on_level(&self.inner, &right_df, how, lsuffix, rsuffix)? {
+                return Ok(PyDataFrame { inner });
+            }
             let args = MergeArgs {
                 how,
                 on: None,
@@ -68019,6 +68039,110 @@ fn index_level_keys_as_columns(frame: &DataFrame, on: &Bound<'_, PyAny>) -> PyRe
         return Ok(frame.clone());
     }
     frame.reset_index(false).map_err(frame_error_to_py)
+}
+
+/// pandas' `join` of a row-MultiIndex frame and a flat-indexed one
+/// (`_join_level`): the flat index's labels broadcast over the MultiIndex
+/// level of the same name, the MultiIndex kept in its order - its rows the
+/// flat side lacks kept only where `how` keeps the MultiIndex side (its own
+/// left / outer, a flat caller's right / outer), a flat-only label never
+/// added. The caller's columns come first, an overlapping name taking
+/// `lsuffix` / `rsuffix`. None when both or neither side has a MultiIndex;
+/// no level of the flat index's name is pandas' ValueError, a repeated flat
+/// label its NotImplementedError. It flattened the MultiIndex and matched
+/// nothing - every joined value NaN (br-frankenpandas-8en83).
+fn join_on_level(
+    caller: &DataFrame,
+    other: &DataFrame,
+    how: &str,
+    lsuffix: &str,
+    rsuffix: &str,
+) -> PyResult<Option<DataFrame>> {
+    let (multi_frame, flat_frame, multi_is_caller) =
+        match (caller.row_multiindex(), other.row_multiindex()) {
+            (Some(_), None) => (caller, other, true),
+            (None, Some(_)) => (other, caller, false),
+            _ => return Ok(None),
+        };
+    let Some(multi) = multi_frame.row_multiindex().cloned() else {
+        return Ok(None);
+    };
+    let name = flat_frame.index().name().map(ToString::to_string);
+    let level = name
+        .and_then(|name| {
+            multi
+                .names()
+                .iter()
+                .position(|level| level.as_ref().is_some_and(|level| *level == name))
+        })
+        .ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "cannot join with no overlapping index names",
+            )
+        })?;
+    if !flat_frame.index().is_unique() {
+        return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "Index._join_level on non-unique index is not implemented",
+        ));
+    }
+    let keep_unmatched = match (how, multi_is_caller) {
+        ("left" | "outer", true) | ("right" | "outer", false) => true,
+        ("left" | "right" | "inner", _) => false,
+        (other, _) => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "do not recognize join method {other}"
+            )));
+        }
+    };
+    let flat_labels: HashSet<&IndexLabel> = flat_frame.index().labels().iter().collect();
+    let level_values = multi.get_level_values(level).map_err(index_error_to_py)?;
+    let level_labels = level_values.labels();
+    let rows: Vec<usize> = (0..level_labels.len())
+        .filter(|&row| keep_unmatched || flat_labels.contains(&level_labels[row]))
+        .collect();
+    let kept_labels: Vec<IndexLabel> = rows.iter().map(|&row| level_labels[row].clone()).collect();
+    let multi_side = frame_rows_keeping_multiindex(multi_frame, &multi, &rows)?;
+    let flat_side = flat_frame.reindex(kept_labels).map_err(frame_error_to_py)?;
+    // An overlapping name takes its side's suffix: the caller's lsuffix,
+    // the other's rsuffix.
+    let (multi_suffix, flat_suffix) = if multi_is_caller {
+        (lsuffix, rsuffix)
+    } else {
+        (rsuffix, lsuffix)
+    };
+    let named = |name: &String, suffix: &str, other_side: &DataFrame| {
+        if other_side.column(name).is_some() {
+            format!("{name}{suffix}")
+        } else {
+            name.clone()
+        }
+    };
+    // The MultiIndex side carries the result's index; the flat side's
+    // columns go after its own (a MultiIndex caller) or before them (a flat
+    // caller).
+    let mut out = multi_side.clone();
+    for name in multi_side.column_names() {
+        let renamed = named(name, multi_suffix, &flat_side);
+        if renamed != *name {
+            out = out
+                .rename_columns(&[(name.as_str(), renamed.as_str())])
+                .map_err(frame_error_to_py)?;
+        }
+    }
+    for (position, name) in flat_side.column_names().into_iter().enumerate() {
+        let renamed = named(name, flat_suffix, &multi_side);
+        let column = flat_side
+            .column(name)
+            .cloned()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(name.clone()))?;
+        out = if multi_is_caller {
+            out.with_column(&renamed, column)
+        } else {
+            out.insert_allow_duplicates(position, renamed, column, false)
+        }
+        .map_err(frame_error_to_py)?;
+    }
+    Ok(Some(out))
 }
 
 /// pandas `merge` over fp-join (suffixes, indicator, validate and sort

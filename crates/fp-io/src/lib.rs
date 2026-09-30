@@ -310,8 +310,8 @@ pub struct CsvReadOptions {
     /// `error`/`warn`/`skip` modes.
     pub on_bad_lines: CsvOnBadLines,
     /// Thousands separator stripped from numeric fields before parsing.
-    /// Matches pandas `thousands` parameter. Must differ from `decimal`
-    /// (otherwise the option is silently ignored, matching pandas).
+    /// Matches pandas `thousands` parameter; one equal to `decimal` is
+    /// skipped after a digit, as pandas' C parser does.
     pub thousands: Option<u8>,
     /// Number of trailing data rows to drop (after the header is
     /// consumed). Matches pandas `skipfooter` parameter. Default: `0`.
@@ -5057,18 +5057,29 @@ fn parse_scalar_with_options(
         }
     }
 
-    // `thousands` is silently ignored if it equals the decimal separator,
-    // matching pandas semantics.
-    let thousands_effective = thousands.filter(|t| *t != decimal);
-    let numeric_candidate: Cow<'_, str> = if let Some(t) = thousands_effective {
-        let ch = char::from(t);
-        if trimmed.contains(ch) {
-            Cow::Owned(trimmed.replace(ch, ""))
-        } else {
-            Cow::Borrowed(trimmed)
+    // `thousands` is stripped before the number is read. When it is also the
+    // decimal mark, pandas' C parser skips it only after a digit, so only a
+    // mark with no digit before it is the decimal point ('1.000' is 1000,
+    // '12.5' 125, '.5' 0.5); it was ignored, reading '1.000' as 1.0
+    // (br-frankenpandas-lqdps).
+    let numeric_candidate: Cow<'_, str> = match thousands.map(char::from) {
+        Some(mark) if trimmed.contains(mark) && u32::from(mark) == u32::from(decimal) => {
+            let mut after_digit = false;
+            Cow::Owned(
+                trimmed
+                    .chars()
+                    .filter(|&c| {
+                        let skipped = c == mark && after_digit;
+                        if !skipped {
+                            after_digit = c.is_ascii_digit();
+                        }
+                        !skipped
+                    })
+                    .collect(),
+            )
         }
-    } else {
-        Cow::Borrowed(trimmed)
+        Some(mark) if trimmed.contains(mark) => Cow::Owned(trimmed.replace(mark, "")),
+        _ => Cow::Borrowed(trimmed),
     };
 
     if let Ok(value) = numeric_candidate.as_ref().parse::<i64>() {
@@ -22898,20 +22909,34 @@ mod tests {
     }
 
     #[test]
-    fn test_csv_thousands_equal_to_decimal_is_ignored() {
-        // pandas silently ignores thousands if it equals decimal.
-        let input = "v\n\"1.234\"\n";
+    fn test_csv_thousands_equal_to_decimal_skips_after_a_digit() {
+        // TEST-CHANGE (br-frankenpandas-lqdps): this pinned "1.234" -> 1.234
+        // on the claim that pandas ignores thousands equal to decimal. Live
+        // pandas 2.2.3 (engine c) skips the mark after a digit: "1.234" ->
+        // 1234, "12.5" -> 125, "1.5e3" -> 15000.0, and a leading ".5" -> 0.5.
+        let input = "v,w,x,y\n\"1.234\",12.5,1.5e3,.5\n";
         let options = CsvReadOptions {
             thousands: Some(b'.'),
             decimal: b'.',
             ..CsvReadOptions::default()
         };
         let frame = read_csv_with_options(input, &options).expect("parse");
-        let v = frame.column("v").unwrap().values()[0].clone();
-        // thousands ignored → "1.234" parses as float 1.234
-        assert!(matches!(v, Scalar::Float64(_)), "expected Float64");
-        let Scalar::Float64(f) = v else { return };
-        assert!((f - 1.234).abs() < 1e-9);
+        let cell = |name: &str| frame.column(name).unwrap().values()[0].clone();
+        assert_eq!(cell("v"), Scalar::Int64(1234));
+        assert_eq!(cell("w"), Scalar::Int64(125));
+        assert_eq!(cell("x"), Scalar::Float64(15000.0));
+        assert_eq!(cell("y"), Scalar::Float64(0.5));
+        // NEGATIVE: with ',' as the decimal mark '.' only groups thousands.
+        let european = CsvReadOptions {
+            thousands: Some(b'.'),
+            decimal: b',',
+            ..CsvReadOptions::default()
+        };
+        let frame = read_csv_with_options("v\n\"1.000,5\"\n", &european).expect("parse");
+        assert_eq!(
+            frame.column("v").unwrap().values()[0],
+            Scalar::Float64(1000.5)
+        );
     }
 
     #[test]

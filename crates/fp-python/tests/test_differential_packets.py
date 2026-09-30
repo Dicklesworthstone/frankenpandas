@@ -21426,3 +21426,110 @@ _E77_CASES = {
 def test_everyday77_mode_keeps_the_source_dtype_like_pandas_5thmj(case: str) -> None:
     run = _E77_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-lqdps: read_csv(thousands='.') with the default decimal
+# '.' ignored the thousands mark; pandas' C parser skips it after a digit.
+def _e78_read(m: Any, text: str, **kwargs: Any) -> list:
+    out = m.read_csv(io.StringIO(text), **kwargs)
+    return [[str(t) for t in out.dtypes], out.values.tolist()]
+
+
+_E78_CASES = {
+    "dot thousands quoted": lambda m: _e78_read(m, 'a;b\n"1.000";2\n', sep=";", thousands="."),
+    "dot thousands unquoted": lambda m: _e78_read(m, "a;b\n1.000;2\n", sep=";", thousands="."),
+    "dot thousands two groups": lambda m: _e78_read(m, "a;b\n1.000.000;2\n", sep=";", thousands="."),
+    "dot thousands column": lambda m: _e78_read(m, "a;b\n1.000;2\n5;3\n", sep=";", thousands="."),
+    "dot thousands after digits": lambda m: _e78_read(m, "a,b,c\n12.5,1.5e3,.5\n", thousands="."),
+    # Negatives: already pandas'.
+    "dot thousands decimal comma": lambda m: _e78_read(m, 'a;b\n"1.000,5";2\n', sep=";", thousands=".", decimal=","),
+    "comma thousands": lambda m: _e78_read(m, 'a,b\n"1,234,567",2\n', thousands=","),
+    "no thousands": lambda m: _e78_read(m, "a;b\n1.000;2\n", sep=";"),
+    "dot in text": lambda m: _e78_read(m, "a;b\nabc.def;2\n", sep=";", thousands="."),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E78_CASES))
+def test_everyday78_thousands_equal_to_decimal_like_pandas_lqdps(case: str) -> None:
+    run = _E78_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-8en83: join of a MultiIndex frame with a flat frame named
+# after one of its levels flattened the MultiIndex and matched nothing (all
+# NaN; inner empty); pandas joins on that level.
+def _e79_frames(m: Any) -> tuple:
+    index = m.MultiIndex.from_tuples([("s", 2023), ("n", 2024), ("q", 2023), ("n", 2023)], names=["region", "year"])
+    multi = m.DataFrame({"v": [1.0, 2.0, 3.0, 4.0]}, index=index)
+    flat = m.DataFrame({"w": [10, 20, 30]}, index=m.Index(["n", "s", "z"], name="region"))
+    return multi, flat
+
+
+def _e79_shown(out: Any) -> list:
+    return [out.index.tolist(), list(out.index.names), out.columns.tolist(), out.values.tolist()]
+
+
+_E79_CASES = {
+    **{
+        f"multi join {how}": (lambda how: lambda m: _e79_shown(_e79_frames(m)[0].join(_e79_frames(m)[1], how=how)))(how)
+        for how in ["left", "inner", "right", "outer"]
+    },
+    **{
+        f"flat join {how}": (lambda how: lambda m: _e79_shown(_e79_frames(m)[1].join(_e79_frames(m)[0], how=how)))(how)
+        for how in ["left", "inner", "right", "outer"]
+    },
+    "join second level": lambda m: _e79_shown(
+        _e79_frames(m)[0].join(m.DataFrame({"z": [7]}, index=m.Index([2024], name="year")))
+    ),
+    "join series": lambda m: _e79_shown(_e79_frames(m)[0].join(_e79_frames(m)[1]["w"])),
+    "join overlap suffix": lambda m: _e79_shown(
+        _e79_frames(m)[0].join(_e79_frames(m)[1].rename(columns={"w": "v"}), rsuffix="_r")
+    ),
+    "join unnamed flat index": lambda m: _e79_shown(
+        _e79_frames(m)[0].join(m.DataFrame({"w": [1]}, index=["n"]))
+    ),
+    "join repeated flat label": lambda m: _e79_shown(
+        _e79_frames(m)[0].join(m.DataFrame({"w": [1, 2]}, index=m.Index(["n", "n"], name="region")))
+    ),
+    # Negatives: already pandas'.
+    "flat join flat": lambda m: _e79_shown(
+        m.DataFrame({"v": [1, 2]}, index=["a", "b"]).join(m.DataFrame({"w": [3]}, index=["b"]))
+    ),
+    "join on column": lambda m: _e79_shown(
+        m.DataFrame({"k": ["n", "s"], "v": [1, 2]}).join(_e79_frames(m)[1], on="k")
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E79_CASES))
+def test_everyday79_join_on_a_multiindex_level_like_pandas_8en83(case: str) -> None:
+    run = _E79_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-bl9gf: MultiIndex.codes held lists; pandas' FrozenList
+# holds read-only numpy arrays in the smallest int dtype for each level.
+def _e80_mi(m: Any) -> Any:
+    return m.MultiIndex.from_tuples([("n", 2023), ("n", 2024), ("s", 2023)], names=["region", "year"])
+
+
+_E80_CASES = {
+    "codes element": lambda m: [type(_e80_mi(m).codes[0]).__name__, str(_e80_mi(m).codes[0].dtype), _e80_mi(m).codes[0].tolist()],
+    "codes read-only": lambda m: _e80_mi(m).codes[1].flags.writeable,
+    "codes of a wide level": lambda m: str(m.MultiIndex.from_arrays([list(range(200)), [0] * 200]).codes[0].dtype),
+    "codes numpy op": lambda m: int(_e80_mi(m).codes[0].max()),
+    # Negatives: already pandas'.
+    "codes repr": lambda m: repr(_e80_mi(m).codes),
+    "codes FrozenList": lambda m: type(_e80_mi(m).codes).__name__,
+    "set_codes round trip": lambda m: list(_e80_mi(m).set_codes(_e80_mi(m).codes)),
+    "levels": lambda m: [level.tolist() for level in _e80_mi(m).levels],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E80_CASES))
+def test_everyday80_multiindex_codes_are_arrays_like_pandas_bl9gf(case: str) -> None:
+    run = _E80_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
