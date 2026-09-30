@@ -22799,3 +22799,53 @@ _E105_CASES = {
 def test_everyday105_lazy_date_range_like_pandas_so0mr(case: str) -> None:
     run = _E105_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-myn6q: DataFrame.values / to_numpy of number columns
+# writes each cell straight into numpy's buffer, a block of 1024 rows at a
+# time (every column's bytes were copied out, interleaved and copied again).
+def _e106_array(array: Any) -> list:
+    return [str(array.dtype), str(array.shape), str(array.flags.writeable), repr(array.tolist())]
+
+
+def _e106_edges(array: Any) -> list:
+    # Rows either side of the 1024-row blocks, and each column's sum.
+    picked = [0, 1, 1023, 1024, 1025, 2047, 2048, len(array) - 1]
+    return [str(array.dtype), str(array.shape), repr([array[row].tolist() for row in picked]), repr(array.sum(axis=0).tolist())]
+
+
+def _e106_long(m: Any, n: int = 2500) -> Any:
+    values = np.arange(n)
+    return m.DataFrame({"a": values * 0.5, "b": values * 3, "c": -values * 0.25})
+
+
+_E106_CASES = {
+    "floats": lambda m: _e106_array(m.DataFrame({"a": [1.5, -0.0, np.nan], "b": [2.0, 3.0, 4.0]}).values),
+    "ints": lambda m: _e106_array(m.DataFrame({"a": [1, 2, 3], "b": [-4, 5, 6]}).values),
+    "int beside float": lambda m: _e106_array(m.DataFrame({"a": [1, 2, 3], "b": [0.5, 1.5, 2.5]}).values),
+    "bools": lambda m: _e106_array(m.DataFrame({"a": [True, False], "b": [False, False]}).values),
+    "bool beside int": lambda m: _e106_array(m.DataFrame({"a": [True, False], "b": [1, 2]}).values),
+    "datetimes": lambda m: _e106_array(
+        m.DataFrame({"a": m.to_datetime(["2020-01-01", "2021-06-30"]), "b": m.to_datetime(["2022-02-02", None])}).values
+    ),
+    "float32": lambda m: _e106_array(
+        m.DataFrame({"a": np.array([1.5, 2.25], dtype="float32"), "b": np.array([3.0, 4.0], dtype="float32")}).values
+    ),
+    "one nullable": lambda m: _e106_array(m.DataFrame({"a": m.array([1, None, 3], dtype="Int64")}).values),
+    "no rows": lambda m: _e106_array(m.DataFrame({"a": np.array([], dtype=float), "b": np.array([], dtype=float)}).values),
+    "no columns": lambda m: _e106_array(m.DataFrame(index=[0, 1, 2]).values),
+    "row slice": lambda m: _e106_array(m.DataFrame({"a": [1.0, 2.0, 3.0, 4.0], "b": [5, 6, 7, 8]}).iloc[1:3].values),
+    "blocks of rows": lambda m: _e106_edges(_e106_long(m).values),
+    "blocks of int rows": lambda m: _e106_edges(_e106_long(m)[["b"]].values),
+    "blocks of a slice": lambda m: _e106_edges(_e106_long(m, 3100).iloc[7:].values),
+    "to_numpy": lambda m: _e106_edges(_e106_long(m).to_numpy()),
+    "np.asarray": lambda m: _e106_edges(np.asarray(_e106_long(m))),
+    "to_numpy na_value": lambda m: _e106_array(m.DataFrame({"a": [1.0, np.nan], "b": [2.0, 3.0]}).to_numpy(na_value=-1.0)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E106_CASES))
+def test_everyday106_frame_values_like_pandas_myn6q(case: str) -> None:
+    run = _E106_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
