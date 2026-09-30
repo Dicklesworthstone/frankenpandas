@@ -342,8 +342,22 @@ fn column_interval_dtype(column: &Column) -> PyIntervalDtype {
     }
 }
 
+/// Whether every cell of a `dtype` column is its own typed scalar or
+/// missing - a number, bool, datetime or duration column, which the casts
+/// keep free of Period, Interval and Python-object cells. A scan for such
+/// cells answers from the dtype: it read every value, building a column's
+/// million-Scalar view (77% of `s + s`; br-frankenpandas-w1nrd).
+fn holds_only_typed_cells(dtype: &DType) -> bool {
+    dtype.is_numeric()
+        || dtype.is_bool()
+        || matches!(dtype, DType::Datetime64 { .. } | DType::Timedelta64)
+}
+
 /// The frequency of a Period column's values (None when none is a period).
 fn column_period_freq(column: &Column) -> Option<PeriodFreq> {
+    if holds_only_typed_cells(&column.dtype()) {
+        return None;
+    }
     column.values().iter().find_map(|value| match value {
         Scalar::Period(period) => Some(period.freq),
         _ => None,
@@ -6106,6 +6120,29 @@ fn numpy_temporal_nanos(obj: &Bound<'_, PyAny>, ns_dtype: &str) -> PyResult<Opti
 /// Convert a Python value to a FrankenPandas Scalar.
 #[allow(clippy::only_used_in_recursion)]
 fn py_to_scalar(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
+    // The everyday cells by exact type first, as the checks below read them:
+    // a float or a str reached its extraction through a dozen failed ones,
+    // raising and formatting a TypeError on the way (a million floats from a
+    // list took ~0.3 s; br-frankenpandas-1ze1o). An int past int64 goes on.
+    if obj.is_exact_instance_of::<pyo3::types::PyFloat>() {
+        let value = obj.extract::<f64>()?;
+        return Ok(if value.is_nan() {
+            Scalar::Null(fp_types::NullKind::NaN)
+        } else {
+            Scalar::Float64(value)
+        });
+    }
+    if obj.is_exact_instance_of::<pyo3::types::PyString>() {
+        return Ok(Scalar::Utf8(obj.extract::<String>()?));
+    }
+    if obj.is_exact_instance_of::<pyo3::types::PyBool>() {
+        return Ok(Scalar::Bool(obj.extract::<bool>()?));
+    }
+    if obj.is_exact_instance_of::<pyo3::types::PyInt>()
+        && let Ok(value) = obj.extract::<i64>()
+    {
+        return Ok(Scalar::Int64(value));
+    }
     if obj.is_none() {
         return Ok(Scalar::Null(fp_types::NullKind::Null));
     }
@@ -6560,8 +6597,14 @@ fn py_to_cell(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
     }
     // A numpy array is an object cell as it is, as pandas keeps it (a
     // one-element array became its float through numpy's deprecated
-    // conversion; fvsao.69).
-    if obj.get_type().name().is_ok_and(|name| name == "ndarray") {
+    // conversion; fvsao.69). A float, str, bool or int skips the check,
+    // which built its type's name as a new str (30% of a Series of a
+    // million strings; br-frankenpandas-1ze1o).
+    let everyday = obj.is_exact_instance_of::<pyo3::types::PyFloat>()
+        || obj.is_exact_instance_of::<pyo3::types::PyString>()
+        || obj.is_exact_instance_of::<pyo3::types::PyBool>()
+        || obj.is_exact_instance_of::<pyo3::types::PyInt>();
+    if !everyday && obj.get_type().name().is_ok_and(|name| name == "ndarray") {
         return Ok(Scalar::Object(fp_types::ObjectValue::Host(
             fp_types::HostValue::new(PyHost(obj.clone().unbind())),
         )));
@@ -7001,6 +7044,64 @@ fn categorical_index_column(index: &CategoricalIndex) -> PyResult<Column> {
         .map_err(frame_error_to_py)
 }
 
+/// A native-order numpy array's elements through the buffer protocol: one
+/// copy, a strided view gathered by `PyBuffer_ToContiguous`. The caller
+/// checks the byte order (see [`py_array_like_column`]).
+fn ndarray_elements<T: pyo3::buffer::Element>(
+    py: Python<'_>,
+    array: &Bound<'_, PyAny>,
+) -> PyResult<Vec<T>> {
+    pyo3::buffer::PyBuffer::<T>::get(array)?.to_vec(py)
+}
+
+/// A native-order array of a numpy dtype narrower than 64 bits, or of
+/// uint64, in the engine's 64-bit storage (the caller tags the width); a
+/// uint64 value at or above 2**63 is refused, as the largest one.
+fn narrow_ndarray_column(
+    py: Python<'_>,
+    array: &Bound<'_, PyAny>,
+    width: NumericWidth,
+) -> PyResult<Column> {
+    fn ints<T: pyo3::buffer::Element + Into<i64>>(
+        py: Python<'_>,
+        array: &Bound<'_, PyAny>,
+    ) -> PyResult<Column> {
+        let values = ndarray_elements::<T>(py, array)?;
+        Ok(Column::from_i64_values(
+            values.into_iter().map(Into::into).collect(),
+        ))
+    }
+    match width {
+        NumericWidth::Int8 => ints::<i8>(py, array),
+        NumericWidth::Int16 => ints::<i16>(py, array),
+        NumericWidth::Int32 => ints::<i32>(py, array),
+        NumericWidth::UInt8 => ints::<u8>(py, array),
+        NumericWidth::UInt16 => ints::<u16>(py, array),
+        NumericWidth::UInt32 => ints::<u32>(py, array),
+        NumericWidth::UInt64 => {
+            let values = ndarray_elements::<u64>(py, array)?;
+            match values
+                .iter()
+                .map(|&value| i64::try_from(value))
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(values) => Ok(Column::from_i64_values(values)),
+                Err(_) => Err(column_error_to_py(
+                    fp_columnar::ColumnError::UInt64OutOfRange {
+                        value: values.iter().copied().max().unwrap_or_default(),
+                    },
+                )),
+            }
+        }
+        NumericWidth::Float32 => Ok(Column::from_f64_values(
+            ndarray_elements::<f32>(py, array)?
+                .into_iter()
+                .map(f64::from)
+                .collect(),
+        )),
+    }
+}
+
 fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Option<Column>> {
     // An array is its column, dtype and all.
     if let Ok(array) = obj.extract::<PyRef<'_, PyExtensionArray>>() {
@@ -7066,15 +7167,25 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
             obj.getattr("shape")?.str()?
         )));
     }
-    let kind = obj.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    let dtype = obj.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    let name = dtype.getattr("name")?.extract::<String>()?;
+    // A native-order array of numbers or bools is read through its buffer,
+    // one copy of its bytes: tolist() made a Python object of every element
+    // and converted each (a million floats took ~0.3 s;
+    // br-frankenpandas-1ze1o). numpy's isnative decides - pyo3's PyBuffer
+    // reads a big-endian ('>') format as native on a little-endian machine -
+    // and any other array keeps tolist().
+    let native = dtype.getattr("isnative")?.extract::<bool>()?;
     // An array of a numpy dtype narrower than 64 bits keeps it, as pandas'
     // Series(np.array([1, 2], dtype=np.int32)) is int32 (it widened to
     // int64 / float64; fvsao.23).
     if matches!(kind.as_str(), "i" | "u" | "f")
-        && let Some((width, _)) =
-            NumericWidth::parse(&obj.getattr("dtype")?.getattr("name")?.extract::<String>()?)
+        && let Some((width, _)) = NumericWidth::parse(&name)
     {
-        let column = if width.is_float() {
+        let column = if native {
+            narrow_ndarray_column(py, obj, width)?
+        } else if width.is_float() {
             Column::from_f64_values(obj.call_method0("tolist")?.extract::<Vec<f64>>()?)
         } else {
             let values = obj.call_method0("tolist")?;
@@ -7099,11 +7210,10 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
             .map_err(column_error_to_py);
     }
     let temporal_array = |ns_dtype: &str| -> PyResult<Vec<Option<i64>>> {
-        Ok(obj
+        let nanos = obj
             .call_method1("astype", (ns_dtype,))?
-            .call_method1("astype", ("int64",))?
-            .call_method0("tolist")?
-            .extract::<Vec<i64>>()?
+            .call_method1("astype", ("int64",))?;
+        Ok(ndarray_elements::<i64>(py, &nanos)?
             .into_iter()
             .map(|ns| (ns != i64::MIN).then_some(ns))
             .collect())
@@ -7119,7 +7229,18 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
             temporal_array("timedelta64[ns]")?,
             Scalar::Timedelta64,
         )?,
+        "i" if native => Column::from_i64_values(ndarray_elements::<i64>(py, obj)?),
         "i" => Column::from_i64_values(obj.call_method0("tolist")?.extract::<Vec<i64>>()?),
+        "f" if native && name == "float64" => {
+            Column::from_f64_values(ndarray_elements::<f64>(py, obj)?)
+        }
+        // A numpy bool is one byte, zero or not.
+        "b" => Column::from_bool_values(
+            ndarray_elements::<u8>(py, &obj.call_method1("view", ("uint8",))?)?
+                .into_iter()
+                .map(|byte| byte != 0)
+                .collect(),
+        ),
         _ => {
             let values = obj
                 .call_method0("tolist")?
@@ -22501,6 +22622,19 @@ fn series_over_index(
     Series::new(name, index.clone(), column).map_err(frame_error_to_py)
 }
 
+/// `scalar` repeated `len` times, the column `Column::from_values` makes of
+/// it: a number or bool straight into its typed buffer - `s * 2.0` and
+/// `s > 0.5` built a million-Scalar Vec and read it back (half their time;
+/// br-frankenpandas-w1nrd) - anything else (and no rows) through it.
+fn broadcast_column(scalar: Scalar, len: usize) -> PyResult<Column> {
+    match scalar {
+        Scalar::Float64(value) if len > 0 => Ok(Column::from_f64_values(vec![value; len])),
+        Scalar::Int64(value) if len > 0 => Ok(Column::from_i64_values(vec![value; len])),
+        Scalar::Bool(value) if len > 0 => Ok(Column::from_bool_values(vec![value; len])),
+        scalar => Column::from_values(vec![scalar; len]).map_err(column_error_to_py),
+    }
+}
+
 /// The zone the Python results of a per-value function share when every
 /// present one is a tz-aware Timestamp of it (None / NaT aside): a Series
 /// of them is that tz-aware dtype, where their scalars keep only the UTC
@@ -22552,6 +22686,9 @@ fn rezoned(series: Series, zone: Option<&str>) -> PyResult<Series> {
 /// bytes), or it is an object column mixing text with other values (an
 /// all-text or all-number column keeps its kernels).
 fn has_object_cells(column: &Column) -> bool {
+    if holds_only_typed_cells(&column.dtype()) {
+        return false;
+    }
     let values = column.values();
     values
         .iter()
@@ -22709,8 +22846,18 @@ fn series_operand(py: Python<'_>, other: &Bound<'_, PyAny>, like: &Series) -> Py
     if let Some(series) = listlike_series_operand(py, other, like, false)? {
         return Ok(series);
     }
-    let scalar = py_to_scalar(py, &unwrap_0d(other)?)?;
-    series_over_index(like.name(), like.index(), vec![scalar; like.len()])
+    let scalar = match py_to_scalar(py, &unwrap_0d(other)?)? {
+        // An int against float64 values is that float, as numpy converts it
+        // (the mixed-dtype kernel converted it per element too): the
+        // operator takes the float kernel (`s * 2` ran 3x `s * 2.0`;
+        // br-frankenpandas-w1nrd).
+        Scalar::Int64(value) if like.column().dtype() == DType::Float64 => {
+            Scalar::Float64(value as f64)
+        }
+        scalar => scalar,
+    };
+    let column = broadcast_column(scalar, like.len())?;
+    Series::new(like.name(), like.index().clone(), column).map_err(frame_error_to_py)
 }
 
 /// A comparison operand against a column of `dtype`: a string compared with
@@ -22798,7 +22945,7 @@ fn comparison_operand(
     }
     // Broadcast over `like`'s own index (a copy of its labels dropped a
     // tz-aware index's zone, so the comparison realigned and came back naive).
-    let column = Column::from_values(vec![scalar; like.len()]).map_err(column_error_to_py)?;
+    let column = broadcast_column(scalar, like.len())?;
     let column = match zone_dtype {
         Some(zone) => column.with_dtype(DType::datetime64_tz(zone)),
         None => column,
@@ -26058,7 +26205,11 @@ impl PySeries {
             .map(|f| py_to_scalar(py, f))
             .transpose()?;
         let rhs = series_operand(py, other, &self.inner)?;
-        let aligned = self.inner.index().labels() == rhs.index().labels();
+        // A broadcast operand shares this Series' index, which `==` answers
+        // without a label compare (the labels of a million-row RangeIndex
+        // were built and compared for every `s.mul(2)`; br-frankenpandas-w1nrd).
+        let aligned = self.inner.index() == rhs.index()
+            || self.inner.index().labels() == rhs.index().labels();
         if aligned && fill.is_none() {
             return op(self, py, other);
         }
@@ -26634,18 +26785,26 @@ impl PySeries {
         }
 
         if let Some(column) = py_array_like_column(py, data)? {
-            let labels = extract_index_labels(index, column.len())?;
-            if labels.len() != column.len() {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Length of values ({}) does not match length of index ({})",
-                    column.len(),
-                    labels.len()
-                )));
-            }
+            // No index given is the default range, built as one: its million
+            // labels were made, scanned back into a range and dropped (70% of
+            // Series(ndarray); br-frankenpandas-1ze1o).
+            let rows = match index {
+                None => Index::default_range(column.len()),
+                Some(_) => {
+                    let labels = extract_index_labels(index, column.len())?;
+                    if labels.len() != column.len() {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Length of values ({}) does not match length of index ({})",
+                            column.len(),
+                            labels.len()
+                        )));
+                    }
+                    Index::new(labels)
+                }
+            };
             let index_name = py_index_arg_name(data);
             let series_name = name.or(index_name).unwrap_or_default();
-            let series =
-                Series::new(series_name, Index::new(labels), column).map_err(frame_error_to_py)?;
+            let series = Series::new(series_name, rows, column).map_err(frame_error_to_py)?;
             return Ok(PySeries { inner: series });
         }
 
@@ -37350,16 +37509,18 @@ impl PyDataFrame {
 
                 let column_order = explicit_cols.unwrap_or(detected_order);
                 let n_rows = col_map.values().next().map(|c| c.len()).unwrap_or(0);
-                let labels = if let Some(cl) = common_labels {
-                    cl
-                } else {
-                    extract_index_labels(index, n_rows)?
+                // No index= and no Series is the default range, built as one:
+                // its labels were made, scanned back into a range and dropped
+                // (half of a DataFrame of arrays; br-frankenpandas-1ze1o).
+                let rows = match common_labels {
+                    Some(labels) => Index::new(labels),
+                    None => Index::default_range(n_rows),
                 };
 
                 // If explicit columns contains extra columns not in dict, add NaN columns
                 for c in &column_order {
                     if !col_map.contains_key(c) {
-                        let scalars = vec![Scalar::Null(NullKind::NaN); labels.len()];
+                        let scalars = vec![Scalar::Null(NullKind::NaN); rows.len()];
                         let col = Column::from_values(scalars).map_err(|e| {
                             PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
                         })?;
@@ -37371,11 +37532,8 @@ impl PyDataFrame {
                 let wanted: HashSet<&String> = column_order.iter().collect();
                 col_map.retain(|k, _| wanted.contains(k));
 
-                let df =
-                    DataFrame::new_with_column_order(Index::new(labels), col_map, column_order)
-                        .map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                        })?;
+                let df = DataFrame::new_with_column_order(rows, col_map, column_order)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
                 return Ok(PyDataFrame { inner: df });
             }
 

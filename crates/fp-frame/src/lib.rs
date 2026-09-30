@@ -12143,6 +12143,12 @@ impl Series {
             Column::from_timedelta64_values_with_validity(raw, validity)
         };
         let numeric = |dtype: &DType| matches!(dtype, DType::Int64 | DType::Float64 | DType::Bool);
+        // Every arm below has a duration side: reading the values first built
+        // both numeric operands' Scalar views on every `s + s` (70% of it;
+        // br-frankenpandas-w1nrd).
+        if self.column.dtype() != DType::Timedelta64 && other.column.dtype() != DType::Timedelta64 {
+            return Ok(None);
+        }
         let (left, right) = (self.values(), other.values());
         let column = match (self.column.dtype(), other.column.dtype(), op) {
             (
@@ -183399,6 +183405,62 @@ mod tests {
                 .scalar_cache_is_materialized(),
             "planted mixed-dtype negative must stay on the Scalar fallback"
         );
+    }
+
+    #[test]
+    fn series_number_arithmetic_keeps_operands_typed_w1nrd() {
+        // `s + s` and `floats * ints` read no Scalar view of an operand: the
+        // duration-scaling pre-check read both before looking at a dtype
+        // (br-frankenpandas-w1nrd).
+        let floats = Series::new(
+            "f",
+            Index::from_range(0, 4, 1),
+            Column::from_f64_values(vec![1.5, -2.0, 0.25, 4.0]),
+        )
+        .unwrap();
+        let ints = Series::new(
+            "i",
+            Index::from_range(0, 4, 1),
+            Column::from_i64_values(vec![1, 2, 3, 4]),
+        )
+        .unwrap();
+        let sum = floats.add(&floats).unwrap();
+        let product = floats.mul(&ints).unwrap();
+        assert!(!floats.column().scalar_cache_is_materialized());
+        assert!(!ints.column().scalar_cache_is_materialized());
+        let as_f64 = |values: &[f64]| {
+            values
+                .iter()
+                .map(|&v| Scalar::Float64(v))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(sum.values(), as_f64(&[3.0, -4.0, 0.5, 8.0]).as_slice());
+        assert_eq!(
+            product.values(),
+            as_f64(&[1.5, -4.0, 0.75, 16.0]).as_slice()
+        );
+        // Negative: a duration side still scales through that path.
+        let durations = Series::new(
+            "d",
+            Index::from_range(0, 4, 1),
+            Column::new(
+                DType::Timedelta64,
+                vec![
+                    Scalar::Timedelta64(10),
+                    Scalar::Timedelta64(20),
+                    Scalar::Null(NullKind::NaT),
+                    Scalar::Timedelta64(40),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let scaled = durations.mul(&ints).unwrap();
+        assert_eq!(scaled.dtype(), DType::Timedelta64);
+        assert_eq!(scaled.values()[0], Scalar::Timedelta64(10));
+        assert_eq!(scaled.values()[1], Scalar::Timedelta64(40));
+        assert!(scaled.values()[2].is_missing());
+        assert_eq!(scaled.values()[3], Scalar::Timedelta64(160));
     }
 
     #[test]

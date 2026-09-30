@@ -22108,3 +22108,190 @@ _E92_CASES = {
 def test_everyday92_read_stata_preserve_dtypes_like_pandas_18pyl(case: str) -> None:
     run = _E92_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-1ze1o: a numpy array or a list was read element by
+# element through Python objects; a native-order array is now read through
+# its buffer. The byte order, strides, widths and missing values stay
+# pandas'.
+def _e93_shown(series: Any) -> list:
+    return [str(series.dtype), series.tolist(), series.isna().tolist()]
+
+
+def _e93_frame(m: Any) -> list:
+    frame = m.DataFrame(
+        {
+            "f": np.array([1.5, np.nan]),
+            "i": np.array([3, -4], dtype=np.int32),
+            "b": np.array([True, False]),
+            "t": np.array(["2024-01-01", "NaT"], dtype="datetime64[ns]"),
+        }
+    )
+    return [[str(t) for t in frame.dtypes], frame.to_dict("list")]
+
+
+def _e93_values(series: Any) -> list:
+    return [series.tolist(), series.isna().tolist()]
+
+
+_E93_ARRAYS = {
+    "float64": lambda: np.array([1.5, -0.0, np.inf, -np.inf, np.nan, 2.0]),
+    "float64 empty": lambda: np.array([], dtype=np.float64),
+    "float64 strided": lambda: np.arange(10.0)[::3],
+    "int64": lambda: np.array([1, -2, 2**62]),
+    "int64 reversed": lambda: np.arange(10)[::-2],
+    "int64 empty": lambda: np.array([], dtype=np.int64),
+    "bool": lambda: np.array([True, False, True]),
+    "bool strided": lambda: np.array([True, False, True, False])[1::2],
+    "bool empty": lambda: np.array([], dtype=bool),
+    "uint64 below 2**63": lambda: np.array([0, 2**63 - 1], dtype=np.uint64),
+    "int16 strided": lambda: np.arange(10, dtype=np.int16)[::4],
+    "float32": lambda: np.array([1.1, np.nan, np.inf], dtype=np.float32),
+    "datetime64 ns strided": lambda: np.array(["2024-01-01", "2024-01-02", "NaT"], dtype="datetime64[ns]")[::2],
+    "timedelta64 ns": lambda: np.array([1500, "NaT"], dtype="timedelta64[ns]"),
+    **{
+        f"{dtype} extremes": (lambda dtype: lambda: np.array([np.iinfo(dtype).min, 7, np.iinfo(dtype).max], dtype=dtype))(dtype)
+        for dtype in ["int8", "int16", "int32", "uint8", "uint16", "uint32"]
+    },
+}
+
+# Their values only: pandas keeps a coarser unit (datetime64[s];
+# br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.16) and a
+# non-native dtype ('>f8'; br-frankenpandas-k2f5c), fp reads both into its
+# native nanosecond / 64-bit storage.
+_E93_VALUE_ARRAYS = {
+    "datetime64 s": lambda: np.array(["2024-01-01", "NaT", "2024-03-01T12:00"], dtype="datetime64[s]"),
+    "timedelta64 ms": lambda: np.array([1500, "NaT"], dtype="timedelta64[ms]"),
+    # Negatives a naive buffer read fails: big-endian bytes read as native
+    # come back byte-swapped.
+    "float64 big-endian": lambda: np.array([1.5, 2.25, np.nan], dtype=">f8"),
+    "int64 big-endian": lambda: np.array([1, 256, -3], dtype=">i8"),
+    "int16 big-endian": lambda: np.array([1, 300, -2], dtype=">i2"),
+    "float32 big-endian": lambda: np.array([1.5, -0.25], dtype=">f4"),
+    "uint32 big-endian": lambda: np.array([1, 2**31], dtype=">u4"),
+}
+
+_E93_CASES = {
+    **{f"Series {name}": (lambda make: lambda m: _e93_shown(m.Series(make())))(make) for name, make in _E93_ARRAYS.items()},
+    **{
+        f"Series {name}": (lambda make: lambda m: _e93_values(m.Series(make())))(make)
+        for name, make in _E93_VALUE_ARRAYS.items()
+    },
+    "DataFrame of arrays": _e93_frame,
+    # The rows: the default RangeIndex, or the index given.
+    "Series rows": lambda m: [repr(m.Series(np.arange(3.0)).index), type(m.Series(np.arange(3.0)).index).__name__],
+    "DataFrame rows": lambda m: [repr(m.DataFrame({"a": np.arange(3)}).index)],
+    "Series index given": lambda m: _e93_shown(m.Series(np.array([1.5, 2.5]), index=["a", "b"])) + [
+        list(m.Series(np.array([1.5, 2.5]), index=["a", "b"]).index)
+    ],
+    "Series index too short": lambda m: _e93_shown(m.Series(np.array([1.5, 2.5]), index=["a"])),
+    "DataFrame index given": lambda m: [list(m.DataFrame({"a": np.array([1, 2])}, index=["x", "y"]).index)],
+    "DataFrame arrays and Series": lambda m: [
+        list(m.DataFrame({"a": np.array([1, 2]), "b": m.Series([5, 6], index=[0, 1])}).index)
+    ],
+    "list floats": lambda m: _e93_shown(m.Series([1.5, 2.0, None, float("nan")])),
+    "list ints": lambda m: _e93_shown(m.Series([1, -2, 3])),
+    "list int and float": lambda m: _e93_shown(m.Series([1, 2.5])),
+    "list text": lambda m: _e93_shown(m.Series(["a", "b", None])),
+    "list bools": lambda m: _e93_shown(m.Series([True, False])),
+    "list numpy floats": lambda m: _e93_shown(m.Series([np.float64(1.5), np.float64(2)])),
+    "list text and int": lambda m: _e93_shown(m.Series(["x", 1])),
+    "list bool and int": lambda m: _e93_shown(m.Series([True, 1])),
+    # Negative: a uint64 array holding 2**63 is refused rather than wrapped
+    # to a negative int64 (br-frankenpandas-gatk1 holds it later); asserted
+    # below apart, pandas holds it.
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E93_CASES))
+def test_everyday93_array_and_list_ingest_like_pandas_1ze1o(case: str) -> None:
+    run = _E93_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_everyday93_uint64_past_int64_is_refused_not_wrapped_1ze1o() -> None:
+    with pytest.raises(Exception, match="9223372036854775808"):
+        fpd.Series(np.array([1, 2**63], dtype=np.uint64))
+
+
+# br-frankenpandas-w1nrd: Series arithmetic / comparison built and scanned
+# million-Scalar views (the object-cell and period scans, the broadcast
+# operand); they now answer from the dtype and broadcast into a typed
+# buffer. Every answer stays pandas'.
+def _e94_shown(series: Any) -> list:
+    return [str(series.dtype), series.tolist(), list(series.index)]
+
+
+def _e94_float(m: Any) -> Any:
+    return m.Series([1.5, np.nan, -2.0], index=[10, 11, 12])
+
+
+def _e94_int(m: Any) -> Any:
+    return m.Series([1, 2, 3], index=[10, 11, 12])
+
+
+_E94_CASES = {
+    "float * float": lambda m: _e94_shown(_e94_float(m) * 2.0),
+    "float * int": lambda m: _e94_shown(_e94_float(m) * 2),
+    "float % int 0": lambda m: _e94_shown(_e94_float(m) % 0),
+    "float // int 0": lambda m: _e94_shown(_e94_float(m) // 0),
+    "float // int": lambda m: _e94_shown(_e94_float(m) // 2),
+    "float ** int": lambda m: _e94_shown(_e94_float(m) ** 2),
+    "float / int": lambda m: _e94_shown(_e94_float(m) / 3),
+    "float - big int": lambda m: _e94_shown(_e94_float(m) - 2**60),
+    "int - float Series": lambda m: _e94_shown(3 - _e94_float(m)),
+    "float32 * int": lambda m: _e94_shown(m.Series([1.5, 2.25], dtype="float32") * 2),
+    # (A float32 flex fill's width is br-frankenpandas-ajyln's.)
+    "float + int flex fill": lambda m: _e94_shown(_e94_float(m).add(2, fill_value=1)),
+    "int * int": lambda m: _e94_shown(_e94_int(m) * 2),
+    "int * float": lambda m: _e94_shown(_e94_int(m) * 0.5),
+    "int * bool": lambda m: _e94_shown(_e94_int(m) * True),
+    # (NaN ** 0 is br-frankenpandas-oie6x's.)
+    "float ** 2": lambda m: _e94_shown(_e94_float(m) ** 2.0),
+    "int // 0": lambda m: _e94_shown(_e94_int(m) // 0),
+    "2 - float": lambda m: _e94_shown(2 - _e94_float(m)),
+    "float + itself": lambda m: _e94_shown(_e94_float(m) + _e94_float(m)),
+    "float + other index": lambda m: _e94_shown(_e94_float(m) + m.Series([1.0, 2.0], index=[11, 13])),
+    "float > scalar": lambda m: _e94_shown(_e94_float(m) > 0.0),
+    "int == scalar": lambda m: _e94_shown(_e94_int(m) == 2),
+    "int != float": lambda m: _e94_shown(_e94_int(m) != 2.0),
+    "bool + True": lambda m: _e94_shown(m.Series([True, False]) + True),
+    "bool == False": lambda m: _e94_shown(m.Series([True, False]) == False),  # noqa: E712
+    "empty float * 2": lambda m: _e94_shown(m.Series([], dtype="float64") * 2),
+    "empty int > 1": lambda m: _e94_shown(m.Series([], dtype="int64") > 1),
+    "int8 * 2": lambda m: _e94_shown(m.Series([1, 2], dtype="int8") * 2),
+    "Int64 * 2": lambda m: _e94_shown(m.Series([1, None], dtype="Int64") * 2),
+    "Float64 > 1": lambda m: _e94_shown(m.Series([1.5, None], dtype="Float64") > 1),
+    "mul flex": lambda m: _e94_shown(_e94_float(m).mul(2)),
+    "mul flex fill": lambda m: _e94_shown(_e94_float(m).mul(2, fill_value=1.0)),
+    "add flex other index fill": lambda m: _e94_shown(
+        _e94_float(m).add(m.Series([1.0, 2.0], index=[11, 13]), fill_value=0.0)
+    ),
+    "eq flex": lambda m: _e94_shown(_e94_int(m).eq(3)),
+    "datetime > text": lambda m: _e94_shown(m.Series(m.to_datetime(["2024-01-01", "2024-01-03"])) > "2024-01-02"),
+    "datetime + Timedelta": lambda m: _e94_shown(m.Series(m.to_datetime(["2024-01-01"])) + m.Timedelta("1D")),
+    "tz-aware == Timestamp": lambda m: _e94_shown(
+        m.Series(m.date_range("2024-01-01", periods=2, tz="UTC")) == m.Timestamp("2024-01-01", tz="UTC")
+    ),
+    # Negatives: the cells' own Python operators and the period and text
+    # comparisons keep their paths.
+    # (An object column of plain numbers is br-frankenpandas-47dus'.)
+    "object cells + 1": lambda m: _e94_shown(m.Series([1, "a"], dtype=object) + 1),
+    "object cells * 2": lambda m: _e94_shown(m.Series(["a", 2.5, None], dtype=object) * 2),
+    "text + text": lambda m: _e94_shown(m.Series(["a", "b"]) + "x"),
+    "text * 2": lambda m: _e94_shown(m.Series(["a", "b"]) * 2),
+    "period > Period": lambda m: _e94_shown(
+        m.Series(m.period_range("2024-01", periods=3, freq="M")) > m.Period("2024-01", freq="M")
+    ),
+    "period == text": lambda m: _e94_shown(m.Series(m.period_range("2024-01", periods=2, freq="M")) == "2024-02"),
+    "string dtype + x": lambda m: _e94_shown(m.Series(["a", None], dtype="string") + "x"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E94_CASES))
+def test_everyday94_series_operators_like_pandas_w1nrd(case: str) -> None:
+    run = _E94_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
