@@ -7150,11 +7150,18 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
         Column::new(dtype, values).map_err(column_error_to_py)
     };
     if let Ok(dti) = obj.extract::<PyRef<'_, PyDatetimeIndex>>() {
-        let column = temporal(
-            DType::Datetime64 { tz: None },
-            dti.inner.nanos(),
-            Scalar::Datetime64,
-        )?;
+        // Its instants typed while none is NaT (their Scalar cells were
+        // built and read back; br-frankenpandas-so0mr).
+        let instants = dti.inner.asi8();
+        let column = if instants.contains(&i64::MIN) {
+            temporal(
+                DType::Datetime64 { tz: None },
+                dti.inner.nanos(),
+                Scalar::Datetime64,
+            )?
+        } else {
+            Column::from_datetime64_values(instants)
+        };
         // A tz-aware index gives a column of its dtype (datetime64[ns, tz]).
         return Ok(Some(match dti.inner.tz() {
             Some(zone) => column.with_dtype(DType::datetime64_tz(zone)),
@@ -8909,6 +8916,24 @@ fn float_labelled(index: Index) -> Index {
         return index;
     }
     Index::new(float_index_labels(labels.to_vec())).rename_index(index.name())
+}
+
+/// The rows an `index=` argument gives `len` values: a DatetimeIndex is its
+/// own index - an O(1) clone sharing its labels, a date_range's lazy range
+/// kept, where its million labels were copied out
+/// (br-frankenpandas-so0mr) - anything else its extracted labels.
+fn index_arg_rows(index: &Bound<'_, PyAny>, len: usize) -> PyResult<Index> {
+    let rows = match index.extract::<PyRef<'_, PyDatetimeIndex>>() {
+        Ok(dti) => dti.inner.as_index().clone(),
+        Err(_) => Index::new(extract_index_labels(Some(index), len)?),
+    };
+    if rows.len() != len {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "Length of values ({len}) does not match length of index ({})",
+            rows.len()
+        )));
+    }
+    Ok(rows)
 }
 
 /// Extract index labels from an optional Python object (Index, list, tuple, sequence, or None).
@@ -26834,17 +26859,7 @@ impl PySeries {
             // Series(ndarray); br-frankenpandas-1ze1o).
             let rows = match index {
                 None => Index::default_range(column.len()),
-                Some(_) => {
-                    let labels = extract_index_labels(index, column.len())?;
-                    if labels.len() != column.len() {
-                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                            "Length of values ({}) does not match length of index ({})",
-                            column.len(),
-                            labels.len()
-                        )));
-                    }
-                    Index::new(labels)
-                }
+                Some(index) => index_arg_rows(index, column.len())?,
             };
             let index_name = py_index_arg_name(data);
             let series_name = name.or(index_name).unwrap_or_default();
@@ -26886,17 +26901,7 @@ impl PySeries {
             if let Some(column) = contiguous_text_column(list.iter()) {
                 let rows = match index {
                     None => Index::default_range(column.len()),
-                    Some(_) => {
-                        let labels = extract_index_labels(index, column.len())?;
-                        if labels.len() != column.len() {
-                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                                "Length of values ({}) does not match length of index ({})",
-                                column.len(),
-                                labels.len()
-                            )));
-                        }
-                        Index::new(labels)
-                    }
+                    Some(index) => index_arg_rows(index, column.len())?,
                 };
                 let series = Series::new(series_name, rows, column)
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
@@ -64478,10 +64483,11 @@ impl PyResampler {
     fn bin_index(&self, index: &Index) -> PyResult<Index> {
         let index = self.zoned_index(index)?;
         let freq = fp_index::canonical_freq(&self.freq).filter(|_| {
-            index
-                .labels()
-                .iter()
-                .all(|label| matches!(label, IndexLabel::Datetime64(_)))
+            index.datetime64_affine_labels().is_some()
+                || index
+                    .labels()
+                    .iter()
+                    .all(|label| matches!(label, IndexLabel::Datetime64(_)))
         });
         Ok(index.with_freq(freq))
     }
@@ -70118,6 +70124,9 @@ fn date_range(
     ) {
         return Err(three_of_four());
     }
+    // A fixed step stays the lazy range (first, step, count) - its labels
+    // were made, read back and made again (br-frankenpandas-so0mr).
+    let mut affine: Option<(i64, i64, usize)> = None;
     let mut nanos: Vec<i64> = match (start, end, periods, freq) {
         // pandas' linspace: numpy spaces the points in float64, truncates
         // them to int64, and pins the last one to `end`.
@@ -70173,15 +70182,11 @@ fn date_range(
                         }
                         _ => return Err(three_of_four()),
                     };
+                    // Every stamp in range, or the range is refused.
                     Index::from_datetime64_affine_range(first, step, count)
-                        .ok_or_else(out_of_range)?
-                        .labels()
-                        .iter()
-                        .map(|label| match label {
-                            IndexLabel::Datetime64(nanos) => Ok(*nanos),
-                            _ => Err(out_of_range()),
-                        })
-                        .collect::<PyResult<Vec<i64>>>()?
+                        .ok_or_else(out_of_range)?;
+                    affine = Some((first, step, count));
+                    Vec::new()
                 }
                 _ => fp_frame::calendar_date_range(start, end, periods, freq)
                     .map_err(|e| match e {
@@ -70198,6 +70203,19 @@ fn date_range(
             }
         }
     };
+    if let Some((first, step, count)) = &mut affine {
+        if !left_inclusive && *count > 0 && start == Some(*first) {
+            *first = first.saturating_add(*step);
+            *count -= 1;
+        }
+        let last = i64::try_from(count.saturating_sub(1))
+            .ok()
+            .and_then(|steps| step.checked_mul(steps))
+            .and_then(|span| first.checked_add(span));
+        if !right_inclusive && *count > 0 && end.is_some() && last == end {
+            *count -= 1;
+        }
+    }
     if !left_inclusive && start.is_some() && nanos.first() == start.as_ref() {
         nanos.remove(0);
     }
@@ -70205,9 +70223,21 @@ fn date_range(
         nanos.pop();
     }
     if zone.is_some() && !on_instants {
+        // Each wall-clock stamp moves on its own: the range is listed.
+        if let Some((first, step, count)) = affine.take() {
+            nanos = std::iter::successors(Some(first), |at| at.checked_add(step))
+                .take(count)
+                .collect();
+        }
         nanos = nanos.into_iter().map(localize).collect::<PyResult<_>>()?;
     }
-    let mut index = Index::from_datetime64(nanos);
+    let mut index = match affine {
+        Some((first, step, count)) if count > 0 => {
+            Index::from_datetime64_affine_range(first, step, count).ok_or_else(out_of_range)?
+        }
+        // An emptied range lists nothing.
+        _ => Index::from_datetime64(nanos),
+    };
     if let Some(name) = name {
         index = index.set_name(name);
     }
@@ -78683,6 +78713,11 @@ fn tz_error_to_py_any(err: fp_types::TimeZoneError) -> PyErr {
 }
 
 fn require_resample_axis(index: &Index) -> PyResult<()> {
+    // A date_range's lazy labels are datetimes, not made to be read
+    // (br-frankenpandas-so0mr).
+    if index.datetime64_affine_labels().is_some() {
+        return Ok(());
+    }
     let labels = index.labels();
     if labels
         .iter()

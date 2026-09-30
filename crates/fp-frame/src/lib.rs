@@ -39299,8 +39299,34 @@ impl Resample<'_> {
         if bucket_ns <= 0 {
             return None;
         }
-        let labels = self.series.index().labels();
-        if let Some(identity) = self.subdaily_exact_target_frequency_result(labels, bucket_ns) {
+        // A date_range's lazy labels are read as the arithmetic they are,
+        // never made (br-frankenpandas-so0mr): the identity test, the span
+        // and each row's bin below, as the label loops compute them.
+        let affine = self
+            .series
+            .index()
+            .datetime64_affine_labels()
+            .filter(|&(_, step, len)| step > 0 && len > 0 && len == vals.len());
+        let labels = match affine {
+            Some(_) => &[][..],
+            None => self.series.index().labels(),
+        };
+        if let Some((first, step, len)) = affine {
+            if first
+                .rem_euclid(Timedelta::NANOS_PER_DAY)
+                .rem_euclid(bucket_ns)
+                == 0
+                && (len == 1 || step == bucket_ns)
+            {
+                return Some(Series::new(
+                    self.series.name(),
+                    self.series.index().clone(),
+                    self.series.column().clone(),
+                ));
+            }
+        } else if let Some(identity) =
+            self.subdaily_exact_target_frequency_result(labels, bucket_ns)
+        {
             return Some(identity);
         }
         // Fused: find origin (min ns) AND max ns in one pass, then accumulate
@@ -39311,6 +39337,11 @@ impl Resample<'_> {
         // origin/bins/bound, same row-order accumulation.
         let mut min_ns = i64::MAX;
         let mut max_ns = i64::MIN;
+        if let Some((first, step, len)) = affine {
+            // A validated range: its last stamp does not overflow.
+            min_ns = first;
+            max_ns = first.checked_add(step.checked_mul(i64::try_from(len - 1).ok()?)?)?;
+        }
         for l in labels {
             if let Some(ns) = resample_label_to_ns(l) {
                 if ns < min_ns {
@@ -39335,12 +39366,24 @@ impl Resample<'_> {
         // Every bin from the first to the last is emitted, empty ones as 0.0
         // (sum) / NaN (mean), as pandas does; this path dropped them. A range too
         // sparse for a dense table goes to the generic path, which emits them too.
-        if (bmax as i128 + 1) > (labels.len() as i128 * 4).max(1 << 16) {
+        let rows = affine.map_or(labels.len(), |(_, _, len)| len);
+        if (bmax as i128 + 1) > (rows as i128 * 4).max(1 << 16) {
             return None;
         }
         let nb = (bmax + 1) as usize;
         let mut sum = vec![0.0_f64; nb];
         let mut count = vec![0_i64; nb];
+        if let Some((first, step, _)) = affine {
+            let mut ns = first;
+            for (i, &value) in vals.iter().enumerate() {
+                if i > 0 {
+                    ns += step;
+                }
+                let didx = (ns - origin).div_euclid(bucket_ns) as usize;
+                sum[didx] += value;
+                count[didx] += 1;
+            }
+        }
         for (i, l) in labels.iter().enumerate() {
             if let Some(ns) = resample_label_to_ns(l) {
                 let didx = (ns - origin).div_euclid(bucket_ns) as usize;
@@ -218559,6 +218602,48 @@ mod tests {
         let off_sum = off.resample("3h").sum().unwrap();
         assert_eq!(off_sum.index().labels(), &bins);
         assert_eq!(off_sum.values(), [1.0, 2.0, 3.0].map(Scalar::Float64));
+    }
+
+    #[test]
+    fn resample_of_a_lazy_date_range_matches_its_listed_stamps_so0mr() {
+        // A Series on a date_range's lazy labels resamples by their
+        // arithmetic - and answers what the same stamps listed answer
+        // (br-frankenpandas-so0mr): bins off the first stamp (01:30 with
+        // '3h' anchors at midnight), empty bins, the identity frequency.
+        const MINUTE: i64 = 60_000_000_000;
+        let day = 1_704_067_200_000_000_000_i64; // 2024-01-01T00:00
+        for (first, step, len, freq) in [
+            (day + 90 * MINUTE, 7 * MINUTE, 200, "3h"),
+            (day, MINUTE, 500, "h"),
+            (day, 5 * MINUTE, 40, "5min"),
+            (day + 90 * MINUTE, 5 * MINUTE, 40, "5min"),
+            (day, 250 * MINUTE, 12, "h"),
+            (day + 3 * MINUTE, MINUTE, 1, "h"),
+        ] {
+            let values: Vec<f64> = (0..len).map(|k| (k * 7 % 11) as f64).collect();
+            let stamps: Vec<i64> = (0..len).map(|k| first + k as i64 * step).collect();
+            let lazy = Index::from_datetime64_affine_range(first, step, len).unwrap();
+            assert!(lazy.datetime64_affine_labels().is_some());
+            let lazy = Series::new("v", lazy, Column::from_f64_values(values.clone())).unwrap();
+            let listed = Series::new(
+                "v",
+                Index::from_datetime64(stamps),
+                Column::from_f64_values(values),
+            )
+            .unwrap();
+            for (ours, theirs) in [
+                (lazy.resample(freq).mean(), listed.resample(freq).mean()),
+                (lazy.resample(freq).sum(), listed.resample(freq).sum()),
+            ] {
+                let (ours, theirs) = (ours.unwrap(), theirs.unwrap());
+                assert_eq!(ours.index().labels(), theirs.index().labels(), "{freq}");
+                assert_eq!(
+                    format!("{:?}", ours.values()),
+                    format!("{:?}", theirs.values()),
+                    "{freq}"
+                );
+            }
+        }
     }
 
     #[test]

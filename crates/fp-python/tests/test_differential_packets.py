@@ -22696,3 +22696,106 @@ _E104_CASES = {
 def test_everyday104_concat_of_text_frames_like_pandas_5muaw(case: str) -> None:
     run = _E104_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-so0mr: a fixed-step date_range stays a lazy range (its
+# labels were made, read back and made again), Series(dr) builds a typed
+# column, index=dr is that index, and resample reads the range's arithmetic.
+def _e105_range(index: Any) -> list:
+    return [str(index.dtype), repr(index.name), str(index.freq), [str(t) for t in index.tolist()]]
+
+
+def _e105_series(s: Any) -> list:
+    return [str(s.dtype), repr(s.index.name), str(s.index.freq), str(s.index.dtype), *s.to_string().split("\n")]
+
+
+def _e105_rows(s: Any) -> list:
+    return [str(s.dtype), repr(s.name), *s.to_string().split("\n")]
+
+
+def _e105_values(m: Any, n: int) -> Any:
+    return np.arange(n, dtype=float) * 1.5
+
+
+_E105_CASES = {
+    "periods from start": lambda m: _e105_range(m.date_range("2020-01-01", periods=5, freq="min")),
+    "periods to end": lambda m: _e105_range(m.date_range(end="2020-01-01 06:00", periods=4, freq="2h", name="t")),
+    "start and end": lambda m: _e105_range(m.date_range("2020-01-01", "2020-01-01 03:00", freq="45min")),
+    "inclusive neither": lambda m: _e105_range(m.date_range("2020-01-01", "2020-01-02", freq="6h", inclusive="neither")),
+    "inclusive left": lambda m: _e105_range(m.date_range("2020-01-01", "2020-01-02", freq="6h", inclusive="left")),
+    "inclusive right": lambda m: _e105_range(m.date_range("2020-01-01", "2020-01-02", freq="6h", inclusive="right")),
+    "inclusive neither off grid": lambda m: _e105_range(
+        m.date_range("2020-01-01", "2020-01-01 20:00", freq="6h", inclusive="neither")
+    ),
+    "neither on one stamp": lambda m: _e105_range(m.date_range("2020-01-01", "2020-01-01", freq="h", inclusive="neither")),
+    "end before start": lambda m: _e105_range(m.date_range("2020-01-02", "2020-01-01", freq="h")),
+    "normalize": lambda m: _e105_range(m.date_range("2020-01-01 05:30", periods=3, freq="D", normalize=True)),
+    "tz utc": lambda m: _e105_range(m.date_range("2020-03-08", periods=4, freq="h", tz="UTC")),
+    "tz wall day": lambda m: _e105_range(m.date_range("2020-03-07", periods=3, freq="D", tz="US/Eastern")),
+    "tz instants hourly": lambda m: _e105_range(m.date_range("2020-03-08", periods=4, freq="h", tz="US/Eastern")),
+    "Series of range": lambda m: _e105_rows(m.Series(m.date_range("2020-01-01", periods=4, freq="min", name="t"))),
+    "Series of index with NaT": lambda m: _e105_rows(m.Series(m.DatetimeIndex(["2020-01-01", None, "2020-01-03"]))),
+    "Series of range ops": lambda m: [
+        str(v) for v in m.Series(m.date_range("2020-01-01 22:00", periods=4, freq="h")).dt.day.tolist()
+    ],
+    "index is the range": lambda m: _e105_series(
+        m.Series(_e105_values(m, 5), index=m.date_range("2020-01-01", periods=5, freq="min", name="t"))
+    ),
+    "index is a zoned range": lambda m: _e105_series(
+        m.Series(_e105_values(m, 3), index=m.date_range("2020-01-01", periods=3, freq="h", tz="UTC"))
+    ),
+    "index of text rows": lambda m: _e105_series(m.Series(["a", "b"], index=m.date_range("2020-01-01", periods=2, freq="D"))),
+    "loc slice": lambda m: _e105_series(
+        m.Series(_e105_values(m, 10), index=m.date_range("2020-01-01", periods=10, freq="min")).loc[
+            "2020-01-01 00:03":"2020-01-01 00:06"
+        ]
+    ),
+    "loc stamp": lambda m: [
+        float(m.Series(_e105_values(m, 10), index=m.date_range("2020-01-01", periods=10, freq="min"))["2020-01-01 00:07"])
+    ],
+    "index fields": lambda m: m.Series(_e105_values(m, 4), index=m.date_range("2020-12-31 23:00", periods=4, freq="h"))
+    .index.year.tolist(),
+    "length mismatch": lambda m: m.Series(_e105_values(m, 3), index=m.date_range("2020-01-01", periods=4, freq="h")),
+    "frame on the range": lambda m: m.DataFrame(
+        {"v": _e105_values(m, 3)}, index=m.date_range("2020-01-01", periods=3, freq="D")
+    )
+    .to_string()
+    .split("\n"),
+    "resample hourly": lambda m: _e105_series(
+        m.Series(_e105_values(m, 200), index=m.date_range("2020-01-01", periods=200, freq="min")).resample("h").mean()
+    ),
+    "resample off grid": lambda m: _e105_series(
+        m.Series(_e105_values(m, 60), index=m.date_range("2020-01-01 01:30", periods=60, freq="7min"))
+        .resample("3h")
+        .sum()
+    ),
+    "resample identity": lambda m: _e105_series(
+        m.Series(_e105_values(m, 6), index=m.date_range("2020-01-01", periods=6, freq="5min")).resample("5min").mean()
+    ),
+    "resample sparse": lambda m: _e105_series(
+        m.Series(_e105_values(m, 5), index=m.date_range("2020-01-01", periods=5, freq="250min")).resample("h").mean()
+    ),
+    "resample daily": lambda m: _e105_series(
+        m.Series(_e105_values(m, 100), index=m.date_range("2020-01-01", periods=100, freq="37min")).resample("D").sum()
+    ),
+    "resample zoned": lambda m: _e105_series(
+        m.Series(_e105_values(m, 30), index=m.date_range("2020-03-08", periods=30, freq="10min", tz="US/Eastern"))
+        .resample("h")
+        .mean()
+    ),
+    # Negatives: a listed DatetimeIndex (not a range) and a linspace range
+    # take the listed path as before.
+    "resample listed": lambda m: _e105_series(
+        m.Series(_e105_values(m, 4), index=m.DatetimeIndex(["2020-01-01 00:10", "2020-01-01 00:50", "2020-01-01 02:05", "2020-01-01 02:06"]))
+        .resample("h")
+        .sum()
+    ),
+    "linspace range": lambda m: _e105_range(m.date_range("2020-01-01", "2020-01-02", periods=4)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E105_CASES))
+def test_everyday105_lazy_date_range_like_pandas_so0mr(case: str) -> None:
+    run = _E105_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

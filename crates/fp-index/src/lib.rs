@@ -1347,8 +1347,11 @@ struct IndexLabels {
     /// so cloning an `Index` is an O(1) refcount bump instead of an O(n)
     /// `Vec<IndexLabel>` deep copy — the dominant cost of same-index binary ops
     /// (`a + b` re-uses the operand index). Set once, never mutated, so sharing
-    /// is observationally identical to a private copy.
-    materialized: OnceLock<Arc<Vec<IndexLabel>>>,
+    /// is observationally identical to a private copy. The cell itself is
+    /// shared by clones too: a lazy backing's labels made by any clone (a
+    /// Series of a date_range resampled, sliced by label) serve them all,
+    /// where each clone made its own million again (br-frankenpandas-so0mr).
+    materialized: Arc<OnceLock<Arc<Vec<IndexLabel>>>>,
     materialized_slice: Option<Arc<MaterializedLabelSlice>>,
     int64_unit_range: Option<Int64UnitRangeLabels>,
     int64_affine: Option<Int64AffineLabels>,
@@ -1376,7 +1379,7 @@ impl IndexLabels {
         let materialized = OnceLock::new();
         let _ = materialized.set(Arc::new(labels));
         Self {
-            materialized,
+            materialized: Arc::new(materialized),
             materialized_slice: None,
             int64_unit_range: None,
             int64_affine: None,
@@ -1390,7 +1393,7 @@ impl IndexLabels {
 
     fn new_int64_unit_range(start: i64, len: usize) -> Option<Self> {
         Some(Self {
-            materialized: OnceLock::new(),
+            materialized: Arc::default(),
             materialized_slice: None,
             int64_unit_range: Some(Int64UnitRangeLabels::new(start, len)?),
             int64_affine: None,
@@ -1407,7 +1410,7 @@ impl IndexLabels {
             return Self::new_int64_unit_range(start, len);
         }
         Some(Self {
-            materialized: OnceLock::new(),
+            materialized: Arc::default(),
             materialized_slice: None,
             int64_unit_range: None,
             int64_affine: Some(Int64AffineLabels::new(start, step, len)?),
@@ -1421,7 +1424,7 @@ impl IndexLabels {
 
     fn new_int64_two_affine(first: Int64AffineLabels, second: Int64AffineLabels) -> Option<Self> {
         Some(Self {
-            materialized: OnceLock::new(),
+            materialized: Arc::default(),
             materialized_slice: None,
             int64_unit_range: None,
             int64_affine: None,
@@ -1440,7 +1443,7 @@ impl IndexLabels {
         len: usize,
     ) -> Option<Self> {
         Some(Self {
-            materialized: OnceLock::new(),
+            materialized: Arc::default(),
             materialized_slice: None,
             int64_unit_range: None,
             int64_affine: None,
@@ -1456,7 +1459,7 @@ impl IndexLabels {
         let int64_typed = OnceLock::new();
         let _ = int64_typed.set(Some(values));
         Self {
-            materialized: OnceLock::new(),
+            materialized: Arc::default(),
             materialized_slice: None,
             int64_unit_range: None,
             int64_affine: None,
@@ -1470,7 +1473,7 @@ impl IndexLabels {
 
     fn new_datetime64_affine(start: i64, step: i64, len: usize) -> Option<Self> {
         Some(Self {
-            materialized: OnceLock::new(),
+            materialized: Arc::default(),
             materialized_slice: None,
             int64_unit_range: None,
             int64_affine: None,
@@ -1486,7 +1489,7 @@ impl IndexLabels {
         debug_assert!(!offsets.is_empty());
         debug_assert_eq!(*offsets.last().expect("non-empty"), bytes.len());
         Self {
-            materialized: OnceLock::new(),
+            materialized: Arc::default(),
             materialized_slice: None,
             int64_unit_range: None,
             int64_affine: None,
@@ -1695,7 +1698,7 @@ impl IndexLabels {
                 MaterializedLabelSlice::new(Arc::clone(&slice.labels), next_start, len)
         {
             return Self {
-                materialized: OnceLock::new(),
+                materialized: Arc::default(),
                 materialized_slice: Some(Arc::new(view)),
                 int64_unit_range: None,
                 int64_affine: None,
@@ -1711,7 +1714,7 @@ impl IndexLabels {
             && let Some(view) = MaterializedLabelSlice::new(Arc::clone(labels), start, len)
         {
             return Self {
-                materialized: OnceLock::new(),
+                materialized: Arc::default(),
                 materialized_slice: Some(Arc::new(view)),
                 int64_unit_range: None,
                 int64_affine: None,
@@ -1956,22 +1959,9 @@ impl Clone for IndexLabels {
         if let Some(view) = self.int64_typed.get() {
             let _ = int64_typed.set(view.clone());
         }
-        let materialized = OnceLock::new();
-        // A unit-range, typed Int64, or contiguous-Utf8 backing can regenerate
-        // the label vector on demand, so skip the O(n) Vec<IndexLabel> deep clone.
-        let has_lazy_backing = self.int64_unit_range.is_some()
-            || self.int64_affine.is_some()
-            || self.int64_two_affine.is_some()
-            || self.int64_strided.is_some()
-            || self.datetime64_affine.is_some()
-            || self.materialized_slice.is_some()
-            || self.utf8_contiguous.is_some()
-            || matches!(int64_typed.get(), Some(Some(_)));
-        if !has_lazy_backing && let Some(labels) = self.materialized.get() {
-            let _ = materialized.set(labels.clone());
-        }
         Self {
-            materialized,
+            // One cell for every clone: labels made by any serve all.
+            materialized: Arc::clone(&self.materialized),
             materialized_slice: self.materialized_slice.clone(),
             int64_unit_range: self.int64_unit_range,
             int64_affine: self.int64_affine,
@@ -2625,6 +2615,17 @@ impl Index {
         Self::new(nanos.into_iter().map(IndexLabel::Datetime64).collect())
     }
 
+    /// The `(first, step, len)` of a date_range's lazy datetime labels -
+    /// label `k` is `Datetime64(first + k * step)` - None for any other
+    /// labels (br-frankenpandas-so0mr).
+    #[must_use]
+    #[doc(hidden)]
+    pub fn datetime64_affine_labels(&self) -> Option<(i64, i64, usize)> {
+        self.labels
+            .datetime64_affine_range()
+            .map(|range| (range.start, range.step, range.len))
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         self.labels.len()
@@ -2816,6 +2817,11 @@ impl Index {
     /// Whether every label is a datetime (NaT included) - what a time zone
     /// can describe.
     fn holds_only_datetimes(&self) -> bool {
+        // A date_range's lazy range is datetimes without its labels made
+        // (br-frankenpandas-so0mr).
+        if self.labels.datetime64_affine_range().is_some() {
+            return true;
+        }
         self.labels().iter().all(|label| {
             matches!(
                 label,
@@ -8253,11 +8259,13 @@ impl DatetimeIndex {
     }
 
     pub fn from_index(index: Index) -> Result<Self, IndexError> {
-        ensure_index_kind(
-            &index,
-            |label| matches!(label, IndexLabel::Datetime64(_)),
-            "DatetimeIndex",
-        )?;
+        if index.labels.datetime64_affine_range().is_none() {
+            ensure_index_kind(
+                &index,
+                |label| matches!(label, IndexLabel::Datetime64(_)),
+                "DatetimeIndex",
+            )?;
+        }
         Ok(Self { index })
     }
 
@@ -8525,6 +8533,10 @@ impl DatetimeIndex {
     /// NAT is preserved as `i64::MIN` to match the on-disk sentinel.
     #[must_use]
     pub fn asi8(&self) -> Vec<i64> {
+        // A date_range's lazy range, its labels not made (br-frankenpandas-so0mr).
+        if let Some(range) = self.index.labels.datetime64_affine_range() {
+            return range.materialize_i64();
+        }
         self.index
             .labels()
             .iter()
@@ -22776,6 +22788,38 @@ mod tests {
                 IndexLabel::Datetime64(1_704_240_000_000_000_000),
             ]
         );
+    }
+
+    #[test]
+    fn datetime_index_of_an_affine_range_keeps_it_lazy_so0mr() {
+        // A DatetimeIndex over a date_range's lazy range, zoned, answers its
+        // instants without making its labels (br-frankenpandas-so0mr).
+        let (start, step) = (1_704_067_200_000_000_000, 60 * Timedelta::NANOS_PER_SEC);
+        let expected: Vec<i64> = (0..4).map(|k| start + k * step).collect();
+        let affine = Index::from_datetime64_affine_range(start, step, 4).unwrap();
+        let dti = DatetimeIndex::from_index(affine)
+            .and_then(|dti| dti.with_tz(Some("UTC")))
+            .unwrap();
+        assert_eq!(dti.asi8(), expected);
+        assert!(dti.as_index().labels.materialized.get().is_none());
+        assert_eq!(dti.tz().as_deref(), Some("UTC"));
+        assert_eq!(
+            DatetimeIndex::from_index(Index::from_datetime64(expected.clone()))
+                .unwrap()
+                .asi8(),
+            expected
+        );
+        // Negative: an index of other labels is still refused.
+        let ints = Index::new(vec![IndexLabel::Int64(1), IndexLabel::Int64(2)]);
+        assert!(DatetimeIndex::from_index(ints).is_err());
+        // Labels a clone makes are the original's too (a Series resampled
+        // made them again every call).
+        let original = Index::from_datetime64_affine_range(start, step, 4).unwrap();
+        let clone = original.clone();
+        assert!(original.labels.materialized.get().is_none());
+        assert_eq!(clone.labels().len(), 4);
+        assert!(original.labels.materialized.get().is_some());
+        assert_eq!(original.labels(), clone.labels());
     }
 
     #[test]
