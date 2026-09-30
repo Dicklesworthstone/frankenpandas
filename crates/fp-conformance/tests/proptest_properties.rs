@@ -2911,7 +2911,8 @@ proptest! {
                     | IndexLabel::Datetime64(_)
                     | IndexLabel::Float64(_)
                     | IndexLabel::Bool(_)
-                    | IndexLabel::Object(_) => {}
+                    | IndexLabel::Object(_)
+                    | IndexLabel::Interval(_) => {}
                     IndexLabel::Period(period) if !period.is_nat() => {}
                     // All labels must be non-null when dropna=true. This used
                     // to be vacuous (IndexLabel had no null variant); since

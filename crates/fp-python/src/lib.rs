@@ -6124,18 +6124,7 @@ fn py_to_scalar(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
     // An Interval cell (Series([Interval(0, 1), ...]) raised "Cannot convert
     // Interval to Scalar").
     if let Ok(interval) = obj.extract::<PyRef<'_, PyInterval>>() {
-        let closed = match interval.closed.as_str() {
-            "left" => fp_types::IntervalClosed::Left,
-            "both" => fp_types::IntervalClosed::Both,
-            "neither" => fp_types::IntervalClosed::Neither,
-            _ => fp_types::IntervalClosed::Right,
-        };
-        let cell = fp_types::Interval::new(interval.left, interval.right, closed);
-        return Ok(Scalar::Interval(if interval.int_endpoints {
-            cell.with_int_endpoints()
-        } else {
-            cell
-        }));
+        return Ok(Scalar::Interval(interval.core()));
     }
     if let Ok(type_name) = obj.get_type().name() {
         if type_name == "Timedelta"
@@ -7982,6 +7971,15 @@ fn py_to_index_label(obj: &Bound<'_, PyAny>) -> PyResult<IndexLabel> {
     if let Ok(period) = obj.extract::<PyRef<'_, PyPeriod>>() {
         return Ok(IndexLabel::Period(period.inner));
     }
+    // An Interval is the interval label (an IntervalIndex's; c27hq), a
+    // missing one NaN.
+    if let Ok(interval) = obj.extract::<PyRef<'_, PyInterval>>() {
+        return Ok(if interval.is_missing() {
+            IndexLabel::Null(NullKind::NaN)
+        } else {
+            IndexLabel::Interval(interval.core())
+        });
+    }
     // A naive datetime.datetime / a datetime.timedelta is the instant /
     // duration it names, as a Timestamp is (they became their text, so
     // Index([datetime(2024, 1, 1)]) was an object Index of strings).
@@ -8235,6 +8233,8 @@ fn index_label_to_py(py: Python<'_>, label: &IndexLabel) -> PyResult<Py<PyAny>> 
         IndexLabel::Object(object) => scalar_to_py(py, &Scalar::Object(object.clone())),
         // A period label is a Period (NaT for its NaT; 45fzr).
         IndexLabel::Period(period) => scalar_to_py(py, &Scalar::Period(*period)),
+        // An interval label is an Interval (c27hq).
+        IndexLabel::Interval(interval) => PyInterval::of(interval).into_py_any(py),
         IndexLabel::Null(NullKind::NaT) => nat_object(py),
         IndexLabel::Null(NullKind::NaN) => f64::NAN.into_py_any(py),
         IndexLabel::Null(NullKind::Null) => Ok(py.None()),
@@ -8364,11 +8364,14 @@ fn row_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
 
 /// `index` as the CategoricalIndex its category metadata describes, when
 /// the core's CategoricalIndex can hold it (text labels and categories, no
-/// missing label); None for any other index.
+/// missing label); None for any other index. Interval categories (pd.cut's)
+/// go in as their text, as they did before intervals were labels, until the
+/// core's CategoricalIndex holds any label (br-frankenpandas-lztvp).
 fn categorical_index_of(index: &Index) -> Option<CategoricalIndex> {
     let categories = index.categories()?;
     let text = |label: &IndexLabel| match label {
         IndexLabel::Utf8(text) => Some(text.clone()),
+        IndexLabel::Interval(interval) => Some(interval.to_string()),
         _ => None,
     };
     let labels: Option<Vec<String>> = index.labels().iter().map(text).collect();
@@ -8633,6 +8636,27 @@ fn flat_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
         // Periods of one freq are a PeriodIndex (they were text; 45fzr).
         if let Some(inner) = PeriodIndex::from_index(index) {
             return Ok(Py::new(py, PyPeriodIndex { inner })?.into_any());
+        }
+        // Intervals are an IntervalIndex (they were text; c27hq).
+        if labels
+            .iter()
+            .all(|label| matches!(label, IndexLabel::Interval(_)))
+        {
+            let intervals = labels
+                .iter()
+                .filter_map(|label| match label {
+                    IndexLabel::Interval(interval) => Some(PyInterval::of(interval)),
+                    _ => None,
+                })
+                .collect();
+            return Ok(Py::new(
+                py,
+                PyIntervalIndex {
+                    intervals,
+                    name: index.name().map(ToString::to_string),
+                },
+            )?
+            .into_any());
         }
     }
     Ok(Py::new(
@@ -8899,6 +8923,7 @@ fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
         IndexLabel::Bool(b) => Scalar::Bool(*b),
         IndexLabel::Object(object) => Scalar::Object(object.clone()),
         IndexLabel::Period(period) => Scalar::Period(*period),
+        IndexLabel::Interval(interval) => Scalar::Interval(*interval),
         IndexLabel::Null(k) => Scalar::Null(*k),
     }
 }
@@ -10733,6 +10758,7 @@ impl PyIndex {
             IndexLabel::Datetime64(d) => *d != 0,
             IndexLabel::Object(object) => object.as_list().is_none_or(|items| !items.is_empty()),
             IndexLabel::Period(period) => !period.is_nat(),
+            IndexLabel::Interval(_) => true,
             IndexLabel::Null(_) => false,
         })
     }
@@ -10747,6 +10773,7 @@ impl PyIndex {
             IndexLabel::Datetime64(d) => *d != 0,
             IndexLabel::Object(object) => object.as_list().is_none_or(|items| !items.is_empty()),
             IndexLabel::Period(period) => !period.is_nat(),
+            IndexLabel::Interval(_) => true,
             IndexLabel::Null(_) => false,
         })
     }
@@ -11346,6 +11373,7 @@ impl PyIndex {
                     IndexLabel::Datetime64(d) => Scalar::Datetime64(*d),
                     IndexLabel::Object(object) => Scalar::Object(object.clone()),
                     IndexLabel::Period(period) => Scalar::Period(*period),
+                    IndexLabel::Interval(interval) => Scalar::Interval(*interval),
                     IndexLabel::Null(k) => Scalar::Null(*k),
                 })
                 .collect(),
@@ -11385,6 +11413,7 @@ impl PyIndex {
                     IndexLabel::Datetime64(d) => Scalar::Datetime64(*d),
                     IndexLabel::Object(object) => Scalar::Object(object.clone()),
                     IndexLabel::Period(period) => Scalar::Period(*period),
+                    IndexLabel::Interval(interval) => Scalar::Interval(*interval),
                     IndexLabel::Null(k) => Scalar::Null(*k),
                 })
                 .collect(),
@@ -15320,7 +15349,7 @@ impl PyMultiIndex {
                         Scalar::Datetime64(d) => IndexLabel::Datetime64(*d),
                         Scalar::Timedelta64(t) => IndexLabel::Timedelta64(*t),
                         Scalar::Period(p) => IndexLabel::Int64(p.ordinal),
-                        Scalar::Interval(inv) => IndexLabel::Utf8(inv.to_string()),
+                        Scalar::Interval(inv) => IndexLabel::Interval(*inv),
                         Scalar::Object(object) => IndexLabel::Object(object.clone()),
                         Scalar::Null(k) => IndexLabel::Null(*k),
                     })
@@ -24705,6 +24734,7 @@ fn sort_union_labels(labels: &mut [IndexLabel]) -> PyResult<()> {
         // Ord); the core cannot name their class.
         IndexLabel::Object(_) => "object",
         IndexLabel::Period(_) => "Period",
+        IndexLabel::Interval(_) => "Interval",
         IndexLabel::Null(_) => "NoneType",
     };
     let number = |label: &IndexLabel| match label {
@@ -33154,6 +33184,8 @@ impl PySeriesLoc {
     /// labels, and a duplicated label returns every matching row.
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let key = &resolve_callable_key(self.parent.bind(py).as_any(), key)?;
+        // A point over an IntervalIndex is the interval(s) holding it.
+        let key = &interval_point_key(py, self.inner.index(), key)?;
         // A MultiIndex key (s.loc['y'], s.loc[('y', 1)]; fvsao.36).
         if let Some(selected) = series_multiindex_loc(py, &self.inner, key, false)? {
             return Ok(selected);
@@ -48277,6 +48309,54 @@ fn loc_key_error(e: impl std::fmt::Display) -> PyErr {
     PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string())
 }
 
+/// pandas' IntervalIndex lookup of a point (`s.loc[1.5]`): a real-number
+/// `key` over an index of intervals answers the intervals containing it -
+/// one as that Interval, several as a list of them (a Series), none pandas'
+/// KeyError of the point; any other key or index as it is. The point was a
+/// KeyError (br-frankenpandas-c27hq).
+fn interval_point_key<'py>(
+    py: Python<'py>,
+    index: &Index,
+    key: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let labels = index.labels();
+    let number = !key.is_instance_of::<pyo3::types::PyBool>()
+        && (key.is_instance_of::<pyo3::types::PyInt>()
+            || key.is_instance_of::<pyo3::types::PyFloat>());
+    if !number
+        || labels.is_empty()
+        || !labels
+            .iter()
+            .all(|label| matches!(label, IndexLabel::Interval(_)))
+    {
+        return Ok(key.clone());
+    }
+    let point = key.extract::<f64>()?;
+    let mut hits: Vec<&fp_types::Interval> = Vec::new();
+    for label in labels {
+        if let IndexLabel::Interval(interval) = label
+            && interval.contains(point)
+            && !hits.contains(&interval)
+        {
+            hits.push(interval);
+        }
+    }
+    match hits.as_slice() {
+        [] => Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+            key.clone().unbind(),
+        )),
+        [interval] => PyInterval::of(interval).into_bound_py_any(py),
+        several => Ok(PyList::new(
+            py,
+            several
+                .iter()
+                .map(|interval| PyInterval::of(interval))
+                .collect::<Vec<_>>(),
+        )?
+        .into_any()),
+    }
+}
+
 /// pandas' KeyError for `.loc` list labels `index` lacks: none there,
 /// "None of [<the key as an Index named as `index`>] are in the [index]";
 /// some, "<the missing ones, once each> not in index"; None when all are
@@ -51015,6 +51095,8 @@ impl PyDataFrameLoc {
 
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let key = &resolve_callable_key(self.parent.bind(py).as_any(), key)?;
+        // A row point over an IntervalIndex is the interval(s) holding it.
+        let key = &interval_point_key(py, self.inner.index(), key)?;
         // Row MultiIndex: an outer label or a tuple prefix selects rows,
         // tried first as pandas does (df.loc['x'], df.loc[('x', 2)]); a
         // 2-tuple that matches nothing is then (rows, cols) below. They raised
@@ -72027,7 +72109,8 @@ fn scalar_to_index_label_converter(s: &Scalar) -> IndexLabel {
         // A period is its own label (it was its ordinal - pd.Index of
         // periods held ints; 45fzr).
         Scalar::Period(p) => IndexLabel::Period(*p),
-        Scalar::Interval(inv) => IndexLabel::Utf8(inv.to_string()),
+        // An interval is its own label (it was its text; c27hq).
+        Scalar::Interval(inv) => IndexLabel::Interval(*inv),
         Scalar::Object(object) => IndexLabel::Object(object.clone()),
         Scalar::Null(k) => IndexLabel::Null(*k),
     }
@@ -74105,6 +74188,22 @@ impl PyInterval {
         })
     }
 
+    /// The core interval this Python Interval is, its endpoint type kept.
+    fn core(&self) -> fp_types::Interval {
+        let closed = match self.closed.as_str() {
+            "left" => fp_types::IntervalClosed::Left,
+            "both" => fp_types::IntervalClosed::Both,
+            "neither" => fp_types::IntervalClosed::Neither,
+            _ => fp_types::IntervalClosed::Right,
+        };
+        let interval = fp_types::Interval::new(self.left, self.right, closed);
+        if self.int_endpoints {
+            interval.with_int_endpoints()
+        } else {
+            interval
+        }
+    }
+
     /// The Python Interval of `interval`, its endpoint type kept.
     fn of(interval: &fp_types::Interval) -> Self {
         Self {
@@ -74536,6 +74635,17 @@ impl PyIntervalIndex {
     #[getter]
     fn name(&self) -> Option<String> {
         self.name.clone()
+    }
+
+    /// pandas' `name` is writable (crosstab names its index so; it was
+    /// refused, br-frankenpandas-c27hq).
+    #[setter]
+    fn set_name(&mut self, name: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        self.name = match name.filter(|name| !name.is_none()) {
+            Some(name) => Some(name.str()?.to_string()),
+            None => None,
+        };
+        Ok(())
     }
 
     /// pandas' `length`: each interval's right - left, int64 for int

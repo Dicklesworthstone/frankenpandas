@@ -18518,6 +18518,7 @@ fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
         IndexLabel::Datetime64(value) => Scalar::Utf8(format_datetime_ns(*value)),
         IndexLabel::Object(value) => Scalar::Object(value.clone()),
         IndexLabel::Period(value) => Scalar::Period(*value),
+        IndexLabel::Interval(value) => Scalar::Interval(*value),
         // Typed-null label round-trips to the same-kind missing scalar.
         IndexLabel::Null(kind) => Scalar::Null(*kind),
     }

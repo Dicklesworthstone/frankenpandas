@@ -621,7 +621,7 @@ fn emit_groupby_result<'a>(
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
             Scalar::Period(v) => IndexLabel::Period(*v),
-            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+            Scalar::Interval(iv) => IndexLabel::Interval(*iv),
             Scalar::Object(object) => IndexLabel::Object(object.clone()),
         });
         out_values.push(Scalar::Float64(sum));
@@ -793,7 +793,7 @@ fn groupby_sum_timedelta64(
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
             Scalar::Period(v) => IndexLabel::Period(*v),
-            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+            Scalar::Interval(iv) => IndexLabel::Interval(*iv),
             Scalar::Object(object) => IndexLabel::Object(object.clone()),
         });
         out_values.push(Scalar::Timedelta64(sum));
@@ -878,7 +878,7 @@ fn groupby_sum_utf8(
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
             Scalar::Period(v) => IndexLabel::Period(*v),
-            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+            Scalar::Interval(iv) => IndexLabel::Interval(*iv),
             Scalar::Object(object) => IndexLabel::Object(object.clone()),
         });
         out_values.push(Scalar::Utf8(joined));
@@ -990,7 +990,7 @@ fn groupby_sum_int64(
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
             Scalar::Period(v) => IndexLabel::Period(*v),
-            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+            Scalar::Interval(iv) => IndexLabel::Interval(*iv),
             Scalar::Object(object) => IndexLabel::Object(object.clone()),
         });
         out_values.push(match i64::try_from(total) {
@@ -1936,7 +1936,7 @@ fn try_groupby_count_size_counter(
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
             Scalar::Period(v) => IndexLabel::Period(*v),
-            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+            Scalar::Interval(iv) => IndexLabel::Interval(*iv),
             Scalar::Object(object) => IndexLabel::Object(object.clone()),
         });
         out_values.push(Scalar::Int64(if matches!(func, AggFunc::Count) {
@@ -2012,7 +2012,7 @@ fn try_groupby_mean_numeric_counter(
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
             Scalar::Period(v) => IndexLabel::Period(*v),
-            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+            Scalar::Interval(iv) => IndexLabel::Interval(*iv),
             Scalar::Object(object) => IndexLabel::Object(object.clone()),
         });
         out_values.push(if *count == 0 {
@@ -2128,7 +2128,7 @@ fn try_groupby_var_std_numeric_counter(
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
             Scalar::Period(v) => IndexLabel::Period(*v),
-            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+            Scalar::Interval(iv) => IndexLabel::Interval(*iv),
             Scalar::Object(object) => IndexLabel::Object(object.clone()),
         });
         out_values.push(if group.count <= 1 {
@@ -2157,7 +2157,7 @@ fn scalar_group_label(label: &Scalar) -> IndexLabel {
         Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
         Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
         Scalar::Period(v) => IndexLabel::Period(*v),
-        Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+        Scalar::Interval(iv) => IndexLabel::Interval(*iv),
         Scalar::Object(object) => IndexLabel::Object(object.clone()),
     }
 }
@@ -2482,7 +2482,7 @@ fn try_groupby_min_max_scalar_slot(
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
             Scalar::Period(v) => IndexLabel::Period(*v),
-            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+            Scalar::Interval(iv) => IndexLabel::Interval(*iv),
             Scalar::Object(object) => IndexLabel::Object(object.clone()),
         });
         out_values.push(if *invalid {
@@ -2561,7 +2561,7 @@ fn try_groupby_first_last_scalar_slot(
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
             Scalar::Period(v) => IndexLabel::Period(*v),
-            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+            Scalar::Interval(iv) => IndexLabel::Interval(*iv),
             Scalar::Object(object) => IndexLabel::Object(object.clone()),
         });
         out_values.push(slot.clone().unwrap_or(Scalar::Null(NullKind::NaN)));
@@ -2667,7 +2667,7 @@ fn try_groupby_sum_prod_integer_counter(
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
             Scalar::Period(v) => IndexLabel::Period(*v),
-            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+            Scalar::Interval(iv) => IndexLabel::Interval(*iv),
             Scalar::Object(object) => IndexLabel::Object(object.clone()),
         });
         out_values.push(if take_sum {
@@ -2762,7 +2762,7 @@ fn try_groupby_sum_prod_float_counter(
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
             Scalar::Period(v) => IndexLabel::Period(*v),
-            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+            Scalar::Interval(iv) => IndexLabel::Interval(*iv),
             Scalar::Object(object) => IndexLabel::Object(object.clone()),
         });
         out_values.push(Scalar::Float64(if take_sum {
@@ -3049,7 +3049,7 @@ pub fn groupby_agg(
             Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
             Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
             Scalar::Period(v) => IndexLabel::Period(*v),
-            Scalar::Interval(iv) => IndexLabel::Utf8(format!("{iv}")),
+            Scalar::Interval(iv) => IndexLabel::Interval(*iv),
             Scalar::Object(object) => IndexLabel::Object(object.clone()),
         });
 

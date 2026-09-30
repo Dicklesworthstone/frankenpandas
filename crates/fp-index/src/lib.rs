@@ -181,6 +181,12 @@ pub enum IndexLabel {
     /// (ordinal `i64::MIN`) is missing. Before `Null` so null labels still
     /// sort last.
     Period(fp_types::Period),
+    /// An interval, an IntervalIndex's label (br-frankenpandas-c27hq): a
+    /// Series / DataFrame row index, value_counts(bins=), groupby over
+    /// pd.cut and a cut column's value_counts keep them (they were their
+    /// text). Ordered by left, then right endpoint; before `Null` so null
+    /// labels still sort last.
+    Interval(fp_types::Interval),
     /// Typed missing label (br-frankenpandas-joeff): lets value_counts
     /// (dropna=False) and friends keep pandas' distinct None / nan / NaT
     /// buckets instead of collapsing them or colliding with genuine
@@ -245,7 +251,8 @@ impl IndexLabel {
             Self::Bool(_) => 4,
             Self::Object(_) => 5,
             Self::Period(_) => 6,
-            Self::Null(_) => 7,
+            Self::Interval(_) => 7,
+            Self::Null(_) => 8,
         }
     }
 }
@@ -264,6 +271,7 @@ impl PartialEq for IndexLabel {
             (Self::Bool(a), Self::Bool(b)) => a == b,
             (Self::Object(a), Self::Object(b)) => a == b,
             (Self::Period(a), Self::Period(b)) => a == b,
+            (Self::Interval(a), Self::Interval(b)) => a == b,
             (Self::Null(a), Self::Null(b)) => a == b,
             _ => false,
         }
@@ -294,6 +302,7 @@ impl std::hash::Hash for IndexLabel {
             Self::Bool(flag) => flag.hash(state),
             Self::Object(object) => object.hash(state),
             Self::Period(period) => period.hash(state),
+            Self::Interval(interval) => interval.hash(state),
             Self::Null(kind) => kind.hash(state),
         }
     }
@@ -312,6 +321,7 @@ impl Ord for IndexLabel {
             (Self::Bool(a), Self::Bool(b)) => a.cmp(b),
             (Self::Object(a), Self::Object(b)) => a.cmp(b),
             (Self::Period(a), Self::Period(b)) => a.cmp(b),
+            (Self::Interval(a), Self::Interval(b)) => a.cmp(b),
             (Self::Null(a), Self::Null(b)) => a.cmp(b),
             _ => self.kind_rank().cmp(&other.kind_rank()),
         }
@@ -350,7 +360,11 @@ impl IndexLabel {
             Self::Datetime64(value) => *value == i64::MIN,
             Self::Float64(v) => v.0.is_nan(),
             Self::Period(period) => period.is_nat(),
-            Self::Int64(_) | Self::Utf8(_) | Self::Bool(_) | Self::Object(_) => false,
+            Self::Int64(_)
+            | Self::Utf8(_)
+            | Self::Bool(_)
+            | Self::Object(_)
+            | Self::Interval(_) => false,
             Self::Null(_) => true,
         }
     }
@@ -414,8 +428,9 @@ fn index_label_is_truthy(label: &IndexLabel) -> bool {
         IndexLabel::Datetime64(v) => *v != 0,
         // Python truth: an empty list is false, any other object true.
         IndexLabel::Object(object) => object.as_list().is_none_or(|items| !items.is_empty()),
-        // A Period object is true (its NaT was missing above).
-        IndexLabel::Period(_) => true,
+        // A Period object is true (its NaT was missing above), an Interval
+        // object too.
+        IndexLabel::Period(_) | IndexLabel::Interval(_) => true,
         // Unreachable: is_missing() returned true above for every Null.
         IndexLabel::Null(_) => false,
     }
@@ -480,6 +495,8 @@ impl fmt::Display for IndexLabel {
             Self::Object(object) => f.write_str(&object.pprint()),
             // A period as its calendar text (`2024-03`, `2024Q1`, NaT).
             Self::Period(period) => write!(f, "{period}"),
+            // An interval as pandas prints it (`(0, 1]`).
+            Self::Interval(interval) => write!(f, "{interval}"),
             // Matches pandas' REPR of missing labels in an index (None / NaN /
             // NaT — note uppercase NaN: the formatter surface, unlike
             // str(nan)=='nan' which astype(str) uses). Verified pandas 2.2.3.
@@ -761,13 +778,14 @@ fn detect_sort_order(labels: &[IndexLabel]) -> SortOrder {
             Some(IndexLabel::Utf8(_)) => SortOrder::AscendingUtf8,
             Some(IndexLabel::Timedelta64(_)) => SortOrder::AscendingTimedelta64,
             Some(IndexLabel::Datetime64(_)) => SortOrder::AscendingDatetime64,
-            // Float64/Bool/Object/Period/Null labels use the general
+            // Float64/Bool/Object/Period/Interval/Null labels use the general
             // (non-typed) backend.
             Some(
                 IndexLabel::Float64(_)
                 | IndexLabel::Bool(_)
                 | IndexLabel::Object(_)
                 | IndexLabel::Period(_)
+                | IndexLabel::Interval(_)
                 | IndexLabel::Null(_),
             ) => SortOrder::Unsorted,
         };
@@ -5313,10 +5331,13 @@ impl Index {
                     IndexLabel::Datetime64(ns) => IndexLabel::Int64(*ns),
                     // A period is its ordinal (NaT's too), as pandas'.
                     IndexLabel::Period(period) => IndexLabel::Int64(period.ordinal),
-                    // Missing labels and objects have no integer form;
-                    // preserved like unparseable strings (pandas astype(int)
-                    // raises on NaN — callers reject before reaching here).
-                    IndexLabel::Object(_) | IndexLabel::Null(_) => l.clone(),
+                    // Missing labels, objects and intervals have no integer
+                    // form; preserved like unparseable strings (pandas
+                    // astype(int) raises on them — callers reject before
+                    // reaching here).
+                    IndexLabel::Object(_) | IndexLabel::Interval(_) | IndexLabel::Null(_) => {
+                        l.clone()
+                    }
                 })
                 .collect(),
         ))
@@ -5351,6 +5372,11 @@ impl Index {
                             "Cannot cast PeriodIndex to dtype float64".to_owned(),
                         ));
                     }
+                    IndexLabel::Interval(_) => {
+                        return Err(IndexError::InvalidArgument(
+                            "Cannot cast IntervalIndex to dtype float64".to_owned(),
+                        ));
+                    }
                     IndexLabel::Object(object) => {
                         return Err(IndexError::InvalidArgument(format!(
                             "float() argument must be a string or a real number, not {}",
@@ -5382,7 +5408,8 @@ impl Index {
                     IndexLabel::Period(period) => !period.is_nat(),
                     IndexLabel::Null(_)
                     | IndexLabel::Timedelta64(_)
-                    | IndexLabel::Datetime64(_) => {
+                    | IndexLabel::Datetime64(_)
+                    | IndexLabel::Interval(_) => {
                         return Err(IndexError::InvalidArgument(format!(
                             "cannot cast index label {label:?} to bool"
                         )));
@@ -5433,6 +5460,8 @@ impl Index {
                     IndexLabel::Object(object) => IndexLabel::Utf8(object.to_string()),
                     // A period's calendar text, NaT's 'NaT'.
                     IndexLabel::Period(period) => IndexLabel::Utf8(period.to_string()),
+                    // An interval's str ('(0, 1]').
+                    IndexLabel::Interval(interval) => IndexLabel::Utf8(interval.to_string()),
                     // astype(str) uses Python str() forms: str(None)=='None',
                     // str(nan)=='nan' (LOWERCASE, unlike the repr surface),
                     // str(NaT)=='NaT'. Verified pandas 2.2.3.
@@ -5938,6 +5967,7 @@ impl Index {
                 | IndexLabel::Datetime64(_)
                 | IndexLabel::Object(_)
                 | IndexLabel::Period(_)
+                | IndexLabel::Interval(_)
                 | IndexLabel::Null(_) => 8,
                 IndexLabel::Bool(_) => 1,
                 IndexLabel::Utf8(s) => {
@@ -6491,6 +6521,7 @@ impl Index {
             // Periods of one freq (a NaT beside them too); another freq
             // among them was mixed above.
             IndexLabel::Period(_) => "period",
+            IndexLabel::Interval(_) => "interval",
             // The core cannot read an object's kind (pandas says "date" for
             // datetime.date labels); and unreachable for Null: `first` comes
             // from the non-missing iterator and every Null label is_missing.
@@ -7163,6 +7194,7 @@ impl<'a> IndexStringAccessor<'a> {
                 | IndexLabel::Datetime64(_)
                 | IndexLabel::Object(_)
                 | IndexLabel::Period(_)
+                | IndexLabel::Interval(_)
                 | IndexLabel::Null(_) => None,
             })
             .collect()
@@ -7334,6 +7366,7 @@ where
             | IndexLabel::Timedelta64(_)
             | IndexLabel::Object(_)
             | IndexLabel::Period(_)
+            | IndexLabel::Interval(_)
             | IndexLabel::Null(_) => None,
         })
         .collect()
@@ -7368,6 +7401,7 @@ fn datetime_label_time_nanos(label: &IndexLabel) -> Option<i64> {
         | IndexLabel::Timedelta64(_)
         | IndexLabel::Object(_)
         | IndexLabel::Period(_)
+        | IndexLabel::Interval(_)
         | IndexLabel::Null(_) => None,
     }
 }
@@ -7408,6 +7442,7 @@ where
             | IndexLabel::Datetime64(_)
             | IndexLabel::Object(_)
             | IndexLabel::Period(_)
+            | IndexLabel::Interval(_)
             | IndexLabel::Null(_) => None,
         })
         .collect()
@@ -8452,6 +8487,7 @@ impl DatetimeIndex {
                 | IndexLabel::Datetime64(_)
                 | IndexLabel::Object(_)
                 | IndexLabel::Period(_)
+                | IndexLabel::Interval(_)
                 | IndexLabel::Null(_) => None,
             })
             .collect()
@@ -8498,6 +8534,7 @@ impl DatetimeIndex {
                 | IndexLabel::Timedelta64(_)
                 | IndexLabel::Object(_)
                 | IndexLabel::Period(_)
+                | IndexLabel::Interval(_)
                 | IndexLabel::Null(_) => i64::MIN,
             })
             .collect()
@@ -10478,6 +10515,7 @@ impl TimedeltaIndex {
                 | IndexLabel::Datetime64(_)
                 | IndexLabel::Object(_)
                 | IndexLabel::Period(_)
+                | IndexLabel::Interval(_)
                 | IndexLabel::Null(_) => Timedelta::NAT,
             })
             .collect()
@@ -19684,6 +19722,7 @@ impl MultiIndex {
             Some(IndexLabel::Null(fp_types::NullKind::NaN)) => "float",
             Some(IndexLabel::Null(fp_types::NullKind::NaT)) => "NaTType",
             Some(IndexLabel::Period(_)) => "Period",
+            Some(IndexLabel::Interval(_)) => "Interval",
             Some(IndexLabel::Object(_)) | None => "object",
         }
     }
@@ -20105,6 +20144,7 @@ impl MultiIndex {
                 | IndexLabel::Datetime64(_)
                 | IndexLabel::Object(_)
                 | IndexLabel::Period(_)
+                | IndexLabel::Interval(_)
                 | IndexLabel::Null(_) => 8,
                 IndexLabel::Bool(_) => 1,
                 IndexLabel::Utf8(value) => {
@@ -22391,6 +22431,55 @@ mod tests {
                 .is_err()
         );
         assert!(Index::new(text(&["x"])).categories().is_none());
+    }
+
+    #[test]
+    fn interval_labels_compare_hash_and_print_like_pandas_c27hq() {
+        use std::collections::HashSet;
+
+        use fp_types::{Interval, IntervalClosed};
+        let right = |left: f64, right: f64| Interval::new(left, right, IntervalClosed::Right);
+        let a = IndexLabel::Interval(right(0.0, 1.0));
+        let b = IndexLabel::Interval(right(1.0, 2.0));
+        // An interval is a present label, equal to itself whatever the
+        // endpoints' type, printed as pandas prints it.
+        assert!(!a.is_missing());
+        assert_eq!(
+            a,
+            IndexLabel::Interval(right(0.0, 1.0).with_int_endpoints())
+        );
+        assert_eq!(b.to_string(), "(1.0, 2.0]");
+        // Ordered by left then right endpoint, before missing labels.
+        let mut labels = vec![
+            IndexLabel::Null(fp_types::NullKind::NaN),
+            b.clone(),
+            IndexLabel::Interval(right(0.0, 2.0)),
+            a.clone(),
+        ];
+        labels.sort();
+        assert_eq!(
+            labels,
+            vec![
+                a.clone(),
+                IndexLabel::Interval(right(0.0, 2.0)),
+                b.clone(),
+                IndexLabel::Null(fp_types::NullKind::NaN),
+            ]
+        );
+        // Equal intervals hash alike (-0.0 is 0.0), so an index finds them.
+        let set: HashSet<IndexLabel> = [a.clone(), IndexLabel::Interval(right(-0.0, 1.0))]
+            .into_iter()
+            .collect();
+        assert_eq!(set.len(), 1);
+        let index = Index::new(vec![b.clone(), a.clone()]);
+        assert_eq!(index.position(&a), Some(1));
+        // NEGATIVE: the closed side is part of the label, and an interval is
+        // not its text.
+        assert_ne!(
+            a,
+            IndexLabel::Interval(Interval::new(0.0, 1.0, IntervalClosed::Left))
+        );
+        assert_ne!(a, IndexLabel::Utf8("(0.0, 1.0]".to_owned()));
     }
 
     #[test]

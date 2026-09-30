@@ -21533,3 +21533,43 @@ _E80_CASES = {
 def test_everyday80_multiindex_codes_are_arrays_like_pandas_bl9gf(case: str) -> None:
     run = _E80_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-c27hq: an index could not hold intervals - value_counts
+# (bins=), a Series on an IntervalIndex, a groupby over interval values
+# labelled with the intervals' text, and .loc of a point was a KeyError.
+def _e81_shown(obj: Any) -> list:
+    index = obj.index
+    return [type(index).__name__, [repr(label) for label in index.tolist()], obj.values.tolist()]
+
+
+def _e81_series(m: Any) -> Any:
+    return m.Series([1, 2, 3], index=m.IntervalIndex.from_breaks([0, 1, 2, 3]))
+
+
+_E81_CASES = {
+    "series on IntervalIndex": lambda m: _e81_shown(_e81_series(m)),
+    "value_counts bins": lambda m: _e81_shown(m.Series([10, 20, 30, 40, 50, 60]).value_counts(bins=3, sort=False)),
+    "value_counts bins sorted": lambda m: _e81_shown(m.Series([1, 1, 5, 9]).value_counts(bins=2)),
+    "value_counts bins left": lambda m: m.Series([10, 20, 30, 40]).value_counts(bins=2, sort=False).index.left.tolist(),
+    "loc point": lambda m: [_e81_series(m).loc[1.5], _e81_series(m).loc[1]],
+    "loc point in two": lambda m: m.Series([1, 2], index=m.IntervalIndex.from_tuples([(0, 2), (1, 3)])).loc[1.5].tolist(),
+    "frame loc point": lambda m: m.DataFrame({"v": [1, 2, 3]}, index=m.IntervalIndex.from_breaks([0, 1, 2, 3])).loc[2.5].tolist(),
+    "sort_index descending": lambda m: _e81_shown(_e81_series(m).sort_index(ascending=False)),
+    "iloc slice": lambda m: _e81_shown(_e81_series(m).iloc[1:]),
+    "groupby interval values": lambda m: _e81_shown(
+        m.Series([1, 2, 3]).groupby(m.Series([m.Interval(0, 1), m.Interval(1, 2), m.Interval(0, 1)])).sum()
+    ),
+    # Negatives: already pandas'.
+    "loc point outside": lambda m: _e81_series(m).loc[5],
+    "loc interval key": lambda m: _e81_series(m).loc[m.Interval(1, 2)],
+    "cut value_counts class": lambda m: type(m.cut(m.Series([10, 20, 30, 40]), 2).value_counts().index).__name__,
+    "float index loc": lambda m: m.Series([1, 2], index=[0.5, 1.5]).loc[1.5],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E81_CASES))
+def test_everyday81_index_holds_intervals_like_pandas_c27hq(case: str) -> None:
+    run = _E81_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

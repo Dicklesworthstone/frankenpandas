@@ -8703,6 +8703,47 @@ impl PartialEq for Interval {
     }
 }
 
+/// An interval as a label (an IntervalIndex's; br-frankenpandas-c27hq): its
+/// endpoints compare as floats, so only an interval with a NaN endpoint,
+/// which pandas never builds, is unequal to itself.
+impl Eq for Interval {}
+
+impl Interval {
+    /// An endpoint as it compares: -0.0 is 0.0, as `==` has it.
+    fn endpoint_key(value: f64) -> f64 {
+        if value == 0.0 { 0.0 } else { value }
+    }
+}
+
+/// Hashed as it compares: the endpoints (-0.0 as 0.0) and the closed side;
+/// the subtype is not part of the value.
+impl std::hash::Hash for Interval {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        Self::endpoint_key(self.left).to_bits().hash(state);
+        Self::endpoint_key(self.right).to_bits().hash(state);
+        self.closed.hash(state);
+    }
+}
+
+/// pandas' IntervalIndex order: by the left endpoint, then the right, then
+/// the closed side.
+impl Ord for Interval {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        Self::endpoint_key(self.left)
+            .total_cmp(&Self::endpoint_key(other.left))
+            .then_with(|| {
+                Self::endpoint_key(self.right).total_cmp(&Self::endpoint_key(other.right))
+            })
+            .then_with(|| self.closed.cmp(&other.closed))
+    }
+}
+
+impl PartialOrd for Interval {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl Interval {
     /// Construct an interval. No validation on `left <= right` — pandas also
     /// accepts reversed intervals (they're non-empty only if empty-by-design).
