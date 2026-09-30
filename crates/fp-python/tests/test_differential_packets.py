@@ -21931,3 +21931,73 @@ _E88_CASES = {
 def test_everyday88_isna_notna_arrays_like_pandas_ab19z(case: str) -> None:
     run = _E88_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-lztvp: a CategoricalIndex held only non-missing text
+# labels - ints / floats / dates / intervals / None were refused, and an
+# int or NaN-holding category index came back a plain Index.
+def _e89_shown(out: Any) -> list:
+    if hasattr(out, "categories"):
+        return [type(out).__name__, [repr(v) for v in out.tolist()], [repr(v) for v in out.categories.tolist()], out.ordered]
+    if hasattr(out, "index") and hasattr(out, "tolist"):
+        return [type(out.index).__name__, [repr(v) for v in out.index.tolist()], out.tolist()]
+    if hasattr(out, "tolist"):
+        return [type(out).__name__, [repr(v) for v in out.tolist()]]
+    return [repr(out)]
+
+
+def _e89_ints(m: Any) -> Any:
+    return m.CategoricalIndex([3, 1, 3, 2])
+
+
+def _e89_nan(m: Any) -> Any:
+    return m.CategoricalIndex(["b", None, "a", "b"])
+
+
+_E89_CASES = {
+    "ints": lambda m: _e89_shown(_e89_ints(m)),
+    "ints repr": lambda m: [repr(_e89_ints(m))],
+    "ints codes": lambda m: [_e89_ints(m).codes.tolist(), str(_e89_ints(m).codes.dtype)],
+    "ints item": lambda m: [repr(_e89_ints(m)[0]), [repr(v) for v in _e89_ints(m)]],
+    "ints value_counts": lambda m: _e89_shown(_e89_ints(m).value_counts()),
+    "ints rename dict": lambda m: _e89_shown(_e89_ints(m).rename_categories({1: 10})),
+    "ints remove in use": lambda m: _e89_shown(_e89_ints(m).remove_categories(3)),
+    "ints set_categories": lambda m: _e89_shown(_e89_ints(m).set_categories([1, 2])),
+    "floats nan": lambda m: _e89_shown(m.CategoricalIndex([2.5, np.nan, 1.5])),
+    "dates": lambda m: _e89_shown(m.CategoricalIndex(m.to_datetime(["2024-01-02", "2024-01-01"]))),
+    "intervals": lambda m: _e89_shown(m.CategoricalIndex(m.cut([1, 5, 9], [0, 4, 8, 12]))),
+    "nan": lambda m: _e89_shown(_e89_nan(m)),
+    "nan repr": lambda m: [repr(_e89_nan(m))],
+    "nan codes": lambda m: [_e89_nan(m).codes.tolist()],
+    "nan isna": lambda m: [_e89_nan(m).isna().tolist(), _e89_nan(m).hasnans],
+    "nan dropna": lambda m: _e89_shown(_e89_nan(m).dropna()),
+    "nan fillna": lambda m: _e89_shown(_e89_nan(m).fillna("a")),
+    "nan fillna new": lambda m: _e89_shown(_e89_nan(m).fillna("z")),
+    "nan sort_values": lambda m: _e89_shown(_e89_nan(m).sort_values()),
+    "nan value_counts": lambda m: _e89_shown(_e89_nan(m).value_counts()),
+    "outside categories": lambda m: _e89_shown(m.CategoricalIndex(["a", "z"], categories=["a", "b"])),
+    "astype category": lambda m: _e89_shown(m.Index([3, 4, 3]).astype("category")),
+    "Index dtype category": lambda m: _e89_shown(m.Index(["x", "y"], dtype="category")),
+    "set_index int category": lambda m: _e89_shown(
+        m.DataFrame({"k": m.Categorical([2, 1]), "v": [1, 2]}).set_index("k").index
+    ),
+    "set_index nan category": lambda m: _e89_shown(
+        m.DataFrame({"k": m.Categorical(["a", None]), "v": [1, 2]}).set_index("k").index
+    ),
+    "groupby int category": lambda m: _e89_shown(
+        m.DataFrame({"k": m.Categorical([2, 1, 2]), "v": [1, 2, 3]}).groupby("k", observed=False)["v"].sum()
+    ),
+    "cut value_counts intervals": lambda m: [repr(v) for v in m.cut(m.Series([1, 5, 9]), [0, 4, 8, 12]).value_counts().index],
+    "duplicate categories": lambda m: [m.CategoricalIndex(["a"], categories=["a", "a"])],
+    "text scalar": lambda m: [m.CategoricalIndex("abc")],
+    # Negatives: already pandas'.
+    "text labels": lambda m: _e89_shown(m.CategoricalIndex(["b", "a", "b"])),
+    "plain int Index": lambda m: _e89_shown(m.Index([1, 2])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E89_CASES))
+def test_everyday89_categorical_index_any_labels_like_pandas_lztvp(case: str) -> None:
+    run = _E89_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

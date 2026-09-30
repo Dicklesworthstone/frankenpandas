@@ -15486,11 +15486,14 @@ impl RangeIndex {
     }
 }
 
-/// Public pandas-style categorical index wrapper.
+/// Public pandas-style categorical index wrapper: typed labels (text,
+/// numbers, dates, intervals, ...) drawn from typed categories, a missing
+/// label (NaN) holding no category. They were text only
+/// (br-frankenpandas-lztvp).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CategoricalIndex {
-    labels: Vec<String>,
-    categories: Vec<String>,
+    labels: Vec<IndexLabel>,
+    categories: Vec<IndexLabel>,
     ordered: bool,
     name: Option<LabelName>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -15530,24 +15533,33 @@ fn mark_category_rank(seen_ranks: &mut [u64], rank: usize) -> bool {
 }
 
 impl CategoricalIndex {
-    fn category_codes_for(labels: &[String], categories: &[String]) -> Option<Vec<usize>> {
+    fn category_codes_for(labels: &[IndexLabel], categories: &[IndexLabel]) -> Option<Vec<usize>> {
         let map = {
-            let mut map: FxHashMap<&str, usize> = FxHashMap::default();
+            let mut map: FxHashMap<&IndexLabel, usize> = FxHashMap::default();
             for (i, cat) in categories.iter().enumerate() {
-                map.entry(cat.as_str()).or_insert(i);
+                map.entry(cat).or_insert(i);
             }
             map
         };
         let mut codes = Vec::with_capacity(labels.len());
         for label in labels {
-            codes.push(map.get(label.as_str()).copied()?);
+            codes.push(map.get(label).copied()?);
         }
         Some(codes)
     }
 
+    /// A label as the index holds it: any missing one is NaN.
+    fn held(label: IndexLabel) -> IndexLabel {
+        if label.is_missing() {
+            IndexLabel::Null(fp_types::NullKind::NaN)
+        } else {
+            label
+        }
+    }
+
     fn from_parts(
-        labels: Vec<String>,
-        categories: Vec<String>,
+        labels: Vec<IndexLabel>,
+        categories: Vec<IndexLabel>,
         ordered: bool,
         name: Option<LabelName>,
     ) -> Self {
@@ -15561,78 +15573,106 @@ impl CategoricalIndex {
         }
     }
 
+    /// The index of `labels`, its categories the distinct non-missing ones
+    /// in first-seen order; a missing label is NaN.
     #[must_use]
-    pub fn from_values(labels: Vec<String>, ordered: bool) -> Self {
+    pub fn from_values<L: Into<IndexLabel>>(labels: Vec<L>, ordered: bool) -> Self {
         // First-seen dedup in O(n): a side hash set tracks membership while the
         // categories Vec preserves insertion order, replacing the O(n·k)
         // `categories.contains` linear rescan per label.
-        let mut categories = Vec::<String>::new();
-        let mut ranks = FxHashMap::<&str, usize>::default();
+        let labels: Vec<IndexLabel> = labels
+            .into_iter()
+            .map(|label| Self::held(label.into()))
+            .collect();
+        let mut categories = Vec::<IndexLabel>::new();
+        let mut ranks = FxHashMap::<&IndexLabel, usize>::default();
         let mut category_codes = Vec::<usize>::with_capacity(labels.len());
         for label in &labels {
-            let label = label.as_str();
+            if label.is_missing() {
+                continue;
+            }
             let rank = if let Some(rank) = ranks.get(label).copied() {
                 rank
             } else {
                 let rank = categories.len();
                 ranks.insert(label, rank);
-                categories.push(label.to_owned());
+                categories.push(label.clone());
                 rank
             };
             category_codes.push(rank);
         }
         drop(ranks);
+        let complete = category_codes.len() == labels.len();
         Self {
             labels,
             categories,
             ordered,
             name: None,
-            category_codes: Some(category_codes),
+            category_codes: complete.then_some(category_codes),
         }
     }
 
-    pub fn with_categories(
-        labels: Vec<String>,
-        categories: Vec<String>,
+    /// The index of `labels` over `categories`, as pandas' constructor: a
+    /// label outside the categories (or missing) is NaN - it was refused.
+    /// Repeated or missing categories are pandas' errors.
+    pub fn with_categories<L: Into<IndexLabel>, C: Into<IndexLabel>>(
+        labels: Vec<L>,
+        categories: Vec<C>,
         ordered: bool,
     ) -> Result<Self, IndexError> {
-        // O(n+k) membership: hash the category set once, then validate each
-        // label in original order (first offending label still reported).
-        let category_map = {
-            let mut map = FxHashMap::<&str, usize>::default();
-            for (rank, category) in categories.iter().enumerate() {
-                map.entry(category.as_str()).or_insert(rank);
-            }
-            map
-        };
-        let mut category_codes = Vec::<usize>::with_capacity(labels.len());
-        for label in &labels {
-            match category_map.get(label.as_str()).copied() {
-                Some(rank) => category_codes.push(rank),
-                None => {
-                    return Err(IndexError::InvalidArgument(format!(
-                        "CategoricalIndex label {label:?} is not present in categories"
-                    )));
-                }
-            }
+        let categories: Vec<IndexLabel> = categories.into_iter().map(Into::into).collect();
+        if categories.iter().any(IndexLabel::is_missing) {
+            return Err(IndexError::InvalidArgument(
+                "Categorical categories cannot be null".to_owned(),
+            ));
         }
+        // O(n+k) membership: hash the category set once, then place each
+        // label in original order.
+        let mut category_map = FxHashMap::<&IndexLabel, usize>::default();
+        let mut unique = true;
+        for (rank, category) in categories.iter().enumerate() {
+            unique &= category_map.insert(category, rank).is_none();
+        }
+        if !unique {
+            return Err(IndexError::InvalidArgument(
+                "Categorical categories must be unique".to_owned(),
+            ));
+        }
+        let mut category_codes = Vec::<usize>::with_capacity(labels.len());
+        let mut complete = true;
+        let labels: Vec<IndexLabel> = labels
+            .into_iter()
+            .map(|label| {
+                let label = label.into();
+                match category_map.get(&label).copied() {
+                    Some(rank) => {
+                        category_codes.push(rank);
+                        label
+                    }
+                    None => {
+                        complete = false;
+                        IndexLabel::Null(fp_types::NullKind::NaN)
+                    }
+                }
+            })
+            .collect();
         drop(category_map);
         Ok(Self {
             labels,
             categories,
             ordered,
             name: None,
-            category_codes: Some(category_codes),
+            category_codes: complete.then_some(category_codes),
         })
     }
 
     #[must_use]
-    pub fn labels(&self) -> &[String] {
+    pub fn labels(&self) -> &[IndexLabel] {
         &self.labels
     }
 
     #[must_use]
-    pub fn categories(&self) -> &[String] {
+    pub fn categories(&self) -> &[IndexLabel] {
         &self.categories
     }
 
@@ -15717,11 +15757,13 @@ impl CategoricalIndex {
             std::mem::size_of::<String>(),
         );
         if deep {
+            let text_len = |label: &IndexLabel| match label {
+                IndexLabel::Utf8(text) => text.len(),
+                _ => 0,
+            };
             fixed
-                .saturating_add(saturating_usize_sum(self.labels.iter().map(String::len)))
-                .saturating_add(saturating_usize_sum(
-                    self.categories.iter().map(String::len),
-                ))
+                .saturating_add(saturating_usize_sum(self.labels.iter().map(text_len)))
+                .saturating_add(saturating_usize_sum(self.categories.iter().map(text_len)))
                 .saturating_add(self.name.as_ref().map_or(0, |name| name.len()))
         } else {
             fixed
@@ -15733,14 +15775,18 @@ impl CategoricalIndex {
         self.memory_usage(false)
     }
 
+    /// Which labels are missing (it was all false: no label could be).
     #[must_use]
     pub fn isna(&self) -> Vec<bool> {
-        vec![false; self.len()]
+        self.labels.iter().map(IndexLabel::is_missing).collect()
     }
 
     #[must_use]
     pub fn notna(&self) -> Vec<bool> {
-        vec![true; self.len()]
+        self.labels
+            .iter()
+            .map(|label| !label.is_missing())
+            .collect()
     }
 
     /// Categorical labels cannot be differenced without converting to a
@@ -15792,8 +15838,15 @@ impl CategoricalIndex {
         self.category_ranks_are_monotonic(|prev, next| prev >= next)
     }
 
+    /// The distinct non-missing labels, as pandas' `nunique()` (dropna).
     #[must_use]
     pub fn nunique(&self) -> usize {
+        self.distinct_count()
+            .saturating_sub(usize::from(self.labels.iter().any(IndexLabel::is_missing)))
+    }
+
+    /// The distinct labels, a missing one (all are NaN) counted once.
+    fn distinct_count(&self) -> usize {
         if self.labels.len() <= 1 {
             return self.labels.len();
         }
@@ -15811,7 +15864,7 @@ impl CategoricalIndex {
         1
     }
 
-    pub fn item(&self) -> Result<String, IndexError> {
+    pub fn item(&self) -> Result<IndexLabel, IndexError> {
         if self.labels.len() == 1 {
             Ok(self.labels[0].clone())
         } else {
@@ -15887,10 +15940,10 @@ impl CategoricalIndex {
     /// First-occurrence category index for each category name, matching the
     /// semantics of `categories.iter().position(...)` but built once in O(k).
     /// `or_insert` keeps the first index if `categories` somehow has dupes.
-    fn category_index_map(&self) -> FxHashMap<&str, usize> {
-        let mut map: FxHashMap<&str, usize> = FxHashMap::default();
+    fn category_index_map(&self) -> FxHashMap<&IndexLabel, usize> {
+        let mut map: FxHashMap<&IndexLabel, usize> = FxHashMap::default();
         for (i, cat) in self.categories.iter().enumerate() {
-            map.entry(cat.as_str()).or_insert(i);
+            map.entry(cat).or_insert(i);
         }
         map
     }
@@ -15903,9 +15956,9 @@ impl CategoricalIndex {
     }
 
     fn labels_are_unique_by_hash(&self) -> bool {
-        let mut seen: FxHashSet<&str> = FxHashSet::default();
+        let mut seen: FxHashSet<&IndexLabel> = FxHashSet::default();
         for label in &self.labels {
-            if !seen.insert(label.as_str()) {
+            if !seen.insert(label) {
                 return false;
             }
         }
@@ -15913,23 +15966,19 @@ impl CategoricalIndex {
     }
 
     fn unique_label_count_by_hash(&self) -> usize {
-        self.labels
-            .iter()
-            .map(String::as_str)
-            .collect::<FxHashSet<_>>()
-            .len()
+        self.labels.iter().collect::<FxHashSet<_>>().len()
     }
 
     fn labels_are_unique_by_category_rank(&self) -> bool {
         let map = self.category_index_map();
         let mut seen_ranks = vec![0u64; self.categories.len().div_ceil(64)];
-        let mut invalid_seen: FxHashSet<&str> = FxHashSet::default();
+        let mut invalid_seen: FxHashSet<&IndexLabel> = FxHashSet::default();
         for label in &self.labels {
-            if let Some(rank) = map.get(label.as_str()).copied() {
+            if let Some(rank) = map.get(label).copied() {
                 if !mark_category_rank(&mut seen_ranks, rank) {
                     return false;
                 }
-            } else if !invalid_seen.insert(label.as_str()) {
+            } else if !invalid_seen.insert(label) {
                 return false;
             }
         }
@@ -15955,14 +16004,14 @@ impl CategoricalIndex {
     fn unique_label_count_by_category_rank(&self) -> usize {
         let map = self.category_index_map();
         let mut seen_ranks = vec![0u64; self.categories.len().div_ceil(64)];
-        let mut invalid_seen: FxHashSet<&str> = FxHashSet::default();
+        let mut invalid_seen: FxHashSet<&IndexLabel> = FxHashSet::default();
         let mut unique = 0usize;
         for label in &self.labels {
-            if let Some(rank) = map.get(label.as_str()).copied() {
+            if let Some(rank) = map.get(label).copied() {
                 if mark_category_rank(&mut seen_ranks, rank) {
                     unique += 1;
                 }
-            } else if invalid_seen.insert(label.as_str()) {
+            } else if invalid_seen.insert(label) {
                 unique += 1;
             }
         }
@@ -15986,29 +16035,29 @@ impl CategoricalIndex {
         unique
     }
 
-    fn unique_labels_by_hash(&self) -> Vec<String> {
-        let mut seen = FxHashSet::<&str>::default();
-        let mut uniques = Vec::<String>::new();
+    fn unique_labels_by_hash(&self) -> Vec<IndexLabel> {
+        let mut seen = FxHashSet::<&IndexLabel>::default();
+        let mut uniques = Vec::<IndexLabel>::new();
         for label in &self.labels {
-            if seen.insert(label.as_str()) {
+            if seen.insert(label) {
                 uniques.push(label.clone());
             }
         }
         uniques
     }
 
-    fn unique_labels_by_category_rank(&self) -> Vec<String> {
+    fn unique_labels_by_category_rank(&self) -> Vec<IndexLabel> {
         let map = self.category_index_map();
         let mut seen_ranks = vec![0u64; self.categories.len().div_ceil(64)];
-        let mut invalid_seen: FxHashSet<&str> = FxHashSet::default();
+        let mut invalid_seen: FxHashSet<&IndexLabel> = FxHashSet::default();
         let mut uniques =
-            Vec::<String>::with_capacity(self.labels.len().min(self.categories.len()));
+            Vec::<IndexLabel>::with_capacity(self.labels.len().min(self.categories.len()));
         for label in &self.labels {
-            if let Some(rank) = map.get(label.as_str()).copied() {
+            if let Some(rank) = map.get(label).copied() {
                 if mark_category_rank(&mut seen_ranks, rank) {
                     uniques.push(label.clone());
                 }
-            } else if invalid_seen.insert(label.as_str()) {
+            } else if invalid_seen.insert(label) {
                 uniques.push(label.clone());
             }
         }
@@ -16026,7 +16075,7 @@ impl CategoricalIndex {
         }
         let mut seen_ranks = vec![0u64; self.categories.len().div_ceil(64)];
         let mut unique_labels =
-            Vec::<String>::with_capacity(self.labels.len().min(self.categories.len()));
+            Vec::<IndexLabel>::with_capacity(self.labels.len().min(self.categories.len()));
         let mut unique_category_codes =
             Vec::<usize>::with_capacity(self.labels.len().min(self.categories.len()));
         for &rank in category_codes {
@@ -16052,35 +16101,30 @@ impl CategoricalIndex {
         }
     }
 
-    fn value_counts_by_hash(&self) -> Vec<(String, usize)> {
-        let mut order = Vec::<&str>::new();
-        let mut counts = FxHashMap::<&str, usize>::default();
+    fn value_counts_by_hash(&self) -> Vec<(IndexLabel, usize)> {
+        let mut order = Vec::<&IndexLabel>::new();
+        let mut counts = FxHashMap::<&IndexLabel, usize>::default();
         for label in &self.labels {
-            let label = label.as_str();
             let entry = counts.entry(label).or_insert_with(|| {
                 order.push(label);
                 0
             });
             *entry += 1;
         }
-        let mut pairs: Vec<(String, usize)> = order
+        let mut pairs: Vec<(IndexLabel, usize)> = order
             .iter()
-            .map(|label| {
-                let label = *label;
-                (label.to_owned(), counts[label])
-            })
+            .map(|label| ((*label).clone(), counts[label]))
             .collect();
         pairs.sort_by_key(|entry| std::cmp::Reverse(entry.1));
         pairs
     }
 
-    fn value_counts_by_category_rank(&self) -> Vec<(String, usize)> {
+    fn value_counts_by_category_rank(&self) -> Vec<(IndexLabel, usize)> {
         let map = self.category_index_map();
         let mut counts = vec![0usize; self.categories.len()];
-        let mut invalid_counts = FxHashMap::<&str, usize>::default();
-        let mut order = Vec::<&str>::new();
+        let mut invalid_counts = FxHashMap::<&IndexLabel, usize>::default();
+        let mut order = Vec::<&IndexLabel>::new();
         for label in &self.labels {
-            let label = label.as_str();
             if let Some(rank) = map.get(label).copied() {
                 if counts[rank] == 0 {
                     order.push(label);
@@ -16106,7 +16150,7 @@ impl CategoricalIndex {
         pairs
     }
 
-    fn value_counts_by_category_codes(&self, category_codes: &[usize]) -> Vec<(String, usize)> {
+    fn value_counts_by_category_codes(&self, category_codes: &[usize]) -> Vec<(IndexLabel, usize)> {
         if category_codes.len() != self.labels.len() {
             return self.value_counts_by_category_rank();
         }
@@ -16121,7 +16165,7 @@ impl CategoricalIndex {
             }
             *count += 1;
         }
-        let mut pairs: Vec<(String, usize)> = order
+        let mut pairs: Vec<(IndexLabel, usize)> = order
             .into_iter()
             .map(|rank| (self.categories[rank].clone(), counts[rank]))
             .collect();
@@ -16130,17 +16174,16 @@ impl CategoricalIndex {
     }
 
     fn factorize_by_hash(&self) -> (Vec<isize>, Self) {
-        let mut positions = FxHashMap::<&str, isize>::default();
-        let mut uniques = Vec::<String>::new();
+        let mut positions = FxHashMap::<&IndexLabel, isize>::default();
+        let mut uniques = Vec::<IndexLabel>::new();
         let mut codes = Vec::with_capacity(self.labels.len());
         for label in &self.labels {
-            let label = label.as_str();
             if let Some(code) = positions.get(label) {
                 codes.push(*code);
             } else {
                 let code = isize::try_from(uniques.len()).unwrap_or(isize::MAX);
                 positions.insert(label, code);
-                uniques.push(label.to_owned());
+                uniques.push(label.clone());
                 codes.push(code);
             }
         }
@@ -16158,7 +16201,7 @@ impl CategoricalIndex {
             return self.factorize_by_category_rank();
         }
         let mut rank_codes = vec![-1isize; self.categories.len()];
-        let mut unique_labels = Vec::<String>::new();
+        let mut unique_labels = Vec::<IndexLabel>::new();
         let mut unique_category_codes = Vec::<usize>::new();
         let mut codes = Vec::with_capacity(category_codes.len());
         for &rank in category_codes {
@@ -16187,17 +16230,16 @@ impl CategoricalIndex {
     fn factorize_by_category_rank(&self) -> (Vec<isize>, Self) {
         let map = self.category_index_map();
         let mut rank_codes = vec![-1isize; self.categories.len()];
-        let mut invalid_codes = FxHashMap::<&str, isize>::default();
-        let mut uniques = Vec::<String>::new();
+        let mut invalid_codes = FxHashMap::<&IndexLabel, isize>::default();
+        let mut uniques = Vec::<IndexLabel>::new();
         let mut codes = Vec::with_capacity(self.labels.len());
         for label in &self.labels {
-            let label = label.as_str();
             if let Some(rank) = map.get(label).copied() {
                 let mut code = rank_codes[rank];
                 if code < 0 {
                     code = isize::try_from(uniques.len()).unwrap_or(isize::MAX);
                     rank_codes[rank] = code;
-                    uniques.push(label.to_owned());
+                    uniques.push(label.clone());
                 }
                 codes.push(code);
             } else if let Some(code) = invalid_codes.get(label) {
@@ -16205,7 +16247,7 @@ impl CategoricalIndex {
             } else {
                 let code = isize::try_from(uniques.len()).unwrap_or(isize::MAX);
                 invalid_codes.insert(label, code);
-                uniques.push(label.to_owned());
+                uniques.push(label.clone());
                 codes.push(code);
             }
         }
@@ -16223,10 +16265,10 @@ impl CategoricalIndex {
         let mut result = vec![false; n];
         match keep {
             DuplicateKeep::First | DuplicateKeep::Last => {
-                let mut seen: FxHashSet<&str> =
+                let mut seen: FxHashSet<&IndexLabel> =
                     FxHashSet::with_capacity_and_hasher(n, Default::default());
                 let mut mark = |i: usize| {
-                    if !seen.insert(self.labels[i].as_str()) {
+                    if !seen.insert(&self.labels[i]) {
                         result[i] = true;
                     }
                 };
@@ -16241,13 +16283,13 @@ impl CategoricalIndex {
                 }
             }
             DuplicateKeep::None => {
-                let mut counts: FxHashMap<&str, u32> =
+                let mut counts: FxHashMap<&IndexLabel, u32> =
                     FxHashMap::with_capacity_and_hasher(n, Default::default());
                 for label in &self.labels {
-                    *counts.entry(label.as_str()).or_insert(0) += 1;
+                    *counts.entry(label).or_insert(0) += 1;
                 }
                 for (i, label) in self.labels.iter().enumerate() {
-                    result[i] = counts[label.as_str()] > 1;
+                    result[i] = counts[label] > 1;
                 }
             }
         }
@@ -16261,9 +16303,9 @@ impl CategoricalIndex {
         match keep {
             DuplicateKeep::First | DuplicateKeep::Last => {
                 let mut seen_ranks = vec![0u64; self.categories.len().div_ceil(64)];
-                let mut invalid_seen: FxHashSet<&str> = FxHashSet::default();
+                let mut invalid_seen: FxHashSet<&IndexLabel> = FxHashSet::default();
                 let mut mark = |i: usize| {
-                    let label = self.labels[i].as_str();
+                    let label = &self.labels[i];
                     let fresh = if let Some(rank) = map.get(label).copied() {
                         mark_category_rank(&mut seen_ranks, rank)
                     } else {
@@ -16287,10 +16329,9 @@ impl CategoricalIndex {
                 let words = self.categories.len().div_ceil(64);
                 let mut seen_ranks = vec![0u64; words];
                 let mut duplicate_ranks = vec![0u64; words];
-                let mut invalid_seen: FxHashSet<&str> = FxHashSet::default();
-                let mut invalid_duplicates: FxHashSet<&str> = FxHashSet::default();
+                let mut invalid_seen: FxHashSet<&IndexLabel> = FxHashSet::default();
+                let mut invalid_duplicates: FxHashSet<&IndexLabel> = FxHashSet::default();
                 for label in &self.labels {
-                    let label = label.as_str();
                     if let Some(rank) = map.get(label).copied() {
                         let word = rank >> 6;
                         let bit = 1u64 << (rank & 63);
@@ -16304,7 +16345,6 @@ impl CategoricalIndex {
                     }
                 }
                 for (i, label) in self.labels.iter().enumerate() {
-                    let label = label.as_str();
                     result[i] = if let Some(rank) = map.get(label).copied() {
                         let word = rank >> 6;
                         let bit = 1u64 << (rank & 63);
@@ -16387,10 +16427,7 @@ impl CategoricalIndex {
         mut ordered: impl FnMut(Option<usize>, Option<usize>) -> bool,
     ) -> bool {
         let map = self.category_index_map();
-        let mut ranks = self
-            .labels
-            .iter()
-            .map(|label| map.get(label.as_str()).copied());
+        let mut ranks = self.labels.iter().map(|label| map.get(label).copied());
         let Some(mut previous) = ranks.next() else {
             return true;
         };
@@ -16460,51 +16497,65 @@ impl CategoricalIndex {
         let map = self.category_index_map();
         self.labels
             .iter()
-            .map(|label| map.get(label.as_str()).copied())
+            .map(|label| map.get(label).copied())
             .collect()
     }
 
     #[must_use]
-    pub fn values(&self) -> Vec<String> {
+    pub fn values(&self) -> Vec<IndexLabel> {
         self.labels.clone()
     }
 
     #[must_use]
-    pub fn to_list(&self) -> Vec<String> {
+    pub fn to_list(&self) -> Vec<IndexLabel> {
         self.labels.clone()
     }
 
     #[must_use]
-    pub fn tolist(&self) -> Vec<String> {
+    pub fn tolist(&self) -> Vec<IndexLabel> {
         self.to_list()
     }
 
     #[must_use]
-    pub fn to_numpy(&self) -> Vec<String> {
+    pub fn to_numpy(&self) -> Vec<IndexLabel> {
         self.labels.clone()
     }
 
     #[must_use]
-    pub fn array(&self) -> Vec<String> {
+    pub fn array(&self) -> Vec<IndexLabel> {
         self.labels.clone()
     }
 
+    /// The labels as a plain Index (of their own kind: text, numbers,
+    /// intervals, ...).
     #[must_use]
     pub fn to_index(&self) -> Index {
-        Index::from_utf8(self.labels.clone()).set_names(self.name.as_deref())
+        Index::new(self.labels.clone()).set_names(self.name.as_deref())
     }
 
     /// Stringify each label, matching `pd.CategoricalIndex.format()`.
-    /// Labels are already strings so this clones them.
     #[must_use]
     pub fn format(&self) -> Vec<String> {
-        self.labels.clone()
+        self.labels.iter().map(ToString::to_string).collect()
+    }
+
+    /// Whether `value` may be placed in this index: a category, or missing.
+    fn placeable(&self, value: &IndexLabel, op: &str) -> Result<IndexLabel, IndexError> {
+        if value.is_missing() {
+            return Ok(IndexLabel::Null(fp_types::NullKind::NaN));
+        }
+        if !self.categories.contains(value) {
+            return Err(IndexError::InvalidArgument(format!(
+                "{op}: replacement {value:?} is not a category"
+            )));
+        }
+        Ok(value.clone())
     }
 
     /// Replace positions where `cond` is `false` with `other`, matching
-    /// `pd.CategoricalIndex.where(cond, other)`. `other` must already be
-    /// a member of the categories list.
-    pub fn r#where(&self, cond: &[bool], other: &str) -> Result<Self, IndexError> {
+    /// `pd.CategoricalIndex.where(cond, other)`. `other` must be a
+    /// category, or missing (pandas' default).
+    pub fn r#where(&self, cond: &[bool], other: &IndexLabel) -> Result<Self, IndexError> {
         if cond.len() != self.labels.len() {
             return Err(IndexError::LengthMismatch {
                 expected: self.labels.len(),
@@ -16512,22 +16563,16 @@ impl CategoricalIndex {
                 context: "where: cond length must match index length".to_owned(),
             });
         }
-        if !self.categories.iter().any(|cat| cat == other) {
-            return Err(IndexError::InvalidArgument(format!(
-                "where: replacement {other:?} is not a category"
-            )));
-        }
-        let labels: Vec<String> = self
+        let other = self.placeable(other, "where")?;
+        let labels: Vec<IndexLabel> = self
             .labels
             .iter()
             .zip(cond.iter())
-            .map(|(label, &keep)| {
-                if keep {
-                    label.clone()
-                } else {
-                    other.to_owned()
-                }
-            })
+            .map(
+                |(label, &keep)| {
+                    if keep { label.clone() } else { other.clone() }
+                },
+            )
             .collect();
         Ok(Self::from_parts(
             labels,
@@ -16539,7 +16584,7 @@ impl CategoricalIndex {
 
     /// Replace positions where `mask` is `true` with `value`, matching
     /// `pd.CategoricalIndex.putmask(mask, value)`.
-    pub fn putmask(&self, mask: &[bool], value: &str) -> Result<Self, IndexError> {
+    pub fn putmask(&self, mask: &[bool], value: &IndexLabel) -> Result<Self, IndexError> {
         if mask.len() != self.labels.len() {
             return Err(IndexError::LengthMismatch {
                 expected: self.labels.len(),
@@ -16547,18 +16592,14 @@ impl CategoricalIndex {
                 context: "putmask: mask length must match index length".to_owned(),
             });
         }
-        if !self.categories.iter().any(|cat| cat == value) {
-            return Err(IndexError::InvalidArgument(format!(
-                "putmask: replacement {value:?} is not a category"
-            )));
-        }
-        let labels: Vec<String> = self
+        let value = self.placeable(value, "putmask")?;
+        let labels: Vec<IndexLabel> = self
             .labels
             .iter()
             .zip(mask.iter())
             .map(|(label, &replace)| {
                 if replace {
-                    value.to_owned()
+                    value.clone()
                 } else {
                     label.clone()
                 }
@@ -16584,27 +16625,51 @@ impl CategoricalIndex {
         self.notna()
     }
 
-    /// Whether any label is missing, matching
-    /// `pd.CategoricalIndex.hasnans`. Always `false` because the
-    /// FrankenPandas storage carries only non-null Strings.
+    /// Whether any label is missing, matching `pd.CategoricalIndex.hasnans`
+    /// (it was always false: no label could be missing).
     #[must_use]
     pub fn hasnans(&self) -> bool {
-        false
+        self.labels.iter().any(IndexLabel::is_missing)
     }
 
     /// Drop missing positions, matching `pd.CategoricalIndex.dropna()`.
-    /// Returns a clone because there are no missing labels to drop.
     #[must_use]
     pub fn dropna(&self) -> Self {
-        self.clone()
+        Self::from_parts(
+            self.labels
+                .iter()
+                .filter(|label| !label.is_missing())
+                .cloned()
+                .collect(),
+            self.categories.clone(),
+            self.ordered,
+            self.name.clone(),
+        )
     }
 
-    /// Fill missing positions, matching `pd.CategoricalIndex.fillna(value)`.
-    /// Returns a clone because there are no missing labels to fill;
-    /// `value` is accepted for API parity but ignored.
-    #[must_use]
-    pub fn fillna(&self, _value: &str) -> Self {
-        self.clone()
+    /// Fill missing positions with `value`, matching
+    /// `pd.CategoricalIndex.fillna(value)`: with nothing missing the index is
+    /// unchanged; otherwise `value` must be a category (it was ignored).
+    pub fn fillna(&self, value: &IndexLabel) -> Result<Self, IndexError> {
+        if !self.hasnans() {
+            return Ok(self.clone());
+        }
+        let value = self.placeable(value, "fillna")?;
+        Ok(Self::from_parts(
+            self.labels
+                .iter()
+                .map(|label| {
+                    if label.is_missing() {
+                        value.clone()
+                    } else {
+                        label.clone()
+                    }
+                })
+                .collect(),
+            self.categories.clone(),
+            self.ordered,
+            self.name.clone(),
+        ))
     }
 
     /// Mark the categorical as ordered, matching
@@ -16628,13 +16693,14 @@ impl CategoricalIndex {
     /// Extend the categories list with new entries, matching
     /// `pd.CategoricalIndex.add_categories(new)`. Rejects when any new
     /// category is already present.
-    pub fn add_categories(&self, new: Vec<String>) -> Result<Self, IndexError> {
+    pub fn add_categories<L: Into<IndexLabel>>(&self, new: Vec<L>) -> Result<Self, IndexError> {
+        let new: Vec<IndexLabel> = new.into_iter().map(Into::into).collect();
         // O(k_existing + k_new): hash the existing categories once instead of a
         // linear `categories.contains` scan per new entry. First clashing entry
         // (in `new` order) is still the one reported.
-        let existing: FxHashSet<&str> = self.categories.iter().map(String::as_str).collect();
+        let existing: FxHashSet<&IndexLabel> = self.categories.iter().collect();
         for cat in &new {
-            if existing.contains(cat.as_str()) {
+            if existing.contains(cat) {
                 return Err(IndexError::InvalidArgument(format!(
                     "add_categories: {cat:?} is already a category"
                 )));
@@ -16651,50 +16717,53 @@ impl CategoricalIndex {
     }
 
     /// Drop categories from the list, matching
-    /// `pd.CategoricalIndex.remove_categories(removals)`. Rejects when any
-    /// removed category is still in use by a label (FrankenPandas does not
-    /// yet carry NaN-labeled categoricals).
-    pub fn remove_categories(&self, removals: &[String]) -> Result<Self, IndexError> {
-        // Hash both the category set and the (large) label set once so the
-        // per-removal validation is O(1) instead of two linear `contains`
-        // scans — the `self.labels.contains` rescan was O(removals · n_labels).
-        // Per-removal check order (not-a-category before in-use) is preserved,
-        // so the first offending removal and its message are unchanged.
-        let category_set: FxHashSet<&str> = self.categories.iter().map(String::as_str).collect();
-        let label_set: FxHashSet<&str> = self.labels.iter().map(String::as_str).collect();
+    /// `pd.CategoricalIndex.remove_categories(removals)`: each must be a
+    /// category, and a label of a removed one becomes NaN (it was refused,
+    /// no label could be missing; lztvp).
+    pub fn remove_categories(&self, removals: &[IndexLabel]) -> Result<Self, IndexError> {
+        let category_set: FxHashSet<&IndexLabel> = self.categories.iter().collect();
         for cat in removals {
-            if !category_set.contains(cat.as_str()) {
+            if !category_set.contains(cat) {
                 return Err(IndexError::InvalidArgument(format!(
                     "remove_categories: {cat:?} is not a category"
                 )));
             }
-            if label_set.contains(cat.as_str()) {
-                return Err(IndexError::InvalidArgument(format!(
-                    "remove_categories: {cat:?} is still in use by labels"
-                )));
-            }
         }
-        let removals_set: FxHashSet<&String> = removals.iter().collect();
-        let categories: Vec<String> = self
+        let removals_set: FxHashSet<&IndexLabel> = removals.iter().collect();
+        let categories: Vec<IndexLabel> = self
             .categories
             .iter()
             .filter(|cat| !removals_set.contains(cat))
             .cloned()
             .collect();
-        Ok(Self::from_parts(
-            self.labels.clone(),
-            categories,
-            self.ordered,
-            self.name.clone(),
-        ))
+        Ok(self.recategorized(categories, self.ordered))
+    }
+
+    /// This index over `categories`: a label no longer among them is NaN,
+    /// as pandas' `set_categories` / `remove_categories`.
+    fn recategorized(&self, categories: Vec<IndexLabel>, ordered: bool) -> Self {
+        let kept: FxHashSet<&IndexLabel> = categories.iter().collect();
+        let labels: Vec<IndexLabel> = self
+            .labels
+            .iter()
+            .map(|label| {
+                if kept.contains(label) {
+                    label.clone()
+                } else {
+                    IndexLabel::Null(fp_types::NullKind::NaN)
+                }
+            })
+            .collect();
+        drop(kept);
+        Self::from_parts(labels, categories, ordered, self.name.clone())
     }
 
     /// Narrow categories to the set of labels actually present, matching
     /// `pd.CategoricalIndex.remove_unused_categories()`.
     #[must_use]
     pub fn remove_unused_categories(&self) -> Self {
-        let used: FxHashSet<&String> = self.labels.iter().collect();
-        let categories: Vec<String> = self
+        let used: FxHashSet<&IndexLabel> = self.labels.iter().collect();
+        let categories: Vec<IndexLabel> = self
             .categories
             .iter()
             .filter(|cat| used.contains(cat))
@@ -16709,32 +16778,28 @@ impl CategoricalIndex {
     }
 
     /// Replace the categories list, matching
-    /// `pd.CategoricalIndex.set_categories(new_categories)`. Rejects when
-    /// any current label is missing from the new categories list.
-    pub fn set_categories(&self, new_categories: Vec<String>) -> Result<Self, IndexError> {
-        // O(n+k): hash the new category set once rather than scanning the new
-        // categories Vec for every label. First label missing from the new
-        // set (in label order) is still the one reported.
-        let new_set: FxHashSet<&str> = new_categories.iter().map(String::as_str).collect();
-        for label in &self.labels {
-            if !new_set.contains(label.as_str()) {
-                return Err(IndexError::InvalidArgument(format!(
-                    "set_categories: label {label:?} is not in the new categories"
-                )));
-            }
+    /// `pd.CategoricalIndex.set_categories(new_categories)`: a label not
+    /// among the new categories becomes NaN (it was refused; lztvp).
+    pub fn set_categories<L: Into<IndexLabel>>(
+        &self,
+        new_categories: Vec<L>,
+    ) -> Result<Self, IndexError> {
+        let new_categories: Vec<IndexLabel> = new_categories.into_iter().map(Into::into).collect();
+        let mut seen = FxHashSet::<&IndexLabel>::default();
+        if !new_categories.iter().all(|cat| seen.insert(cat)) {
+            return Err(IndexError::InvalidArgument(
+                "Categorical categories must be unique".to_owned(),
+            ));
         }
-        Ok(Self::from_parts(
-            self.labels.clone(),
-            new_categories,
-            self.ordered,
-            self.name.clone(),
-        ))
+        drop(seen);
+        Ok(self.recategorized(new_categories, self.ordered))
     }
 
     /// Rename categories pos-by-pos, matching
     /// `pd.CategoricalIndex.rename_categories(new)`. Rejects when the
-    /// new list has a different length.
-    pub fn rename_categories(&self, new: Vec<String>) -> Result<Self, IndexError> {
+    /// new list has a different length; a missing label stays missing.
+    pub fn rename_categories<L: Into<IndexLabel>>(&self, new: Vec<L>) -> Result<Self, IndexError> {
+        let new: Vec<IndexLabel> = new.into_iter().map(Into::into).collect();
         if new.len() != self.categories.len() {
             return Err(IndexError::InvalidArgument(format!(
                 "rename_categories: expected {} new names, got {}",
@@ -16742,13 +16807,18 @@ impl CategoricalIndex {
                 new.len()
             )));
         }
-        let mapping: std::collections::HashMap<&String, &String> =
+        let mapping: FxHashMap<&IndexLabel, &IndexLabel> =
             self.categories.iter().zip(new.iter()).collect();
-        let labels: Vec<String> = self
+        let labels: Vec<IndexLabel> = self
             .labels
             .iter()
-            .map(|label| (*mapping.get(label).expect("label is a category")).clone())
+            .map(|label| {
+                mapping
+                    .get(label)
+                    .map_or_else(|| label.clone(), |to| (*to).clone())
+            })
             .collect();
+        drop(mapping);
         Ok(Self::from_parts(
             labels,
             new,
@@ -16760,7 +16830,12 @@ impl CategoricalIndex {
     /// Reorder the categories list, matching
     /// `pd.CategoricalIndex.reorder_categories(new, ordered)`. Rejects
     /// when the new list is not a permutation of the existing categories.
-    pub fn reorder_categories(&self, new: Vec<String>, ordered: bool) -> Result<Self, IndexError> {
+    pub fn reorder_categories<L: Into<IndexLabel>>(
+        &self,
+        new: Vec<L>,
+        ordered: bool,
+    ) -> Result<Self, IndexError> {
+        let new: Vec<IndexLabel> = new.into_iter().map(Into::into).collect();
         if new.len() != self.categories.len() {
             return Err(IndexError::InvalidArgument(format!(
                 "reorder_categories: expected {} categories, got {}",
@@ -16768,7 +16843,7 @@ impl CategoricalIndex {
                 new.len()
             )));
         }
-        let existing: FxHashSet<&String> = self.categories.iter().collect();
+        let existing: FxHashSet<&IndexLabel> = self.categories.iter().collect();
         for cat in &new {
             if !existing.contains(cat) {
                 return Err(IndexError::InvalidArgument(format!(
@@ -16776,7 +16851,7 @@ impl CategoricalIndex {
                 )));
             }
         }
-        let new_set: FxHashSet<&String> = new.iter().collect();
+        let new_set: FxHashSet<&IndexLabel> = new.iter().collect();
         if new_set.len() != new.len() {
             return Err(IndexError::InvalidArgument(
                 "reorder_categories: new categories contain duplicates".to_owned(),
@@ -16912,10 +16987,9 @@ impl CategoricalIndex {
         self.transpose()
     }
 
-    /// Flatten labels to a `Vec<String>`, matching
-    /// `pd.CategoricalIndex.ravel()`.
+    /// Flatten the labels, matching `pd.CategoricalIndex.ravel()`.
     #[must_use]
-    pub fn ravel(&self) -> Vec<String> {
+    pub fn ravel(&self) -> Vec<IndexLabel> {
         self.labels.clone()
     }
 
@@ -16934,17 +17008,20 @@ impl CategoricalIndex {
 
     /// Binary-search insertion position, matching
     /// `pd.CategoricalIndex.searchsorted(value, side)`. Forwarded through
-    /// the underlying utf8 Index.
-    pub fn searchsorted(&self, value: &str, side: &str) -> Result<usize, IndexError> {
-        self.to_index()
-            .searchsorted(&IndexLabel::Utf8(value.to_owned()), side)
+    /// the labels' flat Index.
+    pub fn searchsorted(&self, value: &IndexLabel, side: &str) -> Result<usize, IndexError> {
+        self.to_index().searchsorted(value, side)
     }
 
     /// Find positions of `[start, end]` for a label slice, matching
     /// `pd.CategoricalIndex.slice_locs(start, end)`. Requires labels to
-    /// be sorted lexicographically (so the searchsorted result lines up
-    /// with the slice boundary).
-    pub fn slice_locs(&self, start: &str, end: &str) -> Result<(usize, usize), IndexError> {
+    /// be sorted (so the searchsorted result lines up with the slice
+    /// boundary).
+    pub fn slice_locs(
+        &self,
+        start: &IndexLabel,
+        end: &IndexLabel,
+    ) -> Result<(usize, usize), IndexError> {
         let labels_sorted = self.labels.windows(2).all(|w| w[0] <= w[1]);
         if !labels_sorted {
             return Err(IndexError::InvalidArgument(
@@ -16961,8 +17038,8 @@ impl CategoricalIndex {
     /// `pd.CategoricalIndex.slice_indexer(start, end)`.
     pub fn slice_indexer(
         &self,
-        start: &str,
-        end: &str,
+        start: &IndexLabel,
+        end: &IndexLabel,
     ) -> Result<std::ops::Range<usize>, IndexError> {
         let (l, r) = self.slice_locs(start, end)?;
         Ok(l..r)
@@ -16970,7 +17047,7 @@ impl CategoricalIndex {
 
     fn set_op_via_string<F>(&self, other: &Self, op: F) -> Self
     where
-        F: FnOnce(Vec<&String>, Vec<&String>) -> Vec<String>,
+        F: FnOnce(Vec<&IndexLabel>, Vec<&IndexLabel>) -> Vec<IndexLabel>,
     {
         let labels = op(self.labels.iter().collect(), other.labels.iter().collect());
         // Dedup the union of categories with a seen-set instead of an O(k)
@@ -16979,10 +17056,10 @@ impl CategoricalIndex {
         // growing `categories` Vec — so a label is pushed iff it is neither an
         // existing category nor already pushed this pass: identical first-seen
         // order and dedup to the linear scan.
-        let mut categories: Vec<String> = self.categories.clone();
-        let mut seen: FxHashSet<&String> = self.categories.iter().collect();
+        let mut categories: Vec<IndexLabel> = self.categories.clone();
+        let mut seen: FxHashSet<&IndexLabel> = self.categories.iter().collect();
         for label in &labels {
-            if seen.insert(label) {
+            if !label.is_missing() && seen.insert(label) {
                 categories.push(label.clone());
             }
         }
@@ -17003,8 +17080,8 @@ impl CategoricalIndex {
     #[must_use]
     pub fn intersection(&self, other: &Self) -> Self {
         self.set_op_via_string(other, |left, right| {
-            let right_set: FxHashSet<&&String> = right.iter().collect();
-            let mut seen = FxHashSet::<&String>::default();
+            let right_set: FxHashSet<&&IndexLabel> = right.iter().collect();
+            let mut seen = FxHashSet::<&IndexLabel>::default();
             left.into_iter()
                 .filter(|label| right_set.contains(label) && seen.insert(label))
                 .cloned()
@@ -17017,7 +17094,7 @@ impl CategoricalIndex {
     #[must_use]
     pub fn union(&self, other: &Self) -> Self {
         self.set_op_via_string(other, |left, right| {
-            let mut seen = FxHashSet::<&String>::default();
+            let mut seen = FxHashSet::<&IndexLabel>::default();
             left.into_iter()
                 .chain(right)
                 .filter(|label| seen.insert(label))
@@ -17031,10 +17108,10 @@ impl CategoricalIndex {
     #[must_use]
     pub fn symmetric_difference(&self, other: &Self) -> Self {
         self.set_op_via_string(other, |left, right| {
-            let left_set: FxHashSet<&&String> = left.iter().collect();
-            let right_set: FxHashSet<&&String> = right.iter().collect();
-            let mut seen = FxHashSet::<&String>::default();
-            let mut out = Vec::<String>::new();
+            let left_set: FxHashSet<&&IndexLabel> = left.iter().collect();
+            let right_set: FxHashSet<&&IndexLabel> = right.iter().collect();
+            let mut seen = FxHashSet::<&IndexLabel>::default();
+            let mut out = Vec::<IndexLabel>::new();
             for label in &left {
                 if !right_set.contains(label) && seen.insert(*label) {
                     out.push((*label).clone());
@@ -17056,8 +17133,8 @@ impl CategoricalIndex {
         // Per br-frankenpandas-6r1lq: difference preserves self.name (not
         // shared_name like set_op_via_string applies for union/intersection).
         let mut out = self.set_op_via_string(other, |left, right| {
-            let right_set: FxHashSet<&&String> = right.iter().collect();
-            let mut seen = FxHashSet::<&String>::default();
+            let right_set: FxHashSet<&&IndexLabel> = right.iter().collect();
+            let mut seen = FxHashSet::<&IndexLabel>::default();
             left.into_iter()
                 .filter(|label| !right_set.contains(label) && seen.insert(label))
                 .cloned()
@@ -17073,7 +17150,7 @@ impl CategoricalIndex {
     #[must_use]
     pub fn sort_values(&self) -> Self {
         let positions = self.argsort();
-        let labels: Vec<String> = positions.iter().map(|&p| self.labels[p].clone()).collect();
+        let labels: Vec<IndexLabel> = positions.iter().map(|&p| self.labels[p].clone()).collect();
         Self::from_parts(
             labels,
             self.categories.clone(),
@@ -17096,19 +17173,13 @@ impl CategoricalIndex {
     /// categoricals (`Categorical._values_for_argsort` returns `self.codes`),
     /// NOT lexicographically by the label text. So categories `[b, a, c]` sort
     /// before-`a` because `b` has code 0. The sort is stable, so equal-code
-    /// ties keep their original order. CategoricalIndex labels are non-null, so
-    /// every label resolves to a code. When the category order happens to be
-    /// lexicographic this is identical to the old text sort; only
-    /// non-lexicographic category orders are corrected.
+    /// ties keep their original order; a missing label (no code) sorts last,
+    /// as pandas' na_position='last'.
     #[must_use]
     pub fn argsort(&self) -> Vec<usize> {
         let map = self.category_index_map();
         let mut positions: Vec<usize> = (0..self.labels.len()).collect();
-        positions.sort_by_key(|&i| {
-            map.get(self.labels[i].as_str())
-                .copied()
-                .unwrap_or(usize::MAX)
-        });
+        positions.sort_by_key(|&i| map.get(&self.labels[i]).copied().unwrap_or(usize::MAX));
         positions
     }
 
@@ -17124,7 +17195,7 @@ impl CategoricalIndex {
         // (see set_op_via_string). `seen` borrows self/other categories, never
         // the growing `categories` Vec; identical first-seen order + dedup.
         let mut categories = self.categories.clone();
-        let mut seen: FxHashSet<&String> = self.categories.iter().collect();
+        let mut seen: FxHashSet<&IndexLabel> = self.categories.iter().collect();
         for cat in &other.categories {
             if seen.insert(cat) {
                 categories.push(cat.clone());
@@ -17159,21 +17230,17 @@ impl CategoricalIndex {
 
     /// Insert `value` at position `loc`, matching
     /// `pd.CategoricalIndex.insert(loc, value)`. The value must be a
-    /// member of the categories list; OOB and not-a-category raise.
-    pub fn insert(&self, loc: usize, value: &str) -> Result<Self, IndexError> {
+    /// category or missing; OOB and not-a-category raise.
+    pub fn insert(&self, loc: usize, value: &IndexLabel) -> Result<Self, IndexError> {
         if loc > self.labels.len() {
             return Err(IndexError::OutOfBounds {
                 position: loc,
                 length: self.labels.len(),
             });
         }
-        if !self.categories.iter().any(|cat| cat == value) {
-            return Err(IndexError::InvalidArgument(format!(
-                "insert: {value:?} is not a category"
-            )));
-        }
+        let value = self.placeable(value, "insert")?;
         let mut labels = self.labels.clone();
-        labels.insert(loc, value.to_owned());
+        labels.insert(loc, value);
         Ok(Self::from_parts(
             labels,
             self.categories.clone(),
@@ -17212,7 +17279,7 @@ impl CategoricalIndex {
                 });
             }
         }
-        let labels: Vec<String> = positions.iter().map(|&p| self.labels[p].clone()).collect();
+        let labels: Vec<IndexLabel> = positions.iter().map(|&p| self.labels[p].clone()).collect();
         Ok(Self::from_parts(
             labels,
             self.categories.clone(),
@@ -17224,16 +17291,16 @@ impl CategoricalIndex {
     /// Per-position membership mask, matching
     /// `pd.CategoricalIndex.isin(values)`.
     #[must_use]
-    pub fn isin(&self, values: &[String]) -> Vec<bool> {
-        let needle: FxHashSet<&String> = values.iter().collect();
+    pub fn isin(&self, values: &[IndexLabel]) -> Vec<bool> {
+        let needle: FxHashSet<&IndexLabel> = values.iter().collect();
         self.labels.iter().map(|l| needle.contains(l)).collect()
     }
 
     /// Locate every position matching each target, matching
     /// `pd.CategoricalIndex.get_indexer_non_unique(targets)`.
     #[must_use]
-    pub fn get_indexer_non_unique(&self, targets: &[String]) -> (Vec<isize>, Vec<usize>) {
-        let mut by_value = FxHashMap::<&String, Vec<usize>>::default();
+    pub fn get_indexer_non_unique(&self, targets: &[IndexLabel]) -> (Vec<isize>, Vec<usize>) {
+        let mut by_value = FxHashMap::<&IndexLabel, Vec<usize>>::default();
         for (i, label) in self.labels.iter().enumerate() {
             by_value.entry(label).or_default().push(i);
         }
@@ -17257,8 +17324,8 @@ impl CategoricalIndex {
     /// Locate each label in `targets`, matching
     /// `pd.CategoricalIndex.get_indexer(targets)`.
     #[must_use]
-    pub fn get_indexer(&self, targets: &[String]) -> Vec<isize> {
-        let mut positions = FxHashMap::<&String, isize>::default();
+    pub fn get_indexer(&self, targets: &[IndexLabel]) -> Vec<isize> {
+        let mut positions = FxHashMap::<&IndexLabel, isize>::default();
         for (i, label) in self.labels.iter().enumerate() {
             positions
                 .entry(label)
@@ -17273,13 +17340,13 @@ impl CategoricalIndex {
     /// Alias for [`get_indexer`](Self::get_indexer), matching
     /// `pd.CategoricalIndex.get_indexer_for(targets)`.
     #[must_use]
-    pub fn get_indexer_for(&self, targets: &[String]) -> Vec<isize> {
+    pub fn get_indexer_for(&self, targets: &[IndexLabel]) -> Vec<isize> {
         self.get_indexer(targets)
     }
 
     /// First position of `value`, matching
     /// `pd.CategoricalIndex.get_loc(value)`.
-    pub fn get_loc(&self, value: &str) -> Result<usize, IndexError> {
+    pub fn get_loc(&self, value: &IndexLabel) -> Result<usize, IndexError> {
         self.labels.iter().position(|l| l == value).ok_or_else(|| {
             IndexError::InvalidArgument(format!("get_loc: {value:?} not in CategoricalIndex"))
         })
@@ -17295,23 +17362,39 @@ impl CategoricalIndex {
                 "attempt to get argmax of an empty sequence".to_owned(),
             ));
         }
-        let mut best = 0;
-        if self.ordered {
-            let map = self.category_index_map();
-            let position = |label: &String| map.get(label.as_str()).copied().unwrap_or(0);
-            for i in 1..self.labels.len() {
-                if position(&self.labels[i]) > position(&self.labels[best]) {
-                    best = i;
-                }
+        self.extreme_position(true).ok_or_else(|| {
+            IndexError::InvalidArgument("attempt to get argmax of an empty sequence".to_owned())
+        })
+    }
+
+    /// The position of the first largest (`largest`) or smallest label,
+    /// missing labels skipped: by category position when ordered, by the
+    /// labels themselves otherwise. None when no label is present.
+    fn extreme_position(&self, largest: bool) -> Option<usize> {
+        let map = self.category_index_map();
+        let mut best: Option<usize> = None;
+        for (i, label) in self.labels.iter().enumerate() {
+            if label.is_missing() {
+                continue;
             }
-        } else {
-            for i in 1..self.labels.len() {
-                if self.labels[i] > self.labels[best] {
-                    best = i;
+            let better = best.is_none_or(|at| {
+                let current = &self.labels[at];
+                let order = if self.ordered {
+                    map.get(label).cmp(&map.get(current))
+                } else {
+                    label.cmp(current)
+                };
+                if largest {
+                    order.is_gt()
+                } else {
+                    order.is_lt()
                 }
+            });
+            if better {
+                best = Some(i);
             }
         }
-        Ok(best)
+        best
     }
 
     /// Position of the minimum label, matching
@@ -17322,62 +17405,23 @@ impl CategoricalIndex {
                 "attempt to get argmin of an empty sequence".to_owned(),
             ));
         }
-        let mut best = 0;
-        if self.ordered {
-            let map = self.category_index_map();
-            let position = |label: &String| map.get(label.as_str()).copied().unwrap_or(usize::MAX);
-            for i in 1..self.labels.len() {
-                if position(&self.labels[i]) < position(&self.labels[best]) {
-                    best = i;
-                }
-            }
-        } else {
-            for i in 1..self.labels.len() {
-                if self.labels[i] < self.labels[best] {
-                    best = i;
-                }
-            }
-        }
-        Ok(best)
+        self.extreme_position(false).ok_or_else(|| {
+            IndexError::InvalidArgument("attempt to get argmin of an empty sequence".to_owned())
+        })
     }
 
-    /// Smallest label in category order when ordered, lexicographic when
-    /// unordered, matching `pd.CategoricalIndex.min()`. Empty returns
-    /// `None`.
+    /// Smallest label in category order when ordered, by the labels
+    /// themselves when unordered, matching `pd.CategoricalIndex.min()`
+    /// (missing labels skipped). None when no label is present.
     #[must_use]
-    pub fn min(&self) -> Option<&str> {
-        if self.labels.is_empty() {
-            return None;
-        }
-        if self.ordered {
-            // Compare by category position (hashed once, O(n+k)).
-            let map = self.category_index_map();
-            let position = |label: &String| map.get(label.as_str()).copied().unwrap_or(usize::MAX);
-            self.labels
-                .iter()
-                .min_by_key(|label| position(label))
-                .map(String::as_str)
-        } else {
-            self.labels.iter().min().map(String::as_str)
-        }
+    pub fn min(&self) -> Option<&IndexLabel> {
+        self.extreme_position(false).map(|at| &self.labels[at])
     }
 
     /// Largest label, matching `pd.CategoricalIndex.max()`.
     #[must_use]
-    pub fn max(&self) -> Option<&str> {
-        if self.labels.is_empty() {
-            return None;
-        }
-        if self.ordered {
-            let map = self.category_index_map();
-            let position = |label: &String| map.get(label.as_str()).copied().unwrap_or(0);
-            self.labels
-                .iter()
-                .max_by_key(|label| position(label))
-                .map(String::as_str)
-        } else {
-            self.labels.iter().max().map(String::as_str)
-        }
+    pub fn max(&self) -> Option<&IndexLabel> {
+        self.extreme_position(true).map(|at| &self.labels[at])
     }
 
     /// First-seen unique labels, matching `pd.CategoricalIndex.unique()`.
@@ -17427,31 +17471,46 @@ impl CategoricalIndex {
         self.unique()
     }
 
-    /// Value counts, matching `pd.CategoricalIndex.value_counts()`.
-    /// CategoricalIndex labels are non-null so the total equals `len()`.
+    /// Value counts, matching `pd.CategoricalIndex.value_counts()`: the
+    /// present labels' counts, missing ones left out (dropna).
     #[must_use]
-    pub fn value_counts(&self) -> Vec<(String, usize)> {
-        if let Some(codes) = &self.category_codes {
-            return self.value_counts_by_category_codes(codes);
-        }
-        if self.category_rank_unique_scan_is_bounded() {
-            return self.value_counts_by_category_rank();
-        }
-        self.value_counts_by_hash()
+    pub fn value_counts(&self) -> Vec<(IndexLabel, usize)> {
+        let mut pairs = if let Some(codes) = &self.category_codes {
+            self.value_counts_by_category_codes(codes)
+        } else if self.category_rank_unique_scan_is_bounded() {
+            self.value_counts_by_category_rank()
+        } else {
+            self.value_counts_by_hash()
+        };
+        pairs.retain(|(label, _)| !label.is_missing());
+        pairs
     }
 
     /// Factorize, matching `pd.CategoricalIndex.factorize()`. Returns
     /// `(codes, uniques)` where `uniques` is a CategoricalIndex with
-    /// the same categories list.
+    /// the same categories list; a missing label's code is -1, and it is
+    /// no unique.
     #[must_use]
     pub fn factorize(&self) -> (Vec<isize>, Self) {
-        if let Some(codes) = &self.category_codes {
-            return self.factorize_by_category_codes(codes);
+        let (mut codes, mut uniques) = if let Some(codes) = &self.category_codes {
+            self.factorize_by_category_codes(codes)
+        } else if self.category_rank_unique_scan_is_bounded() {
+            self.factorize_by_category_rank()
+        } else {
+            self.factorize_by_hash()
+        };
+        if let Some(missing) = uniques.labels.iter().position(IndexLabel::is_missing) {
+            let missing = isize::try_from(missing).unwrap_or(isize::MAX);
+            for code in &mut codes {
+                if *code == missing {
+                    *code = -1;
+                } else if *code > missing {
+                    *code -= 1;
+                }
+            }
+            uniques = uniques.dropna();
         }
-        if self.category_rank_unique_scan_is_bounded() {
-            return self.factorize_by_category_rank();
-        }
-        self.factorize_by_hash()
+        (codes, uniques)
     }
 }
 
@@ -23713,12 +23772,19 @@ mod tests {
             true,
         )
         .set_name("priority");
-        assert_eq!(categorical.categories(), &["low", "high"]);
+        assert_eq!(
+            categorical.categories(),
+            &[IndexLabel::from("low"), IndexLabel::from("high")]
+        );
         assert_eq!(categorical.codes(), vec![Some(0), Some(1), Some(0)]);
         assert!(categorical.ordered());
         assert_eq!(
             categorical.values(),
-            vec!["low".to_owned(), "high".to_owned(), "low".to_owned()]
+            vec![
+                IndexLabel::from("low"),
+                IndexLabel::from("high"),
+                IndexLabel::from("low")
+            ]
         );
         assert_eq!(categorical.to_list(), categorical.values());
         assert_eq!(categorical.tolist(), categorical.values());
@@ -23738,10 +23804,24 @@ mod tests {
             categorical.to_index().name().map(|n| n.as_str()),
             Some("priority")
         );
+        // A label outside the categories is NaN, as pandas' constructor.
+        let outside = CategoricalIndex::with_categories(
+            vec!["missing".to_owned()],
+            vec!["known".to_owned()],
+            false,
+        )
+        .expect("a label outside the categories is NaN");
+        assert_eq!(
+            outside.labels(),
+            &[IndexLabel::Null(fp_types::NullKind::NaN)]
+        );
+        assert_eq!(outside.isna(), vec![true]);
+        assert_eq!(outside.categories(), &[IndexLabel::from("known")]);
+        // Repeated categories still reject.
         assert!(
             CategoricalIndex::with_categories(
-                vec!["missing".to_owned()],
                 vec!["known".to_owned()],
+                vec!["known".to_owned(), "known".to_owned()],
                 false,
             )
             .is_err()
@@ -24047,7 +24127,7 @@ mod tests {
             CategoricalIndex::from_values(vec!["high".to_owned()], true)
                 .item()
                 .unwrap(),
-            "high"
+            IndexLabel::from("high")
         );
         assert_eq!(categorical.inferred_type(), "categorical");
         assert!(!categorical.holds_integer());
@@ -32564,17 +32644,18 @@ mod tests {
             vec!["a".to_owned(), "b".to_owned(), "a".to_owned()],
             false,
         );
-        let (positions, missing) = cat.get_indexer_non_unique(&["a".to_owned(), "z".to_owned()]);
+        let (positions, missing) =
+            cat.get_indexer_non_unique(&[IndexLabel::from("a"), IndexLabel::from("z")]);
         assert_eq!(positions, vec![0, 2, -1]);
         assert_eq!(missing, vec![1]);
 
         // Categorical get_indexer also works.
-        let mapped = cat.get_indexer(&["b".to_owned(), "z".to_owned()]);
+        let mapped = cat.get_indexer(&[IndexLabel::from("b"), IndexLabel::from("z")]);
         assert_eq!(mapped, vec![1, -1]);
         // get_indexer_for is an alias.
         assert_eq!(
-            cat.get_indexer_for(&["a".to_owned()]),
-            cat.get_indexer(&["a".to_owned()])
+            cat.get_indexer_for(&[IndexLabel::from("a")]),
+            cat.get_indexer(&[IndexLabel::from("a")])
         );
         Ok(())
     }
@@ -32761,23 +32842,36 @@ mod tests {
             false,
         )?;
 
-        let masked = cat.r#where(&[true, false, true], "d")?;
+        let masked = cat.r#where(&[true, false, true], &IndexLabel::from("d"))?;
         assert_eq!(
             masked.labels(),
-            vec!["a".to_owned(), "d".to_owned(), "c".to_owned()].as_slice()
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("d"),
+                IndexLabel::from("c")
+            ]
+            .as_slice()
         );
 
-        let put = cat.putmask(&[false, true, true], "d")?;
+        let put = cat.putmask(&[false, true, true], &IndexLabel::from("d"))?;
         assert_eq!(
             put.labels(),
-            vec!["a".to_owned(), "d".to_owned(), "d".to_owned()].as_slice()
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("d"),
+                IndexLabel::from("d")
+            ]
+            .as_slice()
         );
 
         // Replacement that's not a category rejects.
-        assert!(cat.r#where(&[true, false, true], "zzz").is_err());
+        assert!(
+            cat.r#where(&[true, false, true], &IndexLabel::from("zzz"))
+                .is_err()
+        );
 
         // Length mismatch.
-        assert!(cat.putmask(&[true; 5], "a").is_err());
+        assert!(cat.putmask(&[true; 5], &IndexLabel::from("a")).is_err());
         Ok(())
     }
 
@@ -32846,10 +32940,10 @@ mod tests {
         assert_eq!(
             cat_sorted.labels(),
             vec![
-                "a".to_owned(),
-                "a".to_owned(),
-                "b".to_owned(),
-                "c".to_owned()
+                IndexLabel::from("a"),
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c")
             ]
             .as_slice()
         );
@@ -32882,10 +32976,10 @@ mod tests {
         assert_eq!(
             cat.sort_values().labels(),
             [
-                "b".to_owned(),
-                "a".to_owned(),
-                "a".to_owned(),
-                "c".to_owned()
+                IndexLabel::from("b"),
+                IndexLabel::from("a"),
+                IndexLabel::from("a"),
+                IndexLabel::from("c")
             ]
             .as_slice()
         );
@@ -32900,7 +32994,7 @@ mod tests {
         // codes a=1, b=0 -> sorted by code: b, a.
         assert_eq!(
             cat_u.sort_values().labels(),
-            ["b".to_owned(), "a".to_owned()].as_slice()
+            [IndexLabel::from("b"), IndexLabel::from("a")].as_slice()
         );
     }
 
@@ -36637,12 +36731,92 @@ mod tests {
         assert!(!cat.hasnans());
         let dropped = cat.dropna();
         assert_eq!(dropped.labels(), cat.labels());
-        let filled = cat.fillna("z");
+        let filled = cat
+            .fillna(&IndexLabel::from("z"))
+            .expect("fillna of an index with no missing label");
         assert_eq!(filled.labels(), cat.labels());
 
         let empty = super::CategoricalIndex::from_values(Vec::<String>::new(), false);
         assert_eq!(empty.isnull(), Vec::<bool>::new());
         assert!(!empty.hasnans());
+    }
+
+    /// pandas 2.2.3: a CategoricalIndex holds any label kind and missing
+    /// labels (br-frankenpandas-lztvp; it held non-missing text only).
+    #[test]
+    fn categorical_index_typed_and_missing_labels_like_pandas_lztvp()
+    -> Result<(), super::IndexError> {
+        let nan = || IndexLabel::Null(fp_types::NullKind::NaN);
+        // CategoricalIndex([3, 1, 3, 2], categories=[1, 2, 3]).
+        let ints = super::CategoricalIndex::with_categories(
+            vec![3_i64, 1, 3, 2],
+            vec![1_i64, 2, 3],
+            false,
+        )?;
+        assert_eq!(ints.codes(), vec![Some(2), Some(0), Some(2), Some(1)]);
+        assert_eq!(ints.categories()[0], IndexLabel::Int64(1));
+        assert_eq!(ints.get_loc(&IndexLabel::Int64(2))?, 3);
+        assert_eq!(
+            ints.value_counts(),
+            vec![
+                (IndexLabel::Int64(3), 2),
+                (IndexLabel::Int64(1), 1),
+                (IndexLabel::Int64(2), 1)
+            ]
+        );
+        // A label outside the categories (and a missing one) is NaN.
+        let text = super::CategoricalIndex::with_categories(
+            vec![
+                IndexLabel::from("b"),
+                nan(),
+                IndexLabel::from("z"),
+                IndexLabel::from("a"),
+            ],
+            vec!["a", "b"],
+            false,
+        )?;
+        assert_eq!(text.isna(), vec![false, true, true, false]);
+        assert!(text.hasnans());
+        assert_eq!(text.codes(), vec![Some(1), None, None, Some(0)]);
+        assert_eq!(text.nunique(), 2);
+        assert_eq!(
+            text.value_counts(),
+            vec![(IndexLabel::from("b"), 1), (IndexLabel::from("a"), 1)]
+        );
+        // factorize: NaN is -1 and no unique.
+        let (codes, uniques) = text.factorize();
+        assert_eq!(codes, vec![0, -1, -1, 1]);
+        assert_eq!(
+            uniques.labels(),
+            &[IndexLabel::from("b"), IndexLabel::from("a")]
+        );
+        // Sorting puts NaN last; dropna drops it; fillna with a category fills.
+        assert_eq!(
+            text.sort_values().labels(),
+            &[IndexLabel::from("a"), IndexLabel::from("b"), nan(), nan()]
+        );
+        assert_eq!(
+            text.dropna().labels(),
+            &[IndexLabel::from("b"), IndexLabel::from("a")]
+        );
+        assert_eq!(
+            text.fillna(&IndexLabel::from("a"))?.labels(),
+            &[
+                IndexLabel::from("b"),
+                IndexLabel::from("a"),
+                IndexLabel::from("a"),
+                IndexLabel::from("a")
+            ]
+        );
+        // Negatives: filling with a new category, inserting one, and
+        // repeated or missing categories are refused.
+        assert!(text.fillna(&IndexLabel::from("z")).is_err());
+        assert!(text.insert(0, &IndexLabel::from("z")).is_err());
+        assert!(
+            super::CategoricalIndex::with_categories(vec!["a"], vec!["a", "a"], false).is_err()
+        );
+        assert!(super::CategoricalIndex::with_categories(vec!["a"], vec![nan()], false).is_err());
+        Ok(())
     }
 
     #[test]
@@ -36671,15 +36845,15 @@ mod tests {
         assert_eq!(
             merged.labels(),
             vec![
-                "a".to_owned(),
-                "b".to_owned(),
-                "c".to_owned(),
-                "d".to_owned()
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+                IndexLabel::from("d")
             ]
             .as_slice()
         );
         assert_eq!(merged.name().map(|n| n.as_str()), Some("level"));
-        assert!(merged.categories().contains(&"e".to_owned()));
+        assert!(merged.categories().contains(&IndexLabel::from("e")));
 
         // delete OOB.
         assert!(matches!(
@@ -36692,29 +36866,29 @@ mod tests {
         let trimmed = cat.delete(0)?;
         assert_eq!(
             trimmed.labels(),
-            vec!["b".to_owned(), "c".to_owned()].as_slice()
+            vec![IndexLabel::from("b"), IndexLabel::from("c")].as_slice()
         );
 
         // insert.
-        let inserted = cat.insert(1, "d")?;
+        let inserted = cat.insert(1, &IndexLabel::from("d"))?;
         assert_eq!(
             inserted.labels(),
             vec![
-                "a".to_owned(),
-                "d".to_owned(),
-                "b".to_owned(),
-                "c".to_owned()
+                IndexLabel::from("a"),
+                IndexLabel::from("d"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c")
             ]
             .as_slice()
         );
-        assert!(cat.insert(1, "zzz").is_err());
+        assert!(cat.insert(1, &IndexLabel::from("zzz")).is_err());
 
         // repeat.
         let repeated = cat.repeat(2);
         assert_eq!(repeated.labels().len(), 6);
-        assert_eq!(repeated.labels()[0], "a");
-        assert_eq!(repeated.labels()[1], "a");
-        assert_eq!(repeated.labels()[2], "b");
+        assert_eq!(repeated.labels()[0], IndexLabel::from("a"));
+        assert_eq!(repeated.labels()[1], IndexLabel::from("a"));
+        assert_eq!(repeated.labels()[2], IndexLabel::from("b"));
         Ok(())
     }
 
@@ -36735,16 +36909,29 @@ mod tests {
             ],
             true,
         )?;
-        assert_eq!(cat.slice_locs("b", "c")?, (1, 3));
-        assert_eq!(cat.slice_indexer("b", "c")?, 1..3);
-        assert_eq!(cat.slice_locs("a", "d")?, (0, 4));
+        assert_eq!(
+            cat.slice_locs(&IndexLabel::from("b"), &IndexLabel::from("c"))?,
+            (1, 3)
+        );
+        assert_eq!(
+            cat.slice_indexer(&IndexLabel::from("b"), &IndexLabel::from("c"))?,
+            1..3
+        );
+        assert_eq!(
+            cat.slice_locs(&IndexLabel::from("a"), &IndexLabel::from("d"))?,
+            (0, 4)
+        );
 
         // Non-monotonic rejects.
         let unsorted = super::CategoricalIndex::from_values(
             vec!["c".to_owned(), "a".to_owned(), "b".to_owned()],
             false,
         );
-        assert!(unsorted.slice_locs("a", "c").is_err());
+        assert!(
+            unsorted
+                .slice_locs(&IndexLabel::from("a"), &IndexLabel::from("c"))
+                .is_err()
+        );
         Ok(())
     }
 
@@ -36758,9 +36945,9 @@ mod tests {
         )?;
 
         // searchsorted on the sorted utf8 index.
-        assert_eq!(cat.searchsorted("b", "left")?, 1);
-        assert_eq!(cat.searchsorted("c", "right")?, 3);
-        assert!(cat.searchsorted("b", "middle").is_err());
+        assert_eq!(cat.searchsorted(&IndexLabel::from("b"), "left")?, 1);
+        assert_eq!(cat.searchsorted(&IndexLabel::from("c"), "right")?, 3);
+        assert!(cat.searchsorted(&IndexLabel::from("b"), "middle").is_err());
 
         let other = super::CategoricalIndex::from_values(
             vec!["b".to_owned(), "c".to_owned(), "d".to_owned()],
@@ -36768,26 +36955,26 @@ mod tests {
         );
         assert_eq!(
             cat.intersection(&other).labels(),
-            vec!["b".to_owned(), "c".to_owned()].as_slice()
+            vec![IndexLabel::from("b"), IndexLabel::from("c")].as_slice()
         );
         assert_eq!(
             cat.union(&other).labels(),
             vec![
-                "a".to_owned(),
-                "b".to_owned(),
-                "c".to_owned(),
-                "d".to_owned(),
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+                IndexLabel::from("d"),
             ]
             .as_slice()
         );
         assert_eq!(
             cat.difference(&other).labels(),
-            vec!["a".to_owned()].as_slice()
+            vec![IndexLabel::from("a")].as_slice()
         );
         // symmetric_difference: a (only in cat) + d (only in other).
         assert_eq!(
             cat.symmetric_difference(&other).labels(),
-            vec!["a".to_owned(), "d".to_owned()].as_slice()
+            vec![IndexLabel::from("a"), IndexLabel::from("d")].as_slice()
         );
         Ok(())
     }
@@ -36823,10 +37010,7 @@ mod tests {
 
         // argsort: positions sorted by lexicographic label.
         let positions = cat.argsort();
-        let labels: Vec<&str> = positions
-            .iter()
-            .map(|&p| cat.labels()[p].as_str())
-            .collect();
+        let labels: Vec<&IndexLabel> = positions.iter().map(|&p| &cat.labels()[p]).collect();
         for w in labels.windows(2) {
             assert!(w[0] <= w[1]);
         }
@@ -36835,7 +37019,12 @@ mod tests {
         let taken = cat.take(&[2, 0, 0])?;
         assert_eq!(
             taken.labels(),
-            vec!["c".to_owned(), "b".to_owned(), "b".to_owned()].as_slice()
+            vec![
+                IndexLabel::from("c"),
+                IndexLabel::from("b"),
+                IndexLabel::from("b")
+            ]
+            .as_slice()
         );
         assert!(matches!(
             cat.take(&[7]).unwrap_err(),
@@ -36847,17 +37036,17 @@ mod tests {
 
         // isin membership.
         assert_eq!(
-            cat.isin(&["a".to_owned(), "z".to_owned()]),
+            cat.isin(&[IndexLabel::from("a"), IndexLabel::from("z")]),
             vec![false, true, false, true]
         );
 
         // get_loc finds first; missing rejects.
-        assert_eq!(cat.get_loc("c")?, 2);
-        assert!(cat.get_loc("zzz").is_err());
+        assert_eq!(cat.get_loc(&IndexLabel::from("c"))?, 2);
+        assert!(cat.get_loc(&IndexLabel::from("zzz")).is_err());
 
         // min/max with ordered=true uses category order.
-        assert_eq!(cat.min(), Some("a"));
-        assert_eq!(cat.max(), Some("c"));
+        assert_eq!(cat.min(), Some(&IndexLabel::from("a")));
+        assert_eq!(cat.max(), Some(&IndexLabel::from("c")));
 
         // Empty.
         let empty = super::CategoricalIndex::from_values(Vec::<String>::new(), false);
@@ -36884,10 +37073,10 @@ mod tests {
         assert_eq!(
             added.categories(),
             vec![
-                "a".to_owned(),
-                "b".to_owned(),
-                "c".to_owned(),
-                "d".to_owned()
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+                IndexLabel::from("d")
             ]
             .as_slice()
         );
@@ -36895,21 +37084,35 @@ mod tests {
         assert!(cat.add_categories(vec!["a".to_owned()]).is_err());
 
         // remove_categories drops "c" (unused).
-        let pruned = cat.remove_categories(&["c".to_owned()])?;
+        let pruned = cat.remove_categories(&[IndexLabel::from("c")])?;
         assert_eq!(
             pruned.categories(),
-            vec!["a".to_owned(), "b".to_owned()].as_slice()
+            vec![IndexLabel::from("a"), IndexLabel::from("b")].as_slice()
         );
-        // Trying to remove a category that's still in use rejects.
-        assert!(cat.remove_categories(&["a".to_owned()]).is_err());
+        // Removing a category that's still in use makes its labels NaN,
+        // as pandas' remove_categories.
+        let removed_in_use = cat.remove_categories(&[IndexLabel::from("a")])?;
+        assert_eq!(
+            removed_in_use.labels(),
+            vec![
+                IndexLabel::Null(fp_types::NullKind::NaN),
+                IndexLabel::from("b")
+            ]
+            .as_slice()
+        );
+        assert!(removed_in_use.labels()[0].is_missing());
+        assert_eq!(
+            removed_in_use.categories(),
+            vec![IndexLabel::from("b"), IndexLabel::from("c")].as_slice()
+        );
         // Removing a missing category rejects.
-        assert!(cat.remove_categories(&["zzz".to_owned()]).is_err());
+        assert!(cat.remove_categories(&[IndexLabel::from("zzz")]).is_err());
 
         // remove_unused_categories trims "c" automatically.
         let trimmed = cat.remove_unused_categories();
         assert_eq!(
             trimmed.categories(),
-            vec!["a".to_owned(), "b".to_owned()].as_slice()
+            vec![IndexLabel::from("a"), IndexLabel::from("b")].as_slice()
         );
 
         // set_categories: extending to {a, b, c, d}.
@@ -36920,9 +37123,25 @@ mod tests {
             "d".to_owned(),
         ])?;
         assert_eq!(extended.categories().len(), 4);
-        // set_categories must include every current label.
+        // set_categories dropping a current label's category makes that
+        // label NaN, as pandas' set_categories.
+        let narrowed = cat.set_categories(vec!["b".to_owned(), "c".to_owned()])?;
+        assert_eq!(
+            narrowed.labels(),
+            vec![
+                IndexLabel::Null(fp_types::NullKind::NaN),
+                IndexLabel::from("b")
+            ]
+            .as_slice()
+        );
+        assert!(narrowed.labels()[0].is_missing());
+        assert_eq!(
+            narrowed.categories(),
+            vec![IndexLabel::from("b"), IndexLabel::from("c")].as_slice()
+        );
+        // A duplicate among the new categories rejects.
         assert!(
-            cat.set_categories(vec!["b".to_owned(), "c".to_owned()])
+            cat.set_categories(vec!["a".to_owned(), "a".to_owned()])
                 .is_err()
         );
 
@@ -36931,11 +37150,16 @@ mod tests {
             cat.rename_categories(vec!["A".to_owned(), "B".to_owned(), "C".to_owned()])?;
         assert_eq!(
             renamed.labels(),
-            vec!["A".to_owned(), "B".to_owned()].as_slice()
+            vec![IndexLabel::from("A"), IndexLabel::from("B")].as_slice()
         );
         assert_eq!(
             renamed.categories(),
-            vec!["A".to_owned(), "B".to_owned(), "C".to_owned()].as_slice()
+            vec![
+                IndexLabel::from("A"),
+                IndexLabel::from("B"),
+                IndexLabel::from("C")
+            ]
+            .as_slice()
         );
         // Wrong length rejects.
         assert!(cat.rename_categories(vec!["X".to_owned()]).is_err());
@@ -36946,7 +37170,12 @@ mod tests {
         assert!(reordered.ordered());
         assert_eq!(
             reordered.categories(),
-            vec!["c".to_owned(), "b".to_owned(), "a".to_owned()].as_slice()
+            vec![
+                IndexLabel::from("c"),
+                IndexLabel::from("b"),
+                IndexLabel::from("a")
+            ]
+            .as_slice()
         );
         // Non-permutation rejects.
         assert!(
@@ -36979,7 +37208,12 @@ mod tests {
         let unique = categorical.unique();
         assert_eq!(
             unique.labels(),
-            vec!["low".to_owned(), "high".to_owned(), "med".to_owned()].as_slice()
+            vec![
+                IndexLabel::from("low"),
+                IndexLabel::from("high"),
+                IndexLabel::from("med")
+            ]
+            .as_slice()
         );
         assert_eq!(unique.name().map(|n| n.as_str()), Some("level"));
 
@@ -36997,7 +37231,7 @@ mod tests {
         assert_eq!(total, categorical.len());
         let low_count = counts
             .iter()
-            .find_map(|(label, n)| (label == "low").then_some(*n))
+            .find_map(|(label, n)| (*label == IndexLabel::from("low")).then_some(*n))
             .expect("low should be counted");
         assert_eq!(low_count, 3);
         // First entry is the most frequent (descending sort).
@@ -37013,7 +37247,11 @@ mod tests {
     #[test]
     fn categorical_index_unique_preserves_categories_and_ordered_i1q1c() {
         let labels = vec!["a".to_owned(), "b".to_owned(), "a".to_owned()];
-        let categories = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        let categories = vec![
+            IndexLabel::from("a"),
+            IndexLabel::from("b"),
+            IndexLabel::from("c"),
+        ];
         let cat = super::CategoricalIndex::with_categories(labels, categories.clone(), true)
             .expect("with_categories");
         let unique = cat.unique();
@@ -37072,8 +37310,8 @@ mod tests {
         assert!(decreasing.is_monotonic_decreasing());
 
         let invalid = super::CategoricalIndex {
-            labels: vec!["missing".to_owned(), "bronze".to_owned()],
-            categories: vec!["bronze".to_owned()],
+            labels: vec![IndexLabel::from("missing"), IndexLabel::from("bronze")],
+            categories: vec![IndexLabel::from("bronze")],
             ordered: true,
             name: None,
             category_codes: None,
@@ -37136,28 +37374,32 @@ mod tests {
 
         let invalid = super::CategoricalIndex {
             labels: vec![
-                "ghost".to_owned(),
-                "low".to_owned(),
-                "ghost".to_owned(),
-                "other".to_owned(),
-                "low".to_owned(),
+                IndexLabel::from("ghost"),
+                IndexLabel::from("low"),
+                IndexLabel::from("ghost"),
+                IndexLabel::from("other"),
+                IndexLabel::from("low"),
             ],
-            categories: vec!["low".to_owned()],
+            categories: vec![IndexLabel::from("low")],
             ordered: false,
             name: None,
             category_codes: None,
         };
-        let mut oracle = std::collections::HashSet::<&str>::new();
+        let mut oracle = std::collections::HashSet::<&IndexLabel>::new();
         for label in invalid.labels() {
-            oracle.insert(label.as_str());
+            oracle.insert(label);
         }
         assert_eq!(invalid.nunique(), oracle.len());
         assert_eq!(invalid.is_unique(), oracle.len() == invalid.len());
 
-        let mut large_categories = vec!["a".to_owned(), "b".to_owned()];
-        large_categories.extend((0..50).map(|value| format!("unused-{value}")));
+        let mut large_categories = vec![IndexLabel::from("a"), IndexLabel::from("b")];
+        large_categories.extend((0..50).map(|value| IndexLabel::Utf8(format!("unused-{value}"))));
         let sparse = super::CategoricalIndex {
-            labels: vec!["a".to_owned(), "b".to_owned(), "a".to_owned()],
+            labels: vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("a"),
+            ],
             categories: large_categories,
             ordered: false,
             name: None,
@@ -37255,27 +37497,27 @@ mod tests {
 
         let invalid = super::CategoricalIndex {
             labels: vec![
-                "ghost".to_owned(),
-                "low".to_owned(),
-                "ghost".to_owned(),
-                "other".to_owned(),
-                "low".to_owned(),
+                IndexLabel::from("ghost"),
+                IndexLabel::from("low"),
+                IndexLabel::from("ghost"),
+                IndexLabel::from("other"),
+                IndexLabel::from("low"),
             ],
-            categories: vec!["low".to_owned()],
+            categories: vec![IndexLabel::from("low")],
             ordered: false,
             name: None,
             category_codes: None,
         };
         assert_matches_flat(&invalid);
 
-        let mut large_categories = vec!["a".to_owned(), "b".to_owned()];
-        large_categories.extend((0..50).map(|value| format!("unused-{value}")));
+        let mut large_categories = vec![IndexLabel::from("a"), IndexLabel::from("b")];
+        large_categories.extend((0..50).map(|value| IndexLabel::Utf8(format!("unused-{value}"))));
         let sparse = super::CategoricalIndex {
             labels: vec![
-                "a".to_owned(),
-                "b".to_owned(),
-                "a".to_owned(),
-                "b".to_owned(),
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
             ],
             categories: large_categories,
             ordered: false,
@@ -37288,11 +37530,11 @@ mod tests {
 
     #[test]
     fn categorical_index_unique_drop_duplicates_use_rank_bitset_uza04199() {
-        fn first_seen_oracle(labels: &[String]) -> Vec<String> {
-            let mut seen = std::collections::HashSet::<&str>::new();
+        fn first_seen_oracle(labels: &[IndexLabel]) -> Vec<IndexLabel> {
+            let mut seen = std::collections::HashSet::<&IndexLabel>::new();
             let mut unique = Vec::new();
             for label in labels {
-                if seen.insert(label.as_str()) {
+                if seen.insert(label) {
                     unique.push(label.clone());
                 }
             }
@@ -37346,13 +37588,13 @@ mod tests {
 
         let invalid = super::CategoricalIndex {
             labels: vec![
-                "ghost".to_owned(),
-                "low".to_owned(),
-                "ghost".to_owned(),
-                "other".to_owned(),
-                "low".to_owned(),
+                IndexLabel::from("ghost"),
+                IndexLabel::from("low"),
+                IndexLabel::from("ghost"),
+                IndexLabel::from("other"),
+                IndexLabel::from("low"),
             ],
-            categories: vec!["low".to_owned()],
+            categories: vec![IndexLabel::from("low")],
             ordered: true,
             name: Some("dirty".into()),
             category_codes: None,
@@ -37360,14 +37602,14 @@ mod tests {
         assert!(invalid.category_rank_unique_scan_is_bounded());
         assert_unique_matches_oracle(&invalid);
 
-        let mut large_categories = vec!["a".to_owned(), "b".to_owned()];
-        large_categories.extend((0..50).map(|value| format!("unused-{value}")));
+        let mut large_categories = vec![IndexLabel::from("a"), IndexLabel::from("b")];
+        large_categories.extend((0..50).map(|value| IndexLabel::Utf8(format!("unused-{value}"))));
         let sparse = super::CategoricalIndex {
             labels: vec![
-                "a".to_owned(),
-                "b".to_owned(),
-                "a".to_owned(),
-                "b".to_owned(),
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
             ],
             categories: large_categories,
             ordered: false,
@@ -37380,22 +37622,21 @@ mod tests {
 
     #[test]
     fn categorical_index_value_counts_use_rank_counts_uza04200() {
-        fn value_counts_oracle(labels: &[String]) -> Vec<(String, usize)> {
-            let mut order = Vec::<&str>::new();
-            let mut counts = std::collections::HashMap::<&str, usize>::new();
+        fn value_counts_oracle(labels: &[IndexLabel]) -> Vec<(IndexLabel, usize)> {
+            let mut order = Vec::<&IndexLabel>::new();
+            let mut counts = std::collections::HashMap::<&IndexLabel, usize>::new();
             for label in labels {
-                let label = label.as_str();
                 let entry = counts.entry(label).or_insert_with(|| {
                     order.push(label);
                     0
                 });
                 *entry += 1;
             }
-            let mut pairs: Vec<(String, usize)> = order
+            let mut pairs: Vec<(IndexLabel, usize)> = order
                 .iter()
                 .map(|label| {
                     let label = *label;
-                    (label.to_owned(), counts[label])
+                    (label.clone(), counts[label])
                 })
                 .collect();
             pairs.sort_by_key(|entry| std::cmp::Reverse(entry.1));
@@ -37429,9 +37670,9 @@ mod tests {
         assert_eq!(
             repeated.value_counts(),
             vec![
-                ("low".to_owned(), 3),
-                ("high".to_owned(), 2),
-                ("med".to_owned(), 1),
+                (IndexLabel::from("low"), 3),
+                (IndexLabel::from("high"), 2),
+                (IndexLabel::from("med"), 1),
             ]
         );
         assert_value_counts_matches_oracle(&repeated);
@@ -37472,22 +37713,22 @@ mod tests {
         assert_eq!(
             tied.value_counts(),
             vec![
-                ("b".to_owned(), 2),
-                ("a".to_owned(), 2),
-                ("c".to_owned(), 1),
+                (IndexLabel::from("b"), 2),
+                (IndexLabel::from("a"), 2),
+                (IndexLabel::from("c"), 1),
             ]
         );
         assert_value_counts_matches_oracle(&tied);
 
         let invalid = super::CategoricalIndex {
             labels: vec![
-                "ghost".to_owned(),
-                "low".to_owned(),
-                "ghost".to_owned(),
-                "other".to_owned(),
-                "low".to_owned(),
+                IndexLabel::from("ghost"),
+                IndexLabel::from("low"),
+                IndexLabel::from("ghost"),
+                IndexLabel::from("other"),
+                IndexLabel::from("low"),
             ],
-            categories: vec!["low".to_owned()],
+            categories: vec![IndexLabel::from("low")],
             ordered: false,
             name: None,
             category_codes: None,
@@ -37496,21 +37737,21 @@ mod tests {
         assert_eq!(
             invalid.value_counts(),
             vec![
-                ("ghost".to_owned(), 2),
-                ("low".to_owned(), 2),
-                ("other".to_owned(), 1),
+                (IndexLabel::from("ghost"), 2),
+                (IndexLabel::from("low"), 2),
+                (IndexLabel::from("other"), 1),
             ]
         );
         assert_value_counts_matches_oracle(&invalid);
 
-        let mut large_categories = vec!["a".to_owned(), "b".to_owned()];
-        large_categories.extend((0..50).map(|value| format!("unused-{value}")));
+        let mut large_categories = vec![IndexLabel::from("a"), IndexLabel::from("b")];
+        large_categories.extend((0..50).map(|value| IndexLabel::Utf8(format!("unused-{value}"))));
         let sparse = super::CategoricalIndex {
             labels: vec![
-                "a".to_owned(),
-                "b".to_owned(),
-                "a".to_owned(),
-                "b".to_owned(),
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
             ],
             categories: large_categories,
             ordered: false,
@@ -37523,18 +37764,17 @@ mod tests {
 
     #[test]
     fn categorical_index_factorize_uses_rank_codes_uza04201() {
-        fn factorize_oracle(labels: &[String]) -> (Vec<isize>, Vec<String>) {
-            let mut positions = std::collections::HashMap::<&str, isize>::new();
-            let mut uniques = Vec::<String>::new();
+        fn factorize_oracle(labels: &[IndexLabel]) -> (Vec<isize>, Vec<IndexLabel>) {
+            let mut positions = std::collections::HashMap::<&IndexLabel, isize>::new();
+            let mut uniques = Vec::<IndexLabel>::new();
             let mut codes = Vec::<isize>::with_capacity(labels.len());
             for label in labels {
-                let label = label.as_str();
                 if let Some(code) = positions.get(label) {
                     codes.push(*code);
                 } else {
                     let code = isize::try_from(uniques.len()).unwrap_or(isize::MAX);
                     positions.insert(label, code);
-                    uniques.push(label.to_owned());
+                    uniques.push(label.clone());
                     codes.push(code);
                 }
             }
@@ -37576,7 +37816,12 @@ mod tests {
         assert_eq!(codes, vec![0, 1, 0, 2, 1, 0]);
         assert_eq!(
             uniques.labels(),
-            vec!["low".to_owned(), "high".to_owned(), "med".to_owned()].as_slice()
+            vec![
+                IndexLabel::from("low"),
+                IndexLabel::from("high"),
+                IndexLabel::from("med")
+            ]
+            .as_slice()
         );
         assert_factorize_matches_oracle(&repeated);
         let same_public_state_without_sidecar = super::CategoricalIndex {
@@ -37591,13 +37836,13 @@ mod tests {
 
         let invalid = super::CategoricalIndex {
             labels: vec![
-                "ghost".to_owned(),
-                "low".to_owned(),
-                "ghost".to_owned(),
-                "other".to_owned(),
-                "low".to_owned(),
+                IndexLabel::from("ghost"),
+                IndexLabel::from("low"),
+                IndexLabel::from("ghost"),
+                IndexLabel::from("other"),
+                IndexLabel::from("low"),
             ],
-            categories: vec!["low".to_owned()],
+            categories: vec![IndexLabel::from("low")],
             ordered: true,
             name: Some("dirty".into()),
             category_codes: None,
@@ -37605,14 +37850,14 @@ mod tests {
         assert!(invalid.category_rank_unique_scan_is_bounded());
         assert_factorize_matches_oracle(&invalid);
 
-        let mut large_categories = vec!["a".to_owned(), "b".to_owned()];
-        large_categories.extend((0..50).map(|value| format!("unused-{value}")));
+        let mut large_categories = vec![IndexLabel::from("a"), IndexLabel::from("b")];
+        large_categories.extend((0..50).map(|value| IndexLabel::Utf8(format!("unused-{value}"))));
         let sparse = super::CategoricalIndex {
             labels: vec![
-                "a".to_owned(),
-                "b".to_owned(),
-                "a".to_owned(),
-                "b".to_owned(),
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
             ],
             categories: large_categories,
             ordered: false,

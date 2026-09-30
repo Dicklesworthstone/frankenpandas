@@ -26,16 +26,12 @@ fn golden() -> String {
     // with_categories: ok
     let ci = CategoricalIndex::with_categories(labels.clone(), cats.clone(), false).unwrap();
     out.push_str(&format!("wc_ok cats={:?}\n", ci.categories()));
-    // with_categories: error (label not present)
-    let bad =
-        CategoricalIndex::with_categories(vec!["zzz".into(), "c1".into()], cats.clone(), false);
+    // with_categories: a label not present is missing (pandas' NaN)
+    let bad = CategoricalIndex::with_categories(vec!["zzz", "c1"], cats.clone(), false);
     out.push_str(&format!("wc_err {}\n", fmt_err(&bad)));
 
     // from_values: first-seen categories order
-    let fv = CategoricalIndex::from_values(
-        vec!["b".into(), "a".into(), "b".into(), "c".into(), "a".into()],
-        true,
-    );
+    let fv = CategoricalIndex::from_values(vec!["b", "a", "b", "c", "a"], true);
     out.push_str(&format!(
         "fv cats={:?} ordered={}\n",
         fv.categories(),
@@ -46,7 +42,7 @@ fn golden() -> String {
     let mut sc_cats = cats.clone();
     sc_cats.push("c8".into());
     out.push_str(&format!("sc_ok {}\n", fmt_err(&ci.set_categories(sc_cats))));
-    // set_categories: error (drops c0 which is in use)
+    // set_categories: drops c0, whose labels become missing
     let drop_cats: Vec<String> = (1..8).map(|i| format!("c{i}")).collect();
     out.push_str(&format!(
         "sc_err {}\n",
@@ -56,14 +52,15 @@ fn golden() -> String {
     // add_categories: ok + error(already present)
     out.push_str(&format!(
         "add_ok {}\n",
-        fmt_err(&ci.add_categories(vec!["c8".into(), "c9".into()]))
+        fmt_err(&ci.add_categories(vec!["c8", "c9"]))
     ));
     out.push_str(&format!(
         "add_err {}\n",
-        fmt_err(&ci.add_categories(vec!["c2".into()]))
+        fmt_err(&ci.add_categories(vec!["c2"]))
     ));
 
-    // remove_categories: ok (unused) + error(in use) + error(not a category)
+    // remove_categories: ok (unused) + ok (in use: its labels become
+    // missing) + error (not a category)
     let ci2 =
         CategoricalIndex::with_categories(labels.clone(), sc_cats_for_remove(), false).unwrap();
     out.push_str(&format!(

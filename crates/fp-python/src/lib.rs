@@ -6946,6 +6946,40 @@ fn parse_duplicate_keep(keep: Option<&Bound<'_, PyAny>>) -> PyResult<DuplicateKe
 /// anything else. These raised "Cannot convert ndarray to Scalar" in the
 /// DataFrame paths, and a DatetimeIndex became its formatted strings with NaT
 /// as 1970-01-01 (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.15).
+/// The labels a CategoricalIndex (or its categories) is built from: any
+/// collection - a list, an array, an Index, a Series, a Categorical - read
+/// item by item as index labels. Text or a scalar is pandas' TypeError.
+fn categorical_labels_of(data: &Bound<'_, PyAny>) -> PyResult<Vec<IndexLabel>> {
+    if data.is_instance_of::<pyo3::types::PyString>() || data.try_iter().is_err() {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "CategoricalIndex(...) must be called with a collection of some kind, {} was passed",
+            data.repr()?
+        )));
+    }
+    data.try_iter()?
+        .map(|item| py_to_index_label(&item?))
+        .collect()
+}
+
+/// A CategoricalIndex construction's refusal as pandas' ValueError of its
+/// message ("Categorical categories must be unique").
+fn categorical_error(err: fp_index::IndexError) -> PyErr {
+    let message = match err {
+        fp_index::IndexError::InvalidArgument(message) => message,
+        other => other.to_string(),
+    };
+    PyErr::new::<pyo3::exceptions::PyValueError, _>(message)
+}
+
+/// A category argument (`add_categories('d')`, `remove_categories(['a'])`):
+/// one label, or each item of a list-like.
+fn category_items(obj: &Bound<'_, PyAny>) -> PyResult<Vec<IndexLabel>> {
+    if obj.is_instance_of::<pyo3::types::PyString>() || obj.try_iter().is_err() {
+        return Ok(vec![py_to_index_label(obj)?]);
+    }
+    categorical_labels_of(obj)
+}
+
 /// A CategoricalIndex's labels as a categorical column of its categories and
 /// ordering, a missing label code -1.
 fn categorical_index_column(index: &CategoricalIndex) -> PyResult<Column> {
@@ -6961,7 +6995,7 @@ fn categorical_index_column(index: &CategoricalIndex) -> PyResult<Column> {
                 .map_or(-1, |position| position as i64)
         })
         .collect();
-    let categories = categories.iter().cloned().map(Scalar::Utf8).collect();
+    let categories = categories.iter().map(index_label_to_scalar).collect();
     Series::from_categorical_codes("", codes, categories, index.ordered())
         .map(|series| series.column().clone())
         .map_err(frame_error_to_py)
@@ -7718,13 +7752,7 @@ fn index_arg_declared(obj: &Bound<'_, PyAny>) -> Option<fp_index::DeclaredDtype>
 fn index_arg_categories(obj: &Bound<'_, PyAny>) -> Option<fp_index::IndexCategories> {
     let categorical = obj.extract::<PyRef<'_, PyCategoricalIndex>>().ok()?;
     Some(fp_index::IndexCategories {
-        categories: categorical
-            .inner
-            .categories()
-            .iter()
-            .cloned()
-            .map(IndexLabel::Utf8)
-            .collect(),
+        categories: categorical.inner.categories().to_vec(),
         ordered: categorical.inner.ordered(),
     })
 }
@@ -8362,22 +8390,18 @@ fn row_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
     flat_index_to_py(py, index)
 }
 
-/// `index` as the CategoricalIndex its category metadata describes, when
-/// the core's CategoricalIndex can hold it (text labels and categories, no
-/// missing label); None for any other index. Interval categories (pd.cut's)
-/// go in as their text, as they did before intervals were labels, until the
-/// core's CategoricalIndex holds any label (br-frankenpandas-lztvp).
+/// `index` as the CategoricalIndex its category metadata describes - any
+/// labels and categories (pd.cut's intervals as Interval objects), a
+/// missing label NaN; None for any other index. Only text was held, and
+/// intervals went in as their text (br-frankenpandas-lztvp).
 fn categorical_index_of(index: &Index) -> Option<CategoricalIndex> {
     let categories = index.categories()?;
-    let text = |label: &IndexLabel| match label {
-        IndexLabel::Utf8(text) => Some(text.clone()),
-        IndexLabel::Interval(interval) => Some(interval.to_string()),
-        _ => None,
-    };
-    let labels: Option<Vec<String>> = index.labels().iter().map(text).collect();
-    let names: Option<Vec<String>> = categories.categories.iter().map(text).collect();
-    let categorical =
-        CategoricalIndex::with_categories(labels?, names?, categories.ordered).ok()?;
+    let categorical = CategoricalIndex::with_categories(
+        index.labels().to_vec(),
+        categories.categories.clone(),
+        categories.ordered,
+    )
+    .ok()?;
     Some(categorical.set_names(index.name().cloned()))
 }
 
@@ -10166,7 +10190,7 @@ impl PyIndex {
         // Any hashable names it, typed (`name=7` raised TypeError; fvsao.64).
         let name = name.map(py_axis_name).transpose()?.flatten();
         if let Some(dtype) = dtype.filter(|dtype| !dtype.is_none()) {
-            return Ok(Py::new(py, Self::new(data, name)?.astype(dtype, true)?)?.into_any());
+            return Self::new(data, name)?.astype(dtype, true);
         }
         if let Some(range) = data.and_then(|data| data.cast::<pyo3::types::PyRange>().ok()) {
             let part = |attr: &str| range.getattr(attr).and_then(|value| value.extract::<i64>());
@@ -11082,8 +11106,9 @@ impl PyIndex {
     /// pandas `Index.astype`: a dtype name, a Python type or a numpy/pandas
     /// dtype. It returned the index unchanged whatever the dtype (fvsao.4).
     #[pyo3(signature = (dtype, copy=true))]
-    fn astype(&self, dtype: &Bound<'_, PyAny>, copy: bool) -> PyResult<Self> {
+    fn astype(&self, dtype: &Bound<'_, PyAny>, copy: bool) -> PyResult<Py<PyAny>> {
         let _ = copy; // pandas' copy= does not change the result
+        let py = dtype.py();
         // astype(object) keeps the values - ints stay ints in an object
         // index, declared object (the type object made them strings, the
         // name was refused; br-frankenpandas-i20vm) - while astype(str)
@@ -11096,8 +11121,40 @@ impl PyIndex {
         } else {
             pandas_dtype_name(&py_dtype_arg(dtype)?)
         };
+        // 'category' / a CategoricalDtype: a CategoricalIndex of the labels,
+        // over the dtype's categories or the sorted distinct present labels
+        // (it was "unsupported Index.astype dtype 'category'"; lztvp).
+        if name == "category" {
+            let labels = self.inner.labels().to_vec();
+            let categories = match dtype
+                .getattr("categories")
+                .ok()
+                .filter(|categories| !categories.is_none())
+            {
+                Some(categories) => categorical_labels_of(&categories)?,
+                None => {
+                    let mut distinct: Vec<IndexLabel> = labels
+                        .iter()
+                        .filter(|label| !label.is_missing())
+                        .cloned()
+                        .collect();
+                    distinct.sort();
+                    distinct.dedup();
+                    distinct
+                }
+            };
+            let ordered = dtype
+                .getattr("ordered")
+                .ok()
+                .and_then(|ordered| ordered.extract::<bool>().ok())
+                .unwrap_or(false);
+            let inner = CategoricalIndex::with_categories(labels, categories, ordered)
+                .map_err(categorical_error)?
+                .set_names(self.inner.name().cloned());
+            return Ok(Py::new(py, PyCategoricalIndex { inner })?.into_any());
+        }
         // str / 'str' is pandas' object dtype of the labels' text.
-        let text = dtype.is(dtype.py().get_type::<pyo3::types::PyString>().as_any())
+        let text = dtype.is(py.get_type::<pyo3::types::PyString>().as_any())
             || dtype.extract::<String>().is_ok_and(|name| name == "str");
         if name == "object" && !text {
             let inner = self
@@ -11105,9 +11162,9 @@ impl PyIndex {
                 .clone()
                 .with_range_span(None)
                 .with_declared_dtype(Some(fp_index::DeclaredDtype::Object));
-            return Ok(Self { inner });
+            return Ok(Py::new(py, Self { inner })?.into_any());
         }
-        self.astype_name(&name)
+        Ok(Py::new(py, self.astype_name(&name)?)?.into_any())
     }
 
     #[getter]
@@ -19370,61 +19427,85 @@ impl PyCategoricalIndex {
         restore_call(py, "CategoricalIndex", payload)
     }
 
+    /// pandas' `CategoricalIndex(data, categories=, ordered=, name=)`: any
+    /// labels - text, numbers, dates, intervals - a missing one (or one
+    /// outside `categories`) NaN; the categories inferred are the sorted
+    /// distinct present labels. Only text was taken, and no missing value
+    /// (br-frankenpandas-lztvp).
     #[new]
-    #[pyo3(signature = (data=None, categories=None, ordered=false, name=None))]
+    #[pyo3(signature = (data=None, categories=None, ordered=None, name=None))]
     pub fn new(
         data: Option<&Bound<'_, PyAny>>,
-        categories: Option<Vec<String>>,
-        ordered: bool,
+        categories: Option<&Bound<'_, PyAny>>,
+        ordered: Option<bool>,
         name: Option<&str>,
     ) -> PyResult<Self> {
-        let labels: Vec<String> = if let Some(d) = data {
-            if let Ok(ci) = d.extract::<PyRef<'_, PyCategoricalIndex>>() {
-                let mut inner = ci.inner.clone();
-                if let Some(n) = name {
-                    inner = inner.set_name(n);
-                }
-                return Ok(Self { inner });
-            } else if let Ok(list) = d.extract::<Vec<String>>() {
-                list
-            } else {
-                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                    "CategoricalIndex requires list of string labels",
-                ));
-            }
-        } else {
-            Vec::new()
+        let data = data.filter(|data| !data.is_none());
+        let categories = categories.filter(|categories| !categories.is_none());
+        // Categorical data (a Categorical, pd.cut's result, a category
+        // Series or index) lends its categories and ordering where they are
+        // not given, as pandas' (ordered was False).
+        let data_dtype = data
+            .and_then(|data| data.getattr("dtype").ok())
+            .filter(|dtype| dtype.hasattr("categories").unwrap_or(false))
+            .filter(|dtype| dtype.hasattr("ordered").unwrap_or(false));
+        let ordered = match ordered {
+            Some(ordered) => ordered,
+            None => data_dtype
+                .as_ref()
+                .and_then(|dtype| dtype.getattr("ordered").ok())
+                .and_then(|ordered| ordered.extract::<bool>().ok())
+                .unwrap_or(false),
         };
-
-        // Inferred categories are the sorted distinct labels, as pandas'
-        // (they were in first-seen order).
-        let categories = categories.unwrap_or_else(|| {
-            let mut distinct = labels.clone();
-            distinct.sort();
-            distinct.dedup();
-            distinct
+        let labels: Vec<IndexLabel> = match data {
+            Some(d) => {
+                if let Ok(ci) = d.extract::<PyRef<'_, PyCategoricalIndex>>()
+                    && categories.is_none()
+                    && ordered == ci.inner.ordered()
+                {
+                    let mut inner = ci.inner.clone();
+                    if let Some(n) = name {
+                        inner = inner.set_name(n);
+                    }
+                    return Ok(Self { inner });
+                }
+                categorical_labels_of(d)?
+            }
+            None => Vec::new(),
+        };
+        let categories = categories.cloned().or_else(|| {
+            data_dtype
+                .as_ref()
+                .and_then(|dtype| dtype.getattr("categories").ok())
+                .filter(|categories| !categories.is_none())
         });
+        let categories: Vec<IndexLabel> = match categories {
+            Some(categories) => categorical_labels_of(&categories)?,
+            None => {
+                let mut distinct: Vec<IndexLabel> = labels
+                    .iter()
+                    .filter(|label| !label.is_missing())
+                    .cloned()
+                    .collect();
+                distinct.sort();
+                distinct.dedup();
+                distinct
+            }
+        };
         let mut inner = CategoricalIndex::with_categories(labels, categories, ordered)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            .map_err(categorical_error)?;
         if let Some(n) = name {
             inner = inner.set_name(n);
         }
         Ok(Self { inner })
     }
 
-    /// pandas' `CategoricalIndex.categories`: an Index (it was a list,
-    /// br-frankenpandas-h1kl9).
+    /// pandas' `CategoricalIndex.categories`: an Index of their kind (an
+    /// IntervalIndex of interval categories; it was a list,
+    /// br-frankenpandas-h1kl9, then text).
     #[getter]
-    pub fn categories(&self) -> PyIndex {
-        PyIndex {
-            inner: Index::new(
-                self.inner
-                    .categories()
-                    .iter()
-                    .map(|category| IndexLabel::Utf8(category.clone()))
-                    .collect(),
-            ),
-        }
+    pub fn categories(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        row_index_to_py(py, &Index::new(self.inner.categories().to_vec()))
     }
 
     #[getter]
@@ -19432,14 +19513,45 @@ impl PyCategoricalIndex {
         self.inner.ordered()
     }
 
+    /// pandas' `codes`: each label's category position, -1 for a missing
+    /// one, an ndarray of the smallest int holding them (int8 under 127
+    /// categories); it was a list (lztvp).
     #[getter]
-    pub fn codes(&self) -> Vec<Option<usize>> {
-        self.inner.codes()
+    pub fn codes(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let codes: Vec<i64> = self
+            .inner
+            .codes()
+            .into_iter()
+            .map(|code| code.map_or(-1, |code| i64::try_from(code).unwrap_or(i64::MAX)))
+            .collect();
+        let dtype = match self.inner.categories().len() {
+            n if n < 127 => "int8",
+            n if n < 32_767 => "int16",
+            n if n < 2_147_483_647 => "int32",
+            _ => "int64",
+        };
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", dtype)?;
+        Ok(py
+            .import("numpy")?
+            .call_method("array", (codes,), Some(&kwargs))?
+            .unbind())
     }
 
     #[getter]
     pub fn name(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         axis_name_to_py(py, self.inner.name())
+    }
+
+    /// `index.name = value`, its base Index's too (it was not writable, so
+    /// a Categorical's describe, naming its index, raised; lztvp).
+    #[setter]
+    fn set_name(mut slf: PyRefMut<'_, Self>, name: &Bound<'_, PyAny>) -> PyResult<()> {
+        let name = py_axis_name(name)?;
+        slf.inner = slf.inner.set_names(name.clone());
+        let base = slf.as_super();
+        base.inner = base.inner.set_names(name);
+        Ok(())
     }
 
     #[getter]
@@ -19469,7 +19581,7 @@ impl PyCategoricalIndex {
             .inner
             .categories()
             .iter()
-            .map(|category| Scalar::Utf8(category.clone()))
+            .map(index_label_to_scalar)
             .collect();
         index_dtype_object(
             py,
@@ -19478,12 +19590,17 @@ impl PyCategoricalIndex {
         )
     }
 
-    pub fn tolist(&self) -> Vec<String> {
-        self.inner.labels().to_vec()
+    /// The labels as Python values (a missing one NaN).
+    pub fn tolist(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        self.inner
+            .labels()
+            .iter()
+            .map(|label| index_label_to_py(py, label))
+            .collect()
     }
 
-    pub fn to_list(&self) -> Vec<String> {
-        self.tolist()
+    pub fn to_list(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        self.tolist(py)
     }
 
     /// pandas' `CategoricalIndex.values`: its Categorical (it was a list of
@@ -19522,8 +19639,12 @@ impl PyCategoricalIndex {
         self.inner.len()
     }
 
+    /// The labels as Python values, as pandas iterates (its `[i]` is a
+    /// numpy scalar).
     fn __iter__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
-        iter_by_position(slf.as_any())
+        let py = slf.py();
+        let values = PyList::new(py, slf.borrow().tolist(py)?)?;
+        Ok(values.try_iter()?.into_any().unbind())
     }
 
     /// pandas refuses an index's truth value (it was its length's).
@@ -19535,19 +19656,35 @@ impl PyCategoricalIndex {
     /// display.max_categories 8, the first and last 4 around `...`),
     /// `ordered=`, the dtype and the name (it printed Rust's `["a"]` and
     /// `ordered=false`).
-    pub fn __repr__(&self) -> String {
-        let quoted = |label: &String| format!("'{label}'");
-        let items: Vec<String> = self.inner.labels().iter().map(quoted).collect();
+    pub fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        // Text quoted, a missing label nan, any other label as Python
+        // prints it (1, (0, 4], 2024-01-01 00:00:00).
+        let shown_label = |label: &IndexLabel| -> PyResult<String> {
+            Ok(match label {
+                IndexLabel::Utf8(text) => format!("'{text}'"),
+                label if label.is_missing() => "nan".to_owned(),
+                other => index_label_to_py(py, other)?.bind(py).str()?.to_string(),
+            })
+        };
+        let items = self
+            .inner
+            .labels()
+            .iter()
+            .map(shown_label)
+            .collect::<PyResult<Vec<String>>>()?;
         let categories = self.inner.categories();
         let shown: Vec<String> = if categories.len() > 8 {
             categories[..4]
                 .iter()
-                .map(quoted)
-                .chain(std::iter::once("...".to_owned()))
-                .chain(categories[categories.len() - 4..].iter().map(quoted))
-                .collect()
+                .map(shown_label)
+                .chain(std::iter::once(Ok("...".to_owned())))
+                .chain(categories[categories.len() - 4..].iter().map(shown_label))
+                .collect::<PyResult<_>>()?
         } else {
-            categories.iter().map(quoted).collect()
+            categories
+                .iter()
+                .map(shown_label)
+                .collect::<PyResult<_>>()?
         };
         let mut attrs = vec![
             format!("categories=[{}]", shown.join(", ")),
@@ -19562,7 +19699,7 @@ impl PyCategoricalIndex {
             "dtype='category'".to_owned(),
         ];
         attrs.extend(self.inner.name().map(|name| format!("name='{name}'")));
-        pandas_index_text("CategoricalIndex", &items, false, attrs)
+        Ok(pandas_index_text("CategoricalIndex", &items, false, attrs))
     }
 
     pub fn __getitem__(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -19574,7 +19711,12 @@ impl PyCategoricalIndex {
                     "index out of bounds",
                 ));
             }
-            return self.inner.labels()[pos as usize].clone().into_py_any(py);
+            // A number as its numpy scalar, as pandas' (it was a Python int).
+            return index_scalar_to_py(
+                py,
+                &self.inner.to_index(),
+                &self.inner.labels()[pos as usize],
+            );
         }
         if let Ok(slice) = item.cast::<pyo3::types::PySlice>() {
             let indices = slice.indices(self.inner.len() as isize)?;
@@ -19845,17 +19987,54 @@ impl PyCategoricalIndex {
         ascending: bool,
         dropna: bool,
     ) -> PyResult<PySeries> {
-        let idx = self.inner.to_index();
-        let counts = idx.value_counts_with_options(normalize, sort, ascending, dropna);
-        let mut idx_labels = Vec::with_capacity(counts.len());
-        let mut vals = Vec::with_capacity(counts.len());
-        for (lbl, sc) in counts {
-            idx_labels.push(lbl);
-            vals.push(sc);
+        // pandas counts every category (an unused one 0) in category order,
+        // a missing label as NaN unless dropna, then sorts by count
+        // (stable); the counts are indexed by a CategoricalIndex of the
+        // categories (it was a plain Index of the labels seen; lztvp).
+        let categories = self.inner.categories();
+        let mut counts = vec![0usize; categories.len()];
+        let mut missing = 0usize;
+        for code in self.inner.codes() {
+            match code {
+                Some(code) => counts[code] += 1,
+                None => missing += 1,
+            }
         }
-        let col = Column::from_values(vals)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        let s = Series::new("count", Index::new(idx_labels), col).map_err(frame_error_to_py)?;
+        let mut rows: Vec<(IndexLabel, usize)> = categories.iter().cloned().zip(counts).collect();
+        if !dropna && missing > 0 {
+            rows.push((IndexLabel::Null(NullKind::NaN), missing));
+        }
+        if sort {
+            rows.sort_by(|left, right| {
+                if ascending {
+                    left.1.cmp(&right.1)
+                } else {
+                    right.1.cmp(&left.1)
+                }
+            });
+        }
+        let total: usize = rows.iter().map(|(_, count)| count).sum();
+        #[allow(clippy::cast_precision_loss)] // pandas' proportions are float64
+        let values: Vec<Scalar> = rows
+            .iter()
+            .map(|(_, count)| {
+                if normalize {
+                    Scalar::Float64(*count as f64 / total as f64)
+                } else {
+                    Scalar::Int64(i64::try_from(*count).unwrap_or(i64::MAX))
+                }
+            })
+            .collect();
+        let index = Index::new(rows.into_iter().map(|(label, _)| label).collect())
+            .with_categories(Some(fp_index::IndexCategories {
+                categories: categories.to_vec(),
+                ordered: self.inner.ordered(),
+            }))
+            .map_err(index_error_to_py)?
+            .set_names(self.inner.name().map(|name| name.as_str()));
+        let column = Column::from_values(values).map_err(column_error_to_py)?;
+        let name = if normalize { "proportion" } else { "count" };
+        let s = Series::new(name, index, column).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: s })
     }
 
@@ -19907,8 +20086,8 @@ impl PyCategoricalIndex {
         })
     }
 
-    /// With no missing labels there is nothing to drop; dropping them is not
-    /// supported yet (this returned the index with them).
+    /// pandas' `dropna(how=)`: the missing labels dropped (it refused
+    /// them; lztvp).
     #[pyo3(signature = (how="any"))]
     pub fn dropna(&self, how: &str) -> PyResult<Self> {
         if !matches!(how, "any" | "all") {
@@ -19916,36 +20095,38 @@ impl PyCategoricalIndex {
                 "invalid how option: {how}"
             )));
         }
-        if self
-            .inner
-            .to_index()
-            .labels()
-            .iter()
-            .any(IndexLabel::is_missing)
-        {
-            return Err(not_implemented(
-                "dropna on an index with missing labels of this type",
-            ));
-        }
-        Ok(self.clone())
+        Ok(Self {
+            inner: self.inner.dropna(),
+        })
     }
 
-    /// With no missing labels there is nothing to fill; filling them is not
-    /// supported yet (this returned the index unfilled whatever the value).
+    /// pandas' `fillna(value)`: missing labels become `value` - a category
+    /// keeps the CategoricalIndex, any other value makes a plain (object)
+    /// Index of the labels; no value, or nothing missing, leaves the index
+    /// (it refused missing labels; lztvp).
     #[pyo3(signature = (value=None))]
-    pub fn fillna(&self, value: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
-        let has_missing = self
+    pub fn fillna(&self, py: Python<'_>, value: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
+        let Some(value) = value.filter(|value| !value.is_none()) else {
+            return Ok(Py::new(py, self.clone())?.into_any());
+        };
+        let label = py_to_index_label(value)?;
+        if let Ok(inner) = self.inner.fillna(&label) {
+            return Ok(Py::new(py, Self { inner })?.into_any());
+        }
+        let labels = self
             .inner
-            .to_index()
             .labels()
             .iter()
-            .any(IndexLabel::is_missing);
-        if value.is_some_and(|v| !v.is_none()) && has_missing {
-            return Err(not_implemented(
-                "fillna on an index with missing labels of this type",
-            ));
-        }
-        Ok(self.clone())
+            .map(|have| {
+                if have.is_missing() {
+                    label.clone()
+                } else {
+                    have.clone()
+                }
+            })
+            .collect();
+        let inner = Index::new(labels).set_names(self.inner.name().cloned());
+        Ok(Py::new(py, PyIndex { inner })?.into_any())
     }
 
     fn as_py_index(&self) -> PyIndex {
@@ -19954,9 +20135,11 @@ impl PyCategoricalIndex {
         }
     }
 
-    fn add_categories(&self, new: Vec<String>) -> PyResult<Self> {
+    /// pandas' `add_categories(new_categories)`: a category or a list-like
+    /// of them, of any kind (only text was taken; lztvp).
+    fn add_categories(&self, new: &Bound<'_, PyAny>) -> PyResult<Self> {
         self.inner
-            .add_categories(new)
+            .add_categories(category_items(new)?)
             .map(|inner| Self { inner })
             .map_err(index_error_to_py)
     }
@@ -20149,12 +20332,13 @@ impl PyCategoricalIndex {
         self.as_py_index().isin(values, level)
     }
 
-    fn isna(&self) -> Vec<bool> {
-        self.inner.isna()
+    /// The missing labels' mask, a bool ndarray (it was a list; lztvp).
+    fn isna(&self) -> BoolArray {
+        BoolArray(self.inner.isna())
     }
 
-    fn isnull(&self) -> Vec<bool> {
-        self.inner.isna()
+    fn isnull(&self) -> BoolArray {
+        self.isna()
     }
 
     fn item(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -20195,12 +20379,12 @@ impl PyCategoricalIndex {
         self.as_py_index().min(py, axis, skipna)
     }
 
-    fn notna(&self) -> Vec<bool> {
-        self.inner.notna()
+    fn notna(&self) -> BoolArray {
+        BoolArray(self.inner.notna())
     }
 
-    fn notnull(&self) -> Vec<bool> {
-        self.inner.notna()
+    fn notnull(&self) -> BoolArray {
+        self.notna()
     }
 
     fn nunique(&self) -> usize {
@@ -20228,9 +20412,12 @@ impl PyCategoricalIndex {
             .reindex(target, method, level, limit, tolerance)
     }
 
-    fn remove_categories(&self, removals: Vec<String>) -> PyResult<Self> {
+    /// pandas' `remove_categories(removals)`: a category or a list-like of
+    /// them; labels of a removed one become NaN (it was refused while in
+    /// use; lztvp).
+    fn remove_categories(&self, removals: &Bound<'_, PyAny>) -> PyResult<Self> {
         self.inner
-            .remove_categories(&removals)
+            .remove_categories(&category_items(removals)?)
             .map(|inner| Self { inner })
             .map_err(index_error_to_py)
     }
@@ -20241,26 +20428,54 @@ impl PyCategoricalIndex {
         }
     }
 
-    fn rename_categories(&self, new: Vec<String>) -> PyResult<Self> {
+    /// pandas' `rename_categories(new_categories)`: a list-like of the new
+    /// names, a dict of old -> new (others kept), or a callable of each old
+    /// name (only a list of text was taken; lztvp).
+    fn rename_categories(&self, new: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let new: Vec<IndexLabel> = if let Ok(mapping) = new.cast::<PyDict>() {
+            let py = new.py();
+            self.inner
+                .categories()
+                .iter()
+                .map(|old| match mapping.get_item(index_label_to_py(py, old)?)? {
+                    Some(to) => py_to_index_label(&to),
+                    None => Ok(old.clone()),
+                })
+                .collect::<PyResult<_>>()?
+        } else if new.is_callable() {
+            let py = new.py();
+            self.inner
+                .categories()
+                .iter()
+                .map(|old| py_to_index_label(&new.call1((index_label_to_py(py, old)?,))?))
+                .collect::<PyResult<_>>()?
+        } else {
+            category_items(new)?
+        };
         self.inner
             .rename_categories(new)
             .map(|inner| Self { inner })
             .map_err(index_error_to_py)
     }
 
-    #[pyo3(signature = (new, ordered=false))]
-    fn reorder_categories(&self, new: Vec<String>, ordered: bool) -> PyResult<Self> {
+    /// pandas' `reorder_categories(new_categories, ordered=None)`: `ordered`
+    /// None keeps the index's (it reset it to False).
+    #[pyo3(signature = (new, ordered=None))]
+    fn reorder_categories(&self, new: &Bound<'_, PyAny>, ordered: Option<bool>) -> PyResult<Self> {
         self.inner
-            .reorder_categories(new, ordered)
+            .reorder_categories(
+                category_items(new)?,
+                ordered.unwrap_or_else(|| self.inner.ordered()),
+            )
             .map(|inner| Self { inner })
             .map_err(index_error_to_py)
     }
 
-    fn repeat(&self, repeats: i64) -> PyResult<PyIndex> {
-        let index = self.inner.to_index();
-        let repeats = repeat_count(index.len(), repeats)?;
-        Ok(PyIndex {
-            inner: index.repeat(repeats),
+    /// pandas' `repeat`: a CategoricalIndex still (it was a plain Index).
+    fn repeat(&self, repeats: i64) -> PyResult<Self> {
+        let repeats = repeat_count(self.inner.len(), repeats)?;
+        Ok(Self {
+            inner: self.inner.repeat(repeats),
         })
     }
 
@@ -20284,9 +20499,11 @@ impl PyCategoricalIndex {
         self.as_py_index().searchsorted(value, side, sorter)
     }
 
-    fn set_categories(&self, new_categories: Vec<String>) -> PyResult<Self> {
+    /// pandas' `set_categories(new_categories)`: any kind of categories; a
+    /// label not among them becomes NaN (it was refused; lztvp).
+    fn set_categories(&self, new_categories: &Bound<'_, PyAny>) -> PyResult<Self> {
         self.inner
-            .set_categories(new_categories)
+            .set_categories(category_items(new_categories)?)
             .map(|inner| Self { inner })
             .map_err(index_error_to_py)
     }
@@ -20362,8 +20579,21 @@ impl PyCategoricalIndex {
             .map_err(index_error_to_py)
     }
 
-    fn to_numpy(&self) -> Vec<String> {
-        self.inner.labels().to_vec()
+    /// pandas' `to_numpy()`: the labels as an ndarray - numbers as numbers
+    /// (float64 beside a missing one), anything else object (it was a list
+    /// of the labels' text).
+    fn to_numpy(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let numeric = self.inner.labels().iter().all(|label| {
+            label.is_missing() || matches!(label, IndexLabel::Int64(_) | IndexLabel::Float64(_))
+        });
+        let kwargs = PyDict::new(py);
+        if !numeric || self.inner.is_empty() {
+            kwargs.set_item("dtype", "object")?;
+        }
+        Ok(py
+            .import("numpy")?
+            .call_method("array", (self.tolist(py)?,), Some(&kwargs))?
+            .unbind())
     }
 
     fn transpose(&self) -> Self {
@@ -86220,13 +86450,16 @@ mod tests {
         assert_eq!(py_ci.len(), 4);
         assert_eq!(name_text(|py| py_ci.name(py)), None);
         assert_eq!(
-            py_ci.categories().inner.labels(),
+            py_ci.inner.categories(),
             &[
                 IndexLabel::Utf8("cat".to_owned()),
                 IndexLabel::Utf8("dog".to_owned())
             ]
         );
-        assert_eq!(py_ci.codes(), vec![Some(0), Some(1), Some(0), Some(1)]);
+        assert_eq!(
+            py_ci.inner.codes(),
+            vec![Some(0), Some(1), Some(0), Some(1)]
+        );
         assert!(!py_ci.ordered());
     }
 
