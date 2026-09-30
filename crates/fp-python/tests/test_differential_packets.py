@@ -20529,3 +20529,34 @@ _E61_CASES = {
 def test_everyday61_object_arithmetic_like_pandas_8dqrn(case: str) -> None:
     run = _E61_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-qgd75: SeriesGroupBy.nth and quantile refused a list (of
+# positions / quantiles).
+def _e62_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {"k": ["b", "a", "b", "a", "b"], "j": [1, 1, 2, 1, 2], "w": [10, 20, 30, 50, 60]},
+        index=[5, 6, 7, 8, 9],
+    )
+
+
+_E62_CASES = {
+    "nth list": lambda m: [_e62_frame(m).groupby("k")["w"].nth([0, -1]).to_dict()],
+    "nth list out of range": lambda m: [_e62_frame(m).groupby("k")["w"].nth([2, 5]).to_dict()],
+    "quantile list": lambda m: [_e62_frame(m).groupby("k")["w"].quantile([0.25, 0.75]).to_dict()],
+    "quantile list names": lambda m: [_e62_frame(m).groupby("k")["w"].quantile([0.5]).index.names],
+    "quantile list two keys": lambda m: [_e62_frame(m).groupby(["k", "j"])["w"].quantile([0.1, 0.9]).to_dict()],
+    "quantile list interpolation": lambda m: [
+        _e62_frame(m).groupby("k")["w"].quantile([0.25], interpolation="lower").to_dict()
+    ],
+    # Negatives: already pandas'.
+    "nth int": lambda m: [_e62_frame(m).groupby("k")["w"].nth(1).to_dict()],
+    "quantile float": lambda m: [_e62_frame(m).groupby("k")["w"].quantile(0.25).to_dict()],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E62_CASES))
+def test_everyday62_groupby_list_nth_quantile_like_pandas_qgd75(case: str) -> None:
+    run = _E62_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

@@ -60205,6 +60205,44 @@ impl PySeriesGroupBy {
         self.series.take(&at).map_err(frame_error_to_py)
     }
 
+    /// One `q`'s per-group quantile ([`PySeriesGroupBy::quantile`]);
+    /// another interpolation than linear takes each group's quantile under
+    /// it.
+    fn quantile_one(
+        &self,
+        q: f64,
+        interpolation: Option<&str>,
+        numeric_only: bool,
+    ) -> PyResult<PySeries> {
+        self.check_numeric_only("quantile", numeric_only)?;
+        let interpolation = interpolation.unwrap_or("linear");
+        let res = if interpolation == "linear" {
+            self.series
+                .groupby(&self.by)
+                .map_err(frame_error_to_py)?
+                .quantile(q)
+                .map_err(frame_error_to_py)?
+        } else {
+            let mut labels = Vec::new();
+            let mut values = Vec::new();
+            for (key, positions) in self.ordered_groups(false)? {
+                labels.push(key);
+                values.push(
+                    self.group_rows(&positions)?
+                        .quantile_with_interpolation(q, interpolation)
+                        .map_err(frame_error_to_py)?,
+                );
+            }
+            let key_name = self.by.name();
+            let index = Index::new(labels).set_names((!key_name.is_empty()).then_some(key_name));
+            let column = Column::from_values(values).map_err(column_error_to_py)?;
+            Series::new(self.series.name(), index, column).map_err(frame_error_to_py)?
+        };
+        Ok(PySeries {
+            inner: self.per_group("quantile", res)?,
+        })
+    }
+
     /// A per-group result of a groupby over several keys is indexed by group
     /// code; relabel it with those groups' labels and MultiIndex levels. A
     /// single-key result passes through.
@@ -61014,40 +61052,76 @@ impl PySeriesGroupBy {
     /// numeric_only=False)`; another interpolation takes each group's
     /// quantile under it (it was refused); numeric_only is pandas' TypeError
     /// over a non-numeric Series (it was unexpected - br-frankenpandas-n57tz).
-    #[pyo3(signature = (q=0.5, interpolation="linear", numeric_only=false))]
+    /// A list of `q` gives each group's quantiles over a (group..., q)
+    /// MultiIndex, group-major, as pandas' (it was 'must be real number';
+    /// br-frankenpandas-qgd75).
+    #[pyo3(signature = (q=None, interpolation="linear", numeric_only=false))]
     fn quantile(
         &self,
-        q: f64,
+        q: Option<&Bound<'_, PyAny>>,
         interpolation: Option<&str>,
         numeric_only: bool,
     ) -> PyResult<PySeries> {
-        self.check_numeric_only("quantile", numeric_only)?;
-        let interpolation = interpolation.unwrap_or("linear");
-        let res = if interpolation == "linear" {
-            self.series
-                .groupby(&self.by)
-                .map_err(frame_error_to_py)?
-                .quantile(q)
-                .map_err(frame_error_to_py)?
-        } else {
-            let mut labels = Vec::new();
-            let mut values = Vec::new();
-            for (key, positions) in self.ordered_groups(false)? {
-                labels.push(key);
-                values.push(
-                    self.group_rows(&positions)?
-                        .quantile_with_interpolation(q, interpolation)
-                        .map_err(frame_error_to_py)?,
-                );
-            }
-            let key_name = self.by.name();
-            let index = Index::new(labels).set_names((!key_name.is_empty()).then_some(key_name));
-            let column = Column::from_values(values).map_err(column_error_to_py)?;
-            Series::new(self.series.name(), index, column).map_err(frame_error_to_py)?
+        let Some(q) = q.filter(|q| !q.is_none()) else {
+            return self.quantile_one(0.5, interpolation, numeric_only);
         };
-        Ok(PySeries {
-            inner: self.per_group("quantile", res)?,
-        })
+        if let Ok(q) = q.extract::<f64>() {
+            return self.quantile_one(q, interpolation, numeric_only);
+        }
+        let qs = q.extract::<Vec<f64>>()?;
+        let per_q = qs
+            .iter()
+            .map(|&q| Ok(self.quantile_one(q, interpolation, numeric_only)?.inner))
+            .collect::<PyResult<Vec<Series>>>()?;
+        let Some(first) = per_q.first() else {
+            return self.quantile_one(0.5, interpolation, numeric_only);
+        };
+        let (keys, mut names): (Vec<Vec<IndexLabel>>, Vec<Option<LabelName>>) =
+            match first.index().row_multiindex() {
+                Some(levels) => (
+                    (0..levels.len())
+                        .map(|row| {
+                            levels
+                                .get_tuple(row)
+                                .unwrap_or_default()
+                                .into_iter()
+                                .cloned()
+                                .collect()
+                        })
+                        .collect(),
+                    levels.names().to_vec(),
+                ),
+                None => (
+                    first
+                        .index()
+                        .labels()
+                        .iter()
+                        .map(|label| vec![label.clone()])
+                        .collect(),
+                    vec![first.index().name().cloned()],
+                ),
+            };
+        names.push(None);
+        let mut tuples = Vec::with_capacity(keys.len() * qs.len());
+        let mut values = Vec::with_capacity(keys.len() * qs.len());
+        for (group, key) in keys.iter().enumerate() {
+            for (position, &q) in qs.iter().enumerate() {
+                let mut tuple = key.clone();
+                tuple.push(IndexLabel::Float64(OrderedF64(q)));
+                tuples.push(tuple);
+                values.push(per_q[position].values()[group].clone());
+            }
+        }
+        let multi = MultiIndex::from_tuples(tuples)
+            .map_err(index_error_to_py)?
+            .set_names(names);
+        let index = multi
+            .to_flat_index("|")
+            .with_row_multiindex(multi)
+            .map_err(index_error_to_py)?;
+        let column = Column::from_values(values).map_err(column_error_to_py)?;
+        let inner = Series::new(first.name(), index, column).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner })
     }
 
     #[pyo3(signature = (ddof=1, numeric_only=false))]
@@ -61769,16 +61843,37 @@ impl PySeriesGroupBy {
         Ok(PySeries { inner })
     }
 
+    /// pandas' `nth(n)`: each group's row at position `n` (negative from the
+    /// end); a list of positions the rows at any of them, in the Series'
+    /// order with its index (a list raised TypeError; br-frankenpandas-qgd75).
     #[pyo3(signature = (n, dropna=None))]
-    fn nth(&self, n: i64, dropna: Option<&str>) -> PyResult<PySeries> {
+    fn nth(&self, n: &Bound<'_, PyAny>, dropna: Option<&str>) -> PyResult<PySeries> {
         unsupported_params("SeriesGroupBy.nth", &[("dropna", dropna.is_none())])?;
-        let res = self
-            .series
-            .groupby(&self.by)
-            .map_err(frame_error_to_py)?
-            .nth(n)
-            .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        if let Ok(n) = n.extract::<i64>() {
+            let res = self
+                .series
+                .groupby(&self.by)
+                .map_err(frame_error_to_py)?
+                .nth(n)
+                .map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner: res });
+        }
+        let wanted: Vec<i64> = n.extract()?;
+        let mut rows: Vec<usize> = Vec::new();
+        for (_, positions) in self.ordered_groups(false)? {
+            let len = i64::try_from(positions.len()).unwrap_or(i64::MAX);
+            for &at in &wanted {
+                let at = if at < 0 { len + at } else { at };
+                if let Some(&row) = usize::try_from(at).ok().and_then(|at| positions.get(at)) {
+                    rows.push(row);
+                }
+            }
+        }
+        rows.sort_unstable();
+        rows.dedup();
+        Ok(PySeries {
+            inner: self.group_rows(&rows)?,
+        })
     }
 
     fn ohlc(&self) -> PyResult<PyDataFrame> {
