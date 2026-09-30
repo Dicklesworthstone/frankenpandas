@@ -20710,3 +20710,64 @@ _E63_CASES = {
 def test_everyday63_io_writers_and_reader_options_like_pandas_0gmqq(case: str) -> None:
     run = _E63_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-0fi7r: s[int] / s[[ints]] read positions on an integer
+# index (pandas: labels), a list of ints set on another index raised
+# KeyError, and int keys read as positions missed pandas' FutureWarning.
+def _e64_series(m: Any, index: Any) -> Any:
+    return m.Series([10.0, 20.0, 30.0], index=index, name="v")
+
+
+def _e64_set(m: Any, index: Any, key: Any, value: Any) -> list:
+    series = _e64_series(m, index)
+    series[key] = value
+    return [series.to_dict()]
+
+
+_E64_INTS = [5, 6, 7]
+_E64_TEXT = ["a", "b", "c"]
+
+
+def _e64_dates(m: Any) -> Any:
+    return m.date_range("2024-01-01", periods=3)
+
+
+_E64_CASES = {
+    "int index get label": lambda m: [_e64_series(m, _E64_INTS)[6]],
+    "int index get list": lambda m: [_e64_series(m, _E64_INTS)[[5, 7]].to_dict()],
+    "int index get ndarray": lambda m: [_e64_series(m, _E64_INTS)[np.array([7, 5])].to_dict()],
+    "int index get missing": lambda m: [_e64_series(m, _E64_INTS)[0]],
+    "int index get missing list": lambda m: [_e64_series(m, _E64_INTS)[[0, 1]]],
+    "int index get partly missing": lambda m: [_e64_series(m, _E64_INTS)[[5, 1]]],
+    "int index set missing list": lambda m: _e64_set(m, _E64_INTS, [0, 1], 0.0),
+    "range get negative": lambda m: [m.Series([1, 2, 3])[-1]],
+    "empty get 0": lambda m: [m.Series([], dtype=float)[0]],
+    "text index get int": lambda m: [_e64_series(m, _E64_TEXT)[1]],
+    "text index get list": lambda m: [_e64_series(m, _E64_TEXT)[[0, 2]].to_dict()],
+    "text index get out of range": lambda m: [_e64_series(m, _E64_TEXT)[5]],
+    "text index set list": lambda m: _e64_set(m, _E64_TEXT, [0, 2], 0.0),
+    "text index set ndarray values": lambda m: _e64_set(m, _E64_TEXT, np.array([0, 1]), [7.0, 8.0]),
+    "text index set negative list": lambda m: _e64_set(m, _E64_TEXT, [-1], 9.0),
+    "text index set out of range": lambda m: _e64_set(m, _E64_TEXT, [5], 9.0),
+    "date index get int": lambda m: [_e64_series(m, _e64_dates(m))[1]],
+    "date index set list": lambda m: _e64_set(m, _e64_dates(m), [0, 2], 0.0),
+    "mixed index get int": lambda m: [_e64_series(m, ["a", 1, "c"])[0]],
+    "mixed index set list": lambda m: _e64_set(m, ["a", 1, "c"], [0], 0.0),
+    "tuple key": lambda m: [_e64_series(m, _E64_TEXT)[(0, 1)]],
+    "column of text index": lambda m: [m.DataFrame({"a": [1, 2]}, index=["x", "y"])["a"][[1]].to_dict()],
+    # Negatives: already pandas'.
+    "range set negative appends": lambda m: _e64_set(m, None, -1, 9.0),
+    "text index get label": lambda m: [_e64_series(m, _E64_TEXT)["b"]],
+    "int index set list present": lambda m: _e64_set(m, _E64_INTS, [5, 7], 0.0),
+    "float index get int label": lambda m: [_e64_series(m, [0.5, 1.0, 2.0])[1]],
+    "int slice": lambda m: [_e64_series(m, _E64_INTS)[1:].to_dict()],
+    "bool mask set": lambda m: _e64_set(m, _E64_TEXT, [True, False, True], 0.0),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E64_CASES))
+def test_everyday64_series_int_keys_labels_or_positions_like_pandas_0fi7r(case: str) -> None:
+    run = _E64_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

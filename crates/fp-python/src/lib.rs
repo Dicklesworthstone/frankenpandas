@@ -26381,12 +26381,35 @@ impl PySeries {
         {
             return series_label_get(py, &self.inner, key);
         }
-        if let Ok(positions) = key.extract::<Vec<i64>>() {
-            let s = self
-                .inner
-                .iloc(&positions)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
+        // A list of integers: labels on an integer index, positions
+        // elsewhere with pandas' FutureWarning (they were positions on any
+        // index, so s[[5, 7]] of an index [5, 6, 7] raised IndexError;
+        // br-frankenpandas-0fi7r).
+        if let Some(ints) = int_list_key(key) {
+            if !ints.is_empty() && !int_keys_are_positions(self.inner.index()) {
+                let wanted = int_key_labels(self.inner.index(), ints);
+                if let Some(missing) = loc_missing_labels_error(self.inner.index(), &wanted, key)? {
+                    return Err(missing);
+                }
+                let s = self.inner.loc(&wanted).map_err(loc_key_error)?;
+                return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+            }
+            if !ints.is_empty() {
+                warn_positional_keys(py, false)?;
+            }
+            let s = self.inner.iloc(&ints).map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                    "positional indexers are out-of-bounds",
+                )
+            })?;
             return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+        }
+        // A tuple the index does not hold: pandas' KeyError (it was read as
+        // positions).
+        if key.is_instance_of::<PyTuple>() {
+            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                "key of type tuple not found and not a MultiIndex",
+            ));
         }
         if let Ok(labels) = key.extract::<Vec<String>>() {
             let idx_labels = loc_list_labels(
@@ -26399,11 +26422,40 @@ impl PySeries {
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
             return Ok(Py::new(py, PySeries { inner: s })?.into_any());
         }
-        if let Ok(position) = key.extract::<i64>() {
-            let scalar = self
-                .inner
-                .iat(position)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
+        // An integer: a label on an integer index (it was a position, so s[0]
+        // of an index [5, 6, 7] was its first value, pandas' KeyError), a
+        // position elsewhere with pandas' FutureWarning.
+        if !key.is_instance_of::<pyo3::types::PyBool>()
+            && let Ok(position) = key.extract::<i64>()
+        {
+            // A RangeIndex holds the label at arithmetic's row (O(1), as
+            // the positional read was).
+            if let Some((start, _, step)) = self.inner.index().range_span() {
+                let row = position
+                    .checked_sub(start)
+                    .filter(|offset| step != 0 && offset % step == 0)
+                    .map(|offset| offset / step)
+                    .filter(|&row| usize::try_from(row).is_ok_and(|row| row < self.inner.len()));
+                return match row {
+                    Some(row) => {
+                        let scalar = self.inner.iat(row).map_err(frame_error_to_py)?;
+                        element_to_py(py, self.inner.column(), &scalar)
+                    }
+                    None => Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                        key.clone().unbind(),
+                    )),
+                };
+            }
+            if !int_keys_are_positions(self.inner.index()) {
+                return series_label_get(py, &self.inner, key);
+            }
+            warn_positional_keys(py, false)?;
+            let scalar = self.inner.iat(position).map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                    "index {position} is out of bounds for axis 0 with size {}",
+                    self.inner.len()
+                ))
+            })?;
             return element_to_py(py, self.inner.column(), &scalar);
         }
         // A label (text, a Timestamp): as `.loc` reads it, so date text on a
@@ -48512,11 +48564,79 @@ fn series_loc_target(series: &Series, key: &Bound<'_, PyAny>) -> PyResult<RowTar
     .map(RowTarget::Rows)
 }
 
+/// pandas' `Index._should_fallback_to_positional`: an integer key names a
+/// POSITION on `index` unless its labels are integers or floats - or mixed
+/// with integers, pandas' 'mixed-integer' - where it is a label (an empty
+/// RangeIndex is integer).
+fn int_keys_are_positions(index: &Index) -> bool {
+    if index.range_span().is_some() {
+        return false;
+    }
+    match index.inferred_type() {
+        "integer" | "floating" | "complex" => false,
+        "mixed" => !index
+            .labels()
+            .iter()
+            .any(|label| matches!(label, IndexLabel::Int64(_))),
+        "empty" => index.range_span().is_none(),
+        _ => true,
+    }
+}
+
+/// pandas 2.2's FutureWarning for integer keys read as positions
+/// ([`int_keys_are_positions`]) by `s[key]` or `s[key] = value`.
+fn warn_positional_keys(py: Python<'_>, setting: bool) -> PyResult<()> {
+    let message = if setting {
+        c"Series.__setitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To set a value by position, use `ser.iloc[pos] = value`"
+    } else {
+        c"Series.__getitem__ treating keys as positions is deprecated. In a future version, integer keys will always be treated as labels (consistent with DataFrame behavior). To access a value by position, use `ser.iloc[pos]`"
+    };
+    PyErr::warn(
+        py,
+        &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+        message,
+        1,
+    )
+}
+
+/// The labels integer keys name on a label-keyed index (see
+/// [`int_keys_are_positions`]): each int itself, or the float equal to it
+/// on a float index (`s[[1, 2]]` of an index [0.5, 1.0, 2.0]).
+#[allow(clippy::cast_precision_loss)]
+fn int_key_labels(index: &Index, ints: Vec<i64>) -> Vec<IndexLabel> {
+    let floating = index.range_span().is_none() && index.inferred_type() == "floating";
+    ints.into_iter()
+        .map(|at| {
+            if floating {
+                IndexLabel::Float64(OrderedF64(at as f64))
+            } else {
+                IndexLabel::Int64(at)
+            }
+        })
+        .collect()
+}
+
+/// The integers of a list-like key (a list, an ndarray; not a string, a
+/// tuple or a boolean mask), None for any other key.
+fn int_list_key(key: &Bound<'_, PyAny>) -> Option<Vec<i64>> {
+    if key.is_instance_of::<pyo3::types::PyString>()
+        || key.is_instance_of::<PyTuple>()
+        || key.extract::<Vec<bool>>().is_ok()
+    {
+        return None;
+    }
+    key.extract::<Vec<i64>>().ok()
+}
+
 /// The rows `s[key] = value` writes, as pandas reads the key: a boolean
 /// mask; an integer slice by position, any other slice by label; a list of
-/// labels; a label (appending a new one) - or, for an integer the index
-/// does not hold as a label and a non-integer index, that position.
+/// labels; a label (appending a new one). Integer keys are labels on an
+/// integer index and positions elsewhere ([`int_keys_are_positions`];
+/// pandas' FutureWarning, an index out of range its IndexError), where a
+/// list of them raised KeyError; a list naming labels the index lacks is
+/// pandas' KeyError.
 fn series_setitem_target(series: &Series, key: &Bound<'_, PyAny>) -> PyResult<RowTarget> {
+    let py = key.py();
     if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
         let positional = ["start", "stop"].iter().all(|bound| {
             slice
@@ -48528,15 +48648,58 @@ fn series_setitem_target(series: &Series, key: &Bound<'_, PyAny>) -> PyResult<Ro
         }
     }
     let labels = series.index().labels();
+    let positional = int_keys_are_positions(series.index());
+    let out_of_bounds = |at: i64| {
+        PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+            "index {at} is out of bounds for axis 0 with size {}",
+            series.len()
+        ))
+    };
+    let position = |at: i64| -> PyResult<usize> {
+        let len = i64::try_from(series.len()).unwrap_or(i64::MAX);
+        let from_start = if at < 0 { at + len } else { at };
+        usize::try_from(from_start)
+            .ok()
+            .filter(|&row| row < series.len())
+            .ok_or_else(|| out_of_bounds(at))
+    };
     if is_single_loc_label(key)
         && !key.is_instance_of::<pyo3::types::PyString>()
+        && !key.is_instance_of::<pyo3::types::PyBool>()
         && let Ok(at) = key.extract::<i64>()
+        && positional
         && !labels.contains(&IndexLabel::Int64(at))
-        && !labels
-            .iter()
-            .any(|label| matches!(label, IndexLabel::Int64(_)))
     {
-        return resolve_iloc_positions(series.len(), key).map(RowTarget::Rows);
+        warn_positional_keys(py, true)?;
+        return Ok(RowTarget::Rows(vec![position(at)?]));
+    }
+    if let Some(ints) = int_list_key(key).filter(|ints| !ints.is_empty()) {
+        if positional {
+            warn_positional_keys(py, true)?;
+            let rows = ints
+                .into_iter()
+                .map(position)
+                .collect::<PyResult<Vec<usize>>>()?;
+            return Ok(RowTarget::Rows(rows));
+        }
+        // pandas' _set_labels: the labels the index lacks, as an array.
+        let present: HashSet<&IndexLabel> = labels.iter().collect();
+        let missing: Vec<i64> = ints
+            .iter()
+            .zip(int_key_labels(series.index(), ints.clone()))
+            .filter(|(_, label)| !present.contains(label))
+            .map(|(&at, _)| at)
+            .collect();
+        if !missing.is_empty() {
+            let shown = py
+                .import("numpy")?
+                .call_method1("asarray", (missing,))?
+                .str()?
+                .to_string();
+            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "{shown} not in index"
+            )));
+        }
     }
     series_loc_target(series, key)
 }
