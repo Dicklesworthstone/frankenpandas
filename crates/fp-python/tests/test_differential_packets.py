@@ -21642,3 +21642,88 @@ _E82_CASES = {
 def test_everyday82_interval_index_is_an_index_like_pandas_tjfdd(case: str) -> None:
     run = _E82_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-l0cqv: a number over an IntervalIndex is a point - s[2.5],
+# s.loc[[0.5, 2.5]], s.loc[0.5:1.5], s.loc[1.5] = v, s.at[1.5] - naming
+# the interval(s) holding it; they raised KeyError, read an integer as a
+# position, or appended the point as a new row.
+def _e83_series(m: Any) -> Any:
+    return m.Series([10, 20, 30], index=m.IntervalIndex.from_breaks([0, 1, 2, 3]))
+
+
+def _e83_frame(m: Any) -> Any:
+    return m.DataFrame({"v": [10, 20, 30]}, index=m.IntervalIndex.from_breaks([0, 1, 2, 3]))
+
+
+def _e83_written(obj: Any, write: Any) -> list:
+    write(obj)
+    return _e81_shown(obj)
+
+
+_E83_CASES = {
+    "getitem point": lambda m: [_e83_series(m)[2.5]],
+    "getitem int point": lambda m: [_e83_series(m)[1]],
+    "getitem int list": lambda m: _e81_shown(_e83_series(m)[[1, 3]]),
+    "loc point list": lambda m: _e81_shown(_e83_series(m).loc[[0.5, 2.5]]),
+    "loc list point outside": lambda m: _e81_shown(_e83_series(m).loc[[0.5, 7]]),
+    "loc list overlapping": lambda m: _e81_shown(
+        m.Series([1, 2], index=m.IntervalIndex.from_tuples([(0, 2), (1, 3)])).loc[[1.5, 0.5]]
+    ),
+    "numpy int key": lambda m: [_e83_series(m).loc[np.int64(1)]],
+    "loc slice points": lambda m: _e81_shown(_e83_series(m).loc[0.5:1.5]),
+    "loc slice beyond": lambda m: _e81_shown(_e83_series(m).loc[1.5:10]),
+    "loc slice before": lambda m: _e81_shown(_e83_series(m).loc[-5:1.5]),
+    "loc slice gap": lambda m: _e81_shown(
+        m.Series([1, 2], index=m.IntervalIndex.from_tuples([(0, 1), (2, 3)])).loc[1.5:2.5]
+    ),
+    "loc slice left closed": lambda m: _e81_shown(
+        m.Series([1, 2, 3], index=m.IntervalIndex.from_breaks([0, 1, 2, 3], closed="left")).loc[1:2]
+    ),
+    "loc slice decreasing": lambda m: _e81_shown(
+        m.Series([1, 2, 3], index=m.IntervalIndex.from_breaks([0, 1, 2, 3])[::-1]).loc[10:1.5]
+    ),
+    "getitem float slice": lambda m: _e81_shown(_e83_series(m)[0.5:1.5]),
+    "frame loc point list": lambda m: _e81_shown(_e83_frame(m).loc[[0.5, 2.5]]),
+    "frame loc slice": lambda m: _e81_shown(_e83_frame(m).loc[0.5:1.5]),
+    "frame loc point column": lambda m: [_e83_frame(m).loc[1.5, "v"]],
+    "frame at point": lambda m: [_e83_frame(m).at[1.5, "v"]],
+    "at point": lambda m: [_e83_series(m).at[1.5]],
+    "get point": lambda m: [_e83_series(m).get(1.5), _e83_series(m).get(7, "none")],
+    "loc set point": lambda m: _e83_written(_e83_series(m), lambda s: s.loc.__setitem__(1.5, 99)),
+    "setitem point": lambda m: _e83_written(_e83_series(m), lambda s: s.__setitem__(2.5, 99)),
+    "loc set point list": lambda m: _e83_written(_e83_series(m), lambda s: s.loc.__setitem__([0.5, 2.5], 99)),
+    "at set point": lambda m: _e83_written(_e83_series(m), lambda s: s.at.__setitem__(1.5, 99)),
+    "frame loc set point": lambda m: _e83_written(_e83_frame(m), lambda f: f.loc.__setitem__((1.5, "v"), 99)),
+    "set_index intervals": lambda m: _e81_shown(
+        m.DataFrame({"b": [m.Interval(0, 1), m.Interval(1, 2)], "v": [1, 2]}).set_index("b")
+    ),
+    "loc slice point in two runs": lambda m: _e81_shown(
+        m.Series([1, 2, 3], index=m.IntervalIndex.from_tuples([(0, 2), (5, 6), (1, 3)])).loc[1.5:]
+    ),
+    # A float bound on an integer index falls where it sorts, a bound on a
+    # decreasing index too; an empty slice keeps the dtype.
+    "float slice on int index": lambda m: _e81_shown(m.Series([1, 2, 3], index=[1, 2, 3]).loc[1.5:2.5]),
+    "decreasing index missing bound": lambda m: _e81_shown(m.Series([1, 2, 3], index=["c", "b", "a"]).loc["bb":"a"]),
+    "empty slice dtype": lambda m: [m.Series([1, 2, 3], index=["a", "b", "c"]).loc["c":"a"].dtype],
+    # Any list of labels reads as .loc (it was a TypeError).
+    "float index getitem list": lambda m: _e81_shown(m.Series([1, 2, 3], index=[0.5, 1.5, 2.5])[[0.5, 2.5]]),
+    "datetime getitem list": lambda m: _e81_shown(
+        m.Series([1, 2], index=m.to_datetime(["2024-01-01", "2024-01-02"]))[[m.Timestamp("2024-01-02")]]
+    ),
+    "getitem point outside": lambda m: [_e83_series(m)[7]],
+    # Negatives: already pandas'.
+    "getitem int slice": lambda m: _e81_shown(_e83_series(m)[0:2]),
+    "loc interval slice": lambda m: _e81_shown(_e83_series(m).loc[m.Interval(0, 1) : m.Interval(1, 2)]),
+    "text index point": lambda m: [m.Series([1, 2], index=["(0, 1]", "(1, 2]"]).loc[0.5]],
+    "text index text": lambda m: [m.Series([1, 2], index=["(0, 1]", "(1, 2]"]).loc["(0, 1]"]],
+    "contains point": lambda m: [1.5 in _e83_series(m).index],
+    "getitem mask": lambda m: _e81_shown(_e83_series(m)[[True, False, True]]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E83_CASES))
+def test_everyday83_points_over_an_interval_index_like_pandas_l0cqv(case: str) -> None:
+    run = _E83_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

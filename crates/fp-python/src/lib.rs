@@ -26702,6 +26702,7 @@ impl PySeries {
         key: &Bound<'_, PyAny>,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
+        let key = &interval_point_key(py, self.inner.index(), key, false)?;
         let target = series_setitem_target(&self.inner, key)?;
         self.inner = series_write(py, &self.inner, target, value)?;
         Ok(())
@@ -26719,6 +26720,9 @@ impl PySeries {
         if let Some(selected) = series_multiindex_loc(py, &self.inner, key, true)? {
             return Ok(selected);
         }
+        // Numbers over an IntervalIndex are points (s[2.5], s[[1, 3]]); an
+        // integer was a position (l0cqv).
+        let key = &interval_point_key(py, self.inner.index(), key, true)?;
         if let Ok(slice) = key.cast::<pyo3::types::PySlice>()
             && !slice_is_positional(slice)?
         {
@@ -26849,6 +26853,16 @@ impl PySeries {
         // returns every row (a Timestamp raised TypeError).
         if key.extract::<String>().is_ok() || is_single_loc_label(key) {
             return series_label_get(py, &self.inner, key);
+        }
+        // Any other list of labels (floats, intervals, timestamps) reads as
+        // `.loc` does, as pandas' (it was this TypeError; l0cqv).
+        if let Some(labels) = loc_label_list(key) {
+            let wanted = loc_list_labels(self.inner.index().labels(), labels?);
+            if let Some(missing) = loc_missing_labels_error(self.inner.index(), &wanted, key)? {
+                return Err(missing);
+            }
+            let s = self.inner.loc(&wanted).map_err(loc_key_error)?;
+            return Ok(Py::new(py, PySeries { inner: s })?.into_any());
         }
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
             "Series index must be an int, str, slice, list, or boolean Series",
@@ -31308,6 +31322,22 @@ impl PySeries {
         key: &Bound<'py, PyAny>,
         default: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        // Over an IntervalIndex, pandas' get: `s[key]` (a point the interval
+        // holding it), the default on its KeyError / ValueError /
+        // IndexError. A point was the default (l0cqv).
+        if holds_intervals(self.inner.index()) {
+            return match self.__getitem__(py, key) {
+                Ok(value) => Ok(value.into_bound(py)),
+                Err(err)
+                    if err.is_instance_of::<pyo3::exceptions::PyKeyError>(py)
+                        || err.is_instance_of::<pyo3::exceptions::PyValueError>(py)
+                        || err.is_instance_of::<pyo3::exceptions::PyIndexError>(py) =>
+                {
+                    Ok(default.cloned().unwrap_or_else(|| py.None().into_bound(py)))
+                }
+                Err(err) => Err(err),
+            };
+        }
         if let Ok(seq) = key.extract::<Vec<Bound<'py, PyAny>>>() {
             let mut labels = Vec::with_capacity(seq.len());
             for item in &seq {
@@ -33188,6 +33218,7 @@ impl PySeriesLoc {
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let key = &resolve_callable_key(self.parent.bind(py).as_any(), key)?;
+        let key = &interval_point_key(py, self.inner.index(), key, false)?;
         write_series_through(py, &self.parent, &mut self.inner, |series| {
             series_write(py, series, series_loc_target(series, key)?, value)
         })
@@ -33199,7 +33230,7 @@ impl PySeriesLoc {
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let key = &resolve_callable_key(self.parent.bind(py).as_any(), key)?;
         // A point over an IntervalIndex is the interval(s) holding it.
-        let key = &interval_point_key(py, self.inner.index(), key)?;
+        let key = &interval_point_key(py, self.inner.index(), key, true)?;
         // A MultiIndex key (s.loc['y'], s.loc[('y', 1)]; fvsao.36).
         if let Some(selected) = series_multiindex_loc(py, &self.inner, key, false)? {
             return Ok(selected);
@@ -33287,6 +33318,9 @@ impl PySeriesAt {
         key: &Bound<'_, PyAny>,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
+        // A point over an IntervalIndex writes the interval holding it (it
+        // appended a row; l0cqv).
+        let key = &interval_point_key(py, self.inner.index(), key, false)?;
         let label = py_to_index_label(key)?;
         write_series_through(py, &self.parent, &mut self.inner, |series| {
             // Date text on a DatetimeIndex is its instant.
@@ -33305,6 +33339,8 @@ impl PySeriesAt {
     }
 
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        // A point over an IntervalIndex reads the interval holding it.
+        let key = &interval_point_key(py, self.inner.index(), key, true)?;
         // Date text on a DatetimeIndex is its instant.
         let label =
             fp_frame::datetime_list_label(self.inner.index().labels(), &py_to_index_label(key)?);
@@ -48323,52 +48359,139 @@ fn loc_key_error(e: impl std::fmt::Display) -> PyErr {
     PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string())
 }
 
-/// pandas' IntervalIndex lookup of a point (`s.loc[1.5]`): a real-number
-/// `key` over an index of intervals answers the intervals containing it -
-/// one as that Interval, several as a list of them (a Series), none pandas'
-/// KeyError of the point; any other key or index as it is. The point was a
-/// KeyError (br-frankenpandas-c27hq).
+/// pandas' IntervalIndex lookup of points (`s.loc[1.5]`, `s[[0.5, 2.5]]`,
+/// `s.loc[1.5] = 0`): over an index of intervals a real-number key is the
+/// interval holding it (several holding it, the boolean mask of their
+/// rows), and a list-like key has each of its numbers replaced by the
+/// intervals holding it; any other key or index is as it is. A point no interval
+/// holds is pandas' KeyError when `reading`, and stays itself in a write (a
+/// new label, pandas' enlargement) or in a list (whose KeyError names it).
+/// The points were KeyErrors, and writes appended them as new labels
+/// (br-frankenpandas-c27hq, br-frankenpandas-l0cqv).
 fn interval_point_key<'py>(
     py: Python<'py>,
     index: &Index,
     key: &Bound<'py, PyAny>,
+    reading: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let labels = index.labels();
-    let number = !key.is_instance_of::<pyo3::types::PyBool>()
-        && (key.is_instance_of::<pyo3::types::PyInt>()
-            || key.is_instance_of::<pyo3::types::PyFloat>());
-    if !number
-        || labels.is_empty()
-        || !labels
-            .iter()
-            .all(|label| matches!(label, IndexLabel::Interval(_)))
-    {
+    if !holds_intervals(index) {
         return Ok(key.clone());
     }
-    let point = key.extract::<f64>()?;
-    let mut hits: Vec<&fp_types::Interval> = Vec::new();
-    for label in labels {
-        if let IndexLabel::Interval(interval) = label
-            && interval.contains(point)
-            && !hits.contains(&interval)
-        {
-            hits.push(interval);
+    let labels = index.labels();
+    let numpy_integer = py.import("numpy")?.getattr("integer")?;
+    let number = |item: &Bound<'py, PyAny>| {
+        !item.is_instance_of::<pyo3::types::PyBool>()
+            && (item.is_instance_of::<pyo3::types::PyInt>()
+                || item.is_instance_of::<pyo3::types::PyFloat>()
+                || item.is_instance(&numpy_integer).unwrap_or(false))
+    };
+    let holding = |point: f64| {
+        let mut hits: Vec<&fp_types::Interval> = Vec::new();
+        for label in labels {
+            if let IndexLabel::Interval(interval) = label
+                && interval.contains(point)
+                && !hits.contains(&interval)
+            {
+                hits.push(interval);
+            }
+        }
+        hits
+    };
+    if number(key) {
+        let point = key.extract::<f64>()?;
+        return match holding(point).as_slice() {
+            [] if reading => Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                key.clone().unbind(),
+            )),
+            [] => Ok(key.clone()),
+            [interval] => PyInterval::of(interval).into_bound_py_any(py),
+            // Every row holding the point, in index order (pandas' mask).
+            _ => Ok(PyList::new(
+                py,
+                labels.iter().map(|label| {
+                    matches!(label, IndexLabel::Interval(interval) if interval.contains(point))
+                }),
+            )?
+            .into_any()),
+        };
+    }
+    if key.is_instance_of::<pyo3::types::PyString>() || key.is_instance_of::<PyTuple>() {
+        return Ok(key.clone());
+    }
+    let items = if let Ok(list) = key.cast::<PyList>() {
+        list.clone()
+    } else if let Ok(list) = key
+        .getattr("tolist")
+        .and_then(|tolist| tolist.call0())
+        .and_then(|list| list.cast_into::<PyList>().map_err(PyErr::from))
+    {
+        list
+    } else {
+        return Ok(key.clone());
+    };
+    // A list of numbers mixing floats is a float Index in pandas, so a
+    // point it lacks is named as a float ("[7.0] not in index").
+    let floats = items
+        .iter()
+        .any(|item| item.is_instance_of::<pyo3::types::PyFloat>());
+    let mut found = false;
+    let mut expanded: Vec<Bound<'py, PyAny>> = Vec::with_capacity(items.len());
+    for item in items.iter() {
+        if !number(&item) {
+            expanded.push(item);
+            continue;
+        }
+        let point = item.extract::<f64>()?;
+        let hits = holding(point);
+        if hits.is_empty() {
+            expanded.push(if floats {
+                point.into_bound_py_any(py)?
+            } else {
+                item
+            });
+        } else {
+            found = true;
+            for interval in hits {
+                expanded.push(PyInterval::of(interval).into_bound_py_any(py)?);
+            }
         }
     }
-    match hits.as_slice() {
-        [] => Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
-            key.clone().unbind(),
-        )),
-        [interval] => PyInterval::of(interval).into_bound_py_any(py),
-        several => Ok(PyList::new(
-            py,
-            several
-                .iter()
-                .map(|interval| PyInterval::of(interval))
-                .collect::<Vec<_>>(),
-        )?
-        .into_any()),
+    // No point held (or no number at all): the key as it came, so pandas'
+    // "None of [...]" names it.
+    if !found {
+        return Ok(key.clone());
     }
+    Ok(PyList::new(py, expanded)?.into_any())
+}
+
+/// Whether `index` is an IntervalIndex: every label an interval.
+fn holds_intervals(index: &Index) -> bool {
+    let labels = index.labels();
+    !labels.is_empty()
+        && labels
+            .iter()
+            .all(|label| matches!(label, IndexLabel::Interval(_)))
+}
+
+/// [`interval_point_key`] of a frame's `.loc` / `.at` key: a (rows,
+/// columns) pair has its row part so read.
+fn frame_interval_point_key<'py>(
+    py: Python<'py>,
+    index: &Index,
+    key: &Bound<'py, PyAny>,
+    reading: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    if let Ok(pair) = key.cast::<PyTuple>()
+        && pair.len() == 2
+    {
+        let rows = pair.get_item(0)?;
+        let resolved = interval_point_key(py, index, &rows, reading)?;
+        if resolved.is(&rows) {
+            return Ok(key.clone());
+        }
+        return Ok(PyTuple::new(py, [resolved, pair.get_item(1)?])?.into_any());
+    }
+    interval_point_key(py, index, key, reading)
 }
 
 /// pandas' KeyError for `.loc` list labels `index` lacks: none there,
@@ -49161,15 +49284,15 @@ fn series_loc_target(series: &Series, key: &Bound<'_, PyAny>) -> PyResult<RowTar
 }
 
 /// pandas' `Index._should_fallback_to_positional`: an integer key names a
-/// POSITION on `index` unless its labels are integers or floats - or mixed
-/// with integers, pandas' 'mixed-integer' - where it is a label (an empty
-/// RangeIndex is integer).
+/// POSITION on `index` unless its labels are integers, floats or (numeric)
+/// intervals - or mixed with integers, pandas' 'mixed-integer' - where it is
+/// a label (an empty RangeIndex is integer).
 fn int_keys_are_positions(index: &Index) -> bool {
     if index.range_span().is_some() {
         return false;
     }
     match index.inferred_type() {
-        "integer" | "floating" | "complex" => false,
+        "integer" | "floating" | "complex" | "interval" => false,
         "mixed" => !index
             .labels()
             .iter()
@@ -51102,6 +51225,7 @@ impl PyDataFrameLoc {
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let key = &resolve_callable_key(self.parent.bind(py).as_any(), key)?;
+        let key = &frame_interval_point_key(py, self.inner.index(), key, false)?;
         write_frame_through(py, &self.parent, &mut self.inner, |frame| {
             frame_loc_write(py, frame, key, value)
         })
@@ -51110,7 +51234,7 @@ impl PyDataFrameLoc {
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let key = &resolve_callable_key(self.parent.bind(py).as_any(), key)?;
         // A row point over an IntervalIndex is the interval(s) holding it.
-        let key = &interval_point_key(py, self.inner.index(), key)?;
+        let key = &frame_interval_point_key(py, self.inner.index(), key, true)?;
         // Row MultiIndex: an outer label or a tuple prefix selects rows,
         // tried first as pandas does (df.loc['x'], df.loc[('x', 2)]); a
         // 2-tuple that matches nothing is then (rows, cols) below. They raised
@@ -51369,6 +51493,7 @@ impl PyDataFrameAt {
                 "DataFrame.at takes a (row, column) pair",
             ));
         }
+        let key = &frame_interval_point_key(py, self.inner.index(), key, false)?;
         write_frame_through(py, &self.parent, &mut self.inner, |frame| {
             frame_loc_write(py, frame, key, value)
         })
@@ -51383,7 +51508,8 @@ impl PyDataFrameAt {
                 "at requires exactly 2 keys: (row, column)",
             ));
         }
-        let row_key = tuple.get_item(0)?;
+        // A row point over an IntervalIndex reads the interval holding it.
+        let row_key = interval_point_key(py, self.inner.index(), &tuple.get_item(0)?, true)?;
         // A typed column label names the column carrying it (fvsao.32); one
         // labelling no column is pandas' KeyError.
         let col_key = column_arg(py, &self.inner, tuple.get_item(1)?)?;

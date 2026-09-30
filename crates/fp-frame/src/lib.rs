@@ -1868,15 +1868,11 @@ fn scalar_to_index_label(value: &Scalar) -> Result<IndexLabel, FrameError> {
         // A period is its own label: set_index of a period column is a
         // PeriodIndex (45fzr).
         Scalar::Period(period) => Ok(IndexLabel::Period(*period)),
+        // An interval too: an IntervalIndex (it was refused; l0cqv).
+        Scalar::Interval(interval) => Ok(IndexLabel::Interval(*interval)),
         Scalar::Null(_) => Err(FrameError::CompatibilityRejected(
             "set_index does not support missing label values".to_owned(),
         )),
-        // Interval indexes need an IndexLabel variant that does not yet
-        // exist; reject explicitly for now.
-        _ => Err(FrameError::CompatibilityRejected(format!(
-            "set_index currently supports Int64/Float64/Bool/Utf8/Datetime64/Timedelta64 labels; found {:?}",
-            value.dtype()
-        ))),
     }
 }
 
@@ -6880,18 +6876,52 @@ fn loc_slice_positions(
                 other => other.cloned(),
             })
         };
+    // pandas slices a decreasing DatetimeIndex by date text through a mask
+    // of keys it must hold, not where they sort: that stays the label path.
+    let date_text = datetime_index
+        && [start, stop]
+            .iter()
+            .any(|bound| matches!(bound, Some(IndexLabel::Utf8(_))));
     let start = resolve(start, false)?;
     let stop = resolve(stop, true)?;
-    let kind = labels.first().map(std::mem::discriminant);
-    let same_kind = |label: &IndexLabel| kind == Some(std::mem::discriminant(label));
-    let monotonic =
-        labels.iter().all(same_kind) && labels.windows(2).all(|pair| pair[0] <= pair[1]);
-    if monotonic && start.as_ref().is_none_or(same_kind) && stop.as_ref().is_none_or(same_kind) {
-        let first = start
-            .as_ref()
-            .map_or(0, |bound| labels.partition_point(|label| label < bound));
+    if let Some(positions) = interval_slice_positions(labels, start.as_ref(), stop.as_ref()) {
+        return positions;
+    }
+    // Integers and floats are one kind, ordered by value: a float bound on
+    // an integer index falls where it sorts (it was "label not found";
+    // l0cqv).
+    let kind_of = |label: &IndexLabel| match label {
+        IndexLabel::Float64(_) => std::mem::discriminant(&IndexLabel::Int64(0)),
+        other => std::mem::discriminant(other),
+    };
+    let kind = labels.first().map(kind_of);
+    let same_kind = |label: &IndexLabel| kind == Some(kind_of(label));
+    let comparable = labels.iter().all(same_kind)
+        && start.as_ref().is_none_or(same_kind)
+        && stop.as_ref().is_none_or(same_kind);
+    let ascending = comparable && labels.windows(2).all(|pair| pair[0] <= pair[1]);
+    // A decreasing index places a bound as pandas' `_searchsorted_monotonic`
+    // does, reversed (it had to be a label).
+    let descending =
+        comparable && !ascending && !date_text && labels.windows(2).all(|pair| pair[0] >= pair[1]);
+    if ascending || descending {
+        let first = start.as_ref().map_or(0, |bound| {
+            labels.partition_point(|label| {
+                if ascending {
+                    label < bound
+                } else {
+                    label > bound
+                }
+            })
+        });
         let end = stop.as_ref().map_or(labels.len(), |bound| {
-            labels.partition_point(|label| label <= bound)
+            labels.partition_point(|label| {
+                if ascending {
+                    label <= bound
+                } else {
+                    label >= bound
+                }
+            })
         });
         return Ok((first < end).then(|| (first, end - 1)));
     }
@@ -6909,6 +6939,136 @@ fn loc_slice_positions(
         None => labels.len().saturating_sub(1),
     };
     Ok((start_pos <= end_pos).then_some((start_pos, end_pos)))
+}
+
+/// [`loc_slice_positions`] over an IntervalIndex - interval `labels` sharing
+/// one `closed` - bounded by real numbers (`s.loc[0.5:1.5]`): each bound as
+/// pandas' `get_slice_bound` places it ([`interval_slice_bound`]). None for
+/// any other index or bounds. A number was looked up as a label, so the
+/// slice raised "label not found" (br-frankenpandas-l0cqv).
+#[allow(clippy::cast_precision_loss)] // pandas compares an integer bound with float endpoints
+fn interval_slice_positions(
+    labels: &[IndexLabel],
+    start: Option<&IndexLabel>,
+    stop: Option<&IndexLabel>,
+) -> Option<Result<Option<(usize, usize)>, FrameError>> {
+    let intervals: Vec<fp_types::Interval> = labels
+        .iter()
+        .map(|label| match label {
+            IndexLabel::Interval(interval) => Some(*interval),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    let closed = intervals.first()?.closed;
+    if intervals.iter().any(|interval| interval.closed != closed) {
+        return None;
+    }
+    let point = |bound: Option<&IndexLabel>| -> Option<Option<(f64, bool)>> {
+        match bound {
+            None => Some(None),
+            Some(IndexLabel::Int64(v)) => Some(Some((*v as f64, true))),
+            Some(IndexLabel::Float64(v)) => Some(Some((v.0, false))),
+            Some(_) => None,
+        }
+    };
+    let (start, stop) = (point(start)?, point(stop)?);
+    if start.is_none() && stop.is_none() {
+        return None;
+    }
+    let bound = |point: Option<(f64, bool)>, left: bool, unbounded: usize| {
+        point.map_or(Ok(unbounded), |point| {
+            interval_slice_bound(&intervals, point, left)
+        })
+    };
+    Some(bound(start, true, 0).and_then(|first| {
+        let end = bound(stop, false, intervals.len())?;
+        Ok((first < end).then(|| (first, end - 1)))
+    }))
+}
+
+/// pandas' `IntervalIndex.get_slice_bound` of the number `point` (an integer
+/// when `integer`) over non-empty `intervals` sharing one `closed`: the rows
+/// whose interval holds it, when they are one run, give its first row for the
+/// start (`left`) bound and one past its last for the stop; a point no
+/// interval holds falls where it sorts among the endpoints of a
+/// non-overlapping monotonic index (`_searchsorted_monotonic`: the right
+/// endpoints for the start of an increasing index, the left ones otherwise,
+/// stepping past an open end), and is pandas' KeyError on any other.
+fn interval_slice_bound(
+    intervals: &[fp_types::Interval],
+    (point, integer): (f64, bool),
+    left: bool,
+) -> Result<usize, FrameError> {
+    let hits: Vec<usize> = intervals
+        .iter()
+        .enumerate()
+        .filter(|(_, interval)| interval.contains(point))
+        .map(|(row, _)| row)
+        .collect();
+    if let (Some(&first), Some(&last)) = (hits.first(), hits.last()) {
+        if last - first + 1 != hits.len() {
+            let shown = if integer {
+                format!("{point}")
+            } else {
+                format!("{point:?}")
+            };
+            return Err(FrameError::Index(fp_index::IndexError::KeyError(format!(
+                "Cannot get {} slice bound for non-unique label: {shown}",
+                if left { "left" } else { "right" }
+            ))));
+        }
+        return Ok(if left { first } else { last + 1 });
+    }
+    let closed = intervals[0].closed;
+    let apart = |before: f64, after: f64| {
+        if closed == fp_types::IntervalClosed::Both {
+            before < after
+        } else {
+            before <= after
+        }
+    };
+    let increasing = intervals
+        .windows(2)
+        .all(|pair| apart(pair[0].right, pair[1].left));
+    let decreasing = intervals
+        .windows(2)
+        .all(|pair| apart(pair[1].right, pair[0].left));
+    if !increasing && !decreasing {
+        return Err(FrameError::Index(fp_index::IndexError::KeyError(
+            "can only get slices from an IntervalIndex if bounds are non-overlapping and all monotonic increasing or decreasing"
+                .to_owned(),
+        )));
+    }
+    let left_increasing = intervals
+        .windows(2)
+        .all(|pair| pair[0].left <= pair[1].left);
+    let use_right = left == left_increasing;
+    let (endpoints, open): (Vec<f64>, bool) = if use_right {
+        (
+            intervals.iter().map(|interval| interval.right).collect(),
+            !closed.right_closed(),
+        )
+    } else {
+        (
+            intervals.iter().map(|interval| interval.left).collect(),
+            !closed.left_closed(),
+        )
+    };
+    let target = match (open, use_right, integer) {
+        (false, _, _) => point,
+        (true, true, true) => point + 1.0,
+        (true, true, false) => point.next_up(),
+        (true, false, true) => point - 1.0,
+        (true, false, false) => point.next_down(),
+    };
+    let ascending = endpoints.windows(2).all(|pair| pair[0] <= pair[1]);
+    Ok(match (ascending, left) {
+        (true, true) => endpoints.partition_point(|&end| end < target),
+        (true, false) => endpoints.partition_point(|&end| end <= target),
+        // pandas searches a decreasing index reversed, the side flipped.
+        (false, true) => endpoints.partition_point(|&end| end > target),
+        (false, false) => endpoints.partition_point(|&end| end >= target),
+    })
 }
 
 fn parse_year_month_period_label(label: &str) -> Option<(i32, u32)> {
@@ -14306,12 +14466,13 @@ impl Series {
         stop: Option<&IndexLabel>,
     ) -> Result<Self, FrameError> {
         let labels = self.index.labels();
+        // An empty selection (an empty Series, or start after stop) keeps
+        // the dtype, as pandas' (it became object; l0cqv).
         if labels.is_empty() {
-            return self.with_labels_and_values_preserving_name(Vec::new(), Vec::new());
+            return self.iloc_slice(Some(0), Some(0));
         }
         let Some((start_pos, end_pos)) = loc_slice_positions(labels, start, stop)? else {
-            // Empty result when start is after stop.
-            return self.with_labels_and_values_preserving_name(Vec::new(), Vec::new());
+            return self.iloc_slice(Some(0), Some(0));
         };
         // The labels between are a run of positions: slice them, which keeps
         // the index's name, zone and freq (the rebuilt labels dropped the
@@ -126714,6 +126875,129 @@ mod tests {
         assert!(matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("not found")));
     }
 
+    /// pandas 2.2.3's `IntervalIndex` slices by points (br-frankenpandas-l0cqv).
+    #[test]
+    fn interval_slice_bounds_place_points_like_pandas_l0cqv() {
+        let intervals = |pairs: &[(f64, f64)], closed: IntervalClosed| -> Vec<IndexLabel> {
+            pairs
+                .iter()
+                .map(|&(left, right)| {
+                    IndexLabel::Interval(fp_types::Interval::new(left, right, closed))
+                })
+                .collect()
+        };
+        let float = |v: f64| IndexLabel::Float64(fp_index::OrderedF64(v));
+        let breaks = intervals(&[(0.0, 1.0), (1.0, 2.0), (2.0, 3.0)], IntervalClosed::Right);
+        let at = |labels: &[IndexLabel], start: Option<IndexLabel>, stop: Option<IndexLabel>| {
+            super::loc_slice_positions(labels, start.as_ref(), stop.as_ref())
+        };
+        // s.loc[0.5:1.5] is (0, 1], (1, 2]; s.loc[1.5:10] (1, 2], (2, 3];
+        // s.loc[-5:1.5] (0, 1], (1, 2]; s.loc[1.5:] (1, 2], (2, 3].
+        assert_eq!(
+            at(&breaks, Some(float(0.5)), Some(float(1.5))).unwrap(),
+            Some((0, 1))
+        );
+        assert_eq!(
+            at(&breaks, Some(float(1.5)), Some(IndexLabel::Int64(10))).unwrap(),
+            Some((1, 2))
+        );
+        assert_eq!(
+            at(&breaks, Some(IndexLabel::Int64(-5)), Some(float(1.5))).unwrap(),
+            Some((0, 1))
+        );
+        assert_eq!(at(&breaks, Some(float(1.5)), None).unwrap(), Some((1, 2)));
+        // The edge 1 is in (0, 1] (right-closed), in [1, 2) when left-closed.
+        assert_eq!(
+            at(&breaks, Some(IndexLabel::Int64(1)), None).unwrap(),
+            Some((0, 2))
+        );
+        let left = intervals(&[(0.0, 1.0), (1.0, 2.0), (2.0, 3.0)], IntervalClosed::Left);
+        assert_eq!(
+            at(
+                &left,
+                Some(IndexLabel::Int64(1)),
+                Some(IndexLabel::Int64(2))
+            )
+            .unwrap(),
+            Some((1, 2))
+        );
+        // A gap: [(0, 1], (2, 3]].loc[1.5:2.5] is (2, 3]; loc[1.2:1.8] nothing.
+        let gap = intervals(&[(0.0, 1.0), (2.0, 3.0)], IntervalClosed::Right);
+        assert_eq!(
+            at(&gap, Some(float(1.5)), Some(float(2.5))).unwrap(),
+            Some((1, 1))
+        );
+        assert_eq!(at(&gap, Some(float(1.2)), Some(float(1.8))).unwrap(), None);
+        // Decreasing: [(2, 3], (1, 2], (0, 1]].loc[10:1.5] is (2, 3], (1, 2].
+        let decreasing = intervals(&[(2.0, 3.0), (1.0, 2.0), (0.0, 1.0)], IntervalClosed::Right);
+        assert_eq!(
+            at(&decreasing, Some(IndexLabel::Int64(10)), Some(float(1.5))).unwrap(),
+            Some((0, 1))
+        );
+        // Overlapping: a point in one run is its bound; outside every
+        // interval it is pandas' KeyError, as is a point in two runs apart.
+        let overlapping = intervals(&[(0.0, 2.0), (1.0, 3.0)], IntervalClosed::Right);
+        assert_eq!(
+            at(&overlapping, Some(float(0.5)), Some(float(1.5))).unwrap(),
+            Some((0, 1))
+        );
+        let err = at(&overlapping, Some(IndexLabel::Int64(5)), None).unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("can only get slices from an IntervalIndex")
+        );
+        let apart = intervals(&[(0.0, 2.0), (5.0, 6.0), (1.0, 3.0)], IntervalClosed::Right);
+        let err = at(&apart, Some(float(1.5)), None).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Cannot get left slice bound for non-unique label: 1.5"
+        );
+        // An empty selection keeps the dtype (it became object).
+        let s = Series::from_values("v", gap.clone(), vec![Scalar::Int64(1), Scalar::Int64(2)])
+            .unwrap();
+        let out = s.loc_slice(Some(&float(1.2)), Some(&float(1.8))).unwrap();
+        assert_eq!((out.len(), out.column().dtype()), (0, DType::Int64));
+        // Interval bounds keep the label path.
+        assert_eq!(
+            at(&breaks, Some(breaks[0].clone()), Some(breaks[1].clone())).unwrap(),
+            Some((0, 1))
+        );
+        // A float bound on a sorted integer index falls where it sorts.
+        let ints = vec![
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(3),
+        ];
+        assert_eq!(
+            at(&ints, Some(float(1.5)), Some(float(2.5))).unwrap(),
+            Some((1, 1))
+        );
+        let descending = vec![
+            IndexLabel::Int64(3),
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(1),
+        ];
+        assert_eq!(
+            at(&descending, Some(float(2.5)), Some(float(1.5))).unwrap(),
+            Some((1, 1))
+        );
+        assert_eq!(
+            at(
+                &descending,
+                Some(IndexLabel::Int64(1)),
+                Some(IndexLabel::Int64(3))
+            )
+            .unwrap(),
+            None
+        );
+        let unsorted = vec![
+            IndexLabel::Int64(3),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+        ];
+        assert!(at(&unsorted, Some(float(1.5)), None).is_err());
+    }
+
     #[test]
     fn series_iloc_slice_exclusive_end() {
         let s = Series::from_values(
@@ -129457,7 +129741,7 @@ mod tests {
     }
 
     #[test]
-    fn dataframe_set_index_rejects_missing_or_unsupported_labels() {
+    fn dataframe_set_index_takes_period_interval_and_missing_labels() {
         let df = DataFrame::from_dict(
             &["id", "v"],
             vec![
@@ -129526,9 +129810,14 @@ mod tests {
             ],
         )
         .unwrap();
-        let err = df_interval.set_index("id", true).unwrap_err();
-        assert!(
-            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("set_index currently supports"))
+        // An interval key is an interval label (l0cqv; it was refused).
+        let indexed = df_interval.set_index("id", true).unwrap();
+        assert_eq!(
+            indexed.index().labels(),
+            &[
+                IndexLabel::Interval(fp_types::Interval::new(0.0, 1.0, IntervalClosed::Right)),
+                IndexLabel::Interval(fp_types::Interval::new(1.0, 2.0, IntervalClosed::Right)),
+            ]
         );
 
         // A missing key is a missing label, as pandas' set_index (it was
