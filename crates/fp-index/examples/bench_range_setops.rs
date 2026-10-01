@@ -372,6 +372,11 @@ fn index_label_digest(digest: usize, label: &IndexLabel) -> usize {
         IndexLabel::Period(value) => {
             fold_u64_digest(digest, 9, u64::from_ne_bytes(value.ordinal.to_ne_bytes()))
         }
+        IndexLabel::Interval(value) => fold_u64_digest(
+            fold_u64_digest(digest, 10, value.left.to_bits()),
+            11,
+            value.right.to_bits(),
+        ),
         IndexLabel::Null(_) => digest.rotate_left(1).wrapping_mul(131).wrapping_add(8),
     }
 }

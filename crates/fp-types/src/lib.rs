@@ -7809,11 +7809,244 @@ pub fn nansem_grouped(values: &[Scalar], ddof: usize) -> Scalar {
     if collect_timedelta_ns_f64(values).is_some() {
         return nansem(values, ddof);
     }
-    let n = collect_finite(values).len();
-    match nanvar(values, ddof) {
-        Scalar::Float64(var) => Scalar::Float64((var / n as f64).sqrt()),
-        other => other,
+    grouped_moments(values)
+        .sem(ddof)
+        .map_or(Scalar::Null(NullKind::NaN), Scalar::Float64)
+}
+
+/// pandas' compensated running sum: its cython `group_sum`, `group_mean`
+/// and `group_cumsum` add each float as `y = v - comp; t = sum + y;
+/// comp = t - sum - y; sum = t` (Kahan), `comp` reset to 0 where it is NaN
+/// (an inf added; GH#53606). A plain `+=` fold differs from it in the last
+/// bits - groupby sum of ten 0.1 is 1.0 in pandas, 0.9999999999999999
+/// naively (br-frankenpandas-xhogl).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct KahanSum {
+    sum: f64,
+    compensation: f64,
+}
+
+impl KahanSum {
+    /// `value` added, as pandas' group kernels add it.
+    #[inline]
+    pub fn add(&mut self, value: f64) {
+        let y = value - self.compensation;
+        let t = self.sum + y;
+        self.compensation = t - self.sum - y;
+        if self.compensation.is_nan() {
+            self.compensation = 0.0;
+        }
+        self.sum = t;
     }
+
+    /// The sum so far.
+    #[inline]
+    #[must_use]
+    pub fn sum(self) -> f64 {
+        self.sum
+    }
+}
+
+/// pandas' online variance: its cython `group_var` folds each float as
+/// Welford (`mean += (v - old) / n; m2 += (v - mean) * (v - old)`) and
+/// answers `m2 / (n - ddof)`, std its square root and sem
+/// `sqrt(m2 / (n - ddof) / n)` - where the two-pass form differs in the
+/// last bits (a constant group's var is 0.0, not 1e-34;
+/// br-frankenpandas-xhogl).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WelfordVar {
+    count: usize,
+    mean: f64,
+    m2: f64,
+}
+
+impl WelfordVar {
+    /// `value` folded in.
+    #[inline]
+    pub fn add(&mut self, value: f64) {
+        self.count += 1;
+        let old = self.mean;
+        self.mean += (value - old) / self.count as f64;
+        self.m2 += (value - self.mean) * (value - old);
+    }
+
+    /// The values folded in.
+    #[must_use]
+    pub fn count(self) -> usize {
+        self.count
+    }
+
+    /// `m2 / (n - ddof)`; None while `n <= ddof`.
+    #[must_use]
+    pub fn var(self, ddof: usize) -> Option<f64> {
+        (self.count > ddof).then(|| self.m2 / (self.count - ddof) as f64)
+    }
+
+    /// The square root of [`Self::var`].
+    #[must_use]
+    pub fn std(self, ddof: usize) -> Option<f64> {
+        self.var(ddof).map(f64::sqrt)
+    }
+
+    /// `sqrt(var / n)`, pandas' grouped sem.
+    #[must_use]
+    pub fn sem(self, ddof: usize) -> Option<f64> {
+        self.var(ddof).map(|var| (var / self.count as f64).sqrt())
+    }
+}
+
+/// pandas' online skewness: its cython `group_skew` folds each float into
+/// running moments (`delta = v - m1; delta_n = delta / n; term1 = delta *
+/// delta_n * (n - 1); m1 += delta_n; m3 += term1 * delta_n * (n - 2) -
+/// 3 * delta_n * m2; m2 += term1`) and answers
+/// `n * (n - 1) ** 0.5 / (n - 2) * (m3 / m2 ** 1.5)` - 0 when `m2` is 0,
+/// missing below 3 values - where the two-pass [`nanskew`] (Series.skew)
+/// differs in the last bits (br-frankenpandas-vjfq9).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SkewMoments {
+    count: usize,
+    m1: f64,
+    m2: f64,
+    m3: f64,
+}
+
+impl SkewMoments {
+    /// `value` folded in.
+    #[inline]
+    pub fn add(&mut self, value: f64) {
+        let before = self.count as f64;
+        self.count += 1;
+        let n = self.count as f64;
+        let delta = value - self.m1;
+        let delta_n = delta / n;
+        let term1 = delta * delta_n * before;
+        self.m1 += delta_n;
+        self.m3 += term1 * delta_n * (n - 2.0) - 3.0 * delta_n * self.m2;
+        self.m2 += term1;
+    }
+
+    /// The values folded in.
+    #[must_use]
+    pub fn count(self) -> usize {
+        self.count
+    }
+
+    /// The bias-corrected skewness; None below 3 values.
+    #[must_use]
+    pub fn skew(self) -> Option<f64> {
+        if self.count < 3 {
+            return None;
+        }
+        if self.m2 == 0.0 {
+            return Some(0.0);
+        }
+        let n = self.count as f64;
+        // pandas raises with libm pow: pow(n - 1, 0.5) is not always sqrt's
+        // correctly rounded answer (n = 2922 differs), and a constant 0.5
+        // exponent would let LLVM substitute sqrt.
+        let half = std::hint::black_box(0.5);
+        Some((n * (n - 1.0).powf(half) / (n - 2.0)) * (self.m3 / self.m2.powf(1.5)))
+    }
+}
+
+/// [`nanskew`] as pandas' grouped skew: [`SkewMoments`] over the present
+/// values.
+#[must_use]
+pub fn nanskew_grouped(values: &[Scalar]) -> Scalar {
+    let mut moments = SkewMoments::default();
+    for value in values {
+        if value.is_missing() {
+            continue;
+        }
+        if let Ok(x) = value.to_f64() {
+            moments.add(x);
+        }
+    }
+    moments
+        .skew()
+        .map_or(Scalar::Null(NullKind::NaN), Scalar::Float64)
+}
+
+/// The present values' Welford moments, as [`nanvar_grouped`] reads them.
+fn grouped_moments(values: &[Scalar]) -> WelfordVar {
+    let mut moments = WelfordVar::default();
+    for value in values {
+        if value.is_missing() {
+            continue;
+        }
+        if let Ok(x) = value.to_f64() {
+            moments.add(x);
+        }
+    }
+    moments
+}
+
+/// [`nansum`] as pandas' groupby / resample / pivot_table add floats: the
+/// compensated [`KahanSum`] (br-frankenpandas-xhogl). Timedelta input keeps
+/// [`nansum`]'s exact integer sum.
+#[must_use]
+pub fn nansum_grouped(values: &[Scalar]) -> Scalar {
+    if collect_timedelta_ns(values).is_some() {
+        return nansum(values);
+    }
+    let mut sum = KahanSum::default();
+    for value in values {
+        if value.is_missing() {
+            continue;
+        }
+        if let Ok(x) = value.to_f64() {
+            sum.add(x);
+        }
+    }
+    Scalar::Float64(sum.sum())
+}
+
+/// [`nanmean`] as pandas' grouped mean: the [`KahanSum`] over the count.
+/// Temporal input keeps [`nanmean`].
+#[must_use]
+pub fn nanmean_grouped(values: &[Scalar]) -> Scalar {
+    if collect_timedelta_ns(values).is_some() || collect_datetime_ns(values).is_some() {
+        return nanmean(values);
+    }
+    let mut sum = KahanSum::default();
+    let mut count = 0_usize;
+    for value in values {
+        if value.is_missing() {
+            continue;
+        }
+        if let Ok(x) = value.to_f64() {
+            sum.add(x);
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return Scalar::Null(NullKind::NaN);
+    }
+    Scalar::Float64(sum.sum() / count as f64)
+}
+
+/// [`nanvar`] as pandas' grouped var: [`WelfordVar`]. Timedelta input keeps
+/// [`nanvar`].
+#[must_use]
+pub fn nanvar_grouped(values: &[Scalar], ddof: usize) -> Scalar {
+    if collect_timedelta_ns_f64(values).is_some() {
+        return nanvar(values, ddof);
+    }
+    grouped_moments(values)
+        .var(ddof)
+        .map_or(Scalar::Null(NullKind::NaN), Scalar::Float64)
+}
+
+/// [`nanstd`] as pandas' grouped std: [`WelfordVar`]. Temporal input keeps
+/// [`nanstd`].
+#[must_use]
+pub fn nanstd_grouped(values: &[Scalar], ddof: usize) -> Scalar {
+    if collect_temporal_backing(values).is_some() {
+        return nanstd(values, ddof);
+    }
+    grouped_moments(values)
+        .std(ddof)
+        .map_or(Scalar::Null(NullKind::NaN), Scalar::Float64)
 }
 
 /// Peak-to-peak range of non-missing values (max − min).
@@ -8700,6 +8933,47 @@ pub struct Interval {
 impl PartialEq for Interval {
     fn eq(&self, other: &Self) -> bool {
         self.left == other.left && self.right == other.right && self.closed == other.closed
+    }
+}
+
+/// An interval as a label (an IntervalIndex's; br-frankenpandas-c27hq): its
+/// endpoints compare as floats, so only an interval with a NaN endpoint,
+/// which pandas never builds, is unequal to itself.
+impl Eq for Interval {}
+
+impl Interval {
+    /// An endpoint as it compares: -0.0 is 0.0, as `==` has it.
+    fn endpoint_key(value: f64) -> f64 {
+        if value == 0.0 { 0.0 } else { value }
+    }
+}
+
+/// Hashed as it compares: the endpoints (-0.0 as 0.0) and the closed side;
+/// the subtype is not part of the value.
+impl std::hash::Hash for Interval {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        Self::endpoint_key(self.left).to_bits().hash(state);
+        Self::endpoint_key(self.right).to_bits().hash(state);
+        self.closed.hash(state);
+    }
+}
+
+/// pandas' IntervalIndex order: by the left endpoint, then the right, then
+/// the closed side.
+impl Ord for Interval {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        Self::endpoint_key(self.left)
+            .total_cmp(&Self::endpoint_key(other.left))
+            .then_with(|| {
+                Self::endpoint_key(self.right).total_cmp(&Self::endpoint_key(other.right))
+            })
+            .then_with(|| self.closed.cmp(&other.closed))
+    }
+}
+
+impl PartialOrd for Interval {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -15645,6 +15919,73 @@ mod tests {
             Scalar::Float64(1.499_999_999_999_999_8)
         );
         assert!(super::nansem_grouped(&values[..1], 1).is_missing());
+    }
+
+    #[test]
+    fn grouped_reducers_add_as_pandas_group_kernels_xhogl() {
+        // pandas 2.2.3 groupby of ten 0.1: sum 1.0, mean 0.1, var 0.0 - a
+        // plain fold gives 0.9999999999999999, 0.09999999999999999 and
+        // 2.1e-34 (br-frankenpandas-xhogl).
+        let tenths: Vec<Scalar> = (0..10).map(|_| Scalar::Float64(0.1)).collect();
+        assert_eq!(super::nansum_grouped(&tenths), Scalar::Float64(1.0));
+        assert_eq!(super::nanmean_grouped(&tenths), Scalar::Float64(0.1));
+        assert_eq!(super::nanvar_grouped(&tenths, 1), Scalar::Float64(0.0));
+        assert_eq!(super::nanstd_grouped(&tenths, 1), Scalar::Float64(0.0));
+        // NEGATIVE: the Series reductions keep their plain fold.
+        assert_eq!(
+            super::nansum(&tenths),
+            Scalar::Float64(0.999_999_999_999_999_9)
+        );
+        // An inf keeps the sum inf (the compensation would go NaN).
+        let mut sum = super::KahanSum::default();
+        for value in [1.0, f64::INFINITY, 2.0] {
+            sum.add(value);
+        }
+        assert_eq!(sum.sum(), f64::INFINITY);
+        // Missing values are skipped; too few for ddof is missing.
+        let gapped = [
+            Scalar::Float64(1.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(4.0),
+        ];
+        assert_eq!(super::nanmean_grouped(&gapped), Scalar::Float64(2.5));
+        assert_eq!(super::nanvar_grouped(&gapped, 1), Scalar::Float64(4.5));
+        assert!(super::nanvar_grouped(&gapped[..1], 1).is_missing());
+        // Timedelta input keeps the exact integer paths.
+        let spans = [Scalar::Timedelta64(1), Scalar::Timedelta64(2)];
+        assert_eq!(super::nansum_grouped(&spans), super::nansum(&spans));
+    }
+
+    #[test]
+    fn grouped_skew_is_pandas_online_group_skew_vjfq9() {
+        // pandas 2.2.3 groupby skew of [1, 4, 8] is 0.42327316026800615 - a
+        // two-pass form gives 0.4232731602680071 (br-frankenpandas-vjfq9).
+        let group = [
+            Scalar::Float64(1.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(4.0),
+            Scalar::Float64(8.0),
+        ];
+        assert_eq!(
+            super::nanskew_grouped(&group),
+            Scalar::Float64(0.423_273_160_268_006_15)
+        );
+        // 2922 values: pandas raises (n - 1) ** 0.5 with libm pow, which is not
+        // sqrt's answer for n - 1 = 2921 (sqrt gives -0.002284383734800802).
+        let long: Vec<Scalar> = (0..2922_i32)
+            .map(|i| Scalar::Float64(f64::from((i * 7919) % 1000) / 7.0))
+            .collect();
+        assert_eq!(
+            super::nanskew_grouped(&long),
+            Scalar::Float64(-0.002_284_383_734_800_801_4)
+        );
+        // A constant group is 0; below 3 values missing; an inf poisons its
+        // group (pandas skips only NaN), where dropping it would leave [1, 2, 5].
+        let constant = [7.0; 3].map(Scalar::Float64);
+        assert_eq!(super::nanskew_grouped(&constant), Scalar::Float64(0.0));
+        assert!(super::nanskew_grouped(&group[..2]).is_missing());
+        let with_inf = [1.0, f64::INFINITY, 2.0, 5.0].map(Scalar::Float64);
+        assert!(super::nanskew_grouped(&with_inf).is_missing());
     }
 
     #[test]

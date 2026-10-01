@@ -2088,6 +2088,50 @@ fn fuzz_column_arith_bytes_accepts_ci_crash_20260901_b() {
     fuzz_column_arith_bytes(seed).expect("2026-09-01 CI crash input (b) should satisfy invariants");
 }
 
+/// br-frankenpandas-oie6x: the missing-propagation invariant's one carve-out
+/// is numpy's power identity - NaN ** 0 and 1 ** NaN into a float64 result -
+/// and nothing wider (live pandas 2.2.3 answers those with 1.0).
+#[test]
+fn fuzz_numpy_pow_identity_admits_only_nan_pow_zero_and_one_pow_nan() {
+    let nan = Scalar::Null(NullKind::NaN);
+    let one = Some(Scalar::Float64(1.0));
+    let (pow, f64_out) = (ArithmeticOp::Pow, DType::Float64);
+    assert_eq!(
+        fuzz_numpy_pow_identity(&nan, &Scalar::Float64(0.0), pow, &f64_out),
+        one
+    );
+    assert_eq!(
+        fuzz_numpy_pow_identity(&nan, &Scalar::Int64(0), pow, &f64_out),
+        one
+    );
+    assert_eq!(
+        fuzz_numpy_pow_identity(&Scalar::Float64(1.0), &nan, pow, &f64_out),
+        one
+    );
+    // Everything else still propagates missing.
+    assert_eq!(
+        fuzz_numpy_pow_identity(&nan, &Scalar::Float64(2.0), pow, &f64_out),
+        None
+    );
+    assert_eq!(
+        fuzz_numpy_pow_identity(&Scalar::Float64(2.0), &nan, pow, &f64_out),
+        None
+    );
+    assert_eq!(fuzz_numpy_pow_identity(&nan, &nan, pow, &f64_out), None);
+    assert_eq!(
+        fuzz_numpy_pow_identity(&nan, &Scalar::Float64(0.0), ArithmeticOp::Mul, &f64_out),
+        None
+    );
+    assert_eq!(
+        fuzz_numpy_pow_identity(&nan, &Scalar::Float64(0.0), pow, &DType::Float64Nullable),
+        None
+    );
+    assert_eq!(
+        fuzz_numpy_pow_identity(&Scalar::Float64(3.0), &Scalar::Float64(0.0), pow, &f64_out),
+        None
+    );
+}
+
 #[test]
 fn fuzz_column_arith_bytes_accepts_negative_int_pow_crash_seed() {
     let seed1 = &[0x67, 0x82, 0x0, 0x82, 0x82, 0x62, 0x86, 0x2b, 0xa];

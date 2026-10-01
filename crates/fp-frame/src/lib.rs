@@ -1283,6 +1283,7 @@ pub(crate) fn format_plot_index_label(l: &IndexLabel) -> String {
         IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
         IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
         f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => f.to_string(),
+        IndexLabel::Interval(interval) => interval.to_string(),
         IndexLabel::Object(object) => object.to_string(),
         IndexLabel::Null(_) => l.to_string(),
     }
@@ -1661,6 +1662,7 @@ fn index_label_memory_usage_bytes_with_deep(label: &IndexLabel, deep: bool) -> u
         | IndexLabel::Datetime64(_)
         | IndexLabel::Object(_)
         | IndexLabel::Period(_)
+        | IndexLabel::Interval(_)
         | IndexLabel::Null(_) => 8,
         IndexLabel::Bool(_) => 1,
         IndexLabel::Utf8(text) if deep => text.len(),
@@ -1804,6 +1806,45 @@ fn f64_argmin_first_index(data: &[f64]) -> Option<usize> {
     Some(best_index)
 }
 
+/// Each label's sort rank under a categorical index: its category's
+/// position (pandas sorts a CategoricalIndex by its categories, not its
+/// labels; br-frankenpandas-cld41); None for any other index.
+fn category_ranks(index: &Index) -> Option<Vec<usize>> {
+    let categories = index.categories()?;
+    let ranks: std::collections::HashMap<&IndexLabel, usize> =
+        categories.categories.iter().zip(0_usize..).collect();
+    Some(
+        index
+            .labels()
+            .iter()
+            .map(|label| ranks.get(label).copied().unwrap_or(usize::MAX))
+            .collect(),
+    )
+}
+
+/// The category column a categorical index's labels make: each label its
+/// category's code, a missing one -1 - pandas' reset_index of a
+/// CategoricalIndex (br-frankenpandas-cld41).
+fn categorical_index_column(
+    index: &Index,
+    categories: &fp_index::IndexCategories,
+) -> Result<Column, FrameError> {
+    let ranks: std::collections::HashMap<&IndexLabel, i64> =
+        categories.categories.iter().zip(0_i64..).collect();
+    let codes: Vec<i64> = index
+        .labels()
+        .iter()
+        .map(|label| ranks.get(label).copied().unwrap_or(-1))
+        .collect();
+    let meta = CategoricalMetadata {
+        categories: DataFrame::index_labels_to_scalars(&categories.categories),
+        ordered: categories.ordered,
+    };
+    let positions = Index::new_known_unique_int64_unit_range(0, codes.len());
+    Series::categorical_from_code_parts("", positions, &codes, meta)
+        .map(|series| series.column().clone())
+}
+
 fn scalar_to_index_label(value: &Scalar) -> Result<IndexLabel, FrameError> {
     match value {
         Scalar::Int64(v) => Ok(IndexLabel::Int64(*v)),
@@ -1827,15 +1868,11 @@ fn scalar_to_index_label(value: &Scalar) -> Result<IndexLabel, FrameError> {
         // A period is its own label: set_index of a period column is a
         // PeriodIndex (45fzr).
         Scalar::Period(period) => Ok(IndexLabel::Period(*period)),
+        // An interval too: an IntervalIndex (it was refused; l0cqv).
+        Scalar::Interval(interval) => Ok(IndexLabel::Interval(*interval)),
         Scalar::Null(_) => Err(FrameError::CompatibilityRejected(
             "set_index does not support missing label values".to_owned(),
         )),
-        // Interval indexes need an IndexLabel variant that does not yet
-        // exist; reject explicitly for now.
-        _ => Err(FrameError::CompatibilityRejected(format!(
-            "set_index currently supports Int64/Float64/Bool/Utf8/Datetime64/Timedelta64 labels; found {:?}",
-            value.dtype()
-        ))),
     }
 }
 
@@ -1953,7 +1990,9 @@ fn scalar_to_value_counts_index_label(value: &Scalar) -> IndexLabel {
         // A period labels as itself: value_counts / groupby over periods
         // answer a PeriodIndex (it was their text; 45fzr).
         Scalar::Period(period) => IndexLabel::Period(*period),
-        Scalar::Interval(interval) => IndexLabel::Utf8(format!("{interval}")),
+        // An interval labels as itself: value_counts(bins=) / groupby over
+        // pd.cut answer an IntervalIndex (it was its text; c27hq).
+        Scalar::Interval(interval) => IndexLabel::Interval(*interval),
         // An object cell labels as itself (value_counts of s.dt.date; fvsao.66).
         Scalar::Object(object) => IndexLabel::Object(object.clone()),
         // Typed null labels (br-frankenpandas-8m6ay): pandas keeps real
@@ -2412,6 +2451,7 @@ fn pivot_label_to_column_name(label: &IndexLabel) -> String {
         IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
         IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
         f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => f.to_string(),
+        IndexLabel::Interval(interval) => interval.to_string(),
         IndexLabel::Object(object) => object.to_string(),
         IndexLabel::Null(_) => label.to_string(),
     }
@@ -2422,13 +2462,15 @@ fn scalar_to_pivot_column_name(value: &Scalar) -> String {
 }
 
 fn pivot_table_agg_value(aggfunc: &str, vals: &[f64]) -> Result<f64, FrameError> {
+    // pandas' pivot_table cells are a groupby agg: sum / mean compensated,
+    // var / std Welford (br-frankenpandas-xhogl).
     Ok(match aggfunc {
-        "sum" => vals.iter().sum(),
+        "sum" => kahan_sum(vals),
         "mean" => {
             if vals.is_empty() {
                 f64::NAN
             } else {
-                vals.iter().sum::<f64>() / vals.len() as f64
+                kahan_sum(vals) / vals.len() as f64
             }
         }
         "count" => vals.len() as f64,
@@ -2451,24 +2493,8 @@ fn pivot_table_agg_value(aggfunc: &str, vals: &[f64]) -> Result<f64, FrameError>
                 sorted[mid]
             }
         }
-        "var" => {
-            if vals.len() < 2 {
-                f64::NAN
-            } else {
-                let mean = vals.iter().sum::<f64>() / vals.len() as f64;
-                let sum_sq = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>();
-                sum_sq / (vals.len() as f64 - 1.0)
-            }
-        }
-        "std" => {
-            if vals.len() < 2 {
-                f64::NAN
-            } else {
-                let mean = vals.iter().sum::<f64>() / vals.len() as f64;
-                let sum_sq = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>();
-                (sum_sq / (vals.len() as f64 - 1.0)).sqrt()
-            }
-        }
+        "var" => welford_moments(vals).var(1).unwrap_or(f64::NAN),
+        "std" => welford_moments(vals).std(1).unwrap_or(f64::NAN),
         // Distinct count. `vals` is already null-free (the caller drops values
         // that fail `to_f64()`), so this matches pandas `nunique` (NaN-excluding).
         "nunique" => {
@@ -2500,14 +2526,15 @@ fn pivot_table_agg_value(aggfunc: &str, vals: &[f64]) -> Result<f64, FrameError>
         // Delegate sem/skew to the audited fp_types kernels rather than inlining
         // the formula (an inline groupby copy of skew/kurtosis was the f4dc5540
         // bug). nansem_grouped(ddof=1) = sqrt(var/n), pandas' groupby sem
-        // (br-frankenpandas-7hxqv); nanskew = adjusted Fisher-Pearson G1. Both
+        // (br-frankenpandas-7hxqv); nanskew_grouped = adjusted Fisher-Pearson
+        // G1 by pandas' online group_skew (br-frankenpandas-vjfq9). Both
         // return NaN below their min sample size, matching pandas.
         "sem" | "skew" => {
             let scalars: Vec<Scalar> = vals.iter().map(|&v| Scalar::Float64(v)).collect();
             let agg = if aggfunc == "sem" {
                 fp_types::nansem_grouped(&scalars, 1)
             } else {
-                fp_types::nanskew(&scalars)
+                fp_types::nanskew_grouped(&scalars)
             };
             agg.to_f64().unwrap_or(f64::NAN)
         }
@@ -2748,8 +2775,10 @@ fn pivot_value_f64(col: &Column) -> Option<std::borrow::Cow<'_, [f64]>> {
 /// row/column position; `val_f64` the all-valid Float64 values. Accumulates
 /// each row into a column-major `cell = ci*n_idx + ri` buffer in ROW ORDER, so
 /// the per-cell fold matches the generic `pivot_table_agg_value` exactly
-/// (sum/mean: left-to-right `+`; min/max: `f64::min`/`f64::max` fold over the
-/// same INFINITY/NEG_INFINITY seed). A cell is present iff ≥1 row maps to it;
+/// (sum/mean: left-to-right compensated sum; var/std: Welford, both as pandas'
+/// groupby cells, br-frankenpandas-xhogl; min/max: `f64::min`/`f64::max` fold
+/// over the same INFINITY/NEG_INFINITY seed). A cell is present iff ≥1 row
+/// maps to it;
 /// absent cells emit `Null(NullKind::NaN)` via `from_f64_values_with_validity`.
 /// `col_names` are the sorted distinct column labels (one per `ci`).
 fn pivot_dense_build(
@@ -2790,17 +2819,26 @@ fn pivot_dense_build(
     };
     let n_col = col_names.len();
     let cells = n_idx.saturating_mul(n_col);
-    // sum/mean/var/std accumulate a running sum; min/max a running extremum.
-    let sum_like = matches!(kind, Kind::Sum | Kind::Mean | Kind::Var | Kind::Std);
+    // min/max keep a running extremum; sum/mean a compensated sum and var/std
+    // Welford moments, as pandas' groupby cells fold (br-frankenpandas-xhogl).
     let seed = match kind {
         Kind::Min => f64::INFINITY,
-        Kind::Max => f64::NEG_INFINITY,
-        _ => 0.0,
+        _ => f64::NEG_INFINITY,
     };
-    let mut acc = if matches!(kind, Kind::Count | Kind::Size) {
-        Vec::new()
-    } else {
+    let mut acc = if matches!(kind, Kind::Min | Kind::Max) {
         vec![seed; cells]
+    } else {
+        Vec::new()
+    };
+    let mut sums = if matches!(kind, Kind::Sum | Kind::Mean) {
+        vec![fp_types::KahanSum::default(); cells]
+    } else {
+        Vec::new()
+    };
+    let mut moments = if matches!(kind, Kind::Var | Kind::Std) {
+        vec![fp_types::WelfordVar::default(); cells]
+    } else {
+        Vec::new()
     };
     let mut counts = vec![0u64; cells];
     // `counts` is the number of PRESENT values in a cell; `touched` is whether
@@ -2829,14 +2867,12 @@ fn pivot_dense_build(
                 continue;
             }
         }
-        if sum_like {
-            acc[cell] += val_f64[i];
-        } else {
-            match kind {
-                Kind::Min => acc[cell] = f64::min(acc[cell], val_f64[i]),
-                Kind::Max => acc[cell] = f64::max(acc[cell], val_f64[i]),
-                _ => {}
-            }
+        match kind {
+            Kind::Sum | Kind::Mean => sums[cell].add(val_f64[i]),
+            Kind::Var | Kind::Std => moments[cell].add(val_f64[i]),
+            Kind::Min => acc[cell] = f64::min(acc[cell], val_f64[i]),
+            Kind::Max => acc[cell] = f64::max(acc[cell], val_f64[i]),
+            Kind::Count | Kind::Size => {}
         }
         counts[cell] += 1;
     }
@@ -2845,32 +2881,6 @@ fn pivot_dense_build(
         rows_in_cell
     } else {
         counts.clone()
-    };
-
-    // Second pass for var/std: mean-centered Σ(v-mean)² in ROW ORDER, exactly
-    // matching the generic `pivot_table_agg_value`'s two-pass formula
-    // (`mean = Σv/n` then `Σ(v-mean).powi(2)`, both left-to-right). Means are
-    // precomputed per cell (identical bits to dividing per row).
-    let sumsq = if matches!(kind, Kind::Var | Kind::Std) {
-        let mut means = vec![0.0f64; cells];
-        for cell in 0..cells {
-            if counts[cell] > 0 {
-                means[cell] = acc[cell] / counts[cell] as f64;
-            }
-        }
-        let mut sumsq = vec![0.0f64; cells];
-        for i in 0..ri_codes.len() {
-            if let Some(mask) = present
-                && !(mask.get(i) && !val_f64[i].is_nan())
-            {
-                continue;
-            }
-            let cell = ci_codes[i] as usize * n_idx + ri_codes[i] as usize;
-            sumsq[cell] += (val_f64[i] - means[cell]).powi(2);
-        }
-        sumsq
-    } else {
-        Vec::new()
     };
 
     let mut result_cols = BTreeMap::new();
@@ -2885,31 +2895,20 @@ fn pivot_dense_build(
                 continue;
             }
             data[ri] = match kind {
-                Kind::Sum | Kind::Min | Kind::Max => acc[base + ri],
+                Kind::Min | Kind::Max => acc[base + ri],
+                Kind::Sum => sums[base + ri].sum(),
                 Kind::Mean => {
                     if c == 0 {
                         f64::NAN
                     } else {
-                        acc[base + ri] / c as f64
+                        sums[base + ri].sum() / c as f64
                     }
                 }
                 Kind::Count => c as f64,
                 Kind::Size => rows_in_cell[base + ri] as f64,
                 // var/std: NaN below 2 samples (matches the generic guard).
-                Kind::Var => {
-                    if c < 2 {
-                        f64::NAN
-                    } else {
-                        sumsq[base + ri] / (c as f64 - 1.0)
-                    }
-                }
-                Kind::Std => {
-                    if c < 2 {
-                        f64::NAN
-                    } else {
-                        (sumsq[base + ri] / (c as f64 - 1.0)).sqrt()
-                    }
-                }
+                Kind::Var => moments[base + ri].var(1).unwrap_or(f64::NAN),
+                Kind::Std => moments[base + ri].std(1).unwrap_or(f64::NAN),
             };
             validity.set(ri, true);
         }
@@ -3009,8 +3008,9 @@ fn pivot_dense_build_median(
 /// position. Each margin folds its raw values in ROW ORDER, bit-identical to
 /// the generic `pivot_table_agg_value(aggfunc, margin_source_values(..))`; the
 /// grand total is summed in raw row order (not by reducing per-bucket sums).
-/// Covers sum/mean/count/size/min/max (two-pass), var/std (four-pass,
-/// mean-centered), and median (per-margin bucket sort).
+/// Covers sum/mean (row / column margins compensated, as pandas' groupby),
+/// count/size/min/max, var/std (row / column margins Welford, the grand total
+/// mean-centered two-pass), and median (per-margin bucket sort).
 fn pivot_compute_margins(
     ri_codes: &[u32],
     ci_codes: &[u32],
@@ -3045,56 +3045,48 @@ fn pivot_compute_margins(
     }
 
     if matches!(aggfunc, "var" | "std") {
-        let mut rs = vec![0.0f64; n_idx];
-        let mut rc = vec![0u64; n_idx];
-        let mut cs = vec![0.0f64; n_col];
-        let mut cc = vec![0u64; n_col];
+        // The row / column margins are pandas' groupby aggs, Welford
+        // (br-frankenpandas-xhogl); the grand total is its Series reduction,
+        // the two-pass below (br-frankenpandas-9iim6 owns matching numpy's
+        // pairwise sums there).
+        let mut row_moments = vec![fp_types::WelfordVar::default(); n_idx];
+        let mut col_moments = vec![fp_types::WelfordVar::default(); n_col];
         let mut all_sum = 0.0f64;
         let mut all_cnt = 0u64;
         for i in 0..n {
-            let r = ri_codes[i] as usize;
-            let c = ci_codes[i] as usize;
             let v = val_f64[i];
-            rs[r] += v;
-            rc[r] += 1;
-            cs[c] += v;
-            cc[c] += 1;
+            row_moments[ri_codes[i] as usize].add(v);
+            col_moments[ci_codes[i] as usize].add(v);
             all_sum += v;
             all_cnt += 1;
         }
-        let rm: Vec<f64> = (0..n_idx)
-            .map(|r| if rc[r] > 0 { rs[r] / rc[r] as f64 } else { 0.0 })
-            .collect();
-        let cm: Vec<f64> = (0..n_col)
-            .map(|c| if cc[c] > 0 { cs[c] / cc[c] as f64 } else { 0.0 })
-            .collect();
         let am = if all_cnt > 0 {
             all_sum / all_cnt as f64
         } else {
             0.0
         };
-        let mut rsq = vec![0.0f64; n_idx];
-        let mut csq = vec![0.0f64; n_col];
         let mut asq = 0.0f64;
-        for i in 0..n {
-            let r = ri_codes[i] as usize;
-            let c = ci_codes[i] as usize;
-            let v = val_f64[i];
-            rsq[r] += (v - rm[r]).powi(2);
-            csq[c] += (v - cm[c]).powi(2);
+        for &v in val_f64 {
             asq += (v - am).powi(2);
         }
-        let fin = |sq: f64, cnt: u64| -> f64 {
-            if cnt < 2 {
-                f64::NAN
+        let want_std = aggfunc == "std";
+        let spread = |moments: &fp_types::WelfordVar| -> f64 {
+            let spread = if want_std {
+                moments.std(1)
             } else {
-                let var = sq / (cnt as f64 - 1.0);
-                if aggfunc == "std" { var.sqrt() } else { var }
-            }
+                moments.var(1)
+            };
+            spread.unwrap_or(f64::NAN)
         };
-        let row = (0..n_idx).map(|r| fin(rsq[r], rc[r])).collect();
-        let col = (0..n_col).map(|c| fin(csq[c], cc[c])).collect();
-        return (row, col, fin(asq, all_cnt));
+        let row = row_moments.iter().map(spread).collect();
+        let col = col_moments.iter().map(spread).collect();
+        let all = if all_cnt < 2 {
+            f64::NAN
+        } else {
+            let var = asq / (all_cnt as f64 - 1.0);
+            if want_std { var.sqrt() } else { var }
+        };
+        return (row, col, all);
     }
 
     // Online aggfuncs: sum/mean/count/size/min/max — two passes.
@@ -3108,7 +3100,11 @@ fn pivot_compute_margins(
     } else {
         0.0
     };
+    // The row / column margins are pandas' groupby aggs, a compensated sum
+    // for sum / mean (br-frankenpandas-xhogl); the grand total is its Series
+    // reduction (br-frankenpandas-9iim6).
     let mut row_acc = vec![seed; n_idx];
+    let mut row_sum = vec![fp_types::KahanSum::default(); if is_sum { n_idx } else { 0 }];
     let mut row_cnt = vec![0u64; n_idx];
     let mut all_acc = seed;
     let mut all_cnt = 0u64;
@@ -3116,7 +3112,7 @@ fn pivot_compute_margins(
         let r = ri_codes[i] as usize;
         let v = val_f64[i];
         if is_sum {
-            row_acc[r] += v;
+            row_sum[r].add(v);
             all_acc += v;
         } else if is_min {
             row_acc[r] = f64::min(row_acc[r], v);
@@ -3129,18 +3125,27 @@ fn pivot_compute_margins(
         all_cnt += 1;
     }
     let mut col_acc = vec![seed; n_col];
+    let mut col_sum = vec![fp_types::KahanSum::default(); if is_sum { n_col } else { 0 }];
     let mut col_cnt = vec![0u64; n_col];
     for i in 0..n {
         let c = ci_codes[i] as usize;
         let v = val_f64[i];
         if is_sum {
-            col_acc[c] += v;
+            col_sum[c].add(v);
         } else if is_min {
             col_acc[c] = f64::min(col_acc[c], v);
         } else if is_max {
             col_acc[c] = f64::max(col_acc[c], v);
         }
         col_cnt[c] += 1;
+    }
+    if is_sum {
+        for (acc, sum) in row_acc.iter_mut().zip(&row_sum) {
+            *acc = sum.sum();
+        }
+        for (acc, sum) in col_acc.iter_mut().zip(&col_sum) {
+            *acc = sum.sum();
+        }
     }
     let fin = |acc: f64, cnt: u64| -> f64 {
         match aggfunc {
@@ -4533,6 +4538,8 @@ fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
         // A period label is its period again: reset_index of a PeriodIndex
         // is a period column (45fzr).
         IndexLabel::Period(period) => Scalar::Period(*period),
+        // An interval label is its interval again (c27hq).
+        IndexLabel::Interval(interval) => Scalar::Interval(*interval),
         // The natural bijection: a typed-null label round-trips to the
         // same-kind missing scalar.
         IndexLabel::Null(kind) => Scalar::Null(*kind),
@@ -4547,7 +4554,9 @@ fn index_label_to_utf8_scalar(label: &IndexLabel) -> Scalar {
         IndexLabel::Timedelta64(ns) => Scalar::Utf8(Timedelta::format(*ns)),
         IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
         IndexLabel::Object(object) => Scalar::Utf8(object.to_string()),
-        IndexLabel::Period(_) | IndexLabel::Null(_) => Scalar::Utf8(label.to_string()),
+        IndexLabel::Period(_) | IndexLabel::Interval(_) | IndexLabel::Null(_) => {
+            Scalar::Utf8(label.to_string())
+        }
     }
 }
 
@@ -5081,8 +5090,35 @@ fn index_label_to_json_value(label: &IndexLabel) -> Value {
         // A period as its text (NaT null), as pandas writes one.
         IndexLabel::Period(period) if period.is_nat() => Value::Null,
         IndexLabel::Period(period) => Value::String(period.to_string()),
+        // An interval as its text ('(0, 1]').
+        IndexLabel::Interval(interval) => Value::String(interval.to_string()),
         // pandas to_json renders a missing label as JSON null.
         IndexLabel::Null(_) => Value::Null,
+    }
+}
+
+/// The `split` orient's `index` entries: under row MultiIndex `levels` each
+/// row's levels as an array ([["a", 1], ...]), as pandas' (the flat storage
+/// label "a|1" was written; br-frankenpandas-h06ox), else each label.
+fn split_index_json_values(index: &Index, levels: Option<&fp_index::MultiIndex>) -> Vec<Value> {
+    match levels {
+        Some(levels) => (0..levels.len())
+            .map(|row| {
+                Value::Array(
+                    levels
+                        .get_tuple(row)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(index_label_to_json_value)
+                        .collect(),
+                )
+            })
+            .collect(),
+        None => index
+            .labels()
+            .iter()
+            .map(index_label_to_json_value)
+            .collect(),
     }
 }
 
@@ -5097,6 +5133,7 @@ fn index_label_to_json_key(label: &IndexLabel) -> String {
         }
         IndexLabel::Timedelta64(ns) | IndexLabel::Datetime64(ns) => (*ns / 1_000_000).to_string(),
         f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => f.to_string(),
+        IndexLabel::Interval(interval) => interval.to_string(),
         IndexLabel::Object(object) => object.to_string(),
         IndexLabel::Null(_) => label.to_string(),
     }
@@ -5128,8 +5165,9 @@ fn index_label_to_table_schema_type(label: &IndexLabel) -> &'static str {
         IndexLabel::Int64(_) => "integer",
         IndexLabel::Float64(_) => "number",
         IndexLabel::Bool(_) => "boolean",
-        // pandas' table schema calls any object column "string".
-        IndexLabel::Utf8(_) | IndexLabel::Object(_) => "string",
+        // pandas' table schema calls any object column "string", an
+        // interval one too.
+        IndexLabel::Utf8(_) | IndexLabel::Object(_) | IndexLabel::Interval(_) => "string",
         IndexLabel::Timedelta64(_) => "duration",
         // pandas' table schema calls a period a datetime too.
         IndexLabel::Datetime64(_) | IndexLabel::Period(_) => "datetime",
@@ -5370,6 +5408,7 @@ fn add_offset_to_label(label: &IndexLabel, offset: &str) -> Result<IndexLabel, F
         | IndexLabel::Timedelta64(_)
         | IndexLabel::Object(_)
         | IndexLabel::Period(_)
+        | IndexLabel::Interval(_)
         | IndexLabel::Null(_) => {
             return Err(FrameError::CompatibilityRejected(
                 "first/last offset requires string (date) index".into(),
@@ -5392,6 +5431,7 @@ fn sub_offset_from_label(label: &IndexLabel, offset: &str) -> Result<IndexLabel,
         | IndexLabel::Timedelta64(_)
         | IndexLabel::Object(_)
         | IndexLabel::Period(_)
+        | IndexLabel::Interval(_)
         | IndexLabel::Null(_) => {
             return Err(FrameError::CompatibilityRejected(
                 "first/last offset requires string (date) index".into(),
@@ -6801,18 +6841,52 @@ fn loc_slice_positions(
                 other => other.cloned(),
             })
         };
+    // pandas slices a decreasing DatetimeIndex by date text through a mask
+    // of keys it must hold, not where they sort: that stays the label path.
+    let date_text = datetime_index
+        && [start, stop]
+            .iter()
+            .any(|bound| matches!(bound, Some(IndexLabel::Utf8(_))));
     let start = resolve(start, false)?;
     let stop = resolve(stop, true)?;
-    let kind = labels.first().map(std::mem::discriminant);
-    let same_kind = |label: &IndexLabel| kind == Some(std::mem::discriminant(label));
-    let monotonic =
-        labels.iter().all(same_kind) && labels.windows(2).all(|pair| pair[0] <= pair[1]);
-    if monotonic && start.as_ref().is_none_or(same_kind) && stop.as_ref().is_none_or(same_kind) {
-        let first = start
-            .as_ref()
-            .map_or(0, |bound| labels.partition_point(|label| label < bound));
+    if let Some(positions) = interval_slice_positions(labels, start.as_ref(), stop.as_ref()) {
+        return positions;
+    }
+    // Integers and floats are one kind, ordered by value: a float bound on
+    // an integer index falls where it sorts (it was "label not found";
+    // l0cqv).
+    let kind_of = |label: &IndexLabel| match label {
+        IndexLabel::Float64(_) => std::mem::discriminant(&IndexLabel::Int64(0)),
+        other => std::mem::discriminant(other),
+    };
+    let kind = labels.first().map(kind_of);
+    let same_kind = |label: &IndexLabel| kind == Some(kind_of(label));
+    let comparable = labels.iter().all(same_kind)
+        && start.as_ref().is_none_or(same_kind)
+        && stop.as_ref().is_none_or(same_kind);
+    let ascending = comparable && labels.windows(2).all(|pair| pair[0] <= pair[1]);
+    // A decreasing index places a bound as pandas' `_searchsorted_monotonic`
+    // does, reversed (it had to be a label).
+    let descending =
+        comparable && !ascending && !date_text && labels.windows(2).all(|pair| pair[0] >= pair[1]);
+    if ascending || descending {
+        let first = start.as_ref().map_or(0, |bound| {
+            labels.partition_point(|label| {
+                if ascending {
+                    label < bound
+                } else {
+                    label > bound
+                }
+            })
+        });
         let end = stop.as_ref().map_or(labels.len(), |bound| {
-            labels.partition_point(|label| label <= bound)
+            labels.partition_point(|label| {
+                if ascending {
+                    label <= bound
+                } else {
+                    label >= bound
+                }
+            })
         });
         return Ok((first < end).then(|| (first, end - 1)));
     }
@@ -6830,6 +6904,136 @@ fn loc_slice_positions(
         None => labels.len().saturating_sub(1),
     };
     Ok((start_pos <= end_pos).then_some((start_pos, end_pos)))
+}
+
+/// [`loc_slice_positions`] over an IntervalIndex - interval `labels` sharing
+/// one `closed` - bounded by real numbers (`s.loc[0.5:1.5]`): each bound as
+/// pandas' `get_slice_bound` places it ([`interval_slice_bound`]). None for
+/// any other index or bounds. A number was looked up as a label, so the
+/// slice raised "label not found" (br-frankenpandas-l0cqv).
+#[allow(clippy::cast_precision_loss)] // pandas compares an integer bound with float endpoints
+fn interval_slice_positions(
+    labels: &[IndexLabel],
+    start: Option<&IndexLabel>,
+    stop: Option<&IndexLabel>,
+) -> Option<Result<Option<(usize, usize)>, FrameError>> {
+    let intervals: Vec<fp_types::Interval> = labels
+        .iter()
+        .map(|label| match label {
+            IndexLabel::Interval(interval) => Some(*interval),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    let closed = intervals.first()?.closed;
+    if intervals.iter().any(|interval| interval.closed != closed) {
+        return None;
+    }
+    let point = |bound: Option<&IndexLabel>| -> Option<Option<(f64, bool)>> {
+        match bound {
+            None => Some(None),
+            Some(IndexLabel::Int64(v)) => Some(Some((*v as f64, true))),
+            Some(IndexLabel::Float64(v)) => Some(Some((v.0, false))),
+            Some(_) => None,
+        }
+    };
+    let (start, stop) = (point(start)?, point(stop)?);
+    if start.is_none() && stop.is_none() {
+        return None;
+    }
+    let bound = |point: Option<(f64, bool)>, left: bool, unbounded: usize| {
+        point.map_or(Ok(unbounded), |point| {
+            interval_slice_bound(&intervals, point, left)
+        })
+    };
+    Some(bound(start, true, 0).and_then(|first| {
+        let end = bound(stop, false, intervals.len())?;
+        Ok((first < end).then(|| (first, end - 1)))
+    }))
+}
+
+/// pandas' `IntervalIndex.get_slice_bound` of the number `point` (an integer
+/// when `integer`) over non-empty `intervals` sharing one `closed`: the rows
+/// whose interval holds it, when they are one run, give its first row for the
+/// start (`left`) bound and one past its last for the stop; a point no
+/// interval holds falls where it sorts among the endpoints of a
+/// non-overlapping monotonic index (`_searchsorted_monotonic`: the right
+/// endpoints for the start of an increasing index, the left ones otherwise,
+/// stepping past an open end), and is pandas' KeyError on any other.
+fn interval_slice_bound(
+    intervals: &[fp_types::Interval],
+    (point, integer): (f64, bool),
+    left: bool,
+) -> Result<usize, FrameError> {
+    let hits: Vec<usize> = intervals
+        .iter()
+        .enumerate()
+        .filter(|(_, interval)| interval.contains(point))
+        .map(|(row, _)| row)
+        .collect();
+    if let (Some(&first), Some(&last)) = (hits.first(), hits.last()) {
+        if last - first + 1 != hits.len() {
+            let shown = if integer {
+                format!("{point}")
+            } else {
+                format!("{point:?}")
+            };
+            return Err(FrameError::Index(fp_index::IndexError::KeyError(format!(
+                "Cannot get {} slice bound for non-unique label: {shown}",
+                if left { "left" } else { "right" }
+            ))));
+        }
+        return Ok(if left { first } else { last + 1 });
+    }
+    let closed = intervals[0].closed;
+    let apart = |before: f64, after: f64| {
+        if closed == fp_types::IntervalClosed::Both {
+            before < after
+        } else {
+            before <= after
+        }
+    };
+    let increasing = intervals
+        .windows(2)
+        .all(|pair| apart(pair[0].right, pair[1].left));
+    let decreasing = intervals
+        .windows(2)
+        .all(|pair| apart(pair[1].right, pair[0].left));
+    if !increasing && !decreasing {
+        return Err(FrameError::Index(fp_index::IndexError::KeyError(
+            "can only get slices from an IntervalIndex if bounds are non-overlapping and all monotonic increasing or decreasing"
+                .to_owned(),
+        )));
+    }
+    let left_increasing = intervals
+        .windows(2)
+        .all(|pair| pair[0].left <= pair[1].left);
+    let use_right = left == left_increasing;
+    let (endpoints, open): (Vec<f64>, bool) = if use_right {
+        (
+            intervals.iter().map(|interval| interval.right).collect(),
+            !closed.right_closed(),
+        )
+    } else {
+        (
+            intervals.iter().map(|interval| interval.left).collect(),
+            !closed.left_closed(),
+        )
+    };
+    let target = match (open, use_right, integer) {
+        (false, _, _) => point,
+        (true, true, true) => point + 1.0,
+        (true, true, false) => point.next_up(),
+        (true, false, true) => point - 1.0,
+        (true, false, false) => point.next_down(),
+    };
+    let ascending = endpoints.windows(2).all(|pair| pair[0] <= pair[1]);
+    Ok(match (ascending, left) {
+        (true, true) => endpoints.partition_point(|&end| end < target),
+        (true, false) => endpoints.partition_point(|&end| end <= target),
+        // pandas searches a decreasing index reversed, the side flipped.
+        (false, true) => endpoints.partition_point(|&end| end > target),
+        (false, false) => endpoints.partition_point(|&end| end >= target),
+    })
 }
 
 fn parse_year_month_period_label(label: &str) -> Option<(i32, u32)> {
@@ -7297,6 +7501,7 @@ fn semantic_integer_label_kind_value(label: &IndexLabel) -> Option<(&'static [u8
         | IndexLabel::Utf8(_)
         | IndexLabel::Object(_)
         | IndexLabel::Period(_)
+        | IndexLabel::Interval(_)
         | IndexLabel::Null(_) => None,
     }
 }
@@ -7405,6 +7610,7 @@ fn sorted_int64_unit_range_labels(labels: &[IndexLabel]) -> Option<(i64, i64)> {
         | IndexLabel::Datetime64(_)
         | IndexLabel::Object(_)
         | IndexLabel::Period(_)
+        | IndexLabel::Interval(_)
         | IndexLabel::Null(_) => {
             return None;
         }
@@ -7418,6 +7624,7 @@ fn sorted_int64_unit_range_labels(labels: &[IndexLabel]) -> Option<(i64, i64)> {
         | IndexLabel::Datetime64(_)
         | IndexLabel::Object(_)
         | IndexLabel::Period(_)
+        | IndexLabel::Interval(_)
         | IndexLabel::Null(_) => {
             return None;
         }
@@ -7501,7 +7708,8 @@ where
                     out_valid.set(i, false);
                 }
             } else {
-                out_valid.set(i, false);
+                let (l, r) = (lok.then_some(ld[i]), rok.then_some(rd[i]));
+                missing_operand_op(op, l, r, &mut out[i], &mut out_valid, i);
             }
         }
         return Ok(Column::from_f64_values_with_validity(out, out_valid));
@@ -7522,7 +7730,9 @@ where
                     out_valid.set(i, false);
                 }
             } else {
-                out_valid.set(i, false);
+                let l = lv.get(i).then_some(ld[i] as f64);
+                let r = rv.get(i).then_some(rd[i] as f64);
+                missing_operand_op(op, l, r, &mut out[i], &mut out_valid, i);
             }
         }
         return Ok(Column::from_f64_values_with_validity(out, out_valid));
@@ -7533,7 +7743,16 @@ where
         .zip(rc.values())
         .map(|(lv, rv)| match (lv.to_f64(), rv.to_f64()) {
             (Ok(l), Ok(r)) => Scalar::Float64(op(l, r)),
-            _ => Scalar::Null(NullKind::NaN),
+            // A missing float is NaN to numpy's operator: NaN for every op
+            // but power (br-frankenpandas-oie6x).
+            (l, r) => {
+                let value = op(l.unwrap_or(f64::NAN), r.unwrap_or(f64::NAN));
+                if value.is_nan() {
+                    Scalar::Null(NullKind::NaN)
+                } else {
+                    Scalar::Float64(value)
+                }
+            }
         })
         .collect();
     Ok(Column::from_values(vals)?)
@@ -7547,6 +7766,27 @@ where
 /// a valid-NaN — to_f64 is Ok for Float64(NaN)); the op runs iff both present,
 /// else Null(NaN). Bit-identical to reindex + binary_col_op_numeric. Falls back to
 /// reindex + Scalar for a mixed f64/i64 or non-numeric pair.
+/// Row `i` of a typed float op whose operand `l` or `r` is missing: a
+/// missing float is NaN to numpy's operator, which answers NaN for every op
+/// but power, whose NaN ** 0 and 1 ** NaN are 1 (br-frankenpandas-oie6x).
+fn missing_operand_op<F>(
+    op: &F,
+    l: Option<f64>,
+    r: Option<f64>,
+    out: &mut f64,
+    valid: &mut fp_columnar::ValidityMask,
+    i: usize,
+) where
+    F: Fn(f64, f64) -> f64,
+{
+    let value = op(l.unwrap_or(f64::NAN), r.unwrap_or(f64::NAN));
+    if value.is_nan() {
+        valid.set(i, false);
+    } else {
+        *out = value;
+    }
+}
+
 fn binary_gather_op_numeric<F>(
     lc: &Column,
     lpos: &[Option<usize>],
@@ -7578,7 +7818,7 @@ where
                     valid.set(i, false);
                 }
             } else {
-                valid.set(i, false);
+                missing_operand_op(op, l, r, &mut out[i], &mut valid, i);
             }
         }
         return Ok(Column::from_f64_values_with_validity(out, valid));
@@ -7599,7 +7839,7 @@ where
                     valid.set(i, false);
                 }
             } else {
-                valid.set(i, false);
+                missing_operand_op(op, l, r, &mut out[i], &mut valid, i);
             }
         }
         return Ok(Column::from_f64_values_with_validity(out, valid));
@@ -11130,7 +11370,8 @@ impl Series {
                 f @ (IndexLabel::Float64(_)
                 | IndexLabel::Bool(_)
                 | IndexLabel::Object(_)
-                | IndexLabel::Period(_)) => f.to_string().len(),
+                | IndexLabel::Period(_)
+                | IndexLabel::Interval(_)) => f.to_string().len(),
                 IndexLabel::Null(_) => l.to_string().len(),
             })
             .max()
@@ -11145,7 +11386,8 @@ impl Series {
                 f @ (IndexLabel::Float64(_)
                 | IndexLabel::Bool(_)
                 | IndexLabel::Object(_)
-                | IndexLabel::Period(_)) => f.to_string(),
+                | IndexLabel::Period(_)
+                | IndexLabel::Interval(_)) => f.to_string(),
                 IndexLabel::Null(_) => label.to_string(),
             };
             let val_str = match val {
@@ -11899,6 +12141,12 @@ impl Series {
             Column::from_timedelta64_values_with_validity(raw, validity)
         };
         let numeric = |dtype: &DType| matches!(dtype, DType::Int64 | DType::Float64 | DType::Bool);
+        // Every arm below has a duration side: reading the values first built
+        // both numeric operands' Scalar views on every `s + s` (70% of it;
+        // br-frankenpandas-w1nrd).
+        if self.column.dtype() != DType::Timedelta64 && other.column.dtype() != DType::Timedelta64 {
+            return Ok(None);
+        }
         let (left, right) = (self.values(), other.values());
         let column = match (self.column.dtype(), other.column.dtype(), op) {
             (
@@ -13665,6 +13913,12 @@ impl Series {
     // --- Logical Boolean Operators ---
 
     fn ensure_boolean_series(&self, op_name: &str) -> Result<(), FrameError> {
+        // A bool column holds only bools and missing values (the casts refuse
+        // any other cell): no scan, which built its Scalar view
+        // (br-frankenpandas-qswpf).
+        if self.column.dtype().is_bool() {
+            return Ok(());
+        }
         if let Some(offending) = self
             .values()
             .iter()
@@ -13761,6 +14015,17 @@ impl Series {
     /// Missing values remain missing.
     pub fn not(&self) -> Result<Self, FrameError> {
         self.ensure_boolean_series("not")?;
+
+        // All-valid booleans negate their buffer: the Scalar map below built
+        // and read back a Bool per row (23 ms at 1M rows - Python's `mask`
+        // negates its condition here; br-frankenpandas-qswpf).
+        if let Some(flags) = self.column.as_bool_slice() {
+            return Self::new(
+                format!("~{}", self.name),
+                self.index.clone(),
+                Column::from_bool_values(flags.iter().map(|flag| !flag).collect()),
+            );
+        }
 
         let values: Vec<Scalar> = self
             .values()
@@ -14222,12 +14487,13 @@ impl Series {
         stop: Option<&IndexLabel>,
     ) -> Result<Self, FrameError> {
         let labels = self.index.labels();
+        // An empty selection (an empty Series, or start after stop) keeps
+        // the dtype, as pandas' (it became object; l0cqv).
         if labels.is_empty() {
-            return self.with_labels_and_values_preserving_name(Vec::new(), Vec::new());
+            return self.iloc_slice(Some(0), Some(0));
         }
         let Some((start_pos, end_pos)) = loc_slice_positions(labels, start, stop)? else {
-            // Empty result when start is after stop.
-            return self.with_labels_and_values_preserving_name(Vec::new(), Vec::new());
+            return self.iloc_slice(Some(0), Some(0));
         };
         // The labels between are a run of positions: slice them, which keeps
         // the index's name, zone and freq (the rebuilt labels dropped the
@@ -14298,7 +14564,11 @@ impl Series {
             }
         }
         let na_first = na_position == "first";
-        if !na_first && let Some(values) = self.index.int64_label_values() {
+        let ranks = category_ranks(&self.index);
+        if !na_first
+            && ranks.is_none()
+            && let Some(values) = self.index.int64_label_values()
+        {
             let order = fp_columnar::radix_argsort_i64(&values, ascending);
             return self.sorted_by_positions(&order);
         }
@@ -14324,10 +14594,14 @@ impl Series {
                     }
                 }
                 (false, false) => {
-                    if ascending {
-                        labels[left].cmp(&labels[right])
+                    let (left, right) = if ascending {
+                        (left, right)
                     } else {
-                        labels[right].cmp(&labels[left])
+                        (right, left)
+                    };
+                    match &ranks {
+                        Some(ranks) => ranks[left].cmp(&ranks[right]),
+                        None => labels[left].cmp(&labels[right]),
                     }
                 }
             }
@@ -21865,11 +22139,18 @@ impl Series {
         });
 
         let labels: Vec<IndexLabel> = (0..modes.len()).map(|i| (i as i64).into()).collect();
-        Self::new(
-            self.name.clone(),
-            Index::new(labels),
-            build_mode_column(modes)?,
-        )
+        // The modes are the column's own values (or its missing marker), so
+        // the result keeps its dtype and narrow width, as pandas': a mode
+        // that is the missing value was Int64, an empty one object
+        // (br-frankenpandas-5thmj).
+        let column = match Column::new(self.column.dtype(), modes.clone()) {
+            Ok(column) => match self.column.width() {
+                Some(width) => column.cast_to_width(width, self.column.dtype().is_nullable())?,
+                None => column,
+            },
+            Err(_) => build_mode_column(modes)?,
+        };
+        Self::new(self.name.clone(), Index::new(labels), column)
     }
 
     /// High-cardinality sort-scan mode for an all-valid, no-NaN, **zero-free**
@@ -23515,6 +23796,42 @@ impl Series {
                     Column::from_f64_values_owned(out),
                 );
             }
+            // The default `other` (NaN) over all-valid Float64 values: out[i] =
+            // cond[i] ? data[i] : missing, built as the Scalar map below builds
+            // its Float64 / Null(NaN) cells - from_values' float column, a 0.0
+            // datum under a cleared validity bit, or from_f64_values when every
+            // row is kept. `s.where(cond)` / `s.mask(cond)` without `other` took
+            // that map (35 ms at 1M rows; br-frankenpandas-qswpf).
+            if let (Some(data), Some(cmask)) =
+                (self.column.as_f64_slice(), cond.column.as_bool_slice())
+                && matches!(fill, Scalar::Null(NullKind::NaN))
+                && !data.is_empty()
+            {
+                let len = data.len();
+                let column = if cmask.iter().all(|&keep| keep) {
+                    Column::from_f64_values(data.to_vec())
+                } else {
+                    let mut valid_words = vec![0_u64; len.div_ceil(64)];
+                    let out: Vec<f64> = data
+                        .iter()
+                        .zip(cmask)
+                        .enumerate()
+                        .map(|(i, (&v, &keep))| {
+                            if keep {
+                                valid_words[i / 64] |= 1_u64 << (i % 64);
+                                v
+                            } else {
+                                0.0
+                            }
+                        })
+                        .collect();
+                    Column::from_f64_values_with_validity(
+                        out,
+                        fp_columnar::ValidityMask::from_words(valid_words, len),
+                    )
+                };
+                return Series::new(self.name.clone(), self.index.clone(), column);
+            }
             // Typed Int64 select: all-valid Int64 self + all-valid Bool cond + Int64
             // fill ⇒ out[i] = cond[i] ? data[i] : fill (Int64 has no NaN sentinel, so
             // the output is pure all-valid Int64). Bit-identical to the Scalar map
@@ -23968,6 +24285,38 @@ impl Series {
                     self.index.clone(),
                     Column::from_f64_values_owned(out),
                 );
+            }
+            // The default `other` (NaN), mirror of where_cond's: a row whose
+            // condition holds goes missing (br-frankenpandas-qswpf).
+            if let (Some(data), Some(cmask)) =
+                (self.column.as_f64_slice(), cond.column.as_bool_slice())
+                && matches!(fill, Scalar::Null(NullKind::NaN))
+                && !data.is_empty()
+            {
+                let len = data.len();
+                let column = if cmask.iter().all(|&masked| !masked) {
+                    Column::from_f64_values(data.to_vec())
+                } else {
+                    let mut valid_words = vec![0_u64; len.div_ceil(64)];
+                    let out: Vec<f64> = data
+                        .iter()
+                        .zip(cmask)
+                        .enumerate()
+                        .map(|(i, (&v, &masked))| {
+                            if masked {
+                                0.0
+                            } else {
+                                valid_words[i / 64] |= 1_u64 << (i % 64);
+                                v
+                            }
+                        })
+                        .collect();
+                    Column::from_f64_values_with_validity(
+                        out,
+                        fp_columnar::ValidityMask::from_words(valid_words, len),
+                    )
+                };
+                return Series::new(self.name.clone(), self.index.clone(), column);
             }
             // Typed Int64 select (mirror of where_cond): cond true ⇒ fill, false ⇒
             // data. Pure all-valid Int64 output, bit-identical to the Scalar map;
@@ -26918,6 +27267,11 @@ impl Series {
             Some(zone) => index_column.with_dtype(DType::datetime64_tz(zone)),
             None => index_column,
         };
+        // A categorical index as a category column (cld41).
+        let index_column = match self.index.categories() {
+            Some(categories) => categorical_index_column(&self.index, categories)?,
+            None => index_column,
+        };
         // In order, so an index column sharing the value column's label
         // (allow_duplicates) stays its own column.
         let columns = ColumnStore::from_pairs([
@@ -27999,7 +28353,8 @@ impl Series {
                     f @ (IndexLabel::Float64(_)
                     | IndexLabel::Bool(_)
                     | IndexLabel::Object(_)
-                    | IndexLabel::Period(_)) => {
+                    | IndexLabel::Period(_)
+                    | IndexLabel::Interval(_)) => {
                         scratch = f.to_string();
                         &scratch
                     }
@@ -28277,9 +28632,10 @@ impl Series {
                     IndexLabel::Utf8(s) => csv_escape(s, sep),
                     IndexLabel::Timedelta64(ns) => csv_escape(&Timedelta::format(*ns), sep),
                     IndexLabel::Datetime64(ns) => csv_escape(&format_datetime_ns(*ns), sep),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
-                        csv_escape(&f.to_string(), sep)
-                    }
+                    f @ (IndexLabel::Float64(_)
+                    | IndexLabel::Bool(_)
+                    | IndexLabel::Period(_)
+                    | IndexLabel::Interval(_)) => csv_escape(&f.to_string(), sep),
                     IndexLabel::Object(object) => csv_escape(&object.to_string(), sep),
                     // pandas to_csv writes a missing index label as EMPTY
                     // (pd.Series([1], index=[nan]).to_csv() -> ",1").
@@ -28400,9 +28756,10 @@ impl Series {
                     IndexLabel::Utf8(s) => quote_str(s, false),
                     IndexLabel::Timedelta64(ns) => quote_str(&Timedelta::format(*ns), false),
                     IndexLabel::Datetime64(ns) => quote_str(&format_datetime_ns(*ns), false),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
-                        quote_str(&f.to_string(), false)
-                    }
+                    f @ (IndexLabel::Float64(_)
+                    | IndexLabel::Bool(_)
+                    | IndexLabel::Period(_)
+                    | IndexLabel::Interval(_)) => quote_str(&f.to_string(), false),
                     IndexLabel::Object(object) => quote_str(&object.to_string(), false),
                     IndexLabel::Null(_) => quote_str(&label.to_string(), false),
                 };
@@ -28429,12 +28786,7 @@ impl Series {
     pub fn to_json(&self, orient: &str) -> Result<String, FrameError> {
         match orient {
             "split" => {
-                let index = self
-                    .index
-                    .labels()
-                    .iter()
-                    .map(index_label_to_json_value)
-                    .collect();
+                let index = split_index_json_values(&self.index, self.index.row_multiindex());
                 let data = self
                     .column
                     .values()
@@ -29470,7 +29822,14 @@ impl Series {
         // br-frankenpandas-fixture-divergence-triage-9s0c4 kept it object),
         // and numbers and bools take pandas' nullable dtypes (see
         // `convert_column_dtypes`; they were returned unchanged).
-        let column = convert_column_dtypes(&self.column)?;
+        self.convert_dtypes_with(ConvertDtypes::default())
+    }
+
+    /// Matches `pd.Series.convert_dtypes(infer_objects=, convert_string=,
+    /// convert_integer=, convert_boolean=, convert_floating=)` (see
+    /// [`convert_column_dtypes_with`]; br-frankenpandas-di8vx).
+    pub fn convert_dtypes_with(&self, options: ConvertDtypes) -> Result<Self, FrameError> {
+        let column = convert_column_dtypes_with(&self.column, options)?;
         Self::new(self.name.clone(), self.index.clone(), column)
     }
 
@@ -29782,8 +30141,10 @@ impl Series {
 
     /// pandas' `s.explode(ignore_index)` over list cells (fvsao.33): a list
     /// cell becomes one row per item (an empty list one row of NaN), any
-    /// other value stays one row; the result is object, as pandas', and the
-    /// index repeats its labels (a fresh RangeIndex with `ignore_index`).
+    /// other value stays one row; an object Series' result is object and
+    /// another dtype's keeps it (see [`DataFrame::explode_lists`]), as
+    /// pandas', and the index repeats its labels (a fresh RangeIndex with
+    /// `ignore_index`).
     pub fn explode_lists(&self, ignore_index: bool) -> Result<Self, FrameError> {
         let frame = self.to_frame(Some("values"))?;
         let exploded = frame.explode_lists(&["values"], ignore_index)?;
@@ -37273,6 +37634,7 @@ fn resample_label_to_ns(label: &IndexLabel) -> Option<i64> {
         | IndexLabel::Bool(_)
         | IndexLabel::Timedelta64(_)
         | IndexLabel::Object(_)
+        | IndexLabel::Interval(_)
         | IndexLabel::Null(_) => None,
     }
 }
@@ -37284,6 +37646,25 @@ fn resample_label_to_ns(label: &IndexLabel) -> Option<i64> {
 fn resample_bin_label(key: &str) -> IndexLabel {
     let text = IndexLabel::Utf8(key.to_owned());
     resample_label_to_ns(&text).map_or(text, IndexLabel::Datetime64)
+}
+
+/// The resample bin of each of `labels` under `freq`, labelled as a
+/// resample result labels it (its edge), `None` for a label in no bin (a
+/// missing one): pandas' TimeGrouper among groupby keys,
+/// groupby([Grouper(key='t', freq='D'), 'k']) (br-frankenpandas-h06ox).
+#[must_use]
+pub fn resample_bin_labels(labels: &[IndexLabel], freq: &str) -> Vec<Option<IndexLabel>> {
+    let grouping = resample_build_groups_with_options(labels, freq, None, None, None);
+    let mut bins = vec![None; labels.len()];
+    for (key, members) in &grouping.groups {
+        let label = resample_bin_label(key);
+        for &row in members {
+            if let Some(bin) = bins.get_mut(row) {
+                *bin = Some(label.clone());
+            }
+        }
+    }
+    bins
 }
 
 /// Per-bin integer or bool results that took an empty bin: numpy int64/bool
@@ -37341,6 +37722,7 @@ fn resample_label_to_month_ordinal(label: &IndexLabel) -> Option<i64> {
         | IndexLabel::Bool(_)
         | IndexLabel::Timedelta64(_)
         | IndexLabel::Object(_)
+        | IndexLabel::Interval(_)
         | IndexLabel::Null(_) => None,
     }
 }
@@ -37372,6 +37754,7 @@ fn resample_label_to_date(label: &IndexLabel) -> Option<NaiveDate> {
         | IndexLabel::Bool(_)
         | IndexLabel::Timedelta64(_)
         | IndexLabel::Object(_)
+        | IndexLabel::Interval(_)
         | IndexLabel::Null(_) => None,
     }
 }
@@ -37560,7 +37943,7 @@ fn resample_build_groups_with_options(
         else {
             return ResampleGrouping::empty();
         };
-        if buckets > 1_000_000 {
+        if buckets > RESAMPLE_MAX_BINS as usize {
             return ResampleGrouping::empty();
         }
         let mut dense: Vec<Vec<usize>> = vec![Vec::new(); buckets];
@@ -37644,7 +38027,7 @@ fn resample_build_groups_with_options(
         let mut lattice: Vec<(String, i64)> = Vec::new();
         let mut cursor = first;
         while cursor <= last {
-            if bucket_keys.len() >= 1_000_000 {
+            if bucket_keys.len() > RESAMPLE_MAX_BINS as usize {
                 return ResampleGrouping::empty();
             }
             let key = match label {
@@ -37723,7 +38106,7 @@ fn resample_build_groups_with_options(
             std::collections::HashMap::new();
         let mut lattice: Vec<(String, i64)> = Vec::new();
         for ord in min..=max {
-            if order.len() >= 1_000_000 {
+            if order.len() > RESAMPLE_MAX_BINS as usize {
                 return ResampleGrouping::empty();
             }
             let Some(date) =
@@ -37810,7 +38193,7 @@ fn resample_build_groups_with_options(
             Some(format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day()))
         };
         let num_bins = ((max_bin_end - min) / step + 1) as usize;
-        if num_bins >= 1_000_000 {
+        if num_bins > RESAMPLE_MAX_BINS as usize {
             return ResampleGrouping::empty();
         }
         let mut dense: Vec<Vec<usize>> = vec![Vec::new(); num_bins];
@@ -37976,7 +38359,8 @@ fn resample_build_groups_with_options(
             return ResampleGrouping::empty();
         }
         let num_bins_i64 = (lresult - fresult).div_euclid(step_ns);
-        if num_bins_i64 <= 0 || num_bins_i64 >= 1_000_000 {
+        // Past the cap the callers' validate has already refused the rule.
+        if num_bins_i64 <= 0 || num_bins_i64 > RESAMPLE_MAX_BINS {
             return ResampleGrouping::empty();
         }
         let num_bins = num_bins_i64 as usize;
@@ -38058,6 +38442,63 @@ fn resample_build_groups_with_options(
 
     // Fallback: unknown frequency, return empty
     ResampleGrouping::empty()
+}
+
+/// The most resample bins frankenpandas builds. pandas has no cap (its
+/// output has one row per bin, dataless ones included); fp's grouping keeps
+/// a formatted label and a row list per bin, some 300 bytes, so a finer rule
+/// over a long span fails closed with an error here - it returned an EMPTY
+/// result past a million bins (br-frankenpandas-effk4).
+const RESAMPLE_MAX_BINS: i64 = 1 << 24;
+
+/// Refuse a resample whose bins would pass [`RESAMPLE_MAX_BINS`], by the
+/// bound `span / step + 2` - never below the builders' exact count (their
+/// first and last edges lie within a step of the first and last stamps).
+/// Calendar, daily and hourly rules stay under the cap across the whole
+/// datetime64 range, so only minute-and-finer rules look at the labels.
+fn check_resample_bin_count(index: &Index, freq: &str) -> Result<(), FrameError> {
+    let (mult, unit) = parse_resample_freq(freq).unwrap_or((1, freq.to_string()));
+    // 'MS' is month start, not milliseconds - the builders test it first too.
+    if resample_is_period_start(&unit) {
+        return Ok(());
+    }
+    let ns_per_unit: i64 = match unit.to_lowercase().as_str() {
+        "min" | "t" => 60_000_000_000,
+        "s" => 1_000_000_000,
+        "ms" | "l" => 1_000_000,
+        "us" | "u" => 1_000,
+        "ns" | "n" => 1,
+        _ => return Ok(()),
+    };
+    let Some(step) = mult.checked_mul(ns_per_unit).filter(|step| *step > 0) else {
+        return Ok(());
+    };
+    let bounds = if let Some((start, stride, len)) = index.datetime64_affine_labels() {
+        let end = i64::try_from(len.saturating_sub(1))
+            .ok()
+            .and_then(|last| stride.checked_mul(last))
+            .and_then(|offset| start.checked_add(offset));
+        end.map(|end| (start.min(end), start.max(end)))
+    } else {
+        index
+            .labels()
+            .iter()
+            .filter_map(resample_label_to_ns)
+            .fold(None, |acc, ns| {
+                Some(acc.map_or((ns, ns), |(lo, hi): (i64, i64)| (lo.min(ns), hi.max(ns))))
+            })
+    };
+    let Some((first, last)) = bounds else {
+        return Ok(());
+    };
+    let bins = (i128::from(last) - i128::from(first)) / i128::from(step) + 2;
+    if bins > i128::from(RESAMPLE_MAX_BINS) {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "resample('{freq}') would build {bins} bins, more than the {RESAMPLE_MAX_BINS} \
+             frankenpandas supports"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_resample_options(
@@ -38175,8 +38616,14 @@ impl Resample<'_> {
         )
     }
 
-    /// Build groups: returns (bucket_keys_in_order, bucket->row_indices).
-    fn build_groups(&self) -> (Vec<String>, std::collections::HashMap<String, Vec<usize>>) {
+    /// Build groups: returns (bucket_keys_in_order, bucket->row_indices), or
+    /// the refusal of a rule past [`RESAMPLE_MAX_BINS`] bins
+    /// (br-frankenpandas-effk4) - checked here, where the grouping is built,
+    /// so the single-pass kernels (bins bounded by their rows) skip its scan.
+    fn build_groups(
+        &self,
+    ) -> Result<(Vec<String>, std::collections::HashMap<String, Vec<usize>>), FrameError> {
+        check_resample_bin_count(self.series.index(), &self.freq)?;
         let g = resample_build_groups_with_options(
             self.series.index().labels(),
             &self.freq,
@@ -38184,7 +38631,7 @@ impl Resample<'_> {
             self.label.as_deref(),
             self.origin.as_deref(),
         );
-        (g.order, g.groups)
+        Ok((g.order, g.groups))
     }
 
     /// Aggregate each time bucket using a function.
@@ -38194,7 +38641,7 @@ impl Resample<'_> {
     {
         // Per br-frankenpandas-7bc60.
         self.validate()?;
-        let (order, groups) = self.build_groups();
+        let (order, groups) = self.build_groups()?;
         let vals = self.series.column().values();
 
         let mut out_labels = Vec::with_capacity(order.len());
@@ -38226,7 +38673,7 @@ impl Resample<'_> {
         F: Fn(&Series) -> Result<Scalar, FrameError>,
     {
         self.validate()?;
-        let (order, groups) = self.build_groups();
+        let (order, groups) = self.build_groups()?;
         let mut labels = Vec::with_capacity(order.len());
         let mut values = Vec::with_capacity(order.len());
         for key in &order {
@@ -38433,21 +38880,20 @@ impl Resample<'_> {
             if let Some(r) = self.resample_reduce_single_pass(vals, true) {
                 return r;
             }
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out_f64 = Vec::with_capacity(order.len());
             for key in &order {
                 out_labels.push(resample_bin_label(key));
-                // An empty bin sums to pandas' 0.0: Rust's f64 `Sum` starts
-                // from -0.0, which printed '-0.0' for resample('MS').sum()'s
-                // dataless months (fvsao.35). A non-empty bin starts from its
-                // first value, as numpy's reduction does.
-                let mut members = groups[key].iter().map(|&i| vals[i]);
-                out_f64.push(
-                    members
-                        .next()
-                        .map_or(0.0, |first| members.fold(first, |total, v| total + v)),
-                );
+                // pandas' group_sum: compensated from 0.0, so an empty bin is
+                // 0.0 (Rust's f64 `Sum` starts from -0.0, which printed '-0.0'
+                // for resample('MS').sum()'s dataless months; fvsao.35) and
+                // the rest add as pandas does (br-frankenpandas-xhogl).
+                let mut sum = fp_types::KahanSum::default();
+                for &i in &groups[key] {
+                    sum.add(vals[i]);
+                }
+                out_f64.push(sum.sum());
             }
             let index = Index::new(out_labels).rename_index(self.series.index().name());
             return Series::new(self.series.name(), index, Column::from_f64_values(out_f64));
@@ -38480,7 +38926,7 @@ impl Resample<'_> {
                     });
                 }
             }
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out_i64 = Vec::with_capacity(order.len());
             for key in &order {
@@ -38505,7 +38951,7 @@ impl Resample<'_> {
         if self.series.column().dtype() == DType::Utf8 {
             return self.aggregate_scalar(fp_types::nansum_utf8);
         }
-        self.aggregate_scalar(fp_types::nansum)
+        self.aggregate_scalar(fp_types::nansum_grouped)
     }
 
     /// Resample mean.
@@ -38531,16 +38977,19 @@ impl Resample<'_> {
             if let Some(r) = self.resample_reduce_single_pass(vals, false) {
                 return r;
             }
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out_f64 = Vec::with_capacity(order.len());
             for key in &order {
                 out_labels.push(resample_bin_label(key));
                 let g = &groups[key];
+                // pandas' group_mean: the compensated sum over the count
+                // (br-frankenpandas-xhogl).
                 out_f64.push(if g.is_empty() {
                     f64::NAN
                 } else {
-                    g.iter().map(|&i| vals[i]).sum::<f64>() / g.len() as f64
+                    let members: Vec<f64> = g.iter().map(|&i| vals[i]).collect();
+                    kahan_sum(&members) / g.len() as f64
                 });
             }
             let index = Index::new(out_labels).rename_index(self.series.index().name());
@@ -38561,7 +39010,7 @@ impl Resample<'_> {
             if let Some(r) = self.resample_reduce_single_pass(&vals, false) {
                 return r;
             }
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out_f64 = Vec::with_capacity(order.len());
             for key in &order {
@@ -38570,23 +39019,24 @@ impl Resample<'_> {
                 out_f64.push(if g.is_empty() {
                     f64::NAN
                 } else {
-                    g.iter().map(|&i| vals[i]).sum::<f64>() / g.len() as f64
+                    let members: Vec<f64> = g.iter().map(|&i| vals[i]).collect();
+                    kahan_sum(&members) / g.len() as f64
                 });
             }
             let index = Index::new(out_labels).rename_index(self.series.index().name());
             return Series::new(self.series.name(), index, Column::from_f64_values(out_f64));
         }
-        self.aggregate_scalar(fp_types::nanmean)
+        self.aggregate_scalar(fp_types::nanmean_grouped)
     }
 
     /// One-pass daily resample mean over an all-valid no-NaN f64 slice: accumulate
     /// sum+count per day index instead of build_groups' Vec<usize> scatter + gather
     /// (2 passes). VERBATIM the "D" path of `resample_build_groups` for the day
     /// ords + key_of + contiguous min..=max bin order + empty-bin NaN, so the
-    /// emitted index and `sum/count` (== `nanmean` for no-NaN, row-order sum) are
-    /// bit-identical. `None` (caller falls back) for an empty/all-NaT input or a
-    /// more-than-1e6-day span (matching build_groups' cap), or any
-    /// non-Datetime64/Date label.
+    /// emitted index and `sum/count` (== `nanmean_grouped` for no-NaN, the
+    /// row-order compensated sum) are bit-identical. `None` (caller falls back)
+    /// for an empty/all-NaT input, a more-than-1e6-day span (past datetime64's
+    /// range), or any non-Datetime64/Date label.
     /// Dispatch the daily / sub-daily one-pass resample reduce (mean if `is_sum`
     /// is false, sum if true). `None` (caller uses build_groups) for non-D/sub-day
     /// freqs or when a helper bails (empty / sparse / non-datetime label).
@@ -38673,13 +39123,14 @@ impl Resample<'_> {
         if n >= 1_000_000 {
             return None;
         }
-        let mut sum = vec![0.0_f64; n];
+        // Compensated, as pandas' group_sum / group_mean (br-frankenpandas-xhogl).
+        let mut sum = vec![fp_types::KahanSum::default(); n];
         let mut count = vec![0_i64; n];
         for (i, mo_opt) in month_ords.iter().enumerate() {
             if let Some(mo) = *mo_opt {
                 let bidx = ((bucket_end_mo(mo) - first) / bucket_months) as usize;
                 if bidx < n {
-                    sum[bidx] += vals[i];
+                    sum[bidx].add(vals[i]);
                     count[bidx] += 1;
                 }
             }
@@ -38694,9 +39145,9 @@ impl Resample<'_> {
                 let c = count[bidx];
                 out_f64.push(if c > 0 {
                     if is_sum {
-                        sum[bidx]
+                        sum[bidx].sum()
                     } else {
-                        sum[bidx] / c as f64
+                        sum[bidx].sum() / c as f64
                     }
                 } else if is_sum {
                     0.0
@@ -38828,12 +39279,13 @@ impl Resample<'_> {
         if n >= 1_000_000 {
             return None;
         }
-        let mut sum = vec![0.0_f64; n];
+        // Compensated, as pandas' group_sum / group_mean (br-frankenpandas-xhogl).
+        let mut sum = vec![fp_types::KahanSum::default(); n];
         let mut count = vec![0_i64; n];
         for (i, o) in day_ords.iter().enumerate() {
             if let Some(ord) = *o {
                 let bidx = (ord - min) as usize;
-                sum[bidx] += vals[i];
+                sum[bidx].add(vals[i]);
                 count[bidx] += 1;
             }
         }
@@ -38843,11 +39295,11 @@ impl Resample<'_> {
         };
         let mut out_labels = Vec::with_capacity(n);
         let mut out_f64 = Vec::with_capacity(n);
-        for (bidx, (&s, &c)) in sum.iter().zip(count.iter()).enumerate() {
+        for (bidx, (s, &c)) in sum.iter().zip(count.iter()).enumerate() {
             if let Some(key) = key_of(min + bidx as i64) {
                 out_labels.push(resample_bin_label(&key));
                 out_f64.push(if c > 0 {
-                    if is_sum { s } else { s / c as f64 }
+                    if is_sum { s.sum() } else { s.sum() / c as f64 }
                 } else if is_sum {
                     0.0
                 } else {
@@ -38881,8 +39333,34 @@ impl Resample<'_> {
         if bucket_ns <= 0 {
             return None;
         }
-        let labels = self.series.index().labels();
-        if let Some(identity) = self.subdaily_exact_target_frequency_result(labels, bucket_ns) {
+        // A date_range's lazy labels are read as the arithmetic they are,
+        // never made (br-frankenpandas-so0mr): the identity test, the span
+        // and each row's bin below, as the label loops compute them.
+        let affine = self
+            .series
+            .index()
+            .datetime64_affine_labels()
+            .filter(|&(_, step, len)| step > 0 && len > 0 && len == vals.len());
+        let labels = match affine {
+            Some(_) => &[][..],
+            None => self.series.index().labels(),
+        };
+        if let Some((first, step, len)) = affine {
+            if first
+                .rem_euclid(Timedelta::NANOS_PER_DAY)
+                .rem_euclid(bucket_ns)
+                == 0
+                && (len == 1 || step == bucket_ns)
+            {
+                return Some(Series::new(
+                    self.series.name(),
+                    self.series.index().clone(),
+                    self.series.column().clone(),
+                ));
+            }
+        } else if let Some(identity) =
+            self.subdaily_exact_target_frequency_result(labels, bucket_ns)
+        {
             return Some(identity);
         }
         // Fused: find origin (min ns) AND max ns in one pass, then accumulate
@@ -38893,6 +39371,11 @@ impl Resample<'_> {
         // origin/bins/bound, same row-order accumulation.
         let mut min_ns = i64::MAX;
         let mut max_ns = i64::MIN;
+        if let Some((first, step, len)) = affine {
+            // A validated range: its last stamp does not overflow.
+            min_ns = first;
+            max_ns = first.checked_add(step.checked_mul(i64::try_from(len - 1).ok()?)?)?;
+        }
         for l in labels {
             if let Some(ns) = resample_label_to_ns(l) {
                 if ns < min_ns {
@@ -38917,26 +39400,39 @@ impl Resample<'_> {
         // Every bin from the first to the last is emitted, empty ones as 0.0
         // (sum) / NaN (mean), as pandas does; this path dropped them. A range too
         // sparse for a dense table goes to the generic path, which emits them too.
-        if (bmax as i128 + 1) > (labels.len() as i128 * 4).max(1 << 16) {
+        let rows = affine.map_or(labels.len(), |(_, _, len)| len);
+        if (bmax as i128 + 1) > (rows as i128 * 4).max(1 << 16) {
             return None;
         }
         let nb = (bmax + 1) as usize;
-        let mut sum = vec![0.0_f64; nb];
+        // Compensated, as pandas' group_sum / group_mean (br-frankenpandas-xhogl).
+        let mut sum = vec![fp_types::KahanSum::default(); nb];
         let mut count = vec![0_i64; nb];
+        if let Some((first, step, _)) = affine {
+            let mut ns = first;
+            for (i, &value) in vals.iter().enumerate() {
+                if i > 0 {
+                    ns += step;
+                }
+                let didx = (ns - origin).div_euclid(bucket_ns) as usize;
+                sum[didx].add(value);
+                count[didx] += 1;
+            }
+        }
         for (i, l) in labels.iter().enumerate() {
             if let Some(ns) = resample_label_to_ns(l) {
                 let didx = (ns - origin).div_euclid(bucket_ns) as usize;
-                sum[didx] += vals[i];
+                sum[didx].add(vals[i]);
                 count[didx] += 1;
             }
         }
         let out_f64: Vec<f64> = sum
             .iter()
             .zip(&count)
-            .map(|(&total, &n)| match (is_sum, n) {
-                (true, _) => total,
+            .map(|(total, &n)| match (is_sum, n) {
+                (true, _) => total.sum(),
                 (false, 0) => f64::NAN,
-                (false, n) => total / n as f64,
+                (false, n) => total.sum() / n as f64,
             })
             .collect();
         let index = Index::from_datetime64_affine_range(origin, bucket_ns, nb)
@@ -39002,7 +39498,7 @@ impl Resample<'_> {
         // SAME `build_groups` + label construction, so the bucket axis is identical.
         if self.series.column().as_i64_slice().is_some() {
             self.validate()?;
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out = Vec::with_capacity(order.len());
             for key in &order {
@@ -39077,7 +39573,7 @@ impl Resample<'_> {
                     return r;
                 }
             }
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out = Vec::with_capacity(order.len());
             for key in &order {
@@ -39118,7 +39614,7 @@ impl Resample<'_> {
         let data = self.series.column().as_i64_slice()?;
         Some((|| -> Result<Series, FrameError> {
             self.validate()?;
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out = Vec::with_capacity(order.len());
             for key in &order {
@@ -39156,7 +39652,7 @@ impl Resample<'_> {
         let data = self.series.column().as_i64_slice()?;
         Some((|| -> Result<Series, FrameError> {
             self.validate()?;
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out = Vec::with_capacity(order.len());
             for key in &order {
@@ -39230,7 +39726,7 @@ impl Resample<'_> {
     {
         // Per br-frankenpandas-7bc60.
         self.validate()?;
-        let (order, groups) = self.build_groups();
+        let (order, groups) = self.build_groups()?;
         let vals = self.series.column().values();
 
         let mut out_labels = Vec::with_capacity(order.len());
@@ -39257,7 +39753,7 @@ impl Resample<'_> {
         if let Some(r) = self.resample_var_typed(true) {
             return r;
         }
-        self.aggregate_scalar(|vals| fp_types::nanstd(vals, 1))
+        self.aggregate_scalar(|vals| fp_types::nanstd_grouped(vals, 1))
     }
 
     /// Resample variance.
@@ -39271,23 +39767,25 @@ impl Resample<'_> {
         // Per br-frankenpandas-x3lk4: mirror Resample::std above by routing
         // through fp_types::nanvar, which preserves Timedelta64 dtype
         // (br-j8ntk). The previous inline f64 closure silently dropped
-        // Timedelta values via to_f64().ok() filter.
-        self.aggregate_scalar(|vals| fp_types::nanvar(vals, 1))
+        // Timedelta values via to_f64().ok() filter. Floats fold Welford, as
+        // pandas' group_var (br-frankenpandas-xhogl).
+        self.aggregate_scalar(|vals| fp_types::nanvar_grouped(vals, 1))
     }
 
-    /// Typed two-pass var/std per bin for an all-valid no-NaN Float64 column,
+    /// Typed Welford var/std per bin for an all-valid no-NaN Float64 column,
     /// skipping the per-bin `Vec<Scalar>` gather + nan_* dispatch that
-    /// `aggregate_scalar` pays per call. Bit-identical: `fp_types::nanvar` IS this
-    /// mean-centered two-pass (`mean=sum/n`; `sum((x-mean).powi(2))/(n-1)`;
-    /// `n<=1 -> Null(NaN)`), and `nanstd == sqrt(nanvar)`. Returns `None` for a
-    /// non-f64 column (e.g. Timedelta) or any NaN, so those keep the nan_* path.
+    /// `aggregate_scalar` pays per call. Bit-identical: `fp_types::nanvar_grouped`
+    /// IS this row-order Welford update (pandas' group_var,
+    /// br-frankenpandas-xhogl; `n<=1 -> Null(NaN)`), and `nanstd_grouped ==
+    /// sqrt(nanvar_grouped)`. Returns `None` for a non-f64 column (e.g.
+    /// Timedelta) or any NaN, so those keep the nan_* path.
     fn resample_var_typed(&self, want_std: bool) -> Option<Result<Series, FrameError>> {
         // f64 borrows its contiguous slice (rejecting any NaN); an all-valid Int64
-        // column materializes the `v as f64` view once (nanvar/nanstd coerce via
-        // to_f64 and return Float64, so Int64 var/std widen to Float64 — dtype-
+        // column materializes the `v as f64` view once (the grouped reducers coerce
+        // via to_f64 and return Float64, so Int64 var/std widen to Float64 — dtype-
         // correct, no i64 overflow since the accumulation is f64 exactly as the
-        // generic path). Bit-identical to aggregate_scalar(nanvar/nanstd) on an
-        // all-valid Int64 column: it is this same typed two-pass over `v as f64`.
+        // generic path). Bit-identical to aggregate_scalar(nanvar_grouped) on an
+        // all-valid Int64 column: it is this same typed Welford over `v as f64`.
         let owned_i64: Vec<f64>;
         let vals: &[f64] = if let Some(v) = self.series.column().as_f64_slice() {
             if v.iter().any(|x| x.is_nan()) {
@@ -39301,22 +39799,17 @@ impl Resample<'_> {
         };
         Some((|| -> Result<Series, FrameError> {
             self.validate()?;
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out = Vec::with_capacity(order.len());
             for key in &order {
-                let g = &groups[key];
-                let n = g.len();
-                let s = if n < 2 {
-                    Scalar::Null(NullKind::NaN)
-                } else {
-                    let mean = g.iter().map(|&i| vals[i]).sum::<f64>() / n as f64;
-                    let ssd = g.iter().map(|&i| (vals[i] - mean).powi(2)).sum::<f64>();
-                    let var = ssd / (n - 1) as f64;
-                    Scalar::Float64(if want_std { var.sqrt() } else { var })
-                };
+                // Welford per bin, as pandas' group_var (br-frankenpandas-xhogl).
+                let mut moments = fp_types::WelfordVar::default();
+                for &i in &groups[key] {
+                    moments.add(vals[i]);
+                }
                 out_labels.push(resample_bin_label(key));
-                out.push(s);
+                out.push(moment_spread(moments, want_std));
             }
             let index = Index::new(out_labels).rename_index(self.series.index().name());
             Series::new(self.series.name(), index, Column::from_values(out)?)
@@ -39358,7 +39851,7 @@ impl Resample<'_> {
         };
         if let Some(vals) = typed {
             self.validate()?;
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             if order.iter().all(|k| !groups[k].is_empty()) {
                 let mut out_labels = Vec::with_capacity(order.len());
                 let mut out_f64 = Vec::with_capacity(order.len());
@@ -39404,7 +39897,7 @@ impl Resample<'_> {
             // wrapping on overflow as numpy does (this was Float64;
             // br-frankenpandas-0yilt).
             self.validate()?;
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out_i64 = Vec::with_capacity(order.len());
             for key in &order {
@@ -39467,14 +39960,15 @@ impl Resample<'_> {
     pub fn agg(&self, funcs: &[&str]) -> Result<DataFrame, FrameError> {
         // Per br-frankenpandas-7bc60.
         self.validate()?;
-        let (order, groups) = self.build_groups();
+        let (order, groups) = self.build_groups()?;
         // Buckets-once fast path (br-frankenpandas-833wx): the per-func loop below
         // calls aggregate_named per func, each REBUILDING the bins — N+1 builds.
         // For the f64-bucket reductions over an all-valid no-NaN column with no
         // empty bins, build per-bin f64 buckets ONCE and apply each func over the
-        // shared buckets. Bit-identical to the per-func nan_* (verified): nansum/
-        // nanmean/nanmin/nanmax/nanprod == plain fold/sum over the finite bucket,
-        // nanvar/nanstd == the mean-centered two-pass (n<=1 -> Null(NaN), matching).
+        // shared buckets. Bit-identical to the per-func reducers: nansum_grouped /
+        // nanmean_grouped == the compensated fold over the finite bucket, nanmin/
+        // nanmax/nanprod == plain folds, nanvar_grouped/nanstd_grouped == its
+        // Welford update (n<=1 -> Null(NaN), matching).
         const BUCKET_FUNCS: &[&str] = &["sum", "mean", "min", "max", "std", "var", "prod"];
         if !funcs.is_empty()
             && funcs.iter().all(|f| BUCKET_FUNCS.contains(f))
@@ -39494,9 +39988,11 @@ impl Resample<'_> {
                     .iter()
                     .map(|b| {
                         let n = b.len();
+                        // sum / mean compensated, std / var Welford, as pandas'
+                        // group kernels (br-frankenpandas-xhogl).
                         match func {
-                            "sum" => Scalar::Float64(b.iter().sum::<f64>()),
-                            "mean" => Scalar::Float64(b.iter().sum::<f64>() / n as f64),
+                            "sum" => Scalar::Float64(kahan_sum(b)),
+                            "mean" => Scalar::Float64(kahan_sum(b) / n as f64),
                             "min" => {
                                 Scalar::Float64(b.iter().copied().fold(f64::INFINITY, f64::min))
                             }
@@ -39504,16 +40000,7 @@ impl Resample<'_> {
                                 Scalar::Float64(b.iter().copied().fold(f64::NEG_INFINITY, f64::max))
                             }
                             "prod" => Scalar::Float64(b.iter().product::<f64>()),
-                            _ => {
-                                if n < 2 {
-                                    Scalar::Null(NullKind::NaN)
-                                } else {
-                                    let mean = b.iter().sum::<f64>() / n as f64;
-                                    let ssd = b.iter().map(|x| (x - mean).powi(2)).sum::<f64>();
-                                    let var = ssd / (n - 1) as f64;
-                                    Scalar::Float64(if func == "std" { var.sqrt() } else { var })
-                                }
-                            }
+                            _ => moment_spread(welford_moments(b), func == "std"),
                         }
                     })
                     .collect();
@@ -39558,26 +40045,24 @@ impl Resample<'_> {
         self.agg(funcs)
     }
 
-    /// Bucket labels in first-observed order.
-    #[must_use]
-    pub fn keys(&self) -> Vec<IndexLabel> {
-        let (order, _) = self.build_groups();
-        order.iter().map(|key| resample_bin_label(key)).collect()
+    /// Bucket labels in first-observed order; a rule past the bin cap is
+    /// refused (br-frankenpandas-effk4).
+    pub fn keys(&self) -> Result<Vec<IndexLabel>, FrameError> {
+        let (order, _) = self.build_groups()?;
+        Ok(order.iter().map(|key| resample_bin_label(key)).collect())
     }
 
     /// Mapping from bucket labels to source row positions.
-    #[must_use]
-    pub fn indices(&self) -> HashMap<IndexLabel, Vec<usize>> {
-        let (order, groups) = self.build_groups();
-        order
+    pub fn indices(&self) -> Result<HashMap<IndexLabel, Vec<usize>>, FrameError> {
+        let (order, groups) = self.build_groups()?;
+        Ok(order
             .iter()
             .map(|key| (resample_bin_label(key), groups[key].clone()))
-            .collect()
+            .collect())
     }
 
     /// Alias for [`Self::indices`].
-    #[must_use]
-    pub fn groups(&self) -> HashMap<IndexLabel, Vec<usize>> {
+    pub fn groups(&self) -> Result<HashMap<IndexLabel, Vec<usize>>, FrameError> {
         self.indices()
     }
 
@@ -39594,10 +40079,9 @@ impl Resample<'_> {
     }
 
     /// Number of non-empty resample buckets.
-    #[must_use]
-    pub fn ngroups(&self) -> usize {
-        let (order, _) = self.build_groups();
-        order.len()
+    pub fn ngroups(&self) -> Result<usize, FrameError> {
+        let (order, _) = self.build_groups()?;
+        Ok(order.len())
     }
 
     /// Series resampler dimensionality.
@@ -39616,7 +40100,7 @@ impl Resample<'_> {
     pub fn get_group(&self, name: &str) -> Result<Series, FrameError> {
         // Per br-frankenpandas-7bc60.
         self.validate()?;
-        let (_order, groups) = self.build_groups();
+        let (_order, groups) = self.build_groups()?;
         let positions = groups.get(name).ok_or_else(|| {
             FrameError::CompatibilityRejected(format!("resample group '{name}' not found"))
         })?;
@@ -39641,6 +40125,7 @@ impl Resample<'_> {
     /// origin anchoring here.
     fn bin_lattice(&self) -> Result<Vec<(String, i64)>, FrameError> {
         self.validate()?;
+        check_resample_bin_count(self.series.index(), &self.freq)?;
         let grouping = resample_build_groups_with_options(
             self.series.index().labels(),
             &self.freq,
@@ -39873,7 +40358,7 @@ impl Resample<'_> {
         };
         if let Some(vals) = typed {
             self.validate()?;
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             if order.iter().all(|k| !groups[k].is_empty()) {
                 let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
                 let mut out_labels = Vec::with_capacity(order.len());
@@ -39913,13 +40398,12 @@ impl Resample<'_> {
         }
         // Typed path (f64 borrows its slice rejecting any NaN; all-valid Int64 builds
         // the `v as f64` view once): `nansem_grouped(_, 1)` returns
-        // `sqrt(nanvar(_, 1) / n)` (Float64) and `Null(NaN)` when `n <= 1`, so Int64
-        // sem widens to Float64. Mirror `resample_var_typed`'s per-bin two-pass (mean,
-        // ssd, var with ddof=1) then take `sqrt(var / n)`. Bit-identical to
-        // aggregate_scalar(|v| nansem_grouped(v,1)) on an all-valid Int64 column: the
-        // mean/ssd/var are the same operations `resample_var_typed` already reproduces
-        // bit-for-bit from `nanvar`, and the `n <= 1 -> Null(NaN)` gate matches
-        // (empty/singleton bins included).
+        // `sqrt(nanvar_grouped(_, 1) / n)` (Float64) and `Null(NaN)` when `n <= 1`, so
+        // Int64 sem widens to Float64. Mirror `resample_var_typed`'s per-bin Welford
+        // update then take `sqrt(var / n)`. Bit-identical to
+        // aggregate_scalar(|v| nansem_grouped(v,1)) on an all-valid Int64 column: it
+        // is the same `WelfordVar` over the bin's values in row order, and the
+        // `n <= 1 -> Null(NaN)` gate matches (empty/singleton bins included).
         let owned_i64: Vec<f64>;
         let typed: Option<&[f64]> = if let Some(v) = self.series.column().as_f64_slice() {
             if v.iter().any(|x| x.is_nan()) {
@@ -39935,23 +40419,22 @@ impl Resample<'_> {
         };
         if let Some(vals) = typed {
             self.validate()?;
-            let (order, groups) = self.build_groups();
+            let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out = Vec::with_capacity(order.len());
             for key in &order {
-                let g = &groups[key];
-                let n = g.len();
-                let s = if n <= 1 {
-                    Scalar::Null(NullKind::NaN)
-                } else {
-                    let mean = g.iter().map(|&i| vals[i]).sum::<f64>() / n as f64;
-                    let ssd = g.iter().map(|&i| (vals[i] - mean).powi(2)).sum::<f64>();
-                    // pandas' group_var sem: sqrt(var / n), not std / sqrt(n)
-                    // (br-frankenpandas-7hxqv).
-                    Scalar::Float64((ssd / (n - 1) as f64 / n as f64).sqrt())
-                };
+                // pandas' group_var sem, Welford: sqrt(var / n), not std /
+                // sqrt(n) (br-frankenpandas-7hxqv, br-frankenpandas-xhogl).
+                let mut moments = fp_types::WelfordVar::default();
+                for &i in &groups[key] {
+                    moments.add(vals[i]);
+                }
                 out_labels.push(resample_bin_label(key));
-                out.push(s);
+                out.push(
+                    moments
+                        .sem(1)
+                        .map_or(Scalar::Null(NullKind::NaN), Scalar::Float64),
+                );
             }
             let index = Index::new(out_labels).rename_index(self.series.index().name());
             return Series::new(self.series.name(), index, Column::from_values(out)?);
@@ -40005,7 +40488,7 @@ impl Resample<'_> {
     pub fn ohlc(&self) -> Result<DataFrame, FrameError> {
         // Per br-frankenpandas-7bc60.
         self.validate()?;
-        let (order, groups) = self.build_groups();
+        let (order, groups) = self.build_groups()?;
         let vals = self.series.values();
         let mut labels = Vec::with_capacity(order.len());
         let mut opens = Vec::with_capacity(order.len());
@@ -40152,7 +40635,7 @@ impl Resample<'_> {
     pub fn transform(&self, func: &str) -> Result<Series, FrameError> {
         // Per br-frankenpandas-7bc60.
         self.validate()?;
-        let (order, groups) = self.build_groups();
+        let (order, groups) = self.build_groups()?;
         let vals = self.series.values();
         let mut out = vec![Scalar::Null(NullKind::NaN); self.series.len()];
 
@@ -40160,14 +40643,16 @@ impl Resample<'_> {
             let positions = &groups[key];
             let group_vals: Vec<Scalar> = positions.iter().map(|&idx| vals[idx].clone()).collect();
             let value = match func {
-                "sum" => fp_types::nansum(&group_vals),
-                "mean" => fp_types::nanmean(&group_vals),
+                // pandas' group kernels: compensated sums, Welford moments
+                // (br-frankenpandas-xhogl).
+                "sum" => fp_types::nansum_grouped(&group_vals),
+                "mean" => fp_types::nanmean_grouped(&group_vals),
                 "count" => fp_types::nancount(&group_vals),
                 "min" => fp_types::nanmin(&group_vals),
                 "max" => fp_types::nanmax(&group_vals),
                 "prod" => nanprod_preserving_int(&group_vals),
-                "std" => fp_types::nanstd(&group_vals, 1),
-                "var" => fp_types::nanvar(&group_vals, 1),
+                "std" => fp_types::nanstd_grouped(&group_vals, 1),
+                "var" => fp_types::nanvar_grouped(&group_vals, 1),
                 "median" => fp_types::nanmedian(&group_vals),
                 "size" => Scalar::Int64(group_vals.len() as i64),
                 "nunique" => {
@@ -41273,10 +41758,12 @@ impl<'a> DataFrameResample<'a> {
         )
     }
 
-    fn build_groups(&self) -> (Vec<String>, HashMap<String, Vec<usize>>) {
+    fn build_groups(&self) -> Result<(Vec<String>, HashMap<String, Vec<usize>>), FrameError> {
         // Per gauntlet CONF-RC2: share the origin-anchored N-day bucketing
         // with the Series resample path so multiplied frequencies (e.g. "2D")
-        // bucket identically here.
+        // bucket identically here. A rule past RESAMPLE_MAX_BINS is refused
+        // (br-frankenpandas-effk4).
+        check_resample_bin_count(&self.df.index, &self.freq)?;
         let g = resample_build_groups_with_options(
             self.df.index.labels(),
             &self.freq,
@@ -41284,7 +41771,7 @@ impl<'a> DataFrameResample<'a> {
             self.label.as_deref(),
             self.origin.as_deref(),
         );
-        (g.order, g.groups)
+        Ok((g.order, g.groups))
     }
 
     fn series_resample<'s>(&self, series: &'s Series) -> Resample<'s> {
@@ -41554,26 +42041,24 @@ impl<'a> DataFrameResample<'a> {
         self.agg(funcs)
     }
 
-    /// Bucket labels in first-observed order.
-    #[must_use]
-    pub fn keys(&self) -> Vec<IndexLabel> {
-        let (order, _) = self.build_groups();
-        order.iter().map(|key| resample_bin_label(key)).collect()
+    /// Bucket labels in first-observed order; a rule past the bin cap is
+    /// refused (br-frankenpandas-effk4).
+    pub fn keys(&self) -> Result<Vec<IndexLabel>, FrameError> {
+        let (order, _) = self.build_groups()?;
+        Ok(order.iter().map(|key| resample_bin_label(key)).collect())
     }
 
     /// Mapping from bucket labels to source row positions.
-    #[must_use]
-    pub fn indices(&self) -> HashMap<IndexLabel, Vec<usize>> {
-        let (order, groups) = self.build_groups();
-        order
+    pub fn indices(&self) -> Result<HashMap<IndexLabel, Vec<usize>>, FrameError> {
+        let (order, groups) = self.build_groups()?;
+        Ok(order
             .iter()
             .map(|key| (resample_bin_label(key), groups[key].clone()))
-            .collect()
+            .collect())
     }
 
     /// Alias for [`Self::indices`].
-    #[must_use]
-    pub fn groups(&self) -> HashMap<IndexLabel, Vec<usize>> {
+    pub fn groups(&self) -> Result<HashMap<IndexLabel, Vec<usize>>, FrameError> {
         self.indices()
     }
 
@@ -41590,10 +42075,9 @@ impl<'a> DataFrameResample<'a> {
     }
 
     /// Number of non-empty resample buckets.
-    #[must_use]
-    pub fn ngroups(&self) -> usize {
-        let (order, _) = self.build_groups();
-        order.len()
+    pub fn ngroups(&self) -> Result<usize, FrameError> {
+        let (order, _) = self.build_groups()?;
+        Ok(order.len())
     }
 
     /// DataFrame resampler dimensionality.
@@ -41611,7 +42095,7 @@ impl<'a> DataFrameResample<'a> {
     /// Return all source rows for one resample bucket.
     pub fn get_group(&self, name: &str) -> Result<DataFrame, FrameError> {
         self.validate()?;
-        let (_, groups) = self.build_groups();
+        let (_, groups) = self.build_groups()?;
         let positions = groups.get(name).ok_or_else(|| {
             FrameError::CompatibilityRejected(format!("resample group '{name}' not found"))
         })?;
@@ -41672,7 +42156,7 @@ impl<'a> DataFrameResample<'a> {
     /// Count source rows in each resample bucket.
     pub fn size(&self) -> Result<Series, FrameError> {
         self.validate()?;
-        let (order, groups) = self.build_groups();
+        let (order, groups) = self.build_groups()?;
         // Timestamp bins, as every other resample result (they were the bin
         // keys' text; br-frankenpandas-0yilt).
         let labels: Vec<IndexLabel> = order.iter().map(|key| resample_bin_label(key)).collect();
@@ -41787,6 +42271,148 @@ impl<'a> DataFrameResample<'a> {
         F: Fn(&Self) -> Result<T, FrameError>,
     {
         func(self)
+    }
+}
+
+/// pandas' grouped sum of `values` in order: its compensated
+/// [`fp_types::KahanSum`] (a plain fold differs in the last bits;
+/// br-frankenpandas-xhogl).
+fn kahan_sum(values: &[f64]) -> f64 {
+    let mut sum = fp_types::KahanSum::default();
+    for &value in values {
+        sum.add(value);
+    }
+    sum.sum()
+}
+
+/// A cumulative step whose running value is its output (cumprod, cummin,
+/// cummax), in the (accumulator, output) shape the dense cum kernels take.
+fn running(step: impl Fn(f64, f64) -> f64) -> impl Fn(f64, f64) -> (f64, f64) {
+    move |acc, value| {
+        let next = step(acc, value);
+        (next, next)
+    }
+}
+
+/// pandas' group_cumsum step: the compensated sum, its running total the
+/// output (br-frankenpandas-xhogl).
+fn kahan_running(mut sum: fp_types::KahanSum, value: f64) -> (fp_types::KahanSum, f64) {
+    sum.add(value);
+    (sum, sum.sum())
+}
+
+/// Per-group compensated sums and counts: row `r`'s value, when present,
+/// added to group `gids[r]` in row order, as pandas' group_sum / group_mean
+/// fold (br-frankenpandas-xhogl).
+fn grouped_sums(
+    gids: &[usize],
+    ng: usize,
+    values: impl Iterator<Item = Option<f64>>,
+) -> (Vec<fp_types::KahanSum>, Vec<u64>) {
+    let mut sums = vec![fp_types::KahanSum::default(); ng];
+    let mut counts = vec![0_u64; ng];
+    for (&g, value) in gids.iter().zip(values) {
+        if let Some(value) = value {
+            sums[g].add(value);
+            counts[g] += 1;
+        }
+    }
+    (sums, counts)
+}
+
+/// Per-group Welford moments: row `r`'s value, when present, folded into
+/// group `gids[r]` in row order, as pandas' group_var folds
+/// (br-frankenpandas-xhogl).
+fn grouped_welford(
+    gids: &[usize],
+    ng: usize,
+    values: impl Iterator<Item = Option<f64>>,
+) -> Vec<fp_types::WelfordVar> {
+    let mut moments = vec![fp_types::WelfordVar::default(); ng];
+    for (&g, value) in gids.iter().zip(values) {
+        if let Some(value) = value {
+            moments[g].add(value);
+        }
+    }
+    moments
+}
+
+/// A group's ddof=1 std (`want_std`) or var, missing for fewer than two
+/// values.
+fn moment_spread(moments: fp_types::WelfordVar, want_std: bool) -> Scalar {
+    let spread = if want_std {
+        moments.std(1)
+    } else {
+        moments.var(1)
+    };
+    spread.map_or(Scalar::Null(NullKind::NaN), Scalar::Float64)
+}
+
+/// Each row's group ddof=1 std (`want_std`) or var from its Welford
+/// `moments`, missing where the group holds fewer than two values; None when
+/// every group does (the generic path owns that all-null shape).
+fn broadcast_spread(
+    gid_per_row: &[usize],
+    moments: &[fp_types::WelfordVar],
+    want_std: bool,
+) -> Option<Column> {
+    if moments.iter().all(|group| group.count() <= 1) {
+        return None;
+    }
+    let nrows = gid_per_row.len();
+    let mut data = Vec::with_capacity(nrows);
+    let mut words = vec![0u64; nrows.div_ceil(64)];
+    for (row, &g) in gid_per_row.iter().enumerate() {
+        let spread = if want_std {
+            moments[g].std(1)
+        } else {
+            moments[g].var(1)
+        };
+        data.push(spread.unwrap_or(0.0));
+        if spread.is_some() {
+            words[row / 64] |= 1u64 << (row % 64);
+        }
+    }
+    Some(Column::from_f64_values_with_validity(
+        data,
+        fp_columnar::ValidityMask::from_words(words, nrows),
+    ))
+}
+
+/// pandas' grouped moments of `values` in order: [`fp_types::WelfordVar`]
+/// (br-frankenpandas-xhogl).
+fn welford_moments(values: &[f64]) -> fp_types::WelfordVar {
+    let mut moments = fp_types::WelfordVar::default();
+    for &value in values {
+        moments.add(value);
+    }
+    moments
+}
+
+/// A per-group online moment state pandas' group kernels fold row by row:
+/// group_var's Welford update, group_skew's third-moment update.
+trait GroupMoments: Copy + Default {
+    fn add(&mut self, value: f64);
+    fn count(&self) -> usize;
+}
+
+impl GroupMoments for fp_types::WelfordVar {
+    fn add(&mut self, value: f64) {
+        Self::add(self, value);
+    }
+
+    fn count(&self) -> usize {
+        Self::count(*self)
+    }
+}
+
+impl GroupMoments for fp_types::SkewMoments {
+    fn add(&mut self, value: f64) {
+        Self::add(self, value);
+    }
+
+    fn count(&self) -> usize {
+        Self::count(*self)
     }
 }
 
@@ -42262,13 +42888,13 @@ fn dense_groupby_diff_i64_to_f64(
 /// `SeriesGroupBy::try_cum_dense_nullable`'s gid branch, shared with the
 /// DataFrameGroupBy cumulative dense path. Bit-identical to the generic skipna
 /// cumulative (present-finite valid, missing missing).
-fn dense_groupby_cum_nullable_f64(
+fn dense_groupby_cum_nullable_f64<A: Copy>(
     gid_per_row: &[usize],
     ngroups: usize,
     data: &[f64],
     validity: &fp_columnar::ValidityMask,
-    init: f64,
-    step: impl Fn(f64, f64) -> f64,
+    init: A,
+    step: impl Fn(A, f64) -> (A, f64),
 ) -> (Vec<f64>, fp_columnar::ValidityMask) {
     let n = data.len();
     let mut acc = vec![init; ngroups];
@@ -42278,10 +42904,10 @@ fn dense_groupby_cum_nullable_f64(
     for row in 0..n {
         if validity.get(row) {
             let g = gid_per_row[row];
-            let next = step(acc[g], data[row]);
+            let (next, value) = step(acc[g], data[row]);
             acc[g] = next;
-            out[row] = next;
-            if !next.is_nan() {
+            out[row] = value;
+            if !value.is_nan() {
                 words[row / 64] |= 1u64 << (row % 64);
             }
         }
@@ -42297,14 +42923,14 @@ fn dense_groupby_cum_nullable_f64(
 /// accumulator matches the gid-keyed version exactly. Also serves an all-valid
 /// column (validity all-set ⇒ every row folds, every bit set — modulo the
 /// cumprod overflow-NaN bit-clear, which is a no-op for finite folds).
-fn dense_groupby_cum_nullable_f64_by_key(
+fn dense_groupby_cum_nullable_f64_by_key<A: Copy>(
     keys: &[i64],
     min: i64,
     range: usize,
     data: &[f64],
     validity: &fp_columnar::ValidityMask,
-    init: f64,
-    step: impl Fn(f64, f64) -> f64,
+    init: A,
+    step: impl Fn(A, f64) -> (A, f64),
 ) -> (Vec<f64>, fp_columnar::ValidityMask) {
     let n = data.len();
     let mut acc = vec![init; range];
@@ -42313,10 +42939,10 @@ fn dense_groupby_cum_nullable_f64_by_key(
     for row in 0..n {
         if validity.get(row) {
             let off = (keys[row] as i128 - min as i128) as usize;
-            let next = step(acc[off], data[row]);
+            let (next, value) = step(acc[off], data[row]);
             acc[off] = next;
-            out[row] = next;
-            if !next.is_nan() {
+            out[row] = value;
+            if !value.is_nan() {
                 words[row / 64] |= 1u64 << (row % 64);
             }
         }
@@ -43525,17 +44151,14 @@ impl SeriesGroupBy<'_> {
                     // An object key (s.dt.date) labels its group as itself;
                     // it rendered "Object(datetime.date(...))" (fvsao.66).
                     Scalar::Object(object) => IndexLabel::Object(object.clone()),
-                    // Period/Interval still have NO IndexLabel variant — a
-                    // representation gap (no6s4 / 00ze3-class), not a mapping
-                    // bug. They label as pandas prints them ('2024-01',
-                    // '(0, 3]' - a groupby over pd.cut; the debug rendering
-                    // was 'Interval(Interval { .. })', fvsao.54): distinct
+                    // A period is its own label (45fzr), an interval too
+                    // (c27hq; a groupby over pd.cut labelled its text, and
+                    // once 'Interval(Interval { .. })', fvsao.54): distinct
                     // groups stay DISTINCT; the old `"NaN"` collapse gave
                     // every unlisted key the SAME label. Missing values never
                     // reach here (skipped above), so this is not the null path.
-                    // A period is its own label (45fzr).
                     Scalar::Period(period) => IndexLabel::Period(*period),
-                    Scalar::Interval(interval) => IndexLabel::Utf8(interval.to_string()),
+                    Scalar::Interval(interval) => IndexLabel::Interval(*interval),
                     other => IndexLabel::Utf8(format!("{other:?}")),
                 };
                 order.push(lbl);
@@ -43874,11 +44497,11 @@ impl SeriesGroupBy<'_> {
     /// value slice and a dense gid layout apply. Bit-identical: rows are visited
     /// in ascending order, so each group's running fold matches the generic
     /// per-group scan; the all-valid no-NaN gate means no position is missing.
-    fn try_cum_dense(
+    fn try_cum_dense<A: Copy>(
         &self,
-        init: f64,
+        init: A,
         nan_aware: bool,
-        step: impl Fn(f64, f64) -> f64,
+        step: impl Fn(A, f64) -> (A, f64),
     ) -> Option<Series> {
         if self.column_is_timedelta() {
             return None;
@@ -43946,9 +44569,9 @@ impl SeriesGroupBy<'_> {
             let mut out = vec![0.0_f64; n];
             for row in 0..n {
                 let off = (keys[row] as i128 - min as i128) as usize;
-                let next = step(acc[off], data[row]);
+                let (next, value) = step(acc[off], data[row]);
                 acc[off] = next;
-                out[row] = next;
+                out[row] = value;
             }
             // Move the hot accumulator output into the backing (Arc::new) instead
             // of from_f64_values' Arc::from(Vec) cold-realloc-copy (~5.7ms/1M);
@@ -43963,9 +44586,9 @@ impl SeriesGroupBy<'_> {
         #[allow(clippy::needless_range_loop)] // row indexes data, gids and out
         for row in 0..n {
             let g = gids[row];
-            let next = step(acc[g], data[row]);
+            let (next, value) = step(acc[g], data[row]);
             acc[g] = next;
-            out[row] = next;
+            out[row] = value;
         }
         let column = build(out);
         Series::new(self.series.name(), index, column).ok()
@@ -43981,7 +44604,11 @@ impl SeriesGroupBy<'_> {
     /// result is valid, a missing slot missing, and a present slot whose running
     /// `acc` goes NaN (cumprod inf*0) clears its bit — exactly what the generic
     /// `Scalar::Float64(acc)` -> from_values NaN-as-missing produces.
-    fn try_cum_dense_nullable(&self, init: f64, step: impl Fn(f64, f64) -> f64) -> Option<Series> {
+    fn try_cum_dense_nullable<A: Copy>(
+        &self,
+        init: A,
+        step: impl Fn(A, f64) -> (A, f64),
+    ) -> Option<Series> {
         if self.column_is_timedelta() {
             return None;
         }
@@ -43997,10 +44624,10 @@ impl SeriesGroupBy<'_> {
             for row in 0..n {
                 if validity.get(row) {
                     let off = (keys[row] as i128 - min as i128) as usize;
-                    let next = step(acc[off], data[row]);
+                    let (next, value) = step(acc[off], data[row]);
                     acc[off] = next;
-                    out[row] = next;
-                    if !next.is_nan() {
+                    out[row] = value;
+                    if !value.is_nan() {
                         words[row / 64] |= 1u64 << (row % 64);
                     }
                 }
@@ -44017,10 +44644,10 @@ impl SeriesGroupBy<'_> {
         for row in 0..n {
             if validity.get(row) {
                 let g = gids[row];
-                let next = step(acc[g], data[row]);
+                let (next, value) = step(acc[g], data[row]);
                 acc[g] = next;
-                out[row] = next;
-                if !next.is_nan() {
+                out[row] = value;
+                if !value.is_nan() {
                     words[row / 64] |= 1u64 << (row % 64);
                 }
             }
@@ -45256,11 +45883,19 @@ impl SeriesGroupBy<'_> {
             return r;
         }
         // Dense single-fold fast path (no per-group Vec<f64> buckets) — see
-        // dense_group_fold. Bit-identical to agg_numeric's `nums.iter().sum()`.
-        if let Some(r) = self.dense_group_fold(0.0, |a, x| a + x, |a, _| Scalar::Float64(a)) {
+        // dense_group_fold. Both add as pandas' group_sum: compensated
+        // (br-frankenpandas-xhogl).
+        if let Some(r) = self.dense_group_fold(
+            fp_types::KahanSum::default(),
+            |mut sum, x| {
+                sum.add(x);
+                sum
+            },
+            |sum, _| Scalar::Float64(sum.sum()),
+        ) {
             return r.and_then(|reduced| self.fill_all_missing_groups(reduced, 0.0));
         }
-        self.agg_numeric(|nums| nums.iter().sum(), self.series.name())
+        self.agg_numeric(kahan_sum, self.series.name())
             .and_then(|reduced| self.fill_all_missing_groups(reduced, 0.0))
     }
 
@@ -45316,15 +45951,20 @@ impl SeriesGroupBy<'_> {
             });
         }
         // Dense single-fold fast path (no per-group Vec<f64> buckets) — see
-        // dense_group_fold. Bit-identical to agg_numeric's `sum(nums)/len` (sum
-        // accumulates in value order; every group non-empty for all-valid values).
-        if let Some(r) =
-            self.dense_group_fold(0.0, |a, x| a + x, |a, n| Scalar::Float64(a / n as f64))
-        {
+        // dense_group_fold. Both are pandas' group_mean: the compensated sum
+        // over the count (br-frankenpandas-xhogl).
+        if let Some(r) = self.dense_group_fold(
+            fp_types::KahanSum::default(),
+            |mut sum, x| {
+                sum.add(x);
+                sum
+            },
+            |sum, n| Scalar::Float64(sum.sum() / n as f64),
+        ) {
             return r;
         }
         self.agg_numeric(
-            |nums| nums.iter().sum::<f64>() / nums.len() as f64,
+            |nums| kahan_sum(nums) / nums.len() as f64,
             self.series.name(),
         )
     }
@@ -46000,11 +46640,11 @@ impl SeriesGroupBy<'_> {
     /// gates miss (caller falls back to `agg_numeric`). Bit-identical: first-seen
     /// gids/labels, value-order fold == the bucket's `iter().fold`, by-name
     /// index, all groups non-empty for an all-valid value column.
-    fn dense_group_fold(
+    fn dense_group_fold<A: Copy>(
         &self,
-        init: f64,
-        fold: impl Fn(f64, f64) -> f64,
-        finish: impl Fn(f64, i64) -> Scalar,
+        init: A,
+        fold: impl Fn(A, f64) -> A,
+        finish: impl Fn(A, i64) -> Scalar,
     ) -> Option<Result<Series, FrameError>> {
         let (gids, ngroups) = self.dense_group_ids()?;
         let vf = self.series.column.as_f64_slice();
@@ -46068,19 +46708,20 @@ impl SeriesGroupBy<'_> {
         Some(Series::new(self.series.name(), index, column))
     }
 
-    /// Dense two-pass groupby var/std (ddof=1) over a dense gid layout (int64 OR
-    /// contiguous-Utf8 key) and an Int64/Float64/nullable-Float64 value column —
-    /// no per-group `Vec<f64>` buckets + closure re-scan. Pass 1 sums + counts per
-    /// gid (skipna: only non-missing values fold/count); pass 2 accumulates squared
-    /// deviations; emit ssd/(n-1) (or its sqrt for `want_std`). `None` if the
-    /// dense/typed gates miss (caller falls back to `agg_numeric`). Bit-identical
-    /// to `agg_numeric`'s var/std closures: first-seen gids/labels, value-order
-    /// sums (== each bucket's value order, == the generic `is_missing()`-skipped
-    /// `to_f64()` order), `(x-mean).powi(2)`, and the emit matches the generic
-    /// wrap exactly — all-missing group (n==0) -> `Null(NaN)`, n==1 -> `Float64(NaN)`,
-    /// n>=2 -> `Float64(value)`. The all-valid path is unchanged (n>=1 always, so the
-    /// n==0 arm never fires).
-    fn dense_group_var_std(&self, want_std: bool) -> Option<Result<Series, FrameError>> {
+    /// Dense one-pass groupby moments over a dense gid layout (int64 OR
+    /// contiguous-Utf8 key) and an Int64/Float64/nullable-Float64 value column -
+    /// no per-group `Vec<f64>` buckets + closure re-scan. Each gid folds its
+    /// values in row order as pandas' group kernels do - Welford for var
+    /// (br-frankenpandas-xhogl), the third-moment update for skew
+    /// (br-frankenpandas-vjfq9); skipna: only non-missing values - and `emit`
+    /// answers each group's moments (an all-missing group is `Null(NaN)`).
+    /// `None` if the dense/typed gates miss (caller falls back to
+    /// `agg_numeric` / `agg_values_scalar`), with first-seen gids/labels as
+    /// those give them.
+    fn dense_group_moments<M: GroupMoments>(
+        &self,
+        emit: impl Fn(M) -> Scalar,
+    ) -> Option<Result<Series, FrameError>> {
         let (gids, ngroups) = self.dense_group_ids()?;
         let vf = self.series.column.as_f64_slice();
         let vi = self.series.column.as_i64_slice();
@@ -46093,54 +46734,26 @@ impl SeriesGroupBy<'_> {
             return None;
         }
         let order = self.dense_group_labels(&gids, ngroups)?;
-        let mut sum = vec![0.0_f64; ngroups];
-        let mut count = vec![0_i64; ngroups];
+        let mut moments = vec![M::default(); ngroups];
         for (i, &g) in gids.iter().enumerate() {
             if let Some(f) = vf {
-                sum[g] += f[i];
-                count[g] += 1;
+                moments[g].add(f[i]);
             } else if let Some(vi2) = vi {
-                sum[g] += vi2[i] as f64;
-                count[g] += 1;
+                moments[g].add(vi2[i] as f64);
             } else {
                 let (data, validity) = vfv.unwrap();
                 if validity.get(i) {
-                    sum[g] += data[i];
-                    count[g] += 1;
+                    moments[g].add(data[i]);
                 }
             }
         }
-        let mean: Vec<f64> = (0..ngroups)
-            .map(|g| {
-                if count[g] > 0 {
-                    sum[g] / count[g] as f64
-                } else {
-                    0.0
-                }
-            })
-            .collect();
-        let mut ssd = vec![0.0_f64; ngroups];
-        for (i, &g) in gids.iter().enumerate() {
-            if let Some(f) = vf {
-                ssd[g] += (f[i] - mean[g]).powi(2);
-            } else if let Some(vi2) = vi {
-                ssd[g] += (vi2[i] as f64 - mean[g]).powi(2);
-            } else {
-                let (data, validity) = vfv.unwrap();
-                if validity.get(i) {
-                    ssd[g] += (data[i] - mean[g]).powi(2);
-                }
-            }
-        }
-        let values: Vec<Scalar> = (0..ngroups)
-            .map(|g| {
-                if count[g] == 0 {
+        let values: Vec<Scalar> = moments
+            .iter()
+            .map(|&group| {
+                if group.count() == 0 {
                     Scalar::Null(NullKind::NaN)
-                } else if count[g] < 2 {
-                    Scalar::Float64(f64::NAN)
                 } else {
-                    let var = ssd[g] / (count[g] - 1) as f64;
-                    Scalar::Float64(if want_std { var.sqrt() } else { var })
+                    emit(group)
                 }
             })
             .collect();
@@ -47023,12 +47636,12 @@ impl SeriesGroupBy<'_> {
         })
     }
 
-    /// Standard error of the mean for each group.
     /// Cache-hot dense group moments for an all-valid Float64 value column keyed
-    /// by a single bounded-Int64 column (br-frankenpandas-1q4q4). sem/skew/kurt
-    /// go through `agg_values_scalar`, which materializes a `Vec<Scalar>` per
-    /// group (cloning every value) then `nansem`/`nanskew`/`nankurt` over Scalars
-    /// (sem was 0.08× pandas, skew 0.14×). This computes the same TWO-PASS
+    /// by a single bounded-Int64 column (br-frankenpandas-1q4q4) - kurt's; sem
+    /// and skew fold online in `dense_group_moments`, as pandas' group kernels.
+    /// kurt goes through `agg_values_scalar`, which materializes a `Vec<Scalar>`
+    /// per group (cloning every value) then `nankurt` over Scalars (sem was
+    /// 0.08× pandas, skew 0.14× that way). This computes the same TWO-PASS
     /// mean-centered moments typed and in row order: pass 1 = per-group sum +
     /// finite count → mean; pass 2 = Σ(x−mean).powi(2/3/4). `finalize(n, m2, m3,
     /// m4)` reproduces each op's exact formula. BIT-IDENTICAL: same `collect_finite`
@@ -47040,12 +47653,12 @@ impl SeriesGroupBy<'_> {
         F: Fn(f64, f64, f64, f64) -> Scalar,
     {
         // Dense first-seen grouping for Int64 OR contiguous-Utf8 keys (sister to
-        // dense_group_var_std): the old body required `as_i64_slice` on the key,
+        // dense_group_moments): the old body required `as_i64_slice` on the key,
         // so a Utf8-keyed sem/skew/kurt fell to agg_values_scalar (Vec<Scalar>
         // per group + nansem/nanskew/nankurt; sem was 0.69x, skew 0.84x pandas
         // @1M). `dense_group_ids` yields the identical first-seen gid order the
         // old Int64 histogram produced (so Int64 output is bit-identical), and
-        // labels are rebuilt per gid from ki/ku exactly as dense_group_var_std
+        // labels are rebuilt per gid from ki/ku exactly as dense_group_moments
         // does. f64-value-only (as_f64_slice) and Int64/contiguous-Utf8-key-only,
         // as before; anything else (nullable value, scalar-backed key) bails.
         // Value view: an all-valid Float64 column borrows its slice (NaN handled by
@@ -47131,15 +47744,15 @@ impl SeriesGroupBy<'_> {
         }
     }
 
+    /// Standard error of the mean for each group.
     pub fn sem(&self) -> Result<Series, FrameError> {
         self.refuse_text("sem")?;
-        if let Some(result) = self.group_moment_dense(|n, m2, _, _| {
-            if n <= 1.0 {
-                Scalar::Null(NullKind::NaN)
-            } else {
-                // pandas' group_var sem: sqrt(var / n) (br-frankenpandas-7hxqv).
-                Scalar::Float64((m2 / (n - 1.0) / n).sqrt())
-            }
+        // pandas' group_var sem, Welford: sqrt(var / n) (br-frankenpandas-7hxqv,
+        // br-frankenpandas-xhogl); a group of one is missing.
+        if let Some(result) = self.dense_group_moments(|group: fp_types::WelfordVar| {
+            group
+                .sem(1)
+                .map_or(Scalar::Null(NullKind::NaN), Scalar::Float64)
         }) {
             return result.and_then(float_moment_series);
         }
@@ -47188,19 +47801,16 @@ impl SeriesGroupBy<'_> {
     /// Skewness of each group.
     pub fn skew(&self) -> Result<Series, FrameError> {
         self.refuse_text("skew")?;
-        if let Some(result) = self.group_moment_dense(|n, m2, m3, _| {
-            if n < 3.0 {
-                return Scalar::Null(NullKind::NaN);
-            }
-            let s2 = m2 / (n - 1.0);
-            if s2 == 0.0 {
-                return Scalar::Float64(0.0);
-            }
-            Scalar::Float64((n / ((n - 1.0) * (n - 2.0))) * (m3 / s2.powf(1.5)))
+        // pandas' group_skew: an online third-moment update per group
+        // (br-frankenpandas-vjfq9); an inf value makes its group NaN.
+        if let Some(result) = self.dense_group_moments(|group: fp_types::SkewMoments| {
+            group
+                .skew()
+                .map_or(Scalar::Null(NullKind::NaN), Scalar::Float64)
         }) {
             return result.and_then(float_moment_series);
         }
-        self.agg_values_scalar(self.series.name(), fp_types::nanskew)
+        self.agg_values_scalar(self.series.name(), fp_types::nanskew_grouped)
             .and_then(float_moment_series)
     }
 
@@ -47242,8 +47852,10 @@ impl SeriesGroupBy<'_> {
             return self.var();
         }
         self.refuse_text("var")?;
-        self.agg_values_scalar(self.series.name(), |vals| fp_types::nanvar(vals, ddof))
-            .and_then(float_moment_series)
+        self.agg_values_scalar(self.series.name(), |vals| {
+            fp_types::nanvar_grouped(vals, ddof)
+        })
+        .and_then(float_moment_series)
     }
 
     /// Standard deviation of each group with pandas' `ddof`; `std_ddof(1)` is
@@ -47253,8 +47865,10 @@ impl SeriesGroupBy<'_> {
             return self.std();
         }
         self.refuse_text("std")?;
-        self.agg_values_scalar(self.series.name(), |vals| fp_types::nanstd(vals, ddof))
-            .and_then(float_moment_series)
+        self.agg_values_scalar(self.series.name(), |vals| {
+            fp_types::nanstd_grouped(vals, ddof)
+        })
+        .and_then(float_moment_series)
     }
 
     /// Standard error of the mean of each group with pandas' `ddof`;
@@ -47731,23 +48345,17 @@ impl SeriesGroupBy<'_> {
                 std_ns.clamp(i64::MIN as f64, i64::MAX as f64) as i64
             });
         }
-        // Dense two-pass fast path (sister to var's): std lacked any dense path, so
-        // even all-valid std re-scanned agg_numeric's per-group bucket, and a
-        // nullable column fell to the generic build_groups gather. Bit-identical to
-        // the closure below (var.sqrt()).
-        if let Some(r) = self.dense_group_var_std(true) {
+        // Dense fast path (sister to var's): std lacked any dense path, so even
+        // all-valid std re-scanned agg_numeric's per-group bucket, and a nullable
+        // column fell to the generic build_groups gather. Both are pandas'
+        // group_var: Welford (br-frankenpandas-xhogl).
+        if let Some(r) = self.dense_group_moments(|group: fp_types::WelfordVar| {
+            Scalar::Float64(group.std(1).unwrap_or(f64::NAN))
+        }) {
             return r;
         }
         self.agg_numeric(
-            |nums| {
-                if nums.len() < 2 {
-                    return f64::NAN;
-                }
-                let mean = nums.iter().sum::<f64>() / nums.len() as f64;
-                let var =
-                    nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (nums.len() - 1) as f64;
-                var.sqrt()
-            },
+            |nums| welford_moments(nums).std(1).unwrap_or(f64::NAN),
             self.series.name(),
         )
     }
@@ -47775,20 +48383,16 @@ impl SeriesGroupBy<'_> {
                 var_ns.clamp(i64::MIN as f64, i64::MAX as f64) as i64
             });
         }
-        // Dense two-pass fast path (now shared with std + nullable via
-        // dense_group_var_std): two sequential passes over the dense gids, no
-        // per-group buckets. Bit-identical to the closure below.
-        if let Some(r) = self.dense_group_var_std(false) {
+        // Dense fast path (shared with std / sem + nullable via
+        // dense_group_moments): one pass over the dense gids, no per-group
+        // buckets. Both are pandas' group_var: Welford (br-frankenpandas-xhogl).
+        if let Some(r) = self.dense_group_moments(|group: fp_types::WelfordVar| {
+            Scalar::Float64(group.var(1).unwrap_or(f64::NAN))
+        }) {
             return r;
         }
         self.agg_numeric(
-            |nums| {
-                if nums.len() < 2 {
-                    return f64::NAN;
-                }
-                let mean = nums.iter().sum::<f64>() / nums.len() as f64;
-                nums.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (nums.len() - 1) as f64
-            },
+            |nums| welford_moments(nums).var(1).unwrap_or(f64::NAN),
             self.series.name(),
         )
     }
@@ -48026,21 +48630,22 @@ impl SeriesGroupBy<'_> {
         if let Some(r) = self.integral_by_row(i64::wrapping_add, false, false) {
             return r;
         }
-        if let Some(s) = self.try_cum_dense(0.0, false, |a, v| a + v) {
+        // Compensated, as pandas' group_cumsum (br-frankenpandas-xhogl).
+        if let Some(s) = self.try_cum_dense(fp_types::KahanSum::default(), false, kahan_running) {
             return Ok(s);
         }
-        if let Some(s) = self.try_cum_dense_nullable(0.0, |a, v| a + v) {
+        if let Some(s) = self.try_cum_dense_nullable(fp_types::KahanSum::default(), kahan_running) {
             return Ok(s);
         }
         self.transform_groups(|vals| {
-            let mut acc = 0.0_f64;
+            let mut acc = fp_types::KahanSum::default();
             vals.iter()
                 .map(|value| {
                     if value.is_missing() {
                         Scalar::Null(NullKind::NaN)
                     } else if let Ok(v) = value.to_f64() {
-                        acc += v;
-                        Scalar::Float64(acc)
+                        acc.add(v);
+                        Scalar::Float64(acc.sum())
                     } else {
                         Scalar::Null(NullKind::NaN)
                     }
@@ -48065,10 +48670,10 @@ impl SeriesGroupBy<'_> {
         if let Some(r) = self.integral_by_row(i64::wrapping_mul, false, false) {
             return r;
         }
-        if let Some(s) = self.try_cum_dense(1.0, true, |a, v| a * v) {
+        if let Some(s) = self.try_cum_dense(1.0, true, running(|a, v| a * v)) {
             return Ok(s);
         }
-        if let Some(s) = self.try_cum_dense_nullable(1.0, |a, v| a * v) {
+        if let Some(s) = self.try_cum_dense_nullable(1.0, running(|a, v| a * v)) {
             return Ok(s);
         }
         self.transform_groups(|vals| {
@@ -48113,12 +48718,15 @@ impl SeriesGroupBy<'_> {
         if let Some(r) = self.integral_by_row(std::cmp::min, true, false) {
             return r;
         }
-        if let Some(s) = self.try_cum_dense(f64::INFINITY, false, |a, v| if v < a { v } else { a })
-        {
+        if let Some(s) = self.try_cum_dense(
+            f64::INFINITY,
+            false,
+            running(|a, v| if v < a { v } else { a }),
+        ) {
             return Ok(s);
         }
         if let Some(s) =
-            self.try_cum_dense_nullable(f64::INFINITY, |a, v| if v < a { v } else { a })
+            self.try_cum_dense_nullable(f64::INFINITY, running(|a, v| if v < a { v } else { a }))
         {
             return Ok(s);
         }
@@ -48165,13 +48773,15 @@ impl SeriesGroupBy<'_> {
         if let Some(r) = self.integral_by_row(std::cmp::max, true, false) {
             return r;
         }
-        if let Some(s) =
-            self.try_cum_dense(f64::NEG_INFINITY, false, |a, v| if v > a { v } else { a })
-        {
+        if let Some(s) = self.try_cum_dense(
+            f64::NEG_INFINITY,
+            false,
+            running(|a, v| if v > a { v } else { a }),
+        ) {
             return Ok(s);
         }
-        if let Some(s) =
-            self.try_cum_dense_nullable(f64::NEG_INFINITY, |a, v| if v > a { v } else { a })
+        if let Some(s) = self
+            .try_cum_dense_nullable(f64::NEG_INFINITY, running(|a, v| if v > a { v } else { a }))
         {
             return Ok(s);
         }
@@ -49178,20 +49788,22 @@ impl SeriesGroupBy<'_> {
                 let span = (mx as i128 - mn as i128 + 1) as u128;
                 if span <= (1u128 << 24) && span <= (keys.len() as u128).saturating_mul(16) {
                     let span = span as usize;
-                    let mut sum = vec![0.0_f64; span];
+                    // Compensated, as pandas' group_sum / group_mean
+                    // (br-frankenpandas-xhogl).
+                    let mut sum = vec![fp_types::KahanSum::default(); span];
                     let mut cnt = vec![0.0_f64; span];
                     for (&k, &v) in keys.iter().zip(data) {
                         let g = (k - mn) as usize;
-                        sum[g] += v;
+                        sum[g].add(v);
                         cnt[g] += 1.0;
                     }
                     let agg: Vec<f64> = if func == "mean" {
                         sum.iter()
                             .zip(&cnt)
-                            .map(|(&s, &c)| if c > 0.0 { s / c } else { 0.0 })
+                            .map(|(s, &c)| if c > 0.0 { s.sum() / c } else { 0.0 })
                             .collect()
                     } else {
-                        sum
+                        sum.iter().map(|s| s.sum()).collect()
                     };
                     let mut out = vec![0.0_f64; data.len()];
                     for (slot, &k) in out.iter_mut().zip(keys) {
@@ -49214,19 +49826,19 @@ impl SeriesGroupBy<'_> {
             if let Some((gids, ngroups)) = self.dense_group_ids()
                 && gids.len() == data.len()
             {
-                let mut sum = vec![0.0_f64; ngroups];
+                let mut sum = vec![fp_types::KahanSum::default(); ngroups];
                 let mut cnt = vec![0.0_f64; ngroups];
                 for (&g, &v) in gids.iter().zip(data) {
-                    sum[g] += v;
+                    sum[g].add(v);
                     cnt[g] += 1.0;
                 }
                 let agg: Vec<f64> = if func == "mean" {
                     sum.iter()
                         .zip(&cnt)
-                        .map(|(&s, &c)| if c > 0.0 { s / c } else { 0.0 })
+                        .map(|(s, &c)| if c > 0.0 { s.sum() / c } else { 0.0 })
                         .collect()
                 } else {
-                    sum
+                    sum.iter().map(|s| s.sum()).collect()
                 };
                 let mut out = vec![0.0_f64; data.len()];
                 for (slot, &g) in out.iter_mut().zip(gids.iter()) {
@@ -49286,36 +49898,19 @@ impl SeriesGroupBy<'_> {
                 }
 
                 let want_std = func == "std";
-                let mut sum = vec![0.0_f64; span];
-                let mut cnt = vec![0u64; span];
+                // Welford per group, as pandas' group_var (br-frankenpandas-xhogl).
+                let mut moments = vec![fp_types::WelfordVar::default(); span];
                 for (&k, &v) in keys.iter().zip(data) {
                     let g = (k as i128 - mn as i128) as usize;
-                    sum[g] += v;
-                    cnt[g] += 1;
+                    moments[g].add(v);
                 }
+                let cnt: Vec<usize> = moments.iter().map(|group| group.count()).collect();
                 if !cnt.iter().all(|&c| c <= 1) {
-                    let means: Vec<f64> = (0..span)
-                        .map(|g| {
-                            if cnt[g] == 0 {
-                                0.0
-                            } else {
-                                sum[g] / cnt[g] as f64
-                            }
-                        })
-                        .collect();
-                    let mut sumsq = vec![0.0_f64; span];
-                    for (&k, &v) in keys.iter().zip(data) {
-                        let g = (k as i128 - mn as i128) as usize;
-                        sumsq[g] += (v - means[g]).powi(2);
-                    }
-                    let agg: Vec<f64> = (0..span)
-                        .map(|g| {
-                            if cnt[g] <= 1 {
-                                0.0
-                            } else {
-                                let var = sumsq[g] / (cnt[g] - 1) as f64;
-                                if want_std { var.sqrt() } else { var }
-                            }
+                    let agg: Vec<f64> = moments
+                        .iter()
+                        .map(|group| {
+                            let spread = if want_std { group.std(1) } else { group.var(1) };
+                            spread.unwrap_or(0.0)
                         })
                         .collect();
                     let has_singletons = keys.iter().any(|&k| {
@@ -49398,14 +49993,16 @@ impl SeriesGroupBy<'_> {
             let positions = &groups[key];
             let group_vals: Vec<Scalar> = positions.iter().map(|&idx| vals[idx].clone()).collect();
             let value = match func {
-                "sum" => fp_types::nansum(&group_vals),
-                "mean" => fp_types::nanmean(&group_vals),
+                // pandas' group kernels: compensated sums, Welford moments
+                // (br-frankenpandas-xhogl).
+                "sum" => fp_types::nansum_grouped(&group_vals),
+                "mean" => fp_types::nanmean_grouped(&group_vals),
                 "count" => fp_types::nancount(&group_vals),
                 "min" => fp_types::nanmin(&group_vals),
                 "max" => fp_types::nanmax(&group_vals),
                 "prod" => nanprod_preserving_int(&group_vals),
-                "std" => fp_types::nanstd(&group_vals, 1),
-                "var" => fp_types::nanvar(&group_vals, 1),
+                "std" => fp_types::nanstd_grouped(&group_vals, 1),
+                "var" => fp_types::nanvar_grouped(&group_vals, 1),
                 "median" => fp_types::nanmedian(&group_vals),
                 "size" => Scalar::Int64(group_vals.len() as i64),
                 "nunique" => {
@@ -49441,8 +50038,9 @@ impl SeriesGroupBy<'_> {
                 ),
                 // Statistical moments broadcast the per-group scalar to all rows,
                 // matching pandas groupby.transform('skew'/'kurt'/'sem').
-                // br-frankenpandas-e96wv (same kernels as the agg dispatch).
-                "skew" => fp_types::nanskew(&group_vals),
+                // br-frankenpandas-e96wv (same kernels as the agg dispatch;
+                // skew is pandas' online group_skew, br-frankenpandas-vjfq9).
+                "skew" => fp_types::nanskew_grouped(&group_vals),
                 "kurt" | "kurtosis" => fp_types::nankurt(&group_vals),
                 "sem" => fp_types::nansem_grouped(&group_vals, 1),
                 other => {
@@ -49910,9 +50508,10 @@ impl SeriesGroupBy<'_> {
         // above for `order`) — N+1 group builds. For the f64-bucket reductions,
         // build the dense gids + per-gid f64 buckets ONCE and apply every func
         // over the shared buckets. Bit-identical: each func over the value-order
-        // bucket equals its standalone result (mean=sum/n, std=sqrt(ssd/(n-1)),
-        // etc. — same value-order sums as dense_group_fold / the var two-pass),
-        // same first-seen gids/labels, same by-name index. Gated on int64/Utf8
+        // bucket equals its standalone result (mean=sum/n, std=sqrt(var) - the
+        // same row-order compensated sums and Welford moments as
+        // dense_group_fold / dense_group_moments), same first-seen gids/labels,
+        // same by-name index. Gated on int64/Utf8
         // key + all-valid numeric values; count excluded (Int64 output).
         const BUCKET_FUNCS: &[&str] = &["sum", "mean", "min", "max", "std", "var", "prod"];
         // The buckets are f64: an int64/bool column's sum/min/max/prod must come
@@ -49936,14 +50535,13 @@ impl SeriesGroupBy<'_> {
                 // heap Vecs and scatter-pushed all n values into them (realloc +
                 // cache-scattered writes) before folding each func — dominating the
                 // op (0.70x pandas). Every BUCKET_FUNC is expressible from running
-                // per-group accumulators in ONE pass (sum/count/min/max/prod), plus
-                // a SECOND mean-centered pass only when std/var is requested. Fixed
-                // O(ngroups) accumulator memory (cache-hot), no per-value storage.
+                // per-group accumulators in ONE pass (sum/count/min/max/prod, and
+                // Welford moments when std/var is requested). Fixed O(ngroups)
+                // accumulator memory (cache-hot), no per-value storage.
                 // BIT-IDENTICAL: sum/prod fold each group's values in the SAME row
                 // order as the bucket (gids scanned in row order); min/max use the
                 // same `f64::min`/`f64::max` (matches the fold incl. signed zero);
-                // std/var reuse the exact two-pass mean-centered form
-                // (mean=sum/n; ssd=Σ(x-mean)² in row order; n<2 ⇒ NaN).
+                // std/var are the same row-order Welford update (n<2 ⇒ NaN).
                 // Demand flags, extending the `need_var` this function already had.
                 // The first pass maintained min/max/prod for EVERY row regardless of
                 // what was asked for; the emission below reads `mn[g]` only under
@@ -49958,7 +50556,14 @@ impl SeriesGroupBy<'_> {
                 let need_max = funcs.contains(&"max");
                 let need_prod = funcs.contains(&"prod");
                 let mut order: Vec<IndexLabel> = Vec::with_capacity(ngroups);
-                let mut sum = vec![0.0_f64; ngroups];
+                // Compensated sums and Welford moments, as pandas' group
+                // kernels fold (br-frankenpandas-xhogl).
+                let mut sum = vec![fp_types::KahanSum::default(); ngroups];
+                let mut moments = if need_var {
+                    vec![fp_types::WelfordVar::default(); ngroups]
+                } else {
+                    Vec::new()
+                };
                 let mut cnt = vec![0_usize; ngroups];
                 let mut mn = if need_min {
                     vec![f64::INFINITY; ngroups]
@@ -49995,8 +50600,11 @@ impl SeriesGroupBy<'_> {
                         order.push(lbl);
                     }
                     let x = val_at(i);
-                    sum[g] += x;
+                    sum[g].add(x);
                     cnt[g] += 1;
+                    if need_var {
+                        moments[g].add(x);
+                    }
                     if need_min {
                         mn[g] = mn[g].min(x);
                     }
@@ -50007,19 +50615,6 @@ impl SeriesGroupBy<'_> {
                         prod[g] *= x;
                     }
                 }
-                // Only the std/var arm reads `ssd`, and that arm is unreachable
-                // unless `need_var`, so the allocation follows the same flag.
-                let mut ssd = if need_var {
-                    vec![0.0_f64; ngroups]
-                } else {
-                    Vec::new()
-                };
-                if need_var {
-                    for (i, &g) in gids.iter().enumerate() {
-                        let mean = sum[g] / cnt[g] as f64;
-                        ssd[g] += (val_at(i) - mean).powi(2);
-                    }
-                }
                 let mut result_cols = BTreeMap::new();
                 let mut col_order = Vec::new();
                 for &func in funcs {
@@ -50027,19 +50622,13 @@ impl SeriesGroupBy<'_> {
                         .map(|g| {
                             let n = cnt[g];
                             let v = match func {
-                                "sum" => sum[g],
-                                "mean" => sum[g] / n as f64,
+                                "sum" => sum[g].sum(),
+                                "mean" => sum[g].sum() / n as f64,
                                 "min" => mn[g],
                                 "max" => mx[g],
                                 "prod" => prod[g],
-                                _ => {
-                                    if n < 2 {
-                                        f64::NAN
-                                    } else {
-                                        let var = ssd[g] / (n - 1) as f64;
-                                        if func == "std" { var.sqrt() } else { var }
-                                    }
-                                }
+                                "std" => moments[g].std(1).unwrap_or(f64::NAN),
+                                _ => moments[g].var(1).unwrap_or(f64::NAN),
                             };
                             Scalar::Float64(v)
                         })
@@ -60115,14 +60704,14 @@ impl DatetimeAccessor<'_> {
     /// Matches `pd.Series.dt.floor(freq)`. Supported frequencies:
     /// "D", "h"/"H", "min"/"T", "s"/"S", "ms", "us", "ns".
     pub fn floor(&self, freq: &str) -> Result<Series, FrameError> {
-        self.round_to_freq(freq, DtRoundMode::Floor)
+        self.floor_with_options(freq, TzLocalizeOptions::default())
     }
 
     /// Round each datetime up (ceil) to the given frequency.
     ///
     /// Matches `pd.Series.dt.ceil(freq)`. Same frequencies as `floor`.
     pub fn ceil(&self, freq: &str) -> Result<Series, FrameError> {
-        self.round_to_freq(freq, DtRoundMode::Ceil)
+        self.ceil_with_options(freq, TzLocalizeOptions::default())
     }
 
     /// Round each datetime to the nearest given frequency.
@@ -60130,7 +60719,38 @@ impl DatetimeAccessor<'_> {
     /// Matches `pd.Series.dt.round(freq)`. Ties round half-to-even on the
     /// frequency-unit count, like pandas. Same frequencies as `floor`.
     pub fn round(&self, freq: &str) -> Result<Series, FrameError> {
-        self.round_to_freq(freq, DtRoundMode::Round)
+        self.round_with_options(freq, TzLocalizeOptions::default())
+    }
+
+    /// `floor` with pandas' `ambiguous` / `nonexistent`: a tz-aware
+    /// column's rounded wall clock goes back into its zone under them (a
+    /// DST gap or repeat was always an error; br-frankenpandas-cnpw1).
+    pub fn floor_with_options(
+        &self,
+        freq: &str,
+        options: TzLocalizeOptions,
+    ) -> Result<Series, FrameError> {
+        self.round_to_freq(freq, DtRoundMode::Floor, options)
+    }
+
+    /// `ceil` with pandas' `ambiguous` / `nonexistent` (see
+    /// [`Self::floor_with_options`]).
+    pub fn ceil_with_options(
+        &self,
+        freq: &str,
+        options: TzLocalizeOptions,
+    ) -> Result<Series, FrameError> {
+        self.round_to_freq(freq, DtRoundMode::Ceil, options)
+    }
+
+    /// `round` with pandas' `ambiguous` / `nonexistent` (see
+    /// [`Self::floor_with_options`]).
+    pub fn round_with_options(
+        &self,
+        freq: &str,
+        options: TzLocalizeOptions,
+    ) -> Result<Series, FrameError> {
+        self.round_to_freq(freq, DtRoundMode::Round, options)
     }
 
     /// Internal: floor/ceil/round each datetime to `freq` by working in
@@ -60138,15 +60758,22 @@ impl DatetimeAccessor<'_> {
     /// back. Operating on the i64-ns value rather than the second-granular
     /// string repr fixes sub-second frequencies (ms/us/ns) and exact half-unit
     /// ties at any frequency. Per br-frankenpandas-cm5fy.
-    fn round_to_freq(&self, freq: &str, mode: DtRoundMode) -> Result<Series, FrameError> {
+    fn round_to_freq(
+        &self,
+        freq: &str,
+        mode: DtRoundMode,
+        options: TzLocalizeOptions,
+    ) -> Result<Series, FrameError> {
         use fp_types::{Timedelta, Timestamp};
         // A tz-aware column rounds its wall clock and the result goes back
-        // into the zone, as pandas (it rounded the UTC clock and dropped the
-        // zone).
+        // into the zone under `options`, as pandas (it rounded the UTC clock
+        // and dropped the zone).
         if let Some(zone) = self.series.column().timezone().map(str::to_owned) {
             let wall = self.tz_localize(None)?;
-            let rounded = wall.dt().round_to_freq(freq, mode)?;
-            return rounded.dt().tz_localize(Some(&zone));
+            let rounded = wall
+                .dt()
+                .round_to_freq(freq, mode, TzLocalizeOptions::default())?;
+            return rounded.dt().tz_localize_with_options(Some(&zone), options);
         }
         let freq_ns = resolve_fixed_frequency(freq)?;
         // A duration column rounds its durations, pandas' TimedeltaProperties
@@ -62306,11 +62933,25 @@ pub fn to_numeric_with_options(
     series: &Series,
     options: ToNumericOptions,
 ) -> Result<Series, FrameError> {
+    // A masked numeric Series is numbers already: itself, as pandas returns
+    // a numeric input (its <NA> raised 'Unable to parse Null';
+    // br-frankenpandas-tdafd).
+    if matches!(
+        series.column().dtype(),
+        DType::Int64Nullable | DType::Float64Nullable
+    ) {
+        return Ok(series.clone());
+    }
     let mut converted = Vec::with_capacity(series.len());
     let mut has_float = false;
 
     for (i, val) in series.values().iter().enumerate() {
         match val {
+            // A missing value is NaN, as pandas' (it raised).
+            Scalar::Null(_) => {
+                has_float = true;
+                converted.push(Scalar::Null(NullKind::NaN));
+            }
             Scalar::Int64(_) | Scalar::Float64(_) => {
                 if matches!(val, Scalar::Float64(_)) {
                     has_float = true;
@@ -62395,10 +63036,20 @@ pub fn downcast_numeric(series: &Series, downcast: &str) -> Result<Series, Frame
         }
     };
     let column = series.column();
+    // A masked integer Series downcasts over its present values to the
+    // masked width (Int8 ...), as pandas' (it was returned as Int64;
+    // br-frankenpandas-tdafd).
+    let masked = column.dtype() == DType::Int64Nullable && downcast != "float";
     let numbers: Vec<f64> = match column.dtype() {
         DType::Int64 | DType::Float64 if !column.has_nulls() || downcast == "float" => column
             .values()
             .iter()
+            .map(|value| value.to_f64().unwrap_or(f64::NAN))
+            .collect(),
+        DType::Int64Nullable if masked => column
+            .values()
+            .iter()
+            .filter(|value| !value.is_missing())
             .map(|value| value.to_f64().unwrap_or(f64::NAN))
             .collect(),
         _ => return Ok(series.clone()),
@@ -62429,7 +63080,7 @@ pub fn downcast_numeric(series: &Series, downcast: &str) -> Result<Series, Frame
         .find(|width| width.itemsize() <= itemsize && holds(*width))
     {
         Some(width) if Some(width) == column.width() => Ok(series.clone()),
-        Some(width) => series.astype_width(width, false),
+        Some(width) => series.astype_width(width, masked),
         None => Ok(series.clone()),
     }
 }
@@ -62569,10 +63220,14 @@ pub fn to_datetime_with_options(
     // any span that is NOT a plain ISO form (tz suffix, slashes, text month,
     // invalid date, etc.) bails the WHOLE column to the general path, so
     // timezone inference / mixed-tz-object / every other shape is unchanged.
+    // dayfirst reads a day before the month, which this ISO parse does not;
+    // a text column that happened to be contiguous (a str-op output)
+    // parsed month first under dayfirst=True (br-frankenpandas-gwtxd).
     if options.unit.is_none()
         && options.format.is_none()
         && options.origin.is_none()
         && !options.utc
+        && !options.dayfirst
         && let Some((bytes, offsets)) = series.column().as_utf8_contiguous()
     {
         let nrows = offsets.len() - 1;
@@ -62639,7 +63294,14 @@ pub fn to_datetime_with_options(
 
     // Per br-frankenpandas-iy82u: pandas pd.to_datetime preserves source axis name.
     let index = series.index().clone();
-    let mut column = Column::from_values(converted)?;
+    // Every value NaT is still pandas' datetime64[ns] column (it inferred
+    // object; br-frankenpandas-3rj8b).
+    let all_missing = converted.iter().all(Scalar::is_missing);
+    let mut column = if all_missing && !converted.is_empty() {
+        Column::new(DType::Datetime64 { tz: None }, converted)?
+    } else {
+        Column::from_values(converted)?
+    };
     // utc=True is pandas' datetime64[ns, UTC]: the values are already UTC
     // instants; the dtype said naive.
     if utc && matches!(column.dtype(), DType::Datetime64 { .. }) {
@@ -62797,16 +63459,24 @@ pub fn to_datetime_values_with_options(
                         // unparseable; br-frankenpandas-6kaxp). A string with
                         // a zone has no such guess and reads below.
                         parse_datetime_string(s, Some(&guess.format))
-                    } else if let Some(pattern) = inferred_timezone_pattern {
-                        parse_datetime_string_with_timezone_pattern(s, pattern)
                     } else if !options.utc
                         && options.format.is_none()
+                        && !matches!(
+                            inferred_timezone_pattern,
+                            Some(DatetimeTimezonePattern::Aware)
+                        )
                         && let Some(nanos) = fast_iso_datetime_nanos(s)
                     {
                         // Fast path emits Datetime64 directly; the
                         // datetime64_scalar_from_parsed_datetime wrapper below
-                        // passes a Datetime64 through unchanged.
+                        // passes a Datetime64 through unchanged. Its forms
+                        // carry no zone, so a naive column's pattern reads
+                        // them the same; tried first, as the default
+                        // timezone inference made every row skip it
+                        // (br-frankenpandas-ogi15).
                         Scalar::Datetime64(nanos)
+                    } else if let Some(pattern) = inferred_timezone_pattern {
+                        parse_datetime_string_with_timezone_pattern(s, pattern)
                     } else {
                         parse_datetime_string(s, options.format)
                     }
@@ -62850,6 +63520,24 @@ pub fn to_datetime_values_with_options(
                 datetime64_scalar_from_parsed_datetime(parsed)
             }
         };
+        // A number past the nanosecond range in its unit is pandas'
+        // OutOfBoundsDatetime under errors='raise' (it was a silent NaT;
+        // br-frankenpandas-3rj8b).
+        if options.errors == DatetimeErrors::Raise
+            && result.is_missing()
+            && let Some(unit) = options.unit.filter(|_| parsed_unit.is_some())
+            && matches!(val, Scalar::Int64(_) | Scalar::Float64(_))
+            && !val.is_missing()
+        {
+            let input = match val {
+                Scalar::Int64(value) => value.to_string(),
+                Scalar::Float64(value) => value.to_string(),
+                _ => String::new(),
+            };
+            return Err(FrameError::CompatibilityRejected(format!(
+                "cannot convert input {input} with the unit '{unit}', at position {position}"
+            )));
+        }
         if options.errors == DatetimeErrors::Raise
             && result.is_missing()
             && let Scalar::Utf8(text) = val
@@ -63490,14 +64178,15 @@ fn iso_four_digits(b: &[u8], i: usize) -> Option<i64> {
     Some(v)
 }
 
-/// Fast ISO-8601 `YYYY-MM-DD` / `YYYY-MM-DD[ T]HH:MM:SS` -> UTC epoch-nanos
-/// (br-frankenpandas-j5150). The general `parse_datetime_string` path tries
+/// Fast ISO-8601 `YYYY-MM-DD` / `YYYY-MM-DD[ T]HH:MM` /
+/// `YYYY-MM-DD[ T]HH:MM:SS` -> UTC epoch-nanos (br-frankenpandas-j5150,
+/// br-frankenpandas-ogi15). The general `parse_datetime_string` path tries
 /// 2–3 `chrono::parse_from_str` formats per string (most failing), then renders
 /// a `Scalar::Utf8` that is re-parsed to `Datetime64` — a triple pass with
 /// allocations per row, ~13x slower than `pd.to_datetime`. This reads the
 /// digits directly and computes the same nanos chrono produces.
 ///
-/// Bit-identical: returns `None` for any shape other than these two exact
+/// Bit-identical: returns `None` for any shape other than these three exact
 /// fixed-width forms OR an out-of-range calendar date/time, so the general
 /// parser handles those (an invalid date renders `NaT` there, matching). For a
 /// valid date the days count is Howard Hinnant's proleptic-Gregorian
@@ -63519,6 +64208,21 @@ fn fast_iso_datetime_nanos(s: &str) -> Option<i64> {
                 iso_two_digits(b, 8)?,
                 0,
                 0,
+                0,
+            )
+        }
+        // YYYY-MM-DD[ T]HH:MM, chrono's "%Y-%m-%d %H:%M" / "%Y-%m-%dT%H:%M"
+        // (br-frankenpandas-ogi15).
+        16 => {
+            if b[4] != b'-' || b[7] != b'-' || (b[10] != b' ' && b[10] != b'T') || b[13] != b':' {
+                return None;
+            }
+            (
+                iso_four_digits(b, 0)?,
+                iso_two_digits(b, 5)?,
+                iso_two_digits(b, 8)?,
+                iso_two_digits(b, 11)?,
+                iso_two_digits(b, 14)?,
                 0,
             )
         }
@@ -65299,42 +66003,117 @@ pub fn cut_bins_with_precision(
     binned_categorical(series, bin_indices, &categories)
 }
 
-/// A column as pandas' `convert_dtypes` retypes it (live pandas 2.2.3): ints
-/// to the nullable Int64; floats to Int64 when every present value is a
-/// whole number (none present included), else to Float64; bools, and an
-/// object column of bools beside missing values, to boolean; an object
-/// column of numbers as those numbers would. Text stays text (pandas'
-/// `string` dtype has no separate form here), as do mixed object columns,
-/// empty or all-missing object columns, datetimes and categoricals.
-fn convert_column_dtypes(column: &Column) -> Result<Column, FrameError> {
+/// pandas' `convert_dtypes` switches (`infer_objects`, `convert_string`,
+/// `convert_integer`, `convert_boolean`, `convert_floating`), all on by
+/// default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ConvertDtypes {
+    pub infer_objects: bool,
+    pub convert_string: bool,
+    pub convert_integer: bool,
+    pub convert_boolean: bool,
+    pub convert_floating: bool,
+}
+
+impl Default for ConvertDtypes {
+    fn default() -> Self {
+        Self {
+            infer_objects: true,
+            convert_string: true,
+            convert_integer: true,
+            convert_boolean: true,
+            convert_floating: true,
+        }
+    }
+}
+
+/// pandas' convert_dtypes (pandas.core.dtypes.cast) for one column: with
+/// `infer_objects` the column's object values inferred first; nullable,
+/// `string`, categorical and datetime columns kept; then, in pandas' order,
+/// text to `string` (convert_string); int kinds to Int64, float and bool
+/// kinds whose present values are all whole to Int64 (convert_integer); float
+/// and bool kinds to Float64 - Int64 when whole and convert_integer
+/// (convert_floating); bools, and an object column of bools, to boolean
+/// (convert_boolean) - so bools without convert_boolean become Int64, as
+/// pandas'. What no switch retypes keeps its dtype. The switches were not
+/// taken (br-frankenpandas-di8vx).
+pub fn convert_column_dtypes_with(
+    column: &Column,
+    options: ConvertDtypes,
+) -> Result<Column, FrameError> {
+    let inferred = if options.infer_objects {
+        inferred_object_column(column)?
+    } else {
+        None
+    };
+    let column = inferred.as_ref().unwrap_or(column);
+    // numpy's kind; bools beside a missing value are pandas' object column.
+    let kind = match column.dtype() {
+        DType::Int64 => 'i',
+        DType::Float64 => 'f',
+        DType::Bool if column.count() == column.len() => 'b',
+        DType::Bool => 'O',
+        DType::Utf8 if !column.is_pandas_string() => 'O',
+        _ => return Ok(column.clone()),
+    };
     let values = column.values();
-    let whole = |value: &Scalar| match value {
-        Scalar::Int64(_) => true,
+    let present: Vec<&Scalar> = values.iter().filter(|value| !value.is_missing()).collect();
+    // pandas' infer_dtype of an object column's present values.
+    let code = (kind == 'O').then(|| {
+        let all =
+            |test: fn(&Scalar) -> bool| !present.is_empty() && present.iter().all(|v| test(v));
+        if all(|value| matches!(value, Scalar::Utf8(_))) {
+            "string"
+        } else if all(|value| matches!(value, Scalar::Bool(_))) {
+            "boolean"
+        } else if all(|value| matches!(value, Scalar::Int64(_))) {
+            "integer"
+        } else if all(|value| matches!(value, Scalar::Int64(_) | Scalar::Float64(_))) {
+            "mixed-integer-float"
+        } else {
+            "mixed"
+        }
+    });
+    let whole = present.iter().all(|value| match value {
+        Scalar::Int64(_) | Scalar::Bool(_) => true,
         Scalar::Float64(v) => v.is_finite() && v.fract() == 0.0,
         _ => false,
-    };
-    let numbers = |present: &mut dyn Iterator<Item = &Scalar>| {
-        let mut all_whole = true;
-        for value in present {
-            match value {
-                Scalar::Int64(_) | Scalar::Float64(_) => all_whole &= whole(value),
-                _ => return None,
-            }
+    });
+    let numeric_kind = matches!(kind, 'f' | 'b');
+    let mut target: Option<DType> = None;
+    let mut text = false;
+    if code == Some("string") && options.convert_string {
+        text = true;
+    }
+    if options.convert_integer {
+        if kind == 'i'
+            || (numeric_kind && whole)
+            || (options.infer_objects && code == Some("integer"))
+        {
+            target = Some(DType::Int64Nullable);
+        } else if numeric_kind {
+            target = None;
         }
-        Some(if all_whole {
-            DType::Int64Nullable
-        } else {
-            DType::Float64Nullable
-        })
-    };
-    // A text column is pandas' `string` dtype, its missing value pd.NA
-    // (pd.Series(['a', None]).convert_dtypes() is string [a, <NA>]; fvsao.59).
-    let mut texts = values.iter().filter(|value| !value.is_missing()).peekable();
-    if column.dtype() == DType::Utf8
-        && !column.is_pandas_string()
-        && texts.peek().is_some()
-        && texts.all(|value| matches!(value, Scalar::Utf8(_)))
-    {
+    }
+    if options.convert_floating {
+        if numeric_kind {
+            target = Some(if options.convert_integer && whole {
+                DType::Int64Nullable
+            } else {
+                DType::Float64Nullable
+            });
+        } else if options.infer_objects && code == Some("mixed-integer-float") {
+            target = Some(DType::Float64Nullable);
+        }
+    }
+    if options.convert_boolean && (kind == 'b' || code == Some("boolean")) {
+        target = Some(DType::BoolNullable);
+    }
+    if text {
+        // A text column is pandas' `string` dtype, its missing value pd.NA
+        // (pd.Series(['a', None]).convert_dtypes() is string [a, <NA>];
+        // fvsao.59).
         let normalized = values
             .iter()
             .map(|value| {
@@ -65347,28 +66126,16 @@ fn convert_column_dtypes(column: &Column) -> Result<Column, FrameError> {
             .collect();
         return Ok(Column::new(DType::Utf8, normalized)?.as_pandas_string());
     }
-    let mut present = values.iter().filter(|value| !value.is_missing());
-    let target = match column.dtype() {
-        DType::Int64 | DType::Int64Nullable => Some(DType::Int64Nullable),
-        DType::Bool | DType::BoolNullable
-            if present
-                .clone()
-                .all(|value| matches!(value, Scalar::Bool(_))) =>
-        {
-            Some(DType::BoolNullable)
+    // A narrow int keeps its width (int32 -> Int32), float32 too (-> Float32).
+    let width = column.width();
+    match (target, width) {
+        (Some(DType::Int64Nullable), Some(width)) if kind == 'i' => {
+            Ok(column.cast_to_width(width, true)?)
         }
-        DType::Float64 | DType::Float64Nullable => numbers(&mut present),
-        DType::Utf8 => match present.clone().next() {
-            None => None,
-            Some(Scalar::Bool(_)) => present
-                .all(|value| matches!(value, Scalar::Bool(_)))
-                .then_some(DType::BoolNullable),
-            Some(_) => numbers(&mut present),
-        },
-        _ => None,
-    };
-    match target {
-        Some(target) if target != column.dtype() => Ok(column.astype(target)?),
+        (Some(DType::Float64Nullable), Some(NumericWidth::Float32)) => {
+            Ok(column.cast_to_width(NumericWidth::Float32, true)?)
+        }
+        (Some(target), _) if target != column.dtype() => Ok(column.astype(target)?),
         _ => Ok(column.clone()),
     }
 }
@@ -65610,6 +66377,7 @@ pub fn index_to_frame(index: &Index, name: Option<&str>) -> Result<DataFrame, Fr
             IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
             IndexLabel::Object(object) => Scalar::Object(object.clone()),
             IndexLabel::Period(period) => Scalar::Period(*period),
+            IndexLabel::Interval(interval) => Scalar::Interval(*interval),
             // Typed-null label round-trips to the same-kind missing scalar.
             IndexLabel::Null(kind) => Scalar::Null(*kind),
         })
@@ -65640,6 +66408,7 @@ pub fn index_to_series(index: &Index, name: Option<&str>) -> Result<Series, Fram
             IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
             IndexLabel::Object(object) => Scalar::Object(object.clone()),
             IndexLabel::Period(period) => Scalar::Period(*period),
+            IndexLabel::Interval(interval) => Scalar::Interval(*interval),
             // Typed-null label round-trips to the same-kind missing scalar.
             IndexLabel::Null(kind) => Scalar::Null(*kind),
         })
@@ -65848,11 +66617,42 @@ fn concat_series_columns_storage(
         }
         return Ok(Column::from_i64_values_owned(out));
     }
+    if let Some(column) =
+        concat_contiguous_text(series_list.iter().map(|s| Some(s.column())), total_len)
+    {
+        return Ok(column);
+    }
     let mut values = Vec::with_capacity(total_len);
     for s in series_list {
         values.extend_from_slice(s.values());
     }
     Ok(Column::from_values(values)?)
+}
+
+/// Pieces that are all-valid contiguous Utf8 columns (or row-range views of
+/// one) joined end to end: their bytes, each piece's offsets rebased - the
+/// column `from_values` makes of the same strings, without building any
+/// piece's Scalar view (br-frankenpandas-5muaw). None when a piece is
+/// absent (a concat gap) or any other column.
+fn concat_contiguous_text<'a>(
+    pieces: impl Iterator<Item = Option<&'a Column>>,
+    total_len: usize,
+) -> Option<Column> {
+    let pieces = pieces
+        .map(|column| column.and_then(Column::as_utf8_window))
+        .collect::<Option<Vec<_>>>()?;
+    let mut bytes = Vec::new();
+    let mut offsets = Vec::with_capacity(total_len + 1);
+    offsets.push(0);
+    for (source, source_offsets) in pieces {
+        // A row-less piece (offsets [0]) adds nothing.
+        if let [first, .., last] = *source_offsets {
+            let base = bytes.len();
+            bytes.extend_from_slice(&source[first..last]);
+            offsets.extend(source_offsets[1..].iter().map(|&at| at - first + base));
+        }
+    }
+    Some(Column::from_utf8_contiguous(bytes, offsets))
 }
 
 pub fn concat_series_with_ignore_index(
@@ -66028,13 +66828,19 @@ fn concat_nullable_dtype(frames: &[&DataFrame], col_name: &str) -> Option<DType>
 /// all-missing `result` of such an int or of a float `source` (df.where over
 /// an int column reported int64 beside NaN, an all-NaN float column object;
 /// br-frankenpandas-vzoct). An int64 source that already held a missing
-/// value keeps its dtype, so where(cond, self) stays the identity. Anything
-/// else is `result`.
+/// value keeps its dtype, so where(cond, self) stays the identity. An
+/// all-missing `result` of a nullable source is that dtype's NA throughout
+/// (it was object; br-frankenpandas-ygb4e). Anything else is `result`.
 fn nullable_kept(source: &Column, result: Column) -> Result<Column, FrameError> {
     let dtype = source.dtype();
     let numpy_int_gained_missing = dtype == DType::Int64 && !source.has_any_missing();
     if dtype.is_nullable() && result.dtype() == dtype.to_non_nullable() {
         Ok(result.with_dtype(dtype))
+    } else if dtype.is_nullable() && result.dtype() == DType::Null {
+        Ok(Column::new(
+            dtype,
+            vec![Scalar::Null(NullKind::Null); result.len()],
+        )?)
     } else if (result.dtype() == DType::Int64
         && result.has_any_missing()
         && numpy_int_gained_missing)
@@ -66274,6 +67080,14 @@ pub fn concat_dataframes_with_ignore_index(
             }
             continue;
         }
+        // Typed TEXT sibling: every frame has this column as all-valid
+        // contiguous Utf8 (no null-fill).
+        if let Some(column) =
+            concat_contiguous_text(frames.iter().map(|frame| frame.column(col_name)), total_len)
+        {
+            columns.insert(col_name.clone(), column);
+            continue;
+        }
         // FIRST PASS decides the KIND of the gaps before any are minted. A source
         // column that already carried a missing value is nullable, and pandas
         // fills a nullable column with pd.NA (a Null-kind missing) while keeping
@@ -66472,7 +67286,8 @@ pub fn concat_dataframes_with_keys(
                 f @ (IndexLabel::Float64(_)
                 | IndexLabel::Bool(_)
                 | IndexLabel::Object(_)
-                | IndexLabel::Period(_)) => {
+                | IndexLabel::Period(_)
+                | IndexLabel::Interval(_)) => {
                     format!("{key}|{f}")
                 }
                 IndexLabel::Null(_) => format!("{key}|{label}"),
@@ -69821,9 +70636,10 @@ impl<'a> StyledDataFrame<'a> {
                     IndexLabel::Utf8(s) => Self::escape_html_text(s),
                     IndexLabel::Timedelta64(ns) => Self::escape_html_text(&Timedelta::format(*ns)),
                     IndexLabel::Datetime64(ns) => Self::escape_html_text(&format_datetime_ns(*ns)),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
-                        f.to_string()
-                    }
+                    f @ (IndexLabel::Float64(_)
+                    | IndexLabel::Bool(_)
+                    | IndexLabel::Period(_)
+                    | IndexLabel::Interval(_)) => f.to_string(),
                     IndexLabel::Object(object) => Self::escape_html_text(&object.to_string()),
                     IndexLabel::Null(_) => label.to_string(),
                 };
@@ -71153,6 +71969,7 @@ impl DataFrame {
             IndexLabel::Datetime64(ns) => Scalar::Datetime64(*ns),
             IndexLabel::Object(object) => Scalar::Object(object.clone()),
             IndexLabel::Period(period) => Scalar::Period(*period),
+            IndexLabel::Interval(interval) => Scalar::Interval(*interval),
             // Typed-null label round-trips to the same-kind missing scalar.
             IndexLabel::Null(kind) => Scalar::Null(*kind),
         }
@@ -71644,6 +72461,16 @@ impl DataFrame {
                 gathered.push(values[pos]);
             }
             Index::from_i64_values(gathered)
+        } else if let Some((start, _, step)) = self.index.range_span() {
+            // A RangeIndex's row at `pos` is start + pos * step (see
+            // take_rows_by_positions_with_affine_certificate_unchecked;
+            // br-frankenpandas-sj5bn).
+            Index::from_i64_values(
+                positions
+                    .iter()
+                    .map(|&pos| start + pos as i64 * step)
+                    .collect(),
+            )
         } else {
             let index_labels = self.index.labels();
 
@@ -71909,6 +72736,16 @@ impl DataFrame {
                 gathered.push(values[pos]);
             }
             Index::from_i64_values(gathered)
+        } else if let Some((start, _, step)) = self.index.range_span() {
+            // A RangeIndex's row at `pos` is start + pos * step, the int64
+            // labels the typed view gathers: a small selection built all of
+            // its labels first (br-frankenpandas-sj5bn).
+            Index::from_i64_values(
+                positions
+                    .iter()
+                    .map(|&pos| start + pos as i64 * step)
+                    .collect(),
+            )
         } else {
             let index_labels = self.index.labels();
 
@@ -78001,6 +78838,19 @@ impl DataFrame {
             DType::Datetime64 { tz: Some(zone) } => index.with_tz(Some(&zone))?,
             _ => index,
         };
+        // A categorical column's categories ride on it too (pandas: a
+        // CategoricalIndex; it was a plain Index; br-frankenpandas-cld41).
+        let index = match source.categorical() {
+            Some(meta) => index.with_categories(Some(fp_index::IndexCategories {
+                categories: meta
+                    .categories
+                    .iter()
+                    .map(scalar_to_index_label)
+                    .collect::<Result<_, _>>()?,
+                ordered: meta.ordered,
+            }))?,
+            None => index,
+        };
 
         if verify_integrity && index.has_duplicates() {
             return Err(FrameError::CompatibilityRejected(
@@ -78367,6 +79217,12 @@ impl DataFrame {
             Some(zone) => index_column.with_dtype(DType::datetime64_tz(zone)),
             None => index_column,
         };
+        // A categorical index comes back as a category column, as pandas'
+        // (it came back object; br-frankenpandas-cld41).
+        let index_column = match self.index.categories() {
+            Some(categories) => categorical_index_column(&self.index, categories)?,
+            None => index_column,
+        };
 
         let column_multiindex =
             self.column_multiindex_with_leading(std::slice::from_ref(&index_column_name))?;
@@ -78494,7 +79350,9 @@ impl DataFrame {
             }
         }
         let na_first = na_position == "first";
-        if !na_first {
+        // A categorical index sorts by its categories (cld41).
+        let ranks = category_ranks(&self.index);
+        if !na_first && ranks.is_none() {
             // Already-sorted short-circuit
             if (ascending && self.index.is_monotonic_increasing())
                 || (!ascending && self.index.is_monotonic_decreasing())
@@ -78528,10 +79386,14 @@ impl DataFrame {
                     }
                 }
                 (false, false) => {
-                    if ascending {
-                        labels[left].cmp(&labels[right])
+                    let (left, right) = if ascending {
+                        (left, right)
                     } else {
-                        labels[right].cmp(&labels[left])
+                        (right, left)
+                    };
+                    match &ranks {
+                        Some(ranks) => ranks[left].cmp(&ranks[right]),
+                        None => labels[left].cmp(&labels[right]),
                     }
                 }
             }
@@ -79019,6 +79881,37 @@ impl DataFrame {
                         )));
                     }
                 }
+            }
+        } else if labels.len() <= 8
+            && let Some(keys) = labels
+                .iter()
+                .map(|label| match label {
+                    IndexLabel::Int64(key) => Some(*key),
+                    _ => None,
+                })
+                .collect::<Option<Vec<i64>>>()
+            && let Some(values) = self.index.int64_label_values()
+        {
+            // A few Int64 keys against a duplicated Int64 index: one scan of
+            // the raw i64 labels per key, its every position in index order -
+            // the map below, without hashing a million labels into it on
+            // every call (br-frankenpandas-63xxx).
+            out_labels.reserve(labels.len());
+            for (requested, key) in labels.iter().zip(keys) {
+                let before = positions.len();
+                positions.extend(
+                    values
+                        .iter()
+                        .enumerate()
+                        .filter(|&(_, &value)| value == key)
+                        .map(|(position, _)| position),
+                );
+                if positions.len() == before {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "loc label not found: {requested:?}"
+                    )));
+                }
+                out_labels.resize(positions.len(), requested.clone());
             }
         } else {
             out_labels.reserve(labels.len());
@@ -81796,9 +82689,10 @@ impl DataFrame {
                 IndexLabel::Utf8(v) => v.clone(),
                 IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                 IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
-                    f.to_string()
-                }
+                f @ (IndexLabel::Float64(_)
+                | IndexLabel::Bool(_)
+                | IndexLabel::Period(_)
+                | IndexLabel::Interval(_)) => f.to_string(),
                 IndexLabel::Object(object) => object.to_string(),
                 null @ IndexLabel::Null(_) => null.to_string(),
             }
@@ -83138,6 +84032,7 @@ impl DataFrame {
                     IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
                     IndexLabel::Object(object) => Scalar::Object(object.clone()),
                     IndexLabel::Period(period) => Scalar::Period(*period),
+                    IndexLabel::Interval(interval) => Scalar::Interval(*interval),
                     IndexLabel::Null(kind) => Scalar::Null(*kind),
                 });
                 for col_vals in &col_values {
@@ -84123,9 +85018,10 @@ impl DataFrame {
                     IndexLabel::Utf8(s) => s,
                     IndexLabel::Timedelta64(ns) => Timedelta::format(ns),
                     IndexLabel::Datetime64(ns) => format_datetime_ns(ns),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
-                        f.to_string()
-                    }
+                    f @ (IndexLabel::Float64(_)
+                    | IndexLabel::Bool(_)
+                    | IndexLabel::Period(_)
+                    | IndexLabel::Interval(_)) => f.to_string(),
                     IndexLabel::Object(object) => object.to_string(),
                     null @ IndexLabel::Null(_) => null.to_string(),
                 };
@@ -84187,8 +85083,9 @@ impl DataFrame {
             } else {
                 Some(val_col.values())
             };
+            // Compensated, as pandas' groupby cells (br-frankenpandas-xhogl).
             let mut sums = if needs_sum {
-                vec![0.0f64; cells]
+                vec![fp_types::KahanSum::default(); cells]
             } else {
                 Vec::new()
             };
@@ -84223,7 +85120,7 @@ impl DataFrame {
                 };
                 if let Some(v) = v {
                     if needs_sum {
-                        sums[cell] += v;
+                        sums[cell].add(v);
                     }
                     counts[cell] += 1;
                 }
@@ -84240,9 +85137,9 @@ impl DataFrame {
                     }
                     data[ri] = if needs_sum {
                         if aggfunc == "sum" {
-                            sums[base + ri]
+                            sums[base + ri].sum()
                         } else {
-                            sums[base + ri] / c as f64
+                            sums[base + ri].sum() / c as f64
                         }
                     } else {
                         c as f64 // count / size
@@ -86946,16 +87843,17 @@ impl DataFrame {
     /// axis name).
     pub fn with_index(&self, index: Index) -> Result<Self, FrameError> {
         let mut out = self.set_axis(index.labels().to_vec(), 0)?;
-        // The given index's name, time zone, freq, RangeIndex origin and
-        // declared dtype ride along (they were dropped with the labels;
-        // br-frankenpandas-i20vm).
+        // The given index's name, time zone, freq, RangeIndex origin,
+        // declared dtype and categories ride along (they were dropped with
+        // the labels; br-frankenpandas-i20vm, br-frankenpandas-cld41).
         out.index = out
             .index
             .rename_index(index.name())
             .with_tz(index.tz())?
             .with_freq(index.freq().map(str::to_owned))
             .with_range_span(index.range_span())
-            .with_declared_dtype(index.declared_dtype());
+            .with_declared_dtype(index.declared_dtype())
+            .with_categories(index.categories().cloned())?;
         Ok(out)
     }
 
@@ -89164,9 +90062,10 @@ impl DataFrame {
                     IndexLabel::Utf8(s) => s.clone(),
                     IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
                     IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
-                        f.to_string()
-                    }
+                    f @ (IndexLabel::Float64(_)
+                    | IndexLabel::Bool(_)
+                    | IndexLabel::Period(_)
+                    | IndexLabel::Interval(_)) => f.to_string(),
                     IndexLabel::Object(object) => object.to_string(),
                     IndexLabel::Null(_) => label.to_string(),
                 });
@@ -89263,9 +90162,10 @@ impl DataFrame {
                     IndexLabel::Utf8(s) => escape_html(s),
                     IndexLabel::Timedelta64(ns) => escape_html(&Timedelta::format(*ns)),
                     IndexLabel::Datetime64(ns) => escape_html(&format_datetime_ns(*ns)),
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
-                        f.to_string()
-                    }
+                    f @ (IndexLabel::Float64(_)
+                    | IndexLabel::Bool(_)
+                    | IndexLabel::Period(_)
+                    | IndexLabel::Interval(_)) => f.to_string(),
                     IndexLabel::Object(object) => escape_html(&object.to_string()),
                     IndexLabel::Null(_) => label.to_string(),
                 };
@@ -89695,6 +90595,7 @@ impl DataFrame {
                         IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
                         IndexLabel::Object(object) => Scalar::Object(object.clone()),
                         IndexLabel::Period(period) => Scalar::Period(*period),
+                        IndexLabel::Interval(interval) => Scalar::Interval(*interval),
                         IndexLabel::Null(kind) => Scalar::Null(*kind),
                     })
                     .collect();
@@ -89839,9 +90740,10 @@ impl DataFrame {
                     IndexLabel::Datetime64(ns) => {
                         out.push_str(&csv_escape(&format_datetime_ns(*ns), sep))
                     }
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
-                        out.push_str(&csv_escape(&f.to_string(), sep))
-                    }
+                    f @ (IndexLabel::Float64(_)
+                    | IndexLabel::Bool(_)
+                    | IndexLabel::Period(_)
+                    | IndexLabel::Interval(_)) => out.push_str(&csv_escape(&f.to_string(), sep)),
                     IndexLabel::Object(object) => {
                         out.push_str(&csv_escape(&object.to_string(), sep));
                     }
@@ -89936,9 +90838,10 @@ impl DataFrame {
                     IndexLabel::Datetime64(ns) => {
                         out.push_str(&csv_escape(&format_datetime_ns(*ns), sep))
                     }
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
-                        out.push_str(&csv_escape(&f.to_string(), sep))
-                    }
+                    f @ (IndexLabel::Float64(_)
+                    | IndexLabel::Bool(_)
+                    | IndexLabel::Period(_)
+                    | IndexLabel::Interval(_)) => out.push_str(&csv_escape(&f.to_string(), sep)),
                     IndexLabel::Object(object) => {
                         out.push_str(&csv_escape(&object.to_string(), sep));
                     }
@@ -90087,9 +90990,10 @@ impl DataFrame {
                     IndexLabel::Datetime64(ns) => {
                         out.push_str(&quote_str(&format_datetime_ns(*ns), false))
                     }
-                    f @ (IndexLabel::Float64(_) | IndexLabel::Bool(_) | IndexLabel::Period(_)) => {
-                        out.push_str(&quote_str(&f.to_string(), false))
-                    }
+                    f @ (IndexLabel::Float64(_)
+                    | IndexLabel::Bool(_)
+                    | IndexLabel::Period(_)
+                    | IndexLabel::Interval(_)) => out.push_str(&quote_str(&f.to_string(), false)),
                     IndexLabel::Object(object) => {
                         out.push_str(&quote_str(&object.to_string(), false));
                     }
@@ -90285,12 +91189,7 @@ impl DataFrame {
                 // Stream the big `data` array (DataArrayJson), keep the small
                 // per-row index vec. Skips the n*m data Value tree + per-cell
                 // values(). Columns are serialized directly from column_order.
-                let index: Vec<Value> = self
-                    .index
-                    .labels()
-                    .iter()
-                    .map(index_label_to_json_value)
-                    .collect();
+                let index = split_index_json_values(&self.index, self.row_multiindex());
                 let col_values: Vec<&[Scalar]> = (0..self.num_columns())
                     .filter_map(|pos| self.column_at(pos))
                     .map(Column::values)
@@ -90602,7 +91501,8 @@ impl DataFrame {
                     f @ (IndexLabel::Float64(_)
                     | IndexLabel::Bool(_)
                     | IndexLabel::Object(_)
-                    | IndexLabel::Period(_)) => f.to_string(),
+                    | IndexLabel::Period(_)
+                    | IndexLabel::Interval(_)) => f.to_string(),
                     IndexLabel::Null(_) => l.to_string(),
                 })
                 .collect();
@@ -90751,7 +91651,8 @@ impl DataFrame {
                     f @ (IndexLabel::Float64(_)
                     | IndexLabel::Bool(_)
                     | IndexLabel::Object(_)
-                    | IndexLabel::Period(_)) => f.to_string(),
+                    | IndexLabel::Period(_)
+                    | IndexLabel::Interval(_)) => f.to_string(),
                     null @ IndexLabel::Null(_) => null.to_string(),
                 });
             }
@@ -90819,7 +91720,8 @@ impl DataFrame {
                     f @ (IndexLabel::Float64(_)
                     | IndexLabel::Bool(_)
                     | IndexLabel::Object(_)
-                    | IndexLabel::Period(_)) => f.to_string(),
+                    | IndexLabel::Period(_)
+                    | IndexLabel::Interval(_)) => f.to_string(),
                     IndexLabel::Null(_) => l.to_string(),
                 })
                 .collect();
@@ -91370,7 +92272,8 @@ impl DataFrame {
                     f @ (IndexLabel::Float64(_)
                     | IndexLabel::Bool(_)
                     | IndexLabel::Object(_)
-                    | IndexLabel::Period(_)) => row_part.push_str(&format!("{f}")),
+                    | IndexLabel::Period(_)
+                    | IndexLabel::Interval(_)) => row_part.push_str(&format!("{f}")),
                     l @ IndexLabel::Null(_) => row_part.push_str(&format!("{l}")),
                 }
                 for col_name in col_names {
@@ -91686,7 +92589,8 @@ impl DataFrame {
                 f @ (IndexLabel::Float64(_)
                 | IndexLabel::Bool(_)
                 | IndexLabel::Object(_)
-                | IndexLabel::Period(_)) => f.to_string(),
+                | IndexLabel::Period(_)
+                | IndexLabel::Interval(_)) => f.to_string(),
                 IndexLabel::Null(_) => label.to_string(),
             };
             let sep_pos = label_str.rfind('|').ok_or_else(|| {
@@ -93538,7 +94442,8 @@ impl DataFrame {
     }
 
     fn mode_axis1(&self, numeric_only: bool, dropna: bool) -> Result<Self, FrameError> {
-        // Per br-frankenpandas-uy9z2: include Timedelta64 in numeric_only.
+        // Per br-frankenpandas-uy9z2: include Timedelta64 in numeric_only;
+        // masked numbers too (fsf9r).
         let selected_columns = self
             .column_order
             .iter()
@@ -93546,7 +94451,13 @@ impl DataFrame {
                 !numeric_only
                     || matches!(
                         self.columns[name.as_str()].dtype(),
-                        DType::Bool | DType::Int64 | DType::Float64 | DType::Timedelta64
+                        DType::Bool
+                            | DType::Int64
+                            | DType::Float64
+                            | DType::Timedelta64
+                            | DType::Int64Nullable
+                            | DType::Float64Nullable
+                            | DType::BoolNullable
                     )
             })
             .cloned()
@@ -93573,6 +94484,36 @@ impl DataFrame {
         }
 
         let mode_columns = (0..max_modes).map(|i| i.to_string()).collect::<Vec<_>>();
+        // pandas frames the rows' modes, so a row with fewer modes than
+        // another is padded with a missing value: numpy numbers are then
+        // float64 throughout, and masked columns keep their masked dtype
+        // (Int64 with <NA>; Float64 beside a Float64 column). They were an
+        // int64 column holding NaN (br-frankenpandas-fsf9r).
+        let padded = row_modes.iter().any(|modes| modes.len() < max_modes);
+        let source_dtypes: Vec<DType> = selected_columns
+            .iter()
+            .map(|name| self.columns[name.as_str()].dtype())
+            .collect();
+        let numpy_numbers = source_dtypes
+            .iter()
+            .all(|dtype| matches!(dtype, DType::Int64 | DType::Float64));
+        let masked = if source_dtypes
+            .iter()
+            .all(|dtype| *dtype == DType::BoolNullable)
+        {
+            Some(DType::BoolNullable)
+        } else if source_dtypes
+            .iter()
+            .all(|dtype| matches!(dtype, DType::Int64Nullable | DType::Float64Nullable))
+        {
+            Some(if source_dtypes.contains(&DType::Float64Nullable) {
+                DType::Float64Nullable
+            } else {
+                DType::Int64Nullable
+            })
+        } else {
+            None
+        };
         let padded_rows = row_modes
             .into_iter()
             .map(|mut modes| {
@@ -93593,22 +94534,33 @@ impl DataFrame {
         let any_source_is_float = selected_columns
             .iter()
             .any(|name| matches!(self.columns[name.as_str()].dtype(), DType::Float64));
+        let to_float = masked.is_none() && (any_source_is_float || (padded && numpy_numbers));
 
         let mut result_cols = BTreeMap::new();
         for (col_idx, name) in mode_columns.iter().enumerate() {
             let mut values: Vec<Scalar> =
                 padded_rows.iter().map(|row| row[col_idx].clone()).collect();
-            if any_source_is_float {
+            if to_float {
                 for value in &mut values {
                     if let Scalar::Int64(v) = *value {
                         *value = Scalar::Float64(v as f64);
                     }
                 }
             }
-            result_cols.insert(name.clone(), build_mode_column(values)?);
+            let column = match &masked {
+                Some(dtype) => Column::new(dtype.clone(), values)?,
+                None => build_mode_column(values)?,
+            };
+            result_cols.insert(name.clone(), column);
         }
 
-        Self::new_with_axis(self.index.clone(), result_cols, mode_columns)
+        // The columns are pandas' RangeIndex 0..n (they were the text '0',
+        // '1'; br-frankenpandas-fsf9r).
+        let span = (0, i64::try_from(max_modes).unwrap_or(i64::MAX), 1);
+        Ok(
+            Self::new_with_axis(self.index.clone(), result_cols, mode_columns)?
+                .with_column_range(span),
+        )
     }
 
     /// Internal: reduce each numeric column to a single scalar via the named function.
@@ -97824,7 +98776,18 @@ impl DataFrame {
                                     out_valid.set(i, false);
                                 }
                             } else {
-                                out_valid.set(i, false);
+                                // A missing float is NaN to numpy's operator:
+                                // NaN for every op but power, whose NaN ** 0 and
+                                // 1 ** NaN are 1 (br-frankenpandas-oie6x).
+                                let r = op(
+                                    if lok { ld[i] } else { f64::NAN },
+                                    if rok { rd[i] } else { f64::NAN },
+                                );
+                                if r.is_nan() {
+                                    out_valid.set(i, false);
+                                } else {
+                                    out[i] = r;
+                                }
                             }
                         }
                         return Ok(Column::from_f64_values_with_validity(out, out_valid));
@@ -97859,7 +98822,16 @@ impl DataFrame {
                         .zip(rc.values())
                         .map(|(lv, rv)| match (lv.to_f64(), rv.to_f64()) {
                             (Ok(l), Ok(r)) => Scalar::Float64(op(l, r)),
-                            _ => Scalar::Null(NullKind::NaN),
+                            // A missing float is NaN to numpy's operator: NaN
+                            // for every op but power (br-frankenpandas-oie6x).
+                            (l, r) => {
+                                let value = op(l.unwrap_or(f64::NAN), r.unwrap_or(f64::NAN));
+                                if value.is_nan() {
+                                    Scalar::Null(NullKind::NaN)
+                                } else {
+                                    Scalar::Float64(value)
+                                }
+                            }
                         })
                         .collect();
                     // Float64 even when every row is NaN, which from_values
@@ -99302,6 +100274,10 @@ impl DataFrame {
         F: Fn(f64, f64) -> f64 + Sync,
     {
         let par_inner = compute_bound && self.column_order.len() <= 2;
+        // A missing float is NaN to numpy's operator: its answer for one is
+        // NaN - missing - for every op but power, whose NaN ** 0 and 1 ** NaN
+        // are 1 (they stayed missing; br-frankenpandas-oie6x).
+        let missing_result = op(f64::NAN, scalar);
         // By position: a repeated column key is its own column (i17d4).
         let computed = self.par_map_column_positions_min(16_384, |pos| {
             let col = self.column_at(pos).expect("column in bounds");
@@ -99352,6 +100328,9 @@ impl DataFrame {
                         if !r.is_nan() {
                             valid_words[i / 64] |= 1_u64 << (i % 64);
                         }
+                    } else if !missing_result.is_nan() {
+                        out[i] = missing_result;
+                        valid_words[i / 64] |= 1_u64 << (i % 64);
                     }
                 }
                 let validity = fp_columnar::ValidityMask::from_words(valid_words, len);
@@ -99377,6 +100356,9 @@ impl DataFrame {
                         if !r.is_nan() {
                             valid_words[i / 64] |= 1_u64 << (i % 64);
                         }
+                    } else if !missing_result.is_nan() {
+                        out[i] = missing_result;
+                        valid_words[i / 64] |= 1_u64 << (i % 64);
                     }
                 }
                 let validity = fp_columnar::ValidityMask::from_words(valid_words, len);
@@ -99388,7 +100370,11 @@ impl DataFrame {
                     .iter()
                     .map(|v| {
                         if v.is_missing() {
-                            Scalar::Null(NullKind::NaN)
+                            if missing_result.is_nan() {
+                                Scalar::Null(NullKind::NaN)
+                            } else {
+                                Scalar::Float64(missing_result)
+                            }
                         } else {
                             match v.to_f64() {
                                 Ok(f) => Scalar::Float64(op(f, scalar)),
@@ -99625,9 +100611,20 @@ impl DataFrame {
     /// into numbers (pandas keeps `['1', '2']` as strings; only to_numeric
     /// parses) and left numbers unchanged.
     pub fn convert_dtypes(&self) -> Result<Self, FrameError> {
+        self.convert_dtypes_with(ConvertDtypes::default())
+    }
+
+    /// Matches `pd.DataFrame.convert_dtypes(infer_objects=,
+    /// convert_string=, convert_integer=, convert_boolean=,
+    /// convert_floating=)`: each column as [`convert_column_dtypes_with`]
+    /// retypes it (br-frankenpandas-di8vx).
+    pub fn convert_dtypes_with(&self, options: ConvertDtypes) -> Result<Self, FrameError> {
         let mut result_cols = BTreeMap::new();
         for name in &self.column_order {
-            result_cols.insert(name.clone(), convert_column_dtypes(&self.columns[name])?);
+            result_cols.insert(
+                name.clone(),
+                convert_column_dtypes_with(&self.columns[name], options)?,
+            );
         }
         Ok(Self {
             columns: result_cols.into(),
@@ -101837,8 +102834,10 @@ impl DataFrame {
     /// per item (an empty list one row of NaN), a non-list value stays one
     /// row; several columns must hold lists of the same length in each row
     /// (pandas' ValueError otherwise). The other columns repeat with their
-    /// dtypes, the exploded ones are object, as pandas', and the index
-    /// repeats its labels (a fresh RangeIndex with `ignore_index`).
+    /// dtypes, the exploded object ones are object, as pandas', and the index
+    /// repeats its labels (a fresh RangeIndex with `ignore_index`). A column
+    /// of another dtype holds no list and keeps its dtype, as pandas' (it
+    /// came back object, br-frankenpandas-xxryq).
     pub fn explode_lists(&self, columns: &[&str], ignore_index: bool) -> Result<Self, FrameError> {
         if columns.is_empty() {
             return Err(FrameError::CompatibilityRejected(
@@ -101881,8 +102880,12 @@ impl DataFrame {
             }
         }
         let mut out = self.take_rows_by_positions(&rows)?;
-        for (name, values) in columns.iter().zip(exploded) {
-            out = out.with_column(*name, Column::from_object_values(values))?;
+        for ((name, values), source) in columns.iter().zip(exploded).zip(&sources) {
+            // Only an object column holds lists; another keeps the taken
+            // column, dtype and all.
+            if matches!(source.dtype(), DType::Utf8 | DType::Null) {
+                out = out.with_column(*name, Column::from_object_values(values))?;
+            }
         }
         let out = out.with_labels_of(self);
         if ignore_index {
@@ -102295,7 +103298,7 @@ impl DataFrameGroupBy<'_> {
                         Scalar::Int64(v) => total += i128::from(*v),
                         Scalar::Null(_) => {}
                         Scalar::Float64(v) if v.is_nan() => {}
-                        _ => return fp_types::nansum(group_vals),
+                        _ => return fp_types::nansum_grouped(group_vals),
                     }
                 }
                 match i64::try_from(total) {
@@ -102310,12 +103313,12 @@ impl DataFrameGroupBy<'_> {
                         Scalar::Bool(flag) => total += i64::from(*flag),
                         Scalar::Null(_) => {}
                         Scalar::Float64(v) if v.is_nan() => {}
-                        _ => return fp_types::nansum(group_vals),
+                        _ => return fp_types::nansum_grouped(group_vals),
                     }
                 }
                 Scalar::Int64(total)
             }
-            DType::Categorical => fp_types::nansum(group_vals),
+            DType::Categorical => fp_types::nansum_grouped(group_vals),
             // Per br-frankenpandas-6lnll: pandas groupby.sum() on an object/string
             // column concatenates each group's non-null values in encounter order
             // (skipna), exactly like Series::sum (br-f031e). The catch-all below
@@ -102336,7 +103339,7 @@ impl DataFrameGroupBy<'_> {
                     match value {
                         Scalar::Timedelta64(v) if *v != Timedelta::NAT => total += i128::from(*v),
                         Scalar::Timedelta64(_) | Scalar::Null(_) => {}
-                        _ => return fp_types::nansum(group_vals),
+                        _ => return fp_types::nansum_grouped(group_vals),
                     }
                 }
                 match i64::try_from(total) {
@@ -102344,7 +103347,7 @@ impl DataFrameGroupBy<'_> {
                     Err(_) => Scalar::Float64(total as f64),
                 }
             }
-            _ => fp_types::nansum(group_vals),
+            _ => fp_types::nansum_grouped(group_vals),
         }
     }
 
@@ -103014,12 +104017,11 @@ impl DataFrameGroupBy<'_> {
             // as itself; it rendered as "Object(datetime.date(...))" (fvsao.66).
             Scalar::Object(object) => IndexLabel::Object(object.clone()),
             // A PERIOD key is its own label, so the result is on a
-            // PeriodIndex (45fzr); an INTERVAL key, which `IndexLabel` has no
-            // variant for (br-frankenpandas-no6s4), labels as pandas prints
-            // it: a groupby over pd.cut printed 'Interval(Interval { .. })'
-            // (fvsao.54).
+            // PeriodIndex (45fzr); an INTERVAL key too (c27hq; it labelled as
+            // its text, and a groupby over pd.cut once printed
+            // 'Interval(Interval { .. })', fvsao.54).
             Scalar::Period(period) => IndexLabel::Period(*period),
-            Scalar::Interval(interval) => IndexLabel::Utf8(interval.to_string()),
+            Scalar::Interval(interval) => IndexLabel::Interval(*interval),
         }
     }
 
@@ -104103,13 +105105,13 @@ impl DataFrameGroupBy<'_> {
                 && let Some(vals) = col.as_f64_slice()
             {
                 let ng = *ngroups;
+                // sum / mean compensated, var / std Welford, as pandas' group
+                // kernels (br-frankenpandas-xhogl).
                 match func_name {
                     "sum" => {
-                        let mut acc = vec![0.0_f64; ng];
-                        for (row, &v) in vals.iter().enumerate() {
-                            acc[gid_per_row[row]] += v;
-                        }
-                        agg_vals.extend(go_gid.iter().map(|&g| Scalar::Float64(acc[g])));
+                        let (sums, _) =
+                            grouped_sums(gid_per_row, ng, vals.iter().map(|&v| Some(v)));
+                        agg_vals.extend(go_gid.iter().map(|&g| Scalar::Float64(sums[g].sum())));
                     }
                     "count" => {
                         let mut cnt = vec![0i64; ng];
@@ -104138,31 +105140,14 @@ impl DataFrameGroupBy<'_> {
                         agg_vals.extend(go_gid.iter().map(|&g| Scalar::Float64(cur[g])));
                     }
                     "var" | "std" => {
-                        // Two-pass per group exactly like nanvar(.,ddof=1):
-                        // mean = row-order sum/count, then sum_sq =
-                        // Σ(x-mean).powi(2) in row order, /(n-1). n<=1 ⇒ Null.
-                        let want_std = func_name == "std";
-                        let mut sum = vec![0.0_f64; ng];
-                        let mut cnt = vec![0u64; ng];
-                        for (row, &v) in vals.iter().enumerate() {
-                            let g = gid_per_row[row];
-                            sum[g] += v;
-                            cnt[g] += 1;
-                        }
-                        let means: Vec<f64> = (0..ng).map(|g| sum[g] / cnt[g] as f64).collect();
-                        let mut sumsq = vec![0.0_f64; ng];
-                        for (row, &v) in vals.iter().enumerate() {
-                            let g = gid_per_row[row];
-                            sumsq[g] += (v - means[g]).powi(2);
-                        }
-                        agg_vals.extend(go_gid.iter().map(|&g| {
-                            if cnt[g] <= 1 {
-                                Scalar::Null(NullKind::NaN)
-                            } else {
-                                let var = sumsq[g] / (cnt[g] - 1) as f64;
-                                Scalar::Float64(if want_std { var.sqrt() } else { var })
-                            }
-                        }));
+                        // Welford per group, ddof=1; n<=1 ⇒ Null.
+                        let moments =
+                            grouped_welford(gid_per_row, ng, vals.iter().map(|&v| Some(v)));
+                        agg_vals.extend(
+                            go_gid
+                                .iter()
+                                .map(|&g| moment_spread(moments[g], func_name == "std")),
+                        );
                     }
                     "first" | "last" => {
                         // FP groupby first/last = literal first/last element in
@@ -104200,17 +105185,12 @@ impl DataFrameGroupBy<'_> {
                     }
                     _ => {
                         // mean
-                        let mut acc = vec![0.0_f64; ng];
-                        let mut cnt = vec![0u64; ng];
-                        for (row, &v) in vals.iter().enumerate() {
-                            let g = gid_per_row[row];
-                            acc[g] += v;
-                            cnt[g] += 1;
-                        }
+                        let (sums, cnt) =
+                            grouped_sums(gid_per_row, ng, vals.iter().map(|&v| Some(v)));
                         agg_vals.extend(
                             go_gid
                                 .iter()
-                                .map(|&g| Scalar::Float64(acc[g] / cnt[g] as f64)),
+                                .map(|&g| Scalar::Float64(sums[g].sum() / cnt[g] as f64)),
                         );
                     }
                 }
@@ -104254,18 +105234,13 @@ impl DataFrameGroupBy<'_> {
                         }));
                     }
                     "mean" => {
-                        // nanmean(Int64) coerces to f64 then row-order sum/count.
-                        let mut sum = vec![0.0_f64; ng];
-                        let mut cnt = vec![0u64; ng];
-                        for (row, &v) in vals.iter().enumerate() {
-                            let g = gid_per_row[row];
-                            sum[g] += v as f64;
-                            cnt[g] += 1;
-                        }
+                        // Int64 read as f64, the compensated sum over the count.
+                        let (sums, cnt) =
+                            grouped_sums(gid_per_row, ng, vals.iter().map(|&v| Some(v as f64)));
                         agg_vals.extend(
                             go_gid
                                 .iter()
-                                .map(|&g| Scalar::Float64(sum[g] / cnt[g] as f64)),
+                                .map(|&g| Scalar::Float64(sums[g].sum() / cnt[g] as f64)),
                         );
                     }
                     "count" => {
@@ -104332,30 +105307,15 @@ impl DataFrameGroupBy<'_> {
                         agg_vals.extend(go_gid.iter().map(|&g| Scalar::Float64(meds[g])));
                     }
                     _ => {
-                        // var/std: nanvar coerces Int64 to f64 (collect_finite),
-                        // so compute in f64 exactly as the Float64 path. ddof=1.
-                        let want_std = func_name == "std";
-                        let mut sum = vec![0.0_f64; ng];
-                        let mut cnt = vec![0u64; ng];
-                        for (row, &v) in vals.iter().enumerate() {
-                            let g = gid_per_row[row];
-                            sum[g] += v as f64;
-                            cnt[g] += 1;
-                        }
-                        let means: Vec<f64> = (0..ng).map(|g| sum[g] / cnt[g] as f64).collect();
-                        let mut sumsq = vec![0.0_f64; ng];
-                        for (row, &v) in vals.iter().enumerate() {
-                            let g = gid_per_row[row];
-                            sumsq[g] += (v as f64 - means[g]).powi(2);
-                        }
-                        agg_vals.extend(go_gid.iter().map(|&g| {
-                            if cnt[g] <= 1 {
-                                Scalar::Null(NullKind::NaN)
-                            } else {
-                                let var = sumsq[g] / (cnt[g] - 1) as f64;
-                                Scalar::Float64(if want_std { var.sqrt() } else { var })
-                            }
-                        }));
+                        // var/std: Int64 read as f64, Welford as the Float64
+                        // path. ddof=1.
+                        let moments =
+                            grouped_welford(gid_per_row, ng, vals.iter().map(|&v| Some(v as f64)));
+                        agg_vals.extend(
+                            go_gid
+                                .iter()
+                                .map(|&g| moment_spread(moments[g], func_name == "std")),
+                        );
                     }
                 }
                 result_cols.insert(col_name.clone(), Column::from_values(agg_vals)?);
@@ -104382,14 +105342,14 @@ impl DataFrameGroupBy<'_> {
 
                 let agg_val = match func_name {
                     "sum" => Self::sum_group_vals(col.dtype(), &group_vals),
-                    "mean" => fp_types::nanmean(&group_vals),
+                    "mean" => fp_types::nanmean_grouped(&group_vals),
                     "count" => fp_types::nancount(&group_vals),
                     // Every row, missing values included (it was rejected).
                     "size" => Scalar::Int64(i64::try_from(group_vals.len()).unwrap_or(i64::MAX)),
                     "min" => fp_types::nanmin(&group_vals),
                     "max" => fp_types::nanmax(&group_vals),
-                    "std" => fp_types::nanstd(&group_vals, 1),
-                    "var" => fp_types::nanvar(&group_vals, 1),
+                    "std" => fp_types::nanstd_grouped(&group_vals, 1),
+                    "var" => fp_types::nanvar_grouped(&group_vals, 1),
                     "median" => fp_types::nanmedian(&group_vals),
                     // br-frankenpandas-groupby-idxmax-idxmin, second slice.
                     // `.agg("quantile")` CANNOT carry a q, so the string form is
@@ -104425,7 +105385,8 @@ impl DataFrameGroupBy<'_> {
                     "all" => fp_types::nanall(&group_vals),
                     // Statistical moments (br-frankenpandas-zge5s) — not in the
                     // dense gate, so they reach this generic per-group path.
-                    "skew" => fp_types::nanskew(&group_vals),
+                    // skew is pandas' online group_skew (br-frankenpandas-vjfq9).
+                    "skew" => fp_types::nanskew_grouped(&group_vals),
                     "kurt" | "kurtosis" => fp_types::nankurt(&group_vals),
                     "sem" => fp_types::nansem_grouped(&group_vals, 1),
                     // br-frankenpandas-groupby-idxmax-idxmin: pandas' idxmax/idxmin
@@ -104718,9 +105679,9 @@ impl DataFrameGroupBy<'_> {
     /// output `out_index`, accumulate each value column's reduction in one
     /// hash-free pass and assemble the result frame. Every value column is gated
     /// by the caller to a dense Float64/Int64 slice. Bit-identical to the
-    /// per-group Scalar gather: the accumulators reproduce nansum/nanmean/
-    /// nanmin/.../nanmedian as a row-order fold within each group, emitted in
-    /// `order`.
+    /// per-group Scalar gather: the accumulators reproduce nansum_grouped/
+    /// nanmean_grouped/nanmin/.../nanmedian as a row-order fold within each
+    /// group, emitted in `order`.
     fn dense_aggregate_emit(
         &self,
         value_cols: &[String],
@@ -104739,14 +105700,17 @@ impl DataFrameGroupBy<'_> {
         // the serial loop left all but one core idle.
         let emit_one = |col_name: &str| -> Result<(String, Column), FrameError> {
             let col = &self.df.columns[col_name];
+            // sum / mean compensated and var / std Welford throughout, as
+            // pandas' group kernels (br-frankenpandas-xhogl).
             let agg_vals: Vec<Scalar> = if let Some(vals) = col.as_f64_slice() {
                 match func_name {
                     "sum" => {
-                        let mut acc = vec![0.0_f64; ng];
-                        for (row, &v) in vals.iter().enumerate() {
-                            acc[gid_per_row[row]] += v;
-                        }
-                        order.iter().map(|&g| Scalar::Float64(acc[g])).collect()
+                        let (sums, _) =
+                            grouped_sums(gid_per_row, ng, vals.iter().map(|&v| Some(v)));
+                        order
+                            .iter()
+                            .map(|&g| Scalar::Float64(sums[g].sum()))
+                            .collect()
                     }
                     "count" => {
                         let mut cnt = vec![0i64; ng];
@@ -104771,30 +105735,11 @@ impl DataFrameGroupBy<'_> {
                         order.iter().map(|&g| Scalar::Float64(cur[g])).collect()
                     }
                     "var" | "std" => {
-                        let want_std = func_name == "std";
-                        let mut sum = vec![0.0_f64; ng];
-                        let mut cnt = vec![0u64; ng];
-                        for (row, &v) in vals.iter().enumerate() {
-                            let g = gid_per_row[row];
-                            sum[g] += v;
-                            cnt[g] += 1;
-                        }
-                        let means: Vec<f64> = (0..ng).map(|g| sum[g] / cnt[g] as f64).collect();
-                        let mut sumsq = vec![0.0_f64; ng];
-                        for (row, &v) in vals.iter().enumerate() {
-                            let g = gid_per_row[row];
-                            sumsq[g] += (v - means[g]).powi(2);
-                        }
+                        let moments =
+                            grouped_welford(gid_per_row, ng, vals.iter().map(|&v| Some(v)));
                         order
                             .iter()
-                            .map(|&g| {
-                                if cnt[g] <= 1 {
-                                    Scalar::Null(NullKind::NaN)
-                                } else {
-                                    let var = sumsq[g] / (cnt[g] - 1) as f64;
-                                    Scalar::Float64(if want_std { var.sqrt() } else { var })
-                                }
-                            })
+                            .map(|&g| moment_spread(moments[g], func_name == "std"))
                             .collect()
                     }
                     "first" | "last" => {
@@ -104827,16 +105772,11 @@ impl DataFrameGroupBy<'_> {
                     }
                     _ => {
                         // mean
-                        let mut acc = vec![0.0_f64; ng];
-                        let mut cnt = vec![0u64; ng];
-                        for (row, &v) in vals.iter().enumerate() {
-                            let g = gid_per_row[row];
-                            acc[g] += v;
-                            cnt[g] += 1;
-                        }
+                        let (sums, cnt) =
+                            grouped_sums(gid_per_row, ng, vals.iter().map(|&v| Some(v)));
                         order
                             .iter()
-                            .map(|&g| Scalar::Float64(acc[g] / cnt[g] as f64))
+                            .map(|&g| Scalar::Float64(sums[g].sum() / cnt[g] as f64))
                             .collect()
                     }
                 }
@@ -104856,16 +105796,11 @@ impl DataFrameGroupBy<'_> {
                             .collect()
                     }
                     "mean" => {
-                        let mut sum = vec![0.0_f64; ng];
-                        let mut cnt = vec![0u64; ng];
-                        for (row, &v) in vals.iter().enumerate() {
-                            let g = gid_per_row[row];
-                            sum[g] += v as f64;
-                            cnt[g] += 1;
-                        }
+                        let (sums, cnt) =
+                            grouped_sums(gid_per_row, ng, vals.iter().map(|&v| Some(v as f64)));
                         order
                             .iter()
-                            .map(|&g| Scalar::Float64(sum[g] / cnt[g] as f64))
+                            .map(|&g| Scalar::Float64(sums[g].sum() / cnt[g] as f64))
                             .collect()
                     }
                     "count" => {
@@ -104876,31 +105811,12 @@ impl DataFrameGroupBy<'_> {
                         order.iter().map(|&g| Scalar::Int64(cnt[g])).collect()
                     }
                     "var" | "std" => {
-                        // nanvar coerces Int64 to f64; ddof=1, n<=1 ⇒ Null.
-                        let want_std = func_name == "std";
-                        let mut sum = vec![0.0_f64; ng];
-                        let mut cnt = vec![0u64; ng];
-                        for (row, &v) in vals.iter().enumerate() {
-                            let g = gid_per_row[row];
-                            sum[g] += v as f64;
-                            cnt[g] += 1;
-                        }
-                        let means: Vec<f64> = (0..ng).map(|g| sum[g] / cnt[g] as f64).collect();
-                        let mut sumsq = vec![0.0_f64; ng];
-                        for (row, &v) in vals.iter().enumerate() {
-                            let g = gid_per_row[row];
-                            sumsq[g] += (v as f64 - means[g]).powi(2);
-                        }
+                        // Int64 read as f64; ddof=1, n<=1 ⇒ Null.
+                        let moments =
+                            grouped_welford(gid_per_row, ng, vals.iter().map(|&v| Some(v as f64)));
                         order
                             .iter()
-                            .map(|&g| {
-                                if cnt[g] <= 1 {
-                                    Scalar::Null(NullKind::NaN)
-                                } else {
-                                    let var = sumsq[g] / (cnt[g] - 1) as f64;
-                                    Scalar::Float64(if want_std { var.sqrt() } else { var })
-                                }
-                            })
+                            .map(|&g| moment_spread(moments[g], func_name == "std"))
                             .collect()
                     }
                     "first" | "last" => {
@@ -104966,18 +105882,21 @@ impl DataFrameGroupBy<'_> {
                 // build_groups path (groupby nullable reductions were ~0.4x pandas).
                 // Accumulate skipna over the typed (data, validity). BIT-IDENTICAL
                 // to apply_agg_func's nan* reductions: all-missing group -> sum 0.0,
-                // mean/min/max/var/std NaN, count 0; mean/var/std are the same
-                // two-pass mean-centered folds. The caller only gates these funcs
-                // onto nullable columns.
+                // mean/min/max/var/std NaN, count 0; sum/mean are the same
+                // compensated folds and var/std the same Welford update. The
+                // caller only gates these funcs onto nullable columns.
+                let present = || {
+                    data.iter()
+                        .enumerate()
+                        .map(|(row, &v)| validity.get(row).then_some(v))
+                };
                 match func_name {
                     "sum" => {
-                        let mut acc = vec![0.0_f64; ng];
-                        for (row, &v) in data.iter().enumerate() {
-                            if validity.get(row) {
-                                acc[gid_per_row[row]] += v;
-                            }
-                        }
-                        order.iter().map(|&g| Scalar::Float64(acc[g])).collect()
+                        let (sums, _) = grouped_sums(gid_per_row, ng, present());
+                        order
+                            .iter()
+                            .map(|&g| Scalar::Float64(sums[g].sum()))
+                            .collect()
                     }
                     "count" => {
                         let mut cnt = vec![0i64; ng];
@@ -104989,63 +105908,23 @@ impl DataFrameGroupBy<'_> {
                         order.iter().map(|&g| Scalar::Int64(cnt[g])).collect()
                     }
                     "mean" => {
-                        let mut acc = vec![0.0_f64; ng];
-                        let mut cnt = vec![0u64; ng];
-                        for (row, &v) in data.iter().enumerate() {
-                            if validity.get(row) {
-                                let g = gid_per_row[row];
-                                acc[g] += v;
-                                cnt[g] += 1;
-                            }
-                        }
+                        let (sums, cnt) = grouped_sums(gid_per_row, ng, present());
                         order
                             .iter()
                             .map(|&g| {
                                 if cnt[g] == 0 {
                                     Scalar::Null(NullKind::NaN)
                                 } else {
-                                    Scalar::Float64(acc[g] / cnt[g] as f64)
+                                    Scalar::Float64(sums[g].sum() / cnt[g] as f64)
                                 }
                             })
                             .collect()
                     }
                     "var" | "std" => {
-                        let want_std = func_name == "std";
-                        let mut acc = vec![0.0_f64; ng];
-                        let mut cnt = vec![0u64; ng];
-                        for (row, &v) in data.iter().enumerate() {
-                            if validity.get(row) {
-                                let g = gid_per_row[row];
-                                acc[g] += v;
-                                cnt[g] += 1;
-                            }
-                        }
-                        let means: Vec<f64> = (0..ng)
-                            .map(|g| {
-                                if cnt[g] == 0 {
-                                    0.0
-                                } else {
-                                    acc[g] / cnt[g] as f64
-                                }
-                            })
-                            .collect();
-                        let mut sumsq = vec![0.0_f64; ng];
-                        for (row, &v) in data.iter().enumerate() {
-                            if validity.get(row) {
-                                let g = gid_per_row[row];
-                                sumsq[g] += (v - means[g]).powi(2);
-                            }
-                        }
+                        let moments = grouped_welford(gid_per_row, ng, present());
                         order
                             .iter()
-                            .map(|&g| {
-                                if cnt[g] <= 1 {
-                                    Scalar::Null(NullKind::NaN)
-                                } else {
-                                    let var = sumsq[g] / (cnt[g] - 1) as f64;
-                                    Scalar::Float64(if want_std { var.sqrt() } else { var })
-                                }
-                            })
+                            .map(|&g| moment_spread(moments[g], func_name == "std"))
                             .collect()
                     }
                     "first" | "last" => {
@@ -105156,63 +106035,35 @@ impl DataFrameGroupBy<'_> {
                         order.iter().map(|&g| Scalar::Int64(cnt[g])).collect()
                     }
                     "mean" => {
-                        let mut sum = vec![0.0_f64; ng];
-                        let mut cnt = vec![0u64; ng];
-                        for (row, &v) in data.iter().enumerate() {
-                            if validity.get(row) {
-                                let g = gid_per_row[row];
-                                sum[g] += v as f64;
-                                cnt[g] += 1;
-                            }
-                        }
+                        let (sums, cnt) = grouped_sums(
+                            gid_per_row,
+                            ng,
+                            data.iter()
+                                .enumerate()
+                                .map(|(row, &v)| validity.get(row).then_some(v as f64)),
+                        );
                         order
                             .iter()
                             .map(|&g| {
                                 if cnt[g] == 0 {
                                     Scalar::Null(NullKind::NaN)
                                 } else {
-                                    Scalar::Float64(sum[g] / cnt[g] as f64)
+                                    Scalar::Float64(sums[g].sum() / cnt[g] as f64)
                                 }
                             })
                             .collect()
                     }
                     "var" | "std" => {
-                        let want_std = func_name == "std";
-                        let mut sum = vec![0.0_f64; ng];
-                        let mut cnt = vec![0u64; ng];
-                        for (row, &v) in data.iter().enumerate() {
-                            if validity.get(row) {
-                                let g = gid_per_row[row];
-                                sum[g] += v as f64;
-                                cnt[g] += 1;
-                            }
-                        }
-                        let means: Vec<f64> = (0..ng)
-                            .map(|g| {
-                                if cnt[g] == 0 {
-                                    0.0
-                                } else {
-                                    sum[g] / cnt[g] as f64
-                                }
-                            })
-                            .collect();
-                        let mut sumsq = vec![0.0_f64; ng];
-                        for (row, &v) in data.iter().enumerate() {
-                            if validity.get(row) {
-                                let g = gid_per_row[row];
-                                sumsq[g] += (v as f64 - means[g]).powi(2);
-                            }
-                        }
+                        let moments = grouped_welford(
+                            gid_per_row,
+                            ng,
+                            data.iter()
+                                .enumerate()
+                                .map(|(row, &v)| validity.get(row).then_some(v as f64)),
+                        );
                         order
                             .iter()
-                            .map(|&g| {
-                                if cnt[g] <= 1 {
-                                    Scalar::Null(NullKind::NaN)
-                                } else {
-                                    let var = sumsq[g] / (cnt[g] - 1) as f64;
-                                    Scalar::Float64(if want_std { var.sqrt() } else { var })
-                                }
-                            })
+                            .map(|&g| moment_spread(moments[g], func_name == "std"))
                             .collect()
                     }
                     "first" | "last" => {
@@ -105393,8 +106244,8 @@ impl DataFrameGroupBy<'_> {
     /// 8 MB written and 8 MB read purely to hand the gid to the very next pass.
     ///
     /// BIT-IDENTICAL: the accumulation still runs in ascending ROW order into a
-    /// per-group bin — `acc[gid_per_row[row]] += v` becomes
-    /// `acc[slot(key[row])] += v`, and slot ↔ gid is a bijection, so each
+    /// per-group bin — `acc[gid_per_row[row]].add(v)` becomes
+    /// `acc[slot(key[row])].add(v)`, and slot ↔ gid is a bijection, so each
     /// group's values are added in exactly the same sequence with exactly the
     /// same intermediate rounding. Nothing is reassociated. `first_row` then
     /// reproduces the first-seen gid numbering, and `sort=True` orders by
@@ -105420,7 +106271,8 @@ impl DataFrameGroupBy<'_> {
             return None;
         }
 
-        let mut acc = vec![0.0_f64; range];
+        // Compensated, as pandas' group_sum / group_mean (br-frankenpandas-xhogl).
+        let mut acc = vec![fp_types::KahanSum::default(); range];
         let mut cnt = vec![0_u64; range];
         let mut first_row = vec![usize::MAX; range];
         for (row, (&k, &v)) in keys.iter().zip(vals.iter()).enumerate() {
@@ -105428,7 +106280,7 @@ impl DataFrameGroupBy<'_> {
             if first_row[slot] == usize::MAX {
                 first_row[slot] = row;
             }
-            acc[slot] += v;
+            acc[slot].add(v);
             cnt[slot] += 1;
         }
 
@@ -105459,9 +106311,9 @@ impl DataFrameGroupBy<'_> {
             .iter()
             .map(|&slot| {
                 if func_name == "sum" {
-                    Scalar::Float64(acc[slot])
+                    Scalar::Float64(acc[slot].sum())
                 } else {
-                    Scalar::Float64(acc[slot] / cnt[slot] as f64)
+                    Scalar::Float64(acc[slot].sum() / cnt[slot] as f64)
                 }
             })
             .collect();
@@ -105474,8 +106326,9 @@ impl DataFrameGroupBy<'_> {
     /// Stable shared-nothing variance/std for a bounded Int64 key and all-valid
     /// Float64 value columns. Each row morsel counting-partitions its values by
     /// direct-address key slot. Group workers then consume the morsel partitions
-    /// in input order, so every group's sum and squared-deviation folds are
-    /// bit-identical to the serial dense reducer while independent groups run on
+    /// in input order, so every group's Welford update (pandas' group_var,
+    /// br-frankenpandas-xhogl) is bit-identical to the serial dense reducer
+    /// while independent groups run on
     /// separate cores without locks. Unlike column-only parallelism, this can use
     /// all available CPUs even for a one-column frame, and it never materializes
     /// the input-sized `gid_per_row` bridge.
@@ -105608,40 +106461,33 @@ impl DataFrameGroupBy<'_> {
                         let Some(&slot) = slots.get(index) else {
                             break;
                         };
+                        // The group's rows in input order (morsels in order,
+                        // rows ascending within each), Welford as pandas'
+                        // group_var (br-frankenpandas-xhogl).
                         let mut count = 0usize;
-                        let mut sums = vec![0.0_f64; ncols];
+                        let mut moments = vec![fp_types::WelfordVar::default(); ncols];
                         for (row_ids, offsets, _) in partitions {
                             let rows = &row_ids[offsets[slot]..offsets[slot + 1]];
                             count += rows.len();
                             for &row in rows {
                                 let row = row as usize;
                                 for column in 0..ncols {
-                                    sums[column] += value_slices[column][row];
+                                    moments[column].add(value_slices[column][row]);
                                 }
                             }
                         }
-                        let means: Vec<f64> = sums.iter().map(|sum| *sum / count as f64).collect();
-                        let mut sumsq = vec![0.0_f64; ncols];
-                        for (row_ids, offsets, _) in partitions {
-                            let rows = &row_ids[offsets[slot]..offsets[slot + 1]];
-                            for &row in rows {
-                                let row = row as usize;
-                                for column in 0..ncols {
-                                    sumsq[column] +=
-                                        (value_slices[column][row] - means[column]).powi(2);
-                                }
-                            }
-                        }
-                        if func_name == "std" && count > 1 {
-                            for value in &mut sumsq {
-                                *value = (*value / (count - 1) as f64).sqrt();
-                            }
-                        } else if count > 1 {
-                            for value in &mut sumsq {
-                                *value /= (count - 1) as f64;
-                            }
-                        }
-                        results.push((slot, count, sumsq));
+                        let spreads: Vec<f64> = moments
+                            .iter()
+                            .map(|group| {
+                                let spread = if func_name == "std" {
+                                    group.std(1)
+                                } else {
+                                    group.var(1)
+                                };
+                                spread.unwrap_or(0.0)
+                            })
+                            .collect();
+                        results.push((slot, count, spreads));
                     }
                     results
                 }));
@@ -107423,7 +108269,7 @@ impl DataFrameGroupBy<'_> {
             return self.var();
         }
         self.refuse_text_columns("var")?;
-        float_moment_frame(self.aggregate_each_group(|vals| fp_types::nanvar(vals, ddof))?)
+        float_moment_frame(self.aggregate_each_group(|vals| fp_types::nanvar_grouped(vals, ddof))?)
     }
 
     /// GroupBy standard deviation with pandas' `ddof`; `std_ddof(1)` is
@@ -107433,7 +108279,7 @@ impl DataFrameGroupBy<'_> {
             return self.std();
         }
         self.refuse_text_columns("std")?;
-        float_moment_frame(self.aggregate_each_group(|vals| fp_types::nanstd(vals, ddof))?)
+        float_moment_frame(self.aggregate_each_group(|vals| fp_types::nanstd_grouped(vals, ddof))?)
     }
 
     /// GroupBy standard error of the mean with pandas' `ddof`; `sem_ddof(1)`
@@ -109061,8 +109907,11 @@ impl DataFrameGroupBy<'_> {
     /// every `(col, func)` spec in one pass per value column, emitting each
     /// group's value in `emit` order (the gids in output order — `order` for the
     /// int64-dense bypass, `go_gid` for the build_groups path). Bit-identical to
-    /// the per-group `apply_agg_func` reduce: a single sum/count fold, a second
-    /// mean-centered sumsq fold for var/std (ddof=1, n<=1 ⇒ Null).
+    /// the per-group `apply_agg_func` reduce: a compensated sum/count fold and a
+    /// Welford update for var/std (ddof=1, n<=1 ⇒ Null), as pandas' group
+    /// kernels (br-frankenpandas-xhogl), skew group_skew's online third-moment
+    /// update (br-frankenpandas-vjfq9); kurt keeps its plain sum and second
+    /// mean-centered pass.
     fn moments_by_pair(
         &self,
         specs: &[(String, String)],
@@ -109117,6 +109966,28 @@ impl DataFrameGroupBy<'_> {
             let want_last = needs("last");
             let want_minmax = needs("min") || needs("max");
             let want_prod = needs("prod");
+            // sum / mean compensated, var / std / sem Welford and skew the
+            // online third-moment update, as pandas' group kernels
+            // (br-frankenpandas-xhogl, br-frankenpandas-vjfq9); `sum` stays the
+            // plain fold kurt's two-pass moments centre on.
+            let want_kahan = needs("sum") || needs("mean");
+            let want_welford = needs("var") || needs("std") || needs("sem");
+            let want_skew = needs("skew");
+            let mut kahan = if want_kahan {
+                vec![fp_types::KahanSum::default(); ngroups]
+            } else {
+                Vec::new()
+            };
+            let mut welford = if want_welford {
+                vec![fp_types::WelfordVar::default(); ngroups]
+            } else {
+                Vec::new()
+            };
+            let mut skew_moments = if want_skew {
+                vec![fp_types::SkewMoments::default(); ngroups]
+            } else {
+                Vec::new()
+            };
             let mut mn = if want_minmax {
                 vec![f64::INFINITY; ngroups]
             } else {
@@ -109158,6 +110029,15 @@ impl DataFrameGroupBy<'_> {
                 }
                 sum[g] += v;
                 cnt[g] += 1;
+                if want_kahan {
+                    kahan[g].add(v);
+                }
+                if want_welford {
+                    welford[g].add(v);
+                }
+                if want_skew {
+                    skew_moments[g].add(v);
+                }
                 if want_minmax {
                     mn[g] = mn[g].min(v);
                     mx[g] = mx[g].max(v);
@@ -109168,7 +110048,10 @@ impl DataFrameGroupBy<'_> {
             }
 
             if needs("sum") {
-                let out: Vec<Scalar> = emit.iter().map(|&g| Scalar::Float64(sum[g])).collect();
+                let out: Vec<Scalar> = emit
+                    .iter()
+                    .map(|&g| Scalar::Float64(kahan[g].sum()))
+                    .collect();
                 by_pair.insert(
                     (col_name.clone(), "sum".to_owned()),
                     Column::from_values(out)?,
@@ -109184,7 +110067,7 @@ impl DataFrameGroupBy<'_> {
             if needs("mean") {
                 let out: Vec<Scalar> = emit
                     .iter()
-                    .map(|&g| Scalar::Float64(sum[g] / cnt[g] as f64))
+                    .map(|&g| Scalar::Float64(kahan[g].sum() / cnt[g] as f64))
                     .collect();
                 by_pair.insert(
                     (col_name.clone(), "mean".to_owned()),
@@ -109236,54 +110119,35 @@ impl DataFrameGroupBy<'_> {
                 || needs("kurt")
                 || needs("kurtosis")
             {
-                let means: Vec<f64> = (0..ngroups).map(|g| sum[g] / cnt[g] as f64).collect();
-                let mut sumsq = vec![0.0_f64; ngroups];
-                let need_m3 = needs("skew");
                 let need_m4 = needs("kurt") || needs("kurtosis");
-                // Allocation follows the same demand flags the loop already used.
-                // m3v is read only under `needs("skew")` (== need_m3) and m4v only
-                // under `need_m4`, so an unrequested moment costs nothing at all now
-                // rather than an ngroups-sized zeroed Vec.
-                let mut m3v = if need_m3 {
-                    vec![0.0_f64; ngroups]
-                } else {
-                    Vec::new()
-                };
-                let mut m4v = if need_m4 {
-                    vec![0.0_f64; ngroups]
-                } else {
-                    Vec::new()
-                };
-                for (row, &v) in vals.iter().enumerate() {
-                    let g = gid_per_row[row];
-                    let d = v - means[g];
-                    // d2 reuse; see group_moment_dense. When only sumsq is wanted the
-                    // cost is unchanged (one multiply either way), so the gated arms
-                    // below lose nothing by it.
-                    let d2 = d * d;
-                    sumsq[g] += d2;
-                    if need_m3 {
-                        m3v[g] += d2 * d;
-                    }
-                    if need_m4 {
+                // kurt's second, mean-centered pass - the only moment still taken
+                // in two passes - runs only when kurt is asked for.
+                let mut sumsq = Vec::new();
+                let mut m4v = Vec::new();
+                if need_m4 {
+                    let means: Vec<f64> = (0..ngroups).map(|g| sum[g] / cnt[g] as f64).collect();
+                    sumsq = vec![0.0_f64; ngroups];
+                    m4v = vec![0.0_f64; ngroups];
+                    for (row, &v) in vals.iter().enumerate() {
+                        let g = gid_per_row[row];
+                        let d = v - means[g];
+                        // d2 reuse; see group_moment_dense.
+                        let d2 = d * d;
+                        sumsq[g] += d2;
                         m4v[g] += d2 * d2;
                     }
                 }
-                // sem / skew / kurt reproduce fp_types::nansem_grouped/nanskew/
-                // nankurt exactly (two-pass mean-centered moments over the same
-                // finite ascending-row values; here the column is all-valid f64 so
-                // every value is included). Bit-identical to the agg_values_scalar
-                // path.
+                // sem / skew / kurt reproduce fp_types::nansem_grouped/
+                // nanskew_grouped/nankurt exactly (the same row-order folds over
+                // the same values; here the column is all-valid f64 so every value
+                // is included). Bit-identical to the agg_values_scalar path.
                 if needs("sem") {
                     let out: Vec<Scalar> = emit
                         .iter()
                         .map(|&g| {
-                            if cnt[g] <= 1 {
-                                Scalar::Null(NullKind::NaN)
-                            } else {
-                                let n = cnt[g] as f64;
-                                Scalar::Float64((sumsq[g] / (n - 1.0) / n).sqrt())
-                            }
+                            welford[g]
+                                .sem(1)
+                                .map_or(Scalar::Null(NullKind::NaN), Scalar::Float64)
                         })
                         .collect();
                     by_pair.insert(
@@ -109291,19 +110155,13 @@ impl DataFrameGroupBy<'_> {
                         Column::from_values(out)?,
                     );
                 }
-                if needs("skew") {
+                if want_skew {
                     let out: Vec<Scalar> = emit
                         .iter()
                         .map(|&g| {
-                            let n = cnt[g] as f64;
-                            if n < 3.0 {
-                                return Scalar::Null(NullKind::NaN);
-                            }
-                            let s2 = sumsq[g] / (n - 1.0);
-                            if s2 == 0.0 {
-                                return Scalar::Float64(0.0);
-                            }
-                            Scalar::Float64((n / ((n - 1.0) * (n - 2.0))) * (m3v[g] / s2.powf(1.5)))
+                            skew_moments[g]
+                                .skew()
+                                .map_or(Scalar::Null(NullKind::NaN), Scalar::Float64)
                         })
                         .collect();
                     by_pair.insert(
@@ -109337,13 +110195,7 @@ impl DataFrameGroupBy<'_> {
                 if needs("var") {
                     let out: Vec<Scalar> = emit
                         .iter()
-                        .map(|&g| {
-                            if cnt[g] <= 1 {
-                                Scalar::Null(NullKind::NaN)
-                            } else {
-                                Scalar::Float64(sumsq[g] / (cnt[g] - 1) as f64)
-                            }
-                        })
+                        .map(|&g| moment_spread(welford[g], false))
                         .collect();
                     by_pair.insert(
                         (col_name.clone(), "var".to_owned()),
@@ -109353,13 +110205,7 @@ impl DataFrameGroupBy<'_> {
                 if needs("std") {
                     let out: Vec<Scalar> = emit
                         .iter()
-                        .map(|&g| {
-                            if cnt[g] <= 1 {
-                                Scalar::Null(NullKind::NaN)
-                            } else {
-                                Scalar::Float64((sumsq[g] / (cnt[g] - 1) as f64).sqrt())
-                            }
-                        })
+                        .map(|&g| moment_spread(welford[g], true))
                         .collect();
                     by_pair.insert(
                         (col_name.clone(), "std".to_owned()),
@@ -109656,9 +110502,11 @@ impl DataFrameGroupBy<'_> {
         group_vals: &[Scalar],
         dtype: DType,
     ) -> Result<Scalar, FrameError> {
+        // sum / mean compensated, std / var Welford, as pandas' group kernels
+        // (br-frankenpandas-xhogl).
         match func_name {
             "sum" => Ok(Self::sum_group_vals(dtype, group_vals)),
-            "mean" => Ok(fp_types::nanmean(group_vals)),
+            "mean" => Ok(fp_types::nanmean_grouped(group_vals)),
             "count" => Ok(fp_types::nancount(group_vals)),
             // pandas' size counts every row, missing values included (a
             // named ("col", "size") aggregation was rejected).
@@ -109667,8 +110515,8 @@ impl DataFrameGroupBy<'_> {
             )),
             "min" => Ok(fp_types::nanmin(group_vals)),
             "max" => Ok(fp_types::nanmax(group_vals)),
-            "std" => Ok(fp_types::nanstd(group_vals, 1)),
-            "var" => Ok(fp_types::nanvar(group_vals, 1)),
+            "std" => Ok(fp_types::nanstd_grouped(group_vals, 1)),
+            "var" => Ok(fp_types::nanvar_grouped(group_vals, 1)),
             "median" => Ok(fp_types::nanmedian(group_vals)),
             // pandas skips nulls for first/last (br-frankenpandas-iq9gz).
             "first" => Ok(group_vals
@@ -109684,8 +110532,9 @@ impl DataFrameGroupBy<'_> {
                 .unwrap_or(Scalar::Null(NullKind::NaN))),
             "nunique" => Ok(fp_types::nannunique(group_vals)),
             "prod" => Ok(fp_types::nanprod(group_vals)),
-            // Statistical moments (br-frankenpandas-zge5s).
-            "skew" => Ok(fp_types::nanskew(group_vals)),
+            // Statistical moments (br-frankenpandas-zge5s); skew is pandas'
+            // online group_skew (br-frankenpandas-vjfq9).
+            "skew" => Ok(fp_types::nanskew_grouped(group_vals)),
             "kurt" | "kurtosis" => Ok(fp_types::nankurt(group_vals)),
             "sem" => Ok(fp_types::nansem_grouped(group_vals, 1)),
             other => Err(FrameError::CompatibilityRejected(format!(
@@ -109726,10 +110575,10 @@ impl DataFrameGroupBy<'_> {
                 "False".to_owned()
             }),
             Scalar::Object(object) => IndexLabel::Object(object.clone()),
-            // A period is its own label (45fzr); an interval as pandas
-            // prints it (group_key_label; fvsao.54).
+            // A period is its own label (45fzr), an interval too (c27hq; it
+            // labelled its text).
             Scalar::Period(period) => IndexLabel::Period(*period),
-            Scalar::Interval(interval) => IndexLabel::Utf8(interval.to_string()),
+            Scalar::Interval(interval) => IndexLabel::Interval(*interval),
             other => IndexLabel::Utf8(format!("{other:?}")),
         }
     }
@@ -110276,9 +111125,10 @@ impl DataFrameGroupBy<'_> {
     /// (br-frankenpandas-8kags + follow-ups). Returns `None` (caller falls back to
     /// the generic Scalar path) unless a dense gid layout applies and every value
     /// column is a dense Float64/Int64 slice. Bit-identical to the generic path:
-    /// the per-gid accumulators reproduce `nanmean`/`nancount`/`nanmin`/`nanmax`/
-    /// `nanmedian`/first/last/`nanprod`/`nanvar`/`nanstd`/`sum_group_vals` over each
-    /// group in row order (the same folds `apply_agg_func` runs); the broadcast
+    /// the per-gid accumulators reproduce `nanmean_grouped`/`nancount`/`nanmin`/
+    /// `nanmax`/`nanmedian`/first/last/`nanprod`/`nanvar_grouped`/`nanstd_grouped`/
+    /// `sum_group_vals` over each group in row order (the same folds
+    /// `apply_agg_func` runs); the broadcast
     /// writes the same value at every row, emitted via the typed constructors.
     fn try_transform_dense(
         &self,
@@ -110310,17 +111160,16 @@ impl DataFrameGroupBy<'_> {
         let mut col_order = Vec::with_capacity(value_cols.len());
         for col_name in value_cols {
             let col = &self.df.columns[col_name];
+            // sum / mean compensated, var / std Welford, as pandas' group
+            // kernels (br-frankenpandas-xhogl).
             let column = if let Some(vals) = col.as_f64_slice() {
                 match func_name {
                     "mean" => {
-                        let mut acc = vec![0.0_f64; ngroups];
-                        let mut cnt = vec![0u64; ngroups];
-                        for (row, &v) in vals.iter().enumerate() {
-                            let g = gid_per_row[row];
-                            acc[g] += v;
-                            cnt[g] += 1;
-                        }
-                        let agg: Vec<f64> = (0..ngroups).map(|g| acc[g] / cnt[g] as f64).collect();
+                        let (sums, cnt) =
+                            grouped_sums(&gid_per_row, ngroups, vals.iter().map(|&v| Some(v)));
+                        let agg: Vec<f64> = (0..ngroups)
+                            .map(|g| sums[g].sum() / cnt[g] as f64)
+                            .collect();
                         Column::from_f64_values(gid_per_row.iter().map(|&g| agg[g]).collect())
                     }
                     "count" => {
@@ -110357,57 +111206,20 @@ impl DataFrameGroupBy<'_> {
                         Column::from_f64_values(gid_per_row.iter().map(|&g| acc[g]).collect())
                     }
                     "sum" => {
-                        let mut acc = vec![0.0_f64; ngroups];
-                        for (row, &v) in vals.iter().enumerate() {
-                            acc[gid_per_row[row]] += v;
-                        }
-                        Column::from_f64_values(gid_per_row.iter().map(|&g| acc[g]).collect())
+                        let (sums, _) =
+                            grouped_sums(&gid_per_row, ngroups, vals.iter().map(|&v| Some(v)));
+                        Column::from_f64_values(
+                            gid_per_row.iter().map(|&g| sums[g].sum()).collect(),
+                        )
                     }
                     "var" | "std" => {
-                        let want_std = func_name == "std";
-                        let mut sum = vec![0.0_f64; ngroups];
-                        let mut cnt = vec![0u64; ngroups];
-                        for (row, &v) in vals.iter().enumerate() {
-                            let g = gid_per_row[row];
-                            sum[g] += v;
-                            cnt[g] += 1;
-                        }
                         // All groups size <= 1 ⇒ every var is Null; the generic
                         // path then infers a non-Float64 (all-null) column dtype,
-                        // which the typed validity constructor cannot reproduce.
-                        // Bail so the generic path owns that degenerate shape.
-                        if cnt.iter().all(|&c| c <= 1) {
-                            return None;
-                        }
-                        let means: Vec<f64> =
-                            (0..ngroups).map(|g| sum[g] / cnt[g] as f64).collect();
-                        let mut sumsq = vec![0.0_f64; ngroups];
-                        for (row, &v) in vals.iter().enumerate() {
-                            let g = gid_per_row[row];
-                            sumsq[g] += (v - means[g]).powi(2);
-                        }
-                        let agg: Vec<f64> = (0..ngroups)
-                            .map(|g| {
-                                if cnt[g] <= 1 {
-                                    0.0
-                                } else {
-                                    let var = sumsq[g] / (cnt[g] - 1) as f64;
-                                    if want_std { var.sqrt() } else { var }
-                                }
-                            })
-                            .collect();
-                        let mut data = Vec::with_capacity(nrows);
-                        let mut words = vec![0u64; nrows.div_ceil(64)];
-                        for (row, &g) in gid_per_row.iter().enumerate() {
-                            data.push(agg[g]);
-                            if cnt[g] > 1 {
-                                words[row / 64] |= 1u64 << (row % 64);
-                            }
-                        }
-                        Column::from_f64_values_with_validity(
-                            data,
-                            fp_columnar::ValidityMask::from_words(words, nrows),
-                        )
+                        // which the typed validity constructor cannot reproduce -
+                        // broadcast_spread bails so the generic path owns it.
+                        let moments =
+                            grouped_welford(&gid_per_row, ngroups, vals.iter().map(|&v| Some(v)));
+                        broadcast_spread(&gid_per_row, &moments, func_name == "std")?
                     }
                     _ => {
                         let want_min = func_name == "min";
@@ -110436,36 +111248,30 @@ impl DataFrameGroupBy<'_> {
                 // BIT-IDENTICAL to apply_agg_func's nan* reductions: mean/sum skip
                 // missing (all-missing group -> mean NaN, sum 0.0), count counts
                 // non-missing. Other funcs keep the generic path (return None).
+                let present = || {
+                    data.iter()
+                        .enumerate()
+                        .map(|(row, &v)| validity.get(row).then_some(v))
+                };
                 match func_name {
                     "mean" => {
-                        let mut acc = vec![0.0_f64; ngroups];
-                        let mut cnt = vec![0u64; ngroups];
-                        for (row, &v) in data.iter().enumerate() {
-                            if validity.get(row) {
-                                let g = gid_per_row[row];
-                                acc[g] += v;
-                                cnt[g] += 1;
-                            }
-                        }
+                        let (sums, cnt) = grouped_sums(&gid_per_row, ngroups, present());
                         let agg: Vec<f64> = (0..ngroups)
                             .map(|g| {
                                 if cnt[g] == 0 {
                                     f64::NAN
                                 } else {
-                                    acc[g] / cnt[g] as f64
+                                    sums[g].sum() / cnt[g] as f64
                                 }
                             })
                             .collect();
                         Column::from_f64_values(gid_per_row.iter().map(|&g| agg[g]).collect())
                     }
                     "sum" => {
-                        let mut acc = vec![0.0_f64; ngroups];
-                        for (row, &v) in data.iter().enumerate() {
-                            if validity.get(row) {
-                                acc[gid_per_row[row]] += v;
-                            }
-                        }
-                        Column::from_f64_values(gid_per_row.iter().map(|&g| acc[g]).collect())
+                        let (sums, _) = grouped_sums(&gid_per_row, ngroups, present());
+                        Column::from_f64_values(
+                            gid_per_row.iter().map(|&g| sums[g].sum()).collect(),
+                        )
                     }
                     _ => {
                         // count of non-missing per group, broadcast
@@ -110534,14 +111340,14 @@ impl DataFrameGroupBy<'_> {
                 let vals = col.as_i64_slice()?;
                 match func_name {
                     "mean" => {
-                        let mut sum = vec![0.0_f64; ngroups];
-                        let mut cnt = vec![0u64; ngroups];
-                        for (row, &v) in vals.iter().enumerate() {
-                            let g = gid_per_row[row];
-                            sum[g] += v as f64;
-                            cnt[g] += 1;
-                        }
-                        let agg: Vec<f64> = (0..ngroups).map(|g| sum[g] / cnt[g] as f64).collect();
+                        let (sums, cnt) = grouped_sums(
+                            &gid_per_row,
+                            ngroups,
+                            vals.iter().map(|&v| Some(v as f64)),
+                        );
+                        let agg: Vec<f64> = (0..ngroups)
+                            .map(|g| sums[g].sum() / cnt[g] as f64)
+                            .collect();
                         Column::from_f64_values(gid_per_row.iter().map(|&g| agg[g]).collect())
                     }
                     "count" => {
@@ -110600,47 +111406,13 @@ impl DataFrameGroupBy<'_> {
                         )
                     }
                     "var" | "std" => {
-                        // nanvar coerces Int64 -> f64; ddof=1, n<=1 -> Null(NaN).
-                        let want_std = func_name == "std";
-                        let mut sum = vec![0.0_f64; ngroups];
-                        let mut cnt = vec![0u64; ngroups];
-                        for (row, &v) in vals.iter().enumerate() {
-                            let g = gid_per_row[row];
-                            sum[g] += v as f64;
-                            cnt[g] += 1;
-                        }
-                        if cnt.iter().all(|&c| c <= 1) {
-                            return None;
-                        }
-                        let means: Vec<f64> =
-                            (0..ngroups).map(|g| sum[g] / cnt[g] as f64).collect();
-                        let mut sumsq = vec![0.0_f64; ngroups];
-                        for (row, &v) in vals.iter().enumerate() {
-                            let g = gid_per_row[row];
-                            sumsq[g] += (v as f64 - means[g]).powi(2);
-                        }
-                        let agg: Vec<f64> = (0..ngroups)
-                            .map(|g| {
-                                if cnt[g] <= 1 {
-                                    0.0
-                                } else {
-                                    let var = sumsq[g] / (cnt[g] - 1) as f64;
-                                    if want_std { var.sqrt() } else { var }
-                                }
-                            })
-                            .collect();
-                        let mut data = Vec::with_capacity(nrows);
-                        let mut words = vec![0u64; nrows.div_ceil(64)];
-                        for (row, &g) in gid_per_row.iter().enumerate() {
-                            data.push(agg[g]);
-                            if cnt[g] > 1 {
-                                words[row / 64] |= 1u64 << (row % 64);
-                            }
-                        }
-                        Column::from_f64_values_with_validity(
-                            data,
-                            fp_columnar::ValidityMask::from_words(words, nrows),
-                        )
+                        // Int64 read as f64; ddof=1, n<=1 -> Null(NaN).
+                        let moments = grouped_welford(
+                            &gid_per_row,
+                            ngroups,
+                            vals.iter().map(|&v| Some(v as f64)),
+                        );
+                        broadcast_spread(&gid_per_row, &moments, func_name == "std")?
                     }
                     _ => {
                         let want_min = func_name == "min";
@@ -110685,11 +111457,11 @@ impl DataFrameGroupBy<'_> {
     /// An all-valid Int64 column folds in int64 by `int_op` and stays Int64, as
     /// in pandas (br-frankenpandas-azq6g); every dense layout has all-valid
     /// keys, so every row is in a group.
-    fn try_cum_dense(
+    fn try_cum_dense<A: Copy + Send + Sync>(
         &self,
-        init: f64,
+        init: A,
         nan_aware: bool,
-        step: impl Fn(f64, f64) -> f64 + Sync,
+        step: impl Fn(A, f64) -> (A, f64) + Sync,
         int_op: CumOp,
     ) -> Option<DataFrame> {
         if self.by.is_empty() {
@@ -110768,9 +111540,9 @@ impl DataFrameGroupBy<'_> {
                     let mut out = vec![0.0_f64; nrows];
                     for row in 0..nrows {
                         let off = (keys[row] as i128 - min as i128) as usize;
-                        let next = step(acc[off], vals[row]);
+                        let (next, value) = step(acc[off], vals[row]);
                         acc[off] = next;
-                        out[row] = next;
+                        out[row] = value;
                     }
                     build(out)
                 } else if let Some((data, validity)) = col.as_f64_slice_with_validity() {
@@ -110814,9 +111586,9 @@ impl DataFrameGroupBy<'_> {
                     #[allow(clippy::needless_range_loop)] // row indexes vals, gids and out
                     for row in 0..nrows {
                         let g = gid_per_row[row];
-                        let next = step(acc[g], vals[row]);
+                        let (next, value) = step(acc[g], vals[row]);
                         acc[g] = next;
-                        out[row] = next;
+                        out[row] = value;
                     }
                     build(out)
                 } else if let Some((data, validity)) = col.as_f64_slice_with_validity() {
@@ -111826,7 +112598,13 @@ impl DataFrameGroupBy<'_> {
     /// The per-group cumulative sum folded in f64 (the dtype is settled by
     /// [`cumsum`](Self::cumsum)).
     fn cumsum_f64(&self) -> Result<DataFrame, FrameError> {
-        if let Some(df) = self.try_cum_dense(0.0, false, |a, v| a + v, CumOp::Sum) {
+        // Compensated, as pandas' group_cumsum (br-frankenpandas-xhogl).
+        if let Some(df) = self.try_cum_dense(
+            fp_types::KahanSum::default(),
+            false,
+            kahan_running,
+            CumOp::Sum,
+        ) {
             return Ok(df);
         }
         // Per br-frankenpandas-ccf67: per-column Timedelta detection — the
@@ -111852,14 +112630,14 @@ impl DataFrameGroupBy<'_> {
                     })
                     .collect();
             }
-            let mut acc = 0.0_f64;
+            let mut acc = fp_types::KahanSum::default();
             vals.iter()
                 .map(|v| {
                     if v.is_missing() {
                         Scalar::Null(NullKind::NaN)
                     } else if let Ok(f) = v.to_f64() {
-                        acc += f;
-                        Scalar::Float64(acc)
+                        acc.add(f);
+                        Scalar::Float64(acc.sum())
                     } else {
                         Scalar::Null(NullKind::NaN)
                     }
@@ -111871,7 +112649,7 @@ impl DataFrameGroupBy<'_> {
     /// The per-group cumulative product folded in f64 (the dtype is settled by
     /// [`cumprod`](Self::cumprod)).
     fn cumprod_f64(&self) -> Result<DataFrame, FrameError> {
-        if let Some(df) = self.try_cum_dense(1.0, true, |a, v| a * v, CumOp::Prod) {
+        if let Some(df) = self.try_cum_dense(1.0, true, running(|a, v| a * v), CumOp::Prod) {
             return Ok(df);
         }
         // Per br-frankenpandas-ccf67: Timedelta² is dimensionless; emit NaT
@@ -111905,7 +112683,7 @@ impl DataFrameGroupBy<'_> {
         if let Some(df) = self.try_cum_dense(
             f64::NEG_INFINITY,
             false,
-            |a, v| if v > a { v } else { a },
+            running(|a, v| if v > a { v } else { a }),
             CumOp::Max,
         ) {
             return Ok(df);
@@ -111953,7 +112731,7 @@ impl DataFrameGroupBy<'_> {
         if let Some(df) = self.try_cum_dense(
             f64::INFINITY,
             false,
-            |a, v| if v < a { v } else { a },
+            running(|a, v| if v < a { v } else { a }),
             CumOp::Min,
         ) {
             return Ok(df);
@@ -112830,7 +113608,8 @@ impl DataFrameGroupBy<'_> {
                     f @ (IndexLabel::Float64(_)
                     | IndexLabel::Bool(_)
                     | IndexLabel::Object(_)
-                    | IndexLabel::Period(_)) => {
+                    | IndexLabel::Period(_)
+                    | IndexLabel::Interval(_)) => {
                         format!("{f}|{stat}")
                     }
                     IndexLabel::Null(_) => format!("{group_label}|{stat}"),
@@ -112941,7 +113720,8 @@ impl DataFrameGroupBy<'_> {
                 f @ (IndexLabel::Float64(_)
                 | IndexLabel::Bool(_)
                 | IndexLabel::Object(_)
-                | IndexLabel::Period(_)) => f.to_string(),
+                | IndexLabel::Period(_)
+                | IndexLabel::Interval(_)) => f.to_string(),
                 IndexLabel::Null(_) => label.to_string(),
             };
             if label_str == name {
@@ -113202,12 +113982,13 @@ impl DataFrameGroupBy<'_> {
     /// Dense moment fast path for the named DataFrameGroupBy moment reducers
     /// (br-frankenpandas-1q4q4): when every non-key numeric column is all-valid
     /// Float64, route through `agg_typed_pairs_dense_f64_moments` (the same
-    /// two-pass mean-centered moments the dict/list agg uses, now extended with
-    /// sem/skew/kurt) and rename its `{col}_{func}` outputs to the bare `{col}`.
+    /// moments the dict/list agg uses, extended with sem/skew/kurt) and rename
+    /// its `{col}_{func}` outputs to the bare `{col}`.
     /// Bails (→ generic `build_groups` path) when any non-key Int64/Timedelta64
     /// column is present (the f64-only dense path would silently drop it).
-    /// BIT-IDENTICAL: `moments_by_pair` reproduces `nansem`/`nanskew`/`nankurt`
-    /// exactly and `int64_dense_grouping` matches `build_groups`' group order.
+    /// BIT-IDENTICAL: `moments_by_pair` reproduces `nansem_grouped`/
+    /// `nanskew_grouped`/`nankurt` exactly and `int64_dense_grouping` matches
+    /// `build_groups`' group order.
     fn try_moment_dense(&self, func: &str) -> Result<Option<DataFrame>, FrameError> {
         // Float64 AND all-valid Int64 value columns are eligible: `try_moment_dense`
         // is only ever called with skew/sem/kurt, all of which widen an Int64 column
@@ -113397,13 +114178,14 @@ impl DataFrameGroupBy<'_> {
                 // population third moment (m3/n) with a sample variance
                 // (m2/(n-1)), yielding results off by a factor of (n/(n-1))^1.5
                 // — e.g. 0.9428 instead of pandas' 1.7320 for [10,10,40].
-                // nanskew also handles n<3 → NaN and zero-variance groups → 0.0,
-                // keeping groupby.skew consistent with Series/resample/rolling.
+                // nanskew also handles n<3 → NaN and zero-variance groups → 0.0.
+                // The grouped form is pandas' online group_skew
+                // (br-frankenpandas-vjfq9), which Series.skew is not.
                 let group_values: Vec<Scalar> = groups[gkey]
                     .iter()
                     .map(|&i| col.values()[i].clone())
                     .collect();
-                vals.push(fp_types::nanskew(&group_values));
+                vals.push(fp_types::nanskew_grouped(&group_values));
             }
 
             result_cols.insert(col_name.clone(), Column::from_values(vals)?);
@@ -126376,6 +127158,129 @@ mod tests {
         assert!(matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("not found")));
     }
 
+    /// pandas 2.2.3's `IntervalIndex` slices by points (br-frankenpandas-l0cqv).
+    #[test]
+    fn interval_slice_bounds_place_points_like_pandas_l0cqv() {
+        let intervals = |pairs: &[(f64, f64)], closed: IntervalClosed| -> Vec<IndexLabel> {
+            pairs
+                .iter()
+                .map(|&(left, right)| {
+                    IndexLabel::Interval(fp_types::Interval::new(left, right, closed))
+                })
+                .collect()
+        };
+        let float = |v: f64| IndexLabel::Float64(fp_index::OrderedF64(v));
+        let breaks = intervals(&[(0.0, 1.0), (1.0, 2.0), (2.0, 3.0)], IntervalClosed::Right);
+        let at = |labels: &[IndexLabel], start: Option<IndexLabel>, stop: Option<IndexLabel>| {
+            super::loc_slice_positions(labels, start.as_ref(), stop.as_ref())
+        };
+        // s.loc[0.5:1.5] is (0, 1], (1, 2]; s.loc[1.5:10] (1, 2], (2, 3];
+        // s.loc[-5:1.5] (0, 1], (1, 2]; s.loc[1.5:] (1, 2], (2, 3].
+        assert_eq!(
+            at(&breaks, Some(float(0.5)), Some(float(1.5))).unwrap(),
+            Some((0, 1))
+        );
+        assert_eq!(
+            at(&breaks, Some(float(1.5)), Some(IndexLabel::Int64(10))).unwrap(),
+            Some((1, 2))
+        );
+        assert_eq!(
+            at(&breaks, Some(IndexLabel::Int64(-5)), Some(float(1.5))).unwrap(),
+            Some((0, 1))
+        );
+        assert_eq!(at(&breaks, Some(float(1.5)), None).unwrap(), Some((1, 2)));
+        // The edge 1 is in (0, 1] (right-closed), in [1, 2) when left-closed.
+        assert_eq!(
+            at(&breaks, Some(IndexLabel::Int64(1)), None).unwrap(),
+            Some((0, 2))
+        );
+        let left = intervals(&[(0.0, 1.0), (1.0, 2.0), (2.0, 3.0)], IntervalClosed::Left);
+        assert_eq!(
+            at(
+                &left,
+                Some(IndexLabel::Int64(1)),
+                Some(IndexLabel::Int64(2))
+            )
+            .unwrap(),
+            Some((1, 2))
+        );
+        // A gap: [(0, 1], (2, 3]].loc[1.5:2.5] is (2, 3]; loc[1.2:1.8] nothing.
+        let gap = intervals(&[(0.0, 1.0), (2.0, 3.0)], IntervalClosed::Right);
+        assert_eq!(
+            at(&gap, Some(float(1.5)), Some(float(2.5))).unwrap(),
+            Some((1, 1))
+        );
+        assert_eq!(at(&gap, Some(float(1.2)), Some(float(1.8))).unwrap(), None);
+        // Decreasing: [(2, 3], (1, 2], (0, 1]].loc[10:1.5] is (2, 3], (1, 2].
+        let decreasing = intervals(&[(2.0, 3.0), (1.0, 2.0), (0.0, 1.0)], IntervalClosed::Right);
+        assert_eq!(
+            at(&decreasing, Some(IndexLabel::Int64(10)), Some(float(1.5))).unwrap(),
+            Some((0, 1))
+        );
+        // Overlapping: a point in one run is its bound; outside every
+        // interval it is pandas' KeyError, as is a point in two runs apart.
+        let overlapping = intervals(&[(0.0, 2.0), (1.0, 3.0)], IntervalClosed::Right);
+        assert_eq!(
+            at(&overlapping, Some(float(0.5)), Some(float(1.5))).unwrap(),
+            Some((0, 1))
+        );
+        let err = at(&overlapping, Some(IndexLabel::Int64(5)), None).unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("can only get slices from an IntervalIndex")
+        );
+        let apart = intervals(&[(0.0, 2.0), (5.0, 6.0), (1.0, 3.0)], IntervalClosed::Right);
+        let err = at(&apart, Some(float(1.5)), None).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Cannot get left slice bound for non-unique label: 1.5"
+        );
+        // An empty selection keeps the dtype (it became object).
+        let s = Series::from_values("v", gap.clone(), vec![Scalar::Int64(1), Scalar::Int64(2)])
+            .unwrap();
+        let out = s.loc_slice(Some(&float(1.2)), Some(&float(1.8))).unwrap();
+        assert_eq!((out.len(), out.column().dtype()), (0, DType::Int64));
+        // Interval bounds keep the label path.
+        assert_eq!(
+            at(&breaks, Some(breaks[0].clone()), Some(breaks[1].clone())).unwrap(),
+            Some((0, 1))
+        );
+        // A float bound on a sorted integer index falls where it sorts.
+        let ints = vec![
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(3),
+        ];
+        assert_eq!(
+            at(&ints, Some(float(1.5)), Some(float(2.5))).unwrap(),
+            Some((1, 1))
+        );
+        let descending = vec![
+            IndexLabel::Int64(3),
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(1),
+        ];
+        assert_eq!(
+            at(&descending, Some(float(2.5)), Some(float(1.5))).unwrap(),
+            Some((1, 1))
+        );
+        assert_eq!(
+            at(
+                &descending,
+                Some(IndexLabel::Int64(1)),
+                Some(IndexLabel::Int64(3))
+            )
+            .unwrap(),
+            None
+        );
+        let unsorted = vec![
+            IndexLabel::Int64(3),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+        ];
+        assert!(at(&unsorted, Some(float(1.5)), None).is_err());
+    }
+
     #[test]
     fn series_iloc_slice_exclusive_end() {
         let s = Series::from_values(
@@ -129119,7 +130024,7 @@ mod tests {
     }
 
     #[test]
-    fn dataframe_set_index_rejects_missing_or_unsupported_labels() {
+    fn dataframe_set_index_takes_period_interval_and_missing_labels() {
         let df = DataFrame::from_dict(
             &["id", "v"],
             vec![
@@ -129188,9 +130093,14 @@ mod tests {
             ],
         )
         .unwrap();
-        let err = df_interval.set_index("id", true).unwrap_err();
-        assert!(
-            matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("set_index currently supports"))
+        // An interval key is an interval label (l0cqv; it was refused).
+        let indexed = df_interval.set_index("id", true).unwrap();
+        assert_eq!(
+            indexed.index().labels(),
+            &[
+                IndexLabel::Interval(fp_types::Interval::new(0.0, 1.0, IntervalClosed::Right)),
+                IndexLabel::Interval(fp_types::Interval::new(1.0, 2.0, IntervalClosed::Right)),
+            ]
         );
 
         // A missing key is a missing label, as pandas' set_index (it was
@@ -132561,6 +133471,110 @@ mod tests {
         };
         assert!(concat(&[&ints, &text]).is_err());
         assert!(concat(&[&ints, &ints]).is_ok());
+    }
+
+    #[test]
+    fn explode_keeps_a_non_object_dtype_like_pandas_xxryq() {
+        use fp_types::ObjectValue;
+        let labels = vec![IndexLabel::Int64(4), IndexLabel::Int64(3)];
+        // A float / int / Int64 Series holds no list: pandas returns it,
+        // dtype and all (it came back object).
+        for (values, dtype) in [
+            (
+                vec![Scalar::Float64(3.0), Scalar::Null(NullKind::NaN)],
+                DType::Float64,
+            ),
+            (vec![Scalar::Int64(3), Scalar::Int64(4)], DType::Int64),
+        ] {
+            let series = Series::from_values("s", labels.clone(), values).unwrap();
+            let exploded = series.explode_lists(false).unwrap();
+            assert_eq!(exploded.column().dtype(), dtype);
+            assert_eq!(exploded.index().labels(), labels.as_slice());
+            let renumbered = series.explode_lists(true).unwrap();
+            assert_eq!(renumbered.column().dtype(), dtype);
+            assert_eq!(renumbered.index().labels()[1], IndexLabel::Int64(1));
+        }
+        // A frame's float column exploded beside a list column keeps float64
+        // when it is the one exploded alone.
+        let list = |items: Vec<Scalar>| Scalar::Object(ObjectValue::list(items));
+        let frame = DataFrame::from_dict(
+            &["a", "b"],
+            vec![
+                ("a", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+                (
+                    "b",
+                    vec![
+                        list(vec![Scalar::Int64(1)]),
+                        list(vec![Scalar::Int64(2), Scalar::Int64(3)]),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let by_a = frame.explode_lists(&["a"], false).unwrap();
+        assert_eq!(by_a.column("a").unwrap().dtype(), DType::Float64);
+        assert_eq!(by_a.len(), 2);
+        // NEGATIVE: the object list column still explodes to object rows,
+        // the float column repeating with its dtype.
+        let by_b = frame.explode_lists(&["b"], false).unwrap();
+        assert_eq!(by_b.len(), 3);
+        assert_eq!(by_b.column("b").unwrap().dtype(), DType::Utf8);
+        assert_eq!(by_b.column("a").unwrap().dtype(), DType::Float64);
+    }
+
+    #[test]
+    fn mode_keeps_the_source_dtype_like_pandas_5thmj() {
+        let labels = |n: i64| (0..n).map(IndexLabel::Int64).collect::<Vec<_>>();
+        // The missing value as the mode keeps the column's dtype (it was
+        // Int64 whatever the column).
+        let floats = Series::from_values(
+            "f",
+            labels(3),
+            vec![
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(1.0),
+            ],
+        )
+        .unwrap();
+        let modes = floats.mode_with_dropna(false).unwrap();
+        assert_eq!(modes.column().dtype(), DType::Float64);
+        assert_eq!(modes.len(), 1);
+        assert!(modes.values()[0].is_missing());
+        let text = Series::from_values(
+            "t",
+            labels(3),
+            vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::Null),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            text.mode_with_dropna(false).unwrap().column().dtype(),
+            DType::Utf8
+        );
+        // An all-missing column's empty mode keeps it too (it was object).
+        let gaps = Series::from_values(
+            "g",
+            labels(2),
+            vec![Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)],
+        )
+        .unwrap();
+        let empty = gaps.mode_with_dropna(true).unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(empty.column().dtype(), gaps.column().dtype());
+        // NEGATIVE: a present int mode stays Int64.
+        let ints = Series::from_values(
+            "i",
+            labels(3),
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(2)],
+        )
+        .unwrap();
+        let int_modes = ints.mode_with_dropna(true).unwrap();
+        assert_eq!(int_modes.column().dtype(), DType::Int64);
+        assert_eq!(int_modes.values(), &[Scalar::Int64(2)]);
     }
 
     #[test]
@@ -167556,13 +168570,16 @@ mod tests {
         // Bins are Timestamps, as pandas keys them (br-frankenpandas-0yilt).
         let bin = |date: &str| IndexLabel::Datetime64(parse_datetime64_nanos(date).unwrap());
 
-        assert_eq!(resample.keys(), vec![bin("2024-01-31"), bin("2024-02-29")]);
-        assert_eq!(resample.ngroups(), 2);
+        assert_eq!(
+            resample.keys().unwrap(),
+            vec![bin("2024-01-31"), bin("2024-02-29")]
+        );
+        assert_eq!(resample.ngroups().unwrap(), 2);
         assert_eq!(resample.ndim(), 1);
         assert_eq!(resample.grouper(), "M");
         assert!(resample.exclusions().is_empty());
         assert_eq!(
-            resample.indices().get(&bin("2024-01-31")),
+            resample.indices().unwrap().get(&bin("2024-01-31")),
             Some(&vec![0, 1])
         );
         assert_eq!(resample.get_group("2024-02-29").unwrap().len(), 3);
@@ -167619,7 +168636,7 @@ mod tests {
             ohlc.columns()["close"].values(),
             &[Scalar::Float64(3.0), Scalar::Float64(5.0)]
         );
-        assert_eq!(resample.pipe(|r| Ok(r.ngroups())).unwrap(), 2);
+        assert_eq!(resample.pipe(|r| r.ngroups()).unwrap(), 2);
         assert_eq!(
             resample.asfreq().unwrap().values(),
             &[Scalar::Null(NullKind::NaN), Scalar::Null(NullKind::NaN)]
@@ -168931,12 +169948,12 @@ mod tests {
         .unwrap();
         let resample = df.resample("M");
 
-        assert_eq!(resample.ngroups(), 2);
+        assert_eq!(resample.ngroups().unwrap(), 2);
         assert_eq!(resample.ndim(), 2);
         assert_eq!(resample.level(), "M");
         // Bins are Timestamps, as pandas keys them (br-frankenpandas-0yilt).
         let february = IndexLabel::Datetime64(parse_datetime64_nanos("2024-02-29").unwrap());
-        assert_eq!(resample.groups().get(&february), Some(&vec![2, 3]));
+        assert_eq!(resample.groups().unwrap().get(&february), Some(&vec![2, 3]));
         assert_eq!(resample.get_group("2024-01-31").unwrap().len(), 2);
 
         let aggregate = resample
@@ -172792,6 +173809,39 @@ mod tests {
                 Scalar::Null(NullKind::NaN),
             ]
         );
+    }
+
+    /// pandas 2.2.3: mode(axis=1)'s columns are the RangeIndex 0..n, and a
+    /// row padded with a missing mode makes numpy ints float64 throughout
+    /// (br-frankenpandas-fsf9r).
+    #[test]
+    fn df_mode_axis1_range_columns_and_padded_float_fsf9r() {
+        let frame = |b: i64| {
+            DataFrame::from_dict(
+                &["a", "b"],
+                vec![
+                    ("a", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                    ("b", vec![Scalar::Int64(1), Scalar::Int64(b)]),
+                ],
+            )
+            .unwrap()
+        };
+        let padded = frame(3).mode_with_options(1, false, true).unwrap();
+        assert_eq!(
+            padded.column_labels(),
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)]
+        );
+        assert_eq!(padded.column_range_span(), Some((0, 2, 1)));
+        let first = padded.column("0").unwrap();
+        assert_eq!(first.dtype(), DType::Float64);
+        assert_eq!(
+            first.values(),
+            &[Scalar::Float64(1.0), Scalar::Float64(2.0)]
+        );
+        // No row padded: the ints stay int64.
+        let even = frame(2).mode_with_options(1, false, true).unwrap();
+        assert_eq!(even.column("0").unwrap().dtype(), DType::Int64);
+        assert_eq!(even.column_labels(), vec![IndexLabel::Int64(0)]);
     }
 
     #[test]
@@ -176808,6 +177858,217 @@ mod tests {
         assert_eq!(result.column().dtype(), DType::Int64);
         assert_eq!(result.column().values()[0], Scalar::Int64(42));
         assert_eq!(result.column().values()[1], Scalar::Int64(99));
+    }
+
+    #[test]
+    fn to_numeric_keeps_and_downcasts_masked_ints_tdafd() {
+        let masked = Series::from_values(
+            "m",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)],
+        )
+        .unwrap()
+        .astype(DType::Int64Nullable)
+        .unwrap();
+        // A masked Series is numbers already: itself.
+        let same = to_numeric(&masked).unwrap();
+        assert_eq!(same.column().dtype(), DType::Int64Nullable);
+        // Downcast over its present values, to the masked width.
+        let small = super::downcast_numeric(&same, "integer").unwrap();
+        assert_eq!(small.column().dtype(), DType::Int64Nullable);
+        assert_eq!(small.column().width(), Some(super::NumericWidth::Int8));
+        assert!(small.values()[1].is_missing());
+        // Text with a missing value: NaN in a float64 column (it raised).
+        let text = Series::from_values(
+            "t",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Utf8("1".to_owned()), Scalar::Null(NullKind::Null)],
+        )
+        .unwrap();
+        let parsed = to_numeric(&text).unwrap();
+        assert_eq!(parsed.column().dtype(), DType::Float64);
+        assert!(parsed.values()[1].is_missing());
+        // Negative: an unmasked int64 holding a missing value is not
+        // downcast (numpy cannot hold it in an int width).
+        let plain = Series::from_values(
+            "p",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Null(NullKind::NaN)],
+        )
+        .unwrap();
+        let kept = super::downcast_numeric(&plain, "integer").unwrap();
+        assert_eq!(kept.column().width(), plain.column().width());
+    }
+
+    #[test]
+    fn categorical_index_set_sort_reset_like_pandas_cld41() {
+        // k = Categorical(['b', 'a', 'b', 'c'], categories=['c', 'b', 'a'])
+        let text = |value: &str| Scalar::Utf8(value.to_owned());
+        let key = Series::from_categorical_codes(
+            "k",
+            vec![1, 2, 1, 0],
+            vec![text("c"), text("b"), text("a")],
+            false,
+        )
+        .unwrap();
+        let values = Column::from_values((1..=4).map(Scalar::Int64).collect()).unwrap();
+        let mut columns = std::collections::BTreeMap::new();
+        columns.insert("k".to_owned(), key.column().clone());
+        columns.insert("v".to_owned(), values);
+        let frame = DataFrame::new_with_column_order(
+            key.index().clone(),
+            columns,
+            vec!["k".to_owned(), "v".to_owned()],
+        )
+        .unwrap();
+        // set_index keeps the categories on the index.
+        let indexed = frame.set_index("k", true).unwrap();
+        let categories = indexed.index().categories().expect("a categorical index");
+        assert_eq!(
+            categories.categories,
+            vec![
+                IndexLabel::Utf8("c".into()),
+                IndexLabel::Utf8("b".into()),
+                IndexLabel::Utf8("a".into())
+            ]
+        );
+        // sort_index orders by the categories (c, b, b, a), not the text.
+        let sorted = indexed.sort_index(true).unwrap();
+        assert_eq!(
+            sorted.column("v").unwrap().values(),
+            &[
+                Scalar::Int64(4),
+                Scalar::Int64(1),
+                Scalar::Int64(3),
+                Scalar::Int64(2)
+            ]
+        );
+        // reset_index gives the categorical column back.
+        let reset = indexed.reset_index(false).unwrap();
+        assert!(reset.column("k").unwrap().categorical().is_some());
+        // NEGATIVE: a text column's index is not categorical.
+        let plain = DataFrame::from_dict(&["k"], vec![("k", vec![text("b"), text("a")])]).unwrap();
+        assert!(
+            plain
+                .set_index("k", true)
+                .unwrap()
+                .index()
+                .categories()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn convert_dtypes_switches_follow_pandas_di8vx() {
+        use super::{ConvertDtypes, convert_column_dtypes_with};
+        let all = ConvertDtypes::default();
+        let convert =
+            |column: &Column, options| convert_column_dtypes_with(column, options).unwrap();
+        let bools = Column::from_values(vec![Scalar::Bool(true), Scalar::Bool(false)]).unwrap();
+        assert_eq!(convert(&bools, all).dtype(), DType::BoolNullable);
+        // Without convert_boolean pandas makes bools Int64 (a bool is whole).
+        let no_boolean = ConvertDtypes {
+            convert_boolean: false,
+            ..all
+        };
+        assert_eq!(convert(&bools, no_boolean).dtype(), DType::Int64Nullable);
+        // Whole floats: Int64; without convert_integer Float64; without both
+        // kept float64.
+        let floats =
+            Column::from_values(vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN)]).unwrap();
+        assert_eq!(convert(&floats, all).dtype(), DType::Int64Nullable);
+        let no_integer = ConvertDtypes {
+            convert_integer: false,
+            ..all
+        };
+        assert_eq!(convert(&floats, no_integer).dtype(), DType::Float64Nullable);
+        let neither = ConvertDtypes {
+            convert_integer: false,
+            convert_floating: false,
+            ..all
+        };
+        assert_eq!(convert(&floats, neither).dtype(), DType::Float64);
+        // Text is `string` unless convert_string is off.
+        let text = Column::from_values(vec![
+            Scalar::Utf8("a".to_owned()),
+            Scalar::Null(NullKind::Null),
+        ])
+        .unwrap();
+        assert!(convert(&text, all).is_pandas_string());
+        let no_string = ConvertDtypes {
+            convert_string: false,
+            ..all
+        };
+        assert!(!convert(&text, no_string).is_pandas_string());
+        // Negative: a nullable Float64 of whole numbers is kept, as pandas
+        // keeps extension arrays.
+        let masked = floats.astype(DType::Float64Nullable).unwrap();
+        assert_eq!(convert(&masked, all).dtype(), DType::Float64Nullable);
+    }
+
+    #[test]
+    fn resample_bin_labels_and_split_multiindex_rows_h06ox() {
+        const HOUR: i64 = 3_600_000_000_000;
+        let jan1 = 1_704_067_200_000_000_000; // 2024-01-01T00:00
+        let labels = vec![
+            IndexLabel::Datetime64(jan1 + 9 * HOUR),
+            IndexLabel::Datetime64(jan1 + 58 * HOUR), // 2024-01-03T10:00
+            IndexLabel::Null(NullKind::NaT),
+        ];
+        // Each row's day bin, labelled at its left edge; a NaT in none.
+        let days = super::resample_bin_labels(&labels, "D");
+        assert_eq!(
+            days,
+            vec![
+                Some(IndexLabel::Datetime64(jan1)),
+                Some(IndexLabel::Datetime64(jan1 + 48 * HOUR)),
+                None
+            ]
+        );
+        // Month-end bins are labelled at the period's end (2024-01-31).
+        let months = super::resample_bin_labels(&labels[..2], "ME");
+        assert_eq!(months[0], months[1]);
+        assert_eq!(
+            months[0],
+            Some(IndexLabel::Datetime64(jan1 + 30 * 24 * HOUR))
+        );
+
+        // split writes each MultiIndex row as its levels' array.
+        let multi = fp_index::MultiIndex::from_tuples(vec![
+            vec![IndexLabel::Utf8("a".to_owned()), IndexLabel::Int64(1)],
+            vec![IndexLabel::Utf8("b".to_owned()), IndexLabel::Int64(2)],
+        ])
+        .unwrap();
+        let index = multi.to_flat_index("|").with_row_multiindex(multi).unwrap();
+        let series = Series::new(
+            "v",
+            index,
+            Column::from_values(vec![Scalar::Int64(0), Scalar::Int64(1)]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            series.to_json("split").unwrap(),
+            r#"{"name":"v","index":[["a",1],["b",2]],"data":[0,1]}"#
+        );
+        let frame = series.to_frame(None).unwrap();
+        assert!(
+            frame
+                .to_json("split")
+                .unwrap()
+                .contains(r#""index":[["a",1],["b",2]]"#)
+        );
+        // Negative: a flat index writes its labels.
+        let flat = Series::from_values(
+            "v",
+            vec![IndexLabel::Utf8("a|1".to_owned())],
+            vec![Scalar::Int64(0)],
+        )
+        .unwrap();
+        assert!(
+            flat.to_json("split")
+                .unwrap()
+                .contains(r#""index":["a|1"]"#)
+        );
     }
 
     #[test]
@@ -182375,6 +183636,323 @@ mod tests {
                 .column()
                 .scalar_cache_is_materialized(),
             "planted mixed-dtype negative must stay on the Scalar fallback"
+        );
+    }
+
+    #[test]
+    fn series_number_arithmetic_keeps_operands_typed_w1nrd() {
+        // `s + s` and `floats * ints` read no Scalar view of an operand: the
+        // duration-scaling pre-check read both before looking at a dtype
+        // (br-frankenpandas-w1nrd).
+        let floats = Series::new(
+            "f",
+            Index::from_range(0, 4, 1),
+            Column::from_f64_values(vec![1.5, -2.0, 0.25, 4.0]),
+        )
+        .unwrap();
+        let ints = Series::new(
+            "i",
+            Index::from_range(0, 4, 1),
+            Column::from_i64_values(vec![1, 2, 3, 4]),
+        )
+        .unwrap();
+        let sum = floats.add(&floats).unwrap();
+        let product = floats.mul(&ints).unwrap();
+        assert!(!floats.column().scalar_cache_is_materialized());
+        assert!(!ints.column().scalar_cache_is_materialized());
+        let as_f64 = |values: &[f64]| {
+            values
+                .iter()
+                .map(|&v| Scalar::Float64(v))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(sum.values(), as_f64(&[3.0, -4.0, 0.5, 8.0]).as_slice());
+        assert_eq!(
+            product.values(),
+            as_f64(&[1.5, -4.0, 0.75, 16.0]).as_slice()
+        );
+        // Negative: a duration side still scales through that path.
+        let durations = Series::new(
+            "d",
+            Index::from_range(0, 4, 1),
+            Column::new(
+                DType::Timedelta64,
+                vec![
+                    Scalar::Timedelta64(10),
+                    Scalar::Timedelta64(20),
+                    Scalar::Null(NullKind::NaT),
+                    Scalar::Timedelta64(40),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let scaled = durations.mul(&ints).unwrap();
+        assert_eq!(scaled.dtype(), DType::Timedelta64);
+        assert_eq!(scaled.values()[0], Scalar::Timedelta64(10));
+        assert_eq!(scaled.values()[1], Scalar::Timedelta64(40));
+        assert!(scaled.values()[2].is_missing());
+        assert_eq!(scaled.values()[3], Scalar::Timedelta64(160));
+    }
+
+    #[test]
+    fn loc_of_int_keys_on_a_duplicated_int_index_63xxx() {
+        // A few Int64 keys against a duplicated Int64 index take every
+        // position of each key in index order, keys in the order asked,
+        // without the label map (br-frankenpandas-63xxx).
+        let keys = [5_i64, 7, 5, 9, 7, 5];
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "v".to_string(),
+            Column::from_f64_values((0..keys.len()).map(|p| p as f64).collect()),
+        );
+        let frame = DataFrame::new_with_column_order(
+            Index::from_i64_values(keys.to_vec()),
+            columns,
+            vec!["v".to_string()],
+        )
+        .unwrap();
+        let picked = |asked: &[IndexLabel]| {
+            let out = frame.loc_with_columns(asked, None).unwrap();
+            let values = out.column("v").unwrap().values().to_vec();
+            (out.index().labels().to_vec(), values)
+        };
+        let (labels, values) = picked(&[IndexLabel::Int64(7), IndexLabel::Int64(5)]);
+        assert_eq!(labels, [7, 7, 5, 5, 5].map(IndexLabel::Int64));
+        assert_eq!(values, [1.0, 4.0, 0.0, 2.0, 5.0].map(Scalar::Float64));
+        let (labels, values) = picked(&[IndexLabel::Int64(9), IndexLabel::Int64(9)]);
+        assert_eq!(labels, [9, 9].map(IndexLabel::Int64));
+        assert_eq!(values, [3.0, 3.0].map(Scalar::Float64));
+        // Negatives: a missing key fails closed; a float key keeps the map.
+        assert!(
+            frame
+                .loc_with_columns(&[IndexLabel::Int64(6)], None)
+                .is_err()
+        );
+        let float_key = IndexLabel::Float64(fp_index::OrderedF64(9.0));
+        assert_eq!(
+            frame
+                .loc_with_columns(std::slice::from_ref(&float_key), None)
+                .is_ok(),
+            frame.index().labels().contains(&float_key)
+        );
+    }
+
+    #[test]
+    fn concat_of_contiguous_text_frames_joins_their_bytes_5muaw() {
+        // Frames whose text column is contiguous concatenate it as bytes -
+        // one piece a row slice whose offsets do not start at zero - and
+        // answer the strings a Scalar-backed concat gives
+        // (br-frankenpandas-5muaw).
+        let text = |values: &[&str]| {
+            let mut bytes = Vec::new();
+            let mut offsets = vec![0];
+            for value in values {
+                bytes.extend_from_slice(value.as_bytes());
+                offsets.push(bytes.len());
+            }
+            Column::from_utf8_contiguous(bytes, offsets)
+        };
+        let frame = |column: Column| {
+            let len = column.len();
+            let mut columns = BTreeMap::new();
+            columns.insert("s".to_string(), column);
+            DataFrame::new_with_column_order(
+                Index::from_range(0, len as i64, 1),
+                columns,
+                vec!["s".to_string()],
+            )
+            .unwrap()
+        };
+        let first = frame(text(&["ab", "", "é"]));
+        let second = frame(text(&["x", "yz", "w"]))
+            .iloc_slice(Some(1), None)
+            .unwrap();
+        let (_, second_offsets) = second.column("s").unwrap().as_utf8_window().unwrap();
+        assert_eq!(second_offsets, &[1, 3, 4]);
+        let joined = concat_dataframes(&[&first, &second]).unwrap();
+        assert!(joined.column("s").unwrap().as_utf8_contiguous().is_some());
+        let expect: Vec<Scalar> = ["ab", "", "é", "yz", "w"]
+            .iter()
+            .map(|&value| Scalar::Utf8(value.into()))
+            .collect();
+        assert_eq!(joined.column("s").unwrap().values(), expect.as_slice());
+        // Negative: a Scalar-backed piece takes the generic path, same strings.
+        let scalar = frame(
+            Column::from_values(vec![Scalar::Utf8("yz".into()), Scalar::Utf8("w".into())]).unwrap(),
+        );
+        let mixed = concat_dataframes(&[&first, &scalar]).unwrap();
+        assert_eq!(mixed.column("s").unwrap().values(), expect.as_slice());
+        // Series pieces, one row-less.
+        let series = |column: Column| {
+            let len = column.len();
+            Series::new("s", Index::from_range(0, len as i64, 1), column).unwrap()
+        };
+        let joined = crate::concat_series(&[
+            &series(text(&["ab", "", "é"])),
+            &series(text(&[])),
+            &series(text(&["yz", "w"])),
+        ])
+        .unwrap();
+        assert!(joined.column().as_utf8_contiguous().is_some());
+        assert_eq!(joined.values(), expect.as_slice());
+    }
+
+    #[test]
+    fn range_index_row_take_gathers_its_labels_sj5bn() {
+        // A small selection of a RangeIndex's rows reads their labels as
+        // start + position * step - it built every label first - and they
+        // are the labels the label vector gave (br-frankenpandas-sj5bn).
+        // 16 rows, 2 taken: under a quarter, the branch without a typed view.
+        for (start, stop, step) in [(0, 16, 1), (10, 170, 10), (7, -25, -2)] {
+            let index = Index::from_range(start, stop, step);
+            let len = index.len();
+            let mut columns = BTreeMap::new();
+            columns.insert("v".to_string(), Column::from_i64_values((0..16).collect()));
+            let frame =
+                DataFrame::new_with_column_order(index.clone(), columns, vec!["v".to_string()])
+                    .unwrap();
+            let mut mask = vec![false; len];
+            mask[1] = true;
+            mask[len - 1] = true;
+            let taken = frame.iloc_bool(&mask).unwrap();
+            let expect = [index.labels()[1].clone(), index.labels()[len - 1].clone()];
+            assert_eq!(taken.index().labels(), &expect, "{start} {stop} {step}");
+            assert_eq!(
+                taken.column("v").unwrap().values(),
+                &[Scalar::Int64(1), Scalar::Int64(15)]
+            );
+        }
+    }
+
+    #[test]
+    fn nullable_where_all_missing_keeps_its_dtype_ygb4e() {
+        // A nullable Series whose where / mask leaves nothing present keeps
+        // its masked dtype, all NA, as pandas' (it was object;
+        // br-frankenpandas-ygb4e).
+        let index = Index::from_range(0, 2, 1);
+        let cond = Series::new(
+            "c",
+            index.clone(),
+            Column::from_bool_values(vec![false, true]),
+        )
+        .unwrap();
+        for (dtype, present) in [
+            (DType::Float64Nullable, Scalar::Float64(1.5)),
+            (DType::Int64Nullable, Scalar::Int64(1)),
+            (DType::BoolNullable, Scalar::Bool(true)),
+        ] {
+            let source = Series::new(
+                "s",
+                index.clone(),
+                Column::new(dtype.clone(), vec![present, Scalar::Null(NullKind::Null)]).unwrap(),
+            )
+            .unwrap();
+            let kept = source.where_cond(&cond, None).unwrap();
+            assert_eq!(kept.dtype(), dtype, "{dtype:?}");
+            assert!(kept.values().iter().all(Scalar::is_missing), "{dtype:?}");
+            let masked = source.mask(&cond.not().unwrap(), None).unwrap();
+            assert_eq!(masked.dtype(), dtype, "{dtype:?}");
+        }
+        // Negative: a present value keeps the path it had.
+        let partial = Series::new(
+            "s",
+            index,
+            Column::new(
+                DType::Float64Nullable,
+                vec![Scalar::Float64(1.5), Scalar::Float64(2.5)],
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .where_cond(&cond, None)
+        .unwrap();
+        assert_eq!(partial.dtype(), DType::Float64Nullable);
+        assert_eq!(partial.values()[1], Scalar::Float64(2.5));
+    }
+
+    #[test]
+    fn series_where_default_nan_other_stays_typed_qswpf() {
+        // `s.where(cond)` with pandas' default NaN `other` over float values
+        // selects typed (the Scalar map read every value) and answers as that
+        // map did: the replaced rows missing NaN, a float64 column
+        // (br-frankenpandas-qswpf).
+        let index = Index::from_range(0, 4, 1);
+        let values = Series::new(
+            "v",
+            index.clone(),
+            Column::from_f64_values(vec![1.5, -2.0, 0.25, 4.0]),
+        )
+        .unwrap();
+        let cond = Series::new(
+            "c",
+            index.clone(),
+            Column::from_bool_values(vec![true, false, true, false]),
+        )
+        .unwrap();
+        let nan = Scalar::Null(NullKind::NaN);
+        let kept = values.where_cond(&cond, Some(&nan)).unwrap();
+        assert!(!values.column().scalar_cache_is_materialized());
+        assert_eq!(kept.dtype(), DType::Float64);
+        assert_eq!(
+            kept.values(),
+            &[
+                Scalar::Float64(1.5),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(0.25),
+                Scalar::Null(NullKind::NaN),
+            ]
+        );
+        assert_eq!(kept.column().validity().count_valid(), 2);
+        // Every row kept is the values themselves; none left is empty.
+        let all = Series::new("c", index, Column::from_bool_values(vec![true; 4])).unwrap();
+        assert_eq!(
+            values.where_cond(&all, None).unwrap().values(),
+            values.values()
+        );
+        let empty = Series::new(
+            "v",
+            Index::from_range(0, 0, 1),
+            Column::from_f64_values(vec![]),
+        )
+        .unwrap();
+        let none = Series::new(
+            "c",
+            Index::from_range(0, 0, 1),
+            Column::from_bool_values(vec![]),
+        )
+        .unwrap();
+        assert_eq!(empty.where_cond(&none, None).unwrap().len(), 0);
+        // mask, its mirror: the rows whose condition holds go missing.
+        let masked = values.mask(&cond, None).unwrap();
+        assert_eq!(
+            masked.values(),
+            &[
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(-2.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(4.0),
+            ]
+        );
+        let fresh = Series::new(
+            "v",
+            Index::from_range(0, 4, 1),
+            Column::from_f64_values(vec![1.5, -2.0, 0.25, 4.0]),
+        )
+        .unwrap();
+        fresh.mask(&cond, None).unwrap();
+        assert!(!fresh.column().scalar_cache_is_materialized());
+        // not() - Python's mask negates its condition - stays typed too.
+        let flipped = cond.not().unwrap();
+        assert!(!cond.column().scalar_cache_is_materialized());
+        assert_eq!(
+            flipped.values(),
+            &[
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+            ]
         );
     }
 
@@ -193648,6 +195226,99 @@ mod tests {
     }
 
     #[test]
+    fn to_datetime_dayfirst_reads_a_contiguous_column_as_a_scalar_one_gwtxd() {
+        // dayfirst=True over the same ISO text answers alike whether the
+        // column is contiguous (a str-op output) or Scalar-backed: the
+        // contiguous fast path ignored dayfirst (br-frankenpandas-gwtxd).
+        let texts = ["2024-01-02", "2024-03-04"];
+        let mut bytes = Vec::new();
+        let mut offsets = vec![0];
+        for text in texts {
+            bytes.extend_from_slice(text.as_bytes());
+            offsets.push(bytes.len());
+        }
+        let contiguous = Series::new(
+            "d",
+            Index::from_range(0, 2, 1),
+            Column::from_utf8_contiguous(bytes, offsets),
+        )
+        .unwrap();
+        let scalar = Series::from_values(
+            "d",
+            vec![0_i64.into(), 1_i64.into()],
+            texts.iter().map(|&t| Scalar::Utf8(t.into())).collect(),
+        )
+        .unwrap();
+        let options = super::ToDatetimeOptions {
+            dayfirst: true,
+            ..super::ToDatetimeOptions::default()
+        };
+        let from_contiguous = super::to_datetime_with_options(&contiguous, options).unwrap();
+        let from_scalar = super::to_datetime_with_options(&scalar, options).unwrap();
+        assert_eq!(from_contiguous.values(), from_scalar.values());
+        assert_eq!(
+            from_contiguous.values()[0],
+            datetime64_scalar("2024-02-01 00:00:00")
+        );
+        // Negative: without dayfirst the ISO order stands.
+        let plain =
+            super::to_datetime_with_options(&contiguous, super::ToDatetimeOptions::default())
+                .unwrap();
+        assert_eq!(plain.values()[0], datetime64_scalar("2024-01-02 00:00:00"));
+    }
+
+    #[test]
+    fn to_datetime_fast_iso_matches_general_parse_ogi15() {
+        // The fast ISO parse - now tried first under the default (naive)
+        // timezone inference, and knowing YYYY-MM-DD HH:MM - gives what the
+        // general chrono parse gives, and declines what it rejects
+        // (br-frankenpandas-ogi15).
+        for text in [
+            "2024-01-15",
+            "2024-01-15 10:30",
+            "2024-01-15T10:30",
+            "2024-01-15 10:30:45",
+            "2024-02-29 23:59",
+            "1969-12-31 23:59",
+        ] {
+            let general = super::datetime64_scalar_from_parsed_datetime(
+                super::parse_datetime_string(text, None),
+            );
+            let fast = super::fast_iso_datetime_nanos(text).map(Scalar::Datetime64);
+            assert_eq!(fast, Some(general), "{text}");
+        }
+        // Declined, so the general parse keeps answering them (an invalid
+        // date's pass-through is br-frankenpandas-h9cug's).
+        for text in [
+            "2023-02-29 10:00",
+            "2024-01-15 24:00",
+            "2024-01-15 10:60",
+            "2024-13-01 00:00",
+            "2024-01-15x10:30",
+        ] {
+            assert_eq!(super::fast_iso_datetime_nanos(text), None, "{text}");
+        }
+        // A column of them, a missing row and a second shape (NaT under the
+        // first row's lock, as pandas' one guessed format).
+        let s = Series::from_values(
+            "ts",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Utf8("2024-01-15 10:30".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("2024-01-16 11:45".into()),
+                Scalar::Utf8("2024-01-16 11:45:30".into()),
+            ],
+        )
+        .unwrap();
+        let result = super::to_datetime(&s).unwrap();
+        assert_eq!(result.values()[0], datetime64_scalar("2024-01-15 10:30:00"));
+        assert!(result.values()[1].is_missing());
+        assert_eq!(result.values()[2], datetime64_scalar("2024-01-16 11:45:00"));
+        assert!(result.values()[3].is_missing());
+    }
+
+    #[test]
     fn to_datetime_space_separator() {
         let s = Series::from_values(
             "ts",
@@ -193991,6 +195662,45 @@ mod tests {
                 datetime64_scalar("1969-12-31 23:59:59"),
             ]
         );
+    }
+
+    #[test]
+    fn to_datetime_unit_past_the_range_raises_or_is_datetime_nat_3rj8b() {
+        let s = Series::from_values(
+            "epoch",
+            vec![0_i64.into()],
+            vec![Scalar::Int64(1_704_067_200_000)],
+        )
+        .unwrap();
+        let raising = super::ToDatetimeOptions {
+            unit: Some("s"),
+            errors: super::DatetimeErrors::Raise,
+            ..super::ToDatetimeOptions::default()
+        };
+        let err = super::to_datetime_with_options(&s, raising).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("cannot convert input 1704067200000 with the unit 's', at position 0"),
+            "{err}"
+        );
+        // Coerced: NaT, still a datetime64 column (it inferred object).
+        let coerced = super::to_datetime_with_unit(&s, "s").unwrap();
+        assert!(coerced.values()[0].is_missing());
+        assert!(matches!(
+            coerced.column().dtype(),
+            DType::Datetime64 { tz: None }
+        ));
+        // In range in its unit: converted, no error under raise.
+        let ok = super::to_datetime_with_options(
+            &s,
+            super::ToDatetimeOptions {
+                unit: Some("ms"),
+                errors: super::DatetimeErrors::Raise,
+                ..super::ToDatetimeOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(ok.values(), &[datetime64_scalar("2024-01-01 00:00:00")]);
     }
 
     #[test]
@@ -199217,6 +200927,210 @@ mod tests {
             means[0]
         );
         assert_eq!(means[1], 5.0);
+    }
+
+    #[test]
+    fn grouped_float_reductions_add_as_pandas_group_kernels_xhogl() {
+        // pandas 2.2.3 group kernels sum with Kahan compensation and take
+        // moments by Welford (br-frankenpandas-xhogl). Keys [1 x10, 2 x3],
+        // values [0.1 x10, 1e16, 1, 1]: sum [1.0, 1.0000000000000002e16],
+        // var [0.0, 3.333333333333333e31] - a plain fold gives
+        // 0.9999999999999999 and 1e16, the two-pass variance 2.1e-34.
+        fn bits(values: &[Scalar]) -> Vec<u64> {
+            values
+                .iter()
+                .map(|value| match value {
+                    Scalar::Float64(v) => v.to_bits(),
+                    other => panic!("not a float: {other:?}"),
+                })
+                .collect()
+        }
+        fn want(values: &[f64]) -> Vec<u64> {
+            values.iter().map(|v| v.to_bits()).collect()
+        }
+        let mut values = vec![0.1; 10];
+        values.extend([1e16, 1.0, 1.0]);
+        let values: Vec<Scalar> = values.into_iter().map(Scalar::Float64).collect();
+        let int_keys: Vec<Scalar> = (0..13).map(|i| Scalar::Int64(1 + i / 10)).collect();
+        let text_keys: Vec<Scalar> = (0..13)
+            .map(|i| Scalar::Utf8(if i < 10 { "a" } else { "b" }.into()))
+            .collect();
+        let sums = [1.0, 1.000_000_000_000_000_2e16];
+        let vars = [0.0, 3.333_333_333_333_333e31];
+        let totals = [&[1.0; 10][..], &[1.000_000_000_000_000_2e16; 3]].concat();
+        for keys in [&int_keys, &text_keys] {
+            let df = DataFrame::from_dict(
+                &["k", "v"],
+                vec![("k", keys.clone()), ("v", values.clone())],
+            )
+            .unwrap();
+            let grouped = df.groupby(&["k"]).unwrap();
+            let column = |frame: DataFrame| frame.columns["v"].values().to_vec();
+            assert_eq!(bits(&column(grouped.sum().unwrap())), want(&sums));
+            assert_eq!(
+                bits(&column(grouped.mean().unwrap())),
+                want(&[0.1, 3_333_333_333_333_334.0])
+            );
+            assert_eq!(bits(&column(grouped.var().unwrap())), want(&vars));
+            assert_eq!(
+                bits(&column(grouped.std().unwrap())),
+                want(&[0.0, 5_773_502_691_896_257.0])
+            );
+            assert_eq!(
+                bits(&column(grouped.sem().unwrap())),
+                want(&[0.0, 3_333_333_333_333_333.0])
+            );
+            assert_eq!(
+                bits(&column(grouped.transform("sum").unwrap())),
+                want(&totals)
+            );
+            let cumsum = column(grouped.cumsum().unwrap());
+            assert_eq!(
+                bits(&cumsum[9..]),
+                want(&[1.0, 1e16, 1e16, 1.000_000_000_000_000_2e16])
+            );
+            let key = df.column_as_series("k").unwrap();
+            let series = df.column_as_series("v").unwrap();
+            let by_key = series.groupby(&key).unwrap();
+            assert_eq!(bits(by_key.sum().unwrap().values()), want(&sums));
+            assert_eq!(bits(by_key.var().unwrap().values()), want(&vars));
+            assert_eq!(
+                bits(by_key.transform("sum").unwrap().values()),
+                want(&totals)
+            );
+            assert_eq!(
+                bits(&by_key.cumsum().unwrap().values()[9..10]),
+                want(&[1.0])
+            );
+            let rows = DataFrame::from_dict(
+                &["k", "c", "v"],
+                vec![
+                    ("k", keys.clone()),
+                    ("c", keys.clone()),
+                    ("v", values.clone()),
+                ],
+            )
+            .unwrap();
+            let pivoted = rows.pivot_table("v", "k", "c", "sum").unwrap();
+            let diagonal: Vec<Scalar> = pivoted
+                .column_order
+                .iter()
+                .enumerate()
+                .map(|(i, name)| pivoted.columns[name].values()[i].clone())
+                .collect();
+            assert_eq!(bits(&diagonal), want(&sums));
+        }
+        // Resample bins are groups too: ten hourly 0.1 in one day.
+        let hours = Index::from_datetime64((0..10).map(|h| h * 3_600_000_000_000).collect());
+        let hourly = Series::new("v", hours, Column::from_f64_values(vec![0.1; 10])).unwrap();
+        assert_eq!(
+            bits(hourly.resample("D").sum().unwrap().values()),
+            want(&[1.0])
+        );
+        assert_eq!(
+            bits(hourly.resample("D").var().unwrap().values()),
+            want(&[0.0])
+        );
+        // NEGATIVE: a Series reduction is numpy's fold, not a group kernel -
+        // pandas sums [1e16, 1, 1] to 1e16.
+        let plain = Series::from_values(
+            "v",
+            (0..3_i64).map(Into::into).collect(),
+            values[10..].to_vec(),
+        )
+        .unwrap();
+        assert_eq!(plain.sum().unwrap(), Scalar::Float64(1e16));
+        // NEGATIVE: integer group sums stay exact past 2**53.
+        let ints = DataFrame::from_dict(
+            &["k", "v"],
+            vec![
+                ("k", vec![Scalar::Int64(1), Scalar::Int64(1)]),
+                ("v", vec![Scalar::Int64(1 << 53), Scalar::Int64(1)]),
+            ],
+        )
+        .unwrap();
+        let summed = ints.groupby(&["k"]).unwrap().sum().unwrap();
+        assert_eq!(
+            summed.columns["v"].values(),
+            &[Scalar::Int64((1 << 53) + 1)]
+        );
+    }
+
+    #[test]
+    fn groupby_skew_is_pandas_online_group_skew_vjfq9() {
+        // pandas 2.2.3 group_skew folds running moments per group
+        // (br-frankenpandas-vjfq9): keys [1 x4, 2 x3, 3 x3, 4 x4], values
+        // [1, 2, 4, 8.5 | 1e9, 1e9 + 1, 1e9 + 3 | 7, 7, 7 | 1, inf, 2, 5] ->
+        // [1.2425515694555238, 0.9352195295828247, 0.0, NaN] - the two-pass
+        // form gives 0.9352192954604264 for the offset group, and dropping the
+        // inf would leave [1, 2, 5] a finite skew.
+        let values = [
+            1.0,
+            2.0,
+            4.0,
+            8.5,
+            1e9,
+            1e9 + 1.0,
+            1e9 + 3.0,
+            7.0,
+            7.0,
+            7.0,
+            1.0,
+            f64::INFINITY,
+            2.0,
+            5.0,
+        ];
+        let keys = [1, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 4];
+        let expected: [Option<f64>; 4] = [
+            Some(1.242_551_569_455_523_8),
+            Some(0.935_219_529_582_824_7),
+            Some(0.0),
+            None,
+        ];
+        let check = |got: &[Scalar], what: &str| {
+            assert_eq!(got.len(), expected.len(), "{what}");
+            for (cell, want) in got.iter().zip(&expected) {
+                match (cell, want) {
+                    (Scalar::Float64(g), Some(w)) => {
+                        assert_eq!(g.to_bits(), w.to_bits(), "{what}: {g} vs {w}");
+                    }
+                    (cell, None) => assert!(cell.is_missing(), "{what}: {cell:?}"),
+                    (cell, Some(w)) => panic!("{what}: {cell:?} vs {w}"),
+                }
+            }
+        };
+        let int_keys: Vec<Scalar> = keys.iter().map(|&k| Scalar::Int64(k)).collect();
+        let text_keys: Vec<Scalar> = keys.iter().map(|k| Scalar::Utf8(format!("g{k}"))).collect();
+        for keys in [int_keys, text_keys] {
+            let df = DataFrame::from_dict(
+                &["k", "v"],
+                vec![
+                    ("k", keys),
+                    ("v", values.iter().map(|&v| Scalar::Float64(v)).collect()),
+                ],
+            )
+            .unwrap();
+            let grouped = df.groupby(&["k"]).unwrap();
+            check(
+                grouped.skew().unwrap().columns["v"].values(),
+                "DataFrameGroupBy.skew",
+            );
+            let listed = grouped.agg_list(&["skew"]).unwrap();
+            check(
+                listed.columns[&listed.column_order[0]].values(),
+                "agg(['skew'])",
+            );
+            let series = df.column_as_series("v").unwrap();
+            let key = df.column_as_series("k").unwrap();
+            let by_key = series.groupby(&key).unwrap();
+            check(by_key.skew().unwrap().values(), "SeriesGroupBy.skew");
+            let broadcast = by_key.transform("skew").unwrap();
+            let group_starts: Vec<Scalar> = [0, 4, 7, 10]
+                .iter()
+                .map(|&row| broadcast.values()[row].clone())
+                .collect();
+            check(&group_starts, "transform('skew')");
+        }
     }
 
     #[test]
@@ -216882,6 +218796,79 @@ mod tests {
     }
 
     #[test]
+    fn resample_of_a_lazy_date_range_matches_its_listed_stamps_so0mr() {
+        // A Series on a date_range's lazy labels resamples by their
+        // arithmetic - and answers what the same stamps listed answer
+        // (br-frankenpandas-so0mr): bins off the first stamp (01:30 with
+        // '3h' anchors at midnight), empty bins, the identity frequency.
+        const MINUTE: i64 = 60_000_000_000;
+        let day = 1_704_067_200_000_000_000_i64; // 2024-01-01T00:00
+        for (first, step, len, freq) in [
+            (day + 90 * MINUTE, 7 * MINUTE, 200, "3h"),
+            (day, MINUTE, 500, "h"),
+            (day, 5 * MINUTE, 40, "5min"),
+            (day + 90 * MINUTE, 5 * MINUTE, 40, "5min"),
+            (day, 250 * MINUTE, 12, "h"),
+            (day + 3 * MINUTE, MINUTE, 1, "h"),
+        ] {
+            let values: Vec<f64> = (0..len).map(|k| (k * 7 % 11) as f64).collect();
+            let stamps: Vec<i64> = (0..len).map(|k| first + k as i64 * step).collect();
+            let lazy = Index::from_datetime64_affine_range(first, step, len).unwrap();
+            assert!(lazy.datetime64_affine_labels().is_some());
+            let lazy = Series::new("v", lazy, Column::from_f64_values(values.clone())).unwrap();
+            let listed = Series::new(
+                "v",
+                Index::from_datetime64(stamps),
+                Column::from_f64_values(values),
+            )
+            .unwrap();
+            for (ours, theirs) in [
+                (lazy.resample(freq).mean(), listed.resample(freq).mean()),
+                (lazy.resample(freq).sum(), listed.resample(freq).sum()),
+            ] {
+                let (ours, theirs) = (ours.unwrap(), theirs.unwrap());
+                assert_eq!(ours.index().labels(), theirs.index().labels(), "{freq}");
+                assert_eq!(
+                    format!("{:?}", ours.values()),
+                    format!("{:?}", theirs.values()),
+                    "{freq}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn resample_past_a_million_bins_answers_or_refuses_effk4() {
+        // Three stamps 1,050,000 s apart resample('s') into 1,050,001 bins -
+        // the grouping returned an EMPTY result from a million bins on
+        // (br-frankenpandas-effk4); pandas answers every bin.
+        const SECOND: i64 = 1_000_000_000;
+        let day = 1_704_067_200_000_000_000_i64; // 2024-01-01T00:00
+        let stamps = vec![day, day + 7 * SECOND, day + 1_050_000 * SECOND];
+        let series = Series::new(
+            "v",
+            Index::from_datetime64(stamps),
+            Column::from_f64_values(vec![1.0, 2.0, 4.0]),
+        )
+        .unwrap();
+        let sums = series.resample("s").sum().unwrap();
+        assert_eq!(sums.len(), 1_050_001);
+        assert_eq!(sums.values()[7], Scalar::Float64(2.0));
+        assert_eq!(sums.values()[1_050_000], Scalar::Float64(4.0));
+        // An 'ms' rule over a year would be 3e10 bins: refused, never empty.
+        let year = Series::new(
+            "v",
+            Index::from_datetime64(vec![day, day + 366 * 86_400 * SECOND]),
+            Column::from_f64_values(vec![1.0, 2.0]),
+        )
+        .unwrap();
+        let refused = year.resample("ms").sum().unwrap_err().to_string();
+        assert!(refused.contains("bins"), "{refused}");
+        // NEGATIVE: the same year by hour stays under the cap.
+        assert_eq!(year.resample("h").sum().unwrap().len(), 366 * 24 + 1);
+    }
+
+    #[test]
     fn series_resample_subdaily_typed_fast_path_emits_datetime64_labels() {
         let base = 1_577_836_800_000_000_000i64;
         let minute = 60_000_000_000i64;
@@ -225598,8 +227585,9 @@ mod test_select_columns_perf_76e1fd {
     #[test]
     fn dataframe_groupby_dense_float_agg_matches_reference() {
         // df.groupby([int]).{sum,mean,count} over all-valid Float64 value
-        // columns exercises the dense single-pass accumulation path. Must be
-        // bit-identical to a row-order left-fold reference (sorted groups).
+        // columns exercises the dense single-pass accumulation path. Quarter
+        // values sum exactly, so the compensated group sum is bit-identical to
+        // a row-order left-fold reference (sorted groups).
         let mut state: u64 = 0x9216_D5D9_8979_FB1B;
         let mut next = || {
             state = state
@@ -225723,7 +227711,8 @@ mod test_select_columns_perf_76e1fd {
             for (g, w) in f64_of(&gb.max().unwrap()).iter().zip(&want_max) {
                 assert_eq!(g.to_bits(), w.to_bits(), "trial {trial} max");
             }
-            // var/std: two-pass mean then Σ(x-mean)^2 / (n-1), ddof=1, n<=1→Null.
+            // var/std: pandas' group_var is Welford's online update
+            // (br-frankenpandas-xhogl), ddof=1, n<=1→Null.
             let nan_of = |res: &DataFrame| -> Vec<Option<f64>> {
                 res.column("v")
                     .unwrap()
@@ -225743,9 +227732,13 @@ mod test_select_columns_perf_76e1fd {
                     if gv.len() <= 1 {
                         None
                     } else {
-                        let mean = gv.iter().sum::<f64>() / gv.len() as f64;
-                        let ss: f64 = gv.iter().map(|x| (x - mean).powi(2)).sum();
-                        Some(ss / (gv.len() - 1) as f64)
+                        let (mut mean, mut m2) = (0.0_f64, 0.0_f64);
+                        for (seen, x) in gv.iter().enumerate() {
+                            let old = mean;
+                            mean += (x - old) / (seen + 1) as f64;
+                            m2 += (x - mean) * (x - old);
+                        }
+                        Some(m2 / (gv.len() - 1) as f64)
                     }
                 })
                 .collect();
@@ -232958,6 +234951,44 @@ mod dt_timezone_census_gmp9c {
             first(&naive.dt().round("H").expect("round")),
             "2024-01-15 10:00:00"
         );
+    }
+
+    /// A zoned column floored into a DST gap goes back into its zone under
+    /// pandas' `nonexistent` (live pandas 2.2.3: 2020-03-08 03:30 US/Central
+    /// floored to 2h is 03:00-05:00 with shift_forward, NonExistentTimeError
+    /// by default); it was always the error (br-frankenpandas-cnpw1).
+    #[test]
+    fn zone_aware_floor_reads_nonexistent_like_pandas_cnpw1() {
+        use super::{TzAmbiguousPolicy, TzLocalizeOptions, TzNonexistentPolicy};
+        // 2020-03-08 03:30 wall clock (naive nanoseconds).
+        let naive = Series::from_values(
+            "ts",
+            vec![0_i64.into()],
+            vec![Scalar::Datetime64(1_583_638_200_000_000_000)],
+        )
+        .expect("naive series");
+        let zoned = naive
+            .dt()
+            .tz_localize(Some("US/Central"))
+            .expect("03:30 CDT exists");
+        let shifted = zoned
+            .dt()
+            .floor_with_options(
+                "2h",
+                TzLocalizeOptions {
+                    ambiguous: TzAmbiguousPolicy::Raise,
+                    nonexistent: TzNonexistentPolicy::ShiftForward,
+                },
+            )
+            .expect("shift_forward places the gap's 02:00");
+        // 03:00 CDT is 08:00 UTC.
+        assert_eq!(
+            shifted.values()[0],
+            Scalar::Datetime64(1_583_654_400_000_000_000)
+        );
+        assert_eq!(shifted.column().timezone(), Some("US/Central"));
+        // NEGATIVE: pandas' default nonexistent='raise' still refuses the gap.
+        assert!(zoned.dt().floor("2h").is_err());
     }
 }
 

@@ -1143,18 +1143,18 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     // on the public README example path.
     let _ = monthly.agg(&["sum", "size", "nunique"])?;
     let _ = monthly.aggregate(&["mean", "sem"])?;
-    assert_eq!(monthly.keys().len(), 2);
+    assert_eq!(monthly.keys()?.len(), 2);
     // Resample bins are Timestamps, as pandas keys them (br-frankenpandas-0yilt).
     assert_eq!(
         monthly
-            .indices()
+            .indices()?
             .get(&IndexLabel::Datetime64(1_706_659_200_000_000_000)),
         Some(&vec![0, 1])
     );
-    assert_eq!(monthly.groups(), monthly.indices());
+    assert_eq!(monthly.groups()?, monthly.indices()?);
     assert_eq!(monthly.grouper(), "M");
     assert_eq!(monthly.level(), "M");
-    assert_eq!(monthly.ngroups(), 2);
+    assert_eq!(monthly.ngroups()?, 2);
     assert_eq!(monthly.ndim(), 1);
     assert!(monthly.exclusions().is_empty());
     assert_eq!(monthly.get_group("2024-01-31")?.len(), 2);
@@ -1264,17 +1264,17 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let _ = drs.agg(&["sum", "mean"])?;
     let _ = drs.prod()?;
     let _ = drs.aggregate(&["sem", "size", "nunique"])?;
-    assert_eq!(drs.keys().len(), 2);
+    assert_eq!(drs.keys()?.len(), 2);
     // Resample bins are Timestamps, as pandas keys them (br-frankenpandas-0yilt).
     assert_eq!(
-        drs.indices()
+        drs.indices()?
             .get(&IndexLabel::Datetime64(1_706_659_200_000_000_000)),
         Some(&vec![0, 1])
     );
-    assert_eq!(drs.groups(), drs.indices());
+    assert_eq!(drs.groups()?, drs.indices()?);
     assert_eq!(drs.grouper(), "M");
     assert_eq!(drs.level(), "M");
-    assert_eq!(drs.ngroups(), 2);
+    assert_eq!(drs.ngroups()?, 2);
     assert_eq!(drs.ndim(), 2);
     assert!(drs.exclusions().is_empty());
     assert_eq!(drs.get_group("2024-01-31")?.len(), 2);
@@ -6803,6 +6803,7 @@ const FP_IO_EXPORTED_IO_FNS: &[&str] = &[
     "write_excel_bytes",
     "write_excel_bytes_with_options",
     "write_excel_with_options",
+    "write_excel_workbook_bytes",
     "write_feather",
     "write_feather_bytes",
     "write_hdf",
