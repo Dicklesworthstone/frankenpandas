@@ -15975,10 +15975,18 @@ mod tests {
         let long: Vec<Scalar> = (0..2922_i32)
             .map(|i| Scalar::Float64(f64::from((i * 7919) % 1000) / 7.0))
             .collect();
-        assert_eq!(
-            super::nanskew_grouped(&long),
-            Scalar::Float64(-0.002_284_383_734_800_801_4)
-        );
+        let glibc_pow = Scalar::Float64(-0.002_284_383_734_800_801_4);
+        // That is pandas on glibc, the oracle's platform. pandas' Cython
+        // `** 0.5` calls the platform's pow, as fp does, and Apple's libm
+        // returns sqrt's answer for 2921 (CI 36847809394 macos-latest), so
+        // another libm may give that one - never anything else
+        // (br-frankenpandas-3bo1g).
+        if cfg!(all(target_os = "linux", target_env = "gnu")) {
+            assert_eq!(super::nanskew_grouped(&long), glibc_pow);
+        } else {
+            let sqrt = Scalar::Float64(-0.002_284_383_734_800_802);
+            assert!([glibc_pow, sqrt].contains(&super::nanskew_grouped(&long)));
+        }
         // A constant group is 0; below 3 values missing; an inf poisons its
         // group (pandas skips only NaN), where dropping it would leave [1, 2, 5].
         let constant = [7.0; 3].map(Scalar::Float64);
