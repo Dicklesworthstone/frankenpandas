@@ -23258,3 +23258,58 @@ _E116_CASES = {
 def test_everyday116_datetimeindex_iteration_like_pandas_tumiz(case: str) -> None:
     run = _E116_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-9iim6: a Series' sum / mean / var / std / sem / skew / kurt
+# add in numpy's pairwise order (missing slots as 0 in place; a masked dtype
+# over its runs; an int64 mean through numpy's 8192-value cast buffer). They
+# were an 8-lane pass and a left fold, off pandas' last bits past 128 / 8
+# values.
+def _e117_values(n: int, missing: bool = True) -> Any:
+    k = np.arange(n)
+    values = ((k * 7919 + 13) % 100003) / 7.0 - 7000.0
+    values = np.where(k % 5 == 0, values * 1e6, values)
+    return np.where(missing & (k % 11 == 3), np.nan, values)
+
+
+def _e117_ints(n: int) -> Any:
+    return ((np.arange(n) * 7919 + 13) % 100003) * 3_000_000_007
+
+
+_E117_OPS = ("sum", "mean", "var", "std", "sem", "skew", "kurt")
+_E117_CASES = {
+    **{
+        f"float64 n={n}": (lambda n: lambda m: [getattr(m.Series(_e117_values(n)), op)() for op in _E117_OPS])(n)
+        for n in (7, 8, 9, 127, 128, 129, 1000, 100_000)
+    },
+    "int64 past the cast buffer": lambda m: [getattr(m.Series(_e117_ints(20_000)), op)() for op in _E117_OPS],
+    "masked Float64": lambda m: [
+        getattr(m.Series(m.array(_e117_values(1000).tolist(), dtype="Float64")), op)() for op in _E117_OPS
+    ],
+    "masked Int64": lambda m: [
+        getattr(m.Series(m.array(_e117_ints(20_000).tolist(), dtype="Int64")), op)() for op in ("mean", "var", "std")
+    ],
+    "frame": lambda m: m.DataFrame({"a": _e117_values(1000), "b": _e117_values(1000, False)})
+    .agg(list(_E117_OPS))
+    .values.tolist(),
+    "describe": lambda m: m.Series(_e117_values(1000)).describe().tolist(),
+    "datetime mean": lambda m: [
+        str(m.Series(m.to_datetime(1_700_000_000_000_000_000 + (_e117_ints(20_000) // 3_000_000_007) * 1_000_000_007)).mean())
+    ],
+    "pivot grand total": lambda m: [
+        m.DataFrame({"a": np.arange(1000) % 3, "b": np.arange(1000) % 4, "v": _e117_values(1000)})
+        .pivot_table(values="v", index="a", columns="b", aggfunc=agg, margins=True)
+        .loc["All", "All"]
+        for agg in ("sum", "mean", "var", "std")
+    ],
+    # Negatives: short inputs are unchanged; an exact int sum stays exact.
+    "short": lambda m: [getattr(m.Series([0.1, 0.2, 0.3]), op)() for op in ("sum", "mean", "var")],
+    "int sum": lambda m: [m.Series(_e117_ints(20_000)).sum()],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E117_CASES))
+def test_everyday117_series_reductions_add_like_numpy_9iim6(case: str) -> None:
+    run = _E117_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

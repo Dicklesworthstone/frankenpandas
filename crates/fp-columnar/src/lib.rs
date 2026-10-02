@@ -8118,39 +8118,6 @@ fn ptp_nullable_i64(data: &[i64], validity: Option<&ValidityMask>) -> Scalar {
     }
 }
 
-/// Two-pass moments over the PRESENT subset of an f64 slice (+ optional validity):
-/// returns `(n, mean, sum_sq)` where `n` = present count, `mean = Σ/n`, and
-/// `sum_sq = Σ(x − mean)²`. Present iff (validity-set) AND non-NaN — exactly
-/// `collect_finite`'s drop-missing. Same values, same order as
-/// `collect_finite(..).iter().sum()`, so the f64 accumulation is byte-identical to
-/// nanvar/nansem. `n == 0` ⇒ `(0, 0.0, 0.0)` (caller returns Null(NaN)).
-fn present_moments_f64(data: &[f64], validity: Option<&ValidityMask>) -> (usize, f64, f64) {
-    // ⚠️ BLOCKED FAST PATH REMOVED — same reason as the central-moments sibling
-    // (br-frankenpandas-8s4mb). The doc above this function states the accumulation
-    // is "byte-identical to nanvar/nansem"; 8-lane blocked summation is not, and
-    // `var_std_sem_nullable_typed_match_nan_reference` asserts the identity. The
-    // claim in the doc is the contract, so the lever yields to it.
-    let mut sum = 0.0_f64;
-    let mut n = 0usize;
-    for (i, &x) in data.iter().enumerate() {
-        if validity.is_none_or(|v| v.get(i)) && !x.is_nan() {
-            sum += x;
-            n += 1;
-        }
-    }
-    if n == 0 {
-        return (0, 0.0, 0.0);
-    }
-    let mean = sum / n as f64;
-    let mut sum_sq = 0.0_f64;
-    for (i, &x) in data.iter().enumerate() {
-        if validity.is_none_or(|v| v.get(i)) && !x.is_nan() {
-            sum_sq += (x - mean).powi(2);
-        }
-    }
-    (n, mean, sum_sq)
-}
-
 /// Central moments over the PRESENT subset of an f64 slice for skew/kurt:
 /// `(n, m2, m3, m4)` = present count and `Σ(x − mean)^{2,3,4}`, matching
 /// nanskew/nankurt's `nums.iter().map(|x| (x-mean).powi(k)).sum()` (the k-sums are
@@ -8300,80 +8267,6 @@ fn blocked_sum_f64(data: &[f64]) -> f64 {
         total += x;
     }
     total
-}
-
-/// Second pass of the central-moment computation, 8-lane blocked: accumulates
-/// m2/m3/m4 about `mean` in 24 independent lanes so the three dependency chains
-/// break the same way [`blocked_sum_f64`] breaks the sum's.
-///
-/// Second pass for the `sem`/`var` moment pair: `Sigma (x - mean)^2`, 8-lane
-/// blocked. The `sem` half of br-frankenpandas-8s4mb — the skew/kurt half uses
-/// the removed `blocked_central_moments_f64`, which also carried m3/m4 this caller does not
-/// need.
-///
-/// Same bit-identity property: under 8 elements `chunks_exact(8)` yields nothing,
-/// the whole slice flows through the remainder loop, and `powi(2)` there is
-/// verbatim what the scalar fold ran.
-fn blocked_sum_sq_f64(data: &[f64], mean: f64) -> f64 {
-    let mut acc = [0.0_f64; 8];
-    let mut chunks = data.chunks_exact(8);
-    for c in &mut chunks {
-        for l in 0..8 {
-            let d = c[l] - mean;
-            acc[l] += d * d;
-        }
-    }
-    let mut total =
-        ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
-    for &x in chunks.remainder() {
-        total += (x - mean).powi(2);
-    }
-    total
-}
-
-/// Int64 sibling of [`blocked_sum_sq_f64`].
-fn blocked_sum_sq_i64(data: &[i64], mean: f64) -> f64 {
-    let mut acc = [0.0_f64; 8];
-    let mut chunks = data.chunks_exact(8);
-    for c in &mut chunks {
-        for l in 0..8 {
-            let d = c[l] as f64 - mean;
-            acc[l] += d * d;
-        }
-    }
-    let mut total =
-        ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
-    for &v in chunks.remainder() {
-        total += (v as f64 - mean).powi(2);
-    }
-    total
-}
-
-/// Int64 sibling of [`present_moments_f64`]: present iff validity-set; folds
-/// `v as f64` (matching nanvar's `to_f64`), so bit-identical.
-fn present_moments_i64(data: &[i64], validity: Option<&ValidityMask>) -> (usize, f64, f64) {
-    // ⚠️ BLOCKED FAST PATH REMOVED — see the f64 sibling. This function's own doc
-    // says "folds `v as f64` (matching nanvar's `to_f64`), so bit-identical"; the
-    // blocked route made that false.
-    let mut sum = 0.0_f64;
-    let mut n = 0usize;
-    for (i, &v) in data.iter().enumerate() {
-        if validity.is_none_or(|vm| vm.get(i)) {
-            sum += v as f64;
-            n += 1;
-        }
-    }
-    if n == 0 {
-        return (0, 0.0, 0.0);
-    }
-    let mean = sum / n as f64;
-    let mut sum_sq = 0.0_f64;
-    for (i, &v) in data.iter().enumerate() {
-        if validity.is_none_or(|vm| vm.get(i)) {
-            sum_sq += (v as f64 - mean).powi(2);
-        }
-    }
-    (n, mean, sum_sq)
 }
 
 /// Borrowed typed view of a numeric column (all-valid OR nullable Float64/Int64)
@@ -22102,39 +21995,27 @@ impl Column {
         if any { Some(result) } else { None }
     }
 
-    /// Σ(v−mean)² over an all-valid Float64 concat output, folding each chunk
-    /// slice in place in 0..n order — bit-identical to the materialized
-    /// `Σ(v−mean)²` second pass in `Series::var` (same values, order, 0.0 seed),
-    /// without the cold materialization. Completes the concat→reduce vein (var/std).
+    /// The chunk slices of an all-valid Float64 `concat(...)` output, in
+    /// order, borrowed without materializing the concatenated buffer - for a
+    /// reduction that reads the column in one global order (pandas' pairwise
+    /// sums; br-frankenpandas-9iim6). `None` for any other column.
     #[must_use]
-    pub fn all_valid_f64_chunk_sq_dev_sum(&self, mean: f64) -> Option<f64> {
+    pub fn all_valid_f64_chunk_slices(&self) -> Option<Vec<&[f64]>> {
         if self.dtype != DType::Float64 || !self.validity.all() {
             return None;
         }
         let chunks = self.values.float64_chunks_ref()?;
-        // `blocked_sum_sq_f64` is the same Sigma (x - mean)^2 the nullable sem/var
-        // path uses, so the two agree by construction rather than by coincidence.
-        let mut s = 0.0_f64;
-        for chunk in chunks {
-            s += blocked_sum_sq_f64(chunk.as_slice(), mean);
-        }
-        Some(s)
+        Some(chunks.iter().map(Float64Chunk::as_slice).collect())
     }
 
-    /// Int64 sibling of `all_valid_f64_chunk_sq_dev_sum` (`(v as f64 − mean)²`).
+    /// Int64 sibling of [`Self::all_valid_f64_chunk_slices`].
     #[must_use]
-    pub fn all_valid_i64_chunk_sq_dev_sum(&self, mean: f64) -> Option<f64> {
+    pub fn all_valid_i64_chunk_slices(&self) -> Option<Vec<&[i64]>> {
         if self.dtype != DType::Int64 || !self.validity.all() {
             return None;
         }
         let chunks = self.values.int64_chunks_ref()?;
-        // Int64 sibling of the blocked f64 path above; `blocked_sum_sq_i64` widens
-        // with `as f64` in exactly the same place the scalar fold did.
-        let mut s = 0.0_f64;
-        for chunk in chunks {
-            s += blocked_sum_sq_i64(chunk.as_slice(), mean);
-        }
-        Some(s)
+        Some(chunks.iter().map(Int64Chunk::as_slice).collect())
     }
 
     /// Product of an all-valid Float64 concat output, folding each chunk slice
@@ -23717,64 +23598,122 @@ impl Column {
             .map(|data| data.iter().map(|&value| predicate(value)).collect())
     }
 
+    /// This column as pandas' float reductions read it
+    /// ([`fp_types::PandasReductions`]: its values, which slots are present,
+    /// and how pandas holds the missing ones), handed to `reduce`; `None` for a
+    /// dtype they do not cover (temporal, text, object). Typed and chunked
+    /// storage is read in place; a NaN in a float buffer is missing, as pandas
+    /// reads it (br-frankenpandas-9iim6).
+    pub fn pandas_reductions<R>(
+        &self,
+        reduce: impl FnOnce(&fp_types::PandasReductions<'_>) -> R,
+    ) -> Option<R> {
+        use fp_types::{MissingLayout, PandasReductions, ReductionValues};
+        let numpy = MissingLayout::Numpy;
+        let not_nan_words = |data: &[f64], validity: Option<&ValidityMask>| -> Vec<u64> {
+            let mut words = vec![0_u64; data.len().div_ceil(64)];
+            for (i, value) in data.iter().enumerate() {
+                if !value.is_nan() && validity.is_none_or(|validity| validity.get(i)) {
+                    words[i / 64] |= 1 << (i % 64);
+                }
+            }
+            words
+        };
+        match self.dtype {
+            DType::Float64 => {
+                if let Some(chunks) = self.all_valid_f64_chunk_slices()
+                    && !chunks.iter().any(|chunk| chunk.iter().any(|v| v.is_nan()))
+                {
+                    let reductions =
+                        PandasReductions::new(ReductionValues::FloatChunks(&chunks), None, numpy);
+                    return Some(reduce(&reductions));
+                }
+                if let Some(data) = self.as_f64_slice() {
+                    let present = data
+                        .iter()
+                        .any(|v| v.is_nan())
+                        .then(|| not_nan_words(data, None));
+                    let values = ReductionValues::Float(data);
+                    let reductions = PandasReductions::new(values, present.as_deref(), numpy);
+                    return Some(reduce(&reductions));
+                }
+                if let Some((data, validity)) = self.as_f64_slice_with_validity() {
+                    let present = not_nan_words(data, Some(validity));
+                    let values = ReductionValues::Float(data);
+                    let reductions = PandasReductions::new(values, Some(&present), numpy);
+                    return Some(reduce(&reductions));
+                }
+            }
+            DType::Int64 => {
+                if let Some(chunks) = self.all_valid_i64_chunk_slices() {
+                    let reductions =
+                        PandasReductions::new(ReductionValues::IntChunks(&chunks), None, numpy);
+                    return Some(reduce(&reductions));
+                }
+                if let Some(data) = self.as_i64_slice() {
+                    let reductions = PandasReductions::new(ReductionValues::Int(data), None, numpy);
+                    return Some(reduce(&reductions));
+                }
+            }
+            DType::Float64Nullable | DType::Int64Nullable | DType::Bool | DType::BoolNullable => {}
+            _ => return None,
+        }
+        // Any other storage: read the cells. Ints and bools are numpy integer
+        // arrays (a masked one for the nullable dtypes); an Int64 column
+        // holding a missing value is pandas' float64 (the Rust constructors'
+        // spelling, DISC-011), so it reads as floats.
+        let masked = matches!(
+            self.dtype,
+            DType::Float64Nullable | DType::Int64Nullable | DType::BoolNullable
+        );
+        let layout = if masked { MissingLayout::Masked } else { numpy };
+        let cells = self.values();
+        let mut present = vec![0_u64; cells.len().div_ceil(64)];
+        let mut floats = Vec::with_capacity(cells.len());
+        let mut ints = Vec::with_capacity(cells.len());
+        let mut all_present = true;
+        for (i, cell) in cells.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)] // numpy's int64 -> float64 cast
+            let (float, int) = match cell {
+                Scalar::Float64(value) if !value.is_nan() => (*value, 0),
+                Scalar::Int64(value) => (*value as f64, *value),
+                Scalar::Bool(value) => (f64::from(*value), i64::from(*value)),
+                _ if cell.is_missing() => {
+                    all_present = false;
+                    floats.push(0.0);
+                    ints.push(0);
+                    continue;
+                }
+                _ => return None,
+            };
+            present[i / 64] |= 1 << (i % 64);
+            floats.push(float);
+            ints.push(int);
+        }
+        let integral = matches!(
+            self.dtype,
+            DType::Int64 | DType::Int64Nullable | DType::Bool | DType::BoolNullable
+        ) && (masked || all_present);
+        let values = if integral {
+            ReductionValues::Int(&ints)
+        } else {
+            ReductionValues::Float(&floats)
+        };
+        let reductions = PandasReductions::new(values, Some(&present), layout);
+        Some(reduce(&reductions))
+    }
+
     /// Sample variance (ddof-parameterized).
     ///
-    /// Matches `pd.Series.var(ddof=1)`.
+    /// Matches `pd.Series.var(ddof=1)`: pandas' nanvar (a masked dtype's
+    /// numpy var), its sums in numpy's order (br-frankenpandas-9iim6).
     #[must_use]
     pub fn var(&self, ddof: usize) -> Scalar {
-        // Typed two-pass reduction: an all-valid Float64 column computes the
-        // mean then the sum of squared deviations straight over its contiguous
-        // buffer, skipping the Vec<Scalar> materialization. Bit-identical to
-        // nanvar's numeric arm — the exact same `Iterator::sum::<f64>()`
-        // constructs over the same values in the same order (so seed/ordering
-        // match), `Null(NaN)` when count <= ddof.
-        if let Some(data) = self.as_f64_slice() {
-            let n = data.len();
-            if n <= ddof {
-                return Scalar::Null(NullKind::NaN);
-            }
-            let mean: f64 = data.iter().sum::<f64>() / n as f64;
-            let sum_sq: f64 = data.iter().map(|&x| (x - mean).powi(2)).sum::<f64>();
-            return Scalar::Float64(sum_sq / (n - ddof) as f64);
-        }
-        // Int64 analogue: an all-valid Int64 column runs the SAME two-pass over
-        // `v as f64` straight off the raw `&[i64]`, skipping nanvar's
-        // `Vec<Scalar::Int64>` materialization AND its per-Scalar `to_f64` in
-        // `collect_finite`. Bit-identical: `as_i64_slice` gates dtype==Int64 &&
-        // all-valid, so `collect_finite` (drop-missing + `to_f64`) reduces to
-        // `[v as f64]` in the same order, and `n == nums.len()` (no missing) so the
-        // `n <= ddof -> Null(NaN)` guard matches. dtype==Int64 gate keeps
-        // Timedelta64's dtype-preserving nanvar arm untouched.
-        if let Some(data) = self.as_i64_slice() {
-            let n = data.len();
-            if n <= ddof {
-                return Scalar::Null(NullKind::NaN);
-            }
-            let mean: f64 = data.iter().map(|&v| v as f64).sum::<f64>() / n as f64;
-            let sum_sq: f64 = data.iter().map(|&v| (v as f64 - mean).powi(2)).sum::<f64>();
-            return Scalar::Float64(sum_sq / (n - ddof) as f64);
-        }
-        // Nullable Float64/Int64: two-pass moments over the PRESENT subset, skipping
-        // nanvar's Vec<Scalar> materialization + collect_finite. Bit-identical (same
-        // present values, same order ⇒ same n/mean/sum_sq; n <= ddof ⇒ Null(NaN)).
-        if self.dtype == DType::Float64
-            && let Some((data, validity)) = self.as_f64_slice_with_validity()
-        {
-            let (n, _mean, sum_sq) = present_moments_f64(data, Some(validity));
-            return if n <= ddof {
+        if let Some((count, var)) = self.pandas_reductions(|r| (r.count(), r.var(ddof))) {
+            return if count <= ddof {
                 Scalar::Null(NullKind::NaN)
             } else {
-                Scalar::Float64(sum_sq / (n - ddof) as f64)
-            };
-        }
-        if self.dtype == DType::Int64
-            && let Some((data, validity)) = self.as_i64_slice_with_validity()
-        {
-            let (n, _mean, sum_sq) = present_moments_i64(data, Some(validity));
-            return if n <= ddof {
-                Scalar::Null(NullKind::NaN)
-            } else {
-                Scalar::Float64(sum_sq / (n - ddof) as f64)
+                Scalar::Float64(var)
             };
         }
         nanvar(&self.values, ddof)
@@ -23785,22 +23724,14 @@ impl Column {
     /// Matches `pd.Series.std(ddof=1)`.
     #[must_use]
     pub fn std(&self, ddof: usize) -> Scalar {
-        // For an all-valid Float64 OR Int64 column nanstd is sqrt(nanvar) (the
-        // non-Timedelta arm); reuse the typed var (which has both fast paths),
-        // skipping nanstd's Vec<Scalar> materialization (and, for Int64, its extra
-        // collect_finite f64 buffer). Bit-identical: nanstd's numeric arm is
-        // literally `match nanvar(..) { Float64(v) => Float64(v.sqrt()), other =>
-        // other }`, and typed var == nanvar for these dtypes, so the same var bits
-        // are sqrt'd (and a n<=ddof Null(NaN) passes through unchanged). Non-Float64
-        // /non-Int64 (e.g. Timedelta) keep nanstd's dtype-preserving path.
-        // Delegate to typed var for any Float64/Int64 column (all-valid OR nullable
-        // — var now has both). nanstd's numeric arm is literally sqrt(nanvar), and
-        // typed var == nanvar for these dtypes, so this is bit-identical. Timedelta
-        // and other dtypes keep nanstd's dtype-preserving path.
-        if matches!(&self.dtype, DType::Float64 | DType::Int64) {
-            return match self.var(ddof) {
-                Scalar::Float64(v) => Scalar::Float64(v.sqrt()),
-                other => other,
+        // pandas' nanstd: sqrt of its nanvar, the sums in numpy's order, for
+        // every dtype the pandas reductions read (br-frankenpandas-9iim6);
+        // Timedelta and the other dtypes keep nanstd's dtype-preserving path.
+        if let Some((count, std)) = self.pandas_reductions(|r| (r.count(), r.std(ddof))) {
+            return if count <= ddof {
+                Scalar::Null(NullKind::NaN)
+            } else {
+                Scalar::Float64(std)
             };
         }
         nanstd(&self.values, ddof)
@@ -23811,46 +23742,14 @@ impl Column {
     /// Matches `pd.Series.sem(ddof=1)`.
     #[must_use]
     pub fn sem(&self, ddof: usize) -> Scalar {
-        // sem = std / sqrt(n) over the PRESENT subset (n = present count). The
-        // as_*_with_validity two-pass handles all-valid AND nullable Float64/Int64
-        // (for all-valid, validity.get is always true, so present == non-NaN,
-        // exactly collect_finite's finite filter) — a SINGLE two-pass, vs nansem's
-        // DOUBLE collect_finite (once for `n`, again in nanstd->nanvar) AND its
-        // Vec<Scalar> materialization. Bit-identical: same present values, same
-        // order ⇒ same n/mean/sum_sq, same `n <= ddof -> Null(NaN)` guard.
-        if self.dtype == DType::Float64
-            && let Some((data, validity)) = self.as_f64_slice_with_validity()
-        {
-            let (n, _mean, sum_sq) = present_moments_f64(data, Some(validity));
-            if n <= ddof {
-                return Scalar::Null(NullKind::NaN);
-            }
-            let std = (sum_sq / (n - ddof) as f64).sqrt();
-            return Scalar::Float64(std / (n as f64).sqrt());
-        }
-        if self.dtype == DType::Int64
-            && let Some((data, validity)) = self.as_i64_slice_with_validity()
-        {
-            let (n, _mean, sum_sq) = present_moments_i64(data, Some(validity));
-            if n <= ddof {
-                return Scalar::Null(NullKind::NaN);
-            }
-            let std = (sum_sq / (n - ddof) as f64).sqrt();
-            return Scalar::Float64(std / (n as f64).sqrt());
-        }
-        // Fallback for all-valid Float64/Int64 backings the two accessors above do
-        // NOT expose (chunked / transposed / strided variants that as_f64_slice
-        // reaches but as_f64_slice_with_validity does not). Bit-identical Vec path.
-        if let Some(nums) = self.typed_collect_finite_f64() {
-            let n = nums.len();
-            if n <= ddof {
-                return Scalar::Null(NullKind::NaN);
-            }
-            let nf = n as f64;
-            let mean = nums.iter().sum::<f64>() / nf;
-            let sum_sq: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
-            let std = (sum_sq / (n - ddof) as f64).sqrt();
-            return Scalar::Float64(std / nf.sqrt());
+        // pandas' nansem: sqrt(nanvar) / sqrt(count), the variance's sums in
+        // numpy's order (br-frankenpandas-9iim6).
+        if let Some((count, sem)) = self.pandas_reductions(|r| (r.count(), r.sem(ddof))) {
+            return if count <= ddof {
+                Scalar::Null(NullKind::NaN)
+            } else {
+                Scalar::Float64(sem)
+            };
         }
         nansem(&self.values, ddof)
     }
@@ -48781,21 +48680,42 @@ mod tests {
                 for col in [&i_all, &i_null, &f_null] {
                     let vals = col.values().to_vec();
                     for ddof in [0usize, 1, 2] {
-                        assert!(
-                            approx_eq(&col.var(ddof), &fp_types::nanvar(&vals, ddof)),
-                            "var trial {trial} ddof {ddof}"
-                        );
-                        assert!(
-                            approx_eq(&col.std(ddof), &fp_types::nanstd(&vals, ddof)),
-                            "std trial {trial} ddof {ddof}"
-                        );
-                        assert!(
-                            approx_eq(&col.sem(ddof), &fp_types::nansem(&vals, ddof)),
-                            "sem trial {trial} ddof {ddof}"
-                        );
+                        let (var, std, sem) = pandas_var_std_sem(&vals, ddof);
+                        assert!(approx_eq(&col.var(ddof), &var), "var {trial} {ddof}");
+                        assert!(approx_eq(&col.std(ddof), &std), "std {trial} {ddof}");
+                        assert!(approx_eq(&col.sem(ddof), &sem), "sem {trial} {ddof}");
                     }
                 }
             }
+        }
+
+        /// pandas' nanvar / nanstd / nansem written out over the cells: the
+        /// missing slots 0 in place, the mean and the squared deviations each
+        /// one numpy pairwise sum (br-frankenpandas-9iim6).
+        fn pandas_var_std_sem(vals: &[Scalar], ddof: usize) -> (Scalar, Scalar, Scalar) {
+            let present: Vec<Option<f64>> = vals
+                .iter()
+                .map(|v| (!v.is_missing()).then(|| v.to_f64().expect("number")))
+                .collect();
+            let count = present.iter().flatten().count();
+            if count <= ddof {
+                let missing = Scalar::Null(fp_types::NullKind::NaN);
+                return (missing.clone(), missing.clone(), missing);
+            }
+            let zeroed: Vec<f64> = present.iter().map(|v| v.unwrap_or(0.0)).collect();
+            #[allow(clippy::cast_precision_loss)] // below 250
+            let (count, divisor) = (count as f64, (count - ddof) as f64);
+            let mean = (0.0 + fp_types::numpy_pairwise_sum(&zeroed)) / count;
+            let squares: Vec<f64> = present
+                .iter()
+                .map(|v| v.map_or(0.0, |x| (mean - x) * (mean - x)))
+                .collect();
+            let var = (0.0 + fp_types::numpy_pairwise_sum(&squares)) / divisor;
+            (
+                Scalar::Float64(var),
+                Scalar::Float64(var.sqrt()),
+                Scalar::Float64(var.sqrt() / count.sqrt()),
+            )
         }
 
         /// br-frankenpandas-8s4mb: the blocked 8-lane fast path must agree with
@@ -48946,24 +48866,12 @@ mod tests {
             assert_eq!(m3, 0.0);
             assert_eq!(m4, 10.25);
 
-            // The sem/var pair takes the same guards. mean is exact in both cases.
-            let (n, mean, sum_sq) = crate::present_moments_f64(&[1.0, 2.0, 3.0, 4.0], None);
-            assert_eq!((n, mean, sum_sq), (4, 2.5, 5.0));
-            let (n, mean, sum_sq) = crate::present_moments_f64(&[7.0; 8], None);
-            assert_eq!((n, mean, sum_sq), (8, 7.0, 0.0));
-            // NaN must fall back and be EXCLUDED, not propagate into mean.
-            let (n, mean, sum_sq) = crate::present_moments_f64(&[1.0, f64::NAN, 3.0], None);
-            assert_eq!((n, mean, sum_sq), (2, 2.0, 2.0));
-            let (n, mean, sum_sq) = crate::present_moments_i64(&[1, 2, 3, 4], None);
-            assert_eq!((n, mean, sum_sq), (4, 2.5, 5.0));
-
             // ⚠️ NON-VACUITY. Every production caller passes Some(validity), so a
             // gate of `is_none()` would make the blocked path unreachable and this
             // lever inert while every assertion above still passed. These four
             // exercise the path the PRODUCT actually takes: a mask that is present
             // and entirely set. Same inputs, same answers as the None cases.
             let full8 = ValidityMask::all_valid(8);
-            let full4 = ValidityMask::all_valid(4);
             assert_eq!(
                 crate::present_central_moments_f64(&[7.0; 8], Some(&full8)),
                 (8, 0.0, 0.0, 0.0)
@@ -48972,18 +48880,6 @@ mod tests {
                 crate::present_central_moments_i64(&[5_i64; 8], Some(&full8)),
                 (8, 0.0, 0.0, 0.0)
             );
-            let (n, mean, sum_sq) = crate::present_moments_f64(&[1.0, 2.0, 3.0, 4.0], Some(&full4));
-            assert_eq!((n, mean, sum_sq), (4, 2.5, 5.0));
-            let (n, mean, sum_sq) = crate::present_moments_i64(&[1, 2, 3, 4], Some(&full4));
-            assert_eq!((n, mean, sum_sq), (4, 2.5, 5.0));
-
-            // A mask with a HOLE must still take the scalar path and exclude it.
-            let mut holed = ValidityMask::all_valid(4);
-            holed.set(1, false);
-            let (n, mean, sum_sq) =
-                crate::present_moments_f64(&[1.0, 99.0, 2.0, 3.0], Some(&holed));
-            assert_eq!((n, mean), (3, 2.0));
-            assert_eq!(sum_sq, 2.0);
         }
 
         #[test]
@@ -65340,15 +65236,19 @@ mod ab_i64_var_ccfp {
             }
         }
         // Negative + large-magnitude values (exercise `v as f64` sign/precision).
+        // Their squared deviations round, so the order of the sums shows: the
+        // var is pandas' (live 2.2.3, Series(data).var(ddof)), which nanvar's
+        // left fold is not (br-frankenpandas-9iim6).
         let data: Vec<i64> = (0..5000).map(|i| (i as i64 - 2500) * 100_003).collect();
         let col = Column::from_i64_values_owned(data);
-        for ddof in [0usize, 1] {
+        for (ddof, pandas) in [(0usize, 0x4352_813c_5084_85f8), (1, 0x4352_822e_e8d5_41d5)] {
             assert_eq!(
-                var_bits(&orig_var(&col, ddof)),
                 var_bits(&col.var(ddof)),
-                "i64 var diverged (signed) ddof={ddof}"
+                pandas,
+                "i64 var (signed) ddof={ddof}"
             );
         }
+        assert_ne!(var_bits(&orig_var(&col, 1)), 0x4352_822e_e8d5_41d5);
     }
 
     #[test]
@@ -65359,12 +65259,8 @@ mod ab_i64_var_ccfp {
         const REPS: usize = 3;
         const DDOF: usize = 1;
 
-        // Parity guard inside the perf run too.
-        assert_eq!(
-            var_bits(&orig_var(&mk_col(N), DDOF)),
-            var_bits(&mk_col(N).var(DDOF)),
-            "i64 var diverged (perf)"
-        );
+        // No parity guard: the typed var is pandas' (numpy's pairwise sums,
+        // br-frankenpandas-9iim6) and differs from nanvar's left fold here.
 
         for _ in 0..2 {
             std::hint::black_box(orig_var(&mk_col(N), DDOF));
@@ -65482,14 +65378,15 @@ mod ab_i64_std_ccfp {
                 );
             }
         }
-        // Negative + large-magnitude values.
+        // Negative + large-magnitude values: pandas' std (live 2.2.3), which
+        // nanstd's left fold is not (br-frankenpandas-9iim6).
         let data: Vec<i64> = (0..5000).map(|i| (i as i64 - 2500) * 100_003).collect();
         let col = Column::from_i64_values_owned(data);
-        for ddof in [0usize, 1] {
+        for (ddof, pandas) in [(0usize, 0x41a1_34f7_0d13_3ea7), (1, 0x41a1_3567_d5c8_f9c1)] {
             assert_eq!(
-                std_bits(&orig_std(&col, ddof)),
                 std_bits(&col.std(ddof)),
-                "i64 std diverged (signed) ddof={ddof}"
+                pandas,
+                "i64 std (signed) ddof={ddof}"
             );
         }
     }
@@ -65502,12 +65399,8 @@ mod ab_i64_std_ccfp {
         const REPS: usize = 3;
         const DDOF: usize = 1;
 
-        // Parity guard inside the perf run too.
-        assert_eq!(
-            std_bits(&orig_std(&mk_col(N), DDOF)),
-            std_bits(&mk_col(N).std(DDOF)),
-            "i64 std diverged (perf)"
-        );
+        // No parity guard: the typed std is pandas' (numpy's pairwise sums,
+        // br-frankenpandas-9iim6) and differs from nanstd's left fold here.
 
         for _ in 0..2 {
             std::hint::black_box(orig_std(&mk_col(N), DDOF));
@@ -65632,14 +65525,15 @@ mod ab_i64_sem_ccfp {
                 );
             }
         }
-        // Negative + large-magnitude Int64.
+        // Negative + large-magnitude Int64: pandas' sem (live 2.2.3), which
+        // nansem's left fold is not (br-frankenpandas-9iim6).
         let data: Vec<i64> = (0..5000).map(|i| (i as i64 - 2500) * 100_003).collect();
         let col = Column::from_i64_values_owned(data);
-        for ddof in [0usize, 1] {
+        for (ddof, pandas) in [(0usize, 0x413f_25d6_a613_9dee), (1, 0x413f_26a2_cf43_ac1e)] {
             assert_eq!(
-                sem_bits(&orig_sem(&col, ddof)),
                 sem_bits(&col.sem(ddof)),
-                "i64 sem diverged (signed) ddof={ddof}"
+                pandas,
+                "i64 sem (signed) ddof={ddof}"
             );
         }
     }
@@ -65652,12 +65546,8 @@ mod ab_i64_sem_ccfp {
         const REPS: usize = 3;
         const DDOF: usize = 1;
 
-        // Parity guard inside the perf run too.
-        assert_eq!(
-            sem_bits(&orig_sem(&mk_col(N), DDOF)),
-            sem_bits(&mk_col(N).sem(DDOF)),
-            "i64 sem diverged (perf)"
-        );
+        // No parity guard: the typed sem is pandas' (numpy's pairwise sums,
+        // br-frankenpandas-9iim6) and differs from nansem's left fold here.
 
         for _ in 0..2 {
             std::hint::black_box(orig_sem(&mk_col(N), DDOF));

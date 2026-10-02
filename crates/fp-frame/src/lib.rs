@@ -2461,6 +2461,27 @@ fn scalar_to_pivot_column_name(value: &Scalar) -> String {
     pivot_label_to_column_name(&scalar_to_value_counts_index_label(value))
 }
 
+/// The grand total of `pivot_table(margins=True)`: pandas reduces the values
+/// as a Series, so sum / mean / var / std add in numpy's pairwise order
+/// (br-frankenpandas-9iim6) where the cells and the row / column margins are
+/// groupby aggs ([`pivot_table_agg_value`]).
+fn pivot_table_grand_total(aggfunc: &str, vals: &[f64]) -> Result<f64, FrameError> {
+    // pandas reduces the present values only, packed in row order.
+    let present: Vec<f64> = vals.iter().copied().filter(|v| !v.is_nan()).collect();
+    let series = fp_types::PandasReductions::new(
+        fp_types::ReductionValues::Float(&present),
+        None,
+        fp_types::MissingLayout::Numpy,
+    );
+    Ok(match aggfunc {
+        "sum" => series.sum(),
+        "mean" => series.mean(),
+        "var" => series.var(1),
+        "std" => series.std(1),
+        _ => return pivot_table_agg_value(aggfunc, vals),
+    })
+}
+
 fn pivot_table_agg_value(aggfunc: &str, vals: &[f64]) -> Result<f64, FrameError> {
     // pandas' pivot_table cells are a groupby agg: sum / mean compensated,
     // var / std Welford (br-frankenpandas-xhogl).
@@ -3044,30 +3065,23 @@ fn pivot_compute_margins(
         return (row, col, med(ab));
     }
 
+    // The grand total is pandas' Series reduction of the values, in numpy's
+    // order (br-frankenpandas-9iim6).
+    let grand = fp_types::PandasReductions::new(
+        fp_types::ReductionValues::Float(val_f64),
+        None,
+        fp_types::MissingLayout::Numpy,
+    );
+
     if matches!(aggfunc, "var" | "std") {
         // The row / column margins are pandas' groupby aggs, Welford
-        // (br-frankenpandas-xhogl); the grand total is its Series reduction,
-        // the two-pass below (br-frankenpandas-9iim6 owns matching numpy's
-        // pairwise sums there).
+        // (br-frankenpandas-xhogl).
         let mut row_moments = vec![fp_types::WelfordVar::default(); n_idx];
         let mut col_moments = vec![fp_types::WelfordVar::default(); n_col];
-        let mut all_sum = 0.0f64;
-        let mut all_cnt = 0u64;
         for i in 0..n {
             let v = val_f64[i];
             row_moments[ri_codes[i] as usize].add(v);
             col_moments[ci_codes[i] as usize].add(v);
-            all_sum += v;
-            all_cnt += 1;
-        }
-        let am = if all_cnt > 0 {
-            all_sum / all_cnt as f64
-        } else {
-            0.0
-        };
-        let mut asq = 0.0f64;
-        for &v in val_f64 {
-            asq += (v - am).powi(2);
         }
         let want_std = aggfunc == "std";
         let spread = |moments: &fp_types::WelfordVar| -> f64 {
@@ -3080,12 +3094,7 @@ fn pivot_compute_margins(
         };
         let row = row_moments.iter().map(spread).collect();
         let col = col_moments.iter().map(spread).collect();
-        let all = if all_cnt < 2 {
-            f64::NAN
-        } else {
-            let var = asq / (all_cnt as f64 - 1.0);
-            if want_std { var.sqrt() } else { var }
-        };
+        let all = if want_std { grand.std(1) } else { grand.var(1) };
         return (row, col, all);
     }
 
@@ -3102,18 +3111,17 @@ fn pivot_compute_margins(
     };
     // The row / column margins are pandas' groupby aggs, a compensated sum
     // for sum / mean (br-frankenpandas-xhogl); the grand total is its Series
-    // reduction (br-frankenpandas-9iim6).
+    // reduction, `grand` above.
     let mut row_acc = vec![seed; n_idx];
     let mut row_sum = vec![fp_types::KahanSum::default(); if is_sum { n_idx } else { 0 }];
     let mut row_cnt = vec![0u64; n_idx];
-    let mut all_acc = seed;
+    let mut all_acc = if is_sum { grand.sum() } else { seed };
     let mut all_cnt = 0u64;
     for i in 0..n {
         let r = ri_codes[i] as usize;
         let v = val_f64[i];
         if is_sum {
             row_sum[r].add(v);
-            all_acc += v;
         } else if is_min {
             row_acc[r] = f64::min(row_acc[r], v);
             all_acc = f64::min(all_acc, v);
@@ -20169,34 +20177,17 @@ impl Series {
         }
     }
 
-    /// Vectorizable f64 sum: 8 independent accumulator lanes broken out of the
-    /// sequential-dependency chain that a plain `iter().sum()` (a 0.0-seeded
-    /// left-fold) forms — LLVM cannot auto-vectorize that fold because f64 add is
-    /// non-associative. Pandas/numpy sum via a pairwise/blocked algorithm too, so
-    /// this ALSO tracks numpy's value more closely than the left-fold did. For
-    /// `data.len() < 8` the `as_chunks::<8>()` chunk slice is empty and the whole
-    /// slice flows through the remainder left-fold, so the result is
-    /// BIT-IDENTICAL to `iter().sum()` on short arrays (every reduction
-    /// conformance fixture is tiny); it diverges (in the last ~ULP, more
-    /// accurately) only on large arrays where no exact value is pinned.
-    fn blocked_sum_f64(data: &[f64]) -> f64 {
-        let mut acc = [0.0_f64; 8];
-        let (chunks, remainder) = data.as_chunks::<8>();
-        for c in chunks {
-            for l in 0..8 {
-                acc[l] += c[l];
-            }
-        }
-        let mut total =
-            ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
-        for &x in remainder {
-            total += x;
-        }
-        total
+    /// This column as pandas' float reductions read it
+    /// ([`Column::pandas_reductions`]; br-frankenpandas-9iim6).
+    fn with_pandas_reductions<R>(
+        &self,
+        reduce: impl FnOnce(&fp_types::PandasReductions<'_>) -> R,
+    ) -> Option<R> {
+        self.column.pandas_reductions(reduce)
     }
 
-    /// Blocked (8-lane) dot product of two equal-length f64 slices — the dot
-    /// analogue of [`Self::blocked_sum_f64`]. Breaks the `result += a*b`
+    /// Blocked (8-lane) dot product of two equal-length f64 slices. Breaks
+    /// the `result += a*b`
     /// dependency chain into 8 independent `acc[l] += a[l]*b[l]` lanes so the
     /// multiply-accumulate AUTO-VECTORIZES (fma). Degenerates to the sequential
     /// left-fold for `len < 8` (empty `as_chunks`), so it's bit-identical to
@@ -20216,132 +20207,6 @@ impl Series {
             total += x * y;
         }
         total
-    }
-
-    /// Blocked (8-lane) central moments off a contiguous f64 slice: returns
-    /// `(Σ(v-mean)², Σ(v-mean)^K)` with `K = 4` when `FOURTH`, else `K = 3`.
-    /// The moment analogue of [`Self::blocked_sum_f64`], and admissible for the
-    /// same reason (br-frankenpandas-8s4mb).
-    ///
-    /// `skew`/`kurtosis` accumulated both moments in ONE ordered scalar loop, so
-    /// every `m2 +=` depended on the previous one — a sequential dependency chain
-    /// LLVM cannot break, because f64 add is non-associative. Eight independent
-    /// lanes break it; the `d * d` / `d2 * d` / `d2 * d2` products are the same
-    /// expansions `powi(2)`/`powi(3)`/`powi(4)` lower to, so only the ADDITION
-    /// order changes.
-    ///
-    /// BIT-IDENTITY, stated precisely because this is a numerics change and
-    /// `br-frankenpandas-jawxr` rejected FMA for changing bits: `as_chunks::<8>()`
-    /// is EMPTY below 8 elements, so a short slice flows entirely through the
-    /// remainder loop — which deliberately calls `.powi()` rather than the
-    /// unrolled products, making it bit-identical to the loop it replaces. Every
-    /// conformance fixture for these ops has 2 to 6 elements, so the pinned
-    /// surface is untouched by construction. Above 8 it diverges in the last few
-    /// ULP, and (like `blocked_sum_f64` before it) toward numpy, which sums
-    /// pairwise rather than as a left-fold.
-    fn blocked_central_moments_f64<const FOURTH: bool>(data: &[f64], mean: f64) -> (f64, f64) {
-        let mut a2 = [0.0_f64; 8];
-        let mut ak = [0.0_f64; 8];
-        let (chunks, remainder) = data.as_chunks::<8>();
-        for c in chunks {
-            for l in 0..8 {
-                let d = c[l] - mean;
-                let d2 = d * d;
-                a2[l] += d2;
-                ak[l] += if FOURTH { d2 * d2 } else { d2 * d };
-            }
-        }
-        let mut m2 = ((a2[0] + a2[1]) + (a2[2] + a2[3])) + ((a2[4] + a2[5]) + (a2[6] + a2[7]));
-        let mut mk = ((ak[0] + ak[1]) + (ak[2] + ak[3])) + ((ak[4] + ak[5]) + (ak[6] + ak[7]));
-        for &v in remainder {
-            let d = v - mean;
-            m2 += d.powi(2);
-            mk += if FOURTH { d.powi(4) } else { d.powi(3) };
-        }
-        (m2, mk)
-    }
-
-    /// Int64 sibling of [`Self::blocked_central_moments_f64`], widening each
-    /// element with `as f64` exactly where the scalar loop did. Kept separate
-    /// rather than made generic so the lane bodies stay concrete slices and the
-    /// widening stays inside the vectorizable chunk loop.
-    fn blocked_central_moments_i64<const FOURTH: bool>(data: &[i64], mean: f64) -> (f64, f64) {
-        let mut a2 = [0.0_f64; 8];
-        let mut ak = [0.0_f64; 8];
-        let (chunks, remainder) = data.as_chunks::<8>();
-        for c in chunks {
-            for l in 0..8 {
-                let d = c[l] as f64 - mean;
-                let d2 = d * d;
-                a2[l] += d2;
-                ak[l] += if FOURTH { d2 * d2 } else { d2 * d };
-            }
-        }
-        let mut m2 = ((a2[0] + a2[1]) + (a2[2] + a2[3])) + ((a2[4] + a2[5]) + (a2[6] + a2[7]));
-        let mut mk = ((ak[0] + ak[1]) + (ak[2] + ak[3])) + ((ak[4] + ak[5]) + (ak[6] + ak[7]));
-        for &iv in remainder {
-            let d = iv as f64 - mean;
-            m2 += d.powi(2);
-            mk += if FOURTH { d.powi(4) } else { d.powi(3) };
-        }
-        (m2, mk)
-    }
-
-    /// Blocked widening sum of an `&[i64]` as f64 — the `as f64` sibling of
-    /// [`Self::blocked_sum_f64`], for the Int64 arms of `skew`/`kurtosis` whose
-    /// mean was `data.iter().map(|&v| v as f64).sum::<f64>()`. Same 8-lane
-    /// structure, same empty-below-8 degeneration to the left-fold.
-    fn blocked_sum_i64_as_f64(data: &[i64]) -> f64 {
-        let mut acc = [0.0_f64; 8];
-        let (chunks, remainder) = data.as_chunks::<8>();
-        for c in chunks {
-            for l in 0..8 {
-                acc[l] += c[l] as f64;
-            }
-        }
-        let mut total =
-            ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
-        for &x in remainder {
-            total += x as f64;
-        }
-        total
-    }
-
-    fn f64_valid_sum_count(data: &[f64], validity: &ValidityMask) -> (f64, usize) {
-        // All-valid fast path: no missing slots, so the sum is over the whole
-        // contiguous slice — use the vectorizable blocked sum instead of the
-        // per-element bit-scan. (The bit-scan visits indices in ascending order,
-        // matching a left-fold; the blocked sum matches that on <8-element inputs
-        // and is more accurate + faster on large ones.)
-        if validity.all() {
-            return (Self::blocked_sum_f64(data), data.len());
-        }
-        let validity_words = validity.packed_words_for_scan();
-        let mut total = 0.0_f64;
-        let mut count = 0_usize;
-
-        for (word_idx, &word) in validity_words.iter().enumerate() {
-            let base = word_idx * 64;
-            if base >= data.len() {
-                break;
-            }
-
-            let chunk_len = (data.len() - base).min(64);
-            let len_mask = if chunk_len == 64 {
-                u64::MAX
-            } else {
-                (1_u64 << chunk_len) - 1
-            };
-            let mut valid_bits = word & len_mask;
-            while valid_bits != 0 {
-                let offset = valid_bits.trailing_zeros() as usize;
-                total += data[base + offset];
-                count += 1;
-                valid_bits &= valid_bits - 1;
-            }
-        }
-
-        (total, count)
     }
 
     /// Fallible sibling of [`Self::sum`] for a `Timedelta64` column: reports a
@@ -20414,7 +20279,7 @@ impl Series {
         // A float32 column sums as pandas' nansum does: numpy's float32
         // pairwise sum with 0 where a value is missing (fvsao.23).
         if let Some((values, _)) = self.float32_values_zero_filled() {
-            let sum = fp_types::numpy_pairwise_sum_f32(&values);
+            let sum = fp_types::numpy_pairwise_sum(&values);
             return Ok(Scalar::Float64(f64::from(sum)));
         }
         // Per br-frankenpandas-a52db: pandas preserves Int64/Bool dtype for
@@ -20563,31 +20428,11 @@ impl Series {
             _ => {}
         }
 
-        // Typed fast path (br-frankenpandas-lei31): an all-valid Float64 column
-        // sums its contiguous f64 buffer directly, skipping the per-element
-        // Scalar match + is_missing check. Bit-identical to the Scalar left-fold
-        // below — same values, same order, and all-valid means nothing is
-        // skipped, so `Iterator::sum` (a 0.0-seeded left-fold) matches exactly.
-        // Concat chunk fast path: a `concat(...)` output is a lazy chunks column;
-        // fold the chunk slices in place instead of materializing the cold 40MB
-        // buffer that `as_f64_slice` below would build. Bit-identical to
-        // `data.iter().sum()` (both 0.0-seeded sequential left-folds over the same
-        // 0..n values), so `concat(...).sum()` beats pandas' copy-then-sum.
-        if let Some(s) = self.column.all_valid_f64_chunk_sum() {
-            return Ok(Scalar::Float64(s));
-        }
-
-        if let Some(data) = self.column.as_f64_slice() {
-            return Ok(Scalar::Float64(Self::blocked_sum_f64(data)));
-        }
-
-        // Typed nullable fast path (sister to lei31): a Float64 column WITH missing
-        // values otherwise materialized the whole Vec<Scalar> below and matched each
-        // element. Sum only valid slots straight from the f64 buffer — bit-identical
-        // to the Scalar left-fold (same non-missing values in row order, same
-        // 0.0-seeded `+`; inf stays as `to_f64(Float64(inf))=inf` does, never dropped).
-        if let Some((data, validity)) = self.column.as_f64_slice_with_validity() {
-            let (total, _) = Self::f64_valid_sum_count(data, validity);
+        // A float column adds as pandas does, in numpy's pairwise order over
+        // the column with its missing slots as 0 (a masked Float64: over each
+        // run of present values) - typed and chunked storage read in place
+        // (br-frankenpandas-9iim6).
+        if let Some(total) = self.with_pandas_reductions(|r| r.sum()) {
             return Ok(Scalar::Float64(total));
         }
 
@@ -20624,28 +20469,32 @@ impl Series {
     }
 
     /// Mean of a datetime64 column the way pandas' nanmean takes it: NaT
-    /// slots filled with 0, all values summed as float64 (numpy's blocked
-    /// order, see [`Self::blocked_sum_f64`]), divided by the non-NaT count
-    /// and truncated to int64 nanoseconds; all-NaT or empty gives NaT.
+    /// slots filled with 0, the int64 nanoseconds summed as float64 through
+    /// numpy's cast buffer ([`fp_types::PandasReductions`]), divided by the
+    /// non-NaT count and truncated to int64; all-NaT or empty gives NaT.
     fn datetime_mean(&self) -> Scalar {
-        let mut count = 0_usize;
-        let filled: Vec<f64> = self
-            .column
-            .values()
+        let values = self.column.values();
+        let mut present = vec![0_u64; values.len().div_ceil(64)];
+        let nanos: Vec<i64> = values
             .iter()
-            .map(|value| match value {
+            .enumerate()
+            .map(|(i, value)| match value {
                 Scalar::Datetime64(ns) if *ns != Timestamp::NAT => {
-                    count += 1;
-                    *ns as f64
+                    present[i / 64] |= 1 << (i % 64);
+                    *ns
                 }
-                _ => 0.0,
+                _ => 0,
             })
             .collect();
-        if count == 0 {
+        let reductions = fp_types::PandasReductions::new(
+            fp_types::ReductionValues::Int(&nanos),
+            Some(&present),
+            fp_types::MissingLayout::Numpy,
+        );
+        if reductions.count() == 0 {
             return Scalar::Datetime64(Timestamp::NAT);
         }
-        let mean = Self::blocked_sum_f64(&filled) / count as f64;
-        Scalar::Datetime64(mean as i64)
+        Scalar::Datetime64(reductions.mean() as i64)
     }
 
     /// Mean of non-null numeric values. Returns NaN for empty.
@@ -20663,21 +20512,14 @@ impl Series {
             }
             #[allow(clippy::cast_precision_loss)] // numpy's float32 count
             let count = count as f32;
-            let mean = fp_types::numpy_pairwise_sum_f32(&values) / count;
+            let mean = fp_types::numpy_pairwise_sum(&values) / count;
             return Ok(Scalar::Float64(f64::from(mean)));
         }
-        // Concat chunk fast path (see sum): fold the lazy chunks in place instead
-        // of materializing the cold buffer. Bit-identical to f64_valid_sum_count
-        // over the materialized all-valid buffer (Σ data[0..n]/n, same order).
-        if let Some(m) = self.column.all_valid_f64_chunk_mean() {
-            return Ok(Scalar::Float64(m));
-        }
-        if let Some((data, validity)) = self.column.as_f64_slice_with_validity() {
-            let (total, count) = Self::f64_valid_sum_count(data, validity);
-            if count == 0 {
-                return Ok(Scalar::Float64(f64::NAN));
-            }
-            return Ok(Scalar::Float64(total / count as f64));
+        // A numeric column's mean is pandas' nanmean: its total in numpy's
+        // order (an int64 column's through numpy's cast buffer) over the
+        // count (br-frankenpandas-9iim6).
+        if let Some(mean) = self.with_pandas_reductions(|r| r.mean()) {
+            return Ok(Scalar::Float64(mean));
         }
 
         // Per br-frankenpandas-a52db: sum() now preserves Int64/Bool dtype.
@@ -21175,82 +21017,7 @@ impl Series {
             let clamped = var_ns.clamp(i64::MIN as f64, i64::MAX as f64);
             return Ok(Scalar::Timedelta64(clamped as i64));
         }
-        let mean_val = match self.mean()? {
-            Scalar::Float64(v) => v,
-            _ => return Ok(Scalar::Float64(f64::NAN)),
-        };
-        // Concat chunk fast path: fold Σ(v-mean)² over the lazy chunks in place
-        // (mean_val already computed via the fast chunk mean) instead of
-        // materializing the cold buffer. Bit-identical to the fold below.
-        if let Some(sum_sq_diff) = self.column.all_valid_f64_chunk_sq_dev_sum(mean_val) {
-            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - 1.0)));
-        }
-        if let Some(sum_sq_diff) = self.column.all_valid_i64_chunk_sq_dev_sum(mean_val) {
-            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - 1.0)));
-        }
-        // Typed second pass over the contiguous all-valid buffer (count == n).
-        // mean_val is reused from the typed self.mean(); the (v-mean)^2 row-order
-        // fold matches the Scalar loop below exactly — bit-identical, no Scalar
-        // materialization.
-        if let Some(data) = self.column.as_f64_slice() {
-            let mut sum_sq_diff = 0.0_f64;
-            for &v in data {
-                let diff = v - mean_val;
-                sum_sq_diff += diff * diff;
-            }
-            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - 1.0)));
-        }
-        if let Some(data) = self.column.as_i64_slice() {
-            let mut sum_sq_diff = 0.0_f64;
-            for &v in data {
-                let diff = v as f64 - mean_val;
-                sum_sq_diff += diff * diff;
-            }
-            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - 1.0)));
-        }
-        // Typed nullable second pass (sister to the all-valid f64 path above): a
-        // Float64 column WITH missing values otherwise materialized Vec<Scalar>
-        // here. Fold squared deviations over valid slots only — bit-identical to the
-        // Scalar loop below (same non-missing values, same row order, same
-        // mean_val reused from the now-typed self.mean()).
-        if let Some((data, validity)) = self.column.as_f64_slice_with_validity() {
-            let mut sum_sq_diff = 0.0_f64;
-            for (i, &v) in data.iter().enumerate() {
-                if validity.get(i) {
-                    let diff = v - mean_val;
-                    sum_sq_diff += diff * diff;
-                }
-            }
-            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - 1.0)));
-        }
-        // Typed nullable Int64 second pass (sister to the nullable Float64 arm above
-        // and the nullable Int64 sum/min/max/median/quantile paths; also speeds
-        // `std()`, which delegates here): a nullable Int64 column otherwise fell to the
-        // per-element Scalar match over a materialized Vec<Scalar>. Fold `(v-mean)^2`
-        // over the valid slots straight off the raw `&[i64]` + validity mask, reusing
-        // the `mean_val` from the already-typed `self.mean()`. Bit-identical to the
-        // Scalar loop: `validity.get(i)` is exactly the `!is_missing()` filter for an
-        // Int64 cell, `v as f64 == Scalar::Int64(v).to_f64()`, same present values in
-        // row order, same `diff * diff` fold; `count` (validity popcount) is unchanged.
-        if let Some((data, validity)) = self.column.as_i64_slice_with_validity() {
-            let mut sum_sq_diff = 0.0_f64;
-            for (i, &v) in data.iter().enumerate() {
-                if validity.get(i) {
-                    let diff = v as f64 - mean_val;
-                    sum_sq_diff += diff * diff;
-                }
-            }
-            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - 1.0)));
-        }
-        let mut sum_sq_diff = 0.0_f64;
-        for val in self.column.values() {
-            if !val.is_missing() {
-                let v = val.to_f64().map_err(ColumnError::from)?;
-                let diff = v - mean_val;
-                sum_sq_diff += diff * diff;
-            }
-        }
-        Ok(Scalar::Float64(sum_sq_diff / (count as f64 - 1.0)))
+        self.var_ddof(1)
     }
 
     /// Variance with configurable degrees of freedom.
@@ -21291,62 +21058,16 @@ impl Series {
             let clamped = var_ns.clamp(i64::MIN as f64, i64::MAX as f64);
             return Ok(Scalar::Timedelta64(clamped as i64));
         }
+        // A numeric column's variance is pandas' nanvar (a masked one's,
+        // numpy's var over its runs): the mean and the squared deviations
+        // each added in numpy's order (br-frankenpandas-9iim6).
+        if let Some(variance) = self.with_pandas_reductions(|r| r.var(ddof)) {
+            return Ok(Scalar::Float64(variance));
+        }
         let mean_val = match self.mean()? {
             Scalar::Float64(v) => v,
             _ => return Ok(Scalar::Float64(f64::NAN)),
         };
-        // Typed second pass over the contiguous all-valid buffer (count == n);
-        // bit-identical row-order fold, no Scalar materialization (see var()).
-        if let Some(data) = self.column.as_f64_slice() {
-            let mut sum_sq_diff = 0.0_f64;
-            for &v in data {
-                let diff = v - mean_val;
-                sum_sq_diff += diff * diff;
-            }
-            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - ddof as f64)));
-        }
-        // Typed nullable Float64 second pass (mirror of var()'s nullable Float64 arm,
-        // with the `(count - ddof)` divisor): a nullable Float64 column otherwise fell to
-        // the per-element Scalar match over a materialized Vec<Scalar>. Fold `(v-mean)^2`
-        // over the valid slots off the raw `(&[f64], &ValidityMask)`, reusing `mean_val`
-        // from the already-typed `self.mean()`. Bit-identical to the Scalar loop below
-        // (same present values in row order, same `diff * diff` fold, same divisor) —
-        // exactly as var()'s nullable Float64 arm is to its shared generic tail.
-        if let Some((data, validity)) = self.column.as_f64_slice_with_validity() {
-            let mut sum_sq_diff = 0.0_f64;
-            for (i, &v) in data.iter().enumerate() {
-                if validity.get(i) {
-                    let diff = v - mean_val;
-                    sum_sq_diff += diff * diff;
-                }
-            }
-            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - ddof as f64)));
-        }
-        if let Some(data) = self.column.as_i64_slice() {
-            let mut sum_sq_diff = 0.0_f64;
-            for &v in data {
-                let diff = v as f64 - mean_val;
-                sum_sq_diff += diff * diff;
-            }
-            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - ddof as f64)));
-        }
-        // Typed nullable Int64 second pass (sister to var()'s nullable Int64 arm and the
-        // nullable Int64 sum/min/max/median/quantile/skew paths): fold `(v-mean)^2` over
-        // the valid slots off the raw `&[i64]` + validity mask, reusing `mean_val` from
-        // the already-typed `self.mean()`. Bit-identical to the Scalar loop:
-        // `validity.get(i)` is exactly the `!is_missing()` filter for an Int64 cell,
-        // `v as f64 == Scalar::Int64(v).to_f64()`, same present values in row order, the
-        // same `diff * diff` fold and `(count - ddof)` divisor.
-        if let Some((data, validity)) = self.column.as_i64_slice_with_validity() {
-            let mut sum_sq_diff = 0.0_f64;
-            for (i, &v) in data.iter().enumerate() {
-                if validity.get(i) {
-                    let diff = v as f64 - mean_val;
-                    sum_sq_diff += diff * diff;
-                }
-            }
-            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - ddof as f64)));
-        }
         let mut sum_sq_diff = 0.0_f64;
         for val in self.column.values() {
             if !val.is_missing() {
@@ -26514,6 +26235,11 @@ impl Series {
     ///
     /// Matches `pd.Series.sem()`. Computes `std / sqrt(n)`.
     pub fn sem(&self) -> Result<f64, FrameError> {
+        // pandas' nansem: sqrt(nanvar) / sqrt(count), the variance's sums in
+        // numpy's order (br-frankenpandas-9iim6).
+        if let Some(sem) = self.with_pandas_reductions(|r| r.sem(1)) {
+            return Ok(sem);
+        }
         let (n, _, _, m2) = match self.numeric_moments() {
             Ok(moments) => moments,
             Err(FrameError::CompatibilityRejected(message)) => {
@@ -26540,57 +26266,11 @@ impl Series {
         // (which numeric_values() turns into Err). The Rolling::skew
         // variant already returns NaN correctly in this case (line 8868+).
         //
-        // Typed all-valid Float64 fast path: an `as_f64_slice` column is all-valid
-        // with no NaN, so `numeric_values` would copy the whole buffer into a `vals`
-        // Vec<f64> then re-scan it three times (mean, m2, m3). Compute the mean and a
-        // FUSED single m2/m3 pass straight off the slice — no Vec copy. Bit-identical:
-        // `vals == data` (all present, index order), same `Σ data / n` mean, and m2/m3
-        // are the same `(v-mean).powi(2)`/`.powi(3)` summed in the same order (fusing
-        // two independent sums into one pass changes no term).
-        if let Some(data) = self.column.as_f64_slice() {
-            let count = data.len();
-            if count < 3 {
-                return Ok(f64::NAN);
-            }
-            let n = count as f64;
-            // perf (br-frankenpandas-8s4mb): the mean was `iter().sum()` — the same
-            // 0.0-seeded left-fold `blocked_sum_f64` was written to replace — and the
-            // moments were an ordered scalar loop. Both are now 8-lane blocked. Below
-            // 8 elements both degenerate to the original fold, so every conformance
-            // fixture (all 2-6 elements) keeps its exact bits.
-            let mean = Self::blocked_sum_f64(data) / n;
-            let (m2, m3) = Self::blocked_central_moments_f64::<false>(data, mean);
-            let s2 = m2 / (n - 1.0);
-            if s2 == 0.0 {
-                return Ok(0.0);
-            }
-            let s3 = s2.powf(1.5);
-            return Ok((n / ((n - 1.0) * (n - 2.0))) * (m3 / s3));
-        }
-        // Typed all-valid Int64 fast path (sister to the Float64 arm): compute the
-        // mean and a FUSED m2/m3 pass straight off the raw `&[i64]` (`iv as f64`),
-        // instead of `numeric_values` building an intermediate `Vec<f64>` (v as f64)
-        // that skew then re-scans twice. Bit-identical: `numeric_values` on an
-        // all-valid Int64 column already yields `vals == [v as f64]` and the same
-        // in-order `Σ/n` mean, and the fused m2/m3 sums the same `(v-mean)^{2,3}`
-        // terms in the same index order — fusing two independent sums reorders no
-        // term. Only skips the Vec alloc + one scan.
-        if let Some(data) = self.column.as_i64_slice() {
-            let count = data.len();
-            if count < 3 {
-                return Ok(f64::NAN);
-            }
-            let n = count as f64;
-            // perf (br-frankenpandas-8s4mb): blocked mean + blocked moments, as in
-            // the Float64 arm above; identical below 8 elements.
-            let mean = Self::blocked_sum_i64_as_f64(data) / n;
-            let (m2, m3) = Self::blocked_central_moments_i64::<false>(data, mean);
-            let s2 = m2 / (n - 1.0);
-            if s2 == 0.0 {
-                return Ok(0.0);
-            }
-            let s3 = s2.powf(1.5);
-            return Ok((n / ((n - 1.0) * (n - 2.0))) * (m3 / s3));
+        // A numeric column's skew is pandas' nanskew: its central sums in
+        // numpy's order, `_zero_out_fperr`, and `n * (n - 1) ** 0.5 / (n - 2)`
+        // (br-frankenpandas-9iim6).
+        if let Some(skew) = self.with_pandas_reductions(|r| r.skew()) {
+            return Ok(skew);
         }
         let (count, mean, vals) = match self.numeric_values() {
             Ok(t) => t,
@@ -26627,47 +26307,11 @@ impl Series {
         // Per br-frankenpandas-d1aa3: pandas returns NaN (not Err) when
         // there are too few non-null values. See skew above.
         //
-        // Typed all-valid Float64 fast path (sister to skew): fused mean + m2/m4
-        // single pass off the `as_f64_slice` buffer, no `vals` Vec copy. Bit-identical.
-        if let Some(data) = self.column.as_f64_slice() {
-            let count = data.len();
-            if count < 4 {
-                return Ok(f64::NAN);
-            }
-            let n = count as f64;
-            // perf (br-frankenpandas-8s4mb): blocked mean + blocked moments (fourth
-            // power); identical below 8 elements, where `as_chunks::<8>()` is empty.
-            let mean = Self::blocked_sum_f64(data) / n;
-            let (m2, m4) = Self::blocked_central_moments_f64::<true>(data, mean);
-            let s2 = m2 / (n - 1.0);
-            if s2 == 0.0 {
-                return Ok(0.0);
-            }
-            let adj = (n * (n + 1.0)) / ((n - 1.0) * (n - 2.0) * (n - 3.0));
-            let sub = (3.0 * (n - 1.0).powi(2)) / ((n - 2.0) * (n - 3.0));
-            return Ok(adj * (m4 / (s2 * s2)) - sub);
-        }
-        // Typed all-valid Int64 fast path (mirror of skew): fused mean + m2/m4 pass
-        // off the raw `&[i64]` (`iv as f64`), no intermediate `Vec<f64>`. Bit-
-        // identical to `numeric_values` + the generic m2/m4 scans on an all-valid
-        // Int64 column.
-        if let Some(data) = self.column.as_i64_slice() {
-            let count = data.len();
-            if count < 4 {
-                return Ok(f64::NAN);
-            }
-            let n = count as f64;
-            // perf (br-frankenpandas-8s4mb): blocked mean + blocked moments, mirroring
-            // the Float64 arm; identical below 8 elements.
-            let mean = Self::blocked_sum_i64_as_f64(data) / n;
-            let (m2, m4) = Self::blocked_central_moments_i64::<true>(data, mean);
-            let s2 = m2 / (n - 1.0);
-            if s2 == 0.0 {
-                return Ok(0.0);
-            }
-            let adj = (n * (n + 1.0)) / ((n - 1.0) * (n - 2.0) * (n - 3.0));
-            let sub = (3.0 * (n - 1.0).powi(2)) / ((n - 2.0) * (n - 3.0));
-            return Ok(adj * (m4 / (s2 * s2)) - sub);
+        // A numeric column's kurtosis is pandas' nankurt: its central sums in
+        // numpy's order, `_zero_out_fperr`, 0 for a vanishing denominator
+        // (br-frankenpandas-9iim6).
+        if let Some(kurt) = self.with_pandas_reductions(|r| r.kurt()) {
+            return Ok(kurt);
         }
         let (count, mean, vals) = match self.numeric_values() {
             Ok(t) => t,
@@ -27864,14 +27508,20 @@ impl Series {
         let (mean, std, min, max) = if floats.is_empty() {
             (f64::NAN, f64::NAN, f64::NAN, f64::NAN)
         } else {
-            let sum: f64 = floats.iter().sum();
-            let mean = sum / count;
-            let std = if floats.len() > 1 {
-                let var = floats.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (count - 1.0);
-                var.sqrt()
-            } else {
-                f64::NAN
-            };
+            // pandas' describe is the Series' own mean and std, added in
+            // numpy's order (br-frankenpandas-9iim6).
+            let (mean, std) = self
+                .with_pandas_reductions(|r| (r.mean(), r.std(1)))
+                .unwrap_or_else(|| {
+                    let mean = floats.iter().sum::<f64>() / count;
+                    let std = if floats.len() > 1 {
+                        let squares = floats.iter().map(|v| (v - mean).powi(2)).sum::<f64>();
+                        (squares / (count - 1.0)).sqrt()
+                    } else {
+                        f64::NAN
+                    };
+                    (mean, std)
+                });
             let min = floats.iter().copied().fold(f64::INFINITY, f64::min);
             let max = floats.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             (mean, std, min, max)
@@ -81638,13 +81288,18 @@ impl DataFrame {
                     f64::NAN,
                 )
             } else {
-                let sum: f64 = nums.iter().sum();
-                let mean_val = sum / count;
-                let var = if nums.len() > 1 {
-                    nums.iter().map(|x| (x - mean_val).powi(2)).sum::<f64>() / (count - 1.0)
-                } else {
-                    f64::NAN
-                };
+                // Each column's mean and std as its Series' own, added in
+                // numpy's order (br-frankenpandas-9iim6).
+                let pandas = col.pandas_reductions(|r| (r.mean(), r.var(1)));
+                let (mean_val, var) = pandas.unwrap_or_else(|| {
+                    let mean_val = nums.iter().sum::<f64>() / count;
+                    let var = if nums.len() > 1 {
+                        nums.iter().map(|x| (x - mean_val).powi(2)).sum::<f64>() / (count - 1.0)
+                    } else {
+                        f64::NAN
+                    };
+                    (mean_val, var)
+                });
                 // Order statistics via O(n) selection instead of a full O(n log n)
                 // sort: min/max are folds and the three percentiles reuse
                 // quantile_select. -0.0/0.0 ties (equal under partial_cmp but
@@ -85663,7 +85318,7 @@ impl DataFrame {
         all_col_vals.push(if overall_vals.is_empty() {
             Scalar::Null(NullKind::NaN)
         } else {
-            Scalar::Float64(pivot_table_agg_value(aggfunc, &overall_vals)?)
+            Scalar::Float64(pivot_table_grand_total(aggfunc, &overall_vals)?)
         });
         new_cols.insert(
             margins_name.to_owned(),
@@ -117268,14 +116923,14 @@ mod tests {
         assert_eq!(out.name(), "");
     }
 
-    /// The fused m2/m3 and m2/m4 passes replace `(v - mean).powi(k)` sums. That
-    /// is only bit-identical if `powi(4)` associates as `(d*d)*(d*d)` and
-    /// `powi(3)` as `(d*d)*d` — if either associates differently the last ulp
-    /// moves, which is a semantics change, not a perf change.
-    ///
-    /// Compare against the EXACT expressions the fallback used before fusing.
+    /// Series skew / kurtosis are pandas' nanskew / nankurt: the missing slots
+    /// 0 in place, the mean and the centred powers `(d*d)` / `(d*d)*d` /
+    /// `(d*d)*(d*d)` each one numpy pairwise sum, `_zero_out_fperr`, and
+    /// pandas' own formulas (br-frankenpandas-9iim6; the bits against live
+    /// pandas are pinned in `pandas_reductions_9iim6`). Compare against those
+    /// expressions written out, over a column with missing values.
     #[test]
-    fn fused_skew_kurtosis_moments_are_bit_identical_to_the_powi_form() {
+    fn skew_kurtosis_are_pandas_nanops_formulas() {
         for len in [7usize, 64, 257, 1000] {
             // Nullable so the typed all-valid arms decline and the FUSED
             // fallback is what actually runs.
@@ -117292,32 +116947,49 @@ mod tests {
             let index = Index::new((0..len as i64).map(IndexLabel::Int64).collect());
             let series = Series::new("s".to_string(), index, column).expect("series");
 
-            let vals: Vec<f64> = data.iter().copied().filter(|v| !v.is_nan()).collect();
-            let count = vals.len();
-            let n = count as f64;
-            let mean = vals.iter().sum::<f64>() / n;
-            let m2: f64 = vals.iter().map(|v| (v - mean).powi(2)).sum();
-            let m3: f64 = vals.iter().map(|v| (v - mean).powi(3)).sum();
-            let m4: f64 = vals.iter().map(|v| (v - mean).powi(4)).sum();
+            let n = data.iter().filter(|v| !v.is_nan()).count() as f64;
+            let zeroed: Vec<f64> = data
+                .iter()
+                .map(|v| if v.is_nan() { 0.0 } else { *v })
+                .collect();
+            let mean = (0.0 + fp_types::numpy_pairwise_sum(&zeroed)) / n;
+            let centred_sum = |power: fn(f64) -> f64| {
+                let terms: Vec<f64> = data
+                    .iter()
+                    .map(|v| if v.is_nan() { 0.0 } else { power(v - mean) })
+                    .collect();
+                0.0 + fp_types::numpy_pairwise_sum(&terms)
+            };
+            let zero_out_fperr = |x: f64| if x.abs() < 1e-14 { 0.0 } else { x };
+            let m2 = centred_sum(|d| d * d);
+            let m3 = centred_sum(|d| d * d * d);
+            let m4 = centred_sum(|d| (d * d) * (d * d));
 
-            let s2 = m2 / (n - 1.0);
-            // `powf(1.5)`, NOT `sqrt().powi(3)` — they differ by ulps and the
-            // implementation uses powf.
-            let s3 = s2.powf(1.5);
-            let want_skew = (n / ((n - 1.0) * (n - 2.0))) * (m3 / s3);
-            let adj = (n * (n + 1.0)) / ((n - 1.0) * (n - 2.0) * (n - 3.0));
-            let sub = (3.0 * (n - 1.0).powi(2)) / ((n - 2.0) * (n - 3.0));
-            let want_kurt = adj * (m4 / (s2 * s2)) - sub;
+            // libm pow, as pandas raises (a literal 0.5 would become sqrt).
+            let half = std::hint::black_box(0.5);
+            let (m2z, m3z) = (zero_out_fperr(m2), zero_out_fperr(m3));
+            let want_skew = if m2z == 0.0 {
+                0.0
+            } else {
+                (n * (n - 1.0).powf(half) / (n - 2.0)) * (m3z / m2z.powf(1.5))
+            };
+            let numerator = zero_out_fperr(n * (n + 1.0) * (n - 1.0) * m4);
+            let denominator = zero_out_fperr((n - 2.0) * (n - 3.0) * (m2 * m2));
+            let want_kurt = if denominator == 0.0 {
+                0.0
+            } else {
+                numerator / denominator - 3.0 * ((n - 1.0) * (n - 1.0)) / ((n - 2.0) * (n - 3.0))
+            };
 
             assert_eq!(
                 series.skew().expect("skew").to_bits(),
                 want_skew.to_bits(),
-                "len={len}: fused m2/m3 must be BITWISE equal to the powi form"
+                "len={len}: skew is pandas' nanskew"
             );
             assert_eq!(
                 series.kurtosis().expect("kurtosis").to_bits(),
                 want_kurt.to_bits(),
-                "len={len}: fused m2/m4 must be BITWISE equal to the powi form"
+                "len={len}: kurtosis is pandas' nankurt"
             );
         }
     }
@@ -234415,209 +234087,177 @@ mod dot_small_shape_phase_split_03fp5 {
     }
 }
 
-/// Locks for the blocked moment accumulation in `Series::skew` / `Series::kurtosis`
-/// (br-frankenpandas-8s4mb).
-///
-/// The whole change is admissible only because it is bit-identical below 8
-/// elements — `br-frankenpandas-jawxr` rejected FMA for changing pinned bits, and
-/// every conformance fixture for these ops has 2 to 6 elements. These tests assert
-/// that property directly rather than trusting the `as_chunks::<8>()` argument, and
-/// then assert the lane path is genuinely exercised above 8 so the first assertion
-/// is not passing vacuously.
+/// Series / DataFrame float reductions against live pandas 2.2.3 / numpy
+/// 2.3.5 bits (br-frankenpandas-9iim6): `sum` / `mean` / `var` / `std` /
+/// `sem` / `skew` / `kurt` add in numpy's pairwise order with the missing
+/// slots as 0 (a masked dtype over its runs, an int64 mean through numpy's
+/// cast buffer). They were an 8-lane pass seeded at 0 and a left fold, which
+/// missed pandas' last bits past 128 values (sum / mean) and 8 (var / std),
+/// and `skew` used another formula. Data: `((k * 7919 + 13) % 100003) / 7.0 -
+/// 7000.0`, times 1e6 where `k % 5 == 0`, as fp-types' tests build it.
 #[cfg(test)]
-mod blocked_moments_8s4mb {
+mod pandas_reductions_9iim6 {
     use fp_columnar::Column;
     use fp_index::Index;
+    use fp_types::{DType, NullKind, Scalar};
 
-    use super::Series;
+    use super::{DataFrame, Series, concat_series};
 
-    fn f64_series(values: Vec<f64>) -> Series {
-        let n = values.len() as i64;
-        Series::new(
-            "v",
-            Index::from_range(0, n, 1),
-            Column::from_f64_values(values),
-        )
-        .unwrap()
+    #[allow(clippy::cast_precision_loss)] // below 100003
+    fn floats(n: usize, missing: bool) -> Vec<f64> {
+        (0..n)
+            .map(|k| {
+                if missing && k % 11 == 3 {
+                    return f64::NAN;
+                }
+                let base = ((k * 7919 + 13) % 100_003) as f64 / 7.0 - 7000.0;
+                if k % 5 == 0 { base * 1e6 } else { base }
+            })
+            .collect()
     }
 
-    fn i64_series(values: Vec<i64>) -> Series {
-        let n = values.len() as i64;
-        Series::new(
-            "v",
-            Index::from_range(0, n, 1),
-            Column::from_i64_values(values),
-        )
-        .unwrap()
+    fn series(column: Column) -> Series {
+        let n = i64::try_from(column.len()).unwrap();
+        Series::new("v", Index::from_range(0, n, 1), column).unwrap()
     }
 
-    /// The EXACT algorithm the blocked version replaced, kept here as the oracle:
-    /// a 0.0-seeded left-fold mean and an ordered `powi` moment loop.
-    fn left_fold_skew(data: &[f64]) -> f64 {
-        let n = data.len() as f64;
-        let mean = data.iter().sum::<f64>() / n;
-        let (mut m2, mut m3) = (0.0_f64, 0.0_f64);
-        for &v in data {
-            let d = v - mean;
-            m2 += d.powi(2);
-            m3 += d.powi(3);
+    fn bits(value: &Scalar) -> u64 {
+        match value {
+            Scalar::Float64(value) => value.to_bits(),
+            other => panic!("expected a float, got {other:?}"),
         }
-        let s2 = m2 / (n - 1.0);
-        if s2 == 0.0 {
-            return 0.0;
-        }
-        (n / ((n - 1.0) * (n - 2.0))) * (m3 / s2.powf(1.5))
     }
 
-    fn left_fold_kurtosis(data: &[f64]) -> f64 {
-        let n = data.len() as f64;
-        let mean = data.iter().sum::<f64>() / n;
-        let (mut m2, mut m4) = (0.0_f64, 0.0_f64);
-        for &v in data {
-            let d = v - mean;
-            m2 += d.powi(2);
-            m4 += d.powi(4);
-        }
-        let s2 = m2 / (n - 1.0);
-        if s2 == 0.0 {
-            return 0.0;
-        }
-        let adj = (n * (n + 1.0)) / ((n - 1.0) * (n - 2.0) * (n - 3.0));
-        let sub = (3.0 * (n - 1.0).powi(2)) / ((n - 2.0) * (n - 3.0));
-        adj * (m4 / (s2 * s2)) - sub
-    }
-
-    /// Every length the conformance corpus actually pins (fixtures run 2-6
-    /// elements) plus 7, the last length before the first chunk exists.
     #[test]
-    fn below_eight_elements_must_be_bit_identical_to_the_left_fold_8s4mb() {
-        for n in 3..8_usize {
-            let data: Vec<f64> = (0..n)
-                .map(|i| 1.0 + i as f64 * 1.5 + (i % 3) as f64)
+    fn float64_with_nan_reduces_to_pandas_bits() {
+        // pandas: Series(floats(1000)) with NaN at k % 11 == 3.
+        let s = series(Column::from_f64_values(floats(1000, true)));
+        assert_eq!(bits(&s.sum().unwrap()), 0x421a_d4f6_8061_248e);
+        assert_eq!(bits(&s.mean().unwrap()), 0x417e_39f9_3e1a_a248);
+        assert_eq!(bits(&s.var().unwrap()), 0x43c7_9481_cba1_263b);
+        assert_eq!(bits(&s.std().unwrap()), 0x41db_7825_28c0_37cc);
+        assert_eq!(s.sem().unwrap().to_bits(), 0x418d_27ba_a0ea_2f9a);
+        assert_eq!(s.skew().unwrap().to_bits(), 0x3fc8_e53a_e277_3d7f);
+        assert_eq!(s.kurt().unwrap().to_bits(), 0x4018_3c97_3603_dfd0);
+        // DataFrame reductions read the same column the same way.
+        let frame = DataFrame::from_series(vec![s.clone()]).unwrap();
+        assert_eq!(
+            bits(&frame.sum().unwrap().values()[0]),
+            0x421a_d4f6_8061_248e
+        );
+        assert_eq!(
+            bits(&frame.mean().unwrap().values()[0]),
+            0x417e_39f9_3e1a_a248
+        );
+        assert_eq!(
+            bits(&frame.var().unwrap().values()[0]),
+            0x43c7_9481_cba1_263b
+        );
+        // NEGATIVE: the present values added left to right are not pandas'.
+        let left_fold: f64 = floats(1000, true).iter().filter(|v| !v.is_nan()).sum();
+        assert_ne!(left_fold.to_bits(), 0x421a_d4f6_8061_248e);
+    }
+
+    #[test]
+    fn concatenated_chunks_reduce_as_the_whole_column() {
+        // pandas: Series(floats(1000)) sum / mean / var; concat of its two
+        // pieces answers the same.
+        let whole = floats(1000, false);
+        let head = series(Column::from_f64_values(whole[..400].to_vec()));
+        let tail = series(Column::from_f64_values(whole[400..].to_vec()));
+        let joined = concat_series(&[&head, &tail]).unwrap();
+        assert!(joined.column().all_valid_f64_chunk_slices().is_some());
+        for s in [&joined, &series(Column::from_f64_values(whole))] {
+            assert_eq!(bits(&s.sum().unwrap()), 0x421d_3d1b_8a34_9246);
+            assert_eq!(bits(&s.mean().unwrap()), 0x417d_f0c0_0a73_45e9);
+            assert_eq!(bits(&s.var().unwrap()), 0x43c7_ca85_5afe_c186);
+        }
+    }
+
+    #[test]
+    fn int64_mean_sums_through_numpys_cast_buffer() {
+        // pandas: Series((k * 7919 + 13) % 100003 * 3_000_000_007), n = 20000.
+        let ints: Vec<i64> = (0..20_000_usize)
+            .map(|k| i64::try_from((k * 7919 + 13) % 100_003).unwrap() * 3_000_000_007)
+            .collect();
+        let s = series(Column::from_i64_values(ints));
+        assert_eq!(bits(&s.mean().unwrap()), 0x42e1_0d17_ebf8_272d);
+        assert_eq!(bits(&s.var().unwrap()), 0x45b8_3c24_c921_82b6);
+        assert_eq!(s.sem().unwrap().to_bits(), 0x4261_d2a2_f139_68e2);
+        assert_eq!(s.skew().unwrap().to_bits(), 0x3f31_a21c_d4bb_ff52);
+        assert_eq!(s.kurt().unwrap().to_bits(), 0xbff3_328c_4edc_26ee);
+    }
+
+    #[test]
+    fn masked_float64_adds_runs_of_present_values() {
+        // pandas: pd.array(floats(1000), dtype="Float64") with NA at
+        // k % 11 == 3: sum / mean differ from the float64 column's above.
+        let s = series(Column::from_f64_values(floats(1000, true)))
+            .astype(DType::Float64Nullable)
+            .unwrap();
+        assert_eq!(bits(&s.sum().unwrap()), 0x421a_d4f6_8061_2492);
+        assert_eq!(bits(&s.mean().unwrap()), 0x417e_39f9_3e1a_a24c);
+        assert_eq!(bits(&s.var().unwrap()), 0x43c7_9481_cba1_263a);
+        assert_eq!(s.sem().unwrap().to_bits(), 0x418d_27ba_a0ea_2f9a);
+    }
+
+    #[test]
+    fn pivot_grand_total_is_the_series_reduction() {
+        // pandas: DataFrame({"a": k % 3, "b": k % 4, "v": floats(1000)})
+        // .pivot_table("v", "a", "b", aggfunc, margins=True).loc["All", "All"]
+        // for sum / mean / var / std - all present (the dense margins) and
+        // with NaN at k % 11 == 3 (the generic ones).
+        const ALL_PRESENT: [u64; 4] = [
+            0x421d_3d1b_8a34_9246,
+            0x417d_f0c0_0a73_45e9,
+            0x43c7_ca85_5afe_c186,
+            0x41db_9789_55af_d068,
+        ];
+        const WITH_NAN: [u64; 4] = [
+            0x421a_d4f6_8061_2492,
+            0x417e_39f9_3e1a_a24c,
+            0x43c7_9481_cba1_263b,
+            0x41db_7825_28c0_37cc,
+        ];
+        let keys = |modulus: i64| -> Vec<Scalar> {
+            (0..1000_i64).map(|k| Scalar::Int64(k % modulus)).collect()
+        };
+        for (missing, expected) in [(false, ALL_PRESENT), (true, WITH_NAN)] {
+            let values = floats(1000, missing)
+                .into_iter()
+                .map(Scalar::Float64)
                 .collect();
-            let got = f64_series(data.clone()).skew().unwrap();
-            assert_eq!(
-                got.to_bits(),
-                left_fold_skew(&data).to_bits(),
-                "skew n={n} must be BIT-identical, not merely close"
-            );
-            if n >= 4 {
-                let got = f64_series(data.clone()).kurtosis().unwrap();
-                assert_eq!(
-                    got.to_bits(),
-                    left_fold_kurtosis(&data).to_bits(),
-                    "kurtosis n={n} must be BIT-identical, not merely close"
-                );
+            let frame = DataFrame::from_dict(
+                &["a", "b", "v"],
+                vec![("a", keys(3)), ("b", keys(4)), ("v", values)],
+            )
+            .unwrap();
+            for (aggfunc, want) in ["sum", "mean", "var", "std"].into_iter().zip(expected) {
+                let table = frame.pivot_table_with_margins("v", "a", "b", aggfunc, true);
+                let all = table.unwrap().column("All").unwrap().values().to_vec();
+                assert_eq!(bits(all.last().unwrap()), want, "{aggfunc} {missing}");
             }
         }
     }
 
-    /// The Int64 arms widen with `as f64` and must land on the same bits as the
-    /// Float64 arm fed the widened values — they share the pinned fixture surface.
     #[test]
-    fn int64_arm_below_eight_must_be_bit_identical_to_the_left_fold_8s4mb() {
-        for n in 4..8_usize {
-            let ints: Vec<i64> = (0..n as i64).map(|i| i * 3 - 4).collect();
-            let widened: Vec<f64> = ints.iter().map(|&v| v as f64).collect();
-            assert_eq!(
-                i64_series(ints.clone()).skew().unwrap().to_bits(),
-                left_fold_skew(&widened).to_bits(),
-                "i64 skew n={n} must be BIT-identical"
-            );
-            assert_eq!(
-                i64_series(ints).kurtosis().unwrap().to_bits(),
-                left_fold_kurtosis(&widened).to_bits(),
-                "i64 kurtosis n={n} must be BIT-identical"
-            );
-        }
-    }
-
-    /// Neumaier-compensated `Σ(v-mean)²` — materially more accurate than either
-    /// candidate, so it can adjudicate between them. Not a candidate itself: the
-    /// compensation costs more than the blocking saves.
-    fn compensated_m2(data: &[f64], mean: f64) -> f64 {
-        let (mut sum, mut c) = (0.0_f64, 0.0_f64);
-        for &v in data {
-            let d = v - mean;
-            let term = d * d;
-            let t = sum + term;
-            if sum.abs() >= term.abs() {
-                c += (sum - t) + term;
-            } else {
-                c += (term - t) + sum;
-            }
-            sum = t;
-        }
-        sum + c
-    }
-
-    /// Two claims in one test, because the second is what keeps the first honest:
-    /// the lane path must ACTUALLY run above 8 elements (otherwise the
-    /// bit-identity test above proves nothing), and where it runs it must land
-    /// CLOSER to the compensated value — the acceptance evidence `9ab0f8cc1` used
-    /// for `blocked_sum_f64`, not merely "faster".
-    #[test]
-    fn above_eight_the_lane_path_runs_and_lands_closer_to_the_compensated_value_8s4mb() {
-        // Alternating magnitudes so summation order is decidable at all: a
-        // uniform array would let both orders agree and the test would pass
-        // while measuring nothing.
-        let data: Vec<f64> = (0..4096)
-            .map(|i| {
-                if i % 2 == 0 {
-                    1e7 + i as f64
+    fn datetime_mean_sums_nanoseconds_through_the_cast_buffer() {
+        // pandas: to_datetime(1.7e18 + (k * 7919 + 13) % 100003 * 1_000_000_007)
+        // with NaT at k % 11 == 3, n = 20000: mean().value.
+        let values: Vec<Scalar> = (0..20_000_usize)
+            .map(|k| {
+                if k % 11 == 3 {
+                    Scalar::Null(NullKind::NaT)
                 } else {
-                    1e-3 * i as f64
+                    let offset = i64::try_from((k * 7919 + 13) % 100_003).unwrap();
+                    Scalar::Datetime64(1_700_000_000_000_000_000 + offset * 1_000_000_007)
                 }
             })
             .collect();
-        let mean = data.iter().sum::<f64>() / data.len() as f64;
-
-        let (blocked, _) = Series::blocked_central_moments_f64::<false>(&data, mean);
-        let mut folded = 0.0_f64;
-        for &v in &data {
-            folded += (v - mean).powi(2);
-        }
-
-        assert_ne!(
-            blocked.to_bits(),
-            folded.to_bits(),
-            "NON-VACUITY: at n=4096 the 8-lane path must produce a different sum \
-             from the left-fold, or the bit-identity test below 8 is meaningless"
-        );
-
-        let reference = compensated_m2(&data, mean);
-        let blocked_err = (blocked - reference).abs();
-        let folded_err = (folded - reference).abs();
-        assert!(
-            blocked_err <= folded_err,
-            "blocked m2 must be at least as close to the compensated value as the \
-             left-fold: blocked_err={blocked_err:e} folded_err={folded_err:e}"
-        );
-    }
-
-    /// The Int64 lane path needs its own non-vacuity witness; the Float64 test
-    /// above cannot reach it.
-    #[test]
-    fn the_int64_lane_path_must_actually_run_above_eight_8s4mb() {
-        // Magnitudes chosen so the accumulated sum LEAVES the exactly-representable
-        // integer range (2^53): my first witness used values near 1e6, whose squared
-        // deviations summed exactly in f64, so both orders agreed bitwise and the
-        // assertion below failed — correctly, because the test was measuring nothing.
-        // Squared deviations here are ~1e18 and 4096 of them total ~1e21, far past
-        // 2^53, so rounding occurs and summation order is observable.
-        let data: Vec<i64> = (0..4096)
-            .map(|i| if i % 2 == 0 { 2_000_000_000 + i } else { i })
-            .collect();
-        let mean = data.iter().map(|&v| v as f64).sum::<f64>() / data.len() as f64;
-        let (blocked, _) = Series::blocked_central_moments_i64::<true>(&data, mean);
-        let mut folded = 0.0_f64;
-        for &v in &data {
-            folded += (v as f64 - mean).powi(2);
-        }
-        assert_ne!(
-            blocked.to_bits(),
-            folded.to_bits(),
-            "NON-VACUITY: the i64 8-lane path must differ from the i64 left-fold at n=4096"
+        let s = series(Column::new(DType::Datetime64 { tz: None }, values).unwrap());
+        assert_eq!(
+            s.mean().unwrap(),
+            Scalar::Datetime64(1_700_049_991_717_762_560)
         );
     }
 }

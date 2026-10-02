@@ -786,38 +786,464 @@ impl NumericWidth {
     }
 }
 
-/// numpy's float32 `add.reduce` of `values` - its `pairwise_sum`, every
-/// addition in float32: below 8 values a running sum from 0; up to 128,
-/// eight running sums over the 8-value blocks folded as
-/// `((r0 + r1) + (r2 + r3)) + ((r4 + r5) + (r6 + r7))`, then the remainder;
-/// beyond that the two halves (the first a multiple of 8 long) summed
-/// apart. pandas' float32 `sum` and `mean` are it bit for bit, where a
-/// float64 sum rounded once differs in the last place (fvsao.23).
+/// numpy's `pairwise_sum`, the kernel of its float `add.reduce` over a
+/// contiguous run, every addition in `T`: below 8 values a running sum from
+/// 0; up to 128, eight running sums seeded with the first eight values and
+/// stepped over the 8-value blocks, folded as
+/// `((r0 + r1) + (r2 + r3)) + ((r4 + r5) + (r6 + r7))`, then the remainder in
+/// order; beyond that the two halves (the first a multiple of 8 long) summed
+/// apart. pandas' float32 and float64 sums are it bit for bit, where a sum
+/// rounded once or added left to right differs in the last place (fvsao.23,
+/// br-frankenpandas-9iim6).
 #[must_use]
-pub fn numpy_pairwise_sum_f32(values: &[f32]) -> f32 {
-    const BLOCK: usize = 128;
+pub fn numpy_pairwise_sum<T>(values: &[T]) -> T
+where
+    T: Copy + Default + std::ops::Add<Output = T>,
+{
+    // The same split as `pairwise_range`, over the slice itself (no copy).
+    if values.len() <= PAIRWISE_BLOCK {
+        return pairwise_block(values);
+    }
+    let mut half = values.len() / 2;
+    half -= half % 8;
+    numpy_pairwise_sum(&values[..half]) + numpy_pairwise_sum(&values[half..])
+}
+
+/// numpy's `PW_BLOCKSIZE`: runs this long or shorter are summed directly.
+const PAIRWISE_BLOCK: usize = 128;
+
+/// [`numpy_pairwise_sum`] over `len` values that numpy reads from one array
+/// but fp holds in another shape (a cast, chunks, missing slots as 0):
+/// `fill(start, block)` writes values `start..start + block.len()` into each
+/// block, at most 128 long, the blocks asked for left to right.
+pub fn numpy_pairwise_sum_by<T, F>(len: usize, fill: &F) -> T
+where
+    T: Copy + Default + std::ops::Add<Output = T>,
+    F: Fn(usize, &mut [T]),
+{
+    pairwise_range(0, len, fill)
+}
+
+/// Values `start..start + len` of [`numpy_pairwise_sum_by`].
+fn pairwise_range<T, F>(start: usize, len: usize, fill: &F) -> T
+where
+    T: Copy + Default + std::ops::Add<Output = T>,
+    F: Fn(usize, &mut [T]),
+{
+    if len <= PAIRWISE_BLOCK {
+        let mut buffer = [T::default(); PAIRWISE_BLOCK];
+        let block = &mut buffer[..len];
+        fill(start, block);
+        return pairwise_block(block);
+    }
+    let mut half = len / 2;
+    half -= half % 8;
+    pairwise_range(start, half, fill) + pairwise_range(start + half, len - half, fill)
+}
+
+/// numpy's pairwise sum of at most 128 contiguous values.
+fn pairwise_block<T>(values: &[T]) -> T
+where
+    T: Copy + Default + std::ops::Add<Output = T>,
+{
     let n = values.len();
     if n < 8 {
-        return values.iter().fold(0.0_f32, |acc, &value| acc + value);
+        return values.iter().fold(T::default(), |acc, &value| acc + value);
     }
-    if n <= BLOCK {
-        let mut sums = [0.0_f32; 8];
-        sums.copy_from_slice(&values[..8]);
-        let whole = n - n % 8;
-        for block in values[8..whole].as_chunks::<8>().0 {
-            for (sum, &value) in sums.iter_mut().zip(block) {
-                *sum += value;
+    let mut sums = [T::default(); 8];
+    sums.copy_from_slice(&values[..8]);
+    let whole = n - n % 8;
+    for block in values[8..whole].as_chunks::<8>().0 {
+        for (sum, &value) in sums.iter_mut().zip(block) {
+            *sum = *sum + value;
+        }
+    }
+    let folded =
+        ((sums[0] + sums[1]) + (sums[2] + sums[3])) + ((sums[4] + sums[5]) + (sums[6] + sums[7]));
+    values[whole..]
+        .iter()
+        .fold(folded, |acc, &value| acc + value)
+}
+
+/// A numeric column's values as pandas' float reductions read them: one
+/// buffer or the chunks of one (a `concat` result), float64 or a numpy int64
+/// array (read through numpy's int64 -> float64 cast; ints that pandas holds
+/// as float64 because one is missing are `Float`).
+#[derive(Debug, Clone, Copy)]
+pub enum ReductionValues<'a> {
+    Float(&'a [f64]),
+    Int(&'a [i64]),
+    FloatChunks(&'a [&'a [f64]]),
+    IntChunks(&'a [&'a [i64]]),
+}
+
+impl ReductionValues<'_> {
+    fn len(self) -> usize {
+        match self {
+            Self::Float(values) => values.len(),
+            Self::Int(values) => values.len(),
+            Self::FloatChunks(chunks) => chunks.iter().map(|chunk| chunk.len()).sum(),
+            Self::IntChunks(chunks) => chunks.iter().map(|chunk| chunk.len()).sum(),
+        }
+    }
+}
+
+/// Reads [`ReductionValues`] block by block, left to right (a chunked
+/// column's cursor only moves forward).
+struct ValueReader<'a> {
+    values: ReductionValues<'a>,
+    /// The chunk the last block started in and that chunk's first position.
+    cursor: std::cell::Cell<(usize, usize)>,
+}
+
+impl<'a> ValueReader<'a> {
+    fn new(values: ReductionValues<'a>) -> Self {
+        Self {
+            values,
+            cursor: std::cell::Cell::new((0, 0)),
+        }
+    }
+
+    /// Values `start..start + block.len()` as float64.
+    #[allow(clippy::cast_precision_loss)] // numpy's int64 -> float64 cast
+    fn read(&self, start: usize, block: &mut [f64]) {
+        match self.values {
+            ReductionValues::Float(values) => {
+                block.copy_from_slice(&values[start..start + block.len()]);
+            }
+            ReductionValues::Int(values) => {
+                for (slot, &value) in block.iter_mut().zip(&values[start..]) {
+                    *slot = value as f64;
+                }
+            }
+            ReductionValues::FloatChunks(chunks) => {
+                self.read_chunks(chunks, start, block, |slots, values| {
+                    slots.copy_from_slice(values);
+                });
+            }
+            ReductionValues::IntChunks(chunks) => {
+                self.read_chunks(chunks, start, block, |slots, values| {
+                    for (slot, &value) in slots.iter_mut().zip(values) {
+                        *slot = value as f64;
+                    }
+                });
             }
         }
-        let folded = ((sums[0] + sums[1]) + (sums[2] + sums[3]))
-            + ((sums[4] + sums[5]) + (sums[6] + sums[7]));
-        return values[whole..]
-            .iter()
-            .fold(folded, |acc, &value| acc + value);
     }
-    let mut half = n / 2;
-    half -= half % 8;
-    numpy_pairwise_sum_f32(&values[..half]) + numpy_pairwise_sum_f32(&values[half..])
+
+    fn read_chunks<T>(
+        &self,
+        chunks: &[&[T]],
+        start: usize,
+        block: &mut [f64],
+        copy: impl Fn(&mut [f64], &[T]),
+    ) {
+        let (mut chunk, mut chunk_start) = self.cursor.get();
+        if start < chunk_start {
+            (chunk, chunk_start) = (0, 0);
+        }
+        while start >= chunk_start + chunks[chunk].len() {
+            chunk_start += chunks[chunk].len();
+            chunk += 1;
+        }
+        self.cursor.set((chunk, chunk_start));
+        let mut filled = 0;
+        while filled < block.len() {
+            let offset = start + filled - chunk_start;
+            let take = (chunks[chunk].len() - offset).min(block.len() - filled);
+            copy(
+                &mut block[filled..filled + take],
+                &chunks[chunk][offset..offset + take],
+            );
+            filled += take;
+            if filled < block.len() {
+                chunk_start += chunks[chunk].len();
+                chunk += 1;
+            }
+        }
+    }
+}
+
+/// How pandas holds a column's missing values, which decides the order its
+/// float reductions add in (br-frankenpandas-9iim6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingLayout {
+    /// A numpy float64 / int64 array: pandas' nanops fill the missing (NaN,
+    /// NaT) slots with 0 in place and sum the whole array, every pairwise
+    /// block keeping its position.
+    Numpy,
+    /// A masked (nullable `Float64` / `Int64`) array: numpy adds each run of
+    /// present values onto a running total (`add.reduce(where=)`).
+    Masked,
+}
+
+/// numpy's buffer for a casting reduction: an int64 array summed as float64
+/// is cast, and summed, 8192 values at a time.
+const NUMPY_CAST_BUFFER: usize = 8192;
+
+/// pandas' float reductions of one numeric column - `sum`, `mean`, `var`,
+/// `std`, `sem`, `skew`, `kurt` - adding in numpy's exact order, so a long
+/// column answers pandas' bits rather than a nearby value. Measured against
+/// live pandas 2.2.3 / numpy 2.3.5; bead br-frankenpandas-9iim6 holds the
+/// model and the alternatives it rejected.
+#[derive(Debug, Clone, Copy)]
+pub struct PandasReductions<'a> {
+    values: ReductionValues<'a>,
+    /// Packed presence bits, bit `i % 64` of word `i / 64` for slot `i`;
+    /// `None` when every slot is present.
+    present: Option<&'a [u64]>,
+    layout: MissingLayout,
+    len: usize,
+    count: usize,
+}
+
+impl<'a> PandasReductions<'a> {
+    /// `present` is the packed presence bits (`None`: all present).
+    #[must_use]
+    pub fn new(
+        values: ReductionValues<'a>,
+        present: Option<&'a [u64]>,
+        layout: MissingLayout,
+    ) -> Self {
+        let len = values.len();
+        let count = present.map_or(len, |words| {
+            (0..len)
+                .filter(|&i| words[i / 64] >> (i % 64) & 1 == 1)
+                .count()
+        });
+        Self {
+            values,
+            present: present.filter(|_| count < len),
+            layout,
+            len,
+            count,
+        }
+    }
+
+    /// The present values.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    fn is_present(&self, i: usize) -> bool {
+        self.present
+            .is_none_or(|words| words[i / 64] >> (i % 64) & 1 == 1)
+    }
+
+    /// numpy's `add.reduce` of `term(value)` over the present values, in this
+    /// layout's order; `cast_buffered` adds 8192 values at a time onto the
+    /// total, as numpy sums an int64 array as float64.
+    fn add_reduce(&self, term: impl Fn(f64) -> f64, cast_buffered: bool) -> f64 {
+        let reader = ValueReader::new(self.values);
+        let buffer = if cast_buffered {
+            NUMPY_CAST_BUFFER
+        } else {
+            self.len.max(1)
+        };
+        let mut total = 0.0_f64;
+        let mut chunk_start = 0;
+        while chunk_start < self.len {
+            let chunk_end = (chunk_start + buffer).min(self.len);
+            match self.layout {
+                MissingLayout::Numpy => {
+                    let fill = |start: usize, block: &mut [f64]| {
+                        let first = chunk_start + start;
+                        reader.read(first, block);
+                        if self.present.is_none() {
+                            for slot in block.iter_mut() {
+                                *slot = term(*slot);
+                            }
+                            return;
+                        }
+                        for (k, slot) in block.iter_mut().enumerate() {
+                            *slot = if self.is_present(first + k) {
+                                term(*slot)
+                            } else {
+                                0.0
+                            };
+                        }
+                    };
+                    total += numpy_pairwise_sum_by(chunk_end - chunk_start, &fill);
+                }
+                MissingLayout::Masked => {
+                    let mut i = chunk_start;
+                    while i < chunk_end {
+                        if !self.is_present(i) {
+                            i += 1;
+                            continue;
+                        }
+                        let run_start = i;
+                        while i < chunk_end && self.is_present(i) {
+                            i += 1;
+                        }
+                        let fill = |start: usize, block: &mut [f64]| {
+                            reader.read(run_start + start, block);
+                            for slot in block.iter_mut() {
+                                *slot = term(*slot);
+                            }
+                        };
+                        total += numpy_pairwise_sum_by(i - run_start, &fill);
+                    }
+                }
+            }
+            chunk_start = chunk_end;
+        }
+        total
+    }
+
+    /// The values' total as [`Self::add_reduce`] adds them, a present float
+    /// buffer summed in place.
+    fn total(&self, cast_buffered: bool) -> f64 {
+        if let (ReductionValues::Float(values), None) = (self.values, self.present) {
+            return 0.0 + numpy_pairwise_sum(values);
+        }
+        self.add_reduce(|value| value, cast_buffered)
+    }
+
+    /// The total `mean` divides: an int64 array's through numpy's cast
+    /// buffer (a datetime64's NaT slots are 0 in it).
+    fn mean_total(&self) -> f64 {
+        let int = matches!(
+            self.values,
+            ReductionValues::Int(_) | ReductionValues::IntChunks(_)
+        );
+        self.total(int)
+    }
+
+    /// `Series.sum()` of a float column, missing values skipped.
+    #[must_use]
+    pub fn sum(&self) -> f64 {
+        self.total(false)
+    }
+
+    /// `Series.mean()`; NaN with no present value.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)] // pandas' float count
+    pub fn mean(&self) -> f64 {
+        if self.count == 0 {
+            return f64::NAN;
+        }
+        self.mean_total() / self.count as f64
+    }
+
+    /// `Series.var(ddof=ddof)`; NaN with `ddof` or fewer present values.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)] // pandas' float count
+    pub fn var(&self, ddof: usize) -> f64 {
+        if self.count <= ddof {
+            return f64::NAN;
+        }
+        // nanops casts an int64 array to float64 whole before its mean; the
+        // masked var sums int64 values through the cast buffer.
+        let total = if self.layout == MissingLayout::Masked {
+            self.mean_total()
+        } else {
+            self.total(false)
+        };
+        let mean = total / self.count as f64;
+        let squares = self.add_reduce(
+            |value| {
+                let deviation = mean - value;
+                deviation * deviation
+            },
+            false,
+        );
+        squares / (self.count - ddof) as f64
+    }
+
+    /// `Series.std(ddof=ddof)`.
+    #[must_use]
+    pub fn std(&self, ddof: usize) -> f64 {
+        self.var(ddof).sqrt()
+    }
+
+    /// This column as nanops reads it: pandas' `sem`, `skew` and `kurt` read
+    /// even a masked column with its missing slots filled with 0.
+    fn as_numpy(&self) -> Self {
+        Self {
+            layout: MissingLayout::Numpy,
+            ..*self
+        }
+    }
+
+    /// `Series.sem(ddof=ddof)`: `sqrt(var) / sqrt(count)`.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)] // pandas' float count
+    pub fn sem(&self, ddof: usize) -> f64 {
+        self.as_numpy().var(ddof).sqrt() / (self.count as f64).sqrt()
+    }
+
+    /// The central sums `(m2, m3 or m4)` of nanskew / nankurt.
+    #[allow(clippy::cast_precision_loss)] // pandas' float count
+    fn central_moments(&self, fourth: bool) -> (f64, f64) {
+        let numpy = self.as_numpy();
+        let mean = numpy.total(false) / self.count as f64;
+        let m2 = numpy.add_reduce(
+            |value| {
+                let deviation = value - mean;
+                deviation * deviation
+            },
+            false,
+        );
+        let higher = numpy.add_reduce(
+            |value| {
+                let deviation = value - mean;
+                let square = deviation * deviation;
+                if fourth {
+                    square * square
+                } else {
+                    square * deviation
+                }
+            },
+            false,
+        );
+        (m2, higher)
+    }
+
+    /// `Series.skew()`: pandas' nanskew; NaN below 3 values, 0 for constant
+    /// data.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)] // pandas' float count
+    pub fn skew(&self) -> f64 {
+        if self.count < 3 {
+            return f64::NAN;
+        }
+        let (m2, m3) = self.central_moments(false);
+        let (m2, m3) = (zero_out_fperr(m2), zero_out_fperr(m3));
+        if m2 == 0.0 {
+            return 0.0;
+        }
+        let count = self.count as f64;
+        // pandas raises with libm pow (n = 2922 tells it from sqrt); a
+        // literal 0.5 exponent would let LLVM substitute sqrt.
+        let half = std::hint::black_box(0.5);
+        (count * (count - 1.0).powf(half) / (count - 2.0)) * (m3 / m2.powf(1.5))
+    }
+
+    /// `Series.kurt()`: pandas' nankurt; NaN below 4 values, 0 when the
+    /// denominator vanishes (constant data).
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)] // pandas' float count
+    pub fn kurt(&self) -> f64 {
+        if self.count < 4 {
+            return f64::NAN;
+        }
+        let (m2, m4) = self.central_moments(true);
+        let count = self.count as f64;
+        let numerator = zero_out_fperr(count * (count + 1.0) * (count - 1.0) * m4);
+        let denominator = zero_out_fperr((count - 2.0) * (count - 3.0) * (m2 * m2));
+        if denominator == 0.0 {
+            return 0.0;
+        }
+        let adjustment = 3.0 * ((count - 1.0) * (count - 1.0)) / ((count - 2.0) * (count - 3.0));
+        numerator / denominator - adjustment
+    }
+}
+
+/// pandas' `_zero_out_fperr`: a moment below 1e-14 in magnitude is 0.
+fn zero_out_fperr(value: f64) -> f64 {
+    if value.abs() < 1e-14 { 0.0 } else { value }
 }
 
 /// A numeric column's numpy dtype as numpy's promotion sees it: kind and
@@ -21384,7 +21810,7 @@ mod sparse_dtype_pandas_name_3gxc6 {
 /// promotion (fvsao.23). Expected values are live pandas 2.2.3 / numpy 2.4.6.
 #[cfg(test)]
 mod numeric_width_fvsao23 {
-    use super::{DType, NumericWidth, NumpyNumeric, numpy_pairwise_sum_f32};
+    use super::{DType, NumericWidth, NumpyNumeric, numpy_pairwise_sum};
 
     #[test]
     fn float32_sum_is_numpys_pairwise_sum_bit_for_bit() {
@@ -21403,14 +21829,14 @@ mod numeric_width_fvsao23 {
             let values: Vec<f32> = (0..n)
                 .map(|k| ((k * 37) % 1000) as f32 * 0.013_f32)
                 .collect();
-            assert_eq!(numpy_pairwise_sum_f32(&values).to_bits(), bits, "n={n}");
+            assert_eq!(numpy_pairwise_sum(&values).to_bits(), bits, "n={n}");
             if n < 100 {
                 #[allow(clippy::cast_possible_truncation)]
                 let rounded_once = values.iter().map(|&v| f64::from(v)).sum::<f64>() as f32;
                 assert_ne!(rounded_once.to_bits(), bits, "n={n}");
             }
         }
-        assert_eq!(numpy_pairwise_sum_f32(&[]), 0.0);
+        assert_eq!(numpy_pairwise_sum::<f32>(&[]), 0.0);
     }
 
     #[test]
@@ -21568,5 +21994,342 @@ mod numeric_width_fvsao23 {
         }
         assert_eq!(NumericWidth::itemsize(NumericWidth::Int8), 1);
         assert_eq!(NumericWidth::Float32.itemsize(), 4);
+    }
+}
+
+/// `PandasReductions` against live pandas 2.2.3 / numpy 2.3.5: the bits of
+/// `Series(...).sum() / mean() / var() / std() / sem() / skew() / kurt()`
+/// over data both sides build with the same integer arithmetic and one
+/// division (br-frankenpandas-9iim6).
+#[cfg(test)]
+mod pandas_reductions_9iim6 {
+    use super::{MissingLayout, PandasReductions, ReductionValues};
+
+    /// `((k * 7919 + 13) % 100003) / 7.0 - 7000.0`, times 1e6 where
+    /// `k % 5 == 0`; missing where `k % 11 == 3`.
+    #[allow(clippy::cast_precision_loss)] // below 100003
+    fn floats(n: usize) -> (Vec<f64>, Vec<u64>) {
+        let mut present = vec![0_u64; n.div_ceil(64)];
+        let values = (0..n)
+            .map(|k| {
+                if k % 11 != 3 {
+                    present[k / 64] |= 1 << (k % 64);
+                }
+                let base = ((k * 7919 + 13) % 100_003) as f64 / 7.0 - 7000.0;
+                if k % 5 == 0 { base * 1e6 } else { base }
+            })
+            .collect();
+        (values, present)
+    }
+
+    /// `(k * 7919 + 13) % 100003 * 3_000_000_007`.
+    fn ints(n: usize) -> Vec<i64> {
+        (0..n)
+            .map(|k| i64::try_from((k * 7919 + 13) % 100_003).unwrap() * 3_000_000_007)
+            .collect()
+    }
+
+    fn assert_bits(got: &[f64], expected: &[u64], case: &str) {
+        let got: Vec<u64> = got.iter().map(|value| value.to_bits()).collect();
+        assert_eq!(got, expected, "{case}");
+    }
+
+    #[test]
+    fn numpy_float64_with_nan_matches_pandas_bits() {
+        // pandas: s = Series(floats(n)) with NaN at the missing slots.
+        let cases: [(usize, [u64; 7]); 7] = [
+            (
+                7,
+                [
+                    0xc1ff_1185_2dcb_6db6,
+                    0xc1d4_b658_c932_4924,
+                    0x43db_301d_4a8d_87a3,
+                    0x41e4_db58_e2f1_458e,
+                    0x41d1_078f_09d3_9c5c,
+                    0xc002_1f47_ceae_1b43,
+                    0x4014_c8bc_93df_56e6,
+                ],
+            ),
+            (
+                8,
+                [
+                    0xc1ff_1184_f43d_b6da,
+                    0xc1d1_c0de_426c_687d,
+                    0x43d7_9d3c_ecd2_da2b,
+                    0x41e3_7012_7d6c_71a5,
+                    0x41cd_631d_3379_9929,
+                    0xc003_b196_82f9_28dc,
+                    0x4018_9de2_eba9_5ecc,
+                ],
+            ),
+            (
+                127,
+                [
+                    0x4200_324e_3389_2490,
+                    0x4192_0704_ad1e_360d,
+                    0x43c9_4a6b_3390_577d,
+                    0x41dc_72bf_d6fa_9808,
+                    0x41a5_38f5_8417_ae1e,
+                    0x3fd0_b6bf_045c_e4d5,
+                    0x4017_1585_bf13_21c4,
+                ],
+            ),
+            (
+                128,
+                [
+                    0x4200_324d_7236_db6e,
+                    0x4191_df3a_f99d_a2ae,
+                    0x43c9_1234_ffb7_4a93,
+                    0x41dc_5310_c97c_292c,
+                    0x41a5_09f4_cfcf_9206,
+                    0x3fd0_d9df_0d68_00b0,
+                    0x4017_61b6_5653_ae82,
+                ],
+            ),
+            (
+                129,
+                [
+                    0x4200_324c_d43e_db71,
+                    0x4191_b81f_8a1d_61da,
+                    0x43c8_daf6_85d3_386f,
+                    0x41dc_33ca_af49_8c24,
+                    0x41a4_dbc2_8609_a567,
+                    0x3fd0_fcc5_39d9_6901,
+                    0x4017_ade4_7855_7c25,
+                ],
+            ),
+            (
+                1000,
+                [
+                    0x421a_d4f6_8061_248e,
+                    0x417e_39f9_3e1a_a248,
+                    0x43c7_9481_cba1_263b,
+                    0x41db_7825_28c0_37cc,
+                    0x418d_27ba_a0ea_2f9a,
+                    0x3fc8_e53a_e277_3d7f,
+                    0x4018_3c97_3603_dfd0,
+                ],
+            ),
+            (
+                100_000,
+                [
+                    0x4283_088c_316e_46dc,
+                    0x417b_7135_0c27_1185,
+                    0x43c7_a0de_3b8e_ea34,
+                    0x41db_7f57_6673_8d6b,
+                    0x4157_58cc_33fd_4ae6,
+                    0x3fc7_f1cf_b14a_14c8,
+                    0x4018_06b5_f26a_c384,
+                ],
+            ),
+        ];
+        for (n, expected) in cases {
+            let (values, present) = floats(n);
+            let r = PandasReductions::new(
+                ReductionValues::Float(&values),
+                Some(&present),
+                MissingLayout::Numpy,
+            );
+            let got = [
+                r.sum(),
+                r.mean(),
+                r.var(1),
+                r.std(1),
+                r.sem(1),
+                r.skew(),
+                r.kurt(),
+            ];
+            assert_bits(&got, &expected, &format!("float64 n={n}"));
+        }
+        // NEGATIVE: the present values added left to right are not pandas'.
+        let (values, present) = floats(100_000);
+        let left_fold: f64 = values
+            .iter()
+            .enumerate()
+            .filter(|&(k, _)| present[k / 64] >> (k % 64) & 1 == 1)
+            .map(|(_, value)| value)
+            .sum();
+        assert_ne!(left_fold.to_bits(), 0x4283_088c_316e_46dc);
+    }
+
+    #[test]
+    fn numpy_int64_mean_sums_through_the_cast_buffer() {
+        // pandas: Series(ints(n)) (int64): mean, var, sem, skew, kurt.
+        let cases: [(usize, [u64; 5]); 3] = [
+            (
+                129,
+                [
+                    0x42e0_dda2_9987_3f9e,
+                    0x45b9_0e2a_887d_aeda,
+                    0x429c_34a1_c273_372f,
+                    0x3f95_9e9d_c69e_ec88,
+                    0xbff3_844b_ba13_eac1,
+                ],
+            ),
+            (
+                8193,
+                [
+                    0x42e1_0d5b_e407_5aa7,
+                    0x45b8_3bf5_04f5_f2fc,
+                    0x426b_d893_c5c9_85b1,
+                    0x3f42_7452_ff15_86c7,
+                    0xbff3_318c_611b_b59c,
+                ],
+            ),
+            (
+                20_000,
+                [
+                    0x42e1_0d17_ebf8_272d,
+                    0x45b8_3c24_c921_82b6,
+                    0x4261_d2a2_f139_68e2,
+                    0x3f31_a21c_d4bb_ff52,
+                    0xbff3_328c_4edc_26ee,
+                ],
+            ),
+        ];
+        for (n, expected) in cases {
+            let values = ints(n);
+            let r =
+                PandasReductions::new(ReductionValues::Int(&values), None, MissingLayout::Numpy);
+            let got = [r.mean(), r.var(1), r.sem(1), r.skew(), r.kurt()];
+            assert_bits(&got, &expected, &format!("int64 n={n}"));
+            // The same values read as chunks give the same bits.
+            let (head, tail) = values.split_at(n / 3);
+            let (middle, rest) = tail.split_at(1);
+            let chunks = [head, middle, &[][..], rest];
+            let chunked = PandasReductions::new(
+                ReductionValues::IntChunks(&chunks),
+                None,
+                MissingLayout::Numpy,
+            );
+            let got = [
+                chunked.mean(),
+                chunked.var(1),
+                chunked.sem(1),
+                chunked.skew(),
+                chunked.kurt(),
+            ];
+            assert_bits(&got, &expected, &format!("int64 chunks n={n}"));
+        }
+    }
+
+    #[test]
+    fn masked_columns_add_runs_of_present_values() {
+        // pandas: Series(pd.array(floats(n), dtype="Float64")) with NA at the
+        // missing slots: sum, mean, var, sem. sum / mean differ from the
+        // float64 column's above (n = 129: ...6e against ...71) - the runs.
+        let cases: [(usize, [u64; 4]); 3] = [
+            (
+                129,
+                [
+                    0x4200_324c_d43e_db6e,
+                    0x4191_b81f_8a1d_61d6,
+                    0x43c8_daf6_85d3_3872,
+                    0x41a4_dbc2_8609_a567,
+                ],
+            ),
+            (
+                1000,
+                [
+                    0x421a_d4f6_8061_2492,
+                    0x417e_39f9_3e1a_a24c,
+                    0x43c7_9481_cba1_263a,
+                    0x418d_27ba_a0ea_2f9a,
+                ],
+            ),
+            (
+                100_000,
+                [
+                    0x4283_088c_316e_46de,
+                    0x417b_7135_0c27_1188,
+                    0x43c7_a0de_3b8e_ea37,
+                    0x4157_58cc_33fd_4ae6,
+                ],
+            ),
+        ];
+        for (n, expected) in cases {
+            let (values, present) = floats(n);
+            let r = PandasReductions::new(
+                ReductionValues::Float(&values),
+                Some(&present),
+                MissingLayout::Masked,
+            );
+            assert_bits(
+                &[r.sum(), r.mean(), r.var(1), r.sem(1)],
+                &expected,
+                &format!("Float64 n={n}"),
+            );
+            let (head, tail) = values.split_at(n / 2 + 1);
+            let chunks = [head, tail];
+            let chunked = PandasReductions::new(
+                ReductionValues::FloatChunks(&chunks),
+                Some(&present),
+                MissingLayout::Masked,
+            );
+            let got = [
+                chunked.sum(),
+                chunked.mean(),
+                chunked.var(1),
+                chunked.sem(1),
+            ];
+            assert_bits(&got, &expected, &format!("Float64 chunks n={n}"));
+        }
+        // pandas: pd.array(ints(n), dtype="Int64") with NA where k % 997 == 5:
+        // mean and var, the runs summed within numpy's 8192-value buffers.
+        for (n, expected) in [
+            (8193, [0x42e1_0f35_29c2_807b_u64, 0x45b8_39ed_8746_bdcc]),
+            (20_000, [0x42e1_0cf2_cc56_752a, 0x45b8_3c63_72fc_fad5]),
+        ] {
+            let values = ints(n);
+            let mut present = vec![0_u64; n.div_ceil(64)];
+            for k in (0..n).filter(|k| k % 997 != 5) {
+                present[k / 64] |= 1 << (k % 64);
+            }
+            let r = PandasReductions::new(
+                ReductionValues::Int(&values),
+                Some(&present),
+                MissingLayout::Masked,
+            );
+            assert_bits(&[r.mean(), r.var(1)], &expected, &format!("Int64 n={n}"));
+        }
+    }
+
+    #[test]
+    fn edge_cases_match_pandas() {
+        let reductions = |values: &[f64], present: Option<&[u64]>| {
+            let r = PandasReductions::new(
+                ReductionValues::Float(values),
+                present,
+                MissingLayout::Numpy,
+            );
+            [r.sum(), r.mean(), r.var(1), r.sem(1), r.skew(), r.kurt()]
+        };
+        // pandas: [1.5] * 10 -> 15.0 1.5 0.0 0.0 0.0 0.0 (a constant's kurt
+        // is 0, not 0 minus the bias term); [2.0] * 3 kurt NaN.
+        let constant = reductions(&[1.5; 10], None);
+        assert_eq!(constant, [15.0, 1.5, 0.0, 0.0, 0.0, 0.0]);
+        assert!(reductions(&[2.0; 3], None)[5].is_nan());
+        // [1, 2] skew NaN; [1, 2, 4] skew 0.9352195295828237.
+        assert!(reductions(&[1.0, 2.0], None)[4].is_nan());
+        assert_eq!(
+            reductions(&[1.0, 2.0, 4.0], None)[4],
+            0.935_219_529_582_823_7
+        );
+        // Empty / all missing: sum 0.0, the rest NaN.
+        let empty = reductions(&[], None);
+        assert_eq!(empty[0], 0.0);
+        assert!(empty[1..].iter().all(|value| value.is_nan()));
+        let all_missing = reductions(&[3.0; 5], Some(&[0]));
+        assert_eq!(all_missing[0], 0.0);
+        assert!(all_missing[1].is_nan());
+        // -0.0 * 10 sums to 0.0 (numpy adds onto the identity 0.0).
+        assert_eq!(
+            reductions(&[-0.0; 10], None)[0].to_bits(),
+            0.0_f64.to_bits()
+        );
+        // An inf: sum / mean inf, the spread NaN.
+        let inf = reductions(&[1.0, f64::INFINITY, 2.0, 5.0], None);
+        assert_eq!(inf[0], f64::INFINITY);
+        assert!(inf[2..].iter().all(|value| value.is_nan()));
     }
 }
