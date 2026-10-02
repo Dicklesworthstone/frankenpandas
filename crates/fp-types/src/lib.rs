@@ -1030,6 +1030,8 @@ pub struct PandasReductions<'a> {
     layout: MissingLayout,
     len: usize,
     count: usize,
+    /// The float total, when the count's sweep already added it.
+    total: Option<f64>,
 }
 
 impl<'a> PandasReductions<'a> {
@@ -1037,21 +1039,24 @@ impl<'a> PandasReductions<'a> {
     /// `isnan`); read without a presence bitmap.
     #[must_use]
     pub fn numpy_nan_missing(values: ReductionValues<'a>) -> Self {
-        let present = |values: &[f64]| values.iter().filter(|value| !value.is_nan()).count();
         let len = values.len();
-        let count = match values {
-            ReductionValues::Float(values) => present(values),
-            ReductionValues::FloatChunks(chunks) => chunks.iter().map(|chunk| present(chunk)).sum(),
-            ReductionValues::Int(_) | ReductionValues::IntChunks(_) => len,
-        };
-        Self {
+        let mut reductions = Self {
             values,
             present: None,
-            nan_missing: count < len,
+            nan_missing: true,
             layout: MissingLayout::Numpy,
             len,
-            count,
+            count: len,
+            total: None,
+        };
+        if let ReductionValues::Float(_) | ReductionValues::FloatChunks(_) = values {
+            // One sweep counts the values and adds them, NaN as 0 in place.
+            let SumPair(total, count) = reductions.add_reduce(|value| SumPair(value, 1), false);
+            reductions.count = count;
+            reductions.total = Some(total);
         }
+        reductions.nan_missing = reductions.count < len;
+        reductions
     }
 
     /// `present` is the packed presence bits (`None`: all present).
@@ -1082,6 +1087,7 @@ impl<'a> PandasReductions<'a> {
             layout,
             len,
             count,
+            total: None,
         }
     }
 
@@ -1206,6 +1212,9 @@ impl<'a> PandasReductions<'a> {
     /// The values' total as [`Self::add_reduce`] adds them, a present float
     /// buffer summed in place.
     fn total(&self, cast_buffered: bool) -> f64 {
+        if let Some(total) = self.total {
+            return total;
+        }
         if let (ReductionValues::Float(values), None, false) =
             (self.values, self.present, self.nan_missing)
         {
@@ -1349,11 +1358,12 @@ impl<'a> PandasReductions<'a> {
     }
 }
 
-/// Two float sums carried side by side, added lane by lane.
+/// Two sums carried side by side (two float sums, or a float sum and a
+/// count), added lane by lane.
 #[derive(Debug, Clone, Copy, Default)]
-struct SumPair(f64, f64);
+struct SumPair<A, B = A>(A, B);
 
-impl std::ops::Add for SumPair {
+impl<A: std::ops::Add<Output = A>, B: std::ops::Add<Output = B>> std::ops::Add for SumPair<A, B> {
     type Output = Self;
 
     fn add(self, other: Self) -> Self {
