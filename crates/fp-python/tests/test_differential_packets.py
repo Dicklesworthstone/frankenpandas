@@ -23313,3 +23313,45 @@ _E117_CASES = {
 def test_everyday117_series_reductions_add_like_numpy_9iim6(case: str) -> None:
     run = _E117_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-n026a: rolling / expanding var, std and sem slide as pandas'
+# roll_var does - the leaving values out before the entering ones in, a window
+# sharing nothing with the previous one starting over. Adding first missed
+# pandas' last bits at almost every position.
+def _e118_walk(n: int = 2000, offset: float = 100.0) -> Any:
+    k = np.arange(n)
+    values = offset + np.cumsum(((k * 7919 + 13) % 1000 - 500) / 97.0)
+    return np.where(k % 37 == 5, np.nan, values)
+
+
+def _e118_timed(m: Any) -> Any:
+    seconds = 1_700_000_000 + np.cumsum(np.arange(300) * 31 % 13 + 1)
+    return m.Series(_e118_walk(300), index=m.to_datetime(seconds * 1_000_000_000))
+
+
+_E118_CASES = {
+    **{
+        f"rolling({w}).{op}": (lambda w, op: lambda m: getattr(m.Series(_e118_walk()).rolling(w), op)().tolist())(
+            w, op
+        )
+        for w in (2, 3, 7, 30)
+        for op in ("var", "std", "sem")
+    },
+    "min_periods ddof=0": lambda m: m.Series(_e118_walk()).rolling(30, min_periods=5).var(ddof=0).tolist(),
+    "center": lambda m: m.Series(_e118_walk()).rolling(5, center=True).var().tolist(),
+    "large offset": lambda m: m.Series(_e118_walk(offset=1e9)).rolling(7).std().tolist(),
+    "constant stretch": lambda m: m.Series([3.0] * 40 + list(_e118_walk(60))).rolling(4).var().tolist(),
+    "expanding": lambda m: m.Series(_e118_walk()).expanding().var().tolist()
+    + m.Series(_e118_walk()).expanding().std().tolist(),
+    "time window": lambda m: _e118_timed(m).rolling("7s").var().tolist(),
+    # Negative: rolling mean matched pandas already and stays as it was.
+    "rolling mean": lambda m: m.Series(_e118_walk()).rolling(7).mean().tolist(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E118_CASES))
+def test_everyday118_rolling_var_slides_like_roll_var_n026a(case: str) -> None:
+    run = _E118_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

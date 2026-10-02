@@ -32164,15 +32164,6 @@ impl Default for RollingVarianceState {
 }
 
 impl RollingVarianceState {
-    fn reset(&mut self) {
-        self.mean = 0.0;
-        self.m2 = 0.0;
-        self.compensation_add = 0.0;
-        self.compensation_remove = 0.0;
-        self.consecutive_same = 0;
-        self.previous_value = f64::NAN;
-    }
-
     fn add(&mut self, value: f64) {
         if value == self.previous_value {
             self.consecutive_same += 1;
@@ -32197,7 +32188,10 @@ impl RollingVarianceState {
 
         self.nobs -= 1;
         if self.nobs == 0 {
-            self.reset();
+            // pandas' roll_var empties only the moments; the compensations and
+            // the run of equal values carry on (br-frankenpandas-n026a).
+            self.mean = 0.0;
+            self.m2 = 0.0;
             return;
         }
 
@@ -33296,17 +33290,26 @@ impl Rolling<'_> {
 
         for i in 0..len {
             let (start, end) = self.window_bounds(i, len);
-            while r < end {
-                if let Some(value) = value_at(r) {
-                    state.add(value);
-                }
-                r += 1;
+            // pandas' roll_var: a window sharing nothing with the previous one
+            // starts over; otherwise the leaving values come out BEFORE the
+            // entering ones go in - adding first differs in the last bits at
+            // almost every position (br-frankenpandas-n026a).
+            if start >= r {
+                state = RollingVarianceState::default();
+                l = start;
+                r = start;
             }
             while l < start {
                 if let Some(value) = value_at(l) {
                     state.remove(value);
                 }
                 l += 1;
+            }
+            while r < end {
+                if let Some(value) = value_at(r) {
+                    state.add(value);
+                }
+                r += 1;
             }
             match state.output(self.min_periods, ddof, kind) {
                 Scalar::Float64(v) => {
@@ -234259,6 +234262,137 @@ mod pandas_reductions_9iim6 {
             s.mean().unwrap(),
             Scalar::Datetime64(1_700_049_991_717_762_560)
         );
+    }
+}
+
+/// Rolling / expanding var, std and sem against live pandas 2.2.3 bits
+/// (br-frankenpandas-n026a). pandas' roll_var removes the leaving values
+/// before adding the entering ones; adding first missed its last bits at
+/// almost every position. Data: `100 + cumsum(((k * 7919 + 13) % 1000 - 500)
+/// / 97)`, a left fold, with NaN where `k % 37 == 5`.
+#[cfg(test)]
+mod rolling_var_order_n026a {
+    use fp_columnar::Column;
+    use fp_index::Index;
+    use fp_types::Scalar;
+
+    use super::Series;
+
+    fn walk() -> Series {
+        let mut total = 0.0_f64;
+        let values: Vec<f64> = (0..2000_i64)
+            .map(|k| {
+                #[allow(clippy::cast_precision_loss)] // below 1000
+                let step = ((k * 7919 + 13) % 1000 - 500) as f64 / 97.0;
+                total += step;
+                if k % 37 == 5 { f64::NAN } else { 100.0 + total }
+            })
+            .collect();
+        Series::new(
+            "v",
+            Index::from_range(0, 2000, 1),
+            Column::from_f64_values(values),
+        )
+        .unwrap()
+    }
+
+    fn bits_at(series: &Series, positions: [usize; 3]) -> [u64; 3] {
+        positions.map(|i| match &series.values()[i] {
+            Scalar::Float64(value) => value.to_bits(),
+            other => panic!("position {i}: {other:?}"),
+        })
+    }
+
+    #[test]
+    fn rolling_var_std_sem_match_pandas_bits() {
+        let s = walk();
+        let at = [50, 100, 1999];
+        let r7 = s.rolling(7, None);
+        assert_eq!(
+            bits_at(&r7.var().unwrap(), at),
+            [
+                0x403e_64cf_3b4b_419c,
+                0x4032_3cdc_ec78_9c53,
+                0x4036_faee_247a_1558
+            ]
+        );
+        assert_eq!(
+            bits_at(&r7.std().unwrap(), at),
+            [
+                0x4016_0d5e_9140_1ac3,
+                0x4011_150f_9fb7_932c,
+                0x4013_2cd1_1929_b53a
+            ]
+        );
+        assert_eq!(
+            bits_at(&r7.sem().unwrap(), at),
+            [
+                0x4002_016c_c0c3_0e39,
+                0x3ffb_e52d_c332_b95d,
+                0x3fff_5010_72c4_6179
+            ]
+        );
+        // NEGATIVE: each window's own two-pass variance is a nearby value
+        // (...42db, ...9c96, ...12bd), not pandas' sliding one.
+        for (i, pinned) in at.into_iter().zip(bits_at(&r7.var().unwrap(), at)) {
+            let window: Vec<f64> = s.values()[i - 6..=i]
+                .iter()
+                .filter_map(|v| match v {
+                    Scalar::Float64(x) if !x.is_nan() => Some(*x),
+                    _ => None,
+                })
+                .collect();
+            #[allow(clippy::cast_precision_loss)] // 7 values
+            let n = window.len() as f64;
+            let mean = window.iter().fold(0.0, |acc, v| acc + v) / n;
+            let squares = window
+                .iter()
+                .fold(0.0, |acc, v| acc + (v - mean) * (v - mean));
+            assert_ne!((squares / (n - 1.0)).to_bits(), pinned, "position {i}");
+        }
+        let r30 = s.rolling(30, Some(5));
+        assert_eq!(
+            bits_at(&r30.var_ddof(0).unwrap(), at),
+            [
+                0x403d_4868_9b57_87b3,
+                0x4035_6aae_edb1_ff17,
+                0x4039_9939_03e7_bfcb
+            ]
+        );
+        let centered = s.rolling_with_center(5, None, true);
+        assert_eq!(
+            bits_at(&centered.var().unwrap(), [50, 100, 1990]),
+            [
+                0x4034_167c_c69e_4c24,
+                0x4042_bd32_9464_73d6,
+                0x4035_d09e_0626_370a
+            ]
+        );
+        assert_eq!(
+            bits_at(&s.expanding(None).var().unwrap(), at),
+            [
+                0x403b_b387_1611_49d4,
+                0x403a_9976_8f9c_e257,
+                0x4047_b6fc_a2fc_d05a
+            ]
+        );
+    }
+
+    #[test]
+    fn a_constant_window_is_exactly_zero() {
+        // pandas: Series([3.0] * 10 + [4.0, 5.0]).rolling(4).var()
+        let values = [3.0; 10].into_iter().chain([4.0, 5.0]).collect();
+        let s = Series::new(
+            "v",
+            Index::from_range(0, 12, 1),
+            Column::from_f64_values(values),
+        );
+        let var = s.unwrap().rolling(4, None).var().unwrap();
+        let got: Vec<Scalar> = var.values().to_vec();
+        assert!(got[..3].iter().all(Scalar::is_missing));
+        assert!(got[3..10].iter().all(|v| *v == Scalar::Float64(0.0)));
+        assert_eq!(got[10], Scalar::Float64(0.25));
+        assert_eq!(got[11], Scalar::Float64(0.916_666_666_666_666_5));
     }
 }
 
