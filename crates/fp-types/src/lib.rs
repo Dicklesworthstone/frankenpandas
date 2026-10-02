@@ -841,6 +841,39 @@ where
     pairwise_range(start, half, fill) + pairwise_range(start + half, len - half, fill)
 }
 
+/// [`numpy_pairwise_sum`] of `term(value)` over `values`, each term made
+/// where it is added.
+fn numpy_pairwise_sum_of<T, F>(values: &[f64], term: &F) -> T
+where
+    T: Copy + Default + std::ops::Add<Output = T>,
+    F: Fn(f64) -> T,
+{
+    if values.len() > PAIRWISE_BLOCK {
+        let mut half = values.len() / 2;
+        half -= half % 8;
+        return numpy_pairwise_sum_of(&values[..half], term)
+            + numpy_pairwise_sum_of(&values[half..], term);
+    }
+    let n = values.len();
+    if n < 8 {
+        return values
+            .iter()
+            .fold(T::default(), |acc, &value| acc + term(value));
+    }
+    let mut sums: [T; 8] = std::array::from_fn(|lane| term(values[lane]));
+    let whole = n - n % 8;
+    for block in values[8..whole].as_chunks::<8>().0 {
+        for (sum, &value) in sums.iter_mut().zip(block) {
+            *sum = *sum + term(value);
+        }
+    }
+    let folded =
+        ((sums[0] + sums[1]) + (sums[2] + sums[3])) + ((sums[4] + sums[5]) + (sums[6] + sums[7]));
+    values[whole..]
+        .iter()
+        .fold(folded, |acc, &value| acc + term(value))
+}
+
 /// numpy's pairwise sum of at most 128 contiguous values.
 fn pairwise_block<T>(values: &[T]) -> T
 where
@@ -992,12 +1025,35 @@ pub struct PandasReductions<'a> {
     /// Packed presence bits, bit `i % 64` of word `i / 64` for slot `i`;
     /// `None` when every slot is present.
     present: Option<&'a [u64]>,
+    /// The float values' NaNs are the missing slots (and some value is one).
+    nan_missing: bool,
     layout: MissingLayout,
     len: usize,
     count: usize,
 }
 
 impl<'a> PandasReductions<'a> {
+    /// A numpy float64 array, its NaNs the missing values (nanops' mask is
+    /// `isnan`); read without a presence bitmap.
+    #[must_use]
+    pub fn numpy_nan_missing(values: ReductionValues<'a>) -> Self {
+        let present = |values: &[f64]| values.iter().filter(|value| !value.is_nan()).count();
+        let len = values.len();
+        let count = match values {
+            ReductionValues::Float(values) => present(values),
+            ReductionValues::FloatChunks(chunks) => chunks.iter().map(|chunk| present(chunk)).sum(),
+            ReductionValues::Int(_) | ReductionValues::IntChunks(_) => len,
+        };
+        Self {
+            values,
+            present: None,
+            nan_missing: count < len,
+            layout: MissingLayout::Numpy,
+            len,
+            count,
+        }
+    }
+
     /// `present` is the packed presence bits (`None`: all present).
     #[must_use]
     pub fn new(
@@ -1007,13 +1063,22 @@ impl<'a> PandasReductions<'a> {
     ) -> Self {
         let len = values.len();
         let count = present.map_or(len, |words| {
-            (0..len)
-                .filter(|&i| words[i / 64] >> (i % 64) & 1 == 1)
-                .count()
+            let whole: usize = words[..len / 64]
+                .iter()
+                .map(|word| word.count_ones() as usize)
+                .sum();
+            let tail = len % 64;
+            whole
+                + if tail == 0 {
+                    0
+                } else {
+                    (words[len / 64] & ((1_u64 << tail) - 1)).count_ones() as usize
+                }
         });
         Self {
             values,
             present: present.filter(|_| count < len),
+            nan_missing: false,
             layout,
             len,
             count,
@@ -1026,64 +1091,110 @@ impl<'a> PandasReductions<'a> {
         self.count
     }
 
-    fn is_present(&self, i: usize) -> bool {
-        self.present
-            .is_none_or(|words| words[i / 64] >> (i % 64) & 1 == 1)
+    /// The first slot in `from..end` whose presence is `present`, else `end`.
+    fn next_slot(&self, from: usize, end: usize, present: bool) -> usize {
+        let Some(words) = self.present else {
+            return if present { from } else { end };
+        };
+        let mut i = from;
+        while i < end {
+            let word = if present {
+                words[i / 64]
+            } else {
+                !words[i / 64]
+            };
+            let ahead = word >> (i % 64);
+            if ahead != 0 {
+                return (i + ahead.trailing_zeros() as usize).min(end);
+            }
+            i += 64 - i % 64;
+        }
+        end
     }
 
     /// numpy's `add.reduce` of `term(value)` over the present values, in this
     /// layout's order; `cast_buffered` adds 8192 values at a time onto the
-    /// total, as numpy sums an int64 array as float64.
-    fn add_reduce(&self, term: impl Fn(f64) -> f64, cast_buffered: bool) -> f64 {
+    /// total, as numpy sums an int64 array as float64. A `T` of several sums
+    /// adds each in that same order.
+    fn add_reduce<T>(&self, term: impl Fn(f64) -> T, cast_buffered: bool) -> T
+    where
+        T: Copy + Default + std::ops::Add<Output = T>,
+    {
         let reader = ValueReader::new(self.values);
+        // The values of `first..first + block.len()`, each through `term`.
+        let read_terms = |first: usize, block: &mut [T]| {
+            let mut values = [0.0_f64; PAIRWISE_BLOCK];
+            let values = &mut values[..block.len()];
+            reader.read(first, values);
+            let terms = block.iter_mut().zip(values.iter());
+            if self.nan_missing {
+                // The NaN slots are 0, in place.
+                for (slot, &value) in terms {
+                    *slot = if value.is_nan() {
+                        T::default()
+                    } else {
+                        term(value)
+                    };
+                }
+            } else {
+                for (slot, &value) in terms {
+                    *slot = term(value);
+                }
+            }
+        };
         let buffer = if cast_buffered {
             NUMPY_CAST_BUFFER
         } else {
             self.len.max(1)
         };
-        let mut total = 0.0_f64;
+        let mut total = T::default();
         let mut chunk_start = 0;
         while chunk_start < self.len {
             let chunk_end = (chunk_start + buffer).min(self.len);
             match self.layout {
                 MissingLayout::Numpy => {
-                    let fill = |start: usize, block: &mut [f64]| {
-                        let first = chunk_start + start;
-                        reader.read(first, block);
-                        if self.present.is_none() {
-                            for slot in block.iter_mut() {
-                                *slot = term(*slot);
-                            }
-                            return;
-                        }
-                        for (k, slot) in block.iter_mut().enumerate() {
-                            *slot = if self.is_present(first + k) {
-                                term(*slot)
-                            } else {
-                                0.0
+                    if let (ReductionValues::Float(values), None) = (self.values, self.present) {
+                        let values = &values[chunk_start..chunk_end];
+                        let part = if self.nan_missing {
+                            // The NaN slots are 0, in place.
+                            let term = |value: f64| {
+                                if value.is_nan() {
+                                    T::default()
+                                } else {
+                                    term(value)
+                                }
                             };
+                            numpy_pairwise_sum_of(values, &term)
+                        } else {
+                            numpy_pairwise_sum_of(values, &term)
+                        };
+                        total = total + part;
+                        chunk_start = chunk_end;
+                        continue;
+                    }
+                    let fill = |start: usize, block: &mut [T]| {
+                        let first = chunk_start + start;
+                        read_terms(first, block);
+                        // The missing slots are 0, in place.
+                        let end = first + block.len();
+                        let mut slot = self.next_slot(first, end, false);
+                        while slot < end {
+                            let run_end = self.next_slot(slot, end, true);
+                            block[slot - first..run_end - first].fill(T::default());
+                            slot = self.next_slot(run_end, end, false);
                         }
                     };
-                    total += numpy_pairwise_sum_by(chunk_end - chunk_start, &fill);
+                    total = total + numpy_pairwise_sum_by(chunk_end - chunk_start, &fill);
                 }
                 MissingLayout::Masked => {
-                    let mut i = chunk_start;
-                    while i < chunk_end {
-                        if !self.is_present(i) {
-                            i += 1;
-                            continue;
-                        }
-                        let run_start = i;
-                        while i < chunk_end && self.is_present(i) {
-                            i += 1;
-                        }
-                        let fill = |start: usize, block: &mut [f64]| {
-                            reader.read(run_start + start, block);
-                            for slot in block.iter_mut() {
-                                *slot = term(*slot);
-                            }
+                    let mut run_start = self.next_slot(chunk_start, chunk_end, true);
+                    while run_start < chunk_end {
+                        let run_end = self.next_slot(run_start, chunk_end, false);
+                        let fill = |start: usize, block: &mut [T]| {
+                            read_terms(run_start + start, block);
                         };
-                        total += numpy_pairwise_sum_by(i - run_start, &fill);
+                        total = total + numpy_pairwise_sum_by(run_end - run_start, &fill);
+                        run_start = self.next_slot(run_end, chunk_end, true);
                     }
                 }
             }
@@ -1095,7 +1206,9 @@ impl<'a> PandasReductions<'a> {
     /// The values' total as [`Self::add_reduce`] adds them, a present float
     /// buffer summed in place.
     fn total(&self, cast_buffered: bool) -> f64 {
-        if let (ReductionValues::Float(values), None) = (self.values, self.present) {
+        if let (ReductionValues::Float(values), None, false) =
+            (self.values, self.present, self.nan_missing)
+        {
             return 0.0 + numpy_pairwise_sum(values);
         }
         self.add_reduce(|value| value, cast_buffered)
@@ -1179,22 +1292,17 @@ impl<'a> PandasReductions<'a> {
     fn central_moments(&self, fourth: bool) -> (f64, f64) {
         let numpy = self.as_numpy();
         let mean = numpy.total(false) / self.count as f64;
-        let m2 = numpy.add_reduce(
-            |value| {
-                let deviation = value - mean;
-                deviation * deviation
-            },
-            false,
-        );
-        let higher = numpy.add_reduce(
+        // Both sums in one sweep: each adds in numpy's order on its own.
+        let SumPair(m2, higher) = numpy.add_reduce(
             |value| {
                 let deviation = value - mean;
                 let square = deviation * deviation;
-                if fourth {
+                let higher = if fourth {
                     square * square
                 } else {
                     square * deviation
-                }
+                };
+                SumPair(square, higher)
             },
             false,
         );
@@ -1238,6 +1346,18 @@ impl<'a> PandasReductions<'a> {
         }
         let adjustment = 3.0 * ((count - 1.0) * (count - 1.0)) / ((count - 2.0) * (count - 3.0));
         numerator / denominator - adjustment
+    }
+}
+
+/// Two float sums carried side by side, added lane by lane.
+#[derive(Debug, Clone, Copy, Default)]
+struct SumPair(f64, f64);
+
+impl std::ops::Add for SumPair {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        Self(self.0 + other.0, self.1 + other.1)
     }
 }
 
@@ -22123,14 +22243,8 @@ mod pandas_reductions_9iim6 {
                 ],
             ),
         ];
-        for (n, expected) in cases {
-            let (values, present) = floats(n);
-            let r = PandasReductions::new(
-                ReductionValues::Float(&values),
-                Some(&present),
-                MissingLayout::Numpy,
-            );
-            let got = [
+        let all = |r: &PandasReductions<'_>| {
+            [
                 r.sum(),
                 r.mean(),
                 r.var(1),
@@ -22138,8 +22252,29 @@ mod pandas_reductions_9iim6 {
                 r.sem(1),
                 r.skew(),
                 r.kurt(),
-            ];
-            assert_bits(&got, &expected, &format!("float64 n={n}"));
+            ]
+        };
+        for (n, expected) in cases {
+            let (values, present) = floats(n);
+            let r = PandasReductions::new(
+                ReductionValues::Float(&values),
+                Some(&present),
+                MissingLayout::Numpy,
+            );
+            assert_bits(&all(&r), &expected, &format!("float64 n={n}"));
+            // The same column holding NaN in its missing slots, whole and as
+            // a concat's chunks.
+            let with_nan: Vec<f64> = values
+                .iter()
+                .enumerate()
+                .map(|(k, &value)| if k % 11 == 3 { f64::NAN } else { value })
+                .collect();
+            let r = PandasReductions::numpy_nan_missing(ReductionValues::Float(&with_nan));
+            assert_bits(&all(&r), &expected, &format!("float64 NaN n={n}"));
+            let (head, tail) = with_nan.split_at(n / 3);
+            let chunks = [head, tail];
+            let r = PandasReductions::numpy_nan_missing(ReductionValues::FloatChunks(&chunks));
+            assert_bits(&all(&r), &expected, &format!("float64 NaN chunks n={n}"));
         }
         // NEGATIVE: the present values added left to right are not pandas'.
         let (values, present) = floats(100_000);

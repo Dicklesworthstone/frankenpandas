@@ -23610,35 +23610,41 @@ impl Column {
     ) -> Option<R> {
         use fp_types::{MissingLayout, PandasReductions, ReductionValues};
         let numpy = MissingLayout::Numpy;
-        let not_nan_words = |data: &[f64], validity: Option<&ValidityMask>| -> Vec<u64> {
-            let mut words = vec![0_u64; data.len().div_ceil(64)];
-            for (i, value) in data.iter().enumerate() {
-                if !value.is_nan() && validity.is_none_or(|validity| validity.get(i)) {
-                    words[i / 64] |= 1 << (i % 64);
-                }
-            }
-            words
+        // The valid slots that do not hold NaN.
+        let present_words = |data: &[f64], validity: &ValidityMask| -> Vec<u64> {
+            data.chunks(64)
+                .zip(validity.packed_words_for_scan())
+                .map(|(chunk, valid)| {
+                    let not_nan = chunk.iter().enumerate().fold(0_u64, |word, (bit, value)| {
+                        word | u64::from(!value.is_nan()) << bit
+                    });
+                    not_nan & valid
+                })
+                .collect()
         };
         match self.dtype {
             DType::Float64 => {
-                if let Some(chunks) = self.all_valid_f64_chunk_slices()
-                    && !chunks.iter().any(|chunk| chunk.iter().any(|v| v.is_nan()))
-                {
-                    let reductions =
-                        PandasReductions::new(ReductionValues::FloatChunks(&chunks), None, numpy);
-                    return Some(reduce(&reductions));
+                // Every slot valid: the missing values are the NaNs.
+                if let Some(chunks) = self.all_valid_f64_chunk_slices() {
+                    let values = ReductionValues::FloatChunks(&chunks);
+                    return Some(reduce(&PandasReductions::numpy_nan_missing(values)));
                 }
                 if let Some(data) = self.as_f64_slice() {
-                    let present = data
-                        .iter()
-                        .any(|v| v.is_nan())
-                        .then(|| not_nan_words(data, None));
                     let values = ReductionValues::Float(data);
-                    let reductions = PandasReductions::new(values, present.as_deref(), numpy);
-                    return Some(reduce(&reductions));
+                    return Some(reduce(&PandasReductions::numpy_nan_missing(values)));
                 }
                 if let Some((data, validity)) = self.as_f64_slice_with_validity() {
-                    let present = not_nan_words(data, Some(validity));
+                    // Missing slots that hold NaN are the ones numpy's mask
+                    // sees already.
+                    let mut missing_are_nan = true;
+                    validity.for_each_invalid_range(|start, len| {
+                        missing_are_nan &= data[start..start + len].iter().all(|v| v.is_nan());
+                    });
+                    if missing_are_nan {
+                        let values = ReductionValues::Float(data);
+                        return Some(reduce(&PandasReductions::numpy_nan_missing(values)));
+                    }
+                    let present = present_words(data, validity);
                     let values = ReductionValues::Float(data);
                     let reductions = PandasReductions::new(values, Some(&present), numpy);
                     return Some(reduce(&reductions));
