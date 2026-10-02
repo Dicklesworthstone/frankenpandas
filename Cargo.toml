@@ -87,6 +87,10 @@ scraper = "0.27.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde-pickle = "1.2.0"
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
+# fp-expr's parser and evaluator recurse once per nesting level; stacker grows
+# the stack on demand at each level, so a pandas-legal depth cannot overflow a
+# small or debug-build thread (br-frankenpandas-bhbuz).
+stacker = "0.1.25"
 thiserror = "2.0.20"
 zmij = "1.0.23"
 # tracing: optional observability layer per br-frankenpandas-7gd4.

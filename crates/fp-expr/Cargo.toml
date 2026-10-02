@@ -18,6 +18,7 @@ fp-index = { path = "../fp-index", version = "0.3.0" }
 fp-runtime = { path = "../fp-runtime", version = "0.3.0" }
 fp-types = { path = "../fp-types", version = "0.3.0" }
 serde = { workspace = true }
+stacker = { workspace = true }
 thiserror = { workspace = true }
 
 # br-frankenpandas-qm012. Test-only: the A/B harness self-reports the SHA-256 of
