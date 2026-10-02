@@ -23355,3 +23355,46 @@ _E118_CASES = {
 def test_everyday118_rolling_var_slides_like_roll_var_n026a(case: str) -> None:
     run = _E118_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-py3c0: read_csv's float cells convert as pandas' default C
+# converter does - 17 digits (leading zeros count) added as x * 10 + d in
+# float64, one power-of-ten scaling - not correctly rounded; a value past
+# float64 is not a float. fp parsed them exactly.
+def _e119_reprs(n: int = 400) -> list:
+    k = np.arange(n)
+    values = np.cumsum(((k * 7919 + 13) % 1000 - 500) / 97.0) * 10.0 ** ((k % 23) - 11)
+    return [repr(float(v)) for v in values]
+
+
+def _e119_read(m: Any, cells: list, **kwargs: Any) -> list:
+    frame = m.read_csv(io.StringIO("x\n" + "\n".join(cells) + "\n"), **kwargs)
+    return [str(frame["x"].dtype)] + frame["x"].tolist()
+
+
+_E119_CASES = {
+    "reprs": lambda m: _e119_read(m, _e119_reprs()),
+    "long fractions": lambda m: _e119_read(
+        m, ["0.8690736625851781286570704999", "0.000000068288360759838675650889", "-0.0080749473608410608782560"]
+    ),
+    "leading zeros": lambda m: _e119_read(m, ["00000000000000000.5", "0000000000000000.5", "000123.4500"]),
+    "exponents": lambda m: _e119_read(m, ["1.5E+10", "-.5e-3", "5.", "1e-320", "2.5e-310", "-1e-400", "0.001e310"]),
+    "comma decimal": lambda m: [
+        str(v) for v in m.read_csv(io.StringIO("x;y\n9,890295358649789;1\n"), sep=";", decimal=",")["x"].tolist()
+    ],
+    "past float64": lambda m: _e119_read(m, ["1e309", "2.5"]),
+    "wide int beside a fraction": lambda m: _e119_read(m, ["99999999999999999", "1.5"]),
+    "wide int beside a missing value": lambda m: _e119_read(m, ["12", "NA", "99999999999999999"]),
+    "read_table": lambda m: m.read_table(io.StringIO("x\ty\n9.890295358649789\t1\n"))["x"].tolist(),
+    "python engine": lambda m: _e119_read(m, _e119_reprs(50), engine="python"),
+    "to_numeric": lambda m: m.to_numeric(m.Series(_e119_reprs(200) + ["00000000000000000.5"], dtype=object)).tolist(),
+    # Negative: short decimals read the same either way.
+    "short decimals": lambda m: _e119_read(m, ["0.1", "115215.73", "2.5", "-3.75"]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E119_CASES))
+def test_everyday119_read_csv_floats_convert_like_pandas_py3c0(case: str) -> None:
+    run = _E119_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case

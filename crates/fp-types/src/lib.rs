@@ -1376,6 +1376,180 @@ fn zero_out_fperr(value: f64) -> f64 {
     if value.abs() < 1e-14 { 0.0 } else { value }
 }
 
+/// What pandas' default text-to-float64 conversion - `read_csv` /
+/// `read_table` with `float_precision=None` or `'high'`, and `to_numeric` of
+/// strings - makes of a token (br-frankenpandas-py3c0).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PandasDecimal {
+    /// A decimal number, converted as pandas converts it.
+    Value(f64),
+    /// A token that starts as a number but that pandas does not read as a
+    /// float: trailing text, an exponent without digits or with more than 17,
+    /// a value past float64's range.
+    Rejected,
+    /// No digits before an exponent: not a decimal (the `inf` / `nan`
+    /// spellings, `.`, `-`); the caller's own rules apply.
+    NotDecimal,
+}
+
+/// Significant digits pandas' converter keeps, leading zeros included;
+/// also the most exponent digits it reads.
+const PANDAS_DECIMAL_DIGITS: usize = 17;
+
+/// The significand as pandas accumulates it, `x * 10 + d` in float64. While
+/// the digits stay within 2^53 every step is exact, so they add as an
+/// integer.
+#[derive(Default)]
+struct PandasSignificand {
+    exact: u64,
+    float: f64,
+    rounding: bool,
+    digits: usize,
+}
+
+impl PandasSignificand {
+    fn push(&mut self, digit: u8) {
+        self.digits += 1;
+        if !self.rounding {
+            let next = self.exact * 10 + u64::from(digit);
+            if next <= 1 << 53 {
+                self.exact = next;
+                return;
+            }
+            self.rounding = true;
+            #[allow(clippy::cast_precision_loss)] // at most 2^53: exact
+            let exact = self.exact as f64;
+            self.float = exact;
+        }
+        self.float = self.float * 10.0 + f64::from(digit);
+    }
+
+    #[allow(clippy::cast_precision_loss)] // at most 2^53: exact
+    fn value(&self) -> f64 {
+        if self.rounding {
+            self.float
+        } else {
+            self.exact as f64
+        }
+    }
+}
+
+/// pandas' scaling table: the float64 nearest each `1e0 ..= 1e308`.
+static PANDAS_POW10: std::sync::LazyLock<[f64; 309]> = std::sync::LazyLock::new(|| {
+    std::array::from_fn(|power| format!("1e{power}").parse().unwrap_or(f64::INFINITY))
+});
+
+/// pandas' default text-to-float64 conversion of `token` (no surrounding
+/// space). It is not correctly rounded: the first 17 digits - leading zeros
+/// count - accumulate as `x * 10 + d` in float64 (digits past them in the
+/// integer part raise the exponent, in the fraction they are dropped), the
+/// exponent is a wrapping 32-bit integer of at most 17 digits, and the value
+/// is scaled ONCE by a float64 power of ten: `x * 1e{e}` for `e` up to 308,
+/// `x / 1e{-e}` down to -308, `x / 1e{-308-e} / 1e308` down to -616, `+0.0`
+/// below that; past 308, or overflowing to infinity, the token is not a
+/// float. The sign applies last. Measured against live pandas 2.2.3 over
+/// 180k tokens (repr / `%.20e` / `%.25f` / 1-30 digit fractions / leading
+/// zeros / exponents to +-640 / wrapping exponents), 0 mismatches;
+/// `float()` misses about a third of them.
+#[must_use]
+pub fn pandas_decimal_to_f64(token: &[u8]) -> PandasDecimal {
+    let (negative, body) = match token.first() {
+        Some(b'-') => (true, &token[1..]),
+        Some(b'+') => (false, &token[1..]),
+        _ => (false, token),
+    };
+    let mut significand = PandasSignificand::default();
+    let mut exponent = 0_i32;
+    let mut pos = 0;
+    while let Some(&byte @ b'0'..=b'9') = body.get(pos) {
+        if significand.digits < PANDAS_DECIMAL_DIGITS {
+            significand.push(byte - b'0');
+        } else {
+            exponent = exponent.wrapping_add(1);
+        }
+        pos += 1;
+    }
+    let mut seen_digit = pos > 0;
+    if body.get(pos) == Some(&b'.') {
+        pos += 1;
+        while let Some(&byte @ b'0'..=b'9') = body.get(pos) {
+            if significand.digits < PANDAS_DECIMAL_DIGITS {
+                significand.push(byte - b'0');
+                exponent = exponent.wrapping_sub(1);
+            }
+            seen_digit = true;
+            pos += 1;
+        }
+    }
+    if !seen_digit {
+        return PandasDecimal::NotDecimal;
+    }
+    if let Some(b'e' | b'E') = body.get(pos) {
+        pos += 1;
+        let negative_exponent = match body.get(pos) {
+            Some(b'-') => {
+                pos += 1;
+                true
+            }
+            Some(b'+') => {
+                pos += 1;
+                false
+            }
+            _ => false,
+        };
+        let start = pos;
+        let mut written = 0_i32;
+        while pos - start < PANDAS_DECIMAL_DIGITS
+            && let Some(&byte @ b'0'..=b'9') = body.get(pos)
+        {
+            written = written
+                .wrapping_mul(10)
+                .wrapping_add(i32::from(byte - b'0'));
+            pos += 1;
+        }
+        if pos == start {
+            return PandasDecimal::Rejected;
+        }
+        exponent = exponent.wrapping_add(if negative_exponent {
+            written.wrapping_neg()
+        } else {
+            written
+        });
+    }
+    if pos != body.len() {
+        return PandasDecimal::Rejected;
+    }
+    let value = significand.value();
+    let pow10 = |power: i32| PANDAS_POW10[power.unsigned_abs() as usize];
+    let magnitude = match exponent {
+        309.. => return PandasDecimal::Rejected,
+        0.. => value * pow10(exponent),
+        -308.. => value / pow10(exponent),
+        -616.. => value / pow10(-308 - exponent) / pow10(308),
+        _ => return PandasDecimal::Value(0.0),
+    };
+    if magnitude.is_infinite() {
+        return PandasDecimal::Rejected;
+    }
+    PandasDecimal::Value(if negative { -magnitude } else { magnitude })
+}
+
+/// An integer cell of a column pandas reads as float64 (one of its cells is
+/// fractional): the integer's digits through [`pandas_decimal_to_f64`],
+/// exact up to 2^53.
+#[must_use]
+#[allow(clippy::cast_precision_loss)] // at most 2^53, or 19 digits: a value
+pub fn pandas_int_to_f64(value: i64) -> f64 {
+    if value.unsigned_abs() <= 1 << 53 {
+        return value as f64;
+    }
+    match pandas_decimal_to_f64(value.to_string().as_bytes()) {
+        PandasDecimal::Value(parsed) => parsed,
+        // 19 digits at most: always a value.
+        PandasDecimal::Rejected | PandasDecimal::NotDecimal => value as f64,
+    }
+}
+
 /// A numeric column's numpy dtype as numpy's promotion sees it: kind and
 /// bits. The 64-bit ones are a column without a [`NumericWidth`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -22476,5 +22650,96 @@ mod pandas_reductions_9iim6 {
         let inf = reductions(&[1.0, f64::INFINITY, 2.0, 5.0], None);
         assert_eq!(inf[0], f64::INFINITY);
         assert!(inf[2..].iter().all(|value| value.is_nan()));
+    }
+}
+
+/// pandas' default text-to-float64 conversion against live pandas 2.2.3
+/// bits: `read_csv(StringIO('x\n' + token), dtype={'x': 'float64'})`
+/// (br-frankenpandas-py3c0).
+#[cfg(test)]
+mod pandas_decimal_py3c0 {
+    use super::{PandasDecimal, pandas_decimal_to_f64, pandas_int_to_f64};
+
+    fn bits(token: &str) -> u64 {
+        match pandas_decimal_to_f64(token.as_bytes()) {
+            PandasDecimal::Value(value) => value.to_bits(),
+            other => panic!("{token:?}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tokens_convert_to_pandas_bits() {
+        let cases = [
+            ("9.890295358649789", 0x4023_c7d4_cb12_5ce4),
+            ("0.8690736625851781286570704999", 0x3feb_cf73_91d3_c8f1),
+            ("0.000000068288360759838675650889", 0x3e72_54bd_8bcd_610b),
+            ("-0.0080749473608410608782560", 0xbf80_8999_16a7_63f3),
+            ("99999999999999999", 0x4376_3457_85d8_a001),
+            ("1234567890123456789012345", 0x44f0_56e0_f36a_6444),
+            // 17 leading zeros are the 17 digits kept.
+            ("00000000000000000.5", 0x0000_0000_0000_0000),
+            ("-00000000000000000.5", 0x8000_0000_0000_0000),
+            ("1.5E+10", 0x420b_f08e_b000_0000),
+            ("-.5e-3", 0xbf40_624d_d2f1_a9fc),
+            ("5.", 0x4014_0000_0000_0000),
+            ("1e-320", 0x0000_0000_0000_07e8),
+            ("2.5e-310", 0x0000_2e05_5c9a_3f6c),
+            ("-1e-400", 0x8000_0000_0000_0000),
+            // Below 1e-616: +0.0, the sign dropped.
+            ("-1e-700", 0x0000_0000_0000_0000),
+            // The exponent wraps as a 32-bit integer.
+            ("1e-4294967296", 0x3ff0_0000_0000_0000),
+            ("1.7976931348623157e308", 0x7fef_ffff_ffff_ffff),
+            ("0.001e310", 0x7fac_7b1f_3cac_7433),
+        ];
+        for (token, expected) in cases {
+            assert_eq!(bits(token), expected, "{token:?}");
+        }
+        // NEGATIVE: the correctly rounded value is not pandas'.
+        let correctly_rounded: f64 = "9.890295358649789".parse().unwrap();
+        assert_ne!(correctly_rounded.to_bits(), 0x4023_c7d4_cb12_5ce4);
+    }
+
+    #[test]
+    fn what_pandas_does_not_read_as_a_float() {
+        for token in [
+            "1e309",
+            "0e400",
+            "1.8e308",
+            "1e+0000000000000000001",
+            "1e-2147483649",
+            "1e",
+            "1e+",
+            "1.5d3",
+            "0x10",
+            "1_000.5",
+            "1..5",
+        ] {
+            assert_eq!(
+                pandas_decimal_to_f64(token.as_bytes()),
+                PandasDecimal::Rejected,
+                "{token:?}"
+            );
+        }
+        for token in ["inf", "-Infinity", "nan", ".", "-", "e5", "+.e1", "--1", ""] {
+            assert_eq!(
+                pandas_decimal_to_f64(token.as_bytes()),
+                PandasDecimal::NotDecimal,
+                "{token:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_integer_in_a_float_column_takes_the_same_conversion() {
+        assert_eq!(pandas_int_to_f64(-42).to_bits(), (-42.0_f64).to_bits());
+        assert_eq!(
+            pandas_int_to_f64(99_999_999_999_999_999).to_bits(),
+            0x4376_3457_85d8_a001
+        );
+        assert_eq!(
+            pandas_int_to_f64(-99_999_999_999_999_999).to_bits(),
+            0xc376_3457_85d8_a001
+        );
     }
 }

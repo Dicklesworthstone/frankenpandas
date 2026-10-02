@@ -1429,7 +1429,6 @@ dependencies = [
  "csv",
  "dta",
  "fallible-iterator 0.2.0",
- "fast-float2",
  "fp-columnar",
  "fp-frame",
  "fp-index",

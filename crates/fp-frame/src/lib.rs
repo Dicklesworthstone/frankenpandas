@@ -62613,9 +62613,16 @@ pub fn to_numeric_with_options(
             }
             Scalar::Utf8(s) => {
                 let trimmed = s.trim();
+                // pandas' text converter, not correctly rounded; the inf / nan
+                // spellings as Rust reads them (br-frankenpandas-py3c0).
+                let float = || match fp_types::pandas_decimal_to_f64(trimmed.as_bytes()) {
+                    fp_types::PandasDecimal::Value(value) => Some(value),
+                    fp_types::PandasDecimal::Rejected => None,
+                    fp_types::PandasDecimal::NotDecimal => trimmed.parse::<f64>().ok(),
+                };
                 if let Ok(i) = trimmed.parse::<i64>() {
                     converted.push(Scalar::Int64(i));
-                } else if let Ok(f) = trimmed.parse::<f64>() {
+                } else if let Some(f) = float() {
                     has_float = true;
                     converted.push(Scalar::Float64(f));
                 } else {

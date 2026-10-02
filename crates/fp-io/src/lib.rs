@@ -680,10 +680,31 @@ fn strings_to_contiguous_raw(raw: &[String]) -> (Vec<u8>, Vec<usize>) {
 }
 
 fn build_csv_object_aware_column(
-    values: Vec<Scalar>,
+    mut values: Vec<Scalar>,
     raw_bytes: &[u8],
     raw_offsets: &[usize],
 ) -> Result<Column, IoError> {
+    // A numeric column with a fractional cell goes through pandas' float
+    // converter whole: an integer cell past 2^53 reads from its digits rather
+    // than as a cast (br-frankenpandas-py3c0).
+    let fractional = values
+        .iter()
+        .any(|value| matches!(value, Scalar::Float64(_)));
+    let number = |value: &Scalar| {
+        matches!(
+            value,
+            Scalar::Int64(_) | Scalar::Float64(_) | Scalar::Null(_)
+        )
+    };
+    if fractional && values.iter().all(number) {
+        for value in &mut values {
+            if let Scalar::Int64(int) = *value
+                && int.unsigned_abs() > 1 << 53
+            {
+                *value = Scalar::Float64(fp_types::pandas_int_to_f64(int));
+            }
+        }
+    }
     let column = Column::from_values(values)?;
     // A column read as nothing but missing values is float64 NaN in pandas'
     // parser (it was object); a header-only column (no rows) stays object.
@@ -802,20 +823,23 @@ fn parse_i64_ascii(field: &[u8]) -> Option<i64> {
     }
 }
 
+/// A float cell as pandas' default C converter reads it - not correctly
+/// rounded (`fp_types::pandas_decimal_to_f64`; br-frankenpandas-py3c0); the
+/// `inf` / `nan` spellings as Rust reads them.
 fn parse_f64_csv_number(field: &[u8]) -> Option<f64> {
-    match fast_float2::parse::<f64, _>(field) {
-        Ok(value) => Some(value),
-        Err(_) if field.is_ascii() => std::str::from_utf8(field).ok()?.parse::<f64>().ok(),
-        Err(_) => None,
+    match fp_types::pandas_decimal_to_f64(field) {
+        fp_types::PandasDecimal::Value(value) => Some(value),
+        fp_types::PandasDecimal::Rejected => None,
+        fp_types::PandasDecimal::NotDecimal => std::str::from_utf8(field).ok()?.parse::<f64>().ok(),
     }
 }
 
-/// Exact powers of ten for the fused decimal fast path. Every entry up to
-/// 10^18 is exactly representable in f64, so dividing an exact mantissa by an
-/// entry is a single correctly-rounded operation.
-const FUSED_DECIMAL_POW10: [f64; 19] = [
+/// Exact powers of ten for the fused decimal fast path, one per fraction
+/// digit it admits. Every entry is exactly representable in f64, so dividing
+/// an exact mantissa by an entry is a single correctly-rounded operation.
+const FUSED_DECIMAL_POW10: [f64; 18] = [
     1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
-    1e17, 1e18,
+    1e17,
 ];
 
 /// One CSV field admitted by the fused scanner/parser.
@@ -833,17 +857,15 @@ struct FusedNumericField {
 /// Scans one CSV field starting at `start`, using an optimized byte delimiter
 /// scan before decimal digit accumulation.
 ///
-/// Admits only `[+-]?digits[.digits]` tokens with at most 18 mantissa digits
-/// (so the `u64` accumulator and the `i64` integer route can never overflow)
-/// and, for fractional values, a mantissa of at most 2^53 (so it is exactly
-/// representable in `f64`). Under those gates the computed value is provably
-/// bit-identical to the fallback parser: the mantissa and the power of ten
-/// are both exact in `f64`, so the single division (or `u64 -> f64`
-/// round-to-nearest-even conversion for integers) yields the correctly
-/// rounded value of the decimal token — the same contract `fast_float2` and
-/// `str::parse::<f64>` guarantee. Anything else (NA tokens, booleans,
-/// whitespace, exponents, overlong or malformed numbers, quotes, CR) returns
-/// `None` and must take the existing per-field fallback route.
+/// Admits only `[+-]?digits[.digits]` tokens with at most 17 digits (the
+/// digits pandas' converter keeps, leading zeros included) and a mantissa of
+/// at most 2^53. Under those gates the computed value is provably
+/// bit-identical to `parse_f64_csv_number`: pandas' `x * 10 + d` is exact
+/// while the digits fit 2^53, and its one scaling divides by an exact power
+/// of ten - the single division here (an integer is the mantissa itself).
+/// Anything else (NA tokens, booleans, whitespace, exponents, overlong or
+/// malformed numbers, quotes, CR) returns `None` and must take the existing
+/// per-field fallback route.
 #[inline]
 fn fuse_scan_numeric_csv_field(data: &[u8], start: usize) -> Option<FusedNumericField> {
     let remaining = data.get(start..)?;
@@ -866,7 +888,7 @@ fn fuse_scan_numeric_csv_field(data: &[u8], start: usize) -> Option<FusedNumeric
     while pos < end {
         match data.get(pos) {
             Some(&byte @ b'0'..=b'9') => {
-                if digits == 18 {
+                if digits == 17 {
                     return None;
                 }
                 mantissa = mantissa * 10 + u64::from(byte - b'0');
@@ -882,14 +904,11 @@ fn fuse_scan_numeric_csv_field(data: &[u8], start: usize) -> Option<FusedNumeric
         }
     }
 
-    if digits == 0 || (seen_dot && frac_digits == 0) {
+    if digits == 0 || (seen_dot && frac_digits == 0) || mantissa > (1u64 << 53) {
         return None;
     }
 
     if seen_dot {
-        if mantissa > (1u64 << 53) {
-            return None;
-        }
         let magnitude = mantissa as f64 / FUSED_DECIMAL_POW10[frac_digits];
         Some(FusedNumericField {
             int_value: None,
@@ -897,7 +916,7 @@ fn fuse_scan_numeric_csv_field(data: &[u8], start: usize) -> Option<FusedNumeric
             end,
         })
     } else {
-        // digits <= 18 => mantissa < 10^18 < i64::MAX, so the cast is exact.
+        // mantissa <= 2^53 < i64::MAX, so both casts are exact.
         let int_magnitude = mantissa as i64;
         let float_magnitude = mantissa as f64;
         Some(FusedNumericField {
@@ -928,7 +947,7 @@ fn push_fused_numeric_csv_field(values: &mut CsvTypedColumnValues, field: &Fused
                 out.push(value);
             } else {
                 let mut promoted = Vec::with_capacity(out.capacity());
-                promoted.extend(out.iter().copied().map(|value| value as f64));
+                promoted.extend(out.iter().copied().map(fp_types::pandas_int_to_f64));
                 promoted.push(field.float_value);
                 *values = CsvTypedColumnValues::Float64(promoted);
             }
@@ -961,7 +980,7 @@ fn push_csv_default_numeric_field(values: &mut CsvTypedColumnValues, field: &[u8
                 match parse_f64_csv_number(trimmed) {
                     Some(value) if !value.is_nan() => {
                         let mut promoted = Vec::with_capacity(out.capacity());
-                        promoted.extend(out.iter().copied().map(|value| value as f64));
+                        promoted.extend(out.iter().copied().map(fp_types::pandas_int_to_f64));
                         promoted.push(value);
                         *values = CsvTypedColumnValues::Float64(promoted);
                         true
@@ -1162,7 +1181,7 @@ fn merge_one_simple_numeric_csv_column(
         let mut out = match first {
             CsvTypedColumnValues::Int64(src) => {
                 let mut v = Vec::with_capacity(capacity);
-                v.extend(src.into_iter().map(|value| value as f64));
+                v.extend(src.into_iter().map(fp_types::pandas_int_to_f64));
                 v
             }
             CsvTypedColumnValues::Float64(mut src) => {
@@ -1173,7 +1192,7 @@ fn merge_one_simple_numeric_csv_column(
         for src in sources {
             match src {
                 CsvTypedColumnValues::Int64(src) => {
-                    out.extend(src.into_iter().map(|value| value as f64));
+                    out.extend(src.into_iter().map(fp_types::pandas_int_to_f64));
                 }
                 CsvTypedColumnValues::Float64(src) => out.extend(src),
             }
@@ -1598,17 +1617,43 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
     // bytes (already captured for verbatim). A pure-numeric-no-null column then
     // emits its typed column directly, bit-identical to from_values over the
     // equivalent Scalars: all-Int64 → Int64 (from_i64_values), any-Float64-no-null
-    // → Float64 with ints coerced to `x as f64` (from_f64_values) — exactly what
-    // Column::from_values + build_csv_object_aware_column produce for those inputs.
+    // → Float64 with ints coerced as pandas' float converter reads them
+    // (`WideInts`; from_f64_values) — exactly what Column::from_values +
+    // build_csv_object_aware_column produce for those inputs.
     // `valid: None` = all-valid so far (the common fast case, no per-cell bit
     // tracking); `Some(mask)` = at least one NA has appeared. A missing value
     // promotes inferred numpy-style integers to Float64, because pandas' int64
     // cannot represent NA; Float64 and Bool keep their typed missing form.
     enum ColAcc {
         Int(Vec<i64>, Option<Vec<bool>>),
-        Float(Vec<f64>, Option<Vec<bool>>),
+        Float(Vec<f64>, Option<Vec<bool>>, WideInts),
         Bool(Vec<bool>, Option<Vec<bool>>),
         Fallback,
+    }
+    /// A Float column's integer cells past 2^53, cast for now: once a
+    /// fractional cell sends the column through pandas' float converter they
+    /// read from their digits instead; a column made float by a missing value
+    /// alone keeps the cast (br-frankenpandas-py3c0).
+    #[derive(Default)]
+    struct WideInts {
+        fractional: bool,
+        cells: Vec<(usize, i64)>,
+    }
+    impl WideInts {
+        fn cast(&mut self, row: usize, value: i64) -> f64 {
+            if value.unsigned_abs() > 1 << 53 {
+                self.cells.push((row, value));
+            }
+            value as f64
+        }
+
+        fn finish(self, values: &mut [f64]) {
+            if self.fractional {
+                for (row, value) in self.cells {
+                    values[row] = fp_types::pandas_int_to_f64(value);
+                }
+            }
+        }
     }
     let mut accs: Vec<ColAcc> = (0..header_count)
         .map(|_| ColAcc::Int(Vec::with_capacity(row_hint), None))
@@ -1645,15 +1690,19 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
             if is_pandas_default_na(field) {
                 match acc {
                     ColAcc::Int(buf, valid) => {
-                        let mut promoted: Vec<f64> =
-                            buf.iter().map(|&value| value as f64).collect();
+                        let mut wide = WideInts::default();
+                        let mut promoted: Vec<f64> = buf
+                            .iter()
+                            .enumerate()
+                            .map(|(row, &value)| wide.cast(row, value))
+                            .collect();
                         promoted.push(0.0);
                         let mut promoted_valid =
                             valid.take().unwrap_or_else(|| vec![true; buf.len()]);
                         promoted_valid.push(false);
-                        *acc = ColAcc::Float(promoted, Some(promoted_valid));
+                        *acc = ColAcc::Float(promoted, Some(promoted_valid), wide);
                     }
-                    ColAcc::Float(buf, valid) => {
+                    ColAcc::Float(buf, valid, _) => {
                         valid
                             .get_or_insert_with(|| vec![true; buf.len()])
                             .push(false);
@@ -1678,8 +1727,8 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
                             vv.push(true);
                         }
                     }
-                    ColAcc::Float(buf, valid) => {
-                        buf.push(v as f64);
+                    ColAcc::Float(buf, valid, wide) => {
+                        buf.push(wide.cast(buf.len(), v));
                         if let Some(vv) = valid {
                             vv.push(true);
                         }
@@ -1687,20 +1736,29 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
                     ColAcc::Bool(_, _) => *acc = ColAcc::Fallback,
                     ColAcc::Fallback => {}
                 }
-            } else if let Ok(v) = trimmed.parse::<f64>()
+            } else if let Some(v) = parse_f64_csv_number(trimmed.as_bytes())
                 && !v.is_nan()
                 && (!v.is_infinite() || field.len() == trimmed.len())
             {
                 match acc {
                     ColAcc::Int(buf, valid) => {
-                        let mut promoted: Vec<f64> = buf.iter().map(|&i| i as f64).collect();
+                        let mut promoted: Vec<f64> = buf
+                            .iter()
+                            .copied()
+                            .map(fp_types::pandas_int_to_f64)
+                            .collect();
                         promoted.push(v);
                         if let Some(vv) = valid.as_mut() {
                             vv.push(true);
                         }
-                        *acc = ColAcc::Float(promoted, valid.take());
+                        let wide = WideInts {
+                            fractional: true,
+                            cells: Vec::new(),
+                        };
+                        *acc = ColAcc::Float(promoted, valid.take(), wide);
                     }
-                    ColAcc::Float(buf, valid) => {
+                    ColAcc::Float(buf, valid, wide) => {
+                        wide.fractional = true;
                         buf.push(v);
                         if let Some(vv) = valid {
                             vv.push(true);
@@ -1734,7 +1792,7 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
                             vv.push(true);
                         }
                     }
-                    ColAcc::Float(_, _) | ColAcc::Fallback => *acc = ColAcc::Fallback,
+                    ColAcc::Float(..) | ColAcc::Fallback => *acc = ColAcc::Fallback,
                 }
             } else {
                 *acc = ColAcc::Fallback;
@@ -1778,7 +1836,8 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
                     None => Column::from_i64_values(buf),
                 }
             }
-            ColAcc::Float(buf, valid) if has_value(buf.len(), &valid) => {
+            ColAcc::Float(mut buf, valid, wide) if has_value(buf.len(), &valid) => {
+                wide.finish(&mut buf);
                 match valid.as_deref().and_then(validity_from_bools) {
                     Some(mask) => Column::from_f64_values_with_validity(buf, mask),
                     None => Column::from_f64_values(buf),
@@ -4852,7 +4911,7 @@ fn parse_scalar(field: &str) -> Scalar {
     if let Ok(value) = trimmed.parse::<i64>() {
         return Scalar::Int64(value);
     }
-    if let Ok(value) = trimmed.parse::<f64>()
+    if let Some(value) = parse_f64_csv_number(trimmed.as_bytes())
         && !value.is_nan()
         && (!value.is_infinite() || field.len() == trimmed.len())
     {
@@ -5130,7 +5189,7 @@ fn parse_scalar_with_options(
     } else {
         Cow::Borrowed(numeric_candidate.as_ref())
     };
-    if let Ok(value) = float_candidate.as_ref().parse::<f64>()
+    if let Some(value) = parse_f64_csv_number(float_candidate.as_bytes())
         && !value.is_nan()
         && (!value.is_infinite() || field.len() == trimmed.len())
     {
@@ -39489,7 +39548,7 @@ mod merge_simple_numeric_csv_chunks_tests {
                         dst.extend(src);
                     }
                     (CsvTypedColumnValues::Float64(dst), CsvTypedColumnValues::Int64(src)) => {
-                        dst.extend(src.into_iter().map(|value| value as f64));
+                        dst.extend(src.into_iter().map(fp_types::pandas_int_to_f64));
                     }
                     (CsvTypedColumnValues::Float64(dst), CsvTypedColumnValues::Float64(src)) => {
                         dst.extend(src);
@@ -40159,5 +40218,99 @@ mod float32_csv_fvsao23 {
         .unwrap();
         let frame = DataFrame::from_series(vec![gapped]).unwrap();
         assert_eq!(write_csv_string(&frame).unwrap(), ",f\n0,0.1\n1,\n");
+    }
+}
+
+/// read_csv's float cells convert as pandas' default C converter does - not
+/// correctly rounded (br-frankenpandas-py3c0). Bits from live pandas 2.2.3
+/// `read_csv` of the same text.
+#[cfg(test)]
+mod pandas_float_converter_py3c0 {
+    use fp_types::{DType, Scalar};
+
+    use super::{CsvReadOptions, read_csv_str, read_csv_with_options};
+
+    fn float_bits(column: &fp_columnar::Column) -> Vec<u64> {
+        assert_eq!(column.dtype(), DType::Float64);
+        column
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Float64(value) => value.to_bits(),
+                Scalar::Null(_) => f64::NAN.to_bits(),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
+    fn column_bits(csv: &str) -> Vec<u64> {
+        let frame = read_csv_str(csv).expect("read");
+        float_bits(frame.column("x").expect("x"))
+    }
+
+    #[test]
+    fn long_mantissas_read_as_pandas_reads_them() {
+        // The fallback parse (17 digits, leading zeros, an exponent) beside
+        // the fused one (short decimals, unchanged).
+        let csv = "x\n9.890295358649789\n0.000000068288360759838675650889\n1.5E+10\n\
+                   0.1\n115215.73\n00000000000000000.5\n";
+        assert_eq!(
+            column_bits(csv),
+            [
+                0x4023_c7d4_cb12_5ce4,
+                0x3e72_54bd_8bcd_610b,
+                0x420b_f08e_b000_0000,
+                0x3fb9_9999_9999_999a,
+                0x40fc_20fb_ae14_7ae1,
+                0x0000_0000_0000_0000,
+            ]
+        );
+        // NEGATIVE: the correctly rounded value is not pandas'.
+        let correctly_rounded: f64 = "9.890295358649789".parse().unwrap();
+        assert_ne!(correctly_rounded.to_bits(), 0x4023_c7d4_cb12_5ce4);
+    }
+
+    #[test]
+    fn a_wide_integer_reads_from_its_digits_only_beside_a_fraction() {
+        // A fractional cell sends the whole column through the converter...
+        assert_eq!(
+            column_bits("x\n99999999999999999\n1.5\n"),
+            [0x4376_3457_85d8_a001, 0x3ff8_0000_0000_0000]
+        );
+        // ... a missing value alone casts the integers (pandas: ...a000).
+        assert_eq!(
+            column_bits("x\n12\nNA\n99999999999999999\n"),
+            [
+                0x4028_0000_0000_0000,
+                f64::NAN.to_bits(),
+                0x4376_3457_85d8_a000
+            ]
+        );
+    }
+
+    #[test]
+    fn a_value_past_float64_is_not_a_float() {
+        // pandas: object column ['1e309', '2.5'].
+        let frame = read_csv_str("x\n1e309\n2.5\n").expect("read");
+        let column = frame.column("x").expect("x");
+        assert_eq!(column.dtype(), DType::Utf8);
+        assert_eq!(
+            column.values(),
+            &[Scalar::Utf8("1e309".into()), Scalar::Utf8("2.5".into())]
+        );
+    }
+
+    #[test]
+    fn a_comma_decimal_reads_the_same_way() {
+        let options = CsvReadOptions {
+            delimiter: b';',
+            decimal: b',',
+            ..CsvReadOptions::default()
+        };
+        let frame = read_csv_with_options("x;y\n9,890295358649789;1\n", &options).expect("read");
+        assert_eq!(
+            float_bits(frame.column("x").expect("x")),
+            [0x4023_c7d4_cb12_5ce4]
+        );
     }
 }

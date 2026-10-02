@@ -157,7 +157,7 @@ The diagram above shows the runtime/data-flow crates. The total workspace is **1
 frankenpandas/
 ├── crates/
 │   ├── frankenpandas/    # Unified facade crate with prelude (more than 1,800 lines)
-│   ├── fp-types/         # Scalar, DType (incl. nullable Int64/Float64/boolean), Timestamp, Timedelta, Period, Interval, NanOps (more than 17,000 lines)
+│   ├── fp-types/         # Scalar, DType (incl. nullable Int64/Float64/boolean), Timestamp, Timedelta, Period, Interval, NanOps (more than 20,000 lines)
 │   ├── fp-columnar/      # Column with typed Arc<[f64]>/Arc<[i64]> backings, ValidityMask, vectorized kernels (more than 60,000 lines)
 │   ├── fp-dot-kernel/    # The one crate compiled with +avx2,+fma: f64 dot product and elementwise kernels, runtime-dispatched (more than 1,000 lines)
 │   ├── fp-index/         # Index, MultiIndex, 5 typed variants, alignment planning (more than 33,000 lines)
