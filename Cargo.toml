@@ -27,7 +27,7 @@ members = [
 
 [workspace.package]
 edition = "2024"
-version = "0.3.0"
+version = "0.4.0"
 # The LICENSE file is MIT plus a non-MIT rider on AI-assistant usage, which is
 # not expressible as a standard SPDX expression. The file itself is therefore the
 # license of record; no `license = "MIT"` SPDX field is set (it would understate
@@ -57,7 +57,7 @@ csv = "1.4.0"
 dta = "0.6.0"
 hdf5 = { package = "hdf5-metno", version = "0.12.4" }
 parquet = { version = "60.0.0", default-features = false, features = ["arrow", "snap"] }
-mysql = "28.0.2"
+mysql = "28.0.3"
 memchr = "2.8.3"
 mimalloc = "0.1.52"
 # MUST be the fallible-iterator major that postgres-protocol implements its
@@ -74,7 +74,7 @@ postgres-protocol = "0.6.12"
 # and fatal for `cargo test`: every fp-python test binary failed to link with
 # `undefined symbol: PyGILState_Ensure` and friends, so the whole crate's suite
 # was dark. br-frankenpandas-r18qs, CrimsonPine 2026-08-17.
-pyo3 = { version = "0.29.2" }
+pyo3 = { version = "0.29.3" }
 quick-xml = "0.42"
 regex = "1.13.1"
 rust_xlsxwriter = "0.99.0"

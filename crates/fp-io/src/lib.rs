@@ -10354,6 +10354,7 @@ fn retag_nullable(col: Column, declared: DType) -> Column {
 /// travel in an Arrow / Parquet / Feather file. fp writes and reads it the
 /// same way (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.22).
 const PANDAS_METADATA_KEY: &str = "pandas";
+const LEGACY_ROW_MULTIINDEX_NAMES_METADATA_KEY: &str = "frankenpandas.row_multiindex_names";
 
 /// pandas' (`pandas_type`, `numpy_type`, `metadata`) for a column, as
 /// pyarrow records them - a nullable Int64 is `numpy_type: 'Int64'`, which
@@ -10390,7 +10391,9 @@ fn pandas_column_type(column: &Column) -> (&'static str, &'static str, serde_jso
 /// A frame's columns as pandas lays them out in an Arrow table (pyarrow's
 /// `Table.from_pandas(preserve_index=index)`) and the `pandas` metadata
 /// recording them: the data columns, then each index level as a column - its
-/// name, or `__index_level_N__` when unnamed or taken by a data column. With
+/// name, or an unused `__index_level_N__` field when unnamed or taken by a
+/// data column or another index level. Physical field names are unique even
+/// when logical index names are repeated. With
 /// `index=None` a RangeIndex (fp's, or labels 0..n under no name) travels as
 /// metadata only; `Some(true)` writes it as a column too, `Some(false)` no
 /// index at all. A label index was dropped, and a row MultiIndex travelled as
@@ -10401,9 +10404,20 @@ fn pandas_arrow_layout(
 ) -> Result<(Vec<(String, Column)>, String), IoError> {
     use serde_json::{Value, json};
     let data_names: Vec<String> = frame.column_names().into_iter().cloned().collect();
-    let field_for = |level: usize, name: Option<&str>| match name {
-        Some(name) if !data_names.iter().any(|data| data == name) => name.to_owned(),
-        _ => format!("{SYNTHETIC_ROW_MULTIINDEX_PREFIX}{level}__"),
+    let mut used_fields: std::collections::BTreeSet<String> = data_names.iter().cloned().collect();
+    let mut field_for = |level: usize, name: Option<&str>| {
+        if let Some(name) = name
+            && used_fields.insert(name.to_owned())
+        {
+            return name.to_owned();
+        }
+        let mut field = format!("{SYNTHETIC_ROW_MULTIINDEX_PREFIX}{level}__");
+        let mut suffix = 0_usize;
+        while !used_fields.insert(field.clone()) {
+            suffix += 1;
+            field = format!("{SYNTHETIC_ROW_MULTIINDEX_PREFIX}{level}_{suffix}__");
+        }
+        field
     };
     let level_column = |labels: &[IndexLabel], tz: Option<&str>| -> Result<Column, IoError> {
         let values: Vec<Scalar> = labels.iter().map(index_label_to_scalar_value).collect();
@@ -10477,7 +10491,7 @@ fn pandas_arrow_layout(
         index_columns.push(json!(field));
         columns.push((field, column));
     }
-    let metadata = json!({
+    let mut metadata = json!({
         "index_columns": index_columns,
         "column_indexes": [{
             "name": frame.columns_name(),
@@ -10491,6 +10505,15 @@ fn pandas_arrow_layout(
         "creator": { "library": "frankenpandas", "version": env!("CARGO_PKG_VERSION") },
         "pandas_version": "2.2.3",
     });
+    if frame.row_multiindex().is_some() {
+        // pandas records the logical level names, but fp also exposes a flat
+        // index beside the MultiIndex. Its textual name may be None or differ
+        // from the joined level names; physical storage fields must not leak
+        // into that name on read. Foreign pandas readers ignore this extension.
+        metadata["frankenpandas"] = json!({
+            "row_multiindex_flat_name": frame.index().name(),
+        });
+    }
     Ok((columns, metadata.to_string()))
 }
 
@@ -10529,6 +10552,41 @@ fn dataframe_to_record_batch(
 /// columns (`k`, `__index_level_0__`) over a default 0..n index
 /// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.22). Metadata that
 /// does not match the columns read leaves the frame as read.
+fn apply_arrow_row_index_metadata(
+    frame: DataFrame,
+    pandas: Option<&str>,
+    legacy: Option<&str>,
+) -> Result<DataFrame, IoError> {
+    if let Some(raw) = pandas {
+        return apply_pandas_metadata(frame, raw);
+    }
+    let Some(raw) = legacy else {
+        return Ok(frame);
+    };
+    // v0.3.0 wrote these declared levels first and recorded their logical
+    // names under this private key. Synthetic-looking data names alone do
+    // not identify an index, and undeclared trailing fields remain data.
+    let names: Vec<Option<String>> = serde_json::from_str(raw)
+        .map_err(|error| IoError::Arrow(format!("invalid legacy MultiIndex names: {error}")))?;
+    let fields: Vec<String> = (0..names.len())
+        .map(|level| format!("__index_level_{level}__"))
+        .collect();
+    let actual_fields = frame.column_names();
+    if names.len() < 2
+        || names.len() > actual_fields.len()
+        || fields.iter().zip(&actual_fields).any(|(expected, actual)| {
+            expected != actual.as_str() || frame.column_occurrences(expected) != 1
+        })
+    {
+        return Err(IoError::Arrow(
+            "legacy MultiIndex metadata does not match its leading index fields".to_owned(),
+        ));
+    }
+    let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
+    let restored = promote_frame_index_columns(&frame, &fields)?;
+    restore_row_multiindex_names(restored, &names)
+}
+
 fn apply_pandas_metadata(frame: DataFrame, raw: &str) -> Result<DataFrame, IoError> {
     use serde_json::Value;
     let Ok(meta) = serde_json::from_str::<Value>(raw) else {
@@ -10580,7 +10638,35 @@ fn apply_pandas_metadata(frame: DataFrame, raw: &str) -> Result<DataFrame, IoErr
                 let renamed = frame.index().rename_index(name.as_deref());
                 frame.with_index(renamed)?
             }
-            _ => restore_row_multiindex_names(frame, &names)?,
+            _ => {
+                let flat_name = match meta
+                    .get("frankenpandas")
+                    .and_then(|fp| fp.get("row_multiindex_flat_name"))
+                {
+                    Some(Value::Null) => None,
+                    Some(Value::String(name)) => Some(name.clone()),
+                    _ => Some(
+                        names
+                            .iter()
+                            .map(|name| name.as_deref().unwrap_or_default())
+                            .collect::<Vec<_>>()
+                            .join("|"),
+                    ),
+                };
+                let restored = restore_row_multiindex_names(frame, &names)?;
+                if restored.index().name().map(|name| name.as_str()) == flat_name.as_deref() {
+                    restored
+                } else if let Some(row_multiindex) = restored.row_multiindex().cloned() {
+                    // with_index replaces the row axis, so reattach its logical
+                    // MultiIndex after restoring the independent flat name.
+                    let renamed = restored.index().rename_index(flat_name.as_deref());
+                    restored
+                        .with_index(renamed)?
+                        .with_row_multiindex(row_multiindex)?
+                } else {
+                    restored
+                }
+            }
         };
     } else if let [range] = descriptors.as_slice()
         && range["kind"].as_str() == Some("range")
@@ -11274,6 +11360,66 @@ pub fn read_parquet_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
         .key_value_metadata()
         .and_then(|pairs| pairs.iter().find(|pair| pair.key == PANDAS_METADATA_KEY))
         .and_then(|pair| pair.value.clone());
+    let legacy_metadata = if pandas_metadata.is_none() {
+        let file_entries: Vec<_> = builder
+            .metadata()
+            .file_metadata()
+            .key_value_metadata()
+            .into_iter()
+            .flatten()
+            .filter(|pair| pair.key == LEGACY_ROW_MULTIINDEX_NAMES_METADATA_KEY)
+            .collect();
+        let file_value = match file_entries.as_slice() {
+            [] => None,
+            [entry] => Some(entry.value.clone().ok_or_else(|| {
+                IoError::Parquet("legacy MultiIndex metadata has no value".to_owned())
+            })?),
+            _ => {
+                return Err(IoError::Parquet(
+                    "duplicate legacy MultiIndex metadata".to_owned(),
+                ));
+            }
+        };
+        let schema_value = if file_value.is_some() {
+            // The builder's schema merges file metadata over embedded Arrow
+            // metadata. Remove only the legacy file key before using the stock
+            // schema converter so a disagreement remains observable.
+            let embedded_metadata: Vec<_> = builder
+                .metadata()
+                .file_metadata()
+                .key_value_metadata()
+                .into_iter()
+                .flatten()
+                .filter(|pair| pair.key != LEGACY_ROW_MULTIINDEX_NAMES_METADATA_KEY)
+                .cloned()
+                .collect();
+            let embedded_schema = parquet::arrow::parquet_to_arrow_schema(
+                builder.parquet_schema(),
+                Some(&embedded_metadata),
+            )
+            .map_err(|error| IoError::Parquet(error.to_string()))?;
+            embedded_schema
+                .metadata()
+                .get(LEGACY_ROW_MULTIINDEX_NAMES_METADATA_KEY)
+                .cloned()
+        } else {
+            builder
+                .schema()
+                .metadata()
+                .get(LEGACY_ROW_MULTIINDEX_NAMES_METADATA_KEY)
+                .cloned()
+        };
+        if let (Some(file), Some(schema)) = (&file_value, &schema_value)
+            && file != schema
+        {
+            return Err(IoError::Parquet(
+                "conflicting legacy MultiIndex metadata".to_owned(),
+            ));
+        }
+        file_value.or(schema_value)
+    } else {
+        None
+    };
     let batch_size = total_rows.clamp(1, 16 * 1024 * 1024);
     let reader = builder
         .with_batch_size(batch_size)
@@ -11306,10 +11452,11 @@ pub fn read_parquet_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
         let refs: Vec<&DataFrame> = all_frames.iter().collect();
         fp_frame::concat_dataframes(&refs)?
     };
-    match pandas_metadata {
-        Some(raw) => apply_pandas_metadata(frame, &raw),
-        None => Ok(frame),
-    }
+    apply_arrow_row_index_metadata(
+        frame,
+        pandas_metadata.as_deref(),
+        legacy_metadata.as_deref(),
+    )
 }
 
 /// Write a DataFrame to a Parquet file.
@@ -11414,8 +11561,8 @@ fn excel_range_rows(
 }
 
 /// Convert a calamine `Data` cell value to a `Scalar`.
-fn excel_cell_to_scalar(cell: &calamine::Data) -> Scalar {
-    match cell {
+fn excel_cell_to_scalar(cell: &calamine::Data) -> Result<Scalar, IoError> {
+    Ok(match cell {
         calamine::Data::Int(v) => Scalar::Int64(*v),
         calamine::Data::Float(v) => {
             if v.is_nan() {
@@ -11442,11 +11589,23 @@ fn excel_cell_to_scalar(cell: &calamine::Data) -> Scalar {
         // ("45293.1278..."). (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.20)
         calamine::Data::DateTime(dt) if dt.is_duration() => {
             let millis = (dt.as_f64() * 86_400_000.0).round();
-            if millis.is_finite() && millis.abs() < 9.2e15 {
-                Scalar::Timedelta64(millis as i64 * 1_000_000)
-            } else {
-                Scalar::Null(NullKind::NaT)
+            let min_millis = (i64::MIN / 1_000_000) as f64;
+            let max_millis = (i64::MAX / 1_000_000) as f64;
+            let out_of_range = || {
+                IoError::Excel(format!(
+                    "Excel duration {} days is outside timedelta64[ns] range at millisecond precision",
+                    dt.as_f64()
+                ))
+            };
+            // These millisecond bounds are exact f64 integers (below 2^53).
+            // Check before casting; never saturate, wrap, or replace a value by NaT.
+            if !millis.is_finite() || millis < min_millis || millis > max_millis {
+                return Err(out_of_range());
             }
+            let nanos = (millis as i64)
+                .checked_mul(1_000_000)
+                .ok_or_else(out_of_range)?;
+            Scalar::Timedelta64(nanos)
         }
         calamine::Data::DateTime(dt) => {
             excel_datetime_to_epoch_ns(dt).map_or(Scalar::Null(NullKind::NaT), Scalar::Datetime64)
@@ -11454,7 +11613,7 @@ fn excel_cell_to_scalar(cell: &calamine::Data) -> Scalar {
         calamine::Data::DateTimeIso(s) => Scalar::Utf8(s.clone()),
         calamine::Data::DurationIso(s) => Scalar::Utf8(s.clone()),
         calamine::Data::Error(e) => Scalar::Utf8(format!("#ERROR:{e:?}")),
-    }
+    })
 }
 
 /// Convert a Scalar to an IndexLabel, handling float precision correctly.
@@ -11477,8 +11636,8 @@ fn scalar_to_index_label(scalar: Scalar) -> IndexLabel {
 /// number/bool/date by its value (pandas keeps e.g. 2020 as the label; fp
 /// labels are strings, so "2020"), and an empty cell `Unnamed: {position}`.
 /// The flag marks a generated name (no index name when it becomes the index).
-fn excel_header_name(cell: &calamine::Data, position: usize) -> (String, bool) {
-    match excel_cell_to_scalar(cell) {
+fn excel_header_name(cell: &calamine::Data, position: usize) -> Result<(String, bool), IoError> {
+    Ok(match excel_cell_to_scalar(cell)? {
         Scalar::Utf8(text) => (text, false),
         Scalar::Null(_) => (format!("Unnamed: {position}"), true),
         Scalar::Int64(v) => (v.to_string(), false),
@@ -11486,7 +11645,7 @@ fn excel_header_name(cell: &calamine::Data, position: usize) -> (String, bool) {
         Scalar::Bool(v) => ((if v { "True" } else { "False" }).to_owned(), false),
         Scalar::Datetime64(ns) => (format_datetime_ns(ns), false),
         other => (other.to_string(), false),
-    }
+    })
 }
 
 /// Shared parsing logic for Excel data after extracting rows from a workbook.
@@ -11528,7 +11687,7 @@ fn parse_excel_rows(
                 .iter()
                 .enumerate()
                 .map(|(i, cell)| excel_header_name(cell, i))
-                .collect();
+                .collect::<Result<Vec<_>, IoError>>()?;
             let (mut headers, generated): (Vec<String>, Vec<bool>) =
                 header_pairs.into_iter().unzip();
             // Repeated names are renamed as pandas' readers do (4qg5w.21).
@@ -11565,7 +11724,7 @@ fn parse_excel_rows(
     for row in data_rows {
         for (col_idx, col_vec) in columns.iter_mut().enumerate() {
             let cell = row.get(col_idx).unwrap_or(&calamine::Data::Empty);
-            col_vec.push(excel_cell_to_scalar(cell));
+            col_vec.push(excel_cell_to_scalar(cell)?);
         }
     }
 
@@ -11650,9 +11809,9 @@ fn parse_excel_rows(
             .iter()
             .map(|row| {
                 let cell = row.get(idx_pos).unwrap_or(&calamine::Data::Empty);
-                scalar_to_index_label(excel_cell_to_scalar(cell))
+                excel_cell_to_scalar(cell).map(scalar_to_index_label)
             })
-            .collect();
+            .collect::<Result<Vec<_>, IoError>>()?;
         Index::new(idx_labels).set_names(index_name.as_deref())
     } else {
         Index::default_range(data_rows.len())
@@ -12345,6 +12504,11 @@ pub fn read_feather_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
     let cursor = std::io::Cursor::new(data);
     let reader = FileReader::try_new(cursor, None).map_err(|e| IoError::Arrow(e.to_string()))?;
     let pandas_metadata = reader.schema().metadata().get(PANDAS_METADATA_KEY).cloned();
+    let legacy_metadata = reader
+        .schema()
+        .metadata()
+        .get(LEGACY_ROW_MULTIINDEX_NAMES_METADATA_KEY)
+        .cloned();
 
     let mut all_frames: Vec<DataFrame> = Vec::new();
     for batch_result in reader {
@@ -12368,10 +12532,11 @@ pub fn read_feather_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
         let refs: Vec<&DataFrame> = all_frames.iter().collect();
         fp_frame::concat_dataframes(&refs)?
     };
-    match pandas_metadata {
-        Some(raw) => apply_pandas_metadata(frame, &raw),
-        None => Ok(frame),
-    }
+    apply_arrow_row_index_metadata(
+        frame,
+        pandas_metadata.as_deref(),
+        legacy_metadata.as_deref(),
+    )
 }
 
 /// Write a DataFrame to an Arrow IPC (Feather v2) file.
@@ -12445,6 +12610,11 @@ pub fn read_ipc_stream_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
     let cursor = std::io::Cursor::new(data);
     let reader = StreamReader::try_new(cursor, None).map_err(|e| IoError::Arrow(e.to_string()))?;
     let pandas_metadata = reader.schema().metadata().get(PANDAS_METADATA_KEY).cloned();
+    let legacy_metadata = reader
+        .schema()
+        .metadata()
+        .get(LEGACY_ROW_MULTIINDEX_NAMES_METADATA_KEY)
+        .cloned();
 
     let mut all_frames: Vec<DataFrame> = Vec::new();
     for batch_result in reader {
@@ -12468,10 +12638,11 @@ pub fn read_ipc_stream_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
         let refs: Vec<&DataFrame> = all_frames.iter().collect();
         fp_frame::concat_dataframes(&refs)?
     };
-    match pandas_metadata {
-        Some(raw) => apply_pandas_metadata(frame, &raw),
-        None => Ok(frame),
-    }
+    apply_arrow_row_index_metadata(
+        frame,
+        pandas_metadata.as_deref(),
+        legacy_metadata.as_deref(),
+    )
 }
 
 // ── SQL I/O ─────────────────────────────────────────────────────────────

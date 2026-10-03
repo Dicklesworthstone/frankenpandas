@@ -6588,12 +6588,37 @@ fn scalar_to_py(py: Python<'_>, scalar: &Scalar) -> PyResult<Py<PyAny>> {
 /// a list refuses it itself (`fillna([1, 2])` raises as pandas does). They
 /// raised "Cannot convert list to Scalar".
 fn py_to_cell(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
+    py_to_cell_with_ancestors(py, obj, &mut Vec::new())
+}
+
+const MAX_LIST_CELL_DEPTH: usize = 128;
+
+/// List cells are copied recursively, so reject cycles by identity on the
+/// active path and bound its depth. A shared acyclic sublist remains valid.
+fn py_to_cell_with_ancestors<'py>(
+    py: Python<'_>,
+    obj: &Bound<'py, PyAny>,
+    ancestors: &mut Vec<Bound<'py, PyAny>>,
+) -> PyResult<Scalar> {
     if let Ok(list) = obj.cast::<PyList>() {
+        if ancestors.iter().any(|ancestor| ancestor.is(obj)) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "cyclic list cells are not supported",
+            ));
+        }
+        if ancestors.len() >= MAX_LIST_CELL_DEPTH {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "list cell nesting exceeds {MAX_LIST_CELL_DEPTH} levels"
+            )));
+        }
+        ancestors.push(obj.clone());
         let items = list
             .iter()
-            .map(|item| py_to_cell(py, &item))
-            .collect::<PyResult<Vec<_>>>()?;
-        return Ok(Scalar::Object(fp_types::ObjectValue::list(items)));
+            .map(|item| py_to_cell_with_ancestors(py, &item, ancestors))
+            .collect::<PyResult<Vec<_>>>();
+        // Restore the path before propagating a child conversion error.
+        ancestors.pop();
+        return Ok(Scalar::Object(fp_types::ObjectValue::list(items?)));
     }
     // bytes are a bytes cell the core reads (they were a host object, so
     // every kernel over them ran single-threaded under the GIL; 4qg5w.8).
@@ -42890,6 +42915,8 @@ impl PyDataFrame {
     /// (br-frankenpandas-n57tz).
     /// `@name` references resolve as pandas' (see [`resolve_expr_locals`]);
     /// every engine / parser pandas takes gives the same rows here.
+    /// Expressions must be trusted input: the Python fallback can call methods
+    /// and builtins with side effects. Engine/parser selection is not a sandbox.
     #[pyo3(signature = (expr, inplace=false, local_dict=None, global_dict=None, level=0, engine=None, parser=None))]
     #[allow(clippy::too_many_arguments)]
     fn query(
@@ -42962,6 +42989,8 @@ impl PyDataFrame {
     /// pandas' `inplace=True` an assignment (`c = a + b`) adds the column to
     /// this frame and returns None; without one it is pandas' ValueError
     /// (br-frankenpandas-n57tz).
+    /// Expressions must be trusted input: the Python fallback can call methods
+    /// and builtins with side effects. Engine/parser selection is not a sandbox.
     #[pyo3(signature = (expr, inplace=false, local_dict=None, global_dict=None, level=0, engine=None, parser=None))]
     #[allow(clippy::too_many_arguments)]
     fn eval(

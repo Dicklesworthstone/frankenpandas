@@ -28,6 +28,7 @@ publish its ed25519 public key below.
 | `cc-pandas` | Claude Code (this agent) | Review-mode audits, implementation of HIGH/MEDIUM beads, session handoffs. |
 | `cod-pandas` | Codex (OpenAI o-series) | Large refactors (lxhr monolith split, SQL backend epic slices), conformance gate work. |
 | `Clawdstein-libupdater-frankenpandas` | Claude Code specializing in dependency sweeps | Library-updater runs, asupersync bumps. |
+| `cod-pandas-release-W4` | Codex release worker | Release qualification, dependency gates, and signed release tags. |
 
 Additional agents (`cmi`, review agents, etc.) join temporarily via
 the NTM swarm orchestrator; their commits carry `Co-Authored-By:`
@@ -35,16 +36,16 @@ footers attributing the specific model variant.
 
 ### Signing key fingerprints
 
-*(Populated once br-frankenpandas-3d5q policy decision is made and
-the maintainer + each agent publishes an SSH signing key. Until then,
-commit-signature verification is absent — this is tracked under
-3d5q itself.)*
+The release worker's key is recorded below for explicit local verification.
+Other identity keys and GitHub registration remain pending under
+br-frankenpandas-3d5q; do not infer verification for those identities.
 
 | Identity | SSH key fingerprint | Notes |
 |----------|--------------------|-------|
-| Jeffrey Emanuel | *(pending)* | Primary human maintainer; required for release tags. |
+| Jeffrey Emanuel | *(pending)* | Primary human maintainer's signing key. |
 | cc-pandas | *(pending)* | Per-session key; rotated on account changes. |
 | cod-pandas | *(pending)* | Codex-identity key; separate per-session. |
+| cod-pandas-release-W4 | `SHA256:WjIbFn7vI825B3mtgATqM+mNQptwLWsr6PTLRE494+k` | Release signing key created 2026-10-03. GitHub signing-key registration is pending; verify local signatures against this fingerprint. |
 
 ## How to contribute
 

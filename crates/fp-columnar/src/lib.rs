@@ -66705,8 +66705,9 @@ mod floordiv_mod_f64_pandas_special_value_lock {
     /// s = pd.Series([466, -7, 0]) and b = pd.Series([True, False, True]).
     #[test]
     fn int_bool_floordiv_and_mod_match_pandas_without_panicking() {
-        use crate::Column;
         use fp_types::{DType, Scalar};
+
+        use crate::Column;
 
         let ints = |v: &[i64]| {
             Column::new(DType::Int64, v.iter().map(|x| Scalar::Int64(*x)).collect()).unwrap()
@@ -66720,7 +66721,10 @@ mod floordiv_mod_f64_pandas_special_value_lock {
         // s // True -> int64 [466, -7, 0]
         assert_eq!(
             dtype_and_values(s.floordiv(&bools(&[true, true, true])).unwrap()),
-            (DType::Int64, vec![Scalar::Int64(466), Scalar::Int64(-7), Scalar::Int64(0)])
+            (
+                DType::Int64,
+                vec![Scalar::Int64(466), Scalar::Int64(-7), Scalar::Int64(0)]
+            )
         );
         // s % True -> int64 [0, 0, 0]
         assert_eq!(
@@ -66758,7 +66762,10 @@ mod floordiv_mod_f64_pandas_special_value_lock {
         );
         assert_eq!(
             dtype_and_values(b.r#mod(&ints(&[2, 3, 4])).unwrap()),
-            (DType::Int64, vec![Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(1)])
+            (
+                DType::Int64,
+                vec![Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(1)]
+            )
         );
         // bool % int with a zero divisor -> float64 [1.0, nan, 1.0]
         let bz = b.r#mod(&ints(&[2, 0, 4])).unwrap();
@@ -67185,8 +67192,9 @@ mod floordiv_mod_f64_pandas_special_value_lock {
 /// live pandas 2.2.3.
 #[cfg(test)]
 mod numeric_width_columns_fvsao23 {
-    use super::{Column, ColumnError};
     use fp_types::{DType, NumericWidth, Scalar};
+
+    use super::{Column, ColumnError};
 
     fn ints(values: &[i64]) -> Column {
         Column::from_i64_values(values.to_vec())
@@ -67386,8 +67394,9 @@ mod numeric_width_columns_fvsao23 {
 /// marker and what ends it.
 #[cfg(test)]
 mod pandas_string_columns_fvsao59 {
-    use super::Column;
     use fp_types::{DType, NullKind, Scalar};
+
+    use super::Column;
 
     fn text(values: &[Option<&str>]) -> Column {
         Column::new(

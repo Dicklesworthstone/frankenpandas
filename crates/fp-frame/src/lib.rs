@@ -31567,9 +31567,11 @@ impl Series {
 
     /// [`Self::category_codes`] as an Int64 column (-1 where missing).
     fn category_codes_column(&self) -> Result<Column, FrameError> {
-        self.category_codes().map(Column::from_i64_values).ok_or_else(|| {
-            FrameError::CompatibilityRejected("the Series is not categorical".to_owned())
-        })
+        self.category_codes()
+            .map(Column::from_i64_values)
+            .ok_or_else(|| {
+                FrameError::CompatibilityRejected("the Series is not categorical".to_owned())
+            })
     }
 
     /// A categorical Series whose row `i` is category `codes[i]` of `meta`
@@ -69198,7 +69200,6 @@ type ColumnOrderNames = LazyDataFrameColumnOrder;
 type ColumnOrderNames = Vec<String>;
 
 type DataFrameColumnOrderStore = ColumnAxis;
-
 
 /// The storage keys of the columns under a column MultiIndex given as one
 /// label list per level: each column's [`column_key`]s joined with '_', as
@@ -118485,8 +118486,16 @@ mod tests {
         };
 
         let sum = df.sum_with_numeric_only(false).expect("sum");
-        assert_eq!(at(&sum, "b"), Scalar::Int64(2), "bool sums to its True count");
-        assert_eq!(at(&sum, "label"), Scalar::Utf8("xyz".into()), "object still concatenates");
+        assert_eq!(
+            at(&sum, "b"),
+            Scalar::Int64(2),
+            "bool sums to its True count"
+        );
+        assert_eq!(
+            at(&sum, "label"),
+            Scalar::Utf8("xyz".into()),
+            "object still concatenates"
+        );
 
         let min = df.min_agg_with_numeric_only(false).expect("min");
         assert_eq!(at(&min, "b"), Scalar::Bool(false));
@@ -133811,8 +133820,9 @@ mod tests {
 
     #[test]
     fn to_datetime_reads_a_bare_year_and_text_month_times_fvsao_35() {
-        use crate::{DatetimeErrors, ToDatetimeOptions, to_datetime_values_with_options};
         use fp_types::Timestamp;
+
+        use crate::{DatetimeErrors, ToDatetimeOptions, to_datetime_values_with_options};
         let read = |text: &str| {
             to_datetime_values_with_options(
                 &[Scalar::Utf8(text.to_owned())],
@@ -154878,14 +154888,21 @@ mod tests {
 
         for shifted in [
             df.shift(1).unwrap(),
-            df.shift_with_fill_value(1, Scalar::Null(NullKind::Null)).unwrap(),
+            df.shift_with_fill_value(1, Scalar::Null(NullKind::Null))
+                .unwrap(),
         ] {
             let k = shifted.column("k").unwrap().values().to_vec();
             assert!(k[0].is_missing(), "object column vacated slot is missing");
-            assert_eq!(&k[1..], &[Scalar::Utf8("x".into()), Scalar::Utf8("y".into())]);
+            assert_eq!(
+                &k[1..],
+                &[Scalar::Utf8("x".into()), Scalar::Utf8("y".into())]
+            );
             let t = shifted.column("t").unwrap().values().to_vec();
             assert!(t[0].is_missing(), "datetime column vacated slot is NaT");
-            assert_eq!(&t[1..], &[Scalar::Datetime64(t0), Scalar::Datetime64(t0 + day)]);
+            assert_eq!(
+                &t[1..],
+                &[Scalar::Datetime64(t0), Scalar::Datetime64(t0 + day)]
+            );
             let a = shifted.column("a").unwrap().values().to_vec();
             assert!(a[0].is_missing());
         }
@@ -167157,7 +167174,11 @@ mod tests {
         let utf8 = |s: &str| Scalar::Utf8(s.to_owned());
         let plain = Series::from_values(
             "s",
-            vec![IndexLabel::Int64(10), IndexLabel::Int64(20), IndexLabel::Int64(30)],
+            vec![
+                IndexLabel::Int64(10),
+                IndexLabel::Int64(20),
+                IndexLabel::Int64(30),
+            ],
             vec![utf8("b"), utf8("a"), utf8("b")],
         )
         .unwrap();
@@ -167187,12 +167208,20 @@ mod tests {
             Series::from_categorical_codes("e", vec![1, 0], vec![utf8("z"), utf8("a")], false)
                 .unwrap();
         assert_eq!(
-            explicit.astype(DType::Categorical).unwrap().cat().unwrap().categories(),
+            explicit
+                .astype(DType::Categorical)
+                .unwrap()
+                .cat()
+                .unwrap()
+                .categories(),
             [utf8("z"), utf8("a")]
         );
         // NEGATIVE: a plain column is not categorical and has no accessor.
         assert!(plain.cat().is_none());
-        assert_eq!(plain.eq_scalar(&utf8("b")).unwrap().values()[1], Scalar::Bool(false));
+        assert_eq!(
+            plain.eq_scalar(&utf8("b")).unwrap().values()[1],
+            Scalar::Bool(false)
+        );
     }
 
     #[test]
@@ -178149,7 +178178,11 @@ mod tests {
         // index, and non-string labels are untouched.
         let dates = Series::from_values(
             "d",
-            vec!["2024-01-01".into(), "2024-01-02".into(), "2024-01-03".into()],
+            vec![
+                "2024-01-01".into(),
+                "2024-01-02".into(),
+                "2024-01-03".into(),
+            ],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -224829,7 +224862,10 @@ mod test_groupby_idxmin_idxmax_utf8_e9aba4 {
         // Result is per-group; the group axis is 0 then 1. Each value is the
         // original index label with its own type. GOLDEN-CHANGE (fvsao.4): it was
         // the label stringified ("1"); pandas 2.2.3 returns the int64 label.
-        assert_eq!(result.values().to_vec(), vec![Scalar::Int64(1), Scalar::Int64(3)]);
+        assert_eq!(
+            result.values().to_vec(),
+            vec![Scalar::Int64(1), Scalar::Int64(3)]
+        );
     }
 
     #[test]
@@ -224841,7 +224877,10 @@ mod test_groupby_idxmin_idxmax_utf8_e9aba4 {
         // group 0: ["banana", "apple"] -> max "banana" at idx 0
         // group 1: ["cherry", "ant"]   -> max "cherry" at idx 2
         // GOLDEN-CHANGE (fvsao.4): int64 labels, not "0"/"2".
-        assert_eq!(result.values().to_vec(), vec![Scalar::Int64(0), Scalar::Int64(2)]);
+        assert_eq!(
+            result.values().to_vec(),
+            vec![Scalar::Int64(0), Scalar::Int64(2)]
+        );
     }
 
     #[test]
@@ -224854,7 +224893,10 @@ mod test_groupby_idxmin_idxmax_utf8_e9aba4 {
         // group 0: [10, 5] -> min 5 at idx 1
         // group 1: [30, 20] -> min 20 at idx 3
         // GOLDEN-CHANGE (fvsao.4): int64 labels, not "1"/"3".
-        assert_eq!(result.values().to_vec(), vec![Scalar::Int64(1), Scalar::Int64(3)]);
+        assert_eq!(
+            result.values().to_vec(),
+            vec![Scalar::Int64(1), Scalar::Int64(3)]
+        );
     }
 
     #[test]
@@ -224936,7 +224978,11 @@ mod test_groupby_idxmin_idxmax_utf8_e9aba4 {
         let gb = series.groupby(&groups).expect("groupby ok");
         let result = gb.idxmin().expect("idxmin ok");
         // GOLDEN-CHANGE (fvsao.4): the int64 label of "ant", not "2".
-        assert_eq!(result.values()[0], Scalar::Int64(2), "expected idx of \"ant\"");
+        assert_eq!(
+            result.values()[0],
+            Scalar::Int64(2),
+            "expected idx of \"ant\""
+        );
     }
 }
 

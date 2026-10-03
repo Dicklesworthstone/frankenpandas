@@ -539,6 +539,13 @@ Grammar (simplified):
 
 The parser produces an `Expr` AST that the evaluator walks, resolving column references against the DataFrame's `EvalContext`. Local variables (prefixed with `@`) are broadcast to Series of the appropriate length. Column names with spaces or special characters can be referenced via backticks. Chained comparisons (`a < b < c`) parse to the pandas-style pairwise AND form (`(a < b) and (b < c)`). The entire pipeline (parse, resolve, evaluate, filter) happens in a single call with no temporary DataFrames.
 
+In the Python binding, `DataFrame.eval()` and `DataFrame.query()` can fall back to
+Python evaluation for pandas-compatible expressions that the Rust parser does
+not handle. Supply trusted expressions only: method calls and Python builtins
+can perform file IO and other side effects. The `engine` and `parser` arguments
+do not create a security sandbox. This fallback does not apply to the Rust
+`fp-expr` API described above.
+
 ### Bayesian Runtime Policy
 
 The runtime distinguishes between **strict mode** (fail on any ambiguity) and **hardened mode** (log and attempt repair). The decision between Allow, Reject, and Repair uses Bayesian expected-loss minimization:
@@ -1778,6 +1785,7 @@ Uses a deterministic LCG (Linear Congruential Generator) with Fisher-Yates shuff
 | Limitation | Status | Workaround |
 |-----------|--------|------------|
 | Python bindings (`fp-python`) are not yet a drop-in replacement | The binding exposes pandas' top-level names and the core class method surface with `frankenpandas.pyi` stubs and maturin wheel builds, but that coverage is counted by name: many members are partial, some keyword arguments raise `NotImplementedError`, and behavioral parity is established case by case in the differential pytest suite. IO runs natively (no pandas import); surfaces without a backend (HDF5, SPSS, GBQ, ORC, multi-sheet `ExcelWriter`, `to_clipboard`) raise `NotImplementedError` | Build with `maturin build -m crates/fp-python/Cargo.toml`; check the operations you rely on against pandas before swapping `import pandas as pd` |
+| Python list-cell conversion is bounded | Cyclic nested list cells and list cells nested deeper than 128 list levels raise `ValueError`; repeated acyclic sublists remain accepted | Supply acyclic list cells with at most 128 nested list levels |
 | SQL has three bundled backends (`rusqlite` by default, `mysql` behind `sql-mysql`, `postgres` behind `sql-postgresql`) | The generic `SqlConnection` trait + `SqlInspector` is feature-complete with bundled SQLite, MySQL, and pure synchronous Tokio-free PostgreSQL adapters | Use SQLite, MySQL, or PostgreSQL (`PostgresConnection`), or implement `SqlConnection` for another backend |
 | Parallelism is hand-rolled, not pooled | Hot paths fan out with `std::thread::scope` (144 occurrences across 8 files under `crates/*/src`, measured 2026-09-28) and one persistent worker pool serves string kernels; there is no rayon and no global pool, so each parallel call pays a thread-spawn cost — 203–1,011 µs for the fan-out pattern itself versus 19–98 µs for a persistent pool in the fp-columnar/src/parallel_pool.rs harness (the header documents that this overstates live per-call cost), which is the main structural loss at 100k-row sizes | Set `FP_ELEMENTWISE_PAR_MIN` / `FP_*_MAX_WORKERS` to tune thresholds; a shared pool is the tracked fix |
 | Native plot rendering | `DataFrame::plot` / `hist` / `boxplot`, `Series::plot` / `hist`, and GroupBy plotting hooks return backend-neutral `PlotSpec` / `HistogramSpec` / `BoxPlotSpec` data, with a built-in deterministic SVG/HTML renderer (`to_svg()`, `to_html()`, `save()`, `*_to_svg()`, `*_to_html()`, `*_to_file()`) supporting 11 plot kinds (line, bar, barh, hist, box, kde, density, area, pie, scatter, hexbin); standalone rasterized PNG remains deferred | Use built-in SVG/HTML export directly, or feed specs to an external renderer |
@@ -1803,6 +1811,13 @@ A: No. Every crate in the workspace uses `#![forbid(unsafe_code)]`. Memory safet
 
 **Q: How do I use this from Python?**
 A: Partly. A PyO3 binding crate (`crates/fp-python`) exposes pandas' top-level names and the core class methods by name, and a differential pytest suite checks behavior against pandas 2.2.3 case by case; it is not yet a drop-in replacement (see Limitations). Build and install the wheel with `maturin build --release -m crates/fp-python/Cargo.toml && pip install target/wheels/*.whl`, then use `import frankenpandas as pd`.
+
+Source wheel builds require the pinned `nightly-2026-08-31` toolchain. The x86-64
+release profile enables SSE4.1 in `fp-columnar`, so its wheels require an SSE4.1
+CPU. A manylinux tag describes the glibc baseline; it does not remove that CPU
+requirement. The initial PyPI packaging qualification targets CPython 3.13 on
+Linux x86-64 and a source distribution. Other prebuilt wheel platforms and
+interpreter versions remain unqualified.
 
 **Q: What's the `EvidenceLedger`?**
 A: Every alignment decision, dtype coercion, and policy override is logged with Bayesian confidence scores and the evidence terms (log-likelihood ratios) that drove each decision. This creates an auditable trail of exactly how your data was transformed. pandas makes these same decisions silently with no record.
@@ -1836,10 +1851,10 @@ A: As of 2026-09-24 the tracker holds about 4,100 beads, of which 79 are open. M
 | Priority | Feature | Status |
 |----------|---------|--------|
 | Done | Release to crates.io | 0.3.0 was published on 2026-09-12 (`frankenpandas`, `fp-*`); the `v0.3.0` tag carries an SSH signature |
-| High | Verifiable signed releases | The signing-key fingerprints in `AUTHORS.md` are still pending, so the `v0.3.0` signature cannot be checked against a published key; cut the next release from a green CI batch |
-| In progress | Python packaging for `fp-python` | `pyproject.toml` + maturin wheel builds for Linux, macOS, and Windows, each native leg smoke-testing its wheel; `frankenpandas.pyi` type stubs; differential pytest harness. No PyPI release yet, and the binding is not yet a drop-in replacement (see Limitations) |
+| High | Verifiable signed releases | `AUTHORS.md` records the W4 release-worker fingerprint for local signature verification; GitHub signing-key registration and other identity keys remain pending. Qualify the next release through pinned RCH gates and native DSR artifact builds. |
+| In progress | Python packaging for `fp-python` | Version 0.4.0 targets a Linux x86-64 / CPython 3.13 wheel and pinned-toolchain source distribution; other prebuilt platforms remain unqualified. `frankenpandas.pyi` type stubs and differential pytest harness are included. Check the published release and PyPI for availability; the binding is not yet a drop-in replacement (see Limitations) |
 | Done | Tokio-free PostgreSQL `SqlConnection` adapter | `PostgresConnection` behind `sql-postgresql` with pure synchronous wire protocol and live-server integration tests |
-| Done | MySQL `SqlConnection` adapter | `MysqlConnection` behind `sql-mysql` (no live-server integration test yet) |
+| Done | MySQL `SqlConnection` adapter | `MysqlConnection` behind `sql-mysql`; release qualification includes 38 live MySQL 8.4.11 checks covering prepared-cache eviction, Unicode/nulls, transactions and dataframe writes. TLS and other platforms remain unqualified. |
 | Medium | Rust constructor spelling of ints with a missing value (DISC-011) | Every observable path promotes as pandas; the Rust constructors' `Int64` holding a missing value is the open decision, taken with the harness and the fixtures that pin it (br-frankenpandas-ih6ho) |
 | Medium | Shared thread pool | Replace per-call `thread::scope` fan-out (144 occurrences across 8 files) with one pool; the spawn cost is the dominant loss at 100k rows |
 | Done | Native deterministic SVG/HTML plotting renderer | Zero-dependency pure safe-Rust SVG/HTML renderer in `fp-frame` supporting line, bar, barh, hist, box, kde, density, area, pie, scatter, hexbin across DataFrame, Series, and GroupBy |
@@ -2787,10 +2802,10 @@ Some IO formats have unusual gotchas worth knowing up-front:
 
 **Pickle / Stata / HDF5** are round-trip-tested but use simpler implementations than pandas. **ORC** is a retained API surface that fails closed until a Tokio-free native backend lands:
 
-- **Pickle** writes a real pickle stream through `serde-pickle` (protocol 2 or 3, selectable), but the payload is a FrankenPandas envelope (a tagged split-orient JSON object), not a pickled pandas `DataFrame`. Round-trip works *within* FrankenPandas; `pandas.read_pickle` on the file yields a dict, and `read_pickle_bytes` refuses foreign pickles.
+- **Pickle** writes a real pickle stream through `serde-pickle` (protocol 2 or 3, selectable), but the payload is a FrankenPandas envelope (a tagged split-orient JSON object), not a pickled pandas `DataFrame`. `pandas.read_pickle` on the file yields a dict, and `read_pickle_bytes` refuses foreign pickles. The envelope currently reuses JSON Split inference: nullable numeric/bool columns become Float64 and their null markers become NaN. Exact nullable dtype and null-kind round trips remain an existing limitation tracked in [#40](https://github.com/Dicklesworthstone/frankenpandas/issues/40).
 - **Stata** supports the common `.dta` formats (114–119); exotic Stata 11 / 12 / 13 features are not implemented.
 - **ORC** previously rode on `orc-rust`, which pulled Tokio into the workspace. The `read_orc*` / `write_orc*` functions now return a deterministic policy error until a no-Tokio backend replaces it.
-- **HDF5** is feature-gated (`hdf5` cargo feature, requires the `hdf5-metno` system dependency). The implementation provides a keyed-snapshot layout: every DataFrame is one HDF5 group with one dataset per column. PyTables-compatible table/storer layouts are a future epic.
+- **HDF5** is feature-gated (`hdf5` cargo feature, requires the `hdf5-metno` system dependency). The keyed-snapshot layout stores one versioned FrankenPandas Pickle payload dataset inside each DataFrame group. It inherits the nullable dtype/null-kind limitation in [#40](https://github.com/Dicklesworthstone/frankenpandas/issues/40). PyTables-compatible table/storer layouts remain pending.
 
 ## How `eval()` / `query()` Differs From `df["col"] > 5`
 
@@ -2843,7 +2858,7 @@ A rough heat map of how compatible we are with pandas, by API family, as of 2026
 | IO: ORC | 🔴 | Public API retained, but fail-closed under the no-Tokio policy until a native Tokio-free backend lands. |
 | IO: HDF5 | 🟡 | Feature-gated; keyed-snapshot layout, not PyTables-compatible. |
 | IO: SQL (SQLite) | 🟢 | Full read / write / chunked / inspector surface. |
-| IO: SQL (MySQL) | 🟢 | `MysqlConnection` behind the `sql-mysql` feature; dtype-mapping tests only, no live-server integration test yet. |
+| IO: SQL (MySQL) | 🟢 | `MysqlConnection` behind `sql-mysql`; dtype mapping and 38 live MySQL 8.4.11 checks. TLS and other platforms remain unqualified. |
 | IO: SQL (PostgreSQL) | 🟢 | `PostgresConnection` behind `sql-postgresql` using a Tokio-free synchronous wire protocol, with full `SqlConnection` and `SqlInspector` coverage. |
 | Sparse (`.sparse()` accessor + `SparseDType`) | 🟡 | DISC-009: accessor surface works but physical storage is still dense. |
 | `apply` shape variants | 🟡 | DISC-010: Rust requires explicit shape (`apply_scalar` / `apply_series` / `apply_series_stacked`). Function-wise equivalent. |

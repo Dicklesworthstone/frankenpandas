@@ -1285,7 +1285,7 @@ dependencies = [
 
 [[package]]
 name = "fp-bench"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "fp-columnar",
  "fp-frame",
@@ -1299,7 +1299,7 @@ dependencies = [
 
 [[package]]
 name = "fp-columnar"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "fp-dot-kernel",
  "fp-types",
@@ -1311,7 +1311,7 @@ dependencies = [
 
 [[package]]
 name = "fp-conformance"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "criterion",
  "fp-columnar",
@@ -1337,11 +1337,11 @@ dependencies = [
 
 [[package]]
 name = "fp-dot-kernel"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "fp-expr"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "fp-columnar",
  "fp-frame",
@@ -1356,7 +1356,7 @@ dependencies = [
 
 [[package]]
 name = "fp-frame"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -1379,7 +1379,7 @@ dependencies = [
 
 [[package]]
 name = "fp-frankentui"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "fp-conformance",
  "fp-runtime",
@@ -1392,7 +1392,7 @@ dependencies = [
 
 [[package]]
 name = "fp-groupby"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bumpalo",
  "fp-columnar",
@@ -1406,7 +1406,7 @@ dependencies = [
 
 [[package]]
 name = "fp-index"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "criterion",
@@ -1419,7 +1419,7 @@ dependencies = [
 
 [[package]]
 name = "fp-io"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "arrow-ipc",
@@ -1453,7 +1453,7 @@ dependencies = [
 
 [[package]]
 name = "fp-join"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bumpalo",
  "fp-columnar",
@@ -1467,7 +1467,7 @@ dependencies = [
 
 [[package]]
 name = "fp-python"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "fp-columnar",
  "fp-expr",
@@ -1482,7 +1482,7 @@ dependencies = [
 
 [[package]]
 name = "fp-runtime"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "asupersync",
  "serde",
@@ -1493,7 +1493,7 @@ dependencies = [
 
 [[package]]
 name = "fp-types"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -1535,7 +1535,7 @@ dependencies = [
 
 [[package]]
 name = "frankenpandas"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "fp-columnar",
  "fp-expr",
@@ -2149,9 +2149,9 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "lru"
-version = "0.16.4"
+version = "0.18.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f66e8d5d03f609abc3a39e6f08e4164ebf1447a732906d39eb9b99b7919ef39"
+checksum = "ef9ac18847474e638e3702b76c65d4eb93428471a74778ef0f1be711717f89b5"
 
 [[package]]
 name = "lz4_flex"
@@ -2278,9 +2278,9 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "mysql"
-version = "28.0.2"
+version = "28.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e99968f000e2aadff1545932ac7f7ed4002eeb0207061f377f15ac95ae82626c"
+checksum = "7d3d30e2806645e218163f49c2656286061cc91ffce24d93d758fd136e70eb5d"
 dependencies = [
  "arc-swap",
  "bufstream",
@@ -2611,11 +2611,11 @@ checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
 name = "pem"
-version = "3.0.6"
+version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
+checksum = "d354a98a3d1251555de99e8fdd8afda05573c31b82f59063a7b0a29b5527f120"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "serde_core",
 ]
 
@@ -2922,9 +2922,9 @@ dependencies = [
 
 [[package]]
 name = "pyo3"
-version = "0.29.2"
+version = "0.29.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4688ddedf473e32662b9b067670129a8afb8c18e351482c70d62ba4a88171e8b"
+checksum = "700d18fa267b73b9b521fd7e13580e2f446916f176cacee1ab63fcc8191f1655"
 dependencies = [
  "libc",
  "once_cell",
@@ -2936,18 +2936,18 @@ dependencies = [
 
 [[package]]
 name = "pyo3-build-config"
-version = "0.29.2"
+version = "0.29.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f41027e41b4bd03f6e60f9f417fe24a6341a6bb744edd62b6f709f2a52ea30e9"
+checksum = "7b3fc0c4d08f6bb10e71fe39dfb9e2f59c6eb6854e22ec8092f50c69a4499adb"
 dependencies = [
  "target-lexicon",
 ]
 
 [[package]]
 name = "pyo3-ffi"
-version = "0.29.2"
+version = "0.29.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e591a95526fead067432c3b3a33fc74770b87b1e04e73671090d9c2055a2b327"
+checksum = "dfc0b8e19df29aad7086cf977bb0c2a2f143e30567eb113e9cf72b62ca698330"
 dependencies = [
  "libc",
  "pyo3-build-config",
@@ -2955,9 +2955,9 @@ dependencies = [
 
 [[package]]
 name = "pyo3-macros"
-version = "0.29.2"
+version = "0.29.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73225868fc1cd84eef2c3c230ddb91273bf1de46aeb8a4248da76d32a0924a1c"
+checksum = "6100e8a4b5eba53afaa5ed078364851a0b2499c553a44c31026b929049b49dc6"
 dependencies = [
  "proc-macro2",
  "pyo3-macros-backend",
@@ -2967,9 +2967,9 @@ dependencies = [
 
 [[package]]
 name = "pyo3-macros-backend"
-version = "0.29.2"
+version = "0.29.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "571575aa3749fa6216757dd47d2a3e7ef360f329a40f0666a9fbd14889024952"
+checksum = "6143877a16e82b5a727b7127ff4cd86858a24a28d745d72f43e6f227c7b1bdb3"
 dependencies = [
  "heck",
  "proc-macro2",

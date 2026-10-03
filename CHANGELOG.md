@@ -3,9 +3,58 @@
 All notable changes to FrankenPandas are documented in this file, organized by capability area.
 
 FrankenPandas is a clean-room Rust reimplementation of the full pandas API surface:
-**15 workspace crates, `#![forbid(unsafe_code)]` workspace-wide**. Workspace version is **0.3.0**.
+**15 workspace crates, `#![forbid(unsafe_code)]` workspace-wide**. Workspace version is **0.4.0**.
 
 Repository: <https://github.com/Dicklesworthstone/frankenpandas>
+
+## 0.4.0 release qualification (2026-10-03, pending publication)
+
+- Arrow-family writers allocate distinct physical fields for row-index levels,
+  preserving data columns whose names collide with synthetic index fields and
+  preserving repeated logical MultiIndex names across Parquet, Feather and IPC.
+  Readers preserve independent textual flat index names and restore logical
+  names when reading standard pandas metadata.
+  Readers also handle the legacy native MultiIndex metadata layout; malformed
+  or ambiguous layouts return an error rather than guessing index fields.
+  A genuine published v0.3.0 consumer produced nine retained old-writer files
+  with its original lockfile; current-reader qualification is in progress.
+  The separate Git-source producer never executed and remains tracked in
+  [RCH #88](https://github.com/Dicklesworthstone/remote_compilation_helper/issues/88).
+- Merge width restoration follows each output column's source position,
+  preserving Float64 values across mixed-width outer keys, repeated payload
+  names and suffix collisions.
+- Python list-cell conversion refuses cycles and nesting deeper than 128 list
+  levels with `ValueError`. Repeated acyclic sublists remain accepted.
+- Excel duration cells outside the supported nanosecond range return an
+  explicit error at millisecond precision, including header and index cells.
+  Conversion checks the range before integer multiplication.
+- Byte-valued merge keys compare by value. List and opaque host object keys are
+  explicitly refused in equijoins and grouped asof joins; they must not collapse
+  into missing keys. Safe hashable Host semantics require the broader callback,
+  equality and interpreter-ownership design tracked in
+  [#38](https://github.com/Dicklesworthstone/frankenpandas/issues/38).
+- Python `DataFrame.eval()` and `DataFrame.query()` accept trusted expressions
+  only. Their pandas-compatible Python fallback can execute calls with side
+  effects; `engine` and `parser` arguments are not a security sandbox.
+- The optional no-default-feature `fp-io` library-test target currently fails
+  to compile because a SQL stub test's helper import is SQLite-gated. This
+  test configuration remains tracked in
+  [#39](https://github.com/Dicklesworthstone/frankenpandas/issues/39); HDF5
+  compatibility qualification uses a separate producer and default+HDF5 test
+  lane.
+- Native HDF5/Pickle snapshots inherit JSON Split's nullable dtype and null-kind
+  inference. The existing typed-snapshot limitation is tracked in
+  [#40](https://github.com/Dicklesworthstone/frankenpandas/issues/40). Both old
+  and proposed HDF dependency versions fail the same exact dtype check on the
+  same file; the optional dependency update was withdrawn. The original HDF
+  versions remain, and the bidirectional snapshot compatibility gate remains
+  failed and incomplete.
+- The stock G6 conformance step passed, while its supplemental stored-sidecar
+  check failed because 460 packet directories lack `parity_report.json`.
+  Neither a clean v0.3.0 checkout nor the current tracked corpus supplies those
+  report files. Reproducible report generation and retention are tracked in
+  [#41](https://github.com/Dicklesworthstone/frankenpandas/issues/41); the whole
+  G6 pipeline is not qualified as green.
 
 Scope window: project inception on 2026-02-13 through HEAD on 2026-09-15.
 This 2026-09-15 refresh covers the window **2026-05-17 through 2026-09-15**
