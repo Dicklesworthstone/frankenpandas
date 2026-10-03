@@ -17,7 +17,8 @@ Repository: <https://github.com/Dicklesworthstone/frankenpandas>
   Readers also handle the legacy native MultiIndex metadata layout; malformed
   or ambiguous layouts return an error rather than guessing index fields.
   A genuine published v0.3.0 consumer produced nine retained old-writer files
-  with its original lockfile; current-reader qualification is in progress.
+  with its original lockfile; the current Rust reader passed all nine files
+  and a facade CSV smoke check.
   The separate Git-source producer never executed and remains tracked in
   [RCH #88](https://github.com/Dicklesworthstone/remote_compilation_helper/issues/88).
 - Merge width restoration follows each output column's source position,
@@ -25,6 +26,9 @@ Repository: <https://github.com/Dicklesworthstone/frankenpandas>
   names and suffix collisions.
 - Python list-cell conversion refuses cycles and nesting deeper than 128 list
   levels with `ValueError`. Repeated acyclic sublists remain accepted.
+- Python source distributions include the pinned toolchain and a separate
+  Cargo-generated lock matching their reduced workspace. The Rust workspace
+  lock remains unchanged; the packaging backend requires Maturin 1.15 or newer.
 - Excel duration cells outside the supported nanosecond range return an
   explicit error at millisecond precision, including header and index cells.
   Conversion checks the range before integer multiplication.
