@@ -5,6 +5,7 @@ Differential conformance test harness for frankenpandas vs pandas oracle on pack
 from __future__ import annotations
 
 import collections.abc
+import copy
 import datetime
 import fractions
 import glob
@@ -12,6 +13,7 @@ import itertools
 import json
 import math
 import os
+import pickle
 import re
 import tempfile
 import warnings
@@ -17714,6 +17716,19 @@ _RA_CASES = {
 }
 
 
+# An answer no scalar holds - a list, tuple or dict, an empty bin's empty
+# one too - is an object cell, as pandas keeps it (it raised "Cannot convert
+# list to Scalar"); shown and compared cell by cell.
+def _ra_cells(result: Any) -> list:
+    return _mk_shown(result) + [repr(cell) for cell in result.tolist()]
+
+
+_RA_CASES["list"] = lambda m: _ra_cells(_ra_series(m).resample("D").apply(lambda g: list(g)))
+_RA_CASES["tuple"] = lambda m: _ra_cells(_ra_series(m).resample("D").apply(lambda g: tuple(g)))
+_RA_CASES["dict"] = lambda m: _ra_cells(_ra_series(m).resample("D").apply(lambda g: {"n": len(g)}))
+_RA_CASES["frame list"] = lambda m: _ra_cells(_ra_frame(m).resample("D").apply(lambda g: list(g))["v"])
+
+
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 @pytest.mark.parametrize("case", list(_RA_CASES))
 def test_resample_apply_rows_like_pandas_jno5s(case: str) -> None:
@@ -23660,6 +23675,89 @@ def test_index_of_datetimes_in_several_zones_ewrvf(case: str) -> None:
     assert seen(fpd) == seen(pd), case
 
 
+# br-frankenpandas-acelo: infer_freq knew fixed steps, B and ME only (MS /
+# QS / YS / W-<day> / WOM came back None or 7D), and dt.to_period() without
+# freq raised for them. Each index is pandas' date_range of the family; fp
+# reads the same instants.
+_ACELO_FREQS = [
+    "MS", "ME", "QS", "QE", "QS-FEB", "QE-NOV", "YS", "YE", "YS-MAR", "YE-JUN", "W-SUN", "W-WED",
+    "2W-FRI", "B", "D", "2D", "3h", "15min", "BMS", "BME", "BQE", "BYS", "BYE", "2MS", "6ME",
+    "2QS", "2YS", "WOM-1MON", "WOM-3FRI",
+]
+_ACELO_MULTIPLIED = {"2W-FRI", "2D", "3h", "15min"}  # period multiples: tus8r
+
+
+def _acelo_index(m: Any, freq: str) -> Any:
+    stamps = pd.date_range("2024-01-01", periods=8, freq=freq)
+    return stamps if m is pd else fpd.to_datetime([t.isoformat() for t in stamps], format="ISO8601")
+
+
+_ACELO_CASES = {f"infer_freq {freq}": (lambda freq: lambda m: [m.infer_freq(_acelo_index(m, freq))])(freq) for freq in _ACELO_FREQS}
+_ACELO_CASES.update({
+    f"to_period {freq}": (lambda freq: lambda m: [str(p) for p in m.Series(list(_acelo_index(m, freq))).dt.to_period()])(freq)
+    for freq in _ACELO_FREQS
+    if freq not in _ACELO_MULTIPLIED
+})
+_ACELO_CASES["infer_freq decreasing"] = lambda m: [m.infer_freq(m.DatetimeIndex(["2024-01-03", "2024-01-02", "2024-01-01"]))]
+_ACELO_CASES["infer_freq 15th of each month"] = lambda m: [m.infer_freq(m.DatetimeIndex(["2024-03-15", "2024-04-15", "2024-05-15"]))]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_ACELO_CASES))
+def test_infer_freq_and_to_period_like_pandas_acelo(case: str) -> None:
+    run = _ACELO_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-ymbic: to_html printed each float on its own (1.5 beside
+# pandas' 1.50 / 2.25; 10000000000.0 for 1.000000e+10), had no index-name row
+# or column-axis corner, and refused na_rep / float_format / justify / escape
+# / render_links / bold_rows / header / index_names / decimal.
+def _ymbic_frames(m: Any) -> dict:
+    named_index = m.DataFrame({"a": [1.5, np.nan]}, index=m.Index([10, 20], name="idx"))
+    named_columns = m.DataFrame({"a": [1, 2]})
+    named_columns.columns.name = "cols"
+    return {
+        "ints": m.DataFrame({"a": [1, 2, 3]}),
+        "floats": m.DataFrame({"a": [1.5, 2.25, 3.0]}),
+        "float NaN": m.DataFrame({"a": [1.5, np.nan, 3.0]}),
+        "wide range": m.DataFrame({"a": [1e10, 2.5, 3.1415926535]}),
+        "html text": m.DataFrame({"a": ["<b>x</b>", "a&b", "http://e.com/?q=1&r=2"]}),
+        "mixed": m.DataFrame({"a": [1, 2], "b": ["x", "y"], "c": [0.1, 0.25]}),
+        "string index": m.DataFrame({"a": [1.5, 2.5]}, index=["r1", "r2"]),
+        "named index": named_index,
+        "named columns": named_columns,
+    }
+
+
+_YMBIC_KWARGS = {
+    "default": {},
+    "index=False": {"index": False},
+    "na_rep": {"na_rep": "-"},
+    "float_format": {"float_format": "{:.3f}".format},
+    "justify": {"justify": "left"},
+    "escape=False": {"escape": False},
+    "render_links": {"render_links": True},
+    "bold_rows=False": {"bold_rows": False},
+    "header=False": {"header": False},
+    "index_names=False": {"index_names": False},
+    "decimal": {"decimal": ","},
+    "table tag": {"classes": "x y", "table_id": "t", "border": 0},
+}
+_YMBIC_CASES = {
+    f"{frame} {label}": (lambda frame, kw: lambda m: [_ymbic_frames(m)[frame].to_html(**kw)])(frame, kw)
+    for frame in _ymbic_frames(pd)
+    for label, kw in _YMBIC_KWARGS.items()
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_YMBIC_CASES))
+def test_to_html_like_pandas_ymbic(case: str) -> None:
+    run = _YMBIC_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
 # br-frankenpandas-wha4m: read_csv(parse_dates=) of aware datetimes in one
 # zone is pandas' datetime64[ns, zone], NaT where a cell is empty - fp kept
 # the text; to_datetime of such a Series with a missing value likewise.
@@ -23707,3 +23805,472 @@ def test_to_clipboard_writes_pandas_tab_separated_text(tmp_path: Path, monkeypat
     # NEGATIVE: excel=False (pandas writes the repr) is still refused.
     with pytest.raises(NotImplementedError):
         fpd.DataFrame(frame).to_clipboard(excel=False)
+
+
+# br-frankenpandas-h9cug: a string under a format - format=, or the one pandas
+# guesses from a column's first value - is read as pandas' array_strptime
+# reads it: its regex (case ignored, whitespace as \s+, leap seconds 60 / 61
+# running into the next minute) then the calendar. A later row's day the
+# month lacks was dateutil's complaint (pandas: strptime's, a ValueError);
+# a format= leap second was 0.1 s off, a lowercase t / a tab NaT, a stray
+# space read. NEGATIVE rows: valid columns, an invalid first value (no
+# guess: dateutil's DateParseError, as before).
+_H9CUG_GUESSED = [
+    ["2023-02-29 10:00"],
+    ["2024-01-15 24:00"],
+    ["2024-13-01"],
+    ["2024-01-15 10:00", "2023-02-29 10:00"],
+    ["2024-01-15", "2024-13-01"],
+    ["2024-01-15 10:00", "2024-01-15 24:00"],
+    ["2024-01-15 10:00", "2024-01-15 10:61"],
+    ["2024-01-15 10:00:00", "2024-01-15 10:00:61"],
+    ["2024-12-31 23:00:00", "2024-12-31 23:59:60"],
+    ["2024-01-15T10:00:00", "2024-01-15T10:61:00"],
+    ["2024-01-15T10:00:00", "2023-02-29T10:00:00"],
+    ["2024/01/15", "2023/02/29"],
+    ["2024/01/15", "2024/13/01"],
+    ["2024-01-15 10:00", "2024-01-15\t10:30"],
+    ["2024-01-15 10:00", "2024-01-15T10:30"],
+    ["15/01/2024", "31/04/2024"],
+    ["2024-01-15 10:00", "2024-02-29 23:59"],
+    ["2024-12-31 23:59:60"],
+]
+_H9CUG_GIVEN = [
+    ("%Y-%m-%d", ["2024-01-15", "2023-02-29"]),
+    ("%Y-%m-%d", ["2024-01-15x"]),
+    ("%Y-%m-%d", [" 2024-01-15"]),
+    ("%Y-%m-%d", ["2024-01-15 "]),
+    ("%Y-%m-%d", ["2024-01- 5"]),
+    ("%d/%m/%Y", ["31/04/2024"]),
+    ("%m/%d/%Y", ["02/30/2024"]),
+    ("%Y-%m-%d %H:%M:%S", ["2024-01-15 10:00:60"]),
+    ("%Y-%m-%d %H:%M:%S", ["2024-01-15 10:00:61"]),
+    ("%Y-%m-%d %H:%M:%S", ["2024-12-31 23:59:60"]),
+    ("%Y-%m-%d %H:%M", ["2024-01-15 10:61"]),
+    ("%Y-%m-%dT%H:%M", ["2024-01-15t10:30"]),
+    ("%Y-%m-%d %H:%M", ["2024-01-15\t10:30"]),
+    ("%d.%m.%Y %H:%M", ["15.01.2024 10:30", "29.02.2023 10:30"]),
+    ("%m/%d/%Y %I:%M %p", ["01/15/2024 12:30 am", "01/15/2024 12:30 PM"]),
+    ("%m/%d/%Y %I:%M", ["01/15/2024 12:30"]),
+    ("%d/%m/%Y %I:%M%p", ["15/01/2024 10:30Pm"]),
+    ("%Y-%m-%d %H:%M %p", ["2024-01-15 10:30 PM"]),
+    ("%Y%m%d", ["20240230"]),
+    ("%d/%m/%y", ["15/01/68", "15/01/69"]),
+    ("%d-%b-%Y", ["15-JAN-2024", "15-sept-2024"]),
+    ("%d %B %Y", ["15 september 2024"]),
+    ("%a %d/%m/%Y", ["Mon 15/01/2024"]),
+    ("%d/%m/%Y %%", ["15/01/2024 %"]),
+    ("%d/%m/%Y", ["29/02/1900"]),
+    ("%d/%m/%Y", ["15/01/0000"]),
+    ("%d/%m/%Y", ["0/01/2024"]),
+    ("%d/%m/%Y %H:%M:%S.%f", ["15/01/2024 10:00:00.1234567"]),
+    ("%d/%m/%Y %H:%M:%S.%f", ["15/01/2024 10:00:00.1234567891"]),
+    ("%Y-%m-%d %H:%M:%S.%f", ["2024-01-15 10:00:00."]),
+    ("%Y-%m-%d %H:%M:%S.%f", ["2024-01-15 10:00:59.1234567891"]),
+    ("%Y-%m-%d", ["2024-01-15", "2024-02-29", None]),
+]
+_H9CUG_CASES: dict[str, Any] = {}
+# Loop names of their own: a module-level `_values` rebinds the helper
+# test_values_match_pandas calls.
+for _h9cug_values in _H9CUG_GUESSED:
+    for _h9cug_errors in ("raise", "coerce"):
+        _H9CUG_CASES[f"guessed {_h9cug_values!r} {_h9cug_errors}"] = (
+            lambda m, v=_h9cug_values, e=_h9cug_errors: m.to_datetime(m.Series(v), errors=e)
+        )
+for _h9cug_format, _h9cug_values in _H9CUG_GIVEN:
+    for _h9cug_errors in ("raise", "coerce"):
+        _H9CUG_CASES[f"format {_h9cug_format!r} {_h9cug_values!r} {_h9cug_errors}"] = (
+            lambda m, f=_h9cug_format, v=_h9cug_values, e=_h9cug_errors: m.to_datetime(
+                m.Series(v), format=f, errors=e
+            )
+        )
+_H9CUG_CASES["format utc leap second"] = lambda m: m.to_datetime(
+    m.Series(["2024-01-15 10:00:60"]), format="%Y-%m-%d %H:%M:%S", utc=True
+)
+_H9CUG_CASES["list later feb 29"] = lambda m: m.to_datetime(["2024-01-15", "2023-02-29"], errors="coerce")
+_H9CUG_CASES["mixed leap second"] = lambda m: m.to_datetime(m.Series(["2024-12-31 23:59:60"]), format="mixed")
+_H9CUG_CASES["index format leap second"] = lambda m: m.to_datetime(
+    m.Index(["2024-12-31 23:59:60"]), format="%Y-%m-%d %H:%M:%S"
+)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_H9CUG_CASES))
+def test_to_datetime_reads_a_format_like_pandas_strptime_h9cug(case: str) -> None:
+    run = _H9CUG_CASES[case]
+    assert _f1jm5_outcome(lambda: run(fpd)) == _f1jm5_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.58: no dtype object
+# could be pickled or deep-copied ("cannot pickle 'CategoricalDtype'
+# object"), so neither could df.dtypes, a dict of dtypes, or anything a
+# multiprocessing worker passed holding one. Each round trip is compared
+# with pandas' on type, repr, equality with the original and str.
+_FVSAO58_DTYPES = {
+    "CategoricalDtype ordered": lambda m: m.CategoricalDtype(["a", "b"], ordered=True),
+    "CategoricalDtype none": lambda m: m.CategoricalDtype(),
+    "CategoricalDtype ints": lambda m: m.CategoricalDtype([3, 1, 2]),
+    "CategoricalDtype of a Series": lambda m: m.Series(["b", "a", "b"], dtype="category").dtype,
+    "DatetimeTZDtype UTC": lambda m: m.DatetimeTZDtype(tz="UTC"),
+    "DatetimeTZDtype Paris": lambda m: m.DatetimeTZDtype(tz="Europe/Paris"),
+    "DatetimeTZDtype of a Series": lambda m: m.Series(m.to_datetime(["2024-01-01"]).tz_localize("UTC")).dtype,
+    "PeriodDtype": lambda m: m.PeriodDtype("M"),
+    "IntervalDtype": lambda m: m.IntervalDtype("int64", closed="left"),
+    "Int64Dtype": lambda m: m.Int64Dtype(),
+    "Int8Dtype": lambda m: m.Int8Dtype(),
+    "UInt32Dtype": lambda m: m.UInt32Dtype(),
+    "Float32Dtype": lambda m: m.Float32Dtype(),
+    "Float64Dtype": lambda m: m.Float64Dtype(),
+    "BooleanDtype": lambda m: m.BooleanDtype(),
+    "StringDtype": lambda m: m.StringDtype(),
+    "SparseDtype": lambda m: m.SparseDtype("float64"),
+    "Int64Dtype of a Series": lambda m: m.Series([1, None], dtype="Int64").dtype,
+}
+
+
+def _fvsao58_round_trip(make: Any, how: str) -> Any:
+    try:
+        original = make()
+        copied = pickle.loads(pickle.dumps(original)) if how == "pickle" else copy.deepcopy(original)
+        return ("ok", type(copied).__name__, repr(copied), bool(copied == original), str(copied))
+    except NameError:
+        raise
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("how", ["pickle", "deepcopy"])
+@pytest.mark.parametrize("case", list(_FVSAO58_DTYPES))
+def test_dtype_objects_pickle_like_pandas_fvsao58(case: str, how: str) -> None:
+    make = _FVSAO58_DTYPES[case]
+    assert _fvsao58_round_trip(lambda: make(fpd), how) == _fvsao58_round_trip(lambda: make(pd), how), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_frame_dtypes_pickle_like_pandas_fvsao58() -> None:
+    def seen(m: Any) -> Any:
+        frame = m.DataFrame(
+            {"a": [1, None], "b": ["x", "y"], "c": [1.5, 2.5]}
+        ).astype({"a": "Int64", "b": "category"})
+        dtypes = pickle.loads(pickle.dumps(frame.dtypes))
+        mapping = copy.deepcopy(frame.dtypes.to_dict())
+        return ([str(d) for d in dtypes], {k: str(v) for k, v in mapping.items()})
+
+    assert seen(fpd) == seen(pd)
+    # NEGATIVE: the copy is its own object yet equal, and the categories and
+    # their order survive (a bare CategoricalDtype() would equal any).
+    original = fpd.CategoricalDtype(["b", "a"], ordered=True)
+    copied = pickle.loads(pickle.dumps(original))
+    assert copied is not original and copied == original
+    assert list(copied.categories) == ["b", "a"] and copied.ordered
+    assert copied != fpd.CategoricalDtype(["a", "b"], ordered=True)
+
+
+# br-frankenpandas-47dus: an object column of numbers took fp's kernels with
+# its object (text) dtype - + 1 a coercion error, * 2 all NaN, a - b the
+# text '-2.0', -s / abs / ~ text cells; an object column of text against a
+# number refused with a coercion message. pandas runs every one through the
+# cells' Python operators (numpy's object loop, then _masked_arith_op).
+# NEGATIVE rows: typed columns, text against text, string dtype + str.
+_47DUS_CASES = {
+    "obj ints + 1": lambda m: m.Series([1, 2], dtype=object) + 1,
+    "obj None + 1": lambda m: m.Series([None, None], dtype=object) + 1,
+    "obj mixed * 2": lambda m: m.Series([1, 2.5, None], dtype=object) * 2,
+    "obj ints - obj": lambda m: m.Series([1, 2], dtype=object) - m.Series([3, 4], dtype=object),
+    "obj missing pairs": lambda m: m.Series([1, None], dtype=object) + m.Series([None, 2], dtype=object),
+    "obj ints / 2": lambda m: m.Series([1, 2], dtype=object) / 2,
+    "obj ints ** 2": lambda m: m.Series([1, 2], dtype=object) ** 2,
+    "obj None ** 2": lambda m: m.Series([1, 2, None], dtype=object) ** 2,
+    "1 ** obj None": lambda m: 1 ** m.Series([1, 2, None], dtype=object),
+    "2 ** obj None": lambda m: 2 ** m.Series([1, 2, None], dtype=object),
+    "obj ints // 2": lambda m: m.Series([5, 7], dtype=object) // 2,
+    "obj ints % 2": lambda m: m.Series([5, 7], dtype=object) % 2,
+    "2 - obj ints": lambda m: 2 - m.Series([5, 7], dtype=object),
+    "obj + float series": lambda m: m.Series([1, 2], dtype=object) + m.Series([0.5, 1.5]),
+    "astype object + 1": lambda m: m.Series([1, 2]).astype(object) + 1,
+    "obj bools + 1": lambda m: m.Series([True, False], dtype=object) + 1,
+    "obj ints sum": lambda m: [m.Series([1, 2], dtype=object).sum()],
+    "obj mixed sum": lambda m: [m.Series([1, 2.5, None], dtype=object).sum()],
+    "obj None sum": lambda m: [m.Series([None, None], dtype=object).sum()],
+    "obj ints prod": lambda m: [m.Series([3, 4], dtype=object).prod()],
+    "obj ints > 1": lambda m: m.Series([1, 2], dtype=object) > 1,
+    "obj frame + 1": lambda m: m.DataFrame({"a": [1, 2]}, dtype=object) + 1,
+    "obj frame * 2 mixed": lambda m: m.DataFrame({"a": [1, 2], "b": [1.5, 2.5]}).astype({"a": object}) * 2,
+    "obj frame sum": lambda m: m.DataFrame({"a": [1, 2]}, dtype=object).sum(),
+    "neg ints": lambda m: -m.Series([1, -2], dtype=object),
+    "neg None": lambda m: -m.Series([1, None], dtype=object),
+    "neg nan": lambda m: -m.Series([1, float("nan")], dtype=object),
+    "neg text": lambda m: -m.Series(["a", "b"]),
+    "neg empty": lambda m: -m.Series([], dtype=object),
+    "pos text": lambda m: +m.Series(["a", "b"]),
+    "pos ints": lambda m: +m.Series([1, 2], dtype=object),
+    "abs ints": lambda m: abs(m.Series([-1, 2.5], dtype=object)),
+    "abs method": lambda m: m.Series([-1, 2.5], dtype=object).abs(),
+    "abs None": lambda m: abs(m.Series([-1, None], dtype=object)),
+    "abs text": lambda m: m.Series(["a"]).abs(),
+    "inv ints": lambda m: ~m.Series([1, 2], dtype=object),
+    "inv bools": lambda m: ~m.Series([True, False], dtype=object),
+    "neg bools obj": lambda m: -m.Series([True, False], dtype=object),
+    "frame neg": lambda m: -m.DataFrame({"a": [1, 2]}, dtype=object),
+    "frame abs": lambda m: m.DataFrame({"a": [-1, 2]}, dtype=object).abs(),
+    "frame abs mixed": lambda m: abs(m.DataFrame({"a": [-1, 2], "b": [-1.5, 2.0]}).astype({"a": object})),
+    "frame neg repeated labels": lambda m: -m.DataFrame([[1, -2.5], [3, 4.0]], columns=["a", "a"]).astype(object),
+    "frame invert": lambda m: ~m.DataFrame({"a": [1, 2], "b": [True, False]}).astype({"a": object}),
+    "frame abs text": lambda m: m.DataFrame({"a": ["x"]}).abs(),
+    "text * 2": lambda m: m.Series(["a", "bc"]) * 2,
+    "2 * text": lambda m: 2 * m.Series(["a", "bc"]),
+    "text * 1.5": lambda m: m.Series(["a"]) * 1.5,
+    "text - 1": lambda m: m.Series(["a"]) - 1,
+    "text / 2": lambda m: m.Series(["a"]) / 2,
+    "text % 1": lambda m: m.Series(["a%s"]) % 1,
+    "text + 1": lambda m: m.Series(["a", "b"]) + 1,
+    "text + None": lambda m: m.Series(["a", "b"]) + None,
+    "text + list": lambda m: m.Series(["a", "b"]) + ["x", "y"],
+    "text + int series": lambda m: m.Series(["a", "b"]) + m.Series([1, 2]),
+    "text frame + 1": lambda m: m.DataFrame({"a": ["x"]}) + 1,
+    # NEGATIVE: what already matched keeps matching.
+    "text + text": lambda m: m.Series(["a", "b"]) + m.Series(["x", "y"]),
+    "x + text": lambda m: "x" + m.Series(["a", None]),
+    "text frame + x": lambda m: m.DataFrame({"a": ["x"]}) + "y",
+    "string dtype + x": lambda m: m.Series(["a"], dtype="string") + "x",
+    "int + 1 typed": lambda m: m.Series([1, 2]) + 1,
+    "neg typed": lambda m: -m.Series([1, -2]),
+    "abs typed frame": lambda m: m.DataFrame({"a": [-1, 2], "b": [-1.5, 2.0]}).abs(),
+}
+
+
+def _47dus_outcome(run: Any) -> Any:
+    try:
+        result = run()
+        if isinstance(result, list):
+            return ("ok", "list", [(type(v).__name__, repr(v)) for v in result])
+        dtype = str(getattr(result, "dtypes", getattr(result, "dtype", None)))
+        return ("ok", type(result).__name__, dtype, repr(result.values.tolist()))
+    except NameError:
+        raise
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_47DUS_CASES))
+def test_object_column_operators_like_pandas_47dus(case: str) -> None:
+    run = _47DUS_CASES[case]
+    assert _47dus_outcome(lambda: run(fpd)) == _47dus_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-2blaf: DataFrame.eval of an expression naming no column is
+# pandas' one Python value (fp broadcast it to every row, a 933 MB string per
+# row in the fuzz target), a constant's division by zero Python's
+# ZeroDivisionError (fp: inf). NEGATIVE rows: expressions over a column stay
+# a Series; an assignment of a constant still fills the column.
+_2BLAF_EXPRS = [
+    '3*"ab"',
+    "1+2",
+    '"ab"',
+    "2**10",
+    "1.5 * 2",
+    "True",
+    "1 < 2",
+    "-3",
+    "(1+2)*3",
+    "7 // 2",
+    "-7 // 2",
+    "-7 % 3",
+    "7.5 % 2",
+    "2**-1",
+    '"ab" * 0',
+    '"ab" * True',
+    "1 + True",
+    "1 == 1.0",
+    '"a" < "b"',
+    "True and False",
+    "3 in [1, 2, 3]",
+    "@x + 1",
+    '"a" + "b"',
+    "1/0",
+    "1//0",
+    "1%0",
+    "1.0/0",
+    "5.5//0",
+    "5.5 % 0",
+    "0/0",
+    "1/(1-1)",
+    "a + 1*0",
+    "a * 2",
+    "a / 0",
+    "a > 1",
+]
+_2BLAF_CASES: dict[str, Any] = {
+    expr: (lambda m, e=expr: m.DataFrame({"a": [1, 2]}).eval(e, local_dict={"x": 5})) for expr in _2BLAF_EXPRS
+}
+_2BLAF_CASES["empty frame 1+2"] = lambda m: m.DataFrame({"a": []}).eval("1+2")
+_2BLAF_CASES["assignment of a constant"] = lambda m: m.DataFrame({"a": [1, 2]}).eval("c = 1 + 2")
+
+
+def _2blaf_outcome(run: Any) -> Any:
+    try:
+        result = run()
+        if hasattr(result, "values"):
+            return ("ok", type(result).__name__, str(getattr(result, "dtypes", getattr(result, "dtype", None))), repr(result.values.tolist()))
+        return ("ok", type(result).__name__, repr(result))
+    except NameError:
+        raise
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+_2BLAF_NOT_COVERED = {
+    "2**-1": "Python folds int ** negative int to a float; fp's kernels refuse it as numpy does for a column",
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(case, marks=pytest.mark.xfail(strict=True, reason=_2BLAF_NOT_COVERED[case]))
+        if case in _2BLAF_NOT_COVERED
+        else case
+        for case in _2BLAF_CASES
+    ],
+)
+def test_eval_of_a_constant_is_one_value_2blaf(case: str) -> None:
+    run = _2BLAF_CASES[case]
+    assert _2blaf_outcome(lambda: run(fpd)) == _2blaf_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-c6xs9: pivot_table(dropna=True) drops each aggregated
+# row whose every value is missing (var / std / sem of one value, skew of
+# fewer than three) and each all-missing column; the single-value kernel
+# path and the no-`columns` groupby kept them as NaN rows / columns.
+# NEGATIVE rows: dropna=False keeps them, mean drops nothing, two values
+# (already pandas' definition) unchanged.
+def _c6xs9_frame(m: Any, rows: list, cols: list, vals: list) -> Any:
+    return m.DataFrame({"r": rows, "c": cols, "v": vals, "w": [float(i) for i in range(len(rows))]})
+
+
+_C6XS9_CASES = {
+    "var drops a row": lambda m: _c6xs9_frame(m, [1, 1, 2], ["x"] * 3, [1.0, 3.0, 5.0]).pivot_table(
+        index="r", columns="c", values="v", aggfunc="var"
+    ),
+    "var drops a column": lambda m: _c6xs9_frame(m, [1, 1, 1], ["x", "x", "y"], [1.0, 3.0, 5.0]).pivot_table(
+        index="r", columns="c", values="v", aggfunc="var"
+    ),
+    "std drops both": lambda m: _c6xs9_frame(m, [1, 1, 2, 3], ["x", "x", "y", "x"], [1.0, 3.0, 5.0, 7.0]).pivot_table(
+        index="r", columns="c", values="v", aggfunc="std"
+    ),
+    "sem drops a row": lambda m: _c6xs9_frame(m, [1, 1, 2], ["x"] * 3, [1.0, 3.0, 5.0]).pivot_table(
+        index="r", columns="c", values="v", aggfunc="sem"
+    ),
+    "skew of a short group": lambda m: _c6xs9_frame(m, [1, 1, 1, 2, 2], ["x"] * 5, [1.0, 3.0, 8.0, 5.0, 6.0]).pivot_table(
+        index="r", columns="c", values="v", aggfunc="skew"
+    ),
+    "no columns var": lambda m: _c6xs9_frame(m, [1, 1, 2], ["x"] * 3, [1.0, 3.0, 5.0]).pivot_table(
+        index="r", values="v", aggfunc="var"
+    ),
+    "no columns two values": lambda m: _c6xs9_frame(m, [1, 1, 2], ["x"] * 3, [1.0, 3.0, 5.0]).pivot_table(
+        index="r", values=["v", "w"], aggfunc="var"
+    ),
+    "var with fill_value": lambda m: _c6xs9_frame(m, [1, 1, 2, 2], ["x", "x", "y", "x"], [1.0, 3.0, 5.0, 6.0]).pivot_table(
+        index="r", columns="c", values="v", aggfunc="var", fill_value=0
+    ),
+    "var with margins": lambda m: _c6xs9_frame(m, [1, 1, 2], ["x", "x", "y"], [1.0, 3.0, 5.0]).pivot_table(
+        index="r", columns="c", values="v", aggfunc="var", margins=True
+    ),
+    "int count": lambda m: _c6xs9_frame(m, [1, 1, 2], ["x", "y", "x"], [1, 3, 5]).pivot_table(
+        index="r", columns="c", values="v", aggfunc="count"
+    ),
+    "int sum": lambda m: _c6xs9_frame(m, [1, 1, 2], ["x", "y", "x"], [1, 3, 5]).pivot_table(
+        index="r", columns="c", values="v", aggfunc="sum"
+    ),
+    "two index keys var": lambda m: m.DataFrame(
+        {"r": [1, 1, 2], "s": ["a", "a", "b"], "c": ["x"] * 3, "v": [1.0, 3.0, 5.0]}
+    ).pivot_table(index=["r", "s"], columns="c", values="v", aggfunc="var"),
+    # NEGATIVE
+    "dropna False keeps": lambda m: _c6xs9_frame(m, [1, 1, 2], ["x"] * 3, [1.0, 3.0, 5.0]).pivot_table(
+        index="r", columns="c", values="v", aggfunc="var", dropna=False
+    ),
+    "mean drops nothing": lambda m: _c6xs9_frame(m, [1, 1, 2], ["x"] * 3, [1.0, 3.0, 5.0]).pivot_table(
+        index="r", columns="c", values="v", aggfunc="mean"
+    ),
+    "two values": lambda m: _c6xs9_frame(m, [1, 1, 2], ["x"] * 3, [1.0, 3.0, 5.0]).pivot_table(
+        index="r", columns="c", values=["v", "w"], aggfunc="var"
+    ),
+}
+
+
+def _c6xs9_outcome(run: Any) -> Any:
+    try:
+        table = run()
+        return (
+            [repr(label) for label in table.index],
+            [repr(label) for label in table.columns],
+            str(table.dtypes.tolist()),
+            repr(table.values.tolist()),
+        )
+    except NameError:
+        raise
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_C6XS9_CASES))
+def test_pivot_table_dropna_drops_all_missing_rows_and_columns_c6xs9(case: str) -> None:
+    run = _C6XS9_CASES[case]
+    assert _c6xs9_outcome(lambda: run(fpd)) == _c6xs9_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-vol90: resample of an unsorted DatetimeIndex read the rows
+# as given, so first / last / ohlc / apply / transform answered other rows
+# than pandas, which bins them in time order (a stable sort, ties kept in
+# input order). NEGATIVE rows: order-free reductions, a sorted index.
+_VOL90_STAMPS = ["2024-01-02 09:00", "2024-01-01 05:00", "2024-01-02 03:00", "2024-01-01 01:00", "2024-01-01 05:00"]
+
+
+def _vol90_series(m: Any) -> Any:
+    return m.Series([3.0, 2.0, 4.0, 1.0, 2.5], index=m.to_datetime(_VOL90_STAMPS), name="s")
+
+
+def _vol90_frame(m: Any) -> Any:
+    return m.DataFrame({"a": [3.0, 2.0, 4.0, 1.0, 2.5], "b": [7, 6, 8, 5, 9]}, index=m.to_datetime(_VOL90_STAMPS))
+
+
+_VOL90_CASES = {
+    **{
+        f"series {op}": (lambda op: lambda m: getattr(_vol90_series(m).resample("D"), op)())(op)
+        for op in ["first", "last", "ohlc", "sum", "count", "max", "median"]
+    },
+    **{
+        f"frame {op}": (lambda op: lambda m: getattr(_vol90_frame(m).resample("D"), op)())(op)
+        for op in ["first", "last", "sum", "mean"]
+    },
+    "series agg first": lambda m: _vol90_series(m).resample("D").agg("first"),
+    "series apply iloc0": lambda m: _vol90_series(m).resample("D").apply(lambda g: g.iloc[0]),
+    "series apply head2": lambda m: _vol90_series(m).resample("D").apply(lambda g: g.head(2)),
+    "series transform first": lambda m: _vol90_series(m).resample("D").transform("first"),
+    "series 12h last": lambda m: _vol90_series(m).resample("12h").last(),
+    "frame apply head1": lambda m: _vol90_frame(m).resample("D").apply(lambda g: g.head(1)),
+    "frame on= column first": lambda m: _vol90_frame(m).assign(t=m.to_datetime(_VOL90_STAMPS)).reset_index(drop=True).resample("D", on="t").first(),
+    # NEGATIVE: a sorted index is unchanged.
+    "sorted series first": lambda m: _vol90_series(m).sort_index().resample("D").first(),
+}
+
+
+def _vol90_outcome(run: Any) -> Any:
+    try:
+        result = run()
+        return (type(result).__name__, [repr(label) for label in result.index], repr(result.values.tolist()))
+    except NameError:
+        raise
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VOL90_CASES))
+def test_resample_reads_an_unsorted_index_in_time_order_vol90(case: str) -> None:
+    run = _VOL90_CASES[case]
+    assert _vol90_outcome(lambda: run(fpd)) == _vol90_outcome(lambda: run(pd)), case

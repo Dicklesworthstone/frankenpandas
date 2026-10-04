@@ -2237,6 +2237,181 @@ fn column_multiindex_headers(
 /// index level takes at least the index's `col_space`, left-justified.
 /// Every frame prints this way (a frame it could not lay out printed
 /// frankenpandas' own Display; fvsao.34).
+/// `DataFrame.to_html`'s layout keywords beside the cell ones
+/// ([`TextKeywords`]), as pandas' HTMLFormatter reads them.
+struct HtmlLayout<'a> {
+    index: bool,
+    header: bool,
+    index_names: bool,
+    bold_rows: bool,
+    escape: bool,
+    render_links: bool,
+    justify: &'a str,
+}
+
+/// The URL schemes pandas' `is_url` accepts (`_VALID_URLS`: urllib's
+/// uses_relative, uses_netloc and uses_params, the empty one left out).
+const HTML_LINK_SCHEMES: [&str; 30] = [
+    "file",
+    "ftp",
+    "git",
+    "git+ssh",
+    "gopher",
+    "hdl",
+    "http",
+    "https",
+    "imap",
+    "itms-services",
+    "mms",
+    "nfs",
+    "nntp",
+    "prospero",
+    "rsync",
+    "rtsp",
+    "rtsps",
+    "rtspu",
+    "sftp",
+    "shttp",
+    "sip",
+    "sips",
+    "snews",
+    "svn",
+    "svn+ssh",
+    "tel",
+    "telnet",
+    "wais",
+    "ws",
+    "wss",
+];
+
+/// pandas' `HTMLFormatter` over a frame with a flat index and flat columns
+/// (br-frankenpandas-ymbic): each column's `to_string` cells (formatters,
+/// float_format, na_rep, decimal) stripped - fp printed every float on its
+/// own (1.5, not pandas' 1.50 beside 2.25) - the index labels as `to_string`
+/// shows them, the columns' name over the index and a row of the index's
+/// name when it has one, `<th>` index cells unless `bold_rows` is off, `&`,
+/// `<` and `>` escaped unless `escape` is off, and a URL in an `<a>` under
+/// `render_links`. `tag` opens the table.
+fn pandas_html(
+    py: Python<'_>,
+    frame: &DataFrame,
+    tag: &str,
+    text: &TextKeywords<'_, '_>,
+    layout: &HtmlLayout<'_>,
+) -> PyResult<String> {
+    let (len, width) = frame.shape();
+    let rows: Vec<usize> = (0..len).collect();
+    let style = text.style(py, frame, &rows, layout.index)?;
+    let urlparse = if layout.render_links {
+        Some(py.import("urllib.parse")?.getattr("urlparse")?)
+    } else {
+        None
+    };
+    let cell = |kind: &str, raw: &str| -> PyResult<String> {
+        let shown = if layout.escape {
+            raw.replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+        } else {
+            raw.to_owned()
+        };
+        let shown = shown.trim();
+        let link = match &urlparse {
+            Some(urlparse) => {
+                let scheme: String = urlparse.call1((shown,))?.getattr("scheme")?.extract()?;
+                HTML_LINK_SCHEMES.contains(&scheme.as_str())
+            }
+            None => false,
+        };
+        Ok(if link {
+            format!(
+                "      <{kind}><a href=\"{}\" target=\"_blank\">{shown}</a></{kind}>\n",
+                raw.trim()
+            )
+        } else {
+            format!("      <{kind}>{shown}</{kind}>\n")
+        })
+    };
+    // pandas' show_col_idx_names / show_row_idx_names: a named column axis
+    // heads the index column (a blank one when the index is hidden), a named
+    // index gets a row of its own.
+    let column_axis_name = frame
+        .columns_name()
+        .map(String::from)
+        .filter(|_| layout.index_names && layout.header);
+    let row_name = frame
+        .index()
+        .name()
+        .map(|name| name.to_string())
+        .filter(|_| layout.index && layout.index_names);
+    let lead_column = layout.index || column_axis_name.is_some();
+    let lead_kind = if layout.bold_rows { "th" } else { "td" };
+    let mut out = format!("{tag}\n");
+    if layout.header || row_name.is_some() {
+        out.push_str("  <thead>\n");
+    }
+    if layout.header {
+        out.push_str(&format!(
+            "    <tr style=\"text-align: {};\">\n",
+            layout.justify
+        ));
+        if lead_column {
+            out.push_str(&cell("th", column_axis_name.as_deref().unwrap_or(""))?);
+        }
+        let labels = frame.column_labels();
+        let label_texts = if labels.len() == width {
+            pandas_column_label_texts(&labels)
+        } else {
+            frame.column_names().into_iter().cloned().collect()
+        };
+        for label in &label_texts {
+            out.push_str(&cell("th", label)?);
+        }
+        out.push_str("    </tr>\n");
+    }
+    if let Some(name) = &row_name {
+        out.push_str("    <tr>\n");
+        out.push_str(&cell("th", name)?);
+        for _ in 0..width {
+            out.push_str("      <th></th>\n");
+        }
+        out.push_str("    </tr>\n");
+    }
+    if layout.header || row_name.is_some() {
+        out.push_str("  </thead>\n");
+    }
+    let index_texts = match style.index_cells.clone() {
+        Some(texts) => texts,
+        None => pandas_label_texts(frame.index().labels(), frame.index().tz()),
+    };
+    let columns: Vec<Vec<String>> = (0..width)
+        .map(|position| {
+            style
+                .cells
+                .get(position)
+                .cloned()
+                .flatten()
+                .or_else(|| frame.column_at(position).map(pandas_cells))
+                .unwrap_or_default()
+        })
+        .collect();
+    out.push_str("  <tbody>\n");
+    for row in 0..len {
+        out.push_str("    <tr>\n");
+        if layout.index {
+            out.push_str(&cell(lead_kind, &index_texts[row])?);
+        } else if lead_column {
+            out.push_str(&cell(lead_kind, "")?);
+        }
+        for column in &columns {
+            out.push_str(&cell("td", &column[row])?);
+        }
+        out.push_str("    </tr>\n");
+    }
+    out.push_str("  </tbody>\n</table>");
+    Ok(out)
+}
+
 fn pandas_frame_text(
     frame: &DataFrame,
     limits: RowLimits,
@@ -22889,21 +23064,27 @@ fn rezoned(series: Series, zone: Option<&str>) -> PyResult<Series> {
 
 /// Whether pandas' arithmetic over `column` runs through the cells' own
 /// Python operators: it holds a Python-object cell (a host object, a list,
-/// bytes), or it is an object column mixing text with other values (an
-/// all-text or all-number column keeps its kernels).
+/// bytes), or it is an object column of anything but text - numbers,
+/// bools, nothing present - whose kernels read the cells as text (an
+/// object column of ints + 1 was a coercion error, * 2 all NaN, a - b
+/// the text '-2.0'; br-frankenpandas-47dus). An all-text column keeps its
+/// kernels.
 fn has_object_cells(column: &Column) -> bool {
     if holds_only_typed_cells(&column.dtype()) {
         return false;
     }
     let values = column.values();
-    values
+    if values
         .iter()
         .any(|value| matches!(value, Scalar::Object(_)))
-        || (is_object_column(column)
-            && values.iter().any(|value| matches!(value, Scalar::Utf8(_)))
-            && values
-                .iter()
-                .any(|value| !value.is_missing() && !matches!(value, Scalar::Utf8(_))))
+    {
+        return true;
+    }
+    let mut present = values.iter().filter(|value| !value.is_missing());
+    let all_text = present
+        .clone()
+        .all(|value| matches!(value, Scalar::Utf8(_)));
+    is_object_column(column) && !(all_text && present.next().is_some())
 }
 
 /// pandas' object arithmetic when either operand column holds such cells
@@ -22930,7 +23111,13 @@ fn host_object_arith(
     let right_has = other_series
         .as_ref()
         .is_some_and(|series| has_object_cells(series.column()));
-    if !has_object_cells(left.column()) && !right_has {
+    // An object column of text against anything but text reads pair by
+    // pair through Python too, as pandas: 'a' + 1 is Python's TypeError,
+    // 'a%s' % 1 formats (the kernels refused both with a coercion message;
+    // br-frankenpandas-47dus). Text against text keeps the kernels.
+    let text_against_other =
+        is_object_column(left.column()) && !text_operand(other, other_series.as_ref());
+    if !has_object_cells(left.column()) && !right_has && !text_against_other {
         return Ok(None);
     }
     // A tuple is no operand pandas broadcasts.
@@ -22972,17 +23159,22 @@ fn host_object_arith(
         }
         None => (left.clone(), None),
     };
-    let scalar_missing = theirs.is_none() && py_to_cell(py, other)?.is_missing();
     let operator = py.import("operator")?.getattr(op)?;
     let column = left.column();
+    // _masked_arith_op against a scalar masks the column's missing cells
+    // only (so 'a' + None is Python's TypeError; it was NaN) - and every
+    // cell of a reflected pow by 1 (its "1 ** np.nan is 1" unmasking, which
+    // reaches rpow alone: it tests `op is pow`, the builtin, so 1 ** [1, 2,
+    // None] is all NaN while [1, 2, None] ** 2 is [1, 4, nan]; measured).
+    let rpow_one = theirs.is_none() && op == "pow" && reflected && other.eq(1)?;
     let pairwise = |masked: bool| -> PyResult<Vec<Scalar>> {
         let mut cells = Vec::with_capacity(left.len());
         for (position, value) in column.values().iter().enumerate() {
             let (their, their_missing) = match &theirs {
                 Some(theirs) => (theirs[position].0.bind(py).clone(), theirs[position].1),
-                None => (other.clone(), scalar_missing),
+                None => (other.clone(), false),
             };
-            if masked && (value.is_missing() || their_missing) {
+            if masked && (value.is_missing() || their_missing || rpow_one) {
                 cells.push(Scalar::Null(NullKind::NaN));
                 continue;
             }
@@ -23013,6 +23205,41 @@ fn host_object_arith(
     )
     .map_err(frame_error_to_py)?;
     Ok(Some(PySeries { inner }))
+}
+
+/// Whether an arithmetic operand is text - a str, or a Series of text -
+/// which an object column of text meets with fp's kernels.
+fn text_operand(other: &Bound<'_, PyAny>, other_series: Option<&Series>) -> bool {
+    match other_series {
+        Some(series) => series.column().dtype() == DType::Utf8,
+        None => other.is_instance_of::<pyo3::types::PyString>(),
+    }
+}
+
+/// pandas' unary operator over an object column: numpy's object loop, `op`
+/// (the `operator` module's neg / pos / abs / invert) on each cell, a
+/// missing one as Python holds it (so None and text are Python's
+/// TypeError), the results an object column. None for any other column.
+/// fp's kernels read the cells as text: -s of numbers was ['-1', '2'], abs
+/// and ~ alike (br-frankenpandas-47dus).
+fn host_object_unary(py: Python<'_>, series: &Series, op: &str) -> PyResult<Option<Series>> {
+    let column = series.column();
+    if !is_object_column(column) && !has_object_cells(column) {
+        return Ok(None);
+    }
+    let operator = py.import("operator")?.getattr(op)?;
+    let cells = column
+        .values()
+        .iter()
+        .map(|value| py_to_cell(py, &operator.call1((cell_to_py(py, column, value)?,))?))
+        .collect::<PyResult<Vec<_>>>()?;
+    Series::new(
+        series.name(),
+        series.index().clone(),
+        Column::from_object_values(cells),
+    )
+    .map(Some)
+    .map_err(frame_error_to_py)
 }
 
 /// pandas' sum / prod over such cells (numpy's object add.reduce /
@@ -27913,8 +28140,12 @@ impl PySeries {
         let result = masked_pow_ones(&lhs, &self.inner, result)?;
         bool_numpy_series(result, target)
     }
-    /// `-s`; pandas negates a bool Series as logical NOT (it raised).
-    fn __neg__(&self) -> PyResult<PySeries> {
+    /// `-s`; pandas negates a bool Series as logical NOT (it raised), an
+    /// object column cell by cell ([`host_object_unary`]).
+    fn __neg__(&self, py: Python<'_>) -> PyResult<PySeries> {
+        if let Some(inner) = host_object_unary(py, &self.inner, "neg")? {
+            return Ok(PySeries { inner });
+        }
         if self.inner.dtype() == DType::Bool {
             return wrap_series(self.inner.invert());
         }
@@ -27923,14 +28154,23 @@ impl PySeries {
     /// `~s`: logical NOT of a bool Series, bitwise NOT of ints, as pandas.
     /// `df[~mask]` raised "bad operand type for unary ~"
     /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.13).
-    fn __invert__(&self) -> PyResult<PySeries> {
+    fn __invert__(&self, py: Python<'_>) -> PyResult<PySeries> {
+        if let Some(inner) = host_object_unary(py, &self.inner, "invert")? {
+            return Ok(PySeries { inner });
+        }
         unary_keeping_width(self.inner.invert(), &self.inner)
     }
     /// `abs(s)` and `+s`, as pandas.
-    fn __abs__(&self) -> PyResult<PySeries> {
+    fn __abs__(&self, py: Python<'_>) -> PyResult<PySeries> {
+        if let Some(inner) = host_object_unary(py, &self.inner, "abs")? {
+            return Ok(PySeries { inner });
+        }
         unary_keeping_width(self.inner.abs(), &self.inner)
     }
-    fn __pos__(&self) -> PyResult<PySeries> {
+    fn __pos__(&self, py: Python<'_>) -> PyResult<PySeries> {
+        if let Some(inner) = host_object_unary(py, &self.inner, "pos")? {
+            return Ok(PySeries { inner });
+        }
         unary_keeping_width(self.inner.positive(), &self.inner)
     }
     /// `s & other`, `s | other`, `s ^ other` and their reflected forms, as
@@ -28774,8 +29014,12 @@ impl PySeries {
         moment_to_py(py, value, self.inner.count() >= 4)
     }
 
-    /// Return the absolute value of each element as a new Series.
-    fn abs(&self) -> PyResult<PySeries> {
+    /// Return the absolute value of each element as a new Series; an
+    /// object column's cell by cell ([`host_object_unary`]).
+    fn abs(&self, py: Python<'_>) -> PyResult<PySeries> {
+        if let Some(inner) = host_object_unary(py, &self.inner, "abs")? {
+            return Ok(PySeries { inner });
+        }
         let r = self
             .inner
             .abs()
@@ -35714,8 +35958,15 @@ impl PyDataFrame {
             && !other.is_instance_of::<PyList>()
             && !other.is_instance_of::<PyTuple>()
             && other.getattr("tolist").is_err();
+        // A column of text against a scalar other than a str too (pandas'
+        // own TypeError for df + 1; br-frankenpandas-47dus).
+        let text_scalar = other.is_instance_of::<pyo3::types::PyString>();
         let objects: Vec<usize> = (0..self.inner.num_columns())
-            .filter(|&position| self.inner.column_at(position).is_some_and(has_object_cells))
+            .filter(|&position| {
+                self.inner.column_at(position).is_some_and(|column| {
+                    has_object_cells(column) || (is_object_column(column) && !text_scalar)
+                })
+            })
             .collect();
         if scalar && !objects.is_empty() {
             let py = other.py();
@@ -36144,6 +36395,61 @@ impl PyDataFrame {
         )
         .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: series })
+    }
+
+    /// The unary operator `op` (the `operator` module's neg / pos / abs /
+    /// invert) over the frame: each object column cell by cell through
+    /// Python ([`host_object_unary`]), the rest by `core`, placed by
+    /// position so a repeated label keeps its own column. Object columns
+    /// of numbers became text (br-frankenpandas-47dus).
+    fn unary_with_objects(
+        &self,
+        py: Python<'_>,
+        op: &str,
+        core: fn(&DataFrame) -> Result<DataFrame, fp_frame::FrameError>,
+    ) -> PyResult<PyDataFrame> {
+        let width = self.inner.num_columns();
+        let mut computed: Vec<Option<Column>> = Vec::with_capacity(width);
+        for position in 0..width {
+            let object = self
+                .inner
+                .column_at(position)
+                .is_some_and(|column| is_object_column(column) || has_object_cells(column));
+            computed.push(if object {
+                let series = self.column_series_at(position)?.inner;
+                host_object_unary(py, &series, op)?.map(|series| series.column().clone())
+            } else {
+                None
+            });
+        }
+        if computed.iter().all(Option::is_none) {
+            return wrap_frame(core(&self.inner));
+        }
+        // The core sees a 0 where each object column was, which every
+        // unary operator takes.
+        let rows = self.inner.len();
+        let placeholder =
+            Column::new(DType::Int64, vec![Scalar::Int64(0); rows]).map_err(column_error_to_py)?;
+        let columns = computed
+            .iter()
+            .enumerate()
+            .map(|(position, done)| match done {
+                Some(_) => Some(placeholder.clone()),
+                None => self.inner.column_at(position).cloned(),
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyIndexError, _>("column position"))?;
+        let result =
+            core(&self.inner.with_columns_at_positions(columns)).map_err(frame_error_to_py)?;
+        let columns = computed
+            .into_iter()
+            .enumerate()
+            .map(|(position, done)| done.or_else(|| result.column_at(position).cloned()))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyIndexError, _>("column position"))?;
+        Ok(PyDataFrame {
+            inner: result.with_columns_at_positions(columns),
+        })
     }
 
     /// `idxmax` / `idxmin` along the rows over MultiIndex columns: each
@@ -39028,18 +39334,18 @@ impl PyDataFrame {
     ) -> PyResult<PyDataFrame> {
         self.arith_operator(other, ArithmeticOp::Pow, true, "**")
     }
-    fn __neg__(&self) -> PyResult<PyDataFrame> {
-        wrap_frame(self.inner.neg())
+    fn __neg__(&self, py: Python<'_>) -> PyResult<PyDataFrame> {
+        self.unary_with_objects(py, "neg", DataFrame::neg)
     }
     /// `~df`, `abs(df)` and `+df`, as pandas (fvsao.13: `~` raised).
-    fn __invert__(&self) -> PyResult<PyDataFrame> {
-        wrap_frame(self.inner.invert())
+    fn __invert__(&self, py: Python<'_>) -> PyResult<PyDataFrame> {
+        self.unary_with_objects(py, "invert", DataFrame::invert)
     }
-    fn __abs__(&self) -> PyResult<PyDataFrame> {
-        wrap_frame(self.inner.abs())
+    fn __abs__(&self, py: Python<'_>) -> PyResult<PyDataFrame> {
+        self.unary_with_objects(py, "abs", DataFrame::abs)
     }
-    fn __pos__(&self) -> PyResult<PyDataFrame> {
-        wrap_frame(self.inner.positive())
+    fn __pos__(&self, py: Python<'_>) -> PyResult<PyDataFrame> {
+        self.unary_with_objects(py, "pos", DataFrame::positive)
     }
     /// `df & other`, `df | other`, `df ^ other` and their reflected forms,
     /// column by column as pandas (see [`PyDataFrame::logical`]).
@@ -40943,12 +41249,11 @@ impl PyDataFrame {
         self.notna()
     }
 
-    /// Return the elementwise absolute value as a new DataFrame.
-    fn abs(&self) -> PyResult<PyDataFrame> {
-        // frame_error_to_py, not a blanket ValueError: abs of an object column
-        // is pandas' TypeError (4qg5w.18).
-        let result = self.inner.abs().map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+    /// Return the elementwise absolute value as a new DataFrame; an object
+    /// column's cell by cell, so text is Python's TypeError (4qg5w.18) and
+    /// numbers their abs (they became text; br-frankenpandas-47dus).
+    fn abs(&self, py: Python<'_>) -> PyResult<PyDataFrame> {
+        self.unary_with_objects(py, "abs", DataFrame::abs)
     }
 
     /// Clip values to the `[lower, upper]` range (either bound optional).
@@ -42306,25 +42611,35 @@ impl PyDataFrame {
             "DataFrame.to_html",
             &[
                 ("col_space", unset(col_space)),
-                ("header", header),
-                ("na_rep", na_rep == "NaN"),
-                ("formatters", unset(formatters)),
-                ("float_format", unset(float_format)),
                 ("sparsify", unset(sparsify)),
-                ("index_names", index_names),
-                ("justify", justify.is_none()),
                 ("max_rows", max_rows.is_none()),
                 ("max_cols", max_cols.is_none()),
                 ("show_dimensions", !show_dimensions),
-                ("decimal", decimal == "."),
-                ("bold_rows", bold_rows),
-                ("escape", escape),
                 ("notebook", !notebook),
-                ("render_links", !render_links),
                 ("encoding", encoding.is_none()),
             ],
         )?;
         let frame = select_columns_arg(self.inner.clone(), columns)?;
+        let flat = frame.row_multiindex().is_none() && frame.columns_multiindex().is_none();
+        if !flat {
+            // A MultiIndex frame keeps fp-frame's table, which reads none of
+            // these (refused rather than ignored).
+            unsupported_params(
+                "DataFrame.to_html of a MultiIndex frame",
+                &[
+                    ("header", header),
+                    ("na_rep", na_rep == "NaN"),
+                    ("formatters", unset(formatters)),
+                    ("float_format", unset(float_format)),
+                    ("index_names", index_names),
+                    ("justify", justify.is_none()),
+                    ("decimal", decimal == "."),
+                    ("bold_rows", bold_rows),
+                    ("escape", escape),
+                    ("render_links", !render_links),
+                ],
+            )?;
+        }
         let classes = match classes.filter(|classes| !classes.is_none()) {
             None => String::new(),
             Some(one) if one.is_instance_of::<pyo3::types::PyString>() => {
@@ -42353,10 +42668,33 @@ impl PyDataFrame {
             .map(|id| format!(" id=\"{id}\""))
             .unwrap_or_default();
         let tag = format!("<table{border} class=\"dataframe{classes}\"{id}>");
-        let html =
+        let html = if flat {
+            let text = TextKeywords {
+                col_space: None,
+                header: None,
+                formatters,
+                float_format,
+                na_rep,
+                decimal,
+                justify: None,
+                index_names,
+                sparsify: None,
+            };
+            let html = HtmlLayout {
+                index,
+                header,
+                index_names,
+                bold_rows,
+                escape,
+                render_links,
+                justify: justify.unwrap_or("right"),
+            };
+            Python::attach(|py| pandas_html(py, &frame, &tag, &text, &html))?
+        } else {
             frame
                 .to_html(index)
-                .replacen("<table border=\"1\" class=\"dataframe\">", &tag, 1);
+                .replacen("<table border=\"1\" class=\"dataframe\">", &tag, 1)
+        };
         write_text_target(buf, html, false)
     }
 
@@ -43072,8 +43410,14 @@ impl PyDataFrame {
         let raw = expr;
         let (expr, locals) = resolve_expr_locals(py, raw, local_dict, global_dict, level)?;
         let expr = expr.as_str();
-        let value_error =
-            |e: fp_expr::ExprError| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string());
+        // A constant's division by zero is Python's ZeroDivisionError, as
+        // pandas folds it (br-frankenpandas-2blaf).
+        let value_error = |e: fp_expr::ExprError| match e {
+            fp_expr::ExprError::ZeroDivision(message) => {
+                PyErr::new::<pyo3::exceptions::PyZeroDivisionError, _>(message)
+            }
+            e => PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()),
+        };
         // pandas runs each non-blank line in order, a later line seeing the
         // columns an earlier one assigned; several lines must all assign
         // (a multi-line eval was one parse error; br-frankenpandas-c5b7x).
@@ -43136,8 +43480,13 @@ impl PyDataFrame {
                 "Cannot operate inplace if there is no assignment",
             ));
         }
-        match self.inner.eval_with_locals(expr, &locals) {
-            Ok(evaluated) => Ok(Py::new(py, PySeries { inner: evaluated })?.into_any()),
+        // An expression naming no column is pandas' one value, computed once
+        // (it was broadcast to every row; br-frankenpandas-2blaf).
+        match self.inner.eval_value_with_locals(expr, &locals) {
+            Ok(fp_expr::EvalValue::Series(evaluated)) => {
+                Ok(Py::new(py, PySeries { inner: *evaluated })?.into_any())
+            }
+            Ok(fp_expr::EvalValue::Scalar(value)) => scalar_to_py(py, &value),
             Err(fp_expr::ExprError::ParseError(_)) => {
                 Ok(
                     python_engine_eval(py, &self.inner, raw, local_dict, global_dict, level)?
@@ -44056,6 +44405,31 @@ impl PyDataFrame {
                 .map_err(frame_error_to_py)?;
             Bound::new(py, PyDataFrame { inner: sorted })?.into_any()
         };
+        // pandas' dropna=True drops each aggregated row whose every value is
+        // missing before it unstacks (var / std / sem of one value, skew of
+        // fewer than three), as the branch above does - the kernel's table
+        // and the groupby of no `columns` kept it (br-frankenpandas-c6xs9) -
+        // and, last of all, each column whose every value is missing.
+        let all_missing = |axis: i64| -> PyResult<Bound<'py, PyDict>> {
+            let kwargs = keyword("how", pyo3::types::PyString::new(py, "all").into_any())?;
+            kwargs.set_item("axis", axis)?;
+            Ok(kwargs)
+        };
+        if dropna && (column_keys.is_empty() || simple) {
+            table = table.call_method("dropna", (), Some(&all_missing(0)?))?;
+            // With `columns`, a column whose every cell was dropped never
+            // unstacks, so no fill_value reaches it.
+            if simple {
+                table = table.call_method("dropna", (), Some(&all_missing(1)?))?;
+            }
+        }
+        let without_empty_columns = |table: Bound<'py, PyAny>| -> PyResult<Bound<'py, PyAny>> {
+            if dropna {
+                table.call_method("dropna", (), Some(&all_missing(1)?))
+            } else {
+                Ok(table)
+            }
+        };
         if let Some(fill) = fill_value.filter(|fill| !fill.is_none()) {
             let fill = py_to_scalar(py, fill)?;
             let res = table
@@ -44086,7 +44460,7 @@ impl PyDataFrame {
             table = Bound::new(py, PyDataFrame { inner: res })?.into_any();
         }
         if !margins {
-            return Ok(table);
+            return without_empty_columns(table);
         }
         if index_keys.len() != 1 {
             return Err(not_implemented(
@@ -44134,7 +44508,7 @@ impl PyDataFrame {
             concat.call1((PyList::new(py, [table, one_row(cells)?])?,))?
         };
         with_row.getattr("index")?.setattr("name", index_name)?;
-        Ok(with_row)
+        without_empty_columns(with_row)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -54232,6 +54606,16 @@ impl PySeriesDatetimeAccessor {
                 inferred.as_str()
             }
         };
+        if freq == "B" {
+            Python::attach(|py| {
+                PyErr::warn(
+                    py,
+                    &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+                    c"PeriodDtype[B] is deprecated and will be removed in a future version. Use a DatetimeIndex with freq='B' instead",
+                    1,
+                )
+            })?;
+        }
         let (Some(period_freq), DType::Datetime64 { tz }) =
             (PeriodFreq::parse(freq), self.series.column().dtype())
         else {
@@ -54337,17 +54721,7 @@ impl PySeriesDatetimeAccessor {
             .ok()
             .flatten()
             .ok_or_else(missing)?;
-        Ok(match freq.as_str() {
-            "ME" => "M".to_owned(),
-            "7D" => {
-                // 1970-01-01 was a Thursday (index 3, Monday 0).
-                const WEEKDAYS: [&str; 7] = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
-                let day = nanos[0].div_euclid(86_400_000_000_000);
-                let weekday = usize::try_from((day + 3).rem_euclid(7)).unwrap_or(0);
-                format!("W-{}", WEEKDAYS[weekday])
-            }
-            _ => freq,
-        })
+        period_alias_of_inferred(&freq)
     }
 
     /// Each value's scalar `method()` (Timestamp.to_pydatetime,
@@ -64838,6 +65212,26 @@ impl PyResampler {
         label: Option<String>,
         origin: Option<String>,
     ) -> PyResult<Self> {
+        // pandas bins the rows in time order - an unsorted index taken in its
+        // stable argsort, NaT first (TimeGrouper's mergesort) - so first /
+        // last / ohlc / apply / transform read each bin's earliest row first;
+        // they read the rows as given (br-frankenpandas-vol90).
+        let target = match target {
+            ResampleTarget::Series(series) if !series.index().is_monotonic_increasing() => {
+                let order = series
+                    .index()
+                    .argsort()
+                    .into_iter()
+                    .map(|position| i64::try_from(position).unwrap_or(i64::MAX))
+                    .collect::<Vec<_>>();
+                ResampleTarget::Series(series.take(&order).map_err(frame_error_to_py)?)
+            }
+            ResampleTarget::DataFrame(frame) if !frame.index().is_monotonic_increasing() => {
+                let order = frame.index().argsort();
+                ResampleTarget::DataFrame(frame.take_rows(&order).map_err(frame_error_to_py)?)
+            }
+            target => target,
+        };
         let index = match &target {
             ResampleTarget::Series(series) => series.index().clone(),
             ResampleTarget::DataFrame(frame) => frame.index().clone(),
@@ -65117,11 +65511,21 @@ impl PyResampler {
         if answers.first().is_some_and(answer_is_rows) {
             return self.concat_bin_rows(py, bins, answers);
         }
+        // An answer no scalar holds - a list, tuple or dict - is an object
+        // cell, as pandas keeps it (it raised "Cannot convert list to
+        // Scalar"; br-frankenpandas-jno5s).
         let values = answers
             .iter()
-            .map(|answer| py_to_scalar(py, answer))
+            .map(|answer| py_to_cell(py, answer))
             .collect::<PyResult<Vec<_>>>()?;
-        let mut column = Column::from_values(values).map_err(column_error_to_py)?;
+        let mut column = if values
+            .iter()
+            .any(|value| matches!(value, Scalar::Object(_)))
+        {
+            Column::from_object_values(values)
+        } else {
+            Column::from_values(values).map_err(column_error_to_py)?
+        };
         // pandas reads the answers as numpy would: ints beside a missing value
         // are float64 (an empty bin's max answered an int64 holding NaN).
         if column.dtype() == DType::Int64 && column.has_any_missing() {
@@ -70236,6 +70640,45 @@ fn mixed_zone_timestamps<'py>(
     Ok(Some(PyList::new(py, stamps)?))
 }
 
+/// The period frequency pandas' `dt.to_period()` reads an inferred offset
+/// as (its `get_period_alias`, then Period's own refusals), measured against
+/// pandas 2.2.3: MS / ME / BME are M, every QS Q-DEC, QE-x / BQE-x Q-x, every
+/// YS / BYS Y-DEC, YE-x / BYE-x Y-x, weeks and fixed units themselves; BMS,
+/// a week of the month and a counted start are not period frequencies, and
+/// a counted end is Period's "please use" (acelo).
+fn period_alias_of_inferred(freq: &str) -> PyResult<String> {
+    let refused = |message: String| PyErr::new::<pyo3::exceptions::PyValueError, _>(message);
+    let digits = freq.len() - freq.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let (count, base) = freq.split_at(digits);
+    let (rule, anchor) = base.split_once('-').unwrap_or((base, ""));
+    let unsupported = |what: &str| refused(format!("{what} is not supported as period frequency"));
+    let invalid = |reason: &str| {
+        refused(format!(
+            "Invalid frequency: {freq}, failed to parse with error message: {reason}"
+        ))
+    };
+    match (count.is_empty(), rule) {
+        (_, "WOM") | (true, "BMS") => Err(unsupported(freq)),
+        (true, "MS" | "ME" | "BME") => Ok("M".to_owned()),
+        (true, "QS") => Ok("Q-DEC".to_owned()),
+        (true, "QE" | "BQE") => Ok(format!("Q-{anchor}")),
+        (true, "YS" | "BYS") => Ok("Y-DEC".to_owned()),
+        (true, "YE" | "BYE") => Ok(format!("Y-{anchor}")),
+        (false, "MS" | "QS" | "YS") => Err(unsupported(base)),
+        (false, "ME") => Err(invalid(
+            "ValueError(\"for Period, please use 'M' instead of 'ME'\")",
+        )),
+        (false, "QE" | "YE") => Err(invalid(&format!(
+            "ValueError(\"for Period, please use '{}-{anchor}' instead of '{base}'\")",
+            &rule[..1]
+        ))),
+        (false, "BME" | "BQE" | "BYE") => {
+            Err(invalid(&format!("ValueError('Invalid frequency: {base}')")))
+        }
+        _ => Ok(freq.to_owned()),
+    }
+}
+
 /// The object Index `to_datetime` answers for datetimes in several zones
 /// ([`mixed_zone_timestamps`]): Timestamps, an aware one kept whole, or
 /// under format='mixed' every datetime the Python object it is.
@@ -70252,15 +70695,18 @@ fn mixed_zone_index(stamps: Bound<'_, PyList>, pydatetime: bool) -> PyResult<PyI
 fn to_datetime_error(err: fp_frame::FrameError) -> PyErr {
     match err {
         // A string no format reads is pandas' DateParseError (a ValueError),
-        // as is an ISO-shaped one with a field out of range.
+        // as is dateutil's complaint about an ISO-shaped one with a field
+        // out of range ("day is out of range for month: <text>"); a format's
+        // own ("day is out of range for month, at position 1") is a plain
+        // ValueError.
         fp_frame::FrameError::CompatibilityRejected(message)
             if [
-                "Unknown datetime string format",
-                "month must be in 1..12",
-                "day is out of range for month",
-                "hour must be in 0..23",
-                "minute must be in 0..59",
-                "second must be in 0..59",
+                "Unknown datetime string format, unable to parse: ",
+                "month must be in 1..12: ",
+                "day is out of range for month: ",
+                "hour must be in 0..23: ",
+                "minute must be in 0..59: ",
+                "second must be in 0..59: ",
             ]
             .iter()
             .any(|prefix| message.starts_with(prefix)) =>
@@ -74776,6 +75222,16 @@ macro_rules! define_simple_dtype {
                 Self
             }
 
+            /// Pickles (and deep-copies) as `<Class>()` ([`restore`]; no
+            /// dtype could be pickled, so neither could `df.dtypes`;
+            /// fvsao.58).
+            fn __reduce__<'py>(
+                &self,
+                py: Python<'py>,
+            ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+                restore_call(py, $class_name, constructor_payload(py, Vec::new(), &[])?)
+            }
+
             #[getter]
             fn name(&self) -> &'static str {
                 $dtype_name
@@ -74872,6 +75328,16 @@ impl PyStringDtype {
         }
     }
 
+    /// Pickles (and deep-copies) as `StringDtype(storage)` ([`restore`];
+    /// fvsao.58).
+    fn __reduce__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let payload = constructor_payload(py, vec![self.storage.into_bound_py_any(py)?], &[])?;
+        restore_call(py, "StringDtype", payload)
+    }
+
     /// The dtype a 'string[storage]' spelling names, as pandas'.
     #[classmethod]
     fn construct_from_string(
@@ -74962,6 +75428,27 @@ impl PyCategoricalDtype {
         })
     }
 
+    /// Pickles (and deep-copies) as `CategoricalDtype(categories,
+    /// ordered=)`, the categories as a list of their values ([`restore`];
+    /// fvsao.58).
+    fn __reduce__<'py>(
+        slf: &Bound<'py, Self>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let py = slf.py();
+        let categories = slf.getattr("categories")?;
+        let categories = if categories.is_none() {
+            categories
+        } else {
+            PyList::new(py, categories.try_iter()?.collect::<PyResult<Vec<_>>>()?)?.into_any()
+        };
+        let payload = constructor_payload(
+            py,
+            vec![categories],
+            &[("ordered", slf.getattr("ordered")?)],
+        )?;
+        restore_call(py, "CategoricalDtype", payload)
+    }
+
     #[getter]
     fn name(&self) -> &'static str {
         "category"
@@ -75046,6 +75533,20 @@ impl PyDatetimeTZDtype {
         })
     }
 
+    /// Pickles (and deep-copies) as `DatetimeTZDtype(unit=, tz=)`, the
+    /// zone as its tzinfo ([`restore`]; fvsao.58).
+    fn __reduce__<'py>(
+        slf: &Bound<'py, Self>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let py = slf.py();
+        let payload = constructor_payload(
+            py,
+            Vec::new(),
+            &[("unit", slf.getattr("unit")?), ("tz", slf.getattr("tz")?)],
+        )?;
+        restore_call(py, "DatetimeTZDtype", payload)
+    }
+
     /// The zone as pandas' tzinfo object (see [`zone_tzinfo`]; it was the
     /// name, a str).
     #[getter]
@@ -75099,6 +75600,17 @@ impl PyPeriodDtype {
         }
     }
 
+    /// Pickles (and deep-copies) as `PeriodDtype(freq)` ([`restore`];
+    /// fvsao.58).
+    fn __reduce__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let payload =
+            constructor_payload(py, vec![self.freq.as_str().into_bound_py_any(py)?], &[])?;
+        restore_call(py, "PeriodDtype", payload)
+    }
+
     #[getter]
     fn name(&self) -> String {
         format!("period[{}]", self.freq)
@@ -75146,6 +75658,20 @@ impl PyIntervalDtype {
             subtype: subtype.map(str::to_string),
             closed: closed.map(str::to_string),
         }
+    }
+
+    /// Pickles (and deep-copies) as `IntervalDtype(subtype, closed=)`
+    /// ([`restore`]; fvsao.58).
+    fn __reduce__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let payload = constructor_payload(
+            py,
+            vec![self.subtype.as_deref().into_bound_py_any(py)?],
+            &[("closed", self.closed.as_deref().into_bound_py_any(py)?)],
+        )?;
+        restore_call(py, "IntervalDtype", payload)
     }
 
     #[getter]
@@ -75215,6 +75741,23 @@ impl PySparseDtype {
         })
     }
 
+    /// Pickles (and deep-copies) as `SparseDtype(dtype, fill_value)`, the
+    /// fill value as the text it keeps ([`restore`]; fvsao.58).
+    fn __reduce__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let payload = constructor_payload(
+            py,
+            vec![
+                self.dtype.as_str().into_bound_py_any(py)?,
+                self.fill_value.as_str().into_bound_py_any(py)?,
+            ],
+            &[],
+        )?;
+        restore_call(py, "SparseDtype", payload)
+    }
+
     #[getter]
     fn name(&self) -> String {
         format!("Sparse[{}, {}]", self.dtype, self.fill_value)
@@ -75269,6 +75812,20 @@ impl PyArrowDtype {
         Ok(Self {
             pyarrow_dtype: dt_str,
         })
+    }
+
+    /// Pickles (and deep-copies) as `ArrowDtype(pyarrow_dtype)`, the type
+    /// by its name ([`restore`]; fvsao.58).
+    fn __reduce__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let payload = constructor_payload(
+            py,
+            vec![self.pyarrow_dtype.as_str().into_bound_py_any(py)?],
+            &[],
+        )?;
+        restore_call(py, "ArrowDtype", payload)
     }
 
     #[getter]
@@ -86933,7 +87490,7 @@ mod tests {
         assert_eq!(idx_len, 3);
 
         // Arithmetic: __neg__
-        let neg = py_df.__neg__().expect("negate"); // ubs:ignore — test fixture
+        let neg = Python::attach(|py| py_df.__neg__(py)).expect("negate"); // ubs:ignore — test fixture
         let col_x = neg.column_series("x").expect("col x"); // ubs:ignore — test fixture
         assert_eq!(
             col_x.inner.values(),
@@ -87818,7 +88375,7 @@ mod tests {
                 .expect("melt"); // ubs:ignore — test fixture
             assert_eq!(melted.shape(), (3, 3));
 
-            let abs_df = py_df.abs().expect("abs"); // ubs:ignore — test fixture
+            let abs_df = py_df.abs(py).expect("abs"); // ubs:ignore — test fixture
             assert_eq!(abs_df.shape(), (3, 2));
 
             let lo = pyo3::types::PyFloat::new(py, 2.0);

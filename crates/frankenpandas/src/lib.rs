@@ -19,9 +19,10 @@
 pub use fp_columnar::{ArithmeticOp, Column, ColumnError, ComparisonOp, ValidityMask};
 // ── Expression engine ───────────────────────────────────────────────────
 pub use fp_expr::{
-    DataFrameExprExt, Delta, EvalContext, Expr, ExprError, MaterializedView, SeriesRef, col,
-    eval_str, eval_str_with_locals, evaluate, evaluate_on_dataframe,
-    evaluate_on_dataframe_with_locals, lit,
+    DataFrameExprExt, Delta, EvalContext, EvalValue, Expr, ExprError, MaterializedView, SeriesRef,
+    col, eval_str, eval_str_with_locals, eval_value_on_dataframe_with_locals,
+    eval_value_str_with_locals, evaluate, evaluate_on_dataframe, evaluate_on_dataframe_with_locals,
+    lit,
 };
 #[cfg(feature = "lazy-transpose-view")]
 pub use fp_frame::DataFrameTransposeView;
