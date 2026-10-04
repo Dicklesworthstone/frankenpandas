@@ -24045,3 +24045,84 @@ def _47dus_outcome(run: Any) -> Any:
 def test_object_column_operators_like_pandas_47dus(case: str) -> None:
     run = _47DUS_CASES[case]
     assert _47dus_outcome(lambda: run(fpd)) == _47dus_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-2blaf: DataFrame.eval of an expression naming no column is
+# pandas' one Python value (fp broadcast it to every row, a 933 MB string per
+# row in the fuzz target), a constant's division by zero Python's
+# ZeroDivisionError (fp: inf). NEGATIVE rows: expressions over a column stay
+# a Series; an assignment of a constant still fills the column.
+_2BLAF_EXPRS = [
+    '3*"ab"',
+    "1+2",
+    '"ab"',
+    "2**10",
+    "1.5 * 2",
+    "True",
+    "1 < 2",
+    "-3",
+    "(1+2)*3",
+    "7 // 2",
+    "-7 // 2",
+    "-7 % 3",
+    "7.5 % 2",
+    "2**-1",
+    '"ab" * 0',
+    '"ab" * True',
+    "1 + True",
+    "1 == 1.0",
+    '"a" < "b"',
+    "True and False",
+    "3 in [1, 2, 3]",
+    "@x + 1",
+    '"a" + "b"',
+    "1/0",
+    "1//0",
+    "1%0",
+    "1.0/0",
+    "5.5//0",
+    "5.5 % 0",
+    "0/0",
+    "1/(1-1)",
+    "a + 1*0",
+    "a * 2",
+    "a / 0",
+    "a > 1",
+]
+_2BLAF_CASES: dict[str, Any] = {
+    expr: (lambda m, e=expr: m.DataFrame({"a": [1, 2]}).eval(e, local_dict={"x": 5})) for expr in _2BLAF_EXPRS
+}
+_2BLAF_CASES["empty frame 1+2"] = lambda m: m.DataFrame({"a": []}).eval("1+2")
+_2BLAF_CASES["assignment of a constant"] = lambda m: m.DataFrame({"a": [1, 2]}).eval("c = 1 + 2")
+
+
+def _2blaf_outcome(run: Any) -> Any:
+    try:
+        result = run()
+        if hasattr(result, "values"):
+            return ("ok", type(result).__name__, str(getattr(result, "dtypes", getattr(result, "dtype", None))), repr(result.values.tolist()))
+        return ("ok", type(result).__name__, repr(result))
+    except NameError:
+        raise
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+_2BLAF_NOT_COVERED = {
+    "2**-1": "Python folds int ** negative int to a float; fp's kernels refuse it as numpy does for a column",
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(case, marks=pytest.mark.xfail(strict=True, reason=_2BLAF_NOT_COVERED[case]))
+        if case in _2BLAF_NOT_COVERED
+        else case
+        for case in _2BLAF_CASES
+    ],
+)
+def test_eval_of_a_constant_is_one_value_2blaf(case: str) -> None:
+    run = _2BLAF_CASES[case]
+    assert _2blaf_outcome(lambda: run(fpd)) == _2blaf_outcome(lambda: run(pd)), case

@@ -81,7 +81,7 @@ use std::collections::BTreeMap;
 use fp_columnar::ComparisonOp;
 use fp_frame::{self, FrameError, Series};
 use fp_index::{DuplicateKeep, Index, IndexLabel};
-use fp_runtime::{EvidenceLedger, RuntimePolicy};
+use fp_runtime::{EvidenceLedger, RuntimeMode, RuntimePolicy};
 use fp_types::{DType, Scalar};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -677,6 +677,10 @@ pub enum ExprError {
     UnanchoredLocal(String),
     #[error("parse error: {0}")]
     ParseError(String),
+    /// A constant expression dividing by zero: Python's ZeroDivisionError
+    /// and its message, as pandas folds the constant (br-frankenpandas-2blaf).
+    #[error("{0}")]
+    ZeroDivision(String),
     #[error(transparent)]
     Frame(#[from] FrameError),
 }
@@ -722,6 +726,9 @@ fn evaluate_node(
         }
         Expr::Mul { left, right } => {
             let (lhs, rhs) = evaluate_arith_operands(left, right, context, policy, ledger)?;
+            if policy.mode == RuntimeMode::Hardened {
+                check_repeated_text_budget(&lhs, &rhs)?;
+            }
             lhs.mul_with_policy(&rhs, policy, ledger)
                 .map_err(ExprError::from)
         }
@@ -1026,6 +1033,188 @@ pub fn evaluate_on_dataframe_with_locals(
     evaluate(expr, &context, policy, ledger)
 }
 
+/// The most bytes hardened mode lets a repeated string (`text * n`) take,
+/// summed over an expression's rows.
+const HARDENED_REPEATED_TEXT_BYTES: usize = 64 << 20;
+
+/// Hardened mode's bound on `text * n`: the bytes the repetition would take
+/// over every row, refused past [`HARDENED_REPEATED_TEXT_BYTES`] before any
+/// is allocated. `466667723 * "23sezz%z"` asked for 3.7 GB a row and ran the
+/// eval fuzz target out of memory (br-frankenpandas-2blaf); strict mode
+/// builds what pandas builds.
+fn check_repeated_text_budget(lhs: &Series, rhs: &Series) -> Result<(), ExprError> {
+    let repeats = |text: &Series, count: &Series| {
+        text.dtype() == DType::Utf8 && matches!(count.dtype(), DType::Int64 | DType::Bool)
+    };
+    if !repeats(lhs, rhs) && !repeats(rhs, lhs) {
+        return Ok(());
+    }
+    let mut total = 0_usize;
+    for pair in lhs.values().iter().zip(rhs.values()) {
+        let ((Scalar::Utf8(text), count) | (count, Scalar::Utf8(text))) = pair else {
+            continue;
+        };
+        let count = match count {
+            Scalar::Int64(n) => usize::try_from(*n).unwrap_or(0),
+            Scalar::Bool(flag) => usize::from(*flag),
+            _ => 0,
+        };
+        total = total.saturating_add(text.len().saturating_mul(count));
+    }
+    if total > HARDENED_REPEATED_TEXT_BYTES {
+        return Err(ExprError::Frame(FrameError::CompatibilityRejected(
+            format!(
+                "hardened mode refuses a repeated string of {total} bytes (its budget is {HARDENED_REPEATED_TEXT_BYTES}); strict mode builds it"
+            ),
+        )));
+    }
+    Ok(())
+}
+
+/// What pandas' `DataFrame.eval` answers for an expression without an
+/// assignment: the Series an expression over columns makes or, for one
+/// naming no column (`1 + 2`, `3 * "ab"`, `@x + 1`), its one value,
+/// computed once. fp broadcast that value to every row
+/// (br-frankenpandas-2blaf).
+#[derive(Debug, Clone)]
+pub enum EvalValue {
+    Series(Box<Series>),
+    Scalar(Scalar),
+}
+
+/// Whether `expr` names no column - literals and `@locals` under
+/// arithmetic, comparisons, `and` / `or` and `in` - so pandas folds it to
+/// one value. `abs()` (pandas answers a numpy scalar) and `not` (pandas'
+/// bitwise `~`: `not True` is -2) keep the column form.
+fn is_constant(expr: &Expr) -> bool {
+    match expr {
+        Expr::Literal { .. } | Expr::Local { .. } => true,
+        Expr::Add { left, right }
+        | Expr::Sub { left, right }
+        | Expr::Mul { left, right }
+        | Expr::Div { left, right }
+        | Expr::Modulo { left, right }
+        | Expr::FloorDiv { left, right }
+        | Expr::Pow { left, right }
+        | Expr::And { left, right }
+        | Expr::Or { left, right }
+        | Expr::Compare { left, right, .. } => is_constant(left) && is_constant(right),
+        Expr::IsIn { left, .. } => is_constant(left),
+        _ => false,
+    }
+}
+
+/// The one value of a constant `expr` over a one-row `context`.
+fn constant_value(
+    expr: &Expr,
+    context: &EvalContext,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<Scalar, ExprError> {
+    evaluate(expr, context, policy, ledger)?
+        .values()
+        .first()
+        .cloned()
+        .ok_or(ExprError::UnanchoredLiteral)
+}
+
+/// Python's ZeroDivisionError for a division in a constant `expr` whose
+/// divisor is zero - its message by the operands' kinds, as pandas folds a
+/// constant with Python's operators (the kernels answered inf / NaN). The
+/// operands are checked left to right, inner divisions first.
+fn check_constant_division(
+    expr: &Expr,
+    context: &EvalContext,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<(), ExprError> {
+    let (left, right) = match expr {
+        Expr::Add { left, right }
+        | Expr::Sub { left, right }
+        | Expr::Mul { left, right }
+        | Expr::Div { left, right }
+        | Expr::Modulo { left, right }
+        | Expr::FloorDiv { left, right }
+        | Expr::Pow { left, right }
+        | Expr::And { left, right }
+        | Expr::Or { left, right }
+        | Expr::Compare { left, right, .. } => (left, right),
+        Expr::IsIn { left, .. } => return check_constant_division(left, context, policy, ledger),
+        _ => return Ok(()),
+    };
+    check_constant_division(left, context, policy, ledger)?;
+    check_constant_division(right, context, policy, ledger)?;
+    let operator = match expr {
+        Expr::Div { .. } => "/",
+        Expr::FloorDiv { .. } => "//",
+        Expr::Modulo { .. } => "%",
+        _ => return Ok(()),
+    };
+    let float = |value: &Scalar| matches!(value, Scalar::Float64(_));
+    let divisor = constant_value(right, context, policy, ledger)?;
+    let zero = match divisor {
+        Scalar::Int64(value) => value == 0,
+        Scalar::Bool(value) => !value,
+        Scalar::Float64(value) => value == 0.0,
+        _ => false,
+    };
+    if !zero {
+        return Ok(());
+    }
+    let dividend = constant_value(left, context, policy, ledger)?;
+    if !matches!(
+        dividend,
+        Scalar::Int64(_) | Scalar::Bool(_) | Scalar::Float64(_)
+    ) {
+        return Ok(());
+    }
+    let floats = float(&dividend) || float(&divisor);
+    let message = match (operator, floats) {
+        ("/", false) => "division by zero",
+        ("/", true) => "float division by zero",
+        ("//", false) => "integer division or modulo by zero",
+        ("//", true) => "float floor division by zero",
+        (_, false) => "integer modulo by zero",
+        (_, true) => "float modulo by zero",
+    };
+    Err(ExprError::ZeroDivision(message.to_owned()))
+}
+
+/// pandas' `DataFrame.eval` (without an assignment) of a parsed expression:
+/// [`EvalValue::Scalar`] for one naming no column, evaluated once over a
+/// one-row anchor whatever the frame's length, else [`EvalValue::Series`].
+pub fn eval_value_on_dataframe_with_locals(
+    expr: &Expr,
+    frame: &fp_frame::DataFrame,
+    locals: &BTreeMap<String, Scalar>,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<EvalValue, ExprError> {
+    if !is_constant(expr) {
+        return evaluate_on_dataframe_with_locals(expr, frame, locals, policy, ledger)
+            .map(|series| EvalValue::Series(Box::new(series)));
+    }
+    let context = EvalContext {
+        series: BTreeMap::new(),
+        locals: locals.clone(),
+        anchor_index: Some(Index::new(vec![IndexLabel::Int64(0)])),
+    };
+    check_constant_division(expr, &context, policy, ledger)?;
+    constant_value(expr, &context, policy, ledger).map(EvalValue::Scalar)
+}
+
+/// [`eval_value_on_dataframe_with_locals`] of an expression string.
+pub fn eval_value_str_with_locals(
+    expr_str: &str,
+    frame: &fp_frame::DataFrame,
+    locals: &BTreeMap<String, Scalar>,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<EvalValue, ExprError> {
+    let expr = parse_expr(expr_str)?;
+    eval_value_on_dataframe_with_locals(&expr, frame, locals, policy, ledger)
+}
+
 fn is_pure_boolean_literal_filter(expr: &Expr) -> bool {
     match expr {
         Expr::Literal {
@@ -1150,17 +1339,29 @@ pub fn query_str_with_locals(
 /// Import this trait to call `df.eval("a + b")` and `df.query("a > 1")` directly.
 /// Uses a default hardened policy and fresh evidence ledger.
 pub trait DataFrameExprExt {
-    /// Evaluate an expression string in the context of this DataFrame.
-    ///
-    /// Matches `pd.DataFrame.eval(expr)`.
+    /// Evaluate an expression string in the context of this DataFrame, as
+    /// a column of it: an expression naming no column is broadcast to every
+    /// row, as the right-hand side of an assignment (`c = 1`) takes it.
+    /// [`Self::eval_value`] answers what `pd.DataFrame.eval(expr)` returns.
     fn eval(&self, expr_str: &str) -> Result<Series, ExprError>;
 
-    /// Matches `pd.DataFrame.eval(expr)` with explicit `@local` scalar bindings.
+    /// [`Self::eval`] with explicit `@local` scalar bindings.
     fn eval_with_locals(
         &self,
         expr_str: &str,
         locals: &BTreeMap<String, Scalar>,
     ) -> Result<Series, ExprError>;
+
+    /// Matches `pd.DataFrame.eval(expr)` without an assignment: a Series,
+    /// or one value for an expression naming no column ([`EvalValue`]).
+    fn eval_value(&self, expr_str: &str) -> Result<EvalValue, ExprError>;
+
+    /// [`Self::eval_value`] with explicit `@local` scalar bindings.
+    fn eval_value_with_locals(
+        &self,
+        expr_str: &str,
+        locals: &BTreeMap<String, Scalar>,
+    ) -> Result<EvalValue, ExprError>;
 
     /// Filter rows by a boolean expression string.
     ///
@@ -1188,6 +1389,20 @@ impl DataFrameExprExt for fp_frame::DataFrame {
         let policy = RuntimePolicy::hardened(Some(100_000));
         let mut ledger = EvidenceLedger::new();
         eval_str_with_locals(expr_str, self, locals, &policy, &mut ledger)
+    }
+
+    fn eval_value(&self, expr_str: &str) -> Result<EvalValue, ExprError> {
+        self.eval_value_with_locals(expr_str, &BTreeMap::new())
+    }
+
+    fn eval_value_with_locals(
+        &self,
+        expr_str: &str,
+        locals: &BTreeMap<String, Scalar>,
+    ) -> Result<EvalValue, ExprError> {
+        let policy = RuntimePolicy::hardened(Some(100_000));
+        let mut ledger = EvidenceLedger::new();
+        eval_value_str_with_locals(expr_str, self, locals, &policy, &mut ledger)
     }
 
     fn query(&self, expr_str: &str) -> Result<fp_frame::DataFrame, ExprError> {
@@ -10372,6 +10587,140 @@ mod validate_filter_mask_typed_witness_ab_qm012 {
         assert!(
             (0.95..=1.05).contains(&aa_median) && aa_low <= 1.0 && aa_high >= 1.0,
             "A/A null gate failed: median={aa_median:.4}, CI=[{aa_low:.4},{aa_high:.4}]"
+        );
+    }
+}
+
+/// br-frankenpandas-2blaf: `DataFrame.eval` of an expression naming no
+/// column is pandas' one value (it was broadcast to every row), a constant
+/// division by zero Python's ZeroDivisionError, and hardened mode refuses a
+/// repeated string past its byte budget before allocating it. Values pinned
+/// to live pandas 2.2.3.
+#[cfg(test)]
+mod eval_value_2blaf {
+    use std::collections::BTreeMap;
+
+    use fp_runtime::{EvidenceLedger, RuntimePolicy};
+    use fp_types::Scalar;
+
+    use super::{DataFrameExprExt, EvalValue, ExprError, eval_value_str_with_locals};
+
+    fn frame() -> fp_frame::DataFrame {
+        fp_frame::DataFrame::from_dict(
+            &["a"],
+            vec![("a", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+        )
+        .unwrap()
+    }
+
+    fn value(expr: &str) -> Result<EvalValue, ExprError> {
+        let locals = BTreeMap::from([("x".to_owned(), Scalar::Int64(5))]);
+        frame().eval_value_with_locals(expr, &locals)
+    }
+
+    #[test]
+    fn a_constant_is_one_value() {
+        for (expr, expected) in [
+            ("3*\"ab\"", Scalar::Utf8("ababab".to_owned())),
+            ("1+2", Scalar::Int64(3)),
+            ("\"ab\"", Scalar::Utf8("ab".to_owned())),
+            ("2**10", Scalar::Int64(1024)),
+            ("1.5 * 2", Scalar::Float64(3.0)),
+            ("(1+2)*3", Scalar::Int64(9)),
+            ("7 // 2", Scalar::Int64(3)),
+            ("-7 % 3", Scalar::Int64(2)),
+            ("1 < 2", Scalar::Bool(true)),
+            ("True and False", Scalar::Bool(false)),
+            ("3 in [1, 2, 3]", Scalar::Bool(true)),
+            ("@x + 1", Scalar::Int64(6)),
+            ("\"a\" + \"b\"", Scalar::Utf8("ab".to_owned())),
+        ] {
+            let got = value(expr);
+            assert!(
+                matches!(&got, Ok(EvalValue::Scalar(value)) if *value == expected),
+                "{expr}: {got:?}"
+            );
+        }
+        // An empty frame answers the same value.
+        let empty = fp_frame::DataFrame::from_dict(&["a"], vec![("a", Vec::new())]).unwrap();
+        assert!(matches!(
+            empty.eval_value("1+2"),
+            Ok(EvalValue::Scalar(Scalar::Int64(3)))
+        ));
+    }
+
+    #[test]
+    fn an_expression_over_a_column_stays_a_series() {
+        // NEGATIVE: a column (even times zero) keeps its rows; the column
+        // form of a constant still broadcasts, as an assignment takes it.
+        let got = value("a + 1*0");
+        assert!(
+            matches!(&got, Ok(EvalValue::Series(series))
+                if series.values() == [Scalar::Int64(1), Scalar::Int64(2)]),
+            "{got:?}"
+        );
+        assert_eq!(frame().eval("1+2").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_constant_division_by_zero_is_pythons_error() {
+        for (expr, message) in [
+            ("1/0", "division by zero"),
+            ("0/0", "division by zero"),
+            ("1/(1-1)", "division by zero"),
+            ("True/0", "division by zero"),
+            ("1//0", "integer division or modulo by zero"),
+            ("1%0", "integer modulo by zero"),
+            ("1.0/0", "float division by zero"),
+            ("1/0.0", "float division by zero"),
+            ("5.5//0", "float floor division by zero"),
+            ("5.5 % 0", "float modulo by zero"),
+        ] {
+            let got = value(expr);
+            assert!(
+                matches!(&got, Err(ExprError::ZeroDivision(text)) if text == message),
+                "{expr}: {got:?}"
+            );
+        }
+        // NEGATIVE: a column divided by zero keeps the kernels' inf.
+        assert!(matches!(value("a/0"), Ok(EvalValue::Series(_))));
+    }
+
+    #[test]
+    fn hardened_mode_bounds_a_repeated_string() {
+        let locals = BTreeMap::new();
+        let mut ledger = EvidenceLedger::new();
+        let refused = eval_value_str_with_locals(
+            "100000000 * \"ab\"",
+            &frame(),
+            &locals,
+            &RuntimePolicy::hardened(None),
+            &mut ledger,
+        );
+        assert!(refused.is_err_and(|err| {
+            err.to_string()
+                .contains("hardened mode refuses a repeated string of 200000000 bytes")
+        }));
+        // NEGATIVE: under the budget it is built, and strict mode has none.
+        let built = eval_value_str_with_locals(
+            "1000 * \"ab\"",
+            &frame(),
+            &locals,
+            &RuntimePolicy::hardened(None),
+            &mut ledger,
+        );
+        assert!(
+            matches!(built, Ok(EvalValue::Scalar(Scalar::Utf8(ref text))) if text.len() == 2000)
+        );
+        let strict = eval_value_str_with_locals(
+            "40000000 * \"ab\"",
+            &frame(),
+            &locals,
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        );
+        assert!(
+            matches!(strict, Ok(EvalValue::Scalar(Scalar::Utf8(ref text))) if text.len() == 80_000_000)
         );
     }
 }

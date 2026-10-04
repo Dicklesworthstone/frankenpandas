@@ -43410,8 +43410,14 @@ impl PyDataFrame {
         let raw = expr;
         let (expr, locals) = resolve_expr_locals(py, raw, local_dict, global_dict, level)?;
         let expr = expr.as_str();
-        let value_error =
-            |e: fp_expr::ExprError| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string());
+        // A constant's division by zero is Python's ZeroDivisionError, as
+        // pandas folds it (br-frankenpandas-2blaf).
+        let value_error = |e: fp_expr::ExprError| match e {
+            fp_expr::ExprError::ZeroDivision(message) => {
+                PyErr::new::<pyo3::exceptions::PyZeroDivisionError, _>(message)
+            }
+            e => PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()),
+        };
         // pandas runs each non-blank line in order, a later line seeing the
         // columns an earlier one assigned; several lines must all assign
         // (a multi-line eval was one parse error; br-frankenpandas-c5b7x).
@@ -43474,8 +43480,13 @@ impl PyDataFrame {
                 "Cannot operate inplace if there is no assignment",
             ));
         }
-        match self.inner.eval_with_locals(expr, &locals) {
-            Ok(evaluated) => Ok(Py::new(py, PySeries { inner: evaluated })?.into_any()),
+        // An expression naming no column is pandas' one value, computed once
+        // (it was broadcast to every row; br-frankenpandas-2blaf).
+        match self.inner.eval_value_with_locals(expr, &locals) {
+            Ok(fp_expr::EvalValue::Series(evaluated)) => {
+                Ok(Py::new(py, PySeries { inner: *evaluated })?.into_any())
+            }
+            Ok(fp_expr::EvalValue::Scalar(value)) => scalar_to_py(py, &value),
             Err(fp_expr::ExprError::ParseError(_)) => {
                 Ok(
                     python_engine_eval(py, &self.inner, raw, local_dict, global_dict, level)?
