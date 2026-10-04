@@ -23790,3 +23790,97 @@ def test_to_clipboard_writes_pandas_tab_separated_text(tmp_path: Path, monkeypat
     # NEGATIVE: excel=False (pandas writes the repr) is still refused.
     with pytest.raises(NotImplementedError):
         fpd.DataFrame(frame).to_clipboard(excel=False)
+
+
+# br-frankenpandas-h9cug: a string under a format - format=, or the one pandas
+# guesses from a column's first value - is read as pandas' array_strptime
+# reads it: its regex (case ignored, whitespace as \s+, leap seconds 60 / 61
+# running into the next minute) then the calendar. A later row's day the
+# month lacks was dateutil's complaint (pandas: strptime's, a ValueError);
+# a format= leap second was 0.1 s off, a lowercase t / a tab NaT, a stray
+# space read. NEGATIVE rows: valid columns, an invalid first value (no
+# guess: dateutil's DateParseError, as before).
+_H9CUG_GUESSED = [
+    ["2023-02-29 10:00"],
+    ["2024-01-15 24:00"],
+    ["2024-13-01"],
+    ["2024-01-15 10:00", "2023-02-29 10:00"],
+    ["2024-01-15", "2024-13-01"],
+    ["2024-01-15 10:00", "2024-01-15 24:00"],
+    ["2024-01-15 10:00", "2024-01-15 10:61"],
+    ["2024-01-15 10:00:00", "2024-01-15 10:00:61"],
+    ["2024-12-31 23:00:00", "2024-12-31 23:59:60"],
+    ["2024-01-15T10:00:00", "2024-01-15T10:61:00"],
+    ["2024-01-15T10:00:00", "2023-02-29T10:00:00"],
+    ["2024/01/15", "2023/02/29"],
+    ["2024/01/15", "2024/13/01"],
+    ["2024-01-15 10:00", "2024-01-15\t10:30"],
+    ["2024-01-15 10:00", "2024-01-15T10:30"],
+    ["15/01/2024", "31/04/2024"],
+    ["2024-01-15 10:00", "2024-02-29 23:59"],
+    ["2024-12-31 23:59:60"],
+]
+_H9CUG_GIVEN = [
+    ("%Y-%m-%d", ["2024-01-15", "2023-02-29"]),
+    ("%Y-%m-%d", ["2024-01-15x"]),
+    ("%Y-%m-%d", [" 2024-01-15"]),
+    ("%Y-%m-%d", ["2024-01-15 "]),
+    ("%Y-%m-%d", ["2024-01- 5"]),
+    ("%d/%m/%Y", ["31/04/2024"]),
+    ("%m/%d/%Y", ["02/30/2024"]),
+    ("%Y-%m-%d %H:%M:%S", ["2024-01-15 10:00:60"]),
+    ("%Y-%m-%d %H:%M:%S", ["2024-01-15 10:00:61"]),
+    ("%Y-%m-%d %H:%M:%S", ["2024-12-31 23:59:60"]),
+    ("%Y-%m-%d %H:%M", ["2024-01-15 10:61"]),
+    ("%Y-%m-%dT%H:%M", ["2024-01-15t10:30"]),
+    ("%Y-%m-%d %H:%M", ["2024-01-15\t10:30"]),
+    ("%d.%m.%Y %H:%M", ["15.01.2024 10:30", "29.02.2023 10:30"]),
+    ("%m/%d/%Y %I:%M %p", ["01/15/2024 12:30 am", "01/15/2024 12:30 PM"]),
+    ("%m/%d/%Y %I:%M", ["01/15/2024 12:30"]),
+    ("%d/%m/%Y %I:%M%p", ["15/01/2024 10:30Pm"]),
+    ("%Y-%m-%d %H:%M %p", ["2024-01-15 10:30 PM"]),
+    ("%Y%m%d", ["20240230"]),
+    ("%d/%m/%y", ["15/01/68", "15/01/69"]),
+    ("%d-%b-%Y", ["15-JAN-2024", "15-sept-2024"]),
+    ("%d %B %Y", ["15 september 2024"]),
+    ("%a %d/%m/%Y", ["Mon 15/01/2024"]),
+    ("%d/%m/%Y %%", ["15/01/2024 %"]),
+    ("%d/%m/%Y", ["29/02/1900"]),
+    ("%d/%m/%Y", ["15/01/0000"]),
+    ("%d/%m/%Y", ["0/01/2024"]),
+    ("%d/%m/%Y %H:%M:%S.%f", ["15/01/2024 10:00:00.1234567"]),
+    ("%d/%m/%Y %H:%M:%S.%f", ["15/01/2024 10:00:00.1234567891"]),
+    ("%Y-%m-%d %H:%M:%S.%f", ["2024-01-15 10:00:00."]),
+    ("%Y-%m-%d %H:%M:%S.%f", ["2024-01-15 10:00:59.1234567891"]),
+    ("%Y-%m-%d", ["2024-01-15", "2024-02-29", None]),
+]
+_H9CUG_CASES: dict[str, Any] = {}
+# Loop names of their own: a module-level `_values` rebinds the helper
+# test_values_match_pandas calls.
+for _h9cug_values in _H9CUG_GUESSED:
+    for _h9cug_errors in ("raise", "coerce"):
+        _H9CUG_CASES[f"guessed {_h9cug_values!r} {_h9cug_errors}"] = (
+            lambda m, v=_h9cug_values, e=_h9cug_errors: m.to_datetime(m.Series(v), errors=e)
+        )
+for _h9cug_format, _h9cug_values in _H9CUG_GIVEN:
+    for _h9cug_errors in ("raise", "coerce"):
+        _H9CUG_CASES[f"format {_h9cug_format!r} {_h9cug_values!r} {_h9cug_errors}"] = (
+            lambda m, f=_h9cug_format, v=_h9cug_values, e=_h9cug_errors: m.to_datetime(
+                m.Series(v), format=f, errors=e
+            )
+        )
+_H9CUG_CASES["format utc leap second"] = lambda m: m.to_datetime(
+    m.Series(["2024-01-15 10:00:60"]), format="%Y-%m-%d %H:%M:%S", utc=True
+)
+_H9CUG_CASES["list later feb 29"] = lambda m: m.to_datetime(["2024-01-15", "2023-02-29"], errors="coerce")
+_H9CUG_CASES["mixed leap second"] = lambda m: m.to_datetime(m.Series(["2024-12-31 23:59:60"]), format="mixed")
+_H9CUG_CASES["index format leap second"] = lambda m: m.to_datetime(
+    m.Index(["2024-12-31 23:59:60"]), format="%Y-%m-%d %H:%M:%S"
+)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_H9CUG_CASES))
+def test_to_datetime_reads_a_format_like_pandas_strptime_h9cug(case: str) -> None:
+    run = _H9CUG_CASES[case]
+    assert _f1jm5_outcome(lambda: run(fpd)) == _f1jm5_outcome(lambda: run(pd)), case

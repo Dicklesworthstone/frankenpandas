@@ -62472,6 +62472,15 @@ pub fn to_datetime_values_with_options(
         iso_format_guess(first)
             .or_else(|| guess_day_month_format(first, options.dayfirst).map(|guess| guess.format))
     });
+    // The column's format as pandas' strptime reads strings with it: the
+    // format= given (or the day / month order guessed), and the ISO format
+    // guessed from the first value for a row pandas' ISO reader refuses.
+    // A leap second 23:59:60 is the next minute, a tab the format's space,
+    // a lowercase t its T; a day the month lacks is pandas' "day is out of
+    // range for month" (they were NaT, a .1 s off instant, or a string
+    // passed through).
+    let strptime = options.format.and_then(PandasStrptime::new);
+    let lock_strptime = lock_format.as_deref().and_then(PandasStrptime::new);
     let mut converted = Vec::with_capacity(values.len());
 
     for (position, val) in values.iter().enumerate() {
@@ -62485,34 +62494,42 @@ pub fn to_datetime_values_with_options(
                 .as_deref()
                 .is_some_and(|lock| !datetime_shape_matches(text, lock))
         {
-            // A value the format reads a start of: pandas' "unconverted data
-            // remains" (the first value's length is the format's for the
-            // fixed-width forms it guesses).
-            let remainder = lock_format
-                .as_ref()
-                .zip(lock_first)
-                .and_then(|(format, first)| {
-                    (text.len() > first.len()
-                        && text.is_char_boundary(first.len())
-                        && shape_lock
-                            .as_deref()
-                            .is_some_and(|lock| datetime_shape_matches(&text[..first.len()], lock)))
-                    .then(|| (format, &text[first.len()..]))
-                });
-            let head = match (remainder, lock_format.as_ref()) {
-                (Some((format, rest)), _) => format!(
-                    "unconverted data remains when parsing with format \"{format}\": \"{rest}\""
-                ),
-                (None, Some(format)) => {
-                    format!("time data \"{text}\" doesn't match format \"{format}\"")
-                }
-                (None, None) => {
-                    format!("time data \"{text}\" doesn't match the format of the first value")
+            let head = match &lock_strptime {
+                Some(strptime) => strptime.complaint(text),
+                None => {
+                    // A value the format reads a start of: pandas'
+                    // "unconverted data remains" (the first value's length
+                    // is the format's for the fixed-width forms it guesses).
+                    let remainder =
+                        lock_format
+                            .as_ref()
+                            .zip(lock_first)
+                            .and_then(|(format, first)| {
+                                (text.len() > first.len()
+                                    && text.is_char_boundary(first.len())
+                                    && shape_lock.as_deref().is_some_and(|lock| {
+                                        datetime_shape_matches(&text[..first.len()], lock)
+                                    }))
+                                .then(|| (format, &text[first.len()..]))
+                            });
+                    Some(match (remainder, lock_format.as_ref()) {
+                        (Some((format, rest)), _) => format!(
+                            "unconverted data remains when parsing with format \"{format}\": \"{rest}\""
+                        ),
+                        (None, Some(format)) => {
+                            format!("time data \"{text}\" doesn't match format \"{format}\"")
+                        }
+                        (None, None) => format!(
+                            "time data \"{text}\" doesn't match the format of the first value"
+                        ),
+                    })
                 }
             };
-            return Err(FrameError::CompatibilityRejected(format!(
-                "{head}, at position {position}. You might want to try:\n    - passing `format` if your strings have a consistent format;\n    - passing `format='ISO8601'` if your strings are all ISO8601 but not necessarily in exactly the same format;\n    - passing `format='mixed'`, and the format will be inferred for each element individually. You might want to use `dayfirst` alongside this."
-            )));
+            if let Some(head) = head {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "{head}, at position {position}{TO_DATETIME_FORMAT_HINT}"
+                )));
+            }
         }
         // format='ISO8601' reads every string with pandas' ISO reader; one
         // it cannot read is pandas' ValueError, NaT under errors='coerce'
@@ -62527,7 +62544,7 @@ pub fn to_datetime_values_with_options(
                 Some(iso) => iso.rendered(),
                 None if options.errors == DatetimeErrors::Raise => {
                     return Err(FrameError::CompatibilityRejected(format!(
-                        "Time data {text} is not ISO8601 format, at position {position}. You might want to try:\n    - passing `format` if your strings have a consistent format;\n    - passing `format='ISO8601'` if your strings are all ISO8601 but not necessarily in exactly the same format;\n    - passing `format='mixed'`, and the format will be inferred for each element individually. You might want to use `dayfirst` alongside this."
+                        "Time data {text} is not ISO8601 format, at position {position}{TO_DATETIME_FORMAT_HINT}"
                     )));
                 }
                 None => Scalar::Null(NullKind::NaT),
@@ -62545,7 +62562,7 @@ pub fn to_datetime_values_with_options(
             let parsed = match val {
                 Scalar::Null(_) => Scalar::Null(NullKind::NaT),
                 Scalar::Utf8(s) => {
-                    if shape_lock
+                    let read = if shape_lock
                         .as_deref()
                         .is_some_and(|lock| !datetime_shape_matches(s, lock))
                     {
@@ -62582,8 +62599,14 @@ pub fn to_datetime_values_with_options(
                         Scalar::Datetime64(nanos)
                     } else if let Some(pattern) = inferred_timezone_pattern {
                         parse_datetime_string_with_timezone_pattern(s, pattern)
+                    } else if let Some(strptime) = &strptime {
+                        strptime.value(s)
                     } else {
                         parse_datetime_string(s, options.format)
+                    };
+                    match &lock_strptime {
+                        Some(strptime) if read.is_missing() => strptime.value(s),
+                        _ => read,
                     }
                 }
                 // A bare number carries NO unit information, and pandas does not
@@ -62648,19 +62671,32 @@ pub fn to_datetime_values_with_options(
             && let Scalar::Utf8(text) = val
             && !is_datetime_null_token(text)
         {
-            return Err(FrameError::CompatibilityRejected(match options.format {
-                Some(format) => format!(
-                    "time data \"{text}\" doesn't match format \"{format}\", at position {position}. You might want to try:\n    - passing `format` if your strings have a consistent format;\n    - passing `format='ISO8601'` if your strings are all ISO8601 but not necessarily in exactly the same format;\n    - passing `format='mixed'`, and the format will be inferred for each element individually. You might want to use `dayfirst` alongside this."
-                ),
-                // An ISO-shaped value with a field out of range is dateutil's
-                // complaint about it, as pandas raises it.
-                None => match iso8601_fields(text).as_ref().and_then(iso8601_range_error) {
-                    Some(complaint) => format!("{complaint}: {text}, at position {position}"),
-                    None => format!(
-                        "Unknown datetime string format, unable to parse: {text}, at position {position}"
+            // The format's strptime complaint - the given one's, else the
+            // one guessed from the first value - and with neither, an
+            // ISO-shaped value's field out of range is dateutil's.
+            let complaint = strptime
+                .as_ref()
+                .or(lock_strptime.as_ref())
+                .and_then(|strptime| strptime.complaint(text));
+            return Err(FrameError::CompatibilityRejected(
+                match (complaint, options.format) {
+                    (Some(head), _) => {
+                        format!("{head}, at position {position}{TO_DATETIME_FORMAT_HINT}")
+                    }
+                    (None, Some(format)) => format!(
+                        "time data \"{text}\" doesn't match format \"{format}\", at position {position}{TO_DATETIME_FORMAT_HINT}"
                     ),
+                    (None, None) => match iso8601_fields(text)
+                        .as_ref()
+                        .and_then(iso8601_range_error)
+                    {
+                        Some(complaint) => format!("{complaint}: {text}, at position {position}"),
+                        None => format!(
+                            "Unknown datetime string format, unable to parse: {text}, at position {position}"
+                        ),
+                    },
                 },
-            }));
+            ));
         }
         converted.push(result);
     }
@@ -63836,19 +63872,392 @@ fn chrono_strptime_format(format: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// pandas' advice after a string its format cannot read.
+const TO_DATETIME_FORMAT_HINT: &str = ". You might want to try:\n    - passing `format` if your strings have a consistent format;\n    - passing `format='ISO8601'` if your strings are all ISO8601 but not necessarily in exactly the same format;\n    - passing `format='mixed'`, and the format will be inferred for each element individually. You might want to use `dayfirst` alongside this.";
+
+/// One piece of a strptime format as pandas' `TimeRE` compiles it.
+#[derive(Debug, Clone, Copy)]
+enum StrptimePiece {
+    /// A numeric directive and its regex alternatives in order, each a run
+    /// of byte ranges (`%m` is `1[0-2]|0[1-9]|[1-9]`).
+    Number(u8, &'static [&'static [(u8, u8)]]),
+    /// `%f`: as many digits as there are, up to a limit.
+    Fraction,
+    /// A name of a directive, case ignored: `%p`, `%b` / `%B`, `%a` / `%A`.
+    Name(u8, &'static [&'static str]),
+    /// A run of whitespace in the format: one or more (`\s+`).
+    Space,
+    /// Any other byte, ASCII case ignored.
+    Literal(u8),
+}
+
+const STRPTIME_DIGIT: (u8, u8) = (b'0', b'9');
+const STRPTIME_NONZERO: (u8, u8) = (b'1', b'9');
+const STRPTIME_YEAR: &[&[(u8, u8)]] = &[&[STRPTIME_DIGIT; 4]];
+const STRPTIME_SHORT_YEAR: &[&[(u8, u8)]] = &[&[STRPTIME_DIGIT; 2]];
+/// `%m` and `%I`: `1[0-2]|0[1-9]|[1-9]`.
+const STRPTIME_MONTH: &[&[(u8, u8)]] = &[
+    &[(b'1', b'1'), (b'0', b'2')],
+    &[(b'0', b'0'), STRPTIME_NONZERO],
+    &[STRPTIME_NONZERO],
+];
+/// `%d`: `3[01]|[12]\d|0[1-9]|[1-9]| [1-9]`.
+const STRPTIME_DAY: &[&[(u8, u8)]] = &[
+    &[(b'3', b'3'), (b'0', b'1')],
+    &[(b'1', b'2'), STRPTIME_DIGIT],
+    &[(b'0', b'0'), STRPTIME_NONZERO],
+    &[STRPTIME_NONZERO],
+    &[(b' ', b' '), STRPTIME_NONZERO],
+];
+/// `%H`: `2[0-3]|[0-1]\d|\d`.
+const STRPTIME_HOUR: &[&[(u8, u8)]] = &[
+    &[(b'2', b'2'), (b'0', b'3')],
+    &[(b'0', b'1'), STRPTIME_DIGIT],
+    &[STRPTIME_DIGIT],
+];
+/// `%M`: `[0-5]\d|\d`.
+const STRPTIME_MINUTE: &[&[(u8, u8)]] = &[&[(b'0', b'5'), STRPTIME_DIGIT], &[STRPTIME_DIGIT]];
+/// `%S`: `6[0-1]|[0-5]\d|\d` - 60 and 61 are leap seconds.
+const STRPTIME_SECOND: &[&[(u8, u8)]] = &[
+    &[(b'6', b'6'), (b'0', b'1')],
+    &[(b'0', b'5'), STRPTIME_DIGIT],
+    &[STRPTIME_DIGIT],
+];
+const STRPTIME_MONTH_NAMES: &[&str] = &[
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+];
+const STRPTIME_MONTH_ABBREVIATIONS: &[&str] = &[
+    "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+];
+const STRPTIME_WEEKDAY_NAMES: &[&str] = &[
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+];
+const STRPTIME_WEEKDAY_ABBREVIATIONS: &[&str] = &["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+/// The longest format [`PandasStrptime`] models, in pieces.
+const STRPTIME_MAX_PIECES: usize = 32;
+
+/// What pandas reads from a string under a strptime format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StrptimeRead {
+    /// The wall clock it names. A second of 60 or 61 runs into the next
+    /// minute, as pandas' `npy_datetimestruct` arithmetic carries it.
+    Instant(NaiveDateTime),
+    /// The format's regex does not match the string.
+    NoMatch,
+    /// The regex matches the string up to this byte; the rest remains.
+    Remains(usize),
+    /// The fields name a day the month does not have.
+    DayOutOfRange,
+    /// The year is 0 (`datetime.date` starts at 1).
+    YearZero,
+}
+
+/// A strptime format as pandas' `array_strptime` reads strings with it:
+/// its `TimeRE` regex - each directive's alternation, a run of whitespace
+/// as `\s+`, case ignored - matched at the start of the string, then the
+/// calendar. An ISO format (`format_is_iso`) is first read by numpy's ISO
+/// parser, which takes a `.` with no digits or up to 18 of them for `.%f`.
+/// [`PandasStrptime::new`] is `None` for a directive this reader does not
+/// model (`%z`, `%j`, `%U`, ...).
+struct PandasStrptime<'a> {
+    format: &'a str,
+    iso: bool,
+    pieces: Vec<StrptimePiece>,
+}
+
+impl<'a> PandasStrptime<'a> {
+    fn new(format: &'a str) -> Option<Self> {
+        let bytes = format.as_bytes();
+        let mut pieces = Vec::new();
+        let mut at = 0;
+        while at < bytes.len() {
+            let byte = bytes[at];
+            if byte == b'%' {
+                let directive = *bytes.get(at + 1)?;
+                pieces.push(match directive {
+                    b'Y' => StrptimePiece::Number(directive, STRPTIME_YEAR),
+                    b'y' => StrptimePiece::Number(directive, STRPTIME_SHORT_YEAR),
+                    b'm' | b'I' => StrptimePiece::Number(directive, STRPTIME_MONTH),
+                    b'd' => StrptimePiece::Number(directive, STRPTIME_DAY),
+                    b'H' => StrptimePiece::Number(directive, STRPTIME_HOUR),
+                    b'M' => StrptimePiece::Number(directive, STRPTIME_MINUTE),
+                    b'S' => StrptimePiece::Number(directive, STRPTIME_SECOND),
+                    b'f' => StrptimePiece::Fraction,
+                    b'p' => StrptimePiece::Name(directive, &["am", "pm"]),
+                    b'b' => StrptimePiece::Name(directive, STRPTIME_MONTH_ABBREVIATIONS),
+                    b'B' => StrptimePiece::Name(directive, STRPTIME_MONTH_NAMES),
+                    b'a' => StrptimePiece::Name(directive, STRPTIME_WEEKDAY_ABBREVIATIONS),
+                    b'A' => StrptimePiece::Name(directive, STRPTIME_WEEKDAY_NAMES),
+                    b'%' => StrptimePiece::Literal(b'%'),
+                    _ => return None,
+                });
+                at += 2;
+            } else if byte.is_ascii_whitespace() {
+                while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
+                    at += 1;
+                }
+                pieces.push(StrptimePiece::Space);
+            } else {
+                pieces.push(StrptimePiece::Literal(byte));
+                at += 1;
+            }
+        }
+        (pieces.len() <= STRPTIME_MAX_PIECES).then(|| Self {
+            format,
+            iso: format_is_iso(format),
+            pieces,
+        })
+    }
+
+    /// pandas' complaint about `text` (before ", at position N"), or
+    /// `None` when the format reads it.
+    fn complaint(&self, text: &str) -> Option<String> {
+        let format = self.format;
+        match self.read(text) {
+            StrptimeRead::Instant(_) => None,
+            StrptimeRead::NoMatch => Some(format!(
+                "time data \"{text}\" doesn't match format \"{format}\""
+            )),
+            StrptimeRead::Remains(at) => Some(format!(
+                "unconverted data remains when parsing with format \"{format}\": \"{}\"",
+                text.get(at..).unwrap_or_default()
+            )),
+            StrptimeRead::DayOutOfRange => Some("day is out of range for month".to_owned()),
+            StrptimeRead::YearZero => Some("year 0 is out of range".to_owned()),
+        }
+    }
+
+    /// `text` as a datetime value: its instant, else NaT.
+    fn value(&self, text: &str) -> Scalar {
+        match self.read(text) {
+            StrptimeRead::Instant(clock) => datetime64_scalar_from_naive_datetime(clock),
+            _ => Scalar::Null(NullKind::NaT),
+        }
+    }
+
+    fn read(&self, text: &str) -> StrptimeRead {
+        if self.iso {
+            let read = self.read_with(text, (0, 18));
+            if matches!(read, StrptimeRead::Instant(_)) {
+                return read;
+            }
+        }
+        self.read_with(text, (1, 9))
+    }
+
+    /// `text` read with `%f` taking between `fraction.0` and `fraction.1`
+    /// digits.
+    fn read_with(&self, text: &str, fraction: (usize, usize)) -> StrptimeRead {
+        let mut spans = [(0, 0); STRPTIME_MAX_PIECES];
+        let Some(end) = self.match_at(text.as_bytes(), 0, 0, fraction, &mut spans) else {
+            return StrptimeRead::NoMatch;
+        };
+        if end != text.len() {
+            return StrptimeRead::Remains(end);
+        }
+        let pm = self
+            .pieces
+            .iter()
+            .zip(&spans)
+            .find_map(|(piece, &(from, to))| {
+                matches!(piece, StrptimePiece::Name(b'p', _))
+                    .then(|| text[from..to].eq_ignore_ascii_case("pm"))
+            });
+        let (mut year, mut month, mut day) = (1900, 1, 1);
+        let (mut hour, mut minute, mut second, mut nanos) = (0, 0, 0, 0);
+        for (piece, &(from, to)) in self.pieces.iter().zip(&spans) {
+            let field = &text[from..to];
+            let number = field
+                .bytes()
+                .filter(u8::is_ascii_digit)
+                .fold(0_u32, |value, digit| value * 10 + u32::from(digit - b'0'));
+            match *piece {
+                StrptimePiece::Number(b'Y', _) => year = number,
+                // pandas' (the C library's) century for a two-digit year.
+                StrptimePiece::Number(b'y', _) => {
+                    year = number + if number <= 68 { 2000 } else { 1900 };
+                }
+                StrptimePiece::Number(b'm', _) => month = number,
+                StrptimePiece::Number(b'd', _) => day = number,
+                StrptimePiece::Number(b'H', _) => hour = number,
+                // A 12-hour clock: 12 AM is midnight, a PM hour past noon;
+                // without %p it reads as AM.
+                StrptimePiece::Number(b'I', _) => {
+                    hour = match (pm, number) {
+                        (Some(true), 12) => 12,
+                        (Some(true), _) => number + 12,
+                        (_, 12) => 0,
+                        _ => number,
+                    };
+                }
+                StrptimePiece::Number(b'M', _) => minute = number,
+                StrptimePiece::Number(b'S', _) => second = number,
+                StrptimePiece::Fraction => {
+                    let digits = field.len().min(9);
+                    nanos = field.as_bytes()[..digits]
+                        .iter()
+                        .fold(0_u32, |value, digit| value * 10 + u32::from(digit - b'0'))
+                        * 10_u32.pow(9 - u32::try_from(digits).unwrap_or(9));
+                }
+                StrptimePiece::Name(b'b' | b'B', names) => {
+                    month = names
+                        .iter()
+                        .position(|name| name.eq_ignore_ascii_case(field))
+                        .and_then(|index| u32::try_from(index + 1).ok())
+                        .unwrap_or(1);
+                }
+                _ => {}
+            }
+        }
+        if year == 0 {
+            return StrptimeRead::YearZero;
+        }
+        // The regex reads no month past 12, no hour past 23, no minute
+        // past 59: a date chrono refuses is a day the month does not have.
+        let clock = i32::try_from(year)
+            .ok()
+            .and_then(|year| NaiveDate::from_ymd_opt(year, month, day))
+            .and_then(|date| date.and_hms_nano_opt(hour, minute, 0, nanos));
+        clock.map_or(StrptimeRead::DayOutOfRange, |clock| {
+            StrptimeRead::Instant(clock + Duration::seconds(i64::from(second)))
+        })
+    }
+
+    /// The end of the regex's match of `text` from `at` by the pieces from
+    /// `piece` on, each piece's span recorded in `spans`: a regex's
+    /// backtracking, alternatives in order, repeats longest first.
+    fn match_at(
+        &self,
+        text: &[u8],
+        piece: usize,
+        at: usize,
+        fraction: (usize, usize),
+        spans: &mut [(usize, usize); STRPTIME_MAX_PIECES],
+    ) -> Option<usize> {
+        let Some(&current) = self.pieces.get(piece) else {
+            return Some(at);
+        };
+        let rest = &text[at..];
+        let mut attempt = |end: usize| {
+            spans[piece] = (at, end);
+            self.match_at(text, piece + 1, end, fraction, spans)
+        };
+        match current {
+            StrptimePiece::Literal(byte) => rest
+                .first()
+                .filter(|first| first.eq_ignore_ascii_case(&byte))
+                .and_then(|_| attempt(at + 1)),
+            StrptimePiece::Space => {
+                let run = rest
+                    .iter()
+                    .take_while(|byte| byte.is_ascii_whitespace())
+                    .count();
+                (1..=run).rev().find_map(|len| attempt(at + len))
+            }
+            StrptimePiece::Fraction => {
+                let run = rest
+                    .iter()
+                    .take(fraction.1)
+                    .take_while(|byte| byte.is_ascii_digit())
+                    .count();
+                (fraction.0..=run).rev().find_map(|len| attempt(at + len))
+            }
+            StrptimePiece::Number(_, alternatives) => alternatives.iter().find_map(|alternative| {
+                let fits = rest.len() >= alternative.len()
+                    && alternative
+                        .iter()
+                        .zip(rest)
+                        .all(|(&(low, high), byte)| (low..=high).contains(byte));
+                fits.then(|| attempt(at + alternative.len())).flatten()
+            }),
+            StrptimePiece::Name(_, names) => names.iter().find_map(|name| {
+                let fits = rest
+                    .get(..name.len())
+                    .is_some_and(|head| head.eq_ignore_ascii_case(name.as_bytes()));
+                fits.then(|| attempt(at + name.len())).flatten()
+            }),
+        }
+    }
+}
+
+/// pandas' `format_is_iso`: `%Y`, then - each only after the one before -
+/// a separator (`-`, `/`, a space, `\`, `.` or none) and `%m`, the same
+/// separator and `%d`, a `T` or a space and `%H`, `:%M`, `:%S`, and `%z`
+/// or `.%f` with an optional `%z`; `%Y%m` excepted.
+fn format_is_iso(format: &str) -> bool {
+    if format == "%Y%m" {
+        return false;
+    }
+    let Some(rest) = format.strip_prefix("%Y") else {
+        return false;
+    };
+    let separator = rest
+        .get(..1)
+        .filter(|first| matches!(*first, "-" | "/" | " " | "\\" | "."))
+        .unwrap_or("");
+    let Some(rest) = rest
+        .strip_prefix(separator)
+        .and_then(|rest| rest.strip_prefix("%m"))
+    else {
+        return rest.is_empty();
+    };
+    let steps: [&[&str]; 4] = [&[separator], &["T", " "], &[":"], &[":"]];
+    let directives = ["%d", "%H", "%M", "%S"];
+    let mut rest = rest;
+    for (leads, directive) in steps.iter().zip(directives) {
+        if rest.is_empty() {
+            return true;
+        }
+        let Some(next) = leads
+            .iter()
+            .find_map(|lead| rest.strip_prefix(lead)?.strip_prefix(directive))
+        else {
+            return false;
+        };
+        rest = next;
+    }
+    matches!(rest, "" | "%z" | ".%f" | ".%f%z")
+}
+
 /// Parse a datetime string in various common formats.
 fn parse_datetime_string(s: &str, format: Option<&str>) -> Scalar {
     let trimmed = s.trim();
     if trimmed.is_empty() {
         return Scalar::Null(NullKind::NaT);
     }
+    // chrono reads a second of 60 as a leap second, which came out a tenth
+    // of a second past the next minute; pandas' readers refuse it
+    // (dateutil's "second must be in 0..59") unless a format's strptime
+    // reads it, as [`PandasStrptime`] does.
+    let naive = |format: &str| {
+        NaiveDateTime::parse_from_str(trimmed, format)
+            .ok()
+            .filter(|dt| dt.nanosecond() < 1_000_000_000)
+    };
 
     // If explicit format is provided, use it.
     if let Some(fmt) = format {
         let fmt: &str = &chrono_strptime_format(fmt);
-        return match NaiveDateTime::parse_from_str(trimmed, fmt) {
-            Ok(dt) => Scalar::Utf8(format_naive_datetime(dt)),
-            Err(_) => {
+        return match naive(fmt) {
+            Some(dt) => Scalar::Utf8(format_naive_datetime(dt)),
+            None => {
                 // Try as date-only.
                 match NaiveDate::parse_from_str(trimmed, fmt) {
                     Ok(d) => d
@@ -63874,12 +64283,12 @@ fn parse_datetime_string(s: &str, format: Option<&str>) -> Scalar {
     // Auto-detect format: try common patterns in order.
 
     // ISO 8601 with T separator: 2024-01-15T10:30:00
-    if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S") {
+    if let Some(dt) = naive("%Y-%m-%dT%H:%M:%S") {
         return Scalar::Utf8(format_naive_datetime(dt));
     }
 
     // ISO 8601 with space: 2024-01-15 10:30:00
-    if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S") {
+    if let Some(dt) = naive("%Y-%m-%d %H:%M:%S") {
         return Scalar::Utf8(format_naive_datetime(dt));
     }
 
@@ -63913,7 +64322,7 @@ fn parse_datetime_string(s: &str, format: Option<&str>) -> Scalar {
         "%Y-%m-%d %H:%M:%S%.f",
         "%Y-%m-%dT%H:%M:%S%.f",
     ] {
-        if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, fmt) {
+        if let Some(dt) = naive(fmt) {
             return Scalar::Utf8(format_naive_datetime(dt));
         }
     }
@@ -63954,7 +64363,7 @@ fn parse_datetime_string(s: &str, format: Option<&str>) -> Scalar {
         "%b %d, %Y",
     ] {
         for time in ["%H:%M", "%H:%M:%S"] {
-            if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, &format!("{date} {time}")) {
+            if let Some(dt) = naive(&format!("{date} {time}")) {
                 return Scalar::Utf8(format_naive_datetime(dt));
             }
         }
@@ -236535,6 +236944,299 @@ mod to_datetime_iso8601_f1jm5 {
             );
             assert_eq!(out.values()[0], Scalar::Datetime64(first), "{values:?}");
         }
+    }
+}
+
+/// br-frankenpandas-h9cug: a string under a format - `format=`, or the one
+/// pandas guesses from a column's first value - read as pandas'
+/// `array_strptime` reads it: its regex, then the calendar. Every row
+/// pinned to live pandas 2.2.3.
+#[cfg(test)]
+mod pandas_strptime_h9cug {
+    use chrono::NaiveDateTime;
+    use fp_types::{NullKind, Scalar};
+
+    use super::{
+        DatetimeErrors, PandasStrptime, StrptimeRead, ToDatetimeOptions, format_is_iso,
+        to_datetime_values_with_options,
+    };
+
+    fn clock(text: &str) -> NaiveDateTime {
+        NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S%.f").unwrap()
+    }
+
+    fn nanos(text: &str) -> Scalar {
+        Scalar::Datetime64(clock(text).and_utc().timestamp_nanos_opt().unwrap())
+    }
+
+    fn utf8(values: &[&str]) -> Vec<Scalar> {
+        values
+            .iter()
+            .map(|value| Scalar::Utf8((*value).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn reads_what_pandas_reads() {
+        for (format, text, wall) in [
+            // Leap seconds run into the next minute.
+            (
+                "%Y-%m-%d %H:%M:%S",
+                "2024-12-31 23:59:60",
+                "2025-01-01 00:00:00",
+            ),
+            (
+                "%d/%m/%Y %H:%M:%S",
+                "31/12/2024 23:59:61",
+                "2025-01-01 00:00:01",
+            ),
+            // Case is ignored; whitespace is \s+.
+            ("%Y-%m-%dT%H:%M", "2024-01-15t10:30", "2024-01-15 10:30:00"),
+            ("%Y-%m-%d %H:%M", "2024-01-15\t10:30", "2024-01-15 10:30:00"),
+            ("%Y-%m-%d", "2024-01- 5", "2024-01-05 00:00:00"),
+            ("%Y-%m-%d", "2024-01-1", "2024-01-01 00:00:00"),
+            ("%Y-%m-%dT%H", "2024-01-15T7", "2024-01-15 07:00:00"),
+            (
+                "%m/%d/%Y %I:%M %p",
+                "01/15/2024 12:30 am",
+                "2024-01-15 00:30:00",
+            ),
+            (
+                "%m/%d/%Y %I:%M %p",
+                "01/15/2024 12:30 PM",
+                "2024-01-15 12:30:00",
+            ),
+            ("%m/%d/%Y %I:%M", "01/15/2024 12:30", "2024-01-15 00:30:00"),
+            (
+                "%d/%m/%Y %I:%M%p",
+                "15/01/2024 10:30Pm",
+                "2024-01-15 22:30:00",
+            ),
+            (
+                "%Y-%m-%d %H:%M %p",
+                "2024-01-15 10:30 PM",
+                "2024-01-15 10:30:00",
+            ),
+            ("%d/%m/%y", "15/01/68", "2068-01-15 00:00:00"),
+            ("%d/%m/%y", "15/01/69", "1969-01-15 00:00:00"),
+            ("%d-%b-%Y", "15-JAN-2024", "2024-01-15 00:00:00"),
+            ("%d %B %Y", "15 september 2024", "2024-09-15 00:00:00"),
+            ("%a %d/%m/%Y", "Mon 15/01/2024", "2024-01-15 00:00:00"),
+            ("%A %d/%m/%Y", "Friday 15/01/2024", "2024-01-15 00:00:00"),
+            ("%d/%m/%Y %%", "15/01/2024 %", "2024-01-15 00:00:00"),
+            (
+                "%d/%m/%Y %H:%M:%S.%f",
+                "15/01/2024 10:00:00.1234567",
+                "2024-01-15 10:00:00.1234567",
+            ),
+            // An ISO format is numpy's first: a bare '.' for .%f reads.
+            (
+                "%Y-%m-%d %H:%M:%S.%f",
+                "2024-01-15 10:00:00.",
+                "2024-01-15 10:00:00",
+            ),
+        ] {
+            let strptime = PandasStrptime::new(format).unwrap();
+            assert_eq!(
+                strptime.read(text),
+                StrptimeRead::Instant(clock(wall)),
+                "{format} {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_what_pandas_refuses() {
+        for (format, text, complaint) in [
+            ("%Y-%m-%d", "2023-02-29", "day is out of range for month"),
+            ("%d/%m/%Y", "29/02/1900", "day is out of range for month"),
+            ("%Y%m%d", "20240230", "day is out of range for month"),
+            ("%d/%m/%Y", "15/01/0000", "year 0 is out of range"),
+            (
+                "%Y-%m-%d",
+                "2024-13-01",
+                "time data \"2024-13-01\" doesn't match format \"%Y-%m-%d\"",
+            ),
+            (
+                "%Y-%m-%d %H:%M",
+                "2024-01-15 24:00",
+                "time data \"2024-01-15 24:00\" doesn't match format \"%Y-%m-%d %H:%M\"",
+            ),
+            (
+                "%Y-%m-%d",
+                " 2024-01-15",
+                "time data \" 2024-01-15\" doesn't match format \"%Y-%m-%d\"",
+            ),
+            (
+                "%d/%m/%Y",
+                "0/01/2024",
+                "time data \"0/01/2024\" doesn't match format \"%d/%m/%Y\"",
+            ),
+            (
+                "%d-%b-%Y",
+                "15-sept-2024",
+                "time data \"15-sept-2024\" doesn't match format \"%d-%b-%Y\"",
+            ),
+            (
+                "%Y-%m-%d %H:%M",
+                "2024-01-15 10:61",
+                "unconverted data remains when parsing with format \"%Y-%m-%d %H:%M\": \"1\"",
+            ),
+            (
+                "%Y-%m-%d",
+                "2024-01-15 ",
+                "unconverted data remains when parsing with format \"%Y-%m-%d\": \" \"",
+            ),
+            (
+                "%d/%m/%Y %H:%M:%S.%f",
+                "15/01/2024 10:00:00.1234567891",
+                "unconverted data remains when parsing with format \"%d/%m/%Y %H:%M:%S.%f\": \"1\"",
+            ),
+        ] {
+            let strptime = PandasStrptime::new(format).unwrap();
+            assert_eq!(
+                strptime.complaint(text).as_deref(),
+                Some(complaint),
+                "{format} {text:?}"
+            );
+        }
+        // NEGATIVE: a directive the reader does not model is left to chrono.
+        for format in ["%Y-%m-%d %z", "%j", "%Y-%U", "%Y-%m-%d %"] {
+            assert!(PandasStrptime::new(format).is_none(), "{format}");
+        }
+    }
+
+    #[test]
+    fn iso_formats_are_pandas_format_is_iso() {
+        for format in [
+            "%Y",
+            "%Y-%m",
+            "%Y-%m-%d",
+            "%Y/%m/%d %H",
+            "%Y%m%d",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y.%m.%d %H:%M:%S.%f",
+            "%Y-%m-%d %H:%M:%S%z",
+            "%Y-%m-%d %H:%M:%S.%f%z",
+        ] {
+            assert!(format_is_iso(format), "{format}");
+        }
+        for format in [
+            "%Y%m",
+            "%d/%m/%Y",
+            "%Y-%m/%d",
+            "%Y-%m-%d %H:%S",
+            "%Y-%m-%d %H:%M:%S %z",
+            "%Y-%m-%d%H",
+        ] {
+            assert!(!format_is_iso(format), "{format}");
+        }
+    }
+
+    #[test]
+    fn to_datetime_reads_each_row_under_the_columns_format() {
+        let raise = ToDatetimeOptions {
+            errors: DatetimeErrors::Raise,
+            ..Default::default()
+        };
+        let coerce = ToDatetimeOptions {
+            errors: DatetimeErrors::Coerce,
+            ..Default::default()
+        };
+        let feb29 = utf8(&["2024-01-15 10:00", "2023-02-29 10:00"]);
+        // A later row's day the month lacks, under the format guessed from
+        // the first: strptime's complaint, without the text.
+        let err = to_datetime_values_with_options(&feb29, raise)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("day is out of range for month, at position 1. You might want to try:"),
+            "{err}"
+        );
+        assert_eq!(
+            to_datetime_values_with_options(&feb29, coerce).unwrap(),
+            vec![nanos("2024-01-15 10:00:00"), Scalar::Null(NullKind::NaT)]
+        );
+        // A later row's leap second is the next minute; a tab for the
+        // guessed format's space reads.
+        assert_eq!(
+            to_datetime_values_with_options(
+                &utf8(&["2024-01-15 10:00:00", "2024-01-15 10:00:61"]),
+                raise
+            )
+            .unwrap(),
+            vec![nanos("2024-01-15 10:00:00"), nanos("2024-01-15 10:01:01")]
+        );
+        assert_eq!(
+            to_datetime_values_with_options(
+                &utf8(&["2024-01-15 10:00", "2024-01-15\t10:30"]),
+                raise
+            )
+            .unwrap(),
+            vec![nanos("2024-01-15 10:00:00"), nanos("2024-01-15 10:30:00")]
+        );
+        // format= given: a leap second is the next minute (it was
+        // 10:01:00.1), a trailing letter is unconverted data.
+        let seconds = ToDatetimeOptions {
+            format: Some("%Y-%m-%d %H:%M:%S"),
+            ..raise
+        };
+        assert_eq!(
+            to_datetime_values_with_options(&utf8(&["2024-01-15 10:00:60"]), seconds).unwrap(),
+            vec![nanos("2024-01-15 10:01:00")]
+        );
+        let days = ToDatetimeOptions {
+            format: Some("%Y-%m-%d"),
+            ..raise
+        };
+        let err = to_datetime_values_with_options(&utf8(&["2024-01-15x"]), days)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(
+                "unconverted data remains when parsing with format \"%Y-%m-%d\": \"x\", at position 0"
+            ),
+            "{err}"
+        );
+        // NEGATIVE: an invalid FIRST value guesses no format - dateutil's
+        // complaint, with the text; a lone leap second is one (chrono read
+        // it 0.1 s past the next minute).
+        let err = to_datetime_values_with_options(&utf8(&["2023-02-29"]), raise)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("day is out of range for month: 2023-02-29, at position 0"),
+            "{err}"
+        );
+        let err = to_datetime_values_with_options(&utf8(&["2024-12-31 23:59:60"]), raise)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("second must be in 0..59: 2024-12-31 23:59:60, at position 0"),
+            "{err}"
+        );
+        assert_eq!(
+            to_datetime_values_with_options(
+                &utf8(&["2024-12-31 23:00:00", "2024-12-31 23:59:60"]),
+                raise
+            )
+            .unwrap(),
+            vec![nanos("2024-12-31 23:00:00"), nanos("2025-01-01 00:00:00")]
+        );
+        // NEGATIVE: a later row of another shape the regex cannot read is
+        // still the guessed format's mismatch.
+        let err = to_datetime_values_with_options(
+            &utf8(&["2024-01-15 10:00", "2024-01-15T10:30"]),
+            raise,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains(
+                "time data \"2024-01-15T10:30\" doesn't match format \"%Y-%m-%d %H:%M\", at position 1"
+            ),
+            "{err}"
+        );
     }
 }
 

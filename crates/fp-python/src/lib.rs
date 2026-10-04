@@ -70499,15 +70499,18 @@ fn mixed_zone_index(stamps: Bound<'_, PyList>, pydatetime: bool) -> PyResult<PyI
 fn to_datetime_error(err: fp_frame::FrameError) -> PyErr {
     match err {
         // A string no format reads is pandas' DateParseError (a ValueError),
-        // as is an ISO-shaped one with a field out of range.
+        // as is dateutil's complaint about an ISO-shaped one with a field
+        // out of range ("day is out of range for month: <text>"); a format's
+        // own ("day is out of range for month, at position 1") is a plain
+        // ValueError.
         fp_frame::FrameError::CompatibilityRejected(message)
             if [
-                "Unknown datetime string format",
-                "month must be in 1..12",
-                "day is out of range for month",
-                "hour must be in 0..23",
-                "minute must be in 0..59",
-                "second must be in 0..59",
+                "Unknown datetime string format, unable to parse: ",
+                "month must be in 1..12: ",
+                "day is out of range for month: ",
+                "hour must be in 0..23: ",
+                "minute must be in 0..59: ",
+                "second must be in 0..59: ",
             ]
             .iter()
             .any(|prefix| message.starts_with(prefix)) =>
