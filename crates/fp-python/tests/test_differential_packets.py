@@ -2814,8 +2814,32 @@ def test_assert_equal_flags_decide_like_pandas() -> None:
         assert verdict(fpd.testing.assert_index_equal, fpd.Index([1.0]), fpd.Index([1.0 + 1e-9]), **kw) == verdict(
             pd.testing.assert_index_equal, pd.Index([1.0]), pd.Index([1.0 + 1e-9]), **kw
         ), kw
-    with pytest.raises(NotImplementedError, match="check_like"):
-        fpd.testing.assert_frame_equal(fpd.DataFrame({"a": [1]}), fpd.DataFrame({"a": [1]}), check_like=True)
+    # check_like ignores the order of the labels, never the data under them
+    # (it was refused).
+    def frames(m: Any, flip: bool) -> tuple:
+        left = m.DataFrame({"a": [1, 2, 3], "b": [4.0, 5.0, 6.0]}, index=[10, 20, 30])
+        right = left[["b", "a"]].loc[[30, 10, 20]]
+        if flip:
+            right = right.assign(a=[9, 1, 2])
+        return left, right
+
+    for flip in (False, True):
+        for kw in ({}, {"check_like": True}):
+            assert verdict(fpd.testing.assert_frame_equal, *frames(fpd, flip), **kw) == verdict(
+                pd.testing.assert_frame_equal, *frames(pd, flip), **kw
+            ), (flip, kw)
+    for kw in ({}, {"check_like": True}):
+        assert verdict(
+            fpd.testing.assert_series_equal,
+            fpd.Series([1, 2], index=["x", "y"]),
+            fpd.Series([2, 1], index=["y", "x"]),
+            **kw,
+        ) == verdict(
+            pd.testing.assert_series_equal,
+            pd.Series([1, 2], index=["x", "y"]),
+            pd.Series([2, 1], index=["y", "x"]),
+            **kw,
+        ), kw
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
@@ -23398,3 +23422,109 @@ _E119_CASES = {
 def test_everyday119_read_csv_floats_convert_like_pandas_py3c0(case: str) -> None:
     run = _E119_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# Refusals with the implementation already behind them, wired (2026-10-04):
+# time-based rolling apply / agg(callable) / corr / cov / rank, expanding
+# corr / cov of a frame without other, and dt.to_period() inferring its freq.
+def _e120_hours(n: int = 40) -> Any:
+    k = np.arange(n)
+    return 1_700_000_000 + np.cumsum(k * 37 % 5 + 1) * 3600
+
+
+def _e120_series(m: Any, reverse: bool = False) -> Any:
+    k = np.arange(40)
+    values = ((k * 7919 + 13) % 97) / 7.0
+    if reverse:
+        values = np.sqrt(values[::-1] + 1.0)
+    return m.Series(values, index=m.to_datetime(_e120_hours() * 1_000_000_000))
+
+
+def _e120_frame(m: Any) -> Any:
+    k = np.arange(40)
+    values = ((k * 7919 + 13) % 97) / 7.0
+    index = m.to_datetime(_e120_hours() * 1_000_000_000)
+    return m.DataFrame({"a": values, "b": np.sqrt(values[::-1] + 1.0)}, index=index)
+
+
+def _e120_pairwise(frame: Any) -> list:
+    return frame.values.tolist() + [str(label) for label in frame.index.tolist()]
+
+
+def _e120_periods(m: Any, **range_kw: Any) -> list:
+    periods = m.Series(m.date_range("2024-01-01", **range_kw)).dt.to_period()
+    return [str(periods.dtype)] + periods.astype(str).tolist()
+
+
+_E120_CASES = {
+    "rolling time apply raw": lambda m: _e120_series(m).rolling("6h").apply(np.sum, raw=True).tolist(),
+    "rolling time apply series": lambda m: _e120_series(m).rolling("6h").apply(lambda w: w.max() - w.min()).tolist(),
+    "rolling time apply min_periods": lambda m: _e120_series(m)
+    .rolling("6h", min_periods=3)
+    .apply(np.mean, raw=True)
+    .tolist(),
+    "rolling time agg callable": lambda m: _e120_series(m).rolling("6h").agg(lambda w: w.sum()).tolist(),
+    "rolling time corr": lambda m: _e120_series(m).rolling("6h").corr(_e120_series(m, True)).tolist(),
+    "rolling time cov": lambda m: _e120_series(m).rolling("6h").cov(_e120_series(m, True)).tolist(),
+    "rolling time rank": lambda m: _e120_series(m).rolling("6h").rank().tolist(),
+    "frame rolling time apply": lambda m: _e120_frame(m).rolling("6h").apply(np.sum, raw=True).values.tolist(),
+    "frame rolling time corr": lambda m: _e120_pairwise(_e120_frame(m).rolling("6h").corr()),
+    "frame expanding corr": lambda m: _e120_pairwise(_e120_frame(m).expanding().corr()),
+    "frame expanding cov": lambda m: _e120_pairwise(_e120_frame(m).expanding(min_periods=3).cov()),
+    "to_period D": lambda m: _e120_periods(m, periods=5, freq="D"),
+    "to_period h": lambda m: _e120_periods(m, periods=5, freq="h"),
+    "to_period ME": lambda m: _e120_periods(m, periods=5, freq="ME"),
+    # The inferred weekly anchor (W-MON) by value: fp's Period cannot carry an
+    # anchored weekly freq, so its dtype stays object as for an explicit 'W-MON'.
+    "to_period 7D": lambda m: _e120_periods(m, periods=5, freq="7D")[1:],
+    # Negatives: no frequency to infer is pandas' ValueError.
+    "to_period irregular": lambda m: m.Series(m.to_datetime(["2024-01-01", "2024-01-03", "2024-01-04"]))
+    .dt.to_period()
+    .tolist(),
+    "to_period two values": lambda m: m.Series(m.to_datetime(["2024-01-01", "2024-01-02"])).dt.to_period().tolist(),
+    "rolling count window apply": lambda m: _e120_series(m).rolling(3).apply(np.sum, raw=True).tolist(),
+    # Pearson's own last bits come from numpy's BLAS dot (corrcoef); the gate
+    # is what this case is about.
+    "corr min_periods met": lambda m: [
+        round(float(m.Series([1.0, 2, 3, 4, 5]).corr(m.Series([2.0, 1, 4, 3, 6]), min_periods=4)), 12)
+    ],
+    "corr min_periods unmet": lambda m: [
+        m.Series([1.0, np.nan, 3, 4, 5]).corr(m.Series([2.0, 1, np.nan, 3, 6]), min_periods=4),
+        m.Series([1.0, 2, 3, 4]).corr(m.Series([4.0, 3, 1, 2]), method="spearman", min_periods=5),
+    ],
+    # to_numeric's other spellings: an unpadded inf only ('nan' raises), an
+    # empty string NaN (a blank one raises), pandas' own error message.
+    **{
+        f"to_numeric {text!r}": (lambda text: lambda m: m.to_numeric(m.Series([text, "2"], dtype=object)).tolist())(
+            text
+        )
+        for text in ("nan", "NaN", "inf", "-Infinity", " inf", "", "  ", " 1.5 ", "1_000")
+    },
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E120_CASES))
+def test_everyday120_wired_window_and_period_features(case: str) -> None:
+    run = _E120_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+@pytest.mark.skipif(fpd is None or os.name != "posix", reason="frankenpandas not installed / no sh")
+def test_to_clipboard_writes_pandas_tab_separated_text(tmp_path: Path, monkeypatch: Any) -> None:
+    # A wl-copy on PATH that keeps what it is sent: the clipboard text is
+    # pandas' to_clipboard(excel=True) text, to_csv(sep='\t') with the index
+    # (it was refused).
+    sink = tmp_path / "clipboard.txt"
+    fake = tmp_path / "wl-copy"
+    fake.write_text(f"#!/bin/sh\ncat > '{sink}'\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}")
+    frame = {"a": [1, 2], "b": [1.5, None], "c": ["x", "y"]}
+    fpd.DataFrame(frame).to_clipboard()
+    assert sink.read_text() == pd.DataFrame(frame).to_csv(sep="\t")
+    fpd.Series([1.5, 2.0], name="s").to_clipboard()
+    assert sink.read_text() == pd.Series([1.5, 2.0], name="s").to_csv(sep="\t")
+    # NEGATIVE: excel=False (pandas writes the repr) is still refused.
+    with pytest.raises(NotImplementedError):
+        fpd.DataFrame(frame).to_clipboard(excel=False)

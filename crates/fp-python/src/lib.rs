@@ -30632,13 +30632,21 @@ impl PySeries {
         method: Option<&str>,
         min_periods: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
-        // Fewer than two pairs already correlate to NaN, so min_periods up to
-        // 2 is the default answer; a larger floor needs the pair count.
-        unsupported_params(
-            "Series.corr",
-            &[("min_periods", min_periods.is_none_or(|m| m <= 2))],
-        )?;
         let m = method.unwrap_or("pearson");
+        // pandas: NaN - a Python float - when fewer than min_periods pairs are
+        // both present (it was refused above 2; fewer than two pairs are NaN
+        // anyway).
+        if let Some(floor) = min_periods.filter(|&floor| floor > 2)
+            && matches!(m, "pearson" | "spearman" | "kendall")
+            && self
+                .inner
+                .aligned_numeric_pairs(&other.inner)
+                .map_err(frame_error_to_py)?
+                .len()
+                < floor
+        {
+            return Ok(pyo3::types::PyFloat::new(py, f64::NAN).into_any().unbind());
+        }
         let res = match m {
             "pearson" => self.inner.corr(&other.inner),
             "spearman" => self.inner.corr_spearman(&other.inner),
@@ -33038,6 +33046,8 @@ impl PySeries {
         Ok(self.clone())
     }
 
+    /// pandas' `to_clipboard(excel=True, sep=None)` (see
+    /// `DataFrame.to_clipboard`; it was refused).
     #[pyo3(signature = (excel=true, sep=None, **kwargs))]
     fn to_clipboard(
         &self,
@@ -33045,10 +33055,8 @@ impl PySeries {
         sep: Option<&str>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let _ = (excel, sep, kwargs);
-        Err(not_implemented(
-            "Series.to_clipboard (no clipboard writer yet)",
-        ))
+        clipboard_args("Series", excel, sep, kwargs)?;
+        fp_io::SeriesIoExt::to_clipboard(&self.inner).map_err(io_error_to_py)
     }
 
     /// pandas' `Series.to_csv`: the Series is written as a one-column frame
@@ -48179,6 +48187,10 @@ impl PyDataFrame {
     // Writers: each either writes through fp-io or raises. These used to be
     // `let _ = (...); Ok(())` — they returned None and wrote nothing.
     // br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.1
+    /// pandas' `to_clipboard(excel=True, sep=None)`: the frame as
+    /// tab-separated text with its index, through the OS clipboard
+    /// (wl-copy / xclip / xsel / pbcopy; it was refused). `excel=False`,
+    /// another separator and `to_csv` options are refused.
     #[pyo3(signature = (excel=true, sep=None, **kwargs))]
     fn to_clipboard(
         &self,
@@ -48186,10 +48198,8 @@ impl PyDataFrame {
         sep: Option<&str>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let _ = (excel, sep, kwargs);
-        Err(not_implemented(
-            "DataFrame.to_clipboard (no clipboard writer yet)",
-        ))
+        clipboard_args("DataFrame", excel, sep, kwargs)?;
+        fp_io::DataFrameIoExt::to_clipboard(&self.inner).map_err(io_error_to_py)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -54158,11 +54168,14 @@ impl PySeriesDatetimeAccessor {
     /// (dtype object). An anchored frequency (W-MON, Q-JAN, Y-JUN) - which
     /// fp-types' Period cannot carry - keeps fp-frame's period text.
     fn to_period(&self, freq: Option<&str>) -> PyResult<PySeries> {
-        let freq = freq.ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-                "dt.to_period without freq (inferred from the values) is not supported yet",
-            )
-        })?;
+        let inferred;
+        let freq = match freq {
+            Some(freq) => freq,
+            None => {
+                inferred = self.inferred_period_freq()?;
+                inferred.as_str()
+            }
+        };
         let (Some(period_freq), DType::Datetime64 { tz }) =
             (PeriodFreq::parse(freq), self.series.column().dtype())
         else {
@@ -54243,6 +54256,44 @@ impl PySeriesDatetimeAccessor {
 }
 
 impl PySeriesDatetimeAccessor {
+    /// pandas' `dt.to_period()` frequency: the values' inferred one (three
+    /// or more, evenly spaced or month ends), as a period - a month end is
+    /// 'M', a seven-day step 'W-<weekday>'; else pandas' ValueError (it was
+    /// refused).
+    fn inferred_period_freq(&self) -> PyResult<String> {
+        let missing = || {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "You must pass a freq argument as current index has none.",
+            )
+        };
+        let nanos = self
+            .series
+            .column()
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Datetime64(nanos) if *nanos != i64::MIN => Some(*nanos),
+                _ => None,
+            })
+            .collect::<Option<Vec<i64>>>()
+            .ok_or_else(missing)?;
+        let freq = fp_index::infer_freq_from_nanos(&nanos)
+            .ok()
+            .flatten()
+            .ok_or_else(missing)?;
+        Ok(match freq.as_str() {
+            "ME" => "M".to_owned(),
+            "7D" => {
+                // 1970-01-01 was a Thursday (index 3, Monday 0).
+                const WEEKDAYS: [&str; 7] = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+                let day = nanos[0].div_euclid(86_400_000_000_000);
+                let weekday = usize::try_from((day + 3).rem_euclid(7)).unwrap_or(0);
+                format!("W-{}", WEEKDAYS[weekday])
+            }
+            _ => freq,
+        })
+    }
+
     /// Each value's scalar `method()` (Timestamp.to_pydatetime,
     /// Timedelta.to_pytimedelta) in an object ndarray, NaT kept.
     fn python_objects<'py>(&self, py: Python<'py>, method: &str) -> PyResult<Bound<'py, PyAny>> {
@@ -55834,7 +55885,7 @@ impl PyRolling {
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
         }
         if agg_spec_has_callable(func) {
-            self.require_count_window("agg")?;
+            self.require_index_window("agg")?;
             return match named_agg_spec(func, "Rolling")? {
                 Some(named) => self.agg_func(py, &named),
                 None if func.is_callable() => self.apply(py, func, false, None, None, None, None),
@@ -56145,7 +56196,7 @@ impl PyRolling {
         if self.across {
             return Err(not_implemented(&format!("rolling(axis=1).{method}")));
         }
-        self.require_count_window(method)?;
+        self.require_index_window(method)?;
         self.require_every_row(method)?;
         let ddof = window_ddof(ddof)?;
         let series = self
@@ -56161,13 +56212,19 @@ impl PyRolling {
         let other = window_pairwise_other(py, frame.as_deref(), other, pairwise)?;
         let (window, min_periods, center) = (self.window, self.min_periods, self.center);
         let closed = self.closed();
+        // A time-based window over the index, as the aggregations' (it was
+        // refused).
+        let offset = self.offset.as_deref();
         let result = execute_window_bivariate(
             py,
             series.as_deref(),
             frame.as_deref(),
             other.as_ref(),
             |s1, s2| {
-                let windows = s1.rolling_closed(window, min_periods, center, closed)?;
+                let windows = match offset {
+                    Some(offset) => s1.rolling_offset_centered(offset, min_periods, closed, center)?,
+                    None => s1.rolling_closed(window, min_periods, center, closed)?,
+                };
                 if want_corr {
                     windows.corr_ddof(s2, ddof)
                 } else {
@@ -56175,7 +56232,12 @@ impl PyRolling {
                 }
             },
             Some(|df: &DataFrame| {
-                let windows = df.rolling_closed(window, min_periods, center, closed, None)?;
+                let windows = match offset {
+                    Some(offset) => {
+                        df.rolling_offset_centered(offset, min_periods, closed, None, center)?
+                    }
+                    None => df.rolling_closed(window, min_periods, center, closed, None)?,
+                };
                 if want_corr {
                     windows.corr_ddof(ddof)
                 } else {
@@ -56224,7 +56286,10 @@ impl PyRolling {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Series> {
         let windows = self.series_window(s)?;
-        let min_periods = self.min_periods.unwrap_or(self.window);
+        // pandas' default: the window length, or 1 for a time-based window.
+        let min_periods = self
+            .min_periods
+            .unwrap_or(if self.offset.is_some() { 1 } else { self.window });
         let values = s.column().values();
         let labels = s.index().labels();
         let mut out = Vec::with_capacity(values.len());
@@ -56246,15 +56311,10 @@ impl PyRolling {
         Series::new(s.name(), s.index().clone(), column).map_err(frame_error_to_py)
     }
 
-    /// Refuses a time-based window, or windows along `on=`, where `method`
-    /// only runs count windows over the rows (it would have run a 0-row
-    /// window, or aggregated the `on` column).
-    fn require_count_window(&self, method: &str) -> PyResult<()> {
-        if self.offset.is_some() {
-            return Err(not_implemented(&format!(
-                "Rolling.{method} over a time-based window"
-            )));
-        }
+    /// Refuses windows along `on=` where `method` windows each column over
+    /// the frame's own index (it would have aggregated the `on` column). A
+    /// time-based window over the index runs (it was refused).
+    fn require_index_window(&self, method: &str) -> PyResult<()> {
         if self.on.is_some() {
             return Err(not_implemented(&format!("Rolling.{method} along on=")));
         }
@@ -57377,7 +57437,7 @@ impl PyRolling {
         pct: bool,
         numeric_only: bool,
     ) -> PyResult<Py<PyAny>> {
-        self.require_count_window("rank")?;
+        self.require_index_window("rank")?;
         let m = method.unwrap_or("average");
         // pandas' rolling rank takes only these three (fp-frame also ranks
         // 'first' and 'dense').
@@ -57493,7 +57553,7 @@ impl PyRolling {
                 ("engine_kwargs", engine_kwargs.is_none()),
             ],
         )?;
-        self.require_count_window("apply")?;
+        self.require_index_window("apply")?;
         if func.extract::<String>().is_ok() {
             return self.agg_func(py, func);
         }
@@ -57701,8 +57761,8 @@ impl PyExpanding {
         Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
     }
 
-    /// pandas' expanding corr / cov (see [`PyRolling::bivariate`]; a
-    /// frame's every-pair corr without `other` is refused, as before).
+    /// pandas' expanding corr / cov (see [`PyRolling::bivariate`]), a
+    /// frame's every pair without `other` laid out as rolling's.
     fn bivariate(
         &self,
         py: Python<'_>,
@@ -57729,7 +57789,7 @@ impl PyExpanding {
             .transpose()?;
         let other = window_pairwise_other(py, frame.as_deref(), other, pairwise)?;
         let min_periods = self.min_periods;
-        execute_window_bivariate(
+        let result = execute_window_bivariate(
             py,
             series.as_deref(),
             frame.as_deref(),
@@ -57742,10 +57802,27 @@ impl PyExpanding {
                     windows.cov_ddof(s2, ddof)
                 }
             },
-            None::<fn(&DataFrame) -> Result<DataFrame, FrameError>>,
+            // A frame's pairwise corr / cov (it was refused): an expanding
+            // window is a rolling one as long as the frame, as pandas'
+            // ExpandingIndexer.
+            Some(|df: &DataFrame| {
+                let windows = df.rolling_closed(
+                    df.len().max(1),
+                    Some(min_periods.unwrap_or(1)),
+                    false,
+                    IntervalClosed::Right,
+                    None,
+                )?;
+                if want_corr {
+                    windows.corr_ddof(ddof)
+                } else {
+                    windows.cov_ddof(ddof)
+                }
+            }),
             "Empty expanding object",
             "DataFrame expanding corr / cov without other is not supported",
-        )
+        )?;
+        pairwise_window_result(py, frame.as_deref(), other.as_ref(), result)
     }
 }
 
@@ -69948,10 +70025,17 @@ fn to_numeric_series(py: Python<'_>, arg: &Bound<'_, PyAny>, errors: &str) -> Py
         }
     };
     let opts = fp_frame::ToNumericOptions { errors: err_policy };
+    // pandas' own message ("Unable to parse string ..."), without the
+    // compatibility-gate prefix.
+    let parse_error = |error: FrameError| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>(match error {
+            FrameError::CompatibilityRejected(message) => message,
+            other => other.to_string(),
+        })
+    };
 
     if let Ok(s) = arg.extract::<PyRef<'_, PySeries>>() {
-        return fp_frame::to_numeric_with_options(&s.inner, opts)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()));
+        return fp_frame::to_numeric_with_options(&s.inner, opts).map_err(parse_error);
     }
     if let Ok(list) = arg.cast::<PyList>() {
         let values: Vec<Scalar> = list
@@ -69966,8 +70050,7 @@ fn to_numeric_series(py: Python<'_>, arg: &Bound<'_, PyAny>, errors: &str) -> Py
             values,
         )
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        return fp_frame::to_numeric_with_options(&temp_series, opts)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()));
+        return fp_frame::to_numeric_with_options(&temp_series, opts).map_err(parse_error);
     }
     Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
         "arg must be a Series or list",
@@ -72043,6 +72126,8 @@ fn assert_equal_kwargs(func: &str, kwargs: Option<&Bound<'_, PyDict>>) -> PyResu
             "check_freq" | "check_flags" | "check_categorical" | "check_index" => {
                 value.is_truthy()?
             }
+            // A frame's or series' reorder ([`assert_like_reordered`]).
+            "check_like" if func != "assert_index_equal" => true,
             "check_like" | "by_blocks" | "check_datetimelike_compat" => !value.is_truthy()?,
             "obj" => true,
             _ => {
@@ -72056,6 +72141,50 @@ fn assert_equal_kwargs(func: &str, kwargs: Option<&Bound<'_, PyDict>>) -> PyResu
         }
     }
     Ok(())
+}
+
+/// pandas' `check_like=True` for frames and series: when the two hold the
+/// same labels in another order, `left` reordered like `right`
+/// (`left.reindex_like(right)`), so order alone is no difference. Any other
+/// difference is left for the ordinary comparison to report (it was refused).
+fn assert_like_reordered<'py>(
+    left: &Bound<'py, PyAny>,
+    right: &Bound<'py, PyAny>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let check_like = match kwargs.map(|kwargs| kwargs.get_item("check_like")) {
+        Some(Ok(Some(flag))) => flag.is_truthy()?,
+        Some(Err(err)) => return Err(err),
+        _ => false,
+    };
+    if !check_like {
+        return Ok(None);
+    }
+    let sorted = |labels: &[IndexLabel]| {
+        let mut labels = labels.to_vec();
+        labels.sort();
+        labels
+    };
+    let same_labels = if let (Ok(l), Ok(r)) = (
+        left.extract::<PyRef<'_, PyDataFrame>>(),
+        right.extract::<PyRef<'_, PyDataFrame>>(),
+    ) {
+        let (mut l_cols, mut r_cols) = (l.column_labels(), r.column_labels());
+        l_cols.sort();
+        r_cols.sort();
+        l_cols == r_cols && sorted(l.inner.index().labels()) == sorted(r.inner.index().labels())
+    } else if let (Ok(l), Ok(r)) = (
+        left.extract::<PyRef<'_, PySeries>>(),
+        right.extract::<PyRef<'_, PySeries>>(),
+    ) {
+        sorted(l.inner.index().labels()) == sorted(r.inner.index().labels())
+    } else {
+        false
+    };
+    if !same_labels {
+        return Ok(None);
+    }
+    left.call_method1("reindex_like", (right,)).map(Some)
 }
 
 /// pandas' `check_index_type` / `check_column_type` / `exact`: `True` and
@@ -72219,6 +72348,8 @@ fn assert_frame_equal(
     // frames differing in dtype or index name passed. Column labels are
     // strings here, so check_column_type has nothing more to compare.
     assert_equal_kwargs("assert_frame_equal", kwargs)?;
+    let reordered = assert_like_reordered(left, right, kwargs)?;
+    let left = reordered.as_ref().unwrap_or(left);
     // Unset, pandas compares the axes approximately and each column as
     // assert_series_equal does (ints and bools exactly).
     let axes_exact = check_exact.unwrap_or(false);
@@ -72462,6 +72593,8 @@ fn assert_series_equal(
     // fvsao.5: check_dtype, check_names and check_index_type were dropped,
     // so Series differing in dtype, name or index name passed.
     assert_equal_kwargs("assert_series_equal", kwargs)?;
+    let reordered = assert_like_reordered(left, right, kwargs)?;
+    let left = reordered.as_ref().unwrap_or(left);
     let check_index_type = check_index_type.map_or(Ok(true), assert_type_flag)?;
     let (Ok(l_s), Ok(r_s)) = (
         left.extract::<PyRef<'_, PySeries>>(),
@@ -84387,6 +84520,23 @@ fn read_feather(
     Ok(PyDataFrame {
         inner: select_columns_arg(frame, columns)?,
     })
+}
+
+/// `to_clipboard`'s arguments fp-io writes: pandas' default form (`excel=True`,
+/// tab-separated); `excel=False`, another `sep` and `to_csv` options refused.
+fn clipboard_args(
+    owner: &str,
+    excel: Option<bool>,
+    sep: Option<&str>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<()> {
+    if excel == Some(false) {
+        return Err(not_implemented(&format!("{owner}.to_clipboard(excel=False)")));
+    }
+    if sep.is_some_and(|sep| sep != "\t") {
+        return Err(not_implemented(&format!("{owner}.to_clipboard(sep=...)")));
+    }
+    reject_unsupported_kwargs(&format!("{owner}.to_clipboard"), kwargs, &[])
 }
 
 #[pyfunction]

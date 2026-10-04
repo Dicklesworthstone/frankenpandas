@@ -30820,7 +30820,9 @@ impl Series {
         Ok((cross / denom, ss_x / denom, ss_y / denom, count))
     }
 
-    fn aligned_numeric_pairs(&self, other: &Self) -> Result<Vec<(f64, f64)>, FrameError> {
+    /// The `(self, other)` value pairs pandas' `corr` reads: the two aligned
+    /// inner-wise, a pair kept where both are present numbers.
+    pub fn aligned_numeric_pairs(&self, other: &Self) -> Result<Vec<(f64, f64)>, FrameError> {
         let (left, right) = self.align(other, AlignMode::Inner)?;
         Ok(left
             .values()
@@ -62323,14 +62325,24 @@ pub fn to_numeric_with_options(
             }
             Scalar::Utf8(s) => {
                 let trimmed = s.trim();
-                // pandas' text converter, not correctly rounded; the inf / nan
-                // spellings as Rust reads them (br-frankenpandas-py3c0).
+                // pandas' text converter, not correctly rounded
+                // (br-frankenpandas-py3c0); of the other spellings only an
+                // unpadded inf / infinity - 'nan' and ' inf' raise.
                 let float = || match fp_types::pandas_decimal_to_f64(trimmed.as_bytes()) {
                     fp_types::PandasDecimal::Value(value) => Some(value),
                     fp_types::PandasDecimal::Rejected => None,
-                    fp_types::PandasDecimal::NotDecimal => trimmed.parse::<f64>().ok(),
+                    fp_types::PandasDecimal::NotDecimal => {
+                        let unsigned = s.strip_prefix(['+', '-']).unwrap_or(s);
+                        let inf = unsigned.eq_ignore_ascii_case("inf")
+                            || unsigned.eq_ignore_ascii_case("infinity");
+                        inf.then(|| s.parse::<f64>().ok()).flatten()
+                    }
                 };
-                if let Ok(i) = trimmed.parse::<i64>() {
+                if s.is_empty() {
+                    // pandas: an empty string is NaN (a blank one raises).
+                    has_float = true;
+                    converted.push(Scalar::Null(NullKind::NaN));
+                } else if let Ok(i) = trimmed.parse::<i64>() {
                     converted.push(Scalar::Int64(i));
                 } else if let Some(f) = float() {
                     has_float = true;
