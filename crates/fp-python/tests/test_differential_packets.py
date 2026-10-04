@@ -17716,6 +17716,19 @@ _RA_CASES = {
 }
 
 
+# An answer no scalar holds - a list, tuple or dict, an empty bin's empty
+# one too - is an object cell, as pandas keeps it (it raised "Cannot convert
+# list to Scalar"); shown and compared cell by cell.
+def _ra_cells(result: Any) -> list:
+    return _mk_shown(result) + [repr(cell) for cell in result.tolist()]
+
+
+_RA_CASES["list"] = lambda m: _ra_cells(_ra_series(m).resample("D").apply(lambda g: list(g)))
+_RA_CASES["tuple"] = lambda m: _ra_cells(_ra_series(m).resample("D").apply(lambda g: tuple(g)))
+_RA_CASES["dict"] = lambda m: _ra_cells(_ra_series(m).resample("D").apply(lambda g: {"n": len(g)}))
+_RA_CASES["frame list"] = lambda m: _ra_cells(_ra_frame(m).resample("D").apply(lambda g: list(g))["v"])
+
+
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 @pytest.mark.parametrize("case", list(_RA_CASES))
 def test_resample_apply_rows_like_pandas_jno5s(case: str) -> None:

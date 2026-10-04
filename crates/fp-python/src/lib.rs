@@ -65511,11 +65511,21 @@ impl PyResampler {
         if answers.first().is_some_and(answer_is_rows) {
             return self.concat_bin_rows(py, bins, answers);
         }
+        // An answer no scalar holds - a list, tuple or dict - is an object
+        // cell, as pandas keeps it (it raised "Cannot convert list to
+        // Scalar"; br-frankenpandas-jno5s).
         let values = answers
             .iter()
-            .map(|answer| py_to_scalar(py, answer))
+            .map(|answer| py_to_cell(py, answer))
             .collect::<PyResult<Vec<_>>>()?;
-        let mut column = Column::from_values(values).map_err(column_error_to_py)?;
+        let mut column = if values
+            .iter()
+            .any(|value| matches!(value, Scalar::Object(_)))
+        {
+            Column::from_object_values(values)
+        } else {
+            Column::from_values(values).map_err(column_error_to_py)?
+        };
         // pandas reads the answers as numpy would: ints beside a missing value
         // are float64 (an empty bin's max answered an int64 holding NaN).
         if column.dtype() == DType::Int64 && column.has_any_missing() {
