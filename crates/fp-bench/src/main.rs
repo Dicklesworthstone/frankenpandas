@@ -1800,16 +1800,14 @@ fn run(
                 .expect("sort_values_multi");
         }),
         ("dataframe_ops", "filter_bool_mask") => {
-            // df[df.col_0 > df.col_0.median()]
-            let med = df
-                .get_column("col_0")
-                .median()
-                .ok()
-                .and_then(|s| s.to_f64().ok())
-                .unwrap_or(f64::NAN);
-            let mask: Vec<bool> = raw[0].iter().map(|&v| v > med).collect();
+            // df[df.col_0 > df.col_0.median()] - the median, the compare and
+            // the filter all timed, as the pandas arm times them (the mask
+            // was built outside the timer; br-frankenpandas-ri7uj).
             time_us(|| {
-                let _ = df.loc_bool(&mask).expect("loc_bool");
+                let column = df.get_column("col_0");
+                let median = column.median().expect("median");
+                let mask = column.gt_scalar(&median).expect("gt");
+                let _ = df.filter_rows(&mask).expect("filter_rows");
             })
         }
         ("dataframe_ops", "drop_duplicates") => {
