@@ -44405,6 +44405,31 @@ impl PyDataFrame {
                 .map_err(frame_error_to_py)?;
             Bound::new(py, PyDataFrame { inner: sorted })?.into_any()
         };
+        // pandas' dropna=True drops each aggregated row whose every value is
+        // missing before it unstacks (var / std / sem of one value, skew of
+        // fewer than three), as the branch above does - the kernel's table
+        // and the groupby of no `columns` kept it (br-frankenpandas-c6xs9) -
+        // and, last of all, each column whose every value is missing.
+        let all_missing = |axis: i64| -> PyResult<Bound<'py, PyDict>> {
+            let kwargs = keyword("how", pyo3::types::PyString::new(py, "all").into_any())?;
+            kwargs.set_item("axis", axis)?;
+            Ok(kwargs)
+        };
+        if dropna && (column_keys.is_empty() || simple) {
+            table = table.call_method("dropna", (), Some(&all_missing(0)?))?;
+            // With `columns`, a column whose every cell was dropped never
+            // unstacks, so no fill_value reaches it.
+            if simple {
+                table = table.call_method("dropna", (), Some(&all_missing(1)?))?;
+            }
+        }
+        let without_empty_columns = |table: Bound<'py, PyAny>| -> PyResult<Bound<'py, PyAny>> {
+            if dropna {
+                table.call_method("dropna", (), Some(&all_missing(1)?))
+            } else {
+                Ok(table)
+            }
+        };
         if let Some(fill) = fill_value.filter(|fill| !fill.is_none()) {
             let fill = py_to_scalar(py, fill)?;
             let res = table
@@ -44435,7 +44460,7 @@ impl PyDataFrame {
             table = Bound::new(py, PyDataFrame { inner: res })?.into_any();
         }
         if !margins {
-            return Ok(table);
+            return without_empty_columns(table);
         }
         if index_keys.len() != 1 {
             return Err(not_implemented(
@@ -44483,7 +44508,7 @@ impl PyDataFrame {
             concat.call1((PyList::new(py, [table, one_row(cells)?])?,))?
         };
         with_row.getattr("index")?.setattr("name", index_name)?;
-        Ok(with_row)
+        without_empty_columns(with_row)
     }
 
     #[allow(clippy::too_many_arguments)]

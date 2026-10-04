@@ -24126,3 +24126,85 @@ _2BLAF_NOT_COVERED = {
 def test_eval_of_a_constant_is_one_value_2blaf(case: str) -> None:
     run = _2BLAF_CASES[case]
     assert _2blaf_outcome(lambda: run(fpd)) == _2blaf_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-c6xs9: pivot_table(dropna=True) drops each aggregated
+# row whose every value is missing (var / std / sem of one value, skew of
+# fewer than three) and each all-missing column; the single-value kernel
+# path and the no-`columns` groupby kept them as NaN rows / columns.
+# NEGATIVE rows: dropna=False keeps them, mean drops nothing, two values
+# (already pandas' definition) unchanged.
+def _c6xs9_frame(m: Any, rows: list, cols: list, vals: list) -> Any:
+    return m.DataFrame({"r": rows, "c": cols, "v": vals, "w": [float(i) for i in range(len(rows))]})
+
+
+_C6XS9_CASES = {
+    "var drops a row": lambda m: _c6xs9_frame(m, [1, 1, 2], ["x"] * 3, [1.0, 3.0, 5.0]).pivot_table(
+        index="r", columns="c", values="v", aggfunc="var"
+    ),
+    "var drops a column": lambda m: _c6xs9_frame(m, [1, 1, 1], ["x", "x", "y"], [1.0, 3.0, 5.0]).pivot_table(
+        index="r", columns="c", values="v", aggfunc="var"
+    ),
+    "std drops both": lambda m: _c6xs9_frame(m, [1, 1, 2, 3], ["x", "x", "y", "x"], [1.0, 3.0, 5.0, 7.0]).pivot_table(
+        index="r", columns="c", values="v", aggfunc="std"
+    ),
+    "sem drops a row": lambda m: _c6xs9_frame(m, [1, 1, 2], ["x"] * 3, [1.0, 3.0, 5.0]).pivot_table(
+        index="r", columns="c", values="v", aggfunc="sem"
+    ),
+    "skew of a short group": lambda m: _c6xs9_frame(m, [1, 1, 1, 2, 2], ["x"] * 5, [1.0, 3.0, 8.0, 5.0, 6.0]).pivot_table(
+        index="r", columns="c", values="v", aggfunc="skew"
+    ),
+    "no columns var": lambda m: _c6xs9_frame(m, [1, 1, 2], ["x"] * 3, [1.0, 3.0, 5.0]).pivot_table(
+        index="r", values="v", aggfunc="var"
+    ),
+    "no columns two values": lambda m: _c6xs9_frame(m, [1, 1, 2], ["x"] * 3, [1.0, 3.0, 5.0]).pivot_table(
+        index="r", values=["v", "w"], aggfunc="var"
+    ),
+    "var with fill_value": lambda m: _c6xs9_frame(m, [1, 1, 2, 2], ["x", "x", "y", "x"], [1.0, 3.0, 5.0, 6.0]).pivot_table(
+        index="r", columns="c", values="v", aggfunc="var", fill_value=0
+    ),
+    "var with margins": lambda m: _c6xs9_frame(m, [1, 1, 2], ["x", "x", "y"], [1.0, 3.0, 5.0]).pivot_table(
+        index="r", columns="c", values="v", aggfunc="var", margins=True
+    ),
+    "int count": lambda m: _c6xs9_frame(m, [1, 1, 2], ["x", "y", "x"], [1, 3, 5]).pivot_table(
+        index="r", columns="c", values="v", aggfunc="count"
+    ),
+    "int sum": lambda m: _c6xs9_frame(m, [1, 1, 2], ["x", "y", "x"], [1, 3, 5]).pivot_table(
+        index="r", columns="c", values="v", aggfunc="sum"
+    ),
+    "two index keys var": lambda m: m.DataFrame(
+        {"r": [1, 1, 2], "s": ["a", "a", "b"], "c": ["x"] * 3, "v": [1.0, 3.0, 5.0]}
+    ).pivot_table(index=["r", "s"], columns="c", values="v", aggfunc="var"),
+    # NEGATIVE
+    "dropna False keeps": lambda m: _c6xs9_frame(m, [1, 1, 2], ["x"] * 3, [1.0, 3.0, 5.0]).pivot_table(
+        index="r", columns="c", values="v", aggfunc="var", dropna=False
+    ),
+    "mean drops nothing": lambda m: _c6xs9_frame(m, [1, 1, 2], ["x"] * 3, [1.0, 3.0, 5.0]).pivot_table(
+        index="r", columns="c", values="v", aggfunc="mean"
+    ),
+    "two values": lambda m: _c6xs9_frame(m, [1, 1, 2], ["x"] * 3, [1.0, 3.0, 5.0]).pivot_table(
+        index="r", columns="c", values=["v", "w"], aggfunc="var"
+    ),
+}
+
+
+def _c6xs9_outcome(run: Any) -> Any:
+    try:
+        table = run()
+        return (
+            [repr(label) for label in table.index],
+            [repr(label) for label in table.columns],
+            str(table.dtypes.tolist()),
+            repr(table.values.tolist()),
+        )
+    except NameError:
+        raise
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_C6XS9_CASES))
+def test_pivot_table_dropna_drops_all_missing_rows_and_columns_c6xs9(case: str) -> None:
+    run = _C6XS9_CASES[case]
+    assert _c6xs9_outcome(lambda: run(fpd)) == _c6xs9_outcome(lambda: run(pd)), case
