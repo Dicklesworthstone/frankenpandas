@@ -6037,6 +6037,63 @@ fn sequence_zone(data: &Bound<'_, PyAny>) -> Option<String> {
 /// aware one a host object keeping its zone. None for any other data. They
 /// became naive UTC instants, blending UTC with naive wall times (fvsao.60).
 fn mixed_zone_cells(py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Option<Column>> {
+    let Some(aware) = mixed_zone_flags(data)? else {
+        return Ok(None);
+    };
+    let cells = data
+        .try_iter()?
+        .zip(aware)
+        .map(|(item, aware)| {
+            let item = item?;
+            if aware {
+                Ok(Scalar::Object(fp_types::ObjectValue::Host(
+                    fp_types::HostValue::new(PyHost(item.unbind())),
+                )))
+            } else {
+                py_to_cell(py, &item)
+            }
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(Some(Column::from_object_values(cells)))
+}
+
+/// [`mixed_zone_cells`]' Index: pandas' object Index of each datetime as the
+/// Python object it is (an aware one keeping its zone). None for any other
+/// data. They became one naive datetime64 index, and a NaT among them
+/// raised OutOfBoundsDatetime (ewrvf).
+fn mixed_zone_object_index(data: &Bound<'_, PyAny>) -> PyResult<Option<PyIndex>> {
+    if mixed_zone_flags(data)?.is_none() {
+        return Ok(None);
+    }
+    host_object_index(data).map(Some)
+}
+
+/// An object Index of `items` as Python has them: each a host object, None
+/// or NaT the missing label.
+fn host_object_index(items: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+    let labels = items
+        .try_iter()?
+        .map(|item| {
+            let item = item?;
+            if item.is_none() || item.is_instance_of::<PyNaTType>() {
+                py_to_index_label(&item)
+            } else {
+                Ok(IndexLabel::Object(fp_types::ObjectValue::Host(
+                    fp_types::HostValue::new(PyHost(item.unbind())),
+                )))
+            }
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(PyIndex {
+        inner: Index::new(labels),
+    })
+}
+
+/// Each item's awareness when a list / tuple holds datetimes (NaT / None
+/// among them) in more than one zone, aware beside naive counting as two.
+/// None for any other data: not such a sequence, an item that is not a
+/// datetime, one zone or none.
+fn mixed_zone_flags(data: &Bound<'_, PyAny>) -> PyResult<Option<Vec<bool>>> {
     if !(data.is_instance_of::<PyList>() || data.is_instance_of::<PyTuple>()) {
         return Ok(None);
     }
@@ -6063,24 +6120,7 @@ fn mixed_zone_cells(py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Option<
             zones.push(zone);
         }
     }
-    if zones.len() < 2 {
-        return Ok(None);
-    }
-    let cells = data
-        .try_iter()?
-        .zip(aware)
-        .map(|(item, aware)| {
-            let item = item?;
-            if aware {
-                Ok(Scalar::Object(fp_types::ObjectValue::Host(
-                    fp_types::HostValue::new(PyHost(item.unbind())),
-                )))
-            } else {
-                py_to_cell(py, &item)
-            }
-        })
-        .collect::<PyResult<Vec<_>>>()?;
-    Ok(Some(Column::from_object_values(cells)))
+    Ok((zones.len() >= 2).then_some(aware))
 }
 
 /// `series` with the zone its source list carried (see [`sequence_zone`]):
@@ -10447,6 +10487,22 @@ impl PyIndex {
         let _ = copy; // pandas' copy= does not change the labels
         // Any hashable names it, typed (`name=7` raised TypeError; fvsao.64).
         let name = name.map(py_axis_name).transpose()?.flatten();
+        // Datetimes in more than one zone (or aware beside naive) are an
+        // object Index of each as it is, with or without dtype=object - and
+        // under dtype=object aware ones of one zone too (each lost its zone).
+        let object_dtype = dtype.is_some_and(is_object_dtype_arg);
+        if (object_dtype || dtype.is_none_or(|dtype| dtype.is_none()))
+            && let Some(data) = data
+            && let Some(mut index) = match mixed_zone_object_index(data)? {
+                None if object_dtype && sequence_zone(data).is_some() => {
+                    Some(host_object_index(data)?)
+                }
+                index => index,
+            }
+        {
+            index.inner = index.inner.set_names(name);
+            return Ok(Py::new(py, index)?.into_any());
+        }
         if let Some(dtype) = dtype.filter(|dtype| !dtype.is_none()) {
             return Self::new(data, name)?.astype(dtype, true);
         }
@@ -70184,24 +70240,11 @@ fn mixed_zone_timestamps<'py>(
 /// ([`mixed_zone_timestamps`]): Timestamps, an aware one kept whole, or
 /// under format='mixed' every datetime the Python object it is.
 fn mixed_zone_index(stamps: Bound<'_, PyList>, pydatetime: bool) -> PyResult<PyIndex> {
-    if !pydatetime {
-        return object_index_of(stamps.into_any(), Vec::new());
+    if pydatetime {
+        host_object_index(stamps.as_any())
+    } else {
+        object_index_of(stamps.into_any(), Vec::new())
     }
-    let labels = stamps
-        .iter()
-        .map(|item| {
-            if item.is_none() {
-                py_to_index_label(&item)
-            } else {
-                Ok(IndexLabel::Object(fp_types::ObjectValue::Host(
-                    fp_types::HostValue::new(PyHost(item.unbind())),
-                )))
-            }
-        })
-        .collect::<PyResult<Vec<_>>>()?;
-    Ok(PyIndex {
-        inner: Index::new(labels),
-    })
 }
 
 /// A `to_datetime` failure as pandas' ValueError, its own text (the gate

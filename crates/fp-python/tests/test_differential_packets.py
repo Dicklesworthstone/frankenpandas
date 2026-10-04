@@ -23622,6 +23622,44 @@ def test_to_datetime_reads_iso_like_pandas_f1jm5(case: str) -> None:
     assert _f1jm5_outcome(lambda: run(fpd)) == _f1jm5_outcome(lambda: run(pd)), case
 
 
+# br-frankenpandas-ewrvf: Index() of datetimes in more than one zone (or aware
+# beside naive) became one naive datetime64 index - each value its UTC wall
+# time - and a NaT among them raised OutOfBoundsDatetime; dtype=object
+# dropped the zone of one-zone values too. pandas keeps each as it is.
+_EWRVF_UTC = datetime.timezone.utc
+_EWRVF_DATA = {
+    "two zones": lambda m: [pd.Timestamp("2024-01-05 10:30:15", tz="UTC"), pd.Timestamp("2024-01-05 11:30:15+01:00")],
+    "two zones and NaT": lambda m: [pd.Timestamp("2024-01-05 10:30:15", tz="UTC"), m.NaT, pd.Timestamp("2024-01-05 11:30:15+01:00")],
+    "two zones and None": lambda m: [pd.Timestamp("2024-01-05 10:30:15", tz="UTC"), None, pd.Timestamp("2024-01-05 11:30:15+01:00")],
+    "aware and naive": lambda m: [pd.Timestamp("2024-01-05 10:30:15", tz="UTC"), pd.Timestamp("2024-01-05 10:30:15")],
+    "datetimes in two zones": lambda m: [
+        datetime.datetime(2024, 1, 5, 10, tzinfo=_EWRVF_UTC),
+        datetime.datetime(2024, 1, 5, 11, tzinfo=datetime.timezone(datetime.timedelta(hours=1))),
+    ],
+    "aware and naive datetimes": lambda m: [datetime.datetime(2024, 1, 5, 10, tzinfo=_EWRVF_UTC), datetime.datetime(2024, 1, 5, 10)],
+    "one zone": lambda m: [pd.Timestamp("2024-01-05 10:30:15", tz="UTC"), pd.Timestamp("2024-01-06 10:30:15", tz="UTC")],
+    "naive and NaT": lambda m: [pd.Timestamp("2024-01-05 10:30:15"), m.NaT],
+}
+_EWRVF_CASES = {
+    f"{name} {label}": (lambda make, kw: lambda m: m.Index(make(m), **kw))(make, kw)
+    for name, make in _EWRVF_DATA.items()
+    for label, kw in {"": {}, "dtype=object": {"dtype": object}, "name": {"name": "t"}}.items()
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EWRVF_CASES))
+def test_index_of_datetimes_in_several_zones_ewrvf(case: str) -> None:
+    def seen(m: Any) -> Any:
+        try:
+            index = _EWRVF_CASES[case](m)
+            return (type(index).__name__, str(index.dtype), [repr(v) for v in index], index.name)
+        except Exception as e:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(e).__name__, str(e))
+
+    assert seen(fpd) == seen(pd), case
+
+
 @pytest.mark.skipif(fpd is None or os.name != "posix", reason="frankenpandas not installed / no sh")
 def test_to_clipboard_writes_pandas_tab_separated_text(tmp_path: Path, monkeypatch: Any) -> None:
     # A wl-copy on PATH that keeps what it is sent: the clipboard text is
