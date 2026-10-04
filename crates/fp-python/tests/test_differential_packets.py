@@ -24208,3 +24208,56 @@ def _c6xs9_outcome(run: Any) -> Any:
 def test_pivot_table_dropna_drops_all_missing_rows_and_columns_c6xs9(case: str) -> None:
     run = _C6XS9_CASES[case]
     assert _c6xs9_outcome(lambda: run(fpd)) == _c6xs9_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-vol90: resample of an unsorted DatetimeIndex read the rows
+# as given, so first / last / ohlc / apply / transform answered other rows
+# than pandas, which bins them in time order (a stable sort, ties kept in
+# input order). NEGATIVE rows: order-free reductions, a sorted index.
+_VOL90_STAMPS = ["2024-01-02 09:00", "2024-01-01 05:00", "2024-01-02 03:00", "2024-01-01 01:00", "2024-01-01 05:00"]
+
+
+def _vol90_series(m: Any) -> Any:
+    return m.Series([3.0, 2.0, 4.0, 1.0, 2.5], index=m.to_datetime(_VOL90_STAMPS), name="s")
+
+
+def _vol90_frame(m: Any) -> Any:
+    return m.DataFrame({"a": [3.0, 2.0, 4.0, 1.0, 2.5], "b": [7, 6, 8, 5, 9]}, index=m.to_datetime(_VOL90_STAMPS))
+
+
+_VOL90_CASES = {
+    **{
+        f"series {op}": (lambda op: lambda m: getattr(_vol90_series(m).resample("D"), op)())(op)
+        for op in ["first", "last", "ohlc", "sum", "count", "max", "median"]
+    },
+    **{
+        f"frame {op}": (lambda op: lambda m: getattr(_vol90_frame(m).resample("D"), op)())(op)
+        for op in ["first", "last", "sum", "mean"]
+    },
+    "series agg first": lambda m: _vol90_series(m).resample("D").agg("first"),
+    "series apply iloc0": lambda m: _vol90_series(m).resample("D").apply(lambda g: g.iloc[0]),
+    "series apply head2": lambda m: _vol90_series(m).resample("D").apply(lambda g: g.head(2)),
+    "series transform first": lambda m: _vol90_series(m).resample("D").transform("first"),
+    "series 12h last": lambda m: _vol90_series(m).resample("12h").last(),
+    "frame apply head1": lambda m: _vol90_frame(m).resample("D").apply(lambda g: g.head(1)),
+    "frame on= column first": lambda m: _vol90_frame(m).assign(t=m.to_datetime(_VOL90_STAMPS)).reset_index(drop=True).resample("D", on="t").first(),
+    # NEGATIVE: a sorted index is unchanged.
+    "sorted series first": lambda m: _vol90_series(m).sort_index().resample("D").first(),
+}
+
+
+def _vol90_outcome(run: Any) -> Any:
+    try:
+        result = run()
+        return (type(result).__name__, [repr(label) for label in result.index], repr(result.values.tolist()))
+    except NameError:
+        raise
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VOL90_CASES))
+def test_resample_reads_an_unsorted_index_in_time_order_vol90(case: str) -> None:
+    run = _VOL90_CASES[case]
+    assert _vol90_outcome(lambda: run(fpd)) == _vol90_outcome(lambda: run(pd)), case

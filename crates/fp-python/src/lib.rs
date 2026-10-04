@@ -65212,6 +65212,26 @@ impl PyResampler {
         label: Option<String>,
         origin: Option<String>,
     ) -> PyResult<Self> {
+        // pandas bins the rows in time order - an unsorted index taken in its
+        // stable argsort, NaT first (TimeGrouper's mergesort) - so first /
+        // last / ohlc / apply / transform read each bin's earliest row first;
+        // they read the rows as given (br-frankenpandas-vol90).
+        let target = match target {
+            ResampleTarget::Series(series) if !series.index().is_monotonic_increasing() => {
+                let order = series
+                    .index()
+                    .argsort()
+                    .into_iter()
+                    .map(|position| i64::try_from(position).unwrap_or(i64::MAX))
+                    .collect::<Vec<_>>();
+                ResampleTarget::Series(series.take(&order).map_err(frame_error_to_py)?)
+            }
+            ResampleTarget::DataFrame(frame) if !frame.index().is_monotonic_increasing() => {
+                let order = frame.index().argsort();
+                ResampleTarget::DataFrame(frame.take_rows(&order).map_err(frame_error_to_py)?)
+            }
+            target => target,
+        };
         let index = match &target {
             ResampleTarget::Series(series) => series.index().clone(),
             ResampleTarget::DataFrame(frame) => frame.index().clone(),
