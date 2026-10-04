@@ -5,6 +5,7 @@ Differential conformance test harness for frankenpandas vs pandas oracle on pack
 from __future__ import annotations
 
 import collections.abc
+import copy
 import datetime
 import fractions
 import glob
@@ -12,6 +13,7 @@ import itertools
 import json
 import math
 import os
+import pickle
 import re
 import tempfile
 import warnings
@@ -23884,3 +23886,69 @@ _H9CUG_CASES["index format leap second"] = lambda m: m.to_datetime(
 def test_to_datetime_reads_a_format_like_pandas_strptime_h9cug(case: str) -> None:
     run = _H9CUG_CASES[case]
     assert _f1jm5_outcome(lambda: run(fpd)) == _f1jm5_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.58: no dtype object
+# could be pickled or deep-copied ("cannot pickle 'CategoricalDtype'
+# object"), so neither could df.dtypes, a dict of dtypes, or anything a
+# multiprocessing worker passed holding one. Each round trip is compared
+# with pandas' on type, repr, equality with the original and str.
+_FVSAO58_DTYPES = {
+    "CategoricalDtype ordered": lambda m: m.CategoricalDtype(["a", "b"], ordered=True),
+    "CategoricalDtype none": lambda m: m.CategoricalDtype(),
+    "CategoricalDtype ints": lambda m: m.CategoricalDtype([3, 1, 2]),
+    "CategoricalDtype of a Series": lambda m: m.Series(["b", "a", "b"], dtype="category").dtype,
+    "DatetimeTZDtype UTC": lambda m: m.DatetimeTZDtype(tz="UTC"),
+    "DatetimeTZDtype Paris": lambda m: m.DatetimeTZDtype(tz="Europe/Paris"),
+    "DatetimeTZDtype of a Series": lambda m: m.Series(m.to_datetime(["2024-01-01"]).tz_localize("UTC")).dtype,
+    "PeriodDtype": lambda m: m.PeriodDtype("M"),
+    "IntervalDtype": lambda m: m.IntervalDtype("int64", closed="left"),
+    "Int64Dtype": lambda m: m.Int64Dtype(),
+    "Int8Dtype": lambda m: m.Int8Dtype(),
+    "UInt32Dtype": lambda m: m.UInt32Dtype(),
+    "Float32Dtype": lambda m: m.Float32Dtype(),
+    "Float64Dtype": lambda m: m.Float64Dtype(),
+    "BooleanDtype": lambda m: m.BooleanDtype(),
+    "StringDtype": lambda m: m.StringDtype(),
+    "SparseDtype": lambda m: m.SparseDtype("float64"),
+    "Int64Dtype of a Series": lambda m: m.Series([1, None], dtype="Int64").dtype,
+}
+
+
+def _fvsao58_round_trip(make: Any, how: str) -> Any:
+    try:
+        original = make()
+        copied = pickle.loads(pickle.dumps(original)) if how == "pickle" else copy.deepcopy(original)
+        return ("ok", type(copied).__name__, repr(copied), bool(copied == original), str(copied))
+    except NameError:
+        raise
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("how", ["pickle", "deepcopy"])
+@pytest.mark.parametrize("case", list(_FVSAO58_DTYPES))
+def test_dtype_objects_pickle_like_pandas_fvsao58(case: str, how: str) -> None:
+    make = _FVSAO58_DTYPES[case]
+    assert _fvsao58_round_trip(lambda: make(fpd), how) == _fvsao58_round_trip(lambda: make(pd), how), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_frame_dtypes_pickle_like_pandas_fvsao58() -> None:
+    def seen(m: Any) -> Any:
+        frame = m.DataFrame(
+            {"a": [1, None], "b": ["x", "y"], "c": [1.5, 2.5]}
+        ).astype({"a": "Int64", "b": "category"})
+        dtypes = pickle.loads(pickle.dumps(frame.dtypes))
+        mapping = copy.deepcopy(frame.dtypes.to_dict())
+        return ([str(d) for d in dtypes], {k: str(v) for k, v in mapping.items()})
+
+    assert seen(fpd) == seen(pd)
+    # NEGATIVE: the copy is its own object yet equal, and the categories and
+    # their order survive (a bare CategoricalDtype() would equal any).
+    original = fpd.CategoricalDtype(["b", "a"], ordered=True)
+    copied = pickle.loads(pickle.dumps(original))
+    assert copied is not original and copied == original
+    assert list(copied.categories) == ["b", "a"] and copied.ordered
+    assert copied != fpd.CategoricalDtype(["a", "b"], ordered=True)

@@ -75026,6 +75026,16 @@ macro_rules! define_simple_dtype {
                 Self
             }
 
+            /// Pickles (and deep-copies) as `<Class>()` ([`restore`]; no
+            /// dtype could be pickled, so neither could `df.dtypes`;
+            /// fvsao.58).
+            fn __reduce__<'py>(
+                &self,
+                py: Python<'py>,
+            ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+                restore_call(py, $class_name, constructor_payload(py, Vec::new(), &[])?)
+            }
+
             #[getter]
             fn name(&self) -> &'static str {
                 $dtype_name
@@ -75122,6 +75132,16 @@ impl PyStringDtype {
         }
     }
 
+    /// Pickles (and deep-copies) as `StringDtype(storage)` ([`restore`];
+    /// fvsao.58).
+    fn __reduce__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let payload = constructor_payload(py, vec![self.storage.into_bound_py_any(py)?], &[])?;
+        restore_call(py, "StringDtype", payload)
+    }
+
     /// The dtype a 'string[storage]' spelling names, as pandas'.
     #[classmethod]
     fn construct_from_string(
@@ -75212,6 +75232,27 @@ impl PyCategoricalDtype {
         })
     }
 
+    /// Pickles (and deep-copies) as `CategoricalDtype(categories,
+    /// ordered=)`, the categories as a list of their values ([`restore`];
+    /// fvsao.58).
+    fn __reduce__<'py>(
+        slf: &Bound<'py, Self>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let py = slf.py();
+        let categories = slf.getattr("categories")?;
+        let categories = if categories.is_none() {
+            categories
+        } else {
+            PyList::new(py, categories.try_iter()?.collect::<PyResult<Vec<_>>>()?)?.into_any()
+        };
+        let payload = constructor_payload(
+            py,
+            vec![categories],
+            &[("ordered", slf.getattr("ordered")?)],
+        )?;
+        restore_call(py, "CategoricalDtype", payload)
+    }
+
     #[getter]
     fn name(&self) -> &'static str {
         "category"
@@ -75296,6 +75337,20 @@ impl PyDatetimeTZDtype {
         })
     }
 
+    /// Pickles (and deep-copies) as `DatetimeTZDtype(unit=, tz=)`, the
+    /// zone as its tzinfo ([`restore`]; fvsao.58).
+    fn __reduce__<'py>(
+        slf: &Bound<'py, Self>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let py = slf.py();
+        let payload = constructor_payload(
+            py,
+            Vec::new(),
+            &[("unit", slf.getattr("unit")?), ("tz", slf.getattr("tz")?)],
+        )?;
+        restore_call(py, "DatetimeTZDtype", payload)
+    }
+
     /// The zone as pandas' tzinfo object (see [`zone_tzinfo`]; it was the
     /// name, a str).
     #[getter]
@@ -75349,6 +75404,17 @@ impl PyPeriodDtype {
         }
     }
 
+    /// Pickles (and deep-copies) as `PeriodDtype(freq)` ([`restore`];
+    /// fvsao.58).
+    fn __reduce__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let payload =
+            constructor_payload(py, vec![self.freq.as_str().into_bound_py_any(py)?], &[])?;
+        restore_call(py, "PeriodDtype", payload)
+    }
+
     #[getter]
     fn name(&self) -> String {
         format!("period[{}]", self.freq)
@@ -75396,6 +75462,20 @@ impl PyIntervalDtype {
             subtype: subtype.map(str::to_string),
             closed: closed.map(str::to_string),
         }
+    }
+
+    /// Pickles (and deep-copies) as `IntervalDtype(subtype, closed=)`
+    /// ([`restore`]; fvsao.58).
+    fn __reduce__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let payload = constructor_payload(
+            py,
+            vec![self.subtype.as_deref().into_bound_py_any(py)?],
+            &[("closed", self.closed.as_deref().into_bound_py_any(py)?)],
+        )?;
+        restore_call(py, "IntervalDtype", payload)
     }
 
     #[getter]
@@ -75465,6 +75545,23 @@ impl PySparseDtype {
         })
     }
 
+    /// Pickles (and deep-copies) as `SparseDtype(dtype, fill_value)`, the
+    /// fill value as the text it keeps ([`restore`]; fvsao.58).
+    fn __reduce__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let payload = constructor_payload(
+            py,
+            vec![
+                self.dtype.as_str().into_bound_py_any(py)?,
+                self.fill_value.as_str().into_bound_py_any(py)?,
+            ],
+            &[],
+        )?;
+        restore_call(py, "SparseDtype", payload)
+    }
+
     #[getter]
     fn name(&self) -> String {
         format!("Sparse[{}, {}]", self.dtype, self.fill_value)
@@ -75519,6 +75616,20 @@ impl PyArrowDtype {
         Ok(Self {
             pyarrow_dtype: dt_str,
         })
+    }
+
+    /// Pickles (and deep-copies) as `ArrowDtype(pyarrow_dtype)`, the type
+    /// by its name ([`restore`]; fvsao.58).
+    fn __reduce__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        let payload = constructor_payload(
+            py,
+            vec![self.pyarrow_dtype.as_str().into_bound_py_any(py)?],
+            &[],
+        )?;
+        restore_call(py, "ArrowDtype", payload)
     }
 
     #[getter]
