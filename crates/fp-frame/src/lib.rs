@@ -32461,153 +32461,25 @@ fn expanding_moment_output(
     }
 }
 
-#[derive(Default)]
-struct RollingPairwiseMomentState {
-    nobs: usize,
-    sum_x: f64,
-    sum_y: f64,
-    sum_x2: f64,
-    sum_y2: f64,
-    sum_xy: f64,
-    distinct_x: BTreeMap<u64, usize>,
-    distinct_y: BTreeMap<u64, usize>,
-}
-
-impl RollingPairwiseMomentState {
-    fn add(&mut self, x: f64, y: f64) {
-        self.nobs += 1;
-        self.sum_x += x;
-        self.sum_y += y;
-        self.sum_x2 += x * x;
-        self.sum_y2 += y * y;
-        self.sum_xy += x * y;
-        *self
-            .distinct_x
-            .entry(RollingMomentState::value_key(x))
-            .or_insert(0) += 1;
-        *self
-            .distinct_y
-            .entry(RollingMomentState::value_key(y))
-            .or_insert(0) += 1;
+/// A column's values as pandas' window cov / corr read them: float64, NaN
+/// where a value is missing or not a number (a Timedelta as its
+/// nanoseconds).
+fn pairwise_floats(column: &Column) -> Vec<f64> {
+    if let Some(data) = column.as_f64_slice() {
+        return data.to_vec();
     }
-
-    fn remove(&mut self, x: f64, y: f64) {
-        if self.nobs == 0 {
-            return;
-        }
-        self.nobs -= 1;
-        self.sum_x -= x;
-        self.sum_y -= y;
-        self.sum_x2 -= x * x;
-        self.sum_y2 -= y * y;
-        self.sum_xy -= x * y;
-        Self::dec_count(&mut self.distinct_x, RollingMomentState::value_key(x));
-        Self::dec_count(&mut self.distinct_y, RollingMomentState::value_key(y));
+    if let Some((data, validity)) = column.as_f64_slice_with_validity() {
+        return data
+            .iter()
+            .enumerate()
+            .map(|(i, &value)| if validity.get(i) { value } else { f64::NAN })
+            .collect();
     }
-
-    fn dec_count(counts: &mut BTreeMap<u64, usize>, key: u64) {
-        if let Some(count) = counts.get_mut(&key) {
-            *count -= 1;
-            if *count == 0 {
-                counts.remove(&key);
-            }
-        }
-    }
-
-    fn constant_x(&self) -> bool {
-        self.nobs > 0 && self.distinct_x.len() <= 1
-    }
-
-    fn constant_y(&self) -> bool {
-        self.nobs > 0 && self.distinct_y.len() <= 1
-    }
-
-    fn cov_num(&self) -> f64 {
-        let n = self.nobs as f64;
-        self.sum_xy - (self.sum_x * self.sum_y) / n
-    }
-
-    fn var_x_num(&self) -> f64 {
-        let n = self.nobs as f64;
-        self.sum_x2 - (self.sum_x * self.sum_x) / n
-    }
-
-    fn var_y_num(&self) -> f64 {
-        let n = self.nobs as f64;
-        self.sum_y2 - (self.sum_y * self.sum_y) / n
-    }
-
-    /// Update only the sums (no `distinct` multisets). Used by the no-null fast
-    /// path, which tracks per-axis constancy via running consecutive-same-value
-    /// counters (pandas' O(1) trick) instead.
-    fn add_sums(&mut self, x: f64, y: f64) {
-        self.nobs += 1;
-        self.sum_x += x;
-        self.sum_y += y;
-        self.sum_x2 += x * x;
-        self.sum_y2 += y * y;
-        self.sum_xy += x * y;
-    }
-
-    fn remove_sums(&mut self, x: f64, y: f64) {
-        if self.nobs == 0 {
-            return;
-        }
-        self.nobs -= 1;
-        self.sum_x -= x;
-        self.sum_y -= y;
-        self.sum_x2 -= x * x;
-        self.sum_y2 -= y * y;
-        self.sum_xy -= x * y;
-    }
-
-    /// pandas' window cov (`sum((x - mx)(y - my)) / (nobs - ddof)`) or corr
-    /// (the cov over the ddof standard deviations, so ddof cancels but for
-    /// NaN where `nobs <= ddof`); ddof 1 leaves one observation NaN.
-    #[allow(clippy::cast_precision_loss)] // window counts
-    fn output(
-        &self,
-        min_periods: usize,
-        want_corr: bool,
-        constant_x: bool,
-        constant_y: bool,
-        ddof: usize,
-    ) -> Scalar {
-        if self.nobs < min_periods || self.nobs == 0 || (self.nobs < 2 && ddof >= 1) {
-            return Scalar::Null(NullKind::NaN);
-        }
-        if want_corr && self.nobs <= ddof {
-            return Scalar::Null(NullKind::NaN);
-        }
-        if !want_corr && (constant_x || constant_y) {
-            return if self.nobs <= ddof {
-                Scalar::Null(NullKind::NaN)
-            } else {
-                Scalar::Float64(0.0)
-            };
-        }
-        if want_corr && (constant_x || constant_y) {
-            return Scalar::Null(NullKind::NaN);
-        }
-
-        let cov_num = self.cov_num();
-        if want_corr {
-            let var_x = self.var_x_num();
-            let var_y = self.var_y_num();
-            if var_x <= 0.0 || var_y <= 0.0 {
-                Scalar::Null(NullKind::NaN)
-            } else {
-                let corr = cov_num / (var_x.sqrt() * var_y.sqrt());
-                if (1.0 - corr.abs()).abs() <= 1.0e-12 {
-                    Scalar::Float64(corr.signum())
-                } else {
-                    Scalar::Float64(corr)
-                }
-            }
-        } else {
-            Scalar::Float64(cov_num / (self.nobs as f64 - ddof as f64))
-        }
-    }
+    column
+        .values()
+        .iter()
+        .map(|value| Series::pairwise_numeric_value(value).unwrap_or(f64::NAN))
+        .collect()
 }
 
 /// Max window width for the cache-hot sorted-multiset rolling order-statistic
@@ -33754,206 +33626,84 @@ impl Rolling<'_> {
                 Some(self.series.align(other, AlignMode::Left)?.1)
             };
         let aligned_other: &Series = aligned_owned.as_ref().unwrap_or(other);
-        // Typed all-valid (both no-NaN) fast path: run the sliding pairwise
-        // power-sum recurrence over the two raw &[f64], skipping the two 1M
-        // Vec<Scalar>, the 1M Vec<Option<(f64,f64)>> pairs buffer, and the
-        // 32B/cell Vec<Scalar> output. Bit-identical to the clean path below
-        // (same add_sums/remove_sums/output + per-axis consecutive-equal
-        // counters; both all-valid no-NaN => every pair observed). Undefined rows
-        // become NaN -> validity-missing, matching the Scalar Null/Float64(NaN).
-        // Shared sliding pairwise power-sum kernel over two &[f64] (used by both the
-        // all-valid Float64 borrow arm and the all-valid Int64 `v as f64` arm below).
-        // Both gates are all-valid no-NaN, so every pair is observed — bit-identical to
-        // the clean Scalar path (same add_sums/remove_sums/output + per-axis run
-        // counters). Undefined rows become NaN -> validity-missing.
-        let compute = |a: &[f64], b: &[f64]| -> Vec<f64> {
-            let len = a.len();
-            let mut out = Vec::with_capacity(len);
-            let mut state = RollingPairwiseMomentState::default();
-            let mut left = 0_usize;
-            let mut right = 0_usize;
-            let mut run_x = 0_usize;
-            let mut run_y = 0_usize;
-            let mut prev_x = f64::NAN;
-            let mut prev_y = f64::NAN;
-            for i in 0..len {
-                let (start, end) = self.window_bounds(i, len);
-                while right < end {
-                    let (x, y) = (a[right], b[right]);
-                    state.add_sums(x, y);
-                    if x == prev_x {
-                        run_x += 1;
-                    } else {
-                        run_x = 1;
-                        prev_x = x;
-                    }
-                    if y == prev_y {
-                        run_y += 1;
-                    } else {
-                        run_y = 1;
-                        prev_y = y;
-                    }
-                    right += 1;
-                }
-                while left < start {
-                    state.remove_sums(a[left], b[left]);
-                    left += 1;
-                }
-                let cx = state.nobs > 0 && run_x >= state.nobs;
-                let cy = state.nobs > 0 && run_y >= state.nobs;
-                out.push(
-                    match state.output(self.min_periods, want_corr, cx, cy, ddof) {
-                        Scalar::Float64(f) => f,
-                        _ => f64::NAN,
-                    },
-                );
+        // pandas' window cov / corr are its window means and variances
+        // composed, each side NaN where the other is (its prep_binary):
+        //   cov  = (mean(x*y) - mean(x) * mean(y)) * n / (n - ddof)
+        //   corr = cov / sqrt(var(x) * var(y))
+        // with n the pairs a window holds. Measured against live pandas 2.2.3,
+        // 0 mismatches over 180 random cases (count, time-based and centred
+        // windows, NaN, min_periods, ddof 0 / 1, cov and corr); the online
+        // co-moment state this replaces missed the last bits.
+        let (mut xs, mut ys) = (
+            pairwise_floats(self.series.column()),
+            pairwise_floats(aligned_other.column()),
+        );
+        for (x, y) in xs.iter_mut().zip(ys.iter_mut()) {
+            if x.is_nan() || y.is_nan() {
+                (*x, *y) = (f64::NAN, f64::NAN);
             }
-            out
-        };
-        if let (Some(a), Some(b)) = (
-            self.series.column().as_f64_slice(),
-            aligned_other.column().as_f64_slice(),
-        ) {
-            let out = compute(a, b);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
         }
-        // Typed both-all-valid-Int64 fast path (sister to the Float64 arm above; mirror
-        // of Ewm::cov's both-Int64 arm): two all-valid Int64 columns otherwise
-        // materialized both via `.values()`. Map each `v as f64` off the raw `&[i64]`
-        // and run the SAME `compute` kernel. Bit-identical on all-valid Int64 inputs
-        // (every pair observed, `to_f64(Int64(v)) == v as f64`, same recurrence, same
-        // `from_f64_values`).
-        if let (Some(da), Some(db)) = (
-            self.series.column().as_i64_slice(),
-            aligned_other.column().as_i64_slice(),
-        ) {
-            let a: Vec<f64> = da.iter().map(|&v| v as f64).collect();
-            let b: Vec<f64> = db.iter().map(|&v| v as f64).collect();
-            let out = compute(&a, &b);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        // Mixed all-valid Float64/Int64 fast paths (sisters to the both-typed arms): the
-        // generic path below materializes BOTH columns even when one is a borrowable
-        // Float64 slice. Borrow the Float64 side, build the Int64 side's f64 view
-        // (`v as f64`), and run the SAME `compute` kernel. Bit-identical on all-valid
-        // inputs (every pair observed, `to_f64(Int64(v)) == v as f64`).
-        if let (Some(a), Some(db)) = (
-            self.series.column().as_f64_slice(),
-            aligned_other.column().as_i64_slice(),
-        ) {
-            let b: Vec<f64> = db.iter().map(|&v| v as f64).collect();
-            let out = compute(a, &b);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        if let (Some(da), Some(b)) = (
-            self.series.column().as_i64_slice(),
-            aligned_other.column().as_f64_slice(),
-        ) {
-            let a: Vec<f64> = da.iter().map(|&v| v as f64).collect();
-            let out = compute(&a, b);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        let a_vals = self.series.column().values();
-        let b_vals = aligned_other.column().values();
-        let len = a_vals.len();
-        let pairs: Vec<Option<(f64, f64)>> = (0..len)
-            .map(|idx| {
-                Some((
-                    Series::pairwise_numeric_value(&a_vals[idx])?,
-                    Series::pairwise_numeric_value(&b_vals[idx])?,
-                ))
-            })
-            .collect();
-        let mut out = Vec::with_capacity(len);
-        let mut state = RollingPairwiseMomentState::default();
-        let mut left = 0_usize;
-        let mut right = 0_usize;
-
-        // No-NaN / no-missing fast path (br-frankenpandas-1q4q4): the per-axis
-        // `distinct_x`/`distinct_y` BTreeMaps exist only for `constant_x()`/
-        // `constant_y()` (cov→0 / corr→NaN on a constant axis), and maintaining
-        // them every step was the whole cost (rolling cov @w=100 was 0.11×
-        // pandas). For clean, contiguous data an axis is constant iff its
-        // trailing run of equal values covers the window — pandas' O(1)
-        // consecutive-same-value counter; `run >= nobs` is BIT-IDENTICAL to
-        // `distinct.len() <= 1` (no nulls interrupt the run, `==` matches
-        // `value_key` incl. −0.0==0.0). NaN/missing keep the multiset path.
-        let all_clean = pairs
-            .iter()
-            .all(|p| matches!(p, Some((x, y)) if !x.is_nan() && !y.is_nan()));
-        if all_clean {
-            let mut run_x = 0_usize;
-            let mut run_y = 0_usize;
-            let mut prev_x = f64::NAN;
-            let mut prev_y = f64::NAN;
-            for i in 0..len {
-                let (start, end) = self.window_bounds(i, len);
-                while right < end {
-                    if let Some((x, y)) = pairs[right] {
-                        state.add_sums(x, y);
-                        if x == prev_x {
-                            run_x += 1;
-                        } else {
-                            run_x = 1;
-                            prev_x = x;
-                        }
-                        if y == prev_y {
-                            run_y += 1;
-                        } else {
-                            run_y = 1;
-                            prev_y = y;
-                        }
-                    }
-                    right += 1;
-                }
-                while left < start {
-                    if let Some((x, y)) = pairs[left] {
-                        state.remove_sums(x, y);
-                    }
-                    left += 1;
-                }
-                let cx = state.nobs > 0 && run_x >= state.nobs;
-                let cy = state.nobs > 0 && run_y >= state.nobs;
-                out.push(state.output(self.min_periods, want_corr, cx, cy, ddof));
-            }
-            let index = self.series.index().clone();
-            // Float64 even when every window is undefined (all-NaN inferred
-            // object).
-            let column = Column::new(DType::Float64, out)?;
-            return Series::new(self.series.name(), index, column);
-        }
-
+        let len = xs.len();
+        let mut pairs = Vec::with_capacity(len);
+        let (mut left, mut right, mut held) = (0_usize, 0_usize, 0_usize);
         for i in 0..len {
-            // Use the shared window bounds so `center=True` is honored exactly
-            // like the other rolling aggregations (br-frankenpandas-rcvcn);
-            // pandas emits a value when valid_count >= min_periods.
             let (start, end) = self.window_bounds(i, len);
-            while right < end {
-                if let Some((x, y)) = pairs[right] {
-                    state.add(x, y);
-                }
-                right += 1;
-            }
-            while left < start {
-                if let Some((x, y)) = pairs[left] {
-                    state.remove(x, y);
-                }
-                left += 1;
-            }
-            let cx = state.constant_x();
-            let cy = state.constant_y();
-            out.push(state.output(self.min_periods, want_corr, cx, cy, ddof));
+            let present = |slots: &[f64]| slots.iter().filter(|x| !x.is_nan()).count();
+            held += present(&xs[right.min(end)..end]);
+            right = right.max(end);
+            held -= present(&xs[left..start.max(left)]);
+            left = left.max(start);
+            pairs.push(held as f64);
         }
-
-        // Per br-frankenpandas-yk50z: pandas rolling cov/corr preserves source
-        // axis name. Inline impl, not via apply_rolling. Float64 even when
-        // every window is undefined (all-NaN inferred object).
+        let products: Vec<f64> = xs.iter().zip(&ys).map(|(x, y)| x * y).collect();
         let index = self.series.index().clone();
-        let column = Column::new(DType::Float64, out)?;
+        let series = |values: Vec<f64>| {
+            Series::new(
+                self.series.name(),
+                index.clone(),
+                Column::from_f64_values(values),
+            )
+        };
+        let (x, y, xy) = (series(xs)?, series(ys)?, series(products)?);
+        let over = |series: &Series, var: bool| -> Result<Vec<f64>, FrameError> {
+            let windows = Rolling {
+                series,
+                window: self.window,
+                min_periods: self.min_periods,
+                center: self.center,
+                bounds: self.bounds.clone(),
+            };
+            let out = if var {
+                windows.var_ddof(ddof)?
+            } else {
+                windows.mean()?
+            };
+            Ok(pairwise_floats(out.column()))
+        };
+        let (mean_xy, mean_x, mean_y) = (over(&xy, false)?, over(&x, false)?, over(&y, false)?);
+        #[allow(clippy::cast_precision_loss)] // pandas' float ddof
+        let float_ddof = ddof as f64;
+        let mut out: Vec<f64> = (0..len)
+            .map(|i| (mean_xy[i] - mean_x[i] * mean_y[i]) * (pairs[i] / (pairs[i] - float_ddof)))
+            .collect();
+        if want_corr {
+            let (var_x, var_y) = (over(&x, true)?, over(&y, true)?);
+            for (i, value) in out.iter_mut().enumerate() {
+                *value /= (var_x[i] * var_y[i]).sqrt();
+            }
+        }
+        // Per br-frankenpandas-yk50z: pandas rolling cov/corr preserves source
+        // axis name; Float64 even when every window is undefined, which is
+        // missing (NaN): 0.0 under a cleared bit reads back `Null(NaN)`, as
+        // `rolling_var_online`'s output.
+        let mut defined = fp_columnar::ValidityMask::all_valid(len);
+        for (i, value) in out.iter_mut().enumerate() {
+            if value.is_nan() {
+                defined.set(i, false);
+                *value = 0.0;
+            }
+        }
+        let column = Column::from_f64_values_with_validity(out, defined);
         Series::new(self.series.name(), index, column)
     }
 
@@ -35312,23 +35062,10 @@ impl Expanding<'_> {
         self.expanding_bivariate(other, false, ddof)
     }
 
-    /// O(n) online bivariate sweep backing expanding `cov`/`corr`
-    /// (br-frankenpandas-1wc0n).
-    ///
-    /// The historical paths re-folded the whole prefix `[0, i]` every step
-    /// (two-pass means + cross/var sums) - O(n^2). The expanding window only
-    /// appends, so a single Welford bivariate accumulator maintains the running
-    /// means and the co-moment `Cab` plus per-variable `M2a`/`M2b`, giving
-    /// `cov = Cab/(nobs-1)` and `corr = Cab/sqrt(M2a*M2b)` in
-    /// O(n). Only pairs where BOTH values are present/numeric are admitted
-    /// (pairwise NaN skip), and `min_periods.max(2)` gates emission - identical
-    /// membership and gating to the per-step path; only the summation order
-    /// changes. A fully constant input leaves `M2a`/`M2b` exactly 0 (`da == 0`),
-    /// so the `std == 0 -> NaN` guard is reproduced. Expanding cov/corr are
-    /// tolerance-tested (no bit-goldens), so the reassociated sums are in-spec.
-    /// `ddof` is pandas' (cov over `nobs - ddof`; corr NaN where
-    /// `nobs <= ddof`, the ddof cancelling otherwise).
-    #[allow(clippy::cast_precision_loss)] // window counts
+    /// pandas' expanding cov / corr: its rolling ones over the growing window
+    /// (pandas' composition of window means and variances; see
+    /// [`Rolling::rolling_pairwise_moment`]). The Welford co-moment sweep this
+    /// replaced missed pandas' last bits.
     fn expanding_bivariate(
         &self,
         other: &Series,
@@ -35341,125 +35078,8 @@ impl Expanding<'_> {
                 column_len: other.len(),
             });
         }
-        // Typed all-valid fast path — each column an all-valid Float64 (borrow its
-        // `&[f64]`) or all-valid Int64 (map `v as f64` once), INCLUDING a MIXED
-        // Int64×Float64 pair: run the online bivariate Welford recurrence over the
-        // two f64 views, skipping the two n-element Vec<Scalar> materializations +
-        // per-element is_missing/to_f64 dispatch that dominated expanding cov/corr
-        // (~0.5-0.8x pandas). Bit-identical to the Scalar path below: an all-valid
-        // no-NaN column (`as_f64_slice` => validity.all() + fp clears the validity
-        // bit for any NaN, so no present-NaN slot; `as_i64_slice` is never NaN) makes
-        // every row an observation, so nobs/mean/m2/cab evolve identically, and
-        // `to_f64(Int64(v)) == v as f64`. Undefined rows (pre-min_pairs or zero-std
-        // corr) push f64::NAN, which `from_f64_values` renders as the same
-        // `Null(NaN)` the Scalar arm pushes; finite results render as `Float64`.
-        // A local `fn` (not a closure): elision ties the `Cow<'_>` output to `col`.
-        fn view(col: &Column) -> Option<std::borrow::Cow<'_, [f64]>> {
-            if let Some(d) = col.as_f64_slice() {
-                Some(std::borrow::Cow::Borrowed(d))
-            } else {
-                col.as_i64_slice()
-                    .map(|d| std::borrow::Cow::Owned(d.iter().map(|&v| v as f64).collect()))
-            }
-        }
-        if let (Some(av_view), Some(bv_view)) = (view(self.series.column()), view(other.column())) {
-            let (a, b) = (av_view.as_ref(), bv_view.as_ref());
-            let len = a.len();
-            let min_pairs = self.min_periods.max(if ddof == 0 { 1 } else { 2 });
-            let mut out = Vec::with_capacity(len);
-            let mut nobs: usize = 0;
-            let mut mean_a = 0.0_f64;
-            let mut mean_b = 0.0_f64;
-            let mut m2a = 0.0_f64;
-            let mut m2b = 0.0_f64;
-            let mut cab = 0.0_f64;
-            for j in 0..len {
-                let (av, bv) = (a[j], b[j]);
-                nobs += 1;
-                let da = av - mean_a;
-                mean_a += da / nobs as f64;
-                let db = bv - mean_b;
-                mean_b += db / nobs as f64;
-                m2a += da * (av - mean_a);
-                m2b += db * (bv - mean_b);
-                cab += da * (bv - mean_b);
-                if nobs < min_pairs {
-                    out.push(f64::NAN);
-                    continue;
-                }
-                let denom = nobs as f64 - ddof as f64;
-                if want_corr {
-                    let std_a = (m2a / denom).sqrt();
-                    let std_b = (m2b / denom).sqrt();
-                    if nobs <= ddof || std_a == 0.0 || std_b == 0.0 {
-                        out.push(f64::NAN);
-                    } else {
-                        out.push((cab / denom) / (std_a * std_b));
-                    }
-                } else {
-                    out.push(cab / denom);
-                }
-            }
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        let a_vals = self.series.column().values();
-        let b_vals = other.column().values();
-        let len = a_vals.len();
-        let min_pairs = self.min_periods.max(if ddof == 0 { 1 } else { 2 });
-        let mut out = Vec::with_capacity(len);
-
-        let mut nobs: usize = 0;
-        let mut mean_a = 0.0_f64;
-        let mut mean_b = 0.0_f64;
-        let mut m2a = 0.0_f64;
-        let mut m2b = 0.0_f64;
-        let mut cab = 0.0_f64;
-
-        for j in 0..len {
-            let a = if a_vals[j].is_missing() {
-                None
-            } else {
-                a_vals[j].to_f64().ok()
-            };
-            let b = if b_vals[j].is_missing() {
-                None
-            } else {
-                b_vals[j].to_f64().ok()
-            };
-            if let (Some(a), Some(b)) = (a, b) {
-                nobs += 1;
-                let da = a - mean_a;
-                mean_a += da / nobs as f64;
-                let db = b - mean_b;
-                mean_b += db / nobs as f64;
-                // Post-update deltas: a - mean_a (new) and b - mean_b (new).
-                m2a += da * (a - mean_a);
-                m2b += db * (b - mean_b);
-                cab += da * (b - mean_b);
-            }
-
-            if nobs < min_pairs {
-                out.push(Scalar::Null(NullKind::NaN));
-                continue;
-            }
-            let denom = nobs as f64 - ddof as f64;
-            if want_corr {
-                let std_a = (m2a / denom).sqrt();
-                let std_b = (m2b / denom).sqrt();
-                if nobs <= ddof || std_a == 0.0 || std_b == 0.0 {
-                    out.push(Scalar::Null(NullKind::NaN));
-                } else {
-                    out.push(Scalar::Float64((cab / denom) / (std_a * std_b)));
-                }
-            } else {
-                out.push(Scalar::Float64(cab / denom));
-            }
-        }
-
-        let index = self.series.index().clone();
-        let column = Column::from_values(out)?;
-        Series::new(self.series.name(), index, column)
+        self.as_full_window_rolling()
+            .rolling_pairwise_moment(other, want_corr, ddof)
     }
 
     /// Expanding standard error of the mean.
@@ -234582,6 +234202,119 @@ mod resample_spread_single_pass_7x91u {
                 assert_eq!(bits_at(fast, &every), bits_at(hashed, &every), "{freq}");
             }
         }
+    }
+}
+
+/// Rolling / expanding cov and corr against live pandas 2.2.3 bits: pandas
+/// composes them from its window means and variances. x is the n026a walk
+/// (NaN where `k % 37 == 5`), y = `(k * 31 % 17) / 3 + x / 4` (NaN where
+/// `k % 41 == 7`), 500 rows.
+#[cfg(test)]
+mod rolling_cov_corr_composed {
+    use fp_columnar::Column;
+    use fp_index::Index;
+    use fp_types::Scalar;
+
+    use super::Series;
+
+    fn pair() -> (Series, Series) {
+        let mut total = 0.0_f64;
+        let mut xs = Vec::with_capacity(500);
+        let mut ys = Vec::with_capacity(500);
+        for k in 0..500_i64 {
+            #[allow(clippy::cast_precision_loss)] // below 1000
+            let step = ((k * 7919 + 13) % 1000 - 500) as f64 / 97.0;
+            total += step;
+            let x = if k % 37 == 5 { f64::NAN } else { 100.0 + total };
+            xs.push(x);
+            #[allow(clippy::cast_precision_loss)] // below 17
+            let y = ((k * 31) % 17) as f64 / 3.0 + 0.25 * x;
+            ys.push(if k % 41 == 7 { f64::NAN } else { y });
+        }
+        let series = |values| {
+            Series::new(
+                "v",
+                Index::from_range(0, 500, 1),
+                Column::from_f64_values(values),
+            )
+            .unwrap()
+        };
+        (series(xs), series(ys))
+    }
+
+    fn bits_at(series: &Series, at: [usize; 3]) -> [Option<u64>; 3] {
+        at.map(|i| match &series.values()[i] {
+            Scalar::Float64(value) if !value.is_nan() => Some(value.to_bits()),
+            value if value.is_missing() => None,
+            other => panic!("position {i}: {other:?}"),
+        })
+    }
+
+    #[test]
+    fn rolling_and_expanding_cov_corr_match_pandas_bits() {
+        let (x, y) = pair();
+        let at = [20, 100, 499];
+        let r7 = x.rolling(7, None);
+        assert_eq!(
+            bits_at(&r7.cov(&y).unwrap(), at),
+            [
+                Some(0x3ffe_fd7c_e028_5aab),
+                Some(0x3fc4_14c4_2420_caab),
+                None
+            ]
+        );
+        assert_eq!(
+            bits_at(&r7.corr(&y).unwrap(), at),
+            [
+                Some(0x3fda_efaa_54d5_07f2),
+                Some(0x3f9f_4701_8173_d639),
+                None
+            ]
+        );
+        assert_eq!(
+            bits_at(&x.rolling(30, Some(5)).cov_ddof(&y, 0).unwrap(), at),
+            [
+                Some(0x4019_0fdd_15f3_0600),
+                Some(0x4012_9859_ab8e_4000),
+                Some(0x4018_efdb_b3b2_cc00)
+            ]
+        );
+        assert_eq!(
+            bits_at(&x.expanding(None).corr(&y).unwrap(), at),
+            [
+                Some(0x3fe3_c992_607e_d691),
+                Some(0x3fe3_46b2_34ff_ca01),
+                Some(0x3fe6_a3f7_919e_4d0e)
+            ]
+        );
+        assert_eq!(
+            bits_at(&x.expanding(None).cov(&y).unwrap(), at),
+            [
+                Some(0x401a_744c_ec80_8656),
+                Some(0x4019_bcc8_9e4c_2ed5),
+                Some(0x4025_7394_be7f_f101)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_perfect_line_is_not_snapped_to_one() {
+        // pandas: Series([1.0, .., 8]).rolling(3).corr(Series([2.0, .., 16]))
+        // [NaN, NaN, 1.0000000000000004, 0.9999999999999991, ...]; NEGATIVE:
+        // the replaced kernel rounded anything within 1e-12 of +-1 to +-1.
+        let x = (1..=8).map(f64::from).collect();
+        let y = (1..=8).map(|k| f64::from(k) * 2.0).collect();
+        let series = |values| {
+            Series::new(
+                "v",
+                Index::from_range(0, 8, 1),
+                Column::from_f64_values(values),
+            )
+            .unwrap()
+        };
+        let corr = series(x).rolling(3, None).corr(&series(y)).unwrap();
+        assert_eq!(corr.values()[2], Scalar::Float64(1.000_000_000_000_000_4));
+        assert_eq!(corr.values()[3], Scalar::Float64(0.999_999_999_999_999_1));
     }
 }
 
