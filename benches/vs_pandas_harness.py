@@ -2998,6 +2998,16 @@ def bench_ewm_mean_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: df["col_0"].ewm(span=10).mean())
 
 
+def bench_ewm_std_pandas(df: pd.DataFrame) -> list[float]:
+    """fp-bench rolling/ewm_std (br-frankenpandas-c5nwf)."""
+    return time_operation(lambda: df["col_0"].ewm(span=10).std())
+
+
+def bench_ewm_corr_pandas(df: pd.DataFrame) -> list[float]:
+    """fp-bench rolling/ewm_corr (br-frankenpandas-c5nwf)."""
+    return time_operation(lambda: df["col_0"].ewm(span=10).corr(df["col_1"]))
+
+
 # Indexing Workloads (pandas)
 def bench_iloc_slice_pandas(df: pd.DataFrame) -> list[float]:
     n = len(df)
@@ -3522,6 +3532,8 @@ PANDAS_WORKLOADS = {
         "expanding_sum": bench_expanding_sum_pandas,
         "expanding_apply_stateful": bench_expanding_apply_stateful_pandas,
         "ewm_mean": bench_ewm_mean_pandas,
+        "ewm_std": bench_ewm_std_pandas,
+        "ewm_corr": bench_ewm_corr_pandas,
     },
     "indexing": {
         "iloc_slice": bench_iloc_slice_pandas,

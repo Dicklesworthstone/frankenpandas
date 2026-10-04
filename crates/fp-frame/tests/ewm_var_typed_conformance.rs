@@ -1,8 +1,8 @@
-//! No-mock conformance guard for the typed all-valid EWM var/std fast path
-//! (ewm_var_all_observed over a raw &[f64]). It must be bit-identical to the
-//! generic Scalar path. Trick: append ONE NaN so the series is NOT all-valid ->
-//! as_f64_slice returns None -> the Scalar path runs; its OBSERVED prefix (rows
-//! 0..k) processes exactly the same values the typed path does on the all-valid
+//! No-mock conformance guard for the EWM var/std/cov/corr input paths: an
+//! all-valid column is read as its borrowed &[f64], any other through its
+//! Scalars. Trick: append ONE NaN so the series is NOT all-valid ->
+//! as_f64_slice returns None -> the Scalar read runs; its OBSERVED prefix (rows
+//! 0..k) feeds exactly the same values the borrowed read does on the all-valid
 //! series, so the two must agree bit-for-bit over that prefix.
 
 use fp_columnar::Column;

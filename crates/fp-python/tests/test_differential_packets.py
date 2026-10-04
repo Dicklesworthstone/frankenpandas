@@ -3366,14 +3366,17 @@ _EWM_CASES = {
     "sum_halflife": lambda m: _ewm_s(m).ewm(halflife=1.5).sum(),
     "frame_com": lambda m: _ewm_df(m).ewm(com=0.5).mean(),
     "frame_adjust_false_min_periods": lambda m: _ewm_df(m).ewm(span=2, adjust=False, min_periods=2).mean(),
-    "std_com": pytest.param(
-        lambda m: _ewm_s(m).ewm(com=1).std(),
-        marks=pytest.mark.xfail(strict=True, reason="br-frankenpandas-c5nwf: ewm std last-bit order"),
-    ),
-    "var_adjust_false": pytest.param(
-        lambda m: _ewm_s(m).ewm(alpha=0.4, adjust=False).var(),
-        marks=pytest.mark.xfail(strict=True, reason="br-frankenpandas-c5nwf: ewm var last-bit order"),
-    ),
+    # br-frankenpandas-c5nwf: var / std / cov / corr are pandas' ewmcov, in
+    # its update order, inf read as missing, cov / corr over the pairs each
+    # masked by the other.
+    "std_com": lambda m: _ewm_s(m).ewm(com=1).std(),
+    "var_adjust_false": lambda m: _ewm_s(m).ewm(alpha=0.4, adjust=False).var(),
+    "var_bias_ignore_na": lambda m: _ewm_s(m).ewm(halflife=2, ignore_na=True).var(bias=True),
+    "std_min_periods_inf": lambda m: m.Series([1.0, np.inf, 3.0, -np.inf, 5.0, 6.0, 2.5]).ewm(com=1, min_periods=2).std(),
+    "cov_adjust_false": lambda m: _ewm_s(m).ewm(alpha=0.4, adjust=False).cov(m.Series([2.0, 1.0, 5.0, _NAN, 3.0, 9.0])),
+    "cov_bias_inf": lambda m: m.Series([1.0, 2.0, np.inf, 4.0, 8.0, 3.0]).ewm(span=3).cov(m.Series([2.0, 1.0, 5.0, _NAN, 3.0, 9.0]), bias=True),
+    "corr_inf_masks_other": lambda m: m.Series([1.0, 2.0, np.inf, 4.0, 8.0, 3.0]).ewm(com=1).corr(m.Series([2.0, 1.0, 5.0, _NAN, 3.0, 9.0])),
+    "frame_var": lambda m: _ewm_df(m).ewm(com=1).var(),
 }
 
 

@@ -3631,6 +3631,18 @@ fn run(
                 let _ = series.ewm(Some(10.0), None).mean().expect("ewm mean");
             })
         }
+        ("rolling", "ewm_std") => {
+            let series = df.get_column("col_0");
+            time_us(|| {
+                let _ = series.ewm(Some(10.0), None).std().expect("ewm std");
+            })
+        }
+        ("rolling", "ewm_corr") => {
+            let (x, y) = (df.get_column("col_0"), df.get_column("col_1"));
+            time_us(|| {
+                let _ = x.ewm(Some(10.0), None).corr(&y).expect("ewm corr");
+            })
+        }
         // The fp-bench frame uses a default 0..rows Int64 index (matching the
         // pandas side's set_index(range(n))), so loc/reindex labels line up.
         ("indexing", "iloc_slice") => {

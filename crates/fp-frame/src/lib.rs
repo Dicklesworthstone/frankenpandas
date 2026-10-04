@@ -35468,164 +35468,226 @@ pub struct Ewm<'a> {
     deltas: Option<Vec<f64>>,
 }
 
-/// Typed all-observed (all-valid, no-NaN) EWM debiased variance recurrence over a
-/// raw `&[f64]`, returning the per-row var (`NaN` where undefined: row 0 and any
-/// `sum_wt^2 <= sum_wt2`). Bit-identical to `Ewm::var`'s Scalar loop for an
-/// all-valid input — every element is `observed`, so the same arithmetic runs —
-/// but skips the 1M `Vec<Scalar>` materialization and per-element
-/// `is_missing`/`to_f64` dispatch (ewm var was 0.26x, std 0.13x pandas). Shared by
-/// `var` (emit as-is) and `std` (sqrt each).
-fn ewm_var_all_observed(data: &[f64], one_minus_alpha: f64) -> Vec<f64> {
-    let new_wt = 1.0_f64;
-    let mut ewm_mean = f64::NAN;
-    let mut ewm_cov = 0.0_f64;
-    let mut nobs = 0_usize;
-    let mut sum_wt = 1.0_f64;
-    let mut sum_wt2 = 1.0_f64;
-    let mut old_wt = 1.0_f64;
-    let mut out = Vec::with_capacity(data.len());
-    for &x in data {
-        nobs += 1;
-        if nobs == 1 {
-            ewm_mean = x;
-            ewm_cov = 0.0;
-            sum_wt = 1.0;
-            sum_wt2 = 1.0;
-            old_wt = 1.0;
+/// pandas' weights for its EWM moment kernels (`aggregations.pyx::ewmcov`):
+/// the decay `1 - alpha`, a new observation's weight (1 adjusted, else
+/// `alpha`), `ignore_na`, and the observations a value needs.
+#[derive(Clone, Copy)]
+struct EwmWeights {
+    old_wt_factor: f64,
+    new_wt: f64,
+    adjust: bool,
+    ignore_na: bool,
+    minp: usize,
+}
+
+/// One run of pandas' `aggregations.pyx::ewmcov(x, y)`: the online means and
+/// weighted co-moment of the pairs stepped over, a pair observed when both
+/// sides are finite (pandas' `_prep_values` reads +-inf as NaN). The updates
+/// are pandas' own, in its order, so each value matches pandas to the bit
+/// (var is the run over `(x, x)`).
+struct EwmCov {
+    mean_x: f64,
+    mean_y: f64,
+    cov: f64,
+    sum_wt: f64,
+    sum_wt2: f64,
+    old_wt: f64,
+    nobs: usize,
+}
+
+impl EwmCov {
+    /// The run after its first pair (the means NaN until a pair is observed).
+    fn start(x: f64, y: f64) -> Self {
+        let observed = x.is_finite() && y.is_finite();
+        let (mean_x, mean_y) = if observed {
+            (x, y)
         } else {
-            sum_wt *= one_minus_alpha;
-            sum_wt2 *= one_minus_alpha * one_minus_alpha;
-            old_wt *= one_minus_alpha;
-            let old_mean = ewm_mean;
-            if ewm_mean != x {
-                ewm_mean = (old_wt * ewm_mean + new_wt * x) / (old_wt + new_wt);
-            }
-            ewm_cov = (old_wt * (ewm_cov + (old_mean - ewm_mean).powi(2))
-                + new_wt * (x - ewm_mean).powi(2))
-                / (old_wt + new_wt);
-            sum_wt += new_wt;
-            sum_wt2 += new_wt * new_wt;
-            old_wt += new_wt;
+            (f64::NAN, f64::NAN)
+        };
+        Self {
+            mean_x,
+            mean_y,
+            cov: 0.0,
+            sum_wt: 1.0,
+            sum_wt2: 1.0,
+            old_wt: 1.0,
+            nobs: usize::from(observed),
         }
-        let numerator = sum_wt * sum_wt - sum_wt2;
-        out.push(if numerator > 0.0 {
-            ewm_cov * (sum_wt * sum_wt) / numerator
+    }
+
+    /// Steps over one pair; an observation that moved the means returns
+    /// what [`ewm_corr_kernel`] needs to update its own co-moments alike.
+    fn step(&mut self, w: &EwmWeights, x: f64, y: f64) -> Option<EwmUpdate> {
+        let observed = x.is_finite() && y.is_finite();
+        self.nobs += usize::from(observed);
+        if self.mean_x.is_nan() {
+            // pandas starts the means at the first observation (and restarts
+            // them should they overflow to NaN), the weights untouched.
+            if observed {
+                (self.mean_x, self.mean_y) = (x, y);
+            }
+            return None;
+        }
+        if !observed && w.ignore_na {
+            return None;
+        }
+        self.sum_wt *= w.old_wt_factor;
+        self.sum_wt2 *= w.old_wt_factor * w.old_wt_factor;
+        self.old_wt *= w.old_wt_factor;
+        if !observed {
+            return None;
+        }
+        let (old_mean_x, old_mean_y) = (self.mean_x, self.mean_y);
+        let update = EwmUpdate {
+            old_wt: self.old_wt,
+            total_wt: self.old_wt + w.new_wt,
+            old_mean_x,
+            old_mean_y,
+        };
+        let total_wt = update.total_wt;
+        // Equal values leave a mean exactly as it was (pandas' guard for a
+        // constant run).
+        if self.mean_x != x {
+            self.mean_x = ((self.old_wt * old_mean_x) + (w.new_wt * x)) / total_wt;
+        }
+        if self.mean_y != y {
+            self.mean_y = ((self.old_wt * old_mean_y) + (w.new_wt * y)) / total_wt;
+        }
+        self.cov = ((self.old_wt
+            * (self.cov + ((old_mean_x - self.mean_x) * (old_mean_y - self.mean_y))))
+            + (w.new_wt * ((x - self.mean_x) * (y - self.mean_y))))
+            / total_wt;
+        self.sum_wt += w.new_wt;
+        self.sum_wt2 += w.new_wt * w.new_wt;
+        self.old_wt += w.new_wt;
+        if !w.adjust {
+            self.sum_wt /= self.old_wt;
+            self.sum_wt2 /= self.old_wt * self.old_wt;
+            self.old_wt = 1.0;
+        }
+        Some(update)
+    }
+
+    /// NaN below `minp` observations, the co-moment under `bias`, else that
+    /// debiased by `sum_wt^2 / (sum_wt^2 - sum_wt2)` (NaN while the
+    /// denominator is not positive).
+    fn value(&self, w: &EwmWeights, bias: bool) -> f64 {
+        if self.nobs < w.minp {
+            return f64::NAN;
+        }
+        if bias {
+            return self.cov;
+        }
+        let numerator = self.sum_wt * self.sum_wt;
+        let denominator = numerator - self.sum_wt2;
+        if denominator > 0.0 {
+            (numerator / denominator) * self.cov
         } else {
             f64::NAN
-        });
+        }
+    }
+}
+
+/// pandas' `ewmcov(x, y, bias)` row by row over `pairs`.
+fn ewm_cov_kernel(
+    w: &EwmWeights,
+    mut pairs: impl Iterator<Item = (f64, f64)>,
+    bias: bool,
+) -> Vec<f64> {
+    let mut out = Vec::with_capacity(pairs.size_hint().0);
+    if let Some((x, y)) = pairs.next() {
+        let mut run = EwmCov::start(x, y);
+        out.push(run.value(w, bias));
+        for (x, y) in pairs {
+            run.step(w, x, y);
+            out.push(run.value(w, bias));
+        }
     }
     out
 }
 
-/// Typed all-observed (both inputs all-valid, no-NaN) EWM debiased covariance over
-/// raw `&[f64]` pairs — the same `ewmcov(x,y)` recurrence as `Ewm::cov`'s Scalar
-/// loop (every pair observed), skipping the two 1M `Vec<Scalar>` materializations
-/// and per-element is_missing/to_f64 dispatch (ewm cov was 0.35x pandas).
-fn ewm_cov_all_observed(a: &[f64], b: &[f64], one_minus_alpha: f64) -> Vec<f64> {
-    let new_wt = 1.0_f64;
-    let mut mean_x = f64::NAN;
-    let mut mean_y = f64::NAN;
-    let mut cov_xy = 0.0_f64;
-    let mut nobs = 0_usize;
-    let mut sum_wt = 1.0_f64;
-    let mut sum_wt2 = 1.0_f64;
-    let mut old_wt = 1.0_f64;
-    let mut out = Vec::with_capacity(a.len());
-    for (&xv, &yv) in a.iter().zip(b.iter()) {
-        nobs += 1;
-        if nobs == 1 {
-            mean_x = xv;
-            mean_y = yv;
-            cov_xy = 0.0;
-            sum_wt = 1.0;
-            sum_wt2 = 1.0;
-            old_wt = 1.0;
-        } else {
-            sum_wt *= one_minus_alpha;
-            sum_wt2 *= one_minus_alpha * one_minus_alpha;
-            old_wt *= one_minus_alpha;
-            let old_mean_x = mean_x;
-            let old_mean_y = mean_y;
-            if mean_x != xv {
-                mean_x = (old_wt * mean_x + new_wt * xv) / (old_wt + new_wt);
-            }
-            if mean_y != yv {
-                mean_y = (old_wt * mean_y + new_wt * yv) / (old_wt + new_wt);
-            }
-            cov_xy = (old_wt * (cov_xy + (old_mean_x - mean_x) * (old_mean_y - mean_y))
-                + new_wt * (xv - mean_x) * (yv - mean_y))
-                / (old_wt + new_wt);
-            sum_wt += new_wt;
-            sum_wt2 += new_wt * new_wt;
-            old_wt += new_wt;
-        }
-        let numerator = sum_wt * sum_wt - sum_wt2;
-        out.push(if numerator > 0.0 {
-            cov_xy * (sum_wt * sum_wt) / numerator
-        } else {
+/// The weights and prior means an observed [`EwmCov::step`] updated with.
+struct EwmUpdate {
+    old_wt: f64,
+    total_wt: f64,
+    old_mean_x: f64,
+    old_mean_y: f64,
+}
+
+/// pandas' EWM `corr`: three biased `ewmcov` runs - over the pairs, and over
+/// each side with itself - `cov / zsqrt(var_x * var_y)`. Each side being NaN
+/// where the other is ([`prep_binary`]), the three runs observe the same rows,
+/// so the self runs' weights and means are the pair run's: one pass keeps two
+/// means and three co-moments, each updated as its own run would. Only a
+/// mean overflowing to NaN parts the runs (one restarts it, another does
+/// not), and the pair co-moment is NaN from that row on in every run, so the
+/// values agree there too.
+fn ewm_corr_kernel(w: &EwmWeights, mut pairs: impl Iterator<Item = (f64, f64)>) -> Vec<f64> {
+    let mut out = Vec::with_capacity(pairs.size_hint().0);
+    let Some((x, y)) = pairs.next() else {
+        return out;
+    };
+    let mut run = EwmCov::start(x, y);
+    let (mut cov_xx, mut cov_yy) = (0.0_f64, 0.0_f64);
+    let corr = |run: &EwmCov, cov_xx: f64, cov_yy: f64| {
+        if run.nobs < w.minp {
             f64::NAN
-        });
+        } else {
+            run.cov / zsqrt(cov_xx * cov_yy)
+        }
+    };
+    out.push(corr(&run, cov_xx, cov_yy));
+    for (x, y) in pairs {
+        if let Some(update) = run.step(w, x, y) {
+            let moment = |cov: f64, old_mean: f64, mean: f64, value: f64| {
+                ((update.old_wt * (cov + ((old_mean - mean) * (old_mean - mean))))
+                    + (w.new_wt * ((value - mean) * (value - mean))))
+                    / update.total_wt
+            };
+            cov_xx = moment(cov_xx, update.old_mean_x, run.mean_x, x);
+            cov_yy = moment(cov_yy, update.old_mean_y, run.mean_y, y);
+        }
+        out.push(corr(&run, cov_xx, cov_yy));
     }
     out
 }
 
-/// Typed all-observed EWM correlation over raw `&[f64]` pairs — the same
-/// `cov_xy / sqrt(cov_xx*cov_yy)` BIASED-accumulator recurrence as `Ewm::corr`'s
-/// Scalar loop (debias factor cancels, so only `old_wt` decays), every pair
-/// observed (ewm corr was 0.70x pandas).
-fn ewm_corr_all_observed(a: &[f64], b: &[f64], one_minus_alpha: f64) -> Vec<f64> {
-    let new_wt = 1.0_f64;
-    let mut mean_x = f64::NAN;
-    let mut mean_y = f64::NAN;
-    let mut cov_xx = 0.0_f64;
-    let mut cov_yy = 0.0_f64;
-    let mut cov_xy = 0.0_f64;
-    let mut nobs = 0_usize;
-    let mut old_wt = 1.0_f64;
-    let mut out = Vec::with_capacity(a.len());
-    for (&xv, &yv) in a.iter().zip(b.iter()) {
-        nobs += 1;
-        if nobs == 1 {
-            mean_x = xv;
-            mean_y = yv;
-            cov_xx = 0.0;
-            cov_yy = 0.0;
-            cov_xy = 0.0;
-            old_wt = 1.0;
-        } else {
-            old_wt *= one_minus_alpha;
-            let old_mean_x = mean_x;
-            let old_mean_y = mean_y;
-            if mean_x != xv {
-                mean_x = (old_wt * mean_x + new_wt * xv) / (old_wt + new_wt);
-            }
-            if mean_y != yv {
-                mean_y = (old_wt * mean_y + new_wt * yv) / (old_wt + new_wt);
-            }
-            let denom = old_wt + new_wt;
-            cov_xx = (old_wt * (cov_xx + (old_mean_x - mean_x) * (old_mean_x - mean_x))
-                + new_wt * (xv - mean_x) * (xv - mean_x))
-                / denom;
-            cov_yy = (old_wt * (cov_yy + (old_mean_y - mean_y) * (old_mean_y - mean_y))
-                + new_wt * (yv - mean_y) * (yv - mean_y))
-                / denom;
-            cov_xy = (old_wt * (cov_xy + (old_mean_x - mean_x) * (old_mean_y - mean_y))
-                + new_wt * (xv - mean_x) * (yv - mean_y))
-                / denom;
-            old_wt += new_wt;
-        }
-        if nobs < 2 {
-            out.push(f64::NAN);
-            continue;
-        }
-        let denom = cov_xx * cov_yy;
-        out.push(if denom > 0.0 {
-            cov_xy / denom.sqrt()
-        } else {
-            f64::NAN
-        });
+/// pandas' `zsqrt`: the square root, 0 for a negative value.
+fn zsqrt(value: f64) -> f64 {
+    if value < 0.0 { 0.0 } else { value.sqrt() }
+}
+
+/// pandas' `prep_binary` over two equal-length sides: each NaN where the
+/// other is missing (`x + 0 * y`, so an infinite side masks the other too).
+fn prep_binary<'a>(x: &'a [f64], y: &'a [f64]) -> impl Iterator<Item = (f64, f64)> + 'a {
+    x.iter().zip(y).map(|(&x, &y)| (x + 0.0 * y, y + 0.0 * x))
+}
+
+/// A column as pandas' EWM moment kernels read it: floats, NaN where a value
+/// is missing or not numeric (borrowed when the column is all-valid float64).
+fn ewm_floats(column: &Column) -> std::borrow::Cow<'_, [f64]> {
+    use std::borrow::Cow;
+    if let Some(data) = column.as_f64_slice() {
+        return Cow::Borrowed(data);
     }
-    out
+    if let Some(data) = column.as_i64_slice() {
+        return Cow::Owned(data.iter().map(|&v| v as f64).collect());
+    }
+    if let Some((data, validity)) = column.as_f64_slice_with_validity() {
+        return Cow::Owned(
+            data.iter()
+                .enumerate()
+                .map(|(i, &value)| if validity.get(i) { value } else { f64::NAN })
+                .collect(),
+        );
+    }
+    Cow::Owned(
+        column
+            .values()
+            .iter()
+            .map(|value| value.to_f64().unwrap_or(f64::NAN))
+            .collect(),
+    )
 }
 
 impl Ewm<'_> {
@@ -36021,601 +36083,119 @@ impl Ewm<'_> {
 
     /// EWM covariance with another Series (sample, ddof=1).
     ///
-    /// Matches `series.ewm(span=...).cov(other)`. Uses Welford-style
-    /// online updates with exponential weighting over aligned
-    /// positions; missing positions on either side emit `Null(NaN)`
-    /// without advancing the running estimate. Returns
-    /// `LengthMismatch` when inputs differ in length.
+    /// Matches `series.ewm(span=...).cov(other)` ([`Self::cov_bias`] with
+    /// bias=False). Returns `LengthMismatch` when inputs differ in length.
     pub fn cov(&self, other: &Series) -> Result<Series, FrameError> {
-        if self.series.len() != other.len() {
-            return Err(FrameError::LengthMismatch {
-                index_len: self.series.len(),
-                column_len: other.len(),
-            });
-        }
-        let alpha = self
-            .alpha
-            .clone()
-            .map_err(FrameError::CompatibilityRejected)?;
-        let one_minus_alpha = 1.0 - alpha;
-        // Typed all-valid (both no-NaN) fast path: bivariate recurrence over the
-        // raw &[f64] pairs, skipping two 1M Vec<Scalar> + per-element dispatch.
-        // Restricted to the default adjust=True / min_periods<=1 configuration
-        // (issue #19): non-default windows take the generic kernel below, which
-        // carries the adjust renormalization and min_periods gate.
-        if self.adjust
-            && self.min_periods <= 1
-            && let (Some(a), Some(b)) = (
-                self.series.column().as_f64_slice(),
-                other.column().as_f64_slice(),
-            )
-        {
-            let out = ewm_cov_all_observed(a, b, one_minus_alpha);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        // Typed both-all-valid-Int64 fast path (sister to the both-Float64 arm above):
-        // when BOTH columns are all-valid Int64 they otherwise materialized both via
-        // `.values()`. Map each `v as f64` off the raw `&[i64]` and run the SAME
-        // `ewm_cov_all_observed`. Bit-identical to the generic on all-valid Int64 inputs:
-        // every row is observed (neither is_missing/NaN), `to_f64(Int64(v)) == v as f64`,
-        // same paired operands into the same bivariate recurrence, same from_f64_values.
-        if self.adjust
-            && self.min_periods <= 1
-            && let (Some(da), Some(db)) = (
-                self.series.column().as_i64_slice(),
-                other.column().as_i64_slice(),
-            )
-        {
-            let a: Vec<f64> = da.iter().map(|&v| v as f64).collect();
-            let b: Vec<f64> = db.iter().map(|&v| v as f64).collect();
-            let out = ewm_cov_all_observed(&a, &b, one_minus_alpha);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        // Typed MIXED all-valid fast path (f64 x i64 and i64 x f64): one side borrows its
-        // contiguous &[f64], the other maps `v as f64` off its raw &[i64]; run the SAME
-        // `ewm_cov_all_observed`. Bit-identical on all-valid inputs (every row observed,
-        // `to_f64(Int64(v)) == v as f64`, same paired operands, same from_f64_values).
-        if self.adjust
-            && self.min_periods <= 1
-            && let (Some(a), Some(db)) = (
-                self.series.column().as_f64_slice(),
-                other.column().as_i64_slice(),
-            )
-        {
-            let b: Vec<f64> = db.iter().map(|&v| v as f64).collect();
-            let out = ewm_cov_all_observed(a, &b, one_minus_alpha);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        if self.adjust
-            && self.min_periods <= 1
-            && let (Some(da), Some(b)) = (
-                self.series.column().as_i64_slice(),
-                other.column().as_f64_slice(),
-            )
-        {
-            let a: Vec<f64> = da.iter().map(|&v| v as f64).collect();
-            let out = ewm_cov_all_observed(&a, b, one_minus_alpha);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        self.cov_rows(other, false)
+        self.cov_bias(other, false)
     }
 
-    /// pandas' `cov(other, bias=)`: bias=True is the weighted covariance
-    /// without the debias factor ([`Self::cov`] is bias=False).
+    /// pandas' `cov(other, bias=)`: its `ewmcov` over the pairs, each side NaN
+    /// where the other is; bias=True is the weighted covariance without the
+    /// debias factor.
     pub fn cov_bias(&self, other: &Series, bias: bool) -> Result<Series, FrameError> {
-        if !bias {
-            return self.cov(other);
-        }
-        if self.series.len() != other.len() {
-            return Err(FrameError::LengthMismatch {
-                index_len: self.series.len(),
-                column_len: other.len(),
-            });
-        }
-        self.cov_rows(other, true)
-    }
-
-    /// pandas' `ewmcov(x, y, bias=)` row by row (the kernel the typed arms of
-    /// [`Self::cov`] short-cut for bias=False over all-valid inputs).
-    fn cov_rows(&self, other: &Series, bias: bool) -> Result<Series, FrameError> {
-        let alpha = self
-            .alpha
-            .clone()
-            .map_err(FrameError::CompatibilityRejected)?;
-        let one_minus_alpha = 1.0 - alpha;
-        let a_vals = self.series.column().values();
-        let b_vals = other.column().values();
-        let mut out = Vec::with_capacity(a_vals.len());
-        // pandas' exact debiased `ewmcov(x, y)` (bias=False, ignore_na=False)
-        // — br-frankenpandas-cupvi. A row is an observation only when both
-        // inputs are present; otherwise the accumulated weights still decay
-        // (ignore_na=False). Honors adjust / min_periods (issue #19) exactly
-        // as `aggregations.pyx::ewmcov`.
-        let new_wt = if self.adjust { 1.0_f64 } else { alpha };
-        let minp = self.min_periods.max(1);
-        let mut mean_x = f64::NAN;
-        let mut mean_y = f64::NAN;
-        let mut cov_xy = 0.0_f64;
-        let mut nobs = 0_usize;
-        let mut sum_wt = 1.0_f64;
-        let mut sum_wt2 = 1.0_f64;
-        let mut old_wt = 1.0_f64;
-
-        for (a, b) in a_vals.iter().zip(b_vals.iter()) {
-            let x = if a.is_missing() {
-                None
-            } else {
-                a.to_f64().ok()
-            };
-            let y = if b.is_missing() {
-                None
-            } else {
-                b.to_f64().ok()
-            };
-            let observed = matches!((x, y), (Some(xv), Some(yv)) if !xv.is_nan() && !yv.is_nan());
-            if observed {
-                let (xv, yv) = (x.unwrap(), y.unwrap());
-                nobs += 1;
-                if nobs == 1 {
-                    mean_x = xv;
-                    mean_y = yv;
-                    cov_xy = 0.0;
-                    sum_wt = 1.0;
-                    sum_wt2 = 1.0;
-                    old_wt = 1.0;
-                } else {
-                    sum_wt *= one_minus_alpha;
-                    sum_wt2 *= one_minus_alpha * one_minus_alpha;
-                    old_wt *= one_minus_alpha;
-                    let old_mean_x = mean_x;
-                    let old_mean_y = mean_y;
-                    if mean_x != xv {
-                        mean_x = (old_wt * mean_x + new_wt * xv) / (old_wt + new_wt);
-                    }
-                    if mean_y != yv {
-                        mean_y = (old_wt * mean_y + new_wt * yv) / (old_wt + new_wt);
-                    }
-                    cov_xy = (old_wt * (cov_xy + (old_mean_x - mean_x) * (old_mean_y - mean_y))
-                        + new_wt * (xv - mean_x) * (yv - mean_y))
-                        / (old_wt + new_wt);
-                    sum_wt += new_wt;
-                    sum_wt2 += new_wt * new_wt;
-                    old_wt += new_wt;
-                    if !self.adjust {
-                        // pandas ewmcov: adjust=False renormalizes the weight
-                        // accumulators after every observation.
-                        sum_wt /= old_wt;
-                        sum_wt2 /= old_wt * old_wt;
-                        old_wt = 1.0;
-                    }
-                }
-            } else if nobs == 0 {
-                out.push(Scalar::Null(NullKind::NaN));
-                continue;
-            } else if !self.ignore_na {
-                sum_wt *= one_minus_alpha;
-                sum_wt2 *= one_minus_alpha * one_minus_alpha;
-                old_wt *= one_minus_alpha;
-            }
-
-            // pandas ewmcov: `NaN` until `minp` joint observations, then the
-            // covariance itself under bias, else debiased (NaN while the
-            // debias denominator is <= 0).
-            let numerator = sum_wt * sum_wt - sum_wt2;
-            if nobs >= minp && bias {
-                out.push(Scalar::Float64(cov_xy));
-            } else if nobs >= minp && numerator > 0.0 {
-                out.push(Scalar::Float64(cov_xy * (sum_wt * sum_wt) / numerator));
-            } else {
-                out.push(Scalar::Null(NullKind::NaN));
-            }
-        }
-
+        let (w, x, y) = self.moment_pair(other)?;
         // Per br-frankenpandas-074bp: pandas Series.ewm(...).cov preserves
         // source axis name.
-        let index = self.series.index().clone();
-        let column = Column::from_values(out)?;
-        Series::new(self.series.name(), index, column)
+        self.moment_series(ewm_cov_kernel(&w, prep_binary(&x, &y), bias))
     }
 
     /// EWM Pearson correlation with another Series.
     ///
-    /// Matches `series.ewm(span=...).corr(other)`. Uses the same
-    /// exponentially weighted covariance path as `cov(other)` and
-    /// normalizes by the two exponentially weighted standard deviations.
+    /// Matches `series.ewm(span=...).corr(other)`: pandas' biased `ewmcov` of
+    /// the pairs over `zsqrt` of the two sides' biased variances, each side
+    /// NaN where the other is.
     pub fn corr(&self, other: &Series) -> Result<Series, FrameError> {
-        if self.series.len() != other.len() {
-            return Err(FrameError::LengthMismatch {
-                index_len: self.series.len(),
-                column_len: other.len(),
-            });
-        }
-        let alpha = self
-            .alpha
-            .clone()
-            .map_err(FrameError::CompatibilityRejected)?;
-        let one_minus_alpha = 1.0 - alpha;
-        // Typed all-valid (both no-NaN) fast path: bivariate recurrence over the
-        // raw &[f64] pairs, skipping two 1M Vec<Scalar> + per-element dispatch.
-        // Restricted to the default adjust=True / min_periods<=1 configuration
-        // (issue #19): non-default windows take the generic kernel below.
-        if self.adjust
-            && self.min_periods <= 1
-            && let (Some(a), Some(b)) = (
-                self.series.column().as_f64_slice(),
-                other.column().as_f64_slice(),
-            )
-        {
-            let out = ewm_corr_all_observed(a, b, one_minus_alpha);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        // Typed both-all-valid-Int64 fast path (mirror of Ewm::cov's both-Int64 arm):
-        // when BOTH columns are all-valid Int64, map each `v as f64` off the raw `&[i64]`
-        // and run the SAME `ewm_corr_all_observed` instead of materializing both via
-        // `.values()`. Bit-identical on all-valid Int64 inputs (every row observed,
-        // `to_f64(Int64(v)) == v as f64`, same bivariate recurrence, same from_f64_values).
-        if self.adjust
-            && self.min_periods <= 1
-            && let (Some(da), Some(db)) = (
-                self.series.column().as_i64_slice(),
-                other.column().as_i64_slice(),
-            )
-        {
-            let a: Vec<f64> = da.iter().map(|&v| v as f64).collect();
-            let b: Vec<f64> = db.iter().map(|&v| v as f64).collect();
-            let out = ewm_corr_all_observed(&a, &b, one_minus_alpha);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        // Typed MIXED all-valid fast path (f64 x i64 and i64 x f64): one side borrows its
-        // contiguous &[f64], the other maps `v as f64` off its raw &[i64]; run the SAME
-        // `ewm_corr_all_observed`. Bit-identical on all-valid inputs (every row observed,
-        // `to_f64(Int64(v)) == v as f64`, same bivariate recurrence, same from_f64_values).
-        if self.adjust
-            && self.min_periods <= 1
-            && let (Some(a), Some(db)) = (
-                self.series.column().as_f64_slice(),
-                other.column().as_i64_slice(),
-            )
-        {
-            let b: Vec<f64> = db.iter().map(|&v| v as f64).collect();
-            let out = ewm_corr_all_observed(a, &b, one_minus_alpha);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        if self.adjust
-            && self.min_periods <= 1
-            && let (Some(da), Some(b)) = (
-                self.series.column().as_i64_slice(),
-                other.column().as_f64_slice(),
-            )
-        {
-            let a: Vec<f64> = da.iter().map(|&v| v as f64).collect();
-            let out = ewm_corr_all_observed(&a, b, one_minus_alpha);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        let a_vals = self.series.column().values();
-        let b_vals = other.column().values();
-        let mut out = Vec::with_capacity(a_vals.len());
-        // pandas computes EWM corr as `cov_xy / sqrt(cov_xx * cov_yy)` using the
-        // BIASED ewmcov accumulators (the debias factor cancels) — cupvi. Each
-        // covariance follows the same `ewmcov` recurrence as `cov()`, honoring
-        // adjust / min_periods (issue #19).
-        let new_wt = if self.adjust { 1.0_f64 } else { alpha };
-        let minp = self.min_periods.max(1);
-        let mut mean_x = f64::NAN;
-        let mut mean_y = f64::NAN;
-        let mut cov_xx = 0.0_f64;
-        let mut cov_yy = 0.0_f64;
-        let mut cov_xy = 0.0_f64;
-        let mut nobs = 0_usize;
-        let mut old_wt = 1.0_f64;
-
-        for (a, b) in a_vals.iter().zip(b_vals.iter()) {
-            let x = if a.is_missing() {
-                None
-            } else {
-                a.to_f64().ok()
-            };
-            let y = if b.is_missing() {
-                None
-            } else {
-                b.to_f64().ok()
-            };
-            let observed = matches!((x, y), (Some(xv), Some(yv)) if !xv.is_nan() && !yv.is_nan());
-            if observed {
-                let (xv, yv) = (x.unwrap(), y.unwrap());
-                nobs += 1;
-                if nobs == 1 {
-                    mean_x = xv;
-                    mean_y = yv;
-                    cov_xx = 0.0;
-                    cov_yy = 0.0;
-                    cov_xy = 0.0;
-                    old_wt = 1.0;
-                } else {
-                    old_wt *= one_minus_alpha;
-                    let old_mean_x = mean_x;
-                    let old_mean_y = mean_y;
-                    if mean_x != xv {
-                        mean_x = (old_wt * mean_x + new_wt * xv) / (old_wt + new_wt);
-                    }
-                    if mean_y != yv {
-                        mean_y = (old_wt * mean_y + new_wt * yv) / (old_wt + new_wt);
-                    }
-                    let denom = old_wt + new_wt;
-                    cov_xx = (old_wt * (cov_xx + (old_mean_x - mean_x) * (old_mean_x - mean_x))
-                        + new_wt * (xv - mean_x) * (xv - mean_x))
-                        / denom;
-                    cov_yy = (old_wt * (cov_yy + (old_mean_y - mean_y) * (old_mean_y - mean_y))
-                        + new_wt * (yv - mean_y) * (yv - mean_y))
-                        / denom;
-                    cov_xy = (old_wt * (cov_xy + (old_mean_x - mean_x) * (old_mean_y - mean_y))
-                        + new_wt * (xv - mean_x) * (yv - mean_y))
-                        / denom;
-                    old_wt += new_wt;
-                    if !self.adjust {
-                        // pandas ewmcov: adjust=False renormalizes the prior
-                        // weight to 1 after every observation. The sum_wt /
-                        // sum_wt2 accumulators are not tracked here because the
-                        // biased outputs never consult them.
-                        old_wt = 1.0;
-                    }
-                }
-            } else if nobs == 0 {
-                out.push(Scalar::Null(NullKind::NaN));
-                continue;
-            } else if !self.ignore_na {
-                old_wt *= one_minus_alpha;
-            }
-
-            // min_periods gate (issue #19); below 2 observations the biased
-            // variances are 0 and pandas' 0/0 is NaN, kept explicit here.
-            if nobs < 2 || nobs < minp {
-                out.push(Scalar::Null(NullKind::NaN));
-                continue;
-            }
-            let denom = cov_xx * cov_yy;
-            if denom > 0.0 {
-                out.push(Scalar::Float64(cov_xy / denom.sqrt()));
-            } else {
-                out.push(Scalar::Null(NullKind::NaN));
-            }
-        }
-
+        let (w, x, y) = self.moment_pair(other)?;
         // Per br-frankenpandas-xbddh: pandas Series.ewm(...).corr preserves
         // source axis name.
-        let index = self.series.index().clone();
-        let column = Column::from_values(out)?;
-        Series::new(self.series.name(), index, column)
+        self.moment_series(ewm_corr_kernel(&w, prep_binary(&x, &y)))
     }
 
     /// EWM standard deviation (sample, ddof=1).
     ///
     /// Matches `series.ewm(span=...).std()`.
     pub fn std(&self) -> Result<Series, FrameError> {
-        // Typed all-valid (no-NaN) fast path: var recurrence over the raw &[f64]
-        // then sqrt each, in one pass — instead of var() + re-materializing its
-        // Scalars to sqrt + from_values (ewm std was 0.13x pandas). Bit-identical:
-        // sqrt(NaN)=NaN (== the Null(NaN) pass-through), sqrt(var) typed.
-        // Restricted to the default adjust=True / min_periods<=1 configuration
-        // (issue #19): non-default windows take var()'s generic kernel.
-        if let Some(alpha) = self.alpha.clone().ok()
-            && self.adjust
-            && self.min_periods <= 1
-            && let Some(data) = self.series.column().as_f64_slice()
-        {
-            let mut out = ewm_var_all_observed(data, 1.0 - alpha);
-            for v in out.iter_mut() {
-                *v = v.sqrt();
-            }
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        // Typed all-valid Int64 fast path (sister to the all-valid Float64 arm above,
-        // mirror of Ewm::var's Int64 arm): map `v as f64` off the raw `&[i64]`, run the
-        // SAME var recurrence + per-element sqrt, emit a typed f64 column — instead of
-        // `self.var()?` re-materializing its Scalars to sqrt. Bit-identical (all-valid
-        // Int64 ⇒ `v as f64`, same recurrence, `sqrt(var)` per element as the Float64
-        // arm; sqrt(NaN)=NaN can't occur here since every output is finite).
-        if let Some(alpha) = self.alpha.clone().ok()
-            && self.adjust
-            && self.min_periods <= 1
-            && let Some(data) = self.series.column().as_i64_slice()
-        {
-            let f: Vec<f64> = data.iter().map(|&v| v as f64).collect();
-            let mut out = ewm_var_all_observed(&f, 1.0 - alpha);
-            for v in out.iter_mut() {
-                *v = v.sqrt();
-            }
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        let var_series = self.var()?;
-        let mut out = Vec::with_capacity(var_series.len());
-        for v in var_series.column().values() {
-            match v {
-                Scalar::Float64(f) => out.push(Scalar::Float64(f.sqrt())),
-                _ => out.push(v.clone()),
-            }
-        }
-        // Per br-frankenpandas-xbddh: pandas Series.ewm(...).std preserves
-        // source axis name.
-        let index = self.series.index().clone();
-        let column = Column::from_values(out)?;
-        Series::new(self.series.name(), index, column)
+        self.std_bias(false)
     }
 
     /// EWM variance (sample, ddof=1).
     ///
-    /// Uses the online formula for exponentially weighted variance.
     /// Matches `series.ewm(span=...).var()`.
     pub fn var(&self) -> Result<Series, FrameError> {
+        self.var_bias(false)
+    }
+
+    /// pandas' `var(bias=)`: its `ewmcov(x, x)`; bias=True is the weighted
+    /// variance without the debias factor.
+    pub fn var_bias(&self, bias: bool) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-72avi: pandas Series.ewm(...).var preserves
+        // source axis name.
+        self.moment_series(self.var_values(bias)?)
+    }
+
+    /// pandas' `std(bias=)`: `zsqrt` of [`Self::var_bias`].
+    pub fn std_bias(&self, bias: bool) -> Result<Series, FrameError> {
+        let mut values = self.var_values(bias)?;
+        for value in &mut values {
+            *value = zsqrt(*value);
+        }
+        self.moment_series(values)
+    }
+
+    fn var_values(&self, bias: bool) -> Result<Vec<f64>, FrameError> {
+        let w = self.moment_weights()?;
+        let x = ewm_floats(self.series.column());
+        Ok(ewm_cov_kernel(&w, x.iter().map(|&x| (x, x)), bias))
+    }
+
+    /// pandas' `ewmcov` weights from this window's decay and options.
+    fn moment_weights(&self) -> Result<EwmWeights, FrameError> {
         let alpha = self
             .alpha
             .clone()
             .map_err(FrameError::CompatibilityRejected)?;
-        let one_minus_alpha = 1.0 - alpha;
-        // Typed all-valid (no-NaN) fast path: run the recurrence over the raw
-        // &[f64], skipping the 1M Vec<Scalar> + per-element to_f64/is_missing.
-        // Restricted to the default adjust=True / min_periods<=1 configuration
-        // (issue #19): non-default windows take the generic kernel below.
-        if self.adjust
-            && self.min_periods <= 1
-            && let Some(data) = self.series.column().as_f64_slice()
-        {
-            let out = ewm_var_all_observed(data, one_minus_alpha);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        // Typed all-valid Int64 fast path (sister to the all-valid Float64 arm above):
-        // an all-valid Int64 column drove the generic `.values()` Scalar loop below.
-        // Map `v as f64` off the raw `&[i64]` and run the SAME `ewm_var_all_observed`.
-        // Bit-identical to the generic on an all-valid Int64 column: no missing (its
-        // `is_missing() || to_f64().is_nan()` gate never fires), `to_f64(Int64(v)) ==
-        // v as f64`, same operands into the same recurrence in the same order; `out`
-        // fed to the same `from_f64_values` yields the identical column.
-        if self.adjust
-            && self.min_periods <= 1
-            && let Some(data) = self.series.column().as_i64_slice()
-        {
-            let f: Vec<f64> = data.iter().map(|&v| v as f64).collect();
-            let out = ewm_var_all_observed(&f, one_minus_alpha);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        self.var_rows(false)
+        Ok(EwmWeights {
+            old_wt_factor: 1.0 - alpha,
+            new_wt: if self.adjust { 1.0 } else { alpha },
+            adjust: self.adjust,
+            ignore_na: self.ignore_na,
+            minp: self.min_periods.max(1),
+        })
     }
 
-    /// pandas' `var(bias=)`: bias=True is the weighted variance without the
-    /// debias factor ([`Self::var`] is bias=False).
-    pub fn var_bias(&self, bias: bool) -> Result<Series, FrameError> {
-        if bias {
-            self.var_rows(true)
-        } else {
-            self.var()
+    /// The weights and both sides' floats for `cov` / `corr`, refused when
+    /// `other` differs in length.
+    fn moment_pair<'o>(
+        &self,
+        other: &'o Series,
+    ) -> Result<
+        (
+            EwmWeights,
+            std::borrow::Cow<'_, [f64]>,
+            std::borrow::Cow<'o, [f64]>,
+        ),
+        FrameError,
+    > {
+        if self.series.len() != other.len() {
+            return Err(FrameError::LengthMismatch {
+                index_len: self.series.len(),
+                column_len: other.len(),
+            });
         }
+        Ok((
+            self.moment_weights()?,
+            ewm_floats(self.series.column()),
+            ewm_floats(other.column()),
+        ))
     }
 
-    /// pandas' `std(bias=)`: the square root of [`Self::var_bias`].
-    pub fn std_bias(&self, bias: bool) -> Result<Series, FrameError> {
-        if !bias {
-            return self.std();
-        }
-        let var = self.var_rows(true)?;
-        let out = var
-            .column()
-            .values()
-            .iter()
-            .map(|v| match v {
-                Scalar::Float64(f) => Scalar::Float64(f.sqrt()),
-                other => other.clone(),
-            })
-            .collect();
+    /// `values` (NaN where undefined) on this window's index and name.
+    fn moment_series(&self, values: Vec<f64>) -> Result<Series, FrameError> {
         Series::new(
             self.series.name(),
             self.series.index().clone(),
-            Column::from_values(out)?,
+            Column::from_f64_values(values),
         )
-    }
-
-    /// pandas' `ewmcov(x, x, bias=)` row by row (the kernel the typed arms
-    /// of [`Self::var`] short-cut for bias=False over all-valid inputs).
-    fn var_rows(&self, bias: bool) -> Result<Series, FrameError> {
-        let alpha = self
-            .alpha
-            .clone()
-            .map_err(FrameError::CompatibilityRejected)?;
-        let one_minus_alpha = 1.0 - alpha;
-        let vals = self.series.column().values();
-        let mut out = Vec::with_capacity(vals.len());
-
-        // pandas' exact `ewmcov(x, x)` (bias=False, ignore_na=False)
-        // — br-frankenpandas-cupvi. The prior implementation used a different
-        // (wrong) normalization (no sum_wt decay; sum_wt as the mean denominator)
-        // and diverged from pandas. Here new observations enter with weight
-        // `new_wt` (1.0 for adjust=True, alpha for adjust=False — issue #19),
-        // every step decays sum_wt/sum_wt2/old_wt by (1-alpha)[^2], the mean uses
-        // an (old_wt + new_wt) denominator, and the debias factor is
-        // sum_wt^2 / (sum_wt^2 - sum_wt2).
-        let new_wt = if self.adjust { 1.0_f64 } else { alpha };
-        let minp = self.min_periods.max(1);
-        let mut ewm_mean = f64::NAN;
-        let mut ewm_cov = 0.0_f64;
-        let mut nobs = 0_usize;
-        let mut sum_wt = 1.0_f64;
-        let mut sum_wt2 = 1.0_f64;
-        let mut old_wt = 1.0_f64;
-
-        for val in vals {
-            let observed = !(val.is_missing() || val.to_f64().map_or(true, |v| v.is_nan()));
-            if observed {
-                let x = val.to_f64().unwrap();
-                nobs += 1;
-                if nobs == 1 {
-                    ewm_mean = x;
-                    ewm_cov = 0.0;
-                    sum_wt = 1.0;
-                    sum_wt2 = 1.0;
-                    old_wt = 1.0;
-                } else {
-                    sum_wt *= one_minus_alpha;
-                    sum_wt2 *= one_minus_alpha * one_minus_alpha;
-                    old_wt *= one_minus_alpha;
-                    let old_mean = ewm_mean;
-                    // Guard a constant run so the mean stays exactly equal.
-                    if ewm_mean != x {
-                        ewm_mean = (old_wt * ewm_mean + new_wt * x) / (old_wt + new_wt);
-                    }
-                    ewm_cov = (old_wt * (ewm_cov + (old_mean - ewm_mean).powi(2))
-                        + new_wt * (x - ewm_mean).powi(2))
-                        / (old_wt + new_wt);
-                    sum_wt += new_wt;
-                    sum_wt2 += new_wt * new_wt;
-                    old_wt += new_wt;
-                    if !self.adjust {
-                        // pandas ewmcov: adjust=False renormalizes the weight
-                        // accumulators after every observation.
-                        sum_wt /= old_wt;
-                        sum_wt2 /= old_wt * old_wt;
-                        old_wt = 1.0;
-                    }
-                }
-            } else if nobs == 0 {
-                // No observation yet — variance undefined.
-                out.push(Scalar::Null(NullKind::NaN));
-                continue;
-            } else if !self.ignore_na {
-                // ignore_na=False: a gap still decays the accumulated weights.
-                sum_wt *= one_minus_alpha;
-                sum_wt2 *= one_minus_alpha * one_minus_alpha;
-                old_wt *= one_minus_alpha;
-            }
-
-            // Debiased (ddof=1) output - the variance itself under bias; NaN
-            // until `minp` observations (issue #19) and, debiased, while the
-            // effective sample weight does not exceed one observation.
-            let numerator = sum_wt * sum_wt - sum_wt2;
-            if nobs >= minp && bias {
-                out.push(Scalar::Float64(ewm_cov));
-            } else if nobs >= minp && numerator > 0.0 {
-                out.push(Scalar::Float64(ewm_cov * (sum_wt * sum_wt) / numerator));
-            } else {
-                out.push(Scalar::Null(NullKind::NaN));
-            }
-        }
-
-        // Per br-frankenpandas-72avi: pandas Series.ewm(...).var preserves
-        // source axis name.
-        let index = self.series.index().clone();
-        let column = Column::from_values(out)?;
-        Series::new(self.series.name(), index, column)
     }
 
     // ── pandas API parity additions (br-frankenpandas-mvynk) ─────────
@@ -236108,6 +235688,190 @@ mod transpose_row_prealloc_uza04 {
                 "width {width}: row 1"
             );
         }
+    }
+}
+
+/// EWM var / std / cov / corr against live pandas 2.2.3 bits (c5nwf): its
+/// `ewmcov` updates in its order, inf read as missing, cov / corr over the
+/// pairs each masked by the other. x = [1, 2, NaN, 4, 8, 3],
+/// y = [2, 1, 5, NaN, 3, 9].
+#[cfg(test)]
+mod ewm_moments_match_pandas_c5nwf {
+    use std::f64::consts::FRAC_1_SQRT_2;
+
+    use fp_columnar::Column;
+    use fp_index::Index;
+
+    use super::Series;
+
+    const NAN: f64 = f64::NAN;
+    const INF: f64 = f64::INFINITY;
+
+    fn series(values: &[f64]) -> Series {
+        Series::new(
+            "v",
+            Index::from_range(0, 6, 1),
+            Column::from_f64_values(values.to_vec()),
+        )
+        .unwrap()
+    }
+
+    fn x() -> Series {
+        series(&[1.0, 2.0, NAN, 4.0, 8.0, 3.0])
+    }
+
+    fn y() -> Series {
+        series(&[2.0, 1.0, 5.0, NAN, 3.0, 9.0])
+    }
+
+    fn assert_bits(got: &Series, want: &[f64], what: &str) {
+        let got: Vec<f64> = got
+            .values()
+            .iter()
+            .map(|v| {
+                if v.is_missing() {
+                    NAN
+                } else {
+                    v.to_f64().unwrap()
+                }
+            })
+            .collect();
+        assert_eq!(got.len(), want.len(), "{what}");
+        for (i, (g, w)) in got.iter().zip(want).enumerate() {
+            assert!(
+                g.to_bits() == w.to_bits() || (g.is_nan() && w.is_nan()),
+                "{what} row {i}: fp {g:?}, pandas {w:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn std_and_var_debias_in_pandas_order() {
+        // fp divided cov * sum_wt^2 by the denominator: row 4 was
+        // 3.1942088687231616, row 3 / 5 of the var 2.967105263157895 /
+        // 7.410774435259143.
+        let x = x();
+        let com1 = x.ewm_with_options(None, Some(0.5), true, 0);
+        // FRAC_1_SQRT_2 is pandas' 0.7071067811865476, sqrt(0.5).
+        let std = [
+            NAN,
+            FRAC_1_SQRT_2,
+            FRAC_1_SQRT_2,
+            1.6290629680421056,
+            3.194208868723162,
+            2.854343978871252,
+        ];
+        assert_bits(&com1.std().unwrap(), &std, "std com=1");
+        let minp3 = x.ewm_with_options(None, Some(0.5), true, 3);
+        let mut std_minp3 = std;
+        std_minp3[1..3].fill(NAN);
+        assert_bits(&minp3.std().unwrap(), &std_minp3, "std min_periods=3");
+        let recursive = x.ewm_with_options(None, Some(0.4), false, 0);
+        assert_bits(
+            &recursive.var().unwrap(),
+            &[
+                NAN,
+                0.5,
+                0.5,
+                2.9671052631578956,
+                10.952814380379312,
+                7.410774435259144,
+            ],
+            "var alpha=0.4 adjust=False",
+        );
+    }
+
+    #[test]
+    fn cov_and_corr_follow_ewmcov() {
+        let (x, y) = (x(), y());
+        let recursive = x.ewm_with_options(None, Some(0.4), false, 0);
+        assert_bits(
+            &recursive.cov(&y).unwrap(),
+            &[
+                NAN,
+                -0.5,
+                -0.5,
+                -0.4999999999999999,
+                3.9263456090651565,
+                -4.467935018085692,
+            ],
+            "cov alpha=0.4 adjust=False",
+        );
+        assert_bits(
+            &recursive.corr(&y).unwrap(),
+            &[
+                NAN,
+                -1.0,
+                -1.0,
+                -1.0,
+                0.8768471627059999,
+                -0.33093731001755894,
+            ],
+            "corr alpha=0.4 adjust=False",
+        );
+        let ignoring = x
+            .ewm_with_options(None, Some(0.4), false, 0)
+            .ignoring_na(true);
+        assert_bits(
+            &ignoring.cov_bias(&y, true).unwrap(),
+            &[0.0, -0.24, -0.24, -0.24, 2.0736, -0.4631040000000002],
+            "cov bias=True ignore_na=True",
+        );
+    }
+
+    #[test]
+    fn inf_is_missing() {
+        // NEGATIVE: fp read inf as a value - its mean became inf, then NaN.
+        let swings = series(&[1.0, INF, 3.0, -INF, 5.0, 6.0]);
+        assert_bits(
+            &swings
+                .ewm_with_options(None, Some(0.5), true, 0)
+                .var_bias(true)
+                .unwrap(),
+            &[0.0, 0.0, 0.64, 0.64, 1.1972789115646258, 1.0651477394090423],
+            "var bias=True over +-inf",
+        );
+        // An inf on one side masks the other side's value too.
+        let x = series(&[1.0, 2.0, INF, 4.0, 8.0, 3.0]);
+        let com1 = x.ewm_with_options(None, Some(0.5), true, 0);
+        let y = y();
+        assert_bits(
+            &com1.cov(&y).unwrap(),
+            &[NAN, -0.5, -0.5, -0.5, 4.94, -10.566869300911856],
+            "cov with an inf",
+        );
+        assert_bits(
+            &com1.corr(&y).unwrap(),
+            &[
+                NAN,
+                -1.0,
+                -1.0,
+                -1.0,
+                0.9286961276156451,
+                -0.7309507191832493,
+            ],
+            "corr with an inf",
+        );
+    }
+
+    #[test]
+    fn mean_is_untouched() {
+        let mean = x()
+            .ewm_with_options(None, Some(0.5), true, 0)
+            .mean()
+            .unwrap();
+        assert_bits(
+            &mean,
+            &[
+                1.0,
+                1.6666666666666667,
+                1.6666666666666667,
+                3.3636363636363638,
+                6.111111111111111,
+                4.423728813559322,
+            ],
+            "mean com=1",
+        );
     }
 }
 
