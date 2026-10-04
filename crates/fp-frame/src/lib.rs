@@ -29932,7 +29932,8 @@ impl Series {
     /// Matches `series.rolling(window, min_periods=None)`.
     pub fn rolling(&self, window: usize, min_periods: Option<usize>) -> Rolling<'_> {
         Rolling {
-            series: self,
+            series: window_values(self),
+            source: self,
             window,
             min_periods: min_periods.unwrap_or(window),
             center: false,
@@ -30030,7 +30031,8 @@ impl Series {
         center: bool,
     ) -> Rolling<'_> {
         Rolling {
-            series: self,
+            series: window_values(self),
+            source: self,
             window,
             min_periods: min_periods.unwrap_or(window),
             center,
@@ -30043,7 +30045,8 @@ impl Series {
     /// Matches `pd.Series.rolling(window, center=True)`.
     pub fn rolling_center(&self, window: usize, min_periods: Option<usize>) -> Rolling<'_> {
         Rolling {
-            series: self,
+            series: window_values(self),
+            source: self,
             window,
             min_periods: min_periods.unwrap_or(window),
             center: true,
@@ -30056,7 +30059,8 @@ impl Series {
     /// Matches `series.expanding(min_periods=1)`.
     pub fn expanding(&self, min_periods: Option<usize>) -> Expanding<'_> {
         Expanding {
-            series: self,
+            series: window_values(self),
+            source: self,
             min_periods: min_periods.unwrap_or(1),
         }
     }
@@ -30124,7 +30128,7 @@ impl Series {
             }
         };
         Ewm {
-            series: self,
+            series: window_values(self),
             alpha: validated_alpha,
             adjust,
             min_periods,
@@ -31922,13 +31926,75 @@ impl RollingOrderStat {
     }
 }
 
+/// What pandas' window kernels read (`BaseWindow._prep_values`): the values
+/// with +-inf as NaN, in every rolling / expanding / ewm aggregation.
+/// Borrowed when the column holds no infinity (an all-valid float64 column
+/// answers from its cached all-finite witness).
+fn window_values(series: &Series) -> std::borrow::Cow<'_, Series> {
+    use std::borrow::Cow;
+    let column = series.column();
+    if column.dtype() != DType::Float64
+        || column.as_f64_finite_arc_view_source(column.len()).is_some()
+    {
+        return Cow::Borrowed(series);
+    }
+    // A branch-free OR over each block vectorizes; `any` stops per value.
+    let has_infinite = |data: &[f64]| {
+        data.chunks(256).any(|block| {
+            block
+                .iter()
+                .fold(false, |seen, value| seen | value.is_infinite())
+        })
+    };
+    let floats: Vec<f64> = if let Some(data) = column.as_f64_slice() {
+        if !has_infinite(data) {
+            return Cow::Borrowed(series);
+        }
+        data.to_vec()
+    } else if let Some((data, validity)) = column.as_f64_slice_with_validity() {
+        if !has_infinite(data) {
+            return Cow::Borrowed(series);
+        }
+        data.iter()
+            .enumerate()
+            .map(|(i, &value)| if validity.get(i) { value } else { f64::NAN })
+            .collect()
+    } else {
+        let values = column.values();
+        if !values
+            .iter()
+            .any(|value| matches!(value, Scalar::Float64(v) if v.is_infinite()))
+        {
+            return Cow::Borrowed(series);
+        }
+        values
+            .iter()
+            .map(|value| value.to_f64().unwrap_or(f64::NAN))
+            .collect()
+    };
+    let cleaned = floats
+        .into_iter()
+        .map(|value| if value.is_infinite() { f64::NAN } else { value })
+        .collect();
+    Cow::Owned(Series {
+        name: series.name.clone(),
+        index: series.index.clone(),
+        column: Column::from_f64_values(cleaned),
+        categorical: None,
+        sparse: None,
+    })
+}
+
 /// Rolling window aggregation over a Series.
 ///
 /// Created by `Series::rolling()`. Provides methods for computing
 /// rolling statistics over a sliding window.
 #[derive(Debug)]
 pub struct Rolling<'a> {
-    series: &'a Series,
+    /// The values the window kernels read ([`window_values`]).
+    series: std::borrow::Cow<'a, Series>,
+    /// The Series as given, which `count` reads (pandas counts an inf).
+    source: &'a Series,
     window: usize,
     min_periods: usize,
     center: bool,
@@ -32497,7 +32563,8 @@ impl<'a> Rolling<'a> {
     /// `validate()` and the kernel-selection thresholds well-defined.
     fn with_bounds(series: &'a Series, bounds: Vec<(usize, usize)>, min_periods: usize) -> Self {
         Rolling {
-            series,
+            series: window_values(series),
+            source: series,
             window: series.len().max(min_periods).max(1),
             min_periods,
             center: false,
@@ -32507,6 +32574,13 @@ impl<'a> Rolling<'a> {
 }
 
 impl Rolling<'_> {
+    /// The Series every window function reads: the source with +-inf as
+    /// NaN, as pandas' `_prep_values` hands it to its kernels and to `apply`.
+    #[must_use]
+    pub fn prepared(&self) -> &Series {
+        &self.series
+    }
+
     fn validate(&self) -> Result<(), FrameError> {
         if self.window == 0 {
             return Err(FrameError::CompatibilityRejected(
@@ -33066,7 +33140,7 @@ impl Rolling<'_> {
     /// number of non-nulls (which can be 0).
     pub fn count(&self) -> Result<Series, FrameError> {
         self.validate()?;
-        let vals = self.series.column().values();
+        let vals = self.source.column().values();
         let len = vals.len();
         let mut out = Vec::with_capacity(len);
 
@@ -33629,7 +33703,8 @@ impl Rolling<'_> {
             };
         let aligned_other: &Series = aligned_owned.as_ref().unwrap_or(other);
         // pandas' window cov / corr are its window means and variances
-        // composed, each side NaN where the other is (its prep_binary):
+        // composed, each side NaN where the other is missing or infinite (its
+        // prep_binary, then _prep_values):
         //   cov  = (mean(x*y) - mean(x) * mean(y)) * n / (n - ddof)
         //   corr = cov / sqrt(var(x) * var(y))
         // with n the pairs a window holds. Measured against live pandas 2.2.3,
@@ -33641,7 +33716,7 @@ impl Rolling<'_> {
             pairwise_floats(aligned_other.column()),
         );
         for (x, y) in xs.iter_mut().zip(ys.iter_mut()) {
-            if x.is_nan() || y.is_nan() {
+            if !x.is_finite() || !y.is_finite() {
                 (*x, *y) = (f64::NAN, f64::NAN);
             }
         }
@@ -33669,7 +33744,8 @@ impl Rolling<'_> {
         let (x, y, xy) = (series(xs)?, series(ys)?, series(products)?);
         let over = |series: &Series, var: bool| -> Result<Vec<f64>, FrameError> {
             let windows = Rolling {
-                series,
+                series: std::borrow::Cow::Borrowed(series),
+                source: series,
                 window: self.window,
                 min_periods: self.min_periods,
                 center: self.center,
@@ -33901,8 +33977,8 @@ impl Rolling<'_> {
                 //
                 // rank()'s defaults here are method='average', ascending=True,
                 // na_option='keep', matching the groupby routings in this file.
-                "corr" => self.corr(self.series)?,
-                "cov" => self.cov(self.series)?,
+                "corr" => self.corr(self.source)?,
+                "cov" => self.cov(self.source)?,
                 "rank" => self.rank("average", true, "keep")?,
                 _ => {
                     return Err(FrameError::CompatibilityRejected(format!(
@@ -33938,6 +34014,11 @@ impl Rolling<'_> {
     /// std/var rather than the O(n·w) per-window two-pass re-fold
     /// (br-frankenpandas-g6qa2).
     pub fn sem(&self) -> Result<Series, FrameError> {
+        // pandas divides by its count, which counts an inf the window values
+        // read as NaN: with one present, its std over sqrt(count - 1).
+        if !std::ptr::eq(&*self.series, self.source) {
+            return sem_of(&self.std()?, &self.count()?, 1);
+        }
         self.rolling_var_online(1, VarOutputKind::Sem)
     }
 
@@ -34396,7 +34477,10 @@ impl Rolling<'_> {
 /// Created by `Series::expanding()`. All prior elements are included
 /// in each window computation.
 pub struct Expanding<'a> {
-    series: &'a Series,
+    /// The values the window kernels read ([`window_values`]).
+    series: std::borrow::Cow<'a, Series>,
+    /// The Series as given, which `count` reads (pandas counts an inf).
+    source: &'a Series,
     min_periods: usize,
 }
 
@@ -34480,18 +34564,26 @@ impl Expanding<'_> {
         if self.min_periods <= 1
             && let Some(data) = self.series.column().as_f64_slice()
         {
-            let mut out = Vec::with_capacity(data.len());
+            // collect() over the slice, not push(): with a push the
+            // accumulator round-tripped through the stack every row, a
+            // store-forward in the add chain whose cost moved with code layout.
             let mut acc = -0.0_f64;
-            let mut count = 0_usize;
-            for &v in data {
-                acc += v;
-                count += 1;
-                if is_mean {
-                    out.push(acc / count as f64);
-                } else {
-                    out.push(acc);
-                }
-            }
+            let out: Vec<f64> = if is_mean {
+                data.iter()
+                    .enumerate()
+                    .map(|(i, &v)| {
+                        acc += v;
+                        acc / (i + 1) as f64
+                    })
+                    .collect()
+            } else {
+                data.iter()
+                    .map(|&v| {
+                        acc += v;
+                        acc
+                    })
+                    .collect()
+            };
             let index = self.series.index().clone();
             // All emitted values are finite (acc / acc-over-count of all-valid
             // no-NaN input, min_periods<=1) ⇒ MOVE the hot output Vec into the
@@ -34512,18 +34604,24 @@ impl Expanding<'_> {
         if self.min_periods <= 1
             && let Some(data) = self.series.column().as_i64_slice()
         {
-            let mut out = Vec::with_capacity(data.len());
+            // collect(), not push() (see the Float64 arm).
             let mut acc = -0.0_f64;
-            let mut count = 0_usize;
-            for &v in data {
-                acc += v as f64;
-                count += 1;
-                if is_mean {
-                    out.push(acc / count as f64);
-                } else {
-                    out.push(acc);
-                }
-            }
+            let out: Vec<f64> = if is_mean {
+                data.iter()
+                    .enumerate()
+                    .map(|(i, &v)| {
+                        acc += v as f64;
+                        acc / (i + 1) as f64
+                    })
+                    .collect()
+            } else {
+                data.iter()
+                    .map(|&v| {
+                        acc += v as f64;
+                        acc
+                    })
+                    .collect()
+            };
             let index = self.series.index().clone();
             return Series::new(
                 self.series.name(),
@@ -34710,10 +34808,17 @@ impl Expanding<'_> {
     /// `min_periods > len` request — both of which expanding allows and which
     /// the per-window emission (`Null(NaN)` until `nobs >= min_periods`) handles
     /// unchanged. Bit-faithful to pandas' compensated `roll_var`.
+    /// The Series every expanding function reads ([`Rolling::prepared`]).
+    #[must_use]
+    pub fn prepared(&self) -> &Series {
+        &self.series
+    }
+
     fn as_full_window_rolling(&self) -> Rolling<'_> {
         let len = self.series.column().len();
         Rolling {
-            series: self.series,
+            series: std::borrow::Cow::Borrowed(&*self.series),
+            source: self.source,
             window: len.max(self.min_periods).max(1),
             min_periods: self.min_periods,
             center: false,
@@ -34868,7 +34973,7 @@ impl Expanding<'_> {
     ///
     /// Matches `series.expanding().count()`.
     pub fn count(&self) -> Result<Series, FrameError> {
-        let vals = self.series.column().values();
+        let vals = self.source.column().values();
         let mut running = 0_usize;
         let mut out = Vec::with_capacity(vals.len());
 
@@ -35091,6 +35196,10 @@ impl Expanding<'_> {
     /// (`sem = std / √nobs`) instead of the O(n²) per-step re-fold
     /// (br-frankenpandas-g6qa2).
     pub fn sem(&self) -> Result<Series, FrameError> {
+        // pandas divides by its count, which counts an inf (see Rolling::sem).
+        if !std::ptr::eq(&*self.series, self.source) {
+            return sem_of(&self.std()?, &self.count()?, 1);
+        }
         self.as_full_window_rolling()
             .rolling_var_online(1, VarOutputKind::Sem)
     }
@@ -35391,8 +35500,8 @@ impl Expanding<'_> {
                 //
                 // rank()'s defaults here are method='average', ascending=True,
                 // na_option='keep', matching the groupby routings in this file.
-                "corr" => self.corr(self.series)?,
-                "cov" => self.cov(self.series)?,
+                "corr" => self.corr(self.source)?,
+                "cov" => self.cov(self.source)?,
                 "rank" => self.rank("average", true, "keep")?,
                 _ => {
                     return Err(FrameError::CompatibilityRejected(format!(
@@ -35441,7 +35550,8 @@ impl Expanding<'_> {
 /// Created by `Series::ewm()`. Uses the recursive EWM formula:
 /// `y_t = alpha * x_t + (1 - alpha) * y_{t-1}`
 pub struct Ewm<'a> {
-    series: &'a Series,
+    /// The values the kernels read ([`window_values`]).
+    series: std::borrow::Cow<'a, Series>,
     // Per br-frankenpandas-d895b: stores either the validated alpha or
     // the validation error message. Validation is deferred to method
     // invocation so the `let ewm = s.ewm(...)` factory doesn't itself
@@ -36228,8 +36338,8 @@ impl Ewm<'_> {
                 //     e.agg('cov').equals(e.cov(s))     True
                 // compared with .equals(), which is NaN-aware — a list comparison
                 // reads False on any window result because NaN != NaN.
-                "corr" => self.corr(self.series)?,
-                "cov" => self.cov(self.series)?,
+                "corr" => self.corr(&self.series)?,
+                "cov" => self.cov(&self.series)?,
                 _ => {
                     return Err(FrameError::CompatibilityRejected(format!(
                         "ewm.agg: unsupported function '{func}' (supported: mean, sum, std, var)"
@@ -235872,6 +235982,174 @@ mod ewm_moments_match_pandas_c5nwf {
             ],
             "mean com=1",
         );
+    }
+}
+
+/// Rolling / expanding / ewm read +-inf as NaN, as pandas' `_prep_values`,
+/// and count still counts it (f5prp); values pinned to live pandas 2.2.3.
+/// x = [1, inf, 3, -inf, 5, 6, 2, NaN, 4].
+#[cfg(test)]
+mod window_inf_is_missing_f5prp {
+    use std::{
+        borrow::Cow,
+        f64::consts::{FRAC_1_SQRT_2, SQRT_2},
+    };
+
+    use fp_columnar::Column;
+    use fp_index::Index;
+
+    use super::{Series, window_values};
+
+    const NAN: f64 = f64::NAN;
+    const INF: f64 = f64::INFINITY;
+
+    fn series(values: &[f64]) -> Series {
+        Series::new(
+            "v",
+            Index::from_range(0, 9, 1),
+            Column::from_f64_values(values.to_vec()),
+        )
+        .unwrap()
+    }
+
+    fn x() -> Series {
+        series(&[1.0, INF, 3.0, -INF, 5.0, 6.0, 2.0, NAN, 4.0])
+    }
+
+    fn assert_bits(got: &Series, want: &[f64], what: &str) {
+        let got: Vec<f64> = got
+            .values()
+            .iter()
+            .map(|v| {
+                if v.is_missing() {
+                    NAN
+                } else {
+                    v.to_f64().unwrap()
+                }
+            })
+            .collect();
+        assert_eq!(got.len(), want.len(), "{what}");
+        for (i, (g, w)) in got.iter().zip(want).enumerate() {
+            assert!(
+                g.to_bits() == w.to_bits() || (g.is_nan() && w.is_nan()),
+                "{what} row {i}: fp {g:?}, pandas {w:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rolling_reads_inf_as_nan() {
+        // fp's online sum carried inf - inf = NaN into every later window.
+        let x = x();
+        let r = x.rolling(3, Some(1));
+        let sum = [1.0, 1.0, 4.0, 3.0, 8.0, 11.0, 13.0, 8.0, 6.0];
+        assert_bits(&r.sum().unwrap(), &sum, "rolling sum");
+        let mean = [1.0, 1.0, 2.0, 3.0, 4.0, 5.5, 4.333333333333333, 4.0, 3.0];
+        assert_bits(&r.mean().unwrap(), &mean, "rolling mean");
+        let max = [1.0, 1.0, 3.0, 3.0, 5.0, 6.0, 6.0, 6.0, 4.0];
+        assert_bits(&r.max().unwrap(), &max, "rolling max");
+        let median = [1.0, 1.0, 2.0, 3.0, 4.0, 5.5, 5.0, 4.0, 3.0];
+        assert_bits(&r.median().unwrap(), &median, "rolling median");
+        let std = [
+            NAN,
+            NAN,
+            SQRT_2,
+            NAN,
+            SQRT_2,
+            FRAC_1_SQRT_2,
+            2.0816659994661326,
+            2.82842712474619,
+            1.414213562373094,
+        ];
+        assert_bits(&r.std().unwrap(), &std, "rolling std");
+    }
+
+    #[test]
+    fn expanding_and_ewm_read_inf_as_nan() {
+        let x = x();
+        let e = x.expanding(None);
+        let sum = [1.0, 1.0, 4.0, 4.0, 9.0, 15.0, 17.0, 17.0, 21.0];
+        assert_bits(&e.sum().unwrap(), &sum, "expanding sum");
+        let max = [1.0, 1.0, 3.0, 3.0, 5.0, 6.0, 6.0, 6.0, 6.0];
+        assert_bits(&e.max().unwrap(), &max, "expanding max");
+        let std = [
+            NAN,
+            NAN,
+            SQRT_2,
+            SQRT_2,
+            2.0,
+            2.217355782608345,
+            2.073644135332772,
+            2.073644135332772,
+            1.8708286933869707,
+        ];
+        assert_bits(&e.std().unwrap(), &std, "expanding std");
+        let com1 = x.ewm_with_options(None, Some(0.5), true, 0);
+        let mean = [
+            1.0,
+            1.0,
+            2.6,
+            2.6,
+            4.428571428571429,
+            5.377358490566038,
+            3.52991452991453,
+            3.52991452991453,
+            3.8525469168900806,
+        ];
+        assert_bits(&com1.mean().unwrap(), &mean, "ewm mean");
+        let sum = [
+            1.0, 0.5, 3.25, 1.625, 5.8125, 8.90625, 6.453125, 3.2265625, 5.61328125,
+        ];
+        assert_bits(&com1.sum().unwrap(), &sum, "ewm sum");
+    }
+
+    #[test]
+    fn cov_and_corr_mask_an_inf_on_either_side() {
+        let y = series(&[2.0, 1.0, 4.0, 3.0, INF, 1.0, 5.0, 2.0, 7.0]);
+        let cov = [NAN, NAN, 2.0, NAN, NAN, NAN, -8.0, -8.0, 2.0];
+        assert_bits(
+            &x().rolling(3, Some(1)).cov(&y).unwrap(),
+            &cov,
+            "rolling cov",
+        );
+        let plain = series(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 2.0, 1.0, 4.0]);
+        let corr = [
+            NAN,
+            NAN,
+            0.6546536707079766,
+            0.6546536707079766,
+            NAN,
+            NAN,
+            NAN,
+            -0.5447047794019222,
+            0.9538209664765315,
+        ];
+        assert_bits(
+            &plain.rolling(3, None).corr(&y).unwrap(),
+            &corr,
+            "rolling corr",
+        );
+    }
+
+    #[test]
+    fn count_counts_inf_and_a_finite_column_is_borrowed() {
+        // NEGATIVE: pandas counts an inf (notna), so count reads the source.
+        let x = x();
+        let rolling = [1.0, 2.0, 3.0, 3.0, 3.0, 3.0, 3.0, 2.0, 2.0];
+        assert_bits(
+            &x.rolling(3, Some(1)).count().unwrap(),
+            &rolling,
+            "rolling count",
+        );
+        let expanding = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 7.0, 8.0];
+        assert_bits(
+            &x.expanding(None).count().unwrap(),
+            &expanding,
+            "expanding count",
+        );
+        assert!(matches!(window_values(&x), Cow::Owned(_)));
+        let finite = series(&[1.0, 2.0, NAN, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]);
+        assert!(matches!(window_values(&finite), Cow::Borrowed(_)));
     }
 }
 

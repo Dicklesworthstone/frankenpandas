@@ -23513,6 +23513,48 @@ def test_everyday120_wired_window_and_period_features(case: str) -> None:
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
 
 
+# br-frankenpandas-f5prp: every window function reads +-inf as NaN (pandas'
+# _prep_values) - fp's online sums carried inf - inf = NaN into every later
+# window - while count (and so sem's divisor) still counts it.
+_F5PRP_X = [1.0, np.inf, 3.0, -np.inf, 5.0, 6.0, 2.0, np.nan, 4.0, 8.0, -np.inf, 7.0]
+_F5PRP_Y = [2.0, 1.0, 4.0, 3.0, np.inf, 1.0, 5.0, 2.0, 7.0, 3.0, 1.0, 9.0]
+
+
+def _f5prp_series(m: Any) -> Any:
+    return m.Series(_F5PRP_X)
+
+
+def _f5prp_inf_count_plus_sum(window: Any) -> float:
+    return float(np.isinf(window).sum()) + float(np.nansum(window))
+
+
+_F5PRP_CASES = {
+    "rolling sum": lambda m: _f5prp_series(m).rolling(3, min_periods=1).sum().tolist(),
+    "rolling mean centered": lambda m: _f5prp_series(m).rolling(3, min_periods=1, center=True).mean().tolist(),
+    "rolling max": lambda m: _f5prp_series(m).rolling(3, min_periods=1).max().tolist(),
+    "rolling std": lambda m: _f5prp_series(m).rolling(3, min_periods=1).std().tolist(),
+    "rolling sem": lambda m: _f5prp_series(m).rolling(3, min_periods=1).sem().tolist(),
+    "rolling count": lambda m: _f5prp_series(m).rolling(3, min_periods=1).count().tolist(),
+    "rolling apply raw": lambda m: _f5prp_series(m).rolling(3, min_periods=1).apply(_f5prp_inf_count_plus_sum, raw=True).tolist(),
+    "rolling cov other inf": lambda m: _f5prp_series(m).rolling(3, min_periods=1).cov(m.Series(_F5PRP_Y)).tolist(),
+    "time rolling mean": lambda m: m.Series(_F5PRP_X, index=m.date_range("2024-01-01", periods=12, freq="h")).rolling("3h").mean().tolist(),
+    "expanding sum": lambda m: _f5prp_series(m).expanding().sum().tolist(),
+    "expanding sem": lambda m: _f5prp_series(m).expanding().sem().tolist(),
+    "expanding apply min_periods": lambda m: _f5prp_series(m).expanding(min_periods=3).apply(_f5prp_inf_count_plus_sum, raw=True).tolist(),
+    "frame expanding apply min_periods": lambda m: m.DataFrame({"x": _F5PRP_X, "y": _F5PRP_Y}).expanding(min_periods=3).apply(_f5prp_inf_count_plus_sum, raw=True).to_numpy().ravel().tolist(),
+    "frame rolling median": lambda m: m.DataFrame({"x": _F5PRP_X, "y": _F5PRP_Y}).rolling(3, min_periods=1).median().to_numpy().ravel().tolist(),
+    "ewm mean": lambda m: _f5prp_series(m).ewm(com=1).mean().tolist(),
+    "groupby rolling mean": lambda m: _f5prp_series(m).groupby(list("abaababbabab")).rolling(2, min_periods=1).mean().tolist(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_F5PRP_CASES))
+def test_window_functions_read_inf_as_nan(case: str) -> None:
+    run = _F5PRP_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
 @pytest.mark.skipif(fpd is None or os.name != "posix", reason="frankenpandas not installed / no sh")
 def test_to_clipboard_writes_pandas_tab_separated_text(tmp_path: Path, monkeypatch: Any) -> None:
     # A wl-copy on PATH that keeps what it is sent: the clipboard text is

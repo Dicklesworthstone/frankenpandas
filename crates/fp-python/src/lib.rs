@@ -56222,7 +56222,9 @@ impl PyRolling {
             other.as_ref(),
             |s1, s2| {
                 let windows = match offset {
-                    Some(offset) => s1.rolling_offset_centered(offset, min_periods, closed, center)?,
+                    Some(offset) => {
+                        s1.rolling_offset_centered(offset, min_periods, closed, center)?
+                    }
                     None => s1.rolling_closed(window, min_periods, center, closed)?,
                 };
                 if want_corr {
@@ -56287,10 +56289,13 @@ impl PyRolling {
     ) -> PyResult<Series> {
         let windows = self.series_window(s)?;
         // pandas' default: the window length, or 1 for a time-based window.
-        let min_periods = self
-            .min_periods
-            .unwrap_or(if self.offset.is_some() { 1 } else { self.window });
-        let values = s.column().values();
+        let min_periods = self.min_periods.unwrap_or(if self.offset.is_some() {
+            1
+        } else {
+            self.window
+        });
+        // The windows hold +-inf as NaN, as pandas' apply sees them.
+        let values = windows.prepared().column().values();
         let labels = s.index().labels();
         let mut out = Vec::with_capacity(values.len());
         for i in 0..values.len() {
@@ -58169,12 +58174,17 @@ impl PyExpanding {
             if let Some(ref s) = self.series {
                 let s = window_series_input(s, "Expanding", "apply", false, false)?;
                 let n = s.len();
-                let vals = s.column().values();
-                let mut out_vals = Vec::with_capacity(n);
                 let min_p = self.min_periods.unwrap_or(1);
+                // pandas' windows hold +-inf as NaN and need min_periods
+                // values present.
+                let expanding = s.expanding(Some(min_p));
+                let vals = expanding.prepared().column().values();
+                let mut out_vals = Vec::with_capacity(n);
+                let mut present = 0_usize;
                 for i in 0..n {
                     let slice = &vals[0..=i];
-                    if slice.len() < min_p {
+                    present += usize::from(!vals[i].is_missing());
+                    if present < min_p {
                         out_vals.push(Scalar::Float64(f64::NAN));
                     } else {
                         let labels = &s.index().labels()[0..=i];
@@ -58205,11 +58215,16 @@ impl PyExpanding {
                     let Some(col) = df.column(col_name) else {
                         continue;
                     };
-                    let vals = col.values();
+                    let column = Series::new(col_name.as_str(), df.index().clone(), col.clone())
+                        .map_err(frame_error_to_py)?;
+                    let expanding = column.expanding(Some(min_p));
+                    let vals = expanding.prepared().column().values();
                     let mut out_vals = Vec::with_capacity(n);
+                    let mut present = 0_usize;
                     for i in 0..n {
                         let slice = &vals[0..=i];
-                        if slice.len() < min_p {
+                        present += usize::from(!vals[i].is_missing());
+                        if present < min_p {
                             out_vals.push(Scalar::Float64(f64::NAN));
                         } else {
                             let labels = &df.index().labels()[0..=i];
@@ -84531,7 +84546,9 @@ fn clipboard_args(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<()> {
     if excel == Some(false) {
-        return Err(not_implemented(&format!("{owner}.to_clipboard(excel=False)")));
+        return Err(not_implemented(&format!(
+            "{owner}.to_clipboard(excel=False)"
+        )));
     }
     if sep.is_some_and(|sep| sep != "\t") {
         return Err(not_implemented(&format!("{owner}.to_clipboard(sep=...)")));
