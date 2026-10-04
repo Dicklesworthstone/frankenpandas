@@ -65197,6 +65197,10 @@ pub struct PyResampler {
     /// pandas' `group_keys`: an apply answering rows keys them by their bin
     /// (br-frankenpandas-jno5s).
     group_keys: bool,
+    /// The source's NaT rows, left out of `target` as pandas leaves them out
+    /// of every bin; a transform answers them NaN, first
+    /// (br-frankenpandas-88rwi).
+    nat_rows: usize,
 }
 
 impl PyResampler {
@@ -65215,20 +65219,38 @@ impl PyResampler {
         // pandas bins the rows in time order - an unsorted index taken in its
         // stable argsort, NaT first (TimeGrouper's mergesort) - so first /
         // last / ohlc / apply / transform read each bin's earliest row first;
-        // they read the rows as given (br-frankenpandas-vol90).
+        // they read the rows as given (br-frankenpandas-vol90). The NaT rows
+        // are in no bin and are set aside: they bounded the bins from the NaT
+        // instant, 126477 daily bins for one (br-frankenpandas-88rwi). A
+        // monotonic index holds no NaT.
+        let leading_nat = |index: &Index, order: &[usize]| {
+            let labels = index.labels();
+            order
+                .iter()
+                .take_while(|&&row| {
+                    matches!(labels[row], IndexLabel::Datetime64(nanos) if nanos == fp_types::Timestamp::NAT)
+                })
+                .count()
+        };
+        let mut nat_rows = 0;
         let target = match target {
             ResampleTarget::Series(series) if !series.index().is_monotonic_increasing() => {
-                let order = series
-                    .index()
-                    .argsort()
-                    .into_iter()
-                    .map(|position| i64::try_from(position).unwrap_or(i64::MAX))
-                    .collect::<Vec<_>>();
-                ResampleTarget::Series(series.take(&order).map_err(frame_error_to_py)?)
+                let order = series.index().argsort();
+                nat_rows = leading_nat(series.index(), &order);
+                let at: Vec<i64> = order[nat_rows..]
+                    .iter()
+                    .map(|&position| i64::try_from(position).unwrap_or(i64::MAX))
+                    .collect();
+                ResampleTarget::Series(series.take(&at).map_err(frame_error_to_py)?)
             }
             ResampleTarget::DataFrame(frame) if !frame.index().is_monotonic_increasing() => {
                 let order = frame.index().argsort();
-                ResampleTarget::DataFrame(frame.take_rows(&order).map_err(frame_error_to_py)?)
+                nat_rows = leading_nat(frame.index(), &order);
+                ResampleTarget::DataFrame(
+                    frame
+                        .take_rows(&order[nat_rows..])
+                        .map_err(frame_error_to_py)?,
+                )
             }
             target => target,
         };
@@ -65246,6 +65268,7 @@ impl PyResampler {
                 origin,
                 zone: None,
                 group_keys: false,
+                nat_rows,
             });
         };
         let unit = freq.trim_start_matches(|c: char| c.is_ascii_digit());
@@ -65288,6 +65311,7 @@ impl PyResampler {
                 rows: index,
             }),
             group_keys: false,
+            nat_rows,
         })
     }
 
@@ -65442,7 +65466,30 @@ impl PyResampler {
             origin: self.origin.clone(),
             zone: self.zone.clone(),
             group_keys: self.group_keys,
+            nat_rows: self.nat_rows,
         }
+    }
+
+    /// A transform's answer over the source's rows: the NaT rows set aside
+    /// first, NaN, as pandas answers them - ints beside them float64
+    /// (br-frankenpandas-88rwi).
+    fn with_nat_rows(&self, series: Series) -> PyResult<Series> {
+        if self.nat_rows == 0 {
+            return Ok(series);
+        }
+        let mut labels = vec![IndexLabel::Datetime64(fp_types::Timestamp::NAT); self.nat_rows];
+        labels.extend(series.index().labels().iter().cloned());
+        let index = Index::new(labels)
+            .set_names(series.index().name().cloned())
+            .with_tz(series.index().tz())
+            .map_err(index_error_to_py)?;
+        let mut values = vec![Scalar::Null(NullKind::NaN); self.nat_rows];
+        values.extend(series.column().values().iter().cloned());
+        let mut column = Column::from_values(values).map_err(column_error_to_py)?;
+        if column.dtype() == DType::Int64 {
+            column = column.astype(DType::Float64).map_err(column_error_to_py)?;
+        }
+        Series::new(series.name(), index, column).map_err(frame_error_to_py)
     }
 
     /// `func`'s answer over each bin's rows, every bin (empty ones included)
@@ -65857,6 +65904,7 @@ impl PyResampler {
             origin: self.origin.clone(),
             zone: self.zone.clone(),
             group_keys: self.group_keys,
+            nat_rows: self.nat_rows,
         })
     }
 
@@ -66529,6 +66577,7 @@ impl PyResampler {
                 taken.column().clone(),
             )
             .map_err(frame_error_to_py)?;
+            let res = self.with_nat_rows(res)?;
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
         let mut values = vec![Scalar::Null(NullKind::NaN); source.len()];
@@ -66562,6 +66611,7 @@ impl PyResampler {
         let column = Column::from_values(values).map_err(column_error_to_py)?;
         let res = Series::new(source.name(), source.index().clone(), column)
             .map_err(frame_error_to_py)?;
+        let res = self.with_nat_rows(res)?;
         Ok(Py::new(py, PySeries { inner: res })?.into_any())
     }
 }

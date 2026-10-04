@@ -24274,3 +24274,67 @@ def _vol90_outcome(run: Any) -> Any:
 def test_resample_reads_an_unsorted_index_in_time_order_vol90(case: str) -> None:
     run = _VOL90_CASES[case]
     assert _vol90_outcome(lambda: run(fpd)) == _vol90_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-88rwi: a NaT in the index bounded the bins from the NaT
+# instant - 126477 daily bins of 0.0 for one, and first / last panicked on
+# an overflow in a debug build. pandas leaves NaT rows out of every bin;
+# a transform answers them NaN, first. NEGATIVE: an index without NaT.
+_88RWI_STAMPS = {
+    "first": [None, "2024-01-01 01:00", "2024-01-01 05:00", "2024-01-02 09:00"],
+    "middle": ["2024-01-02 09:00", "2024-01-01 05:00", None, "2024-01-01 01:00"],
+    "last": ["2024-01-01 01:00", "2024-01-01 05:00", "2024-01-02 09:00", None],
+    "two": [None, "2024-01-02 09:00", None, "2024-01-01 01:00"],
+    "none": ["2024-01-02 09:00", "2024-01-01 05:00", "2024-01-03 03:00", "2024-01-01 01:00"],
+}
+
+
+def _88rwi_series(m: Any, where: str) -> Any:
+    return m.Series([3.0, 2.0, 9.0, 1.0], index=m.to_datetime(_88RWI_STAMPS[where]), name="s")
+
+
+_88RWI_CASES = {
+    f"{where} {op}": (lambda where, op: lambda m: getattr(_88rwi_series(m, where).resample("D"), op)())(where, op)
+    for where in _88RWI_STAMPS
+    for op in ["sum", "mean", "count", "first", "last", "ohlc", "size"]
+}
+_88RWI_CASES.update(
+    {
+        f"{where} transform first": (
+            lambda where: lambda m: _88rwi_series(m, where).resample("D").transform("first")
+        )(where)
+        for where in _88RWI_STAMPS
+    }
+)
+_88RWI_CASES["middle transform lambda"] = lambda m: _88rwi_series(m, "middle").resample("D").transform(lambda g: g - g.mean())
+_88RWI_CASES["middle int count transform"] = lambda m: m.Series(
+    [3, 2, 9, 1], index=m.to_datetime(_88RWI_STAMPS["middle"])
+).resample("D").transform("count")
+_88RWI_CASES["middle frame first"] = lambda m: m.DataFrame(
+    {"a": [3.0, 2.0, 9.0, 1.0], "b": [7, 6, 5, 4]}, index=m.to_datetime(_88RWI_STAMPS["middle"])
+).resample("D").first()
+_88RWI_CASES["middle frame transform sum"] = lambda m: m.DataFrame(
+    {"a": [3.0, 2.0, 9.0, 1.0]}, index=m.to_datetime(_88RWI_STAMPS["middle"])
+).resample("D").transform("sum")
+_88RWI_CASES["middle 12h sum"] = lambda m: _88rwi_series(m, "middle").resample("12h").sum()
+
+
+_88RWI_DIVERGES = {
+    "middle transform lambda": "pandas 2.2.3 raises its internal ValueError 'Categorical categories cannot be null' "
+    "for a callable transform over a NaT index; fp answers the NaT row NaN, as for a named one",
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(case, marks=pytest.mark.xfail(strict=True, reason=_88RWI_DIVERGES[case]))
+        if case in _88RWI_DIVERGES
+        else case
+        for case in _88RWI_CASES
+    ],
+)
+def test_resample_leaves_nat_rows_out_of_every_bin_88rwi(case: str) -> None:
+    run = _88RWI_CASES[case]
+    assert _vol90_outcome(lambda: run(fpd)) == _vol90_outcome(lambda: run(pd)), case
