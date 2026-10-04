@@ -23064,21 +23064,27 @@ fn rezoned(series: Series, zone: Option<&str>) -> PyResult<Series> {
 
 /// Whether pandas' arithmetic over `column` runs through the cells' own
 /// Python operators: it holds a Python-object cell (a host object, a list,
-/// bytes), or it is an object column mixing text with other values (an
-/// all-text or all-number column keeps its kernels).
+/// bytes), or it is an object column of anything but text - numbers,
+/// bools, nothing present - whose kernels read the cells as text (an
+/// object column of ints + 1 was a coercion error, * 2 all NaN, a - b
+/// the text '-2.0'; br-frankenpandas-47dus). An all-text column keeps its
+/// kernels.
 fn has_object_cells(column: &Column) -> bool {
     if holds_only_typed_cells(&column.dtype()) {
         return false;
     }
     let values = column.values();
-    values
+    if values
         .iter()
         .any(|value| matches!(value, Scalar::Object(_)))
-        || (is_object_column(column)
-            && values.iter().any(|value| matches!(value, Scalar::Utf8(_)))
-            && values
-                .iter()
-                .any(|value| !value.is_missing() && !matches!(value, Scalar::Utf8(_))))
+    {
+        return true;
+    }
+    let mut present = values.iter().filter(|value| !value.is_missing());
+    let all_text = present
+        .clone()
+        .all(|value| matches!(value, Scalar::Utf8(_)));
+    is_object_column(column) && !(all_text && present.next().is_some())
 }
 
 /// pandas' object arithmetic when either operand column holds such cells
@@ -23105,7 +23111,13 @@ fn host_object_arith(
     let right_has = other_series
         .as_ref()
         .is_some_and(|series| has_object_cells(series.column()));
-    if !has_object_cells(left.column()) && !right_has {
+    // An object column of text against anything but text reads pair by
+    // pair through Python too, as pandas: 'a' + 1 is Python's TypeError,
+    // 'a%s' % 1 formats (the kernels refused both with a coercion message;
+    // br-frankenpandas-47dus). Text against text keeps the kernels.
+    let text_against_other =
+        is_object_column(left.column()) && !text_operand(other, other_series.as_ref());
+    if !has_object_cells(left.column()) && !right_has && !text_against_other {
         return Ok(None);
     }
     // A tuple is no operand pandas broadcasts.
@@ -23147,17 +23159,22 @@ fn host_object_arith(
         }
         None => (left.clone(), None),
     };
-    let scalar_missing = theirs.is_none() && py_to_cell(py, other)?.is_missing();
     let operator = py.import("operator")?.getattr(op)?;
     let column = left.column();
+    // _masked_arith_op against a scalar masks the column's missing cells
+    // only (so 'a' + None is Python's TypeError; it was NaN) - and every
+    // cell of a reflected pow by 1 (its "1 ** np.nan is 1" unmasking, which
+    // reaches rpow alone: it tests `op is pow`, the builtin, so 1 ** [1, 2,
+    // None] is all NaN while [1, 2, None] ** 2 is [1, 4, nan]; measured).
+    let rpow_one = theirs.is_none() && op == "pow" && reflected && other.eq(1)?;
     let pairwise = |masked: bool| -> PyResult<Vec<Scalar>> {
         let mut cells = Vec::with_capacity(left.len());
         for (position, value) in column.values().iter().enumerate() {
             let (their, their_missing) = match &theirs {
                 Some(theirs) => (theirs[position].0.bind(py).clone(), theirs[position].1),
-                None => (other.clone(), scalar_missing),
+                None => (other.clone(), false),
             };
-            if masked && (value.is_missing() || their_missing) {
+            if masked && (value.is_missing() || their_missing || rpow_one) {
                 cells.push(Scalar::Null(NullKind::NaN));
                 continue;
             }
@@ -23188,6 +23205,41 @@ fn host_object_arith(
     )
     .map_err(frame_error_to_py)?;
     Ok(Some(PySeries { inner }))
+}
+
+/// Whether an arithmetic operand is text - a str, or a Series of text -
+/// which an object column of text meets with fp's kernels.
+fn text_operand(other: &Bound<'_, PyAny>, other_series: Option<&Series>) -> bool {
+    match other_series {
+        Some(series) => series.column().dtype() == DType::Utf8,
+        None => other.is_instance_of::<pyo3::types::PyString>(),
+    }
+}
+
+/// pandas' unary operator over an object column: numpy's object loop, `op`
+/// (the `operator` module's neg / pos / abs / invert) on each cell, a
+/// missing one as Python holds it (so None and text are Python's
+/// TypeError), the results an object column. None for any other column.
+/// fp's kernels read the cells as text: -s of numbers was ['-1', '2'], abs
+/// and ~ alike (br-frankenpandas-47dus).
+fn host_object_unary(py: Python<'_>, series: &Series, op: &str) -> PyResult<Option<Series>> {
+    let column = series.column();
+    if !is_object_column(column) && !has_object_cells(column) {
+        return Ok(None);
+    }
+    let operator = py.import("operator")?.getattr(op)?;
+    let cells = column
+        .values()
+        .iter()
+        .map(|value| py_to_cell(py, &operator.call1((cell_to_py(py, column, value)?,))?))
+        .collect::<PyResult<Vec<_>>>()?;
+    Series::new(
+        series.name(),
+        series.index().clone(),
+        Column::from_object_values(cells),
+    )
+    .map(Some)
+    .map_err(frame_error_to_py)
 }
 
 /// pandas' sum / prod over such cells (numpy's object add.reduce /
@@ -28088,8 +28140,12 @@ impl PySeries {
         let result = masked_pow_ones(&lhs, &self.inner, result)?;
         bool_numpy_series(result, target)
     }
-    /// `-s`; pandas negates a bool Series as logical NOT (it raised).
-    fn __neg__(&self) -> PyResult<PySeries> {
+    /// `-s`; pandas negates a bool Series as logical NOT (it raised), an
+    /// object column cell by cell ([`host_object_unary`]).
+    fn __neg__(&self, py: Python<'_>) -> PyResult<PySeries> {
+        if let Some(inner) = host_object_unary(py, &self.inner, "neg")? {
+            return Ok(PySeries { inner });
+        }
         if self.inner.dtype() == DType::Bool {
             return wrap_series(self.inner.invert());
         }
@@ -28098,14 +28154,23 @@ impl PySeries {
     /// `~s`: logical NOT of a bool Series, bitwise NOT of ints, as pandas.
     /// `df[~mask]` raised "bad operand type for unary ~"
     /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.13).
-    fn __invert__(&self) -> PyResult<PySeries> {
+    fn __invert__(&self, py: Python<'_>) -> PyResult<PySeries> {
+        if let Some(inner) = host_object_unary(py, &self.inner, "invert")? {
+            return Ok(PySeries { inner });
+        }
         unary_keeping_width(self.inner.invert(), &self.inner)
     }
     /// `abs(s)` and `+s`, as pandas.
-    fn __abs__(&self) -> PyResult<PySeries> {
+    fn __abs__(&self, py: Python<'_>) -> PyResult<PySeries> {
+        if let Some(inner) = host_object_unary(py, &self.inner, "abs")? {
+            return Ok(PySeries { inner });
+        }
         unary_keeping_width(self.inner.abs(), &self.inner)
     }
-    fn __pos__(&self) -> PyResult<PySeries> {
+    fn __pos__(&self, py: Python<'_>) -> PyResult<PySeries> {
+        if let Some(inner) = host_object_unary(py, &self.inner, "pos")? {
+            return Ok(PySeries { inner });
+        }
         unary_keeping_width(self.inner.positive(), &self.inner)
     }
     /// `s & other`, `s | other`, `s ^ other` and their reflected forms, as
@@ -28949,8 +29014,12 @@ impl PySeries {
         moment_to_py(py, value, self.inner.count() >= 4)
     }
 
-    /// Return the absolute value of each element as a new Series.
-    fn abs(&self) -> PyResult<PySeries> {
+    /// Return the absolute value of each element as a new Series; an
+    /// object column's cell by cell ([`host_object_unary`]).
+    fn abs(&self, py: Python<'_>) -> PyResult<PySeries> {
+        if let Some(inner) = host_object_unary(py, &self.inner, "abs")? {
+            return Ok(PySeries { inner });
+        }
         let r = self
             .inner
             .abs()
@@ -35889,8 +35958,15 @@ impl PyDataFrame {
             && !other.is_instance_of::<PyList>()
             && !other.is_instance_of::<PyTuple>()
             && other.getattr("tolist").is_err();
+        // A column of text against a scalar other than a str too (pandas'
+        // own TypeError for df + 1; br-frankenpandas-47dus).
+        let text_scalar = other.is_instance_of::<pyo3::types::PyString>();
         let objects: Vec<usize> = (0..self.inner.num_columns())
-            .filter(|&position| self.inner.column_at(position).is_some_and(has_object_cells))
+            .filter(|&position| {
+                self.inner.column_at(position).is_some_and(|column| {
+                    has_object_cells(column) || (is_object_column(column) && !text_scalar)
+                })
+            })
             .collect();
         if scalar && !objects.is_empty() {
             let py = other.py();
@@ -36319,6 +36395,61 @@ impl PyDataFrame {
         )
         .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: series })
+    }
+
+    /// The unary operator `op` (the `operator` module's neg / pos / abs /
+    /// invert) over the frame: each object column cell by cell through
+    /// Python ([`host_object_unary`]), the rest by `core`, placed by
+    /// position so a repeated label keeps its own column. Object columns
+    /// of numbers became text (br-frankenpandas-47dus).
+    fn unary_with_objects(
+        &self,
+        py: Python<'_>,
+        op: &str,
+        core: fn(&DataFrame) -> Result<DataFrame, fp_frame::FrameError>,
+    ) -> PyResult<PyDataFrame> {
+        let width = self.inner.num_columns();
+        let mut computed: Vec<Option<Column>> = Vec::with_capacity(width);
+        for position in 0..width {
+            let object = self
+                .inner
+                .column_at(position)
+                .is_some_and(|column| is_object_column(column) || has_object_cells(column));
+            computed.push(if object {
+                let series = self.column_series_at(position)?.inner;
+                host_object_unary(py, &series, op)?.map(|series| series.column().clone())
+            } else {
+                None
+            });
+        }
+        if computed.iter().all(Option::is_none) {
+            return wrap_frame(core(&self.inner));
+        }
+        // The core sees a 0 where each object column was, which every
+        // unary operator takes.
+        let rows = self.inner.len();
+        let placeholder =
+            Column::new(DType::Int64, vec![Scalar::Int64(0); rows]).map_err(column_error_to_py)?;
+        let columns = computed
+            .iter()
+            .enumerate()
+            .map(|(position, done)| match done {
+                Some(_) => Some(placeholder.clone()),
+                None => self.inner.column_at(position).cloned(),
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyIndexError, _>("column position"))?;
+        let result =
+            core(&self.inner.with_columns_at_positions(columns)).map_err(frame_error_to_py)?;
+        let columns = computed
+            .into_iter()
+            .enumerate()
+            .map(|(position, done)| done.or_else(|| result.column_at(position).cloned()))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyIndexError, _>("column position"))?;
+        Ok(PyDataFrame {
+            inner: result.with_columns_at_positions(columns),
+        })
     }
 
     /// `idxmax` / `idxmin` along the rows over MultiIndex columns: each
@@ -39203,18 +39334,18 @@ impl PyDataFrame {
     ) -> PyResult<PyDataFrame> {
         self.arith_operator(other, ArithmeticOp::Pow, true, "**")
     }
-    fn __neg__(&self) -> PyResult<PyDataFrame> {
-        wrap_frame(self.inner.neg())
+    fn __neg__(&self, py: Python<'_>) -> PyResult<PyDataFrame> {
+        self.unary_with_objects(py, "neg", DataFrame::neg)
     }
     /// `~df`, `abs(df)` and `+df`, as pandas (fvsao.13: `~` raised).
-    fn __invert__(&self) -> PyResult<PyDataFrame> {
-        wrap_frame(self.inner.invert())
+    fn __invert__(&self, py: Python<'_>) -> PyResult<PyDataFrame> {
+        self.unary_with_objects(py, "invert", DataFrame::invert)
     }
-    fn __abs__(&self) -> PyResult<PyDataFrame> {
-        wrap_frame(self.inner.abs())
+    fn __abs__(&self, py: Python<'_>) -> PyResult<PyDataFrame> {
+        self.unary_with_objects(py, "abs", DataFrame::abs)
     }
-    fn __pos__(&self) -> PyResult<PyDataFrame> {
-        wrap_frame(self.inner.positive())
+    fn __pos__(&self, py: Python<'_>) -> PyResult<PyDataFrame> {
+        self.unary_with_objects(py, "pos", DataFrame::positive)
     }
     /// `df & other`, `df | other`, `df ^ other` and their reflected forms,
     /// column by column as pandas (see [`PyDataFrame::logical`]).
@@ -41118,12 +41249,11 @@ impl PyDataFrame {
         self.notna()
     }
 
-    /// Return the elementwise absolute value as a new DataFrame.
-    fn abs(&self) -> PyResult<PyDataFrame> {
-        // frame_error_to_py, not a blanket ValueError: abs of an object column
-        // is pandas' TypeError (4qg5w.18).
-        let result = self.inner.abs().map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner: result })
+    /// Return the elementwise absolute value as a new DataFrame; an object
+    /// column's cell by cell, so text is Python's TypeError (4qg5w.18) and
+    /// numbers their abs (they became text; br-frankenpandas-47dus).
+    fn abs(&self, py: Python<'_>) -> PyResult<PyDataFrame> {
+        self.unary_with_objects(py, "abs", DataFrame::abs)
     }
 
     /// Clip values to the `[lower, upper]` range (either bound optional).
@@ -87294,7 +87424,7 @@ mod tests {
         assert_eq!(idx_len, 3);
 
         // Arithmetic: __neg__
-        let neg = py_df.__neg__().expect("negate"); // ubs:ignore — test fixture
+        let neg = Python::attach(|py| py_df.__neg__(py)).expect("negate"); // ubs:ignore — test fixture
         let col_x = neg.column_series("x").expect("col x"); // ubs:ignore — test fixture
         assert_eq!(
             col_x.inner.values(),
@@ -88179,7 +88309,7 @@ mod tests {
                 .expect("melt"); // ubs:ignore — test fixture
             assert_eq!(melted.shape(), (3, 3));
 
-            let abs_df = py_df.abs().expect("abs"); // ubs:ignore — test fixture
+            let abs_df = py_df.abs(py).expect("abs"); // ubs:ignore — test fixture
             assert_eq!(abs_df.shape(), (3, 2));
 
             let lo = pyo3::types::PyFloat::new(py, 2.0);

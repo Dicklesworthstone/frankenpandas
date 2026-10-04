@@ -23952,3 +23952,96 @@ def test_frame_dtypes_pickle_like_pandas_fvsao58() -> None:
     assert copied is not original and copied == original
     assert list(copied.categories) == ["b", "a"] and copied.ordered
     assert copied != fpd.CategoricalDtype(["a", "b"], ordered=True)
+
+
+# br-frankenpandas-47dus: an object column of numbers took fp's kernels with
+# its object (text) dtype - + 1 a coercion error, * 2 all NaN, a - b the
+# text '-2.0', -s / abs / ~ text cells; an object column of text against a
+# number refused with a coercion message. pandas runs every one through the
+# cells' Python operators (numpy's object loop, then _masked_arith_op).
+# NEGATIVE rows: typed columns, text against text, string dtype + str.
+_47DUS_CASES = {
+    "obj ints + 1": lambda m: m.Series([1, 2], dtype=object) + 1,
+    "obj None + 1": lambda m: m.Series([None, None], dtype=object) + 1,
+    "obj mixed * 2": lambda m: m.Series([1, 2.5, None], dtype=object) * 2,
+    "obj ints - obj": lambda m: m.Series([1, 2], dtype=object) - m.Series([3, 4], dtype=object),
+    "obj missing pairs": lambda m: m.Series([1, None], dtype=object) + m.Series([None, 2], dtype=object),
+    "obj ints / 2": lambda m: m.Series([1, 2], dtype=object) / 2,
+    "obj ints ** 2": lambda m: m.Series([1, 2], dtype=object) ** 2,
+    "obj None ** 2": lambda m: m.Series([1, 2, None], dtype=object) ** 2,
+    "1 ** obj None": lambda m: 1 ** m.Series([1, 2, None], dtype=object),
+    "2 ** obj None": lambda m: 2 ** m.Series([1, 2, None], dtype=object),
+    "obj ints // 2": lambda m: m.Series([5, 7], dtype=object) // 2,
+    "obj ints % 2": lambda m: m.Series([5, 7], dtype=object) % 2,
+    "2 - obj ints": lambda m: 2 - m.Series([5, 7], dtype=object),
+    "obj + float series": lambda m: m.Series([1, 2], dtype=object) + m.Series([0.5, 1.5]),
+    "astype object + 1": lambda m: m.Series([1, 2]).astype(object) + 1,
+    "obj bools + 1": lambda m: m.Series([True, False], dtype=object) + 1,
+    "obj ints sum": lambda m: [m.Series([1, 2], dtype=object).sum()],
+    "obj mixed sum": lambda m: [m.Series([1, 2.5, None], dtype=object).sum()],
+    "obj None sum": lambda m: [m.Series([None, None], dtype=object).sum()],
+    "obj ints prod": lambda m: [m.Series([3, 4], dtype=object).prod()],
+    "obj ints > 1": lambda m: m.Series([1, 2], dtype=object) > 1,
+    "obj frame + 1": lambda m: m.DataFrame({"a": [1, 2]}, dtype=object) + 1,
+    "obj frame * 2 mixed": lambda m: m.DataFrame({"a": [1, 2], "b": [1.5, 2.5]}).astype({"a": object}) * 2,
+    "obj frame sum": lambda m: m.DataFrame({"a": [1, 2]}, dtype=object).sum(),
+    "neg ints": lambda m: -m.Series([1, -2], dtype=object),
+    "neg None": lambda m: -m.Series([1, None], dtype=object),
+    "neg nan": lambda m: -m.Series([1, float("nan")], dtype=object),
+    "neg text": lambda m: -m.Series(["a", "b"]),
+    "neg empty": lambda m: -m.Series([], dtype=object),
+    "pos text": lambda m: +m.Series(["a", "b"]),
+    "pos ints": lambda m: +m.Series([1, 2], dtype=object),
+    "abs ints": lambda m: abs(m.Series([-1, 2.5], dtype=object)),
+    "abs method": lambda m: m.Series([-1, 2.5], dtype=object).abs(),
+    "abs None": lambda m: abs(m.Series([-1, None], dtype=object)),
+    "abs text": lambda m: m.Series(["a"]).abs(),
+    "inv ints": lambda m: ~m.Series([1, 2], dtype=object),
+    "inv bools": lambda m: ~m.Series([True, False], dtype=object),
+    "neg bools obj": lambda m: -m.Series([True, False], dtype=object),
+    "frame neg": lambda m: -m.DataFrame({"a": [1, 2]}, dtype=object),
+    "frame abs": lambda m: m.DataFrame({"a": [-1, 2]}, dtype=object).abs(),
+    "frame abs mixed": lambda m: abs(m.DataFrame({"a": [-1, 2], "b": [-1.5, 2.0]}).astype({"a": object})),
+    "frame neg repeated labels": lambda m: -m.DataFrame([[1, -2.5], [3, 4.0]], columns=["a", "a"]).astype(object),
+    "frame invert": lambda m: ~m.DataFrame({"a": [1, 2], "b": [True, False]}).astype({"a": object}),
+    "frame abs text": lambda m: m.DataFrame({"a": ["x"]}).abs(),
+    "text * 2": lambda m: m.Series(["a", "bc"]) * 2,
+    "2 * text": lambda m: 2 * m.Series(["a", "bc"]),
+    "text * 1.5": lambda m: m.Series(["a"]) * 1.5,
+    "text - 1": lambda m: m.Series(["a"]) - 1,
+    "text / 2": lambda m: m.Series(["a"]) / 2,
+    "text % 1": lambda m: m.Series(["a%s"]) % 1,
+    "text + 1": lambda m: m.Series(["a", "b"]) + 1,
+    "text + None": lambda m: m.Series(["a", "b"]) + None,
+    "text + list": lambda m: m.Series(["a", "b"]) + ["x", "y"],
+    "text + int series": lambda m: m.Series(["a", "b"]) + m.Series([1, 2]),
+    "text frame + 1": lambda m: m.DataFrame({"a": ["x"]}) + 1,
+    # NEGATIVE: what already matched keeps matching.
+    "text + text": lambda m: m.Series(["a", "b"]) + m.Series(["x", "y"]),
+    "x + text": lambda m: "x" + m.Series(["a", None]),
+    "text frame + x": lambda m: m.DataFrame({"a": ["x"]}) + "y",
+    "string dtype + x": lambda m: m.Series(["a"], dtype="string") + "x",
+    "int + 1 typed": lambda m: m.Series([1, 2]) + 1,
+    "neg typed": lambda m: -m.Series([1, -2]),
+    "abs typed frame": lambda m: m.DataFrame({"a": [-1, 2], "b": [-1.5, 2.0]}).abs(),
+}
+
+
+def _47dus_outcome(run: Any) -> Any:
+    try:
+        result = run()
+        if isinstance(result, list):
+            return ("ok", "list", [(type(v).__name__, repr(v)) for v in result])
+        dtype = str(getattr(result, "dtypes", getattr(result, "dtype", None)))
+        return ("ok", type(result).__name__, dtype, repr(result.values.tolist()))
+    except NameError:
+        raise
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_47DUS_CASES))
+def test_object_column_operators_like_pandas_47dus(case: str) -> None:
+    run = _47DUS_CASES[case]
+    assert _47dus_outcome(lambda: run(fpd)) == _47dus_outcome(lambda: run(pd)), case
