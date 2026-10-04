@@ -2161,6 +2161,23 @@ fn run(
                 })
             }
         }
+        ("dataframe_ops", "series_gt_scalar") => {
+            // s > s.iloc[n // 2] (br-frankenpandas-4h4mp): the typed scalar
+            // compare, float64 or int64 by `dtype`. The threshold is the column's
+            // own middle value, so it carries the column's type (an Int64
+            // scalar for int64, the i64 compare) on both sides.
+            let column = df.column("col_0").expect("col_0").clone();
+            let threshold = column.values()[rows / 2].clone();
+            let series = Series::new(
+                "s",
+                Index::new_known_unique_int64_unit_range(0, rows),
+                column,
+            )
+            .expect("compare series");
+            time_us(|| {
+                let _ = series.gt_scalar(&threshold).expect("gt");
+            })
+        }
         ("dataframe_ops", "df_transpose_full_materialize") => time_us(|| {
             // br-frankenpandas-l4vzc, requested by the other pane, and it exists
             // because the two lanes that look like they cover this DO NOT.

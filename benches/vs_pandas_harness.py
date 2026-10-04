@@ -2317,6 +2317,13 @@ def bench_series_kurtosis_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: values.kurtosis())
 
 
+def bench_series_gt_scalar_pandas(df: pd.DataFrame) -> list[float]:
+    """s > s.iloc[n // 2] - fp-bench dataframe_ops/series_gt_scalar (br-frankenpandas-4h4mp)."""
+    values = df["col_0"]
+    threshold = values.iloc[len(values) // 2]
+    return time_operation(lambda: values > threshold)
+
+
 def bench_df_skew_pandas(df: pd.DataFrame) -> list[float]:
     """DataFrame.skew — fp-bench has had a `df_skew` lane with NO pandas arm.
 
@@ -3450,6 +3457,7 @@ PANDAS_WORKLOADS = {
         "df_transpose_materialized_clone": bench_df_transpose_materialized_clone_pandas,
         "series_skew": bench_series_skew_pandas,
         "series_kurtosis": bench_series_kurtosis_pandas,
+        "series_gt_scalar": bench_series_gt_scalar_pandas,
         "df_skew": bench_df_skew_pandas,
         "df_sem": bench_df_sem_pandas,
         "df_to_dict_index_materialize": bench_df_to_dict_index_materialize_pandas,

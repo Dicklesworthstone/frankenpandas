@@ -7354,6 +7354,60 @@ pub enum ComparisonOp {
     Le,
 }
 
+/// `v <op> s` for every value of a typed slice: fp-dot-kernel's 8-lane AVX2
+/// compare when the CPU has AVX2 (br-frankenpandas-4h4mp), else six
+/// monomorphic loops with `op` hoisted out (a `match` inside the closure
+/// blocked SIMD; scalar eq was 0.44x pandas). A comparison is exact, so both
+/// give the same bools.
+fn compare_f64_scalar(data: &[f64], s: f64, op: ComparisonOp) -> Vec<bool> {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        let mut out = vec![false; data.len()];
+        match op {
+            ComparisonOp::Gt => fp_dot_kernel::gt_f64_scalar_into(data, s, &mut out),
+            ComparisonOp::Lt => fp_dot_kernel::lt_f64_scalar_into(data, s, &mut out),
+            ComparisonOp::Eq => fp_dot_kernel::eq_f64_scalar_into(data, s, &mut out),
+            ComparisonOp::Ne => fp_dot_kernel::ne_f64_scalar_into(data, s, &mut out),
+            ComparisonOp::Ge => fp_dot_kernel::ge_f64_scalar_into(data, s, &mut out),
+            ComparisonOp::Le => fp_dot_kernel::le_f64_scalar_into(data, s, &mut out),
+        }
+        return out;
+    }
+    match op {
+        ComparisonOp::Gt => data.iter().map(|&v| v > s).collect(),
+        ComparisonOp::Lt => data.iter().map(|&v| v < s).collect(),
+        ComparisonOp::Eq => data.iter().map(|&v| v == s).collect(),
+        ComparisonOp::Ne => data.iter().map(|&v| v != s).collect(),
+        ComparisonOp::Ge => data.iter().map(|&v| v >= s).collect(),
+        ComparisonOp::Le => data.iter().map(|&v| v <= s).collect(),
+    }
+}
+
+/// The `i64` sibling of [`compare_f64_scalar`].
+fn compare_i64_scalar(data: &[i64], s: i64, op: ComparisonOp) -> Vec<bool> {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        let mut out = vec![false; data.len()];
+        match op {
+            ComparisonOp::Gt => fp_dot_kernel::gt_i64_scalar_into(data, s, &mut out),
+            ComparisonOp::Lt => fp_dot_kernel::lt_i64_scalar_into(data, s, &mut out),
+            ComparisonOp::Eq => fp_dot_kernel::eq_i64_scalar_into(data, s, &mut out),
+            ComparisonOp::Ne => fp_dot_kernel::ne_i64_scalar_into(data, s, &mut out),
+            ComparisonOp::Ge => fp_dot_kernel::ge_i64_scalar_into(data, s, &mut out),
+            ComparisonOp::Le => fp_dot_kernel::le_i64_scalar_into(data, s, &mut out),
+        }
+        return out;
+    }
+    match op {
+        ComparisonOp::Gt => data.iter().map(|&v| v > s).collect(),
+        ComparisonOp::Lt => data.iter().map(|&v| v < s).collect(),
+        ComparisonOp::Eq => data.iter().map(|&v| v == s).collect(),
+        ComparisonOp::Ne => data.iter().map(|&v| v != s).collect(),
+        ComparisonOp::Ge => data.iter().map(|&v| v >= s).collect(),
+        ComparisonOp::Le => data.iter().map(|&v| v <= s).collect(),
+    }
+}
+
 /// Largest `k` for which the typed `nkeep` uses a bounded top-`k` linear scan.
 /// For small `k` (the dominant case) this is O(n) with a tiny working set and a
 /// cheap threshold reject — far better than a full O(n·log n) sort or a
@@ -20573,36 +20627,12 @@ impl Column {
         if let Some(data) = self.as_f64_slice()
             && let Ok(s) = scalar.to_f64()
         {
-            // Hoist the `op` match OUT of the per-element closure: a `match op`
-            // inside the map body is a loop-invariant branch that blocks SIMD
-            // (scalar eq was 0.44x pandas). Six monomorphic `v <op> s` loops each
-            // auto-vectorize to a packed f64 compare. Bit-identical (same per-op
-            // comparison; only the dispatch moved out of the loop).
-            let bools: Vec<bool> = match op {
-                ComparisonOp::Gt => data.iter().map(|&v| v > s).collect(),
-                ComparisonOp::Lt => data.iter().map(|&v| v < s).collect(),
-                ComparisonOp::Eq => data.iter().map(|&v| v == s).collect(),
-                ComparisonOp::Ne => data.iter().map(|&v| v != s).collect(),
-                ComparisonOp::Ge => data.iter().map(|&v| v >= s).collect(),
-                ComparisonOp::Le => data.iter().map(|&v| v <= s).collect(),
-            };
-            return Ok(Self::from_bool_values(bools));
+            return Ok(Self::from_bool_values(compare_f64_scalar(data, s, op)));
         }
         if let Some(data) = self.as_i64_slice()
             && let Scalar::Int64(s) = scalar
         {
-            let s = *s;
-            // Hoist `op` out of the closure (see the Float64 arm) so each
-            // monomorphic i64 compare loop auto-vectorizes. Bit-identical.
-            let bools: Vec<bool> = match op {
-                ComparisonOp::Gt => data.iter().map(|&v| v > s).collect(),
-                ComparisonOp::Lt => data.iter().map(|&v| v < s).collect(),
-                ComparisonOp::Eq => data.iter().map(|&v| v == s).collect(),
-                ComparisonOp::Ne => data.iter().map(|&v| v != s).collect(),
-                ComparisonOp::Ge => data.iter().map(|&v| v >= s).collect(),
-                ComparisonOp::Le => data.iter().map(|&v| v <= s).collect(),
-            };
-            return Ok(Self::from_bool_values(bools));
+            return Ok(Self::from_bool_values(compare_i64_scalar(data, *s, op)));
         }
 
         // Nullable Float64 fast path: the all-valid `as_f64_slice` above bails on
@@ -20618,20 +20648,10 @@ impl Column {
         if let Some((data, validity)) = self.as_f64_slice_with_validity()
             && let Ok(s) = scalar.to_f64()
         {
-            // Hoist `op` out of the closure (see the all-valid Float64 arm): the
-            // compare over the raw &[f64] vectorizes; masked slots are dropped by
-            // the carried validity, so the bool value there is never observed.
-            // Bit-identical.
-            let bools: Vec<bool> = match op {
-                ComparisonOp::Gt => data.iter().map(|&v| v > s).collect(),
-                ComparisonOp::Lt => data.iter().map(|&v| v < s).collect(),
-                ComparisonOp::Eq => data.iter().map(|&v| v == s).collect(),
-                ComparisonOp::Ne => data.iter().map(|&v| v != s).collect(),
-                ComparisonOp::Ge => data.iter().map(|&v| v >= s).collect(),
-                ComparisonOp::Le => data.iter().map(|&v| v <= s).collect(),
-            };
+            // Masked slots are dropped by the carried validity, so the bool
+            // value there is never observed. Bit-identical.
             return Ok(Self::from_bool_values_with_validity(
-                bools,
+                compare_f64_scalar(data, s, op),
                 validity.clone(),
             ));
         }
@@ -20646,17 +20666,8 @@ impl Column {
         if let Some((data, validity)) = self.as_i64_slice_with_validity()
             && let Scalar::Int64(s) = scalar
         {
-            let s = *s;
-            let bools: Vec<bool> = match op {
-                ComparisonOp::Gt => data.iter().map(|&v| v > s).collect(),
-                ComparisonOp::Lt => data.iter().map(|&v| v < s).collect(),
-                ComparisonOp::Eq => data.iter().map(|&v| v == s).collect(),
-                ComparisonOp::Ne => data.iter().map(|&v| v != s).collect(),
-                ComparisonOp::Ge => data.iter().map(|&v| v >= s).collect(),
-                ComparisonOp::Le => data.iter().map(|&v| v <= s).collect(),
-            };
             return Ok(Self::from_bool_values_with_validity(
-                bools,
+                compare_i64_scalar(data, *s, op),
                 validity.clone(),
             ));
         }
