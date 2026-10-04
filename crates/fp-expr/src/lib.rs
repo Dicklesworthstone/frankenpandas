@@ -687,6 +687,18 @@ pub fn evaluate(
     policy: &RuntimePolicy,
     ledger: &mut EvidenceLedger,
 ) -> Result<Series, ExprError> {
+    // Each level recurses through here, so a deep tree grows the stack it
+    // needs (br-frankenpandas-bhbuz).
+    on_deep_stack(|| evaluate_node(expr, context, policy, ledger))
+}
+
+/// One node of [`evaluate`]; its operands evaluate through [`evaluate`].
+fn evaluate_node(
+    expr: &Expr,
+    context: &EvalContext,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<Series, ExprError> {
     match expr {
         Expr::Series { name } => context
             .get_series(&name.0)
@@ -1000,8 +1012,7 @@ pub fn evaluate_on_dataframe(
     policy: &RuntimePolicy,
     ledger: &mut EvidenceLedger,
 ) -> Result<Series, ExprError> {
-    let context = EvalContext::from_dataframe_for_expr_with_locals(frame, &BTreeMap::new(), expr)?;
-    evaluate(expr, &context, policy, ledger)
+    evaluate_on_dataframe_with_locals(expr, frame, &BTreeMap::new(), policy, ledger)
 }
 
 pub fn evaluate_on_dataframe_with_locals(
@@ -1897,6 +1908,10 @@ fn evaluate_delta_comparison(
 ///   pow_expr   → atom ( "**" unary_expr )?
 ///   atom       → primary ( "." METHOD_CALL )*
 ///   primary    → NUMBER | STRING | BOOL | IDENT | LOCAL | "abs" "(" expr ")" | "(" expr ")"
+///
+/// Nesting is bounded: more than [`MAX_BRACKET_NESTING`] open brackets, or
+/// a tree deeper than [`MAX_EXPR_DEPTH`], is a [`ExprError::ParseError`]
+/// rather than a stack overflow (br-frankenpandas-bhbuz).
 pub fn parse_expr(input: &str) -> Result<Expr, ExprError> {
     let tokens = tokenize(input)?;
     let mut pos = 0;
@@ -1908,6 +1923,150 @@ pub fn parse_expr(input: &str) -> Result<Expr, ExprError> {
         )));
     }
     Ok(result)
+}
+
+/// Runs one level of the parser's or the evaluator's recursion, first growing
+/// the stack when less than `RED_ZONE` of it remains. The depth bounds below
+/// cap how far that can go; within them the frame size no longer matters - a
+/// debug build's evaluator overflowed a 2 MiB test thread near 490 levels, a
+/// depth pandas evaluates, even on a thread sized at 64 KiB per level
+/// (br-frankenpandas-bhbuz).
+fn on_deep_stack<R>(work: impl FnOnce() -> R) -> R {
+    const RED_ZONE: usize = 1024 * 1024;
+    const SEGMENT: usize = 8 * 1024 * 1024;
+    stacker::maybe_grow(RED_ZONE, SEGMENT, work)
+}
+
+/// The deepest expression tree the parser builds (a leaf is depth 1).
+///
+/// pandas 2.2.3 evaluates through recursive Python visitors, so under
+/// CPython's default recursion limit it raises `RecursionError` once nesting
+/// passes about 330 levels (`a + a + ...`, `1 ** 1 ** ...`) to 490 (`- - a`,
+/// `not not ...`, `x & x & ...`). Every expression pandas evaluates fits
+/// under this bound; a deeper one is a parse error here, never a stack
+/// overflow while parsing, evaluating, cloning or dropping it.
+pub const MAX_EXPR_DEPTH: usize = 512;
+
+/// CPython's tokenizer refuses more than 200 nested brackets, which pandas
+/// raises as `tokenize.TokenError: too many nested parentheses`.
+pub const MAX_BRACKET_NESTING: usize = 200;
+
+thread_local! {
+    /// The parser's active `not` / sign / `**` recursion on this thread.
+    static PARSE_RECURSION: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// One level of the parser's `not` / sign / `**` recursion, refused past
+/// [`MAX_EXPR_DEPTH`] before it can exhaust the stack; released on drop.
+struct RecursionGuard;
+
+impl RecursionGuard {
+    fn enter() -> Result<Self, ExprError> {
+        PARSE_RECURSION.with(|active| {
+            let next = active.get() + 1;
+            if next > MAX_EXPR_DEPTH {
+                return Err(nested_too_deeply());
+            }
+            active.set(next);
+            Ok(Self)
+        })
+    }
+}
+
+impl Drop for RecursionGuard {
+    fn drop(&mut self) {
+        PARSE_RECURSION.with(|active| active.set(active.get() - 1));
+    }
+}
+
+fn nested_too_deeply() -> ExprError {
+    ExprError::ParseError(format!(
+        "expression nested more than {MAX_EXPR_DEPTH} levels deep"
+    ))
+}
+
+/// The depth of a node over children at most `children` deep, refused past
+/// [`MAX_EXPR_DEPTH`].
+fn node_depth(children: usize) -> Result<usize, ExprError> {
+    if children >= MAX_EXPR_DEPTH {
+        Err(nested_too_deeply())
+    } else {
+        Ok(children + 1)
+    }
+}
+
+/// The depth of a binary node over `left` and `right`, refused past
+/// [`MAX_EXPR_DEPTH`]; `left_depth` is `left`'s when a chain already knows it.
+fn joined_depth(left: &Expr, left_depth: Option<usize>, right: &Expr) -> Result<usize, ExprError> {
+    let left_depth = left_depth.unwrap_or_else(|| expr_depth(left));
+    node_depth(left_depth.max(expr_depth(right)))
+}
+
+/// The depth of `expr` (a leaf is 1), walked with an explicit stack so the
+/// walk itself never recurses.
+fn expr_depth(expr: &Expr) -> usize {
+    let mut deepest = 0;
+    let mut pending = vec![(expr, 1_usize)];
+    while let Some((node, depth)) = pending.pop() {
+        deepest = deepest.max(depth);
+        pending.extend(
+            node.children()
+                .into_iter()
+                .flatten()
+                .map(|child| (child, depth + 1)),
+        );
+    }
+    deepest
+}
+
+impl Expr {
+    /// The sub-expressions this node evaluates (at most three).
+    fn children(&self) -> [Option<&Self>; 3] {
+        match self {
+            Self::Series { .. } | Self::Local { .. } | Self::Literal { .. } => [None, None, None],
+            Self::Add { left, right }
+            | Self::Sub { left, right }
+            | Self::Mul { left, right }
+            | Self::Div { left, right }
+            | Self::Modulo { left, right }
+            | Self::FloorDiv { left, right }
+            | Self::Pow { left, right }
+            | Self::And { left, right }
+            | Self::Or { left, right }
+            | Self::CombineFirst { left, right }
+            | Self::Compare { left, right, .. } => [Some(left), Some(right), None],
+            Self::Not { expr }
+            | Self::Abs { expr }
+            | Self::Round { expr, .. }
+            | Self::IsNull { expr, .. }
+            | Self::FillNa { expr, .. }
+            | Self::DropNa { expr }
+            | Self::SortValues { expr, .. }
+            | Self::SortIndex { expr, .. }
+            | Self::ArgSort { expr }
+            | Self::Mode { expr, .. }
+            | Self::Duplicated { expr, .. }
+            | Self::DropDuplicates { expr, .. }
+            | Self::HeadTail { expr, .. }
+            | Self::TopN { expr, .. }
+            | Self::Replace { expr, .. }
+            | Self::Astype { expr, .. }
+            | Self::Rank { expr, .. }
+            | Self::Between { expr, .. }
+            | Self::Clip { expr, .. }
+            | Self::Shift { expr, .. }
+            | Self::Diff { expr, .. }
+            | Self::CumSum { expr }
+            | Self::CumProd { expr }
+            | Self::CumMin { expr }
+            | Self::CumMax { expr }
+            | Self::PctChange { expr, .. }
+            | Self::IsIn { left: expr, .. } => [Some(expr), None, None],
+            Self::Where {
+                expr, cond, other, ..
+            } => [Some(expr), Some(cond), other.as_deref()],
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1951,6 +2110,7 @@ enum Token {
 fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
     let chars: Vec<char> = input.chars().collect();
     let mut tokens = Vec::new();
+    let mut open_brackets = 0_usize;
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
@@ -2081,20 +2241,25 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
                 tokens.push(Token::Percent);
                 i += 1;
             }
-            '(' => {
-                tokens.push(Token::LParen);
+            '(' | '[' => {
+                open_brackets += 1;
+                if open_brackets > MAX_BRACKET_NESTING {
+                    return Err(ExprError::ParseError("too many nested parentheses".into()));
+                }
+                tokens.push(if c == '(' {
+                    Token::LParen
+                } else {
+                    Token::LBracket
+                });
                 i += 1;
             }
-            ')' => {
-                tokens.push(Token::RParen);
-                i += 1;
-            }
-            '[' => {
-                tokens.push(Token::LBracket);
-                i += 1;
-            }
-            ']' => {
-                tokens.push(Token::RBracket);
+            ')' | ']' => {
+                open_brackets = open_brackets.saturating_sub(1);
+                tokens.push(if c == ')' {
+                    Token::RParen
+                } else {
+                    Token::RBracket
+                });
                 i += 1;
             }
             ',' => {
@@ -2262,11 +2427,19 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ExprError> {
     Ok(tokens)
 }
 
+/// Every bracket re-enters the precedence ladder here, so a nested
+/// expression grows the stack it needs (br-frankenpandas-bhbuz).
 fn parse_or(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
+    on_deep_stack(|| parse_or_node(tokens, pos))
+}
+
+fn parse_or_node(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
     let mut left = parse_and(tokens, pos)?;
+    let mut depth = None;
     while *pos < tokens.len() && tokens[*pos] == Token::Or {
         *pos += 1;
         let right = parse_and(tokens, pos)?;
+        depth = Some(joined_depth(&left, depth, &right)?);
         left = Expr::Or {
             left: Box::new(left),
             right: Box::new(right),
@@ -2277,9 +2450,11 @@ fn parse_or(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
 
 fn parse_and(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
     let mut left = parse_not(tokens, pos)?;
+    let mut depth = None;
     while *pos < tokens.len() && tokens[*pos] == Token::And {
         *pos += 1;
         let right = parse_not(tokens, pos)?;
+        depth = Some(joined_depth(&left, depth, &right)?);
         left = Expr::And {
             left: Box::new(left),
             right: Box::new(right),
@@ -2291,7 +2466,9 @@ fn parse_and(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
 fn parse_not(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
     if *pos < tokens.len() && tokens[*pos] == Token::Not {
         *pos += 1;
-        let inner = parse_not(tokens, pos)?;
+        let _level = RecursionGuard::enter()?;
+        let inner = on_deep_stack(|| parse_not(tokens, pos))?;
+        node_depth(expr_depth(&inner))?;
         return Ok(Expr::Not {
             expr: Box::new(inner),
         });
@@ -2302,6 +2479,7 @@ fn parse_not(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
 fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
     let mut left = parse_add(tokens, pos)?;
     let mut chained = None;
+    let mut chained_depth = 0;
     while *pos < tokens.len() {
         let membership = if tokens[*pos] == Token::In {
             *pos += 1;
@@ -2316,16 +2494,20 @@ fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError
             None
         };
         if let Some(negated) = membership {
+            let comparison_depth = node_depth(expr_depth(&left))?;
             let comparison = Expr::IsIn {
                 left: Box::new(left.clone()),
                 values: parse_list_literal(tokens, pos)?,
                 negated,
             };
             chained = Some(match chained {
-                Some(previous) => Expr::And {
-                    left: Box::new(previous),
-                    right: Box::new(comparison),
-                },
+                Some(previous) => {
+                    node_depth(chained_depth.max(comparison_depth))?;
+                    Expr::And {
+                        left: Box::new(previous),
+                        right: Box::new(comparison),
+                    }
+                }
                 None => comparison,
             });
             break;
@@ -2343,17 +2525,24 @@ fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError
         if let Some(op) = op {
             *pos += 1;
             let right = parse_add(tokens, pos)?;
+            let comparison_depth = joined_depth(&left, None, &right)?;
             let comparison = Expr::Compare {
                 left: Box::new(left.clone()),
                 right: Box::new(right.clone()),
                 op,
             };
             chained = Some(match chained {
-                Some(previous) => Expr::And {
-                    left: Box::new(previous),
-                    right: Box::new(comparison),
-                },
-                None => comparison,
+                Some(previous) => {
+                    chained_depth = node_depth(chained_depth.max(comparison_depth))?;
+                    Expr::And {
+                        left: Box::new(previous),
+                        right: Box::new(comparison),
+                    }
+                }
+                None => {
+                    chained_depth = comparison_depth;
+                    comparison
+                }
             });
             left = right;
         } else {
@@ -2655,11 +2844,13 @@ fn parse_none_or_scalar_argument(tokens: &[Token], pos: &mut usize) -> Result<()
 
 fn parse_add(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
     let mut left = parse_mul(tokens, pos)?;
+    let mut depth = None;
     while *pos < tokens.len() {
         match &tokens[*pos] {
             Token::Plus => {
                 *pos += 1;
                 let right = parse_mul(tokens, pos)?;
+                depth = Some(joined_depth(&left, depth, &right)?);
                 left = Expr::Add {
                     left: Box::new(left),
                     right: Box::new(right),
@@ -2668,6 +2859,7 @@ fn parse_add(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
             Token::Minus => {
                 *pos += 1;
                 let right = parse_mul(tokens, pos)?;
+                depth = Some(joined_depth(&left, depth, &right)?);
                 left = Expr::Sub {
                     left: Box::new(left),
                     right: Box::new(right),
@@ -2681,11 +2873,13 @@ fn parse_add(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
 
 fn parse_mul(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
     let mut left = parse_unary(tokens, pos)?;
+    let mut depth = None;
     while *pos < tokens.len() {
         match &tokens[*pos] {
             Token::Star => {
                 *pos += 1;
                 let right = parse_unary(tokens, pos)?;
+                depth = Some(joined_depth(&left, depth, &right)?);
                 left = Expr::Mul {
                     left: Box::new(left),
                     right: Box::new(right),
@@ -2694,6 +2888,7 @@ fn parse_mul(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
             Token::Slash => {
                 *pos += 1;
                 let right = parse_unary(tokens, pos)?;
+                depth = Some(joined_depth(&left, depth, &right)?);
                 left = Expr::Div {
                     left: Box::new(left),
                     right: Box::new(right),
@@ -2702,6 +2897,7 @@ fn parse_mul(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
             Token::FloorDiv => {
                 *pos += 1;
                 let right = parse_unary(tokens, pos)?;
+                depth = Some(joined_depth(&left, depth, &right)?);
                 left = Expr::FloorDiv {
                     left: Box::new(left),
                     right: Box::new(right),
@@ -2710,6 +2906,7 @@ fn parse_mul(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
             Token::Percent => {
                 *pos += 1;
                 let right = parse_unary(tokens, pos)?;
+                depth = Some(joined_depth(&left, depth, &right)?);
                 left = Expr::Modulo {
                     left: Box::new(left),
                     right: Box::new(right),
@@ -2726,11 +2923,14 @@ fn parse_unary(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
         match tokens[*pos] {
             Token::Plus => {
                 *pos += 1;
-                return parse_unary(tokens, pos);
+                let _level = RecursionGuard::enter()?;
+                return on_deep_stack(|| parse_unary(tokens, pos));
             }
             Token::Minus => {
                 *pos += 1;
-                let inner = parse_unary(tokens, pos)?;
+                let _level = RecursionGuard::enter()?;
+                let inner = on_deep_stack(|| parse_unary(tokens, pos))?;
+                node_depth(expr_depth(&inner))?;
                 return Ok(Expr::Sub {
                     left: Box::new(Expr::Literal {
                         value: Scalar::Int64(0),
@@ -2748,7 +2948,9 @@ fn parse_pow(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
     let left = parse_atom(tokens, pos)?;
     if *pos < tokens.len() && tokens[*pos] == Token::Pow {
         *pos += 1;
-        let right = parse_unary(tokens, pos)?;
+        let _level = RecursionGuard::enter()?;
+        let right = on_deep_stack(|| parse_unary(tokens, pos))?;
+        joined_depth(&left, None, &right)?;
         Ok(Expr::Pow {
             left: Box::new(left),
             right: Box::new(right),
@@ -2802,6 +3004,7 @@ fn parse_atom(tokens: &[Token], pos: &mut usize) -> Result<Expr, ExprError> {
                 ));
             }
             *pos += 1; // skip ')'
+            node_depth(expr_depth(&inner))?;
             Ok(Expr::Abs {
                 expr: Box::new(inner),
             })
@@ -4426,6 +4629,10 @@ fn parse_postfix(mut expr: Expr, tokens: &[Token], pos: &mut usize) -> Result<Ex
                 )));
             }
         };
+        // Each call wraps the chain built so far, one level deeper.
+        if expr_depth(&expr) > MAX_EXPR_DEPTH {
+            return Err(nested_too_deeply());
+        }
     }
     Ok(expr)
 }
@@ -9846,6 +10053,92 @@ mod tests {
             .query_with_locals("val > @threshold", &locals)
             .unwrap();
         assert_eq!(result.len(), 2);
+    }
+
+    /// br-frankenpandas-bhbuz: nesting was unbounded, so a deep string
+    /// overflowed the stack (fuzz_parse_expr). pandas 2.2.3 evaluates each
+    /// expression below at its last accepted depth (one level more raises
+    /// RecursionError, or TokenError past 200 brackets); fp must evaluate
+    /// them on a default test thread, and refuse deeper ones as a ParseError.
+    #[test]
+    fn nesting_pandas_evaluates_works_and_deeper_is_a_parse_error_bhbuz() {
+        use super::DataFrameExprExt;
+
+        let frame = fp_frame::DataFrame::from_dict(
+            &["a"],
+            vec![(
+                "a",
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )],
+        )
+        .unwrap();
+        let ints = |values: [i64; 3]| values.map(Scalar::Int64).to_vec();
+        let bools = |values: [bool; 3]| values.map(Scalar::Bool).to_vec();
+        let joined = |term: &str, sep: &str, n: usize| vec![term; n].join(sep);
+        let accepted = [
+            // '(' * 200 + 'a' + ')' * 200 + ' > 1'
+            (
+                format!("{}a{} > 1", "(".repeat(200), ")".repeat(200)),
+                bools([false, true, true]),
+            ),
+            (format!("{}a", "-".repeat(490)), ints([1, 2, 3])),
+            (format!("{}a", "+".repeat(490)), ints([1, 2, 3])),
+            (
+                format!("{}(a > 1)", "not ".repeat(487)),
+                bools([true, false, false]),
+            ),
+            (joined("a", "+", 327), ints([327, 654, 981])),
+            (format!("{}a", "1*".repeat(326)), ints([1, 2, 3])),
+            (joined("(a > 1)", " and ", 492), bools([false, true, true])),
+            (joined("(a > 1)", " | ", 492), bools([false, true, true])),
+            (format!("a{}", "**1".repeat(328)), ints([1, 2, 3])),
+            (joined("a", " < ", 492), bools([false, false, false])),
+        ];
+        for (expr, expected) in &accepted {
+            let shape: String = expr.chars().take(12).collect();
+            assert_eq!(
+                frame.eval(expr).unwrap().values(),
+                expected.as_slice(),
+                "{shape}"
+            );
+        }
+        assert_eq!(frame.query(&accepted[0].0).unwrap().len(), 2);
+
+        let refused = [
+            format!("{}a{} > 1", "(".repeat(201), ")".repeat(201)),
+            format!("a in {}1{}", "[".repeat(201), "]".repeat(201)),
+            format!("{}a", "-".repeat(4096)),
+            format!("{}a", "+".repeat(4096)),
+            format!("{}(a > 1)", "not ".repeat(1024)),
+            joined("a", "+", 2048),
+            joined("a", " * ", 2048),
+            joined("(a > 1)", " and ", 1024),
+            joined("(a > 1)", " or ", 1024),
+            joined("a", " < ", 1024),
+            joined("1", "**", 1400),
+            format!("a{}", ".abs()".repeat(600)),
+            format!(
+                "({}a{}){}",
+                "abs(".repeat(150),
+                ")".repeat(150),
+                ".abs()".repeat(400)
+            ),
+        ];
+        for expr in &refused {
+            let shape: String = expr.chars().take(12).collect();
+            assert!(
+                matches!(super::parse_expr(expr), Err(ExprError::ParseError(_))),
+                "{shape}"
+            );
+            assert!(
+                matches!(frame.eval(expr), Err(ExprError::ParseError(_))),
+                "{shape}"
+            );
+        }
+        // A refused parse releases its recursion levels: the deepest
+        // accepted sign chain still parses afterwards on this thread.
+        assert!(super::parse_expr(&format!("{}a", "-".repeat(600))).is_err());
+        assert!(super::parse_expr(&format!("{}a", "-".repeat(490))).is_ok());
     }
 }
 

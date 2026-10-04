@@ -198,6 +198,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      # The job's TMPDIR must exist before any step runs mktemp: the toolchain
+      # action does, and died "mktemp: failed to create file via template
+      # .tmp/tmp.XXXXXXXXXX" while this step still ran after it (CI
+      # 36992184401; br-frankenpandas-3bo1g).
+      - name: Create temp dirs
+        run: mkdir -p .tmp .target
+
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain
         shell: bash
@@ -219,9 +226,6 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.11"
-
-      - name: Create temp dirs
-        run: mkdir -p .tmp .target
 
       - name: Install the binding's runtime dependency (numpy)
         # fp-python's Rust tests run the binding in-process on this
@@ -438,6 +442,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      # TMPDIR must exist before the toolchain action's mktemp (CI
+      # 36992184401; br-frankenpandas-3bo1g).
+      - name: Create temp dirs
+        run: mkdir -p .tmp .target-conformance
+
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain
         shell: bash
@@ -474,9 +483,6 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.11"
-
-      - name: Create temp dirs
-        run: mkdir -p .tmp .target-conformance
 
       - name: Install and verify required pandas oracle
         run: |
@@ -566,6 +572,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      # TMPDIR must exist before the toolchain action's mktemp (CI
+      # 36992184401; br-frankenpandas-3bo1g).
+      - name: Create temp dirs
+        run: mkdir -p .tmp .target-gates
+
       - name: Resolve pinned Rust toolchain
         id: rust_toolchain
         shell: bash
@@ -595,9 +606,6 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.11"
-
-      - name: Create temp dirs
-        run: mkdir -p .tmp .target-gates
 
       # G3 (`cargo test --workspace --lib`) and G7 (llvm-cov over the
       # workspace) run fp-python's in-process binding tests on this
@@ -873,7 +881,10 @@ jobs:
           python -m venv "$RUNNER_TEMP/nopd"
           NOPD="$RUNNER_TEMP/nopd/bin/python"
           "$NOPD" -m pip install --quiet pytest
-          "$NOPD" -m pip install --no-deps dist/*.whl
+          # The wheel with its one declared dependency (numpy, as any install
+          # has it): --no-deps left read_json's numpy import failing, which is
+          # no claim about pandas (br-frankenpandas-3bo1g).
+          "$NOPD" -m pip install dist/*.whl
           for module in pandas pyarrow openpyxl; do
             if "$NOPD" -c "import $module" 2>/dev/null; then
               echo "$module is importable in the pandas-absent venv" >&2
