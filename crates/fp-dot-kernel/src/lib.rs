@@ -560,6 +560,173 @@ pub fn sqrt_f64_into(a: &[f64], out: &mut [f64]) -> (bool, bool) {
     (domain_held, all_finite)
 }
 
+/// The eight `bool`s of every 8-lane compare mask, bit `i` -> lane `i`.
+const MASK_BYTES: [[bool; 8]; 256] = {
+    let mut table = [[false; 8]; 256];
+    let mut bits = 0;
+    while bits < 256 {
+        let mut lane = 0;
+        while lane < 8 {
+            table[bits][lane] = (bits >> lane) & 1 == 1;
+            lane += 1;
+        }
+        bits += 1;
+    }
+    table
+};
+
+/// `out[i] = a[i] <op> s` for one comparison and one element type, eight lanes
+/// per step (br-frankenpandas-4h4mp).
+///
+/// `Series > scalar` measured 0.25 ms against pandas' 0.10 at 1M floats: the
+/// baseline loop is 2-lane SSE2 compares narrowed lane by lane to `bool` bytes
+/// (`packssdw` x2 + `packsswb` + `pextrw`), numpy a 4-lane AVX2 compare. Here
+/// two 256-bit compares give an 8-bit mask whose bytes come from one table
+/// lookup and one 8-byte store.
+///
+/// BIT-IDENTICAL to `a[i] <op> s`: a comparison is exact, and the lane-wise
+/// IEEE predicates are the scalar ones - `simd_ne` is unordered-or-unequal
+/// (NaN != s is true), the others ordered (false on NaN); -0.0 == 0.0.
+///
+/// ⚠️ `#[inline(never)]` and non-generic, for the reason on
+/// [`materialize_float64_dot`]: an inlinable entry point codegens in the
+/// caller's baseline crate and loses the `+avx2` flag.
+///
+/// ⚠️ CALLER MUST GUARD with `is_x86_feature_detected!("avx2")`; this crate
+/// emits AVX2 unconditionally and entering it on a pre-AVX2 CPU is SIGILL.
+macro_rules! compare_scalar_kernel {
+    ($name:ident, $elem:ty, $simd_cmp:ident, $op:tt) => {
+        #[doc = concat!(
+            "Lane-wise `out[i] = a[i] ", stringify!($op), " s` over `",
+            stringify!($elem), "`; see `compare_scalar_kernel`."
+        )]
+        ///
+        /// # Panics
+        /// Panics if `a` and `out` do not have the same length.
+        #[inline(never)]
+        pub fn $name(a: &[$elem], s: $elem, out: &mut [bool]) {
+            assert_eq!(
+                a.len(),
+                out.len(),
+                concat!(stringify!($name), ": out length mismatch")
+            );
+            const LANES: usize = 8;
+            let splat = Simd::<$elem, LANES>::splat(s);
+            let (chunks, tail) = a.as_chunks::<LANES>();
+            let (out_chunks, out_tail) = out.as_chunks_mut::<LANES>();
+            for (lanes, slots) in chunks.iter().zip(out_chunks) {
+                let mask = Simd::from_array(*lanes).$simd_cmp(splat);
+                *slots = MASK_BYTES[mask.to_bitmask() as usize];
+            }
+            for (slot, &value) in out_tail.iter_mut().zip(tail) {
+                *slot = value $op s;
+            }
+        }
+    };
+}
+
+compare_scalar_kernel!(gt_f64_scalar_into, f64, simd_gt, >);
+compare_scalar_kernel!(ge_f64_scalar_into, f64, simd_ge, >=);
+compare_scalar_kernel!(lt_f64_scalar_into, f64, simd_lt, <);
+compare_scalar_kernel!(le_f64_scalar_into, f64, simd_le, <=);
+compare_scalar_kernel!(eq_f64_scalar_into, f64, simd_eq, ==);
+compare_scalar_kernel!(ne_f64_scalar_into, f64, simd_ne, !=);
+compare_scalar_kernel!(gt_i64_scalar_into, i64, simd_gt, >);
+compare_scalar_kernel!(ge_i64_scalar_into, i64, simd_ge, >=);
+compare_scalar_kernel!(lt_i64_scalar_into, i64, simd_lt, <);
+compare_scalar_kernel!(le_i64_scalar_into, i64, simd_le, <=);
+compare_scalar_kernel!(eq_i64_scalar_into, i64, simd_eq, ==);
+compare_scalar_kernel!(ne_i64_scalar_into, i64, simd_ne, !=);
+
+#[cfg(test)]
+mod compare_scalar_4h4mp {
+    use super::*;
+
+    type Kernel<T> = fn(&[T], T, &mut [bool]);
+    /// A kernel and the scalar comparison it must reproduce.
+    type Case<T> = (Kernel<T>, fn(T, T) -> bool);
+
+    fn check<T: Copy + std::fmt::Debug>(
+        kernel: Kernel<T>,
+        scalar: fn(T, T) -> bool,
+        values: &[T],
+        s: T,
+    ) {
+        // Every length (each tail), from both fills, so no slot is left unwritten.
+        for len in 0..=values.len() {
+            let want: Vec<bool> = values[..len].iter().map(|&v| scalar(v, s)).collect();
+            for fill in [false, true] {
+                let mut out = vec![fill; len];
+                kernel(&values[..len], s, &mut out);
+                assert_eq!(out, want, "len {len}, s {s:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn f64_kernels_match_the_scalar_compare_including_nan_and_signed_zero() {
+        let values = [
+            0.5,
+            f64::NAN,
+            -0.0,
+            0.0,
+            f64::INFINITY,
+            -1.5,
+            0.5,
+            f64::NEG_INFINITY,
+            2.0,
+            0.25,
+            f64::NAN,
+            0.5,
+            1e300,
+            -0.0,
+            0.5,
+            3.0,
+            -2.0,
+            0.5,
+            7.0,
+        ];
+        let kernels: [Case<f64>; 6] = [
+            (gt_f64_scalar_into, |a, b| a > b),
+            (ge_f64_scalar_into, |a, b| a >= b),
+            (lt_f64_scalar_into, |a, b| a < b),
+            (le_f64_scalar_into, |a, b| a <= b),
+            (eq_f64_scalar_into, |a, b| a == b),
+            (ne_f64_scalar_into, |a, b| a != b),
+        ];
+        for (kernel, scalar) in kernels {
+            for s in [0.5, 0.0, -0.0, f64::NAN, f64::INFINITY] {
+                check(kernel, scalar, &values, s);
+            }
+        }
+        // NEGATIVE: an ordered "not equal" would call NaN != 0.5 false.
+        let mut out = [false; 8];
+        ne_f64_scalar_into(&[f64::NAN; 8], 0.5, &mut out);
+        assert_eq!(out, [true; 8]);
+    }
+
+    #[test]
+    fn i64_kernels_match_the_scalar_compare() {
+        let values: Vec<i64> = (0..19_i64)
+            .map(|k| (k * 7919 + 13) % 11 - 5)
+            .chain([i64::MIN, i64::MAX])
+            .collect();
+        let kernels: [Case<i64>; 6] = [
+            (gt_i64_scalar_into, |a, b| a > b),
+            (ge_i64_scalar_into, |a, b| a >= b),
+            (lt_i64_scalar_into, |a, b| a < b),
+            (le_i64_scalar_into, |a, b| a <= b),
+            (eq_i64_scalar_into, |a, b| a == b),
+            (ne_i64_scalar_into, |a, b| a != b),
+        ];
+        for (kernel, scalar) in kernels {
+            for s in [0, 3, -5, i64::MIN, i64::MAX] {
+                check(kernel, scalar, &values, s);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

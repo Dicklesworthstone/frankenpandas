@@ -1075,6 +1075,9 @@ fn scalar_to_key_component(s: &fp_types::Scalar) -> JoinKeyComponent {
         fp_types::Scalar::Datetime64(v) if *v != fp_types::Timestamp::NAT => {
             JoinKeyComponent::Present(IndexLabel::Datetime64(*v))
         }
+        fp_types::Scalar::Object(object @ fp_types::ObjectValue::Bytes(_)) => {
+            JoinKeyComponent::Present(IndexLabel::Object(object.clone()))
+        }
         _ => JoinKeyComponent::Missing, // Null, NaN, NaT
     }
 }
@@ -1096,6 +1099,30 @@ type MergeRowPositions = (
 );
 type JoinPositionBucket = smallvec::SmallVec<[usize; 1]>;
 
+/// Unsupported object keys must fail before either a typed fast path or the
+/// generic key collector can mistake them for missing values. Matching the
+/// variant avoids calling an opaque host object's repr, hash or equality.
+fn validate_object_join_keys(column: &Column) -> Result<(), JoinError> {
+    // These representations hold only text and missing markers. Preserve the
+    // typed string fast paths without allocating a Scalar/String per key.
+    if column.as_utf8_window().is_some() || column.as_nullable_utf8_contiguous().is_some() {
+        return Ok(());
+    }
+    if matches!(column.dtype(), DType::Utf8 | DType::Categorical)
+        && column.values().iter().any(|value| {
+            matches!(
+                value,
+                Scalar::Object(fp_types::ObjectValue::List(_) | fp_types::ObjectValue::Host(_))
+            )
+        })
+    {
+        return Err(JoinError::Frame(FrameError::CompatibilityRejected(
+            "list and host object join keys are unsupported; bytes keys are supported".to_owned(),
+        )));
+    }
+    Ok(())
+}
+
 fn collect_join_key_columns<'a>(
     frame: &'a fp_frame::DataFrame,
     on: &[&str],
@@ -1108,6 +1135,7 @@ fn collect_join_key_columns<'a>(
                 "{side} DataFrame missing key column '{key_name}'"
             )))
         })?;
+        validate_object_join_keys(key_column)?;
         key_columns.push(key_column);
     }
     Ok(key_columns)
@@ -9188,6 +9216,7 @@ pub fn merge_dataframes_on_with_options(
     options: MergeExecutionOptions,
 ) -> Result<MergedDataFrame, JoinError> {
     let suffixes = resolve_merge_suffixes(options.suffixes.clone());
+    let indicator_name = resolve_merge_indicator_name(options.indicator_name.as_deref())?;
     // A column key a side repeats (['a', 'a']; not a join key) rides through
     // the merge under stand-in keys and comes back under its own name, each
     // column its own - by name every copy read the first column (i17d4). A
@@ -9202,6 +9231,15 @@ pub fn merge_dataframes_on_with_options(
         right_on,
         join_type,
         options,
+    )?;
+    let merged = keeping_source_widths(
+        merged,
+        left,
+        right,
+        left_on,
+        right_on,
+        join_type,
+        indicator_name.as_deref(),
     )?;
     let suffixed = |name: &str, suffix: Option<&String>| {
         format!("{name}{}", suffix.map_or("", String::as_str))
@@ -9259,7 +9297,7 @@ pub fn merge_dataframes_on_with_options(
                 .collect(),
         }
     };
-    Ok(keeping_source_widths(merged, left, right, &suffixes))
+    Ok(merged)
 }
 
 /// A frame keyed by stand-ins and each stand-in with the name it stands for.
@@ -9295,40 +9333,135 @@ fn stand_in_repeated_keys(
     Ok(Some((frame.with_column_keys(keys)?, stand_ins)))
 }
 
-/// `merged` with each output column in the numpy width of the left or
-/// right column it came from (fvsao.23) - found by its name, or by its name
-/// less that side's suffix - where its storage carries the width and every
-/// value is in range: a row the join invented as missing leaves an int32
-/// column float64, as pandas'.
+/// Restore widths by the output projection: all left positions followed by
+/// right positions, excluding shared keys. Display names can repeat or
+/// collide across suffixes and therefore cannot identify a source column.
+/// Shared numeric keys retain the width of the rows supplying their values.
+/// Only mixed-width right/outer keys need a complete-tuple origin scan.
 fn keeping_source_widths(
     mut merged: MergedDataFrame,
     left: &fp_frame::DataFrame,
     right: &fp_frame::DataFrame,
-    suffixes: &ResolvedMergeSuffixes,
-) -> MergedDataFrame {
-    let source_of = |name: &str| {
-        let unsuffixed = |suffix: Option<&str>| {
-            suffix
-                .filter(|suffix| !suffix.is_empty())
-                .and_then(|suffix| name.strip_suffix(suffix))
-        };
-        left.column(name)
-            .or_else(|| right.column(name))
-            .or_else(|| unsuffixed(suffixes.left.as_deref()).and_then(|base| left.column(base)))
-            .or_else(|| unsuffixed(suffixes.right.as_deref()).and_then(|base| right.column(base)))
+    left_on: &[&str],
+    right_on: &[&str],
+    join_type: JoinType,
+    indicator_name: Option<&str>,
+) -> Result<MergedDataFrame, JoinError> {
+    let shared = |name: &str| {
+        !matches!(join_type, JoinType::Cross)
+            && left_on
+                .iter()
+                .zip(right_on)
+                .any(|(l, r)| l == r && *l == name)
     };
-    for position in 0..merged.columns.len() {
-        let Some(name) = merged.columns.name_at(position).map(str::to_owned) else {
-            continue;
+    let mut sources = Vec::with_capacity(left.num_columns() + right.num_columns());
+    let fail = || {
+        JoinError::Frame(FrameError::CompatibilityRejected(
+            "merge output projection does not match source positions".to_owned(),
+        ))
+    };
+    for position in 0..left.num_columns() {
+        let name = left.column_name_at(position).ok_or_else(fail)?;
+        let source = left.column_at(position).ok_or_else(fail)?;
+        let partner = if shared(&name) {
+            Some(right.column(&name).ok_or_else(fail)?)
+        } else {
+            None
         };
-        let Some(source) = source_of(&name).filter(|source| source.width().is_some()) else {
-            continue;
+        sources.push((source, partner));
+    }
+    for position in 0..right.num_columns() {
+        let name = right.column_name_at(position).ok_or_else(fail)?;
+        if !shared(&name) {
+            sources.push((right.column_at(position).ok_or_else(fail)?, None));
+        }
+    }
+    if merged.columns.len() != sources.len() + usize::from(indicator_name.is_some()) {
+        return Err(fail());
+    }
+    if let Some(indicator) = indicator_name
+        && merged.columns.name_at(sources.len()) != Some(indicator)
+    {
+        return Err(fail());
+    }
+    let needs_origins = matches!(join_type, JoinType::Right | JoinType::Outer)
+        && sources.iter().any(|(source, partner)| {
+            partner.is_some_and(|partner| {
+                source.width() != partner.width()
+                    && fp_types::NumpyNumeric::of(&source.dtype(), source.width()).is_some()
+                    && fp_types::NumpyNumeric::of(&partner.dtype(), partner.width()).is_some()
+            })
+        });
+    let origins = if needs_origins {
+        let left_keys = collect_composite_keys(&collect_join_key_columns(left, left_on, "left")?);
+        let left_keys: FxHashSet<_> = left_keys.into_iter().collect();
+        let right_keys =
+            collect_composite_keys(&collect_join_key_columns(right, right_on, "right")?);
+        let mut has_match = false;
+        let mut has_right_only = false;
+        for key in right_keys {
+            if left_keys.contains(&key) {
+                has_match = true;
+            } else {
+                has_right_only = true;
+            }
+        }
+        let has_left = if matches!(join_type, JoinType::Outer) {
+            !left.is_empty()
+        } else {
+            has_match
         };
-        if let Some(column) = merged.columns.column_at_mut(position) {
+        Some((has_left, has_right_only))
+    } else {
+        None
+    };
+    for (position, (source, partner)) in sources.into_iter().enumerate() {
+        let column = merged.columns.column_at_mut(position).ok_or_else(fail)?;
+        if let Some(partner) = partner {
+            let numeric = fp_types::NumpyNumeric::of(&source.dtype(), source.width()).zip(
+                fp_types::NumpyNumeric::of(&partner.dtype(), partner.width()),
+            );
+            let Some((left_numeric, right_numeric)) = numeric else {
+                continue;
+            };
+            // Every inner/left shared key comes from a present left row.
+            // Its width must not depend on an unmatched right payload row.
+            if matches!(join_type, JoinType::Inner | JoinType::Left) {
+                *column = column.clone().keeping_dtype_of(source);
+                continue;
+            }
+            if let Some((has_left, has_right_only)) = origins {
+                // No right-only tuples includes empty output: pandas keeps
+                // the left dtype. Right-only output keeps the right dtype.
+                if !has_right_only {
+                    *column = column.clone().keeping_dtype_of(source);
+                    continue;
+                }
+                if !has_left {
+                    *column = column.clone().keeping_dtype_of(partner);
+                    continue;
+                }
+            } else if column.width().is_some() {
+                continue;
+            }
+            // Both origins require the common width, including clearing a
+            // stale narrow tag on an already typed builder's output.
+            if let Some(width) = left_numeric.result_type(right_numeric).width() {
+                let nullable = column.dtype().is_nullable();
+                if width.fits_storage(&column.dtype())
+                    && (width.is_float() || nullable || !column.has_nulls())
+                    && column.width() != Some(width)
+                {
+                    *column = column.cast_to_width(width, nullable)?;
+                }
+            } else if column.width().is_some() {
+                *column = column.astype(column.dtype())?;
+            }
+        } else if source.width().is_some() {
             *column = column.clone().narrowed_like(source);
         }
     }
-    merged
+    Ok(merged)
 }
 
 fn merge_dataframes_on_with_options_storage(
@@ -10321,6 +10454,8 @@ pub fn merge_dataframes(
                 "right DataFrame missing key column '{on}'"
             )))
         })?;
+        validate_object_join_keys(left_key)?;
+        validate_object_join_keys(right_key)?;
         let suffixes = ResolvedMergeSuffixes::default();
         return merge_single_key_inner_unsorted(
             left,
@@ -11186,16 +11321,18 @@ fn merge_asof_grouped(
 ) -> Result<MergedDataFrame, JoinError> {
     // Validate by columns exist
     for col in by_cols {
-        if left.columns().get(col).is_none() {
-            return Err(JoinError::Frame(FrameError::CompatibilityRejected(
-                format!("merge_asof: 'by' column '{col}' not found in left"),
-            )));
-        }
-        if right.columns().get(col).is_none() {
-            return Err(JoinError::Frame(FrameError::CompatibilityRejected(
-                format!("merge_asof: 'by' column '{col}' not found in right"),
-            )));
-        }
+        let left_column = left.columns().get(col).ok_or_else(|| {
+            JoinError::Frame(FrameError::CompatibilityRejected(format!(
+                "merge_asof: 'by' column '{col}' not found in left"
+            )))
+        })?;
+        let right_column = right.columns().get(col).ok_or_else(|| {
+            JoinError::Frame(FrameError::CompatibilityRejected(format!(
+                "merge_asof: 'by' column '{col}' not found in right"
+            )))
+        })?;
+        validate_object_join_keys(left_column)?;
+        validate_object_join_keys(right_column)?;
     }
 
     let left_key = left.columns().get(on).ok_or_else(|| {

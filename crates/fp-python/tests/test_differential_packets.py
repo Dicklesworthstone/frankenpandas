@@ -2814,8 +2814,32 @@ def test_assert_equal_flags_decide_like_pandas() -> None:
         assert verdict(fpd.testing.assert_index_equal, fpd.Index([1.0]), fpd.Index([1.0 + 1e-9]), **kw) == verdict(
             pd.testing.assert_index_equal, pd.Index([1.0]), pd.Index([1.0 + 1e-9]), **kw
         ), kw
-    with pytest.raises(NotImplementedError, match="check_like"):
-        fpd.testing.assert_frame_equal(fpd.DataFrame({"a": [1]}), fpd.DataFrame({"a": [1]}), check_like=True)
+    # check_like ignores the order of the labels, never the data under them
+    # (it was refused).
+    def frames(m: Any, flip: bool) -> tuple:
+        left = m.DataFrame({"a": [1, 2, 3], "b": [4.0, 5.0, 6.0]}, index=[10, 20, 30])
+        right = left[["b", "a"]].loc[[30, 10, 20]]
+        if flip:
+            right = right.assign(a=[9, 1, 2])
+        return left, right
+
+    for flip in (False, True):
+        for kw in ({}, {"check_like": True}):
+            assert verdict(fpd.testing.assert_frame_equal, *frames(fpd, flip), **kw) == verdict(
+                pd.testing.assert_frame_equal, *frames(pd, flip), **kw
+            ), (flip, kw)
+    for kw in ({}, {"check_like": True}):
+        assert verdict(
+            fpd.testing.assert_series_equal,
+            fpd.Series([1, 2], index=["x", "y"]),
+            fpd.Series([2, 1], index=["y", "x"]),
+            **kw,
+        ) == verdict(
+            pd.testing.assert_series_equal,
+            pd.Series([1, 2], index=["x", "y"]),
+            pd.Series([2, 1], index=["y", "x"]),
+            **kw,
+        ), kw
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
@@ -3342,14 +3366,17 @@ _EWM_CASES = {
     "sum_halflife": lambda m: _ewm_s(m).ewm(halflife=1.5).sum(),
     "frame_com": lambda m: _ewm_df(m).ewm(com=0.5).mean(),
     "frame_adjust_false_min_periods": lambda m: _ewm_df(m).ewm(span=2, adjust=False, min_periods=2).mean(),
-    "std_com": pytest.param(
-        lambda m: _ewm_s(m).ewm(com=1).std(),
-        marks=pytest.mark.xfail(strict=True, reason="br-frankenpandas-c5nwf: ewm std last-bit order"),
-    ),
-    "var_adjust_false": pytest.param(
-        lambda m: _ewm_s(m).ewm(alpha=0.4, adjust=False).var(),
-        marks=pytest.mark.xfail(strict=True, reason="br-frankenpandas-c5nwf: ewm var last-bit order"),
-    ),
+    # br-frankenpandas-c5nwf: var / std / cov / corr are pandas' ewmcov, in
+    # its update order, inf read as missing, cov / corr over the pairs each
+    # masked by the other.
+    "std_com": lambda m: _ewm_s(m).ewm(com=1).std(),
+    "var_adjust_false": lambda m: _ewm_s(m).ewm(alpha=0.4, adjust=False).var(),
+    "var_bias_ignore_na": lambda m: _ewm_s(m).ewm(halflife=2, ignore_na=True).var(bias=True),
+    "std_min_periods_inf": lambda m: m.Series([1.0, np.inf, 3.0, -np.inf, 5.0, 6.0, 2.5]).ewm(com=1, min_periods=2).std(),
+    "cov_adjust_false": lambda m: _ewm_s(m).ewm(alpha=0.4, adjust=False).cov(m.Series([2.0, 1.0, 5.0, _NAN, 3.0, 9.0])),
+    "cov_bias_inf": lambda m: m.Series([1.0, 2.0, np.inf, 4.0, 8.0, 3.0]).ewm(span=3).cov(m.Series([2.0, 1.0, 5.0, _NAN, 3.0, 9.0]), bias=True),
+    "corr_inf_masks_other": lambda m: m.Series([1.0, 2.0, np.inf, 4.0, 8.0, 3.0]).ewm(com=1).corr(m.Series([2.0, 1.0, 5.0, _NAN, 3.0, 9.0])),
+    "frame_var": lambda m: _ewm_df(m).ewm(com=1).var(),
 }
 
 
@@ -23258,3 +23285,459 @@ _E116_CASES = {
 def test_everyday116_datetimeindex_iteration_like_pandas_tumiz(case: str) -> None:
     run = _E116_CASES[case]
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-9iim6: a Series' sum / mean / var / std / sem / skew / kurt
+# add in numpy's pairwise order (missing slots as 0 in place; a masked dtype
+# over its runs; an int64 mean through numpy's 8192-value cast buffer). They
+# were an 8-lane pass and a left fold, off pandas' last bits past 128 / 8
+# values.
+def _e117_values(n: int, missing: bool = True) -> Any:
+    k = np.arange(n)
+    values = ((k * 7919 + 13) % 100003) / 7.0 - 7000.0
+    values = np.where(k % 5 == 0, values * 1e6, values)
+    return np.where(missing & (k % 11 == 3), np.nan, values)
+
+
+def _e117_ints(n: int) -> Any:
+    return ((np.arange(n) * 7919 + 13) % 100003) * 3_000_000_007
+
+
+_E117_OPS = ("sum", "mean", "var", "std", "sem", "skew", "kurt")
+_E117_CASES = {
+    **{
+        f"float64 n={n}": (lambda n: lambda m: [getattr(m.Series(_e117_values(n)), op)() for op in _E117_OPS])(n)
+        for n in (7, 8, 9, 127, 128, 129, 1000, 100_000)
+    },
+    "int64 past the cast buffer": lambda m: [getattr(m.Series(_e117_ints(20_000)), op)() for op in _E117_OPS],
+    "masked Float64": lambda m: [
+        getattr(m.Series(m.array(_e117_values(1000).tolist(), dtype="Float64")), op)() for op in _E117_OPS
+    ],
+    "masked Int64": lambda m: [
+        getattr(m.Series(m.array(_e117_ints(20_000).tolist(), dtype="Int64")), op)() for op in ("mean", "var", "std")
+    ],
+    "frame": lambda m: m.DataFrame({"a": _e117_values(1000), "b": _e117_values(1000, False)})
+    .agg(list(_E117_OPS))
+    .values.tolist(),
+    "describe": lambda m: m.Series(_e117_values(1000)).describe().tolist(),
+    "datetime mean": lambda m: [
+        str(m.Series(m.to_datetime(1_700_000_000_000_000_000 + (_e117_ints(20_000) // 3_000_000_007) * 1_000_000_007)).mean())
+    ],
+    "pivot grand total": lambda m: [
+        m.DataFrame({"a": np.arange(1000) % 3, "b": np.arange(1000) % 4, "v": _e117_values(1000)})
+        .pivot_table(values="v", index="a", columns="b", aggfunc=agg, margins=True)
+        .loc["All", "All"]
+        for agg in ("sum", "mean", "var", "std")
+    ],
+    # Negatives: short inputs are unchanged; an exact int sum stays exact.
+    "short": lambda m: [getattr(m.Series([0.1, 0.2, 0.3]), op)() for op in ("sum", "mean", "var")],
+    "int sum": lambda m: [m.Series(_e117_ints(20_000)).sum()],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E117_CASES))
+def test_everyday117_series_reductions_add_like_numpy_9iim6(case: str) -> None:
+    run = _E117_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-n026a: rolling / expanding var, std and sem slide as pandas'
+# roll_var does - the leaving values out before the entering ones in, a window
+# sharing nothing with the previous one starting over. Adding first missed
+# pandas' last bits at almost every position.
+def _e118_walk(n: int = 2000, offset: float = 100.0) -> Any:
+    k = np.arange(n)
+    values = offset + np.cumsum(((k * 7919 + 13) % 1000 - 500) / 97.0)
+    return np.where(k % 37 == 5, np.nan, values)
+
+
+def _e118_timed(m: Any) -> Any:
+    seconds = 1_700_000_000 + np.cumsum(np.arange(300) * 31 % 13 + 1)
+    return m.Series(_e118_walk(300), index=m.to_datetime(seconds * 1_000_000_000))
+
+
+_E118_CASES = {
+    **{
+        f"rolling({w}).{op}": (lambda w, op: lambda m: getattr(m.Series(_e118_walk()).rolling(w), op)().tolist())(
+            w, op
+        )
+        for w in (2, 3, 7, 30)
+        for op in ("var", "std", "sem")
+    },
+    "min_periods ddof=0": lambda m: m.Series(_e118_walk()).rolling(30, min_periods=5).var(ddof=0).tolist(),
+    "center": lambda m: m.Series(_e118_walk()).rolling(5, center=True).var().tolist(),
+    "large offset": lambda m: m.Series(_e118_walk(offset=1e9)).rolling(7).std().tolist(),
+    "constant stretch": lambda m: m.Series([3.0] * 40 + list(_e118_walk(60))).rolling(4).var().tolist(),
+    "expanding": lambda m: m.Series(_e118_walk()).expanding().var().tolist()
+    + m.Series(_e118_walk()).expanding().std().tolist(),
+    "time window": lambda m: _e118_timed(m).rolling("7s").var().tolist(),
+    # Negative: rolling mean matched pandas already and stays as it was.
+    "rolling mean": lambda m: m.Series(_e118_walk()).rolling(7).mean().tolist(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E118_CASES))
+def test_everyday118_rolling_var_slides_like_roll_var_n026a(case: str) -> None:
+    run = _E118_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-py3c0: read_csv's float cells convert as pandas' default C
+# converter does - 17 digits (leading zeros count) added as x * 10 + d in
+# float64, one power-of-ten scaling - not correctly rounded; a value past
+# float64 is not a float. fp parsed them exactly.
+def _e119_reprs(n: int = 400) -> list:
+    k = np.arange(n)
+    values = np.cumsum(((k * 7919 + 13) % 1000 - 500) / 97.0) * 10.0 ** ((k % 23) - 11)
+    return [repr(float(v)) for v in values]
+
+
+def _e119_read(m: Any, cells: list, **kwargs: Any) -> list:
+    frame = m.read_csv(io.StringIO("x\n" + "\n".join(cells) + "\n"), **kwargs)
+    return [str(frame["x"].dtype)] + frame["x"].tolist()
+
+
+_E119_CASES = {
+    "reprs": lambda m: _e119_read(m, _e119_reprs()),
+    "long fractions": lambda m: _e119_read(
+        m, ["0.8690736625851781286570704999", "0.000000068288360759838675650889", "-0.0080749473608410608782560"]
+    ),
+    "leading zeros": lambda m: _e119_read(m, ["00000000000000000.5", "0000000000000000.5", "000123.4500"]),
+    "exponents": lambda m: _e119_read(m, ["1.5E+10", "-.5e-3", "5.", "1e-320", "2.5e-310", "-1e-400", "0.001e310"]),
+    "comma decimal": lambda m: [
+        str(v) for v in m.read_csv(io.StringIO("x;y\n9,890295358649789;1\n"), sep=";", decimal=",")["x"].tolist()
+    ],
+    "past float64": lambda m: _e119_read(m, ["1e309", "2.5"]),
+    "wide int beside a fraction": lambda m: _e119_read(m, ["99999999999999999", "1.5"]),
+    "wide int beside a missing value": lambda m: _e119_read(m, ["12", "NA", "99999999999999999"]),
+    "read_table": lambda m: m.read_table(io.StringIO("x\ty\n9.890295358649789\t1\n"))["x"].tolist(),
+    "python engine": lambda m: _e119_read(m, _e119_reprs(50), engine="python"),
+    "to_numeric": lambda m: m.to_numeric(m.Series(_e119_reprs(200) + ["00000000000000000.5"], dtype=object)).tolist(),
+    # Negative: short decimals read the same either way.
+    "short decimals": lambda m: _e119_read(m, ["0.1", "115215.73", "2.5", "-3.75"]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E119_CASES))
+def test_everyday119_read_csv_floats_convert_like_pandas_py3c0(case: str) -> None:
+    run = _E119_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# Refusals with the implementation already behind them, wired (2026-10-04):
+# time-based rolling apply / agg(callable) / corr / cov / rank, expanding
+# corr / cov of a frame without other, and dt.to_period() inferring its freq.
+def _e120_hours(n: int = 40) -> Any:
+    k = np.arange(n)
+    return 1_700_000_000 + np.cumsum(k * 37 % 5 + 1) * 3600
+
+
+def _e120_series(m: Any, reverse: bool = False) -> Any:
+    k = np.arange(40)
+    values = ((k * 7919 + 13) % 97) / 7.0
+    if reverse:
+        values = np.sqrt(values[::-1] + 1.0)
+    return m.Series(values, index=m.to_datetime(_e120_hours() * 1_000_000_000))
+
+
+def _e120_frame(m: Any) -> Any:
+    k = np.arange(40)
+    values = ((k * 7919 + 13) % 97) / 7.0
+    index = m.to_datetime(_e120_hours() * 1_000_000_000)
+    return m.DataFrame({"a": values, "b": np.sqrt(values[::-1] + 1.0)}, index=index)
+
+
+def _e120_pairwise(frame: Any) -> list:
+    return frame.values.tolist() + [str(label) for label in frame.index.tolist()]
+
+
+def _e120_periods(m: Any, **range_kw: Any) -> list:
+    periods = m.Series(m.date_range("2024-01-01", **range_kw)).dt.to_period()
+    return [str(periods.dtype)] + periods.astype(str).tolist()
+
+
+_E120_CASES = {
+    "rolling time apply raw": lambda m: _e120_series(m).rolling("6h").apply(np.sum, raw=True).tolist(),
+    "rolling time apply series": lambda m: _e120_series(m).rolling("6h").apply(lambda w: w.max() - w.min()).tolist(),
+    "rolling time apply min_periods": lambda m: _e120_series(m)
+    .rolling("6h", min_periods=3)
+    .apply(np.mean, raw=True)
+    .tolist(),
+    "rolling time agg callable": lambda m: _e120_series(m).rolling("6h").agg(lambda w: w.sum()).tolist(),
+    "rolling time corr": lambda m: _e120_series(m).rolling("6h").corr(_e120_series(m, True)).tolist(),
+    "rolling time cov": lambda m: _e120_series(m).rolling("6h").cov(_e120_series(m, True)).tolist(),
+    "rolling time rank": lambda m: _e120_series(m).rolling("6h").rank().tolist(),
+    "frame rolling time apply": lambda m: _e120_frame(m).rolling("6h").apply(np.sum, raw=True).values.tolist(),
+    "frame rolling time corr": lambda m: _e120_pairwise(_e120_frame(m).rolling("6h").corr()),
+    "frame expanding corr": lambda m: _e120_pairwise(_e120_frame(m).expanding().corr()),
+    "frame expanding cov": lambda m: _e120_pairwise(_e120_frame(m).expanding(min_periods=3).cov()),
+    "to_period D": lambda m: _e120_periods(m, periods=5, freq="D"),
+    "to_period h": lambda m: _e120_periods(m, periods=5, freq="h"),
+    "to_period ME": lambda m: _e120_periods(m, periods=5, freq="ME"),
+    # The inferred weekly anchor (W-MON) by value: fp's Period cannot carry an
+    # anchored weekly freq, so its dtype stays object as for an explicit 'W-MON'.
+    "to_period 7D": lambda m: _e120_periods(m, periods=5, freq="7D")[1:],
+    # Negatives: no frequency to infer is pandas' ValueError.
+    "to_period irregular": lambda m: m.Series(m.to_datetime(["2024-01-01", "2024-01-03", "2024-01-04"]))
+    .dt.to_period()
+    .tolist(),
+    "to_period two values": lambda m: m.Series(m.to_datetime(["2024-01-01", "2024-01-02"])).dt.to_period().tolist(),
+    "rolling count window apply": lambda m: _e120_series(m).rolling(3).apply(np.sum, raw=True).tolist(),
+    # Pearson's own last bits come from numpy's BLAS dot (corrcoef); the gate
+    # is what this case is about.
+    "corr min_periods met": lambda m: [
+        round(float(m.Series([1.0, 2, 3, 4, 5]).corr(m.Series([2.0, 1, 4, 3, 6]), min_periods=4)), 12)
+    ],
+    "corr min_periods unmet": lambda m: [
+        m.Series([1.0, np.nan, 3, 4, 5]).corr(m.Series([2.0, 1, np.nan, 3, 6]), min_periods=4),
+        m.Series([1.0, 2, 3, 4]).corr(m.Series([4.0, 3, 1, 2]), method="spearman", min_periods=5),
+    ],
+    # to_numeric's other spellings: an unpadded inf only ('nan' raises), an
+    # empty string NaN (a blank one raises), pandas' own error message.
+    **{
+        f"to_numeric {text!r}": (lambda text: lambda m: m.to_numeric(m.Series([text, "2"], dtype=object)).tolist())(
+            text
+        )
+        for text in ("nan", "NaN", "inf", "-Infinity", " inf", "", "  ", " 1.5 ", "1_000")
+    },
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E120_CASES))
+def test_everyday120_wired_window_and_period_features(case: str) -> None:
+    run = _E120_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-f5prp: every window function reads +-inf as NaN (pandas'
+# _prep_values) - fp's online sums carried inf - inf = NaN into every later
+# window - while count (and so sem's divisor) still counts it.
+_F5PRP_X = [1.0, np.inf, 3.0, -np.inf, 5.0, 6.0, 2.0, np.nan, 4.0, 8.0, -np.inf, 7.0]
+_F5PRP_Y = [2.0, 1.0, 4.0, 3.0, np.inf, 1.0, 5.0, 2.0, 7.0, 3.0, 1.0, 9.0]
+
+
+def _f5prp_series(m: Any) -> Any:
+    return m.Series(_F5PRP_X)
+
+
+def _f5prp_inf_count_plus_sum(window: Any) -> float:
+    return float(np.isinf(window).sum()) + float(np.nansum(window))
+
+
+_F5PRP_CASES = {
+    "rolling sum": lambda m: _f5prp_series(m).rolling(3, min_periods=1).sum().tolist(),
+    "rolling mean centered": lambda m: _f5prp_series(m).rolling(3, min_periods=1, center=True).mean().tolist(),
+    "rolling max": lambda m: _f5prp_series(m).rolling(3, min_periods=1).max().tolist(),
+    "rolling std": lambda m: _f5prp_series(m).rolling(3, min_periods=1).std().tolist(),
+    "rolling sem": lambda m: _f5prp_series(m).rolling(3, min_periods=1).sem().tolist(),
+    "rolling count": lambda m: _f5prp_series(m).rolling(3, min_periods=1).count().tolist(),
+    "rolling apply raw": lambda m: _f5prp_series(m).rolling(3, min_periods=1).apply(_f5prp_inf_count_plus_sum, raw=True).tolist(),
+    "rolling cov other inf": lambda m: _f5prp_series(m).rolling(3, min_periods=1).cov(m.Series(_F5PRP_Y)).tolist(),
+    "time rolling mean": lambda m: m.Series(_F5PRP_X, index=m.date_range("2024-01-01", periods=12, freq="h")).rolling("3h").mean().tolist(),
+    "expanding sum": lambda m: _f5prp_series(m).expanding().sum().tolist(),
+    "expanding sem": lambda m: _f5prp_series(m).expanding().sem().tolist(),
+    "expanding apply min_periods": lambda m: _f5prp_series(m).expanding(min_periods=3).apply(_f5prp_inf_count_plus_sum, raw=True).tolist(),
+    "frame expanding apply min_periods": lambda m: m.DataFrame({"x": _F5PRP_X, "y": _F5PRP_Y}).expanding(min_periods=3).apply(_f5prp_inf_count_plus_sum, raw=True).to_numpy().ravel().tolist(),
+    "frame rolling median": lambda m: m.DataFrame({"x": _F5PRP_X, "y": _F5PRP_Y}).rolling(3, min_periods=1).median().to_numpy().ravel().tolist(),
+    "ewm mean": lambda m: _f5prp_series(m).ewm(com=1).mean().tolist(),
+    "groupby rolling mean": lambda m: _f5prp_series(m).groupby(list("abaababbabab")).rolling(2, min_periods=1).mean().tolist(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_F5PRP_CASES))
+def test_window_functions_read_inf_as_nan(case: str) -> None:
+    run = _F5PRP_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-f1jm5: to_datetime read ISO timestamps pandas parses as
+# NaT - every offset under format='ISO8601' / 'mixed', a column of mixed
+# offsets (a DST crossing) on any path, T10 / T1030 / a bare trailing '.' -
+# and format='ISO8601' accepted what is not ISO8601. pandas' ISO reader is
+# numpy's parse_iso_8601_datetime.
+_F1JM5_STRINGS = [
+    "2024-01-05T10", "2024-01-05T1030", "2024-01-05T10:30:15.", "2024-01-05T10:30:15.1234567891",
+    "2024.01.05", "2024 01 05", "2024-1-5", "20240105T103015", "2024-01-05T1:30", " 2024-01-05",
+    "2024-01-05T10:30:15Z", "2024-01-05T10:30:15+05:30", "2024-01-05T10:30:15+0530",
+    "2024-01-05T10:30:15 +05:30", "2024-01-05T10:30:15-08:00", "2024-01-05T10:30:15+00:00",
+    "2024-01-05T10:30:15+05", "01/05/2024", "Jan 5 2024", "2024-W01", "2024-01-05 ", "2024-01-05T",
+    "2024-01-05t10:00", "2024-01-05T1", "2024-13-01", "2024-02-30", "2024-01-05T25:00",
+    "2024-01-05T10:61",
+]
+_F1JM5_LISTS = {
+    "mixed offsets": ["2024-01-05T10:30:15Z", "2024-01-05T11:30:15+01:00"],
+    "DST crossing": ["2024-03-30T10:00:00+01:00", None, "2024-04-01T10:00:00+02:00"],
+    "one offset": ["2024-01-05T10:30:15+05:30", "2024-01-06T10:30:15+05:30"],
+    "naive beside aware": ["2024-01-05T10:00", "2024-01-05T10:00:00+00:00"],
+    "ISO beside not": ["2024-01-05", "01/05/2024"],
+}
+_F1JM5_KWARGS = {
+    "default": {},
+    "ISO8601": {"format": "ISO8601"},
+    "mixed": {"format": "mixed"},
+    "ISO8601 coerce": {"format": "ISO8601", "errors": "coerce"},
+    "utc": {"utc": True},
+}
+_F1JM5_CASES = {
+    f"{name} {values!r}": (lambda values, kw: lambda m: m.to_datetime(values, **kw))(values, kw)
+    for name, kw in _F1JM5_KWARGS.items()
+    for values in [[s] for s in _F1JM5_STRINGS] + list(_F1JM5_LISTS.values())
+}
+_F1JM5_CASES["series mixed offsets"] = lambda m: m.to_datetime(m.Series(_F1JM5_LISTS["mixed offsets"], name="t"))
+# read_csv(parse_dates=) reads with the same parser: an out-of-range date
+# leaves the column as its text (fp parsed the rest), T10 parses (it was text).
+_F1JM5_CASES["read_csv out of range stays text"] = lambda m: m.read_csv(
+    io.StringIO("d,v\n2024-01-05,1\n2024-13-01,2\n"), parse_dates=["d"]
+)["d"]
+_F1JM5_CASES["read_csv hour only"] = lambda m: m.read_csv(
+    io.StringIO("d,v\n2024-01-05T10,1\n2024-01-06T11,2\n"), parse_dates=["d"]
+)["d"]
+
+
+def _f1jm5_outcome(run: Any) -> Any:
+    # _e23_outcome without the exception's module (fp's DateParseError is
+    # its own class), with the container and dtype pandas answers.
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = run()
+            values = [repr(v) for v in result]
+        warned = [(w.category.__name__, str(w.message)) for w in caught]
+        return ("ok", type(result).__name__, str(result.dtype), values, warned)
+    except NameError:
+        raise
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_F1JM5_CASES))
+def test_to_datetime_reads_iso_like_pandas_f1jm5(case: str) -> None:
+    run = _F1JM5_CASES[case]
+    assert _f1jm5_outcome(lambda: run(fpd)) == _f1jm5_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-ewrvf: Index() of datetimes in more than one zone (or aware
+# beside naive) became one naive datetime64 index - each value its UTC wall
+# time - and a NaT among them raised OutOfBoundsDatetime; dtype=object
+# dropped the zone of one-zone values too. pandas keeps each as it is.
+_EWRVF_UTC = datetime.timezone.utc
+_EWRVF_DATA = {
+    "two zones": lambda m: [pd.Timestamp("2024-01-05 10:30:15", tz="UTC"), pd.Timestamp("2024-01-05 11:30:15+01:00")],
+    "two zones and NaT": lambda m: [pd.Timestamp("2024-01-05 10:30:15", tz="UTC"), m.NaT, pd.Timestamp("2024-01-05 11:30:15+01:00")],
+    "two zones and None": lambda m: [pd.Timestamp("2024-01-05 10:30:15", tz="UTC"), None, pd.Timestamp("2024-01-05 11:30:15+01:00")],
+    "aware and naive": lambda m: [pd.Timestamp("2024-01-05 10:30:15", tz="UTC"), pd.Timestamp("2024-01-05 10:30:15")],
+    "datetimes in two zones": lambda m: [
+        datetime.datetime(2024, 1, 5, 10, tzinfo=_EWRVF_UTC),
+        datetime.datetime(2024, 1, 5, 11, tzinfo=datetime.timezone(datetime.timedelta(hours=1))),
+    ],
+    "aware and naive datetimes": lambda m: [datetime.datetime(2024, 1, 5, 10, tzinfo=_EWRVF_UTC), datetime.datetime(2024, 1, 5, 10)],
+    "one zone": lambda m: [pd.Timestamp("2024-01-05 10:30:15", tz="UTC"), pd.Timestamp("2024-01-06 10:30:15", tz="UTC")],
+    "naive and NaT": lambda m: [pd.Timestamp("2024-01-05 10:30:15"), m.NaT],
+}
+_EWRVF_CASES = {
+    f"{name} {label}": (lambda make, kw: lambda m: m.Index(make(m), **kw))(make, kw)
+    for name, make in _EWRVF_DATA.items()
+    for label, kw in {"": {}, "dtype=object": {"dtype": object}, "name": {"name": "t"}}.items()
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EWRVF_CASES))
+def test_index_of_datetimes_in_several_zones_ewrvf(case: str) -> None:
+    def seen(m: Any) -> Any:
+        try:
+            index = _EWRVF_CASES[case](m)
+            return (type(index).__name__, str(index.dtype), [repr(v) for v in index], index.name)
+        except Exception as e:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(e).__name__, str(e))
+
+    assert seen(fpd) == seen(pd), case
+
+
+# br-frankenpandas-acelo: infer_freq knew fixed steps, B and ME only (MS /
+# QS / YS / W-<day> / WOM came back None or 7D), and dt.to_period() without
+# freq raised for them. Each index is pandas' date_range of the family; fp
+# reads the same instants.
+_ACELO_FREQS = [
+    "MS", "ME", "QS", "QE", "QS-FEB", "QE-NOV", "YS", "YE", "YS-MAR", "YE-JUN", "W-SUN", "W-WED",
+    "2W-FRI", "B", "D", "2D", "3h", "15min", "BMS", "BME", "BQE", "BYS", "BYE", "2MS", "6ME",
+    "2QS", "2YS", "WOM-1MON", "WOM-3FRI",
+]
+_ACELO_MULTIPLIED = {"2W-FRI", "2D", "3h", "15min"}  # period multiples: tus8r
+
+
+def _acelo_index(m: Any, freq: str) -> Any:
+    stamps = pd.date_range("2024-01-01", periods=8, freq=freq)
+    return stamps if m is pd else fpd.to_datetime([t.isoformat() for t in stamps], format="ISO8601")
+
+
+_ACELO_CASES = {f"infer_freq {freq}": (lambda freq: lambda m: [m.infer_freq(_acelo_index(m, freq))])(freq) for freq in _ACELO_FREQS}
+_ACELO_CASES.update({
+    f"to_period {freq}": (lambda freq: lambda m: [str(p) for p in m.Series(list(_acelo_index(m, freq))).dt.to_period()])(freq)
+    for freq in _ACELO_FREQS
+    if freq not in _ACELO_MULTIPLIED
+})
+_ACELO_CASES["infer_freq decreasing"] = lambda m: [m.infer_freq(m.DatetimeIndex(["2024-01-03", "2024-01-02", "2024-01-01"]))]
+_ACELO_CASES["infer_freq 15th of each month"] = lambda m: [m.infer_freq(m.DatetimeIndex(["2024-03-15", "2024-04-15", "2024-05-15"]))]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_ACELO_CASES))
+def test_infer_freq_and_to_period_like_pandas_acelo(case: str) -> None:
+    run = _ACELO_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-wha4m: read_csv(parse_dates=) of aware datetimes in one
+# zone is pandas' datetime64[ns, zone], NaT where a cell is empty - fp kept
+# the text; to_datetime of such a Series with a missing value likewise.
+_WHA4M_CSV = {
+    "one offset": "d,v\n2024-01-05T10:30:15+05:30,1\n2024-01-06T10:30:15+05:30,2\n",
+    "Z with an empty cell": "d,v\n2024-01-05T10:30:15Z,1\n,2\n2024-01-06T10:30:15Z,3\n",
+    "two offsets": "d,v\n2024-01-05T10:30:15Z,1\n2024-01-05T11:30:15+01:00,2\n",
+    "naive beside aware": "d,v\n2024-01-05 10:30:00,1\n2024-01-05T10:30:00Z,2\n",
+    "naive": "d,v\n2024-01-05,1\n2024-01-06,2\n",
+}
+_WHA4M_CASES = {
+    f"read_csv {name}": (lambda text: lambda m: m.read_csv(io.StringIO(text), parse_dates=["d"])["d"])(text)
+    for name, text in _WHA4M_CSV.items()
+}
+_WHA4M_CASES["to_datetime Series with NaT"] = lambda m: m.to_datetime(
+    m.Series(["2024-01-05T10:30:15+05:30", None, "2024-01-06T10:30:15+05:30"])
+)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_WHA4M_CASES))
+def test_parse_dates_of_one_zone_is_zoned_wha4m(case: str) -> None:
+    def seen(m: Any) -> Any:
+        result = _WHA4M_CASES[case](m)
+        return (str(result.dtype), [str(v) for v in result.tolist()])
+
+    assert seen(fpd) == seen(pd), case
+
+
+@pytest.mark.skipif(fpd is None or os.name != "posix", reason="frankenpandas not installed / no sh")
+def test_to_clipboard_writes_pandas_tab_separated_text(tmp_path: Path, monkeypatch: Any) -> None:
+    # A wl-copy on PATH that keeps what it is sent: the clipboard text is
+    # pandas' to_clipboard(excel=True) text, to_csv(sep='\t') with the index
+    # (it was refused).
+    sink = tmp_path / "clipboard.txt"
+    fake = tmp_path / "wl-copy"
+    fake.write_text(f"#!/bin/sh\ncat > '{sink}'\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}")
+    frame = {"a": [1, 2], "b": [1.5, None], "c": ["x", "y"]}
+    fpd.DataFrame(frame).to_clipboard()
+    assert sink.read_text() == pd.DataFrame(frame).to_csv(sep="\t")
+    fpd.Series([1.5, 2.0], name="s").to_clipboard()
+    assert sink.read_text() == pd.Series([1.5, 2.0], name="s").to_csv(sep="\t")
+    # NEGATIVE: excel=False (pandas writes the repr) is still refused.
+    with pytest.raises(NotImplementedError):
+        fpd.DataFrame(frame).to_clipboard(excel=False)

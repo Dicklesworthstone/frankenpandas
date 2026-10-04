@@ -1800,16 +1800,14 @@ fn run(
                 .expect("sort_values_multi");
         }),
         ("dataframe_ops", "filter_bool_mask") => {
-            // df[df.col_0 > df.col_0.median()]
-            let med = df
-                .get_column("col_0")
-                .median()
-                .ok()
-                .and_then(|s| s.to_f64().ok())
-                .unwrap_or(f64::NAN);
-            let mask: Vec<bool> = raw[0].iter().map(|&v| v > med).collect();
+            // df[df.col_0 > df.col_0.median()] - the median, the compare and
+            // the filter all timed, as the pandas arm times them (the mask
+            // was built outside the timer; br-frankenpandas-ri7uj).
             time_us(|| {
-                let _ = df.loc_bool(&mask).expect("loc_bool");
+                let column = df.get_column("col_0");
+                let median = column.median().expect("median");
+                let mask = column.gt_scalar(&median).expect("gt");
+                let _ = df.filter_rows(&mask).expect("filter_rows");
             })
         }
         ("dataframe_ops", "drop_duplicates") => {
@@ -2160,6 +2158,23 @@ fn run(
                     let _ = series.kurtosis().expect("kurtosis");
                 })
             }
+        }
+        ("dataframe_ops", "series_gt_scalar") => {
+            // s > s.iloc[n // 2] (br-frankenpandas-4h4mp): the typed scalar
+            // compare, float64 or int64 by `dtype`. The threshold is the column's
+            // own middle value, so it carries the column's type (an Int64
+            // scalar for int64, the i64 compare) on both sides.
+            let column = df.column("col_0").expect("col_0").clone();
+            let threshold = column.values()[rows / 2].clone();
+            let series = Series::new(
+                "s",
+                Index::new_known_unique_int64_unit_range(0, rows),
+                column,
+            )
+            .expect("compare series");
+            time_us(|| {
+                let _ = series.gt_scalar(&threshold).expect("gt");
+            })
         }
         ("dataframe_ops", "df_transpose_full_materialize") => time_us(|| {
             // br-frankenpandas-l4vzc, requested by the other pane, and it exists
@@ -3616,6 +3631,18 @@ fn run(
                 let _ = series.ewm(Some(10.0), None).mean().expect("ewm mean");
             })
         }
+        ("rolling", "ewm_std") => {
+            let series = df.get_column("col_0");
+            time_us(|| {
+                let _ = series.ewm(Some(10.0), None).std().expect("ewm std");
+            })
+        }
+        ("rolling", "ewm_corr") => {
+            let (x, y) = (df.get_column("col_0"), df.get_column("col_1"));
+            time_us(|| {
+                let _ = x.ewm(Some(10.0), None).corr(&y).expect("ewm corr");
+            })
+        }
         // The fp-bench frame uses a default 0..rows Int64 index (matching the
         // pandas side's set_index(range(n))), so loc/reindex labels line up.
         ("indexing", "iloc_slice") => {
@@ -4185,6 +4212,21 @@ fn run(
                 Series::new("s", Index::from_datetime64(nanos), vals).expect("resample series");
             time_us(|| {
                 let _ = series.resample("M").std().expect("resample std");
+            })
+        }
+        ("datetime", "resample_var_hourly") => {
+            // s.resample("h").var(): `rows` minutely points -> hourly bins, the
+            // sub-daily spread path (br-frankenpandas-7x91u: var / std / sem
+            // hashed formatted bin labels where sum / mean ran one pass).
+            let base: i64 = 946_684_800_000_000_000;
+            let nanos: Vec<i64> = (0..rows as i64)
+                .map(|i| base + i * 60_000_000_000)
+                .collect();
+            let vals = Column::from_f64_values((0..rows).map(|i| i as f64).collect());
+            let series =
+                Series::new("s", Index::from_datetime64(nanos), vals).expect("resample series");
+            time_us(|| {
+                let _ = series.resample("h").var().expect("resample var");
             })
         }
         ("datetime", "resample_median") => {

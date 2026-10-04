@@ -680,10 +680,31 @@ fn strings_to_contiguous_raw(raw: &[String]) -> (Vec<u8>, Vec<usize>) {
 }
 
 fn build_csv_object_aware_column(
-    values: Vec<Scalar>,
+    mut values: Vec<Scalar>,
     raw_bytes: &[u8],
     raw_offsets: &[usize],
 ) -> Result<Column, IoError> {
+    // A numeric column with a fractional cell goes through pandas' float
+    // converter whole: an integer cell past 2^53 reads from its digits rather
+    // than as a cast (br-frankenpandas-py3c0).
+    let fractional = values
+        .iter()
+        .any(|value| matches!(value, Scalar::Float64(_)));
+    let number = |value: &Scalar| {
+        matches!(
+            value,
+            Scalar::Int64(_) | Scalar::Float64(_) | Scalar::Null(_)
+        )
+    };
+    if fractional && values.iter().all(number) {
+        for value in &mut values {
+            if let Scalar::Int64(int) = *value
+                && int.unsigned_abs() > 1 << 53
+            {
+                *value = Scalar::Float64(fp_types::pandas_int_to_f64(int));
+            }
+        }
+    }
     let column = Column::from_values(values)?;
     // A column read as nothing but missing values is float64 NaN in pandas'
     // parser (it was object); a header-only column (no rows) stays object.
@@ -802,20 +823,23 @@ fn parse_i64_ascii(field: &[u8]) -> Option<i64> {
     }
 }
 
+/// A float cell as pandas' default C converter reads it - not correctly
+/// rounded (`fp_types::pandas_decimal_to_f64`; br-frankenpandas-py3c0); the
+/// `inf` / `nan` spellings as Rust reads them.
 fn parse_f64_csv_number(field: &[u8]) -> Option<f64> {
-    match fast_float2::parse::<f64, _>(field) {
-        Ok(value) => Some(value),
-        Err(_) if field.is_ascii() => std::str::from_utf8(field).ok()?.parse::<f64>().ok(),
-        Err(_) => None,
+    match fp_types::pandas_decimal_to_f64(field) {
+        fp_types::PandasDecimal::Value(value) => Some(value),
+        fp_types::PandasDecimal::Rejected => None,
+        fp_types::PandasDecimal::NotDecimal => std::str::from_utf8(field).ok()?.parse::<f64>().ok(),
     }
 }
 
-/// Exact powers of ten for the fused decimal fast path. Every entry up to
-/// 10^18 is exactly representable in f64, so dividing an exact mantissa by an
-/// entry is a single correctly-rounded operation.
-const FUSED_DECIMAL_POW10: [f64; 19] = [
+/// Exact powers of ten for the fused decimal fast path, one per fraction
+/// digit it admits. Every entry is exactly representable in f64, so dividing
+/// an exact mantissa by an entry is a single correctly-rounded operation.
+const FUSED_DECIMAL_POW10: [f64; 18] = [
     1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
-    1e17, 1e18,
+    1e17,
 ];
 
 /// One CSV field admitted by the fused scanner/parser.
@@ -833,17 +857,15 @@ struct FusedNumericField {
 /// Scans one CSV field starting at `start`, using an optimized byte delimiter
 /// scan before decimal digit accumulation.
 ///
-/// Admits only `[+-]?digits[.digits]` tokens with at most 18 mantissa digits
-/// (so the `u64` accumulator and the `i64` integer route can never overflow)
-/// and, for fractional values, a mantissa of at most 2^53 (so it is exactly
-/// representable in `f64`). Under those gates the computed value is provably
-/// bit-identical to the fallback parser: the mantissa and the power of ten
-/// are both exact in `f64`, so the single division (or `u64 -> f64`
-/// round-to-nearest-even conversion for integers) yields the correctly
-/// rounded value of the decimal token — the same contract `fast_float2` and
-/// `str::parse::<f64>` guarantee. Anything else (NA tokens, booleans,
-/// whitespace, exponents, overlong or malformed numbers, quotes, CR) returns
-/// `None` and must take the existing per-field fallback route.
+/// Admits only `[+-]?digits[.digits]` tokens with at most 17 digits (the
+/// digits pandas' converter keeps, leading zeros included) and a mantissa of
+/// at most 2^53. Under those gates the computed value is provably
+/// bit-identical to `parse_f64_csv_number`: pandas' `x * 10 + d` is exact
+/// while the digits fit 2^53, and its one scaling divides by an exact power
+/// of ten - the single division here (an integer is the mantissa itself).
+/// Anything else (NA tokens, booleans, whitespace, exponents, overlong or
+/// malformed numbers, quotes, CR) returns `None` and must take the existing
+/// per-field fallback route.
 #[inline]
 fn fuse_scan_numeric_csv_field(data: &[u8], start: usize) -> Option<FusedNumericField> {
     let remaining = data.get(start..)?;
@@ -866,7 +888,7 @@ fn fuse_scan_numeric_csv_field(data: &[u8], start: usize) -> Option<FusedNumeric
     while pos < end {
         match data.get(pos) {
             Some(&byte @ b'0'..=b'9') => {
-                if digits == 18 {
+                if digits == 17 {
                     return None;
                 }
                 mantissa = mantissa * 10 + u64::from(byte - b'0');
@@ -882,14 +904,11 @@ fn fuse_scan_numeric_csv_field(data: &[u8], start: usize) -> Option<FusedNumeric
         }
     }
 
-    if digits == 0 || (seen_dot && frac_digits == 0) {
+    if digits == 0 || (seen_dot && frac_digits == 0) || mantissa > (1u64 << 53) {
         return None;
     }
 
     if seen_dot {
-        if mantissa > (1u64 << 53) {
-            return None;
-        }
         let magnitude = mantissa as f64 / FUSED_DECIMAL_POW10[frac_digits];
         Some(FusedNumericField {
             int_value: None,
@@ -897,7 +916,7 @@ fn fuse_scan_numeric_csv_field(data: &[u8], start: usize) -> Option<FusedNumeric
             end,
         })
     } else {
-        // digits <= 18 => mantissa < 10^18 < i64::MAX, so the cast is exact.
+        // mantissa <= 2^53 < i64::MAX, so both casts are exact.
         let int_magnitude = mantissa as i64;
         let float_magnitude = mantissa as f64;
         Some(FusedNumericField {
@@ -928,7 +947,7 @@ fn push_fused_numeric_csv_field(values: &mut CsvTypedColumnValues, field: &Fused
                 out.push(value);
             } else {
                 let mut promoted = Vec::with_capacity(out.capacity());
-                promoted.extend(out.iter().copied().map(|value| value as f64));
+                promoted.extend(out.iter().copied().map(fp_types::pandas_int_to_f64));
                 promoted.push(field.float_value);
                 *values = CsvTypedColumnValues::Float64(promoted);
             }
@@ -961,7 +980,7 @@ fn push_csv_default_numeric_field(values: &mut CsvTypedColumnValues, field: &[u8
                 match parse_f64_csv_number(trimmed) {
                     Some(value) if !value.is_nan() => {
                         let mut promoted = Vec::with_capacity(out.capacity());
-                        promoted.extend(out.iter().copied().map(|value| value as f64));
+                        promoted.extend(out.iter().copied().map(fp_types::pandas_int_to_f64));
                         promoted.push(value);
                         *values = CsvTypedColumnValues::Float64(promoted);
                         true
@@ -1162,7 +1181,7 @@ fn merge_one_simple_numeric_csv_column(
         let mut out = match first {
             CsvTypedColumnValues::Int64(src) => {
                 let mut v = Vec::with_capacity(capacity);
-                v.extend(src.into_iter().map(|value| value as f64));
+                v.extend(src.into_iter().map(fp_types::pandas_int_to_f64));
                 v
             }
             CsvTypedColumnValues::Float64(mut src) => {
@@ -1173,7 +1192,7 @@ fn merge_one_simple_numeric_csv_column(
         for src in sources {
             match src {
                 CsvTypedColumnValues::Int64(src) => {
-                    out.extend(src.into_iter().map(|value| value as f64));
+                    out.extend(src.into_iter().map(fp_types::pandas_int_to_f64));
                 }
                 CsvTypedColumnValues::Float64(src) => out.extend(src),
             }
@@ -1598,17 +1617,43 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
     // bytes (already captured for verbatim). A pure-numeric-no-null column then
     // emits its typed column directly, bit-identical to from_values over the
     // equivalent Scalars: all-Int64 → Int64 (from_i64_values), any-Float64-no-null
-    // → Float64 with ints coerced to `x as f64` (from_f64_values) — exactly what
-    // Column::from_values + build_csv_object_aware_column produce for those inputs.
+    // → Float64 with ints coerced as pandas' float converter reads them
+    // (`WideInts`; from_f64_values) — exactly what Column::from_values +
+    // build_csv_object_aware_column produce for those inputs.
     // `valid: None` = all-valid so far (the common fast case, no per-cell bit
     // tracking); `Some(mask)` = at least one NA has appeared. A missing value
     // promotes inferred numpy-style integers to Float64, because pandas' int64
     // cannot represent NA; Float64 and Bool keep their typed missing form.
     enum ColAcc {
         Int(Vec<i64>, Option<Vec<bool>>),
-        Float(Vec<f64>, Option<Vec<bool>>),
+        Float(Vec<f64>, Option<Vec<bool>>, WideInts),
         Bool(Vec<bool>, Option<Vec<bool>>),
         Fallback,
+    }
+    /// A Float column's integer cells past 2^53, cast for now: once a
+    /// fractional cell sends the column through pandas' float converter they
+    /// read from their digits instead; a column made float by a missing value
+    /// alone keeps the cast (br-frankenpandas-py3c0).
+    #[derive(Default)]
+    struct WideInts {
+        fractional: bool,
+        cells: Vec<(usize, i64)>,
+    }
+    impl WideInts {
+        fn cast(&mut self, row: usize, value: i64) -> f64 {
+            if value.unsigned_abs() > 1 << 53 {
+                self.cells.push((row, value));
+            }
+            value as f64
+        }
+
+        fn finish(self, values: &mut [f64]) {
+            if self.fractional {
+                for (row, value) in self.cells {
+                    values[row] = fp_types::pandas_int_to_f64(value);
+                }
+            }
+        }
     }
     let mut accs: Vec<ColAcc> = (0..header_count)
         .map(|_| ColAcc::Int(Vec::with_capacity(row_hint), None))
@@ -1645,15 +1690,19 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
             if is_pandas_default_na(field) {
                 match acc {
                     ColAcc::Int(buf, valid) => {
-                        let mut promoted: Vec<f64> =
-                            buf.iter().map(|&value| value as f64).collect();
+                        let mut wide = WideInts::default();
+                        let mut promoted: Vec<f64> = buf
+                            .iter()
+                            .enumerate()
+                            .map(|(row, &value)| wide.cast(row, value))
+                            .collect();
                         promoted.push(0.0);
                         let mut promoted_valid =
                             valid.take().unwrap_or_else(|| vec![true; buf.len()]);
                         promoted_valid.push(false);
-                        *acc = ColAcc::Float(promoted, Some(promoted_valid));
+                        *acc = ColAcc::Float(promoted, Some(promoted_valid), wide);
                     }
-                    ColAcc::Float(buf, valid) => {
+                    ColAcc::Float(buf, valid, _) => {
                         valid
                             .get_or_insert_with(|| vec![true; buf.len()])
                             .push(false);
@@ -1678,8 +1727,8 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
                             vv.push(true);
                         }
                     }
-                    ColAcc::Float(buf, valid) => {
-                        buf.push(v as f64);
+                    ColAcc::Float(buf, valid, wide) => {
+                        buf.push(wide.cast(buf.len(), v));
                         if let Some(vv) = valid {
                             vv.push(true);
                         }
@@ -1687,20 +1736,29 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
                     ColAcc::Bool(_, _) => *acc = ColAcc::Fallback,
                     ColAcc::Fallback => {}
                 }
-            } else if let Ok(v) = trimmed.parse::<f64>()
+            } else if let Some(v) = parse_f64_csv_number(trimmed.as_bytes())
                 && !v.is_nan()
                 && (!v.is_infinite() || field.len() == trimmed.len())
             {
                 match acc {
                     ColAcc::Int(buf, valid) => {
-                        let mut promoted: Vec<f64> = buf.iter().map(|&i| i as f64).collect();
+                        let mut promoted: Vec<f64> = buf
+                            .iter()
+                            .copied()
+                            .map(fp_types::pandas_int_to_f64)
+                            .collect();
                         promoted.push(v);
                         if let Some(vv) = valid.as_mut() {
                             vv.push(true);
                         }
-                        *acc = ColAcc::Float(promoted, valid.take());
+                        let wide = WideInts {
+                            fractional: true,
+                            cells: Vec::new(),
+                        };
+                        *acc = ColAcc::Float(promoted, valid.take(), wide);
                     }
-                    ColAcc::Float(buf, valid) => {
+                    ColAcc::Float(buf, valid, wide) => {
+                        wide.fractional = true;
                         buf.push(v);
                         if let Some(vv) = valid {
                             vv.push(true);
@@ -1734,7 +1792,7 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
                             vv.push(true);
                         }
                     }
-                    ColAcc::Float(_, _) | ColAcc::Fallback => *acc = ColAcc::Fallback,
+                    ColAcc::Float(..) | ColAcc::Fallback => *acc = ColAcc::Fallback,
                 }
             } else {
                 *acc = ColAcc::Fallback;
@@ -1778,7 +1836,8 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
                     None => Column::from_i64_values(buf),
                 }
             }
-            ColAcc::Float(buf, valid) if has_value(buf.len(), &valid) => {
+            ColAcc::Float(mut buf, valid, wide) if has_value(buf.len(), &valid) => {
+                wide.finish(&mut buf);
                 match valid.as_deref().and_then(validity_from_bools) {
                     Some(mask) => Column::from_f64_values_with_validity(buf, mask),
                     None => Column::from_f64_values(buf),
@@ -4852,7 +4911,7 @@ fn parse_scalar(field: &str) -> Scalar {
     if let Ok(value) = trimmed.parse::<i64>() {
         return Scalar::Int64(value);
     }
-    if let Ok(value) = trimmed.parse::<f64>()
+    if let Some(value) = parse_f64_csv_number(trimmed.as_bytes())
         && !value.is_nan()
         && (!value.is_infinite() || field.len() == trimmed.len())
     {
@@ -5130,7 +5189,7 @@ fn parse_scalar_with_options(
     } else {
         Cow::Borrowed(numeric_candidate.as_ref())
     };
-    if let Ok(value) = float_candidate.as_ref().parse::<f64>()
+    if let Some(value) = parse_f64_csv_number(float_candidate.as_bytes())
         && !value.is_nan()
         && (!value.is_infinite() || field.len() == trimmed.len())
     {
@@ -6493,6 +6552,16 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             .filter(|dtype| dtype.is_nullable())
             .cloned()
     };
+    // A parse_dates column of aware datetimes in one zone is pandas'
+    // datetime64[ns, zone] (it stayed text; wha4m).
+    let zoned_date_column = |name: &str, values: &[Scalar]| -> Option<Column> {
+        options
+            .parse_dates
+            .as_ref()
+            .is_some_and(|names| names.iter().any(|date| date == name))
+            .then(|| fp_frame::uniform_zone_datetime_column(values, false))
+            .flatten()
+    };
 
     // If index_col is set, extract that column as the index
     if let Some(ref idx_col_name) = options.index_col {
@@ -6557,6 +6626,8 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             let name = headers.get(orig_idx).cloned().unwrap_or_default();
             let column = if let Some(dtype) = forced_nullable(&name) {
                 Column::new(dtype, columns[col_idx].clone())?
+            } else if let Some(column) = zoned_date_column(&name, &columns[col_idx]) {
+                column
             } else if preserve_object_text && !dtype_forced(&name) {
                 let (rb, ro) = strings_to_contiguous_raw(&raw_columns[orig_idx]);
                 build_csv_object_aware_column(columns[col_idx].clone(), &rb, &ro)?
@@ -6579,6 +6650,8 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             let name = headers.get(idx).cloned().unwrap_or_default();
             let column = if let Some(dtype) = forced_nullable(&name) {
                 Column::new(dtype, values)?
+            } else if let Some(column) = zoned_date_column(&name, &values) {
+                column
             } else if preserve_object_text && !dtype_forced(&name) {
                 let (rb, ro) = strings_to_contiguous_raw(&raw_columns[idx]);
                 build_csv_object_aware_column(values, &rb, &ro)?
@@ -10295,6 +10368,7 @@ fn retag_nullable(col: Column, declared: DType) -> Column {
 /// travel in an Arrow / Parquet / Feather file. fp writes and reads it the
 /// same way (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.22).
 const PANDAS_METADATA_KEY: &str = "pandas";
+const LEGACY_ROW_MULTIINDEX_NAMES_METADATA_KEY: &str = "frankenpandas.row_multiindex_names";
 
 /// pandas' (`pandas_type`, `numpy_type`, `metadata`) for a column, as
 /// pyarrow records them - a nullable Int64 is `numpy_type: 'Int64'`, which
@@ -10331,7 +10405,9 @@ fn pandas_column_type(column: &Column) -> (&'static str, &'static str, serde_jso
 /// A frame's columns as pandas lays them out in an Arrow table (pyarrow's
 /// `Table.from_pandas(preserve_index=index)`) and the `pandas` metadata
 /// recording them: the data columns, then each index level as a column - its
-/// name, or `__index_level_N__` when unnamed or taken by a data column. With
+/// name, or an unused `__index_level_N__` field when unnamed or taken by a
+/// data column or another index level. Physical field names are unique even
+/// when logical index names are repeated. With
 /// `index=None` a RangeIndex (fp's, or labels 0..n under no name) travels as
 /// metadata only; `Some(true)` writes it as a column too, `Some(false)` no
 /// index at all. A label index was dropped, and a row MultiIndex travelled as
@@ -10342,9 +10418,20 @@ fn pandas_arrow_layout(
 ) -> Result<(Vec<(String, Column)>, String), IoError> {
     use serde_json::{Value, json};
     let data_names: Vec<String> = frame.column_names().into_iter().cloned().collect();
-    let field_for = |level: usize, name: Option<&str>| match name {
-        Some(name) if !data_names.iter().any(|data| data == name) => name.to_owned(),
-        _ => format!("{SYNTHETIC_ROW_MULTIINDEX_PREFIX}{level}__"),
+    let mut used_fields: std::collections::BTreeSet<String> = data_names.iter().cloned().collect();
+    let mut field_for = |level: usize, name: Option<&str>| {
+        if let Some(name) = name
+            && used_fields.insert(name.to_owned())
+        {
+            return name.to_owned();
+        }
+        let mut field = format!("{SYNTHETIC_ROW_MULTIINDEX_PREFIX}{level}__");
+        let mut suffix = 0_usize;
+        while !used_fields.insert(field.clone()) {
+            suffix += 1;
+            field = format!("{SYNTHETIC_ROW_MULTIINDEX_PREFIX}{level}_{suffix}__");
+        }
+        field
     };
     let level_column = |labels: &[IndexLabel], tz: Option<&str>| -> Result<Column, IoError> {
         let values: Vec<Scalar> = labels.iter().map(index_label_to_scalar_value).collect();
@@ -10418,7 +10505,7 @@ fn pandas_arrow_layout(
         index_columns.push(json!(field));
         columns.push((field, column));
     }
-    let metadata = json!({
+    let mut metadata = json!({
         "index_columns": index_columns,
         "column_indexes": [{
             "name": frame.columns_name(),
@@ -10432,6 +10519,15 @@ fn pandas_arrow_layout(
         "creator": { "library": "frankenpandas", "version": env!("CARGO_PKG_VERSION") },
         "pandas_version": "2.2.3",
     });
+    if frame.row_multiindex().is_some() {
+        // pandas records the logical level names, but fp also exposes a flat
+        // index beside the MultiIndex. Its textual name may be None or differ
+        // from the joined level names; physical storage fields must not leak
+        // into that name on read. Foreign pandas readers ignore this extension.
+        metadata["frankenpandas"] = json!({
+            "row_multiindex_flat_name": frame.index().name(),
+        });
+    }
     Ok((columns, metadata.to_string()))
 }
 
@@ -10470,6 +10566,41 @@ fn dataframe_to_record_batch(
 /// columns (`k`, `__index_level_0__`) over a default 0..n index
 /// (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.22). Metadata that
 /// does not match the columns read leaves the frame as read.
+fn apply_arrow_row_index_metadata(
+    frame: DataFrame,
+    pandas: Option<&str>,
+    legacy: Option<&str>,
+) -> Result<DataFrame, IoError> {
+    if let Some(raw) = pandas {
+        return apply_pandas_metadata(frame, raw);
+    }
+    let Some(raw) = legacy else {
+        return Ok(frame);
+    };
+    // v0.3.0 wrote these declared levels first and recorded their logical
+    // names under this private key. Synthetic-looking data names alone do
+    // not identify an index, and undeclared trailing fields remain data.
+    let names: Vec<Option<String>> = serde_json::from_str(raw)
+        .map_err(|error| IoError::Arrow(format!("invalid legacy MultiIndex names: {error}")))?;
+    let fields: Vec<String> = (0..names.len())
+        .map(|level| format!("__index_level_{level}__"))
+        .collect();
+    let actual_fields = frame.column_names();
+    if names.len() < 2
+        || names.len() > actual_fields.len()
+        || fields.iter().zip(&actual_fields).any(|(expected, actual)| {
+            expected != actual.as_str() || frame.column_occurrences(expected) != 1
+        })
+    {
+        return Err(IoError::Arrow(
+            "legacy MultiIndex metadata does not match its leading index fields".to_owned(),
+        ));
+    }
+    let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
+    let restored = promote_frame_index_columns(&frame, &fields)?;
+    restore_row_multiindex_names(restored, &names)
+}
+
 fn apply_pandas_metadata(frame: DataFrame, raw: &str) -> Result<DataFrame, IoError> {
     use serde_json::Value;
     let Ok(meta) = serde_json::from_str::<Value>(raw) else {
@@ -10521,7 +10652,35 @@ fn apply_pandas_metadata(frame: DataFrame, raw: &str) -> Result<DataFrame, IoErr
                 let renamed = frame.index().rename_index(name.as_deref());
                 frame.with_index(renamed)?
             }
-            _ => restore_row_multiindex_names(frame, &names)?,
+            _ => {
+                let flat_name = match meta
+                    .get("frankenpandas")
+                    .and_then(|fp| fp.get("row_multiindex_flat_name"))
+                {
+                    Some(Value::Null) => None,
+                    Some(Value::String(name)) => Some(name.clone()),
+                    _ => Some(
+                        names
+                            .iter()
+                            .map(|name| name.as_deref().unwrap_or_default())
+                            .collect::<Vec<_>>()
+                            .join("|"),
+                    ),
+                };
+                let restored = restore_row_multiindex_names(frame, &names)?;
+                if restored.index().name().map(|name| name.as_str()) == flat_name.as_deref() {
+                    restored
+                } else if let Some(row_multiindex) = restored.row_multiindex().cloned() {
+                    // with_index replaces the row axis, so reattach its logical
+                    // MultiIndex after restoring the independent flat name.
+                    let renamed = restored.index().rename_index(flat_name.as_deref());
+                    restored
+                        .with_index(renamed)?
+                        .with_row_multiindex(row_multiindex)?
+                } else {
+                    restored
+                }
+            }
         };
     } else if let [range] = descriptors.as_slice()
         && range["kind"].as_str() == Some("range")
@@ -11215,6 +11374,66 @@ pub fn read_parquet_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
         .key_value_metadata()
         .and_then(|pairs| pairs.iter().find(|pair| pair.key == PANDAS_METADATA_KEY))
         .and_then(|pair| pair.value.clone());
+    let legacy_metadata = if pandas_metadata.is_none() {
+        let file_entries: Vec<_> = builder
+            .metadata()
+            .file_metadata()
+            .key_value_metadata()
+            .into_iter()
+            .flatten()
+            .filter(|pair| pair.key == LEGACY_ROW_MULTIINDEX_NAMES_METADATA_KEY)
+            .collect();
+        let file_value = match file_entries.as_slice() {
+            [] => None,
+            [entry] => Some(entry.value.clone().ok_or_else(|| {
+                IoError::Parquet("legacy MultiIndex metadata has no value".to_owned())
+            })?),
+            _ => {
+                return Err(IoError::Parquet(
+                    "duplicate legacy MultiIndex metadata".to_owned(),
+                ));
+            }
+        };
+        let schema_value = if file_value.is_some() {
+            // The builder's schema merges file metadata over embedded Arrow
+            // metadata. Remove only the legacy file key before using the stock
+            // schema converter so a disagreement remains observable.
+            let embedded_metadata: Vec<_> = builder
+                .metadata()
+                .file_metadata()
+                .key_value_metadata()
+                .into_iter()
+                .flatten()
+                .filter(|pair| pair.key != LEGACY_ROW_MULTIINDEX_NAMES_METADATA_KEY)
+                .cloned()
+                .collect();
+            let embedded_schema = parquet::arrow::parquet_to_arrow_schema(
+                builder.parquet_schema(),
+                Some(&embedded_metadata),
+            )
+            .map_err(|error| IoError::Parquet(error.to_string()))?;
+            embedded_schema
+                .metadata()
+                .get(LEGACY_ROW_MULTIINDEX_NAMES_METADATA_KEY)
+                .cloned()
+        } else {
+            builder
+                .schema()
+                .metadata()
+                .get(LEGACY_ROW_MULTIINDEX_NAMES_METADATA_KEY)
+                .cloned()
+        };
+        if let (Some(file), Some(schema)) = (&file_value, &schema_value)
+            && file != schema
+        {
+            return Err(IoError::Parquet(
+                "conflicting legacy MultiIndex metadata".to_owned(),
+            ));
+        }
+        file_value.or(schema_value)
+    } else {
+        None
+    };
     let batch_size = total_rows.clamp(1, 16 * 1024 * 1024);
     let reader = builder
         .with_batch_size(batch_size)
@@ -11247,10 +11466,11 @@ pub fn read_parquet_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
         let refs: Vec<&DataFrame> = all_frames.iter().collect();
         fp_frame::concat_dataframes(&refs)?
     };
-    match pandas_metadata {
-        Some(raw) => apply_pandas_metadata(frame, &raw),
-        None => Ok(frame),
-    }
+    apply_arrow_row_index_metadata(
+        frame,
+        pandas_metadata.as_deref(),
+        legacy_metadata.as_deref(),
+    )
 }
 
 /// Write a DataFrame to a Parquet file.
@@ -11355,8 +11575,8 @@ fn excel_range_rows(
 }
 
 /// Convert a calamine `Data` cell value to a `Scalar`.
-fn excel_cell_to_scalar(cell: &calamine::Data) -> Scalar {
-    match cell {
+fn excel_cell_to_scalar(cell: &calamine::Data) -> Result<Scalar, IoError> {
+    Ok(match cell {
         calamine::Data::Int(v) => Scalar::Int64(*v),
         calamine::Data::Float(v) => {
             if v.is_nan() {
@@ -11383,11 +11603,23 @@ fn excel_cell_to_scalar(cell: &calamine::Data) -> Scalar {
         // ("45293.1278..."). (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.20)
         calamine::Data::DateTime(dt) if dt.is_duration() => {
             let millis = (dt.as_f64() * 86_400_000.0).round();
-            if millis.is_finite() && millis.abs() < 9.2e15 {
-                Scalar::Timedelta64(millis as i64 * 1_000_000)
-            } else {
-                Scalar::Null(NullKind::NaT)
+            let min_millis = (i64::MIN / 1_000_000) as f64;
+            let max_millis = (i64::MAX / 1_000_000) as f64;
+            let out_of_range = || {
+                IoError::Excel(format!(
+                    "Excel duration {} days is outside timedelta64[ns] range at millisecond precision",
+                    dt.as_f64()
+                ))
+            };
+            // These millisecond bounds are exact f64 integers (below 2^53).
+            // Check before casting; never saturate, wrap, or replace a value by NaT.
+            if !millis.is_finite() || millis < min_millis || millis > max_millis {
+                return Err(out_of_range());
             }
+            let nanos = (millis as i64)
+                .checked_mul(1_000_000)
+                .ok_or_else(out_of_range)?;
+            Scalar::Timedelta64(nanos)
         }
         calamine::Data::DateTime(dt) => {
             excel_datetime_to_epoch_ns(dt).map_or(Scalar::Null(NullKind::NaT), Scalar::Datetime64)
@@ -11395,7 +11627,7 @@ fn excel_cell_to_scalar(cell: &calamine::Data) -> Scalar {
         calamine::Data::DateTimeIso(s) => Scalar::Utf8(s.clone()),
         calamine::Data::DurationIso(s) => Scalar::Utf8(s.clone()),
         calamine::Data::Error(e) => Scalar::Utf8(format!("#ERROR:{e:?}")),
-    }
+    })
 }
 
 /// Convert a Scalar to an IndexLabel, handling float precision correctly.
@@ -11418,8 +11650,8 @@ fn scalar_to_index_label(scalar: Scalar) -> IndexLabel {
 /// number/bool/date by its value (pandas keeps e.g. 2020 as the label; fp
 /// labels are strings, so "2020"), and an empty cell `Unnamed: {position}`.
 /// The flag marks a generated name (no index name when it becomes the index).
-fn excel_header_name(cell: &calamine::Data, position: usize) -> (String, bool) {
-    match excel_cell_to_scalar(cell) {
+fn excel_header_name(cell: &calamine::Data, position: usize) -> Result<(String, bool), IoError> {
+    Ok(match excel_cell_to_scalar(cell)? {
         Scalar::Utf8(text) => (text, false),
         Scalar::Null(_) => (format!("Unnamed: {position}"), true),
         Scalar::Int64(v) => (v.to_string(), false),
@@ -11427,7 +11659,7 @@ fn excel_header_name(cell: &calamine::Data, position: usize) -> (String, bool) {
         Scalar::Bool(v) => ((if v { "True" } else { "False" }).to_owned(), false),
         Scalar::Datetime64(ns) => (format_datetime_ns(ns), false),
         other => (other.to_string(), false),
-    }
+    })
 }
 
 /// Shared parsing logic for Excel data after extracting rows from a workbook.
@@ -11469,7 +11701,7 @@ fn parse_excel_rows(
                 .iter()
                 .enumerate()
                 .map(|(i, cell)| excel_header_name(cell, i))
-                .collect();
+                .collect::<Result<Vec<_>, IoError>>()?;
             let (mut headers, generated): (Vec<String>, Vec<bool>) =
                 header_pairs.into_iter().unzip();
             // Repeated names are renamed as pandas' readers do (4qg5w.21).
@@ -11506,7 +11738,7 @@ fn parse_excel_rows(
     for row in data_rows {
         for (col_idx, col_vec) in columns.iter_mut().enumerate() {
             let cell = row.get(col_idx).unwrap_or(&calamine::Data::Empty);
-            col_vec.push(excel_cell_to_scalar(cell));
+            col_vec.push(excel_cell_to_scalar(cell)?);
         }
     }
 
@@ -11591,9 +11823,9 @@ fn parse_excel_rows(
             .iter()
             .map(|row| {
                 let cell = row.get(idx_pos).unwrap_or(&calamine::Data::Empty);
-                scalar_to_index_label(excel_cell_to_scalar(cell))
+                excel_cell_to_scalar(cell).map(scalar_to_index_label)
             })
-            .collect();
+            .collect::<Result<Vec<_>, IoError>>()?;
         Index::new(idx_labels).set_names(index_name.as_deref())
     } else {
         Index::default_range(data_rows.len())
@@ -12286,6 +12518,11 @@ pub fn read_feather_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
     let cursor = std::io::Cursor::new(data);
     let reader = FileReader::try_new(cursor, None).map_err(|e| IoError::Arrow(e.to_string()))?;
     let pandas_metadata = reader.schema().metadata().get(PANDAS_METADATA_KEY).cloned();
+    let legacy_metadata = reader
+        .schema()
+        .metadata()
+        .get(LEGACY_ROW_MULTIINDEX_NAMES_METADATA_KEY)
+        .cloned();
 
     let mut all_frames: Vec<DataFrame> = Vec::new();
     for batch_result in reader {
@@ -12309,10 +12546,11 @@ pub fn read_feather_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
         let refs: Vec<&DataFrame> = all_frames.iter().collect();
         fp_frame::concat_dataframes(&refs)?
     };
-    match pandas_metadata {
-        Some(raw) => apply_pandas_metadata(frame, &raw),
-        None => Ok(frame),
-    }
+    apply_arrow_row_index_metadata(
+        frame,
+        pandas_metadata.as_deref(),
+        legacy_metadata.as_deref(),
+    )
 }
 
 /// Write a DataFrame to an Arrow IPC (Feather v2) file.
@@ -12386,6 +12624,11 @@ pub fn read_ipc_stream_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
     let cursor = std::io::Cursor::new(data);
     let reader = StreamReader::try_new(cursor, None).map_err(|e| IoError::Arrow(e.to_string()))?;
     let pandas_metadata = reader.schema().metadata().get(PANDAS_METADATA_KEY).cloned();
+    let legacy_metadata = reader
+        .schema()
+        .metadata()
+        .get(LEGACY_ROW_MULTIINDEX_NAMES_METADATA_KEY)
+        .cloned();
 
     let mut all_frames: Vec<DataFrame> = Vec::new();
     for batch_result in reader {
@@ -12409,10 +12652,11 @@ pub fn read_ipc_stream_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
         let refs: Vec<&DataFrame> = all_frames.iter().collect();
         fp_frame::concat_dataframes(&refs)?
     };
-    match pandas_metadata {
-        Some(raw) => apply_pandas_metadata(frame, &raw),
-        None => Ok(frame),
-    }
+    apply_arrow_row_index_metadata(
+        frame,
+        pandas_metadata.as_deref(),
+        legacy_metadata.as_deref(),
+    )
 }
 
 // ── SQL I/O ─────────────────────────────────────────────────────────────
@@ -39489,7 +39733,7 @@ mod merge_simple_numeric_csv_chunks_tests {
                         dst.extend(src);
                     }
                     (CsvTypedColumnValues::Float64(dst), CsvTypedColumnValues::Int64(src)) => {
-                        dst.extend(src.into_iter().map(|value| value as f64));
+                        dst.extend(src.into_iter().map(fp_types::pandas_int_to_f64));
                     }
                     (CsvTypedColumnValues::Float64(dst), CsvTypedColumnValues::Float64(src)) => {
                         dst.extend(src);
@@ -40159,5 +40403,150 @@ mod float32_csv_fvsao23 {
         .unwrap();
         let frame = DataFrame::from_series(vec![gapped]).unwrap();
         assert_eq!(write_csv_string(&frame).unwrap(), ",f\n0,0.1\n1,\n");
+    }
+}
+
+/// read_csv's float cells convert as pandas' default C converter does - not
+/// correctly rounded (br-frankenpandas-py3c0). Bits from live pandas 2.2.3
+/// `read_csv` of the same text.
+#[cfg(test)]
+mod pandas_float_converter_py3c0 {
+    use fp_types::{DType, Scalar};
+
+    use super::{CsvReadOptions, read_csv_str, read_csv_with_options};
+
+    fn float_bits(column: &fp_columnar::Column) -> Vec<u64> {
+        assert_eq!(column.dtype(), DType::Float64);
+        column
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Float64(value) => value.to_bits(),
+                Scalar::Null(_) => f64::NAN.to_bits(),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
+    fn column_bits(csv: &str) -> Vec<u64> {
+        let frame = read_csv_str(csv).expect("read");
+        float_bits(frame.column("x").expect("x"))
+    }
+
+    #[test]
+    fn long_mantissas_read_as_pandas_reads_them() {
+        // The fallback parse (17 digits, leading zeros, an exponent) beside
+        // the fused one (short decimals, unchanged).
+        let csv = "x\n9.890295358649789\n0.000000068288360759838675650889\n1.5E+10\n\
+                   0.1\n115215.73\n00000000000000000.5\n";
+        assert_eq!(
+            column_bits(csv),
+            [
+                0x4023_c7d4_cb12_5ce4,
+                0x3e72_54bd_8bcd_610b,
+                0x420b_f08e_b000_0000,
+                0x3fb9_9999_9999_999a,
+                0x40fc_20fb_ae14_7ae1,
+                0x0000_0000_0000_0000,
+            ]
+        );
+        // NEGATIVE: the correctly rounded value is not pandas'.
+        let correctly_rounded: f64 = "9.890295358649789".parse().unwrap();
+        assert_ne!(correctly_rounded.to_bits(), 0x4023_c7d4_cb12_5ce4);
+    }
+
+    #[test]
+    fn a_wide_integer_reads_from_its_digits_only_beside_a_fraction() {
+        // A fractional cell sends the whole column through the converter...
+        assert_eq!(
+            column_bits("x\n99999999999999999\n1.5\n"),
+            [0x4376_3457_85d8_a001, 0x3ff8_0000_0000_0000]
+        );
+        // ... a missing value alone casts the integers (pandas: ...a000).
+        assert_eq!(
+            column_bits("x\n12\nNA\n99999999999999999\n"),
+            [
+                0x4028_0000_0000_0000,
+                f64::NAN.to_bits(),
+                0x4376_3457_85d8_a000
+            ]
+        );
+    }
+
+    #[test]
+    fn a_value_past_float64_is_not_a_float() {
+        // pandas: object column ['1e309', '2.5'].
+        let frame = read_csv_str("x\n1e309\n2.5\n").expect("read");
+        let column = frame.column("x").expect("x");
+        assert_eq!(column.dtype(), DType::Utf8);
+        assert_eq!(
+            column.values(),
+            &[Scalar::Utf8("1e309".into()), Scalar::Utf8("2.5".into())]
+        );
+    }
+
+    #[test]
+    fn a_comma_decimal_reads_the_same_way() {
+        let options = CsvReadOptions {
+            delimiter: b';',
+            decimal: b',',
+            ..CsvReadOptions::default()
+        };
+        let frame = read_csv_with_options("x;y\n9,890295358649789;1\n", &options).expect("read");
+        assert_eq!(
+            float_bits(frame.column("x").expect("x")),
+            [0x4023_c7d4_cb12_5ce4]
+        );
+    }
+}
+
+/// read_csv(parse_dates=) of aware datetimes in one zone is pandas'
+/// datetime64[ns, zone] - they stayed text (wha4m). Pinned to pandas 2.2.3.
+#[cfg(test)]
+mod parse_dates_one_zone_wha4m {
+    use fp_types::{DType, Scalar};
+
+    use super::{CsvReadOptions, read_csv_with_options};
+
+    fn dates(csv: &str) -> fp_columnar::Column {
+        let options = CsvReadOptions {
+            parse_dates: Some(vec!["d".to_owned()]),
+            ..CsvReadOptions::default()
+        };
+        let frame = read_csv_with_options(csv, &options).expect("read");
+        frame.column("d").expect("d").clone()
+    }
+
+    #[test]
+    fn one_offset_is_a_zoned_column() {
+        let column = dates("d,v\n2024-01-05T10:30:15+05:30,1\n2024-01-06T10:30:15+05:30,2\n");
+        assert_eq!(column.dtype(), DType::datetime64_tz("UTC+05:30"));
+        // 2024-01-05 10:30:15+05:30 is 05:00:15 UTC.
+        assert_eq!(
+            column.values()[0],
+            Scalar::Datetime64(1_704_430_815_000_000_000)
+        );
+    }
+
+    #[test]
+    fn a_missing_cell_is_nat_in_the_zone() {
+        let column = dates("d,v\n2024-01-05T10:30:15Z,1\n,2\n2024-01-06T10:30:15Z,3\n");
+        assert_eq!(column.dtype(), DType::datetime64_tz("UTC"));
+        assert!(column.values()[1].is_missing());
+        assert_eq!(
+            column.values()[0],
+            Scalar::Datetime64(1_704_450_615_000_000_000)
+        );
+    }
+
+    #[test]
+    fn naive_beside_aware_stays_text() {
+        // NEGATIVE: pandas keeps a naive / aware mix as the text read (unz0t).
+        let column = dates("d,v\n2024-01-05 10:30:00,1\n2024-01-05T10:30:00Z,2\n");
+        assert!(!matches!(column.dtype(), DType::Datetime64 { .. }));
+        assert_eq!(
+            column.values()[1],
+            Scalar::Utf8("2024-01-05T10:30:00Z".to_owned())
+        );
     }
 }

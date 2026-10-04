@@ -6037,6 +6037,63 @@ fn sequence_zone(data: &Bound<'_, PyAny>) -> Option<String> {
 /// aware one a host object keeping its zone. None for any other data. They
 /// became naive UTC instants, blending UTC with naive wall times (fvsao.60).
 fn mixed_zone_cells(py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Option<Column>> {
+    let Some(aware) = mixed_zone_flags(data)? else {
+        return Ok(None);
+    };
+    let cells = data
+        .try_iter()?
+        .zip(aware)
+        .map(|(item, aware)| {
+            let item = item?;
+            if aware {
+                Ok(Scalar::Object(fp_types::ObjectValue::Host(
+                    fp_types::HostValue::new(PyHost(item.unbind())),
+                )))
+            } else {
+                py_to_cell(py, &item)
+            }
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(Some(Column::from_object_values(cells)))
+}
+
+/// [`mixed_zone_cells`]' Index: pandas' object Index of each datetime as the
+/// Python object it is (an aware one keeping its zone). None for any other
+/// data. They became one naive datetime64 index, and a NaT among them
+/// raised OutOfBoundsDatetime (ewrvf).
+fn mixed_zone_object_index(data: &Bound<'_, PyAny>) -> PyResult<Option<PyIndex>> {
+    if mixed_zone_flags(data)?.is_none() {
+        return Ok(None);
+    }
+    host_object_index(data).map(Some)
+}
+
+/// An object Index of `items` as Python has them: each a host object, None
+/// or NaT the missing label.
+fn host_object_index(items: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+    let labels = items
+        .try_iter()?
+        .map(|item| {
+            let item = item?;
+            if item.is_none() || item.is_instance_of::<PyNaTType>() {
+                py_to_index_label(&item)
+            } else {
+                Ok(IndexLabel::Object(fp_types::ObjectValue::Host(
+                    fp_types::HostValue::new(PyHost(item.unbind())),
+                )))
+            }
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(PyIndex {
+        inner: Index::new(labels),
+    })
+}
+
+/// Each item's awareness when a list / tuple holds datetimes (NaT / None
+/// among them) in more than one zone, aware beside naive counting as two.
+/// None for any other data: not such a sequence, an item that is not a
+/// datetime, one zone or none.
+fn mixed_zone_flags(data: &Bound<'_, PyAny>) -> PyResult<Option<Vec<bool>>> {
     if !(data.is_instance_of::<PyList>() || data.is_instance_of::<PyTuple>()) {
         return Ok(None);
     }
@@ -6063,24 +6120,7 @@ fn mixed_zone_cells(py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Option<
             zones.push(zone);
         }
     }
-    if zones.len() < 2 {
-        return Ok(None);
-    }
-    let cells = data
-        .try_iter()?
-        .zip(aware)
-        .map(|(item, aware)| {
-            let item = item?;
-            if aware {
-                Ok(Scalar::Object(fp_types::ObjectValue::Host(
-                    fp_types::HostValue::new(PyHost(item.unbind())),
-                )))
-            } else {
-                py_to_cell(py, &item)
-            }
-        })
-        .collect::<PyResult<Vec<_>>>()?;
-    Ok(Some(Column::from_object_values(cells)))
+    Ok((zones.len() >= 2).then_some(aware))
 }
 
 /// `series` with the zone its source list carried (see [`sequence_zone`]):
@@ -6588,12 +6628,37 @@ fn scalar_to_py(py: Python<'_>, scalar: &Scalar) -> PyResult<Py<PyAny>> {
 /// a list refuses it itself (`fillna([1, 2])` raises as pandas does). They
 /// raised "Cannot convert list to Scalar".
 fn py_to_cell(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
+    py_to_cell_with_ancestors(py, obj, &mut Vec::new())
+}
+
+const MAX_LIST_CELL_DEPTH: usize = 128;
+
+/// List cells are copied recursively, so reject cycles by identity on the
+/// active path and bound its depth. A shared acyclic sublist remains valid.
+fn py_to_cell_with_ancestors<'py>(
+    py: Python<'_>,
+    obj: &Bound<'py, PyAny>,
+    ancestors: &mut Vec<Bound<'py, PyAny>>,
+) -> PyResult<Scalar> {
     if let Ok(list) = obj.cast::<PyList>() {
+        if ancestors.iter().any(|ancestor| ancestor.is(obj)) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "cyclic list cells are not supported",
+            ));
+        }
+        if ancestors.len() >= MAX_LIST_CELL_DEPTH {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "list cell nesting exceeds {MAX_LIST_CELL_DEPTH} levels"
+            )));
+        }
+        ancestors.push(obj.clone());
         let items = list
             .iter()
-            .map(|item| py_to_cell(py, &item))
-            .collect::<PyResult<Vec<_>>>()?;
-        return Ok(Scalar::Object(fp_types::ObjectValue::list(items)));
+            .map(|item| py_to_cell_with_ancestors(py, &item, ancestors))
+            .collect::<PyResult<Vec<_>>>();
+        // Restore the path before propagating a child conversion error.
+        ancestors.pop();
+        return Ok(Scalar::Object(fp_types::ObjectValue::list(items?)));
     }
     // bytes are a bytes cell the core reads (they were a host object, so
     // every kernel over them ran single-threaded under the GIL; 4qg5w.8).
@@ -10422,6 +10487,22 @@ impl PyIndex {
         let _ = copy; // pandas' copy= does not change the labels
         // Any hashable names it, typed (`name=7` raised TypeError; fvsao.64).
         let name = name.map(py_axis_name).transpose()?.flatten();
+        // Datetimes in more than one zone (or aware beside naive) are an
+        // object Index of each as it is, with or without dtype=object - and
+        // under dtype=object aware ones of one zone too (each lost its zone).
+        let object_dtype = dtype.is_some_and(is_object_dtype_arg);
+        if (object_dtype || dtype.is_none_or(|dtype| dtype.is_none()))
+            && let Some(data) = data
+            && let Some(mut index) = match mixed_zone_object_index(data)? {
+                None if object_dtype && sequence_zone(data).is_some() => {
+                    Some(host_object_index(data)?)
+                }
+                index => index,
+            }
+        {
+            index.inner = index.inner.set_names(name);
+            return Ok(Py::new(py, index)?.into_any());
+        }
         if let Some(dtype) = dtype.filter(|dtype| !dtype.is_none()) {
             return Self::new(data, name)?.astype(dtype, true);
         }
@@ -30607,13 +30688,21 @@ impl PySeries {
         method: Option<&str>,
         min_periods: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
-        // Fewer than two pairs already correlate to NaN, so min_periods up to
-        // 2 is the default answer; a larger floor needs the pair count.
-        unsupported_params(
-            "Series.corr",
-            &[("min_periods", min_periods.is_none_or(|m| m <= 2))],
-        )?;
         let m = method.unwrap_or("pearson");
+        // pandas: NaN - a Python float - when fewer than min_periods pairs are
+        // both present (it was refused above 2; fewer than two pairs are NaN
+        // anyway).
+        if let Some(floor) = min_periods.filter(|&floor| floor > 2)
+            && matches!(m, "pearson" | "spearman" | "kendall")
+            && self
+                .inner
+                .aligned_numeric_pairs(&other.inner)
+                .map_err(frame_error_to_py)?
+                .len()
+                < floor
+        {
+            return Ok(pyo3::types::PyFloat::new(py, f64::NAN).into_any().unbind());
+        }
         let res = match m {
             "pearson" => self.inner.corr(&other.inner),
             "spearman" => self.inner.corr_spearman(&other.inner),
@@ -33013,6 +33102,8 @@ impl PySeries {
         Ok(self.clone())
     }
 
+    /// pandas' `to_clipboard(excel=True, sep=None)` (see
+    /// `DataFrame.to_clipboard`; it was refused).
     #[pyo3(signature = (excel=true, sep=None, **kwargs))]
     fn to_clipboard(
         &self,
@@ -33020,10 +33111,8 @@ impl PySeries {
         sep: Option<&str>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let _ = (excel, sep, kwargs);
-        Err(not_implemented(
-            "Series.to_clipboard (no clipboard writer yet)",
-        ))
+        clipboard_args("Series", excel, sep, kwargs)?;
+        fp_io::SeriesIoExt::to_clipboard(&self.inner).map_err(io_error_to_py)
     }
 
     /// pandas' `Series.to_csv`: the Series is written as a one-column frame
@@ -42890,6 +42979,8 @@ impl PyDataFrame {
     /// (br-frankenpandas-n57tz).
     /// `@name` references resolve as pandas' (see [`resolve_expr_locals`]);
     /// every engine / parser pandas takes gives the same rows here.
+    /// Expressions must be trusted input: the Python fallback can call methods
+    /// and builtins with side effects. Engine/parser selection is not a sandbox.
     #[pyo3(signature = (expr, inplace=false, local_dict=None, global_dict=None, level=0, engine=None, parser=None))]
     #[allow(clippy::too_many_arguments)]
     fn query(
@@ -42962,6 +43053,8 @@ impl PyDataFrame {
     /// pandas' `inplace=True` an assignment (`c = a + b`) adds the column to
     /// this frame and returns None; without one it is pandas' ValueError
     /// (br-frankenpandas-n57tz).
+    /// Expressions must be trusted input: the Python fallback can call methods
+    /// and builtins with side effects. Engine/parser selection is not a sandbox.
     #[pyo3(signature = (expr, inplace=false, local_dict=None, global_dict=None, level=0, engine=None, parser=None))]
     #[allow(clippy::too_many_arguments)]
     fn eval(
@@ -48150,6 +48243,10 @@ impl PyDataFrame {
     // Writers: each either writes through fp-io or raises. These used to be
     // `let _ = (...); Ok(())` — they returned None and wrote nothing.
     // br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.1
+    /// pandas' `to_clipboard(excel=True, sep=None)`: the frame as
+    /// tab-separated text with its index, through the OS clipboard
+    /// (wl-copy / xclip / xsel / pbcopy; it was refused). `excel=False`,
+    /// another separator and `to_csv` options are refused.
     #[pyo3(signature = (excel=true, sep=None, **kwargs))]
     fn to_clipboard(
         &self,
@@ -48157,10 +48254,8 @@ impl PyDataFrame {
         sep: Option<&str>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let _ = (excel, sep, kwargs);
-        Err(not_implemented(
-            "DataFrame.to_clipboard (no clipboard writer yet)",
-        ))
+        clipboard_args("DataFrame", excel, sep, kwargs)?;
+        fp_io::DataFrameIoExt::to_clipboard(&self.inner).map_err(io_error_to_py)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -54129,11 +54224,24 @@ impl PySeriesDatetimeAccessor {
     /// (dtype object). An anchored frequency (W-MON, Q-JAN, Y-JUN) - which
     /// fp-types' Period cannot carry - keeps fp-frame's period text.
     fn to_period(&self, freq: Option<&str>) -> PyResult<PySeries> {
-        let freq = freq.ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-                "dt.to_period without freq (inferred from the values) is not supported yet",
-            )
-        })?;
+        let inferred;
+        let freq = match freq {
+            Some(freq) => freq,
+            None => {
+                inferred = self.inferred_period_freq()?;
+                inferred.as_str()
+            }
+        };
+        if freq == "B" {
+            Python::attach(|py| {
+                PyErr::warn(
+                    py,
+                    &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+                    c"PeriodDtype[B] is deprecated and will be removed in a future version. Use a DatetimeIndex with freq='B' instead",
+                    1,
+                )
+            })?;
+        }
         let (Some(period_freq), DType::Datetime64 { tz }) =
             (PeriodFreq::parse(freq), self.series.column().dtype())
         else {
@@ -54214,6 +54322,34 @@ impl PySeriesDatetimeAccessor {
 }
 
 impl PySeriesDatetimeAccessor {
+    /// pandas' `dt.to_period()` frequency: the values' inferred one (three
+    /// or more, evenly spaced or month ends), as a period - a month end is
+    /// 'M', a seven-day step 'W-<weekday>'; else pandas' ValueError (it was
+    /// refused).
+    fn inferred_period_freq(&self) -> PyResult<String> {
+        let missing = || {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "You must pass a freq argument as current index has none.",
+            )
+        };
+        let nanos = self
+            .series
+            .column()
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Datetime64(nanos) if *nanos != i64::MIN => Some(*nanos),
+                _ => None,
+            })
+            .collect::<Option<Vec<i64>>>()
+            .ok_or_else(missing)?;
+        let freq = fp_index::infer_freq_from_nanos(&nanos)
+            .ok()
+            .flatten()
+            .ok_or_else(missing)?;
+        period_alias_of_inferred(&freq)
+    }
+
     /// Each value's scalar `method()` (Timestamp.to_pydatetime,
     /// Timedelta.to_pytimedelta) in an object ndarray, NaT kept.
     fn python_objects<'py>(&self, py: Python<'py>, method: &str) -> PyResult<Bound<'py, PyAny>> {
@@ -55805,7 +55941,7 @@ impl PyRolling {
             return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
         }
         if agg_spec_has_callable(func) {
-            self.require_count_window("agg")?;
+            self.require_index_window("agg")?;
             return match named_agg_spec(func, "Rolling")? {
                 Some(named) => self.agg_func(py, &named),
                 None if func.is_callable() => self.apply(py, func, false, None, None, None, None),
@@ -56116,7 +56252,7 @@ impl PyRolling {
         if self.across {
             return Err(not_implemented(&format!("rolling(axis=1).{method}")));
         }
-        self.require_count_window(method)?;
+        self.require_index_window(method)?;
         self.require_every_row(method)?;
         let ddof = window_ddof(ddof)?;
         let series = self
@@ -56132,13 +56268,21 @@ impl PyRolling {
         let other = window_pairwise_other(py, frame.as_deref(), other, pairwise)?;
         let (window, min_periods, center) = (self.window, self.min_periods, self.center);
         let closed = self.closed();
+        // A time-based window over the index, as the aggregations' (it was
+        // refused).
+        let offset = self.offset.as_deref();
         let result = execute_window_bivariate(
             py,
             series.as_deref(),
             frame.as_deref(),
             other.as_ref(),
             |s1, s2| {
-                let windows = s1.rolling_closed(window, min_periods, center, closed)?;
+                let windows = match offset {
+                    Some(offset) => {
+                        s1.rolling_offset_centered(offset, min_periods, closed, center)?
+                    }
+                    None => s1.rolling_closed(window, min_periods, center, closed)?,
+                };
                 if want_corr {
                     windows.corr_ddof(s2, ddof)
                 } else {
@@ -56146,7 +56290,12 @@ impl PyRolling {
                 }
             },
             Some(|df: &DataFrame| {
-                let windows = df.rolling_closed(window, min_periods, center, closed, None)?;
+                let windows = match offset {
+                    Some(offset) => {
+                        df.rolling_offset_centered(offset, min_periods, closed, None, center)?
+                    }
+                    None => df.rolling_closed(window, min_periods, center, closed, None)?,
+                };
                 if want_corr {
                     windows.corr_ddof(ddof)
                 } else {
@@ -56195,8 +56344,14 @@ impl PyRolling {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Series> {
         let windows = self.series_window(s)?;
-        let min_periods = self.min_periods.unwrap_or(self.window);
-        let values = s.column().values();
+        // pandas' default: the window length, or 1 for a time-based window.
+        let min_periods = self.min_periods.unwrap_or(if self.offset.is_some() {
+            1
+        } else {
+            self.window
+        });
+        // The windows hold +-inf as NaN, as pandas' apply sees them.
+        let values = windows.prepared().column().values();
         let labels = s.index().labels();
         let mut out = Vec::with_capacity(values.len());
         for i in 0..values.len() {
@@ -56217,15 +56372,10 @@ impl PyRolling {
         Series::new(s.name(), s.index().clone(), column).map_err(frame_error_to_py)
     }
 
-    /// Refuses a time-based window, or windows along `on=`, where `method`
-    /// only runs count windows over the rows (it would have run a 0-row
-    /// window, or aggregated the `on` column).
-    fn require_count_window(&self, method: &str) -> PyResult<()> {
-        if self.offset.is_some() {
-            return Err(not_implemented(&format!(
-                "Rolling.{method} over a time-based window"
-            )));
-        }
+    /// Refuses windows along `on=` where `method` windows each column over
+    /// the frame's own index (it would have aggregated the `on` column). A
+    /// time-based window over the index runs (it was refused).
+    fn require_index_window(&self, method: &str) -> PyResult<()> {
         if self.on.is_some() {
             return Err(not_implemented(&format!("Rolling.{method} along on=")));
         }
@@ -57348,7 +57498,7 @@ impl PyRolling {
         pct: bool,
         numeric_only: bool,
     ) -> PyResult<Py<PyAny>> {
-        self.require_count_window("rank")?;
+        self.require_index_window("rank")?;
         let m = method.unwrap_or("average");
         // pandas' rolling rank takes only these three (fp-frame also ranks
         // 'first' and 'dense').
@@ -57464,7 +57614,7 @@ impl PyRolling {
                 ("engine_kwargs", engine_kwargs.is_none()),
             ],
         )?;
-        self.require_count_window("apply")?;
+        self.require_index_window("apply")?;
         if func.extract::<String>().is_ok() {
             return self.agg_func(py, func);
         }
@@ -57672,8 +57822,8 @@ impl PyExpanding {
         Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
     }
 
-    /// pandas' expanding corr / cov (see [`PyRolling::bivariate`]; a
-    /// frame's every-pair corr without `other` is refused, as before).
+    /// pandas' expanding corr / cov (see [`PyRolling::bivariate`]), a
+    /// frame's every pair without `other` laid out as rolling's.
     fn bivariate(
         &self,
         py: Python<'_>,
@@ -57700,7 +57850,7 @@ impl PyExpanding {
             .transpose()?;
         let other = window_pairwise_other(py, frame.as_deref(), other, pairwise)?;
         let min_periods = self.min_periods;
-        execute_window_bivariate(
+        let result = execute_window_bivariate(
             py,
             series.as_deref(),
             frame.as_deref(),
@@ -57713,10 +57863,27 @@ impl PyExpanding {
                     windows.cov_ddof(s2, ddof)
                 }
             },
-            None::<fn(&DataFrame) -> Result<DataFrame, FrameError>>,
+            // A frame's pairwise corr / cov (it was refused): an expanding
+            // window is a rolling one as long as the frame, as pandas'
+            // ExpandingIndexer.
+            Some(|df: &DataFrame| {
+                let windows = df.rolling_closed(
+                    df.len().max(1),
+                    Some(min_periods.unwrap_or(1)),
+                    false,
+                    IntervalClosed::Right,
+                    None,
+                )?;
+                if want_corr {
+                    windows.corr_ddof(ddof)
+                } else {
+                    windows.cov_ddof(ddof)
+                }
+            }),
             "Empty expanding object",
             "DataFrame expanding corr / cov without other is not supported",
-        )
+        )?;
+        pairwise_window_result(py, frame.as_deref(), other.as_ref(), result)
     }
 }
 
@@ -58063,12 +58230,17 @@ impl PyExpanding {
             if let Some(ref s) = self.series {
                 let s = window_series_input(s, "Expanding", "apply", false, false)?;
                 let n = s.len();
-                let vals = s.column().values();
-                let mut out_vals = Vec::with_capacity(n);
                 let min_p = self.min_periods.unwrap_or(1);
+                // pandas' windows hold +-inf as NaN and need min_periods
+                // values present.
+                let expanding = s.expanding(Some(min_p));
+                let vals = expanding.prepared().column().values();
+                let mut out_vals = Vec::with_capacity(n);
+                let mut present = 0_usize;
                 for i in 0..n {
                     let slice = &vals[0..=i];
-                    if slice.len() < min_p {
+                    present += usize::from(!vals[i].is_missing());
+                    if present < min_p {
                         out_vals.push(Scalar::Float64(f64::NAN));
                     } else {
                         let labels = &s.index().labels()[0..=i];
@@ -58099,11 +58271,16 @@ impl PyExpanding {
                     let Some(col) = df.column(col_name) else {
                         continue;
                     };
-                    let vals = col.values();
+                    let column = Series::new(col_name.as_str(), df.index().clone(), col.clone())
+                        .map_err(frame_error_to_py)?;
+                    let expanding = column.expanding(Some(min_p));
+                    let vals = expanding.prepared().column().values();
                     let mut out_vals = Vec::with_capacity(n);
+                    let mut present = 0_usize;
                     for i in 0..n {
                         let slice = &vals[0..=i];
-                        if slice.len() < min_p {
+                        present += usize::from(!vals[i].is_missing());
+                        if present < min_p {
                             out_vals.push(Scalar::Float64(f64::NAN));
                         } else {
                             let labels = &df.index().labels()[0..=i];
@@ -69919,10 +70096,17 @@ fn to_numeric_series(py: Python<'_>, arg: &Bound<'_, PyAny>, errors: &str) -> Py
         }
     };
     let opts = fp_frame::ToNumericOptions { errors: err_policy };
+    // pandas' own message ("Unable to parse string ..."), without the
+    // compatibility-gate prefix.
+    let parse_error = |error: FrameError| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>(match error {
+            FrameError::CompatibilityRejected(message) => message,
+            other => other.to_string(),
+        })
+    };
 
     if let Ok(s) = arg.extract::<PyRef<'_, PySeries>>() {
-        return fp_frame::to_numeric_with_options(&s.inner, opts)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()));
+        return fp_frame::to_numeric_with_options(&s.inner, opts).map_err(parse_error);
     }
     if let Ok(list) = arg.cast::<PyList>() {
         let values: Vec<Scalar> = list
@@ -69937,8 +70121,7 @@ fn to_numeric_series(py: Python<'_>, arg: &Bound<'_, PyAny>, errors: &str) -> Py
             values,
         )
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        return fp_frame::to_numeric_with_options(&temp_series, opts)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()));
+        return fp_frame::to_numeric_with_options(&temp_series, opts).map_err(parse_error);
     }
     Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
         "arg must be a Series or list",
@@ -69973,13 +70156,153 @@ fn converted_datetime_index(converted: &Series) -> PyResult<PyDatetimeIndex> {
     Ok(PyDatetimeIndex { inner })
 }
 
+/// pandas' answer when `to_datetime` reads datetimes in more than one zone
+/// (mixed offsets - a DST-crossing column - or aware beside naive): each
+/// value a Timestamp in its own zone - a `datetime.datetime` under
+/// format='mixed', pandas' dateutil path - NaT where missing, after pandas'
+/// FutureWarning. None when the result is a datetime column (one zone or
+/// none). They became NaT.
+fn mixed_zone_timestamps<'py>(
+    py: Python<'py>,
+    converted: &Series,
+    pydatetime: bool,
+) -> PyResult<Option<Bound<'py, PyList>>> {
+    if matches!(converted.dtype(), DType::Datetime64 { .. }) {
+        return Ok(None);
+    }
+    let datetime = py.import("datetime")?;
+    let timedelta = datetime.getattr("timedelta")?;
+    // A whole number of microseconds past the epoch, as datetime holds it.
+    let since_epoch = |nanos: i64| timedelta.call1((0, 0, nanos.div_euclid(1000)));
+    let mut stamps = Vec::with_capacity(converted.len());
+    let mut zones: Vec<Option<String>> = Vec::new();
+    for value in converted.values() {
+        let (nanos, zone, offset) = match value {
+            // dateutil leaves a missing value None (pandas' NaT otherwise).
+            missing if missing.is_missing() => {
+                stamps.push(if pydatetime {
+                    py.None()
+                } else {
+                    nat_object(py)?
+                });
+                continue;
+            }
+            Scalar::Utf8(text) => match fp_frame::aware_datetime_parts(text) {
+                Some((nanos, zone, offset)) => (nanos, Some(zone), offset),
+                None => return Ok(None),
+            },
+            Scalar::Datetime64(nanos) => (*nanos, None, 0),
+            _ => return Ok(None),
+        };
+        if !zones.contains(&zone) {
+            zones.push(zone.clone());
+        }
+        if pydatetime {
+            let stamp = match zone {
+                None => datetime
+                    .getattr("datetime")?
+                    .call1((1970, 1, 1))?
+                    .add(since_epoch(nanos)?)?,
+                Some(_) => {
+                    let utc = datetime.getattr("timezone")?.getattr("utc")?;
+                    let fixed = datetime
+                        .getattr("timezone")?
+                        .call1((timedelta.call1((0, offset))?,))?;
+                    datetime
+                        .getattr("datetime")?
+                        .call1((1970, 1, 1, 0, 0, 0, 0, utc))?
+                        .add(since_epoch(nanos)?)?
+                        .call_method1("astimezone", (fixed,))?
+                }
+            };
+            stamps.push(stamp.unbind());
+            continue;
+        }
+        let stamp = PyTimestamp {
+            inner: Timestamp { nanos, tz: zone },
+            unit: StampUnit::Ns,
+        };
+        stamps.push(Py::new(py, stamp)?.into_any());
+    }
+    if zones.len() < 2 || zones.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    PyErr::warn(
+        py,
+        &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+        c"In a future version of pandas, parsing datetimes with mixed time zones will raise an error unless `utc=True`. Please specify `utc=True` to opt in to the new behaviour and silence this warning. To create a `Series` with mixed offsets and `object` dtype, please use `apply` and `datetime.datetime.strptime`",
+        1,
+    )?;
+    Ok(Some(PyList::new(py, stamps)?))
+}
+
+/// The period frequency pandas' `dt.to_period()` reads an inferred offset
+/// as (its `get_period_alias`, then Period's own refusals), measured against
+/// pandas 2.2.3: MS / ME / BME are M, every QS Q-DEC, QE-x / BQE-x Q-x, every
+/// YS / BYS Y-DEC, YE-x / BYE-x Y-x, weeks and fixed units themselves; BMS,
+/// a week of the month and a counted start are not period frequencies, and
+/// a counted end is Period's "please use" (acelo).
+fn period_alias_of_inferred(freq: &str) -> PyResult<String> {
+    let refused = |message: String| PyErr::new::<pyo3::exceptions::PyValueError, _>(message);
+    let digits = freq.len() - freq.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let (count, base) = freq.split_at(digits);
+    let (rule, anchor) = base.split_once('-').unwrap_or((base, ""));
+    let unsupported = |what: &str| refused(format!("{what} is not supported as period frequency"));
+    let invalid = |reason: &str| {
+        refused(format!(
+            "Invalid frequency: {freq}, failed to parse with error message: {reason}"
+        ))
+    };
+    match (count.is_empty(), rule) {
+        (_, "WOM") | (true, "BMS") => Err(unsupported(freq)),
+        (true, "MS" | "ME" | "BME") => Ok("M".to_owned()),
+        (true, "QS") => Ok("Q-DEC".to_owned()),
+        (true, "QE" | "BQE") => Ok(format!("Q-{anchor}")),
+        (true, "YS" | "BYS") => Ok("Y-DEC".to_owned()),
+        (true, "YE" | "BYE") => Ok(format!("Y-{anchor}")),
+        (false, "MS" | "QS" | "YS") => Err(unsupported(base)),
+        (false, "ME") => Err(invalid(
+            "ValueError(\"for Period, please use 'M' instead of 'ME'\")",
+        )),
+        (false, "QE" | "YE") => Err(invalid(&format!(
+            "ValueError(\"for Period, please use '{}-{anchor}' instead of '{base}'\")",
+            &rule[..1]
+        ))),
+        (false, "BME" | "BQE" | "BYE") => {
+            Err(invalid(&format!("ValueError('Invalid frequency: {base}')")))
+        }
+        _ => Ok(freq.to_owned()),
+    }
+}
+
+/// The object Index `to_datetime` answers for datetimes in several zones
+/// ([`mixed_zone_timestamps`]): Timestamps, an aware one kept whole, or
+/// under format='mixed' every datetime the Python object it is.
+fn mixed_zone_index(stamps: Bound<'_, PyList>, pydatetime: bool) -> PyResult<PyIndex> {
+    if pydatetime {
+        host_object_index(stamps.as_any())
+    } else {
+        object_index_of(stamps.into_any(), Vec::new())
+    }
+}
+
 /// A `to_datetime` failure as pandas' ValueError, its own text (the gate
 /// prefix left off).
 fn to_datetime_error(err: fp_frame::FrameError) -> PyErr {
     match err {
-        // A string no format reads is pandas' DateParseError (a ValueError).
+        // A string no format reads is pandas' DateParseError (a ValueError),
+        // as is an ISO-shaped one with a field out of range.
         fp_frame::FrameError::CompatibilityRejected(message)
-            if message.starts_with("Unknown datetime string format") =>
+            if [
+                "Unknown datetime string format",
+                "month must be in 1..12",
+                "day is out of range for month",
+                "hour must be in 0..23",
+                "minute must be in 0..59",
+                "second must be in 0..59",
+            ]
+            .iter()
+            .any(|prefix| message.starts_with(prefix)) =>
         {
             DateParseError::new_err(message)
         }
@@ -70079,6 +70402,13 @@ fn to_datetime(
         let series = object_instants(py, &s.inner)?;
         warn_order(series.values())?;
         let res = fp_frame::to_datetime_with_options(&series, opts).map_err(to_datetime_error)?;
+        if let Some(stamps) = mixed_zone_timestamps(py, &res, format == Some("mixed"))?
+            && let Some(column) = mixed_zone_cells(py, stamps.as_any())?
+        {
+            let inner =
+                Series::new(res.name(), res.index().clone(), column).map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner })?.into_any());
+        }
         return Ok(Py::new(py, PySeries { inner: res })?.into_any());
     }
     if let Ok(dti) = arg.extract::<PyRef<'_, PyDatetimeIndex>>() {
@@ -70109,6 +70439,10 @@ fn to_datetime(
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let res =
             fp_frame::to_datetime_with_options(&temp_series, opts).map_err(to_datetime_error)?;
+        if let Some(stamps) = mixed_zone_timestamps(py, &res, format == Some("mixed"))? {
+            let index = mixed_zone_index(stamps, format == Some("mixed"))?;
+            return Ok(Py::new(py, index)?.into_any());
+        }
         return Ok(Py::new(py, converted_datetime_index(&res)?)?.into_any());
     }
     if let Ok(list) = arg.cast::<PyList>() {
@@ -70135,6 +70469,10 @@ fn to_datetime(
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let res =
             fp_frame::to_datetime_with_options(&temp_series, opts).map_err(to_datetime_error)?;
+        if let Some(stamps) = mixed_zone_timestamps(py, &res, format == Some("mixed"))? {
+            let index = mixed_zone_index(stamps, format == Some("mixed"))?;
+            return Ok(Py::new(py, index)?.into_any());
+        }
         // Aware datetimes of one zone stay in it (they came back naive).
         let res = with_sequence_zone(res, Some(arg))?;
         return Ok(Py::new(py, converted_datetime_index(&res)?)?.into_any());
@@ -70154,6 +70492,10 @@ fn to_datetime(
             warn_order(temp_series.values())?;
             let res = fp_frame::to_datetime_with_options(&temp_series, opts)
                 .map_err(to_datetime_error)?;
+            if let Some(stamps) = mixed_zone_timestamps(py, &res, format == Some("mixed"))? {
+                let index = mixed_zone_index(stamps, format == Some("mixed"))?;
+                return Ok(Py::new(py, index)?.into_any());
+            }
             return Ok(Py::new(py, converted_datetime_index(&res)?)?.into_any());
         }
     }
@@ -72014,6 +72356,8 @@ fn assert_equal_kwargs(func: &str, kwargs: Option<&Bound<'_, PyDict>>) -> PyResu
             "check_freq" | "check_flags" | "check_categorical" | "check_index" => {
                 value.is_truthy()?
             }
+            // A frame's or series' reorder ([`assert_like_reordered`]).
+            "check_like" if func != "assert_index_equal" => true,
             "check_like" | "by_blocks" | "check_datetimelike_compat" => !value.is_truthy()?,
             "obj" => true,
             _ => {
@@ -72027,6 +72371,50 @@ fn assert_equal_kwargs(func: &str, kwargs: Option<&Bound<'_, PyDict>>) -> PyResu
         }
     }
     Ok(())
+}
+
+/// pandas' `check_like=True` for frames and series: when the two hold the
+/// same labels in another order, `left` reordered like `right`
+/// (`left.reindex_like(right)`), so order alone is no difference. Any other
+/// difference is left for the ordinary comparison to report (it was refused).
+fn assert_like_reordered<'py>(
+    left: &Bound<'py, PyAny>,
+    right: &Bound<'py, PyAny>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let check_like = match kwargs.map(|kwargs| kwargs.get_item("check_like")) {
+        Some(Ok(Some(flag))) => flag.is_truthy()?,
+        Some(Err(err)) => return Err(err),
+        _ => false,
+    };
+    if !check_like {
+        return Ok(None);
+    }
+    let sorted = |labels: &[IndexLabel]| {
+        let mut labels = labels.to_vec();
+        labels.sort();
+        labels
+    };
+    let same_labels = if let (Ok(l), Ok(r)) = (
+        left.extract::<PyRef<'_, PyDataFrame>>(),
+        right.extract::<PyRef<'_, PyDataFrame>>(),
+    ) {
+        let (mut l_cols, mut r_cols) = (l.column_labels(), r.column_labels());
+        l_cols.sort();
+        r_cols.sort();
+        l_cols == r_cols && sorted(l.inner.index().labels()) == sorted(r.inner.index().labels())
+    } else if let (Ok(l), Ok(r)) = (
+        left.extract::<PyRef<'_, PySeries>>(),
+        right.extract::<PyRef<'_, PySeries>>(),
+    ) {
+        sorted(l.inner.index().labels()) == sorted(r.inner.index().labels())
+    } else {
+        false
+    };
+    if !same_labels {
+        return Ok(None);
+    }
+    left.call_method1("reindex_like", (right,)).map(Some)
 }
 
 /// pandas' `check_index_type` / `check_column_type` / `exact`: `True` and
@@ -72190,6 +72578,8 @@ fn assert_frame_equal(
     // frames differing in dtype or index name passed. Column labels are
     // strings here, so check_column_type has nothing more to compare.
     assert_equal_kwargs("assert_frame_equal", kwargs)?;
+    let reordered = assert_like_reordered(left, right, kwargs)?;
+    let left = reordered.as_ref().unwrap_or(left);
     // Unset, pandas compares the axes approximately and each column as
     // assert_series_equal does (ints and bools exactly).
     let axes_exact = check_exact.unwrap_or(false);
@@ -72433,6 +72823,8 @@ fn assert_series_equal(
     // fvsao.5: check_dtype, check_names and check_index_type were dropped,
     // so Series differing in dtype, name or index name passed.
     assert_equal_kwargs("assert_series_equal", kwargs)?;
+    let reordered = assert_like_reordered(left, right, kwargs)?;
+    let left = reordered.as_ref().unwrap_or(left);
     let check_index_type = check_index_type.map_or(Ok(true), assert_type_flag)?;
     let (Ok(l_s), Ok(r_s)) = (
         left.extract::<PyRef<'_, PySeries>>(),
@@ -84358,6 +84750,25 @@ fn read_feather(
     Ok(PyDataFrame {
         inner: select_columns_arg(frame, columns)?,
     })
+}
+
+/// `to_clipboard`'s arguments fp-io writes: pandas' default form (`excel=True`,
+/// tab-separated); `excel=False`, another `sep` and `to_csv` options refused.
+fn clipboard_args(
+    owner: &str,
+    excel: Option<bool>,
+    sep: Option<&str>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<()> {
+    if excel == Some(false) {
+        return Err(not_implemented(&format!(
+            "{owner}.to_clipboard(excel=False)"
+        )));
+    }
+    if sep.is_some_and(|sep| sep != "\t") {
+        return Err(not_implemented(&format!("{owner}.to_clipboard(sep=...)")));
+    }
+    reject_unsupported_kwargs(&format!("{owner}.to_clipboard"), kwargs, &[])
 }
 
 #[pyfunction]

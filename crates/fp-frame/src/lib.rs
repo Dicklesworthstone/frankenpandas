@@ -2461,6 +2461,27 @@ fn scalar_to_pivot_column_name(value: &Scalar) -> String {
     pivot_label_to_column_name(&scalar_to_value_counts_index_label(value))
 }
 
+/// The grand total of `pivot_table(margins=True)`: pandas reduces the values
+/// as a Series, so sum / mean / var / std add in numpy's pairwise order
+/// (br-frankenpandas-9iim6) where the cells and the row / column margins are
+/// groupby aggs ([`pivot_table_agg_value`]).
+fn pivot_table_grand_total(aggfunc: &str, vals: &[f64]) -> Result<f64, FrameError> {
+    // pandas reduces the present values only, packed in row order.
+    let present: Vec<f64> = vals.iter().copied().filter(|v| !v.is_nan()).collect();
+    let series = fp_types::PandasReductions::new(
+        fp_types::ReductionValues::Float(&present),
+        None,
+        fp_types::MissingLayout::Numpy,
+    );
+    Ok(match aggfunc {
+        "sum" => series.sum(),
+        "mean" => series.mean(),
+        "var" => series.var(1),
+        "std" => series.std(1),
+        _ => return pivot_table_agg_value(aggfunc, vals),
+    })
+}
+
 fn pivot_table_agg_value(aggfunc: &str, vals: &[f64]) -> Result<f64, FrameError> {
     // pandas' pivot_table cells are a groupby agg: sum / mean compensated,
     // var / std Welford (br-frankenpandas-xhogl).
@@ -3044,30 +3065,23 @@ fn pivot_compute_margins(
         return (row, col, med(ab));
     }
 
+    // The grand total is pandas' Series reduction of the values, in numpy's
+    // order (br-frankenpandas-9iim6).
+    let grand = fp_types::PandasReductions::new(
+        fp_types::ReductionValues::Float(val_f64),
+        None,
+        fp_types::MissingLayout::Numpy,
+    );
+
     if matches!(aggfunc, "var" | "std") {
         // The row / column margins are pandas' groupby aggs, Welford
-        // (br-frankenpandas-xhogl); the grand total is its Series reduction,
-        // the two-pass below (br-frankenpandas-9iim6 owns matching numpy's
-        // pairwise sums there).
+        // (br-frankenpandas-xhogl).
         let mut row_moments = vec![fp_types::WelfordVar::default(); n_idx];
         let mut col_moments = vec![fp_types::WelfordVar::default(); n_col];
-        let mut all_sum = 0.0f64;
-        let mut all_cnt = 0u64;
         for i in 0..n {
             let v = val_f64[i];
             row_moments[ri_codes[i] as usize].add(v);
             col_moments[ci_codes[i] as usize].add(v);
-            all_sum += v;
-            all_cnt += 1;
-        }
-        let am = if all_cnt > 0 {
-            all_sum / all_cnt as f64
-        } else {
-            0.0
-        };
-        let mut asq = 0.0f64;
-        for &v in val_f64 {
-            asq += (v - am).powi(2);
         }
         let want_std = aggfunc == "std";
         let spread = |moments: &fp_types::WelfordVar| -> f64 {
@@ -3080,12 +3094,7 @@ fn pivot_compute_margins(
         };
         let row = row_moments.iter().map(spread).collect();
         let col = col_moments.iter().map(spread).collect();
-        let all = if all_cnt < 2 {
-            f64::NAN
-        } else {
-            let var = asq / (all_cnt as f64 - 1.0);
-            if want_std { var.sqrt() } else { var }
-        };
+        let all = if want_std { grand.std(1) } else { grand.var(1) };
         return (row, col, all);
     }
 
@@ -3102,18 +3111,17 @@ fn pivot_compute_margins(
     };
     // The row / column margins are pandas' groupby aggs, a compensated sum
     // for sum / mean (br-frankenpandas-xhogl); the grand total is its Series
-    // reduction (br-frankenpandas-9iim6).
+    // reduction, `grand` above.
     let mut row_acc = vec![seed; n_idx];
     let mut row_sum = vec![fp_types::KahanSum::default(); if is_sum { n_idx } else { 0 }];
     let mut row_cnt = vec![0u64; n_idx];
-    let mut all_acc = seed;
+    let mut all_acc = if is_sum { grand.sum() } else { seed };
     let mut all_cnt = 0u64;
     for i in 0..n {
         let r = ri_codes[i] as usize;
         let v = val_f64[i];
         if is_sum {
             row_sum[r].add(v);
-            all_acc += v;
         } else if is_min {
             row_acc[r] = f64::min(row_acc[r], v);
             all_acc = f64::min(all_acc, v);
@@ -20169,34 +20177,17 @@ impl Series {
         }
     }
 
-    /// Vectorizable f64 sum: 8 independent accumulator lanes broken out of the
-    /// sequential-dependency chain that a plain `iter().sum()` (a 0.0-seeded
-    /// left-fold) forms — LLVM cannot auto-vectorize that fold because f64 add is
-    /// non-associative. Pandas/numpy sum via a pairwise/blocked algorithm too, so
-    /// this ALSO tracks numpy's value more closely than the left-fold did. For
-    /// `data.len() < 8` the `as_chunks::<8>()` chunk slice is empty and the whole
-    /// slice flows through the remainder left-fold, so the result is
-    /// BIT-IDENTICAL to `iter().sum()` on short arrays (every reduction
-    /// conformance fixture is tiny); it diverges (in the last ~ULP, more
-    /// accurately) only on large arrays where no exact value is pinned.
-    fn blocked_sum_f64(data: &[f64]) -> f64 {
-        let mut acc = [0.0_f64; 8];
-        let (chunks, remainder) = data.as_chunks::<8>();
-        for c in chunks {
-            for l in 0..8 {
-                acc[l] += c[l];
-            }
-        }
-        let mut total =
-            ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
-        for &x in remainder {
-            total += x;
-        }
-        total
+    /// This column as pandas' float reductions read it
+    /// ([`Column::pandas_reductions`]; br-frankenpandas-9iim6).
+    fn with_pandas_reductions<R>(
+        &self,
+        reduce: impl FnOnce(&fp_types::PandasReductions<'_>) -> R,
+    ) -> Option<R> {
+        self.column.pandas_reductions(reduce)
     }
 
-    /// Blocked (8-lane) dot product of two equal-length f64 slices — the dot
-    /// analogue of [`Self::blocked_sum_f64`]. Breaks the `result += a*b`
+    /// Blocked (8-lane) dot product of two equal-length f64 slices. Breaks
+    /// the `result += a*b`
     /// dependency chain into 8 independent `acc[l] += a[l]*b[l]` lanes so the
     /// multiply-accumulate AUTO-VECTORIZES (fma). Degenerates to the sequential
     /// left-fold for `len < 8` (empty `as_chunks`), so it's bit-identical to
@@ -20216,132 +20207,6 @@ impl Series {
             total += x * y;
         }
         total
-    }
-
-    /// Blocked (8-lane) central moments off a contiguous f64 slice: returns
-    /// `(Σ(v-mean)², Σ(v-mean)^K)` with `K = 4` when `FOURTH`, else `K = 3`.
-    /// The moment analogue of [`Self::blocked_sum_f64`], and admissible for the
-    /// same reason (br-frankenpandas-8s4mb).
-    ///
-    /// `skew`/`kurtosis` accumulated both moments in ONE ordered scalar loop, so
-    /// every `m2 +=` depended on the previous one — a sequential dependency chain
-    /// LLVM cannot break, because f64 add is non-associative. Eight independent
-    /// lanes break it; the `d * d` / `d2 * d` / `d2 * d2` products are the same
-    /// expansions `powi(2)`/`powi(3)`/`powi(4)` lower to, so only the ADDITION
-    /// order changes.
-    ///
-    /// BIT-IDENTITY, stated precisely because this is a numerics change and
-    /// `br-frankenpandas-jawxr` rejected FMA for changing bits: `as_chunks::<8>()`
-    /// is EMPTY below 8 elements, so a short slice flows entirely through the
-    /// remainder loop — which deliberately calls `.powi()` rather than the
-    /// unrolled products, making it bit-identical to the loop it replaces. Every
-    /// conformance fixture for these ops has 2 to 6 elements, so the pinned
-    /// surface is untouched by construction. Above 8 it diverges in the last few
-    /// ULP, and (like `blocked_sum_f64` before it) toward numpy, which sums
-    /// pairwise rather than as a left-fold.
-    fn blocked_central_moments_f64<const FOURTH: bool>(data: &[f64], mean: f64) -> (f64, f64) {
-        let mut a2 = [0.0_f64; 8];
-        let mut ak = [0.0_f64; 8];
-        let (chunks, remainder) = data.as_chunks::<8>();
-        for c in chunks {
-            for l in 0..8 {
-                let d = c[l] - mean;
-                let d2 = d * d;
-                a2[l] += d2;
-                ak[l] += if FOURTH { d2 * d2 } else { d2 * d };
-            }
-        }
-        let mut m2 = ((a2[0] + a2[1]) + (a2[2] + a2[3])) + ((a2[4] + a2[5]) + (a2[6] + a2[7]));
-        let mut mk = ((ak[0] + ak[1]) + (ak[2] + ak[3])) + ((ak[4] + ak[5]) + (ak[6] + ak[7]));
-        for &v in remainder {
-            let d = v - mean;
-            m2 += d.powi(2);
-            mk += if FOURTH { d.powi(4) } else { d.powi(3) };
-        }
-        (m2, mk)
-    }
-
-    /// Int64 sibling of [`Self::blocked_central_moments_f64`], widening each
-    /// element with `as f64` exactly where the scalar loop did. Kept separate
-    /// rather than made generic so the lane bodies stay concrete slices and the
-    /// widening stays inside the vectorizable chunk loop.
-    fn blocked_central_moments_i64<const FOURTH: bool>(data: &[i64], mean: f64) -> (f64, f64) {
-        let mut a2 = [0.0_f64; 8];
-        let mut ak = [0.0_f64; 8];
-        let (chunks, remainder) = data.as_chunks::<8>();
-        for c in chunks {
-            for l in 0..8 {
-                let d = c[l] as f64 - mean;
-                let d2 = d * d;
-                a2[l] += d2;
-                ak[l] += if FOURTH { d2 * d2 } else { d2 * d };
-            }
-        }
-        let mut m2 = ((a2[0] + a2[1]) + (a2[2] + a2[3])) + ((a2[4] + a2[5]) + (a2[6] + a2[7]));
-        let mut mk = ((ak[0] + ak[1]) + (ak[2] + ak[3])) + ((ak[4] + ak[5]) + (ak[6] + ak[7]));
-        for &iv in remainder {
-            let d = iv as f64 - mean;
-            m2 += d.powi(2);
-            mk += if FOURTH { d.powi(4) } else { d.powi(3) };
-        }
-        (m2, mk)
-    }
-
-    /// Blocked widening sum of an `&[i64]` as f64 — the `as f64` sibling of
-    /// [`Self::blocked_sum_f64`], for the Int64 arms of `skew`/`kurtosis` whose
-    /// mean was `data.iter().map(|&v| v as f64).sum::<f64>()`. Same 8-lane
-    /// structure, same empty-below-8 degeneration to the left-fold.
-    fn blocked_sum_i64_as_f64(data: &[i64]) -> f64 {
-        let mut acc = [0.0_f64; 8];
-        let (chunks, remainder) = data.as_chunks::<8>();
-        for c in chunks {
-            for l in 0..8 {
-                acc[l] += c[l] as f64;
-            }
-        }
-        let mut total =
-            ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
-        for &x in remainder {
-            total += x as f64;
-        }
-        total
-    }
-
-    fn f64_valid_sum_count(data: &[f64], validity: &ValidityMask) -> (f64, usize) {
-        // All-valid fast path: no missing slots, so the sum is over the whole
-        // contiguous slice — use the vectorizable blocked sum instead of the
-        // per-element bit-scan. (The bit-scan visits indices in ascending order,
-        // matching a left-fold; the blocked sum matches that on <8-element inputs
-        // and is more accurate + faster on large ones.)
-        if validity.all() {
-            return (Self::blocked_sum_f64(data), data.len());
-        }
-        let validity_words = validity.packed_words_for_scan();
-        let mut total = 0.0_f64;
-        let mut count = 0_usize;
-
-        for (word_idx, &word) in validity_words.iter().enumerate() {
-            let base = word_idx * 64;
-            if base >= data.len() {
-                break;
-            }
-
-            let chunk_len = (data.len() - base).min(64);
-            let len_mask = if chunk_len == 64 {
-                u64::MAX
-            } else {
-                (1_u64 << chunk_len) - 1
-            };
-            let mut valid_bits = word & len_mask;
-            while valid_bits != 0 {
-                let offset = valid_bits.trailing_zeros() as usize;
-                total += data[base + offset];
-                count += 1;
-                valid_bits &= valid_bits - 1;
-            }
-        }
-
-        (total, count)
     }
 
     /// Fallible sibling of [`Self::sum`] for a `Timedelta64` column: reports a
@@ -20414,7 +20279,7 @@ impl Series {
         // A float32 column sums as pandas' nansum does: numpy's float32
         // pairwise sum with 0 where a value is missing (fvsao.23).
         if let Some((values, _)) = self.float32_values_zero_filled() {
-            let sum = fp_types::numpy_pairwise_sum_f32(&values);
+            let sum = fp_types::numpy_pairwise_sum(&values);
             return Ok(Scalar::Float64(f64::from(sum)));
         }
         // Per br-frankenpandas-a52db: pandas preserves Int64/Bool dtype for
@@ -20563,31 +20428,11 @@ impl Series {
             _ => {}
         }
 
-        // Typed fast path (br-frankenpandas-lei31): an all-valid Float64 column
-        // sums its contiguous f64 buffer directly, skipping the per-element
-        // Scalar match + is_missing check. Bit-identical to the Scalar left-fold
-        // below — same values, same order, and all-valid means nothing is
-        // skipped, so `Iterator::sum` (a 0.0-seeded left-fold) matches exactly.
-        // Concat chunk fast path: a `concat(...)` output is a lazy chunks column;
-        // fold the chunk slices in place instead of materializing the cold 40MB
-        // buffer that `as_f64_slice` below would build. Bit-identical to
-        // `data.iter().sum()` (both 0.0-seeded sequential left-folds over the same
-        // 0..n values), so `concat(...).sum()` beats pandas' copy-then-sum.
-        if let Some(s) = self.column.all_valid_f64_chunk_sum() {
-            return Ok(Scalar::Float64(s));
-        }
-
-        if let Some(data) = self.column.as_f64_slice() {
-            return Ok(Scalar::Float64(Self::blocked_sum_f64(data)));
-        }
-
-        // Typed nullable fast path (sister to lei31): a Float64 column WITH missing
-        // values otherwise materialized the whole Vec<Scalar> below and matched each
-        // element. Sum only valid slots straight from the f64 buffer — bit-identical
-        // to the Scalar left-fold (same non-missing values in row order, same
-        // 0.0-seeded `+`; inf stays as `to_f64(Float64(inf))=inf` does, never dropped).
-        if let Some((data, validity)) = self.column.as_f64_slice_with_validity() {
-            let (total, _) = Self::f64_valid_sum_count(data, validity);
+        // A float column adds as pandas does, in numpy's pairwise order over
+        // the column with its missing slots as 0 (a masked Float64: over each
+        // run of present values) - typed and chunked storage read in place
+        // (br-frankenpandas-9iim6).
+        if let Some(total) = self.with_pandas_reductions(|r| r.sum()) {
             return Ok(Scalar::Float64(total));
         }
 
@@ -20624,28 +20469,32 @@ impl Series {
     }
 
     /// Mean of a datetime64 column the way pandas' nanmean takes it: NaT
-    /// slots filled with 0, all values summed as float64 (numpy's blocked
-    /// order, see [`Self::blocked_sum_f64`]), divided by the non-NaT count
-    /// and truncated to int64 nanoseconds; all-NaT or empty gives NaT.
+    /// slots filled with 0, the int64 nanoseconds summed as float64 through
+    /// numpy's cast buffer ([`fp_types::PandasReductions`]), divided by the
+    /// non-NaT count and truncated to int64; all-NaT or empty gives NaT.
     fn datetime_mean(&self) -> Scalar {
-        let mut count = 0_usize;
-        let filled: Vec<f64> = self
-            .column
-            .values()
+        let values = self.column.values();
+        let mut present = vec![0_u64; values.len().div_ceil(64)];
+        let nanos: Vec<i64> = values
             .iter()
-            .map(|value| match value {
+            .enumerate()
+            .map(|(i, value)| match value {
                 Scalar::Datetime64(ns) if *ns != Timestamp::NAT => {
-                    count += 1;
-                    *ns as f64
+                    present[i / 64] |= 1 << (i % 64);
+                    *ns
                 }
-                _ => 0.0,
+                _ => 0,
             })
             .collect();
-        if count == 0 {
+        let reductions = fp_types::PandasReductions::new(
+            fp_types::ReductionValues::Int(&nanos),
+            Some(&present),
+            fp_types::MissingLayout::Numpy,
+        );
+        if reductions.count() == 0 {
             return Scalar::Datetime64(Timestamp::NAT);
         }
-        let mean = Self::blocked_sum_f64(&filled) / count as f64;
-        Scalar::Datetime64(mean as i64)
+        Scalar::Datetime64(reductions.mean() as i64)
     }
 
     /// Mean of non-null numeric values. Returns NaN for empty.
@@ -20663,21 +20512,14 @@ impl Series {
             }
             #[allow(clippy::cast_precision_loss)] // numpy's float32 count
             let count = count as f32;
-            let mean = fp_types::numpy_pairwise_sum_f32(&values) / count;
+            let mean = fp_types::numpy_pairwise_sum(&values) / count;
             return Ok(Scalar::Float64(f64::from(mean)));
         }
-        // Concat chunk fast path (see sum): fold the lazy chunks in place instead
-        // of materializing the cold buffer. Bit-identical to f64_valid_sum_count
-        // over the materialized all-valid buffer (Σ data[0..n]/n, same order).
-        if let Some(m) = self.column.all_valid_f64_chunk_mean() {
-            return Ok(Scalar::Float64(m));
-        }
-        if let Some((data, validity)) = self.column.as_f64_slice_with_validity() {
-            let (total, count) = Self::f64_valid_sum_count(data, validity);
-            if count == 0 {
-                return Ok(Scalar::Float64(f64::NAN));
-            }
-            return Ok(Scalar::Float64(total / count as f64));
+        // A numeric column's mean is pandas' nanmean: its total in numpy's
+        // order (an int64 column's through numpy's cast buffer) over the
+        // count (br-frankenpandas-9iim6).
+        if let Some(mean) = self.with_pandas_reductions(|r| r.mean()) {
+            return Ok(Scalar::Float64(mean));
         }
 
         // Per br-frankenpandas-a52db: sum() now preserves Int64/Bool dtype.
@@ -21175,82 +21017,7 @@ impl Series {
             let clamped = var_ns.clamp(i64::MIN as f64, i64::MAX as f64);
             return Ok(Scalar::Timedelta64(clamped as i64));
         }
-        let mean_val = match self.mean()? {
-            Scalar::Float64(v) => v,
-            _ => return Ok(Scalar::Float64(f64::NAN)),
-        };
-        // Concat chunk fast path: fold Σ(v-mean)² over the lazy chunks in place
-        // (mean_val already computed via the fast chunk mean) instead of
-        // materializing the cold buffer. Bit-identical to the fold below.
-        if let Some(sum_sq_diff) = self.column.all_valid_f64_chunk_sq_dev_sum(mean_val) {
-            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - 1.0)));
-        }
-        if let Some(sum_sq_diff) = self.column.all_valid_i64_chunk_sq_dev_sum(mean_val) {
-            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - 1.0)));
-        }
-        // Typed second pass over the contiguous all-valid buffer (count == n).
-        // mean_val is reused from the typed self.mean(); the (v-mean)^2 row-order
-        // fold matches the Scalar loop below exactly — bit-identical, no Scalar
-        // materialization.
-        if let Some(data) = self.column.as_f64_slice() {
-            let mut sum_sq_diff = 0.0_f64;
-            for &v in data {
-                let diff = v - mean_val;
-                sum_sq_diff += diff * diff;
-            }
-            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - 1.0)));
-        }
-        if let Some(data) = self.column.as_i64_slice() {
-            let mut sum_sq_diff = 0.0_f64;
-            for &v in data {
-                let diff = v as f64 - mean_val;
-                sum_sq_diff += diff * diff;
-            }
-            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - 1.0)));
-        }
-        // Typed nullable second pass (sister to the all-valid f64 path above): a
-        // Float64 column WITH missing values otherwise materialized Vec<Scalar>
-        // here. Fold squared deviations over valid slots only — bit-identical to the
-        // Scalar loop below (same non-missing values, same row order, same
-        // mean_val reused from the now-typed self.mean()).
-        if let Some((data, validity)) = self.column.as_f64_slice_with_validity() {
-            let mut sum_sq_diff = 0.0_f64;
-            for (i, &v) in data.iter().enumerate() {
-                if validity.get(i) {
-                    let diff = v - mean_val;
-                    sum_sq_diff += diff * diff;
-                }
-            }
-            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - 1.0)));
-        }
-        // Typed nullable Int64 second pass (sister to the nullable Float64 arm above
-        // and the nullable Int64 sum/min/max/median/quantile paths; also speeds
-        // `std()`, which delegates here): a nullable Int64 column otherwise fell to the
-        // per-element Scalar match over a materialized Vec<Scalar>. Fold `(v-mean)^2`
-        // over the valid slots straight off the raw `&[i64]` + validity mask, reusing
-        // the `mean_val` from the already-typed `self.mean()`. Bit-identical to the
-        // Scalar loop: `validity.get(i)` is exactly the `!is_missing()` filter for an
-        // Int64 cell, `v as f64 == Scalar::Int64(v).to_f64()`, same present values in
-        // row order, same `diff * diff` fold; `count` (validity popcount) is unchanged.
-        if let Some((data, validity)) = self.column.as_i64_slice_with_validity() {
-            let mut sum_sq_diff = 0.0_f64;
-            for (i, &v) in data.iter().enumerate() {
-                if validity.get(i) {
-                    let diff = v as f64 - mean_val;
-                    sum_sq_diff += diff * diff;
-                }
-            }
-            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - 1.0)));
-        }
-        let mut sum_sq_diff = 0.0_f64;
-        for val in self.column.values() {
-            if !val.is_missing() {
-                let v = val.to_f64().map_err(ColumnError::from)?;
-                let diff = v - mean_val;
-                sum_sq_diff += diff * diff;
-            }
-        }
-        Ok(Scalar::Float64(sum_sq_diff / (count as f64 - 1.0)))
+        self.var_ddof(1)
     }
 
     /// Variance with configurable degrees of freedom.
@@ -21291,62 +21058,16 @@ impl Series {
             let clamped = var_ns.clamp(i64::MIN as f64, i64::MAX as f64);
             return Ok(Scalar::Timedelta64(clamped as i64));
         }
+        // A numeric column's variance is pandas' nanvar (a masked one's,
+        // numpy's var over its runs): the mean and the squared deviations
+        // each added in numpy's order (br-frankenpandas-9iim6).
+        if let Some(variance) = self.with_pandas_reductions(|r| r.var(ddof)) {
+            return Ok(Scalar::Float64(variance));
+        }
         let mean_val = match self.mean()? {
             Scalar::Float64(v) => v,
             _ => return Ok(Scalar::Float64(f64::NAN)),
         };
-        // Typed second pass over the contiguous all-valid buffer (count == n);
-        // bit-identical row-order fold, no Scalar materialization (see var()).
-        if let Some(data) = self.column.as_f64_slice() {
-            let mut sum_sq_diff = 0.0_f64;
-            for &v in data {
-                let diff = v - mean_val;
-                sum_sq_diff += diff * diff;
-            }
-            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - ddof as f64)));
-        }
-        // Typed nullable Float64 second pass (mirror of var()'s nullable Float64 arm,
-        // with the `(count - ddof)` divisor): a nullable Float64 column otherwise fell to
-        // the per-element Scalar match over a materialized Vec<Scalar>. Fold `(v-mean)^2`
-        // over the valid slots off the raw `(&[f64], &ValidityMask)`, reusing `mean_val`
-        // from the already-typed `self.mean()`. Bit-identical to the Scalar loop below
-        // (same present values in row order, same `diff * diff` fold, same divisor) —
-        // exactly as var()'s nullable Float64 arm is to its shared generic tail.
-        if let Some((data, validity)) = self.column.as_f64_slice_with_validity() {
-            let mut sum_sq_diff = 0.0_f64;
-            for (i, &v) in data.iter().enumerate() {
-                if validity.get(i) {
-                    let diff = v - mean_val;
-                    sum_sq_diff += diff * diff;
-                }
-            }
-            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - ddof as f64)));
-        }
-        if let Some(data) = self.column.as_i64_slice() {
-            let mut sum_sq_diff = 0.0_f64;
-            for &v in data {
-                let diff = v as f64 - mean_val;
-                sum_sq_diff += diff * diff;
-            }
-            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - ddof as f64)));
-        }
-        // Typed nullable Int64 second pass (sister to var()'s nullable Int64 arm and the
-        // nullable Int64 sum/min/max/median/quantile/skew paths): fold `(v-mean)^2` over
-        // the valid slots off the raw `&[i64]` + validity mask, reusing `mean_val` from
-        // the already-typed `self.mean()`. Bit-identical to the Scalar loop:
-        // `validity.get(i)` is exactly the `!is_missing()` filter for an Int64 cell,
-        // `v as f64 == Scalar::Int64(v).to_f64()`, same present values in row order, the
-        // same `diff * diff` fold and `(count - ddof)` divisor.
-        if let Some((data, validity)) = self.column.as_i64_slice_with_validity() {
-            let mut sum_sq_diff = 0.0_f64;
-            for (i, &v) in data.iter().enumerate() {
-                if validity.get(i) {
-                    let diff = v as f64 - mean_val;
-                    sum_sq_diff += diff * diff;
-                }
-            }
-            return Ok(Scalar::Float64(sum_sq_diff / (count as f64 - ddof as f64)));
-        }
         let mut sum_sq_diff = 0.0_f64;
         for val in self.column.values() {
             if !val.is_missing() {
@@ -26514,6 +26235,11 @@ impl Series {
     ///
     /// Matches `pd.Series.sem()`. Computes `std / sqrt(n)`.
     pub fn sem(&self) -> Result<f64, FrameError> {
+        // pandas' nansem: sqrt(nanvar) / sqrt(count), the variance's sums in
+        // numpy's order (br-frankenpandas-9iim6).
+        if let Some(sem) = self.with_pandas_reductions(|r| r.sem(1)) {
+            return Ok(sem);
+        }
         let (n, _, _, m2) = match self.numeric_moments() {
             Ok(moments) => moments,
             Err(FrameError::CompatibilityRejected(message)) => {
@@ -26540,57 +26266,11 @@ impl Series {
         // (which numeric_values() turns into Err). The Rolling::skew
         // variant already returns NaN correctly in this case (line 8868+).
         //
-        // Typed all-valid Float64 fast path: an `as_f64_slice` column is all-valid
-        // with no NaN, so `numeric_values` would copy the whole buffer into a `vals`
-        // Vec<f64> then re-scan it three times (mean, m2, m3). Compute the mean and a
-        // FUSED single m2/m3 pass straight off the slice — no Vec copy. Bit-identical:
-        // `vals == data` (all present, index order), same `Σ data / n` mean, and m2/m3
-        // are the same `(v-mean).powi(2)`/`.powi(3)` summed in the same order (fusing
-        // two independent sums into one pass changes no term).
-        if let Some(data) = self.column.as_f64_slice() {
-            let count = data.len();
-            if count < 3 {
-                return Ok(f64::NAN);
-            }
-            let n = count as f64;
-            // perf (br-frankenpandas-8s4mb): the mean was `iter().sum()` — the same
-            // 0.0-seeded left-fold `blocked_sum_f64` was written to replace — and the
-            // moments were an ordered scalar loop. Both are now 8-lane blocked. Below
-            // 8 elements both degenerate to the original fold, so every conformance
-            // fixture (all 2-6 elements) keeps its exact bits.
-            let mean = Self::blocked_sum_f64(data) / n;
-            let (m2, m3) = Self::blocked_central_moments_f64::<false>(data, mean);
-            let s2 = m2 / (n - 1.0);
-            if s2 == 0.0 {
-                return Ok(0.0);
-            }
-            let s3 = s2.powf(1.5);
-            return Ok((n / ((n - 1.0) * (n - 2.0))) * (m3 / s3));
-        }
-        // Typed all-valid Int64 fast path (sister to the Float64 arm): compute the
-        // mean and a FUSED m2/m3 pass straight off the raw `&[i64]` (`iv as f64`),
-        // instead of `numeric_values` building an intermediate `Vec<f64>` (v as f64)
-        // that skew then re-scans twice. Bit-identical: `numeric_values` on an
-        // all-valid Int64 column already yields `vals == [v as f64]` and the same
-        // in-order `Σ/n` mean, and the fused m2/m3 sums the same `(v-mean)^{2,3}`
-        // terms in the same index order — fusing two independent sums reorders no
-        // term. Only skips the Vec alloc + one scan.
-        if let Some(data) = self.column.as_i64_slice() {
-            let count = data.len();
-            if count < 3 {
-                return Ok(f64::NAN);
-            }
-            let n = count as f64;
-            // perf (br-frankenpandas-8s4mb): blocked mean + blocked moments, as in
-            // the Float64 arm above; identical below 8 elements.
-            let mean = Self::blocked_sum_i64_as_f64(data) / n;
-            let (m2, m3) = Self::blocked_central_moments_i64::<false>(data, mean);
-            let s2 = m2 / (n - 1.0);
-            if s2 == 0.0 {
-                return Ok(0.0);
-            }
-            let s3 = s2.powf(1.5);
-            return Ok((n / ((n - 1.0) * (n - 2.0))) * (m3 / s3));
+        // A numeric column's skew is pandas' nanskew: its central sums in
+        // numpy's order, `_zero_out_fperr`, and `n * (n - 1) ** 0.5 / (n - 2)`
+        // (br-frankenpandas-9iim6).
+        if let Some(skew) = self.with_pandas_reductions(|r| r.skew()) {
+            return Ok(skew);
         }
         let (count, mean, vals) = match self.numeric_values() {
             Ok(t) => t,
@@ -26627,47 +26307,11 @@ impl Series {
         // Per br-frankenpandas-d1aa3: pandas returns NaN (not Err) when
         // there are too few non-null values. See skew above.
         //
-        // Typed all-valid Float64 fast path (sister to skew): fused mean + m2/m4
-        // single pass off the `as_f64_slice` buffer, no `vals` Vec copy. Bit-identical.
-        if let Some(data) = self.column.as_f64_slice() {
-            let count = data.len();
-            if count < 4 {
-                return Ok(f64::NAN);
-            }
-            let n = count as f64;
-            // perf (br-frankenpandas-8s4mb): blocked mean + blocked moments (fourth
-            // power); identical below 8 elements, where `as_chunks::<8>()` is empty.
-            let mean = Self::blocked_sum_f64(data) / n;
-            let (m2, m4) = Self::blocked_central_moments_f64::<true>(data, mean);
-            let s2 = m2 / (n - 1.0);
-            if s2 == 0.0 {
-                return Ok(0.0);
-            }
-            let adj = (n * (n + 1.0)) / ((n - 1.0) * (n - 2.0) * (n - 3.0));
-            let sub = (3.0 * (n - 1.0).powi(2)) / ((n - 2.0) * (n - 3.0));
-            return Ok(adj * (m4 / (s2 * s2)) - sub);
-        }
-        // Typed all-valid Int64 fast path (mirror of skew): fused mean + m2/m4 pass
-        // off the raw `&[i64]` (`iv as f64`), no intermediate `Vec<f64>`. Bit-
-        // identical to `numeric_values` + the generic m2/m4 scans on an all-valid
-        // Int64 column.
-        if let Some(data) = self.column.as_i64_slice() {
-            let count = data.len();
-            if count < 4 {
-                return Ok(f64::NAN);
-            }
-            let n = count as f64;
-            // perf (br-frankenpandas-8s4mb): blocked mean + blocked moments, mirroring
-            // the Float64 arm; identical below 8 elements.
-            let mean = Self::blocked_sum_i64_as_f64(data) / n;
-            let (m2, m4) = Self::blocked_central_moments_i64::<true>(data, mean);
-            let s2 = m2 / (n - 1.0);
-            if s2 == 0.0 {
-                return Ok(0.0);
-            }
-            let adj = (n * (n + 1.0)) / ((n - 1.0) * (n - 2.0) * (n - 3.0));
-            let sub = (3.0 * (n - 1.0).powi(2)) / ((n - 2.0) * (n - 3.0));
-            return Ok(adj * (m4 / (s2 * s2)) - sub);
+        // A numeric column's kurtosis is pandas' nankurt: its central sums in
+        // numpy's order, `_zero_out_fperr`, 0 for a vanishing denominator
+        // (br-frankenpandas-9iim6).
+        if let Some(kurt) = self.with_pandas_reductions(|r| r.kurt()) {
+            return Ok(kurt);
         }
         let (count, mean, vals) = match self.numeric_values() {
             Ok(t) => t,
@@ -27864,14 +27508,20 @@ impl Series {
         let (mean, std, min, max) = if floats.is_empty() {
             (f64::NAN, f64::NAN, f64::NAN, f64::NAN)
         } else {
-            let sum: f64 = floats.iter().sum();
-            let mean = sum / count;
-            let std = if floats.len() > 1 {
-                let var = floats.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (count - 1.0);
-                var.sqrt()
-            } else {
-                f64::NAN
-            };
+            // pandas' describe is the Series' own mean and std, added in
+            // numpy's order (br-frankenpandas-9iim6).
+            let (mean, std) = self
+                .with_pandas_reductions(|r| (r.mean(), r.std(1)))
+                .unwrap_or_else(|| {
+                    let mean = floats.iter().sum::<f64>() / count;
+                    let std = if floats.len() > 1 {
+                        let squares = floats.iter().map(|v| (v - mean).powi(2)).sum::<f64>();
+                        (squares / (count - 1.0)).sqrt()
+                    } else {
+                        f64::NAN
+                    };
+                    (mean, std)
+                });
             let min = floats.iter().copied().fold(f64::INFINITY, f64::min);
             let max = floats.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             (mean, std, min, max)
@@ -30282,7 +29932,8 @@ impl Series {
     /// Matches `series.rolling(window, min_periods=None)`.
     pub fn rolling(&self, window: usize, min_periods: Option<usize>) -> Rolling<'_> {
         Rolling {
-            series: self,
+            series: window_values(self),
+            source: self,
             window,
             min_periods: min_periods.unwrap_or(window),
             center: false,
@@ -30380,7 +30031,8 @@ impl Series {
         center: bool,
     ) -> Rolling<'_> {
         Rolling {
-            series: self,
+            series: window_values(self),
+            source: self,
             window,
             min_periods: min_periods.unwrap_or(window),
             center,
@@ -30393,7 +30045,8 @@ impl Series {
     /// Matches `pd.Series.rolling(window, center=True)`.
     pub fn rolling_center(&self, window: usize, min_periods: Option<usize>) -> Rolling<'_> {
         Rolling {
-            series: self,
+            series: window_values(self),
+            source: self,
             window,
             min_periods: min_periods.unwrap_or(window),
             center: true,
@@ -30406,7 +30059,8 @@ impl Series {
     /// Matches `series.expanding(min_periods=1)`.
     pub fn expanding(&self, min_periods: Option<usize>) -> Expanding<'_> {
         Expanding {
-            series: self,
+            series: window_values(self),
+            source: self,
             min_periods: min_periods.unwrap_or(1),
         }
     }
@@ -30474,7 +30128,7 @@ impl Series {
             }
         };
         Ewm {
-            series: self,
+            series: window_values(self),
             alpha: validated_alpha,
             adjust,
             min_periods,
@@ -31170,7 +30824,9 @@ impl Series {
         Ok((cross / denom, ss_x / denom, ss_y / denom, count))
     }
 
-    fn aligned_numeric_pairs(&self, other: &Self) -> Result<Vec<(f64, f64)>, FrameError> {
+    /// The `(self, other)` value pairs pandas' `corr` reads: the two aligned
+    /// inner-wise, a pair kept where both are present numbers.
+    pub fn aligned_numeric_pairs(&self, other: &Self) -> Result<Vec<(f64, f64)>, FrameError> {
         let (left, right) = self.align(other, AlignMode::Inner)?;
         Ok(left
             .values()
@@ -31917,9 +31573,11 @@ impl Series {
 
     /// [`Self::category_codes`] as an Int64 column (-1 where missing).
     fn category_codes_column(&self) -> Result<Column, FrameError> {
-        self.category_codes().map(Column::from_i64_values).ok_or_else(|| {
-            FrameError::CompatibilityRejected("the Series is not categorical".to_owned())
-        })
+        self.category_codes()
+            .map(Column::from_i64_values)
+            .ok_or_else(|| {
+                FrameError::CompatibilityRejected("the Series is not categorical".to_owned())
+            })
     }
 
     /// A categorical Series whose row `i` is category `codes[i]` of `meta`
@@ -32268,13 +31926,75 @@ impl RollingOrderStat {
     }
 }
 
+/// What pandas' window kernels read (`BaseWindow._prep_values`): the values
+/// with +-inf as NaN, in every rolling / expanding / ewm aggregation.
+/// Borrowed when the column holds no infinity (an all-valid float64 column
+/// answers from its cached all-finite witness).
+fn window_values(series: &Series) -> std::borrow::Cow<'_, Series> {
+    use std::borrow::Cow;
+    let column = series.column();
+    if column.dtype() != DType::Float64
+        || column.as_f64_finite_arc_view_source(column.len()).is_some()
+    {
+        return Cow::Borrowed(series);
+    }
+    // A branch-free OR over each block vectorizes; `any` stops per value.
+    let has_infinite = |data: &[f64]| {
+        data.chunks(256).any(|block| {
+            block
+                .iter()
+                .fold(false, |seen, value| seen | value.is_infinite())
+        })
+    };
+    let floats: Vec<f64> = if let Some(data) = column.as_f64_slice() {
+        if !has_infinite(data) {
+            return Cow::Borrowed(series);
+        }
+        data.to_vec()
+    } else if let Some((data, validity)) = column.as_f64_slice_with_validity() {
+        if !has_infinite(data) {
+            return Cow::Borrowed(series);
+        }
+        data.iter()
+            .enumerate()
+            .map(|(i, &value)| if validity.get(i) { value } else { f64::NAN })
+            .collect()
+    } else {
+        let values = column.values();
+        if !values
+            .iter()
+            .any(|value| matches!(value, Scalar::Float64(v) if v.is_infinite()))
+        {
+            return Cow::Borrowed(series);
+        }
+        values
+            .iter()
+            .map(|value| value.to_f64().unwrap_or(f64::NAN))
+            .collect()
+    };
+    let cleaned = floats
+        .into_iter()
+        .map(|value| if value.is_infinite() { f64::NAN } else { value })
+        .collect();
+    Cow::Owned(Series {
+        name: series.name.clone(),
+        index: series.index.clone(),
+        column: Column::from_f64_values(cleaned),
+        categorical: None,
+        sparse: None,
+    })
+}
+
 /// Rolling window aggregation over a Series.
 ///
 /// Created by `Series::rolling()`. Provides methods for computing
 /// rolling statistics over a sliding window.
 #[derive(Debug)]
 pub struct Rolling<'a> {
-    series: &'a Series,
+    /// The values the window kernels read ([`window_values`]).
+    series: std::borrow::Cow<'a, Series>,
+    /// The Series as given, which `count` reads (pandas counts an inf).
+    source: &'a Series,
     window: usize,
     min_periods: usize,
     center: bool,
@@ -32514,15 +32234,6 @@ impl Default for RollingVarianceState {
 }
 
 impl RollingVarianceState {
-    fn reset(&mut self) {
-        self.mean = 0.0;
-        self.m2 = 0.0;
-        self.compensation_add = 0.0;
-        self.compensation_remove = 0.0;
-        self.consecutive_same = 0;
-        self.previous_value = f64::NAN;
-    }
-
     fn add(&mut self, value: f64) {
         if value == self.previous_value {
             self.consecutive_same += 1;
@@ -32547,7 +32258,10 @@ impl RollingVarianceState {
 
         self.nobs -= 1;
         if self.nobs == 0 {
-            self.reset();
+            // pandas' roll_var empties only the moments; the compensations and
+            // the run of equal values carry on (br-frankenpandas-n026a).
+            self.mean = 0.0;
+            self.m2 = 0.0;
             return;
         }
 
@@ -32815,153 +32529,25 @@ fn expanding_moment_output(
     }
 }
 
-#[derive(Default)]
-struct RollingPairwiseMomentState {
-    nobs: usize,
-    sum_x: f64,
-    sum_y: f64,
-    sum_x2: f64,
-    sum_y2: f64,
-    sum_xy: f64,
-    distinct_x: BTreeMap<u64, usize>,
-    distinct_y: BTreeMap<u64, usize>,
-}
-
-impl RollingPairwiseMomentState {
-    fn add(&mut self, x: f64, y: f64) {
-        self.nobs += 1;
-        self.sum_x += x;
-        self.sum_y += y;
-        self.sum_x2 += x * x;
-        self.sum_y2 += y * y;
-        self.sum_xy += x * y;
-        *self
-            .distinct_x
-            .entry(RollingMomentState::value_key(x))
-            .or_insert(0) += 1;
-        *self
-            .distinct_y
-            .entry(RollingMomentState::value_key(y))
-            .or_insert(0) += 1;
+/// A column's values as pandas' window cov / corr read them: float64, NaN
+/// where a value is missing or not a number (a Timedelta as its
+/// nanoseconds).
+fn pairwise_floats(column: &Column) -> Vec<f64> {
+    if let Some(data) = column.as_f64_slice() {
+        return data.to_vec();
     }
-
-    fn remove(&mut self, x: f64, y: f64) {
-        if self.nobs == 0 {
-            return;
-        }
-        self.nobs -= 1;
-        self.sum_x -= x;
-        self.sum_y -= y;
-        self.sum_x2 -= x * x;
-        self.sum_y2 -= y * y;
-        self.sum_xy -= x * y;
-        Self::dec_count(&mut self.distinct_x, RollingMomentState::value_key(x));
-        Self::dec_count(&mut self.distinct_y, RollingMomentState::value_key(y));
+    if let Some((data, validity)) = column.as_f64_slice_with_validity() {
+        return data
+            .iter()
+            .enumerate()
+            .map(|(i, &value)| if validity.get(i) { value } else { f64::NAN })
+            .collect();
     }
-
-    fn dec_count(counts: &mut BTreeMap<u64, usize>, key: u64) {
-        if let Some(count) = counts.get_mut(&key) {
-            *count -= 1;
-            if *count == 0 {
-                counts.remove(&key);
-            }
-        }
-    }
-
-    fn constant_x(&self) -> bool {
-        self.nobs > 0 && self.distinct_x.len() <= 1
-    }
-
-    fn constant_y(&self) -> bool {
-        self.nobs > 0 && self.distinct_y.len() <= 1
-    }
-
-    fn cov_num(&self) -> f64 {
-        let n = self.nobs as f64;
-        self.sum_xy - (self.sum_x * self.sum_y) / n
-    }
-
-    fn var_x_num(&self) -> f64 {
-        let n = self.nobs as f64;
-        self.sum_x2 - (self.sum_x * self.sum_x) / n
-    }
-
-    fn var_y_num(&self) -> f64 {
-        let n = self.nobs as f64;
-        self.sum_y2 - (self.sum_y * self.sum_y) / n
-    }
-
-    /// Update only the sums (no `distinct` multisets). Used by the no-null fast
-    /// path, which tracks per-axis constancy via running consecutive-same-value
-    /// counters (pandas' O(1) trick) instead.
-    fn add_sums(&mut self, x: f64, y: f64) {
-        self.nobs += 1;
-        self.sum_x += x;
-        self.sum_y += y;
-        self.sum_x2 += x * x;
-        self.sum_y2 += y * y;
-        self.sum_xy += x * y;
-    }
-
-    fn remove_sums(&mut self, x: f64, y: f64) {
-        if self.nobs == 0 {
-            return;
-        }
-        self.nobs -= 1;
-        self.sum_x -= x;
-        self.sum_y -= y;
-        self.sum_x2 -= x * x;
-        self.sum_y2 -= y * y;
-        self.sum_xy -= x * y;
-    }
-
-    /// pandas' window cov (`sum((x - mx)(y - my)) / (nobs - ddof)`) or corr
-    /// (the cov over the ddof standard deviations, so ddof cancels but for
-    /// NaN where `nobs <= ddof`); ddof 1 leaves one observation NaN.
-    #[allow(clippy::cast_precision_loss)] // window counts
-    fn output(
-        &self,
-        min_periods: usize,
-        want_corr: bool,
-        constant_x: bool,
-        constant_y: bool,
-        ddof: usize,
-    ) -> Scalar {
-        if self.nobs < min_periods || self.nobs == 0 || (self.nobs < 2 && ddof >= 1) {
-            return Scalar::Null(NullKind::NaN);
-        }
-        if want_corr && self.nobs <= ddof {
-            return Scalar::Null(NullKind::NaN);
-        }
-        if !want_corr && (constant_x || constant_y) {
-            return if self.nobs <= ddof {
-                Scalar::Null(NullKind::NaN)
-            } else {
-                Scalar::Float64(0.0)
-            };
-        }
-        if want_corr && (constant_x || constant_y) {
-            return Scalar::Null(NullKind::NaN);
-        }
-
-        let cov_num = self.cov_num();
-        if want_corr {
-            let var_x = self.var_x_num();
-            let var_y = self.var_y_num();
-            if var_x <= 0.0 || var_y <= 0.0 {
-                Scalar::Null(NullKind::NaN)
-            } else {
-                let corr = cov_num / (var_x.sqrt() * var_y.sqrt());
-                if (1.0 - corr.abs()).abs() <= 1.0e-12 {
-                    Scalar::Float64(corr.signum())
-                } else {
-                    Scalar::Float64(corr)
-                }
-            }
-        } else {
-            Scalar::Float64(cov_num / (self.nobs as f64 - ddof as f64))
-        }
-    }
+    column
+        .values()
+        .iter()
+        .map(|value| Series::pairwise_numeric_value(value).unwrap_or(f64::NAN))
+        .collect()
 }
 
 /// Max window width for the cache-hot sorted-multiset rolling order-statistic
@@ -32977,7 +32563,8 @@ impl<'a> Rolling<'a> {
     /// `validate()` and the kernel-selection thresholds well-defined.
     fn with_bounds(series: &'a Series, bounds: Vec<(usize, usize)>, min_periods: usize) -> Self {
         Rolling {
-            series,
+            series: window_values(series),
+            source: series,
             window: series.len().max(min_periods).max(1),
             min_periods,
             center: false,
@@ -32987,6 +32574,13 @@ impl<'a> Rolling<'a> {
 }
 
 impl Rolling<'_> {
+    /// The Series every window function reads: the source with +-inf as
+    /// NaN, as pandas' `_prep_values` hands it to its kernels and to `apply`.
+    #[must_use]
+    pub fn prepared(&self) -> &Series {
+        &self.series
+    }
+
     fn validate(&self) -> Result<(), FrameError> {
         if self.window == 0 {
             return Err(FrameError::CompatibilityRejected(
@@ -33546,7 +33140,7 @@ impl Rolling<'_> {
     /// number of non-nulls (which can be 0).
     pub fn count(&self) -> Result<Series, FrameError> {
         self.validate()?;
-        let vals = self.series.column().values();
+        let vals = self.source.column().values();
         let len = vals.len();
         let mut out = Vec::with_capacity(len);
 
@@ -33646,17 +33240,26 @@ impl Rolling<'_> {
 
         for i in 0..len {
             let (start, end) = self.window_bounds(i, len);
-            while r < end {
-                if let Some(value) = value_at(r) {
-                    state.add(value);
-                }
-                r += 1;
+            // pandas' roll_var: a window sharing nothing with the previous one
+            // starts over; otherwise the leaving values come out BEFORE the
+            // entering ones go in - adding first differs in the last bits at
+            // almost every position (br-frankenpandas-n026a).
+            if start >= r {
+                state = RollingVarianceState::default();
+                l = start;
+                r = start;
             }
             while l < start {
                 if let Some(value) = value_at(l) {
                     state.remove(value);
                 }
                 l += 1;
+            }
+            while r < end {
+                if let Some(value) = value_at(r) {
+                    state.add(value);
+                }
+                r += 1;
             }
             match state.output(self.min_periods, ddof, kind) {
                 Scalar::Float64(v) => {
@@ -34099,206 +33702,86 @@ impl Rolling<'_> {
                 Some(self.series.align(other, AlignMode::Left)?.1)
             };
         let aligned_other: &Series = aligned_owned.as_ref().unwrap_or(other);
-        // Typed all-valid (both no-NaN) fast path: run the sliding pairwise
-        // power-sum recurrence over the two raw &[f64], skipping the two 1M
-        // Vec<Scalar>, the 1M Vec<Option<(f64,f64)>> pairs buffer, and the
-        // 32B/cell Vec<Scalar> output. Bit-identical to the clean path below
-        // (same add_sums/remove_sums/output + per-axis consecutive-equal
-        // counters; both all-valid no-NaN => every pair observed). Undefined rows
-        // become NaN -> validity-missing, matching the Scalar Null/Float64(NaN).
-        // Shared sliding pairwise power-sum kernel over two &[f64] (used by both the
-        // all-valid Float64 borrow arm and the all-valid Int64 `v as f64` arm below).
-        // Both gates are all-valid no-NaN, so every pair is observed — bit-identical to
-        // the clean Scalar path (same add_sums/remove_sums/output + per-axis run
-        // counters). Undefined rows become NaN -> validity-missing.
-        let compute = |a: &[f64], b: &[f64]| -> Vec<f64> {
-            let len = a.len();
-            let mut out = Vec::with_capacity(len);
-            let mut state = RollingPairwiseMomentState::default();
-            let mut left = 0_usize;
-            let mut right = 0_usize;
-            let mut run_x = 0_usize;
-            let mut run_y = 0_usize;
-            let mut prev_x = f64::NAN;
-            let mut prev_y = f64::NAN;
-            for i in 0..len {
-                let (start, end) = self.window_bounds(i, len);
-                while right < end {
-                    let (x, y) = (a[right], b[right]);
-                    state.add_sums(x, y);
-                    if x == prev_x {
-                        run_x += 1;
-                    } else {
-                        run_x = 1;
-                        prev_x = x;
-                    }
-                    if y == prev_y {
-                        run_y += 1;
-                    } else {
-                        run_y = 1;
-                        prev_y = y;
-                    }
-                    right += 1;
-                }
-                while left < start {
-                    state.remove_sums(a[left], b[left]);
-                    left += 1;
-                }
-                let cx = state.nobs > 0 && run_x >= state.nobs;
-                let cy = state.nobs > 0 && run_y >= state.nobs;
-                out.push(
-                    match state.output(self.min_periods, want_corr, cx, cy, ddof) {
-                        Scalar::Float64(f) => f,
-                        _ => f64::NAN,
-                    },
-                );
+        // pandas' window cov / corr are its window means and variances
+        // composed, each side NaN where the other is missing or infinite (its
+        // prep_binary, then _prep_values):
+        //   cov  = (mean(x*y) - mean(x) * mean(y)) * n / (n - ddof)
+        //   corr = cov / sqrt(var(x) * var(y))
+        // with n the pairs a window holds. Measured against live pandas 2.2.3,
+        // 0 mismatches over 180 random cases (count, time-based and centred
+        // windows, NaN, min_periods, ddof 0 / 1, cov and corr); the online
+        // co-moment state this replaces missed the last bits.
+        let (mut xs, mut ys) = (
+            pairwise_floats(self.series.column()),
+            pairwise_floats(aligned_other.column()),
+        );
+        for (x, y) in xs.iter_mut().zip(ys.iter_mut()) {
+            if !x.is_finite() || !y.is_finite() {
+                (*x, *y) = (f64::NAN, f64::NAN);
             }
-            out
-        };
-        if let (Some(a), Some(b)) = (
-            self.series.column().as_f64_slice(),
-            aligned_other.column().as_f64_slice(),
-        ) {
-            let out = compute(a, b);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
         }
-        // Typed both-all-valid-Int64 fast path (sister to the Float64 arm above; mirror
-        // of Ewm::cov's both-Int64 arm): two all-valid Int64 columns otherwise
-        // materialized both via `.values()`. Map each `v as f64` off the raw `&[i64]`
-        // and run the SAME `compute` kernel. Bit-identical on all-valid Int64 inputs
-        // (every pair observed, `to_f64(Int64(v)) == v as f64`, same recurrence, same
-        // `from_f64_values`).
-        if let (Some(da), Some(db)) = (
-            self.series.column().as_i64_slice(),
-            aligned_other.column().as_i64_slice(),
-        ) {
-            let a: Vec<f64> = da.iter().map(|&v| v as f64).collect();
-            let b: Vec<f64> = db.iter().map(|&v| v as f64).collect();
-            let out = compute(&a, &b);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        // Mixed all-valid Float64/Int64 fast paths (sisters to the both-typed arms): the
-        // generic path below materializes BOTH columns even when one is a borrowable
-        // Float64 slice. Borrow the Float64 side, build the Int64 side's f64 view
-        // (`v as f64`), and run the SAME `compute` kernel. Bit-identical on all-valid
-        // inputs (every pair observed, `to_f64(Int64(v)) == v as f64`).
-        if let (Some(a), Some(db)) = (
-            self.series.column().as_f64_slice(),
-            aligned_other.column().as_i64_slice(),
-        ) {
-            let b: Vec<f64> = db.iter().map(|&v| v as f64).collect();
-            let out = compute(a, &b);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        if let (Some(da), Some(b)) = (
-            self.series.column().as_i64_slice(),
-            aligned_other.column().as_f64_slice(),
-        ) {
-            let a: Vec<f64> = da.iter().map(|&v| v as f64).collect();
-            let out = compute(&a, b);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        let a_vals = self.series.column().values();
-        let b_vals = aligned_other.column().values();
-        let len = a_vals.len();
-        let pairs: Vec<Option<(f64, f64)>> = (0..len)
-            .map(|idx| {
-                Some((
-                    Series::pairwise_numeric_value(&a_vals[idx])?,
-                    Series::pairwise_numeric_value(&b_vals[idx])?,
-                ))
-            })
-            .collect();
-        let mut out = Vec::with_capacity(len);
-        let mut state = RollingPairwiseMomentState::default();
-        let mut left = 0_usize;
-        let mut right = 0_usize;
-
-        // No-NaN / no-missing fast path (br-frankenpandas-1q4q4): the per-axis
-        // `distinct_x`/`distinct_y` BTreeMaps exist only for `constant_x()`/
-        // `constant_y()` (cov→0 / corr→NaN on a constant axis), and maintaining
-        // them every step was the whole cost (rolling cov @w=100 was 0.11×
-        // pandas). For clean, contiguous data an axis is constant iff its
-        // trailing run of equal values covers the window — pandas' O(1)
-        // consecutive-same-value counter; `run >= nobs` is BIT-IDENTICAL to
-        // `distinct.len() <= 1` (no nulls interrupt the run, `==` matches
-        // `value_key` incl. −0.0==0.0). NaN/missing keep the multiset path.
-        let all_clean = pairs
-            .iter()
-            .all(|p| matches!(p, Some((x, y)) if !x.is_nan() && !y.is_nan()));
-        if all_clean {
-            let mut run_x = 0_usize;
-            let mut run_y = 0_usize;
-            let mut prev_x = f64::NAN;
-            let mut prev_y = f64::NAN;
-            for i in 0..len {
-                let (start, end) = self.window_bounds(i, len);
-                while right < end {
-                    if let Some((x, y)) = pairs[right] {
-                        state.add_sums(x, y);
-                        if x == prev_x {
-                            run_x += 1;
-                        } else {
-                            run_x = 1;
-                            prev_x = x;
-                        }
-                        if y == prev_y {
-                            run_y += 1;
-                        } else {
-                            run_y = 1;
-                            prev_y = y;
-                        }
-                    }
-                    right += 1;
-                }
-                while left < start {
-                    if let Some((x, y)) = pairs[left] {
-                        state.remove_sums(x, y);
-                    }
-                    left += 1;
-                }
-                let cx = state.nobs > 0 && run_x >= state.nobs;
-                let cy = state.nobs > 0 && run_y >= state.nobs;
-                out.push(state.output(self.min_periods, want_corr, cx, cy, ddof));
-            }
-            let index = self.series.index().clone();
-            // Float64 even when every window is undefined (all-NaN inferred
-            // object).
-            let column = Column::new(DType::Float64, out)?;
-            return Series::new(self.series.name(), index, column);
-        }
-
+        let len = xs.len();
+        let mut pairs = Vec::with_capacity(len);
+        let (mut left, mut right, mut held) = (0_usize, 0_usize, 0_usize);
         for i in 0..len {
-            // Use the shared window bounds so `center=True` is honored exactly
-            // like the other rolling aggregations (br-frankenpandas-rcvcn);
-            // pandas emits a value when valid_count >= min_periods.
             let (start, end) = self.window_bounds(i, len);
-            while right < end {
-                if let Some((x, y)) = pairs[right] {
-                    state.add(x, y);
-                }
-                right += 1;
-            }
-            while left < start {
-                if let Some((x, y)) = pairs[left] {
-                    state.remove(x, y);
-                }
-                left += 1;
-            }
-            let cx = state.constant_x();
-            let cy = state.constant_y();
-            out.push(state.output(self.min_periods, want_corr, cx, cy, ddof));
+            let present = |slots: &[f64]| slots.iter().filter(|x| !x.is_nan()).count();
+            held += present(&xs[right.min(end)..end]);
+            right = right.max(end);
+            held -= present(&xs[left..start.max(left)]);
+            left = left.max(start);
+            pairs.push(held as f64);
         }
-
-        // Per br-frankenpandas-yk50z: pandas rolling cov/corr preserves source
-        // axis name. Inline impl, not via apply_rolling. Float64 even when
-        // every window is undefined (all-NaN inferred object).
+        let products: Vec<f64> = xs.iter().zip(&ys).map(|(x, y)| x * y).collect();
         let index = self.series.index().clone();
-        let column = Column::new(DType::Float64, out)?;
+        let series = |values: Vec<f64>| {
+            Series::new(
+                self.series.name(),
+                index.clone(),
+                Column::from_f64_values(values),
+            )
+        };
+        let (x, y, xy) = (series(xs)?, series(ys)?, series(products)?);
+        let over = |series: &Series, var: bool| -> Result<Vec<f64>, FrameError> {
+            let windows = Rolling {
+                series: std::borrow::Cow::Borrowed(series),
+                source: series,
+                window: self.window,
+                min_periods: self.min_periods,
+                center: self.center,
+                bounds: self.bounds.clone(),
+            };
+            let out = if var {
+                windows.var_ddof(ddof)?
+            } else {
+                windows.mean()?
+            };
+            Ok(pairwise_floats(out.column()))
+        };
+        let (mean_xy, mean_x, mean_y) = (over(&xy, false)?, over(&x, false)?, over(&y, false)?);
+        #[allow(clippy::cast_precision_loss)] // pandas' float ddof
+        let float_ddof = ddof as f64;
+        let mut out: Vec<f64> = (0..len)
+            .map(|i| (mean_xy[i] - mean_x[i] * mean_y[i]) * (pairs[i] / (pairs[i] - float_ddof)))
+            .collect();
+        if want_corr {
+            let (var_x, var_y) = (over(&x, true)?, over(&y, true)?);
+            for (i, value) in out.iter_mut().enumerate() {
+                *value /= (var_x[i] * var_y[i]).sqrt();
+            }
+        }
+        // Per br-frankenpandas-yk50z: pandas rolling cov/corr preserves source
+        // axis name; Float64 even when every window is undefined, which is
+        // missing (NaN): 0.0 under a cleared bit reads back `Null(NaN)`, as
+        // `rolling_var_online`'s output.
+        let mut defined = fp_columnar::ValidityMask::all_valid(len);
+        for (i, value) in out.iter_mut().enumerate() {
+            if value.is_nan() {
+                defined.set(i, false);
+                *value = 0.0;
+            }
+        }
+        let column = Column::from_f64_values_with_validity(out, defined);
         Series::new(self.series.name(), index, column)
     }
 
@@ -34494,8 +33977,8 @@ impl Rolling<'_> {
                 //
                 // rank()'s defaults here are method='average', ascending=True,
                 // na_option='keep', matching the groupby routings in this file.
-                "corr" => self.corr(self.series)?,
-                "cov" => self.cov(self.series)?,
+                "corr" => self.corr(self.source)?,
+                "cov" => self.cov(self.source)?,
                 "rank" => self.rank("average", true, "keep")?,
                 _ => {
                     return Err(FrameError::CompatibilityRejected(format!(
@@ -34531,6 +34014,11 @@ impl Rolling<'_> {
     /// std/var rather than the O(n·w) per-window two-pass re-fold
     /// (br-frankenpandas-g6qa2).
     pub fn sem(&self) -> Result<Series, FrameError> {
+        // pandas divides by its count, which counts an inf the window values
+        // read as NaN: with one present, its std over sqrt(count - 1).
+        if !std::ptr::eq(&*self.series, self.source) {
+            return sem_of(&self.std()?, &self.count()?, 1);
+        }
         self.rolling_var_online(1, VarOutputKind::Sem)
     }
 
@@ -34989,7 +34477,10 @@ impl Rolling<'_> {
 /// Created by `Series::expanding()`. All prior elements are included
 /// in each window computation.
 pub struct Expanding<'a> {
-    series: &'a Series,
+    /// The values the window kernels read ([`window_values`]).
+    series: std::borrow::Cow<'a, Series>,
+    /// The Series as given, which `count` reads (pandas counts an inf).
+    source: &'a Series,
     min_periods: usize,
 }
 
@@ -35073,18 +34564,26 @@ impl Expanding<'_> {
         if self.min_periods <= 1
             && let Some(data) = self.series.column().as_f64_slice()
         {
-            let mut out = Vec::with_capacity(data.len());
+            // collect() over the slice, not push(): with a push the
+            // accumulator round-tripped through the stack every row, a
+            // store-forward in the add chain whose cost moved with code layout.
             let mut acc = -0.0_f64;
-            let mut count = 0_usize;
-            for &v in data {
-                acc += v;
-                count += 1;
-                if is_mean {
-                    out.push(acc / count as f64);
-                } else {
-                    out.push(acc);
-                }
-            }
+            let out: Vec<f64> = if is_mean {
+                data.iter()
+                    .enumerate()
+                    .map(|(i, &v)| {
+                        acc += v;
+                        acc / (i + 1) as f64
+                    })
+                    .collect()
+            } else {
+                data.iter()
+                    .map(|&v| {
+                        acc += v;
+                        acc
+                    })
+                    .collect()
+            };
             let index = self.series.index().clone();
             // All emitted values are finite (acc / acc-over-count of all-valid
             // no-NaN input, min_periods<=1) ⇒ MOVE the hot output Vec into the
@@ -35105,18 +34604,24 @@ impl Expanding<'_> {
         if self.min_periods <= 1
             && let Some(data) = self.series.column().as_i64_slice()
         {
-            let mut out = Vec::with_capacity(data.len());
+            // collect(), not push() (see the Float64 arm).
             let mut acc = -0.0_f64;
-            let mut count = 0_usize;
-            for &v in data {
-                acc += v as f64;
-                count += 1;
-                if is_mean {
-                    out.push(acc / count as f64);
-                } else {
-                    out.push(acc);
-                }
-            }
+            let out: Vec<f64> = if is_mean {
+                data.iter()
+                    .enumerate()
+                    .map(|(i, &v)| {
+                        acc += v as f64;
+                        acc / (i + 1) as f64
+                    })
+                    .collect()
+            } else {
+                data.iter()
+                    .map(|&v| {
+                        acc += v as f64;
+                        acc
+                    })
+                    .collect()
+            };
             let index = self.series.index().clone();
             return Series::new(
                 self.series.name(),
@@ -35303,10 +34808,17 @@ impl Expanding<'_> {
     /// `min_periods > len` request — both of which expanding allows and which
     /// the per-window emission (`Null(NaN)` until `nobs >= min_periods`) handles
     /// unchanged. Bit-faithful to pandas' compensated `roll_var`.
+    /// The Series every expanding function reads ([`Rolling::prepared`]).
+    #[must_use]
+    pub fn prepared(&self) -> &Series {
+        &self.series
+    }
+
     fn as_full_window_rolling(&self) -> Rolling<'_> {
         let len = self.series.column().len();
         Rolling {
-            series: self.series,
+            series: std::borrow::Cow::Borrowed(&*self.series),
+            source: self.source,
             window: len.max(self.min_periods).max(1),
             min_periods: self.min_periods,
             center: false,
@@ -35461,7 +34973,7 @@ impl Expanding<'_> {
     ///
     /// Matches `series.expanding().count()`.
     pub fn count(&self) -> Result<Series, FrameError> {
-        let vals = self.series.column().values();
+        let vals = self.source.column().values();
         let mut running = 0_usize;
         let mut out = Vec::with_capacity(vals.len());
 
@@ -35657,23 +35169,10 @@ impl Expanding<'_> {
         self.expanding_bivariate(other, false, ddof)
     }
 
-    /// O(n) online bivariate sweep backing expanding `cov`/`corr`
-    /// (br-frankenpandas-1wc0n).
-    ///
-    /// The historical paths re-folded the whole prefix `[0, i]` every step
-    /// (two-pass means + cross/var sums) - O(n^2). The expanding window only
-    /// appends, so a single Welford bivariate accumulator maintains the running
-    /// means and the co-moment `Cab` plus per-variable `M2a`/`M2b`, giving
-    /// `cov = Cab/(nobs-1)` and `corr = Cab/sqrt(M2a*M2b)` in
-    /// O(n). Only pairs where BOTH values are present/numeric are admitted
-    /// (pairwise NaN skip), and `min_periods.max(2)` gates emission - identical
-    /// membership and gating to the per-step path; only the summation order
-    /// changes. A fully constant input leaves `M2a`/`M2b` exactly 0 (`da == 0`),
-    /// so the `std == 0 -> NaN` guard is reproduced. Expanding cov/corr are
-    /// tolerance-tested (no bit-goldens), so the reassociated sums are in-spec.
-    /// `ddof` is pandas' (cov over `nobs - ddof`; corr NaN where
-    /// `nobs <= ddof`, the ddof cancelling otherwise).
-    #[allow(clippy::cast_precision_loss)] // window counts
+    /// pandas' expanding cov / corr: its rolling ones over the growing window
+    /// (pandas' composition of window means and variances; see
+    /// [`Rolling::rolling_pairwise_moment`]). The Welford co-moment sweep this
+    /// replaced missed pandas' last bits.
     fn expanding_bivariate(
         &self,
         other: &Series,
@@ -35686,125 +35185,8 @@ impl Expanding<'_> {
                 column_len: other.len(),
             });
         }
-        // Typed all-valid fast path — each column an all-valid Float64 (borrow its
-        // `&[f64]`) or all-valid Int64 (map `v as f64` once), INCLUDING a MIXED
-        // Int64×Float64 pair: run the online bivariate Welford recurrence over the
-        // two f64 views, skipping the two n-element Vec<Scalar> materializations +
-        // per-element is_missing/to_f64 dispatch that dominated expanding cov/corr
-        // (~0.5-0.8x pandas). Bit-identical to the Scalar path below: an all-valid
-        // no-NaN column (`as_f64_slice` => validity.all() + fp clears the validity
-        // bit for any NaN, so no present-NaN slot; `as_i64_slice` is never NaN) makes
-        // every row an observation, so nobs/mean/m2/cab evolve identically, and
-        // `to_f64(Int64(v)) == v as f64`. Undefined rows (pre-min_pairs or zero-std
-        // corr) push f64::NAN, which `from_f64_values` renders as the same
-        // `Null(NaN)` the Scalar arm pushes; finite results render as `Float64`.
-        // A local `fn` (not a closure): elision ties the `Cow<'_>` output to `col`.
-        fn view(col: &Column) -> Option<std::borrow::Cow<'_, [f64]>> {
-            if let Some(d) = col.as_f64_slice() {
-                Some(std::borrow::Cow::Borrowed(d))
-            } else {
-                col.as_i64_slice()
-                    .map(|d| std::borrow::Cow::Owned(d.iter().map(|&v| v as f64).collect()))
-            }
-        }
-        if let (Some(av_view), Some(bv_view)) = (view(self.series.column()), view(other.column())) {
-            let (a, b) = (av_view.as_ref(), bv_view.as_ref());
-            let len = a.len();
-            let min_pairs = self.min_periods.max(if ddof == 0 { 1 } else { 2 });
-            let mut out = Vec::with_capacity(len);
-            let mut nobs: usize = 0;
-            let mut mean_a = 0.0_f64;
-            let mut mean_b = 0.0_f64;
-            let mut m2a = 0.0_f64;
-            let mut m2b = 0.0_f64;
-            let mut cab = 0.0_f64;
-            for j in 0..len {
-                let (av, bv) = (a[j], b[j]);
-                nobs += 1;
-                let da = av - mean_a;
-                mean_a += da / nobs as f64;
-                let db = bv - mean_b;
-                mean_b += db / nobs as f64;
-                m2a += da * (av - mean_a);
-                m2b += db * (bv - mean_b);
-                cab += da * (bv - mean_b);
-                if nobs < min_pairs {
-                    out.push(f64::NAN);
-                    continue;
-                }
-                let denom = nobs as f64 - ddof as f64;
-                if want_corr {
-                    let std_a = (m2a / denom).sqrt();
-                    let std_b = (m2b / denom).sqrt();
-                    if nobs <= ddof || std_a == 0.0 || std_b == 0.0 {
-                        out.push(f64::NAN);
-                    } else {
-                        out.push((cab / denom) / (std_a * std_b));
-                    }
-                } else {
-                    out.push(cab / denom);
-                }
-            }
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        let a_vals = self.series.column().values();
-        let b_vals = other.column().values();
-        let len = a_vals.len();
-        let min_pairs = self.min_periods.max(if ddof == 0 { 1 } else { 2 });
-        let mut out = Vec::with_capacity(len);
-
-        let mut nobs: usize = 0;
-        let mut mean_a = 0.0_f64;
-        let mut mean_b = 0.0_f64;
-        let mut m2a = 0.0_f64;
-        let mut m2b = 0.0_f64;
-        let mut cab = 0.0_f64;
-
-        for j in 0..len {
-            let a = if a_vals[j].is_missing() {
-                None
-            } else {
-                a_vals[j].to_f64().ok()
-            };
-            let b = if b_vals[j].is_missing() {
-                None
-            } else {
-                b_vals[j].to_f64().ok()
-            };
-            if let (Some(a), Some(b)) = (a, b) {
-                nobs += 1;
-                let da = a - mean_a;
-                mean_a += da / nobs as f64;
-                let db = b - mean_b;
-                mean_b += db / nobs as f64;
-                // Post-update deltas: a - mean_a (new) and b - mean_b (new).
-                m2a += da * (a - mean_a);
-                m2b += db * (b - mean_b);
-                cab += da * (b - mean_b);
-            }
-
-            if nobs < min_pairs {
-                out.push(Scalar::Null(NullKind::NaN));
-                continue;
-            }
-            let denom = nobs as f64 - ddof as f64;
-            if want_corr {
-                let std_a = (m2a / denom).sqrt();
-                let std_b = (m2b / denom).sqrt();
-                if nobs <= ddof || std_a == 0.0 || std_b == 0.0 {
-                    out.push(Scalar::Null(NullKind::NaN));
-                } else {
-                    out.push(Scalar::Float64((cab / denom) / (std_a * std_b)));
-                }
-            } else {
-                out.push(Scalar::Float64(cab / denom));
-            }
-        }
-
-        let index = self.series.index().clone();
-        let column = Column::from_values(out)?;
-        Series::new(self.series.name(), index, column)
+        self.as_full_window_rolling()
+            .rolling_pairwise_moment(other, want_corr, ddof)
     }
 
     /// Expanding standard error of the mean.
@@ -35814,6 +35196,10 @@ impl Expanding<'_> {
     /// (`sem = std / √nobs`) instead of the O(n²) per-step re-fold
     /// (br-frankenpandas-g6qa2).
     pub fn sem(&self) -> Result<Series, FrameError> {
+        // pandas divides by its count, which counts an inf (see Rolling::sem).
+        if !std::ptr::eq(&*self.series, self.source) {
+            return sem_of(&self.std()?, &self.count()?, 1);
+        }
         self.as_full_window_rolling()
             .rolling_var_online(1, VarOutputKind::Sem)
     }
@@ -36114,8 +35500,8 @@ impl Expanding<'_> {
                 //
                 // rank()'s defaults here are method='average', ascending=True,
                 // na_option='keep', matching the groupby routings in this file.
-                "corr" => self.corr(self.series)?,
-                "cov" => self.cov(self.series)?,
+                "corr" => self.corr(self.source)?,
+                "cov" => self.cov(self.source)?,
                 "rank" => self.rank("average", true, "keep")?,
                 _ => {
                     return Err(FrameError::CompatibilityRejected(format!(
@@ -36164,7 +35550,8 @@ impl Expanding<'_> {
 /// Created by `Series::ewm()`. Uses the recursive EWM formula:
 /// `y_t = alpha * x_t + (1 - alpha) * y_{t-1}`
 pub struct Ewm<'a> {
-    series: &'a Series,
+    /// The values the kernels read ([`window_values`]).
+    series: std::borrow::Cow<'a, Series>,
     // Per br-frankenpandas-d895b: stores either the validated alpha or
     // the validation error message. Validation is deferred to method
     // invocation so the `let ewm = s.ewm(...)` factory doesn't itself
@@ -36191,164 +35578,226 @@ pub struct Ewm<'a> {
     deltas: Option<Vec<f64>>,
 }
 
-/// Typed all-observed (all-valid, no-NaN) EWM debiased variance recurrence over a
-/// raw `&[f64]`, returning the per-row var (`NaN` where undefined: row 0 and any
-/// `sum_wt^2 <= sum_wt2`). Bit-identical to `Ewm::var`'s Scalar loop for an
-/// all-valid input — every element is `observed`, so the same arithmetic runs —
-/// but skips the 1M `Vec<Scalar>` materialization and per-element
-/// `is_missing`/`to_f64` dispatch (ewm var was 0.26x, std 0.13x pandas). Shared by
-/// `var` (emit as-is) and `std` (sqrt each).
-fn ewm_var_all_observed(data: &[f64], one_minus_alpha: f64) -> Vec<f64> {
-    let new_wt = 1.0_f64;
-    let mut ewm_mean = f64::NAN;
-    let mut ewm_cov = 0.0_f64;
-    let mut nobs = 0_usize;
-    let mut sum_wt = 1.0_f64;
-    let mut sum_wt2 = 1.0_f64;
-    let mut old_wt = 1.0_f64;
-    let mut out = Vec::with_capacity(data.len());
-    for &x in data {
-        nobs += 1;
-        if nobs == 1 {
-            ewm_mean = x;
-            ewm_cov = 0.0;
-            sum_wt = 1.0;
-            sum_wt2 = 1.0;
-            old_wt = 1.0;
+/// pandas' weights for its EWM moment kernels (`aggregations.pyx::ewmcov`):
+/// the decay `1 - alpha`, a new observation's weight (1 adjusted, else
+/// `alpha`), `ignore_na`, and the observations a value needs.
+#[derive(Clone, Copy)]
+struct EwmWeights {
+    old_wt_factor: f64,
+    new_wt: f64,
+    adjust: bool,
+    ignore_na: bool,
+    minp: usize,
+}
+
+/// One run of pandas' `aggregations.pyx::ewmcov(x, y)`: the online means and
+/// weighted co-moment of the pairs stepped over, a pair observed when both
+/// sides are finite (pandas' `_prep_values` reads +-inf as NaN). The updates
+/// are pandas' own, in its order, so each value matches pandas to the bit
+/// (var is the run over `(x, x)`).
+struct EwmCov {
+    mean_x: f64,
+    mean_y: f64,
+    cov: f64,
+    sum_wt: f64,
+    sum_wt2: f64,
+    old_wt: f64,
+    nobs: usize,
+}
+
+impl EwmCov {
+    /// The run after its first pair (the means NaN until a pair is observed).
+    fn start(x: f64, y: f64) -> Self {
+        let observed = x.is_finite() && y.is_finite();
+        let (mean_x, mean_y) = if observed {
+            (x, y)
         } else {
-            sum_wt *= one_minus_alpha;
-            sum_wt2 *= one_minus_alpha * one_minus_alpha;
-            old_wt *= one_minus_alpha;
-            let old_mean = ewm_mean;
-            if ewm_mean != x {
-                ewm_mean = (old_wt * ewm_mean + new_wt * x) / (old_wt + new_wt);
-            }
-            ewm_cov = (old_wt * (ewm_cov + (old_mean - ewm_mean).powi(2))
-                + new_wt * (x - ewm_mean).powi(2))
-                / (old_wt + new_wt);
-            sum_wt += new_wt;
-            sum_wt2 += new_wt * new_wt;
-            old_wt += new_wt;
+            (f64::NAN, f64::NAN)
+        };
+        Self {
+            mean_x,
+            mean_y,
+            cov: 0.0,
+            sum_wt: 1.0,
+            sum_wt2: 1.0,
+            old_wt: 1.0,
+            nobs: usize::from(observed),
         }
-        let numerator = sum_wt * sum_wt - sum_wt2;
-        out.push(if numerator > 0.0 {
-            ewm_cov * (sum_wt * sum_wt) / numerator
+    }
+
+    /// Steps over one pair; an observation that moved the means returns
+    /// what [`ewm_corr_kernel`] needs to update its own co-moments alike.
+    fn step(&mut self, w: &EwmWeights, x: f64, y: f64) -> Option<EwmUpdate> {
+        let observed = x.is_finite() && y.is_finite();
+        self.nobs += usize::from(observed);
+        if self.mean_x.is_nan() {
+            // pandas starts the means at the first observation (and restarts
+            // them should they overflow to NaN), the weights untouched.
+            if observed {
+                (self.mean_x, self.mean_y) = (x, y);
+            }
+            return None;
+        }
+        if !observed && w.ignore_na {
+            return None;
+        }
+        self.sum_wt *= w.old_wt_factor;
+        self.sum_wt2 *= w.old_wt_factor * w.old_wt_factor;
+        self.old_wt *= w.old_wt_factor;
+        if !observed {
+            return None;
+        }
+        let (old_mean_x, old_mean_y) = (self.mean_x, self.mean_y);
+        let update = EwmUpdate {
+            old_wt: self.old_wt,
+            total_wt: self.old_wt + w.new_wt,
+            old_mean_x,
+            old_mean_y,
+        };
+        let total_wt = update.total_wt;
+        // Equal values leave a mean exactly as it was (pandas' guard for a
+        // constant run).
+        if self.mean_x != x {
+            self.mean_x = ((self.old_wt * old_mean_x) + (w.new_wt * x)) / total_wt;
+        }
+        if self.mean_y != y {
+            self.mean_y = ((self.old_wt * old_mean_y) + (w.new_wt * y)) / total_wt;
+        }
+        self.cov = ((self.old_wt
+            * (self.cov + ((old_mean_x - self.mean_x) * (old_mean_y - self.mean_y))))
+            + (w.new_wt * ((x - self.mean_x) * (y - self.mean_y))))
+            / total_wt;
+        self.sum_wt += w.new_wt;
+        self.sum_wt2 += w.new_wt * w.new_wt;
+        self.old_wt += w.new_wt;
+        if !w.adjust {
+            self.sum_wt /= self.old_wt;
+            self.sum_wt2 /= self.old_wt * self.old_wt;
+            self.old_wt = 1.0;
+        }
+        Some(update)
+    }
+
+    /// NaN below `minp` observations, the co-moment under `bias`, else that
+    /// debiased by `sum_wt^2 / (sum_wt^2 - sum_wt2)` (NaN while the
+    /// denominator is not positive).
+    fn value(&self, w: &EwmWeights, bias: bool) -> f64 {
+        if self.nobs < w.minp {
+            return f64::NAN;
+        }
+        if bias {
+            return self.cov;
+        }
+        let numerator = self.sum_wt * self.sum_wt;
+        let denominator = numerator - self.sum_wt2;
+        if denominator > 0.0 {
+            (numerator / denominator) * self.cov
         } else {
             f64::NAN
-        });
+        }
+    }
+}
+
+/// pandas' `ewmcov(x, y, bias)` row by row over `pairs`.
+fn ewm_cov_kernel(
+    w: &EwmWeights,
+    mut pairs: impl Iterator<Item = (f64, f64)>,
+    bias: bool,
+) -> Vec<f64> {
+    let mut out = Vec::with_capacity(pairs.size_hint().0);
+    if let Some((x, y)) = pairs.next() {
+        let mut run = EwmCov::start(x, y);
+        out.push(run.value(w, bias));
+        for (x, y) in pairs {
+            run.step(w, x, y);
+            out.push(run.value(w, bias));
+        }
     }
     out
 }
 
-/// Typed all-observed (both inputs all-valid, no-NaN) EWM debiased covariance over
-/// raw `&[f64]` pairs — the same `ewmcov(x,y)` recurrence as `Ewm::cov`'s Scalar
-/// loop (every pair observed), skipping the two 1M `Vec<Scalar>` materializations
-/// and per-element is_missing/to_f64 dispatch (ewm cov was 0.35x pandas).
-fn ewm_cov_all_observed(a: &[f64], b: &[f64], one_minus_alpha: f64) -> Vec<f64> {
-    let new_wt = 1.0_f64;
-    let mut mean_x = f64::NAN;
-    let mut mean_y = f64::NAN;
-    let mut cov_xy = 0.0_f64;
-    let mut nobs = 0_usize;
-    let mut sum_wt = 1.0_f64;
-    let mut sum_wt2 = 1.0_f64;
-    let mut old_wt = 1.0_f64;
-    let mut out = Vec::with_capacity(a.len());
-    for (&xv, &yv) in a.iter().zip(b.iter()) {
-        nobs += 1;
-        if nobs == 1 {
-            mean_x = xv;
-            mean_y = yv;
-            cov_xy = 0.0;
-            sum_wt = 1.0;
-            sum_wt2 = 1.0;
-            old_wt = 1.0;
-        } else {
-            sum_wt *= one_minus_alpha;
-            sum_wt2 *= one_minus_alpha * one_minus_alpha;
-            old_wt *= one_minus_alpha;
-            let old_mean_x = mean_x;
-            let old_mean_y = mean_y;
-            if mean_x != xv {
-                mean_x = (old_wt * mean_x + new_wt * xv) / (old_wt + new_wt);
-            }
-            if mean_y != yv {
-                mean_y = (old_wt * mean_y + new_wt * yv) / (old_wt + new_wt);
-            }
-            cov_xy = (old_wt * (cov_xy + (old_mean_x - mean_x) * (old_mean_y - mean_y))
-                + new_wt * (xv - mean_x) * (yv - mean_y))
-                / (old_wt + new_wt);
-            sum_wt += new_wt;
-            sum_wt2 += new_wt * new_wt;
-            old_wt += new_wt;
-        }
-        let numerator = sum_wt * sum_wt - sum_wt2;
-        out.push(if numerator > 0.0 {
-            cov_xy * (sum_wt * sum_wt) / numerator
-        } else {
+/// The weights and prior means an observed [`EwmCov::step`] updated with.
+struct EwmUpdate {
+    old_wt: f64,
+    total_wt: f64,
+    old_mean_x: f64,
+    old_mean_y: f64,
+}
+
+/// pandas' EWM `corr`: three biased `ewmcov` runs - over the pairs, and over
+/// each side with itself - `cov / zsqrt(var_x * var_y)`. Each side being NaN
+/// where the other is ([`prep_binary`]), the three runs observe the same rows,
+/// so the self runs' weights and means are the pair run's: one pass keeps two
+/// means and three co-moments, each updated as its own run would. Only a
+/// mean overflowing to NaN parts the runs (one restarts it, another does
+/// not), and the pair co-moment is NaN from that row on in every run, so the
+/// values agree there too.
+fn ewm_corr_kernel(w: &EwmWeights, mut pairs: impl Iterator<Item = (f64, f64)>) -> Vec<f64> {
+    let mut out = Vec::with_capacity(pairs.size_hint().0);
+    let Some((x, y)) = pairs.next() else {
+        return out;
+    };
+    let mut run = EwmCov::start(x, y);
+    let (mut cov_xx, mut cov_yy) = (0.0_f64, 0.0_f64);
+    let corr = |run: &EwmCov, cov_xx: f64, cov_yy: f64| {
+        if run.nobs < w.minp {
             f64::NAN
-        });
+        } else {
+            run.cov / zsqrt(cov_xx * cov_yy)
+        }
+    };
+    out.push(corr(&run, cov_xx, cov_yy));
+    for (x, y) in pairs {
+        if let Some(update) = run.step(w, x, y) {
+            let moment = |cov: f64, old_mean: f64, mean: f64, value: f64| {
+                ((update.old_wt * (cov + ((old_mean - mean) * (old_mean - mean))))
+                    + (w.new_wt * ((value - mean) * (value - mean))))
+                    / update.total_wt
+            };
+            cov_xx = moment(cov_xx, update.old_mean_x, run.mean_x, x);
+            cov_yy = moment(cov_yy, update.old_mean_y, run.mean_y, y);
+        }
+        out.push(corr(&run, cov_xx, cov_yy));
     }
     out
 }
 
-/// Typed all-observed EWM correlation over raw `&[f64]` pairs — the same
-/// `cov_xy / sqrt(cov_xx*cov_yy)` BIASED-accumulator recurrence as `Ewm::corr`'s
-/// Scalar loop (debias factor cancels, so only `old_wt` decays), every pair
-/// observed (ewm corr was 0.70x pandas).
-fn ewm_corr_all_observed(a: &[f64], b: &[f64], one_minus_alpha: f64) -> Vec<f64> {
-    let new_wt = 1.0_f64;
-    let mut mean_x = f64::NAN;
-    let mut mean_y = f64::NAN;
-    let mut cov_xx = 0.0_f64;
-    let mut cov_yy = 0.0_f64;
-    let mut cov_xy = 0.0_f64;
-    let mut nobs = 0_usize;
-    let mut old_wt = 1.0_f64;
-    let mut out = Vec::with_capacity(a.len());
-    for (&xv, &yv) in a.iter().zip(b.iter()) {
-        nobs += 1;
-        if nobs == 1 {
-            mean_x = xv;
-            mean_y = yv;
-            cov_xx = 0.0;
-            cov_yy = 0.0;
-            cov_xy = 0.0;
-            old_wt = 1.0;
-        } else {
-            old_wt *= one_minus_alpha;
-            let old_mean_x = mean_x;
-            let old_mean_y = mean_y;
-            if mean_x != xv {
-                mean_x = (old_wt * mean_x + new_wt * xv) / (old_wt + new_wt);
-            }
-            if mean_y != yv {
-                mean_y = (old_wt * mean_y + new_wt * yv) / (old_wt + new_wt);
-            }
-            let denom = old_wt + new_wt;
-            cov_xx = (old_wt * (cov_xx + (old_mean_x - mean_x) * (old_mean_x - mean_x))
-                + new_wt * (xv - mean_x) * (xv - mean_x))
-                / denom;
-            cov_yy = (old_wt * (cov_yy + (old_mean_y - mean_y) * (old_mean_y - mean_y))
-                + new_wt * (yv - mean_y) * (yv - mean_y))
-                / denom;
-            cov_xy = (old_wt * (cov_xy + (old_mean_x - mean_x) * (old_mean_y - mean_y))
-                + new_wt * (xv - mean_x) * (yv - mean_y))
-                / denom;
-            old_wt += new_wt;
-        }
-        if nobs < 2 {
-            out.push(f64::NAN);
-            continue;
-        }
-        let denom = cov_xx * cov_yy;
-        out.push(if denom > 0.0 {
-            cov_xy / denom.sqrt()
-        } else {
-            f64::NAN
-        });
+/// pandas' `zsqrt`: the square root, 0 for a negative value.
+fn zsqrt(value: f64) -> f64 {
+    if value < 0.0 { 0.0 } else { value.sqrt() }
+}
+
+/// pandas' `prep_binary` over two equal-length sides: each NaN where the
+/// other is missing (`x + 0 * y`, so an infinite side masks the other too).
+fn prep_binary<'a>(x: &'a [f64], y: &'a [f64]) -> impl Iterator<Item = (f64, f64)> + 'a {
+    x.iter().zip(y).map(|(&x, &y)| (x + 0.0 * y, y + 0.0 * x))
+}
+
+/// A column as pandas' EWM moment kernels read it: floats, NaN where a value
+/// is missing or not numeric (borrowed when the column is all-valid float64).
+fn ewm_floats(column: &Column) -> std::borrow::Cow<'_, [f64]> {
+    use std::borrow::Cow;
+    if let Some(data) = column.as_f64_slice() {
+        return Cow::Borrowed(data);
     }
-    out
+    if let Some(data) = column.as_i64_slice() {
+        return Cow::Owned(data.iter().map(|&v| v as f64).collect());
+    }
+    if let Some((data, validity)) = column.as_f64_slice_with_validity() {
+        return Cow::Owned(
+            data.iter()
+                .enumerate()
+                .map(|(i, &value)| if validity.get(i) { value } else { f64::NAN })
+                .collect(),
+        );
+    }
+    Cow::Owned(
+        column
+            .values()
+            .iter()
+            .map(|value| value.to_f64().unwrap_or(f64::NAN))
+            .collect(),
+    )
 }
 
 impl Ewm<'_> {
@@ -36744,601 +36193,119 @@ impl Ewm<'_> {
 
     /// EWM covariance with another Series (sample, ddof=1).
     ///
-    /// Matches `series.ewm(span=...).cov(other)`. Uses Welford-style
-    /// online updates with exponential weighting over aligned
-    /// positions; missing positions on either side emit `Null(NaN)`
-    /// without advancing the running estimate. Returns
-    /// `LengthMismatch` when inputs differ in length.
+    /// Matches `series.ewm(span=...).cov(other)` ([`Self::cov_bias`] with
+    /// bias=False). Returns `LengthMismatch` when inputs differ in length.
     pub fn cov(&self, other: &Series) -> Result<Series, FrameError> {
-        if self.series.len() != other.len() {
-            return Err(FrameError::LengthMismatch {
-                index_len: self.series.len(),
-                column_len: other.len(),
-            });
-        }
-        let alpha = self
-            .alpha
-            .clone()
-            .map_err(FrameError::CompatibilityRejected)?;
-        let one_minus_alpha = 1.0 - alpha;
-        // Typed all-valid (both no-NaN) fast path: bivariate recurrence over the
-        // raw &[f64] pairs, skipping two 1M Vec<Scalar> + per-element dispatch.
-        // Restricted to the default adjust=True / min_periods<=1 configuration
-        // (issue #19): non-default windows take the generic kernel below, which
-        // carries the adjust renormalization and min_periods gate.
-        if self.adjust
-            && self.min_periods <= 1
-            && let (Some(a), Some(b)) = (
-                self.series.column().as_f64_slice(),
-                other.column().as_f64_slice(),
-            )
-        {
-            let out = ewm_cov_all_observed(a, b, one_minus_alpha);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        // Typed both-all-valid-Int64 fast path (sister to the both-Float64 arm above):
-        // when BOTH columns are all-valid Int64 they otherwise materialized both via
-        // `.values()`. Map each `v as f64` off the raw `&[i64]` and run the SAME
-        // `ewm_cov_all_observed`. Bit-identical to the generic on all-valid Int64 inputs:
-        // every row is observed (neither is_missing/NaN), `to_f64(Int64(v)) == v as f64`,
-        // same paired operands into the same bivariate recurrence, same from_f64_values.
-        if self.adjust
-            && self.min_periods <= 1
-            && let (Some(da), Some(db)) = (
-                self.series.column().as_i64_slice(),
-                other.column().as_i64_slice(),
-            )
-        {
-            let a: Vec<f64> = da.iter().map(|&v| v as f64).collect();
-            let b: Vec<f64> = db.iter().map(|&v| v as f64).collect();
-            let out = ewm_cov_all_observed(&a, &b, one_minus_alpha);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        // Typed MIXED all-valid fast path (f64 x i64 and i64 x f64): one side borrows its
-        // contiguous &[f64], the other maps `v as f64` off its raw &[i64]; run the SAME
-        // `ewm_cov_all_observed`. Bit-identical on all-valid inputs (every row observed,
-        // `to_f64(Int64(v)) == v as f64`, same paired operands, same from_f64_values).
-        if self.adjust
-            && self.min_periods <= 1
-            && let (Some(a), Some(db)) = (
-                self.series.column().as_f64_slice(),
-                other.column().as_i64_slice(),
-            )
-        {
-            let b: Vec<f64> = db.iter().map(|&v| v as f64).collect();
-            let out = ewm_cov_all_observed(a, &b, one_minus_alpha);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        if self.adjust
-            && self.min_periods <= 1
-            && let (Some(da), Some(b)) = (
-                self.series.column().as_i64_slice(),
-                other.column().as_f64_slice(),
-            )
-        {
-            let a: Vec<f64> = da.iter().map(|&v| v as f64).collect();
-            let out = ewm_cov_all_observed(&a, b, one_minus_alpha);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        self.cov_rows(other, false)
+        self.cov_bias(other, false)
     }
 
-    /// pandas' `cov(other, bias=)`: bias=True is the weighted covariance
-    /// without the debias factor ([`Self::cov`] is bias=False).
+    /// pandas' `cov(other, bias=)`: its `ewmcov` over the pairs, each side NaN
+    /// where the other is; bias=True is the weighted covariance without the
+    /// debias factor.
     pub fn cov_bias(&self, other: &Series, bias: bool) -> Result<Series, FrameError> {
-        if !bias {
-            return self.cov(other);
-        }
-        if self.series.len() != other.len() {
-            return Err(FrameError::LengthMismatch {
-                index_len: self.series.len(),
-                column_len: other.len(),
-            });
-        }
-        self.cov_rows(other, true)
-    }
-
-    /// pandas' `ewmcov(x, y, bias=)` row by row (the kernel the typed arms of
-    /// [`Self::cov`] short-cut for bias=False over all-valid inputs).
-    fn cov_rows(&self, other: &Series, bias: bool) -> Result<Series, FrameError> {
-        let alpha = self
-            .alpha
-            .clone()
-            .map_err(FrameError::CompatibilityRejected)?;
-        let one_minus_alpha = 1.0 - alpha;
-        let a_vals = self.series.column().values();
-        let b_vals = other.column().values();
-        let mut out = Vec::with_capacity(a_vals.len());
-        // pandas' exact debiased `ewmcov(x, y)` (bias=False, ignore_na=False)
-        // — br-frankenpandas-cupvi. A row is an observation only when both
-        // inputs are present; otherwise the accumulated weights still decay
-        // (ignore_na=False). Honors adjust / min_periods (issue #19) exactly
-        // as `aggregations.pyx::ewmcov`.
-        let new_wt = if self.adjust { 1.0_f64 } else { alpha };
-        let minp = self.min_periods.max(1);
-        let mut mean_x = f64::NAN;
-        let mut mean_y = f64::NAN;
-        let mut cov_xy = 0.0_f64;
-        let mut nobs = 0_usize;
-        let mut sum_wt = 1.0_f64;
-        let mut sum_wt2 = 1.0_f64;
-        let mut old_wt = 1.0_f64;
-
-        for (a, b) in a_vals.iter().zip(b_vals.iter()) {
-            let x = if a.is_missing() {
-                None
-            } else {
-                a.to_f64().ok()
-            };
-            let y = if b.is_missing() {
-                None
-            } else {
-                b.to_f64().ok()
-            };
-            let observed = matches!((x, y), (Some(xv), Some(yv)) if !xv.is_nan() && !yv.is_nan());
-            if observed {
-                let (xv, yv) = (x.unwrap(), y.unwrap());
-                nobs += 1;
-                if nobs == 1 {
-                    mean_x = xv;
-                    mean_y = yv;
-                    cov_xy = 0.0;
-                    sum_wt = 1.0;
-                    sum_wt2 = 1.0;
-                    old_wt = 1.0;
-                } else {
-                    sum_wt *= one_minus_alpha;
-                    sum_wt2 *= one_minus_alpha * one_minus_alpha;
-                    old_wt *= one_minus_alpha;
-                    let old_mean_x = mean_x;
-                    let old_mean_y = mean_y;
-                    if mean_x != xv {
-                        mean_x = (old_wt * mean_x + new_wt * xv) / (old_wt + new_wt);
-                    }
-                    if mean_y != yv {
-                        mean_y = (old_wt * mean_y + new_wt * yv) / (old_wt + new_wt);
-                    }
-                    cov_xy = (old_wt * (cov_xy + (old_mean_x - mean_x) * (old_mean_y - mean_y))
-                        + new_wt * (xv - mean_x) * (yv - mean_y))
-                        / (old_wt + new_wt);
-                    sum_wt += new_wt;
-                    sum_wt2 += new_wt * new_wt;
-                    old_wt += new_wt;
-                    if !self.adjust {
-                        // pandas ewmcov: adjust=False renormalizes the weight
-                        // accumulators after every observation.
-                        sum_wt /= old_wt;
-                        sum_wt2 /= old_wt * old_wt;
-                        old_wt = 1.0;
-                    }
-                }
-            } else if nobs == 0 {
-                out.push(Scalar::Null(NullKind::NaN));
-                continue;
-            } else if !self.ignore_na {
-                sum_wt *= one_minus_alpha;
-                sum_wt2 *= one_minus_alpha * one_minus_alpha;
-                old_wt *= one_minus_alpha;
-            }
-
-            // pandas ewmcov: `NaN` until `minp` joint observations, then the
-            // covariance itself under bias, else debiased (NaN while the
-            // debias denominator is <= 0).
-            let numerator = sum_wt * sum_wt - sum_wt2;
-            if nobs >= minp && bias {
-                out.push(Scalar::Float64(cov_xy));
-            } else if nobs >= minp && numerator > 0.0 {
-                out.push(Scalar::Float64(cov_xy * (sum_wt * sum_wt) / numerator));
-            } else {
-                out.push(Scalar::Null(NullKind::NaN));
-            }
-        }
-
+        let (w, x, y) = self.moment_pair(other)?;
         // Per br-frankenpandas-074bp: pandas Series.ewm(...).cov preserves
         // source axis name.
-        let index = self.series.index().clone();
-        let column = Column::from_values(out)?;
-        Series::new(self.series.name(), index, column)
+        self.moment_series(ewm_cov_kernel(&w, prep_binary(&x, &y), bias))
     }
 
     /// EWM Pearson correlation with another Series.
     ///
-    /// Matches `series.ewm(span=...).corr(other)`. Uses the same
-    /// exponentially weighted covariance path as `cov(other)` and
-    /// normalizes by the two exponentially weighted standard deviations.
+    /// Matches `series.ewm(span=...).corr(other)`: pandas' biased `ewmcov` of
+    /// the pairs over `zsqrt` of the two sides' biased variances, each side
+    /// NaN where the other is.
     pub fn corr(&self, other: &Series) -> Result<Series, FrameError> {
-        if self.series.len() != other.len() {
-            return Err(FrameError::LengthMismatch {
-                index_len: self.series.len(),
-                column_len: other.len(),
-            });
-        }
-        let alpha = self
-            .alpha
-            .clone()
-            .map_err(FrameError::CompatibilityRejected)?;
-        let one_minus_alpha = 1.0 - alpha;
-        // Typed all-valid (both no-NaN) fast path: bivariate recurrence over the
-        // raw &[f64] pairs, skipping two 1M Vec<Scalar> + per-element dispatch.
-        // Restricted to the default adjust=True / min_periods<=1 configuration
-        // (issue #19): non-default windows take the generic kernel below.
-        if self.adjust
-            && self.min_periods <= 1
-            && let (Some(a), Some(b)) = (
-                self.series.column().as_f64_slice(),
-                other.column().as_f64_slice(),
-            )
-        {
-            let out = ewm_corr_all_observed(a, b, one_minus_alpha);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        // Typed both-all-valid-Int64 fast path (mirror of Ewm::cov's both-Int64 arm):
-        // when BOTH columns are all-valid Int64, map each `v as f64` off the raw `&[i64]`
-        // and run the SAME `ewm_corr_all_observed` instead of materializing both via
-        // `.values()`. Bit-identical on all-valid Int64 inputs (every row observed,
-        // `to_f64(Int64(v)) == v as f64`, same bivariate recurrence, same from_f64_values).
-        if self.adjust
-            && self.min_periods <= 1
-            && let (Some(da), Some(db)) = (
-                self.series.column().as_i64_slice(),
-                other.column().as_i64_slice(),
-            )
-        {
-            let a: Vec<f64> = da.iter().map(|&v| v as f64).collect();
-            let b: Vec<f64> = db.iter().map(|&v| v as f64).collect();
-            let out = ewm_corr_all_observed(&a, &b, one_minus_alpha);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        // Typed MIXED all-valid fast path (f64 x i64 and i64 x f64): one side borrows its
-        // contiguous &[f64], the other maps `v as f64` off its raw &[i64]; run the SAME
-        // `ewm_corr_all_observed`. Bit-identical on all-valid inputs (every row observed,
-        // `to_f64(Int64(v)) == v as f64`, same bivariate recurrence, same from_f64_values).
-        if self.adjust
-            && self.min_periods <= 1
-            && let (Some(a), Some(db)) = (
-                self.series.column().as_f64_slice(),
-                other.column().as_i64_slice(),
-            )
-        {
-            let b: Vec<f64> = db.iter().map(|&v| v as f64).collect();
-            let out = ewm_corr_all_observed(a, &b, one_minus_alpha);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        if self.adjust
-            && self.min_periods <= 1
-            && let (Some(da), Some(b)) = (
-                self.series.column().as_i64_slice(),
-                other.column().as_f64_slice(),
-            )
-        {
-            let a: Vec<f64> = da.iter().map(|&v| v as f64).collect();
-            let out = ewm_corr_all_observed(&a, b, one_minus_alpha);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        let a_vals = self.series.column().values();
-        let b_vals = other.column().values();
-        let mut out = Vec::with_capacity(a_vals.len());
-        // pandas computes EWM corr as `cov_xy / sqrt(cov_xx * cov_yy)` using the
-        // BIASED ewmcov accumulators (the debias factor cancels) — cupvi. Each
-        // covariance follows the same `ewmcov` recurrence as `cov()`, honoring
-        // adjust / min_periods (issue #19).
-        let new_wt = if self.adjust { 1.0_f64 } else { alpha };
-        let minp = self.min_periods.max(1);
-        let mut mean_x = f64::NAN;
-        let mut mean_y = f64::NAN;
-        let mut cov_xx = 0.0_f64;
-        let mut cov_yy = 0.0_f64;
-        let mut cov_xy = 0.0_f64;
-        let mut nobs = 0_usize;
-        let mut old_wt = 1.0_f64;
-
-        for (a, b) in a_vals.iter().zip(b_vals.iter()) {
-            let x = if a.is_missing() {
-                None
-            } else {
-                a.to_f64().ok()
-            };
-            let y = if b.is_missing() {
-                None
-            } else {
-                b.to_f64().ok()
-            };
-            let observed = matches!((x, y), (Some(xv), Some(yv)) if !xv.is_nan() && !yv.is_nan());
-            if observed {
-                let (xv, yv) = (x.unwrap(), y.unwrap());
-                nobs += 1;
-                if nobs == 1 {
-                    mean_x = xv;
-                    mean_y = yv;
-                    cov_xx = 0.0;
-                    cov_yy = 0.0;
-                    cov_xy = 0.0;
-                    old_wt = 1.0;
-                } else {
-                    old_wt *= one_minus_alpha;
-                    let old_mean_x = mean_x;
-                    let old_mean_y = mean_y;
-                    if mean_x != xv {
-                        mean_x = (old_wt * mean_x + new_wt * xv) / (old_wt + new_wt);
-                    }
-                    if mean_y != yv {
-                        mean_y = (old_wt * mean_y + new_wt * yv) / (old_wt + new_wt);
-                    }
-                    let denom = old_wt + new_wt;
-                    cov_xx = (old_wt * (cov_xx + (old_mean_x - mean_x) * (old_mean_x - mean_x))
-                        + new_wt * (xv - mean_x) * (xv - mean_x))
-                        / denom;
-                    cov_yy = (old_wt * (cov_yy + (old_mean_y - mean_y) * (old_mean_y - mean_y))
-                        + new_wt * (yv - mean_y) * (yv - mean_y))
-                        / denom;
-                    cov_xy = (old_wt * (cov_xy + (old_mean_x - mean_x) * (old_mean_y - mean_y))
-                        + new_wt * (xv - mean_x) * (yv - mean_y))
-                        / denom;
-                    old_wt += new_wt;
-                    if !self.adjust {
-                        // pandas ewmcov: adjust=False renormalizes the prior
-                        // weight to 1 after every observation. The sum_wt /
-                        // sum_wt2 accumulators are not tracked here because the
-                        // biased outputs never consult them.
-                        old_wt = 1.0;
-                    }
-                }
-            } else if nobs == 0 {
-                out.push(Scalar::Null(NullKind::NaN));
-                continue;
-            } else if !self.ignore_na {
-                old_wt *= one_minus_alpha;
-            }
-
-            // min_periods gate (issue #19); below 2 observations the biased
-            // variances are 0 and pandas' 0/0 is NaN, kept explicit here.
-            if nobs < 2 || nobs < minp {
-                out.push(Scalar::Null(NullKind::NaN));
-                continue;
-            }
-            let denom = cov_xx * cov_yy;
-            if denom > 0.0 {
-                out.push(Scalar::Float64(cov_xy / denom.sqrt()));
-            } else {
-                out.push(Scalar::Null(NullKind::NaN));
-            }
-        }
-
+        let (w, x, y) = self.moment_pair(other)?;
         // Per br-frankenpandas-xbddh: pandas Series.ewm(...).corr preserves
         // source axis name.
-        let index = self.series.index().clone();
-        let column = Column::from_values(out)?;
-        Series::new(self.series.name(), index, column)
+        self.moment_series(ewm_corr_kernel(&w, prep_binary(&x, &y)))
     }
 
     /// EWM standard deviation (sample, ddof=1).
     ///
     /// Matches `series.ewm(span=...).std()`.
     pub fn std(&self) -> Result<Series, FrameError> {
-        // Typed all-valid (no-NaN) fast path: var recurrence over the raw &[f64]
-        // then sqrt each, in one pass — instead of var() + re-materializing its
-        // Scalars to sqrt + from_values (ewm std was 0.13x pandas). Bit-identical:
-        // sqrt(NaN)=NaN (== the Null(NaN) pass-through), sqrt(var) typed.
-        // Restricted to the default adjust=True / min_periods<=1 configuration
-        // (issue #19): non-default windows take var()'s generic kernel.
-        if let Some(alpha) = self.alpha.clone().ok()
-            && self.adjust
-            && self.min_periods <= 1
-            && let Some(data) = self.series.column().as_f64_slice()
-        {
-            let mut out = ewm_var_all_observed(data, 1.0 - alpha);
-            for v in out.iter_mut() {
-                *v = v.sqrt();
-            }
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        // Typed all-valid Int64 fast path (sister to the all-valid Float64 arm above,
-        // mirror of Ewm::var's Int64 arm): map `v as f64` off the raw `&[i64]`, run the
-        // SAME var recurrence + per-element sqrt, emit a typed f64 column — instead of
-        // `self.var()?` re-materializing its Scalars to sqrt. Bit-identical (all-valid
-        // Int64 ⇒ `v as f64`, same recurrence, `sqrt(var)` per element as the Float64
-        // arm; sqrt(NaN)=NaN can't occur here since every output is finite).
-        if let Some(alpha) = self.alpha.clone().ok()
-            && self.adjust
-            && self.min_periods <= 1
-            && let Some(data) = self.series.column().as_i64_slice()
-        {
-            let f: Vec<f64> = data.iter().map(|&v| v as f64).collect();
-            let mut out = ewm_var_all_observed(&f, 1.0 - alpha);
-            for v in out.iter_mut() {
-                *v = v.sqrt();
-            }
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        let var_series = self.var()?;
-        let mut out = Vec::with_capacity(var_series.len());
-        for v in var_series.column().values() {
-            match v {
-                Scalar::Float64(f) => out.push(Scalar::Float64(f.sqrt())),
-                _ => out.push(v.clone()),
-            }
-        }
-        // Per br-frankenpandas-xbddh: pandas Series.ewm(...).std preserves
-        // source axis name.
-        let index = self.series.index().clone();
-        let column = Column::from_values(out)?;
-        Series::new(self.series.name(), index, column)
+        self.std_bias(false)
     }
 
     /// EWM variance (sample, ddof=1).
     ///
-    /// Uses the online formula for exponentially weighted variance.
     /// Matches `series.ewm(span=...).var()`.
     pub fn var(&self) -> Result<Series, FrameError> {
+        self.var_bias(false)
+    }
+
+    /// pandas' `var(bias=)`: its `ewmcov(x, x)`; bias=True is the weighted
+    /// variance without the debias factor.
+    pub fn var_bias(&self, bias: bool) -> Result<Series, FrameError> {
+        // Per br-frankenpandas-72avi: pandas Series.ewm(...).var preserves
+        // source axis name.
+        self.moment_series(self.var_values(bias)?)
+    }
+
+    /// pandas' `std(bias=)`: `zsqrt` of [`Self::var_bias`].
+    pub fn std_bias(&self, bias: bool) -> Result<Series, FrameError> {
+        let mut values = self.var_values(bias)?;
+        for value in &mut values {
+            *value = zsqrt(*value);
+        }
+        self.moment_series(values)
+    }
+
+    fn var_values(&self, bias: bool) -> Result<Vec<f64>, FrameError> {
+        let w = self.moment_weights()?;
+        let x = ewm_floats(self.series.column());
+        Ok(ewm_cov_kernel(&w, x.iter().map(|&x| (x, x)), bias))
+    }
+
+    /// pandas' `ewmcov` weights from this window's decay and options.
+    fn moment_weights(&self) -> Result<EwmWeights, FrameError> {
         let alpha = self
             .alpha
             .clone()
             .map_err(FrameError::CompatibilityRejected)?;
-        let one_minus_alpha = 1.0 - alpha;
-        // Typed all-valid (no-NaN) fast path: run the recurrence over the raw
-        // &[f64], skipping the 1M Vec<Scalar> + per-element to_f64/is_missing.
-        // Restricted to the default adjust=True / min_periods<=1 configuration
-        // (issue #19): non-default windows take the generic kernel below.
-        if self.adjust
-            && self.min_periods <= 1
-            && let Some(data) = self.series.column().as_f64_slice()
-        {
-            let out = ewm_var_all_observed(data, one_minus_alpha);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        // Typed all-valid Int64 fast path (sister to the all-valid Float64 arm above):
-        // an all-valid Int64 column drove the generic `.values()` Scalar loop below.
-        // Map `v as f64` off the raw `&[i64]` and run the SAME `ewm_var_all_observed`.
-        // Bit-identical to the generic on an all-valid Int64 column: no missing (its
-        // `is_missing() || to_f64().is_nan()` gate never fires), `to_f64(Int64(v)) ==
-        // v as f64`, same operands into the same recurrence in the same order; `out`
-        // fed to the same `from_f64_values` yields the identical column.
-        if self.adjust
-            && self.min_periods <= 1
-            && let Some(data) = self.series.column().as_i64_slice()
-        {
-            let f: Vec<f64> = data.iter().map(|&v| v as f64).collect();
-            let out = ewm_var_all_observed(&f, one_minus_alpha);
-            let index = self.series.index().clone();
-            return Series::new(self.series.name(), index, Column::from_f64_values(out));
-        }
-        self.var_rows(false)
+        Ok(EwmWeights {
+            old_wt_factor: 1.0 - alpha,
+            new_wt: if self.adjust { 1.0 } else { alpha },
+            adjust: self.adjust,
+            ignore_na: self.ignore_na,
+            minp: self.min_periods.max(1),
+        })
     }
 
-    /// pandas' `var(bias=)`: bias=True is the weighted variance without the
-    /// debias factor ([`Self::var`] is bias=False).
-    pub fn var_bias(&self, bias: bool) -> Result<Series, FrameError> {
-        if bias {
-            self.var_rows(true)
-        } else {
-            self.var()
+    /// The weights and both sides' floats for `cov` / `corr`, refused when
+    /// `other` differs in length.
+    fn moment_pair<'o>(
+        &self,
+        other: &'o Series,
+    ) -> Result<
+        (
+            EwmWeights,
+            std::borrow::Cow<'_, [f64]>,
+            std::borrow::Cow<'o, [f64]>,
+        ),
+        FrameError,
+    > {
+        if self.series.len() != other.len() {
+            return Err(FrameError::LengthMismatch {
+                index_len: self.series.len(),
+                column_len: other.len(),
+            });
         }
+        Ok((
+            self.moment_weights()?,
+            ewm_floats(self.series.column()),
+            ewm_floats(other.column()),
+        ))
     }
 
-    /// pandas' `std(bias=)`: the square root of [`Self::var_bias`].
-    pub fn std_bias(&self, bias: bool) -> Result<Series, FrameError> {
-        if !bias {
-            return self.std();
-        }
-        let var = self.var_rows(true)?;
-        let out = var
-            .column()
-            .values()
-            .iter()
-            .map(|v| match v {
-                Scalar::Float64(f) => Scalar::Float64(f.sqrt()),
-                other => other.clone(),
-            })
-            .collect();
+    /// `values` (NaN where undefined) on this window's index and name.
+    fn moment_series(&self, values: Vec<f64>) -> Result<Series, FrameError> {
         Series::new(
             self.series.name(),
             self.series.index().clone(),
-            Column::from_values(out)?,
+            Column::from_f64_values(values),
         )
-    }
-
-    /// pandas' `ewmcov(x, x, bias=)` row by row (the kernel the typed arms
-    /// of [`Self::var`] short-cut for bias=False over all-valid inputs).
-    fn var_rows(&self, bias: bool) -> Result<Series, FrameError> {
-        let alpha = self
-            .alpha
-            .clone()
-            .map_err(FrameError::CompatibilityRejected)?;
-        let one_minus_alpha = 1.0 - alpha;
-        let vals = self.series.column().values();
-        let mut out = Vec::with_capacity(vals.len());
-
-        // pandas' exact `ewmcov(x, x)` (bias=False, ignore_na=False)
-        // — br-frankenpandas-cupvi. The prior implementation used a different
-        // (wrong) normalization (no sum_wt decay; sum_wt as the mean denominator)
-        // and diverged from pandas. Here new observations enter with weight
-        // `new_wt` (1.0 for adjust=True, alpha for adjust=False — issue #19),
-        // every step decays sum_wt/sum_wt2/old_wt by (1-alpha)[^2], the mean uses
-        // an (old_wt + new_wt) denominator, and the debias factor is
-        // sum_wt^2 / (sum_wt^2 - sum_wt2).
-        let new_wt = if self.adjust { 1.0_f64 } else { alpha };
-        let minp = self.min_periods.max(1);
-        let mut ewm_mean = f64::NAN;
-        let mut ewm_cov = 0.0_f64;
-        let mut nobs = 0_usize;
-        let mut sum_wt = 1.0_f64;
-        let mut sum_wt2 = 1.0_f64;
-        let mut old_wt = 1.0_f64;
-
-        for val in vals {
-            let observed = !(val.is_missing() || val.to_f64().map_or(true, |v| v.is_nan()));
-            if observed {
-                let x = val.to_f64().unwrap();
-                nobs += 1;
-                if nobs == 1 {
-                    ewm_mean = x;
-                    ewm_cov = 0.0;
-                    sum_wt = 1.0;
-                    sum_wt2 = 1.0;
-                    old_wt = 1.0;
-                } else {
-                    sum_wt *= one_minus_alpha;
-                    sum_wt2 *= one_minus_alpha * one_minus_alpha;
-                    old_wt *= one_minus_alpha;
-                    let old_mean = ewm_mean;
-                    // Guard a constant run so the mean stays exactly equal.
-                    if ewm_mean != x {
-                        ewm_mean = (old_wt * ewm_mean + new_wt * x) / (old_wt + new_wt);
-                    }
-                    ewm_cov = (old_wt * (ewm_cov + (old_mean - ewm_mean).powi(2))
-                        + new_wt * (x - ewm_mean).powi(2))
-                        / (old_wt + new_wt);
-                    sum_wt += new_wt;
-                    sum_wt2 += new_wt * new_wt;
-                    old_wt += new_wt;
-                    if !self.adjust {
-                        // pandas ewmcov: adjust=False renormalizes the weight
-                        // accumulators after every observation.
-                        sum_wt /= old_wt;
-                        sum_wt2 /= old_wt * old_wt;
-                        old_wt = 1.0;
-                    }
-                }
-            } else if nobs == 0 {
-                // No observation yet — variance undefined.
-                out.push(Scalar::Null(NullKind::NaN));
-                continue;
-            } else if !self.ignore_na {
-                // ignore_na=False: a gap still decays the accumulated weights.
-                sum_wt *= one_minus_alpha;
-                sum_wt2 *= one_minus_alpha * one_minus_alpha;
-                old_wt *= one_minus_alpha;
-            }
-
-            // Debiased (ddof=1) output - the variance itself under bias; NaN
-            // until `minp` observations (issue #19) and, debiased, while the
-            // effective sample weight does not exceed one observation.
-            let numerator = sum_wt * sum_wt - sum_wt2;
-            if nobs >= minp && bias {
-                out.push(Scalar::Float64(ewm_cov));
-            } else if nobs >= minp && numerator > 0.0 {
-                out.push(Scalar::Float64(ewm_cov * (sum_wt * sum_wt) / numerator));
-            } else {
-                out.push(Scalar::Null(NullKind::NaN));
-            }
-        }
-
-        // Per br-frankenpandas-72avi: pandas Series.ewm(...).var preserves
-        // source axis name.
-        let index = self.series.index().clone();
-        let column = Column::from_values(out)?;
-        Series::new(self.series.name(), index, column)
     }
 
     // ── pandas API parity additions (br-frankenpandas-mvynk) ─────────
@@ -37371,8 +36338,8 @@ impl Ewm<'_> {
                 //     e.agg('cov').equals(e.cov(s))     True
                 // compared with .equals(), which is NaN-aware — a list comparison
                 // reads False on any window result because NaN != NaN.
-                "corr" => self.corr(self.series)?,
-                "cov" => self.cov(self.series)?,
+                "corr" => self.corr(&self.series)?,
+                "cov" => self.cov(&self.series)?,
                 _ => {
                     return Err(FrameError::CompatibilityRejected(format!(
                         "ewm.agg: unsupported function '{func}' (supported: mean, sum, std, var)"
@@ -37687,14 +36654,40 @@ fn int_bins_with_gaps_as_float(values: Vec<Scalar>) -> Vec<Scalar> {
 
 /// Convert a datelike index label to a month ordinal (year*12 + month-1) for
 /// multiplied-calendar resample bucketing. Per gauntlet bead 2.5.
+/// [`resample_label_to_month_ordinal`] of every label. Stamps in time order
+/// stay in one month for long runs, so the day span of the last month found
+/// answers most of them without the calendar (br-frankenpandas-7x91u).
+fn resample_month_ordinals(labels: &[IndexLabel]) -> Vec<Option<i64>> {
+    let (mut first_day, mut last_day, mut ordinal) = (1, 0, 0);
+    labels
+        .iter()
+        .map(|label| {
+            let IndexLabel::Datetime64(ns) = label else {
+                return resample_label_to_month_ordinal(label);
+            };
+            let day = ns.div_euclid(Timedelta::NANOS_PER_DAY);
+            if !(first_day..=last_day).contains(&day) {
+                let (year, month, day_of_month) = civil_from_day(day);
+                let length = i32::try_from(year)
+                    .ok()
+                    .and_then(|year| Some(days_in_month(year, i32::try_from(month).ok()?)))
+                    .map_or(1, i64::from);
+                first_day = day - (day_of_month - 1);
+                last_day = first_day + length - 1;
+                ordinal = year * 12 + month - 1;
+            }
+            Some(ordinal)
+        })
+        .collect()
+}
+
 fn resample_label_to_month_ordinal(label: &IndexLabel) -> Option<i64> {
     match label {
         IndexLabel::Datetime64(ns) => {
-            let secs = ns.div_euclid(1_000_000_000);
-            DateTime::from_timestamp(secs, 0).map(|dt| {
-                let d = dt.naive_utc().date();
-                i64::from(d.year()) * 12 + i64::from(d.month0())
-            })
+            // chrono's calendar without a DateTime per stamp
+            // (br-frankenpandas-7x91u).
+            let (year, month, _) = civil_from_day(ns.div_euclid(Timedelta::NANOS_PER_DAY));
+            Some(year * 12 + month - 1)
         }
         IndexLabel::Utf8(s) => {
             let date_part = s
@@ -37993,8 +36986,7 @@ fn resample_build_groups_with_options(
             Some("left") => ResampleLabel::Left,
             _ => ResampleLabel::Right,
         };
-        let month_ords: Vec<Option<i64>> =
-            labels.iter().map(resample_label_to_month_ordinal).collect();
+        let month_ords = resample_month_ordinals(labels);
         let period_end_mo = |mo: i64| -> i64 {
             match unit.as_str() {
                 "M" | "ME" => mo,
@@ -38584,6 +37576,96 @@ pub struct Resample<'a> {
     origin: Option<String>,
 }
 
+/// One bin's running reduction in the single-pass resample kernels, which
+/// clone a prototype per bin and add each row's value to its bin in row
+/// order - the order of the rows in pandas' group kernels.
+trait ResampleBin: Clone {
+    /// A bin of one value reduces to that value (sum, mean), so stamps that
+    /// are already their own bins return the input as it is.
+    const SINGLETON_IS_VALUE: bool;
+
+    fn add(&mut self, value: f64);
+
+    /// The bin's reduction, an empty bin's included (NaN when missing).
+    fn value(&self) -> f64;
+}
+
+/// pandas' group_sum: compensated from 0.0, so an empty bin is 0.0
+/// (br-frankenpandas-xhogl).
+#[derive(Clone, Default)]
+struct BinSum(fp_types::KahanSum);
+
+impl ResampleBin for BinSum {
+    const SINGLETON_IS_VALUE: bool = true;
+
+    fn add(&mut self, value: f64) {
+        self.0.add(value);
+    }
+
+    fn value(&self) -> f64 {
+        self.0.sum()
+    }
+}
+
+/// pandas' group_mean: the compensated sum over the count, an empty bin NaN.
+#[derive(Clone, Default)]
+struct BinMean(fp_types::KahanSum, usize);
+
+impl ResampleBin for BinMean {
+    const SINGLETON_IS_VALUE: bool = true;
+
+    fn add(&mut self, value: f64) {
+        self.0.add(value);
+        self.1 += 1;
+    }
+
+    #[allow(clippy::cast_precision_loss)] // pandas' float count
+    fn value(&self) -> f64 {
+        if self.1 == 0 {
+            f64::NAN
+        } else {
+            self.0.sum() / self.1 as f64
+        }
+    }
+}
+
+/// Which spread a [`BinSpread`] reports.
+#[derive(Clone, Copy)]
+enum Spread {
+    Var,
+    Std,
+    Sem,
+}
+
+/// pandas' group_var, Welford in row order, as var / std / sem (ddof 1;
+/// sem is sqrt(var / n)); NaN below two values (br-frankenpandas-xhogl,
+/// br-frankenpandas-7x91u).
+#[derive(Clone)]
+struct BinSpread(fp_types::WelfordVar, Spread);
+
+impl BinSpread {
+    fn new(spread: Spread) -> Self {
+        Self(fp_types::WelfordVar::default(), spread)
+    }
+}
+
+impl ResampleBin for BinSpread {
+    const SINGLETON_IS_VALUE: bool = false;
+
+    fn add(&mut self, value: f64) {
+        self.0.add(value);
+    }
+
+    fn value(&self) -> f64 {
+        match self.1 {
+            Spread::Var => self.0.var(1),
+            Spread::Std => self.0.std(1),
+            Spread::Sem => self.0.sem(1),
+        }
+        .unwrap_or(f64::NAN)
+    }
+}
+
 impl Resample<'_> {
     pub fn closed(mut self, closed: &str) -> Self {
         self.closed = Some(closed.to_string());
@@ -38877,7 +37959,7 @@ impl Resample<'_> {
             && !vals.iter().any(|x| x.is_nan())
         {
             self.validate()?;
-            if let Some(r) = self.resample_reduce_single_pass(vals, true) {
+            if let Some(r) = self.resample_reduce_single_pass(vals, BinSum::default()) {
                 return r;
             }
             let (order, groups) = self.build_groups()?;
@@ -38908,7 +37990,7 @@ impl Resample<'_> {
             let max_abs = data.iter().map(|v| v.unsigned_abs()).max().unwrap_or(0);
             if u128::from(max_abs) * (data.len() as u128) < (1_u128 << 53) {
                 let vals: Vec<f64> = data.iter().map(|&v| v as f64).collect();
-                if let Some(r) = self.resample_reduce_single_pass(&vals, true) {
+                if let Some(r) = self.resample_reduce_single_pass(&vals, BinSum::default()) {
                     return r.and_then(|sums| {
                         let ints = sums
                             .values()
@@ -38974,7 +38056,7 @@ impl Resample<'_> {
             // accumulate sum+count per day index in ONE pass. Bit-identical: same
             // day ords / labels / empty-bin handling as resample_build_groups' "D"
             // path, sum in row order (== contiguous bin value order).
-            if let Some(r) = self.resample_reduce_single_pass(vals, false) {
+            if let Some(r) = self.resample_reduce_single_pass(vals, BinMean::default()) {
                 return r;
             }
             let (order, groups) = self.build_groups()?;
@@ -39007,7 +38089,7 @@ impl Resample<'_> {
         if let Some(data) = self.series.column().as_i64_slice() {
             self.validate()?;
             let vals: Vec<f64> = data.iter().map(|&v| v as f64).collect();
-            if let Some(r) = self.resample_reduce_single_pass(&vals, false) {
+            if let Some(r) = self.resample_reduce_single_pass(&vals, BinMean::default()) {
                 return r;
             }
             let (order, groups) = self.build_groups()?;
@@ -39037,13 +38119,13 @@ impl Resample<'_> {
     /// row-order compensated sum) are bit-identical. `None` (caller falls back)
     /// for an empty/all-NaT input, a more-than-1e6-day span (past datetime64's
     /// range), or any non-Datetime64/Date label.
-    /// Dispatch the daily / sub-daily one-pass resample reduce (mean if `is_sum`
-    /// is false, sum if true). `None` (caller uses build_groups) for non-D/sub-day
+    /// Dispatch the calendar / daily / sub-daily one-pass resample reduce, each
+    /// bin a clone of `empty`. `None` (caller uses build_groups) for other
     /// freqs or when a helper bails (empty / sparse / non-datetime label).
-    fn resample_reduce_single_pass(
+    fn resample_reduce_single_pass<B: ResampleBin>(
         &self,
         vals: &[f64],
-        is_sum: bool,
+        empty: B,
     ) -> Option<Result<Series, FrameError>> {
         if self.closed.is_some() || self.label.is_some() || self.origin.is_some() {
             return None;
@@ -39056,11 +38138,11 @@ impl Resample<'_> {
             _ => 0,
         };
         if months_per_period > 0 {
-            return self.monthly_reduce_single_pass(vals, months_per_period, mult, is_sum);
+            return self.monthly_reduce_single_pass(vals, months_per_period, mult, empty);
         }
         if unit == "D"
             && mult <= 1
-            && let Some(r) = self.daily_reduce_single_pass(vals, is_sum)
+            && let Some(r) = self.daily_reduce_single_pass(vals, empty.clone())
         {
             return Some(r);
         }
@@ -39073,32 +38155,31 @@ impl Resample<'_> {
             "ns" => 1,
             _ => return None,
         };
-        self.subdaily_reduce_single_pass(vals, ns_per, mult, is_sum)
+        self.subdaily_reduce_single_pass(vals, ns_per, mult, empty)
     }
 
     /// One-pass calendar (M/Q/Y/A) resample reduce over an all-valid no-NaN f64
-    /// slice: accumulate sum+count per bucket index in ONE pass instead of
+    /// slice: accumulate each bucket's bin in ONE pass instead of
     /// build_groups' Vec<usize> scatter + per-bin gather. VERBATIM the M/Q/Y/A
     /// path's month ordinals + period_end_mo/bucket_end_mo bucketing + contiguous
     /// first..=last right-edge cursors + resample_month_end_key + filled empty
-    /// buckets (mean->NaN, sum->0.0). bidx = (bucket_end_mo(mo)-first)/bucket_months
+    /// buckets (their bin's empty value). bidx = (bucket_end_mo(mo)-first)/bucket_months
     /// is direct (no order map). `None` (caller falls back) on empty/all-bad input
-    /// or a >1e6-bucket span. Bit-identical: same buckets/keys/order, row-order sum
-    /// (== contiguous bucket value order for time-ordered data).
-    fn monthly_reduce_single_pass(
+    /// or a >1e6-bucket span. Bit-identical: same buckets/keys/order, row-order
+    /// adds (== contiguous bucket value order for time-ordered data).
+    fn monthly_reduce_single_pass<B: ResampleBin>(
         &self,
         vals: &[f64],
         months_per_period: i64,
         mult: i64,
-        is_sum: bool,
+        empty: B,
     ) -> Option<Result<Series, FrameError>> {
         let bucket_months = mult.checked_mul(months_per_period)?;
         if bucket_months <= 0 {
             return None;
         }
         let labels = self.series.index().labels();
-        let month_ords: Vec<Option<i64>> =
-            labels.iter().map(resample_label_to_month_ordinal).collect();
+        let month_ords = resample_month_ordinals(labels);
         let period_end_mo = |mo: i64| -> i64 {
             mo.div_euclid(months_per_period) * months_per_period + (months_per_period - 1)
         };
@@ -39123,15 +38204,12 @@ impl Resample<'_> {
         if n >= 1_000_000 {
             return None;
         }
-        // Compensated, as pandas' group_sum / group_mean (br-frankenpandas-xhogl).
-        let mut sum = vec![fp_types::KahanSum::default(); n];
-        let mut count = vec![0_i64; n];
+        let mut bins = vec![empty; n];
         for (i, mo_opt) in month_ords.iter().enumerate() {
             if let Some(mo) = *mo_opt {
                 let bidx = ((bucket_end_mo(mo) - first) / bucket_months) as usize;
                 if bidx < n {
-                    sum[bidx].add(vals[i]);
-                    count[bidx] += 1;
+                    bins[bidx].add(vals[i]);
                 }
             }
         }
@@ -39142,18 +38220,7 @@ impl Resample<'_> {
         while cursor <= last && bidx < n {
             if let Some(key) = resample_month_end_key(cursor) {
                 out_labels.push(resample_bin_label(&key));
-                let c = count[bidx];
-                out_f64.push(if c > 0 {
-                    if is_sum {
-                        sum[bidx].sum()
-                    } else {
-                        sum[bidx].sum() / c as f64
-                    }
-                } else if is_sum {
-                    0.0
-                } else {
-                    f64::NAN
-                });
+                out_f64.push(bins[bidx].value());
             }
             cursor += bucket_months;
             bidx += 1;
@@ -39184,8 +38251,7 @@ impl Resample<'_> {
             return None;
         }
         let labels = self.series.index().labels();
-        let month_ords: Vec<Option<i64>> =
-            labels.iter().map(resample_label_to_month_ordinal).collect();
+        let month_ords = resample_month_ordinals(labels);
         let period_end_mo = |mo: i64| -> i64 {
             mo.div_euclid(months_per_period) * months_per_period + (months_per_period - 1)
         };
@@ -39256,10 +38322,10 @@ impl Resample<'_> {
         })())
     }
 
-    fn daily_reduce_single_pass(
+    fn daily_reduce_single_pass<B: ResampleBin>(
         &self,
         vals: &[f64],
-        is_sum: bool,
+        empty: B,
     ) -> Option<Result<Series, FrameError>> {
         use chrono::Datelike;
         let labels = self.series.index().labels();
@@ -39279,14 +38345,10 @@ impl Resample<'_> {
         if n >= 1_000_000 {
             return None;
         }
-        // Compensated, as pandas' group_sum / group_mean (br-frankenpandas-xhogl).
-        let mut sum = vec![fp_types::KahanSum::default(); n];
-        let mut count = vec![0_i64; n];
+        let mut bins = vec![empty; n];
         for (i, o) in day_ords.iter().enumerate() {
             if let Some(ord) = *o {
-                let bidx = (ord - min) as usize;
-                sum[bidx].add(vals[i]);
-                count[bidx] += 1;
+                bins[(ord - min) as usize].add(vals[i]);
             }
         }
         let key_of = |ord: i64| -> Option<String> {
@@ -39295,16 +38357,10 @@ impl Resample<'_> {
         };
         let mut out_labels = Vec::with_capacity(n);
         let mut out_f64 = Vec::with_capacity(n);
-        for (bidx, (s, &c)) in sum.iter().zip(count.iter()).enumerate() {
+        for (bidx, bin) in bins.iter().enumerate() {
             if let Some(key) = key_of(min + bidx as i64) {
                 out_labels.push(resample_bin_label(&key));
-                out_f64.push(if c > 0 {
-                    if is_sum { s.sum() } else { s.sum() / c as f64 }
-                } else if is_sum {
-                    0.0
-                } else {
-                    f64::NAN
-                });
+                out_f64.push(bin.value());
             }
         }
         let index = Index::new(out_labels).rename_index(self.series.index().name());
@@ -39315,19 +38371,19 @@ impl Resample<'_> {
         ))
     }
 
-    /// One-pass sub-daily (H/min/s/ms/us/ns) resample mean over an all-valid no-NaN
-    /// f64 slice: accumulate sum+count per bin index in ONE pass instead of
+    /// One-pass sub-daily (H/min/s/ms/us/ns) resample reduce over an all-valid
+    /// no-NaN f64 slice: accumulate each bin index's bin in ONE pass instead of
     /// build_groups' Vec<usize> scatter + per-bin gather. VERBATIM the sub-day
-    /// path's `bin = (ns-origin).div_euclid(bucket_ns)`, the dense-range gate, the
-    /// bin-start Datetime64 label, and EMPTY-BIN SKIP (sub-daily does not fill
-    /// empty bins, unlike daily). `None` (caller falls back) on empty input or a
-    /// sparse range (matching the dense_done gate -> the HashMap/sort path).
-    fn subdaily_reduce_single_pass(
+    /// path's `bin = (ns-origin).div_euclid(bucket_ns)`, the dense-range gate,
+    /// the bin-start Datetime64 label, and every bin from the first to the last.
+    /// `None` (caller falls back) on empty input or a sparse range (matching
+    /// the dense_done gate -> the HashMap/sort path).
+    fn subdaily_reduce_single_pass<B: ResampleBin>(
         &self,
         vals: &[f64],
         ns_per: i64,
         mult: i64,
-        is_sum: bool,
+        empty: B,
     ) -> Option<Result<Series, FrameError>> {
         let bucket_ns = mult.checked_mul(ns_per)?;
         if bucket_ns <= 0 {
@@ -39345,23 +38401,26 @@ impl Resample<'_> {
             Some(_) => &[][..],
             None => self.series.index().labels(),
         };
-        if let Some((first, step, len)) = affine {
-            if first
-                .rem_euclid(Timedelta::NANOS_PER_DAY)
-                .rem_euclid(bucket_ns)
-                == 0
-                && (len == 1 || step == bucket_ns)
+        // Stamps that are already their own bins: each bin holds one value.
+        if B::SINGLETON_IS_VALUE {
+            if let Some((first, step, len)) = affine {
+                if first
+                    .rem_euclid(Timedelta::NANOS_PER_DAY)
+                    .rem_euclid(bucket_ns)
+                    == 0
+                    && (len == 1 || step == bucket_ns)
+                {
+                    return Some(Series::new(
+                        self.series.name(),
+                        self.series.index().clone(),
+                        self.series.column().clone(),
+                    ));
+                }
+            } else if let Some(identity) =
+                self.subdaily_exact_target_frequency_result(labels, bucket_ns)
             {
-                return Some(Series::new(
-                    self.series.name(),
-                    self.series.index().clone(),
-                    self.series.column().clone(),
-                ));
+                return Some(identity);
             }
-        } else if let Some(identity) =
-            self.subdaily_exact_target_frequency_result(labels, bucket_ns)
-        {
-            return Some(identity);
         }
         // Fused: find origin (min ns) AND max ns in one pass, then accumulate
         // sum/count per bin in a second pass — instead of materializing two 16MB
@@ -39397,44 +38456,30 @@ impl Resample<'_> {
         let origin_day = min_ns.div_euclid(Timedelta::NANOS_PER_DAY) * Timedelta::NANOS_PER_DAY;
         let origin = min_ns - (min_ns - origin_day).rem_euclid(bucket_ns);
         let bmax = (max_ns - origin).div_euclid(bucket_ns);
-        // Every bin from the first to the last is emitted, empty ones as 0.0
-        // (sum) / NaN (mean), as pandas does; this path dropped them. A range too
+        // Every bin from the first to the last is emitted, empty ones their
+        // bin's empty value, as pandas does; this path dropped them. A range too
         // sparse for a dense table goes to the generic path, which emits them too.
         let rows = affine.map_or(labels.len(), |(_, _, len)| len);
         if (bmax as i128 + 1) > (rows as i128 * 4).max(1 << 16) {
             return None;
         }
         let nb = (bmax + 1) as usize;
-        // Compensated, as pandas' group_sum / group_mean (br-frankenpandas-xhogl).
-        let mut sum = vec![fp_types::KahanSum::default(); nb];
-        let mut count = vec![0_i64; nb];
+        let mut bins = vec![empty; nb];
         if let Some((first, step, _)) = affine {
             let mut ns = first;
             for (i, &value) in vals.iter().enumerate() {
                 if i > 0 {
                     ns += step;
                 }
-                let didx = (ns - origin).div_euclid(bucket_ns) as usize;
-                sum[didx].add(value);
-                count[didx] += 1;
+                bins[(ns - origin).div_euclid(bucket_ns) as usize].add(value);
             }
         }
         for (i, l) in labels.iter().enumerate() {
             if let Some(ns) = resample_label_to_ns(l) {
-                let didx = (ns - origin).div_euclid(bucket_ns) as usize;
-                sum[didx].add(vals[i]);
-                count[didx] += 1;
+                bins[(ns - origin).div_euclid(bucket_ns) as usize].add(vals[i]);
             }
         }
-        let out_f64: Vec<f64> = sum
-            .iter()
-            .zip(&count)
-            .map(|(total, &n)| match (is_sum, n) {
-                (true, _) => total.sum(),
-                (false, 0) => f64::NAN,
-                (false, n) => total.sum() / n as f64,
-            })
-            .collect();
+        let out_f64: Vec<f64> = bins.iter().map(ResampleBin::value).collect();
         let index = Index::from_datetime64_affine_range(origin, bucket_ns, nb)
             .unwrap_or_else(|| {
                 let labels = (0..nb)
@@ -39799,6 +38844,13 @@ impl Resample<'_> {
         };
         Some((|| -> Result<Series, FrameError> {
             self.validate()?;
+            // One pass over the rows into bins by arithmetic, as sum / mean
+            // (br-frankenpandas-7x91u); the bins it does not cover hash their
+            // labels below.
+            let spread = if want_std { Spread::Std } else { Spread::Var };
+            if let Some(r) = self.resample_reduce_single_pass(vals, BinSpread::new(spread)) {
+                return r;
+            }
             let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out = Vec::with_capacity(order.len());
@@ -40419,6 +39471,9 @@ impl Resample<'_> {
         };
         if let Some(vals) = typed {
             self.validate()?;
+            if let Some(r) = self.resample_reduce_single_pass(vals, BinSpread::new(Spread::Sem)) {
+                return r;
+            }
             let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out = Vec::with_capacity(order.len());
@@ -62960,9 +62015,26 @@ pub fn to_numeric_with_options(
             }
             Scalar::Utf8(s) => {
                 let trimmed = s.trim();
-                if let Ok(i) = trimmed.parse::<i64>() {
+                // pandas' text converter, not correctly rounded
+                // (br-frankenpandas-py3c0); of the other spellings only an
+                // unpadded inf / infinity - 'nan' and ' inf' raise.
+                let float = || match fp_types::pandas_decimal_to_f64(trimmed.as_bytes()) {
+                    fp_types::PandasDecimal::Value(value) => Some(value),
+                    fp_types::PandasDecimal::Rejected => None,
+                    fp_types::PandasDecimal::NotDecimal => {
+                        let unsigned = s.strip_prefix(['+', '-']).unwrap_or(s);
+                        let inf = unsigned.eq_ignore_ascii_case("inf")
+                            || unsigned.eq_ignore_ascii_case("infinity");
+                        inf.then(|| s.parse::<f64>().ok()).flatten()
+                    }
+                };
+                if s.is_empty() {
+                    // pandas: an empty string is NaN (a blank one raises).
+                    has_float = true;
+                    converted.push(Scalar::Null(NullKind::NaN));
+                } else if let Ok(i) = trimmed.parse::<i64>() {
                     converted.push(Scalar::Int64(i));
-                } else if let Ok(f) = trimmed.parse::<f64>() {
+                } else if let Some(f) = float() {
                     has_float = true;
                     converted.push(Scalar::Float64(f));
                 } else {
@@ -63278,14 +62350,16 @@ pub fn to_datetime_with_options(
     // object/string column. Keep UTC nanoseconds in Column's contiguous datetime
     // backing and carry the shared zone on its dtype. Mixed zones intentionally
     // do not enter this path: pandas cannot unify them into one DatetimeTZDtype.
+    // format='ISO8601' / 'mixed' parse each value on their own and land here
+    // too (their offsets became NaT).
     if options.unit.is_none()
-        && options.format.is_none()
+        && matches!(options.format, None | Some("ISO8601" | "mixed"))
         && options.origin.is_none()
         && !options.utc
-        && let Some((nanos, timezone)) = uniform_timezone_datetime_values(series.values())
+        && let Some(column) =
+            uniform_zone_datetime_column(series.values(), options.format == Some("ISO8601"))
     {
         let index = series.index().clone();
-        let column = Column::from_datetime64_values_with_timezone(nanos, timezone);
         return Series::new(series.name().to_owned(), index, column);
     }
 
@@ -63331,6 +62405,7 @@ pub fn to_datetime_values_with_options(
     // nothing, so every value came back NaT.
     let per_element = matches!(options.format, Some("mixed" | "ISO8601"));
     let mixed = options.format == Some("mixed");
+    let iso8601 = options.format == Some("ISO8601");
     let options = ToDatetimeOptions {
         format: options.format.filter(|_| !per_element),
         ..options
@@ -63376,12 +62451,17 @@ pub fn to_datetime_values_with_options(
     } else {
         None
     };
-    let inferred_timezone_pattern =
-        if parsed_unit.is_none() && options.format.is_none() && options.infer_mixed_timezone {
-            infer_values_datetime_timezone_pattern(values)
-        } else {
-            None
-        };
+    // Not for format='mixed' / 'ISO8601': each value carries its own zone
+    // (the first value's pattern made an aware one beside a naive NaT).
+    let inferred_timezone_pattern = if parsed_unit.is_none()
+        && options.format.is_none()
+        && !per_element
+        && options.infer_mixed_timezone
+    {
+        infer_values_datetime_timezone_pattern(values)
+    } else {
+        None
+    };
     // The format the lock stands for, as pandas' mismatch error names it
     // (it said "the format of the first value"), and the first value it was
     // read from.
@@ -63433,6 +62513,31 @@ pub fn to_datetime_values_with_options(
             return Err(FrameError::CompatibilityRejected(format!(
                 "{head}, at position {position}. You might want to try:\n    - passing `format` if your strings have a consistent format;\n    - passing `format='ISO8601'` if your strings are all ISO8601 but not necessarily in exactly the same format;\n    - passing `format='mixed'`, and the format will be inferred for each element individually. You might want to use `dayfirst` alongside this."
             )));
+        }
+        // format='ISO8601' reads every string with pandas' ISO reader; one
+        // it cannot read is pandas' ValueError, NaT under errors='coerce'
+        // (non-ISO strings parsed, offsets became NaT).
+        if iso8601
+            && parsed_unit.is_none()
+            && let Scalar::Utf8(text) = val
+            && !is_datetime_null_token(text)
+            && !matches!(text.as_str(), "now" | "today")
+        {
+            let parsed = match parse_iso8601(text) {
+                Some(iso) => iso.rendered(),
+                None if options.errors == DatetimeErrors::Raise => {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "Time data {text} is not ISO8601 format, at position {position}. You might want to try:\n    - passing `format` if your strings have a consistent format;\n    - passing `format='ISO8601'` if your strings are all ISO8601 but not necessarily in exactly the same format;\n    - passing `format='mixed'`, and the format will be inferred for each element individually. You might want to use `dayfirst` alongside this."
+                    )));
+                }
+                None => Scalar::Null(NullKind::NaT),
+            };
+            converted.push(if options.utc {
+                normalize_datetime_scalar_to_utc(parsed)
+            } else {
+                datetime64_scalar_from_parsed_datetime(parsed)
+            });
+            continue;
         }
         let result = if let Some(unit) = parsed_unit {
             parse_datetime_scalar_with_unit(val, unit, origin, options.utc)
@@ -63547,9 +62652,14 @@ pub fn to_datetime_values_with_options(
                 Some(format) => format!(
                     "time data \"{text}\" doesn't match format \"{format}\", at position {position}. You might want to try:\n    - passing `format` if your strings have a consistent format;\n    - passing `format='ISO8601'` if your strings are all ISO8601 but not necessarily in exactly the same format;\n    - passing `format='mixed'`, and the format will be inferred for each element individually. You might want to use `dayfirst` alongside this."
                 ),
-                None => format!(
-                    "Unknown datetime string format, unable to parse: {text}, at position {position}"
-                ),
+                // An ISO-shaped value with a field out of range is dateutil's
+                // complaint about it, as pandas raises it.
+                None => match iso8601_fields(text).as_ref().and_then(iso8601_range_error) {
+                    Some(complaint) => format!("{complaint}: {text}, at position {position}"),
+                    None => format!(
+                        "Unknown datetime string format, unable to parse: {text}, at position {position}"
+                    ),
+                },
             }));
         }
         converted.push(result);
@@ -64074,39 +63184,101 @@ fn datetime64_scalar_from_parsed_datetime(value: Scalar) -> Scalar {
     }
 }
 
-/// Return UTC nanoseconds and the one shared pandas timezone for a fully
-/// timezone-aware string sequence. A single dtype cannot represent a mixture
-/// of zones, so any null, non-string, naive, invalid, or differently-labelled
-/// input deliberately declines this typed path.
-fn uniform_timezone_datetime_values(values: &[Scalar]) -> Option<(Vec<i64>, String)> {
+/// An aware datetime `to_datetime` could not put in one zone with the rest
+/// (mixed offsets; pandas answers an object column of Timestamps): its UTC
+/// nanoseconds, the zone pandas names it by - `UTC` for a zero offset,
+/// `UTC+01:00` for another, a named zone by its name - and its offset from
+/// UTC in seconds.
+#[must_use]
+pub fn aware_datetime_parts(text: &str) -> Option<(i64, String, i32)> {
+    let trimmed = text.trim();
+    let (_, named_zone) = split_zone_annotation(trimmed);
+    let fixed = parse_tz_aware_datetime(trimmed)
+        .ok()
+        .map(|parsed| parsed.fixed)
+        .or_else(|| parse_iso8601(trimmed).and_then(|iso| iso.aware()))?;
+    let zone = match named_zone {
+        Some(name) => name.to_owned(),
+        None if fixed.offset().local_minus_utc() == 0 => "UTC".to_owned(),
+        None => format!("UTC{}", fixed.format("%:z")),
+    };
+    Some((
+        fixed.timestamp_nanos_opt()?,
+        zone,
+        fixed.offset().local_minus_utc(),
+    ))
+}
+
+/// Timezone-aware datetime strings in one zone, NaT where a value is
+/// missing, as pandas types them: a `datetime64[ns, zone]` column of UTC
+/// nanoseconds. A single dtype cannot hold a mixture of zones, so any naive,
+/// non-string, invalid or differently-zoned value declines it (None), as
+/// does a column with no aware value. `iso_only` reads only what pandas' ISO
+/// reader reads (format='ISO8601').
+#[must_use]
+pub fn uniform_zone_datetime_column(values: &[Scalar], iso_only: bool) -> Option<Column> {
     let mut timezone: Option<String> = None;
     let mut nanos = Vec::with_capacity(values.len());
+    let mut missing = false;
 
     for value in values {
-        let Scalar::Utf8(rendered) = value else {
-            return None;
+        let rendered = match value {
+            Scalar::Utf8(text) if !is_datetime_null_token(text) => text,
+            Scalar::Utf8(_) | Scalar::Null(_) => {
+                missing = true;
+                nanos.push(fp_types::Timestamp::NAT);
+                continue;
+            }
+            _ => return None,
         };
         let trimmed = rendered.trim();
-        let (without_annotation, named_zone) = split_zone_annotation(trimmed);
-        let parsed = parse_tz_aware_datetime(trimmed).ok()?;
+        let (_, named_zone) = split_zone_annotation(trimmed);
+        // format='ISO8601' reads only what pandas' ISO reader reads; otherwise
+        // the aware parser first, the ISO reader for the offsets it misses
+        // (+0530, a space before the offset).
+        let parsed = (!iso_only)
+            .then(|| {
+                parse_tz_aware_datetime(trimmed)
+                    .ok()
+                    .map(|parsed| parsed.fixed)
+            })
+            .flatten()
+            .or_else(|| parse_iso8601(rendered).and_then(|iso| iso.aware()))?;
+        // pandas names a zero offset (Z or +00:00) UTC.
         let label = match named_zone {
-            Some(name) => name.to_owned(),
-            None if fixed_offset_suffix(without_annotation) == Some("Z") => "UTC".to_owned(),
-            None => format!("UTC{}", parsed.fixed.format("%:z")),
+            Some(name) if !iso_only => name.to_owned(),
+            _ if parsed.offset().local_minus_utc() == 0 => "UTC".to_owned(),
+            _ => format!("UTC{}", parsed.format("%:z")),
         };
         match &timezone {
             Some(existing) if existing != &label => return None,
             None => timezone = Some(label),
             Some(_) => {}
         }
-        let value = parsed.fixed.timestamp_nanos_opt()?;
+        let value = parsed.timestamp_nanos_opt()?;
         if value == fp_types::Timestamp::NAT {
             return None;
         }
         nanos.push(value);
     }
 
-    Some((nanos, timezone?))
+    let timezone = timezone?;
+    if !missing {
+        return Some(Column::from_datetime64_values_with_timezone(
+            nanos, timezone,
+        ));
+    }
+    let cells = nanos
+        .into_iter()
+        .map(|nanos| {
+            if nanos == fp_types::Timestamp::NAT {
+                Scalar::Null(NullKind::NaT)
+            } else {
+                Scalar::Datetime64(nanos)
+            }
+        })
+        .collect();
+    Column::new(DType::datetime64_tz(timezone), cells).ok()
 }
 
 /// Normalize a parsed `to_datetime(utc=True)` scalar to a UTC `Datetime64`.
@@ -64280,6 +63452,261 @@ fn fast_iso_datetime_nanos(s: &str) -> Option<i64> {
         .checked_mul(1_000_000_000)
 }
 
+/// What numpy's `parse_iso_8601_datetime` - pandas' `format='ISO8601'`
+/// reader - reads from a string: the wall clock and, when given, its UTC
+/// offset in minutes.
+struct IsoDatetime {
+    local: NaiveDateTime,
+    offset_minutes: Option<i32>,
+}
+
+impl IsoDatetime {
+    /// The value as the string parsers hand it on: the rendered naive or
+    /// aware datetime.
+    fn rendered(&self) -> Scalar {
+        match self.offset_minutes {
+            None => Scalar::Utf8(format_naive_datetime(self.local)),
+            Some(_) => self.aware().map_or(Scalar::Null(NullKind::NaT), |aware| {
+                Scalar::Utf8(format_aware_datetime(aware, None))
+            }),
+        }
+    }
+
+    fn aware(&self) -> Option<DateTime<FixedOffset>> {
+        FixedOffset::east_opt(self.offset_minutes? * 60)?
+            .from_local_datetime(&self.local)
+            .single()
+    }
+}
+
+/// numpy's `parse_iso_8601_datetime`, as pandas vendors it: leading
+/// whitespace, a four-digit year, then optionally the month and the day (one
+/// or two digits after a `-`, `.`, `/`, `\` or space separator, two without
+/// one), then after a `T` or a space the hour (two digits unless more
+/// follows), minutes and seconds (one or two digits after `:`, two without),
+/// a fraction of up to 18 digits (nanoseconds kept), and an optional `Z` or
+/// `+-H[H][[:]M[M]]` offset, whitespace allowed around it. Anything else is
+/// not ISO8601 (`None`), nor is an out-of-range field
+/// ([`iso8601_range_error`]).
+fn parse_iso8601(text: &str) -> Option<IsoDatetime> {
+    let fields = iso8601_fields(text)?;
+    if iso8601_range_error(&fields).is_some() {
+        return None;
+    }
+    let local = NaiveDate::from_ymd_opt(fields.year, fields.month, fields.day)?.and_hms_nano_opt(
+        fields.hour,
+        fields.minute,
+        fields.second,
+        fields.nanos,
+    )?;
+    Some(IsoDatetime {
+        local,
+        offset_minutes: fields.offset_minutes,
+    })
+}
+
+/// The fields [`parse_iso8601`]'s grammar reads, before its range checks.
+struct IsoFields {
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    nanos: u32,
+    offset_minutes: Option<i32>,
+}
+
+/// pandas' (dateutil's) complaint about an ISO-shaped string whose field is
+/// out of range - `month must be in 1..12` and the like - in the order it
+/// checks them.
+fn iso8601_range_error(fields: &IsoFields) -> Option<&'static str> {
+    if !(1..=12).contains(&fields.month) {
+        return Some("month must be in 1..12");
+    }
+    let last_day = u32::try_from(days_in_month(fields.year, fields.month as i32)).unwrap_or(0);
+    if fields.day < 1 || fields.day > last_day {
+        return Some("day is out of range for month");
+    }
+    if fields.hour >= 24 {
+        return Some("hour must be in 0..23");
+    }
+    if fields.minute >= 60 {
+        return Some("minute must be in 0..59");
+    }
+    (fields.second >= 60).then_some("second must be in 0..59")
+}
+
+fn iso8601_fields(text: &str) -> Option<IsoFields> {
+    let b = text.as_bytes();
+    let digit = |i: usize| {
+        b.get(i)
+            .filter(|c| c.is_ascii_digit())
+            .map(|c| u32::from(c - b'0'))
+    };
+    let mut i = b.iter().take_while(|c| c.is_ascii_whitespace()).count();
+    let mut year = 0_i32;
+    for k in 0..4 {
+        year = year * 10 + i32::try_from(digit(i + k)?).ok()?;
+    }
+    i += 4;
+    let (mut month, mut day, mut hour, mut minute, mut second, mut nanos) = (1, 1, 0, 0, 0, 0);
+    let done = |i: usize| i == b.len();
+    'clock: {
+        if done(i) {
+            break 'clock;
+        }
+        let separator = if digit(i).is_none() {
+            let sep = b[i];
+            if !matches!(sep, b'-' | b'.' | b'/' | b'\\' | b' ') {
+                return None;
+            }
+            i += 1;
+            digit(i)?;
+            Some(sep)
+        } else {
+            None
+        };
+        // One or two digits after a separator, exactly two without one.
+        let field = |i: &mut usize, separated: bool| -> Option<u32> {
+            let mut value = digit(*i)?;
+            *i += 1;
+            match digit(*i) {
+                Some(next) => {
+                    value = value * 10 + next;
+                    *i += 1;
+                }
+                None if !separated => return None,
+                None => {}
+            }
+            Some(value)
+        };
+        month = field(&mut i, separator.is_some())?;
+        if done(i) {
+            break 'clock;
+        }
+        if let Some(sep) = separator {
+            if b[i] != sep || i + 1 == b.len() {
+                return None;
+            }
+            i += 1;
+        }
+        day = field(&mut i, separator.is_some())?;
+        if done(i) {
+            break 'clock;
+        }
+        if !matches!(b[i], b'T' | b' ') || i + 1 == b.len() {
+            return None;
+        }
+        i += 1;
+        hour = digit(i)?;
+        i += 1;
+        let two_digit_hour = digit(i).is_some();
+        if let Some(next) = digit(i) {
+            hour = hour * 10 + next;
+            i += 1;
+        }
+        if done(i) {
+            if !two_digit_hour {
+                return None;
+            }
+            break 'clock;
+        }
+        let colons = if b[i] == b':' {
+            i += 1;
+            digit(i)?;
+            true
+        } else if digit(i).is_none() {
+            if !two_digit_hour {
+                return None;
+            }
+            break 'clock;
+        } else {
+            false
+        };
+        minute = field(&mut i, colons)?;
+        if done(i) {
+            break 'clock;
+        }
+        if colons && b[i] == b':' {
+            i += 1;
+            digit(i)?;
+        } else if colons || digit(i).is_none() {
+            break 'clock;
+        }
+        second = field(&mut i, colons)?;
+        if b.get(i) == Some(&b'.') {
+            i += 1;
+            let mut read = 0;
+            while read < 18
+                && let Some(next) = digit(i)
+            {
+                if read < 9 {
+                    nanos = nanos * 10 + next;
+                }
+                read += 1;
+                i += 1;
+            }
+            nanos *= 10_u32.pow(9 - read.min(9));
+        }
+    }
+    // The offset: whitespace, then Z or +-hours[[:]minutes], then whitespace.
+    let skip_space = |i: &mut usize| {
+        while *i < b.len() && b[*i].is_ascii_whitespace() {
+            *i += 1;
+        }
+    };
+    skip_space(&mut i);
+    let mut offset_minutes = None;
+    match b.get(i) {
+        Some(b'Z') => {
+            offset_minutes = Some(0);
+            i += 1;
+        }
+        Some(&sign @ (b'+' | b'-')) => {
+            i += 1;
+            let part = |i: &mut usize, limit: u32| -> Option<i32> {
+                let mut value = digit(*i)?;
+                *i += 1;
+                if let Some(next) = digit(*i) {
+                    value = value * 10 + next;
+                    *i += 1;
+                    if value >= limit {
+                        return None;
+                    }
+                }
+                i32::try_from(value).ok()
+            };
+            let hours = part(&mut i, 24)?;
+            let minutes = if i < b.len() {
+                if b[i] == b':' {
+                    i += 1;
+                }
+                part(&mut i, 60)?
+            } else {
+                0
+            };
+            let total = hours * 60 + minutes;
+            offset_minutes = Some(if sign == b'-' { -total } else { total });
+        }
+        _ => {}
+    }
+    skip_space(&mut i);
+    if !done(i) {
+        return None;
+    }
+    Some(IsoFields {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        nanos,
+        offset_minutes,
+    })
+}
+
 /// The guess [`guess_day_month_format`] makes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DayMonthGuess {
@@ -64436,8 +63863,10 @@ fn parse_datetime_string(s: &str, format: Option<&str>) -> Scalar {
     }
 
     if has_tz_suffix(trimmed) {
+        // An ISO offset the aware parser does not read (+0530, a space
+        // before it) is pandas' ISO reader's (it was NaT).
         return parse_tz_aware_datetime(trimmed).map_or_else(
-            |_| Scalar::Null(NullKind::NaT),
+            |_| parse_iso8601(trimmed).map_or(Scalar::Null(NullKind::NaT), |iso| iso.rendered()),
             |parsed| Scalar::Utf8(format_aware_datetime(parsed.fixed, None)),
         );
     }
@@ -64555,11 +63984,28 @@ fn parse_datetime_string(s: &str, format: Option<&str>) -> Scalar {
         return Scalar::Utf8(format!("{} 00:00:00", d.format("%Y-%m-%d")));
     }
 
-    // Already normalized or has timezone info - return as-is if it looks like a datetime.
-    if trimmed.len() >= 10 && trimmed.as_bytes().get(4) == Some(&b'-') {
-        return Scalar::Utf8(trimmed.to_owned());
+    // The other ISO forms pandas reads: an hour alone (T10), HHMM, a bare
+    // trailing '.', '.' / ' ' / '\' date separators, an offset after a space
+    // (they were NaT or raised).
+    if let Some(iso) = parse_iso8601(trimmed) {
+        return iso.rendered();
+    }
+    // pandas' dateutil fallback reads a date with a dangling T as that date,
+    // and a lowercase t as the T between date and time.
+    if let Some(date) = trimmed.strip_suffix('T')
+        && let Some(iso) = parse_iso8601(date)
+    {
+        return iso.rendered();
+    }
+    if let Some(at) = trimmed.find('t')
+        && let Some(iso) = parse_iso8601(&format!("{}T{}", &trimmed[..at], &trimmed[at + 1..]))
+    {
+        return iso.rendered();
     }
 
+    // Nothing reads it: NaT, which errors='raise' turns into pandas' error.
+    // (Text shaped like a date - 2024-13-01, 2024-01-05T25:00 - went on as
+    // it was and became a silent NaT.)
     Scalar::Null(NullKind::NaT)
 }
 
@@ -69538,7 +68984,6 @@ type ColumnOrderNames = LazyDataFrameColumnOrder;
 type ColumnOrderNames = Vec<String>;
 
 type DataFrameColumnOrderStore = ColumnAxis;
-
 
 /// The storage keys of the columns under a column MultiIndex given as one
 /// label list per level: each column's [`column_key`]s joined with '_', as
@@ -81638,13 +81083,18 @@ impl DataFrame {
                     f64::NAN,
                 )
             } else {
-                let sum: f64 = nums.iter().sum();
-                let mean_val = sum / count;
-                let var = if nums.len() > 1 {
-                    nums.iter().map(|x| (x - mean_val).powi(2)).sum::<f64>() / (count - 1.0)
-                } else {
-                    f64::NAN
-                };
+                // Each column's mean and std as its Series' own, added in
+                // numpy's order (br-frankenpandas-9iim6).
+                let pandas = col.pandas_reductions(|r| (r.mean(), r.var(1)));
+                let (mean_val, var) = pandas.unwrap_or_else(|| {
+                    let mean_val = nums.iter().sum::<f64>() / count;
+                    let var = if nums.len() > 1 {
+                        nums.iter().map(|x| (x - mean_val).powi(2)).sum::<f64>() / (count - 1.0)
+                    } else {
+                        f64::NAN
+                    };
+                    (mean_val, var)
+                });
                 // Order statistics via O(n) selection instead of a full O(n log n)
                 // sort: min/max are folds and the three percentiles reuse
                 // quantile_select. -0.0/0.0 ties (equal under partial_cmp but
@@ -85663,7 +85113,7 @@ impl DataFrame {
         all_col_vals.push(if overall_vals.is_empty() {
             Scalar::Null(NullKind::NaN)
         } else {
-            Scalar::Float64(pivot_table_agg_value(aggfunc, &overall_vals)?)
+            Scalar::Float64(pivot_table_grand_total(aggfunc, &overall_vals)?)
         });
         new_cols.insert(
             margins_name.to_owned(),
@@ -117268,14 +116718,14 @@ mod tests {
         assert_eq!(out.name(), "");
     }
 
-    /// The fused m2/m3 and m2/m4 passes replace `(v - mean).powi(k)` sums. That
-    /// is only bit-identical if `powi(4)` associates as `(d*d)*(d*d)` and
-    /// `powi(3)` as `(d*d)*d` — if either associates differently the last ulp
-    /// moves, which is a semantics change, not a perf change.
-    ///
-    /// Compare against the EXACT expressions the fallback used before fusing.
+    /// Series skew / kurtosis are pandas' nanskew / nankurt: the missing slots
+    /// 0 in place, the mean and the centred powers `(d*d)` / `(d*d)*d` /
+    /// `(d*d)*(d*d)` each one numpy pairwise sum, `_zero_out_fperr`, and
+    /// pandas' own formulas (br-frankenpandas-9iim6; the bits against live
+    /// pandas are pinned in `pandas_reductions_9iim6`). Compare against those
+    /// expressions written out, over a column with missing values.
     #[test]
-    fn fused_skew_kurtosis_moments_are_bit_identical_to_the_powi_form() {
+    fn skew_kurtosis_are_pandas_nanops_formulas() {
         for len in [7usize, 64, 257, 1000] {
             // Nullable so the typed all-valid arms decline and the FUSED
             // fallback is what actually runs.
@@ -117292,32 +116742,49 @@ mod tests {
             let index = Index::new((0..len as i64).map(IndexLabel::Int64).collect());
             let series = Series::new("s".to_string(), index, column).expect("series");
 
-            let vals: Vec<f64> = data.iter().copied().filter(|v| !v.is_nan()).collect();
-            let count = vals.len();
-            let n = count as f64;
-            let mean = vals.iter().sum::<f64>() / n;
-            let m2: f64 = vals.iter().map(|v| (v - mean).powi(2)).sum();
-            let m3: f64 = vals.iter().map(|v| (v - mean).powi(3)).sum();
-            let m4: f64 = vals.iter().map(|v| (v - mean).powi(4)).sum();
+            let n = data.iter().filter(|v| !v.is_nan()).count() as f64;
+            let zeroed: Vec<f64> = data
+                .iter()
+                .map(|v| if v.is_nan() { 0.0 } else { *v })
+                .collect();
+            let mean = (0.0 + fp_types::numpy_pairwise_sum(&zeroed)) / n;
+            let centred_sum = |power: fn(f64) -> f64| {
+                let terms: Vec<f64> = data
+                    .iter()
+                    .map(|v| if v.is_nan() { 0.0 } else { power(v - mean) })
+                    .collect();
+                0.0 + fp_types::numpy_pairwise_sum(&terms)
+            };
+            let zero_out_fperr = |x: f64| if x.abs() < 1e-14 { 0.0 } else { x };
+            let m2 = centred_sum(|d| d * d);
+            let m3 = centred_sum(|d| d * d * d);
+            let m4 = centred_sum(|d| (d * d) * (d * d));
 
-            let s2 = m2 / (n - 1.0);
-            // `powf(1.5)`, NOT `sqrt().powi(3)` — they differ by ulps and the
-            // implementation uses powf.
-            let s3 = s2.powf(1.5);
-            let want_skew = (n / ((n - 1.0) * (n - 2.0))) * (m3 / s3);
-            let adj = (n * (n + 1.0)) / ((n - 1.0) * (n - 2.0) * (n - 3.0));
-            let sub = (3.0 * (n - 1.0).powi(2)) / ((n - 2.0) * (n - 3.0));
-            let want_kurt = adj * (m4 / (s2 * s2)) - sub;
+            // libm pow, as pandas raises (a literal 0.5 would become sqrt).
+            let half = std::hint::black_box(0.5);
+            let (m2z, m3z) = (zero_out_fperr(m2), zero_out_fperr(m3));
+            let want_skew = if m2z == 0.0 {
+                0.0
+            } else {
+                (n * (n - 1.0).powf(half) / (n - 2.0)) * (m3z / m2z.powf(1.5))
+            };
+            let numerator = zero_out_fperr(n * (n + 1.0) * (n - 1.0) * m4);
+            let denominator = zero_out_fperr((n - 2.0) * (n - 3.0) * (m2 * m2));
+            let want_kurt = if denominator == 0.0 {
+                0.0
+            } else {
+                numerator / denominator - 3.0 * ((n - 1.0) * (n - 1.0)) / ((n - 2.0) * (n - 3.0))
+            };
 
             assert_eq!(
                 series.skew().expect("skew").to_bits(),
                 want_skew.to_bits(),
-                "len={len}: fused m2/m3 must be BITWISE equal to the powi form"
+                "len={len}: skew is pandas' nanskew"
             );
             assert_eq!(
                 series.kurtosis().expect("kurtosis").to_bits(),
                 want_kurt.to_bits(),
-                "len={len}: fused m2/m4 must be BITWISE equal to the powi form"
+                "len={len}: kurtosis is pandas' nankurt"
             );
         }
     }
@@ -118803,8 +118270,16 @@ mod tests {
         };
 
         let sum = df.sum_with_numeric_only(false).expect("sum");
-        assert_eq!(at(&sum, "b"), Scalar::Int64(2), "bool sums to its True count");
-        assert_eq!(at(&sum, "label"), Scalar::Utf8("xyz".into()), "object still concatenates");
+        assert_eq!(
+            at(&sum, "b"),
+            Scalar::Int64(2),
+            "bool sums to its True count"
+        );
+        assert_eq!(
+            at(&sum, "label"),
+            Scalar::Utf8("xyz".into()),
+            "object still concatenates"
+        );
 
         let min = df.min_agg_with_numeric_only(false).expect("min");
         assert_eq!(at(&min, "b"), Scalar::Bool(false));
@@ -134129,8 +133604,9 @@ mod tests {
 
     #[test]
     fn to_datetime_reads_a_bare_year_and_text_month_times_fvsao_35() {
-        use crate::{DatetimeErrors, ToDatetimeOptions, to_datetime_values_with_options};
         use fp_types::Timestamp;
+
+        use crate::{DatetimeErrors, ToDatetimeOptions, to_datetime_values_with_options};
         let read = |text: &str| {
             to_datetime_values_with_options(
                 &[Scalar::Utf8(text.to_owned())],
@@ -155196,14 +154672,21 @@ mod tests {
 
         for shifted in [
             df.shift(1).unwrap(),
-            df.shift_with_fill_value(1, Scalar::Null(NullKind::Null)).unwrap(),
+            df.shift_with_fill_value(1, Scalar::Null(NullKind::Null))
+                .unwrap(),
         ] {
             let k = shifted.column("k").unwrap().values().to_vec();
             assert!(k[0].is_missing(), "object column vacated slot is missing");
-            assert_eq!(&k[1..], &[Scalar::Utf8("x".into()), Scalar::Utf8("y".into())]);
+            assert_eq!(
+                &k[1..],
+                &[Scalar::Utf8("x".into()), Scalar::Utf8("y".into())]
+            );
             let t = shifted.column("t").unwrap().values().to_vec();
             assert!(t[0].is_missing(), "datetime column vacated slot is NaT");
-            assert_eq!(&t[1..], &[Scalar::Datetime64(t0), Scalar::Datetime64(t0 + day)]);
+            assert_eq!(
+                &t[1..],
+                &[Scalar::Datetime64(t0), Scalar::Datetime64(t0 + day)]
+            );
             let a = shifted.column("a").unwrap().values().to_vec();
             assert!(a[0].is_missing());
         }
@@ -167475,7 +166958,11 @@ mod tests {
         let utf8 = |s: &str| Scalar::Utf8(s.to_owned());
         let plain = Series::from_values(
             "s",
-            vec![IndexLabel::Int64(10), IndexLabel::Int64(20), IndexLabel::Int64(30)],
+            vec![
+                IndexLabel::Int64(10),
+                IndexLabel::Int64(20),
+                IndexLabel::Int64(30),
+            ],
             vec![utf8("b"), utf8("a"), utf8("b")],
         )
         .unwrap();
@@ -167505,12 +166992,20 @@ mod tests {
             Series::from_categorical_codes("e", vec![1, 0], vec![utf8("z"), utf8("a")], false)
                 .unwrap();
         assert_eq!(
-            explicit.astype(DType::Categorical).unwrap().cat().unwrap().categories(),
+            explicit
+                .astype(DType::Categorical)
+                .unwrap()
+                .cat()
+                .unwrap()
+                .categories(),
             [utf8("z"), utf8("a")]
         );
         // NEGATIVE: a plain column is not categorical and has no accessor.
         assert!(plain.cat().is_none());
-        assert_eq!(plain.eq_scalar(&utf8("b")).unwrap().values()[1], Scalar::Bool(false));
+        assert_eq!(
+            plain.eq_scalar(&utf8("b")).unwrap().values()[1],
+            Scalar::Bool(false)
+        );
     }
 
     #[test]
@@ -178467,7 +177962,11 @@ mod tests {
         // index, and non-string labels are untouched.
         let dates = Series::from_values(
             "d",
-            vec!["2024-01-01".into(), "2024-01-02".into(), "2024-01-03".into()],
+            vec![
+                "2024-01-01".into(),
+                "2024-01-02".into(),
+                "2024-01-03".into(),
+            ],
             vec![
                 Scalar::Float64(1.0),
                 Scalar::Float64(2.0),
@@ -225147,7 +224646,10 @@ mod test_groupby_idxmin_idxmax_utf8_e9aba4 {
         // Result is per-group; the group axis is 0 then 1. Each value is the
         // original index label with its own type. GOLDEN-CHANGE (fvsao.4): it was
         // the label stringified ("1"); pandas 2.2.3 returns the int64 label.
-        assert_eq!(result.values().to_vec(), vec![Scalar::Int64(1), Scalar::Int64(3)]);
+        assert_eq!(
+            result.values().to_vec(),
+            vec![Scalar::Int64(1), Scalar::Int64(3)]
+        );
     }
 
     #[test]
@@ -225159,7 +224661,10 @@ mod test_groupby_idxmin_idxmax_utf8_e9aba4 {
         // group 0: ["banana", "apple"] -> max "banana" at idx 0
         // group 1: ["cherry", "ant"]   -> max "cherry" at idx 2
         // GOLDEN-CHANGE (fvsao.4): int64 labels, not "0"/"2".
-        assert_eq!(result.values().to_vec(), vec![Scalar::Int64(0), Scalar::Int64(2)]);
+        assert_eq!(
+            result.values().to_vec(),
+            vec![Scalar::Int64(0), Scalar::Int64(2)]
+        );
     }
 
     #[test]
@@ -225172,7 +224677,10 @@ mod test_groupby_idxmin_idxmax_utf8_e9aba4 {
         // group 0: [10, 5] -> min 5 at idx 1
         // group 1: [30, 20] -> min 20 at idx 3
         // GOLDEN-CHANGE (fvsao.4): int64 labels, not "1"/"3".
-        assert_eq!(result.values().to_vec(), vec![Scalar::Int64(1), Scalar::Int64(3)]);
+        assert_eq!(
+            result.values().to_vec(),
+            vec![Scalar::Int64(1), Scalar::Int64(3)]
+        );
     }
 
     #[test]
@@ -225254,7 +224762,11 @@ mod test_groupby_idxmin_idxmax_utf8_e9aba4 {
         let gb = series.groupby(&groups).expect("groupby ok");
         let result = gb.idxmin().expect("idxmin ok");
         // GOLDEN-CHANGE (fvsao.4): the int64 label of "ant", not "2".
-        assert_eq!(result.values()[0], Scalar::Int64(2), "expected idx of \"ant\"");
+        assert_eq!(
+            result.values()[0],
+            Scalar::Int64(2),
+            "expected idx of \"ant\""
+        );
     }
 }
 
@@ -234415,210 +233927,601 @@ mod dot_small_shape_phase_split_03fp5 {
     }
 }
 
-/// Locks for the blocked moment accumulation in `Series::skew` / `Series::kurtosis`
-/// (br-frankenpandas-8s4mb).
-///
-/// The whole change is admissible only because it is bit-identical below 8
-/// elements — `br-frankenpandas-jawxr` rejected FMA for changing pinned bits, and
-/// every conformance fixture for these ops has 2 to 6 elements. These tests assert
-/// that property directly rather than trusting the `as_chunks::<8>()` argument, and
-/// then assert the lane path is genuinely exercised above 8 so the first assertion
-/// is not passing vacuously.
+/// Series / DataFrame float reductions against live pandas 2.2.3 / numpy
+/// 2.3.5 bits (br-frankenpandas-9iim6): `sum` / `mean` / `var` / `std` /
+/// `sem` / `skew` / `kurt` add in numpy's pairwise order with the missing
+/// slots as 0 (a masked dtype over its runs, an int64 mean through numpy's
+/// cast buffer). They were an 8-lane pass seeded at 0 and a left fold, which
+/// missed pandas' last bits past 128 values (sum / mean) and 8 (var / std),
+/// and `skew` used another formula. Data: `((k * 7919 + 13) % 100003) / 7.0 -
+/// 7000.0`, times 1e6 where `k % 5 == 0`, as fp-types' tests build it.
 #[cfg(test)]
-mod blocked_moments_8s4mb {
+mod pandas_reductions_9iim6 {
     use fp_columnar::Column;
     use fp_index::Index;
+    use fp_types::{DType, NullKind, Scalar};
+
+    use super::{DataFrame, Series, concat_series};
+
+    #[allow(clippy::cast_precision_loss)] // below 100003
+    fn floats(n: usize, missing: bool) -> Vec<f64> {
+        (0..n)
+            .map(|k| {
+                if missing && k % 11 == 3 {
+                    return f64::NAN;
+                }
+                let base = ((k * 7919 + 13) % 100_003) as f64 / 7.0 - 7000.0;
+                if k % 5 == 0 { base * 1e6 } else { base }
+            })
+            .collect()
+    }
+
+    fn series(column: Column) -> Series {
+        let n = i64::try_from(column.len()).unwrap();
+        Series::new("v", Index::from_range(0, n, 1), column).unwrap()
+    }
+
+    fn bits(value: &Scalar) -> u64 {
+        match value {
+            Scalar::Float64(value) => value.to_bits(),
+            other => panic!("expected a float, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn float64_with_nan_reduces_to_pandas_bits() {
+        // pandas: Series(floats(1000)) with NaN at k % 11 == 3.
+        let s = series(Column::from_f64_values(floats(1000, true)));
+        assert_eq!(bits(&s.sum().unwrap()), 0x421a_d4f6_8061_248e);
+        assert_eq!(bits(&s.mean().unwrap()), 0x417e_39f9_3e1a_a248);
+        assert_eq!(bits(&s.var().unwrap()), 0x43c7_9481_cba1_263b);
+        assert_eq!(bits(&s.std().unwrap()), 0x41db_7825_28c0_37cc);
+        assert_eq!(s.sem().unwrap().to_bits(), 0x418d_27ba_a0ea_2f9a);
+        assert_eq!(s.skew().unwrap().to_bits(), 0x3fc8_e53a_e277_3d7f);
+        assert_eq!(s.kurt().unwrap().to_bits(), 0x4018_3c97_3603_dfd0);
+        // DataFrame reductions read the same column the same way.
+        let frame = DataFrame::from_series(vec![s.clone()]).unwrap();
+        assert_eq!(
+            bits(&frame.sum().unwrap().values()[0]),
+            0x421a_d4f6_8061_248e
+        );
+        assert_eq!(
+            bits(&frame.mean().unwrap().values()[0]),
+            0x417e_39f9_3e1a_a248
+        );
+        assert_eq!(
+            bits(&frame.var().unwrap().values()[0]),
+            0x43c7_9481_cba1_263b
+        );
+        // NEGATIVE: the present values added left to right are not pandas'.
+        let left_fold: f64 = floats(1000, true).iter().filter(|v| !v.is_nan()).sum();
+        assert_ne!(left_fold.to_bits(), 0x421a_d4f6_8061_248e);
+    }
+
+    #[test]
+    fn concatenated_chunks_reduce_as_the_whole_column() {
+        // pandas: Series(floats(1000)) sum / mean / var; concat of its two
+        // pieces answers the same.
+        let whole = floats(1000, false);
+        let head = series(Column::from_f64_values(whole[..400].to_vec()));
+        let tail = series(Column::from_f64_values(whole[400..].to_vec()));
+        let joined = concat_series(&[&head, &tail]).unwrap();
+        assert!(joined.column().all_valid_f64_chunk_slices().is_some());
+        for s in [&joined, &series(Column::from_f64_values(whole))] {
+            assert_eq!(bits(&s.sum().unwrap()), 0x421d_3d1b_8a34_9246);
+            assert_eq!(bits(&s.mean().unwrap()), 0x417d_f0c0_0a73_45e9);
+            assert_eq!(bits(&s.var().unwrap()), 0x43c7_ca85_5afe_c186);
+        }
+    }
+
+    #[test]
+    fn int64_mean_sums_through_numpys_cast_buffer() {
+        // pandas: Series((k * 7919 + 13) % 100003 * 3_000_000_007), n = 20000.
+        let ints: Vec<i64> = (0..20_000_usize)
+            .map(|k| i64::try_from((k * 7919 + 13) % 100_003).unwrap() * 3_000_000_007)
+            .collect();
+        let s = series(Column::from_i64_values(ints));
+        assert_eq!(bits(&s.mean().unwrap()), 0x42e1_0d17_ebf8_272d);
+        assert_eq!(bits(&s.var().unwrap()), 0x45b8_3c24_c921_82b6);
+        assert_eq!(s.sem().unwrap().to_bits(), 0x4261_d2a2_f139_68e2);
+        assert_eq!(s.skew().unwrap().to_bits(), 0x3f31_a21c_d4bb_ff52);
+        assert_eq!(s.kurt().unwrap().to_bits(), 0xbff3_328c_4edc_26ee);
+    }
+
+    #[test]
+    fn masked_float64_adds_runs_of_present_values() {
+        // pandas: pd.array(floats(1000), dtype="Float64") with NA at
+        // k % 11 == 3: sum / mean differ from the float64 column's above.
+        let s = series(Column::from_f64_values(floats(1000, true)))
+            .astype(DType::Float64Nullable)
+            .unwrap();
+        assert_eq!(bits(&s.sum().unwrap()), 0x421a_d4f6_8061_2492);
+        assert_eq!(bits(&s.mean().unwrap()), 0x417e_39f9_3e1a_a24c);
+        assert_eq!(bits(&s.var().unwrap()), 0x43c7_9481_cba1_263a);
+        assert_eq!(s.sem().unwrap().to_bits(), 0x418d_27ba_a0ea_2f9a);
+    }
+
+    #[test]
+    fn pivot_grand_total_is_the_series_reduction() {
+        // pandas: DataFrame({"a": k % 3, "b": k % 4, "v": floats(1000)})
+        // .pivot_table("v", "a", "b", aggfunc, margins=True).loc["All", "All"]
+        // for sum / mean / var / std - all present (the dense margins) and
+        // with NaN at k % 11 == 3 (the generic ones).
+        const ALL_PRESENT: [u64; 4] = [
+            0x421d_3d1b_8a34_9246,
+            0x417d_f0c0_0a73_45e9,
+            0x43c7_ca85_5afe_c186,
+            0x41db_9789_55af_d068,
+        ];
+        const WITH_NAN: [u64; 4] = [
+            0x421a_d4f6_8061_2492,
+            0x417e_39f9_3e1a_a24c,
+            0x43c7_9481_cba1_263b,
+            0x41db_7825_28c0_37cc,
+        ];
+        let keys = |modulus: i64| -> Vec<Scalar> {
+            (0..1000_i64).map(|k| Scalar::Int64(k % modulus)).collect()
+        };
+        for (missing, expected) in [(false, ALL_PRESENT), (true, WITH_NAN)] {
+            let values = floats(1000, missing)
+                .into_iter()
+                .map(Scalar::Float64)
+                .collect();
+            let frame = DataFrame::from_dict(
+                &["a", "b", "v"],
+                vec![("a", keys(3)), ("b", keys(4)), ("v", values)],
+            )
+            .unwrap();
+            for (aggfunc, want) in ["sum", "mean", "var", "std"].into_iter().zip(expected) {
+                let table = frame.pivot_table_with_margins("v", "a", "b", aggfunc, true);
+                let all = table.unwrap().column("All").unwrap().values().to_vec();
+                assert_eq!(bits(all.last().unwrap()), want, "{aggfunc} {missing}");
+            }
+        }
+    }
+
+    #[test]
+    fn datetime_mean_sums_nanoseconds_through_the_cast_buffer() {
+        // pandas: to_datetime(1.7e18 + (k * 7919 + 13) % 100003 * 1_000_000_007)
+        // with NaT at k % 11 == 3, n = 20000: mean().value.
+        let values: Vec<Scalar> = (0..20_000_usize)
+            .map(|k| {
+                if k % 11 == 3 {
+                    Scalar::Null(NullKind::NaT)
+                } else {
+                    let offset = i64::try_from((k * 7919 + 13) % 100_003).unwrap();
+                    Scalar::Datetime64(1_700_000_000_000_000_000 + offset * 1_000_000_007)
+                }
+            })
+            .collect();
+        let s = series(Column::new(DType::Datetime64 { tz: None }, values).unwrap());
+        assert_eq!(
+            s.mean().unwrap(),
+            Scalar::Datetime64(1_700_049_991_717_762_560)
+        );
+    }
+}
+
+/// Resample var / std / sem through the single-pass bin kernels against live
+/// pandas 2.2.3 bits (br-frankenpandas-7x91u). Data: `100 + cumsum(((k * 7919
+/// + 13) % 1000 - 500) / 97)`, a left fold.
+#[cfg(test)]
+mod resample_spread_single_pass_7x91u {
+    use fp_columnar::Column;
+    use fp_index::Index;
+    use fp_types::Scalar;
 
     use super::Series;
 
-    fn f64_series(values: Vec<f64>) -> Series {
-        let n = values.len() as i64;
+    const JAN_1_2024_NS: i64 = 1_704_067_200_000_000_000;
+
+    fn walk(n: usize) -> Vec<f64> {
+        let mut total = 0.0_f64;
+        (0..n as i64)
+            .map(|k| {
+                #[allow(clippy::cast_precision_loss)] // below 1000
+                let step = ((k * 7919 + 13) % 1000 - 500) as f64 / 97.0;
+                total += step;
+                100.0 + total
+            })
+            .collect()
+    }
+
+    /// Minute stamps from 2024-01-01 with minutes 300..480 dropped but for
+    /// 330: hour 5 holds one value, hours 6 and 7 none.
+    fn minutes() -> Series {
+        let values = walk(1000);
+        let (stamps, kept): (Vec<i64>, Vec<f64>) = (0..1000_i64)
+            .filter(|&k| !(300..480).contains(&k) || k == 330)
+            .map(|k| (JAN_1_2024_NS + k * 60_000_000_000, values[k as usize]))
+            .unzip();
         Series::new(
             "v",
-            Index::from_range(0, n, 1),
+            Index::from_datetime64(stamps),
+            Column::from_f64_values(kept),
+        )
+        .unwrap()
+    }
+
+    /// 400 rows six hours apart.
+    fn quarter_days() -> Series {
+        let stamps = (0..400_i64)
+            .map(|k| JAN_1_2024_NS + k * 21_600_000_000_000)
+            .collect();
+        Series::new(
+            "v",
+            Index::from_datetime64(stamps),
+            Column::from_f64_values(walk(400)),
+        )
+        .unwrap()
+    }
+
+    fn bits_at(series: &Series, at: &[usize]) -> Vec<Option<u64>> {
+        at.iter()
+            .map(|&i| match &series.values()[i] {
+                Scalar::Float64(value) if !value.is_nan() => Some(value.to_bits()),
+                value if value.is_missing() => None,
+                other => panic!("position {i}: {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn hourly_spread_matches_pandas_bits() {
+        let s = minutes();
+        let at = [0, 4, 5, 6, 7, 16];
+        let var = s.resample("h").var().unwrap();
+        assert_eq!(var.len(), 17);
+        assert_eq!(
+            bits_at(&var, &at),
+            [
+                Some(0x4039_2842_3e0d_6787),
+                Some(0x403e_276f_1ee4_26d1),
+                None,
+                None,
+                None,
+                Some(0x4038_cc69_5b93_6930)
+            ]
+        );
+        assert_eq!(
+            bits_at(&s.resample("h").std().unwrap(), &at),
+            [
+                Some(0x4014_1014_08c1_1fc0),
+                Some(0x4015_f70f_517a_9995),
+                None,
+                None,
+                None,
+                Some(0x4013_eb52_a78c_e5ec)
+            ]
+        );
+        assert_eq!(
+            bits_at(&s.resample("h").sem().unwrap(), &at),
+            [
+                Some(0x3fe4_b884_d121_748b),
+                Some(0x3fe6_af78_a25f_3fa5),
+                None,
+                None,
+                None,
+                Some(0x3fe9_3230_9e5c_67b4)
+            ]
+        );
+        // NEGATIVE: stamps that are their own bins have no spread - the sum /
+        // mean shortcut returns the values themselves.
+        let stamps = (0..5_i64)
+            .map(|k| JAN_1_2024_NS + k * 3_600_000_000_000)
+            .collect();
+        let hourly = Series::new(
+            "v",
+            Index::from_datetime64(stamps),
+            Column::from_f64_values(walk(5)),
+        )
+        .unwrap();
+        let var = hourly.resample("h").var().unwrap();
+        assert_eq!(var.len(), 5);
+        assert!(var.values().iter().all(Scalar::is_missing));
+        let sum = hourly.resample("h").sum().unwrap();
+        assert_eq!(sum.values(), hourly.values());
+    }
+
+    #[test]
+    fn daily_and_month_end_spread_matches_pandas_bits() {
+        let s = quarter_days();
+        let daily = s.resample("D").var().unwrap();
+        assert_eq!(daily.len(), 100);
+        assert_eq!(
+            bits_at(&daily, &[0, 50, 99]),
+            [
+                Some(0x4036_0e41_c9f7_0588),
+                Some(0x4011_15cf_ce3a_3e43),
+                Some(0x402b_41b0_6cfa_21d0)
+            ]
+        );
+        assert_eq!(
+            bits_at(&s.resample("D").sem().unwrap(), &[0, 50, 99]),
+            [
+                Some(0x4002_c90f_a3f8_dbf8),
+                Some(0x3ff0_88a0_8f36_37a9),
+                Some(0x3ffd_8881_2caa_801c)
+            ]
+        );
+        assert_eq!(
+            bits_at(&s.resample("ME").std().unwrap(), &[0, 1, 2, 3]),
+            [
+                Some(0x4015_bc33_c1bf_983a),
+                Some(0x4018_5b9b_3b8b_59ee),
+                Some(0x4015_4bea_6ec0_5b5c),
+                Some(0x4014_ec52_5fcf_d2de)
+            ]
+        );
+    }
+
+    #[test]
+    fn single_pass_bins_equal_the_label_hashing_path() {
+        // origin='start_day' is pandas' default but routes through
+        // build_groups, the path the single pass replaced.
+        let s = minutes();
+        for freq in ["h", "15min", "D"] {
+            let fast = [
+                s.resample(freq).var().unwrap(),
+                s.resample(freq).std().unwrap(),
+                s.resample(freq).sem().unwrap(),
+            ];
+            let hashed = [
+                s.resample(freq).origin("start_day").var().unwrap(),
+                s.resample(freq).origin("start_day").std().unwrap(),
+                s.resample(freq).origin("start_day").sem().unwrap(),
+            ];
+            for (fast, hashed) in fast.iter().zip(&hashed) {
+                let every: Vec<usize> = (0..hashed.len()).collect();
+                assert_eq!(fast.len(), hashed.len(), "{freq}");
+                assert_eq!(fast.index().labels(), hashed.index().labels(), "{freq}");
+                assert_eq!(bits_at(fast, &every), bits_at(hashed, &every), "{freq}");
+            }
+        }
+    }
+}
+
+/// Rolling / expanding cov and corr against live pandas 2.2.3 bits: pandas
+/// composes them from its window means and variances. x is the n026a walk
+/// (NaN where `k % 37 == 5`), y = `(k * 31 % 17) / 3 + x / 4` (NaN where
+/// `k % 41 == 7`), 500 rows.
+#[cfg(test)]
+mod rolling_cov_corr_composed {
+    use fp_columnar::Column;
+    use fp_index::Index;
+    use fp_types::Scalar;
+
+    use super::Series;
+
+    fn pair() -> (Series, Series) {
+        let mut total = 0.0_f64;
+        let mut xs = Vec::with_capacity(500);
+        let mut ys = Vec::with_capacity(500);
+        for k in 0..500_i64 {
+            #[allow(clippy::cast_precision_loss)] // below 1000
+            let step = ((k * 7919 + 13) % 1000 - 500) as f64 / 97.0;
+            total += step;
+            let x = if k % 37 == 5 { f64::NAN } else { 100.0 + total };
+            xs.push(x);
+            #[allow(clippy::cast_precision_loss)] // below 17
+            let y = ((k * 31) % 17) as f64 / 3.0 + 0.25 * x;
+            ys.push(if k % 41 == 7 { f64::NAN } else { y });
+        }
+        let series = |values| {
+            Series::new(
+                "v",
+                Index::from_range(0, 500, 1),
+                Column::from_f64_values(values),
+            )
+            .unwrap()
+        };
+        (series(xs), series(ys))
+    }
+
+    fn bits_at(series: &Series, at: [usize; 3]) -> [Option<u64>; 3] {
+        at.map(|i| match &series.values()[i] {
+            Scalar::Float64(value) if !value.is_nan() => Some(value.to_bits()),
+            value if value.is_missing() => None,
+            other => panic!("position {i}: {other:?}"),
+        })
+    }
+
+    #[test]
+    fn rolling_and_expanding_cov_corr_match_pandas_bits() {
+        let (x, y) = pair();
+        let at = [20, 100, 499];
+        let r7 = x.rolling(7, None);
+        assert_eq!(
+            bits_at(&r7.cov(&y).unwrap(), at),
+            [
+                Some(0x3ffe_fd7c_e028_5aab),
+                Some(0x3fc4_14c4_2420_caab),
+                None
+            ]
+        );
+        assert_eq!(
+            bits_at(&r7.corr(&y).unwrap(), at),
+            [
+                Some(0x3fda_efaa_54d5_07f2),
+                Some(0x3f9f_4701_8173_d639),
+                None
+            ]
+        );
+        assert_eq!(
+            bits_at(&x.rolling(30, Some(5)).cov_ddof(&y, 0).unwrap(), at),
+            [
+                Some(0x4019_0fdd_15f3_0600),
+                Some(0x4012_9859_ab8e_4000),
+                Some(0x4018_efdb_b3b2_cc00)
+            ]
+        );
+        assert_eq!(
+            bits_at(&x.expanding(None).corr(&y).unwrap(), at),
+            [
+                Some(0x3fe3_c992_607e_d691),
+                Some(0x3fe3_46b2_34ff_ca01),
+                Some(0x3fe6_a3f7_919e_4d0e)
+            ]
+        );
+        assert_eq!(
+            bits_at(&x.expanding(None).cov(&y).unwrap(), at),
+            [
+                Some(0x401a_744c_ec80_8656),
+                Some(0x4019_bcc8_9e4c_2ed5),
+                Some(0x4025_7394_be7f_f101)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_perfect_line_is_not_snapped_to_one() {
+        // pandas: Series([1.0, .., 8]).rolling(3).corr(Series([2.0, .., 16]))
+        // [NaN, NaN, 1.0000000000000004, 0.9999999999999991, ...]; NEGATIVE:
+        // the replaced kernel rounded anything within 1e-12 of +-1 to +-1.
+        let x = (1..=8).map(f64::from).collect();
+        let y = (1..=8).map(|k| f64::from(k) * 2.0).collect();
+        let series = |values| {
+            Series::new(
+                "v",
+                Index::from_range(0, 8, 1),
+                Column::from_f64_values(values),
+            )
+            .unwrap()
+        };
+        let corr = series(x).rolling(3, None).corr(&series(y)).unwrap();
+        assert_eq!(corr.values()[2], Scalar::Float64(1.000_000_000_000_000_4));
+        assert_eq!(corr.values()[3], Scalar::Float64(0.999_999_999_999_999_1));
+    }
+}
+
+/// Rolling / expanding var, std and sem against live pandas 2.2.3 bits
+/// (br-frankenpandas-n026a). pandas' roll_var removes the leaving values
+/// before adding the entering ones; adding first missed its last bits at
+/// almost every position. Data: `100 + cumsum(((k * 7919 + 13) % 1000 - 500)
+/// / 97)`, a left fold, with NaN where `k % 37 == 5`.
+#[cfg(test)]
+mod rolling_var_order_n026a {
+    use fp_columnar::Column;
+    use fp_index::Index;
+    use fp_types::Scalar;
+
+    use super::Series;
+
+    fn walk() -> Series {
+        let mut total = 0.0_f64;
+        let values: Vec<f64> = (0..2000_i64)
+            .map(|k| {
+                #[allow(clippy::cast_precision_loss)] // below 1000
+                let step = ((k * 7919 + 13) % 1000 - 500) as f64 / 97.0;
+                total += step;
+                if k % 37 == 5 { f64::NAN } else { 100.0 + total }
+            })
+            .collect();
+        Series::new(
+            "v",
+            Index::from_range(0, 2000, 1),
             Column::from_f64_values(values),
         )
         .unwrap()
     }
 
-    fn i64_series(values: Vec<i64>) -> Series {
-        let n = values.len() as i64;
-        Series::new(
-            "v",
-            Index::from_range(0, n, 1),
-            Column::from_i64_values(values),
-        )
-        .unwrap()
+    fn bits_at(series: &Series, positions: [usize; 3]) -> [u64; 3] {
+        positions.map(|i| match &series.values()[i] {
+            Scalar::Float64(value) => value.to_bits(),
+            other => panic!("position {i}: {other:?}"),
+        })
     }
 
-    /// The EXACT algorithm the blocked version replaced, kept here as the oracle:
-    /// a 0.0-seeded left-fold mean and an ordered `powi` moment loop.
-    fn left_fold_skew(data: &[f64]) -> f64 {
-        let n = data.len() as f64;
-        let mean = data.iter().sum::<f64>() / n;
-        let (mut m2, mut m3) = (0.0_f64, 0.0_f64);
-        for &v in data {
-            let d = v - mean;
-            m2 += d.powi(2);
-            m3 += d.powi(3);
-        }
-        let s2 = m2 / (n - 1.0);
-        if s2 == 0.0 {
-            return 0.0;
-        }
-        (n / ((n - 1.0) * (n - 2.0))) * (m3 / s2.powf(1.5))
-    }
-
-    fn left_fold_kurtosis(data: &[f64]) -> f64 {
-        let n = data.len() as f64;
-        let mean = data.iter().sum::<f64>() / n;
-        let (mut m2, mut m4) = (0.0_f64, 0.0_f64);
-        for &v in data {
-            let d = v - mean;
-            m2 += d.powi(2);
-            m4 += d.powi(4);
-        }
-        let s2 = m2 / (n - 1.0);
-        if s2 == 0.0 {
-            return 0.0;
-        }
-        let adj = (n * (n + 1.0)) / ((n - 1.0) * (n - 2.0) * (n - 3.0));
-        let sub = (3.0 * (n - 1.0).powi(2)) / ((n - 2.0) * (n - 3.0));
-        adj * (m4 / (s2 * s2)) - sub
-    }
-
-    /// Every length the conformance corpus actually pins (fixtures run 2-6
-    /// elements) plus 7, the last length before the first chunk exists.
     #[test]
-    fn below_eight_elements_must_be_bit_identical_to_the_left_fold_8s4mb() {
-        for n in 3..8_usize {
-            let data: Vec<f64> = (0..n)
-                .map(|i| 1.0 + i as f64 * 1.5 + (i % 3) as f64)
+    fn rolling_var_std_sem_match_pandas_bits() {
+        let s = walk();
+        let at = [50, 100, 1999];
+        let r7 = s.rolling(7, None);
+        assert_eq!(
+            bits_at(&r7.var().unwrap(), at),
+            [
+                0x403e_64cf_3b4b_419c,
+                0x4032_3cdc_ec78_9c53,
+                0x4036_faee_247a_1558
+            ]
+        );
+        assert_eq!(
+            bits_at(&r7.std().unwrap(), at),
+            [
+                0x4016_0d5e_9140_1ac3,
+                0x4011_150f_9fb7_932c,
+                0x4013_2cd1_1929_b53a
+            ]
+        );
+        assert_eq!(
+            bits_at(&r7.sem().unwrap(), at),
+            [
+                0x4002_016c_c0c3_0e39,
+                0x3ffb_e52d_c332_b95d,
+                0x3fff_5010_72c4_6179
+            ]
+        );
+        // NEGATIVE: each window's own two-pass variance is a nearby value
+        // (...42db, ...9c96, ...12bd), not pandas' sliding one.
+        for (i, pinned) in at.into_iter().zip(bits_at(&r7.var().unwrap(), at)) {
+            let window: Vec<f64> = s.values()[i - 6..=i]
+                .iter()
+                .filter_map(|v| match v {
+                    Scalar::Float64(x) if !x.is_nan() => Some(*x),
+                    _ => None,
+                })
                 .collect();
-            let got = f64_series(data.clone()).skew().unwrap();
-            assert_eq!(
-                got.to_bits(),
-                left_fold_skew(&data).to_bits(),
-                "skew n={n} must be BIT-identical, not merely close"
-            );
-            if n >= 4 {
-                let got = f64_series(data.clone()).kurtosis().unwrap();
-                assert_eq!(
-                    got.to_bits(),
-                    left_fold_kurtosis(&data).to_bits(),
-                    "kurtosis n={n} must be BIT-identical, not merely close"
-                );
-            }
+            #[allow(clippy::cast_precision_loss)] // 7 values
+            let n = window.len() as f64;
+            let mean = window.iter().fold(0.0, |acc, v| acc + v) / n;
+            let squares = window
+                .iter()
+                .fold(0.0, |acc, v| acc + (v - mean) * (v - mean));
+            assert_ne!((squares / (n - 1.0)).to_bits(), pinned, "position {i}");
         }
-    }
-
-    /// The Int64 arms widen with `as f64` and must land on the same bits as the
-    /// Float64 arm fed the widened values — they share the pinned fixture surface.
-    #[test]
-    fn int64_arm_below_eight_must_be_bit_identical_to_the_left_fold_8s4mb() {
-        for n in 4..8_usize {
-            let ints: Vec<i64> = (0..n as i64).map(|i| i * 3 - 4).collect();
-            let widened: Vec<f64> = ints.iter().map(|&v| v as f64).collect();
-            assert_eq!(
-                i64_series(ints.clone()).skew().unwrap().to_bits(),
-                left_fold_skew(&widened).to_bits(),
-                "i64 skew n={n} must be BIT-identical"
-            );
-            assert_eq!(
-                i64_series(ints).kurtosis().unwrap().to_bits(),
-                left_fold_kurtosis(&widened).to_bits(),
-                "i64 kurtosis n={n} must be BIT-identical"
-            );
-        }
-    }
-
-    /// Neumaier-compensated `Σ(v-mean)²` — materially more accurate than either
-    /// candidate, so it can adjudicate between them. Not a candidate itself: the
-    /// compensation costs more than the blocking saves.
-    fn compensated_m2(data: &[f64], mean: f64) -> f64 {
-        let (mut sum, mut c) = (0.0_f64, 0.0_f64);
-        for &v in data {
-            let d = v - mean;
-            let term = d * d;
-            let t = sum + term;
-            if sum.abs() >= term.abs() {
-                c += (sum - t) + term;
-            } else {
-                c += (term - t) + sum;
-            }
-            sum = t;
-        }
-        sum + c
-    }
-
-    /// Two claims in one test, because the second is what keeps the first honest:
-    /// the lane path must ACTUALLY run above 8 elements (otherwise the
-    /// bit-identity test above proves nothing), and where it runs it must land
-    /// CLOSER to the compensated value — the acceptance evidence `9ab0f8cc1` used
-    /// for `blocked_sum_f64`, not merely "faster".
-    #[test]
-    fn above_eight_the_lane_path_runs_and_lands_closer_to_the_compensated_value_8s4mb() {
-        // Alternating magnitudes so summation order is decidable at all: a
-        // uniform array would let both orders agree and the test would pass
-        // while measuring nothing.
-        let data: Vec<f64> = (0..4096)
-            .map(|i| {
-                if i % 2 == 0 {
-                    1e7 + i as f64
-                } else {
-                    1e-3 * i as f64
-                }
-            })
-            .collect();
-        let mean = data.iter().sum::<f64>() / data.len() as f64;
-
-        let (blocked, _) = Series::blocked_central_moments_f64::<false>(&data, mean);
-        let mut folded = 0.0_f64;
-        for &v in &data {
-            folded += (v - mean).powi(2);
-        }
-
-        assert_ne!(
-            blocked.to_bits(),
-            folded.to_bits(),
-            "NON-VACUITY: at n=4096 the 8-lane path must produce a different sum \
-             from the left-fold, or the bit-identity test below 8 is meaningless"
+        let r30 = s.rolling(30, Some(5));
+        assert_eq!(
+            bits_at(&r30.var_ddof(0).unwrap(), at),
+            [
+                0x403d_4868_9b57_87b3,
+                0x4035_6aae_edb1_ff17,
+                0x4039_9939_03e7_bfcb
+            ]
         );
-
-        let reference = compensated_m2(&data, mean);
-        let blocked_err = (blocked - reference).abs();
-        let folded_err = (folded - reference).abs();
-        assert!(
-            blocked_err <= folded_err,
-            "blocked m2 must be at least as close to the compensated value as the \
-             left-fold: blocked_err={blocked_err:e} folded_err={folded_err:e}"
+        let centered = s.rolling_with_center(5, None, true);
+        assert_eq!(
+            bits_at(&centered.var().unwrap(), [50, 100, 1990]),
+            [
+                0x4034_167c_c69e_4c24,
+                0x4042_bd32_9464_73d6,
+                0x4035_d09e_0626_370a
+            ]
+        );
+        assert_eq!(
+            bits_at(&s.expanding(None).var().unwrap(), at),
+            [
+                0x403b_b387_1611_49d4,
+                0x403a_9976_8f9c_e257,
+                0x4047_b6fc_a2fc_d05a
+            ]
         );
     }
 
-    /// The Int64 lane path needs its own non-vacuity witness; the Float64 test
-    /// above cannot reach it.
     #[test]
-    fn the_int64_lane_path_must_actually_run_above_eight_8s4mb() {
-        // Magnitudes chosen so the accumulated sum LEAVES the exactly-representable
-        // integer range (2^53): my first witness used values near 1e6, whose squared
-        // deviations summed exactly in f64, so both orders agreed bitwise and the
-        // assertion below failed — correctly, because the test was measuring nothing.
-        // Squared deviations here are ~1e18 and 4096 of them total ~1e21, far past
-        // 2^53, so rounding occurs and summation order is observable.
-        let data: Vec<i64> = (0..4096)
-            .map(|i| if i % 2 == 0 { 2_000_000_000 + i } else { i })
-            .collect();
-        let mean = data.iter().map(|&v| v as f64).sum::<f64>() / data.len() as f64;
-        let (blocked, _) = Series::blocked_central_moments_i64::<true>(&data, mean);
-        let mut folded = 0.0_f64;
-        for &v in &data {
-            folded += (v as f64 - mean).powi(2);
-        }
-        assert_ne!(
-            blocked.to_bits(),
-            folded.to_bits(),
-            "NON-VACUITY: the i64 8-lane path must differ from the i64 left-fold at n=4096"
+    fn a_constant_window_is_exactly_zero() {
+        // pandas: Series([3.0] * 10 + [4.0, 5.0]).rolling(4).var()
+        let values = [3.0; 10].into_iter().chain([4.0, 5.0]).collect();
+        let s = Series::new(
+            "v",
+            Index::from_range(0, 12, 1),
+            Column::from_f64_values(values),
         );
+        let var = s.unwrap().rolling(4, None).var().unwrap();
+        let got: Vec<Scalar> = var.values().to_vec();
+        assert!(got[..3].iter().all(Scalar::is_missing));
+        assert!(got[3..10].iter().all(|v| *v == Scalar::Float64(0.0)));
+        assert_eq!(got[10], Scalar::Float64(0.25));
+        assert_eq!(got[11], Scalar::Float64(0.916_666_666_666_666_5));
     }
 }
 
@@ -236269,6 +236172,537 @@ mod transpose_row_prealloc_uza04 {
                 "width {width}: row 1"
             );
         }
+    }
+}
+
+/// EWM var / std / cov / corr against live pandas 2.2.3 bits (c5nwf): its
+/// `ewmcov` updates in its order, inf read as missing, cov / corr over the
+/// pairs each masked by the other. x = [1, 2, NaN, 4, 8, 3],
+/// y = [2, 1, 5, NaN, 3, 9].
+#[cfg(test)]
+mod ewm_moments_match_pandas_c5nwf {
+    use std::f64::consts::FRAC_1_SQRT_2;
+
+    use fp_columnar::Column;
+    use fp_index::Index;
+
+    use super::Series;
+
+    const NAN: f64 = f64::NAN;
+    const INF: f64 = f64::INFINITY;
+
+    fn series(values: &[f64]) -> Series {
+        Series::new(
+            "v",
+            Index::from_range(0, 6, 1),
+            Column::from_f64_values(values.to_vec()),
+        )
+        .unwrap()
+    }
+
+    fn x() -> Series {
+        series(&[1.0, 2.0, NAN, 4.0, 8.0, 3.0])
+    }
+
+    fn y() -> Series {
+        series(&[2.0, 1.0, 5.0, NAN, 3.0, 9.0])
+    }
+
+    fn assert_bits(got: &Series, want: &[f64], what: &str) {
+        let got: Vec<f64> = got
+            .values()
+            .iter()
+            .map(|v| {
+                if v.is_missing() {
+                    NAN
+                } else {
+                    v.to_f64().unwrap()
+                }
+            })
+            .collect();
+        assert_eq!(got.len(), want.len(), "{what}");
+        for (i, (g, w)) in got.iter().zip(want).enumerate() {
+            assert!(
+                g.to_bits() == w.to_bits() || (g.is_nan() && w.is_nan()),
+                "{what} row {i}: fp {g:?}, pandas {w:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn std_and_var_debias_in_pandas_order() {
+        // fp divided cov * sum_wt^2 by the denominator: row 4 was
+        // 3.1942088687231616, row 3 / 5 of the var 2.967105263157895 /
+        // 7.410774435259143.
+        let x = x();
+        let com1 = x.ewm_with_options(None, Some(0.5), true, 0);
+        // FRAC_1_SQRT_2 is pandas' 0.7071067811865476, sqrt(0.5).
+        let std = [
+            NAN,
+            FRAC_1_SQRT_2,
+            FRAC_1_SQRT_2,
+            1.6290629680421056,
+            3.194208868723162,
+            2.854343978871252,
+        ];
+        assert_bits(&com1.std().unwrap(), &std, "std com=1");
+        let minp3 = x.ewm_with_options(None, Some(0.5), true, 3);
+        let mut std_minp3 = std;
+        std_minp3[1..3].fill(NAN);
+        assert_bits(&minp3.std().unwrap(), &std_minp3, "std min_periods=3");
+        let recursive = x.ewm_with_options(None, Some(0.4), false, 0);
+        assert_bits(
+            &recursive.var().unwrap(),
+            &[
+                NAN,
+                0.5,
+                0.5,
+                2.9671052631578956,
+                10.952814380379312,
+                7.410774435259144,
+            ],
+            "var alpha=0.4 adjust=False",
+        );
+    }
+
+    #[test]
+    fn cov_and_corr_follow_ewmcov() {
+        let (x, y) = (x(), y());
+        let recursive = x.ewm_with_options(None, Some(0.4), false, 0);
+        assert_bits(
+            &recursive.cov(&y).unwrap(),
+            &[
+                NAN,
+                -0.5,
+                -0.5,
+                -0.4999999999999999,
+                3.9263456090651565,
+                -4.467935018085692,
+            ],
+            "cov alpha=0.4 adjust=False",
+        );
+        assert_bits(
+            &recursive.corr(&y).unwrap(),
+            &[
+                NAN,
+                -1.0,
+                -1.0,
+                -1.0,
+                0.8768471627059999,
+                -0.33093731001755894,
+            ],
+            "corr alpha=0.4 adjust=False",
+        );
+        let ignoring = x
+            .ewm_with_options(None, Some(0.4), false, 0)
+            .ignoring_na(true);
+        assert_bits(
+            &ignoring.cov_bias(&y, true).unwrap(),
+            &[0.0, -0.24, -0.24, -0.24, 2.0736, -0.4631040000000002],
+            "cov bias=True ignore_na=True",
+        );
+    }
+
+    #[test]
+    fn inf_is_missing() {
+        // NEGATIVE: fp read inf as a value - its mean became inf, then NaN.
+        let swings = series(&[1.0, INF, 3.0, -INF, 5.0, 6.0]);
+        assert_bits(
+            &swings
+                .ewm_with_options(None, Some(0.5), true, 0)
+                .var_bias(true)
+                .unwrap(),
+            &[0.0, 0.0, 0.64, 0.64, 1.1972789115646258, 1.0651477394090423],
+            "var bias=True over +-inf",
+        );
+        // An inf on one side masks the other side's value too.
+        let x = series(&[1.0, 2.0, INF, 4.0, 8.0, 3.0]);
+        let com1 = x.ewm_with_options(None, Some(0.5), true, 0);
+        let y = y();
+        assert_bits(
+            &com1.cov(&y).unwrap(),
+            &[NAN, -0.5, -0.5, -0.5, 4.94, -10.566869300911856],
+            "cov with an inf",
+        );
+        assert_bits(
+            &com1.corr(&y).unwrap(),
+            &[
+                NAN,
+                -1.0,
+                -1.0,
+                -1.0,
+                0.9286961276156451,
+                -0.7309507191832493,
+            ],
+            "corr with an inf",
+        );
+    }
+
+    #[test]
+    fn mean_is_untouched() {
+        let mean = x()
+            .ewm_with_options(None, Some(0.5), true, 0)
+            .mean()
+            .unwrap();
+        assert_bits(
+            &mean,
+            &[
+                1.0,
+                1.6666666666666667,
+                1.6666666666666667,
+                3.3636363636363638,
+                6.111111111111111,
+                4.423728813559322,
+            ],
+            "mean com=1",
+        );
+    }
+}
+
+/// to_datetime reads ISO strings as pandas' ISO reader (numpy's
+/// `parse_iso_8601_datetime`) does (f1jm5): offsets under format='ISO8601' /
+/// 'mixed', T10 / T1030 / a bare '.', and format='ISO8601' refuses what is
+/// not ISO8601. Pinned to live pandas 2.2.3.
+#[cfg(test)]
+mod to_datetime_iso8601_f1jm5 {
+    use fp_index::IndexLabel;
+    use fp_types::{DType, Scalar};
+
+    use super::{
+        DatetimeErrors, Series, ToDatetimeOptions, iso8601_fields, iso8601_range_error,
+        parse_iso8601, to_datetime_values_with_options, to_datetime_with_options,
+    };
+
+    fn utf8(values: &[&str]) -> Vec<Scalar> {
+        values
+            .iter()
+            .map(|value| Scalar::Utf8((*value).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn reads_numpys_grammar() {
+        for (text, wall, offset) in [
+            ("2024", "2024-01-01 00:00:00", None),
+            ("2024-1-5", "2024-01-05 00:00:00", None),
+            ("2024.01.05", "2024-01-05 00:00:00", None),
+            ("2024 01 05", "2024-01-05 00:00:00", None),
+            ("2024\\01\\05", "2024-01-05 00:00:00", None),
+            (" 2024-01-05", "2024-01-05 00:00:00", None),
+            ("20240105T103015", "2024-01-05 10:30:15", None),
+            ("2024-01-05T10", "2024-01-05 10:00:00", None),
+            ("2024-01-05T1030", "2024-01-05 10:30:00", None),
+            ("2024-01-05T1:30", "2024-01-05 01:30:00", None),
+            ("2024-01-05T10:30:15.", "2024-01-05 10:30:15", None),
+            (
+                "2024-01-05T10:30:15.1234567891",
+                "2024-01-05 10:30:15.123456789",
+                None,
+            ),
+            ("2024-01-05T10:30:15Z", "2024-01-05 10:30:15", Some(0)),
+            ("2024-01-05T10:30:15+0530", "2024-01-05 10:30:15", Some(330)),
+            (
+                "2024-01-05T10:30:15 +05:30 ",
+                "2024-01-05 10:30:15",
+                Some(330),
+            ),
+            ("2024-01-05T10:30:15-8", "2024-01-05 10:30:15", Some(-480)),
+        ] {
+            let iso = parse_iso8601(text).unwrap_or_else(|| panic!("{text}"));
+            let read = iso.local.format("%Y-%m-%d %H:%M:%S%.f").to_string();
+            assert_eq!(
+                (read.as_str(), iso.offset_minutes),
+                (wall, offset),
+                "{text}"
+            );
+        }
+        // NEGATIVE: what numpy's reader refuses (pandas: "is not ISO8601").
+        for text in [
+            "01/05/2024",
+            "Jan 5 2024",
+            "2024-W01",
+            "2024-005",
+            "+2024-01-05",
+            "2024-01-05 ",
+            "2024-01-05T",
+            "2024-01-05t10:00",
+            "2024-01-05T1",
+            "2024-01-05T1030:15",
+            "2024-01-05T10:30:15+05 :30",
+            "2024-13-01",
+            "2024-02-30",
+        ] {
+            assert!(parse_iso8601(text).is_none(), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_field_out_of_range_is_dateutils_complaint() {
+        for (text, complaint) in [
+            ("2024-13-01", "month must be in 1..12"),
+            ("2024-02-30", "day is out of range for month"),
+            ("2023-02-29", "day is out of range for month"),
+            ("2024-01-05T25:00", "hour must be in 0..23"),
+            ("2024-01-05T10:61", "minute must be in 0..59"),
+            ("2024-01-05T10:30:61", "second must be in 0..59"),
+        ] {
+            let fields = iso8601_fields(text);
+            assert_eq!(
+                fields.as_ref().and_then(iso8601_range_error),
+                Some(complaint),
+                "{text}"
+            );
+        }
+        let leap = iso8601_fields("2024-02-29T10:00");
+        assert_eq!(leap.as_ref().and_then(iso8601_range_error), None);
+        let raise = ToDatetimeOptions {
+            errors: DatetimeErrors::Raise,
+            ..Default::default()
+        };
+        let err = to_datetime_values_with_options(&utf8(&["2024-13-01"]), raise)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("month must be in 1..12: 2024-13-01, at position 0"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn iso8601_refuses_what_is_not_iso_and_coerce_keeps_nat() {
+        let raise = ToDatetimeOptions {
+            format: Some("ISO8601"),
+            errors: DatetimeErrors::Raise,
+            ..Default::default()
+        };
+        let err = to_datetime_values_with_options(&utf8(&["2024-01-05", "01/05/2024"]), raise)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("Time data 01/05/2024 is not ISO8601 format, at position 1."),
+            "{err}"
+        );
+        // NEGATIVE: errors='coerce' still answers NaT for it.
+        let coerce = ToDatetimeOptions {
+            format: Some("ISO8601"),
+            errors: DatetimeErrors::Coerce,
+            ..Default::default()
+        };
+        let values =
+            to_datetime_values_with_options(&utf8(&["2024-01-05T10", "01/05/2024"]), coerce)
+                .unwrap();
+        assert_eq!(values[0], Scalar::Datetime64(1_704_448_800_000_000_000));
+        assert!(values[1].is_missing());
+    }
+
+    #[test]
+    fn offsets_make_a_zoned_column_under_every_format() {
+        // Under format='ISO8601' / 'mixed' every offset was NaT; +00:00 is
+        // pandas' UTC (it was UTC+00:00).
+        // 2024-01-05 10:30:15 at +05:30 is 05:00:15 UTC; at UTC itself.
+        let (at_0530, at_utc) = (1_704_430_815_000_000_000, 1_704_450_615_000_000_000);
+        for (format, values, zone, first) in [
+            (
+                Some("ISO8601"),
+                ["2024-01-05T10:30:15+0530", "2024-01-06T10:30:15+05:30"],
+                "UTC+05:30",
+                at_0530,
+            ),
+            (
+                Some("mixed"),
+                ["2024-01-05T10:30:15Z", "2024-01-06T10:30:15+00:00"],
+                "UTC",
+                at_utc,
+            ),
+            (
+                None,
+                ["2024-01-05T10:30:15+00:00", "2024-01-06T10:30:15+00:00"],
+                "UTC",
+                at_utc,
+            ),
+        ] {
+            let labels = vec![IndexLabel::Int64(0), IndexLabel::Int64(1)];
+            let series = Series::from_values("t", labels, utf8(&values)).unwrap();
+            let options = ToDatetimeOptions {
+                format,
+                ..Default::default()
+            };
+            let out = to_datetime_with_options(&series, options).unwrap();
+            assert_eq!(
+                out.column().dtype(),
+                DType::datetime64_tz(zone),
+                "{values:?}"
+            );
+            assert_eq!(out.values()[0], Scalar::Datetime64(first), "{values:?}");
+        }
+    }
+}
+
+/// Rolling / expanding / ewm read +-inf as NaN, as pandas' `_prep_values`,
+/// and count still counts it (f5prp); values pinned to live pandas 2.2.3.
+/// x = [1, inf, 3, -inf, 5, 6, 2, NaN, 4].
+#[cfg(test)]
+mod window_inf_is_missing_f5prp {
+    use std::{
+        borrow::Cow,
+        f64::consts::{FRAC_1_SQRT_2, SQRT_2},
+    };
+
+    use fp_columnar::Column;
+    use fp_index::Index;
+
+    use super::{Series, window_values};
+
+    const NAN: f64 = f64::NAN;
+    const INF: f64 = f64::INFINITY;
+
+    fn series(values: &[f64]) -> Series {
+        Series::new(
+            "v",
+            Index::from_range(0, 9, 1),
+            Column::from_f64_values(values.to_vec()),
+        )
+        .unwrap()
+    }
+
+    fn x() -> Series {
+        series(&[1.0, INF, 3.0, -INF, 5.0, 6.0, 2.0, NAN, 4.0])
+    }
+
+    fn assert_bits(got: &Series, want: &[f64], what: &str) {
+        let got: Vec<f64> = got
+            .values()
+            .iter()
+            .map(|v| {
+                if v.is_missing() {
+                    NAN
+                } else {
+                    v.to_f64().unwrap()
+                }
+            })
+            .collect();
+        assert_eq!(got.len(), want.len(), "{what}");
+        for (i, (g, w)) in got.iter().zip(want).enumerate() {
+            assert!(
+                g.to_bits() == w.to_bits() || (g.is_nan() && w.is_nan()),
+                "{what} row {i}: fp {g:?}, pandas {w:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rolling_reads_inf_as_nan() {
+        // fp's online sum carried inf - inf = NaN into every later window.
+        let x = x();
+        let r = x.rolling(3, Some(1));
+        let sum = [1.0, 1.0, 4.0, 3.0, 8.0, 11.0, 13.0, 8.0, 6.0];
+        assert_bits(&r.sum().unwrap(), &sum, "rolling sum");
+        let mean = [1.0, 1.0, 2.0, 3.0, 4.0, 5.5, 4.333333333333333, 4.0, 3.0];
+        assert_bits(&r.mean().unwrap(), &mean, "rolling mean");
+        let max = [1.0, 1.0, 3.0, 3.0, 5.0, 6.0, 6.0, 6.0, 4.0];
+        assert_bits(&r.max().unwrap(), &max, "rolling max");
+        let median = [1.0, 1.0, 2.0, 3.0, 4.0, 5.5, 5.0, 4.0, 3.0];
+        assert_bits(&r.median().unwrap(), &median, "rolling median");
+        let std = [
+            NAN,
+            NAN,
+            SQRT_2,
+            NAN,
+            SQRT_2,
+            FRAC_1_SQRT_2,
+            2.0816659994661326,
+            2.82842712474619,
+            1.414213562373094,
+        ];
+        assert_bits(&r.std().unwrap(), &std, "rolling std");
+    }
+
+    #[test]
+    fn expanding_and_ewm_read_inf_as_nan() {
+        let x = x();
+        let e = x.expanding(None);
+        let sum = [1.0, 1.0, 4.0, 4.0, 9.0, 15.0, 17.0, 17.0, 21.0];
+        assert_bits(&e.sum().unwrap(), &sum, "expanding sum");
+        let max = [1.0, 1.0, 3.0, 3.0, 5.0, 6.0, 6.0, 6.0, 6.0];
+        assert_bits(&e.max().unwrap(), &max, "expanding max");
+        let std = [
+            NAN,
+            NAN,
+            SQRT_2,
+            SQRT_2,
+            2.0,
+            2.217355782608345,
+            2.073644135332772,
+            2.073644135332772,
+            1.8708286933869707,
+        ];
+        assert_bits(&e.std().unwrap(), &std, "expanding std");
+        let com1 = x.ewm_with_options(None, Some(0.5), true, 0);
+        let mean = [
+            1.0,
+            1.0,
+            2.6,
+            2.6,
+            4.428571428571429,
+            5.377358490566038,
+            3.52991452991453,
+            3.52991452991453,
+            3.8525469168900806,
+        ];
+        assert_bits(&com1.mean().unwrap(), &mean, "ewm mean");
+        let sum = [
+            1.0, 0.5, 3.25, 1.625, 5.8125, 8.90625, 6.453125, 3.2265625, 5.61328125,
+        ];
+        assert_bits(&com1.sum().unwrap(), &sum, "ewm sum");
+    }
+
+    #[test]
+    fn cov_and_corr_mask_an_inf_on_either_side() {
+        let y = series(&[2.0, 1.0, 4.0, 3.0, INF, 1.0, 5.0, 2.0, 7.0]);
+        let cov = [NAN, NAN, 2.0, NAN, NAN, NAN, -8.0, -8.0, 2.0];
+        assert_bits(
+            &x().rolling(3, Some(1)).cov(&y).unwrap(),
+            &cov,
+            "rolling cov",
+        );
+        let plain = series(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 2.0, 1.0, 4.0]);
+        let corr = [
+            NAN,
+            NAN,
+            0.6546536707079766,
+            0.6546536707079766,
+            NAN,
+            NAN,
+            NAN,
+            -0.5447047794019222,
+            0.9538209664765315,
+        ];
+        assert_bits(
+            &plain.rolling(3, None).corr(&y).unwrap(),
+            &corr,
+            "rolling corr",
+        );
+    }
+
+    #[test]
+    fn count_counts_inf_and_a_finite_column_is_borrowed() {
+        // NEGATIVE: pandas counts an inf (notna), so count reads the source.
+        let x = x();
+        let rolling = [1.0, 2.0, 3.0, 3.0, 3.0, 3.0, 3.0, 2.0, 2.0];
+        assert_bits(
+            &x.rolling(3, Some(1)).count().unwrap(),
+            &rolling,
+            "rolling count",
+        );
+        let expanding = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 7.0, 8.0];
+        assert_bits(
+            &x.expanding(None).count().unwrap(),
+            &expanding,
+            "expanding count",
+        );
+        assert!(matches!(window_values(&x), Cow::Owned(_)));
+        let finite = series(&[1.0, 2.0, NAN, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]);
+        assert!(matches!(window_values(&finite), Cow::Borrowed(_)));
     }
 }
 

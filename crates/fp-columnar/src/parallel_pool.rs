@@ -65,8 +65,7 @@
 //! thread after [`run`] returns. That is why `run` returns results rather than
 //! letting workers publish.
 
-use std::sync::mpsc;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, mpsc};
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
