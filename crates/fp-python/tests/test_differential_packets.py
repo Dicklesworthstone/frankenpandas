@@ -23694,6 +23694,55 @@ def test_infer_freq_and_to_period_like_pandas_acelo(case: str) -> None:
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
 
 
+# br-frankenpandas-ymbic: to_html printed each float on its own (1.5 beside
+# pandas' 1.50 / 2.25; 10000000000.0 for 1.000000e+10), had no index-name row
+# or column-axis corner, and refused na_rep / float_format / justify / escape
+# / render_links / bold_rows / header / index_names / decimal.
+def _ymbic_frames(m: Any) -> dict:
+    named_index = m.DataFrame({"a": [1.5, np.nan]}, index=m.Index([10, 20], name="idx"))
+    named_columns = m.DataFrame({"a": [1, 2]})
+    named_columns.columns.name = "cols"
+    return {
+        "ints": m.DataFrame({"a": [1, 2, 3]}),
+        "floats": m.DataFrame({"a": [1.5, 2.25, 3.0]}),
+        "float NaN": m.DataFrame({"a": [1.5, np.nan, 3.0]}),
+        "wide range": m.DataFrame({"a": [1e10, 2.5, 3.1415926535]}),
+        "html text": m.DataFrame({"a": ["<b>x</b>", "a&b", "http://e.com/?q=1&r=2"]}),
+        "mixed": m.DataFrame({"a": [1, 2], "b": ["x", "y"], "c": [0.1, 0.25]}),
+        "string index": m.DataFrame({"a": [1.5, 2.5]}, index=["r1", "r2"]),
+        "named index": named_index,
+        "named columns": named_columns,
+    }
+
+
+_YMBIC_KWARGS = {
+    "default": {},
+    "index=False": {"index": False},
+    "na_rep": {"na_rep": "-"},
+    "float_format": {"float_format": "{:.3f}".format},
+    "justify": {"justify": "left"},
+    "escape=False": {"escape": False},
+    "render_links": {"render_links": True},
+    "bold_rows=False": {"bold_rows": False},
+    "header=False": {"header": False},
+    "index_names=False": {"index_names": False},
+    "decimal": {"decimal": ","},
+    "table tag": {"classes": "x y", "table_id": "t", "border": 0},
+}
+_YMBIC_CASES = {
+    f"{frame} {label}": (lambda frame, kw: lambda m: [_ymbic_frames(m)[frame].to_html(**kw)])(frame, kw)
+    for frame in _ymbic_frames(pd)
+    for label, kw in _YMBIC_KWARGS.items()
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_YMBIC_CASES))
+def test_to_html_like_pandas_ymbic(case: str) -> None:
+    run = _YMBIC_CASES[case]
+    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
+
+
 # br-frankenpandas-wha4m: read_csv(parse_dates=) of aware datetimes in one
 # zone is pandas' datetime64[ns, zone], NaT where a cell is empty - fp kept
 # the text; to_datetime of such a Series with a missing value likewise.

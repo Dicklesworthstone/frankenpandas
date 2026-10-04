@@ -2237,6 +2237,181 @@ fn column_multiindex_headers(
 /// index level takes at least the index's `col_space`, left-justified.
 /// Every frame prints this way (a frame it could not lay out printed
 /// frankenpandas' own Display; fvsao.34).
+/// `DataFrame.to_html`'s layout keywords beside the cell ones
+/// ([`TextKeywords`]), as pandas' HTMLFormatter reads them.
+struct HtmlLayout<'a> {
+    index: bool,
+    header: bool,
+    index_names: bool,
+    bold_rows: bool,
+    escape: bool,
+    render_links: bool,
+    justify: &'a str,
+}
+
+/// The URL schemes pandas' `is_url` accepts (`_VALID_URLS`: urllib's
+/// uses_relative, uses_netloc and uses_params, the empty one left out).
+const HTML_LINK_SCHEMES: [&str; 30] = [
+    "file",
+    "ftp",
+    "git",
+    "git+ssh",
+    "gopher",
+    "hdl",
+    "http",
+    "https",
+    "imap",
+    "itms-services",
+    "mms",
+    "nfs",
+    "nntp",
+    "prospero",
+    "rsync",
+    "rtsp",
+    "rtsps",
+    "rtspu",
+    "sftp",
+    "shttp",
+    "sip",
+    "sips",
+    "snews",
+    "svn",
+    "svn+ssh",
+    "tel",
+    "telnet",
+    "wais",
+    "ws",
+    "wss",
+];
+
+/// pandas' `HTMLFormatter` over a frame with a flat index and flat columns
+/// (br-frankenpandas-ymbic): each column's `to_string` cells (formatters,
+/// float_format, na_rep, decimal) stripped - fp printed every float on its
+/// own (1.5, not pandas' 1.50 beside 2.25) - the index labels as `to_string`
+/// shows them, the columns' name over the index and a row of the index's
+/// name when it has one, `<th>` index cells unless `bold_rows` is off, `&`,
+/// `<` and `>` escaped unless `escape` is off, and a URL in an `<a>` under
+/// `render_links`. `tag` opens the table.
+fn pandas_html(
+    py: Python<'_>,
+    frame: &DataFrame,
+    tag: &str,
+    text: &TextKeywords<'_, '_>,
+    layout: &HtmlLayout<'_>,
+) -> PyResult<String> {
+    let (len, width) = frame.shape();
+    let rows: Vec<usize> = (0..len).collect();
+    let style = text.style(py, frame, &rows, layout.index)?;
+    let urlparse = if layout.render_links {
+        Some(py.import("urllib.parse")?.getattr("urlparse")?)
+    } else {
+        None
+    };
+    let cell = |kind: &str, raw: &str| -> PyResult<String> {
+        let shown = if layout.escape {
+            raw.replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+        } else {
+            raw.to_owned()
+        };
+        let shown = shown.trim();
+        let link = match &urlparse {
+            Some(urlparse) => {
+                let scheme: String = urlparse.call1((shown,))?.getattr("scheme")?.extract()?;
+                HTML_LINK_SCHEMES.contains(&scheme.as_str())
+            }
+            None => false,
+        };
+        Ok(if link {
+            format!(
+                "      <{kind}><a href=\"{}\" target=\"_blank\">{shown}</a></{kind}>\n",
+                raw.trim()
+            )
+        } else {
+            format!("      <{kind}>{shown}</{kind}>\n")
+        })
+    };
+    // pandas' show_col_idx_names / show_row_idx_names: a named column axis
+    // heads the index column (a blank one when the index is hidden), a named
+    // index gets a row of its own.
+    let column_axis_name = frame
+        .columns_name()
+        .map(String::from)
+        .filter(|_| layout.index_names && layout.header);
+    let row_name = frame
+        .index()
+        .name()
+        .map(|name| name.to_string())
+        .filter(|_| layout.index && layout.index_names);
+    let lead_column = layout.index || column_axis_name.is_some();
+    let lead_kind = if layout.bold_rows { "th" } else { "td" };
+    let mut out = format!("{tag}\n");
+    if layout.header || row_name.is_some() {
+        out.push_str("  <thead>\n");
+    }
+    if layout.header {
+        out.push_str(&format!(
+            "    <tr style=\"text-align: {};\">\n",
+            layout.justify
+        ));
+        if lead_column {
+            out.push_str(&cell("th", column_axis_name.as_deref().unwrap_or(""))?);
+        }
+        let labels = frame.column_labels();
+        let label_texts = if labels.len() == width {
+            pandas_column_label_texts(&labels)
+        } else {
+            frame.column_names().into_iter().cloned().collect()
+        };
+        for label in &label_texts {
+            out.push_str(&cell("th", label)?);
+        }
+        out.push_str("    </tr>\n");
+    }
+    if let Some(name) = &row_name {
+        out.push_str("    <tr>\n");
+        out.push_str(&cell("th", name)?);
+        for _ in 0..width {
+            out.push_str("      <th></th>\n");
+        }
+        out.push_str("    </tr>\n");
+    }
+    if layout.header || row_name.is_some() {
+        out.push_str("  </thead>\n");
+    }
+    let index_texts = match style.index_cells.clone() {
+        Some(texts) => texts,
+        None => pandas_label_texts(frame.index().labels(), frame.index().tz()),
+    };
+    let columns: Vec<Vec<String>> = (0..width)
+        .map(|position| {
+            style
+                .cells
+                .get(position)
+                .cloned()
+                .flatten()
+                .or_else(|| frame.column_at(position).map(pandas_cells))
+                .unwrap_or_default()
+        })
+        .collect();
+    out.push_str("  <tbody>\n");
+    for row in 0..len {
+        out.push_str("    <tr>\n");
+        if layout.index {
+            out.push_str(&cell(lead_kind, &index_texts[row])?);
+        } else if lead_column {
+            out.push_str(&cell(lead_kind, "")?);
+        }
+        for column in &columns {
+            out.push_str(&cell("td", &column[row])?);
+        }
+        out.push_str("    </tr>\n");
+    }
+    out.push_str("  </tbody>\n</table>");
+    Ok(out)
+}
+
 fn pandas_frame_text(
     frame: &DataFrame,
     limits: RowLimits,
@@ -42306,25 +42481,35 @@ impl PyDataFrame {
             "DataFrame.to_html",
             &[
                 ("col_space", unset(col_space)),
-                ("header", header),
-                ("na_rep", na_rep == "NaN"),
-                ("formatters", unset(formatters)),
-                ("float_format", unset(float_format)),
                 ("sparsify", unset(sparsify)),
-                ("index_names", index_names),
-                ("justify", justify.is_none()),
                 ("max_rows", max_rows.is_none()),
                 ("max_cols", max_cols.is_none()),
                 ("show_dimensions", !show_dimensions),
-                ("decimal", decimal == "."),
-                ("bold_rows", bold_rows),
-                ("escape", escape),
                 ("notebook", !notebook),
-                ("render_links", !render_links),
                 ("encoding", encoding.is_none()),
             ],
         )?;
         let frame = select_columns_arg(self.inner.clone(), columns)?;
+        let flat = frame.row_multiindex().is_none() && frame.columns_multiindex().is_none();
+        if !flat {
+            // A MultiIndex frame keeps fp-frame's table, which reads none of
+            // these (refused rather than ignored).
+            unsupported_params(
+                "DataFrame.to_html of a MultiIndex frame",
+                &[
+                    ("header", header),
+                    ("na_rep", na_rep == "NaN"),
+                    ("formatters", unset(formatters)),
+                    ("float_format", unset(float_format)),
+                    ("index_names", index_names),
+                    ("justify", justify.is_none()),
+                    ("decimal", decimal == "."),
+                    ("bold_rows", bold_rows),
+                    ("escape", escape),
+                    ("render_links", !render_links),
+                ],
+            )?;
+        }
         let classes = match classes.filter(|classes| !classes.is_none()) {
             None => String::new(),
             Some(one) if one.is_instance_of::<pyo3::types::PyString>() => {
@@ -42353,10 +42538,33 @@ impl PyDataFrame {
             .map(|id| format!(" id=\"{id}\""))
             .unwrap_or_default();
         let tag = format!("<table{border} class=\"dataframe{classes}\"{id}>");
-        let html =
+        let html = if flat {
+            let text = TextKeywords {
+                col_space: None,
+                header: None,
+                formatters,
+                float_format,
+                na_rep,
+                decimal,
+                justify: None,
+                index_names,
+                sparsify: None,
+            };
+            let html = HtmlLayout {
+                index,
+                header,
+                index_names,
+                bold_rows,
+                escape,
+                render_links,
+                justify: justify.unwrap_or("right"),
+            };
+            Python::attach(|py| pandas_html(py, &frame, &tag, &text, &html))?
+        } else {
             frame
                 .to_html(index)
-                .replacen("<table border=\"1\" class=\"dataframe\">", &tag, 1);
+                .replacen("<table border=\"1\" class=\"dataframe\">", &tag, 1)
+        };
         write_text_target(buf, html, false)
     }
 
