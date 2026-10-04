@@ -1,0 +1,45 @@
+{
+  "schema": "frankenpandas.previous-writer-fixtures.v1",
+  "package_version": "0.3.0",
+  "source_commit": "0ad22f914e3a07af07d1197857bb9fa9798b3c4d",
+  "producer": {
+    "dependencies": "seven authentic published FrankenPandas 0.3.0 packages",
+    "writer": "fp_io::write_parquet_bytes/write_feather_bytes/write_ipc_stream_bytes",
+    "published_archive_sha256": "95ebd6704500afdcf55192321743c2995c8478a0fa655fad07bd324bb1177bbd",
+    "published_lock_sha256": "ddcc9b021b70c6948b683d3b40f96bf9b8cd43662918bbb832952807e3701567",
+    "source_receipt_sha256": "5f06a185767e27c7c333b7bf4671a6d7e6637f01a8bead260d19980c4b303dee",
+    "writer_receipt_sha256": "5923f78e63c4214ab7edbeaa6f7d2b92fa4af7555adb449520aad7d63d55bae9"
+  },
+  "input": {
+    "row_levels": [["a", "b"], [100, 200]],
+    "logical_names": {
+      "named": ["region", "code"],
+      "unnamed": [null, null],
+      "duplicate": ["key", "key"]
+    },
+    "payload_columns": {"__index_level_2__": [30, 40], "value": [10, 20]},
+    "flat_index": ["a|100", "b|200"],
+    "legacy_flat_name": "__index_level_0__|__index_level_1__"
+  },
+  "preservation": "Retain these exact old-writer bytes. Do not regenerate with the reader under test.",
+  "files": [
+    {"filename": "duplicate.feather", "bytes": 1874,
+     "sha256": "0af87706e4438c110e5c3ab7889e4dd6437f103552d72edd6aaa495797e3a737"},
+    {"filename": "duplicate.ipc", "bytes": 1352,
+     "sha256": "3499d5d91dac0dd21e8c8cb4a3276689a888a816de0319b9a7ac9cc9fa8c9420"},
+    {"filename": "duplicate.parquet", "bytes": 1651,
+     "sha256": "c305594fb38ffa4f5e761ddf3ee29d84169d315d8a7418ec3a9d3bade1d4d05c"},
+    {"filename": "named.feather", "bytes": 1882,
+     "sha256": "fefec690f8208a1a899d587b4fffa51f565c07051e69739aa6df1c45ec795789"},
+    {"filename": "named.ipc", "bytes": 1352,
+     "sha256": "afd2ae8fc9086d9b69e0f252710920965488d93d4c19040c08a9fd3406b14cba"},
+    {"filename": "named.parquet", "bytes": 1659,
+     "sha256": "5f17758d1c03cdcbbb6d1fa189fa4bd0b8a10b718c5f3a2a405a61137d69d576"},
+    {"filename": "unnamed.feather", "bytes": 1874,
+     "sha256": "2ab678aee50e8686b0ae36c5dd9d9f407793039f75347d87ece7f1e85d49f3e6"},
+    {"filename": "unnamed.ipc", "bytes": 1352,
+     "sha256": "1b566a6623dfd5b2714d7357f6a7f82c1fe8ae7a1bfb238002a371740478d7c2"},
+    {"filename": "unnamed.parquet", "bytes": 1645,
+     "sha256": "894594b3c088cdee7d92b4d8f99845271cfbeadcfb3522fce317f5018e5e3070"}
+  ]
+}
