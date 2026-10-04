@@ -23660,6 +23660,35 @@ def test_index_of_datetimes_in_several_zones_ewrvf(case: str) -> None:
     assert seen(fpd) == seen(pd), case
 
 
+# br-frankenpandas-wha4m: read_csv(parse_dates=) of aware datetimes in one
+# zone is pandas' datetime64[ns, zone], NaT where a cell is empty - fp kept
+# the text; to_datetime of such a Series with a missing value likewise.
+_WHA4M_CSV = {
+    "one offset": "d,v\n2024-01-05T10:30:15+05:30,1\n2024-01-06T10:30:15+05:30,2\n",
+    "Z with an empty cell": "d,v\n2024-01-05T10:30:15Z,1\n,2\n2024-01-06T10:30:15Z,3\n",
+    "two offsets": "d,v\n2024-01-05T10:30:15Z,1\n2024-01-05T11:30:15+01:00,2\n",
+    "naive beside aware": "d,v\n2024-01-05 10:30:00,1\n2024-01-05T10:30:00Z,2\n",
+    "naive": "d,v\n2024-01-05,1\n2024-01-06,2\n",
+}
+_WHA4M_CASES = {
+    f"read_csv {name}": (lambda text: lambda m: m.read_csv(io.StringIO(text), parse_dates=["d"])["d"])(text)
+    for name, text in _WHA4M_CSV.items()
+}
+_WHA4M_CASES["to_datetime Series with NaT"] = lambda m: m.to_datetime(
+    m.Series(["2024-01-05T10:30:15+05:30", None, "2024-01-06T10:30:15+05:30"])
+)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_WHA4M_CASES))
+def test_parse_dates_of_one_zone_is_zoned_wha4m(case: str) -> None:
+    def seen(m: Any) -> Any:
+        result = _WHA4M_CASES[case](m)
+        return (str(result.dtype), [str(v) for v in result.tolist()])
+
+    assert seen(fpd) == seen(pd), case
+
+
 @pytest.mark.skipif(fpd is None or os.name != "posix", reason="frankenpandas not installed / no sh")
 def test_to_clipboard_writes_pandas_tab_separated_text(tmp_path: Path, monkeypatch: Any) -> None:
     # A wl-copy on PATH that keeps what it is sent: the clipboard text is

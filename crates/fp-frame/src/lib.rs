@@ -62356,11 +62356,10 @@ pub fn to_datetime_with_options(
         && matches!(options.format, None | Some("ISO8601" | "mixed"))
         && options.origin.is_none()
         && !options.utc
-        && let Some((nanos, timezone)) =
-            uniform_timezone_datetime_values(series.values(), options.format == Some("ISO8601"))
+        && let Some(column) =
+            uniform_zone_datetime_column(series.values(), options.format == Some("ISO8601"))
     {
         let index = series.index().clone();
-        let column = Column::from_datetime64_values_with_timezone(nanos, timezone);
         return Series::new(series.name().to_owned(), index, column);
     }
 
@@ -63210,20 +63209,27 @@ pub fn aware_datetime_parts(text: &str) -> Option<(i64, String, i32)> {
     ))
 }
 
-/// Return UTC nanoseconds and the one shared pandas timezone for a fully
-/// timezone-aware string sequence. A single dtype cannot represent a mixture
-/// of zones, so any null, non-string, naive, invalid, or differently-labelled
-/// input deliberately declines this typed path.
-fn uniform_timezone_datetime_values(
-    values: &[Scalar],
-    iso_only: bool,
-) -> Option<(Vec<i64>, String)> {
+/// Timezone-aware datetime strings in one zone, NaT where a value is
+/// missing, as pandas types them: a `datetime64[ns, zone]` column of UTC
+/// nanoseconds. A single dtype cannot hold a mixture of zones, so any naive,
+/// non-string, invalid or differently-zoned value declines it (None), as
+/// does a column with no aware value. `iso_only` reads only what pandas' ISO
+/// reader reads (format='ISO8601').
+#[must_use]
+pub fn uniform_zone_datetime_column(values: &[Scalar], iso_only: bool) -> Option<Column> {
     let mut timezone: Option<String> = None;
     let mut nanos = Vec::with_capacity(values.len());
+    let mut missing = false;
 
     for value in values {
-        let Scalar::Utf8(rendered) = value else {
-            return None;
+        let rendered = match value {
+            Scalar::Utf8(text) if !is_datetime_null_token(text) => text,
+            Scalar::Utf8(_) | Scalar::Null(_) => {
+                missing = true;
+                nanos.push(fp_types::Timestamp::NAT);
+                continue;
+            }
+            _ => return None,
         };
         let trimmed = rendered.trim();
         let (_, named_zone) = split_zone_annotation(trimmed);
@@ -63256,7 +63262,23 @@ fn uniform_timezone_datetime_values(
         nanos.push(value);
     }
 
-    Some((nanos, timezone?))
+    let timezone = timezone?;
+    if !missing {
+        return Some(Column::from_datetime64_values_with_timezone(
+            nanos, timezone,
+        ));
+    }
+    let cells = nanos
+        .into_iter()
+        .map(|nanos| {
+            if nanos == fp_types::Timestamp::NAT {
+                Scalar::Null(NullKind::NaT)
+            } else {
+                Scalar::Datetime64(nanos)
+            }
+        })
+        .collect();
+    Column::new(DType::datetime64_tz(timezone), cells).ok()
 }
 
 /// Normalize a parsed `to_datetime(utc=True)` scalar to a UTC `Datetime64`.

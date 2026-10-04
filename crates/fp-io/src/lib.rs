@@ -6552,6 +6552,16 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             .filter(|dtype| dtype.is_nullable())
             .cloned()
     };
+    // A parse_dates column of aware datetimes in one zone is pandas'
+    // datetime64[ns, zone] (it stayed text; wha4m).
+    let zoned_date_column = |name: &str, values: &[Scalar]| -> Option<Column> {
+        options
+            .parse_dates
+            .as_ref()
+            .is_some_and(|names| names.iter().any(|date| date == name))
+            .then(|| fp_frame::uniform_zone_datetime_column(values, false))
+            .flatten()
+    };
 
     // If index_col is set, extract that column as the index
     if let Some(ref idx_col_name) = options.index_col {
@@ -6616,6 +6626,8 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             let name = headers.get(orig_idx).cloned().unwrap_or_default();
             let column = if let Some(dtype) = forced_nullable(&name) {
                 Column::new(dtype, columns[col_idx].clone())?
+            } else if let Some(column) = zoned_date_column(&name, &columns[col_idx]) {
+                column
             } else if preserve_object_text && !dtype_forced(&name) {
                 let (rb, ro) = strings_to_contiguous_raw(&raw_columns[orig_idx]);
                 build_csv_object_aware_column(columns[col_idx].clone(), &rb, &ro)?
@@ -6638,6 +6650,8 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             let name = headers.get(idx).cloned().unwrap_or_default();
             let column = if let Some(dtype) = forced_nullable(&name) {
                 Column::new(dtype, values)?
+            } else if let Some(column) = zoned_date_column(&name, &values) {
+                column
             } else if preserve_object_text && !dtype_forced(&name) {
                 let (rb, ro) = strings_to_contiguous_raw(&raw_columns[idx]);
                 build_csv_object_aware_column(values, &rb, &ro)?
@@ -40482,6 +40496,57 @@ mod pandas_float_converter_py3c0 {
         assert_eq!(
             float_bits(frame.column("x").expect("x")),
             [0x4023_c7d4_cb12_5ce4]
+        );
+    }
+}
+
+/// read_csv(parse_dates=) of aware datetimes in one zone is pandas'
+/// datetime64[ns, zone] - they stayed text (wha4m). Pinned to pandas 2.2.3.
+#[cfg(test)]
+mod parse_dates_one_zone_wha4m {
+    use fp_types::{DType, Scalar};
+
+    use super::{CsvReadOptions, read_csv_with_options};
+
+    fn dates(csv: &str) -> fp_columnar::Column {
+        let options = CsvReadOptions {
+            parse_dates: Some(vec!["d".to_owned()]),
+            ..CsvReadOptions::default()
+        };
+        let frame = read_csv_with_options(csv, &options).expect("read");
+        frame.column("d").expect("d").clone()
+    }
+
+    #[test]
+    fn one_offset_is_a_zoned_column() {
+        let column = dates("d,v\n2024-01-05T10:30:15+05:30,1\n2024-01-06T10:30:15+05:30,2\n");
+        assert_eq!(column.dtype(), DType::datetime64_tz("UTC+05:30"));
+        // 2024-01-05 10:30:15+05:30 is 05:00:15 UTC.
+        assert_eq!(
+            column.values()[0],
+            Scalar::Datetime64(1_704_430_815_000_000_000)
+        );
+    }
+
+    #[test]
+    fn a_missing_cell_is_nat_in_the_zone() {
+        let column = dates("d,v\n2024-01-05T10:30:15Z,1\n,2\n2024-01-06T10:30:15Z,3\n");
+        assert_eq!(column.dtype(), DType::datetime64_tz("UTC"));
+        assert!(column.values()[1].is_missing());
+        assert_eq!(
+            column.values()[0],
+            Scalar::Datetime64(1_704_450_615_000_000_000)
+        );
+    }
+
+    #[test]
+    fn naive_beside_aware_stays_text() {
+        // NEGATIVE: pandas keeps a naive / aware mix as the text read (unz0t).
+        let column = dates("d,v\n2024-01-05 10:30:00,1\n2024-01-05T10:30:00Z,2\n");
+        assert!(!matches!(column.dtype(), DType::Datetime64 { .. }));
+        assert_eq!(
+            column.values()[1],
+            Scalar::Utf8("2024-01-05T10:30:00Z".to_owned())
         );
     }
 }
