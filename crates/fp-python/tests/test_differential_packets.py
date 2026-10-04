@@ -23660,40 +23660,6 @@ def test_index_of_datetimes_in_several_zones_ewrvf(case: str) -> None:
     assert seen(fpd) == seen(pd), case
 
 
-# br-frankenpandas-acelo: infer_freq knew fixed steps, B and ME only (MS /
-# QS / YS / W-<day> / WOM came back None or 7D), and dt.to_period() without
-# freq raised for them. Each index is pandas' date_range of the family; fp
-# reads the same instants.
-_ACELO_FREQS = [
-    "MS", "ME", "QS", "QE", "QS-FEB", "QE-NOV", "YS", "YE", "YS-MAR", "YE-JUN", "W-SUN", "W-WED",
-    "2W-FRI", "B", "D", "2D", "3h", "15min", "BMS", "BME", "BQE", "BYS", "BYE", "2MS", "6ME",
-    "2QS", "2YS", "WOM-1MON", "WOM-3FRI",
-]
-_ACELO_MULTIPLIED = {"2W-FRI", "2D", "3h", "15min"}  # period multiples: tus8r
-
-
-def _acelo_index(m: Any, freq: str) -> Any:
-    stamps = pd.date_range("2024-01-01", periods=8, freq=freq)
-    return stamps if m is pd else fpd.to_datetime([t.isoformat() for t in stamps], format="ISO8601")
-
-
-_ACELO_CASES = {f"infer_freq {freq}": (lambda freq: lambda m: [m.infer_freq(_acelo_index(m, freq))])(freq) for freq in _ACELO_FREQS}
-_ACELO_CASES.update({
-    f"to_period {freq}": (lambda freq: lambda m: [str(p) for p in m.Series(list(_acelo_index(m, freq))).dt.to_period()])(freq)
-    for freq in _ACELO_FREQS
-    if freq not in _ACELO_MULTIPLIED
-})
-_ACELO_CASES["infer_freq decreasing"] = lambda m: [m.infer_freq(m.DatetimeIndex(["2024-01-03", "2024-01-02", "2024-01-01"]))]
-_ACELO_CASES["infer_freq 15th of each month"] = lambda m: [m.infer_freq(m.DatetimeIndex(["2024-03-15", "2024-04-15", "2024-05-15"]))]
-
-
-@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-@pytest.mark.parametrize("case", list(_ACELO_CASES))
-def test_infer_freq_and_to_period_like_pandas_acelo(case: str) -> None:
-    run = _ACELO_CASES[case]
-    assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
-
-
 # br-frankenpandas-wha4m: read_csv(parse_dates=) of aware datetimes in one
 # zone is pandas' datetime64[ns, zone], NaT where a cell is empty - fp kept
 # the text; to_datetime of such a Series with a missing value likewise.

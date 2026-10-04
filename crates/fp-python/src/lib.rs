@@ -54232,16 +54232,6 @@ impl PySeriesDatetimeAccessor {
                 inferred.as_str()
             }
         };
-        if freq == "B" {
-            Python::attach(|py| {
-                PyErr::warn(
-                    py,
-                    &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
-                    c"PeriodDtype[B] is deprecated and will be removed in a future version. Use a DatetimeIndex with freq='B' instead",
-                    1,
-                )
-            })?;
-        }
         let (Some(period_freq), DType::Datetime64 { tz }) =
             (PeriodFreq::parse(freq), self.series.column().dtype())
         else {
@@ -54347,7 +54337,17 @@ impl PySeriesDatetimeAccessor {
             .ok()
             .flatten()
             .ok_or_else(missing)?;
-        period_alias_of_inferred(&freq)
+        Ok(match freq.as_str() {
+            "ME" => "M".to_owned(),
+            "7D" => {
+                // 1970-01-01 was a Thursday (index 3, Monday 0).
+                const WEEKDAYS: [&str; 7] = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+                let day = nanos[0].div_euclid(86_400_000_000_000);
+                let weekday = usize::try_from((day + 3).rem_euclid(7)).unwrap_or(0);
+                format!("W-{}", WEEKDAYS[weekday])
+            }
+            _ => freq,
+        })
     }
 
     /// Each value's scalar `method()` (Timestamp.to_pydatetime,
@@ -70234,45 +70234,6 @@ fn mixed_zone_timestamps<'py>(
         1,
     )?;
     Ok(Some(PyList::new(py, stamps)?))
-}
-
-/// The period frequency pandas' `dt.to_period()` reads an inferred offset
-/// as (its `get_period_alias`, then Period's own refusals), measured against
-/// pandas 2.2.3: MS / ME / BME are M, every QS Q-DEC, QE-x / BQE-x Q-x, every
-/// YS / BYS Y-DEC, YE-x / BYE-x Y-x, weeks and fixed units themselves; BMS,
-/// a week of the month and a counted start are not period frequencies, and
-/// a counted end is Period's "please use" (acelo).
-fn period_alias_of_inferred(freq: &str) -> PyResult<String> {
-    let refused = |message: String| PyErr::new::<pyo3::exceptions::PyValueError, _>(message);
-    let digits = freq.len() - freq.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-    let (count, base) = freq.split_at(digits);
-    let (rule, anchor) = base.split_once('-').unwrap_or((base, ""));
-    let unsupported = |what: &str| refused(format!("{what} is not supported as period frequency"));
-    let invalid = |reason: &str| {
-        refused(format!(
-            "Invalid frequency: {freq}, failed to parse with error message: {reason}"
-        ))
-    };
-    match (count.is_empty(), rule) {
-        (_, "WOM") | (true, "BMS") => Err(unsupported(freq)),
-        (true, "MS" | "ME" | "BME") => Ok("M".to_owned()),
-        (true, "QS") => Ok("Q-DEC".to_owned()),
-        (true, "QE" | "BQE") => Ok(format!("Q-{anchor}")),
-        (true, "YS" | "BYS") => Ok("Y-DEC".to_owned()),
-        (true, "YE" | "BYE") => Ok(format!("Y-{anchor}")),
-        (false, "MS" | "QS" | "YS") => Err(unsupported(base)),
-        (false, "ME") => Err(invalid(
-            "ValueError(\"for Period, please use 'M' instead of 'ME'\")",
-        )),
-        (false, "QE" | "YE") => Err(invalid(&format!(
-            "ValueError(\"for Period, please use '{}-{anchor}' instead of '{base}'\")",
-            &rule[..1]
-        ))),
-        (false, "BME" | "BQE" | "BYE") => {
-            Err(invalid(&format!("ValueError('Invalid frequency: {base}')")))
-        }
-        _ => Ok(freq.to_owned()),
-    }
 }
 
 /// The object Index `to_datetime` answers for datetimes in several zones
