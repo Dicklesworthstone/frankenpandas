@@ -19120,79 +19120,181 @@ fn apply_month_end_offset(
     add_months_to_month_end(current_month_end, month_steps)
 }
 
-fn fixed_frequency_name(diff: i64) -> Option<String> {
-    if diff <= 0 {
+/// pandas' month aliases (`MONTH_ALIASES`), January first.
+const MONTH_ALIASES: [&str; 12] = [
+    "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+];
+
+/// pandas' weekday aliases (`int_to_weekday`), Monday first.
+const WEEKDAY_ALIASES: [&str; 7] = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+
+/// pandas' `_maybe_add_count`: the alias, its count in front unless 1.
+fn with_count(base: &str, count: i64) -> String {
+    if count == 1 {
+        base.to_owned()
+    } else {
+        format!("{count}{base}")
+    }
+}
+
+/// pandas' `unique_deltas`: the distinct differences of consecutive values,
+/// ascending.
+fn unique_deltas(values: &[i64]) -> Vec<i64> {
+    let mut deltas: Vec<i64> = values.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    deltas.sort_unstable();
+    deltas.dedup();
+    deltas
+}
+
+/// A fixed step under a day as pandas names it: whole hours, minutes,
+/// seconds, milli-, microseconds, else nanoseconds, with its count.
+fn fixed_frequency_name(step: i64) -> Option<String> {
+    if step == 0 {
         return None;
     }
-
-    let units = [
-        (Timedelta::NANOS_PER_DAY, "D"),
+    for (unit, suffix) in [
         (Timedelta::NANOS_PER_HOUR, "h"),
         (Timedelta::NANOS_PER_MIN, "min"),
         (Timedelta::NANOS_PER_SEC, "s"),
         (Timedelta::NANOS_PER_MILLI, "ms"),
         (Timedelta::NANOS_PER_MICRO, "us"),
-        (1, "ns"),
-    ];
-    for (unit_nanos, suffix) in units {
-        if diff % unit_nanos == 0 {
-            let count = diff / unit_nanos;
-            return if count == 1 {
-                Some(suffix.to_owned())
-            } else {
-                Some(format!("{count}{suffix}"))
-            };
+    ] {
+        if step % unit == 0 {
+            return Some(with_count(suffix, step / unit));
         }
     }
-    None
+    Some(with_count("ns", step))
 }
 
-fn infer_business_day_freq(dates: &[(chrono::NaiveDate, i64)]) -> Option<String> {
-    if dates.iter().any(|(date, _)| !is_business_day(*date)) {
-        return None;
-    }
-    let first_time = dates[0].1;
-    if dates.iter().any(|(_, time)| *time != first_time) {
-        return None;
-    }
-    for window in dates.windows(2) {
-        let expected = next_business_day(checked_day_step(window[0].0, 1).ok()?).ok()?;
-        if window[1].0 != expected {
-            return None;
-        }
-    }
-    Some("B".to_owned())
-}
-
-fn infer_month_end_freq(dates: &[(chrono::NaiveDate, i64)]) -> Option<String> {
+/// pandas' `month_position_check`: whether every date is its month's
+/// calendar end (`ce`), business end (`be`, a Friday within the last three
+/// days), calendar start (`cs`) or business start (`bs`, a Monday within the
+/// first three), asked in that order.
+fn month_position(dates: &[chrono::NaiveDate]) -> Option<&'static str> {
     use chrono::Datelike;
 
-    let first_time = dates[0].1;
-    if dates.iter().any(|(_, time)| *time != first_time) {
-        return None;
+    let (mut calendar_start, mut business_start) = (true, true);
+    let (mut calendar_end, mut business_end) = (true, true);
+    for date in dates {
+        let (day, weekday) = (date.day(), date.weekday().num_days_from_monday());
+        let last = last_day_of_month(date.year(), date.month()).ok()?.day();
+        calendar_start &= day == 1;
+        business_start &= day == 1 || (day <= 3 && weekday == 0);
+        calendar_end &= day == last;
+        business_end &= day == last || (last - day < 3 && weekday == 4);
     }
-    for (date, _) in dates {
-        if *date != last_day_of_month(date.year(), date.month()).ok()? {
-            return None;
-        }
-    }
-
-    let step = month_ordinal(dates[1].0) - month_ordinal(dates[0].0);
-    if step <= 0 {
-        return None;
-    }
-    if dates
-        .windows(2)
-        .all(|window| month_ordinal(window[1].0) - month_ordinal(window[0].0) == step)
-    {
-        if step == 1 {
-            Some("ME".to_owned())
-        } else {
-            Some(format!("{step}ME"))
-        }
+    if calendar_end {
+        Some("ce")
+    } else if business_end {
+        Some("be")
+    } else if calendar_start {
+        Some("cs")
+    } else if business_start {
+        Some("bs")
     } else {
         None
     }
+}
+
+/// pandas' `_infer_daily_rule`, for steps of whole days: an annual, then a
+/// quarterly, then a monthly rule when every date sits at the same position
+/// in its month, else a fixed step (`D`, or `W-<weekday>` for whole weeks),
+/// business days, a week of the month. `deltas` are [`unique_deltas`].
+fn infer_daily_rule(dates: &[chrono::NaiveDate], deltas: &[i64]) -> Option<String> {
+    use chrono::Datelike;
+
+    let first = dates[0];
+    let position = month_position(dates);
+    let years: Vec<i64> = dates.iter().map(|date| i64::from(date.year())).collect();
+    let ydiffs = unique_deltas(&years);
+    if ydiffs.len() == 1
+        && dates.iter().all(|date| date.month() == first.month())
+        && let Some(rule) = position.and_then(|position| match position {
+            "cs" => Some("YS"),
+            "bs" => Some("BYS"),
+            "ce" => Some("YE"),
+            "be" => Some("BYE"),
+            _ => None,
+        })
+    {
+        let month = MONTH_ALIASES[first.month0() as usize];
+        return Some(with_count(&format!("{rule}-{month}"), ydiffs[0]));
+    }
+    let months: Vec<i64> = dates.iter().map(|date| month_ordinal(*date)).collect();
+    let mdiffs = unique_deltas(&months);
+    if mdiffs.len() == 1 {
+        let quarterly = position.and_then(|position| match position {
+            "cs" => Some("QS"),
+            "bs" => Some("BQS"),
+            "ce" => Some("QE"),
+            "be" => Some("BQE"),
+            _ => None,
+        });
+        if mdiffs[0] % 3 == 0
+            && let Some(rule) = quarterly
+        {
+            // pandas anchors a quarter on the month its first date's month
+            // shares a remainder with: 0 -> DEC, 2 -> NOV, 1 -> OCT.
+            let anchor = match first.month() % 3 {
+                0 => "DEC",
+                2 => "NOV",
+                _ => "OCT",
+            };
+            return Some(with_count(&format!("{rule}-{anchor}"), mdiffs[0] / 3));
+        }
+        if let Some(rule) = position.and_then(|position| match position {
+            "cs" => Some("MS"),
+            "bs" => Some("BMS"),
+            "ce" => Some("ME"),
+            "be" => Some("BME"),
+            _ => None,
+        }) {
+            return Some(with_count(rule, mdiffs[0]));
+        }
+    }
+    let weekday = first.weekday().num_days_from_monday();
+    if let [delta] = deltas {
+        let days = delta / Timedelta::NANOS_PER_DAY;
+        return Some(if days.rem_euclid(7) == 0 {
+            with_count(
+                &format!("W-{}", WEEKDAY_ALIASES[weekday as usize]),
+                days / 7,
+            )
+        } else {
+            with_count("D", days)
+        });
+    }
+    // Business days: steps of one day, three across a weekend, landing on
+    // Monday after three and Tuesday..Friday after one.
+    if deltas == [Timedelta::NANOS_PER_DAY, 3 * Timedelta::NANOS_PER_DAY] {
+        let mut on = i64::from(weekday);
+        let business = dates.windows(2).all(|pair| {
+            let shift = (pair[1] - pair[0]).num_days();
+            on = (on + shift).rem_euclid(7);
+            (on == 0 && shift == 3) || ((1..=4).contains(&on) && shift == 1)
+        });
+        if business {
+            return Some("B".to_owned());
+        }
+    }
+    // A week of the month: one weekday, one of the first four weeks.
+    if dates.iter().all(|date| date.weekday() == first.weekday()) {
+        let mut weeks: Vec<u32> = dates
+            .iter()
+            .map(|date| (date.day() - 1) / 7)
+            .filter(|week| *week < 4)
+            .collect();
+        weeks.sort_unstable();
+        weeks.dedup();
+        if let [week] = weeks[..] {
+            return Some(format!(
+                "WOM-{}{}",
+                week + 1,
+                WEEKDAY_ALIASES[weekday as usize]
+            ));
+        }
+    }
+    None
 }
 
 /// Infer a pandas-style frequency string from a DatetimeIndex.
@@ -19207,10 +19309,19 @@ pub fn infer_freq(index: &Index) -> Result<Option<String>, DateRangeError> {
         if range.len < 3 {
             return Err(DateRangeError::InsufficientDates);
         }
-        if range.step <= 0 {
-            return Ok(None);
+        // A step of whole days is pandas' daily rule, which reads the dates
+        // (annual / weekly anchors) - from the range's arithmetic, its labels
+        // left unbuilt; a shorter one is its unit.
+        if range.step % Timedelta::NANOS_PER_DAY != 0 {
+            return Ok(fixed_frequency_name(range.step));
         }
-        return Ok(fixed_frequency_name(range.step));
+        let mut values = Vec::with_capacity(range.len);
+        let mut value = range.start;
+        for _ in 0..range.len {
+            values.push(value);
+            value = value.wrapping_add(range.step);
+        }
+        return infer_freq_from_nanos(&values);
     }
 
     let mut values = Vec::with_capacity(index.len());
@@ -19237,35 +19348,39 @@ pub fn infer_freq_from_timestamps(timestamps: &[&str]) -> Result<Option<String>,
     infer_freq_from_nanos(&values)
 }
 
-/// Infer a pandas-style frequency string from nanosecond timestamps.
+/// Infer a pandas-style frequency string from nanosecond timestamps, as
+/// pandas' `_FrequencyInferer.get_freq` does: None unless strictly
+/// increasing or decreasing; when the smallest step is whole days, its daily
+/// rule ([`infer_daily_rule`]: YS-JAN, QE-DEC, MS, W-MON, B, WOM-3FRI...);
+/// business hours (`bh`) for steps of 1 / 17 / 65 hours; else one fixed step
+/// in its unit (`15min`, `-1h`), None for several.
 pub fn infer_freq_from_nanos(values: &[i64]) -> Result<Option<String>, DateRangeError> {
     if values.len() < 3 {
         return Err(DateRangeError::InsufficientDates);
     }
-    if values.windows(2).any(|window| window[1] <= window[0]) {
+    let increasing = values.windows(2).all(|pair| pair[1] > pair[0]);
+    if !increasing && !values.windows(2).all(|pair| pair[1] < pair[0]) {
         return Ok(None);
     }
-
-    let first_diff = values[1] - values[0];
-    if values
-        .windows(2)
-        .all(|window| window[1] - window[0] == first_diff)
-    {
-        return Ok(fixed_frequency_name(first_diff));
+    let deltas = unique_deltas(values);
+    if deltas[0] % Timedelta::NANOS_PER_DAY == 0 {
+        let dates: Vec<chrono::NaiveDate> = values
+            .iter()
+            .map(|value| split_datetime_nanos(*value).map(|(date, _)| date))
+            .collect::<Result<_, _>>()?;
+        return Ok(infer_daily_rule(&dates, &deltas));
     }
-
-    let dates: Vec<(chrono::NaiveDate, i64)> = values
-        .iter()
-        .map(|value| split_datetime_nanos(*value))
-        .collect::<Result<_, _>>()?;
-    if let Some(freq) = infer_business_day_freq(&dates) {
-        return Ok(Some(freq));
+    let hour = Timedelta::NANOS_PER_HOUR;
+    if deltas.iter().all(|delta| delta % hour == 0) {
+        let hours: Vec<i64> = deltas.iter().map(|delta| delta / hour).collect();
+        if matches!(hours.as_slice(), [1, 17] | [1, 65] | [1, 17, 65]) {
+            return Ok(Some("bh".to_owned()));
+        }
     }
-    if let Some(freq) = infer_month_end_freq(&dates) {
-        return Ok(Some(freq));
-    }
-
-    Ok(None)
+    Ok(match deltas.as_slice() {
+        [step] => fixed_frequency_name(*step),
+        _ => None,
+    })
 }
 
 /// Create a DatetimeIndex with evenly spaced values.
@@ -39783,5 +39898,51 @@ mod interval_index_tests {
         assert_eq!(values(&ints.round(2)), values(&ints));
         let text = Index::new(vec![IndexLabel::Utf8("1.25".to_owned())]);
         assert_eq!(values(&text.round(0)), values(&text));
+    }
+}
+
+/// infer_freq as pandas' `_FrequencyInferer` (acelo): month / quarter / year
+/// starts and ends with their anchors, weeks, business days, weeks of the
+/// month, signed steps. Each row is pandas 2.2.3's `date_range` of that
+/// family and its `infer_freq`.
+#[cfg(test)]
+mod infer_freq_like_pandas_acelo {
+    use super::infer_freq_from_timestamps;
+
+    #[test]
+    fn every_family_as_pandas_infers_it() {
+        // Each row: the stamps, then pandas' answer after "->".
+        let cases = [
+            "2024-01-01 2024-02-01 2024-03-01 2024-04-01 -> MS",
+            "2024-01-31 2024-02-29 2024-03-31 2024-04-30 -> ME",
+            // pandas anchors QS on the month sharing its first month's
+            // remainder by 3: January -> QS-OCT.
+            "2024-01-01 2024-04-01 2024-07-01 2024-10-01 -> QS-OCT",
+            "2024-02-29 2024-05-31 2024-08-31 2024-11-30 -> QE-NOV",
+            "2024-01-01 2025-01-01 2026-01-01 2027-01-01 -> YS-JAN",
+            "2024-06-30 2025-06-30 2026-06-30 2027-06-30 -> YE-JUN",
+            "2024-01-07 2024-01-14 2024-01-21 2024-01-28 -> W-SUN",
+            "2024-01-05 2024-01-19 2024-02-02 2024-02-16 -> 2W-FRI",
+            "2024-01-04 2024-01-05 2024-01-08 2024-01-09 -> B",
+            "2024-01-01 2024-01-03 2024-01-05 2024-01-07 -> 2D",
+            "2024-01-01T00:00:00 2024-01-01T03:00:00 2024-01-01T06:00:00 -> 3h",
+            "2024-01-01T00:00:00 2024-01-01T00:15:00 2024-01-01T00:30:00 -> 15min",
+            "2024-01-31 2024-02-29 2024-03-29 2024-04-30 -> BME",
+            "2024-03-29 2024-06-28 2024-09-30 2024-12-31 -> BQE-DEC",
+            "2024-01-31 2024-07-31 2025-01-31 2025-07-31 -> 2QE-OCT",
+            "2024-01-19 2024-02-16 2024-03-15 2024-04-19 -> WOM-3FRI",
+            "2024-01-04 2024-01-03 2024-01-02 2024-01-01 -> -1D",
+            // NEGATIVE: irregular steps, one day of the month that is neither
+            // start nor end, and year starts with a two-year gap stay None.
+            "2024-01-01 2024-01-02 2024-01-05 -> None",
+            "2024-03-15 2024-04-15 2024-05-15 -> None",
+            "2024-01-01 2025-01-01 2026-01-01 2028-01-03 -> None",
+        ];
+        for case in cases {
+            let (stamps, want) = case.split_once(" -> ").unwrap();
+            let stamps: Vec<&str> = stamps.split_whitespace().collect();
+            let got = infer_freq_from_timestamps(&stamps).unwrap();
+            assert_eq!(got.as_deref().unwrap_or("None"), want, "{case}");
+        }
     }
 }
