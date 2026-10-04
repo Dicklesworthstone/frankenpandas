@@ -154,8 +154,11 @@ def test_reader_on_corrupt_file_raises_instead_of_returning_empty(reader, payloa
         lambda p: _frame().to_hdf(str(p / "x.h5"), key="k"),
         lambda p: _frame().to_orc(str(p / "x.orc")),
         lambda p: _frame().to_gbq("dataset.table"),
-        lambda p: _frame().to_clipboard(),
-        lambda p: fpd.Series([1, 2]).to_clipboard(),
+        # TEST-CHANGE (cac5cf1f7): to_clipboard writes through wl-copy /
+        # xclip / xsel / pbcopy now (test_to_clipboard_writes_pandas_tab_
+        # separated_text); excel=False stays refused.
+        lambda p: _frame().to_clipboard(excel=False),
+        lambda p: fpd.Series([1, 2]).to_clipboard(excel=False),
         lambda p: fpd.Series([1, 2]).to_hdf(str(p / "x.h5"), key="k"),
     ],
     ids=[
@@ -166,8 +169,8 @@ def test_reader_on_corrupt_file_raises_instead_of_returning_empty(reader, payloa
         "to_hdf",
         "to_orc",
         "to_gbq",
-        "to_clipboard",
-        "Series.to_clipboard",
+        "to_clipboard excel=False",
+        "Series.to_clipboard excel=False",
         "Series.to_hdf",
     ],
 )

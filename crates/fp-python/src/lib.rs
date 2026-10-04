@@ -70100,13 +70100,127 @@ fn converted_datetime_index(converted: &Series) -> PyResult<PyDatetimeIndex> {
     Ok(PyDatetimeIndex { inner })
 }
 
+/// pandas' answer when `to_datetime` reads datetimes in more than one zone
+/// (mixed offsets - a DST-crossing column - or aware beside naive): each
+/// value a Timestamp in its own zone - a `datetime.datetime` under
+/// format='mixed', pandas' dateutil path - NaT where missing, after pandas'
+/// FutureWarning. None when the result is a datetime column (one zone or
+/// none). They became NaT.
+fn mixed_zone_timestamps<'py>(
+    py: Python<'py>,
+    converted: &Series,
+    pydatetime: bool,
+) -> PyResult<Option<Bound<'py, PyList>>> {
+    if matches!(converted.dtype(), DType::Datetime64 { .. }) {
+        return Ok(None);
+    }
+    let datetime = py.import("datetime")?;
+    let timedelta = datetime.getattr("timedelta")?;
+    // A whole number of microseconds past the epoch, as datetime holds it.
+    let since_epoch = |nanos: i64| timedelta.call1((0, 0, nanos.div_euclid(1000)));
+    let mut stamps = Vec::with_capacity(converted.len());
+    let mut zones: Vec<Option<String>> = Vec::new();
+    for value in converted.values() {
+        let (nanos, zone, offset) = match value {
+            // dateutil leaves a missing value None (pandas' NaT otherwise).
+            missing if missing.is_missing() => {
+                stamps.push(if pydatetime {
+                    py.None()
+                } else {
+                    nat_object(py)?
+                });
+                continue;
+            }
+            Scalar::Utf8(text) => match fp_frame::aware_datetime_parts(text) {
+                Some((nanos, zone, offset)) => (nanos, Some(zone), offset),
+                None => return Ok(None),
+            },
+            Scalar::Datetime64(nanos) => (*nanos, None, 0),
+            _ => return Ok(None),
+        };
+        if !zones.contains(&zone) {
+            zones.push(zone.clone());
+        }
+        if pydatetime {
+            let stamp = match zone {
+                None => datetime
+                    .getattr("datetime")?
+                    .call1((1970, 1, 1))?
+                    .add(since_epoch(nanos)?)?,
+                Some(_) => {
+                    let utc = datetime.getattr("timezone")?.getattr("utc")?;
+                    let fixed = datetime
+                        .getattr("timezone")?
+                        .call1((timedelta.call1((0, offset))?,))?;
+                    datetime
+                        .getattr("datetime")?
+                        .call1((1970, 1, 1, 0, 0, 0, 0, utc))?
+                        .add(since_epoch(nanos)?)?
+                        .call_method1("astimezone", (fixed,))?
+                }
+            };
+            stamps.push(stamp.unbind());
+            continue;
+        }
+        let stamp = PyTimestamp {
+            inner: Timestamp { nanos, tz: zone },
+            unit: StampUnit::Ns,
+        };
+        stamps.push(Py::new(py, stamp)?.into_any());
+    }
+    if zones.len() < 2 || zones.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    PyErr::warn(
+        py,
+        &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+        c"In a future version of pandas, parsing datetimes with mixed time zones will raise an error unless `utc=True`. Please specify `utc=True` to opt in to the new behaviour and silence this warning. To create a `Series` with mixed offsets and `object` dtype, please use `apply` and `datetime.datetime.strptime`",
+        1,
+    )?;
+    Ok(Some(PyList::new(py, stamps)?))
+}
+
+/// The object Index `to_datetime` answers for datetimes in several zones
+/// ([`mixed_zone_timestamps`]): Timestamps, an aware one kept whole, or
+/// under format='mixed' every datetime the Python object it is.
+fn mixed_zone_index(stamps: Bound<'_, PyList>, pydatetime: bool) -> PyResult<PyIndex> {
+    if !pydatetime {
+        return object_index_of(stamps.into_any(), Vec::new());
+    }
+    let labels = stamps
+        .iter()
+        .map(|item| {
+            if item.is_none() {
+                py_to_index_label(&item)
+            } else {
+                Ok(IndexLabel::Object(fp_types::ObjectValue::Host(
+                    fp_types::HostValue::new(PyHost(item.unbind())),
+                )))
+            }
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(PyIndex {
+        inner: Index::new(labels),
+    })
+}
+
 /// A `to_datetime` failure as pandas' ValueError, its own text (the gate
 /// prefix left off).
 fn to_datetime_error(err: fp_frame::FrameError) -> PyErr {
     match err {
-        // A string no format reads is pandas' DateParseError (a ValueError).
+        // A string no format reads is pandas' DateParseError (a ValueError),
+        // as is an ISO-shaped one with a field out of range.
         fp_frame::FrameError::CompatibilityRejected(message)
-            if message.starts_with("Unknown datetime string format") =>
+            if [
+                "Unknown datetime string format",
+                "month must be in 1..12",
+                "day is out of range for month",
+                "hour must be in 0..23",
+                "minute must be in 0..59",
+                "second must be in 0..59",
+            ]
+            .iter()
+            .any(|prefix| message.starts_with(prefix)) =>
         {
             DateParseError::new_err(message)
         }
@@ -70206,6 +70320,13 @@ fn to_datetime(
         let series = object_instants(py, &s.inner)?;
         warn_order(series.values())?;
         let res = fp_frame::to_datetime_with_options(&series, opts).map_err(to_datetime_error)?;
+        if let Some(stamps) = mixed_zone_timestamps(py, &res, format == Some("mixed"))?
+            && let Some(column) = mixed_zone_cells(py, stamps.as_any())?
+        {
+            let inner =
+                Series::new(res.name(), res.index().clone(), column).map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner })?.into_any());
+        }
         return Ok(Py::new(py, PySeries { inner: res })?.into_any());
     }
     if let Ok(dti) = arg.extract::<PyRef<'_, PyDatetimeIndex>>() {
@@ -70236,6 +70357,10 @@ fn to_datetime(
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let res =
             fp_frame::to_datetime_with_options(&temp_series, opts).map_err(to_datetime_error)?;
+        if let Some(stamps) = mixed_zone_timestamps(py, &res, format == Some("mixed"))? {
+            let index = mixed_zone_index(stamps, format == Some("mixed"))?;
+            return Ok(Py::new(py, index)?.into_any());
+        }
         return Ok(Py::new(py, converted_datetime_index(&res)?)?.into_any());
     }
     if let Ok(list) = arg.cast::<PyList>() {
@@ -70262,6 +70387,10 @@ fn to_datetime(
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let res =
             fp_frame::to_datetime_with_options(&temp_series, opts).map_err(to_datetime_error)?;
+        if let Some(stamps) = mixed_zone_timestamps(py, &res, format == Some("mixed"))? {
+            let index = mixed_zone_index(stamps, format == Some("mixed"))?;
+            return Ok(Py::new(py, index)?.into_any());
+        }
         // Aware datetimes of one zone stay in it (they came back naive).
         let res = with_sequence_zone(res, Some(arg))?;
         return Ok(Py::new(py, converted_datetime_index(&res)?)?.into_any());
@@ -70281,6 +70410,10 @@ fn to_datetime(
             warn_order(temp_series.values())?;
             let res = fp_frame::to_datetime_with_options(&temp_series, opts)
                 .map_err(to_datetime_error)?;
+            if let Some(stamps) = mixed_zone_timestamps(py, &res, format == Some("mixed"))? {
+                let index = mixed_zone_index(stamps, format == Some("mixed"))?;
+                return Ok(Py::new(py, index)?.into_any());
+            }
             return Ok(Py::new(py, converted_datetime_index(&res)?)?.into_any());
         }
     }

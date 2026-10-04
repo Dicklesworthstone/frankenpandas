@@ -23555,6 +23555,73 @@ def test_window_functions_read_inf_as_nan(case: str) -> None:
     assert _e23_outcome(lambda: run(fpd)) == _e23_outcome(lambda: run(pd)), case
 
 
+# br-frankenpandas-f1jm5: to_datetime read ISO timestamps pandas parses as
+# NaT - every offset under format='ISO8601' / 'mixed', a column of mixed
+# offsets (a DST crossing) on any path, T10 / T1030 / a bare trailing '.' -
+# and format='ISO8601' accepted what is not ISO8601. pandas' ISO reader is
+# numpy's parse_iso_8601_datetime.
+_F1JM5_STRINGS = [
+    "2024-01-05T10", "2024-01-05T1030", "2024-01-05T10:30:15.", "2024-01-05T10:30:15.1234567891",
+    "2024.01.05", "2024 01 05", "2024-1-5", "20240105T103015", "2024-01-05T1:30", " 2024-01-05",
+    "2024-01-05T10:30:15Z", "2024-01-05T10:30:15+05:30", "2024-01-05T10:30:15+0530",
+    "2024-01-05T10:30:15 +05:30", "2024-01-05T10:30:15-08:00", "2024-01-05T10:30:15+00:00",
+    "2024-01-05T10:30:15+05", "01/05/2024", "Jan 5 2024", "2024-W01", "2024-01-05 ", "2024-01-05T",
+    "2024-01-05t10:00", "2024-01-05T1", "2024-13-01", "2024-02-30", "2024-01-05T25:00",
+    "2024-01-05T10:61",
+]
+_F1JM5_LISTS = {
+    "mixed offsets": ["2024-01-05T10:30:15Z", "2024-01-05T11:30:15+01:00"],
+    "DST crossing": ["2024-03-30T10:00:00+01:00", None, "2024-04-01T10:00:00+02:00"],
+    "one offset": ["2024-01-05T10:30:15+05:30", "2024-01-06T10:30:15+05:30"],
+    "naive beside aware": ["2024-01-05T10:00", "2024-01-05T10:00:00+00:00"],
+    "ISO beside not": ["2024-01-05", "01/05/2024"],
+}
+_F1JM5_KWARGS = {
+    "default": {},
+    "ISO8601": {"format": "ISO8601"},
+    "mixed": {"format": "mixed"},
+    "ISO8601 coerce": {"format": "ISO8601", "errors": "coerce"},
+    "utc": {"utc": True},
+}
+_F1JM5_CASES = {
+    f"{name} {values!r}": (lambda values, kw: lambda m: m.to_datetime(values, **kw))(values, kw)
+    for name, kw in _F1JM5_KWARGS.items()
+    for values in [[s] for s in _F1JM5_STRINGS] + list(_F1JM5_LISTS.values())
+}
+_F1JM5_CASES["series mixed offsets"] = lambda m: m.to_datetime(m.Series(_F1JM5_LISTS["mixed offsets"], name="t"))
+# read_csv(parse_dates=) reads with the same parser: an out-of-range date
+# leaves the column as its text (fp parsed the rest), T10 parses (it was text).
+_F1JM5_CASES["read_csv out of range stays text"] = lambda m: m.read_csv(
+    io.StringIO("d,v\n2024-01-05,1\n2024-13-01,2\n"), parse_dates=["d"]
+)["d"]
+_F1JM5_CASES["read_csv hour only"] = lambda m: m.read_csv(
+    io.StringIO("d,v\n2024-01-05T10,1\n2024-01-06T11,2\n"), parse_dates=["d"]
+)["d"]
+
+
+def _f1jm5_outcome(run: Any) -> Any:
+    # _e23_outcome without the exception's module (fp's DateParseError is
+    # its own class), with the container and dtype pandas answers.
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = run()
+            values = [repr(v) for v in result]
+        warned = [(w.category.__name__, str(w.message)) for w in caught]
+        return ("ok", type(result).__name__, str(result.dtype), values, warned)
+    except NameError:
+        raise
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_F1JM5_CASES))
+def test_to_datetime_reads_iso_like_pandas_f1jm5(case: str) -> None:
+    run = _F1JM5_CASES[case]
+    assert _f1jm5_outcome(lambda: run(fpd)) == _f1jm5_outcome(lambda: run(pd)), case
+
+
 @pytest.mark.skipif(fpd is None or os.name != "posix", reason="frankenpandas not installed / no sh")
 def test_to_clipboard_writes_pandas_tab_separated_text(tmp_path: Path, monkeypatch: Any) -> None:
     # A wl-copy on PATH that keeps what it is sent: the clipboard text is

@@ -62350,11 +62350,14 @@ pub fn to_datetime_with_options(
     // object/string column. Keep UTC nanoseconds in Column's contiguous datetime
     // backing and carry the shared zone on its dtype. Mixed zones intentionally
     // do not enter this path: pandas cannot unify them into one DatetimeTZDtype.
+    // format='ISO8601' / 'mixed' parse each value on their own and land here
+    // too (their offsets became NaT).
     if options.unit.is_none()
-        && options.format.is_none()
+        && matches!(options.format, None | Some("ISO8601" | "mixed"))
         && options.origin.is_none()
         && !options.utc
-        && let Some((nanos, timezone)) = uniform_timezone_datetime_values(series.values())
+        && let Some((nanos, timezone)) =
+            uniform_timezone_datetime_values(series.values(), options.format == Some("ISO8601"))
     {
         let index = series.index().clone();
         let column = Column::from_datetime64_values_with_timezone(nanos, timezone);
@@ -62403,6 +62406,7 @@ pub fn to_datetime_values_with_options(
     // nothing, so every value came back NaT.
     let per_element = matches!(options.format, Some("mixed" | "ISO8601"));
     let mixed = options.format == Some("mixed");
+    let iso8601 = options.format == Some("ISO8601");
     let options = ToDatetimeOptions {
         format: options.format.filter(|_| !per_element),
         ..options
@@ -62448,12 +62452,17 @@ pub fn to_datetime_values_with_options(
     } else {
         None
     };
-    let inferred_timezone_pattern =
-        if parsed_unit.is_none() && options.format.is_none() && options.infer_mixed_timezone {
-            infer_values_datetime_timezone_pattern(values)
-        } else {
-            None
-        };
+    // Not for format='mixed' / 'ISO8601': each value carries its own zone
+    // (the first value's pattern made an aware one beside a naive NaT).
+    let inferred_timezone_pattern = if parsed_unit.is_none()
+        && options.format.is_none()
+        && !per_element
+        && options.infer_mixed_timezone
+    {
+        infer_values_datetime_timezone_pattern(values)
+    } else {
+        None
+    };
     // The format the lock stands for, as pandas' mismatch error names it
     // (it said "the format of the first value"), and the first value it was
     // read from.
@@ -62505,6 +62514,31 @@ pub fn to_datetime_values_with_options(
             return Err(FrameError::CompatibilityRejected(format!(
                 "{head}, at position {position}. You might want to try:\n    - passing `format` if your strings have a consistent format;\n    - passing `format='ISO8601'` if your strings are all ISO8601 but not necessarily in exactly the same format;\n    - passing `format='mixed'`, and the format will be inferred for each element individually. You might want to use `dayfirst` alongside this."
             )));
+        }
+        // format='ISO8601' reads every string with pandas' ISO reader; one
+        // it cannot read is pandas' ValueError, NaT under errors='coerce'
+        // (non-ISO strings parsed, offsets became NaT).
+        if iso8601
+            && parsed_unit.is_none()
+            && let Scalar::Utf8(text) = val
+            && !is_datetime_null_token(text)
+            && !matches!(text.as_str(), "now" | "today")
+        {
+            let parsed = match parse_iso8601(text) {
+                Some(iso) => iso.rendered(),
+                None if options.errors == DatetimeErrors::Raise => {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "Time data {text} is not ISO8601 format, at position {position}. You might want to try:\n    - passing `format` if your strings have a consistent format;\n    - passing `format='ISO8601'` if your strings are all ISO8601 but not necessarily in exactly the same format;\n    - passing `format='mixed'`, and the format will be inferred for each element individually. You might want to use `dayfirst` alongside this."
+                    )));
+                }
+                None => Scalar::Null(NullKind::NaT),
+            };
+            converted.push(if options.utc {
+                normalize_datetime_scalar_to_utc(parsed)
+            } else {
+                datetime64_scalar_from_parsed_datetime(parsed)
+            });
+            continue;
         }
         let result = if let Some(unit) = parsed_unit {
             parse_datetime_scalar_with_unit(val, unit, origin, options.utc)
@@ -62619,9 +62653,14 @@ pub fn to_datetime_values_with_options(
                 Some(format) => format!(
                     "time data \"{text}\" doesn't match format \"{format}\", at position {position}. You might want to try:\n    - passing `format` if your strings have a consistent format;\n    - passing `format='ISO8601'` if your strings are all ISO8601 but not necessarily in exactly the same format;\n    - passing `format='mixed'`, and the format will be inferred for each element individually. You might want to use `dayfirst` alongside this."
                 ),
-                None => format!(
-                    "Unknown datetime string format, unable to parse: {text}, at position {position}"
-                ),
+                // An ISO-shaped value with a field out of range is dateutil's
+                // complaint about it, as pandas raises it.
+                None => match iso8601_fields(text).as_ref().and_then(iso8601_range_error) {
+                    Some(complaint) => format!("{complaint}: {text}, at position {position}"),
+                    None => format!(
+                        "Unknown datetime string format, unable to parse: {text}, at position {position}"
+                    ),
+                },
             }));
         }
         converted.push(result);
@@ -63146,11 +63185,39 @@ fn datetime64_scalar_from_parsed_datetime(value: Scalar) -> Scalar {
     }
 }
 
+/// An aware datetime `to_datetime` could not put in one zone with the rest
+/// (mixed offsets; pandas answers an object column of Timestamps): its UTC
+/// nanoseconds, the zone pandas names it by - `UTC` for a zero offset,
+/// `UTC+01:00` for another, a named zone by its name - and its offset from
+/// UTC in seconds.
+#[must_use]
+pub fn aware_datetime_parts(text: &str) -> Option<(i64, String, i32)> {
+    let trimmed = text.trim();
+    let (_, named_zone) = split_zone_annotation(trimmed);
+    let fixed = parse_tz_aware_datetime(trimmed)
+        .ok()
+        .map(|parsed| parsed.fixed)
+        .or_else(|| parse_iso8601(trimmed).and_then(|iso| iso.aware()))?;
+    let zone = match named_zone {
+        Some(name) => name.to_owned(),
+        None if fixed.offset().local_minus_utc() == 0 => "UTC".to_owned(),
+        None => format!("UTC{}", fixed.format("%:z")),
+    };
+    Some((
+        fixed.timestamp_nanos_opt()?,
+        zone,
+        fixed.offset().local_minus_utc(),
+    ))
+}
+
 /// Return UTC nanoseconds and the one shared pandas timezone for a fully
 /// timezone-aware string sequence. A single dtype cannot represent a mixture
 /// of zones, so any null, non-string, naive, invalid, or differently-labelled
 /// input deliberately declines this typed path.
-fn uniform_timezone_datetime_values(values: &[Scalar]) -> Option<(Vec<i64>, String)> {
+fn uniform_timezone_datetime_values(
+    values: &[Scalar],
+    iso_only: bool,
+) -> Option<(Vec<i64>, String)> {
     let mut timezone: Option<String> = None;
     let mut nanos = Vec::with_capacity(values.len());
 
@@ -63159,19 +63226,30 @@ fn uniform_timezone_datetime_values(values: &[Scalar]) -> Option<(Vec<i64>, Stri
             return None;
         };
         let trimmed = rendered.trim();
-        let (without_annotation, named_zone) = split_zone_annotation(trimmed);
-        let parsed = parse_tz_aware_datetime(trimmed).ok()?;
+        let (_, named_zone) = split_zone_annotation(trimmed);
+        // format='ISO8601' reads only what pandas' ISO reader reads; otherwise
+        // the aware parser first, the ISO reader for the offsets it misses
+        // (+0530, a space before the offset).
+        let parsed = (!iso_only)
+            .then(|| {
+                parse_tz_aware_datetime(trimmed)
+                    .ok()
+                    .map(|parsed| parsed.fixed)
+            })
+            .flatten()
+            .or_else(|| parse_iso8601(rendered).and_then(|iso| iso.aware()))?;
+        // pandas names a zero offset (Z or +00:00) UTC.
         let label = match named_zone {
-            Some(name) => name.to_owned(),
-            None if fixed_offset_suffix(without_annotation) == Some("Z") => "UTC".to_owned(),
-            None => format!("UTC{}", parsed.fixed.format("%:z")),
+            Some(name) if !iso_only => name.to_owned(),
+            _ if parsed.offset().local_minus_utc() == 0 => "UTC".to_owned(),
+            _ => format!("UTC{}", parsed.format("%:z")),
         };
         match &timezone {
             Some(existing) if existing != &label => return None,
             None => timezone = Some(label),
             Some(_) => {}
         }
-        let value = parsed.fixed.timestamp_nanos_opt()?;
+        let value = parsed.timestamp_nanos_opt()?;
         if value == fp_types::Timestamp::NAT {
             return None;
         }
@@ -63352,6 +63430,261 @@ fn fast_iso_datetime_nanos(s: &str) -> Option<i64> {
         .checked_mul(1_000_000_000)
 }
 
+/// What numpy's `parse_iso_8601_datetime` - pandas' `format='ISO8601'`
+/// reader - reads from a string: the wall clock and, when given, its UTC
+/// offset in minutes.
+struct IsoDatetime {
+    local: NaiveDateTime,
+    offset_minutes: Option<i32>,
+}
+
+impl IsoDatetime {
+    /// The value as the string parsers hand it on: the rendered naive or
+    /// aware datetime.
+    fn rendered(&self) -> Scalar {
+        match self.offset_minutes {
+            None => Scalar::Utf8(format_naive_datetime(self.local)),
+            Some(_) => self.aware().map_or(Scalar::Null(NullKind::NaT), |aware| {
+                Scalar::Utf8(format_aware_datetime(aware, None))
+            }),
+        }
+    }
+
+    fn aware(&self) -> Option<DateTime<FixedOffset>> {
+        FixedOffset::east_opt(self.offset_minutes? * 60)?
+            .from_local_datetime(&self.local)
+            .single()
+    }
+}
+
+/// numpy's `parse_iso_8601_datetime`, as pandas vendors it: leading
+/// whitespace, a four-digit year, then optionally the month and the day (one
+/// or two digits after a `-`, `.`, `/`, `\` or space separator, two without
+/// one), then after a `T` or a space the hour (two digits unless more
+/// follows), minutes and seconds (one or two digits after `:`, two without),
+/// a fraction of up to 18 digits (nanoseconds kept), and an optional `Z` or
+/// `+-H[H][[:]M[M]]` offset, whitespace allowed around it. Anything else is
+/// not ISO8601 (`None`), nor is an out-of-range field
+/// ([`iso8601_range_error`]).
+fn parse_iso8601(text: &str) -> Option<IsoDatetime> {
+    let fields = iso8601_fields(text)?;
+    if iso8601_range_error(&fields).is_some() {
+        return None;
+    }
+    let local = NaiveDate::from_ymd_opt(fields.year, fields.month, fields.day)?.and_hms_nano_opt(
+        fields.hour,
+        fields.minute,
+        fields.second,
+        fields.nanos,
+    )?;
+    Some(IsoDatetime {
+        local,
+        offset_minutes: fields.offset_minutes,
+    })
+}
+
+/// The fields [`parse_iso8601`]'s grammar reads, before its range checks.
+struct IsoFields {
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    nanos: u32,
+    offset_minutes: Option<i32>,
+}
+
+/// pandas' (dateutil's) complaint about an ISO-shaped string whose field is
+/// out of range - `month must be in 1..12` and the like - in the order it
+/// checks them.
+fn iso8601_range_error(fields: &IsoFields) -> Option<&'static str> {
+    if !(1..=12).contains(&fields.month) {
+        return Some("month must be in 1..12");
+    }
+    let last_day = u32::try_from(days_in_month(fields.year, fields.month as i32)).unwrap_or(0);
+    if fields.day < 1 || fields.day > last_day {
+        return Some("day is out of range for month");
+    }
+    if fields.hour >= 24 {
+        return Some("hour must be in 0..23");
+    }
+    if fields.minute >= 60 {
+        return Some("minute must be in 0..59");
+    }
+    (fields.second >= 60).then_some("second must be in 0..59")
+}
+
+fn iso8601_fields(text: &str) -> Option<IsoFields> {
+    let b = text.as_bytes();
+    let digit = |i: usize| {
+        b.get(i)
+            .filter(|c| c.is_ascii_digit())
+            .map(|c| u32::from(c - b'0'))
+    };
+    let mut i = b.iter().take_while(|c| c.is_ascii_whitespace()).count();
+    let mut year = 0_i32;
+    for k in 0..4 {
+        year = year * 10 + i32::try_from(digit(i + k)?).ok()?;
+    }
+    i += 4;
+    let (mut month, mut day, mut hour, mut minute, mut second, mut nanos) = (1, 1, 0, 0, 0, 0);
+    let done = |i: usize| i == b.len();
+    'clock: {
+        if done(i) {
+            break 'clock;
+        }
+        let separator = if digit(i).is_none() {
+            let sep = b[i];
+            if !matches!(sep, b'-' | b'.' | b'/' | b'\\' | b' ') {
+                return None;
+            }
+            i += 1;
+            digit(i)?;
+            Some(sep)
+        } else {
+            None
+        };
+        // One or two digits after a separator, exactly two without one.
+        let field = |i: &mut usize, separated: bool| -> Option<u32> {
+            let mut value = digit(*i)?;
+            *i += 1;
+            match digit(*i) {
+                Some(next) => {
+                    value = value * 10 + next;
+                    *i += 1;
+                }
+                None if !separated => return None,
+                None => {}
+            }
+            Some(value)
+        };
+        month = field(&mut i, separator.is_some())?;
+        if done(i) {
+            break 'clock;
+        }
+        if let Some(sep) = separator {
+            if b[i] != sep || i + 1 == b.len() {
+                return None;
+            }
+            i += 1;
+        }
+        day = field(&mut i, separator.is_some())?;
+        if done(i) {
+            break 'clock;
+        }
+        if !matches!(b[i], b'T' | b' ') || i + 1 == b.len() {
+            return None;
+        }
+        i += 1;
+        hour = digit(i)?;
+        i += 1;
+        let two_digit_hour = digit(i).is_some();
+        if let Some(next) = digit(i) {
+            hour = hour * 10 + next;
+            i += 1;
+        }
+        if done(i) {
+            if !two_digit_hour {
+                return None;
+            }
+            break 'clock;
+        }
+        let colons = if b[i] == b':' {
+            i += 1;
+            digit(i)?;
+            true
+        } else if digit(i).is_none() {
+            if !two_digit_hour {
+                return None;
+            }
+            break 'clock;
+        } else {
+            false
+        };
+        minute = field(&mut i, colons)?;
+        if done(i) {
+            break 'clock;
+        }
+        if colons && b[i] == b':' {
+            i += 1;
+            digit(i)?;
+        } else if colons || digit(i).is_none() {
+            break 'clock;
+        }
+        second = field(&mut i, colons)?;
+        if b.get(i) == Some(&b'.') {
+            i += 1;
+            let mut read = 0;
+            while read < 18
+                && let Some(next) = digit(i)
+            {
+                if read < 9 {
+                    nanos = nanos * 10 + next;
+                }
+                read += 1;
+                i += 1;
+            }
+            nanos *= 10_u32.pow(9 - read.min(9));
+        }
+    }
+    // The offset: whitespace, then Z or +-hours[[:]minutes], then whitespace.
+    let skip_space = |i: &mut usize| {
+        while *i < b.len() && b[*i].is_ascii_whitespace() {
+            *i += 1;
+        }
+    };
+    skip_space(&mut i);
+    let mut offset_minutes = None;
+    match b.get(i) {
+        Some(b'Z') => {
+            offset_minutes = Some(0);
+            i += 1;
+        }
+        Some(&sign @ (b'+' | b'-')) => {
+            i += 1;
+            let part = |i: &mut usize, limit: u32| -> Option<i32> {
+                let mut value = digit(*i)?;
+                *i += 1;
+                if let Some(next) = digit(*i) {
+                    value = value * 10 + next;
+                    *i += 1;
+                    if value >= limit {
+                        return None;
+                    }
+                }
+                i32::try_from(value).ok()
+            };
+            let hours = part(&mut i, 24)?;
+            let minutes = if i < b.len() {
+                if b[i] == b':' {
+                    i += 1;
+                }
+                part(&mut i, 60)?
+            } else {
+                0
+            };
+            let total = hours * 60 + minutes;
+            offset_minutes = Some(if sign == b'-' { -total } else { total });
+        }
+        _ => {}
+    }
+    skip_space(&mut i);
+    if !done(i) {
+        return None;
+    }
+    Some(IsoFields {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        nanos,
+        offset_minutes,
+    })
+}
+
 /// The guess [`guess_day_month_format`] makes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DayMonthGuess {
@@ -63508,8 +63841,10 @@ fn parse_datetime_string(s: &str, format: Option<&str>) -> Scalar {
     }
 
     if has_tz_suffix(trimmed) {
+        // An ISO offset the aware parser does not read (+0530, a space
+        // before it) is pandas' ISO reader's (it was NaT).
         return parse_tz_aware_datetime(trimmed).map_or_else(
-            |_| Scalar::Null(NullKind::NaT),
+            |_| parse_iso8601(trimmed).map_or(Scalar::Null(NullKind::NaT), |iso| iso.rendered()),
             |parsed| Scalar::Utf8(format_aware_datetime(parsed.fixed, None)),
         );
     }
@@ -63627,11 +63962,28 @@ fn parse_datetime_string(s: &str, format: Option<&str>) -> Scalar {
         return Scalar::Utf8(format!("{} 00:00:00", d.format("%Y-%m-%d")));
     }
 
-    // Already normalized or has timezone info - return as-is if it looks like a datetime.
-    if trimmed.len() >= 10 && trimmed.as_bytes().get(4) == Some(&b'-') {
-        return Scalar::Utf8(trimmed.to_owned());
+    // The other ISO forms pandas reads: an hour alone (T10), HHMM, a bare
+    // trailing '.', '.' / ' ' / '\' date separators, an offset after a space
+    // (they were NaT or raised).
+    if let Some(iso) = parse_iso8601(trimmed) {
+        return iso.rendered();
+    }
+    // pandas' dateutil fallback reads a date with a dangling T as that date,
+    // and a lowercase t as the T between date and time.
+    if let Some(date) = trimmed.strip_suffix('T')
+        && let Some(iso) = parse_iso8601(date)
+    {
+        return iso.rendered();
+    }
+    if let Some(at) = trimmed.find('t')
+        && let Some(iso) = parse_iso8601(&format!("{}T{}", &trimmed[..at], &trimmed[at + 1..]))
+    {
+        return iso.rendered();
     }
 
+    // Nothing reads it: NaT, which errors='raise' turns into pandas' error.
+    // (Text shaped like a date - 2024-13-01, 2024-01-05T25:00 - went on as
+    // it was and became a silent NaT.)
     Scalar::Null(NullKind::NaT)
 }
 
@@ -235982,6 +236334,185 @@ mod ewm_moments_match_pandas_c5nwf {
             ],
             "mean com=1",
         );
+    }
+}
+
+/// to_datetime reads ISO strings as pandas' ISO reader (numpy's
+/// `parse_iso_8601_datetime`) does (f1jm5): offsets under format='ISO8601' /
+/// 'mixed', T10 / T1030 / a bare '.', and format='ISO8601' refuses what is
+/// not ISO8601. Pinned to live pandas 2.2.3.
+#[cfg(test)]
+mod to_datetime_iso8601_f1jm5 {
+    use fp_index::IndexLabel;
+    use fp_types::{DType, Scalar};
+
+    use super::{
+        DatetimeErrors, Series, ToDatetimeOptions, iso8601_fields, iso8601_range_error,
+        parse_iso8601, to_datetime_values_with_options, to_datetime_with_options,
+    };
+
+    fn utf8(values: &[&str]) -> Vec<Scalar> {
+        values
+            .iter()
+            .map(|value| Scalar::Utf8((*value).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn reads_numpys_grammar() {
+        for (text, wall, offset) in [
+            ("2024", "2024-01-01 00:00:00", None),
+            ("2024-1-5", "2024-01-05 00:00:00", None),
+            ("2024.01.05", "2024-01-05 00:00:00", None),
+            ("2024 01 05", "2024-01-05 00:00:00", None),
+            ("2024\\01\\05", "2024-01-05 00:00:00", None),
+            (" 2024-01-05", "2024-01-05 00:00:00", None),
+            ("20240105T103015", "2024-01-05 10:30:15", None),
+            ("2024-01-05T10", "2024-01-05 10:00:00", None),
+            ("2024-01-05T1030", "2024-01-05 10:30:00", None),
+            ("2024-01-05T1:30", "2024-01-05 01:30:00", None),
+            ("2024-01-05T10:30:15.", "2024-01-05 10:30:15", None),
+            (
+                "2024-01-05T10:30:15.1234567891",
+                "2024-01-05 10:30:15.123456789",
+                None,
+            ),
+            ("2024-01-05T10:30:15Z", "2024-01-05 10:30:15", Some(0)),
+            ("2024-01-05T10:30:15+0530", "2024-01-05 10:30:15", Some(330)),
+            (
+                "2024-01-05T10:30:15 +05:30 ",
+                "2024-01-05 10:30:15",
+                Some(330),
+            ),
+            ("2024-01-05T10:30:15-8", "2024-01-05 10:30:15", Some(-480)),
+        ] {
+            let iso = parse_iso8601(text).unwrap_or_else(|| panic!("{text}"));
+            let read = iso.local.format("%Y-%m-%d %H:%M:%S%.f").to_string();
+            assert_eq!(
+                (read.as_str(), iso.offset_minutes),
+                (wall, offset),
+                "{text}"
+            );
+        }
+        // NEGATIVE: what numpy's reader refuses (pandas: "is not ISO8601").
+        for text in [
+            "01/05/2024",
+            "Jan 5 2024",
+            "2024-W01",
+            "2024-005",
+            "+2024-01-05",
+            "2024-01-05 ",
+            "2024-01-05T",
+            "2024-01-05t10:00",
+            "2024-01-05T1",
+            "2024-01-05T1030:15",
+            "2024-01-05T10:30:15+05 :30",
+            "2024-13-01",
+            "2024-02-30",
+        ] {
+            assert!(parse_iso8601(text).is_none(), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_field_out_of_range_is_dateutils_complaint() {
+        for (text, complaint) in [
+            ("2024-13-01", "month must be in 1..12"),
+            ("2024-02-30", "day is out of range for month"),
+            ("2023-02-29", "day is out of range for month"),
+            ("2024-01-05T25:00", "hour must be in 0..23"),
+            ("2024-01-05T10:61", "minute must be in 0..59"),
+            ("2024-01-05T10:30:61", "second must be in 0..59"),
+        ] {
+            let fields = iso8601_fields(text);
+            assert_eq!(
+                fields.as_ref().and_then(iso8601_range_error),
+                Some(complaint),
+                "{text}"
+            );
+        }
+        let leap = iso8601_fields("2024-02-29T10:00");
+        assert_eq!(leap.as_ref().and_then(iso8601_range_error), None);
+        let raise = ToDatetimeOptions {
+            errors: DatetimeErrors::Raise,
+            ..Default::default()
+        };
+        let err = to_datetime_values_with_options(&utf8(&["2024-13-01"]), raise)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("month must be in 1..12: 2024-13-01, at position 0"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn iso8601_refuses_what_is_not_iso_and_coerce_keeps_nat() {
+        let raise = ToDatetimeOptions {
+            format: Some("ISO8601"),
+            errors: DatetimeErrors::Raise,
+            ..Default::default()
+        };
+        let err = to_datetime_values_with_options(&utf8(&["2024-01-05", "01/05/2024"]), raise)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("Time data 01/05/2024 is not ISO8601 format, at position 1."),
+            "{err}"
+        );
+        // NEGATIVE: errors='coerce' still answers NaT for it.
+        let coerce = ToDatetimeOptions {
+            format: Some("ISO8601"),
+            errors: DatetimeErrors::Coerce,
+            ..Default::default()
+        };
+        let values =
+            to_datetime_values_with_options(&utf8(&["2024-01-05T10", "01/05/2024"]), coerce)
+                .unwrap();
+        assert_eq!(values[0], Scalar::Datetime64(1_704_448_800_000_000_000));
+        assert!(values[1].is_missing());
+    }
+
+    #[test]
+    fn offsets_make_a_zoned_column_under_every_format() {
+        // Under format='ISO8601' / 'mixed' every offset was NaT; +00:00 is
+        // pandas' UTC (it was UTC+00:00).
+        // 2024-01-05 10:30:15 at +05:30 is 05:00:15 UTC; at UTC itself.
+        let (at_0530, at_utc) = (1_704_430_815_000_000_000, 1_704_450_615_000_000_000);
+        for (format, values, zone, first) in [
+            (
+                Some("ISO8601"),
+                ["2024-01-05T10:30:15+0530", "2024-01-06T10:30:15+05:30"],
+                "UTC+05:30",
+                at_0530,
+            ),
+            (
+                Some("mixed"),
+                ["2024-01-05T10:30:15Z", "2024-01-06T10:30:15+00:00"],
+                "UTC",
+                at_utc,
+            ),
+            (
+                None,
+                ["2024-01-05T10:30:15+00:00", "2024-01-06T10:30:15+00:00"],
+                "UTC",
+                at_utc,
+            ),
+        ] {
+            let labels = vec![IndexLabel::Int64(0), IndexLabel::Int64(1)];
+            let series = Series::from_values("t", labels, utf8(&values)).unwrap();
+            let options = ToDatetimeOptions {
+                format,
+                ..Default::default()
+            };
+            let out = to_datetime_with_options(&series, options).unwrap();
+            assert_eq!(
+                out.column().dtype(),
+                DType::datetime64_tz(zone),
+                "{values:?}"
+            );
+            assert_eq!(out.values()[0], Scalar::Datetime64(first), "{values:?}");
+        }
     }
 }
 
