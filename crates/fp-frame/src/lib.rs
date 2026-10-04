@@ -37342,14 +37342,40 @@ fn int_bins_with_gaps_as_float(values: Vec<Scalar>) -> Vec<Scalar> {
 
 /// Convert a datelike index label to a month ordinal (year*12 + month-1) for
 /// multiplied-calendar resample bucketing. Per gauntlet bead 2.5.
+/// [`resample_label_to_month_ordinal`] of every label. Stamps in time order
+/// stay in one month for long runs, so the day span of the last month found
+/// answers most of them without the calendar (br-frankenpandas-7x91u).
+fn resample_month_ordinals(labels: &[IndexLabel]) -> Vec<Option<i64>> {
+    let (mut first_day, mut last_day, mut ordinal) = (1, 0, 0);
+    labels
+        .iter()
+        .map(|label| {
+            let IndexLabel::Datetime64(ns) = label else {
+                return resample_label_to_month_ordinal(label);
+            };
+            let day = ns.div_euclid(Timedelta::NANOS_PER_DAY);
+            if !(first_day..=last_day).contains(&day) {
+                let (year, month, day_of_month) = civil_from_day(day);
+                let length = i32::try_from(year)
+                    .ok()
+                    .and_then(|year| Some(days_in_month(year, i32::try_from(month).ok()?)))
+                    .map_or(1, i64::from);
+                first_day = day - (day_of_month - 1);
+                last_day = first_day + length - 1;
+                ordinal = year * 12 + month - 1;
+            }
+            Some(ordinal)
+        })
+        .collect()
+}
+
 fn resample_label_to_month_ordinal(label: &IndexLabel) -> Option<i64> {
     match label {
         IndexLabel::Datetime64(ns) => {
-            let secs = ns.div_euclid(1_000_000_000);
-            DateTime::from_timestamp(secs, 0).map(|dt| {
-                let d = dt.naive_utc().date();
-                i64::from(d.year()) * 12 + i64::from(d.month0())
-            })
+            // chrono's calendar without a DateTime per stamp
+            // (br-frankenpandas-7x91u).
+            let (year, month, _) = civil_from_day(ns.div_euclid(Timedelta::NANOS_PER_DAY));
+            Some(year * 12 + month - 1)
         }
         IndexLabel::Utf8(s) => {
             let date_part = s
@@ -37648,8 +37674,7 @@ fn resample_build_groups_with_options(
             Some("left") => ResampleLabel::Left,
             _ => ResampleLabel::Right,
         };
-        let month_ords: Vec<Option<i64>> =
-            labels.iter().map(resample_label_to_month_ordinal).collect();
+        let month_ords = resample_month_ordinals(labels);
         let period_end_mo = |mo: i64| -> i64 {
             match unit.as_str() {
                 "M" | "ME" => mo,
@@ -38239,6 +38264,96 @@ pub struct Resample<'a> {
     origin: Option<String>,
 }
 
+/// One bin's running reduction in the single-pass resample kernels, which
+/// clone a prototype per bin and add each row's value to its bin in row
+/// order - the order of the rows in pandas' group kernels.
+trait ResampleBin: Clone {
+    /// A bin of one value reduces to that value (sum, mean), so stamps that
+    /// are already their own bins return the input as it is.
+    const SINGLETON_IS_VALUE: bool;
+
+    fn add(&mut self, value: f64);
+
+    /// The bin's reduction, an empty bin's included (NaN when missing).
+    fn value(&self) -> f64;
+}
+
+/// pandas' group_sum: compensated from 0.0, so an empty bin is 0.0
+/// (br-frankenpandas-xhogl).
+#[derive(Clone, Default)]
+struct BinSum(fp_types::KahanSum);
+
+impl ResampleBin for BinSum {
+    const SINGLETON_IS_VALUE: bool = true;
+
+    fn add(&mut self, value: f64) {
+        self.0.add(value);
+    }
+
+    fn value(&self) -> f64 {
+        self.0.sum()
+    }
+}
+
+/// pandas' group_mean: the compensated sum over the count, an empty bin NaN.
+#[derive(Clone, Default)]
+struct BinMean(fp_types::KahanSum, usize);
+
+impl ResampleBin for BinMean {
+    const SINGLETON_IS_VALUE: bool = true;
+
+    fn add(&mut self, value: f64) {
+        self.0.add(value);
+        self.1 += 1;
+    }
+
+    #[allow(clippy::cast_precision_loss)] // pandas' float count
+    fn value(&self) -> f64 {
+        if self.1 == 0 {
+            f64::NAN
+        } else {
+            self.0.sum() / self.1 as f64
+        }
+    }
+}
+
+/// Which spread a [`BinSpread`] reports.
+#[derive(Clone, Copy)]
+enum Spread {
+    Var,
+    Std,
+    Sem,
+}
+
+/// pandas' group_var, Welford in row order, as var / std / sem (ddof 1;
+/// sem is sqrt(var / n)); NaN below two values (br-frankenpandas-xhogl,
+/// br-frankenpandas-7x91u).
+#[derive(Clone)]
+struct BinSpread(fp_types::WelfordVar, Spread);
+
+impl BinSpread {
+    fn new(spread: Spread) -> Self {
+        Self(fp_types::WelfordVar::default(), spread)
+    }
+}
+
+impl ResampleBin for BinSpread {
+    const SINGLETON_IS_VALUE: bool = false;
+
+    fn add(&mut self, value: f64) {
+        self.0.add(value);
+    }
+
+    fn value(&self) -> f64 {
+        match self.1 {
+            Spread::Var => self.0.var(1),
+            Spread::Std => self.0.std(1),
+            Spread::Sem => self.0.sem(1),
+        }
+        .unwrap_or(f64::NAN)
+    }
+}
+
 impl Resample<'_> {
     pub fn closed(mut self, closed: &str) -> Self {
         self.closed = Some(closed.to_string());
@@ -38532,7 +38647,7 @@ impl Resample<'_> {
             && !vals.iter().any(|x| x.is_nan())
         {
             self.validate()?;
-            if let Some(r) = self.resample_reduce_single_pass(vals, true) {
+            if let Some(r) = self.resample_reduce_single_pass(vals, BinSum::default()) {
                 return r;
             }
             let (order, groups) = self.build_groups()?;
@@ -38563,7 +38678,7 @@ impl Resample<'_> {
             let max_abs = data.iter().map(|v| v.unsigned_abs()).max().unwrap_or(0);
             if u128::from(max_abs) * (data.len() as u128) < (1_u128 << 53) {
                 let vals: Vec<f64> = data.iter().map(|&v| v as f64).collect();
-                if let Some(r) = self.resample_reduce_single_pass(&vals, true) {
+                if let Some(r) = self.resample_reduce_single_pass(&vals, BinSum::default()) {
                     return r.and_then(|sums| {
                         let ints = sums
                             .values()
@@ -38629,7 +38744,7 @@ impl Resample<'_> {
             // accumulate sum+count per day index in ONE pass. Bit-identical: same
             // day ords / labels / empty-bin handling as resample_build_groups' "D"
             // path, sum in row order (== contiguous bin value order).
-            if let Some(r) = self.resample_reduce_single_pass(vals, false) {
+            if let Some(r) = self.resample_reduce_single_pass(vals, BinMean::default()) {
                 return r;
             }
             let (order, groups) = self.build_groups()?;
@@ -38662,7 +38777,7 @@ impl Resample<'_> {
         if let Some(data) = self.series.column().as_i64_slice() {
             self.validate()?;
             let vals: Vec<f64> = data.iter().map(|&v| v as f64).collect();
-            if let Some(r) = self.resample_reduce_single_pass(&vals, false) {
+            if let Some(r) = self.resample_reduce_single_pass(&vals, BinMean::default()) {
                 return r;
             }
             let (order, groups) = self.build_groups()?;
@@ -38692,13 +38807,13 @@ impl Resample<'_> {
     /// row-order compensated sum) are bit-identical. `None` (caller falls back)
     /// for an empty/all-NaT input, a more-than-1e6-day span (past datetime64's
     /// range), or any non-Datetime64/Date label.
-    /// Dispatch the daily / sub-daily one-pass resample reduce (mean if `is_sum`
-    /// is false, sum if true). `None` (caller uses build_groups) for non-D/sub-day
+    /// Dispatch the calendar / daily / sub-daily one-pass resample reduce, each
+    /// bin a clone of `empty`. `None` (caller uses build_groups) for other
     /// freqs or when a helper bails (empty / sparse / non-datetime label).
-    fn resample_reduce_single_pass(
+    fn resample_reduce_single_pass<B: ResampleBin>(
         &self,
         vals: &[f64],
-        is_sum: bool,
+        empty: B,
     ) -> Option<Result<Series, FrameError>> {
         if self.closed.is_some() || self.label.is_some() || self.origin.is_some() {
             return None;
@@ -38711,11 +38826,11 @@ impl Resample<'_> {
             _ => 0,
         };
         if months_per_period > 0 {
-            return self.monthly_reduce_single_pass(vals, months_per_period, mult, is_sum);
+            return self.monthly_reduce_single_pass(vals, months_per_period, mult, empty);
         }
         if unit == "D"
             && mult <= 1
-            && let Some(r) = self.daily_reduce_single_pass(vals, is_sum)
+            && let Some(r) = self.daily_reduce_single_pass(vals, empty.clone())
         {
             return Some(r);
         }
@@ -38728,32 +38843,31 @@ impl Resample<'_> {
             "ns" => 1,
             _ => return None,
         };
-        self.subdaily_reduce_single_pass(vals, ns_per, mult, is_sum)
+        self.subdaily_reduce_single_pass(vals, ns_per, mult, empty)
     }
 
     /// One-pass calendar (M/Q/Y/A) resample reduce over an all-valid no-NaN f64
-    /// slice: accumulate sum+count per bucket index in ONE pass instead of
+    /// slice: accumulate each bucket's bin in ONE pass instead of
     /// build_groups' Vec<usize> scatter + per-bin gather. VERBATIM the M/Q/Y/A
     /// path's month ordinals + period_end_mo/bucket_end_mo bucketing + contiguous
     /// first..=last right-edge cursors + resample_month_end_key + filled empty
-    /// buckets (mean->NaN, sum->0.0). bidx = (bucket_end_mo(mo)-first)/bucket_months
+    /// buckets (their bin's empty value). bidx = (bucket_end_mo(mo)-first)/bucket_months
     /// is direct (no order map). `None` (caller falls back) on empty/all-bad input
-    /// or a >1e6-bucket span. Bit-identical: same buckets/keys/order, row-order sum
-    /// (== contiguous bucket value order for time-ordered data).
-    fn monthly_reduce_single_pass(
+    /// or a >1e6-bucket span. Bit-identical: same buckets/keys/order, row-order
+    /// adds (== contiguous bucket value order for time-ordered data).
+    fn monthly_reduce_single_pass<B: ResampleBin>(
         &self,
         vals: &[f64],
         months_per_period: i64,
         mult: i64,
-        is_sum: bool,
+        empty: B,
     ) -> Option<Result<Series, FrameError>> {
         let bucket_months = mult.checked_mul(months_per_period)?;
         if bucket_months <= 0 {
             return None;
         }
         let labels = self.series.index().labels();
-        let month_ords: Vec<Option<i64>> =
-            labels.iter().map(resample_label_to_month_ordinal).collect();
+        let month_ords = resample_month_ordinals(labels);
         let period_end_mo = |mo: i64| -> i64 {
             mo.div_euclid(months_per_period) * months_per_period + (months_per_period - 1)
         };
@@ -38778,15 +38892,12 @@ impl Resample<'_> {
         if n >= 1_000_000 {
             return None;
         }
-        // Compensated, as pandas' group_sum / group_mean (br-frankenpandas-xhogl).
-        let mut sum = vec![fp_types::KahanSum::default(); n];
-        let mut count = vec![0_i64; n];
+        let mut bins = vec![empty; n];
         for (i, mo_opt) in month_ords.iter().enumerate() {
             if let Some(mo) = *mo_opt {
                 let bidx = ((bucket_end_mo(mo) - first) / bucket_months) as usize;
                 if bidx < n {
-                    sum[bidx].add(vals[i]);
-                    count[bidx] += 1;
+                    bins[bidx].add(vals[i]);
                 }
             }
         }
@@ -38797,18 +38908,7 @@ impl Resample<'_> {
         while cursor <= last && bidx < n {
             if let Some(key) = resample_month_end_key(cursor) {
                 out_labels.push(resample_bin_label(&key));
-                let c = count[bidx];
-                out_f64.push(if c > 0 {
-                    if is_sum {
-                        sum[bidx].sum()
-                    } else {
-                        sum[bidx].sum() / c as f64
-                    }
-                } else if is_sum {
-                    0.0
-                } else {
-                    f64::NAN
-                });
+                out_f64.push(bins[bidx].value());
             }
             cursor += bucket_months;
             bidx += 1;
@@ -38839,8 +38939,7 @@ impl Resample<'_> {
             return None;
         }
         let labels = self.series.index().labels();
-        let month_ords: Vec<Option<i64>> =
-            labels.iter().map(resample_label_to_month_ordinal).collect();
+        let month_ords = resample_month_ordinals(labels);
         let period_end_mo = |mo: i64| -> i64 {
             mo.div_euclid(months_per_period) * months_per_period + (months_per_period - 1)
         };
@@ -38911,10 +39010,10 @@ impl Resample<'_> {
         })())
     }
 
-    fn daily_reduce_single_pass(
+    fn daily_reduce_single_pass<B: ResampleBin>(
         &self,
         vals: &[f64],
-        is_sum: bool,
+        empty: B,
     ) -> Option<Result<Series, FrameError>> {
         use chrono::Datelike;
         let labels = self.series.index().labels();
@@ -38934,14 +39033,10 @@ impl Resample<'_> {
         if n >= 1_000_000 {
             return None;
         }
-        // Compensated, as pandas' group_sum / group_mean (br-frankenpandas-xhogl).
-        let mut sum = vec![fp_types::KahanSum::default(); n];
-        let mut count = vec![0_i64; n];
+        let mut bins = vec![empty; n];
         for (i, o) in day_ords.iter().enumerate() {
             if let Some(ord) = *o {
-                let bidx = (ord - min) as usize;
-                sum[bidx].add(vals[i]);
-                count[bidx] += 1;
+                bins[(ord - min) as usize].add(vals[i]);
             }
         }
         let key_of = |ord: i64| -> Option<String> {
@@ -38950,16 +39045,10 @@ impl Resample<'_> {
         };
         let mut out_labels = Vec::with_capacity(n);
         let mut out_f64 = Vec::with_capacity(n);
-        for (bidx, (s, &c)) in sum.iter().zip(count.iter()).enumerate() {
+        for (bidx, bin) in bins.iter().enumerate() {
             if let Some(key) = key_of(min + bidx as i64) {
                 out_labels.push(resample_bin_label(&key));
-                out_f64.push(if c > 0 {
-                    if is_sum { s.sum() } else { s.sum() / c as f64 }
-                } else if is_sum {
-                    0.0
-                } else {
-                    f64::NAN
-                });
+                out_f64.push(bin.value());
             }
         }
         let index = Index::new(out_labels).rename_index(self.series.index().name());
@@ -38970,19 +39059,19 @@ impl Resample<'_> {
         ))
     }
 
-    /// One-pass sub-daily (H/min/s/ms/us/ns) resample mean over an all-valid no-NaN
-    /// f64 slice: accumulate sum+count per bin index in ONE pass instead of
+    /// One-pass sub-daily (H/min/s/ms/us/ns) resample reduce over an all-valid
+    /// no-NaN f64 slice: accumulate each bin index's bin in ONE pass instead of
     /// build_groups' Vec<usize> scatter + per-bin gather. VERBATIM the sub-day
-    /// path's `bin = (ns-origin).div_euclid(bucket_ns)`, the dense-range gate, the
-    /// bin-start Datetime64 label, and EMPTY-BIN SKIP (sub-daily does not fill
-    /// empty bins, unlike daily). `None` (caller falls back) on empty input or a
-    /// sparse range (matching the dense_done gate -> the HashMap/sort path).
-    fn subdaily_reduce_single_pass(
+    /// path's `bin = (ns-origin).div_euclid(bucket_ns)`, the dense-range gate,
+    /// the bin-start Datetime64 label, and every bin from the first to the last.
+    /// `None` (caller falls back) on empty input or a sparse range (matching
+    /// the dense_done gate -> the HashMap/sort path).
+    fn subdaily_reduce_single_pass<B: ResampleBin>(
         &self,
         vals: &[f64],
         ns_per: i64,
         mult: i64,
-        is_sum: bool,
+        empty: B,
     ) -> Option<Result<Series, FrameError>> {
         let bucket_ns = mult.checked_mul(ns_per)?;
         if bucket_ns <= 0 {
@@ -39000,23 +39089,26 @@ impl Resample<'_> {
             Some(_) => &[][..],
             None => self.series.index().labels(),
         };
-        if let Some((first, step, len)) = affine {
-            if first
-                .rem_euclid(Timedelta::NANOS_PER_DAY)
-                .rem_euclid(bucket_ns)
-                == 0
-                && (len == 1 || step == bucket_ns)
+        // Stamps that are already their own bins: each bin holds one value.
+        if B::SINGLETON_IS_VALUE {
+            if let Some((first, step, len)) = affine {
+                if first
+                    .rem_euclid(Timedelta::NANOS_PER_DAY)
+                    .rem_euclid(bucket_ns)
+                    == 0
+                    && (len == 1 || step == bucket_ns)
+                {
+                    return Some(Series::new(
+                        self.series.name(),
+                        self.series.index().clone(),
+                        self.series.column().clone(),
+                    ));
+                }
+            } else if let Some(identity) =
+                self.subdaily_exact_target_frequency_result(labels, bucket_ns)
             {
-                return Some(Series::new(
-                    self.series.name(),
-                    self.series.index().clone(),
-                    self.series.column().clone(),
-                ));
+                return Some(identity);
             }
-        } else if let Some(identity) =
-            self.subdaily_exact_target_frequency_result(labels, bucket_ns)
-        {
-            return Some(identity);
         }
         // Fused: find origin (min ns) AND max ns in one pass, then accumulate
         // sum/count per bin in a second pass — instead of materializing two 16MB
@@ -39052,44 +39144,30 @@ impl Resample<'_> {
         let origin_day = min_ns.div_euclid(Timedelta::NANOS_PER_DAY) * Timedelta::NANOS_PER_DAY;
         let origin = min_ns - (min_ns - origin_day).rem_euclid(bucket_ns);
         let bmax = (max_ns - origin).div_euclid(bucket_ns);
-        // Every bin from the first to the last is emitted, empty ones as 0.0
-        // (sum) / NaN (mean), as pandas does; this path dropped them. A range too
+        // Every bin from the first to the last is emitted, empty ones their
+        // bin's empty value, as pandas does; this path dropped them. A range too
         // sparse for a dense table goes to the generic path, which emits them too.
         let rows = affine.map_or(labels.len(), |(_, _, len)| len);
         if (bmax as i128 + 1) > (rows as i128 * 4).max(1 << 16) {
             return None;
         }
         let nb = (bmax + 1) as usize;
-        // Compensated, as pandas' group_sum / group_mean (br-frankenpandas-xhogl).
-        let mut sum = vec![fp_types::KahanSum::default(); nb];
-        let mut count = vec![0_i64; nb];
+        let mut bins = vec![empty; nb];
         if let Some((first, step, _)) = affine {
             let mut ns = first;
             for (i, &value) in vals.iter().enumerate() {
                 if i > 0 {
                     ns += step;
                 }
-                let didx = (ns - origin).div_euclid(bucket_ns) as usize;
-                sum[didx].add(value);
-                count[didx] += 1;
+                bins[(ns - origin).div_euclid(bucket_ns) as usize].add(value);
             }
         }
         for (i, l) in labels.iter().enumerate() {
             if let Some(ns) = resample_label_to_ns(l) {
-                let didx = (ns - origin).div_euclid(bucket_ns) as usize;
-                sum[didx].add(vals[i]);
-                count[didx] += 1;
+                bins[(ns - origin).div_euclid(bucket_ns) as usize].add(vals[i]);
             }
         }
-        let out_f64: Vec<f64> = sum
-            .iter()
-            .zip(&count)
-            .map(|(total, &n)| match (is_sum, n) {
-                (true, _) => total.sum(),
-                (false, 0) => f64::NAN,
-                (false, n) => total.sum() / n as f64,
-            })
-            .collect();
+        let out_f64: Vec<f64> = bins.iter().map(ResampleBin::value).collect();
         let index = Index::from_datetime64_affine_range(origin, bucket_ns, nb)
             .unwrap_or_else(|| {
                 let labels = (0..nb)
@@ -39454,6 +39532,13 @@ impl Resample<'_> {
         };
         Some((|| -> Result<Series, FrameError> {
             self.validate()?;
+            // One pass over the rows into bins by arithmetic, as sum / mean
+            // (br-frankenpandas-7x91u); the bins it does not cover hash their
+            // labels below.
+            let spread = if want_std { Spread::Std } else { Spread::Var };
+            if let Some(r) = self.resample_reduce_single_pass(vals, BinSpread::new(spread)) {
+                return r;
+            }
             let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out = Vec::with_capacity(order.len());
@@ -40074,6 +40159,9 @@ impl Resample<'_> {
         };
         if let Some(vals) = typed {
             self.validate()?;
+            if let Some(r) = self.resample_reduce_single_pass(vals, BinSpread::new(Spread::Sem)) {
+                return r;
+            }
             let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
             let mut out = Vec::with_capacity(order.len());
@@ -234315,6 +234403,185 @@ mod pandas_reductions_9iim6 {
             s.mean().unwrap(),
             Scalar::Datetime64(1_700_049_991_717_762_560)
         );
+    }
+}
+
+/// Resample var / std / sem through the single-pass bin kernels against live
+/// pandas 2.2.3 bits (br-frankenpandas-7x91u). Data: `100 + cumsum(((k * 7919
+/// + 13) % 1000 - 500) / 97)`, a left fold.
+#[cfg(test)]
+mod resample_spread_single_pass_7x91u {
+    use fp_columnar::Column;
+    use fp_index::Index;
+    use fp_types::Scalar;
+
+    use super::Series;
+
+    const JAN_1_2024_NS: i64 = 1_704_067_200_000_000_000;
+
+    fn walk(n: usize) -> Vec<f64> {
+        let mut total = 0.0_f64;
+        (0..n as i64)
+            .map(|k| {
+                #[allow(clippy::cast_precision_loss)] // below 1000
+                let step = ((k * 7919 + 13) % 1000 - 500) as f64 / 97.0;
+                total += step;
+                100.0 + total
+            })
+            .collect()
+    }
+
+    /// Minute stamps from 2024-01-01 with minutes 300..480 dropped but for
+    /// 330: hour 5 holds one value, hours 6 and 7 none.
+    fn minutes() -> Series {
+        let values = walk(1000);
+        let (stamps, kept): (Vec<i64>, Vec<f64>) = (0..1000_i64)
+            .filter(|&k| !(300..480).contains(&k) || k == 330)
+            .map(|k| (JAN_1_2024_NS + k * 60_000_000_000, values[k as usize]))
+            .unzip();
+        Series::new(
+            "v",
+            Index::from_datetime64(stamps),
+            Column::from_f64_values(kept),
+        )
+        .unwrap()
+    }
+
+    /// 400 rows six hours apart.
+    fn quarter_days() -> Series {
+        let stamps = (0..400_i64)
+            .map(|k| JAN_1_2024_NS + k * 21_600_000_000_000)
+            .collect();
+        Series::new(
+            "v",
+            Index::from_datetime64(stamps),
+            Column::from_f64_values(walk(400)),
+        )
+        .unwrap()
+    }
+
+    fn bits_at(series: &Series, at: &[usize]) -> Vec<Option<u64>> {
+        at.iter()
+            .map(|&i| match &series.values()[i] {
+                Scalar::Float64(value) if !value.is_nan() => Some(value.to_bits()),
+                value if value.is_missing() => None,
+                other => panic!("position {i}: {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn hourly_spread_matches_pandas_bits() {
+        let s = minutes();
+        let at = [0, 4, 5, 6, 7, 16];
+        let var = s.resample("h").var().unwrap();
+        assert_eq!(var.len(), 17);
+        assert_eq!(
+            bits_at(&var, &at),
+            [
+                Some(0x4039_2842_3e0d_6787),
+                Some(0x403e_276f_1ee4_26d1),
+                None,
+                None,
+                None,
+                Some(0x4038_cc69_5b93_6930)
+            ]
+        );
+        assert_eq!(
+            bits_at(&s.resample("h").std().unwrap(), &at),
+            [
+                Some(0x4014_1014_08c1_1fc0),
+                Some(0x4015_f70f_517a_9995),
+                None,
+                None,
+                None,
+                Some(0x4013_eb52_a78c_e5ec)
+            ]
+        );
+        assert_eq!(
+            bits_at(&s.resample("h").sem().unwrap(), &at),
+            [
+                Some(0x3fe4_b884_d121_748b),
+                Some(0x3fe6_af78_a25f_3fa5),
+                None,
+                None,
+                None,
+                Some(0x3fe9_3230_9e5c_67b4)
+            ]
+        );
+        // NEGATIVE: stamps that are their own bins have no spread - the sum /
+        // mean shortcut returns the values themselves.
+        let stamps = (0..5_i64)
+            .map(|k| JAN_1_2024_NS + k * 3_600_000_000_000)
+            .collect();
+        let hourly = Series::new(
+            "v",
+            Index::from_datetime64(stamps),
+            Column::from_f64_values(walk(5)),
+        )
+        .unwrap();
+        let var = hourly.resample("h").var().unwrap();
+        assert_eq!(var.len(), 5);
+        assert!(var.values().iter().all(Scalar::is_missing));
+        let sum = hourly.resample("h").sum().unwrap();
+        assert_eq!(sum.values(), hourly.values());
+    }
+
+    #[test]
+    fn daily_and_month_end_spread_matches_pandas_bits() {
+        let s = quarter_days();
+        let daily = s.resample("D").var().unwrap();
+        assert_eq!(daily.len(), 100);
+        assert_eq!(
+            bits_at(&daily, &[0, 50, 99]),
+            [
+                Some(0x4036_0e41_c9f7_0588),
+                Some(0x4011_15cf_ce3a_3e43),
+                Some(0x402b_41b0_6cfa_21d0)
+            ]
+        );
+        assert_eq!(
+            bits_at(&s.resample("D").sem().unwrap(), &[0, 50, 99]),
+            [
+                Some(0x4002_c90f_a3f8_dbf8),
+                Some(0x3ff0_88a0_8f36_37a9),
+                Some(0x3ffd_8881_2caa_801c)
+            ]
+        );
+        assert_eq!(
+            bits_at(&s.resample("ME").std().unwrap(), &[0, 1, 2, 3]),
+            [
+                Some(0x4015_bc33_c1bf_983a),
+                Some(0x4018_5b9b_3b8b_59ee),
+                Some(0x4015_4bea_6ec0_5b5c),
+                Some(0x4014_ec52_5fcf_d2de)
+            ]
+        );
+    }
+
+    #[test]
+    fn single_pass_bins_equal_the_label_hashing_path() {
+        // origin='start_day' is pandas' default but routes through
+        // build_groups, the path the single pass replaced.
+        let s = minutes();
+        for freq in ["h", "15min", "D"] {
+            let fast = [
+                s.resample(freq).var().unwrap(),
+                s.resample(freq).std().unwrap(),
+                s.resample(freq).sem().unwrap(),
+            ];
+            let hashed = [
+                s.resample(freq).origin("start_day").var().unwrap(),
+                s.resample(freq).origin("start_day").std().unwrap(),
+                s.resample(freq).origin("start_day").sem().unwrap(),
+            ];
+            for (fast, hashed) in fast.iter().zip(&hashed) {
+                let every: Vec<usize> = (0..hashed.len()).collect();
+                assert_eq!(fast.len(), hashed.len(), "{freq}");
+                assert_eq!(fast.index().labels(), hashed.index().labels(), "{freq}");
+                assert_eq!(bits_at(fast, &every), bits_at(hashed, &every), "{freq}");
+            }
+        }
     }
 }
 

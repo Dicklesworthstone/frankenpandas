@@ -4187,6 +4187,21 @@ fn run(
                 let _ = series.resample("M").std().expect("resample std");
             })
         }
+        ("datetime", "resample_var_hourly") => {
+            // s.resample("h").var(): `rows` minutely points -> hourly bins, the
+            // sub-daily spread path (br-frankenpandas-7x91u: var / std / sem
+            // hashed formatted bin labels where sum / mean ran one pass).
+            let base: i64 = 946_684_800_000_000_000;
+            let nanos: Vec<i64> = (0..rows as i64)
+                .map(|i| base + i * 60_000_000_000)
+                .collect();
+            let vals = Column::from_f64_values((0..rows).map(|i| i as f64).collect());
+            let series =
+                Series::new("s", Index::from_datetime64(nanos), vals).expect("resample series");
+            time_us(|| {
+                let _ = series.resample("h").var().expect("resample var");
+            })
+        }
         ("datetime", "resample_median") => {
             let base: i64 = 946_684_800_000_000_000;
             let nanos: Vec<i64> = (0..rows as i64)

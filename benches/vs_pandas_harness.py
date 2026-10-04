@@ -3268,6 +3268,23 @@ def bench_to_datetime_pandas(df: pd.DataFrame) -> list[float]:
     return time_operation(lambda: pd.to_datetime(s))
 
 
+def bench_resample_std_pandas(df: pd.DataFrame) -> list[float]:
+    """s.resample('ME').std() over hourly points - fp-bench datetime/resample_std."""
+    n = len(df)
+    index = pd.date_range("2000-01-01", periods=n, freq="h")
+    s = pd.Series(np.arange(n, dtype=np.float64), index=index)
+    return time_operation(lambda: s.resample("ME").std())
+
+
+def bench_resample_var_hourly_pandas(df: pd.DataFrame) -> list[float]:
+    """s.resample('h').var() over minutely points - fp-bench datetime/resample_var_hourly
+    (br-frankenpandas-7x91u)."""
+    n = len(df)
+    index = pd.date_range("2000-01-01", periods=n, freq="min")
+    s = pd.Series(np.arange(n, dtype=np.float64), index=index)
+    return time_operation(lambda: s.resample("h").var())
+
+
 def bench_dt_floor_pandas(df: pd.DataFrame) -> list[float]:
     n = len(df)
     s = pd.Series(pd.date_range("2000-01-01", periods=n, freq="37s"))
@@ -3538,6 +3555,8 @@ PANDAS_WORKLOADS = {
         "dt_time": bench_dt_time_pandas,
         "dt_day_name": bench_dt_day_name_pandas,
         "dt_month_name": bench_dt_month_name_pandas,
+        "resample_std": bench_resample_std_pandas,
+        "resample_var_hourly": bench_resample_var_hourly_pandas,
     },
 }
 
