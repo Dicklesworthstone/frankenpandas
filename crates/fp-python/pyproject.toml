@@ -13,7 +13,7 @@
 # README's "Python bindings" rows before relying on it.
 
 [build-system]
-requires = ["maturin>=1.7,<2.0"]
+requires = ["maturin>=1.15,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -41,3 +41,12 @@ Repository = "https://github.com/Dicklesworthstone/frankenpandas"
 features = ["extension-module"]
 module-name = "frankenpandas"
 strip = true
+# The workspace uses unstable Cargo profile flags and requires this exact pin.
+# Include a copy beside this pyproject so maturin puts it at the sdist root.
+# Maturin trims the workspace to the Python dependency closure. Its separate
+# Cargo-generated lock matches that distribution without changing the Rust
+# workspace lock. Include it at the sdist root for locked source builds.
+include = [
+    { path = "rust-toolchain.toml", format = "sdist" },
+    { path = "Cargo.lock", format = "sdist" },
+]

@@ -27,7 +27,7 @@ members = [
 
 [workspace.package]
 edition = "2024"
-version = "0.3.0"
+version = "0.4.0"
 # The LICENSE file is MIT plus a non-MIT rider on AI-assistant usage, which is
 # not expressible as a standard SPDX expression. The file itself is therefore the
 # license of record; no `license = "MIT"` SPDX field is set (it would understate
@@ -55,10 +55,9 @@ chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 chrono-tz = "0.10.4"
 csv = "1.4.0"
 dta = "0.6.0"
-fast-float2 = "0.2.4"
 hdf5 = { package = "hdf5-metno", version = "0.12.4" }
 parquet = { version = "60.0.0", default-features = false, features = ["arrow", "snap"] }
-mysql = "28.0.2"
+mysql = "28.0.3"
 memchr = "2.8.3"
 mimalloc = "0.1.52"
 # MUST be the fallible-iterator major that postgres-protocol implements its
@@ -75,7 +74,7 @@ postgres-protocol = "0.6.12"
 # and fatal for `cargo test`: every fp-python test binary failed to link with
 # `undefined symbol: PyGILState_Ensure` and friends, so the whole crate's suite
 # was dark. br-frankenpandas-r18qs, CrimsonPine 2026-08-17.
-pyo3 = { version = "0.29.2" }
+pyo3 = { version = "0.29.3" }
 quick-xml = "0.42"
 regex = "1.13.1"
 rust_xlsxwriter = "0.99.0"
@@ -87,6 +86,10 @@ scraper = "0.27.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde-pickle = "1.2.0"
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
+# fp-expr's parser and evaluator recurse once per nesting level; stacker grows
+# the stack on demand at each level, so a pandas-legal depth cannot overflow a
+# small or debug-build thread (br-frankenpandas-bhbuz).
+stacker = "0.1.25"
 thiserror = "2.0.20"
 zmij = "1.0.23"
 # tracing: optional observability layer per br-frankenpandas-7gd4.

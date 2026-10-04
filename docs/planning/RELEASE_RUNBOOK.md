@@ -2,21 +2,28 @@
 
 > Operational runbook for cutting a release. Written under `br-frankenpandas-rc-signed-release-030-kf1lc` (reality-check 2026-09-03). Everything here is agent-executable EXCEPT the steps marked **[MAINTAINER]** — those need the release manager's signing key / crates.io token.
 
-## 0. Release gating (what must be green before tagging)
+## 0. Release gating (source before tagging, artifacts before upload)
 
 | Gate | Why | Evidence |
 |---|---|---|
-| CI green batch | README's publish story is "cut the next release from a green CI batch"; CI was producing zero successes (br-frankenpandas-ey5sl) — do not tag until a full `ci.yml` run is green | GH Actions run URL |
+| Pinned-toolchain gate | Run formatting, workspace/all-targets Clippy with warnings denied, and the full default workspace tests through RCH; release builds use DSR | Exact source revision and terminal RCH receipts |
 | Live-oracle report exists and is honest | `artifacts/ci/live_oracle_report.json` (br-frankenpandas-rc-live-oracle-local-run-8oey9) — the crate page repeats the parity number; it must be reproducible | report file + HEAD sha inside |
-| Packaging landmine closed | `br-frankenpandas-rc-sse41-downstream-lock-hrnom`: `fp-columnar` fails optimized builds without a `+sse4.1` stanza. Consumers MUST have a documented path (README "Building release binaries that depend on frankenpandas") BEFORE the next crates.io publish, or every downstream release build breaks | consumer probe in the bead |
+| Portable release consumer | The 0.3.0 `fp-columnar` optimized-build lock was removed. An ordinary outside-workspace release consumer must build without a `+sse4.1` override; README documents optional x86_64 acceleration separately | Actual published-version consumer build and runtime receipt |
 | Packet corpus green | `python3 scripts/gen_feature_parity_table.py --check` (0 failing; pending entries must be explained orphans) | docs/planning/FEATURE_PARITY.md |
 | `cargo package --list` clean for all 15 crates | no stray artifacts in the shipped tars | `cargo package --list -p <crate>` per crate |
+| Verified workspace packages, after tagging and before upload | The native DSR artifact producer runs `cargo package --workspace --locked -j1` in the exact tagged snapshot, compiling normalized archives against Cargo's temporary registry overlay | Terminal DSR receipt, unchanged post-build source audit and all 15 archive inventories |
+
+The release-wave ruling permits disclosed pre-existing and non-default defects.
+For 0.4.0 the stock G6 conformance step passed, while its stored-sidecar step
+failed on missing reports also absent from the previous tag. The complete G6
+pipeline remains nonzero; see [#41](https://github.com/Dicklesworthstone/frankenpandas/issues/41).
+Do not infer positive live counts from an unavailable generated report.
 
 ## 1. Version bump (workspace single-source)
 
-1. `Cargo.toml [workspace] package.version` is the single source (all crates inherit `version.workspace = true`, per br-h8a8). Bump it once (e.g. `0.2.0 → 0.3.0`).
-2. Update the `CHANGELOG.md` header line "Workspace version is **0.2.0**" and add/refresh the version-timeline row.
-3. Commit: `chore(release): bump workspace version to 0.3.0 [br-frankenpandas-rc-signed-release-030-kf1lc]`.
+1. Bump `Cargo.toml [workspace.package] version` (all crates inherit `version.workspace = true`, per br-h8a8), all internal path-dependency version ranges, and the workspace lock entries together (e.g. `0.3.0 → 0.4.0`).
+2. Update the `CHANGELOG.md` workspace version and add/refresh the version-timeline row.
+3. Commit only the release's owned paths directly on `main` after qualification.
 
 ## 2. Tag — **[MAINTAINER]** (one-time key setup, then mechanical)
 
@@ -29,57 +36,70 @@ git config --local gpg.format ssh
 git config --local tag.gpgsign true     # tags only; commit signing policy is 3d5q's
 ```
 
-Register the public key with GitHub as a **Signing Key**, then publish its fingerprint into `AUTHORS.md` (the table currently carries no keys — that is the pending half of 3d5q).
+Register the public key with GitHub as a **Signing Key** when authorized credentials permit, then publish its fingerprint and registration status in `AUTHORS.md`. Local signature verification must use an explicitly trusted public key even when GitHub registration is pending.
 
 Per release:
 
 ```bash
-git tag -s frankenpandas-v0.3.0 -m "frankenpandas 0.3.0"
-git tag -s v0.3.0 -m "workspace 0.3.0"                      # historic dual-tag convention, see CHANGELOG timeline
-git push origin main && git push origin main:master          # master sync is mandatory per AGENTS.md
-git push origin frankenpandas-v0.3.0 v0.3.0
+git tag -s frankenpandas-v0.4.0 -m "frankenpandas 0.4.0"
+git tag -s v0.4.0 -m "workspace 0.4.0"                      # historic dual-tag convention, see CHANGELOG timeline
+git push --atomic origin main main:master frankenpandas-v0.4.0 v0.4.0
 ```
 
 Verify the chain (AGENTS.md "Verifying a commit locally"):
 
 ```bash
-git tag -v frankenpandas-v0.3.0          # or: git log --show-signature -1 frankenpandas-v0.3.0
-git log --format='%G?' -1 frankenpandas-v0.3.0   # expect G (good) or U (good, unknown key)
+git tag -v frankenpandas-v0.4.0          # with the trusted public key in allowed_signers
+git log --format='%G?' -1 frankenpandas-v0.4.0   # this checks the commit signature separately
 ```
 
 ## 3. Publish
 
-Primary path is automated: `.github/workflows/release-plz.yml` (config `release-plz.toml`) opens a release PR from conventional commits; merging it triggers the release job, which tags and — once the maintainer flips `publish = true` (currently `false` by design, br-4clx) — publishes crates in **topological dependency order**.
+The release-wave path uses DSR for GitHub releases and direct crates.io uploads from the qualified source. Do not dispatch GitHub Actions for this path. Keep the existing `release-plz.toml` publication policy intact.
 
-Manual fallback (only if release-plz is broken), in dependency order:
+Publish the qualified source in dependency order, waiting for each new version to become available before its dependents:
 
 ```
-fp-types → fp-columnar → fp-dot-kernel → fp-index → fp-runtime → fp-expr
-→ fp-frame → fp-groupby → fp-join → fp-io → fp-conformance → fp-bench
+fp-types → fp-dot-kernel → fp-columnar → fp-index → fp-runtime → fp-frame
+→ fp-expr → fp-groupby → fp-join → fp-io → fp-conformance → fp-bench
 → fp-frankentui → fp-python → frankenpandas
 ```
 
 ```bash
-cargo publish -p fp-types            # repeat per crate, order above; use --dry-run first
-cargo publish --dry-run -p <crate>   # for every member before the real pass
+cargo +nightly-2026-08-31 package --workspace --locked --allow-dirty -j1
+cargo +nightly-2026-08-31 publish -p fp-types --locked --no-verify
 ```
 
-`cargo publish` is **[MAINTAINER]** (crates.io token).
+Run verified packaging in the native DSR artifact producer's exact tagged
+snapshot with a fresh target directory. Retain the terminal build receipt and
+unchanged post-build source audit, and separately record custody of all 15
+private crate archives. This is artifact-production proof, not an RCH gate.
+Cargo repackages source during `publish`; before uploading, compare a
+compiler-free `publish --dry-run --no-verify` archive with the qualified archive
+from the identical non-Git source stage and Cargo version. Retain earlier target
+directories. Repeat the upload command for each member in the order above.
+`--no-verify` is permitted only after genuine archive verification; it must
+never stand in for that gate. Keep the crates.io token in the publication
+process environment and out of arguments, files and logs. `cargo publish` is
+**[MAINTAINER]** (crates.io token).
 
 ## 4. Post-publish consumer verification (the probe that must pass)
 
-From OUTSIDE the workspace, a stock consumer must build in release via the documented path:
+From OUTSIDE the workspace, a stock consumer must build in release without
+workspace-only profile overrides:
 
 ```toml
 # consumer Cargo.toml
-cargo-features = ["profile-rustflags"]        # nightly cargo; first line
 [dependencies]
-frankenpandas = "=0.3.0"
-[profile.release.package.fp-columnar]
-rustflags = ["-Ctarget-feature=+sse4.1"]
+frankenpandas = "=0.4.0"
 ```
 
-`cargo build --release` must succeed; REMOVING the stanza must fail with the `E0080` message that points at README "Building release binaries that depend on frankenpandas". Both directions are the `hrnom` probe.
+`cargo build --release` must succeed. The previous release's `E0080` failure
+without SSE4.1 is a regression control, not the desired behavior for 0.4.0.
+The optional x86_64 `profile-rustflags` acceleration stanza is documented in
+README "Building release binaries that depend on frankenpandas". Qualify the
+published release's default build and real consumer operations separately
+from the workspace's accelerated benchmark profile.
 
 ## 5. Immediately after
 
