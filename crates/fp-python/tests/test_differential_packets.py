@@ -24980,3 +24980,228 @@ def test_fast_eval_query_where_and_logic_like_pandas_pjeme(case: str) -> None:
         return (repr(result), dtypes)
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-3o9vc: map(dict) is one key lookup per row and a take from
+# the dict's values; get_dummies codes a column once. These pin both against
+# pandas, contiguous text included (.str.lower() yields it), with the rules
+# br-frankenpandas-jjoxr found broken: map keeps the values' dtype and finds
+# keys as pandas' Index does; get_dummies makes equal numbers one level,
+# sorts numbers before text, keeps a categorical's own categories, makes int
+# levels float under dummy_na, gives a datetime's missing level NaT, prints
+# pandas' f-string text in prefixed names, honours every dtype= pandas does
+# and leaves a frame's bool and number columns alone.
+class _CountingMissing(dict):
+    calls = 0
+
+    def __missing__(self, key: Any) -> Any:
+        type(self).calls += 1
+        return "other"
+
+
+def _3o9vc_text(m: Any) -> Any:
+    return m.Series(["Alpha", "Beta", "Gamma", "Alpha", "Beta", "Alpha"] * 3).str.lower()
+
+
+_3O9VC_MAP_CASES = {
+    "contiguous text, a key missing": lambda m: _3o9vc_text(m).map({"alpha": 1, "beta": 2}),
+    "contiguous text, every key": lambda m: _3o9vc_text(m).map({"alpha": 1, "beta": 2, "gamma": 3}),
+    "contiguous text to text": lambda m: _3o9vc_text(m).map({"alpha": "A", "gamma": "G"}),
+    "contiguous text to None": lambda m: _3o9vc_text(m).map({"alpha": None, "beta": 1.5, "gamma": 2}),
+    "contiguous text, mixed answers": lambda m: _3o9vc_text(m).map({"alpha": 1, "beta": "b", "gamma": True}),
+    "text with None": lambda m: m.Series(["a", None, "b", "a"]).map({"a": "x", "b": "y"}),
+    "text with None, ignore": lambda m: m.Series(["a", None, "b", "a"]).map({"a": "x"}, na_action="ignore"),
+    "None key, ignore": lambda m: m.Series(["a", None]).map({"a": "x", None: "n"}, na_action="ignore"),
+    "None key": lambda m: m.Series(["a", None]).map({"a": "x", None: "n"}),
+    "missing hook, ignore": lambda m: m.Series(["a", None, "b"]).map(
+        collections.defaultdict(lambda: "d", {"a": "x"}), na_action="ignore"
+    ),
+    "ints": lambda m: m.Series([1, 2, 1, 3, 2]).map({1: "one", 2: "two"}),
+    "ints to ints": lambda m: m.Series([1, 2, 1, 2] * 4).map({1: 10, 2: 20}),
+    "bools": lambda m: m.Series([True, False, True]).map({True: "yes", False: "no"}),
+    "floats, -0.0 is 0.0": lambda m: m.Series([1.0, -0.0, 0.0, 2.5]).map({1.0: "a", 0.0: "z"}),
+    "float NaN": lambda m: m.Series([1.0, _NAN, 1.0]).map({1.0: "a"}),
+    "unicode keys": lambda m: m.Series(["é", "z", "é", "ß"]).str.lower().map({"é": 1, "ß": 2}),
+    "empty": lambda m: m.Series([], dtype=object).map({"a": 1}),
+    "sliced contiguous": lambda m: _3o9vc_text(m).iloc[2:9].map({"alpha": 1, "gamma": 3}),
+    # The result keeps the dict values' dtype, not the answers' alone.
+    "partly used float values": lambda m: m.Series(["a", "a"]).map({"a": 1, "b": 2.5}),
+    "partly used mixed values": lambda m: m.Series(["a"]).map({"a": 1, "b": "x"}),
+    "bool values, a key missing": lambda m: m.Series(["a", "c"]).map({"a": True, "b": False}),
+    "datetime values, a key missing": lambda m: m.Series(["a", "b"]).map({"a": m.Timestamp("2020-01-01")}),
+    "empty dict": lambda m: m.Series(["a"]).map({}),
+    # Keys are found as pandas' Index finds them.
+    "NaN row finds the NaN key": lambda m: m.Series([1.0, _NAN]).map({_NAN: "n"}),
+    "None row misses the NaN key": lambda m: m.Series(["a", None]).map({_NAN: "n"}),
+    "NaN row misses the None key": lambda m: m.Series([1.0, _NAN]).map({None: "n"}),
+    "int row never finds a bool key": lambda m: m.Series([1, 0]).map({True: "t"}),
+    "bool row never finds an int key": lambda m: m.Series([True, False]).map({1: "one"}),
+    "text row misses an int key": lambda m: m.Series(["1"]).map({1: "one"}),
+    "float row finds the int key": lambda m: m.Series([1.0, 2.5]).map({1: "one"}),
+    "int row finds the float key": lambda m: m.Series([1, 2, 3, 2]).map({2.0: "two", 3.5: "x"}),
+    "int32 rows": lambda m: m.Series(np.array([1, 2, 1], dtype=np.int32)).map({1: "a", 2: 2.5}),
+    "float row 2**62 vs near int keys": lambda m: m.Series([2.0**62, 1.5]).map({2**62 + 1: "x", 2**62: "y"}),
+    "NaN row, NaN key, ignore": lambda m: m.Series([1.0, _NAN]).map({_NAN: "n", 1.0: "a"}, na_action="ignore"),
+    "ints, True key and 1 key merge": lambda m: m.Series([1, 0, 1]).map({True: "t", 1: "one"}),
+    "tuple key beside text": lambda m: m.Series(["a"]).map({("a",): 1, "a": 2}),
+    "datetime rows": lambda m: m.Series(m.to_datetime(["2020-01-01", "2020-01-02"])).map(
+        {m.Timestamp("2020-01-01"): "x"}
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_3O9VC_MAP_CASES))
+def test_map_dict_looks_up_each_value_once_like_pandas_3o9vc(case: str) -> None:
+    def shown(m: Any) -> Any:
+        result = _3O9VC_MAP_CASES[case](m)
+        return (repr(result), str(result.dtype), [type(v).__name__ for v in result.tolist()])
+
+    assert shown(fpd) == shown(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_map_dict_missing_hook_sees_every_row_3o9vc() -> None:
+    # NEGATIVE: a dict with __missing__ is not memoized - pandas subscripts it
+    # per row, so a hook counting its calls sees each missing row.
+    def run(m: Any) -> Any:
+        _CountingMissing.calls = 0
+        mapping = _CountingMissing({"alpha": "A"})
+        result = _3o9vc_text(m).map(mapping)
+        return (result.tolist(), _CountingMissing.calls)
+
+    assert run(fpd) == run(pd)
+    assert run(pd)[1] == 9
+
+
+def _3o9vc_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "s": ["x", "y", "x", None],
+            "n": [1, 2, 3, 4],
+            "b": [True, False, True, True],
+            "o": m.Series([True, None, False, True], dtype=object),
+            "c": m.Series(["q", "p", "q", "p"], dtype="category"),
+        }
+    )
+
+
+_3O9VC_DUMMY_CASES = {
+    "text": lambda m: m.get_dummies(m.Series(["b", "a", "c", "a"])),
+    "contiguous text": lambda m: m.get_dummies(_3o9vc_text(m)),
+    "contiguous text, prefix, int dtype": lambda m: m.get_dummies(_3o9vc_text(m), prefix="w", prefix_sep="/", dtype=int),
+    "text with None, dummy_na": lambda m: m.get_dummies(m.Series(["b", None, "a"]), dummy_na=True),
+    "dummy_na, nothing missing": lambda m: m.get_dummies(m.Series(["b", "a"]), dummy_na=True),
+    "drop_first": lambda m: m.get_dummies(m.Series(["b", "a", "c"]), drop_first=True),
+    "drop_first, dummy_na": lambda m: m.get_dummies(m.Series(["a", None, "b"]), dummy_na=True, drop_first=True),
+    "drop_first, one level": lambda m: m.get_dummies(m.Series(["a", "a"]), drop_first=True),
+    "float dtype": lambda m: m.get_dummies(m.Series(["b", "a"]), dtype=float),
+    "uint8 dtype": lambda m: m.get_dummies(m.Series(["b", "a", "b"]), dtype="uint8"),
+    "float32 dtype": lambda m: m.get_dummies(m.Series(["b", "a"]), dtype="float32"),
+    "numpy uint8 type": lambda m: m.get_dummies(m.Series(["b", "a"]), dtype=np.uint8),
+    "masked Int8 dtype": lambda m: m.get_dummies(m.Series(["b", "a"]), dtype="Int8"),
+    "masked Int64 dtype": lambda m: m.get_dummies(m.Series(["b", "a"]), dtype="Int64"),
+    "masked Float64 dtype": lambda m: m.get_dummies(m.Series(["b", "a"]), dtype="Float64"),
+    "boolean dtype": lambda m: m.get_dummies(m.Series(["b", "a"]), dtype="boolean"),
+    "object dtype refused": lambda m: m.get_dummies(m.Series(["b", "a"]), dtype=object),
+    "string column is boolean": lambda m: m.get_dummies(m.Series(["b", None, "a"], dtype="string")),
+    "string frame column, dummy_na '<NA>'": lambda m: m.get_dummies(
+        m.DataFrame({"s": m.Series(["b", None], dtype="string")}), dummy_na=True
+    ),
+    "string column, bool asked": lambda m: m.get_dummies(m.Series(["b", "a"], dtype="string"), dtype=bool),
+    "ints sort as numbers": lambda m: m.get_dummies(m.Series([2, 10, 1])),
+    "negative and huge ints": lambda m: m.get_dummies(m.Series([5, -3, 2**62, 5, 0, -(2**62)]), prefix="i"),
+    "int32 column": lambda m: m.get_dummies(m.Series(np.array([3, 1, 3], dtype=np.int32)), dtype=int),
+    "ints, dummy_na makes floats": lambda m: m.get_dummies(m.Series([2, 10, 1]), dummy_na=True),
+    "ints, prefix, dummy_na": lambda m: m.get_dummies(m.Series([2, 10, 1]), prefix="x", dummy_na=True),
+    "floats, -0.0 is 0.0": lambda m: m.get_dummies(m.Series([1.5, 0.0, -0.0])),
+    "floats, prefix": lambda m: m.get_dummies(m.Series([1.5, 0.0, _NAN]), prefix="f", dummy_na=True),
+    "object numbers before text": lambda m: m.get_dummies(m.Series([1.5, 2, "a"], dtype=object)),
+    "object True 1 1.0 one level": lambda m: m.get_dummies(m.Series([True, 1, 1.0, "a"], dtype=object)),
+    "object bools": lambda m: m.get_dummies(m.Series([True, False, None], dtype=object), dummy_na=True),
+    "object ints, dummy_na": lambda m: m.get_dummies(m.Series([2, 1], dtype=object), dummy_na=True),
+    "bools": lambda m: m.get_dummies(m.Series([True, False, True])),
+    "bools, prefix, dummy_na": lambda m: m.get_dummies(m.Series([True, False]), prefix="b", dummy_na=True),
+    "datetimes, prefix": lambda m: m.get_dummies(m.Series(m.to_datetime(["2020-01-02", "2020-01-01"])), prefix="d"),
+    "datetimes, prefix, dummy_na": lambda m: m.get_dummies(
+        m.Series(m.to_datetime(["2020-01-02", None])), prefix="d", dummy_na=True
+    ),
+    "categorical keeps its categories": lambda m: m.get_dummies(
+        m.Series(["b", "a", "b"], dtype=m.CategoricalDtype(["c", "b", "a"]))
+    ),
+    "categorical, dummy_na": lambda m: m.get_dummies(m.Series(["b", None, "b"], dtype="category"), dummy_na=True),
+    "categorical, prefix, dummy_na": lambda m: m.get_dummies(
+        m.Series(["b", None], dtype="category"), prefix="c", dummy_na=True
+    ),
+    "unicode sorts by code point": lambda m: m.get_dummies(m.Series(["é", "z", "a", "Z"])),
+    "empty": lambda m: m.get_dummies(m.Series([], dtype=object)),
+    "all missing": lambda m: m.get_dummies(m.Series([None, None], dtype=object)),
+    "all missing, dummy_na": lambda m: m.get_dummies(m.Series([None, None], dtype=object), dummy_na=True),
+    "frame encodes object, string, category": lambda m: m.get_dummies(_3o9vc_frame(m)),
+    "frame dummy_na": lambda m: m.get_dummies(_3o9vc_frame(m), dummy_na=True),
+    "frame columns=": lambda m: m.get_dummies(_3o9vc_frame(m), columns=["n", "s"]),
+    "frame prefix list": lambda m: m.get_dummies(_3o9vc_frame(m), prefix=["S", "O", "C"]),
+    "frame prefix dict": lambda m: m.get_dummies(_3o9vc_frame(m), prefix={"s": "S", "o": "O", "c": "C"}),
+    "frame prefix too short": lambda m: m.get_dummies(_3o9vc_frame(m), prefix=["S"]),
+    "frame string dtype": lambda m: m.get_dummies(m.DataFrame({"t": m.Series(["y", "x"], dtype="string")})),
+    "frame 1 and '1' twice": lambda m: m.get_dummies(
+        m.DataFrame({"o": m.Series([1, "1", None], dtype=object), "v": [1.0, 2.0, 3.0]})
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_3O9VC_DUMMY_CASES))
+def test_get_dummies_codes_each_column_once_like_pandas_3o9vc(case: str) -> None:
+    def shown(m: Any) -> Any:
+        try:
+            result = _3O9VC_DUMMY_CASES[case](m)
+        except Exception as error:  # noqa: BLE001 - the error is the answer compared
+            return (type(error).__name__, str(error))
+        # Not repr: a float column axis holding NaN prints apart from pandas'
+        # in any frame (br-frankenpandas-qacqs); the labels are compared
+        # typed here.
+        return (
+            result.values.tolist(),
+            list(result.index),
+            [str(t) for t in result.dtypes],
+            [(type(label).__name__, repr(label)) for label in result.columns],
+        )
+
+    assert shown(fpd) == shown(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_get_dummies_string_series_dummy_na_is_refused_3o9vc() -> None:
+    # pandas labels the missing level pd.NA, which an fp column label cannot
+    # hold apart from None: refused rather than labelled None.
+    with pytest.raises(NotImplementedError):
+        fpd.get_dummies(fpd.Series(["b", None], dtype="string"), dummy_na=True)
+    # NEGATIVE: prefixed (a frame's columns), the level is the text '<NA>'.
+    frame = fpd.DataFrame({"s": fpd.Series(["b", None], dtype="string")})
+    assert list(fpd.get_dummies(frame, dummy_na=True).columns) == ["s_b", "s_<NA>"]
+
+
+_3O9VC_REINDEX_CASES = {
+    "datetime Series": lambda m: m.Series(m.to_datetime(["2020-01-01", "2020-01-02"])).reindex([0, 5]),
+    "timedelta Series": lambda m: m.Series(m.to_timedelta(["1D", "2D"])).reindex([1, 7, 0]),
+    "datetime frame": lambda m: m.DataFrame({"t": m.to_datetime(["2020-01-01"]), "v": [1.5]}).reindex([0, 1]),
+    # NEGATIVE: a float column's invented gap stays NaN, an int column's
+    # float64 NaN.
+    "float Series": lambda m: m.Series([1.5, 2.5]).reindex([0, 9]),
+    "int Series": lambda m: m.Series([1, 2]).reindex([1, 9]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_3O9VC_REINDEX_CASES))
+def test_reindex_invents_nat_in_temporal_columns_3o9vc(case: str) -> None:
+    def shown(m: Any) -> Any:
+        result = _3O9VC_REINDEX_CASES[case](m)
+        series = [result[c] for c in result.columns] if hasattr(result, "columns") else [result]
+        return [
+            (repr(s), str(s.dtype), [type(v).__name__ for v in s.tolist()], [type(v).__name__ for v in s])
+            for s in series
+        ]
+
+    assert shown(fpd) == shown(pd)

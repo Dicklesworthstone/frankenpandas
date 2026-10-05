@@ -44,6 +44,7 @@ use pyo3::{
         PyTimeAccess, PyTuple, PyTzInfoAccess,
     },
 };
+use rustc_hash::FxHashMap;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -32590,10 +32591,10 @@ impl PySeries {
         if let Some(mapped) = self.categorical_map(py, arg, ignore_na)? {
             return Ok(mapped);
         }
-        let vals = self.inner.column().values();
         // Each result keeps this index (its name and a tz-aware zone).
         let index = self.inner.index();
         if arg.is_callable() {
+            let vals = self.inner.column().values();
             let mut out = Vec::with_capacity(vals.len());
             let mut results = Vec::with_capacity(vals.len());
             for v in vals {
@@ -32629,30 +32630,154 @@ impl PySeries {
         } else if let Ok(dict) = arg.cast::<PyDict>() {
             // A dict subclass with __missing__ (a defaultdict) answers its
             // default for a missing key, as pandas subscripts it (it was NaN;
-            // br-frankenpandas-n9zpp).
-            let defaulting = arg.hasattr("__missing__")?;
-            let mut out = Vec::with_capacity(vals.len());
-            for v in vals {
-                if ignore_na && (v.is_null() || matches!(v, Scalar::Float64(f) if f.is_nan())) {
-                    out.push(v.clone());
-                    continue;
+            // br-frankenpandas-n9zpp) - row by row, its hook seeing each.
+            if arg.hasattr("__missing__")? {
+                let vals = self.inner.column().values();
+                let mut out = Vec::with_capacity(vals.len());
+                for v in vals {
+                    if ignore_na && (v.is_null() || matches!(v, Scalar::Float64(f) if f.is_nan())) {
+                        out.push(v.clone());
+                        continue;
+                    }
+                    out.push(py_to_scalar(py, &arg.get_item(scalar_to_py(py, v)?)?)?);
                 }
-                let py_val = scalar_to_py(py, v)?;
-                if defaulting {
-                    out.push(py_to_scalar(py, &arg.get_item(&py_val)?)?);
-                } else if let Some(mapped) = dict.get_item(&py_val)? {
-                    out.push(py_to_scalar(py, &mapped)?);
-                } else {
-                    out.push(Scalar::Float64(f64::NAN));
+                let s = series_over_index(
+                    self.inner.name(),
+                    index,
+                    pandas_promote_int_with_missing(out),
+                )?;
+                return Ok(PySeries { inner: s });
+            }
+            // A plain dict is pandas' Series of its values (float64 when
+            // empty), taken from at each row's key in the keys' Index: an int
+            // row finds the float key it equals but never a bool key, a NaN
+            // row the NaN key, and na_action='ignore' drops the missing keys.
+            // The result keeps the values' dtype ({'a': 1, 'b': 2.5} answers
+            // 1.0, a missing datetime NaT), a gap pandas invents NaN (an int
+            // column's float64). It looked each row up in the Python dict -
+            // 1M strings of five words, 1M Python strings, lookups and
+            // answers: 100 ms against pandas' 29 (br-frankenpandas-3o9vc) -
+            // and inferred from the answers alone (True found the key 1, and
+            // the 1 of {'a': 1, 'b': 'x'} was int64; br-frankenpandas-jjoxr).
+            let keys: Vec<IndexLabel> = dict
+                .keys()
+                .iter()
+                .map(|key| py_to_index_label(&key))
+                .collect::<PyResult<_>>()?;
+            let mapper = if dict.is_empty() {
+                Column::from_f64_values(Vec::new())
+            } else {
+                PySeries::from_data(py, Some(dict.values().as_any()), None, None)?
+                    .inner
+                    .column()
+                    .clone()
+            };
+            let mut by_label: FxHashMap<&IndexLabel, usize> = FxHashMap::default();
+            let mut by_text: FxHashMap<&[u8], usize> = FxHashMap::default();
+            for (at, key) in keys.iter().enumerate() {
+                by_label.entry(key).or_insert(at);
+                if let IndexLabel::Utf8(text) = key {
+                    by_text.entry(text.as_bytes()).or_insert(at);
                 }
             }
-            let s = series_over_index(
-                self.inner.name(),
-                index,
-                pandas_promote_int_with_missing(out),
-            )?;
+            let column = self.inner.column();
+            // A float's bits with -0.0 as 0.0, the key equal floats share.
+            let float_key = |float: f64| {
+                if float == 0.0 {
+                    0.0_f64.to_bits()
+                } else {
+                    float.to_bits()
+                }
+            };
+            let positions: Vec<Option<usize>> = if let Some((bytes, offsets)) =
+                column.as_utf8_contiguous()
+            {
+                offsets
+                    .windows(2)
+                    .map(|bounds| by_text.get(&bytes[bounds[0]..bounds[1]]).copied())
+                    .collect()
+            } else if let Some(ints) = column.as_i64_slice() {
+                // An int row finds the int key or the float key equal to
+                // it, never a bool key - read from the column's buffer
+                // (a Scalar per row and a label hash made 1M ints 1.8x
+                // pandas).
+                let mut by_int: FxHashMap<i64, usize> = FxHashMap::default();
+                for (at, key) in keys.iter().enumerate() {
+                    let int = match key {
+                        IndexLabel::Int64(int) => Some(*int),
+                        IndexLabel::Float64(float)
+                            if float.0.fract() == 0.0
+                                && (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0)
+                                    .contains(&float.0) =>
+                        {
+                            Some(float.0 as i64)
+                        }
+                        _ => None,
+                    };
+                    if let Some(int) = int {
+                        by_int.entry(int).or_insert(at);
+                    }
+                }
+                ints.iter().map(|int| by_int.get(int).copied()).collect()
+            } else if let Some(floats) = column.as_f64_slice() {
+                // A float row finds the float key or the int key equal to
+                // it, a NaN row the NaN key.
+                let mut by_bits: FxHashMap<u64, usize> = FxHashMap::default();
+                for (at, key) in keys.iter().enumerate() {
+                    let float = match key {
+                        IndexLabel::Float64(float) => Some(float.0),
+                        IndexLabel::Int64(int) if (*int as f64) as i128 == i128::from(*int) => {
+                            Some(*int as f64)
+                        }
+                        _ => None,
+                    };
+                    if let Some(float) = float {
+                        by_bits.entry(float_key(float)).or_insert(at);
+                    }
+                }
+                let nan_at = by_label
+                    .get(&IndexLabel::Null(NullKind::NaN))
+                    .copied()
+                    .filter(|_| !ignore_na);
+                floats
+                    .iter()
+                    .map(|&float| {
+                        if float.is_nan() {
+                            nan_at
+                        } else {
+                            by_bits.get(&float_key(float)).copied()
+                        }
+                    })
+                    .collect()
+            } else {
+                column
+                    .values()
+                    .iter()
+                    .map(|v| match v {
+                        Scalar::Utf8(text) => by_text.get(text.as_bytes()).copied(),
+                        _ if v.is_missing() && ignore_na => None,
+                        Scalar::Null(kind) => by_label.get(&IndexLabel::Null(*kind)).copied(),
+                        _ if v.is_missing() => {
+                            let kind = if matches!(v, Scalar::Float64(_)) {
+                                NullKind::NaN
+                            } else {
+                                NullKind::NaT
+                            };
+                            by_label.get(&IndexLabel::Null(kind)).copied()
+                        }
+                        other => by_label
+                            .get(&scalar_to_index_label_converter(other))
+                            .copied(),
+                    })
+                    .collect()
+            };
+            let mapped = fp_frame::reindex_column_with_invented_gaps(&mapper, &positions)
+                .map_err(frame_error_to_py)?;
+            let s =
+                Series::new(self.inner.name(), index.clone(), mapped).map_err(frame_error_to_py)?;
             Ok(PySeries { inner: s })
         } else if let Ok(other_ser) = arg.extract::<PyRef<PySeries>>() {
+            let vals = self.inner.column().values();
             let mut out = Vec::with_capacity(vals.len());
             for v in vals {
                 if ignore_na && (v.is_null() || matches!(v, Scalar::Float64(f) if f.is_nan())) {
@@ -77305,64 +77430,342 @@ fn factorize(
     Ok((py_codes, Py::new(py, py_uniques)?.into_any()))
 }
 
-/// A get_dummies cell in pandas' `dtype` (bool by default; float64 was
-/// ignored and came back bool).
-/// One dummy column per category of `categories` over `values` - a value
-/// matches the category of its text that it equals, a missing value the
-/// missing category - typed bool, or int64 / float64 for that `dtype`. The
-/// values are coded once and each column's buffer filled from its rows (it
-/// compared every value with every category through boxed scalars:
-/// get_dummies of 50,000 values in 5,000 categories took 25 s).
-fn dummy_columns(values: &[Scalar], categories: &[Scalar], dtype: Option<&str>) -> Vec<Column> {
-    let mut by_text: HashMap<String, usize> = HashMap::with_capacity(categories.len());
-    let mut missing_at = None;
-    for (at, category) in categories.iter().enumerate() {
-        if category.is_null() {
-            missing_at = Some(at);
-        } else {
-            by_text.entry(scalar_to_label_str(category)).or_insert(at);
+/// pandas' hash-table identity of a get_dummies value: equal numbers - 1,
+/// 1.0 and True; 0.0 and -0.0 - are one level, as pandas' factorize makes
+/// them; text and other values are their own (they were keyed by their
+/// text: '0' / '-0' two levels, the int 1 beside a text '1' dropped;
+/// br-frankenpandas-jjoxr).
+#[derive(PartialEq, Eq, Hash)]
+enum DummyKey<'a> {
+    Number(u64),
+    Int(i64),
+    Text(&'a [u8]),
+    Other(IndexLabel),
+}
+
+impl<'a> DummyKey<'a> {
+    fn of(value: &'a Scalar) -> Self {
+        match value {
+            Scalar::Utf8(text) => Self::Text(text.as_bytes()),
+            Scalar::Bool(flag) => Self::Number(f64::from(u8::from(*flag)).to_bits()),
+            Scalar::Int64(int) => {
+                let float = *int as f64;
+                if float as i128 == i128::from(*int) {
+                    Self::Number(float.to_bits())
+                } else {
+                    Self::Int(*int)
+                }
+            }
+            Scalar::Float64(float) if *float == 0.0 => Self::Number(0.0_f64.to_bits()),
+            Scalar::Float64(float) => Self::Number(float.to_bits()),
+            other => Self::Other(scalar_to_index_label_converter(other)),
         }
     }
-    let mut rows: Vec<Vec<usize>> = vec![Vec::new(); categories.len()];
-    for (row, value) in values.iter().enumerate() {
-        let at = if value.is_null() {
-            missing_at
-        } else {
-            by_text
-                .get(&scalar_to_label_str(value))
-                .copied()
-                .filter(|&at| *value == categories[at])
-        };
-        if let Some(at) = at {
-            rows[at].push(row);
+}
+
+/// One get_dummies indicator column per level from `first` on, each row's
+/// level read from `codes` (a code past the levels marks no level): `zero`
+/// everywhere but `one` in that level's rows.
+fn scatter_dummies<T: Copy>(
+    codes: &[u32],
+    first: usize,
+    count: usize,
+    zero: T,
+    one: T,
+) -> Vec<Vec<T>> {
+    let mut columns: Vec<Vec<T>> = (first..count).map(|_| vec![zero; codes.len()]).collect();
+    for (row, &code) in codes.iter().enumerate() {
+        if let Some(cells) = (code as usize)
+            .checked_sub(first)
+            .and_then(|at| columns.get_mut(at))
+        {
+            cells[row] = one;
         }
     }
-    let n = values.len();
-    rows.into_iter()
-        .map(|rows| match dtype {
-            Some("int64") => {
-                let mut data = vec![0_i64; n];
-                for row in rows {
-                    data[row] = 1;
-                }
-                Column::from_i64_values_owned(data)
-            }
-            Some("float64") => {
-                let mut data = vec![0.0_f64; n];
-                for row in rows {
-                    data[row] = 1.0;
-                }
-                Column::from_f64_values_owned(data)
-            }
-            _ => {
-                let mut data = vec![false; n];
-                for row in rows {
-                    data[row] = true;
-                }
-                Column::from_bool_values(data)
-            }
+    columns
+}
+
+/// The dtype of get_dummies' indicator cells: pandas' `dtype=` - numpy
+/// bool / int64 / float64 or a narrower width (uint8, float32; it raised
+/// TypeError), the masked boolean / Int / Float (they came back bool) -
+/// object being pandas' ValueError (br-frankenpandas-jjoxr).
+#[derive(Clone, Copy)]
+enum DummyCells {
+    Bool,
+    Boolean,
+    /// int64, or masked Int64.
+    Int(bool),
+    /// float64, or masked Float64.
+    Float(bool),
+    Narrow(NumericWidth, bool),
+}
+
+impl DummyCells {
+    fn of(dtype: &Bound<'_, PyAny>) -> PyResult<Self> {
+        if let Some((width, masked)) = py_width_arg(dtype) {
+            return Ok(Self::Narrow(width, masked));
+        }
+        if matches!(dtype_arg_text(dtype)?.as_str(), "object" | "O") {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "dtype=object is not a valid dtype for get_dummies",
+            ));
+        }
+        Ok(match pandas_dtype_name(&py_dtype_arg(dtype)?).as_str() {
+            "bool" => Self::Bool,
+            "boolean" => Self::Boolean,
+            "int64" => Self::Int(false),
+            "Int64" => Self::Int(true),
+            "float64" => Self::Float(false),
+            "Float64" => Self::Float(true),
+            other => return Err(not_implemented(&format!("get_dummies with dtype={other}"))),
         })
-        .collect()
+    }
+}
+
+/// get_dummies of one column, as pandas' `_get_dummies_1d`: its levels - a
+/// categorical's categories in order, else its distinct values sorted
+/// (numbers, then other values, then text; the first of equal numbers
+/// stands for them), a missing level last for `dummy_na` (NaT for datetime
+/// and timedelta, NA for a `string` column, NaN else, int levels then
+/// floats as pandas' Index.insert makes them) - each with its indicator
+/// column in `cells` (bool when None, pandas' boolean for a `string`
+/// column), the first level dropped for `drop_first`. It sorted text
+/// labels, ignored a categorical's categories and added no missing level
+/// when nothing was missing (br-frankenpandas-jjoxr). The column is coded
+/// once, text read from its contiguous buffer when it has one, and the
+/// indicators filled from the codes: a String per row, twice, made
+/// get_dummies of 1M strings 2.9x pandas (br-frankenpandas-3o9vc).
+fn dummy_levels(
+    column: &Column,
+    dummy_na: bool,
+    drop_first: bool,
+    cells: Option<DummyCells>,
+) -> PyResult<Vec<(IndexLabel, Column)>> {
+    const MISSING: u32 = u32::MAX;
+    if column.len() >= MISSING as usize {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "get_dummies: too many rows",
+        ));
+    }
+    let categories = column.categorical().map(|meta| &meta.categories);
+    let mut levels: Vec<Scalar> = Vec::new();
+    let mut codes: Vec<u32> = Vec::with_capacity(column.len());
+    let mut seen: FxHashMap<DummyKey<'_>, u32> = FxHashMap::default();
+    if let Some(categories) = categories {
+        for (at, category) in categories.iter().enumerate() {
+            seen.entry(DummyKey::of(category)).or_insert(at as u32);
+        }
+        levels.clone_from(categories);
+    }
+    if let Some((bytes, offsets)) = column.as_utf8_contiguous().filter(|_| categories.is_none()) {
+        for bounds in offsets.windows(2) {
+            let word = &bytes[bounds[0]..bounds[1]];
+            let code = match seen.get(&DummyKey::Text(word)) {
+                Some(&code) => code,
+                None => {
+                    let code = levels.len() as u32;
+                    let text = std::str::from_utf8(word).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                    })?;
+                    levels.push(Scalar::Utf8(text.to_owned()));
+                    seen.insert(DummyKey::Text(word), code);
+                    code
+                }
+            };
+            codes.push(code);
+        }
+    } else if let Some(ints) = column.as_i64_slice().filter(|_| categories.is_none()) {
+        // An int column's levels are its distinct ints, read from its buffer
+        // (a Scalar and a key per row made 1M ints 2.2x pandas).
+        let mut by_int: FxHashMap<i64, u32> = FxHashMap::default();
+        for &int in ints {
+            let next = levels.len() as u32;
+            let code = *by_int.entry(int).or_insert_with(|| {
+                levels.push(Scalar::Int64(int));
+                next
+            });
+            codes.push(code);
+        }
+    } else {
+        for value in column.values() {
+            if value.is_missing() {
+                codes.push(MISSING);
+                continue;
+            }
+            let key = DummyKey::of(value);
+            let code = match seen.get(&key) {
+                Some(&code) => code,
+                None if categories.is_some() => MISSING,
+                None => {
+                    let code = levels.len() as u32;
+                    levels.push(value.clone());
+                    seen.insert(key, code);
+                    code
+                }
+            };
+            codes.push(code);
+        }
+    }
+    if categories.is_none() {
+        // pandas' sorted levels; numbers before text as its mixed sort puts
+        // them (they sorted by kind, bools apart from the ints they equal).
+        let keys: Vec<(u8, IndexLabel)> = levels
+            .iter()
+            .map(|value| match value {
+                Scalar::Bool(flag) => (0, IndexLabel::Int64(i64::from(*flag))),
+                Scalar::Int64(_) | Scalar::Float64(_) => {
+                    (0, scalar_to_index_label_converter(value))
+                }
+                Scalar::Utf8(_) => (2, scalar_to_index_label_converter(value)),
+                other => (1, scalar_to_index_label_converter(other)),
+            })
+            .collect();
+        let mut order: Vec<usize> = (0..levels.len()).collect();
+        order.sort_by(|&a, &b| keys[a].cmp(&keys[b]));
+        let mut recode = vec![0_u32; levels.len()];
+        for (new, &old) in order.iter().enumerate() {
+            recode[old] = new as u32;
+        }
+        for code in &mut codes {
+            if *code != MISSING {
+                *code = recode[*code as usize];
+            }
+        }
+        let unsorted = std::mem::take(&mut levels);
+        levels = order.into_iter().map(|old| unsorted[old].clone()).collect();
+    }
+    let floats = dummy_na
+        && categories.is_none()
+        && levels.iter().all(|value| matches!(value, Scalar::Int64(_)));
+    let mut labels: Vec<IndexLabel> = levels
+        .iter()
+        .map(|value| match value {
+            Scalar::Int64(int) if floats => IndexLabel::Float64(fp_index::OrderedF64(*int as f64)),
+            other => scalar_to_index_label_converter(other),
+        })
+        .collect();
+    if dummy_na {
+        let missing = labels.len() as u32;
+        for code in &mut codes {
+            if *code == MISSING {
+                *code = missing;
+            }
+        }
+        // NaT for a datetime / timedelta column, pandas' NA (`Null`) for a
+        // `string` column, NaN else - as the levels' Index takes it.
+        let kind = match column.dtype() {
+            _ if categories.is_some() => NullKind::NaN,
+            DType::Datetime64 { .. } | DType::Timedelta64 => NullKind::NaT,
+            _ if column.is_pandas_string() => NullKind::Null,
+            _ => NullKind::NaN,
+        };
+        labels.push(IndexLabel::Null(kind));
+    }
+    let first = usize::from(drop_first && !labels.is_empty());
+    let count = labels.len();
+    let cells = cells.unwrap_or(if column.is_pandas_string() {
+        DummyCells::Boolean
+    } else {
+        DummyCells::Bool
+    });
+    let ints = || {
+        scatter_dummies(&codes, first, count, 0_i64, 1)
+            .into_iter()
+            .map(Column::from_i64_values_owned)
+    };
+    let floats = || {
+        scatter_dummies(&codes, first, count, 0.0_f64, 1.0)
+            .into_iter()
+            .map(Column::from_f64_values_owned)
+    };
+    let columns: Vec<Column> = match cells {
+        DummyCells::Bool => scatter_dummies(&codes, first, count, false, true)
+            .into_iter()
+            .map(Column::from_bool_values)
+            .collect(),
+        DummyCells::Boolean => scatter_dummies(&codes, first, count, false, true)
+            .into_iter()
+            .map(|data| Column::from_bool_values(data).astype(DType::BoolNullable))
+            .collect::<Result<_, _>>()
+            .map_err(column_error_to_py)?,
+        DummyCells::Int(false) => ints().collect(),
+        DummyCells::Float(false) => floats().collect(),
+        DummyCells::Int(true) => ints()
+            .map(|column| column.astype(DType::Int64Nullable))
+            .collect::<Result<_, _>>()
+            .map_err(column_error_to_py)?,
+        DummyCells::Float(true) => floats()
+            .map(|column| column.astype(DType::Float64Nullable))
+            .collect::<Result<_, _>>()
+            .map_err(column_error_to_py)?,
+        DummyCells::Narrow(width, masked) if width.is_float() => floats()
+            .map(|column| column.cast_to_width(width, masked))
+            .collect::<Result<_, _>>()
+            .map_err(column_error_to_py)?,
+        DummyCells::Narrow(width, masked) => ints()
+            .map(|column| column.cast_to_width(width, masked))
+            .collect::<Result<_, _>>()
+            .map_err(column_error_to_py)?,
+    };
+    Ok(labels.into_iter().skip(first).zip(columns).collect())
+}
+
+/// The text pandas' f-string gives a get_dummies level in a prefixed column
+/// name: '1.0' for a float, '2020-01-01 00:00:00' for a timestamp, 'nan' /
+/// 'NaT' / a `string` column's '<NA>' for the missing level (they were
+/// Rust's '1', 'Timestamp[ns]').
+fn dummy_level_text(py: Python<'_>, label: &IndexLabel) -> PyResult<String> {
+    Ok(match label {
+        IndexLabel::Utf8(text) => text.clone(),
+        IndexLabel::Int64(int) => int.to_string(),
+        IndexLabel::Null(NullKind::NaT) => "NaT".to_owned(),
+        IndexLabel::Null(NullKind::Null) => "<NA>".to_owned(),
+        IndexLabel::Null(_) => "nan".to_owned(),
+        other => index_label_to_py(py, other)?.bind(py).str()?.extract()?,
+    })
+}
+
+/// A frame over `index` of `columns` in order, labelled as given: a label
+/// twice (get_dummies' two 'o_1' columns of 1 and '1') stays twice, as
+/// pandas'; two labels keyed alike (1 and '1') are refused, as every frame
+/// here refuses them.
+fn frame_of_labelled_columns(
+    index: Index,
+    columns: Vec<(IndexLabel, Column)>,
+) -> PyResult<DataFrame> {
+    let mut store = BTreeMap::new();
+    let mut order = Vec::new();
+    let mut labels = Vec::new();
+    let mut seen: HashMap<String, IndexLabel> = HashMap::new();
+    let mut repeats = Vec::new();
+    for (position, (label, column)) in columns.into_iter().enumerate() {
+        let name = fp_frame::column_key(&label);
+        match seen.get(&name) {
+            Some(previous) if *previous == label => repeats.push((position, name, column)),
+            Some(previous) => {
+                return Err(not_implemented(&format!(
+                    "a frame holding both the column labels {previous:?} and {label:?} (they are \
+                     keyed by the same text)"
+                )));
+            }
+            None => {
+                seen.insert(name.clone(), label.clone());
+                store.insert(name.clone(), column);
+                order.push(name);
+                labels.push(label);
+            }
+        }
+    }
+    let mut frame = DataFrame::new_with_column_order(index, store, order)
+        .map_err(frame_error_to_py)?
+        .with_column_labels(labels)
+        .map_err(frame_error_to_py)?;
+    for (position, name, column) in repeats {
+        frame = frame
+            .insert_allow_duplicates(position, name, column, true)
+            .map_err(frame_error_to_py)?;
+    }
+    Ok(frame)
 }
 
 #[pyfunction]
@@ -77380,186 +77783,110 @@ fn get_dummies(
 ) -> PyResult<PyDataFrame> {
     // A type (dtype=int, float, bool) as well as its name; a type raised
     // TypeError.
-    let dtype_name = dtype
+    let dtype = dtype
         .filter(|dtype| !dtype.is_none())
-        .map(|dtype| py_dtype_arg(dtype).map(|dtype| pandas_dtype_name(&dtype)))
+        .map(DummyCells::of)
         .transpose()?;
-    let dtype = dtype_name.as_deref();
     let prefix = prefix.filter(|prefix| !prefix.is_none());
-    let series_prefix: Option<String> = prefix.and_then(|prefix| prefix.extract().ok());
-    let prefix_of = |position: usize, column: &str| -> PyResult<String> {
-        // pandas' prefix for a frame: one string for every column, a list by
-        // position, a dict by column (it was ignored; fvsao.30).
-        let Some(prefix) = prefix else {
-            return Ok(column.to_owned());
-        };
-        if let Ok(text) = prefix.extract::<String>() {
-            return Ok(text);
-        }
-        if let Ok(mapping) = prefix.cast::<PyDict>() {
-            return match mapping.get_item(column)? {
-                Some(text) => text.extract(),
-                None => Ok(column.to_owned()),
-            };
-        }
-        prefix.get_item(position)?.extract()
-    };
-    let prefix = series_prefix.as_deref();
     if let Ok(df) = data.extract::<PyRef<'_, PyDataFrame>>() {
-        let all_df_cols = df.column_labels();
         // columns= may name typed labels (columns=[2]; fvsao.32).
         let columns: Option<Vec<String>> = column_arg_opt(&df.inner, columns)?
             .filter(|columns| !columns.is_none())
             .map(|columns| columns.extract())
             .transpose()?;
+        // pandas encodes the object, string and category columns (a bool
+        // column was encoded too; br-frankenpandas-jjoxr).
         let target_cols: Vec<String> = columns.unwrap_or_else(|| {
-            all_df_cols
-                .iter()
-                .filter(|c| {
-                    if let Some(col) = df.inner.column(c) {
-                        let dt = col.dtype();
-                        dt == fp_types::DType::Utf8 || dt == fp_types::DType::Bool
-                    } else {
-                        false
-                    }
+            df.inner
+                .column_names()
+                .into_iter()
+                .enumerate()
+                .filter(|(at, _)| {
+                    df.inner.column_at(*at).is_some_and(|column| {
+                        column.categorical().is_some()
+                            || matches!(
+                                column_pandas_dtype_name(column).as_str(),
+                                "object" | "string" | "category"
+                            )
+                    })
                 })
-                .cloned()
+                .map(|(_, name)| name.clone())
                 .collect()
         });
-
-        let mut result_col_map = BTreeMap::new();
-        let mut result_col_order = Vec::new();
-
-        // 1. Non-target columns first (matches pandas behavior)
+        // pandas' prefix for a frame: one string for every column, a list by
+        // position, a dict by column (it was ignored; fvsao.30), either as
+        // long as the columns encoded (br-frankenpandas-jjoxr).
+        if let Some(prefix) =
+            prefix.filter(|prefix| !prefix.is_instance_of::<pyo3::types::PyString>())
+            && let Ok(given) = prefix.len()
+            && given != target_cols.len()
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Length of 'prefix' ({given}) did not match the length of the columns being encoded ({}).",
+                target_cols.len()
+            )));
+        }
+        let prefix_of = |position: usize, column: &str| -> PyResult<String> {
+            let Some(prefix) = prefix else {
+                return Ok(column.to_owned());
+            };
+            if let Ok(text) = prefix.extract::<String>() {
+                return Ok(text);
+            }
+            if prefix.is_instance_of::<PyDict>() {
+                return prefix.get_item(column)?.extract();
+            }
+            prefix.get_item(position)?.extract()
+        };
+        // The other columns first, then each encoded column's indicators,
+        // as pandas.
         let targets: HashSet<&String> = target_cols.iter().collect();
-        for c_name in &all_df_cols {
-            if !targets.contains(c_name) {
-                let col_obj = df.inner.column(c_name).unwrap().clone();
-                result_col_map.insert(c_name.clone(), col_obj);
-                result_col_order.push(c_name.clone());
+        let mut out: Vec<(IndexLabel, Column)> = Vec::new();
+        for (at, name) in df.inner.column_names().into_iter().enumerate() {
+            if let Some(column) = df.inner.column_at(at).filter(|_| !targets.contains(name)) {
+                out.push((df.inner.column_label(name), column.clone()));
             }
         }
-
-        // 2. Dummy columns for each target column
-        for (position, c_name) in target_cols.iter().enumerate() {
-            let label = prefix_of(position, c_name)?;
-            if let Some(col) = df.inner.column(c_name) {
-                let vals = col.values();
-                let mut distinct_cats = Vec::new();
-                let mut cat_set = HashSet::new();
-                for v in vals {
-                    if v.is_null() {
-                        if dummy_na && cat_set.insert("nan".to_string()) {
-                            distinct_cats.push(Scalar::Null(NullKind::NaN));
-                        }
-                    } else {
-                        let s = scalar_to_label_str(v);
-                        if cat_set.insert(s) {
-                            distinct_cats.push(v.clone());
-                        }
-                    }
-                }
-                // By value (ints numerically - 2 before 10 - they sorted as
-                // text), the missing category last, as pandas.
-                distinct_cats.sort_by(|a, b| {
-                    (a.is_null(), scalar_to_index_label_converter(a))
-                        .cmp(&(b.is_null(), scalar_to_index_label_converter(b)))
-                });
-                let start_idx = if drop_first && !distinct_cats.is_empty() {
-                    1
-                } else {
-                    0
-                };
-                let kept = &distinct_cats[start_idx..];
-                for (cat, col_obj) in kept.iter().zip(dummy_columns(vals, kept, dtype)) {
-                    let dummy_name = if cat.is_null() {
-                        format!("{label}{prefix_sep}nan")
-                    } else {
-                        let cat_str = scalar_to_label_str(cat);
-                        format!("{label}{prefix_sep}{cat_str}")
-                    };
-                    result_col_map.insert(dummy_name.clone(), col_obj);
-                    result_col_order.push(dummy_name);
+        for (position, name) in target_cols.iter().enumerate() {
+            let label = prefix_of(position, name)?;
+            if let Some(column) = df.inner.column(name) {
+                for (level, indicator) in dummy_levels(column, dummy_na, drop_first, dtype)? {
+                    let text = dummy_level_text(py, &level)?;
+                    out.push((
+                        IndexLabel::Utf8(format!("{label}{prefix_sep}{text}")),
+                        indicator,
+                    ));
                 }
             }
         }
-        let new_df = DataFrame::new_with_column_order(
-            df.inner.index().clone(),
-            result_col_map,
-            result_col_order,
-        )
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
-        .with_typed_labels_of(&df.inner);
-        return Ok(PyDataFrame { inner: new_df });
+        let frame = frame_of_labelled_columns(df.inner.index().clone(), out)?;
+        return Ok(PyDataFrame { inner: frame });
     }
 
     let s = PySeries::from_data(py, Some(data), None, None)?;
-    let vals = s.inner.column().values();
-    let mut distinct_cats = Vec::new();
-    let mut cat_set = HashSet::new();
-    for v in vals {
-        if v.is_null() {
-            if dummy_na && cat_set.insert("nan".to_string()) {
-                distinct_cats.push(Scalar::Null(NullKind::NaN));
-            }
-        } else {
-            let str_val = scalar_to_label_str(v);
-            if cat_set.insert(str_val) {
-                distinct_cats.push(v.clone());
-            }
-        }
+    // A Series' columns are its levels themselves, typed (fvsao.32), or the
+    // prefix's text before each.
+    let prefix: Option<String> = prefix.map(|prefix| prefix.str()?.extract()).transpose()?;
+    if prefix.is_none() && dummy_na && s.inner.column().is_pandas_string() {
+        return Err(not_implemented(
+            "get_dummies of a string Series with dummy_na: pandas labels the missing level pd.NA, \
+             which a column label here cannot hold apart from None",
+        ));
     }
-    // By value (ints numerically - 2 before 10 - they sorted as text), the
-    // missing category last, as pandas.
-    distinct_cats.sort_by(|a, b| {
-        (a.is_null(), scalar_to_index_label_converter(a))
-            .cmp(&(b.is_null(), scalar_to_index_label_converter(b)))
-    });
-    let start_idx = if drop_first && !distinct_cats.is_empty() {
-        1
-    } else {
-        0
-    };
-    let mut col_map = BTreeMap::new();
-    let mut col_order = Vec::new();
-
-    let kept = &distinct_cats[start_idx..];
-    for (cat, col_obj) in kept.iter().zip(dummy_columns(vals, kept, dtype)) {
-        let dummy_name = if cat.is_null() {
-            if let Some(p) = prefix {
-                format!("{p}{prefix_sep}nan")
-            } else {
-                // Keyed as a NaN label is, relabeled below.
-                fp_frame::column_key(&IndexLabel::Null(NullKind::NaN))
-            }
-        } else {
-            let cat_str = scalar_to_label_str(cat);
-            if let Some(p) = prefix {
-                format!("{p}{prefix_sep}{cat_str}")
-            } else {
-                cat_str
-            }
+    let mut out = Vec::new();
+    for (level, indicator) in dummy_levels(s.inner.column(), dummy_na, drop_first, dtype)? {
+        let label = match &prefix {
+            Some(prefix) => IndexLabel::Utf8(format!(
+                "{prefix}{prefix_sep}{}",
+                dummy_level_text(py, &level)?
+            )),
+            None => level,
         };
-        col_map.insert(dummy_name.clone(), col_obj);
-        col_order.push(dummy_name);
+        out.push((label, indicator));
     }
-    let df = DataFrame::new_with_column_order(s.inner.index().clone(), col_map, col_order)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-    // Unprefixed, the columns are the values themselves, typed (fvsao.32),
-    // the missing category's a NaN label as pandas' (it was the text 'nan').
-    let df = match prefix {
-        None => df.with_value_labels(&s.inner.column().dtype()),
-        Some(_) => df,
-    };
-    let df = match (prefix, kept.iter().position(Scalar::is_null)) {
-        (None, Some(at)) => {
-            let mut labels = df.column_labels();
-            labels[at] = IndexLabel::Null(NullKind::NaN);
-            df.with_column_labels(labels).map_err(frame_error_to_py)?
-        }
-        _ => df,
-    };
-    Ok(PyDataFrame { inner: df })
+    Ok(PyDataFrame {
+        inner: frame_of_labelled_columns(s.inner.index().clone(), out)?,
+    })
 }
 
 /// A crosstab `table` normalized as pandas' `_normalize`: over everything

@@ -66923,15 +66923,16 @@ fn nullable_kept(source: &Column, result: Column) -> Result<Column, FrameError> 
 /// A missing value pandas invents is always a float `NaN`, in every dtype, and an
 /// all-valid int64 column widens to float64 because numpy int64 cannot hold one.
 /// A column that ALREADY carried a missing value is nullable, can hold the gap,
-/// and keeps its dtype — the same condition [`column_with_invented_gaps`] uses
+/// and keeps its dtype — the same condition `column_with_invented_gaps` uses
 /// for the concat/constructor sites.
 ///
 /// ONE function because the drift between two copies WAS the bug:
 /// `DataFrame::reindex` carried this logic inline while `Series::reindex` called
 /// the columnar default, so `pd.Series([1,2]).reindex([0,1,2])` returned Int64
 /// with a `Null` gap where the frame path already returned float64 with `NaN`.
-/// Both call here now.
-fn reindex_column_with_invented_gaps(
+/// Both call here now, and so does the binding's `Series.map(dict)`, a take
+/// from the dict's values (br-frankenpandas-3o9vc).
+pub fn reindex_column_with_invented_gaps(
     column: &Column,
     positions: &[Option<usize>],
 ) -> Result<Column, FrameError> {
@@ -66944,7 +66945,13 @@ fn reindex_column_with_invented_gaps(
         return Ok(widened
             .reindex_by_positions_with_absent_scalar(positions, Scalar::Null(NullKind::NaN))?);
     }
-    Ok(column.reindex_by_positions_with_absent_scalar(positions, Scalar::Null(NullKind::NaN))?)
+    // A datetime / timedelta column's gap is NaT, as numpy's datetime64
+    // holds it (a NaN gap read back as a float nan; br-frankenpandas-3o9vc).
+    let gap = match column.dtype() {
+        DType::Datetime64 { .. } | DType::Timedelta64 => NullKind::NaT,
+        _ => NullKind::NaN,
+    };
+    Ok(column.reindex_by_positions_with_absent_scalar(positions, Scalar::Null(gap))?)
 }
 
 /// Concatenate DataFrames along axis 0 (row-wise).
