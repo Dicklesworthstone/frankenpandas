@@ -25781,3 +25781,52 @@ def test_transpose_of_masked_beside_other_dtypes_is_object_like_pandas_mxjyl(cas
         return ([str(dtype) for dtype in t.dtypes], cells, t.isna().values.tolist())
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-ttzzq: groupby sum of an object column concatenates each
+# group's text (skipping missing values), and a group with no text sums to 0,
+# pandas' object sum of nothing (None under min_count=1); a `string` column's
+# such group is the text '0' (<NA> under min_count). fp gave '' for it, and a
+# SeriesGroupBy sum of text was float64 NaN. NEGATIVE: numeric sums unchanged.
+_TTZZQ_SUMS = {
+    "frame, a group of None": lambda m: m.DataFrame({"a": [1, 2, 3, 4], "s": ["x", "y", "x", None]}).groupby("a").sum(),
+    "frame, mixed groups": lambda m: m.DataFrame({"k": [1, 1, 2, 2, 3], "s": ["x", None, None, None, "z"]}).groupby("k").sum(),
+    "frame, numbers beside text": lambda m: m.DataFrame({"k": [1, 1, 2], "v": [1, 2, 3], "s": ["a", "b", None]}).groupby("k").sum(),
+    "frame, min_count=1": lambda m: m.DataFrame({"k": [1, 2], "s": ["a", None]}).groupby("k").sum(min_count=1),
+    "frame, all None": lambda m: m.DataFrame({"k": [1, 2], "s": [None, None]}).groupby("k").sum(),
+    "frame, agg('sum')": lambda m: m.DataFrame({"k": [1, 1, 2], "s": ["a", "b", None]}).groupby("k").agg("sum"),
+    "frame, agg dict": lambda m: m.DataFrame({"k": [1, 1, 2], "s": ["a", "b", None]}).groupby("k").agg({"s": "sum"}),
+    "frame, column selected": lambda m: m.DataFrame({"k": [1, 1, 2], "s": ["a", "b", None]}).groupby("k")["s"].sum(),
+    "frame, string dtype": lambda m: m.DataFrame({"k": [1, 1, 2], "s": m.Series(["a", "b", None], dtype="string")}).groupby("k").sum(),
+    "frame, string dtype, min_count=1": lambda m: m.DataFrame({"k": [1, 1, 2], "s": m.Series(["a", "b", None], dtype="string")}).groupby("k").sum(min_count=1),
+    "series": lambda m: m.Series(["x", None, None, "y"]).groupby([1, 1, 2, 3]).sum(),
+    "series, one group": lambda m: m.Series(["a", "b"]).groupby([1, 1]).sum(),
+    "series, NaN missing": lambda m: m.Series(["x", math.nan, math.nan, "y"]).groupby([1, 1, 2, 3]).sum(),
+    "series, min_count=1": lambda m: m.Series(["x", None, None, "y"]).groupby([1, 1, 2, 3]).sum(min_count=1),
+    "series, empty text": lambda m: m.Series(["", None]).groupby([1, 2]).sum(),
+    "series, all None": lambda m: m.Series([None, None, "a"]).groupby([1, 1, 2]).sum(),
+    "series, string dtype": lambda m: m.Series(["a", "b", None], dtype="string").groupby([1, 1, 2]).sum(),
+    "frame, agg list": lambda m: m.DataFrame({"k": [1, 1, 2], "s": ["a", "b", None]}).groupby("k").agg(["sum"]),
+    "frame, as_index=False": lambda m: m.DataFrame({"k": [1, 1, 2], "s": ["a", "b", None]}).groupby("k", as_index=False).sum(),
+    "frame, two keys": lambda m: m.DataFrame({"k": [1, 1, 2], "j": ["x", "x", "y"], "s": ["a", "b", None]}).groupby(["k", "j"]).sum(),
+    "frame, text key": lambda m: m.DataFrame({"k": ["p", "p", "q"], "s": ["a", "b", None]}).groupby("k").sum(),
+    "series, agg('sum')": lambda m: m.Series(["a", "b", None]).groupby([1, 1, 2]).agg("sum"),
+    "series, transform('sum')": lambda m: m.Series(["a", "b", None]).groupby([1, 1, 2]).transform("sum"),
+    "series, string dtype, transform('sum')": lambda m: m.Series(["a", "b", None], dtype="string").groupby([1, 1, 2]).transform("sum"),
+    "series, string dtype, min_count=1": lambda m: m.Series(["a", "b", None], dtype="string").groupby([1, 1, 2]).sum(min_count=1),
+    "series, int (NEGATIVE)": lambda m: m.Series([1, 2, 3]).groupby([1, 1, 2]).sum(),
+    "series, float (NEGATIVE)": lambda m: m.Series([1.5, math.nan, 3.0]).groupby([1, 1, 2]).sum(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_TTZZQ_SUMS))
+def test_groupby_sum_of_text_like_pandas_ttzzq(case: str) -> None:
+    def shown(m: Any) -> Any:
+        result = _TTZZQ_SUMS[case](m)
+        if hasattr(result, "columns"):
+            cells = [[type(cell).__name__ for cell in result[column].tolist()] for column in result.columns]
+            return (repr(result), [str(dtype) for dtype in result.dtypes], cells)
+        return (repr(result), str(result.dtype), [type(cell).__name__ for cell in result.tolist()])
+
+    assert shown(fpd) == shown(pd)

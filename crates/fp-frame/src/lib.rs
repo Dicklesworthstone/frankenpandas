@@ -45102,6 +45102,16 @@ impl SeriesGroupBy<'_> {
 
     /// Sum of each group.
     pub fn sum(&self) -> Result<Series, FrameError> {
+        // An object column's groups concatenate their text (the numeric
+        // paths below read it as nothing: float64 NaN; ttzzq).
+        if matches!(self.series.column.dtype(), DType::Utf8 | DType::Null) {
+            let sums = self.agg_values_scalar(self.series.name(), object_group_sum)?;
+            return Series::new(
+                sums.name(),
+                sums.index().clone(),
+                Column::from_object_values(sums.values().to_vec()),
+            );
+        }
         // Per br-frankenpandas-c1bxu: agg_numeric drops Timedelta64 values
         // via to_f64(). Pandas td_series.groupby(...).sum() returns
         // Timedelta64 per group — preserve dtype here.
@@ -49221,11 +49231,14 @@ impl SeriesGroupBy<'_> {
         let (_order, order_keys, groups) = self.build_groups();
         let vals = self.series.values();
         let mut out = vec![Scalar::Null(NullKind::NaN); self.series.len()];
+        let object = matches!(self.series.column.dtype(), DType::Utf8 | DType::Null);
 
         for key in &order_keys {
             let positions = &groups[key];
             let group_vals: Vec<Scalar> = positions.iter().map(|&idx| vals[idx].clone()).collect();
             let value = match func {
+                // An object column's text concatenates (it was 0.0; ttzzq).
+                "sum" if object => object_group_sum(&group_vals),
                 // pandas' group kernels: compensated sums, Welford moments
                 // (br-frankenpandas-xhogl).
                 "sum" => fp_types::nansum_grouped(&group_vals),
@@ -49291,7 +49304,11 @@ impl SeriesGroupBy<'_> {
         // Per br-frankenpandas-2vgu0: pandas SeriesGroupBy.transform preserves
         // source index name. Sister to transform_groups fix (u2ogr).
         let index = self.series.index.clone();
-        let column = Column::from_values(out)?;
+        let column = if object && func == "sum" {
+            Column::from_object_values(out)
+        } else {
+            Column::from_values(out)?
+        };
         Series::new(self.series.name(), index, column)
     }
 
@@ -103502,6 +103519,35 @@ fn float_moment_series(series: Series) -> Result<Series, FrameError> {
     }
 }
 
+/// pandas' groupby sum of one group of an object column: its text
+/// concatenated in row order, missing values skipped, and 0 - pandas' object
+/// sum of nothing - for a group holding no text (it was '', and the
+/// SeriesGroupBy sum / transform of text float64 NaN / 0.0;
+/// br-frankenpandas-ttzzq).
+fn object_group_sum(group_vals: &[Scalar]) -> Scalar {
+    let mut joined: Option<String> = None;
+    for value in group_vals {
+        if let Scalar::Utf8(text) = value {
+            joined.get_or_insert_with(String::new).push_str(text);
+        }
+    }
+    joined.map_or(Scalar::Int64(0), Scalar::Utf8)
+}
+
+/// A groupby reduction's output column over `source`: an object column's
+/// sums stay object (text beside 0s, or 0s alone - which inferred int64), as
+/// pandas'; anything else inferred from the values.
+fn reduced_group_column(
+    func_name: &str,
+    source: &Column,
+    values: Vec<Scalar>,
+) -> Result<Column, FrameError> {
+    if func_name == "sum" && matches!(source.dtype(), DType::Utf8 | DType::Null) {
+        return Ok(Column::from_object_values(values));
+    }
+    Ok(Column::from_values(values)?)
+}
+
 /// Which groups of a groupby `count()` column hold fewer than `min_count`
 /// non-missing values.
 fn below_min_count(counts: &[Scalar], min_count: usize) -> Vec<bool> {
@@ -103676,18 +103722,9 @@ impl DataFrameGroupBy<'_> {
             DType::Categorical => fp_types::nansum_grouped(group_vals),
             // Per br-frankenpandas-6lnll: pandas groupby.sum() on an object/string
             // column concatenates each group's non-null values in encounter order
-            // (skipna), exactly like Series::sum (br-f031e). The catch-all below
-            // would route Utf8 through nansum, whose to_f64() fails on strings and
-            // silently produces Float64(0.0). Empty / all-null group -> "".
-            DType::Utf8 => {
-                let mut joined = String::new();
-                for value in group_vals {
-                    if let Scalar::Utf8(s) = value {
-                        joined.push_str(s);
-                    }
-                }
-                Scalar::Utf8(joined)
-            }
+            // (skipna). The catch-all below would route Utf8 through nansum, whose
+            // to_f64() fails on strings and silently produces Float64(0.0).
+            DType::Utf8 | DType::Null => object_group_sum(group_vals),
             DType::Timedelta64 => {
                 let mut total = 0_i128;
                 for value in group_vals {
@@ -105802,7 +105839,10 @@ impl DataFrameGroupBy<'_> {
                 agg_vals.push(agg_val);
             }
 
-            result_cols.insert(col_name.clone(), Column::from_values(agg_vals)?);
+            result_cols.insert(
+                col_name.clone(),
+                reduced_group_column(func_name, col, agg_vals)?,
+            );
             col_order.push(col_name.clone());
         }
 
@@ -109713,7 +109753,10 @@ impl DataFrameGroupBy<'_> {
                 agg_vals.push(agg_val);
             }
 
-            result_cols.insert(col_name.clone(), Column::from_values(agg_vals)?);
+            result_cols.insert(
+                col_name.clone(),
+                reduced_group_column(func_name, col, agg_vals)?,
+            );
             col_order.push(col_name.clone());
         }
 
@@ -110844,7 +110887,10 @@ impl DataFrameGroupBy<'_> {
                 agg_vals.push(Self::apply_agg_func(func_name, &group_vals, col.dtype())?);
             }
 
-            result_cols.insert(output_name.to_owned(), Column::from_values(agg_vals)?);
+            result_cols.insert(
+                output_name.to_owned(),
+                reduced_group_column(func_name, col, agg_vals)?,
+            );
             col_order.push(output_name.to_owned());
         }
 

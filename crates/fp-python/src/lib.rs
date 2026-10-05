@@ -7006,6 +7006,21 @@ fn zoned_row(py: Python<'_>, frame: &DataFrame, row: Series) -> PyResult<Series>
     .map_err(frame_error_to_py)
 }
 
+/// A `string` column's groupby sums as pandas gives them: `string`, a group
+/// holding no text the text '0' (pandas sums the objects - 0 for nothing -
+/// and casts back; the core's object sums hold the int 0; ttzzq).
+fn string_group_sums(column: &Column) -> Column {
+    let values = column
+        .values()
+        .iter()
+        .map(|value| match value {
+            Scalar::Int64(0) => Scalar::Utf8("0".to_owned()),
+            other => other.clone(),
+        })
+        .collect();
+    Column::from_object_values(values).as_pandas_string()
+}
+
 /// Whether `dtype` is one of pandas' nullable extension dtypes (Int64 /
 /// Float64 / boolean), whose missing value is `pd.NA`.
 fn is_nullable_extension(dtype: &DType) -> bool {
@@ -63615,6 +63630,14 @@ impl PyGroupBy {
             let column = column.clone().as_pandas_string();
             return frame.with_column(name, column).map_err(frame_error_to_py);
         }
+        if self.df.column(name).is_some_and(Column::is_pandas_string)
+            && matches!(op, "sum" | "sum(min_count)")
+            && let Some(column) = frame.column(name)
+            && column.dtype() == DType::Utf8
+        {
+            let column = string_group_sums(column);
+            return frame.with_column(name, column).map_err(frame_error_to_py);
+        }
         let width = self.df.column(name).and_then(Column::width);
         if let (Some(width), Some(column)) = (width, frame.column(name))
             && let Some(target) = groupby_reduction_width(width, op, column)
@@ -66581,6 +66604,23 @@ impl PySeriesGroupBy {
         Ok(())
     }
 
+    /// `res`, this groupby's `op` result, with a `string` column's sums as
+    /// pandas gives them (see [`string_group_sums`]); any other as it is.
+    fn string_sums(&self, op: &str, res: Series) -> PyResult<Series> {
+        if !self.series.column().is_pandas_string()
+            || !matches!(op, "sum" | "sum(min_count)")
+            || res.column().dtype() != DType::Utf8
+        {
+            return Ok(res);
+        }
+        Series::new(
+            res.name().clone(),
+            res.index().clone(),
+            string_group_sums(res.column()),
+        )
+        .map_err(frame_error_to_py)
+    }
+
     /// A reduction's result: sorted by key when `sort`, and with
     /// as_index=False the keys moved into a column beside it, as pandas does.
     fn wrap_result(&self, op: &str, s: Series) -> PyResult<Py<PyAny>> {
@@ -66600,7 +66640,7 @@ impl PySeriesGroupBy {
             )
             .map_err(frame_error_to_py)?
         } else {
-            res
+            self.string_sums(op, res)?
         };
         // A narrow column's groups in pandas' dtype for `op` (fvsao.23).
         let res = match self.series.column().width() {
@@ -68312,12 +68352,14 @@ impl PySeriesGroupBy {
                 )));
             }
             let res = gb.transform(&func_str).map_err(frame_error_to_py)?;
+            let res = self.string_sums(&func_str, res)?;
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
         let plain = args.is_empty() && kwargs.is_none_or(|k| k.is_empty());
         if plain && let Some(name) = cython_func_name(func)? {
             warn_cython_callable(func, "SeriesGroupBy", name)?;
             let res = gb.transform(name).map_err(frame_error_to_py)?;
+            let res = self.string_sums(name, res)?;
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
         // Any other callable runs on each group, as pandas': a scalar result
