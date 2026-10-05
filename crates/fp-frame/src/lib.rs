@@ -15558,6 +15558,65 @@ impl Series {
             || (matches!(limit_direction, None | Some("forward")) && limit_area.is_none())
     }
 
+    /// `op` run over this datetime / timedelta Series' nanoseconds as
+    /// float64 (NaT missing), its answer cast back to this dtype - each
+    /// number truncated toward zero, as numpy's `astype('i8')`, a missing
+    /// one NaT (see [`Self::interpolate_with`]).
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)] // pandas' float64 grid
+    fn temporal_interpolated(
+        &self,
+        op: impl Fn(&Self) -> Result<Self, FrameError>,
+    ) -> Result<Self, FrameError> {
+        let numbers: Vec<Scalar> = self
+            .column
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Datetime64(nanos) | Scalar::Timedelta64(nanos) if *nanos != i64::MIN => {
+                    Scalar::Float64(*nanos as f64)
+                }
+                _ => Scalar::Null(NullKind::NaN),
+            })
+            .collect();
+        let numbers = Self::new(
+            self.name.clone(),
+            self.index.clone(),
+            Column::new(DType::Float64, numbers)?,
+        )?;
+        let answer = op(&numbers)?;
+        let datetime = matches!(self.column.dtype(), DType::Datetime64 { .. });
+        // A value that was there stays exactly itself (the float64 grid
+        // would round its nanoseconds); only the gaps take the answer.
+        let source = self.column.values();
+        let values: Vec<Scalar> = answer
+            .column
+            .values()
+            .iter()
+            .enumerate()
+            .map(|(position, value)| match value {
+                _ if source.get(position).is_some_and(|cell| !cell.is_missing())
+                    && answer.len() == source.len() =>
+                {
+                    source[position].clone()
+                }
+                Scalar::Float64(number) if number.is_finite() => {
+                    let nanos = number.trunc() as i64;
+                    if datetime {
+                        Scalar::Datetime64(nanos)
+                    } else {
+                        Scalar::Timedelta64(nanos)
+                    }
+                }
+                _ => Scalar::Null(NullKind::NaT),
+            })
+            .collect();
+        Self::new(
+            answer.name.clone(),
+            answer.index.clone(),
+            Column::new(self.column.dtype(), values)?,
+        )
+    }
+
     /// pandas' `interpolate(method, limit=, limit_direction=, limit_area=)`
     /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.5: the Python
     /// binding dropped every option and always interpolated linearly).
@@ -15574,6 +15633,20 @@ impl Series {
             return Err(FrameError::CompatibilityRejected(format!(
                 "interpolate(method='{method}') with limit_direction or limit_area"
             )));
+        }
+        // Datetimes / durations interpolate linearly as pandas' do: their
+        // nanoseconds through float64 (numpy's interp grid), cast back
+        // truncating as numpy's astype (a datetime left NaT, a duration
+        // under limit_direction raised; br-frankenpandas-l5jx6).
+        if method == "linear"
+            && matches!(
+                self.column.dtype(),
+                DType::Datetime64 { .. } | DType::Timedelta64
+            )
+        {
+            return self.temporal_interpolated(|numbers| {
+                numbers.interpolate_with(method, limit, limit_direction, limit_area)
+            });
         }
         let plain_forward =
             matches!(limit_direction, None | Some("forward")) && limit_area.is_none();
@@ -17868,6 +17941,10 @@ impl Series {
     ///
     /// Matches `pd.Series.replace(to_replace, value)` for scalar pairs.
     pub fn replace(&self, replacements: &[(Scalar, Scalar)]) -> Result<Self, FrameError> {
+        // No values to replace: itself, its dtype kept (it was object; l5jx6).
+        if self.is_empty() {
+            return Ok(self.clone());
+        }
         let replacements = self.replace_keys_by_value(replacements);
         let out = self.keeping_width(self.replace_storage(&replacements), false)?;
         let writes_missing = replacements.iter().any(|(_, value)| value.is_missing());
@@ -24507,6 +24584,11 @@ impl Series {
     }
 
     pub fn isin(&self, test_values: &[Scalar]) -> Result<Self, FrameError> {
+        // No values test to bool as any do (inferred, they were object;
+        // br-frankenpandas-l5jx6) - boolean over a masked Series.
+        if self.is_empty() {
+            return self.masked_bool_result(self.bool_mask_preserving_name(Vec::new())?, false);
+        }
         let flags = self.isin_flags(test_values)?;
         self.masked_bool_result(flags, false)
     }
@@ -29242,6 +29324,10 @@ impl Series {
     }
 
     pub fn duplicated(&self) -> Result<Self, FrameError> {
+        // No values mark bool as any do (they were object; l5jx6).
+        if self.is_empty() {
+            return self.bool_mask_preserving_name(Vec::new());
+        }
         // Per br-frankenpandas-d8d9d: O(n) HashMap-based dedup. Within a
         // single Column values are homogeneous (Column::new), so ScalarKey
         // equivalence matches semantic_eq. Null is its own bucket via
@@ -29354,6 +29440,9 @@ impl Series {
     /// - `Last`: mark all but the last occurrence as True
     /// - `None`: mark all duplicated values as True
     pub fn duplicated_keep(&self, keep: DuplicateKeep) -> Result<Self, FrameError> {
+        if self.is_empty() {
+            return self.bool_mask_preserving_name(Vec::new());
+        }
         // Hash-free dense seen-bitset fast path for all-valid bounded Int64.
         if let Some(dense) = self.duplicated_flags_i64_direct(keep) {
             return self.bool_mask_preserving_name(dense);
@@ -125504,6 +125593,78 @@ mod tests {
         for position in 0..gappy.num_columns() {
             assert_eq!(gappy.column_at(position).unwrap().dtype(), DType::Float64);
         }
+    }
+
+    #[test]
+    fn temporal_interpolate_and_empty_tests_like_pandas_l5jx6() {
+        let labels = |n: i64| (0..n).map(IndexLabel::from).collect::<Vec<_>>();
+        let day = 86_400_000_000_000_i64;
+        // pandas interpolates datetimes linearly in their nanoseconds; a
+        // value that was there stays exact (here 1 ns past midnight).
+        let instants = Series::new(
+            "t",
+            Index::new(labels(3)),
+            Column::new(
+                DType::Datetime64 { tz: None },
+                vec![
+                    Scalar::Datetime64(0),
+                    Scalar::Null(NullKind::NaT),
+                    Scalar::Datetime64(2 * day + 1),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let filled = instants
+            .interpolate_with("linear", None, None, None)
+            .unwrap();
+        assert_eq!(filled.column().dtype(), DType::Datetime64 { tz: None });
+        assert_eq!(
+            filled.values(),
+            &[
+                Scalar::Datetime64(0),
+                Scalar::Datetime64(day),
+                Scalar::Datetime64(2 * day + 1)
+            ]
+        );
+        // NEGATIVE: a leading gap has nothing before it and stays NaT.
+        let leading = Series::new(
+            "t",
+            Index::new(labels(2)),
+            Column::new(
+                DType::Datetime64 { tz: None },
+                vec![Scalar::Null(NullKind::NaT), Scalar::Datetime64(day)],
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .interpolate_with("linear", None, None, None)
+        .unwrap();
+        assert!(leading.values()[0].is_missing());
+        // No values test / mark bool and replace to their own dtype.
+        let empty = Series::new(
+            "e",
+            Index::new(Vec::new()),
+            Column::new(DType::Float64, Vec::new()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            empty
+                .isin(&[Scalar::Float64(1.0)])
+                .unwrap()
+                .column()
+                .dtype(),
+            DType::Bool
+        );
+        assert_eq!(empty.duplicated().unwrap().column().dtype(), DType::Bool);
+        assert_eq!(
+            empty
+                .replace(&[(Scalar::Float64(1.0), Scalar::Float64(2.0))])
+                .unwrap()
+                .column()
+                .dtype(),
+            DType::Float64
+        );
     }
 
     #[test]

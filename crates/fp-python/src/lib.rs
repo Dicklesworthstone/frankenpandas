@@ -1619,7 +1619,19 @@ fn pandas_label_texts(labels: &[IndexLabel], zone: Option<&str>) -> Vec<String> 
                 .collect()
         };
     }
-    if all(|label| matches!(label, IndexLabel::Datetime64(_))) {
+    // NaT beside datetimes is one of their labels: the dates keep their
+    // shared resolution (a midnight-only index printed its times beside a
+    // NaT; br-frankenpandas-l5jx6).
+    if labels
+        .iter()
+        .any(|label| matches!(label, IndexLabel::Datetime64(_)))
+        && all(|label| {
+            matches!(
+                label,
+                IndexLabel::Datetime64(_) | IndexLabel::Null(NullKind::NaT)
+            )
+        })
+    {
         let instants: Vec<Option<i64>> = labels
             .iter()
             .map(|label| match label {
@@ -7122,6 +7134,112 @@ fn string_group_sums(column: &Column) -> Column {
         })
         .collect();
     Column::from_object_values(values).as_pandas_string()
+}
+
+/// A cell of `column` as pandas' `map` / `apply` hands it to a function:
+/// a masked Int64 / Float64 column holding a missing value goes through
+/// `to_numpy()`'s float64, so its numbers are floats and the gap NaN
+/// (`float_gaps`; they were ints and pd.NA, `map(str)` '1' / '<NA>' where
+/// pandas gives '1.0' / 'nan'; br-frankenpandas-l5jx6); any other as the
+/// column holds it.
+#[allow(clippy::cast_precision_loss)] // numpy's int64 -> float64
+fn mapped_cell(
+    py: Python<'_>,
+    column: &Column,
+    value: &Scalar,
+    float_gaps: bool,
+) -> PyResult<Py<PyAny>> {
+    if float_gaps {
+        if value.is_missing() {
+            return f64::NAN.into_py_any(py);
+        }
+        if let Scalar::Int64(number) = value {
+            return (*number as f64).into_py_any(py);
+        }
+    }
+    cell_to_py(py, column, value)
+}
+
+/// Whether `map` / `apply` hand `column`'s cells over as numpy's float64
+/// (see [`mapped_cell`]).
+fn maps_through_float(column: &Column) -> bool {
+    matches!(
+        column.dtype(),
+        DType::Int64Nullable | DType::Float64Nullable
+    ) && column.has_any_missing()
+}
+
+/// pandas' `fillna(value)` of a datetime / timedelta `series` with a value
+/// not of its kind: an object Series of its instants / durations (in their
+/// zone) and `value` where they were missing (at most `limit` of them) - 0
+/// filled the epoch and 'x' raised (br-frankenpandas-l5jx6). None when the
+/// value is of the kind (a datetime / timedelta, numpy's, a string parsing
+/// as one) or missing, or the Series is neither, for the caller's own fill.
+fn temporal_object_fill(
+    py: Python<'_>,
+    series: &Series,
+    value: &Bound<'_, PyAny>,
+    limit: Option<usize>,
+) -> PyResult<Option<Series>> {
+    let column = series.column();
+    let datetime = matches!(column.dtype(), DType::Datetime64 { .. });
+    // Nothing missing, nothing filled: the dtype stays (pandas' no-op).
+    if !(datetime || column.dtype() == DType::Timedelta64)
+        || !column.has_any_missing()
+        || isna(py, value)?.bind(py).is_truthy()?
+    {
+        return Ok(None);
+    }
+    let (python_kind, numpy_kind, parser) = if datetime {
+        ("datetime", "datetime64", "Timestamp")
+    } else {
+        ("timedelta", "timedelta64", "Timedelta")
+    };
+    let own_class = if datetime {
+        value.extract::<PyRef<'_, PyTimestamp>>().is_ok()
+    } else {
+        value.extract::<PyRef<'_, PyTimedelta>>().is_ok()
+    };
+    let of_kind = own_class
+        || value.is_instance(&py.import("datetime")?.getattr(python_kind)?)?
+        || value.get_type().name()?.to_str()? == numpy_kind
+        || (value.is_instance_of::<pyo3::types::PyString>()
+            && py
+                .import("frankenpandas")?
+                .getattr(parser)?
+                .call1((value,))
+                .is_ok());
+    if of_kind {
+        return Ok(None);
+    }
+    let fill = py_to_cell(py, value)?;
+    let mut left = limit.unwrap_or(usize::MAX);
+    let cells = column
+        .values()
+        .iter()
+        .map(|cell| {
+            if cell.is_missing() {
+                if left == 0 {
+                    return Ok(Scalar::Null(NullKind::NaT));
+                }
+                left -= 1;
+                return Ok(fill.clone());
+            }
+            if column.timezone().is_some() {
+                return Ok(Scalar::Object(fp_types::ObjectValue::Host(
+                    fp_types::HostValue::new(PyHost(cell_to_py(py, column, cell)?)),
+                )));
+            }
+            Ok(cell.clone())
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    Series::new(
+        series.name(),
+        series.index().clone(),
+        Column::from_object_values(cells),
+    )
+    .map(Some)
+    .map_err(frame_error_to_py)
 }
 
 /// Whether `dtype` is one of pandas' nullable extension dtypes (Int64 /
@@ -30203,6 +30321,9 @@ impl PySeries {
                 )));
             }
             refuse_masked_int_fill(py, self.inner.column(), val)?;
+            if let Some(inner) = temporal_object_fill(py, &self.inner, val, limit)? {
+                return Ok(PySeries { inner });
+            }
             let fill_val = py_to_cell(py, val)?;
             let new_col = fill_column_with_scalar(self.inner.column(), &fill_val, limit)
                 .map_err(frame_error_to_py)?;
@@ -32920,12 +33041,14 @@ impl PySeries {
         }
         let column = self.inner.column();
         let vals = column.values();
+        let float_gaps = maps_through_float(column);
         let mut out = Vec::with_capacity(vals.len());
         let mut results = Vec::with_capacity(vals.len());
         for v in vals {
             // A tz-aware value reaches the function in its zone (it was the
-            // naive UTC wall clock; br-frankenpandas-wuize).
-            let py_val = cell_to_py(py, column, v)?;
+            // naive UTC wall clock; br-frankenpandas-wuize); a masked number
+            // beside a gap as numpy's float (l5jx6).
+            let py_val = mapped_cell(py, column, v, float_gaps)?;
             let res = if let Some(extra_args) = args {
                 let mut full_args = Vec::with_capacity(1 + extra_args.len());
                 full_args.push(py_val);
@@ -32968,6 +33091,7 @@ impl PySeries {
                 return Ok(PySeries { inner });
             }
             let vals = self.inner.column().values();
+            let float_gaps = maps_through_float(self.inner.column());
             let mut out = Vec::with_capacity(vals.len());
             let mut results = Vec::with_capacity(vals.len());
             for v in vals {
@@ -32977,8 +33101,9 @@ impl PySeries {
                 }
                 // The function sees the value as the column holds it: pd.NA
                 // for a `string` Series' missing one (fvsao.59; it saw None),
-                // and a pd.NA it returns stays the object, as pandas'.
-                let py_val = cell_to_py(py, self.inner.column(), v)?;
+                // and a pd.NA it returns stays the object, as pandas'; a
+                // masked number beside a gap as numpy's float (l5jx6).
+                let py_val = mapped_cell(py, self.inner.column(), v, float_gaps)?;
                 let res = arg.call1((py_val,))?;
                 if self.inner.column().is_pandas_string() && res.is_instance_of::<PyNAType>() {
                     out.push(Scalar::Object(fp_types::ObjectValue::Host(

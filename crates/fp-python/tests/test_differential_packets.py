@@ -26144,3 +26144,65 @@ _N33O4_CASES = {
 @pytest.mark.parametrize("case", list(_N33O4_CASES))
 def test_timedelta_fractions_print_like_pandas_n33o4(case: str) -> None:
     assert repr(_N33O4_CASES[case](fpd)) == repr(_N33O4_CASES[case](pd))
+
+
+# br-frankenpandas-l5jx6: a datetime / timedelta Series filled with a value
+# not of its kind (0, 1.5, 'x', a date) is object holding it (0 filled the
+# epoch), datetimes interpolate linearly in their nanoseconds (they stayed
+# NaT), a date index beside NaT prints dates, a masked Int64 / Float64
+# Series with a gap hands map / apply numpy's floats ('1.0', 'nan'), and an
+# empty duplicated / isin / replace keeps pandas' dtype. NEGATIVE: a
+# Timestamp / datetime / parseable string / NaT fill keeps datetime64, an
+# Int64 map without a gap passes ints.
+def _l5jx6_dates(m: Any) -> Any:
+    return m.Series(m.to_datetime(["2020-01-02", None, "2020-01-01"]))
+
+
+_L5JX6_CASES = {
+    "datetime fillna 0": lambda m: _l5jx6_dates(m).fillna(0),
+    "datetime fillna text": lambda m: _l5jx6_dates(m).fillna("x"),
+    "datetime fillna float": lambda m: _l5jx6_dates(m).fillna(1.5),
+    "datetime fillna date": lambda m: _l5jx6_dates(m).fillna(datetime.date(2021, 1, 1)),
+    "datetime fillna 0, limit=1": lambda m: m.Series(m.to_datetime([None, None, "2020-01-01"])).fillna(0, limit=1),
+    "UTC fillna 0": lambda m: m.Series(m.to_datetime(["2020-01-02 10:00", None]).tz_localize("UTC")).fillna(0),
+    "timedelta fillna 0": lambda m: m.Series(m.to_timedelta(["1D", None])).fillna(0),
+    "datetime fillna Timestamp (NEGATIVE)": lambda m: _l5jx6_dates(m).fillna(m.Timestamp("2021-01-01")),
+    "datetime fillna datetime (NEGATIVE)": lambda m: _l5jx6_dates(m).fillna(datetime.datetime(2021, 1, 1)),
+    "datetime fillna date text (NEGATIVE)": lambda m: _l5jx6_dates(m).fillna("2021-01-01"),
+    "datetime fillna NaT (NEGATIVE)": lambda m: _l5jx6_dates(m).fillna(m.NaT),
+    "datetime fillna 0, nothing missing (NEGATIVE)": lambda m: m.Series(m.to_datetime(["2020-01-01"])).fillna(0),
+    "timedelta fillna Timedelta (NEGATIVE)": lambda m: m.Series(m.to_timedelta(["1D", None])).fillna(m.Timedelta("2D")),
+    "datetime interpolate": lambda m: _l5jx6_dates(m).interpolate(),
+    "datetime interpolate, limit=1": lambda m: m.Series(m.to_datetime(["2020-01-01", None, None, "2020-01-04 00:00:00.000000001"], format="ISO8601")).interpolate(limit=1),
+    "datetime interpolate, both": lambda m: m.Series(m.to_datetime([None, "2020-01-01", None, "2020-01-03"])).interpolate(limit_direction="both"),
+    "datetime interpolate, odd nanoseconds": lambda m: m.Series(m.to_datetime(["2020-01-01 00:00:00.000000007", None, "2020-01-04 00:00:00.000000001"], format="ISO8601")).interpolate(),
+    "UTC interpolate": lambda m: m.Series(m.to_datetime(["2020-01-01 10:00", None, "2020-01-02 00:00"]).tz_localize("UTC")).interpolate(),
+    "timedelta interpolate, both": lambda m: m.Series(m.to_timedelta(["1D", None, "3D"])).interpolate(limit_direction="both"),
+    "dates beside NaT, value_counts": lambda m: _l5jx6_dates(m).value_counts(dropna=False),
+    "dates beside NaT, index": lambda m: m.Series([1, 2], index=m.to_datetime(["2020-01-01", None])),
+    "Int64 map str": lambda m: m.Series([1, None, 3], dtype="Int64").map(str),
+    "Int64 apply str": lambda m: m.Series([1, None, 3], dtype="Int64").apply(str),
+    "Int64 map doubled": lambda m: m.Series([1, None, 3], dtype="Int64").map(lambda x: x * 2),
+    "Float64 map str": lambda m: m.Series([1.5, None], dtype="Float64").map(str),
+    "Int64 map str, no gap (NEGATIVE)": lambda m: m.Series([1, 3], dtype="Int64").map(str),
+    "boolean map str (NEGATIVE)": lambda m: m.Series([True, None], dtype="boolean").map(str),
+    "empty duplicated": lambda m: m.Series([], dtype="float64").duplicated(),
+    "empty duplicated keep=False": lambda m: m.Series([], dtype="float64").duplicated(keep=False),
+    "empty isin": lambda m: m.Series([], dtype="float64").isin([1]),
+    "empty Int64 isin": lambda m: m.Series([], dtype="Int64").isin([1]),
+    "empty replace": lambda m: m.Series([], dtype="float64").replace(1, 2),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_L5JX6_CASES))
+def test_temporal_fill_interpolate_and_masked_map_like_pandas_l5jx6(case: str) -> None:
+    import warnings
+
+    def shown(m: Any) -> Any:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = _L5JX6_CASES[case](m)
+        return (repr(result), str(result.dtype), [type(cell).__name__ for cell in result.tolist()])
+
+    assert shown(fpd) == shown(pd)
