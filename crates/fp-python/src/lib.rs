@@ -72198,10 +72198,28 @@ fn cut(
     binned_result(py, unordered, series_input, false, retbins, edges)
 }
 
+/// pd.cut / pd.qcut's `x` ([`binning_series`]). Datetime and timedelta
+/// values bin into interval[datetime64[ns]] / interval[timedelta64[ns]]
+/// categories, which fp's Interval (float endpoints) cannot hold yet: they
+/// are refused - every value came back NaN, silently
+/// (br-frankenpandas-1qj7z).
+fn binning_input(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<(Series, bool)> {
+    let (series, series_input) = binning_series(py, x)?;
+    if matches!(
+        series.dtype(),
+        DType::Datetime64 { .. } | DType::Timedelta64
+    ) {
+        return Err(not_implemented(
+            "pd.cut / pd.qcut of datetime64 / timedelta64 values (interval[datetime64[ns]] categories)",
+        ));
+    }
+    Ok((series, series_input))
+}
+
 /// pd.cut / pd.qcut's `x` as a Series, and whether it was one. pandas bins
 /// any 1-D array-like - a list, tuple, ndarray or Index (an ndarray or an
 /// Index raised TypeError) - and refuses a scalar, a str or a 2-D array.
-fn binning_input(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<(Series, bool)> {
+fn binning_series(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<(Series, bool)> {
     if let Ok(series) = x.extract::<PyRef<'_, PySeries>>() {
         return Ok((series.inner.clone(), true));
     }

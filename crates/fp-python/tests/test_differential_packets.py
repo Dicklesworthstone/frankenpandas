@@ -24487,3 +24487,18 @@ def _fvsao46_shown(run: Any) -> Any:
 def test_fvsao46_added_items_like_pandas(case: str) -> None:
     run = _FVSAO46_MORE_CASES[case]
     assert _fvsao46_shown(lambda: run(fpd)) == _fvsao46_shown(lambda: run(pd)), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_cut_refuses_datetime_values_1qj7z() -> None:
+    # pandas bins datetime / timedelta values into interval[datetime64[ns]]
+    # categories, which fp's Interval cannot hold yet (br-frankenpandas-1qj7z):
+    # refused - every value came back NaN, silently. A refusal, not parity.
+    dates = fpd.Series(fpd.to_datetime(["2024-01-01", "2024-01-05", "2024-01-10"]))
+    spans = fpd.Series(fpd.to_timedelta(["1h", "5h", "10h"]))
+    for binning in (lambda x: fpd.cut(x, 2), lambda x: fpd.qcut(x, 2)):
+        for values in (dates, spans):
+            with pytest.raises(NotImplementedError, match="datetime64 / timedelta64"):
+                binning(values)
+    # NEGATIVE: numbers still bin as pandas bins them.
+    assert repr(fpd.cut(fpd.Series([1.0, 5.0, 10.0]), 2)) == repr(pd.cut(pd.Series([1.0, 5.0, 10.0]), 2))
