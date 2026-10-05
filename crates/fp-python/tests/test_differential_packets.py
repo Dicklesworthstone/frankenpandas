@@ -24595,3 +24595,98 @@ def test_correlation_of_values_of_order_1e_9_like_pandas_su6b9(case: str) -> Non
 
     got, want = values(fpd), values(pd)
     assert np.allclose(got, want, rtol=1e-12, atol=0, equal_nan=True), (got, want)
+
+
+# br-frankenpandas-s1pnw: pandas casts combine's answers back to the Series'
+# dtype when no value changes (maybe_cast_pointwise_result); fp kept the
+# dtype it inferred from them, and refused a scalar other.
+_S1PNW_CASES = {
+    "int, integral float answers": lambda m: m.Series([1, 2, 3]).combine(m.Series([1.0, 5.0, 0.0]), max),
+    "int, fractional answers": lambda m: m.Series([1, 2, 3]).combine(m.Series([1.5, 2.0, 0.5]), max),
+    "int, answers within 1e-8": lambda m: m.Series([1, 2]).combine(m.Series([0.0, 0.0]), lambda a, b: a + 1e-9),
+    "int, a missing answer": lambda m: m.Series([1, 2]).combine(m.Series([1.0]), lambda a, b: a + b),
+    "int32": lambda m: m.Series([1, 2], dtype="int32").combine(m.Series([1.0, 5.0]), max),
+    "float, int answers": lambda m: m.Series([1.5, 2.5]).combine(m.Series([1, 2]), lambda a, b: int(a) + b),
+    "float32": lambda m: m.Series([1.5, 2.5], dtype="float32").combine(m.Series([1, 2]), lambda a, b: a + b),
+    "bool, 0 / 1 answers": lambda m: m.Series([True, False]).combine(m.Series([0, 0]), lambda a, b: int(a)),
+    "bool, int answers": lambda m: m.Series([True, False]).combine(m.Series([1, 2]), lambda a, b: a + b),
+    "int, bool answers": lambda m: m.Series([1, 2]).combine(m.Series([1, 3]), lambda a, b: a == b),
+    "int, text answers": lambda m: m.Series([1, 2]).combine(m.Series([1, 3]), lambda a, b: str(a)),
+    "Int64": lambda m: m.Series([1, None], dtype="Int64").combine(m.Series([1.0, 2.0]), lambda a, b: 7.0),
+    "Int64, fractional": lambda m: m.Series([1, 2], dtype="Int64").combine(m.Series([1.0, 2.0]), lambda a, b: 0.5),
+    "Float64": lambda m: m.Series([1.5, None], dtype="Float64").combine(m.Series([1, 2]), lambda a, b: 3),
+    "scalar other": lambda m: m.Series([1, 2], name="s").combine(5.0, max),
+    "scalar other, float answers": lambda m: m.Series([1, 2]).combine(0.5, lambda a, b: a * b),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_S1PNW_CASES))
+def test_combine_casts_back_to_the_series_dtype_like_pandas_s1pnw(case: str) -> None:
+    def shown(m: Any) -> Any:
+        result = _S1PNW_CASES[case](m)
+        return (str(result.dtype), repr(result), result.name)
+
+    assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-pwsl2: DatetimeIndex.date / .time / .timetz are pandas
+# properties (object arrays, NaT where missing); fp had methods returning
+# lists with None, and timetz dropped the zone.
+_PWSL2_INDEXES = {
+    "naive with NaT": lambda m: m.DatetimeIndex(["2024-01-01 10:30:15.000123", None]),
+    "nanoseconds": lambda m: m.DatetimeIndex(["2024-03-10 23:59:59.123456789"]),
+    "tz-aware": lambda m: m.DatetimeIndex(["2024-01-01 10:30", "2024-07-01 08:00"], tz="US/Eastern"),
+    "frame index": lambda m: m.DataFrame({"v": [1, 2]}, index=m.to_datetime(["2024-01-02 00:00", "2024-01-03 04:05"])).index,
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("attr", ["date", "time", "timetz"])
+@pytest.mark.parametrize("case", list(_PWSL2_INDEXES))
+def test_datetimeindex_date_time_are_properties_like_pandas_pwsl2(case: str, attr: str) -> None:
+    def shown(m: Any) -> Any:
+        out = getattr(_PWSL2_INDEXES[case](m), attr)
+        return (type(out).__name__, str(out.dtype), [repr(v) for v in out])
+
+    assert shown(fpd) == shown(pd)
+    # NEGATIVE: a Timestamp's date / time stay methods.
+    assert fpd.Timestamp("2024-01-01 10:30").date() == pd.Timestamp("2024-01-01 10:30").date()
+
+
+def _nat_attribute(m: Any, name: str) -> Any:
+    try:
+        value = getattr(m.NaT, name)
+        if callable(value):
+            value = value()
+    except Exception as e:  # noqa: BLE001 - the exception is the outcome
+        return ("raise", type(e).__name__, str(e))
+    if isinstance(value, float) and value != value:
+        return ("nan", type(value).__name__)
+    return ("value", type(value).__name__ if value is not m.NaT else "NaT", repr(value))
+
+
+# br-frankenpandas-4ffc9: 57 of pandas' 78 NaT attributes were missing, the
+# fields were None (pandas nan) and NaT.time() answered NaT.
+_NAT_ATTRIBUTES = sorted(n for n in dir(pd.NaT) if not n.startswith("_") and n not in {"as_unit", "fromisoformat"})
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("name", _NAT_ATTRIBUTES)
+def test_nat_attributes_like_pandas_4ffc9(name: str) -> None:
+    assert _nat_attribute(fpd, name) == _nat_attribute(pd, name)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_nat_methods_answer_the_one_nat_4ffc9() -> None:
+    for m in (pd, fpd):
+        assert m.NaT.date() is m.NaT
+        assert m.NaT.as_unit("s") is m.NaT
+        assert m.NaT.tz_localize("UTC") is m.NaT
+    # NEGATIVE: NaT still equals nothing, itself included.
+    assert not (fpd.NaT == fpd.NaT)
+    for m in (pd, fpd):
+        with pytest.raises(TypeError, match="takes exactly one argument"):
+            m.NaT.fromisoformat()
+        with pytest.raises(TypeError, match="takes exactly 1 positional argument"):
+            m.NaT.fromisoformat("2024-01-01")

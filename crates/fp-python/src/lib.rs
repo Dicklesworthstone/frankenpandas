@@ -562,6 +562,95 @@ fn index_dtype_object<'py>(
     Ok(pyo3::types::PyString::new(py, name).into_any())
 }
 
+/// pandas' `maybe_cast_pointwise_result` for `Series.combine`: the answers,
+/// typed from what `func` returned, go back to the Series' dtype when no
+/// value changes - an int Series' max(34, 120.0) is the int 120, a float
+/// Series' int answers are floats, an int32 or nullable Int64 Series keeps
+/// its dtype - and keep their own dtype otherwise: a fractional or missing
+/// answer of a numpy int, bool answers of a number, text
+/// (br-frankenpandas-s1pnw).
+fn cast_pointwise_like(answers: Column, source: &Column) -> Column {
+    // numpy's allclose(rtol=0, atol=1e-8) between the answers and their
+    // integer cast (a truncation).
+    let near_integral = |v: f64| v.is_finite() && (v - v.trunc()).abs() <= 1e-8;
+    let floats = || -> Option<Vec<f64>> {
+        answers
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Float64(v) => Some(*v),
+                Scalar::Int64(v) => Some(*v as f64),
+                _ => None,
+            })
+            .collect()
+    };
+    let cast = match (source.dtype(), answers.dtype()) {
+        (DType::Int64, DType::Int64) => Some(answers.clone().narrowed_like(source)),
+        (DType::Int64, DType::Float64) => floats()
+            .filter(|values| values.iter().all(|&v| near_integral(v)))
+            .and_then(|values| {
+                let ints = values
+                    .iter()
+                    .map(|&v| Scalar::Int64(v.trunc() as i64))
+                    .collect();
+                Column::new(DType::Int64, ints).ok()
+            })
+            .map(|column| column.narrowed_like(source)),
+        (DType::Float64, DType::Int64 | DType::Float64) => {
+            let column = answers.astype(DType::Float64).ok();
+            // A float32 Series takes them when float32 holds each within
+            // pandas' 5e-4.
+            let fits_f32 = source.width().is_none_or(|_| {
+                floats().is_some_and(|values| {
+                    values
+                        .iter()
+                        .all(|&v| v.is_nan() || (f64::from(v as f32) - v).abs() <= 5e-4)
+                })
+            });
+            column.map(|column| {
+                if fits_f32 {
+                    column.narrowed_like(source)
+                } else {
+                    column
+                }
+            })
+        }
+        (DType::Bool, DType::Int64 | DType::Float64) => floats()
+            .filter(|values| values.iter().all(|&v| v == 0.0 || (v - 1.0).abs() <= 1e-8))
+            .and_then(|values| {
+                Column::new(
+                    DType::Bool,
+                    values.iter().map(|&v| Scalar::Bool(v != 0.0)).collect(),
+                )
+                .ok()
+            }),
+        // The extension dtypes' _from_sequence: integral numbers and missing
+        // values make an Int64, any numbers a Float64.
+        (DType::Int64Nullable | DType::Float64Nullable, _) => {
+            let integer = source.dtype() == DType::Int64Nullable;
+            answers
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Null(_) => Some(Scalar::Null(NullKind::Null)),
+                    Scalar::Float64(v) if v.is_nan() => Some(Scalar::Null(NullKind::Null)),
+                    Scalar::Int64(v) if integer => Some(Scalar::Int64(*v)),
+                    Scalar::Float64(v) if integer && v.fract() == 0.0 && v.abs() < 9.2e18 => {
+                        Some(Scalar::Int64(*v as i64))
+                    }
+                    Scalar::Int64(v) => Some(Scalar::Float64(*v as f64)),
+                    Scalar::Float64(v) if !integer => Some(Scalar::Float64(*v)),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()
+                .and_then(|values| Column::new(source.dtype(), values).ok())
+                .map(|column| column.narrowed_like(source))
+        }
+        _ => None,
+    };
+    cast.unwrap_or(answers)
+}
+
 /// pandas' name for a dtype, as `Series.dtype` / `DataFrame.dtypes` print it.
 fn pandas_dtype_name(dtype: &fp_types::DType) -> String {
     use fp_types::DType;
@@ -3233,77 +3322,460 @@ impl PyNaTType {
         i64::MIN
     }
 
+    // pandas' NaT fields are float nan (they were None, so a NaT cell's
+    // `t.month` in an apply made an object column; 4ffc9).
     #[getter]
-    fn year(&self) -> Option<i64> {
-        None
+    fn year(&self) -> f64 {
+        f64::NAN
     }
     #[getter]
-    fn month(&self) -> Option<i64> {
-        None
+    fn month(&self) -> f64 {
+        f64::NAN
     }
     #[getter]
-    fn day(&self) -> Option<i64> {
-        None
+    fn day(&self) -> f64 {
+        f64::NAN
     }
     #[getter]
-    fn hour(&self) -> Option<i64> {
-        None
+    fn hour(&self) -> f64 {
+        f64::NAN
     }
     #[getter]
-    fn minute(&self) -> Option<i64> {
-        None
+    fn minute(&self) -> f64 {
+        f64::NAN
     }
     #[getter]
-    fn second(&self) -> Option<i64> {
-        None
+    fn second(&self) -> f64 {
+        f64::NAN
     }
     #[getter]
-    fn microsecond(&self) -> Option<i64> {
-        None
+    fn millisecond(&self) -> f64 {
+        f64::NAN
     }
     #[getter]
-    fn nanosecond(&self) -> Option<i64> {
-        None
+    fn microsecond(&self) -> f64 {
+        f64::NAN
     }
     #[getter]
-    fn days(&self) -> Option<i64> {
-        None
+    fn nanosecond(&self) -> f64 {
+        f64::NAN
     }
     #[getter]
-    fn seconds(&self) -> Option<i64> {
-        None
+    fn days(&self) -> f64 {
+        f64::NAN
     }
     #[getter]
-    fn microseconds(&self) -> Option<i64> {
-        None
+    fn seconds(&self) -> f64 {
+        f64::NAN
     }
     #[getter]
-    fn nanoseconds(&self) -> Option<i64> {
-        None
+    fn microseconds(&self) -> f64 {
+        f64::NAN
+    }
+    #[getter]
+    fn nanoseconds(&self) -> f64 {
+        f64::NAN
+    }
+    #[getter]
+    fn quarter(&self) -> f64 {
+        f64::NAN
+    }
+    #[getter]
+    fn qyear(&self) -> f64 {
+        f64::NAN
+    }
+    #[getter]
+    fn week(&self) -> f64 {
+        f64::NAN
+    }
+    #[getter]
+    fn weekofyear(&self) -> f64 {
+        f64::NAN
+    }
+    #[getter]
+    fn day_of_week(&self) -> f64 {
+        f64::NAN
+    }
+    #[getter]
+    fn dayofweek(&self) -> f64 {
+        f64::NAN
+    }
+    #[getter]
+    fn day_of_year(&self) -> f64 {
+        f64::NAN
+    }
+    #[getter]
+    fn dayofyear(&self) -> f64 {
+        f64::NAN
+    }
+    #[getter]
+    fn days_in_month(&self) -> f64 {
+        f64::NAN
+    }
+    #[getter]
+    fn daysinmonth(&self) -> f64 {
+        f64::NAN
     }
 
-    fn isoformat(&self) -> &'static str {
+    #[getter]
+    fn is_leap_year(&self) -> bool {
+        false
+    }
+    #[getter]
+    fn is_month_start(&self) -> bool {
+        false
+    }
+    #[getter]
+    fn is_month_end(&self) -> bool {
+        false
+    }
+    #[getter]
+    fn is_quarter_start(&self) -> bool {
+        false
+    }
+    #[getter]
+    fn is_quarter_end(&self) -> bool {
+        false
+    }
+    #[getter]
+    fn is_year_start(&self) -> bool {
+        false
+    }
+    #[getter]
+    fn is_year_end(&self) -> bool {
+        false
+    }
+
+    #[getter]
+    fn fold(&self) -> i64 {
+        0
+    }
+    #[getter]
+    fn tz(&self, py: Python<'_>) -> Py<PyAny> {
+        py.None()
+    }
+    #[getter]
+    fn tzinfo(&self, py: Python<'_>) -> Py<PyAny> {
+        py.None()
+    }
+
+    /// `numpy.datetime64('NaT')`.
+    #[getter]
+    fn asm8<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        py.import("numpy")?.getattr("datetime64")?.call1(("NaT",))
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn to_datetime64<'py>(
+        &self,
+        py: Python<'py>,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.asm8(py)
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn to_numpy<'py>(
+        &self,
+        py: Python<'py>,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.asm8(py)
+    }
+
+    /// datetime's own bounds and resolution, as pandas' NaT inherits them.
+    #[getter]
+    fn max<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        py.import("datetime")?.getattr("datetime")?.getattr("max")
+    }
+    #[getter]
+    fn min<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        py.import("datetime")?.getattr("datetime")?.getattr("min")
+    }
+    #[getter]
+    fn resolution<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        py.import("datetime")?
+            .getattr("datetime")?
+            .getattr("resolution")
+    }
+
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn isoformat(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> &'static str {
         "NaT"
     }
 
     fn total_seconds(&self) -> f64 {
         f64::NAN
     }
-
-    /// pandas' NaT.date() / time() / to_pydatetime() are NaT.
-    fn date(&self) -> Self {
-        PyNaTType
+    fn weekday(&self) -> f64 {
+        f64::NAN
+    }
+    fn isoweekday(&self) -> f64 {
+        f64::NAN
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn day_name(&self, _args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) -> f64 {
+        f64::NAN
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn month_name(&self, _args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) -> f64 {
+        f64::NAN
     }
 
-    fn time(&self) -> Self {
-        PyNaTType
+    // The methods pandas' NaT answers with NaT itself - the one object
+    // (date() / to_pydatetime() made a new one).
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn date(
+        &self,
+        py: Python<'_>,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        nat_object(py)
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn to_pydatetime(
+        &self,
+        py: Python<'_>,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        nat_object(py)
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn replace(
+        &self,
+        py: Python<'_>,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        nat_object(py)
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn tz_convert(
+        &self,
+        py: Python<'_>,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        nat_object(py)
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn tz_localize(
+        &self,
+        py: Python<'_>,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        nat_object(py)
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn now(
+        &self,
+        py: Python<'_>,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        nat_object(py)
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn today(
+        &self,
+        py: Python<'_>,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        nat_object(py)
+    }
+    /// pandas' `as_unit(unit, round_ok=True)`: NaT in any unit.
+    #[pyo3(signature = (unit, round_ok=true))]
+    fn as_unit(&self, py: Python<'_>, unit: &str, round_ok: bool) -> PyResult<Py<PyAny>> {
+        let _ = (unit, round_ok);
+        nat_object(py)
+    }
+    /// pandas' `fromisoformat` takes exactly one argument, and NaT cannot be
+    /// built from its datetime fields: both are TypeErrors.
+    #[pyo3(signature = (*args))]
+    fn fromisoformat(&self, args: &Bound<'_, PyTuple>) -> PyResult<()> {
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            if args.len() == 1 {
+                "__new__() takes exactly 1 positional argument (9 given)".to_owned()
+            } else {
+                format!(
+                    "NaTType.fromisoformat() takes exactly one argument ({} given)",
+                    args.len()
+                )
+            },
+        ))
     }
 
-    #[pyo3(signature = (warn=true))]
-    fn to_pydatetime(&self, warn: bool) -> Self {
-        let _ = warn; // there are no nanoseconds to discard
-        PyNaTType
+    // The datetime methods pandas' NaT refuses: "NaTType does not support
+    // <name>" (time() answered NaT; the rest were missing).
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn time(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(nat_unsupported("time"))
     }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn timetz(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(nat_unsupported("timetz"))
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn astimezone(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(nat_unsupported("astimezone"))
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn combine(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(nat_unsupported("combine"))
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn ctime(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(nat_unsupported("ctime"))
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn dst(&self, _args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+        Err(nat_unsupported("dst"))
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn fromisocalendar(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(nat_unsupported("fromisocalendar"))
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn fromordinal(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(nat_unsupported("fromordinal"))
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn fromtimestamp(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(nat_unsupported("fromtimestamp"))
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn isocalendar(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(nat_unsupported("isocalendar"))
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn strftime(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(nat_unsupported("strftime"))
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn strptime(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(nat_unsupported("strptime"))
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn timestamp(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(nat_unsupported("timestamp"))
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn timetuple(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(nat_unsupported("timetuple"))
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn toordinal(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(nat_unsupported("toordinal"))
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn tzname(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(nat_unsupported("tzname"))
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn utcfromtimestamp(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(nat_unsupported("utcfromtimestamp"))
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn utcnow(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(nat_unsupported("utcnow"))
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn utcoffset(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(nat_unsupported("utcoffset"))
+    }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn utctimetuple(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(nat_unsupported("utctimetuple"))
+    }
+}
+
+/// pandas' refusal of a datetime method NaT has no answer for.
+fn nat_unsupported(name: &str) -> PyErr {
+    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("NaTType does not support {name}"))
 }
 
 /// Components breakdown for `Timedelta` (pandas `Timedelta.components`),
@@ -14097,22 +14569,12 @@ impl PyDatetimeIndex {
         })
     }
 
-    fn date(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
-        let dt_mod = py.import("datetime")?;
-        let date_cls = dt_mod.getattr("date")?;
-        let mut out = Vec::with_capacity(self.inner.len());
-        let years = self.inner.year();
-        let months = self.inner.month();
-        let days = self.inner.day();
-        for i in 0..self.inner.len() {
-            if let (Some(y), Some(m), Some(d)) = (years[i], months[i], days[i]) {
-                let py_d = date_cls.call1((y, m, d))?;
-                out.push(py_d.into_any().unbind());
-            } else {
-                out.push(py.None());
-            }
-        }
-        Ok(PyList::new(py, out)?.unbind())
+    /// pandas' `DatetimeIndex.date`: an object array of `datetime.date`, NaT
+    /// where missing - a property, as pandas' (it was a method returning a
+    /// list with None, so `idx.date` was a bound method).
+    #[getter]
+    fn date<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        stamp_objects(slf.as_any(), "date")
     }
 
     #[getter]
@@ -14494,29 +14956,18 @@ impl PyDatetimeIndex {
         Ok(Self { inner })
     }
 
-    fn time(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
-        let dt_mod = py.import("datetime")?;
-        let time_cls = dt_mod.getattr("time")?;
-        let mut out = Vec::with_capacity(self.inner.len());
-        let hours = self.inner.hour();
-        let minutes = self.inner.minute();
-        let seconds = self.inner.second();
-        let microseconds = self.inner.microsecond();
-        for i in 0..self.inner.len() {
-            if let (Some(h), Some(m), Some(s), Some(us)) =
-                (hours[i], minutes[i], seconds[i], microseconds[i])
-            {
-                let py_t = time_cls.call1((h, m, s, us))?;
-                out.push(py_t.into_any().unbind());
-            } else {
-                out.push(py.None());
-            }
-        }
-        Ok(PyList::new(py, out)?.unbind())
+    /// pandas' `DatetimeIndex.time`: `datetime.time` objects (wall clock,
+    /// no zone), NaT where missing; a property (see [`Self::date`]).
+    #[getter]
+    fn time<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        stamp_objects(slf.as_any(), "time")
     }
 
-    fn timetz(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
-        self.time(py)
+    /// pandas' `DatetimeIndex.timetz`: `time` with the zone's tzinfo (it
+    /// dropped the zone); a property.
+    #[getter]
+    fn timetz<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        stamp_objects(slf.as_any(), "timetz")
     }
 
     fn to_julian_date(&self) -> Vec<Option<f64>> {
@@ -33133,10 +33584,28 @@ impl PySeries {
     fn combine(
         &self,
         py: Python<'_>,
-        other: &PySeries,
+        other: &Bound<'_, PyAny>,
         func: &Bound<'_, PyAny>,
         fill_value: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
+        let column = self.inner.column();
+        // Anything but a Series is a scalar meeting every value, as pandas'
+        // (it raised TypeError; s1pnw).
+        let Ok(other) = other.extract::<PyRef<'_, PySeries>>() else {
+            let mut answers = Vec::with_capacity(column.len());
+            for value in column.values() {
+                let out = func.call1((scalar_to_py(py, value)?, other))?;
+                answers.push(py_to_scalar(py, &out)?);
+            }
+            let answers = Column::from_values(answers).map_err(column_error_to_py)?;
+            let series = Series::new(
+                self.inner.name().clone(),
+                self.inner.index().clone(),
+                cast_pointwise_like(answers, column),
+            )
+            .map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner: series });
+        };
         let fill_scalar = match fill_value {
             Some(fv) if !fv.is_none() => Some(py_to_scalar(py, fv)?),
             _ => None,
@@ -33173,7 +33642,8 @@ impl PySeries {
         } else {
             LabelName::default()
         };
-        let res_series = Series::new(res_name, plan.union_index, col).map_err(frame_error_to_py)?;
+        let res_series = Series::new(res_name, plan.union_index, cast_pointwise_like(col, column))
+            .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res_series })
     }
 
@@ -34073,6 +34543,32 @@ fn object_ndarray<'py>(
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", "object")?;
     let array = np.call_method("empty", (items.len(),), Some(&kwargs))?;
+    array.set_item(pyo3::types::PySlice::full(py), PyList::new(py, items)?)?;
+    Ok(array)
+}
+
+/// Each stamp's `Timestamp.<method>()` over an iterable of stamps, NaT for
+/// NaT, as pandas' object array: the Timestamp answers already carry pandas'
+/// zone rules (`DatetimeIndex.date` / `time` / `timetz`).
+fn stamp_objects<'py>(stamps: &Bound<'py, PyAny>, method: &str) -> PyResult<Bound<'py, PyAny>> {
+    let py = stamps.py();
+    let nat = nat_object(py)?;
+    let items = stamps
+        .try_iter()?
+        .map(|stamp| {
+            let stamp = stamp?;
+            if stamp.is(&nat) {
+                Ok(stamp)
+            } else {
+                stamp.call_method0(method)
+            }
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "object")?;
+    let array = py
+        .import("numpy")?
+        .call_method("empty", (items.len(),), Some(&kwargs))?;
     array.set_item(pyo3::types::PySlice::full(py), PyList::new(py, items)?)?;
     Ok(array)
 }
