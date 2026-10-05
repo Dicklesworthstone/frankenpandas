@@ -26470,3 +26470,46 @@ def test_numpy_scalars_and_flex_fill_keep_the_width_like_pandas_yxqee_ajyln(case
         return (str(result.dtype), [repr(value) for value in result.tolist()])
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-par0y: DataFrame arithmetic keeps each narrow numpy
+# column's width as its Series does - against a number (a numpy one weak), a
+# frame of the same widths, with fill_value, under a unary operator - where
+# the frame kernels answered float64 / int64.
+def _par0y_frame(m: Any) -> Any:
+    return m.DataFrame({
+        "a": np.array([0.1, 2.5, np.nan], dtype="float32"),
+        "i": np.array([3, 100, -128], dtype="int8"),
+        "u": np.array([200, 1, 7], dtype="uint8"),
+        "j": np.array([5, -6, 7], dtype="int32"),
+        "f": [1.5, 2.5, np.nan],
+    })
+
+
+_PAR0Y_CASES = {
+    "frame * 0.1": lambda m: _par0y_frame(m) * 0.1,
+    "frame + 3": lambda m: _par0y_frame(m) + 3,
+    "frame // 2": lambda m: _par0y_frame(m) // 2,
+    "frame / 2": lambda m: _par0y_frame(m) / 2,
+    "3 - frame": lambda m: 3 - _par0y_frame(m),
+    "frame * np.float64(0.1)": lambda m: _par0y_frame(m) * np.float64(0.1),
+    "frame + np.int64(3)": lambda m: _par0y_frame(m) + np.int64(3),
+    "frame.add(1, fill_value=0)": lambda m: _par0y_frame(m).add(1, fill_value=0),
+    "frame * frame": lambda m: _par0y_frame(m) * _par0y_frame(m),
+    "frame.add(frame, fill_value=0)": lambda m: _par0y_frame(m).add(_par0y_frame(m), fill_value=0),
+    "-frame": lambda m: -_par0y_frame(m),
+    "abs(frame)": lambda m: abs(_par0y_frame(m)),
+    "frame + float64 Series (NEGATIVE)": lambda m: _par0y_frame(m) + m.Series([1.0] * 5, index=list("aiujf")),
+    "float64 frame * 0.1 (NEGATIVE)": lambda m: m.DataFrame({"f": [1.5, 2.5]}) * 0.1,
+    "int64 frame + 3 (NEGATIVE)": lambda m: m.DataFrame({"k": [1, 2]}) + 3,
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_PAR0Y_CASES))
+def test_frame_arithmetic_keeps_narrow_widths_like_pandas_par0y(case: str) -> None:
+    def shown(m: Any) -> Any:
+        result = _PAR0Y_CASES[case](m)
+        return ([str(dtype) for dtype in result.dtypes], repr(result.values.tolist()))
+
+    assert shown(fpd) == shown(pd)

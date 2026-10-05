@@ -24310,6 +24310,119 @@ fn fill_one_side(side: &Series, against: &Series, fill: &Scalar) -> PyResult<Ser
     narrowed_to(filled, side.column().width())
 }
 
+/// Whether a column of `frame` carries a narrow numpy width (float32, int8,
+/// uint16, ...).
+fn has_narrow_column(frame: &DataFrame) -> bool {
+    (0..frame.num_columns()).any(|position| {
+        frame
+            .column_at(position)
+            .is_some_and(|column| column.width().is_some())
+    })
+}
+
+/// `series <op> other` (`other <op> series` when `reflected`) through the
+/// Series operators, which type the result as numpy does.
+fn series_operator(
+    series: &PySeries,
+    py: Python<'_>,
+    other: &Bound<'_, PyAny>,
+    op: ArithmeticOp,
+    reflected: bool,
+) -> PyResult<PySeries> {
+    match (op, reflected) {
+        (ArithmeticOp::Add, false) => series.__add__(py, other),
+        (ArithmeticOp::Add, true) => series.__radd__(py, other),
+        (ArithmeticOp::Sub, false) => series.__sub__(py, other),
+        (ArithmeticOp::Sub, true) => series.__rsub__(py, other),
+        (ArithmeticOp::Mul, false) => series.__mul__(py, other),
+        (ArithmeticOp::Mul, true) => series.__rmul__(py, other),
+        (ArithmeticOp::Div, false) => series.__truediv__(py, other),
+        (ArithmeticOp::Div, true) => series.__rtruediv__(py, other),
+        (ArithmeticOp::FloorDiv, false) => series.__floordiv__(py, other),
+        (ArithmeticOp::FloorDiv, true) => series.__rfloordiv__(py, other),
+        (ArithmeticOp::Mod, false) => series.__mod__(py, other),
+        (ArithmeticOp::Mod, true) => series.__rmod__(py, other),
+        (ArithmeticOp::Pow, false) => series.__pow__(py, other, None),
+        (ArithmeticOp::Pow, true) => series.__rpow__(py, other, None),
+    }
+}
+
+/// `result`, of `left <op> right` for two frames, with each column both
+/// hold in numpy's dtype for the pair - float32 + float32 is float32, int8 +
+/// int8 int8 wrapped, true division of ints float64 - as
+/// [`narrowed_arith`] types a Series pair (they were float64 / int64;
+/// br-frankenpandas-par0y). A column one side lacks, or a pair not both
+/// numpy numbers, keeps the engine's dtype; computing a float32 pair in
+/// float64 and rounding once is numpy's float32 answer.
+fn narrowed_frame_arith(
+    result: DataFrame,
+    left: &DataFrame,
+    right: &DataFrame,
+    true_division: bool,
+) -> PyResult<DataFrame> {
+    use fp_types::NumpyNumeric;
+    if !has_narrow_column(left) && !has_narrow_column(right) {
+        return Ok(result);
+    }
+    let numpy = |column: &Column| NumpyNumeric::of(&column.dtype(), column.width());
+    let names: Vec<String> = result.column_names().into_iter().cloned().collect();
+    let mut columns = Vec::with_capacity(names.len());
+    for (position, name) in names.iter().enumerate() {
+        let column = result
+            .column_at(position)
+            .cloned()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyIndexError, _>("column position"))?;
+        let numeric = match (
+            left.column(name).and_then(numpy),
+            right.column(name).and_then(numpy),
+        ) {
+            (Some(l), Some(r)) => Some(l.result_type(r)),
+            _ => None,
+        };
+        let numeric = match numeric {
+            Some(numeric) if true_division && !numeric.is_float() => Some(NumpyNumeric::Float(64)),
+            numeric => numeric,
+        };
+        columns.push(match numeric {
+            Some(numeric) => {
+                let series = Series::new(name.as_str(), result.index().clone(), column)
+                    .map_err(frame_error_to_py)?;
+                narrowed_to(series, numeric.width())?.column().clone()
+            }
+            None => column,
+        });
+    }
+    Ok(result.with_columns_at_positions(columns))
+}
+
+/// `result`, a unary operator's answer over `source`, with each column in
+/// its source column's narrow width (-df of float32 / int8 columns stays
+/// float32 / int8, an int8 -128 wrapped; they were float64 / int64;
+/// br-frankenpandas-par0y), as [`unary_keeping_width`] keeps a Series'.
+fn widths_kept(result: DataFrame, source: &DataFrame) -> PyResult<DataFrame> {
+    if !has_narrow_column(source) || result.num_columns() != source.num_columns() {
+        return Ok(result);
+    }
+    let names: Vec<String> = result.column_names().into_iter().cloned().collect();
+    let mut columns = Vec::with_capacity(names.len());
+    for (position, name) in names.iter().enumerate() {
+        let column = result
+            .column_at(position)
+            .cloned()
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyIndexError, _>("column position"))?;
+        let width = source.column_at(position).and_then(Column::width);
+        columns.push(match width {
+            Some(_) => {
+                let series = Series::new(name.as_str(), result.index().clone(), column)
+                    .map_err(frame_error_to_py)?;
+                narrowed_to(series, width)?.column().clone()
+            }
+            None => column,
+        });
+    }
+    Ok(result.with_columns_at_positions(columns))
+}
+
 /// `left <op> right` for two DataFrames.
 fn frame_arith(
     left: &DataFrame,
@@ -37253,6 +37366,9 @@ impl PyDataFrame {
         reflected: bool,
         symbol: &str,
     ) -> PyResult<PyDataFrame> {
+        // A numpy number is the Python number of its value (see
+        // [`arith_operand`]; br-frankenpandas-par0y).
+        let other = &arith_operand(other)?;
         // Columns of Python-object cells against a scalar run the cells' own
         // operators, as a Series of them does (they were NaN / a coercion
         // error; br-frankenpandas-8dqrn); the other columns their kernels.
@@ -37310,13 +37426,39 @@ impl PyDataFrame {
             }
             return Ok(PyDataFrame { inner: result });
         }
+        // Columns of a narrow numpy dtype (float32, int8, ...) against a
+        // number type as their Series do - the width kept, a numpy number
+        // weak, an int wrapped - where the frame kernels answered float64 /
+        // int64 (br-frankenpandas-par0y).
+        if scalar && has_narrow_column(&self.inner) && number_scalar(&unwrap_0d(other)?).is_some() {
+            let py = other.py();
+            let columns = (0..self.inner.num_columns())
+                .map(|position| {
+                    let series = self.column_series_at(position)?;
+                    Ok(series_operator(&series, py, other, op, reflected)?
+                        .inner
+                        .column()
+                        .clone())
+                })
+                .collect::<PyResult<Vec<Column>>>()?;
+            return Ok(PyDataFrame {
+                inner: self.inner.with_columns_at_positions(columns),
+            });
+        }
         if let Ok(frame) = other.extract::<PyRef<'_, PyDataFrame>>() {
             let (left, right) = if reflected {
                 (&frame.inner, &self.inner)
             } else {
                 (&self.inner, &frame.inner)
             };
-            let result = wrap_frame(frame_arith(left, right, op))?;
+            let result = PyDataFrame {
+                inner: narrowed_frame_arith(
+                    frame_arith(left, right, op).map_err(frame_error_to_py)?,
+                    left,
+                    right,
+                    op == ArithmeticOp::Div,
+                )?,
+            };
             // bool % bool columns are numpy's int8 (see [`BoolNumpy`]).
             if op == ArithmeticOp::Mod && self.inner.column_names() == frame.inner.column_names() {
                 let both = |position: usize| {
@@ -37481,7 +37623,7 @@ impl PyDataFrame {
                 "DataFrame.{method}(fill_value={fill}) that is not a number"
             ))
         })?;
-        wrap_frame(match op {
+        let result = match op {
             ArithmeticOp::Add => left.add_df_fill(right, value),
             ArithmeticOp::Sub => left.sub_df_fill(right, value),
             ArithmeticOp::Mul => left.mul_df_fill(right, value),
@@ -37493,6 +37635,10 @@ impl PyDataFrame {
                     "DataFrame.{method}(fill_value=...) against a DataFrame"
                 )));
             }
+        }
+        .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame {
+            inner: narrowed_frame_arith(result, left, right, op == ArithmeticOp::Div)?,
         })
     }
 
@@ -37726,7 +37872,10 @@ impl PyDataFrame {
             });
         }
         if computed.iter().all(Option::is_none) {
-            return wrap_frame(core(&self.inner));
+            let result = core(&self.inner).map_err(frame_error_to_py)?;
+            return Ok(PyDataFrame {
+                inner: widths_kept(result, &self.inner)?,
+            });
         }
         // The core sees a 0 where each object column was, which every
         // unary operator takes.
