@@ -29633,6 +29633,13 @@ impl PySeries {
     /// Return the absolute value of each element as a new Series; an
     /// object column's cell by cell ([`host_object_unary`]).
     fn abs(&self, py: Python<'_>) -> PyResult<PySeries> {
+        // Text has no absolute value: Python's TypeError, as pandas' (it was
+        // a ValueError; br-frankenpandas-wwbb1); no text, nothing to refuse.
+        if self.inner.column().is_pandas_string() && !self.inner.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "bad operand type for abs(): 'str'",
+            ));
+        }
         if let Some(inner) = host_object_unary(py, &self.inner, "abs")? {
             return Ok(PySeries { inner });
         }
@@ -29982,6 +29989,30 @@ impl PySeries {
 
             let val = value.expect("value is some");
 
+            // A `string` Series holds text only: a scalar fill with nothing
+            // missing changes nothing (it became object), and one that is
+            // not text cannot fill a missing value - pandas' TypeError (it
+            // was stringified; br-frankenpandas-wwbb1).
+            if self.inner.column().is_pandas_string()
+                && !val.is_instance_of::<PyDict>()
+                && val.extract::<PyRef<PySeries>>().is_err()
+            {
+                // A missing fill (NaN, None, pd.NA) leaves <NA> as it is (it
+                // stored a NaN printing 'nan').
+                let missing_fill = isna(py, val)?.bind(py).is_truthy()?;
+                if !self.inner.column().has_any_missing() || missing_fill {
+                    return Ok(PySeries {
+                        inner: self.inner.clone(),
+                    });
+                }
+                if !val.is_instance_of::<pyo3::types::PyString>() {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                        "Cannot set non-string value '{}' into a StringArray.",
+                        val.str()?
+                    )));
+                }
+            }
+
             // 1. Value is a Series
             if let Ok(other_s) = val.extract::<PyRef<PySeries>>() {
                 // An equal index - repeated labels too - fills row for row,
@@ -30109,6 +30140,13 @@ impl PySeries {
     ) -> PyResult<PySeries> {
         numpy_compat_kwargs("cumprod", kwargs)?;
         self.refuse_string_reduction("cumprod")?;
+        // A product of durations is no duration: pandas' TypeError (it
+        // answered; br-frankenpandas-wwbb1).
+        if self.inner.dtype() == DType::Timedelta64 {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "cumprod not supported for Timedelta.",
+            ));
+        }
         let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
         if ax != 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -30897,6 +30935,25 @@ impl PySeries {
                 .map_err(frame_error_to_py);
         }
         let target = dtype_arg_text(&spec).unwrap_or_default();
+        // A datetime / timedelta Series does not cast to a float: pandas'
+        // TypeError (it was a ValueError; br-frankenpandas-wwbb1).
+        let temporal = match self.inner.column().dtype() {
+            DType::Datetime64 { .. } => Some("DatetimeArray"),
+            DType::Timedelta64 => Some("TimedeltaArray"),
+            _ => None,
+        };
+        if let Some(kind) = temporal
+            && matches!(target.as_str(), "float" | "float64" | "float32" | "double")
+        {
+            let width = if target == "float32" {
+                "float32"
+            } else {
+                "float64"
+            };
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "Cannot cast {kind} to dtype {width}"
+            )));
+        }
         // astype(str) of a masked Series (Int64, Float64, boolean) spells its
         // <NA> as pandas does (it gave 'None'; br-frankenpandas-tdafd).
         if self.inner.column().dtype().is_nullable() && target == "str" {
@@ -33600,6 +33657,13 @@ impl PySeries {
             if method == "pad" && limit_direction.is_some_and(|d| d != "forward") {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                     "`limit_direction` must be 'forward' for method `pad`",
+                ));
+            }
+            // pandas' masked boolean array does not interpolate (it answered
+            // boolean; br-frankenpandas-wwbb1) - an empty one comes back.
+            if self.inner.dtype() == DType::BoolNullable && !self.inner.is_empty() {
+                return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                    "interpolate is not implemented for dtype=boolean",
                 ));
             }
             if !Series::interpolate_supports(method, limit_direction, limit_area) {
@@ -66971,6 +67035,13 @@ impl PySeriesGroupBy {
         let _ = engine_kwargs;
         groupby_engine("SeriesGroupBy.sum", engine)?;
         self.check_numeric_only("sum", numeric_only)?;
+        // Instants do not add: pandas' TypeError (an object NaN Series;
+        // br-frankenpandas-wwbb1).
+        if matches!(self.series.column().dtype(), DType::Datetime64 { .. }) {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "datetime64 type does not support sum operations",
+            ));
+        }
         let gb = self.grouped()?;
         let min_count = usize::try_from(min_count).unwrap_or(0);
         let res = gb

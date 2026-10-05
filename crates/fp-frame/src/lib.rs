@@ -18680,6 +18680,17 @@ impl Series {
         if self.is_empty() {
             return Ok(self.clone());
         }
+        // Bools no bound moves stay bools, as pandas' clip (its `where`
+        // replaces nothing; they were float64; br-frankenpandas-wwbb1).
+        if let Some(flags) = self.column.as_bool_slice() {
+            let moved = |flag: &bool| {
+                let value = f64::from(u8::from(*flag));
+                lower.is_some_and(|lower| lower > value) || upper.is_some_and(|upper| upper < value)
+            };
+            if !flags.iter().any(moved) {
+                return Ok(self.clone());
+            }
+        }
         self.keeping_extension_dtype(self.keeping_width(self.clip_storage(lower, upper), false))
     }
 
@@ -19345,6 +19356,15 @@ impl Series {
     ///
     /// Matches `pd.Series.round(decimals)`. NaN values pass through.
     pub fn round(&self, decimals: i32) -> Result<Self, FrameError> {
+        // pandas rounds numbers only: an object / `string` / datetime /
+        // timedelta / boolean Series comes back as it is (they raised
+        // TypeError, a boolean one became float64; br-frankenpandas-wwbb1).
+        if matches!(
+            self.column.dtype(),
+            DType::Utf8 | DType::Datetime64 { .. } | DType::Timedelta64 | DType::BoolNullable
+        ) {
+            return Ok(self.clone());
+        }
         Self::new(
             self.name.clone(),
             self.index.clone(),
@@ -22208,7 +22228,7 @@ impl Series {
         };
         let shifted = self.shift_with_fill_value(periods, fill)?;
         let column = shifted_column_dtype(&self.column.dtype(), shifted.column, periods)?;
-        Self::new(shifted.name, shifted.index, column)
+        self.missing_kept(Self::new(shifted.name, shifted.index, column)?)
     }
 
     /// Shift index by `periods`, filling the vacated positions with `fill_value`
@@ -22392,6 +22412,12 @@ impl Series {
     /// Matches `pd.Series.diff(periods)`. Computes `value[i] - value[i - periods]`.
     /// Produces NaN for positions without a valid predecessor and for nulls.
     pub fn diff(&self, periods: i64) -> Result<Self, FrameError> {
+        // A float32 Series' differences are float32 (numpy subtracts in it;
+        // they were float64; br-frankenpandas-wwbb1).
+        self.keeping_width(self.diff_storage(periods), false)
+    }
+
+    fn diff_storage(&self, periods: i64) -> Result<Self, FrameError> {
         // A nullable Int64 / Float64 / boolean Series diffs in its own dtype,
         // a gap NA (pandas' masked arrays; it came back float64; 4qg5w.11).
         if self.column.dtype().is_nullable() {
@@ -23100,6 +23126,25 @@ impl Series {
         if let Some(empty) = self.empty_cumulative("cumprod") {
             return empty;
         }
+        // A float32 column multiplies in float32, each partial product
+        // rounded, as cumsum adds (it was float64; br-frankenpandas-wwbb1).
+        if self.column.width() == Some(NumericWidth::Float32) {
+            let mut acc = 1.0_f64;
+            let out: Vec<Scalar> = self
+                .column
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Float64(v) if !v.is_nan() => {
+                        acc = NumericWidth::round_f32(acc * v);
+                        Scalar::Float64(acc)
+                    }
+                    _ => Scalar::missing_for_dtype(self.column.dtype()),
+                })
+                .collect();
+            let column = Column::new(self.column.dtype(), out)?.keeping_dtype_of(&self.column);
+            return Series::new(self.name.clone(), self.index.clone(), column);
+        }
         // Typed prefix-product fast path (see cumsum): all-valid Int64
         // (wrapping_mul) / Float64 (acc*=v), bit-identical, no Scalar materialize.
         if let Some(data) = self.column.as_i64_slice()
@@ -23734,11 +23779,57 @@ impl Series {
             return Ok(self.clone());
         }
         // A nullable Series keeps its dtype (4qg5w.11), a narrow one its
-        // width while `other` fits it (fvsao.23).
+        // width while `other` fits it (fvsao.23); with no `other` (or a
+        // missing one, the same) a datetime / timedelta / text / float one
+        // too.
         let selected = self
             .where_cond_selected(cond, other)
             .and_then(|selected| self.keep_nullable(selected));
+        let selected = if other.is_none_or(Scalar::is_missing) {
+            selected.and_then(|selected| self.missing_kept(selected))
+        } else {
+            selected
+        };
         self.keeping_width(selected, false)
+    }
+
+    /// `result`, an operation's output holding this Series' values and
+    /// missing ones it put among them, in this Series' dtype where that dtype
+    /// holds a missing value of its own - a datetime / timedelta (NaT), text
+    /// (`string`'s NA, object's NaN as it came) or float column: a result
+    /// left with missing values only inferred object (`s.where(s.isna())` of
+    /// datetimes, the shift of a one-value `string` Series;
+    /// br-frankenpandas-wwbb1). Any other result as it is.
+    fn missing_kept(&self, result: Self) -> Result<Self, FrameError> {
+        let dtype = self.column.dtype();
+        if result.column.dtype() == dtype
+            || !matches!(
+                dtype,
+                DType::Datetime64 { .. } | DType::Timedelta64 | DType::Utf8 | DType::Float64
+            )
+        {
+            return Ok(result);
+        }
+        let temporal = matches!(dtype, DType::Datetime64 { .. } | DType::Timedelta64);
+        let values: Vec<Scalar> = result
+            .column
+            .values()
+            .iter()
+            .map(|value| match value {
+                missing if temporal && missing.is_missing() => Scalar::Null(NullKind::NaT),
+                value => value.clone(),
+            })
+            .collect();
+        let column = if dtype == DType::Utf8 {
+            Column::from_object_values(values)
+        } else {
+            Column::new(dtype, values)?
+        };
+        Self::new(
+            result.name.clone(),
+            result.index.clone(),
+            column.keeping_dtype_of(&self.column),
+        )
     }
 
     fn where_cond_selected(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
@@ -27326,9 +27417,18 @@ impl Series {
     /// Percentage change without any null fill — interior missing values
     /// propagate as NaN. The shared core behind [`pct_change`] (after the
     /// default forward-fill) and [`pct_change_with_fill`].
-    fn pct_change_core(&self, periods: i64) -> Result<Self, FrameError> {
+    fn pct_change_core(&self, periods: i64, float32: bool) -> Result<Self, FrameError> {
         let len = self.len();
         let len_i = len as i64;
+        // pandas' `data / shifted - 1`, a float32 Series' in float32: each
+        // step rounded to it (it was float64; br-frankenpandas-wwbb1).
+        let change = |cur: f64, prev: f64| {
+            if float32 {
+                NumericWidth::round_f32(NumericWidth::round_f32(cur / prev) - 1.0)
+            } else {
+                cur / prev - 1.0
+            }
+        };
 
         // Typed Float64 fast path (br-frankenpandas-c7rfx): an `as_f64_slice`
         // column is all-valid Float64 with no NaN, so there are no missing
@@ -27357,7 +27457,7 @@ impl Series {
                 // pandas' own formula, `data / shifted - 1`: `(cur - prev) /
                 // prev` rounds differently and gives NaN after an infinite
                 // prev where pandas gives -1 (fvsao.13).
-                let ratio = data[i] / prev - 1.0;
+                let ratio = change(data[i], prev);
                 out[i] = ratio;
                 if ratio.is_nan() {
                     validity.set(i, false);
@@ -27425,7 +27525,7 @@ impl Series {
 
             match (current.to_f64(), previous.to_f64()) {
                 (Ok(cur), Ok(prev)) => {
-                    out.push(Scalar::Float64(cur / prev - 1.0));
+                    out.push(Scalar::Float64(change(cur, prev)));
                 }
                 _ => out.push(Scalar::Null(NullKind::NaN)),
             }
@@ -27496,8 +27596,9 @@ impl Series {
                 "fill_method must be one of ['ffill', 'pad', 'bfill', 'backfill'], got '{method}'"
             )));
         }
+        let float32 = self.column.width() == Some(NumericWidth::Float32);
         if self.column.validity().all() {
-            return self.pct_change_core(periods);
+            return self.keeping_width(self.pct_change_core(periods, float32), false);
         }
         let filled = match fill_method {
             None => self.clone(),
@@ -27507,7 +27608,7 @@ impl Series {
                 _ => unreachable!("fill_method validated above"),
             },
         };
-        filled.pct_change_core(periods)
+        self.keeping_width(filled.pct_change_core(periods, float32), false)
     }
 
     /// Convert Series to a single-column DataFrame.
@@ -45276,8 +45377,9 @@ impl SeriesGroupBy<'_> {
     /// Mean of each group.
     pub fn mean(&self) -> Result<Series, FrameError> {
         self.refuse_text("mean")?;
-        // Per br-frankenpandas-c1bxu: Timedelta64-aware groupby mean.
-        if self.column_is_timedelta() {
+        // Per br-frankenpandas-c1bxu: Timedelta64-aware groupby mean; a
+        // datetime column's too (exact, as DISC-019's datetime mean).
+        if self.column_is_timedelta() || self.column_is_datetime() {
             return self.agg_timedelta(|sum, count| {
                 if count == 0 {
                     0
@@ -45366,6 +45468,15 @@ impl SeriesGroupBy<'_> {
     where
         F: Fn(i128, usize) -> i128,
     {
+        // A datetime column's instants combine the same way (its mean; it
+        // was object NaN, br-frankenpandas-wwbb1), staying datetimes in its
+        // zone.
+        let datetime = self.column_is_datetime();
+        let wrap: fn(i64) -> Scalar = if datetime {
+            Scalar::Datetime64
+        } else {
+            Scalar::Timedelta64
+        };
         let (order, order_keys, groups) = self.build_groups();
         let mut labels = Vec::with_capacity(order_keys.len());
         let mut values = Vec::with_capacity(order_keys.len());
@@ -45374,7 +45485,9 @@ impl SeriesGroupBy<'_> {
             let mut sum: i128 = 0;
             let mut count: usize = 0;
             for &idx in indices {
-                if let Scalar::Timedelta64(ns) = &self.series.column.values()[idx] {
+                if let Scalar::Timedelta64(ns) | Scalar::Datetime64(ns) =
+                    &self.series.column.values()[idx]
+                {
                     if *ns == fp_types::Timedelta::NAT {
                         continue;
                     }
@@ -45384,11 +45497,11 @@ impl SeriesGroupBy<'_> {
             }
             labels.push(order[i].clone());
             if count == 0 {
-                values.push(Scalar::Timedelta64(fp_types::Timedelta::NAT));
+                values.push(wrap(fp_types::Timedelta::NAT));
             } else {
                 let emitted = combine(sum, count);
                 let clamped = emitted.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
-                values.push(Scalar::Timedelta64(clamped as i64));
+                values.push(wrap(clamped as i64));
             }
         }
         // Per br-frankenpandas-1iqhe: sister to p6y8q. Apply by-Series name.
@@ -45399,7 +45512,11 @@ impl SeriesGroupBy<'_> {
             Some(by_name)
         };
         let index = Index::new(labels).rename_index(idx_name);
-        let column = Column::from_values(values)?;
+        let column = if datetime {
+            Column::new(self.series.column.dtype(), values)?
+        } else {
+            Column::from_values(values)?
+        };
         Series::new(self.series.name(), index, column)
     }
 
@@ -125387,6 +125504,95 @@ mod tests {
         for position in 0..gappy.num_columns() {
             assert_eq!(gappy.column_at(position).unwrap().dtype(), DType::Float64);
         }
+    }
+
+    #[test]
+    fn results_keep_pandas_dtypes_wwbb1() {
+        let labels = |n: i64| (0..n).map(IndexLabel::from).collect::<Vec<_>>();
+        let series = |column: Column| {
+            let n = i64::try_from(column.len()).unwrap();
+            Series::new("s", Index::new(labels(n)), column).unwrap()
+        };
+        let flags = |values: &[bool]| {
+            series(
+                Column::new(
+                    DType::Bool,
+                    values.iter().map(|&v| Scalar::Bool(v)).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        let day = 86_400_000_000_000_i64;
+        let instants = series(
+            Column::new(
+                DType::Datetime64 { tz: None },
+                vec![
+                    Scalar::Datetime64(0),
+                    Scalar::Datetime64(day),
+                    Scalar::Datetime64(3 * day),
+                ],
+            )
+            .unwrap(),
+        );
+        // pandas: where without `other` puts NaT in a datetime column (it
+        // became object - every value masked inferred nothing).
+        let masked = instants
+            .where_cond(&flags(&[false, false, false]), None)
+            .unwrap();
+        assert_eq!(masked.column().dtype(), DType::Datetime64 { tz: None });
+        assert!(masked.column().values().iter().all(Scalar::is_missing));
+        // A datetime groupby mean is the exact mean instant.
+        let keys = series(
+            Column::new(
+                DType::Int64,
+                vec![Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(2)],
+            )
+            .unwrap(),
+        );
+        let means = instants.groupby(&keys).unwrap().mean().unwrap();
+        assert_eq!(means.column().dtype(), DType::Datetime64 { tz: None });
+        assert_eq!(
+            means.values(),
+            &[Scalar::Datetime64(day / 2), Scalar::Datetime64(3 * day)]
+        );
+        // float32 differences / changes / products stay float32, each step
+        // rounded (numpy's float32 arithmetic).
+        let narrow = series(
+            Column::new(
+                DType::Float64,
+                vec![
+                    Scalar::Float64(1.5),
+                    Scalar::Float64(2.25),
+                    Scalar::Float64(4.0),
+                ],
+            )
+            .unwrap(),
+        )
+        .astype_width(fp_types::NumericWidth::Float32, false)
+        .unwrap();
+        for result in [narrow.diff(1), narrow.pct_change(1), narrow.cumprod()] {
+            assert_eq!(
+                result.unwrap().column().width(),
+                Some(fp_types::NumericWidth::Float32)
+            );
+        }
+        assert_eq!(
+            narrow.pct_change(1).unwrap().values()[2],
+            Scalar::Float64(f64::from(0.777_777_8_f32))
+        );
+        // Bools no bound moves stay bools; NEGATIVE: a moving bound changes
+        // them.
+        let bools = flags(&[true, false]);
+        assert_eq!(
+            bools.clip(Some(0.0), Some(1.0)).unwrap().column().dtype(),
+            DType::Bool
+        );
+        assert_ne!(
+            bools.clip(Some(0.5), Some(1.0)).unwrap().column().dtype(),
+            DType::Bool
+        );
+        // round leaves datetimes / text as they are.
+        assert_eq!(instants.round(1).unwrap().values(), instants.values());
     }
 
     #[test]

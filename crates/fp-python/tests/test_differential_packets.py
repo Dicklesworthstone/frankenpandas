@@ -25879,8 +25879,8 @@ _4OHJC_OPS = {
     "round": lambda s: s.round(1),
     "interp": lambda s: s.interpolate(),
 }
-_4OHJC_EMPTY_RESIDUE = {("cumsum", "datetime64[ns]"), ("cumprod", "datetime64[ns]"), ("cumprod", "timedelta64[ns]"), ("gb sum", "datetime64[ns]"), ("gb mean", "object"), ("gb mean", "string"), ("diff", "bool"), ("diff", "object"), ("diff", "string"), ("diff", "float32"), ("pct", "bool"), ("pct", "object"), ("pct", "string"), ("pct", "float32"), ("abs", "datetime64[ns]"), ("pow2", "int64"), ("pow2", "Int64"), ("pow2", "string"), ("pow2", "datetime64[ns]"), ("pow2", "timedelta64[ns]"), ("pow2", "int32"), ("add1", "datetime64[ns]"), ("add1", "timedelta64[ns]"), ("div2", "string"), ("div2", "datetime64[ns]"), ("div2", "timedelta64[ns]"), ("eq1", "datetime64[ns]"), ("eq1", "timedelta64[ns]"), ("roll sum", "object"), ("roll sum", "string"), ("exp mean", "object"), ("exp mean", "string"), ("astype f", "datetime64[ns]"), ("astype f", "timedelta64[ns]"), ("round", "object"), ("round", "boolean"), ("round", "string"), ("round", "datetime64[ns]"), ("round", "timedelta64[ns]"), ("interp", "Int64")}
-_4OHJC_ONE_ROW_RESIDUE = {("cumprod", "object"), ("cumprod", "timedelta64[ns]"), ("cumprod", "float32"), ("shift", "string"), ("where", "string"), ("where", "datetime64[ns]"), ("where", "timedelta64[ns]"), ("gb sum", "datetime64[ns]"), ("gb mean", "datetime64[ns]"), ("diff", "object"), ("diff", "string"), ("diff", "float32"), ("pct", "bool"), ("pct", "object"), ("pct", "string"), ("pct", "float32"), ("abs", "string"), ("abs", "datetime64[ns]"), ("clip", "bool"), ("fillna0", "string"), ("astype f", "datetime64[ns]"), ("astype f", "timedelta64[ns]"), ("round", "object"), ("round", "boolean"), ("round", "string"), ("round", "datetime64[ns]"), ("round", "timedelta64[ns]"), ("interp", "boolean")}
+_4OHJC_EMPTY_RESIDUE = {("cumsum", "datetime64[ns]"), ("cumprod", "datetime64[ns]"), ("gb mean", "object"), ("gb mean", "string"), ("diff", "bool"), ("diff", "object"), ("diff", "string"), ("pct", "bool"), ("pct", "object"), ("pct", "string"), ("abs", "datetime64[ns]"), ("pow2", "int64"), ("pow2", "Int64"), ("pow2", "string"), ("pow2", "datetime64[ns]"), ("pow2", "timedelta64[ns]"), ("pow2", "int32"), ("add1", "datetime64[ns]"), ("add1", "timedelta64[ns]"), ("div2", "string"), ("div2", "datetime64[ns]"), ("div2", "timedelta64[ns]"), ("eq1", "datetime64[ns]"), ("eq1", "timedelta64[ns]"), ("roll sum", "object"), ("roll sum", "string"), ("exp mean", "object"), ("exp mean", "string"), ("interp", "Int64")}
+_4OHJC_ONE_ROW_RESIDUE = {("cumprod", "object"), ("diff", "object"), ("diff", "string"), ("pct", "bool"), ("pct", "object"), ("pct", "string"), ("abs", "datetime64[ns]")}
 
 
 def _4ohjc_cells(residue: set[tuple[str, str]], bead: str) -> list[Any]:
@@ -25947,5 +25947,74 @@ def test_empty_frames_answer_pandas_dtypes_4ohjc(case: str, rows: int) -> None:
         result = _4OHJC_FRAMES[case](m, rows)
         dtypes = [str(dtype) for dtype in result.dtypes] if hasattr(result, "columns") else str(result.dtype)
         return (repr(result), dtypes)
+
+    assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-wwbb1: results keep pandas' dtype over several values too -
+# where / mask without `other` put NaT / <NA> / NaN in a datetime / timedelta
+# / string column (it became object), a string shift / fillna stays string,
+# a datetime groupby mean is datetime, float32 diff / pct_change / cumprod
+# stay float32 (each step rounded), bools no bound moves stay bool, round
+# leaves non-numbers as they are, and pandas' refusals raise its error.
+def _wwbb1_dt(m: Any) -> Any:
+    return m.Series(m.to_datetime(["2024-01-01 10:00", "2024-01-02 00:00", None, "2024-01-05 06:30"]))
+
+
+_WWBB1_CASES = {
+    "datetime where": lambda m: _wwbb1_dt(m).where(m.Series([True, False, True, True])),
+    "datetime mask": lambda m: _wwbb1_dt(m).mask(m.Series([True, False, False, False])),
+    "datetime where all False": lambda m: _wwbb1_dt(m).where(m.Series([False] * 4)),
+    "datetime where nan other": lambda m: _wwbb1_dt(m).where(m.Series([True, False, True, True]), math.nan),
+    "UTC where": lambda m: m.Series(m.to_datetime(["2024-01-01 10:00", "2024-01-02 00:00"]).tz_localize("UTC")).where(m.Series([False, True])),
+    "timedelta where": lambda m: m.Series(m.to_timedelta(["1D", "2h", None])).where(m.Series([False, True, True])),
+    "string where": lambda m: m.Series(["a", None, "c"], dtype="string").where(m.Series([True, True, False])),
+    "string where all False": lambda m: m.Series(["a"], dtype="string").where(m.Series([False])),
+    "object where all False": lambda m: m.Series(["a", "b"]).where(m.Series([False, False])),
+    "int where (NEGATIVE)": lambda m: m.Series([1, 2]).where(m.Series([True, False])),
+    "string shift": lambda m: m.Series(["a", "b"], dtype="string").shift(2),
+    "string fillna 0, nothing missing": lambda m: m.Series(["a", "b"], dtype="string").fillna(0),
+    "string fillna 0, missing": lambda m: m.Series(["a", None], dtype="string").fillna(0),
+    "string fillna text": lambda m: m.Series(["a", None], dtype="string").fillna("z"),
+    "string fillna NaN": lambda m: m.Series(["a", None], dtype="string").fillna(math.nan),
+    "datetime groupby mean": lambda m: _wwbb1_dt(m).groupby([1, 1, 2, 2]).mean(),
+    "datetime groupby mean, all NaT group": lambda m: _wwbb1_dt(m).groupby([1, 1, 2, 3]).mean(),
+    "UTC groupby mean": lambda m: m.Series(m.to_datetime(["2024-01-01 10:00", "2024-01-03 00:00"]).tz_localize("UTC")).groupby([1, 1]).mean(),
+    "datetime groupby sum": lambda m: _wwbb1_dt(m).groupby([1, 1, 2, 2]).sum(),
+    "float32 diff": lambda m: m.Series([1.5, 2.25, None, 4.1, 0.3], dtype="float32").diff(),
+    "float32 pct_change": lambda m: m.Series([1.5, 2.25, 4.1, 0.3, 7.7], dtype="float32").pct_change(),
+    "float32 pct_change, missing": lambda m: m.Series([1.5, None, 4.1, 0.3], dtype="float32").pct_change(),
+    "float32 cumprod": lambda m: m.Series([1.5, 2.25, None, 4.1, 0.3], dtype="float32").cumprod(),
+    "float64 pct_change (NEGATIVE)": lambda m: m.Series([1.5, 2.25, 4.1]).pct_change(),
+    "bool clip, no bound moves": lambda m: m.Series([True, False]).clip(0, 1),
+    "bool clip, open bounds": lambda m: m.Series([True, False]).clip(-1, 2),
+    "bool clip, upper only": lambda m: m.Series([True, False]).clip(upper=1),
+    "object round": lambda m: m.Series(["a", 1.26]).round(1),
+    "string round": lambda m: m.Series(["a", None], dtype="string").round(1),
+    "datetime round": lambda m: _wwbb1_dt(m).round(1),
+    "timedelta round": lambda m: m.Series(m.to_timedelta(["1s", "2D"])).round(0),
+    "boolean round": lambda m: m.Series([True, None], dtype="boolean").round(),
+    "float round (NEGATIVE)": lambda m: m.Series([1.26, 2.5]).round(1),
+    "datetime astype float": lambda m: _wwbb1_dt(m).astype("float64"),
+    "timedelta astype float32": lambda m: m.Series(m.to_timedelta(["1D"])).astype("float32"),
+    "boolean interpolate": lambda m: m.Series([True, None, False], dtype="boolean").interpolate(),
+    "timedelta cumprod": lambda m: m.Series(m.to_timedelta(["1D", "2D"])).cumprod(),
+    "string abs": lambda m: m.Series(["a"], dtype="string").abs(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_WWBB1_CASES))
+def test_results_keep_pandas_dtype_wwbb1(case: str) -> None:
+    import warnings
+
+    def shown(m: Any) -> Any:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                result = _WWBB1_CASES[case](m)
+            except Exception as error:  # noqa: BLE001 - the error is the answer
+                return ("raises", type(error).__name__, str(error))
+        return (repr(result), str(result.dtype))
 
     assert shown(fpd) == shown(pd)
