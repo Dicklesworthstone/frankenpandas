@@ -7094,7 +7094,7 @@ fn parse_period_ordinal(value: &str) -> Result<Period, FrameError> {
     }
     if let Some((year, quarter)) = parse_quarter_period_label(trimmed) {
         let ordinal = i64::from(year - 1970) * 4 + i64::from(quarter - 1);
-        return Ok(Period::new(ordinal, PeriodFreq::Quarterly));
+        return Ok(Period::new(ordinal, PeriodFreq::QUARTERLY));
     }
     if let Some((year, month)) = parse_year_month_period_label(trimmed) {
         let ordinal = i64::from(year - 1970) * 12 + i64::from(month - 1);
@@ -7121,7 +7121,7 @@ fn parse_period_ordinal(value: &str) -> Result<Period, FrameError> {
         let year = trimmed.parse::<i32>().map_err(|_| {
             FrameError::CompatibilityRejected(format!("cannot parse period value '{value}'"))
         })?;
-        return Ok(Period::new(i64::from(year - 1970), PeriodFreq::Annual));
+        return Ok(Period::new(i64::from(year - 1970), PeriodFreq::ANNUAL));
     }
     Err(FrameError::CompatibilityRejected(format!(
         "cannot parse period value '{value}'"
@@ -61216,9 +61216,11 @@ fn period_label_numeric_into(nanos: i64, freq: PeriodFreq, buf: &mut String) -> 
     // Hand-rolled ASCII writers, bit-identical to the prior `write!` arms:
     // `{:04}`->push_4d, `{:02}`->push_2d, Quarterly's unpadded `{}` year->push_uint,
     // its single-digit quarter is a literal digit.
+    // Calendar years / quarters and Monday..Sunday weeks only: another
+    // anchor's label is its fiscal period's (the `_` arm declines).
     match freq {
-        PeriodFreq::Annual => push_4d(buf, y),
-        PeriodFreq::Quarterly => {
+        PeriodFreq::ANNUAL => push_4d(buf, y),
+        PeriodFreq::QUARTERLY => {
             push_uint(buf, y);
             buf.push('Q');
             buf.push((b'0' + ((m - 1) / 3 + 1) as u8) as char);
@@ -61285,7 +61287,7 @@ fn period_label_numeric_into(nanos: i64, freq: PeriodFreq, buf: &mut String) -> 
             buf.push(':');
             push_2d(buf, s);
         }
-        PeriodFreq::Weekly => {
+        PeriodFreq::WEEKLY => {
             // weekly_period_bounds: Monday..Sunday of the week. 1970-01-01 (day 0)
             // is a Thursday = 3 days from Monday => num_days_from_monday =
             // (day+3) mod 7. Label "start/end" as "%Y-%m-%d/%Y-%m-%d".
@@ -61314,10 +61316,10 @@ fn period_label_numeric_into(nanos: i64, freq: PeriodFreq, buf: &mut String) -> 
 
 fn cached_period_label_day(nanos: i64, freq: PeriodFreq) -> Option<i64> {
     match freq {
-        PeriodFreq::Annual
-        | PeriodFreq::Quarterly
+        PeriodFreq::ANNUAL
+        | PeriodFreq::QUARTERLY
         | PeriodFreq::Monthly
-        | PeriodFreq::Weekly
+        | PeriodFreq::WEEKLY
         | PeriodFreq::Daily
         | PeriodFreq::Business => Some(nanos.div_euclid(PERIOD_LABEL_NANOS_PER_DAY)),
         PeriodFreq::Hourly | PeriodFreq::Minutely | PeriodFreq::Secondly => None,
@@ -61433,10 +61435,10 @@ fn period_index_from_datetime_like_index(index: &Index, freq: &str) -> Result<In
         let mut offsets: Vec<usize> = Vec::with_capacity(src.len() + 1);
         offsets.push(0);
         match period_freq {
-            PeriodFreq::Annual
-            | PeriodFreq::Quarterly
+            PeriodFreq::ANNUAL
+            | PeriodFreq::QUARTERLY
             | PeriodFreq::Monthly
-            | PeriodFreq::Weekly
+            | PeriodFreq::WEEKLY
             | PeriodFreq::Daily
             | PeriodFreq::Business => {
                 let mut label_cache: Option<(i64, String)> = None;
@@ -61518,7 +61520,7 @@ fn weekly_period_bounds(date: NaiveDate) -> Result<(NaiveDate, NaiveDate), Frame
 /// Anchor weekday for an anchored weekly alias `W-MON`..`W-SAT`.
 ///
 /// Returns `None` for the default `W` / `W-SUN` (handled by the canonical
-/// `PeriodFreq::Weekly` path) and for any non-weekly alias. Case-insensitive.
+/// `PeriodFreq::WEEKLY` path) and for any non-weekly alias. Case-insensitive.
 fn weekly_anchor_weekday(freq: &str) -> Option<Weekday> {
     match freq.trim().to_ascii_uppercase().strip_prefix("W-")? {
         "MON" => Some(Weekday::Mon),
@@ -61603,7 +61605,7 @@ fn month_from_code(code: &str) -> Option<u32> {
 /// `A-JAN`..`A-NOV` (the fiscal year ENDS in this month).
 ///
 /// Returns `None` for the default `Y`/`A`/`Y-DEC`/`A-DEC` (canonical
-/// `PeriodFreq::Annual` path) and for any non-annual alias. Case-insensitive.
+/// `PeriodFreq::ANNUAL` path) and for any non-annual alias. Case-insensitive.
 fn annual_anchor_month(freq: &str) -> Option<u32> {
     let upper = freq.trim().to_ascii_uppercase();
     let suffix = upper
@@ -61680,7 +61682,7 @@ fn annual_anchored_label_to_timestamp(
 
 /// End-month anchor for an anchored quarterly alias `Q-JAN`..`Q-NOV` (the
 /// fiscal year — and thus Q4 — ENDS in this month). `None` for the default
-/// `Q`/`Q-DEC` (canonical `PeriodFreq::Quarterly`) and non-quarterly aliases.
+/// `Q`/`Q-DEC` (canonical `PeriodFreq::QUARTERLY`) and non-quarterly aliases.
 fn quarterly_anchor_month(freq: &str) -> Option<u32> {
     let suffix = freq
         .trim()
@@ -61778,10 +61780,10 @@ fn quarterly_anchored_label_to_timestamp(
 
 fn format_period_label(dt: NaiveDateTime, freq: PeriodFreq) -> Result<String, FrameError> {
     Ok(match freq {
-        PeriodFreq::Annual => dt.format("%Y").to_string(),
-        PeriodFreq::Quarterly => format!("{}Q{}", dt.year(), ((dt.month() - 1) / 3) + 1),
+        PeriodFreq::ANNUAL => dt.format("%Y").to_string(),
+        PeriodFreq::QUARTERLY => format!("{}Q{}", dt.year(), ((dt.month() - 1) / 3) + 1),
         PeriodFreq::Monthly => dt.format("%Y-%m").to_string(),
-        PeriodFreq::Weekly => {
+        PeriodFreq::WEEKLY => {
             let (start, end) = weekly_period_bounds(dt.date())?;
             format!("{}/{}", start.format("%Y-%m-%d"), end.format("%Y-%m-%d"))
         }
@@ -61879,8 +61881,10 @@ fn period_label_to_timestamp(
         return Ok(IndexLabel::Datetime64(i64::MIN));
     }
 
+    // Calendar years / quarters here; fiscal ones resolve through
+    // annual_anchored_label_to_timestamp / quarterly_anchored_label_to_timestamp.
     let datetime = match freq {
-        PeriodFreq::Annual => {
+        PeriodFreq::ANNUAL => {
             let year = trimmed
                 .parse::<i32>()
                 .map_err(|_| period_timestamp_parse_error(trimmed, freq))?;
@@ -61896,7 +61900,7 @@ fn period_label_to_timestamp(
                 period_datetime_at(date, 23, 59, 59, 999_999_999)?
             }
         }
-        PeriodFreq::Quarterly => {
+        PeriodFreq::QUARTERLY => {
             let (year, quarter) = parse_quarter_period_label(trimmed)
                 .ok_or_else(|| period_timestamp_parse_error(trimmed, freq))?;
             let start_month = (quarter - 1) * 3 + 1;
@@ -62003,7 +62007,7 @@ fn period_label_to_timestamp(
                 target,
             )?
         }
-        PeriodFreq::Weekly => {
+        PeriodFreq::Weekly(_) => {
             // Weekly period labels are formatted "START/END" (the Monday-anchored
             // week bounds). `how='start'` resolves to the START date at midnight;
             // `how='end'` resolves to the END date at the last nanosecond, matching
@@ -81674,7 +81678,7 @@ impl DataFrame {
 
         // Anchored fiscal-year labels (Y-JAN..Y-NOV) need the anchor month to
         // resolve their start/end; anchored weekly labels share the canonical
-        // Weekly START/END shape, so they route through PeriodFreq::Weekly.
+        // Weekly START/END shape, so they route through PeriodFreq::WEEKLY.
         let labels = if let Some(anchor) = annual_anchor_month(freq) {
             self.index
                 .labels()
@@ -81689,7 +81693,7 @@ impl DataFrame {
                 .collect::<Result<Vec<_>, _>>()?
         } else {
             let period_freq = if weekly_anchor_weekday(freq).is_some() {
-                PeriodFreq::Weekly
+                PeriodFreq::WEEKLY
             } else {
                 PeriodFreq::parse(freq).ok_or_else(|| {
                     FrameError::CompatibilityRejected(format!(
@@ -176560,7 +176564,7 @@ mod tests {
                 .expect("valid time");
 
             for (alias, freq, want) in [
-                ("W", PeriodFreq::Weekly, weekly),
+                ("W", PeriodFreq::WEEKLY, weekly),
                 ("B", PeriodFreq::Business, business),
             ] {
                 // Renderer 1: nanos -> label, this crate's own path.
@@ -177962,8 +177966,8 @@ mod tests {
         assert_eq!(
             df.columns()["period"].values(),
             &[
-                Scalar::Period(Period::new(216, PeriodFreq::Quarterly)),
-                Scalar::Period(Period::new(648, PeriodFreq::Quarterly)),
+                Scalar::Period(Period::new(216, PeriodFreq::QUARTERLY)),
+                Scalar::Period(Period::new(648, PeriodFreq::QUARTERLY)),
             ]
         );
         assert_eq!(
@@ -177989,10 +177993,10 @@ mod tests {
                 IndexLabel::from(3_i64),
             ],
             vec![
-                Scalar::Period(Period::new(216, PeriodFreq::Quarterly)),
+                Scalar::Period(Period::new(216, PeriodFreq::QUARTERLY)),
                 Scalar::Period(Period::new(650, PeriodFreq::Monthly)),
                 Scalar::Period(Period::parse("2024-01-15").unwrap()),
-                Scalar::Period(Period::new(54, PeriodFreq::Annual)),
+                Scalar::Period(Period::new(54, PeriodFreq::ANNUAL)),
             ],
         )
         .unwrap();

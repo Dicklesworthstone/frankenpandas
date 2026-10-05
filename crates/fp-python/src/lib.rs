@@ -6160,7 +6160,16 @@ fn convert_period_freq(p: Period, target_freq: &str, how: &str) -> PyResult<Peri
 fn period_from_text(text: &str, freq: Option<&str>) -> PyResult<Period> {
     let unreadable = |err: String| PyErr::new::<pyo3::exceptions::PyValueError, _>(err);
     match (Period::parse(text), freq) {
-        (Ok(period), Some(freq)) => convert_period_freq(period, freq, "start"),
+        (Ok(period), Some(freq)) => match (period.freq, PeriodFreq::parse(freq)) {
+            // A quarter label names the fiscal quarter of an anchored
+            // frequency (pandas' quarter_to_myear): Period('2024Q1', 'Q-JAN')
+            // is fiscal 2024Q1, starting 2023-02 (it read the calendar
+            // quarter and became 2024Q4).
+            (PeriodFreq::QUARTERLY, Some(target @ PeriodFreq::Quarterly(_))) => {
+                Ok(Period::new(period.ordinal, target))
+            }
+            _ => convert_period_freq(period, freq, "start"),
+        },
         (Ok(period), None) => Ok(period),
         (Err(err), None) => Err(unreadable(err.to_string())),
         (Err(err), Some(freq)) => {
@@ -6235,11 +6244,13 @@ impl PyPeriod {
 /// The offset `n` periods of `freq` span, as pandas' Period - Period gives
 /// it (`<3 * MonthEnds>`; it was the int 3; br-frankenpandas-3x4e7).
 fn period_freq_offset(freq: PeriodFreq, n: i64) -> PyResult<PyDateOffset> {
+    // An anchored frequency's offset carries its anchor (<2 * YearEnds:
+    // month=6> for Y-JUN, QuarterEnd startingMonth=1 for Q-JAN).
     Ok(match freq {
-        PeriodFreq::Annual => offset_year_end(n, false, 12)?,
-        PeriodFreq::Quarterly => offset_quarter_end(n, false, 12)?,
+        PeriodFreq::Annual(month) => offset_year_end(n, false, i64::from(month))?,
+        PeriodFreq::Quarterly(month) => offset_quarter_end(n, false, i64::from(month))?,
         PeriodFreq::Monthly => offset_month_end(n, false),
-        PeriodFreq::Weekly => offset_week(n, false, Some(6))?,
+        PeriodFreq::Weekly(day) => offset_week(n, false, Some(i64::from(day)))?,
         PeriodFreq::Daily => offset_day(n),
         PeriodFreq::Business => offset_business_day(n, false),
         PeriodFreq::Hourly => offset_hour(n),
@@ -6291,20 +6302,24 @@ impl PyPeriod {
                 if let Some(y) = year_item {
                     let year = y.extract::<i64>()?;
                     let freq_str = freq_arg.as_deref().unwrap_or("Y");
+                    let parsed = PeriodFreq::parse(freq_str);
                     let inner = match freq_str.to_ascii_uppercase().as_str() {
+                        // A fiscal year / quarter names the period itself:
+                        // Period(year=2024, quarter=1, freq='Q-JAN') is
+                        // 2024Q1 (pandas' quarter_to_myear).
+                        _ if matches!(parsed, Some(PeriodFreq::Quarterly(_))) => {
+                            let quarter = kw
+                                .get_item("quarter")?
+                                .map_or(Ok(1), |v| v.extract::<i64>())?;
+                            let ord = (year - 1970) * 4 + quarter - 1;
+                            Period::new(ord, parsed.unwrap_or(PeriodFreq::QUARTERLY))
+                        }
                         "M" => {
                             let month = kw
                                 .get_item("month")?
                                 .map_or(Ok(1), |v| v.extract::<i64>())?;
                             let ord = (year - 1970) * 12 + month - 1;
                             Period::new(ord, PeriodFreq::Monthly)
-                        }
-                        "Q" | "Q-DEC" => {
-                            let quarter = kw
-                                .get_item("quarter")?
-                                .map_or(Ok(1), |v| v.extract::<i64>())?;
-                            let ord = (year - 1970) * 4 + quarter - 1;
-                            Period::new(ord, PeriodFreq::Quarterly)
                         }
                         "D" => {
                             let month = kw
@@ -6316,7 +6331,11 @@ impl PyPeriod {
                         }
                         _ => {
                             let ord = year - 1970;
-                            Period::new(ord, PeriodFreq::Annual)
+                            let annual = match parsed {
+                                Some(freq @ PeriodFreq::Annual(_)) => freq,
+                                _ => PeriodFreq::ANNUAL,
+                            };
+                            Period::new(ord, annual)
                         }
                     };
                     return Ok(PyPeriod { inner });
@@ -6333,7 +6352,7 @@ impl PyPeriod {
                 return Ok(PyPeriod { inner });
             }
             if let Ok(yr) = val.extract::<i64>() {
-                let mut p = Period::new(yr - 1970, PeriodFreq::Annual);
+                let mut p = Period::new(yr - 1970, PeriodFreq::ANNUAL);
                 if let Some(target_freq) = freq_arg.as_deref() {
                     p = convert_period_freq(p, target_freq, "start")?;
                 }
@@ -6346,7 +6365,7 @@ impl PyPeriod {
         }
 
         Ok(PyPeriod {
-            inner: Period::new(0, PeriodFreq::Annual),
+            inner: Period::new(0, PeriodFreq::ANNUAL),
         })
     }
 
@@ -6360,9 +6379,19 @@ impl PyPeriod {
         self.inner.freqstr()
     }
 
+    /// pandas' `freq`: the period's offset (`<QuarterEnd: startingMonth=1>`
+    /// for Q-JAN, `<Week: weekday=3>` for W-THU) as `PeriodIndex.freq` gives
+    /// it; it was the alias text.
     #[getter]
-    fn freq(&self) -> &'static str {
-        self.inner.freqstr()
+    fn freq(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let offset = fp_index::canonical_freq(self.inner.freqstr())
+            .map(|freqstr| offset_for_freqstr(&freqstr))
+            .transpose()?
+            .flatten();
+        match offset {
+            Some(offset) => offset.into_py_any(py),
+            None => self.inner.freqstr().into_py_any(py),
+        }
     }
 
     // The date and time fields, read where pandas reads them (see
@@ -20218,7 +20247,9 @@ impl PyPeriodIndex {
         let (period_freq, starts): (PeriodFreq, Vec<[i64; 7]>) = if quarter.is_some() {
             let period_freq =
                 PeriodFreq::parse(freq.unwrap_or("Q")).ok_or_else(|| invalid(freq))?;
-            if period_freq != PeriodFreq::Quarterly {
+            // pandas 2.2.3 takes quarter fields at Q-DEC only: an anchored
+            // quarter (Q-JAN) fails its base check as well.
+            if period_freq != PeriodFreq::QUARTERLY {
                 return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
                     "base must equal FR_QTR",
                 ));
@@ -93305,7 +93336,7 @@ mod tests {
         let period = PyPeriod {
             inner: Period {
                 ordinal: 54, // 2024 for Annual
-                freq: PeriodFreq::Annual,
+                freq: PeriodFreq::ANNUAL,
             },
         };
         assert_eq!(period.year(), Some(2024));

@@ -10085,14 +10085,19 @@ pub fn interval_range(
 #[serde(rename_all = "SCREAMING-KEBAB-CASE")]
 #[non_exhaustive]
 pub enum PeriodFreq {
-    /// `Y-DEC` / `A` / `Y` — annual periods.
-    Annual,
-    /// `Q-DEC` / `Q` — quarterly periods.
-    Quarterly,
+    /// `Y-<MON>` / `A` / `Y` — annual periods of a fiscal year ending in the
+    /// month carried (1-12; `Y` is `Y-DEC`). The ordinal counts fiscal years
+    /// from 1970: `Period('2024', 'Y-JUN')` spans 2023-07-01..2024-06-30.
+    Annual(u8),
+    /// `Q-<MON>` / `Q` — quarters of a fiscal year ending in the month
+    /// carried (1-12; `Q` is `Q-DEC`): `Period('2025Q1', 'Q-JAN')` spans
+    /// 2024-02-01..2024-04-30.
+    Quarterly(u8),
     /// `M` — monthly periods.
     Monthly,
-    /// `W-SUN` / `W` — weekly periods.
-    Weekly,
+    /// `W-<DAY>` / `W` — weeks ending on the weekday carried (0 = Monday ..
+    /// 6 = Sunday; `W` is `W-SUN`).
+    Weekly(u8),
     /// `D` — daily periods.
     Daily,
     /// `B` — business-day periods.
@@ -10111,9 +10116,62 @@ pub enum PeriodFreq {
     Nanoseconds,
 }
 
+/// The month abbreviations pandas anchors annual / quarterly frequencies on.
+const PERIOD_MONTHS: [&str; 12] = [
+    "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+];
+/// The weekday abbreviations pandas anchors weekly frequencies on, Monday 0.
+const PERIOD_WEEKDAYS: [&str; 7] = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+
 impl PeriodFreq {
+    /// `Y` / `Y-DEC`: calendar years.
+    pub const ANNUAL: Self = Self::Annual(12);
+    /// `Q` / `Q-DEC`: calendar quarters.
+    pub const QUARTERLY: Self = Self::Quarterly(12);
+    /// `W` / `W-SUN`: weeks Monday to Sunday.
+    pub const WEEKLY: Self = Self::Weekly(6);
+
+    /// Months a date's month count moves forward to land on its fiscal
+    /// calendar: a fiscal year ending in month `m` starts in month `m + 1`,
+    /// so `(months since 1970-01 + shift)` divided by 12 (3) is the annual
+    /// (quarterly) ordinal. 0 for a year ending in December and for every
+    /// unanchored frequency.
+    #[must_use]
+    pub const fn fiscal_month_shift(self) -> i64 {
+        match self {
+            Self::Annual(month) | Self::Quarterly(month) => (12 - (month as i64 % 12)) % 12,
+            _ => 0,
+        }
+    }
+
+    /// Days a week starts after the Monday of `W-SUN`'s week: a week ending
+    /// on weekday `d` (Monday 0) starts on `d + 1`, so `W-MON` weeks start a
+    /// day later and `W-SAT` ones six days later (a Sunday). 0 for `W-SUN`
+    /// and every other frequency.
+    #[must_use]
+    pub const fn week_start_shift(self) -> i64 {
+        match self {
+            Self::Weekly(day) => (day as i64 % 7 + 1) % 7,
+            _ => 0,
+        }
+    }
+
+    /// The anchored form `prefix-ANCHOR` of a frequency alias (`Y-JUN`,
+    /// `Q-JAN`, `W-MON`), with pandas' deprecated `A-` annual spelling.
+    fn parse_anchored(alias: &str) -> Option<Self> {
+        let (prefix, anchor) = alias.split_once('-')?;
+        let month = PERIOD_MONTHS.iter().position(|name| *name == anchor);
+        let day = PERIOD_WEEKDAYS.iter().position(|name| *name == anchor);
+        match (prefix, month, day) {
+            ("A" | "Y", Some(month), _) => Some(Self::Annual(month as u8 + 1)),
+            ("Q", Some(month), _) => Some(Self::Quarterly(month as u8 + 1)),
+            ("W", _, Some(day)) => Some(Self::Weekly(day as u8)),
+            _ => None,
+        }
+    }
+
     /// Parse a pandas-style frequency alias. Recognizes the common subset
-    /// (Y-DEC/A/Y, Q-DEC/Q, M, W-SUN/W, D, B, h/H, min/T, s/S) plus the
+    /// (Y-<MON>/A/Y, Q-<MON>/Q, M, W-<DAY>/W, D, B, h/H, min/T, s/S) plus the
     /// sub-second units ms, us/US, ns/NS.
     ///
     /// Case-insensitive with ONE exception: bare `MS` is month start in pandas,
@@ -10133,10 +10191,10 @@ impl PeriodFreq {
             return Some(Self::Milliseconds);
         }
         match alias.to_ascii_uppercase().as_str() {
-            "A" | "Y" | "A-DEC" | "Y-DEC" | "ANNUAL" | "YEARLY" => Some(Self::Annual),
-            "Q" | "Q-DEC" | "QUARTERLY" => Some(Self::Quarterly),
+            "A" | "Y" | "ANNUAL" | "YEARLY" => Some(Self::ANNUAL),
+            "Q" | "QUARTERLY" => Some(Self::QUARTERLY),
             "M" | "MONTHLY" => Some(Self::Monthly),
-            "W" | "W-SUN" | "WEEKLY" => Some(Self::Weekly),
+            "W" | "WEEKLY" => Some(Self::WEEKLY),
             "D" | "DAILY" => Some(Self::Daily),
             "B" | "BUSINESS" => Some(Self::Business),
             "H" | "HOURLY" => Some(Self::Hourly),
@@ -10147,18 +10205,29 @@ impl PeriodFreq {
             // The spelled-out form only; bare "MS" is deliberately absent, and
             // every other casing of it was taken above.
             "MILLISECOND" | "MILLISECONDS" => Some(Self::Milliseconds),
-            _ => None,
+            anchored => Self::parse_anchored(anchored),
         }
     }
 
     /// Canonical pandas alias string.
     #[must_use]
     pub const fn alias(self) -> &'static str {
+        const ANNUAL: [&str; 12] = [
+            "Y-JAN", "Y-FEB", "Y-MAR", "Y-APR", "Y-MAY", "Y-JUN", "Y-JUL", "Y-AUG", "Y-SEP",
+            "Y-OCT", "Y-NOV", "Y-DEC",
+        ];
+        const QUARTERLY: [&str; 12] = [
+            "Q-JAN", "Q-FEB", "Q-MAR", "Q-APR", "Q-MAY", "Q-JUN", "Q-JUL", "Q-AUG", "Q-SEP",
+            "Q-OCT", "Q-NOV", "Q-DEC",
+        ];
+        const WEEKLY: [&str; 7] = [
+            "W-MON", "W-TUE", "W-WED", "W-THU", "W-FRI", "W-SAT", "W-SUN",
+        ];
         match self {
-            Self::Annual => "Y-DEC",
-            Self::Quarterly => "Q-DEC",
+            Self::Annual(month) => ANNUAL[(month as usize + 11) % 12],
+            Self::Quarterly(month) => QUARTERLY[(month as usize + 11) % 12],
             Self::Monthly => "M",
-            Self::Weekly => "W-SUN",
+            Self::Weekly(day) => WEEKLY[day as usize % 7],
             Self::Daily => "D",
             Self::Business => "B",
             Self::Hourly => "h",
@@ -10191,8 +10260,8 @@ impl PeriodFreq {
     #[must_use]
     pub const fn resolution(self) -> Option<&'static str> {
         match self {
-            Self::Annual => Some("year"),
-            Self::Quarterly => Some("quarter"),
+            Self::Annual(_) => Some("year"),
+            Self::Quarterly(_) => Some("quarter"),
             Self::Monthly => Some("month"),
             Self::Daily => Some("day"),
             Self::Hourly => Some("hour"),
@@ -10203,7 +10272,7 @@ impl PeriodFreq {
             Self::Nanoseconds => Some("nanosecond"),
             // pandas' Week and BusinessDay offsets carry no `_resolution_obj`,
             // so `.resolution` raises AttributeError rather than answering.
-            Self::Weekly | Self::Business => None,
+            Self::Weekly(_) | Self::Business => None,
         }
     }
 }
@@ -10310,7 +10379,7 @@ impl Period {
                     value: s.to_owned(),
                     target: "Period".to_owned(),
                 })?;
-            return Ok(Self::new(ordinal, PeriodFreq::Quarterly));
+            return Ok(Self::new(ordinal, PeriodFreq::QUARTERLY));
         }
 
         if let Some((year, month, day)) = parse_ymd_period(trimmed) {
@@ -10337,7 +10406,7 @@ impl Period {
                     value: s.to_owned(),
                     target: "Period".to_owned(),
                 })?;
-            return Ok(Self::new(ordinal, PeriodFreq::Annual));
+            return Ok(Self::new(ordinal, PeriodFreq::ANNUAL));
         }
 
         Err(TypeError::ValueNotParseable {
@@ -10384,11 +10453,14 @@ impl Period {
         }
         let ord = self.ordinal;
         match self.freq {
-            PeriodFreq::Annual => {
+            // An anchored year or quarter is labelled by the fiscal year its
+            // ordinal counts (Period('2024', 'Y-JUN') ends 2024-06-30), so
+            // the label does not depend on the anchor.
+            PeriodFreq::Annual(_) => {
                 let year = 1970 + ord;
                 write!(rendered, "{year}")
             }
-            PeriodFreq::Quarterly => {
+            PeriodFreq::Quarterly(_) => {
                 let year = 1970 + ord.div_euclid(4);
                 let quarter = ord.rem_euclid(4) + 1;
                 write!(rendered, "{year}Q{quarter}")
@@ -10430,10 +10502,14 @@ impl Period {
             // fp-frame's `format_period_label` already produced the range form
             // for the same freq, so the two renderers disagreed on every weekly
             // period; this makes them agree.
-            PeriodFreq::Weekly => {
-                // Days-since-epoch of the anchor Monday 1969-12-22.
+            PeriodFreq::Weekly(_) => {
+                // Days-since-epoch of the anchor Monday 1969-12-22; a week
+                // ending on another weekday starts that many days later
+                // (W-MON weeks run Tuesday..Monday).
                 const WEEK_ANCHOR_DAY: i64 = -10;
-                let start = ord.saturating_mul(7).saturating_add(WEEK_ANCHOR_DAY);
+                let start = ord
+                    .saturating_mul(7)
+                    .saturating_add(WEEK_ANCHOR_DAY + self.freq.week_start_shift());
                 let (sy, sm, sd) = civil_from_days(start);
                 let (ey, em, ed) = civil_from_days(start.saturating_add(6));
                 write!(rendered, "{sy:04}-{sm:02}-{sd:02}/{ey:04}-{em:02}-{ed:02}")
@@ -10578,7 +10654,7 @@ impl std::fmt::Display for Period {
 ///
 /// ```
 /// use fp_types::{period_range, Period, PeriodFreq};
-/// let q1 = Period::new(216, PeriodFreq::Quarterly);
+/// let q1 = Period::new(216, PeriodFreq::QUARTERLY);
 /// let year = period_range(q1, 4);
 /// assert_eq!(year.len(), 4);
 /// assert_eq!(year[0].ordinal, 216);
@@ -12382,7 +12458,7 @@ mod tests {
         );
         assert_eq!(
             cast_scalar(&Scalar::Utf8("2024Q1".to_owned()), DType::Period).expect("period cast"),
-            Scalar::Period(Period::new(216, PeriodFreq::Quarterly))
+            Scalar::Period(Period::new(216, PeriodFreq::QUARTERLY))
         );
         assert_eq!(
             cast_scalar(&Scalar::Utf8("(0, 1]".to_owned()), DType::Interval)
@@ -17527,11 +17603,11 @@ mod tests {
 
     #[test]
     fn period_freq_parses_canonical_aliases() {
-        assert_eq!(PeriodFreq::parse("A"), Some(PeriodFreq::Annual));
-        assert_eq!(PeriodFreq::parse("Y"), Some(PeriodFreq::Annual));
-        assert_eq!(PeriodFreq::parse("Q"), Some(PeriodFreq::Quarterly));
+        assert_eq!(PeriodFreq::parse("A"), Some(PeriodFreq::ANNUAL));
+        assert_eq!(PeriodFreq::parse("Y"), Some(PeriodFreq::ANNUAL));
+        assert_eq!(PeriodFreq::parse("Q"), Some(PeriodFreq::QUARTERLY));
         assert_eq!(PeriodFreq::parse("M"), Some(PeriodFreq::Monthly));
-        assert_eq!(PeriodFreq::parse("W"), Some(PeriodFreq::Weekly));
+        assert_eq!(PeriodFreq::parse("W"), Some(PeriodFreq::WEEKLY));
         assert_eq!(PeriodFreq::parse("D"), Some(PeriodFreq::Daily));
         assert_eq!(PeriodFreq::parse("B"), Some(PeriodFreq::Business));
         assert_eq!(PeriodFreq::parse("H"), Some(PeriodFreq::Hourly));
@@ -17542,7 +17618,7 @@ mod tests {
 
     #[test]
     fn period_freq_parse_is_case_insensitive() {
-        assert_eq!(PeriodFreq::parse("quarterly"), Some(PeriodFreq::Quarterly));
+        assert_eq!(PeriodFreq::parse("quarterly"), Some(PeriodFreq::QUARTERLY));
         assert_eq!(PeriodFreq::parse("MONTHLY"), Some(PeriodFreq::Monthly));
     }
 
@@ -17556,10 +17632,10 @@ mod tests {
     #[test]
     fn period_freq_alias_roundtrip() {
         for freq in [
-            PeriodFreq::Annual,
-            PeriodFreq::Quarterly,
+            PeriodFreq::ANNUAL,
+            PeriodFreq::QUARTERLY,
             PeriodFreq::Monthly,
-            PeriodFreq::Weekly,
+            PeriodFreq::WEEKLY,
             PeriodFreq::Daily,
             PeriodFreq::Business,
             PeriodFreq::Hourly,
@@ -17571,6 +17647,51 @@ mod tests {
         ] {
             assert_eq!(PeriodFreq::parse(freq.alias()), Some(freq));
         }
+    }
+
+    /// Anchored aliases parse to their anchor and print back; the shifts move
+    /// a month count / week start onto the fiscal calendar; a W-MON label
+    /// spans Tuesday..Monday (live pandas 2.2.3: Period('2024-03-01', 'W-MON')
+    /// is '2024-02-27/2024-03-04', ordinal 2827; br-frankenpandas-39h5n).
+    #[test]
+    fn anchored_period_freqs_parse_print_and_shift_39h5n() {
+        for month in 1..=12_u8 {
+            for freq in [PeriodFreq::Annual(month), PeriodFreq::Quarterly(month)] {
+                assert_eq!(PeriodFreq::parse(freq.alias()), Some(freq));
+            }
+        }
+        for day in 0..7_u8 {
+            assert_eq!(
+                PeriodFreq::parse(PeriodFreq::Weekly(day).alias()),
+                Some(PeriodFreq::Weekly(day))
+            );
+        }
+        assert_eq!(PeriodFreq::parse("Y-JUN"), Some(PeriodFreq::Annual(6)));
+        assert_eq!(PeriodFreq::parse("A-JUN"), Some(PeriodFreq::Annual(6)));
+        assert_eq!(PeriodFreq::parse("q-jan"), Some(PeriodFreq::Quarterly(1)));
+        assert_eq!(PeriodFreq::parse("W-MON"), Some(PeriodFreq::Weekly(0)));
+        assert_eq!(PeriodFreq::parse("Q-DEC"), Some(PeriodFreq::QUARTERLY));
+        // NEGATIVE: not an anchor, or not an anchorable frequency.
+        assert_eq!(PeriodFreq::parse("Q-XYZ"), None);
+        assert_eq!(PeriodFreq::parse("M-JAN"), None);
+        assert_eq!(PeriodFreq::parse("W-JAN"), None);
+        assert_eq!(PeriodFreq::Annual(6).fiscal_month_shift(), 6);
+        assert_eq!(PeriodFreq::Quarterly(1).fiscal_month_shift(), 11);
+        assert_eq!(PeriodFreq::QUARTERLY.fiscal_month_shift(), 0);
+        assert_eq!(PeriodFreq::Weekly(0).week_start_shift(), 1);
+        assert_eq!(PeriodFreq::WEEKLY.week_start_shift(), 0);
+        assert_eq!(
+            Period::new(2827, PeriodFreq::Weekly(0)).to_string(),
+            "2024-02-27/2024-03-04"
+        );
+        assert_eq!(
+            Period::new(2826, PeriodFreq::Weekly(5)).to_string(),
+            "2024-02-25/2024-03-02"
+        );
+        assert_eq!(
+            Period::new(220, PeriodFreq::Quarterly(1)).to_string(),
+            "2025Q1"
+        );
     }
 
     /// The three sub-second frequencies pandas' `to_period` accepts and this
@@ -17636,17 +17757,17 @@ mod tests {
 
     #[test]
     fn period_freq_anchored_aliases_are_pandas_canonical_h2wiv() {
-        assert_eq!(PeriodFreq::Annual.alias(), "Y-DEC");
-        assert_eq!(PeriodFreq::Quarterly.alias(), "Q-DEC");
-        assert_eq!(PeriodFreq::Weekly.alias(), "W-SUN");
+        assert_eq!(PeriodFreq::ANNUAL.alias(), "Y-DEC");
+        assert_eq!(PeriodFreq::QUARTERLY.alias(), "Q-DEC");
+        assert_eq!(PeriodFreq::WEEKLY.alias(), "W-SUN");
 
-        assert_eq!(PeriodFreq::parse("A"), Some(PeriodFreq::Annual));
-        assert_eq!(PeriodFreq::parse("Y"), Some(PeriodFreq::Annual));
-        assert_eq!(PeriodFreq::parse("Y-DEC"), Some(PeriodFreq::Annual));
-        assert_eq!(PeriodFreq::parse("Q"), Some(PeriodFreq::Quarterly));
-        assert_eq!(PeriodFreq::parse("Q-DEC"), Some(PeriodFreq::Quarterly));
-        assert_eq!(PeriodFreq::parse("W"), Some(PeriodFreq::Weekly));
-        assert_eq!(PeriodFreq::parse("W-SUN"), Some(PeriodFreq::Weekly));
+        assert_eq!(PeriodFreq::parse("A"), Some(PeriodFreq::ANNUAL));
+        assert_eq!(PeriodFreq::parse("Y"), Some(PeriodFreq::ANNUAL));
+        assert_eq!(PeriodFreq::parse("Y-DEC"), Some(PeriodFreq::ANNUAL));
+        assert_eq!(PeriodFreq::parse("Q"), Some(PeriodFreq::QUARTERLY));
+        assert_eq!(PeriodFreq::parse("Q-DEC"), Some(PeriodFreq::QUARTERLY));
+        assert_eq!(PeriodFreq::parse("W"), Some(PeriodFreq::WEEKLY));
+        assert_eq!(PeriodFreq::parse("W-SUN"), Some(PeriodFreq::WEEKLY));
     }
 
     #[test]
@@ -17665,8 +17786,8 @@ mod tests {
     /// for each f, with W and B raising AttributeError.
     #[test]
     fn period_freq_resolution_is_the_component_word_not_the_alias() {
-        assert_eq!(PeriodFreq::Annual.resolution(), Some("year"));
-        assert_eq!(PeriodFreq::Quarterly.resolution(), Some("quarter"));
+        assert_eq!(PeriodFreq::ANNUAL.resolution(), Some("year"));
+        assert_eq!(PeriodFreq::QUARTERLY.resolution(), Some("quarter"));
         assert_eq!(PeriodFreq::Monthly.resolution(), Some("month"));
         assert_eq!(PeriodFreq::Daily.resolution(), Some("day"));
         assert_eq!(PeriodFreq::Hourly.resolution(), Some("hour"));
@@ -17674,7 +17795,7 @@ mod tests {
         assert_eq!(PeriodFreq::Secondly.resolution(), Some("second"));
 
         // pandas raises AttributeError for these two rather than answering.
-        assert_eq!(PeriodFreq::Weekly.resolution(), None);
+        assert_eq!(PeriodFreq::WEEKLY.resolution(), None);
         assert_eq!(PeriodFreq::Business.resolution(), None);
 
         // The bug this replaces was the alias table copied into the resolution
@@ -17682,10 +17803,10 @@ mod tests {
         // for both. (Every pandas alias is short and lowercase-ish; every
         // resolution word is a full English noun -- they never coincide.)
         for freq in [
-            PeriodFreq::Annual,
-            PeriodFreq::Quarterly,
+            PeriodFreq::ANNUAL,
+            PeriodFreq::QUARTERLY,
             PeriodFreq::Monthly,
-            PeriodFreq::Weekly,
+            PeriodFreq::WEEKLY,
             PeriodFreq::Daily,
             PeriodFreq::Business,
             PeriodFreq::Hourly,
@@ -17713,11 +17834,11 @@ mod tests {
     fn period_parse_common_pandas_ordinals_avm08() {
         assert_eq!(
             Period::parse("2024").unwrap(),
-            Period::new(54, PeriodFreq::Annual)
+            Period::new(54, PeriodFreq::ANNUAL)
         );
         assert_eq!(
             Period::parse("2024Q1").unwrap(),
-            Period::new(216, PeriodFreq::Quarterly)
+            Period::new(216, PeriodFreq::QUARTERLY)
         );
         assert_eq!(
             Period::parse("2024-01").unwrap(),
@@ -17732,10 +17853,10 @@ mod tests {
 
     #[test]
     fn period_shift_advances_ordinal() {
-        let q1 = Period::new(216, PeriodFreq::Quarterly);
+        let q1 = Period::new(216, PeriodFreq::QUARTERLY);
         let q2 = q1.shift(1);
         assert_eq!(q2.ordinal, 217);
-        assert_eq!(q2.freq, PeriodFreq::Quarterly);
+        assert_eq!(q2.freq, PeriodFreq::QUARTERLY);
         let q0 = q1.shift(-1);
         assert_eq!(q0.ordinal, 215);
     }
@@ -17750,8 +17871,8 @@ mod tests {
 
     #[test]
     fn period_diff_returns_period_count() {
-        let a = Period::new(216, PeriodFreq::Quarterly);
-        let b = Period::new(220, PeriodFreq::Quarterly);
+        let a = Period::new(216, PeriodFreq::QUARTERLY);
+        let b = Period::new(220, PeriodFreq::QUARTERLY);
         assert_eq!(b.diff(&a), Some(4));
         assert_eq!(a.diff(&b), Some(-4));
     }
@@ -17759,7 +17880,7 @@ mod tests {
     #[test]
     fn period_diff_rejects_mismatched_freq() {
         let monthly = Period::new(100, PeriodFreq::Monthly);
-        let quarterly = Period::new(100, PeriodFreq::Quarterly);
+        let quarterly = Period::new(100, PeriodFreq::QUARTERLY);
         assert_eq!(monthly.diff(&quarterly), None);
         assert_eq!(quarterly.diff(&monthly), None);
     }
@@ -17777,7 +17898,7 @@ mod tests {
     #[test]
     fn period_cmp_cross_freq_returns_none() {
         let m = Period::new(1, PeriodFreq::Monthly);
-        let q = Period::new(1, PeriodFreq::Quarterly);
+        let q = Period::new(1, PeriodFreq::QUARTERLY);
         assert_eq!(m.cmp_same_freq(&q), None);
     }
 
@@ -17796,10 +17917,10 @@ mod tests {
             // All TWELVE frequencies. This stopped at nine, so no property
             // test here ever generated a sub-second period.
             match raw % 12 {
-                0 => PeriodFreq::Annual,
-                1 => PeriodFreq::Quarterly,
+                0 => PeriodFreq::ANNUAL,
+                1 => PeriodFreq::QUARTERLY,
                 2 => PeriodFreq::Monthly,
-                3 => PeriodFreq::Weekly,
+                3 => PeriodFreq::WEEKLY,
                 4 => PeriodFreq::Daily,
                 5 => PeriodFreq::Business,
                 6 => PeriodFreq::Hourly,
@@ -17813,10 +17934,10 @@ mod tests {
 
         fn different_freq(freq: PeriodFreq) -> PeriodFreq {
             match freq {
-                PeriodFreq::Annual => PeriodFreq::Quarterly,
-                PeriodFreq::Quarterly => PeriodFreq::Monthly,
-                PeriodFreq::Monthly => PeriodFreq::Weekly,
-                PeriodFreq::Weekly => PeriodFreq::Daily,
+                PeriodFreq::Annual(_) => PeriodFreq::QUARTERLY,
+                PeriodFreq::Quarterly(_) => PeriodFreq::Monthly,
+                PeriodFreq::Monthly => PeriodFreq::WEEKLY,
+                PeriodFreq::Weekly(_) => PeriodFreq::Daily,
                 PeriodFreq::Daily => PeriodFreq::Business,
                 PeriodFreq::Business => PeriodFreq::Hourly,
                 PeriodFreq::Hourly => PeriodFreq::Minutely,
@@ -17827,7 +17948,7 @@ mod tests {
                 PeriodFreq::Secondly => PeriodFreq::Milliseconds,
                 PeriodFreq::Milliseconds => PeriodFreq::Microseconds,
                 PeriodFreq::Microseconds => PeriodFreq::Nanoseconds,
-                PeriodFreq::Nanoseconds => PeriodFreq::Annual,
+                PeriodFreq::Nanoseconds => PeriodFreq::ANNUAL,
             }
         }
 
@@ -17912,11 +18033,11 @@ mod tests {
     fn period_display_is_pandas_calendar_string() {
         // Ordinal 216 on the quarterly axis (1970Q1 == 0) is 1970 + 54y = 2024Q1.
         assert_eq!(
-            Period::new(216, PeriodFreq::Quarterly).to_string(),
+            Period::new(216, PeriodFreq::QUARTERLY).to_string(),
             "2024Q1"
         );
         // 1970 + 54 == 2024 on the annual axis.
-        assert_eq!(Period::new(54, PeriodFreq::Annual).to_string(), "2024");
+        assert_eq!(Period::new(54, PeriodFreq::ANNUAL).to_string(), "2024");
         // 1970-01 == 0 -> 2024-03 is 54*12 + 2 == 650 months.
         assert_eq!(Period::new(650, PeriodFreq::Monthly).to_string(), "2024-03");
         // Day 0 == 1970-01-01; 2024-01-15.
@@ -17954,7 +18075,7 @@ mod tests {
             (-2829, "1915-10-04/1915-10-10"),
         ] {
             assert_eq!(
-                Period::new(ordinal, PeriodFreq::Weekly).to_string(),
+                Period::new(ordinal, PeriodFreq::WEEKLY).to_string(),
                 want,
                 "weekly ordinal {ordinal}"
             );
@@ -17995,7 +18116,7 @@ mod tests {
             assert_ne!(rendered, later, "business ordinals must not repeat");
         }
 
-        assert_eq!(Period::new(i64::MIN, PeriodFreq::Weekly).to_string(), "NaT");
+        assert_eq!(Period::new(i64::MIN, PeriodFreq::WEEKLY).to_string(), "NaT");
         assert_eq!(
             Period::new(i64::MIN, PeriodFreq::Business).to_string(),
             "NaT"
@@ -18027,10 +18148,10 @@ mod tests {
     #[ignore = "release-only attribution probe for br-frankenpandas-6pqra"]
     fn profile_period_display_direct_sink_ab_6pqra() {
         const FREQUENCIES: [PeriodFreq; 9] = [
-            PeriodFreq::Annual,
-            PeriodFreq::Quarterly,
+            PeriodFreq::ANNUAL,
+            PeriodFreq::QUARTERLY,
             PeriodFreq::Monthly,
-            PeriodFreq::Weekly,
+            PeriodFreq::WEEKLY,
             PeriodFreq::Daily,
             PeriodFreq::Business,
             PeriodFreq::Hourly,
@@ -18101,7 +18222,7 @@ mod tests {
 
     #[test]
     fn period_roundtrips_through_serde_json() {
-        let p = Period::new(42, PeriodFreq::Weekly);
+        let p = Period::new(42, PeriodFreq::WEEKLY);
         let json = serde_json::to_string(&p).expect("serialize");
         let back: Period = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(p, back);
@@ -18113,13 +18234,13 @@ mod tests {
 
     #[test]
     fn period_range_zero_periods_is_empty() {
-        let start = Period::new(216, PeriodFreq::Quarterly);
+        let start = Period::new(216, PeriodFreq::QUARTERLY);
         assert!(period_range(start, 0).is_empty());
     }
 
     #[test]
     fn period_range_single_period_returns_start_only() {
-        let start = Period::new(216, PeriodFreq::Quarterly);
+        let start = Period::new(216, PeriodFreq::QUARTERLY);
         let r = period_range(start, 1);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0], start);
@@ -18127,7 +18248,7 @@ mod tests {
 
     #[test]
     fn period_range_increments_ordinal_by_one_per_step() {
-        let start = Period::new(216, PeriodFreq::Quarterly);
+        let start = Period::new(216, PeriodFreq::QUARTERLY);
         let r = period_range(start, 4);
         assert_eq!(r.len(), 4);
         assert_eq!(r[0].ordinal, 216);
@@ -18146,7 +18267,7 @@ mod tests {
     #[test]
     fn period_range_negative_starting_ordinal_works() {
         // Ordinal axis is signed — pre-epoch periods are valid.
-        let start = Period::new(-3, PeriodFreq::Annual);
+        let start = Period::new(-3, PeriodFreq::ANNUAL);
         let r = period_range(start, 5);
         assert_eq!(
             r.iter().map(|p| p.ordinal).collect::<Vec<_>>(),
@@ -18176,10 +18297,10 @@ mod tests {
             // All TWELVE frequencies. This stopped at nine, so no property
             // test here ever generated a sub-second period.
             match raw % 12 {
-                0 => PeriodFreq::Annual,
-                1 => PeriodFreq::Quarterly,
+                0 => PeriodFreq::ANNUAL,
+                1 => PeriodFreq::QUARTERLY,
                 2 => PeriodFreq::Monthly,
-                3 => PeriodFreq::Weekly,
+                3 => PeriodFreq::WEEKLY,
                 4 => PeriodFreq::Daily,
                 5 => PeriodFreq::Business,
                 6 => PeriodFreq::Hourly,
@@ -21049,18 +21170,18 @@ mod tests {
     #[test]
     fn period_parse_annual() {
         let p = Period::parse("2024").unwrap();
-        assert_eq!(p.freq(), PeriodFreq::Annual);
+        assert_eq!(p.freq(), PeriodFreq::ANNUAL);
         assert_eq!(p.ordinal(), 2024 - 1970);
     }
 
     #[test]
     fn period_parse_quarterly() {
         let p = Period::parse("2024Q1").unwrap();
-        assert_eq!(p.freq(), PeriodFreq::Quarterly);
+        assert_eq!(p.freq(), PeriodFreq::QUARTERLY);
         assert_eq!(p.ordinal(), (2024 - 1970) * 4);
 
         let p2 = Period::parse("2024q3").unwrap();
-        assert_eq!(p2.freq(), PeriodFreq::Quarterly);
+        assert_eq!(p2.freq(), PeriodFreq::QUARTERLY);
         assert_eq!(p2.ordinal(), (2024 - 1970) * 4 + 2);
     }
 

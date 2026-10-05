@@ -4133,9 +4133,9 @@ fn readme_timedelta_period_helpers() -> Result<(), Box<dyn std::error::Error>> {
     let _ = comps.nanoseconds;
 
     // ── Period::cmp_same_freq ────────────────────────────────────
-    let q1 = Period::new(216, PeriodFreq::Quarterly);
-    let q2 = Period::new(217, PeriodFreq::Quarterly);
-    let q1_again = Period::new(216, PeriodFreq::Quarterly);
+    let q1 = Period::new(216, PeriodFreq::QUARTERLY);
+    let q2 = Period::new(217, PeriodFreq::QUARTERLY);
+    let q1_again = Period::new(216, PeriodFreq::QUARTERLY);
     assert_eq!(q1.cmp_same_freq(&q2), Some(Ordering::Less));
     assert_eq!(q2.cmp_same_freq(&q1), Some(Ordering::Greater));
     assert_eq!(q1.cmp_same_freq(&q1_again), Some(Ordering::Equal));
@@ -4961,10 +4961,10 @@ fn readme_periodfreq_parse_alias_round_trip() -> Result<(), Box<dyn std::error::
     // the legacy A/Q/W/H/T/S spellings (checked below), but alias()
     // round-trips the canonical form.
     let cases: [(PeriodFreq, &str); 9] = [
-        (PeriodFreq::Annual, "Y-DEC"),
-        (PeriodFreq::Quarterly, "Q-DEC"),
+        (PeriodFreq::ANNUAL, "Y-DEC"),
+        (PeriodFreq::QUARTERLY, "Q-DEC"),
         (PeriodFreq::Monthly, "M"),
-        (PeriodFreq::Weekly, "W-SUN"),
+        (PeriodFreq::WEEKLY, "W-SUN"),
         (PeriodFreq::Daily, "D"),
         (PeriodFreq::Business, "B"),
         (PeriodFreq::Hourly, "h"),
@@ -4989,17 +4989,17 @@ fn readme_periodfreq_parse_alias_round_trip() -> Result<(), Box<dyn std::error::
     // Long-form and LEGACY aliases also parse (pandas accepts the
     // deprecated A/H/T/S spellings on input even though freqstr emits the
     // canonical forms above).
-    assert_eq!(PeriodFreq::parse("ANNUAL"), Some(PeriodFreq::Annual));
-    assert_eq!(PeriodFreq::parse("YEARLY"), Some(PeriodFreq::Annual));
-    assert_eq!(PeriodFreq::parse("Y"), Some(PeriodFreq::Annual));
-    assert_eq!(PeriodFreq::parse("A"), Some(PeriodFreq::Annual));
+    assert_eq!(PeriodFreq::parse("ANNUAL"), Some(PeriodFreq::ANNUAL));
+    assert_eq!(PeriodFreq::parse("YEARLY"), Some(PeriodFreq::ANNUAL));
+    assert_eq!(PeriodFreq::parse("Y"), Some(PeriodFreq::ANNUAL));
+    assert_eq!(PeriodFreq::parse("A"), Some(PeriodFreq::ANNUAL));
     assert_eq!(PeriodFreq::parse("MONTHLY"), Some(PeriodFreq::Monthly));
     assert_eq!(PeriodFreq::parse("MIN"), Some(PeriodFreq::Minutely));
     assert_eq!(PeriodFreq::parse("T"), Some(PeriodFreq::Minutely));
     assert_eq!(PeriodFreq::parse("H"), Some(PeriodFreq::Hourly));
     assert_eq!(PeriodFreq::parse("S"), Some(PeriodFreq::Secondly));
-    assert_eq!(PeriodFreq::parse("W"), Some(PeriodFreq::Weekly));
-    assert_eq!(PeriodFreq::parse("Q"), Some(PeriodFreq::Quarterly));
+    assert_eq!(PeriodFreq::parse("W"), Some(PeriodFreq::WEEKLY));
+    assert_eq!(PeriodFreq::parse("Q"), Some(PeriodFreq::QUARTERLY));
 
     // Garbage input returns None.
     assert_eq!(PeriodFreq::parse("garbage"), None);
@@ -5054,7 +5054,7 @@ fn readme_display_impls() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── PeriodFreq Display ──────────────────────────────────────
     // Each variant has an alias string used as Display.
-    let _ = format!("{}", PeriodFreq::Quarterly);
+    let _ = format!("{}", PeriodFreq::QUARTERLY);
     let _ = format!("{}", PeriodFreq::Daily);
     // PeriodFreq doesn't pin a specific alphabet here — just
     // exercise the impl.
@@ -6523,7 +6523,7 @@ fn readme_index_helpers_round_trip() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn readme_pandas_helpers_round_trip() -> Result<(), Box<dyn std::error::Error>> {
     // ── Period + period_range ───────────────────────────────────
-    let q1 = Period::new(216, PeriodFreq::Quarterly);
+    let q1 = Period::new(216, PeriodFreq::QUARTERLY);
     let periods = period_range(q1, 4);
     assert_eq!(periods.len(), 4);
     // period_range advances by 1 ordinal per step.

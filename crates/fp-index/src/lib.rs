@@ -7256,9 +7256,26 @@ fn datetime_to_period_error(message: impl Into<String>) -> IndexError {
     ))
 }
 
-fn date_to_weekly_period_ordinal(date: chrono::NaiveDate) -> Result<i64, IndexError> {
+/// The weekly ordinal of `date` for weeks ending on `freq`'s weekday:
+/// whole weeks since the Monday 1969-12-22, the week start moved `shift`
+/// days later for an anchor other than Sunday (W-MON weeks start Tuesday).
+fn date_to_weekly_period_ordinal(
+    date: chrono::NaiveDate,
+    freq: PeriodFreq,
+) -> Result<i64, IndexError> {
     let base = period_epoch_date(1969, 12, 22)?;
-    Ok(date.signed_duration_since(base).num_days().div_euclid(7))
+    Ok((date.signed_duration_since(base).num_days() - freq.week_start_shift()).div_euclid(7))
+}
+
+/// `date`'s month count since 1970-01 on `freq`'s fiscal calendar: a fiscal
+/// year ending in June starts in July, so July 2023 counts as the first
+/// month of fiscal 2024 (Period('2023-07-01', 'Y-JUN') is '2024').
+fn fiscal_month_ordinal(date: chrono::NaiveDate, freq: PeriodFreq) -> Result<i64, IndexError> {
+    (i64::from(date.year()) - 1970)
+        .checked_mul(12)
+        .and_then(|base| base.checked_add(i64::from(date.month() - 1)))
+        .and_then(|months| months.checked_add(freq.fiscal_month_shift()))
+        .ok_or_else(|| datetime_to_period_error("fiscal month ordinal overflow"))
 }
 
 fn business_period_anchor_date(date: chrono::NaiveDate) -> Result<chrono::NaiveDate, IndexError> {
@@ -7309,11 +7326,14 @@ fn datetime_period_ordinal(nanos: i64, freq: PeriodFreq) -> Result<i64, IndexErr
     let date = dt.date_naive();
     let year_offset = i64::from(date.year()) - 1970;
     match freq {
-        PeriodFreq::Annual => Ok(year_offset),
-        PeriodFreq::Quarterly => year_offset
-            .checked_mul(4)
-            .and_then(|base| base.checked_add(i64::from((date.month() - 1) / 3)))
-            .ok_or_else(|| datetime_to_period_error("quarterly ordinal overflow")),
+        // Fiscal years / quarters: the month count on the fiscal calendar,
+        // twelve (three) to a period (Q-JAN puts 2024-03 in 2025Q1).
+        PeriodFreq::Annual(_) => {
+            fiscal_month_ordinal(date, freq).map(|months| months.div_euclid(12))
+        }
+        PeriodFreq::Quarterly(_) => {
+            fiscal_month_ordinal(date, freq).map(|months| months.div_euclid(3))
+        }
         PeriodFreq::Monthly => year_offset
             .checked_mul(12)
             .and_then(|base| base.checked_add(i64::from(date.month() - 1)))
@@ -7334,7 +7354,7 @@ fn datetime_period_ordinal(nanos: i64, freq: PeriodFreq) -> Result<i64, IndexErr
         PeriodFreq::Microseconds => Ok(nanos.div_euclid(Timedelta::NANOS_PER_MICRO)),
         // Storage is already nanoseconds, so this is the identity.
         PeriodFreq::Nanoseconds => Ok(nanos),
-        PeriodFreq::Weekly => date_to_weekly_period_ordinal(date),
+        PeriodFreq::Weekly(_) => date_to_weekly_period_ordinal(date, freq),
         PeriodFreq::Business => date_to_business_period_ordinal(date),
         _ => Err(datetime_to_period_error("unsupported period frequency")),
     }
@@ -7661,26 +7681,28 @@ fn period_business_date(ordinal: i64) -> Result<chrono::NaiveDate, IndexError> {
 /// the calendar are errors.
 pub fn period_start_nanos(period: Period) -> Result<i64, IndexError> {
     match period.freq {
-        PeriodFreq::Annual => {
+        // A fiscal year / quarter starts the shift's months before its
+        // calendar counterpart: Y-JUN 2024 (ordinal 54) starts 2023-07-01.
+        PeriodFreq::Annual(_) | PeriodFreq::Quarterly(_) => {
+            let months = if matches!(period.freq, PeriodFreq::Annual(_)) {
+                12
+            } else {
+                3
+            };
             let month_ordinal = period
                 .ordinal
-                .checked_mul(12)
-                .ok_or_else(|| period_timestamp_error("annual ordinal overflow"))?;
-            period_date_to_nanos(period_month_start(month_ordinal)?)
-        }
-        PeriodFreq::Quarterly => {
-            let month_ordinal = period
-                .ordinal
-                .checked_mul(3)
-                .ok_or_else(|| period_timestamp_error("quarterly ordinal overflow"))?;
+                .checked_mul(months)
+                .and_then(|month| month.checked_sub(period.freq.fiscal_month_shift()))
+                .ok_or_else(|| period_timestamp_error("fiscal ordinal overflow"))?;
             period_date_to_nanos(period_month_start(month_ordinal)?)
         }
         PeriodFreq::Monthly => period_date_to_nanos(period_month_start(period.ordinal)?),
-        PeriodFreq::Weekly => {
+        PeriodFreq::Weekly(_) => {
             let base = period_epoch_date(1969, 12, 22)?;
             let days = period
                 .ordinal
                 .checked_mul(7)
+                .and_then(|days| days.checked_add(period.freq.week_start_shift()))
                 .ok_or_else(|| period_timestamp_error("weekly ordinal overflow"))?;
             period_date_to_nanos(period_add_days(base, days)?)
         }
@@ -7759,6 +7781,12 @@ fn period_qyear(period: Period) -> Result<i32, IndexError> {
     if period.ordinal == i64::MIN {
         return Ok(-1);
     }
+    // A quarter's qyear is the fiscal year its ordinal counts: Q-JAN's
+    // 2025Q1 ends 2024-04-30 and its qyear is 2025.
+    if matches!(period.freq, PeriodFreq::Quarterly(_)) {
+        return i32::try_from(1970 + period.ordinal.div_euclid(4))
+            .map_err(|_| period_timestamp_error("qyear out of range"));
+    }
     let end_nanos = period_end_nanos(period)?;
     datetime_nanos_to_date(end_nanos)
         .map(|date| date.year())
@@ -7803,11 +7831,11 @@ fn period_fields_error(message: impl Into<String>) -> IndexError {
 fn period_fields_freq(fields: &PeriodFields<'_>) -> Result<PeriodFreq, IndexError> {
     let freq = fields
         .freq
-        .or_else(|| fields.quarter.map(|_| PeriodFreq::Quarterly))
+        .or_else(|| fields.quarter.map(|_| PeriodFreq::QUARTERLY))
         .ok_or_else(|| {
             period_fields_error("freq is required unless quarter fields imply quarterly periods")
         })?;
-    if fields.quarter.is_some() && freq != PeriodFreq::Quarterly {
+    if fields.quarter.is_some() && !matches!(freq, PeriodFreq::Quarterly(_)) {
         return Err(period_fields_error(
             "quarter fields require quarterly frequency",
         ));
@@ -7854,14 +7882,17 @@ fn required_period_field(
         .ok_or_else(|| period_fields_error(format!("{name} fields are required")))
 }
 
-fn quarter_start_month(quarter: u32) -> Result<u32, IndexError> {
-    if (1..=4).contains(&quarter) {
-        Ok((quarter - 1) * 3 + 1)
-    } else {
-        Err(period_fields_error(format!(
+/// The period a fiscal `year` and `quarter` name under `freq` (pandas'
+/// quarter_to_myear): the ordinal counts fiscal quarters, so Q-JAN's 2024
+/// quarter 1 is 2024Q1 whatever calendar months it spans (2023-02..04).
+fn fiscal_quarter_period(year: i32, quarter: u32, freq: PeriodFreq) -> Result<Period, IndexError> {
+    if !(1..=4).contains(&quarter) {
+        return Err(period_fields_error(format!(
             "quarter must be in 1..=4, got {quarter}"
-        )))
+        )));
     }
+    let ordinal = (i64::from(year) - 1970) * 4 + i64::from(quarter) - 1;
+    Ok(Period::new(ordinal, freq))
 }
 
 fn period_from_fields_at(
@@ -7874,13 +7905,13 @@ fn period_from_fields_at(
         .get(position)
         .copied()
         .ok_or_else(|| period_fields_error("year fields are required"))?;
-    let month = if freq == PeriodFreq::Quarterly {
+    let month = if matches!(freq, PeriodFreq::Quarterly(_)) {
         if let Some(quarters) = fields.quarter {
             let quarter = quarters
                 .get(position)
                 .copied()
                 .ok_or_else(|| period_fields_error("quarter fields are required"))?;
-            quarter_start_month(quarter)?
+            return fiscal_quarter_period(year, quarter, freq);
         } else {
             required_period_field(fields.month, "month", position)?
         }
@@ -7894,7 +7925,7 @@ fn period_from_fields_at(
     };
     let day = if matches!(
         freq,
-        PeriodFreq::Annual | PeriodFreq::Quarterly | PeriodFreq::Monthly
+        PeriodFreq::Annual(_) | PeriodFreq::Quarterly(_) | PeriodFreq::Monthly
     ) {
         1
     } else {
@@ -12328,9 +12359,22 @@ impl PeriodIndex {
         Ok(self.field_instants()?.second())
     }
 
-    /// Quarter (1-4), matching `pd.PeriodIndex.quarter`.
+    /// Quarter (1-4), matching `pd.PeriodIndex.quarter`: a quarterly
+    /// period's fiscal quarter (Q-JAN's 2025Q1 is quarter 1 though it ends
+    /// in April), any other the calendar quarter of its end date.
     pub fn quarter(&self) -> Result<Vec<Option<u32>>, IndexError> {
-        Ok(self.field_instants()?.quarter())
+        let calendar = self.field_instants()?.quarter();
+        Ok(self
+            .values
+            .iter()
+            .zip(calendar)
+            .map(|(period, calendar)| match period.freq {
+                PeriodFreq::Quarterly(_) if period.ordinal != i64::MIN => {
+                    u32::try_from(period.ordinal.rem_euclid(4) + 1).ok()
+                }
+                _ => calendar,
+            })
+            .collect())
     }
 
     /// Day of week (0=Monday, 6=Sunday), matching `pd.PeriodIndex.weekday`.
@@ -24140,17 +24184,17 @@ mod tests {
         })?;
         assert_eq!(
             quarterly.values(),
-            &[Period::new(201, PeriodFreq::Quarterly)]
+            &[Period::new(201, PeriodFreq::QUARTERLY)]
         );
 
         let single_year = [2020];
         let single_month = [1];
         let weekly = PeriodIndex::from_fields(PeriodFields {
             month: Some(&single_month),
-            freq: Some(PeriodFreq::Weekly),
+            freq: Some(PeriodFreq::WEEKLY),
             ..PeriodFields::new(&single_year)
         })?;
-        assert_eq!(weekly.values(), &[Period::new(2_610, PeriodFreq::Weekly)]);
+        assert_eq!(weekly.values(), &[Period::new(2_610, PeriodFreq::WEEKLY)]);
 
         let weekend_day = [4];
         let business = PeriodIndex::from_fields(PeriodFields {
@@ -32691,7 +32735,7 @@ mod tests {
         // Mixed-frequency index: inferred_freq returns None.
         let mixed = super::PeriodIndex::new(vec![
             Period::new(10, PeriodFreq::Monthly),
-            Period::new(10, PeriodFreq::Annual),
+            Period::new(10, PeriodFreq::ANNUAL),
         ]);
         assert_eq!(mixed.inferred_freq(), None);
 
@@ -33053,7 +33097,7 @@ mod tests {
         assert!(matches!(bad_len, super::IndexError::LengthMismatch { .. }));
 
         // Mismatched freq replacement rejects.
-        let mismatch = Period::new(10, PeriodFreq::Annual);
+        let mismatch = Period::new(10, PeriodFreq::ANNUAL);
         assert!(pi.r#where(&[true, false, true], mismatch).is_err());
         assert!(pi.putmask(&[false, true, false], mismatch).is_err());
         Ok(())
@@ -33121,7 +33165,7 @@ mod tests {
         assert_eq!(left.symmetric_difference(&right)?.values(), &[p1, p4]);
 
         // Mismatched freq rejects.
-        let mismatch = super::PeriodIndex::new(vec![Period::new(10, PeriodFreq::Annual)]);
+        let mismatch = super::PeriodIndex::new(vec![Period::new(10, PeriodFreq::ANNUAL)]);
         assert!(left.intersection(&mismatch).is_err());
         assert!(left.union(&mismatch).is_err());
         assert!(left.difference(&mismatch).is_err());
@@ -33149,7 +33193,7 @@ mod tests {
 
         let mixed = super::PeriodIndex::new(vec![
             Period::new(10, PeriodFreq::Monthly),
-            Period::new(10, PeriodFreq::Annual),
+            Period::new(10, PeriodFreq::ANNUAL),
         ]);
         assert!(mixed.sort_values().is_err());
         assert!(mixed.sort().is_err());
@@ -33240,7 +33284,7 @@ mod tests {
             assert_eq!(period.freq, PeriodFreq::Monthly);
         }
 
-        let empty = super::PeriodIndex::from_ordinals(&[], PeriodFreq::Annual);
+        let empty = super::PeriodIndex::from_ordinals(&[], PeriodFreq::ANNUAL);
         assert!(empty.is_empty());
         assert!(empty.asi8().is_empty());
     }
@@ -33264,13 +33308,55 @@ mod tests {
         assert_eq!(days.values()[1].ordinal, i64::MIN);
         assert_eq!(days.values()[1].freq, PeriodFreq::Daily);
         // A quarter's month is its third; an hour's hour is itself.
-        let quarters = super::PeriodIndex::from_ordinals(&[216], PeriodFreq::Quarterly);
+        let quarters = super::PeriodIndex::from_ordinals(&[216], PeriodFreq::QUARTERLY);
         assert_eq!(quarters.month()?, vec![Some(3)]);
         let hours = super::PeriodIndex::from_ordinals(&[473_374], PeriodFreq::Hourly);
         assert_eq!(hours.hour()?, vec![Some(22)]);
         // NEGATIVE: a month's year and month are those of its start too.
         assert_eq!(months.year()?, vec![Some(2024), None, Some(2023)]);
         assert_eq!(months.month()?, vec![Some(1), None, Some(2)]);
+        Ok(())
+    }
+
+    /// Anchored frequencies on pandas' fiscal axes, live pandas 2.2.3:
+    /// 2024-03-01 is Y-JUN '2024' (ordinal 54, from 2023-07-01), Q-JAN
+    /// '2025Q1' (220, from 2024-02-01; quarter 1, qyear 2025, year 2024),
+    /// Q-NOV '2024Q2' (217), W-MON ordinal 2827 from 2024-02-27, W-SAT 2826
+    /// from 2024-02-25; 1969-12-31 at Q-JAN is 1970Q4 (3)
+    /// (br-frankenpandas-39h5n).
+    #[test]
+    fn anchored_periods_follow_the_fiscal_calendar_39h5n() -> Result<(), super::IndexError> {
+        use fp_types::PeriodFreq;
+        const DAY: i64 = 86_400_000_000_000;
+        let march_first = 19_783 * DAY;
+        let cases = [
+            (PeriodFreq::Annual(6), 54, 19_539),
+            (PeriodFreq::Quarterly(1), 220, 19_754),
+            (PeriodFreq::Quarterly(11), 217, 19_783),
+            (PeriodFreq::Weekly(0), 2827, 19_780),
+            (PeriodFreq::Weekly(5), 2826, 19_778),
+            (PeriodFreq::QUARTERLY, 216, 19_723),
+        ];
+        for (freq, ordinal, start_day) in cases {
+            let period = super::datetime_nanos_to_period(march_first, freq)?;
+            assert_eq!(period.ordinal, ordinal, "{freq:?}");
+            assert_eq!(
+                super::period_start_nanos(period)?,
+                start_day * DAY,
+                "{freq:?}"
+            );
+        }
+        let pre_epoch = super::datetime_nanos_to_period(-DAY, PeriodFreq::Quarterly(1))?;
+        assert_eq!(pre_epoch.ordinal, 3);
+        let quarters =
+            super::PeriodIndex::from_ordinals(&[220, i64::MIN], PeriodFreq::Quarterly(1));
+        assert_eq!(quarters.quarter()?, vec![Some(1), None]);
+        assert_eq!(quarters.qyear()?, vec![2025, -1]);
+        assert_eq!(quarters.year()?, vec![Some(2024), None]);
+        assert_eq!(quarters.month()?, vec![Some(4), None]);
+        // NEGATIVE: a fiscal year's quarter is its end date's calendar one.
+        let years = super::PeriodIndex::from_ordinals(&[54], PeriodFreq::Annual(6));
+        assert_eq!(years.quarter()?, vec![Some(2)]);
         Ok(())
     }
 
@@ -33329,7 +33415,7 @@ mod tests {
         assert_eq!(empty.mean()?, None);
         assert_eq!(empty.median()?, None);
 
-        let mixed = super::PeriodIndex::new(vec![p1, Period::new(10, PeriodFreq::Annual)]);
+        let mixed = super::PeriodIndex::new(vec![p1, Period::new(10, PeriodFreq::ANNUAL)]);
         assert!(mixed.mean().is_err());
         assert!(mixed.median().is_err());
         Ok(())
@@ -33352,7 +33438,7 @@ mod tests {
         assert!(empty.argmin().is_err());
         assert!(empty.argsort()?.is_empty());
 
-        let mixed = super::PeriodIndex::new(vec![p1, Period::new(10, PeriodFreq::Annual)]);
+        let mixed = super::PeriodIndex::new(vec![p1, Period::new(10, PeriodFreq::ANNUAL)]);
         assert!(mixed.argmax().is_err());
         assert!(mixed.argsort().is_err());
         Ok(())
@@ -33375,7 +33461,7 @@ mod tests {
         assert_eq!(back.values()[0].ordinal, 9);
 
         // Mixed-freq rejects.
-        let mixed = super::PeriodIndex::new(vec![p1, Period::new(10, PeriodFreq::Annual)]);
+        let mixed = super::PeriodIndex::new(vec![p1, Period::new(10, PeriodFreq::ANNUAL)]);
         assert!(mixed.shift(1).is_err());
         Ok(())
     }
@@ -33405,7 +33491,7 @@ mod tests {
         assert!(super::PeriodIndex::new(vec![p1]).is_full());
 
         // Mixed-frequency.
-        let mixed = super::PeriodIndex::new(vec![p1, Period::new(10, PeriodFreq::Annual)]);
+        let mixed = super::PeriodIndex::new(vec![p1, Period::new(10, PeriodFreq::ANNUAL)]);
         assert!(!mixed.is_full());
     }
 
@@ -33426,7 +33512,7 @@ mod tests {
         // Mixed freq rejects.
         let mixed = super::PeriodIndex::new(vec![
             Period::new(10, PeriodFreq::Monthly),
-            Period::new(10, PeriodFreq::Annual),
+            Period::new(10, PeriodFreq::ANNUAL),
         ]);
         assert!(mixed.min().is_err());
         assert!(mixed.max().is_err());
@@ -33948,7 +34034,7 @@ mod tests {
         assert_eq!(pi.searchsorted(p2, "left")?, 1);
         assert_eq!(pi.searchsorted(p3, "right")?, 3);
         // Mismatched freq rejects.
-        let mismatch = Period::new(10, PeriodFreq::Annual);
+        let mismatch = Period::new(10, PeriodFreq::ANNUAL);
         assert!(pi.searchsorted(mismatch, "left").is_err());
 
         let r = super::RangeIndex::new(0, 10, 2).unwrap();
@@ -34201,10 +34287,10 @@ mod tests {
         let parity_cases = [
             super::PeriodIndex::new(Vec::new()),
             super::PeriodIndex::new(vec![Period::new(i64::MIN, PeriodFreq::Daily)]),
-            super::PeriodIndex::new(vec![Period::new(0, PeriodFreq::Annual)]).set_name("annual"),
+            super::PeriodIndex::new(vec![Period::new(0, PeriodFreq::ANNUAL)]).set_name("annual"),
             super::PeriodIndex::new(vec![
                 Period::new(i64::MIN, PeriodFreq::Monthly),
-                Period::new(-1, PeriodFreq::Quarterly),
+                Period::new(-1, PeriodFreq::QUARTERLY),
                 Period::new(0, PeriodFreq::Daily),
                 Period::new(i64::MAX, PeriodFreq::Secondly),
             ]),
@@ -34773,8 +34859,8 @@ mod tests {
         let periods = super::PeriodIndex::new(vec![
             Period::new(10, PeriodFreq::Monthly),
             Period::new(12, PeriodFreq::Monthly),
-            Period::new(13, PeriodFreq::Quarterly),
-            Period::new(15, PeriodFreq::Quarterly),
+            Period::new(13, PeriodFreq::QUARTERLY),
+            Period::new(15, PeriodFreq::QUARTERLY),
         ]);
         assert_eq!(periods.diff(1), vec![None, Some(2), None, Some(2)]);
         assert_eq!(periods.diff(-1), vec![Some(-2), None, Some(-2), None]);
@@ -34824,17 +34910,17 @@ mod tests {
         assert_eq!(
             dt.to_period("Y")?.values(),
             &[
-                Period::new(-1, PeriodFreq::Annual),
-                Period::new(0, PeriodFreq::Annual),
-                Period::new(54, PeriodFreq::Annual),
+                Period::new(-1, PeriodFreq::ANNUAL),
+                Period::new(0, PeriodFreq::ANNUAL),
+                Period::new(54, PeriodFreq::ANNUAL),
             ]
         );
         assert_eq!(
             dt.to_period("Q")?.values(),
             &[
-                Period::new(-1, PeriodFreq::Quarterly),
-                Period::new(0, PeriodFreq::Quarterly),
-                Period::new(216, PeriodFreq::Quarterly),
+                Period::new(-1, PeriodFreq::QUARTERLY),
+                Period::new(0, PeriodFreq::QUARTERLY),
+                Period::new(216, PeriodFreq::QUARTERLY),
             ]
         );
         assert_eq!(
@@ -34856,9 +34942,9 @@ mod tests {
         assert_eq!(
             dt.to_period("W")?.values(),
             &[
-                Period::new(1, PeriodFreq::Weekly),
-                Period::new(1, PeriodFreq::Weekly),
-                Period::new(2_827, PeriodFreq::Weekly),
+                Period::new(1, PeriodFreq::WEEKLY),
+                Period::new(1, PeriodFreq::WEEKLY),
+                Period::new(2_827, PeriodFreq::WEEKLY),
             ]
         );
         assert_eq!(
@@ -35003,8 +35089,8 @@ mod tests {
         use fp_types::{Period, PeriodFreq};
 
         let annual = super::PeriodIndex::new(vec![
-            Period::new(0, PeriodFreq::Annual),
-            Period::new(1, PeriodFreq::Annual),
+            Period::new(0, PeriodFreq::ANNUAL),
+            Period::new(1, PeriodFreq::ANNUAL),
         ])
         .set_name("p");
         assert_eq!(
@@ -35025,8 +35111,8 @@ mod tests {
         assert_eq!(annual_start.name().map(|n| n.as_str()), Some("p"));
 
         let quarterly = super::PeriodIndex::new(vec![
-            Period::new(0, PeriodFreq::Quarterly),
-            Period::new(1, PeriodFreq::Quarterly),
+            Period::new(0, PeriodFreq::QUARTERLY),
+            Period::new(1, PeriodFreq::QUARTERLY),
         ]);
         assert_eq!(
             quarterly.asfreq("D")?.values(),
@@ -35071,8 +35157,8 @@ mod tests {
         assert_eq!(
             monthly.asfreq_with_how("W", "start")?.values(),
             &[
-                Period::new(1, PeriodFreq::Weekly),
-                Period::new(5, PeriodFreq::Weekly),
+                Period::new(1, PeriodFreq::WEEKLY),
+                Period::new(5, PeriodFreq::WEEKLY),
             ]
         );
         assert!(matches!(
@@ -35255,8 +35341,8 @@ mod tests {
         ));
 
         let quarterly = super::PeriodIndex::new(vec![
-            Period::new(-1, PeriodFreq::Quarterly),
-            Period::new(0, PeriodFreq::Quarterly),
+            Period::new(-1, PeriodFreq::QUARTERLY),
+            Period::new(0, PeriodFreq::QUARTERLY),
         ]);
         assert_eq!(
             quarterly.start_time()?.asi8(),
@@ -35272,7 +35358,7 @@ mod tests {
         assert_eq!(quarterly.qyear()?, vec![1969, 1970]);
 
         let mixed_freq = super::PeriodIndex::new(vec![
-            Period::new(1, PeriodFreq::Weekly),
+            Period::new(1, PeriodFreq::WEEKLY),
             Period::new(2, PeriodFreq::Business),
             Period::new(1, PeriodFreq::Hourly),
         ]);

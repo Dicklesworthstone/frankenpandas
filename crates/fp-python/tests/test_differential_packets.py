@@ -26513,3 +26513,56 @@ def test_frame_arithmetic_keeps_narrow_widths_like_pandas_par0y(case: str) -> No
         return ([str(dtype) for dtype in result.dtypes], repr(result.values.tolist()))
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-39h5n: anchored period frequencies - fiscal years
+# (Y-JUN), fiscal quarters (Q-JAN, Q-NOV) and weeks ending on another day
+# (W-MON, W-SAT) - are period[<freq>] values with pandas' ordinals, labels,
+# spans and fields (they were object text, so + 1 raised); a quarter label
+# names the fiscal quarter. Default anchors are unchanged.
+_ANCHOR_DATES = ["2024-03-01", "2024-08-15", None, "1969-12-31"]
+
+
+def _anchored(m: Any, freq: str) -> Any:
+    return m.Series(m.to_datetime(_ANCHOR_DATES)).dt.to_period(freq)
+
+
+def _period_fields(periods: Any) -> Any:
+    return [list(getattr(periods.dt, name)) for name in ("year", "quarter", "month", "qyear", "day")]
+
+
+_ANCHOR_CASES = {}
+for _freq in ("Y-JUN", "Q-JAN", "Q-NOV", "W-MON", "W-SAT", "Q (NEGATIVE)", "W (NEGATIVE)"):
+    _f = _freq.split(" ")[0]
+    _ANCHOR_CASES[f"to_period {_freq}"] = lambda m, f=_f: _anchored(m, f)
+    _ANCHOR_CASES[f"+ 1 {_freq}"] = lambda m, f=_f: _anchored(m, f) + 1
+    _ANCHOR_CASES[f"start_time {_freq}"] = lambda m, f=_f: _anchored(m, f).dt.start_time
+    _ANCHOR_CASES[f"end_time {_freq}"] = lambda m, f=_f: _anchored(m, f).dt.end_time
+    _ANCHOR_CASES[f"astype(str) {_freq}"] = lambda m, f=_f: _anchored(m, f).astype(str)
+    _ANCHOR_CASES[f"fields {_freq}"] = lambda m, f=_f: _period_fields(_anchored(m, f))
+_ANCHOR_CASES.update({
+    "Period('2024Q1', 'Q-JAN') is fiscal": lambda m: (m.Period("2024Q1", freq="Q-JAN").ordinal, m.Period("2024Q1", freq="Q-JAN").start_time),
+    "Period('2024', 'Y-JUN')": lambda m: (m.Period("2024", freq="Y-JUN").ordinal, m.Period("2024", freq="Y-JUN").start_time),
+    "Period(year=, quarter=, Q-JAN)": lambda m: m.Period(year=2024, quarter=1, freq="Q-JAN"),
+    "Period.freq W-THU": lambda m: repr(m.Period("2024-03-01", "W-THU").freq),
+    "period_range Q-MAR": lambda m: m.period_range("2023Q4", periods=3, freq="Q-MAR"),
+    "asfreq Q-JAN -> M": lambda m: (m.Period("2024Q1", "Q-JAN").asfreq("M", "start"), m.Period("2024Q1", "Q-JAN").asfreq("M", "end")),
+    "asfreq M -> Q-JAN": lambda m: m.Period("2024-05", "M").asfreq("Q-JAN"),
+    "Period - Period Q-JAN": lambda m: m.Period("2025Q3", "Q-JAN") - m.Period("2025Q1", "Q-JAN"),
+    "groupby Q-JAN": lambda m: m.Series([1, 2, 3, 4]).groupby(_anchored(m, "Q-JAN")).sum(),
+    "from_fields Q-JAN refused like pandas (NEGATIVE)": lambda m: m.PeriodIndex.from_fields(year=[2024], quarter=[1], freq="Q-JAN"),
+    "datetime column unchanged (NEGATIVE)": lambda m: m.Series(m.to_datetime(_ANCHOR_DATES)),
+})
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_ANCHOR_CASES))
+def test_anchored_period_frequencies_like_pandas_39h5n(case: str) -> None:
+    def shown(m: Any) -> Any:
+        try:
+            result = _ANCHOR_CASES[case](m)
+        except AssertionError as error:
+            return ("AssertionError", str(error))
+        return (repr(result), str(getattr(result, "dtype", "")))
+
+    assert shown(fpd) == shown(pd)

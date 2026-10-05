@@ -444,7 +444,7 @@ let secs = Timedelta::total_seconds(td_ns);                  // i64 → f64 seco
 let components = Timedelta::components(td_ns);               // TimedeltaComponents{ days, hours, minutes, ... }
 
 // Period: a discrete calendar interval indexed by ordinal at a given freq
-let q_freq = PeriodFreq::Quarterly;
+let q_freq = PeriodFreq::QUARTERLY;                         // Q-DEC; Quarterly(1) is Q-JAN
 let p = Period::new(/* ordinal */ 218, q_freq);             // 2024Q3 (54 yrs × 4 q + offset)
 
 // Interval: half-open or closed bin (constructed from f64 endpoints)
@@ -457,11 +457,11 @@ let day_ns: i64 = 24 * 60 * 60 * 1_000_000_000;
 let dates = date_range(Some("2024-01-01"), Some("2024-12-31"), None, day_ns * 30, None)?;
 let bdays = bdate_range(Some("2024-01-01"), Some("2024-12-31"), None, None)?;
 let tds   = timedelta_range(Some(0_i64), Some(30_i64 * day_ns), None, day_ns, None)?;
-let pds   = period_range(Period::new(218, PeriodFreq::Quarterly), 12);  // start, count
+let pds   = period_range(Period::new(218, PeriodFreq::QUARTERLY), 12);  // start, count
 let ivs   = interval_range_by_periods(0.0_f64, 1.0_f64, 10)?;
 
 // Period <-> Timestamp on the index level (string-keyed freq + how)
-let pix   = PeriodIndex::from_range(Period::new(216, PeriodFreq::Quarterly), 4);
+let pix   = PeriodIndex::from_range(Period::new(216, PeriodFreq::QUARTERLY), 4);
 let back  = pix.to_timestamp("S")?;     // PeriodIndex -> DatetimeIndex (start-of-period)
 ```
 
@@ -1562,7 +1562,7 @@ use frankenpandas::prelude::*;
 
 // Build a quarterly PeriodIndex via the typed builder (ordinal-based)
 let pix = PeriodIndex::from_range(
-    Period::new(216, PeriodFreq::Quarterly),   // start ordinal
+    Period::new(216, PeriodFreq::QUARTERLY),   // start ordinal
     12,                                        // 12 periods → 2024Q1..2026Q4
 );
 
