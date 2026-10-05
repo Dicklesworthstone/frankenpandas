@@ -70090,6 +70090,118 @@ impl Default for DataFrameFlags {
 /// Alias for [`DataFrameFlags`] matching `pd.Flags`.
 pub type Flags = DataFrameFlags;
 
+/// The dtype pandas' `DataFrame.transpose` gives every output column: the
+/// source columns' one shared dtype (an extension dtype included: Int64,
+/// boolean, `string`, a category, a zone), numpy's result type of numpy
+/// numbers (bool is not one: beside a number it is object), or object, each
+/// cell as it was. Each output row inferred its own dtype, so the row
+/// [4, 3.5, None] of int / float / text columns became float64 and a row of
+/// ints read off object columns int64 (br-frankenpandas-mxjyl).
+enum TransposedDtype<'a> {
+    Shared(&'a Column),
+    Numbers { float: bool },
+    Object,
+}
+
+impl<'a> TransposedDtype<'a> {
+    fn of(columns: &[&'a Column]) -> Self {
+        // numpy numbers first, one dtype or several: their widths are
+        // `DataFrame::transpose`'s to settle, and an int64 storage holding a
+        // missing value (the Rust constructors', DISC-011) infers per row as
+        // the lazy view does.
+        if columns
+            .iter()
+            .all(|column| matches!(column.dtype(), DType::Int64 | DType::Float64))
+        {
+            return Self::Numbers {
+                float: columns
+                    .iter()
+                    .any(|column| column.dtype() == DType::Float64),
+            };
+        }
+        let same = |left: &Column, right: &Column| {
+            left.dtype() == right.dtype()
+                && left.width() == right.width()
+                && left.is_pandas_string() == right.is_pandas_string()
+                && left.categorical() == right.categorical()
+        };
+        match columns.first() {
+            Some(first) if columns.iter().all(|column| same(column, first)) => Self::Shared(first),
+            _ => Self::Object,
+        }
+    }
+
+    /// Whether the lazy transpose view, which carries numpy storage only,
+    /// gives this dtype.
+    #[cfg(feature = "lazy-transpose-view")]
+    fn viewable(&self) -> bool {
+        match self {
+            Self::Numbers { .. } => true,
+            Self::Shared(column) => {
+                !column.is_pandas_string()
+                    && column.categorical().is_none()
+                    && matches!(
+                        column.dtype(),
+                        DType::Bool
+                            | DType::Utf8
+                            | DType::Timedelta64
+                            | DType::Datetime64 { tz: None }
+                    )
+            }
+            Self::Object => false,
+        }
+    }
+
+    /// An output column of this dtype holding `values`, one cell per source
+    /// column of `columns`.
+    fn column(&self, columns: &[&Column], values: Vec<Scalar>) -> Result<Column, FrameError> {
+        Ok(match self {
+            Self::Shared(template) => match template.dtype() {
+                // Object cells as they are (a row of ints read off object
+                // columns stays object); `string` stays `string`.
+                DType::Utf8 => {
+                    let column = Column::from_object_values(values);
+                    if template.is_pandas_string() {
+                        column.as_pandas_string()
+                    } else {
+                        column
+                    }
+                }
+                dtype => {
+                    let column = Column::new(dtype, values)?;
+                    match template.categorical() {
+                        Some(meta) => column.with_categorical(Some(meta.clone())),
+                        None => column,
+                    }
+                }
+            },
+            Self::Numbers { float: true } => Column::new(DType::Float64, values)?,
+            Self::Numbers { float: false } => Column::from_values(values)?,
+            Self::Object => Column::from_object_values(
+                values
+                    .into_iter()
+                    .zip(columns)
+                    .map(|(value, column)| {
+                        // A temporal column's missing value is NaT among
+                        // the objects (its raw sentinel printed as
+                        // -106752 days +00:12:43.145224192).
+                        if value.is_missing()
+                            && matches!(
+                                column.dtype(),
+                                DType::Datetime64 { .. } | DType::Timedelta64 | DType::Period
+                            )
+                        {
+                            Scalar::Null(NullKind::NaT)
+                        } else {
+                            value
+                        }
+                    })
+                    .collect(),
+            ),
+        })
+    }
+}
+
 /// Feature-gated lazy homogeneous transpose view.
 ///
 /// The view stores references to the original typed columns plus axis
@@ -82885,8 +82997,17 @@ impl DataFrame {
     }
 
     fn transpose_storage(&self) -> Result<Self, FrameError> {
+        // The view carries numpy storage: an extension dtype, a zone or an
+        // object mix is the eager path's (a homogeneous `string` / Float64
+        // frame came back object / float64, a mixed-zone one naive).
         #[cfg(feature = "lazy-transpose-view")]
         if !self.column_order.is_empty()
+            && TransposedDtype::of(
+                &(0..self.num_columns())
+                    .filter_map(|position| self.column_at(position))
+                    .collect::<Vec<_>>(),
+            )
+            .viewable()
             && let Some(view) = self.transpose_view()?
         {
             let source_columns: Arc<[Column]> = self
@@ -83098,15 +83219,10 @@ impl DataFrame {
         let src_values: Vec<&[Scalar]> = src_cols.iter().map(|c| c.values()).collect();
         // pandas transposes through the columns' COMMON dtype: ints mixed
         // with floats are float64 in every output column (as the lazy view's
-        // PromotedFloat64); each row inferred its own, so a [1, NaN] row
-        // became a nullable int64 column. All-int sources keep Int64, nulls
-        // included, as the lazy view does (DISC-011).
-        let to_float = src_cols
-            .iter()
-            .all(|column| matches!(column.dtype(), DType::Int64 | DType::Float64))
-            && src_cols
-                .iter()
-                .any(|column| column.dtype() == DType::Float64);
+        // PromotedFloat64; a [1, NaN] row became a nullable int64 column),
+        // all-int sources keep Int64, nulls included, as the lazy view does
+        // (DISC-011), and anything else mixed is object.
+        let dtype = TransposedDtype::of(&src_cols);
         let mut pairs = Vec::with_capacity(n_rows);
         for (row_idx, label) in labels.iter().enumerate() {
             let col_name = label_to_name(label);
@@ -83114,12 +83230,7 @@ impl DataFrame {
             for vals in &src_values {
                 row_values.push(vals[row_idx].clone());
             }
-            let column = if to_float {
-                Column::new(DType::Float64, row_values)?
-            } else {
-                Column::from_values(row_values)?
-            };
-            pairs.push((col_name, column));
+            pairs.push((col_name, dtype.column(&src_cols, row_values)?));
         }
 
         finish_transpose(new_index, pairs)
@@ -125132,6 +125243,132 @@ mod tests {
         for position in 0..gappy.num_columns() {
             assert_eq!(gappy.column_at(position).unwrap().dtype(), DType::Float64);
         }
+    }
+
+    #[test]
+    fn transpose_of_mixed_dtypes_is_object_with_the_cells_as_they_were_mxjyl() {
+        let labels = || vec![IndexLabel::from(0_i64), IndexLabel::from(1_i64)];
+        let series =
+            |name: &str, column: Column| Series::new(name, Index::new(labels()), column).unwrap();
+        let transposed = |columns: Vec<Series>| {
+            DataFrame::from_series(columns)
+                .unwrap()
+                .transpose()
+                .unwrap()
+        };
+        // pandas: DataFrame({'a': [1, 4], 'b': [1.5, 3.5], 's': ['x', None]}).T
+        // is object in every column, 4 an int and None None; the row
+        // [4, 3.5, None] was inferred float64.
+        let mixed = transposed(vec![
+            series(
+                "a",
+                Column::new(DType::Int64, vec![Scalar::Int64(1), Scalar::Int64(4)]).unwrap(),
+            ),
+            series(
+                "b",
+                Column::new(
+                    DType::Float64,
+                    vec![Scalar::Float64(1.5), Scalar::Float64(3.5)],
+                )
+                .unwrap(),
+            ),
+            series(
+                "s",
+                Column::from_object_values(vec![
+                    Scalar::Utf8("x".into()),
+                    Scalar::Null(NullKind::Null),
+                ]),
+            ),
+        ]);
+        let row = mixed.column_at(1).unwrap();
+        assert_eq!(row.dtype(), DType::Utf8);
+        assert!(!row.is_pandas_string());
+        assert_eq!(
+            row.values(),
+            &[
+                Scalar::Int64(4),
+                Scalar::Float64(3.5),
+                Scalar::Null(NullKind::Null)
+            ]
+        );
+        // Object columns holding ints: the row stays object (it was int64).
+        let objects = transposed(vec![
+            series(
+                "a",
+                Column::from_object_values(vec![Scalar::Utf8("x".into()), Scalar::Int64(1)]),
+            ),
+            series(
+                "b",
+                Column::from_object_values(vec![Scalar::Utf8("y".into()), Scalar::Int64(2)]),
+            ),
+        ]);
+        assert_eq!(objects.column_at(1).unwrap().dtype(), DType::Utf8);
+        assert_eq!(
+            objects.column_at(1).unwrap().values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+        // A temporal column's missing value is NaT among the objects.
+        let temporal = transposed(vec![
+            series(
+                "t",
+                Column::new(
+                    DType::Datetime64 { tz: None },
+                    vec![Scalar::Datetime64(0), Scalar::Null(NullKind::NaT)],
+                )
+                .unwrap(),
+            ),
+            series(
+                "n",
+                Column::new(DType::Int64, vec![Scalar::Int64(1), Scalar::Int64(2)]).unwrap(),
+            ),
+        ]);
+        assert_eq!(temporal.column_at(1).unwrap().dtype(), DType::Utf8);
+        assert_eq!(
+            temporal.column_at(1).unwrap().values(),
+            &[Scalar::Null(NullKind::NaT), Scalar::Int64(2)]
+        );
+        // One shared extension dtype stays (it was a numpy int64 holding
+        // the NA).
+        let masked = transposed(vec![
+            series(
+                "a",
+                Column::new(
+                    DType::Int64Nullable,
+                    vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)],
+                )
+                .unwrap(),
+            ),
+            series(
+                "b",
+                Column::new(
+                    DType::Int64Nullable,
+                    vec![Scalar::Int64(3), Scalar::Int64(4)],
+                )
+                .unwrap(),
+            ),
+        ]);
+        for position in 0..masked.num_columns() {
+            assert_eq!(
+                masked.column_at(position).unwrap().dtype(),
+                DType::Int64Nullable
+            );
+        }
+        // NEGATIVE: an Int64 beside a numpy int64 is object, not Int64.
+        let beside = transposed(vec![
+            series(
+                "a",
+                Column::new(
+                    DType::Int64Nullable,
+                    vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)],
+                )
+                .unwrap(),
+            ),
+            series(
+                "b",
+                Column::new(DType::Int64, vec![Scalar::Int64(3), Scalar::Int64(4)]).unwrap(),
+            ),
+        ]);
+        assert_eq!(beside.column_at(0).unwrap().dtype(), DType::Utf8);
     }
 
     #[test]

@@ -25688,3 +25688,96 @@ def test_masked_reductions_keep_their_kind_like_pandas_1t4kg(case: str) -> None:
         return (repr(result), str(getattr(result, "dtype", type(result).__name__)))
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-mxjyl: DataFrame.T goes through the columns' common dtype,
+# as pandas' transpose: one shared dtype stays (Int64, boolean, string, a
+# category, a zone, a period frequency), numpy numbers meet in numpy's result
+# type, anything else mixed is object with each cell as it was. Each row
+# inferred its own (int / float / text columns' row [4, 3.5, None] was
+# float64). NEGATIVE: float-only / int+float / int32+float32 stay numeric.
+_MXJYL_FRAMES = {
+    "int+float+text": lambda m: m.DataFrame({"a": [1, 2, 3, 4], "b": [1.5, math.nan, 2.5, 3.5], "s": ["x", "y", "x", None]}),
+    "int+float+text, text index": lambda m: m.DataFrame({"a": [1, 2, 3], "b": [1.5, math.nan, 2.5], "s": ["x", None, "y"]}, index=["r", "s", "t"]),
+    "ints in object columns": lambda m: m.DataFrame({"a": ["x", 1, 2.5], "b": ["y", 2, None]}),
+    "float nan + text": lambda m: m.DataFrame({"a": [math.nan, 1.0], "b": ["q", None]}),
+    "bool + text": lambda m: m.DataFrame({"a": [True, False], "b": ["x", None]}),
+    "bool + float": lambda m: m.DataFrame({"a": [True, False], "b": [1.5, math.nan]}),
+    "int32 + bool": lambda m: m.DataFrame({"a": m.Series([1, 2], dtype="int32"), "b": [True, False]}),
+    "datetime NaT + int": lambda m: m.DataFrame({"a": m.to_datetime(["2024-01-01", None]), "b": [1, 2]}),
+    "timedelta NaT + float": lambda m: m.DataFrame({"a": m.to_timedelta(["1D", None]), "b": [1.5, 2.5]}),
+    "UTC + naive": lambda m: m.DataFrame({"a": m.to_datetime(["2024-01-01 10:00", "2024-01-02 00:00"]).tz_localize("UTC"), "b": m.to_datetime(["2024-01-01", "2024-01-03"])}),
+    "UTC + New York": lambda m: m.DataFrame({"a": m.to_datetime(["2024-01-01 10:00", "2024-01-02 00:00"]).tz_localize("UTC"), "b": m.to_datetime(["2024-01-01", "2024-01-03"]).tz_localize("America/New_York")}),
+    "UTC + int": lambda m: m.DataFrame({"a": m.to_datetime(["2024-01-01 10:00", "2024-01-02 00:00"]).tz_localize("UTC"), "b": [1, 2]}),
+    "New York x2": lambda m: m.DataFrame({"a": m.to_datetime(["2024-01-01 10:00", "2024-01-02 00:00"]).tz_localize("America/New_York"), "b": m.to_datetime(["2024-01-01", "2024-01-03"]).tz_localize("America/New_York")}),
+    "category, same categories": lambda m: m.DataFrame({"a": m.Categorical(["x", "y"]), "b": m.Categorical(["y", "x"])}),
+    "category, ordered": lambda m: m.DataFrame({"a": m.Categorical(["x", "y"], ordered=True), "b": m.Categorical(["y", "x"], ordered=True)}),
+    "category, other categories": lambda m: m.DataFrame({"a": m.Categorical(["x", "y"]), "b": m.Categorical(["x", "z"])}),
+    "category + object": lambda m: m.DataFrame({"a": m.Categorical(["x", "y"]), "b": ["y", "x"]}),
+    "period x2": lambda m: m.DataFrame({"a": m.period_range("2024-01", periods=2, freq="M"), "b": m.period_range("2024-03", periods=2, freq="M")}),
+    "period + int": lambda m: m.DataFrame({"a": m.period_range("2024-01", periods=2, freq="M"), "b": [1, 2]}),
+    "Int64 x2": lambda m: m.DataFrame({"a": m.Series([1, 2], dtype="Int64"), "b": m.Series([3, None], dtype="Int64")}),
+    "Float64 x2": lambda m: m.DataFrame({"a": m.Series([1.5, 2.5], dtype="Float64"), "b": m.Series([1.0, None], dtype="Float64")}),
+    "boolean x2": lambda m: m.DataFrame({"a": m.Series([True, None], dtype="boolean"), "b": m.Series([False, True], dtype="boolean")}),
+    "string x2": lambda m: m.DataFrame({"a": m.Series(["x", None], dtype="string"), "b": m.Series(["y", "z"], dtype="string")}),
+    "string x2, no missing": lambda m: m.DataFrame({"a": m.Series(["x", "w"], dtype="string"), "b": m.Series(["y", "z"], dtype="string")}),
+    "int32 x2": lambda m: m.DataFrame({"a": m.Series([1, 2], dtype="int32"), "b": m.Series([3, 4], dtype="int32")}),
+    "float only": lambda m: m.DataFrame({"a": [1.5, math.nan], "b": [2.5, 3.5]}),
+    "int + float": lambda m: m.DataFrame({"a": [1, 2], "b": [1.5, math.nan]}),
+    "int32 + float32": lambda m: m.DataFrame({"a": m.Series([1, 2], dtype="int32"), "b": m.Series([1.5, 2.5], dtype="float32")}),
+    "int8 + uint8": lambda m: m.DataFrame({"a": m.Series([1, 2], dtype="int8"), "b": m.Series([1, 2], dtype="uint8")}),
+    "text only": lambda m: m.DataFrame({"a": ["x", "w"], "b": ["y", "z"]}),
+}
+
+
+def _mxjyl_cell(cell: Any) -> str:
+    if cell is None:
+        return "None"
+    if type(cell).__name__ in ("NaTType", "NAType"):
+        return type(cell).__name__
+    if isinstance(cell, float) and math.isnan(cell):
+        return "nan"
+    return f"{type(cell).__name__}={cell}"
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_MXJYL_FRAMES))
+def test_transpose_goes_through_the_common_dtype_like_pandas_mxjyl(case: str) -> None:
+    def shown(m: Any) -> Any:
+        t = _MXJYL_FRAMES[case](m).T
+        return (
+            [str(dtype) for dtype in t.dtypes],
+            [[_mxjyl_cell(cell) for cell in t[column].tolist()] for column in t.columns],
+            repr(t),
+            t.isna().values.tolist(),
+            [str(dtype) for dtype in t.T.dtypes],
+        )
+
+    assert shown(fpd) == shown(pd)
+
+
+# A masked column beside another dtype transposes to object too; the missing
+# cell is pd.NA in pandas and None here (an object column's missing marker,
+# br-frankenpandas-0xeam), so it is compared as missing.
+_MXJYL_MASKED_FRAMES = {
+    "Int64 + int64": lambda m: m.DataFrame({"a": m.Series([1, None], dtype="Int64"), "b": [3, 4]}),
+    "Int64 + float64": lambda m: m.DataFrame({"a": m.Series([1, None], dtype="Int64"), "b": [3.5, math.nan]}),
+    "Int64 + Float64": lambda m: m.DataFrame({"a": m.Series([1, None], dtype="Int64"), "b": m.Series([3.5, None], dtype="Float64")}),
+    "boolean + bool": lambda m: m.DataFrame({"a": m.Series([True, None], dtype="boolean"), "b": [True, False]}),
+    "boolean + Int64": lambda m: m.DataFrame({"a": m.Series([True, None], dtype="boolean"), "b": m.Series([1, None], dtype="Int64")}),
+    "string + object": lambda m: m.DataFrame({"a": m.Series(["x", None], dtype="string"), "b": ["y", "z"]}),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_MXJYL_MASKED_FRAMES))
+def test_transpose_of_masked_beside_other_dtypes_is_object_like_pandas_mxjyl(case: str) -> None:
+    def shown(m: Any) -> Any:
+        t = _MXJYL_MASKED_FRAMES[case](m).T
+        cells = [
+            ["missing" if m.isna(cell) else _mxjyl_cell(cell) for cell in t[column].tolist()]
+            for column in t.columns
+        ]
+        return ([str(dtype) for dtype in t.dtypes], cells, t.isna().values.tolist())
+
+    assert shown(fpd) == shown(pd)

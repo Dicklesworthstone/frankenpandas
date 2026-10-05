@@ -36328,6 +36328,25 @@ impl PyDataFrame {
             .inner
             .transpose()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        // Each output column is one source row: a tz-aware column's instant
+        // is a Timestamp in its zone among the object cells, as `zoned_row`
+        // makes a row (the core's cell is the naive UTC instant; mxjyl).
+        if (0..self.inner.num_columns())
+            .filter_map(|position| self.inner.column_at(position))
+            .any(|column| column.timezone().is_some())
+        {
+            let columns = Python::attach(|py| {
+                (0..result.num_columns())
+                    .filter_map(|position| result.column_at(position))
+                    .map(|column| {
+                        let row = Series::new("", result.index().clone(), column.clone())
+                            .map_err(frame_error_to_py)?;
+                        Ok(zoned_row(py, &self.inner, row)?.column().clone())
+                    })
+                    .collect::<PyResult<Vec<Column>>>()
+            })?;
+            result = result.with_columns_at_positions(columns);
+        }
         // A MultiIndex moves with its axis: the row levels become the column
         // levels and the column levels the row levels (the flat 'x/1' labels
         // were all that crossed; fvsao.36).
