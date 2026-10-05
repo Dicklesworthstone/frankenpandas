@@ -7159,6 +7159,24 @@ fn reduction_to_py(
     if result.is_missing() && is_nullable_extension(&series.dtype()) {
         return na_object(py);
     }
+    // pandas' masked reductions keep their kind: an Int64 prod is np.int64,
+    // and so is an Int64 quantile when the column holds a missing value and
+    // the quantile is a whole number (only then does pandas' masked quantile
+    // cast back); a boolean min / max is np.bool_. They were np.float64
+    // (br-frankenpandas-1t4kg).
+    match (series.dtype(), result) {
+        (DType::Int64Nullable, Scalar::Float64(value))
+            if value.fract() == 0.0
+                && value.abs() < 9.2e18
+                && (op == "prod" || (op == "quantile" && series.column().has_any_missing())) =>
+        {
+            return numpy_scalar(py, &Scalar::Int64(*value as i64));
+        }
+        (DType::BoolNullable, Scalar::Float64(value)) if matches!(op, "min" | "max") => {
+            return numpy_scalar(py, &Scalar::Bool(*value != 0.0));
+        }
+        _ => {}
+    }
     // A tz-aware column's instant is a Timestamp in its zone (min / max /
     // median / quantile came back naive UTC).
     if let (DType::Datetime64 { tz: Some(zone) }, Scalar::Datetime64(nanos)) =
@@ -29424,6 +29442,30 @@ impl PySeries {
                     .inner
                     .quantile_list(&qs, interpolation)
                     .map_err(frame_error_to_py)?;
+                // A masked column's quantiles are Float64 - Int64 when it
+                // holds a missing value and every quantile is a whole number,
+                // as pandas' masked quantile casts back (they were numpy
+                // float64; br-frankenpandas-1t4kg).
+                let res = match self.inner.dtype() {
+                    DType::Int64Nullable | DType::Float64Nullable => {
+                        let whole = self.inner.dtype() == DType::Int64Nullable
+                            && self.inner.column().has_any_missing()
+                            && res.column().values().iter().all(|value| match value {
+                                Scalar::Float64(x) => x.fract() == 0.0,
+                                Scalar::Int64(_) => true,
+                                _ => false,
+                            });
+                        let target = if whole {
+                            DType::Int64Nullable
+                        } else {
+                            DType::Float64Nullable
+                        };
+                        let column = res.column().astype(target).map_err(column_error_to_py)?;
+                        Series::new(res.name().clone(), res.index().clone(), column)
+                            .map_err(frame_error_to_py)?
+                    }
+                    _ => res,
+                };
                 Ok(Py::new(py, PySeries { inner: res })?.into_any())
             } else {
                 Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
@@ -66524,6 +66566,23 @@ impl PySeriesGroupBy {
     /// as_index=False the keys moved into a column beside it, as pandas does.
     fn wrap_result(&self, op: &str, s: Series) -> PyResult<Py<PyAny>> {
         let res = masked_reduction(&self.series.column().dtype(), op, self.per_group(op, s)?)?;
+        // A `string` column's groups keep its dtype where they are its own
+        // values (first / last / min / max / nth; they were object;
+        // br-frankenpandas-1t4kg).
+        let res = if self.series.column().is_pandas_string()
+            && matches!(op, "first" | "last" | "min" | "max" | "nth")
+            && res.column().dtype() == DType::Utf8
+            && !res.column().is_pandas_string()
+        {
+            Series::new(
+                res.name().clone(),
+                res.index().clone(),
+                res.column().clone().as_pandas_string(),
+            )
+            .map_err(frame_error_to_py)?
+        } else {
+            res
+        };
         // A narrow column's groups in pandas' dtype for `op` (fvsao.23).
         let res = match self.series.column().width() {
             Some(width) => {

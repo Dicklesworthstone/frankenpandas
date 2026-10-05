@@ -25654,3 +25654,37 @@ def test_subset_ops_keep_the_nullable_dtype_like_pandas_1t4kg(dtype: str, op: st
         return (repr(result), str(result.dtype))
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-1t4kg: pandas' masked reductions keep their kind - an Int64
+# prod is np.int64, an Int64 quantile too when the column holds a missing
+# value and every quantile is whole (else float / Float64), a boolean min /
+# max is np.bool_ - and a `string` column's groupby first / last / max stay
+# `string`. NEGATIVE: a column without a missing value quantiles to floats.
+_1T4KG_REDUCTIONS = {
+    "Int64 prod": lambda m: m.Series([3, None, 1, 3], dtype="Int64").prod(),
+    "Int64 prod, no NA": lambda m: m.Series([2, 5], dtype="Int64").prod(),
+    "Int64 quantile with NA, whole": lambda m: m.Series([3, None, 1, 3], dtype="Int64").quantile(0.5),
+    "Int64 quantile with NA, fractional": lambda m: m.Series([1, 2, None], dtype="Int64").quantile(0.5),
+    "Int64 quantile without NA": lambda m: m.Series([1, 3, 3], dtype="Int64").quantile(0.5),
+    "Int64 quantile list with NA, whole": lambda m: m.Series([3, None, 1, 3], dtype="Int64").quantile([0.25, 0.5]),
+    "Int64 quantile list with NA, fractional": lambda m: m.Series([1, 2, None], dtype="Int64").quantile([0.25, 0.5]),
+    "Int64 quantile list without NA": lambda m: m.Series([1, 2], dtype="Int64").quantile([0.5, 1.0]),
+    "Float64 quantile list": lambda m: m.Series([1.5, None, 2.5], dtype="Float64").quantile([0.5]),
+    "boolean max": lambda m: m.Series([True, None, False], dtype="boolean").max(),
+    "boolean min": lambda m: m.Series([True, None, False], dtype="boolean").min(),
+    "string groupby first": lambda m: m.Series(["b", None, "a", "b"], dtype="string").groupby([0, 0, 1, 1]).first(),
+    "string groupby last": lambda m: m.Series(["b", None, "a", "b"], dtype="string").groupby([0, 0, 1, 1]).last(),
+    "string groupby max": lambda m: m.Series(["b", None, "a", "b"], dtype="string").groupby([0, 0, 1, 1]).max(),
+    "int64 quantile list": lambda m: m.Series([1, 2]).quantile([0.5]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_1T4KG_REDUCTIONS))
+def test_masked_reductions_keep_their_kind_like_pandas_1t4kg(case: str) -> None:
+    def shown(m: Any) -> Any:
+        result = _1T4KG_REDUCTIONS[case](m)
+        return (repr(result), str(getattr(result, "dtype", type(result).__name__)))
+
+    assert shown(fpd) == shown(pd)
