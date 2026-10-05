@@ -24574,7 +24574,27 @@ fn series_logical(
     let left_dtype = left.dtype();
     if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
         let right = &series.inner;
-        if left.index().labels() == right.index().labels() {
+        // `Index ==` answers equal range / shared indexes without building
+        // their labels; the label comparison stays for the rest.
+        if left.index() == right.index() || left.index().labels() == right.index().labels() {
+            // Two all-valid bool columns in one pass over their buffers (a 1M
+            // `m1 & m2` read both sides as Scalars: 60 ms against pandas'
+            // 1.4 ms).
+            if let (Some(a), Some(b)) = (
+                left.column().as_bool_slice(),
+                right.column().as_bool_slice(),
+            ) {
+                let values = a
+                    .iter()
+                    .zip(b)
+                    .map(|(&x, &y)| match op {
+                        LogicalOp::And => x & y,
+                        LogicalOp::Or => x | y,
+                        LogicalOp::Xor => x ^ y,
+                    })
+                    .collect();
+                return Ok((left.index().clone(), Column::from_bool_values(values)));
+            }
             let column = logical_columns(
                 left.column(),
                 &left_dtype,

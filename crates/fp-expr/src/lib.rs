@@ -78,7 +78,7 @@
 
 use std::collections::BTreeMap;
 
-use fp_columnar::ComparisonOp;
+use fp_columnar::{ArithmeticOp, ComparisonOp};
 use fp_frame::{self, FrameError, Series};
 use fp_index::{DuplicateKeep, Index, IndexLabel};
 use fp_runtime::{EvidenceLedger, RuntimeMode, RuntimePolicy};
@@ -715,17 +715,47 @@ fn evaluate_node(
             context.broadcast_local(name, value)
         }
         Expr::Add { left, right } => {
-            let (lhs, rhs) = evaluate_arith_operands(left, right, context, policy, ledger)?;
+            let (lhs, rhs) = match evaluate_scalar_arith(
+                left,
+                right,
+                ArithmeticOp::Add,
+                context,
+                policy,
+                ledger,
+            )? {
+                Ok(answer) => return Ok(answer),
+                Err(operands) => operands,
+            };
             lhs.add_with_policy(&rhs, policy, ledger)
                 .map_err(ExprError::from)
         }
         Expr::Sub { left, right } => {
-            let (lhs, rhs) = evaluate_arith_operands(left, right, context, policy, ledger)?;
+            let (lhs, rhs) = match evaluate_scalar_arith(
+                left,
+                right,
+                ArithmeticOp::Sub,
+                context,
+                policy,
+                ledger,
+            )? {
+                Ok(answer) => return Ok(answer),
+                Err(operands) => operands,
+            };
             lhs.sub_with_policy(&rhs, policy, ledger)
                 .map_err(ExprError::from)
         }
         Expr::Mul { left, right } => {
-            let (lhs, rhs) = evaluate_arith_operands(left, right, context, policy, ledger)?;
+            let (lhs, rhs) = match evaluate_scalar_arith(
+                left,
+                right,
+                ArithmeticOp::Mul,
+                context,
+                policy,
+                ledger,
+            )? {
+                Ok(answer) => return Ok(answer),
+                Err(operands) => operands,
+            };
             if policy.mode == RuntimeMode::Hardened {
                 check_repeated_text_budget(&lhs, &rhs)?;
             }
@@ -733,7 +763,17 @@ fn evaluate_node(
                 .map_err(ExprError::from)
         }
         Expr::Div { left, right } => {
-            let (lhs, rhs) = evaluate_arith_operands(left, right, context, policy, ledger)?;
+            let (lhs, rhs) = match evaluate_scalar_arith(
+                left,
+                right,
+                ArithmeticOp::Div,
+                context,
+                policy,
+                ledger,
+            )? {
+                Ok(answer) => return Ok(answer),
+                Err(operands) => operands,
+            };
             lhs.div_with_policy(&rhs, policy, ledger)
                 .map_err(ExprError::from)
         }
@@ -1387,7 +1427,9 @@ impl DataFrameExprExt for fp_frame::DataFrame {
         locals: &BTreeMap<String, Scalar>,
     ) -> Result<Series, ExprError> {
         let policy = RuntimePolicy::hardened(Some(100_000));
-        let mut ledger = EvidenceLedger::new();
+        // The ledger is discarded, so no semantic witness (a sha256 over the
+        // index per operation) is computed for it.
+        let mut ledger = EvidenceLedger::new().without_semantic_witnesses();
         eval_str_with_locals(expr_str, self, locals, &policy, &mut ledger)
     }
 
@@ -1401,7 +1443,7 @@ impl DataFrameExprExt for fp_frame::DataFrame {
         locals: &BTreeMap<String, Scalar>,
     ) -> Result<EvalValue, ExprError> {
         let policy = RuntimePolicy::hardened(Some(100_000));
-        let mut ledger = EvidenceLedger::new();
+        let mut ledger = EvidenceLedger::new().without_semantic_witnesses();
         eval_value_str_with_locals(expr_str, self, locals, &policy, &mut ledger)
     }
 
@@ -1415,7 +1457,7 @@ impl DataFrameExprExt for fp_frame::DataFrame {
         locals: &BTreeMap<String, Scalar>,
     ) -> Result<fp_frame::DataFrame, ExprError> {
         let policy = RuntimePolicy::hardened(Some(100_000));
-        let mut ledger = EvidenceLedger::new();
+        let mut ledger = EvidenceLedger::new().without_semantic_witnesses();
         query_str_with_locals(expr_str, self, locals, &policy, &mut ledger)
     }
 }
@@ -1472,6 +1514,53 @@ fn evaluate_scalar_operand_named(
     };
     let index = context.anchor_index.as_ref().ok_or(anchor_error)?;
     Series::broadcast(name, value, index.labels().to_vec()).map_err(ExprError::from)
+}
+
+/// `series <op> scalar` (either side) for + - * / through the column's scalar
+/// kernel (`Column::binary_scalar`, the same arithmetic the broadcast pair
+/// would take) instead of broadcasting the scalar to a column carrying the
+/// frame's labels - ~30 ms of a 1M `v + 1`. Where the kernel declines (a NaN,
+/// a non-numeric or nullable column) or neither side is a scalar, the operand
+/// pair [`evaluate_arith_operands`] would make.
+fn evaluate_scalar_arith(
+    left: &Expr,
+    right: &Expr,
+    op: ArithmeticOp,
+    context: &EvalContext,
+    policy: &RuntimePolicy,
+    ledger: &mut EvidenceLedger,
+) -> Result<Result<Series, (Series, Series)>, ExprError> {
+    let scalar_left = match (is_scalar_operand(left), is_scalar_operand(right)) {
+        (false, true) => false,
+        (true, false) => true,
+        _ => return evaluate_arith_operands(left, right, context, policy, ledger).map(Err),
+    };
+    let (series_expr, scalar_expr) = if scalar_left {
+        (right, left)
+    } else {
+        (left, right)
+    };
+    let series = evaluate(series_expr, context, policy, ledger)?;
+    let value = match scalar_expr {
+        Expr::Literal { value } => value,
+        Expr::Local { name } => context
+            .get_local(name)
+            .ok_or_else(|| ExprError::UnknownLocal(name.clone()))?,
+        _ => return evaluate_arith_operands(left, right, context, policy, ledger).map(Err),
+    };
+    if let Some(column) = series.column().binary_scalar(value, op, scalar_left) {
+        return Ok(Ok(Series::new(
+            series.name().clone(),
+            series.index().clone(),
+            column,
+        )?));
+    }
+    let broadcast = evaluate_scalar_operand_named(scalar_expr, context, series.name())?;
+    Ok(Err(if scalar_left {
+        (broadcast, series)
+    } else {
+        (series, broadcast)
+    }))
 }
 
 /// Evaluate both operands of an arithmetic node. A scalar operand (literal or

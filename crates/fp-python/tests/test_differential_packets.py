@@ -24915,3 +24915,68 @@ def test_dataframe_of_a_scalar_like_pandas_lcqm5(data: Any, axes: str) -> None:
     assert built(fpd) == built(pd)
     # NEGATIVE: a list of text is still a column of strings.
     assert fpd.DataFrame(["ab", "c"]).values.tolist() == [["ab"], ["c"]]
+
+
+# br-frankenpandas-pjeme: eval / query / where / & | ^ took slow paths at 1M
+# rows (discarded semantic witnesses, broadcast literals, Scalar views, a
+# finite-only typed where). These pin the fast paths' answers, and where a
+# kernel must decline (a NaN, a nullable or unaligned operand) the fallback's.
+def _pjeme_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "k": [3, 700, 12, 950, 0, 499, 501, 8],
+            "v": [0.25, 0.75, 0.5, 0.9, 0.1, 0.51, 0.49, 0.6],
+            "w": [1.5, -2.0, 0.0, 3.25, 7.0, -0.5, 2.0, 1.0],
+            "n": [1.0, _NAN, 3.0, 4.0, _NAN, 6.0, 7.0, 8.0],
+        }
+    )
+
+
+def _pjeme_local(m: Any, x: float, expr: str) -> Any:
+    return _pjeme_frame(m).eval(expr)
+
+
+_PJEME_CASES = {
+    "eval float op literal": lambda m: _pjeme_frame(m).eval("v * w + 1"),
+    "eval literal first": lambda m: _pjeme_frame(m).eval("2 * v - k"),
+    "eval div": lambda m: _pjeme_frame(m).eval("w / 4"),
+    "eval literal minus": lambda m: _pjeme_frame(m).eval("10 - w"),
+    "eval int op int": lambda m: _pjeme_frame(m).eval("k * 3 + 1"),
+    "eval int overflow wraps": lambda m: m.DataFrame({"a": [2**62, 3]}).eval("a * 4"),
+    "eval int truediv": lambda m: _pjeme_frame(m).eval("k / 2"),
+    "eval NaN column (kernel declines)": lambda m: _pjeme_frame(m).eval("n + 1"),
+    "eval local": lambda m: _pjeme_local(m, 2.5, "v * @x"),
+    "eval NaN local (kernel declines)": lambda m: _pjeme_local(m, _NAN, "v + @x"),
+    "eval comparison and": lambda m: _pjeme_frame(m).eval("v > 0.5 and k < 500"),
+    "eval or": lambda m: _pjeme_frame(m).eval("v > 0.5 or w < 0"),
+    "query and": lambda m: _pjeme_frame(m).query("v > 0.5 and k < 500"),
+    "query or": lambda m: _pjeme_frame(m).query("v > 0.8 or w < 0"),
+    "& aligned": lambda m: (lambda d: (d["v"] > 0.5) & (d["k"] < 500))(_pjeme_frame(m)),
+    "| aligned": lambda m: (lambda d: (d["v"] > 0.5) | (d["k"] < 500))(_pjeme_frame(m)),
+    "^ aligned": lambda m: (lambda d: (d["v"] > 0.5) ^ (d["k"] < 500))(_pjeme_frame(m)),
+    "& named": lambda m: m.Series([True, False], name="a") & m.Series([True, True], name="b"),
+    # NEGATIVE: an unaligned or nullable pair keeps the aligned path.
+    "& unaligned": lambda m: m.Series([True, False, True], index=[0, 1, 2])
+    & m.Series([True, True], index=[2, 0]),
+    "& nullable": lambda m: m.Series([True, None, False], dtype="boolean")
+    & m.Series([True, True, None], dtype="boolean"),
+    "where default": lambda m: (lambda d: d[["v", "w"]].where(d[["v", "w"]] > 0.4))(_pjeme_frame(m)),
+    "where all false": lambda m: (lambda d: d[["v", "w"]].where(d[["v", "w"]] > 100))(_pjeme_frame(m)),
+    "where scalar other": lambda m: (lambda d: d[["v", "w"]].where(d[["v", "w"]] > 0.4, -1.0))(_pjeme_frame(m)),
+    "where None other": lambda m: (lambda d: d[["v"]].where(d[["v"]] > 0.4, None))(_pjeme_frame(m)),
+    "where NaN data": lambda m: (lambda d: d[["n"]].where(d[["n"]] > 3))(_pjeme_frame(m)),
+    "mask default": lambda m: (lambda d: d[["v", "w"]].mask(d[["v", "w"]] > 0.4))(_pjeme_frame(m)),
+    "where inf other": lambda m: (lambda d: d[["v"]].where(d[["v"]] > 0.4, float("inf")))(_pjeme_frame(m)),
+    "where int column": lambda m: (lambda d: d[["k"]].where(d[["k"]] > 100))(_pjeme_frame(m)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_PJEME_CASES))
+def test_fast_eval_query_where_and_logic_like_pandas_pjeme(case: str) -> None:
+    def shown(m: Any) -> Any:
+        result = _PJEME_CASES[case](m)
+        dtypes = [str(t) for t in result.dtypes] if hasattr(result, "columns") else [str(result.dtype)]
+        return (repr(result), dtypes)
+
+    assert shown(fpd) == shown(pd)

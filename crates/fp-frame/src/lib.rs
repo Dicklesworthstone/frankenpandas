@@ -13940,6 +13940,24 @@ impl Series {
         Ok(())
     }
 
+    /// `and` / `or` of two all-valid bool columns on one unique index - the
+    /// identity alignment `align_union_sorted_plan` gives them - in one pass
+    /// over the buffers (a 1M `query('a and b')` built both as Scalars); None
+    /// for anything else, which takes the aligned three-valued path.
+    fn bool_pair_same_index(
+        &self,
+        other: &Self,
+        op: impl Fn(bool, bool) -> bool,
+    ) -> Option<Column> {
+        if self.index.has_duplicates() || self.index != other.index {
+            return None;
+        }
+        let (left, right) = (self.column.as_bool_slice()?, other.column.as_bool_slice()?);
+        Some(Column::from_bool_values(
+            left.iter().zip(right).map(|(&x, &y)| op(x, y)).collect(),
+        ))
+    }
+
     /// Element-wise boolean AND with outer index alignment.
     ///
     /// Uses three-valued logic compatible with nullable boolean semantics:
@@ -13949,6 +13967,16 @@ impl Series {
     pub fn and(&self, other: &Self) -> Result<Self, FrameError> {
         self.ensure_boolean_series("and")?;
         other.ensure_boolean_series("and")?;
+
+        if let Some(column) = self.bool_pair_same_index(other, |x, y| x & y) {
+            let out_name = if self.name == other.name {
+                self.name.clone()
+            } else {
+                // Unnamed (None), as pandas, when the names differ (pjeme).
+                LabelName::default()
+            };
+            return Self::new(out_name, self.index.clone(), column);
+        }
 
         let plan = align_union_sorted_plan(&self.index, &other.index);
         validate_alignment_plan(&plan)?;
@@ -13973,7 +14001,8 @@ impl Series {
         let out_name = if self.name == other.name {
             self.name.clone()
         } else {
-            format!("{}&{}", self.name, other.name).into()
+            // Unnamed (None), as pandas, when the names differ (pjeme).
+            LabelName::default()
         };
 
         Self::new(out_name, plan.union_index, Column::from_values(values)?)
@@ -13988,6 +14017,15 @@ impl Series {
     pub fn or(&self, other: &Self) -> Result<Self, FrameError> {
         self.ensure_boolean_series("or")?;
         other.ensure_boolean_series("or")?;
+
+        if let Some(column) = self.bool_pair_same_index(other, |x, y| x | y) {
+            let out_name = if self.name == other.name {
+                self.name.clone()
+            } else {
+                LabelName::default()
+            };
+            return Self::new(out_name, self.index.clone(), column);
+        }
 
         let plan = align_union_sorted_plan(&self.index, &other.index);
         validate_alignment_plan(&plan)?;
@@ -14012,7 +14050,7 @@ impl Series {
         let out_name = if self.name == other.name {
             self.name.clone()
         } else {
-            format!("{}|{}", self.name, other.name).into()
+            LabelName::default()
         };
 
         Self::new(out_name, plan.union_index, Column::from_values(values)?)
@@ -83202,15 +83240,17 @@ impl DataFrame {
         other: Option<&Scalar>,
         mask_mode: bool,
     ) -> Option<Result<Self, FrameError>> {
-        let &Scalar::Float64(fill) = other? else {
-            return None;
+        // A missing `other` - pandas' default, NaN - makes the cell missing,
+        // as the general path's Null(NaN) fill does: `df.where(cond)` took
+        // that path for every cell (108 ms against pandas' 11 ms at 2 x 1M).
+        let fill = match other {
+            None | Some(Scalar::Null(_)) => None,
+            Some(Scalar::Float64(fill)) if fill.is_nan() => None,
+            Some(Scalar::Float64(fill)) if fill.is_finite() => Some(*fill),
+            Some(_) => return None,
         };
         // Keyed by name: a repeated column key takes the positional path (i17d4).
-        if !fill.is_finite()
-            || self.index != cond.index
-            || !self.index.is_unique()
-            || self.has_repeated_column_keys()
-        {
+        if self.index != cond.index || !self.index.is_unique() || self.has_repeated_column_keys() {
             return None;
         }
         for name in &self.column_order {
@@ -83233,15 +83273,25 @@ impl DataFrame {
             let Some((sd, sv)) = self.columns[name].as_f64_slice_with_validity() else {
                 return Ok(None);
             };
-            let cond_vals = cond.columns[name].values();
-            if cond_vals.len() != sd.len() {
+            // An all-valid bool condition is read from its buffer, not its
+            // Scalar view.
+            let cond_column = &cond.columns[name];
+            let cond_bools = cond_column.as_bool_slice();
+            let cond_vals: &[Scalar] = if cond_bools.is_some() {
+                &[]
+            } else {
+                cond_column.values()
+            };
+            if cond_bools.map_or(cond_vals.len(), <[bool]>::len) != sd.len() {
                 return Ok(None);
             }
             let n = sd.len();
             let mut out = vec![0.0_f64; n];
             let mut out_valid = fp_columnar::ValidityMask::all_valid(n);
             for i in 0..n {
-                let keep_self = match &cond_vals[i] {
+                let cell =
+                    cond_bools.map_or_else(|| cond_vals[i].clone(), |bools| Scalar::Bool(bools[i]));
+                let keep_self = match &cell {
                     Scalar::Bool(b) => {
                         // where: keep self iff cond true; mask: iff cond false.
                         if mask_mode { !*b } else { *b }
@@ -83288,8 +83338,11 @@ impl DataFrame {
                     if !(sv.get(i) && !sd[i].is_nan()) {
                         out_valid.set(i, false);
                     }
-                } else {
+                } else if let Some(fill) = fill {
                     out[i] = fill;
+                } else {
+                    out[i] = f64::NAN;
+                    out_valid.set(i, false);
                 }
             }
             Ok(Some(Column::from_f64_values_with_validity(out, out_valid)))
