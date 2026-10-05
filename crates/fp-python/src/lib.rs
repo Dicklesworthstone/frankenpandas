@@ -54777,7 +54777,7 @@ impl PySeriesStringAccessor {
             .and_then(|frame| frame.with_row_multiindex(levels))
             .map_err(frame_error_to_py)?;
         Ok(PyDataFrame {
-            inner: group_column_labels(frame),
+            inner: self.string_frame(group_column_labels(frame)),
         })
     }
 
@@ -54992,7 +54992,7 @@ impl PySeriesStringAccessor {
             let s = self.series.str().extract(pat).map_err(frame_error_to_py)?;
             return Ok(Py::new(py, self.finish(s)?)?.into_any());
         }
-        let inner = group_column_labels(df);
+        let inner = self.string_frame(group_column_labels(df));
         Ok(Py::new(py, PyDataFrame { inner })?.into_any())
     }
     /// pandas' `split(pat=None, n=-1, expand=False, regex=None)`: a Series of
@@ -55016,7 +55016,7 @@ impl PySeriesStringAccessor {
                 .str()
                 .split_expand_n(literal, parts)
                 .map_err(frame_error_to_py)?;
-            let inner = positional_column_range(df)?;
+            let inner = self.string_frame(positional_column_range(df)?);
             return Ok(Py::new(py, PyDataFrame { inner })?.into_any());
         }
         let re = py.import("re")?;
@@ -55033,7 +55033,8 @@ impl PySeriesStringAccessor {
             };
             Ok(pieces.unbind())
         })?;
-        lists_result(py, lists, expand)
+        let result = lists_result(py, lists, expand)?;
+        self.string_expanded(py, result, expand)
     }
     /// pandas' `rsplit(pat=None, n=-1, expand=False)`: as `split` from the
     /// right (always a literal pattern).
@@ -55052,13 +55053,14 @@ impl PySeriesStringAccessor {
                 .str()
                 .rsplit_df(literal, parts)
                 .map_err(frame_error_to_py)?;
-            let inner = positional_column_range(df)?;
+            let inner = self.string_frame(positional_column_range(df)?);
             return Ok(Py::new(py, PyDataFrame { inner })?.into_any());
         }
         let lists = self.python_lists(py, |text| {
             Ok(text.call_method1("rsplit", (pat, n))?.unbind())
         })?;
-        lists_result(py, lists, expand)
+        let result = lists_result(py, lists, expand)?;
+        self.string_expanded(py, result, expand)
     }
     /// pandas' `findall(pat, flags=0)`: each string's matches as a list
     /// (Python's `re.findall`, so one group gives the group's text).
@@ -55085,7 +55087,7 @@ impl PySeriesStringAccessor {
             .str()
             .partition_df(sep)
             .map_err(frame_error_to_py)?;
-        let inner = positional_column_range(frame)?;
+        let inner = self.string_frame(positional_column_range(frame)?);
         Ok(Py::new(py, PyDataFrame { inner })?.into_any())
     }
     #[pyo3(signature = (sep=" ", expand=true))]
@@ -55101,7 +55103,7 @@ impl PySeriesStringAccessor {
             .str()
             .rpartition_df(sep)
             .map_err(frame_error_to_py)?;
-        let inner = positional_column_range(frame)?;
+        let inner = self.string_frame(positional_column_range(frame)?);
         Ok(Py::new(py, PyDataFrame { inner })?.into_any())
     }
     /// pandas' `get_dummies(sep='|')`: a 0/1 column per distinct token.
@@ -55228,6 +55230,65 @@ impl PySeriesStringAccessor {
 }
 
 impl PySeriesStringAccessor {
+    /// `frame`, a str method's pieces of this Series as columns, as pandas
+    /// gives them over a `string` column: each column `string`, a missing
+    /// piece <NA> (they were object holding None / NaN; fvsao.59); over an
+    /// object column as it is.
+    fn string_frame(&self, frame: DataFrame) -> DataFrame {
+        let source = self.series.column();
+        if !source.is_pandas_string() {
+            return frame;
+        }
+        // Rows that are the source's rows are missing where it is (a split
+        // piece of a missing value holds the pd.NA object).
+        let aligned = frame.len() == source.len();
+        let columns = (0..frame.num_columns())
+            .filter_map(|position| frame.column_at(position))
+            .map(|column| {
+                let values = column
+                    .values()
+                    .iter()
+                    .enumerate()
+                    .map(|(row, value)| {
+                        if value.is_missing() || (aligned && source.values()[row].is_missing()) {
+                            Scalar::Null(NullKind::Null)
+                        } else {
+                            value.clone()
+                        }
+                    })
+                    .collect();
+                Column::from_object_values(values).as_pandas_string()
+            })
+            .collect();
+        frame.with_columns_at_positions(columns)
+    }
+
+    /// `result`, a `split` / `rsplit` of Python lists, its expanded frame
+    /// in pandas' `string` dtype over a `string` column (see
+    /// [`Self::string_frame`]).
+    fn string_expanded(
+        &self,
+        py: Python<'_>,
+        result: Py<PyAny>,
+        expand: bool,
+    ) -> PyResult<Py<PyAny>> {
+        if !expand || !self.series.column().is_pandas_string() {
+            return Ok(result);
+        }
+        let frame = result
+            .bind(py)
+            .extract::<PyRef<'_, PyDataFrame>>()?
+            .inner
+            .clone();
+        Ok(Py::new(
+            py,
+            PyDataFrame {
+                inner: self.string_frame(frame),
+            },
+        )?
+        .into_any())
+    }
+
     fn wrap(
         &self,
         op: impl FnOnce(&fp_frame::StringAccessor<'_>) -> Result<Series, FrameError>,
@@ -55329,6 +55390,9 @@ impl PySeriesStringAccessor {
             .iter()
             .zip(source.values())
             .map(|(value, original)| match value {
+                // A test's `na=` answer stands where the text is missing
+                // (contains('a', na=False) is False there; it was <NA>).
+                Scalar::Bool(_) if original.is_missing() => value.clone(),
                 _ if original.is_missing() => Scalar::Null(NullKind::Null),
                 Scalar::Float64(v) if target.is_some() => Scalar::Int64(*v as i64),
                 other => other.clone(),

@@ -26256,3 +26256,43 @@ def test_negative_frequencies_step_backwards_like_pandas_tzxpk(case: str) -> Non
             return ("raises", type(error).__name__, str(error))
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.59 (str accessor
+# over a `string` column): a test's na= answer stands at a missing value
+# (contains('a', na=False) was <NA>), and the pieces of split / rsplit /
+# partition / rpartition / extract / extractall with expand are `string`
+# columns with <NA> (they were object holding None / NaN). NEGATIVE: an
+# object column's pieces stay object; na= unset keeps <NA>.
+def _fvsao59_text(m: Any, dtype: str = "string") -> Any:
+    return m.Series(["Apple pie", None, "banana Split", "", "date,fig"], dtype=dtype)
+
+
+_FVSAO59_STR_CASES = {
+    "contains na=False": lambda m: _fvsao59_text(m).str.contains("a", na=False),
+    "contains na=True": lambda m: _fvsao59_text(m).str.contains("a", na=True),
+    "startswith na=False": lambda m: _fvsao59_text(m).str.startswith("b", na=False),
+    "contains, na unset (NEGATIVE)": lambda m: _fvsao59_text(m).str.contains("a"),
+    "split expand": lambda m: _fvsao59_text(m).str.split(" ", expand=True),
+    "split expand, whitespace": lambda m: _fvsao59_text(m).str.split(expand=True),
+    "split expand, regex": lambda m: _fvsao59_text(m).str.split(r"[ ,]", expand=True, regex=True),
+    "rsplit expand": lambda m: _fvsao59_text(m).str.rsplit(" ", n=1, expand=True),
+    "partition": lambda m: _fvsao59_text(m).str.partition(" "),
+    "rpartition": lambda m: _fvsao59_text(m).str.rpartition(" "),
+    "extract": lambda m: _fvsao59_text(m).str.extract(r"([a-z]+)"),
+    "extract two groups": lambda m: _fvsao59_text(m).str.extract(r"(\w)(\w)"),
+    "extractall": lambda m: _fvsao59_text(m).str.extractall(r"(a)"),
+    "object split expand (NEGATIVE)": lambda m: _fvsao59_text(m, "object").str.split(" ", expand=True),
+    "object extract (NEGATIVE)": lambda m: _fvsao59_text(m, "object").str.extract(r"([a-z]+)"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FVSAO59_STR_CASES))
+def test_string_accessor_results_keep_string_like_pandas_fvsao59(case: str) -> None:
+    def shown(m: Any) -> Any:
+        result = _FVSAO59_STR_CASES[case](m)
+        dtypes = [str(dtype) for dtype in result.dtypes] if hasattr(result, "columns") else str(result.dtype)
+        return (repr(result), dtypes)
+
+    assert shown(fpd) == shown(pd)
