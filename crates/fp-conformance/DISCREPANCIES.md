@@ -311,6 +311,13 @@
 - **Tests affected:** `fp_p2d_028` (strict, hardened), `fp_p2d_029` (strict, hardened), `concat_dataframes_axis1_duplicate_columns_succeeds`.
 - **Review date:** 2026-09-12
 
+### DISC-033: `rank` of a masked Int64 / boolean Series ranks its missing values (pandas 2.2.3 reads the buffer under the mask)
+- **Reference:** pandas 2.2.3 ranks a masked Int64 / boolean array's raw data, ignoring the mask, so a missing value gets a rank from whatever the buffer holds in its slot: `pd.Series([3, None, 1, 3], dtype='Int64').rank()` is `[3.5, 1.5, 1.5, 3.5]` (the constructor stores 1 under the mask, which ties with the real 1); `pd.Series([3, 1, 5], dtype='Int64').where(mask)` ranks the 1 `where` left behind; `pd.Series([True, None, False], dtype='boolean').rank()` is `[3.0, 1.5, 1.5]`. A `Float64` Series holds NaN under its mask and ranks correctly (`[1.0, nan, 2.0]`). Measured live 2026-10-05.
+- **Our impl:** the missing value is missing: `[2.5, NaN, 1.0, 2.5]` (`na_option='keep'`), last with `na_option='bottom'`, as pandas ranks every other dtype.
+- **Impact:** the answer pandas gives depends on how the array was built (the hidden buffer is not observable through pandas' API), so it cannot be reproduced from the values alone.
+- **Resolution:** ACCEPTED (found by br-frankenpandas-1t4kg's sweep).
+- **Review date:** 2026-10-05
+
 ## Rules
 
 1. Every divergence gets a sequential ID (DISC-NNN)
