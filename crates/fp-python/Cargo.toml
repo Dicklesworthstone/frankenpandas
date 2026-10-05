@@ -29,6 +29,7 @@ fp-types = { path = "../fp-types", version = "0.4.0" }
 fp-expr = { path = "../fp-expr", version = "0.4.0" }
 mimalloc = { workspace = true }
 pyo3 = { workspace = true }
+rustc-hash = "2"
 
 [features]
 default = ["lazy-transpose-view"]

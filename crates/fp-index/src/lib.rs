@@ -18788,10 +18788,11 @@ pub enum TimedeltaRangeError {
     InsufficientParams,
     #[error("must specify no more than two of start, end, periods")]
     TooManyParams,
-    #[error("freq must be positive")]
-    NonPositiveFreq,
-    #[error("cannot compute range: end < start with positive freq")]
-    InvalidRange,
+    /// A zero step goes nowhere (pandas' ZeroDivisionError). A negative one
+    /// steps backwards and a range stepping away from `end` is empty, as
+    /// pandas' (they were refused; br-frankenpandas-tzxpk).
+    #[error("freq must be non-zero")]
+    ZeroFreq,
 }
 
 /// Create a TimedeltaIndex with evenly spaced values.
@@ -18820,16 +18821,18 @@ pub fn timedelta_range(
     freq: i64,
     name: Option<&str>,
 ) -> Result<Index, TimedeltaRangeError> {
-    if freq <= 0 {
-        return Err(TimedeltaRangeError::NonPositiveFreq);
+    if freq == 0 {
+        return Err(TimedeltaRangeError::ZeroFreq);
     }
 
     let (start_ns, count) = match (start, end, periods) {
         (Some(s), Some(e), None) => {
-            if e < s {
-                return Err(TimedeltaRangeError::InvalidRange);
-            }
-            let n = ((e - s) / freq + 1) as usize;
+            // A step away from `end` reaches nothing (empty, as pandas').
+            let n = if (freq > 0 && e < s) || (freq < 0 && e > s) {
+                0
+            } else {
+                ((e - s) / freq + 1) as usize
+            };
             (s, n)
         }
         (Some(s), None, Some(p)) => (s, p),
@@ -22877,6 +22880,38 @@ mod tests {
         )
         .expect_err("start + end + periods with explicit freq must fail closed");
         assert!(matches!(err, TimedeltaRangeError::TooManyParams));
+    }
+
+    #[test]
+    fn timedelta_range_steps_backwards_and_away_is_empty_tzxpk() {
+        let day = Timedelta::NANOS_PER_DAY;
+        let labels = |idx: Index| idx.labels().to_vec();
+        // pandas: timedelta_range('5D', periods=3, freq='-1D') is 5, 4, 3 days.
+        assert_eq!(
+            labels(timedelta_range(Some(5 * day), None, Some(3), -day, None).unwrap()),
+            [5, 4, 3].map(|d| IndexLabel::Timedelta64(d * day))
+        );
+        // ... from end: '-1D' ending at 1 day is 3, 2, 1 days.
+        assert_eq!(
+            labels(timedelta_range(None, Some(day), Some(3), -day, None).unwrap()),
+            [3, 2, 1].map(|d| IndexLabel::Timedelta64(d * day))
+        );
+        // Stepping away from `end` is empty, either sign.
+        assert!(
+            timedelta_range(Some(day), Some(5 * day), None, -day, None)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            timedelta_range(Some(5 * day), Some(day), None, day, None)
+                .unwrap()
+                .is_empty()
+        );
+        // NEGATIVE: a zero step is refused.
+        assert!(matches!(
+            timedelta_range(Some(day), None, Some(2), 0, None),
+            Err(TimedeltaRangeError::ZeroFreq)
+        ));
     }
 
     #[test]

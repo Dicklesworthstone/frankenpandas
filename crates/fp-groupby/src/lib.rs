@@ -826,15 +826,16 @@ fn is_utf8_values(values: &[Scalar]) -> bool {
 
 /// Per br-frankenpandas-f031e sister gap: object/string `groupby.sum()`
 /// concatenates each group's non-null values in encounter order, matching
-/// pandas and FP `Series::sum`. Default skipna=True, so missing values are
-/// skipped; an empty / all-null group yields `Scalar::Utf8("")`.
+/// pandas. Default skipna=True, so missing values are skipped; a group with
+/// no text sums to `Scalar::Int64(0)`, pandas' object sum of nothing (it was
+/// `Utf8("")`; br-frankenpandas-ttzzq), in an object column.
 fn groupby_sum_utf8(
     keys: &[Scalar],
     values: &[Scalar],
     options: GroupByOptions,
 ) -> Result<Series, GroupByError> {
     let mut ordering = Vec::<GroupKeyRef<'_>>::new();
-    let mut slot = FxHashMap::<GroupKeyRef<'_>, (usize, String)>::default();
+    let mut slot = FxHashMap::<GroupKeyRef<'_>, (usize, Option<String>)>::default();
 
     for (pos, (key, value)) in keys.iter().zip(values.iter()).enumerate() {
         if options.dropna && key.is_missing() {
@@ -843,10 +844,10 @@ fn groupby_sum_utf8(
         let key_id = GroupKeyRef::from_scalar(key);
         let entry = slot.entry(key_id.clone()).or_insert_with(|| {
             ordering.push(key_id.clone());
-            (pos, String::new())
+            (pos, None)
         });
         if let Scalar::Utf8(s) = value {
-            entry.1.push_str(s);
+            entry.1.get_or_insert_with(String::new).push_str(s);
         }
     }
 
@@ -884,10 +885,10 @@ fn groupby_sum_utf8(
             Scalar::Interval(iv) => IndexLabel::Interval(*iv),
             Scalar::Object(object) => IndexLabel::Object(object.clone()),
         });
-        out_values.push(Scalar::Utf8(joined));
+        out_values.push(joined.map_or(Scalar::Int64(0), Scalar::Utf8));
     }
 
-    let out_column = Column::new(DType::Utf8, out_values)?;
+    let out_column = Column::from_object_values(out_values);
     Ok(Series::new("sum", Index::new(out_index), out_column)?)
 }
 
@@ -5019,6 +5020,54 @@ mod tests {
         assert_eq!(
             out.values(),
             &[Scalar::Utf8("xy".to_owned()), Scalar::Utf8("z".to_owned()),]
+        );
+    }
+
+    #[test]
+    fn groupby_sum_of_a_group_without_text_is_zero_like_pandas_ttzzq() {
+        // pandas: Series(['x', None, None, '']).groupby([1, 1, 2, 3]).sum()
+        // is object ['x', 0, ''] - a group with no text sums to 0 (it was
+        // ''); a group holding the empty text keeps it (NEGATIVE).
+        let labels = || vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()];
+        let keys = Series::from_values(
+            "key",
+            labels(),
+            vec![
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+            ],
+        )
+        .expect("keys");
+        let values = Series::from_values(
+            "value",
+            labels(),
+            vec![
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8(String::new()),
+            ],
+        )
+        .expect("values");
+        let mut ledger = EvidenceLedger::new();
+        let out = groupby_sum(
+            &keys,
+            &values,
+            GroupByOptions::default(),
+            &RuntimePolicy::strict(),
+            &mut ledger,
+        )
+        .expect("groupby");
+        assert_eq!(out.column().dtype(), DType::Utf8);
+        assert_eq!(
+            out.values(),
+            &[
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Int64(0),
+                Scalar::Utf8(String::new()),
+            ]
         );
     }
 

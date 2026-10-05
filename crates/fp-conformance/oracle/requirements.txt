@@ -2,4 +2,6 @@ pandas==2.2.3
 # pandas' xlsx engine: read_excel/to_excel raise ModuleNotFoundError without it.
 openpyxl==3.1.5
 pyarrow==25.0.1
+# pandas' Styler renders through jinja2 (DataFrame.style tests' pandas arm).
+jinja2==3.1.6
 scipy>=1.10.0

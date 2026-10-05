@@ -6410,9 +6410,9 @@ fn readme_paired_helpers_round_trip() -> Result<(), Box<dyn std::error::Error>> 
     // None/None/None should trip InsufficientParams.
     let err = timedelta_range(None, None, None, 1, None).unwrap_err();
     assert!(matches!(err, TimedeltaRangeError::InsufficientParams));
-    // freq <= 0 should trip NonPositiveFreq.
+    // A zero freq should trip ZeroFreq (a negative one steps backwards).
     let err2 = timedelta_range(Some(0), Some(10), None, 0, None).unwrap_err();
-    assert!(matches!(err2, TimedeltaRangeError::NonPositiveFreq));
+    assert!(matches!(err2, TimedeltaRangeError::ZeroFreq));
 
     // ── DateRangeError ───────────────────────────────────────────
     // Triggering DateRangeError::InsufficientParams via date_range
