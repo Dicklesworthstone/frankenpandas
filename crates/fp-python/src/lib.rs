@@ -74811,6 +74811,76 @@ fn deprecated_freq_alias(freq: &str) -> Option<(String, String)> {
     Some((alias.to_owned(), replacement))
 }
 
+/// A range's `canonical` freq as pandas spells it: a negative one with its
+/// count ('-1D', '-1W-SUN', '-2MS'; br-frankenpandas-tzxpk).
+fn signed_freq(canonical: String, negative: bool) -> String {
+    match (
+        negative,
+        canonical.starts_with(|c: char| c.is_ascii_digit()),
+    ) {
+        (false, _) => canonical,
+        (true, true) => format!("-{canonical}"),
+        (true, false) => format!("-1{canonical}"),
+    }
+}
+
+/// pandas' `generate_range` for a calendar offset stepping backwards by its
+/// magnitude `freq` (from `-<freq>`): `start` rolled forward onto the offset
+/// is the first stamp, then each step back - down to `end` or `periods` of
+/// them - or, from `end` and `periods`, `end` rolled back onto the offset is
+/// the last. Built from the forward generator over the same stamps,
+/// reversed; None for a frequency it does not know.
+fn negative_calendar_range(
+    start: Option<i64>,
+    end: Option<i64>,
+    periods: Option<usize>,
+    freq: &str,
+) -> PyResult<Option<Vec<i64>>> {
+    let calendar = |start: Option<i64>, end: Option<i64>, periods: Option<usize>| {
+        fp_frame::calendar_date_range(start, end, periods, freq).map_err(|e| match e {
+            fp_frame::FrameError::CompatibilityRejected(message) => {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(message)
+            }
+            other => frame_error_to_py(other),
+        })
+    };
+    let one = |stamps: Option<Vec<i64>>| stamps.and_then(|stamps| stamps.first().copied());
+    let forward = match (start, end, periods) {
+        (Some(first), last, periods) => {
+            let Some(on) = one(calendar(Some(first), None, Some(1))?) else {
+                return Ok(None);
+            };
+            match (last, periods) {
+                (Some(last), None) => {
+                    // pandas rolls `end` back onto the offset only when
+                    // `start` was already on it.
+                    let last = if on == first {
+                        one(calendar(None, Some(last), Some(1))?).unwrap_or(last)
+                    } else {
+                        last
+                    };
+                    if last > on {
+                        Some(Vec::new())
+                    } else {
+                        calendar(Some(last), Some(on), None)?
+                    }
+                }
+                (None, Some(periods)) => calendar(None, Some(on), Some(periods))?,
+                _ => None,
+            }
+        }
+        (None, Some(last), Some(periods)) => match one(calendar(None, Some(last), Some(1))?) {
+            Some(on) => calendar(Some(on), None, Some(periods))?,
+            None => None,
+        },
+        _ => None,
+    };
+    Ok(forward.map(|mut stamps| {
+        stamps.reverse();
+        stamps
+    }))
+}
+
 /// Return a fixed frequency DatetimeIndex (pandas `date_range`): fixed steps
 /// (D, h, min, s, ms, us, ns with a count) and calendar offsets (W and its
 /// weekday anchors, MS/ME, QS/QE, YS/YE, B and the business month/quarter/
@@ -74864,7 +74934,11 @@ fn date_range(
         .filter(|freq| !freq.is_none())
         .map(|freq| freq_alias(freq, "date_range"))
         .transpose()?;
-    let freq = freq.as_deref();
+    // A negative frequency steps backwards from `start`, as pandas'
+    // generate_range: its magnitude runs the range and the sign turns it
+    // round (it was 'Invalid frequency'; br-frankenpandas-tzxpk).
+    let negative = freq.as_deref().is_some_and(|freq| freq.starts_with('-'));
+    let freq = freq.as_deref().map(|freq| freq.trim_start_matches('-'));
     if unit.is_some_and(|unit| unit != "ns") {
         return Err(not_implemented("date_range(unit=...) other than 'ns'"));
     }
@@ -74982,9 +75056,12 @@ fn date_range(
             }
             match parse_freq_to_nanos(freq) {
                 Ok(step) if step > 0 => {
+                    let step = if negative { -step } else { step };
                     let (first, count) = match (start, end, periods) {
                         (Some(first), Some(last), None) => {
-                            let count = if last < first {
+                            // Stepping away from `end` reaches nothing.
+                            let count = if (step > 0 && last < first) || (step < 0 && last > first)
+                            {
                                 0
                             } else {
                                 usize::try_from((last - first) / step + 1)
@@ -75007,6 +75084,13 @@ fn date_range(
                         .ok_or_else(out_of_range)?;
                     affine = Some((first, step, count));
                     Vec::new()
+                }
+                _ if negative => {
+                    negative_calendar_range(start, end, periods, freq)?.ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Invalid frequency: -{freq}"
+                        ))
+                    })?
                 }
                 _ => fp_frame::calendar_date_range(start, end, periods, freq)
                     .map_err(|e| match e {
@@ -75065,7 +75149,8 @@ fn date_range(
     // `.freq` <Day>); the linspace form has none.
     let range_freq = match (given, freq) {
         ((true, true, true), None) => None,
-        (_, freq) => fp_index::canonical_freq(freq.unwrap_or("D")),
+        (_, freq) => fp_index::canonical_freq(freq.unwrap_or("D"))
+            .map(|canonical| signed_freq(canonical, negative)),
     };
     let dti = DatetimeIndex::from_index(index)
         .and_then(|dti| dti.with_tz(zone.as_deref()))
@@ -75378,7 +75463,11 @@ fn timedelta_range(
     freq: &str,
     name: Option<&str>,
 ) -> PyResult<PyTimedeltaIndex> {
-    let freq_nanos = parse_freq_to_nanos(freq)?;
+    // A negative freq steps backwards ('-1D' from 5 days: 5, 4, 3; it was
+    // 'unsupported frequency'; br-frankenpandas-tzxpk).
+    let magnitude = freq.trim_start_matches('-');
+    let negative = magnitude.len() < freq.len();
+    let freq_nanos = parse_freq_to_nanos(magnitude)? * if negative { -1 } else { 1 };
 
     let parse_td_arg = |arg: Option<&str>| -> PyResult<Option<i64>> {
         match arg {
@@ -75404,10 +75493,13 @@ fn timedelta_range(
 
     let idx = fp_index::timedelta_range(start_ns, end_ns, periods, freq_nanos, name)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-    // The range carries its freq, as pandas' (it had none).
+    // The range carries its freq, as pandas' (it had none) - a negative one
+    // with its count ('-1D').
+    let canonical =
+        fp_index::canonical_freq(magnitude).map(|canonical| signed_freq(canonical, negative));
     let tdi = TimedeltaIndex::from_index(idx)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
-        .with_freq(fp_index::canonical_freq(freq));
+        .with_freq(canonical);
     Ok(PyTimedeltaIndex { inner: tdi })
 }
 
@@ -75421,6 +75513,23 @@ fn period_range(
     freq: Option<&str>,
     name: Option<&str>,
 ) -> PyResult<PyPeriodIndex> {
+    // A period is a span: a negative freq is pandas' ValueError, named as
+    // its offset ('-1M' is '-1ME'; it was 'unsupported frequency';
+    // br-frankenpandas-tzxpk).
+    if let Some(magnitude) = freq.and_then(|f| f.strip_prefix('-')) {
+        let (count, rule) = magnitude.split_at(
+            magnitude
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(magnitude.len()),
+        );
+        let count = if count.is_empty() { "1" } else { count };
+        let offset = fp_index::canonical_freq(&format!("1{rule}"))
+            .map(|canonical| canonical.trim_start_matches('1').to_owned())
+            .unwrap_or_else(|| rule.to_owned());
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "Frequency must be positive, because it represents span: -{count}{offset}"
+        )));
+    }
     if let Some(f) = freq
         && PeriodFreq::parse(f).is_none()
     {

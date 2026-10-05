@@ -26206,3 +26206,53 @@ def test_temporal_fill_interpolate_and_masked_map_like_pandas_l5jx6(case: str) -
         return (repr(result), str(result.dtype), [type(cell).__name__ for cell in result.tolist()])
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-tzxpk: a negative frequency steps backwards, as pandas'
+# generate_range - fixed steps from start / to end, calendar offsets from
+# start rolled forward onto the offset (end rolled back only when start was
+# on it), tz-aware, `inclusive`, the freq spelled with its count ('-1D',
+# '-1W-SUN'); timedelta_range likewise, and period_range refuses a span with
+# pandas' ValueError. They raised 'Invalid frequency' / 'unsupported
+# frequency'. NEGATIVE: positive frequencies unchanged; stepping away from
+# `end` is empty.
+_TZXPK_CASES = {
+    "periods -1D": lambda m: m.date_range("2024-01-01", periods=3, freq="-1D"),
+    "start end -2D": lambda m: m.date_range("2024-01-05", "2024-01-01", freq="-2D"),
+    "end periods -1D": lambda m: m.date_range(end="2024-01-01", periods=3, freq="-1D"),
+    "periods -2h": lambda m: m.date_range("2024-01-01", periods=3, freq="-2h"),
+    "-1ME from an off-offset start": lambda m: m.date_range("2024-03-15", periods=3, freq="-1ME"),
+    "-1ME start on offset, end rolled back": lambda m: m.date_range("2024-03-31", "2024-01-01", freq="-1ME"),
+    "-1ME start off offset, end kept": lambda m: m.date_range("2024-03-15", "2024-01-01", freq="-1ME"),
+    "-1ME end periods": lambda m: m.date_range(end="2024-01-15", periods=3, freq="-1ME"),
+    "-1W": lambda m: m.date_range("2024-01-10", periods=3, freq="-1W"),
+    "-2MS": lambda m: m.date_range("2024-01-10", periods=3, freq="-2MS"),
+    "tz -1D": lambda m: m.date_range("2024-01-01", periods=3, freq="-1D", tz="America/New_York"),
+    "tz -1h": lambda m: m.date_range("2024-03-11 03:00", periods=3, freq="-1h", tz="America/New_York"),
+    "inclusive left": lambda m: m.date_range("2024-01-05", "2024-01-01", freq="-1D", inclusive="left"),
+    "inclusive right": lambda m: m.date_range("2024-01-05", "2024-01-01", freq="-1D", inclusive="right"),
+    "freq": lambda m: m.date_range("2024-01-01", periods=3, freq="-1D").freq,
+    "freqstr": lambda m: m.date_range("2024-01-01", periods=3, freq="-1D").freqstr,
+    "start before end, -1D (empty)": lambda m: m.date_range("2024-01-01", "2024-01-05", freq="-1D"),
+    "positive 2D (NEGATIVE)": lambda m: m.date_range("2024-01-01", periods=3, freq="2D"),
+    "positive ME (NEGATIVE)": lambda m: m.date_range("2024-01-15", periods=3, freq="ME"),
+    "timedelta_range -1D": lambda m: m.timedelta_range("5D", periods=3, freq="-1D"),
+    "timedelta_range start end -2D": lambda m: m.timedelta_range("5D", "1D", freq="-2D"),
+    "timedelta_range end periods -1D": lambda m: m.timedelta_range(end="1D", periods=3, freq="-1D"),
+    "timedelta_range -90min": lambda m: m.timedelta_range("5h", periods=3, freq="-90min"),
+    "timedelta_range start after end, 1D (empty)": lambda m: m.timedelta_range("5D", "1D", freq="1D"),
+    "period_range -1M": lambda m: m.period_range("2024-03", periods=3, freq="-1M"),
+    "period_range -2Q": lambda m: m.period_range("2024-03", periods=3, freq="-2Q"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_TZXPK_CASES))
+def test_negative_frequencies_step_backwards_like_pandas_tzxpk(case: str) -> None:
+    def shown(m: Any) -> Any:
+        try:
+            return repr(_TZXPK_CASES[case](m))
+        except Exception as error:  # noqa: BLE001 - the error is the answer
+            return ("raises", type(error).__name__, str(error))
+
+    assert shown(fpd) == shown(pd)
