@@ -1806,6 +1806,26 @@ fn f64_argmin_first_index(data: &[f64]) -> Option<usize> {
     Some(best_index)
 }
 
+/// Whether `index` is int labels strictly increasing (`Some(true)`) or
+/// strictly decreasing (`Some(false)`) - a RangeIndex by its step, any other
+/// int index in one pass; `None` for anything else. sort_index of such an
+/// index is its order or its reverse: a descending sort keeps tied labels in
+/// their order (pandas' nargsort), so only a strict order reverses
+/// (br-frankenpandas-deixj).
+fn strictly_monotonic_i64(index: &Index) -> Option<bool> {
+    if let Some((_, _, step)) = index.range_span() {
+        return Some(step > 0 || index.len() < 2);
+    }
+    let values = index.int64_label_values()?;
+    if values.windows(2).all(|pair| pair[0] < pair[1]) {
+        Some(true)
+    } else if values.windows(2).all(|pair| pair[0] > pair[1]) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 /// Each label's sort rank under a categorical index: its category's
 /// position (pandas sorts a CategoricalIndex by its categories, not its
 /// labels; br-frankenpandas-cld41); None for any other index.
@@ -14611,6 +14631,19 @@ impl Series {
         }
         let na_first = na_position == "first";
         let ranks = category_ranks(&self.index);
+        // A strictly ordered int index is already sorted one way or the
+        // other: s.sort_index(ascending=False) of a RangeIndex radix-sorted
+        // 1M labels pandas checks in one pass (8.4x; br-frankenpandas-deixj).
+        if !na_first
+            && ranks.is_none()
+            && let Some(increasing) = strictly_monotonic_i64(&self.index)
+        {
+            if increasing == ascending {
+                return Ok(self.clone());
+            }
+            let reversed: Vec<usize> = (0..self.len()).rev().collect();
+            return self.sorted_by_positions(&reversed);
+        }
         if !na_first
             && ranks.is_none()
             && let Some(values) = self.index.int64_label_values()
@@ -79457,6 +79490,14 @@ impl DataFrame {
             {
                 return Ok(self.clone());
             }
+            // Strictly ordered the other way: the reverse (a RangeIndex sorted
+            // descending was a radix sort of its labels, 2.1x pandas;
+            // br-frankenpandas-deixj).
+            if let Some(increasing) = strictly_monotonic_i64(&self.index)
+                && increasing != ascending
+            {
+                return self.sorted_rows_by_positions((0..self.len()).rev().collect());
+            }
             if let Some(values) = self.index.int64_label_values() {
                 let order = fp_columnar::radix_argsort_i64(&values, ascending);
                 return self.sorted_rows_by_positions(order);
@@ -112344,6 +112385,29 @@ impl DataFrameGroupBy<'_> {
                 let (index, levels) = self.multi_dense_index_mixed(&g)?;
                 let sizes = counts(&g.gid_per_row, g.ngroups, &g.order);
                 return Series::new("size", index.with_row_multiindex(levels)?, sizes);
+            }
+        }
+        // One all-valid int or text key: the named aggregations' dense
+        // groupings, a count per gid (build_groups' map and row lists made
+        // groupby(int key).size() 1.7x pandas; br-frankenpandas-deixj). The
+        // labels and their order are build_groups', the index unnamed as its.
+        if self.as_index && self.by.len() == 1 {
+            let key_col = &self.df.columns[&self.by[0]];
+            let dense = if let Some(keys) = key_col.as_i64_slice() {
+                i64_dense_histogram_range(keys)
+                    .map(|(min, range)| self.int64_dense_grouping(keys, min, range))
+            } else if is_text_key_column(key_col) {
+                Some(self.single_utf8_key_dense_grouping(key_col))
+            } else {
+                None
+            };
+            if let Some((gid_per_row, ngroups, order, index)) = dense {
+                let mut count = vec![0_i64; ngroups];
+                for &gid in &gid_per_row {
+                    count[gid] += 1;
+                }
+                let sizes = Column::from_i64_values(order.iter().map(|&gid| count[gid]).collect());
+                return Series::new("size", index.rename_index(None::<LabelName>), sizes);
             }
         }
 

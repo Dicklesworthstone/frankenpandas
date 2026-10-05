@@ -25250,3 +25250,100 @@ def test_invented_gap_in_temporal_column_is_nat_x96xa(case: str) -> None:
         ] + [repr(frame)]
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-deixj: sort_index of a strictly ordered int index is its
+# order or its reverse, and groupby(...).size() over one int / text key
+# counts from the dense grouping. These pin both against pandas: RangeIndex,
+# stepped, reversed, sorted, unsorted, duplicated and NaN-bearing indexes,
+# na_position, ignore_index; size over int / text keys, sort=False, dropna,
+# as_index=False. NEGATIVE: a duplicated monotonic index sorted the other
+# way keeps its ties in order (kind='stable'), not reversed; an unsorted
+# index still sorts; a missing key still drops or keeps as dropna says.
+def _deixj_frame(m: Any, index: Any = None) -> Any:
+    return m.DataFrame(
+        {"k": [3, 1, 3, 2, 1, 3], "v": [0.5, 1.5, 2.5, 3.5, 4.5, 5.5], "s": list("bacbab")},
+        index=index,
+    )
+
+
+_DEIXJ_SORT_CASES = {
+    "series RangeIndex desc": lambda m: m.Series([1.5, 2.5, 3.5, 4.5]).sort_index(ascending=False),
+    "series RangeIndex asc": lambda m: m.Series([1.5, 2.5, 3.5]).sort_index(),
+    "series stepped RangeIndex desc": lambda m: m.Series(
+        [1, 2, 3], index=m.RangeIndex(0, 6, 2)
+    ).sort_index(ascending=False),
+    "series reversed RangeIndex asc": lambda m: m.Series(
+        [1, 2, 3], index=m.RangeIndex(4, -2, -2)
+    ).sort_index(),
+    "series sorted ints desc": lambda m: m.Series([1, 2, 3], index=[10, 20, 30]).sort_index(ascending=False),
+    "series decreasing ints asc": lambda m: m.Series([1, 2, 3], index=[30, 20, -5]).sort_index(),
+    "series decreasing ints desc": lambda m: m.Series([1, 2, 3], index=[30, 20, -5]).sort_index(ascending=False),
+    # Ties under pandas' default kind='quicksort' fall where numpy's unstable
+    # introsort leaves them; kind='stable' fixes their order, and a reversal
+    # of a non-strict order would break it.
+    "series duplicated monotonic desc": lambda m: m.Series([1, 2, 3, 4], index=[5, 5, 7, 7]).sort_index(
+        ascending=False, kind="stable"
+    ),
+    "series duplicated decreasing asc": lambda m: m.Series([1, 2, 3, 4], index=[7, 7, 5, 5]).sort_index(
+        kind="stable"
+    ),
+    "series unsorted desc": lambda m: m.Series([1, 2, 3, 4], index=[3, 9, 1, 4]).sort_index(ascending=False),
+    "series na_position first": lambda m: m.Series([1, 2, 3], index=[1, 2, 3]).sort_index(
+        ascending=False, na_position="first"
+    ),
+    "series NaN labels": lambda m: m.Series([1, 2, 3], index=[2.0, _NAN, 1.0]).sort_index(ascending=False),
+    "series named desc ignore_index": lambda m: m.Series([1.5, 2.5], name="x").sort_index(
+        ascending=False, ignore_index=True
+    ),
+    "series empty desc": lambda m: m.Series([], dtype=float).sort_index(ascending=False),
+    "series one row desc": lambda m: m.Series([7]).sort_index(ascending=False),
+    "frame RangeIndex desc": lambda m: _deixj_frame(m).sort_index(ascending=False),
+    "frame RangeIndex asc": lambda m: _deixj_frame(m).sort_index(),
+    "frame sorted ints desc": lambda m: _deixj_frame(m, [1, 4, 9, 10, 20, 31]).sort_index(ascending=False),
+    "frame decreasing ints asc": lambda m: _deixj_frame(m, [9, 8, 7, 3, 2, 0]).sort_index(),
+    "frame duplicated monotonic desc": lambda m: _deixj_frame(m, [1, 1, 2, 2, 3, 3]).sort_index(
+        ascending=False, kind="stable"
+    ),
+    "frame unsorted desc": lambda m: _deixj_frame(m, [4, 1, 6, 2, 5, 3]).sort_index(ascending=False),
+    "frame desc ignore_index": lambda m: _deixj_frame(m).sort_index(ascending=False, ignore_index=True),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_DEIXJ_SORT_CASES))
+def test_sort_index_of_an_ordered_index_like_pandas_deixj(case: str) -> None:
+    def shown(m: Any) -> Any:
+        result = _DEIXJ_SORT_CASES[case](m)
+        return (repr(result), repr(result.index), type(result.index).__name__)
+
+    assert shown(fpd) == shown(pd)
+
+
+_DEIXJ_SIZE_CASES = {
+    "int key": lambda m: _deixj_frame(m).groupby("k").size(),
+    "text key": lambda m: _deixj_frame(m).groupby("s").size(),
+    "int key sort=False": lambda m: _deixj_frame(m).groupby("k", sort=False).size(),
+    "text key sort=False": lambda m: _deixj_frame(m).groupby("s", sort=False).size(),
+    "int key as_index=False": lambda m: _deixj_frame(m).groupby("k", as_index=False).size(),
+    "text key as_index=False": lambda m: _deixj_frame(m).groupby("s", as_index=False).size(),
+    "negative and wide ints": lambda m: m.DataFrame({"k": [-5, 10**6, -5, 3], "v": [1, 2, 3, 4]})
+    .groupby("k")
+    .size(),
+    "text key with None": lambda m: m.DataFrame({"s": ["a", None, "a"], "v": [1, 2, 3]}).groupby("s").size(),
+    "text key with None, dropna=False": lambda m: m.DataFrame({"s": ["a", None, "a"], "v": [1, 2, 3]})
+    .groupby("s", dropna=False)
+    .size(),
+    "float key with NaN": lambda m: m.DataFrame({"k": [1.0, _NAN, 1.0], "v": [1, 2, 3]}).groupby("k").size(),
+    "named frame index": lambda m: _deixj_frame(m, m.Index([10, 11, 12, 13, 14, 15], name="r")).groupby("k").size(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_DEIXJ_SIZE_CASES))
+def test_groupby_size_over_one_key_like_pandas_deixj(case: str) -> None:
+    def shown(m: Any) -> Any:
+        result = _DEIXJ_SIZE_CASES[case](m)
+        return (repr(result), repr(result.index), str(getattr(result, "dtype", result.dtypes)))
+
+    assert shown(fpd) == shown(pd)
