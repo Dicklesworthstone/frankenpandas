@@ -24338,3 +24338,35 @@ _88RWI_DIVERGES = {
 def test_resample_leaves_nat_rows_out_of_every_bin_88rwi(case: str) -> None:
     run = _88RWI_CASES[case]
     assert _vol90_outcome(lambda: run(fpd)) == _vol90_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.37 (part): an
+# expanding sum over no observations yet (min_periods=0 before the first
+# value) is pandas' 0.0; it was the fold's -0.0 seed. Compared by the sign
+# of each value too, as -0.0 == 0.0. NEGATIVE: -0.0 values still sum to
+# -0.0, as pandas'.
+_FVSAO37_CASES = {
+    "float leading NaN": lambda m: m.Series([np.nan, 1.0]).expanding(min_periods=0).sum(),
+    "float two leading NaN": lambda m: m.Series([np.nan, np.nan, 2.5]).expanding(min_periods=0).sum(),
+    "int with a missing value": lambda m: m.Series([None, 0, 3]).expanding(min_periods=0).sum(),
+    "mean stays NaN": lambda m: m.Series([np.nan, 1.0]).expanding(min_periods=0).mean(),
+    "frame leading NaN": lambda m: m.DataFrame({"a": [np.nan, 1.0], "b": [2.0, np.nan]}).expanding(min_periods=0).sum(),
+    "negative zero alone": lambda m: m.Series([np.nan, -0.0]).expanding(min_periods=0).sum(),
+    "rolling leading NaN": lambda m: m.Series([np.nan, 1.0]).rolling(2, min_periods=0).sum(),
+}
+
+
+def _fvsao37_outcome(run: Any) -> Any:
+    result = run()
+    cells = result.values.ravel().tolist()
+    return (
+        str(getattr(result, "dtypes", getattr(result, "dtype", None))),
+        [None if math.isnan(cell) else (cell, math.copysign(1.0, cell)) for cell in cells],
+    )
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FVSAO37_CASES))
+def test_expanding_sum_of_nothing_is_positive_zero_fvsao37(case: str) -> None:
+    run = _FVSAO37_CASES[case]
+    assert _fvsao37_outcome(lambda: run(fpd)) == _fvsao37_outcome(lambda: run(pd)), case

@@ -34664,7 +34664,9 @@ impl Expanding<'_> {
                         acc / count as f64
                     };
                 } else {
-                    out[i] = acc;
+                    // pandas' sum of no observations is 0.0, not the -0.0
+                    // seed (fvsao.37).
+                    out[i] = if count == 0 { 0.0 } else { acc };
                 }
             }
             let index = self.series.index().clone();
@@ -34694,7 +34696,9 @@ impl Expanding<'_> {
                     out.push(Scalar::Float64(acc / count as f64));
                 }
             } else {
-                out.push(Scalar::Float64(acc));
+                // pandas' sum of no observations is 0.0, not the -0.0 seed
+                // (fvsao.37).
+                out.push(Scalar::Float64(if count == 0 { 0.0 } else { acc }));
             }
         }
         let index = self.series.index().clone();
@@ -237237,6 +237241,51 @@ mod pandas_strptime_h9cug {
             ),
             "{err}"
         );
+    }
+}
+
+/// fvsao.37 (part): an expanding sum over no observations yet - a leading
+/// NaN under min_periods=0 - is pandas' 0.0, not the fold's -0.0 seed; a
+/// sum of -0.0 values stays -0.0, as pandas'. Pinned to live pandas 2.2.3.
+#[cfg(test)]
+mod expanding_empty_sum_fvsao37 {
+    use fp_columnar::Column;
+    use fp_index::Index;
+    use fp_types::Scalar;
+
+    use super::Series;
+
+    fn signs(series: &Series) -> Vec<Option<f64>> {
+        series
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Float64(x) if !x.is_nan() => Some(1.0_f64.copysign(*x)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn no_observations_sum_to_positive_zero() {
+        // A float column (the typed nullable fold) and an int column holding
+        // a missing value (the generic fold): the first window holds nothing,
+        // 0.0; then -0.0 alone stays -0.0, and 0 is 0.0.
+        for (values, expected) in [
+            (
+                vec![Scalar::Null(fp_types::NullKind::NaN), Scalar::Float64(-0.0)],
+                vec![Some(1.0), Some(-1.0)],
+            ),
+            (
+                vec![Scalar::Null(fp_types::NullKind::Null), Scalar::Int64(0)],
+                vec![Some(1.0), Some(1.0)],
+            ),
+        ] {
+            let column = Column::from_values(values.clone()).unwrap();
+            let series = Series::new("x", Index::default_range(2), column).unwrap();
+            let summed = series.expanding(Some(0)).sum().unwrap();
+            assert_eq!(signs(&summed), expected, "{values:?}");
+        }
     }
 }
 
