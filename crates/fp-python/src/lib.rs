@@ -35314,15 +35314,32 @@ impl PySeries {
                     .column("__value__")
                     .cloned()
                     .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("__value__"))?;
+                // A Series reads orient 'columns' as 'index', and writes
+                // 'table' as its one-column frame's (they raised 'unknown
+                // orient'; br-frankenpandas-usxn9).
+                let series_orient = match orient.unwrap_or("index") {
+                    "columns" => "index",
+                    other => other,
+                };
+                if series_orient == "table" {
+                    return Series::new(
+                        series_table_name(series.name()),
+                        frame.index().clone(),
+                        column,
+                    )
+                    .and_then(|values| values.to_frame(None))
+                    .and_then(|table| table.to_json_with_options("table", options))
+                    .map_err(frame_error_to_py);
+                }
                 let index = match series.index().row_multiindex() {
-                    Some(levels) if orient.unwrap_or("index") == "index" => {
+                    Some(levels) if series_orient == "index" => {
                         Python::attach(|py| json_tuple_keyed_index(py, levels))?
                     }
                     _ => frame.index().clone(),
                 };
                 Series::new(series.name(), index, column)
                     .map_err(frame_error_to_py)?
-                    .to_json_with_options(orient.unwrap_or("index"), options)
+                    .to_json_with_options(series_orient, options)
                     .map_err(frame_error_to_py)
             },
         )
@@ -73191,6 +73208,92 @@ fn csv_multi_header_axes(frame: DataFrame, header: &CsvHeaderLevels) -> PyResult
     }
 }
 
+/// A CSV token under pandas' C-parser integer scans (`str_to_int64` /
+/// `str_to_uint64`): spaces around and a sign allowed, an overflow found
+/// while the digits accumulate - before any trailing text, so
+/// '99999999999999999999.0' overflows rather than being invalid.
+enum CsvIntToken {
+    Int(i128),
+    Overflow,
+    Invalid,
+}
+
+/// [`CsvIntToken`] of `token`, bounded by int64 or (`unsigned`) by uint64
+/// above and int64 below, as pandas' uint64 scan reads a negative as int64.
+fn csv_int_token(token: &str, unsigned: bool) -> CsvIntToken {
+    let body = token.trim_start_matches(' ');
+    let (negative, digits) = match body.as_bytes().first() {
+        Some(b'-') => (true, &body[1..]),
+        Some(b'+') => (false, &body[1..]),
+        _ => (false, body),
+    };
+    let max = if unsigned {
+        i128::from(u64::MAX)
+    } else {
+        i128::from(i64::MAX)
+    };
+    let min = i128::from(i64::MIN);
+    let mut value = 0_i128;
+    let mut length = 0;
+    for byte in digits.bytes().take_while(u8::is_ascii_digit) {
+        value = value * 10 + i128::from(byte - b'0');
+        length += 1;
+        let signed = if negative { -value } else { value };
+        if signed > max || signed < min {
+            return CsvIntToken::Overflow;
+        }
+    }
+    if length == 0 || !digits[length..].trim_matches(' ').is_empty() {
+        return CsvIntToken::Invalid;
+    }
+    CsvIntToken::Int(if negative { -value } else { value })
+}
+
+/// Whether pandas' C parser keeps a column of these tokens (missing cells
+/// aside) as its text: its int64 scan, in cell order, meets an overflow
+/// before any non-integer, and the uint64 scan of the whole column then
+/// overflows or meets a negative beside a value past int64. A column that
+/// fits uint64 is pandas' uint64 (br-frankenpandas-gatk1) and stays as
+/// read, as does one where a non-integer ends either scan
+/// (br-frankenpandas-sa8p9).
+fn csv_integer_overflow_keeps_text(values: &[Scalar]) -> bool {
+    let tokens = || {
+        values.iter().filter_map(|value| match value {
+            Scalar::Utf8(token) => Some(token.as_str()),
+            _ => None,
+        })
+    };
+    let mut overflowed = false;
+    for token in tokens() {
+        match csv_int_token(token, false) {
+            CsvIntToken::Int(_) => {}
+            CsvIntToken::Overflow => {
+                overflowed = true;
+                break;
+            }
+            CsvIntToken::Invalid => return false,
+        }
+    }
+    if !overflowed {
+        return false;
+    }
+    let (mut negative, mut large) = (false, false);
+    for token in tokens() {
+        match csv_int_token(token, true) {
+            CsvIntToken::Int(value) => {
+                negative |= value < 0;
+                large |= value > i128::from(i64::MAX);
+                if negative && large {
+                    return true;
+                }
+            }
+            CsvIntToken::Overflow => return true,
+            CsvIntToken::Invalid => return false,
+        }
+    }
+    false
+}
+
 /// One column label from a pandas position-or-name argument.
 fn csv_column_ref(frame: &DataFrame, item: &Bound<'_, PyAny>) -> PyResult<String> {
     if let Ok(position) = item.extract::<usize>() {
@@ -73538,6 +73641,46 @@ fn read_csv_impl(
         );
         frame = fp_io::read_csv_with_options(&text, &text_opts).map_err(io_error_to_py)?;
         frame_dtype = None;
+    }
+    // An integer past int64 / uint64 keeps its column as text, as pandas'
+    // C parser (see [`csv_integer_overflow_keeps_text`]); a float column
+    // holding an integral value that large is re-read as its text to decide
+    // (it read float64, the digits lost; br-frankenpandas-sa8p9).
+    if frame_dtype.is_none() {
+        let typed = opts.dtype.as_ref();
+        let suspects: Vec<String> = frame
+            .column_names()
+            .iter()
+            .filter(|name| typed.is_none_or(|typed| !typed.contains_key(name.as_str())))
+            .filter(|name| {
+                frame.column(name).is_some_and(|column| {
+                    column.dtype() == DType::Float64
+                        && column.values().iter().any(|value| {
+                            matches!(value, Scalar::Float64(x)
+                                if x.abs() >= 9_223_372_036_854_775_808.0 && x.fract() == 0.0)
+                        })
+                })
+            })
+            .map(|name| name.to_string())
+            .collect();
+        if !suspects.is_empty() {
+            let mut text_opts = opts.clone();
+            let mut dtypes = opts.dtype.clone().unwrap_or_default();
+            for name in &suspects {
+                dtypes.insert(name.clone(), DType::Utf8);
+            }
+            text_opts.dtype = Some(dtypes);
+            let raw = fp_io::read_csv_with_options(&text, &text_opts).map_err(io_error_to_py)?;
+            for name in suspects {
+                if let Some(column) = raw.column(&name)
+                    && csv_integer_overflow_keeps_text(column.values())
+                {
+                    frame = frame
+                        .with_column(name, column.clone())
+                        .map_err(frame_error_to_py)?;
+                }
+            }
+        }
     }
     if let Some(converters) = &converters {
         frame = apply_csv_converters(py, frame, &text, &opts, converters)?;
@@ -90125,6 +90268,24 @@ fn write_json_py(
         text
     };
     write_text_target(path_or_buf, text, args.mode == "a")
+}
+
+/// The column a Series' `to_json(orient='table')` is under, pandas'
+/// `name or "values"`: its name unless falsy - None, '', 0, 0.0, False
+/// (br-frankenpandas-usxn9).
+fn series_table_name(name: &LabelName) -> LabelName {
+    let falsy = name.is_empty()
+        || match name.label() {
+            IndexLabel::Int64(value) => value == 0,
+            IndexLabel::Float64(value) => value.0 == 0.0,
+            IndexLabel::Bool(value) => !value,
+            _ => false,
+        };
+    if falsy {
+        LabelName::from("values")
+    } else {
+        name.clone()
+    }
 }
 
 /// pandas' JSON Lines of a records array (`convert_to_line_delimits`), as

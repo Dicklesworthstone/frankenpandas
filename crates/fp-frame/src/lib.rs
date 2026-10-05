@@ -5320,16 +5320,31 @@ pub fn indent_pandas_json(compact: &str, indent: usize) -> String {
 #[derive(Clone, Copy)]
 pub struct PandasJsonDouble {
     bytes: [u8; 48],
-    len: usize,
+    start: usize,
+    end: usize,
 }
 
+/// 10^0 ..= 10^15, the scales of `double_precision`.
+const JSON_POW10: [f64; 16] = [
+    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15,
+];
+
+/// "00" ..= "99", two digits a step for [`PandasJsonDouble`].
+const JSON_DIGIT_PAIRS: &[u8; 200] = b"0001020304050607080910111213141516171819\
+2021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869\
+707172737475767778798081828384858687888990919293949596979899";
+
 impl PandasJsonDouble {
-    /// pandas' text for `value` at `precision` decimals.
+    /// pandas' text for `value` at `precision` decimals. The fixed-point
+    /// form is written right to left, two digits a step (the first cut, a
+    /// digit a step left to right, made JSON Lines ~1.8x slower than serde's
+    /// shortest spelling; 6udgl follow-up).
     #[must_use]
     pub fn new(value: f64, precision: u32) -> Self {
         let mut text = Self {
-            bytes: [0; 48],
-            len: 0,
+            bytes: [b'0'; 48],
+            start: 0,
+            end: 0,
         };
         if !value.is_finite() {
             text.push(b"null");
@@ -5342,7 +5357,7 @@ impl PandasJsonDouble {
             text.push_exponent_form(value, precision.max(1) as usize);
             return text;
         }
-        let scale = 10_f64.powi(precision as i32);
+        let scale = JSON_POW10[precision as usize];
         let mut whole = magnitude as u64;
         let scaled = (magnitude - whole as f64) * scale;
         let mut fraction = scaled as u64;
@@ -5360,24 +5375,31 @@ impl PandasJsonDouble {
                 whole += 1;
             }
         }
+        // Right to left over the '0'-filled bytes: the fraction (its
+        // leading zeros are the fill), the point, the whole part, the sign.
+        let mut at = text.bytes.len();
+        if precision > 0 {
+            if fraction == 0 {
+                at -= 1;
+            } else {
+                let mut places = precision as usize;
+                while fraction.is_multiple_of(10) {
+                    places -= 1;
+                    fraction /= 10;
+                }
+                text.write_digits(at, fraction);
+                at -= places;
+            }
+            at -= 1;
+            text.bytes[at] = b'.';
+        }
+        at = text.write_digits(at, whole);
         if value < 0.0 {
-            text.push(b"-");
+            at -= 1;
+            text.bytes[at] = b'-';
         }
-        text.push_digits(whole, 0);
-        if precision == 0 {
-            return text;
-        }
-        text.push(b".");
-        if fraction == 0 {
-            text.push(b"0");
-            return text;
-        }
-        let mut places = precision as usize;
-        while fraction.is_multiple_of(10) {
-            places -= 1;
-            fraction /= 10;
-        }
-        text.push_digits(fraction, places);
+        text.start = at;
+        text.end = text.bytes.len();
         text
     }
 
@@ -5385,13 +5407,34 @@ impl PandasJsonDouble {
     #[must_use]
     pub fn as_str(&self) -> &str {
         // Only ASCII is ever written.
-        std::str::from_utf8(&self.bytes[..self.len]).unwrap_or("null")
+        std::str::from_utf8(&self.bytes[self.start..self.end]).unwrap_or("null")
     }
 
+    /// `number`'s decimal digits ending before `end`, two a step; their
+    /// first position.
+    fn write_digits(&mut self, mut end: usize, mut number: u64) -> usize {
+        while number >= 100 {
+            let pair = (number % 100) as usize * 2;
+            number /= 100;
+            end -= 2;
+            self.bytes[end..end + 2].copy_from_slice(&JSON_DIGIT_PAIRS[pair..pair + 2]);
+        }
+        if number >= 10 {
+            let pair = number as usize * 2;
+            end -= 2;
+            self.bytes[end..end + 2].copy_from_slice(&JSON_DIGIT_PAIRS[pair..pair + 2]);
+        } else {
+            end -= 1;
+            self.bytes[end] = b'0' + number as u8;
+        }
+        end
+    }
+
+    /// `bytes` appended left to right (the null and exponent forms).
     fn push(&mut self, bytes: &[u8]) {
-        let end = (self.len + bytes.len()).min(self.bytes.len());
-        self.bytes[self.len..end].copy_from_slice(&bytes[..end - self.len]);
-        self.len = end;
+        let end = (self.end + bytes.len()).min(self.bytes.len());
+        self.bytes[self.end..end].copy_from_slice(&bytes[..end - self.end]);
+        self.end = end;
     }
 
     /// `number`'s decimal digits, zero-padded on the left to `width`.

@@ -27086,3 +27086,56 @@ def test_to_json_index_and_indent_like_pandas_gl38f(case: str) -> None:
             return ("ValueError", str(error))
 
     assert shown(fpd) == shown(pd)
+
+
+# Series.to_json(orient='table') is the one-column frame's table (the column
+# named by the Series, 'values' when the name is falsy) and orient='columns'
+# reads as 'index' (br-frankenpandas-usxn9).
+def _usxn9_series(m: Any, name: Any) -> Any:
+    return m.Series([1.5, 2.5], index=["a", "b"], name=name)
+
+
+_USXN9_CASES = {
+    "table, named": lambda m: _usxn9_series(m, "s").to_json(orient="table"),
+    "table, unnamed": lambda m: _usxn9_series(m, None).to_json(orient="table"),
+    "table, name 0 is falsy": lambda m: _usxn9_series(m, 0).to_json(orient="table"),
+    "table, empty name": lambda m: _usxn9_series(m, "").to_json(orient="table"),
+    "table, named index": lambda m: m.Series([1.5], index=m.Index(["a"], name="k"), name="v").to_json(orient="table"),
+    "table, index=False": lambda m: _usxn9_series(m, "s").to_json(orient="table", index=False),
+    "table, dates": lambda m: m.Series(m.to_datetime(["2024-01-02"]), name="d").to_json(orient="table"),
+    "columns": lambda m: _usxn9_series(m, "s").to_json(orient="columns"),
+    "index (NEGATIVE)": lambda m: _usxn9_series(m, "s").to_json(orient="index"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_USXN9_CASES))
+def test_series_to_json_table_and_columns_like_pandas_usxn9(case: str) -> None:
+    assert _USXN9_CASES[case](fpd) == _USXN9_CASES[case](pd)
+
+
+# read_csv keeps a column whose integers overflow int64 / uint64 as its
+# text, as pandas' C parser does (its int64, then uint64, scan in cell
+# order) (br-frankenpandas-sa8p9).
+_SA8P9_CASES = {
+    "overflow alone": "a\n99999999999999999999\n",
+    "overflow then small": "a\n99999999999999999999\n1\n",
+    "small then overflow": "a\n1\n99999999999999999999\n",
+    "below int64 min": "a\n-9223372036854775809\n",
+    "negative beside the uint64 range": "a\n-1\n18446744073709551615\n",
+    "overflow with a blank cell": "a,b\n99999999999999999999,1\n,2\n",
+    "overflow then text": "a\n99999999999999999999\nx\n",
+    "overflow written with .0": "a\n99999999999999999999.0\n",
+    "a float first keeps float (NEGATIVE)": "a\n1.5\n99999999999999999999\n",
+    "an exponent stays float (NEGATIVE)": "a\n1e20\n",
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_SA8P9_CASES))
+def test_read_csv_integer_overflow_keeps_text_like_pandas_sa8p9(case: str) -> None:
+    def shown(m: Any) -> Any:
+        frame = m.read_csv(io.StringIO(_SA8P9_CASES[case]))
+        return ([str(dtype) for dtype in frame.dtypes], repr(frame.values.tolist()))
+
+    assert shown(fpd) == shown(pd)
