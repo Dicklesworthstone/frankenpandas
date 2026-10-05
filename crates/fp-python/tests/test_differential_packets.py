@@ -26018,3 +26018,62 @@ def test_results_keep_pandas_dtype_wwbb1(case: str) -> None:
         return (repr(result), str(result.dtype))
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-8rzgf: pandas sums an object column with its missing
+# values filled with the identity (0 for sum, 1 for prod; 0.0 under cumsum,
+# the position kept NaN), so text beside a missing value raises Python's
+# TypeError - it answered the text joined without them. NEGATIVE: text alone
+# concatenates, numbers beside a missing value add, all missing sum to 0.
+_8RZGF_CASES = {
+    "text beside None": lambda m: m.Series(["a", None, "b"]).sum(),
+    "text beside NaN": lambda m: m.Series(["a", math.nan]).sum(),
+    "None before text": lambda m: m.Series([None, "a"]).sum(),
+    "skipna=False": lambda m: m.Series(["a", None, "b"]).sum(skipna=False),
+    "min_count=1": lambda m: m.Series(["a", None]).sum(min_count=1),
+    "prod of text beside None": lambda m: m.Series(["a", None]).prod(),
+    "list beside None": lambda m: m.Series([[1], None]).sum(),
+    "frame sum": lambda m: m.DataFrame({"s": ["a", None, "b"]}).sum(),
+    "frame sum, numeric_only": lambda m: m.DataFrame({"s": ["a", None, "b"], "n": [1, 2, 3]}).sum(numeric_only=True),
+    "cumsum of text beside None": lambda m: m.Series(["a", None, "b"]).cumsum(),
+    "text alone (NEGATIVE)": lambda m: m.Series(["a", "b"]).sum(),
+    "numbers beside None (NEGATIVE)": lambda m: m.Series([1, None, 2], dtype=object).sum(),
+    "all None (NEGATIVE)": lambda m: m.Series([None, None]).sum(),
+    "text cumsum alone (NEGATIVE)": lambda m: m.Series(["a", "b"]).cumsum(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_8RZGF_CASES))
+def test_object_sums_fill_missing_values_like_pandas_8rzgf(case: str) -> None:
+    def shown(m: Any) -> Any:
+        try:
+            result = _8RZGF_CASES[case](m)
+        except Exception as error:  # noqa: BLE001 - the error is the answer
+            return ("raises", type(error).__name__, str(error))
+        return repr(result)
+
+    assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-u1dey: a list key is pandas' Index of its values - ints
+# beside a missing value are float64 labels (1.0, NaN).
+_U1DEY_CASES = {
+    "list key, None, dropna=False": lambda m: m.Series([1, 2, 3]).groupby([1, None, 1], dropna=False).sum(),
+    "list key, NaN, dropna=False": lambda m: m.Series([1, 2, 3]).groupby([1, math.nan, 1], dropna=False).sum(),
+    "list key, None": lambda m: m.Series([1, 2, 3]).groupby([1, None, 1]).sum(),
+    "list key, NaN": lambda m: m.Series([1, 2, 3]).groupby([1, math.nan, 1]).sum(),
+    "list key, None, size": lambda m: m.Series([1, 2, 3]).groupby([1, None, 1], dropna=False).size(),
+    "int list key (NEGATIVE)": lambda m: m.Series([1, 2, 3]).groupby([1, 2, 1]).sum(),
+    "text list key with None": lambda m: m.Series([1, 2, 3]).groupby(["a", None, "a"], dropna=False).sum(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_U1DEY_CASES))
+def test_list_key_labels_like_pandas_u1dey(case: str) -> None:
+    def shown(m: Any) -> Any:
+        result = _U1DEY_CASES[case](m)
+        return (repr(result), str(result.index.dtype))
+
+    assert shown(fpd) == shown(pd)

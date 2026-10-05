@@ -23819,15 +23819,41 @@ fn object_cells_reduce(
         return f64::NAN.into_py_any(py);
     }
     let operator = py.import("operator")?.getattr(op)?;
-    let mut cells = values.iter().filter(|value| !skipna || !value.is_missing());
-    let Some(first) = cells.next() else {
-        return if op == "mul" { 1 } else { 0 }.into_py_any(py);
+    let identity = if op == "mul" { 1 } else { 0 };
+    // pandas fills the missing cells with the identity under skipna
+    // (nanops' fill_value) and folds them all, so a list or text beside a
+    // missing value is Python's TypeError (they were skipped;
+    // br-frankenpandas-8rzgf); skipna=False folds each as Python sees it.
+    let cell = |value: &Scalar| -> PyResult<Py<PyAny>> {
+        if skipna && value.is_missing() {
+            identity.into_py_any(py)
+        } else {
+            cell_to_py(py, column, value)
+        }
     };
-    let mut total = cell_to_py(py, column, first)?.into_bound(py);
-    for cell in cells {
-        total = operator.call1((total, cell_to_py(py, column, cell)?))?;
+    let mut cells = values.iter();
+    let Some(first) = cells.next() else {
+        return identity.into_py_any(py);
+    };
+    let mut total = cell(first)?.into_bound(py);
+    for value in cells {
+        total = operator.call1((total, cell(value)?))?;
     }
     Ok(total.unbind())
+}
+
+/// Whether `column` is an object column holding text beside a missing
+/// value, which pandas sums / multiplies / accumulates through Python's
+/// operators with the missing ones filled (see [`object_cells_reduce`]) -
+/// Python's TypeError where it adds the fill to the text (it answered the
+/// text joined without them; br-frankenpandas-8rzgf).
+fn text_beside_missing(column: &Column) -> bool {
+    is_object_column(column)
+        && column.has_any_missing()
+        && column
+            .values()
+            .iter()
+            .any(|value| matches!(value, Scalar::Utf8(_)))
 }
 
 fn series_operand(py: Python<'_>, other: &Bound<'_, PyAny>, like: &Series) -> PyResult<Series> {
@@ -29171,8 +29197,9 @@ impl PySeries {
             self.check_numeric_only("sum")?;
         }
         // Python-object cells sum with their own + (they were joined as
-        // text, ''; br-frankenpandas-8dqrn).
-        if has_object_cells(self.inner.column()) {
+        // text, ''; br-frankenpandas-8dqrn), and so does text beside a
+        // missing value (8rzgf).
+        if has_object_cells(self.inner.column()) || text_beside_missing(self.inner.column()) {
             return Python::attach(|py| {
                 object_cells_reduce(py, &self.inner, "add", skipna, min_count)
             });
@@ -29474,8 +29501,10 @@ impl PySeries {
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("prod")?;
-        } else if has_object_cells(self.inner.column()) {
-            // Python-object cells multiply with their own * (br-frankenpandas-8dqrn).
+        } else if has_object_cells(self.inner.column()) || text_beside_missing(self.inner.column())
+        {
+            // Python-object cells multiply with their own * (br-frankenpandas-8dqrn),
+            // text beside a missing value too (8rzgf).
             return Python::attach(|py| {
                 object_cells_reduce(py, &self.inner, "mul", skipna, min_count.unwrap_or(0))
             });
@@ -29665,6 +29694,29 @@ impl PySeries {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "No axis named {ax} for object type Series"
             )));
+        }
+        // Text beside a missing value accumulates through Python's + with
+        // the missing ones as 0.0 (pandas' cumsum fill; as they are under
+        // skipna=False), which is Python's TypeError where the fill meets
+        // the text (it skipped them; br-frankenpandas-8rzgf).
+        if text_beside_missing(self.inner.column()) {
+            Python::attach(|py| -> PyResult<()> {
+                let add = py.import("operator")?.getattr("add")?;
+                let column = self.inner.column();
+                let mut total: Option<Bound<'_, PyAny>> = None;
+                for value in column.values() {
+                    let cell = if skipna && value.is_missing() {
+                        0.0_f64.into_bound_py_any(py)?
+                    } else {
+                        cell_to_py(py, column, value)?.into_bound(py)
+                    };
+                    total = Some(match total {
+                        Some(total) => add.call1((total, cell))?,
+                        None => cell,
+                    });
+                }
+                Ok(())
+            })?;
         }
         let r = self
             .inner
@@ -31756,6 +31808,24 @@ impl PySeries {
         }
         let sort = sort.unwrap_or(true);
         let by_series = match (by.filter(|b| !b.is_none()), level.filter(|l| !l.is_none())) {
+            // A list key's groups are pandas' Index of its unique values:
+            // ints beside a missing value kept by dropna=False are float64
+            // labels (1.0, NaN; they were int64 labels holding the gap),
+            // with dropna the ints alone, int64 - unless a float NaN made
+            // numpy's array of the list float64 (br-frankenpandas-u1dey).
+            (Some(by), None)
+                if by.cast::<PyList>().is_ok_and(|list| {
+                    !dropna
+                        || list
+                            .iter()
+                            .any(|item| item.is_instance_of::<pyo3::types::PyFloat>())
+                }) =>
+            {
+                let key = extract_or_build_series(py, by, &self.inner)?;
+                let values = pandas_promote_int_with_missing(key.values().to_vec());
+                Series::from_values(key.name(), key.index().labels().to_vec(), values)
+                    .map_err(frame_error_to_py)?
+            }
             (Some(by), None) => extract_or_build_series(py, by, &self.inner)?,
             // pandas' level= groups by the index itself (fvsao.19); over a
             // MultiIndex by one of its levels (fvsao.36).
@@ -41028,7 +41098,11 @@ impl PyDataFrame {
         op: &str,
     ) -> PyResult<PySeries> {
         let objects: Vec<usize> = (0..self.inner.num_columns())
-            .filter(|&position| self.inner.column_at(position).is_some_and(has_object_cells))
+            .filter(|&position| {
+                self.inner
+                    .column_at(position)
+                    .is_some_and(|column| has_object_cells(column) || text_beside_missing(column))
+            })
             .collect();
         if axis != 0
             || numeric_only
