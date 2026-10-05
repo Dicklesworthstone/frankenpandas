@@ -12011,17 +12011,22 @@ impl Series {
         other: &Self,
         op: ArithmeticOp,
     ) -> Result<Option<Column>, FrameError> {
+        // A datetime result keeps the datetime operand's dtype, its zone
+        // included (an aware Series + Timedelta came back naive, showing the
+        // UTC wall time; br-frankenpandas-xs0nn).
         let output_datetime = match (self.column.dtype(), other.column.dtype(), op) {
             (DType::Datetime64 { .. }, DType::Datetime64 { .. }, ArithmeticOp::Sub)
             | (DType::Timedelta64, DType::Timedelta64, ArithmeticOp::Add | ArithmeticOp::Sub) => {
-                false
+                None
             }
             (
-                DType::Datetime64 { .. },
+                dtype @ DType::Datetime64 { .. },
                 DType::Timedelta64,
                 ArithmeticOp::Add | ArithmeticOp::Sub,
             )
-            | (DType::Timedelta64, DType::Datetime64 { .. }, ArithmeticOp::Add) => true,
+            | (DType::Timedelta64, dtype @ DType::Datetime64 { .. }, ArithmeticOp::Add) => {
+                Some(dtype)
+            }
             _ => return Ok(None),
         };
 
@@ -12075,10 +12080,11 @@ impl Series {
                 validity.set(i, false);
             }
         }
-        Ok(Some(if output_datetime {
-            Column::from_datetime64_values_with_validity(output, validity)
-        } else {
-            Column::from_timedelta64_values_with_validity(output, validity)
+        Ok(Some(match output_datetime {
+            Some(dtype) => {
+                Column::from_datetime64_values_with_validity(output, validity).with_dtype(dtype)
+            }
+            None => Column::from_timedelta64_values_with_validity(output, validity),
         }))
     }
 
@@ -62779,6 +62785,47 @@ pub fn to_datetime_with_options(
             series.column().clone()
         };
         return Series::new(series.name().to_owned(), series.index().clone(), column);
+    }
+    // Numbers given with a format are parsed as their text, as pandas does
+    // (a float as its integer part, NaN as NaT): 20240229 with '%Y%m%d' is
+    // 2024-02-29 (each number was read as epoch nanoseconds, 1970-01-01
+    // 00:00:00.020240229; br-frankenpandas-ivgp0). A bool is no date:
+    // pandas' TypeError, NaT throughout under errors='coerce'.
+    if options.unit.is_none()
+        && let Some(format) = options.format
+        && !matches!(format, "mixed" | "ISO8601")
+        && matches!(
+            series.column().dtype(),
+            DType::Int64 | DType::Float64 | DType::Bool
+        )
+    {
+        let values = if series.column().dtype() == DType::Bool {
+            if options.errors == DatetimeErrors::Raise {
+                return Err(FrameError::CompatibilityRejected(
+                    "dtype bool cannot be converted to datetime64[ns]".to_owned(),
+                ));
+            }
+            vec![Scalar::Null(NullKind::NaT); series.len()]
+        } else {
+            #[allow(clippy::cast_possible_truncation)] // pandas' int(value)
+            series
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Int64(number) => Scalar::Utf8(number.to_string()),
+                    Scalar::Float64(number) if number.is_finite() => {
+                        Scalar::Utf8((number.trunc() as i64).to_string())
+                    }
+                    _ => Scalar::Null(NullKind::Null),
+                })
+                .collect()
+        };
+        let text = Series::new(
+            series.name().to_owned(),
+            series.index().clone(),
+            Column::from_values(values)?,
+        )?;
+        return to_datetime_with_options(&text, options);
     }
     // Typed contiguous-Utf8 fast path (br-frankenpandas-j5150): for the default
     // string-inference shape (no unit/format/origin, !utc), read the column's
@@ -197160,6 +197207,68 @@ mod tests {
             err.to_string(),
             "compatibility gate rejected operation: unsupported to_datetime unit 'M'"
         );
+    }
+
+    #[test]
+    fn to_datetime_with_options_parses_numbers_with_a_format_as_text_ivgp0() {
+        // Live pandas 2.2.3: to_datetime(Series([20240229, 20240301.7, NaN]),
+        // format='%Y%m%d') is [2024-02-29, 2024-03-01, NaT]; without the
+        // format the numbers are epoch nanoseconds (NEGATIVE).
+        let s = Series::from_values(
+            "d",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![
+                Scalar::Float64(20_240_229.0),
+                Scalar::Float64(20_240_301.7),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+        let parsed = super::to_datetime_with_options(
+            &s,
+            super::ToDatetimeOptions {
+                format: Some("%Y%m%d"),
+                ..super::ToDatetimeOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(parsed.values()[0], datetime64_scalar("2024-02-29 00:00:00"));
+        assert_eq!(parsed.values()[1], datetime64_scalar("2024-03-01 00:00:00"));
+        assert!(parsed.values()[2].is_missing());
+        let epoch =
+            super::to_datetime_with_options(&s, super::ToDatetimeOptions::default()).unwrap();
+        assert_eq!(epoch.values()[0], Scalar::Datetime64(20_240_229));
+    }
+
+    /// An aware Series + / - a duration keeps its zone, and a take of an
+    /// aware column holding a NaT too (br-frankenpandas-xs0nn).
+    #[test]
+    fn zoned_datetime_arithmetic_and_takes_keep_the_zone_xs0nn() {
+        let zone = DType::datetime64_tz("US/Eastern");
+        let stamps = Column::from_datetime64_values_with_validity(
+            vec![1_704_121_200_000_000_000, 1_704_207_600_000_000_000],
+            ValidityMask::all_valid(2),
+        )
+        .with_dtype(zone.clone());
+        let mut second_missing = ValidityMask::all_valid(2);
+        second_missing.set(1, false);
+        let hours = Column::from_timedelta64_values_with_validity(
+            vec![3_600_000_000_000, 0],
+            second_missing,
+        );
+        let index = Index::new(vec![0_i64.into(), 1_i64.into()]);
+        let left = Series::new("t", index.clone(), stamps).unwrap();
+        let right = Series::new("h", index, hours).unwrap();
+        let sum = left.add(&right).unwrap();
+        assert_eq!(sum.column().dtype(), zone);
+        assert_eq!(
+            sum.values()[0],
+            Scalar::Datetime64(1_704_121_200_000_000_000 + 3_600_000_000_000)
+        );
+        assert!(sum.values()[1].is_missing());
+        assert_eq!(sum.column().take_positions(&[1, 0]).dtype(), zone);
+        let difference = left.sub(&left).unwrap();
+        assert_eq!(difference.column().dtype(), DType::Timedelta64);
     }
 
     #[test]

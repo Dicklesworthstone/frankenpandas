@@ -75053,6 +75053,12 @@ fn mixed_zone_index(stamps: Bound<'_, PyList>, pydatetime: bool) -> PyResult<PyI
 /// prefix left off).
 fn to_datetime_error(err: fp_frame::FrameError) -> PyErr {
     match err {
+        // A bool column given a format (br-frankenpandas-ivgp0).
+        fp_frame::FrameError::CompatibilityRejected(message)
+            if message.starts_with("dtype bool cannot be converted") =>
+        {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(message)
+        }
         // A string no format reads is pandas' DateParseError (a ValueError),
         // as is dateutil's complaint about an ISO-shaped one with a field
         // out of range ("day is out of range for month: <text>"); a format's
@@ -75085,6 +75091,125 @@ fn to_datetime_error(err: fp_frame::FrameError) -> PyErr {
     }
 }
 
+/// pandas' `to_datetime(DataFrame)` (its _assemble_from_unit_mappings): the
+/// columns name year / month / day (required) and hour .. ns, in any case
+/// and with plural aliases; `year * 10000 + month * 100 + day` parses with
+/// '%Y%m%d' and the finer parts add as timedeltas, so a missing part is NaT
+/// and an impossible date pandas' error (NaT under errors='coerce'); another
+/// column is pandas' "extra keys" ValueError (br-frankenpandas-g1xps).
+fn assemble_datetimes(
+    py: Python<'_>,
+    frame: &Bound<'_, PyAny>,
+    errors: &str,
+    utc: bool,
+) -> PyResult<Py<PyAny>> {
+    const UNIT_MAP: [(&str, &str); 21] = [
+        ("year", "year"),
+        ("years", "year"),
+        ("month", "month"),
+        ("months", "month"),
+        ("day", "day"),
+        ("days", "day"),
+        ("hour", "h"),
+        ("hours", "h"),
+        ("minute", "m"),
+        ("minutes", "m"),
+        ("second", "s"),
+        ("seconds", "s"),
+        ("ms", "ms"),
+        ("millisecond", "ms"),
+        ("milliseconds", "ms"),
+        ("us", "us"),
+        ("microsecond", "us"),
+        ("microseconds", "us"),
+        ("ns", "ns"),
+        ("nanosecond", "ns"),
+        ("nanoseconds", "ns"),
+    ];
+    let unit_of = |name: &str| {
+        let lower = name.to_lowercase();
+        UNIT_MAP
+            .iter()
+            .find(|(alias, _)| *alias == name || *alias == lower)
+            .map(|(_, unit)| *unit)
+    };
+    let value_error = |message: String| PyErr::new::<pyo3::exceptions::PyValueError, _>(message);
+    let mut by_unit: HashMap<&str, Bound<'_, PyAny>> = HashMap::new();
+    let mut extra = Vec::new();
+    for column in frame.getattr("columns")?.try_iter()? {
+        let column = column?;
+        let name = column.str()?.to_string();
+        match unit_of(&name) {
+            Some(unit) => {
+                by_unit.insert(unit, column);
+            }
+            None => extra.push(name),
+        }
+    }
+    let missing: Vec<&str> = ["day", "month", "year"]
+        .into_iter()
+        .filter(|unit| !by_unit.contains_key(unit))
+        .collect();
+    if !missing.is_empty() {
+        return Err(value_error(format!(
+            "to assemble mappings requires at least that [year, month, day] be specified: [{}] is missing",
+            missing.join(",")
+        )));
+    }
+    extra.sort();
+    if !extra.is_empty() {
+        return Err(value_error(format!(
+            "extra keys have been passed to the datetime assemblage: [{}]",
+            extra.join(",")
+        )));
+    }
+    let module = py.import("frankenpandas")?;
+    // Each part is coerced to a number first (pandas' coerce: to_numeric
+    // with the same errors), so a year column of text is read as numbers.
+    let numeric = PyDict::new(py);
+    numeric.set_item("errors", errors)?;
+    let part = |unit: &str| {
+        module
+            .getattr("to_numeric")?
+            .call((frame.get_item(&by_unit[unit])?,), Some(&numeric))
+    };
+    let number = part("year")?
+        .mul(10_000)?
+        .add(part("month")?.mul(100)?)?
+        .add(part("day")?)?;
+    let options = PyDict::new(py);
+    options.set_item("format", "%Y%m%d")?;
+    options.set_item("errors", errors)?;
+    options.set_item("utc", utc)?;
+    let mut stamps = module
+        .getattr("to_datetime")?
+        .call((number,), Some(&options))
+        .map_err(|err| value_error(format!("cannot assemble the datetimes: {}", err.value(py))))?;
+    for unit in ["h", "m", "s", "ms", "us", "ns"] {
+        let Some(label) = by_unit.get(unit) else {
+            continue;
+        };
+        let values = module
+            .getattr("to_numeric")?
+            .call((frame.get_item(label)?,), Some(&numeric))?;
+        let delta_options = PyDict::new(py);
+        delta_options.set_item("unit", unit)?;
+        delta_options.set_item("errors", errors)?;
+        let delta = module
+            .getattr("to_timedelta")?
+            .call((values,), Some(&delta_options))
+            .map_err(|err| {
+                value_error(format!(
+                    "cannot assemble the datetimes [{}]: {}",
+                    label.str().map(|text| text.to_string()).unwrap_or_default(),
+                    err.value(py)
+                ))
+            })?;
+        stamps = stamps.add(delta)?;
+    }
+    Ok(stamps.unbind())
+}
+
 /// Convert argument to datetime (pandas `to_datetime`): `errors='raise'`
 /// (pandas' default) raises on a string it cannot parse or that does not
 /// match the column's one format - those silently became NaT - and
@@ -75104,6 +75229,11 @@ fn to_datetime(
     unit: Option<&str>,
     origin: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // A DataFrame of year / month / day (and finer) columns assembles one
+    // datetime per row (it was a TypeError; br-frankenpandas-g1xps).
+    if arg.extract::<PyRef<'_, PyDataFrame>>().is_ok() {
+        return assemble_datetimes(py, arg, errors, utc);
+    }
     // origin= (it was refused): 'unix' the default, 'julian', a date, or a
     // number of `unit`s past the epoch (br-frankenpandas-6kaxp).
     let origin = origin.filter(|origin| !origin.is_none());

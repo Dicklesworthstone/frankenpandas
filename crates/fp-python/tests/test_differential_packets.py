@@ -26623,6 +26623,65 @@ _VWKD3_CASES = {
 }
 
 
+# br-frankenpandas-ivgp0: to_datetime of numbers with a format parses each
+# number's text (YYYYMMDD ints were read as epoch nanoseconds);
+# br-frankenpandas-g1xps: to_datetime(DataFrame) assembles year / month /
+# day (+ hour .. ns) columns; br-frankenpandas-xs0nn: a tz-aware Series
+# +/- a Timedelta keeps its zone (it showed the UTC wall time, naive).
+_DT_NAN = float("nan")
+
+
+def _aware(m: Any, tz: str = "US/Eastern") -> Any:
+    return m.Series(m.to_datetime(["2024-01-01 10:00", "2024-03-10 01:30"])).dt.tz_localize(tz)
+
+
+_DATETIME_FIX_CASES = {
+    "ivgp0 ints %Y%m%d": lambda m: m.to_datetime(m.Series([20240229, 20231231]), format="%Y%m%d"),
+    "ivgp0 floats with NaN": lambda m: m.to_datetime(m.Series([20240229.0, _DT_NAN]), format="%Y%m%d"),
+    "ivgp0 fraction truncated": lambda m: m.to_datetime(m.Series([20240229.5]), format="%Y%m%d"),
+    "ivgp0 %Y": lambda m: m.to_datetime(m.Series([2024]), format="%Y"),
+    "ivgp0 list / scalar / Index": lambda m: (
+        m.to_datetime([20240229], format="%Y%m%d"),
+        m.to_datetime(20240229, format="%Y%m%d"),
+        m.to_datetime(m.Index([20240229]), format="%Y%m%d"),
+    ),
+    "ivgp0 bad month raises": lambda m: m.to_datetime(m.Series([20241301]), format="%Y%m%d"),
+    "ivgp0 bad month coerced": lambda m: m.to_datetime(m.Series([20241301]), format="%Y%m%d", errors="coerce"),
+    "ivgp0 bool raises": lambda m: m.to_datetime(m.Series([True]), format="%Y"),
+    "ivgp0 no format stays epoch (NEGATIVE)": lambda m: m.to_datetime(m.Series([20240229])),
+    "ivgp0 unit (NEGATIVE)": lambda m: m.to_datetime(m.Series([1700000000]), unit="s"),
+    "g1xps ymd": lambda m: m.to_datetime(m.DataFrame({"year": [2024, 2023], "month": [2, 12], "day": [29, 31]})),
+    "g1xps case, plurals, index, missing hour": lambda m: m.to_datetime(m.DataFrame({"Year": [2024, 2023], "MONTH": [2, 12], "days": [29, 31], "hours": [10, None]}, index=["p", "q"])),
+    "g1xps all units utc": lambda m: m.to_datetime(m.DataFrame({"year": [2024], "month": [1], "day": [1], "minute": [5], "second": [7], "ms": [8], "us": [9], "ns": [10]}), utc=True),
+    "g1xps text year": lambda m: m.to_datetime(m.DataFrame({"year": ["2024"], "month": [1], "day": [1]})),
+    "g1xps impossible date raises": lambda m: m.to_datetime(m.DataFrame({"year": [2023], "month": [2], "day": [30]})),
+    "g1xps impossible date coerced": lambda m: m.to_datetime(m.DataFrame({"year": [2023], "month": [2], "day": [30]}), errors="coerce"),
+    "g1xps missing day": lambda m: m.to_datetime(m.DataFrame({"year": [2023], "month": [2]})),
+    "g1xps extra keys": lambda m: m.to_datetime(m.DataFrame({"year": [2024], "month": [1], "day": [1], "foo": [1], "bar": [2]})),
+    "xs0nn + Timedelta": lambda m: _aware(m) + m.Timedelta("1h"),
+    "xs0nn - Timedelta": lambda m: _aware(m) - m.Timedelta("1D"),
+    "xs0nn Timedelta +": lambda m: m.Timedelta("1h") + _aware(m),
+    "xs0nn + timedelta Series with NaT": lambda m: _aware(m) + m.to_timedelta(m.Series([1, None]), unit="h"),
+    "xs0nn UTC - timedelta Series": lambda m: _aware(m, "UTC") - m.to_timedelta(m.Series([1, 2]), unit="h"),
+    "xs0nn head of a zoned column with NaT": lambda m: (_aware(m) + m.to_timedelta(m.Series([None, 1]), unit="h")).iloc[[1, 0]],
+    "xs0nn aware - aware (NEGATIVE)": lambda m: _aware(m) - _aware(m),
+    "xs0nn naive + Timedelta (NEGATIVE)": lambda m: m.Series(m.to_datetime(["2024-01-01 10:00"])) + m.Timedelta("1h"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_DATETIME_FIX_CASES))
+def test_datetime_parsing_assembly_and_zoned_arithmetic_like_pandas(case: str) -> None:
+    def shown(m: Any) -> Any:
+        try:
+            result = _DATETIME_FIX_CASES[case](m)
+        except (TypeError, ValueError) as error:
+            return (type(error).__name__, str(error))
+        return repr(result)
+
+    assert shown(fpd) == shown(pd)
+
+
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 @pytest.mark.parametrize("case", list(_VWKD3_CASES))
 def test_fillna_limit_counts_along_the_column_like_pandas_vwkd3(case: str) -> None:

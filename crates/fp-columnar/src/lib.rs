@@ -16932,6 +16932,14 @@ impl Column {
     #[must_use]
     pub fn keeping_dtype_of(mut self, source: &Self) -> Self {
         self.pandas_string = source.pandas_string && self.dtype == DType::Utf8;
+        // A zoned datetime keeps its zone: the typed takes rebuild through
+        // the naive datetime64 constructors (a repr of an aware column with
+        // a NaT printed UTC wall times; br-frankenpandas-xs0nn).
+        if matches!(source.dtype, DType::Datetime64 { tz: Some(_) })
+            && matches!(self.dtype, DType::Datetime64 { tz: None })
+        {
+            self.dtype = source.dtype.clone();
+        }
         // The common case, a 64-bit source, costs nothing on the hot takes.
         if source.width.is_none() {
             self.width = None;
