@@ -5514,6 +5514,50 @@ impl PyTimestamp {
             .unbind())
     }
 
+    /// The ISO week number, pandas' `week` / `weekofyear` (they were
+    /// missing; br-frankenpandas-b9lc7).
+    #[getter]
+    fn week(&self, py: Python<'_>) -> PyResult<Option<i64>> {
+        if self.civil_fields().is_none() {
+            return Ok(None);
+        }
+        self.isocalendar(py)?
+            .bind(py)
+            .get_item(1)?
+            .extract()
+            .map(Some)
+    }
+
+    #[getter]
+    fn weekofyear(&self, py: Python<'_>) -> PyResult<Option<i64>> {
+        self.week(py)
+    }
+
+    /// The zone's UTC offset, `datetime.utcoffset()` (None when naive; it
+    /// was missing, as were tzname and dst - br-frankenpandas-b9lc7).
+    fn utcoffset(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match self.py_datetime(py)? {
+            Some(dt) => Ok(dt.call_method0("utcoffset")?.unbind()),
+            None => nat_object(py),
+        }
+    }
+
+    /// The zone's abbreviation (`EST`), `datetime.tzname()`.
+    fn tzname(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match self.py_datetime(py)? {
+            Some(dt) => Ok(dt.call_method0("tzname")?.unbind()),
+            None => nat_object(py),
+        }
+    }
+
+    /// The zone's daylight-saving adjustment, `datetime.dst()`.
+    fn dst(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match self.py_datetime(py)? {
+            Some(dt) => Ok(dt.call_method0("dst")?.unbind()),
+            None => nat_object(py),
+        }
+    }
+
     /// The calendar date as a `datetime.date`; NaT for NaT.
     fn date(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let Some((year, month, day, ..)) = self.civil_fields() else {
@@ -7965,6 +8009,35 @@ fn unduplicated_positions(duplicated: &[bool]) -> Vec<usize> {
         .collect()
 }
 
+/// The positions an Index `delete(loc)` drops: one position (negative
+/// counts from the end) or a list / array of them, with numpy's
+/// IndexError for one out of bounds (br-frankenpandas-b9lc7).
+fn delete_positions(loc: &Bound<'_, PyAny>, len: usize) -> PyResult<HashSet<usize>> {
+    let positions: Vec<i64> = match loc.extract::<i64>() {
+        Ok(position) => vec![position],
+        Err(_) => loc.extract::<Vec<i64>>()?,
+    };
+    let mut dropped = HashSet::with_capacity(positions.len());
+    for position in positions {
+        let resolved = if position < 0 {
+            position + len as i64
+        } else {
+            position
+        };
+        match usize::try_from(resolved) {
+            Ok(at) if at < len => {
+                dropped.insert(at);
+            }
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                    "index {position} is out of bounds for axis 0 with size {len}"
+                )));
+            }
+        }
+    }
+    Ok(dropped)
+}
+
 /// pandas' `keep=` of duplicated / drop_duplicates: 'first', 'last' or
 /// False; anything else is pandas' ValueError (it also read 'First',
 /// 'false' and 'none', and raised texts of its own; br-frankenpandas-k2bwx).
@@ -9129,6 +9202,20 @@ fn py_axis_name(value: &Bound<'_, PyAny>) -> PyResult<Option<LabelName>> {
     py_series_name(value).map(Some)
 }
 
+/// The name a `reindex` target gives its axis: an index-like target's (an
+/// Index or Series - anything with a `.name`, pandas' `preserve_names`
+/// test), None among them; nothing for a list, an array or a MultiIndex,
+/// which keep the axis' own names (br-frankenpandas-hnu53).
+fn reindex_target_name(target: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Option<LabelName>>> {
+    let Some(target) = target.filter(|target| !target.is_instance_of::<PyMultiIndex>()) else {
+        return Ok(None);
+    };
+    if !target.hasattr("name")? {
+        return Ok(None);
+    }
+    py_axis_name(&target.getattr("name")?).map(Some)
+}
+
 /// The MultiIndex `pd.Index([(1, 2), (3, 4)])` builds from a list (or
 /// tuple) of tuples - only the Index constructor does; `index=`, `set_axis`
 /// and the setters keep tuple labels (r0hk0). None for anything else.
@@ -9976,7 +10063,9 @@ fn float_index_labels(labels: Vec<IndexLabel>) -> Vec<IndexLabel> {
 }
 
 /// `index` with [`float_index_labels`] applied when they change it (a
-/// missing label, or ints beside floats), its name kept.
+/// missing label, or ints beside floats), its name kept. Aware instants
+/// are left as they are (rebuilding them dropped the zone when a NaT was
+/// among them; br-frankenpandas-wtu8e).
 fn float_labelled(index: Index) -> Index {
     let labels = index.labels();
     let mixed = labels
@@ -9985,7 +10074,7 @@ fn float_labelled(index: Index) -> Index {
         && labels
             .iter()
             .any(|label| matches!(label, IndexLabel::Float64(_)));
-    if !mixed && !index.hasnans() {
+    if index.tz().is_some() || (!mixed && !index.hasnans()) {
         return index;
     }
     Index::new(float_index_labels(labels.to_vec())).rename_index(index.name())
@@ -11350,7 +11439,11 @@ impl PyIndex {
     /// joined tuples, not numpy's values (br-frankenpandas-myyy1).
     fn operator(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>, op: &str) -> PyResult<Py<PyAny>> {
         if datetimelike_index_object(slf.as_any()) {
-            return datetimelike_index_arithmetic(slf.as_any(), other, op);
+            let result = datetimelike_index_arithmetic(slf.as_any(), other, op)?;
+            if let Ok(durations) = slf.extract::<PyRef<'_, PyTimedeltaIndex>>() {
+                return durations.with_arithmetic_freq(result, other, op);
+            }
+            return Ok(result);
         }
         // A MultiIndex has no arithmetic: pandas' invalid-op TypeError.
         if slf.is_instance_of::<PyMultiIndex>() {
@@ -11367,13 +11460,28 @@ impl PyIndex {
     /// A unary operator of this Index (see [`Self::operator`]): a typed
     /// index class answers Python's TypeError for a missing operator.
     fn unary_operator(slf: &Bound<'_, Self>, op: &str, operand: &str) -> PyResult<Py<PyAny>> {
-        // -tdi, +tdi, abs(tdi): the durations' own (a2t82).
-        if slf.is_instance_of::<PyTimedeltaIndex>() {
+        // -tdi, +tdi, abs(tdi): the durations' own (a2t82), -tdi with its
+        // freq negated, +tdi with it kept (it was dropped; b9lc7).
+        if let Ok(durations) = slf.extract::<PyRef<'_, PyTimedeltaIndex>>() {
             let py = slf.py();
             let module = py.import("frankenpandas")?;
             let values = module.getattr("Series")?.call1((slf,))?.call_method0(op)?;
             let result = module.getattr("Index")?.call1((values,))?;
             result.setattr("name", slf.getattr("name")?)?;
+            let freq = match op {
+                "__neg__" => durations
+                    .inner
+                    .freq()
+                    .and_then(|freq| fp_index::scale_freq(&freq, -1)),
+                "__pos__" => durations.inner.freq(),
+                _ => None,
+            };
+            if let (Some(freq), Ok(negated)) =
+                (freq, result.extract::<PyRef<'_, PyTimedeltaIndex>>())
+            {
+                let inner = negated.inner.clone().with_freq(Some(freq));
+                return PyTimedeltaIndex { inner }.into_py_any(py);
+            }
             return Ok(result.unbind());
         }
         if typed_index_object(slf.as_any()) {
@@ -11414,13 +11522,52 @@ impl PyIndex {
                 }
                 return Ok(PyIndex { inner });
             } else if let Ok(s) = d.extract::<PyRef<'_, PySeries>>() {
+                let series_name = Some(s.inner.name().clone()).filter(|n| !n.is_empty());
+                // Durations are a TimedeltaIndex however many are missing
+                // (all-NaT ones were a DatetimeIndex, none an object Index;
+                // br-frankenpandas-wtu8e).
+                if s.inner.column().dtype() == DType::Timedelta64 {
+                    let nanos = s
+                        .inner
+                        .values()
+                        .iter()
+                        .map(|value| match value {
+                            Scalar::Timedelta64(nanos) => *nanos,
+                            _ => Timedelta::NAT,
+                        })
+                        .collect();
+                    return Ok(PyIndex {
+                        inner: TimedeltaIndex::new(nanos)
+                            .into_index()
+                            .with_declared_dtype(Some(fp_index::DeclaredDtype::Timedelta64))
+                            .set_names(name.or(series_name)),
+                    });
+                }
+                // Aware instants keep their zone (they were naive, showing
+                // the UTC wall time; wtu8e).
+                if let DType::Datetime64 { tz: Some(zone) } = s.inner.column().dtype() {
+                    let nanos = s
+                        .inner
+                        .values()
+                        .iter()
+                        .map(|value| match value {
+                            Scalar::Datetime64(nanos) => *nanos,
+                            _ => Timestamp::NAT,
+                        })
+                        .collect();
+                    let instants = DatetimeIndex::new(nanos)
+                        .with_tz(Some(&zone))
+                        .map_err(index_error_to_py)?;
+                    return Ok(PyIndex {
+                        inner: instants.into_index().set_names(name.or(series_name)),
+                    });
+                }
                 let labels = s
                     .inner
                     .values()
                     .iter()
                     .map(scalar_to_index_label_converter)
                     .collect();
-                let series_name = Some(s.inner.name().clone()).filter(|n| !n.is_empty());
                 return Ok(PyIndex {
                     inner: Index::new(labels).set_names(name.or(series_name)),
                 });
@@ -12210,14 +12357,19 @@ impl PyIndex {
         Ok(PyIndex { inner: res })
     }
 
-    fn delete(&self, loc: usize) -> PyResult<Self> {
-        let mut labels = self.inner.labels().to_vec();
-        if loc >= labels.len() {
-            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
-                "Index position out of bounds",
-            ));
-        }
-        labels.remove(loc);
+    /// pandas' `delete(loc)`: a position (negative from the end) or a list
+    /// / array of them, as numpy's delete (a list was a TypeError;
+    /// br-frankenpandas-b9lc7).
+    fn delete(&self, loc: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let dropped = delete_positions(loc, self.inner.len())?;
+        let labels = self
+            .inner
+            .labels()
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| !dropped.contains(at))
+            .map(|(_, label)| label.clone())
+            .collect();
         let mut res = Index::new(labels);
         if let Some(n) = self.inner.name() {
             res = res.rename_index(Some(n));
@@ -14940,7 +15092,7 @@ impl PyDatetimeIndex {
         datetime_field_index(self.inner.daysinmonth())
     }
 
-    fn delete(&self, loc: usize) -> PyResult<Self> {
+    fn delete(&self, loc: &Bound<'_, PyAny>) -> PyResult<Self> {
         let new_idx = self.as_py_index().delete(loc)?;
         let mut vals = Vec::with_capacity(new_idx.inner.len());
         for l in new_idx.inner.labels() {
@@ -17550,6 +17702,84 @@ impl PyTimedeltaIndex {
             )),
         }
     }
+
+    /// The freq pandas gives `self <op> other`: a scalar duration or
+    /// instant (or a tick) added or subtracted keeps it, negated when these
+    /// durations are the ones subtracted; a number multiplies or divides it
+    /// (see [`fp_index::multiply_tick_freq`] / [`fp_index::divide_tick_freq`];
+    /// a zero divisor is pandas' ZeroDivisionError); NaT or anything else
+    /// drops it (it was dropped always; br-frankenpandas-b9lc7).
+    fn arithmetic_freq(&self, other: &Bound<'_, PyAny>, op: &str) -> PyResult<Option<String>> {
+        // An operand by position (an array, a list, an index) drops it.
+        let Some(freq) = self
+            .inner
+            .freq()
+            .filter(|_| !other.hasattr("__len__").unwrap_or(true))
+        else {
+            return Ok(None);
+        };
+        let tick = || {
+            other
+                .extract::<PyRef<'_, PyDateOffset>>()
+                .is_ok_and(|offset| offset.nanos().is_ok())
+        };
+        let scalar = py_to_scalar(other.py(), other).ok();
+        match (op, scalar) {
+            (
+                "__add__" | "__radd__" | "__sub__",
+                Some(Scalar::Timedelta64(_) | Scalar::Datetime64(_)),
+            ) => Ok(Some(freq)),
+            ("__rsub__", Some(Scalar::Timedelta64(_) | Scalar::Datetime64(_))) => {
+                Ok(fp_index::scale_freq(&freq, -1))
+            }
+            ("__add__" | "__radd__" | "__sub__", _) if tick() => Ok(Some(freq)),
+            ("__mul__" | "__rmul__", Some(Scalar::Int64(times))) => {
+                Ok(fp_index::scale_freq(&freq, times))
+            }
+            ("__mul__" | "__rmul__", Some(Scalar::Float64(factor))) => {
+                fp_index::multiply_tick_freq(&freq, factor)
+                    .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)
+            }
+            ("__truediv__" | "__floordiv__", Some(Scalar::Int64(0) | Scalar::Float64(0.0))) => Err(
+                PyErr::new::<pyo3::exceptions::PyZeroDivisionError, _>("division by zero"),
+            ),
+            ("__truediv__" | "__floordiv__", Some(Scalar::Int64(divisor))) => {
+                Ok(fp_index::divide_tick_freq(&freq, divisor as f64))
+            }
+            ("__truediv__" | "__floordiv__", Some(Scalar::Float64(divisor))) => {
+                Ok(fp_index::divide_tick_freq(&freq, divisor))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// `result` (an operator's answer on these durations) with the freq
+    /// pandas gives it, when it is durations or instants
+    /// ([`Self::arithmetic_freq`]).
+    fn with_arithmetic_freq(
+        &self,
+        result: Py<PyAny>,
+        other: &Bound<'_, PyAny>,
+        op: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let py = other.py();
+        let bound = result.bind(py);
+        if let Ok(durations) = bound.extract::<PyRef<'_, Self>>() {
+            let inner = durations
+                .inner
+                .clone()
+                .with_freq(self.arithmetic_freq(other, op)?);
+            return Self { inner }.into_py_any(py);
+        }
+        if let Ok(instants) = bound.extract::<PyRef<'_, PyDatetimeIndex>>() {
+            let inner = instants
+                .inner
+                .clone()
+                .with_freq(self.arithmetic_freq(other, op)?);
+            return PyDatetimeIndex { inner }.into_py_any(py);
+        }
+        Ok(result)
+    }
 }
 
 #[pymethods]
@@ -17575,6 +17805,7 @@ impl PyTimedeltaIndex {
         name: Option<&str>,
     ) -> PyResult<Self> {
         let mut nanos = Vec::new();
+        let mut series_name = None;
         if let Some(obj) = data {
             if let Ok(tdi) = obj.extract::<PyRef<'_, PyTimedeltaIndex>>() {
                 let mut inner = tdi.inner.clone();
@@ -17584,6 +17815,8 @@ impl PyTimedeltaIndex {
                 return Ok(Self { inner });
             }
             if let Ok(s) = obj.extract::<PyRef<'_, PySeries>>() {
+                // A Series names the index (it was dropped; wtu8e).
+                series_name = Some(s.inner.name().clone()).filter(|n| !n.is_empty());
                 for v in s.inner.values() {
                     match v {
                         Scalar::Timedelta64(ns) => nanos.push(*ns),
@@ -17662,6 +17895,8 @@ impl PyTimedeltaIndex {
         let mut inner = TimedeltaIndex::new(nanos.clone());
         if let Some(n) = name {
             inner = inner.set_name(n);
+        } else if series_name.is_some() {
+            inner = inner.rename_index(series_name);
         }
         // pandas' freq=: 'infer' takes the inferred tick; a tick the
         // durations must step by exactly (pandas' ValueError otherwise). It
@@ -18538,7 +18773,7 @@ impl PyTimedeltaIndex {
         })
     }
 
-    fn delete(&self, loc: usize) -> PyResult<Self> {
+    fn delete(&self, loc: &Bound<'_, PyAny>) -> PyResult<Self> {
         let new_idx = self.as_py_index().delete(loc)?;
         let mut vals = Vec::with_capacity(new_idx.inner.len());
         for l in new_idx.inner.labels() {
@@ -19115,7 +19350,7 @@ impl PyRangeIndex {
         Self::or_index(slf.py(), out, ranges)
     }
 
-    fn delete(slf: PyRef<'_, Self>, loc: usize) -> PyResult<Py<PyAny>> {
+    fn delete(slf: PyRef<'_, Self>, loc: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let out = slf.as_super().delete(loc)?.inner;
         Self::or_index(slf.py(), out, true)
     }
@@ -20106,14 +20341,16 @@ impl PyPeriodIndex {
         period_field_index(py, self.inner.daysinmonth())
     }
 
-    fn delete(&self, loc: usize) -> PyResult<Self> {
-        if loc >= self.inner.len() {
-            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
-                "index out of bounds",
-            ));
-        }
-        let mut vals = self.inner.values().to_vec();
-        vals.remove(loc);
+    fn delete(&self, loc: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let dropped = delete_positions(loc, self.inner.len())?;
+        let vals = self
+            .inner
+            .values()
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| !dropped.contains(at))
+            .map(|(_, period)| *period)
+            .collect();
         let mut out = PeriodIndex::new(vals);
         if let Some(n) = self.inner.name() {
             out = out.set_name(n);
@@ -21513,7 +21750,7 @@ impl PyCategoricalIndex {
         self.as_py_index().astype_name(&index_astype_name(dtype)?)
     }
 
-    fn delete(&self, loc: usize) -> PyResult<PyIndex> {
+    fn delete(&self, loc: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
         self.as_py_index().delete(loc)
     }
 
@@ -24091,7 +24328,8 @@ fn series_operand(py: Python<'_>, other: &Bound<'_, PyAny>, like: &Series) -> Py
     if let Some(series) = listlike_series_operand(py, other, like, false)? {
         return Ok(series);
     }
-    let scalar = match py_to_scalar(py, &unwrap_0d(other)?)? {
+    let operand = unwrap_0d(other)?;
+    let scalar = match py_to_scalar(py, &operand)? {
         // An int against float64 values is that float, as numpy converts it
         // (the mixed-dtype kernel converted it per element too): the
         // operator takes the float kernel (`s * 2` ran 3x `s * 2.0`;
@@ -24099,11 +24337,44 @@ fn series_operand(py: Python<'_>, other: &Bound<'_, PyAny>, like: &Series) -> Py
         Scalar::Int64(value) if like.column().dtype() == DType::Float64 => {
             Scalar::Float64(value as f64)
         }
+        // A float NaN against durations is that float, which `/` answers
+        // with NaT (the untyped missing operand gave float64 NaN;
+        // br-frankenpandas-wtu8e).
+        Scalar::Null(NullKind::NaN)
+            if like.column().dtype() == DType::Timedelta64
+                && operand.is_instance_of::<pyo3::types::PyFloat>() =>
+        {
+            Scalar::Float64(f64::NAN)
+        }
         scalar => scalar,
     };
     let scalar = weak_float32(like, other, scalar);
-    let column = broadcast_column(scalar, like.len())?;
+    // A tz-aware instant broadcasts in its zone, which durations + it keep
+    // (it was naive, showing the UTC wall time; br-frankenpandas-wtu8e).
+    let zone = match scalar {
+        Scalar::Datetime64(_) => operand_zone(&operand)?,
+        _ => None,
+    };
+    let mut column = broadcast_column(scalar, like.len())?;
+    if let Some(zone) = zone {
+        column = column.with_dtype(DType::datetime64_tz(zone));
+    }
     Series::new(like.name(), like.index().clone(), column).map_err(frame_error_to_py)
+}
+
+/// The zone of a tz-aware instant operand (a Timestamp, or a datetime with
+/// a tzinfo); None for a naive one or anything else.
+fn operand_zone(operand: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    if let Ok(stamp) = operand.extract::<PyRef<'_, PyTimestamp>>() {
+        return Ok(stamp.inner.tz.clone());
+    }
+    if operand.cast::<PyDateTime>().is_ok() {
+        let tzinfo = operand.getattr("tzinfo")?;
+        if !tzinfo.is_none() {
+            return tz_name(&tzinfo).map(Some);
+        }
+    }
+    Ok(None)
 }
 
 /// The number a plain Python int / float `other` is to an op over `like`'s
@@ -33989,6 +34260,16 @@ impl PySeries {
             }
             None => reindexed,
         };
+        // An index-like target names the index ([`reindex_target_name`];
+        // br-frankenpandas-hnu53).
+        let reindexed = match reindex_target_name(Some(idx_obj))? {
+            Some(name) if reindexed.index().row_multiindex().is_none() => {
+                let index = reindexed.index().clone().set_names(name);
+                Series::new(reindexed.name(), index, reindexed.column().clone())
+                    .map_err(frame_error_to_py)?
+            }
+            _ => reindexed,
+        };
         let Some(fill) = fill_value.filter(|fv| !fv.is_none()) else {
             return Ok(PySeries { inner: reindexed });
         };
@@ -36147,6 +36428,78 @@ fn axis_passed_none(axis: &Passed<'_>) -> bool {
 }
 
 impl PyDataFrame {
+    /// pandas' `join` of a list (or tuple) of frames / Series on the index
+    /// (`_join_compat`): when every index is unique, their concat along the
+    /// columns - joined outer and reindexed to this frame's index for
+    /// how='left', else joined `how` - with overlapping columns concat's
+    /// ValueError; otherwise index merges in turn. `on=` and suffixes are
+    /// pandas' ValueErrors. A list raised TypeError
+    /// (br-frankenpandas-4lss6).
+    #[allow(clippy::too_many_arguments)]
+    fn join_many(
+        &self,
+        py: Python<'_>,
+        others: &Bound<'_, PyAny>,
+        on: Option<&Bound<'_, PyAny>>,
+        how: &str,
+        lsuffix: &str,
+        rsuffix: &str,
+        sort: bool,
+        validate: Option<&str>,
+    ) -> PyResult<PyDataFrame> {
+        if on.is_some_and(|on| !on.is_none()) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Joining multiple DataFrames only supported for joining on index",
+            ));
+        }
+        if !lsuffix.is_empty() || !rsuffix.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Suffixes not supported when joining multiple DataFrames",
+            ));
+        }
+        let module = py.import("frankenpandas")?;
+        let this = Bound::new(py, self.clone())?.into_any();
+        let mut frames = vec![this.clone()];
+        for other in others.try_iter()? {
+            frames.push(other?);
+        }
+        let mut unique = true;
+        for frame in &frames {
+            unique &= frame
+                .getattr("index")?
+                .getattr("is_unique")?
+                .extract::<bool>()?;
+        }
+        let joined = if unique {
+            let named = PyDict::new(py);
+            named.set_item("axis", 1)?;
+            named.set_item("join", if how == "left" { "outer" } else { how })?;
+            named.set_item("verify_integrity", true)?;
+            named.set_item("sort", sort)?;
+            let joined = module
+                .getattr("concat")?
+                .call((PyList::new(py, &frames)?,), Some(&named))?;
+            if how == "left" {
+                joined.call_method1("reindex", (this.getattr("index")?,))?
+            } else {
+                joined
+            }
+        } else {
+            let named = PyDict::new(py);
+            named.set_item("how", how)?;
+            named.set_item("left_index", true)?;
+            named.set_item("right_index", true)?;
+            named.set_item("validate", validate)?;
+            let merge = module.getattr("merge")?;
+            let mut joined = this;
+            for frame in &frames[1..] {
+                joined = merge.call((joined, frame), Some(&named))?;
+            }
+            joined
+        };
+        joined.extract::<PyDataFrame>().map_err(Into::into)
+    }
+
     /// pandas 2's reduction over both axes when `axis=None` is passed (mean,
     /// median, min, max, skew, kurt, any, all): every value - of the columns
     /// of the `only` dtypes, when given (numeric_only / bool_only) - as one
@@ -43846,6 +44199,39 @@ impl PyDataFrame {
         let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
         unsupported_params("DataFrame.groupby", &[("axis", ax == 0)])?;
         let by = by.filter(|b| !b.is_none());
+        // A dict maps each index label to its group, as pandas' groupby does
+        // (a label it lacks is a missing key; it was a KeyError on the dict;
+        // br-frankenpandas-2ahoa).
+        let mapped_by;
+        let by = match by.map(|by| by.cast::<PyDict>()) {
+            Some(Ok(mapping)) => {
+                let cells = self
+                    .inner
+                    .index()
+                    .labels()
+                    .iter()
+                    .map(
+                        |label| match mapping.get_item(index_label_to_py(py, label)?)? {
+                            Some(group) => py_to_scalar(py, &group),
+                            None => Ok(Scalar::Null(NullKind::NaN)),
+                        },
+                    )
+                    .collect::<PyResult<Vec<_>>>()?;
+                let column = Column::from_values(cells).map_err(column_error_to_py)?;
+                // The grouping is named after the index it maps.
+                let name = self
+                    .inner
+                    .index()
+                    .name()
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                let keys = Series::new(name, self.inner.index().clone(), column)
+                    .map_err(frame_error_to_py)?;
+                mapped_by = Bound::new(py, PySeries { inner: keys })?.into_any();
+                Some(&mapped_by)
+            }
+            _ => by,
+        };
         let level = level.filter(|l| !l.is_none());
         // A lone pd.Grouper: with freq= it is pandas' TimeGrouper - the same
         // bins as resample over `key` (or the index), empty ones included -
@@ -48150,8 +48536,13 @@ impl PyDataFrame {
         }
         let built = py.get_type::<PyDataFrame>().call1((data,))?;
         let transposed = built.extract::<PyRef<'_, PyDataFrame>>()?.transposed()?;
+        // pandas' infer_to_same_shape infers each column after the
+        // transpose: a column of ints beside text rows is int64 (it stayed
+        // object; br-frankenpandas-4q2tt).
+        let inferred = Bound::new(py, transposed)?.call_method0("infer_objects")?;
+        let inner = inferred.extract::<PyRef<'_, PyDataFrame>>()?.inner.clone();
         PyDataFrame {
-            inner: with_row_axis(transposed.inner, &row_index)?,
+            inner: with_row_axis(inner, &row_index)?,
         }
         .into_bound_py_any(py)
     }
@@ -48747,6 +49138,21 @@ impl PyDataFrame {
                 res = res.with_columns_at_positions(promoted);
             }
         }
+        // An index-like target (an Index, a Series) names its axis, None
+        // included; a list or an array keeps the axis' own name (pandas'
+        // preserve_names; the frame's own were kept always;
+        // br-frankenpandas-hnu53).
+        if let Some(name) = reindex_target_name(target_index)?
+            && res.row_multiindex().is_none()
+        {
+            let index = res.index().clone().set_names(name);
+            res = res.with_index(index).map_err(frame_error_to_py)?;
+        }
+        if let Some(name) = reindex_target_name(target_columns)?
+            && res.columns_multiindex().is_none()
+        {
+            res = res.with_columns_name(name);
+        }
         Ok(PyDataFrame { inner: res })
     }
 
@@ -48860,6 +49266,9 @@ impl PyDataFrame {
         sort: bool,
         validate: Option<&str>,
     ) -> PyResult<PyDataFrame> {
+        if other.is_instance_of::<PyList>() || other.is_instance_of::<PyTuple>() {
+            return self.join_many(py, other, on, how, lsuffix, rsuffix, sort, validate);
+        }
         let right_df = if let Ok(odf) = other.extract::<PyRef<'_, PyDataFrame>>() {
             odf.inner.clone()
         } else if let Ok(os) = other.extract::<PyRef<'_, PySeries>>() {
@@ -65606,6 +66015,31 @@ impl PyGroupBy {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        // (name, function) tuples: the functions as a list, each column's
+        // results under the names - pandas' (column, name) columns
+        // (br-frankenpandas-2ahoa).
+        if let Some((names, funcs)) = func.map(named_func_tuples).transpose()?.flatten() {
+            let list = PyList::new(py, &funcs)?;
+            let result = self
+                .agg(py, Some(list.as_any()), args, kwargs)?
+                .into_bound(py);
+            let renamed = result
+                .getattr("columns")?
+                .try_iter()?
+                .enumerate()
+                .map(|(position, column)| -> PyResult<Bound<'_, PyAny>> {
+                    let outer = column?.cast_into::<PyTuple>()?.get_item(0)?;
+                    let name = pyo3::types::PyString::new(py, &names[position % names.len()]);
+                    Ok(PyTuple::new(py, [outer, name.into_any()])?.into_any())
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            let columns = py
+                .import("frankenpandas")?
+                .getattr("MultiIndex")?
+                .call_method1("from_tuples", (PyList::new(py, renamed)?,))?;
+            result.setattr("columns", columns)?;
+            return Ok(result.unbind());
+        }
         self.refuse_repeated_agg_columns(func, kwargs)?;
         // A {column: func} dict's typed keys name their columns (fvsao.32).
         let column_keyed = match func.map(|func| func.cast::<PyDict>()) {
@@ -65643,6 +66077,14 @@ impl PyGroupBy {
         let kwargs = renamed_kwargs.as_ref().or(kwargs);
         let named = kwargs.filter(|k| !k.is_empty());
         if !args.is_empty() || (func.is_some() && named.is_some()) {
+            // A method name with arguments is that method called with them,
+            // as pandas' agg dispatches a string (agg('mean',
+            // numeric_only=True); it was refused, br-frankenpandas-2ahoa).
+            if let Some(name) = func.and_then(|func| func.extract::<String>().ok()) {
+                return Ok(Bound::new(py, self.clone())?
+                    .call_method(name.as_str(), args.clone(), named)?
+                    .unbind());
+            }
             return Err(not_implemented(
                 "DataFrameGroupBy.agg with arguments for the function",
             ));
@@ -67692,6 +68134,38 @@ impl PySeriesGroupBy {
     }
 }
 
+/// The names, then the functions, of an `agg([(name, func), ...])` spec.
+type NamedFuncs<'py> = (Vec<String>, Vec<Bound<'py, PyAny>>);
+
+/// The names and functions of pandas' `agg([(name, func), ...])`, a list of
+/// (name, aggfunc) tuples: the functions run as a list and the results
+/// take the names (the tuples were read as names - an AttributeError;
+/// br-frankenpandas-2ahoa). None for any other spec.
+fn named_func_tuples<'py>(spec: &Bound<'py, PyAny>) -> PyResult<Option<NamedFuncs<'py>>> {
+    let Ok(list) = spec.cast::<PyList>() else {
+        return Ok(None);
+    };
+    if list.is_empty() {
+        return Ok(None);
+    }
+    let mut names = Vec::with_capacity(list.len());
+    let mut funcs = Vec::with_capacity(list.len());
+    for item in list.iter() {
+        let Ok(pair) = item.cast::<PyTuple>() else {
+            return Ok(None);
+        };
+        if pair.len() != 2 {
+            return Ok(None);
+        }
+        let Ok(name) = pair.get_item(0)?.extract::<String>() else {
+            return Ok(None);
+        };
+        names.push(name);
+        funcs.push(pair.get_item(1)?);
+    }
+    Ok(Some((names, funcs)))
+}
+
 /// The names [`PySeriesGroupBy::agg_name`] runs as its reductions.
 const SERIES_GROUPBY_AGG_NAMES: [&str; 20] = [
     "sum", "mean", "min", "max", "std", "var", "sem", "count", "first", "last", "median", "prod",
@@ -67743,6 +68217,13 @@ fn series_groupby_agg<'py>(
         return Err(PyErr::new::<SpecificationError, _>(
             "nested renamer is not supported",
         ));
+    }
+    if let Some((names, funcs)) = named_func_tuples(func)? {
+        let results = funcs
+            .iter()
+            .map(|func| series_groupby_agg(this, Some(func), args, kwargs))
+            .collect::<PyResult<Vec<_>>>()?;
+        return concat_keyed(results, names);
     }
     if func.is_instance_of::<PyList>() || func.is_instance_of::<PyTuple>() {
         let funcs: Vec<Bound<'py, PyAny>> = func.try_iter()?.collect::<PyResult<_>>()?;
@@ -74414,6 +74895,56 @@ fn join_on_level(
 /// included); left_index/right_index merges join on the index labels moved
 /// into a key column and restore them as the result index.
 /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.3)
+/// The name pandas' `Index.join` gives an index-on-index merge or join,
+/// which follows the path the join takes: against an empty side, the name
+/// of the side the result is (the left for left / outer when the right is
+/// empty, for left / inner when the left is); over increasing indexes with
+/// a unique one, equal indexes keep the left's (the right's for a right
+/// join), two unique ones a left / right join's kept side's, anything else
+/// the name both share; duplicates otherwise the left's; and two unique
+/// unsorted indexes a left / right join's kept side's, inner / outer the
+/// shared name. A left join kept the left's always, a right join the
+/// right's (br-frankenpandas-4lss6).
+fn index_join_name<'a>(left: &'a Index, right: &'a Index, how: &str) -> Option<&'a LabelName> {
+    let (left_name, right_name) = (left.name(), right.name());
+    let shared = || left_name.filter(|name| right_name == Some(*name));
+    if left.is_empty() || right.is_empty() {
+        let keeps_left = if right.is_empty() {
+            matches!(how, "left" | "outer")
+        } else {
+            matches!(how, "left" | "inner")
+        };
+        return if keeps_left { left_name } else { right_name };
+    }
+    let (left_unique, right_unique) = (left.is_unique(), right.is_unique());
+    let kept_side = || match how {
+        "left" => left_name,
+        "right" => right_name,
+        _ => shared(),
+    };
+    if left.is_monotonic_increasing()
+        && right.is_monotonic_increasing()
+        && (left_unique || right_unique)
+    {
+        if left.equals(right) {
+            return if how == "right" {
+                right_name
+            } else {
+                left_name
+            };
+        }
+        return if left_unique && right_unique {
+            kept_side()
+        } else {
+            shared()
+        };
+    }
+    if !left_unique || !right_unique {
+        return left_name;
+    }
+    kept_side()
+}
+
 fn merge_impl(
     left: &DataFrame,
     right: &DataFrame,
@@ -74714,17 +75245,9 @@ fn merge_impl(
             .map_err(frame_error_to_py)?;
         let labels = merged.index().labels().to_vec();
         let frame = merged.set_axis(labels, 0).map_err(frame_error_to_py)?;
-        // pandas' index name: a left join keeps the left index's, a right
-        // join the right's, inner / outer the name both share - never the
-        // internal key column's, which leaked (fvsao.31).
-        let name = match args.how {
-            "left" => left.index().name(),
-            "right" => right.index().name(),
-            _ => left
-                .index()
-                .name()
-                .filter(|name| right.index().name() == Some(*name)),
-        };
+        // pandas' index name (see [`index_join_name`]) - never the internal
+        // key column's, which leaked (fvsao.31).
+        let name = index_join_name(left.index(), right.index(), args.how);
         // pandas joins the two indexes, so labels that are a RangeIndex side's
         // own (a left join's left, an inner join's shorter range) stay one.
         let span = [left.index(), right.index()].into_iter().find_map(|side| {
@@ -84947,13 +85470,34 @@ fn resample_offset_origin(
 }
 
 /// `series` (datetime64) with `offset` applied `times` times to each value;
-/// NaT stays NaT.
+/// NaT stays NaT. A tick moves durations by its fixed length, as pandas'
+/// Timedelta of it (it raised; br-frankenpandas-b9lc7).
 fn series_apply_offset(
     py: Python<'_>,
     series: &Series,
     offset: &PyDateOffset,
     times: i64,
 ) -> PyResult<Series> {
+    if matches!(series.column().dtype(), DType::Timedelta64)
+        && let Ok(length) = offset.nanos()
+    {
+        let overflow = || PyErr::new::<pyo3::exceptions::PyOverflowError, _>("Timedelta overflow");
+        let shift = length.checked_mul(times).ok_or_else(overflow)?;
+        let values = series
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Timedelta64(nanos) if *nanos != Timedelta::NAT => nanos
+                    .checked_add(shift)
+                    .map(Scalar::Timedelta64)
+                    .ok_or_else(overflow),
+                _ => Ok(Scalar::Null(NullKind::NaT)),
+            })
+            .collect::<PyResult<Vec<Scalar>>>()?;
+        let column = Column::new(DType::Timedelta64, values).map_err(column_error_to_py)?;
+        return Series::new(series.name(), series.index().clone(), column)
+            .map_err(frame_error_to_py);
+    }
     if !matches!(series.column().dtype(), DType::Datetime64 { tz: None }) {
         return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
             "cannot add {} to a Series of dtype {}",
@@ -93542,8 +94086,15 @@ mod tests {
         assert!(idx.any());
         let dropped = idx.dropna(None).expect("dropna"); // ubs:ignore — test fixture
         assert_eq!(dropped.inner.len(), 2);
-        let deleted = idx.delete(0).expect("delete"); // ubs:ignore — test fixture
-        assert_eq!(deleted.inner.len(), 2);
+        Python::attach(|py| {
+            let at = |loc: &[i64]| idx.delete(&PyList::new(py, loc).expect("list")); // ubs:ignore — test fixture
+            let deleted = idx.delete(&0_i64.into_bound_py_any(py).expect("int")); // ubs:ignore — test fixture
+            assert_eq!(deleted.expect("delete").inner.len(), 2); // ubs:ignore — test fixture
+            // A list of positions, one from the end (b9lc7).
+            let kept = at(&[0, -1]).expect("delete list"); // ubs:ignore — test fixture
+            assert_eq!(kept.inner.labels(), &[IndexLabel::Int64(2)]);
+            assert!(at(&[3]).is_err());
+        });
         let repeated = idx.repeat(2, None).expect("repeat"); // ubs:ignore — test fixture
         assert_eq!(repeated.inner.len(), 6);
         let taken = idx.take(vec![1, 0], 0, true, None).expect("take"); // ubs:ignore — test fixture

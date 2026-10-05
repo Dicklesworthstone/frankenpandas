@@ -26669,6 +26669,56 @@ _DATETIME_FIX_CASES = {
 }
 
 
+# br-frankenpandas-4q2tt: apply(axis=1) returning a Series per row infers
+# each result column (pandas' infer_to_same_shape); it stayed object.
+_APPLY_ROWS_CASES = {
+    "int beside text": lambda m: m.DataFrame({"g": ["p", "q"], "x": [1, 2]}).apply(lambda r: m.Series({"s": r["x"] + 1, "t": r["g"]}), axis=1),
+    "float with NaN beside text": lambda m: m.DataFrame({"g": ["p", "q"], "x": [1.5, float("nan")]}).apply(lambda r: m.Series({"s": r["x"], "t": r["g"]}), axis=1),
+    "bool beside text": lambda m: m.DataFrame({"g": ["p", "q"], "x": [1, 2]}).apply(lambda r: m.Series({"b": r["x"] > 1, "t": r["g"]}), axis=1),
+    "all int (NEGATIVE)": lambda m: m.DataFrame({"x": [1, 2]}).apply(lambda r: m.Series({"a": r["x"], "b": r["x"] * 2}), axis=1),
+    "mixed column stays object (NEGATIVE)": lambda m: m.DataFrame({"x": [1, 2]}).apply(lambda r: m.Series({"a": r["x"] if r["x"] == 1 else "two"}), axis=1),
+}
+
+
+# br-frankenpandas-2ahoa: agg([(name, func), ...]) names each result,
+# groupby(dict) maps the index labels to groups, and a method name passes
+# agg's arguments on to it.
+def _agg_2ahoa_frame(m: Any) -> Any:
+    return m.DataFrame({"a": ["x", "y", "x", "y"], "w": [1, 2, 3, 4], "v": [1.5, 2.5, 3.5, 4.5]})
+
+
+_GROUPBY_AGG_CASES = {
+    "SeriesGroupBy tuples": lambda m: _agg_2ahoa_frame(m).groupby("a")["w"].agg([("lo", "min"), ("total", lambda s: s.sum())]),
+    "DataFrameGroupBy tuples": lambda m: _agg_2ahoa_frame(m).groupby("a").agg([("lo", "min"), ("hi", "max")]),
+    "dict over positions, one unmapped": lambda m: _agg_2ahoa_frame(m).groupby({0: "p", 1: "q", 2: "p"})["w"].sum(),
+    "dict over a named index": lambda m: _agg_2ahoa_frame(m).set_index("a").groupby({"x": "X", "y": "Y"})["w"].sum(),
+    "agg('mean', numeric_only=True)": lambda m: _agg_2ahoa_frame(m).assign(s=list("pqrs")).groupby("a").agg("mean", numeric_only=True),
+    "agg('sum', min_count=3)": lambda m: _agg_2ahoa_frame(m).groupby("a")["w"].agg("sum", min_count=3),
+    "plain list of names (NEGATIVE)": lambda m: _agg_2ahoa_frame(m).groupby("a")["w"].agg(["min", "max"]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_GROUPBY_AGG_CASES))
+def test_groupby_named_tuples_dict_keys_and_agg_arguments_like_pandas_2ahoa(case: str) -> None:
+    def shown(m: Any) -> Any:
+        result = _GROUPBY_AGG_CASES[case](m)
+        dtypes = [str(dtype) for dtype in result.dtypes] if hasattr(result, "columns") else str(result.dtype)
+        return (repr(result), dtypes)
+
+    assert shown(fpd) == shown(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_APPLY_ROWS_CASES))
+def test_apply_rows_returning_series_infers_columns_like_pandas_4q2tt(case: str) -> None:
+    def shown(m: Any) -> Any:
+        result = _APPLY_ROWS_CASES[case](m)
+        return (repr(result), [str(dtype) for dtype in result.dtypes])
+
+    assert shown(fpd) == shown(pd)
+
+
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 @pytest.mark.parametrize("case", list(_DATETIME_FIX_CASES))
 def test_datetime_parsing_assembly_and_zoned_arithmetic_like_pandas(case: str) -> None:
@@ -26726,5 +26776,168 @@ def test_anchored_period_frequencies_like_pandas_39h5n(case: str) -> None:
         except AssertionError as error:
             return ("AssertionError", str(error))
         return (repr(result), str(getattr(result, "dtype", "")))
+
+    assert shown(fpd) == shown(pd)
+
+
+# Timestamp ISO week and zone accessors, Index.delete by a list or from the
+# end, and the freq TimedeltaIndex arithmetic keeps (br-frankenpandas-b9lc7).
+def _daily_durations(m: Any) -> Any:
+    return m.timedelta_range("1D", periods=3, name="d")
+
+
+_B9LC7_CASES = {
+    "Timestamp.week / weekofyear": lambda m: (m.Timestamp("2024-03-10 01:30").week, m.Timestamp("2024-12-30").weekofyear),
+    "aware utcoffset / tzname / dst": lambda m: (lambda t: (t.utcoffset(), t.tzname(), t.dst()))(m.Timestamp("2024-07-01 12:00", tz="US/Eastern")),
+    "naive utcoffset / tzname / dst are None (NEGATIVE)": lambda m: (lambda t: (t.utcoffset(), t.tzname(), t.dst()))(m.Timestamp("2024-07-01")),
+    "Index.delete(list)": lambda m: m.Index([1, 2, 3], name="i").delete([0, 2]),
+    "Index.delete(-1)": lambda m: m.Index(["a", "b", "c"]).delete(-1),
+    "Index.delete(int) unchanged (NEGATIVE)": lambda m: m.Index([1, 2, 3]).delete(1),
+    "Index.delete out of bounds": lambda m: m.Index([1, 2, 3]).delete([0, 5]),
+    "DatetimeIndex.delete(list)": lambda m: m.date_range("2024-01-01", periods=4).delete([1, -1]),
+    "PeriodIndex.delete(list)": lambda m: m.period_range("2024-01", periods=4, freq="M").delete([0, 1]),
+    "TimedeltaIndex + Timedelta keeps freq": lambda m: _daily_durations(m) + m.Timedelta("1h"),
+    "Timedelta - TimedeltaIndex negates it": lambda m: m.Timedelta("5D") - _daily_durations(m),
+    "TimedeltaIndex + Hour offset": lambda m: _daily_durations(m) + m.offsets.Hour(2),
+    "TimedeltaIndex * 1.5": lambda m: _daily_durations(m) * 1.5,
+    "TimedeltaIndex / 7": lambda m: _daily_durations(m) / 7,
+    "TimedeltaIndex // 2": lambda m: _daily_durations(m) // 2,
+    "-TimedeltaIndex": lambda m: -_daily_durations(m),
+    "TimedeltaIndex + Timestamp": lambda m: _daily_durations(m) + m.Timestamp("2024-01-01"),
+    "abs drops freq (NEGATIVE)": lambda m: abs(_daily_durations(m)),
+    "+ NaT drops freq (NEGATIVE)": lambda m: _daily_durations(m) + m.NaT,
+    "* array drops freq (NEGATIVE)": lambda m: _daily_durations(m) * np.array([1, 2, 3]),
+    "* 0 drops freq (NEGATIVE)": lambda m: _daily_durations(m) * 0,
+    "/ 0 with a freq": lambda m: _daily_durations(m) / 0,
+    "ns freq * 1.5": lambda m: m.timedelta_range("1ns", periods=3, freq="ns") * 1.5,
+    "timedelta Series - Day offset": lambda m: m.Series(m.to_timedelta(["1D", None]), name="s") - m.offsets.Day(1),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_B9LC7_CASES))
+def test_timestamp_accessors_index_delete_and_timedelta_freq_like_pandas_b9lc7(case: str) -> None:
+    def shown(m: Any) -> Any:
+        try:
+            result = _B9LC7_CASES[case](m)
+        except (IndexError, ValueError, ZeroDivisionError) as error:
+            return (type(error).__name__, str(error))
+        return repr(result)
+
+    assert shown(fpd) == shown(pd)
+
+
+# Durations meeting aware instants keep the zone, an Index of a Series keeps
+# its durations' / aware instants' dtype, and a duration / NaN is NaT
+# (br-frankenpandas-wtu8e).
+def _tds(m: Any) -> Any:
+    return m.Series(m.to_timedelta(["1D", "2D", None]), name="d")
+
+
+_WTU8E_CASES = {
+    "durations + aware Timestamp": lambda m: _tds(m) + m.Timestamp("2024-01-01", tz="UTC"),
+    "aware Timestamp + durations": lambda m: m.Timestamp("2024-03-09 12:00", tz="US/Eastern") + _tds(m),
+    "aware Timestamp - durations": lambda m: m.Timestamp("2024-01-01", tz="US/Eastern") - _tds(m),
+    "durations + aware datetime": lambda m: _tds(m) + datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc),
+    "durations + naive Timestamp stays naive (NEGATIVE)": lambda m: _tds(m) + m.Timestamp("2024-01-01"),
+    "Index(all-NaT durations)": lambda m: m.Index(m.Series(m.to_timedelta([None, None]), name="x")),
+    "Index(empty durations)": lambda m: m.Index(m.Series([], dtype="timedelta64[ns]")),
+    "Index(aware instants)": lambda m: m.Index(m.Series(m.date_range("2024-01-01", periods=2, tz="US/Eastern"), name="z")),
+    "Index(all-NaT aware instants)": lambda m: m.Index(m.Series([None, None], dtype="datetime64[ns, UTC]")),
+    "TimedeltaIndex(Series) keeps the name": lambda m: m.TimedeltaIndex(_tds(m)),
+    "durations / NaN": lambda m: _tds(m) / np.nan,
+    "durations / 2.0 (NEGATIVE)": lambda m: _tds(m) / 2.0,
+    "TimedeltaIndex * NaN": lambda m: m.timedelta_range("1D", periods=2) * np.nan,
+    "TimedeltaIndex + aware Timestamp": lambda m: m.timedelta_range("1D", periods=2) + m.Timestamp("2024-01-01", tz="US/Eastern"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_WTU8E_CASES))
+def test_durations_with_aware_instants_and_typed_indexes_like_pandas_wtu8e(case: str) -> None:
+    def shown(m: Any) -> Any:
+        result = _WTU8E_CASES[case](m)
+        return (repr(result), str(result.dtype))
+
+    assert shown(fpd) == shown(pd)
+
+
+# DataFrame.join of a list on the index, and the index name an
+# index-on-index merge / join keeps (br-frankenpandas-4lss6).
+def _join_4lss6_frames(m: Any) -> dict:
+    return {
+        "a": m.DataFrame({"a": [1, 2, 3]}, index=m.Index(["p", "q", "r"], name="key")),
+        "b": m.DataFrame({"b": [10.0, 30.0, 40.0]}, index=m.Index(["p", "r", "s"], name="key")),
+        "c": m.DataFrame({"c": [7]}, index=m.Index(["q"], name="key")),
+        "dup": m.DataFrame({"d": [1, 2]}, index=["p", "p"]),
+        "keydup": m.DataFrame({"f": [1, 2]}, index=m.Index(["p", "p"], name="key")),
+        "other": m.DataFrame({"e": [1]}, index=m.Index(["p"], name="other")),
+        "unsorted": m.DataFrame({"u": [1, 2]}, index=m.Index(["r", "p"], name="other")),
+    }
+
+
+_JOIN_MANY_CASES = {
+    "list, how=left": lambda m, f: f["a"].join([f["b"], f["c"]]),
+    "list, how=inner": lambda m, f: f["a"].join([f["b"], f["c"]], how="inner"),
+    "list, how=outer": lambda m, f: f["a"].join([f["b"], f["c"]], how="outer"),
+    "list, how=right": lambda m, f: f["a"].join([f["b"], f["c"]], how="right"),
+    "list with duplicates merges": lambda m, f: f["a"].join([f["dup"], f["c"]]),
+    "list with a Series": lambda m, f: f["a"].join([m.Series([5], index=["r"], name="s")]),
+    "tuple": lambda m, f: f["a"].join((f["b"],), how="outer"),
+    "list on= refused": lambda m, f: f["a"].join([f["b"]], on="a"),
+    "list suffix refused": lambda m, f: f["a"].join([f["b"]], lsuffix="_x"),
+    "list overlapping columns": lambda m, f: f["a"].join([f["a"]]),
+    "one frame (NEGATIVE)": lambda m, f: f["a"].join(f["b"]),
+    "left join, other side has duplicates": lambda m, f: f["a"].join(f["dup"]),
+    "right join, other side has duplicates": lambda m, f: f["dup"].join(f["a"], how="right"),
+    "inner join, both duplicated": lambda m, f: f["keydup"].join(f["dup"], how="inner"),
+    "left join, other name, unique sorted": lambda m, f: f["a"].join(f["other"]),
+    "inner join, unsorted unique": lambda m, f: m.merge(f["a"], f["unsorted"], left_index=True, right_index=True),
+    "outer join, unsorted unique": lambda m, f: m.merge(f["a"], f["unsorted"], how="outer", left_index=True, right_index=True),
+    "left join, empty right": lambda m, f: f["a"].join(f["other"].iloc[:0]),
+    "inner join, empty left": lambda m, f: f["a"].iloc[:0].join(f["other"], how="inner"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_JOIN_MANY_CASES))
+def test_join_of_a_list_and_index_join_names_like_pandas_4lss6(case: str) -> None:
+    def shown(m: Any) -> Any:
+        try:
+            result = _JOIN_MANY_CASES[case](m, _join_4lss6_frames(m))
+        except ValueError as error:
+            return ("ValueError", str(error))
+        return (repr(result), [str(dtype) for dtype in result.dtypes], result.index.name)
+
+    assert shown(fpd) == shown(pd)
+
+
+# reindex with an Index / Series target names the axis after it; a list or
+# an array keeps the axis' own name (br-frankenpandas-hnu53).
+def _reindex_hnu53_frame(m: Any) -> Any:
+    return m.DataFrame({"x": [1, 2]}, index=m.Index(["p", "q"], name="n"))
+
+
+_REINDEX_NAME_CASES = {
+    "nameless Index clears the name": lambda m: _reindex_hnu53_frame(m).reindex(m.Index(["q", "p"])),
+    "named Index": lambda m: _reindex_hnu53_frame(m).reindex(m.Index(["q", "p"], name="t")),
+    "list keeps the name (NEGATIVE)": lambda m: _reindex_hnu53_frame(m).reindex(["q", "p"]),
+    "ndarray keeps the name (NEGATIVE)": lambda m: _reindex_hnu53_frame(m).reindex(np.array(["q", "p"])),
+    "columns= named Index": lambda m: _reindex_hnu53_frame(m).reindex(columns=m.Index(["x", "y"], name="c")),
+    "Series target": lambda m: _reindex_hnu53_frame(m).reindex(m.Series(["q", "p"], name="sname")),
+    "reindex_like": lambda m: _reindex_hnu53_frame(m).reindex_like(m.DataFrame({"x": [0]}, index=m.Index(["q"], name="z"))),
+    "Series.reindex named Index": lambda m: _reindex_hnu53_frame(m)["x"].reindex(m.Index(["q"], name="t")),
+    "Series.reindex with a fill": lambda m: _reindex_hnu53_frame(m)["x"].reindex(m.Index(["q", "r"], name="t"), fill_value=0),
+    "RangeIndex target": lambda m: m.Series([1, 2]).reindex(m.RangeIndex(3, name="r")),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_REINDEX_NAME_CASES))
+def test_reindex_takes_the_target_name_like_pandas_hnu53(case: str) -> None:
+    def shown(m: Any) -> Any:
+        result = _REINDEX_NAME_CASES[case](m)
+        columns = getattr(result, "columns", None)
+        return (repr(result), result.index.name, None if columns is None else columns.name)
 
     assert shown(fpd) == shown(pd)

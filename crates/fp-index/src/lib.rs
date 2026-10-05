@@ -8086,6 +8086,100 @@ pub fn scale_freq(freqstr: &str, factor: i64) -> Option<String> {
     Some(freq_with_count(n.checked_mul(factor)?, rule))
 }
 
+/// pandas' tick units, coarsest first: the rule code, its length in
+/// nanoseconds and the resolution a tick's Timedelta holds it at (seconds
+/// for a day down to a second).
+const TICK_UNITS: [(&str, i64, i64); 7] = [
+    ("D", 86_400_000_000_000, 1_000_000_000),
+    ("h", 3_600_000_000_000, 1_000_000_000),
+    ("min", 60_000_000_000, 1_000_000_000),
+    ("s", 1_000_000_000, 1_000_000_000),
+    ("ms", 1_000_000, 1_000_000),
+    ("us", 1_000, 1_000),
+    ("ns", 1, 1),
+];
+
+/// A tick freqstr's count and unit (its place in [`TICK_UNITS`]).
+fn tick_count(freqstr: &str) -> Option<(i64, usize)> {
+    let (n, rule) = split_freq_count(freqstr)?;
+    let unit = TICK_UNITS.iter().position(|(code, _, _)| *code == rule)?;
+    Some((n, unit))
+}
+
+/// The tick freqstr of a duration, pandas' `delta_to_tick`: whole days in
+/// days, other whole seconds in hours, minutes or seconds, else in milli-,
+/// micro- or nanoseconds ('0D' for none).
+fn duration_tick(nanos: i64) -> String {
+    const SECOND: i64 = 1_000_000_000;
+    let (n, rule) = if nanos % SECOND == 0 {
+        let seconds = nanos / SECOND;
+        if seconds % 86_400 == 0 {
+            (seconds / 86_400, "D")
+        } else if seconds % 3_600 == 0 {
+            (seconds / 3_600, "h")
+        } else if seconds % 60 == 0 {
+            (seconds / 60, "min")
+        } else {
+            (seconds, "s")
+        }
+    } else if nanos % 1_000_000 == 0 {
+        (nanos / 1_000_000, "ms")
+    } else if nanos % 1_000 == 0 {
+        (nanos / 1_000, "us")
+    } else {
+        (nanos, "ns")
+    };
+    freq_with_count(n, rule)
+}
+
+/// The freq of a TimedeltaIndex multiplied by a float, pandas' `Tick *
+/// factor`: the same unit when the product is whole (truncated), else the
+/// next finer unit's count times it ('D' x 1.5 -> '36h'). None for a freq
+/// that is not a tick or a product that is zero or not finite (pandas
+/// drops that freq); Err past nanoseconds, pandas' ValueError.
+pub fn multiply_tick_freq(freqstr: &str, factor: f64) -> Result<Option<String>, String> {
+    let Some((mut n, mut unit)) = tick_count(freqstr) else {
+        return Ok(None);
+    };
+    loop {
+        let product = factor * n as f64;
+        if !product.is_finite() {
+            return Ok(None);
+        }
+        // pandas: np.isclose(n % 1, 0), then int(n).
+        if product.rem_euclid(1.0) <= 1e-8 {
+            let count = product.trunc() as i64;
+            return Ok((count != 0).then(|| freq_with_count(count, TICK_UNITS[unit].0)));
+        }
+        let Some(&(_, finer, _)) = TICK_UNITS.get(unit + 1) else {
+            return Err("Could not convert to integer offset at any resolution".to_owned());
+        };
+        n = n
+            .checked_mul(TICK_UNITS[unit].1 / finer)
+            .ok_or_else(|| "Could not convert to integer offset at any resolution".to_owned())?;
+        unit += 1;
+    }
+}
+
+/// The freq of a TimedeltaIndex divided by a number, pandas' `Tick /
+/// divisor`: the tick's Timedelta at its own resolution divided and
+/// truncated there, as a tick again ('D' / 7 -> '12342s', 'D' / 2 ->
+/// '12h'). None for a freq that is not a tick, a quotient that is not
+/// finite, or one that truncates a nonzero freq to nothing (pandas drops
+/// that freq).
+#[must_use]
+pub fn divide_tick_freq(freqstr: &str, divisor: f64) -> Option<String> {
+    let (n, unit) = tick_count(freqstr)?;
+    let (_, length, resolution) = TICK_UNITS[unit];
+    let held = n.checked_mul(length / resolution)?;
+    let quotient = held as f64 / divisor;
+    if !quotient.is_finite() {
+        return None;
+    }
+    let nanos = (quotient.trunc() as i64).checked_mul(resolution)?;
+    (nanos != 0 || n == 0).then(|| duration_tick(nanos))
+}
+
 /// The freq a `take` of `positions` keeps: pandas reads positions in one
 /// constant nonzero step as a slice (`maybe_indices_to_slice`), so the freq
 /// scales by the step ([0, 2] of 'h' is '2h'); any other take has none.
@@ -38437,6 +38531,31 @@ mod tests {
         assert_eq!(canonical("D1"), None);
         assert_eq!(super::scale_freq("D", 2).as_deref(), Some("2D"));
         assert_eq!(super::scale_freq("D", -1).as_deref(), Some("-1D"));
+        // pandas' Tick * float / Tick / number (b9lc7).
+        let times = |freq: &str, factor: f64| super::multiply_tick_freq(freq, factor);
+        assert_eq!(times("D", 1.5), Ok(Some("36h".to_owned())));
+        assert_eq!(times("D", 0.1), Ok(Some("144min".to_owned())));
+        assert_eq!(times("s", 0.0015), Ok(Some("1500us".to_owned())));
+        assert_eq!(times("D", -0.5), Ok(Some("-12h".to_owned())));
+        assert_eq!(times("3h", 2.0), Ok(Some("6h".to_owned())));
+        assert_eq!(times("D", 0.0), Ok(None));
+        assert_eq!(times("D", f64::NAN), Ok(None));
+        assert_eq!(times("ME", 1.5), Ok(None));
+        assert!(times("ns", 1.5).is_err());
+        let over = |freq: &str, divisor: f64| super::divide_tick_freq(freq, divisor);
+        assert_eq!(over("D", 2.0).as_deref(), Some("12h"));
+        assert_eq!(over("D", 7.0).as_deref(), Some("12342s"));
+        assert_eq!(over("-1D", 7.0).as_deref(), Some("-12342s"));
+        assert_eq!(over("h", 7.0).as_deref(), Some("514s"));
+        assert_eq!(over("D", 0.5).as_deref(), Some("2D"));
+        assert_eq!(over("D", 2.5).as_deref(), Some("576min"));
+        assert_eq!(over("5us", 2.0).as_deref(), Some("2us"));
+        assert_eq!(over("3h", -2.0).as_deref(), Some("-90min"));
+        // A second / 3 truncates to nothing at second resolution.
+        assert_eq!(over("s", 3.0), None);
+        assert_eq!(over("ns", 2.0), None);
+        assert_eq!(over("D", 0.0), None);
+        assert_eq!(over("W-SUN", 2.0), None);
 
         let days = |values: &[&str]| {
             let nanos: Vec<i64> = values
