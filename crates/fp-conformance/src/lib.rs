@@ -9993,6 +9993,7 @@ fn run_fixture_operation(
                             mixed_tz_as_object: false,
                             errors: fp_frame::DatetimeErrors::Coerce,
                             dayfirst: false,
+                            yearfirst: false,
                         },
                     )
                     .map_err(|err| err.to_string())
@@ -19576,6 +19577,7 @@ fn execute_and_compare_differential(
                             mixed_tz_as_object: false,
                             errors: fp_frame::DatetimeErrors::Coerce,
                             dayfirst: false,
+                            yearfirst: false,
                         },
                     )
                     .map_err(|err| err.to_string())

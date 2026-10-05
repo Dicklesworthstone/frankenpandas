@@ -24338,3 +24338,260 @@ _88RWI_DIVERGES = {
 def test_resample_leaves_nat_rows_out_of_every_bin_88rwi(case: str) -> None:
     run = _88RWI_CASES[case]
     assert _vol90_outcome(lambda: run(fpd)) == _vol90_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.37 (part): an
+# expanding sum over no observations yet (min_periods=0 before the first
+# value) is pandas' 0.0; it was the fold's -0.0 seed. Compared by the sign
+# of each value too, as -0.0 == 0.0. NEGATIVE: -0.0 values still sum to
+# -0.0, as pandas'.
+_FVSAO37_CASES = {
+    "float leading NaN": lambda m: m.Series([np.nan, 1.0]).expanding(min_periods=0).sum(),
+    "float two leading NaN": lambda m: m.Series([np.nan, np.nan, 2.5]).expanding(min_periods=0).sum(),
+    "int with a missing value": lambda m: m.Series([None, 0, 3]).expanding(min_periods=0).sum(),
+    "mean stays NaN": lambda m: m.Series([np.nan, 1.0]).expanding(min_periods=0).mean(),
+    "frame leading NaN": lambda m: m.DataFrame({"a": [np.nan, 1.0], "b": [2.0, np.nan]}).expanding(min_periods=0).sum(),
+    "negative zero alone": lambda m: m.Series([np.nan, -0.0]).expanding(min_periods=0).sum(),
+    "rolling leading NaN": lambda m: m.Series([np.nan, 1.0]).rolling(2, min_periods=0).sum(),
+}
+
+
+def _fvsao37_outcome(run: Any) -> Any:
+    result = run()
+    cells = result.values.ravel().tolist()
+    return (
+        str(getattr(result, "dtypes", getattr(result, "dtype", None))),
+        [None if math.isnan(cell) else (cell, math.copysign(1.0, cell)) for cell in cells],
+    )
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FVSAO37_CASES))
+def test_expanding_sum_of_nothing_is_positive_zero_fvsao37(case: str) -> None:
+    run = _FVSAO37_CASES[case]
+    assert _fvsao37_outcome(lambda: run(fpd)) == _fvsao37_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.26 (part):
+# Series.argsort takes pandas' (axis=0, kind='quicksort', order=None,
+# stable=None) - axis -1 too, so np.argsort(s) is a Series (it took a
+# non-pandas ascending=, and numpy's call fell back to an ndarray) - and
+# warns pandas' FutureWarning when a value is missing (it set -1 silently).
+_FVSAO26_CASES = {
+    "np.argsort": lambda m: np.argsort(m.Series([3, 1, 2])),
+    "axis -1": lambda m: m.Series([3, 1, 2]).argsort(axis=-1),
+    "axis index": lambda m: m.Series([3, 1, 2]).argsort(axis="index"),
+    "axis 1": lambda m: m.Series([3, 1, 2]).argsort(axis=1),
+    "kind stable": lambda m: m.Series([2, 1, 2, 1]).argsort(kind="stable"),
+    "kind foo": lambda m: m.Series([3, 1, 2]).argsort(kind="foo"),
+    "order and stable ignored": lambda m: m.Series([3, 1, 2]).argsort(order="x", stable=True),
+    "missing value": lambda m: m.Series([3.0, np.nan, 1.0]).argsort(),
+    "np.argsort missing": lambda m: np.argsort(m.Series([3.0, np.nan, 1.0])),
+    # NEGATIVE: no missing value, no warning.
+    "plain": lambda m: m.Series([3.0, 2.0, 1.0]).argsort(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FVSAO26_CASES))
+def test_series_argsort_takes_pandas_signature_fvsao26(case: str) -> None:
+    run = _FVSAO26_CASES[case]
+    assert _f1jm5_outcome(lambda: run(fpd)) == _f1jm5_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.46 (item 2): a date
+# no format names - a two-digit year - is read by pandas' dateutil fallback,
+# under dayfirst / yearfirst, with pandas' "Could not infer format"
+# UserWarning when another value follows (it raised DateParseError, and
+# yearfirst was refused). Both arms read the same clock for the century.
+# NEGATIVE: a four-digit year keeps its guessed format; junk still raises.
+_FVSAO46_DATES = {
+    "two digit": (["01/02/24", "03/04/24"], {}),
+    "two digit dayfirst": (["01/02/24", "13/04/24"], {"dayfirst": True}),
+    "day past 12": (["13/04/24"], {}),
+    "two digit dash": (["24-01-02"], {}),
+    "dash yearfirst": (["24-01-02"], {"yearfirst": True}),
+    "dash both": (["24-01-02"], {"dayfirst": True, "yearfirst": True}),
+    "ambiguous": (["01-02-03"], {}),
+    "ambiguous dayfirst": (["01-02-03"], {"dayfirst": True}),
+    "ambiguous yearfirst": (["01-02-03"], {"yearfirst": True}),
+    "ambiguous both": (["01-02-03"], {"dayfirst": True, "yearfirst": True}),
+    "short yearfirst": (["1/2/24"], {"yearfirst": True}),
+    "dots": (["01.02.24"], {}),
+    "year past 31": (["99-01-02"], {}),
+    "century pivot": (["01/02/76", "01/02/69", "01/02/68"], {}),
+    "text month": (["5 Jan 24"], {}),
+    "with a clock": (["01/02/24 10:30", "01/02/24 10:30 PM"], {}),
+    "a missing value": (["01/02/24", None, "03/04/24"], {}),
+    "coerce junk": (["01/02/24", "hello"], {"errors": "coerce"}),
+    # NEGATIVE
+    "four digit year": (["01/02/2024", "03/04/2024"], {}),
+    "junk raises": (["hello"], {}),
+    "yearfirst four digit": (["01/02/2024"], {"yearfirst": True}),
+}
+_FVSAO46_CASES = {
+    name: (lambda values, kw: lambda m: m.to_datetime(m.Series(values), **kw))(values, kw)
+    for name, (values, kw) in _FVSAO46_DATES.items()
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FVSAO46_CASES))
+def test_to_datetime_reads_two_digit_years_like_dateutil_fvsao46(case: str) -> None:
+    run = _FVSAO46_CASES[case]
+    assert _f1jm5_outcome(lambda: run(fpd)) == _f1jm5_outcome(lambda: run(pd)), case
+
+
+# fvsao.46's items added from fvsao.47, each landed by an earlier bead; pinned
+# here against live pandas as the bead's closing evidence: pivot_table /
+# crosstab with dropna=False over missing keys and values, crosstab
+# normalize with margins and two arrays on an axis, merge_asof on the
+# indexes, cut / qcut precision, groupby sample's rows.
+def _fvsao46_keys(m: Any) -> Any:
+    return m.DataFrame({"r": ["a", "a", None, "b"], "c": ["x", None, "y", "y"], "v": [1.0, 2.0, 3.0, np.nan]})
+
+
+_FVSAO46_MORE_CASES = {
+    "pivot dropna False": lambda m: _fvsao46_keys(m).pivot_table(
+        index="r", columns="c", values="v", aggfunc="sum", dropna=False
+    ),
+    "crosstab dropna False": lambda m: m.crosstab(_fvsao46_keys(m)["r"], _fvsao46_keys(m)["c"], dropna=False),
+    "crosstab normalize margins": lambda m: m.crosstab(
+        m.Series(["a", "a", "b"]), m.Series(["x", "y", "y"]), normalize=True, margins=True
+    ),
+    "crosstab two arrays": lambda m: m.crosstab(
+        [m.Series(["a", "a", "b"]), m.Series([1, 2, 1])], m.Series(["x", "y", "y"])
+    ),
+    "merge_asof on indexes": lambda m: m.merge_asof(
+        m.DataFrame({"a": [1, 5]}, index=[1, 5]),
+        m.DataFrame({"b": [10, 20]}, index=[2, 4]),
+        left_index=True,
+        right_index=True,
+    ),
+    "cut precision": lambda m: m.cut(m.Series([0.123456, 0.5, 0.987654]), 2, precision=2),
+    "qcut precision": lambda m: m.qcut(m.Series([0.123456, 0.5, 0.987654, 0.3]), 2, precision=1),
+    "groupby sample": lambda m: m.DataFrame({"k": ["a", "a", "b", "b"], "v": [1, 2, 3, 4]})
+    .groupby("k")
+    .sample(n=1, random_state=0),
+}
+
+
+def _fvsao46_shown(run: Any) -> Any:
+    result = run()
+    dtypes = [str(t) for t in result.dtypes] if hasattr(result, "columns") else [str(result.dtype)]
+    return (repr(result), dtypes)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FVSAO46_MORE_CASES))
+def test_fvsao46_added_items_like_pandas(case: str) -> None:
+    run = _FVSAO46_MORE_CASES[case]
+    assert _fvsao46_shown(lambda: run(fpd)) == _fvsao46_shown(lambda: run(pd)), case
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_cut_refuses_datetime_values_1qj7z() -> None:
+    # pandas bins datetime / timedelta values into interval[datetime64[ns]]
+    # categories, which fp's Interval cannot hold yet (br-frankenpandas-1qj7z):
+    # refused - every value came back NaN, silently. A refusal, not parity.
+    dates = fpd.Series(fpd.to_datetime(["2024-01-01", "2024-01-05", "2024-01-10"]))
+    spans = fpd.Series(fpd.to_timedelta(["1h", "5h", "10h"]))
+    for binning in (lambda x: fpd.cut(x, 2), lambda x: fpd.qcut(x, 2)):
+        for values in (dates, spans):
+            with pytest.raises(NotImplementedError, match="datetime64 / timedelta64"):
+                binning(values)
+    # NEGATIVE: numbers still bin as pandas bins them.
+    assert repr(fpd.cut(fpd.Series([1.0, 5.0, 10.0]), 2)) == repr(pd.cut(pd.Series([1.0, 5.0, 10.0]), 2))
+
+
+# Each frame drove one fp matrix path to an asymmetric pearson matrix before
+# br-frankenpandas-su6b9: complete columns (the Gram kernel), one NaN pattern
+# shared by every column, and NaN skipped per pair.
+_SU6B9_FRAMES = {
+    "complete": {
+        "x": [1.27, -11.87, -5.79, -1.96, 8.99, 11.45],
+        "y": [1.03, 2.62, 6.94, -0.98, 3.61, 4.71],
+        "z": [0.845, 0.945, 0.904, 0.57, 0.145, 0.192],
+    },
+    "shared NaN rows": {
+        "x": [2.99, _NAN, -8.91, -4.55, -9.92, 0.6, 13.4, -4.92],
+        "y": [3.14, _NAN, 6.07, 5.32, 2.21, 4.91, 7.09, 0.97],
+        "z": [0.793, _NAN, 0.989, 0.215, 0.16, 0.613, 0.044, 0.036],
+    },
+    "NaN per pair": {
+        "x": [_NAN, -25.17, -5.39, -0.49, 1.13, -15.3, -4.78],
+        "y": [2.06, 2.57, _NAN, 2.58, 4.9, 7.65, 3.25],
+        "z": [0.268, 0.88, 0.51, 0.847, 0.64, 0.742, 0.091],
+    },
+    "everyday": {
+        "units": [10, 3, 7, _NAN, 5, 2, 8, 1],
+        "price": [2.5, 10.0, 2.5, 7.25, 10.0, 7.25, 2.5, 10.0],
+    },
+    # Pearson was all NaN: an absolute f64::EPSILON floor on the denominator.
+    "values of order 1e-9": {
+        "a": [1e-9, 2e-9, 4e-9, 3e-9, 6e-9, 5e-9],
+        "b": [2e-9, 1e-9, 5e-9, 4e-9, 4e-9, 7e-9],
+    },
+    # Pearson was NaN: x's first value, its shift, is outside the pair's rows.
+    "a pair's own rows": {"x": [1e9, 1.0, 2.0, 3.0, 5.0], "y": [_NAN, 1.0, 2.0, 3.0, 4.0]},
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("stat", ["pearson", "spearman", "kendall", "cov"])
+@pytest.mark.parametrize("case", list(_SU6B9_FRAMES))
+def test_corr_and_cov_matrices_are_symmetric_like_pandas_su6b9(case: str, stat: str) -> None:
+    # pandas' nancorr writes one value to result[i, j] and result[j, i]; fp
+    # finalized (j, i) separately, an ULP away (br-frankenpandas-su6b9).
+    def matrix(m: Any) -> list:
+        frame = m.DataFrame(_SU6B9_FRAMES[case])
+        out = frame.cov() if stat == "cov" else frame.corr(method=stat)
+        return [out[c].tolist() for c in out.columns]
+
+    got, want = matrix(fpd), matrix(pd)
+    assert want == [list(row) for row in zip(*want)]
+    # NEGATIVE: the pre-change wheel's matrix differs from its transpose.
+    assert got == [list(row) for row in zip(*got)], got
+    assert np.allclose(got, want, rtol=1e-12, atol=0, equal_nan=True), (got, want)
+    if stat != "cov":
+        assert [row[i] for i, row in enumerate(got)] == [row[i] for i, row in enumerate(want)]
+
+
+_SU6B9_A = [1e-9, 2e-9, 4e-9, 3e-9, 6e-9, 5e-9]
+_SU6B9_B = [2e-9, 1e-9, 5e-9, 4e-9, 4e-9, 7e-9]
+_SU6B9_GROUPED = {"k": [1, 1, 1, 2, 2, 2], "x": _SU6B9_A, "y": _SU6B9_B}
+_SU6B9_SURFACES = {
+    "Series.corr": lambda m: m.Series(_SU6B9_A).corr(m.Series(_SU6B9_B)),
+    "Series.corr, unaligned": lambda m: m.Series(_SU6B9_A, index=list("abcdef")).corr(
+        m.Series(_SU6B9_B, index=list("fedcba"))
+    ),
+    "Series.autocorr": lambda m: m.Series(_SU6B9_A).autocorr(),
+    "DataFrame.corrwith": lambda m: m.DataFrame({"x": _SU6B9_A}).corrwith(m.DataFrame({"x": _SU6B9_B})),
+    "DataFrame.corr(min_periods)": lambda m: m.DataFrame({"x": _SU6B9_A, "y": _SU6B9_B}).corr(min_periods=3),
+    "DataFrameGroupBy.corr": lambda m: m.DataFrame(_SU6B9_GROUPED).groupby("k").corr(),
+    "SeriesGroupBy.corr": lambda m: m.DataFrame(_SU6B9_GROUPED).groupby("k")["x"].corr(m.Series(_SU6B9_B)),
+    # NEGATIVE: a constant variable - round-off of a constant included - is
+    # still NaN, as pandas'.
+    "constant Series.corr": lambda m: m.Series([0.1] * 5).corr(m.Series([1.0, 2.0, 4.0, 3.0, 5.0])),
+    "constant over the pair": lambda m: m.DataFrame(
+        {"x": [0.1, 0.1, 0.1, 7.0, 0.1], "y": [1.0, 2.0, 4.0, _NAN, 5.0]}
+    ).corr(),
+    "constant thirds": lambda m: m.DataFrame({"x": [1 / 3] * 7, "y": list(range(7))}).corr(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_SU6B9_SURFACES))
+def test_correlation_of_values_of_order_1e_9_like_pandas_su6b9(case: str) -> None:
+    # Every Pearson surface was NaN for variables whose standard deviations
+    # multiply below f64::EPSILON (br-frankenpandas-su6b9).
+    def values(m: Any) -> list:
+        out = _SU6B9_SURFACES[case](m)
+        if hasattr(out, "columns"):
+            return [float(v) for c in out.columns for v in out[c].tolist()]
+        if hasattr(out, "index"):
+            return [float(v) for v in out.tolist()]
+        return [float(out)]
+
+    got, want = values(fpd), values(pd)
+    assert np.allclose(got, want, rtol=1e-12, atol=0, equal_nan=True), (got, want)

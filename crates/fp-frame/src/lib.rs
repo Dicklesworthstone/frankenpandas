@@ -30181,8 +30181,7 @@ impl Series {
         // x/y pair Vecs == `data[0..n]` / `data[lag..len]`. Two linear passes over
         // the raw slice (means, then centered cross/var sums) with NO `values()`
         // Vec<Scalar> materialization and NO pair Vecs. Bit-identical to the Scalar
-        // loop: same values in the same order, same `cov/sqrt(var_x*var_y)` with the
-        // identical `< f64::EPSILON => NaN` guard.
+        // loop: same values in the same order, the same `pearson_ratio`.
         if let Some(data) = self.column.as_f64_slice() {
             if data.len() <= lag {
                 return Ok(f64::NAN);
@@ -30210,12 +30209,11 @@ impl Series {
                 var_x += dx * dx;
                 var_y += dy * dy;
             }
-            let denom = (var_x * var_y).sqrt();
-            return if denom < f64::EPSILON {
-                Ok(f64::NAN)
-            } else {
-                Ok(cov / denom)
-            };
+            return Ok(pearson_ratio(
+                cov,
+                centered_sum_of_squares(var_x, n_f, mean_x),
+                centered_sum_of_squares(var_y, n_f, mean_y),
+            ));
         }
 
         // Typed all-valid Int64 fast path (sister to the Float64 arm above): an
@@ -30224,8 +30222,7 @@ impl Series {
         // `.values()` Vec<Scalar> materialization and no x/y pair Vecs. Bit-
         // identical to the generic path below on an all-valid Int64 column: nothing
         // is skipped (no missing), `to_f64(Int64(v)) == v as f64`, the sums fold in
-        // the same order, and the `cov/sqrt(var_x*var_y)` with the identical
-        // `< f64::EPSILON => NaN` guard is unchanged. autocorr always returns f64.
+        // the same order, and the same `pearson_ratio`. autocorr always returns f64.
         if let Some(data) = self.column.as_i64_slice() {
             if data.len() <= lag {
                 return Ok(f64::NAN);
@@ -30253,12 +30250,11 @@ impl Series {
                 var_x += dx * dx;
                 var_y += dy * dy;
             }
-            let denom = (var_x * var_y).sqrt();
-            return if denom < f64::EPSILON {
-                Ok(f64::NAN)
-            } else {
-                Ok(cov / denom)
-            };
+            return Ok(pearson_ratio(
+                cov,
+                centered_sum_of_squares(var_x, n_f, mean_x),
+                centered_sum_of_squares(var_y, n_f, mean_y),
+            ));
         }
 
         let vals = self.column.values();
@@ -30304,12 +30300,11 @@ impl Series {
             var_y += dy * dy;
         }
 
-        let denom = (var_x * var_y).sqrt();
-        if denom < f64::EPSILON {
-            Ok(f64::NAN)
-        } else {
-            Ok(cov / denom)
-        }
+        Ok(pearson_ratio(
+            cov,
+            centered_sum_of_squares(var_x, n_f, mean_x),
+            centered_sum_of_squares(var_y, n_f, mean_y),
+        ))
     }
 
     /// Compute the dot product with another Series.
@@ -30530,12 +30525,7 @@ impl Series {
     /// Compute the Pearson correlation with another Series.
     pub fn corr(&self, other: &Self) -> Result<f64, FrameError> {
         let (cov, var_x, var_y, _) = self.cov_components(other)?;
-        let denom = (var_x * var_y).sqrt();
-        if denom < f64::EPSILON {
-            Ok(f64::NAN)
-        } else {
-            Ok(cov / denom)
-        }
+        Ok(pearson_ratio(cov, var_x, var_y))
     }
 
     /// Compute the sample covariance with another Series.
@@ -30658,7 +30648,8 @@ impl Series {
     /// The pair selection + iteration order are identical to the prior one-pass
     /// loops (same typed identical-unique-index gate as
     /// [`Self::cov_centered_cross_sum`], same Scalar fallback) — only the
-    /// arithmetic moves one-pass -> two-pass.
+    /// arithmetic moves one-pass -> two-pass. A variance is exactly 0.0 when
+    /// its sum of squares is round-off of a constant (`centered_sum_of_squares`).
     fn cov_components(&self, other: &Self) -> Result<(f64, f64, f64, usize), FrameError> {
         // Typed fast path: identical-unique-index + both-Float64 slices, two
         // linear passes (means, then centered sums) with no pair-Vec.
@@ -30699,7 +30690,12 @@ impl Series {
                 }
             }
             let denom = n - 1.0;
-            return Ok((cross / denom, ss_x / denom, ss_y / denom, count));
+            return Ok((
+                cross / denom,
+                centered_sum_of_squares(ss_x, n, mean_x) / denom,
+                centered_sum_of_squares(ss_y, n, mean_y) / denom,
+                count,
+            ));
         }
 
         // perf (br-frankenpandas-3rrcz): typed both-Int64 two-pass — identical unique
@@ -30735,7 +30731,12 @@ impl Series {
                 ss_y += dy * dy;
             }
             let denom = n - 1.0;
-            return Ok((cross / denom, ss_x / denom, ss_y / denom, count));
+            return Ok((
+                cross / denom,
+                centered_sum_of_squares(ss_x, n, mean_x) / denom,
+                centered_sum_of_squares(ss_y, n, mean_y) / denom,
+                count,
+            ));
         }
 
         // perf: typed MIXED all-valid two-pass — the both-Float64 (nullable-aware) and
@@ -30791,7 +30792,12 @@ impl Series {
                     ss_y += dy * dy;
                 }
                 let denom = n - 1.0;
-                return Ok((cross / denom, ss_x / denom, ss_y / denom, count));
+                return Ok((
+                    cross / denom,
+                    centered_sum_of_squares(ss_x, n, mean_x) / denom,
+                    centered_sum_of_squares(ss_y, n, mean_y) / denom,
+                    count,
+                ));
             }
         }
 
@@ -30821,7 +30827,12 @@ impl Series {
             ss_y += dy * dy;
         }
         let denom = n - 1.0;
-        Ok((cross / denom, ss_x / denom, ss_y / denom, count))
+        Ok((
+            cross / denom,
+            centered_sum_of_squares(ss_x, n, mean_x) / denom,
+            centered_sum_of_squares(ss_y, n, mean_y) / denom,
+            count,
+        ))
     }
 
     /// The `(self, other)` value pairs pandas' `corr` reads: the two aligned
@@ -31445,12 +31456,11 @@ impl Series {
             var_y += dy * dy;
         }
 
-        let denom = (var_x * var_y).sqrt();
-        if denom < f64::EPSILON {
-            Ok(f64::NAN)
-        } else {
-            Ok(cov / denom)
-        }
+        Ok(pearson_ratio(
+            cov,
+            centered_sum_of_squares(var_x, n, mean_x),
+            centered_sum_of_squares(var_y, n, mean_y),
+        ))
     }
 
     /// Group the Series by another Series of the same length.
@@ -34664,7 +34674,9 @@ impl Expanding<'_> {
                         acc / count as f64
                     };
                 } else {
-                    out[i] = acc;
+                    // pandas' sum of no observations is 0.0, not the -0.0
+                    // seed (fvsao.37).
+                    out[i] = if count == 0 { 0.0 } else { acc };
                 }
             }
             let index = self.series.index().clone();
@@ -34694,7 +34706,9 @@ impl Expanding<'_> {
                     out.push(Scalar::Float64(acc / count as f64));
                 }
             } else {
-                out.push(Scalar::Float64(acc));
+                // pandas' sum of no observations is 0.0, not the -0.0 seed
+                // (fvsao.37).
+                out.push(Scalar::Float64(if count == 0 { 0.0 } else { acc }));
             }
         }
         let index = self.series.index().clone();
@@ -62205,6 +62219,9 @@ pub struct ToDatetimeOptions<'a> {
     /// pandas' `dayfirst=`: a numeric date's two short slots read day then
     /// month (see [`guess_day_month_format`]).
     pub dayfirst: bool,
+    /// pandas' `yearfirst=`: dateutil reads an ambiguous all-numeric date
+    /// year first (see [`dateutil_date`]).
+    pub yearfirst: bool,
 }
 
 /// pandas' `to_datetime(errors=)`.
@@ -62225,6 +62242,7 @@ impl Default for ToDatetimeOptions<'_> {
             mixed_tz_as_object: false,
             errors: DatetimeErrors::Coerce,
             dayfirst: false,
+            yearfirst: false,
         }
     }
 }
@@ -62481,6 +62499,7 @@ pub fn to_datetime_values_with_options(
     // passed through).
     let strptime = options.format.and_then(PandasStrptime::new);
     let lock_strptime = lock_format.as_deref().and_then(PandasStrptime::new);
+    let this_year = current_year();
     let mut converted = Vec::with_capacity(values.len());
 
     for (position, val) in values.iter().enumerate() {
@@ -62604,9 +62623,18 @@ pub fn to_datetime_values_with_options(
                     } else {
                         parse_datetime_string(s, options.format)
                     };
-                    match &lock_strptime {
+                    let read = match &lock_strptime {
                         Some(strptime) if read.is_missing() => strptime.value(s),
                         _ => read,
+                    };
+                    // No format given or guessed: pandas reads what no
+                    // parser here does with dateutil, a two-digit year
+                    // included (01/02/24; it raised; fvsao.46).
+                    if read.is_missing() && options.format.is_none() && shape_lock.is_none() {
+                        dateutil_date(s, options.dayfirst, options.yearfirst, this_year)
+                            .map_or(read, datetime64_scalar_from_naive_datetime)
+                    } else {
+                        read
                     }
                 }
                 // A bare number carries NO unit information, and pandas does not
@@ -63861,6 +63889,172 @@ pub fn day_month_format_warning(values: &[Scalar], dayfirst: bool) -> Option<Str
     ))
 }
 
+/// The current year, as dateutil reads it to put a two-digit year in a
+/// century (UTC here; dateutil's local clock differs only around New Year).
+#[must_use]
+pub fn current_year() -> i32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
+        .and_then(|secs| DateTime::from_timestamp(secs, 0))
+        .map_or(1970, |now| now.year())
+}
+
+/// dateutil's reading of a date pandas cannot guess a format for - a
+/// two-digit year (`01/02/24`, `24-01-02`, `5 Jan 24`) - as pandas falls
+/// back to it element by element: three date tokens (numbers, or one month
+/// name) split by `/`, `-`, `.`, `,` or spaces, then optionally a clock
+/// (`H:MM[:SS[.f]]`, an AM / PM). The order is dateutil's `resolve_ymd`
+/// under `dayfirst` / `yearfirst` (a number past 31 is the year, a leading
+/// one past 12 the day); a year of one or two digits goes to the century
+/// that keeps it within 50 years of `this_year`, as dateutil's
+/// `convertyear`. None for anything else or a day the month lacks.
+#[must_use]
+pub fn dateutil_date(
+    text: &str,
+    dayfirst: bool,
+    yearfirst: bool,
+    this_year: i32,
+) -> Option<NaiveDateTime> {
+    const MONTHS: [&str; 12] = [
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+    ];
+    let text = text.trim();
+    // The clock is the whitespace-separated tail holding the first ':'.
+    let (date, clock) = match text.find(':') {
+        Some(colon) => {
+            let start = text[..colon].rfind(char::is_whitespace)? + 1;
+            (text[..start].trim_end(), Some(text[start..].trim()))
+        }
+        None => (text, None),
+    };
+    // (value, digits written) per number; the month name's position.
+    let mut numbers: Vec<(i64, usize)> = Vec::with_capacity(3);
+    let mut month_at = None;
+    for token in date
+        .split(|c: char| matches!(c, '/' | '-' | '.' | ',') || c.is_whitespace())
+        .filter(|token| !token.is_empty())
+    {
+        if token.len() <= 4 && token.bytes().all(|b| b.is_ascii_digit()) {
+            numbers.push((token.parse().ok()?, token.len()));
+        } else {
+            // dateutil's month names: in full, three letters, or "Sept".
+            let lower = token.to_ascii_lowercase();
+            let month = MONTHS.iter().position(|name| {
+                *name == lower || name[..3] == lower || (lower == "sept" && *name == "september")
+            })?;
+            if month_at.is_some() {
+                return None;
+            }
+            month_at = Some((numbers.len(), i64::try_from(month + 1).ok()?));
+        }
+    }
+    let count = numbers.len() + usize::from(month_at.is_some());
+    if count != 3 {
+        return None;
+    }
+    // The three slots in order, a month name in its place.
+    let mut slots = numbers;
+    if let Some((at, month)) = month_at {
+        slots.insert(at, (month, 0));
+    }
+    let v = |i: usize| slots[i].0;
+    // A number of more than two digits names the year (dateutil's ystridx;
+    // the month name's slot has none).
+    let year_at = slots.iter().position(|&(_, digits)| digits > 2);
+    let (year_i, month_i, day_i) = match (month_at.map(|(at, _)| at), year_at) {
+        (Some(m), Some(y)) => (y, m, 3 - m - y),
+        (Some(0), None) => {
+            if v(1) > 31 {
+                (1, 0, 2)
+            } else {
+                (2, 0, 1)
+            }
+        }
+        (Some(1), None) => {
+            if v(0) > 31 || (yearfirst && v(2) <= 31) {
+                (0, 1, 2)
+            } else {
+                (2, 1, 0)
+            }
+        }
+        (Some(_), None) => {
+            if v(1) > 31 {
+                (1, 2, 0)
+            } else {
+                (0, 2, 1)
+            }
+        }
+        (None, _) => {
+            if v(0) > 31 || year_at == Some(0) || (yearfirst && v(1) <= 12 && v(2) <= 31) {
+                if dayfirst && v(2) <= 12 {
+                    (0, 2, 1)
+                } else {
+                    (0, 1, 2)
+                }
+            } else if v(0) > 12 || (dayfirst && v(1) <= 12) {
+                (2, 1, 0)
+            } else {
+                (2, 0, 1)
+            }
+        }
+    };
+    let (mut year, written) = slots[year_i];
+    if year < 100 && written <= 2 {
+        let century = i64::from(this_year) / 100 * 100;
+        year += century;
+        if year >= i64::from(this_year) + 50 {
+            year -= 100;
+        } else if year < i64::from(this_year) - 50 {
+            year += 100;
+        }
+    }
+    let date = NaiveDate::from_ymd_opt(
+        i32::try_from(year).ok()?,
+        u32::try_from(v(month_i)).ok()?,
+        u32::try_from(v(day_i)).ok()?,
+    )?;
+    let nanos = match clock {
+        Some(clock) => time_of_day_nanos(clock)?,
+        None => 0,
+    };
+    Some(date.and_hms_opt(0, 0, 0)? + Duration::nanoseconds(nanos))
+}
+
+/// pandas' UserWarning when it cannot guess a column's format from its
+/// first value and falls back to dateutil element by element - said only
+/// when another value follows (see [`dateutil_date`]).
+#[must_use]
+pub fn infer_format_warning(values: &[Scalar], dayfirst: bool) -> Option<&'static str> {
+    let mut present = values.iter().filter(|value| match value {
+        Scalar::Utf8(text) => !is_datetime_null_token(text),
+        other => !other.is_missing(),
+    });
+    let Scalar::Utf8(first) = present.next()? else {
+        return None;
+    };
+    // fp's stand-in for pandas' guess: a first value the string parsers
+    // read (an ISO form, a four-digit-year date, a text month with its year
+    // in full) or a day / month order reads names a format.
+    let guessed = !parse_datetime_string(first, None).is_missing()
+        || guess_day_month_format(first, dayfirst).is_some();
+    (!guessed && present.next().is_some()).then_some(
+        "Could not infer format, so each element will be parsed individually, falling back to `dateutil`. To ensure parsing is consistent and as-expected, please specify a format.",
+    )
+}
+
 /// A pandas strptime format as chrono reads it: pandas' `%f` is the
 /// fraction's digits (`.5` is half a second), chrono's the nanosecond
 /// count (5 ns), so `.%f` becomes chrono's `%.f`.
@@ -64246,10 +64440,18 @@ fn parse_datetime_string(s: &str, format: Option<&str>) -> Scalar {
     // of a second past the next minute; pandas' readers refuse it
     // (dateutil's "second must be in 0..59") unless a format's strptime
     // reads it, as [`PandasStrptime`] does.
+    // And chrono's %Y takes any number of digits, so 01/02/24 read as the
+    // year 24; pandas' formats want four and leave a two-digit year to
+    // dateutil ([`dateutil_date`]; fvsao.46).
     let naive = |format: &str| {
         NaiveDateTime::parse_from_str(trimmed, format)
             .ok()
-            .filter(|dt| dt.nanosecond() < 1_000_000_000)
+            .filter(|dt| dt.nanosecond() < 1_000_000_000 && dt.year() >= 100)
+    };
+    let naive_date = |format: &str| {
+        NaiveDate::parse_from_str(trimmed, format)
+            .ok()
+            .filter(|date| date.year() >= 100)
     };
 
     // If explicit format is provided, use it.
@@ -64293,17 +64495,17 @@ fn parse_datetime_string(s: &str, format: Option<&str>) -> Scalar {
     }
 
     // Date only: 2024-01-15
-    if let Ok(d) = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+    if let Some(d) = naive_date("%Y-%m-%d") {
         return Scalar::Utf8(format!("{} 00:00:00", d.format("%Y-%m-%d")));
     }
 
     // Date with slashes: 2024/01/15
-    if let Ok(d) = NaiveDate::parse_from_str(trimmed, "%Y/%m/%d") {
+    if let Some(d) = naive_date("%Y/%m/%d") {
         return Scalar::Utf8(format!("{} 00:00:00", d.format("%Y-%m-%d")));
     }
 
     // US date format: 01/15/2024 (MM/DD/YYYY)
-    if let Ok(d) = NaiveDate::parse_from_str(trimmed, "%m/%d/%Y") {
+    if let Some(d) = naive_date("%m/%d/%Y") {
         return Scalar::Utf8(format!("{} 00:00:00", d.format("%Y-%m-%d")));
     }
 
@@ -64347,7 +64549,7 @@ fn parse_datetime_string(s: &str, format: Option<&str>) -> Scalar {
         "%d %B %Y",
         "%d %b %Y",
     ] {
-        if let Ok(d) = NaiveDate::parse_from_str(trimmed, fmt) {
+        if let Some(d) = naive_date(fmt) {
             return Scalar::Utf8(format!("{} 00:00:00", d.format("%Y-%m-%d")));
         }
     }
@@ -71362,6 +71564,33 @@ fn complete_spearman_centered_parallel(
         }
     }
     Some(centered)
+}
+
+/// A variable's centred (two-pass) sum of squares, or 0.0 when it is only the
+/// round-off of a constant: each deviation of a constant variable is the same
+/// `value - mean` residue, at most `count * EPSILON * |mean|`. pandas'
+/// correlation is NaN for a zero variance only; an absolute `f64::EPSILON`
+/// floor on the denominator made any two variables whose standard deviations
+/// multiply below it NaN - values of order 1e-9 (br-frankenpandas-su6b9).
+fn centered_sum_of_squares(sum_sq: f64, count: f64, mean: f64) -> f64 {
+    let residue = 4.0 * count * f64::EPSILON * mean.abs();
+    if sum_sq <= count * residue * residue {
+        0.0
+    } else {
+        sum_sq
+    }
+}
+
+/// Pearson's r from a cross product and two sums of squares (or the three
+/// over one divisor), as pandas: NaN for a zero variance, and clipped into
+/// [-1, 1] as numpy's corrcoef and pandas' nancorr clip.
+fn pearson_ratio(cross: f64, sum_sq_x: f64, sum_sq_y: f64) -> f64 {
+    let denom = (sum_sq_x * sum_sq_y).sqrt();
+    if denom == 0.0 {
+        f64::NAN
+    } else {
+        (cross / denom).clamp(-1.0, 1.0)
+    }
 }
 
 fn spearman_centered_corr(
@@ -86131,7 +86360,7 @@ impl DataFrame {
             count += 1;
         }
 
-        let compute_pair = |i: usize, j: usize| -> (f64, f64) {
+        let compute_pair = |i: usize, j: usize| -> f64 {
             let mut sum_xy = 0.0_f64;
             for (&x, &y) in col_data[i].iter().zip(col_data[j].iter()) {
                 if x.is_nan() {
@@ -86139,7 +86368,7 @@ impl DataFrame {
                 }
                 sum_xy += x * y;
             }
-            let v_ij = Self::finalize_pairwise_stat(
+            Self::finalize_pairwise_stat(
                 stat,
                 min_periods,
                 count,
@@ -86148,22 +86377,7 @@ impl DataFrame {
                 sum_xy,
                 sum2[i],
                 sum2[j],
-            );
-            let v_ji = if i != j {
-                Self::finalize_pairwise_stat(
-                    stat,
-                    min_periods,
-                    count,
-                    sum[j],
-                    sum[i],
-                    sum_xy,
-                    sum2[j],
-                    sum2[i],
-                )
-            } else {
-                v_ij
-            };
-            (v_ij, v_ji)
+            )
         };
 
         let pairs: Vec<(usize, usize)> =
@@ -86178,7 +86392,7 @@ impl DataFrame {
             let pairs_ref: &[(usize, usize)] = &pairs;
             let compute_ref = &compute_pair;
             let next = std::sync::atomic::AtomicUsize::new(0);
-            let cells: Vec<(usize, usize, f64, f64)> = std::thread::scope(|scope| {
+            let cells: Vec<(usize, usize, f64)> = std::thread::scope(|scope| {
                 let mut handles = Vec::with_capacity(worker_count);
                 for _ in 0..worker_count {
                     let next = &next;
@@ -86192,8 +86406,7 @@ impl DataFrame {
                             }
                             let end = (start + MORSEL).min(pairs_ref.len());
                             for &(i, j) in &pairs_ref[start..end] {
-                                let (v_ij, v_ji) = compute_ref(i, j);
-                                out.push((i, j, v_ij, v_ji));
+                                out.push((i, j, compute_ref(i, j)));
                             }
                         }
                         out
@@ -86207,19 +86420,15 @@ impl DataFrame {
                 }
                 all
             });
-            for (i, j, v_ij, v_ji) in cells {
-                mat[i * n + j] = v_ij;
-                if i != j {
-                    mat[j * n + i] = v_ji;
-                }
+            for (i, j, value) in cells {
+                mat[i * n + j] = value;
+                mat[j * n + i] = value;
             }
         } else {
             for (i, j) in pairs {
-                let (v_ij, v_ji) = compute_pair(i, j);
-                mat[i * n + j] = v_ij;
-                if i != j {
-                    mat[j * n + i] = v_ji;
-                }
+                let value = compute_pair(i, j);
+                mat[i * n + j] = value;
+                mat[j * n + i] = value;
             }
         }
 
@@ -86232,9 +86441,8 @@ impl DataFrame {
         Ok(Some(result_cols))
     }
 
-    /// Finalize a pairwise cov/corr cell from accumulated moments.
-    ///
-    /// Arithmetic is bit-identical to the historical per-pair inline form.
+    /// Finalize a pairwise cov/corr cell from accumulated moments. Symmetric
+    /// in its x / y arguments to the bit.
     #[allow(clippy::too_many_arguments)] // moment accumulators; bundling into a
     // struct would obscure the bit-identical per-pair arithmetic.
     fn finalize_pairwise_stat(
@@ -86254,18 +86462,25 @@ impl DataFrame {
         let n_f = count as f64;
         let mean_x = sum_x / n_f;
         let mean_y = sum_y / n_f;
-        let cov_xy = (sum_xy - n_f * mean_x * mean_y) / (n_f - 1.0);
+        // `n * (mean_x * mean_y)`: symmetric in x and y to the bit, so the
+        // (i, j) and (j, i) cells agree, as pandas' nancorr writes one value
+        // to both (`(n * mean_x) * mean_y` differed by an ULP).
+        let cov_xy = (sum_xy - n_f * (mean_x * mean_y)) / (n_f - 1.0);
         match stat {
             "cov" => cov_xy,
             "corr" => {
-                let var_x = (sum_x2 - n_f * mean_x * mean_x) / (n_f - 1.0);
-                let var_y = (sum_y2 - n_f * mean_y * mean_y) / (n_f - 1.0);
-                let denom = (var_x * var_y).sqrt();
-                if denom < f64::EPSILON {
-                    f64::NAN
-                } else {
-                    cov_xy / denom
+                // The same association as cov_xy, so a column's correlation
+                // with itself is exactly 1.0. A one-pass sum of squares is
+                // zero when it is within its own round-off (`n * EPSILON` of
+                // the squares it came from), not below an absolute epsilon
+                // (su6b9; see `centered_sum_of_squares`).
+                let flat = |dev: f64, squares: f64| dev <= 4.0 * n_f * f64::EPSILON * squares;
+                let dev_x = sum_x2 - n_f * (mean_x * mean_x);
+                let dev_y = sum_y2 - n_f * (mean_y * mean_y);
+                if flat(dev_x, sum_x2) || flat(dev_y, sum_y2) {
+                    return f64::NAN;
                 }
+                pearson_ratio(cov_xy, dev_x / (n_f - 1.0), dev_y / (n_f - 1.0))
             }
             _ => f64::NAN,
         }
@@ -86275,19 +86490,11 @@ impl DataFrame {
     ///
     /// The expensive `O(M)` moment accumulation is run **once per unordered
     /// pair** `{i, j}` (`i <= j`) instead of once per ordered pair, halving the
-    /// `O(N^2 · M)` pairwise work. Both the `(i, j)` and `(j, i)` cells are then
-    /// finalized from that single set of moments — the `(j, i)` cell with the
-    /// marginals swapped (`x <-> y`), which reproduces the historical
-    /// independent `(j, i)` computation **bit-for-bit**.
-    ///
-    /// The swap is necessary, not cosmetic: the matrix is *not* exactly
-    /// symmetric in IEEE-754. `cov_xy` contains `n * mean_x * mean_y`, which
-    /// parses as `(n * mean_x) * mean_y`; multiplication is commutative but not
-    /// associative, so `(n*mean_i)*mean_j` and `(n*mean_j)*mean_i` can differ by
-    /// one ULP. Feeding `finalize` the swapped marginals replays the exact
-    /// association the old `(j, i)` pass used, so the golden output is unchanged
-    /// to the last bit. Our own safe-Rust Gram-matrix kernel (no C BLAS).
-    /// `min_periods` semantics are preserved unchanged.
+    /// `O(N^2 · M)` pairwise work, and its one finalized value fills both the
+    /// `(i, j)` and `(j, i)` cells: the matrix is exactly symmetric, as pandas'
+    /// (its nancorr assigns `result[xi, yi] = result[yi, xi]`). Our own
+    /// safe-Rust Gram-matrix kernel (no C BLAS). `min_periods` semantics are
+    /// preserved unchanged.
     fn pairwise_stat_matrix(
         numeric_cols: &[String],
         col_data: &[std::borrow::Cow<'_, [f64]>],
@@ -86496,40 +86703,42 @@ impl DataFrame {
 
             for j in 0..n {
                 for i in 0..=j {
-                    let g = gram[i * n + j];
-                    mat[i * n + j] = Self::finalize_pairwise_stat(
+                    // A column with itself reads its own sum of squares: the
+                    // banded Gram sum reassociates it, which left a diagonal
+                    // of 0.9999999999999966 where pandas has 1.0.
+                    let cross = if i == j { sum2[i] } else { gram[i * n + j] };
+                    let value = Self::finalize_pairwise_stat(
                         stat,
                         min_periods,
                         len,
                         sum[i],
                         sum[j],
-                        g,
+                        cross,
                         sum2[i],
                         sum2[j],
                     );
-                    if i != j {
-                        mat[j * n + i] = Self::finalize_pairwise_stat(
-                            stat,
-                            min_periods,
-                            len,
-                            sum[j],
-                            sum[i],
-                            g,
-                            sum2[j],
-                            sum2[i],
-                        );
-                    }
+                    mat[i * n + j] = value;
+                    mat[j * n + i] = value;
                 }
             }
         } else {
             // Exact per-pair (NaN-skipping) path. Each (i, j) pair is an
             // independent O(len) reduction over the two columns, so fan the
             // upper-triangle pairs across worker threads (br-frankenpandas-4j56s):
-            // a worker computes a pair's five moments + both finalized cells and
-            // the main thread scatters them. Bit-identical — each cell keeps the
-            // same NaN-skip, same left-fold, same finalize as the serial loop;
-            // only the owning thread differs.
-            let compute_pair = |i: usize, j: usize| -> (f64, f64) {
+            // a worker computes a pair's five moments and its finalized value,
+            // and the main thread scatters it to both cells. Bit-identical — each
+            // cell keeps the same NaN-skip, same left-fold, same finalize as the
+            // serial loop; only the owning thread differs.
+            let compute_pair = |i: usize, j: usize| -> f64 {
+                // Shift again by the pair's own first observation: a column's
+                // first value may lie outside the rows the pair keeps (x =
+                // [1e9, 1, 2, 3], y = [NaN, 1, 2, 3]), where the one-pass sums
+                // cancel to round-off (su6b9).
+                let (kx, ky) = col_data[i]
+                    .iter()
+                    .zip(col_data[j].iter())
+                    .find(|(x, y)| x.is_finite() && y.is_finite())
+                    .map_or((0.0, 0.0), |(&x, &y)| (x, y));
                 let mut sum_x = 0.0_f64;
                 let mut sum_y = 0.0_f64;
                 let mut sum_xy = 0.0_f64;
@@ -86540,6 +86749,7 @@ impl DataFrame {
                     if x.is_nan() || y.is_nan() {
                         continue;
                     }
+                    let (x, y) = (x - kx, y - ky);
                     sum_x += x;
                     sum_y += y;
                     sum_xy += x * y;
@@ -86547,8 +86757,7 @@ impl DataFrame {
                     sum_y2 += y * y;
                     count += 1;
                 }
-                // Cell (i, j): col i is "x", col j is "y".
-                let v_ij = Self::finalize_pairwise_stat(
+                Self::finalize_pairwise_stat(
                     stat,
                     min_periods,
                     count,
@@ -86557,24 +86766,7 @@ impl DataFrame {
                     sum_xy,
                     sum_x2,
                     sum_y2,
-                );
-                // Cell (j, i): swap marginals so the (n·mean_x·mean_y) association
-                // matches the old pass.
-                let v_ji = if i != j {
-                    Self::finalize_pairwise_stat(
-                        stat,
-                        min_periods,
-                        count,
-                        sum_y,
-                        sum_x,
-                        sum_xy,
-                        sum_y2,
-                        sum_x2,
-                    )
-                } else {
-                    v_ij
-                };
-                (v_ij, v_ji)
+                )
             };
 
             let pairs: Vec<(usize, usize)> =
@@ -86588,12 +86780,12 @@ impl DataFrame {
                 let pairs_ref: &[(usize, usize)] = &pairs;
                 let compute_ref = &compute_pair;
                 let next = std::sync::atomic::AtomicUsize::new(0);
-                let cells: Vec<(usize, usize, f64, f64)> = std::thread::scope(|scope| {
+                let cells: Vec<(usize, usize, f64)> = std::thread::scope(|scope| {
                     let mut handles = Vec::with_capacity(worker_count);
                     for _ in 0..worker_count {
                         let next = &next;
                         handles.push(scope.spawn(move || {
-                            let mut out: Vec<(usize, usize, f64, f64)> = Vec::new();
+                            let mut out: Vec<(usize, usize, f64)> = Vec::new();
                             loop {
                                 let start =
                                     next.fetch_add(MORSEL, std::sync::atomic::Ordering::Relaxed);
@@ -86602,14 +86794,13 @@ impl DataFrame {
                                 }
                                 let end = (start + MORSEL).min(pairs_ref.len());
                                 for &(i, j) in &pairs_ref[start..end] {
-                                    let (v_ij, v_ji) = compute_ref(i, j);
-                                    out.push((i, j, v_ij, v_ji));
+                                    out.push((i, j, compute_ref(i, j)));
                                 }
                             }
                             out
                         }));
                     }
-                    let mut all: Vec<(usize, usize, f64, f64)> = Vec::new();
+                    let mut all: Vec<(usize, usize, f64)> = Vec::new();
                     for handle in handles {
                         if let Ok(mut part) = handle.join() {
                             all.append(&mut part);
@@ -86617,19 +86808,15 @@ impl DataFrame {
                     }
                     all
                 });
-                for (i, j, v_ij, v_ji) in cells {
-                    mat[i * n + j] = v_ij;
-                    if i != j {
-                        mat[j * n + i] = v_ji;
-                    }
+                for (i, j, value) in cells {
+                    mat[i * n + j] = value;
+                    mat[j * n + i] = value;
                 }
             } else {
                 for &(i, j) in &pairs {
-                    let (v_ij, v_ji) = compute_pair(i, j);
-                    mat[i * n + j] = v_ij;
-                    if i != j {
-                        mat[j * n + i] = v_ji;
-                    }
+                    let value = compute_pair(i, j);
+                    mat[i * n + j] = value;
+                    mat[j * n + i] = value;
                 }
             }
         }
@@ -87114,12 +87301,11 @@ impl DataFrame {
                                 xs.iter().zip(&ys).map(|(x, y)| (x - mx) * (y - my)).sum();
                             let vx: f64 = xs.iter().map(|x| (x - mx).powi(2)).sum();
                             let vy: f64 = ys.iter().map(|y| (y - my).powi(2)).sum();
-                            let denom = (vx * vy).sqrt();
-                            if denom < f64::EPSILON {
-                                f64::NAN
-                            } else {
-                                cov / denom
-                            }
+                            pearson_ratio(
+                                cov,
+                                centered_sum_of_squares(vx, n, mx),
+                                centered_sum_of_squares(vy, n, my),
+                            )
                         };
 
                         labels.push(label.clone());
@@ -237236,6 +237422,320 @@ mod pandas_strptime_h9cug {
                 "time data \"2024-01-15T10:30\" doesn't match format \"%Y-%m-%d %H:%M\", at position 1"
             ),
             "{err}"
+        );
+    }
+}
+
+/// fvsao.46 (part): a date no format names - a two-digit year - read as
+/// pandas' dateutil fallback reads it, under dayfirst / yearfirst. Every row
+/// measured on live pandas 2.2.3 in 2026 (`this_year` pins the century).
+#[cfg(test)]
+mod dateutil_dates_fvsao46 {
+    use chrono::NaiveDateTime;
+    use fp_types::Scalar;
+
+    use super::{
+        DatetimeErrors, ToDatetimeOptions, dateutil_date, to_datetime_values_with_options,
+    };
+
+    fn at(text: &str) -> NaiveDateTime {
+        NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap()
+    }
+
+    #[test]
+    fn reads_dateutils_order_and_century() {
+        for (text, dayfirst, yearfirst, wall) in [
+            ("01/02/24", false, false, "2024-01-02 00:00"),
+            ("01/02/24", true, false, "2024-02-01 00:00"),
+            ("13/04/24", false, false, "2024-04-13 00:00"),
+            ("24-01-02", false, false, "2002-01-24 00:00"),
+            ("24-01-02", false, true, "2024-01-02 00:00"),
+            ("24-01-02", true, true, "2024-02-01 00:00"),
+            ("01-02-03", false, false, "2003-01-02 00:00"),
+            ("01-02-03", true, false, "2003-02-01 00:00"),
+            ("01-02-03", false, true, "2001-02-03 00:00"),
+            ("01-02-03", true, true, "2001-03-02 00:00"),
+            ("1/2/24", false, true, "2001-02-24 00:00"),
+            ("01.02.24", false, false, "2024-01-02 00:00"),
+            ("99-01-02", false, false, "1999-01-02 00:00"),
+            ("99-01-02", true, false, "1999-02-01 00:00"),
+            ("24/12/31", false, false, "2031-12-24 00:00"),
+            ("24/12/31", false, true, "2024-12-31 00:00"),
+            ("01/02/76", false, false, "1976-01-02 00:00"),
+            ("01/02/69", false, false, "2069-01-02 00:00"),
+            ("01/02/68", false, false, "2068-01-02 00:00"),
+            ("5 Jan 24", false, false, "2024-01-05 00:00"),
+            ("01/02/24 10:30", false, false, "2024-01-02 10:30"),
+            ("01/02/24 10:30 PM", false, false, "2024-01-02 22:30"),
+        ] {
+            assert_eq!(
+                dateutil_date(text, dayfirst, yearfirst, 2026),
+                Some(at(wall)),
+                "{text} dayfirst={dayfirst} yearfirst={yearfirst}"
+            );
+        }
+        // NEGATIVE: not three date tokens, a day the month lacks, a word.
+        for text in ["hello", "01/02", "01/02/24/5", "02/30/24", "5 Janu 24"] {
+            assert_eq!(dateutil_date(text, false, false, 2026), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn to_datetime_falls_back_to_dateutil_without_a_format() {
+        let raise = ToDatetimeOptions {
+            errors: DatetimeErrors::Raise,
+            ..ToDatetimeOptions::default()
+        };
+        let utf8 = |values: &[&str]| -> Vec<Scalar> {
+            values
+                .iter()
+                .map(|value| Scalar::Utf8((*value).to_owned()))
+                .collect()
+        };
+        let read = to_datetime_values_with_options(&utf8(&["01/02/24", "03/04/24"]), raise);
+        assert!(
+            matches!(
+                read.as_deref(),
+                Ok([Scalar::Datetime64(_), Scalar::Datetime64(_)])
+            ),
+            "{read:?}"
+        );
+        // NEGATIVE: what no reader takes is still pandas' error.
+        let err = to_datetime_values_with_options(&utf8(&["hello"]), raise)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Unknown datetime string format"), "{err}");
+        // NEGATIVE: a given format reads its own way (no dateutil).
+        let formatted = ToDatetimeOptions {
+            format: Some("%Y-%m-%d"),
+            ..raise
+        };
+        assert!(to_datetime_values_with_options(&utf8(&["01/02/24"]), formatted).is_err());
+    }
+}
+
+/// fvsao.37 (part): an expanding sum over no observations yet - a leading
+/// NaN under min_periods=0 - is pandas' 0.0, not the fold's -0.0 seed; a
+/// sum of -0.0 values stays -0.0, as pandas'. Pinned to live pandas 2.2.3.
+#[cfg(test)]
+mod expanding_empty_sum_fvsao37 {
+    use fp_columnar::Column;
+    use fp_index::Index;
+    use fp_types::Scalar;
+
+    use super::Series;
+
+    fn signs(series: &Series) -> Vec<Option<f64>> {
+        series
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Float64(x) if !x.is_nan() => Some(1.0_f64.copysign(*x)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn no_observations_sum_to_positive_zero() {
+        // A float column (the typed nullable fold) and an int column holding
+        // a missing value (the generic fold): the first window holds nothing,
+        // 0.0; then -0.0 alone stays -0.0, and 0 is 0.0.
+        for (values, expected) in [
+            (
+                vec![Scalar::Null(fp_types::NullKind::NaN), Scalar::Float64(-0.0)],
+                vec![Some(1.0), Some(-1.0)],
+            ),
+            (
+                vec![Scalar::Null(fp_types::NullKind::Null), Scalar::Int64(0)],
+                vec![Some(1.0), Some(1.0)],
+            ),
+        ] {
+            let column = Column::from_values(values.clone()).unwrap();
+            let series = Series::new("x", Index::default_range(2), column).unwrap();
+            let summed = series.expanding(Some(0)).sum().unwrap();
+            assert_eq!(signs(&summed), expected, "{values:?}");
+        }
+    }
+}
+
+/// Pearson correlation, as pandas' (br-frankenpandas-su6b9): a symmetric
+/// matrix with an exact unit diagonal, NaN for a zero variance only - not
+/// for variables of order 1e-9 - and a pair's own rows shifting its sums.
+/// Values pinned to live pandas 2.2.3.
+#[cfg(test)]
+mod corr_family_su6b9 {
+    use std::collections::BTreeMap;
+
+    use fp_columnar::Column;
+    use fp_index::Index;
+
+    use super::{DataFrame, Series};
+
+    const TINY_A: [f64; 6] = [1e-9, 2e-9, 4e-9, 3e-9, 6e-9, 5e-9];
+    const TINY_B: [f64; 6] = [2e-9, 1e-9, 5e-9, 4e-9, 4e-9, 7e-9];
+
+    fn frame(columns: &[(&str, Vec<f64>)]) -> DataFrame {
+        let len = columns[0].1.len();
+        let map = columns
+            .iter()
+            .map(|(name, values)| ((*name).to_owned(), Column::from_f64_values(values.clone())))
+            .collect::<BTreeMap<_, _>>();
+        let order: Vec<String> = columns.iter().map(|(name, _)| (*name).to_owned()).collect();
+        DataFrame::new_with_column_order(Index::from_range(0, len as i64, 1), map, order).unwrap()
+    }
+
+    fn matrix(result: &DataFrame) -> Vec<Vec<f64>> {
+        result
+            .column_names()
+            .iter()
+            .map(|name| {
+                result
+                    .column(name)
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .map(|v| v.to_f64().unwrap_or(f64::NAN))
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn series(values: &[f64]) -> Series {
+        Series::new(
+            "x",
+            Index::from_range(0, values.len() as i64, 1),
+            Column::from_f64_values(values.to_vec()),
+        )
+        .unwrap()
+    }
+
+    fn assert_symmetric_unit_diagonal(m: &[Vec<f64>]) {
+        for (i, row) in m.iter().enumerate() {
+            assert_eq!(row[i].to_bits(), 1.0_f64.to_bits(), "diagonal {i}: {m:?}");
+            for (j, value) in row.iter().enumerate() {
+                assert_eq!(value.to_bits(), m[j][i].to_bits(), "({i}, {j}): {m:?}");
+            }
+        }
+    }
+
+    #[test]
+    #[allow(clippy::approx_constant)] // 3.14 is a datum the old kernel got asymmetric
+    fn matrix_is_symmetric_with_a_unit_diagonal_on_every_path() {
+        let nan = f64::NAN;
+        // Complete columns, one shared NaN row, NaN skipped per pair: each was
+        // an ULP asymmetric.
+        for columns in [
+            vec![
+                ("x", vec![1.27, -11.87, -5.79, -1.96, 8.99, 11.45]),
+                ("y", vec![1.03, 2.62, 6.94, -0.98, 3.61, 4.71]),
+                ("z", vec![0.845, 0.945, 0.904, 0.57, 0.145, 0.192]),
+            ],
+            vec![
+                ("x", vec![2.99, nan, -8.91, -4.55, -9.92, 0.6, 13.4, -4.92]),
+                ("y", vec![3.14, nan, 6.07, 5.32, 2.21, 4.91, 7.09, 0.97]),
+                (
+                    "z",
+                    vec![0.793, nan, 0.989, 0.215, 0.16, 0.613, 0.044, 0.036],
+                ),
+            ],
+            vec![
+                ("x", vec![nan, -25.17, -5.39, -0.49, 1.13, -15.3, -4.78]),
+                ("y", vec![2.06, 2.57, nan, 2.58, 4.9, 7.65, 3.25]),
+                ("z", vec![0.268, 0.88, 0.51, 0.847, 0.64, 0.742, 0.091]),
+            ],
+        ] {
+            assert_symmetric_unit_diagonal(&matrix(&frame(&columns).corr().unwrap()));
+        }
+    }
+
+    #[test]
+    fn banded_gram_matrix_is_scale_free_with_a_unit_diagonal() {
+        // 100k x 10 crosses the banded Gram threshold. Scaled by 2^-30 every
+        // value is of order 1e-9 (the eager Gram kernel; the lazy one serves
+        // the unscaled frame), and a power-of-two scale changes no rounding:
+        // the two matrices agree to the bit. The scaled one was all NaN, and
+        // the diagonal read 0.9999999999999966.
+        let rows = 100_000;
+        let columns: Vec<(String, Vec<f64>)> = (0..10)
+            .map(|c| {
+                let values = (0..rows)
+                    .map(|r| ((r * (c + 3)) as f64 * 0.37).sin() + (r % (c + 2)) as f64)
+                    .collect();
+                (format!("c{c}"), values)
+            })
+            .collect();
+        let named = |scale: f64| -> Vec<(&str, Vec<f64>)> {
+            columns
+                .iter()
+                .map(|(name, values)| (name.as_str(), values.iter().map(|v| v * scale).collect()))
+                .collect()
+        };
+        let plain = matrix(&frame(&named(1.0)).corr().unwrap());
+        let tiny = matrix(&frame(&named(2.0_f64.powi(-30))).corr().unwrap());
+        assert_symmetric_unit_diagonal(&plain);
+        assert_symmetric_unit_diagonal(&tiny);
+        for (p, t) in plain.iter().flatten().zip(tiny.iter().flatten()) {
+            assert!((p - t).abs() <= 1e-15, "{p} vs {t}");
+        }
+    }
+
+    #[test]
+    fn variables_of_order_1e_9_correlate_like_pandas() {
+        let close = |got: f64, want: f64| (got - want).abs() <= 1e-12 * want.abs();
+        let r = series(&TINY_A).corr(&series(&TINY_B)).unwrap();
+        assert!(close(r, 0.725_377_899_426_234_7), "Series.corr {r}");
+        let auto = series(&TINY_A).autocorr(1).unwrap();
+        assert!(close(auto, 0.493_196_961_916_071_8), "autocorr {auto}");
+        let m = matrix(
+            &frame(&[("a", TINY_A.to_vec()), ("b", TINY_B.to_vec())])
+                .corr()
+                .unwrap(),
+        );
+        assert!(
+            close(m[0][1], 0.725_377_899_426_234_7),
+            "DataFrame.corr {m:?}"
+        );
+        let with = frame(&[("a", TINY_A.to_vec())])
+            .corrwith(&frame(&[("a", TINY_B.to_vec())]))
+            .unwrap();
+        let w = with.values()[0].to_f64().unwrap();
+        assert!(close(w, 0.725_377_899_426_234_7), "corrwith {w}");
+    }
+
+    #[test]
+    fn a_pair_shifts_by_its_own_rows() {
+        // x's first value is outside the rows the pair keeps: NaN before.
+        let m = matrix(
+            &frame(&[
+                ("x", vec![1e9, 1.0, 2.0, 3.0, 5.0]),
+                ("y", vec![f64::NAN, 1.0, 2.0, 3.0, 4.0]),
+            ])
+            .corr()
+            .unwrap(),
+        );
+        assert!((m[0][1] - 0.982_707_629_823_990_8).abs() <= 1e-12, "{m:?}");
+    }
+
+    #[test]
+    fn a_constant_variable_is_still_nan() {
+        // NEGATIVE: round-off of a constant is a zero variance, as pandas'
+        // (0.1 * 5 / 5 is not 0.1, so its deviations are not exactly zero).
+        let nan_pair = |x: Vec<f64>, y: Vec<f64>| {
+            let m = matrix(&frame(&[("x", x.clone()), ("y", y.clone())]).corr().unwrap());
+            assert!(m[0][1].is_nan() && m[1][0].is_nan(), "{x:?} {y:?}: {m:?}");
+            let r = series(&x).corr(&series(&y)).unwrap();
+            assert!(r.is_nan(), "Series.corr {x:?} {y:?}: {r}");
+        };
+        nan_pair(vec![0.1; 5], vec![1.0, 2.0, 4.0, 3.0, 5.0]);
+        nan_pair(vec![1.0 / 3.0; 7], (0..7).map(f64::from).collect());
+        nan_pair(
+            vec![0.1, 0.1, 0.1, 7.0, 0.1],
+            vec![1.0, 2.0, 4.0, f64::NAN, 5.0],
+        );
+        nan_pair(
+            vec![5.0, 0.1, 0.1, 0.1, 0.1],
+            vec![f64::NAN, 1.0, 2.0, 4.0, 3.0],
         );
     }
 }
