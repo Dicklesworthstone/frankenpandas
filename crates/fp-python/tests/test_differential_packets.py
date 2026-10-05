@@ -25205,3 +25205,48 @@ def test_reindex_invents_nat_in_temporal_columns_3o9vc(case: str) -> None:
         ]
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-x96xa: a missing value in a datetime or timedelta column -
+# a gap concat / from_records invents, a NaN beside timestamps - is NaT, as
+# pandas' (it was a NaN, read back as a float nan).
+def _x96xa_stamps(m: Any) -> Any:
+    return m.DataFrame({"t": m.to_datetime(["2020-01-01", "2020-01-02"]), "d": m.to_timedelta(["1D", "2h"])})
+
+
+_X96XA_CASES = {
+    "concat, columns absent below": lambda m: m.concat([_x96xa_stamps(m), m.DataFrame({"u": [1]})]),
+    "concat, columns absent above": lambda m: m.concat([m.DataFrame({"u": [1, 2]}), _x96xa_stamps(m)]),
+    "concat ignore_index": lambda m: m.concat([_x96xa_stamps(m), m.DataFrame({"u": [1]})], ignore_index=True),
+    "from_records, key missing": lambda m: m.DataFrame.from_records(
+        [{"t": m.Timestamp("2020-01-01"), "v": 1}, {"v": 2}]
+    ),
+    "records via the constructor": lambda m: m.DataFrame(
+        [{"d": m.Timedelta("1D")}, {"v": 2.5}]
+    ),
+    "a NaN beside timestamps": lambda m: m.DataFrame({"t": m.Series([m.Timestamp("2020-01-01"), _NAN])}),
+    "a NaN beside durations": lambda m: m.DataFrame({"d": m.Series([_NAN, m.Timedelta("3h")])}),
+    # NEGATIVE: a float or int column's invented gap stays NaN / float64,
+    # an object column's None.
+    "concat, number columns": lambda m: m.concat([m.DataFrame({"f": [1.5], "i": [1]}), m.DataFrame({"u": [1]})]),
+    "concat, text column": lambda m: m.concat([m.DataFrame({"s": ["a"]}), m.DataFrame({"u": [1]})]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_X96XA_CASES))
+def test_invented_gap_in_temporal_column_is_nat_x96xa(case: str) -> None:
+    def shown(m: Any) -> Any:
+        frame = _X96XA_CASES[case](m)
+        return [
+            (
+                str(name),
+                str(frame[name].dtype),
+                [type(v).__name__ for v in frame[name].tolist()],
+                [type(v).__name__ for v in frame[name]],
+                repr(frame[name].value_counts(dropna=False).index.tolist()),
+            )
+            for name in frame.columns
+        ] + [repr(frame)]
+
+    assert shown(fpd) == shown(pd)

@@ -12053,7 +12053,14 @@ impl Column {
     }
 
     fn normalize_missing_for_dtype(value: Scalar, dtype: DType) -> Scalar {
+        // A datetime / timedelta column holds no NaN: its missing value is NaT,
+        // as numpy's datetime64 (a NaN beside timestamps - a missing record
+        // key, a concat's gap, Series([ts, np.nan]) - read back as a float nan;
+        // br-frankenpandas-x96xa).
+        let temporal = matches!(dtype, DType::Datetime64 { .. } | DType::Timedelta64);
         match value {
+            Scalar::Null(NullKind::NaN) if temporal => Scalar::Null(NullKind::NaT),
+            Scalar::Float64(float) if temporal && float.is_nan() => Scalar::Null(NullKind::NaT),
             Scalar::Null(NullKind::NaN) => Scalar::Null(NullKind::NaN),
             Scalar::Null(NullKind::NaT) => Scalar::Null(NullKind::NaT),
             Scalar::Null(_) => Scalar::missing_for_dtype(dtype),
