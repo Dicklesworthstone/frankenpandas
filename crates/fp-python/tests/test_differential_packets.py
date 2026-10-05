@@ -24690,3 +24690,50 @@ def test_nat_methods_answer_the_one_nat_4ffc9() -> None:
             m.NaT.fromisoformat()
         with pytest.raises(TypeError, match="takes exactly 1 positional argument"):
             m.NaT.fromisoformat("2024-01-01")
+
+
+_INF = float("inf")
+# br-frankenpandas-bq60w: spearman / kendall tied values within f64::EPSILON
+# (0.1 + 0.2 and 0.3), spearman never returned on an infinity, and
+# DataFrame.corr read +-inf as a value where pandas' isfinite mask drops it.
+_BQ60W_NEAR = {"x": [0.1 + 0.2, 0.3, 0.5, 0.7, 0.2], "y": [1.0, 2.0, 3.0, 4.0, 5.0]}
+_BQ60W_CASES = {
+    "Series near-equal": lambda m, method: m.Series(_BQ60W_NEAR["x"]).corr(m.Series(_BQ60W_NEAR["y"]), method=method),
+    "Series near-equal, NaN row": lambda m, method: m.Series(_BQ60W_NEAR["x"] + [_NAN]).corr(
+        m.Series(_BQ60W_NEAR["y"] + [6.0]), method=method
+    ),
+    "DataFrame near-equal": lambda m, method: m.DataFrame(_BQ60W_NEAR).corr(method=method),
+    "DataFrame near-equal, NaN row": lambda m, method: m.DataFrame(
+        {"x": _BQ60W_NEAR["x"] + [_NAN], "y": _BQ60W_NEAR["y"] + [6.0]}
+    ).corr(method=method),
+    "Series infinity": lambda m, method: m.Series([1.0, _INF, 2.0]).corr(m.Series([1.0, 2.0, 3.0]), method=method),
+    "DataFrame infinity": lambda m, method: m.DataFrame(
+        {"a": [1.0, _INF, 2.0, -_INF, 5.0, 3.0], "b": [1.0, 2.0, 3.0, 4.0, 0.5, 2.5]}
+    ).corr(method=method),
+    "corrwith infinity": lambda m, method: m.DataFrame({"a": [1.0, _INF, 2.0, 3.0]}).corrwith(
+        m.DataFrame({"a": [1.0, 2.0, 3.0, 5.0]}), method=method
+    ),
+    # NEGATIVE: equal values still tie.
+    "Series equal values": lambda m, method: m.Series([1.0, 1.0, 2.0, 3.0]).corr(
+        m.Series([1.0, 2.0, 3.0, 4.0]), method=method
+    ),
+    "DataFrame equal values": lambda m, method: m.DataFrame(
+        {"x": [1.0, 1.0, 2.0, 3.0, _NAN], "y": [1.0, 2.0, 2.0, 4.0, 5.0]}
+    ).corr(method=method),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("method", ["pearson", "spearman", "kendall"])
+@pytest.mark.parametrize("case", list(_BQ60W_CASES))
+def test_correlation_ties_and_infinities_like_pandas_bq60w(case: str, method: str) -> None:
+    def values(m: Any) -> list:
+        out = _BQ60W_CASES[case](m, method)
+        if hasattr(out, "columns"):
+            return [float(v) for c in out.columns for v in out[c].tolist()]
+        if hasattr(out, "index"):
+            return [float(v) for v in out.tolist()]
+        return [float(out)]
+
+    got, want = values(fpd), values(pd)
+    assert np.allclose(got, want, rtol=1e-12, atol=1e-15, equal_nan=True), (got, want)

@@ -30895,13 +30895,14 @@ impl Series {
         }
 
         // O(n log n) Knight's algorithm for the general (with-ties) case; falls
-        // through to the O(n²) loop below only on the rare epsilon-near-but-not-
-        // exact-tie inputs it cannot reproduce bit-identically.
+        // through to the O(n²) loop below only for non-finite values.
         if let Some(tau) = Self::kendall_tau_b_knight(&pairs) {
             return Ok(tau);
         }
 
-        // Count concordant and discordant pairs, plus tied pairs
+        // Count concordant and discordant pairs, plus tied pairs. A tie is
+        // two equal values, as scipy's kendalltau (pandas'): values within
+        // f64::EPSILON - 0.1 + 0.2 and 0.3 - tied (br-frankenpandas-bq60w).
         let mut concordant = 0_i64;
         let mut discordant = 0_i64;
         let mut tied_x = 0_i64;
@@ -30909,17 +30910,15 @@ impl Series {
 
         for i in 0..n {
             for j in (i + 1)..n {
-                let dx = pairs[i].0 - pairs[j].0;
-                let dy = pairs[i].1 - pairs[j].1;
-
-                if dx.abs() < f64::EPSILON && dy.abs() < f64::EPSILON {
+                let ((xi, yi), (xj, yj)) = (pairs[i], pairs[j]);
+                if xi == xj && yi == yj {
                     tied_x += 1;
                     tied_y += 1;
-                } else if dx.abs() < f64::EPSILON {
+                } else if xi == xj {
                     tied_x += 1;
-                } else if dy.abs() < f64::EPSILON {
+                } else if yi == yj {
                     tied_y += 1;
-                } else if (dx > 0.0 && dy > 0.0) || (dx < 0.0 && dy < 0.0) {
+                } else if (xi > xj && yi > yj) || (xi < xj && yi < yj) {
                     concordant += 1;
                 } else {
                     discordant += 1;
@@ -30949,10 +30948,7 @@ impl Series {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        if by_x
-            .windows(2)
-            .any(|window| (window[1].0 - window[0].0).abs() < f64::EPSILON)
-        {
+        if by_x.windows(2).any(|window| window[1].0 == window[0].0) {
             return None;
         }
 
@@ -30961,10 +30957,7 @@ impl Series {
         y_sorted
             .sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
 
-        if y_sorted
-            .windows(2)
-            .any(|window| (window[1] - window[0]).abs() < f64::EPSILON)
-        {
+        if y_sorted.windows(2).any(|window| window[1] == window[0]) {
             return None;
         }
 
@@ -30982,22 +30975,14 @@ impl Series {
     /// Knight's algorithm, replacing the O(n²) all-pairs loop.
     ///
     /// Returns `None` (deferring to the pairwise loop) when any value is
-    /// non-finite, or when two values lie within `f64::EPSILON` without being
-    /// exactly equal — in that case the loop's `|Δ| < EPSILON` tie test is not
-    /// reproducible by exact-equality grouping, so the loop must run to stay
-    /// bit-identical. When the gate passes, exact grouping classifies every
-    /// pair identically to the loop, so the tau is bit-identical: the numerator
+    /// non-finite. Exact grouping classifies every pair as the loop's exact
+    /// tie test does, so the tau is bit-identical: the numerator
     /// `C − D == n0 − xtie − ytie + ntie − 2·dis` and the denominator
     /// `sqrt((n0 − xtie)(n0 − ytie))` are computed from the same integer-exact
     /// f64 operands (counts < 2^53), and the NaN/`denom < EPSILON` guard matches.
     fn kendall_tau_b_knight(pairs: &[(f64, f64)]) -> Option<f64> {
         let n = pairs.len();
         if pairs.iter().any(|(x, y)| !x.is_finite() || !y.is_finite()) {
-            return None;
-        }
-        if Self::has_epsilon_nonexact_ties(pairs.iter().map(|p| p.0))
-            || Self::has_epsilon_nonexact_ties(pairs.iter().map(|p| p.1))
-        {
             return None;
         }
 
@@ -31029,18 +31014,6 @@ impl Series {
         } else {
             Some(con_minus_dis / denom)
         }
-    }
-
-    /// True if a sorted view of `values` holds two entries within `f64::EPSILON`
-    /// that are not exactly equal — i.e. exact-equality grouping would disagree
-    /// with the pairwise `|Δ| < EPSILON` tie test, so the fast path must defer.
-    fn has_epsilon_nonexact_ties(values: impl Iterator<Item = f64>) -> bool {
-        let mut v: Vec<f64> = values.collect();
-        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        v.windows(2).any(|w| {
-            let diff = w[1] - w[0];
-            diff > 0.0 && diff < f64::EPSILON
-        })
     }
 
     /// Sum of t·(t−1)/2 over runs of exactly-equal values in a sorted iterator.
@@ -31094,10 +31067,7 @@ impl Series {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        if by_x
-            .windows(2)
-            .any(|window| (x[window[1]] - x[window[0]]).abs() < f64::EPSILON)
-        {
+        if by_x.windows(2).any(|window| x[window[1]] == x[window[0]]) {
             return None;
         }
 
@@ -31106,10 +31076,7 @@ impl Series {
         y_sorted
             .sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
 
-        if y_sorted
-            .windows(2)
-            .any(|window| (window[1] - window[0]).abs() < f64::EPSILON)
-        {
+        if y_sorted.windows(2).any(|window| window[1] == window[0]) {
             return None;
         }
 
@@ -31144,9 +31111,10 @@ impl Series {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        if order.windows(2).any(|window| {
-            (values[window[1] as usize] - values[window[0] as usize]).abs() < f64::EPSILON
-        }) {
+        if order
+            .windows(2)
+            .any(|window| values[window[1] as usize] == values[window[0] as usize])
+        {
             return None;
         }
 
@@ -31424,8 +31392,10 @@ impl Series {
         let mut i = 0;
         while i < n {
             let mut j = i;
-            // Find group of tied values
-            while j < n && (indexed[j].1 - indexed[i].1).abs() < f64::EPSILON {
+            // Find the group of equal values, as pandas' rank (bq60w): values
+            // within f64::EPSILON tied, and an infinity - inf - inf is NaN -
+            // never joined its own group, so the loop never ended.
+            while j < n && indexed[j].1 == indexed[i].1 {
                 j += 1;
             }
             // Average rank for tied group: (i+1 + j) / 2
@@ -86868,9 +86838,26 @@ impl DataFrame {
             ) {
                 result_cols
             } else {
+                // pandas' nancorr masks with isfinite: +-inf is a missing value
+                // to DataFrame.corr (bq60w; the lazy path takes finite columns
+                // only).
                 let col_data: Vec<std::borrow::Cow<'_, [f64]>> = col_arcs
                     .iter()
-                    .map(|(data, start)| std::borrow::Cow::Borrowed(&data[*start..*start + len]))
+                    .map(|(data, start)| {
+                        let values = &data[*start..*start + len];
+                        if values.iter().any(|value| value.is_infinite()) {
+                            std::borrow::Cow::Owned(
+                                values
+                                    .iter()
+                                    .map(
+                                        |&value| if value.is_infinite() { f64::NAN } else { value },
+                                    )
+                                    .collect(),
+                            )
+                        } else {
+                            std::borrow::Cow::Borrowed(values)
+                        }
+                    })
                     .collect();
                 Self::pairwise_stat_matrix(&numeric_cols, &col_data, stat, min_periods)?
             }
@@ -86974,10 +86961,23 @@ impl DataFrame {
             .zip(&numeric_cols)
             .filter_map(|(&pos, name)| self.column_at(pos).map(|col| (name, col)))
             .map(|(name, col)| {
+                // pandas' DataFrame.corr masks with isfinite: +-inf is a
+                // missing value to spearman and kendall too (bq60w).
+                let column = match col.as_f64_slice_with_validity() {
+                    Some((data, _)) if data.iter().any(|value| value.is_infinite()) => {
+                        Column::from_f64_values(
+                            Self::pairwise_numeric_column_values(col, len)
+                                .iter()
+                                .map(|&value| if value.is_infinite() { f64::NAN } else { value })
+                                .collect(),
+                        )
+                    }
+                    _ => col.clone(),
+                };
                 Series::new(
                     name,
                     Index::new_known_unique_int64_unit_range(0, len),
-                    col.clone(),
+                    column,
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -237737,6 +237737,101 @@ mod corr_family_su6b9 {
             vec![5.0, 0.1, 0.1, 0.1, 0.1],
             vec![f64::NAN, 1.0, 2.0, 4.0, 3.0],
         );
+    }
+}
+
+/// Spearman and Kendall tie by equality, as pandas' rank and scipy's
+/// kendalltau - 0.1 + 0.2 and 0.3 are two values - and DataFrame.corr reads
+/// +-inf as missing for every method, as pandas' isfinite mask
+/// (br-frankenpandas-bq60w). Values pinned to live pandas 2.2.3.
+#[cfg(test)]
+mod rank_corr_exact_ties_bq60w {
+    use std::collections::BTreeMap;
+
+    use fp_columnar::Column;
+    use fp_index::Index;
+
+    use super::{DataFrame, Series};
+
+    fn series(values: &[f64]) -> Series {
+        Series::new(
+            "x",
+            Index::from_range(0, values.len() as i64, 1),
+            Column::from_f64_values(values.to_vec()),
+        )
+        .unwrap()
+    }
+
+    fn frame_corr(a: &[f64], b: &[f64], method: &str) -> f64 {
+        let frame = DataFrame::new_with_column_order(
+            Index::from_range(0, a.len() as i64, 1),
+            BTreeMap::from([
+                ("a".to_owned(), Column::from_f64_values(a.to_vec())),
+                ("b".to_owned(), Column::from_f64_values(b.to_vec())),
+            ]),
+            vec!["a".to_owned(), "b".to_owned()],
+        )
+        .unwrap();
+        let corr = frame.corr_method(method).unwrap();
+        let a_cells = corr.column("a").unwrap().values();
+        assert_eq!(a_cells[0].to_f64().unwrap(), 1.0, "{method} diagonal");
+        a_cells[1].to_f64().unwrap()
+    }
+
+    fn close(got: f64, want: f64) -> bool {
+        (got - want).abs() <= 1e-12
+    }
+
+    #[test]
+    fn near_equal_values_are_not_ties() {
+        let x = [0.1 + 0.2, 0.3, 0.5, 0.7, 0.2];
+        let y = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let rho = series(&x).corr_spearman(&series(&y)).unwrap();
+        let tau = series(&x).corr_kendall(&series(&y)).unwrap();
+        assert!(close(rho, -0.1), "spearman {rho}");
+        assert!(close(tau, 0.0), "kendall {tau}");
+        assert!(close(frame_corr(&x, &y, "spearman"), -0.1));
+        assert!(close(frame_corr(&x, &y, "kendall"), 0.0));
+    }
+
+    #[test]
+    fn equal_values_still_tie() {
+        // NEGATIVE: exact ties are ties.
+        let x = [1.0, 1.0, 2.0, 3.0];
+        let y = [1.0, 2.0, 3.0, 4.0];
+        let rho = series(&x).corr_spearman(&series(&y)).unwrap();
+        let tau = series(&x).corr_kendall(&series(&y)).unwrap();
+        assert!(close(rho, 0.948_683_298_050_513_9), "spearman {rho}");
+        assert!(close(tau, 0.912_870_929_175_277), "kendall {tau}");
+    }
+
+    #[test]
+    fn a_series_ranks_infinity_as_a_value() {
+        // Spearman never returned: inf - inf is NaN, so an infinity never
+        // joined its own tie group.
+        let x = [1.0, f64::INFINITY, 2.0];
+        let y = [1.0, 2.0, 3.0];
+        let rho = series(&x).corr_spearman(&series(&y)).unwrap();
+        let tau = series(&x).corr_kendall(&series(&y)).unwrap();
+        assert!(close(rho, 0.5), "spearman {rho}");
+        assert!(close(tau, 0.333_333_333_333_333_37), "kendall {tau}");
+    }
+
+    #[test]
+    fn a_frame_reads_infinity_as_missing() {
+        let r = frame_corr(
+            &[1.0, f64::INFINITY, 2.0, 3.0, 7.0],
+            &[1.0, 2.0, 3.0, 5.0, 4.0],
+            "pearson",
+        );
+        assert!(close(r, 0.575_159_934_353_966_1), "pearson {r}");
+        let a = [1.0, f64::INFINITY, 2.0, f64::NEG_INFINITY, 5.0];
+        let b = [1.0, 2.0, 3.0, 4.0, 0.5];
+        assert!(close(frame_corr(&a, &b, "spearman"), -0.5));
+        assert!(close(
+            frame_corr(&a, &b, "kendall"),
+            -0.333_333_333_333_333_37
+        ));
     }
 }
 
