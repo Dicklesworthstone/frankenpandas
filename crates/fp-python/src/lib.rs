@@ -28301,6 +28301,7 @@ impl PySeries {
             return Ok(Py::new(py, PySeries { inner: s })?.into_any());
         }
         if let Ok(series_mask) = key.extract::<PyRef<'_, PySeries>>() {
+            refuse_nan_mask(&series_mask.inner)?;
             let s = self
                 .inner
                 .iloc_bool_series(&series_mask.inner)
@@ -35102,6 +35103,7 @@ impl PySeriesILoc {
             return Ok(Py::new(py, PySeries { inner: s })?.into_any());
         }
         if let Ok(series_mask) = key.extract::<PyRef<'_, PySeries>>() {
+            refuse_nan_mask(&series_mask.inner)?;
             let s = self
                 .inner
                 .iloc_bool_series(&series_mask.inner)
@@ -35169,7 +35171,7 @@ impl PySeriesLoc {
         if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
             return series(series_loc_slice(&self.inner, slice)?);
         }
-        if let Some(mask) = loc_bool_series_mask(key) {
+        if let Some(mask) = loc_bool_series_mask(key)? {
             return series(
                 self.inner
                     .loc_bool_series(&mask.inner)
@@ -39821,6 +39823,30 @@ impl PyDataFrame {
         }
         // `df[mask]` with a boolean Series -> filtered rows
         if let Ok(mask) = key.extract::<PyRef<'_, PySeries>>() {
+            if matches!(
+                mask.inner.column().dtype(),
+                DType::Bool | DType::BoolNullable
+            ) {
+                refuse_nan_mask(&mask.inner)?;
+                // An all-True mask is pandas' copy, its RangeIndex kept
+                // (_getitem_bool_array; it became an int64 Index -
+                // df.loc[mask] does in pandas too; br-frankenpandas-hbgr3).
+                if *mask.inner.index() == *self.inner.index()
+                    && mask
+                        .inner
+                        .column()
+                        .as_bool_slice()
+                        .is_some_and(|bits| bits.iter().all(|&keep| keep))
+                {
+                    return Ok(Py::new(
+                        py,
+                        PyDataFrame {
+                            inner: self.inner.clone(),
+                        },
+                    )?
+                    .into_any());
+                }
+            }
             let frame = self
                 .inner
                 .filter_rows(&mask.inner)
@@ -39933,7 +39959,7 @@ impl PyDataFrame {
             self.inner = frame_mask_write(py, &self.inner, &mask.inner, value)?;
             return Ok(());
         }
-        let is_mask = loc_bool_series_mask(key).is_some()
+        let is_mask = loc_bool_series_mask(key)?.is_some()
             || ((key.cast::<PyList>().is_ok() || key.getattr("tolist").is_ok())
                 && key.extract::<Vec<bool>>().is_ok());
         if is_mask {
@@ -50762,10 +50788,30 @@ fn loc_missing_labels_error(
 }
 
 /// The boolean mask carried by a Series indexer, if it is one.
-fn loc_bool_series_mask<'py>(key: &Bound<'py, PyAny>) -> Option<PyRef<'py, PySeries>> {
-    key.extract::<PyRef<'_, PySeries>>()
+fn loc_bool_series_mask<'py>(key: &Bound<'py, PyAny>) -> PyResult<Option<PyRef<'py, PySeries>>> {
+    let Some(mask) = key
+        .extract::<PyRef<'_, PySeries>>()
         .ok()
         .filter(|s| matches!(s.inner.column().dtype(), DType::Bool | DType::BoolNullable))
+    else {
+        return Ok(None);
+    };
+    refuse_nan_mask(&mask.inner)?;
+    Ok(Some(mask))
+}
+
+/// pandas' ValueError for a boolean mask holding a missing value outside
+/// the nullable boolean dtype - True / False beside NaN or None, an object
+/// mask; its NA reads False in a `boolean` mask (it read False here too;
+/// br-frankenpandas-hbgr3).
+fn refuse_nan_mask(mask: &Series) -> PyResult<()> {
+    let column = mask.column();
+    if column.dtype() == DType::Bool && column.has_any_missing() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Cannot mask with non-boolean array containing NA / NaN values",
+        ));
+    }
+    Ok(())
 }
 
 /// Labels from a list-like indexer (list, tuple of labels, ndarray, Index,
@@ -51001,7 +51047,7 @@ fn resolve_loc_rows(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<LocRows>
                 .map_err(frame_error_to_py),
         };
     }
-    if let Some(mask) = loc_bool_series_mask(key) {
+    if let Some(mask) = loc_bool_series_mask(key)? {
         return df
             .loc_bool_series(&mask.inner)
             .map(LocRows::frame)
@@ -51088,7 +51134,7 @@ fn resolve_loc_row_positions(
         let (start, stop) = (bound("start")?, bound("stop")?);
         return slice_positions(start.as_ref(), stop.as_ref()).map_err(loc_key_error);
     }
-    if let Some(mask) = loc_bool_series_mask(key) {
+    if let Some(mask) = loc_bool_series_mask(key)? {
         let truthy = |value: &Scalar| matches!(value, Scalar::Bool(true));
         if mask.inner.index().labels() == labels {
             return Ok(mask
@@ -53558,27 +53604,37 @@ impl PyDataFrameLoc {
                     .get_item(tuple.get_item(0)?)
                     .map(Bound::unbind);
             }
-            // A boolean Series of rows with one plain column label takes just
-            // that column's rows: every column was filtered first
-            // (br-frankenpandas-sj5bn). A callable row key reads the whole
+            // A boolean Series of rows with one plain column label, or a list
+            // of distinct ones, takes just those columns' rows: every column
+            // was filtered first (br-frankenpandas-sj5bn; a list,
+            // br-frankenpandas-ffh9h). A callable row key reads the whole
             // frame, so it keeps it.
             let row_key = tuple.get_item(0)?;
             let columns_key = tuple.get_item(1)?;
-            let one_column = columns_key.extract::<String>().ok().filter(|name| {
+            let plain_column = |name: &String| {
                 self.inner.columns_multiindex().is_none()
                     && self.inner.column_occurrences(name) == 1
                     && matches!(self.inner.column_label(name), IndexLabel::Utf8(_))
-            });
+            };
+            let narrow_to: Option<Vec<String>> = if let Ok(name) = columns_key.extract::<String>() {
+                plain_column(&name).then(|| vec![name])
+            } else if columns_key.is_instance_of::<PyList>() {
+                columns_key.extract::<Vec<String>>().ok().filter(|names| {
+                    !names.is_empty()
+                        && names.iter().all(plain_column)
+                        && names.iter().collect::<HashSet<_>>().len() == names.len()
+                })
+            } else {
+                None
+            };
             let mask_rows = row_key
                 .extract::<PyRef<'_, PySeries>>()
                 .is_ok_and(|mask| mask.inner.dtype().is_bool());
             let narrowed;
-            let source = match one_column.filter(|_| mask_rows) {
-                Some(name) => {
-                    narrowed = self
-                        .inner
-                        .select_columns(&[name.as_str()])
-                        .map_err(loc_key_error)?;
+            let source = match narrow_to.filter(|_| mask_rows) {
+                Some(names) => {
+                    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                    narrowed = self.inner.select_columns(&names).map_err(loc_key_error)?;
                     &narrowed
                 }
                 None => &self.inner,

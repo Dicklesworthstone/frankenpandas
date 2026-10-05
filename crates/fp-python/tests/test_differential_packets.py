@@ -25347,3 +25347,105 @@ def test_groupby_size_over_one_key_like_pandas_deixj(case: str) -> None:
         return (repr(result), repr(result.index), str(getattr(result, "dtype", result.dtypes)))
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-ffh9h: a boolean filter gathers its rows branch-free after
+# the affine prefix, a RangeIndex's rows come from its arithmetic, and
+# df.loc[mask, [cols]] narrows to those columns first. These pin the answers
+# across mask shapes (random, all, none, a run, every other row, one row,
+# first and last) and indexes (RangeIndex, stepped, int, text, duplicated),
+# and loc with one / several / repeated / missing columns. NEGATIVE: an
+# unaligned mask still aligns, a mask holding NaN still raises as pandas'.
+def _ffh9h_frame(m: Any, index: Any = None) -> Any:
+    rng = np.random.default_rng(7)
+    n = 40
+    return m.DataFrame(
+        {
+            "k": rng.integers(0, 9, n),
+            "v": rng.random(n),
+            "s": [f"w{i % 5}" for i in range(n)],
+            "b": [i % 3 == 0 for i in range(n)],
+        },
+        index=index,
+    )
+
+
+_FFH9H_MASKS = {
+    "random": lambda d: d["v"] > 0.5,
+    "all": lambda d: d["v"] >= 0,
+    "none": lambda d: d["v"] > 2,
+    "a run": lambda d: (d["v"] * 0 + np.arange(len(d))) .between(5, 17),
+    "every other row": lambda d: (d["v"] * 0 + np.arange(len(d))) % 2 == 0,
+    "one row": lambda d: (d["v"] * 0 + np.arange(len(d))) == 13,
+    "first and last": lambda d: ((d["v"] * 0 + np.arange(len(d))) % 39) == 0,
+}
+
+_FFH9H_INDEXES = {
+    "range": lambda m: None,
+    "stepped range": lambda m: m.RangeIndex(100, 20, -2),
+    "ints": lambda m: m.Index(np.arange(40) * 7 - 50),
+    "text": lambda m: m.Index([f"r{i}" for i in range(40)]),
+    "duplicated": lambda m: m.Index([i // 2 for i in range(40)]),
+}
+
+_FFH9H_SELECTIONS = {
+    "frame[mask]": lambda d, mask: d[mask],
+    "loc[mask]": lambda d, mask: d.loc[mask],
+    "loc[mask, 'v']": lambda d, mask: d.loc[mask, "v"],
+    "loc[mask, ['k', 'v']]": lambda d, mask: d.loc[mask, ["k", "v"]],
+    "loc[mask, ['s', 'k', 'b']]": lambda d, mask: d.loc[mask, ["s", "k", "b"]],
+    "series[mask]": lambda d, mask: d["v"][mask],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("selection", list(_FFH9H_SELECTIONS))
+@pytest.mark.parametrize("index", list(_FFH9H_INDEXES))
+@pytest.mark.parametrize("mask", list(_FFH9H_MASKS))
+def test_boolean_filters_like_pandas_ffh9h(mask: str, index: str, selection: str) -> None:
+    def shown(m: Any) -> Any:
+        frame = _ffh9h_frame(m, _FFH9H_INDEXES[index](m))
+        result = _FFH9H_SELECTIONS[selection](frame, _FFH9H_MASKS[mask](frame))
+        return (repr(result), repr(result.index))
+
+    assert shown(fpd) == shown(pd)
+
+
+_FFH9H_EDGE_CASES = {
+    "repeated column list": lambda m: (lambda d: d.loc[d["v"] > 0.5, ["k", "k"]])(_ffh9h_frame(m)),
+    "missing column": lambda m: (lambda d: d.loc[d["v"] > 0.5, ["k", "nope"]])(_ffh9h_frame(m)),
+    "unaligned mask": lambda m: (lambda d: d.loc[(d["v"] > 0.5).iloc[::-1], ["k", "v"]])(_ffh9h_frame(m)),
+    "mask holding NaN": lambda m: (lambda d: d.loc[m.Series([True, _NAN] * 20), ["k"]])(_ffh9h_frame(m)),
+    "bool list": lambda m: (lambda d: d.loc[[i % 4 == 1 for i in range(40)], ["v", "s"]])(_ffh9h_frame(m)),
+    # br-frankenpandas-hbgr3: a unique mask over a repeated index is
+    # reindexed (each row its label's value); a NaN mask is refused through
+    # every door; a nullable boolean mask's NA reads False.
+    "repeated index, unaligned mask": lambda m: m.DataFrame({"v": [1, 2, 3, 4]}, index=[0, 0, 1, 1])[
+        m.Series([True, False], index=[1, 0])
+    ],
+    "repeated index, loc unaligned mask": lambda m: m.DataFrame({"v": [1, 2, 3, 4]}, index=[0, 0, 1, 1]).loc[
+        m.Series([True, False], index=[1, 0]), "v"
+    ],
+    "series[] NaN mask": lambda m: m.Series([1, 2, 3, 4])[m.Series([True, _NAN, True, False])],
+    "series.loc NaN mask": lambda m: m.Series([1, 2, 3, 4]).loc[m.Series([True, _NAN, True, False])],
+    "frame[] NaN mask": lambda m: m.DataFrame({"v": [1, 2, 3, 4]})[m.Series([True, None, True, False])],
+    "boolean NA mask": lambda m: m.DataFrame({"v": [1, 2, 3, 4]})[
+        m.Series([True, None, True, False], dtype="boolean")
+    ],
+    "all-True frame[] keeps the RangeIndex": lambda m: m.DataFrame({"v": [1, 2, 3]}, index=m.RangeIndex(9, 0, -3))[
+        m.Series([True, True, True], index=m.RangeIndex(9, 0, -3))
+    ],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FFH9H_EDGE_CASES))
+def test_boolean_filter_edges_like_pandas_ffh9h(case: str) -> None:
+    def shown(m: Any) -> Any:
+        try:
+            result = _FFH9H_EDGE_CASES[case](m)
+        except Exception as error:  # noqa: BLE001 - the error is the answer compared
+            return (type(error).__name__,)
+        return (repr(result), repr(result.index))
+
+    assert shown(fpd) == shown(pd)

@@ -2916,7 +2916,21 @@ def op_series_filter(pd, payload: dict[str, Any]) -> dict[str, Any]:
     mask_values = [scalar_from_json(item) for item in right["values"]]
 
     data = pd.Series(data_values, index=data_index, name=left.get("name", "data"))
-    mask = pd.Series(mask_values, index=mask_index, name=right.get("name", "mask"))
+    # A boolean mask holding a null is pandas' nullable `boolean` mask - the
+    # only boolean mask that can hold one (an object mask of True / False /
+    # None is refused: 'Cannot mask with non-boolean array containing NA /
+    # NaN values'); its NA reads False. Built without the dtype, the
+    # *_null_mask cases raised here, and their fixtures were hand-written
+    # instead (br-frankenpandas-hbgr3).
+    mask_is_nullable_bool = any(value is None for value in mask_values) and all(
+        value is None or isinstance(value, bool) for value in mask_values
+    )
+    mask = pd.Series(
+        mask_values,
+        index=mask_index,
+        name=right.get("name", "mask"),
+        dtype="boolean" if mask_is_nullable_bool else None,
+    )
 
     try:
         out = data[mask]

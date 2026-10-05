@@ -8754,43 +8754,86 @@ enum BooleanMaskSelection {
     Positions(Vec<usize>),
 }
 
+/// The positions of a boolean mask's `true`s, gathered branch-free: every
+/// position written, the length advanced by its bit (a branch per row
+/// mispredicts half a random mask's rows; br-frankenpandas-ffh9h).
+fn true_positions(mask: &[bool]) -> Vec<usize> {
+    let mut positions = vec![0_usize; mask.iter().filter(|&&keep| keep).count() + 1];
+    let mut len = 0;
+    for (position, &keep) in mask.iter().enumerate() {
+        positions[len] = position;
+        len += usize::from(keep);
+    }
+    positions.truncate(len);
+    positions
+}
+
+/// The rows of `labels` a boolean `mask` whose index differs from them
+/// keeps: pandas reindexes the mask to the labels, so each row takes its
+/// label's value, and a label repeated in the rows keeps each of its rows
+/// (it kept that label's first row once per occurrence;
+/// br-frankenpandas-hbgr3). A label the mask lacks drops its rows; a mask
+/// repeating a label cannot be reindexed, as pandas'.
+fn reindexed_mask_rows(labels: &[IndexLabel], mask: &Series) -> Result<Vec<usize>, FrameError> {
+    if mask.index().has_duplicates() {
+        return Err(FrameError::CompatibilityRejected(
+            "cannot reindex on an axis with duplicate labels".to_owned(),
+        ));
+    }
+    let mask_at = mask.index().position_map_first();
+    let values = mask.column().values();
+    Ok(labels
+        .iter()
+        .enumerate()
+        .filter(|(_, label)| {
+            mask_at
+                .get(*label)
+                .is_some_and(|&at| matches!(values[at], Scalar::Bool(true)))
+        })
+        .map(|(row, _)| row)
+        .collect())
+}
+
 #[inline]
 fn boolean_mask_selection(mask: &[bool]) -> BooleanMaskSelection {
     let mut affine = AffineSelectionBuilder::default();
-    let mut positions: Option<Vec<usize>> = None;
 
     for (position, &keep) in mask.iter().enumerate() {
         if !keep {
             continue;
         }
-        if let Some(positions) = &mut positions {
-            positions.push(position);
-            continue;
-        }
-
         affine.push(position);
         if !affine.is_affine {
             // Positions before `position` are the affine prefix. Rebuild that
-            // prefix once, then append the first non-affine hit and keep
-            // gathering. A mask's selected positions are strictly ascending,
-            // so the arithmetic has already been proven in `push`.
+            // prefix once, then append the first non-affine hit and gather the
+            // rest. A mask's selected positions are strictly ascending, so the
+            // arithmetic has already been proven in `push`. The rest is
+            // gathered branch-free - every position written, the length
+            // advanced by its bit - into a buffer its counted trues size: a
+            // branch per row mispredicted half a random mask's rows (47% of
+            // df.loc[mask, 'v'] at 1M rows; br-frankenpandas-ffh9h).
             let prefix_len = affine.len.saturating_sub(1);
-            let mut gathered = Vec::with_capacity((mask.len() / 2).max(affine.len));
-            for offset in 0..prefix_len {
-                gathered.push(affine.first + offset * affine.step);
+            let rest = &mask[position + 1..];
+            let selected = prefix_len + 1 + rest.iter().filter(|&&keep| keep).count();
+            let mut gathered = vec![0_usize; selected + 1];
+            for (offset, slot) in gathered[..prefix_len].iter_mut().enumerate() {
+                *slot = affine.first + offset * affine.step;
             }
-            gathered.push(position);
-            positions = Some(gathered);
+            gathered[prefix_len] = position;
+            let mut len = prefix_len + 1;
+            for (offset, &keep) in rest.iter().enumerate() {
+                gathered[len] = position + 1 + offset;
+                len += usize::from(keep);
+            }
+            gathered.truncate(len);
+            return BooleanMaskSelection::Positions(gathered);
         }
     }
 
-    match positions {
-        Some(positions) => BooleanMaskSelection::Positions(positions),
-        None => affine.finish().map_or_else(
-            || BooleanMaskSelection::Positions(Vec::new()),
-            BooleanMaskSelection::Affine,
-        ),
-    }
+    affine.finish().map_or_else(
+        || BooleanMaskSelection::Positions(Vec::new()),
+        BooleanMaskSelection::Affine,
+    )
 }
 
 /// Recognize a strictly-ascending arithmetic progression of normalized row
@@ -14133,20 +14176,17 @@ impl Series {
             return self.take_by_label_selector(mask);
         }
 
-        // Fast path: when indexes are identical AND no duplicates, skip alignment.
-        // This is the common case for s[s > x].
-        // Per br-frankenpandas-axw58 perf optimization.
-        // Per br-frankenpandas-rg8ys.2.8: must NOT use fast path with duplicate
-        // indexes - the duplicate-handling path preserves all matching rows.
-        if self.index.identical(&mask.index) && !self.index.has_duplicates() {
+        // A mask whose index equals this one masks positionally, as pandas'
+        // check_bool_indexer (index.equals - names aside, repeated labels
+        // too): the common s[s > x] (br-frankenpandas-axw58). A repeated
+        // index took the per-label path below and kept each label's first
+        // row (br-frankenpandas-hbgr3).
+        if self.index == mask.index {
             let positions: Vec<usize> = if let Some(data) = mask.column.as_bool_slice() {
                 if let Some(result) = self.filter_typed_i64_index_by_bool_slice(data) {
                     return result;
                 }
-                data.iter()
-                    .enumerate()
-                    .filter_map(|(i, &keep)| keep.then_some(i))
-                    .collect()
+                true_positions(data)
             } else {
                 mask.column
                     .values()
@@ -14161,24 +14201,10 @@ impl Series {
         }
 
         if self.index.has_duplicates() || mask.index.has_duplicates() {
-            let data_first = self.index.position_map_first();
-            let mask_first = mask.index.position_map_first();
-
-            let mut new_labels = Vec::new();
-            let mut new_values = Vec::new();
-
-            for label in self.index.labels() {
-                let Some(&mask_pos) = mask_first.get(label) else {
-                    continue;
-                };
-                if matches!(mask.column.values()[mask_pos], Scalar::Bool(true)) {
-                    let data_pos = data_first.get(label).copied().unwrap_or(mask_pos);
-                    new_labels.push(label.clone());
-                    new_values.push(self.column.values()[data_pos].clone());
-                }
-            }
-
-            return self.with_labels_and_values_preserving_name(new_labels, new_values);
+            let positions = reindexed_mask_rows(self.index.labels(), mask)?;
+            let index = self.index.take(&positions).rename_index(self.index.name());
+            let column = self.column.take_positions(&positions);
+            return Self::new(self.name.clone(), index, column);
         }
 
         // Align mask to the Series index (pandas behavior: extra mask labels are ignored).
@@ -72581,27 +72607,27 @@ impl DataFrame {
         // Vec<IndexLabel>, and its element-walking drop all collapse to
         // Vec<i64>/Arc operations. Only compute an uncached typed view when
         // the take is wide enough to amortize the one-time O(len) scan.
-        let typed_view = match self.index.cached_int64_label_values() {
+        let typed_view = || match self.index.cached_int64_label_values() {
             Some(view) => view,
             None if n.saturating_mul(4) >= self.len() => self.index.int64_label_values(),
             None => None,
         };
-        let out_index = if let Some(values) = typed_view {
-            let mut gathered = Vec::with_capacity(n);
-            for &pos in positions {
-                gathered.push(values[pos]);
-            }
-            Index::from_i64_values(gathered)
-        } else if let Some((start, _, step)) = self.index.range_span() {
+        let out_index = if let Some((start, _, step)) = self.index.range_span() {
             // A RangeIndex's row at `pos` is start + pos * step (see
             // take_rows_by_positions_with_affine_certificate_unchecked;
-            // br-frankenpandas-sj5bn).
+            // br-frankenpandas-sj5bn, br-frankenpandas-ffh9h).
             Index::from_i64_values(
                 positions
                     .iter()
                     .map(|&pos| start + pos as i64 * step)
                     .collect(),
             )
+        } else if let Some(values) = typed_view() {
+            let mut gathered = Vec::with_capacity(n);
+            for &pos in positions {
+                gathered.push(values[pos]);
+            }
+            Index::from_i64_values(gathered)
         } else {
             let index_labels = self.index.labels();
 
@@ -72856,27 +72882,29 @@ impl DataFrame {
         // Keep index projection byte-for-byte equivalent to
         // `take_rows_by_positions_unchecked`; only column gathering consumes
         // the mask-derived certificate.
-        let typed_view = match self.index.cached_int64_label_values() {
+        let typed_view = || match self.index.cached_int64_label_values() {
             Some(view) => view,
             None if n.saturating_mul(4) >= self.len() => self.index.int64_label_values(),
             None => None,
         };
-        let out_index = if let Some(values) = typed_view {
-            let mut gathered = Vec::with_capacity(n);
-            for &pos in positions {
-                gathered.push(values[pos]);
-            }
-            Index::from_i64_values(gathered)
-        } else if let Some((start, _, step)) = self.index.range_span() {
+        let out_index = if let Some((start, _, step)) = self.index.range_span() {
             // A RangeIndex's row at `pos` is start + pos * step, the int64
             // labels the typed view gathers: a small selection built all of
-            // its labels first (br-frankenpandas-sj5bn).
+            // its labels first (br-frankenpandas-sj5bn), a large one read
+            // them from a 1M-label view built per call (12% of
+            // df.loc[mask, 'v']; br-frankenpandas-ffh9h).
             Index::from_i64_values(
                 positions
                     .iter()
                     .map(|&pos| start + pos as i64 * step)
                     .collect(),
             )
+        } else if let Some(values) = typed_view() {
+            let mut gathered = Vec::with_capacity(n);
+            for &pos in positions {
+                gathered.push(values[pos]);
+            }
+            Index::from_i64_values(gathered)
         } else {
             let index_labels = self.index.labels();
 
@@ -77195,12 +77223,12 @@ impl DataFrame {
     /// The mask must be a Bool-typed Series. Indexes are aligned; missing
     /// mask values are treated as `False`.
     pub fn filter_rows(&self, mask: &Series) -> Result<Self, FrameError> {
-        // Fast path: when indexes are identical AND no duplicates, skip alignment.
-        // This is the common case for df[df['col'] > x].
-        // Per br-frankenpandas-axw58 perf optimization.
-        // Per br-frankenpandas-rg8ys.2.8: must NOT use fast path with duplicate
-        // indexes - the duplicate-handling path preserves all matching rows.
-        if self.index.identical(mask.index()) && !self.index.has_duplicates() {
+        // A mask whose index equals the frame's masks positionally, as pandas'
+        // check_bool_indexer (index.equals - names aside, repeated labels
+        // too): the common df[df['col'] > x] (br-frankenpandas-axw58). A
+        // repeated index took the per-label path below and kept each label's
+        // first row (br-frankenpandas-hbgr3).
+        if self.index == *mask.index() {
             if let Some(mask_bits) = mask.column().as_bool_slice() {
                 return self.loc_bool_with_affine_witness(
                     mask_bits,
@@ -77231,23 +77259,7 @@ impl DataFrame {
 
         // Align mask to DataFrame index (pandas behavior: extra mask labels are ignored).
         if self.index.has_duplicates() || mask.index().has_duplicates() {
-            let data_first = self.index.position_map_first();
-            let mask_first = mask.index().position_map_first();
-
-            let mut new_labels = Vec::new();
-            let mut kept_positions = Vec::new();
-
-            for label in self.index.labels() {
-                let Some(&mask_pos) = mask_first.get(label) else {
-                    continue;
-                };
-                if matches!(mask.column().values()[mask_pos], Scalar::Bool(true)) {
-                    let data_pos = data_first.get(label).copied().unwrap_or(mask_pos);
-                    new_labels.push(label.clone());
-                    kept_positions.push(data_pos);
-                }
-            }
-
+            let kept_positions = reindexed_mask_rows(self.index.labels(), mask)?;
             let n_cols = self.num_columns();
             let mut pairs = Vec::with_capacity(n_cols);
             let mut order = Vec::with_capacity(n_cols);
@@ -77262,9 +77274,9 @@ impl DataFrame {
             // Per br-frankenpandas-z5qu1: pandas preserves the index name
             // through dropna / boolean-indexing (and a tz-aware index's zone).
             let mut out = Self::new_with_axes(
-                Index::new(new_labels)
-                    .rename_index(self.index.name())
-                    .with_tz(self.index.tz())?,
+                self.index
+                    .take(&kept_positions)
+                    .rename_index(self.index.name()),
                 None,
                 columns,
                 order,
@@ -128543,8 +128555,15 @@ mod tests {
         );
     }
 
+    /// A unique mask over a repeated index is reindexed to the rows, each
+    /// row taking its own label's value. Live pandas 2.2.3:
+    /// `DataFrame({'x': [1, 2, 3], 'y': [10, 20, 30]}, index=['a', 'a',
+    /// 'b'])[Series([True, True], index=['a', 'b'])]` keeps rows
+    /// a / a / b with x [1, 2, 3], y [10, 20, 30]. This test asserted
+    /// [1, 1, 3] / [10, 10, 30] - each 'a' row the first one's values - the
+    /// wrong answer it was named after (br-frankenpandas-hbgr3).
     #[test]
-    fn dataframe_filter_rows_duplicate_index_uses_first_occurrence() {
+    fn dataframe_filter_rows_duplicate_index_reindexes_the_mask_like_pandas() {
         let index = Index::new(vec![
             IndexLabel::from("a"),
             IndexLabel::from("a"),
@@ -128590,11 +128609,11 @@ mod tests {
         );
         assert_eq!(
             result.column("x").unwrap().values(),
-            &[Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(3)]
+            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)]
         );
         assert_eq!(
             result.column("y").unwrap().values(),
-            &[Scalar::Int64(10), Scalar::Int64(10), Scalar::Int64(30)]
+            &[Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]
         );
     }
 
