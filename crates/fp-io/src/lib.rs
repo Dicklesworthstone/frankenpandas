@@ -9151,27 +9151,71 @@ fn try_write_json_records_typed(
 ) -> Option<String> {
     let (cols, keys) = extract_typed_value_columns(frame)?;
     let n = frame.index().len();
-    let mut out = String::with_capacity(
-        n.saturating_mul(cols.len().max(1))
+    let separator = if as_jsonl { '\n' } else { ',' };
+    let write_range = |start: usize, end: usize, out: &mut String| {
+        for r in start..end {
+            if r > 0 {
+                out.push(separator);
+            }
+            out.push('{');
+            for (c, col) in cols.iter().enumerate() {
+                if c > 0 {
+                    out.push(',');
+                }
+                out.push_str(&keys[c]);
+                append_typed_json_value(out, col, r, precision);
+            }
+            out.push('}');
+        }
+    };
+    let capacity = |rows: usize| {
+        rows.saturating_mul(cols.len().max(1))
             .saturating_mul(12)
-            .saturating_add(16),
-    );
+            .saturating_add(16)
+    };
+    let mut out = String::with_capacity(capacity(n));
     if !as_jsonl {
         out.push('[');
     }
-    for r in 0..n {
-        if r > 0 {
-            out.push(if as_jsonl { '\n' } else { ',' });
-        }
-        out.push('{');
-        for (c, col) in cols.iter().enumerate() {
-            if c > 0 {
-                out.push(',');
+    // Chunked-parallel, as write_csv's: contiguous row ranges into
+    // per-thread buffers joined in order - the same bytes as one pass. The
+    // pandas float spelling made the serial JSON Lines writer ~1.4x slower
+    // than with serde's shortest spelling (br-frankenpandas-6udgl).
+    const JSON_PAR_MIN_ROWS: usize = 50_000;
+    const JSON_PAR_MIN_ROWS_PER_WORKER: usize = 16_384;
+    let workers = if n >= JSON_PAR_MIN_ROWS {
+        fp_columnar::cached_available_parallelism()
+            .min(16)
+            .min(n / JSON_PAR_MIN_ROWS_PER_WORKER)
+            .max(1)
+    } else {
+        1
+    };
+    if workers >= 2 {
+        let chunk = n.div_ceil(workers);
+        let write_range = &write_range;
+        let parts: Vec<String> = std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(workers);
+            let mut start = 0;
+            while start < n {
+                let end = (start + chunk).min(n);
+                handles.push(scope.spawn(move || {
+                    let mut buf = String::with_capacity(capacity(end - start));
+                    write_range(start, end, &mut buf);
+                    buf
+                }));
+                start = end;
             }
-            out.push_str(&keys[c]);
-            append_typed_json_value(&mut out, col, r, precision);
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("json writer thread"))
+                .collect()
+        });
+        for part in parts {
+            out.push_str(&part);
         }
-        out.push('}');
+    } else {
+        write_range(0, n, &mut out);
     }
     if !as_jsonl {
         out.push(']');
@@ -40301,6 +40345,25 @@ mod merge_simple_numeric_csv_chunks_tests {
         assert_index_matches(&rframe);
         assert_values_matches(&rframe);
         assert_split_matches(&rframe);
+
+        // 70,000 rows take the chunked-parallel records / lines writer
+        // (50,000 rows and up): its bytes are the references' (6udgl).
+        let big = 70_000usize;
+        let mut bc: BTreeMap<String, Column> = BTreeMap::new();
+        bc.insert(
+            "i".to_string(),
+            Column::from_i64_values((0..big as i64).map(|v| v * 7919 - 1_000_000).collect()),
+        );
+        bc.insert(
+            "f".to_string(),
+            Column::from_f64_values((0..big).map(|v| v as f64 / 7.0 - 2500.0).collect()),
+        );
+        let bframe = DataFrame::new(idx(big), bc).expect("bframe");
+        assert_eq!(
+            write_json_string(&bframe, JsonOrient::Records).expect("bjson"),
+            serde_ref(&bframe),
+        );
+        assert_jsonl_matches(&bframe);
     }
 
     #[test]

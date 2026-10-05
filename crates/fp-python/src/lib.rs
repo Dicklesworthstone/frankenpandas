@@ -73208,6 +73208,50 @@ fn csv_multi_header_axes(frame: DataFrame, header: &CsvHeaderLevels) -> PyResult
     }
 }
 
+/// pandas' `read_csv(skip_blank_lines=False)` as text the parser reads:
+/// after the first record, a blank line outside a quoted field (a lone
+/// '\r' too) is a row of missing values - a quoted empty field and as many
+/// empty ones as the first record has - and a line of only spaces / tabs
+/// a row whose first field is those (pandas keeps it; its default skips
+/// it). Blank lines before the first record stay (it was refused;
+/// br-frankenpandas-owfgz).
+fn csv_fill_blank_lines(text: &str, sep: u8, quote: u8) -> String {
+    let (sep, quote) = (char::from(sep), char::from(quote));
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut fields: Option<usize> = None;
+    let mut in_quotes = false;
+    let mut line_fields = 1;
+    for line in text.split_inclusive('\n') {
+        let body = line.trim_end_matches('\n').trim_end_matches('\r');
+        if !in_quotes && body.trim_matches([' ', '\t']).is_empty() {
+            match fields {
+                Some(width) => {
+                    out.push(quote);
+                    out.push_str(body);
+                    out.push(quote);
+                    out.extend(std::iter::repeat_n(sep, width - 1));
+                    out.push_str(&line[body.len()..]);
+                }
+                None => out.push_str(line),
+            }
+            continue;
+        }
+        for ch in body.chars() {
+            if ch == quote {
+                in_quotes = !in_quotes;
+            } else if ch == sep && !in_quotes {
+                line_fields += 1;
+            }
+        }
+        if !in_quotes {
+            fields.get_or_insert(line_fields);
+            line_fields = 1;
+        }
+        out.push_str(line);
+    }
+    out
+}
+
 /// A CSV token under pandas' C-parser integer scans (`str_to_int64` /
 /// `str_to_uint64`): spaces around and a sign allowed, an overflow found
 /// while the digits accumulate - before any trailing text, so
@@ -73393,6 +73437,11 @@ fn read_csv_impl(
         .map(|v| v.extract::<Vec<String>>())
         .transpose()?;
     let na_filter = take("na_filter")?.map(|v| v.is_truthy()).transpose()?;
+    // skip_blank_lines=False: see `csv_fill_blank_lines` (it was refused).
+    let skip_blank_lines = take("skip_blank_lines")?
+        .map(|v| v.is_truthy())
+        .transpose()?
+        .unwrap_or(true);
     let doublequote = take("doublequote")?.map(|v| v.is_truthy()).transpose()?;
     let skipinitialspace = take("skipinitialspace")?
         .map(|v| v.is_truthy())
@@ -73459,6 +73508,10 @@ fn read_csv_impl(
         };
         let quote = quotechar.unwrap_or(fp_io::CsvReadOptions::default().quotechar);
         (text, sep) = split_by_separator_pattern(py, &text, pattern, quote, engine.as_ref())?;
+    }
+    if !skip_blank_lines {
+        let quote = quotechar.unwrap_or(fp_io::CsvReadOptions::default().quotechar);
+        text = csv_fill_blank_lines(&text, sep, quote);
     }
     // skiprows: an int skips that many leading lines; a list-like or a
     // callable skips the records it names (it raised TypeError).

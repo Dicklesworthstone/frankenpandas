@@ -27139,3 +27139,34 @@ def test_read_csv_integer_overflow_keeps_text_like_pandas_sa8p9(case: str) -> No
         return ([str(dtype) for dtype in frame.dtypes], repr(frame.values.tolist()))
 
     assert shown(fpd) == shown(pd)
+
+
+# read_csv(skip_blank_lines=False) reads each blank line after the header
+# as a row of missing values, a whitespace-only line as a row whose first
+# field is that text (br-frankenpandas-owfgz).
+_OWFGZ_CASES = {
+    "one column": ("a\n1\n\n3\n", {}),
+    "two columns": ("a,b\n1,x\n\n3,y\n", {}),
+    "trailing blank line": ("a,b\n1,2\n\n", {}),
+    "two trailing blank lines": ("a,b\n1,2\n\n\n", {}),
+    "blank line inside a quoted field": ('a,b\n"x\n\ny",1\n\n2,3\n', {}),
+    "whitespace-only line": ("a,b\n1,2\n   \n3,4\n", {}),
+    "CRLF": ("a,b,c\r\n1,2,3\r\n\r\n4,5,6\r\n", {}),
+    "other separator": ("x;y\n1;2\n\n3;4\n", {"sep": ";"}),
+    "header=None": ("a,b\n1,2\n\n3,4\n", {"header": None}),
+    "Int64 dtype": ("a\n1\n\n3\n", {"dtype": {"a": "Int64"}}),
+    "default skips (NEGATIVE)": ("a\n1\n\n3\n", {"skip_blank_lines": True}),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_OWFGZ_CASES))
+def test_read_csv_keeps_blank_lines_like_pandas_owfgz(case: str) -> None:
+    text, options = _OWFGZ_CASES[case]
+    options = {"skip_blank_lines": False, **options}
+
+    def shown(m: Any) -> Any:
+        frame = m.read_csv(io.StringIO(text), **options)
+        return ([str(dtype) for dtype in frame.dtypes], repr(frame.values.tolist()), list(frame.columns))
+
+    assert shown(fpd) == shown(pd)
