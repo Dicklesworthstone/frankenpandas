@@ -27267,6 +27267,19 @@ impl PySeries {
     /// against a datetime column is pandas' "Invalid comparison" TypeError.
     fn ordering_operand(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Series> {
         check_comparable(&self.inner, other)?;
+        // Ordering a datetime / timedelta column against None is pandas'
+        // TypeError (it answered all False; br-frankenpandas-jobhh).
+        if other.is_none()
+            && matches!(
+                self.inner.dtype(),
+                DType::Datetime64 { .. } | DType::Timedelta64
+            )
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "Invalid comparison between dtype={} and NoneType",
+                column_pandas_dtype_name(self.inner.column())
+            )));
+        }
         comparison_operand(py, other, &self.inner)?.ok_or_else(|| {
             let kind = other
                 .get_type()

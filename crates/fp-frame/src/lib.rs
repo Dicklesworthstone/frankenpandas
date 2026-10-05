@@ -99742,44 +99742,13 @@ impl DataFrame {
             }
             // pd.NA propagates only through the nullable extension dtypes; a
             // numpy-backed missing value compares False, True under !=
-            // (br-frankenpandas-zwfz3).
-            let propagates_na = col.dtype().is_nullable();
-            let vals: Vec<Scalar> = col
-                .values()
-                .iter()
-                .map(|v| {
-                    if v.is_missing() || scalar.is_missing() {
-                        return if propagates_na {
-                            Scalar::Null(NullKind::Null)
-                        } else {
-                            Scalar::Bool(op == ComparisonOp::Ne)
-                        };
-                    }
-                    match (v.to_f64(), scalar.to_f64()) {
-                        (Ok(l), Ok(r)) => Scalar::Bool(match op {
-                            ComparisonOp::Eq => l == r,
-                            ComparisonOp::Ne => l != r,
-                            ComparisonOp::Gt => l > r,
-                            ComparisonOp::Ge => l >= r,
-                            ComparisonOp::Lt => l < r,
-                            ComparisonOp::Le => l <= r,
-                        }),
-                        _ => {
-                            let vs = format!("{v}");
-                            let ss = format!("{scalar}");
-                            Scalar::Bool(match op {
-                                ComparisonOp::Eq => vs == ss,
-                                ComparisonOp::Ne => vs != ss,
-                                ComparisonOp::Gt => vs > ss,
-                                ComparisonOp::Ge => vs >= ss,
-                                ComparisonOp::Lt => vs < ss,
-                                ComparisonOp::Le => vs <= ss,
-                            })
-                        }
-                    }
-                })
-                .collect();
-            result_cols.push(Column::from_values(vals)?);
+            // (br-frankenpandas-zwfz3) - Column::compare_scalar's rule, which
+            // also compares values of other kinds as pandas: == / != unequal,
+            // ordering a TypeError. This loop compared the two values' TEXT
+            // when either was not a number: df == '1' was True at the int 1,
+            // df > 'a' False instead of pandas' TypeError, a timestamp
+            // compared as 'Timestamp[...]' (br-frankenpandas-jobhh).
+            result_cols.push(col.compare_scalar(scalar, op)?);
         }
 
         Ok(self.with_columns_at_positions(result_cols))

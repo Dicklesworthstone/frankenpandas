@@ -25541,3 +25541,75 @@ def test_unequal_repeated_index_keeps_pandas_answer_rbiki() -> None:
         return (repr(d + o), repr(d["a"] + o["a"]), repr(d.where(d > 1, o)))
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-jobhh: == / != between values of kinds that do not compare
+# (text and a number, a timestamp and a number, a mixed object column against
+# anything) are element-wise unequal, as Python's and pandas' object
+# comparison; they raised TypeError ('value "b" has non-numeric dtype Utf8').
+# NEGATIVE: the ordering operators across kinds still raise TypeError, and
+# same-kind comparisons are unchanged.
+def _jobhh_series(m: Any) -> Any:
+    return {
+        "text": m.Series(["b", None, "a"]),
+        "object": m.Series([1, "a", 2.5, None], dtype=object),
+        "ints": m.Series([1, 2, 3]),
+        "floats": m.Series([1.5, _NAN, 2.0]),
+        "datetimes": m.Series(m.to_datetime(["2020-01-01", None])),
+        "bools": m.Series([True, False]),
+    }
+
+
+_JOBHH_OPERANDS = {
+    "int 1": 1,
+    "float 2.5": 2.5,
+    "text a": "a",
+    "None": None,
+}
+
+_JOBHH_OPS = {
+    "==": lambda s, x: s == x,
+    "!=": lambda s, x: s != x,
+    "eq": lambda s, x: s.eq(x),
+    "ne": lambda s, x: s.ne(x),
+    ">": lambda s, x: s > x,
+    "<=": lambda s, x: s <= x,
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("op", list(_JOBHH_OPS))
+@pytest.mark.parametrize("operand", list(_JOBHH_OPERANDS))
+@pytest.mark.parametrize("series", ["text", "object", "ints", "floats", "datetimes", "bools"])
+def test_cross_kind_equality_is_elementwise_like_pandas_jobhh(series: str, operand: str, op: str) -> None:
+    def shown(m: Any) -> Any:
+        try:
+            result = _JOBHH_OPS[op](_jobhh_series(m)[series], _JOBHH_OPERANDS[operand])
+        except Exception as error:  # noqa: BLE001 - the error is the answer compared
+            return (type(error).__name__,)
+        return (result.tolist(), str(result.dtype))
+
+    assert shown(fpd) == shown(pd)
+
+
+_JOBHH_FRAME_CASES = {
+    "frame == 1": lambda m: m.DataFrame({"s": ["a", "b"], "i": [1, 2], "f": [1.0, _NAN]}) == 1,
+    "frame != 'a'": lambda m: m.DataFrame({"s": ["a", "b"], "i": [1, 2]}) != "a",
+    "filter text column == 0": lambda m: (lambda d: d[d["s"] == 0])(m.DataFrame({"s": ["a", "b"], "i": [1, 2]})),
+    "series == series of another kind": lambda m: m.Series(["1", "2"]) == m.Series([1, 2]),
+    "series != series of another kind": lambda m: m.Series([1, 2]) != m.Series(["1", "2"]),
+    # NEGATIVE: ordering across kinds still raises.
+    "frame > 'a' with numbers": lambda m: m.DataFrame({"s": ["a", "b"], "i": [1, 2]}) > "a",
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_JOBHH_FRAME_CASES))
+def test_cross_kind_frame_equality_like_pandas_jobhh(case: str) -> None:
+    def shown(m: Any) -> Any:
+        try:
+            return repr(_JOBHH_FRAME_CASES[case](m))
+        except Exception as error:  # noqa: BLE001 - the error is the answer compared
+            return (type(error).__name__,)
+
+    assert shown(fpd) == shown(pd)

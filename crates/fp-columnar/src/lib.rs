@@ -1850,6 +1850,24 @@ fn list_compare(left: &[Scalar], right: &[Scalar], op: ComparisonOp) -> Result<b
     Ok(op_holds(left.len().cmp(&right.len()), op))
 }
 
+/// [`scalar_compare`], except that two values of kinds that do not compare -
+/// text and a number, a timestamp and text - are unequal: `==` false, `!=`
+/// true, as Python's equality (pandas' element-wise object comparison); only
+/// the ordering operators raise. Every == / != between such kinds raised
+/// TypeError: `s == 0` over a text column (br-frankenpandas-jobhh).
+fn equality_or_compare(
+    left: &Scalar,
+    right: &Scalar,
+    op: ComparisonOp,
+) -> Result<bool, ColumnError> {
+    match scalar_compare(left, right, op) {
+        Err(ColumnError::Type(_)) if matches!(op, ComparisonOp::Eq | ComparisonOp::Ne) => {
+            Ok(op == ComparisonOp::Ne)
+        }
+        other => other,
+    }
+}
+
 /// Compare two non-missing scalars using the given comparison operator.
 ///
 /// Both scalars are converted to `f64` for comparison. For `Utf8` values,
@@ -20556,8 +20574,7 @@ impl Column {
                 if l.is_missing() || r.is_missing() {
                     return Ok(Scalar::Null(NullKind::Null));
                 }
-                let result = scalar_compare(l, r, op)?;
-                Ok(Scalar::Bool(result))
+                Ok(Scalar::Bool(equality_or_compare(l, r, op)?))
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -20792,8 +20809,7 @@ impl Column {
                 if v.is_missing() {
                     return Ok(Scalar::Null(NullKind::Null));
                 }
-                let result = scalar_compare(v, scalar, op)?;
-                Ok(Scalar::Bool(result))
+                Ok(Scalar::Bool(equality_or_compare(v, scalar, op)?))
             })
             .collect::<Result<Vec<_>, _>>()?;
 
