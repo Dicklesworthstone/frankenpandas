@@ -5220,10 +5220,191 @@ fn index_labels_to_table_schema_type(labels: &[IndexLabel]) -> &'static str {
     }
 }
 
-fn serialize_json_value(value: &Value) -> Result<String, FrameError> {
-    serde_json::to_string(value).map_err(|err| {
+fn serialize_json_value(value: &Value, precision: u32) -> Result<String, FrameError> {
+    to_pandas_json(value, precision).map_err(|err| {
         FrameError::CompatibilityRejected(format!("failed to serialize JSON output: {err}"))
     })
+}
+
+/// pandas' `to_json` default `double_precision`.
+pub const JSON_DOUBLE_PRECISION: u32 = 10;
+
+/// A float's text as pandas' `to_json` writes it (its vendored ujson
+/// encoder) at `precision` decimals (`double_precision`, 0..=15), built on
+/// the stack: above 1e16 or below 1e-15 C's `%.{p}g` ('1.23456789e+20');
+/// anything else fixed point - the fraction scaled by 10^p, truncated and
+/// then rounded (a half up when the digit is odd or zero), carried into the
+/// whole part, its trailing zeros trimmed ('2.0' keeps one); not finite,
+/// null. serde_json's shortest round trip wrote 0.30000000000000004 for
+/// pandas' 0.3 and 1e-12 for its 0.0 (br-frankenpandas-6udgl).
+#[derive(Clone, Copy)]
+pub struct PandasJsonDouble {
+    bytes: [u8; 48],
+    len: usize,
+}
+
+impl PandasJsonDouble {
+    /// pandas' text for `value` at `precision` decimals.
+    #[must_use]
+    pub fn new(value: f64, precision: u32) -> Self {
+        let mut text = Self {
+            bytes: [0; 48],
+            len: 0,
+        };
+        if !value.is_finite() {
+            text.push(b"null");
+            return text;
+        }
+        let precision = precision.min(15);
+        let magnitude = value.abs();
+        // The encoder's bounds: 1e16 - 1, which is 1e16 as a double, and 1e-15.
+        if magnitude > 1e16 || (magnitude != 0.0 && magnitude < 1e-15) {
+            text.push_exponent_form(value, precision.max(1) as usize);
+            return text;
+        }
+        let scale = 10_f64.powi(precision as i32);
+        let mut whole = magnitude as u64;
+        let scaled = (magnitude - whole as f64) * scale;
+        let mut fraction = scaled as u64;
+        let rest = scaled - fraction as f64;
+        if rest > 0.5 || (rest == 0.5 && (fraction == 0 || fraction & 1 == 1)) {
+            fraction += 1;
+        }
+        if fraction as f64 >= scale {
+            fraction = 0;
+            whole += 1;
+        }
+        if precision == 0 {
+            let rest = magnitude - whole as f64;
+            if rest > 0.5 || (rest == 0.5 && whole & 1 == 1) {
+                whole += 1;
+            }
+        }
+        if value < 0.0 {
+            text.push(b"-");
+        }
+        text.push_digits(whole, 0);
+        if precision == 0 {
+            return text;
+        }
+        text.push(b".");
+        if fraction == 0 {
+            text.push(b"0");
+            return text;
+        }
+        let mut places = precision as usize;
+        while fraction.is_multiple_of(10) {
+            places -= 1;
+            fraction /= 10;
+        }
+        text.push_digits(fraction, places);
+        text
+    }
+
+    /// The text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        // Only ASCII is ever written.
+        std::str::from_utf8(&self.bytes[..self.len]).unwrap_or("null")
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        let end = (self.len + bytes.len()).min(self.bytes.len());
+        self.bytes[self.len..end].copy_from_slice(&bytes[..end - self.len]);
+        self.len = end;
+    }
+
+    /// `number`'s decimal digits, zero-padded on the left to `width`.
+    fn push_digits(&mut self, mut number: u64, width: usize) {
+        let mut digits = [b'0'; 20];
+        let mut at = digits.len();
+        loop {
+            at -= 1;
+            digits[at] = b'0' + (number % 10) as u8;
+            number /= 10;
+            if number == 0 {
+                break;
+            }
+        }
+        let at = at.min(digits.len().saturating_sub(width));
+        self.push(&digits[at..]);
+    }
+
+    /// C's `%.{significant}g` for an exponent form: the mantissa's trailing
+    /// zeros (and point) trimmed, a signed exponent of two digits or more.
+    fn push_exponent_form(&mut self, value: f64, significant: usize) {
+        use std::io::Write as _;
+        let mut scratch = [0_u8; 48];
+        let written = {
+            let mut cursor = &mut scratch[..];
+            let room = cursor.len();
+            let _ = write!(cursor, "{value:.*e}", significant - 1);
+            room - cursor.len()
+        };
+        let text = std::str::from_utf8(&scratch[..written]).unwrap_or("0e0");
+        let (mantissa, exponent) = text.split_once('e').unwrap_or((text, "0"));
+        let mantissa = if mantissa.contains('.') {
+            mantissa.trim_end_matches('0').trim_end_matches('.')
+        } else {
+            mantissa
+        };
+        let exponent: i32 = exponent.parse().unwrap_or(0);
+        self.push(mantissa.as_bytes());
+        self.push(if exponent < 0 { b"e-" } else { b"e+" });
+        self.push_digits(u64::from(exponent.unsigned_abs()), 2);
+    }
+}
+
+/// serde_json's compact formatter writing floats as [`PandasJsonDouble`].
+struct PandasJsonFormatter {
+    precision: u32,
+}
+
+impl serde_json::ser::Formatter for PandasJsonFormatter {
+    fn write_f64<W: ?Sized + std::io::Write>(
+        &mut self,
+        writer: &mut W,
+        value: f64,
+    ) -> std::io::Result<()> {
+        writer.write_all(
+            PandasJsonDouble::new(value, self.precision)
+                .as_str()
+                .as_bytes(),
+        )
+    }
+
+    fn write_f32<W: ?Sized + std::io::Write>(
+        &mut self,
+        writer: &mut W,
+        value: f32,
+    ) -> std::io::Result<()> {
+        self.write_f64(writer, f64::from(value))
+    }
+}
+
+/// `value` appended to `writer` as compact JSON with pandas' to_json floats
+/// at `precision` decimals ([`PandasJsonDouble`]).
+fn write_pandas_json<T: Serialize + ?Sized>(
+    writer: &mut Vec<u8>,
+    value: &T,
+    precision: u32,
+) -> serde_json::Result<()> {
+    value.serialize(&mut serde_json::Serializer::with_formatter(
+        writer,
+        PandasJsonFormatter { precision },
+    ))
+}
+
+/// `value` as compact JSON text with pandas' to_json floats at `precision`
+/// decimals ([`PandasJsonDouble`]).
+pub fn to_pandas_json<T: Serialize + ?Sized>(
+    value: &T,
+    precision: u32,
+) -> serde_json::Result<String> {
+    let mut out = Vec::new();
+    write_pandas_json(&mut out, value, precision)?;
+    // serde_json writes only UTF-8.
+    Ok(String::from_utf8(out).unwrap_or_default())
 }
 
 /// Parse an offset string like "3D", "1M", "2Y" into (count, unit).
@@ -28892,7 +29073,19 @@ impl Series {
     /// - `"split"`: `{"name":"...","index":[...],"data":[...]}`
     /// - `"records"` / `"values"`: `[val1, val2, ...]`
     /// - `"index"`: `{"label1": val1, "label2": val2, ...}`
+    ///
+    /// Floats are written at pandas' default `double_precision` (10).
     pub fn to_json(&self, orient: &str) -> Result<String, FrameError> {
+        self.to_json_with_precision(orient, JSON_DOUBLE_PRECISION)
+    }
+
+    /// [`Series::to_json`] with floats at `precision` decimals, pandas'
+    /// `double_precision` ([`PandasJsonDouble`]).
+    pub fn to_json_with_precision(
+        &self,
+        orient: &str,
+        precision: u32,
+    ) -> Result<String, FrameError> {
         match orient {
             "split" => {
                 let index = split_index_json_values(&self.index, self.index.row_multiindex());
@@ -28908,11 +29101,14 @@ impl Series {
                 } else {
                     index_label_to_json_value(&self.name.label())
                 };
-                serialize_json_value(&Value::Object(Map::from_iter([
-                    ("name".to_owned(), name),
-                    ("index".to_owned(), Value::Array(index)),
-                    ("data".to_owned(), Value::Array(data)),
-                ])))
+                serialize_json_value(
+                    &Value::Object(Map::from_iter([
+                        ("name".to_owned(), name),
+                        ("index".to_owned(), Value::Array(index)),
+                        ("data".to_owned(), Value::Array(data)),
+                    ])),
+                    precision,
+                )
             }
             "records" | "values" => {
                 let vals = self
@@ -28921,7 +29117,7 @@ impl Series {
                     .iter()
                     .map(scalar_to_json_value)
                     .collect();
-                serialize_json_value(&Value::Array(vals))
+                serialize_json_value(&Value::Array(vals), precision)
             }
             "index" => {
                 if self.index.has_duplicates() {
@@ -28933,7 +29129,7 @@ impl Series {
                 for (label, value) in self.index.labels().iter().zip(self.column.values()) {
                     entries.insert(index_label_to_json_key(label), scalar_to_json_value(value));
                 }
-                serialize_json_value(&Value::Object(entries))
+                serialize_json_value(&Value::Object(entries), precision)
             }
             _ => Err(FrameError::CompatibilityRejected(format!(
                 "unknown orient: {orient}"
@@ -91881,8 +92077,19 @@ impl DataFrame {
 
     /// Export DataFrame to JSON string.
     ///
-    /// Matches `pd.DataFrame.to_json(orient=...)`.
+    /// Matches `pd.DataFrame.to_json(orient=...)`, floats at pandas' default
+    /// `double_precision` (10).
     pub fn to_json(&self, orient: &str) -> Result<String, FrameError> {
+        self.to_json_with_precision(orient, JSON_DOUBLE_PRECISION)
+    }
+
+    /// [`DataFrame::to_json`] with floats at `precision` decimals, pandas'
+    /// `double_precision` ([`PandasJsonDouble`]).
+    pub fn to_json_with_precision(
+        &self,
+        orient: &str,
+        precision: u32,
+    ) -> Result<String, FrameError> {
         // A key names one column in these orients, so pandas refuses repeated
         // column keys (i17d4: the first duplicate's data was written for each).
         if matches!(orient, "records" | "columns" | "index") && self.has_repeated_column_keys() {
@@ -91912,12 +92119,13 @@ impl DataFrame {
                 // splits the row range across workers and concats their buffers in row
                 // order; wrapping in `[`..`]` reproduces SerializeSeq exactly.
                 let body = par_json_body(n, &|buf, row| {
-                    serde_json::to_writer(
-                        &mut *buf,
+                    write_pandas_json(
+                        buf,
                         &RowJson {
                             record: &record,
                             row_idx: row,
                         },
+                        precision,
                     )
                     .map_err(|_| ())
                 })
@@ -91963,7 +92171,7 @@ impl DataFrame {
                     let inner = par_json_body(n, &|buf, row| {
                         serde_json::to_writer(&mut *buf, &index_keys[row]).map_err(|_| ())?;
                         buf.push(b':');
-                        serde_json::to_writer(&mut *buf, &CellJson(&col_vals[row])).map_err(|_| ())
+                        write_pandas_json(buf, &CellJson(&col_vals[row]), precision).map_err(|_| ())
                     })
                     .map_err(|()| json_ser_err())?;
                     out.push(b'{');
@@ -92003,12 +92211,13 @@ impl DataFrame {
                 let body = par_json_body(self.len(), &|buf, row| {
                     serde_json::to_writer(&mut *buf, &index_keys[row]).map_err(|_| ())?;
                     buf.push(b':');
-                    serde_json::to_writer(
-                        &mut *buf,
+                    write_pandas_json(
+                        buf,
                         &RowJson {
                             record: &record,
                             row_idx: row,
                         },
+                        precision,
                     )
                     .map_err(|_| ())
                 })
@@ -92029,12 +92238,13 @@ impl DataFrame {
                 // `,"index":` / `,"data":` keys (no escapes) reproduces SerializeMap
                 // byte-for-byte.
                 let body = par_json_body(self.len(), &|buf, row| {
-                    serde_json::to_writer(
-                        &mut *buf,
+                    write_pandas_json(
+                        buf,
                         &RowArrayJson {
                             col_values: &col_values,
                             row_idx: row,
                         },
+                        precision,
                     )
                     .map_err(|_| ())
                 })
@@ -92044,7 +92254,7 @@ impl DataFrame {
                 out.extend_from_slice(b"\"columns\":");
                 serde_json::to_writer(&mut out, &self.column_order).map_err(|_| json_ser_err())?;
                 out.extend_from_slice(b",\"index\":");
-                serde_json::to_writer(&mut out, &index).map_err(|_| json_ser_err())?;
+                write_pandas_json(&mut out, &index, precision).map_err(|_| json_ser_err())?;
                 out.extend_from_slice(b",\"data\":[");
                 out.extend_from_slice(&body);
                 out.extend_from_slice(b"]}");
@@ -92060,12 +92270,13 @@ impl DataFrame {
                 // Each row's `[...]` array is independent; wrapping the comma-joined
                 // bodies in `[`..`]` reproduces DataArrayJson's SerializeSeq exactly.
                 let body = par_json_body(self.len(), &|buf, row| {
-                    serde_json::to_writer(
-                        &mut *buf,
+                    write_pandas_json(
+                        buf,
                         &RowArrayJson {
                             col_values: &col_values,
                             row_idx: row,
                         },
+                        precision,
                     )
                     .map_err(|_| ())
                 })
@@ -92137,23 +92348,26 @@ impl DataFrame {
                     })
                     .collect::<Result<Vec<_>, FrameError>>()?;
 
-                serialize_json_value(&Value::Object(Map::from_iter([
-                    (
-                        "schema".to_owned(),
-                        Value::Object(Map::from_iter([
-                            ("fields".to_owned(), Value::Array(fields)),
-                            (
-                                "primaryKey".to_owned(),
-                                Value::Array(vec![Value::String(index_name)]),
-                            ),
-                            (
-                                "pandas_version".to_owned(),
-                                Value::String("1.4.0".to_owned()),
-                            ),
-                        ])),
-                    ),
-                    ("data".to_owned(), Value::Array(data)),
-                ])))
+                serialize_json_value(
+                    &Value::Object(Map::from_iter([
+                        (
+                            "schema".to_owned(),
+                            Value::Object(Map::from_iter([
+                                ("fields".to_owned(), Value::Array(fields)),
+                                (
+                                    "primaryKey".to_owned(),
+                                    Value::Array(vec![Value::String(index_name)]),
+                                ),
+                                (
+                                    "pandas_version".to_owned(),
+                                    Value::String("1.4.0".to_owned()),
+                                ),
+                            ])),
+                        ),
+                        ("data".to_owned(), Value::Array(data)),
+                    ])),
+                    precision,
+                )
             }
             other => Err(FrameError::CompatibilityRejected(format!(
                 "unsupported to_json orient: {other:?}"
@@ -161057,6 +161271,91 @@ mod tests {
         assert!(json.ends_with(']'));
         assert!(json.contains("\"a\":1"));
         assert!(json.contains("\"b\":\"hello\""));
+    }
+
+    #[test]
+    fn dataframe_to_json_floats_follow_pandas_double_precision_6udgl() {
+        // Live pandas 2.2.3's text for each (to_json orient=... [,
+        // double_precision=...]); serde's shortest round trip wrote
+        // 0.3333333333333333, 1e-12, 0.30000000000000004, 1e+16 (6udgl).
+        let values = vec![
+            1.0 / 3.0,
+            2.0,
+            1e-12,
+            123_456_789.123_456_79,
+            1e20,
+            -0.5,
+            0.1 + 0.2,
+            1.5e-5,
+            1e16,
+            1e-15,
+            9.99e-16,
+            0.999_999_999_99,
+        ];
+        let column = |values: Vec<f64>| {
+            let index = (0..values.len() as i64).map(IndexLabel::from).collect();
+            let scalars = values.into_iter().map(Scalar::Float64).collect();
+            DataFrame::from_series(vec![Series::from_values("x", index, scalars).unwrap()]).unwrap()
+        };
+        let frame = column(values);
+        assert_eq!(
+            frame.to_json("values").unwrap(),
+            "[[0.3333333333],[2.0],[0.0],[123456789.123456791],[1e+20],[-0.5],[0.3],\
+             [0.000015],[10000000000000000.0],[0.0],[9.99e-16],[1.0]]"
+        );
+        assert_eq!(
+            frame.to_json_with_precision("values", 3).unwrap(),
+            "[[0.333],[2.0],[0.0],[123456789.123],[1e+20],[-0.5],[0.3],[0.0],\
+             [10000000000000000.0],[0.0],[9.99e-16],[1.0]]"
+        );
+        let small = column(vec![1.0 / 3.0, 0.1 + 0.2]);
+        for (orient, want) in [
+            ("records", r#"[{"x":0.3333333333},{"x":0.3}]"#),
+            ("columns", r#"{"x":{"0":0.3333333333,"1":0.3}}"#),
+            ("index", r#"{"0":{"x":0.3333333333},"1":{"x":0.3}}"#),
+            (
+                "split",
+                r#"{"columns":["x"],"index":[0,1],"data":[[0.3333333333],[0.3]]}"#,
+            ),
+        ] {
+            assert_eq!(small.to_json(orient).unwrap(), want, "{orient}");
+        }
+        let table = small.to_json("table").unwrap();
+        assert!(table.ends_with(r#""data":[{"index":0,"x":0.3333333333},{"index":1,"x":0.3}]}"#));
+        let series = Series::from_values(
+            "x",
+            vec![IndexLabel::from(0_i64), IndexLabel::from(1_i64)],
+            vec![Scalar::Float64(1.0 / 3.0), Scalar::Float64(0.1 + 0.2)],
+        )
+        .unwrap();
+        assert_eq!(
+            series.to_json("index").unwrap(),
+            r#"{"0":0.3333333333,"1":0.3}"#
+        );
+        assert_eq!(
+            series.to_json_with_precision("split", 2).unwrap(),
+            r#"{"name":"x","index":[0,1],"data":[0.33,0.3]}"#
+        );
+        // NEGATIVE: ints, bools, text and missing cells are not floats.
+        let mixed = DataFrame::from_dict(
+            &["i", "b", "s"],
+            vec![
+                ("i", vec![Scalar::Int64(7), Scalar::Int64(-2)]),
+                ("b", vec![Scalar::Bool(true), Scalar::Null(NullKind::Null)]),
+                (
+                    "s",
+                    vec![
+                        Scalar::Utf8("0.30000000000000004".to_owned()),
+                        Scalar::Utf8("x".to_owned()),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            mixed.to_json("records").unwrap(),
+            r#"[{"i":7,"b":true,"s":"0.30000000000000004"},{"i":-2,"b":null,"s":"x"}]"#
+        );
     }
 
     #[test]

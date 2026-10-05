@@ -27017,3 +27017,36 @@ def test_read_csv_text_dtype_keeps_text_and_missing_like_pandas_i5aoq(case: str)
         )
 
     assert shown(fpd) == shown(pd)
+
+
+# to_json writes floats as pandas' encoder does - double_precision decimals,
+# trailing zeros trimmed, C's %g past 1e16 / below 1e-15 - and takes
+# double_precision (br-frankenpandas-6udgl, br-frankenpandas-gl38f).
+_JSON_6UDGL_VALUES = [1 / 3, 2.0, 1e-12, 123456789.123456789, 1e20, -0.5, 0.1 + 0.2, 1.5e-5, 1e16, 1e-15, 9.99e-16, 5e-324, 0.99999999999, float("nan")]
+
+_JSON_6UDGL_CASES = {
+    "columns": lambda m: m.DataFrame({"x": _JSON_6UDGL_VALUES}).to_json(),
+    "records": lambda m: m.DataFrame({"x": _JSON_6UDGL_VALUES}).to_json(orient="records"),
+    "split": lambda m: m.DataFrame({"x": _JSON_6UDGL_VALUES}).to_json(orient="split"),
+    "values, double_precision=3": lambda m: m.DataFrame({"x": _JSON_6UDGL_VALUES}).to_json(orient="values", double_precision=3),
+    "index, double_precision=0": lambda m: m.DataFrame({"x": _JSON_6UDGL_VALUES}).to_json(orient="index", double_precision=0),
+    "table, double_precision=15": lambda m: m.DataFrame({"x": _JSON_6UDGL_VALUES}).to_json(orient="table", double_precision=15),
+    "lines, double_precision=2": lambda m: m.DataFrame({"x": _JSON_6UDGL_VALUES}).to_json(orient="records", lines=True, double_precision=2),
+    "Series": lambda m: m.Series(_JSON_6UDGL_VALUES, name="s").to_json(),
+    "Series split, double_precision=4": lambda m: m.Series(_JSON_6UDGL_VALUES, name="s").to_json(orient="split", double_precision=4),
+    "float index labels, split": lambda m: m.DataFrame({"x": [1, 2]}, index=[0.123456789012, 1 / 3]).to_json(orient="split", double_precision=3),
+    "double_precision=16 refused": lambda m: m.DataFrame({"x": [1.0]}).to_json(double_precision=16),
+    "ints, bools and text unchanged (NEGATIVE)": lambda m: m.DataFrame({"i": [7, -2], "b": [True, False], "s": ["0.30000000000000004", "x"]}).to_json(orient="records"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_JSON_6UDGL_CASES))
+def test_to_json_float_text_and_double_precision_like_pandas_6udgl(case: str) -> None:
+    def shown(m: Any) -> Any:
+        try:
+            return _JSON_6UDGL_CASES[case](m)
+        except ValueError as error:
+            return ("ValueError", str(error))
+
+    assert shown(fpd) == shown(pd)

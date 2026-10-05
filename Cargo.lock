@@ -1448,7 +1448,6 @@ dependencies = [
  "serde-pickle",
  "serde_json",
  "thiserror",
- "zmij",
 ]
 
 [[package]]

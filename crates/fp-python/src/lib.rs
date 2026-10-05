@@ -35294,32 +35294,38 @@ impl PySeries {
             storage_options,
             mode,
         };
-        write_json_py("Series.to_json", path_or_buf, orient, &args, |lines| {
-            if lines {
-                return Err(not_implemented("Series.to_json(lines=True)"));
-            }
-            // A column of dates writes as their instants (fvsao.67), in
-            // date_format / date_unit.
-            let series = Python::attach(|py| object_instants(py, &self.inner))?;
-            let frame = series
-                .to_frame(Some("__value__"))
-                .map_err(frame_error_to_py)?;
-            let frame = json_orient_dates(frame, orient, date_format, date_unit)?;
-            let column = frame
-                .column("__value__")
-                .cloned()
-                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("__value__"))?;
-            let index = match series.index().row_multiindex() {
-                Some(levels) if orient.unwrap_or("index") == "index" => {
-                    Python::attach(|py| json_tuple_keyed_index(py, levels))?
+        write_json_py(
+            "Series.to_json",
+            path_or_buf,
+            orient,
+            &args,
+            |lines, precision| {
+                if lines {
+                    return Err(not_implemented("Series.to_json(lines=True)"));
                 }
-                _ => frame.index().clone(),
-            };
-            Series::new(series.name(), index, column)
-                .map_err(frame_error_to_py)?
-                .to_json(orient.unwrap_or("index"))
-                .map_err(frame_error_to_py)
-        })
+                // A column of dates writes as their instants (fvsao.67), in
+                // date_format / date_unit.
+                let series = Python::attach(|py| object_instants(py, &self.inner))?;
+                let frame = series
+                    .to_frame(Some("__value__"))
+                    .map_err(frame_error_to_py)?;
+                let frame = json_orient_dates(frame, orient, date_format, date_unit)?;
+                let column = frame
+                    .column("__value__")
+                    .cloned()
+                    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>("__value__"))?;
+                let index = match series.index().row_multiindex() {
+                    Some(levels) if orient.unwrap_or("index") == "index" => {
+                        Python::attach(|py| json_tuple_keyed_index(py, levels))?
+                    }
+                    _ => frame.index().clone(),
+                };
+                Series::new(series.name(), index, column)
+                    .map_err(frame_error_to_py)?
+                    .to_json_with_precision(orient.unwrap_or("index"), precision)
+                    .map_err(frame_error_to_py)
+            },
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -50943,68 +50949,82 @@ impl PyDataFrame {
             storage_options,
             mode,
         };
-        write_json_py("DataFrame.to_json", path_or_buf, orient, &args, |lines| {
-            // Columns of dates write as their instants (fvsao.67), in
-            // date_format / date_unit.
-            let frame = Python::attach(|py| frame_object_instants(py, &self.inner))?;
-            let frame = json_orient_dates(frame, orient, date_format, date_unit)?;
-            // MultiIndex columns key records / columns / index by each
-            // column's tuple as Python prints it ("('p', 's')"), as pandas'
-            // (the flat leaf names were written, so a leaf name repeated
-            // across the upper levels was refused; i17d4).
-            let frame = match frame.columns_multiindex() {
-                Some(levels)
-                    if matches!(orient.unwrap_or("columns"), "records" | "columns" | "index") =>
-                {
-                    Python::attach(|py| -> PyResult<DataFrame> {
-                        let keys = (0..levels.len())
-                            .map(|position| {
-                                let labels = levels
-                                    .get_tuple(position)
-                                    .unwrap_or_default()
-                                    .into_iter()
-                                    .map(|label| index_label_to_py(py, label))
-                                    .collect::<PyResult<Vec<_>>>()?;
-                                Ok(PyTuple::new(py, labels)?.str()?.to_string())
-                            })
-                            .collect::<PyResult<Vec<String>>>()?;
-                        let columns = (0..frame.num_columns())
-                            .filter_map(|position| frame.column_at(position).cloned());
-                        let keyed = DataFrame::new_with_column_order(
-                            frame.index().clone(),
-                            fp_frame::ColumnStore::from_pairs(keys.iter().cloned().zip(columns)),
-                            keys,
-                        );
-                        match frame.row_multiindex() {
-                            Some(rows) => keyed.and_then(|f| f.with_row_multiindex(rows.clone())),
-                            None => keyed,
-                        }
+        write_json_py(
+            "DataFrame.to_json",
+            path_or_buf,
+            orient,
+            &args,
+            |lines, precision| {
+                // Columns of dates write as their instants (fvsao.67), in
+                // date_format / date_unit.
+                let frame = Python::attach(|py| frame_object_instants(py, &self.inner))?;
+                let frame = json_orient_dates(frame, orient, date_format, date_unit)?;
+                // MultiIndex columns key records / columns / index by each
+                // column's tuple as Python prints it ("('p', 's')"), as pandas'
+                // (the flat leaf names were written, so a leaf name repeated
+                // across the upper levels was refused; i17d4).
+                let frame = match frame.columns_multiindex() {
+                    Some(levels)
+                        if matches!(
+                            orient.unwrap_or("columns"),
+                            "records" | "columns" | "index"
+                        ) =>
+                    {
+                        Python::attach(|py| -> PyResult<DataFrame> {
+                            let keys = (0..levels.len())
+                                .map(|position| {
+                                    let labels = levels
+                                        .get_tuple(position)
+                                        .unwrap_or_default()
+                                        .into_iter()
+                                        .map(|label| index_label_to_py(py, label))
+                                        .collect::<PyResult<Vec<_>>>()?;
+                                    Ok(PyTuple::new(py, labels)?.str()?.to_string())
+                                })
+                                .collect::<PyResult<Vec<String>>>()?;
+                            let columns = (0..frame.num_columns())
+                                .filter_map(|position| frame.column_at(position).cloned());
+                            let keyed = DataFrame::new_with_column_order(
+                                frame.index().clone(),
+                                fp_frame::ColumnStore::from_pairs(
+                                    keys.iter().cloned().zip(columns),
+                                ),
+                                keys,
+                            );
+                            match frame.row_multiindex() {
+                                Some(rows) => {
+                                    keyed.and_then(|f| f.with_row_multiindex(rows.clone()))
+                                }
+                                None => keyed,
+                            }
+                            .map_err(frame_error_to_py)
+                        })?
+                    }
+                    _ => frame,
+                };
+                // A row MultiIndex keys columns / index by each row's tuple too.
+                let frame = match frame.row_multiindex() {
+                    Some(levels) if matches!(orient.unwrap_or("columns"), "columns" | "index") => {
+                        let index = Python::attach(|py| json_tuple_keyed_index(py, levels))?;
+                        frame.with_index(index).map_err(frame_error_to_py)?
+                    }
+                    _ => frame,
+                };
+                if lines {
+                    // pandas ends every record line, the last included, with "\n".
+                    let mut text = fp_io::write_jsonl_string_with_precision(&frame, precision)
+                        .map_err(io_error_to_py)?;
+                    if !text.is_empty() && !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    Ok(text)
+                } else {
+                    frame
+                        .to_json_with_precision(orient.unwrap_or("columns"), precision)
                         .map_err(frame_error_to_py)
-                    })?
                 }
-                _ => frame,
-            };
-            // A row MultiIndex keys columns / index by each row's tuple too.
-            let frame = match frame.row_multiindex() {
-                Some(levels) if matches!(orient.unwrap_or("columns"), "columns" | "index") => {
-                    let index = Python::attach(|py| json_tuple_keyed_index(py, levels))?;
-                    frame.with_index(index).map_err(frame_error_to_py)?
-                }
-                _ => frame,
-            };
-            if lines {
-                // pandas ends every record line, the last included, with "\n".
-                let mut text = fp_io::write_jsonl_string(&frame).map_err(io_error_to_py)?;
-                if !text.is_empty() && !text.ends_with('\n') {
-                    text.push('\n');
-                }
-                Ok(text)
-            } else {
-                frame
-                    .to_json(orient.unwrap_or("columns"))
-                    .map_err(frame_error_to_py)
-            }
-        })
+            },
+        )
     }
 
     /// Was `self.inner.to_string()` — an ASCII table, not LaTeX.
@@ -90012,22 +90032,32 @@ struct JsonWriteArgs<'a, 'py> {
     mode: &'a str,
 }
 
-/// Write pandas' `to_json` output. `render(lines)` produces the JSON text
-/// (JSON Lines when `lines`). force_ascii escapes non-ASCII as pandas does
-/// (the default, which frankenpandas used to skip), lines and mode='a' follow
-/// pandas' rules, and every other keyword raises NotImplementedError at a
-/// non-default value.
+/// Write pandas' `to_json` output. `render(lines, precision)` produces the
+/// JSON text (JSON Lines when `lines`, floats at `precision` decimals -
+/// double_precision, 0..=15 as pandas checks it; it was refused,
+/// br-frankenpandas-gl38f). force_ascii escapes non-ASCII as pandas does
+/// (the default, which frankenpandas used to skip), lines and mode='a'
+/// follow pandas' rules, and every other keyword raises NotImplementedError
+/// at a non-default value.
 fn write_json_py(
     method: &str,
     path_or_buf: Option<&Bound<'_, PyAny>>,
     orient: Option<&str>,
     args: &JsonWriteArgs<'_, '_>,
-    render: impl FnOnce(bool) -> PyResult<String>,
+    render: impl FnOnce(bool, u32) -> PyResult<String>,
 ) -> PyResult<Option<String>> {
+    let precision = u32::try_from(args.double_precision)
+        .ok()
+        .filter(|precision| *precision <= 15)
+        .ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Invalid value '{}' for option 'double_precision', max is '15'",
+                args.double_precision
+            ))
+        })?;
     unsupported_params(
         method,
         &[
-            ("double_precision", args.double_precision == 10),
             ("default_handler", args.default_handler.is_none()),
             (
                 "compression",
@@ -90057,7 +90087,7 @@ fn write_json_py(
             )));
         }
     }
-    let text = render(args.lines)?;
+    let text = render(args.lines, precision)?;
     let text = if args.force_ascii {
         ascii_escape_json(&text)
     } else {

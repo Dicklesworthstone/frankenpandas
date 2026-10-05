@@ -88,7 +88,7 @@ AACE is a core identity constraint, not a best-effort optimization. pandas' alig
 
 ## What's In The Box
 
-The capability surface (more than 500,000 lines of Rust under `src/` across 15 crates):
+The capability surface (more than 600,000 lines of Rust under `src/` across 15 crates):
 
 | Category | Coverage |
 |----------|----------|
@@ -149,7 +149,7 @@ Plus two auxiliary crates: fp-conformance (1,387 packets / 1,400 fixture files)
 and fp-frankentui (terminal UI dashboard, experimental).
 ```
 
-The diagram above shows the runtime/data-flow crates. The total workspace is **15 crates, more than 600,000 lines of Rust under `crates/`** (more than 500,000 of those lines live under `src/` directories, including the inline `#[cfg(test)]` modules; the rest is out-of-`src/` test, example, fixture, and bench scaffolding). The per-crate figures below are floors on each crate's `src/` lines; a test checks every one against the tree.
+The diagram above shows the runtime/data-flow crates. The total workspace is **15 crates, more than 600,000 lines of Rust under `crates/`** (more than 600,000 of those lines live under `src/` directories, including the inline `#[cfg(test)]` modules; the rest is out-of-`src/` test, example, fixture, and bench scaffolding). The per-crate figures below are floors on each crate's `src/` lines; a test checks every one against the tree.
 
 ## Workspace Structure
 

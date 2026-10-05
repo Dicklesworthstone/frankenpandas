@@ -8916,6 +8916,7 @@ fn write_json_records_serde(
     frame: &DataFrame,
     headers: &[String],
     column_float_promotions: &[bool],
+    precision: u32,
 ) -> Result<String, IoError> {
     let row_count = frame.index().len();
     let mut records = Vec::with_capacity(row_count);
@@ -8931,7 +8932,7 @@ fn write_json_records_serde(
         }
         records.push(serde_json::Value::Object(obj));
     }
-    Ok(serde_json::to_string(&records)?)
+    Ok(fp_frame::to_pandas_json(&records, precision)?)
 }
 
 /// Streaming typed fast path for `to_json(orient="records")` over an all-valid
@@ -9063,32 +9064,27 @@ fn extract_typed_value_columns(frame: &DataFrame) -> Option<(Vec<JCol<'_>>, Vec<
     Some((cols, keys))
 }
 
-/// Append a finite JSON float with the exact shortest-round-trip spelling
-/// `serde_json` uses, but without constructing a formatter or a temporary byte
-/// vector per cell. `zmij::Buffer` owns its fixed stack scratch and is reused
-/// for the complete JSON document.
+/// Append a finite JSON float as pandas' `to_json` spells it at `precision`
+/// decimals ([`fp_frame::PandasJsonDouble`], built on the stack - no
+/// formatter or byte vector per cell). It was serde's shortest round trip,
+/// 0.30000000000000004 where pandas writes 0.3 (br-frankenpandas-6udgl).
 #[inline]
-fn append_json_finite_f64(out: &mut String, value: f64, float_buffer: &mut zmij::Buffer) {
-    out.push_str(float_buffer.format_finite(value));
+fn append_json_finite_f64(out: &mut String, value: f64, precision: u32) {
+    out.push_str(fp_frame::PandasJsonDouble::new(value, precision).as_str());
 }
 
-/// Append cell `(col, r)` as a JSON value, byte-identical to serde:
-/// `i64` via `append_i64_decimal`, finite `f64` via serde's Zmij formatter,
-/// non-finite `f64` as `null` (matching `scalar_to_json`), `bool` as
-/// `true`/`false`. `float_buffer` is a reusable direct-byte formatter scratch.
+/// Append cell `(col, r)` as a JSON value: `i64` via `append_i64_decimal`,
+/// finite `f64` as pandas at `precision` decimals
+/// ([`append_json_finite_f64`]), non-finite `f64` as `null` (matching
+/// `scalar_to_json`), `bool` as `true`/`false`.
 #[inline]
-fn append_typed_json_value(
-    out: &mut String,
-    col: &JCol<'_>,
-    r: usize,
-    float_buffer: &mut zmij::Buffer,
-) {
+fn append_typed_json_value(out: &mut String, col: &JCol<'_>, r: usize, precision: u32) {
     match col {
         JCol::I(s) => append_i64_decimal(out, s[r]),
         JCol::F(s) => {
             let v = s[r];
             if v.is_finite() {
-                append_json_finite_f64(out, v, float_buffer);
+                append_json_finite_f64(out, v, precision);
             } else {
                 out.push_str("null");
             }
@@ -9124,7 +9120,7 @@ fn append_typed_json_value(
         JCol::FN(s, validity) => {
             let v = s[r];
             if validity.get(r) && v.is_finite() {
-                append_json_finite_f64(out, v, float_buffer);
+                append_json_finite_f64(out, v, precision);
             } else {
                 out.push_str("null");
             }
@@ -9148,7 +9144,11 @@ fn append_typed_json_value(
     }
 }
 
-fn try_write_json_records_typed(frame: &DataFrame, as_jsonl: bool) -> Option<String> {
+fn try_write_json_records_typed(
+    frame: &DataFrame,
+    as_jsonl: bool,
+    precision: u32,
+) -> Option<String> {
     let (cols, keys) = extract_typed_value_columns(frame)?;
     let n = frame.index().len();
     let mut out = String::with_capacity(
@@ -9159,7 +9159,6 @@ fn try_write_json_records_typed(frame: &DataFrame, as_jsonl: bool) -> Option<Str
     if !as_jsonl {
         out.push('[');
     }
-    let mut float_buffer = zmij::Buffer::new();
     for r in 0..n {
         if r > 0 {
             out.push(if as_jsonl { '\n' } else { ',' });
@@ -9170,7 +9169,7 @@ fn try_write_json_records_typed(frame: &DataFrame, as_jsonl: bool) -> Option<Str
                 out.push(',');
             }
             out.push_str(&keys[c]);
-            append_typed_json_value(&mut out, col, r, &mut float_buffer);
+            append_typed_json_value(&mut out, col, r, precision);
         }
         out.push('}');
     }
@@ -9239,7 +9238,7 @@ fn build_json_index_key_buffer(frame: &DataFrame) -> Option<(String, Vec<usize>)
     Some((keybuf, keyoff))
 }
 
-fn try_write_json_columns_typed(frame: &DataFrame) -> Option<String> {
+fn try_write_json_columns_typed(frame: &DataFrame, precision: u32) -> Option<String> {
     let (cols, colkeys) = extract_typed_value_columns(frame)?;
     let n = frame.index().len();
     // The n inner index-label keys, pre-serialized once, reused across every
@@ -9252,7 +9251,6 @@ fn try_write_json_columns_typed(frame: &DataFrame) -> Option<String> {
             .saturating_add(16),
     );
     out.push('{');
-    let mut float_buffer = zmij::Buffer::new();
     for (c, col) in cols.iter().enumerate() {
         if c > 0 {
             out.push(',');
@@ -9264,7 +9262,7 @@ fn try_write_json_columns_typed(frame: &DataFrame) -> Option<String> {
                 out.push(',');
             }
             out.push_str(&keybuf[keyoff[r]..keyoff[r + 1]]);
-            append_typed_json_value(&mut out, col, r, &mut float_buffer);
+            append_typed_json_value(&mut out, col, r, precision);
         }
         out.push('}');
     }
@@ -9280,7 +9278,7 @@ fn try_write_json_columns_typed(frame: &DataFrame) -> Option<String> {
 /// arm: outer keys in row order, inner keys in column order (both
 /// `preserve_order`), same key spellings and value formatting; bails (→ serde
 /// path, which errors) on a duplicate index-label key or any non-typed column.
-fn try_write_json_index_typed(frame: &DataFrame) -> Option<String> {
+fn try_write_json_index_typed(frame: &DataFrame, precision: u32) -> Option<String> {
     let (cols, colkeys) = extract_typed_value_columns(frame)?;
     let n = frame.index().len();
     // The n outer index-label keys, pre-serialized once.
@@ -9292,7 +9290,6 @@ fn try_write_json_index_typed(frame: &DataFrame) -> Option<String> {
             .saturating_add(16),
     );
     out.push('{');
-    let mut float_buffer = zmij::Buffer::new();
     for r in 0..n {
         if r > 0 {
             out.push(',');
@@ -9304,7 +9301,7 @@ fn try_write_json_index_typed(frame: &DataFrame) -> Option<String> {
                 out.push(',');
             }
             out.push_str(&colkeys[c]);
-            append_typed_json_value(&mut out, col, r, &mut float_buffer);
+            append_typed_json_value(&mut out, col, r, precision);
         }
         out.push('}');
     }
@@ -9315,9 +9312,8 @@ fn try_write_json_index_typed(frame: &DataFrame) -> Option<String> {
 /// Append the row-major `[[v, v], ...]` array of all cells (column order per
 /// row) to `out` — the shared body of the `values` orient and the `data`
 /// section of the `split` orient.
-fn append_json_row_arrays(out: &mut String, cols: &[JCol<'_>], n: usize) {
+fn append_json_row_arrays(out: &mut String, cols: &[JCol<'_>], n: usize, precision: u32) {
     out.push('[');
-    let mut float_buffer = zmij::Buffer::new();
     for r in 0..n {
         if r > 0 {
             out.push(',');
@@ -9327,7 +9323,7 @@ fn append_json_row_arrays(out: &mut String, cols: &[JCol<'_>], n: usize) {
             if c > 0 {
                 out.push(',');
             }
-            append_typed_json_value(out, col, r, &mut float_buffer);
+            append_typed_json_value(out, col, r, precision);
         }
         out.push(']');
     }
@@ -9337,7 +9333,7 @@ fn append_json_row_arrays(out: &mut String, cols: &[JCol<'_>], n: usize) {
 /// Streaming typed fast path for `to_json(orient="values")` — `[[v, v], ...]`,
 /// row-major arrays with no keys (the simplest orient). Bit-identical to the
 /// serde `Values` arm. Bails (→ serde) on any non-typed column.
-fn try_write_json_values_typed(frame: &DataFrame) -> Option<String> {
+fn try_write_json_values_typed(frame: &DataFrame, precision: u32) -> Option<String> {
     let (cols, _keys) = extract_typed_value_columns(frame)?;
     let n = frame.index().len();
     let mut out = String::with_capacity(
@@ -9345,7 +9341,7 @@ fn try_write_json_values_typed(frame: &DataFrame) -> Option<String> {
             .saturating_mul(12)
             .saturating_add(16),
     );
-    append_json_row_arrays(&mut out, &cols, n);
+    append_json_row_arrays(&mut out, &cols, n, precision);
     Some(out)
 }
 
@@ -9357,7 +9353,7 @@ fn try_write_json_values_typed(frame: &DataFrame) -> Option<String> {
 /// for an Int64 index, hand-rolled here), `data` via `append_json_row_arrays`,
 /// and the object keys are in insertion order (columns, index, data) under
 /// `preserve_order`. Bails (→ serde) on any non-typed column.
-fn try_write_json_split_typed(frame: &DataFrame) -> Option<String> {
+fn try_write_json_split_typed(frame: &DataFrame, precision: u32) -> Option<String> {
     let (cols, _keys) = extract_typed_value_columns(frame)?;
     let n = frame.index().len();
     let headers = frame.column_names();
@@ -9382,7 +9378,8 @@ fn try_write_json_split_typed(frame: &DataFrame) -> Option<String> {
             if i > 0 {
                 idx_json.push(',');
             }
-            idx_json.push_str(&serde_json::to_string(&index_label_to_json(label)).ok()?);
+            idx_json
+                .push_str(&fp_frame::to_pandas_json(&index_label_to_json(label), precision).ok()?);
         }
     }
     idx_json.push(']');
@@ -9397,17 +9394,29 @@ fn try_write_json_split_typed(frame: &DataFrame) -> Option<String> {
     out.push_str(",\"index\":");
     out.push_str(&idx_json);
     out.push_str(",\"data\":");
-    append_json_row_arrays(&mut out, &cols, n);
+    append_json_row_arrays(&mut out, &cols, n, precision);
     out.push('}');
     Some(out)
 }
 
+/// `frame` as `to_json(orient)` text, floats at pandas' default
+/// `double_precision` (10).
 pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String, IoError> {
+    write_json_string_with_precision(frame, orient, fp_frame::JSON_DOUBLE_PRECISION)
+}
+
+/// [`write_json_string`] with floats at `precision` decimals, pandas'
+/// `double_precision` ([`fp_frame::PandasJsonDouble`]).
+pub fn write_json_string_with_precision(
+    frame: &DataFrame,
+    orient: JsonOrient,
+    precision: u32,
+) -> Result<String, IoError> {
     if let Some(row_multiindex) = frame.row_multiindex()
         && orient != JsonOrient::Values
     {
         let materialized = materialize_synthetic_row_multiindex_columns(frame)?;
-        let mut out = write_json_string(&materialized, orient)?;
+        let mut out = write_json_string_with_precision(&materialized, orient, precision)?;
         // The level values ride along as synthetic columns; the level NAMES
         // need their own slot, and only `split` has an object to put it in.
         if orient == JsonOrient::Split && out.ends_with('}') {
@@ -9449,7 +9458,7 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
         JsonOrient::Records => {
             // Typed streaming fast path for all-valid numeric/bool frames; falls
             // back to the serde tree below on anything it can't handle.
-            if let Some(s) = try_write_json_records_typed(frame, false) {
+            if let Some(s) = try_write_json_records_typed(frame, false, precision) {
                 return Ok(s);
             }
             let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
@@ -9461,11 +9470,11 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
                     })
                 })
                 .collect::<Vec<_>>();
-            write_json_records_serde(frame, &headers, &column_float_promotions)
+            write_json_records_serde(frame, &headers, &column_float_promotions, precision)
         }
         JsonOrient::Columns => {
             // Typed streaming fast path; falls back to the serde tree below.
-            if let Some(s) = try_write_json_columns_typed(frame) {
+            if let Some(s) = try_write_json_columns_typed(frame, precision) {
                 return Ok(s);
             }
             let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
@@ -9498,11 +9507,14 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
                 }
                 outer.insert(name.clone(), serde_json::Value::Object(col_obj));
             }
-            Ok(serde_json::to_string(&serde_json::Value::Object(outer))?)
+            Ok(fp_frame::to_pandas_json(
+                &serde_json::Value::Object(outer),
+                precision,
+            )?)
         }
         JsonOrient::Index => {
             // Typed streaming fast path; falls back to the serde tree below.
-            if let Some(s) = try_write_json_index_typed(frame) {
+            if let Some(s) = try_write_json_index_typed(frame, precision) {
                 return Ok(s);
             }
             let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
@@ -9540,11 +9552,14 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
                     )));
                 }
             }
-            Ok(serde_json::to_string(&serde_json::Value::Object(outer))?)
+            Ok(fp_frame::to_pandas_json(
+                &serde_json::Value::Object(outer),
+                precision,
+            )?)
         }
         JsonOrient::Split => {
             // Typed streaming fast path; falls back to the serde tree below.
-            if let Some(s) = try_write_json_split_typed(frame) {
+            if let Some(s) = try_write_json_split_typed(frame, precision) {
                 return Ok(s);
             }
             let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
@@ -9588,11 +9603,14 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
             obj.insert("columns".into(), serde_json::Value::Array(col_array));
             obj.insert("index".into(), serde_json::Value::Array(index_array));
             obj.insert("data".into(), serde_json::Value::Array(data));
-            Ok(serde_json::to_string(&serde_json::Value::Object(obj))?)
+            Ok(fp_frame::to_pandas_json(
+                &serde_json::Value::Object(obj),
+                precision,
+            )?)
         }
         JsonOrient::Values => {
             // Typed streaming fast path; falls back to the serde tree below.
-            if let Some(s) = try_write_json_values_typed(frame) {
+            if let Some(s) = try_write_json_values_typed(frame, precision) {
                 return Ok(s);
             }
             let column_float_promotions = columns
@@ -9619,7 +9637,10 @@ pub fn write_json_string(frame: &DataFrame, orient: JsonOrient) -> Result<String
                     .collect();
                 data.push(serde_json::Value::Array(row));
             }
-            Ok(serde_json::to_string(&serde_json::Value::Array(data))?)
+            Ok(fp_frame::to_pandas_json(
+                &serde_json::Value::Array(data),
+                precision,
+            )?)
         }
     }
 }
@@ -9974,9 +9995,18 @@ pub fn write_stata_with_options(
 /// with no enclosing array. This format is standard for streaming
 /// data pipelines and log processing.
 pub fn write_jsonl_string(frame: &DataFrame) -> Result<String, IoError> {
+    write_jsonl_string_with_precision(frame, fp_frame::JSON_DOUBLE_PRECISION)
+}
+
+/// [`write_jsonl_string`] with floats at `precision` decimals, pandas'
+/// `double_precision` ([`fp_frame::PandasJsonDouble`]).
+pub fn write_jsonl_string_with_precision(
+    frame: &DataFrame,
+    precision: u32,
+) -> Result<String, IoError> {
     // Typed streaming fast path (\n-joined row objects, no enclosing array);
     // falls back to the serde tree below on anything it can't handle.
-    if let Some(s) = try_write_json_records_typed(frame, true) {
+    if let Some(s) = try_write_json_records_typed(frame, true, precision) {
         return Ok(s);
     }
     let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
@@ -10001,7 +10031,10 @@ pub fn write_jsonl_string(frame: &DataFrame) -> Result<String, IoError> {
                 .unwrap_or(serde_json::Value::Null);
             obj.insert(name.clone(), val);
         }
-        lines.push(serde_json::to_string(&serde_json::Value::Object(obj))?);
+        lines.push(fp_frame::to_pandas_json(
+            &serde_json::Value::Object(obj),
+            precision,
+        )?);
     }
 
     Ok(lines.join("\n"))
@@ -24425,31 +24458,40 @@ mod tests {
     }
 
     #[test]
-    fn json_direct_float_spelling_matches_serde() {
-        // The typed writer deliberately bypasses serde's formatter on its hot
-        // path. Lock its shortest-round-trip spelling to the serde reference
-        // at fixed, scientific, subnormal, signed-zero, and largest-finite
-        // boundaries before the writer uses it for every cell in a document.
-        for value in [
-            -0.0,
-            0.0,
-            1.0,
-            -1.0,
-            1.25,
-            1e-7,
-            1e-6,
-            1e20,
-            f64::MIN_POSITIVE,
-            f64::from_bits(1),
-            f64::MAX,
-        ] {
-            let mut direct = String::new();
-            let mut float_buffer = zmij::Buffer::new();
-            super::append_json_finite_f64(&mut direct, value, &mut float_buffer);
-            assert_eq!(
-                direct,
-                serde_json::to_string(&value).expect("finite JSON float")
-            );
+    fn json_direct_float_spelling_matches_pandas_6udgl() {
+        // The typed writer's spelling is pandas' to_json (its ujson
+        // encoder), as live pandas 2.2.3 writes these at double_precision
+        // 10, 3 and 0: fixed point to the precision, trailing zeros
+        // trimmed, C's %g past 1e16 / below 1e-15. serde's shortest round
+        // trip wrote 0.30000000000000004 and 1e-7 (br-frankenpandas-6udgl).
+        let cases: [(f64, &str, &str, &str); 15] = [
+            (-0.0, "0.0", "0.0", "0"),
+            (0.0, "0.0", "0.0", "0"),
+            (1.0, "1.0", "1.0", "1"),
+            (-1.0, "-1.0", "-1.0", "-1"),
+            (1.25, "1.25", "1.25", "1"),
+            (1e-7, "0.0000001", "0.0", "0"),
+            (1e-6, "0.000001", "0.0", "0"),
+            (1e20, "1e+20", "1e+20", "1e+20"),
+            (f64::MIN_POSITIVE, "2.225073859e-308", "2.23e-308", "2e-308"),
+            (f64::from_bits(1), "4.940656458e-324", "4.94e-324", "5e-324"),
+            (f64::MAX, "1.797693135e+308", "1.8e+308", "2e+308"),
+            (0.1 + 0.2, "0.3", "0.3", "0"),
+            (1.0 / 3.0, "0.3333333333", "0.333", "0"),
+            (-2.5e-16, "-2.5e-16", "-2.5e-16", "-3e-16"),
+            (
+                123_456_789.123_456_79,
+                "123456789.123456791",
+                "123456789.123",
+                "123456789",
+            ),
+        ];
+        for (value, ten, three, zero) in cases {
+            for (precision, want) in [(10, ten), (3, three), (0, zero)] {
+                let mut direct = String::new();
+                super::append_json_finite_f64(&mut direct, value, precision);
+                assert_eq!(direct, want, "{value:e} at {precision}");
+            }
         }
     }
 
@@ -39899,10 +39941,20 @@ mod merge_simple_numeric_csv_chunks_tests {
         use fp_types::Scalar;
 
         use super::{JsonOrient, write_json_string};
+        // The references' text: serde's tree with pandas' floats (6udgl).
+        fn pandas_text(value: &serde_json::Value) -> String {
+            fp_frame::to_pandas_json(value, fp_frame::JSON_DOUBLE_PRECISION).unwrap()
+        }
         fn serde_ref(frame: &DataFrame) -> String {
             let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
             let promotions = vec![false; headers.len()];
-            super::write_json_records_serde(frame, &headers, &promotions).expect("serde ref")
+            super::write_json_records_serde(
+                frame,
+                &headers,
+                &promotions,
+                fp_frame::JSON_DOUBLE_PRECISION,
+            )
+            .expect("serde ref")
         }
         // JSONL serde reference: a Map per row serialized independently, joined
         // by '\n' (exactly the pre-fast-path `write_jsonl_string` body).
@@ -39920,7 +39972,7 @@ mod merge_simple_numeric_csv_chunks_tests {
                         .unwrap_or(serde_json::Value::Null);
                     obj.insert(name.clone(), val);
                 }
-                lines.push(serde_json::to_string(&serde_json::Value::Object(obj)).unwrap());
+                lines.push(pandas_text(&serde_json::Value::Object(obj)));
             }
             lines.join("\n")
         }
@@ -39948,7 +40000,7 @@ mod merge_simple_numeric_csv_chunks_tests {
                 }
                 outer.insert(name.clone(), serde_json::Value::Object(col_obj));
             }
-            serde_json::to_string(&serde_json::Value::Object(outer)).unwrap()
+            pandas_text(&serde_json::Value::Object(outer))
         }
         fn assert_columns_matches(frame: &DataFrame) {
             assert_eq!(
@@ -39973,7 +40025,7 @@ mod merge_simple_numeric_csv_chunks_tests {
                 let key = super::index_label_json_key(&frame.index().labels()[row_idx]);
                 outer.insert(key, serde_json::Value::Object(row_obj));
             }
-            serde_json::to_string(&serde_json::Value::Object(outer)).unwrap()
+            pandas_text(&serde_json::Value::Object(outer))
         }
         fn assert_index_matches(frame: &DataFrame) {
             assert_eq!(
@@ -39998,7 +40050,7 @@ mod merge_simple_numeric_csv_chunks_tests {
                     .collect();
                 data.push(serde_json::Value::Array(row));
             }
-            serde_json::to_string(&serde_json::Value::Array(data)).unwrap()
+            pandas_text(&serde_json::Value::Array(data))
         }
         fn assert_values_matches(frame: &DataFrame) {
             assert_eq!(
@@ -40037,7 +40089,7 @@ mod merge_simple_numeric_csv_chunks_tests {
             obj.insert("columns".into(), serde_json::Value::Array(col_array));
             obj.insert("index".into(), serde_json::Value::Array(index_array));
             obj.insert("data".into(), serde_json::Value::Array(data));
-            serde_json::to_string(&serde_json::Value::Object(obj)).unwrap()
+            pandas_text(&serde_json::Value::Object(obj))
         }
         fn assert_split_matches(frame: &DataFrame) {
             assert_eq!(
@@ -40106,12 +40158,12 @@ mod merge_simple_numeric_csv_chunks_tests {
         );
         let frame = DataFrame::new(idx(n), cols).expect("frame");
         // Fast path must actually fire here (all-valid numeric/bool).
-        assert!(super::try_write_json_records_typed(&frame, false).is_some());
-        assert!(super::try_write_json_records_typed(&frame, true).is_some());
-        assert!(super::try_write_json_columns_typed(&frame).is_some());
-        assert!(super::try_write_json_index_typed(&frame).is_some());
-        assert!(super::try_write_json_values_typed(&frame).is_some());
-        assert!(super::try_write_json_split_typed(&frame).is_some());
+        assert!(super::try_write_json_records_typed(&frame, false, 10).is_some());
+        assert!(super::try_write_json_records_typed(&frame, true, 10).is_some());
+        assert!(super::try_write_json_columns_typed(&frame, 10).is_some());
+        assert!(super::try_write_json_index_typed(&frame, 10).is_some());
+        assert!(super::try_write_json_values_typed(&frame, 10).is_some());
+        assert!(super::try_write_json_split_typed(&frame, 10).is_some());
         assert_eq!(
             write_json_string(&frame, JsonOrient::Records).expect("json"),
             serde_ref(&frame),
@@ -40163,7 +40215,7 @@ mod merge_simple_numeric_csv_chunks_tests {
                 .expect("utf8 col"),
         );
         let f4 = DataFrame::new(idx(2), c4).expect("frame4");
-        assert!(super::try_write_json_records_typed(&f4, false).is_none());
+        assert!(super::try_write_json_records_typed(&f4, false, 10).is_none());
         assert_eq!(
             write_json_string(&f4, JsonOrient::Records).expect("json4"),
             serde_ref(&f4),
@@ -40203,7 +40255,7 @@ mod merge_simple_numeric_csv_chunks_tests {
         );
         c5.insert("s".to_string(), Column::from_utf8_contiguous(sbytes, soff));
         let f5 = DataFrame::new(idx(strs.len()), c5).expect("frame5");
-        assert!(super::try_write_json_records_typed(&f5, false).is_some());
+        assert!(super::try_write_json_records_typed(&f5, false, 10).is_some());
         assert_eq!(
             write_json_string(&f5, JsonOrient::Records).expect("json5"),
             serde_ref(&f5),
@@ -40266,7 +40318,7 @@ mod merge_simple_numeric_csv_chunks_tests {
         let frame = DataFrame::new(Index::new_known_unique_int64_unit_range(0, 2), columns)
             .expect("mixed frame");
 
-        assert!(super::try_write_json_records_typed(&frame, false).is_none());
+        assert!(super::try_write_json_records_typed(&frame, false, 10).is_none());
         assert_eq!(
             write_json_string(&frame, JsonOrient::Records).expect("serde fallback"),
             r#"[{"n":1,"s":"hi"},{"n":2,"s":"x"}]"#
