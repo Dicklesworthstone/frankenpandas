@@ -1188,18 +1188,27 @@ impl Float64PairwiseStatMatrixPlan {
         let n_f = count as f64;
         let mean_x = sum_x / n_f;
         let mean_y = sum_y / n_f;
-        let cov_xy = (sum_xy - n_f * mean_x * mean_y) / (n_f - 1.0);
+        // `n * (mean_x * mean_y)`: symmetric in x and y to the bit, so the
+        // (i, j) and (j, i) cells agree, as pandas' nancorr writes one value
+        // to both.
+        let cov_xy = (sum_xy - n_f * (mean_x * mean_y)) / (n_f - 1.0);
         match stat {
             PairwiseFloat64Stat::Cov => cov_xy,
             PairwiseFloat64Stat::Corr => {
-                let var_x = (sum_x2 - n_f * mean_x * mean_x) / (n_f - 1.0);
-                let var_y = (sum_y2 - n_f * mean_y * mean_y) / (n_f - 1.0);
-                let denom = (var_x * var_y).sqrt();
-                if denom < f64::EPSILON {
-                    f64::NAN
-                } else {
-                    cov_xy / denom
+                // The same association as cov_xy, so a column's correlation
+                // with itself is exactly 1.0. pandas' nancorr is NaN for a zero
+                // variance only: a one-pass sum of squares is zero when within
+                // its own round-off (`n * EPSILON` of the squares it came
+                // from), not below an absolute epsilon - that made columns of
+                // order 1e-9 NaN. The ratio is clipped into [-1, 1] as pandas'.
+                let flat = |dev: f64, squares: f64| dev <= 4.0 * n_f * f64::EPSILON * squares;
+                let dev_x = sum_x2 - n_f * (mean_x * mean_x);
+                let dev_y = sum_y2 - n_f * (mean_y * mean_y);
+                if flat(dev_x, sum_x2) || flat(dev_y, sum_y2) {
+                    return f64::NAN;
                 }
+                let denom = ((dev_x / (n_f - 1.0)) * (dev_y / (n_f - 1.0))).sqrt();
+                (cov_xy / denom).clamp(-1.0, 1.0)
             }
         }
     }
@@ -1346,29 +1355,21 @@ impl Float64PairwiseStatMatrixPlan {
 
         for j in 0..n {
             for i in 0..=j {
-                let g = gram[i * n + j];
-                mat[i * n + j] = Self::finalize(
+                // A column with itself reads its own sum of squares: the banded
+                // Gram sum reassociates it (a diagonal of 0.9999999999999966).
+                let cross = if i == j { sum2[i] } else { gram[i * n + j] };
+                let value = Self::finalize(
                     self.stat,
                     self.min_periods,
                     len,
                     sum[i],
                     sum[j],
-                    g,
+                    cross,
                     sum2[i],
                     sum2[j],
                 );
-                if i != j {
-                    mat[j * n + i] = Self::finalize(
-                        self.stat,
-                        self.min_periods,
-                        len,
-                        sum[j],
-                        sum[i],
-                        g,
-                        sum2[j],
-                        sum2[i],
-                    );
-                }
+                mat[i * n + j] = value;
+                mat[j * n + i] = value;
             }
         }
         mat
