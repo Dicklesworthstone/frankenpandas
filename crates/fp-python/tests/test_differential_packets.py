@@ -26555,6 +26555,88 @@ _ANCHOR_CASES.update({
 })
 
 
+_BIG_INT = 2**53 + 1
+
+# br-frankenpandas-lqss7: a masked integer dtype over a list of ints and a
+# missing value keeps the ints exact (2**53 + 1 read 2**53 through float64;
+# 2**63 - 1 raised), and refuses what pandas refuses with pandas' error
+# (1.5 was truncated to 1).
+_MASKED_INT_CASES = {
+    "Series Int64 past 2**53": lambda m: m.Series([1, None, _BIG_INT], dtype="Int64"),
+    "Series Int64 at int64 max": lambda m: m.Series([1, None, 2**63 - 1, 0], dtype="Int64"),
+    "Series Int64 with NaN": lambda m: m.Series([1, float("nan"), _BIG_INT], dtype="Int64"),
+    "Series Int32 max": lambda m: m.Series([1, None, 2**31 - 1], dtype="Int32"),
+    "Series Int64Dtype()": lambda m: m.Series([1, None, _BIG_INT], dtype=m.Int64Dtype()),
+    "DataFrame dtype Int64": lambda m: m.DataFrame({"a": [1, None, _BIG_INT], "b": [_BIG_INT, 2, 3]}, dtype="Int64"),
+    "pd.array Int64": lambda m: m.array([1, None, _BIG_INT], dtype="Int64"),
+    "pd.array inferred": lambda m: m.array([1, None, _BIG_INT]),
+    "Int8 overflow beside None": lambda m: m.Series([1, None, 300], dtype="Int8"),
+    "Int8 overflow beside NaN": lambda m: m.Series([1, float("nan"), 300], dtype="Int8"),
+    "UInt8 negative beside None": lambda m: m.Series([-1, None], dtype="UInt8"),
+    "fraction beside None": lambda m: m.Series([1.5, None], dtype="Int64"),
+    "fraction beside NaN": lambda m: m.Series([1.5, float("nan")], dtype="Int64"),
+    "DataFrame fraction": lambda m: m.DataFrame({"a": [1.5, None]}, dtype="Int64"),
+    "whole floats (NEGATIVE)": lambda m: m.Series([1.0, None, 3.0], dtype="Int64"),
+    "Int8 overflow, nothing missing (NEGATIVE)": lambda m: m.Series([1, 300], dtype="Int8"),
+    "no dtype is float64 (NEGATIVE)": lambda m: m.Series([1, None, _BIG_INT]),
+}
+
+
+# br-frankenpandas-gvd3q: DataFrame.drop over a row MultiIndex reads a key as
+# .loc does (an outer label names its rows; it was a KeyError) and drops by
+# level=; a missing key raises - or passes - as pandas' _drop_axis decides.
+def _gvd3q_frame(m: Any, unique: bool = False) -> Any:
+    k1 = ["a", "b", "c"] if unique else ["a", "a", "b", "b", "c", "a"]
+    k2 = [1, 2, 1] if unique else [1, 2, 1, 2, 1, 1]
+    return m.DataFrame({"k1": k1, "k2": k2, "v": range(len(k1))}).set_index(["k1", "k2"])
+
+
+_GVD3Q_CASES = {
+    "outer label": lambda m: _gvd3q_frame(m).drop("c"),
+    "outer labels": lambda m: _gvd3q_frame(m).drop(["a", "c"]),
+    "tuple": lambda m: _gvd3q_frame(m).drop(("a", 1)),
+    "index= keyword": lambda m: _gvd3q_frame(m).drop(index="b"),
+    "level by name": lambda m: _gvd3q_frame(m).drop(1, level="k2"),
+    "level by position": lambda m: _gvd3q_frame(m).drop("a", level=0),
+    "inplace": lambda m: (lambda d: (d.drop("a", inplace=True), d)[1])(_gvd3q_frame(m)),
+    "repeated axis, missing outer label passes": lambda m: _gvd3q_frame(m).drop("zz"),
+    "repeated axis, missing tuple raises": lambda m: _gvd3q_frame(m).drop([("a", 1), ("q", 3)]),
+    "unique axis, missing label raises": lambda m: _gvd3q_frame(m, unique=True).drop("zz"),
+    "unique axis, missing level label raises": lambda m: _gvd3q_frame(m, unique=True).drop(9, level="k2"),
+    "errors='ignore'": lambda m: _gvd3q_frame(m, unique=True).drop(["a", "zz"], errors="ignore"),
+    "flat index (NEGATIVE)": lambda m: m.DataFrame({"v": [1, 2, 3]}, index=["x", "y", "z"]).drop("y"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_GVD3Q_CASES))
+def test_drop_over_a_row_multiindex_like_pandas_gvd3q(case: str) -> None:
+    def shown(m: Any) -> Any:
+        try:
+            result = _GVD3Q_CASES[case](m)
+        except KeyError as error:
+            return ("KeyError", str(error))
+        return repr(result)
+
+    assert shown(fpd) == shown(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_MASKED_INT_CASES))
+def test_masked_integer_constructors_keep_ints_exact_like_pandas_lqss7(case: str) -> None:
+    def shown(m: Any) -> Any:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                result = _MASKED_INT_CASES[case](m)
+            except (TypeError, OverflowError, ValueError) as error:
+                return (type(error).__name__, str(error))
+        dtypes = [str(dtype) for dtype in result.dtypes] if hasattr(result, "columns") else str(result.dtype)
+        return (repr(result), dtypes)
+
+    assert shown(fpd) == shown(pd)
+
+
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 @pytest.mark.parametrize("case", list(_ANCHOR_CASES))
 def test_anchored_period_frequencies_like_pandas_39h5n(case: str) -> None:

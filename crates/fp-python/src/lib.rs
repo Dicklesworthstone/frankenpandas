@@ -28473,13 +28473,19 @@ impl PySeries {
             .filter(|name| !name.is_none())
             .map(py_series_name)
             .transpose()?;
+        if let (Some(data), Some(dtype)) = (data, dtype.filter(|dtype| !dtype.is_none())) {
+            refuse_masked_int_list(data, dtype)?;
+        }
         // dtype=object keeps a list's values as given; `from_data` would first
         // make [1, None, 2] float64 (fvsao.22). So does dtype='string', whose
-        // text is each given value's (1 was '1.0'; br-frankenpandas-5y62q).
+        // text is each given value's (1 was '1.0'; br-frankenpandas-5y62q),
+        // and a masked integer dtype over ints and missing values, whose ints
+        // stay exact (br-frankenpandas-lqss7).
         let object_values = match (data, dtype) {
             (Some(data), Some(dtype))
-                if (is_object_dtype_arg(dtype) || is_string_dtype_arg(dtype))
-                    && (data.is_instance_of::<PyList>() || data.is_instance_of::<PyTuple>()) =>
+                if ((is_object_dtype_arg(dtype) || is_string_dtype_arg(dtype))
+                    && (data.is_instance_of::<PyList>() || data.is_instance_of::<PyTuple>()))
+                    || (is_nullable_integer_dtype_arg(dtype) && int_list_with_missing(data)?) =>
             {
                 Some(
                     data.try_iter()?
@@ -39407,11 +39413,24 @@ impl PyDataFrame {
         columns: Option<&Bound<'_, PyAny>>,
         dtype: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
+        // Each list of a dict refuses a masked integer dtype as the Series
+        // constructor does (br-frankenpandas-lqss7).
+        if let (Some(dict), Some(dtype)) = (
+            data.and_then(|data| data.cast::<PyDict>().ok()),
+            dtype.filter(|dtype| !dtype.is_none()),
+        ) {
+            for (_, values) in dict.iter() {
+                refuse_masked_int_list(&values, dtype)?;
+            }
+        }
         // ints with a missing value become float64 with NaN, as pandas (and
         // the Series constructor) build them - except under dtype=object,
-        // which keeps the values as given (DISC-011).
-        let keep_objects =
-            dtype.is_some_and(|dtype| !dtype.is_none() && is_object_dtype_arg(dtype));
+        // which keeps the values as given (DISC-011), and a masked integer
+        // dtype, whose ints stay exact (2**53 + 1 read 2**53;
+        // br-frankenpandas-lqss7).
+        let keep_objects = dtype.is_some_and(|dtype| {
+            !dtype.is_none() && (is_object_dtype_arg(dtype) || is_nullable_integer_dtype_arg(dtype))
+        });
         let promote = |scalars: Vec<Scalar>| {
             if keep_objects {
                 scalars
@@ -42491,10 +42510,7 @@ impl PyDataFrame {
         inplace: bool,
         errors: &str,
     ) -> PyResult<Option<PyDataFrame>> {
-        unsupported_params(
-            "DataFrame.drop",
-            &[("level", level.is_none_or(|l| l.is_none()))],
-        )?;
+        let level = level.filter(|level| !level.is_none());
         let (rows, cols) = match passed(labels) {
             Some(labels) => {
                 if passed(index).is_some() || passed(columns).is_some() {
@@ -42517,7 +42533,104 @@ impl PyDataFrame {
         }
         let ignore = errors == "ignore";
         let mut out = self.inner.clone();
-        if let Some(rows) = rows {
+        // `level` names the labels of one level of a row MultiIndex; the
+        // column axis's levels are not supported.
+        if level.is_some() && (cols.is_some() || out.row_multiindex().is_none()) {
+            return Err(not_implemented(
+                "DataFrame.drop(level=...) outside a row MultiIndex",
+            ));
+        }
+        if let (Some(rows), Some(multi)) = (rows.as_ref(), out.row_multiindex().cloned()) {
+            // Under a row MultiIndex an outer label or a tuple names every
+            // row under it, as .loc reads it, and with `level` a label names
+            // the rows holding it there (an outer label was a KeyError and
+            // level= refused; br-frankenpandas-gvd3q).
+            let keys: Vec<Bound<'_, PyAny>> = match rows.cast::<PyList>() {
+                Ok(list) => list.iter().collect(),
+                Err(_) => vec![rows.clone()],
+            };
+            let level_values = match level {
+                Some(level) => {
+                    let position = multiindex_level_position(&multi, level)?;
+                    Some(
+                        multi
+                            .get_level_values(position)
+                            .map_err(index_error_to_py)?,
+                    )
+                }
+                None => None,
+            };
+            let mut dropped: HashSet<usize> = HashSet::new();
+            let mut missing: Vec<&Bound<'_, PyAny>> = Vec::new();
+            for key in &keys {
+                let found: Vec<usize> = match &level_values {
+                    Some(values) => {
+                        let label = py_to_index_label(key)?;
+                        values
+                            .labels()
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, value)| **value == label)
+                            .map(|(position, _)| position)
+                            .collect()
+                    }
+                    None => multiindex_loc_rows(&multi, key, false)?.unwrap_or_default(),
+                };
+                if found.is_empty() {
+                    missing.push(key);
+                }
+                dropped.extend(found);
+            }
+            // A missing key as pandas' _drop_axis treats it: a unique axis
+            // raises from MultiIndex.drop (KeyError(key), or "labels [...]
+            // not found in level"); a repeated one raises for tuples, for a
+            // level only when nothing matched, and passes over a missing
+            // outer label (its level-0 isin).
+            if !missing.is_empty() && !ignore {
+                // numpy's array text, as pandas formats these: ['a' 'zz'] -
+                // the missing labels from a unique axis, every one asked
+                // for from a repeated one.
+                let numpy_text = |items: &[&Bound<'_, PyAny>]| -> PyResult<String> {
+                    let reprs = items
+                        .iter()
+                        .map(|key| key.repr().map(|text| text.to_string()))
+                        .collect::<PyResult<Vec<_>>>()?;
+                    Ok(format!("[{}]", reprs.join(" ")))
+                };
+                let asked: Vec<&Bound<'_, PyAny>> = keys.iter().collect();
+                let unique = out.index().is_unique();
+                let tuple_keys = keys.iter().any(|key| key.is_instance_of::<PyTuple>());
+                let message = match (unique, level_values.is_some()) {
+                    (true, false) => {
+                        return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                            missing[0].clone().unbind(),
+                        ));
+                    }
+                    (true, true) => Some(format!(
+                        "labels {} not found in level",
+                        numpy_text(&missing)?
+                    )),
+                    (false, true) if dropped.is_empty() => {
+                        Some(format!("{} not found in axis", numpy_text(&asked)?))
+                    }
+                    (false, false) if tuple_keys => {
+                        Some(format!("{} not found in axis", numpy_text(&asked)?))
+                    }
+                    (false, _) => None,
+                };
+                if let Some(message) = message {
+                    return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(message));
+                }
+            }
+            let keep: Vec<usize> = (0..out.len())
+                .filter(|position| !dropped.contains(position))
+                .collect();
+            let levels = multi.take(&keep).map_err(index_error_to_py)?;
+            out = out
+                .take_rows(&keep)
+                .and_then(|frame| frame.with_row_multiindex(levels))
+                .map_err(frame_error_to_py)?;
+        } else if let Some(rows) = rows {
             // A point over an IntervalIndex drops the intervals holding it.
             let rows = interval_drop_labels(rows.py(), out.index(), &rows)?;
             let wanted = py_label_list(&rows)?;
@@ -71555,6 +71668,100 @@ impl DtypeRefinementArg {
 fn is_string_dtype_arg(dtype: &Bound<'_, PyAny>) -> bool {
     !dtype.is_instance_of::<pyo3::types::PyType>()
         && dtype_arg_text(dtype).is_ok_and(|name| name == "string")
+}
+
+/// A masked integer dtype argument (`'Int64'`, `pd.Int32Dtype()`,
+/// `'UInt16'` ...): its values are exact ints beside missing ones, so a list
+/// of ints with a None must not pass through float64 on the way.
+fn is_nullable_integer_dtype_arg(dtype: &Bound<'_, PyAny>) -> bool {
+    !dtype.is_instance_of::<pyo3::types::PyType>()
+        && dtype_arg_text(dtype).is_ok_and(|name| {
+            matches!(
+                name.as_str(),
+                "Int8" | "Int16" | "Int32" | "Int64" | "UInt8" | "UInt16" | "UInt32" | "UInt64"
+            )
+        })
+}
+
+/// Whether `data` is a list / tuple of Python ints (not bools) and missing
+/// values, at least one of them missing: under a masked integer dtype
+/// those ints are kept exact, as pandas' IntegerArray takes them (2**53 + 1
+/// read back 2**53 through the float64 inference; br-frankenpandas-lqss7).
+fn int_list_with_missing(data: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if !data.is_instance_of::<PyList>() && !data.is_instance_of::<PyTuple>() {
+        return Ok(false);
+    }
+    let mut any_missing = false;
+    for item in data.try_iter()? {
+        let item = item?;
+        let int = item.is_exact_instance_of::<pyo3::types::PyInt>();
+        let missing = item.is_none()
+            || (item.is_exact_instance_of::<pyo3::types::PyFloat>()
+                && item.extract::<f64>().is_ok_and(f64::is_nan));
+        if !int && !missing {
+            return Ok(false);
+        }
+        any_missing |= missing;
+    }
+    Ok(any_missing)
+}
+
+/// pandas' refusals building a masked integer `dtype` from a list (it
+/// truncated 1.5 to 1 and named the wrong cast; br-frankenpandas-lqss7): a
+/// fractional float is "cannot safely cast non-equivalent object to int64"
+/// beside a missing value, "float64" without one; an int outside a narrow
+/// width is numpy's OverflowError beside a None (an object array), the
+/// float64 cast's TypeError beside a NaN only.
+fn refuse_masked_int_list(data: &Bound<'_, PyAny>, dtype: &Bound<'_, PyAny>) -> PyResult<()> {
+    if !is_nullable_integer_dtype_arg(dtype)
+        || (!data.is_instance_of::<PyList>() && !data.is_instance_of::<PyTuple>())
+    {
+        return Ok(());
+    }
+    let items = data.try_iter()?.collect::<PyResult<Vec<_>>>()?;
+    let is_nan = |item: &Bound<'_, PyAny>| {
+        item.is_exact_instance_of::<pyo3::types::PyFloat>()
+            && item.extract::<f64>().is_ok_and(f64::is_nan)
+    };
+    let has_none = items.iter().any(|item| item.is_none());
+    let has_nan = items.iter().any(is_nan);
+    let target = dtype_arg_text(dtype)?.to_ascii_lowercase();
+    let width = py_width_arg(dtype).map(|(width, _)| width);
+    let refuse = |source: &str| {
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "cannot safely cast non-equivalent {source} to {target}"
+        )))
+    };
+    for item in &items {
+        if item.is_exact_instance_of::<pyo3::types::PyFloat>()
+            && let Ok(value) = item.extract::<f64>()
+            && value.is_finite()
+            && value.fract() != 0.0
+        {
+            return refuse(if has_none || has_nan {
+                "object"
+            } else {
+                "float64"
+            });
+        }
+        if (has_none || has_nan)
+            && item.is_exact_instance_of::<pyo3::types::PyInt>()
+            && let Some(width) = width
+            && !item
+                .extract::<i64>()
+                .is_ok_and(|value| width.holds_int(value))
+        {
+            if !has_none {
+                return refuse("float64");
+            }
+            return Err(PyErr::new::<pyo3::exceptions::PyOverflowError, _>(format!(
+                "Python integer {} out of bounds for {}",
+                item.str()?,
+                width.name(false)
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// `series` as the categorical `dtype` describes when it is a
