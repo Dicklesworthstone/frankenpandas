@@ -24112,6 +24112,34 @@ fn plain_number_operand(like: &Series, other: &Bound<'_, PyAny>) -> Option<Scala
     None
 }
 
+/// `other` as pandas hands it to an arithmetic op: a numpy integer or float
+/// scalar is the Python int / float of its value (pandas'
+/// maybe_prepare_scalar_for_op keeps numpy numbers weak after NEP 50), so
+/// float32 * np.float64(0.1) stays float32 and int8 * np.int64(300) is the
+/// Python int's OverflowError (fp typed them as numpy's strong scalars;
+/// br-frankenpandas-yxqee). Comparisons keep the numpy scalar: pandas
+/// compares s > np.float64(0.1) in float64.
+fn arith_operand<'py>(other: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let kind_of = |other: &Bound<'py, PyAny>| -> Option<String> {
+        let kind = other.get_type();
+        let numpy = kind.module().ok()?.to_str().ok()? == "numpy"
+            && kind.name().ok()?.to_str().ok()? != "ndarray";
+        numpy.then(|| {
+            other
+                .getattr("dtype")
+                .ok()?
+                .getattr("kind")
+                .ok()?
+                .extract()
+                .ok()
+        })?
+    };
+    match kind_of(other).as_deref() {
+        Some("i" | "u" | "f") => other.call_method0("item"),
+        _ => Ok(other.clone()),
+    }
+}
+
 /// numpy's NEP 50: a Python int / float meeting float32 values is a
 /// float32 - rounded to it before the op, so `s * 0.1` multiplies by
 /// float32(0.1) and `s > 0.1` compares with it (they used the float64 and
@@ -24275,7 +24303,11 @@ fn fill_one_side(side: &Series, against: &Series, fill: &Scalar) -> PyResult<Ser
         })
         .collect();
     let column = Column::from_values(values).map_err(column_error_to_py)?;
-    Series::new(side.name(), side.index().clone(), column).map_err(frame_error_to_py)
+    // The fill is written into the side's own array, as pandas' fill_binop
+    // does: a float32 side stays float32 (it widened; br-frankenpandas-ajyln).
+    let filled =
+        Series::new(side.name(), side.index().clone(), column).map_err(frame_error_to_py)?;
+    narrowed_to(filled, side.column().width())
 }
 
 /// `left <op> right` for two DataFrames.
@@ -27528,6 +27560,21 @@ impl PySeries {
             .filter(|f| !f.is_none())
             .map(|f| py_to_scalar(py, f))
             .transpose()?;
+        // A scalar with fill_value: pandas fills this Series' own missing
+        // values and runs the operator with the scalar itself, a missing
+        // scalar being the fill (Series._flex_method) - so a float32
+        // .add(2, fill_value=1) stays float32 where the broadcast operand
+        // typed it float64 (br-frankenpandas-ajyln).
+        if let (Some(fill), Some(fill_value)) = (&fill, fill_value)
+            && other.extract::<PyRef<'_, PySeries>>().is_err()
+            && (other.is_instance_of::<pyo3::types::PyString>() || !other.hasattr("__len__")?)
+        {
+            if py_to_scalar(py, other)?.is_missing() {
+                return op(self, py, fill_value);
+            }
+            let filled = self.inner.fillna(fill).map_err(frame_error_to_py)?;
+            return op(&Self { inner: filled }, py, other);
+        }
         // A plain number broadcasts over this Series' own rows, so the
         // operator itself answers - its operand column was built here only
         // to be found aligned (br-frankenpandas-pnxo5).
@@ -28784,6 +28831,7 @@ impl PySeries {
     // Series' index). Comparisons return a bool Series, as in pandas, so
     // `__eq__`/`__ne__` deliberately do not return a Python bool.
     fn __add__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let other = &arith_operand(other)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "add", false)? {
             return Ok(res);
         }
@@ -28801,6 +28849,7 @@ impl PySeries {
         narrowed_arith(self.inner.add(&rhs), &self.inner, other, false)
     }
     fn __radd__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let other = &arith_operand(other)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "add", true)? {
             return Ok(res);
         }
@@ -28818,6 +28867,7 @@ impl PySeries {
         narrowed_arith(lhs.add(&self.inner), &self.inner, other, false)
     }
     fn __sub__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let other = &arith_operand(other)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "sub", false)? {
             return Ok(res);
         }
@@ -28835,6 +28885,7 @@ impl PySeries {
         narrowed_arith(self.inner.sub(&rhs), &self.inner, other, false)
     }
     fn __rsub__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let other = &arith_operand(other)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "sub", true)? {
             return Ok(res);
         }
@@ -28845,6 +28896,7 @@ impl PySeries {
         narrowed_arith(lhs.sub(&self.inner), &self.inner, other, false)
     }
     fn __mul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let other = &arith_operand(other)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "mul", false)? {
             return Ok(res);
         }
@@ -28855,6 +28907,7 @@ impl PySeries {
         narrowed_arith(self.inner.mul(&rhs), &self.inner, other, false)
     }
     fn __rmul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let other = &arith_operand(other)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "mul", true)? {
             return Ok(res);
         }
@@ -28865,6 +28918,7 @@ impl PySeries {
         narrowed_arith(lhs.mul(&self.inner), &self.inner, other, false)
     }
     fn __truediv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let other = &arith_operand(other)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "truediv", false)? {
             return Ok(res);
         }
@@ -28875,6 +28929,7 @@ impl PySeries {
         narrowed_arith(self.inner.div(&rhs), &self.inner, other, true)
     }
     fn __rtruediv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let other = &arith_operand(other)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "truediv", true)? {
             return Ok(res);
         }
@@ -28885,6 +28940,7 @@ impl PySeries {
         narrowed_arith(lhs.div(&self.inner), &self.inner, other, true)
     }
     fn __floordiv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let other = &arith_operand(other)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "floordiv", false)? {
             return Ok(res);
         }
@@ -28892,6 +28948,7 @@ impl PySeries {
         narrowed_arith(self.inner.floordiv(&rhs), &self.inner, other, false)
     }
     fn __rfloordiv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let other = &arith_operand(other)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "floordiv", true)? {
             return Ok(res);
         }
@@ -28899,6 +28956,7 @@ impl PySeries {
         narrowed_arith(lhs.floordiv(&self.inner), &self.inner, other, false)
     }
     fn __mod__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let other = &arith_operand(other)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "mod", false)? {
             return Ok(res);
         }
@@ -28907,6 +28965,7 @@ impl PySeries {
         bool_numpy_series(result, bool_remainder(&self.inner, other))
     }
     fn __rmod__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let other = &arith_operand(other)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "mod", true)? {
             return Ok(res);
         }
@@ -28936,6 +28995,7 @@ impl PySeries {
         other: &Bound<'_, PyAny>,
         _modulo: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
+        let other = &arith_operand(other)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "pow", false)? {
             return Ok(res);
         }
@@ -28954,6 +29014,7 @@ impl PySeries {
         other: &Bound<'_, PyAny>,
         _modulo: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
+        let other = &arith_operand(other)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "pow", true)? {
             return Ok(res);
         }
@@ -33807,7 +33868,8 @@ impl PySeries {
                 _ => value.clone(),
             })
             .collect();
-        let column = Column::from_values(values).map_err(column_error_to_py)?;
+        let column = fp_frame::reindex_fill_column(&self.inner.column().dtype(), values)
+            .map_err(frame_error_to_py)?;
         let filled = Series::new(reindexed.name(), reindexed.index().clone(), column)
             .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: filled })
@@ -48190,6 +48252,8 @@ impl PyDataFrame {
             ],
         )?;
         let mut res = self.inner.clone();
+        let mut row_target: Option<Vec<IndexLabel>> = None;
+        let mut column_target: Option<Vec<String>> = None;
         let target_index = index.or_else(|| labels.filter(|_| ax == 0));
         if let Some(idx_obj) = target_index {
             // Any index-like target (a DatetimeIndex raised TypeError).
@@ -48254,6 +48318,7 @@ impl PyDataFrame {
                 limit,
                 tolerance,
             )?;
+            row_target = Some(row_labels.clone());
             res = match (method, &fill) {
                 (Some(m), _) => {
                     res.reindex_with_method_options(row_labels, m, limit, tolerance.as_deref())
@@ -48365,6 +48430,38 @@ impl PyDataFrame {
                 res = res
                     .with_columns_multiindex(Some(multi))
                     .map_err(frame_error_to_py)?;
+            } else {
+                column_target = Some(col_names);
+            }
+        }
+        // Both axes changed over one numpy block: pandas takes the block
+        // through one 2-D take with the fill (DataFrame._reindex_multi), so a
+        // label either target lacks promotes every column - an int frame
+        // given a new column is float64 throughout, a bool one object (the
+        // kept columns kept their dtype; br-frankenpandas-r8gr0).
+        if let (Some(rows), Some(names), None) = (&row_target, &column_target, method)
+            && self.inner.row_multiindex().is_none()
+            && rows.as_slice() != self.inner.index().labels()
+            && names.iter().ne(self.inner.column_names())
+            && let Some(block) = reindex_block_promotion(&self.inner, fill.as_ref())
+        {
+            let gap = names.iter().any(|name| self.inner.column(name).is_none())
+                || self
+                    .inner
+                    .index()
+                    .get_indexer(&Index::new(rows.clone()))
+                    .iter()
+                    .any(Option::is_none);
+            if gap {
+                let promoted = (0..res.num_columns())
+                    .filter_map(|position| res.column_at(position))
+                    .map(|column| match &block {
+                        DType::Utf8 => Ok(Column::from_object_values(column.values().to_vec())),
+                        dtype if column.dtype() == *dtype => Ok(column.clone()),
+                        dtype => column.astype(dtype.clone()).map_err(column_error_to_py),
+                    })
+                    .collect::<PyResult<Vec<Column>>>()?;
+                res = res.with_columns_at_positions(promoted);
             }
         }
         Ok(PyDataFrame { inner: res })
@@ -52742,6 +52839,35 @@ fn frame_loc_write(
         }
     } else {
         (key.clone(), every_column())
+    };
+    // Columns that do not exist yet, written over every row (df.loc[:, 'n']
+    // = v), are df['n'] = v: the value's own column (int64 for 1, object
+    // keeping a None). A write naming rows makes them float64 NaN beside the
+    // cells, as pandas (both were float64 NaN-based; br-frankenpandas-tct51).
+    let every_row = rows.cast::<pyo3::types::PySlice>().is_ok_and(|slice| {
+        ["start", "stop", "step"]
+            .iter()
+            .all(|part| slice.getattr(*part).is_ok_and(|bound| bound.is_none()))
+    });
+    let staged;
+    let (frame, columns) = if every_row && columns.iter().any(|name| frame.column(name).is_none()) {
+        let mut target = PyDataFrame {
+            inner: frame.clone(),
+        };
+        for name in columns.iter().filter(|name| frame.column(name).is_none()) {
+            target.assign_named_column(py, name.clone(), value)?;
+        }
+        let existing: Vec<String> = columns
+            .into_iter()
+            .filter(|name| frame.column(name).is_some())
+            .collect();
+        if existing.is_empty() {
+            return Ok(target.inner.with_labels_of(frame));
+        }
+        staged = target.inner;
+        (&staged, existing)
+    } else {
+        (frame, columns)
     };
     let multi_rows = match multi {
         Some(multi) if key.is_instance_of::<PyTuple>() => multiindex_loc_rows(multi, &rows, true)?,
@@ -86787,6 +86913,32 @@ fn index_join_indexers(
     let left_positions = pairs.iter().map(|&(i, _)| to_i64(i)).collect();
     let right_positions = pairs.iter().map(|&(_, j)| to_i64(j)).collect();
     (joined, Some(left_positions), Some(right_positions))
+}
+
+/// The dtype a gap promotes `frame`'s one numpy block to when pandas
+/// reindexes both axes through a 2-D take with `fill` (missing: NaN), as
+/// numpy's maybe_promote: int64 to float64 by NaN or a float, to object by
+/// anything else not an int; bool to object by anything not a bool; an
+/// object block's new columns object. None when the frame is not one block
+/// of one dtype and width, or the fill keeps it.
+fn reindex_block_promotion(frame: &DataFrame, fill: Option<&Scalar>) -> Option<DType> {
+    let mut columns = (0..frame.num_columns()).filter_map(|position| frame.column_at(position));
+    let first = columns.next()?;
+    let (dtype, width) = (first.dtype(), first.width());
+    if first.is_pandas_string()
+        || !columns.all(|column| {
+            column.dtype() == dtype && column.width() == width && !column.is_pandas_string()
+        })
+    {
+        return None;
+    }
+    let fill = fill.filter(|fill| !fill.is_missing());
+    match (dtype, fill) {
+        (DType::Int64, None | Some(Scalar::Float64(_))) => Some(DType::Float64),
+        (DType::Int64, Some(Scalar::Int64(_))) | (DType::Bool, Some(Scalar::Bool(_))) => None,
+        (DType::Int64 | DType::Bool | DType::Utf8, _) => Some(DType::Utf8),
+        _ => None,
+    }
 }
 
 /// pandas' reindex `method` / `limit` / `tolerance` for `targets` new labels

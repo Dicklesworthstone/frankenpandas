@@ -26339,3 +26339,134 @@ def test_invented_gaps_are_nan_and_combine_first_keeps_self_like_pandas_hfdld(ca
         return (repr(result), [str(dtype) for dtype in result.dtypes], kinds)
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-tct51: reindex(fill_value=) promotes the source's dtype by
+# the fill (a float column whose kept cells were NaN read as int64 holding
+# NaN); df.loc[:, new] = value over every row is the value's own column (it
+# was float64), a write naming rows float64 NaN beside the cells.
+def _tct51_frame(m: Any) -> Any:
+    return m.DataFrame({"b": [1.5, float("nan")]}, index=["p", "q"])
+
+
+def _tct51_loc(write: Any) -> Any:
+    def run(m: Any) -> Any:
+        frame = _tct51_frame(m)
+        write(frame, m)
+        return frame
+
+    return run
+
+
+_TCT51_CASES = {
+    "Series float NaN kept, int fill": lambda m: m.Series([1.5, float("nan")], index=["p", "q"]).reindex(["q", "zz"], fill_value=0),
+    "Series float none kept, int fill": lambda m: m.Series([1.5, float("nan")], index=["p", "q"]).reindex(["zz"], fill_value=0),
+    "Series object None kept, int fill": lambda m: m.Series(["a", None], index=["p", "q"]).reindex(["q", "zz"], fill_value=0),
+    "Series int, int fill (NEGATIVE)": lambda m: m.Series([1, 2], index=["p", "q"]).reindex(["q", "zz"], fill_value=0),
+    "Series int, float fill (NEGATIVE)": lambda m: m.Series([1, 2], index=["p", "q"]).reindex(["q", "zz"], fill_value=0.5),
+    "DataFrame float NaN kept, int fill": lambda m: m.DataFrame({"b": [1.5, float("nan")], "a": [1, 2], "s": ["x", None]}, index=["p", "q"]).reindex(["q", "zz"], fill_value=0),
+    "DataFrame none kept, int fill": lambda m: m.DataFrame({"b": [1.5, float("nan")], "a": [1, 2], "s": ["x", None]}, index=["p", "q"]).reindex(["zz"], fill_value=0),
+    "loc new column, int": _tct51_loc(lambda d, m: d.loc.__setitem__((slice(None), "n"), 1)),
+    "loc new column, list": _tct51_loc(lambda d, m: d.loc.__setitem__((slice(None), "n"), [1, 2])),
+    "loc new column, list with None": _tct51_loc(lambda d, m: d.loc.__setitem__((slice(None), "n"), ["x", None])),
+    "loc new column, aligned Series": _tct51_loc(lambda d, m: d.loc.__setitem__((slice(None), "n"), m.Series([5], index=["q"]))),
+    "loc new and existing columns": _tct51_loc(lambda d, m: d.loc.__setitem__((slice(None), ["b", "n"]), 2)),
+    "loc new column, one row (NEGATIVE)": _tct51_loc(lambda d, m: d.loc.__setitem__(("p", "n"), 1)),
+    "loc new column, rows listed (NEGATIVE)": _tct51_loc(lambda d, m: d.loc.__setitem__((["q", "p"], "n"), [7, 8])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_TCT51_CASES))
+def test_reindex_fill_and_loc_new_column_dtypes_like_pandas_tct51(case: str) -> None:
+    def shown(m: Any) -> Any:
+        result = _TCT51_CASES[case](m)
+        dtypes = [str(dtype) for dtype in result.dtypes] if hasattr(result, "columns") else str(result.dtype)
+        return (repr(result), dtypes)
+
+    assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-r8gr0: reindex over both changed axes of a one-dtype frame
+# is pandas' 2-D take, so a label either target lacks promotes every column
+# (the kept columns kept int64 / bool); one changed axis, an unchanged one or
+# a mixed frame reindexes column by column.
+def _r8gr0_ints(m: Any) -> Any:
+    return m.DataFrame({"v": [1, 2], "u": [3, 4]})
+
+
+def _r8gr0_bools(m: Any) -> Any:
+    return m.DataFrame({"p": [True, False], "q": [False, False]})
+
+
+_R8GR0_CASES = {
+    "int, new column, fewer rows": lambda m: _r8gr0_ints(m).reindex(index=[0], columns=["v", "w"]),
+    "int, permuted rows, new column": lambda m: _r8gr0_ints(m).reindex(index=[1, 0], columns=["v", "w"]),
+    "int, permuted rows, new column, fill 0.5": lambda m: _r8gr0_ints(m).reindex(index=[1, 0], columns=["v", "w"], fill_value=0.5),
+    "int, new row": lambda m: _r8gr0_ints(m).reindex(index=[0, 5], columns=["u", "v"]),
+    "int32, new row": lambda m: m.DataFrame({"v": np.array([1, 2], dtype="int32"), "u": np.array([5, 6], dtype="int32")}).reindex(index=[0, 5], columns=["u", "v"]),
+    "bool, permuted rows, new column": lambda m: _r8gr0_bools(m).reindex(index=[1, 0], columns=["p", "z"]),
+    "object, new row and column": lambda m: m.DataFrame({"s": ["a", "b"]}).reindex(index=[0, 9], columns=["s", "t"]),
+    "int, int fill keeps int64 (NEGATIVE)": lambda m: _r8gr0_ints(m).reindex(index=[1, 0], columns=["v", "w"], fill_value=0),
+    "int, no gap (NEGATIVE)": lambda m: _r8gr0_ints(m).reindex(index=[1, 0], columns=["u", "v"]),
+    "int, rows unchanged (NEGATIVE)": lambda m: _r8gr0_ints(m).reindex(index=[0, 1], columns=["v", "w"]),
+    "bool, rows unchanged (NEGATIVE)": lambda m: _r8gr0_bools(m).reindex(index=[0, 1], columns=["p", "z"]),
+    "mixed dtypes (NEGATIVE)": lambda m: m.DataFrame({"v": [1, 2], "s": ["a", "b"]}).reindex(index=[1, 0], columns=["v", "s", "w"]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_R8GR0_CASES))
+def test_reindex_both_axes_promotes_a_one_dtype_frame_like_pandas_r8gr0(case: str) -> None:
+    def shown(m: Any) -> Any:
+        result = _R8GR0_CASES[case](m)
+        return (repr(result), [str(dtype) for dtype in result.dtypes])
+
+    assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-yxqee / br-frankenpandas-ajyln: pandas hands a numpy
+# number to an arithmetic op as the Python int / float of its value
+# (maybe_prepare_scalar_for_op), so a narrow Series keeps its width and an
+# int8 product wraps; a flex method with fill_value fills the Series and runs
+# the operator with the scalar itself. Comparisons keep the numpy scalar.
+def _narrow_f32(m: Any) -> Any:
+    return m.Series(np.array([1.5, np.nan, 0.1], dtype="float32"))
+
+
+def _narrow_i8(m: Any) -> Any:
+    return m.Series(np.array([3, -7, 100], dtype="int8"))
+
+
+_NUMPY_SCALAR_ARITH_CASES = {
+    "float32 * np.float64": lambda m: _narrow_f32(m) * np.float64(0.1),
+    "float32 + np.int64": lambda m: _narrow_f32(m) + np.int64(3),
+    "float32 / np.int32": lambda m: _narrow_f32(m) / np.int32(3),
+    "np.float64 - float32": lambda m: np.float64(0.1) - _narrow_f32(m),
+    "float32 ** np.float64": lambda m: _narrow_f32(m) ** np.float64(2.0),
+    "int8 * np.int64 wraps": lambda m: _narrow_i8(m) * np.int64(3),
+    "int8 // np.int32": lambda m: _narrow_i8(m) // np.int32(3),
+    "int8 + np.float32 is float64": lambda m: _narrow_i8(m) + np.float32(0.1),
+    "int8 * np.int64(300) overflows": lambda m: _narrow_i8(m) * np.int64(300),
+    "float32.mul(np.float64)": lambda m: _narrow_f32(m).mul(np.float64(0.1)),
+    "float32.add(2, fill_value=1)": lambda m: _narrow_f32(m).add(2, fill_value=1),
+    "float32.mul(0.1, fill_value=0.3)": lambda m: _narrow_f32(m).mul(0.1, fill_value=0.3),
+    "float32.add(nan, fill_value=5)": lambda m: _narrow_f32(m).add(np.nan, fill_value=5),
+    "float32.add(float32 Series, fill_value=1)": lambda m: _narrow_f32(m).add(m.Series(np.array([1.0, 2.0, np.nan], dtype="float32")), fill_value=1),
+    "float32 > np.float64 compares in float64 (NEGATIVE)": lambda m: _narrow_f32(m) > np.float64(0.1),
+    "float64 + np.float32 (NEGATIVE)": lambda m: m.Series([0.5, 1.5]) + np.float32(0.1),
+    "float64.add(1, fill_value=0) (NEGATIVE)": lambda m: m.Series([1.0, np.nan]).add(1, fill_value=0),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_NUMPY_SCALAR_ARITH_CASES))
+def test_numpy_scalars_and_flex_fill_keep_the_width_like_pandas_yxqee_ajyln(case: str) -> None:
+    def shown(m: Any) -> Any:
+        try:
+            result = _NUMPY_SCALAR_ARITH_CASES[case](m)
+        except OverflowError as error:
+            return ("OverflowError", str(error))
+        return (str(result.dtype), [repr(value) for value in result.tolist()])
+
+    assert shown(fpd) == shown(pd)

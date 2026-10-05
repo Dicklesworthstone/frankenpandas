@@ -67450,6 +67450,36 @@ pub fn reindex_column_with_invented_gaps(
     Ok(column.reindex_by_positions_with_absent_scalar(positions, Scalar::Null(gap))?)
 }
 
+/// The column `reindex(fill_value=)` builds from `values`, the kept source
+/// cells and the fills: the source's dtype promoted by the fill, as pandas'
+/// maybe_promote. Inferring it from the cells alone let an int fill decide
+/// once no valid source cell was kept - a float column whose kept cells were
+/// NaN read as int64 holding NaN, an object one of None as int64
+/// (br-frankenpandas-tct51).
+pub fn reindex_fill_column(
+    source_dtype: &DType,
+    values: Vec<Scalar>,
+) -> Result<Column, FrameError> {
+    match source_dtype {
+        DType::Utf8
+            if values
+                .iter()
+                .any(|value| !value.is_missing() && !matches!(value, Scalar::Utf8(_))) =>
+        {
+            Ok(Column::from_object_values(values))
+        }
+        DType::Float64 => {
+            let column = Column::from_values(values)?;
+            if matches!(column.dtype(), DType::Int64 | DType::Null) {
+                Ok(column.astype(DType::Float64)?)
+            } else {
+                Ok(column)
+            }
+        }
+        _ => Ok(Column::from_values(values)?),
+    }
+}
+
 /// Concatenate DataFrames along axis 0 (row-wise).
 ///
 /// Matches `pd.concat([df1, df2, ...], axis=0)` semantics:
@@ -89642,7 +89672,10 @@ impl DataFrame {
                     new_vals.push(fill_value.clone());
                 }
             }
-            result_cols.insert(col_name.clone(), Column::from_values(new_vals)?);
+            result_cols.insert(
+                col_name.clone(),
+                reindex_fill_column(&col.dtype(), new_vals)?,
+            );
         }
         // Per br-frankenpandas-1lo93: pandas preserves the index name when
         // reindexing with a flat label list.
@@ -187946,6 +187979,41 @@ mod tests {
         assert_eq!(result.columns["a"].values()[0], Scalar::Float64(1.0));
         assert_eq!(result.columns["a"].values()[1], Scalar::Float64(2.0));
         assert_eq!(result.columns["a"].values()[2], Scalar::Float64(0.0)); // filled
+    }
+
+    /// An int fill keeps a float column float64 when its kept cells are all
+    /// NaN, and an object column of None object; an int column takes the
+    /// int fill as int64 (br-frankenpandas-tct51).
+    #[test]
+    fn reindex_fill_keeps_the_source_dtype_tct51() {
+        let df = DataFrame::from_dict(
+            &["f", "s", "i"],
+            vec![
+                ("f", vec![Scalar::Float64(1.5), Scalar::Null(NullKind::NaN)]),
+                (
+                    "s",
+                    vec![Scalar::Utf8("a".into()), Scalar::Null(NullKind::Null)],
+                ),
+                ("i", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            ],
+        )
+        .unwrap();
+        let result = df
+            .reindex_fill(vec![1_i64.into(), 5_i64.into()], Scalar::Int64(0))
+            .unwrap();
+        let f = result.column("f").unwrap();
+        assert_eq!(f.dtype(), DType::Float64);
+        assert!(f.values()[0].is_missing());
+        assert_eq!(f.values()[1], Scalar::Float64(0.0));
+        let s = result.column("s").unwrap();
+        assert_eq!(s.dtype(), DType::Utf8);
+        assert_eq!(
+            s.values(),
+            &[Scalar::Null(NullKind::Null), Scalar::Int64(0)]
+        );
+        let i = result.column("i").unwrap();
+        assert_eq!(i.dtype(), DType::Int64);
+        assert_eq!(i.values(), &[Scalar::Int64(2), Scalar::Int64(0)]);
     }
 
     #[test]
