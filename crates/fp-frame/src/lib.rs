@@ -14935,26 +14935,23 @@ impl Series {
         Self::new(self.name.clone(), self.index.clone(), column)
     }
 
-    /// Fill missing values with `fill_value`, filling at most `limit`
-    /// consecutive NaN positions.
+    /// Fill the first `limit` missing values with `fill_value`.
     ///
-    /// Matches `series.fillna(value, limit=N)`.
+    /// Matches `series.fillna(value, limit=N)`: pandas counts the fills
+    /// along the whole Series, not per run of missing values (that is a
+    /// method's limit, `ffill(limit=N)`); it filled `limit` per gap
+    /// (br-frankenpandas-vwkd3).
     pub fn fillna_limit(&self, fill_value: &Scalar, limit: usize) -> Result<Self, FrameError> {
         let vals = self.column.values();
         let filled = self.column.fillna(fill_value)?;
         let mut out = Vec::with_capacity(vals.len());
-        let mut consecutive_fills: usize = 0;
+        let mut fills: usize = 0;
 
         for (i, val) in vals.iter().enumerate() {
-            if val.is_missing() {
-                consecutive_fills += 1;
-                if consecutive_fills <= limit {
-                    out.push(filled.values()[i].clone());
-                } else {
-                    out.push(val.clone());
-                }
+            if val.is_missing() && fills < limit {
+                fills += 1;
+                out.push(filled.values()[i].clone());
             } else {
-                consecutive_fills = 0;
                 out.push(val.clone());
             }
         }
@@ -78066,8 +78063,8 @@ impl DataFrame {
         Ok(out.with_labels_of(self))
     }
 
-    /// Fill missing values with `fill_value`, filling at most `limit`
-    /// consecutive NaN positions per column.
+    /// Fill the first `limit` missing values of each column with
+    /// `fill_value` (see [`Series::fillna_limit`]).
     ///
     /// Matches `df.fillna(value, limit=N)`.
     pub fn fillna_limit(&self, fill_value: &Scalar, limit: usize) -> Result<Self, FrameError> {
@@ -188617,6 +188614,33 @@ mod tests {
         assert_eq!(result.column().values()[2], Scalar::Float64(0.0)); // filled
         assert!(result.column().values()[3].is_missing()); // limit exceeded
         assert_eq!(result.column().values()[4], Scalar::Float64(5.0));
+    }
+
+    /// The limit counts fills along the Series, not per gap: live pandas
+    /// 2.2.3 Series([NaN, 1, NaN, NaN, NaN, 2, NaN]).fillna(0, limit=2) is
+    /// [0, 1, 0, NaN, NaN, 2, NaN] (br-frankenpandas-vwkd3).
+    #[test]
+    fn series_fillna_limit_counts_across_gaps_vwkd3() {
+        let nan = Scalar::Null(NullKind::NaN);
+        let values = vec![
+            nan.clone(),
+            Scalar::Float64(1.0),
+            nan.clone(),
+            nan.clone(),
+            nan.clone(),
+            Scalar::Float64(2.0),
+            nan,
+        ];
+        let labels = (0..7_i64).map(IndexLabel::from).collect();
+        let s = Series::from_values("data", labels, values).unwrap();
+        let filled = s.fillna_limit(&Scalar::Float64(0.0), 2).unwrap();
+        let missing: Vec<bool> = filled
+            .column()
+            .values()
+            .iter()
+            .map(Scalar::is_missing)
+            .collect();
+        assert_eq!(missing, vec![false, false, false, true, true, false, true]);
     }
 
     #[test]

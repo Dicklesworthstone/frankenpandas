@@ -23025,6 +23025,30 @@ fn extract_single_col_name(obj: &Bound<'_, PyAny>) -> PyResult<String> {
     Ok(obj.str()?.to_string())
 }
 
+/// `col` with its first `limit` missing values taken from `filled` (the
+/// column fully filled), as pandas' Block.fillna counts them: along the
+/// whole column, not per gap (fillna(0, limit=2) of [NaN, 1, NaN, NaN]
+/// filled all three; br-frankenpandas-vwkd3).
+fn limited_fill(
+    col: &Column,
+    filled: &Column,
+    limit: usize,
+) -> Result<Column, fp_frame::FrameError> {
+    let vals = col.values();
+    let filled_vals = filled.values();
+    let mut out = Vec::with_capacity(vals.len());
+    let mut fills = 0;
+    for (i, v) in vals.iter().enumerate() {
+        if v.is_missing() && fills < limit && i < filled_vals.len() {
+            fills += 1;
+            out.push(filled_vals[i].clone());
+        } else {
+            out.push(v.clone());
+        }
+    }
+    Column::new(col.dtype().clone(), out).map_err(fp_frame::FrameError::Column)
+}
+
 fn fill_column_with_other(
     col: &Column,
     other: &Column,
@@ -23034,24 +23058,7 @@ fn fill_column_with_other(
         let filled = col
             .fillna_with_column(other)
             .map_err(fp_frame::FrameError::Column)?;
-        let vals = col.values();
-        let filled_vals = filled.values();
-        let mut out = Vec::with_capacity(vals.len());
-        let mut consecutive = 0;
-        for (i, v) in vals.iter().enumerate() {
-            if v.is_missing() {
-                consecutive += 1;
-                if consecutive <= lim && i < filled_vals.len() {
-                    out.push(filled_vals[i].clone());
-                } else {
-                    out.push(v.clone());
-                }
-            } else {
-                consecutive = 0;
-                out.push(v.clone());
-            }
-        }
-        Column::new(col.dtype().clone(), out).map_err(fp_frame::FrameError::Column)
+        limited_fill(col, &filled, lim)
     } else {
         col.fillna_with_column(other)
             .map_err(fp_frame::FrameError::Column)
@@ -23086,24 +23093,7 @@ fn fill_column_with_scalar(
 ) -> Result<Column, fp_frame::FrameError> {
     if let Some(lim) = limit {
         let filled = col.fillna(scalar).map_err(fp_frame::FrameError::Column)?;
-        let vals = col.values();
-        let filled_vals = filled.values();
-        let mut out = Vec::with_capacity(vals.len());
-        let mut consecutive = 0;
-        for (i, v) in vals.iter().enumerate() {
-            if v.is_missing() {
-                consecutive += 1;
-                if consecutive <= lim && i < filled_vals.len() {
-                    out.push(filled_vals[i].clone());
-                } else {
-                    out.push(v.clone());
-                }
-            } else {
-                consecutive = 0;
-                out.push(v.clone());
-            }
-        }
-        Column::new(col.dtype().clone(), out).map_err(fp_frame::FrameError::Column)
+        limited_fill(col, &filled, lim)
     } else {
         // A categorical fills with its category (k2bwx).
         fp_frame::fill_column(col, scalar)

@@ -26608,6 +26608,27 @@ _GVD3Q_CASES = {
 }
 
 
+# br-frankenpandas-vwkd3: fillna(value, limit=N) fills the first N missing
+# values along the column (pandas' Block.fillna), not N per gap; a method's
+# limit (ffill / bfill) stays per gap.
+_VWKD3_NAN = float("nan")
+_VWKD3_CASES = {
+    "Series, three gaps": lambda m: m.Series([_VWKD3_NAN, 1, _VWKD3_NAN, _VWKD3_NAN, _VWKD3_NAN, 2, _VWKD3_NAN]).fillna(0, limit=2),
+    "Series filled from a Series": lambda m: m.Series([_VWKD3_NAN, 1, _VWKD3_NAN, _VWKD3_NAN]).fillna(m.Series([7.0, 7.0, 8.0, 9.0]), limit=1),
+    "DataFrame per column": lambda m: m.DataFrame({"a": [_VWKD3_NAN, 1, _VWKD3_NAN, _VWKD3_NAN], "b": [_VWKD3_NAN, _VWKD3_NAN, 3, _VWKD3_NAN]}).fillna(0, limit=1),
+    "DataFrame dict fill": lambda m: m.DataFrame({"a": [_VWKD3_NAN, 1, _VWKD3_NAN, _VWKD3_NAN], "b": [_VWKD3_NAN, _VWKD3_NAN, 3, _VWKD3_NAN]}).fillna({"a": 9}, limit=1),
+    "DataFrame axis=1": lambda m: m.DataFrame({"a": [_VWKD3_NAN, 1, _VWKD3_NAN, _VWKD3_NAN], "b": [_VWKD3_NAN, _VWKD3_NAN, 3, _VWKD3_NAN]}).fillna(0, limit=1, axis=1),
+    "ffill limit stays per gap (NEGATIVE)": lambda m: m.Series([_VWKD3_NAN, 1, _VWKD3_NAN, _VWKD3_NAN, 2, _VWKD3_NAN, _VWKD3_NAN]).ffill(limit=1),
+    "bfill limit stays per gap (NEGATIVE)": lambda m: m.Series([_VWKD3_NAN, _VWKD3_NAN, 1, _VWKD3_NAN, _VWKD3_NAN, 2]).bfill(limit=1),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VWKD3_CASES))
+def test_fillna_limit_counts_along_the_column_like_pandas_vwkd3(case: str) -> None:
+    assert repr(_VWKD3_CASES[case](fpd)) == repr(_VWKD3_CASES[case](pd))
+
+
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 @pytest.mark.parametrize("case", list(_GVD3Q_CASES))
 def test_drop_over_a_row_multiindex_like_pandas_gvd3q(case: str) -> None:
