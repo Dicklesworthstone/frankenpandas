@@ -25879,7 +25879,7 @@ _4OHJC_OPS = {
     "round": lambda s: s.round(1),
     "interp": lambda s: s.interpolate(),
 }
-_4OHJC_EMPTY_RESIDUE = {("cumsum", "datetime64[ns]"), ("cumprod", "datetime64[ns]"), ("gb mean", "object"), ("gb mean", "string"), ("diff", "bool"), ("diff", "object"), ("diff", "string"), ("pct", "bool"), ("pct", "object"), ("pct", "string"), ("abs", "datetime64[ns]"), ("pow2", "int64"), ("pow2", "Int64"), ("pow2", "string"), ("pow2", "datetime64[ns]"), ("pow2", "timedelta64[ns]"), ("pow2", "int32"), ("add1", "datetime64[ns]"), ("add1", "timedelta64[ns]"), ("div2", "string"), ("div2", "datetime64[ns]"), ("div2", "timedelta64[ns]"), ("eq1", "datetime64[ns]"), ("eq1", "timedelta64[ns]"), ("roll sum", "object"), ("roll sum", "string"), ("exp mean", "object"), ("exp mean", "string"), ("interp", "Int64")}
+_4OHJC_EMPTY_RESIDUE = {("cumsum", "datetime64[ns]"), ("cumprod", "datetime64[ns]"), ("gb mean", "object"), ("gb mean", "string"), ("diff", "bool"), ("diff", "object"), ("diff", "string"), ("pct", "bool"), ("pct", "object"), ("pct", "string"), ("abs", "datetime64[ns]"), ("pow2", "int64"), ("pow2", "Int64"), ("pow2", "string"), ("pow2", "datetime64[ns]"), ("pow2", "timedelta64[ns]"), ("pow2", "int32"), ("add1", "datetime64[ns]"), ("div2", "string"), ("div2", "datetime64[ns]"), ("div2", "timedelta64[ns]"), ("eq1", "datetime64[ns]"), ("eq1", "timedelta64[ns]"), ("roll sum", "object"), ("roll sum", "string"), ("exp mean", "object"), ("exp mean", "string"), ("interp", "Int64")}
 _4OHJC_ONE_ROW_RESIDUE = {("cumprod", "object"), ("diff", "object"), ("diff", "string"), ("pct", "bool"), ("pct", "object"), ("pct", "string"), ("abs", "datetime64[ns]")}
 
 
@@ -26862,6 +26862,47 @@ def test_durations_with_aware_instants_and_typed_indexes_like_pandas_wtu8e(case:
     assert shown(fpd) == shown(pd)
 
 
+# The operands a timedelta Series' arithmetic refuses as pandas does: None,
+# ints / lists / int or float arrays added, and another length
+# (br-frankenpandas-wtu8e).
+def _wtu8e_durations(m: Any) -> Any:
+    return m.Series(m.to_timedelta(["1D", "2D", None]))
+
+
+_WTU8E_OPERAND_CASES = {
+    "s * None": lambda m: _wtu8e_durations(m) * None,
+    "s + None": lambda m: _wtu8e_durations(m) + None,
+    "None + s": lambda m: None + _wtu8e_durations(m),
+    "None / s": lambda m: None / _wtu8e_durations(m),
+    "s // None": lambda m: _wtu8e_durations(m) // None,
+    "s * length-1 array": lambda m: _wtu8e_durations(m) * np.array([2]),
+    "s / length-2 list": lambda m: _wtu8e_durations(m) / [1, 2],
+    "s + int array": lambda m: _wtu8e_durations(m) + np.array([1, 2, 3]),
+    "s + int": lambda m: _wtu8e_durations(m) + 1,
+    "s - float array": lambda m: _wtu8e_durations(m) - np.array([1.5, 2.0, 3.0]),
+    "s + list of Timedeltas": lambda m: _wtu8e_durations(m) + [m.Timedelta("1D")] * 3,
+    "s + length-1 timedelta array": lambda m: _wtu8e_durations(m) + np.array([1], dtype="m8[D]"),
+    "s * same-length list (NEGATIVE)": lambda m: _wtu8e_durations(m) * [1, 2, 3],
+    "s + Timedelta (NEGATIVE)": lambda m: _wtu8e_durations(m) + m.Timedelta("1h"),
+    "s + same-length timedelta array (NEGATIVE)": lambda m: _wtu8e_durations(m) + np.array([1, 2, 3], dtype="m8[D]"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_WTU8E_OPERAND_CASES))
+def test_timedelta_series_operand_refusals_like_pandas_wtu8e(case: str) -> None:
+    def shown(m: Any) -> Any:
+        try:
+            result = _WTU8E_OPERAND_CASES[case](m)
+        except TypeError as error:  # numpy's UFuncTypeError is one
+            return ("TypeError", str(error))
+        except ValueError as error:
+            return ("ValueError", str(error))
+        return (repr(result), str(result.dtype))
+
+    assert shown(fpd) == shown(pd)
+
+
 # DataFrame.join of a list on the index, and the index name an
 # index-on-index merge / join keeps (br-frankenpandas-4lss6).
 def _join_4lss6_frames(m: Any) -> dict:
@@ -26939,5 +26980,40 @@ def test_reindex_takes_the_target_name_like_pandas_hnu53(case: str) -> None:
         result = _REINDEX_NAME_CASES[case](m)
         columns = getattr(result, "columns", None)
         return (repr(result), result.index.name, None if columns is None else columns.name)
+
+    assert shown(fpd) == shown(pd)
+
+
+# read_csv with one text dtype for every column reads each column's text,
+# missing cells still missing; the index_col columns are inferred
+# (br-frankenpandas-i5aoq).
+_I5AOQ_TEXT = "a,b\n007,1.50\n,x\n"
+
+_I5AOQ_CASES = {
+    "dtype=str": {"dtype": str},
+    "dtype=object": {"dtype": object},
+    "dtype='str'": {"dtype": "str"},
+    "dtype=str, index_col by name": {"dtype": str, "index_col": "a"},
+    "dtype=object, index_col by position": {"dtype": object, "index_col": 1},
+    "dtype=str, usecols": {"dtype": str, "usecols": ["b"]},
+    "dtype=str, header=None": {"dtype": str, "header": None},
+    "dtype=str, na_filter=False": {"dtype": str, "na_filter": False},
+    "dtype=str, na_values": {"dtype": str, "keep_default_na": False, "na_values": ["x"]},
+    "dtype={'a': str} (NEGATIVE)": {"dtype": {"a": str}},
+    "dtype=float (NEGATIVE)": {"dtype": float, "usecols": ["a"]},
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_I5AOQ_CASES))
+def test_read_csv_text_dtype_keeps_text_and_missing_like_pandas_i5aoq(case: str) -> None:
+    def shown(m: Any) -> Any:
+        frame = m.read_csv(io.StringIO(_I5AOQ_TEXT), **_I5AOQ_CASES[case])
+        return (
+            repr(frame),
+            [str(dtype) for dtype in frame.dtypes],
+            repr(frame.isna().values.tolist()),
+            repr(list(frame.index)),
+        )
 
     assert shown(fpd) == shown(pd)

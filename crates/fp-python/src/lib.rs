@@ -24230,6 +24230,120 @@ fn host_object_arith(
     Ok(Some(PySeries { inner }))
 }
 
+/// pandas' refusals of the operands a timedelta Series' arithmetic
+/// (TimedeltaArray's) rejects, with its messages: None (numpy's ufunc
+/// TypeError for * / // %, which reflected / // % word as a division);
+/// ints, a bool, a float, a list or a float array added or subtracted;
+/// and a list or array of another length (`op` is the dunder's name
+/// without underscores, `reflected` for the r-dunders). fp answered NaT
+/// for None, broadcast a length-1 array, and added lists
+/// (br-frankenpandas-wtu8e).
+fn timedelta_operand_check(
+    like: &Series,
+    other: &Bound<'_, PyAny>,
+    op: &str,
+    reflected: bool,
+) -> PyResult<()> {
+    if like.column().dtype() != DType::Timedelta64 {
+        return Ok(());
+    }
+    let type_error = |message: String| Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(message));
+    let additive = matches!(op, "add" | "sub");
+    // pandas subtracts these from an operand as -self + operand.
+    let symbol = if op == "sub" && !reflected { "-" } else { "+" };
+    if other.is_none() {
+        return match (op, reflected) {
+            ("add", true) => type_error(format!(
+                "unsupported operand type(s) for {symbol}: 'NoneType' and 'TimedeltaArray'"
+            )),
+            ("add" | "sub", _) => type_error(format!(
+                "unsupported operand type(s) for {symbol}: 'TimedeltaArray' and 'NoneType'"
+            )),
+            ("truediv" | "floordiv" | "mod", true) => {
+                type_error("Cannot divide NoneType by TimedeltaArray".to_owned())
+            }
+            ("mul" | "truediv" | "floordiv" | "mod", _) => {
+                let ufunc = match op {
+                    "mul" => "multiply",
+                    "truediv" => "divide",
+                    _ => "floor_divide",
+                };
+                type_error(format!(
+                    "ufunc '{ufunc}' cannot use operands with types dtype('<m8[ns]') and dtype('O')"
+                ))
+            }
+            _ => Ok(()),
+        };
+    }
+    let integers = || {
+        type_error(
+            "Addition/subtraction of integers and integer-arrays with TimedeltaArray is no \
+             longer supported.  Instead of adding/subtracting `n`, use `n * obj.freq`"
+                .to_owned(),
+        )
+    };
+    if additive && other.is_instance_of::<pyo3::types::PyBool>() && !reflected {
+        return type_error(format!(
+            "unsupported operand type(s) for {symbol}: 'TimedeltaArray' and 'bool'"
+        ));
+    }
+    if additive && other.is_instance_of::<pyo3::types::PyInt>() {
+        return integers();
+    }
+    if additive && other.is_instance_of::<pyo3::types::PyFloat>() && !reflected {
+        return type_error(format!(
+            "unsupported operand type(s) for {symbol}: 'TimedeltaArray' and 'float'"
+        ));
+    }
+    if additive && other.is_instance_of::<PyList>() && !(op == "add" && reflected) {
+        return type_error(format!(
+            "unsupported operand type(s) for {symbol}: 'TimedeltaArray' and 'list'"
+        ));
+    }
+    // An array or index by position: its kind, then its length.
+    if other.is_instance_of::<PySeries>()
+        || other.is_instance_of::<pyo3::types::PyString>()
+        || !other.hasattr("__len__")?
+    {
+        return Ok(());
+    }
+    let kind = other
+        .getattr("dtype")
+        .and_then(|dtype| dtype.getattr("kind"))
+        .and_then(|kind| kind.extract::<String>())
+        .unwrap_or_default();
+    if additive && matches!(kind.as_str(), "i" | "u") {
+        return integers();
+    }
+    if additive && kind == "f" && !(op == "sub" && reflected) {
+        let ufunc = if op == "add" { "add" } else { "subtract" };
+        let (left, right) = if reflected {
+            ("float64", "<m8[ns]")
+        } else {
+            ("<m8[ns]", "float64")
+        };
+        return type_error(format!(
+            "ufunc '{ufunc}' cannot use operands with types dtype('{left}') and dtype('{right}')"
+        ));
+    }
+    // A 0-d array has no length: it is a scalar here.
+    match other.len() {
+        Ok(length) if length != like.len() => {}
+        _ => return Ok(()),
+    }
+    let value_error = |message: &str| {
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            message.to_owned(),
+        ))
+    };
+    match op {
+        "add" | "sub" => value_error("cannot add indices of unequal length"),
+        "mul" => value_error("Cannot multiply with unequal lengths"),
+        "truediv" | "floordiv" | "mod" => value_error("Cannot divide vectors with unequal lengths"),
+        _ => Ok(()),
+    }
+}
+
 /// Whether an arithmetic operand is text - a str, or a Series of text -
 /// which an object column of text meets with fp's kernels.
 fn text_operand(other: &Bound<'_, PyAny>, other_series: Option<&Series>) -> bool {
@@ -29243,6 +29357,7 @@ impl PySeries {
     // `__eq__`/`__ne__` deliberately do not return a Python bool.
     fn __add__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let other = &arith_operand(other)?;
+        timedelta_operand_check(&self.inner, other, "add", false)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "add", false)? {
             return Ok(res);
         }
@@ -29261,6 +29376,7 @@ impl PySeries {
     }
     fn __radd__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let other = &arith_operand(other)?;
+        timedelta_operand_check(&self.inner, other, "add", true)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "add", true)? {
             return Ok(res);
         }
@@ -29279,6 +29395,7 @@ impl PySeries {
     }
     fn __sub__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let other = &arith_operand(other)?;
+        timedelta_operand_check(&self.inner, other, "sub", false)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "sub", false)? {
             return Ok(res);
         }
@@ -29297,6 +29414,7 @@ impl PySeries {
     }
     fn __rsub__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let other = &arith_operand(other)?;
+        timedelta_operand_check(&self.inner, other, "sub", true)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "sub", true)? {
             return Ok(res);
         }
@@ -29308,6 +29426,7 @@ impl PySeries {
     }
     fn __mul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let other = &arith_operand(other)?;
+        timedelta_operand_check(&self.inner, other, "mul", false)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "mul", false)? {
             return Ok(res);
         }
@@ -29319,6 +29438,7 @@ impl PySeries {
     }
     fn __rmul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let other = &arith_operand(other)?;
+        timedelta_operand_check(&self.inner, other, "mul", true)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "mul", true)? {
             return Ok(res);
         }
@@ -29330,6 +29450,7 @@ impl PySeries {
     }
     fn __truediv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let other = &arith_operand(other)?;
+        timedelta_operand_check(&self.inner, other, "truediv", false)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "truediv", false)? {
             return Ok(res);
         }
@@ -29341,6 +29462,7 @@ impl PySeries {
     }
     fn __rtruediv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let other = &arith_operand(other)?;
+        timedelta_operand_check(&self.inner, other, "truediv", true)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "truediv", true)? {
             return Ok(res);
         }
@@ -29352,6 +29474,7 @@ impl PySeries {
     }
     fn __floordiv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let other = &arith_operand(other)?;
+        timedelta_operand_check(&self.inner, other, "floordiv", false)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "floordiv", false)? {
             return Ok(res);
         }
@@ -29360,6 +29483,7 @@ impl PySeries {
     }
     fn __rfloordiv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let other = &arith_operand(other)?;
+        timedelta_operand_check(&self.inner, other, "floordiv", true)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "floordiv", true)? {
             return Ok(res);
         }
@@ -29368,6 +29492,7 @@ impl PySeries {
     }
     fn __mod__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let other = &arith_operand(other)?;
+        timedelta_operand_check(&self.inner, other, "mod", false)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "mod", false)? {
             return Ok(res);
         }
@@ -29377,6 +29502,7 @@ impl PySeries {
     }
     fn __rmod__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let other = &arith_operand(other)?;
+        timedelta_operand_check(&self.inner, other, "mod", true)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "mod", true)? {
             return Ok(res);
         }
@@ -73360,6 +73486,38 @@ fn read_csv_impl(
         }
     };
     let mut frame = fp_io::read_csv_with_options(&text, &opts).map_err(io_error_to_py)?;
+    // A text dtype for every column (str / object) reads each column as
+    // its text, a missing cell still missing - as dtype={column: str} does;
+    // casting the parsed frame made '007' the text '7.0' and a missing cell
+    // 'nan'. pandas infers the index_col columns as without it
+    // (br-frankenpandas-i5aoq).
+    if frame_dtype == Some(DType::Utf8) {
+        let index_items: Vec<Bound<'_, PyAny>> = match args.index_col.filter(|i| !i.is_none()) {
+            Some(index_col) if index_col.is_instance_of::<PyList>() => {
+                index_col.try_iter()?.collect::<PyResult<_>>()?
+            }
+            Some(index_col) if !index_col.is_instance_of::<pyo3::types::PyBool>() => {
+                vec![index_col.clone()]
+            }
+            _ => Vec::new(),
+        };
+        // One that names no column is the index_col step's error, below.
+        let index_names: Vec<String> = index_items
+            .iter()
+            .filter_map(|item| csv_column_ref(&frame, item).ok())
+            .collect();
+        let mut text_opts = opts.clone();
+        text_opts.dtype = Some(
+            frame
+                .column_names()
+                .iter()
+                .filter(|name| !index_names.contains(name))
+                .map(|name| (name.to_string(), DType::Utf8))
+                .collect(),
+        );
+        frame = fp_io::read_csv_with_options(&text, &text_opts).map_err(io_error_to_py)?;
+        frame_dtype = None;
+    }
     if let Some(converters) = &converters {
         frame = apply_csv_converters(py, frame, &text, &opts, converters)?;
     }
