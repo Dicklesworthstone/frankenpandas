@@ -7006,6 +7006,79 @@ fn zoned_row(py: Python<'_>, frame: &DataFrame, row: Series) -> PyResult<Series>
     .map_err(frame_error_to_py)
 }
 
+/// An empty column of `source`'s pandas dtype: its width, `string` mark,
+/// categories and zone kept.
+fn empty_column_like(source: &Column) -> PyResult<Column> {
+    let column = Column::new(source.dtype(), Vec::new())
+        .map_err(column_error_to_py)?
+        .keeping_dtype_of(source);
+    Ok(match source.categorical() {
+        Some(meta) => column.with_categorical(Some(meta.clone())),
+        None => column,
+    })
+}
+
+/// An empty Series' `map` / `apply` of a function, without calling it, in
+/// pandas' dtype: the Series' own, a masked one's numpy dtype under `map`
+/// (`numpy_masked`; Int64 -> int64, boolean -> bool) - the answers inferred
+/// object from no values (br-frankenpandas-4ohjc). None when not empty.
+fn empty_mapped(series: &Series, numpy_masked: bool) -> PyResult<Option<Series>> {
+    if !series.is_empty() {
+        return Ok(None);
+    }
+    let source = series.column();
+    let column = match source.dtype() {
+        DType::Int64Nullable if numpy_masked => Column::from_i64_values(Vec::new()),
+        DType::Float64Nullable if numpy_masked => Column::from_f64_values(Vec::new()),
+        DType::BoolNullable if numpy_masked => {
+            Column::new(DType::Bool, Vec::new()).map_err(column_error_to_py)?
+        }
+        _ => empty_column_like(source)?,
+    };
+    Series::new(series.name(), series.index().clone(), column)
+        .map(Some)
+        .map_err(frame_error_to_py)
+}
+
+/// The column a groupby `op` over `source` gives when there are no groups,
+/// in pandas' dtype for it - counts int64 (a masked source's Int64), sums
+/// and products the source's (bools int64, boolean Int64), means and the
+/// moments float64 for ints and bools (masked Float64, a datetime's spread a
+/// timedelta), extremes and first / last the source's - where the core's
+/// reductions inferred object from no values (br-frankenpandas-4ohjc). None
+/// for an op this does not know or one pandas refuses over `source` (a
+/// datetime sum, a timedelta product or variance), which keeps its path.
+fn empty_group_reduction(source: &Column, op: &str) -> PyResult<Option<Column>> {
+    let dtype = source.dtype();
+    let empty = |dtype: DType| Column::new(dtype, Vec::new()).map_err(column_error_to_py);
+    let own = || empty_column_like(source);
+    let op = op.trim_end_matches("(min_count)");
+    let column = match op {
+        "size" | "count" if is_nullable_extension(&dtype) => empty(DType::Int64Nullable)?,
+        "size" | "count" | "nunique" => Column::from_i64_values(Vec::new()),
+        "sum" | "prod" => match dtype {
+            DType::Bool => Column::from_i64_values(Vec::new()),
+            DType::BoolNullable => empty(DType::Int64Nullable)?,
+            DType::Datetime64 { .. } => return Ok(None),
+            DType::Timedelta64 if op == "prod" => return Ok(None),
+            _ => own()?,
+        },
+        "mean" | "median" | "std" | "var" | "sem" => match dtype {
+            DType::Datetime64 { .. } | DType::Timedelta64 if op == "var" => return Ok(None),
+            DType::Int64 | DType::Bool => Column::from_f64_values(Vec::new()),
+            DType::Int64Nullable | DType::BoolNullable => empty(DType::Float64Nullable)?,
+            DType::Datetime64 { .. } if matches!(op, "std" | "sem") => empty(DType::Timedelta64)?,
+            DType::Utf8 if !source.is_pandas_string() && matches!(op, "std" | "sem") => {
+                Column::from_f64_values(Vec::new())
+            }
+            _ => own()?,
+        },
+        "min" | "max" | "first" | "last" => own()?,
+        _ => return Ok(None),
+    };
+    Ok(Some(column))
+}
+
 /// A `string` column's groupby sums as pandas gives them: `string`, a group
 /// holding no text the text '0' (pandas sums the objects - 0 for nothing -
 /// and casts back; the core's object sums hold the int 0; ttzzq).
@@ -32626,6 +32699,9 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
         unsupported_params("Series.apply", &[("convert_dtype", convert_dtype)])?;
+        if let Some(inner) = empty_mapped(&self.inner, false)? {
+            return Ok(PySeries { inner });
+        }
         let column = self.inner.column();
         let vals = column.values();
         let mut out = Vec::with_capacity(vals.len());
@@ -32672,6 +32748,9 @@ impl PySeries {
         // Each result keeps this index (its name and a tz-aware zone).
         let index = self.inner.index();
         if arg.is_callable() {
+            if let Some(inner) = empty_mapped(&self.inner, true)? {
+                return Ok(PySeries { inner });
+            }
             let vals = self.inner.column().values();
             let mut out = Vec::with_capacity(vals.len());
             let mut results = Vec::with_capacity(vals.len());
@@ -63492,8 +63571,31 @@ impl PyGroupBy {
 
     /// A reduction `op`'s frame as Python's, with the unused categories'
     /// rows (see [`Self::with_unused`]).
+    /// `frame`, a per-group `op` over this groupby's columns, with no groups:
+    /// each value column in pandas' dtype for `op` (see
+    /// [`empty_group_reduction`]); with groups, as it is.
+    fn empty_reduced(&self, op: &str, frame: DataFrame) -> PyResult<DataFrame> {
+        if !frame.is_empty() {
+            return Ok(frame);
+        }
+        let names: Vec<String> = frame.column_names().into_iter().cloned().collect();
+        names.iter().try_fold(frame, |frame, name| {
+            let reduced = match self.df.column(name) {
+                Some(source) if !self.by.contains(name) => empty_group_reduction(source, op)?,
+                _ => None,
+            };
+            match reduced {
+                Some(column) => frame.with_column(name, column).map_err(frame_error_to_py),
+                None => Ok(frame),
+            }
+        })
+    }
+
     fn finish(&self, op: &str, result: Result<DataFrame, FrameError>) -> PyResult<PyDataFrame> {
-        let mut inner = self.with_unused(op, result.map_err(frame_error_to_py)?)?;
+        let mut inner = self.empty_reduced(
+            op,
+            self.with_unused(op, result.map_err(frame_error_to_py)?)?,
+        )?;
         // Each value column of a nullable dtype in pandas' masked result
         // dtype (see `masked_reduction_dtype`).
         let names: Vec<String> = inner.column_names().into_iter().cloned().collect();
@@ -64111,8 +64213,9 @@ impl PyGroupBy {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
             .count()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let result = self.empty_reduced("count", self.with_unused("count", result)?)?;
         Ok(PyDataFrame {
-            inner: self.restored(self.with_unused("count", result)?)?,
+            inner: self.restored(result)?,
         })
     }
 
@@ -64246,7 +64349,13 @@ impl PyGroupBy {
         };
         let index = counts.index().rename_index(key);
         let name = if self.as_index { "" } else { "size" };
-        let named = Series::new(name, index, counts.column().clone()).map_err(frame_error_to_py)?;
+        // No groups count to int64 (inferred, it was object; 4ohjc).
+        let column = if counts.is_empty() {
+            Column::from_i64_values(Vec::new())
+        } else {
+            counts.column().clone()
+        };
+        let named = Series::new(name, index, column).map_err(frame_error_to_py)?;
         let named = self.with_unused_series("size", named)?;
         if self.as_index {
             return Ok(Py::new(py, PySeries { inner: named })?.into_any());
@@ -64271,8 +64380,9 @@ impl PyGroupBy {
             .map_err(frame_error_to_py)?
             .nunique_with_dropna(dropna)
             .map_err(frame_error_to_py)?;
+        let result = self.empty_reduced("nunique", self.with_unused("nunique", result)?)?;
         Ok(PyDataFrame {
-            inner: self.restored(self.with_unused("nunique", result)?)?,
+            inner: self.restored(result)?,
         })
     }
 
@@ -66625,6 +66735,17 @@ impl PySeriesGroupBy {
     /// as_index=False the keys moved into a column beside it, as pandas does.
     fn wrap_result(&self, op: &str, s: Series) -> PyResult<Py<PyAny>> {
         let res = masked_reduction(&self.series.column().dtype(), op, self.per_group(op, s)?)?;
+        // No groups: pandas' dtype for `op` (see `empty_group_reduction`).
+        let empty = if res.is_empty() {
+            empty_group_reduction(self.series.column(), op)?
+        } else {
+            None
+        };
+        let res = match empty {
+            Some(column) => Series::new(res.name().clone(), res.index().clone(), column)
+                .map_err(frame_error_to_py)?,
+            None => res,
+        };
         // A `string` column's groups keep its dtype where they are its own
         // values (first / last / min / max / nth; they were object;
         // br-frankenpandas-1t4kg).

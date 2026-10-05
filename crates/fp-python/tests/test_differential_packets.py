@@ -25830,3 +25830,122 @@ def test_groupby_sum_of_text_like_pandas_ttzzq(case: str) -> None:
         return (repr(result), str(result.dtype), [type(cell).__name__ for cell in result.tolist()])
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-4ohjc: an op over no values answers pandas' dtype for it -
+# the result paths inferred object from an empty list of values (cumulative
+# ops, rank, shift, value_counts, map / apply of a function, nlargest, where,
+# drop_duplicates, clip, groupby reductions). Every op x dtype cell is
+# compared; the cells still apart are strict xfails naming their bead, so a
+# fix shows. NEGATIVE: the same cells over one value keep their answers.
+_4OHJC_DTYPES = ["int64", "float64", "bool", "object", "Int64", "Float64", "boolean", "string", "datetime64[ns]", "timedelta64[ns]", "int32", "float32"]
+_4OHJC_ONE = {"int64": [1], "float64": [1.5], "bool": [True], "object": ["a"], "Int64": [1], "Float64": [1.5], "boolean": [True], "string": ["a"], "datetime64[ns]": ["2024-01-01"], "timedelta64[ns]": ["1D"], "int32": [1], "float32": [1.5]}
+_4OHJC_OPS = {
+    "cumsum": lambda s: s.cumsum(),
+    "cumprod": lambda s: s.cumprod(),
+    "cummax": lambda s: s.cummax(),
+    "cummin": lambda s: s.cummin(),
+    "rank": lambda s: s.rank(),
+    "shift": lambda s: s.shift(1),
+    "vc": lambda s: s.value_counts(),
+    "vcn": lambda s: s.value_counts(normalize=True),
+    "map": lambda s: s.map(lambda x: x),
+    "apply": lambda s: s.apply(lambda x: x),
+    "nlargest": lambda s: s.nlargest(2),
+    "where": lambda s: s.where(s.isna()),
+    "gb size": lambda s: s.groupby(s).size(),
+    "gb sum": lambda s: s.groupby(s).sum(),
+    "gb mean": lambda s: s.groupby(s).mean(),
+    "gb count": lambda s: s.groupby(s).count(),
+    "gb max": lambda s: s.groupby(s).max(),
+    "gb first": lambda s: s.groupby(s).first(),
+    "diff": lambda s: s.diff(),
+    "pct": lambda s: s.pct_change(),
+    "abs": lambda s: s.abs(),
+    "clip": lambda s: s.clip(0, 1),
+    "pow2": lambda s: s**2,
+    "add1": lambda s: s + 1,
+    "div2": lambda s: s / 2,
+    "eq1": lambda s: s == 1,
+    "isna": lambda s: s.isna(),
+    "roll sum": lambda s: s.rolling(2).sum(),
+    "exp mean": lambda s: s.expanding().mean(),
+    "fillna0": lambda s: s.fillna(0),
+    "unique": lambda s: s.unique(),
+    "mode": lambda s: s.mode(),
+    "drop_dup": lambda s: s.drop_duplicates(),
+    "sort": lambda s: s.sort_values(),
+    "astype f": lambda s: s.astype("float64"),
+    "round": lambda s: s.round(1),
+    "interp": lambda s: s.interpolate(),
+}
+_4OHJC_EMPTY_RESIDUE = {("cumsum", "datetime64[ns]"), ("cumprod", "datetime64[ns]"), ("cumprod", "timedelta64[ns]"), ("gb sum", "datetime64[ns]"), ("gb mean", "object"), ("gb mean", "string"), ("diff", "bool"), ("diff", "object"), ("diff", "string"), ("diff", "float32"), ("pct", "bool"), ("pct", "object"), ("pct", "string"), ("pct", "float32"), ("abs", "datetime64[ns]"), ("pow2", "int64"), ("pow2", "Int64"), ("pow2", "string"), ("pow2", "datetime64[ns]"), ("pow2", "timedelta64[ns]"), ("pow2", "int32"), ("add1", "datetime64[ns]"), ("add1", "timedelta64[ns]"), ("div2", "string"), ("div2", "datetime64[ns]"), ("div2", "timedelta64[ns]"), ("eq1", "datetime64[ns]"), ("eq1", "timedelta64[ns]"), ("roll sum", "object"), ("roll sum", "string"), ("exp mean", "object"), ("exp mean", "string"), ("astype f", "datetime64[ns]"), ("astype f", "timedelta64[ns]"), ("round", "object"), ("round", "boolean"), ("round", "string"), ("round", "datetime64[ns]"), ("round", "timedelta64[ns]"), ("interp", "Int64")}
+_4OHJC_ONE_ROW_RESIDUE = {("cumprod", "object"), ("cumprod", "timedelta64[ns]"), ("cumprod", "float32"), ("shift", "string"), ("where", "string"), ("where", "datetime64[ns]"), ("where", "timedelta64[ns]"), ("gb sum", "datetime64[ns]"), ("gb mean", "datetime64[ns]"), ("diff", "object"), ("diff", "string"), ("diff", "float32"), ("pct", "bool"), ("pct", "object"), ("pct", "string"), ("pct", "float32"), ("abs", "string"), ("abs", "datetime64[ns]"), ("clip", "bool"), ("fillna0", "string"), ("astype f", "datetime64[ns]"), ("astype f", "timedelta64[ns]"), ("round", "object"), ("round", "boolean"), ("round", "string"), ("round", "datetime64[ns]"), ("round", "timedelta64[ns]"), ("interp", "boolean")}
+
+
+def _4ohjc_cells(residue: set[tuple[str, str]], bead: str) -> list[Any]:
+    return [
+        pytest.param(op, dtype, marks=pytest.mark.xfail(strict=True, reason=bead)) if (op, dtype) in residue else (op, dtype)
+        for op in _4OHJC_OPS
+        for dtype in _4OHJC_DTYPES
+    ]
+
+
+def _4ohjc_outcome(m: Any, op: str, values: list[Any], dtype: str, with_repr: bool) -> Any:
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            result = _4OHJC_OPS[op](m.Series(values, dtype=dtype))
+        except Exception as error:  # noqa: BLE001 - the error kind is the answer
+            return ("raises", type(error).__name__)
+    return (str(result.dtype), repr(result) if with_repr else None)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(("op", "dtype"), _4ohjc_cells(_4OHJC_EMPTY_RESIDUE, "br-frankenpandas-3t7xj"))
+def test_ops_over_no_values_answer_pandas_dtype_4ohjc(op: str, dtype: str) -> None:
+    assert _4ohjc_outcome(fpd, op, [], dtype, True) == _4ohjc_outcome(pd, op, [], dtype, True)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(("op", "dtype"), _4ohjc_cells(_4OHJC_ONE_ROW_RESIDUE, "br-frankenpandas-wwbb1"))
+def test_ops_over_one_value_keep_pandas_dtype_4ohjc(op: str, dtype: str) -> None:
+    values = _4OHJC_ONE[dtype]
+    assert _4ohjc_outcome(fpd, op, values, dtype, False) == _4ohjc_outcome(pd, op, values, dtype, False)
+
+
+# The bead's frames: no rows, then (NEGATIVE) one row.
+_4OHJC_FRAMES = {
+    "constructor": lambda m, n: m.DataFrame({"a": m.Series(list(range(n)), dtype="int64"), "b": m.Series([0.5] * n, dtype="float64")}),
+    "value_counts(dropna=False)": lambda m, n: m.DataFrame({"a": m.Series(list(range(n)), dtype="int64")}).iloc[:, 0].value_counts(dropna=False),
+    "groupby size, dropna=False": lambda m, n: m.DataFrame({"a": m.Series(list(range(n)), dtype="int64")}).groupby("a", dropna=False).size(),
+    "groupby size": lambda m, n: m.DataFrame({"a": m.Series(list(range(n)), dtype="int64")}).groupby("a").size(),
+    "pivot_table count": lambda m, n: m.DataFrame({"a": m.Series(list(range(n)), dtype="int64"), "b": m.Series([0.5] * n, dtype="float64")}).pivot_table(index="a", aggfunc="count"),
+    "pivot_table mean": lambda m, n: m.DataFrame({"a": m.Series(list(range(n)), dtype="int64"), "b": m.Series([0.5] * n, dtype="float64")}).pivot_table(index="a"),
+    "groupby sum": lambda m, n: m.DataFrame({"a": m.Series(list(range(n)), dtype="int64"), "b": m.Series([0.5] * n, dtype="float64")}).groupby("a").sum(),
+    "groupby mean": lambda m, n: m.DataFrame({"a": m.Series(list(range(n)), dtype="int64"), "b": m.Series(list(range(n)), dtype="int64")}).groupby("a").mean(),
+    "groupby count": lambda m, n: m.DataFrame({"a": m.Series(list(range(n)), dtype="int64"), "b": m.Series(list(range(n)), dtype="int64")}).groupby("a").count(),
+    "groupby nunique": lambda m, n: m.DataFrame({"a": m.Series(list(range(n)), dtype="int64"), "b": m.Series(list(range(n)), dtype="int64")}).groupby("a").nunique(),
+    "groupby agg max": lambda m, n: m.DataFrame({"a": m.Series(list(range(n)), dtype="int64"), "b": m.Series(list(range(n)), dtype="int64")}).groupby("a").agg("max"),
+    "value_counts of a frame": lambda m, n: m.DataFrame({"a": m.Series(list(range(n)), dtype="int64")}).value_counts(),
+    "cumsum": lambda m, n: m.DataFrame({"a": m.Series(list(range(n)), dtype="int64")}).cumsum(),
+    "rank": lambda m, n: m.DataFrame({"a": m.Series(list(range(n)), dtype="int64")}).rank(),
+    "shift": lambda m, n: m.DataFrame({"a": m.Series(list(range(n)), dtype="int64"), "b": m.Series([True] * n, dtype="bool")}).shift(1),
+    "dropna(how='all', axis=1)": lambda m, n: m.DataFrame({"b": m.Series([None] * n, dtype="float64")}).dropna(how="all", axis=1),
+    "dropna(thresh=1, axis=1)": lambda m, n: m.DataFrame({"b": m.Series([None] * n, dtype="float64")}).dropna(thresh=1, axis=1),
+    "dropna(how='any', axis=1)": lambda m, n: m.DataFrame({"b": m.Series([0.5] * n, dtype="float64")}).dropna(how="any", axis=1),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("rows", [0, 1])
+@pytest.mark.parametrize("case", list(_4OHJC_FRAMES))
+def test_empty_frames_answer_pandas_dtypes_4ohjc(case: str, rows: int) -> None:
+    def shown(m: Any) -> Any:
+        result = _4OHJC_FRAMES[case](m, rows)
+        dtypes = [str(dtype) for dtype in result.dtypes] if hasattr(result, "columns") else str(result.dtype)
+        return (repr(result), dtypes)
+
+    assert shown(fpd) == shown(pd)

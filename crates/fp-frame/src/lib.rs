@@ -16640,7 +16640,13 @@ impl Series {
             Some(zone) => index.clone().with_tz(Some(zone)).unwrap_or(index),
             None => index,
         };
-        let column = Column::from_values(values)?;
+        // No values count to int64 / float64 as any do (inferred, they were
+        // object; br-frankenpandas-4ohjc).
+        let column = match (values.is_empty(), normalize) {
+            (true, true) => Column::from_f64_values(Vec::new()),
+            (true, false) => Column::from_i64_values(Vec::new()),
+            (false, _) => Column::from_values(values)?,
+        };
         // pandas names a normalized count 'proportion' (fvsao.30).
         let name = if normalize { "proportion" } else { "count" };
         Self::new(name.to_string(), index, column)
@@ -18671,6 +18677,9 @@ impl Series {
     ///
     /// Matches `pd.Series.clip(lower, upper)`. NaN values pass through unchanged.
     pub fn clip(&self, lower: Option<f64>, upper: Option<f64>) -> Result<Self, FrameError> {
+        if self.is_empty() {
+            return Ok(self.clone());
+        }
         self.keeping_extension_dtype(self.keeping_width(self.clip_storage(lower, upper), false))
     }
 
@@ -22175,6 +22184,17 @@ impl Series {
     }
 
     fn shift_storage(&self, periods: i64) -> Result<Self, FrameError> {
+        // No values shift to the dtype a shift vacating slots gives (int64
+        // float64, bool object), pandas' rule by dtype (it inferred object;
+        // br-frankenpandas-4ohjc).
+        if self.is_empty() {
+            let column = match self.column.dtype() {
+                DType::Int64 if periods != 0 => Column::from_f64_values(Vec::new()),
+                DType::Bool if periods != 0 => Column::from_object_values(Vec::new()),
+                _ => self.column.clone(),
+            };
+            return Self::new(self.name.clone(), self.index.clone(), column);
+        }
         // A datetime/timedelta column fills the gap with NaT, as pandas (the
         // NaN fill read back as nan;
         // br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.17).
@@ -22663,10 +22683,50 @@ impl Series {
         Series::new(self.name.clone(), self.index.clone(), column)
     }
 
+    /// An empty Series' cumulative `op` in pandas' dtype - its own (a
+    /// running max / min, a sum or product of floats / objects / masked
+    /// values, a timedelta sum), a sum or product of bools or of a signed
+    /// narrow int int64 and of an unsigned one uint64 - where the Scalar
+    /// paths inferred object from no values (br-frankenpandas-4ohjc). None
+    /// when not empty, and for the sums / products pandas refuses (of
+    /// datetimes, a timedelta product), which keep their path.
+    fn empty_cumulative(&self, op: &str) -> Option<Result<Self, FrameError>> {
+        if !self.is_empty() {
+            return None;
+        }
+        let arithmetic = matches!(op, "cumsum" | "cumprod");
+        let source = &self.column;
+        let column = match source.dtype() {
+            DType::Bool if arithmetic => Column::from_i64_values(Vec::new()),
+            DType::Int64 if arithmetic => match source.width() {
+                Some(width) if width.is_unsigned() => {
+                    return Some(self.astype_width(NumericWidth::UInt64, false));
+                }
+                _ => Column::from_i64_values(Vec::new()),
+            },
+            DType::Datetime64 { .. } if arithmetic => return None,
+            DType::Timedelta64 if op == "cumprod" => return None,
+            DType::Bool
+            | DType::BoolNullable
+            | DType::Int64
+            | DType::Int64Nullable
+            | DType::Float64
+            | DType::Float64Nullable
+            | DType::Timedelta64
+            | DType::Datetime64 { .. }
+            | DType::Utf8 => source.clone(),
+            _ => return None,
+        };
+        Some(Self::new(self.name.clone(), self.index.clone(), column))
+    }
+
     /// Cumulative sum, skipping NaN.
     ///
     /// Matches `pd.Series.cumsum(skipna=True)`.
     pub fn cumsum(&self) -> Result<Self, FrameError> {
+        if let Some(empty) = self.empty_cumulative("cumsum") {
+            return empty;
+        }
         // A float32 column accumulates in float32, each partial sum rounded
         // (float32 0.1 then 0.2 is float32's 0.3); an unsigned narrow one
         // sums to uint64, a signed one to int64, as numpy's cumsum (fvsao.23).
@@ -23037,6 +23097,9 @@ impl Series {
     ///
     /// Matches `pd.Series.cumprod(skipna=True)`.
     pub fn cumprod(&self) -> Result<Self, FrameError> {
+        if let Some(empty) = self.empty_cumulative("cumprod") {
+            return empty;
+        }
         // Typed prefix-product fast path (see cumsum): all-valid Int64
         // (wrapping_mul) / Float64 (acc*=v), bit-identical, no Scalar materialize.
         if let Some(data) = self.column.as_i64_slice()
@@ -23196,6 +23259,9 @@ impl Series {
     ///
     /// Matches `pd.Series.cummin(skipna=True)`.
     pub fn cummin(&self) -> Result<Self, FrameError> {
+        if let Some(empty) = self.empty_cumulative("cummin") {
+            return empty;
+        }
         self.keeping_width(self.cummin_storage(), false)
     }
 
@@ -23429,6 +23495,9 @@ impl Series {
     ///
     /// Matches `pd.Series.cummax(skipna=True)`.
     pub fn cummax(&self) -> Result<Self, FrameError> {
+        if let Some(empty) = self.empty_cumulative("cummax") {
+            return empty;
+        }
         self.keeping_width(self.cummax_storage(), false)
     }
 
@@ -23661,6 +23730,9 @@ impl Series {
     /// values become `NaN`. The condition Series is aligned to `self` via
     /// left-index alignment before masking.
     pub fn where_cond(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
+        if self.is_empty() {
+            return Ok(self.clone());
+        }
         // A nullable Series keeps its dtype (4qg5w.11), a narrow one its
         // width while `other` fits it (fvsao.23).
         let selected = self
@@ -25167,6 +25239,12 @@ impl Series {
     ///
     /// Matches `series.nlargest(n)`. Missing values are excluded.
     pub fn nlargest(&self, n: usize) -> Result<Self, FrameError> {
+        // No values: itself, its dtype kept (inferred, it was object;
+        // br-frankenpandas-4ohjc) - as nsmallest / drop_duplicates / clip /
+        // where.
+        if self.is_empty() {
+            return Ok(self.clone());
+        }
         self.keeping_extension_dtype(self.keeping_width(self.nlargest_storage(n), false))
     }
 
@@ -25276,6 +25354,9 @@ impl Series {
     ///
     /// Matches `series.nsmallest(n)`. Missing values are excluded.
     pub fn nsmallest(&self, n: usize) -> Result<Self, FrameError> {
+        if self.is_empty() {
+            return Ok(self.clone());
+        }
         self.keeping_extension_dtype(self.keeping_width(self.nsmallest_storage(n), false))
     }
 
@@ -29282,6 +29363,9 @@ impl Series {
     /// - `Last`: keep the last occurrence of each value
     /// - `None`: drop all duplicated values entirely
     pub fn drop_duplicates_keep(&self, keep: DuplicateKeep) -> Result<Self, FrameError> {
+        if self.is_empty() {
+            return Ok(self.clone());
+        }
         self.keeping_extension_dtype(
             self.keeping_width(self.drop_duplicates_keep_storage(keep), false),
         )
@@ -30634,6 +30718,15 @@ impl Series {
     ) -> Result<Self, FrameError> {
         validate_rank_method(method)?;
         validate_rank_na_option(na_option)?;
+        // No values rank to float64, as every rank does (it inferred object;
+        // br-frankenpandas-4ohjc).
+        if self.is_empty() {
+            return Self::new(
+                self.name.clone(),
+                self.index.clone(),
+                Column::from_f64_values(Vec::new()),
+            );
+        }
         // An ordered categorical ranks by category order, never by value, so
         // it skips the typed value paths (fvsao.71).
         let ordered_categories = self
@@ -77967,10 +78060,10 @@ impl DataFrame {
             return Ok(self.clone());
         }
 
+        // No rows to read: every column is vacuously all-missing (how='all'
+        // drops it, as pandas; it was kept) and has no missing value
+        // (how='any' keeps it) - the loop's own answers.
         let selected_rows = self.resolve_row_label_selector(subset)?;
-        if selected_rows.is_empty() {
-            return Ok(self.clone());
-        }
 
         let mut keep_columns = Vec::with_capacity(n_cols);
         for pos in 0..n_cols {
@@ -78032,10 +78125,9 @@ impl DataFrame {
             return Ok(self.clone());
         }
 
+        // No rows to read count no value, below any `thresh` (pandas drops
+        // every column; they were kept).
         let selected_rows = self.resolve_row_label_selector(subset)?;
-        if selected_rows.is_empty() {
-            return Ok(self.clone());
-        }
 
         let mut keep_columns = Vec::with_capacity(n_cols);
         for pos in 0..n_cols {
@@ -97645,6 +97737,12 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.shift(periods)`.
     pub fn shift(&self, periods: i64) -> Result<Self, FrameError> {
+        // No rows: every column keeps its dtype in pandas' frame shift (a
+        // Series' shift widens its int64 to float64, a frame's does not;
+        // br-frankenpandas-4ohjc).
+        if self.is_empty() {
+            return Ok(self.clone());
+        }
         // Like abs (br-frankenpandas-qmajv): per-column shift is a fresh output
         // Vec + validity-memmove + typed Column construction — dominated by the
         // alloc/construction, NOT memory bandwidth, so it threads across columns
@@ -125289,6 +125387,80 @@ mod tests {
         for position in 0..gappy.num_columns() {
             assert_eq!(gappy.column_at(position).unwrap().dtype(), DType::Float64);
         }
+    }
+
+    #[test]
+    fn ops_over_no_values_keep_pandas_dtypes_4ohjc() {
+        // pandas 2.2.3 over Series([], dtype=...): the result paths inferred
+        // object from no values.
+        let empty = |dtype: DType| {
+            Series::new(
+                "s",
+                Index::new(Vec::new()),
+                Column::new(dtype, Vec::new()).unwrap(),
+            )
+            .unwrap()
+        };
+        let ints = empty(DType::Int64);
+        let bools = empty(DType::Bool);
+        let dtype = |result: Result<Series, FrameError>| result.unwrap().column().dtype();
+        assert_eq!(dtype(ints.cumsum()), DType::Int64);
+        assert_eq!(dtype(bools.cumsum()), DType::Int64);
+        assert_eq!(dtype(bools.cumprod()), DType::Int64);
+        assert_eq!(dtype(bools.cummax()), DType::Bool);
+        assert_eq!(dtype(ints.rank("average", true, "keep")), DType::Float64);
+        assert_eq!(dtype(ints.shift(1)), DType::Float64);
+        assert_eq!(dtype(ints.shift(0)), DType::Int64);
+        assert_eq!(
+            dtype(ints.value_counts_with_options(false, true, false, true)),
+            DType::Int64
+        );
+        assert_eq!(
+            dtype(ints.value_counts_with_options(true, true, false, true)),
+            DType::Float64
+        );
+        assert_eq!(dtype(bools.nlargest(2)), DType::Bool);
+        assert_eq!(dtype(bools.clip(Some(0.0), Some(1.0))), DType::Bool);
+        assert_eq!(dtype(bools.drop_duplicates()), DType::Bool);
+        // A frame's shift keeps its dtypes; with no rows every column is
+        // all-missing (how='all' and thresh drop it) and none misses a value
+        // (how='any' keeps it).
+        let frame = DataFrame::from_series(vec![ints.clone()]).unwrap();
+        assert_eq!(
+            frame.shift(1).unwrap().column_at(0).unwrap().dtype(),
+            DType::Int64
+        );
+        assert_eq!(
+            frame
+                .dropna_columns_with_options(DropNaHow::All, None)
+                .unwrap()
+                .num_columns(),
+            0
+        );
+        assert_eq!(
+            frame
+                .dropna_columns_with_options(DropNaHow::Any, None)
+                .unwrap()
+                .num_columns(),
+            1
+        );
+        assert_eq!(
+            frame
+                .dropna_columns_with_threshold(1, None)
+                .unwrap()
+                .num_columns(),
+            0
+        );
+        // NEGATIVE: one value's int shift still widens to float64, its sum
+        // stays int64.
+        let one = Series::new(
+            "s",
+            Index::new(vec![IndexLabel::from(0_i64)]),
+            Column::new(DType::Int64, vec![Scalar::Int64(1)]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(dtype(one.shift(1)), DType::Float64);
+        assert_eq!(dtype(one.cumsum()), DType::Int64);
     }
 
     #[test]
