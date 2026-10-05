@@ -29841,10 +29841,17 @@ impl PySeries {
 
             // 1. Value is a Series
             if let Ok(other_s) = val.extract::<PyRef<PySeries>>() {
-                let aligned = other_s
-                    .inner
-                    .reindex(self.inner.index().labels().to_vec())
-                    .map_err(frame_error_to_py)?;
+                // An equal index - repeated labels too - fills row for row,
+                // as pandas' (the reindex refused a repeated index;
+                // br-frankenpandas-rbiki).
+                let aligned = if other_s.inner.index() == self.inner.index() {
+                    other_s.inner.clone()
+                } else {
+                    other_s
+                        .inner
+                        .reindex(self.inner.index().labels().to_vec())
+                        .map_err(frame_error_to_py)?
+                };
                 let new_col = fill_column_with_other(self.inner.column(), aligned.column(), limit)
                     .map_err(frame_error_to_py)?;
                 let out_s = Series::new(
@@ -33756,24 +33763,56 @@ impl PySeries {
             Some(fv) if !fv.is_none() => Some(py_to_scalar(py, fv)?),
             _ => None,
         };
-        let (s1_aligned, s2_aligned) = self
-            .inner
-            .align(&other.inner, AlignMode::Outer)
+        let res_name = if self.inner.name() == other.inner.name() {
+            self.inner.name().clone()
+        } else {
+            LabelName::default()
+        };
+        // pandas walks the union of the indexes and hands func each side's
+        // get(label): equal indexes are their own union, and a label repeated
+        // there is a Series of its rows (func=max then raises pandas' ambiguous
+        // truth value). It read one side through Series.align and the other
+        // through a second plan of another length and panicked
+        // (br-frankenpandas-rbiki).
+        if self.inner.index() == other.inner.index() && self.inner.index().has_duplicates() {
+            let get = |series: &Series, label: &IndexLabel| -> PyResult<Py<PyAny>> {
+                let rows = series
+                    .loc(std::slice::from_ref(label))
+                    .map_err(frame_error_to_py)?;
+                if rows.len() == 1 {
+                    scalar_to_py(py, &rows.column().values()[0])
+                } else {
+                    Ok(Py::new(py, PySeries { inner: rows })?.into_any())
+                }
+            };
+            let mut res_vals = Vec::with_capacity(self.inner.len());
+            for label in self.inner.index().labels() {
+                let out = func.call1((get(&self.inner, label)?, get(&other.inner, label)?))?;
+                // func of two Series answers a Series: an object cell, as
+                // pandas' object result holds it.
+                res_vals.push(py_to_cell(py, &out)?);
+            }
+            let col = Column::from_values(res_vals)
+                .map_err(fp_frame::FrameError::Column)
+                .map_err(frame_error_to_py)?;
+            let res_series = Series::new(
+                res_name,
+                self.inner.index().clone(),
+                cast_pointwise_like(col, column),
+            )
             .map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner: res_series });
+        }
         let plan = fp_index::align(self.inner.index(), other.inner.index(), AlignMode::Outer);
         let n = plan.union_index.len();
         let mut res_vals = Vec::with_capacity(n);
+        let side_value = |series: &Series, at: Option<usize>| match at {
+            Some(at) => series.column().values()[at].clone(),
+            None => fill_scalar.clone().unwrap_or(Scalar::Null(NullKind::NaN)),
+        };
         for i in 0..n {
-            let v1 = if plan.left_positions[i].is_none() {
-                fill_scalar.clone().unwrap_or(Scalar::Null(NullKind::NaN))
-            } else {
-                s1_aligned.column().values()[i].clone()
-            };
-            let v2 = if plan.right_positions[i].is_none() {
-                fill_scalar.clone().unwrap_or(Scalar::Null(NullKind::NaN))
-            } else {
-                s2_aligned.column().values()[i].clone()
-            };
+            let v1 = side_value(&self.inner, plan.left_positions[i]);
+            let v2 = side_value(&other.inner, plan.right_positions[i]);
             let py_v1 = scalar_to_py(py, &v1)?;
             let py_v2 = scalar_to_py(py, &v2)?;
             let out = func.call1((py_v1, py_v2))?;
@@ -33783,11 +33822,6 @@ impl PySeries {
         let col = Column::from_values(res_vals)
             .map_err(fp_frame::FrameError::Column)
             .map_err(frame_error_to_py)?;
-        let res_name = if self.inner.name() == other.inner.name() {
-            self.inner.name().clone()
-        } else {
-            LabelName::default()
-        };
         let res_series = Series::new(res_name, plan.union_index, cast_pointwise_like(col, column))
             .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res_series })
@@ -38785,7 +38819,14 @@ impl PyDataFrame {
                     refuse_unordered_set(&value)?;
 
                     let col = if let Ok(s) = value.extract::<PyRef<'_, PySeries>>() {
-                        if let Some(target_labels) = &common_labels {
+                        if let Some(target_labels) = common_labels
+                            .as_ref()
+                            .filter(|target| s.inner.index().labels() != target.as_slice())
+                        {
+                            // A Series already on the target labels - repeated
+                            // labels too - is taken as it is, as pandas' (the
+                            // reindex refused a repeated index;
+                            // br-frankenpandas-rbiki).
                             let reindexed =
                                 s.inner.reindex(target_labels.clone()).map_err(|e| {
                                     PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
@@ -41032,10 +41073,16 @@ impl PyDataFrame {
 
             // 1. Value is a DataFrame
             if let Ok(other_df) = val.extract::<PyRef<PyDataFrame>>() {
-                let aligned = other_df
-                    .inner
-                    .reindex_like(&self.inner)
-                    .map_err(frame_error_to_py)?;
+                // An equal index - repeated labels too - fills row for row,
+                // its columns read by name below (br-frankenpandas-rbiki).
+                let aligned = if other_df.inner.index() == self.inner.index() {
+                    other_df.inner.clone()
+                } else {
+                    other_df
+                        .inner
+                        .reindex_like(&self.inner)
+                        .map_err(frame_error_to_py)?
+                };
                 let mut col_map = BTreeMap::new();
                 let mut column_order = Vec::with_capacity(self.inner.num_columns());
                 for pos in 0..self.inner.num_columns() {
@@ -41081,10 +41128,14 @@ impl PyDataFrame {
                         if it.is_none() {
                             col_map.insert(name, col.clone());
                         } else if let Ok(py_ser) = it.extract::<PyRef<PySeries>>() {
-                            let aligned = py_ser
-                                .inner
-                                .reindex(self.inner.index().labels().to_vec())
-                                .map_err(frame_error_to_py)?;
+                            let aligned = if py_ser.inner.index() == self.inner.index() {
+                                py_ser.inner.clone()
+                            } else {
+                                py_ser
+                                    .inner
+                                    .reindex(self.inner.index().labels().to_vec())
+                                    .map_err(frame_error_to_py)?
+                            };
                             let new_col = fill_column_with_other(col, aligned.column(), limit)
                                 .map_err(frame_error_to_py)?;
                             col_map.insert(name, new_col);

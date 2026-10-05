@@ -25449,3 +25449,95 @@ def test_boolean_filter_edges_like_pandas_ffh9h(case: str) -> None:
         return (repr(result), repr(result.index))
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-rbiki: two operands whose indexes are EQUAL but repeat
+# labels pair row for row, as pandas' index.equals short-circuit before any
+# alignment: d + o doubled the rows (each label's rows crossed), where / mask /
+# update / combine_first / corrwith read each label's first row, fillna(frame)
+# and DataFrame({'x': s1, 'y': s2}) raised, s.combine panicked. NEGATIVE: join /
+# merge on equal repeated indexes stay pandas' cartesian join, an UNEQUAL
+# repeated index keeps pandas' answer, a unique index is unchanged.
+def _rbiki_pair(m: Any, index: Any = None) -> Any:
+    index = [0, 0, 1, 1] if index is None else index
+    d = m.DataFrame({"a": [1.0, 2.0, 3.0, 4.0], "b": [5.0, _NAN, 7.0, 8.0]}, index=index)
+    o = m.DataFrame({"a": [10.0, 20.0, 30.0, 40.0], "b": [50.0, 60.0, _NAN, 80.0]}, index=index)
+    return d, o
+
+
+def _rbiki_concat(m: Any, objs: Any, **kwargs: Any) -> Any:
+    return m.concat(objs, **kwargs)
+
+
+_RBIKI_OPS = {
+    "add": lambda m, d, o: d + o,
+    "sub method": lambda m, d, o: d.sub(o),
+    "mul fill_value": lambda m, d, o: d.mul(o, fill_value=2),
+    "div": lambda m, d, o: d / o,
+    "ge": lambda m, d, o: d >= o,
+    "where": lambda m, d, o: d.where(d > 2),
+    "where other": lambda m, d, o: d.where(d > 2, o),
+    "mask": lambda m, d, o: d.mask(d > 2),
+    "where series cond axis 0": lambda m, d, o: d.where(d["a"] > 1, axis=0),
+    "fillna frame": lambda m, d, o: d.fillna(o),
+    "fillna dict of series": lambda m, d, o: d.fillna({"b": o["b"]}),
+    "combine_first": lambda m, d, o: d.combine_first(o),
+    "combine": lambda m, d, o: d.combine(o, lambda x, y: x + y),
+    "update": lambda m, d, o: (lambda x: (x.update(o), x)[1])(d.copy()),
+    "corrwith": lambda m, d, o: d.corrwith(o),
+    "add series axis 0": lambda m, d, o: d.add(o["a"], axis=0),
+    "align": lambda m, d, o: d.align(o)[1],
+    "frame from two series": lambda m, d, o: m.DataFrame({"x": d["a"], "y": o["a"]}),
+    "concat axis 1": lambda m, d, o: _rbiki_concat(m, [d, o], axis=1),
+    "series add": lambda m, d, o: d["a"] + o["a"],
+    "series add fill_value": lambda m, d, o: d["b"].add(o["b"], fill_value=0),
+    "series where other": lambda m, d, o: d["a"].where(d["a"] > 2, o["a"]),
+    "series fillna series": lambda m, d, o: d["b"].fillna(o["b"]),
+    "series combine_first": lambda m, d, o: d["b"].combine_first(o["b"]),
+    "series combine lambda": lambda m, d, o: d["a"].combine(o["a"], lambda x, y: x * 2 + y),
+    "series combine max refused": lambda m, d, o: d["a"].combine(o["a"], max),
+    "series update": lambda m, d, o: (lambda x: (x.update(o["b"]), x)[1])(d["b"].copy()),
+    "series corr": lambda m, d, o: round(d["a"].corr(o["a"]), 9),
+    "series cov": lambda m, d, o: round(d["a"].cov(o["a"]), 9),
+    "series corr spearman": lambda m, d, o: round(d["a"].corr(o["a"], method="spearman"), 9),
+    "series & series": lambda m, d, o: (d["a"] > 1) & (o["a"] > 15),
+    # NEGATIVE: pandas joins equal repeated indexes cartesian-wise in join / merge.
+    "join keeps the cartesian join": lambda m, d, o: d[["a"]].join(o[["b"]]),
+    "merge on index keeps the cartesian join": lambda m, d, o: d[["a"]].merge(
+        o[["b"]], left_index=True, right_index=True
+    ),
+}
+
+_RBIKI_INDEXES = {
+    "equal repeated": lambda: [0, 0, 1, 1],
+    "equal repeated text": lambda: ["x", "x", "y", "y"],
+    # NEGATIVE: unique indexes are unchanged.
+    "unique": lambda: [3, 1, 2, 0],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("index", list(_RBIKI_INDEXES))
+@pytest.mark.parametrize("op", list(_RBIKI_OPS))
+def test_equal_repeated_indexes_pair_by_position_like_pandas_rbiki(op: str, index: str) -> None:
+    def shown(m: Any) -> Any:
+        d, o = _rbiki_pair(m, _RBIKI_INDEXES[index]())
+        try:
+            result = _RBIKI_OPS[op](m, d, o)
+        except Exception as error:  # noqa: BLE001 - the error is the answer compared
+            return (type(error).__name__,)
+        return repr(result)
+
+    assert shown(fpd) == shown(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_unequal_repeated_index_keeps_pandas_answer_rbiki() -> None:
+    # NEGATIVE: indexes that differ (one repeats a label the other does not)
+    # still align label-wise as pandas does.
+    def shown(m: Any) -> Any:
+        d = m.DataFrame({"a": [1.0, 2.0, 3.0]}, index=[0, 0, 1])
+        o = m.DataFrame({"a": [10.0, 30.0]}, index=[0, 1])
+        return (repr(d + o), repr(d["a"] + o["a"]), repr(d.where(d > 1, o)))
+
+    assert shown(fpd) == shown(pd)

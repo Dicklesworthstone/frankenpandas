@@ -7324,7 +7324,41 @@ fn align_union_duplicate_aware(
     )
 }
 
+/// The plan pairing two EQUAL indexes row for row - repeated labels too -
+/// as pandas' elementwise ops do: they align only when
+/// `not left.index.equals(right.index)`, so an equal repeated index is
+/// positional, not a join (d + o crossed each label's rows and doubled them,
+/// where / update / corrwith read each label's first; br-frankenpandas-rbiki).
+/// The output index keeps the name both share, as the duplicate join did.
+fn positional_plan(left: &Index, right: &Index) -> AlignmentPlan {
+    let positions: Vec<Option<usize>> = (0..left.len()).map(Some).collect();
+    let shared_name = if left.name() == right.name() {
+        left.name()
+    } else {
+        None
+    };
+    AlignmentPlan {
+        union_index: left.rename_index(shared_name),
+        left_positions: positions.clone(),
+        right_positions: positions,
+    }
+}
+
+/// `align(left, right, AlignMode::Left)`, except that two equal repeated
+/// indexes pair row for row ([`positional_plan`]): `where` / `mask` read
+/// each repeated label's first row of `cond` and `other`
+/// (br-frankenpandas-rbiki).
+fn align_left_or_positional(left: &Index, right: &Index) -> AlignmentPlan {
+    if left.has_duplicates() && left == right {
+        return positional_plan(left, right);
+    }
+    align(left, right, AlignMode::Left)
+}
+
 fn align_union_plan(left: &Index, right: &Index) -> AlignmentPlan {
+    if left.has_duplicates() && left == right {
+        return positional_plan(left, right);
+    }
     if left.has_duplicates() || right.has_duplicates() {
         let (union_index, left_positions, right_positions) =
             align_union_duplicate_aware(left, right);
@@ -7345,6 +7379,9 @@ fn align_union_plan(left: &Index, right: &Index) -> AlignmentPlan {
 /// alignment pandas uses for outer-aligned elementwise ops (arithmetic, logical
 /// `&`/`|`, combine/combine_first). Verified vs live pandas 2.2.3.
 fn align_union_sorted_plan(left: &Index, right: &Index) -> AlignmentPlan {
+    if left.has_duplicates() && left == right {
+        return positional_plan(left, right);
+    }
     if left.has_duplicates() || right.has_duplicates() {
         let (union_index, left_positions, right_positions) =
             align_union_duplicate_aware(left, right);
@@ -13177,6 +13214,13 @@ impl Series {
     /// Uses duplicate-aware alignment for outer joins when duplicate labels exist.
     pub fn align(&self, other: &Self, mode: AlignMode) -> Result<(Self, Self), FrameError> {
         let has_duplicate_labels = self.index.has_duplicates() || other.index.has_duplicates();
+        // Equal indexes - repeated labels too - align to themselves: pandas'
+        // Series.align returns both as they are when index.equals (a repeated
+        // index was joined, each label's rows crossed - corr / corrwith read
+        // them; br-frankenpandas-rbiki).
+        if has_duplicate_labels && self.index == other.index {
+            return Ok((self.clone(), other.clone()));
+        }
         let outer = matches!(mode, AlignMode::Outer);
         let plan = if outer && has_duplicate_labels {
             let (union_index, left_positions, right_positions) =
@@ -13392,23 +13436,24 @@ impl Series {
             );
         }
 
-        let plan = if self.index.has_duplicates() || other.index.has_duplicates() {
-            // Duplicate labels align cartesian-style (unchanged from before);
-            // checked BEFORE the identical-index fast path so identical
-            // duplicate indexes still take this path, not the positional one.
+        // Equal indexes pair row for row - repeated labels too, as pandas'
+        // (live 2.2.3: s.combine_first(o) over an equal [0, 0, 1, 1] is 4 rows
+        // by position). Identical repeated indexes were sent to the cartesian
+        // join on purpose and doubled the rows (br-frankenpandas-rbiki).
+        let plan = if self.index == other.index {
+            let positions = (0..self.len()).map(Some).collect::<Vec<_>>();
+            AlignmentPlan {
+                union_index: self.index.clone(),
+                left_positions: positions.clone(),
+                right_positions: positions,
+            }
+        } else if self.index.has_duplicates() || other.index.has_duplicates() {
             let (union_index, left_positions, right_positions) =
                 align_union_duplicate_aware(&self.index, &other.index);
             AlignmentPlan {
                 union_index,
                 left_positions,
                 right_positions,
-            }
-        } else if self.index == other.index {
-            let positions = (0..self.len()).map(Some).collect::<Vec<_>>();
-            AlignmentPlan {
-                union_index: self.index.clone(),
-                left_positions: positions.clone(),
-                right_positions: positions,
             }
         } else {
             align_union_sorted_unique(&self.index, &other.index)
@@ -13503,8 +13548,9 @@ impl Series {
         // value. Reuse the existing lazy all-valid Float64 select tape from combine_first with
         // operands swapped, so construction records the select plan and typed/scalar consumers
         // materialize only if they actually read the output.
+        // (An equal repeated index is positional too, as pandas';
+        // br-frankenpandas-rbiki.)
         if self.index == other.index
-            && !self.index.has_duplicates()
             && let Some((self_data, self_validity)) = self.column.shared_f64_data_with_validity()
             && self_validity.all()
             && let Some((other_data, other_validity)) = other.column.shared_f64_data_with_validity()
@@ -13522,7 +13568,6 @@ impl Series {
         // pointer-key build + both values() Scalar materializations (≈9× slower than
         // pandas). Bit-identical: present other replaces self, else self kept.
         if self.index == other.index
-            && !self.index.has_duplicates()
             && let Some(sd) = self.column.as_i64_slice()
             && let Some((od, ov)) = other.column.as_i64_slice_with_validity()
         {
@@ -13534,6 +13579,25 @@ impl Series {
                 self.index.clone(),
                 Column::from_i64_values_owned(out),
             );
+        }
+        // An equal index - repeated labels too - updates row for row, as
+        // pandas' (each repeated label took its last row's value;
+        // br-frankenpandas-rbiki).
+        if self.index == other.index {
+            let new_values: Vec<Scalar> = self
+                .values()
+                .iter()
+                .zip(other.values())
+                .map(|(val, other_val)| {
+                    if other_val.is_missing() {
+                        val.clone()
+                    } else {
+                        other_val.clone()
+                    }
+                })
+                .collect();
+            let col = Column::from_values(new_values)?;
+            return Self::new(self.name.clone(), self.index.clone(), col);
         }
         let other_map: BTreeMap<&IndexLabel, &Scalar> = other
             .index
@@ -23727,7 +23791,7 @@ impl Series {
             return self.with_values_preserving_index(self.int_gaps_as_float(values));
         }
 
-        let plan = align(&self.index, &cond.index, AlignMode::Left);
+        let plan = align_left_or_positional(&self.index, &cond.index);
         validate_alignment_plan(&plan)?;
 
         let aligned_data = self.column.reindex_by_positions(&plan.left_positions)?;
@@ -23870,8 +23934,8 @@ impl Series {
         // resulting union_index IS self.index (Left align), matching
         // with_labels_and_values_preserving_name's labels + self.index.name.
         if self.index.is_unique() && cond.index.is_unique() && other.index.is_unique() {
-            let cplan = align(&self.index, &cond.index, AlignMode::Left);
-            let oplan = align(&self.index, &other.index, AlignMode::Left);
+            let cplan = align_left_or_positional(&self.index, &cond.index);
+            let oplan = align_left_or_positional(&self.index, &other.index);
             if validate_alignment_plan(&cplan).is_ok()
                 && validate_alignment_plan(&oplan).is_ok()
                 && let Some(result) = where_gather_df_col(
@@ -23888,13 +23952,13 @@ impl Series {
             }
         }
 
-        let plan = align(&self.index, &cond.index, AlignMode::Left);
+        let plan = align_left_or_positional(&self.index, &cond.index);
         validate_alignment_plan(&plan)?;
 
         let aligned_data = self.column.reindex_by_positions(&plan.left_positions)?;
         let aligned_cond = cond.column.reindex_by_positions(&plan.right_positions)?;
 
-        let other_plan = align(&self.index, &other.index, AlignMode::Left);
+        let other_plan = align_left_or_positional(&self.index, &other.index);
         validate_alignment_plan(&other_plan)?;
         let aligned_other = other
             .column
@@ -24010,8 +24074,8 @@ impl Series {
         // True -> other, False -> self). Same gate/gather, bit-identical to the
         // Scalar select below.
         if self.index.is_unique() && cond.index.is_unique() && other.index.is_unique() {
-            let cplan = align(&self.index, &cond.index, AlignMode::Left);
-            let oplan = align(&self.index, &other.index, AlignMode::Left);
+            let cplan = align_left_or_positional(&self.index, &cond.index);
+            let oplan = align_left_or_positional(&self.index, &other.index);
             if validate_alignment_plan(&cplan).is_ok()
                 && validate_alignment_plan(&oplan).is_ok()
                 && let Some(result) = where_gather_df_col(
@@ -24028,13 +24092,13 @@ impl Series {
             }
         }
 
-        let plan = align(&self.index, &cond.index, AlignMode::Left);
+        let plan = align_left_or_positional(&self.index, &cond.index);
         validate_alignment_plan(&plan)?;
 
         let aligned_data = self.column.reindex_by_positions(&plan.left_positions)?;
         let aligned_cond = cond.column.reindex_by_positions(&plan.right_positions)?;
 
-        let other_plan = align(&self.index, &other.index, AlignMode::Left);
+        let other_plan = align_left_or_positional(&self.index, &other.index);
         validate_alignment_plan(&other_plan)?;
         let aligned_other = other
             .column
@@ -24207,7 +24271,7 @@ impl Series {
             return self.with_values_preserving_index(self.int_gaps_as_float(values));
         }
 
-        let plan = align(&self.index, &cond.index, AlignMode::Left);
+        let plan = align_left_or_positional(&self.index, &cond.index);
         validate_alignment_plan(&plan)?;
 
         let aligned_data = self.column.reindex_by_positions(&plan.left_positions)?;
@@ -30748,10 +30812,11 @@ impl Series {
     /// arithmetic moves one-pass -> two-pass. A variance is exactly 0.0 when
     /// its sum of squares is round-off of a constant (`centered_sum_of_squares`).
     fn cov_components(&self, other: &Self) -> Result<(f64, f64, f64, usize), FrameError> {
-        // Typed fast path: identical-unique-index + both-Float64 slices, two
-        // linear passes (means, then centered sums) with no pair-Vec.
+        // Typed fast path: identical index + both-Float64 slices, two linear
+        // passes (means, then centered sums) with no pair-Vec. An equal
+        // repeated index pairs by position too, as pandas' align
+        // (br-frankenpandas-rbiki).
         if self.index == other.index
-            && self.index.is_unique()
             && let (Some((xd, xv)), Some((yd, yv))) = (
                 self.column.as_f64_slice_with_validity(),
                 other.column.as_f64_slice_with_validity(),
@@ -30800,7 +30865,6 @@ impl Series {
         // == Scalar::Int64.to_f64, so this is bit-identical to the Scalar aligned-pairs
         // two-pass below for the all-valid Int64 case.
         if self.index == other.index
-            && self.index.is_unique()
             && let (Some(xd), Some(yd)) = (self.column.as_i64_slice(), other.column.as_i64_slice())
             && xd.len() == yd.len()
         {
@@ -30846,7 +30910,7 @@ impl Series {
         // (`to_f64(Int64(v)) == v as f64`, no missing/NaN to skip). A NaN-bearing Float64 or
         // nullable column declines the view and keeps the Scalar fallback (its NaN/null
         // skipna policy). Int64×Int64 is served by the arm above; this adds the mixed case.
-        if self.index == other.index && self.index.is_unique() {
+        if self.index == other.index {
             // A local `fn` (not a closure): elision ties the `Cow<'_>` output lifetime
             // to the `col` input, letting `Cow::Borrowed(d)` borrow from it.
             fn view(col: &Column) -> Option<std::borrow::Cow<'_, [f64]>> {
@@ -75470,6 +75534,15 @@ impl DataFrame {
         let mut column_order = Vec::new();
         let mut labels = Vec::with_capacity(materialized_series.len());
         for series in materialized_series {
+            // Identical indexes - repeated labels too - take each column as it
+            // is, as pandas' (a repeated index was joined label-wise;
+            // br-frankenpandas-rbiki).
+            if all_identical {
+                labels.push(series.name.label());
+                column_order.push(series.name.to_string());
+                columns.insert(String::from(series.name), series.column);
+                continue;
+            }
             let plan = align_union(&union_index, &series.index);
             // The right_positions map from the union to this series's positions.
             // Since union_index already contains all labels, the union_index in
@@ -83636,7 +83709,7 @@ impl DataFrame {
             return result;
         }
         let fill = other.cloned().unwrap_or(Scalar::Null(NullKind::NaN));
-        let plan = align(&self.index, &cond.index, AlignMode::Left);
+        let plan = align_left_or_positional(&self.index, &cond.index);
         validate_alignment_plan(&plan)?;
         let mut new_columns = Vec::with_capacity(self.num_columns());
 
@@ -83694,7 +83767,7 @@ impl DataFrame {
             return result;
         }
         let fill = other.cloned().unwrap_or(Scalar::Null(NullKind::NaN));
-        let plan = align(&self.index, &cond.index, AlignMode::Left);
+        let plan = align_left_or_positional(&self.index, &cond.index);
         validate_alignment_plan(&plan)?;
         let mut new_columns = Vec::with_capacity(self.num_columns());
 
@@ -83803,9 +83876,9 @@ impl DataFrame {
             }
         }
 
-        let cond_plan = align(&self.index, &cond.index, AlignMode::Left);
+        let cond_plan = align_left_or_positional(&self.index, &cond.index);
         validate_alignment_plan(&cond_plan)?;
-        let other_plan = align(&self.index, &other.index, AlignMode::Left);
+        let other_plan = align_left_or_positional(&self.index, &other.index);
         validate_alignment_plan(&other_plan)?;
 
         // Typed unaligned select fast path: self+other Float64 with validity,
@@ -83967,9 +84040,9 @@ impl DataFrame {
             }
         }
 
-        let cond_plan = align(&self.index, &cond.index, AlignMode::Left);
+        let cond_plan = align_left_or_positional(&self.index, &cond.index);
         validate_alignment_plan(&cond_plan)?;
-        let other_plan = align(&self.index, &other.index, AlignMode::Left);
+        let other_plan = align_left_or_positional(&self.index, &other.index);
         validate_alignment_plan(&other_plan)?;
 
         // Typed unaligned select fast path (inverse of where_cond_df's: cond True
@@ -89265,9 +89338,10 @@ impl DataFrame {
         // the O(n log n) pointer-key BTreeMap + both .values() Scalar Vecs + the
         // per-cell clone (df.update was 0.16x pandas). Bit-identical to the general
         // path: a slot is overwritten iff `!other_val.is_missing()` (== other valid
-        // and not NaN); a column absent from `other` keeps self unchanged.
+        // and not NaN); a column absent from `other` keeps self unchanged. An
+        // equal repeated index updates by position too, as pandas'
+        // (br-frankenpandas-rbiki).
         if self.index == other.index
-            && self.index.is_unique()
             && self.row_multiindex.is_none()
             && self.column_order.iter().all(|name| {
                 self.columns[name].as_f64_slice_with_validity().is_some()
@@ -89318,13 +89392,21 @@ impl DataFrame {
             });
         }
 
-        let other_idx_map: BTreeMap<&IndexLabel, usize> = other
-            .index
-            .labels()
-            .iter()
-            .enumerate()
-            .map(|(i, l)| (l, i))
-            .collect();
+        // An equal index - repeated labels too - pairs row for row, as pandas'
+        // (each repeated label read its last row of `other`;
+        // br-frankenpandas-rbiki).
+        let positional = self.index == other.index;
+        let other_idx_map: BTreeMap<&IndexLabel, usize> = if positional {
+            BTreeMap::new()
+        } else {
+            other
+                .index
+                .labels()
+                .iter()
+                .enumerate()
+                .map(|(i, l)| (l, i))
+                .collect()
+        };
 
         let mut result_cols = BTreeMap::new();
 
@@ -89336,7 +89418,12 @@ impl DataFrame {
                     .iter()
                     .enumerate()
                     .map(|(i, label)| {
-                        if let Some(&other_i) = other_idx_map.get(label) {
+                        let other_at = if positional {
+                            Some(i)
+                        } else {
+                            other_idx_map.get(label).copied()
+                        };
+                        if let Some(other_i) = other_at {
                             let other_val = &other_col.values()[other_i];
                             if !other_val.is_missing() {
                                 return other_val.clone();
@@ -89415,15 +89502,11 @@ impl DataFrame {
                         && oc.as_f64_slice_with_validity().is_some())
         };
 
-        // Positional fast path is valid only when the two indexes are identical
-        // (so union order == self order and label i maps to row i on both sides)
-        // and unique (the per-cell `self_idx.get` / `other_idx.get` BTreeMap
-        // lookups resolve to position i, matching positional iteration).
-        let positional = self.index == other.index && self.index.is_unique();
-        // When every output column is two-sided Float64, all of them take the
-        // typed positional fast path below, so the O(n log n) per-cell label
-        // maps are never consulted — skip building them (br-frankenpandas-apyf4).
-        let all_typed = positional && slots.iter().all(two_sided_f64);
+        // Two equal indexes pair row for row - repeated labels too, as pandas'
+        // align of equal axes (a repeated index collapsed each label to one row
+        // and read its first; br-frankenpandas-rbiki) - so the per-cell select
+        // below walks positions, never the label maps.
+        let positional = self.index == other.index;
         // MultiIndex columns ride along only when the axes are the same (the
         // sorted union reorders them).
         let column_multiindex = if same_columns {
@@ -89508,21 +89591,12 @@ impl DataFrame {
         // SORTED union when the indexes differ, but keeps the original order
         // when they are identical (Index.union). Verified vs live pandas 2.2.3.
         //
-        // br-frankenpandas-combine-first-union: when the indexes are identical
-        // AND unique (`positional`), the HashSet union collapses to exactly
-        // `self.index.labels()` (every self label is distinct so the first loop
-        // pushes them all in order; the second loop inserts nothing; no sort
-        // since the indexes are equal) and the output index is reused directly
-        // from `self.index` below — so skip the ~2n label clones + SipHash
-        // inserts AND the `Index::new` rehash entirely. When all columns are
-        // additionally two-sided Float64 (`all_typed`) the per-cell loop that
-        // consumes `union_labels` never runs, so we need no label vector at all.
+        // br-frankenpandas-combine-first-union: when the indexes are equal
+        // (`positional`) the rows pair by position and the output index is
+        // reused directly from `self.index` below - so no union label vector,
+        // no label clones + SipHash inserts and no `Index::new` rehash.
         let union_labels: Vec<IndexLabel> = if positional {
-            if all_typed {
-                Vec::new()
-            } else {
-                self.index.labels().to_vec()
-            }
+            Vec::new()
         } else {
             let mut seen = std::collections::HashSet::new();
             let mut union_labels = Vec::new();
@@ -89543,8 +89617,8 @@ impl DataFrame {
         };
 
         // Build lookup maps for self and other (only when some column needs the
-        // general per-cell select).
-        let self_idx: BTreeMap<&IndexLabel, usize> = if all_typed {
+        // general per-cell select by label).
+        let self_idx: BTreeMap<&IndexLabel, usize> = if positional {
             BTreeMap::new()
         } else {
             self.index
@@ -89554,7 +89628,7 @@ impl DataFrame {
                 .map(|(i, l)| (l, i))
                 .collect()
         };
-        let other_idx: BTreeMap<&IndexLabel, usize> = if all_typed {
+        let other_idx: BTreeMap<&IndexLabel, usize> = if positional {
             BTreeMap::new()
         } else {
             other
@@ -89623,27 +89697,32 @@ impl DataFrame {
                 (None, None) => DType::Float64,
             };
 
-            let vals: Vec<Scalar> = union_labels
-                .iter()
-                .map(|label| {
-                    // Prefer self value if non-null
-                    if let Some(sc) = self_col
-                        && let Some(&i) = self_idx.get(label)
-                    {
-                        let v = &sc.values()[i];
-                        if !v.is_missing() {
-                            return v.clone();
-                        }
+            // Each output row's self / other positions: the same row of an
+            // equal index, else its label's position on each side.
+            let pick = |self_at: Option<usize>, other_at: Option<usize>| {
+                // Prefer self value if non-null
+                if let (Some(sc), Some(i)) = (self_col, self_at) {
+                    let v = &sc.values()[i];
+                    if !v.is_missing() {
+                        return v.clone();
                     }
-                    // Fall back to other
-                    if let Some(oc) = other_col
-                        && let Some(&i) = other_idx.get(label)
-                    {
-                        return oc.values()[i].clone();
-                    }
-                    Scalar::Null(NullKind::NaN)
-                })
-                .collect();
+                }
+                // Fall back to other
+                if let (Some(oc), Some(i)) = (other_col, other_at) {
+                    return oc.values()[i].clone();
+                }
+                Scalar::Null(NullKind::NaN)
+            };
+            let vals: Vec<Scalar> = if positional {
+                (0..self.len())
+                    .map(|row| pick(Some(row), Some(row)))
+                    .collect()
+            } else {
+                union_labels
+                    .iter()
+                    .map(|label| pick(self_idx.get(label).copied(), other_idx.get(label).copied()))
+                    .collect()
+            };
 
             // Create column with explicit target dtype to ensure associativity
             Ok(Column::new(target_dtype, vals)?)
@@ -98873,10 +98952,10 @@ impl DataFrame {
         // DataFrames byte-identical to self/other, costing 2×N×M Scalar clones
         // that are discarded immediately by the op loop below. Skipping it
         // saves both the alignment-plan build and those wasted clones; the
-        // result is identical for the equal-shape case.
+        // result is identical for the equal-shape case. An equal REPEATED
+        // index pairs positionally too, as pandas' (br-frankenpandas-rbiki).
         if self.column_order == other.column_order
             && self.index == other.index
-            && !self.index.has_duplicates()
             && self
                 .column_order
                 .iter()
@@ -100335,7 +100414,7 @@ impl DataFrame {
     /// Matches `pd.DataFrame.where(cond, other)` with a DataFrame condition.
     /// Where `cond_df` is True, keep the original value; where False, use `other`.
     pub fn where_mask_df(&self, cond_df: &Self, other: &Scalar) -> Result<Self, FrameError> {
-        let cond_plan = align(&self.index, &cond_df.index, AlignMode::Left);
+        let cond_plan = align_left_or_positional(&self.index, &cond_df.index);
         validate_alignment_plan(&cond_plan)?;
         // By position: a repeated column key is its own column (i17d4).
         let mut result_cols = Vec::with_capacity(self.num_columns());
@@ -100372,7 +100451,7 @@ impl DataFrame {
     /// Matches `pd.DataFrame.mask(cond, other)` with a DataFrame condition.
     /// Inverse of `where_mask_df`: where `cond_df` is True, replace with `other`.
     pub fn mask_df(&self, cond_df: &Self, other: &Scalar) -> Result<Self, FrameError> {
-        let cond_plan = align(&self.index, &cond_df.index, AlignMode::Left);
+        let cond_plan = align_left_or_positional(&self.index, &cond_df.index);
         validate_alignment_plan(&cond_plan)?;
         // By position: a repeated column key is its own column (i17d4).
         let mut result_cols = Vec::with_capacity(self.num_columns());
@@ -101719,7 +101798,12 @@ impl DataFrame {
     ) -> Result<(Self, Self), FrameError> {
         let has_duplicate_labels = self.index.has_duplicates() || other.index.has_duplicates();
         let outer = matches!(mode, AlignMode::Outer);
-        let plan = if outer && has_duplicate_labels {
+        let plan = if has_duplicate_labels && self.index == other.index {
+            // Equal indexes - repeated labels too - pair row for row, as
+            // pandas' align (df.combine crossed each repeated label's rows;
+            // br-frankenpandas-rbiki).
+            positional_plan(&self.index, &other.index)
+        } else if outer && has_duplicate_labels {
             let (union_index, left_positions, right_positions) =
                 align_union_duplicate_aware(&self.index, &other.index);
             AlignmentPlan {
@@ -121703,8 +121787,14 @@ mod tests {
         );
     }
 
+    /// Equal repeated indexes align row for row. Live pandas 2.2.3:
+    /// `Series([10, 20], index=[1, 1]).align(Series([1, 2], index=[1, 1]),
+    /// join='outer')` is ([10, 20], [1, 2]) over [1, 1] - index.equals, no
+    /// join. This test asserted the 4-row cartesian join pandas never builds
+    /// here (br-frankenpandas-rbiki); unequal repeated indexes still join
+    /// (`series_align_outer_unequal_repeated_labels_still_join`).
     #[test]
-    fn series_align_outer_duplicate_labels_cartesian() {
+    fn series_align_outer_equal_repeated_labels_pair_by_position_like_pandas() {
         let left = Series::from_values(
             "x",
             vec![1_i64.into(), 1_i64.into()],
@@ -121719,28 +121809,43 @@ mod tests {
         .unwrap();
 
         let (la, ra) = left.align(&right, AlignMode::Outer).unwrap();
-        assert_eq!(la.len(), 4);
+        assert_eq!(la.index().labels(), &[1_i64.into(), 1_i64.into()]);
+        assert_eq!(la.values(), &[Scalar::Int64(10), Scalar::Int64(20)]);
+        assert_eq!(ra.values(), &[Scalar::Int64(1), Scalar::Int64(2)]);
+    }
+
+    /// NEGATIVE for the equal-index rule: indexes that differ, one repeating
+    /// a label, still take the duplicate-aware outer join. Live pandas 2.2.3:
+    /// `Series([10, 20, 30], index=[1, 1, 2]).align(Series([1, 2],
+    /// index=[1, 2]), join='outer')` is ([10, 20, 30], [1, 1, 2]) over
+    /// [1, 1, 2].
+    #[test]
+    fn series_align_outer_unequal_repeated_labels_still_join() {
+        let left = Series::from_values(
+            "x",
+            vec![1_i64.into(), 1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+        )
+        .unwrap();
+        let right = Series::from_values(
+            "y",
+            vec![1_i64.into(), 2_i64.into()],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+        )
+        .unwrap();
+
+        let (la, ra) = left.align(&right, AlignMode::Outer).unwrap();
         assert_eq!(
             la.index().labels(),
-            &[1_i64.into(), 1_i64.into(), 1_i64.into(), 1_i64.into()]
+            &[1_i64.into(), 1_i64.into(), 2_i64.into()]
         );
         assert_eq!(
             la.values(),
-            &[
-                Scalar::Int64(10),
-                Scalar::Int64(10),
-                Scalar::Int64(20),
-                Scalar::Int64(20)
-            ]
+            &[Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]
         );
         assert_eq!(
             ra.values(),
-            &[
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Int64(1),
-                Scalar::Int64(2)
-            ]
+            &[Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(2)]
         );
     }
 
@@ -122002,34 +122107,34 @@ mod tests {
         );
     }
 
+    /// Equal repeated indexes combine row for row. Live pandas 2.2.3:
+    /// `Series([10.0, nan], index=[1, 1]).combine_first(Series([1.0, 2.0],
+    /// index=[1, 1]))` is [10.0, 2.0] over [1, 1] (same dtype + index.equals
+    /// -> self.mask(self.isna(), other)). This test asserted a 4-row
+    /// cartesian join pandas never builds (br-frankenpandas-rbiki). Its old
+    /// inputs mixed a float self with an int other, where pandas takes a
+    /// reindex path that raises on the repeated labels - fp gives the
+    /// positional answer there (a recorded residue).
     #[test]
-    fn combine_first_duplicate_labels_cartesian() {
+    fn combine_first_equal_repeated_labels_pair_by_position_like_pandas() {
         let left = Series::from_values(
             "x",
             vec![1_i64.into(), 1_i64.into()],
-            vec![Scalar::Int64(10), Scalar::Null(NullKind::NaN)],
+            vec![Scalar::Float64(10.0), Scalar::Null(NullKind::NaN)],
         )
         .unwrap();
         let right = Series::from_values(
             "y",
             vec![1_i64.into(), 1_i64.into()],
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
         )
         .unwrap();
 
         let result = left.combine_first(&right).unwrap();
-        assert_eq!(
-            result.index().labels(),
-            &[1_i64.into(), 1_i64.into(), 1_i64.into(), 1_i64.into()]
-        );
+        assert_eq!(result.index().labels(), &[1_i64.into(), 1_i64.into()]);
         assert_eq!(
             result.values(),
-            &[
-                Scalar::Int64(10),
-                Scalar::Int64(10),
-                Scalar::Int64(1),
-                Scalar::Int64(2)
-            ]
+            &[Scalar::Float64(10.0), Scalar::Float64(2.0)]
         );
     }
 
@@ -157258,8 +157363,13 @@ mod tests {
         );
     }
 
+    /// Equal repeated indexes align row for row. Live pandas 2.2.3:
+    /// `DataFrame({'a': [10, 20]}, index=[1, 1]).align(DataFrame({'b': [1,
+    /// 2]}, index=[1, 1]), join='outer')` keeps both frames' 2 rows over
+    /// [1, 1] (a [10, 20], b [1, 2]). This test asserted the 4-row cartesian
+    /// join pandas never builds here (br-frankenpandas-rbiki).
     #[test]
-    fn dataframe_align_outer_duplicate_labels_cartesian() {
+    fn dataframe_align_outer_equal_repeated_labels_pair_by_position_like_pandas() {
         let df1 = DataFrame::from_dict_with_index(
             vec![("a", vec![Scalar::Int64(10), Scalar::Int64(20)])],
             vec![1_i64.into(), 1_i64.into()],
@@ -157272,28 +157382,14 @@ mod tests {
         .unwrap();
 
         let (left, right) = df1.align_on_index(&df2, AlignMode::Outer).unwrap();
-        assert_eq!(left.len(), 4);
-        assert_eq!(
-            left.index().labels(),
-            &[1_i64.into(), 1_i64.into(), 1_i64.into(), 1_i64.into()]
-        );
+        assert_eq!(left.index().labels(), &[1_i64.into(), 1_i64.into()]);
         assert_eq!(
             left.column("a").unwrap().values(),
-            &[
-                Scalar::Int64(10),
-                Scalar::Int64(10),
-                Scalar::Int64(20),
-                Scalar::Int64(20)
-            ]
+            &[Scalar::Int64(10), Scalar::Int64(20)]
         );
         assert_eq!(
             right.column("b").unwrap().values(),
-            &[
-                Scalar::Int64(1),
-                Scalar::Int64(2),
-                Scalar::Int64(1),
-                Scalar::Int64(2)
-            ]
+            &[Scalar::Int64(1), Scalar::Int64(2)]
         );
     }
 
