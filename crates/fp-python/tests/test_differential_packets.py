@@ -24370,3 +24370,120 @@ def _fvsao37_outcome(run: Any) -> Any:
 def test_expanding_sum_of_nothing_is_positive_zero_fvsao37(case: str) -> None:
     run = _FVSAO37_CASES[case]
     assert _fvsao37_outcome(lambda: run(fpd)) == _fvsao37_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.26 (part):
+# Series.argsort takes pandas' (axis=0, kind='quicksort', order=None,
+# stable=None) - axis -1 too, so np.argsort(s) is a Series (it took a
+# non-pandas ascending=, and numpy's call fell back to an ndarray) - and
+# warns pandas' FutureWarning when a value is missing (it set -1 silently).
+_FVSAO26_CASES = {
+    "np.argsort": lambda m: np.argsort(m.Series([3, 1, 2])),
+    "axis -1": lambda m: m.Series([3, 1, 2]).argsort(axis=-1),
+    "axis index": lambda m: m.Series([3, 1, 2]).argsort(axis="index"),
+    "axis 1": lambda m: m.Series([3, 1, 2]).argsort(axis=1),
+    "kind stable": lambda m: m.Series([2, 1, 2, 1]).argsort(kind="stable"),
+    "kind foo": lambda m: m.Series([3, 1, 2]).argsort(kind="foo"),
+    "order and stable ignored": lambda m: m.Series([3, 1, 2]).argsort(order="x", stable=True),
+    "missing value": lambda m: m.Series([3.0, np.nan, 1.0]).argsort(),
+    "np.argsort missing": lambda m: np.argsort(m.Series([3.0, np.nan, 1.0])),
+    # NEGATIVE: no missing value, no warning.
+    "plain": lambda m: m.Series([3.0, 2.0, 1.0]).argsort(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FVSAO26_CASES))
+def test_series_argsort_takes_pandas_signature_fvsao26(case: str) -> None:
+    run = _FVSAO26_CASES[case]
+    assert _f1jm5_outcome(lambda: run(fpd)) == _f1jm5_outcome(lambda: run(pd)), case
+
+
+# br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.46 (item 2): a date
+# no format names - a two-digit year - is read by pandas' dateutil fallback,
+# under dayfirst / yearfirst, with pandas' "Could not infer format"
+# UserWarning when another value follows (it raised DateParseError, and
+# yearfirst was refused). Both arms read the same clock for the century.
+# NEGATIVE: a four-digit year keeps its guessed format; junk still raises.
+_FVSAO46_DATES = {
+    "two digit": (["01/02/24", "03/04/24"], {}),
+    "two digit dayfirst": (["01/02/24", "13/04/24"], {"dayfirst": True}),
+    "day past 12": (["13/04/24"], {}),
+    "two digit dash": (["24-01-02"], {}),
+    "dash yearfirst": (["24-01-02"], {"yearfirst": True}),
+    "dash both": (["24-01-02"], {"dayfirst": True, "yearfirst": True}),
+    "ambiguous": (["01-02-03"], {}),
+    "ambiguous dayfirst": (["01-02-03"], {"dayfirst": True}),
+    "ambiguous yearfirst": (["01-02-03"], {"yearfirst": True}),
+    "ambiguous both": (["01-02-03"], {"dayfirst": True, "yearfirst": True}),
+    "short yearfirst": (["1/2/24"], {"yearfirst": True}),
+    "dots": (["01.02.24"], {}),
+    "year past 31": (["99-01-02"], {}),
+    "century pivot": (["01/02/76", "01/02/69", "01/02/68"], {}),
+    "text month": (["5 Jan 24"], {}),
+    "with a clock": (["01/02/24 10:30", "01/02/24 10:30 PM"], {}),
+    "a missing value": (["01/02/24", None, "03/04/24"], {}),
+    "coerce junk": (["01/02/24", "hello"], {"errors": "coerce"}),
+    # NEGATIVE
+    "four digit year": (["01/02/2024", "03/04/2024"], {}),
+    "junk raises": (["hello"], {}),
+    "yearfirst four digit": (["01/02/2024"], {"yearfirst": True}),
+}
+_FVSAO46_CASES = {
+    name: (lambda values, kw: lambda m: m.to_datetime(m.Series(values), **kw))(values, kw)
+    for name, (values, kw) in _FVSAO46_DATES.items()
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FVSAO46_CASES))
+def test_to_datetime_reads_two_digit_years_like_dateutil_fvsao46(case: str) -> None:
+    run = _FVSAO46_CASES[case]
+    assert _f1jm5_outcome(lambda: run(fpd)) == _f1jm5_outcome(lambda: run(pd)), case
+
+
+# fvsao.46's items added from fvsao.47, each landed by an earlier bead; pinned
+# here against live pandas as the bead's closing evidence: pivot_table /
+# crosstab with dropna=False over missing keys and values, crosstab
+# normalize with margins and two arrays on an axis, merge_asof on the
+# indexes, cut / qcut precision, groupby sample's rows.
+def _fvsao46_keys(m: Any) -> Any:
+    return m.DataFrame({"r": ["a", "a", None, "b"], "c": ["x", None, "y", "y"], "v": [1.0, 2.0, 3.0, np.nan]})
+
+
+_FVSAO46_MORE_CASES = {
+    "pivot dropna False": lambda m: _fvsao46_keys(m).pivot_table(
+        index="r", columns="c", values="v", aggfunc="sum", dropna=False
+    ),
+    "crosstab dropna False": lambda m: m.crosstab(_fvsao46_keys(m)["r"], _fvsao46_keys(m)["c"], dropna=False),
+    "crosstab normalize margins": lambda m: m.crosstab(
+        m.Series(["a", "a", "b"]), m.Series(["x", "y", "y"]), normalize=True, margins=True
+    ),
+    "crosstab two arrays": lambda m: m.crosstab(
+        [m.Series(["a", "a", "b"]), m.Series([1, 2, 1])], m.Series(["x", "y", "y"])
+    ),
+    "merge_asof on indexes": lambda m: m.merge_asof(
+        m.DataFrame({"a": [1, 5]}, index=[1, 5]),
+        m.DataFrame({"b": [10, 20]}, index=[2, 4]),
+        left_index=True,
+        right_index=True,
+    ),
+    "cut precision": lambda m: m.cut(m.Series([0.123456, 0.5, 0.987654]), 2, precision=2),
+    "qcut precision": lambda m: m.qcut(m.Series([0.123456, 0.5, 0.987654, 0.3]), 2, precision=1),
+    "groupby sample": lambda m: m.DataFrame({"k": ["a", "a", "b", "b"], "v": [1, 2, 3, 4]})
+    .groupby("k")
+    .sample(n=1, random_state=0),
+}
+
+
+def _fvsao46_shown(run: Any) -> Any:
+    result = run()
+    dtypes = [str(t) for t in result.dtypes] if hasattr(result, "columns") else [str(result.dtype)]
+    return (repr(result), dtypes)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FVSAO46_MORE_CASES))
+def test_fvsao46_added_items_like_pandas(case: str) -> None:
+    run = _FVSAO46_MORE_CASES[case]
+    assert _fvsao46_shown(lambda: run(fpd)) == _fvsao46_shown(lambda: run(pd)), case

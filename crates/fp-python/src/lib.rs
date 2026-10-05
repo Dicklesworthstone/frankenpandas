@@ -32028,9 +32028,41 @@ impl PySeries {
         numpy_scalar(py, &Scalar::Float64(value))
     }
 
-    #[pyo3(signature = (ascending=true))]
-    fn argsort(&self, ascending: bool) -> PyResult<PySeries> {
-        let res = self.inner.argsort(ascending).map_err(frame_error_to_py)?;
+    /// pandas' `argsort(axis=0, kind='quicksort', order=None, stable=None)`:
+    /// the positions that sort the values, a missing one -1 after pandas'
+    /// FutureWarning; `axis` -1 too, as pandas takes it so `np.argsort(s)`
+    /// answers a Series (it took a non-pandas `ascending=`, so numpy's call
+    /// fell back to an ndarray; fvsao.26); `order` / `stable` are accepted
+    /// and ignored, as pandas'.
+    #[pyo3(signature = (axis=None, kind=Some("quicksort"), order=None, stable=None))]
+    fn argsort(
+        &self,
+        py: Python<'_>,
+        axis: Option<&Bound<'_, PyAny>>,
+        kind: Option<&str>,
+        order: Option<&Bound<'_, PyAny>>,
+        stable: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        let _ = (order, stable);
+        if !axis.is_some_and(|axis| axis.extract::<i64>().is_ok_and(|axis| axis == -1)) {
+            check_series_axis(axis)?;
+        }
+        if let Some(kind) = kind
+            && !matches!(kind, "quicksort" | "mergesort" | "heapsort" | "stable")
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "sort kind must be one of 'quick', 'heap', or 'stable' (got '{kind}')"
+            )));
+        }
+        if self.inner.column().has_any_missing() {
+            PyErr::warn(
+                py,
+                &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+                c"The behavior of Series.argsort in the presence of NA values is deprecated. In a future version, NA values will be ordered last instead of set to -1.",
+                1,
+            )?;
+        }
+        let res = self.inner.argsort(true).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
     }
 
@@ -70824,7 +70856,6 @@ fn to_datetime(
             )));
         }
     };
-    unsupported_params("to_datetime", &[("yearfirst", !yearfirst)])?;
     let opts = fp_frame::ToDatetimeOptions {
         format,
         unit,
@@ -70832,15 +70863,19 @@ fn to_datetime(
         origin,
         errors,
         dayfirst,
+        yearfirst,
         ..Default::default()
     };
     // pandas' UserWarning when the first string forces the other day/month
-    // order (13/02/2024 without dayfirst).
+    // order (13/02/2024 without dayfirst), or names no format at all (a
+    // two-digit year: each value is read by dateutil; fvsao.46).
     let warn_order = |values: &[Scalar]| -> PyResult<()> {
         if format.is_some() || unit.is_some() {
             return Ok(());
         }
-        match fp_frame::day_month_format_warning(values, dayfirst) {
+        let message = fp_frame::day_month_format_warning(values, dayfirst)
+            .or_else(|| fp_frame::infer_format_warning(values, dayfirst).map(str::to_owned));
+        match message {
             Some(message) => PyErr::warn(
                 py,
                 &py.get_type::<pyo3::exceptions::PyUserWarning>(),

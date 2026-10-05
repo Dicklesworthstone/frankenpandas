@@ -62209,6 +62209,9 @@ pub struct ToDatetimeOptions<'a> {
     /// pandas' `dayfirst=`: a numeric date's two short slots read day then
     /// month (see [`guess_day_month_format`]).
     pub dayfirst: bool,
+    /// pandas' `yearfirst=`: dateutil reads an ambiguous all-numeric date
+    /// year first (see [`dateutil_date`]).
+    pub yearfirst: bool,
 }
 
 /// pandas' `to_datetime(errors=)`.
@@ -62229,6 +62232,7 @@ impl Default for ToDatetimeOptions<'_> {
             mixed_tz_as_object: false,
             errors: DatetimeErrors::Coerce,
             dayfirst: false,
+            yearfirst: false,
         }
     }
 }
@@ -62485,6 +62489,7 @@ pub fn to_datetime_values_with_options(
     // passed through).
     let strptime = options.format.and_then(PandasStrptime::new);
     let lock_strptime = lock_format.as_deref().and_then(PandasStrptime::new);
+    let this_year = current_year();
     let mut converted = Vec::with_capacity(values.len());
 
     for (position, val) in values.iter().enumerate() {
@@ -62608,9 +62613,18 @@ pub fn to_datetime_values_with_options(
                     } else {
                         parse_datetime_string(s, options.format)
                     };
-                    match &lock_strptime {
+                    let read = match &lock_strptime {
                         Some(strptime) if read.is_missing() => strptime.value(s),
                         _ => read,
+                    };
+                    // No format given or guessed: pandas reads what no
+                    // parser here does with dateutil, a two-digit year
+                    // included (01/02/24; it raised; fvsao.46).
+                    if read.is_missing() && options.format.is_none() && shape_lock.is_none() {
+                        dateutil_date(s, options.dayfirst, options.yearfirst, this_year)
+                            .map_or(read, datetime64_scalar_from_naive_datetime)
+                    } else {
+                        read
                     }
                 }
                 // A bare number carries NO unit information, and pandas does not
@@ -63865,6 +63879,172 @@ pub fn day_month_format_warning(values: &[Scalar], dayfirst: bool) -> Option<Str
     ))
 }
 
+/// The current year, as dateutil reads it to put a two-digit year in a
+/// century (UTC here; dateutil's local clock differs only around New Year).
+#[must_use]
+pub fn current_year() -> i32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
+        .and_then(|secs| DateTime::from_timestamp(secs, 0))
+        .map_or(1970, |now| now.year())
+}
+
+/// dateutil's reading of a date pandas cannot guess a format for - a
+/// two-digit year (`01/02/24`, `24-01-02`, `5 Jan 24`) - as pandas falls
+/// back to it element by element: three date tokens (numbers, or one month
+/// name) split by `/`, `-`, `.`, `,` or spaces, then optionally a clock
+/// (`H:MM[:SS[.f]]`, an AM / PM). The order is dateutil's `resolve_ymd`
+/// under `dayfirst` / `yearfirst` (a number past 31 is the year, a leading
+/// one past 12 the day); a year of one or two digits goes to the century
+/// that keeps it within 50 years of `this_year`, as dateutil's
+/// `convertyear`. None for anything else or a day the month lacks.
+#[must_use]
+pub fn dateutil_date(
+    text: &str,
+    dayfirst: bool,
+    yearfirst: bool,
+    this_year: i32,
+) -> Option<NaiveDateTime> {
+    const MONTHS: [&str; 12] = [
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+    ];
+    let text = text.trim();
+    // The clock is the whitespace-separated tail holding the first ':'.
+    let (date, clock) = match text.find(':') {
+        Some(colon) => {
+            let start = text[..colon].rfind(char::is_whitespace)? + 1;
+            (text[..start].trim_end(), Some(text[start..].trim()))
+        }
+        None => (text, None),
+    };
+    // (value, digits written) per number; the month name's position.
+    let mut numbers: Vec<(i64, usize)> = Vec::with_capacity(3);
+    let mut month_at = None;
+    for token in date
+        .split(|c: char| matches!(c, '/' | '-' | '.' | ',') || c.is_whitespace())
+        .filter(|token| !token.is_empty())
+    {
+        if token.len() <= 4 && token.bytes().all(|b| b.is_ascii_digit()) {
+            numbers.push((token.parse().ok()?, token.len()));
+        } else {
+            // dateutil's month names: in full, three letters, or "Sept".
+            let lower = token.to_ascii_lowercase();
+            let month = MONTHS.iter().position(|name| {
+                *name == lower || name[..3] == lower || (lower == "sept" && *name == "september")
+            })?;
+            if month_at.is_some() {
+                return None;
+            }
+            month_at = Some((numbers.len(), i64::try_from(month + 1).ok()?));
+        }
+    }
+    let count = numbers.len() + usize::from(month_at.is_some());
+    if count != 3 {
+        return None;
+    }
+    // The three slots in order, a month name in its place.
+    let mut slots = numbers;
+    if let Some((at, month)) = month_at {
+        slots.insert(at, (month, 0));
+    }
+    let v = |i: usize| slots[i].0;
+    // A number of more than two digits names the year (dateutil's ystridx;
+    // the month name's slot has none).
+    let year_at = slots.iter().position(|&(_, digits)| digits > 2);
+    let (year_i, month_i, day_i) = match (month_at.map(|(at, _)| at), year_at) {
+        (Some(m), Some(y)) => (y, m, 3 - m - y),
+        (Some(0), None) => {
+            if v(1) > 31 {
+                (1, 0, 2)
+            } else {
+                (2, 0, 1)
+            }
+        }
+        (Some(1), None) => {
+            if v(0) > 31 || (yearfirst && v(2) <= 31) {
+                (0, 1, 2)
+            } else {
+                (2, 1, 0)
+            }
+        }
+        (Some(_), None) => {
+            if v(1) > 31 {
+                (1, 2, 0)
+            } else {
+                (0, 2, 1)
+            }
+        }
+        (None, _) => {
+            if v(0) > 31 || year_at == Some(0) || (yearfirst && v(1) <= 12 && v(2) <= 31) {
+                if dayfirst && v(2) <= 12 {
+                    (0, 2, 1)
+                } else {
+                    (0, 1, 2)
+                }
+            } else if v(0) > 12 || (dayfirst && v(1) <= 12) {
+                (2, 1, 0)
+            } else {
+                (2, 0, 1)
+            }
+        }
+    };
+    let (mut year, written) = slots[year_i];
+    if year < 100 && written <= 2 {
+        let century = i64::from(this_year) / 100 * 100;
+        year += century;
+        if year >= i64::from(this_year) + 50 {
+            year -= 100;
+        } else if year < i64::from(this_year) - 50 {
+            year += 100;
+        }
+    }
+    let date = NaiveDate::from_ymd_opt(
+        i32::try_from(year).ok()?,
+        u32::try_from(v(month_i)).ok()?,
+        u32::try_from(v(day_i)).ok()?,
+    )?;
+    let nanos = match clock {
+        Some(clock) => time_of_day_nanos(clock)?,
+        None => 0,
+    };
+    Some(date.and_hms_opt(0, 0, 0)? + Duration::nanoseconds(nanos))
+}
+
+/// pandas' UserWarning when it cannot guess a column's format from its
+/// first value and falls back to dateutil element by element - said only
+/// when another value follows (see [`dateutil_date`]).
+#[must_use]
+pub fn infer_format_warning(values: &[Scalar], dayfirst: bool) -> Option<&'static str> {
+    let mut present = values.iter().filter(|value| match value {
+        Scalar::Utf8(text) => !is_datetime_null_token(text),
+        other => !other.is_missing(),
+    });
+    let Scalar::Utf8(first) = present.next()? else {
+        return None;
+    };
+    // fp's stand-in for pandas' guess: a first value the string parsers
+    // read (an ISO form, a four-digit-year date, a text month with its year
+    // in full) or a day / month order reads names a format.
+    let guessed = !parse_datetime_string(first, None).is_missing()
+        || guess_day_month_format(first, dayfirst).is_some();
+    (!guessed && present.next().is_some()).then_some(
+        "Could not infer format, so each element will be parsed individually, falling back to `dateutil`. To ensure parsing is consistent and as-expected, please specify a format.",
+    )
+}
+
 /// A pandas strptime format as chrono reads it: pandas' `%f` is the
 /// fraction's digits (`.5` is half a second), chrono's the nanosecond
 /// count (5 ns), so `.%f` becomes chrono's `%.f`.
@@ -64250,10 +64430,18 @@ fn parse_datetime_string(s: &str, format: Option<&str>) -> Scalar {
     // of a second past the next minute; pandas' readers refuse it
     // (dateutil's "second must be in 0..59") unless a format's strptime
     // reads it, as [`PandasStrptime`] does.
+    // And chrono's %Y takes any number of digits, so 01/02/24 read as the
+    // year 24; pandas' formats want four and leave a two-digit year to
+    // dateutil ([`dateutil_date`]; fvsao.46).
     let naive = |format: &str| {
         NaiveDateTime::parse_from_str(trimmed, format)
             .ok()
-            .filter(|dt| dt.nanosecond() < 1_000_000_000)
+            .filter(|dt| dt.nanosecond() < 1_000_000_000 && dt.year() >= 100)
+    };
+    let naive_date = |format: &str| {
+        NaiveDate::parse_from_str(trimmed, format)
+            .ok()
+            .filter(|date| date.year() >= 100)
     };
 
     // If explicit format is provided, use it.
@@ -64297,17 +64485,17 @@ fn parse_datetime_string(s: &str, format: Option<&str>) -> Scalar {
     }
 
     // Date only: 2024-01-15
-    if let Ok(d) = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+    if let Some(d) = naive_date("%Y-%m-%d") {
         return Scalar::Utf8(format!("{} 00:00:00", d.format("%Y-%m-%d")));
     }
 
     // Date with slashes: 2024/01/15
-    if let Ok(d) = NaiveDate::parse_from_str(trimmed, "%Y/%m/%d") {
+    if let Some(d) = naive_date("%Y/%m/%d") {
         return Scalar::Utf8(format!("{} 00:00:00", d.format("%Y-%m-%d")));
     }
 
     // US date format: 01/15/2024 (MM/DD/YYYY)
-    if let Ok(d) = NaiveDate::parse_from_str(trimmed, "%m/%d/%Y") {
+    if let Some(d) = naive_date("%m/%d/%Y") {
         return Scalar::Utf8(format!("{} 00:00:00", d.format("%Y-%m-%d")));
     }
 
@@ -64351,7 +64539,7 @@ fn parse_datetime_string(s: &str, format: Option<&str>) -> Scalar {
         "%d %B %Y",
         "%d %b %Y",
     ] {
-        if let Ok(d) = NaiveDate::parse_from_str(trimmed, fmt) {
+        if let Some(d) = naive_date(fmt) {
             return Scalar::Utf8(format!("{} 00:00:00", d.format("%Y-%m-%d")));
         }
     }
@@ -237241,6 +237429,94 @@ mod pandas_strptime_h9cug {
             ),
             "{err}"
         );
+    }
+}
+
+/// fvsao.46 (part): a date no format names - a two-digit year - read as
+/// pandas' dateutil fallback reads it, under dayfirst / yearfirst. Every row
+/// measured on live pandas 2.2.3 in 2026 (`this_year` pins the century).
+#[cfg(test)]
+mod dateutil_dates_fvsao46 {
+    use chrono::NaiveDateTime;
+    use fp_types::Scalar;
+
+    use super::{
+        DatetimeErrors, ToDatetimeOptions, dateutil_date, to_datetime_values_with_options,
+    };
+
+    fn at(text: &str) -> NaiveDateTime {
+        NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap()
+    }
+
+    #[test]
+    fn reads_dateutils_order_and_century() {
+        for (text, dayfirst, yearfirst, wall) in [
+            ("01/02/24", false, false, "2024-01-02 00:00"),
+            ("01/02/24", true, false, "2024-02-01 00:00"),
+            ("13/04/24", false, false, "2024-04-13 00:00"),
+            ("24-01-02", false, false, "2002-01-24 00:00"),
+            ("24-01-02", false, true, "2024-01-02 00:00"),
+            ("24-01-02", true, true, "2024-02-01 00:00"),
+            ("01-02-03", false, false, "2003-01-02 00:00"),
+            ("01-02-03", true, false, "2003-02-01 00:00"),
+            ("01-02-03", false, true, "2001-02-03 00:00"),
+            ("01-02-03", true, true, "2001-03-02 00:00"),
+            ("1/2/24", false, true, "2001-02-24 00:00"),
+            ("01.02.24", false, false, "2024-01-02 00:00"),
+            ("99-01-02", false, false, "1999-01-02 00:00"),
+            ("99-01-02", true, false, "1999-02-01 00:00"),
+            ("24/12/31", false, false, "2031-12-24 00:00"),
+            ("24/12/31", false, true, "2024-12-31 00:00"),
+            ("01/02/76", false, false, "1976-01-02 00:00"),
+            ("01/02/69", false, false, "2069-01-02 00:00"),
+            ("01/02/68", false, false, "2068-01-02 00:00"),
+            ("5 Jan 24", false, false, "2024-01-05 00:00"),
+            ("01/02/24 10:30", false, false, "2024-01-02 10:30"),
+            ("01/02/24 10:30 PM", false, false, "2024-01-02 22:30"),
+        ] {
+            assert_eq!(
+                dateutil_date(text, dayfirst, yearfirst, 2026),
+                Some(at(wall)),
+                "{text} dayfirst={dayfirst} yearfirst={yearfirst}"
+            );
+        }
+        // NEGATIVE: not three date tokens, a day the month lacks, a word.
+        for text in ["hello", "01/02", "01/02/24/5", "02/30/24", "5 Janu 24"] {
+            assert_eq!(dateutil_date(text, false, false, 2026), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn to_datetime_falls_back_to_dateutil_without_a_format() {
+        let raise = ToDatetimeOptions {
+            errors: DatetimeErrors::Raise,
+            ..ToDatetimeOptions::default()
+        };
+        let utf8 = |values: &[&str]| -> Vec<Scalar> {
+            values
+                .iter()
+                .map(|value| Scalar::Utf8((*value).to_owned()))
+                .collect()
+        };
+        let read = to_datetime_values_with_options(&utf8(&["01/02/24", "03/04/24"]), raise);
+        assert!(
+            matches!(
+                read.as_deref(),
+                Ok([Scalar::Datetime64(_), Scalar::Datetime64(_)])
+            ),
+            "{read:?}"
+        );
+        // NEGATIVE: what no reader takes is still pandas' error.
+        let err = to_datetime_values_with_options(&utf8(&["hello"]), raise)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Unknown datetime string format"), "{err}");
+        // NEGATIVE: a given format reads its own way (no dateutil).
+        let formatted = ToDatetimeOptions {
+            format: Some("%Y-%m-%d"),
+            ..raise
+        };
+        assert!(to_datetime_values_with_options(&utf8(&["01/02/24"]), formatted).is_err());
     }
 }
 
