@@ -24831,6 +24831,17 @@ _QOLTT_CASES = {
     "set_properties subset tuple": lambda m: _qoltt_numbers(m).style.set_properties(
         subset=([0, 2], ["x"]), color="green"
     ),
+    "bar": lambda m: _qoltt_numbers(m).style.bar(),
+    "bar zero": lambda m: _qoltt_numbers(m).style.bar(align="zero"),
+    "bar colors about 0": lambda m: _qoltt_numbers(m).style.bar(color=["red", "green"], align=0),
+    "bar width height": lambda m: _qoltt_numbers(m).style.bar(width=50, height=80),
+    "bar vmin vmax": lambda m: _qoltt_numbers(m).style.bar(vmin=0, vmax=5),
+    "bar whole frame": lambda m: _qoltt_numbers(m).style.bar(axis=None),
+    "bar mean": lambda m: _qoltt_numbers(m).style.bar(align="mean", subset=["x"]),
+    "bar right": lambda m: _qoltt_numbers(m).style.bar(align="right"),
+    "bar callable": lambda m: _qoltt_numbers(m).style.bar(align=lambda a: float(a.min()), subset=["y"]),
+    "bar all negative": lambda m: m.DataFrame({"x": [-1.0, -3.0, -2.0]}).style.bar(),
+    "bar with NaN": lambda m: m.DataFrame({"x": [1.0, _NAN, 3.0], "s": ["a", "b", "c"]}).style.bar(),
 }
 
 _QOLTT_RENDERS = {

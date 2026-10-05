@@ -60847,6 +60847,74 @@ fn styler_bound<'py>(
     Ok(Some(vec![bound.clone(); n]))
 }
 
+/// One `Styler.bar` cell's CSS, as pandas draws it: `x` clipped into
+/// `[left, right]`, its bar from the left edge (`left`), to the right edge
+/// (`right`) or from zero (`zero`: a range symmetric about zero; `mid`: zero
+/// where the range puts it), scaled by `width`; a `height` below 1 draws a
+/// thinner bar centred in the cell.
+#[allow(clippy::too_many_arguments)]
+fn styler_bar_css(
+    x: f64,
+    left: f64,
+    right: f64,
+    mode: &str,
+    color: &str,
+    width: f64,
+    height: f64,
+    base: &str,
+) -> String {
+    let mut x = if x < left { left } else { x };
+    x = if x > right { right } else { x };
+    let (mut low, mut high) = (left, right);
+    let (start, end) = match mode {
+        "left" => (0.0, (x - low) / (high - low)),
+        "right" => ((x - low) / (high - low), 1.0),
+        _ => {
+            let mut zero = 0.5;
+            if mode == "zero" {
+                let limit = low.abs().max(high.abs());
+                (low, high) = (-limit, limit);
+            } else {
+                let mid = (low + high) / 2.0;
+                zero = if mid < 0.0 {
+                    -mid / (high - low) + 0.5
+                } else {
+                    -low / (high - low)
+                };
+            }
+            if x < 0.0 {
+                ((x - low) / (high - low), zero)
+            } else {
+                (zero, (x - low) / (high - low))
+            }
+        }
+    };
+    let (start, end) = (start * width, end * width);
+    let mut css = base.to_owned();
+    if end > start {
+        css.push_str("background: linear-gradient(90deg,");
+        if start > 0.0 {
+            css.push_str(&format!(
+                " transparent {:.1}%, {color} {:.1}%,",
+                start * 100.0,
+                start * 100.0
+            ));
+        }
+        css.push_str(&format!(
+            " {color} {:.1}%, transparent {:.1}%)",
+            end * 100.0,
+            end * 100.0
+        ));
+    }
+    if height < 1.0 && css.contains("background: linear-gradient(") {
+        css.push_str(&format!(
+            " no-repeat center; background-size: 100% {:.1}%;",
+            height * 100.0
+        ));
+    }
+    css
+}
+
 /// Whether `value` lies within the bounds (a missing value never does; an
 /// absent bound always holds).
 fn styler_between(
@@ -61596,9 +61664,167 @@ impl PyStyler {
         Err(not_implemented("Styler.text_gradient"))
     }
 
-    #[pyo3(signature = (*_args, **_kwargs))]
-    fn bar(&self, _args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
-        Err(not_implemented("Styler.bar"))
+    /// pandas' `Styler.bar`: each value of `subset` (the numeric columns by
+    /// default) drawn as a CSS linear-gradient bar over its column's (axis
+    /// 0), row's (axis 1) or the whole subset's (axis None) range, aligned
+    /// as `align` says - 'mid' by default: from zero, or from the left /
+    /// right edge when every value shares a sign. A matplotlib `cmap` is
+    /// refused (the binding may not import matplotlib).
+    #[pyo3(signature = (subset=None, axis=Passed(None), *, color=None, cmap=None, width=100.0, height=100.0, align=None, vmin=None, vmax=None, props="width: 10em;"))]
+    #[allow(clippy::too_many_arguments)]
+    fn bar<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        subset: Option<&Bound<'py, PyAny>>,
+        axis: Passed<'py>,
+        color: Option<&Bound<'py, PyAny>>,
+        cmap: Option<&Bound<'py, PyAny>>,
+        width: f64,
+        height: f64,
+        align: Option<&Bound<'py, PyAny>>,
+        vmin: Option<f64>,
+        vmax: Option<f64>,
+        props: &str,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let py = slf.py();
+        let color = color.filter(|color| !color.is_none());
+        if cmap.is_some_and(|cmap| !cmap.is_none()) {
+            if color.is_some() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "`color` and `cmap` cannot both be given",
+                ));
+            }
+            return Err(not_implemented("Styler.bar(cmap=...)"));
+        }
+        let colors: Vec<String> = match color {
+            None => vec!["#d65f5f".to_owned()],
+            Some(color) if color.is_instance_of::<pyo3::types::PyString>() => {
+                vec![color.extract()?]
+            }
+            Some(color)
+                if (color.is_instance_of::<PyList>() || color.is_instance_of::<PyTuple>())
+                    && color.len()? <= 2 =>
+            {
+                color.extract()?
+            }
+            Some(_) => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "`color` must be string or list or tuple of 2 strings,(eg: color=['#d65f5f', '#5fba7d'])",
+                ));
+            }
+        };
+        let paired = color.is_some_and(|color| !color.is_instance_of::<pyo3::types::PyString>());
+        for (name, value) in [("width", width), ("height", height)] {
+            if !(0.0..=100.0).contains(&value) {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "`{name}` must be a value in [0, 100], got {value}"
+                )));
+            }
+        }
+        let subset = match subset.filter(|subset| !subset.is_none()) {
+            Some(subset) => subset.clone(),
+            None => {
+                // pandas' numeric default subset.
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("include", "number")?;
+                let numeric = slf
+                    .data
+                    .bind(py)
+                    .call_method("select_dtypes", (), Some(&kwargs))?
+                    .getattr("columns")?
+                    .call_method0("tolist")?;
+                PyTuple::new(py, [pyo3::types::PySlice::full(py).into_any(), numeric])?.into_any()
+            }
+        };
+        let groups = slf.highlight_groups(py, Some(&subset), styler_axis(&axis)?)?;
+        for (cells, values, _) in groups {
+            let numbers = values
+                .iter()
+                .map(|value| {
+                    if styler_isna(value)? {
+                        Ok(None)
+                    } else {
+                        value.extract::<f64>().map(Some)
+                    }
+                })
+                .collect::<PyResult<Vec<Option<f64>>>>()?;
+            let present: Vec<f64> = numbers.iter().flatten().copied().collect();
+            let fold = |pick: fn(f64, f64) -> f64| {
+                present.iter().copied().reduce(pick).unwrap_or(f64::NAN)
+            };
+            let mut left = vmin.unwrap_or_else(|| fold(f64::min));
+            let mut right = vmax.unwrap_or_else(|| fold(f64::max));
+            let mut shift = 0.0;
+            let mode = match align.filter(|align| !align.is_none()) {
+                Some(align) if align.is_callable() => {
+                    let array = py
+                        .import("numpy")?
+                        .call_method1("array", (PyList::new(py, &values)?,))?;
+                    shift = align.call1((array,))?.extract()?;
+                    "zero"
+                }
+                Some(align) if align.is_instance_of::<pyo3::types::PyString>() => {
+                    match align.extract::<String>()?.as_str() {
+                        "mid" => "mid",
+                        "left" => "left",
+                        "right" => "right",
+                        "zero" => "zero",
+                        "mean" => {
+                            shift = present.iter().sum::<f64>() / present.len() as f64;
+                            "zero"
+                        }
+                        _ => {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                "`align` should be in {'left', 'right', 'mid', 'mean', 'zero'} or be a value defining the center line or a callable that returns a float",
+                            ));
+                        }
+                    }
+                }
+                Some(align) => {
+                    shift = align.extract::<f64>()?;
+                    "zero"
+                }
+                None => "mid",
+            };
+            let mode = if mode == "mid" && left >= 0.0 {
+                left = vmin.unwrap_or(0.0);
+                "left"
+            } else if mode == "mid" && right <= 0.0 {
+                right = vmax.unwrap_or(0.0);
+                "right"
+            } else {
+                mode
+            };
+            for ((row, column), number) in cells.into_iter().zip(numbers) {
+                let css = match number {
+                    None => props.to_owned(),
+                    Some(x) => {
+                        let x = x - shift;
+                        let color = if paired {
+                            colors.get(usize::from(x >= 0.0)).ok_or_else(|| {
+                                PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                                    "list index out of range",
+                                )
+                            })?
+                        } else {
+                            &colors[0]
+                        };
+                        styler_bar_css(
+                            x,
+                            left - shift,
+                            right - shift,
+                            mode,
+                            color,
+                            width / 100.0,
+                            height / 100.0,
+                            props,
+                        )
+                    }
+                };
+                let css = pyo3::types::PyString::new(py, &css).into_any();
+                slf.add_css(StylerTarget::Data, row, column, &css)?;
+            }
+        }
+        Ok(slf)
     }
 
     #[pyo3(signature = (*_args, **_kwargs))]
