@@ -832,7 +832,10 @@ fn pandas_aware_datetime_texts(values: &[Option<i64>], zone: &str) -> Vec<String
 }
 
 /// pandas' `Timedelta._repr_base`: "N days" when `long` is off and the
-/// value is whole days, else "N days HH:MM:SS[.fff[fff[fff]]]".
+/// value is whole days, else "N days HH:MM:SS[.ffffff[fff]]" - milliseconds
+/// and microseconds together whenever either is there (1.5 s is
+/// '.500000'; it printed '.500'; br-frankenpandas-n33o4), nanoseconds
+/// after them.
 fn pandas_timedelta_text(nanos: i64, long: bool) -> String {
     const SECOND: i64 = 1_000_000_000;
     let days = nanos.div_euclid(86_400 * SECOND);
@@ -846,10 +849,8 @@ fn pandas_timedelta_text(nanos: i64, long: bool) -> String {
     let (ms, us, ns) = (sub / 1_000_000, sub / 1_000 % 1_000, sub % 1_000);
     let seconds = if ns != 0 {
         format!("{seconds:02}.{ms:03}{us:03}{ns:03}")
-    } else if us != 0 {
+    } else if us != 0 || ms != 0 {
         format!("{seconds:02}.{ms:03}{us:03}")
-    } else if ms != 0 {
-        format!("{seconds:02}.{ms:03}")
     } else {
         format!("{seconds:02}")
     };
@@ -94635,6 +94636,17 @@ mod tests {
         assert_eq!(pandas_timedelta_text(HOUR, true), "0 days 01:00:00");
         assert_eq!(pandas_timedelta_text(24 * HOUR, false), "1 days");
         assert_eq!(pandas_timedelta_text(24 * HOUR, true), "1 days 00:00:00");
+        // A fraction of a second: microseconds whenever milliseconds or
+        // microseconds are there, nanoseconds after them (n33o4).
+        assert_eq!(
+            pandas_timedelta_text(1_500_000_000, true),
+            "0 days 00:00:01.500000"
+        );
+        assert_eq!(
+            pandas_timedelta_text(1_500, true),
+            "0 days 00:00:00.000001500"
+        );
+        assert_eq!(pandas_timedelta_text(1_000, true), "0 days 00:00:00.000001");
         assert_eq!(python_center("..", 3), " ..");
     }
 }

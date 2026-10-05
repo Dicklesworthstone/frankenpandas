@@ -26119,3 +26119,28 @@ def test_numeric_column_labels_with_a_missing_one_like_pandas_qacqs(case: str) -
         return repr(result)
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-n33o4: a timedelta with a fraction of a second prints
+# microseconds whenever milliseconds or microseconds are there (1.5 s is
+# '.500000'; it printed '.500'), nanoseconds after them - Series, Index and
+# frame alike. NEGATIVE: whole seconds and whole days unchanged.
+_N33O4_CASES = {
+    "Series of 1.5 s": lambda m: m.Series(m.to_timedelta(["1.5s"])),
+    "Series of 1.5 s and 2 days": lambda m: m.Series(m.to_timedelta(["1.5s", "2D"])),
+    "Series of 1 ms": lambda m: m.Series(m.to_timedelta(["1ms"])),
+    "Series of -1.5 s": lambda m: m.Series(m.to_timedelta(["-1.5s"])),
+    "Series of 3 h 0.25 s": lambda m: m.Series(m.to_timedelta(["3h 0.25s"])),
+    "Series of 1500 ns (NEGATIVE)": lambda m: m.Series(m.to_timedelta(["1500ns"])),
+    "Series of 1 us (NEGATIVE)": lambda m: m.Series(m.to_timedelta(["1us"])),
+    "Series of whole seconds (NEGATIVE)": lambda m: m.Series(m.to_timedelta(["1s", "2D"])),
+    "Series of whole days (NEGATIVE)": lambda m: m.Series(m.to_timedelta(["1D", "2D"])),
+    "TimedeltaIndex of 1.5 s": lambda m: m.TimedeltaIndex(m.to_timedelta(["1.5s", "2D"])),
+    "frame of 1.5 s": lambda m: m.DataFrame({"t": m.to_timedelta(["1.5s", "2D"])}),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_N33O4_CASES))
+def test_timedelta_fractions_print_like_pandas_n33o4(case: str) -> None:
+    assert repr(_N33O4_CASES[case](fpd)) == repr(_N33O4_CASES[case](pd))
