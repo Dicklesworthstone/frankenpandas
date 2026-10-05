@@ -1539,9 +1539,19 @@ fn pandas_column_label_texts(labels: &[IndexLabel]) -> Vec<String> {
             .collect();
         return pandas_label_texts(&instants, None);
     }
-    if !(all(|label| matches!(label, IndexLabel::Int64(_) | IndexLabel::Float64(_)))
-        || all(|label| matches!(label, IndexLabel::Bool(_))))
-    {
+    // A NaN among numbers is one of pandas' float labels ('NaN' in the
+    // block; it printed 'nan' on its own; br-frankenpandas-qacqs).
+    let numeric = |label: &IndexLabel| {
+        matches!(
+            label,
+            IndexLabel::Int64(_) | IndexLabel::Float64(_) | IndexLabel::Null(NullKind::NaN)
+        )
+    };
+    let numbers = labels.iter().all(numeric)
+        && labels
+            .iter()
+            .any(|label| matches!(label, IndexLabel::Int64(_) | IndexLabel::Float64(_)));
+    if !(numbers || all(|label| matches!(label, IndexLabel::Bool(_)))) {
         return labels.iter().map(fp_frame::column_key).collect();
     }
     let texts = pandas_label_texts(labels, None);
@@ -1573,7 +1583,12 @@ fn pandas_label_texts(labels: &[IndexLabel], zone: Option<&str>) -> Vec<String> 
             })
             .collect();
     }
-    if all(|label| matches!(label, IndexLabel::Int64(_) | IndexLabel::Float64(_))) {
+    if all(|label| {
+        matches!(
+            label,
+            IndexLabel::Int64(_) | IndexLabel::Float64(_) | IndexLabel::Null(NullKind::NaN)
+        )
+    }) {
         let values: Vec<Option<f64>> = labels
             .iter()
             .map(|label| match label {
@@ -1584,9 +1599,18 @@ fn pandas_label_texts(labels: &[IndexLabel], zone: Option<&str>) -> Vec<String> 
             .collect();
         let cells = pandas_float_cells(&values);
         // The cells carry a sign space; labels keep it only beside a
-        // negative one.
+        // negative one - a NaN label too (' NaN'; it had none, qacqs).
         return if cells.iter().any(|cell| cell.starts_with('-')) {
             cells
+                .into_iter()
+                .map(|cell| {
+                    if cell.starts_with(['-', ' ']) {
+                        cell
+                    } else {
+                        format!(" {cell}")
+                    }
+                })
+                .collect()
         } else {
             cells
                 .into_iter()
@@ -1908,6 +1932,11 @@ impl SeriesFooter {
 /// repr ('a', 1); any other name as its text.
 fn pandas_name_text(name: &LabelName) -> String {
     let label = name.label();
+    // A NaN name prints as Python's str(nan) (it printed the label's 'NaN';
+    // br-frankenpandas-qacqs).
+    if matches!(label, IndexLabel::Null(NullKind::NaN)) {
+        return "nan".to_owned();
+    }
     if !matches!(label, IndexLabel::Object(_)) {
         return name.to_string();
     }
@@ -8326,14 +8355,29 @@ fn index_arg_zone(obj: &Bound<'_, PyAny>) -> Option<String> {
 /// (0, 1.5, True, a Timestamp) the column carrying exactly that typed label -
 /// so `df[0]` finds `DataFrame([[1, 2]])`'s first column and `df['0']` does
 /// not (fvsao.32). None when no column carries it.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)] // whole numbers below 2^63
 fn frame_column_name_for(frame: &DataFrame, key: &Bound<'_, PyAny>) -> Option<String> {
     let label = if key.is_instance_of::<pyo3::types::PyString>() {
         IndexLabel::Utf8(key.extract::<String>().ok()?)
     } else {
         py_to_index_label(key).ok()?
     };
-    let name = fp_frame::column_key(&label);
-    (frame.column(&name).is_some() && frame.column_label(&name) == label).then_some(name)
+    let found = |label: &IndexLabel| {
+        let name = fp_frame::column_key(label);
+        (frame.column(&name).is_some() && frame.column_label(&name) == *label).then_some(name)
+    };
+    // A number finds the equal number of the other kind, as pandas' Index
+    // lookup: df[1] the column 1.0, df[2.0] the column 2 (a KeyError;
+    // br-frankenpandas-qacqs). A bool is not a number here.
+    found(&label).or_else(|| match &label {
+        IndexLabel::Int64(value) => {
+            found(&IndexLabel::Float64(fp_index::OrderedF64(*value as f64)))
+        }
+        IndexLabel::Float64(value) if value.0.fract() == 0.0 && value.0.abs() < 9.2e18 => {
+            found(&IndexLabel::Int64(value.0 as i64))
+        }
+        _ => None,
+    })
 }
 
 /// The column names a `by=` / `columns=` / `keys=` / `.loc` column argument
@@ -8656,6 +8700,15 @@ fn constructor_column_labels(
             return Ok(frame.with_column_range(span));
         }
         refuse_labels_keyed_alike(columns.try_iter()?.filter_map(Result::ok))?;
+        // A list / tuple is pandas' Index of its labels (see
+        // `columns_arg_labels`), as `extract_columns_names` named them.
+        if columns.is_instance_of::<PyList>() || columns.is_instance_of::<PyTuple>() {
+            let items: Vec<Bound<'_, PyAny>> = columns.try_iter()?.collect::<PyResult<_>>()?;
+            let labels = columns_arg_labels(&items)?
+                .into_iter()
+                .filter(|label| !matches!(label, IndexLabel::Utf8(_)));
+            return Ok(frame.with_recorded_column_labels(labels));
+        }
         let labels = columns
             .try_iter()?
             .filter_map(|item| item.ok().and_then(|item| typed_column_label(&item)));
@@ -9954,6 +10007,60 @@ fn index_from_axis_value(value: &Bound<'_, PyAny>) -> PyResult<Index> {
         .map_err(index_error_to_py)
 }
 
+/// The name a Python column label keys its column under: a string itself,
+/// any other label its typed label's [`fp_frame::column_key`] - the key its
+/// recorded label carries (`str(nan)` is 'nan' where the key is 'NaN', so a
+/// NaN column label stayed the text 'nan'; br-frankenpandas-qacqs) - and
+/// `str()` for one with no typed form.
+fn column_name_of(item: &Bound<'_, PyAny>) -> PyResult<String> {
+    if let Ok(text) = item.extract::<String>() {
+        return Ok(text);
+    }
+    match py_to_index_label(item) {
+        Ok(label) => Ok(fp_frame::column_key(&label)),
+        Err(_) => Ok(item.str()?.to_str()?.to_string()),
+    }
+}
+
+/// The labels of a `columns=` list or tuple as pandas' Index of them: a
+/// string itself, any other item its typed label (its text where it has
+/// none), and numbers beside a missing label float64 with NaN, as
+/// `Index([1, 2, None])` is [1.0, 2.0, nan] (they were 1, 2, None;
+/// br-frankenpandas-qacqs).
+#[allow(clippy::cast_precision_loss)] // pandas' int64 -> float64 widening
+fn columns_arg_labels(items: &[Bound<'_, PyAny>]) -> PyResult<Vec<IndexLabel>> {
+    let mut labels = items
+        .iter()
+        .map(|item| {
+            if let Ok(text) = item.extract::<String>() {
+                return Ok(IndexLabel::Utf8(text));
+            }
+            match py_to_index_label(item) {
+                Ok(label) => Ok(label),
+                Err(_) => Ok(IndexLabel::Utf8(item.str()?.to_str()?.to_string())),
+            }
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    let number =
+        |label: &IndexLabel| matches!(label, IndexLabel::Int64(_) | IndexLabel::Float64(_));
+    let missing = |label: &IndexLabel| matches!(label, IndexLabel::Null(_));
+    if labels.iter().all(|label| number(label) || missing(label))
+        && labels.iter().any(number)
+        && labels.iter().any(missing)
+    {
+        for label in &mut labels {
+            *label = match &*label {
+                IndexLabel::Int64(value) => {
+                    IndexLabel::Float64(fp_index::OrderedF64(*value as f64))
+                }
+                IndexLabel::Null(_) => IndexLabel::Null(NullKind::NaN),
+                other => other.clone(),
+            };
+        }
+    }
+    Ok(labels)
+}
+
 /// Extract column names from an optional Python object (Index, list, tuple, sequence, or None).
 fn extract_columns_names(columns: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Vec<String>>> {
     let Some(cols) = columns else {
@@ -9963,37 +10070,18 @@ fn extract_columns_names(columns: Option<&Bound<'_, PyAny>>) -> PyResult<Option<
         let names = idx.inner.labels().iter().map(|l| l.to_string()).collect();
         return Ok(Some(names));
     }
-    if let Ok(list) = cols.cast::<PyList>() {
-        let mut names = Vec::with_capacity(list.len());
-        for item in list.iter() {
-            if let Ok(s) = item.extract::<String>() {
-                names.push(s);
-            } else {
-                names.push(item.str()?.to_str()?.to_string());
-            }
-        }
-        return Ok(Some(names));
-    }
-    if let Ok(tuple) = cols.cast::<PyTuple>() {
-        let mut names = Vec::with_capacity(tuple.len());
-        for item in tuple.iter() {
-            if let Ok(s) = item.extract::<String>() {
-                names.push(s);
-            } else {
-                names.push(item.str()?.to_str()?.to_string());
-            }
-        }
+    if cols.is_instance_of::<PyList>() || cols.is_instance_of::<PyTuple>() {
+        let items: Vec<Bound<'_, PyAny>> = cols.try_iter()?.collect::<PyResult<_>>()?;
+        let names = columns_arg_labels(&items)?
+            .iter()
+            .map(fp_frame::column_key)
+            .collect();
         return Ok(Some(names));
     }
     if let Ok(iter) = cols.try_iter() {
         let mut names = Vec::new();
         for item in iter {
-            let item = item?;
-            if let Ok(s) = item.extract::<String>() {
-                names.push(s);
-            } else {
-                names.push(item.str()?.to_str()?.to_string());
-            }
+            names.push(column_name_of(&item?)?);
         }
         return Ok(Some(names));
     }

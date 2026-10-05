@@ -26077,3 +26077,45 @@ def test_list_key_labels_like_pandas_u1dey(case: str) -> None:
         return (repr(result), str(result.index.dtype))
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-qacqs: a column axis of numbers with a missing label is
+# pandas' float64 Index - [1, 2, None] is [1.0, 2.0, nan], printed as one
+# block of floats with 'NaN' - a NaN label is that label (it was the text
+# 'nan'), and a number finds the equal number of the other kind (df[1] the
+# column 1.0). NEGATIVE: float columns without a missing one, text and int
+# columns, a bool key against float columns (KeyError in both).
+_QACQS_CASES = {
+    "float labels with NaN": lambda m: m.DataFrame([[True, False, True]], columns=[1.0, 10.0, math.nan]),
+    "float labels with NaN, columns": lambda m: m.DataFrame([[1, 2, 3]], columns=[1.0, 2.0, math.nan]).columns,
+    "int labels with None": lambda m: m.DataFrame([[1, 2, 3]], columns=[1, 2, None]),
+    "int labels with None, columns": lambda m: m.DataFrame([[1, 2, 3]], columns=[1, 2, None]).columns,
+    "float label with None": lambda m: m.DataFrame([[1, 2]], columns=[1.5, None]),
+    "tuple of labels": lambda m: m.DataFrame([[1, 2]], columns=(1, None)).columns,
+    "negative and NaN labels": lambda m: m.DataFrame([[1, 2, 3]], columns=[math.nan, 2.25, -1.0]),
+    "int key on float labels": lambda m: m.DataFrame([[1, 2]], columns=[1.0, 2.0])[1],
+    "float key on int labels": lambda m: m.DataFrame([[1, 2]], columns=[1, 2])[2.0],
+    "NaN key": lambda m: m.DataFrame([[1, 2, 3]], columns=[1.0, 2.0, math.nan])[math.nan],
+    "int key after None": lambda m: m.DataFrame([[1, 2, 3]], columns=[1, 2, None])[2],
+    "loc with an int column key": lambda m: m.DataFrame([[1, 2]], columns=[1.0, 2.0]).loc[0, 1],
+    "row index of negative and NaN labels": lambda m: m.Series([1, 2, 3], index=[math.nan, 2.25, -1.0]),
+    "Series named NaN": lambda m: m.Series([1], name=math.nan),
+    "float labels (NEGATIVE)": lambda m: m.DataFrame([[True, False]], columns=[1.0, 10.0]),
+    "text labels with NaN (NEGATIVE)": lambda m: m.DataFrame([[1, 2]], columns=["a", math.nan]),
+    "text labels with None (NEGATIVE)": lambda m: m.DataFrame([[1, 2]], columns=["a", None]).columns,
+    "int labels (NEGATIVE)": lambda m: m.DataFrame([[1, 2]], columns=[3, 4]).columns,
+    "bool key on float labels (NEGATIVE)": lambda m: m.DataFrame([[1, 2]], columns=[1.0, 2.0])[True],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_QACQS_CASES))
+def test_numeric_column_labels_with_a_missing_one_like_pandas_qacqs(case: str) -> None:
+    def shown(m: Any) -> Any:
+        try:
+            result = _QACQS_CASES[case](m)
+        except Exception as error:  # noqa: BLE001 - the error is the answer
+            return ("raises", type(error).__name__)
+        return repr(result)
+
+    assert shown(fpd) == shown(pd)
