@@ -38853,8 +38853,11 @@ impl PyDataFrame {
                 return Ok(PyDataFrame { inner: df });
             }
 
-            // List / Sequence forms
-            if let Ok(seq) = data.cast::<pyo3::types::PySequence>() {
+            // List / Sequence forms; text and bytes are scalars (a str took
+            // this path character by character; lcqm5).
+            let text = data.is_instance_of::<pyo3::types::PyString>()
+                || data.is_instance_of::<pyo3::types::PyBytes>();
+            if !text && let Ok(seq) = data.cast::<pyo3::types::PySequence>() {
                 let len = seq.len()?;
                 if len == 0 {
                     let labels = extract_index_labels(index, 0)?;
@@ -38936,8 +38939,13 @@ impl PyDataFrame {
                     return Ok(PyDataFrame { inner: df });
                 }
 
-                // Case B: 2D Matrix (list of lists/tuples/iterables)
-                if let Ok(first_row_seq) = first_item.cast::<pyo3::types::PySequence>() {
+                // Case B: 2D Matrix (list of lists/tuples/iterables). A text
+                // first value is a scalar, not a row: DataFrame(['ab', 'cd'])
+                // was a 2 x 2 frame of characters (lcqm5).
+                let text_row = first_item.is_instance_of::<pyo3::types::PyString>()
+                    || first_item.is_instance_of::<pyo3::types::PyBytes>();
+                if !text_row && let Ok(first_row_seq) = first_item.cast::<pyo3::types::PySequence>()
+                {
                     let num_cols = first_row_seq.len()?;
                     if let Some(ref explicit) = explicit_cols
                         && explicit.len() != num_cols
@@ -39014,8 +39022,14 @@ impl PyDataFrame {
                 return Ok(PyDataFrame { inner: df });
             }
 
-            // Case D: scalar broadcast
+            // Case D: scalar broadcast, which pandas makes only over a given
+            // index and columns (it built a one-row frame; lcqm5).
             if let Ok(scalar) = py_to_scalar(py, data) {
+                if index.is_none_or(|index| index.is_none()) || explicit_cols.is_none() {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "DataFrame constructor not properly called!",
+                    ));
+                }
                 let labels = extract_index_labels(index, 1)?;
                 let col_order = explicit_cols.unwrap_or_else(|| vec!["0".to_string()]);
                 let mut col_map = BTreeMap::new();
@@ -43336,12 +43350,11 @@ impl PyDataFrame {
         write_encoded_text(py, buf, text, encoding)
     }
 
-    /// Return a chainable Styler for HTML formatting (pandas `DataFrame.style`).
-    fn style(&self) -> PyStyler {
-        PyStyler {
-            df: self.inner.clone(),
-            ops: Vec::new(),
-        }
+    /// pandas' `DataFrame.style`: a new Styler over this frame - a property,
+    /// as pandas' (it was a method; br-frankenpandas-qoltt).
+    #[getter]
+    fn style(slf: &Bound<'_, Self>) -> PyResult<PyStyler> {
+        PyStyler::for_frame(slf.as_any())
     }
 
     /// pandas' `df.set_index(keys, *, drop=True, append=False, inplace=False,
@@ -59565,120 +59578,2214 @@ impl PyExponentialMovingWindow {
     }
 }
 
-/// Recorded Styler directive, replayed onto a fresh `StyledDataFrame` at
-/// render time (the Rust Styler borrows its DataFrame, so the Python wrapper
-/// owns a clone and replays the chain instead of holding the borrow).
-#[derive(Clone)]
-enum StyleOp {
-    HighlightMax(String),
-    HighlightMin(String),
-    BackgroundGradient(String, String),
-    Format(String),
-    NaRep(String),
-    SetCaption(String),
-    SetProperties(Vec<(String, String)>),
-    Bar(String),
-    HideIndex,
+// ── pandas' Styler (br-frankenpandas-qoltt) ─────────────────────────────
+// `DataFrame.style` is pandas' Styler: CSS per cell in the order rules were
+// applied, a display formatter per cell, hidden rows / columns / levels,
+// table styles, a caption, table attributes and the table's uuid, rendered
+// as pandas' html_style.tpl / html_table.tpl write them (`set_uuid` makes the
+// HTML byte-comparable). Values, labels and subsets are read through the
+// frame's Python API, as pandas' Styler reads its DataFrame, so display text
+// is Python's own: str.format of a formatter, a callable's answer, str() of a
+// Timestamp, a Timedelta or NA. It replaced a Styler of fp's own - a method,
+// not a property, with its own inline-style HTML.
+
+/// A cell's CSS: `(property, value)` declarations in the order applied.
+type CssList = Vec<(String, String)>;
+
+/// An axis's labels per position, each split per level.
+type AxisLabels<'py> = Vec<Vec<Bound<'py, PyAny>>>;
+
+/// A `highlight_*` group: its cells, their values, and the Series (or frame)
+/// pandas hands its function.
+type HighlightGroup<'py> = (
+    Vec<(usize, usize)>,
+    Vec<Bound<'py, PyAny>>,
+    Bound<'py, PyAny>,
+);
+
+/// `str(value)`.
+fn py_text(value: &Bound<'_, PyAny>) -> PyResult<String> {
+    value.str()?.extract()
 }
 
-/// Python wrapper for FrankenPandas DataFrame.style (Styler).
-///
-/// Builder methods return a new `Styler` so the chain composes exactly like
-/// pandas: `df.style().highlight_max("yellow").format("{:.2f}").to_html()`.
-#[pyclass(name = "Styler", from_py_object)]
-#[derive(Clone)]
-pub struct PyStyler {
-    df: DataFrame,
-    ops: Vec<StyleOp>,
+/// pandas' `maybe_convert_css_to_tuples`: `"attr: val; attr2: val2;"` read
+/// as declarations - a declaration's value is the text between its first
+/// and second colon, as pandas splits it - and a list of pairs as given.
+fn css_declarations(style: &Bound<'_, PyAny>) -> PyResult<CssList> {
+    if let Ok(text) = style.extract::<String>() {
+        let mut declarations = Vec::new();
+        for part in text.split(';').filter(|part| !part.trim().is_empty()) {
+            let mut pieces = part.split(':');
+            let property = pieces.next().unwrap_or_default().trim().to_owned();
+            let Some(value) = pieces.next() else {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Styles supplied as string must follow CSS rule formats, for example 'attr: val;'. '{text}' was given."
+                )));
+            };
+            declarations.push((property, value.trim().to_owned()));
+        }
+        return Ok(declarations);
+    }
+    style
+        .try_iter()?
+        .map(|pair| {
+            let (property, value): (Bound<'_, PyAny>, Bound<'_, PyAny>) = pair?.extract()?;
+            Ok((py_text(&property)?, py_text(&value)?))
+        })
+        .collect()
 }
+
+/// pandas' scalar `is_float` / `is_integer` / `is_complex` (a bool is none).
+struct NumberKinds<'py> {
+    floating: Bound<'py, PyAny>,
+    integer: Bound<'py, PyAny>,
+    complexfloating: Bound<'py, PyAny>,
+}
+
+impl<'py> NumberKinds<'py> {
+    fn new(py: Python<'py>) -> PyResult<Self> {
+        let np = py.import("numpy")?;
+        Ok(Self {
+            floating: np.getattr("floating")?,
+            integer: np.getattr("integer")?,
+            complexfloating: np.getattr("complexfloating")?,
+        })
+    }
+
+    fn is_float(&self, value: &Bound<'py, PyAny>) -> PyResult<bool> {
+        Ok(value.is_instance_of::<pyo3::types::PyFloat>() || value.is_instance(&self.floating)?)
+    }
+
+    fn is_integer(&self, value: &Bound<'py, PyAny>) -> PyResult<bool> {
+        Ok((value.is_instance_of::<pyo3::types::PyInt>()
+            && !value.is_instance_of::<pyo3::types::PyBool>())
+            || value.is_instance(&self.integer)?)
+    }
+
+    fn is_complex(&self, value: &Bound<'py, PyAny>) -> PyResult<bool> {
+        Ok(value.is_instance_of::<pyo3::types::PyComplex>()
+            || value.is_instance(&self.complexfloating)?)
+    }
+
+    fn is_number(&self, value: &Bound<'py, PyAny>) -> PyResult<bool> {
+        Ok(self.is_float(value)? || self.is_integer(value)? || self.is_complex(value)?)
+    }
+}
+
+/// pandas' `isna(x) is True` for one value.
+fn styler_isna(value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let isna = value.py().import("frankenpandas")?.getattr("isna")?;
+    Ok(isna.call1((value,))?.extract::<bool>().unwrap_or(false))
+}
+
+/// How a cell's display text is made.
+enum StylerFormatter {
+    /// pandas' `_default_formatter`.
+    Default,
+    /// A format string: `spec.format(value)`.
+    Text(String),
+    /// A callable: `func(value)`.
+    Callable(Py<PyAny>),
+}
+
+/// A cell's display formatter as pandas' `_maybe_wrap_formatter` composes
+/// it: `na_rep` for a missing value, else the formatter over the value with
+/// its links rendered and its text escaped, then the decimal and thousands
+/// marks of a number.
+struct StylerFormat {
+    formatter: StylerFormatter,
+    precision: usize,
+    na_rep: Option<String>,
+    decimal: String,
+    thousands: Option<String>,
+    escape: Option<String>,
+    hyperlinks: Option<String>,
+}
+
+impl StylerFormat {
+    fn default_with(precision: usize) -> Self {
+        Self {
+            formatter: StylerFormatter::Default,
+            precision,
+            na_rep: None,
+            decimal: ".".to_owned(),
+            thousands: None,
+            escape: None,
+            hyperlinks: None,
+        }
+    }
+
+    /// The display text of `value`.
+    fn text<'py>(&self, kinds: &NumberKinds<'py>, value: &Bound<'py, PyAny>) -> PyResult<String> {
+        let py = value.py();
+        if let Some(na_rep) = &self.na_rep
+            && styler_isna(value)?
+        {
+            return Ok(na_rep.clone());
+        }
+        let mut shown = value.clone();
+        if let Some(format) = &self.hyperlinks {
+            shown = styler_render_links(shown, format)?;
+        }
+        let number = kinds.is_number(&shown)?;
+        if let Some(escape) = &self.escape {
+            shown = styler_escape(shown, escape)?;
+        }
+        let formatted = match &self.formatter {
+            StylerFormatter::Default => {
+                styler_default_text(kinds, &shown, self.precision, self.thousands.is_some())?
+            }
+            StylerFormatter::Text(spec) => {
+                pyo3::types::PyString::new(py, spec).call_method1("format", (&shown,))?
+            }
+            StylerFormatter::Callable(func) => func.bind(py).call1((&shown,))?,
+        };
+        let mut text = py_text(&formatted)?;
+        if number {
+            let thousands = self.thousands.as_deref().filter(|marks| *marks != ",");
+            match (self.decimal.as_str(), thousands) {
+                (".", None) => {}
+                (".", Some(marks)) => text = text.replace(',', marks),
+                (decimal, None) => text = text.replace('.', decimal),
+                (decimal, Some(marks)) => {
+                    text = text
+                        .replace(',', "§_§-")
+                        .replace('.', decimal)
+                        .replace("§_§-", marks);
+                }
+            }
+        }
+        Ok(text)
+    }
+}
+
+/// pandas' `_default_formatter`: a float or complex to `precision` decimals,
+/// an integer as it is - each comma-grouped when thousands marks are asked
+/// for - and anything else unchanged.
+fn styler_default_text<'py>(
+    kinds: &NumberKinds<'py>,
+    value: &Bound<'py, PyAny>,
+    precision: usize,
+    thousands: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    let format = value.py().import("builtins")?.getattr("format")?;
+    let grouping = if thousands { "," } else { "" };
+    if kinds.is_float(value)? || kinds.is_complex(value)? {
+        return format.call1((value, format!("{grouping}.{precision}f")));
+    }
+    if kinds.is_integer(value)? {
+        return if thousands {
+            format.call1((value, ","))
+        } else {
+            Ok(value.str()?.into_any())
+        };
+    }
+    Ok(value.clone())
+}
+
+/// pandas' `_str_escape`: text escaped for HTML (markupsafe's five) or
+/// LaTeX; anything but text unchanged.
+fn styler_escape<'py>(value: Bound<'py, PyAny>, escape: &str) -> PyResult<Bound<'py, PyAny>> {
+    let Ok(text) = value.extract::<String>() else {
+        return Ok(value);
+    };
+    let escaped = match escape {
+        "html" => text
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&#34;")
+            .replace('\'', "&#39;"),
+        "latex" => text
+            .replace('\\', "ab2§=§8yz")
+            .replace("ab2§=§8yz ", "ab2§=§8yz\\space ")
+            .replace('&', "\\&")
+            .replace('%', "\\%")
+            .replace('$', "\\$")
+            .replace('#', "\\#")
+            .replace('_', "\\_")
+            .replace('{', "\\{")
+            .replace('}', "\\}")
+            .replace("~ ", "~\\space ")
+            .replace('~', "\\textasciitilde ")
+            .replace("^ ", "^\\space ")
+            .replace('^', "\\textasciicircum ")
+            .replace("ab2§=§8yz", "\\textbackslash "),
+        "latex-math" => return Err(not_implemented("Styler.format(escape='latex-math')")),
+        other => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "`escape` only permitted in {{'html', 'latex', 'latex-math'}}, got {other}"
+            )));
+        }
+    };
+    Ok(pyo3::types::PyString::new(value.py(), &escaped).into_any())
+}
+
+/// pandas' `_render_href`: each URL in a text made a link.
+fn styler_render_links<'py>(value: Bound<'py, PyAny>, format: &str) -> PyResult<Bound<'py, PyAny>> {
+    if !value.is_instance_of::<pyo3::types::PyString>() {
+        return Ok(value);
+    }
+    let replacement = match format {
+        "html" => r#"<a href="\g<0>" target="_blank">\g<0></a>"#,
+        "latex" => r"\\href{\g<0>}{\g<0>}",
+        _ => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "``hyperlinks`` format can only be 'html' or 'latex'",
+            ));
+        }
+    };
+    let pattern = r"((http|ftp)s?:\/\/|www.)[\w/\-?=%.:@]+\.[\w/\-&?=%.,':;~!@#$*()\[\]]+";
+    value
+        .py()
+        .import("re")?
+        .call_method1("sub", (pattern, replacement, &value))
+}
+
+/// pandas' `is_list_like` (text is not).
+fn styler_list_like(value: &Bound<'_, PyAny>) -> bool {
+    value.hasattr("__iter__").unwrap_or(false)
+        && !value.is_instance_of::<pyo3::types::PyString>()
+        && !value.is_instance_of::<pyo3::types::PyBytes>()
+}
+
+/// pandas' `non_reducing_slice`: a `subset` as a `.loc` key that keeps both
+/// axes - a column label or list of labels selects columns, a tuple is
+/// (rows, columns), and a scalar part is wrapped in a list.
+fn styler_subset_key<'py>(subset: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let py = subset.py();
+    let columns_only = subset.is_instance_of::<PyList>()
+        || subset.is_instance_of::<pyo3::types::PyString>()
+        || subset.extract::<PyRef<'_, PySeries>>().is_ok()
+        || subset.hasattr("nlevels")?
+        || subset.get_type().name().is_ok_and(|name| name == "ndarray");
+    let subset = if columns_only {
+        PyTuple::new(
+            py,
+            [pyo3::types::PySlice::full(py).into_any(), subset.clone()],
+        )?
+        .into_any()
+    } else {
+        subset.clone()
+    };
+    let keeps_shape = |part: &Bound<'py, PyAny>| -> PyResult<bool> {
+        if let Ok(tuple) = part.cast::<PyTuple>() {
+            return Ok(tuple
+                .iter()
+                .any(|s| s.is_instance_of::<pyo3::types::PySlice>() || styler_list_like(&s)));
+        }
+        Ok(part.is_instance_of::<pyo3::types::PySlice>() || styler_list_like(part))
+    };
+    let parts: Vec<Bound<'py, PyAny>> = if !styler_list_like(&subset) {
+        if subset.is_instance_of::<pyo3::types::PySlice>() {
+            vec![subset]
+        } else {
+            vec![PyList::new(py, [subset])?.into_any()]
+        }
+    } else {
+        subset
+            .try_iter()?
+            .map(|part| {
+                let part = part?;
+                if keeps_shape(&part)? {
+                    Ok(part)
+                } else {
+                    Ok(PyList::new(py, [part])?.into_any())
+                }
+            })
+            .collect::<PyResult<_>>()?
+    };
+    if parts.len() == 1 {
+        return Ok(parts
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| py.None().into_bound(py)));
+    }
+    Ok(PyTuple::new(py, parts)?.into_any())
+}
+
+/// An axis's labels per level (`tolist()`, tuples split), whether it is a
+/// MultiIndex, and its level names.
+fn styler_axis_labels<'py>(
+    axis: &Bound<'py, PyAny>,
+) -> PyResult<(AxisLabels<'py>, bool, Vec<Bound<'py, PyAny>>)> {
+    let nlevels: usize = axis.getattr("nlevels")?.extract()?;
+    let multi = nlevels > 1 || axis.extract::<PyRef<'_, PyMultiIndex>>().is_ok();
+    let names = axis
+        .getattr("names")?
+        .try_iter()?
+        .collect::<PyResult<Vec<_>>>()?;
+    let labels = axis
+        .call_method0("tolist")?
+        .try_iter()?
+        .map(|label| {
+            let label = label?;
+            if multi {
+                label.try_iter()?.collect::<PyResult<Vec<_>>>()
+            } else {
+                Ok(vec![label])
+            }
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok((labels, multi, names))
+}
+
+/// pandas' `_get_level_lengths`: under sparsification each run of labels
+/// equal at a level and every level above it (the last level is never
+/// sparsified) is one header spanning its visible elements; keys are
+/// `(level, position)` of a visible run start.
+fn styler_level_lengths(
+    labels: &[Vec<String>],
+    multi: bool,
+    sparsify: bool,
+    hidden: &BTreeSet<usize>,
+) -> HashMap<(usize, usize), usize> {
+    let mut lengths = HashMap::new();
+    if !multi {
+        for position in (0..labels.len()).filter(|position| !hidden.contains(position)) {
+            lengths.insert((0, position), 1);
+        }
+        return lengths;
+    }
+    let nlevels = labels.first().map_or(0, Vec::len);
+    for level in 0..nlevels {
+        let mut last = 0;
+        for position in 0..labels.len() {
+            let visible = !hidden.contains(&position);
+            if !sparsify {
+                if visible {
+                    lengths.insert((level, position), 1);
+                }
+                continue;
+            }
+            let start = position == 0
+                || level + 1 == nlevels
+                || (0..=level).any(|k| labels[position][k] != labels[position - 1][k]);
+            if start {
+                last = position;
+                lengths.insert((level, position), usize::from(visible));
+            } else if visible {
+                let span = lengths.get(&(level, last)).copied().unwrap_or(0);
+                if span == 0 {
+                    last = position;
+                    lengths.insert((level, position), 1);
+                } else {
+                    lengths.insert((level, last), span + 1);
+                }
+            }
+        }
+    }
+    lengths.retain(|_, span| *span > 0);
+    lengths
+}
+
+/// One rendered header or data cell (pandas' `_element`).
+struct StylerCell {
+    tag: &'static str,
+    id: Option<String>,
+    class: String,
+    attributes: String,
+    text: String,
+    visible: bool,
+}
+
+impl StylerCell {
+    fn blank(class: String, visible: bool) -> Self {
+        Self {
+            tag: "th",
+            id: None,
+            class,
+            attributes: String::new(),
+            text: "&nbsp;".to_owned(),
+            visible,
+        }
+    }
+}
+
+/// CSS rules grouped as pandas' cellstyle maps: one rule per distinct
+/// declaration list, its selectors in the order the cells were rendered.
+#[derive(Default)]
+struct StylerRules {
+    rules: Vec<(CssList, Vec<String>)>,
+    positions: HashMap<CssList, usize>,
+}
+
+impl StylerRules {
+    fn add(&mut self, css: &CssList, selector: String) {
+        match self.positions.get(css) {
+            Some(&at) => self.rules[at].1.push(selector),
+            None => {
+                self.positions.insert(css.clone(), self.rules.len());
+                self.rules.push((css.clone(), vec![selector]));
+            }
+        }
+    }
+}
+
+/// `to_html`'s per-render settings.
+struct StylerRender {
+    uuid: String,
+    table_attributes: Option<String>,
+    table_styles: Vec<(String, CssList)>,
+    caption: Option<String>,
+    sparse_index: bool,
+    sparse_columns: bool,
+    doctype_html: bool,
+    exclude_styles: bool,
+    encoding: String,
+}
+
+/// Which CSS map a rule writes (`ctx`, `ctx_index`, `ctx_columns`).
+#[derive(Clone, Copy)]
+enum StylerTarget {
+    Data,
+    Index,
+    Columns,
+}
+
+/// pandas' `DataFrame.style` (see the section note above).
+#[pyclass(name = "Styler", module = "frankenpandas")]
+pub struct PyStyler {
+    data: Py<PyAny>,
+    uuid: String,
+    caption: Option<String>,
+    table_attributes: Option<String>,
+    table_styles: Vec<(String, CssList)>,
+    ctx: HashMap<(usize, usize), CssList>,
+    ctx_index: HashMap<(usize, usize), CssList>,
+    ctx_columns: HashMap<(usize, usize), CssList>,
+    display: HashMap<(usize, usize), Arc<StylerFormat>>,
+    display_index: HashMap<(usize, usize), Arc<StylerFormat>>,
+    display_columns: HashMap<(usize, usize), Arc<StylerFormat>>,
+    precision: usize,
+    hidden_rows: BTreeSet<usize>,
+    hidden_columns: BTreeSet<usize>,
+    hide_index: Vec<bool>,
+    hide_columns: Vec<bool>,
+    hide_index_names: bool,
+    hide_column_names: bool,
+    cell_ids: bool,
+    cell_context: HashMap<(usize, usize), String>,
+}
+
+/// pandas' `styler.format.precision` default.
+const STYLER_PRECISION: usize = 6;
 
 impl PyStyler {
-    fn with_op(&self, op: StyleOp) -> PyStyler {
-        let mut next = self.clone();
-        next.ops.push(op);
-        next
+    /// A Styler over `data` (a DataFrame), its uuid pandas' 5 hex digits of
+    /// a uuid4.
+    fn for_frame(data: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let py = data.py();
+        let nlevels =
+            |axis: &str| -> PyResult<usize> { data.getattr(axis)?.getattr("nlevels")?.extract() };
+        let hex: String = py
+            .import("uuid")?
+            .call_method0("uuid4")?
+            .getattr("hex")?
+            .extract()?;
+        Ok(Self {
+            data: data.clone().unbind(),
+            uuid: hex.chars().take(5).collect(),
+            caption: None,
+            table_attributes: None,
+            table_styles: Vec::new(),
+            ctx: HashMap::new(),
+            ctx_index: HashMap::new(),
+            ctx_columns: HashMap::new(),
+            display: HashMap::new(),
+            display_index: HashMap::new(),
+            display_columns: HashMap::new(),
+            precision: STYLER_PRECISION,
+            hidden_rows: BTreeSet::new(),
+            hidden_columns: BTreeSet::new(),
+            hide_index: vec![false; nlevels("index")?],
+            hide_columns: vec![false; nlevels("columns")?],
+            hide_index_names: false,
+            hide_column_names: false,
+            cell_ids: true,
+            cell_context: HashMap::new(),
+        })
     }
+
+    fn shape(&self, py: Python<'_>) -> PyResult<(usize, usize)> {
+        let data = self.data.bind(py);
+        Ok((
+            data.getattr("index")?.len()?,
+            data.getattr("columns")?.len()?,
+        ))
+    }
+
+    /// The sub-frame `subset` selects (pandas' `data.loc[non_reducing_slice
+    /// (subset)]`) and its row / column positions in the whole frame.
+    fn subset_frame<'py>(
+        &self,
+        py: Python<'py>,
+        subset: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<(Bound<'py, PyAny>, Vec<usize>, Vec<usize>)> {
+        let data = self.data.bind(py).clone();
+        let Some(subset) = subset.filter(|subset| !subset.is_none()) else {
+            let (rows, columns) = self.shape(py)?;
+            return Ok((data, (0..rows).collect(), (0..columns).collect()));
+        };
+        let sub = data.getattr("loc")?.get_item(styler_subset_key(subset)?)?;
+        let positions = |axis: &str| -> PyResult<Vec<usize>> {
+            data.getattr(axis)?
+                .call_method1("get_indexer_for", (sub.getattr(axis)?,))?
+                .try_iter()?
+                .map(|position| {
+                    usize::try_from(position?.extract::<i64>()?).map_err(|_| {
+                        PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                            "subset selects a label outside the data",
+                        )
+                    })
+                })
+                .collect()
+        };
+        let rows = positions("index")?;
+        let columns = positions("columns")?;
+        Ok((sub, rows, columns))
+    }
+
+    /// pandas' `_update_ctx` precondition.
+    fn require_unique_labels(&self, py: Python<'_>) -> PyResult<()> {
+        let data = self.data.bind(py);
+        let unique = |axis: &str| -> PyResult<bool> {
+            data.getattr(axis)?.getattr("is_unique")?.is_truthy()
+        };
+        if !unique("index")? || !unique("columns")? {
+            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                "`Styler.apply` and `.map` are not compatible with non-unique index or column labels.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Add one style result to a cell: nothing for an empty or missing one
+    /// (pandas skips `not c or isna(c)`).
+    fn add_css(
+        &mut self,
+        target: StylerTarget,
+        row: usize,
+        column: usize,
+        css: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        if !css.is_truthy()? || styler_isna(css)? {
+            return Ok(());
+        }
+        let declarations = css_declarations(css)?;
+        let map = match target {
+            StylerTarget::Data => &mut self.ctx,
+            StylerTarget::Index => &mut self.ctx_index,
+            StylerTarget::Columns => &mut self.ctx_columns,
+        };
+        map.entry((row, column)).or_default().extend(declarations);
+        Ok(())
+    }
+
+    /// The values of `frame` by column (`iloc[:, j].tolist()`).
+    fn columns_of<'py>(frame: &Bound<'py, PyAny>) -> PyResult<Vec<Vec<Bound<'py, PyAny>>>> {
+        let py = frame.py();
+        let iloc = frame.getattr("iloc")?;
+        (0..frame.getattr("columns")?.len()?)
+            .map(|position| {
+                iloc.get_item((pyo3::types::PySlice::full(py), position))?
+                    .call_method0("tolist")?
+                    .try_iter()?
+                    .collect::<PyResult<Vec<_>>>()
+            })
+            .collect()
+    }
+
+    /// A function's style answers for one row or column of `n` values: a
+    /// Series aligned by its labels (pandas raises on a label outside them),
+    /// anything list-like by position; a single value is pandas'
+    /// "collapsing to a Series" ValueError.
+    fn vector_css<'py>(
+        func: &Bound<'py, PyAny>,
+        result: &Bound<'py, PyAny>,
+        labels: &Bound<'py, PyAny>,
+        n: usize,
+    ) -> PyResult<Vec<Option<Bound<'py, PyAny>>>> {
+        if !styler_list_like(result) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Function {} resulted in the apply method collapsing to a Series.\nUsually, this is the result of the function returning a single value, instead of list-like.",
+                result
+                    .py()
+                    .import("builtins")?
+                    .getattr("repr")?
+                    .call1((func,))?
+            )));
+        }
+        if result.extract::<PyRef<'_, PySeries>>().is_ok() {
+            let positions: Vec<i64> = labels
+                .call_method1("get_indexer_for", (result.getattr("index")?,))?
+                .extract()?;
+            let values = result
+                .call_method0("tolist")?
+                .try_iter()?
+                .collect::<PyResult<Vec<_>>>()?;
+            let mut out: Vec<Option<Bound<'py, PyAny>>> = vec![None; n];
+            for (position, value) in positions.into_iter().zip(values) {
+                let Some(slot) = usize::try_from(position)
+                    .ok()
+                    .and_then(|at| out.get_mut(at))
+                else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Function {} created invalid index labels.",
+                        result
+                            .py()
+                            .import("builtins")?
+                            .getattr("repr")?
+                            .call1((func,))?
+                    )));
+                };
+                *slot = Some(value);
+            }
+            return Ok(out);
+        }
+        let values = result.try_iter()?.collect::<PyResult<Vec<_>>>()?;
+        if values.len() != n {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Function {} returned the wrong shape.\nResult has shape: ({},)\nExpected shape:   ({n},)",
+                result
+                    .py()
+                    .import("builtins")?
+                    .getattr("repr")?
+                    .call1((func,))?,
+                values.len()
+            )));
+        }
+        Ok(values.into_iter().map(Some).collect())
+    }
+
+    /// pandas' `Styler._apply`: `func` over each column (axis 0), each row
+    /// (axis 1) or the whole sub-frame (axis None) of `subset`, its CSS
+    /// answers added to the cells.
+    fn apply_styles<'py>(
+        &mut self,
+        py: Python<'py>,
+        func: &Bound<'py, PyAny>,
+        axis: Option<usize>,
+        subset: Option<&Bound<'py, PyAny>>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<()> {
+        self.require_unique_labels(py)?;
+        let (sub, rows, columns) = self.subset_frame(py, subset)?;
+        if rows.is_empty() || columns.is_empty() {
+            return Ok(());
+        }
+        let iloc = sub.getattr("iloc")?;
+        match axis {
+            Some(0) => {
+                for (at, &column) in columns.iter().enumerate() {
+                    let series = iloc.get_item((pyo3::types::PySlice::full(py), at))?;
+                    let result = func.call((&series,), kwargs)?;
+                    let css =
+                        Self::vector_css(func, &result, &series.getattr("index")?, rows.len())?;
+                    for (row, entry) in rows.iter().zip(css) {
+                        if let Some(entry) = entry {
+                            self.add_css(StylerTarget::Data, *row, column, &entry)?;
+                        }
+                    }
+                }
+            }
+            Some(_) => {
+                for (at, &row) in rows.iter().enumerate() {
+                    let series = iloc.get_item(at)?;
+                    let result = func.call((&series,), kwargs)?;
+                    let css =
+                        Self::vector_css(func, &result, &series.getattr("index")?, columns.len())?;
+                    for (column, entry) in columns.iter().zip(css) {
+                        if let Some(entry) = entry {
+                            self.add_css(StylerTarget::Data, row, *column, &entry)?;
+                        }
+                    }
+                }
+            }
+            None => {
+                let result = func.call((&sub,), kwargs)?;
+                let grid: Vec<Vec<Option<Bound<'py, PyAny>>>> = if result
+                    .extract::<PyRef<'_, PyDataFrame>>()
+                    .is_ok()
+                {
+                    // Aligned by labels onto the sub-frame.
+                    let aligned = result.call_method1("reindex_like", (&sub,))?;
+                    Self::columns_of(&aligned)?
+                        .into_iter()
+                        .map(|column| column.into_iter().map(Some).collect())
+                        .collect()
+                } else if result.get_type().name().is_ok_and(|name| name == "ndarray") {
+                    let shape: (usize, usize) =
+                        result.getattr("shape")?.extract().map_err(|_| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                "Function returned ndarray with wrong shape.",
+                            )
+                        })?;
+                    if shape != (rows.len(), columns.len()) {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Function {} returned ndarray with wrong shape.\nResult has shape: ({}, {})\nExpected shape: ({}, {})",
+                            py.import("builtins")?.getattr("repr")?.call1((func,))?,
+                            shape.0,
+                            shape.1,
+                            rows.len(),
+                            columns.len()
+                        )));
+                    }
+                    let transposed = result.getattr("T")?.call_method0("tolist")?;
+                    transposed
+                        .try_iter()?
+                        .map(|column| {
+                            column?
+                                .try_iter()?
+                                .map(|value| value.map(Some))
+                                .collect::<PyResult<Vec<_>>>()
+                        })
+                        .collect::<PyResult<_>>()?
+                } else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                        "Function {} must return a DataFrame or ndarray when passed to `Styler.apply` with axis=None",
+                        py.import("builtins")?.getattr("repr")?.call1((func,))?
+                    )));
+                };
+                for (column, values) in columns.iter().zip(grid) {
+                    for (row, entry) in rows.iter().zip(values) {
+                        if let Some(entry) = entry {
+                            self.add_css(StylerTarget::Data, *row, *column, &entry)?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Style each cell of `subset` with `css_of(value)`.
+    fn style_cells<'py>(
+        &mut self,
+        py: Python<'py>,
+        subset: Option<&Bound<'py, PyAny>>,
+        mut css_of: impl FnMut(&Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>>,
+    ) -> PyResult<()> {
+        self.require_unique_labels(py)?;
+        let (sub, rows, columns) = self.subset_frame(py, subset)?;
+        for (column, values) in columns.iter().zip(Self::columns_of(&sub)?) {
+            for (row, value) in rows.iter().zip(values) {
+                if let Some(css) = css_of(&value)? {
+                    self.add_css(StylerTarget::Data, *row, *column, &css)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The groups a `highlight_*` rule judges: each column (axis 0), each row
+    /// (axis 1) or the whole sub-frame (axis None), as `(cells, values, group)`
+    /// with `group` the Series (or frame) pandas hands its function.
+    fn highlight_groups<'py>(
+        &self,
+        py: Python<'py>,
+        subset: Option<&Bound<'py, PyAny>>,
+        axis: Option<usize>,
+    ) -> PyResult<Vec<HighlightGroup<'py>>> {
+        self.require_unique_labels(py)?;
+        let (sub, rows, columns) = self.subset_frame(py, subset)?;
+        let by_column = Self::columns_of(&sub)?;
+        let iloc = sub.getattr("iloc")?;
+        let mut groups = Vec::new();
+        match axis {
+            Some(0) => {
+                for (at, (&column, values)) in columns.iter().zip(by_column).enumerate() {
+                    let cells = rows.iter().map(|&row| (row, column)).collect();
+                    let group = iloc.get_item((pyo3::types::PySlice::full(py), at))?;
+                    groups.push((cells, values, group));
+                }
+            }
+            Some(_) => {
+                for (at, &row) in rows.iter().enumerate() {
+                    let cells = columns.iter().map(|&column| (row, column)).collect();
+                    let values = by_column.iter().map(|column| column[at].clone()).collect();
+                    groups.push((cells, values, iloc.get_item(at)?));
+                }
+            }
+            None => {
+                let mut cells = Vec::new();
+                let mut values = Vec::new();
+                for (&column, column_values) in columns.iter().zip(by_column) {
+                    for (&row, value) in rows.iter().zip(column_values) {
+                        cells.push((row, column));
+                        values.push(value);
+                    }
+                }
+                groups.push((cells, values, sub));
+            }
+        }
+        Ok(groups)
+    }
+
+    /// Mark each cell of each group whose value passes `keep` with `props`.
+    fn highlight_where<'py>(
+        &mut self,
+        py: Python<'py>,
+        props: &str,
+        groups: Vec<HighlightGroup<'py>>,
+        mut keep: impl FnMut(&Bound<'py, PyAny>, usize, &Bound<'py, PyAny>) -> PyResult<bool>,
+    ) -> PyResult<()> {
+        let css = pyo3::types::PyString::new(py, props).into_any();
+        for (cells, values, group) in groups {
+            for (at, ((row, column), value)) in cells.into_iter().zip(values).enumerate() {
+                if keep(&group, at, &value)? {
+                    self.add_css(StylerTarget::Data, row, column, &css)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// pandas' `refactor_levels`: the level numbers `level` names.
+    fn levels_of(
+        axis: &Bound<'_, PyAny>,
+        level: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Vec<usize>> {
+        let nlevels: usize = axis.getattr("nlevels")?.extract()?;
+        let number = |name: &Bound<'_, PyAny>| -> PyResult<usize> {
+            if let Ok(position) = name.extract::<usize>() {
+                return Ok(position);
+            }
+            let names = axis
+                .getattr("names")?
+                .try_iter()?
+                .collect::<PyResult<Vec<_>>>()?;
+            for (position, candidate) in names.iter().enumerate() {
+                if candidate.eq(name)? {
+                    return Ok(position);
+                }
+            }
+            Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Level {} not found",
+                py_text(name)?
+            )))
+        };
+        match level.filter(|level| !level.is_none()) {
+            None => Ok((0..nlevels).collect()),
+            Some(level) if level.is_instance_of::<PyList>() => {
+                level.try_iter()?.map(|item| number(&item?)).collect()
+            }
+            Some(level)
+                if level.is_instance_of::<pyo3::types::PyInt>()
+                    || level.is_instance_of::<pyo3::types::PyString>() =>
+            {
+                Ok(vec![number(level)?])
+            }
+            Some(_) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "`level` must be of type `int`, `str` or list of such",
+            )),
+        }
+    }
+
+    /// pandas' `_maybe_wrap_formatter`.
+    #[allow(clippy::too_many_arguments)]
+    fn make_format(
+        &self,
+        formatter: Option<&Bound<'_, PyAny>>,
+        na_rep: Option<&str>,
+        precision: Option<usize>,
+        decimal: &str,
+        thousands: Option<&str>,
+        escape: Option<&str>,
+        hyperlinks: Option<&str>,
+    ) -> PyResult<Arc<StylerFormat>> {
+        let formatter = match formatter.filter(|formatter| !formatter.is_none()) {
+            None => StylerFormatter::Default,
+            Some(spec) if spec.is_instance_of::<pyo3::types::PyString>() => {
+                StylerFormatter::Text(spec.extract()?)
+            }
+            Some(func) if func.is_callable() => StylerFormatter::Callable(func.clone().unbind()),
+            Some(other) => {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                    "'formatter' expected str or callable, got {}",
+                    py_text(&other.get_type().into_any())?
+                )));
+            }
+        };
+        Ok(Arc::new(StylerFormat {
+            formatter,
+            precision: precision.unwrap_or(self.precision),
+            na_rep: na_rep.map(str::to_owned),
+            decimal: decimal.to_owned(),
+            thousands: thousands.map(str::to_owned),
+            escape: escape.map(str::to_owned),
+            hyperlinks: hyperlinks.map(str::to_owned),
+        }))
+    }
+
+    /// pandas' `Styler._render_html`.
+    fn render_html(&self, py: Python<'_>, opts: &StylerRender) -> PyResult<String> {
+        let data = self.data.bind(py);
+        let kinds = NumberKinds::new(py)?;
+        let (row_labels, index_multi, index_names) = styler_axis_labels(&data.getattr("index")?)?;
+        let (column_labels, columns_multi, column_names) =
+            styler_axis_labels(&data.getattr("columns")?)?;
+        let values = Self::columns_of(data)?;
+        let default_format = StylerFormat::default_with(self.precision);
+        let text_with = |formats: &HashMap<(usize, usize), Arc<StylerFormat>>,
+                         key: (usize, usize),
+                         value: &Bound<'_, PyAny>|
+         -> PyResult<String> {
+            formats
+                .get(&key)
+                .map_or(&default_format, AsRef::as_ref)
+                .text(&kinds, value)
+        };
+        let keys = |labels: &[Vec<Bound<'_, PyAny>>]| -> PyResult<Vec<Vec<String>>> {
+            labels
+                .iter()
+                .map(|levels| levels.iter().map(py_text).collect())
+                .collect()
+        };
+        let row_lengths = styler_level_lengths(
+            &keys(&row_labels)?,
+            index_multi,
+            opts.sparse_index,
+            &self.hidden_rows,
+        );
+        let column_lengths = styler_level_lengths(
+            &keys(&column_labels)?,
+            columns_multi,
+            opts.sparse_columns,
+            &self.hidden_columns,
+        );
+        let mut cell_rules = StylerRules::default();
+        let mut index_rules = StylerRules::default();
+        let mut column_rules = StylerRules::default();
+        let index_levels = self.hide_index.len();
+        let hidden_index_levels = self.hide_index.iter().filter(|hidden| **hidden).count();
+        let all_index_hidden = self.hide_index.iter().all(|hidden| *hidden);
+
+        let mut head: Vec<Vec<StylerCell>> = Vec::new();
+        if !column_labels.is_empty() {
+            for (level, hidden) in self.hide_columns.iter().enumerate() {
+                if *hidden {
+                    continue;
+                }
+                let mut row: Vec<StylerCell> = (0..index_levels
+                    .saturating_sub(hidden_index_levels + 1))
+                    .map(|_| StylerCell::blank("blank".to_owned(), true))
+                    .collect();
+                let name = &column_names[level];
+                let mut corner = StylerCell::blank(
+                    if name.is_none() {
+                        format!("blank level{level}")
+                    } else {
+                        format!("index_name level{level}")
+                    },
+                    !all_index_hidden,
+                );
+                if !name.is_none() && !self.hide_column_names {
+                    corner.text = py_text(name)?;
+                }
+                row.push(corner);
+                for (column, labels) in column_labels.iter().enumerate() {
+                    let span = column_lengths.get(&(level, column)).copied();
+                    let visible = span.is_some();
+                    let styled = visible
+                        && self
+                            .ctx_columns
+                            .get(&(level, column))
+                            .is_some_and(|css| !css.is_empty());
+                    if styled {
+                        column_rules.add(
+                            &self.ctx_columns[&(level, column)],
+                            format!("level{level}_col{column}"),
+                        );
+                    }
+                    row.push(StylerCell {
+                        tag: "th",
+                        id: (self.cell_ids || styled).then(|| format!("level{level}_col{column}")),
+                        class: format!("col_heading level{level} col{column}"),
+                        attributes: span
+                            .filter(|span| *span > 1)
+                            .map(|span| format!("colspan=\"{span}\""))
+                            .unwrap_or_default(),
+                        text: text_with(&self.display_columns, (level, column), &labels[level])?,
+                        visible,
+                    });
+                }
+                head.push(row);
+            }
+        }
+        let named_index = index_names.iter().any(|name| !name.is_none());
+        if named_index && !all_index_hidden && !self.hide_index_names {
+            let mut row = Vec::new();
+            for (level, name) in index_names.iter().enumerate() {
+                let mut cell =
+                    StylerCell::blank(format!("index_name level{level}"), !self.hide_index[level]);
+                if !name.is_none() {
+                    cell.text = py_text(name)?;
+                }
+                row.push(cell);
+            }
+            if !column_labels.is_empty() {
+                for column in 0..column_labels.len() {
+                    row.push(StylerCell::blank(
+                        format!("blank col{column}"),
+                        !self.hidden_columns.contains(&column),
+                    ));
+                }
+            }
+            head.push(row);
+        }
+
+        let mut body: Vec<Vec<StylerCell>> = Vec::new();
+        for (row, labels) in row_labels.iter().enumerate() {
+            if self.hidden_rows.contains(&row) {
+                continue;
+            }
+            let mut cells = Vec::new();
+            for (level, label) in labels.iter().enumerate() {
+                let span = row_lengths.get(&(level, row)).copied();
+                let visible = span.is_some() && !self.hide_index[level];
+                let styled = visible
+                    && self
+                        .ctx_index
+                        .get(&(row, level))
+                        .is_some_and(|css| !css.is_empty());
+                if styled {
+                    index_rules.add(
+                        &self.ctx_index[&(row, level)],
+                        format!("level{level}_row{row}"),
+                    );
+                }
+                cells.push(StylerCell {
+                    tag: "th",
+                    id: (self.cell_ids || styled).then(|| format!("level{level}_row{row}")),
+                    class: format!("row_heading level{level} row{row}"),
+                    attributes: span
+                        .filter(|span| *span > 1)
+                        .map(|span| format!("rowspan=\"{span}\""))
+                        .unwrap_or_default(),
+                    text: text_with(&self.display_index, (row, level), label)?,
+                    visible,
+                });
+            }
+            for (column, column_values) in values.iter().enumerate() {
+                let visible = !self.hidden_columns.contains(&column);
+                let styled = visible
+                    && self
+                        .ctx
+                        .get(&(row, column))
+                        .is_some_and(|css| !css.is_empty());
+                if styled {
+                    cell_rules.add(&self.ctx[&(row, column)], format!("row{row}_col{column}"));
+                }
+                let extra = self
+                    .cell_context
+                    .get(&(row, column))
+                    .map(|class| format!(" {class}"))
+                    .unwrap_or_default();
+                cells.push(StylerCell {
+                    tag: "td",
+                    id: (self.cell_ids || styled).then(|| format!("row{row}_col{column}")),
+                    class: format!("data row{row} col{column}{extra}"),
+                    attributes: String::new(),
+                    text: text_with(&self.display, (row, column), &column_values[row])?,
+                    visible,
+                });
+            }
+            body.push(cells);
+        }
+
+        let uuid = &opts.uuid;
+        let mut out = String::new();
+        if opts.doctype_html {
+            out.push_str(&format!(
+                "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"{}\">\n",
+                opts.encoding
+            ));
+        }
+        if !opts.exclude_styles {
+            out.push_str("<style type=\"text/css\">\n");
+            let write_props = |out: &mut String, props: &CssList| {
+                for (property, value) in props {
+                    out.push_str(&format!("  {property}: {value};\n"));
+                }
+                out.push_str("}\n");
+            };
+            for (selector, props) in &opts.table_styles {
+                out.push_str(&format!("#T_{uuid} {selector} {{\n"));
+                write_props(&mut out, props);
+            }
+            for rules in [&cell_rules, &index_rules, &column_rules] {
+                for (props, selectors) in &rules.rules {
+                    let joined = selectors
+                        .iter()
+                        .map(|selector| format!("#T_{uuid}_{selector}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    out.push_str(&format!("{joined} {{\n"));
+                    write_props(&mut out, props);
+                }
+            }
+            out.push_str("</style>\n");
+        }
+        if opts.doctype_html {
+            out.push_str("</head>\n<body>\n");
+        }
+        if opts.exclude_styles {
+            out.push_str("<table>\n");
+        } else {
+            out.push_str(&format!("<table id=\"T_{uuid}\""));
+            if let Some(attributes) = &opts.table_attributes {
+                out.push(' ');
+                out.push_str(attributes);
+            }
+            out.push_str(">\n");
+        }
+        if let Some(caption) = &opts.caption {
+            out.push_str(&format!("  <caption>{caption}</caption>\n"));
+        }
+        let write_rows = |out: &mut String, rows: &[Vec<StylerCell>]| {
+            for row in rows {
+                out.push_str("    <tr>\n");
+                for cell in row.iter().filter(|cell| cell.visible) {
+                    if opts.exclude_styles {
+                        out.push_str(&format!(
+                            "      <{tag} {attributes}>{text}</{tag}>\n",
+                            tag = cell.tag,
+                            attributes = cell.attributes,
+                            text = cell.text
+                        ));
+                    } else {
+                        let id = cell
+                            .id
+                            .as_ref()
+                            .map(|id| format!(" id=\"T_{uuid}_{id}\""))
+                            .unwrap_or_default();
+                        out.push_str(&format!(
+                            "      <{tag}{id} class=\"{class}\" {attributes}>{text}</{tag}>\n",
+                            tag = cell.tag,
+                            class = cell.class,
+                            attributes = cell.attributes,
+                            text = cell.text
+                        ));
+                    }
+                }
+                out.push_str("    </tr>\n");
+            }
+        };
+        out.push_str("  <thead>\n");
+        write_rows(&mut out, &head);
+        out.push_str("  </thead>\n  <tbody>\n");
+        write_rows(&mut out, &body);
+        out.push_str("  </tbody>\n</table>\n");
+        if opts.doctype_html {
+            out.push_str("</body>\n</html>\n");
+        }
+        Ok(out)
+    }
+}
+
+/// `apply`'s axis: 0 when left out, None (the whole frame) when passed as
+/// None, else pandas' axis spellings.
+fn styler_axis(axis: &Passed<'_>) -> PyResult<Option<usize>> {
+    match &axis.0 {
+        None => Ok(Some(0)),
+        Some(axis) if axis.is_none() => Ok(None),
+        Some(axis) => {
+            if let Ok(number) = axis.extract::<i64>()
+                && (number == 0 || number == 1)
+            {
+                return Ok(Some(usize::from(number == 1)));
+            }
+            match axis.extract::<String>().ok().as_deref() {
+                Some("index" | "rows") => Ok(Some(0)),
+                Some("columns") => Ok(Some(1)),
+                _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "No axis named {} for object type DataFrame",
+                    py_text(axis)?
+                ))),
+            }
+        }
+    }
+}
+
+/// pandas' `_highlight_between` comparisons for `inclusive`.
+fn styler_bounds_ops(
+    inclusive: &str,
+) -> PyResult<(pyo3::basic::CompareOp, pyo3::basic::CompareOp)> {
+    use pyo3::basic::CompareOp::{Ge, Gt, Le, Lt};
+    match inclusive {
+        "both" => Ok((Ge, Le)),
+        "neither" => Ok((Gt, Lt)),
+        "left" => Ok((Ge, Lt)),
+        "right" => Ok((Gt, Le)),
+        other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "'inclusive' values can be 'both', 'left', 'right', or 'neither' got {other}"
+        ))),
+    }
+}
+
+/// A `highlight_between` bound for one group of `n` cells: one value for
+/// all, or a list-like with one per cell (pandas' `_validate_apply_axis_arg`).
+fn styler_bound<'py>(
+    name: &str,
+    bound: Option<&Bound<'py, PyAny>>,
+    n: usize,
+) -> PyResult<Option<Vec<Bound<'py, PyAny>>>> {
+    let Some(bound) = bound.filter(|bound| !bound.is_none()) else {
+        return Ok(None);
+    };
+    if styler_list_like(bound) {
+        let values = bound.try_iter()?.collect::<PyResult<Vec<_>>>()?;
+        if values.len() != n {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "supplied '{name}' is not correct shape for data over selected 'axis': got ({},), expected ({n},)",
+                values.len()
+            )));
+        }
+        return Ok(Some(values));
+    }
+    Ok(Some(vec![bound.clone(); n]))
+}
+
+/// Whether `value` lies within the bounds (a missing value never does; an
+/// absent bound always holds).
+fn styler_between(
+    value: &Bound<'_, PyAny>,
+    left: Option<&Bound<'_, PyAny>>,
+    right: Option<&Bound<'_, PyAny>>,
+    ops: (pyo3::basic::CompareOp, pyo3::basic::CompareOp),
+) -> PyResult<bool> {
+    let holds = |bound: Option<&Bound<'_, PyAny>>, op| -> PyResult<bool> {
+        match bound {
+            None => Ok(true),
+            Some(bound) => {
+                if styler_isna(value)? || styler_isna(bound)? {
+                    return Ok(false);
+                }
+                value.rich_compare(bound, op)?.is_truthy()
+            }
+        }
+    };
+    Ok(holds(left, ops.0)? && holds(right, ops.1)?)
 }
 
 #[pymethods]
 impl PyStyler {
-    fn __repr__(&self) -> String {
-        format!("Styler(directives={})", self.ops.len())
+    /// The styled DataFrame.
+    #[getter]
+    fn data(&self, py: Python<'_>) -> Py<PyAny> {
+        self.data.clone_ref(py)
     }
 
-    /// Highlight the per-column maximum cell(s) with `color`.
-    fn highlight_max(&self, color: &str) -> PyStyler {
-        self.with_op(StyleOp::HighlightMax(color.to_owned()))
+    #[getter]
+    fn index<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.data.bind(py).getattr("index")
     }
 
-    /// Highlight the per-column minimum cell(s) with `color`.
-    fn highlight_min(&self, color: &str) -> PyStyler {
-        self.with_op(StyleOp::HighlightMin(color.to_owned()))
+    #[getter]
+    fn columns<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.data.bind(py).getattr("columns")
     }
 
-    /// Shade numeric cells along a two-colour `#rrggbb` gradient.
-    fn background_gradient(&self, low: &str, high: &str) -> PyStyler {
-        self.with_op(StyleOp::BackgroundGradient(low.to_owned(), high.to_owned()))
+    #[getter]
+    fn uuid(&self) -> String {
+        self.uuid.clone()
     }
 
-    /// Apply a Python-style numeric format spec, e.g. `"{:.2f}"`.
-    fn format(&self, fmt: &str) -> PyStyler {
-        self.with_op(StyleOp::Format(fmt.to_owned()))
+    #[getter]
+    fn caption(&self) -> Option<String> {
+        self.caption.clone()
     }
 
-    /// Render missing/NaN cells with `placeholder` instead of `"NaN"`.
-    fn na_rep(&self, placeholder: &str) -> PyStyler {
-        self.with_op(StyleOp::NaRep(placeholder.to_owned()))
-    }
-
-    /// Set the table `<caption>`.
-    fn set_caption(&self, caption: &str) -> PyStyler {
-        self.with_op(StyleOp::SetCaption(caption.to_owned()))
-    }
-
-    /// Apply fixed CSS `{property: value}` pairs to every data cell.
-    fn set_properties(&self, props: &Bound<'_, PyDict>) -> PyResult<PyStyler> {
-        let mut pairs: Vec<(String, String)> = Vec::with_capacity(props.len());
-        for (k, v) in props.iter() {
-            pairs.push((k.extract::<String>()?, v.extract::<String>()?));
+    /// Each styled cell's `(property, value)` declarations, keyed `(row,
+    /// column)`.
+    #[getter]
+    fn ctx<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let out = PyDict::new(py);
+        let mut keys: Vec<_> = self.ctx.keys().copied().collect();
+        keys.sort_unstable();
+        for key in keys {
+            out.set_item(key, self.ctx[&key].clone())?;
         }
-        Ok(self.with_op(StyleOp::SetProperties(pairs)))
+        Ok(out)
     }
 
-    /// Draw an in-cell bar chart in each numeric cell.
-    fn bar(&self, color: &str) -> PyStyler {
-        self.with_op(StyleOp::Bar(color.to_owned()))
+    fn _repr_html_(&self, py: Python<'_>) -> PyResult<String> {
+        self.render_html(py, &self.default_render())
     }
 
-    /// Omit the index column/header from the HTML render.
-    fn hide_index(&self) -> PyStyler {
-        self.with_op(StyleOp::HideIndex)
-    }
-
-    /// Render the styled table as HTML (pandas `Styler.to_html`).
-    #[pyo3(signature = (index=true))]
-    fn to_html(&self, index: bool) -> String {
-        let mut styled = self.df.style();
-        for op in &self.ops {
-            styled = match op {
-                StyleOp::HighlightMax(c) => styled.highlight_max(c),
-                StyleOp::HighlightMin(c) => styled.highlight_min(c),
-                StyleOp::BackgroundGradient(lo, hi) => styled.background_gradient(lo, hi),
-                StyleOp::Format(f) => styled.format(f),
-                StyleOp::NaRep(n) => styled.na_rep(n),
-                StyleOp::SetCaption(c) => styled.set_caption(c),
-                StyleOp::SetProperties(pairs) => {
-                    let refs: Vec<(&str, &str)> = pairs
-                        .iter()
-                        .map(|(k, v)| (k.as_str(), v.as_str()))
-                        .collect();
-                    styled.set_properties(&refs)
+    /// pandas' `Styler.format`: the display formatter of each cell of
+    /// `subset` (a dict of them by column label, or one for all); with every
+    /// argument at its default, the formatters are cleared.
+    #[pyo3(signature = (formatter=None, subset=None, na_rep=None, precision=None, decimal=".", thousands=None, escape=None, hyperlinks=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn format<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        formatter: Option<&Bound<'py, PyAny>>,
+        subset: Option<&Bound<'py, PyAny>>,
+        na_rep: Option<&str>,
+        precision: Option<usize>,
+        decimal: &str,
+        thousands: Option<&str>,
+        escape: Option<&str>,
+        hyperlinks: Option<&str>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let py = slf.py();
+        let formatter = formatter.filter(|formatter| !formatter.is_none());
+        if formatter.is_none()
+            && subset.is_none_or(|subset| subset.is_none())
+            && precision.is_none()
+            && decimal == "."
+            && thousands.is_none()
+            && na_rep.is_none()
+            && escape.is_none()
+            && hyperlinks.is_none()
+        {
+            slf.display.clear();
+            return Ok(slf);
+        }
+        let (sub, rows, columns) = slf.subset_frame(py, subset)?;
+        let labels = sub
+            .getattr("columns")?
+            .call_method0("tolist")?
+            .try_iter()?
+            .collect::<PyResult<Vec<_>>>()?;
+        for (column, label) in columns.iter().zip(labels) {
+            let chosen = match formatter {
+                Some(table) if table.is_instance_of::<PyDict>() => {
+                    table.cast::<PyDict>()?.get_item(&label)?
                 }
-                StyleOp::Bar(c) => styled.bar(c),
-                StyleOp::HideIndex => styled.hide_index(),
+                other => other.cloned(),
             };
+            let format = slf.make_format(
+                chosen.as_ref(),
+                na_rep,
+                precision,
+                decimal,
+                thousands,
+                escape,
+                hyperlinks,
+            )?;
+            for &row in &rows {
+                slf.display.insert((row, *column), Arc::clone(&format));
+            }
         }
-        styled.to_html(index)
+        Ok(slf)
+    }
+
+    /// pandas' `Styler.format_index`: the display formatter of an axis's
+    /// labels, per level.
+    #[pyo3(signature = (formatter=None, axis=Passed(None), level=None, na_rep=None, precision=None, decimal=".", thousands=None, escape=None, hyperlinks=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn format_index<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        formatter: Option<&Bound<'py, PyAny>>,
+        axis: Passed<'py>,
+        level: Option<&Bound<'py, PyAny>>,
+        na_rep: Option<&str>,
+        precision: Option<usize>,
+        decimal: &str,
+        thousands: Option<&str>,
+        escape: Option<&str>,
+        hyperlinks: Option<&str>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let py = slf.py();
+        let axis = styler_axis(&axis)?.unwrap_or(0);
+        let labels = slf
+            .data
+            .bind(py)
+            .getattr(if axis == 0 { "index" } else { "columns" })?;
+        let levels = Self::levels_of(&labels, level)?;
+        let formatter = formatter.filter(|formatter| !formatter.is_none());
+        let defaults = formatter.is_none()
+            && level.is_none_or(|level| level.is_none())
+            && precision.is_none()
+            && decimal == "."
+            && thousands.is_none()
+            && na_rep.is_none()
+            && escape.is_none()
+            && hyperlinks.is_none();
+        if defaults {
+            if axis == 0 {
+                slf.display_index.clear();
+            } else {
+                slf.display_columns.clear();
+            }
+            return Ok(slf);
+        }
+        let names = labels
+            .getattr("names")?
+            .try_iter()?
+            .collect::<PyResult<Vec<_>>>()?;
+        let n = labels.len()?;
+        for level in levels {
+            let chosen = match formatter {
+                Some(table) if table.is_instance_of::<PyDict>() => {
+                    let table = table.cast::<PyDict>()?;
+                    match table.get_item(level)? {
+                        Some(found) => Some(found),
+                        None => names
+                            .get(level)
+                            .map(|name| table.get_item(name))
+                            .transpose()?
+                            .flatten(),
+                    }
+                }
+                other => other.cloned(),
+            };
+            let format = slf.make_format(
+                chosen.as_ref(),
+                na_rep,
+                precision,
+                decimal,
+                thousands,
+                escape,
+                hyperlinks,
+            )?;
+            for position in 0..n {
+                if axis == 0 {
+                    slf.display_index
+                        .insert((position, level), Arc::clone(&format));
+                } else {
+                    slf.display_columns
+                        .insert((level, position), Arc::clone(&format));
+                }
+            }
+        }
+        Ok(slf)
+    }
+
+    /// pandas' `Styler.hide`: rows / columns of `subset` (replacing those
+    /// hidden before), else the axis's levels (all of them when `level` is
+    /// None), and with `names` the axis's level names.
+    #[pyo3(signature = (subset=None, axis=Passed(None), level=None, names=false))]
+    fn hide<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        subset: Option<&Bound<'py, PyAny>>,
+        axis: Passed<'py>,
+        level: Option<&Bound<'py, PyAny>>,
+        names: bool,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let py = slf.py();
+        let axis = styler_axis(&axis)?.unwrap_or(0);
+        let subset = subset.filter(|subset| !subset.is_none());
+        let level = level.filter(|level| !level.is_none());
+        if subset.is_some() && level.is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "`subset` and `level` cannot be passed simultaneously",
+            ));
+        }
+        let labels = slf
+            .data
+            .bind(py)
+            .getattr(if axis == 0 { "index" } else { "columns" })?;
+        match subset {
+            None => {
+                if level.is_none() && names {
+                    if axis == 0 {
+                        slf.hide_index_names = true;
+                    } else {
+                        slf.hide_column_names = true;
+                    }
+                    return Ok(slf);
+                }
+                let levels = Self::levels_of(&labels, level)?;
+                let hidden: Vec<bool> = (0..labels.getattr("nlevels")?.extract::<usize>()?)
+                    .map(|position| levels.contains(&position))
+                    .collect();
+                if axis == 0 {
+                    slf.hide_index = hidden;
+                } else {
+                    slf.hide_columns = hidden;
+                }
+            }
+            Some(subset) => {
+                let all = pyo3::types::PySlice::full(py).into_any();
+                let key = if axis == 0 {
+                    PyTuple::new(py, [subset.clone(), all])?
+                } else {
+                    PyTuple::new(py, [all, subset.clone()])?
+                };
+                let (_, rows, columns) = slf.subset_frame(py, Some(&key.into_any()))?;
+                if axis == 0 {
+                    slf.hidden_rows = rows.into_iter().collect();
+                } else {
+                    slf.hidden_columns = columns.into_iter().collect();
+                }
+            }
+        }
+        if names {
+            if axis == 0 {
+                slf.hide_index_names = true;
+            } else {
+                slf.hide_column_names = true;
+            }
+        }
+        Ok(slf)
+    }
+
+    fn set_uuid(mut slf: PyRefMut<'_, Self>, uuid: String) -> PyRefMut<'_, Self> {
+        slf.uuid = uuid;
+        slf
+    }
+
+    /// pandas' `Styler.set_caption`: a string, or a 2-tuple of strings whose
+    /// first is the HTML caption.
+    fn set_caption<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        caption: &Bound<'py, PyAny>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let invalid = || {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "`caption` must be either a string or 2-tuple of strings.",
+            )
+        };
+        let text = if caption.is_instance_of::<PyList>() || caption.is_instance_of::<PyTuple>() {
+            let parts: Vec<String> = caption.extract().map_err(|_| invalid())?;
+            if parts.len() != 2 {
+                return Err(invalid());
+            }
+            parts[0].clone()
+        } else {
+            caption.extract::<String>().map_err(|_| invalid())?
+        };
+        slf.caption = Some(text);
+        Ok(slf)
+    }
+
+    fn set_table_attributes(mut slf: PyRefMut<'_, Self>, attributes: String) -> PyRefMut<'_, Self> {
+        slf.table_attributes = Some(attributes);
+        slf
+    }
+
+    /// pandas' `Styler.set_table_styles`: a list of `{"selector", "props"}`
+    /// rules, or a dict of them per column (axis 0) / row (axis 1) label,
+    /// scoped to that label's cells; appended when `overwrite` is False.
+    #[pyo3(signature = (table_styles=None, axis=Passed(None), overwrite=true, css_class_names=None))]
+    fn set_table_styles<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        table_styles: Option<&Bound<'py, PyAny>>,
+        axis: Passed<'py>,
+        overwrite: bool,
+        css_class_names: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let py = slf.py();
+        if css_class_names.is_some_and(|names| !names.is_none()) {
+            return Err(not_implemented(
+                "Styler.set_table_styles(css_class_names=...)",
+            ));
+        }
+        let Some(table_styles) = table_styles.filter(|styles| !styles.is_none()) else {
+            return Ok(slf);
+        };
+        let rule = |style: &Bound<'py, PyAny>| -> PyResult<(String, Bound<'py, PyAny>)> {
+            Ok((
+                py_text(&style.get_item("selector")?)?,
+                style.get_item("props")?,
+            ))
+        };
+        let mut rules = Vec::new();
+        if let Ok(table) = table_styles.cast::<PyDict>() {
+            let axis = styler_axis(&axis)?.unwrap_or(0);
+            let labels = slf
+                .data
+                .bind(py)
+                .getattr(if axis == 1 { "index" } else { "columns" })?;
+            let scope = if axis == 1 { ".row" } else { ".col" };
+            for (key, styles) in table.iter() {
+                let positions: Vec<i64> = labels
+                    .call_method1("get_indexer_for", (PyList::new(py, [key])?,))?
+                    .extract()?;
+                for position in positions {
+                    for style in styles.try_iter()? {
+                        let (selectors, props) = rule(&style?)?;
+                        let declarations = css_declarations(&props)?;
+                        for selector in selectors.split(',') {
+                            rules.push((
+                                format!("{selector}{scope}{position}"),
+                                declarations.clone(),
+                            ));
+                        }
+                    }
+                }
+            }
+        } else {
+            for style in table_styles.try_iter()? {
+                let (selector, props) = rule(&style?)?;
+                rules.push((selector, css_declarations(&props)?));
+            }
+        }
+        if overwrite {
+            slf.table_styles = rules;
+        } else {
+            slf.table_styles.extend(rules);
+        }
+        Ok(slf)
+    }
+
+    /// pandas' `Styler.set_td_classes`: a class per data cell from a frame
+    /// of class names aligned on the data's labels.
+    fn set_td_classes<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        classes: &Bound<'py, PyAny>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let py = slf.py();
+        let unique = |axis: &str| -> PyResult<bool> {
+            classes.getattr(axis)?.getattr("is_unique")?.is_truthy()
+        };
+        if !unique("index")? || !unique("columns")? {
+            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                "Classes render only if `classes` has unique index and columns.",
+            ));
+        }
+        let aligned = classes.call_method1("reindex_like", (slf.data.bind(py),))?;
+        for (column, values) in Self::columns_of(&aligned)?.into_iter().enumerate() {
+            for (row, value) in values.into_iter().enumerate() {
+                if styler_isna(&value)? || value.eq("")? {
+                    continue;
+                }
+                slf.cell_context.insert((row, column), py_text(&value)?);
+            }
+        }
+        Ok(slf)
+    }
+
+    /// pandas' `Styler.apply`: `func` over each column (axis 0), row (axis
+    /// 1) or the whole `subset` (axis None) answers CSS for its cells.
+    #[pyo3(signature = (func, axis=Passed(None), subset=None, **kwargs))]
+    fn apply<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        func: &Bound<'py, PyAny>,
+        axis: Passed<'py>,
+        subset: Option<&Bound<'py, PyAny>>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let py = slf.py();
+        let axis = styler_axis(&axis)?;
+        slf.apply_styles(py, func, axis, subset, kwargs)?;
+        Ok(slf)
+    }
+
+    /// pandas' `Styler.map`: `func` over each value of `subset` answers its
+    /// cell's CSS.
+    #[pyo3(signature = (func, subset=None, **kwargs))]
+    fn map<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        func: &Bound<'py, PyAny>,
+        subset: Option<&Bound<'py, PyAny>>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let py = slf.py();
+        slf.style_cells(py, subset, |value| func.call((value,), kwargs).map(Some))?;
+        Ok(slf)
+    }
+
+    /// pandas' deprecated spelling of `map`.
+    #[pyo3(signature = (func, subset=None, **kwargs))]
+    fn applymap<'py>(
+        slf: PyRefMut<'py, Self>,
+        func: &Bound<'py, PyAny>,
+        subset: Option<&Bound<'py, PyAny>>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let py = slf.py();
+        PyErr::warn(
+            py,
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            c"Styler.applymap has been deprecated. Use Styler.map instead.",
+            1,
+        )?;
+        Self::map(slf, func, subset, kwargs)
+    }
+
+    /// pandas' `Styler.apply_index` / `map_index`: `func` over each level of
+    /// an axis's labels (a Series per level), or each label, answers CSS for
+    /// the header cells.
+    #[pyo3(signature = (func, axis=Passed(None), level=None, **kwargs))]
+    fn apply_index<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        func: &Bound<'py, PyAny>,
+        axis: Passed<'py>,
+        level: Option<&Bound<'py, PyAny>>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let py = slf.py();
+        let axis = styler_axis(&axis)?.unwrap_or(0);
+        slf.style_headers(py, func, axis, level, kwargs, true)?;
+        Ok(slf)
+    }
+
+    #[pyo3(signature = (func, axis=Passed(None), level=None, **kwargs))]
+    fn map_index<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        func: &Bound<'py, PyAny>,
+        axis: Passed<'py>,
+        level: Option<&Bound<'py, PyAny>>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let py = slf.py();
+        let axis = styler_axis(&axis)?.unwrap_or(0);
+        slf.style_headers(py, func, axis, level, kwargs, false)?;
+        Ok(slf)
+    }
+
+    #[pyo3(signature = (func, axis=Passed(None), level=None, **kwargs))]
+    fn applymap_index<'py>(
+        slf: PyRefMut<'py, Self>,
+        func: &Bound<'py, PyAny>,
+        axis: Passed<'py>,
+        level: Option<&Bound<'py, PyAny>>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let py = slf.py();
+        PyErr::warn(
+            py,
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            c"Styler.applymap_index has been deprecated. Use Styler.map_index instead.",
+            1,
+        )?;
+        Self::map_index(slf, func, axis, level, kwargs)
+    }
+
+    /// pandas' `Styler.highlight_null`: missing values marked with `props`
+    /// (`background-color: {color};` by default).
+    #[pyo3(signature = (color="red", subset=None, props=None))]
+    fn highlight_null<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        color: &str,
+        subset: Option<&Bound<'py, PyAny>>,
+        props: Option<&str>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let py = slf.py();
+        let props = props.map_or_else(|| format!("background-color: {color};"), str::to_owned);
+        let groups = slf.highlight_groups(py, subset, None)?;
+        slf.highlight_where(py, &props, groups, |_, _, value| styler_isna(value))?;
+        Ok(slf)
+    }
+
+    /// pandas' `Styler.highlight_max`: each group's maximum (its `max(skipna
+    /// =True)`) marked with `props`.
+    #[pyo3(signature = (subset=None, color="yellow", axis=Passed(None), props=None))]
+    fn highlight_max<'py>(
+        slf: PyRefMut<'py, Self>,
+        subset: Option<&Bound<'py, PyAny>>,
+        color: &str,
+        axis: Passed<'py>,
+        props: Option<&str>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        Self::highlight_extreme(slf, subset, color, axis, props, "max")
+    }
+
+    /// pandas' `Styler.highlight_min`.
+    #[pyo3(signature = (subset=None, color="yellow", axis=Passed(None), props=None))]
+    fn highlight_min<'py>(
+        slf: PyRefMut<'py, Self>,
+        subset: Option<&Bound<'py, PyAny>>,
+        color: &str,
+        axis: Passed<'py>,
+        props: Option<&str>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        Self::highlight_extreme(slf, subset, color, axis, props, "min")
+    }
+
+    /// pandas' `Styler.highlight_between`: values within `[left, right]`
+    /// (open or closed as `inclusive` says) marked with `props`.
+    #[pyo3(signature = (subset=None, color="yellow", axis=Passed(None), left=None, right=None, inclusive="both", props=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn highlight_between<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        subset: Option<&Bound<'py, PyAny>>,
+        color: &str,
+        axis: Passed<'py>,
+        left: Option<&Bound<'py, PyAny>>,
+        right: Option<&Bound<'py, PyAny>>,
+        inclusive: &str,
+        props: Option<&str>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let py = slf.py();
+        let ops = styler_bounds_ops(inclusive)?;
+        let props = props.map_or_else(|| format!("background-color: {color};"), str::to_owned);
+        let groups = slf.highlight_groups(py, subset, styler_axis(&axis)?)?;
+        let css = pyo3::types::PyString::new(py, &props).into_any();
+        for (cells, values, _) in groups {
+            let lefts = styler_bound("left", left, values.len())?;
+            let rights = styler_bound("right", right, values.len())?;
+            for (at, ((row, column), value)) in cells.into_iter().zip(values.iter()).enumerate() {
+                let low = lefts.as_ref().map(|bounds| &bounds[at]);
+                let high = rights.as_ref().map(|bounds| &bounds[at]);
+                if styler_between(value, low, high, ops)? {
+                    slf.add_css(StylerTarget::Data, row, column, &css)?;
+                }
+            }
+        }
+        Ok(slf)
+    }
+
+    /// pandas' `Styler.highlight_quantile`: values between each group's
+    /// `q_left` and `q_right` quantiles marked with `props`.
+    #[pyo3(signature = (subset=None, color="yellow", axis=Passed(None), q_left=0.0, q_right=1.0, interpolation="linear", inclusive="both", props=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn highlight_quantile<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        subset: Option<&Bound<'py, PyAny>>,
+        color: &str,
+        axis: Passed<'py>,
+        q_left: f64,
+        q_right: f64,
+        interpolation: &str,
+        inclusive: &str,
+        props: Option<&str>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let py = slf.py();
+        let ops = styler_bounds_ops(inclusive)?;
+        let props = props.map_or_else(|| format!("background-color: {color};"), str::to_owned);
+        let groups = slf.highlight_groups(py, subset, styler_axis(&axis)?)?;
+        let css = pyo3::types::PyString::new(py, &props).into_any();
+        let series = py.import("frankenpandas")?.getattr("Series")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("interpolation", interpolation)?;
+        for (cells, values, _) in groups {
+            let quantiles = series
+                .call1((PyList::new(py, &values)?,))?
+                .call_method("quantile", (vec![q_left, q_right],), Some(&kwargs))?
+                .call_method0("tolist")?
+                .try_iter()?
+                .collect::<PyResult<Vec<_>>>()?;
+            let (low, high) = (&quantiles[0], &quantiles[1]);
+            for ((row, column), value) in cells.into_iter().zip(values.iter()) {
+                if styler_between(value, Some(low), Some(high), ops)? {
+                    slf.add_css(StylerTarget::Data, row, column, &css)?;
+                }
+            }
+        }
+        Ok(slf)
+    }
+
+    /// pandas' `Styler.set_properties`: the same declarations on every cell
+    /// of `subset`.
+    #[pyo3(signature = (subset=None, **kwargs))]
+    fn set_properties<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        subset: Option<&Bound<'py, PyAny>>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let py = slf.py();
+        let mut css = String::new();
+        if let Some(kwargs) = kwargs {
+            for (property, value) in kwargs.iter() {
+                css.push_str(&format!("{}: {};", py_text(&property)?, py_text(&value)?));
+            }
+        }
+        let css = pyo3::types::PyString::new(py, &css).into_any();
+        slf.style_cells(py, subset, |_| Ok(Some(css.clone())))?;
+        Ok(slf)
+    }
+
+    /// pandas' `Styler.clear`: every style, formatter and hidden element
+    /// reset; the uuid kept.
+    fn clear(&mut self, py: Python<'_>) -> PyResult<()> {
+        let uuid = self.uuid.clone();
+        *self = Self::for_frame(self.data.bind(py))?;
+        self.uuid = uuid;
+        Ok(())
+    }
+
+    /// pandas' `Styler.pipe`: `func(self, *args, **kwargs)`.
+    #[pyo3(signature = (func, *args, **kwargs))]
+    fn pipe<'py>(
+        slf: &Bound<'py, Self>,
+        func: &Bound<'py, PyAny>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let mut call = vec![slf.clone().into_any()];
+        call.extend(args.iter());
+        func.call(PyTuple::new(slf.py(), call)?, kwargs)
+    }
+
+    /// pandas' `Styler.to_html`: the HTML, written to `buf` when one is
+    /// given. `max_rows` / `max_columns` trimming is refused.
+    #[pyo3(signature = (buf=None, *, table_uuid=None, table_attributes=None, sparse_index=None, sparse_columns=None, bold_headers=false, caption=None, max_rows=None, max_columns=None, encoding=None, doctype_html=false, exclude_styles=false, **_kwargs))]
+    #[allow(clippy::too_many_arguments)]
+    fn to_html(
+        &self,
+        py: Python<'_>,
+        buf: Option<&Bound<'_, PyAny>>,
+        table_uuid: Option<String>,
+        table_attributes: Option<String>,
+        sparse_index: Option<bool>,
+        sparse_columns: Option<bool>,
+        bold_headers: bool,
+        caption: Option<String>,
+        max_rows: Option<usize>,
+        max_columns: Option<usize>,
+        encoding: Option<&str>,
+        doctype_html: bool,
+        exclude_styles: bool,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Option<String>> {
+        let (rows, columns) = self.shape(py)?;
+        if max_rows.is_some_and(|limit| limit < rows)
+            || max_columns.is_some_and(|limit| limit < columns)
+        {
+            return Err(not_implemented(
+                "Styler.to_html(max_rows / max_columns trimming)",
+            ));
+        }
+        let mut opts = self.default_render();
+        if let Some(uuid) = table_uuid.filter(|uuid| !uuid.is_empty()) {
+            opts.uuid = uuid;
+        }
+        if let Some(attributes) = table_attributes.filter(|attributes| !attributes.is_empty()) {
+            opts.table_attributes = Some(attributes);
+        }
+        if let Some(sparse) = sparse_index {
+            opts.sparse_index = sparse;
+        }
+        if let Some(sparse) = sparse_columns {
+            opts.sparse_columns = sparse;
+        }
+        if bold_headers {
+            opts.table_styles.push((
+                "th".to_owned(),
+                vec![("font-weight".to_owned(), "bold".to_owned())],
+            ));
+        }
+        if caption.is_some() {
+            opts.caption = caption;
+        }
+        if let Some(encoding) = encoding {
+            opts.encoding = encoding.to_owned();
+        }
+        opts.doctype_html = doctype_html;
+        opts.exclude_styles = exclude_styles;
+        let html = self.render_html(py, &opts)?;
+        match buf.filter(|buf| !buf.is_none()) {
+            None => Ok(Some(html)),
+            Some(target) => {
+                if encoding.is_some()
+                    && (target.is_instance_of::<pyo3::types::PyString>()
+                        || target.hasattr("__fspath__")?)
+                {
+                    write_encoded_text(py, Some(target), html, encoding)
+                } else {
+                    write_text_target(Some(target), html, false)
+                }
+            }
+        }
+    }
+
+    /// pandas' colormap methods read matplotlib's colormaps, which the
+    /// binding may not import (it owns its plotting); refused until the
+    /// colormaps are ported.
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn background_gradient(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(not_implemented("Styler.background_gradient"))
+    }
+
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn text_gradient(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(not_implemented("Styler.text_gradient"))
+    }
+
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn bar(&self, _args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+        Err(not_implemented("Styler.bar"))
+    }
+
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn set_tooltips(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(not_implemented("Styler.set_tooltips"))
+    }
+
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn set_sticky(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(not_implemented("Styler.set_sticky"))
+    }
+
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn to_latex(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(not_implemented("Styler.to_latex"))
+    }
+
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn to_excel(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(not_implemented("Styler.to_excel"))
+    }
+
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn to_string(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(not_implemented("Styler.to_string"))
+    }
+
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn concat(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(not_implemented("Styler.concat"))
+    }
+
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn export(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(not_implemented("Styler.export"))
+    }
+
+    #[pyo3(name = "use", signature = (*_args, **_kwargs))]
+    fn use_styles(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(not_implemented("Styler.use"))
+    }
+
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn relabel_index(
+        &self,
+        _args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        Err(not_implemented("Styler.relabel_index"))
+    }
+}
+
+impl PyStyler {
+    fn default_render(&self) -> StylerRender {
+        StylerRender {
+            uuid: self.uuid.clone(),
+            table_attributes: self.table_attributes.clone(),
+            table_styles: self.table_styles.clone(),
+            caption: self.caption.clone(),
+            sparse_index: true,
+            sparse_columns: true,
+            doctype_html: false,
+            exclude_styles: false,
+            encoding: "utf-8".to_owned(),
+        }
+    }
+
+    /// `highlight_max` / `highlight_min`: each group's `op` (skipping
+    /// missing values; a frame's twice) marked where a value equals it.
+    fn highlight_extreme<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        subset: Option<&Bound<'py, PyAny>>,
+        color: &str,
+        axis: Passed<'py>,
+        props: Option<&str>,
+        op: &str,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let py = slf.py();
+        let props = props.map_or_else(|| format!("background-color: {color};"), str::to_owned);
+        let axis = styler_axis(&axis)?;
+        let groups = slf.highlight_groups(py, subset, axis)?;
+        let skipna = PyDict::new(py);
+        skipna.set_item("skipna", true)?;
+        let css = pyo3::types::PyString::new(py, &props).into_any();
+        for (cells, values, group) in groups {
+            let mut extreme = group.call_method(op, (), Some(&skipna))?;
+            if axis.is_none() {
+                extreme = extreme.call_method(op, (), Some(&skipna))?;
+            }
+            for ((row, column), value) in cells.into_iter().zip(values.iter()) {
+                if !styler_isna(value)? && value.eq(&extreme).unwrap_or(false) {
+                    slf.add_css(StylerTarget::Data, row, column, &css)?;
+                }
+            }
+        }
+        Ok(slf)
+    }
+
+    /// `apply_index` (`per_level`) / `map_index` over an axis's levels.
+    fn style_headers<'py>(
+        &mut self,
+        py: Python<'py>,
+        func: &Bound<'py, PyAny>,
+        axis: usize,
+        level: Option<&Bound<'py, PyAny>>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+        per_level: bool,
+    ) -> PyResult<()> {
+        let labels = self
+            .data
+            .bind(py)
+            .getattr(if axis == 0 { "index" } else { "columns" })?;
+        let (by_position, _, _) = styler_axis_labels(&labels)?;
+        let series = py.import("frankenpandas")?.getattr("Series")?;
+        let target = if axis == 0 {
+            StylerTarget::Index
+        } else {
+            StylerTarget::Columns
+        };
+        for level in Self::levels_of(&labels, level)? {
+            let values: Vec<Bound<'py, PyAny>> = by_position
+                .iter()
+                .map(|labels| labels[level].clone())
+                .collect();
+            let css: Vec<Option<Bound<'py, PyAny>>> = if per_level {
+                let name = PyDict::new(py);
+                name.set_item("name", level)?;
+                let group = series.call((PyList::new(py, &values)?,), Some(&name))?;
+                let result = func.call((&group,), kwargs)?;
+                Self::vector_css(func, &result, &group.getattr("index")?, values.len())?
+            } else {
+                values
+                    .iter()
+                    .map(|value| func.call((value,), kwargs).map(Some))
+                    .collect::<PyResult<_>>()?
+            };
+            for (position, entry) in css.into_iter().enumerate() {
+                let Some(entry) = entry else { continue };
+                if !entry.is_truthy()? {
+                    continue;
+                }
+                let key = if axis == 0 {
+                    (position, level)
+                } else {
+                    (level, position)
+                };
+                let declarations = css_declarations(&entry)?;
+                let map = match target {
+                    StylerTarget::Index => &mut self.ctx_index,
+                    _ => &mut self.ctx_columns,
+                };
+                map.entry(key).or_default().extend(declarations);
+            }
+        }
+        Ok(())
     }
 }
 

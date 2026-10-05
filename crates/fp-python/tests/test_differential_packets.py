@@ -24737,3 +24737,170 @@ def test_correlation_ties_and_infinities_like_pandas_bq60w(case: str, method: st
 
     got, want = values(fpd), values(pd)
     assert np.allclose(got, want, rtol=1e-12, atol=1e-15, equal_nan=True), (got, want)
+
+
+# br-frankenpandas-qoltt: DataFrame.style is pandas' Styler - a property, with
+# pandas' methods and its HTML (set_uuid makes it byte-comparable). The
+# pandas arm needs jinja2 (pandas' optional Styler dependency).
+def _qoltt_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {"a": [1.5, _NAN, 3.0], "b": ["x", "y", None], "c": [1, 2, 3]},
+        index=m.Index(["r1", "r2", "r3"], name="k"),
+    )
+
+
+def _qoltt_numbers(m: Any) -> Any:
+    return m.DataFrame({"x": [1.25, -2.0, 5.5, 0.0], "y": [10, 20, 30, 40]})
+
+
+_QOLTT_CASES = {
+    "plain": lambda m: _qoltt_frame(m).style,
+    "format precision": lambda m: _qoltt_frame(m).style.format(precision=2),
+    "format string, subset": lambda m: _qoltt_frame(m).style.format("{:.1f}", subset=["a"]),
+    "format dict": lambda m: _qoltt_numbers(m).style.format({"x": "{:+.2f}", "y": "<{}>"}),
+    "format callable": lambda m: _qoltt_numbers(m).style.format(lambda v: f"[{v}]"),
+    "format na_rep": lambda m: _qoltt_frame(m).style.format(na_rep="-", precision=1),
+    "format thousands decimal": lambda m: m.DataFrame({"v": [1234567.891, 2.5]}).style.format(
+        precision=2, thousands=" ", decimal=","
+    ),
+    "format escape html": lambda m: m.DataFrame({"h": ["<b>x</b>", "a&b"]}).style.format(escape="html"),
+    "highlight_max": lambda m: _qoltt_numbers(m).style.highlight_max(),
+    "highlight_max axis 1": lambda m: _qoltt_numbers(m).style.highlight_max(axis=1, color="green"),
+    "highlight_min props": lambda m: _qoltt_numbers(m).style.highlight_min(props="font-weight: bold;"),
+    "highlight_null": lambda m: _qoltt_frame(m).style.highlight_null(),
+    "highlight_between": lambda m: _qoltt_numbers(m).style.highlight_between(left=0, right=20),
+    "highlight_quantile": lambda m: _qoltt_numbers(m).style.highlight_quantile(q_left=0.5),
+    "stacked highlights": lambda m: _qoltt_frame(m)
+    .style.highlight_max(subset=["a", "c"])
+    .highlight_null()
+    .set_caption("Cap"),
+    "apply column": lambda m: _qoltt_numbers(m).style.apply(
+        lambda s: ["color: red;" if v > 1 else "" for v in s], subset=["x"]
+    ),
+    "apply frame": lambda m: _qoltt_numbers(m).style.apply(
+        lambda d: m.DataFrame("opacity: 0.5;", index=d.index, columns=d.columns), axis=None
+    ),
+    "map": lambda m: _qoltt_numbers(m).style.map(lambda v: "color: blue;" if v < 0 else None),
+    "set_properties": lambda m: _qoltt_numbers(m).style.set_properties(subset=["y"], **{"font-weight": "bold"}),
+    "table styles": lambda m: _qoltt_numbers(m).style.set_table_styles(
+        [{"selector": "th", "props": [("color", "red")]}, {"selector": "td", "props": "padding: 2px; margin: 0;"}]
+    ),
+    "table attributes": lambda m: _qoltt_numbers(m).style.set_table_attributes('class="t"'),
+    "hide index": lambda m: _qoltt_frame(m).style.hide(axis="index"),
+    "hide columns subset": lambda m: _qoltt_frame(m).style.hide(subset=["b"], axis="columns"),
+    "hide rows": lambda m: _qoltt_frame(m).style.hide(subset=["r2"]),
+    "multiindex rows": lambda m: m.DataFrame(
+        {"v": [1.5, 2.25, 3.0]},
+        index=m.MultiIndex.from_tuples([("a", 1), ("a", 2), ("b", 1)], names=["L", "N"]),
+    ).style,
+    "multiindex columns": lambda m: m.DataFrame(
+        [[1, 2.5]], columns=m.MultiIndex.from_tuples([("g", "a"), ("g", "b")])
+    ).style,
+    "float index": lambda m: m.DataFrame({"x": [1, 2]}, index=[0.5, 1.25]).style,
+    "values of every kind": lambda m: m.DataFrame(
+        {
+            "d": m.to_datetime(["2024-01-01 00:00", "2024-01-02 03:04"]),
+            "t": m.to_timedelta(["1D", "2h"]),
+            "b": [True, False],
+            "i": m.array([1, None], dtype="Int64"),
+        }
+    ).style,
+    "format_index": lambda m: m.DataFrame({"x": [1, 2]}, index=[0.5, 1.25]).style.format_index("<{}>"),
+    "format_index columns": lambda m: _qoltt_numbers(m).style.format_index(str.upper, axis=1),
+    "apply_index": lambda m: _qoltt_frame(m).style.apply_index(lambda s: ["color: red;" if v == "r2" else "" for v in s]),
+    "map_index columns": lambda m: _qoltt_numbers(m).style.map_index(lambda v: "font-weight: bold;" if v == "y" else None, axis=1),
+    "td classes": lambda m: _qoltt_numbers(m).style.set_td_classes(
+        m.DataFrame({"x": ["neg", "", None, "zero"]})
+    ),
+    "hide index names": lambda m: _qoltt_frame(m).style.hide(names=True),
+    "hide column level": lambda m: m.DataFrame(
+        [[1, 2.5]], columns=m.MultiIndex.from_tuples([("g", "a"), ("g", "b")])
+    ).style.hide(axis=1, level=0),
+    "caption tuple": lambda m: _qoltt_numbers(m).style.set_caption(("html caption", "latex caption")),
+    "table styles per column": lambda m: _qoltt_numbers(m).style.set_table_styles(
+        {"y": [{"selector": "td, th", "props": "color: red;"}]}, overwrite=False
+    ),
+    "highlight_max whole frame": lambda m: _qoltt_numbers(m).style.highlight_max(axis=None),
+    "highlight_between bounds list": lambda m: _qoltt_numbers(m).style.highlight_between(
+        left=[0, 0, 0, 0], right=[2, 30, 6, 40], subset=["y"]
+    ),
+    "hyperlinks": lambda m: m.DataFrame({"u": ["see https://example.com/a now", "plain"]}).style.format(
+        hyperlinks="html"
+    ),
+    "escape latex": lambda m: m.DataFrame({"t": ["a_b & 50%"]}).style.format(escape="latex"),
+    "set_properties subset tuple": lambda m: _qoltt_numbers(m).style.set_properties(
+        subset=([0, 2], ["x"]), color="green"
+    ),
+}
+
+_QOLTT_RENDERS = {
+    "doctype_html": {"doctype_html": True},
+    "exclude_styles": {"exclude_styles": True},
+    "bold_headers + caption": {"bold_headers": True, "caption": "C"},
+    "table_uuid + attributes": {"table_uuid": "zz", "table_attributes": 'class="x"'},
+    "sparse_index False": {"sparse_index": False},
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("render", list(_QOLTT_RENDERS))
+def test_styler_to_html_options_like_pandas_qoltt(render: str) -> None:
+    pytest.importorskip("jinja2", reason="pandas' Styler needs jinja2 (oracle requirements)")
+
+    def html(m: Any) -> str:
+        frame = m.DataFrame(
+            {"v": [1.5, 2.25, 3.0]},
+            index=m.MultiIndex.from_tuples([("a", 1), ("a", 2), ("b", 1)], names=["L", "N"]),
+        )
+        return frame.style.set_uuid("u").highlight_max().to_html(**_QOLTT_RENDERS[render])
+
+    assert html(fpd) == html(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_QOLTT_CASES))
+def test_styler_renders_pandas_html_qoltt(case: str) -> None:
+    pytest.importorskip("jinja2", reason="pandas' Styler needs jinja2 (oracle requirements)")
+    want = _QOLTT_CASES[case](pd).set_uuid("u").to_html()
+    got = _QOLTT_CASES[case](fpd).set_uuid("u").to_html()
+    assert got == want
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_styler_is_a_property_qoltt() -> None:
+    styler = fpd.DataFrame({"a": [1]}).style
+    assert type(styler).__name__ == "Styler"
+    assert styler._repr_html_() == styler.to_html()
+    # NEGATIVE: an unknown keyword raises as pandas'.
+    with pytest.raises(TypeError):
+        styler.format(nonsense=1)
+
+
+# br-frankenpandas-lcqm5: a scalar makes a frame only over a given index and
+# columns (pandas' "DataFrame constructor not properly called!" otherwise),
+# and text is a scalar - it took the list path character by character.
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    ("data", "axes"),
+    # DataFrame(None) without both axes is the empty frame, not a scalar.
+    [(data, axes) for data in (5, 2.5, "x", True) for axes in ("none", "index", "columns", "both")]
+    + [(None, "both")],
+)
+def test_dataframe_of_a_scalar_like_pandas_lcqm5(data: Any, axes: str) -> None:
+    kwargs = {
+        "none": {},
+        "index": {"index": [0, 1]},
+        "columns": {"columns": ["a"]},
+        "both": {"index": [0, 1], "columns": ["a", "b"]},
+    }[axes]
+
+    def built(m: Any) -> Any:
+        try:
+            frame = m.DataFrame(data, **kwargs)
+        except Exception as e:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(e).__name__, str(e))
+        return ([str(t) for t in frame.dtypes], [[repr(v) for v in row] for row in frame.values.tolist()])
+
+    assert built(fpd) == built(pd)
+    # NEGATIVE: a list of text is still a column of strings.
+    assert fpd.DataFrame(["ab", "c"]).values.tolist() == [["ab"], ["c"]]
