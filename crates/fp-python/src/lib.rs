@@ -33475,6 +33475,22 @@ impl PySeries {
                 .inner
                 .interpolate_with(method, limit, limit_direction, limit_area)
                 .map_err(frame_error_to_py)?;
+            // pandas interpolates the masked Int64 / Float64 dtypes into
+            // Float64 (it was numpy float64; br-frankenpandas-1t4kg).
+            let s = if matches!(
+                self.inner.dtype(),
+                DType::Int64Nullable | DType::Float64Nullable
+            ) && s.dtype() != DType::Float64Nullable
+            {
+                let column = s
+                    .column()
+                    .astype(DType::Float64Nullable)
+                    .map_err(column_error_to_py)?;
+                Series::new(s.name().clone(), s.index().clone(), column)
+                    .map_err(frame_error_to_py)?
+            } else {
+                s
+            };
             Ok(PySeries { inner: s })
         })()?;
         Ok(series_inplace(&mut self.inner, result, inplace))

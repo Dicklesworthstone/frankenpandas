@@ -25613,3 +25613,44 @@ def test_cross_kind_frame_equality_like_pandas_jobhh(case: str) -> None:
             return (type(error).__name__,)
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-1t4kg: ops that return a Series' own values keep pandas'
+# nullable extension dtype (an Int64 drop_duplicates was an int64 column
+# holding NaN); interpolate of Int64 / Float64 is Float64. NEGATIVE: the numpy
+# dtypes' results are unchanged.
+def _1t4kg_series(m: Any) -> Any:
+    return {
+        "Int64": m.Series([3, None, 1, 3], dtype="Int64"),
+        "Float64": m.Series([1.5, None, -2.0, 1.5], dtype="Float64"),
+        "boolean": m.Series([True, None, False, True], dtype="boolean"),
+        "string": m.Series(["b", None, "a", "b"], dtype="string"),
+        "int64": m.Series([3, 2, 1, 3]),
+        "float64": m.Series([1.5, _NAN, -2.0, 1.5]),
+        "object text": m.Series(["b", None, "a", "b"]),
+    }
+
+
+_1T4KG_OPS = {
+    "drop_duplicates": lambda s: s.drop_duplicates(),
+    "drop_duplicates keep last": lambda s: s.drop_duplicates(keep="last"),
+    "nlargest": lambda s: s.nlargest(2),
+    "nsmallest keep last": lambda s: s.nsmallest(2, keep="last"),
+    "mode": lambda s: s.mode(),
+    "clip": lambda s: s.clip(0, 2) if str(s.dtype) in ("Int64", "Float64", "int64", "float64") else s,
+    "interpolate": lambda s: s.interpolate() if str(s.dtype) in ("Int64", "Float64", "int64", "float64") else s,
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("op", list(_1T4KG_OPS))
+@pytest.mark.parametrize("dtype", ["Int64", "Float64", "boolean", "string", "int64", "float64", "object text"])
+def test_subset_ops_keep_the_nullable_dtype_like_pandas_1t4kg(dtype: str, op: str) -> None:
+    def shown(m: Any) -> Any:
+        try:
+            result = _1T4KG_OPS[op](_1t4kg_series(m)[dtype])
+        except Exception as error:  # noqa: BLE001 - the error is the answer compared
+            return (type(error).__name__,)
+        return (repr(result), str(result.dtype))
+
+    assert shown(fpd) == shown(pd)

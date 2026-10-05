@@ -18547,6 +18547,33 @@ impl Series {
         Some((values, count))
     }
 
+    /// `result`, holding this Series' own values (drop_duplicates, nlargest /
+    /// nsmallest, mode, clip), in this Series' nullable extension dtype -
+    /// Int64 / Float64 / boolean, or pandas' `string` - as pandas keeps it.
+    /// The engine rebuilt such results from Scalars and inferred numpy
+    /// int64 (an Int64 drop_duplicates was an int64 column HOLDING NaN),
+    /// float64, bool or object (br-frankenpandas-1t4kg).
+    fn keeping_extension_dtype(
+        &self,
+        result: Result<Self, FrameError>,
+    ) -> Result<Self, FrameError> {
+        let mut result = result?;
+        let dtype = self.column.dtype();
+        if matches!(
+            dtype,
+            DType::Int64Nullable | DType::Float64Nullable | DType::BoolNullable
+        ) && result.column.dtype() != dtype
+        {
+            result.column = result.column.astype(dtype)?;
+        } else if self.column.is_pandas_string()
+            && result.column.dtype() == DType::Utf8
+            && !result.column.is_pandas_string()
+        {
+            result.column = result.column.as_pandas_string();
+        }
+        Ok(result)
+    }
+
     /// `result`, an elementwise operation on this Series that pandas keeps
     /// in its dtype (abs, clip, round, shift, fillna; fvsao.23), in this
     /// Series' width: float32 rounded; an integer width wrapped when
@@ -18644,7 +18671,7 @@ impl Series {
     ///
     /// Matches `pd.Series.clip(lower, upper)`. NaN values pass through unchanged.
     pub fn clip(&self, lower: Option<f64>, upper: Option<f64>) -> Result<Self, FrameError> {
-        self.keeping_width(self.clip_storage(lower, upper), false)
+        self.keeping_extension_dtype(self.keeping_width(self.clip_storage(lower, upper), false))
     }
 
     fn clip_storage(&self, lower: Option<f64>, upper: Option<f64>) -> Result<Self, FrameError> {
@@ -21872,6 +21899,10 @@ impl Series {
     ///
     /// Matches `pd.Series.mode(dropna=...)`.
     pub fn mode_with_dropna(&self, dropna: bool) -> Result<Self, FrameError> {
+        self.keeping_extension_dtype(self.mode_with_dropna_storage(dropna))
+    }
+
+    fn mode_with_dropna_storage(&self, dropna: bool) -> Result<Self, FrameError> {
         // ⚠️ A CATEGORICAL COLUMN HOLDS CODES, and here that is wrong TWICE
         // over. The tally itself is safe — codes and categories are a bijection,
         // so the most frequent code is the most frequent value — but the output
@@ -25136,7 +25167,7 @@ impl Series {
     ///
     /// Matches `series.nlargest(n)`. Missing values are excluded.
     pub fn nlargest(&self, n: usize) -> Result<Self, FrameError> {
-        self.keeping_width(self.nlargest_storage(n), false)
+        self.keeping_extension_dtype(self.keeping_width(self.nlargest_storage(n), false))
     }
 
     fn nlargest_storage(&self, n: usize) -> Result<Self, FrameError> {
@@ -25245,7 +25276,7 @@ impl Series {
     ///
     /// Matches `series.nsmallest(n)`. Missing values are excluded.
     pub fn nsmallest(&self, n: usize) -> Result<Self, FrameError> {
-        self.keeping_width(self.nsmallest_storage(n), false)
+        self.keeping_extension_dtype(self.keeping_width(self.nsmallest_storage(n), false))
     }
 
     fn nsmallest_storage(&self, n: usize) -> Result<Self, FrameError> {
@@ -25349,14 +25380,14 @@ impl Series {
     /// - `last`: keep last occurrence of duplicates
     /// - `all`: keep all occurrences (may return more than n rows)
     pub fn nsmallest_keep(&self, n: usize, keep: &str) -> Result<Self, FrameError> {
-        self.nlargest_smallest_impl(n, keep, true)
+        self.keeping_extension_dtype(self.nlargest_smallest_impl(n, keep, true))
     }
 
     /// Return the `n` largest values with `keep` parameter.
     ///
     /// Matches `series.nlargest(n, keep='first'|'last'|'all')`.
     pub fn nlargest_keep(&self, n: usize, keep: &str) -> Result<Self, FrameError> {
-        self.nlargest_smallest_impl(n, keep, false)
+        self.keeping_extension_dtype(self.nlargest_smallest_impl(n, keep, false))
     }
 
     fn nlargest_smallest_impl(
@@ -29251,7 +29282,9 @@ impl Series {
     /// - `Last`: keep the last occurrence of each value
     /// - `None`: drop all duplicated values entirely
     pub fn drop_duplicates_keep(&self, keep: DuplicateKeep) -> Result<Self, FrameError> {
-        self.keeping_width(self.drop_duplicates_keep_storage(keep), false)
+        self.keeping_extension_dtype(
+            self.keeping_width(self.drop_duplicates_keep_storage(keep), false),
+        )
     }
 
     fn drop_duplicates_keep_storage(&self, keep: DuplicateKeep) -> Result<Self, FrameError> {
