@@ -7,8 +7,9 @@
 > IDs were each defined twice (DISC-018, DISC-019, DISC-020), so a citation could
 > resolve to the wrong entry depending on which heading a reader hit first, and one
 > real citation did. The duplicates were renumbered to DISC-022/023/024, keeping the
-> number on whichever entry the existing in-tree citations actually meant. The next
-> free number is DISC-032. To see every ID in use:
+> number on whichever entry the existing in-tree citations actually meant. DISC-032
+> was skipped (DISC-033 was taken past it and is cited as such). The next free
+> number is DISC-034. To see every ID in use:
 > `grep -n '^### DISC-' crates/fp-conformance/DISCREPANCIES.md`
 
 ## Active Divergences
@@ -184,6 +185,13 @@
 - **Tests affected:** `test_repeated_names_where_pandas_fails_answer_as_unique_names` checks fp against pandas on the uniquely named frame and asserts pandas' own failure, so a pandas fix shows there.
 - **Review date:** 2026-09-29
 
+### DISC-033: `rank` of a masked Int64 / boolean Series ranks its missing values (pandas 2.2.3 reads the buffer under the mask)
+- **Reference:** pandas 2.2.3 ranks a masked Int64 / boolean array's raw data, ignoring the mask, so a missing value gets a rank from whatever the buffer holds in its slot: `pd.Series([3, None, 1, 3], dtype='Int64').rank()` is `[3.5, 1.5, 1.5, 3.5]` (the constructor stores 1 under the mask, which ties with the real 1); `pd.Series([3, 1, 5], dtype='Int64').where(mask)` ranks the 1 `where` left behind; `pd.Series([True, None, False], dtype='boolean').rank()` is `[3.0, 1.5, 1.5]`. A `Float64` Series holds NaN under its mask and ranks correctly (`[1.0, nan, 2.0]`). Measured live 2026-10-05.
+- **Our impl:** the missing value is missing: `[2.5, NaN, 1.0, 2.5]` (`na_option='keep'`), last with `na_option='bottom'`, as pandas ranks every other dtype.
+- **Impact:** the answer pandas gives depends on how the array was built (the hidden buffer is not observable through pandas' API), so it cannot be reproduced from the values alone.
+- **Resolution:** ACCEPTED (found by br-frankenpandas-1t4kg's sweep).
+- **Review date:** 2026-10-05
+
 ## Resolved Divergences
 
 ### DISC-025: `str.encode` returns byte LENGTHS, where pandas returns bytes objects
@@ -310,13 +318,6 @@
 - **Resolution:** RESOLVED (br-frankenpandas-ih4t0 / br-frankenpandas-8b4d4).
 - **Tests affected:** `fp_p2d_028` (strict, hardened), `fp_p2d_029` (strict, hardened), `concat_dataframes_axis1_duplicate_columns_succeeds`.
 - **Review date:** 2026-09-12
-
-### DISC-033: `rank` of a masked Int64 / boolean Series ranks its missing values (pandas 2.2.3 reads the buffer under the mask)
-- **Reference:** pandas 2.2.3 ranks a masked Int64 / boolean array's raw data, ignoring the mask, so a missing value gets a rank from whatever the buffer holds in its slot: `pd.Series([3, None, 1, 3], dtype='Int64').rank()` is `[3.5, 1.5, 1.5, 3.5]` (the constructor stores 1 under the mask, which ties with the real 1); `pd.Series([3, 1, 5], dtype='Int64').where(mask)` ranks the 1 `where` left behind; `pd.Series([True, None, False], dtype='boolean').rank()` is `[3.0, 1.5, 1.5]`. A `Float64` Series holds NaN under its mask and ranks correctly (`[1.0, nan, 2.0]`). Measured live 2026-10-05.
-- **Our impl:** the missing value is missing: `[2.5, NaN, 1.0, 2.5]` (`na_option='keep'`), last with `na_option='bottom'`, as pandas ranks every other dtype.
-- **Impact:** the answer pandas gives depends on how the array was built (the hidden buffer is not observable through pandas' API), so it cannot be reproduced from the values alone.
-- **Resolution:** ACCEPTED (found by br-frankenpandas-1t4kg's sweep).
-- **Review date:** 2026-10-05
 
 ## Rules
 
