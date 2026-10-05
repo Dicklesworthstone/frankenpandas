@@ -26296,3 +26296,46 @@ def test_string_accessor_results_keep_string_like_pandas_fvsao59(case: str) -> N
         return (repr(result), dtypes)
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-hfdld: a gap concat(axis=0) invents is NaN in an object,
+# bool or text column even once the column held a None (fp filled None);
+# combine_first keeps self's column when other's is all missing or absent
+# (a None stays None), and a one-sided column gaining rows is reindexed (an
+# int64 one widens to float64). The cells' Python kinds tell None from NaN.
+def _hfdld_left(m: Any) -> Any:
+    return m.DataFrame({"k": [1, 2], "s": ["a", None], "b": [True, False], "o": ["x", "y"]})
+
+
+def _hfdld_right(m: Any) -> Any:
+    return m.DataFrame({"k": [2, 3], "w": [10, 20], "t": ["x", None]})
+
+
+_HFDLD_GAP_CASES = {
+    "concat": lambda m: m.concat([_hfdld_left(m), _hfdld_right(m)]),
+    "concat ignore_index": lambda m: m.concat([_hfdld_left(m), _hfdld_right(m)], ignore_index=True),
+    "concat keys": lambda m: m.concat([_hfdld_left(m), _hfdld_right(m)], keys=["a", "b"]),
+    "concat all-None object column": lambda m: m.concat([m.DataFrame({"s": [None, None]}), m.DataFrame({"k": [1]})]),
+    "concat all-valid int widens (NEGATIVE)": lambda m: m.concat([m.DataFrame({"k": [1, 2]}), m.DataFrame({"s": ["x"]})]),
+    "concat float with NaN (NEGATIVE)": lambda m: m.concat([m.DataFrame({"v": [1.5, None]}), m.DataFrame({"s": ["x"]})]),
+    "combine_first other-lacking column keeps None": lambda m: m.DataFrame({"s": ["a", None]}).combine_first(m.DataFrame({"t": [1, 2]})),
+    "combine_first self-only int gains a row": lambda m: m.DataFrame({"k": [1, 2]}).combine_first(m.DataFrame({"t": [1, 2, 3]})),
+    "combine_first other-only int gains a row": lambda m: m.DataFrame({"k": [1, 2, 3, 4]}).combine_first(m.DataFrame({"w": [10, 20, 30]})),
+    "combine_first self-only text gains a row": lambda m: m.DataFrame({"b": ["x", None]}).combine_first(m.DataFrame({"w": [1, 2, 3]})),
+    "combine_first all-NaN other keeps text": lambda m: m.DataFrame({"s": ["a", None]}).combine_first(m.DataFrame({"s": [float("nan")] * 2})),
+    "combine_first all-NaN other keeps int": lambda m: m.DataFrame({"a": [1, 2]}).combine_first(m.DataFrame({"a": [float("nan")] * 2})),
+    "combine_first other-only all-None column": lambda m: m.DataFrame({"a": [1, 2]}).combine_first(m.DataFrame({"b": [None, None, None]})),
+    "combine_first longer self": lambda m: m.DataFrame({"k": [1, 2, 2, None], "s": ["a", "b", None, "d"], "v": [1.5, float("nan"), 3.0, 4.0]}).combine_first(m.DataFrame({"k": [2, 3, None], "w": [10, 20, 30], "t": ["x", None, "z"]})),
+    "combine_first fills from other (NEGATIVE)": lambda m: m.DataFrame({"s": ["a", None, None]}).combine_first(m.DataFrame({"s": [None, "y", None]})),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_HFDLD_GAP_CASES))
+def test_invented_gaps_are_nan_and_combine_first_keeps_self_like_pandas_hfdld(case: str) -> None:
+    def shown(m: Any) -> Any:
+        result = _HFDLD_GAP_CASES[case](m)
+        kinds = {str(name): [type(value).__name__ for value in result[name].tolist()] for name in result.columns}
+        return (repr(result), [str(dtype) for dtype in result.dtypes], kinds)
+
+    assert shown(fpd) == shown(pd)

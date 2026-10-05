@@ -1767,6 +1767,35 @@ fn poison_series_right_cells_for_combine_first(left: &Series, right: &Series) ->
     .expect("poisoned right series must construct")
 }
 
+/// The same labels, columns and cells, an int cell equal to a float cell of
+/// the same number and any missing value to any other: what combine_first's
+/// associativity promises. Its dtypes are not associative in pandas 2.2.3,
+/// which widens an int column wherever the alignment adds a row and casts
+/// only a column both sides had back to their common dtype (measured live
+/// 2026-10-05: L = {'a': [1]} at [0], M = {'z': [7]} at [9], R = {'a': [5]}
+/// at [9] give float64 [1.0, 5.0] one way and int64 [1, 5] the other; L =
+/// {'c': [0]} at [0], M = {'a': [None]} at [0], R = {'c': [None]} at [1]
+/// give object and float64; br-frankenpandas-hfdld).
+fn same_cells_up_to_numeric_width(left: &DataFrame, right: &DataFrame) -> bool {
+    let number = |value: &Scalar| match value {
+        Scalar::Int64(v) => Some(*v as f64),
+        Scalar::Float64(v) => Some(*v),
+        _ => None,
+    };
+    left.index() == right.index()
+        && left.column_names() == right.column_names()
+        && left.column_names().into_iter().all(|name| {
+            let (Some(lc), Some(rc)) = (left.column(name), right.column(name)) else {
+                return false;
+            };
+            lc.values().iter().zip(rc.values()).all(|(l, r)| {
+                (l.is_missing() && r.is_missing())
+                    || l == r
+                    || matches!((number(l), number(r)), (Some(a), Some(b)) if a == b)
+            })
+        })
+}
+
 fn poison_dataframe_right_cells_for_combine_first(
     left: &DataFrame,
     right: &DataFrame,
@@ -2671,7 +2700,7 @@ proptest! {
             .and_then(|df| left.combine_first(&df))
             .expect("right-associated combine_first chain must succeed");
         prop_assert!(
-            left_assoc.equals(&right_assoc),
+            same_cells_up_to_numeric_width(&left_assoc, &right_assoc),
             "combine_first chaining must be associative for unique-label dataframe inputs"
         );
     }

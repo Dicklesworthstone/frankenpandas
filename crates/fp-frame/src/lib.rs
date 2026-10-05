@@ -67338,6 +67338,30 @@ fn column_with_invented_gaps(
     Column::from_values(values).map_err(Into::into)
 }
 
+/// The missing value `concat(axis=0)` invents for `col_name` in a frame that
+/// lacks it. A numeric column that already held a missing value keeps its
+/// dtype and takes a `Null` gap (see [`column_with_invented_gaps`]), but an
+/// object, bool, category or all-missing lane takes numpy's NaN whatever it
+/// held: concat of {'s': ['a', None]} with a frame lacking 's' reads
+/// [a, None, nan] (the gap read None; br-frankenpandas-hfdld), as
+/// `reindex_concat_axis1_column` already fills along axis=1.
+fn concat_axis0_gap(frames: &[&DataFrame], col_name: &str, source_was_all_valid: bool) -> Scalar {
+    let object_lane = frames
+        .iter()
+        .filter_map(|frame| frame.column(col_name))
+        .any(|column| {
+            matches!(
+                column.dtype(),
+                DType::Utf8 | DType::Bool | DType::Categorical | DType::Null
+            )
+        });
+    if source_was_all_valid || object_lane {
+        Scalar::Null(NullKind::NaN)
+    } else {
+        Scalar::Null(NullKind::Null)
+    }
+}
+
 /// The nullable dtype (Int64 / Float64 / boolean) the present source columns
 /// of `col_name` share, when any is nullable: a concat keeps it and fills a
 /// gap with NA, as pandas keeps `Int64` through a concat that invents one (an
@@ -67656,11 +67680,7 @@ pub fn concat_dataframes_with_ignore_index(
         let invented_a_gap = frames
             .iter()
             .any(|frame| frame.column(col_name).is_none() && !frame.is_empty());
-        let gap = if source_was_all_valid {
-            Scalar::Null(NullKind::NaN)
-        } else {
-            Scalar::Null(NullKind::Null)
-        };
+        let gap = concat_axis0_gap(frames, col_name, source_was_all_valid);
 
         let mut values = Vec::with_capacity(total_len);
         for frame in frames {
@@ -67915,11 +67935,7 @@ pub fn concat_dataframes_with_keys(
         let invented_a_gap = frames
             .iter()
             .any(|frame| frame.column(col_name).is_none() && !frame.is_empty());
-        let gap = if source_was_all_valid {
-            Scalar::Null(NullKind::NaN)
-        } else {
-            Scalar::Null(NullKind::Null)
-        };
+        let gap = concat_axis0_gap(frames, col_name, source_was_all_valid);
 
         let mut values = Vec::with_capacity(total_len);
         for frame in frames {
@@ -90141,6 +90157,43 @@ impl DataFrame {
                     }
                 }
                 return Ok(Column::from_f64_values_with_validity(out, validity));
+            }
+
+            // pandas' DataFrame.combine keeps the aligned self column verbatim
+            // when the aligned other column is all missing (or absent), and a
+            // column only `other` has is other's aligned values: a kept None
+            // stays None, and a row the alignment invents is NaN, widening an
+            // all-valid int64 column to float64 (they read NaN, int64 holding
+            // NaN, or raised casting text to float64; br-frankenpandas-hfdld).
+            let aligned = |column: &Column, side: &BTreeMap<&IndexLabel, usize>| {
+                if positional {
+                    return Ok(column.clone());
+                }
+                let positions: Vec<Option<usize>> = union_labels
+                    .iter()
+                    .map(|label| side.get(label).copied())
+                    .collect();
+                reindex_column_with_invented_gaps(column, &positions)
+            };
+            let other_all_missing =
+                other_col.is_none_or(|oc| oc.values().iter().all(Scalar::is_missing));
+            match (self_col, other_col) {
+                (Some(sc), _) if other_all_missing => return aligned(sc, &self_idx),
+                // Absent from self, all missing in other: the align's all-NaN
+                // float64 column.
+                (None, Some(_)) if other_all_missing => {
+                    let len = if positional {
+                        self.len()
+                    } else {
+                        union_labels.len()
+                    };
+                    return Ok(Column::new(
+                        DType::Float64,
+                        vec![Scalar::Null(NullKind::NaN); len],
+                    )?);
+                }
+                (None, Some(oc)) => return aligned(oc, &other_idx),
+                _ => {}
             }
 
             // Compute common dtype upfront for associativity (br-frankenpandas-1uw2u):
@@ -121352,6 +121405,45 @@ mod tests {
         assert_eq!(
             out.column("a").unwrap().values(),
             &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+    }
+
+    /// An object column that held a None takes a NaN gap from concat, its None
+    /// kept (pandas [a, None, nan]); combine_first keeps self's column where
+    /// `other` lacks it, None included, and widens an int64 column only
+    /// `other` has once the union gives it a row (br-frankenpandas-hfdld).
+    #[test]
+    fn invented_text_gap_is_nan_and_combine_first_keeps_self_hfdld() {
+        let left = DataFrame::from_dict(
+            &["s"],
+            vec![(
+                "s",
+                vec![Scalar::Utf8("a".into()), Scalar::Null(NullKind::Null)],
+            )],
+        )
+        .unwrap();
+        let right = DataFrame::from_dict(&["k"], vec![("k", vec![Scalar::Int64(1)])]).unwrap();
+
+        let stacked = concat_dataframes(&[&left, &right]).unwrap();
+        assert_eq!(
+            stacked.column("s").unwrap().values(),
+            &[
+                Scalar::Utf8("a".into()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::NaN),
+            ]
+        );
+
+        let combined = left.combine_first(&right).unwrap();
+        assert_eq!(
+            combined.column("s").unwrap().values(),
+            &[Scalar::Utf8("a".into()), Scalar::Null(NullKind::Null)]
+        );
+        let k = combined.column("k").unwrap();
+        assert_eq!(k.dtype(), DType::Float64);
+        assert_eq!(
+            k.values(),
+            &[Scalar::Float64(1.0), Scalar::Null(NullKind::NaN)]
         );
     }
 
@@ -154400,10 +154492,15 @@ mod tests {
         assert_eq!(result.columns["a"].values()[0], Scalar::Int64(1));
         assert_eq!(result.columns["a"].values()[1], Scalar::Int64(20));
         assert_eq!(result.columns["a"].values()[2], Scalar::Int64(30));
-        // b[0]=NaN (not in self or other at label 0), b[1]=200, b[2]=300
+        // b[0]=NaN (not in self or other at label 0), b[1]=200, b[2]=300: a
+        // column only `other` has is its aligned values, so the gap at 0
+        // widens it to float64 (live pandas 2.2.3: [NaN, 200.0, 300.0]).
+        // This pinned Int64(200) beside the NaN, an int64 column holding a
+        // NaN pandas never builds (br-frankenpandas-hfdld).
         assert!(result.columns["b"].values()[0].is_missing());
-        assert_eq!(result.columns["b"].values()[1], Scalar::Int64(200));
-        assert_eq!(result.columns["b"].values()[2], Scalar::Int64(300));
+        assert_eq!(result.columns["b"].dtype(), DType::Float64);
+        assert_eq!(result.columns["b"].values()[1], Scalar::Float64(200.0));
+        assert_eq!(result.columns["b"].values()[2], Scalar::Float64(300.0));
     }
 
     // ── DataFrame rename_columns_map test ──
