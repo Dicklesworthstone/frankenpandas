@@ -27050,3 +27050,39 @@ def test_to_json_float_text_and_double_precision_like_pandas_6udgl(case: str) ->
             return ("ValueError", str(error))
 
     assert shown(fpd) == shown(pd)
+
+
+# to_json(index=) and (indent=): split / table without the index, pandas'
+# refusals by the orient given, and its indented layout - JSON Lines too
+# (br-frankenpandas-gl38f).
+def _json_gl38f_frame(m: Any) -> Any:
+    return m.DataFrame({"i": [1, 2], "f": [1 / 3, None], "s": ["a,{b}", 'c"]']}, index=m.Index(["r1", "r2"], name="row"))
+
+
+_JSON_GL38F_CASES = {
+    "split index=False": lambda m: _json_gl38f_frame(m).to_json(orient="split", index=False),
+    "table index=False": lambda m: _json_gl38f_frame(m).to_json(orient="table", index=False),
+    "records index=False": lambda m: _json_gl38f_frame(m).to_json(orient="records", index=False),
+    "records index=True refused": lambda m: _json_gl38f_frame(m).to_json(orient="records", index=True),
+    "columns index=False refused": lambda m: _json_gl38f_frame(m).to_json(orient="columns", index=False),
+    "default orient index=False": lambda m: _json_gl38f_frame(m).to_json(index=False),
+    "Series split index=False": lambda m: m.Series([1.5, 2.5], index=["a", "b"], name="s").to_json(orient="split", index=False),
+    "indent=2": lambda m: _json_gl38f_frame(m).to_json(indent=2),
+    "records indent=1": lambda m: _json_gl38f_frame(m).to_json(orient="records", indent=1),
+    "table indent=4": lambda m: _json_gl38f_frame(m).to_json(orient="table", indent=4),
+    "lines indent=2": lambda m: _json_gl38f_frame(m).to_json(orient="records", lines=True, indent=2),
+    "empty column indent=2": lambda m: m.DataFrame({"x": []}).to_json(indent=2),
+    "indent=0 stays compact (NEGATIVE)": lambda m: _json_gl38f_frame(m).to_json(orient="split", indent=0),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_JSON_GL38F_CASES))
+def test_to_json_index_and_indent_like_pandas_gl38f(case: str) -> None:
+    def shown(m: Any) -> Any:
+        try:
+            return _JSON_GL38F_CASES[case](m)
+        except ValueError as error:
+            return ("ValueError", str(error))
+
+    assert shown(fpd) == shown(pd)

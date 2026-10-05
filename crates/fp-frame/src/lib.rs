@@ -5229,6 +5229,86 @@ fn serialize_json_value(value: &Value, precision: u32) -> Result<String, FrameEr
 /// pandas' `to_json` default `double_precision`.
 pub const JSON_DOUBLE_PRECISION: u32 = 10;
 
+/// pandas' `to_json` keywords around the orient (the dates are the
+/// caller's): the floats' `double_precision` ([`PandasJsonDouble`]) and
+/// whether the `split` / `table` orients carry the index (`index=False`
+/// leaves it out; br-frankenpandas-gl38f).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JsonOptions {
+    pub double_precision: u32,
+    pub index: bool,
+}
+
+impl Default for JsonOptions {
+    fn default() -> Self {
+        Self {
+            double_precision: JSON_DOUBLE_PRECISION,
+            index: true,
+        }
+    }
+}
+
+/// Compact JSON text laid out as pandas' `to_json(indent=n)` writes it (its
+/// ujson encoder): a newline after each opening bracket and each comma,
+/// each element indented `n` spaces a level, the closing bracket on its own
+/// line a level out (an empty container `{` blank line `}`), no space after
+/// a colon; strings untouched. `n` of 0 leaves the text compact
+/// (br-frankenpandas-gl38f).
+#[must_use]
+pub fn indent_pandas_json(compact: &str, indent: usize) -> String {
+    if indent == 0 {
+        return compact.to_owned();
+    }
+    let bytes = compact.as_bytes();
+    let mut out = String::with_capacity(compact.len() * 2);
+    let mut depth = 0_usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let pad = |out: &mut String, depth: usize| {
+        out.extend(std::iter::repeat_n(' ', indent * depth));
+    };
+    for (at, ch) in compact.char_indices() {
+        if in_string {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => {
+                in_string = true;
+                out.push(ch);
+            }
+            '{' | '[' => {
+                depth += 1;
+                out.push(ch);
+                out.push('\n');
+                let closer = if ch == '{' { b'}' } else { b']' };
+                if bytes.get(at + 1).is_some_and(|next| *next != closer) {
+                    pad(&mut out, depth);
+                }
+            }
+            '}' | ']' => {
+                depth = depth.saturating_sub(1);
+                out.push('\n');
+                pad(&mut out, depth);
+                out.push(ch);
+            }
+            ',' => {
+                out.push_str(",\n");
+                pad(&mut out, depth);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 /// A float's text as pandas' `to_json` writes it (its vendored ujson
 /// encoder) at `precision` decimals (`double_precision`, 0..=15), built on
 /// the stack: above 1e16 or below 1e-15 C's `%.{p}g` ('1.23456789e+20');
@@ -29076,19 +29156,19 @@ impl Series {
     ///
     /// Floats are written at pandas' default `double_precision` (10).
     pub fn to_json(&self, orient: &str) -> Result<String, FrameError> {
-        self.to_json_with_precision(orient, JSON_DOUBLE_PRECISION)
+        self.to_json_with_options(orient, JsonOptions::default())
     }
 
-    /// [`Series::to_json`] with floats at `precision` decimals, pandas'
-    /// `double_precision` ([`PandasJsonDouble`]).
-    pub fn to_json_with_precision(
+    /// [`Series::to_json`] under pandas' `double_precision` / `index`
+    /// keywords ([`JsonOptions`]; `split` without the index when it is off).
+    pub fn to_json_with_options(
         &self,
         orient: &str,
-        precision: u32,
+        options: JsonOptions,
     ) -> Result<String, FrameError> {
+        let precision = options.double_precision;
         match orient {
             "split" => {
-                let index = split_index_json_values(&self.index, self.index.row_multiindex());
                 let data = self
                     .column
                     .values()
@@ -29101,14 +29181,13 @@ impl Series {
                 } else {
                     index_label_to_json_value(&self.name.label())
                 };
-                serialize_json_value(
-                    &Value::Object(Map::from_iter([
-                        ("name".to_owned(), name),
-                        ("index".to_owned(), Value::Array(index)),
-                        ("data".to_owned(), Value::Array(data)),
-                    ])),
-                    precision,
-                )
+                let mut entries = vec![("name".to_owned(), name)];
+                if options.index {
+                    let index = split_index_json_values(&self.index, self.index.row_multiindex());
+                    entries.push(("index".to_owned(), Value::Array(index)));
+                }
+                entries.push(("data".to_owned(), Value::Array(data)));
+                serialize_json_value(&Value::Object(Map::from_iter(entries)), precision)
             }
             "records" | "values" => {
                 let vals = self
@@ -92080,16 +92159,18 @@ impl DataFrame {
     /// Matches `pd.DataFrame.to_json(orient=...)`, floats at pandas' default
     /// `double_precision` (10).
     pub fn to_json(&self, orient: &str) -> Result<String, FrameError> {
-        self.to_json_with_precision(orient, JSON_DOUBLE_PRECISION)
+        self.to_json_with_options(orient, JsonOptions::default())
     }
 
-    /// [`DataFrame::to_json`] with floats at `precision` decimals, pandas'
-    /// `double_precision` ([`PandasJsonDouble`]).
-    pub fn to_json_with_precision(
+    /// [`DataFrame::to_json`] under pandas' `double_precision` / `index`
+    /// keywords ([`JsonOptions`]; `split` and `table` without the index
+    /// when it is off).
+    pub fn to_json_with_options(
         &self,
         orient: &str,
-        precision: u32,
+        options: JsonOptions,
     ) -> Result<String, FrameError> {
+        let precision = options.double_precision;
         // A key names one column in these orients, so pandas refuses repeated
         // column keys (i17d4: the first duplicate's data was written for each).
         if matches!(orient, "records" | "columns" | "index") && self.has_repeated_column_keys() {
@@ -92253,8 +92334,10 @@ impl DataFrame {
                 out.push(b'{');
                 out.extend_from_slice(b"\"columns\":");
                 serde_json::to_writer(&mut out, &self.column_order).map_err(|_| json_ser_err())?;
-                out.extend_from_slice(b",\"index\":");
-                write_pandas_json(&mut out, &index, precision).map_err(|_| json_ser_err())?;
+                if options.index {
+                    out.extend_from_slice(b",\"index\":");
+                    write_pandas_json(&mut out, &index, precision).map_err(|_| json_ser_err())?;
+                }
                 out.extend_from_slice(b",\"data\":[");
                 out.extend_from_slice(&body);
                 out.extend_from_slice(b"]}");
@@ -92290,28 +92373,33 @@ impl DataFrame {
                     ));
                 }
 
+                // index=False leaves the index out of the schema (no
+                // primaryKey) and of the rows (gl38f).
                 let index_name = match self.index.name() {
+                    _ if !options.index => None,
                     Some(name) => {
                         if self.columns.contains_key(name) {
                             return Err(FrameError::CompatibilityRejected(format!(
                                 "to_json orient 'table' cannot serialize index name {name:?} because it collides with a column label"
                             )));
                         }
-                        name.to_string()
+                        Some(name.to_string())
                     }
-                    None => self.reset_index_column_name(false)?,
+                    None => Some(self.reset_index_column_name(false)?),
                 };
 
                 let mut fields = Vec::with_capacity(self.column_order.len() + 1);
-                fields.push(Value::Object(Map::from_iter([
-                    ("name".to_owned(), Value::String(index_name.clone())),
-                    (
-                        "type".to_owned(),
-                        Value::String(
-                            index_labels_to_table_schema_type(self.index.labels()).to_owned(),
+                if let Some(index_name) = &index_name {
+                    fields.push(Value::Object(Map::from_iter([
+                        ("name".to_owned(), Value::String(index_name.clone())),
+                        (
+                            "type".to_owned(),
+                            Value::String(
+                                index_labels_to_table_schema_type(self.index.labels()).to_owned(),
+                            ),
                         ),
-                    ),
-                ])));
+                    ])));
+                }
                 for (col_idx, name) in self.column_order.iter().enumerate() {
                     let column = &self.columns[name];
                     fields.push(Value::Object(Map::from_iter([
@@ -92331,10 +92419,12 @@ impl DataFrame {
                         let mut row = Map::new();
                         // The table schema's instants and durations are ISO
                         // 8601, not the other orients' epoch milliseconds.
-                        row.insert(
-                            index_name.clone(),
-                            index_label_to_table_json_value(&self.index.labels()[row_idx]),
-                        );
+                        if let Some(index_name) = &index_name {
+                            row.insert(
+                                index_name.clone(),
+                                index_label_to_table_json_value(&self.index.labels()[row_idx]),
+                            );
+                        }
                         for (col_idx, name) in self.column_order.iter().enumerate() {
                             row.insert(
                                 self.table_column_name(col_idx)?,
@@ -92348,22 +92438,20 @@ impl DataFrame {
                     })
                     .collect::<Result<Vec<_>, FrameError>>()?;
 
+                let mut schema = vec![("fields".to_owned(), Value::Array(fields))];
+                if let Some(index_name) = index_name {
+                    schema.push((
+                        "primaryKey".to_owned(),
+                        Value::Array(vec![Value::String(index_name)]),
+                    ));
+                }
+                schema.push((
+                    "pandas_version".to_owned(),
+                    Value::String("1.4.0".to_owned()),
+                ));
                 serialize_json_value(
                     &Value::Object(Map::from_iter([
-                        (
-                            "schema".to_owned(),
-                            Value::Object(Map::from_iter([
-                                ("fields".to_owned(), Value::Array(fields)),
-                                (
-                                    "primaryKey".to_owned(),
-                                    Value::Array(vec![Value::String(index_name)]),
-                                ),
-                                (
-                                    "pandas_version".to_owned(),
-                                    Value::String("1.4.0".to_owned()),
-                                ),
-                            ])),
-                        ),
+                        ("schema".to_owned(), Value::Object(Map::from_iter(schema))),
                         ("data".to_owned(), Value::Array(data)),
                     ])),
                     precision,
@@ -161275,6 +161363,7 @@ mod tests {
 
     #[test]
     fn dataframe_to_json_floats_follow_pandas_double_precision_6udgl() {
+        use crate::{JsonOptions, indent_pandas_json};
         // Live pandas 2.2.3's text for each (to_json orient=... [,
         // double_precision=...]); serde's shortest round trip wrote
         // 0.3333333333333333, 1e-12, 0.30000000000000004, 1e+16 (6udgl).
@@ -161304,7 +161393,15 @@ mod tests {
              [0.000015],[10000000000000000.0],[0.0],[9.99e-16],[1.0]]"
         );
         assert_eq!(
-            frame.to_json_with_precision("values", 3).unwrap(),
+            frame
+                .to_json_with_options(
+                    "values",
+                    JsonOptions {
+                        double_precision: 3,
+                        index: true,
+                    }
+                )
+                .unwrap(),
             "[[0.333],[2.0],[0.0],[123456789.123],[1e+20],[-0.5],[0.3],[0.0],\
              [10000000000000000.0],[0.0],[9.99e-16],[1.0]]"
         );
@@ -161332,9 +161429,43 @@ mod tests {
             series.to_json("index").unwrap(),
             r#"{"0":0.3333333333,"1":0.3}"#
         );
+        let two_places = JsonOptions {
+            double_precision: 2,
+            index: true,
+        };
         assert_eq!(
-            series.to_json_with_precision("split", 2).unwrap(),
+            series.to_json_with_options("split", two_places).unwrap(),
             r#"{"name":"x","index":[0,1],"data":[0.33,0.3]}"#
+        );
+        // index=False: split and table without the index (gl38f).
+        let no_index = JsonOptions {
+            index: false,
+            ..two_places
+        };
+        assert_eq!(
+            series.to_json_with_options("split", no_index).unwrap(),
+            r#"{"name":"x","data":[0.33,0.3]}"#
+        );
+        assert_eq!(
+            small.to_json_with_options("split", no_index).unwrap(),
+            r#"{"columns":["x"],"data":[[0.33],[0.3]]}"#
+        );
+        assert_eq!(
+            small.to_json_with_options("table", no_index).unwrap(),
+            r#"{"schema":{"fields":[{"name":"x","type":"number"}],"pandas_version":"1.4.0"},"data":[{"x":0.33},{"x":0.3}]}"#
+        );
+        // indent=: pandas' layout of the same text.
+        assert_eq!(
+            indent_pandas_json(&small.to_json("columns").unwrap(), 2),
+            "{\n  \"x\":{\n    \"0\":0.3333333333,\n    \"1\":0.3\n  }\n}"
+        );
+        assert_eq!(
+            indent_pandas_json(r#"{"x":{}}"#, 2),
+            "{\n  \"x\":{\n\n  }\n}"
+        );
+        assert_eq!(
+            indent_pandas_json(r#"["a,{b}","c\"]"]"#, 1),
+            "[\n \"a,{b}\",\n \"c\\\"]\"\n]"
         );
         // NEGATIVE: ints, bools, text and missing cells are not floats.
         let mixed = DataFrame::from_dict(

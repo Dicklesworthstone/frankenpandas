@@ -35299,7 +35299,7 @@ impl PySeries {
             path_or_buf,
             orient,
             &args,
-            |lines, precision| {
+            |lines, options| {
                 if lines {
                     return Err(not_implemented("Series.to_json(lines=True)"));
                 }
@@ -35322,7 +35322,7 @@ impl PySeries {
                 };
                 Series::new(series.name(), index, column)
                     .map_err(frame_error_to_py)?
-                    .to_json_with_precision(orient.unwrap_or("index"), precision)
+                    .to_json_with_options(orient.unwrap_or("index"), options)
                     .map_err(frame_error_to_py)
             },
         )
@@ -50954,7 +50954,7 @@ impl PyDataFrame {
             path_or_buf,
             orient,
             &args,
-            |lines, precision| {
+            |lines, options| {
                 // Columns of dates write as their instants (fvsao.67), in
                 // date_format / date_unit.
                 let frame = Python::attach(|py| frame_object_instants(py, &self.inner))?;
@@ -51012,15 +51012,16 @@ impl PyDataFrame {
                 };
                 if lines {
                     // pandas ends every record line, the last included, with "\n".
-                    let mut text = fp_io::write_jsonl_string_with_precision(&frame, precision)
-                        .map_err(io_error_to_py)?;
+                    let mut text =
+                        fp_io::write_jsonl_string_with_precision(&frame, options.double_precision)
+                            .map_err(io_error_to_py)?;
                     if !text.is_empty() && !text.ends_with('\n') {
                         text.push('\n');
                     }
                     Ok(text)
                 } else {
                     frame
-                        .to_json_with_precision(orient.unwrap_or("columns"), precision)
+                        .to_json_with_options(orient.unwrap_or("columns"), options)
                         .map_err(frame_error_to_py)
                 }
             },
@@ -90032,21 +90033,23 @@ struct JsonWriteArgs<'a, 'py> {
     mode: &'a str,
 }
 
-/// Write pandas' `to_json` output. `render(lines, precision)` produces the
-/// JSON text (JSON Lines when `lines`, floats at `precision` decimals -
-/// double_precision, 0..=15 as pandas checks it; it was refused,
-/// br-frankenpandas-gl38f). force_ascii escapes non-ASCII as pandas does
-/// (the default, which frankenpandas used to skip), lines and mode='a'
-/// follow pandas' rules, and every other keyword raises NotImplementedError
-/// at a non-default value.
+/// Write pandas' `to_json` output. `render(lines, options)` produces the
+/// JSON text (JSON Lines when `lines`) under `double_precision` (0..=15 as
+/// pandas checks it) and `index` (refused by the orient given, as pandas;
+/// split / table leave the index out when False); `indent` lays the text
+/// out as pandas does - JSON Lines from the indented records. These three
+/// were refused (br-frankenpandas-gl38f). force_ascii escapes non-ASCII as
+/// pandas does (the default, which frankenpandas used to skip), lines and
+/// mode='a' follow pandas' rules, and every other keyword raises
+/// NotImplementedError at a non-default value.
 fn write_json_py(
     method: &str,
     path_or_buf: Option<&Bound<'_, PyAny>>,
     orient: Option<&str>,
     args: &JsonWriteArgs<'_, '_>,
-    render: impl FnOnce(bool, u32) -> PyResult<String>,
+    render: impl Fn(bool, fp_frame::JsonOptions) -> PyResult<String>,
 ) -> PyResult<Option<String>> {
-    let precision = u32::try_from(args.double_precision)
+    let double_precision = u32::try_from(args.double_precision)
         .ok()
         .filter(|precision| *precision <= 15)
         .ok_or_else(|| {
@@ -90063,11 +90066,28 @@ fn write_json_py(
                 "compression",
                 compression_is_plain(args.compression, path_or_buf)?,
             ),
-            ("index", args.index.is_none()),
-            ("indent", args.indent.is_none()),
             ("storage_options", args.storage_options.is_none()),
         ],
     )?;
+    // pandas checks index= against the orient as given (a default orient
+    // takes either).
+    match (orient, args.index) {
+        (Some("records" | "values"), Some(true)) => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "'index=True' is only valid when 'orient' is 'split', 'table', 'index', or 'columns'.",
+            ));
+        }
+        (Some("index" | "columns"), Some(false)) => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "'index=False' is only valid when 'orient' is 'split', 'table', 'records', or 'values'.",
+            ));
+        }
+        _ => {}
+    }
+    let options = fp_frame::JsonOptions {
+        double_precision,
+        index: args.index.unwrap_or(true),
+    };
     if args.lines && orient != Some("records") {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "'lines' keyword only valid when 'orient' is records",
@@ -90087,13 +90107,63 @@ fn write_json_py(
             )));
         }
     }
-    let text = render(args.lines, precision)?;
+    let indent = args
+        .indent
+        .and_then(|indent| usize::try_from(indent).ok())
+        .filter(|indent| *indent > 0);
+    let text = match indent {
+        None => render(args.lines, options)?,
+        Some(indent) if args.lines => json_lines_of_records(&fp_frame::indent_pandas_json(
+            &render(false, options)?,
+            indent,
+        )),
+        Some(indent) => fp_frame::indent_pandas_json(&render(false, options)?, indent),
+    };
     let text = if args.force_ascii {
         ascii_escape_json(&text)
     } else {
         text
     };
     write_text_target(path_or_buf, text, args.mode == "a")
+}
+
+/// pandas' JSON Lines of a records array (`convert_to_line_delimits`), as
+/// it makes them from an indented one: the brackets stripped, each comma
+/// between records (outside strings and braces) a newline, and a newline
+/// after the last (br-frankenpandas-gl38f).
+fn json_lines_of_records(records: &str) -> String {
+    let inner = records
+        .strip_prefix('[')
+        .and_then(|text| text.strip_suffix(']'))
+        .unwrap_or(records);
+    let mut out = String::with_capacity(inner.len() + 1);
+    let (mut depth, mut in_string, mut escaped) = (0_usize, false, false);
+    for ch in inner.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            out.push(ch);
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                out.push('\n');
+                continue;
+            }
+            _ => {}
+        }
+        out.push(ch);
+    }
+    out.push('\n');
+    out
 }
 
 /// `frame` as `to_json(orient)` writes its dates: orient='table' writes ISO
