@@ -9359,8 +9359,9 @@ fn py_value_to_column(
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()));
     }
     if let Ok(s) = py_to_scalar(py, val) {
-        return Column::from_values(vec![s; expected_len])
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()));
+        // A number or bool fills its typed buffer (assign(z=1) built a
+        // million Scalars; br-frankenpandas-4jsxs).
+        return broadcast_column(s, expected_len);
     }
     Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
         "Cannot convert value to DataFrame column",
@@ -34502,23 +34503,31 @@ impl PySeries {
             Ok(l) => l,
             Err(_) => return Ok(default.cloned().unwrap_or_else(|| py.None().into_bound(py))),
         };
-        let positions: Vec<usize> = self
-            .inner
-            .index()
-            .labels()
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| *l == &label)
-            .map(|(i, _)| i)
-            .collect();
+        // A unique index finds its one row by lookup and reads that cell
+        // alone (the scan read every label and the cell built the column's
+        // Scalar view: s.get(5) 1.9 ms a million rows; br-frankenpandas-4jsxs).
+        let positions: Vec<usize> = if self.inner.index().has_duplicates() {
+            self.inner
+                .index()
+                .labels()
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| *l == &label)
+                .map(|(i, _)| i)
+                .collect()
+        } else {
+            self.inner.index().position(&label).into_iter().collect()
+        };
         if positions.len() > 1 {
             if let Ok(sub) = self.inner.loc(&[label]) {
                 let py_s = Py::new(py, PySeries { inner: sub })?;
                 return Ok(py_s.into_bound(py).into_any());
             }
-        } else if let Some(pos) = positions.first() {
-            let sc = &self.inner.column().values()[*pos];
-            let py_val = scalar_to_py(py, sc)?;
+        } else if let Some(cell) = positions
+            .first()
+            .and_then(|&pos| self.inner.column().scalar_at(pos))
+        {
+            let py_val = scalar_to_py(py, &cell)?;
             return Ok(py_val.into_bound(py));
         }
         Ok(default.cloned().unwrap_or_else(|| py.None().into_bound(py)))

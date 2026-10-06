@@ -1675,6 +1675,11 @@ fn index_memory_usage_bytes(index: &Index) -> usize {
 }
 
 fn index_memory_usage_bytes_with_deep(index: &Index, deep: bool) -> usize {
+    // A range's labels are int64s, 8 bytes each: not built to be counted
+    // (memory_usage built a million; br-frankenpandas-4jsxs).
+    if index.range_span().is_some() {
+        return index.len() * 8;
+    }
     index
         .labels()
         .iter()
@@ -27438,6 +27443,27 @@ impl Series {
         // no need to materialize Vec<Scalar> (br-frankenpandas-2jibm).
         if !self.column.validity().all() {
             return true;
+        }
+        // A float's NaN, a datetime's or timedelta's NaT, read off the buffer
+        // as is_missing reads the cell (the Scalar view cost 1.3 ms a million
+        // rows; br-frankenpandas-4jsxs).
+        if let Some(data) = self.column.as_f64_slice() {
+            // A count per block vectorizes; an early-exit any does not.
+            return data.chunks(4096).any(|block| {
+                block
+                    .iter()
+                    .map(|&value| u32::from(value.is_nan()))
+                    .sum::<u32>()
+                    > 0
+            });
+        }
+        if let Some(nanos) = self
+            .column
+            .as_datetime64_slice()
+            .or_else(|| self.column.as_timedelta64_slice())
+            && nanos.len() == self.len()
+        {
+            return nanos.contains(&i64::MIN);
         }
         // All slots valid. For dtypes whose missing-ness is captured ENTIRELY by
         // the validity mask (no in-band NaN/NaT/sentinel), all-valid means no
@@ -172399,6 +172425,12 @@ mod tests {
             vec![Scalar::Datetime64(1), Scalar::Null(NullKind::NaT)],
             // all-valid Datetime64 (deferred path -> false)
             vec![Scalar::Datetime64(1), Scalar::Datetime64(2)],
+            // Timedelta64 all-valid and with a NaT (buffer scans; 4jsxs)
+            vec![Scalar::Timedelta64(1), Scalar::Timedelta64(2)],
+            vec![Scalar::Timedelta64(1), Scalar::Null(NullKind::NaT)],
+            // all-valid Float64 past one 4096-value block (block counts;
+            // br-frankenpandas-4jsxs)
+            (0..5000).map(|i| Scalar::Float64(f64::from(i))).collect(),
         ];
         for vals in cases {
             let s = Series::from_values("x", idx(vals.len()), vals).unwrap();
