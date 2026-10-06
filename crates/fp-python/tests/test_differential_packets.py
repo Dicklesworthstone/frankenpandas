@@ -27475,3 +27475,35 @@ def test_reindex_equal_and_empty_targets_like_pandas_lnb7i(case: str) -> None:
                 return ("ValueError", type(err).__name__)
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-nmna9: an index= argument that is an Index, a range or an
+# int64 array is taken whole, and `.index` picks its class from label kinds
+# kept per label identity - a second access answers as the first.
+def _nmna9_index(index: Any) -> Any:
+    return [type(index).__name__, str(index.dtype), index.name, repr(list(index)), str(getattr(index, "freq", None))]
+
+
+def _nmna9_twice(series: Any) -> Any:
+    return [_nmna9_index(series.index), _nmna9_index(series.index)]
+
+
+_NMNA9_CASES = {
+    "Index(int64 array) argument": lambda m: _nmna9_twice(m.Series(np.ones(3), index=m.Index(np.array([5, 3, 9])))),
+    "named Index argument": lambda m: _nmna9_twice(m.Series(np.ones(3), index=m.Index(np.array([5, 3, 9]), name="k"))),
+    "object Index argument": lambda m: _nmna9_twice(m.Series(np.ones(3), index=m.Index([0, 1, 2], dtype=object))),
+    "named RangeIndex argument": lambda m: _nmna9_twice(m.Series(np.ones(3), index=m.RangeIndex(3, name="r"))),
+    "range argument": lambda m: _nmna9_twice(m.Series(np.ones(3), index=range(5, 8))),
+    "int64 array argument": lambda m: _nmna9_twice(m.Series(np.ones(3), index=np.array([7, 1, 4]))),
+    "datetime set_index": lambda m: _nmna9_twice(m.DataFrame({"t": m.to_datetime(["2024-01-03", "2024-01-01"]), "v": [1, 2]}).set_index("t")),
+    "NaT beside instants": lambda m: _nmna9_twice(m.Series([1, 2], index=[m.Timestamp("2024-01-01"), m.NaT])),
+    "durations beside NaN": lambda m: _nmna9_twice(m.Series([1, 2], index=[m.Timedelta("1D"), float("nan")])),
+    "intervals": lambda m: _nmna9_twice(m.Series([1, 2], index=m.interval_range(0, 2))),
+    "derived index with a float (NEGATIVE: not the ints' class)": lambda m: _nmna9_index(m.Series(np.ones(3), index=m.Index(np.array([5, 3, 9]))).index.append(m.Index([1.5]))),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_NMNA9_CASES))
+def test_index_arguments_and_getter_classes_like_pandas_nmna9(case: str) -> None:
+    assert _NMNA9_CASES[case](fpd) == _NMNA9_CASES[case](pd)

@@ -10218,60 +10218,62 @@ fn index_to_timestamp(
 /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.18) - a
 /// MultiIndex level too (br-frankenpandas-stofr).
 fn flat_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
-    // Typed ints are a plain Index: the scans below for instants,
-    // durations, periods and intervals walked a million of them on every
-    // `.index` (br-frankenpandas-lnb7i).
-    if index.has_int64_backing() && !index.is_empty() {
-        return Ok(Py::new(
+    use fp_index::LabelKinds;
+    let plain = || -> PyResult<Py<PyAny>> {
+        Ok(Py::new(
             py,
             PyIndex {
                 inner: index.clone(),
             },
         )?
-        .into_any());
-    }
-    let labels = index.labels();
+        .into_any())
+    };
     // An empty index keeps its source's class (pandas' empty slice of a
     // DatetimeIndex is one; dwyud); one declared object is a plain Index
     // whatever it holds (pandas' astype(object); i20vm).
     match index.declared_dtype() {
-        Some(fp_index::DeclaredDtype::Object) => {
-            return Ok(Py::new(
-                py,
-                PyIndex {
-                    inner: index.clone(),
-                },
-            )?
-            .into_any());
-        }
-        Some(fp_index::DeclaredDtype::Datetime64) if labels.is_empty() => {
+        Some(fp_index::DeclaredDtype::Object) => return plain(),
+        Some(fp_index::DeclaredDtype::Datetime64) if index.is_empty() => {
             if let Ok(inner) = DatetimeIndex::from_index(index.clone()) {
                 return Ok(Py::new(py, PyDatetimeIndex { inner })?.into_any());
             }
         }
-        Some(fp_index::DeclaredDtype::Timedelta64) if labels.is_empty() => {
+        Some(fp_index::DeclaredDtype::Timedelta64) if index.is_empty() => {
             if let Ok(inner) = TimedeltaIndex::from_index(index.clone()) {
                 return Ok(Py::new(py, PyTimedeltaIndex { inner })?.into_any());
             }
         }
         _ => {}
     }
-    if !labels.is_empty() {
-        if labels
-            .iter()
-            .all(|label| matches!(label, IndexLabel::Datetime64(_)))
-            && let Ok(inner) = DatetimeIndex::from_index(index.clone())
-        {
-            return Ok(Py::new(py, PyDatetimeIndex { inner })?.into_any());
-        }
+    // The class follows the kinds of the labels, worked out once per label
+    // identity (every `.index` scanned a million labels for instants,
+    // durations, periods and intervals; br-frankenpandas-nmna9): none of
+    // those, nor NaT, is a plain Index.
+    let kinds = index.label_kinds();
+    let missing = LabelKinds::NAT.union(LabelKinds::OTHER_NULL);
+    let temporal = LabelKinds::DATETIME64
+        .union(LabelKinds::TIMEDELTA64)
+        .union(LabelKinds::PERIOD)
+        .union(LabelKinds::INTERVAL)
+        .union(LabelKinds::NAT);
+    if index.is_empty() || !kinds.intersects(temporal) {
+        return plain();
+    }
+    if kinds.within(LabelKinds::DATETIME64)
+        && let Ok(inner) = DatetimeIndex::from_index(index.clone())
+    {
+        return Ok(Py::new(py, PyDatetimeIndex { inner })?.into_any());
+    }
+    if kinds.within(LabelKinds::TIMEDELTA64)
+        && let Ok(inner) = TimedeltaIndex::from_index(index.clone())
+    {
+        return Ok(Py::new(py, PyTimedeltaIndex { inner })?.into_any());
+    }
+    {
+        let labels = index.labels();
         // NaT labels (alone, or beside instants) are a DatetimeIndex too,
         // as pandas' Index([NaT, NaT]) (br-frankenpandas-mzes1).
-        if labels.iter().all(|label| {
-            matches!(
-                label,
-                IndexLabel::Datetime64(_) | IndexLabel::Null(NullKind::NaT)
-            )
-        }) {
+        if kinds.within(LabelKinds::DATETIME64.union(LabelKinds::NAT)) {
             let instants = labels
                 .iter()
                 .map(|label| match label {
@@ -10285,22 +10287,11 @@ fn flat_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
                 return Ok(Py::new(py, PyDatetimeIndex { inner })?.into_any());
             }
         }
-        if labels
-            .iter()
-            .all(|label| matches!(label, IndexLabel::Timedelta64(_)))
-            && let Ok(inner) = TimedeltaIndex::from_index(index.clone())
-        {
-            return Ok(Py::new(py, PyTimedeltaIndex { inner })?.into_any());
-        }
         // Durations beside missing labels (NaT, NaN, None) are a
         // TimedeltaIndex with NaT, as pandas infers one (a plain Index of
         // durations and nan; br-frankenpandas-a2t82).
-        if labels
-            .iter()
-            .any(|label| matches!(label, IndexLabel::Timedelta64(_)))
-            && labels
-                .iter()
-                .all(|label| matches!(label, IndexLabel::Timedelta64(_) | IndexLabel::Null(_)))
+        if kinds.intersects(LabelKinds::TIMEDELTA64)
+            && kinds.within(LabelKinds::TIMEDELTA64.union(missing))
         {
             let durations = labels
                 .iter()
@@ -10316,24 +10307,28 @@ fn flat_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
             }
         }
         // Periods of one freq are a PeriodIndex (they were text; 45fzr).
-        if let Some(inner) = PeriodIndex::from_index(index) {
+        if kinds.intersects(LabelKinds::PERIOD)
+            && let Some(inner) = PeriodIndex::from_index(index)
+        {
             return Ok(Py::new(py, PyPeriodIndex { inner })?.into_any());
         }
         // Intervals are an IntervalIndex (they were text; c27hq), a missing
         // label beside them a missing interval on their closed side (a
         // where / reindex over one; tjfdd).
-        let closed = labels.iter().find_map(|label| match label {
-            IndexLabel::Interval(interval) => Some(interval.closed.to_string()),
-            _ => None,
-        });
-        if let Some(closed) = closed
-            && labels
-                .iter()
-                .all(|label| matches!(label, IndexLabel::Interval(_) | IndexLabel::Null(_)))
-        {
+        let intervals_only = kinds.intersects(LabelKinds::INTERVAL)
+            && kinds.within(LabelKinds::INTERVAL.union(missing));
+        let closed = if intervals_only {
+            labels.iter().find_map(|label| match label {
+                IndexLabel::Interval(interval) => Some(interval.closed.to_string()),
+                _ => None,
+            })
+        } else {
+            None
+        };
+        if let Some(closed) = closed {
             // A missing one makes the subtype float64, as pandas' (int
             // endpoints print as floats then).
-            let gap = labels.iter().any(IndexLabel::is_missing);
+            let gap = kinds.intersects(missing);
             let intervals = labels
                 .iter()
                 .map(|label| match label {
@@ -10426,9 +10421,18 @@ fn float_labelled(index: Index) -> Index {
 /// kept, where its million labels were copied out
 /// (br-frankenpandas-so0mr) - anything else its extracted labels.
 fn index_arg_rows(index: &Bound<'_, PyAny>, len: usize) -> PyResult<Index> {
-    let rows = match index.extract::<PyRef<'_, PyDatetimeIndex>>() {
-        Ok(dti) => dti.inner.as_index().clone(),
-        Err(_) => Index::new(extract_index_labels(Some(index), len)?),
+    let rows = if let Ok(dti) = index.extract::<PyRef<'_, PyDatetimeIndex>>() {
+        dti.inner.as_index().clone()
+    } else if let Ok(plain) = plain_index_ref(index) {
+        // An Index is its own rows, its labels shared: they were copied out
+        // and rebuilt (Series(v, index=Index(arr)) 14.7 ms a million;
+        // br-frankenpandas-nmna9).
+        plain.inner.clone()
+    } else if let Some(typed) = typed_index_of(index)? {
+        // A range or an int64 array, typed without a label each.
+        typed
+    } else {
+        Index::new(extract_index_labels(Some(index), len)?)
     };
     if rows.len() != len {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(

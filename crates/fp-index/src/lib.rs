@@ -870,6 +870,69 @@ static INDEX_LABEL_EQUALITY_CACHE: OnceLock<Mutex<FxHashMap<(u64, u64), bool>>> 
 
 const INDEX_LABEL_EQUALITY_CACHE_MAX: usize = 4096;
 
+/// [`Index::label_kinds`] by the index's runtime label identity (labels never
+/// change under one), as `INDEX_LABEL_EQUALITY_CACHE` keeps equality.
+static INDEX_LABEL_KINDS_CACHE: OnceLock<Mutex<FxHashMap<u64, LabelKinds>>> = OnceLock::new();
+
+const INDEX_LABEL_KINDS_CACHE_MAX: usize = 4096;
+
+/// The kinds of label an index holds ([`Index::label_kinds`]): which
+/// [`IndexLabel`] variants occur, a missing one split into NaT and any other
+/// null (NaN, None). A set of kinds is itself a `LabelKinds` (`union`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LabelKinds(u16);
+
+impl LabelKinds {
+    pub const INT64: Self = Self(1);
+    pub const UTF8: Self = Self(1 << 1);
+    pub const TIMEDELTA64: Self = Self(1 << 2);
+    pub const DATETIME64: Self = Self(1 << 3);
+    pub const FLOAT64: Self = Self(1 << 4);
+    pub const BOOL: Self = Self(1 << 5);
+    pub const OBJECT: Self = Self(1 << 6);
+    pub const PERIOD: Self = Self(1 << 7);
+    pub const INTERVAL: Self = Self(1 << 8);
+    pub const NAT: Self = Self(1 << 9);
+    /// A missing label other than NaT: NaN or None.
+    pub const OTHER_NULL: Self = Self(1 << 10);
+
+    /// The kind of `label`.
+    #[must_use]
+    pub const fn of(label: &IndexLabel) -> Self {
+        match label {
+            IndexLabel::Int64(_) => Self::INT64,
+            IndexLabel::Utf8(_) => Self::UTF8,
+            IndexLabel::Timedelta64(_) => Self::TIMEDELTA64,
+            IndexLabel::Datetime64(_) => Self::DATETIME64,
+            IndexLabel::Float64(_) => Self::FLOAT64,
+            IndexLabel::Bool(_) => Self::BOOL,
+            IndexLabel::Object(_) => Self::OBJECT,
+            IndexLabel::Period(_) => Self::PERIOD,
+            IndexLabel::Interval(_) => Self::INTERVAL,
+            IndexLabel::Null(fp_types::NullKind::NaT) => Self::NAT,
+            IndexLabel::Null(_) => Self::OTHER_NULL,
+        }
+    }
+
+    /// Both sets of kinds.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Whether a label of a kind in `kinds` occurs.
+    #[must_use]
+    pub const fn intersects(self, kinds: Self) -> bool {
+        self.0 & kinds.0 != 0
+    }
+
+    /// Whether every label is of a kind in `kinds` (true of no label).
+    #[must_use]
+    pub const fn within(self, kinds: Self) -> bool {
+        self.0 & !kinds.0 == 0
+    }
+}
+
 type Int64PositionLookup = FxHashMap<i64, usize>;
 type Utf8PositionLookup = FxHashMap<Box<str>, usize>;
 type SharedInt64PositionLookup = Arc<Int64PositionLookup>;
@@ -2582,6 +2645,45 @@ impl Index {
     #[doc(hidden)]
     pub fn has_int64_backing(&self) -> bool {
         self.labels.has_lazy_int64_backing()
+    }
+
+    /// The kinds of label this index holds, worked out once per label
+    /// identity: typed ints and a datetime range answer without a scan, any
+    /// other labels after one pass, kept as the equality of two indexes is
+    /// (br-frankenpandas-nmna9: every `.index` rescanned a million labels to
+    /// pick its class, and DatetimeIndex::from_index again to check it).
+    #[must_use]
+    pub fn label_kinds(&self) -> LabelKinds {
+        if self.labels.is_empty() {
+            return LabelKinds::default();
+        }
+        if self.labels.has_lazy_int64_backing() {
+            return LabelKinds::INT64;
+        }
+        if self.labels.datetime64_affine_range().is_some() {
+            return LabelKinds::DATETIME64;
+        }
+        let cache = INDEX_LABEL_KINDS_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
+        if let Some(kinds) = cache
+            .lock()
+            .expect("index label kinds cache poisoned")
+            .get(&self.label_identity)
+            .copied()
+        {
+            return kinds;
+        }
+        let kinds = self
+            .labels
+            .iter()
+            .fold(LabelKinds::default(), |kinds, label| {
+                kinds.union(LabelKinds::of(label))
+            });
+        let mut guard = cache.lock().expect("index label kinds cache poisoned");
+        if guard.len() >= INDEX_LABEL_KINDS_CACHE_MAX {
+            guard.clear();
+        }
+        guard.insert(self.label_identity, kinds);
+        kinds
     }
 
     #[must_use]
@@ -5504,19 +5606,11 @@ impl Index {
             "bool" => self.astype_bool(),
             "str" | "string" | "object" => Ok(self.astype_str()),
             "datetime64[ns]" => {
-                ensure_index_kind(
-                    self,
-                    |label| matches!(label, IndexLabel::Datetime64(_)),
-                    "DatetimeIndex",
-                )?;
+                ensure_index_kind(self, LabelKinds::DATETIME64, "DatetimeIndex")?;
                 Ok(self.clone())
             }
             "timedelta64[ns]" => {
-                ensure_index_kind(
-                    self,
-                    |label| matches!(label, IndexLabel::Timedelta64(_)),
-                    "TimedeltaIndex",
-                )?;
+                ensure_index_kind(self, LabelKinds::TIMEDELTA64, "TimedeltaIndex")?;
                 Ok(self.clone())
             }
             other => Err(IndexError::InvalidArgument(format!(
@@ -7989,12 +8083,8 @@ fn period_from_fields_at(
     datetime_period_ordinal(nanos, freq).map(|ordinal| Period::new(ordinal, freq))
 }
 
-fn ensure_index_kind(
-    index: &Index,
-    predicate: impl Fn(&IndexLabel) -> bool,
-    kind: &str,
-) -> Result<(), IndexError> {
-    if index.labels().iter().all(predicate) {
+fn ensure_index_kind(index: &Index, kinds: LabelKinds, kind: &str) -> Result<(), IndexError> {
+    if index.label_kinds().within(kinds) {
         Ok(())
     } else {
         Err(IndexError::InvalidArgument(format!(
@@ -8399,11 +8489,7 @@ impl DatetimeIndex {
 
     pub fn from_index(index: Index) -> Result<Self, IndexError> {
         if index.labels.datetime64_affine_range().is_none() {
-            ensure_index_kind(
-                &index,
-                |label| matches!(label, IndexLabel::Datetime64(_)),
-                "DatetimeIndex",
-            )?;
+            ensure_index_kind(&index, LabelKinds::DATETIME64, "DatetimeIndex")?;
         }
         Ok(Self { index })
     }
@@ -10392,11 +10478,7 @@ impl TimedeltaIndex {
     }
 
     pub fn from_index(index: Index) -> Result<Self, IndexError> {
-        ensure_index_kind(
-            &index,
-            |label| matches!(label, IndexLabel::Timedelta64(_)),
-            "TimedeltaIndex",
-        )?;
+        ensure_index_kind(&index, LabelKinds::TIMEDELTA64, "TimedeltaIndex")?;
         Ok(Self { index })
     }
 
@@ -22760,7 +22842,7 @@ mod tests {
 
     use fp_types::{Period, PeriodFreq, Scalar, Timedelta};
 
-    use crate::{Int64TwoAffineLabels, OrderedF64};
+    use crate::{Int64TwoAffineLabels, LabelKinds, OrderedF64};
 
     #[test]
     fn index_categories_ride_selection_and_refuse_outsiders_cld41() {
@@ -23905,6 +23987,70 @@ mod tests {
         let different = Index::new(vec![1_i64.into(), 2_i64.into(), 4_i64.into()]);
         assert_ne!(base, different);
         assert!(!base.equals(&different));
+    }
+
+    #[test]
+    fn label_kinds_equal_a_pass_over_the_labels_nmna9() {
+        // label_kinds - kept by label identity, answered without a scan for
+        // typed ints and a datetime range - equals a fold over the labels,
+        // and the typed index constructors check through it
+        // (br-frankenpandas-nmna9).
+        let pass = |index: &Index| {
+            index
+                .labels()
+                .iter()
+                .fold(LabelKinds::default(), |kinds, label| {
+                    kinds.union(LabelKinds::of(label))
+                })
+        };
+        let null = |kind| IndexLabel::Null(kind);
+        let cases = [
+            Index::new(vec![1_i64.into(), 2_i64.into()]),
+            Index::from_i64_values(vec![5, 3, 9]),
+            Index::from_range(0, 10, 2),
+            Index::new(vec![
+                "a".into(),
+                null(fp_types::NullKind::NaN),
+                IndexLabel::Bool(true),
+            ]),
+            Index::from_datetime64(vec![0, 10, 20]),
+            Index::new(vec![
+                IndexLabel::Datetime64(3),
+                null(fp_types::NullKind::NaT),
+            ]),
+            Index::new(vec![
+                IndexLabel::Timedelta64(7),
+                null(fp_types::NullKind::Null),
+            ]),
+            Index::new(Vec::new()),
+        ];
+        for index in cases {
+            assert_eq!(index.label_kinds(), pass(&index), "{index:?}");
+            assert_eq!(index.clone().label_kinds(), pass(&index), "{index:?}");
+        }
+        assert!(DatetimeIndex::from_index(Index::from_datetime64(vec![0, 10, 20])).is_ok());
+        assert!(TimedeltaIndex::from_index(Index::new(vec![IndexLabel::Timedelta64(1)])).is_ok());
+        // NEGATIVE: another kind beside them refuses, and labels made from
+        // ones already seen are a new identity with their own kinds.
+        assert!(
+            DatetimeIndex::from_index(Index::new(vec![IndexLabel::Datetime64(1), 2_i64.into()]))
+                .is_err()
+        );
+        assert!(
+            TimedeltaIndex::from_index(Index::new(vec![
+                IndexLabel::Timedelta64(1),
+                null(fp_types::NullKind::NaT),
+            ]))
+            .is_err()
+        );
+        let ints = Index::new(vec![1_i64.into(), 2_i64.into()]);
+        assert_eq!(ints.label_kinds(), LabelKinds::INT64);
+        let mut labels = ints.labels().to_vec();
+        labels.push(IndexLabel::Bool(true));
+        assert_eq!(
+            Index::new(labels).label_kinds(),
+            LabelKinds::INT64.union(LabelKinds::BOOL)
+        );
     }
 
     #[test]
