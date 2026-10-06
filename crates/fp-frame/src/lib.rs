@@ -69480,17 +69480,21 @@ impl LazyTransposeFramePlan {
 /// `.2` removes the `Deref` escape hatch.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ColumnStore {
-    columns: Vec<(String, Column)>,
-    lookup: BTreeMap<String, Vec<usize>>,
+    // Shared behind Arc, written through Arc::make_mut: a frame's clone (each
+    // .iloc / .loc / .at accessor, copy()) shares its columns and their names
+    // where it copied every one - 10 ms a clone at 100k columns
+    // (br-frankenpandas-9xlbq).
+    columns: Arc<Vec<(String, Column)>>,
+    lookup: Arc<BTreeMap<String, Vec<usize>>>,
 }
 
 impl ColumnStore {
     /// Empty store.
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
-            columns: Vec::new(),
-            lookup: BTreeMap::new(),
+            columns: Arc::default(),
+            lookup: Arc::default(),
         }
     }
 
@@ -69506,8 +69510,11 @@ impl ColumnStore {
     /// Append a column at the next position, allowing repeated names.
     pub fn push(&mut self, name: String, column: Column) {
         let pos = self.columns.len();
-        self.lookup.entry(name.clone()).or_default().push(pos);
-        self.columns.push((name, column));
+        Arc::make_mut(&mut self.lookup)
+            .entry(name.clone())
+            .or_default()
+            .push(pos);
+        Arc::make_mut(&mut self.columns).push((name, column));
     }
 
     /// First column stored under `name`, if any.
@@ -69521,7 +69528,7 @@ impl ColumnStore {
     /// Mutable reference to the first column stored under `name`, if any.
     pub fn get_mut(&mut self, name: &str) -> Option<&mut Column> {
         let pos = *self.lookup.get(name)?.first()?;
-        Some(&mut self.columns[pos].1)
+        Some(&mut Arc::make_mut(&mut self.columns)[pos].1)
     }
 
     /// Every column stored under `name`, first occurrence first.
@@ -69574,7 +69581,9 @@ impl ColumnStore {
 
     /// O(1) mutable positional column access.
     pub fn column_at_mut(&mut self, position: usize) -> Option<&mut Column> {
-        self.columns.get_mut(position).map(|(_, col)| col)
+        Arc::make_mut(&mut self.columns)
+            .get_mut(position)
+            .map(|(_, col)| col)
     }
 
     /// First position of `name`, if present.
@@ -69633,7 +69642,7 @@ impl ColumnStore {
     pub fn insert(&mut self, name: String, column: Column) -> Option<Column> {
         if let Some(indices) = self.lookup.get(&name) {
             let first_idx = indices[0];
-            let old = std::mem::replace(&mut self.columns[first_idx].1, column);
+            let old = std::mem::replace(&mut Arc::make_mut(&mut self.columns)[first_idx].1, column);
             Some(old)
         } else {
             self.push(name, column);
@@ -69645,8 +69654,9 @@ impl ColumnStore {
     pub fn replace_all(&mut self, name: &str, column: Column) {
         if let Some(indices) = self.lookup.get(name) {
             let idxs = indices.clone();
+            let columns = Arc::make_mut(&mut self.columns);
             for &idx in &idxs {
-                self.columns[idx].1 = column.clone();
+                columns[idx].1 = column.clone();
             }
         } else {
             self.push(name.to_owned(), column);
@@ -69655,38 +69665,40 @@ impl ColumnStore {
 
     /// Remove EVERY column stored under `name`, returning the first.
     pub fn remove(&mut self, name: &str) -> Option<Column> {
-        let indices = self.lookup.remove(name)?;
+        let indices = Arc::make_mut(&mut self.lookup).remove(name)?;
         let first_idx = indices[0];
         let first_col = self.columns[first_idx].1.clone();
-        self.columns.retain(|(col_name, _)| col_name != name);
+        Arc::make_mut(&mut self.columns).retain(|(col_name, _)| col_name != name);
         self.rebuild_lookup();
         Some(first_col)
     }
 
     fn rebuild_lookup(&mut self) {
-        self.lookup.clear();
+        let lookup = Arc::make_mut(&mut self.lookup);
+        lookup.clear();
         for (pos, (name, _)) in self.columns.iter().enumerate() {
-            self.lookup.entry(name.clone()).or_default().push(pos);
+            lookup.entry(name.clone()).or_default().push(pos);
         }
     }
 
     /// Mutable walk over all stored columns in positional order.
     pub fn iter_mut(&mut self) -> ColumnStoreIterMut<'_> {
         ColumnStoreIterMut {
-            slice_iter: self.columns.iter_mut(),
+            slice_iter: Arc::make_mut(&mut self.columns).iter_mut(),
         }
     }
 
     /// Name-sorted owned pairs, repeats included.
-    fn into_sorted_pairs(mut self) -> Vec<(String, Column)> {
-        self.columns.sort_by(|left, right| left.0.cmp(&right.0));
-        self.columns
+    fn into_sorted_pairs(self) -> Vec<(String, Column)> {
+        let mut columns = Arc::unwrap_or_clone(self.columns);
+        columns.sort_by(|left, right| left.0.cmp(&right.0));
+        columns
     }
 
     /// Owned pairs in positional (arrival) order.
     #[must_use]
     pub fn into_ordered_pairs(self) -> Vec<(String, Column)> {
-        self.columns
+        Arc::unwrap_or_clone(self.columns)
     }
 
     /// Reorder columns according to `order`, keeping any unlisted columns at the end.
@@ -69707,7 +69719,7 @@ impl ColumnStore {
         {
             return;
         }
-        let old_columns = std::mem::take(&mut self.columns);
+        let old_columns = Arc::unwrap_or_clone(std::mem::take(&mut self.columns));
         let mut slots: Vec<Option<(String, Column)>> = old_columns.into_iter().map(Some).collect();
         let mut new_columns = Vec::with_capacity(slots.len().max(order.len()));
         // How many of each name's stored positions are taken, and where its
@@ -69738,7 +69750,7 @@ impl ColumnStore {
         for slot in slots.into_iter().flatten() {
             new_columns.push(slot);
         }
-        self.columns = new_columns;
+        self.columns = Arc::new(new_columns);
         self.rebuild_lookup();
     }
 }
@@ -69815,7 +69827,7 @@ impl From<BTreeMap<String, Column>> for ColumnStore {
 impl From<ColumnStore> for BTreeMap<String, Column> {
     fn from(store: ColumnStore) -> Self {
         let mut map = BTreeMap::new();
-        for (name, col) in store.columns {
+        for (name, col) in Arc::unwrap_or_clone(store.columns) {
             map.entry(name).or_insert(col);
         }
         map
@@ -69853,7 +69865,7 @@ impl Serialize for ColumnStore {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
         let mut map = serializer.serialize_map(Some(self.columns.len()))?;
-        for (name, col) in &self.columns {
+        for (name, col) in self.columns.iter() {
             map.serialize_entry(name, col)?;
         }
         map.end()
@@ -96314,9 +96326,13 @@ impl DataFrame {
             }
         }
 
-        let is_allowed: Vec<bool> = (0..self.num_columns())
-            .map(|pos| allowed.contains(&pos))
-            .collect();
+        // Marked in one pass: a `contains` over `allowed` per position was
+        // quadratic in the column count (100k columns' sum 823 ms, pandas 5;
+        // br-frankenpandas-9xlbq).
+        let mut is_allowed = vec![false; self.num_columns()];
+        for &pos in &allowed {
+            is_allowed[pos] = true;
+        }
         let values = self.par_map_column_positions_min(16_384, |pos| {
             if !is_allowed[pos] {
                 return Ok(None);
