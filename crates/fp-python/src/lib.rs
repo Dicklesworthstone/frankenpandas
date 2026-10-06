@@ -53620,6 +53620,77 @@ fn resolve_loc_row_positions(
     }
 }
 
+/// `df.loc[mask, cols] = number` for a bool mask over the frame's own rows
+/// and plain float64 / int64 columns of the number's kind (an int joining a
+/// float column as its float): each column one select over its buffer - the
+/// column `loc_assign` writes through the mask's positions, a cell per
+/// position and write_cells (df.loc[mask, 'y'] = 0.0 3.1 ms a million rows,
+/// pandas 1.9; br-frankenpandas-1s45z). None for any other write.
+fn masked_number_write(
+    frame: &DataFrame,
+    rows: &Bound<'_, PyAny>,
+    columns: &[String],
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Option<DataFrame>> {
+    let number = if value.is_exact_instance_of::<pyo3::types::PyFloat>() {
+        match value.extract::<f64>() {
+            Ok(v) if !v.is_nan() => Scalar::Float64(v),
+            _ => return Ok(None),
+        }
+    } else if value.is_exact_instance_of::<pyo3::types::PyInt>() {
+        match value.extract::<i64>() {
+            Ok(v) => Scalar::Int64(v),
+            Err(_) => return Ok(None),
+        }
+    } else {
+        return Ok(None);
+    };
+    let Some(mask) = loc_bool_series_mask(rows)? else {
+        return Ok(None);
+    };
+    let labels = frame.index().labels();
+    let own = mask.inner.index().labels();
+    let same_rows =
+        (std::ptr::eq(own.as_ptr(), labels.as_ptr()) && own.len() == labels.len()) || own == labels;
+    let Some(flags) = mask.inner.column().as_bool_slice().filter(|_| same_rows) else {
+        return Ok(None);
+    };
+    let mut written = Vec::with_capacity(columns.len());
+    for name in columns {
+        let Some(column) = frame.column(name).filter(|column| column.width().is_none()) else {
+            return Ok(None);
+        };
+        let new = match (&number, column.as_f64_slice(), column.as_i64_slice()) {
+            (Scalar::Float64(v), Some(data), _) => {
+                Column::from_f64_values_owned(masked_select(flags, data, *v))
+            }
+            // An int joining floats, as write_cells reads it.
+            (Scalar::Int64(v), Some(data), _) => {
+                Column::from_f64_values_owned(masked_select(flags, data, *v as f64))
+            }
+            (Scalar::Int64(v), None, Some(data)) => {
+                Column::from_i64_values_owned(masked_select(flags, data, *v))
+            }
+            _ => return Ok(None),
+        };
+        written.push((name.clone(), new));
+    }
+    let mut out = frame.clone();
+    for (name, column) in written {
+        out = out.with_column(name, column).map_err(frame_error_to_py)?;
+    }
+    Ok(Some(out))
+}
+
+/// `value` where `flags` holds, `data` elsewhere: a select that vectorizes.
+fn masked_select<T: Copy>(flags: &[bool], data: &[T], value: T) -> Vec<T> {
+    flags
+        .iter()
+        .zip(data)
+        .map(|(&keep, &old)| if keep { value } else { old })
+        .collect()
+}
+
 /// `df.loc[rows, cols] = value` / `df.loc[rows] = value` as pandas writes it:
 /// the selected rows of each named column (a new column is created, missing
 /// elsewhere) take a scalar, a Series aligned on the index, or an array-like
@@ -54681,6 +54752,9 @@ fn frame_loc_write(
                 loc_enlarge(py, frame, label, &columns, whole_row, value)
             }
             None => {
+                if let Some(written) = masked_number_write(frame, &rows, &columns, value)? {
+                    return Ok(written.with_labels_of(frame));
+                }
                 let positions = resolve_loc_row_positions(
                     frame.index().labels(),
                     |start, stop| frame.loc_slice_positions(start, stop),

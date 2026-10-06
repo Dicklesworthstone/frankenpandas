@@ -27853,3 +27853,73 @@ def test_negative_int_exponent_raises_like_pandas_uf0mw() -> None:
         pd.Series([1, 2]) ** -1
     with pytest.raises(ValueError):
         fpd.Series([1, 2]) ** -1
+
+
+# br-frankenpandas-1s45z: a number assigned as a column, or written over a
+# bool mask of a plain float64 / int64 column, takes typed paths - the frame
+# pandas gives (signed zero, inf, ints joining floats, several columns).
+def _1s45z_frame(m: Any) -> Any:
+    return m.DataFrame({"x": [1.5, -2.0, 3.25, 0.5, 9.0], "k": [1, -2, 3, 0, 9], "s": list("abcde")})
+
+
+def _1s45z_shown(frame: Any) -> Any:
+    return [
+        (column, str(frame[column].dtype), [repr(v) if not (isinstance(v, float) and math.isnan(v)) else "nan" for v in frame[column].tolist()])
+        for column in frame.columns
+    ]
+
+
+def _1s45z_set(m: Any, key: Any, value: Any) -> Any:
+    frame = _1s45z_frame(m)
+    frame[key] = value
+    return frame
+
+
+def _1s45z_loc(m: Any, mask: Any, columns: Any, value: Any) -> Any:
+    frame = _1s45z_frame(m)
+    frame.loc[mask(frame), columns] = value
+    return frame
+
+
+_1S45Z_CASES = {
+    "df['z'] = 1.5": lambda m: _1s45z_set(m, "z", 1.5),
+    "df['z'] = 7": lambda m: _1s45z_set(m, "z", 7),
+    "df['z'] = -0.0": lambda m: _1s45z_set(m, "z", -0.0),
+    "df['z'] = inf": lambda m: _1s45z_set(m, "z", float("inf")),
+    "df['x'] = 2.5 replaces": lambda m: _1s45z_set(m, "x", 2.5),
+    "assign(w=2.5)": lambda m: _1s45z_frame(m).assign(w=2.5),
+    "loc[mask, x] = 0.0": lambda m: _1s45z_loc(m, lambda f: f["x"] > 1, "x", 0.0),
+    "loc[mask, x] = -0.0": lambda m: _1s45z_loc(m, lambda f: f["x"] > 1, "x", -0.0),
+    "loc[mask, x] = inf": lambda m: _1s45z_loc(m, lambda f: f["x"] > 1, "x", float("inf")),
+    "loc[mask, x] = 7 (an int joins floats)": lambda m: _1s45z_loc(m, lambda f: f["x"] > 1, "x", 7),
+    "loc[mask, k] = -5": lambda m: _1s45z_loc(m, lambda f: f["k"] > 0, "k", -5),
+    "loc[mask, k] = 2**62": lambda m: _1s45z_loc(m, lambda f: f["k"] > 0, "k", 2**62),
+    "loc[mask, [x, k]] = 0": lambda m: _1s45z_loc(m, lambda f: f["k"] > 0, ["x", "k"], 0),
+    "loc[all-true mask, x] = 1.0": lambda m: _1s45z_loc(m, lambda f: f["k"] > -10, "x", 1.0),
+    "loc[all-false mask, k] = 4": lambda m: _1s45z_loc(m, lambda f: f["k"] > 10, "k", 4),
+    "loc[mask, x] = nan (NEGATIVE: the general path's NaN)": lambda m: _1s45z_loc(m, lambda f: f["x"] > 1, "x", float("nan")),
+    "loc[mask, k] = 2.5 (NEGATIVE: the int column becomes float64)": lambda m: _1s45z_loc(m, lambda f: f["k"] > 0, "k", 2.5),
+    "loc[mask, s] = 0 (NEGATIVE: object)": lambda m: _1s45z_loc(m, lambda f: f["k"] > 0, "s", 0),
+    "loc[mask, new] = 1.5 (NEGATIVE: a new column)": lambda m: _1s45z_loc(m, lambda f: f["k"] > 0, "new", 1.5),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_1S45Z_CASES))
+def test_number_writes_like_pandas_1s45z(case: str) -> None:
+    assert _1s45z_shown(_1S45Z_CASES[case](fpd)) == _1s45z_shown(_1S45Z_CASES[case](pd))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_mask_write_keeps_signed_zero_bits_1s45z() -> None:
+    frame = fpd.DataFrame({"x": [1.5, 2.5, 3.5]})
+    frame.loc[frame["x"] > 2, "x"] = -0.0
+    assert [math.copysign(1.0, v) for v in frame["x"].tolist()] == [1.0, -1.0, -1.0]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_mask_with_nan_refuses_like_pandas_1s45z() -> None:
+    for m in (pd, fpd):
+        frame = m.DataFrame({"x": [1.5, 2.5, 3.5]})
+        with pytest.raises(ValueError):
+            frame.loc[m.Series([True, None, False]), "x"] = 0.0
