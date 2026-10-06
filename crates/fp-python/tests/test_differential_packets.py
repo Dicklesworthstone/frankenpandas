@@ -27691,3 +27691,67 @@ def test_dtypes_hold_numpy_dtype_objects_9xlbq() -> None:
     frame = fpd.DataFrame(_9XLBQ_F)
     assert all(dtype is np.dtype("float64") for dtype in frame.dtypes)
     assert (frame.dtypes == "float64").all()
+
+
+# br-frankenpandas-22nzm: an object ndarray keeps object, as pandas' sanitize
+# does - numbers and bools are not inferred (ints beside None were an int64
+# column holding a gap); only datetimes / timedeltas (or NaT alone) take their
+# dtype, and an object operand makes an object result.
+def _22nzm_array(*values: Any) -> Any:
+    array = np.empty(len(values), dtype=object)
+    for at, value in enumerate(values):
+        array[at] = value
+    return array
+
+
+def _22nzm_shown(series: Any) -> Any:
+    return [
+        str(series.dtype),
+        [repr(v) if not (isinstance(v, float) and math.isnan(v)) else "nan" for v in series.tolist()],
+        series.isna().tolist(),
+    ]
+
+
+_22NZM_ARRAYS = {
+    "ints": lambda m: _22nzm_array(1, 2, 3),
+    "ints beside None": lambda m: _22nzm_array(1, None, 3),
+    "ints beside nan": lambda m: _22nzm_array(1, np.nan, 3),
+    "floats": lambda m: _22nzm_array(1.5, 2.5, -0.0),
+    "bools": lambda m: _22nzm_array(True, False, True),
+    "mixed": lambda m: _22nzm_array(1, "a", 2.5),
+    "text beside None": lambda m: _22nzm_array("a", None, "c"),
+    "all None": lambda m: _22nzm_array(None, None),
+    "dates": lambda m: _22nzm_array(datetime.date(2024, 1, 1), datetime.date(2024, 1, 2)),
+    "lists": lambda m: _22nzm_array([1, 2], [3]),
+    "timestamps beside None (NEGATIVE: inferred datetime64)": lambda m: _22nzm_array(m.Timestamp("2024-01-01"), None),
+    "timedeltas (NEGATIVE: inferred timedelta64)": lambda m: _22nzm_array(m.Timedelta("1D"), m.Timedelta("2h")),
+    "NaT alone (NEGATIVE: inferred datetime64)": lambda m: _22nzm_array(m.NaT, m.NaT),
+    "timestamp beside an int": lambda m: _22nzm_array(m.Timestamp("2024-01-01"), 5),
+}
+_22NZM_CASES = {}
+for _name, _make in _22NZM_ARRAYS.items():
+    _22NZM_CASES[f"Series {_name}"] = (lambda make: lambda m: m.Series(make(m)))(_make)
+    _22NZM_CASES[f"dict column {_name}"] = (lambda make: lambda m: m.DataFrame({"x": make(m)})["x"])(_make)
+    _22NZM_CASES[f"setitem {_name}"] = (
+        lambda make: lambda m: (lambda d: (d.__setitem__("y", make(m)), d["y"])[1])(
+            m.DataFrame({"x": list(range(len(make(m))))})
+        )
+    )(_make)
+_22NZM_CASES["2-D object array"] = lambda m: m.DataFrame(np.array([[1, "a"], [None, 2.5]], dtype=object))[0]
+_22NZM_CASES["int Series + object ints"] = lambda m: m.Series([1, 2, 3]) + _22nzm_array(1, 2, 3)
+_22NZM_CASES["float Series * object floats"] = lambda m: m.Series([1.0, 2.0]) * _22nzm_array(1.5, 2.5)
+_22NZM_CASES["int Series == object ints"] = lambda m: m.Series([1, 2, 3]) == _22nzm_array(1, 5, 3)
+_22NZM_CASES["object ints astype int64"] = lambda m: m.Series(_22nzm_array(1, 2)).astype("int64")
+_22NZM_CASES["object ints infer_objects"] = lambda m: m.Series(_22nzm_array(1, 2)).infer_objects()
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_22NZM_CASES))
+def test_object_ndarray_keeps_object_22nzm(case: str) -> None:
+    assert _22nzm_shown(_22NZM_CASES[case](fpd)) == _22nzm_shown(_22NZM_CASES[case](pd))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_object_ndarray_sums_like_pandas_22nzm() -> None:
+    for values in [(1, 2, 3), (1, None, 3), (1.5, 2.5)]:
+        assert fpd.Series(_22nzm_array(*values)).sum() == pd.Series(_22nzm_array(*values)).sum()

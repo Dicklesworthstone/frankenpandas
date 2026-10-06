@@ -8734,6 +8734,7 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
                 .then(|| contiguous_text_column(items.iter().cloned()));
             match text.flatten() {
                 Some(column) => column,
+                None if kind == "O" => object_array_column(py, &items)?,
                 None => {
                     let values = items
                         .iter()
@@ -8745,6 +8746,42 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
         }
     };
     Ok(Some(column))
+}
+
+/// An object ndarray's column (its `items`) as pandas keeps one: object,
+/// each element a cell as it is. Only an array of datetimes, of timedeltas,
+/// of periods or of intervals (beside missing values) takes that dtype, and
+/// one of NaT and missing values datetime64, as pandas'
+/// maybe_infer_to_datetimelike does; numbers and bools stay objects. It was
+/// inferred as a list is: ints int64 (beside a None, an int64 column holding
+/// a gap), floats float64, and a date raised (br-frankenpandas-22nzm).
+fn object_array_column(py: Python<'_>, items: &[Bound<'_, PyAny>]) -> PyResult<Column> {
+    let cells = items
+        .iter()
+        .map(|item| py_to_cell(py, item))
+        .collect::<PyResult<Vec<_>>>()?;
+    let mut present = cells.iter().filter(|cell| !cell.is_missing());
+    let temporal = match present.next() {
+        Some(first) => {
+            matches!(
+                first,
+                Scalar::Datetime64(_)
+                    | Scalar::Timedelta64(_)
+                    | Scalar::Period(_)
+                    | Scalar::Interval(_)
+            ) && present.all(|cell| std::mem::discriminant(cell) == std::mem::discriminant(first))
+        }
+        None => cells
+            .iter()
+            .any(|cell| matches!(cell, Scalar::Null(NullKind::NaT))),
+    };
+    if !temporal {
+        return Ok(Column::from_object_values(cells));
+    }
+    if cells.iter().all(Scalar::is_missing) {
+        return Column::new(DType::Datetime64 { tz: None }, cells).map_err(column_error_to_py);
+    }
+    Column::from_values(cells).map_err(column_error_to_py)
 }
 
 /// pandas refuses a set as column data: its order is arbitrary.
@@ -24641,9 +24678,22 @@ fn host_object_arith(
         Ok(series) => Some(series.inner.clone()),
         Err(_) => None,
     };
-    let right_has = other_series
-        .as_ref()
-        .is_some_and(|series| has_object_cells(series.column()));
+    // An object ndarray holding such cells is one too: an int column +
+    // np.array([1, 2], dtype=object) is pandas' object result
+    // (br-frankenpandas-22nzm).
+    let object_array = other_series.is_none()
+        && other.get_type().name().is_ok_and(|name| name == "ndarray")
+        && other
+            .getattr("dtype")
+            .and_then(|dtype| dtype.getattr("kind"))
+            .is_ok_and(|kind| kind.eq("O").unwrap_or(false));
+    let right_has = match &other_series {
+        Some(series) => has_object_cells(series.column()),
+        None if object_array => {
+            py_array_like_column(py, other)?.is_some_and(|column| has_object_cells(&column))
+        }
+        None => false,
+    };
     // An object column of text against anything but text reads pair by
     // pair through Python too, as pandas: 'a' + 1 is Python's TypeError,
     // 'a%s' % 1 formats (the kernels refused both with a coercion message;
