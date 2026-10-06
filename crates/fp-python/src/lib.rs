@@ -10563,6 +10563,15 @@ fn index_from_axis_value(value: &Bound<'_, PyAny>) -> PyResult<Index> {
             .with_row_multiindex(multi.inner.clone())
             .map_err(index_error_to_py);
     }
+    // An Index is itself - a RangeIndex stays one, an object Index object -
+    // and a range or an int64 array its typed labels, unnamed: they were
+    // rebuilt from copied-out labels (br-frankenpandas-gyj9r).
+    if let Ok(plain) = plain_index_ref(value) {
+        return Ok(plain.inner.clone());
+    }
+    if let Some(typed) = typed_index_of(value)? {
+        return Ok(typed);
+    }
     // A tz-aware DatetimeIndex or datetime Series keeps its zone (it was
     // taken as naive UTC labels).
     let zone = index_arg_zone(value);
@@ -10586,11 +10595,13 @@ fn index_from_axis_value(value: &Bound<'_, PyAny>) -> PyResult<Index> {
         .and_then(|name| name.extract::<String>().ok());
     let labels = extract_index_labels(Some(value), 0)?;
     // A DatetimeIndex / TimedeltaIndex keeps its freq, as the constructors'
-    // index= does (`s.index = dr` dropped it).
+    // index= does (`s.index = dr` dropped it), and a CategoricalIndex its
+    // categories (gyj9r).
     Index::new(labels)
         .rename_index(name.as_deref())
         .with_tz(zone.as_deref())
         .map(|index| index.with_freq(index_arg_freq(value)))
+        .and_then(|index| index.with_categories(index_arg_categories(value)))
         .map_err(index_error_to_py)
 }
 
@@ -11455,6 +11466,35 @@ fn index_in_dtype(index: Index, dtype: &str) -> Index {
         }
         "object" => index.with_declared_dtype(Some(fp_index::DeclaredDtype::Object)),
         _ => index,
+    }
+}
+
+/// Positions given from Python (`take`): a native one-dimensional int64 /
+/// int32 numpy array read through its buffer, anything else item by item
+/// as a `Vec<i64>` reads it. pyo3 read the array one Python int a
+/// position (s.take of a million 63 ms, pandas 22; br-frankenpandas-fk877).
+pub struct Positions(Vec<i64>);
+
+impl<'a, 'py> FromPyObject<'a, 'py> for Positions {
+    type Error = PyErr;
+
+    fn extract(obj: pyo3::Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        if obj.get_type().name().is_ok_and(|name| name == "ndarray") {
+            let dtype = obj.getattr("dtype")?;
+            if dtype.getattr("isnative")?.extract::<bool>()?
+                && obj.getattr("ndim")?.extract::<usize>()? == 1
+            {
+                match dtype.getattr("name")?.extract::<String>()?.as_str() {
+                    "int64" => return Ok(Self(ndarray_elements::<i64>(obj.py(), &obj)?)),
+                    "int32" => {
+                        let positions = ndarray_elements::<i32>(obj.py(), &obj)?;
+                        return Ok(Self(positions.into_iter().map(i64::from).collect()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        obj.extract::<Vec<i64>>().map(Self)
     }
 }
 
@@ -12822,14 +12862,14 @@ impl PyIndex {
     #[pyo3(signature = (indices, axis=0, allow_fill=true, fill_value=None))]
     fn take(
         &self,
-        indices: Vec<i64>,
+        indices: Positions,
         axis: i64,
         allow_fill: bool,
         fill_value: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let _ = axis;
-        let labels = self.inner.labels();
-        let n = labels.len() as i64;
+        let indices = indices.0;
+        let n = self.inner.len() as i64;
         let value_error =
             |message: &str| PyErr::new::<pyo3::exceptions::PyValueError, _>(message.to_owned());
         let missing = if allow_fill && fill_value.is_some_and(|value| !value.is_none()) {
@@ -12853,11 +12893,19 @@ impl PyIndex {
         } else {
             None
         };
+        let Some(missing) = missing else {
+            // numpy's take of the labels: typed ints stay typed, the name
+            // and dtype with them (each label was cloned into a new index;
+            // br-frankenpandas-fk877).
+            let positions = take_positions(&indices, self.inner.len())?;
+            return Ok(PyIndex {
+                inner: self.inner.take(&positions),
+            });
+        };
+        let labels = self.inner.labels();
         let mut out = Vec::with_capacity(indices.len());
         for idx in indices {
-            if idx == -1
-                && let Some(missing) = &missing
-            {
+            if idx == -1 {
                 out.push(missing.clone());
                 continue;
             }
@@ -15804,8 +15852,8 @@ impl PyDatetimeIndex {
     /// pandas' `take(indices)`: positions, negative from the end; one out of
     /// range is pandas' IndexError (it became NaT). Positions in one constant
     /// step keep the freq scaled by it, as pandas.
-    fn take(&self, indices: Vec<i64>) -> PyResult<Self> {
-        let positions = take_positions(&indices, self.inner.len())?;
+    fn take(&self, indices: Positions) -> PyResult<Self> {
+        let positions = take_positions(&indices.0, self.inner.len())?;
         let inner = self.inner.take(&positions).map_err(index_error_to_py)?;
         Ok(Self { inner })
     }
@@ -19390,8 +19438,8 @@ impl PyTimedeltaIndex {
     /// pandas' `take(indices)`: positions, negative from the end; one out of
     /// range is pandas' IndexError (it became NaT). Positions in one constant
     /// step keep the freq scaled by it, as pandas.
-    fn take(&self, indices: Vec<i64>) -> PyResult<Self> {
-        let positions = take_positions(&indices, self.inner.len())?;
+    fn take(&self, indices: Positions) -> PyResult<Self> {
+        let positions = take_positions(&indices.0, self.inner.len())?;
         let inner = self.inner.take(&positions).map_err(index_error_to_py)?;
         Ok(Self { inner })
     }
@@ -22444,10 +22492,10 @@ impl PyCategoricalIndex {
         }
     }
 
-    fn take(&self, indices: Vec<i64>) -> PyResult<Self> {
+    fn take(&self, indices: Positions) -> PyResult<Self> {
         let len = self.inner.len() as i64;
-        let mut u_indices = Vec::with_capacity(indices.len());
-        for idx in indices {
+        let mut u_indices = Vec::with_capacity(indices.0.len());
+        for idx in indices.0 {
             let pos = if idx < 0 { len + idx } else { idx };
             if pos >= 0 && pos < len {
                 u_indices.push(pos as usize);
@@ -34779,11 +34827,15 @@ impl PySeries {
         }
         let zones_mismatch =
             method.is_none() && reindex_zones_mismatch(self.inner.index(), &target.inner);
-        let labels = target.inner.labels().to_vec();
+        // The target's labels are read only where a path needs them: a plain
+        // reindex hands the target index over, and an int one needs no label
+        // made (a million were copied out first; br-frankenpandas-mcq15).
         // Points over an IntervalIndex take the rows of the intervals
         // holding them, under the points themselves (pandas' pointwise
         // get_indexer; they were all NaN, br-frankenpandas-s08y7).
-        if let Some(mapped) = interval_point_targets(self.inner.index(), &labels)? {
+        if holds_intervals(self.inner.index())
+            && let Some(mapped) = interval_point_targets(self.inner.index(), target.inner.labels())?
+        {
             let mapped = Bound::new(
                 py,
                 PyIndex {
@@ -34816,7 +34868,7 @@ impl PySeries {
             let index = self.inner.index();
             if let Some(multi) = index.row_multiindex() {
                 let position = multiindex_level_position(multi, level)?;
-                let rows = level_reindex_positions(multi, position, &labels)?;
+                let rows = level_reindex_positions(multi, position, target.inner.labels())?;
                 return self
                     .inner
                     .take(&rows)
@@ -34827,11 +34879,16 @@ impl PySeries {
         }
         // limit and tolerance bound a method's fill (they were refused,
         // br-frankenpandas-u6p7i).
-        let tolerance =
-            reindex_fill_options(self.inner.index(), labels.len(), method, limit, tolerance)?;
+        let tolerance = reindex_fill_options(
+            self.inner.index(),
+            target.inner.len(),
+            method,
+            limit,
+            tolerance,
+        )?;
         let reindexed = match method {
             Some(m) => self.inner.reindex_with_method_options(
-                labels.clone(),
+                target.inner.labels().to_vec(),
                 m,
                 limit,
                 tolerance.as_deref(),
@@ -34840,8 +34897,8 @@ impl PySeries {
             None if zones_mismatch => self
                 .inner
                 .head(0)
-                .and_then(|none| none.reindex(labels.clone())),
-            None => self.inner.reindex(labels.clone()),
+                .and_then(|none| none.reindex_to_index(&target.inner)),
+            None => self.inner.reindex_to_index(&target.inner),
         }
         .map_err(frame_error_to_py)?;
         if empty_axis {
@@ -34895,9 +34952,9 @@ impl PySeries {
         };
         let fill = py_to_scalar(py, fill)?;
         let source_positions = if zones_mismatch {
-            vec![None; labels.len()]
+            vec![None; target.inner.len()]
         } else {
-            self.inner.index().get_indexer(&Index::new(labels))
+            self.inner.index().get_indexer(&target.inner)
         };
         // A label found takes the source's own value - the reindexed column
         // had turned float by the very rows the fill replaces, so
@@ -35163,7 +35220,7 @@ impl PySeries {
     #[pyo3(signature = (indices, axis=None, **kwargs))]
     fn take(
         &self,
-        indices: Vec<i64>,
+        indices: Positions,
         axis: Option<&Bound<'_, PyAny>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
@@ -35174,7 +35231,8 @@ impl PySeries {
                 "No axis named {ax} for object type Series"
             )));
         }
-        let s = self.inner.take(&indices).map_err(frame_error_to_py)?;
+        take_bounds(&indices.0, self.inner.len())?;
+        let s = self.inner.take(&indices.0).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: s })
     }
 
@@ -35304,37 +35362,20 @@ impl PySeries {
                 "No axis named {ax} for object type Series"
             )));
         }
-        // A MultiIndex stays one (its flat labels were kept alone; r0hk0).
-        if labels.extract::<PyRef<'_, PyMultiIndex>>().is_ok() {
-            let index = index_from_axis_value(labels)?;
-            if index.len() != self.inner.len() {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Length mismatch: Expected axis has {} elements, new values have {} elements",
-                    self.inner.len(),
-                    index.len()
-                )));
-            }
-            let s = Series::new(self.inner.name(), index, self.inner.column().clone())
-                .map_err(frame_error_to_py)?;
-            return Ok(PySeries { inner: s });
+        // The index pandas builds of `labels`, as `s.index =` sets it: a
+        // MultiIndex stays one (r0hk0), an Index is itself, a list unnamed
+        // (the Series' old name was kept, a RangeIndex / object Index
+        // rebuilt from its labels; br-frankenpandas-gyj9r).
+        let index = index_from_axis_value(labels)?;
+        if index.len() != self.inner.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Length mismatch: Expected axis has {} elements, new values have {} elements",
+                self.inner.len(),
+                index.len()
+            )));
         }
-        // A list's labels, or any index-like's (a DatetimeIndex raised
-        // TypeError), with a tz-aware target's zone (fvsao.60).
-        let (lbls, zone) = if let Ok(list) = labels.cast::<PyList>() {
-            let mut v = Vec::with_capacity(list.len());
-            for item in list.iter() {
-                v.push(py_to_index_label(&item)?);
-            }
-            (v, None)
-        } else {
-            let target = labels.extract::<IndexArg>()?;
-            (
-                target.inner.labels().to_vec(),
-                target.inner.tz().map(str::to_owned),
-            )
-        };
-        let s = self.inner.set_axis(lbls).map_err(frame_error_to_py)?;
-        let s = series_index_in_zone(s, zone.as_deref())?;
+        let s = Series::new(self.inner.name(), index, self.inner.column().clone())
+            .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: s })
     }
 
@@ -36796,7 +36837,7 @@ impl PySeriesILoc {
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
             return Ok(Py::new(py, PySeries { inner: s })?.into_any());
         }
-        if let Ok(positions) = key.extract::<Vec<i64>>() {
+        if let Ok(Positions(positions)) = key.extract::<Positions>() {
             let s = self
                 .inner
                 .iloc(&positions)
@@ -49615,7 +49656,7 @@ impl PyDataFrame {
             ],
         )?;
         let mut res = self.inner.clone();
-        let mut row_target: Option<Vec<IndexLabel>> = None;
+        let mut row_target: Option<Index> = None;
         let mut column_target: Option<Vec<String>> = None;
         let target_index = index.or_else(|| labels.filter(|_| ax == 0));
         // Any index-like target (a DatetimeIndex raised TypeError).
@@ -49682,7 +49723,9 @@ impl PyDataFrame {
                     .map_err(frame_error_to_py)?;
                 return Ok(PyDataFrame { inner });
             }
-            let row_labels = target.inner.labels().to_vec();
+            // The target's labels are read only where a path needs them; a
+            // plain reindex hands the target index over (an int one needs no
+            // label made; br-frankenpandas-mcq15).
             // `level`: the target orders that level of a row MultiIndex
             // (level_reindex_positions; it was refused,
             // br-frankenpandas-u6p7i); a flat index's only level reindexes
@@ -49691,10 +49734,11 @@ impl PyDataFrame {
                 let rows = self.inner.index();
                 if let Some(multi) = self.inner.row_multiindex() {
                     let position = multiindex_level_position(multi, level)?;
-                    let kept: Vec<usize> = level_reindex_positions(multi, position, &row_labels)?
-                        .into_iter()
-                        .filter_map(|row| usize::try_from(row).ok())
-                        .collect();
+                    let kept: Vec<usize> =
+                        level_reindex_positions(multi, position, target.inner.labels())?
+                            .into_iter()
+                            .filter_map(|row| usize::try_from(row).ok())
+                            .collect();
                     let levels = multi.take(&kept).map_err(index_error_to_py)?;
                     let taken = res
                         .take_rows(&kept)
@@ -49708,12 +49752,12 @@ impl PyDataFrame {
             // br-frankenpandas-u6p7i).
             let tolerance = reindex_fill_options(
                 self.inner.index(),
-                row_labels.len(),
+                target.inner.len(),
                 method,
                 limit,
                 tolerance,
             )?;
-            row_target = Some(row_labels.clone());
+            row_target = Some(target.inner.clone());
             // An aware target over naive rows, or the reverse, finds none.
             let source =
                 if method.is_none() && reindex_zones_mismatch(self.inner.index(), &target.inner) {
@@ -49722,11 +49766,14 @@ impl PyDataFrame {
                     res
                 };
             res = match (method, &fill) {
-                (Some(m), _) => {
-                    source.reindex_with_method_options(row_labels, m, limit, tolerance.as_deref())
-                }
-                (None, Some(f)) => source.reindex_fill(row_labels, f.clone()),
-                (None, None) => source.reindex(row_labels),
+                (Some(m), _) => source.reindex_with_method_options(
+                    target.inner.labels().to_vec(),
+                    m,
+                    limit,
+                    tolerance.as_deref(),
+                ),
+                (None, Some(f)) => source.reindex_fill(target.inner.labels().to_vec(), f.clone()),
+                (None, None) => source.reindex_to_index(&target.inner),
             }
             .map_err(frame_error_to_py)?;
             if empty_rows {
@@ -49853,7 +49900,7 @@ impl PyDataFrame {
         // kept columns kept their dtype; br-frankenpandas-r8gr0).
         if let (Some(rows), Some(names), None) = (&row_target, &column_target, method)
             && self.inner.row_multiindex().is_none()
-            && rows.as_slice() != self.inner.index().labels()
+            && rows.labels() != self.inner.index().labels()
             && names.iter().ne(self.inner.column_names())
             && let Some(block) = reindex_block_promotion(&self.inner, fill.as_ref())
         {
@@ -49861,7 +49908,7 @@ impl PyDataFrame {
                 || self
                     .inner
                     .index()
-                    .get_indexer(&Index::new(rows.clone()))
+                    .get_indexer(rows)
                     .iter()
                     .any(Option::is_none);
             if gap {
@@ -50492,13 +50539,19 @@ impl PyDataFrame {
     #[pyo3(signature = (indices, axis=None, **kwargs))]
     fn take(
         &self,
-        indices: Vec<i64>,
+        indices: Positions,
         axis: Option<&Bound<'_, PyAny>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
         numpy_compat_kwargs("take", kwargs)?;
         let axis = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
-        let df = self.inner.take(&indices, axis).map_err(frame_error_to_py)?;
+        if axis == 0 {
+            take_bounds(&indices.0, self.inner.len())?;
+        }
+        let df = self
+            .inner
+            .take(&indices.0, axis)
+            .map_err(frame_error_to_py)?;
         Ok(PyDataFrame { inner: df })
     }
 
@@ -50975,6 +51028,17 @@ impl PyDataFrame {
                 out.assign_columns(labels)?;
             }
             return Ok(out);
+        }
+        // The rows are the index pandas builds of `labels`, as `df.index =`
+        // sets it: an Index itself, a list unnamed (the frame's old name was
+        // kept, a RangeIndex / object / categorical Index rebuilt from its
+        // labels; br-frankenpandas-gyj9r).
+        if axis_idx == 0 {
+            let inner = self
+                .inner
+                .with_index(index_from_axis_value(labels)?)
+                .map_err(axis_length_error_to_py)?;
+            return Ok(PyDataFrame { inner });
         }
         let lbls = if let Ok(py_idx) = plain_index_ref(labels) {
             py_idx.inner.labels().to_vec()
@@ -52515,7 +52579,7 @@ impl PyDataFrameILoc {
                             PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
                         })?;
                     return Ok(Py::new(py, PySeries { inner: sub })?.into_any());
-                } else if let Ok(row_positions) = row_key.extract::<Vec<i64>>() {
+                } else if let Ok(Positions(row_positions)) = row_key.extract::<Positions>() {
                     let sub = col_series.iloc(&row_positions).map_err(|e| {
                         PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string())
                     })?;
@@ -52570,7 +52634,7 @@ impl PyDataFrameILoc {
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
             let res = if let Ok(row_slice) = row_key.cast::<pyo3::types::PySlice>() {
                 slice_rows(row_slice, self.inner.len())?.of_frame(&columns)
-            } else if let Ok(rows) = row_key.extract::<Vec<i64>>() {
+            } else if let Ok(Positions(rows)) = row_key.extract::<Positions>() {
                 columns.iloc(&rows)
             } else {
                 return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
@@ -52596,7 +52660,7 @@ impl PyDataFrameILoc {
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
             return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
         }
-        if let Ok(positions) = key.extract::<Vec<i64>>() {
+        if let Ok(Positions(positions)) = key.extract::<Positions>() {
             let frame = self
                 .inner
                 .iloc(&positions)
@@ -52841,16 +52905,11 @@ fn interval_drop_labels<'py>(
 
 /// Whether `index` is an IntervalIndex: every label an interval.
 fn holds_intervals(index: &Index) -> bool {
-    // A RangeIndex holds ints: its labels were built to be asked, on every
-    // `.loc` (br-frankenpandas-sj5bn).
-    if index.range_span().is_some() {
-        return false;
-    }
-    let labels = index.labels();
-    !labels.is_empty()
-        && labels
-            .iter()
-            .all(|label| matches!(label, IndexLabel::Interval(_)))
+    // The labels' kinds, kept per label identity: a RangeIndex's or an int
+    // buffer's answer without a label made (br-frankenpandas-sj5bn), any
+    // other's after one pass (every `.loc` and reindex scanned them;
+    // br-frankenpandas-mcq15).
+    !index.is_empty() && index.label_kinds().within(fp_index::LabelKinds::INTERVAL)
 }
 
 /// [`interval_point_key`] of a frame's `.loc` / `.at` key: a (rows,
@@ -90277,6 +90336,21 @@ fn flat_sortlevel(
         .map(Bound::unbind)
 }
 
+/// numpy's IndexError for a `take` position outside `len` rows (a negative
+/// one counts from the end); Series / DataFrame.take raised ValueError.
+fn take_bounds(indices: &[i64], len: usize) -> PyResult<()> {
+    let length = i64::try_from(len).unwrap_or(i64::MAX);
+    match indices
+        .iter()
+        .find(|&&index| index >= length || index < -length)
+    {
+        Some(index) => Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+            "index {index} is out of bounds for axis 0 with size {len}"
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// `take` positions over `len` rows, negative from the end, as numpy reads
 /// them; one out of range is its IndexError.
 fn take_positions(indices: &[i64], len: usize) -> PyResult<Vec<usize>> {
@@ -95434,7 +95508,9 @@ mod tests {
         });
         let repeated = idx.repeat(2, None).expect("repeat"); // ubs:ignore — test fixture
         assert_eq!(repeated.inner.len(), 6);
-        let taken = idx.take(vec![1, 0], 0, true, None).expect("take"); // ubs:ignore — test fixture
+        let taken = idx // ubs:ignore — test fixture
+            .take(Positions(vec![1, 0]), 0, true, None)
+            .expect("take");
         assert_eq!(taken.inner.len(), 2);
 
         let s1 = Series::new(
