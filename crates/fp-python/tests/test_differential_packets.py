@@ -27984,3 +27984,49 @@ def test_empty_frame_assignment_dtype_6i8lq(name: str) -> None:
         return [str(frame["z"].dtype), len(frame), str(assigned["w"].dtype)]
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-d3ylw (float32): a write a float32 column can hold - a
+# number that survives float32, NaN, None - keeps it float32, as pandas'
+# np_can_hold_element; a lossy number upcasts it to float64.
+def _d3ylw_frame(m: Any) -> Any:
+    return m.DataFrame({"key": [0, 1, 2, 3, 4], "v": np.array([1, 2, 3, 4, 5], dtype=np.float32)})
+
+
+def _d3ylw_shown(frame: Any) -> Any:
+    column = frame["v"]
+    return [str(column.dtype), [repr(v) if not (isinstance(v, float) and math.isnan(v)) else "nan" for v in column.tolist()]]
+
+
+def _d3ylw_loc(m: Any, value: Any, key: Any = None) -> Any:
+    frame = _d3ylw_frame(m)
+    frame.loc[frame["key"] > 2 if key is None else key, "v"] = value
+    return frame
+
+
+_D3YLW_CASES = {
+    "loc[mask] = 7": lambda m: _d3ylw_loc(m, 7),
+    "loc[mask] = 2.5": lambda m: _d3ylw_loc(m, 2.5),
+    "loc[mask] = -0.0": lambda m: _d3ylw_loc(m, -0.0),
+    "loc[mask] = inf": lambda m: _d3ylw_loc(m, float("inf")),
+    "loc[mask] = nan": lambda m: _d3ylw_loc(m, float("nan")),
+    "loc[mask] = None": lambda m: _d3ylw_loc(m, None),
+    "loc[[1, 3]] = 2.5": lambda m: _d3ylw_loc(m, 2.5, [1, 3]),
+    "loc[2] = 16777216": lambda m: _d3ylw_loc(m, 16777216, 2),
+    "iloc[[0, 2], 1] = 2.5": lambda m: (lambda f: (f.iloc.__setitem__(([0, 2], 1), 2.5), f)[1])(_d3ylw_frame(m)),
+    "loc[mask] = [5, 6]": lambda m: _d3ylw_loc(m, [5, 6]),
+    "loc[mask] = np.float64(2.5)": lambda m: _d3ylw_loc(m, np.float64(2.5)),
+    "loc[mask] = np.int64(3)": lambda m: _d3ylw_loc(m, np.int64(3)),
+    "loc[mask] = np.float64(0.1) (NEGATIVE: lossy numpy float, float64)": lambda m: _d3ylw_loc(m, np.float64(0.1)),
+    "loc[2] = np.int64(16777217) (NEGATIVE: lossy numpy int, float64)": lambda m: _d3ylw_loc(m, np.int64(16777217), 2),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_D3YLW_CASES))
+def test_float32_writes_like_pandas_d3ylw(case: str) -> None:
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert _d3ylw_shown(_D3YLW_CASES[case](fpd)) == _d3ylw_shown(_D3YLW_CASES[case](pd))

@@ -53853,6 +53853,29 @@ fn write_cells(column: &Column, positions: &[usize], cells: Vec<Scalar>) -> PyRe
              first"
         )));
     }
+    // A float32 column keeps float32 when every value it takes is one -
+    // pandas' np_can_hold_element: the number survives float32 (an int
+    // exactly), or is missing - written over its float64 storage and tagged
+    // again (lossless: every value fits). It became float64 (39 of
+    // probe_1s45z_loc's cases; br-frankenpandas-d3ylw). Any other value
+    // upcasts it as before.
+    if column.width() == Some(NumericWidth::Float32)
+        && column.dtype() == DType::Float64
+        && cells.iter().all(|cell| match cell {
+            Scalar::Float64(v) => v.is_nan() || f64::from(*v as f32) == *v,
+            Scalar::Int64(v) => {
+                let narrowed = *v as f32;
+                narrowed.is_finite() && narrowed as i128 == i128::from(*v)
+            }
+            cell => cell.is_missing(),
+        })
+    {
+        let storage = column.astype(DType::Float64).map_err(column_error_to_py)?;
+        let written = write_cells(&storage, positions, cells)?;
+        return written
+            .cast_to_width(NumericWidth::Float32, false)
+            .map_err(column_error_to_py);
+    }
     // One number at every position of a plain float64 / int64 column (a
     // scalar over a mask: df.loc[mask, 'y'] = 0.0), the column's own kind (an
     // int joining a float column as its float, as below): the buffer copied
