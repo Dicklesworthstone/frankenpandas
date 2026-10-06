@@ -8404,6 +8404,39 @@ fn ndarray_elements<T: pyo3::buffer::Element>(
     pyo3::buffer::PyBuffer::<T>::get(array)?.to_vec(py)
 }
 
+/// The index of a Python `range` (its affine labels, never built - a
+/// RangeIndex, as pandas makes it) or of a native one-dimensional int64
+/// numpy array (read through its buffer), without a Python object per label:
+/// both went item by item (s.reindex(range(n)) 155 ms, Index(np.arange(n))
+/// 158 ms a million labels; br-frankenpandas-7bope). None for anything else.
+fn typed_index_of(data: &Bound<'_, PyAny>) -> PyResult<Option<Index>> {
+    use pyo3::types::PyRangeMethods;
+    if let Ok(range) = data.cast::<pyo3::types::PyRange>()
+        && let (Ok(start), Ok(stop), Ok(step)) = (range.start(), range.stop(), range.step())
+        && let (Ok(start), Ok(stop), Ok(step)) = (
+            i64::try_from(start),
+            i64::try_from(stop),
+            i64::try_from(step),
+        )
+    {
+        return Ok(Some(Index::from_range(start, stop, step)));
+    }
+    if !data.get_type().name().is_ok_and(|name| name == "ndarray") {
+        return Ok(None);
+    }
+    let dtype = data.getattr("dtype")?;
+    let int64 = dtype.getattr("name")?.extract::<String>()? == "int64";
+    let native = dtype.getattr("isnative")?.extract::<bool>()?;
+    let flat = data.getattr("ndim")?.extract::<usize>()? == 1;
+    if !(int64 && native && flat) {
+        return Ok(None);
+    }
+    Ok(Some(Index::from_i64_values(ndarray_elements::<i64>(
+        data.py(),
+        data,
+    )?)))
+}
+
 /// A native-order array of a numpy dtype narrower than 64 bits, or of
 /// uint64, in the engine's 64-bit storage (the caller tags the width); a
 /// uint64 value at or above 2**63 is refused, as the largest one.
@@ -10344,6 +10377,11 @@ fn extract_index_labels(
                 .map(|item| py_to_index_label(&item))
                 .collect::<PyResult<Vec<_>>>()
                 .map(float_index_labels)
+        } else if let Some(typed) = typed_index_of(index)? {
+            // A range or an int64 array: its int labels without a Python
+            // object each (Series(v, index=np.arange(n)) 210 ms a million;
+            // br-frankenpandas-7bope).
+            Ok(typed.labels().to_vec())
         } else if let Ok(iter) = index.try_iter() {
             let mut labels = Vec::new();
             for item in iter {
@@ -11777,6 +11815,15 @@ impl PyIndex {
                     .collect();
                 return Ok(PyIndex {
                     inner: Index::new(labels).set_names(name.or(series_name)),
+                });
+            } else if let Some(inner) = typed_index_of(d)? {
+                // A range or an int64 array without a Python object per label
+                // (br-frankenpandas-7bope).
+                return Ok(PyIndex {
+                    inner: match name {
+                        Some(n) => inner.set_name(n),
+                        None => inner,
+                    },
                 });
             } else if let Ok(list) = d.extract::<Vec<String>>() {
                 labels = list.into_iter().map(IndexLabel::Utf8).collect();
@@ -34659,6 +34706,19 @@ impl PySeries {
             None => self.inner.reindex(labels.clone()),
         }
         .map_err(frame_error_to_py)?;
+        // A range target is the result's RangeIndex, as pandas' (it was an
+        // Index of its labels, an empty one object; br-frankenpandas-7bope),
+        // under the name the reindex kept.
+        let reindexed = if target.inner.range_span().is_some() {
+            Series::new(
+                reindexed.name(),
+                target.inner.clone().rename_index(reindexed.index().name()),
+                reindexed.column().clone(),
+            )
+            .map_err(frame_error_to_py)?
+        } else {
+            reindexed
+        };
         // The rows are the target's labels: a tz-aware target keeps its zone
         // (they came back naive UTC, fvsao.60) and a date_range its freq.
         let reindexed = series_index_in_zone(reindexed, target.inner.tz())?;

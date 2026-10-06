@@ -27335,3 +27335,44 @@ def test_column_writes_keep_pandas_dtypes_roqqq(case: str) -> None:
         return [(c, str(out[c].dtype), [str(v) for v in out[c].tolist()]) for c in out.columns]
 
     assert shown(fpd) == shown(pd)
+
+
+# A range or an int64 array as an index argument: a reindex to a range is a
+# RangeIndex under the name the rows had, an empty range int64, and the
+# labels are the array's ints (br-frankenpandas-7bope).
+def _7bope_named(m: Any) -> Any:
+    series = m.Series([10.0, 20.0, 30.0, 40.0])
+    series.index.name = "a"
+    return series
+
+
+_7BOPE_CASES = {
+    "reindex range": lambda m: _7bope_named(m).reindex(range(3)),
+    "reindex reversed range": lambda m: _7bope_named(m).reindex(range(3, -1, -1)),
+    "reindex empty range": lambda m: _7bope_named(m).reindex(range(0)),
+    "reindex step range": lambda m: _7bope_named(m).reindex(range(0, 7, 2)),
+    "reindex named RangeIndex": lambda m: _7bope_named(m).reindex(m.RangeIndex(2, name="t")),
+    "reindex list (NEGATIVE: a plain Index)": lambda m: _7bope_named(m).reindex([3, 0]),
+    "reindex int64 array": lambda m: _7bope_named(m).reindex(np.arange(5)),
+    "reindex range fill_value": lambda m: _7bope_named(m).reindex(range(6), fill_value=0.0),
+    "Series index=arange": lambda m: m.Series([1, 2, 3], index=np.arange(3, 0, -1)),
+    "Series index=range": lambda m: m.Series([1, 2, 3], index=range(5, 8)),
+    "Index(arange)": lambda m: m.Series(m.Index(np.arange(4) * 3)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_7BOPE_CASES))
+def test_range_and_array_index_arguments_like_pandas_7bope(case: str) -> None:
+    def shown(m: Any) -> Any:
+        out = _7BOPE_CASES[case](m)
+        index = out.index
+        return (
+            type(index).__name__,
+            str(index.dtype),
+            index.name,
+            [str(v) for v in index.tolist()],
+            [str(v) for v in out.tolist()],
+        )
+
+    assert shown(fpd) == shown(pd)

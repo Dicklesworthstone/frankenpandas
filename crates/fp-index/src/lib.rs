@@ -6415,6 +6415,11 @@ impl Index {
         if let Some(declared) = self.declared {
             return declared.name();
         }
+        // A range is int64 when it holds no label too (an empty one was
+        // object; br-frankenpandas-7bope).
+        if self.range.is_some() {
+            return "int64";
+        }
         match self.inferred_type() {
             "integer" => "int64",
             "floating" => "float64",
