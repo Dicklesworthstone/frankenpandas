@@ -24583,7 +24583,13 @@ fn broadcast_column(scalar: Scalar, len: usize) -> PyResult<Column> {
 /// NaN column came back object; br-frankenpandas-roqqq).
 fn broadcast_assigned_column(scalar: Scalar, len: usize) -> PyResult<Column> {
     match scalar {
-        Scalar::Null(NullKind::NaN) => broadcast_column(Scalar::Float64(f64::NAN), len),
+        Scalar::Null(NullKind::NaN) => Ok(Column::from_f64_constant(f64::NAN, len)),
+        // A number assigned over no rows keeps its dtype: an empty frame's
+        // df['z'] = 1.5 is float64, as pandas (the untyped empty column read
+        // as object; br-frankenpandas-6i8lq).
+        Scalar::Float64(value) if len == 0 => Ok(Column::from_f64_constant(value, 0)),
+        Scalar::Int64(value) if len == 0 => Ok(Column::from_i64_constant(value, 0)),
+        Scalar::Bool(value) if len == 0 => Ok(Column::from_bool_constant(value, 0)),
         scalar => broadcast_column(scalar, len),
     }
 }

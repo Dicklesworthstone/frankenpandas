@@ -2680,12 +2680,30 @@ impl ConstDivisorU64 {
     }
 }
 
+/// numpy's int64 power: `base ** exponent` mod 2^64, square-and-multiply over
+/// the whole exponent. `i64::wrapping_pow` takes a u32, and clamping the
+/// exponent to u32::MAX read 3 ** 2**62 as 3 ** (2**32 - 1)
+/// (br-frankenpandas-cduus).
+fn wrapping_pow_i64(mut base: i64, mut exponent: u64) -> i64 {
+    let mut acc = 1_i64;
+    while exponent > 0 {
+        if exponent & 1 == 1 {
+            acc = acc.wrapping_mul(base);
+        }
+        exponent >>= 1;
+        if exponent > 0 {
+            base = base.wrapping_mul(base);
+        }
+    }
+    acc
+}
+
 /// `v.wrapping_pow(exponent)` of every `v` (the power mod 2^64 int64 wraps
 /// to, whatever the multiply order): square-and-multiply with the exponent's
 /// bits walked outside the loop over the values, so each pass is a plain
 /// multiply that vectorizes - a pow per value branched on those bits for
 /// every value (k ** 2 0.95 ms, pandas 0.26; br-frankenpandas-uf0mw).
-fn wrapping_pow_all(data: &[i64], exponent: u32) -> Vec<i64> {
+fn wrapping_pow_all(data: &[i64], exponent: u64) -> Vec<i64> {
     match exponent {
         0 => vec![1; data.len()],
         1 => data.to_vec(),
@@ -18711,9 +18729,8 @@ impl Column {
                     if r.iter().any(|&exponent| exponent < 0) {
                         return Some(Err(ColumnError::NegativeIntegerPower));
                     }
-                    let out = par_map_vec_i64(l.len(), |i| {
-                        l[i].wrapping_pow(u32::try_from(r[i]).unwrap_or(u32::MAX))
-                    });
+                    let out =
+                        par_map_vec_i64(l.len(), |i| wrapping_pow_i64(l[i], r[i].unsigned_abs()));
                     return Some(Ok(Self::from_i64_values_owned(out)));
                 }
                 // Typed-input fast path (see the Float64 arm): both operands are
@@ -19195,11 +19212,11 @@ impl Column {
                     // int ** int wraps as int64; a negative exponent is the
                     // error binary_numeric raises (declined here).
                     (ArithmeticOp::Pow, false) if s >= 0 => {
-                        wrapping_pow_all(data, u32::try_from(s).unwrap_or(u32::MAX))
+                        wrapping_pow_all(data, s.unsigned_abs())
                     }
                     (ArithmeticOp::Pow, true) if data.iter().all(|&v| v >= 0) => data
                         .iter()
-                        .map(|&v| s.wrapping_pow(u32::try_from(v).unwrap_or(u32::MAX)))
+                        .map(|&v| wrapping_pow_i64(s, v.unsigned_abs()))
                         .collect(),
                     _ => return None,
                 };
@@ -19664,7 +19681,7 @@ impl Column {
                             if rhs_i64 < 0 {
                                 return Err(ColumnError::NegativeIntegerPower);
                             }
-                            lhs_i64.wrapping_pow(u32::try_from(rhs_i64).unwrap_or(u32::MAX))
+                            wrapping_pow_i64(lhs_i64, rhs_i64.unsigned_abs())
                         }
                         // Reached when the vectorized Int64 arm declines (a Bool or
                         // Null-dtype operand) and no zero divisor forced Float64 — e.g.
@@ -35500,7 +35517,7 @@ mod tests {
     use super::{
         ArithmeticOp, BoolAffineSelectionWitness, Column, ColumnData, ColumnError, ComparisonOp,
         ConstDivisorU64, ScalarValues, SparseColumn, ValidityMask, binary_f64_apply,
-        python_floor_div_i64, python_mod_i64, scalar_compare, wrapping_pow_all,
+        python_floor_div_i64, python_mod_i64, scalar_compare, wrapping_pow_all, wrapping_pow_i64,
     };
 
     #[test]
@@ -39974,9 +39991,115 @@ mod tests {
         // br-frankenpandas-uf0mw: the exponent-outside square-and-multiply is
         // each value's wrapping_pow, the small exponents' shortcuts included.
         let data = [0, 1, -1, 2, 3, -7, 12, i64::MAX, i64::MIN, 1 << 31];
-        for exponent in (0..=70).chain([255, 1 << 20, u32::MAX]) {
+        for exponent in (0..=70_u32).chain([255, 1 << 20, u32::MAX]) {
             let want: Vec<i64> = data.iter().map(|&v| v.wrapping_pow(exponent)).collect();
-            assert_eq!(wrapping_pow_all(&data, exponent), want, "** {exponent}");
+            assert_eq!(
+                wrapping_pow_all(&data, u64::from(exponent)),
+                want,
+                "** {exponent}"
+            );
+        }
+    }
+
+    #[test]
+    fn int_power_past_u32_exponents_is_numpys_cduus() {
+        // br-frankenpandas-cduus: an exponent past u32::MAX squares through
+        // all its bits, as numpy's int64 power - the values numpy 2.x gives
+        // for these bases (it was clamped to 3 ** (2**32 - 1)).
+        let bases = [0, 1, 2, 3, -2, 5, 7, -1, 12];
+        let numpy: [(u64, [i64; 9]); 5] = [
+            (
+                1 << 32,
+                [
+                    0,
+                    1,
+                    0,
+                    2491309678558969857,
+                    0,
+                    -9191241575491960831,
+                    -3463789453758169087,
+                    1,
+                    0,
+                ],
+            ),
+            (
+                (1 << 32) + 1,
+                [
+                    0,
+                    1,
+                    0,
+                    7473929035676909571,
+                    0,
+                    -9062719730040700923,
+                    -5799782102597631993,
+                    -1,
+                    0,
+                ],
+            ),
+            (
+                (1 << 40) + 3,
+                [
+                    0,
+                    1,
+                    0,
+                    9120277428587986971,
+                    0,
+                    -4842904517655658371,
+                    1491931725775765847,
+                    -1,
+                    0,
+                ],
+            ),
+            (1 << 62, [0, 1, 0, 1, 0, 1, 1, 1, 0]),
+            (
+                i64::MAX.unsigned_abs(),
+                [
+                    0,
+                    1,
+                    0,
+                    -6148914691236517205,
+                    0,
+                    -3689348814741910323,
+                    7905747460161236407,
+                    -1,
+                    0,
+                ],
+            ),
+        ];
+        for (exponent, want) in numpy {
+            let got: Vec<i64> = bases
+                .iter()
+                .map(|&b| wrapping_pow_i64(b, exponent))
+                .collect();
+            assert_eq!(got, want, "** {exponent}");
+            assert_eq!(
+                wrapping_pow_all(&bases, exponent),
+                want,
+                "all ** {exponent}"
+            );
+            let column = Column::from_i64_values(bases.to_vec());
+            let exponent = i64::try_from(exponent).unwrap();
+            let typed = column
+                .binary_numeric(
+                    &Column::from_i64_values(vec![exponent; bases.len()]),
+                    ArithmeticOp::Pow,
+                )
+                .unwrap();
+            let want_cells: Vec<Scalar> = want.iter().map(|&v| Scalar::Int64(v)).collect();
+            assert_eq!(
+                typed.values(),
+                want_cells.as_slice(),
+                "column ** {exponent}"
+            );
+        }
+        // Exponents within u32 are wrapping_pow's.
+        for exponent in [0_u32, 1, 5, 64, 1000, u32::MAX] {
+            for &b in &bases {
+                assert_eq!(
+                    wrapping_pow_i64(b, u64::from(exponent)),
+                    b.wrapping_pow(exponent)
+                );
+            }
         }
     }
 

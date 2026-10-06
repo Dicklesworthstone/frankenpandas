@@ -27950,3 +27950,37 @@ _T486T_CASES["k > nan (NEGATIVE: all False)"] = lambda m: m.Series(_T486T_K) > f
 @pytest.mark.parametrize("case", list(_T486T_CASES))
 def test_int_series_against_nan_like_pandas_t486t(case: str) -> None:
     assert _t486t_shown(_T486T_CASES[case](fpd)) == _t486t_shown(_T486T_CASES[case](pd))
+
+
+# br-frankenpandas-cduus: int ** an exponent past u32::MAX squares through
+# the whole int64 exponent, as numpy (it was clamped to 2**32 - 1).
+_CDUUS_BASES = [0, 1, 2, 3, -2, 5, 7, -1, 12]
+_CDUUS_CASES = {
+    f"bases ** {e}": (lambda e: lambda m: m.Series(_CDUUS_BASES) ** e)(e)
+    for e in (2**32, 2**32 + 1, 2**40 + 3, 2**62, 2**63 - 1, 3, 0)
+}
+_CDUUS_CASES["Series ** Series of big exponents"] = lambda m: m.Series([3, 5, -1]) ** m.Series([2**62, 2**32 + 1, 2**63 - 1])
+_CDUUS_CASES["2 ** big exponents (scalar left)"] = lambda m: 3 ** m.Series([2**32, 2**62, 5])
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_CDUUS_CASES))
+def test_int_power_past_u32_like_numpy_cduus(case: str) -> None:
+    ours, theirs = _CDUUS_CASES[case](fpd), _CDUUS_CASES[case](pd)
+    assert (str(ours.dtype), ours.tolist()) == (str(theirs.dtype), theirs.tolist())
+
+
+# br-frankenpandas-6i8lq: a number assigned to an empty frame keeps its dtype.
+_6I8LQ_VALUES = {"1.5": 1.5, "7": 7, "True": True, "nan": float("nan"), "None": None, "'x'": "x", "np.float64": np.float64(2.5), "np.int64": np.int64(3)}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("name", list(_6I8LQ_VALUES))
+def test_empty_frame_assignment_dtype_6i8lq(name: str) -> None:
+    def shown(m: Any) -> Any:
+        frame = m.DataFrame({"a": []})
+        frame["z"] = _6I8LQ_VALUES[name]
+        assigned = m.DataFrame({"a": []}).assign(w=_6I8LQ_VALUES[name])
+        return [str(frame["z"].dtype), len(frame), str(assigned["w"].dtype)]
+
+    assert shown(fpd) == shown(pd)
