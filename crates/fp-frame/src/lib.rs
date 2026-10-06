@@ -81451,11 +81451,6 @@ impl DataFrame {
             });
         }
 
-        let mut out_labels = Vec::with_capacity(normalized_positions.len());
-        for &position in &normalized_positions {
-            out_labels.push(self.index.labels()[position].clone());
-        }
-
         let (pairs, out_columns) = match column_selector {
             None => {
                 let n_cols = self.num_columns();
@@ -81493,11 +81488,10 @@ impl DataFrame {
         };
 
         // Per br-frankenpandas-4wlg0: pandas df.iloc preserves row index name
-        // (and a tz-aware index's zone).
-        let index = Index::new(out_labels)
-            .rename_index(self.index.name())
-            .with_tz(self.index.tz())?
-            .with_freq(freq);
+        // (and a tz-aware index's zone) - Index::take keeps both, and typed
+        // labels typed: each label was cloned out of the materialized source
+        // and rebuilt (a million rows 25-30 ms; br-frankenpandas-fk877).
+        let index = self.index.take(&normalized_positions).with_freq(freq);
         let columns = ColumnStore::from_pairs(pairs);
         if !self.allows_duplicate_labels && (columns.has_duplicates() || index.has_duplicates()) {
             return Err(FrameError::CompatibilityRejected(
@@ -81507,6 +81501,13 @@ impl DataFrame {
 
         let mut out = Self::new_with_axis(index, columns, out_columns)?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
+        // The frame's row MultiIndex keeps the selected rows, as take's
+        // (it was dropped: the flat 'x, 1' labels came back).
+        out.row_multiindex = self
+            .row_multiindex
+            .as_ref()
+            .map(|multiindex| Self::project_row_multiindex(multiindex, &normalized_positions))
+            .transpose()?;
         Ok(out.with_labels_of(self))
     }
 

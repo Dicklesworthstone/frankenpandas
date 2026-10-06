@@ -27545,3 +27545,48 @@ def test_factorize_like_pandas_gzkue(case: str) -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         assert _gzkue_shown(_GZKUE_CASES[case](fpd)) == _gzkue_shown(_GZKUE_CASES[case](pd))
+
+
+# br-frankenpandas-fk877: take / iloc read an int array's positions through
+# its buffer, an Index take keeps its dtype, a position out of range is
+# numpy's IndexError.
+def _fk877_shown(result: Any) -> Any:
+    index = result if not hasattr(result, "index") else result.index
+    shown = [type(index).__name__, str(index.dtype), index.name, repr(list(index))]
+    if hasattr(result, "columns"):
+        shown.append(repr(result.to_dict("list")))
+    elif hasattr(result, "index"):
+        shown += [str(result.dtype), repr(result.tolist())]
+    return shown
+
+
+_FK877_SERIES = lambda m: m.Series([10.0, 20.0, 30.0, 40.0], index=[5, 6, 7, 8], name="s")
+_FK877_CASES = {
+    "Series.take int64 array": lambda m: _FK877_SERIES(m).take(np.array([3, 0, 2])),
+    "Series.take int32 array": lambda m: _FK877_SERIES(m).take(np.array([3, 0, 2], dtype="int32")),
+    "Series.take negative": lambda m: _FK877_SERIES(m).take(np.array([-1, -4])),
+    "Series.take strided array": lambda m: _FK877_SERIES(m).take(np.array([3, 9, 0, 9, 2])[::2]),
+    "Series.iloc int64 array": lambda m: _FK877_SERIES(m).iloc[np.array([3, 0])],
+    "DataFrame.take int64 array": lambda m: m.DataFrame({"a": [1, 2, 3, 4], "b": ["w", "x", "y", "z"]}).take(np.array([3, 1])),
+    "DataFrame.iloc rows and a column": lambda m: m.DataFrame({"a": [1, 2, 3, 4], "b": ["w", "x", "y", "z"]}).iloc[np.array([3, 1]), [1]],
+    "object Index.take keeps object": lambda m: m.Index([5, 6, 7, 8], dtype=object).take(np.array([3, 0])),
+    "DataFrame.iloc keeps an object index": lambda m: m.DataFrame({"a": [1, 2, 3]}, index=m.Index([7, 8, 9], dtype=object)).iloc[np.array([2, 0])],
+    "DataFrame.iloc keeps a CategoricalIndex": lambda m: m.DataFrame({"a": [1, 2, 3]}, index=m.CategoricalIndex(["p", "q", "p"])).iloc[np.array([2, 1])],
+    "DataFrame.iloc keeps a MultiIndex": lambda m: m.DataFrame({"a": [1, 2, 3]}, index=m.MultiIndex.from_tuples([("x", 1), ("y", 2), ("z", 3)])).iloc[np.array([2, 0])],
+    "RangeIndex.take": lambda m: m.RangeIndex(4, name="r").take(np.array([3, 0])),
+    "Index(arange).take": lambda m: m.Index(np.arange(6)).take(np.array([5, 1])),
+    "Series.take out of range (NEGATIVE: IndexError)": lambda m: _FK877_SERIES(m).take(np.array([4])),
+    "DataFrame.take out of range (NEGATIVE: IndexError)": lambda m: m.DataFrame({"a": [1, 2]}).take(np.array([-3])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FK877_CASES))
+def test_take_positions_like_pandas_fk877(case: str) -> None:
+    def shown(m: Any) -> Any:
+        try:
+            return _fk877_shown(_FK877_CASES[case](m))
+        except IndexError:
+            return "IndexError"
+
+    assert shown(fpd) == shown(pd)
