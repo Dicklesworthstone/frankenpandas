@@ -27223,6 +27223,9 @@ _AN1XE_CASES = {
     ),
     "to_json": lambda m, p: _an1xe_mixed(m, p).to_json(),
     "to_json iso": lambda m, p: _an1xe_mixed(m, p).to_json(date_format="iso"),
+    "to_json iso naive beside aware": lambda m, p: m.concat([p["a"]["d"], p["n"]["d"]], ignore_index=True).to_json(
+        date_format="iso"
+    ),
     "isin across zones": lambda m, p: _an1xe_mixed(m, p).isin([m.Timestamp("2024-01-01 09:00", tz="Asia/Tokyo")]),
     "isin naive needle (NEGATIVE)": lambda m, p: _an1xe_mixed(m, p).isin([m.Timestamp("2024-01-01")]),
 }
@@ -27246,3 +27249,34 @@ def test_concat_and_object_timestamps_keep_zones_like_pandas_an1xe(case: str) ->
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         assert shown(fpd) == shown(pd)
+
+
+# An object column's naive Timestamp is str(Timestamp) under astype(str),
+# equal to itself and to an equal Timestamp, and ISO text under
+# to_json(date_format='iso') (br-frankenpandas-srzqw).
+def _srzqw_series(m: Any) -> Any:
+    return m.Series([m.Timestamp("2024-04-01"), None, "x", m.Timestamp("2024-04-01 10:30:00.000001")], dtype=object)
+
+
+_SRZQW_CASES = {
+    "astype(str)": lambda m: _srzqw_series(m).astype(str),
+    "equal to itself": lambda m: _srzqw_series(m) == _srzqw_series(m),
+    "equal to a Timestamp": lambda m: _srzqw_series(m) == m.Timestamp("2024-04-01"),
+    "another Timestamp unequal (NEGATIVE)": lambda m: _srzqw_series(m) == m.Timestamp("2024-04-02"),
+    "not-equal": lambda m: _srzqw_series(m) != m.Timestamp("2024-04-01"),
+    "to_json iso": lambda m: _srzqw_series(m).to_json(date_format="iso"),
+    "to_json epoch": lambda m: _srzqw_series(m).to_json(),
+    "frame to_json iso": lambda m: m.DataFrame({"d": _srzqw_series(m)}).to_json(date_format="iso"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_SRZQW_CASES))
+def test_object_naive_timestamps_read_like_pandas_srzqw(case: str) -> None:
+    def shown(m: Any) -> Any:
+        out = _SRZQW_CASES[case](m)
+        if hasattr(out, "dtype"):
+            return str(out.dtype), [str(v) for v in out.tolist()]
+        return out
+
+    assert shown(fpd) == shown(pd)

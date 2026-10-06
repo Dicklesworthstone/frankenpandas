@@ -2002,6 +2002,19 @@ fn scalar_compare(left: &Scalar, right: &Scalar, op: ComparisonOp) -> Result<boo
         });
     }
 
+    // Two datetimes (an object column's naive Timestamps) or two timedeltas
+    // order by their nanoseconds, NaT equal to nothing (the f64 read below
+    // refused them, so a Timestamp cell was unequal to itself;
+    // br-frankenpandas-srzqw).
+    if let (Scalar::Datetime64(a), Scalar::Datetime64(b))
+    | (Scalar::Timedelta64(a), Scalar::Timedelta64(b)) = (left, right)
+    {
+        if *a == i64::MIN || *b == i64::MIN {
+            return Ok(op == ComparisonOp::Ne);
+        }
+        return Ok(op_holds(a.cmp(b), op));
+    }
+
     // Numeric: convert both to f64.
     let lhs = left.to_f64()?;
     let rhs = right.to_f64()?;
@@ -40093,6 +40106,49 @@ mod tests {
             assert_eq!(result.values()[0], Scalar::Bool(false));
             assert_eq!(result.values()[1], Scalar::Bool(true));
             assert_eq!(result.values()[2], Scalar::Bool(false));
+        }
+
+        #[test]
+        fn object_timestamps_compare_by_their_instants_srzqw() {
+            // An object column's naive Timestamps (and Timedeltas) were read
+            // as floats, which they refuse, so each was unequal to itself
+            // (br-frankenpandas-srzqw).
+            let left = Column::from_object_values(vec![
+                Scalar::Datetime64(5),
+                Scalar::Utf8("x".into()),
+                Scalar::Datetime64(9),
+                Scalar::Timedelta64(4),
+            ]);
+            let right = Column::from_object_values(vec![
+                Scalar::Datetime64(5),
+                Scalar::Utf8("x".into()),
+                Scalar::Datetime64(7),
+                Scalar::Timedelta64(4),
+            ]);
+            let flags = |op| {
+                left.binary_comparison(&right, op)
+                    .expect("compare")
+                    .values()
+                    .to_vec()
+            };
+            let bools =
+                |values: &[bool]| values.iter().map(|&b| Scalar::Bool(b)).collect::<Vec<_>>();
+            assert_eq!(flags(ComparisonOp::Eq), bools(&[true, true, false, true]));
+            // NEGATIVE: a different instant is unequal, and ordered.
+            assert_eq!(flags(ComparisonOp::Ne), bools(&[false, false, true, false]));
+            let later = |op| {
+                Column::from_object_values(vec![Scalar::Datetime64(9)])
+                    .binary_comparison(&Column::from_object_values(vec![Scalar::Datetime64(7)]), op)
+                    .expect("compare")
+                    .values()
+                    .to_vec()
+            };
+            assert_eq!(later(ComparisonOp::Gt), bools(&[true]));
+            assert_eq!(later(ComparisonOp::Le), bools(&[false]));
+            // NaT equals nothing, itself included.
+            let nat = Column::from_object_values(vec![Scalar::Datetime64(i64::MIN)]);
+            let eq_nat = nat.binary_comparison(&nat, ComparisonOp::Eq).expect("nat");
+            assert_eq!(eq_nat.values(), bools(&[false]).as_slice());
         }
 
         #[test]

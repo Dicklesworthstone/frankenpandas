@@ -4022,7 +4022,7 @@ fn scalar_to_string_for_astype(value: Scalar) -> String {
         Scalar::Timedelta64(v) if v == Timedelta::NAT => "NaT".to_owned(),
         Scalar::Timedelta64(v) => Timedelta::format(v),
         Scalar::Datetime64(v) if v == Timestamp::NAT => "NaT".to_owned(),
-        Scalar::Datetime64(v) => format!("Timestamp[{v}]"),
+        Scalar::Datetime64(v) => timestamp_text(v),
         Scalar::Period(p) if p.ordinal == i64::MIN => "NaT".to_owned(),
         Scalar::Period(p) => p.calendar_string(),
         Scalar::Interval(v) => v.to_string(),
@@ -6089,21 +6089,30 @@ pub fn strftime_in_zone(nanos: i64, format: &str, tz: Option<&str>) -> String {
     }
 }
 
-/// `str(Timestamp)` of the instant `nanos` in `tz`, as pandas prints a
-/// tz-aware value (repr cells, `astype(str)`): its wall clock
-/// 'YYYY-MM-DD HH:MM:SS', its own fraction when it has one (six digits, nine
-/// for nanoseconds), and the zone's `+HH:MM` offset then.
+/// `str(Timestamp)` of the naive instant `nanos`: its wall clock
+/// 'YYYY-MM-DD HH:MM:SS' and its own fraction when it has one (six digits,
+/// nine for nanoseconds) - how pandas prints a naive Timestamp an object
+/// column holds (`astype(str)` spelled it 'Timestamp[<nanos>]';
+/// br-frankenpandas-srzqw).
 #[must_use]
-pub fn timestamp_text_in_zone(nanos: i64, tz: &str) -> String {
-    let offset = tz_offset_seconds(tz, nanos).unwrap_or(0);
-    let wall = nanos.saturating_add(i64::from(offset) * 1_000_000_000);
-    let mut text = strftime_python(wall, "%Y-%m-%d %H:%M:%S", None);
-    let fraction = wall.rem_euclid(1_000_000_000);
+pub fn timestamp_text(nanos: i64) -> String {
+    let mut text = strftime_python(nanos, "%Y-%m-%d %H:%M:%S", None);
+    let fraction = nanos.rem_euclid(1_000_000_000);
     if fraction % 1_000 != 0 {
         text.push_str(&format!(".{fraction:09}"));
     } else if fraction != 0 {
         text.push_str(&format!(".{:06}", fraction / 1_000));
     }
+    text
+}
+
+/// `str(Timestamp)` of the instant `nanos` in `tz`, as pandas prints a
+/// tz-aware value (repr cells, `astype(str)`): its [`timestamp_text`] wall
+/// clock and the zone's `+HH:MM` offset then.
+#[must_use]
+pub fn timestamp_text_in_zone(nanos: i64, tz: &str) -> String {
+    let offset = tz_offset_seconds(tz, nanos).unwrap_or(0);
+    let mut text = timestamp_text(nanos.saturating_add(i64::from(offset) * 1_000_000_000));
     let sign = if offset < 0 { '-' } else { '+' };
     let minutes = offset.unsigned_abs() / 60;
     text.push_str(&format!("{sign}{:02}:{:02}", minutes / 60, minutes % 60));
@@ -19429,6 +19438,37 @@ mod tests {
             "Timestamp[42, US/Eastern]"
         );
         assert_eq!(Timestamp::nat().to_string(), "NaT");
+    }
+
+    #[test]
+    fn a_naive_timestamp_cell_casts_to_its_str_srzqw() {
+        // astype(str) of an object column's naive Timestamp is str(Timestamp)
+        // - its own fraction, none when whole - not the 'Timestamp[<nanos>]'
+        // placeholder (br-frankenpandas-srzqw).
+        let text = |nanos: i64| cast_scalar(&Scalar::Datetime64(nanos), DType::Utf8);
+        let midnight = 1_711_929_600_000_000_000;
+        assert_eq!(
+            text(midnight),
+            Ok(Scalar::Utf8("2024-04-01 00:00:00".into()))
+        );
+        assert_eq!(
+            text(midnight + 1_000),
+            Ok(Scalar::Utf8("2024-04-01 00:00:00.000001".into()))
+        );
+        assert_eq!(
+            text(midnight + 1),
+            Ok(Scalar::Utf8("2024-04-01 00:00:00.000000001".into()))
+        );
+        assert_eq!(
+            text(-1),
+            Ok(Scalar::Utf8("1969-12-31 23:59:59.999999999".into()))
+        );
+        assert_eq!(text(Timestamp::NAT), Ok(Scalar::Utf8("NaT".into())));
+        // The zoned spelling is the same wall clock and its offset.
+        assert_eq!(
+            crate::timestamp_text_in_zone(midnight, "US/Eastern"),
+            "2024-03-31 20:00:00-04:00"
+        );
     }
 
     #[test]

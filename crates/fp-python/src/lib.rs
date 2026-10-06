@@ -7765,7 +7765,7 @@ fn object_instants(py: Python<'_>, series: &Series) -> PyResult<Series> {
 
 /// `frame` with each column of dates as their instants, as `to_json` reads
 /// them ([`json_instants`]).
-fn frame_object_instants(py: Python<'_>, frame: &DataFrame) -> PyResult<DataFrame> {
+fn frame_object_instants(py: Python<'_>, frame: &DataFrame, iso: bool) -> PyResult<DataFrame> {
     let mut out = frame.clone();
     for position in 0..frame.shape().1 {
         let Some(column) = frame.column_at(position) else {
@@ -7776,7 +7776,7 @@ fn frame_object_instants(py: Python<'_>, frame: &DataFrame) -> PyResult<DataFram
         }
         let series =
             Series::new("", frame.index().clone(), column.clone()).map_err(frame_error_to_py)?;
-        let instants = json_instants(py, &series)?;
+        let instants = json_instants(py, &series, iso)?;
         out = out
             .isetitem(position, instants.column().clone())
             .map_err(frame_error_to_py)?;
@@ -7787,12 +7787,18 @@ fn frame_object_instants(py: Python<'_>, frame: &DataFrame) -> PyResult<DataFram
 /// [`object_instants`] as `to_json` reads a column: one of zoned datetimes
 /// ([`zoned_cells`]) is their instants, which pandas writes as epoch
 /// milliseconds - in UTC, ISO text ending "Z", when none is naive (each
-/// Timestamp's own text was written; br-frankenpandas-an1xe).
-fn json_instants(py: Python<'_>, series: &Series) -> PyResult<Series> {
+/// Timestamp's own text was written; br-frankenpandas-an1xe). Naive beside
+/// aware under date_format='iso' stay cells, which [`json_dates`] writes
+/// each as its kind does.
+fn json_instants(py: Python<'_>, series: &Series, iso: bool) -> PyResult<Series> {
     let Some(cells) = zoned_cells(py, series.column())? else {
         return object_instants(py, series);
     };
-    let column = if cells.iter().any(|cell| matches!(cell, ZonedCell::Naive(_))) {
+    let naive = cells.iter().any(|cell| matches!(cell, ZonedCell::Naive(_)));
+    if naive && iso {
+        return object_instants(py, series);
+    }
+    let column = if naive {
         Column::from_object_values(
             cells
                 .iter()
@@ -35563,7 +35569,9 @@ impl PySeries {
                 }
                 // A column of dates writes as their instants (fvsao.67), in
                 // date_format / date_unit.
-                let series = Python::attach(|py| json_instants(py, &self.inner))?;
+                let series = Python::attach(|py| {
+                    json_instants(py, &self.inner, date_format == Some("iso"))
+                })?;
                 let frame = series
                     .to_frame(Some("__value__"))
                     .map_err(frame_error_to_py)?;
@@ -51251,7 +51259,9 @@ impl PyDataFrame {
             |lines, options| {
                 // Columns of dates write as their instants (fvsao.67), in
                 // date_format / date_unit.
-                let frame = Python::attach(|py| frame_object_instants(py, &self.inner))?;
+                let frame = Python::attach(|py| {
+                    frame_object_instants(py, &self.inner, date_format == Some("iso"))
+                })?;
                 let frame = json_orient_dates(frame, orient, date_format, date_unit)?;
                 // MultiIndex columns key records / columns / index by each
                 // column's tuple as Python prints it ("('p', 's')"), as pandas'
@@ -90905,6 +90915,49 @@ fn json_dates(frame: DataFrame, date_format: Option<&str>, date_unit: &str) -> P
                     _ => Scalar::Null(NullKind::Null),
                 })
                 .collect(),
+            // An object column's Timestamps (a zoned one in UTC with 'Z')
+            // and Timedeltas, each as its kind writes, the other cells as
+            // they are (an ISO date was written as epoch milliseconds, a
+            // zoned one as its own text; br-frankenpandas-srzqw, an1xe).
+            _ if column.holds_non_text()
+                && column.values().iter().any(|value| {
+                    matches!(
+                        value,
+                        Scalar::Datetime64(_)
+                            | Scalar::Timedelta64(_)
+                            | Scalar::Object(fp_types::ObjectValue::Host(_))
+                    )
+                }) =>
+            {
+                let cells = Python::attach(|py| {
+                    column
+                        .values()
+                        .iter()
+                        .map(|value| {
+                            Ok(match value {
+                                Scalar::Datetime64(nanos) if *nanos != Timestamp::NAT => {
+                                    instant(*nanos, false)
+                                }
+                                Scalar::Timedelta64(nanos) if *nanos != Timedelta::NAT => {
+                                    duration(*nanos)
+                                }
+                                Scalar::Object(fp_types::ObjectValue::Host(_)) => {
+                                    match zoned_cell(py, scalar_to_py(py, value)?.bind(py))? {
+                                        Some(ZonedCell::Aware(nanos, _)) => instant(nanos, true),
+                                        Some(ZonedCell::Naive(nanos)) => instant(nanos, false),
+                                        _ => value.clone(),
+                                    }
+                                }
+                                other => other.clone(),
+                            })
+                        })
+                        .collect::<PyResult<Vec<_>>>()
+                })?;
+                out = out
+                    .with_column(name.clone(), Column::from_object_values(cells))
+                    .map_err(frame_error_to_py)?;
+                continue;
+            }
             _ => continue,
         };
         let converted = Column::new(dtype_out.clone(), values).map_err(column_error_to_py)?;
