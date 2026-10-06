@@ -81482,6 +81482,13 @@ impl DataFrame {
         } else {
             self.index.relabeled(out_labels)
         };
+        // No labels keep the index's dtype (`df.loc[[]]` of an int64 index is
+        // an empty int64 one; br-frankenpandas-0l1nu).
+        let index = if labels.is_empty() {
+            index.with_dtype_of(&self.index)
+        } else {
+            index
+        };
         let mut out = Self::new_with_axis(index, columns, out_columns)?;
         out.allows_duplicate_labels = self.allows_duplicate_labels;
         Ok(out.with_labels_of(self))
@@ -172901,6 +172908,30 @@ mod tests {
                 .with_index(Index::from_i64_values(vec![1, 1, 2]))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn loc_of_no_labels_keeps_the_index_dtype_0l1nu() {
+        // df.loc[[]] of an int64 index is an empty int64 index, not an
+        // object one; NEGATIVE: of a mixed object index, an object one (not
+        // its first label's int64) (br-frankenpandas-0l1nu).
+        for (index, dtype) in [
+            (Index::from_i64_values(vec![10, 20, 30]), "int64"),
+            (
+                Index::new(vec![
+                    IndexLabel::Int64(1),
+                    IndexLabel::Utf8("b".to_owned()),
+                    IndexLabel::Int64(3),
+                ]),
+                "object",
+            ),
+        ] {
+            let series = Series::new("a", index, Column::from_i64_values(vec![1, 2, 3])).unwrap();
+            let frame = DataFrame::from_series(vec![series]).unwrap();
+            let none = frame.loc(&[]).unwrap();
+            assert_eq!(none.len(), 0);
+            assert_eq!(none.index().dtype(), dtype);
+        }
     }
 
     #[test]

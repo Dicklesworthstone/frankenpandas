@@ -28089,3 +28089,95 @@ _E00F7_CASES = {
 @pytest.mark.parametrize("case", list(_E00F7_CASES))
 def test_stepped_slices_like_pandas_e00f7(case: str) -> None:
     assert _e00f7_shown(_E00F7_CASES[case](fpd)) == _e00f7_shown(_E00F7_CASES[case](pd))
+
+
+# br-frankenpandas-0l1nu: an empty list (or int / float array) key selects
+# nothing - it was read as a boolean mask of the wrong length - and a list of
+# bools is a mask, never positions (df.iloc[[True, False, True]] read rows 1,
+# 0, 1). An empty bool array is a mask of the wrong length, as pandas.
+def _0l1nu_objects(m: Any) -> Any:
+    s = m.Series([1.5, 2.5, 3.5, 4.5, 5.5], index=m.date_range("2024-01-01", periods=5, freq="D"))
+    d = m.DataFrame({"a": [1, 2, 3], "b": [1.5, 2.5, 3.5]}, index=m.Index([10, 20, 30]))
+    return s, d
+
+
+def _0l1nu_shown(case: Any, m: Any) -> Any:
+    try:
+        obj = case(*_0l1nu_objects(m))
+    except Exception as e:  # noqa: BLE001 - the exception class is the result
+        return ["raise", type(e).__name__]
+    index = obj.index
+    shown = [type(obj).__name__, str(index.dtype), getattr(index, "freqstr", None), [str(v) for v in index.tolist()]]
+    if hasattr(obj, "columns"):
+        shown.append([(str(c), [str(v) for v in obj[c].tolist()]) for c in obj.columns])
+    else:
+        shown.append([str(v) for v in obj.tolist()])
+    return shown
+
+
+_0L1NU_CASES = {
+    "s.iloc[[]] (keeps D)": lambda s, d: s.iloc[[]],
+    "s.loc[[]]": lambda s, d: s.loc[[]],
+    "s[[]]": lambda s, d: s[[]],
+    "s.iloc[np int []]": lambda s, d: s.iloc[np.array([], dtype=np.int64)],
+    "d.iloc[[]]": lambda s, d: d.iloc[[]],
+    "d.loc[[]] (int64 index)": lambda s, d: d.loc[[]],
+    "d.loc[[], 'a']": lambda s, d: d.loc[[], "a"],
+    "d.loc[:, []]": lambda s, d: d.loc[:, []],
+    "d.iloc[[], [0]]": lambda s, d: d.iloc[[], [0]],
+    "d[[]]": lambda s, d: d[[]],
+    "d.iloc[[True, False, True]]": lambda s, d: d.iloc[[True, False, True]],
+    "d.iloc[[True, False, True], [0]]": lambda s, d: d.iloc[[True, False, True], [0]],
+    "d.iloc[np bool, [0, 1]]": lambda s, d: d.iloc[np.array([True, False, True]), [0, 1]],
+    "d.iloc[:, [True, False]]": lambda s, d: d.iloc[:, [True, False]],
+    "d.iloc[0, [False, True]]": lambda s, d: d.iloc[0, [False, True]],
+    "NEGATIVE d.iloc[[True, False]] (short mask)": lambda s, d: d.iloc[[True, False]],
+    "NEGATIVE d.iloc[[True, False], [0]] (short mask)": lambda s, d: d.iloc[[True, False], [0]],
+    "NEGATIVE s.iloc[np bool []]": lambda s, d: s.iloc[np.array([], dtype=bool)],
+    "NEGATIVE d.iloc[np bool []]": lambda s, d: d.iloc[np.array([], dtype=bool)],
+    "NEGATIVE d[np bool []]": lambda s, d: d[np.array([], dtype=bool)],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_0L1NU_CASES))
+def test_empty_and_bool_list_keys_like_pandas_0l1nu(case: str) -> None:
+    assert _0l1nu_shown(_0L1NU_CASES[case], fpd) == _0l1nu_shown(_0L1NU_CASES[case], pd)
+
+
+# br-frankenpandas-ce86r: no labels show an index's type, so an empty one built
+# with a dtype (or from an empty typed array, an empty date_range /
+# period_range, or under an empty Series / DataFrame) keeps its class, dtype
+# and freq - they were object (period[unknown]).
+def _ce86r_shown(case: Any, m: Any) -> Any:
+    index = case(m)
+    if not hasattr(index, "freqstr") and hasattr(index, "index"):
+        index = index.index
+    return [type(index).__name__, str(index.dtype), getattr(index, "freqstr", None), len(index), index.name]
+
+
+_CE86R_CASES = {
+    "Index([], dtype=int64)": lambda m: m.Index([], dtype="int64"),
+    "Index([], dtype=float)": lambda m: m.Index([], dtype=float),
+    "Index([], dtype=bool)": lambda m: m.Index([], dtype=bool),
+    "Index([], dtype=datetime64[ns])": lambda m: m.Index([], dtype="datetime64[ns]"),
+    "Index([], dtype=timedelta64[ns])": lambda m: m.Index([], dtype="timedelta64[ns]"),
+    "Index([], dtype=int64, name=k)": lambda m: m.Index([], dtype="int64", name="k"),
+    "Index(np int64 [])": lambda m: m.Index(np.array([], dtype=np.int64)),
+    "Index(np float64 [])": lambda m: m.Index(np.array([], dtype=float)),
+    "Index(np datetime64 [])": lambda m: m.Index(np.array([], dtype="datetime64[ns]")),
+    "Index([], dtype=int64).astype(float)": lambda m: m.Index([], dtype="int64").astype(float),
+    "period_range(periods=0)": lambda m: m.period_range("2024-01", periods=0, freq="M"),
+    "Series([], index=date_range(0))": lambda m: m.Series([], dtype=float, index=m.date_range("2024-01-01", periods=0, freq="D")),
+    "DataFrame(index=date_range(0))": lambda m: m.DataFrame({"a": np.array([], dtype=float)}, index=m.date_range("2024-01-01", periods=0, freq="D")),
+    "Series([], index=np int [])": lambda m: m.Series([], dtype=float, index=np.array([], dtype=np.int64)),
+    "NEGATIVE Index([]) stays object": lambda m: m.Index([]),
+    "NEGATIVE Index([], dtype=str) is object": lambda m: m.Index([], dtype=str),
+    "NEGATIVE Index([1, 2], dtype=float) by its labels": lambda m: m.Index([1, 2], dtype=float),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_CE86R_CASES))
+def test_empty_indexes_keep_their_type_like_pandas_ce86r(case: str) -> None:
+    assert _ce86r_shown(_CE86R_CASES[case], fpd) == _ce86r_shown(_CE86R_CASES[case], pd)

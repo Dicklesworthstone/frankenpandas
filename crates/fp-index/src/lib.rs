@@ -2694,6 +2694,7 @@ impl Index {
     #[must_use]
     pub fn from_timedelta64(nanos: Vec<i64>) -> Self {
         Self::new(nanos.into_iter().map(IndexLabel::Timedelta64).collect())
+            .declared_if_empty(DeclaredDtype::Timedelta64)
     }
 
     #[must_use]
@@ -2718,12 +2719,24 @@ impl Index {
         if len <= 1 || step > 0 {
             let _ = index.sort_order_cache.set(SortOrder::AscendingDatetime64);
         }
-        Some(index)
+        Some(index.declared_if_empty(DeclaredDtype::Datetime64))
     }
 
     #[must_use]
     pub fn from_datetime64(nanos: Vec<i64>) -> Self {
         Self::new(nanos.into_iter().map(IndexLabel::Datetime64).collect())
+            .declared_if_empty(DeclaredDtype::Datetime64)
+    }
+
+    /// No labels show a type, so an empty index built as `dtype` declares
+    /// it (an empty date_range under a Series was an object index;
+    /// br-frankenpandas-ce86r).
+    fn declared_if_empty(self, dtype: DeclaredDtype) -> Self {
+        if self.is_empty() {
+            self.with_declared_dtype(Some(dtype))
+        } else {
+            self
+        }
     }
 
     /// The `(first, step, len)` of a date_range's lazy datetime labels -
@@ -5620,23 +5633,33 @@ impl Index {
     /// Matches `pd.Index.astype(dtype)` for the generic dtype names this crate
     /// can represent directly.
     pub fn astype(&self, dtype: &str) -> Result<Self, IndexError> {
-        match dtype {
-            "int" | "int64" => Ok(self.astype_int()),
-            "float" | "float64" => self.astype_float(),
-            "bool" => self.astype_bool(),
-            "str" | "string" | "object" => Ok(self.astype_str()),
+        let (out, declared) = match dtype {
+            "int" | "int64" => (self.astype_int(), DeclaredDtype::Int64),
+            "float" | "float64" => (self.astype_float()?, DeclaredDtype::Float64),
+            "bool" => (self.astype_bool()?, DeclaredDtype::Bool),
+            "str" | "string" | "object" => (self.astype_str(), DeclaredDtype::Object),
             "datetime64[ns]" => {
                 ensure_index_kind(self, LabelKinds::DATETIME64, "DatetimeIndex")?;
-                Ok(self.clone())
+                (self.clone(), DeclaredDtype::Datetime64)
             }
             "timedelta64[ns]" => {
                 ensure_index_kind(self, LabelKinds::TIMEDELTA64, "TimedeltaIndex")?;
-                Ok(self.clone())
+                (self.clone(), DeclaredDtype::Timedelta64)
             }
-            other => Err(IndexError::InvalidArgument(format!(
-                "unsupported Index.astype dtype {other:?}"
-            ))),
-        }
+            other => {
+                return Err(IndexError::InvalidArgument(format!(
+                    "unsupported Index.astype dtype {other:?}"
+                )));
+            }
+        };
+        // No labels show a type: an empty index is the dtype asked for
+        // (Index([], dtype='int64') is int64, it was object;
+        // br-frankenpandas-ce86r).
+        Ok(if out.is_empty() {
+            out.with_declared_dtype(Some(declared))
+        } else {
+            out
+        })
     }
 
     /// Equality check against another Index.
@@ -8314,7 +8337,9 @@ pub fn divide_tick_freq(freqstr: &str, divisor: f64) -> Option<String> {
 pub fn take_freq(freq: Option<String>, positions: &[usize]) -> Option<String> {
     let freq = freq?;
     let step = match positions {
-        [] => return None,
+        // No positions is an empty slice to pandas (`s.iloc[[]]` keeps 'D';
+        // br-frankenpandas-0l1nu).
+        [] => return Some(freq),
         [_] => 1,
         [first, second, ..] => i64::try_from(*second).ok()? - i64::try_from(*first).ok()?,
     };
@@ -11925,16 +11950,35 @@ impl TimedeltaIndex {
 /// `Period` already lives in `fp-types`; this wrapper gives callers a typed
 /// index container while DataFrame integration can still materialize through
 /// string labels until a dedicated Period `IndexLabel` variant lands.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeriodIndex {
     values: Vec<Period>,
     name: Option<LabelName>,
+    /// The freq the index was built at, which an empty one has no period to
+    /// show (period_range(periods=0) was period[unknown];
+    /// br-frankenpandas-ce86r). A non-empty index's is its periods'.
+    #[serde(default)]
+    built_freq: Option<PeriodFreq>,
 }
+
+/// Equal periods, name and freq - the periods' own, or for empty indexes
+/// the freq each was built at - whichever constructor made them.
+impl PartialEq for PeriodIndex {
+    fn eq(&self, other: &Self) -> bool {
+        self.values == other.values && self.name == other.name && self.freq() == other.freq()
+    }
+}
+
+impl Eq for PeriodIndex {}
 
 impl PeriodIndex {
     #[must_use]
     pub fn new(values: Vec<Period>) -> Self {
-        Self { values, name: None }
+        Self {
+            values,
+            name: None,
+            built_freq: None,
+        }
     }
 
     /// Construct a PeriodIndex from raw ordinal values and a frequency,
@@ -11945,7 +11989,11 @@ impl PeriodIndex {
             .iter()
             .map(|&ordinal| Period::new(ordinal, freq))
             .collect();
-        Self { values, name: None }
+        Self {
+            values,
+            name: None,
+            built_freq: Some(freq),
+        }
     }
 
     pub fn from_fields(fields: PeriodFields<'_>) -> Result<Self, IndexError> {
@@ -11954,12 +12002,20 @@ impl PeriodIndex {
         let values = (0..fields.year.len())
             .map(|position| period_from_fields_at(&fields, freq, position))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self { values, name: None })
+        Ok(Self {
+            values,
+            name: None,
+            built_freq: Some(freq),
+        })
     }
 
     #[must_use]
     pub fn from_range(start: Period, periods: usize) -> Self {
-        Self::new(fp_types::period_range(start, periods))
+        Self {
+            values: fp_types::period_range(start, periods),
+            name: None,
+            built_freq: Some(start.freq),
+        }
     }
 
     #[must_use]
@@ -12227,7 +12283,10 @@ impl PeriodIndex {
 
     #[must_use]
     pub fn freq(&self) -> Option<PeriodFreq> {
-        self.values.first().map(|period| period.freq)
+        self.values
+            .first()
+            .map(|period| period.freq)
+            .or(self.built_freq)
     }
 
     /// Raw period ordinals, matching `pd.PeriodIndex.asi8`.
@@ -12289,6 +12348,7 @@ impl PeriodIndex {
         Some(Self {
             values,
             name: index.name().cloned(),
+            built_freq: freq,
         })
     }
 
@@ -12306,6 +12366,7 @@ impl PeriodIndex {
         Self {
             values: uniques,
             name: self.name.clone(),
+            built_freq: self.built_freq,
         }
     }
 
@@ -12387,6 +12448,7 @@ impl PeriodIndex {
         Ok(Self {
             values: taken,
             name: self.name.clone(),
+            built_freq: self.freq(),
         })
     }
 
@@ -12403,6 +12465,7 @@ impl PeriodIndex {
         Self {
             values: out,
             name: self.name.clone(),
+            built_freq: self.freq(),
         }
     }
 
@@ -12452,6 +12515,7 @@ impl PeriodIndex {
         Ok(Self {
             values,
             name: self.name.clone(),
+            built_freq: Some(target_freq),
         })
     }
 
@@ -12705,6 +12769,7 @@ impl PeriodIndex {
             } else {
                 None
             },
+            built_freq: self.freq(),
         })
     }
 
@@ -12727,6 +12792,7 @@ impl PeriodIndex {
             } else {
                 None
             },
+            built_freq: self.freq(),
         })
     }
 
@@ -12749,6 +12815,7 @@ impl PeriodIndex {
             } else {
                 None
             },
+            built_freq: self.freq(),
         })
     }
 
@@ -12777,6 +12844,7 @@ impl PeriodIndex {
             } else {
                 None
             },
+            built_freq: self.freq(),
         })
     }
 
@@ -12789,6 +12857,7 @@ impl PeriodIndex {
         Ok(Self {
             values: periods,
             name: self.name.clone(),
+            built_freq: self.freq(),
         })
     }
 
@@ -13071,6 +13140,7 @@ impl PeriodIndex {
         Ok(Self {
             values,
             name: self.name.clone(),
+            built_freq: self.freq(),
         })
     }
 
@@ -13101,6 +13171,7 @@ impl PeriodIndex {
         Ok(Self {
             values,
             name: self.name.clone(),
+            built_freq: self.freq(),
         })
     }
 
@@ -13118,6 +13189,7 @@ impl PeriodIndex {
         Ok(Self {
             values: periods,
             name: self.name.clone(),
+            built_freq: self.freq(),
         })
     }
 
@@ -13130,6 +13202,7 @@ impl PeriodIndex {
         Ok(Self {
             values,
             name: self.name.clone(),
+            built_freq: self.freq(),
         })
     }
 
@@ -13362,6 +13435,7 @@ impl PeriodIndex {
         Self {
             values: periods,
             name,
+            built_freq: self.freq(),
         }
     }
 
@@ -13379,6 +13453,7 @@ impl PeriodIndex {
         Ok(Self {
             values: periods,
             name: self.name.clone(),
+            built_freq: self.freq(),
         })
     }
 
@@ -13405,6 +13480,7 @@ impl PeriodIndex {
             Self {
                 values: uniques,
                 name: self.name.clone(),
+                built_freq: self.freq(),
             },
         )
     }
@@ -23445,6 +23521,73 @@ mod tests {
         // NEGATIVE: labels of their own read their own dtype.
         assert_eq!(ints().take(&[0]).dtype(), "int64");
         assert_eq!(object.with_declared_dtype(None).dtype(), "int64");
+    }
+
+    #[test]
+    fn empty_indexes_keep_the_dtype_they_are_built_as_ce86r() {
+        // No labels show a type: an empty index cast to (or built as) a
+        // dtype reports it, as pandas (they were object).
+        let empty = crate::Index::new(Vec::new());
+        for (dtype, expected) in [
+            ("int64", "int64"),
+            ("float64", "float64"),
+            ("bool", "bool"),
+            ("str", "object"),
+            ("datetime64[ns]", "datetime64[ns]"),
+            ("timedelta64[ns]", "timedelta64[ns]"),
+        ] {
+            assert_eq!(empty.astype(dtype).unwrap().dtype(), expected, "{dtype}");
+        }
+        assert_eq!(
+            crate::Index::from_datetime64(Vec::new()).dtype(),
+            "datetime64[ns]"
+        );
+        assert_eq!(
+            crate::Index::from_timedelta64(Vec::new()).dtype(),
+            "timedelta64[ns]"
+        );
+        // NEGATIVE: labels still decide a non-empty index's dtype, and an
+        // empty one with no dtype asked for is object.
+        let ints = crate::Index::new(vec![IndexLabel::Int64(1), IndexLabel::Int64(2)]);
+        assert_eq!(ints.astype("float64").unwrap().dtype(), "float64");
+        assert_eq!(empty.dtype(), "object");
+        assert_eq!(
+            crate::Index::from_datetime64(vec![5]).declared_dtype(),
+            None
+        );
+    }
+
+    #[test]
+    fn an_empty_period_range_keeps_its_freq_ce86r() {
+        let start = Period::new(648, PeriodFreq::Monthly);
+        let none = crate::PeriodIndex::from_range(start, 0);
+        assert_eq!(none.freq(), Some(PeriodFreq::Monthly));
+        assert_eq!(none.unique().freq(), Some(PeriodFreq::Monthly));
+        // Periods' own freq still decides, and equality follows the freq:
+        // the same periods from either constructor are equal, empty
+        // indexes of two freqs are not.
+        let three = crate::PeriodIndex::from_range(start, 3);
+        assert_eq!(three, crate::PeriodIndex::new(three.values().to_vec()));
+        assert_ne!(
+            none,
+            crate::PeriodIndex::from_range(Period::new(19_000, PeriodFreq::Daily), 0)
+        );
+        assert_eq!(crate::PeriodIndex::new(Vec::new()).freq(), None);
+    }
+
+    #[test]
+    fn take_freq_keeps_it_for_an_empty_take_0l1nu() {
+        // pandas reads no positions as an empty slice (s.iloc[[]] keeps 'D'),
+        // one or a steady step as a slice scaled by it, anything else as none.
+        let daily = || Some("D".to_owned());
+        assert_eq!(crate::take_freq(daily(), &[]).as_deref(), Some("D"));
+        assert_eq!(crate::take_freq(daily(), &[3]).as_deref(), Some("D"));
+        assert_eq!(
+            crate::take_freq(daily(), &[4, 2, 0]).as_deref(),
+            Some("-2D")
+        );
+        assert_eq!(crate::take_freq(daily(), &[0, 1, 3]), None);
+        assert_eq!(crate::take_freq(None, &[]), None);
     }
 
     #[test]

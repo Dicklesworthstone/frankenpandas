@@ -8517,9 +8517,27 @@ fn typed_index_of(data: &Bound<'_, PyAny>) -> PyResult<Option<Index>> {
         return Ok(None);
     }
     let dtype = data.getattr("dtype")?;
-    let int64 = dtype.getattr("name")?.extract::<String>()? == "int64";
-    let native = dtype.getattr("isnative")?.extract::<bool>()?;
+    let dtype_name = dtype.getattr("name")?.extract::<String>()?;
     let flat = data.getattr("ndim")?.extract::<usize>()? == 1;
+    // An empty array is its dtype's empty index (Index(np.array([], int))
+    // is int64; it was object, having no label to show a type;
+    // br-frankenpandas-ce86r).
+    if flat && data.len()? == 0 {
+        let declared = match dtype_name.as_str() {
+            "int64" => fp_index::DeclaredDtype::Int64,
+            "int32" => fp_index::DeclaredDtype::Int32,
+            "float64" => fp_index::DeclaredDtype::Float64,
+            "bool" => fp_index::DeclaredDtype::Bool,
+            "datetime64[ns]" => fp_index::DeclaredDtype::Datetime64,
+            "timedelta64[ns]" => fp_index::DeclaredDtype::Timedelta64,
+            _ => return Ok(None),
+        };
+        return Ok(Some(
+            Index::new(Vec::new()).with_declared_dtype(Some(declared)),
+        ));
+    }
+    let int64 = dtype_name == "int64";
+    let native = dtype.getattr("isnative")?.extract::<bool>()?;
     if !(int64 && native && flat) {
         return Ok(None);
     }
@@ -11608,6 +11626,14 @@ impl<'a, 'py> FromPyObject<'a, 'py> for Positions {
     type Error = PyErr;
 
     fn extract(obj: pyo3::Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        // A boolean list or array is a mask, never positions: a Python bool
+        // is an int, so df.iloc[[True, False, True]] read rows 1, 0, 1 (an
+        // empty bool array, no rows; br-frankenpandas-0l1nu).
+        if bool_mask_key(&obj).is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "a boolean mask is not positions",
+            ));
+        }
         if obj.get_type().name().is_ok_and(|name| name == "ndarray") {
             let dtype = obj.getattr("dtype")?;
             if dtype.getattr("isnative")?.extract::<bool>()?
@@ -12169,7 +12195,16 @@ impl PyIndex {
             return Ok(Py::new(py, index)?.into_any());
         }
         if let Some(dtype) = dtype.filter(|dtype| !dtype.is_none()) {
-            return Self::new(data, name)?.astype(dtype, true);
+            let typed = Self::new(data, name)?.astype(dtype, true)?;
+            // A datetime / timedelta dtype is that index's class, as the
+            // labels pick it below (Index([], dtype='datetime64[ns]') is a
+            // DatetimeIndex; br-frankenpandas-ce86r).
+            if let Ok(index) = typed.bind(py).extract::<PyRef<'_, PyIndex>>()
+                && matches!(index.inner.dtype(), "datetime64[ns]" | "timedelta64[ns]")
+            {
+                return row_index_to_py(py, &index.inner);
+            }
+            return Ok(typed);
         }
         if let Some(range) = data.and_then(|data| data.cast::<pyo3::types::PyRange>().ok()) {
             let part = |attr: &str| range.getattr(attr).and_then(|value| value.extract::<i64>());
@@ -15084,7 +15119,7 @@ impl PyDatetimeIndex {
         // A boolean mask keeps the freq when it selects a run (pandas turns
         // it into a slice); integer positions drop it. Both raised TypeError.
         let asi8 = self.inner.asi8();
-        let (positions, run) = if let Ok(mask) = key.extract::<Vec<bool>>() {
+        let (positions, run) = if let Some(mask) = bool_mask_key(key) {
             if mask.len() != asi8.len() {
                 return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
                     "boolean index did not match indexed array along axis 0; size of axis is {} but size of corresponding boolean axis is {}",
@@ -20948,11 +20983,11 @@ impl PyPeriodIndex {
     /// `<QuarterEnd: startingMonth=12>`); it was the alias text.
     #[getter]
     fn freq(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        // The index's freq: its periods', or an empty one's built freq.
         let offset = self
             .inner
-            .values()
-            .first()
-            .and_then(|period| fp_index::canonical_freq(period.freq.alias()))
+            .freq()
+            .and_then(|freq| fp_index::canonical_freq(freq.alias()))
             .map(|freqstr| offset_for_freqstr(&freqstr))
             .transpose()?
             .flatten();
@@ -20964,7 +20999,7 @@ impl PyPeriodIndex {
 
     #[getter]
     fn freqstr(&self) -> Option<&'static str> {
-        self.inner.values().first().map(|p| p.freq.alias())
+        self.inner.freq().map(PeriodFreq::alias)
     }
 
     /// pandas' keyword-only `from_fields(*, year=, quarter=, month=, day=,
@@ -29516,6 +29551,18 @@ impl PySeries {
             .map_err(frame_error_to_py)?,
             None => series,
         };
+        // No rows show the index's type: an empty Series keeps the index
+        // given as it is (Series([], index=date_range(0)) is on an empty
+        // DatetimeIndex; its labels made an object one; br-frankenpandas-ce86r).
+        let series = match index {
+            Some(index) if series.is_empty() => Series::new(
+                series.name(),
+                index_arg_rows(index, 0)?.rename_index(series.index().name()),
+                series.column().clone(),
+            )
+            .map_err(frame_error_to_py)?,
+            _ => series,
+        };
         // A MultiIndex given as index= stays one (only its flattened labels
         // were kept; fvsao.34).
         let series = match index.and_then(|index| index.extract::<PyRef<'_, PyMultiIndex>>().ok()) {
@@ -29822,9 +29869,7 @@ impl PySeries {
             return Ok(Py::new(py, PySeries { inner: s })?.into_any());
         }
         // An empty list is no mask but no labels (gzune).
-        if let Ok(mask) = key.extract::<Vec<bool>>()
-            && !mask.is_empty()
-        {
+        if let Some(mask) = bool_mask_key(key) {
             let s = self
                 .inner
                 .iloc_bool(&mask)
@@ -37021,7 +37066,7 @@ impl PySeriesILoc {
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
             return Ok(Py::new(py, PySeries { inner: s })?.into_any());
         }
-        if let Ok(mask) = key.extract::<Vec<bool>>() {
+        if let Some(mask) = bool_mask_key(key) {
             let s = self
                 .inner
                 .iloc_bool(&mask)
@@ -37091,8 +37136,7 @@ impl PySeriesLoc {
         }
         // An empty list is no mask but no labels (gzune).
         if (key.cast::<PyList>().is_ok() || key.getattr("tolist").is_ok())
-            && let Ok(mask) = key.extract::<Vec<bool>>()
-            && !mask.is_empty()
+            && let Some(mask) = bool_mask_key(key)
         {
             return series(
                 self.inner
@@ -41289,6 +41333,18 @@ impl PyDataFrame {
             }
             None => built.inner,
         };
+        // No rows show the index's type: an empty frame keeps the index
+        // given as it is (an empty date_range made an object index of no
+        // labels; br-frankenpandas-ce86r).
+        let built = match index {
+            Some(index)
+                if built.is_empty() && index.extract::<PyRef<'_, PyMultiIndex>>().is_err() =>
+            {
+                let rows = index_arg_rows(index, 0)?.rename_index(built.index().name());
+                built.with_index(rows).map_err(frame_error_to_py)?
+            }
+            _ => built,
+        };
         // A MultiIndex given as index= or columns= stays one, and a dict
         // keyed by tuples makes a MultiIndex column axis, as pandas' (only
         // the flattened labels were kept; fvsao.34).
@@ -41882,9 +41938,11 @@ impl PyDataFrame {
         // `df[["a", "b"]]` -> DataFrame with those columns in that order. A
         // boolean Series is a row mask (below): extracting it as names built
         // a Python list of all its rows first (br-frankenpandas-sj5bn).
+        // So is a bool array, an empty one too (it named no columns).
         let bool_mask = key
             .extract::<PyRef<'_, PySeries>>()
-            .is_ok_and(|mask| mask.inner.dtype().is_bool());
+            .is_ok_and(|mask| mask.inner.dtype().is_bool())
+            || bool_mask_key(key).is_some();
         if !bool_mask && let Ok(cols) = key.extract::<Vec<String>>() {
             for col in &cols {
                 if self.inner.column(col).is_none() {
@@ -41970,7 +42028,7 @@ impl PyDataFrame {
             return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
         }
         // `df[mask]` with a boolean list -> filtered rows
-        if let Ok(mask) = key.extract::<Vec<bool>>() {
+        if let Some(mask) = bool_mask_key(key) {
             let frame = self
                 .inner
                 .iloc_bool(&mask)
@@ -42063,7 +42121,7 @@ impl PyDataFrame {
         }
         let is_mask = loc_bool_series_mask(key)?.is_some()
             || ((key.cast::<PyList>().is_ok() || key.getattr("tolist").is_ok())
-                && key.extract::<Vec<bool>>().is_ok());
+                && bool_mask_key(key).is_some());
         if is_mask {
             self.inner = frame_loc_write(py, &self.inner, key, value)?;
             return Ok(());
@@ -52771,6 +52829,11 @@ impl PyDataFrameILoc {
                             PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
                         })?;
                     return Ok(Py::new(py, PySeries { inner: sub })?.into_any());
+                } else if let Some(mask) = bool_mask_key(&col_key) {
+                    let sub = row_series.iloc_bool(&mask).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string())
+                    })?;
+                    return Ok(Py::new(py, PySeries { inner: sub })?.into_any());
                 } else if let Ok(col_positions) = col_key.extract::<Vec<i64>>() {
                     let sub = row_series.iloc(&col_positions).map_err(|e| {
                         PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string())
@@ -52815,7 +52878,7 @@ impl PyDataFrameILoc {
                         PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string())
                     })?;
                     return Ok(Py::new(py, PySeries { inner: sub })?.into_any());
-                } else if let Ok(mask) = row_key.extract::<Vec<bool>>() {
+                } else if let Some(mask) = bool_mask_key(&row_key) {
                     let sub = col_series.iloc_bool(&mask).map_err(|e| {
                         PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string())
                     })?;
@@ -52839,6 +52902,20 @@ impl PyDataFrameILoc {
                         .positions()
                         .into_iter()
                         .map(|c| c as usize)
+                        .collect()
+                } else if let Some(mask) = bool_mask_key(&col_key) {
+                    // A column mask keeps its True columns (it read as
+                    // positions 1 / 0).
+                    if mask.len() != self.inner.num_columns() {
+                        return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                            "Boolean index has wrong length: {} instead of {}",
+                            mask.len(),
+                            self.inner.num_columns()
+                        )));
+                    }
+                    mask.iter()
+                        .enumerate()
+                        .filter_map(|(c, &keep)| keep.then_some(c))
                         .collect()
                 } else if let Ok(col_positions) = col_key.extract::<Vec<i64>>() {
                     let width = self.inner.num_columns() as i64;
@@ -52865,6 +52942,8 @@ impl PyDataFrameILoc {
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
             let res = if let Ok(row_slice) = row_key.cast::<pyo3::types::PySlice>() {
                 slice_rows(row_slice, self.inner.len())?.of_frame(&columns)
+            } else if let Some(mask) = bool_mask_key(&row_key) {
+                columns.iloc_bool(&mask)
             } else if let Ok(Positions(rows)) = row_key.extract::<Positions>() {
                 columns.iloc(&rows)
             } else {
@@ -52898,11 +52977,12 @@ impl PyDataFrameILoc {
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
             return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
         }
-        if let Ok(mask) = key.extract::<Vec<bool>>() {
+        if let Some(mask) = bool_mask_key(key) {
+            // A mask of the wrong length is pandas' IndexError.
             let frame = self
                 .inner
                 .iloc_bool(&mask)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
             return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
         }
         if let Ok(series_mask) = key.extract::<PyRef<'_, PySeries>>() {
@@ -53479,7 +53559,7 @@ fn resolve_loc_rows(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<LocRows>
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()));
     }
     if key.cast::<PyList>().is_ok() || key.getattr("tolist").is_ok() {
-        if let Ok(mask) = key.extract::<Vec<bool>>() {
+        if let Some(mask) = bool_mask_key(key) {
             return df
                 .loc_bool(&mask)
                 .map(LocRows::frame)
@@ -53606,7 +53686,7 @@ fn resolve_loc_row_positions(
             .collect());
     }
     if (key.cast::<PyList>().is_ok() || key.getattr("tolist").is_ok())
-        && let Ok(mask) = key.extract::<Vec<bool>>()
+        && let Some(mask) = bool_mask_key(key)
     {
         if mask.len() != labels.len() {
             return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
@@ -54131,7 +54211,7 @@ fn resolve_iloc_positions(len: usize, key: &Bound<'_, PyAny>) -> PyResult<Vec<us
     if !key.is_instance_of::<pyo3::types::PyString>() && key.hasattr("__len__").unwrap_or(false) {
         // pyo3 reads a bool only from a Python or numpy bool, so a list of
         // integer positions is not taken for a mask.
-        if let Ok(mask) = key.extract::<Vec<bool>>() {
+        if let Some(mask) = bool_mask_key(key) {
             if mask.len() != len {
                 return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
                     "Boolean index has wrong length: {} instead of {len}",
@@ -54225,15 +54305,39 @@ fn int_key_labels(index: &Index, ints: Vec<i64>) -> Vec<IndexLabel> {
 }
 
 /// The integers of a list-like key (a list, an ndarray; not a string, a
-/// tuple or a boolean mask), None for any other key.
+/// tuple or a boolean mask), None for any other key - and for an empty one,
+/// whose dtype pandas infers as 'empty', not 'integer' (`s[[]]` is a label
+/// lookup).
 fn int_list_key(key: &Bound<'_, PyAny>) -> Option<Vec<i64>> {
     if key.is_instance_of::<pyo3::types::PyString>()
         || key.is_instance_of::<PyTuple>()
-        || key.extract::<Vec<bool>>().is_ok()
+        || bool_mask_key(key).is_some()
     {
         return None;
     }
-    key.extract::<Vec<i64>>().ok()
+    key.extract::<Vec<i64>>()
+        .ok()
+        .filter(|positions| !positions.is_empty())
+}
+
+/// `key` as a boolean mask, as pandas' `is_bool_indexer` reads one: a list
+/// of bools, or a bool-dtype array of any length. An empty list (or an empty
+/// int / float array) is no mask - pandas selects no rows with it
+/// (`s.iloc[[]]`, `df.loc[[]]`, `df.loc[:, []]`), where it was read as a
+/// mask of the wrong length; an empty bool array is one, of the wrong length
+/// (br-frankenpandas-0l1nu).
+fn bool_mask_key(key: &Bound<'_, PyAny>) -> Option<Vec<bool>> {
+    let mask = key.extract::<Vec<bool>>().ok()?;
+    if mask.is_empty() {
+        let kind = key
+            .getattr("dtype")
+            .and_then(|dtype| dtype.getattr("kind"))
+            .and_then(|kind| kind.extract::<String>());
+        if !kind.is_ok_and(|kind| kind == "b") {
+            return None;
+        }
+    }
+    Some(mask)
 }
 
 /// The rows `s[key] = value` writes, as pandas reads the key: a boolean
@@ -54623,7 +54727,7 @@ fn resolve_loc_columns(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<Optio
         }));
     }
     // A boolean list/array marks the columns to keep (df.loc[:, df.columns != 'a']).
-    if let Ok(mask) = key.extract::<Vec<bool>>() {
+    if let Some(mask) = bool_mask_key(key) {
         let names: Vec<String> = df.column_names().iter().map(|s| s.to_string()).collect();
         if mask.len() != names.len() {
             return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
@@ -78374,8 +78478,8 @@ fn period_range(
         }
     };
 
-    let values = fp_types::period_range(start_period, count);
-    let mut inner = PeriodIndex::new(values);
+    // At the start's freq, which no period shows when there are none.
+    let mut inner = PeriodIndex::from_range(start_period, count);
     if let Some(n) = name {
         inner = inner.set_name(n);
     }
