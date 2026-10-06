@@ -4170,8 +4170,9 @@ fn fill_reindex_positions(
 
 /// `target`'s positions in a unique `source` when both hold int labels in a
 /// typed backing (a range, an int64 buffer), without an `IndexLabel` made: an
-/// affine source (a RangeIndex) by arithmetic, any other by one map of its
-/// values. None (the caller resolves labels) for any other pair. A reindex of
+/// affine source (a RangeIndex) by arithmetic, any other by the map of its
+/// values its index keeps (Index::unique_int64_positions_of). None (the caller
+/// resolves labels) for any other pair. A reindex of
 /// a million rows to a range made both label sets first (15-27 ms where
 /// pandas takes 3-13; br-frankenpandas-mcq15).
 fn reindex_positions_typed(source: &Index, target: &Index) -> Option<Vec<Option<usize>>> {
@@ -4198,13 +4199,9 @@ fn reindex_positions_typed(source: &Index, target: &Index) -> Option<Vec<Option<
                 .collect(),
         );
     }
-    let values = source.int64_label_values()?;
-    let mut at: FxHashMap<i64, usize> =
-        FxHashMap::with_capacity_and_hasher(values.len(), Default::default());
-    for (position, &value) in values.iter().enumerate() {
-        at.entry(value).or_insert(position);
-    }
-    Some(targets.iter().map(|value| at.get(value).copied()).collect())
+    // The source's value -> position map is kept per label identity (a
+    // million entries were rebuilt on every call).
+    source.unique_int64_positions_of(&targets)
 }
 
 /// Resolve `target` label positions against `src` using a dense direct-address
