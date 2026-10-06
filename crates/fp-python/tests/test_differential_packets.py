@@ -27923,3 +27923,30 @@ def test_mask_with_nan_refuses_like_pandas_1s45z() -> None:
         frame = m.DataFrame({"x": [1.5, 2.5, 3.5]})
         with pytest.raises(ValueError):
             frame.loc[m.Series([True, None, False]), "x"] = 0.0
+
+
+# br-frankenpandas-t486t: an int64 Series against a NaN is pandas' float64 of
+# NaN (1 ** nan and nan ** 0 are 1.0), not an int64 column holding a gap.
+def _t486t_shown(series: Any) -> Any:
+    return [
+        str(series.dtype),
+        [repr(v) if not (isinstance(v, float) and math.isnan(v)) else "nan" for v in series.tolist()],
+        series.isna().tolist(),
+    ]
+
+
+_T486T_K = [3, -7, 0, 1, 12]
+_T486T_CASES = {}
+for _sym, _op in (("+", lambda a, b: a + b), ("-", lambda a, b: a - b), ("*", lambda a, b: a * b), ("/", lambda a, b: a / b), ("//", lambda a, b: a // b), ("%", lambda a, b: a % b), ("**", lambda a, b: a**b)):
+    _T486T_CASES[f"k {_sym} nan"] = (lambda op: lambda m: op(m.Series(_T486T_K), float("nan")))(_op)
+    _T486T_CASES[f"nan {_sym} k"] = (lambda op: lambda m: op(float("nan"), m.Series(_T486T_K)))(_op)
+_T486T_CASES["k + np.nan"] = lambda m: m.Series(_T486T_K) + np.nan
+_T486T_CASES["named k * nan"] = lambda m: m.Series(_T486T_K, name="v") * float("nan")
+_T486T_CASES["float + nan (NEGATIVE: unchanged)"] = lambda m: m.Series([1.5, -2.0]) + float("nan")
+_T486T_CASES["k > nan (NEGATIVE: all False)"] = lambda m: m.Series(_T486T_K) > float("nan")
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_T486T_CASES))
+def test_int_series_against_nan_like_pandas_t486t(case: str) -> None:
+    assert _t486t_shown(_T486T_CASES[case](fpd)) == _t486t_shown(_T486T_CASES[case](pd))

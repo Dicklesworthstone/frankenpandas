@@ -24572,7 +24572,7 @@ fn broadcast_column(scalar: Scalar, len: usize) -> PyResult<Column> {
         // scanned and copied a filled Vec; br-frankenpandas-1s45z).
         Scalar::Float64(value) if len > 0 => Ok(Column::from_f64_constant(value, len)),
         Scalar::Int64(value) if len > 0 => Ok(Column::from_i64_constant(value, len)),
-        Scalar::Bool(value) if len > 0 => Ok(Column::from_bool_values(vec![value; len])),
+        Scalar::Bool(value) if len > 0 => Ok(Column::from_bool_constant(value, len)),
         scalar => Column::from_values(vec![scalar; len]).map_err(column_error_to_py),
     }
 }

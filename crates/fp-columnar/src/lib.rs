@@ -12778,6 +12778,25 @@ impl Column {
         }
     }
 
+    /// `len` copies of `value`, a broadcast bool (`df['z'] = True`): the column
+    /// [`from_bool_values`](Self::from_bool_values) makes of `vec![value; len]`,
+    /// the copies written straight into its `Arc<[bool]>` - that path filled a
+    /// Vec and copied it into the Arc (br-frankenpandas-1s45z).
+    #[must_use]
+    pub fn from_bool_constant(value: bool, len: usize) -> Self {
+        Self {
+            dtype: DType::Bool,
+            values: ScalarValues::lazy_all_valid_bool_arc(
+                std::iter::repeat_n(value, len).collect(),
+            ),
+            validity: ValidityMask::all_valid(len),
+            data: None,
+            categorical: None,
+            width: None,
+            pandas_string: false,
+        }
+    }
+
     /// `len` copies of `value`, a broadcast number (`df['z'] = 1.5`): the column
     /// [`from_f64_values`](Self::from_f64_values) makes of `vec![value; len]` -
     /// all-valid, NaN-exact, its finite witness the number's - without that
@@ -19189,11 +19208,13 @@ impl Column {
             // An int column against a float: its values read as f64 against
             // the number - binary_numeric's int-promoted view of the pair
             // (k * 1.5 broadcast the number and viewed both: 3.2 ms, pandas
-            // 0.4; br-frankenpandas-uf0mw). A NaN number keeps the broadcast.
+            // 0.4; br-frankenpandas-uf0mw). A NaN too: pandas' float64 of
+            // NaN (1 ** nan and nan ** 0 are 1.0, as powf answers) - its
+            // broadcast was a missing cell, which kept the column int64
+            // holding NaN (br-frankenpandas-t486t).
             (DType::Int64, Scalar::Float64(s)) => {
                 let data = self.as_i64_slice()?;
-                let s = Some(*s).filter(|s| !s.is_nan())?;
-                Some(Self::int_float_scalar(data, s, op, scalar_left))
+                Some(Self::int_float_scalar(data, *s, op, scalar_left))
             }
             _ => None,
         }
@@ -39628,19 +39649,16 @@ mod tests {
                 .binary_scalar(&Scalar::Float64(2.0), ArithmeticOp::Pow, false)
                 .is_none()
         );
-        // (An int column's / and a float against it are typed now - see
-        // binary_scalar_int_arms_match_the_broadcast_operand_uf0mw - but a
-        // zero divisor, a negative exponent and a NaN keep the broadcast.)
+        // (An int column's / and a float against it, a NaN included, are
+        // typed now - see binary_scalar_int_arms_match_the_broadcast_operand_
+        // uf0mw and int_column_against_nan_is_float64_nan_t486t - but a zero
+        // divisor and a negative exponent keep the broadcast.)
         assert!(
             ints.binary_scalar(&Scalar::Int64(0), ArithmeticOp::FloorDiv, false)
                 .is_none()
         );
         assert!(
             ints.binary_scalar(&Scalar::Int64(-1), ArithmeticOp::Pow, false)
-                .is_none()
-        );
-        assert!(
-            ints.binary_scalar(&Scalar::Float64(f64::NAN), ArithmeticOp::Add, false)
                 .is_none()
         );
         let gapped = Column::from_f64_values(vec![1.0, f64::NAN]);
@@ -39729,8 +39747,8 @@ mod tests {
             bits(&ours),
             bits(&ints.binary_numeric(&broadcast, ArithmeticOp::Div).unwrap())
         );
-        // Negatives: a zero divisor promotes, a negative exponent raises, a
-        // NaN keeps the broadcast - all left to binary_numeric.
+        // Negatives: a zero divisor promotes and a negative exponent raises -
+        // both left to binary_numeric.
         for op in [ArithmeticOp::Mod, ArithmeticOp::FloorDiv] {
             assert!(ints.binary_scalar(&Scalar::Int64(0), op, false).is_none());
             assert!(ints.binary_scalar(&Scalar::Int64(5), op, true).is_none());
@@ -39743,10 +39761,6 @@ mod tests {
             ints.binary_scalar(&Scalar::Int64(2), ArithmeticOp::Pow, true)
                 .is_none()
         );
-        assert!(
-            ints.binary_scalar(&Scalar::Float64(f64::NAN), ArithmeticOp::Mul, false)
-                .is_none()
-        );
         assert!(matches!(
             ints.binary_numeric(
                 &Column::from_i64_values(vec![-1; ints.len()]),
@@ -39754,6 +39768,40 @@ mod tests {
             ),
             Err(ColumnError::NegativeIntegerPower)
         ));
+    }
+
+    #[test]
+    fn int_column_against_nan_is_float64_nan_t486t() {
+        // br-frankenpandas-t486t: an int64 column against a NaN is pandas'
+        // float64 of NaN, missing - except 1 ** nan and nan ** 0, which are
+        // 1.0 - where the broadcast kept int64 holding a missing cell.
+        let values = [3, -7, 0, 1, 12];
+        let ints = Column::from_i64_values(values.to_vec());
+        for op in [
+            ArithmeticOp::Add,
+            ArithmeticOp::Sub,
+            ArithmeticOp::Mul,
+            ArithmeticOp::Div,
+            ArithmeticOp::Mod,
+            ArithmeticOp::FloorDiv,
+            ArithmeticOp::Pow,
+        ] {
+            for scalar_left in [false, true] {
+                let out = ints
+                    .binary_scalar(&Scalar::Float64(f64::NAN), op, scalar_left)
+                    .unwrap();
+                assert_eq!(out.dtype(), DType::Float64, "{op:?} {scalar_left}");
+                for (i, &v) in values.iter().enumerate() {
+                    let one = matches!(op, ArithmeticOp::Pow)
+                        && ((!scalar_left && v == 1) || (scalar_left && v == 0));
+                    if one {
+                        assert_eq!(out.values()[i], Scalar::Float64(1.0), "{op:?} {v}");
+                    } else {
+                        assert!(out.values()[i].is_missing(), "{op:?} {scalar_left} {v}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -39909,6 +39957,14 @@ mod tests {
                     ours.values,
                     ScalarValues::LazyAllValidInt64 { .. }
                 ));
+            }
+            for value in [true, false] {
+                let ours = Column::from_bool_constant(value, len);
+                let theirs = Column::from_bool_values(vec![value; len]);
+                assert_eq!(ours.dtype(), theirs.dtype());
+                assert_eq!(ours.as_bool_slice(), theirs.as_bool_slice());
+                assert_eq!(ours.values(), theirs.values());
+                assert!(matches!(ours.values, ScalarValues::LazyAllValidBool { .. }));
             }
         }
     }
