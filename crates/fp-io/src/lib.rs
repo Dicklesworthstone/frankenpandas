@@ -1549,6 +1549,556 @@ fn csv_parse_cache_store(mode: CsvParseCacheMode, input: &str, frame: &DataFrame
     }
 }
 
+/// What the default parser reads a cell as, in parse_scalar's decision order:
+/// a missing marker (the field exactly), an integer, a float (the field
+/// trimmed; a padded infinity is text), a boolean (exactly, any case), else
+/// text.
+enum CsvCell {
+    Missing,
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Text,
+}
+
+fn csv_cell(field: &str) -> CsvCell {
+    if is_pandas_default_na(field) {
+        return CsvCell::Missing;
+    }
+    let trimmed = field.trim();
+    if let Ok(value) = trimmed.parse::<i64>() {
+        return CsvCell::Int(value);
+    }
+    if let Some(value) = parse_f64_csv_number(trimmed.as_bytes())
+        && !value.is_nan()
+        && (!value.is_infinite() || field.len() == trimmed.len())
+    {
+        return CsvCell::Float(value);
+    }
+    if field.eq_ignore_ascii_case("true") {
+        return CsvCell::Bool(true);
+    }
+    if field.eq_ignore_ascii_case("false") {
+        return CsvCell::Bool(false);
+    }
+    CsvCell::Text
+}
+
+/// A Float column's integer cells past 2^53, cast for now: once a
+/// fractional cell sends the column through pandas' float converter they
+/// read from their digits instead; a column made float by a missing value
+/// alone keeps the cast (br-frankenpandas-py3c0).
+#[derive(Default)]
+struct CsvWideInts {
+    fractional: bool,
+    cells: Vec<(usize, i64)>,
+}
+
+impl CsvWideInts {
+    fn cast(&mut self, row: usize, value: i64) -> f64 {
+        if value.unsigned_abs() > 1 << 53 {
+            self.cells.push((row, value));
+        }
+        value as f64
+    }
+
+    fn finish(self, values: &mut [f64]) {
+        if self.fractional {
+            for (row, value) in self.cells {
+                values[row] = fp_types::pandas_int_to_f64(value);
+            }
+        }
+    }
+
+    /// These cells followed by `next`'s, whose rows start at `offset`.
+    fn append(&mut self, next: Self, offset: usize) {
+        self.fractional |= next.fractional;
+        self.cells.extend(
+            next.cells
+                .into_iter()
+                .map(|(row, value)| (row + offset, value)),
+        );
+    }
+}
+
+/// One column of the default CSV parser, read a cell at a time
+/// (br-frankenpandas csv-typed-numeric-col): a mixed CSV bails the
+/// frame-wide numeric fast paths, so historically EVERY column round-tripped
+/// through a `Vec<Scalar>` (parse_scalar per cell + a from_values re-scan) —
+/// even a purely-numeric column sitting next to one Utf8 column. Each column
+/// accumulates into a typed Int64/Float64/Bool buffer and, the instant a cell
+/// cannot preserve that column's current type (an AMBIGUOUS promotion —
+/// nullable numbers stay typed, while the raw-object reconstruction preserves
+/// ambiguous mixtures such as int+bool as Utf8), drops to `Fallback`, rebuilt
+/// through the UNCHANGED Scalar path from the raw bytes (captured for
+/// verbatim). A pure-numeric column emits its typed column directly,
+/// bit-identical to from_values over the equivalent Scalars: all-Int64 →
+/// Int64, any Float64 → Float64 with ints read as pandas' float converter
+/// reads them (`CsvWideInts`) — exactly what Column::from_values +
+/// build_csv_object_aware_column produce for those inputs. A column of text
+/// cells only is `Text`: the Scalar path would rebuild its raw text verbatim,
+/// a String a cell (br-frankenpandas-2e7w5). `valid: None` = all-valid so far;
+/// `Some(mask)` = at least one NA has appeared. A missing value promotes
+/// inferred numpy-style integers to Float64, because pandas' int64 cannot
+/// represent NA; Float64 and Bool keep their typed missing form.
+enum CsvColumnAcc {
+    Int(Vec<i64>, Option<Vec<bool>>),
+    Float(Vec<f64>, Option<Vec<bool>>, CsvWideInts),
+    Bool(Vec<bool>, Option<Vec<bool>>),
+    Text,
+    Fallback,
+}
+
+impl CsvColumnAcc {
+    fn new(capacity: usize) -> Self {
+        Self::Int(Vec::with_capacity(capacity), None)
+    }
+
+    /// The column after its next cell.
+    fn push(&mut self, field: &str) {
+        if matches!(self, Self::Fallback) {
+            return;
+        }
+        let acc = self;
+        match csv_cell(field) {
+            CsvCell::Missing => match acc {
+                Self::Int(buf, valid) => {
+                    let mut wide = CsvWideInts::default();
+                    let mut promoted: Vec<f64> = buf
+                        .iter()
+                        .enumerate()
+                        .map(|(row, &value)| wide.cast(row, value))
+                        .collect();
+                    promoted.push(0.0);
+                    let mut promoted_valid = valid.take().unwrap_or_else(|| vec![true; buf.len()]);
+                    promoted_valid.push(false);
+                    *acc = Self::Float(promoted, Some(promoted_valid), wide);
+                }
+                Self::Float(buf, valid, _) => {
+                    valid
+                        .get_or_insert_with(|| vec![true; buf.len()])
+                        .push(false);
+                    buf.push(0.0);
+                }
+                Self::Bool(buf, valid) => {
+                    valid
+                        .get_or_insert_with(|| vec![true; buf.len()])
+                        .push(false);
+                    buf.push(false);
+                }
+                Self::Text => *acc = Self::Fallback,
+                Self::Fallback => {}
+            },
+            CsvCell::Int(value) => match acc {
+                Self::Int(buf, valid) => {
+                    buf.push(value);
+                    if let Some(valid) = valid {
+                        valid.push(true);
+                    }
+                }
+                Self::Float(buf, valid, wide) => {
+                    buf.push(wide.cast(buf.len(), value));
+                    if let Some(valid) = valid {
+                        valid.push(true);
+                    }
+                }
+                Self::Bool(..) | Self::Text => *acc = Self::Fallback,
+                Self::Fallback => {}
+            },
+            CsvCell::Float(value) => match acc {
+                Self::Int(buf, valid) => {
+                    let mut promoted: Vec<f64> = buf
+                        .iter()
+                        .copied()
+                        .map(fp_types::pandas_int_to_f64)
+                        .collect();
+                    promoted.push(value);
+                    if let Some(valid) = valid.as_mut() {
+                        valid.push(true);
+                    }
+                    let wide = CsvWideInts {
+                        fractional: true,
+                        cells: Vec::new(),
+                    };
+                    *acc = Self::Float(promoted, valid.take(), wide);
+                }
+                Self::Float(buf, valid, wide) => {
+                    wide.fractional = true;
+                    buf.push(value);
+                    if let Some(valid) = valid {
+                        valid.push(true);
+                    }
+                }
+                Self::Bool(..) | Self::Text => *acc = Self::Fallback,
+                Self::Fallback => {}
+            },
+            CsvCell::Bool(value) => match acc {
+                Self::Int(buf, valid) => {
+                    // An Int accumulator can only become Bool if every
+                    // preceding slot is missing. Otherwise `1,true` must
+                    // retain the legacy object fallback rather than lose
+                    // the already-observed numeric value.
+                    let only_missing = valid
+                        .as_ref()
+                        .is_some_and(|mask| mask.iter().all(|&present| !present));
+                    if buf.is_empty() || only_missing {
+                        let mut promoted = vec![false; buf.len()];
+                        promoted.push(value);
+                        *acc = Self::Bool(promoted, valid.take());
+                    } else {
+                        *acc = Self::Fallback;
+                    }
+                }
+                Self::Bool(buf, valid) => {
+                    buf.push(value);
+                    if let Some(valid) = valid {
+                        valid.push(true);
+                    }
+                }
+                Self::Float(..) | Self::Text | Self::Fallback => *acc = Self::Fallback,
+            },
+            CsvCell::Text => match acc {
+                Self::Int(buf, _) if buf.is_empty() => *acc = Self::Text,
+                Self::Text => {}
+                _ => *acc = Self::Fallback,
+            },
+        }
+    }
+
+    /// `self`, a chunk's column, followed by `next`, the following chunk's
+    /// read from a fresh start, as one read of both cells in order leaves
+    /// it - or `self` back where that read could have taken `next`
+    /// differently than the fresh start did (a Bool column whose next chunk
+    /// fell back: a fresh start reads missing cells then booleans as float
+    /// and falls back, a Bool column keeps them): the caller then pushes
+    /// that chunk's cells onto it. `self_len` and `next_len` are the
+    /// chunks' row counts.
+    fn merge(self, self_len: usize, next: Self, next_len: usize) -> Result<Self, Self> {
+        fn joined(
+            a: Option<Vec<bool>>,
+            a_len: usize,
+            b: Option<Vec<bool>>,
+            b_len: usize,
+        ) -> Option<Vec<bool>> {
+            if a.is_none() && b.is_none() {
+                return None;
+            }
+            let mut valid = a.unwrap_or_else(|| vec![true; a_len]);
+            valid.extend(b.unwrap_or_else(|| vec![true; b_len]));
+            Some(valid)
+        }
+        Ok(match (self, next) {
+            (Self::Fallback, _) => Self::Fallback,
+            (prev @ Self::Bool(..), Self::Fallback) => return Err(prev),
+            (_, Self::Fallback) => Self::Fallback,
+            (Self::Text, Self::Text) => Self::Text,
+            (Self::Text, _) | (_, Self::Text) => Self::Fallback,
+            (Self::Int(mut a, valid_a), Self::Int(b, valid_b)) => {
+                a.extend(b);
+                Self::Int(a, joined(valid_a, self_len, valid_b, next_len))
+            }
+            // `next` read its cells as floats: so would one read, its ints
+            // (cast; read as pandas' float converter does once any cell of
+            // the column is fractional - `CsvWideInts::finish`) included.
+            (Self::Int(a, valid_a), Self::Float(b, valid_b, wide_b)) => {
+                let mut wide = CsvWideInts::default();
+                let mut values: Vec<f64> = Vec::with_capacity(a.len() + b.len());
+                values.extend(
+                    a.iter()
+                        .enumerate()
+                        .map(|(row, &value)| wide.cast(row, value)),
+                );
+                values.extend(b);
+                wide.append(wide_b, self_len);
+                Self::Float(values, joined(valid_a, self_len, valid_b, next_len), wide)
+            }
+            (Self::Float(mut a, valid_a, mut wide), Self::Int(b, valid_b)) => {
+                a.extend(
+                    b.iter()
+                        .enumerate()
+                        .map(|(row, &value)| wide.cast(self_len + row, value)),
+                );
+                Self::Float(a, joined(valid_a, self_len, valid_b, next_len), wide)
+            }
+            (Self::Float(mut a, valid_a, mut wide), Self::Float(b, valid_b, wide_b)) => {
+                a.extend(b);
+                wide.append(wide_b, self_len);
+                Self::Float(a, joined(valid_a, self_len, valid_b, next_len), wide)
+            }
+            (Self::Bool(mut a, valid_a), Self::Bool(b, valid_b)) => {
+                a.extend(b);
+                Self::Bool(a, joined(valid_a, self_len, valid_b, next_len))
+            }
+            // `next` holds missing cells only: a Bool column keeps them missing.
+            (Self::Bool(mut a, valid_a), Self::Float(_, Some(valid_b), _))
+                if valid_b.iter().all(|&present| !present) =>
+            {
+                a.extend(std::iter::repeat_n(false, next_len));
+                Self::Bool(a, joined(valid_a, self_len, Some(valid_b), next_len))
+            }
+            // A number after booleans, or a boolean after numbers.
+            (Self::Bool(..), Self::Int(..) | Self::Float(..))
+            | (Self::Int(..) | Self::Float(..), Self::Bool(..)) => Self::Fallback,
+        })
+    }
+
+    /// The column as the parser emits it: typed while every cell kept the
+    /// type and one is present, the raw text verbatim for text cells only,
+    /// else the Scalar path over the raw text.
+    fn into_column(self, raw_bytes: Vec<u8>, raw_offsets: Vec<usize>) -> Result<Column, IoError> {
+        // Build a ValidityMask from a per-row bool vec (all-true entries are
+        // the default). None if every entry is valid (the caller uses the
+        // all-valid constructor) or if none are (the guards below fall back -
+        // an all-NA column is Null dtype in the Scalar path, not typed).
+        fn validity_from_bools(valid: &[bool]) -> Option<fp_columnar::ValidityMask> {
+            if valid.iter().all(|&b| b) {
+                return None;
+            }
+            let mut mask = fp_columnar::ValidityMask::all_valid(valid.len());
+            for (i, &ok) in valid.iter().enumerate() {
+                if !ok {
+                    mask.set(i, false);
+                }
+            }
+            Some(mask)
+        }
+        // An empty (0-row) or all-NA numeric column is Null/empty dtype in the
+        // Scalar path, not Int64 — route it to the fallback for exact parity.
+        let has_value = |buf_len: usize, valid: &Option<Vec<bool>>| -> bool {
+            buf_len > 0 && valid.as_ref().is_none_or(|v| v.iter().any(|&b| b))
+        };
+        Ok(match self {
+            Self::Int(buf, valid) if has_value(buf.len(), &valid) => {
+                match valid.as_deref().and_then(validity_from_bools) {
+                    Some(mask) => Column::from_i64_values_with_validity(buf, mask),
+                    None => Column::from_i64_values(buf),
+                }
+            }
+            Self::Float(mut buf, valid, wide) if has_value(buf.len(), &valid) => {
+                wide.finish(&mut buf);
+                match valid.as_deref().and_then(validity_from_bools) {
+                    Some(mask) => Column::from_f64_values_with_validity(buf, mask),
+                    None => Column::from_f64_values(buf),
+                }
+            }
+            Self::Bool(buf, valid) if has_value(buf.len(), &valid) => {
+                match valid.as_deref().and_then(validity_from_bools) {
+                    Some(mask) => Column::from_bool_values_with_validity(buf, mask),
+                    None => Column::from_bool_values(buf),
+                }
+            }
+            // Text cells only (never empty: an empty field is missing).
+            Self::Text => Column::from_utf8_contiguous(raw_bytes, raw_offsets),
+            // Any ambiguous cell, all-NA, or empty → exact legacy path from raw.
+            _ => {
+                let mut values = Vec::with_capacity(raw_offsets.len().saturating_sub(1));
+                for w in raw_offsets.windows(2) {
+                    let field = std::str::from_utf8(&raw_bytes[w[0]..w[1]])
+                        .expect("csv fields originate from a &str input");
+                    values.push(parse_scalar(field));
+                }
+                build_csv_object_aware_column(values, &raw_bytes, &raw_offsets)?
+            }
+        })
+    }
+
+    /// Whether [`Self::into_column`] reads the raw text.
+    fn reads_raw(&self) -> bool {
+        let present = |len: usize, valid: &Option<Vec<bool>>| {
+            len > 0 && valid.as_ref().is_none_or(|v| v.iter().any(|&b| b))
+        };
+        match self {
+            Self::Int(buf, valid) => !present(buf.len(), valid),
+            Self::Float(buf, valid, _) => !present(buf.len(), valid),
+            Self::Bool(buf, valid) => !present(buf.len(), valid),
+            Self::Text | Self::Fallback => true,
+        }
+    }
+}
+
+/// One chunk of a quote-free CSV body - whole lines - read by the default
+/// parser's column accumulators, with each column's raw text.
+struct CsvBodyChunk {
+    accs: Vec<CsvColumnAcc>,
+    raw_bytes: Vec<Vec<u8>>,
+    raw_offsets: Vec<Vec<usize>>,
+    rows: usize,
+}
+
+/// `chunk` (whole lines, no quote or carriage return) read as the sequential
+/// reader reads its records: fields split at commas, a short row padded with
+/// empty (missing) fields. None for a line that reader must judge - an empty
+/// line, or one wider than the header (it names the line in its error).
+fn parse_csv_body_chunk(chunk: &str, header_count: usize) -> Option<CsvBodyChunk> {
+    let bytes = chunk.as_bytes();
+    let row_hint = bytes.len() / (header_count * 8).max(1);
+    let mut accs: Vec<CsvColumnAcc> = (0..header_count)
+        .map(|_| CsvColumnAcc::new(row_hint))
+        .collect();
+    let mut raw_bytes: Vec<Vec<u8>> = (0..header_count)
+        .map(|_| Vec::with_capacity(bytes.len() / header_count))
+        .collect();
+    let mut raw_offsets: Vec<Vec<usize>> = (0..header_count)
+        .map(|_| {
+            let mut offsets = Vec::with_capacity(row_hint + 1);
+            offsets.push(0);
+            offsets
+        })
+        .collect();
+    let mut rows = 0;
+    let mut line_start = 0;
+    while line_start < bytes.len() {
+        let line_end =
+            memchr::memchr(b'\n', &bytes[line_start..]).map_or(bytes.len(), |at| line_start + at);
+        if line_end == line_start {
+            return None;
+        }
+        let mut field_start = line_start;
+        let mut column = 0;
+        loop {
+            if column == header_count {
+                return None;
+            }
+            let field_end = memchr::memchr(b',', &bytes[field_start..line_end])
+                .map_or(line_end, |at| field_start + at);
+            let field = &chunk[field_start..field_end];
+            raw_bytes[column].extend_from_slice(field.as_bytes());
+            raw_offsets[column].push(raw_bytes[column].len());
+            accs[column].push(field);
+            column += 1;
+            if field_end == line_end {
+                break;
+            }
+            field_start = field_end + 1;
+        }
+        for missing in column..header_count {
+            raw_offsets[missing].push(raw_bytes[missing].len());
+            accs[missing].push("");
+        }
+        rows += 1;
+        line_start = line_end + 1;
+    }
+    Some(CsvBodyChunk {
+        accs,
+        raw_bytes,
+        raw_offsets,
+        rows,
+    })
+}
+
+/// A quote-free CSV of a megabyte or more read on several threads
+/// (br-frankenpandas-2e7w5): its body split at line ends, each chunk read by
+/// the default parser's column accumulators, the chunks merged as one
+/// sequential read leaves them (`CsvColumnAcc::merge`; where that cannot be
+/// shown, the chunk's cells pushed onto the column read so far). None - the
+/// caller reads the input sequentially - for a smaller input, any quote or
+/// carriage return, an empty line, or a row wider than the header.
+fn read_csv_str_body_parallel(
+    input: &str,
+    headers: &[String],
+) -> Result<Option<DataFrame>, IoError> {
+    let header_count = headers.len();
+    let bytes = input.as_bytes();
+    // The header is the first line (no quote can make a record span lines);
+    // a leading empty line is the sequential reader's to judge.
+    let Some(header_end) = memchr::memchr(b'\n', bytes).filter(|&at| at > 0) else {
+        return Ok(None);
+    };
+    let body = &input[header_end + 1..];
+    let worker_count = simple_numeric_csv_parallel_worker_count(body.len());
+    if header_count == 0 || worker_count < 2 || memchr::memchr2(b'"', b'\r', bytes).is_some() {
+        return Ok(None);
+    }
+    let Some(chunks) = split_simple_numeric_csv_chunks(body.as_bytes(), worker_count) else {
+        return Ok(None);
+    };
+    read_csv_body_in_chunks(body, headers, &chunks)
+}
+
+/// [`read_csv_str_body_parallel`] over the given chunks of `body`, each a
+/// run of whole lines.
+fn read_csv_body_in_chunks(
+    body: &str,
+    headers: &[String],
+    chunks: &[(usize, usize)],
+) -> Result<Option<DataFrame>, IoError> {
+    let header_count = headers.len();
+    let parsed: Option<Vec<CsvBodyChunk>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = chunks
+            .iter()
+            .map(|&(start, end)| {
+                let chunk = &body[start..end];
+                scope.spawn(move || parse_csv_body_chunk(chunk, header_count))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().ok().flatten())
+            .collect()
+    });
+    let Some(mut parsed) = parsed else {
+        return Ok(None);
+    };
+
+    let rows: usize = parsed.iter().map(|chunk| chunk.rows).sum();
+    let mut merged: Vec<CsvColumnAcc> = Vec::with_capacity(header_count);
+    for column in 0..header_count {
+        let mut acc: Option<(CsvColumnAcc, usize)> = None;
+        for chunk in &mut parsed {
+            let next = std::mem::replace(&mut chunk.accs[column], CsvColumnAcc::Fallback);
+            acc = Some(match acc {
+                None => (next, chunk.rows),
+                Some((prev, prev_rows)) => match prev.merge(prev_rows, next, chunk.rows) {
+                    Ok(joined) => (joined, prev_rows + chunk.rows),
+                    // One read would have taken this chunk's cells from
+                    // `prev`: push them onto it, as it would.
+                    Err(mut prev) => {
+                        let raw_b = &chunk.raw_bytes[column];
+                        for cell in chunk.raw_offsets[column].windows(2) {
+                            prev.push(
+                                std::str::from_utf8(&raw_b[cell[0]..cell[1]])
+                                    .expect("csv fields originate from a &str input"),
+                            );
+                        }
+                        (prev, prev_rows + chunk.rows)
+                    }
+                },
+            });
+        }
+        merged.push(acc.map_or(CsvColumnAcc::Fallback, |(acc, _)| acc));
+    }
+
+    let mut out_columns = BTreeMap::new();
+    let mut column_order = Vec::with_capacity(header_count);
+    for (column, acc) in merged.into_iter().enumerate() {
+        let (raw_b, raw_o) = if acc.reads_raw() {
+            let total: usize = parsed
+                .iter()
+                .map(|chunk| chunk.raw_bytes[column].len())
+                .sum();
+            let mut raw_b = Vec::with_capacity(total);
+            let mut raw_o = Vec::with_capacity(rows + 1);
+            raw_o.push(0);
+            for chunk in &mut parsed {
+                let base = raw_b.len();
+                raw_o.extend(chunk.raw_offsets[column][1..].iter().map(|&at| base + at));
+                raw_b.append(&mut chunk.raw_bytes[column]);
+            }
+            (raw_b, raw_o)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let name = headers[column].clone();
+        out_columns.insert(name.clone(), acc.into_column(raw_b, raw_o)?);
+        column_order.push(name);
+    }
+    Ok(Some(DataFrame::new_with_column_order(
+        csv_default_unit_range_index(rows as i64),
+        out_columns,
+        column_order,
+    )?))
+}
+
 fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
     if csv_input_has_unterminated_quote(input, b',', b'"', true, None) {
         return Err(IoError::CsvUnterminatedQuote);
@@ -1582,6 +2132,10 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
         if let Some(frame) = try_read_csv_str_typed_numeric(input, &headers)? {
             return Ok(frame);
         }
+
+        if let Some(frame) = read_csv_str_body_parallel(input, &headers)? {
+            return Ok(frame);
+        }
     }
 
     // AG-07: Vec-based column accumulation (O(1) per cell vs O(log c) BTreeMap).
@@ -1605,58 +2159,9 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
         })
         .collect();
 
-    // Per-column typed accumulator (br-frankenpandas csv-typed-numeric-col): a
-    // mixed CSV bails the frame-wide numeric fast paths, so historically EVERY
-    // column round-tripped through a `Vec<Scalar>` (parse_scalar per cell + a
-    // from_values re-scan) — even a purely-numeric column sitting next to one
-    // Utf8 column. Accumulate each column into a typed Int64/Float64/Bool buffer and,
-    // the instant a cell cannot preserve that column's current type (an AMBIGUOUS
-    // promotion — nullable numbers stay typed, while the existing raw-object
-    // reconstruction preserves ambiguous mixtures such as int+bool as Utf8),
-    // drop that column to `Fallback` and rebuild it via the UNCHANGED Scalar path from the raw
-    // bytes (already captured for verbatim). A pure-numeric-no-null column then
-    // emits its typed column directly, bit-identical to from_values over the
-    // equivalent Scalars: all-Int64 → Int64 (from_i64_values), any-Float64-no-null
-    // → Float64 with ints coerced as pandas' float converter reads them
-    // (`WideInts`; from_f64_values) — exactly what Column::from_values +
-    // build_csv_object_aware_column produce for those inputs.
-    // `valid: None` = all-valid so far (the common fast case, no per-cell bit
-    // tracking); `Some(mask)` = at least one NA has appeared. A missing value
-    // promotes inferred numpy-style integers to Float64, because pandas' int64
-    // cannot represent NA; Float64 and Bool keep their typed missing form.
-    enum ColAcc {
-        Int(Vec<i64>, Option<Vec<bool>>),
-        Float(Vec<f64>, Option<Vec<bool>>, WideInts),
-        Bool(Vec<bool>, Option<Vec<bool>>),
-        Fallback,
-    }
-    /// A Float column's integer cells past 2^53, cast for now: once a
-    /// fractional cell sends the column through pandas' float converter they
-    /// read from their digits instead; a column made float by a missing value
-    /// alone keeps the cast (br-frankenpandas-py3c0).
-    #[derive(Default)]
-    struct WideInts {
-        fractional: bool,
-        cells: Vec<(usize, i64)>,
-    }
-    impl WideInts {
-        fn cast(&mut self, row: usize, value: i64) -> f64 {
-            if value.unsigned_abs() > 1 << 53 {
-                self.cells.push((row, value));
-            }
-            value as f64
-        }
-
-        fn finish(self, values: &mut [f64]) {
-            if self.fractional {
-                for (row, value) in self.cells {
-                    values[row] = fp_types::pandas_int_to_f64(value);
-                }
-            }
-        }
-    }
-    let mut accs: Vec<ColAcc> = (0..header_count)
-        .map(|_| ColAcc::Int(Vec::with_capacity(row_hint), None))
+    // Per-column typed accumulators (see `CsvColumnAcc`).
+    let mut accs: Vec<CsvColumnAcc> = (0..header_count)
+        .map(|_| CsvColumnAcc::new(row_hint))
         .collect();
 
     let mut row_count: i64 = 0;
@@ -1681,188 +2186,17 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
             let field = record.get(idx + field_offset).unwrap_or_default();
             raw_bytes[idx].extend_from_slice(field.as_bytes());
             raw_offsets[idx].push(raw_bytes[idx].len());
-            let acc = &mut accs[idx];
-            if matches!(acc, ColAcc::Fallback) {
-                continue;
-            }
-            // Mirror parse_scalar's decision order EXACTLY: NA (untrimmed) →
-            // Int64(trimmed) → Float64(trimmed) → else (bool/text) = ambiguous.
-            if is_pandas_default_na(field) {
-                match acc {
-                    ColAcc::Int(buf, valid) => {
-                        let mut wide = WideInts::default();
-                        let mut promoted: Vec<f64> = buf
-                            .iter()
-                            .enumerate()
-                            .map(|(row, &value)| wide.cast(row, value))
-                            .collect();
-                        promoted.push(0.0);
-                        let mut promoted_valid =
-                            valid.take().unwrap_or_else(|| vec![true; buf.len()]);
-                        promoted_valid.push(false);
-                        *acc = ColAcc::Float(promoted, Some(promoted_valid), wide);
-                    }
-                    ColAcc::Float(buf, valid, _) => {
-                        valid
-                            .get_or_insert_with(|| vec![true; buf.len()])
-                            .push(false);
-                        buf.push(0.0);
-                    }
-                    ColAcc::Bool(buf, valid) => {
-                        valid
-                            .get_or_insert_with(|| vec![true; buf.len()])
-                            .push(false);
-                        buf.push(false);
-                    }
-                    ColAcc::Fallback => {}
-                }
-                continue;
-            }
-            let trimmed = field.trim();
-            if let Ok(v) = trimmed.parse::<i64>() {
-                match acc {
-                    ColAcc::Int(buf, valid) => {
-                        buf.push(v);
-                        if let Some(vv) = valid {
-                            vv.push(true);
-                        }
-                    }
-                    ColAcc::Float(buf, valid, wide) => {
-                        buf.push(wide.cast(buf.len(), v));
-                        if let Some(vv) = valid {
-                            vv.push(true);
-                        }
-                    }
-                    ColAcc::Bool(_, _) => *acc = ColAcc::Fallback,
-                    ColAcc::Fallback => {}
-                }
-            } else if let Some(v) = parse_f64_csv_number(trimmed.as_bytes())
-                && !v.is_nan()
-                && (!v.is_infinite() || field.len() == trimmed.len())
-            {
-                match acc {
-                    ColAcc::Int(buf, valid) => {
-                        let mut promoted: Vec<f64> = buf
-                            .iter()
-                            .copied()
-                            .map(fp_types::pandas_int_to_f64)
-                            .collect();
-                        promoted.push(v);
-                        if let Some(vv) = valid.as_mut() {
-                            vv.push(true);
-                        }
-                        let wide = WideInts {
-                            fractional: true,
-                            cells: Vec::new(),
-                        };
-                        *acc = ColAcc::Float(promoted, valid.take(), wide);
-                    }
-                    ColAcc::Float(buf, valid, wide) => {
-                        wide.fractional = true;
-                        buf.push(v);
-                        if let Some(vv) = valid {
-                            vv.push(true);
-                        }
-                    }
-                    ColAcc::Bool(_, _) => *acc = ColAcc::Fallback,
-                    ColAcc::Fallback => {}
-                }
-            } else if field.eq_ignore_ascii_case("true") || field.eq_ignore_ascii_case("false") {
-                let value = field.eq_ignore_ascii_case("true");
-                match acc {
-                    ColAcc::Int(buf, valid) => {
-                        // An Int accumulator can only become Bool if every
-                        // preceding slot is missing. Otherwise `1,true` must
-                        // retain the legacy object fallback rather than lose
-                        // the already-observed numeric value.
-                        let only_missing = valid
-                            .as_ref()
-                            .is_some_and(|mask| mask.iter().all(|&present| !present));
-                        if buf.is_empty() || only_missing {
-                            let mut promoted = vec![false; buf.len()];
-                            promoted.push(value);
-                            *acc = ColAcc::Bool(promoted, valid.take());
-                        } else {
-                            *acc = ColAcc::Fallback;
-                        }
-                    }
-                    ColAcc::Bool(buf, valid) => {
-                        buf.push(value);
-                        if let Some(vv) = valid {
-                            vv.push(true);
-                        }
-                    }
-                    ColAcc::Float(..) | ColAcc::Fallback => *acc = ColAcc::Fallback,
-                }
-            } else {
-                *acc = ColAcc::Fallback;
-            }
+            accs[idx].push(field);
         }
         row_count += 1;
     }
 
-    // Build a ValidityMask from a per-row bool vec (all-true entries are the
-    // default). Returns None if every entry is valid (caller uses the all-valid
-    // constructor) or if none are (caller falls back — an all-NA column is Null
-    // dtype in the Scalar path, not typed).
-    fn validity_from_bools(valid: &[bool]) -> Option<fp_columnar::ValidityMask> {
-        if valid.iter().all(|&b| b) {
-            return None;
-        }
-        let mut mask = fp_columnar::ValidityMask::all_valid(valid.len());
-        for (i, &ok) in valid.iter().enumerate() {
-            if !ok {
-                mask.set(i, false);
-            }
-        }
-        Some(mask)
-    }
-
     let mut out_columns = BTreeMap::new();
     let mut column_order = Vec::with_capacity(header_count);
-    for (idx, acc) in accs.into_iter().enumerate() {
+    for (idx, ((acc, raw_b), raw_o)) in accs.into_iter().zip(raw_bytes).zip(raw_offsets).enumerate()
+    {
         let name = headers.get(idx).cloned().unwrap_or_default();
-        // An empty (0-row) or all-NA numeric column is Null/empty dtype in the
-        // Scalar path, not Int64 — route it to the fallback for exact parity.
-        let has_value = |buf_len: usize, valid: &Option<Vec<bool>>| -> bool {
-            buf_len > 0 && valid.as_ref().is_none_or(|v| v.iter().any(|&b| b))
-        };
-        let column = match acc {
-            // Typed fast paths (all-valid OR nullable): taken when every cell was
-            // clean-numeric (possibly NA), so the output dtype is unambiguous.
-            ColAcc::Int(buf, valid) if has_value(buf.len(), &valid) => {
-                match valid.as_deref().and_then(validity_from_bools) {
-                    Some(mask) => Column::from_i64_values_with_validity(buf, mask),
-                    None => Column::from_i64_values(buf),
-                }
-            }
-            ColAcc::Float(mut buf, valid, wide) if has_value(buf.len(), &valid) => {
-                wide.finish(&mut buf);
-                match valid.as_deref().and_then(validity_from_bools) {
-                    Some(mask) => Column::from_f64_values_with_validity(buf, mask),
-                    None => Column::from_f64_values(buf),
-                }
-            }
-            ColAcc::Bool(buf, valid) if has_value(buf.len(), &valid) => {
-                match valid.as_deref().and_then(validity_from_bools) {
-                    Some(mask) => Column::from_bool_values_with_validity(buf, mask),
-                    None => Column::from_bool_values(buf),
-                }
-            }
-            // Any ambiguous cell, all-NA, or empty → exact legacy path from raw.
-            _ => {
-                let raw_b = &raw_bytes[idx];
-                let raw_o = &raw_offsets[idx];
-                let mut values = Vec::with_capacity(raw_o.len().saturating_sub(1));
-                for w in raw_o.windows(2) {
-                    let field = std::str::from_utf8(&raw_b[w[0]..w[1]])
-                        .expect("csv fields originate from a &str input");
-                    values.push(parse_scalar(field));
-                }
-                build_csv_object_aware_column(values, raw_b, raw_o)?
-            }
-        };
-        out_columns.insert(name.clone(), column);
+        out_columns.insert(name.clone(), acc.into_column(raw_b, raw_o)?);
         column_order.push(name);
     }
 
@@ -18792,14 +19126,15 @@ mod tests {
     use fp_types::{DType, NullKind, Scalar, Timestamp};
 
     use super::{
-        CsvWriteOptions, ExcelReadOptions, ExcelWriteOptions, Float64QuarterAffineCsvPlan,
-        HtmlReadOptions, HtmlWriteOptions, IoError, JsonOrient, LatexWriteOptions,
-        MarkdownWriteOptions, PickleProtocol, PickleWriteOptions, StataWriteOptions,
-        XmlReadOptions, XmlWriteOptions, csv_input_has_unterminated_quote, format_pandas_float,
-        read_csv_str, read_csv_with_index_cols, read_excel_bytes, read_feather_bytes, read_html,
-        read_html_str, read_html_str_with_options, read_json_str, read_orc, read_orc_bytes,
-        read_parquet_bytes, read_pickle, read_pickle_bytes, read_stata, read_stata_bytes, read_xml,
-        read_xml_str, read_xml_str_with_options, write_csv_string, write_csv_string_with_options,
+        CsvColumnAcc, CsvWriteOptions, ExcelReadOptions, ExcelWriteOptions,
+        Float64QuarterAffineCsvPlan, HtmlReadOptions, HtmlWriteOptions, IoError, JsonOrient,
+        LatexWriteOptions, MarkdownWriteOptions, PickleProtocol, PickleWriteOptions,
+        StataWriteOptions, XmlReadOptions, XmlWriteOptions, csv_input_has_unterminated_quote,
+        format_pandas_float, read_csv_body_in_chunks, read_csv_str, read_csv_with_index_cols,
+        read_excel_bytes, read_feather_bytes, read_html, read_html_str, read_html_str_with_options,
+        read_json_str, read_orc, read_orc_bytes, read_parquet_bytes, read_pickle,
+        read_pickle_bytes, read_stata, read_stata_bytes, read_xml, read_xml_str,
+        read_xml_str_with_options, write_csv_string, write_csv_string_with_options,
         write_excel_bytes, write_html, write_html_string, write_html_string_with_options,
         write_json_string, write_jsonl_string, write_latex, write_latex_string,
         write_latex_string_with_options, write_latex_with_options, write_markdown,
@@ -19835,6 +20170,184 @@ mod tests {
         assert!(
             ended_quoted > 1000,
             "the inputs reach the unterminated case"
+        );
+    }
+
+    #[test]
+    fn csv_body_read_in_chunks_is_the_sequential_read_2e7w5() {
+        // br-frankenpandas-2e7w5: a quote-free body read in chunks - split
+        // after every line, and every line its own chunk - and merged equals
+        // the one sequential read, across each promotion a chunk boundary can
+        // split: int / float / missing / bool / text, ints past 2^53 read by
+        // pandas' float converter once any cell is fractional, a short row.
+        fn frame_text(columns: &[(&str, [&str; 8])], short_row: Option<usize>) -> String {
+            let mut text = columns
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>()
+                .join(",");
+            for row in 0..8 {
+                text.push('\n');
+                let width = if short_row == Some(row) {
+                    columns.len() - 1
+                } else {
+                    columns.len()
+                };
+                let cells: Vec<&str> = columns[..width]
+                    .iter()
+                    .map(|(_, cells)| cells[row])
+                    .collect();
+                text.push_str(&cells.join(","));
+            }
+            text.push('\n');
+            text
+        }
+        fn shown(frame: &DataFrame) -> Vec<String> {
+            frame
+                .column_names()
+                .into_iter()
+                .map(|name| {
+                    let column = frame.column(name).unwrap();
+                    format!("{name} {:?} {:?}", column.dtype(), column.values())
+                })
+                .collect()
+        }
+        // Each split of `text`'s body; the chunked read's frame (None: left
+        // to the sequential read) beside the sequential read's.
+        fn reads(text: &str) -> (Vec<String>, Vec<Option<Vec<String>>>) {
+            let sequential = shown(&read_csv_str(text).unwrap());
+            let header_end = text.find('\n').unwrap();
+            let body = &text[header_end + 1..];
+            let headers: Vec<String> = text[..header_end].split(',').map(str::to_owned).collect();
+            let ends: Vec<usize> = body.match_indices('\n').map(|(at, _)| at + 1).collect();
+            let mut splits: Vec<Vec<(usize, usize)>> = ends[..ends.len() - 1]
+                .iter()
+                .map(|&at| vec![(0, at), (at, body.len())])
+                .collect();
+            let mut start = 0;
+            splits.push(
+                ends.iter()
+                    .map(|&end| {
+                        let chunk = (start, end);
+                        start = end;
+                        chunk
+                    })
+                    .collect(),
+            );
+            let chunked = splits
+                .iter()
+                .map(|chunks| {
+                    read_csv_body_in_chunks(body, &headers, chunks)
+                        .unwrap()
+                        .map(|frame| shown(&frame))
+                })
+                .collect();
+            (sequential, chunked)
+        }
+
+        let columns: [(&str, [&str; 8]); 14] = [
+            ("int", ["1", "2", "3", "4", "5", "6", "7", "8"]),
+            ("int_float", ["1", "2", "3", "4.5", "5", "6", "7", "8"]),
+            (
+                "big_frac",
+                [
+                    "9007199254740993",
+                    "2",
+                    "3",
+                    "4",
+                    "5",
+                    "6",
+                    "0.5",
+                    "9007199254740995",
+                ],
+            ),
+            (
+                "big_na",
+                [
+                    "9007199254740993",
+                    "2",
+                    "",
+                    "4",
+                    "5",
+                    "6",
+                    "7",
+                    "9007199254740995",
+                ],
+            ),
+            ("na_int", ["", "", "3", "4", "5", "6", "7", "8"]),
+            (
+                "bool",
+                ["True", "false", "TRUE", "", "False", "true", "", "false"],
+            ),
+            (
+                "na_bool",
+                ["", "", "True", "false", "", "true", "false", "True"],
+            ),
+            ("text", ["a", "b", "c", "d", "e", "f", "g", "h"]),
+            ("text_num", ["a", "b", "c", "1", "e", "", "g", "2.5"]),
+            ("num_text", ["1", "2", "x", "4", "5", "6", "7", "8"]),
+            (
+                "bool_int",
+                ["True", "false", "1", "true", "", "0", "true", "false"],
+            ),
+            ("all_na", ["", "NA", "", "nan", "", "", "NULL", ""]),
+            ("padded", [" 1", "2 ", " 3 ", "4", " a", "b ", "c", " d "]),
+            ("float_bool", ["1.5", "2", "true", "", "3", "4", "5", "6"]),
+        ];
+        let text = frame_text(&columns, Some(5));
+        let (sequential, chunked) = reads(&text);
+        assert_eq!(chunked.len(), 8);
+        for (split, read) in chunked.iter().enumerate() {
+            assert_eq!(
+                read.as_ref(),
+                Some(&sequential),
+                "split {split} of the body differs from the sequential read"
+            );
+        }
+
+        // NEGATIVE: a Bool column whose next chunk opens with missing cells
+        // and then booleans - a fresh start reads float, then falls back -
+        // is not merged as a fallback: the merge hands the Bool column back
+        // and the chunk's cells are pushed onto it, as one read does.
+        let bool_gap: [(&str, [&str; 8]); 2] = [
+            ("k", ["1", "2", "3", "4", "5", "6", "7", "8"]),
+            (
+                "flag",
+                ["True", "false", "", "", "True", "false", "", "true"],
+            ),
+        ];
+        let (sequential, chunked) = reads(&frame_text(&bool_gap, None));
+        assert!(
+            sequential
+                .iter()
+                .any(|column| column.starts_with("flag Bool"))
+        );
+        for read in &chunked {
+            assert_eq!(read.as_ref(), Some(&sequential));
+        }
+        let mut flags = CsvColumnAcc::new(2);
+        flags.push("True");
+        let mut fresh = CsvColumnAcc::new(2);
+        fresh.push("");
+        fresh.push("false");
+        assert!(matches!(fresh, CsvColumnAcc::Fallback));
+        assert!(matches!(
+            flags.merge(1, fresh, 2),
+            Err(CsvColumnAcc::Bool(..))
+        ));
+
+        // NEGATIVE: a row wider than the header is the sequential reader's
+        // (it names the line in its error); so is an empty line.
+        let headers = vec!["a".to_owned(), "b".to_owned()];
+        assert!(
+            read_csv_body_in_chunks("1,2\n3,4,5\n", &headers, &[(0, 4), (4, 10)])
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            read_csv_body_in_chunks("1,2\n\n3,4\n", &headers, &[(0, 4), (4, 9)])
+                .unwrap()
+                .is_none()
         );
     }
 
