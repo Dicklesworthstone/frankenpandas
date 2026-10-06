@@ -27376,3 +27376,45 @@ def test_range_and_array_index_arguments_like_pandas_7bope(case: str) -> None:
         )
 
     assert shown(fpd) == shown(pd)
+
+
+# Datetime / timedelta reductions: a missing median / quantile is NaT, and
+# idxmax / idxmin / argmax / argmin skipping every value of an all-NaT one
+# is numpy's empty-sequence ValueError (br-frankenpandas-h7z3y).
+def _h7z3y_series(m: Any, kind: str) -> Any:
+    if kind == "all NaT":
+        return m.Series(m.to_datetime([None, None]))
+    if kind == "all NaT timedelta":
+        return m.Series(m.to_timedelta([None, None]))
+    if kind == "empty":
+        return m.Series(m.to_datetime([]))
+    return m.Series(m.to_datetime(["2024-03-01 10:00", None, "2023-12-31"]))
+
+
+_H7Z3Y_CASES = {
+    "max with NaT": lambda m: _h7z3y_series(m, "NaT").max(),
+    "idxmax with NaT": lambda m: _h7z3y_series(m, "NaT").idxmax(),
+    "median with NaT": lambda m: _h7z3y_series(m, "NaT").median(),
+    "all NaT median": lambda m: _h7z3y_series(m, "all NaT").median(),
+    "all NaT quantile": lambda m: _h7z3y_series(m, "all NaT").quantile(0.5),
+    "empty median": lambda m: _h7z3y_series(m, "empty").median(),
+    "all NaT idxmax": lambda m: _h7z3y_series(m, "all NaT").idxmax(),
+    "all NaT argmin": lambda m: _h7z3y_series(m, "all NaT").argmin(),
+    "all NaT timedelta idxmin": lambda m: _h7z3y_series(m, "all NaT timedelta").idxmin(),
+    "all NaT idxmax skipna=False (NEGATIVE: NaN)": lambda m: _h7z3y_series(m, "all NaT").idxmax(skipna=False),
+    "float all NaN idxmax (NEGATIVE: NaN)": lambda m: m.Series([float("nan"), float("nan")]).idxmax(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_H7Z3Y_CASES))
+def test_datetime_reductions_like_pandas_h7z3y(case: str) -> None:
+    def shown(m: Any) -> Any:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                return repr(_H7Z3Y_CASES[case](m))
+            except ValueError as err:
+                return ("ValueError", str(err))
+
+    assert shown(fpd) == shown(pd)

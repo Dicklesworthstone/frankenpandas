@@ -32328,6 +32328,7 @@ impl PySeries {
                 "No axis named {ax} for object type Series"
             )));
         }
+        refuse_temporal_all_missing(&self.inner, skipna, true)?;
         let found = if self.inner.column().holds_non_text() {
             object_extreme(py, &self.inner, true, true, skipna)?
                 .and_then(|(row, _)| self.inner.index().labels().get(row).cloned())
@@ -32356,6 +32357,7 @@ impl PySeries {
                 "No axis named {ax} for object type Series"
             )));
         }
+        refuse_temporal_all_missing(&self.inner, skipna, false)?;
         let found = if self.inner.column().holds_non_text() {
             object_extreme(py, &self.inner, false, true, skipna)?
                 .and_then(|(row, _)| self.inner.index().labels().get(row).cloned())
@@ -58841,6 +58843,21 @@ fn window_ddof(ddof: i64) -> PyResult<usize> {
     usize::try_from(ddof).map_err(|_| not_implemented("a negative ddof for a window method"))
 }
 
+/// pandas' ValueError for `idxmax` / `idxmin` / `argmax` / `argmin` that
+/// skip the missing values of a datetime or timedelta Series holding none
+/// else: numpy's empty-sequence error (a float one answers NaN / -1, which
+/// these answered; br-frankenpandas-h7z3y).
+fn refuse_temporal_all_missing(s: &Series, skipna: bool, max: bool) -> PyResult<()> {
+    let temporal = matches!(s.dtype(), DType::Datetime64 { .. } | DType::Timedelta64);
+    if temporal && skipna && !s.is_empty() && s.column().validity().count_valid() == 0 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "attempt to get {} of an empty sequence",
+            if max { "argmax" } else { "argmin" }
+        )));
+    }
+    Ok(())
+}
+
 /// pandas' `Series.argmax` / `argmin` (`max`): `axis` names the one axis
 /// (numpy's ValueError past it), and a -1 - skipna=False with a missing
 /// value, or every value missing - comes with pandas' FutureWarning, as a
@@ -58859,6 +58876,7 @@ fn series_arg_extreme(
             "`axis` must be fewer than the number of dimensions (1)",
         ));
     }
+    refuse_temporal_all_missing(s, skipna, max)?;
     let position = if max {
         s.argmax_skipna(skipna)
     } else {

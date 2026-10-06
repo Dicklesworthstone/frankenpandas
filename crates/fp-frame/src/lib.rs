@@ -9445,10 +9445,13 @@ fn pct_change_fill_direction(fill_method: Option<&str>) -> Result<Option<bool>, 
 }
 
 /// A timedelta reduction's result back as the datetime it stands for: the
-/// same nanoseconds (NaT stays NaT); see `Series::datetime_as_timedelta`.
+/// same nanoseconds, and a missing result NaT (the median / quantile of an
+/// all-NaT or empty column came back as a float NaN;
+/// br-frankenpandas-h7z3y); see `Series::datetime_as_timedelta`.
 fn datetime_from_timedelta_result(result: Scalar) -> Scalar {
     match result {
         Scalar::Timedelta64(ns) => Scalar::Datetime64(ns),
+        other if other.is_missing() => Scalar::Null(NullKind::NaT),
         other => other,
     }
 }
@@ -21070,9 +21073,58 @@ impl Series {
     /// datetime min/max/median/quantile/idxmin/idxmax run the timedelta
     /// reductions and re-wrap with `datetime_from_timedelta_result`. They
     /// raised on `to_f64` (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.17).
+    /// The latest (`max`) or earliest instant of a datetime column off its
+    /// typed buffer, the missing slots skipped and NaT when none is present
+    /// (the reduction a timedelta column of it gives); None for any other
+    /// column or one without a contiguous buffer (br-frankenpandas-h7z3y).
+    fn datetime_typed_extreme(&self, max: bool) -> Option<Scalar> {
+        if !matches!(self.column.dtype(), DType::Datetime64 { .. }) {
+            return None;
+        }
+        let nanos = self
+            .column
+            .as_datetime64_slice()
+            .filter(|nanos| nanos.len() == self.len())?;
+        let validity = self.column.validity();
+        let best = if validity.all() {
+            if max {
+                i64_slice_max_simd(nanos)
+            } else {
+                i64_slice_min_simd(nanos)
+            }
+        } else {
+            nanos
+                .iter()
+                .enumerate()
+                .filter(|&(i, _)| validity.get(i))
+                .map(|(_, &ns)| ns)
+                .reduce(|a, b| if max { a.max(b) } else { a.min(b) })
+        };
+        Some(Scalar::Datetime64(best.unwrap_or(Timestamp::NAT)))
+    }
+
     fn datetime_as_timedelta(&self) -> Result<Option<Self>, FrameError> {
         if !matches!(self.column.dtype(), DType::Datetime64 { .. }) {
             return Ok(None);
+        }
+        // The nanos off the typed buffer, NaT at a missing slot (a million
+        // Timedelta64 Scalars were built off the Scalar view and validated:
+        // s.max() 23 ms; br-frankenpandas-h7z3y).
+        if let Some(nanos) = self.column.as_datetime64_slice()
+            && nanos.len() == self.len()
+        {
+            let validity = self.column.validity();
+            let data = if validity.all() {
+                nanos.to_vec()
+            } else {
+                nanos
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &ns)| if validity.get(i) { ns } else { Timedelta::NAT })
+                    .collect()
+            };
+            let column = Column::from_timedelta64_values_with_validity(data, validity.clone());
+            return Self::new(self.name(), self.index.clone(), column).map(Some);
         }
         let values = self
             .column
@@ -21184,6 +21236,9 @@ impl Series {
     pub fn min(&self) -> Result<Scalar, FrameError> {
         if let Some(meta) = &self.categorical {
             return self.categorical_extreme(meta, true);
+        }
+        if let Some(earliest) = self.datetime_typed_extreme(false) {
+            return Ok(earliest);
         }
         if let Some(nanos) = self.datetime_as_timedelta()? {
             return nanos.min().map(datetime_from_timedelta_result);
@@ -21354,6 +21409,9 @@ impl Series {
     pub fn max(&self) -> Result<Scalar, FrameError> {
         if let Some(meta) = &self.categorical {
             return self.categorical_extreme(meta, false);
+        }
+        if let Some(latest) = self.datetime_typed_extreme(true) {
+            return Ok(latest);
         }
         if let Some(nanos) = self.datetime_as_timedelta()? {
             return nanos.max().map(datetime_from_timedelta_result);
@@ -172472,6 +172530,47 @@ mod tests {
     }
 
     // ── Batch 6: Series properties and utility methods ──
+
+    #[test]
+    fn datetime_extremes_read_off_the_buffer_equal_the_timedelta_path_h7z3y() {
+        // The typed datetime min / max (missing slots skipped, NaT when none
+        // is present) answer what the timedelta reduction of the column does
+        // (br-frankenpandas-h7z3y).
+        let series = |values: Vec<Scalar>| {
+            let labels = (0..values.len() as i64).map(IndexLabel::Int64).collect();
+            let column = Column::new(DType::datetime64_naive(), values).unwrap();
+            Series::new("d", Index::new(labels), column).unwrap()
+        };
+        let reference = |s: &Series, max: bool| {
+            let nanos = s.datetime_as_timedelta().unwrap().unwrap();
+            let result = if max { nanos.max() } else { nanos.min() };
+            crate::datetime_from_timedelta_result(result.unwrap())
+        };
+        let cases = [
+            (0..70)
+                .map(|i| Scalar::Datetime64(i * 37 % 61 - 5))
+                .collect::<Vec<_>>(),
+            vec![
+                Scalar::Datetime64(9),
+                Scalar::Null(NullKind::NaT),
+                Scalar::Datetime64(-3),
+                Scalar::Null(NullKind::NaT),
+            ],
+            vec![Scalar::Null(NullKind::NaT); 3],
+            Vec::new(),
+        ];
+        for values in cases {
+            let s = series(values);
+            for max in [true, false] {
+                let typed = s.datetime_typed_extreme(max).expect("a datetime column");
+                assert_eq!(typed, reference(&s, max), "max={max}");
+                assert_eq!(if max { s.max() } else { s.min() }.unwrap(), typed);
+            }
+        }
+        // NEGATIVE: any other column is the caller's path.
+        let ints = Series::from_values("i", vec![0_i64.into()], vec![Scalar::Int64(4)]).unwrap();
+        assert!(ints.datetime_typed_extreme(true).is_none());
+    }
 
     #[test]
     fn series_hasnans_true() {
