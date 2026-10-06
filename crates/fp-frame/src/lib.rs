@@ -1480,6 +1480,15 @@ fn wall_clock_labels(index: &Index) -> std::borrow::Cow<'_, [IndexLabel]> {
     )
 }
 
+/// The freq of a `step` slice of `index`: pandas scales a datetime or
+/// timedelta index's freq by the slice's step whatever its length
+/// (`t.iloc[4:1:-5]`'s one row is '-5D'), where a take infers it from the
+/// positions and has none to infer from for 0 or 1 rows
+/// (br-frankenpandas-e00f7).
+fn slice_freq(index: &Index, step: isize) -> Option<String> {
+    fp_index::scale_freq(index.freq()?, i64::try_from(step).ok()?)
+}
+
 fn normalize_iloc_position(position: i64, len: usize) -> Result<usize, FrameError> {
     // Fast path (perf): on 64-bit platforms `len <= isize::MAX <= i64::MAX`, so the
     // whole normalization is exact in i64 and avoids the per-call i128 conversions
@@ -13529,6 +13538,21 @@ impl Series {
         Ok(out)
     }
 
+    /// [`Self::sorted_by_positions`] for `sort_index`, which pandas does with
+    /// a take: an order shaped like a slice scales the freq by its step (a
+    /// reversed daily index sorts back to 'D'; br-frankenpandas-e00f7).
+    /// `sort_values` indexes the index with the order, which keeps none.
+    fn sorted_index_by_positions(&self, order: &[usize]) -> Result<Self, FrameError> {
+        let mut out = self.sorted_by_positions(order)?;
+        if let Some(freq) = self.index.freq() {
+            out.index = out
+                .index
+                .clone()
+                .with_freq(fp_index::take_freq(Some(freq.to_owned()), order));
+        }
+        Ok(out)
+    }
+
     fn filter_typed_i64_index_by_bool_slice(
         &self,
         mask: &[bool],
@@ -14948,6 +14972,61 @@ impl Series {
         )
     }
 
+    /// `len` rows from `start`, `step` apart (`step` negative for a backwards
+    /// slice): `s.iloc[start::step]` as Python's `slice.indices` resolves it.
+    ///
+    /// A unit-range index becomes an arithmetic one and an all-valid float64
+    /// column a strided view of its buffer, as pandas' slice is a numpy view;
+    /// `s.iloc[::-1]` built, normalized and gathered a million positions
+    /// (6.3 ms, pandas 0.006; br-frankenpandas-e00f7). Anything else gathers
+    /// the rows as [`Self::iloc`] does.
+    ///
+    /// # Errors
+    /// Rejects a selection reaching outside the rows, as `iloc` does.
+    pub fn iloc_step(&self, start: usize, step: isize, len: usize) -> Result<Self, FrameError> {
+        if step == 0 || !fp_columnar::affine_positions_fit(start, step, len, self.len()) {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "iloc slice of {len} rows from {start} by {step} out of bounds for length {}",
+                self.len()
+            )));
+        }
+        let positions = std::cell::OnceCell::new();
+        let positions = || {
+            positions
+                .get_or_init(|| {
+                    fp_columnar::affine_positions(start, step, len).collect::<Vec<usize>>()
+                })
+                .as_slice()
+        };
+        let affine_index = self
+            .index
+            .int64_unit_range_labels()
+            .and_then(|(range_start, _)| {
+                let label_start = range_start.checked_add(i64::try_from(start).ok()?)?;
+                Index::new_known_unique_int64_affine_range(
+                    label_start,
+                    i64::try_from(step).ok()?,
+                    len,
+                )
+            })
+            .filter(|_| len > 0);
+        let index = match affine_index {
+            Some(index) => index
+                .with_dtype_of(&self.index)
+                .rename_index(self.index.name()),
+            None => self.index.take(positions()),
+        };
+        let column = self
+            .column
+            .take_affine_positions_without_materialized_positions(start, step, len)
+            .unwrap_or_else(|| self.column.take_positions(positions()));
+        Self::new(
+            self.name.clone(),
+            index.with_freq(slice_freq(&self.index, step)),
+            column,
+        )
+    }
+
     /// Label-based boolean mask selection.
     ///
     /// Matches `series.loc[bool_array]` in pandas. The boolean mask must have
@@ -15123,18 +15202,20 @@ impl Series {
             && ranks.is_none()
             && let Some(increasing) = strictly_monotonic_i64(&self.index)
         {
-            if increasing == ascending {
+            // One row is sorted both ways (pandas returns it).
+            if increasing == ascending || self.len() < 2 {
                 return Ok(self.clone());
             }
-            let reversed: Vec<usize> = (0..self.len()).rev().collect();
-            return self.sorted_by_positions(&reversed);
+            // The reverse is `[::-1]`: strided views, and pandas' take of a
+            // slice-shaped order scales the freq by -1 (br-frankenpandas-e00f7).
+            return self.iloc_step(self.len() - 1, -1, self.len());
         }
         if !na_first
             && ranks.is_none()
             && let Some(values) = self.index.int64_label_values()
         {
             let order = fp_columnar::radix_argsort_i64(&values, ascending);
-            return self.sorted_by_positions(&order);
+            return self.sorted_index_by_positions(&order);
         }
         let mut order = (0..self.len()).collect::<Vec<_>>();
         let labels = self.index.labels();
@@ -15170,7 +15251,7 @@ impl Series {
                 }
             }
         });
-        self.sorted_by_positions(&order)
+        self.sorted_index_by_positions(&order)
     }
 
     /// Return a new Series sorted by values.
@@ -74242,24 +74323,41 @@ impl DataFrame {
         &self,
         certificate: AffineSelectionCertificate,
     ) -> Option<Result<Self, FrameError>> {
-        let n = certificate.len;
-        if n == 0 || self.row_multiindex.is_some() {
-            return None;
-        }
-        let last = certificate
-            .start
-            .checked_add(certificate.step.checked_mul(n.saturating_sub(1))?)?;
-        if last >= self.len() {
+        self.take_rows_affine_unchecked(
+            certificate.start,
+            isize::try_from(certificate.step).ok()?,
+            certificate.len,
+            false,
+        )
+    }
+
+    /// Rows `start + i * step`, `i in 0..n` (`step` negative for a backwards
+    /// selection, br-frankenpandas-e00f7), with an arithmetic index and
+    /// descriptor-only column views. Without `gather_rest` it is accepted
+    /// only when every column has such a view; with it, the other columns
+    /// gather the positions (built once).
+    fn take_rows_affine_unchecked(
+        &self,
+        start: usize,
+        step: isize,
+        n: usize,
+        gather_rest: bool,
+    ) -> Option<Result<Self, FrameError>> {
+        if n == 0
+            || step == 0
+            || self.row_multiindex.is_some()
+            || !fp_columnar::affine_positions_fit(start, step, n, self.len())
+        {
             return None;
         }
 
         let out_index = if let Some((range_start, range_len)) = self.index.int64_unit_range_labels()
         {
-            if last >= range_len {
+            if !fp_columnar::affine_positions_fit(start, step, n, range_len) {
                 return None;
             }
-            let label_start = range_start.checked_add(i64::try_from(certificate.start).ok()?)?;
-            let step = i64::try_from(certificate.step).ok()?;
+            let label_start = range_start.checked_add(i64::try_from(start).ok()?)?;
+            let step = i64::try_from(step).ok()?;
             Index::new_known_unique_int64_affine_range(label_start, step, n)?
         } else {
             let typed_view = match self.index.cached_int64_label_values() {
@@ -74267,32 +74365,40 @@ impl DataFrame {
                 None if n.saturating_mul(4) >= self.len() => self.index.int64_label_values(),
                 None => None,
             };
-            if let Some(values) = typed_view {
-                Index::from_i64_strided_values(values, certificate.start, certificate.step, n)?
-            } else {
-                let index_labels = self.index.labels();
-                let mut labels = Vec::with_capacity(n);
-                let mut pos = certificate.start;
-                for _ in 0..n {
-                    labels.push(index_labels[pos].clone());
-                    pos = pos.checked_add(certificate.step)?;
+            match (typed_view, usize::try_from(step)) {
+                (Some(values), Ok(step)) => Index::from_i64_strided_values(values, start, step, n)?,
+                (Some(values), Err(_)) => Index::from_i64_values(
+                    fp_columnar::affine_positions(start, step, n)
+                        .map(|pos| values[pos])
+                        .collect(),
+                ),
+                (None, _) => {
+                    let index_labels = self.index.labels();
+                    let labels = fp_columnar::affine_positions(start, step, n)
+                        .map(|pos| index_labels[pos].clone())
+                        .collect();
+                    // Rows of a tz-aware index keep its zone.
+                    Index::new(labels).with_tz(self.index.tz()).ok()?
                 }
-                // Rows of a tz-aware index keep its zone.
-                Index::new(labels).with_tz(self.index.tz()).ok()?
             }
         };
 
         let n_cols = self.num_columns();
         let mut pairs = Vec::with_capacity(n_cols);
         let mut order = Vec::with_capacity(n_cols);
+        let mut positions: Option<Vec<usize>> = None;
         for i in 0..n_cols {
             let name = self.column_name_at(i).expect("column position in bounds");
             let column = self.column_at(i).expect("column position in bounds");
-            let gathered = column.take_affine_positions_without_materialized_positions(
-                certificate.start,
-                certificate.step,
-                n,
-            )?;
+            let gathered = match column
+                .take_affine_positions_without_materialized_positions(start, step, n)
+            {
+                Some(view) => view,
+                None if gather_rest => column.take_positions(positions.get_or_insert_with(|| {
+                    fp_columnar::affine_positions(start, step, n).collect()
+                })),
+                None => return None,
+            };
             order.push(name.clone());
             pairs.push((name, gathered));
         }
@@ -80733,7 +80839,9 @@ impl DataFrame {
             if let Some(increasing) = strictly_monotonic_i64(&self.index)
                 && increasing != ascending
             {
-                return self.sorted_rows_by_positions((0..self.len()).rev().collect());
+                // `[::-1]`: strided views, and pandas' take of a slice-shaped
+                // order scales the freq by -1 (br-frankenpandas-e00f7).
+                return self.iloc_step(self.len().saturating_sub(1), -1, self.len());
             }
             if let Some(values) = self.index.int64_label_values() {
                 let order = fp_columnar::radix_argsort_i64(&values, ascending);
@@ -81091,7 +81199,16 @@ impl DataFrame {
             .index
             .range_span()
             .filter(|_| order.iter().enumerate().all(|(at, &from)| at == from));
-        let out = self.reorder_rows_by_owned_positions_unchecked(order)?;
+        // pandas' sort is a take: an order shaped like a slice scales the
+        // freq by its step (br-frankenpandas-e00f7).
+        let freq = self
+            .index
+            .freq()
+            .map(|freq| fp_index::take_freq(Some(freq.to_owned()), &order));
+        let mut out = self.reorder_rows_by_owned_positions_unchecked(order)?;
+        if let Some(freq) = freq {
+            out.index = out.index.clone().with_freq(freq);
+        }
         Ok(match unmoved {
             Some(span) => out.with_range_span(Some(span)),
             None => out,
@@ -81498,6 +81615,36 @@ impl DataFrame {
         self.iloc_with_columns(positions, None)
     }
 
+    /// `len` rows from `start`, `step` apart (`step` negative for a backwards
+    /// slice): `df.iloc[start::step]` as Python's `slice.indices` resolves it.
+    ///
+    /// The rows are an arithmetic index and each all-valid float64 column a
+    /// strided view of its buffer, as pandas' slice is a numpy view; every
+    /// stepped slice built, normalized and gathered a list of positions
+    /// (`df.iloc[::-1]` 8.6 ms a million rows by three columns, pandas 0.008;
+    /// br-frankenpandas-e00f7). Other columns gather the rows.
+    ///
+    /// # Errors
+    /// Rejects a selection reaching outside the rows, as `iloc` does.
+    pub fn iloc_step(&self, start: usize, step: isize, len: usize) -> Result<Self, FrameError> {
+        if step == 0 || !fp_columnar::affine_positions_fit(start, step, len, self.len()) {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "iloc slice of {len} rows from {start} by {step} out of bounds for length {}",
+                self.len()
+            )));
+        }
+        let mut out = match self.take_rows_affine_unchecked(start, step, len, true) {
+            Some(result) => result?,
+            None => self.iloc(
+                &fp_columnar::affine_positions(start, step, len)
+                    .map(|pos| i64::try_from(pos).expect("a row position fits i64"))
+                    .collect::<Vec<_>>(),
+            )?,
+        };
+        out.index = out.index.clone().with_freq(slice_freq(&self.index, step));
+        Ok(out)
+    }
+
     /// Position-based row+column selection for list-like indexers.
     ///
     /// Matches `df.iloc[[...], [...]]` for list selectors. Requested rows are
@@ -81748,7 +81895,14 @@ impl DataFrame {
         let end_pos = stop.map_or(len, resolve);
 
         if start_pos >= end_pos || start_pos >= len {
-            return self.take_rows_by_positions(&[]);
+            // An empty slice keeps the freq, as a Series' does (pandas;
+            // the take of no rows had none to infer; br-frankenpandas-e00f7).
+            let mut out = self.take_rows_by_positions(&[])?;
+            out.index = out
+                .index
+                .clone()
+                .with_freq(self.index.freq().map(str::to_owned));
+            return Ok(out);
         }
 
         let len = end_pos - start_pos;
@@ -172747,6 +172901,84 @@ mod tests {
                 .with_index(Index::from_i64_values(vec![1, 1, 2]))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn iloc_step_is_the_positions_take_e00f7() {
+        // br-frankenpandas-e00f7: a stepped slice - strided views where a
+        // column has one, a gather where not - is `iloc` of its positions,
+        // under a RangeIndex and a label index, frame and Series.
+        let n = 2500_usize;
+        let floats: Vec<f64> = (0..n).map(|i| i as f64 * 0.5).collect();
+        let with_nan: Vec<f64> = floats
+            .iter()
+            .enumerate()
+            .map(|(i, v)| if i % 9 == 0 { f64::NAN } else { *v })
+            .collect();
+        let text: Vec<Scalar> = (0..n).map(|i| Scalar::Utf8(format!("t{i}"))).collect();
+        let columns = [
+            Column::from_f64_values(floats),
+            Column::from_f64_values(with_nan),
+            Column::from_i64_values((0..n as i64).map(|i| i * 7 - 3).collect()),
+            Column::from_bool_values((0..n).map(|i| i % 4 == 1).collect()),
+            Column::from_values(text).unwrap(),
+        ];
+        let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Utf8(format!("r{i}"))).collect();
+        for index in [Index::from_range(0, n as i64, 1), Index::new(labels)] {
+            let series: Vec<Series> = columns
+                .iter()
+                .enumerate()
+                .map(|(i, column)| {
+                    Series::new(format!("c{i}"), index.clone(), column.clone()).unwrap()
+                })
+                .collect();
+            let frame = DataFrame::from_series(series.clone()).unwrap();
+            for (start, step, len) in [
+                (n - 1, -1, n),
+                (n - 1, -2, n / 2),
+                (1800, -3, 601),
+                (3, 2, 1249),
+                (10, -1, 11),
+                (0, 5, 0),
+            ] {
+                let positions: Vec<i64> = fp_columnar::affine_positions(start, step, len)
+                    .map(|p| p as i64)
+                    .collect();
+                let stepped = frame.iloc_step(start, step, len).unwrap();
+                let taken = frame.iloc(&positions).unwrap();
+                assert_eq!(stepped.index().labels(), taken.index().labels());
+                for name in taken.column_names() {
+                    assert_eq!(
+                        format!("{:?}", stepped.column(name).unwrap().values()),
+                        format!("{:?}", taken.column(name).unwrap().values()),
+                        "{name} {start} by {step}"
+                    );
+                    assert_eq!(
+                        stepped.column(name).unwrap().validity(),
+                        taken.column(name).unwrap().validity()
+                    );
+                }
+                for s in &series {
+                    let stepped = s.iloc_step(start, step, len).unwrap();
+                    let taken = s.iloc(&positions).unwrap();
+                    assert_eq!(stepped.index().labels(), taken.index().labels());
+                    assert_eq!(
+                        format!("{:?}", stepped.values()),
+                        format!("{:?}", taken.values())
+                    );
+                }
+            }
+            // NEGATIVE: a selection reaching outside the rows is refused,
+            // never wrapped round.
+            assert!(frame.iloc_step(3, -2, 3).is_err());
+            assert!(frame.iloc_step(n - 2, 2, 2).is_err());
+            assert!(series[0].iloc_step(0, -1, 2).is_err());
+        }
+        // pandas scales a slice's freq by its step at any length.
+        let daily = Index::from_range(0, 4, 1).with_freq(Some("D".to_owned()));
+        assert_eq!(crate::slice_freq(&daily, -3).as_deref(), Some("-3D"));
+        assert_eq!(crate::slice_freq(&daily, 1).as_deref(), Some("D"));
+        assert_eq!(crate::slice_freq(&Index::from_range(0, 4, 1), 2), None);
     }
 
     #[test]

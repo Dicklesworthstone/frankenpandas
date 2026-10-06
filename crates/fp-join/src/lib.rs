@@ -1908,9 +1908,9 @@ fn affine_inner_output_lane<'a>(
     column.as_f64_slice()?;
     let built = if len == 0 {
         Column::from_f64_values(Vec::new())
-    } else if let Some(view) =
+    } else if let Some(view) = isize::try_from(step).ok().and_then(|step| {
         column.take_affine_positions_without_materialized_positions(start, step, len)
-    {
+    }) {
         view
     } else {
         let positions = affine_selection_positions(start, step, len);

@@ -28030,3 +28030,62 @@ def test_float32_writes_like_pandas_d3ylw(case: str) -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         assert _d3ylw_shown(_D3YLW_CASES[case](fpd)) == _d3ylw_shown(_D3YLW_CASES[case](pd))
+
+
+# br-frankenpandas-e00f7: a stepped iloc / [] / loc slice is a strided view of
+# each all-valid float64 (and NaN-as-missing float64), int64, datetime,
+# timedelta and bool column, and the slice's freq is the index's scaled by the
+# step at any length (pandas' _get_getitem_freq). 1500 rows, past the 1024 the
+# views start at.
+def _e00f7_frame(m: Any) -> Any:
+    n = 1500
+    k = np.arange(n)
+    return m.DataFrame(
+        {
+            "f": k * 0.5 - 300.0,
+            "nan": np.where(k % 7 == 0, np.nan, k / 3.0),
+            "i": k * 3 - 1000,
+            "b": k % 3 == 0,
+            "dt": m.to_datetime(k * 3_600_000_000_000 + 1_700_000_000_000_000_000),
+            "td": m.to_timedelta((k * 5).tolist(), unit="s"),
+            "s": [f"r{v}" for v in k],
+        },
+        index=m.date_range("2024-01-01", periods=n, freq="D"),
+    )
+
+
+def _e00f7_shown(obj: Any) -> Any:
+    index = obj.index
+    shown_index = [str(index.dtype), getattr(index, "freqstr", None), [str(v) for v in index.tolist()]]
+    if hasattr(obj, "columns"):
+        body = [(str(c), str(obj[c].dtype), [str(v) for v in obj[c].tolist()]) for c in obj.columns]
+    else:
+        body = [str(obj.dtype), [str(v) for v in obj.tolist()]]
+    return [shown_index, body]
+
+
+_E00F7_CASES = {
+    "iloc[::-1]": lambda m: _e00f7_frame(m).iloc[::-1],
+    "iloc[::2]": lambda m: _e00f7_frame(m).iloc[::2],
+    "iloc[1400::-3]": lambda m: _e00f7_frame(m).iloc[1400::-3],
+    "iloc[::-1].iloc[::-1] (strides compose)": lambda m: _e00f7_frame(m).iloc[::-1].iloc[::-1],
+    "iloc[100:1300].iloc[::-2] (a window's view)": lambda m: _e00f7_frame(m).iloc[100:1300].iloc[::-2],
+    "iloc[::-1].sort_index()": lambda m: _e00f7_frame(m).iloc[::-1].sort_index(),
+    "iloc[::-1].sum()": lambda m: _e00f7_frame(m)[["f", "nan", "i", "b"]].iloc[::-1].sum(),
+    "iloc[::-1] + 1": lambda m: _e00f7_frame(m)[["f", "nan", "i"]].iloc[::-1] + 1,
+    "iloc[::-1].isna()": lambda m: _e00f7_frame(m).iloc[::-1].isna(),
+    "s[::-1]": lambda m: _e00f7_frame(m)["nan"][::-1],
+    "s.iloc[::3].cumsum()": lambda m: _e00f7_frame(m)["i"].iloc[::3].cumsum(),
+    "dt.iloc[::-1].dt.day": lambda m: _e00f7_frame(m)["dt"].iloc[::-1].dt.day,
+    "loc[::-2] (freq -2D)": lambda m: _e00f7_frame(m).loc[::-2],
+    "iloc[1400:1395:-7] (one row keeps -7D)": lambda m: _e00f7_frame(m).iloc[1400:1395:-7],
+    "iloc[5:5:-2] (no rows keep -2D)": lambda m: _e00f7_frame(m).iloc[5:5:-2],
+    "loc one row ::-4 (keeps -4D)": lambda m: _e00f7_frame(m).loc["2024-01-05":"2024-01-05":-4],
+    "head(1).iloc[1:-1] (an empty unit slice keeps D)": lambda m: _e00f7_frame(m).head(1).iloc[1:-1],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E00F7_CASES))
+def test_stepped_slices_like_pandas_e00f7(case: str) -> None:
+    assert _e00f7_shown(_E00F7_CASES[case](fpd)) == _e00f7_shown(_E00F7_CASES[case](pd))

@@ -78,7 +78,58 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const STRIDED_FLOAT64_MIN_LEN: usize = 1024;
+const STRIDED_VIEW_MIN_LEN: usize = 1024;
+
+/// Whether every row `start + i * step`, `i in 0..len`, of an affine
+/// selection (a `start::step` slice, `step` negative for a backwards one)
+/// lies in `0..source_len` (br-frankenpandas-e00f7).
+#[must_use]
+pub fn affine_positions_fit(start: usize, step: isize, len: usize, source_len: usize) -> bool {
+    if len == 0 {
+        return true;
+    }
+    if start >= source_len {
+        return false;
+    }
+    match step.unsigned_abs().checked_mul(len - 1) {
+        None => false,
+        Some(span) if step >= 0 => start
+            .checked_add(span)
+            .is_some_and(|last| last < source_len),
+        Some(span) => span <= start,
+    }
+}
+
+/// The rows `start + i * step`, `i in 0..len`, of an affine selection that
+/// [`affine_positions_fit`] its source.
+pub fn affine_positions(start: usize, step: isize, len: usize) -> impl Iterator<Item = usize> {
+    (0..len).map(move |i| affine_position(start, step, i))
+}
+
+/// An affine selection `start + i * step` of a column that is itself rows
+/// `offset + j * source_step` of a buffer, as `(start, step)` in the buffer.
+fn compose_affine(
+    start: usize,
+    step: isize,
+    offset: usize,
+    source_step: isize,
+) -> Option<(usize, isize)> {
+    let start = isize::try_from(start)
+        .ok()?
+        .checked_mul(source_step)?
+        .checked_add(isize::try_from(offset).ok()?)?;
+    Some((usize::try_from(start).ok()?, step.checked_mul(source_step)?))
+}
+
+/// Row `i` of an affine selection, `start + i * step`.
+fn affine_position(start: usize, step: isize, i: usize) -> usize {
+    let stride = step.unsigned_abs();
+    if step >= 0 {
+        start + i * stride
+    } else {
+        start - i * stride
+    }
+}
 
 /// `2^52`, the magnitude at or above which every `f64` is already an integer.
 ///
@@ -795,6 +846,54 @@ impl ValidityMask {
         out
     }
 
+    /// Bits `start + i * step`, `i in 0..len` (`step` negative for a
+    /// backwards selection) as a new mask; the caller keeps them in bounds
+    /// ([`affine_positions_fit`]). A backwards unit step reverses the window's
+    /// words and the bits in each instead of probing every bit
+    /// (br-frankenpandas-e00f7).
+    #[must_use]
+    pub fn strided(&self, start: usize, step: isize, len: usize) -> Self {
+        debug_assert!(affine_positions_fit(start, step, len, self.len));
+        if len == 0 || self.is_all_valid_sentinel() {
+            return Self::all_valid(len);
+        }
+        if step == 1 {
+            return self.slice(start, len);
+        }
+        if step == -1 {
+            // Out bit i is window bit len - 1 - i: reversing every bit of the
+            // window's W words puts it at i + pad, pad = 64 * W - len < 64,
+            // so out word k is reversed word k shifted down by pad over the
+            // next. A word-aligned window is read in place; whatever its last
+            // word holds past `len` lands in the pad bits the shift drops.
+            let first = start + 1 - len;
+            let copied;
+            let window: &[u64] = if first.is_multiple_of(64) && self.invalid_ranges.is_none() {
+                &self.words[first / 64..first / 64 + len.div_ceil(64)]
+            } else {
+                copied = self.slice(first, len).materialized_words();
+                &copied
+            };
+            let w = window.len();
+            let pad = w * 64 - len;
+            let reversed = |j: usize| window[w - 1 - j].reverse_bits();
+            let words = (0..w)
+                .map(|k| match pad {
+                    0 => reversed(k),
+                    _ if k + 1 < w => (reversed(k) >> pad) | (reversed(k + 1) << (64 - pad)),
+                    _ => reversed(k) >> pad,
+                })
+                .collect();
+            return Self::from_words(words, len);
+        }
+        let source = self.materialized_words();
+        let mut words = vec![0_u64; len.div_ceil(64)];
+        for (i, pos) in affine_positions(start, step, len).enumerate() {
+            words[i / 64] |= ((source[pos / 64] >> (pos % 64)) & 1) << (i % 64);
+        }
+        Self::from_words(words, len)
+    }
+
     /// Append another mask's bits to the end of this one.
     #[must_use]
     pub fn concat(&self, other: &Self) -> Self {
@@ -968,6 +1067,24 @@ impl Int64DenseCycleWitness {
         let tail = self.len % self.period;
         let count = full_cycles + usize::from(offset < tail);
         (count > 0).then_some((offset, count))
+    }
+}
+
+/// The buffer behind an all-valid int64, datetime or timedelta column, in
+/// either `Arc` shape those backings hold, for a [`ScalarValues::LazyStridedI64`]
+/// view to share (br-frankenpandas-e00f7).
+#[derive(Clone)]
+enum I64Buffer {
+    Shared(Arc<[i64]>),
+    Owned(Arc<Vec<i64>>),
+}
+
+impl I64Buffer {
+    fn as_slice(&self) -> &[i64] {
+        match self {
+            Self::Shared(data) => data,
+            Self::Owned(data) => data.as_slice(),
+        }
     }
 }
 
@@ -2902,6 +3019,21 @@ enum ScalarValues {
         kind: I64CellKind,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// Rows `data[start + i * step]` (`step` signed) of the buffer of an
+    /// all-valid int64, datetime or timedelta column, each cell as `kind`
+    /// reads it: `iloc[::-1]` / `iloc[::k]` share the buffer as numpy's
+    /// strided view does, where they gathered it (br-frankenpandas-e00f7).
+    /// The contiguous `expanded` copy is built once, when a consumer asks for
+    /// a slice.
+    LazyStridedI64 {
+        data: I64Buffer,
+        start: usize,
+        step: isize,
+        len: usize,
+        kind: I64CellKind,
+        expanded: OnceLock<Vec<i64>>,
+        values: OnceLock<Vec<Scalar>>,
+    },
     LazyAllValidInt64Chunks {
         chunks: Arc<[Int64Chunk]>,
         len: usize,
@@ -3145,11 +3277,16 @@ enum ScalarValues {
     /// `i in 0..len` and passing the result to [`Column::from_f64_values`].
     /// This keeps row filters that reuse one monotone position plan from
     /// copying each Float64 column until a consumer asks for contiguous data or
-    /// scalar values.
+    /// scalar values. `step` is signed: a negative one walks backwards from
+    /// `start`, which is how `iloc[::-1]` shares the buffer as numpy's
+    /// negative-stride view does (br-frankenpandas-e00f7). A view of a
+    /// NaN-as-missing column carries its NaN, the column its selected mask.
     LazyStridedFloat64 {
-        data: Arc<[f64]>,
+        /// Either all-valid buffer kind, so a `from_f64_values_owned` column
+        /// (`Arc<Vec<f64>>`) is shared as well as an `Arc<[f64]>` one.
+        data: Float64ChunkBuffer,
         start: usize,
-        step: usize,
+        step: isize,
         len: usize,
         expanded: OnceLock<Vec<f64>>,
         values: OnceLock<Vec<Scalar>>,
@@ -3233,6 +3370,16 @@ enum ScalarValues {
         len: usize,
         data: OnceLock<Vec<bool>>,
         affine_selection: OnceLock<Option<BoolAffineSelectionWitness>>,
+        values: OnceLock<Vec<Scalar>>,
+    },
+    /// Rows `data[start + i * step]` (`step` signed) of an all-valid Bool
+    /// buffer, as [`Self::LazyStridedI64`] (br-frankenpandas-e00f7).
+    LazyStridedBool {
+        data: Arc<[bool]>,
+        start: usize,
+        step: isize,
+        len: usize,
+        expanded: OnceLock<Vec<bool>>,
         values: OnceLock<Vec<Scalar>>,
     },
     /// Contiguous backing for all-valid Utf8 columns
@@ -3788,15 +3935,19 @@ impl ScalarValues {
         }
     }
 
-    fn lazy_strided_float64(data: Arc<[f64]>, start: usize, step: usize, len: usize) -> Self {
-        debug_assert!(step > 0);
-        if len > 0 {
-            debug_assert!(
-                start
-                    .checked_add(step.saturating_mul(len.saturating_sub(1)))
-                    .is_some_and(|last| last < data.len())
-            );
-        }
+    fn lazy_strided_float64(
+        data: Float64ChunkBuffer,
+        start: usize,
+        step: isize,
+        len: usize,
+    ) -> Self {
+        debug_assert!(step != 0);
+        debug_assert!(affine_positions_fit(
+            start,
+            step,
+            len,
+            data.as_slice().len()
+        ));
         Self::LazyStridedFloat64 {
             data,
             start,
@@ -3846,6 +3997,31 @@ impl ScalarValues {
             start,
             len,
             kind,
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_strided_i64(
+        data: I64Buffer,
+        start: usize,
+        step: isize,
+        len: usize,
+        kind: I64CellKind,
+    ) -> Self {
+        debug_assert!(step != 0);
+        debug_assert!(affine_positions_fit(
+            start,
+            step,
+            len,
+            data.as_slice().len()
+        ));
+        Self::LazyStridedI64 {
+            data,
+            start,
+            step,
+            len,
+            kind,
+            expanded: OnceLock::new(),
             values: OnceLock::new(),
         }
     }
@@ -4027,6 +4203,19 @@ impl ScalarValues {
         Self::LazyAllValidBool {
             data,
             affine_selection: OnceLock::new(),
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_strided_bool(data: Arc<[bool]>, start: usize, step: isize, len: usize) -> Self {
+        debug_assert!(step != 0);
+        debug_assert!(affine_positions_fit(start, step, len, data.len()));
+        Self::LazyStridedBool {
+            data,
+            start,
+            step,
+            len,
+            expanded: OnceLock::new(),
             values: OnceLock::new(),
         }
     }
@@ -5077,13 +5266,20 @@ impl ScalarValues {
         }
     }
 
-    fn expand_strided_float64(data: &[f64], start: usize, step: usize, len: usize) -> Vec<f64> {
-        let mut out = Vec::with_capacity(len);
-        for idx in 0..len {
-            let source_idx = start + idx * step;
-            out.push(data[source_idx]);
+    /// The rows of a strided view, contiguous.
+    fn expand_strided<T: Copy>(data: &[T], start: usize, step: isize, len: usize) -> Vec<T> {
+        match step {
+            _ if len == 0 => Vec::new(),
+            1 => data[start..start + len].to_vec(),
+            -1 => data[start + 1 - len..=start]
+                .iter()
+                .rev()
+                .copied()
+                .collect(),
+            _ => affine_positions(start, step, len)
+                .map(|position| data[position])
+                .collect(),
         }
-        out
     }
 
     fn strided_float64_data(&self) -> Option<&[f64]> {
@@ -5098,7 +5294,7 @@ impl ScalarValues {
         {
             return Some(
                 expanded
-                    .get_or_init(|| Self::expand_strided_float64(data, *start, *step, *len))
+                    .get_or_init(|| Self::expand_strided(data.as_slice(), *start, *step, *len))
                     .as_slice(),
             );
         }
@@ -5752,7 +5948,8 @@ impl ScalarValues {
         out
     }
 
-    /// The cells of a [`Self::LazyI64ArcWindow`] read as `kind`.
+    /// The cells of a [`Self::LazyI64ArcWindow`] or a
+    /// [`Self::LazyStridedI64`] (expanded once) read as `kind`.
     fn i64_arc_window_data(&self, kind: I64CellKind) -> Option<&[i64]> {
         match self {
             Self::LazyI64ArcWindow {
@@ -5762,6 +5959,19 @@ impl ScalarValues {
                 kind: own,
                 ..
             } if *own == kind => Some(&data[*start..*start + *len]),
+            Self::LazyStridedI64 {
+                data,
+                start,
+                step,
+                len,
+                kind: own,
+                expanded,
+                ..
+            } if *own == kind => Some(
+                expanded
+                    .get_or_init(|| Self::expand_strided(data.as_slice(), *start, *step, *len))
+                    .as_slice(),
+            ),
             _ => None,
         }
     }
@@ -5987,6 +6197,23 @@ impl ScalarValues {
                         .collect()
                 })
                 .as_slice(),
+            Self::LazyStridedI64 {
+                data,
+                start,
+                step,
+                len,
+                kind,
+                expanded,
+                values,
+            } => values
+                .get_or_init(|| {
+                    expanded
+                        .get_or_init(|| Self::expand_strided(data.as_slice(), *start, *step, *len))
+                        .iter()
+                        .map(|&value| kind.cell(value))
+                        .collect()
+                })
+                .as_slice(),
             Self::LazyAllValidFloat64Slice {
                 data,
                 start,
@@ -6092,7 +6319,7 @@ impl ScalarValues {
             } => values
                 .get_or_init(|| {
                     expanded
-                        .get_or_init(|| Self::expand_strided_float64(data, *start, *step, *len))
+                        .get_or_init(|| Self::expand_strided(data.as_slice(), *start, *step, *len))
                         .iter()
                         .copied()
                         .map(Scalar::Float64)
@@ -6162,6 +6389,23 @@ impl ScalarValues {
                     .copied()
                     .map(Scalar::Bool)
                     .collect()
+                })
+                .as_slice(),
+            Self::LazyStridedBool {
+                data,
+                start,
+                step,
+                len,
+                expanded,
+                values,
+            } => values
+                .get_or_init(|| {
+                    expanded
+                        .get_or_init(|| Self::expand_strided(data, *start, *step, *len))
+                        .iter()
+                        .copied()
+                        .map(Scalar::Bool)
+                        .collect()
                 })
                 .as_slice(),
             Self::LazyContiguousUtf8 {
@@ -6723,6 +6967,13 @@ impl ScalarValues {
             Self::LazyI64ArcWindow {
                 data, start, kind, ..
             } => kind.cell(data[start + idx]),
+            Self::LazyStridedI64 {
+                data,
+                start,
+                step,
+                kind,
+                ..
+            } => kind.cell(data.as_slice()[affine_position(*start, *step, idx)]),
             Self::LazyAllValidFloat64 { data, .. } => Scalar::Float64(data[idx]),
             Self::LazyAllValidFloat64Vec { data, .. } => Scalar::Float64(data[idx]),
             Self::LazyAllValidFloat64Slice { data, start, .. } => {
@@ -6771,11 +7022,11 @@ impl ScalarValues {
             Self::LazyAllValidFloat64PairwiseStatMatrixColumn { plan, .. } => plan.column_len(),
             Self::LazyAllValidFloat64TransposeRow { plan, .. } => plan.column_len(),
             Self::LazyCombineFirstFloat64 { len, .. } => *len,
-            Self::LazyStridedFloat64 { len, .. } => *len,
+            Self::LazyStridedFloat64 { len, .. } | Self::LazyStridedI64 { len, .. } => *len,
             Self::LazyGatherFloat64 { positions, .. } => positions.len(),
             Self::LazyNullableFloat64 { len, .. } => *len,
             Self::LazyAllValidBool { data, .. } => data.len(),
-            Self::LazyShiftedBool { len, .. } => *len,
+            Self::LazyShiftedBool { len, .. } | Self::LazyStridedBool { len, .. } => *len,
             Self::LazyContiguousUtf8 { offsets, .. } => offsets.len() - 1,
             Self::LazyLowerHexSequenceUtf8 { len, .. } => *len,
             Self::LazyNullableUtf8 { offsets, .. } => offsets.len() - 1,
@@ -6838,10 +7089,12 @@ impl ScalarValues {
             | Self::LazyAllValidFloat64TransposeRow { values, .. }
             | Self::LazyCombineFirstFloat64 { values, .. }
             | Self::LazyStridedFloat64 { values, .. }
+            | Self::LazyStridedI64 { values, .. }
             | Self::LazyGatherFloat64 { values, .. }
             | Self::LazyNullableFloat64 { values, .. }
             | Self::LazyAllValidBool { values, .. }
             | Self::LazyShiftedBool { values, .. }
+            | Self::LazyStridedBool { values, .. }
             | Self::LazyContiguousUtf8 { values, .. }
             | Self::LazyLowerHexSequenceUtf8 { values, .. }
             | Self::LazyNullableUtf8 { values, .. }
@@ -7202,7 +7455,15 @@ impl Clone for ScalarValues {
                 step,
                 len,
                 ..
-            } => Self::lazy_strided_float64(Arc::clone(data), *start, *step, *len),
+            } => Self::lazy_strided_float64(data.clone(), *start, *step, *len),
+            Self::LazyStridedI64 {
+                data,
+                start,
+                step,
+                len,
+                kind,
+                ..
+            } => Self::lazy_strided_i64(data.clone(), *start, *step, *len, *kind),
             Self::LazyGatherFloat64 {
                 data,
                 source_start,
@@ -7243,6 +7504,13 @@ impl Clone for ScalarValues {
                 len,
                 ..
             } => Self::lazy_shifted_bool(Arc::clone(source), *periods, *fill, *len),
+            Self::LazyStridedBool {
+                data,
+                start,
+                step,
+                len,
+                ..
+            } => Self::lazy_strided_bool(Arc::clone(data), *start, *step, *len),
             Self::LazyContiguousUtf8 { bytes, offsets, .. } => {
                 Self::lazy_contiguous_utf8_arc(Arc::clone(bytes), Arc::clone(offsets))
             }
@@ -15658,6 +15926,21 @@ impl Column {
                     .as_slice(),
                 );
             }
+            if let ScalarValues::LazyStridedBool {
+                data,
+                start,
+                step,
+                len,
+                expanded,
+                ..
+            } = &self.values
+            {
+                return Some(
+                    expanded
+                        .get_or_init(|| ScalarValues::expand_strided(data, *start, *step, *len))
+                        .as_slice(),
+                );
+            }
         }
         None
     }
@@ -15771,7 +16054,7 @@ impl Column {
                 };
             }
 
-            if let Some(column) = self.take_strided_all_valid_float64_positions(positions) {
+            if let Some(column) = self.take_strided_all_valid_positions(positions) {
                 return column;
             }
 
@@ -16960,16 +17243,17 @@ impl Column {
         start: usize,
         step: usize,
     ) -> Self {
-        if let Some(column) =
-            self.take_affine_all_valid_float64_positions(positions.len(), start, step)
-        {
+        if let Some(column) = isize::try_from(step).ok().and_then(|step| {
+            self.take_affine_positions_without_materialized_positions(start, step, positions.len())
+        }) {
             return column;
         }
         self.take_positions(positions)
     }
 
     /// Internal companion for callers that already proved a positional gather
-    /// is the arithmetic progression `start + i * step` for `i in 0..len`.
+    /// is the arithmetic progression `start + i * step` for `i in 0..len`
+    /// (`step` negative for a backwards one, as `iloc[::-1]`).
     ///
     /// Returns `None` when this column does not have a descriptor-only affine
     /// representation, letting callers fall back to [`Self::take_positions`].
@@ -16978,92 +17262,187 @@ impl Column {
     pub fn take_affine_positions_without_materialized_positions(
         &self,
         start: usize,
-        step: usize,
+        step: isize,
         len: usize,
     ) -> Option<Self> {
-        self.take_affine_all_valid_float64_positions(len, start, step)
+        if len < STRIDED_VIEW_MIN_LEN || step == 0 || self.categorical.is_some() {
+            return None;
+        }
+        // A NaN-as-missing float64 column holds NaN in exactly its missing
+        // rows, so the view reads them as a gather would; its mask is
+        // selected alongside.
+        let validity = if self.validity.all() {
+            ValidityMask::all_valid(len)
+        } else if self.dtype == DType::Float64 && self.values.nan_missing_exact() {
+            self.validity.strided(start, step, len)
+        } else {
+            return None;
+        };
+        let values =
+            if let Some((data, offset, source_step)) = self.all_valid_float64_affine_source() {
+                let (start, step) = compose_affine(start, step, offset, source_step)?;
+                if !affine_positions_fit(start, step, len, data.as_slice().len()) {
+                    return None;
+                }
+                ScalarValues::lazy_strided_float64(data, start, step, len)
+            } else if let Some((data, offset, source_step)) = self.all_valid_bool_affine_source() {
+                let (start, step) = compose_affine(start, step, offset, source_step)?;
+                if !affine_positions_fit(start, step, len, data.len()) {
+                    return None;
+                }
+                ScalarValues::lazy_strided_bool(data, start, step, len)
+            } else {
+                let (data, offset, source_step, kind) = self.all_valid_i64_affine_source()?;
+                let (start, step) = compose_affine(start, step, offset, source_step)?;
+                if !affine_positions_fit(start, step, len, data.as_slice().len()) {
+                    return None;
+                }
+                ScalarValues::lazy_strided_i64(data, start, step, len, kind)
+            };
+        Some(Self {
+            dtype: self.dtype.clone(),
+            values,
+            validity,
+            data: None,
+            categorical: None,
+            width: self.width,
+            pandas_string: false,
+        })
     }
 
-    fn take_affine_all_valid_float64_positions(
-        &self,
-        len: usize,
-        start: usize,
-        step: usize,
-    ) -> Option<Self> {
-        if self.dtype != DType::Float64
-            || !self.validity.all()
-            || len < STRIDED_FLOAT64_MIN_LEN
-            || step == 0
+    /// This all-valid Float64 column as rows `offset + i * step` of a shared
+    /// buffer: a whole buffer, a contiguous window of one, or a strided view
+    /// (whose selection then composes, so a reversed column reversed again
+    /// reads its source forwards).
+    fn all_valid_float64_affine_source(&self) -> Option<(Float64ChunkBuffer, usize, isize)> {
+        if self.dtype != DType::Float64 {
+            return None;
+        }
+        Some(match &self.values {
+            ScalarValues::LazyAllValidFloat64 { data, .. } => {
+                (Float64ChunkBuffer::Shared(Arc::clone(data)), 0, 1)
+            }
+            ScalarValues::LazyAllValidFloat64Vec { data, .. } => {
+                (Float64ChunkBuffer::Owned(Arc::clone(data)), 0, 1)
+            }
+            ScalarValues::LazyAllValidFloat64Slice { data, start, .. } => {
+                (Float64ChunkBuffer::Shared(Arc::clone(data)), *start, 1)
+            }
+            ScalarValues::LazyStridedFloat64 {
+                data, start, step, ..
+            } => (data.clone(), *start, *step),
+            _ => match &self.data {
+                Some(ColumnData::Float64(data)) => {
+                    (Float64ChunkBuffer::Shared(Arc::clone(data)), 0, 1)
+                }
+                _ => return None,
+            },
+        })
+    }
+
+    /// This all-valid int64, datetime or timedelta column as rows
+    /// `offset + i * step` of a shared buffer, and how its cells read: as
+    /// [`Self::all_valid_float64_affine_source`]. Eager Scalars beside a
+    /// typed cache (the `Column::new` shape) are those cells.
+    fn all_valid_i64_affine_source(&self) -> Option<(I64Buffer, usize, isize, I64CellKind)> {
+        let kind = match self.dtype {
+            DType::Int64 => I64CellKind::Int64,
+            DType::Datetime64 { .. } => I64CellKind::Datetime64,
+            DType::Timedelta64 => I64CellKind::Timedelta64,
+            _ => return None,
+        };
+        let (data, offset, step) = match (&self.values, kind) {
+            (ScalarValues::LazyAllValidInt64 { data, .. }, I64CellKind::Int64)
+            | (ScalarValues::LazyAllValidDatetime64 { data, .. }, I64CellKind::Datetime64) => {
+                (I64Buffer::Shared(Arc::clone(data)), 0, 1)
+            }
+            (ScalarValues::LazyAllValidInt64Vec { data, .. }, I64CellKind::Int64)
+            | (ScalarValues::LazyAllValidDatetime64Vec { data, .. }, I64CellKind::Datetime64)
+            | (ScalarValues::LazyAllValidTimedelta64Vec { data, .. }, I64CellKind::Timedelta64) => {
+                (I64Buffer::Owned(Arc::clone(data)), 0, 1)
+            }
+            (ScalarValues::LazyAllValidInt64Slice { data, start, .. }, I64CellKind::Int64) => {
+                (I64Buffer::Owned(Arc::clone(data)), *start, 1)
+            }
+            (
+                ScalarValues::LazyI64ArcWindow {
+                    data,
+                    start,
+                    kind: own,
+                    ..
+                },
+                _,
+            ) if *own == kind => (I64Buffer::Shared(Arc::clone(data)), *start, 1),
+            (
+                ScalarValues::LazyStridedI64 {
+                    data,
+                    start,
+                    step,
+                    kind: own,
+                    ..
+                },
+                _,
+            ) if *own == kind => (data.clone(), *start, *step),
+            (ScalarValues::Eager(_), _) => match (&self.data, kind) {
+                (Some(ColumnData::Int64(data)), I64CellKind::Int64)
+                | (Some(ColumnData::Datetime64(data)), I64CellKind::Datetime64)
+                | (Some(ColumnData::Timedelta64(data)), I64CellKind::Timedelta64)
+                    if data.len() == self.len() =>
+                {
+                    (I64Buffer::Shared(Arc::clone(data)), 0, 1)
+                }
+                _ => return None,
+            },
+            _ => return None,
+        };
+        Some((data, offset, step, kind))
+    }
+
+    /// This all-valid Bool column as rows `offset + i * step` of a shared
+    /// buffer, as [`Self::all_valid_float64_affine_source`].
+    fn all_valid_bool_affine_source(&self) -> Option<(Arc<[bool]>, usize, isize)> {
+        if let ScalarValues::LazyStridedBool {
+            data, start, step, ..
+        } = &self.values
+        {
+            return (self.dtype == DType::Bool && self.validity.all())
+                .then(|| (Arc::clone(data), *start, *step));
+        }
+        Some((self.bool_arc_view_source()?, 0, 1))
+    }
+
+    fn take_strided_all_valid_positions(&self, positions: &[usize]) -> Option<Self> {
+        if positions.len() < STRIDED_VIEW_MIN_LEN
+            || !matches!(
+                self.dtype,
+                DType::Float64
+                    | DType::Int64
+                    | DType::Bool
+                    | DType::Datetime64 { .. }
+                    | DType::Timedelta64
+            )
         {
             return None;
         }
-
-        let data = match &self.values {
-            ScalarValues::LazyAllValidFloat64 { data, .. } => Arc::clone(data),
-            _ => match &self.data {
-                Some(ColumnData::Float64(data)) => Arc::clone(data),
-                _ => return None,
-            },
-        };
-
-        let last = start.checked_add(step.checked_mul(len - 1)?)?;
-        if last >= data.len() {
-            return None;
-        }
-
-        Some(Self {
-            dtype: self.dtype.clone(),
-            values: ScalarValues::lazy_strided_float64(data, start, step, len),
-            validity: ValidityMask::all_valid(len),
-            data: None,
-            categorical: None,
-            width: None,
-            pandas_string: false,
-        })
+        let (start, step) = Self::bounded_arithmetic_progression_positions(positions, self.len())?;
+        self.take_affine_positions_without_materialized_positions(
+            start,
+            isize::try_from(step).ok()?,
+            positions.len(),
+        )
     }
 
-    fn take_strided_all_valid_float64_positions(&self, positions: &[usize]) -> Option<Self> {
-        if self.dtype != DType::Float64 || positions.len() < STRIDED_FLOAT64_MIN_LEN {
-            return None;
-        }
-
-        let data = match &self.values {
-            ScalarValues::LazyAllValidFloat64 { data, .. } => Arc::clone(data),
-            _ => match &self.data {
-                Some(ColumnData::Float64(data)) => Arc::clone(data),
-                _ => return None,
-            },
-        };
-
-        let (start, step) = Self::bounded_arithmetic_progression_positions(positions, data.len())?;
-
-        Some(Self {
-            dtype: self.dtype.clone(),
-            values: ScalarValues::lazy_strided_float64(data, start, step, positions.len()),
-            validity: ValidityMask::all_valid(positions.len()),
-            data: None,
-            categorical: None,
-            width: None,
-            pandas_string: false,
-        })
-    }
-
+    // A map + collect writes each value straight into the output; the push
+    // loop kept the length in memory and re-checked capacity per row
+    // (br-frankenpandas-e00f7: 46% of f.iloc[::-1].sum()).
     fn take_cached_all_valid_float64_positions(&self, positions: &[usize]) -> Option<Vec<f64>> {
         let data = self.as_f64_slice()?;
-        let mut values = Vec::with_capacity(positions.len());
-        for &pos in positions {
-            values.push(data[pos]);
-        }
-        Some(values)
+        Some(positions.iter().map(|&pos| data[pos]).collect())
     }
 
     fn take_cached_all_valid_int64_positions(&self, positions: &[usize]) -> Option<Vec<i64>> {
         let data = self.as_i64_slice()?;
-        let mut values = Vec::with_capacity(positions.len());
-        for &pos in positions {
-            values.push(data[pos]);
-        }
-        Some(values)
+        Some(positions.iter().map(|&pos| data[pos]).collect())
     }
 
     fn take_all_valid_primitive_positions(&self, positions: &[usize]) -> Option<Vec<Scalar>> {
@@ -35516,8 +35895,9 @@ mod tests {
 
     use super::{
         ArithmeticOp, BoolAffineSelectionWitness, Column, ColumnData, ColumnError, ComparisonOp,
-        ConstDivisorU64, ScalarValues, SparseColumn, ValidityMask, binary_f64_apply,
-        python_floor_div_i64, python_mod_i64, scalar_compare, wrapping_pow_all, wrapping_pow_i64,
+        ConstDivisorU64, ScalarValues, SparseColumn, ValidityMask, affine_positions,
+        affine_positions_fit, binary_f64_apply, python_floor_div_i64, python_mod_i64,
+        scalar_compare, wrapping_pow_all, wrapping_pow_i64,
     };
 
     #[test]
@@ -39999,6 +40379,173 @@ mod tests {
                 "** {exponent}"
             );
         }
+    }
+
+    #[test]
+    fn strided_validity_is_the_bit_gather_e00f7() {
+        // br-frankenpandas-e00f7: a backwards unit step reverses words and
+        // bits (shifting by the pad when the length is not a multiple of 64),
+        // any other step gathers bits - both must read bit start + i * step.
+        for len in [1_usize, 2, 63, 64, 65, 127, 128, 130, 1000] {
+            let mut packed = ValidityMask::all_valid(len);
+            for i in 0..len {
+                if i % 3 == 1 || i % 64 == 63 {
+                    packed.set(i, false);
+                }
+            }
+            let ranges = ValidityMask::from_invalid_ranges(
+                std::sync::Arc::from(vec![(len / 3, len / 4 + 1)]),
+                len,
+            );
+            let masks = [packed, ranges, ValidityMask::all_valid(len)];
+            let half = len / 2 + 1;
+            let cases = [
+                (len - 1, -1, len),
+                (len - 1, -1, half),
+                (half - 1, -1, half),
+                (len - 1, -3, len.div_ceil(3)),
+                (0, 2, len.div_ceil(2)),
+                (0, 1, len),
+                (len - 1, -1, 0),
+            ];
+            for mask in &masks {
+                for (start, step, n) in cases {
+                    assert!(affine_positions_fit(start, step, n, len));
+                    let got = mask.strided(start, step, n);
+                    assert_eq!(got.len(), n);
+                    let expected: Vec<bool> = affine_positions(start, step, n)
+                        .map(|p| mask.get(p))
+                        .collect();
+                    let read: Vec<bool> = (0..n).map(|i| got.get(i)).collect();
+                    assert_eq!(read, expected, "len {len} start {start} step {step} n {n}");
+                }
+            }
+        }
+        assert!(
+            !affine_positions_fit(5, -2, 4, 10),
+            "row 5 - 6 is before the first"
+        );
+        assert!(!affine_positions_fit(5, 2, 3, 9), "row 9 is past the last");
+        assert!(affine_positions_fit(5, 2, 3, 10));
+    }
+
+    #[test]
+    fn affine_takes_are_strided_views_of_the_gather_e00f7() {
+        // br-frankenpandas-e00f7: a stepped selection of an all-valid float64,
+        // NaN-as-missing float64, int64, datetime, timedelta or bool column is
+        // a strided view whose cells, mask and dtype are the gathered rows'
+        // (every selection here reaches the 1024 rows views start at).
+        let n = 4000_usize;
+        let floats: Vec<f64> = (0..n).map(|i| i as f64 * 0.25 - 7.0).collect();
+        let with_nan: Vec<f64> = floats
+            .iter()
+            .enumerate()
+            .map(|(i, v)| if i % 5 == 0 { f64::NAN } else { *v })
+            .collect();
+        let ints: Vec<i64> = (0..n as i64).map(|i| i * 3 - 999).collect();
+        let columns = [
+            ("f64 arc", Column::from_f64_values(floats.clone())),
+            ("f64 owned", Column::from_f64_values_owned(floats)),
+            ("f64 nan", Column::from_f64_values(with_nan)),
+            ("i64", Column::from_i64_values(ints.clone())),
+            ("i64 owned", Column::from_i64_values_owned(ints.clone())),
+            ("datetime", Column::from_datetime64_values(ints.clone())),
+            (
+                "timedelta",
+                Column::from_timedelta64_values_with_validity(ints, ValidityMask::all_valid(n)),
+            ),
+            (
+                "bool",
+                Column::from_bool_values((0..n).map(|i| i % 3 == 0).collect()),
+            ),
+        ];
+        for (name, column) in &columns {
+            for (start, step, len) in [
+                (n - 1, -1, n),
+                (n - 1, -2, n / 2),
+                (3999, -3, 1333),
+                (5, 2, 1997),
+            ] {
+                let view = column
+                    .take_affine_positions_without_materialized_positions(start, step, len)
+                    .unwrap_or_else(|| panic!("{name}: no view of {start} by {step}"));
+                assert!(
+                    matches!(
+                        view.values,
+                        ScalarValues::LazyStridedFloat64 { .. }
+                            | ScalarValues::LazyStridedI64 { .. }
+                            | ScalarValues::LazyStridedBool { .. }
+                    ),
+                    "{name}: a strided view"
+                );
+                let positions: Vec<usize> = affine_positions(start, step, len).collect();
+                let cells: Vec<Scalar> = positions
+                    .iter()
+                    .map(|&p| column.values()[p].clone())
+                    .collect();
+                let mask: Vec<bool> = positions
+                    .iter()
+                    .map(|&p| column.validity().get(p))
+                    .collect();
+                assert_eq!(view.dtype(), column.dtype(), "{name}");
+                assert_eq!(
+                    format!("{:?}", view.values()),
+                    format!("{cells:?}"),
+                    "{name} {start} by {step}"
+                );
+                assert_eq!(
+                    (0..len).map(|i| view.validity().get(i)).collect::<Vec<_>>(),
+                    mask,
+                    "{name} {start} by {step}"
+                );
+            }
+            // Reversed twice, a view reads its source forwards from row 0.
+            if let Some(back) = column
+                .take_affine_positions_without_materialized_positions(n - 1, -1, n)
+                .and_then(|rev| {
+                    rev.take_affine_positions_without_materialized_positions(n - 1, -1, n)
+                })
+            {
+                assert_eq!(
+                    format!("{:?}", back.values()),
+                    format!("{:?}", column.values())
+                );
+                match &back.values {
+                    ScalarValues::LazyStridedFloat64 { start, step, .. }
+                    | ScalarValues::LazyStridedI64 { start, step, .. }
+                    | ScalarValues::LazyStridedBool { start, step, .. } => {
+                        assert_eq!((*start, *step), (0, 1), "{name}");
+                    }
+                    _ => panic!("{name}: a reversed view reversed is a view"),
+                }
+            }
+        }
+        // NEGATIVE: no view where a gather must decide - text, an int64
+        // column holding a missing row, and a selection shorter than 1024.
+        let text = Column::from_values(
+            (0..n)
+                .map(|i| Scalar::Utf8(format!("r{i}")))
+                .collect::<Vec<_>>(),
+        )
+        .expect("utf8 column");
+        assert!(
+            text.take_affine_positions_without_materialized_positions(n - 1, -1, n)
+                .is_none()
+        );
+        let mut holes = ValidityMask::all_valid(n);
+        holes.set(7, false);
+        let nullable = Column::from_i64_values_with_validity((0..n as i64).collect(), holes);
+        assert!(
+            nullable
+                .take_affine_positions_without_materialized_positions(n - 1, -1, n)
+                .is_none()
+        );
+        let short = Column::from_f64_values((0..n).map(|i| i as f64).collect());
+        assert!(
+            short
+                .take_affine_positions_without_materialized_positions(99, -1, 100)
+                .is_none()
+        );
     }
 
     #[test]

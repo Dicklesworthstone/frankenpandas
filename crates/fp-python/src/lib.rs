@@ -53416,9 +53416,11 @@ fn series_loc_slice(series: &Series, slice: &Bound<'_, pyo3::types::PySlice>) ->
     let window = series
         .loc_slice(low.as_ref(), high.as_ref())
         .map_err(loc_key_error)?;
-    match loc_step_positions(window.len(), step) {
+    match loc_step_rows(window.len(), step) {
         None => Ok(window),
-        Some(positions) => window.iloc(&positions).map_err(frame_error_to_py),
+        Some((start, step, rows)) => window
+            .iloc_step(start, step, rows)
+            .map_err(frame_error_to_py),
     }
 }
 
@@ -53437,17 +53439,19 @@ fn slice_is_positional(slice: &Bound<'_, pyo3::types::PySlice>) -> PyResult<bool
 }
 
 /// Every `step`-th row of a `.loc` window of `len` rows, backwards for a
-/// negative step; None for the unit step (the window itself).
-fn loc_step_positions(len: usize, step: i64) -> Option<Vec<i64>> {
+/// negative step, as `iloc_step`'s `(start, step, rows)`; None for the unit
+/// step (the window itself).
+fn loc_step_rows(len: usize, step: i64) -> Option<(usize, isize, usize)> {
     if step == 1 {
         return None;
     }
     let stride = usize::try_from(step.unsigned_abs()).unwrap_or(usize::MAX);
-    Some(if step > 0 {
-        (0..len).step_by(stride).map(|p| p as i64).collect()
-    } else {
-        (0..len).rev().step_by(stride).map(|p| p as i64).collect()
-    })
+    let start = if step > 0 { 0 } else { len.saturating_sub(1) };
+    Some((
+        start,
+        isize::try_from(step).unwrap_or(isize::MIN),
+        len.div_ceil(stride),
+    ))
 }
 
 /// Resolve a `.loc` row indexer the way pandas does. ORDER MATTERS: a Python
@@ -53460,10 +53464,10 @@ fn resolve_loc_rows(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<LocRows>
         let window = df
             .loc_slice(low.as_ref(), high.as_ref())
             .map_err(loc_key_error)?;
-        return match loc_step_positions(window.len(), step) {
+        return match loc_step_rows(window.len(), step) {
             None => Ok(LocRows::frame(window)),
-            Some(positions) => window
-                .iloc(&positions)
+            Some((start, step, rows)) => window
+                .iloc_step(start, step, rows)
                 .map(LocRows::frame)
                 .map_err(frame_error_to_py),
         };
@@ -54020,18 +54024,42 @@ impl SliceRows {
         positions
     }
 
+    /// How many rows the slice reads (`len(range(start, stop, step))`).
+    fn len(self) -> usize {
+        let span = if self.step > 0 {
+            self.stop - self.start
+        } else {
+            self.start - self.stop
+        };
+        usize::try_from(span.max(0)).map_or(0, |span| {
+            span.div_ceil(usize::try_from(self.step.unsigned_abs()).unwrap_or(usize::MAX))
+        })
+    }
+
+    /// The stepped slice as `iloc_step`'s `(start, step, len)` (an empty
+    /// one from row 0: its `start` may lie outside the rows).
+    fn affine(self) -> Option<(usize, isize, usize)> {
+        let len = self.len();
+        let start = if len == 0 { 0 } else { self.start };
+        Some((
+            usize::try_from(start).ok()?,
+            isize::try_from(self.step).ok()?,
+            len,
+        ))
+    }
+
     /// These rows of `series`: a unit step is `iloc_slice`'s zero-copy
-    /// window, any other `iloc`'s gather. A RangeIndex stays one, sliced as
-    /// Python slices a range (`s.iloc[1::2].index` is `RangeIndex(1, 4, 2)`;
-    /// a strided slice came back as a plain Index).
+    /// window, any other `iloc_step`'s strided view. A RangeIndex stays one,
+    /// sliced as Python slices a range (`s.iloc[1::2].index` is
+    /// `RangeIndex(1, 4, 2)`; a strided slice came back as a plain Index).
     fn of_series(self, series: &Series) -> Result<Series, FrameError> {
         let span = series
             .index()
             .sliced_range_span(self.start, self.stop, self.step);
-        let out = if self.step == 1 {
-            series.iloc_slice(Some(self.start), Some(self.stop))
-        } else {
-            series.iloc(&self.positions())
+        let out = match self.affine() {
+            _ if self.step == 1 => series.iloc_slice(Some(self.start), Some(self.stop)),
+            Some((start, step, len)) => series.iloc_step(start, step, len),
+            None => series.iloc(&[]),
         }?;
         Ok(match span {
             Some(_) => out.with_range_span(span),
@@ -54044,10 +54072,10 @@ impl SliceRows {
         let span = frame
             .index()
             .sliced_range_span(self.start, self.stop, self.step);
-        let out = if self.step == 1 {
-            frame.iloc_slice(Some(self.start), Some(self.stop))
-        } else {
-            frame.iloc(&self.positions())
+        let out = match self.affine() {
+            _ if self.step == 1 => frame.iloc_slice(Some(self.start), Some(self.stop)),
+            Some((start, step, len)) => frame.iloc_step(start, step, len),
+            None => frame.iloc(&[]),
         }?;
         Ok(match span {
             Some(_) if out.row_multiindex().is_none() => out.with_range_span(span),
@@ -54587,11 +54615,10 @@ fn resolve_loc_columns(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<Optio
         } else {
             Vec::new()
         };
-        return Ok(Some(match loc_step_positions(window.len(), step) {
+        return Ok(Some(match loc_step_rows(window.len(), step) {
             None => window,
-            Some(positions) => positions
-                .into_iter()
-                .map(|p| window[p as usize].clone())
+            Some((start, step, rows)) => fp_columnar::affine_positions(start, step, rows)
+                .map(|p| window[p].clone())
                 .collect(),
         }));
     }
