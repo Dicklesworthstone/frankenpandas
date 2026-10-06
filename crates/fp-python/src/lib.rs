@@ -36599,6 +36599,46 @@ fn numpy_bytes(column: &Column, kind: &str) -> Vec<u8> {
     }
 }
 
+/// `column`'s typed buffer copied once into a fresh (writable) numpy array:
+/// an all-valid float64 / int64 column, or a NaN-as-missing float64 one,
+/// whose buffer holds the NaN numpy shows; None for any other. Its
+/// bytes went element by element into a Vec<u8> and then into a bytearray
+/// (to_numpy of a million floats 1.31 ms, pandas 0.09 - its view;
+/// br-frankenpandas-0nqnl).
+fn typed_ndarray<'py>(
+    np: &Bound<'py, PyModule>,
+    column: &Column,
+    kind: &str,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let py = np.py();
+    let fresh = |len: usize| np.call_method1("empty", (len, kind));
+    match kind {
+        "float64" => {
+            let data = column.as_f64_slice().or_else(|| {
+                column
+                    .nan_missing_exact()
+                    .then(|| column.as_f64_slice_with_validity().map(|(data, _)| data))
+                    .flatten()
+            });
+            let Some(data) = data else {
+                return Ok(None);
+            };
+            let array = fresh(data.len())?;
+            pyo3::buffer::PyBuffer::<f64>::get(&array)?.copy_from_slice(py, data)?;
+            Ok(Some(array))
+        }
+        "int64" => {
+            let Some(data) = column.as_i64_slice() else {
+                return Ok(None);
+            };
+            let array = fresh(data.len())?;
+            pyo3::buffer::PyBuffer::<i64>::get(&array)?.copy_from_slice(py, data)?;
+            Ok(Some(array))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// A 1-D numpy array of `column` as pandas' `.values` / `to_numpy()` give
 /// it: int64 / float64 (NaN for a gap) / bool / datetime64[ns] /
 /// timedelta64[ns] from one byte buffer, else an object array of the
@@ -36606,8 +36646,13 @@ fn numpy_bytes(column: &Column, kind: &str) -> Vec<u8> {
 fn column_ndarray<'py>(py: Python<'py>, column: &Column) -> PyResult<Bound<'py, PyAny>> {
     let np = py.import("numpy")?;
     if let Some(kind) = numpy_kind(column) {
-        let buffer = pyo3::types::PyByteArray::new(py, &numpy_bytes(column, kind));
-        let array = np.call_method1("frombuffer", (buffer, kind))?;
+        let array = match typed_ndarray(&np, column, kind)? {
+            Some(array) => array,
+            None => {
+                let buffer = pyo3::types::PyByteArray::new(py, &numpy_bytes(column, kind));
+                np.call_method1("frombuffer", (buffer, kind))?
+            }
+        };
         // A narrow numpy column's array is its own dtype (int32, float32;
         // fvsao.23): the values it holds are exactly that dtype's.
         if let Some(width) = column.width().filter(|_| !column.dtype().is_nullable()) {
@@ -78349,6 +78394,23 @@ fn to_timedelta(
             },
         )?
         .into_any());
+    }
+    // A tuple or a 1-d numpy array is the list of its values, as pandas
+    // takes either (both raised TypeError; br-frankenpandas-egi8t); an
+    // array of more dimensions is pandas' TypeError.
+    let ndarray = arg.get_type().name().is_ok_and(|name| name == "ndarray");
+    if ndarray && arg.getattr("ndim")?.extract::<usize>()? != 1 {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "arg must be a string, timedelta, list, tuple, 1-d array, or Series",
+        ));
+    }
+    if ndarray || arg.is_instance_of::<PyTuple>() {
+        let items = if ndarray {
+            arg.call_method0("tolist")?
+        } else {
+            PyList::new(py, arg.try_iter()?.collect::<PyResult<Vec<_>>>()?)?.into_any()
+        };
+        return to_timedelta(py, &items, unit, errors);
     }
     if let Ok(s) = py_to_scalar(py, arg) {
         let temp_series = Series::from_values("", vec![IndexLabel::Int64(0)], vec![s])

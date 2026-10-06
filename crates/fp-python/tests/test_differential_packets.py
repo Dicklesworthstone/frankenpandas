@@ -28224,3 +28224,75 @@ _1F8C6_CASES = {
 @pytest.mark.parametrize("case", list(_1F8C6_CASES))
 def test_diff_like_pandas_1f8c6(case: str) -> None:
     assert _1f8c6_shown(_1F8C6_CASES[case](fpd)) == _1f8c6_shown(_1F8C6_CASES[case](pd))
+
+
+# br-frankenpandas-egi8t: to_timedelta takes a tuple or a 1-d numpy array as the
+# list of its values (both raised TypeError); a 2-d array is pandas' TypeError.
+def _egi8t_shown(case: Any, m: Any) -> Any:
+    try:
+        out = case(m)
+    except Exception as e:  # noqa: BLE001 - the exception class is the result
+        return ["raise", type(e).__name__]
+    return [type(out).__name__, str(out.dtype), [str(v) for v in out]]
+
+
+_EGI8T_CASES = {
+    "tuple": lambda m: m.to_timedelta((1, 2), unit="s"),
+    "int array": lambda m: m.to_timedelta(np.array([1, 2]), unit="s"),
+    "int array ms": lambda m: m.to_timedelta(np.array([1500, 2]), unit="ms"),
+    "float array with nan": lambda m: m.to_timedelta(np.array([1.5, np.nan]), unit="h"),
+    "str array": lambda m: m.to_timedelta(np.array(["1 day", "2h"])),
+    "object array with None": lambda m: m.to_timedelta(np.array(["1 day", None], dtype=object)),
+    "timedelta64[ns] array": lambda m: m.to_timedelta(np.array([1, 2], dtype="timedelta64[ns]")),
+    "empty float array": lambda m: m.to_timedelta(np.array([], dtype=float), unit="s"),
+    "NEGATIVE 2-d array raises": lambda m: m.to_timedelta(np.array([[1, 2]]), unit="s"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EGI8T_CASES))
+def test_to_timedelta_of_arrays_like_pandas_egi8t(case: str) -> None:
+    assert _egi8t_shown(_EGI8T_CASES[case], fpd) == _egi8t_shown(_EGI8T_CASES[case], pd)
+
+
+# br-frankenpandas-0nqnl: a typed column's array is one copy of its buffer (an
+# all-valid float64 / int64 column, a NaN-holding float64 one) - the same
+# dtype, values and writable array pandas gives.
+def _0nqnl_shown(array: Any) -> Any:
+    return [type(array).__name__, str(array.dtype), [repr(v) for v in array], array.flags.writeable]
+
+
+def _0nqnl_columns() -> Any:
+    k = np.arange(1200)
+    x = np.cos(k * 0.11) * 3
+    return {
+        "float": x,
+        "nan": np.where(k % 6 == 1, np.nan, x),
+        "all nan": np.full(1200, np.nan),
+        "signed zero / inf": np.where(k % 2 == 0, -0.0, np.inf),
+        "int": k * 7 - 99,
+        "int32": (k * 3).astype("int32"),
+        "float32": x.astype("float32"),
+        "bool": k % 3 == 0,
+        "int with None": [None if v % 4 == 0 else int(v) for v in k],
+    }
+
+
+_0NQNL_CASES = [(name, how) for name in _0nqnl_columns() for how in ("to_numpy", "values", "asarray", "empty")]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _0NQNL_CASES, ids=lambda case: f"{case[0]}-{case[1]}")
+def test_typed_arrays_like_pandas_0nqnl(case: Any) -> None:
+    name, how = case
+
+    def array_of(m: Any) -> Any:
+        values = _0nqnl_columns()[name]
+        s = m.Series(values[:0] if how == "empty" else values)
+        if how == "values":
+            return s.values
+        if how == "asarray":
+            return np.asarray(s)
+        return s.to_numpy()
+
+    assert _0nqnl_shown(array_of(fpd)) == _0nqnl_shown(array_of(pd))
