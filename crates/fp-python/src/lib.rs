@@ -6886,6 +6886,18 @@ fn mixed_zone_flags(data: &Bound<'_, PyAny>) -> PyResult<Option<Vec<bool>>> {
     Ok((zones.len() >= 2).then_some(aware))
 }
 
+/// Whether `item` is a datetime in a zone: a Timestamp or a
+/// `datetime.datetime` with one.
+fn is_aware_datetime(item: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if let Ok(ts) = item.extract::<PyRef<'_, PyTimestamp>>() {
+        return Ok(!ts.inner.is_nat() && ts.inner.tz.is_some());
+    }
+    match item.cast::<PyDateTime>() {
+        Ok(dt) => Ok(py_datetime_zone(dt)?.is_some()),
+        Err(_) => Ok(false),
+    }
+}
+
 /// `series` with the zone its source list carried (see [`sequence_zone`]):
 /// a naive datetime column's instants shown in it.
 fn with_sequence_zone(series: Series, data: Option<&Bound<'_, PyAny>>) -> PyResult<Series> {
@@ -7751,7 +7763,8 @@ fn object_instants(py: Python<'_>, series: &Series) -> PyResult<Series> {
     .map_err(frame_error_to_py)
 }
 
-/// `frame` with each column of dates as their instants ([`object_instants`]).
+/// `frame` with each column of dates as their instants, as `to_json` reads
+/// them ([`json_instants`]).
 fn frame_object_instants(py: Python<'_>, frame: &DataFrame) -> PyResult<DataFrame> {
     let mut out = frame.clone();
     for position in 0..frame.shape().1 {
@@ -7763,12 +7776,199 @@ fn frame_object_instants(py: Python<'_>, frame: &DataFrame) -> PyResult<DataFram
         }
         let series =
             Series::new("", frame.index().clone(), column.clone()).map_err(frame_error_to_py)?;
-        let instants = object_instants(py, &series)?;
+        let instants = json_instants(py, &series)?;
         out = out
             .isetitem(position, instants.column().clone())
             .map_err(frame_error_to_py)?;
     }
     Ok(out)
+}
+
+/// [`object_instants`] as `to_json` reads a column: one of zoned datetimes
+/// ([`zoned_cells`]) is their instants, which pandas writes as epoch
+/// milliseconds - in UTC, ISO text ending "Z", when none is naive (each
+/// Timestamp's own text was written; br-frankenpandas-an1xe).
+fn json_instants(py: Python<'_>, series: &Series) -> PyResult<Series> {
+    let Some(cells) = zoned_cells(py, series.column())? else {
+        return object_instants(py, series);
+    };
+    let column = if cells.iter().any(|cell| matches!(cell, ZonedCell::Naive(_))) {
+        Column::from_object_values(
+            cells
+                .iter()
+                .map(|cell| match cell {
+                    ZonedCell::Aware(nanos, _) | ZonedCell::Naive(nanos) => {
+                        Scalar::Datetime64(*nanos)
+                    }
+                    ZonedCell::Missing => Scalar::Null(NullKind::NaT),
+                })
+                .collect(),
+        )
+    } else {
+        zoned_to_datetime(&cells, true, false)?
+    };
+    Series::new(series.name(), series.index().clone(), column).map_err(frame_error_to_py)
+}
+
+/// A present cell of an object column of datetimes ([`zoned_cells`]): an
+/// aware one's UTC nanoseconds and zone, a naive one's wall clock.
+enum ZonedCell {
+    Missing,
+    Aware(i64, String),
+    Naive(i64),
+}
+
+/// The cells of an object column of datetimes holding at least one aware
+/// one - Timestamps each in its zone, as astype(object), a concat of pieces
+/// in different zones and a list of zoned Timestamps hold them. None for
+/// any other column (a present cell that is no datetime, or no aware one).
+/// to_datetime, astype, to_json and isin read such a column through it
+/// (they gave NaT, raised, wrote each Timestamp's text and matched nothing;
+/// br-frankenpandas-an1xe).
+fn zoned_cells(py: Python<'_>, column: &Column) -> PyResult<Option<Vec<ZonedCell>>> {
+    if !column.holds_non_text() {
+        return Ok(None);
+    }
+    let mut cells = Vec::with_capacity(column.len());
+    for value in column.values() {
+        let cell = match value {
+            missing if missing.is_missing() => ZonedCell::Missing,
+            Scalar::Datetime64(nanos) => ZonedCell::Naive(*nanos),
+            Scalar::Object(fp_types::ObjectValue::Host(_)) => {
+                let object = scalar_to_py(py, value)?;
+                match zoned_cell(py, object.bind(py))? {
+                    Some(cell) => cell,
+                    None => return Ok(None),
+                }
+            }
+            _ => return Ok(None),
+        };
+        cells.push(cell);
+    }
+    Ok(cells
+        .iter()
+        .any(|cell| matches!(cell, ZonedCell::Aware(..)))
+        .then_some(cells))
+}
+
+/// A Timestamp, `datetime.datetime` or NaT as a [`ZonedCell`]; None for any
+/// other object.
+fn zoned_cell(py: Python<'_>, object: &Bound<'_, PyAny>) -> PyResult<Option<ZonedCell>> {
+    if object.is_instance_of::<PyNaTType>() {
+        return Ok(Some(ZonedCell::Missing));
+    }
+    let stamp = if object.is_instance_of::<PyTimestamp>() {
+        object.clone()
+    } else if object.cast::<PyDateTime>().is_ok() {
+        py.get_type::<PyTimestamp>().call1((object,))?
+    } else {
+        return Ok(None);
+    };
+    let stamp = stamp.extract::<PyRef<'_, PyTimestamp>>()?;
+    Ok(Some(match &stamp.inner.tz {
+        _ if stamp.inner.nanos == Timestamp::NAT => ZonedCell::Missing,
+        Some(zone) => ZonedCell::Aware(stamp.inner.nanos, zone.clone()),
+        None => ZonedCell::Naive(stamp.inner.nanos),
+    }))
+}
+
+/// pandas' `to_datetime` of [`zoned_cells`]: utc=True each instant in UTC (a
+/// naive cell's wall clock read as UTC); otherwise the first present cell
+/// decides - aware in a zone, a column in that zone; naive, a naive one -
+/// and a cell in another zone or of the other kind is pandas' ValueError,
+/// NaT under errors='coerce'.
+fn zoned_to_datetime(cells: &[ZonedCell], utc: bool, coerce: bool) -> PyResult<Column> {
+    let zone = if utc {
+        Some("UTC")
+    } else {
+        match cells
+            .iter()
+            .find(|cell| !matches!(cell, ZonedCell::Missing))
+        {
+            Some(ZonedCell::Aware(_, zone)) => Some(zone.as_str()),
+            _ => None,
+        }
+    };
+    let mut values = Vec::with_capacity(cells.len());
+    for (position, cell) in cells.iter().enumerate() {
+        let nanos = match cell {
+            ZonedCell::Missing => None,
+            ZonedCell::Naive(nanos) if utc || zone.is_none() => Some(*nanos),
+            ZonedCell::Aware(nanos, own) if utc || zone == Some(own.as_str()) => Some(*nanos),
+            _ if coerce => None,
+            ZonedCell::Naive(_) => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Cannot mix tz-aware with tz-naive values, at position {position}"
+                )));
+            }
+            ZonedCell::Aware(..) => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Tz-aware datetime.datetime cannot be converted to datetime64 unless \
+                     utc=True, at position {position}"
+                )));
+            }
+        };
+        values.push(nanos.map_or(Scalar::Null(NullKind::NaT), Scalar::Datetime64));
+    }
+    let dtype = zone.map_or_else(DType::datetime64_naive, DType::datetime64_tz);
+    Column::new(dtype, values).map_err(column_error_to_py)
+}
+
+/// pandas' `astype` of [`zoned_cells`] to a datetime dtype: to one in a
+/// zone, each aware instant in it and each naive wall clock localized to it;
+/// to a naive one, pandas' ValueError. None when `column` holds no zoned
+/// datetimes or `target` is no datetime dtype (the cast raised "cannot cast
+/// scalar of dtype Utf8"; br-frankenpandas-an1xe).
+fn zoned_astype(column: &Column, target: &DType) -> PyResult<Option<Column>> {
+    if !target.is_datetime() {
+        return Ok(None);
+    }
+    let Some(cells) = Python::attach(|py| zoned_cells(py, column))? else {
+        return Ok(None);
+    };
+    let Some(zone) = target.timezone() else {
+        let one_zone = cells
+            .iter()
+            .filter_map(|cell| match cell {
+                ZonedCell::Aware(_, zone) => Some(Some(zone)),
+                ZonedCell::Naive(_) => Some(None),
+                ZonedCell::Missing => None,
+            })
+            .collect::<Vec<_>>()
+            .windows(2)
+            .all(|pair| pair[0] == pair[1]);
+        if one_zone {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "cannot supply both a tz and a timezone-naive dtype (i.e. {})",
+                pandas_dtype_name(target)
+            )));
+        }
+        return zoned_to_datetime(&cells, false, false).map(Some);
+    };
+    // The naive wall clocks localized to the zone, as tz_localize does.
+    let walls = cells
+        .iter()
+        .map(|cell| match cell {
+            ZonedCell::Naive(nanos) => Scalar::Datetime64(*nanos),
+            _ => Scalar::Null(NullKind::NaT),
+        })
+        .collect::<Vec<_>>();
+    let walls = Column::new(DType::datetime64_naive(), walls).map_err(column_error_to_py)?;
+    let localized = Series::new("", Index::default_range(cells.len()), walls)
+        .and_then(|walls| walls.dt().tz_localize(Some(zone)))
+        .map_err(frame_error_to_py)?;
+    let values = cells
+        .iter()
+        .zip(localized.column().values())
+        .map(|(cell, local)| match cell {
+            ZonedCell::Aware(nanos, _) => Scalar::Datetime64(*nanos),
+            ZonedCell::Naive(_) => local.clone(),
+            ZonedCell::Missing => Scalar::Null(NullKind::NaT),
+        })
+        .collect::<Vec<_>>();
+    Column::new(DType::datetime64_tz(zone), values)
+        .map(Some)
+        .map_err(column_error_to_py)
 }
 
 /// pandas' TypeError for a group key column holding an unhashable cell (a
@@ -28862,9 +29062,20 @@ impl PySeries {
                     && (data.is_instance_of::<PyList>() || data.is_instance_of::<PyTuple>()))
                     || (is_nullable_integer_dtype_arg(dtype) && int_list_with_missing(data)?) =>
             {
+                let object = is_object_dtype_arg(dtype);
                 Some(
                     data.try_iter()?
-                        .map(|value| value.and_then(|value| py_to_cell(py, &value)))
+                        .map(|value| {
+                            let value = value?;
+                            // An aware datetime keeps its zone, a host object
+                            // (it became the naive UTC wall clock; an1xe).
+                            if object && is_aware_datetime(&value)? {
+                                return Ok(Scalar::Object(fp_types::ObjectValue::Host(
+                                    fp_types::HostValue::new(PyHost(value.unbind())),
+                                )));
+                            }
+                            py_to_cell(py, &value)
+                        })
                         .collect::<PyResult<Vec<_>>>()?,
                 )
             }
@@ -31772,6 +31983,25 @@ impl PySeries {
         if let Some(inner) = string_dtype_series(&self.inner, &spec)? {
             return Ok(PySeries { inner });
         }
+        // An object column of zoned datetimes to a datetime dtype (an1xe).
+        if self.inner.column().holds_non_text()
+            && let Ok(target) = py_dtype_arg(&spec)
+        {
+            match zoned_astype(self.inner.column(), &target) {
+                Ok(Some(column)) => {
+                    return Series::new(self.inner.name(), self.inner.index().clone(), column)
+                        .map(|inner| PySeries { inner })
+                        .map_err(frame_error_to_py);
+                }
+                Ok(None) => {}
+                Err(_) if errors == "ignore" => {
+                    return Ok(PySeries {
+                        inner: self.inner.clone(),
+                    });
+                }
+                Err(err) => return Err(err),
+            }
+        }
         // astype(str) of a `string` Series spells its missing value '<NA>'
         // (fvsao.59; it gave 'None').
         if self.inner.column().is_pandas_string()
@@ -31957,12 +32187,40 @@ impl PySeries {
 
     fn isin(&self, py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         // A date needle is an object cell (it raised; fvsao.67).
-        let scalars = isin_values(values)?
+        let needles = isin_values(values)?;
+        let scalars = needles
             .iter()
             .map(|item| py_to_cell(py, item))
             .collect::<PyResult<Vec<_>>>()?;
         let res = self.inner.isin(&scalars).map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        // A column of zoned datetimes matches a datetime needle by instant,
+        // aware with aware and naive with naive, as Timestamps compare (an
+        // aware needle matched no cell; br-frankenpandas-an1xe).
+        let Some(cells) = zoned_cells(py, self.inner.column())? else {
+            return Ok(PySeries { inner: res });
+        };
+        let mut wanted = HashSet::new();
+        for needle in &needles {
+            match zoned_cell(py, needle)? {
+                Some(ZonedCell::Aware(nanos, _)) => wanted.insert((true, nanos)),
+                Some(ZonedCell::Naive(nanos)) => wanted.insert((false, nanos)),
+                _ => false,
+            };
+        }
+        let flags = res
+            .values()
+            .iter()
+            .zip(&cells)
+            .map(|(found, cell)| match cell {
+                ZonedCell::Missing => found.clone(),
+                ZonedCell::Aware(nanos, _) => Scalar::Bool(wanted.contains(&(true, *nanos))),
+                ZonedCell::Naive(nanos) => Scalar::Bool(wanted.contains(&(false, *nanos))),
+            })
+            .collect();
+        let column = Column::new(DType::Bool, flags).map_err(column_error_to_py)?;
+        let inner =
+            Series::new(res.name(), res.index().clone(), column).map_err(frame_error_to_py)?;
+        Ok(PySeries { inner })
     }
 
     #[pyo3(signature = (left, right, inclusive="both"))]
@@ -35305,7 +35563,7 @@ impl PySeries {
                 }
                 // A column of dates writes as their instants (fvsao.67), in
                 // date_format / date_unit.
-                let series = Python::attach(|py| object_instants(py, &self.inner))?;
+                let series = Python::attach(|py| json_instants(py, &self.inner))?;
                 let frame = series
                     .to_frame(Some("__value__"))
                     .map_err(frame_error_to_py)?;
@@ -40654,9 +40912,7 @@ impl PyDataFrame {
         // (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.22).
         let inner = match dtype.filter(|dtype| !dtype.is_none()) {
             None => built,
-            Some(dtype) if is_object_dtype_arg(dtype) => {
-                object_frame(&built, None).map_err(frame_error_to_py)?
-            }
+            Some(dtype) if is_object_dtype_arg(dtype) => object_frame(&built, None)?,
             // dtype='string': every column pandas' `string` dtype (fvsao.59).
             Some(dtype) if is_string_dtype_arg(dtype) => {
                 let mut frame = built;
@@ -44073,7 +44329,27 @@ impl PyDataFrame {
             let Some(column) = self.inner.column(name) else {
                 continue;
             };
-            match pandas_astype_int_source(column, spec) {
+            // An object column of zoned datetimes to a datetime dtype (an1xe);
+            // a dict's cast names the column it failed on, as pandas'.
+            let converted = match py_dtype_arg(spec) {
+                Ok(target) if column.holds_non_text() => {
+                    zoned_astype(column, &target).map_err(|err| {
+                        if dtype.cast::<PyDict>().is_err() {
+                            return err;
+                        }
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "{}: Error while type casting for column '{name}'",
+                            err.value(dtype.py())
+                        ))
+                    })
+                }
+                _ => Ok(None),
+            }
+            .and_then(|zoned| match zoned {
+                Some(column) => Ok(Some(column)),
+                None => pandas_astype_int_source(column, spec),
+            });
+            match converted {
                 Ok(Some(column)) => {
                     let frame = read.take().unwrap_or_else(|| self.inner.clone());
                     read = Some(
@@ -44124,16 +44400,17 @@ impl PyDataFrame {
                 .iter()
                 .map(|(column, dt)| (column.as_str(), dt.clone()))
                 .collect();
-            widths.iter().fold(
-                source
-                    .astype_columns(&pairs)
-                    .and_then(|frame| object_frame(&frame, Some(&objects))),
-                |frame, (column, width, nullable)| {
+            let cast = match source.astype_columns(&pairs) {
+                Ok(frame) => Ok(object_frame(&frame, Some(&objects))?),
+                failed => failed,
+            };
+            widths
+                .iter()
+                .fold(cast, |frame, (column, width, nullable)| {
                     frame.and_then(|frame| frame.astype_column_width(column, *width, *nullable))
-                },
-            )
+                })
         } else if is_object_dtype_arg(dtype) {
-            object_frame(&self.inner, None)
+            Ok(object_frame(&self.inner, None)?)
         } else if is_string_dtype_arg(dtype) {
             strings = self.inner.column_names().into_iter().cloned().collect();
             Ok(self.inner.clone())
@@ -71614,6 +71891,7 @@ fn concat(
         Err(_) => objs.try_iter()?.collect::<PyResult<_>>()?,
     };
     let result = concat_kept_dtypes(&pieces, result.bind(py))?;
+    let result = concat_mixed_zones(&pieces, &result)?;
     concat_kept_categories(&pieces, &result).map(Bound::unbind)
 }
 
@@ -71663,6 +71941,97 @@ fn concat_kept_categories<'py>(
         return PyDataFrame { inner }.into_bound_py_any(py);
     }
     Ok(result.clone())
+}
+
+/// A datetime column stacked from pieces in different zones, or naive
+/// beside aware, as pandas' concat makes it: object, each row its piece's
+/// cell (a zoned instant a Timestamp in its zone, a naive one as it is), a
+/// row of a piece lacking the column NaN. fp-frame's concat made such a
+/// column one naive column of UTC wall times - a wrong value
+/// (br-frankenpandas-an1xe). Any other result as it is.
+fn concat_mixed_zones<'py>(
+    pieces: &[Bound<'py, PyAny>],
+    result: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let mixed = |columns: &[Option<&Column>]| {
+        let dtypes: Vec<DType> = columns
+            .iter()
+            .flatten()
+            .map(|column| column.dtype())
+            .collect();
+        dtypes.iter().all(DType::is_datetime)
+            && dtypes.iter().any(|dtype| dtype.timezone().is_some())
+            && dtypes.windows(2).any(|pair| pair[0] != pair[1])
+    };
+    let stacked = |columns: &[Option<&Column>], lengths: &[usize]| -> PyResult<Column> {
+        let mut cells = Vec::with_capacity(lengths.iter().sum());
+        for (column, &len) in columns.iter().zip(lengths) {
+            match column {
+                Some(column) => cells.extend(object_cells(column)?),
+                None => cells.extend(std::iter::repeat_n(Scalar::Null(NullKind::NaN), len)),
+            }
+        }
+        Ok(Column::from_object_values(cells))
+    };
+    let py = result.py();
+    if let Ok(series) = result.extract::<PyRef<'_, PySeries>>() {
+        let Some(parts) = pieces
+            .iter()
+            .map(|piece| piece.extract::<PyRef<'_, PySeries>>().ok())
+            .collect::<Option<Vec<_>>>()
+        else {
+            return Ok(result.clone());
+        };
+        let columns: Vec<Option<&Column>> =
+            parts.iter().map(|part| Some(part.inner.column())).collect();
+        let lengths: Vec<usize> = parts.iter().map(|part| part.inner.len()).collect();
+        if !mixed(&columns) || lengths.iter().sum::<usize>() != series.inner.len() {
+            return Ok(result.clone());
+        }
+        let inner = Series::new(
+            series.inner.name(),
+            series.inner.index().clone(),
+            stacked(&columns, &lengths)?,
+        )
+        .map_err(frame_error_to_py)?;
+        return PySeries { inner }.into_bound_py_any(py);
+    }
+    let Ok(frame) = result.extract::<PyRef<'_, PyDataFrame>>() else {
+        return Ok(result.clone());
+    };
+    let Some(parts) = pieces
+        .iter()
+        .map(|piece| piece.extract::<PyRef<'_, PyDataFrame>>().ok())
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Ok(result.clone());
+    };
+    let lengths: Vec<usize> = parts.iter().map(|part| part.inner.len()).collect();
+    // Repeated column keys name several columns: left as they are.
+    if !result
+        .getattr("columns")?
+        .getattr("is_unique")?
+        .is_truthy()?
+        || lengths.iter().sum::<usize>() != frame.inner.len()
+    {
+        return Ok(result.clone());
+    }
+    let mut out: Option<DataFrame> = None;
+    for name in frame.inner.column_names() {
+        let columns: Vec<Option<&Column>> =
+            parts.iter().map(|part| part.inner.column(name)).collect();
+        if mixed(&columns) {
+            let base = out.take().unwrap_or_else(|| frame.inner.clone());
+            out = Some(
+                base.with_column(name.clone(), stacked(&columns, &lengths)?)
+                    .map_err(frame_error_to_py)?,
+            );
+        }
+    }
+    match out {
+        Some(inner) => PyDataFrame { inner }.into_bound_py_any(py),
+        None => Ok(result.clone()),
+    }
 }
 
 /// The dtypes pandas' concat keeps stacking `pieces`, set on `result` (they
@@ -72166,9 +72535,33 @@ fn is_object_dtype_arg(obj: &Bound<'_, PyAny>) -> bool {
     name.is_some_and(|name| matches!(name.as_str(), "object" | "O" | "|O" | "object_"))
 }
 
+/// `column`'s cells as pandas' object column holds them: a tz-aware instant
+/// a Timestamp in its zone (a bare `Scalar::Datetime64` carries none, so
+/// astype(object) and a concat of pieces in different zones read back the
+/// naive UTC wall clock; br-frankenpandas-an1xe), any other cell as it is.
+fn object_cells(column: &Column) -> PyResult<Vec<Scalar>> {
+    if column.timezone().is_none() {
+        return Ok(column.values().to_vec());
+    }
+    Python::attach(|py| {
+        column
+            .values()
+            .iter()
+            .map(|cell| {
+                if cell.is_missing() {
+                    return Ok(cell.clone());
+                }
+                Ok(Scalar::Object(fp_types::ObjectValue::Host(
+                    fp_types::HostValue::new(PyHost(cell_to_py(py, column, cell)?)),
+                )))
+            })
+            .collect()
+    })
+}
+
 /// `series` as a pandas object column: the same values, as they are.
 fn object_series(series: &Series) -> PyResult<Series> {
-    let mut values = series.column().values().to_vec();
+    let mut values = object_cells(series.column())?;
     // A `string` Series' missing value stays pd.NA as the object (pandas'
     // astype(object) of one holds NAType; fvsao.59), as a masked Int64 /
     // Float64 / boolean one's does (it became None; br-frankenpandas-15crl).
@@ -72199,7 +72592,7 @@ fn object_series(series: &Series) -> PyResult<Series> {
 
 /// `frame` with the columns named in `only` (every column when None) as
 /// pandas object columns holding the same values.
-fn object_frame(frame: &DataFrame, only: Option<&[String]>) -> Result<DataFrame, FrameError> {
+fn object_frame(frame: &DataFrame, only: Option<&[String]>) -> PyResult<DataFrame> {
     let mut out = frame.clone();
     for position in 0..frame.shape().1 {
         let wanted = only.is_none_or(|only| {
@@ -72208,10 +72601,9 @@ fn object_frame(frame: &DataFrame, only: Option<&[String]>) -> Result<DataFrame,
                 .is_some_and(|name| only.contains(&name))
         });
         if let (true, Some(column)) = (wanted, frame.column_at(position)) {
-            out = out.isetitem(
-                position,
-                Column::from_object_values(column.values().to_vec()),
-            )?;
+            out = out
+                .isetitem(position, Column::from_object_values(object_cells(column)?))
+                .map_err(frame_error_to_py)?;
         }
     }
     Ok(out)
@@ -76161,6 +76553,7 @@ fn to_datetime(
             )));
         }
     };
+    let coerce = matches!(errors, fp_frame::DatetimeErrors::Coerce);
     let opts = fp_frame::ToDatetimeOptions {
         format,
         unit,
@@ -76195,6 +76588,13 @@ fn to_datetime(
         return Ok(py.None());
     }
     if let Ok(s) = arg.extract::<PyRef<'_, PySeries>>() {
+        // A column of zoned datetimes is their instants (it became NaT).
+        if let Some(cells) = zoned_cells(py, s.inner.column())? {
+            let column = zoned_to_datetime(&cells, utc, coerce)?;
+            let inner = Series::new(s.inner.name(), s.inner.index().clone(), column)
+                .map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner })?.into_any());
+        }
         // A column of dates (s.dt.date) is its midnights (it became NaT).
         let series = object_instants(py, &s.inner)?;
         warn_order(series.values())?;

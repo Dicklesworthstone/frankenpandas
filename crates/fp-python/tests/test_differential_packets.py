@@ -27170,3 +27170,79 @@ def test_read_csv_keeps_blank_lines_like_pandas_owfgz(case: str) -> None:
         return ([str(dtype) for dtype in frame.dtypes], repr(frame.values.tolist()), list(frame.columns))
 
     assert shown(fpd) == shown(pd)
+
+
+# concat keeps a column's zone (gaps, inner, keys, Series too); pieces in
+# different zones, or naive beside aware, stack to object Timestamps each in
+# its zone; and to_datetime, astype, to_json and isin read an object column
+# of zoned Timestamps by its instants (br-frankenpandas-an1xe).
+def _an1xe_parts(m: Any) -> dict:
+    def stamps(values: list, zone: Any = "UTC") -> Any:
+        out = m.to_datetime(values)
+        return out.tz_localize(zone) if zone else out
+
+    many = [f"2024-01-{i % 28 + 1:02d}" if i % 7 else None for i in range(150)]
+    return {
+        "a": m.DataFrame({"d": stamps(["2024-01-01", None, "2024-01-03"]), "x": [1.5, float("nan"), 3.0]}),
+        "b": m.DataFrame({"d": stamps(["2024-02-01", "2024-02-02"]), "x": [float("nan"), 5.0]}),
+        "c": m.DataFrame({"x": [7.0, 8.0]}),
+        "e": m.DataFrame({"d": stamps(["2024-03-01"], "US/Eastern"), "x": [9.0]}),
+        "n": m.DataFrame({"d": stamps(["2024-04-01"], None), "x": [10.0]}),
+        "big": m.DataFrame({"d": stamps(many), "x": [float(i) if i % 5 else float("nan") for i in range(150)]}),
+    }
+
+
+def _an1xe_mixed(m: Any, p: dict) -> Any:
+    return m.concat([p["a"]["d"], p["e"]["d"]], ignore_index=True)
+
+
+_AN1XE_CASES = {
+    "frames in one zone": lambda m, p: m.concat([p["a"], p["b"]]),
+    "a frame lacking the column": lambda m, p: m.concat([p["a"], p["c"], p["b"]]),
+    "join=inner": lambda m, p: m.concat([p["a"], p["b"]], join="inner"),
+    "keys=": lambda m, p: m.concat([p["a"], p["b"]], keys=["p", "q"]),
+    "across 64-row words": lambda m, p: m.concat([p["big"], p["big"].iloc[3:70], p["big"]]),
+    "Series in one zone": lambda m, p: m.concat([p["a"]["d"], p["b"]["d"]], ignore_index=True),
+    "two zones are object Timestamps (NEGATIVE: not naive)": lambda m, p: m.concat([p["a"], p["e"]]),
+    "naive beside aware, a frame lacking it": lambda m, p: m.concat([p["a"], p["n"], p["c"]], ignore_index=True),
+    "Series in two zones": _an1xe_mixed,
+    "astype(object)": lambda m, p: p["a"]["d"].astype(object),
+    "frame astype(object)": lambda m, p: p["a"].astype(object),
+    "dtype=object constructor": lambda m, p: m.Series([m.Timestamp("2024-01-01", tz="UTC"), None], dtype=object),
+    "to_datetime one zone": lambda m, p: m.to_datetime(p["a"]["d"].astype(object)),
+    "to_datetime utc=True": lambda m, p: m.to_datetime(_an1xe_mixed(m, p), utc=True),
+    "to_datetime two zones raises": lambda m, p: m.to_datetime(_an1xe_mixed(m, p)),
+    "to_datetime naive beside aware raises": lambda m, p: m.to_datetime(
+        m.concat([p["a"]["d"], p["n"]["d"]], ignore_index=True)
+    ),
+    "to_datetime coerce": lambda m, p: m.to_datetime(_an1xe_mixed(m, p), errors="coerce"),
+    "astype to a zone": lambda m, p: _an1xe_mixed(m, p).astype("datetime64[ns, Asia/Tokyo]"),
+    "astype naive raises": lambda m, p: p["a"]["d"].astype(object).astype("datetime64[ns]"),
+    "frame astype dict raises naming the column": lambda m, p: m.concat([p["a"], p["e"]]).astype(
+        {"d": "datetime64[ns]"}
+    ),
+    "to_json": lambda m, p: _an1xe_mixed(m, p).to_json(),
+    "to_json iso": lambda m, p: _an1xe_mixed(m, p).to_json(date_format="iso"),
+    "isin across zones": lambda m, p: _an1xe_mixed(m, p).isin([m.Timestamp("2024-01-01 09:00", tz="Asia/Tokyo")]),
+    "isin naive needle (NEGATIVE)": lambda m, p: _an1xe_mixed(m, p).isin([m.Timestamp("2024-01-01")]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_AN1XE_CASES))
+def test_concat_and_object_timestamps_keep_zones_like_pandas_an1xe(case: str) -> None:
+    def shown(m: Any) -> Any:
+        try:
+            out = _AN1XE_CASES[case](m, _an1xe_parts(m))
+        except Exception as err:  # noqa: BLE001 - the raising cases compare
+            return (type(err).__name__, str(err))
+        if hasattr(out, "columns"):
+            cells = [(c, str(out[c].dtype), [str(v) for v in out[c].tolist()]) for c in out.columns]
+            return cells, [str(label) for label in out.index.tolist()]
+        if hasattr(out, "dtype"):
+            return str(out.dtype), [str(v) for v in out.tolist()], [str(label) for label in out.index.tolist()]
+        return out
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert shown(fpd) == shown(pd)

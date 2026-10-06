@@ -848,6 +848,21 @@ impl ValidityMask {
         out
     }
 
+    /// OR this mask's bits into `words` from row `at` on: one piece of an
+    /// N-way concat (`Column::concat_masked`).
+    fn or_into_words(&self, words: &mut [u64], at: usize) {
+        let base = at / 64;
+        let shift = at % 64;
+        for (idx, word) in self.materialized_words().into_iter().enumerate() {
+            words[base + idx] |= word << shift;
+            if shift != 0
+                && let Some(next) = words.get_mut(base + idx + 1)
+            {
+                *next |= word >> (64 - shift);
+            }
+        }
+    }
+
     /// Position of the first valid bit.
     #[must_use]
     pub fn first_valid(&self) -> Option<usize> {
@@ -21544,10 +21559,74 @@ impl Column {
             out.extend_from_slice(b);
             return Ok(Self::from_f64_values(out));
         }
+        if let Some(joined) = Self::concat_masked(&[self, other]) {
+            return Ok(joined);
+        }
         let mut values = Vec::with_capacity(self.values.len() + other.values.len());
         values.extend_from_slice(&self.values);
         values.extend_from_slice(&other.values);
         Self::new(self.dtype.clone(), values)
+    }
+
+    /// Pieces that are all Float64 (missing slots included) or all one
+    /// Datetime64 dtype with contiguous nanos (NaT slots included), joined
+    /// end to end: the buffers, and the validity masks a word at a time. A
+    /// float slot is valid iff its bit is set and its datum is not NaN, and
+    /// an invalid one holds the nullable backing's 0.0 datum; a datetime
+    /// keeps the pieces' dtype, zone included. The cells the Scalar concat
+    /// makes of the same pieces, without their Scalar views: that path cost
+    /// ~5x pandas' concat of a million floats with gaps and ~11x of a
+    /// million datetimes, and fp-frame's rebuilt a zoned column naive
+    /// (br-frankenpandas-an1xe). None for any other mix, or no pieces.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn concat_masked(pieces: &[&Self]) -> Option<Self> {
+        let dtype = pieces.first()?.dtype.clone();
+        let len = pieces.iter().map(|piece| piece.len()).sum::<usize>();
+        let mut words = vec![0_u64; len.div_ceil(64)];
+        let mut at = 0;
+        if dtype == DType::Float64 {
+            let parts = pieces
+                .iter()
+                .map(|piece| piece.as_f64_slice_with_validity())
+                .collect::<Option<Vec<_>>>()?;
+            let mut data = Vec::with_capacity(len);
+            for (values, validity) in parts {
+                data.extend_from_slice(values);
+                validity.or_into_words(&mut words, at);
+                at += values.len();
+            }
+            for (chunk, word) in data.chunks_mut(64).zip(words.iter_mut()) {
+                for (bit, datum) in chunk.iter_mut().enumerate() {
+                    if datum.is_nan() {
+                        *word &= !(1_u64 << bit);
+                    }
+                    if (*word >> bit) & 1 == 0 {
+                        *datum = 0.0;
+                    }
+                }
+            }
+            return Some(Self::from_f64_values_with_validity(
+                data,
+                ValidityMask::from_words(words, len),
+            ));
+        }
+        if !dtype.is_datetime() || pieces.iter().any(|piece| piece.dtype != dtype) {
+            return None;
+        }
+        let mut data = Vec::with_capacity(len);
+        for piece in pieces {
+            let nanos = piece
+                .as_datetime64_slice()
+                .filter(|nanos| nanos.len() == piece.len())?;
+            data.extend_from_slice(nanos);
+            piece.validity.or_into_words(&mut words, at);
+            at += nanos.len();
+        }
+        let mut joined =
+            Self::from_datetime64_values_with_validity(data, ValidityMask::from_words(words, len));
+        joined.dtype = dtype;
+        Some(joined)
     }
 
     /// Alias for concat, matching np.append.
@@ -67395,6 +67474,81 @@ mod numeric_width_columns_fvsao23 {
             .reindex_by_positions_with_absent_scalar(&[Some(0), None], Scalar::Int64(7))
             .unwrap();
         assert_eq!(narrow_fill.width(), Some(NumericWidth::Int8));
+    }
+
+    #[test]
+    fn concat_of_nullable_floats_and_datetimes_keeps_values_masks_and_zone() {
+        // Float64 with missing values across 64-row word edges (one side's
+        // length not word-aligned): the typed join keeps every value and
+        // missing slot, as the Scalar concat did (perf follow-up of concat).
+        let floats = |n: usize, missing: &[usize]| {
+            let values: Vec<Scalar> = (0..n)
+                .map(|i| {
+                    if missing.contains(&i) {
+                        Scalar::Null(fp_types::NullKind::NaN)
+                    } else {
+                        Scalar::Float64(i as f64 + 0.5)
+                    }
+                })
+                .collect();
+            Column::new(DType::Float64, values).unwrap()
+        };
+        let left = floats(70, &[0, 63, 64, 69]);
+        let right = floats(65, &[1, 64]);
+        let joined = left.concat(&right).unwrap();
+        let mut expected = left.values().to_vec();
+        expected.extend_from_slice(right.values());
+        assert_eq!(joined.values(), expected.as_slice());
+        assert_eq!(joined.len(), 135);
+        let missing: Vec<usize> = (0..135).filter(|&i| !joined.validity().get(i)).collect();
+        assert_eq!(missing, vec![0, 63, 64, 69, 71, 134]);
+        // Datetime64 with a NaT, in a zone: values, NaT and the zone kept.
+        let dates = |nanos: &[i64]| {
+            let values: Vec<Scalar> = nanos
+                .iter()
+                .map(|&v| {
+                    if v == i64::MIN {
+                        Scalar::Null(fp_types::NullKind::NaT)
+                    } else {
+                        Scalar::Datetime64(v)
+                    }
+                })
+                .collect();
+            Column::new(DType::datetime64_tz("UTC"), values).unwrap()
+        };
+        let early = dates(&[0, i64::MIN, 86_400_000_000_000]);
+        let late = dates(&[1_000, 2_000]);
+        let both = early.concat(&late).unwrap();
+        assert_eq!(both.dtype(), DType::datetime64_tz("UTC"));
+        let mut expected = early.values().to_vec();
+        expected.extend_from_slice(late.values());
+        assert_eq!(both.values(), expected.as_slice());
+        assert!(!both.validity().get(1));
+
+        // N pieces at once (fp-frame's frame / Series concat): the middle
+        // piece starts and ends off a word edge (br-frankenpandas-an1xe).
+        let middle = floats(3, &[1]);
+        let joined = Column::concat_masked(&[&left, &middle, &right]).unwrap();
+        let mut expected = left.values().to_vec();
+        expected.extend_from_slice(middle.values());
+        expected.extend_from_slice(right.values());
+        assert_eq!(joined.values(), expected.as_slice());
+        let missing: Vec<usize> = (0..138).filter(|&i| !joined.validity().get(i)).collect();
+        assert_eq!(missing, vec![0, 63, 64, 69, 71, 74, 137]);
+        let zoned = Column::concat_masked(&[&early, &late, &early]).unwrap();
+        assert_eq!(zoned.dtype(), DType::datetime64_tz("UTC"));
+        assert_eq!(zoned.len(), 8);
+        assert!(!zoned.validity().get(6));
+        // NEGATIVE: pieces in two zones, or floats beside ints, are not one
+        // dtype's buffer - the Scalar path decides those.
+        let eastern = Column::new(
+            DType::datetime64_tz("US/Eastern"),
+            vec![Scalar::Datetime64(0)],
+        )
+        .unwrap();
+        assert!(Column::concat_masked(&[&early, &eastern]).is_none());
+        assert!(Column::concat_masked(&[&left, &ints(&[1])]).is_none());
+        assert!(Column::concat_masked(&[]).is_none());
     }
 
     #[test]

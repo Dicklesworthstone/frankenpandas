@@ -5220,6 +5220,23 @@ fn index_labels_to_table_schema_type(labels: &[IndexLabel]) -> &'static str {
     }
 }
 
+/// Each of `len` rows' validity as a bool, `valid` for a present row (notna)
+/// or its negation (isna), unpacked 64 rows a word from the packed mask
+/// (a bit lookup per row made isna of a million NaN-holding floats ~15x
+/// pandas'; perf).
+fn validity_flags(validity: &ValidityMask, len: usize, valid: bool) -> Vec<bool> {
+    if validity.all() {
+        return vec![valid; len];
+    }
+    let words = validity.packed_words_for_scan();
+    let mut flags = Vec::with_capacity(len);
+    for (block, word) in words.iter().enumerate() {
+        let rows = len.saturating_sub(block * 64).min(64);
+        flags.extend((0..rows).map(|bit| (word >> bit & 1 == 1) == valid));
+    }
+    flags
+}
+
 fn serialize_json_value(value: &Value, precision: u32) -> Result<String, FrameError> {
     to_pandas_json(value, precision).map_err(|err| {
         FrameError::CompatibilityRejected(format!("failed to serialize JSON output: {err}"))
@@ -9904,16 +9921,7 @@ fn int_needle_membership_bitset(test_values: &[Scalar]) -> Option<(i64, Vec<bool
 /// mask is built FROM is_missing, so this is bit-identical to mapping
 /// `Scalar::Bool(value.is_missing())` over the values.
 fn column_na_mask(col: &Column, want_missing: bool) -> Column {
-    let validity = col.validity();
-    let n = col.len();
-    let flags: Vec<bool> = if validity.all() {
-        vec![!want_missing; n]
-    } else if want_missing {
-        (0..n).map(|i| !validity.get(i)).collect()
-    } else {
-        (0..n).map(|i| validity.get(i)).collect()
-    };
-    Column::from_bool_values(flags)
+    Column::from_bool_values(validity_flags(col.validity(), col.len(), !want_missing))
 }
 
 fn isin_apply_column(
@@ -16414,13 +16422,7 @@ impl Series {
         // The mask is built from is_missing (validity.get(i) == !values[i]
         // .is_missing()), so this is bit-identical, emits a typed Bool column
         // (1B/elem vs 32B Scalar::Bool), and skips the lazy Scalar build.
-        let validity = self.column.validity();
-        let n = self.column.len();
-        let flags: Vec<bool> = if validity.all() {
-            vec![false; n]
-        } else {
-            (0..n).map(|i| !validity.get(i)).collect()
-        };
+        let flags = validity_flags(self.column.validity(), self.column.len(), false);
         // Per br-frankenpandas-48vkl: preserve index name (self.index carries it).
         Series::new(
             self.name.clone(),
@@ -16441,13 +16443,7 @@ impl Series {
     /// Matches `pd.Series.notna()`.
     pub fn notna(&self) -> Result<Self, FrameError> {
         // Validity-mask direct read (see isna): notna(i) == validity.get(i).
-        let validity = self.column.validity();
-        let n = self.column.len();
-        let flags: Vec<bool> = if validity.all() {
-            vec![true; n]
-        } else {
-            (0..n).map(|i| validity.get(i)).collect()
-        };
+        let flags = validity_flags(self.column.validity(), self.column.len(), true);
         // Per br-frankenpandas-48vkl: preserve index name (self.index carries it).
         Series::new(
             self.name.clone(),
@@ -20935,6 +20931,12 @@ impl Series {
             // The nullable boolean counts its Trues too, as an int (it summed
             // as float: 2.0 for pandas' 2).
             DType::Bool | DType::BoolNullable => {
+                // An all-valid bool column counts its contiguous buffer (the
+                // Scalar vector built for the loop below cost ~1 ms a million
+                // rows - isna().sum() ran 7x pandas; perf).
+                if let Some(data) = self.column.as_bool_slice() {
+                    return Ok(Scalar::Int64(data.iter().map(|&b| i64::from(b)).sum()));
+                }
                 let mut total: i64 = 0;
                 for val in self.column.values() {
                     if let Scalar::Bool(b) = val {
@@ -67525,11 +67527,36 @@ fn concat_series_columns_storage(
     {
         return Ok(column);
     }
+    let pieces: Vec<&Column> = series_list.iter().map(|s| s.column()).collect();
+    if let Some(column) = Column::concat_masked(&pieces) {
+        return Ok(column);
+    }
     let mut values = Vec::with_capacity(total_len);
     for s in series_list {
         values.extend_from_slice(s.values());
     }
-    Ok(Column::from_values(values)?)
+    Ok(keep_concat_zone(
+        Column::from_values(values)?,
+        pieces.into_iter(),
+    ))
+}
+
+/// `column` (rebuilt from Scalars, which carry no zone) in the tz-aware
+/// datetime dtype every present piece shares: pandas keeps
+/// `datetime64[ns, tz]` through a concat, NaT gaps included, where the
+/// rebuilt column came back naive (br-frankenpandas-an1xe).
+fn keep_concat_zone<'a>(column: Column, mut pieces: impl Iterator<Item = &'a Column>) -> Column {
+    let Some(dtype) = pieces.next().map(Column::dtype) else {
+        return column;
+    };
+    if dtype.timezone().is_some()
+        && column.dtype().is_datetime()
+        && pieces.all(|piece| piece.dtype() == dtype)
+    {
+        column.with_dtype(dtype)
+    } else {
+        column
+    }
 }
 
 /// Pieces that are all-valid contiguous Utf8 columns (or row-range views of
@@ -68052,6 +68079,16 @@ pub fn concat_dataframes_with_ignore_index(
             columns.insert(col_name.clone(), column);
             continue;
         }
+        // Every frame has it as Float64 or as one datetime dtype (an1xe).
+        if let Some(column) = frames
+            .iter()
+            .map(|frame| frame.column(col_name))
+            .collect::<Option<Vec<&Column>>>()
+            .and_then(|pieces| Column::concat_masked(&pieces))
+        {
+            columns.insert(col_name.clone(), column);
+            continue;
+        }
         // FIRST PASS decides the KIND of the gaps before any are minted. A source
         // column that already carried a missing value is nullable, and pandas
         // fills a nullable column with pd.NA (a Null-kind missing) while keeping
@@ -68088,12 +68125,16 @@ pub fn concat_dataframes_with_ignore_index(
                 }
             }
         }
+        let column = match nullable_dtype {
+            Some(dtype) => Column::new(dtype, values)?,
+            None => column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?,
+        };
         columns.insert(
             col_name.clone(),
-            match nullable_dtype {
-                Some(dtype) => Column::new(dtype, values)?,
-                None => column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?,
-            },
+            keep_concat_zone(
+                column,
+                frames.iter().filter_map(|frame| frame.column(col_name)),
+            ),
         );
     }
 
@@ -68343,12 +68384,16 @@ pub fn concat_dataframes_with_keys(
                 }
             }
         }
+        let column = match nullable_dtype {
+            Some(dtype) => Column::new(dtype, values)?,
+            None => column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?,
+        };
         columns.insert(
             col_name.clone(),
-            match nullable_dtype {
-                Some(dtype) => Column::new(dtype, values)?,
-                None => column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?,
-            },
+            keep_concat_zone(
+                column,
+                frames.iter().filter_map(|frame| frame.column(col_name)),
+            ),
         );
     }
 
@@ -68408,16 +68453,26 @@ fn concat_dataframes_axis0_inner(frames: &[&DataFrame]) -> Result<DataFrame, Fra
 
     let mut columns = BTreeMap::new();
     for name in &shared_columns {
-        let mut values = Vec::with_capacity(total_len);
-        for frame in frames {
-            values.extend_from_slice(
+        let pieces: Vec<&Column> = frames
+            .iter()
+            .map(|frame| {
                 frame
                     .column(name)
                     .expect("shared concat(axis=0, join='inner') column must exist")
-                    .values(),
-            );
+            })
+            .collect();
+        if let Some(column) = Column::concat_masked(&pieces) {
+            columns.insert(name.clone(), column);
+            continue;
         }
-        columns.insert(name.clone(), Column::from_values(values)?);
+        let mut values = Vec::with_capacity(total_len);
+        for piece in &pieces {
+            values.extend_from_slice(piece.values());
+        }
+        columns.insert(
+            name.clone(),
+            keep_concat_zone(Column::from_values(values)?, pieces.into_iter()),
+        );
     }
 
     DataFrame::new_with_column_order(index, columns, shared_columns)
@@ -118148,6 +118203,58 @@ mod tests {
     }
 
     #[test]
+    fn concat_keeps_the_zone_its_pieces_share_an1xe() {
+        // Scalar::Datetime64 carries no zone: a concat that rebuilt the column
+        // from Scalars made a datetime64[ns, UTC] column naive
+        // (br-frankenpandas-an1xe).
+        let zoned = |zone: &str, nanos: &[Option<i64>]| {
+            let values = nanos
+                .iter()
+                .map(|nanos| nanos.map_or(Scalar::Null(NullKind::NaT), Scalar::Datetime64))
+                .collect();
+            Column::new(DType::datetime64_tz(zone), values).expect("zoned column")
+        };
+        let frame = |column: Column| {
+            let rows = column.len();
+            DataFrame::from_dict(&["x"], vec![("x", vec![Scalar::Float64(1.0); rows])])
+                .and_then(|frame| frame.with_column("d", column))
+                .expect("frame")
+        };
+        let a = frame(zoned("UTC", &[Some(0), None]));
+        let b = frame(zoned("UTC", &[Some(1_000)]));
+        let lacking = DataFrame::from_dict(&["x"], vec![("x", vec![Scalar::Float64(2.0)])])
+            .expect("a frame without d");
+        let utc = DType::datetime64_tz("UTC");
+        // Every frame holds it (the typed join), a frame lacks it (NaT gaps),
+        // join='inner', and Series.
+        let both = crate::concat_dataframes(&[&a, &b]).expect("concat");
+        assert_eq!(both.column("d").expect("d").dtype(), utc);
+        let gapped = crate::concat_dataframes(&[&a, &lacking, &b]).expect("concat");
+        let d = gapped.column("d").expect("d");
+        assert_eq!(d.dtype(), utc);
+        assert_eq!(d.values()[0], Scalar::Datetime64(0));
+        assert!(d.values()[1].is_missing() && d.values()[2].is_missing());
+        assert_eq!(d.values()[3], Scalar::Datetime64(1_000));
+        let inner = crate::concat_dataframes_with_axis_join(&[&a, &b], 0, crate::ConcatJoin::Inner)
+            .expect("inner");
+        assert_eq!(inner.column("d").expect("d").dtype(), utc);
+        let series = |frame: &DataFrame| {
+            Series::new(
+                "d",
+                frame.index().clone(),
+                frame.column("d").expect("d").clone(),
+            )
+            .expect("series")
+        };
+        let stacked = crate::concat_series(&[&series(&a), &series(&b)]).expect("series concat");
+        assert_eq!(stacked.dtype(), utc);
+        // NEGATIVE: pieces in two zones share none, so none is claimed.
+        let eastern = frame(zoned("US/Eastern", &[Some(5)]));
+        let mixed = crate::concat_dataframes(&[&a, &eastern]).expect("concat");
+        assert_eq!(mixed.column("d").expect("d").dtype().timezone(), None);
+    }
+
+    #[test]
     fn concat_series_three_series() {
         use super::concat_series;
 
@@ -124409,6 +124516,44 @@ mod tests {
         let empty_result = all_null.dropna().unwrap();
         assert_eq!(empty_result.index().name().map(|n| n.as_str()), Some("idx"));
         assert_eq!(empty_result.len(), 0);
+    }
+
+    #[test]
+    fn isna_notna_unpack_the_mask_across_words_and_bool_sum_counts() {
+        // 130 rows missing at the 64-row word edges: the packed-word unpack
+        // flags exactly those rows, and a bool Series sums its Trues off the
+        // typed buffer (perf follow-up of the isna().sum() loss).
+        let missing = [0_usize, 63, 64, 127, 129];
+        let values: Vec<Scalar> = (0..130_usize)
+            .map(|i| {
+                if missing.contains(&i) {
+                    Scalar::Null(NullKind::NaN)
+                } else {
+                    Scalar::Float64(i as f64)
+                }
+            })
+            .collect();
+        let index = (0..130_i64).map(IndexLabel::from).collect();
+        let s = Series::from_values("x", index, values).unwrap();
+        let isna = s.isna().unwrap();
+        let flagged: Vec<usize> = isna
+            .values()
+            .iter()
+            .enumerate()
+            .filter(|(_, value)| matches!(value, Scalar::Bool(true)))
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(flagged, missing);
+        assert_eq!(isna.sum().unwrap(), Scalar::Int64(5));
+        assert_eq!(s.notna().unwrap().sum().unwrap(), Scalar::Int64(125));
+        let frame = DataFrame::from_series(vec![s]).unwrap();
+        let mask = frame.isna().unwrap();
+        let column = mask.column("x").unwrap();
+        assert_eq!(column.values(), isna.values());
+        assert_eq!(
+            frame.notna().unwrap().column("x").unwrap().values().len(),
+            130
+        );
     }
 
     #[test]
