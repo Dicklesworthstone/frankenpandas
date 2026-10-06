@@ -5916,6 +5916,48 @@ fn csv_input_has_unterminated_quote(
     escape: Option<u8>,
 ) -> bool {
     let bytes = input.as_bytes();
+    // Outside a quoted field only a quote byte changes anything, and it opens
+    // a field only where the byte before it is a line break or the delimiter
+    // (or it starts the input); inside one, only a quote or the escape byte.
+    // So hop between those with memchr - every byte went through this loop,
+    // 7.9% of reading a million-row csv (br-frankenpandas-2e7w5). A quote
+    // that is also the delimiter, a line break or the escape keeps the walk.
+    if quote != delimiter && quote != b'\n' && quote != b'\r' && escape != Some(quote) {
+        let mut idx = 0;
+        while let Some(found) = memchr::memchr(quote, &bytes[idx..]) {
+            let open = idx + found;
+            let opens = open == 0 || {
+                let before = bytes[open - 1];
+                before == b'\n' || before == b'\r' || before == delimiter
+            };
+            idx = open + 1;
+            if !opens {
+                continue;
+            }
+            loop {
+                let next = match escape {
+                    Some(escape) => memchr::memchr2(quote, escape, &bytes[idx..]),
+                    None => memchr::memchr(quote, &bytes[idx..]),
+                };
+                let Some(found) = next else {
+                    return true;
+                };
+                let at = idx + found;
+                if escape == Some(bytes[at]) {
+                    idx = at + 2;
+                    if idx >= bytes.len() {
+                        return true;
+                    }
+                } else if doublequote && bytes.get(at + 1) == Some(&quote) {
+                    idx = at + 2;
+                } else {
+                    idx = at + 1;
+                    break;
+                }
+            }
+        }
+        return false;
+    }
     let mut in_quotes = false;
     let mut at_field_start = true;
     let mut idx = 0;
@@ -19734,6 +19776,68 @@ mod tests {
     /// Negative control for the scanner: quotes that are properly closed, and a
     /// literal quote in the MIDDLE of an unquoted field, must NOT be read as an
     /// unterminated field.
+    #[test]
+    fn quote_scan_hopping_with_memchr_is_the_byte_walk_2e7w5() {
+        // br-frankenpandas-2e7w5: the memchr hop between quote / escape bytes
+        // reaches the verdict of walking every byte, on inputs mixing quotes
+        // mid-field, doubled quotes, escapes, CR / LF and the delimiter -
+        // including NEGATIVE cases that end inside a quoted field.
+        fn walk(bytes: &[u8], doublequote: bool, escape: Option<u8>) -> bool {
+            let (mut in_quotes, mut at_field_start, mut idx) = (false, true, 0);
+            while idx < bytes.len() {
+                let byte = bytes[idx];
+                if in_quotes {
+                    if escape == Some(byte) {
+                        idx += 2;
+                        continue;
+                    }
+                    if byte == b'"' {
+                        if doublequote && bytes.get(idx + 1) == Some(&b'"') {
+                            idx += 2;
+                            continue;
+                        }
+                        in_quotes = false;
+                        at_field_start = false;
+                    }
+                } else if byte == b'"' && at_field_start {
+                    in_quotes = true;
+                    at_field_start = false;
+                } else {
+                    at_field_start = byte == b'\n' || byte == b'\r' || byte == b',';
+                }
+                idx += 1;
+            }
+            in_quotes
+        }
+        let alphabet = *b"a,\"\n\r\\\"b";
+        let mut state = 0x2e75_u64.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        let mut ended_quoted = 0;
+        for case in 0..20_000 {
+            let len = case % 41;
+            let text: String = (0..len)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    char::from(alphabet[(state % alphabet.len() as u64) as usize])
+                })
+                .collect();
+            for (doublequote, escape) in [(true, None), (false, None), (true, Some(b'\\'))] {
+                let expected = walk(text.as_bytes(), doublequote, escape);
+                ended_quoted += usize::from(expected);
+                assert_eq!(
+                    csv_input_has_unterminated_quote(&text, b',', b'"', doublequote, escape),
+                    expected,
+                    "{text:?} doublequote {doublequote} escape {escape:?}"
+                );
+            }
+        }
+        assert!(
+            ended_quoted > 1000,
+            "the inputs reach the unterminated case"
+        );
+    }
+
     #[test]
     fn csv_closed_and_literal_quotes_are_not_unterminated() {
         assert!(!csv_input_has_unterminated_quote(
