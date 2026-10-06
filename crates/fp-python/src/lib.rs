@@ -1065,6 +1065,33 @@ fn categories_index(py: Python<'_>, categories: &[Scalar]) -> PyResult<Py<PyAny>
     .into_py_any(py)
 }
 
+/// A plain all-valid float64 / int64 / bool column as the Python list
+/// `tolist()` and iteration give: its numbers straight off the buffer, as
+/// `scalar_to_py` boxes each (the Scalar view was built first - a million
+/// floats 28.7 ms, pandas 20.2; br-frankenpandas-zsm50). None for any other
+/// column.
+fn typed_column_list(py: Python<'_>, column: &Column) -> PyResult<Option<Py<PyAny>>> {
+    if !column.validity().all() || column.is_pandas_string() {
+        return Ok(None);
+    }
+    let list = match column.dtype() {
+        DType::Float64 => column
+            .as_f64_slice()
+            .map(|data| PyList::new(py, data))
+            .transpose()?,
+        DType::Int64 => column
+            .as_i64_slice()
+            .map(|data| PyList::new(py, data))
+            .transpose()?,
+        DType::Bool => column
+            .as_bool_slice()
+            .map(|data| PyList::new(py, data))
+            .transpose()?,
+        _ => None,
+    };
+    Ok(list.map(|list| list.into_any().unbind()))
+}
+
 /// A column's values as pandas materializes a run of them (repr cells,
 /// tolist, iteration, `.values`): an interval categorical's go through
 /// IntervalIndex.take, which makes `interval[int64]` float64 once any is
@@ -30639,6 +30666,9 @@ impl PySeries {
     /// Return values as a Python list.
     fn tolist(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let column = self.inner.column();
+        if let Some(list) = typed_column_list(py, column)? {
+            return Ok(list);
+        }
         let values: Vec<Py<PyAny>> = materialized_values(column)
             .iter()
             .map(|s| cell_to_py(py, column, s))
@@ -30650,6 +30680,9 @@ impl PySeries {
     /// back to `s[i]`, whose elements are numpy scalars.
     fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let column = self.inner.column();
+        if let Some(list) = typed_column_list(py, column)? {
+            return Ok(list.bind(py).try_iter()?.into_any().unbind());
+        }
         let values = materialized_values(column)
             .iter()
             .map(|value| iterated_to_py(py, column, value))
