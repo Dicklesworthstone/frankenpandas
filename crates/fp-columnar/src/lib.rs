@@ -12759,6 +12759,49 @@ impl Column {
         }
     }
 
+    /// `len` copies of `value`, a broadcast number (`df['z'] = 7`): the column
+    /// [`from_i64_values`](Self::from_i64_values) makes of `vec![value; len]`,
+    /// the copies written straight into its `Arc<[i64]>` - that path filled a
+    /// Vec and copied it into the Arc (br-frankenpandas-1s45z).
+    #[must_use]
+    pub fn from_i64_constant(value: i64, len: usize) -> Self {
+        Self {
+            dtype: DType::Int64,
+            values: ScalarValues::lazy_all_valid_int64_arc(
+                std::iter::repeat_n(value, len).collect(),
+            ),
+            validity: ValidityMask::all_valid(len),
+            data: None,
+            categorical: None,
+            width: None,
+            pandas_string: false,
+        }
+    }
+
+    /// `len` copies of `value`, a broadcast number (`df['z'] = 1.5`): the column
+    /// [`from_f64_values`](Self::from_f64_values) makes of `vec![value; len]` -
+    /// all-valid, NaN-exact, its finite witness the number's - without that
+    /// path's NaN / finite scan and Vec-to-Arc copy (0.50 ms a million rows,
+    /// pandas 0.13; br-frankenpandas-1s45z). A NaN (or no rows) takes that path.
+    #[must_use]
+    pub fn from_f64_constant(value: f64, len: usize) -> Self {
+        if value.is_nan() || len == 0 {
+            return Self::from_f64_values(vec![value; len]);
+        }
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_all_valid_float64_arc_nan_exact(
+                std::iter::repeat_n(value, len).collect(),
+                Some(value.is_finite()),
+            ),
+            validity: ValidityMask::all_valid(len),
+            data: None,
+            categorical: None,
+            width: None,
+            pandas_string: false,
+        }
+    }
+
     /// Like [`from_i64_values`](Self::from_i64_values) but MOVES the `Vec<i64>`
     /// into the backing (one `Arc::new`) instead of `Arc::from(Vec)`'s
     /// alloc+memcpy (~28ms/5M). The i64 sibling of
@@ -39823,6 +39866,49 @@ mod tests {
                     unsigned / d.unsigned_abs(),
                     "{unsigned} / {d}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn constant_columns_are_the_filled_vec_columns_1s45z() {
+        // br-frankenpandas-1s45z: a constant column is the column the filled
+        // Vec made - dtype, values (bits), validity, finite witness, backing.
+        for len in [0, 1, 3, 1000] {
+            for value in [
+                1.5,
+                -0.0,
+                0.0,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::NAN,
+                -2.5e300,
+            ] {
+                let ours = Column::from_f64_constant(value, len);
+                let theirs = Column::from_f64_values(vec![value; len]);
+                assert_eq!(ours.dtype(), theirs.dtype());
+                assert_eq!(ours.len(), theirs.len());
+                for i in 0..len {
+                    assert_eq!(ours.validity().get(i), theirs.validity().get(i));
+                    let bits = |column: &Column| match &column.values()[i] {
+                        Scalar::Float64(v) => Some(v.to_bits()),
+                        _ => None,
+                    };
+                    assert_eq!(bits(&ours), bits(&theirs), "{value} x {len} row {i}");
+                }
+                assert_eq!(ours.f64_finite_witness(), theirs.f64_finite_witness());
+                assert_eq!(ours.as_f64_slice(), theirs.as_f64_slice());
+            }
+            for value in [0, 7, -1, i64::MIN, i64::MAX] {
+                let ours = Column::from_i64_constant(value, len);
+                let theirs = Column::from_i64_values(vec![value; len]);
+                assert_eq!(ours.dtype(), theirs.dtype());
+                assert_eq!(ours.as_i64_slice(), theirs.as_i64_slice());
+                assert_eq!(ours.values(), theirs.values());
+                assert!(matches!(
+                    ours.values,
+                    ScalarValues::LazyAllValidInt64 { .. }
+                ));
             }
         }
     }

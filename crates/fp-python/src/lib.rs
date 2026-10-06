@@ -24568,8 +24568,10 @@ fn series_over_index(
 /// br-frankenpandas-w1nrd) - anything else (and no rows) through it.
 fn broadcast_column(scalar: Scalar, len: usize) -> PyResult<Column> {
     match scalar {
-        Scalar::Float64(value) if len > 0 => Ok(Column::from_f64_values(vec![value; len])),
-        Scalar::Int64(value) if len > 0 => Ok(Column::from_i64_values(vec![value; len])),
+        // A number's copies go straight into the column's buffer (from_f64_values
+        // scanned and copied a filled Vec; br-frankenpandas-1s45z).
+        Scalar::Float64(value) if len > 0 => Ok(Column::from_f64_constant(value, len)),
+        Scalar::Int64(value) if len > 0 => Ok(Column::from_i64_constant(value, len)),
         Scalar::Bool(value) if len > 0 => Ok(Column::from_bool_values(vec![value; len])),
         scalar => Column::from_values(vec![scalar; len]).map_err(column_error_to_py),
     }
@@ -53773,6 +53775,43 @@ fn write_cells(column: &Column, positions: &[usize], cells: Vec<Scalar>) -> PyRe
             "Cannot setitem on a Categorical with a new category ({shown}), set the categories \
              first"
         )));
+    }
+    // One number at every position of a plain float64 / int64 column (a
+    // scalar over a mask: df.loc[mask, 'y'] = 0.0), the column's own kind (an
+    // int joining a float column as its float, as below): the buffer copied
+    // and the number written in it - each cell was a Scalar written by put
+    // (4.3 ms a million rows, pandas 2.0; br-frankenpandas-1s45z).
+    if column.width().is_none()
+        && let Some(first) = cells.first()
+        && cells.iter().all(|cell| match (first, cell) {
+            (Scalar::Float64(a), Scalar::Float64(b)) => a.to_bits() == b.to_bits(),
+            (Scalar::Int64(a), Scalar::Int64(b)) => a == b,
+            _ => false,
+        })
+    {
+        let float = match first {
+            Scalar::Float64(v) if !v.is_nan() => Some(*v),
+            Scalar::Int64(v) => Some(*v as f64),
+            _ => None,
+        };
+        if let (Some(data), Some(value)) = (column.as_f64_slice(), float) {
+            let mut out = data.to_vec();
+            if positions
+                .iter()
+                .all(|&p| out.get_mut(p).map(|slot| *slot = value).is_some())
+            {
+                return Ok(Column::from_f64_values_owned(out));
+            }
+        }
+        if let (Some(data), Scalar::Int64(value)) = (column.as_i64_slice(), first) {
+            let mut out = data.to_vec();
+            if positions
+                .iter()
+                .all(|&p| out.get_mut(p).map(|slot| *slot = *value).is_some())
+            {
+                return Ok(Column::from_i64_values_owned(out));
+            }
+        }
     }
     // A missing cell in a numpy column is NaN (None included), and an int
     // joining a float column is a float; an integral float joining a 64-bit
