@@ -2575,6 +2575,15 @@ impl Index {
         self.labels.cached_int64_view()
     }
 
+    /// Whether the labels are ints held by a typed backing (a range, an
+    /// int64 buffer): every one an Int64, none missing - known without
+    /// materializing them. False says nothing about the labels.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn has_int64_backing(&self) -> bool {
+        self.labels.has_lazy_int64_backing()
+    }
+
     #[must_use]
     pub fn from_utf8(values: Vec<String>) -> Self {
         Self::new(values.into_iter().map(IndexLabel::from).collect())

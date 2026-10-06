@@ -27418,3 +27418,60 @@ def test_datetime_reductions_like_pandas_h7z3y(case: str) -> None:
                 return ("ValueError", str(err))
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-lnb7i: a reindex target equal to the index keeps the rows
+# under the target (pandas' Index.reindex answers no indexer), an empty one
+# that is no Index is the index's [:0], an aware target over naive rows finds
+# none.
+def _lnb7i_shown(result: Any) -> Any:
+    index = result.index
+    shown = [
+        type(index).__name__,
+        str(index.dtype),
+        index.name,
+        repr(list(index)),
+        str(getattr(index, "freq", None)),
+    ]
+    if hasattr(result, "columns"):
+        return shown + [list(result.columns), [str(d) for d in result.dtypes], repr(result.to_dict("list"))]
+    return shown + [str(result.dtype), repr(result.tolist())]
+
+
+_LNB7I_CASES = {
+    "range target, RangeIndex kept": lambda m: m.Series([1, 2, 3], index=m.RangeIndex(3, name="src")).reindex(range(3)),
+    "own index over duplicates": lambda m: (lambda s: s.reindex(s.index))(m.Series([1, 2, 3], index=[0, 0, 1])),
+    "equal target, ffill over an unsorted index": lambda m: m.Series([1, 2, 3], index=[3, 1, 2]).reindex([3, 1, 2], method="ffill"),
+    "equal target, limit without method": lambda m: m.Series([1, 2, 3], index=[3, 1, 2]).reindex([3, 1, 2], limit=1),
+    "own MultiIndex": lambda m: (lambda s: s.reindex(s.index))(m.Series([1, 2], index=m.MultiIndex.from_tuples([("a", 1), ("b", 2)]))),
+    "own CategoricalIndex": lambda m: (lambda i: m.Series([1, 2], index=i).reindex(i))(m.CategoricalIndex(["a", "b"])),
+    "equal object Index target": lambda m: m.Series([1, 2, 3]).reindex(m.Index([0, 1, 2], dtype=object)),
+    "equal target with fill_value keeps NaN": lambda m: m.Series([1.0, float("nan")]).reindex(range(2), fill_value=0),
+    "empty list target": lambda m: m.Series([1.0, 2.0], index=m.RangeIndex(2, name="src")).reindex([]),
+    "empty list over a tz index with freq": lambda m: m.Series([1.0, 2.0], index=m.date_range("2024-01-01", periods=2, freq="D", tz="UTC", name="d")).reindex([]),
+    "aware target over naive rows": lambda m: m.Series([1, 2], index=m.date_range("2024-01-01", periods=2, freq="D")).reindex(m.date_range("2024-01-01", periods=2, freq="D", tz="UTC")),
+    "aware target over naive rows, fill_value": lambda m: m.Series([1, 2], index=m.date_range("2024-01-01", periods=2, freq="D")).reindex(m.date_range("2024-01-01", periods=2, freq="D", tz="UTC"), fill_value=0),
+    "frame range target": lambda m: m.DataFrame({"a": [1, 2], "b": ["x", "y"]}).reindex(range(2)),
+    "frame range target, longer": lambda m: m.DataFrame({"a": [1, 2]}, index=m.RangeIndex(2, name="q")).reindex(range(3)),
+    "frame own index over duplicates": lambda m: (lambda d: d.reindex(d.index))(m.DataFrame({"a": [1, 2, 3]}, index=[0, 0, 1])),
+    "frame equal rows, new column": lambda m: m.DataFrame({"a": [1, 2], "b": [3, 4]}).reindex(index=range(2), columns=["a", "c"]),
+    "frame empty list target": lambda m: m.DataFrame({"a": [1, 2]}, index=m.RangeIndex(2, name="src")).reindex([]),
+    "frame own MultiIndex": lambda m: (lambda d: d.reindex(d.index))(m.DataFrame({"a": [1, 2]}, index=m.MultiIndex.from_tuples([("a", 1), ("b", 2)]))),
+    "duplicates, unequal target (NEGATIVE: raises)": lambda m: m.Series([1, 2, 3], index=[0, 0, 1]).reindex([0, 1]),
+    "limit without method, unequal target (NEGATIVE: raises)": lambda m: m.Series([1, 2, 3]).reindex([0, 5], limit=1),
+    "bad method, equal target (NEGATIVE: raises)": lambda m: m.Series([1, 2, 3]).reindex(range(3), method="foo"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_LNB7I_CASES))
+def test_reindex_equal_and_empty_targets_like_pandas_lnb7i(case: str) -> None:
+    def shown(m: Any) -> Any:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                return _lnb7i_shown(_LNB7I_CASES[case](m))
+            except ValueError as err:
+                return ("ValueError", type(err).__name__)
+
+    assert shown(fpd) == shown(pd)

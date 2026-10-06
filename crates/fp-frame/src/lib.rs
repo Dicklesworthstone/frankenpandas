@@ -89150,19 +89150,32 @@ impl DataFrame {
     /// pandas' `df.index = new_index` replaces it (`set_axis` keeps the old
     /// axis name).
     pub fn with_index(&self, index: Index) -> Result<Self, FrameError> {
-        let mut out = self.set_axis(index.labels().to_vec(), 0)?;
-        // The given index's name, time zone, freq, RangeIndex origin,
-        // declared dtype and categories ride along (they were dropped with
-        // the labels; br-frankenpandas-i20vm, br-frankenpandas-cld41).
-        out.index = out
-            .index
-            .rename_index(index.name())
-            .with_tz(index.tz())?
-            .with_freq(index.freq().map(str::to_owned))
-            .with_range_span(index.range_span())
-            .with_declared_dtype(index.declared_dtype())
-            .with_categories(index.categories().cloned())?;
-        Ok(out)
+        if index.len() != self.index.len() {
+            return Err(FrameError::LengthMismatch {
+                index_len: index.len(),
+                column_len: self.index.len(),
+            });
+        }
+        // The given index itself - its name, time zone, freq, RangeIndex
+        // origin, declared dtype and categories with it (br-frankenpandas-i20vm,
+        // br-frankenpandas-cld41), its labels shared rather than copied out
+        // and rebuilt (a million rows took 5-7 ms; br-frankenpandas-lnb7i) -
+        // without row MultiIndex levels, as `set_axis` leaves none.
+        let index = index.to_flat_index();
+        Self::validate_duplicate_label_policy(
+            self.allows_duplicate_labels,
+            &index,
+            None,
+            "set_axis",
+        )?;
+        Ok(Self {
+            columns: self.columns.clone(),
+            column_order: self.column_order.clone(),
+            index,
+            column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
+        })
     }
 
     /// Replace the row index or column names without touching data.
@@ -172570,6 +172583,69 @@ mod tests {
         // NEGATIVE: any other column is the caller's path.
         let ints = Series::from_values("i", vec![0_i64.into()], vec![Scalar::Int64(4)]).unwrap();
         assert!(ints.datetime_typed_extreme(true).is_none());
+    }
+
+    #[test]
+    fn with_index_takes_the_index_whole_lnb7i() {
+        // The rows are the given index itself - labels, name, zone, freq and
+        // RangeIndex origin as the labels rebuilt through set_axis and
+        // re-dressed give them - its int64 buffer shared rather than copied
+        // out (br-frankenpandas-lnb7i).
+        let frame = DataFrame::from_dict_with_index(
+            vec![(
+                "a",
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+        )
+        .unwrap();
+        let rebuilt = |index: &Index| {
+            frame
+                .set_axis(index.labels().to_vec(), 0)
+                .unwrap()
+                .index()
+                .clone()
+                .rename_index(index.name())
+                .with_tz(index.tz())
+                .unwrap()
+                .with_freq(index.freq().map(str::to_owned))
+                .with_range_span(index.range_span())
+        };
+        let buffer = Index::from_i64_values(vec![7, 5, 9]).set_name("k");
+        let range = Index::from_range(10, 16, 2).set_name("r");
+        let instants = Index::new((0..3).map(IndexLabel::Datetime64).collect())
+            .with_tz(Some("UTC"))
+            .unwrap()
+            .with_freq(Some("D".to_owned()));
+        for index in [buffer.clone(), range, instants] {
+            let out = frame.with_index(index.clone()).unwrap();
+            let expected = rebuilt(&index);
+            assert_eq!(out.index(), &expected);
+            assert_eq!(out.index().name(), expected.name());
+            assert_eq!(out.index().freq(), expected.freq());
+            assert_eq!(out.index().range_span(), expected.range_span());
+            assert_eq!(
+                out.column("a").unwrap().values(),
+                frame.column("a").unwrap().values()
+            );
+        }
+        let out = frame.with_index(buffer.clone()).unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            &out.index().int64_label_values().unwrap(),
+            &buffer.int64_label_values().unwrap()
+        ));
+        // NEGATIVE: a wrong length refuses, and so do duplicates where the
+        // frame allows none.
+        assert!(matches!(
+            frame.with_index(Index::from_i64_values(vec![1, 2])),
+            Err(FrameError::LengthMismatch { .. })
+        ));
+        let strict = frame.set_flags(Some(false)).unwrap();
+        assert!(
+            strict
+                .with_index(Index::from_i64_values(vec![1, 1, 2]))
+                .is_err()
+        );
     }
 
     #[test]

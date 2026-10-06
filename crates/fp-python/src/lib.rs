@@ -9456,6 +9456,90 @@ fn reindex_target_name(target: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Opt
     py_axis_name(&target.getattr("name")?).map(Some)
 }
 
+/// pandas' reindex fill methods; anything else is its ValueError, which it
+/// raises before looking at the target.
+fn check_reindex_method(method: Option<&str>) -> PyResult<()> {
+    match method {
+        None | Some("pad" | "ffill" | "backfill" | "bfill" | "nearest") => Ok(()),
+        Some(method) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "Invalid fill method. Expecting pad (ffill), backfill (bfill) or nearest. Got {method}"
+        ))),
+    }
+}
+
+/// The index of a reindex of rows labelled `index` to `obj` (`target` its
+/// index) that looks no label up: pandas' `Index.reindex` answers no indexer
+/// when the target `equals` the index, so the rows stay as they are - over
+/// duplicate labels, an unsorted index under a method, any limit or
+/// tolerance, all of which a lookup refuses - under the target as pandas
+/// returns it: a MultiIndex with its levels, a CategoricalIndex with its
+/// categories, a range a RangeIndex, an object Index its dtype, named as
+/// [`reindex_target_name`] says (else the source's name). None when the
+/// labels differ, or only one side is a MultiIndex (br-frankenpandas-lnb7i:
+/// the lookup of every label took 20-30 ms a million rows where pandas
+/// takes 0.2).
+fn reindex_equal_target(
+    index: &Index,
+    obj: &Bound<'_, PyAny>,
+    target: &Index,
+) -> PyResult<Option<Index>> {
+    let multi = obj.is_instance_of::<PyMultiIndex>();
+    if multi != index.row_multiindex().is_some() {
+        return Ok(None);
+    }
+    let target = if multi {
+        index_from_axis_value(obj)?
+    } else {
+        target.clone()
+    };
+    if target != *index {
+        return Ok(None);
+    }
+    if multi {
+        return Ok(Some(target));
+    }
+    let target = reindex_target_dtype(&target, obj)?
+        .unwrap_or(target)
+        .rename_index(index.name());
+    Ok(Some(match reindex_target_name(Some(obj))? {
+        Some(name) => target.set_names(name),
+        None => target,
+    }))
+}
+
+/// `index` - a reindex result's rows, the labels of the target `obj` -
+/// under the target's dtype where the labels read another: an object Index
+/// stays object, a CategoricalIndex keeps its categories (both came back
+/// as the labels' own dtype; br-frankenpandas-lnb7i). None when the target
+/// declares neither.
+fn reindex_target_dtype(index: &Index, obj: &Bound<'_, PyAny>) -> PyResult<Option<Index>> {
+    let declared = index_arg_declared(obj);
+    let categories = index_arg_categories(obj);
+    if declared.is_none() && categories.is_none() {
+        return Ok(None);
+    }
+    index
+        .clone()
+        .with_declared_dtype(declared)
+        .with_categories(categories)
+        .map(Some)
+        .map_err(index_error_to_py)
+}
+
+/// Whether a reindex of rows labelled `index` to `target` finds no label:
+/// pandas compares a tz-aware DatetimeIndex with a naive one as different
+/// dtypes, so every row of the result is missing (the naive labels matched
+/// the aware ones' UTC instants; br-frankenpandas-lnb7i).
+fn reindex_zones_mismatch(index: &Index, target: &Index) -> bool {
+    let datetimes = |index: &Index| {
+        index
+            .labels()
+            .iter()
+            .all(|label| matches!(label, IndexLabel::Datetime64(_)))
+    };
+    index.tz().is_some() != target.tz().is_some() && datetimes(index) && datetimes(target)
+}
+
 /// The MultiIndex `pd.Index([(1, 2), (3, 4)])` builds from a list (or
 /// tuple) of tuples - only the Index constructor does; `index=`, `set_axis`
 /// and the setters keep tuple labels (r0hk0). None for anything else.
@@ -10134,6 +10218,18 @@ fn index_to_timestamp(
 /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.18) - a
 /// MultiIndex level too (br-frankenpandas-stofr).
 fn flat_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
+    // Typed ints are a plain Index: the scans below for instants,
+    // durations, periods and intervals walked a million of them on every
+    // `.index` (br-frankenpandas-lnb7i).
+    if index.has_int64_backing() && !index.is_empty() {
+        return Ok(Py::new(
+            py,
+            PyIndex {
+                inner: index.clone(),
+            },
+        )?
+        .into_any());
+    }
     let labels = index.labels();
     // An empty index keeps its source's class (pandas' empty slice of a
     // DatetimeIndex is one; dwyud); one declared object is a plain Index
@@ -10307,6 +10403,11 @@ fn float_index_labels(labels: Vec<IndexLabel>) -> Vec<IndexLabel> {
 /// are left as they are (rebuilding them dropped the zone when a NaT was
 /// among them; br-frankenpandas-wtu8e).
 fn float_labelled(index: Index) -> Index {
+    // Typed ints hold no float and no missing label: their million labels
+    // were made only to find none (br-frankenpandas-lnb7i).
+    if index.has_int64_backing() {
+        return index;
+    }
     let labels = index.labels();
     let mixed = labels
         .iter()
@@ -34657,8 +34758,23 @@ impl PySeries {
         let Some(idx_obj) = index else {
             return Ok(self.clone());
         };
+        check_reindex_method(method)?;
         // Any index-like target (a DatetimeIndex raised TypeError).
         let target = idx_obj.extract::<IndexArg>()?;
+        let flat = level.is_none_or(|level| level.is_none());
+        // An empty target that is no Index is pandas' `index[:0]`: its
+        // RangeIndex, zone, freq and name kept (it was an object Index).
+        let empty_axis = flat && target.inner.is_empty() && !idx_obj.is_instance_of::<PyIndex>();
+        if flat
+            && !empty_axis
+            && let Some(index) = reindex_equal_target(self.inner.index(), idx_obj, &target.inner)?
+        {
+            let inner = Series::new(self.inner.name(), index, self.inner.column().clone())
+                .map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner });
+        }
+        let zones_mismatch =
+            method.is_none() && reindex_zones_mismatch(self.inner.index(), &target.inner);
         let labels = target.inner.labels().to_vec();
         // Points over an IntervalIndex take the rows of the intervals
         // holding them, under the points themselves (pandas' pointwise
@@ -34716,9 +34832,21 @@ impl PySeries {
                 limit,
                 tolerance.as_deref(),
             ),
+            // An aware target over naive rows, or the reverse, finds none.
+            None if zones_mismatch => self
+                .inner
+                .head(0)
+                .and_then(|none| none.reindex(labels.clone())),
             None => self.inner.reindex(labels.clone()),
         }
         .map_err(frame_error_to_py)?;
+        if empty_axis {
+            return self
+                .inner
+                .head(0)
+                .map(|inner| Self { inner })
+                .map_err(frame_error_to_py);
+        }
         // A range target is the result's RangeIndex, as pandas' (it was an
         // Index of its labels, an empty one object; br-frankenpandas-7bope),
         // under the name the reindex kept.
@@ -34734,6 +34862,11 @@ impl PySeries {
         };
         // The rows are the target's labels: a tz-aware target keeps its zone
         // (they came back naive UTC, fvsao.60) and a date_range its freq.
+        let reindexed = match reindex_target_dtype(reindexed.index(), idx_obj)? {
+            Some(index) => Series::new(reindexed.name(), index, reindexed.column().clone())
+                .map_err(frame_error_to_py)?,
+            None => reindexed,
+        };
         let reindexed = series_index_in_zone(reindexed, target.inner.tz())?;
         let reindexed = match target.inner.freq() {
             Some(freq) => {
@@ -34757,7 +34890,11 @@ impl PySeries {
             return Ok(PySeries { inner: reindexed });
         };
         let fill = py_to_scalar(py, fill)?;
-        let source_positions = self.inner.index().get_indexer(&Index::new(labels));
+        let source_positions = if zones_mismatch {
+            vec![None; labels.len()]
+        } else {
+            self.inner.index().get_indexer(&Index::new(labels))
+        };
         // A label found takes the source's own value - the reindexed column
         // had turned float by the very rows the fill replaces, so
         // reindex(fill_value=0) of an int Series came back float64.
@@ -49453,6 +49590,7 @@ impl PyDataFrame {
     ) -> PyResult<PyDataFrame> {
         // copy= only lets pandas share buffers; a new frame satisfies it.
         let _ = copy;
+        check_reindex_method(method)?;
         let fill = match fill_value.filter(|fv| !fv.is_none()) {
             Some(fv) => Some(py_to_scalar(py, fv)?),
             None => None,
@@ -49476,9 +49614,41 @@ impl PyDataFrame {
         let mut row_target: Option<Vec<IndexLabel>> = None;
         let mut column_target: Option<Vec<String>> = None;
         let target_index = index.or_else(|| labels.filter(|_| ax == 0));
-        if let Some(idx_obj) = target_index {
-            // Any index-like target (a DatetimeIndex raised TypeError).
-            let target = idx_obj.extract::<IndexArg>()?;
+        // Any index-like target (a DatetimeIndex raised TypeError).
+        let row_target_arg = target_index
+            .map(|obj| obj.extract::<IndexArg>())
+            .transpose()?;
+        // An empty row target that is no Index is pandas' `index[:0]`, and
+        // one equal to the index keeps the rows (see the Series').
+        let empty_rows = level.is_none()
+            && target_index.is_some_and(|obj| !obj.is_instance_of::<PyIndex>())
+            && row_target_arg
+                .as_ref()
+                .is_some_and(|target| target.inner.is_empty());
+        let mut rows_kept = false;
+        if let (Some(obj), Some(target)) = (target_index, &row_target_arg)
+            && level.is_none()
+            && !empty_rows
+            && self.inner.row_multiindex().is_none()
+            && let Some(index) = reindex_equal_target(self.inner.index(), obj, &target.inner)?
+        {
+            res = res.with_index(index).map_err(frame_error_to_py)?;
+            rows_kept = true;
+        }
+        // A MultiIndex target equal to the frame's row MultiIndex keeps the
+        // rows under the target's levels (they were all NaN).
+        if let (Some(obj), Some(source)) = (target_index, self.inner.row_multiindex())
+            && level.is_none()
+            && let Ok(target) = obj.extract::<PyRef<'_, PyMultiIndex>>()
+            && target.inner.equals(source)
+        {
+            res = res
+                .with_row_multiindex(target.inner.clone())
+                .map_err(frame_error_to_py)?;
+            rows_kept = true;
+        }
+        if let (Some(idx_obj), Some(target)) = (target_index.filter(|_| !rows_kept), row_target_arg)
+        {
             // Points over an IntervalIndex take the rows of the intervals
             // holding them, under the points (they were all NaN; s08y7).
             if let Some(mapped) = interval_point_targets(self.inner.index(), target.inner.labels())?
@@ -49540,14 +49710,31 @@ impl PyDataFrame {
                 tolerance,
             )?;
             row_target = Some(row_labels.clone());
+            // An aware target over naive rows, or the reverse, finds none.
+            let source =
+                if method.is_none() && reindex_zones_mismatch(self.inner.index(), &target.inner) {
+                    res.head(0).map_err(frame_error_to_py)?
+                } else {
+                    res
+                };
             res = match (method, &fill) {
                 (Some(m), _) => {
-                    res.reindex_with_method_options(row_labels, m, limit, tolerance.as_deref())
+                    source.reindex_with_method_options(row_labels, m, limit, tolerance.as_deref())
                 }
-                (None, Some(f)) => res.reindex_fill(row_labels, f.clone()),
-                (None, None) => res.reindex(row_labels),
+                (None, Some(f)) => source.reindex_fill(row_labels, f.clone()),
+                (None, None) => source.reindex(row_labels),
             }
             .map_err(frame_error_to_py)?;
+            if empty_rows {
+                res = self.inner.head(0).map_err(frame_error_to_py)?;
+            } else if target.inner.range_span().is_some() {
+                // A range target is the result's RangeIndex, as the Series'
+                // (br-frankenpandas-7bope), under the name the reindex kept.
+                let index = target.inner.clone().rename_index(res.index().name());
+                res = res.with_index(index).map_err(frame_error_to_py)?;
+            } else if let Some(index) = reindex_target_dtype(res.index(), idx_obj)? {
+                res = res.with_index(index).map_err(frame_error_to_py)?;
+            }
             // The rows are the target's labels: a tz-aware target keeps its
             // zone (fvsao.60) and a date_range its freq.
             if let Some(zone) = target.inner.tz() {
