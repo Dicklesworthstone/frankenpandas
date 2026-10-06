@@ -27755,3 +27755,39 @@ def test_object_ndarray_keeps_object_22nzm(case: str) -> None:
 def test_object_ndarray_sums_like_pandas_22nzm() -> None:
     for values in [(1, 2, 3), (1, None, 3), (1.5, 2.5)]:
         assert fpd.Series(_22nzm_array(*values)).sum() == pd.Series(_22nzm_array(*values)).sum()
+
+
+# br-frankenpandas-it9kh: `del df[key]` reads the key as pandas' label, as
+# `df[key]` does - an int / float / bool / Timestamp label, not only a str.
+def _it9kh_after_del(make: Any, key: Any) -> Any:
+    frame = make()
+    try:
+        del frame[key]
+    except KeyError:
+        return "KeyError"
+    return [repr(list(frame.columns)), [str(dtype) for dtype in frame.dtypes], repr(frame.values.tolist())]
+
+
+_IT9KH_CASES = {
+    "int label": (lambda m: m.DataFrame(np.arange(6.0).reshape(2, 3)), 0),
+    "last int label": (lambda m: m.DataFrame(np.arange(6.0).reshape(2, 3)), 2),
+    "float label": (lambda m: m.DataFrame({1.5: [1], 2.5: [2]}), 1.5),
+    "bool label": (lambda m: m.DataFrame({True: [1], False: [2]}), False),
+    "Timestamp label": (lambda m: m.DataFrame({m.Timestamp("2024-01-01"): [1], m.Timestamp("2024-01-02"): [2]}), "ts"),
+    "str label": (lambda m: m.DataFrame({"a": [1], "b": [2]}), "a"),
+    "repeated str label": (lambda m: m.DataFrame([[1, 2, 3]], columns=["a", "b", "a"]), "a"),
+    "str '0' beside int 0 (NEGATIVE: KeyError)": (lambda m: m.DataFrame(np.arange(6.0).reshape(2, 3)), "0"),
+    "missing label (NEGATIVE: KeyError)": (lambda m: m.DataFrame(np.arange(6.0).reshape(2, 3)), 7),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_IT9KH_CASES))
+def test_del_reads_the_label_like_pandas_it9kh(case: str) -> None:
+    make, key = _IT9KH_CASES[case]
+
+    def shown(m: Any) -> Any:
+        label = m.Timestamp("2024-01-01") if key == "ts" else key
+        return _it9kh_after_del(lambda: make(m), label)
+
+    assert shown(fpd) == shown(pd)

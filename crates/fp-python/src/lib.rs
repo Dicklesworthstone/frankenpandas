@@ -42040,10 +42040,14 @@ impl PyDataFrame {
 
     /// `del df[name]` drops that column, as pandas (KeyError when absent).
     fn __delitem__(&mut self, key: &Bound<'_, PyAny>) -> PyResult<()> {
-        let name: String = key.extract()?;
-        if self.inner.column(&name).is_none() {
-            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(name));
-        }
+        // By the label pandas reads, as `df[key]` finds it: the integer 0
+        // names DataFrame(array)'s first column, '0' does not (a str was
+        // required: del df[0] raised TypeError; br-frankenpandas-it9kh).
+        let Some(name) = self.column_name_for(key) else {
+            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                key.clone().unbind(),
+            ));
+        };
         self.inner = self.inner.drop_column(&name).map_err(frame_error_to_py)?;
         Ok(())
     }
