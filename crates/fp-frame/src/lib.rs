@@ -5269,12 +5269,32 @@ fn validity_flags(validity: &ValidityMask, len: usize, valid: bool) -> Vec<bool>
     if validity.all() {
         return vec![valid; len];
     }
+    // A byte of the mask at a time, its eight flags copied from a table (bit
+    // by bit through a Map it was most of s.notna(): 0.50 ms a million rows,
+    // pandas 0.15; br-frankenpandas-ivgh5); the word inverted for the
+    // missing flags. The last word's bits past `len` are cut off.
+    const BYTE_FLAGS: [[bool; 8]; 256] = {
+        let mut table = [[false; 8]; 256];
+        let mut byte = 0;
+        while byte < 256 {
+            let mut bit = 0;
+            while bit < 8 {
+                table[byte][bit] = (byte >> bit) & 1 == 1;
+                bit += 1;
+            }
+            byte += 1;
+        }
+        table
+    };
     let words = validity.packed_words_for_scan();
-    let mut flags = Vec::with_capacity(len);
-    for (block, word) in words.iter().enumerate() {
-        let rows = len.saturating_sub(block * 64).min(64);
-        flags.extend((0..rows).map(|bit| (word >> bit & 1 == 1) == valid));
+    let mut flags = Vec::with_capacity(words.len() * 64);
+    for word in words {
+        let word = if valid { word } else { !word };
+        for byte in word.to_le_bytes() {
+            flags.extend_from_slice(&BYTE_FLAGS[usize::from(byte)]);
+        }
     }
+    flags.truncate(len);
     flags
 }
 
@@ -172727,6 +172747,36 @@ mod tests {
                 .with_index(Index::from_i64_values(vec![1, 1, 2]))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn validity_flags_unpack_like_the_bit_loop_ivgh5() {
+        // The byte-table unpack is the bit-by-bit flags, either sense, for
+        // lengths around word and byte boundaries, all-valid and all-missing.
+        let bit_loop = |validity: &ValidityMask, len: usize, valid: bool| -> Vec<bool> {
+            (0..len).map(|i| validity.get(i) == valid).collect()
+        };
+        for len in [0, 1, 7, 8, 9, 63, 64, 65, 127, 128, 130, 1000] {
+            for pattern in 0..4 {
+                let mut validity = ValidityMask::all_valid(len);
+                for i in 0..len {
+                    let keep = match pattern {
+                        0 => i % 3 != 0,
+                        1 => i % 7 == 2,
+                        2 => false,
+                        _ => i != len / 2,
+                    };
+                    validity.set(i, keep);
+                }
+                for valid in [true, false] {
+                    assert_eq!(
+                        crate::validity_flags(&validity, len, valid),
+                        bit_loop(&validity, len, valid),
+                        "len {len} valid {valid}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
