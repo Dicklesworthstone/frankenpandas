@@ -4168,6 +4168,45 @@ fn fill_reindex_positions(
         .collect())
 }
 
+/// `target`'s positions in a unique `source` when both hold int labels in a
+/// typed backing (a range, an int64 buffer), without an `IndexLabel` made: an
+/// affine source (a RangeIndex) by arithmetic, any other by one map of its
+/// values. None (the caller resolves labels) for any other pair. A reindex of
+/// a million rows to a range made both label sets first (15-27 ms where
+/// pandas takes 3-13; br-frankenpandas-mcq15).
+fn reindex_positions_typed(source: &Index, target: &Index) -> Option<Vec<Option<usize>>> {
+    if !(source.has_int64_backing() && target.has_int64_backing()) {
+        return None;
+    }
+    let targets = target.int64_label_values()?;
+    let len = source.len();
+    let affine = source
+        .int64_unit_range_labels()
+        .map(|(start, _)| (start, 1))
+        .or_else(|| source.range_span().map(|(start, _, step)| (start, step)));
+    if let Some((start, step)) = affine {
+        return Some(
+            targets
+                .iter()
+                .map(|&value| {
+                    let offset = value.checked_sub(start)?;
+                    if offset % step != 0 {
+                        return None;
+                    }
+                    usize::try_from(offset / step).ok().filter(|&at| at < len)
+                })
+                .collect(),
+        );
+    }
+    let values = source.int64_label_values()?;
+    let mut at: FxHashMap<i64, usize> =
+        FxHashMap::with_capacity_and_hasher(values.len(), Default::default());
+    for (position, &value) in values.iter().enumerate() {
+        at.entry(value).or_insert(position);
+    }
+    Some(targets.iter().map(|value| at.get(value).copied()).collect())
+}
+
 /// Resolve `target` label positions against `src` using a dense direct-address
 /// table, valid only when every `src` label is a bounded-range `Int64`.
 ///
@@ -13955,6 +13994,15 @@ impl Series {
     ///
     /// Matches `pd.Series.reindex(new_index)`.
     pub fn reindex(&self, new_labels: Vec<IndexLabel>) -> Result<Self, FrameError> {
+        self.reindex_to_index(&Index::new(new_labels))
+    }
+
+    /// [`Self::reindex`] to the labels of `target`, kept as they are (a
+    /// range, an int64 buffer): over int labels on both sides the positions
+    /// come without a label made (see `reindex_positions_typed`;
+    /// br-frankenpandas-mcq15). The result's index is `target` under this
+    /// Series' index name.
+    pub fn reindex_to_index(&self, target: &Index) -> Result<Self, FrameError> {
         if self.index.has_duplicates() {
             return Err(FrameError::CompatibilityRejected(
                 "reindex cannot handle duplicate index labels".to_owned(),
@@ -13962,7 +14010,11 @@ impl Series {
         }
         // Per br-frankenpandas-1lo93: pandas preserves the index name when
         // reindexing with a flat label list. Was lost via Index::new.
-        let new_index = Index::new(new_labels).rename_index(self.index.name());
+        let new_index = target.clone().rename_index(self.index.name());
+        if let Some(positions) = reindex_positions_typed(&self.index, &new_index) {
+            let col = reindex_column_with_invented_gaps(&self.column, &positions)?;
+            return Self::new(self.name.clone(), new_index, col);
+        }
 
         // Fast path (br-frankenpandas-rdxia): when every source label is a
         // bounded-range Int64, resolve target positions through a dense
@@ -89833,6 +89885,13 @@ impl DataFrame {
     ///
     /// Missing rows are filled with NaN.
     pub fn reindex(&self, new_labels: Vec<IndexLabel>) -> Result<Self, FrameError> {
+        self.reindex_to_index(&Index::new(new_labels))
+    }
+
+    /// [`Self::reindex`] to the labels of `target`, kept as they are (a
+    /// range, an int64 buffer; br-frankenpandas-mcq15): the rows' index is
+    /// `target` under this frame's index name.
+    pub fn reindex_to_index(&self, target: &Index) -> Result<Self, FrameError> {
         if self.index.has_duplicates() {
             return Err(FrameError::CompatibilityRejected(
                 "reindex cannot handle duplicate index labels".to_owned(),
@@ -89844,14 +89903,18 @@ impl DataFrame {
         // materializing a `Vec<Scalar>` of the whole source each time — for a
         // 100k×10 reindex that was ~58x slower than pandas. Resolve each new
         // label to `Some(row)`/`None` ONCE, shared across all columns.
-        let new_len = new_labels.len();
+        let new_len = target.len();
         // Per br-frankenpandas-1lo93: pandas preserves the index name when
         // reindexing with a flat label list. Built here (not just at the end) so
         // the fallback resolver can borrow it for `get_indexer`, which needs the
         // target's typed backing + sort_order.
-        let new_index = Index::new(new_labels).rename_index(self.index.name());
+        let new_index = target.clone().rename_index(self.index.name());
+        // Int labels on both sides resolve without a label made
+        // (reindex_positions_typed).
         let positions: Vec<Option<usize>> =
-            if let Some((start, len)) = self.index.int64_unit_range_labels() {
+            if let Some(positions) = reindex_positions_typed(&self.index, &new_index) {
+                positions
+            } else if let Some((start, len)) = self.index.int64_unit_range_labels() {
                 // Unit-range Int64 index (the pandas RangeIndex default): a label
                 // Int64(v) maps to position v-start arithmetically — O(1) per label,
                 // NO hashmap build/probe (br-frankenpandas-uza04.112). The unit range
@@ -172647,6 +172710,62 @@ mod tests {
                 .with_index(Index::from_i64_values(vec![1, 1, 2]))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn reindex_to_typed_targets_equals_the_label_lookup_mcq15() {
+        // Typed positions - an affine source by arithmetic, an int buffer by
+        // a map - give each target label the value of the source label equal
+        // to it, a missing value where none is, under the target itself
+        // (br-frankenpandas-mcq15).
+        let values: Vec<Scalar> = (0..6)
+            .map(|i| Scalar::Float64(f64::from(i) * 1.5))
+            .collect();
+        let sources = [
+            Index::from_range(0, 6, 1),
+            Index::from_range(10, 22, 2),
+            Index::from_range(5, -1, -1),
+            Index::from_i64_values(vec![7, 2, 9, 4, 11, 0]),
+        ];
+        let targets = [
+            Index::from_range(0, 12, 1),
+            Index::from_range(11, -3, -2),
+            Index::from_i64_values(vec![9, 4, 100, -1, 7]),
+            Index::from_range(0, 0, 1),
+        ];
+        for source in &sources {
+            for target in &targets {
+                assert!(
+                    target.is_empty() || crate::reindex_positions_typed(source, target).is_some()
+                );
+                let series = Series::new(
+                    "s",
+                    source.clone(),
+                    Column::from_values(values.clone()).unwrap(),
+                )
+                .unwrap();
+                let got = series.reindex_to_index(target).unwrap();
+                assert_eq!(got.index(), target);
+                assert_eq!(got.len(), target.len());
+                for (label, cell) in target.labels().iter().zip(got.values()) {
+                    match source.labels().iter().position(|at| at == label) {
+                        Some(at) => assert_eq!(cell, &values[at], "{label:?}"),
+                        None => assert!(cell.is_missing(), "{label:?}"),
+                    }
+                }
+            }
+        }
+        // NEGATIVE: a float target is left to the label lookup, and a source
+        // with duplicate labels still refuses.
+        let floats = Index::new(vec![IndexLabel::Float64(fp_index::OrderedF64(1.0))]);
+        assert!(crate::reindex_positions_typed(&sources[0], &floats).is_none());
+        let duplicated = Series::new(
+            "d",
+            Index::from_i64_values(vec![1, 1]),
+            Column::from_values(values[..2].to_vec()).unwrap(),
+        )
+        .unwrap();
+        assert!(duplicated.reindex_to_index(&targets[0]).is_err());
     }
 
     #[test]

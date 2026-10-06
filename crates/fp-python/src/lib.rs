@@ -34827,11 +34827,15 @@ impl PySeries {
         }
         let zones_mismatch =
             method.is_none() && reindex_zones_mismatch(self.inner.index(), &target.inner);
-        let labels = target.inner.labels().to_vec();
+        // The target's labels are read only where a path needs them: a plain
+        // reindex hands the target index over, and an int one needs no label
+        // made (a million were copied out first; br-frankenpandas-mcq15).
         // Points over an IntervalIndex take the rows of the intervals
         // holding them, under the points themselves (pandas' pointwise
         // get_indexer; they were all NaN, br-frankenpandas-s08y7).
-        if let Some(mapped) = interval_point_targets(self.inner.index(), &labels)? {
+        if holds_intervals(self.inner.index())
+            && let Some(mapped) = interval_point_targets(self.inner.index(), target.inner.labels())?
+        {
             let mapped = Bound::new(
                 py,
                 PyIndex {
@@ -34864,7 +34868,7 @@ impl PySeries {
             let index = self.inner.index();
             if let Some(multi) = index.row_multiindex() {
                 let position = multiindex_level_position(multi, level)?;
-                let rows = level_reindex_positions(multi, position, &labels)?;
+                let rows = level_reindex_positions(multi, position, target.inner.labels())?;
                 return self
                     .inner
                     .take(&rows)
@@ -34875,11 +34879,16 @@ impl PySeries {
         }
         // limit and tolerance bound a method's fill (they were refused,
         // br-frankenpandas-u6p7i).
-        let tolerance =
-            reindex_fill_options(self.inner.index(), labels.len(), method, limit, tolerance)?;
+        let tolerance = reindex_fill_options(
+            self.inner.index(),
+            target.inner.len(),
+            method,
+            limit,
+            tolerance,
+        )?;
         let reindexed = match method {
             Some(m) => self.inner.reindex_with_method_options(
-                labels.clone(),
+                target.inner.labels().to_vec(),
                 m,
                 limit,
                 tolerance.as_deref(),
@@ -34888,8 +34897,8 @@ impl PySeries {
             None if zones_mismatch => self
                 .inner
                 .head(0)
-                .and_then(|none| none.reindex(labels.clone())),
-            None => self.inner.reindex(labels.clone()),
+                .and_then(|none| none.reindex_to_index(&target.inner)),
+            None => self.inner.reindex_to_index(&target.inner),
         }
         .map_err(frame_error_to_py)?;
         if empty_axis {
@@ -34943,9 +34952,9 @@ impl PySeries {
         };
         let fill = py_to_scalar(py, fill)?;
         let source_positions = if zones_mismatch {
-            vec![None; labels.len()]
+            vec![None; target.inner.len()]
         } else {
-            self.inner.index().get_indexer(&Index::new(labels))
+            self.inner.index().get_indexer(&target.inner)
         };
         // A label found takes the source's own value - the reindexed column
         // had turned float by the very rows the fill replaces, so
@@ -49647,7 +49656,7 @@ impl PyDataFrame {
             ],
         )?;
         let mut res = self.inner.clone();
-        let mut row_target: Option<Vec<IndexLabel>> = None;
+        let mut row_target: Option<Index> = None;
         let mut column_target: Option<Vec<String>> = None;
         let target_index = index.or_else(|| labels.filter(|_| ax == 0));
         // Any index-like target (a DatetimeIndex raised TypeError).
@@ -49714,7 +49723,9 @@ impl PyDataFrame {
                     .map_err(frame_error_to_py)?;
                 return Ok(PyDataFrame { inner });
             }
-            let row_labels = target.inner.labels().to_vec();
+            // The target's labels are read only where a path needs them; a
+            // plain reindex hands the target index over (an int one needs no
+            // label made; br-frankenpandas-mcq15).
             // `level`: the target orders that level of a row MultiIndex
             // (level_reindex_positions; it was refused,
             // br-frankenpandas-u6p7i); a flat index's only level reindexes
@@ -49723,10 +49734,11 @@ impl PyDataFrame {
                 let rows = self.inner.index();
                 if let Some(multi) = self.inner.row_multiindex() {
                     let position = multiindex_level_position(multi, level)?;
-                    let kept: Vec<usize> = level_reindex_positions(multi, position, &row_labels)?
-                        .into_iter()
-                        .filter_map(|row| usize::try_from(row).ok())
-                        .collect();
+                    let kept: Vec<usize> =
+                        level_reindex_positions(multi, position, target.inner.labels())?
+                            .into_iter()
+                            .filter_map(|row| usize::try_from(row).ok())
+                            .collect();
                     let levels = multi.take(&kept).map_err(index_error_to_py)?;
                     let taken = res
                         .take_rows(&kept)
@@ -49740,12 +49752,12 @@ impl PyDataFrame {
             // br-frankenpandas-u6p7i).
             let tolerance = reindex_fill_options(
                 self.inner.index(),
-                row_labels.len(),
+                target.inner.len(),
                 method,
                 limit,
                 tolerance,
             )?;
-            row_target = Some(row_labels.clone());
+            row_target = Some(target.inner.clone());
             // An aware target over naive rows, or the reverse, finds none.
             let source =
                 if method.is_none() && reindex_zones_mismatch(self.inner.index(), &target.inner) {
@@ -49754,11 +49766,14 @@ impl PyDataFrame {
                     res
                 };
             res = match (method, &fill) {
-                (Some(m), _) => {
-                    source.reindex_with_method_options(row_labels, m, limit, tolerance.as_deref())
-                }
-                (None, Some(f)) => source.reindex_fill(row_labels, f.clone()),
-                (None, None) => source.reindex(row_labels),
+                (Some(m), _) => source.reindex_with_method_options(
+                    target.inner.labels().to_vec(),
+                    m,
+                    limit,
+                    tolerance.as_deref(),
+                ),
+                (None, Some(f)) => source.reindex_fill(target.inner.labels().to_vec(), f.clone()),
+                (None, None) => source.reindex_to_index(&target.inner),
             }
             .map_err(frame_error_to_py)?;
             if empty_rows {
@@ -49885,7 +49900,7 @@ impl PyDataFrame {
         // kept columns kept their dtype; br-frankenpandas-r8gr0).
         if let (Some(rows), Some(names), None) = (&row_target, &column_target, method)
             && self.inner.row_multiindex().is_none()
-            && rows.as_slice() != self.inner.index().labels()
+            && rows.labels() != self.inner.index().labels()
             && names.iter().ne(self.inner.column_names())
             && let Some(block) = reindex_block_promotion(&self.inner, fill.as_ref())
         {
@@ -49893,7 +49908,7 @@ impl PyDataFrame {
                 || self
                     .inner
                     .index()
-                    .get_indexer(&Index::new(rows.clone()))
+                    .get_indexer(rows)
                     .iter()
                     .any(Option::is_none);
             if gap {
@@ -52890,16 +52905,11 @@ fn interval_drop_labels<'py>(
 
 /// Whether `index` is an IntervalIndex: every label an interval.
 fn holds_intervals(index: &Index) -> bool {
-    // A RangeIndex holds ints: its labels were built to be asked, on every
-    // `.loc` (br-frankenpandas-sj5bn).
-    if index.range_span().is_some() {
-        return false;
-    }
-    let labels = index.labels();
-    !labels.is_empty()
-        && labels
-            .iter()
-            .all(|label| matches!(label, IndexLabel::Interval(_)))
+    // The labels' kinds, kept per label identity: a RangeIndex's or an int
+    // buffer's answer without a label made (br-frankenpandas-sj5bn), any
+    // other's after one pass (every `.loc` and reindex scanned them;
+    // br-frankenpandas-mcq15).
+    !index.is_empty() && index.label_kinds().within(fp_index::LabelKinds::INTERVAL)
 }
 
 /// [`interval_point_key`] of a frame's `.loc` / `.at` key: a (rows,
