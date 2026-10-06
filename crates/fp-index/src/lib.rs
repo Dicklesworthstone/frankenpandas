@@ -4047,6 +4047,26 @@ impl Index {
     /// position; missing selectors, or ones equal to no int (an integral
     /// Float64 is its int), map to `None` and callers preserve their own
     /// fail-closed error surface.
+    /// Each of `targets`' position in these unique int labels (a typed
+    /// backing's), through the lookup kept per label identity - built once
+    /// for this index, as pandas keeps its engine - None for labels that are
+    /// not unique ints held typed (br-frankenpandas-mcq15).
+    #[must_use]
+    #[doc(hidden)]
+    pub fn unique_int64_positions_of(&self, targets: &[i64]) -> Option<Vec<Option<usize>>> {
+        if !self.labels.has_lazy_int64_backing() || self.has_duplicates() {
+            return None;
+        }
+        let values = self.labels.int64_view()?;
+        let lookup = int64_position_lookup_cached(self.label_identity, &values);
+        Some(
+            targets
+                .iter()
+                .map(|value| lookup.get(value).copied())
+                .collect(),
+        )
+    }
+
     #[must_use]
     #[doc(hidden)]
     pub fn unsorted_unique_int64_positions(
