@@ -19039,6 +19039,25 @@ impl Column {
             (DType::Float64, Scalar::Float64(_) | Scalar::Int64(_)) => {
                 let data = self.as_f64_slice()?;
                 let s = scalar.to_f64().ok().filter(|s| !s.is_nan())?;
+                // A finite number (nonzero under * and /) makes no NaN of these
+                // NaN-free values - inf - inf, inf * 0 and 0 / 0 need an inf or
+                // a zero on its side - so there is no witness to fold and the
+                // sweep is the plain vectorized op (the witness was two thirds
+                // of x * 2's loop; br-frankenpandas-uf0mw).
+                if s.is_finite()
+                    && (s != 0.0 || matches!(op, ArithmeticOp::Add | ArithmeticOp::Sub))
+                {
+                    let out: Vec<f64> = match (op, scalar_left) {
+                        (ArithmeticOp::Add, _) => data.iter().map(|&v| v + s).collect(),
+                        (ArithmeticOp::Sub, false) => data.iter().map(|&v| v - s).collect(),
+                        (ArithmeticOp::Sub, true) => data.iter().map(|&v| s - v).collect(),
+                        (ArithmeticOp::Mul, _) => data.iter().map(|&v| v * s).collect(),
+                        (ArithmeticOp::Div, false) => data.iter().map(|&v| v / s).collect(),
+                        (ArithmeticOp::Div, true) => data.iter().map(|&v| s / v).collect(),
+                        _ => return None,
+                    };
+                    return Some(Self::from_f64_all_valid_with_finite_opt(out, None));
+                }
                 let mut output_nan = false;
                 // One monomorphic loop per op (a fn pointer per element does
                 // not vectorize), the NaN witness folded into the sweep.
@@ -19142,6 +19161,25 @@ impl Column {
     /// the number's all-valid broadcast - + - * / in one sweep, ** // % by
     /// the same per-element helpers on the same threads.
     fn int_float_scalar(data: &[i64], s: f64, op: ArithmeticOp, scalar_left: bool) -> Self {
+        // Every int reads as a finite f64, so a finite number (nonzero under
+        // * and /) makes no NaN: the plain sweep, as binary_scalar's float arm.
+        let plain =
+            s.is_finite() && (s != 0.0 || matches!(op, ArithmeticOp::Add | ArithmeticOp::Sub));
+        let out: Option<Vec<f64>> = match (op, scalar_left) {
+            _ if !plain => None,
+            (ArithmeticOp::Add, false) => Some(data.iter().map(|&v| v as f64 + s).collect()),
+            (ArithmeticOp::Add, true) => Some(data.iter().map(|&v| s + v as f64).collect()),
+            (ArithmeticOp::Sub, false) => Some(data.iter().map(|&v| v as f64 - s).collect()),
+            (ArithmeticOp::Sub, true) => Some(data.iter().map(|&v| s - v as f64).collect()),
+            (ArithmeticOp::Mul, false) => Some(data.iter().map(|&v| v as f64 * s).collect()),
+            (ArithmeticOp::Mul, true) => Some(data.iter().map(|&v| s * v as f64).collect()),
+            (ArithmeticOp::Div, false) => Some(data.iter().map(|&v| v as f64 / s).collect()),
+            (ArithmeticOp::Div, true) => Some(data.iter().map(|&v| s / v as f64).collect()),
+            _ => None,
+        };
+        if let Some(out) = out {
+            return Self::from_f64_values_owned_tracked(out, false);
+        }
         let mut output_nan = false;
         macro_rules! sweep {
             ($apply:expr) => {
