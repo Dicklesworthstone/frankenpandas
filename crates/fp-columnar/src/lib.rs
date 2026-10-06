@@ -12319,46 +12319,58 @@ impl Column {
     /// to skip cloning when values already have the correct dtype.
     pub fn new(dtype: DType, values: Vec<Scalar>) -> Result<Self, ColumnError> {
         if dtype == DType::Categorical {
-            let mut categories: Vec<Scalar> = Vec::new();
-            let mut seen_keys = rustc_hash::FxHashSet::default();
-            let mut normalized = Vec::with_capacity(values.len());
-
             #[derive(Hash, PartialEq, Eq)]
-            enum CatKey {
+            enum CatKey<'a> {
                 Bool(bool),
                 Int64(i64),
                 FloatBits(u64),
-                Utf8(Box<str>),
+                Utf8(&'a str),
                 Timedelta64(i64),
                 Datetime64(i64),
                 Period(i64),
             }
 
-            for val in values {
-                if val.is_missing() {
-                    normalized.push(Scalar::Null(NullKind::NaN));
-                } else {
-                    let key = match &val {
-                        Scalar::Bool(b) => Some(CatKey::Bool(*b)),
-                        Scalar::Int64(i) => Some(CatKey::Int64(*i)),
-                        Scalar::Float64(f) => {
-                            let norm = if *f == 0.0 { 0.0 } else { *f };
-                            Some(CatKey::FloatBits(norm.to_bits()))
-                        }
-                        Scalar::Utf8(s) => Some(CatKey::Utf8(s.clone().into())),
-                        Scalar::Timedelta64(t) => Some(CatKey::Timedelta64(*t)),
-                        Scalar::Datetime64(d) => Some(CatKey::Datetime64(*d)),
-                        Scalar::Period(p) => Some(CatKey::Period(p.ordinal)),
-                        _ => None,
-                    };
-                    if let Some(k) = key
-                        && seen_keys.insert(k)
-                    {
-                        categories.push(val.clone());
+            fn cat_key(val: &Scalar) -> Option<CatKey<'_>> {
+                match val {
+                    Scalar::Bool(b) => Some(CatKey::Bool(*b)),
+                    Scalar::Int64(i) => Some(CatKey::Int64(*i)),
+                    Scalar::Float64(f) => {
+                        let norm = if *f == 0.0 { 0.0 } else { *f };
+                        Some(CatKey::FloatBits(norm.to_bits()))
                     }
-                    normalized.push(val);
+                    Scalar::Utf8(s) => Some(CatKey::Utf8(s.as_str())),
+                    Scalar::Timedelta64(t) => Some(CatKey::Timedelta64(*t)),
+                    Scalar::Datetime64(d) => Some(CatKey::Datetime64(*d)),
+                    Scalar::Period(p) => Some(CatKey::Period(p.ordinal)),
+                    _ => None,
                 }
             }
+
+            // The categories, first seen, keyed by the values themselves: an
+            // owned key per value cloned every text value once more (a
+            // million strings' astype('category') 77 ms, pandas 35;
+            // br-frankenpandas-6nywz).
+            let mut categories: Vec<Scalar> = Vec::new();
+            let mut seen_keys = rustc_hash::FxHashSet::default();
+            for val in &values {
+                if !val.is_missing()
+                    && let Some(key) = cat_key(val)
+                    && seen_keys.insert(key)
+                {
+                    categories.push(val.clone());
+                }
+            }
+            drop(seen_keys);
+            let normalized: Vec<Scalar> = values
+                .into_iter()
+                .map(|val| {
+                    if val.is_missing() {
+                        Scalar::Null(NullKind::NaN)
+                    } else {
+                        val
+                    }
+                })
+                .collect();
 
             categories.sort_by(|a, b| compare_scalars_na_last(a, b, true));
 
@@ -38710,6 +38722,63 @@ mod tests {
         // NEGATIVE: an all-missing codes column holds no category.
         let none = Column::from_category_codes(DType::Interval, vec![u32::MAX; 3], categories);
         assert!(none.values().iter().all(Scalar::is_missing));
+    }
+
+    #[test]
+    fn categorical_new_keys_by_borrowed_values_6nywz() {
+        // The categories are the distinct keyed values, first seen, sorted
+        // (-0.0 one with 0.0), every value kept and a missing one NaN - the
+        // owned-key construction's answer without a String per value
+        // (br-frankenpandas-6nywz).
+        let text = |s: &str| Scalar::Utf8(s.to_owned());
+        let values = vec![
+            text("b"),
+            text("a"),
+            Scalar::Null(NullKind::Null),
+            text("b"),
+            text("c"),
+            Scalar::Null(NullKind::NaN),
+            text("a"),
+        ];
+        let column = Column::new(DType::Categorical, values.clone()).expect("categorical");
+        assert_eq!(column.dtype(), DType::Categorical);
+        let meta = column.categorical().expect("categories");
+        assert_eq!(meta.categories, vec![text("a"), text("b"), text("c")]);
+        assert!(!meta.ordered);
+        let expected: Vec<Scalar> = values
+            .iter()
+            .map(|value| {
+                if value.is_missing() {
+                    Scalar::Null(NullKind::NaN)
+                } else {
+                    value.clone()
+                }
+            })
+            .collect();
+        assert_eq!(column.values(), expected.as_slice());
+        let floats = Column::new(
+            DType::Categorical,
+            vec![
+                Scalar::Float64(-0.0),
+                Scalar::Float64(1.5),
+                Scalar::Float64(0.0),
+            ],
+        )
+        .expect("float categories");
+        assert_eq!(
+            floats.categorical().expect("categories").categories.len(),
+            2
+        );
+        // NEGATIVE: a kind with no key (an interval) is a value but no
+        // category, as before.
+        let interval = Scalar::Interval(Interval::new(0.0, 1.0, IntervalClosed::Right));
+        let mixed = Column::new(DType::Categorical, vec![interval.clone(), text("z")])
+            .expect("mixed categorical");
+        assert_eq!(
+            mixed.categorical().expect("categories").categories,
+            vec![text("z")]
+        );
+        assert!(mixed.values()[0].semantic_eq(&interval));
     }
 
     #[test]
