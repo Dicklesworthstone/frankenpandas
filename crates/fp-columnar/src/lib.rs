@@ -2617,6 +2617,105 @@ fn python_mod_i64(lhs: i64, rhs: i64) -> i64 {
     value
 }
 
+/// Division of `u64` values by one divisor `1 <= d < 2^63` as a multiply-high
+/// and shifts - Granlund and Montgomery's round-up method (Hacker's Delight
+/// 10-8), exact for every `u64` - where a hardware divide per value cost 20+
+/// cycles (k // 3 1.7 ms, pandas' libdivide 0.64; br-frankenpandas-uf0mw).
+#[derive(Clone, Copy)]
+enum ConstDivisorU64 {
+    One,
+    Shift(u32),
+    Magic { magic: u64, shift: u32 },
+}
+
+impl ConstDivisorU64 {
+    fn new(divisor: u64) -> Self {
+        debug_assert!((1..1 << 63).contains(&divisor));
+        if divisor == 1 {
+            return Self::One;
+        }
+        if divisor.is_power_of_two() {
+            return Self::Shift(divisor.trailing_zeros());
+        }
+        // l = ceil(log2 d) in 2..=63; m = floor(2^(64 + l) / d) - 2^64 + 1,
+        // which fits a u64 for any d that is not a power of two.
+        let l = 64 - (divisor - 1).leading_zeros();
+        let magic = (1_u128 << (64 + l)) / u128::from(divisor) - (1_u128 << 64) + 1;
+        Self::Magic {
+            magic: magic as u64,
+            shift: l - 1,
+        }
+    }
+
+    #[inline]
+    fn divide(self, n: u64) -> u64 {
+        match self {
+            Self::One => n,
+            Self::Shift(shift) => n >> shift,
+            Self::Magic { magic, shift } => {
+                let high = ((u128::from(n) * u128::from(magic)) >> 64) as u64;
+                (high + ((n - high) >> 1)) >> shift
+            }
+        }
+    }
+
+    /// Python's floor division `n // d` for the divisor `d > 0` this was made
+    /// of: [`python_floor_div_i64`]'s value.
+    #[inline]
+    fn floor_div(self, n: i64, divisor: i64) -> i64 {
+        if n >= 0 {
+            return self.divide(n.unsigned_abs()) as i64;
+        }
+        // floor(n / d) = -ceil(|n| / d); |n| <= 2^63 and d - 1 < 2^63, so the
+        // sum fits, and the quotient 2^63 (i64::MIN // 1) wraps back to MIN.
+        let magnitude = n.unsigned_abs() + (divisor.unsigned_abs() - 1);
+        (self.divide(magnitude) as i64).wrapping_neg()
+    }
+
+    /// Python's `n % d` for the divisor `d > 0`: `n - (n // d) * d`, in
+    /// `0..d` (wrapping intermediates; the remainder itself fits).
+    #[inline]
+    fn floor_mod(self, n: i64, divisor: i64) -> i64 {
+        n.wrapping_sub(self.floor_div(n, divisor).wrapping_mul(divisor))
+    }
+}
+
+/// `v.wrapping_pow(exponent)` of every `v` (the power mod 2^64 int64 wraps
+/// to, whatever the multiply order): square-and-multiply with the exponent's
+/// bits walked outside the loop over the values, so each pass is a plain
+/// multiply that vectorizes - a pow per value branched on those bits for
+/// every value (k ** 2 0.95 ms, pandas 0.26; br-frankenpandas-uf0mw).
+fn wrapping_pow_all(data: &[i64], exponent: u32) -> Vec<i64> {
+    match exponent {
+        0 => vec![1; data.len()],
+        1 => data.to_vec(),
+        2 => data.iter().map(|&v| v.wrapping_mul(v)).collect(),
+        3 => data
+            .iter()
+            .map(|&v| v.wrapping_mul(v).wrapping_mul(v))
+            .collect(),
+        _ => {
+            let mut acc = vec![1_i64; data.len()];
+            let mut base = data.to_vec();
+            let mut remaining = exponent;
+            loop {
+                if remaining & 1 == 1 {
+                    for (a, &b) in acc.iter_mut().zip(&base) {
+                        *a = a.wrapping_mul(b);
+                    }
+                }
+                remaining >>= 1;
+                if remaining == 0 {
+                    break acc;
+                }
+                for b in &mut base {
+                    *b = b.wrapping_mul(*b);
+                }
+            }
+        }
+    }
+}
+
 /// AG-10: Vectorized binary arithmetic on `&[i64]` slices.
 ///
 /// Produces `i64` results for Add/Sub/Mul. For Div, returns `None`
@@ -18986,7 +19085,16 @@ impl Column {
                         return Some(Self::int_float_scalar(data, s as f64, op, scalar_left));
                     }
                     // // and % keep int64 while no divisor is 0 (a 0 makes
-                    // binary_numeric promote the column: declined here).
+                    // binary_numeric promote the column: declined here). A
+                    // positive divisor divides through its reciprocal.
+                    (ArithmeticOp::FloorDiv | ArithmeticOp::Mod, false) if s > 0 => {
+                        let divisor = ConstDivisorU64::new(s.unsigned_abs());
+                        if matches!(op, ArithmeticOp::Mod) {
+                            par_map_vec_i64(data.len(), |i| divisor.floor_mod(data[i], s))
+                        } else {
+                            par_map_vec_i64(data.len(), |i| divisor.floor_div(data[i], s))
+                        }
+                    }
                     (ArithmeticOp::FloorDiv | ArithmeticOp::Mod, false) if s != 0 => {
                         let apply = if matches!(op, ArithmeticOp::Mod) {
                             python_mod_i64
@@ -19006,8 +19114,7 @@ impl Column {
                     // int ** int wraps as int64; a negative exponent is the
                     // error binary_numeric raises (declined here).
                     (ArithmeticOp::Pow, false) if s >= 0 => {
-                        let exponent = u32::try_from(s).unwrap_or(u32::MAX);
-                        data.iter().map(|&v| v.wrapping_pow(exponent)).collect()
+                        wrapping_pow_all(data, u32::try_from(s).unwrap_or(u32::MAX))
                     }
                     (ArithmeticOp::Pow, true) if data.iter().all(|&v| v >= 0) => data
                         .iter()
@@ -20806,6 +20913,35 @@ impl Column {
             return Ok(Self::from_bool_values(bools));
         }
         if let (Some(l), Some(r)) = (self.as_i64_slice(), right.as_i64_slice()) {
+            let zip = || l.iter().zip(r);
+            let bools: Vec<bool> = match op {
+                ComparisonOp::Gt => zip().map(|(&a, &b)| a > b).collect(),
+                ComparisonOp::Lt => zip().map(|(&a, &b)| a < b).collect(),
+                ComparisonOp::Eq => zip().map(|(&a, &b)| a == b).collect(),
+                ComparisonOp::Ne => zip().map(|(&a, &b)| a != b).collect(),
+                ComparisonOp::Ge => zip().map(|(&a, &b)| a >= b).collect(),
+                ComparisonOp::Le => zip().map(|(&a, &b)| a <= b).collect(),
+            };
+            return Ok(Self::from_bool_values(bools));
+        }
+        // Float64 against Int64 (either side): scalar_compare reads the pair
+        // as f64 (their common dtype), so the ints read as f64 in the sweep
+        // answer each cell (x > k went cell by cell: 3.5 ms, pandas 0.4;
+        // br-frankenpandas-uf0mw).
+        let mixed: Option<(Vec<f64>, &[f64], bool)> =
+            match (self.as_i64_slice(), right.as_f64_slice()) {
+                (Some(l), Some(r)) => Some((l.iter().map(|&v| v as f64).collect(), r, false)),
+                _ => match (self.as_f64_slice(), right.as_i64_slice()) {
+                    (Some(l), Some(r)) => Some((r.iter().map(|&v| v as f64).collect(), l, true)),
+                    _ => None,
+                },
+            };
+        if let Some((ints, floats, ints_right)) = mixed {
+            let (l, r): (&[f64], &[f64]) = if ints_right {
+                (floats, &ints)
+            } else {
+                (&ints, floats)
+            };
             let zip = || l.iter().zip(r);
             let bools: Vec<bool> = match op {
                 ComparisonOp::Gt => zip().map(|(&a, &b)| a > b).collect(),
@@ -35261,8 +35397,8 @@ mod tests {
 
     use super::{
         ArithmeticOp, BoolAffineSelectionWitness, Column, ColumnData, ColumnError, ComparisonOp,
-        ScalarValues, SparseColumn, ValidityMask, python_floor_div_i64, python_mod_i64,
-        scalar_compare,
+        ConstDivisorU64, ScalarValues, SparseColumn, ValidityMask, binary_f64_apply,
+        python_floor_div_i64, python_mod_i64, scalar_compare, wrapping_pow_all,
     };
 
     #[test]
@@ -39586,6 +39722,165 @@ mod tests {
             .map(Scalar::Int64)
             .collect();
         assert_eq!(powered.values(), want.as_slice());
+    }
+
+    #[test]
+    fn const_divisor_is_pythons_floor_div_and_mod_uf0mw() {
+        // br-frankenpandas-uf0mw: the multiply-high reciprocal is
+        // python_floor_div_i64 / python_mod_i64 for every positive divisor
+        // shape (1, powers of two, magic) and the i64 extremes; its unsigned
+        // divide is `/` itself.
+        let divisors = [
+            1,
+            2,
+            3,
+            5,
+            6,
+            7,
+            10,
+            641,
+            1000,
+            (1 << 31) - 1,
+            1 << 32,
+            (1 << 32) + 15,
+            1 << 62,
+            (1 << 62) + 1,
+            i64::MAX,
+        ];
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for &d in &divisors {
+            let divisor = ConstDivisorU64::new(d.unsigned_abs());
+            let mut values = vec![
+                0,
+                1,
+                -1,
+                d - 1,
+                d,
+                d.wrapping_add(1),
+                -d,
+                (-d).wrapping_sub(1),
+                i64::MAX,
+                i64::MIN,
+                i64::MIN + 1,
+                i64::MAX - 1,
+            ];
+            values.extend((0..20_000).map(|_| next() as i64));
+            values.extend((0..2_000).map(|_| (next() % 4096) as i64 - 2048));
+            for &n in &values {
+                assert_eq!(
+                    divisor.floor_div(n, d),
+                    python_floor_div_i64(n, d),
+                    "{n} // {d}"
+                );
+                assert_eq!(divisor.floor_mod(n, d), python_mod_i64(n, d), "{n} % {d}");
+                let unsigned = n as u64;
+                assert_eq!(
+                    divisor.divide(unsigned),
+                    unsigned / d.unsigned_abs(),
+                    "{unsigned} / {d}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wrapping_pow_all_is_wrapping_pow_uf0mw() {
+        // br-frankenpandas-uf0mw: the exponent-outside square-and-multiply is
+        // each value's wrapping_pow, the small exponents' shortcuts included.
+        let data = [0, 1, -1, 2, 3, -7, 12, i64::MAX, i64::MIN, 1 << 31];
+        for exponent in (0..=70).chain([255, 1 << 20, u32::MAX]) {
+            let want: Vec<i64> = data.iter().map(|&v| v.wrapping_pow(exponent)).collect();
+            assert_eq!(wrapping_pow_all(&data, exponent), want, "** {exponent}");
+        }
+    }
+
+    #[test]
+    fn mixed_int_float_columns_take_the_f64_view_values_uf0mw() {
+        // br-frankenpandas-uf0mw: Float64 against Int64 (+ - * /, either
+        // side) and Int64 / Int64 read the ints as f64 - the values
+        // binary_f64_apply gives, a generated NaN (inf - inf) missing; the
+        // typed mixed comparison is scalar_compare's cell by cell.
+        let bits = |column: &Column| -> Vec<(Option<u64>, bool)> {
+            (0..column.len())
+                .map(|i| {
+                    let value = match &column.values()[i] {
+                        Scalar::Float64(v) => Some(v.to_bits()),
+                        _ => None,
+                    };
+                    (value, column.validity().get(i))
+                })
+                .collect()
+        };
+        let floats = vec![
+            0.5,
+            -1.5,
+            f64::INFINITY,
+            -0.0,
+            1e300,
+            7.0,
+            f64::NEG_INFINITY,
+        ];
+        let ints = vec![3, -7, 0, (1 << 53) + 1, i64::MIN, 7, -1];
+        let x = Column::from_f64_values(floats.clone());
+        let k = Column::from_i64_values(ints.clone());
+        for op in [
+            ArithmeticOp::Add,
+            ArithmeticOp::Sub,
+            ArithmeticOp::Mul,
+            ArithmeticOp::Div,
+        ] {
+            let apply = binary_f64_apply(op);
+            let want = |l: &[f64], r: &[f64]| {
+                Column::from_f64_values_owned(l.iter().zip(r).map(|(&a, &b)| apply(a, b)).collect())
+            };
+            let as_f64: Vec<f64> = ints.iter().map(|&v| v as f64).collect();
+            assert_eq!(
+                bits(&x.binary_numeric(&k, op).unwrap()),
+                bits(&want(&floats, &as_f64)),
+                "x {op:?} k"
+            );
+            assert_eq!(
+                bits(&k.binary_numeric(&x, op).unwrap()),
+                bits(&want(&as_f64, &floats)),
+                "k {op:?} x"
+            );
+        }
+        let ones = Column::from_i64_values(vec![2, 0, -3, 1, 4, 0, 5]);
+        let quotient = k.binary_numeric(&ones, ArithmeticOp::Div).unwrap();
+        let want: Vec<f64> = ints
+            .iter()
+            .zip([2_i64, 0, -3, 1, 4, 0, 5])
+            .map(|(&a, b)| a as f64 / b as f64)
+            .collect();
+        assert_eq!(bits(&quotient), bits(&Column::from_f64_values_owned(want)));
+        for op in [
+            ComparisonOp::Gt,
+            ComparisonOp::Lt,
+            ComparisonOp::Eq,
+            ComparisonOp::Ne,
+            ComparisonOp::Ge,
+            ComparisonOp::Le,
+        ] {
+            let ours = x.binary_comparison(&k, op).unwrap();
+            let theirs = k.binary_comparison(&x, op).unwrap();
+            for i in 0..floats.len() {
+                let (f, n) = (Scalar::Float64(floats[i]), Scalar::Int64(ints[i]));
+                assert_eq!(
+                    ours.values()[i],
+                    Scalar::Bool(scalar_compare(&f, &n, op).unwrap())
+                );
+                assert_eq!(
+                    theirs.values()[i],
+                    Scalar::Bool(scalar_compare(&n, &f, op).unwrap())
+                );
+            }
+        }
     }
 
     #[test]

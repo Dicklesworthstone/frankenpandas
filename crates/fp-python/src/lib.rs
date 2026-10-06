@@ -25445,7 +25445,11 @@ fn number_scalar(other: &Bound<'_, PyAny>) -> Option<Scalar> {
 /// Series with different labels; only the flex methods align them
 /// (br-frankenpandas-zwfz3: the operators aligned too).
 fn check_comparable(this: &Series, other: &Bound<'_, PyAny>) -> PyResult<()> {
+    // Index equality first: it answers two equal ranges (or one index) without
+    // a label each - two million-row RangeIndexes built and compared their
+    // labels for every `x > k` (br-frankenpandas-uf0mw).
     if let Ok(series) = other.extract::<PyRef<'_, PySeries>>()
+        && series.inner.index() != this.index()
         && series.inner.index().labels() != this.index().labels()
     {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
