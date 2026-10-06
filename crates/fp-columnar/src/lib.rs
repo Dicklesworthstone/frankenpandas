@@ -2692,6 +2692,25 @@ fn vectorized_binary_i64(
     Some((out, combined))
 }
 
+/// How a window of an `i64` buffer reads its cells: the int64, datetime and
+/// timedelta columns share the buffer shape (br-frankenpandas-d2xp1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum I64CellKind {
+    Int64,
+    Datetime64,
+    Timedelta64,
+}
+
+impl I64CellKind {
+    fn cell(self, value: i64) -> Scalar {
+        match self {
+            Self::Int64 => Scalar::Int64(value),
+            Self::Datetime64 => Scalar::Datetime64(value),
+            Self::Timedelta64 => Scalar::Timedelta64(value),
+        }
+    }
+}
+
 enum ScalarValues {
     /// Eager Scalar backing (the general fallback for mixed/typed columns that
     /// no lazy variant covers). The Scalar buffer is `Arc`-shared so
@@ -2723,6 +2742,17 @@ enum ScalarValues {
         data: Arc<Vec<i64>>,
         start: usize,
         len: usize,
+        values: OnceLock<Vec<Scalar>>,
+    },
+    /// A window of the `Arc<[i64]>` buffer of an all-valid int64, datetime
+    /// or timedelta column (which `LazyAllValidInt64Slice`'s `Arc<Vec<i64>>`
+    /// cannot share), each cell as `kind` reads it: a row slice of such a
+    /// column copied its range (br-frankenpandas-d2xp1).
+    LazyI64ArcWindow {
+        data: Arc<[i64]>,
+        start: usize,
+        len: usize,
+        kind: I64CellKind,
         values: OnceLock<Vec<Scalar>>,
     },
     LazyAllValidInt64Chunks {
@@ -3655,6 +3685,20 @@ impl ScalarValues {
             data,
             start,
             len,
+            values: OnceLock::new(),
+        }
+    }
+
+    fn lazy_i64_arc_window(data: Arc<[i64]>, start: usize, len: usize, kind: I64CellKind) -> Self {
+        debug_assert!(
+            start.checked_add(len).is_some_and(|end| end <= data.len()),
+            "i64 view window must lie within source data"
+        );
+        Self::LazyI64ArcWindow {
+            data,
+            start,
+            len,
+            kind,
             values: OnceLock::new(),
         }
     }
@@ -5561,6 +5605,20 @@ impl ScalarValues {
         out
     }
 
+    /// The cells of a [`Self::LazyI64ArcWindow`] read as `kind`.
+    fn i64_arc_window_data(&self, kind: I64CellKind) -> Option<&[i64]> {
+        match self {
+            Self::LazyI64ArcWindow {
+                data,
+                start,
+                len,
+                kind: own,
+                ..
+            } if *own == kind => Some(&data[*start..*start + *len]),
+            _ => None,
+        }
+    }
+
     fn chunks_i64_data(&self) -> Option<&[i64]> {
         if let Self::LazyAllValidInt64Chunks {
             chunks, len, data, ..
@@ -5765,6 +5823,20 @@ impl ScalarValues {
                         .iter()
                         .copied()
                         .map(Scalar::Int64)
+                        .collect()
+                })
+                .as_slice(),
+            Self::LazyI64ArcWindow {
+                data,
+                start,
+                len,
+                kind,
+                values,
+            } => values
+                .get_or_init(|| {
+                    data[*start..*start + *len]
+                        .iter()
+                        .map(|&value| kind.cell(value))
                         .collect()
                 })
                 .as_slice(),
@@ -6501,6 +6573,9 @@ impl ScalarValues {
             Self::LazyAllValidInt64 { data, .. } => Scalar::Int64(data[idx]),
             Self::LazyAllValidInt64Vec { data, .. } => Scalar::Int64(data[idx]),
             Self::LazyAllValidInt64Slice { data, start, .. } => Scalar::Int64(data[start + idx]),
+            Self::LazyI64ArcWindow {
+                data, start, kind, ..
+            } => kind.cell(data[start + idx]),
             Self::LazyAllValidFloat64 { data, .. } => Scalar::Float64(data[idx]),
             Self::LazyAllValidFloat64Vec { data, .. } => Scalar::Float64(data[idx]),
             Self::LazyAllValidFloat64Slice { data, start, .. } => {
@@ -6544,7 +6619,7 @@ impl ScalarValues {
             Self::LazyAllValidFloat64Vec { data, .. } => data.len(),
             Self::LazyAllValidFloat64Chunks { len, .. } => *len,
             Self::LazyAllValidFloat64Slice { len, .. } => *len,
-            Self::LazyAllValidInt64Slice { len, .. } => *len,
+            Self::LazyAllValidInt64Slice { len, .. } | Self::LazyI64ArcWindow { len, .. } => *len,
             Self::LazyAllValidFloat64Dot { len, .. } => *len,
             Self::LazyAllValidFloat64PairwiseStatMatrixColumn { plan, .. } => plan.column_len(),
             Self::LazyAllValidFloat64TransposeRow { plan, .. } => plan.column_len(),
@@ -6610,6 +6685,7 @@ impl ScalarValues {
             | Self::LazyAllValidFloat64Chunks { values, .. }
             | Self::LazyAllValidFloat64Slice { values, .. }
             | Self::LazyAllValidInt64Slice { values, .. }
+            | Self::LazyI64ArcWindow { values, .. }
             | Self::LazyAllValidFloat64Dot { values, .. }
             | Self::LazyAllValidFloat64PairwiseStatMatrixColumn { values, .. }
             | Self::LazyAllValidFloat64TransposeRow { values, .. }
@@ -6933,6 +7009,13 @@ impl Clone for ScalarValues {
             Self::LazyAllValidInt64Slice {
                 data, start, len, ..
             } => Self::lazy_all_valid_int64_slice(Arc::clone(data), *start, *len),
+            Self::LazyI64ArcWindow {
+                data,
+                start,
+                len,
+                kind,
+                ..
+            } => Self::lazy_i64_arc_window(Arc::clone(data), *start, *len, *kind),
             Self::LazyAllValidFloat64Slice {
                 data,
                 start,
@@ -14435,6 +14518,9 @@ impl Column {
             {
                 return Some(&data[*start..*start + *len]);
             }
+            if let Some(data) = self.values.i64_arc_window_data(I64CellKind::Int64) {
+                return Some(data);
+            }
             if let Some(data) = self.values.chunks_i64_data() {
                 return Some(data);
             }
@@ -14468,6 +14554,9 @@ impl Column {
         if let ScalarValues::LazyAllValidDatetime64Vec { data, .. } = &self.values {
             return Some(data.as_slice());
         }
+        if let Some(data) = self.values.i64_arc_window_data(I64CellKind::Datetime64) {
+            return Some(data);
+        }
         if let Some(ColumnData::Datetime64(data)) = &self.data {
             return Some(data);
         }
@@ -14485,6 +14574,9 @@ impl Column {
         }
         if let ScalarValues::LazyAllValidTimedelta64Vec { data, .. } = &self.values {
             return Some(data.as_slice());
+        }
+        if let Some(data) = self.values.i64_arc_window_data(I64CellKind::Timedelta64) {
+            return Some(data);
         }
         if let Some(ColumnData::Timedelta64(data)) = &self.data {
             return Some(data);
@@ -14881,6 +14973,51 @@ impl Column {
             // `LazyAllValidInt64` and `ColumnData::Int64` are `Arc<[i64]>`, which
             // cannot be re-shared as `Arc<Vec<i64>>` without the copy this window
             // exists to avoid; those keep the copying arm.
+            _ => None,
+        }
+    }
+
+    /// The `Arc<[i64]>` buffer behind an all-valid int64, datetime or
+    /// timedelta column, this column's offset into it and how its cells
+    /// read: what a `LazyI64ArcWindow` shares (br-frankenpandas-d2xp1).
+    /// Eager Scalars beside a typed cache (the `Column::new` shape) are
+    /// those cells, all valid.
+    fn i64_arc_window_source(&self) -> Option<(Arc<[i64]>, usize, I64CellKind)> {
+        if !self.validity.all() {
+            return None;
+        }
+        let kind = match self.dtype {
+            DType::Int64 => I64CellKind::Int64,
+            DType::Datetime64 { .. } => I64CellKind::Datetime64,
+            DType::Timedelta64 => I64CellKind::Timedelta64,
+            _ => return None,
+        };
+        match &self.values {
+            ScalarValues::LazyI64ArcWindow {
+                data,
+                start,
+                kind: own,
+                ..
+            } if *own == kind => return Some((Arc::clone(data), *start, kind)),
+            ScalarValues::LazyAllValidInt64 { data, .. } if kind == I64CellKind::Int64 => {
+                return Some((Arc::clone(data), 0, kind));
+            }
+            ScalarValues::LazyAllValidDatetime64 { data, .. }
+                if kind == I64CellKind::Datetime64 =>
+            {
+                return Some((Arc::clone(data), 0, kind));
+            }
+            ScalarValues::Eager(_) => {}
+            _ => return None,
+        }
+        match (&self.data, kind) {
+            (Some(ColumnData::Int64(data)), I64CellKind::Int64)
+            | (Some(ColumnData::Datetime64(data)), I64CellKind::Datetime64)
+            | (Some(ColumnData::Timedelta64(data)), I64CellKind::Timedelta64)
+                if data.len() == self.len() =>
+            {
+                Some((Arc::clone(data), 0, kind))
+            }
             _ => None,
         }
     }
@@ -16187,6 +16324,26 @@ impl Column {
                 return Self {
                     dtype: self.dtype.clone(),
                     values: ScalarValues::lazy_all_valid_int64_slice(src_data, view_start, len),
+                    validity: ValidityMask::all_valid(len),
+                    data: None,
+                    categorical: None,
+                    width: None,
+                    pandas_string: false,
+                };
+            }
+
+            // The window over an `Arc<[i64]>` int64, datetime or timedelta
+            // buffer, which the window above cannot share (they copied the
+            // range; br-frankenpandas-d2xp1).
+            if let Some((src_data, src_start, kind)) = self.i64_arc_window_source()
+                && let Some(view_start) = src_start.checked_add(start)
+                && view_start
+                    .checked_add(len)
+                    .is_some_and(|view_end| view_end <= src_data.len())
+            {
+                return Self {
+                    dtype: self.dtype.clone(),
+                    values: ScalarValues::lazy_i64_arc_window(src_data, view_start, len, kind),
                     validity: ValidityMask::all_valid(len),
                     data: None,
                     categorical: None,
@@ -36473,6 +36630,68 @@ mod tests {
         // NEGATIVE: an all-valid masked `boolean` column stays `boolean`.
         let masked = Column::new(DType::BoolNullable, vec![Scalar::Bool(true); 10]).unwrap();
         assert_eq!(same(&masked, 2, 5).dtype(), DType::BoolNullable);
+    }
+
+    #[test]
+    fn i64_arc_windows_share_the_source_buffer_d2xp1() {
+        // An all-valid int64 / datetime / timedelta column on an Arc<[i64]>
+        // slices into a window over that buffer: its typed slice points into
+        // the source, its cells are the gather's (br-frankenpandas-d2xp1).
+        let ints = Column::from_i64_values((0..150).map(|i| i * 3 - 7).collect());
+        let stamps = Column::from_datetime64_values((0..150).map(|i| i * 1_000).collect())
+            .with_dtype(DType::datetime64_tz("UTC"));
+        let spans = Column::new(
+            DType::Timedelta64,
+            (0..150_i64).map(Scalar::Timedelta64).collect(),
+        )
+        .unwrap();
+        let typed = |column: &Column| -> *const i64 {
+            column
+                .as_i64_slice()
+                .or_else(|| column.as_datetime64_slice())
+                .or_else(|| column.as_timedelta64_slice())
+                .expect("typed")
+                .as_ptr()
+        };
+        for column in [&ints, &stamps, &spans] {
+            let window = column.take_contiguous_range(5, 120);
+            let positions: Vec<usize> = (5..125).collect();
+            let gathered = column.take_positions(&positions);
+            assert_eq!(window.dtype(), column.dtype());
+            assert_eq!(window.values(), gathered.values());
+            assert_eq!(typed(&window), typed(column).wrapping_add(5));
+            assert_eq!(window.scalar_at(3), Some(column.values()[8].clone()));
+            // A window of the window shares the same buffer.
+            let inner = window.take_contiguous_range(10, 20);
+            assert_eq!(typed(&inner), typed(column).wrapping_add(15));
+            assert_eq!(inner.values(), &column.values()[15..35]);
+        }
+        // NEGATIVE: a datetime column holding a NaT is not all-valid; it
+        // copies its range (its mask sliced) as before.
+        let with_nat = Column::new(
+            DType::datetime64_naive(),
+            (0..150_i64)
+                .map(|i| {
+                    if i == 9 {
+                        Scalar::Null(NullKind::NaT)
+                    } else {
+                        Scalar::Datetime64(i)
+                    }
+                })
+                .collect(),
+        )
+        .unwrap();
+        let window = with_nat.take_contiguous_range(5, 10);
+        assert!(!window.validity().get(4));
+        assert!(!matches!(
+            window.values,
+            ScalarValues::LazyI64ArcWindow { .. }
+        ));
+        let positions: Vec<usize> = (5..15).collect();
+        assert_eq!(
+            window.values(),
+            with_nat.take_positions(&positions).values()
+        );
     }
 
     #[test]
