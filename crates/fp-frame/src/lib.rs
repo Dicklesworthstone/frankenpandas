@@ -105841,16 +105841,30 @@ impl DataFrameGroupBy<'_> {
             group_order.sort_by(|a, b| composite_key_cmp(a, b));
             return;
         }
-        group_order.sort_by(|a, b| {
-            for (level, rank) in ranks.iter().enumerate() {
-                let order = match rank {
-                    Some(rank) => {
-                        let of = |key: &ScalarKey<'_>| rank.get(key).copied().unwrap_or(usize::MAX);
-                        of(&a[level]).cmp(&of(&b[level]))
-                    }
+        // Each group's rank at each categorical level, looked up once: the
+        // comparator hashed both keys on every comparison (a 500k-category
+        // key's size() spent half its time there; br-frankenpandas-5fo6z).
+        // The same stable sort, of the groups' positions.
+        let level_ranks: Vec<Option<Vec<usize>>> = ranks
+            .iter()
+            .enumerate()
+            .map(|(level, rank)| {
+                rank.as_ref().map(|rank| {
+                    group_order
+                        .iter()
+                        .map(|key| rank.get(&key[level]).copied().unwrap_or(usize::MAX))
+                        .collect()
+                })
+            })
+            .collect();
+        let mut positions: Vec<usize> = (0..group_order.len()).collect();
+        positions.sort_by(|&a, &b| {
+            for (level, ranks) in level_ranks.iter().enumerate() {
+                let order = match ranks {
+                    Some(ranks) => ranks[a].cmp(&ranks[b]),
                     None => composite_key_cmp(
-                        std::slice::from_ref(&a[level]),
-                        std::slice::from_ref(&b[level]),
+                        std::slice::from_ref(&group_order[a][level]),
+                        std::slice::from_ref(&group_order[b][level]),
                     ),
                 };
                 if order != Ordering::Equal {
@@ -105859,6 +105873,10 @@ impl DataFrameGroupBy<'_> {
             }
             Ordering::Equal
         });
+        let mut keys: Vec<GroupKey<'_>> = group_order.iter_mut().map(std::mem::take).collect();
+        for (slot, position) in group_order.iter_mut().zip(positions) {
+            *slot = std::mem::take(&mut keys[position]);
+        }
     }
 
     /// Internal: extract the group key label for a given row index.

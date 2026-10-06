@@ -28365,3 +28365,60 @@ def test_categorical_codes_like_pandas_5oup5(case: Any) -> None:
         }[op]()
 
     assert _5oup5_shown(run(fpd)) == _5oup5_shown(run(pd))
+
+
+# br-frankenpandas-vriq2: a category key's groups are a CategoricalIndex - its
+# categories and ordered flag - for size() and the dropna=False reductions
+# too, as for its other reductions (they were a plain Index); a missing key's
+# group (dropna=False) leaves an ordered key's groups unordered, as pandas
+# builds them; a plain key's groups stay a plain Index.
+def _vriq2_frame(m: Any, kind: str) -> Any:
+    k = np.arange(120)
+    text = [None if v % 7 == 3 else f"g{v % 4}" for v in k]
+    df = m.DataFrame({"c": list((k * 5) % 3) if kind == "int" else text, "v": (k % 13) / 4.0, "w": k % 5})
+    if kind in ("text", "int"):
+        df["c"] = df["c"].astype("category")
+    elif kind == "ordered":
+        df["c"] = df["c"].astype(m.CategoricalDtype(ordered=True))
+    elif kind == "cut":
+        df["c"] = m.cut(df["v"], 3)
+    return df
+
+
+def _vriq2_shown(obj: Any) -> Any:
+    index = obj.index
+    categories = getattr(index, "categories", None)
+    return [
+        type(index).__name__,
+        [repr(v) for v in index.tolist()],
+        None if categories is None else [repr(v) for v in categories.tolist()],
+        getattr(index, "ordered", None),
+        [repr(v) for v in obj.tolist()],
+    ]
+
+
+_VRIQ2_CASES = [
+    (kind, op)
+    for kind in ("text", "int", "ordered", "cut", "plain")
+    for op in ("size", "size_unsorted", "dropna_false_size", "dropna_false_sum", "series_dropna_false_sum", "frame_dropna_false_sum", "sum")
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _VRIQ2_CASES, ids=lambda case: f"{case[0]}-{case[1]}")
+def test_category_key_groups_are_a_categorical_index_like_pandas_vriq2(case: Any) -> None:
+    kind, op = case
+
+    def run(m: Any) -> Any:
+        df = _vriq2_frame(m, kind)
+        return {
+            "size": lambda: df.groupby("c", observed=True).size(),
+            "size_unsorted": lambda: df.groupby("c", observed=True, sort=False).size(),
+            "dropna_false_size": lambda: df.groupby("c", observed=True, dropna=False).size(),
+            "dropna_false_sum": lambda: df.groupby("c", observed=True, dropna=False)["v"].sum(),
+            "series_dropna_false_sum": lambda: df["v"].groupby(df["c"], observed=True, dropna=False).sum(),
+            "frame_dropna_false_sum": lambda: df.groupby("c", observed=True, dropna=False)[["v", "w"]].sum()["v"],
+            "sum": lambda: df.groupby("c", observed=True)["w"].sum(),
+        }[op]()
+
+    assert _vriq2_shown(run(fpd)) == _vriq2_shown(run(pd))

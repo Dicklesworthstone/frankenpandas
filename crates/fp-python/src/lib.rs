@@ -58527,10 +58527,11 @@ fn check_category_keys(
     Ok(Vec::new())
 }
 
-/// `series` indexed by a category key's values - a groupby's groups, a
-/// value_counts' - its index carrying the key's categories: pandas'
-/// CategoricalIndex (it was a plain Index; br-frankenpandas-cld41). A
-/// MultiIndex result or labels outside the categories stay as they are.
+/// `series` indexed by a category key's values - a value_counts' (a
+/// groupby's groups: [`with_group_categories`]) - its index carrying the
+/// key's categories: pandas' CategoricalIndex (it was a plain Index;
+/// br-frankenpandas-cld41). A MultiIndex result or labels outside the
+/// categories stay as they are.
 fn with_key_categories(series: Series, key: &Column) -> PyResult<Series> {
     match key_categorized_index(series.index(), key) {
         Some(index) => {
@@ -58558,6 +58559,37 @@ fn key_categorized_index(index: &Index, key: &Column) -> Option<Index> {
         ordered: meta.ordered,
     };
     index.clone().with_categories(Some(categories)).ok()
+}
+
+/// [`key_categorized_index`] for a groupby's groups: a missing key's group
+/// (dropna=False) costs the categories their order, as pandas builds that
+/// index (measured, 2.2.3: an ordered key's groups are ordered=False then
+/// while its value_counts(dropna=False) stay ordered; br-frankenpandas-vriq2).
+fn group_categorized_index(index: &Index, key: &Column) -> Option<Index> {
+    let categorized = key_categorized_index(index, key)?;
+    match categorized.categories() {
+        Some(categories)
+            if categories.ordered && index.labels().iter().any(IndexLabel::is_missing) =>
+        {
+            let unordered = fp_index::IndexCategories {
+                ordered: false,
+                ..categories.clone()
+            };
+            categorized.with_categories(Some(unordered)).ok()
+        }
+        _ => Some(categorized),
+    }
+}
+
+/// `series`, a groupby's per-group result, indexed by a category key's
+/// groups as [`group_categorized_index`] labels them.
+fn with_group_categories(series: Series, key: &Column) -> PyResult<Series> {
+    match group_categorized_index(series.index(), key) {
+        Some(index) => {
+            Series::new(series.name(), index, series.column().clone()).map_err(frame_error_to_py)
+        }
+        None => Ok(series),
+    }
 }
 
 /// A per-group reduction `op` with a row added for each unused category
@@ -58627,9 +58659,44 @@ fn category_order(meta: &CategoricalMetadata, index: &Index) -> Vec<usize> {
         .row_multiindex()
         .and_then(|levels| levels.get_level_values(0).ok())
         .map_or_else(|| index.labels().to_vec(), |level| level.labels().to_vec());
+    let ranks = CategoryRanks::new(meta);
+    let rank_of: Vec<usize> = keys.iter().map(|key| ranks.rank(key)).collect();
     let mut positions: Vec<usize> = (0..keys.len()).collect();
-    positions.sort_by_key(|&position| category_rank(meta, &keys[position]));
+    positions.sort_by_key(|&position| rank_of[position]);
     positions
+}
+
+/// [`category_rank`] of many labels against one key's categories: the
+/// categories' labels hashed once and each label looked up, the scan kept
+/// for a label that is no category's label. A sort ranked by
+/// `category_rank` rescanned the categories - building each one's label -
+/// on every comparison: a 20k-row groupby over 10k categories took 20 s
+/// (br-frankenpandas-5fo6z).
+struct CategoryRanks<'a> {
+    meta: &'a CategoricalMetadata,
+    by_label: FxHashMap<IndexLabel, usize>,
+}
+
+impl<'a> CategoryRanks<'a> {
+    fn new(meta: &'a CategoricalMetadata) -> Self {
+        let mut by_label = FxHashMap::default();
+        for (rank, category) in meta.categories.iter().enumerate() {
+            by_label
+                .entry(scalar_to_index_label_converter(category))
+                .or_insert(rank);
+        }
+        Self { meta, by_label }
+    }
+
+    /// `category_rank(meta, label)`: the first category labelled `label`
+    /// is the first category that is it (a category equal to the label's
+    /// value is labelled so), so a hit answers; a miss scans.
+    fn rank(&self, label: &IndexLabel) -> usize {
+        match self.by_label.get(label) {
+            Some(&rank) => rank,
+            None => category_rank(self.meta, label),
+        }
+    }
 }
 
 /// A group label's position among a category key's categories (past them
@@ -65473,6 +65540,19 @@ fn group_key_object(py: Python<'_>, key: &[IndexLabel], numpy_parts: bool) -> Py
     }
 }
 
+/// `groups` at `positions`, a category key's groups keeping their
+/// categories (a take keeps the labels alone; br-frankenpandas-vriq2).
+fn taken_groups(groups: &Index, positions: &[usize]) -> Index {
+    let taken = groups.take(positions);
+    match groups.categories() {
+        Some(categories) => taken
+            .clone()
+            .with_categories(Some(categories.clone()))
+            .unwrap_or(taken),
+        None => taken,
+    }
+}
+
 /// The positions among `groups` (a multi-key groupby's groups, in code
 /// order) of the group codes `labels` hold.
 fn group_code_positions(groups: &Index, labels: &[IndexLabel]) -> PyResult<Vec<usize>> {
@@ -65925,7 +66005,7 @@ impl PyGroupBy {
             [key] => self
                 .df
                 .column(key)
-                .and_then(|column| key_categorized_index(frame.index(), column)),
+                .and_then(|column| group_categorized_index(frame.index(), column)),
             _ => None,
         };
         match categorized {
@@ -65971,7 +66051,8 @@ impl PyGroupBy {
             if self.sort
                 && let Some(meta) = self.df.column(&self.by[0]).and_then(Column::categorical)
             {
-                ordered.sort_by_key(|(key, _)| category_rank(meta, key));
+                let ranks = CategoryRanks::new(meta);
+                ordered.sort_by_cached_key(|(key, _)| ranks.rank(key));
             }
         }
         Ok(ordered)
@@ -66726,6 +66807,16 @@ impl PyGroupBy {
                     ([_], [name]) => groups.set_names(name.clone()),
                     _ => groups,
                 };
+                // One category key's groups are a CategoricalIndex
+                // (br-frankenpandas-vriq2).
+                let groups = match by {
+                    [key] => self
+                        .df
+                        .column(key)
+                        .and_then(|column| group_categorized_index(&groups, column))
+                        .unwrap_or(groups),
+                    _ => groups,
+                };
                 return Ok(PySeriesGroupBy {
                     series,
                     by: Series::new("", self.df.index().clone(), codes)
@@ -67010,6 +67101,15 @@ impl PyGroupBy {
         };
         let named = Series::new(name, index, column).map_err(frame_error_to_py)?;
         let named = self.with_unused_series("size", named)?;
+        // A category key's groups are a CategoricalIndex, as its reductions'
+        // are (br-frankenpandas-vriq2).
+        let named = match self.by.as_slice() {
+            [key] => match self.df.column(key) {
+                Some(column) => with_group_categories(named, column)?,
+                None => named,
+            },
+            _ => named,
+        };
         if self.as_index {
             return Ok(Py::new(py, PySeries { inner: named })?.into_any());
         }
@@ -68959,9 +69059,12 @@ fn missing_key_groups(by: &Series, sort: bool) -> PyResult<(Series, Index)> {
         .and_then(|gb| gb.group_codes())
         .map_err(frame_error_to_py)?;
     let name = by.name();
+    let groups = groups.set_names((!name.is_empty()).then_some(name));
+    // A category key's groups are a CategoricalIndex (br-frankenpandas-vriq2).
+    let groups = group_categorized_index(&groups, by.column()).unwrap_or(groups);
     Ok((
         Series::new("", by.index().clone(), codes).map_err(frame_error_to_py)?,
-        groups.set_names((!name.is_empty()).then_some(name)),
+        groups,
     ))
 }
 
@@ -69172,7 +69275,10 @@ impl PySeriesGroupBy {
             // First seen; the unused categories (no rows) after them.
             (false, _) => groups
                 .sort_by_key(|(_, positions)| positions.first().copied().unwrap_or(usize::MAX)),
-            (true, Some(meta)) => groups.sort_by_key(|(key, _)| category_rank(meta, key)),
+            (true, Some(meta)) => {
+                let ranks = CategoryRanks::new(meta);
+                groups.sort_by_cached_key(|(key, _)| ranks.rank(key));
+            }
             (true, None) => groups.sort_by(|a, b| a.0.cmp(&b.0)),
         }
         Ok(groups)
@@ -69266,7 +69372,7 @@ impl PySeriesGroupBy {
             return Series::new(s.name(), index, s.column().clone()).map_err(frame_error_to_py);
         }
         let positions = group_code_positions(groups, s.index().labels())?;
-        Series::new(s.name(), groups.take(&positions), s.column().clone())
+        Series::new(s.name(), taken_groups(groups, &positions), s.column().clone())
             .map_err(frame_error_to_py)
     }
 
@@ -69278,7 +69384,7 @@ impl PySeriesGroupBy {
             return Ok(frame);
         };
         let positions = group_code_positions(groups, frame.index().labels())?;
-        let index = groups.take(&positions);
+        let index = taken_groups(groups, &positions);
         // `with_index` keeps the labels alone; the levels ride separately.
         let levels = index.row_multiindex().cloned();
         let frame = frame.with_index(index).map_err(frame_error_to_py)?;
@@ -69322,7 +69428,7 @@ impl PySeriesGroupBy {
     fn keys_index(&self, ordered: &[(IndexLabel, Vec<usize>)]) -> PyResult<Index> {
         let keys: Vec<IndexLabel> = ordered.iter().map(|(key, _)| key.clone()).collect();
         match &self.groups {
-            Some(groups) => Ok(groups.take(&group_code_positions(groups, &keys)?)),
+            Some(groups) => Ok(taken_groups(groups, &group_code_positions(groups, &keys)?)),
             None => {
                 let name = self.by.name();
                 Ok(Index::new(keys).set_names((!name.is_empty()).then_some(name)))
@@ -69461,7 +69567,7 @@ impl PySeriesGroupBy {
         // (they were the naive UTC instants; br-frankenpandas-wuize).
         let res = rezoned(res, self.series.column().timezone())?;
         // A category key's groups are a CategoricalIndex (cld41).
-        let res = with_key_categories(res, self.by.column())?;
+        let res = with_group_categories(res, self.by.column())?;
         Python::attach(|py| {
             if self.as_index {
                 return Ok(Py::new(py, PySeries { inner: res })?.into_any());
