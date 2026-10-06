@@ -9587,6 +9587,51 @@ fn factorize_i64_typed(data: &[i64], sort: bool) -> (Vec<i64>, Vec<i64>) {
     (codes, uniques)
 }
 
+/// The factorize of a float buffer, as the Scalar arm answers it: a slot
+/// the validity masks or a NaN is missing (-1), -0.0 is 0.0 (the first
+/// spelling seen kept), first-seen codes, sorted by value when asked -
+/// without a Scalar per value (a million distinct floats took 128-155 ms,
+/// pandas 80-109; br-frankenpandas-rzry7).
+fn factorize_f64_typed(data: &[f64], validity: &ValidityMask, sort: bool) -> (Vec<i64>, Vec<f64>) {
+    let all_valid = validity.all();
+    let mut seen: FxHashMap<u64, i64> = FxHashMap::default();
+    let mut uniques: Vec<f64> = Vec::new();
+    let mut codes: Vec<i64> = Vec::with_capacity(data.len());
+    for (i, &value) in data.iter().enumerate() {
+        if value.is_nan() || !(all_valid || validity.get(i)) {
+            codes.push(-1);
+            continue;
+        }
+        let key = if value == 0.0 { 0.0_f64 } else { value }.to_bits();
+        let next = uniques.len() as i64;
+        let code = *seen.entry(key).or_insert_with(|| {
+            uniques.push(value);
+            next
+        });
+        codes.push(code);
+    }
+    if sort && !uniques.is_empty() {
+        let mut ordering: Vec<usize> = (0..uniques.len()).collect();
+        ordering.sort_by(|&a, &b| uniques[a].total_cmp(&uniques[b]));
+        let mut remap = vec![0i64; uniques.len()];
+        let sorted: Vec<f64> = ordering
+            .into_iter()
+            .enumerate()
+            .map(|(sorted_pos, orig)| {
+                remap[orig] = sorted_pos as i64;
+                uniques[orig]
+            })
+            .collect();
+        for code in &mut codes {
+            if *code >= 0 {
+                *code = remap[*code as usize];
+            }
+        }
+        uniques = sorted;
+    }
+    (codes, uniques)
+}
+
 /// Fully-typed `value_counts` for all-valid Int64 columns. This keeps the
 /// tally, optional count-order permutation, values output, and count output in
 /// primitive buffers instead of boxing high-cardinality outputs as `Scalar`s.
@@ -29631,6 +29676,18 @@ impl Column {
             uniques.dtype = self.dtype.clone();
             return Ok((Self::from_i64_values_owned(codes), uniques));
         }
+        //   * Float64 with missing values as the -1 sentinel → codes as Int64,
+        //     uniques as Float64 (a missing bucket of its own takes the
+        //     Scalar arm, which places it where it first appears).
+        if let Some((data, validity)) = self.as_f64_slice_with_validity()
+            && (use_na_sentinel || (validity.all() && !data.iter().any(|v| v.is_nan())))
+        {
+            let (codes, uniques) = factorize_f64_typed(data, validity, sort);
+            return Ok((
+                Self::from_i64_values_owned(codes),
+                Self::from_f64_values(uniques),
+            ));
+        }
 
         // `codes` is a typed `Vec<i64>` (factorize codes are always plain Int64,
         // -1 for NA) — built directly and emitted via `from_i64_values`, skipping
@@ -47550,6 +47607,91 @@ mod tests {
                     assert_eq!(got_uniques, uniques, "trial {trial} sort={sort} uniques");
                 }
             }
+        }
+
+        #[test]
+        fn factorize_f64_typed_equals_the_scalar_arm_rzry7() {
+            // The typed float factorize answers what the Scalar arm does over
+            // the same values: NaN and masked slots -1, -0.0 one value with
+            // 0.0 (its first spelling kept), first-seen codes, both sort
+            // modes (br-frankenpandas-rzry7).
+            let values = [
+                2.5,
+                -0.0,
+                f64::NAN,
+                2.5,
+                0.0,
+                -7.25,
+                f64::INFINITY,
+                -7.25,
+                1e300,
+            ];
+            let scalars: Vec<Scalar> = values
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| {
+                    if i == 7 {
+                        Scalar::Null(fp_types::NullKind::NaN)
+                    } else {
+                        Scalar::Float64(v)
+                    }
+                })
+                .collect();
+            // The same scalars in an object column take the Scalar arm.
+            let reference = Column::from_object_values(scalars.clone());
+            assert!(
+                reference.as_f64_slice_with_validity().is_none(),
+                "the reference must take the Scalar arm"
+            );
+            let typed = Column::from_values(scalars).expect("typed");
+            assert!(typed.as_f64_slice_with_validity().is_some());
+            let bits = |column: &Column| -> Vec<Option<u64>> {
+                column
+                    .values()
+                    .iter()
+                    .map(|value| match value {
+                        Scalar::Float64(v) => Some(v.to_bits()),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            // First-seen uniques by `==` (-0.0 equals 0.0), missing skipped.
+            let first_seen = |sort: bool| -> Vec<Option<u64>> {
+                let mut uniques: Vec<f64> = Vec::new();
+                for (i, &v) in values.iter().enumerate() {
+                    if i != 7 && !v.is_nan() && !uniques.contains(&v) {
+                        uniques.push(v);
+                    }
+                }
+                if sort {
+                    uniques.sort_by(f64::total_cmp);
+                }
+                uniques.into_iter().map(|v| Some(v.to_bits())).collect()
+            };
+            for sort in [false, true] {
+                let (want_codes, _) = reference
+                    .factorize_with_options(sort, true)
+                    .expect("reference");
+                let (got_codes, got_uniques) =
+                    typed.factorize_with_options(sort, true).expect("typed");
+                assert_eq!(got_codes.values(), want_codes.values(), "sort={sort}");
+                assert_eq!(bits(&got_uniques), first_seen(sort), "sort={sort}");
+            }
+            let (codes, uniques) = typed.factorize_with_options(false, true).expect("typed");
+            assert_eq!(
+                codes.values(),
+                &[0, 1, -1, 0, 1, 2, 3, -1, 4].map(Scalar::Int64)
+            );
+            // NEGATIVE: -0.0 is not a value apart from 0.0, its first spelling
+            // stays; a missing bucket (use_na_sentinel=False) is the Scalar
+            // arm's, NaN placed where it first appears.
+            assert!(matches!(
+                uniques.values()[1],
+                Scalar::Float64(v) if v.to_bits() == (-0.0_f64).to_bits()
+            ));
+            assert_eq!(uniques.len(), 5);
+            let (codes, _) = typed.factorize_with_options(false, false).expect("bucket");
+            assert_eq!(codes.values()[2], Scalar::Int64(2));
         }
 
         #[test]
