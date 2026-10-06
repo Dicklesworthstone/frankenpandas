@@ -80480,10 +80480,6 @@ fn api_pandas_dtype<'py>(dtype: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny
     numpy_dtype(dtype)
 }
 
-fn scalar_to_label_str(s: &Scalar) -> String {
-    s.to_string()
-}
-
 fn scalar_to_index_label_converter(s: &Scalar) -> IndexLabel {
     match s {
         Scalar::Int64(v) => IndexLabel::Int64(*v),
@@ -80561,74 +80557,139 @@ fn factorize(
         )?;
     }
     let s = PySeries::from_data(py, Some(values), None, None)?;
-    let col_vals = s.inner.column().values();
-
-    let mut cat_to_code: HashMap<String, i64> = HashMap::new();
-    let mut uniques_labels: Vec<IndexLabel> = Vec::new();
-    let mut codes: Vec<i64> = Vec::with_capacity(col_vals.len());
-
-    for v in col_vals {
-        if v.is_null() {
-            if use_na_sentinel {
-                codes.push(-1);
-            } else {
-                let null_key = "__NULL__".to_string();
-                let code = match cat_to_code.get(&null_key) {
-                    Some(&c) => c,
-                    None => {
-                        let next_code = uniques_labels.len() as i64;
-                        uniques_labels.push(IndexLabel::Null(NullKind::NaN));
-                        cat_to_code.insert(null_key, next_code);
-                        next_code
-                    }
-                };
-                codes.push(code);
-            }
-        } else {
-            let key = scalar_to_label_str(v);
-            let code = match cat_to_code.get(&key) {
-                Some(&c) => c,
-                None => {
-                    let next_code = uniques_labels.len() as i64;
-                    uniques_labels.push(scalar_to_index_label_converter(v));
-                    cat_to_code.insert(key, next_code);
-                    next_code
-                }
-            };
-            codes.push(code);
-        }
-    }
-
-    if sort && !uniques_labels.is_empty() {
-        let mut sorted_pairs: Vec<(usize, IndexLabel)> =
-            uniques_labels.into_iter().enumerate().collect();
-        sorted_pairs.sort_by(|(_, a), (_, b)| a.cmp(b));
-        let mut old_to_new = vec![0i64; sorted_pairs.len()];
-        let mut new_uniques = Vec::with_capacity(sorted_pairs.len());
-        for (new_idx, (old_idx, val)) in sorted_pairs.into_iter().enumerate() {
-            old_to_new[old_idx] = new_idx as i64;
-            new_uniques.push(val);
+    let column = s.inner.column();
+    let dtype = column.dtype();
+    let (mut codes, mut uniques) = factorize_first_seen(column)?;
+    let first_missing = codes.iter().position(|&code| code < 0);
+    if sort {
+        // pandas sorts the uniques - a categorical's by its categories'
+        // order - and the codes follow.
+        let rank = |label: &IndexLabel| -> Option<usize> {
+            let meta = column.categorical()?;
+            meta.categories
+                .iter()
+                .position(|category| scalar_to_index_label_converter(category) == *label)
+        };
+        let mut order: Vec<usize> = (0..uniques.len()).collect();
+        order.sort_by(|&a, &b| match (rank(&uniques[a]), rank(&uniques[b])) {
+            (Some(a), Some(b)) => a.cmp(&b),
+            _ => uniques[a].cmp(&uniques[b]),
+        });
+        let mut new_code = vec![0_i64; order.len()];
+        for (rank, &old) in order.iter().enumerate() {
+            new_code[old] = i64::try_from(rank).unwrap_or(i64::MAX);
         }
         for code in &mut codes {
-            if *code >= 0 && (*code as usize) < old_to_new.len() {
-                *code = old_to_new[*code as usize];
+            if let Ok(old) = usize::try_from(*code) {
+                *code = new_code[old];
             }
         }
-        uniques_labels = new_uniques;
+        uniques = order.into_iter().map(|old| uniques[old].clone()).collect();
     }
-
+    if !use_na_sentinel && let Some(first) = first_missing {
+        // The missing values' own code: after the uniques seen before the
+        // first of them, or last when sorted - under the column's missing
+        // label (NaT among instants and durations, NaN otherwise).
+        let na_code = if sort {
+            uniques.len()
+        } else {
+            codes[..first]
+                .iter()
+                .filter_map(|&code| usize::try_from(code).ok())
+                .max()
+                .map_or(0, |code| code + 1)
+        };
+        let na = i64::try_from(na_code).unwrap_or(i64::MAX);
+        for code in &mut codes {
+            if *code < 0 {
+                *code = na;
+            } else if *code >= na {
+                *code += 1;
+            }
+        }
+        let missing = match dtype {
+            DType::Datetime64 { .. } => IndexLabel::Datetime64(Timestamp::NAT),
+            DType::Timedelta64 => IndexLabel::Timedelta64(Timedelta::NAT),
+            _ => IndexLabel::Null(NullKind::NaN),
+        };
+        uniques.insert(na_code, missing);
+    }
+    // The uniques under the column's dtype: an instant's zone, an empty
+    // one's dtype, a categorical's categories (they were an object Index).
+    let mut index = Index::new(uniques);
+    if let DType::Datetime64 { tz: Some(zone) } = &dtype {
+        index = index.with_tz(Some(zone)).map_err(index_error_to_py)?;
+    }
+    if index.is_empty() {
+        let declared = match dtype {
+            DType::Int64 => Some(fp_index::DeclaredDtype::Int64),
+            DType::Float64 => Some(fp_index::DeclaredDtype::Float64),
+            DType::Bool => Some(fp_index::DeclaredDtype::Bool),
+            DType::Datetime64 { .. } => Some(fp_index::DeclaredDtype::Datetime64),
+            DType::Timedelta64 => Some(fp_index::DeclaredDtype::Timedelta64),
+            _ => None,
+        };
+        index = index.with_declared_dtype(declared);
+    }
+    let index = key_categorized_index(&index, column).unwrap_or(index);
     // The codes are pandas' int64 numpy array (they were a list).
-    let py_codes = py
-        .import("numpy")?
-        .call_method1("array", (codes, "int64"))?
-        .unbind();
+    let py_codes = IndexerArray(codes).into_pyobject(py)?.unbind();
     if !keeps_index {
-        return Ok((py_codes, labels_ndarray(py, &uniques_labels)?.unbind()));
+        return Ok((py_codes, labels_ndarray(py, index.labels())?.unbind()));
     }
-    let py_uniques = PyIndex {
-        inner: Index::new(uniques_labels),
-    };
-    Ok((py_codes, Py::new(py, py_uniques)?.into_any()))
+    Ok((py_codes, row_index_to_py(py, &index)?))
+}
+
+/// `column`'s first-seen factorize codes (-1 for a missing value) and
+/// uniques, in pandas' identity: a typed column - text alone among them -
+/// through [`Column::factorize_with_options`] (its own buffer; -0.0 is 0.0,
+/// NaN and NaT are missing); an object column, text beside other values,
+/// keyed as pandas' hash table keys them ([`DummyKey`]: equal numbers -
+/// True, 1, 1.0 - one value, text its own). Every value was keyed by its
+/// text: 1 and '1' were one unique, True and 1 two, 0.0 and -0.0 two, a
+/// float array's NaN a value of its own - and a String a value made a
+/// million strings 92 ms (pandas 32; br-frankenpandas-gzkue).
+fn factorize_first_seen(column: &Column) -> PyResult<(Vec<i64>, Vec<IndexLabel>)> {
+    let (codes, uniques) = column
+        .factorize_with_options(false, true)
+        .map_err(column_error_to_py)?;
+    let uniques = uniques.values();
+    if column.dtype() != DType::Utf8 || uniques.iter().all(|value| matches!(value, Scalar::Utf8(_)))
+    {
+        let codes = match codes.as_i64_slice() {
+            Some(codes) => codes.to_vec(),
+            None => codes
+                .values()
+                .iter()
+                .map(|code| match code {
+                    Scalar::Int64(code) => *code,
+                    _ => -1,
+                })
+                .collect(),
+        };
+        let uniques = uniques
+            .iter()
+            .map(scalar_to_index_label_converter)
+            .collect();
+        return Ok((codes, uniques));
+    }
+    let values = column.values();
+    let mut seen: FxHashMap<DummyKey<'_>, i64> = FxHashMap::default();
+    let mut uniques = Vec::new();
+    let mut codes = Vec::with_capacity(values.len());
+    for value in values {
+        if value.is_missing() {
+            codes.push(-1);
+            continue;
+        }
+        let next = i64::try_from(uniques.len()).unwrap_or(i64::MAX);
+        let code = *seen.entry(DummyKey::of(value)).or_insert_with(|| {
+            uniques.push(scalar_to_index_label_converter(value));
+            next
+        });
+        codes.push(code);
+    }
+    Ok((codes, uniques))
 }
 
 /// pandas' hash-table identity of a get_dummies value: equal numbers - 1,

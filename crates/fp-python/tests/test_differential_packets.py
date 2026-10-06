@@ -27507,3 +27507,41 @@ _NMNA9_CASES = {
 @pytest.mark.parametrize("case", list(_NMNA9_CASES))
 def test_index_arguments_and_getter_classes_like_pandas_nmna9(case: str) -> None:
     assert _NMNA9_CASES[case](fpd) == _NMNA9_CASES[case](pd)
+
+
+# br-frankenpandas-gzkue: factorize keys values as pandas' hash table does
+# (equal numbers one value, text its own; NaN missing) and returns the
+# uniques under the values' class.
+def _gzkue_shown(result: Any) -> Any:
+    codes, uniques = result
+    shown = [str(np.asarray(codes).dtype), [int(c) for c in np.asarray(codes)], type(uniques).__name__]
+    shown += [str(getattr(uniques, "dtype", None)), repr(list(uniques))]
+    if hasattr(uniques, "categories"):
+        shown.append(repr(list(uniques.categories)))
+    return shown
+
+
+_GZKUE_CASES = {
+    "int beside text and float": lambda m: m.factorize(m.Series([1, "1", 1.0], dtype=object)),
+    "bools beside ints": lambda m: m.factorize(m.Series([True, 1, 0, False], dtype=object)),
+    "signed zeros": lambda m: m.factorize(m.Series([-0.0, 0.0, 1.5])),
+    "float array NaN": lambda m: m.factorize(np.array([1.5, np.nan, 1.5])),
+    "all NaN": lambda m: m.factorize(m.Series([np.nan, np.nan])),
+    "datetimes": lambda m: m.factorize(m.Series(m.to_datetime(["2024-01-02", "2024-01-01", None, "2024-01-02"]))),
+    "datetimes no sentinel": lambda m: m.factorize(m.Series(m.to_datetime(["2024-01-02", None, "2024-01-02"])), use_na_sentinel=False),
+    "tz datetimes": lambda m: m.factorize(m.Series(m.to_datetime(["2024-01-02", "2024-01-01"]).tz_localize("UTC"))),
+    "timedeltas": lambda m: m.factorize(m.Series(m.to_timedelta(["1D", "2D", "1D"]))),
+    "categorical sorted": lambda m: m.factorize(m.Series(["b", "a", "b"], dtype="category"), sort=True),
+    "empty float": lambda m: m.factorize(m.Series([], dtype="float64")),
+    "strings with None, no sentinel, sorted": lambda m: m.factorize(m.Series(["b", None, "a", "b"]), sort=True, use_na_sentinel=False),
+    "Series method": lambda m: m.Series(["b", "a", "b"]).factorize(),
+    "text 1 and int 1 (NEGATIVE: two uniques)": lambda m: m.factorize(m.Series(["1", 1], dtype=object)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_GZKUE_CASES))
+def test_factorize_like_pandas_gzkue(case: str) -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert _gzkue_shown(_GZKUE_CASES[case](fpd)) == _gzkue_shown(_GZKUE_CASES[case](pd))
