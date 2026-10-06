@@ -27280,3 +27280,58 @@ def test_object_naive_timestamps_read_like_pandas_srzqw(case: str) -> None:
         return out
 
     assert shown(fpd) == shown(pd)
+
+
+# Column writes keep pandas' dtypes: an integral float written into an int64
+# column is the int it equals, a NaN assigned as a whole column is float64
+# (br-frankenpandas-roqqq).
+def _roqqq_frame(m: Any) -> Any:
+    return m.DataFrame({"f": [1.5, 2.5, 3.5], "i": [1, 2, 3], "b": [True, False, True]})
+
+
+def _roqqq_write(how: str, value: Any) -> Any:
+    def run(m: Any) -> Any:
+        frame = _roqqq_frame(m)
+        if how == "mask":
+            frame.loc[frame["i"] > 1, "i"] = value
+        elif how == "iloc":
+            frame.iloc[0, 1] = value
+        elif how == "series":
+            series = frame["i"].copy()
+            series[0] = value
+            return series.to_frame()
+        else:
+            frame[how] = value
+        return frame
+
+    return run
+
+
+_ROQQQ_CASES = {
+    "mask int <- 2.0": _roqqq_write("mask", 2.0),
+    "mask int <- -0.0": _roqqq_write("mask", -0.0),
+    "iloc int <- 3.0": _roqqq_write("iloc", 3.0),
+    "series int s[0] = 2.0": _roqqq_write("series", 2.0),
+    "mask int <- 2.5 (NEGATIVE: upcasts)": _roqqq_write("mask", 2.5),
+    "mask int <- nan (NEGATIVE: upcasts)": _roqqq_write("mask", float("nan")),
+    "setitem new nan": _roqqq_write("z", float("nan")),
+    "setitem new float": _roqqq_write("z", 1.5),
+    "setitem new None (NEGATIVE: object)": _roqqq_write("z", None),
+    "setitem overwrite float with int": _roqqq_write("f", 0),
+    "assign nan": lambda m: _roqqq_frame(m).assign(z=float("nan")),
+    "assign None (NEGATIVE: object)": lambda m: _roqqq_frame(m).assign(z=None),
+    "mask float <- 0.0": lambda m: (lambda f: (f.loc.__setitem__((f["i"] > 1, "f"), 0.0), f)[1])(_roqqq_frame(m)),
+    "mask bool <- False": lambda m: (lambda f: (f.loc.__setitem__((f["i"] > 1, "b"), False), f)[1])(_roqqq_frame(m)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_ROQQQ_CASES))
+def test_column_writes_keep_pandas_dtypes_roqqq(case: str) -> None:
+    def shown(m: Any) -> Any:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            out = _ROQQQ_CASES[case](m)
+        return [(c, str(out[c].dtype), [str(v) for v in out[c].tolist()]) for c in out.columns]
+
+    assert shown(fpd) == shown(pd)

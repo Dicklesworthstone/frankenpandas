@@ -9361,7 +9361,7 @@ fn py_value_to_column(
     if let Ok(s) = py_to_scalar(py, val) {
         // A number or bool fills its typed buffer (assign(z=1) built a
         // million Scalars; br-frankenpandas-4jsxs).
-        return broadcast_column(s, expected_len);
+        return broadcast_assigned_column(s, expected_len);
     }
     Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
         "Cannot convert value to DataFrame column",
@@ -24246,6 +24246,17 @@ fn broadcast_column(scalar: Scalar, len: usize) -> PyResult<Column> {
     }
 }
 
+/// [`broadcast_column`] of a value assigned as a whole column (`df['z'] =
+/// v`, `assign(z=v)`): a NaN is pandas' float64 column and None an object
+/// one, as [`pandas_promote_int_with_missing`] reads a list of them (assign's
+/// NaN column came back object; br-frankenpandas-roqqq).
+fn broadcast_assigned_column(scalar: Scalar, len: usize) -> PyResult<Column> {
+    match scalar {
+        Scalar::Null(NullKind::NaN) => broadcast_column(Scalar::Float64(f64::NAN), len),
+        scalar => broadcast_column(scalar, len),
+    }
+}
+
 /// The zone the Python results of a per-value function share when every
 /// present one is a tz-aware Timestamp of it (None / NaT aside): a Series
 /// of them is that tz-aware dtype, where their scalars keep only the UTC
@@ -38538,8 +38549,11 @@ impl PyDataFrame {
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let n = self.inner.len();
+        // Index equality answers by the shared label identity first (the
+        // label comparison built and read a million labels a side;
+        // br-frankenpandas-roqqq).
         if let Ok(series) = value.extract::<PyRef<'_, PySeries>>()
-            && series.inner.index().labels() == self.inner.index().labels()
+            && series.inner.index() == self.inner.index()
         {
             self.inner = self
                 .inner
@@ -38576,7 +38590,14 @@ impl PyDataFrame {
             }
             values
         } else {
-            vec![py_to_scalar(py, value)?; n]
+            // A number or bool fills its typed buffer (df['z'] = 1.5 built a
+            // million Scalars; br-frankenpandas-roqqq).
+            let column = broadcast_assigned_column(py_to_scalar(py, value)?, n)?;
+            self.inner = self
+                .inner
+                .with_column(name, column)
+                .map_err(frame_error_to_py)?;
+            return Ok(());
         };
         self.inner = self
             .inner
@@ -52978,7 +52999,21 @@ fn resolve_loc_row_positions(
     }
     if let Some(mask) = loc_bool_series_mask(key)? {
         let truthy = |value: &Scalar| matches!(value, Scalar::Bool(true));
-        if mask.inner.index().labels() == labels {
+        // A mask over the frame's own rows shares its labels (an index's
+        // clones share them): the same slice needs no comparison, and a
+        // bool mask is read off its buffer (a million labels compared and a
+        // million Scalars built per write; br-frankenpandas-roqqq).
+        let own = mask.inner.index().labels();
+        let same_slice = std::ptr::eq(own.as_ptr(), labels.as_ptr()) && own.len() == labels.len();
+        if same_slice || own == labels {
+            if let Some(flags) = mask.inner.column().as_bool_slice() {
+                return Ok(flags
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &keep)| keep)
+                    .map(|(position, _)| position)
+                    .collect());
+            }
             return Ok(mask
                 .inner
                 .values()
@@ -53184,8 +53219,12 @@ fn write_cells(column: &Column, positions: &[usize], cells: Vec<Scalar>) -> PyRe
         )));
     }
     // A missing cell in a numpy column is NaN (None included), and an int
-    // joining a float column is a float.
-    #[allow(clippy::cast_precision_loss)] // pandas performs the same int64 -> float64 widening
+    // joining a float column is a float; an integral float joining a 64-bit
+    // int column is the int it equals, as numpy holds it (the column became
+    // float64; br-frankenpandas-roqqq).
+    let wide_ints = dtype == DType::Int64 && column.width().is_none();
+    // pandas' own widening; integral and in range, checked.
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
     let cells: Vec<Scalar> = cells
         .into_iter()
         .map(|cell| match (&dtype, cell) {
@@ -53194,6 +53233,13 @@ fn write_cells(column: &Column, positions: &[usize], cells: Vec<Scalar>) -> PyRe
             }
             (DType::Float64 | DType::Float64Nullable, Scalar::Int64(v)) => {
                 Scalar::Float64(v as f64)
+            }
+            (DType::Int64, Scalar::Float64(v))
+                if wide_ints
+                    && v.fract() == 0.0
+                    && (-(2f64.powi(63))..2f64.powi(63)).contains(&v) =>
+            {
+                Scalar::Int64(v as i64)
             }
             (_, cell) => cell,
         })

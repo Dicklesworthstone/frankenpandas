@@ -21551,6 +21551,48 @@ impl Column {
                 right: values.len(),
             });
         }
+        // An all-valid int, float or bool column written with present
+        // values of its own kind: its buffer copied and written, the same
+        // all-valid cells the Scalar copy below re-validated (40 ms a
+        // million rows; br-frankenpandas-roqqq). Missing writes and any other
+        // mix take that path.
+        if indices.iter().all(|&i| i < self.len()) {
+            if let Some(data) = self.as_f64_slice()
+                && values
+                    .iter()
+                    .all(|value| matches!(value, Scalar::Float64(x) if !x.is_nan()))
+            {
+                let mut out = data.to_vec();
+                for (&i, value) in indices.iter().zip(values) {
+                    if let Scalar::Float64(x) = value {
+                        out[i] = *x;
+                    }
+                }
+                return Ok(Self::from_f64_values_owned(out));
+            }
+            if let Some(data) = self.as_i64_slice()
+                && values.iter().all(|value| matches!(value, Scalar::Int64(_)))
+            {
+                let mut out = data.to_vec();
+                for (&i, value) in indices.iter().zip(values) {
+                    if let Scalar::Int64(x) = value {
+                        out[i] = *x;
+                    }
+                }
+                return Ok(Self::from_i64_values_owned(out));
+            }
+            if let Some(data) = self.as_bool_slice()
+                && values.iter().all(|value| matches!(value, Scalar::Bool(_)))
+            {
+                let mut out = data.to_vec();
+                for (&i, value) in indices.iter().zip(values) {
+                    if let Scalar::Bool(x) = value {
+                        out[i] = *x;
+                    }
+                }
+                return Ok(Self::from_bool_values(out));
+            }
+        }
         let mut out = self.values.to_vec();
         for (&i, v) in indices.iter().zip(values) {
             if i >= out.len() {
@@ -36475,6 +36517,72 @@ mod tests {
         assert_eq!(stamps_copy.values(), stamps.values());
         assert_eq!(spans_copy.values(), spans.values());
         assert_eq!(periods_copy.values(), periods.values());
+    }
+
+    #[test]
+    fn put_on_typed_buffers_equals_the_scalar_rebuild_roqqq() {
+        // The typed writes (all-valid int / float / bool, present values of
+        // the column's kind) give the column the Scalar copy + Column::new
+        // made (br-frankenpandas-roqqq).
+        let reference = |column: &Column, indices: &[usize], values: &[Scalar]| {
+            let mut out = column.values().to_vec();
+            for (&i, value) in indices.iter().zip(values) {
+                out[i] = value.clone();
+            }
+            Column::new(column.dtype(), out)
+        };
+        let floats = Column::from_f64_values((0..70).map(f64::from).collect());
+        let ints = Column::from_i64_values_owned((0..70).collect());
+        let flags = Column::from_bool_values((0..70).map(|i| i % 2 == 0).collect());
+        let cases: Vec<(&Column, Vec<usize>, Vec<Scalar>)> = vec![
+            (&floats, vec![0, 64, 69], vec![Scalar::Float64(-1.5); 3]),
+            (
+                &ints,
+                vec![3, 65],
+                vec![Scalar::Int64(-7), Scalar::Int64(9)],
+            ),
+            (
+                &flags,
+                vec![1, 2],
+                vec![Scalar::Bool(true), Scalar::Bool(false)],
+            ),
+            // NEGATIVE: a missing write, or another kind of value, keeps the
+            // Scalar path (a NaN makes a holey float; a fraction into an int
+            // column is that path's LossyFloatToInt error).
+            (&floats, vec![5], vec![Scalar::Null(NullKind::NaN)]),
+            (&floats, vec![5], vec![Scalar::Float64(f64::NAN)]),
+            (&ints, vec![5], vec![Scalar::Float64(2.5)]),
+        ];
+        for (column, indices, values) in cases {
+            let (written, want) = match (
+                column.put(&indices, &values),
+                reference(column, &indices, &values),
+            ) {
+                (Ok(written), Ok(want)) => (written, want),
+                (Err(got), Err(want)) => {
+                    assert_eq!(format!("{got:?}"), format!("{want:?}"));
+                    continue;
+                }
+                (got, want) => panic!("put {got:?} but the Scalar path {want:?}"),
+            };
+            assert_eq!(written.dtype(), want.dtype());
+            assert_eq!(written.validity(), want.validity());
+            let same = |a: &Scalar, b: &Scalar| match (a, b) {
+                (Scalar::Float64(x), Scalar::Float64(y)) => x.to_bits() == y.to_bits(),
+                _ => a == b,
+            };
+            assert!(
+                written
+                    .values()
+                    .iter()
+                    .zip(want.values())
+                    .all(|(a, b)| same(a, b)),
+                "{:?} at {indices:?}",
+                column.dtype()
+            );
+        }
+        // Past the end is still the length error.
+        assert!(floats.put(&[70], &[Scalar::Float64(1.0)]).is_err());
     }
 
     #[test]
