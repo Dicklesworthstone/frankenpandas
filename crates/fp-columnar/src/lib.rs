@@ -931,12 +931,15 @@ pub enum ColumnData {
     Int64(Arc<[i64]>),
     Bool(Arc<[bool]>),
     Utf8(Vec<String>),
-    Timedelta64(Vec<i64>),
-    Datetime64(Vec<i64>),
+    // The temporal buffers are shared like the numeric ones: as a `Vec`, a
+    // column clone (a frame's `.iloc` / `.loc` accessor clones the frame)
+    // copied every datetime, 8 MB a million rows (br-frankenpandas-rrulv).
+    Timedelta64(Arc<[i64]>),
+    Datetime64(Arc<[i64]>),
     /// Period column: per-row ordinals plus the column-uniform frequency
     /// (a pandas `PeriodArray` carries a single freq for the whole array).
     /// `i64::MIN` ordinals are NaT.
-    Period(Vec<i64>, PeriodFreq),
+    Period(Arc<[i64]>, PeriodFreq),
     Interval(Vec<Interval>),
 }
 
@@ -1681,7 +1684,7 @@ impl ColumnData {
                         _ => Timedelta::NAT,
                     })
                     .collect();
-                Self::Timedelta64(data)
+                Self::Timedelta64(Arc::from(data))
             }
             DType::Datetime64 { .. } => {
                 let data: Vec<i64> = values
@@ -1692,7 +1695,7 @@ impl ColumnData {
                         _ => Timestamp::NAT,
                     })
                     .collect();
-                Self::Datetime64(data)
+                Self::Datetime64(Arc::from(data))
             }
             DType::Period => {
                 // A pandas PeriodArray has one freq for the whole column; take
@@ -1712,7 +1715,7 @@ impl ColumnData {
                         _ => i64::MIN, // NaT sentinel for Period
                     })
                     .collect();
-                Self::Period(data, freq)
+                Self::Period(Arc::from(data), freq)
             }
             DType::Interval => {
                 let data: Vec<Interval> = values
@@ -6480,6 +6483,49 @@ impl ScalarValues {
         }
     }
 
+    /// `as_slice()[idx]`, read off the typed backing where that is the
+    /// whole of the cell: one cell (`df.at`, a row of a frame) built the
+    /// column's entire Scalar view, a million Scalars, and every clone (a
+    /// frame's `.iloc` / `.at` accessor clones it) starts without one
+    /// (br-frankenpandas-rrulv). The caller bounds `idx`.
+    fn cell(&self, idx: usize) -> Scalar {
+        let text = |bytes: &[u8], lo: usize, hi: usize| {
+            Scalar::Utf8(
+                std::str::from_utf8(&bytes[lo..hi])
+                    .expect("contiguous utf8 buffer is valid by construction")
+                    .to_owned(),
+            )
+        };
+        match self {
+            Self::Eager(values) => values[idx].clone(),
+            Self::LazyAllValidInt64 { data, .. } => Scalar::Int64(data[idx]),
+            Self::LazyAllValidInt64Vec { data, .. } => Scalar::Int64(data[idx]),
+            Self::LazyAllValidInt64Slice { data, start, .. } => Scalar::Int64(data[start + idx]),
+            Self::LazyAllValidFloat64 { data, .. } => Scalar::Float64(data[idx]),
+            Self::LazyAllValidFloat64Vec { data, .. } => Scalar::Float64(data[idx]),
+            Self::LazyAllValidFloat64Slice { data, start, .. } => {
+                Scalar::Float64(data[start + idx])
+            }
+            Self::LazyAllValidDatetime64 { data, .. } => Scalar::Datetime64(data[idx]),
+            Self::LazyAllValidDatetime64Vec { data, .. } => Scalar::Datetime64(data[idx]),
+            Self::LazyAllValidTimedelta64Vec { data, .. } => Scalar::Timedelta64(data[idx]),
+            Self::LazyAllValidPeriodVec { data, freq, .. } => {
+                Scalar::Period(Period::new(data[idx], *freq))
+            }
+            Self::LazyAllValidBool { data, .. } => Scalar::Bool(data[idx]),
+            Self::LazyContiguousUtf8 { bytes, offsets, .. } => {
+                text(bytes, offsets[idx], offsets[idx + 1])
+            }
+            Self::LazyUtf8Slice {
+                bytes,
+                offsets,
+                start,
+                ..
+            } => text(bytes, offsets[start + idx], offsets[start + idx + 1]),
+            _ => self.as_slice()[idx].clone(),
+        }
+    }
+
     fn len(&self) -> usize {
         match self {
             Self::Eager(values) => values.len(),
@@ -7318,6 +7364,13 @@ impl Clone for Column {
             Some(d @ ColumnData::Timedelta64(_))
                 if matches!(self.dtype, DType::Timedelta64)
                     && matches!(values, ScalarValues::Eager(_)) =>
+            {
+                Some(d.clone())
+            }
+            // A shared buffer since rrulv, so a period clone keeps its typed
+            // access too (it dropped it).
+            Some(d @ ColumnData::Period(..))
+                if self.dtype == DType::Period && matches!(values, ScalarValues::Eager(_)) =>
             {
                 Some(d.clone())
             }
@@ -12057,18 +12110,18 @@ impl Column {
                     Some(data.iter().all(|value| value.is_finite())),
                 ))
             }
-            (Some(ColumnData::Timedelta64(data)), DType::Timedelta64)
-                if data.len() == self.values.len() =>
-            {
-                Some(ScalarValues::from_vec(
-                    data.iter().copied().map(Scalar::Timedelta64).collect(),
-                ))
-            }
             (Some(ColumnData::Datetime64(data)), DType::Datetime64 { .. })
                 if data.len() == self.values.len() =>
             {
-                Some(ScalarValues::lazy_all_valid_datetime64(data.clone()))
+                Some(ScalarValues::lazy_all_valid_datetime64_arc(Arc::clone(
+                    data,
+                )))
             }
+            // A timedelta column has no lazy backing over the shared buffer:
+            // its values clone as they are (an Arc) and the clone keeps the
+            // buffer beside them. Rebuilding the same Scalars here cost every
+            // clone - every .iloc / .loc of a frame - 12 ms a million rows
+            // (br-frankenpandas-rrulv).
             (Some(ColumnData::Period(data, freq)), DType::Period)
                 if data.len() == self.values.len() =>
             {
@@ -12291,7 +12344,7 @@ impl Column {
                 ScalarValues::lazy_all_valid_int64_arc(Arc::clone(data))
             }
             (Some(ColumnData::Datetime64(data)), DType::Datetime64 { .. }, true) => {
-                ScalarValues::lazy_all_valid_datetime64(data.clone())
+                ScalarValues::lazy_all_valid_datetime64_arc(Arc::clone(data))
             }
             _ => ScalarValues::from_vec(coerced),
         };
@@ -14416,7 +14469,7 @@ impl Column {
             return Some(data.as_slice());
         }
         if let Some(ColumnData::Datetime64(data)) = &self.data {
-            return Some(data.as_slice());
+            return Some(data);
         }
         None
     }
@@ -14434,7 +14487,7 @@ impl Column {
             return Some(data.as_slice());
         }
         if let Some(ColumnData::Timedelta64(data)) = &self.data {
-            return Some(data.as_slice());
+            return Some(data);
         }
         None
     }
@@ -14451,7 +14504,7 @@ impl Column {
             return Some((data.as_slice(), *freq));
         }
         if let Some(ColumnData::Period(data, freq)) = &self.data {
-            return Some((data.as_slice(), *freq));
+            return Some((data, *freq));
         }
         None
     }
@@ -16183,6 +16236,30 @@ impl Column {
                     pandas_string: self.pandas_string,
                 };
             }
+
+            // Datetimes and bools copy their range of the buffer (the caller
+            // puts a zone back): they built the range's Vec<usize> and
+            // gathered it, 1.5 ms / 0.6 ms for 500,000 rows against pandas'
+            // 0.06 ms / 0.01 ms view (perf).
+            if let Some(nanos) = self.as_datetime64_slice()
+                && nanos.len() == self.len()
+            {
+                return Self::from_datetime64_values_with_validity(
+                    nanos[start..end].to_vec(),
+                    ValidityMask::all_valid(len),
+                );
+            }
+            if let Some(nanos) = self.as_timedelta64_slice()
+                && nanos.len() == self.len()
+            {
+                return Self::from_timedelta64_values_with_validity(
+                    nanos[start..end].to_vec(),
+                    ValidityMask::all_valid(len),
+                );
+            }
+            if let Some(flags) = self.as_bool_slice() {
+                return Self::from_bool_values(flags[start..end].to_vec());
+            }
         }
 
         // CONTIGUOUS RANGE ON A NULLABLE COLUMN. The block above is gated on
@@ -16380,6 +16457,25 @@ impl Column {
             }
 
             return Self::from_f64_values_with_validity(window.to_vec(), mask);
+        }
+
+        // A datetime or timedelta column holding NaT: its range of nanos and
+        // of the mask.
+        if let Some(nanos) = self.as_datetime64_slice()
+            && nanos.len() == self.len()
+        {
+            return Self::from_datetime64_values_with_validity(
+                nanos[start..end].to_vec(),
+                self.validity.slice(start, len),
+            );
+        }
+        if let Some(nanos) = self.as_timedelta64_slice()
+            && nanos.len() == self.len()
+        {
+            return Self::from_timedelta64_values_with_validity(
+                nanos[start..end].to_vec(),
+                self.validity.slice(start, len),
+            );
         }
 
         let positions: Vec<usize> = (start..end).collect();
@@ -17358,6 +17454,15 @@ impl Column {
     #[must_use]
     pub fn value(&self, idx: usize) -> Option<&Scalar> {
         self.values.get(idx)
+    }
+
+    /// The cell at `idx` (`values()[idx]`) without building the column's
+    /// Scalar view when its typed backing holds the cell (a single-cell or
+    /// single-row read built the whole view; br-frankenpandas-rrulv). None
+    /// past the end.
+    #[must_use]
+    pub fn scalar_at(&self, idx: usize) -> Option<Scalar> {
+        (idx < self.len()).then(|| self.values.cell(idx))
     }
 
     /// Extract scalar value from a single-element column.
@@ -36267,6 +36372,171 @@ mod tests {
                 .collect::<Vec<_>>()
                 .as_slice()
         );
+    }
+
+    #[test]
+    fn take_contiguous_range_copies_datetime_and_bool_buffers_as_the_gather_did() {
+        // The typed copies (no Vec<usize> of the range) give the gather's
+        // cells: a zone kept, NaT kept across a word edge, bools as bools.
+        let same = |column: &Column, start: usize, len: usize| {
+            let positions: Vec<usize> = (start..start + len).collect();
+            let gathered = column.take_positions(&positions);
+            let sliced = column.take_contiguous_range(start, len);
+            assert_eq!(sliced.dtype(), gathered.dtype());
+            assert_eq!(sliced.values(), gathered.values());
+            assert_eq!(sliced.validity(), gathered.validity());
+            sliced
+        };
+        let zoned = Column::from_datetime64_values((0..150i64).map(|i| i * 1_000).collect())
+            .with_dtype(DType::datetime64_tz("UTC"));
+        let sliced = same(&zoned, 3, 140);
+        assert_eq!(sliced.dtype(), DType::datetime64_tz("UTC"));
+        let with_nat = Column::new(
+            DType::datetime64_tz("UTC"),
+            (0..150i64)
+                .map(|i| {
+                    if i % 61 == 0 {
+                        Scalar::Null(NullKind::NaT)
+                    } else {
+                        Scalar::Datetime64(i)
+                    }
+                })
+                .collect(),
+        )
+        .unwrap();
+        let sliced = same(&with_nat, 1, 125);
+        assert!(!sliced.validity().get(60) && !sliced.validity().get(121));
+        let spans = Column::new(
+            DType::Timedelta64,
+            (0..150i64)
+                .map(|i| {
+                    if i % 61 == 0 {
+                        Scalar::Null(NullKind::NaT)
+                    } else {
+                        Scalar::Timedelta64(i * 7)
+                    }
+                })
+                .collect(),
+        )
+        .unwrap();
+        same(&spans, 1, 125);
+        let all_spans = Column::new(
+            DType::Timedelta64,
+            (0..150i64).map(Scalar::Timedelta64).collect(),
+        )
+        .unwrap();
+        same(&all_spans, 64, 70);
+        let flags = Column::from_bool_values((0..150).map(|i| i % 3 == 0).collect());
+        same(&flags, 64, 70);
+        // NEGATIVE: an all-valid masked `boolean` column stays `boolean`.
+        let masked = Column::new(DType::BoolNullable, vec![Scalar::Bool(true); 10]).unwrap();
+        assert_eq!(same(&masked, 2, 5).dtype(), DType::BoolNullable);
+    }
+
+    #[test]
+    fn a_temporal_column_clone_shares_its_buffer_rrulv() {
+        // A frame's .iloc / .loc accessor clones the frame: a datetime,
+        // timedelta or period column's cached buffer was a Vec the clone
+        // copied (br-frankenpandas-rrulv). With a NaT the values stay eager
+        // beside the cached buffer, the shape the clone carried it in.
+        let stamps = Column::new(
+            DType::datetime64_naive(),
+            vec![
+                Scalar::Datetime64(1),
+                Scalar::Null(NullKind::NaT),
+                Scalar::Datetime64(3),
+            ],
+        )
+        .unwrap();
+        let spans = Column::new(
+            DType::Timedelta64,
+            vec![Scalar::Timedelta64(5), Scalar::Null(NullKind::NaT)],
+        )
+        .unwrap();
+        let periods = Column::new(
+            DType::Period,
+            vec![Scalar::Period(Period::new(7, PeriodFreq::Daily)); 3],
+        )
+        .unwrap();
+        let (stamps_copy, spans_copy, periods_copy) =
+            (stamps.clone(), spans.clone(), periods.clone());
+        assert_eq!(
+            stamps_copy.as_datetime64_slice().expect("typed").as_ptr(),
+            stamps.as_datetime64_slice().expect("typed").as_ptr()
+        );
+        assert_eq!(
+            spans_copy.as_timedelta64_slice().expect("typed").as_ptr(),
+            spans.as_timedelta64_slice().expect("typed").as_ptr()
+        );
+        assert_eq!(
+            periods_copy.as_period_slice().expect("typed").0.as_ptr(),
+            periods.as_period_slice().expect("typed").0.as_ptr()
+        );
+        assert_eq!(stamps_copy.values(), stamps.values());
+        assert_eq!(spans_copy.values(), spans.values());
+        assert_eq!(periods_copy.values(), periods.values());
+    }
+
+    #[test]
+    fn scalar_at_reads_one_cell_as_the_scalar_view_holds_it_rrulv() {
+        // `scalar_at` reads the typed backing (df.at, a frame row built the
+        // whole Scalar view per call; br-frankenpandas-rrulv): every backing
+        // it reads directly, and one it does not, give values()[i].
+        let ints = Column::from_i64_values((0..70).map(|i| i * 3 - 5).collect());
+        let floats_with_nan = Column::from_f64_values(
+            (0..70)
+                .map(|i| {
+                    if i % 9 == 0 {
+                        f64::NAN
+                    } else {
+                        f64::from(i) / 4.0
+                    }
+                })
+                .collect(),
+        );
+        let text = Column::from_utf8_contiguous(b"abcdefg".to_vec(), vec![0, 1, 1, 3, 7]);
+        let columns = [
+            ints.clone(),
+            Column::from_i64_values_owned((0..70).collect()),
+            Column::from_i64_values_owned((0..70).collect()).take_contiguous_range(5, 50),
+            floats_with_nan.clone(),
+            Column::from_f64_values_owned((0..70).map(f64::from).collect()),
+            Column::from_f64_values((0..70).map(f64::from).collect()).take_contiguous_range(3, 40),
+            Column::from_datetime64_values((0..70).map(|i| i * 1_000).collect()),
+            Column::from_period_values_owned((0..70).collect(), PeriodFreq::Daily),
+            Column::from_bool_values((0..70).map(|i| i % 3 == 0).collect()),
+            text.clone(),
+            text.take_contiguous_range(1, 3),
+            Column::from_f64_values_with_validity(
+                vec![1.0, 0.0, 3.0],
+                ValidityMask::from_words(vec![0b101], 3),
+            ),
+        ];
+        // Bit-identical cells (a NaN float equals no float under ==).
+        let same = |a: &Scalar, b: &Scalar| match (a, b) {
+            (Scalar::Float64(x), Scalar::Float64(y)) => x.to_bits() == y.to_bits(),
+            _ => a == b,
+        };
+        for column in &columns {
+            for idx in 0..column.len() {
+                let cell = column.scalar_at(idx).expect("in bounds");
+                assert!(
+                    same(&cell, &column.values()[idx]),
+                    "{:?} row {idx}: {cell:?}",
+                    column.dtype()
+                );
+            }
+            // NEGATIVE: past the end there is no cell.
+            assert_eq!(column.scalar_at(column.len()), None);
+        }
+        // The read builds no Scalar view (NON-VACUITY: the cache starts
+        // empty on a fresh column and stays so).
+        let stamps = Column::from_datetime64_values((0..70).collect());
+        assert_eq!(stamps.scalar_at(9), Some(Scalar::Datetime64(9)));
+        match &stamps.values {
+            ScalarValues::LazyAllValidDatetime64 { values, .. } => assert!(values.get().is_none()),
+            other => panic!("expected the lazy datetime backing, got {other:?}"),
+        }
     }
 
     // br-frankenpandas-1rrs8: this `#[test]` had been stacked onto

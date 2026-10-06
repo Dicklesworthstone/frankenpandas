@@ -52904,16 +52904,22 @@ fn resolve_loc_rows(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<LocRows>
         }
         LocKey::Label(label) => label,
     };
-    // None, one or several rows carry it: the count stops at a second
-    // (it compared all million labels; br-frankenpandas-63xxx).
-    match df
-        .index()
-        .labels()
-        .iter()
-        .filter(|l| **l == label)
-        .take(2)
-        .count()
-    {
+    // None, one or several rows carry it: a unique index answers by its
+    // lookup (the count read every label for a second match - df.loc[5] 1.8
+    // ms a million rows; br-frankenpandas-rrulv), one with repeats counts,
+    // stopping at a second (it compared all million labels;
+    // br-frankenpandas-63xxx).
+    let carriers = if df.index().has_duplicates() {
+        df.index()
+            .labels()
+            .iter()
+            .filter(|l| **l == label)
+            .take(2)
+            .count()
+    } else {
+        usize::from(df.index().position(&label).is_some())
+    };
+    match carriers {
         // pandas' KeyError is the key itself (it was its Debug text,
         // 'Int64(5)'; br-frankenpandas-7fbgd).
         0 => Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(

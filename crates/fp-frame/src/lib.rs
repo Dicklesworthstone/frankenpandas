@@ -27724,13 +27724,13 @@ impl Series {
         } else {
             pos as usize
         };
-        if idx >= self.len() {
-            return Err(FrameError::CompatibilityRejected(format!(
+        // One cell, not the column's Scalar view (br-frankenpandas-rrulv).
+        self.column.scalar_at(idx).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!(
                 "iat: position {pos} out of bounds for Series of length {}",
                 self.len()
-            )));
-        }
-        Ok(self.column.values()[idx].clone())
+            ))
+        })
     }
 
     /// Access a scalar value by label.
@@ -27740,7 +27740,9 @@ impl Series {
         let pos = self.index.position(label).ok_or_else(|| {
             FrameError::CompatibilityRejected(format!("at: label {label:?} not found in index"))
         })?;
-        Ok(self.column.values()[pos].clone())
+        self.column.scalar_at(pos).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("at: label {label:?} not found in index"))
+        })
     }
 
     /// Dict-like scalar lookup by label.
@@ -27751,7 +27753,7 @@ impl Series {
     pub fn get(&self, label: &IndexLabel) -> Option<Scalar> {
         self.index
             .position(label)
-            .map(|pos| self.column.values()[pos].clone())
+            .and_then(|pos| self.column.scalar_at(pos))
     }
 
     /// Dict-like scalar lookup with a fallback value.
@@ -81540,14 +81542,17 @@ impl DataFrame {
     /// returned Series has the DataFrame's column names as its index and the
     /// row values as data.
     pub fn loc_row(&self, label: &IndexLabel) -> Result<Series, FrameError> {
-        let pos = self
-            .index
-            .labels()
-            .iter()
-            .position(|l| l == label)
-            .ok_or_else(|| {
-                FrameError::CompatibilityRejected(format!("loc label not found: {label:?}"))
-            })?;
+        // A unique index finds its one match without scanning - or, as a
+        // RangeIndex, building - its labels (df.loc[5] built a million;
+        // br-frankenpandas-rrulv); with repeats, the first.
+        let pos = if self.index.has_duplicates() {
+            self.index.labels().iter().position(|l| l == label)
+        } else {
+            self.index.position(label)
+        }
+        .ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("loc label not found: {label:?}"))
+        })?;
 
         self.row_to_series(pos)
     }
@@ -81587,7 +81592,10 @@ impl DataFrame {
             let col = self.column_at(at).ok_or_else(|| {
                 FrameError::CompatibilityRejected(format!("column '{name}' not found"))
             })?;
-            values.push(col.values()[position].clone());
+            // One cell, not the column's Scalar view (br-frankenpandas-rrulv).
+            values.push(col.scalar_at(position).ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!("row {position} out of bounds"))
+            })?);
             if !dtypes.contains(&col.dtype()) {
                 dtypes.push(col.dtype());
             }
@@ -88962,7 +88970,7 @@ impl DataFrame {
     /// `CompatibilityRejected` for out-of-range row or column
     /// positions.
     pub fn iat(&self, row_pos: i64, col_pos: i64) -> Result<Scalar, FrameError> {
-        let n_rows = self.index.labels().len();
+        let n_rows = self.len();
         let row_idx = if row_pos < 0 {
             (n_rows as i64 + row_pos) as usize
         } else {
@@ -88992,7 +89000,12 @@ impl DataFrame {
                 "DataFrame.iat: column position {col_pos} out of bounds for width {n_cols}"
             ))
         })?;
-        Ok(column.values()[row_idx].clone())
+        // One cell, not the column's Scalar view (br-frankenpandas-rrulv).
+        column.scalar_at(row_idx).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!(
+                "DataFrame.iat: row position {row_pos} out of bounds for length {n_rows}"
+            ))
+        })
     }
 
     /// This frame with `index` as its row axis, labels and name both, as
@@ -89105,7 +89118,10 @@ impl DataFrame {
         let col = self.columns.get(column).ok_or_else(|| {
             FrameError::CompatibilityRejected(format!("DataFrame.at: column {column:?} not found"))
         })?;
-        Ok(col.values()[row].clone())
+        // One cell, not the column's Scalar view (br-frankenpandas-rrulv).
+        col.scalar_at(row).ok_or_else(|| {
+            FrameError::CompatibilityRejected(format!("DataFrame.at: row {row} out of bounds"))
+        })
     }
 
     /// Per-column value counts as a map of Series.
