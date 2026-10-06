@@ -10563,6 +10563,15 @@ fn index_from_axis_value(value: &Bound<'_, PyAny>) -> PyResult<Index> {
             .with_row_multiindex(multi.inner.clone())
             .map_err(index_error_to_py);
     }
+    // An Index is itself - a RangeIndex stays one, an object Index object -
+    // and a range or an int64 array its typed labels, unnamed: they were
+    // rebuilt from copied-out labels (br-frankenpandas-gyj9r).
+    if let Ok(plain) = plain_index_ref(value) {
+        return Ok(plain.inner.clone());
+    }
+    if let Some(typed) = typed_index_of(value)? {
+        return Ok(typed);
+    }
     // A tz-aware DatetimeIndex or datetime Series keeps its zone (it was
     // taken as naive UTC labels).
     let zone = index_arg_zone(value);
@@ -10586,11 +10595,13 @@ fn index_from_axis_value(value: &Bound<'_, PyAny>) -> PyResult<Index> {
         .and_then(|name| name.extract::<String>().ok());
     let labels = extract_index_labels(Some(value), 0)?;
     // A DatetimeIndex / TimedeltaIndex keeps its freq, as the constructors'
-    // index= does (`s.index = dr` dropped it).
+    // index= does (`s.index = dr` dropped it), and a CategoricalIndex its
+    // categories (gyj9r).
     Index::new(labels)
         .rename_index(name.as_deref())
         .with_tz(zone.as_deref())
         .map(|index| index.with_freq(index_arg_freq(value)))
+        .and_then(|index| index.with_categories(index_arg_categories(value)))
         .map_err(index_error_to_py)
 }
 
@@ -35342,37 +35353,20 @@ impl PySeries {
                 "No axis named {ax} for object type Series"
             )));
         }
-        // A MultiIndex stays one (its flat labels were kept alone; r0hk0).
-        if labels.extract::<PyRef<'_, PyMultiIndex>>().is_ok() {
-            let index = index_from_axis_value(labels)?;
-            if index.len() != self.inner.len() {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Length mismatch: Expected axis has {} elements, new values have {} elements",
-                    self.inner.len(),
-                    index.len()
-                )));
-            }
-            let s = Series::new(self.inner.name(), index, self.inner.column().clone())
-                .map_err(frame_error_to_py)?;
-            return Ok(PySeries { inner: s });
+        // The index pandas builds of `labels`, as `s.index =` sets it: a
+        // MultiIndex stays one (r0hk0), an Index is itself, a list unnamed
+        // (the Series' old name was kept, a RangeIndex / object Index
+        // rebuilt from its labels; br-frankenpandas-gyj9r).
+        let index = index_from_axis_value(labels)?;
+        if index.len() != self.inner.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Length mismatch: Expected axis has {} elements, new values have {} elements",
+                self.inner.len(),
+                index.len()
+            )));
         }
-        // A list's labels, or any index-like's (a DatetimeIndex raised
-        // TypeError), with a tz-aware target's zone (fvsao.60).
-        let (lbls, zone) = if let Ok(list) = labels.cast::<PyList>() {
-            let mut v = Vec::with_capacity(list.len());
-            for item in list.iter() {
-                v.push(py_to_index_label(&item)?);
-            }
-            (v, None)
-        } else {
-            let target = labels.extract::<IndexArg>()?;
-            (
-                target.inner.labels().to_vec(),
-                target.inner.tz().map(str::to_owned),
-            )
-        };
-        let s = self.inner.set_axis(lbls).map_err(frame_error_to_py)?;
-        let s = series_index_in_zone(s, zone.as_deref())?;
+        let s = Series::new(self.inner.name(), index, self.inner.column().clone())
+            .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: s })
     }
 
@@ -51019,6 +51013,17 @@ impl PyDataFrame {
                 out.assign_columns(labels)?;
             }
             return Ok(out);
+        }
+        // The rows are the index pandas builds of `labels`, as `df.index =`
+        // sets it: an Index itself, a list unnamed (the frame's old name was
+        // kept, a RangeIndex / object / categorical Index rebuilt from its
+        // labels; br-frankenpandas-gyj9r).
+        if axis_idx == 0 {
+            let inner = self
+                .inner
+                .with_index(index_from_axis_value(labels)?)
+                .map_err(axis_length_error_to_py)?;
+            return Ok(PyDataFrame { inner });
         }
         let lbls = if let Ok(py_idx) = plain_index_ref(labels) {
             py_idx.inner.labels().to_vec()

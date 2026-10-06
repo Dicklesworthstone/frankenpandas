@@ -27590,3 +27590,45 @@ def test_take_positions_like_pandas_fk877(case: str) -> None:
             return "IndexError"
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-gyj9r: set_axis and `obj.index =` install the index pandas
+# builds of the labels - an Index itself (name, RangeIndex, object dtype,
+# categories), a list or a range unnamed - not the old index's name.
+def _gyj9r_shown(result: Any) -> Any:
+    index = result.index
+    return [type(index).__name__, str(index.dtype), index.name, repr(list(index))]
+
+
+def _gyj9r_assign(obj: Any, value: Any) -> Any:
+    obj.index = value
+    return obj
+
+
+_GYJ9R_FRAME = lambda m: m.DataFrame({"a": [1, 2]}, index=m.Index([0, 1], name="old"))
+_GYJ9R_SERIES = lambda m: m.Series([1, 2], index=m.Index([0, 1], name="old"))
+_GYJ9R_CASES = {
+    "frame set_axis list": lambda m: _GYJ9R_FRAME(m).set_axis([5, 6]),
+    "frame set_axis named Index": lambda m: _GYJ9R_FRAME(m).set_axis(m.Index([5, 6], name="k")),
+    "frame set_axis named RangeIndex": lambda m: _GYJ9R_FRAME(m).set_axis(m.RangeIndex(2, name="r")),
+    "frame set_axis object Index": lambda m: _GYJ9R_FRAME(m).set_axis(m.Index([5, 6], dtype=object)),
+    "frame set_axis CategoricalIndex": lambda m: _GYJ9R_FRAME(m).set_axis(m.CategoricalIndex(["p", "q"])),
+    "frame index = RangeIndex": lambda m: _gyj9r_assign(_GYJ9R_FRAME(m), m.RangeIndex(2, name="r")),
+    "frame index = range": lambda m: _gyj9r_assign(_GYJ9R_FRAME(m), range(2)),
+    "series set_axis list": lambda m: _GYJ9R_SERIES(m).set_axis([5, 6]),
+    "series set_axis named Index": lambda m: _GYJ9R_SERIES(m).set_axis(m.Index([5, 6], name="k")),
+    "series index = object Index": lambda m: _gyj9r_assign(_GYJ9R_SERIES(m), m.Index([7, 8], dtype=object)),
+    "frame set_axis wrong length (NEGATIVE: raises)": lambda m: _GYJ9R_FRAME(m).set_axis([1, 2, 3]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_GYJ9R_CASES))
+def test_set_axis_installs_pandas_index_gyj9r(case: str) -> None:
+    def shown(m: Any) -> Any:
+        try:
+            return _gyj9r_shown(_GYJ9R_CASES[case](m))
+        except ValueError:
+            return "ValueError"
+
+    assert shown(fpd) == shown(pd)
