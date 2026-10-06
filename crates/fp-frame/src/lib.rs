@@ -68610,8 +68610,13 @@ fn concat_dataframes_axis1(
     let mut pairs = Vec::new();
     let mut output_column_order = Vec::new();
     for frame in frames {
-        let positions = if frame.index() == &target_index {
-            (0..frame.len()).map(Some).collect::<Vec<_>>()
+        // A frame on the target index shares its columns (each was gathered
+        // through an identity Vec<Option<usize>> after its Scalar view was
+        // read for a missing value: concat axis=1 of two 1M-row frames 19 ms;
+        // br-frankenpandas-kk9se).
+        let identical = frame.index() == &target_index;
+        let positions = if identical {
+            Vec::new()
         } else if frame.index().has_duplicates() {
             return Err(FrameError::CompatibilityRejected(
                 "concat(axis=1) cannot reindex duplicate index labels".to_owned(),
@@ -68626,7 +68631,11 @@ fn concat_dataframes_axis1(
                 .column_name_at(pos)
                 .expect("column position in bounds");
             let column = frame.column_at(pos).expect("column position in bounds");
-            let reindexed = reindex_concat_axis1_column(column, &positions)?;
+            let reindexed = if identical {
+                column.clone()
+            } else {
+                reindex_concat_axis1_column(column, &positions)?
+            };
             pairs.push((name.clone(), reindexed));
             output_column_order.push(name);
         }
@@ -122188,6 +122197,46 @@ mod tests {
             concat_dataframes_with_axis(&[&strict_left, &right], 1).expect_err("should reject");
         assert!(matches!(err, FrameError::CompatibilityRejected(_)));
         assert!(err.to_string().contains("duplicate labels are present"));
+    }
+
+    #[test]
+    fn concat_dataframes_axis1_shares_the_columns_of_a_frame_on_the_target_index_kk9se() {
+        // A frame whose index is the target's shares its columns as they are
+        // (br-frankenpandas-kk9se): the buffer is the source's own.
+        let rows: Vec<IndexLabel> = (0..70_i64).map(IndexLabel::Int64).collect();
+        let left = DataFrame::new(
+            Index::new(rows.clone()),
+            BTreeMap::from([(
+                "x".to_owned(),
+                Column::from_f64_values((0..70).map(f64::from).collect()),
+            )]),
+        )
+        .unwrap();
+        let right = DataFrame::new(
+            Index::new(rows),
+            BTreeMap::from([("y".to_owned(), Column::from_i64_values((0..70).collect()))]),
+        )
+        .unwrap();
+        let out = concat_dataframes_with_axis(&[&left, &right], 1).unwrap();
+        assert_eq!(
+            out.column("x").unwrap().as_f64_slice().unwrap().as_ptr(),
+            left.column("x").unwrap().as_f64_slice().unwrap().as_ptr()
+        );
+        assert_eq!(
+            out.column("y").unwrap().values(),
+            right.column("y").unwrap().values()
+        );
+        // NEGATIVE: a frame on another index is reindexed, its gaps missing.
+        let shifted = DataFrame::from_dict_with_index(
+            vec![("z", vec![Scalar::Float64(1.5)])],
+            vec![500_i64.into()],
+        )
+        .unwrap();
+        let out = concat_dataframes_with_axis(&[&left, &shifted], 1).unwrap();
+        assert_eq!(out.len(), 71);
+        assert!(out.column("x").unwrap().values()[70].is_missing());
+        assert!(out.column("z").unwrap().values()[0].is_missing());
+        assert_eq!(out.column("z").unwrap().values()[70], Scalar::Float64(1.5));
     }
 
     #[test]
