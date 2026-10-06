@@ -1489,6 +1489,81 @@ fn slice_freq(index: &Index, step: isize) -> Option<String> {
     fp_index::scale_freq(index.freq()?, i64::try_from(step).ok()?)
 }
 
+/// `data[i] - data[i - periods]` for every row with a partner (`p` =
+/// |periods|, at most the length), 0.0 for the `p` without: one collected
+/// pass, where zeroing a `vec![0.0; n]` first was 41% of `df.diff()` (its
+/// page faults, in each worker's fresh allocation).
+fn shifted_f64_differences(data: &[f64], periods: i64, p: usize) -> Vec<f64> {
+    let n = data.len();
+    let boundary = std::iter::repeat_n(0.0, p);
+    if periods >= 0 {
+        boundary
+            .chain(
+                data[p..]
+                    .iter()
+                    .zip(&data[..n - p])
+                    .map(|(cur, prev)| cur - prev),
+            )
+            .collect()
+    } else {
+        data[..n - p]
+            .iter()
+            .zip(&data[p..])
+            .map(|(cur, next)| cur - next)
+            .chain(boundary)
+            .collect()
+    }
+}
+
+/// `diff(periods)` of a nullable float64 buffer of `n` rows: row i is
+/// `data[i] - data[i - periods]`, present iff both rows are. The mask is the
+/// source's ANDed with itself shifted by `periods`, a word at a time, and the
+/// subtraction runs over every in-range row; a missing row keeps the 0.0
+/// datum. It read two mask bits per row (35% of `df.diff()`).
+fn nullable_f64_diff(data: &[f64], validity: &ValidityMask, periods: i64) -> Column {
+    let n = data.len();
+    let p = usize::try_from(periods.unsigned_abs()).map_or(n, |p| p.min(n));
+    let words = validity.packed_words_for_scan();
+    let (word_shift, bit_shift) = (p / 64, p % 64);
+    let at = |k: usize| words.get(k).copied().unwrap_or(0);
+    let partner = |k: usize| -> u64 {
+        if periods >= 0 {
+            // Bit i of the partner mask is bit i - p: the words shifted up.
+            let Some(src) = k.checked_sub(word_shift) else {
+                return 0;
+            };
+            let low = src
+                .checked_sub(1)
+                .filter(|_| bit_shift > 0)
+                .map_or(0, |below| at(below) >> (64 - bit_shift));
+            (at(src) << bit_shift) | low
+        } else {
+            // Bit i is bit i + p: shifted down; past the end reads 0.
+            let src = k + word_shift;
+            let high = if bit_shift > 0 {
+                at(src + 1) << (64 - bit_shift)
+            } else {
+                0
+            };
+            (at(src) >> bit_shift) | high
+        }
+    };
+    let valid_words: Vec<u64> = (0..words.len()).map(|k| at(k) & partner(k)).collect();
+    let mut out = shifted_f64_differences(data, periods, p);
+    for (k, &word) in valid_words.iter().enumerate() {
+        let mut missing = !word;
+        while missing != 0 {
+            let i = k * 64 + missing.trailing_zeros() as usize;
+            if i >= n {
+                break;
+            }
+            out[i] = 0.0;
+            missing &= missing - 1;
+        }
+    }
+    Column::from_f64_values_with_validity(out, ValidityMask::from_words(valid_words, n))
+}
+
 fn normalize_iloc_position(position: i64, len: usize) -> Result<usize, FrameError> {
     // Fast path (perf): on 64-bit platforms `len <= isize::MAX <= i64::MAX`, so the
     // whole normalization is exact in i64 and avoids the per-call i128 conversions
@@ -23047,7 +23122,6 @@ impl Series {
         // `from_f64_values_with_validity` 0.0-datum + cleared-bit convention.
         // The index and name are preserved.
         if let Some(data) = self.column.as_f64_slice() {
-            let mut out = vec![0.0_f64; n];
             let invalid_len = periods.unsigned_abs().min(n as u64) as usize;
             let validity = if invalid_len == 0 {
                 fp_columnar::ValidityMask::all_valid(n)
@@ -23059,26 +23133,7 @@ impl Series {
                     n,
                 )
             };
-            if periods >= 0 {
-                let p = invalid_len;
-                for ((dst, &cur), &prev) in out[p..]
-                    .iter_mut()
-                    .zip(data[p..].iter())
-                    .zip(data[..n - p].iter())
-                {
-                    *dst = cur - prev;
-                }
-            } else {
-                let p = invalid_len;
-                let valid_len = n - p;
-                for ((dst, &cur), &next) in out[..valid_len]
-                    .iter_mut()
-                    .zip(data[..valid_len].iter())
-                    .zip(data[p..].iter())
-                {
-                    *dst = cur - next;
-                }
-            }
+            let out = shifted_f64_differences(data, periods, invalid_len);
             let column = Column::from_f64_values_with_validity(out, validity);
             return Series::new(self.name.clone(), self.index.clone(), column);
         }
@@ -23092,29 +23147,7 @@ impl Series {
         // missing-operand slot ⇒ cleared bit ⇒ `Null(NullKind::NaN)` (the same
         // `from_f64_values_with_validity` 0.0-datum + cleared-bit convention).
         if let Some((data, in_valid)) = self.column.as_f64_slice_with_validity() {
-            let invalid_len = periods.unsigned_abs().min(n as u64) as usize;
-            let mut out = vec![0.0_f64; n];
-            let mut valid_words = vec![0_u64; n.div_ceil(64)];
-            let p = invalid_len;
-            if periods >= 0 {
-                for i in p..n {
-                    let j = i - p;
-                    if in_valid.get(i) && in_valid.get(j) {
-                        out[i] = data[i] - data[j];
-                        valid_words[i / 64] |= 1_u64 << (i % 64);
-                    }
-                }
-            } else {
-                for i in 0..n.saturating_sub(p) {
-                    let j = i + p;
-                    if in_valid.get(i) && in_valid.get(j) {
-                        out[i] = data[i] - data[j];
-                        valid_words[i / 64] |= 1_u64 << (i % 64);
-                    }
-                }
-            }
-            let validity = fp_columnar::ValidityMask::from_words(valid_words, n);
-            let column = Column::from_f64_values_with_validity(out, validity);
+            let column = nullable_f64_diff(data, in_valid, periods);
             return Series::new(self.name.clone(), self.index.clone(), column);
         }
 
@@ -98570,46 +98603,14 @@ impl DataFrame {
     ///
     /// Matches `pd.DataFrame.diff(periods)`.
     pub fn diff(&self, periods: i64) -> Result<Self, FrameError> {
-        // Direct-typed-column fast path for Float64 (see apply_cum_f64): the
-        // `apply_per_column` clone de-types nullable Float64 columns, dropping them
-        // to the generic Scalar diff (DataFrame diff on nullable f64 was ~6x slower
-        // than pandas). Positional NaN-propagating diff off the STORED column's
-        // `(&[f64], &ValidityMask)`: `out = v - v_{periods-back}`, valid iff BOTH
-        // endpoints present. Bit-identical to Series::diff's nullable path (and the
-        // generic diff, which emits Null(NaN) for any boundary/missing-operand slot).
-        // Non-Float64 columns delegate to Series::diff (Timedelta/Bool/Int64 dtype
-        // rules preserved).
+        // Each column is its Series' diff (the stored column, typed: an
+        // all-valid float64 one a vectorized pass, a nullable one
+        // `nullable_f64_diff`, a float32 one float32). A float64 loop of its
+        // own read two mask bits per row (df[['x', 'y']].diff() 4.65 ms a
+        // million rows, two Series diffs 0.54) and made float32 float64.
         let transformed = self.par_map_column_positions_min(16_384, |pos| {
             let col = self.column_at(pos).expect("column in bounds");
-            if col.dtype() == DType::Float64
-                && let Some((data, validity)) = col.as_f64_slice_with_validity()
-            {
-                let n = data.len();
-                let mut out = vec![0.0_f64; n];
-                let mut words = vec![0u64; n.div_ceil(64)];
-                let p = periods.unsigned_abs().min(n as u64) as usize;
-                if periods >= 0 {
-                    for i in p..n {
-                        let j = i - p;
-                        if validity.get(i) && validity.get(j) {
-                            out[i] = data[i] - data[j];
-                            words[i / 64] |= 1u64 << (i % 64);
-                        }
-                    }
-                } else {
-                    for i in 0..n - p {
-                        let j = i + p;
-                        if validity.get(i) && validity.get(j) {
-                            out[i] = data[i] - data[j];
-                            words[i / 64] |= 1u64 << (i % 64);
-                        }
-                    }
-                }
-                Ok(Column::from_f64_values_with_validity(
-                    out,
-                    fp_columnar::ValidityMask::from_words(words, n),
-                ))
-            } else if col.dtype().is_numeric()
+            if col.dtype().is_numeric()
                 || col.dtype().is_bool()
                 || col.dtype().is_datetime()
                 || col.dtype().is_timedelta()
@@ -172908,6 +172909,50 @@ mod tests {
                 .with_index(Index::from_i64_values(vec![1, 1, 2]))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn nullable_diff_a_word_at_a_time_is_the_row_loop_1f8c6() {
+        // The shifted-and-ANDed mask and the collected differences are the
+        // per-row loop they replace: present iff both rows are, the
+        // difference there, 0.0 elsewhere - lengths and periods around word
+        // edges, both signs, past the length (br-frankenpandas-1f8c6).
+        for n in [0_usize, 1, 2, 63, 64, 65, 127, 128, 129, 200] {
+            let data: Vec<f64> = (0..n).map(|i| (i * i) as f64 * 0.5 - 3.0).collect();
+            let mut validity = ValidityMask::all_valid(n);
+            for i in 0..n {
+                if i % 5 == 2 || i % 64 == 63 {
+                    validity.set(i, false);
+                }
+            }
+            for periods in [0_i64, 1, 2, 63, 64, 65, 200, -1, -2, -64, -65, -200] {
+                let got = crate::nullable_f64_diff(&data, &validity, periods);
+                let p = usize::try_from(periods.unsigned_abs()).unwrap().min(n);
+                for i in 0..n {
+                    let partner = if periods >= 0 {
+                        i.checked_sub(p)
+                    } else {
+                        Some(i + p).filter(|&j| j < n)
+                    };
+                    let present = partner.is_some_and(|j| validity.get(i) && validity.get(j));
+                    assert_eq!(
+                        got.validity().get(i),
+                        present,
+                        "n {n} periods {periods} row {i}"
+                    );
+                    let (values, _) = got.as_f64_slice_with_validity().unwrap();
+                    let expected = match partner {
+                        Some(j) if present => data[i] - data[j],
+                        _ => 0.0,
+                    };
+                    assert_eq!(
+                        values[i].to_bits(),
+                        expected.to_bits(),
+                        "n {n} periods {periods} row {i}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

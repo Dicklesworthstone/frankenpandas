@@ -28181,3 +28181,46 @@ _CE86R_CASES = {
 @pytest.mark.parametrize("case", list(_CE86R_CASES))
 def test_empty_indexes_keep_their_type_like_pandas_ce86r(case: str) -> None:
     assert _ce86r_shown(_CE86R_CASES[case], fpd) == _ce86r_shown(_CE86R_CASES[case], pd)
+
+
+# br-frankenpandas-1f8c6: a frame's diff is each column's Series diff (a float32
+# column stays float32 - its own float64 loop made it float64), and a NaN-holding
+# column's diff is present where both rows are, across word edges.
+def _1f8c6_frame(m: Any) -> Any:
+    k = np.arange(150)
+    x = np.sin(k * 0.37) * 10
+    return m.DataFrame(
+        {
+            "f": x,
+            "nan": np.where(k % 7 == 3, np.nan, x),
+            "f32": x.astype("float32"),
+            "nan32": np.where(k % 5 == 1, np.nan, x).astype("float32"),
+            "i": k * 3,
+        }
+    )
+
+
+def _1f8c6_shown(obj: Any) -> Any:
+    if hasattr(obj, "columns"):
+        return [(str(c), str(obj[c].dtype), [repr(v) for v in obj[c].tolist()]) for c in obj.columns]
+    return [str(obj.dtype), [repr(v) for v in obj.tolist()]]
+
+
+_1F8C6_CASES = {
+    "df.diff()": lambda m: _1f8c6_frame(m).diff(),
+    "df.diff(-3)": lambda m: _1f8c6_frame(m).diff(-3),
+    "df.diff(64)": lambda m: _1f8c6_frame(m).diff(64),
+    "df.diff(-65)": lambda m: _1f8c6_frame(m).diff(-65),
+    "df.diff(200) (past the length)": lambda m: _1f8c6_frame(m).diff(200),
+    "df.diff(0)": lambda m: _1f8c6_frame(m).diff(0),
+    "s_nan.diff()": lambda m: _1f8c6_frame(m)["nan"].diff(),
+    "s_nan.diff(-64)": lambda m: _1f8c6_frame(m)["nan"].diff(-64),
+    "s_nan32.diff(2)": lambda m: _1f8c6_frame(m)["nan32"].diff(2),
+    "df[['f32', 'nan32']].diff() keeps float32": lambda m: _1f8c6_frame(m)[["f32", "nan32"]].diff(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_1F8C6_CASES))
+def test_diff_like_pandas_1f8c6(case: str) -> None:
+    assert _1f8c6_shown(_1F8C6_CASES[case](fpd)) == _1f8c6_shown(_1F8C6_CASES[case](pd))
