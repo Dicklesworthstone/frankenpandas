@@ -27632,3 +27632,62 @@ def test_set_axis_installs_pandas_index_gyj9r(case: str) -> None:
             return "ValueError"
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-9xlbq: a 2-D float64 / int64 / bool array is read through
+# one buffer (any layout or stride), .dtypes reuses numpy's dtype objects,
+# .columns of a RangeIndex axis is its range - each as pandas answers.
+def _9xlbq_shown(frame: Any) -> Any:
+    return [
+        type(frame.columns).__name__,
+        repr(list(frame.columns)),
+        [str(dtype) for dtype in frame.dtypes],
+        [repr(frame.iloc[:, j].tolist()) for j in range(frame.shape[1])],
+    ]
+
+
+_9XLBQ_F = np.arange(12.0).reshape(3, 4) - 5.5
+_9XLBQ_I = np.arange(12).reshape(3, 4) - 6
+_9XLBQ_B = (np.arange(12).reshape(3, 4) % 3) == 0
+_9XLBQ_CASES = {
+    "float64 C order": lambda m: m.DataFrame(_9XLBQ_F),
+    "float64 F order": lambda m: m.DataFrame(np.asfortranarray(_9XLBQ_F)),
+    "float64 transposed": lambda m: m.DataFrame(_9XLBQ_F.T),
+    "float64 strided": lambda m: m.DataFrame(_9XLBQ_F[::2, ::2]),
+    "float64 reversed": lambda m: m.DataFrame(_9XLBQ_F[::-1, ::-1]),
+    "float64 nan / inf / -0.0": lambda m: m.DataFrame(np.array([[np.nan, np.inf], [-0.0, -np.inf]])),
+    "int64 C order": lambda m: m.DataFrame(_9XLBQ_I),
+    "int64 strided": lambda m: m.DataFrame(_9XLBQ_I[:, 1::2]),
+    "bool C order": lambda m: m.DataFrame(_9XLBQ_B),
+    "bool transposed": lambda m: m.DataFrame(_9XLBQ_B.T),
+    "no rows": lambda m: m.DataFrame(_9XLBQ_F[:0]),
+    "one column": lambda m: m.DataFrame(_9XLBQ_I[:, :1]),
+    "columns= and index=": lambda m: m.DataFrame(_9XLBQ_F, columns=list("abcd"), index=list("xyz")),
+    "float32 keeps its width": lambda m: m.DataFrame(_9XLBQ_F.astype(np.float32)),
+    "dtypes of a mixed frame": lambda m: m.DataFrame({"f": [1.5], "i": [1], "b": [True], "s": ["x"], "I": m.array([1], dtype="Int64")}),
+    "columns after setitem": lambda m: (lambda d: (d.__setitem__(4, 0.0), d)[1])(m.DataFrame(_9XLBQ_F)),
+    "columns after rename to text": lambda m: m.DataFrame(_9XLBQ_F).rename(columns={0: "0"}),
+    "columns after drop": lambda m: m.DataFrame(_9XLBQ_F).drop(columns=[1]),
+    "columns of a copy": lambda m: m.DataFrame(_9XLBQ_F).copy(),
+    "wide sum": lambda m: m.DataFrame(np.arange(40.0).reshape(2, 20)).sum().to_frame(),
+    "columns= wrong length (NEGATIVE: raises)": lambda m: m.DataFrame(_9XLBQ_F, columns=list("ab")),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_9XLBQ_CASES))
+def test_matrix_dtypes_columns_like_pandas_9xlbq(case: str) -> None:
+    def shown(m: Any) -> Any:
+        try:
+            return _9xlbq_shown(_9XLBQ_CASES[case](m))
+        except ValueError:
+            return "ValueError"
+
+    assert shown(fpd) == shown(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_dtypes_hold_numpy_dtype_objects_9xlbq() -> None:
+    frame = fpd.DataFrame(_9XLBQ_F)
+    assert all(dtype is np.dtype("float64") for dtype in frame.dtypes)
+    assert (frame.dtypes == "float64").all()

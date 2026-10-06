@@ -70477,7 +70477,10 @@ impl<'a> IntoIterator for &'a mut LazyDataFrameColumns {
 
 #[cfg(feature = "lazy-transpose-view")]
 enum LazyDataFrameColumnOrder {
-    Eager(Vec<String>),
+    // Shared behind Arc, written through Arc::make_mut: a frame's clone (each
+    // .iloc / .loc accessor, copy()) copied every name - 0.7 ms a clone at
+    // 100k columns (br-frankenpandas-9xlbq).
+    Eager(Arc<Vec<String>>),
     Int64UnitRange {
         start: i64,
         len: usize,
@@ -70555,7 +70558,7 @@ impl LazyDataFrameColumnOrder {
 
     fn make_eager(&mut self) -> &mut Vec<String> {
         if matches!(self, Self::Int64UnitRange { .. }) {
-            let previous = std::mem::replace(self, Self::Eager(Vec::new()));
+            let previous = std::mem::replace(self, Self::Eager(Arc::default()));
             let Self::Int64UnitRange {
                 start,
                 len,
@@ -70567,17 +70570,17 @@ impl LazyDataFrameColumnOrder {
             let order = materialized
                 .into_inner()
                 .unwrap_or_else(|| Self::materialize_range(start, len));
-            *self = Self::Eager(order);
+            *self = Self::Eager(Arc::new(order));
         }
         let Self::Eager(order) = self else {
             unreachable!();
         };
-        order
+        Arc::make_mut(order)
     }
 
     fn into_materialized(self) -> Vec<String> {
         match self {
-            Self::Eager(order) => order,
+            Self::Eager(order) => Arc::unwrap_or_clone(order),
             Self::Int64UnitRange {
                 start,
                 len,
@@ -70592,7 +70595,7 @@ impl LazyDataFrameColumnOrder {
 #[cfg(feature = "lazy-transpose-view")]
 impl From<Vec<String>> for LazyDataFrameColumnOrder {
     fn from(order: Vec<String>) -> Self {
-        Self::Eager(order)
+        Self::Eager(Arc::new(order))
     }
 }
 
@@ -70606,7 +70609,7 @@ impl From<LazyDataFrameColumnOrder> for Vec<String> {
 #[cfg(feature = "lazy-transpose-view")]
 impl Default for LazyDataFrameColumnOrder {
     fn default() -> Self {
-        Self::Eager(Vec::new())
+        Self::Eager(Arc::default())
     }
 }
 
@@ -70689,7 +70692,7 @@ impl Serialize for LazyDataFrameColumnOrder {
 #[cfg(feature = "lazy-transpose-view")]
 impl<'de> Deserialize<'de> for LazyDataFrameColumnOrder {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Vec::<String>::deserialize(deserializer).map(Self::Eager)
+        Vec::<String>::deserialize(deserializer).map(Self::from)
     }
 }
 
@@ -74603,7 +74606,7 @@ impl DataFrame {
             index,
             row_multiindex: None,
             columns: LazyDataFrameColumns::float64_block(store),
-            column_order: LazyDataFrameColumnOrder::Eager(names).into(),
+            column_order: LazyDataFrameColumnOrder::from(names).into(),
             column_multiindex: None,
             allows_duplicate_labels: true,
         })
@@ -78122,19 +78125,20 @@ impl DataFrame {
     #[must_use]
     pub fn column_range_span(&self) -> Option<(i64, i64, i64)> {
         let (start, stop, step) = self.column_order.range?;
-        let labels = self.column_labels();
-        let expected = (0..labels.len()).map(|at| {
+        let len = fp_index::RangeIndex::new(start, stop, step).ok()?.len();
+        if len != self.column_order.len() {
+            return None;
+        }
+        // Label by label, none collected: `df.columns` asks this per access
+        // (br-frankenpandas-9xlbq).
+        let holds = self.column_order.iter().enumerate().all(|(at, name)| {
             i64::try_from(at)
                 .ok()
                 .and_then(|at| at.checked_mul(step))
                 .and_then(|offset| start.checked_add(offset))
+                .is_some_and(|value| self.column_order.label(name) == IndexLabel::Int64(value))
         });
-        let holds = labels
-            .iter()
-            .zip(expected)
-            .all(|(label, value)| value.is_some_and(|value| *label == IndexLabel::Int64(value)));
-        let len = fp_index::RangeIndex::new(start, stop, step).ok()?.len();
-        (holds && len == labels.len()).then_some((start, stop, step))
+        holds.then_some((start, stop, step))
     }
 
     /// This frame's columns marked as pandas' default RangeIndex `span` (its

@@ -459,23 +459,16 @@ fn shifted_periods(series: &Series, n: &Bound<'_, PyAny>, sign: i64) -> PyResult
 /// raised); the extension dtype classes for the nullable, categorical and
 /// tz-aware ones; the name for anything else.
 fn column_pandas_dtype<'py>(py: Python<'py>, column: &Column) -> PyResult<Bound<'py, PyAny>> {
-    let name = column_pandas_dtype_name(column);
+    if let Some(name) = column_numpy_dtype_name(column) {
+        return py.import("numpy")?.call_method1("dtype", (name,));
+    }
     if let Some(width) = column.width() {
-        return if column.dtype().is_nullable() {
-            masked_width_dtype(py, width)
-        } else {
-            py.import("numpy")?.call_method1("dtype", (name,))
-        };
+        return masked_width_dtype(py, width);
     }
     if column.is_pandas_string() {
         return PyStringDtype::default().into_bound_py_any(py);
     }
-    if matches!(
-        name.as_str(),
-        "int64" | "float64" | "bool" | "object" | "datetime64[ns]" | "timedelta64[ns]"
-    ) {
-        return py.import("numpy")?.call_method1("dtype", (name,));
-    }
+    let name = column_pandas_dtype_name(column);
     match column.dtype() {
         DType::Int64Nullable => PyInt64Dtype.into_bound_py_any(py),
         DType::Float64Nullable => PyFloat64Dtype.into_bound_py_any(py),
@@ -500,6 +493,25 @@ fn column_pandas_dtype<'py>(py: Python<'py>, column: &Column) -> PyResult<Bound<
         DType::Period => index_dtype_object(py, &name, None),
         _ => Ok(pyo3::types::PyString::new(py, &name).into_any()),
     }
+}
+
+/// The name of the numpy dtype a column's pandas dtype is (`np.dtype(name)`:
+/// int8 ... float64, bool, object, datetime64[ns], timedelta64[ns]); None
+/// for an extension dtype (masked, string, categorical, tz-aware, interval,
+/// period).
+fn column_numpy_dtype_name(column: &Column) -> Option<String> {
+    if column.width().is_some() {
+        return (!column.dtype().is_nullable()).then(|| column_pandas_dtype_name(column));
+    }
+    if column.is_pandas_string() {
+        return None;
+    }
+    let name = column_pandas_dtype_name(column);
+    matches!(
+        name.as_str(),
+        "int64" | "float64" | "bool" | "object" | "datetime64[ns]" | "timedelta64[ns]"
+    )
+    .then_some(name)
 }
 
 /// pandas' masked extension dtype of a narrow width: `pd.Int8Dtype()` ...
@@ -8429,6 +8441,59 @@ fn ndarray_elements<T: pyo3::buffer::Element>(
     array: &Bound<'_, PyAny>,
 ) -> PyResult<Vec<T>> {
     pyo3::buffer::PyBuffer::<T>::get(array)?.to_vec(py)
+}
+
+/// The columns of a native-order 2-D float64 / int64 / bool numpy array of
+/// `rows` rows and `width` columns, read through one buffer in column-major
+/// order - each column as [`py_array_like_column`] reads its view, without
+/// the view: a view and its conversion per column cost ~3 us a column
+/// (`DataFrame(np.random.normal(size=(10, 100_000)))` 300 ms, pandas 0.01;
+/// br-frankenpandas-9xlbq). None for any other array.
+fn matrix_columns(
+    py: Python<'_>,
+    data: &Bound<'_, PyAny>,
+    rows: usize,
+    width: usize,
+) -> PyResult<Option<Vec<Column>>> {
+    fn split<T: Copy, U>(
+        values: &[T],
+        rows: usize,
+        width: usize,
+        build: fn(Vec<T>) -> U,
+    ) -> Vec<U> {
+        if rows == 0 {
+            return (0..width).map(|_| build(Vec::new())).collect();
+        }
+        values
+            .chunks_exact(rows)
+            .map(|column| build(column.to_vec()))
+            .collect()
+    }
+    fn fortran<T: pyo3::buffer::Element>(
+        py: Python<'_>,
+        array: &Bound<'_, PyAny>,
+    ) -> PyResult<Vec<T>> {
+        pyo3::buffer::PyBuffer::<T>::get(array)?.to_fortran_vec(py)
+    }
+    let dtype = data.getattr("dtype")?;
+    if !dtype.getattr("isnative")?.extract::<bool>()? {
+        return Ok(None);
+    }
+    let columns = match dtype.getattr("name")?.extract::<String>()?.as_str() {
+        "float64" => split(&fortran(py, data)?, rows, width, Column::from_f64_values),
+        "int64" => split(&fortran(py, data)?, rows, width, Column::from_i64_values),
+        // A numpy bool is one byte, zero or not.
+        "bool" => split(
+            &fortran::<u8>(py, &data.call_method1("view", ("uint8",))?)?,
+            rows,
+            width,
+            |bytes: Vec<u8>| {
+                Column::from_bool_values(bytes.into_iter().map(|byte| byte != 0).collect())
+            },
+        ),
+        _ => return Ok(None),
+    };
+    Ok(Some(columns))
 }
 
 /// The index of a Python `range` (its affine labels, never built - a
@@ -38817,9 +38882,14 @@ impl PyDataFrame {
     /// '0'), a RangeIndex for pandas' default columns, named as the axis is
     /// (fvsao.32).
     fn column_axis_index(&self) -> Index {
-        let index = Index::new(self.inner.column_labels())
-            .with_range_span(self.inner.column_range_span())
-            .rename_index(self.inner.columns_name());
+        // A RangeIndex axis as its range, its labels never built (100k
+        // columns' .columns built them twice, 11 ms an access;
+        // br-frankenpandas-9xlbq).
+        let index = match self.inner.column_range_span() {
+            Some((start, stop, step)) => Index::from_range(start, stop, step),
+            None => Index::new(self.inner.column_labels()),
+        }
+        .rename_index(self.inner.columns_name());
         // A transposed tz-aware row index keeps its zone (fvsao.60).
         match self.inner.columns_tz() {
             Some(zone) => index.clone().with_tz(Some(zone)).unwrap_or(index),
@@ -40867,7 +40937,12 @@ impl PyDataFrame {
             // Sequence (fvsao.32's `DataFrame(np.random.rand(5, 3))`).
             if data.get_type().name()?.to_str()? == "ndarray" {
                 let shape: Vec<usize> = data.getattr("shape")?.extract()?;
+                let matrix = match shape.as_slice() {
+                    [rows, width] => matrix_columns(py, data, *rows, *width)?,
+                    _ => None,
+                };
                 let parts: Vec<Bound<'_, PyAny>> = match shape.as_slice() {
+                    _ if matrix.is_some() => Vec::new(),
                     [_] => vec![data.clone()],
                     [_, width] => (0..*width)
                         .map(|column| data.get_item((pyo3::types::PySlice::full(py), column)))
@@ -40880,26 +40955,31 @@ impl PyDataFrame {
                     }
                 };
                 let rows = shape.first().copied().unwrap_or(0);
+                let width = matrix.as_ref().map_or(parts.len(), Vec::len);
                 let names = match explicit_cols {
-                    Some(names) if names.len() != parts.len() => {
+                    Some(names) if names.len() != width => {
                         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                            "Shape of passed values is ({rows}, {}), indices imply ({rows}, {})",
-                            parts.len(),
+                            "Shape of passed values is ({rows}, {width}), indices imply ({rows}, {})",
                             names.len()
                         )));
                     }
                     Some(names) => names,
-                    None => (0..parts.len()).map(|at| at.to_string()).collect(),
+                    None => (0..width).map(|at| at.to_string()).collect(),
                 };
-                let mut pairs = Vec::with_capacity(parts.len());
-                for (name, part) in names.iter().zip(&parts) {
-                    let column = py_array_like_column(py, part)?.ok_or_else(|| {
-                        PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                            "DataFrame data format not recognized",
-                        )
-                    })?;
-                    pairs.push((name.clone(), column));
-                }
+                let columns = match matrix {
+                    Some(columns) => columns,
+                    None => parts
+                        .iter()
+                        .map(|part| {
+                            py_array_like_column(py, part)?.ok_or_else(|| {
+                                PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                    "DataFrame data format not recognized",
+                                )
+                            })
+                        })
+                        .collect::<PyResult<Vec<_>>>()?,
+                };
+                let pairs: Vec<(String, Column)> = names.iter().cloned().zip(columns).collect();
                 let labels = extract_index_labels(index, rows)?;
                 let df = DataFrame::new_with_column_order(
                     Index::new(labels),
@@ -41404,17 +41484,38 @@ impl PyDataFrame {
         let cols = self.column_labels();
         let mut labels = Vec::with_capacity(cols.len());
         let mut dtypes = Vec::with_capacity(cols.len());
+        // One cell per numpy dtype name - numpy hands out one object per
+        // name: np.dtype(name) and its cell per column cost ~2 us a column
+        // (100k columns 236 ms, pandas 0.5; br-frankenpandas-9xlbq).
+        let mut numpy_cells: Vec<(String, Scalar)> = Vec::new();
         // By position: a repeated label reported its first column's dtype
         // (concat(axis=1, keys=...) of two 'v' columns, a pivot_table with
         // several aggfuncs, read the int64 'sum' dtype for the 'mean').
         for (position, col) in cols.into_iter().enumerate() {
             // The column's typed label (0, not '0'; fvsao.32).
             labels.push(self.inner.column_label(&col));
-            let dtype = match self.inner.column_at(position) {
-                Some(column) => column_pandas_dtype(py, column)?,
-                None => py.import("numpy")?.call_method1("dtype", ("object",))?,
+            let column = self.inner.column_at(position);
+            let numpy_name =
+                column.map_or_else(|| Some("object".to_owned()), column_numpy_dtype_name);
+            let cell = match (numpy_name, column) {
+                (None, Some(column)) => py_to_cell(py, &column_pandas_dtype(py, column)?)?,
+                // A numpy dtype (object for a missing column).
+                (name, _) => {
+                    let name = name.unwrap_or_else(|| "object".to_owned());
+                    match numpy_cells.iter().find(|(known, _)| *known == name) {
+                        Some((_, cell)) => cell.clone(),
+                        None => {
+                            let dtype = py
+                                .import("numpy")?
+                                .call_method1("dtype", (name.as_str(),))?;
+                            let cell = py_to_cell(py, &dtype)?;
+                            numpy_cells.push((name, cell.clone()));
+                            cell
+                        }
+                    }
+                }
             };
-            dtypes.push(py_to_cell(py, &dtype)?);
+            dtypes.push(cell);
         }
         let s = Series::from_values("", labels, dtypes)
             .map_err(frame_error_to_py)?
