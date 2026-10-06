@@ -3087,15 +3087,20 @@ enum ScalarValues {
         freq: PeriodFreq,
         values: OnceLock<Vec<Scalar>>,
     },
-    /// Each row's category, `categories[codes[i]]` (a code past them: a
-    /// missing row, NaN) - a categorical kept as pandas keeps one, codes
-    /// plus categories, boxing a Scalar per row only when read. pd.cut /
-    /// qcut's Interval bins (fvsao.54) built one per row, 1.6x the old
-    /// label text's cost.
+    /// Each row's category, `categories[codes[i]]` (-1: a missing row, NaN):
+    /// a categorical kept as pandas keeps one, codes plus categories, boxing
+    /// a Scalar per row only when read. pd.cut / qcut's Interval bins
+    /// (fvsao.54) built one per row, 1.6x the old label text's cost, and a
+    /// categorical column stored the categories' text repeated, every
+    /// category-aware op re-deriving the codes by hashing it
+    /// (br-frankenpandas-5oup5). The Scalar view is shared by the clones:
+    /// it is a function of the codes and categories, which never change, and
+    /// a groupby clones its key (a fresh cache boxed a million Scalars per
+    /// call).
     LazyCategoryCodes {
-        codes: Arc<Vec<u32>>,
+        codes: Arc<Vec<i32>>,
         categories: Arc<[Scalar]>,
-        values: OnceLock<Vec<Scalar>>,
+        values: Arc<OnceLock<Vec<Scalar>>>,
     },
     /// Nullable Datetime64 backing (the temporal mirror of `LazyNullableInt64`):
     /// contiguous ns `data` + `validity`; an invalid slot materializes
@@ -4218,6 +4223,26 @@ impl ScalarValues {
             expanded: OnceLock::new(),
             values: OnceLock::new(),
         }
+    }
+
+    fn lazy_category_codes(codes: Arc<Vec<i32>>, categories: Arc<[Scalar]>) -> Self {
+        debug_assert!(codes.iter().all(|&code| {
+            code == -1 || usize::try_from(code).is_ok_and(|code| code < categories.len())
+        }));
+        Self::LazyCategoryCodes {
+            codes,
+            categories,
+            values: Arc::default(),
+        }
+    }
+
+    /// Row `code` of a categorical's categories, NaN for -1.
+    fn category_cell(categories: &[Scalar], code: i32) -> Scalar {
+        usize::try_from(code)
+            .ok()
+            .and_then(|code| categories.get(code))
+            .cloned()
+            .unwrap_or(Scalar::Null(NullKind::NaN))
     }
 
     fn lazy_shifted_bool(source: Arc<[bool]>, periods: i64, fill: bool, len: usize) -> Self {
@@ -6088,12 +6113,7 @@ impl ScalarValues {
                 .get_or_init(|| {
                     codes
                         .iter()
-                        .map(|&code| {
-                            categories
-                                .get(code as usize)
-                                .cloned()
-                                .unwrap_or(Scalar::Null(NullKind::NaN))
-                        })
+                        .map(|&code| Self::category_cell(categories, code))
                         .collect()
                 })
                 .as_slice(),
@@ -6974,6 +6994,9 @@ impl ScalarValues {
                 kind,
                 ..
             } => kind.cell(data.as_slice()[affine_position(*start, *step, idx)]),
+            Self::LazyCategoryCodes {
+                codes, categories, ..
+            } => Self::category_cell(categories, codes[idx]),
             Self::LazyAllValidFloat64 { data, .. } => Scalar::Float64(data[idx]),
             Self::LazyAllValidFloat64Vec { data, .. } => Scalar::Float64(data[idx]),
             Self::LazyAllValidFloat64Slice { data, start, .. } => {
@@ -7074,7 +7097,6 @@ impl ScalarValues {
             | Self::LazyAllValidDatetime64Vec { values, .. }
             | Self::LazyAllValidTimedelta64Vec { values, .. }
             | Self::LazyAllValidPeriodVec { values, .. }
-            | Self::LazyCategoryCodes { values, .. }
             | Self::LazyNullableDatetime64 { values, .. }
             | Self::LazyNullableTimedelta64 { values, .. }
             | Self::LazyNullablePeriod { values, .. }
@@ -7119,6 +7141,7 @@ impl ScalarValues {
             | Self::LazyLeftJoinDenseCycleRightInt64 { values, .. }
             | Self::LazyNullableRepeatPositionsI64AsFloat64 { values, .. }
             | Self::LazyUtf8Slice { values, .. } => values.get().is_some(),
+            Self::LazyCategoryCodes { values, .. } => values.get().is_some(),
         }
     }
 }
@@ -7342,11 +7365,13 @@ impl Clone for ScalarValues {
                 values: OnceLock::new(),
             },
             Self::LazyCategoryCodes {
-                codes, categories, ..
+                codes,
+                categories,
+                values,
             } => Self::LazyCategoryCodes {
                 codes: Arc::clone(codes),
                 categories: Arc::clone(categories),
-                values: OnceLock::new(),
+                values: Arc::clone(values),
             },
             Self::LazyNullableDatetime64 { data, validity, .. } => {
                 Self::lazy_nullable_datetime64(data.clone(), validity.clone())
@@ -13212,31 +13237,42 @@ impl Column {
         }
     }
 
-    /// A column of `categories[code]` per row - a code past them is a
-    /// missing row (NaN) - that keeps the codes and boxes a `Scalar` per row
-    /// only when a consumer reads the Scalar view: pd.cut / qcut's Interval
-    /// bins (fvsao.54). Semantically identical to `Column::new(dtype,
-    /// scalars)` over the same values; `dtype` is the categories' own.
+    /// A column of `categories[code]` per row - a negative code, or one past
+    /// them, is a missing row (NaN) - that keeps the codes and boxes a
+    /// `Scalar` per row only when a consumer reads the Scalar view: pd.cut /
+    /// qcut's Interval bins (fvsao.54). Semantically identical to
+    /// `Column::new(dtype, scalars)` over the same values; `dtype` is the
+    /// categories' own.
     #[must_use]
     #[doc(hidden)]
-    pub fn from_category_codes(dtype: DType, codes: Vec<u32>, categories: Vec<Scalar>) -> Self {
+    pub fn from_category_codes(dtype: DType, codes: Vec<i32>, categories: Vec<Scalar>) -> Self {
+        Self::category_codes_column(dtype, codes, categories.into(), None)
+    }
+
+    /// The codes column of [`Self::from_category_codes`] and
+    /// [`Self::from_categorical_codes`]: a code outside the categories is
+    /// stored as -1, the missing code every reader of the codes expects.
+    fn category_codes_column(
+        dtype: DType,
+        mut codes: Vec<i32>,
+        categories: Arc<[Scalar]>,
+        categorical: Option<CategoricalMetadata>,
+    ) -> Self {
         let len = codes.len();
         let mut words = vec![0_u64; len.div_ceil(64)];
-        for (row, &code) in codes.iter().enumerate() {
-            if (code as usize) < categories.len() {
+        for (row, code) in codes.iter_mut().enumerate() {
+            if usize::try_from(*code).is_ok_and(|code| code < categories.len()) {
                 words[row / 64] |= 1_u64 << (row % 64);
+            } else {
+                *code = -1;
             }
         }
         Self {
             dtype,
-            values: ScalarValues::LazyCategoryCodes {
-                codes: Arc::new(codes),
-                categories: categories.into(),
-                values: OnceLock::new(),
-            },
+            values: ScalarValues::lazy_category_codes(Arc::new(codes), categories),
             validity: ValidityMask::from_words(words, len),
             data: None,
-            categorical: None,
+            categorical,
             width: None,
             pandas_string: false,
         }
@@ -16024,6 +16060,28 @@ impl Column {
     /// result through the storage's own constructors, which know no width.
     fn take_positions_storage(&self, positions: &[usize]) -> Self {
         let n = positions.len();
+        // A categorical held as codes gathers its codes, staying one (its
+        // rows were gathered as Scalars into a by-value column, 27% of a
+        // categorical sort_values; br-frankenpandas-5oup5).
+        if let ScalarValues::LazyCategoryCodes {
+            codes, categories, ..
+        } = &self.values
+        {
+            let taken: Vec<i32> = positions.iter().map(|&position| codes[position]).collect();
+            let mut words = vec![0_u64; n.div_ceil(64)];
+            for (i, &code) in taken.iter().enumerate() {
+                words[i / 64] |= u64::from(code >= 0) << (i % 64);
+            }
+            return Self {
+                dtype: self.dtype.clone(),
+                values: ScalarValues::lazy_category_codes(Arc::new(taken), Arc::clone(categories)),
+                validity: ValidityMask::from_words(words, n),
+                data: None,
+                categorical: self.categorical.clone(),
+                width: None,
+                pandas_string: false,
+            };
+        }
         if self.validity.all() {
             // Zero-copy contiguous-range Float64 view
             // (br-frankenpandas-jbyuc.1.1.1.1): ordered unique joins gather
@@ -17842,6 +17900,29 @@ impl Column {
             width: self.width,
             pandas_string: self.pandas_string,
         }
+    }
+
+    /// A categorical column whose row i is category `codes[i]` of `meta`
+    /// (-1: missing), held as the codes (br-frankenpandas-5oup5).
+    #[must_use]
+    pub fn from_categorical_codes(codes: Vec<i32>, meta: CategoricalMetadata) -> Self {
+        let categories = Arc::from(meta.categories.as_slice());
+        Self::category_codes_column(DType::Categorical, codes, categories, Some(meta))
+    }
+
+    /// The category codes (-1: missing) of a column held as codes
+    /// ([`Self::from_categorical_codes`], a cut's bins) while its categorical
+    /// metadata names the categories they index; None for any other column.
+    #[must_use]
+    pub fn categorical_codes(&self) -> Option<&[i32]> {
+        let ScalarValues::LazyCategoryCodes {
+            codes, categories, ..
+        } = &self.values
+        else {
+            return None;
+        };
+        let meta = self.categorical.as_ref()?;
+        (meta.categories.as_slice() == &categories[..]).then_some(codes.as_slice())
     }
 
     /// The numpy dtype narrower than the storage that pandas reports for
@@ -39471,12 +39552,9 @@ mod tests {
         let first = Interval::new(0.0, 1.0, IntervalClosed::Right);
         let second = Interval::new(1.0, 2.0, IntervalClosed::Right);
         let categories = vec![Scalar::Interval(first), Scalar::Interval(second)];
-        // Code 7 is past the categories: missing, as u32::MAX is.
-        let column = Column::from_category_codes(
-            DType::Interval,
-            vec![1, u32::MAX, 0, 7, 1],
-            categories.clone(),
-        );
+        // Code 7 is past the categories: missing, as -1 is.
+        let column =
+            Column::from_category_codes(DType::Interval, vec![1, -1, 0, 7, 1], categories.clone());
         // Nothing is boxed until the Scalar view is read.
         assert!(!column.scalar_cache_is_materialized());
         assert_eq!(column.len(), 5);
@@ -39502,11 +39580,11 @@ mod tests {
                 .zip(eager.values())
                 .all(|(lazy, eager)| lazy.semantic_eq(eager))
         );
-        // A clone keeps the codes (fresh cache) and reads the same.
+        // A clone keeps the codes and reads the same.
         let copy = column.clone();
         assert_eq!(copy.values(), column.values());
         // NEGATIVE: an all-missing codes column holds no category.
-        let none = Column::from_category_codes(DType::Interval, vec![u32::MAX; 3], categories);
+        let none = Column::from_category_codes(DType::Interval, vec![-1; 3], categories);
         assert!(none.values().iter().all(Scalar::is_missing));
     }
 
@@ -40379,6 +40457,70 @@ mod tests {
                 "** {exponent}"
             );
         }
+    }
+
+    #[test]
+    fn categorical_columns_held_as_codes_read_as_their_values_5oup5() {
+        // br-frankenpandas-5oup5: a column of codes into categories reads -
+        // values, mask, a cell, a clone, a take - as the by-value column of
+        // those categories would, NaN where the code is -1.
+        let categories = vec![
+            Scalar::Utf8("a".to_owned()),
+            Scalar::Utf8("b".to_owned()),
+            Scalar::Utf8("c".to_owned()),
+        ];
+        let meta = fp_types::CategoricalMetadata::new(categories.clone(), false);
+        let codes: Vec<i32> = (0..200)
+            .map(|i| if i % 7 == 3 { -1 } else { i % 3 })
+            .collect();
+        let column = Column::from_categorical_codes(codes.clone(), meta.clone());
+        let expected: Vec<Scalar> = codes
+            .iter()
+            .map(|&code| {
+                usize::try_from(code)
+                    .map_or(Scalar::Null(NullKind::NaN), |code| categories[code].clone())
+            })
+            .collect();
+        assert_eq!(column.dtype(), DType::Categorical);
+        assert_eq!(column.categorical(), Some(&meta));
+        // A clone made before the Scalar view is read shares it once read
+        // (a groupby clones its key; a fresh cache boxed every row per call).
+        let early_clone = column.clone();
+        assert!(!column.scalar_cache_is_materialized());
+        assert_eq!(column.values(), expected.as_slice());
+        assert!(early_clone.scalar_cache_is_materialized());
+        for (i, &code) in codes.iter().enumerate() {
+            assert_eq!(column.validity().get(i), code >= 0);
+        }
+        assert_eq!(column.categorical_codes(), Some(codes.as_slice()));
+        assert_eq!(column.clone().categorical_codes(), Some(codes.as_slice()));
+        let positions = [5_usize, 3, 199, 0, 3];
+        let taken = column.take_positions(&positions);
+        let taken_codes: Vec<i32> = positions.iter().map(|&p| codes[p]).collect();
+        assert_eq!(taken.categorical_codes(), Some(taken_codes.as_slice()));
+        // Other rows, so not the source's Scalar view.
+        assert!(!taken.scalar_cache_is_materialized());
+        assert_eq!(
+            taken.values(),
+            positions
+                .iter()
+                .map(|&p| expected[p].clone())
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
+        // NEGATIVE: metadata naming other categories hands out no codes
+        // (they would index the wrong list), and the values stay the codes'.
+        let renamed = column.with_categorical(Some(fp_types::CategoricalMetadata::new(
+            vec![Scalar::Utf8("x".to_owned())],
+            false,
+        )));
+        assert_eq!(renamed.categorical_codes(), None);
+        assert_eq!(renamed.values(), expected.as_slice());
+        // NEGATIVE: a code outside the categories is held as -1, missing -
+        // never a code the codes readers would index past the list with.
+        let out_of_range = Column::from_categorical_codes(vec![0, 3, -5, 2], meta);
+        assert_eq!(out_of_range.categorical_codes(), Some(&[0, -1, -1, 2][..]));
+        assert_eq!(out_of_range.validity().count_valid(), 2);
     }
 
     #[test]

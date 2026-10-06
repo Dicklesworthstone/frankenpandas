@@ -10696,33 +10696,46 @@ fn compare_categorical_codes(left: i64, right: i64, op: ComparisonOp) -> bool {
     }
 }
 
-fn compare_categorical_codes_with_na_position(
-    left: &Scalar,
-    right: &Scalar,
-    ascending: bool,
-    na_first: bool,
-) -> Ordering {
-    match (categorical_code(left), categorical_code(right)) {
-        (None, None) => Ordering::Equal,
-        (None, Some(_)) => {
-            if na_first {
-                Ordering::Less
-            } else {
-                Ordering::Greater
-            }
-        }
-        (Some(_), None) => {
-            if na_first {
-                Ordering::Greater
-            } else {
-                Ordering::Less
-            }
-        }
-        (Some(left), Some(right)) => {
-            let order = left.cmp(&right);
-            if ascending { order } else { order.reverse() }
-        }
+/// The positions of category `codes` (-1: missing) of `ncat` categories in
+/// category order - ascending or not, the missing first or last - each
+/// category's rows in their own order: a stable counting sort (the
+/// comparator sort of the codes as Scalars it replaces was 43% of a
+/// categorical sort_values; br-frankenpandas-5oup5).
+fn stable_code_order(codes: &[i64], ncat: usize, ascending: bool, na_first: bool) -> Vec<usize> {
+    // Slot 0 holds the missing rows, slot c + 1 code c's.
+    let slot = |code: i64| {
+        usize::try_from(code)
+            .ok()
+            .filter(|&code| code < ncat)
+            .map_or(0, |code| code + 1)
+    };
+    let mut counts = vec![0_usize; ncat + 1];
+    for &code in codes {
+        counts[slot(code)] += 1;
     }
+    let mut slots: Vec<usize> = if ascending {
+        (1..=ncat).collect()
+    } else {
+        (1..=ncat).rev().collect()
+    };
+    if na_first {
+        slots.insert(0, 0);
+    } else {
+        slots.push(0);
+    }
+    let mut next = vec![0_usize; ncat + 1];
+    let mut at = 0;
+    for &s in &slots {
+        next[s] = at;
+        at += counts[s];
+    }
+    let mut order = vec![0_usize; codes.len()];
+    for (position, &code) in codes.iter().enumerate() {
+        let s = slot(code);
+        order[next[s]] = position;
+        next[s] += 1;
+    }
+    order
 }
 
 /// `column` with its missing values filled by `fill_value`: a categorical
@@ -14420,9 +14433,42 @@ impl Series {
         {
             return self.categorical_ordering_compare_scalar(meta, scalar, op);
         }
+        if let Some(column) = Self::codes_compare_scalar(&self.column, scalar, op)? {
+            return Self::new(self.name.clone(), self.index.clone(), column);
+        }
 
         let column = self.column.compare_scalar(scalar, op)?;
         Self::new(self.name.clone(), self.index.clone(), column)
+    }
+
+    /// `==` / `!=` of a categorical column held as codes: the column's own
+    /// comparison of each category (and of a missing row) once, looked up
+    /// by each row's code - it built and compared a Scalar a row
+    /// (`c == 'key7'` 57 ms a million rows, pandas 0.06;
+    /// br-frankenpandas-5oup5). None when the column holds no codes or that
+    /// comparison is not a plain bool per category.
+    fn codes_compare_scalar(
+        column: &Column,
+        scalar: &Scalar,
+        op: ComparisonOp,
+    ) -> Result<Option<Column>, FrameError> {
+        let (Some(codes), Some(meta)) = (column.categorical_codes(), column.categorical()) else {
+            return Ok(None);
+        };
+        let ncat = i32::try_from(meta.categories.len())
+            .map_err(|_| FrameError::CompatibilityRejected("too many categories".to_owned()))?;
+        let probe_codes: Vec<i32> = (0..ncat).chain(std::iter::once(-1)).collect();
+        let probe =
+            Column::from_categorical_codes(probe_codes, meta.clone()).compare_scalar(scalar, op)?;
+        let Some(table) = probe.as_bool_slice() else {
+            return Ok(None);
+        };
+        let missing = table[table.len() - 1];
+        let flags = codes
+            .iter()
+            .map(|&code| usize::try_from(code).map_or(missing, |code| table[code]))
+            .collect();
+        Ok(Some(Column::from_bool_values(flags)))
     }
 
     fn categorical_ordering_compare_scalar(
@@ -15416,28 +15462,21 @@ impl Series {
             return self.sorted_by_positions(&order);
         }
         let mut order = (0..self.len()).collect::<Vec<_>>();
-        if self.categorical.is_some() {
-            // A categorical sorts by category order, not by value.
-            let codes = self.category_codes_column()?;
-            let codes = codes.values();
-            order.sort_by(|&left_pos, &right_pos| {
-                compare_categorical_codes_with_na_position(
-                    &codes[left_pos],
-                    &codes[right_pos],
-                    ascending,
-                    na_first,
-                )
-            });
-        } else {
-            order.sort_by(|&left_pos, &right_pos| {
-                compare_scalars_with_na_position(
-                    &self.values()[left_pos],
-                    &self.values()[right_pos],
-                    ascending,
-                    na_first,
-                )
-            });
+        if let (Some(meta), Some(codes)) = (self.categorical.as_ref(), self.category_codes()) {
+            // A categorical sorts by category order, not by value: a stable
+            // counting sort of its codes, the order the comparator sort of
+            // them gave (184 ms a million rows; br-frankenpandas-5oup5).
+            let order = stable_code_order(&codes, meta.categories.len(), ascending, na_first);
+            return self.sorted_by_positions(&order);
         }
+        order.sort_by(|&left_pos, &right_pos| {
+            compare_scalars_with_na_position(
+                &self.values()[left_pos],
+                &self.values()[right_pos],
+                ascending,
+                na_first,
+            )
+        });
         self.sorted_by_positions(&order)
     }
 
@@ -16744,31 +16783,22 @@ impl Series {
             .collect();
         let mut null_count = 0_usize;
 
-        let codes = self.category_codes_column()?;
-        for (idx, value) in codes.values().iter().enumerate() {
-            match value {
-                Scalar::Int64(code) if *code == -1 => {
-                    null_count += 1;
-                }
-                Scalar::Int64(code) if *code >= 0 => {
-                    let position = *code as usize;
-                    let (_, count) = counts.get_mut(position).ok_or_else(|| {
-                        FrameError::CompatibilityRejected(format!(
-                            "categorical value_counts encountered out-of-bounds code {code} at idx={idx}"
-                        ))
-                    })?;
-                    *count += 1;
-                }
-                other if other.is_missing() => {
-                    null_count += 1;
-                }
-                other => {
-                    return Err(FrameError::CompatibilityRejected(format!(
-                        "categorical value_counts requires int64 codes or missing values; found {:?} at idx={idx}",
-                        other.dtype()
-                    )));
-                }
-            }
+        // Counted off the codes themselves: their column's Scalar view was
+        // built for this loop (br-frankenpandas-5oup5).
+        let codes = self.category_codes().ok_or_else(|| {
+            FrameError::CompatibilityRejected("the Series is not categorical".to_owned())
+        })?;
+        for (idx, &code) in codes.iter().enumerate() {
+            let Ok(position) = usize::try_from(code) else {
+                null_count += 1;
+                continue;
+            };
+            let (_, count) = counts.get_mut(position).ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!(
+                    "categorical value_counts encountered out-of-bounds code {code} at idx={idx}"
+                ))
+            })?;
+            *count += 1;
         }
 
         if !dropna && null_count > 0 {
@@ -19096,9 +19126,12 @@ impl Series {
             if self.categorical.is_some() {
                 return Ok(self.clone());
             }
-            let mut out = Self::from_categorical(self.name.clone(), self.values().to_vec(), false)?;
-            out.index = self.index.clone();
-            return Ok(out);
+            return Self::categorical_of_column(
+                self.name.clone(),
+                self.index.clone(),
+                &self.column,
+                false,
+            );
         }
         // Casting a categorical casts its values, never its codes (it held the
         // codes when this was written, and a category column came out as "0",
@@ -32607,6 +32640,13 @@ impl Series {
     /// operations that order or count by category (br-frankenpandas-hrxn9).
     fn category_codes(&self) -> Option<Vec<i64>> {
         let meta = self.categorical.as_ref()?;
+        // A column held as codes into these categories reads them
+        // (br-frankenpandas-5oup5); one held as values hashes each.
+        if self.column.categorical() == Some(meta)
+            && let Some(codes) = self.column.categorical_codes()
+        {
+            return Some(codes.iter().map(|&code| i64::from(code)).collect());
+        }
         let positions: FxHashMap<ScalarKey<'_>, i64> = meta
             .categories
             .iter()
@@ -32641,24 +32681,24 @@ impl Series {
     }
 
     /// A categorical Series whose row `i` is category `codes[i]` of `meta`
-    /// (-1: missing), stored by value.
+    /// (-1: missing), held as the codes (br-frankenpandas-5oup5).
     fn categorical_from_code_parts(
         name: impl Into<LabelName>,
         index: Index,
         codes: &[i64],
         meta: CategoricalMetadata,
     ) -> Result<Self, FrameError> {
-        let values: Vec<Scalar> = codes
+        let codes = codes
             .iter()
             .map(|&code| {
-                usize::try_from(code)
-                    .ok()
-                    .and_then(|code| meta.categories.get(code))
-                    .cloned()
-                    .unwrap_or(Scalar::Null(NullKind::NaN))
+                i32::try_from(code).map_err(|_| {
+                    FrameError::CompatibilityRejected(format!(
+                        "categorical code {code} is out of range"
+                    ))
+                })
             })
-            .collect();
-        let column = Column::new(DType::Categorical, values)?.with_categorical(Some(meta.clone()));
+            .collect::<Result<Vec<i32>, _>>()?;
+        let column = Column::from_categorical_codes(codes, meta.clone());
         Ok(Self {
             name: name.into(),
             index,
@@ -32666,6 +32706,133 @@ impl Series {
             categorical: Some(meta),
             sparse: None,
         })
+    }
+
+    /// Each value's first-seen code among the distinct present values (-1
+    /// where missing), and those values in that order: one hash lookup a
+    /// row.
+    fn first_seen_codes(values: &[Scalar]) -> Result<(Vec<i32>, Vec<Scalar>), FrameError> {
+        let mut positions: FxHashMap<ScalarKey<'_>, i32> = FxHashMap::default();
+        let mut categories: Vec<Scalar> = Vec::new();
+        let mut codes = Vec::with_capacity(values.len());
+        for value in values {
+            if value.is_missing() {
+                codes.push(-1);
+                continue;
+            }
+            let next = i32::try_from(categories.len())
+                .map_err(|_| FrameError::CompatibilityRejected("too many categories".to_owned()))?;
+            let code = *positions
+                .entry(scalar_key_allow_missing(value))
+                .or_insert_with(|| {
+                    categories.push(value.clone());
+                    next
+                });
+            codes.push(code);
+        }
+        Ok((codes, categories))
+    }
+
+    /// The categorical Series of `codes` into `categories` (first-seen),
+    /// the categories sorted as pandas' factorize sorts them - in the order
+    /// of appearance only when they do not order among themselves (mixed
+    /// kinds) - and the codes renumbered to match.
+    fn sorted_categorical(
+        name: impl Into<LabelName>,
+        index: Index,
+        mut codes: Vec<i32>,
+        categories: Vec<Scalar>,
+        ordered: bool,
+    ) -> Self {
+        let kind = |value: &Scalar| match value {
+            Scalar::Int64(_) | Scalar::Float64(_) => 0,
+            Scalar::Bool(_) => 1,
+            Scalar::Utf8(_) => 2,
+            Scalar::Datetime64(_) => 3,
+            Scalar::Timedelta64(_) => 4,
+            _ => 5,
+        };
+        let sortable = categories.first().is_some_and(|first| {
+            kind(first) < 5 && categories.iter().all(|c| kind(c) == kind(first))
+        });
+        let categories = if sortable {
+            let mut order: Vec<usize> = (0..categories.len()).collect();
+            order.sort_by(|&a, &b| {
+                compare_scalars_with_na_position(&categories[a], &categories[b], true, false)
+            });
+            let mut rank = vec![0_i32; categories.len()];
+            for (new, &old) in order.iter().enumerate() {
+                rank[old] = i32::try_from(new).expect("codes fit i32");
+            }
+            for code in &mut codes {
+                if let Ok(old) = usize::try_from(*code) {
+                    *code = rank[old];
+                }
+            }
+            order
+                .into_iter()
+                .map(|old| categories[old].clone())
+                .collect()
+        } else {
+            categories
+        };
+        let meta = CategoricalMetadata {
+            categories,
+            ordered,
+        };
+        Self {
+            name: name.into(),
+            index,
+            column: Column::from_categorical_codes(codes, meta.clone()),
+            categorical: Some(meta),
+            sparse: None,
+        }
+    }
+
+    /// The categorical Series of `column`'s values (`astype('category')`): a
+    /// text column factorizes its bytes, building no value; any other
+    /// column its values.
+    fn categorical_of_column(
+        name: impl Into<LabelName>,
+        index: Index,
+        column: &Column,
+        ordered: bool,
+    ) -> Result<Self, FrameError> {
+        let text =
+            column.as_utf8_contiguous().is_some() || column.as_nullable_utf8_contiguous().is_some();
+        let (codes, categories) = if text {
+            let (codes, uniques) = column.factorize_with_options(false, true)?;
+            let too_many = || FrameError::CompatibilityRejected("too many categories".to_owned());
+            let codes = codes
+                .as_i64_slice()
+                .ok_or_else(too_many)?
+                .iter()
+                .map(|&code| i32::try_from(code).map_err(|_| too_many()))
+                .collect::<Result<Vec<i32>, _>>()?;
+            (codes, uniques.values().to_vec())
+        } else if let Some(data) = column.as_i64_slice() {
+            // An all-valid int64 column hashes its integers (equal as its
+            // values are), building no Scalar a row.
+            let mut positions: FxHashMap<i64, i32> = FxHashMap::default();
+            let mut categories: Vec<Scalar> = Vec::new();
+            let mut codes = Vec::with_capacity(data.len());
+            for &value in data {
+                let next = i32::try_from(categories.len()).map_err(|_| {
+                    FrameError::CompatibilityRejected("too many categories".to_owned())
+                })?;
+                let code = *positions.entry(value).or_insert_with(|| {
+                    categories.push(Scalar::Int64(value));
+                    next
+                });
+                codes.push(code);
+            }
+            (codes, categories)
+        } else {
+            Self::first_seen_codes(column.values())?
+        };
+        Ok(Self::sorted_categorical(
+            name, index, codes, categories, ordered,
+        ))
     }
 
     /// Create a categorical Series from values.
@@ -32678,43 +32845,14 @@ impl Series {
         values: Vec<Scalar>,
         ordered: bool,
     ) -> Result<Self, FrameError> {
-        let mut categories: Vec<Scalar> = Vec::new();
-        {
-            let mut seen: FxHashSet<ScalarKey<'_>> = FxHashSet::default();
-            for value in &values {
-                if !value.is_missing() && seen.insert(scalar_key_allow_missing(value)) {
-                    categories.push(value.clone());
-                }
-            }
-        }
-        // pandas factorizes with sort=True and keeps the order of appearance
-        // only when the values do not order among themselves (mixed kinds).
-        let kind = |value: &Scalar| match value {
-            Scalar::Int64(_) | Scalar::Float64(_) => 0,
-            Scalar::Bool(_) => 1,
-            Scalar::Utf8(_) => 2,
-            Scalar::Datetime64(_) => 3,
-            Scalar::Timedelta64(_) => 4,
-            _ => 5,
-        };
-        if categories.first().is_some_and(|first| {
-            kind(first) < 5 && categories.iter().all(|c| kind(c) == kind(first))
-        }) {
-            categories.sort_by(|a, b| compare_scalars_with_na_position(a, b, true, false));
-        }
-        let len = values.len();
-        let meta = CategoricalMetadata {
+        let (codes, categories) = Self::first_seen_codes(&values)?;
+        Ok(Self::sorted_categorical(
+            name,
+            Index::new_known_unique_int64_unit_range(0, values.len()),
+            codes,
             categories,
             ordered,
-        };
-        let column = Column::new(DType::Categorical, values)?.with_categorical(Some(meta.clone()));
-        Ok(Self {
-            name: name.into(),
-            index: Index::new_known_unique_int64_unit_range(0, len),
-            column,
-            categorical: Some(meta),
-            sparse: None,
-        })
+        ))
     }
 
     /// Create a categorical Series from explicit codes and categories.
@@ -44087,6 +44225,62 @@ fn rank_numeric_positions_raw(
     ranks
 }
 
+/// The group of each code of a categorical key held as codes
+/// (br-frankenpandas-5oup5): the groups numbered in the order their codes
+/// are first seen - the hashing groupers' first-seen order - categories whose
+/// keys coincide sharing one, as hashing their values would put them in one;
+/// `usize::MAX` for a code no row holds. Also each group's first category.
+/// The scan stops once every category is seen.
+fn categorical_code_gids(codes: &[i32], categories: &[Scalar]) -> (Vec<usize>, Vec<usize>) {
+    let mut gid_of_code = vec![usize::MAX; categories.len()];
+    let mut gid_of_key: FxHashMap<ScalarKey<'_>, usize> = FxHashMap::default();
+    let mut firsts: Vec<usize> = Vec::new();
+    let mut unseen = categories.len();
+    for &code in codes {
+        if unseen == 0 {
+            break;
+        }
+        let Ok(code) = usize::try_from(code) else {
+            continue;
+        };
+        if gid_of_code[code] == usize::MAX {
+            gid_of_code[code] = *gid_of_key
+                .entry(scalar_key_allow_missing(&categories[code]))
+                .or_insert_with(|| {
+                    firsts.push(code);
+                    firsts.len() - 1
+                });
+            unseen -= 1;
+        }
+    }
+    (gid_of_code, firsts)
+}
+
+/// The groups of a categorical key held as codes (see
+/// [`categorical_code_gids`]): each group's first category and its rows, a
+/// -1 code (a missing key) in none. One array lookup a row where the hashing
+/// groupers box and hash each row's value; counted first so every group's
+/// rows are allocated once.
+fn categorical_code_groups(codes: &[i32], categories: &[Scalar]) -> (Vec<usize>, Vec<Vec<usize>>) {
+    let (gid_of_code, firsts) = categorical_code_gids(codes, categories);
+    let mut counts = vec![0_usize; firsts.len()];
+    for &code in codes {
+        if let Ok(code) = usize::try_from(code) {
+            counts[gid_of_code[code]] += 1;
+        }
+    }
+    let mut rows: Vec<Vec<usize>> = counts
+        .iter()
+        .map(|&count| Vec::with_capacity(count))
+        .collect();
+    for (row, &code) in codes.iter().enumerate() {
+        if let Ok(code) = usize::try_from(code) {
+            rows[gid_of_code[code]].push(row);
+        }
+    }
+    (firsts, rows)
+}
+
 impl SeriesGroupBy<'_> {
     /// Build groups as (key_label -> Vec<row_index>).
     fn build_groups(
@@ -44097,6 +44291,31 @@ impl SeriesGroupBy<'_> {
         FxHashMap<ScalarKey<'_>, Vec<usize>>,
     ) {
         let n = self.series.len();
+
+        // A categorical key held as codes: its groups off the codes, each
+        // keyed and labelled from its category as the loop at the end keys
+        // and labels the rows holding it (br-frankenpandas-5oup5; that loop
+        // boxed the key's million values and hashed each).
+        if let (Some(codes), Some(meta)) = (
+            self.by.column.categorical_codes(),
+            self.by.column.categorical(),
+        ) {
+            let (firsts, mut rows) = categorical_code_groups(codes, &meta.categories);
+            let order = firsts
+                .iter()
+                .map(|&code| Self::group_label(&meta.categories[code]))
+                .collect();
+            let order_keys: Vec<ScalarKey<'_>> = firsts
+                .iter()
+                .map(|&code| scalar_key_allow_missing(&meta.categories[code]))
+                .collect();
+            let groups = order_keys
+                .iter()
+                .zip(rows.iter_mut())
+                .map(|(&key, rows)| (key, std::mem::take(rows)))
+                .collect();
+            return (order, order_keys, groups);
+        }
 
         // Hash-free dense-gid fast path for an all-valid, bounded-range Int64
         // grouping key: assign each value a group id via a dense direct-address
@@ -44250,43 +44469,48 @@ impl SeriesGroupBy<'_> {
             }
             let key = scalar_key_allow_missing(val);
             if seen.insert(key) {
-                let lbl = match val {
-                    Scalar::Int64(v) => IndexLabel::Int64(*v),
-                    Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
-                    // br-frankenpandas-9m9zf: pandas keeps group keys TYPED.
-                    // Measured, live 2.2.3: df.groupby("k").sum().index is
-                    // [False, True] with index dtype `bool`, and a float key
-                    // stays float — never the strings "True"/"False"/"1.5".
-                    Scalar::Bool(v) => IndexLabel::Bool(*v),
-                    Scalar::Float64(v) => IndexLabel::Float64(fp_index::OrderedF64(*v)),
-                    // br-frankenpandas-no6s4: temporal keys stay TYPED,
-                    // mirroring the DataFrameGroupBy arms (group_key_label,
-                    // this file ~85009). MEASURED, live pandas 2.2.3:
-                    // s.groupby(datetime_key).sum().index is a typed
-                    // DatetimeIndex; the Timedelta64 analogue stays
-                    // timedelta-typed — never the string "NaN".
-                    Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
-                    Scalar::Timedelta64(v) => IndexLabel::Timedelta64(*v),
-                    // An object key (s.dt.date) labels its group as itself;
-                    // it rendered "Object(datetime.date(...))" (fvsao.66).
-                    Scalar::Object(object) => IndexLabel::Object(object.clone()),
-                    // A period is its own label (45fzr), an interval too
-                    // (c27hq; a groupby over pd.cut labelled its text, and
-                    // once 'Interval(Interval { .. })', fvsao.54): distinct
-                    // groups stay DISTINCT; the old `"NaN"` collapse gave
-                    // every unlisted key the SAME label. Missing values never
-                    // reach here (skipped above), so this is not the null path.
-                    Scalar::Period(period) => IndexLabel::Period(*period),
-                    Scalar::Interval(interval) => IndexLabel::Interval(*interval),
-                    other => IndexLabel::Utf8(format!("{other:?}")),
-                };
-                order.push(lbl);
+                order.push(Self::group_label(val));
                 order_keys.push(key);
             }
             groups.entry(key).or_default().push(i);
         }
 
         (order, order_keys, groups)
+    }
+
+    /// The label of the group of a present key value.
+    fn group_label(val: &Scalar) -> IndexLabel {
+        match val {
+            Scalar::Int64(v) => IndexLabel::Int64(*v),
+            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
+            // br-frankenpandas-9m9zf: pandas keeps group keys TYPED.
+            // Measured, live 2.2.3: df.groupby("k").sum().index is
+            // [False, True] with index dtype `bool`, and a float key
+            // stays float — never the strings "True"/"False"/"1.5".
+            Scalar::Bool(v) => IndexLabel::Bool(*v),
+            Scalar::Float64(v) => IndexLabel::Float64(fp_index::OrderedF64(*v)),
+            // br-frankenpandas-no6s4: temporal keys stay TYPED,
+            // mirroring the DataFrameGroupBy arms (group_key_label,
+            // this file ~85009). MEASURED, live pandas 2.2.3:
+            // s.groupby(datetime_key).sum().index is a typed
+            // DatetimeIndex; the Timedelta64 analogue stays
+            // timedelta-typed — never the string "NaN".
+            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
+            Scalar::Timedelta64(v) => IndexLabel::Timedelta64(*v),
+            // An object key (s.dt.date) labels its group as itself;
+            // it rendered "Object(datetime.date(...))" (fvsao.66).
+            Scalar::Object(object) => IndexLabel::Object(object.clone()),
+            // A period is its own label (45fzr), an interval too
+            // (c27hq; a groupby over pd.cut labelled its text, and
+            // once 'Interval(Interval { .. })', fvsao.54): distinct
+            // groups stay DISTINCT; the old `"NaN"` collapse gave
+            // every unlisted key the SAME label. Missing values never
+            // reach here (their rows are dropped), so this is not the
+            // null path.
+            Scalar::Period(period) => IndexLabel::Period(*period),
+            Scalar::Interval(interval) => IndexLabel::Interval(*interval),
+            other => IndexLabel::Utf8(format!("{other:?}")),
+        }
     }
 
     /// Dense group id per row + group count, without the SipHash `build_groups`
@@ -44315,6 +44539,23 @@ impl SeriesGroupBy<'_> {
 
     #[cfg_attr(test, inline(never))]
     fn compute_dense_group_ids(&self) -> Option<(Vec<usize>, usize)> {
+        // A categorical key held as codes, no row missing: each row's group
+        // is its code's first-seen number (br-frankenpandas-5oup5; the
+        // reductions over it took build_groups' per-group gathers). A missing
+        // key's row belongs to no group, which this layout cannot say, so
+        // such a key stays with build_groups.
+        if let (Some(codes), Some(meta)) = (
+            self.by.column.categorical_codes(),
+            self.by.column.categorical(),
+        ) && !codes.contains(&-1)
+        {
+            let (gid_of_code, firsts) = categorical_code_gids(codes, &meta.categories);
+            let gids = codes
+                .iter()
+                .map(|&code| usize::try_from(code).map_or(usize::MAX, |code| gid_of_code[code]))
+                .collect();
+            return Some((gids, firsts.len()));
+        }
         if let Some(data) = self.by.column.as_i64_slice()
             && let Some((min, range)) = i64_dense_histogram_range(data)
         {
@@ -44492,7 +44733,22 @@ impl SeriesGroupBy<'_> {
     /// onto the slow SipHash path (10-74x slower than pandas).
     fn dense_group_labels(&self, gids: &[usize], ngroups: usize) -> Option<Vec<IndexLabel>> {
         let mut order: Vec<IndexLabel> = Vec::with_capacity(ngroups);
-        if let Some(ks) = self.by.column.as_i64_slice() {
+        if let (Some(codes), Some(meta)) = (
+            self.by.column.categorical_codes(),
+            self.by.column.categorical(),
+        ) {
+            // A categorical key's group is labelled by its category, as
+            // build_groups labels it (br-frankenpandas-5oup5).
+            for (i, &g) in gids.iter().enumerate() {
+                if order.len() == ngroups {
+                    break;
+                }
+                if g == order.len() {
+                    let category = &meta.categories[usize::try_from(codes[i]).ok()?];
+                    order.push(Self::group_label(category));
+                }
+            }
+        } else if let Some(ks) = self.by.column.as_i64_slice() {
             for (i, &g) in gids.iter().enumerate() {
                 if g == order.len() {
                     order.push(IndexLabel::Int64(ks[i]));
@@ -46140,8 +46396,16 @@ impl SeriesGroupBy<'_> {
     }
 
     fn column_is_timedelta(&self) -> bool {
+        // Cell by cell: a numeric column's first present value answers, where
+        // reading `values()` boxed the whole column as Scalars on every sum,
+        // mean, cumsum ... over a key with no dense path (a categorical key's
+        // sum spent a third of its time there; br-frankenpandas-5oup5).
+        let column = &self.series.column;
         let mut saw_td = false;
-        for v in self.series.column.values() {
+        for row in 0..column.len() {
+            let Some(v) = column.scalar_at(row) else {
+                break;
+            };
             if v.is_missing() {
                 continue;
             }
@@ -66650,11 +66914,8 @@ fn binned_categorical(
     let binned = match categories {
         BinCategories::Intervals(intervals) => Column::from_category_codes(
             DType::Interval,
-            bins.map(|bin| {
-                bin.and_then(|bin| u32::try_from(bin).ok())
-                    .unwrap_or(u32::MAX)
-            })
-            .collect(),
+            bins.map(|bin| bin.and_then(|bin| i32::try_from(bin).ok()).unwrap_or(-1))
+                .collect(),
             intervals.iter().copied().map(Scalar::Interval).collect(),
         ),
         BinCategories::Labels(labels) => {
@@ -105015,6 +105276,30 @@ impl DataFrameGroupBy<'_> {
     fn build_groups(&self) -> (Vec<GroupKey<'_>>, GroupMap<'_>) {
         let n = self.df.len();
 
+        // A single categorical key held as codes: its groups off the codes
+        // (br-frankenpandas-5oup5), then the generic path's sort. A missing
+        // key's group (dropna=False) is left to the generic path.
+        if let [name] = self.by.as_slice()
+            && let Some(codes) = self.df.columns[name].categorical_codes()
+            && let Some(meta) = self.df.columns[name].categorical()
+            && (self.dropna || !codes.contains(&-1))
+        {
+            let (firsts, mut rows) = categorical_code_groups(codes, &meta.categories);
+            let mut group_order: Vec<GroupKey<'_>> = firsts
+                .iter()
+                .map(|&code| vec![scalar_key_allow_missing(&meta.categories[code])])
+                .collect();
+            let groups: GroupMap<'_> = group_order
+                .iter()
+                .zip(rows.iter_mut())
+                .map(|(key, rows)| (key.clone(), std::mem::take(rows)))
+                .collect();
+            if self.sort {
+                self.sort_group_order(&mut group_order);
+            }
+            return (group_order, groups);
+        }
+
         // Dense fast path: a single all-valid Int64 grouping column (bounded
         // range) assigns group ids via a direct-address table — no per-row
         // Vec<ScalarKey> heap allocation and no per-row hashing (the dominant
@@ -106439,6 +106724,43 @@ impl DataFrameGroupBy<'_> {
             {
                 return self.aggregate_temporal_sparse(&value_cols, keys, false, func_name);
             }
+        }
+
+        // A categorical key held as codes, no row missing: the same dense
+        // engine over its codes' groups (br-frankenpandas-5oup5; build_groups
+        // and a per-group Scalar fold were 0.29x pandas on df.groupby(cat).mean()).
+        if self.as_index
+            && matches!(
+                func_name,
+                "sum"
+                    | "mean"
+                    | "count"
+                    | "min"
+                    | "max"
+                    | "var"
+                    | "std"
+                    | "first"
+                    | "last"
+                    | "prod"
+                    | "median"
+            )
+            && value_cols.iter().all(|c| {
+                let col = &self.df.columns[c];
+                col.as_f64_slice().is_some()
+                    || col.as_i64_slice().is_some()
+                    || col.as_f64_slice_with_validity().is_some()
+                    || col.as_i64_slice_with_validity().is_some()
+            })
+            && let Some((gid_per_row, ng, order, out_index)) = self.categorical_codes_grouping()
+        {
+            return self.dense_aggregate_emit(
+                &value_cols,
+                &gid_per_row,
+                ng,
+                &order,
+                func_name,
+                out_index,
+            );
         }
 
         let (group_order, groups) = self.build_groups();
@@ -108493,6 +108815,47 @@ impl DataFrameGroupBy<'_> {
             .collect();
         let out_index = Index::new(labels).rename_index(self.single_key_name());
         (gid_per_row, ng, order, out_index)
+    }
+
+    /// Codes sibling of `temporal_sparse_grouping`: a single categorical key
+    /// held as codes with no row missing (br-frankenpandas-5oup5). Its gids
+    /// are the codes' first-seen numbers (`categorical_code_gids`), `sort=True`
+    /// orders them as `build_groups` sorts their keys (`sort_group_order`: the
+    /// categories' order) and each group is labelled by the category of its
+    /// first row, as `group_key_label` labels it. None for any other key.
+    fn categorical_codes_grouping(&self) -> Option<(Vec<usize>, usize, Vec<usize>, Index)> {
+        let [name] = self.by.as_slice() else {
+            return None;
+        };
+        let column = &self.df.columns[name];
+        let codes = column.categorical_codes()?;
+        let meta = column.categorical()?;
+        if codes.contains(&-1) {
+            return None;
+        }
+        let (gid_of_code, firsts) = categorical_code_gids(codes, &meta.categories);
+        let gid_per_row: Vec<usize> = codes
+            .iter()
+            .map(|&code| usize::try_from(code).map_or(usize::MAX, |code| gid_of_code[code]))
+            .collect();
+        let ng = firsts.len();
+        let mut order: Vec<usize> = (0..ng).collect();
+        if self.sort {
+            let mut keys: Vec<GroupKey<'_>> = firsts
+                .iter()
+                .map(|&code| vec![scalar_key_allow_missing(&meta.categories[code])])
+                .collect();
+            let gid_of_key: FxHashMap<GroupKey<'_>, usize> =
+                keys.iter().cloned().zip(0..).collect();
+            self.sort_group_order(&mut keys);
+            order = keys.iter().map(|key| gid_of_key[key]).collect();
+        }
+        let labels: Vec<IndexLabel> = order
+            .iter()
+            .map(|&g| Self::group_key_scalar_label(&meta.categories[firsts[g]]))
+            .collect();
+        let out_index = Index::new(labels).rename_index(self.single_key_name());
+        Some((gid_per_row, ng, order, out_index))
     }
 
     fn aggregate_temporal_sparse(
@@ -172909,6 +173272,220 @@ mod tests {
                 .with_index(Index::from_i64_values(vec![1, 1, 2]))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn categorical_ops_on_codes_are_the_value_ops_5oup5() {
+        // br-frankenpandas-5oup5: the counting sort is the stable comparator
+        // sort of the codes, either direction and missing position; ==, !=
+        // and value_counts read off the codes equal the same Series held by
+        // value (a codes column whose metadata no longer matches).
+        let codes: Vec<i64> = (0..300).map(|i| [2, -1, 0, 1, 2, 0][i % 6]).collect();
+        for ascending in [true, false] {
+            for na_first in [true, false] {
+                let mut expected: Vec<usize> = (0..codes.len()).collect();
+                expected.sort_by(|&a, &b| {
+                    let key = |code: i64| (code < 0) != na_first;
+                    match (codes[a] < 0, codes[b] < 0) {
+                        (true, true) => std::cmp::Ordering::Equal,
+                        (true, false) | (false, true) => key(codes[a]).cmp(&key(codes[b])),
+                        (false, false) if ascending => codes[a].cmp(&codes[b]),
+                        (false, false) => codes[b].cmp(&codes[a]),
+                    }
+                });
+                assert_eq!(
+                    crate::stable_code_order(&codes, 3, ascending, na_first),
+                    expected,
+                    "ascending {ascending} na_first {na_first}"
+                );
+            }
+        }
+        let values: Vec<Scalar> = (0..300)
+            .map(|i| match i % 6 {
+                1 => Scalar::Null(NullKind::NaN),
+                k => Scalar::Utf8(format!("v{}", k % 3)),
+            })
+            .collect();
+        let coded = Series::from_categorical("c", values, false).unwrap();
+        assert!(coded.column().categorical_codes().is_some());
+        // NEGATIVE: the same Series held by value takes the per-row path.
+        let by_value = Series::new(
+            "c",
+            coded.index().clone(),
+            Column::new(DType::Categorical, coded.values().to_vec())
+                .unwrap()
+                .with_categorical(coded.column().categorical().cloned()),
+        )
+        .unwrap();
+        let mut by_value = by_value;
+        by_value.categorical = coded.categorical.clone();
+        assert!(by_value.column().categorical_codes().is_none());
+        for scalar in [
+            Scalar::Utf8("v1".to_owned()),
+            Scalar::Utf8("absent".to_owned()),
+            Scalar::Null(NullKind::NaN),
+        ] {
+            for op in [fp_columnar::ComparisonOp::Eq, fp_columnar::ComparisonOp::Ne] {
+                assert_eq!(
+                    coded.compare_scalar(&scalar, op).unwrap().values(),
+                    by_value.compare_scalar(&scalar, op).unwrap().values(),
+                    "{scalar:?} {op:?}"
+                );
+            }
+        }
+        assert_eq!(
+            format!("{:?}", coded.value_counts().unwrap().values()),
+            format!("{:?}", by_value.value_counts().unwrap().values())
+        );
+        assert_eq!(
+            coded.sort_values(true).unwrap().values(),
+            by_value.sort_values(true).unwrap().values()
+        );
+    }
+
+    #[test]
+    fn categorical_key_groupby_on_codes_is_the_value_groupby_5oup5() {
+        // br-frankenpandas-5oup5: grouping by a categorical key held as
+        // codes - its groups off the codes when a key is missing, first-seen
+        // dense ids when none is - reduces as grouping by the same key held
+        // by value, and a missing key's row is in no group.
+        fn reduce(gb: &crate::SeriesGroupBy<'_>, name: &str) -> Series {
+            match name {
+                "sum" => gb.sum(),
+                "mean" => gb.mean(),
+                "count" => gb.count(),
+                "size" => gb.size(),
+                "var" => gb.var(),
+                "first" => gb.first(),
+                "min" => gb.min(),
+                "max" => gb.max(),
+                _ => gb.cumsum(),
+            }
+            .unwrap()
+        }
+        let n = 240_usize;
+        let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+        let floats: Vec<Scalar> = (0..n)
+            .map(|i| {
+                if i % 11 == 4 {
+                    Scalar::Null(NullKind::NaN)
+                } else {
+                    Scalar::Float64(i as f64 * 0.25 - 7.0)
+                }
+            })
+            .collect();
+        let ints: Vec<Scalar> = (0..n).map(|i| Scalar::Int64((i * i % 17) as i64)).collect();
+        for with_missing in [true, false] {
+            let keys: Vec<Scalar> = (0..n)
+                .map(|i| match i % 7 {
+                    3 if with_missing => Scalar::Null(NullKind::NaN),
+                    k => Scalar::Utf8(format!("g{}", (k * 5) % 4)),
+                })
+                .collect();
+            let coded = Series::new(
+                "k",
+                Index::new(labels.clone()),
+                Series::from_categorical("k", keys, false)
+                    .unwrap()
+                    .column()
+                    .clone(),
+            )
+            .unwrap();
+            assert!(coded.column().categorical_codes().is_some());
+            let by_value = Series::new(
+                "k",
+                Index::new(labels.clone()),
+                Column::new(DType::Categorical, coded.values().to_vec())
+                    .unwrap()
+                    .with_categorical(coded.column().categorical().cloned()),
+            )
+            .unwrap();
+            assert!(by_value.column().categorical_codes().is_none());
+            for values in [&floats, &ints] {
+                let series = Series::from_values("v", labels.clone(), values.clone()).unwrap();
+                let on_codes = series.groupby(&coded).unwrap();
+                let on_values = series.groupby(&by_value).unwrap();
+                // The dense layout serves exactly the key with no row missing.
+                assert_eq!(on_codes.dense_group_ids().is_some(), !with_missing);
+                for name in [
+                    "sum", "mean", "count", "size", "var", "first", "min", "max", "cumsum",
+                ] {
+                    let got = reduce(&on_codes, name);
+                    let want = reduce(&on_values, name);
+                    assert_eq!(got.index().labels(), want.index().labels(), "{name}");
+                    assert_eq!(
+                        format!("{:?}", got.values()),
+                        format!("{:?}", want.values()),
+                        "{name} missing {with_missing}"
+                    );
+                }
+                // NEGATIVE: a missing key's rows count in no group (a code
+                // of -1 read as a category would add them to one).
+                let total: i64 = on_codes
+                    .size()
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .map(|count| match count {
+                        Scalar::Int64(count) => *count,
+                        other => panic!("size is {other:?}"),
+                    })
+                    .sum();
+                let missing = if with_missing {
+                    (0..n).filter(|i| i % 7 == 3).count()
+                } else {
+                    0
+                };
+                assert_eq!(total, (n - missing) as i64);
+            }
+            // The frame groupby: the dense engine over the codes' groups when
+            // no key is missing, build_groups otherwise - both the by-value
+            // key's generic fold, sorted (the categories' order) or not.
+            // The key set as a column, as df['k'] = ... sets it
+            // (from_series turns a categorical Series back into values).
+            let frame = |key: &Series| {
+                DataFrame::from_series(vec![
+                    Series::from_values("f", labels.clone(), floats.clone()).unwrap(),
+                    Series::from_values("i", labels.clone(), ints.clone()).unwrap(),
+                ])
+                .unwrap()
+                .with_column("k", key.column().clone())
+                .unwrap()
+            };
+            let (coded_frame, value_frame) = (frame(&coded), frame(&by_value));
+            for sort in [true, false] {
+                let on_codes = coded_frame
+                    .groupby_full_options(&["k"], true, sort, true)
+                    .unwrap();
+                let on_values = value_frame
+                    .groupby_full_options(&["k"], true, sort, true)
+                    .unwrap();
+                assert_eq!(
+                    on_codes.categorical_codes_grouping().is_some(),
+                    !with_missing
+                );
+                assert!(on_values.categorical_codes_grouping().is_none());
+                for func in [
+                    "sum", "mean", "count", "min", "max", "var", "std", "first", "last", "prod",
+                    "median",
+                ] {
+                    let got = on_codes.aggregate_named_func(func).unwrap();
+                    let want = on_values.aggregate_named_func(func).unwrap();
+                    assert_eq!(
+                        got.index().labels(),
+                        want.index().labels(),
+                        "{func} sort {sort}"
+                    );
+                    for column in ["f", "i"] {
+                        assert_eq!(
+                            format!("{:?}", got.column(column).unwrap().values()),
+                            format!("{:?}", want.column(column).unwrap().values()),
+                            "{func} {column} sort {sort} missing {with_missing}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

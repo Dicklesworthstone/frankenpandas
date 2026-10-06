@@ -28296,3 +28296,72 @@ def test_typed_arrays_like_pandas_0nqnl(case: Any) -> None:
         return s.to_numpy()
 
     assert _0nqnl_shown(array_of(fpd)) == _0nqnl_shown(array_of(pd))
+
+
+# br-frankenpandas-5oup5: astype('category') holds codes into the categories;
+# what pandas shows of it - values, codes, categories, value_counts, sorts,
+# comparisons, takes - is unchanged, across text (with missing), int, float,
+# bool and mixed values.
+def _5oup5_series(m: Any, kind: str) -> Any:
+    k = np.arange(300)
+    values = {
+        "text": [None if v % 11 == 4 else f"t{v % 5}" for v in k],
+        "int": list((k * 7) % 4),
+        "float nan": [np.nan if v % 9 == 0 else (v % 3) / 2 for v in k],
+        "bool": list(k % 3 == 0),
+        "mixed": [[1, "a", 2.5, None][v % 4] for v in k],
+    }[kind]
+    return m.Series(values).astype("category")
+
+
+def _5oup5_shown(obj: Any) -> Any:
+    if hasattr(obj, "tolist") and hasattr(obj, "index"):
+        return [str(obj.dtype), [repr(v) for v in obj.tolist()], [repr(v) for v in obj.index.tolist()]]
+    if hasattr(obj, "tolist"):
+        return [repr(v) for v in obj.tolist()]
+    return repr(obj)
+
+
+# value_counts' tie order and a mixed kind's category order differ from pandas
+# before and after the codes backing: br-frankenpandas-kbnmj.
+_5OUP5_KBNMJ = {
+    ("text", "value_counts"),
+    ("text", "value_counts_asc"),
+    ("mixed", "codes"),
+    ("mixed", "categories"),
+    ("mixed", "value_counts"),
+    ("mixed", "value_counts_asc"),
+    ("mixed", "sort_values"),
+    ("mixed", "sort_desc_na_first"),
+}
+_5OUP5_CASES = [
+    (kind, op)
+    for kind in ("text", "int", "float nan", "bool", "mixed")
+    for op in ("self", "codes", "categories", "value_counts", "value_counts_asc", "sort_values", "sort_desc_na_first", "eq_first", "ne_absent", "iloc_list", "reversed")
+    if (kind, op) not in _5OUP5_KBNMJ
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _5OUP5_CASES, ids=lambda case: f"{case[0]}-{case[1]}")
+def test_categorical_codes_like_pandas_5oup5(case: Any) -> None:
+    kind, op = case
+
+    def run(m: Any) -> Any:
+        s = _5oup5_series(m, kind)
+        first = s.dropna().iloc[0]
+        return {
+            "self": lambda: s,
+            "codes": lambda: s.cat.codes,
+            "categories": lambda: s.cat.categories,
+            "value_counts": lambda: s.value_counts(),
+            "value_counts_asc": lambda: s.value_counts(ascending=True, dropna=False),
+            "sort_values": lambda: s.sort_values(kind="stable"),
+            "sort_desc_na_first": lambda: s.sort_values(ascending=False, na_position="first", kind="stable"),
+            "eq_first": lambda: s == first,
+            "ne_absent": lambda: s != "absent",
+            "iloc_list": lambda: s.iloc[[7, 3, 299, 0, 7]],
+            "reversed": lambda: s.iloc[::-1],
+        }[op]()
+
+    assert _5oup5_shown(run(fpd)) == _5oup5_shown(run(pd))

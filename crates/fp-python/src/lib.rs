@@ -28819,6 +28819,23 @@ impl PySeries {
         equal: bool,
     ) -> PyResult<PySeries> {
         check_comparable(&self.inner, other)?;
+        // A categorical held as codes compares a plain scalar by its codes
+        // (Series::compare_scalar); the scalar was broadcast to a Series of a
+        // million cells first (c == 'key7' 55 ms; br-frankenpandas-5oup5).
+        if self.inner.column().categorical_codes().is_some()
+            && (other.is_none()
+                || other.is_instance_of::<pyo3::types::PyString>()
+                || other.is_instance_of::<pyo3::types::PyInt>()
+                || other.is_instance_of::<pyo3::types::PyFloat>())
+        {
+            let scalar = py_to_scalar(py, other)?;
+            let op = if equal {
+                ComparisonOp::Eq
+            } else {
+                ComparisonOp::Ne
+            };
+            return wrap_series(self.inner.compare_scalar(&scalar, op));
+        }
         let Some(rhs) = comparison_operand(py, other, &self.inner)? else {
             let column = Column::from_values(vec![Scalar::Bool(!equal); self.inner.len()])
                 .map_err(column_error_to_py)?;
@@ -94775,6 +94792,9 @@ mod tests {
 
     #[test]
     fn test_py_series_and_indexers() {
+        // Python::attach below needs the interpreter: it passed only when
+        // another test thread had initialized it first.
+        Python::initialize();
         let labels = vec![
             IndexLabel::Utf8("a".into()),
             IndexLabel::Utf8("b".into()),
@@ -94823,6 +94843,9 @@ mod tests {
 
     #[test]
     fn test_py_dataframe_indexers_and_dunders() {
+        // Python::attach below needs the interpreter: it passed only when
+        // another test thread had initialized it first.
+        Python::initialize();
         let df = DataFrame::from_dict(
             &["x", "y"],
             vec![
@@ -95336,6 +95359,9 @@ mod tests {
 
     #[test]
     fn test_py_dataframe_extended_ops() {
+        // Python::attach below needs the interpreter: it passed only when
+        // another test thread had initialized it first.
+        Python::initialize();
         let df = DataFrame::from_dict(
             &["a", "b"],
             vec![
@@ -95480,6 +95506,9 @@ mod tests {
 
     #[test]
     fn test_py_range_index() {
+        // Python::attach below needs the interpreter: it passed only when
+        // another test thread had initialized it first.
+        Python::initialize();
         // TEST-CHANGE (fvsao.18): a RangeIndex is now an Index whose labels
         // are the range, so the Index methods are its base's; same checks.
         Python::attach(|py| {
@@ -95526,6 +95555,9 @@ mod tests {
 
     #[test]
     fn test_py_period_index_and_range() {
+        // Python::attach below needs the interpreter: it passed only when
+        // another test thread had initialized it first.
+        Python::initialize();
         let pi = period_range(Some("2024-01"), None, Some(3), Some("M"), Some("monthly"))
             .expect("period_range"); // ubs:ignore — test fixture
         assert_eq!(pi.len(), 3);
@@ -95774,6 +95806,9 @@ mod tests {
 
     #[test]
     fn test_py_groupby_and_resampler() {
+        // Python::attach below needs the interpreter: it passed only when
+        // another test thread had initialized it first.
+        Python::initialize();
         let s = Series::from_values(
             "vals",
             vec![
@@ -95950,6 +95985,9 @@ mod tests {
 
     #[test]
     fn test_py_series_and_dataframe_operations() {
+        // Python::attach below needs the interpreter: it passed only when
+        // another test thread had initialized it first.
+        Python::initialize();
         let s = Series::new(
             "s",
             Index::new(vec![
@@ -96044,6 +96082,9 @@ mod tests {
 
     #[test]
     fn test_py_batch2_operations() {
+        // Python::attach below needs the interpreter: it passed only when
+        // another test thread had initialized it first.
+        Python::initialize();
         let idx = PyIndex {
             inner: Index::new(vec![
                 IndexLabel::Int64(1),
@@ -96197,6 +96238,9 @@ mod tests {
 
     #[test]
     fn test_py_interval_index() {
+        // Python::attach below needs the interpreter: it passed only when
+        // another test thread had initialized it first.
+        Python::initialize();
         let pii = PyIntervalIndex {
             intervals: vec![
                 PyInterval {
