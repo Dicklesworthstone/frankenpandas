@@ -25054,7 +25054,7 @@ fn operand_zone(operand: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
 /// The number a plain Python int / float `other` is to an op over `like`'s
 /// Float64 or Int64 values, as [`series_operand`] broadcasts it (an int
 /// against floats is that float); None for any other operand or column - a
-/// numpy scalar, a bool, an int past i64, a float against ints.
+/// numpy scalar, a bool, an int past i64, a float against narrow ints.
 fn plain_number_operand(like: &Series, other: &Bound<'_, PyAny>) -> Option<Scalar> {
     let dtype = like.column().dtype();
     let float_values = dtype == DType::Float64;
@@ -25066,6 +25066,12 @@ fn plain_number_operand(like: &Series, other: &Bound<'_, PyAny>) -> Option<Scala
             .extract::<f64>()
             .ok()
             .map(|value| weak_float32(like, other, Scalar::Float64(value)));
+    }
+    // A float against plain int64 values is that float: the kernels read the
+    // ints as f64 against it, as numpy does (k * 1.5 broadcast it;
+    // br-frankenpandas-uf0mw). A narrower int keeps the broadcast.
+    if other.is_exact_instance_of::<pyo3::types::PyFloat>() && like.column().width().is_none() {
+        return other.extract::<f64>().ok().map(Scalar::Float64);
     }
     if other.is_exact_instance_of::<pyo3::types::PyInt>() {
         let value = other.extract::<i64>().ok()?;
@@ -30049,6 +30055,11 @@ impl PySeries {
         if let Some(res) = host_object_arith(py, &self.inner, other, "floordiv", false)? {
             return Ok(res);
         }
+        // A plain number through the typed scalar kernel, as + - * / take it
+        // (k // 3 broadcast the 3: 3.6 ms, pandas 0.75; br-frankenpandas-uf0mw).
+        if let Some(result) = scalar_arith(&self.inner, other, ArithmeticOp::FloorDiv, false) {
+            return narrowed_arith(Ok(result), &self.inner, other, false);
+        }
         let rhs = series_operand(py, other, &self.inner)?;
         narrowed_arith(self.inner.floordiv(&rhs), &self.inner, other, false)
     }
@@ -30057,6 +30068,9 @@ impl PySeries {
         timedelta_operand_check(&self.inner, other, "floordiv", true)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "floordiv", true)? {
             return Ok(res);
+        }
+        if let Some(result) = scalar_arith(&self.inner, other, ArithmeticOp::FloorDiv, true) {
+            return narrowed_arith(Ok(result), &self.inner, other, false);
         }
         let lhs = series_operand(py, other, &self.inner)?;
         narrowed_arith(lhs.floordiv(&self.inner), &self.inner, other, false)
@@ -30067,6 +30081,10 @@ impl PySeries {
         if let Some(res) = host_object_arith(py, &self.inner, other, "mod", false)? {
             return Ok(res);
         }
+        if let Some(result) = scalar_arith(&self.inner, other, ArithmeticOp::Mod, false) {
+            let result = narrowed_arith(Ok(result), &self.inner, other, false)?;
+            return bool_numpy_series(result, bool_remainder(&self.inner, other));
+        }
         let rhs = series_operand(py, other, &self.inner)?;
         let result = narrowed_arith(self.inner.remainder(&rhs), &self.inner, other, false)?;
         bool_numpy_series(result, bool_remainder(&self.inner, other))
@@ -30076,6 +30094,10 @@ impl PySeries {
         timedelta_operand_check(&self.inner, other, "mod", true)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "mod", true)? {
             return Ok(res);
+        }
+        if let Some(result) = scalar_arith(&self.inner, other, ArithmeticOp::Mod, true) {
+            let result = narrowed_arith(Ok(result), &self.inner, other, false)?;
+            return bool_numpy_series(result, bool_remainder(&self.inner, other));
         }
         let lhs = series_operand(py, other, &self.inner)?;
         let result = narrowed_arith(lhs.remainder(&self.inner), &self.inner, other, false)?;
@@ -30107,6 +30129,12 @@ impl PySeries {
         if let Some(res) = host_object_arith(py, &self.inner, other, "pow", false)? {
             return Ok(res);
         }
+        // An int64 / float64 Series (never bool, never masked) ** a plain
+        // number through the typed scalar kernel (k ** 2 42 ms, pandas 0.24;
+        // br-frankenpandas-uf0mw).
+        if let Some(result) = scalar_arith(&self.inner, other, ArithmeticOp::Pow, false) {
+            return narrowed_arith(Ok(result), &self.inner, other, false);
+        }
         let target = match integer_scalar(other).filter(|_| boolean_series(&self.inner)) {
             Some(exponent) => Some(BoolNumpy::power(exponent)?),
             None => None,
@@ -30125,6 +30153,9 @@ impl PySeries {
         let other = &arith_operand(other)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "pow", true)? {
             return Ok(res);
+        }
+        if let Some(result) = scalar_arith(&self.inner, other, ArithmeticOp::Pow, true) {
+            return narrowed_arith(Ok(result), &self.inner, other, false);
         }
         let target = integer_scalar(other)
             .filter(|_| boolean_series(&self.inner))

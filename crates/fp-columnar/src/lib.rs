@@ -2654,6 +2654,36 @@ fn vectorized_binary_i64(
         }
     }
 
+    // Every row valid (the common case): one monomorphic loop per op - no
+    // validity bit per element and no fn pointer, so add / sub / mul
+    // vectorize (k * k 1.4 ms, pandas 0.28; br-frankenpandas-uf0mw). The
+    // values the general loop below writes.
+    if combined.all() {
+        let out: Vec<i64> = match op {
+            ArithmeticOp::Add => left
+                .iter()
+                .zip(right)
+                .map(|(&l, &r)| l.wrapping_add(r))
+                .collect(),
+            ArithmeticOp::Sub => left
+                .iter()
+                .zip(right)
+                .map(|(&l, &r)| l.wrapping_sub(r))
+                .collect(),
+            ArithmeticOp::Mul => left
+                .iter()
+                .zip(right)
+                .map(|(&l, &r)| l.wrapping_mul(r))
+                .collect(),
+            ArithmeticOp::Mod => par_map_vec_i64(left.len(), |i| python_mod_i64(left[i], right[i])),
+            ArithmeticOp::FloorDiv => {
+                par_map_vec_i64(left.len(), |i| python_floor_div_i64(left[i], right[i]))
+            }
+            ArithmeticOp::Div | ArithmeticOp::Pow => unreachable!("handled by early return above"),
+        };
+        return Some((out, combined));
+    }
+
     let apply: fn(i64, i64) -> i64 = match op {
         ArithmeticOp::Add => |a, b| a.wrapping_add(b),
         ArithmeticOp::Sub => |a, b| a.wrapping_sub(b),
@@ -13407,7 +13437,15 @@ impl Column {
     /// take_positions/binary zero-copy fast paths — fine for terminal outputs).
     #[must_use]
     pub fn from_f64_values_owned(data: Vec<f64>) -> Self {
-        if data.iter().any(|v| v.is_nan()) {
+        let has_nan = data.iter().any(|v| v.is_nan());
+        Self::from_f64_values_owned_tracked(data, has_nan)
+    }
+
+    /// [`Self::from_f64_values_owned`] of a buffer whose NaN its writer
+    /// tracked (`has_nan`): the same column, without the rescan
+    /// (br-frankenpandas-uf0mw).
+    fn from_f64_values_owned_tracked(data: Vec<f64>, has_nan: bool) -> Self {
+        if has_nan {
             return Self::from_f64_values(data);
         }
         let len = data.len();
@@ -18358,15 +18396,18 @@ impl Column {
                     // COMPUTE-bound → parallelize; add/sub/mul/div are bandwidth-bound
                     // → keep serial (threads would only contend). Bit-identical
                     // (same apply, order preserved).
-                    let result: Vec<f64> = if matches!(
+                    if matches!(
                         op,
                         ArithmeticOp::Pow | ArithmeticOp::Mod | ArithmeticOp::FloorDiv
                     ) {
-                        par_map_vec_f64(l.len(), |i| apply(l[i], r[i]))
-                    } else {
-                        l.iter().zip(r).map(|(&a, &b)| apply(a, b)).collect()
-                    };
-                    return Some(Ok(Self::from_f64_values_owned(result)));
+                        let result = par_map_vec_f64(l.len(), |i| apply(l[i], r[i]));
+                        return Some(Ok(Self::from_f64_values_owned(result)));
+                    }
+                    // + - * / in one monomorphic sweep that tracks NaN, the
+                    // values `apply` gives (a fn pointer per element did not
+                    // vectorize; br-frankenpandas-uf0mw).
+                    let (result, _, output_nan) = apply_f64_slices_nan_tracked(op, l, r);
+                    return Some(Ok(Self::from_f64_values_owned_tracked(result, output_nan)));
                 }
                 // Typed MIXED / int-promoted fast path: the both-Float64 borrow above
                 // declined because a side is Int64 (Int64 op Float64, or Int64 / Int64
@@ -18391,15 +18432,17 @@ impl Column {
                 if let (Some(lv), Some(rv)) = (f64_view(self), f64_view(right)) {
                     let (l, r) = (lv.as_ref(), rv.as_ref());
                     let apply = binary_f64_apply(op);
-                    let result: Vec<f64> = if matches!(
+                    if matches!(
                         op,
                         ArithmeticOp::Pow | ArithmeticOp::Mod | ArithmeticOp::FloorDiv
                     ) {
-                        par_map_vec_f64(l.len(), |i| apply(l[i], r[i]))
-                    } else {
-                        l.iter().zip(r).map(|(&a, &b)| apply(a, b)).collect()
-                    };
-                    return Some(Ok(Self::from_f64_values_owned(result)));
+                        let result = par_map_vec_f64(l.len(), |i| apply(l[i], r[i]));
+                        return Some(Ok(Self::from_f64_values_owned(result)));
+                    }
+                    // + - * / as the both-Float64 arm sweeps them
+                    // (br-frankenpandas-uf0mw).
+                    let (result, _, output_nan) = apply_f64_slices_nan_tracked(op, l, r);
+                    return Some(Ok(Self::from_f64_values_owned_tracked(result, output_nan)));
                 }
                 // Nullable / mixed-nullable f64-output fast path: generalizes the
                 // all-valid `f64_view` above to the NULLABLE case (which it declines,
@@ -18496,6 +18539,21 @@ impl Column {
                 // Both must actually be Int64 for the i64 fast path.
                 if self.dtype != DType::Int64 || right.dtype != DType::Int64 {
                     return None;
+                }
+                // int ** int over two all-valid buffers: the Scalar arm's
+                // wrapping_pow per element, a negative exponent its error -
+                // that arm built a Scalar per cell (k ** 2 42 ms, pandas 0.24;
+                // br-frankenpandas-uf0mw).
+                if matches!(op, ArithmeticOp::Pow)
+                    && let (Some(l), Some(r)) = (self.as_i64_slice(), right.as_i64_slice())
+                {
+                    if r.iter().any(|&exponent| exponent < 0) {
+                        return Some(Err(ColumnError::NegativeIntegerPower));
+                    }
+                    let out = par_map_vec_i64(l.len(), |i| {
+                        l[i].wrapping_pow(u32::try_from(r[i]).unwrap_or(u32::MAX))
+                    });
+                    return Some(Ok(Self::from_i64_values_owned(out)));
                 }
                 // Typed-input fast path (see the Float64 arm): both operands are
                 // all-valid contiguous i64 buffers, so feed vectorized_binary_i64
@@ -18922,12 +18980,93 @@ impl Column {
                     (ArithmeticOp::Sub, false) => data.iter().map(|&v| v.wrapping_sub(s)).collect(),
                     (ArithmeticOp::Sub, true) => data.iter().map(|&v| s.wrapping_sub(v)).collect(),
                     (ArithmeticOp::Mul, _) => data.iter().map(|&v| v.wrapping_mul(s)).collect(),
+                    // int / int is float64: both read as f64, as binary_numeric's
+                    // int-promoted view divides them (br-frankenpandas-uf0mw).
+                    (ArithmeticOp::Div, _) => {
+                        return Some(Self::int_float_scalar(data, s as f64, op, scalar_left));
+                    }
+                    // // and % keep int64 while no divisor is 0 (a 0 makes
+                    // binary_numeric promote the column: declined here).
+                    (ArithmeticOp::FloorDiv | ArithmeticOp::Mod, false) if s != 0 => {
+                        let apply = if matches!(op, ArithmeticOp::Mod) {
+                            python_mod_i64
+                        } else {
+                            python_floor_div_i64
+                        };
+                        par_map_vec_i64(data.len(), |i| apply(data[i], s))
+                    }
+                    (ArithmeticOp::FloorDiv | ArithmeticOp::Mod, true) if !data.contains(&0) => {
+                        let apply = if matches!(op, ArithmeticOp::Mod) {
+                            python_mod_i64
+                        } else {
+                            python_floor_div_i64
+                        };
+                        par_map_vec_i64(data.len(), |i| apply(s, data[i]))
+                    }
+                    // int ** int wraps as int64; a negative exponent is the
+                    // error binary_numeric raises (declined here).
+                    (ArithmeticOp::Pow, false) if s >= 0 => {
+                        let exponent = u32::try_from(s).unwrap_or(u32::MAX);
+                        data.iter().map(|&v| v.wrapping_pow(exponent)).collect()
+                    }
+                    (ArithmeticOp::Pow, true) if data.iter().all(|&v| v >= 0) => data
+                        .iter()
+                        .map(|&v| s.wrapping_pow(u32::try_from(v).unwrap_or(u32::MAX)))
+                        .collect(),
                     _ => return None,
                 };
                 Some(Self::from_i64_values_owned(out))
             }
+            // An int column against a float: its values read as f64 against
+            // the number - binary_numeric's int-promoted view of the pair
+            // (k * 1.5 broadcast the number and viewed both: 3.2 ms, pandas
+            // 0.4; br-frankenpandas-uf0mw). A NaN number keeps the broadcast.
+            (DType::Int64, Scalar::Float64(s)) => {
+                let data = self.as_i64_slice()?;
+                let s = Some(*s).filter(|s| !s.is_nan())?;
+                Some(Self::int_float_scalar(data, s, op, scalar_left))
+            }
             _ => None,
         }
+    }
+
+    /// `data <op> s` (`s <op> data` when `scalar_left`) with `data` read as
+    /// f64: the column binary_numeric makes of an all-valid Int64 column and
+    /// the number's all-valid broadcast - + - * / in one sweep, ** // % by
+    /// the same per-element helpers on the same threads.
+    fn int_float_scalar(data: &[i64], s: f64, op: ArithmeticOp, scalar_left: bool) -> Self {
+        let mut output_nan = false;
+        macro_rules! sweep {
+            ($apply:expr) => {
+                data.iter()
+                    .map(|&v| {
+                        let r: f64 = $apply(v as f64);
+                        output_nan |= r.is_nan();
+                        r
+                    })
+                    .collect::<Vec<f64>>()
+            };
+        }
+        let out = match (op, scalar_left) {
+            (ArithmeticOp::Add, false) => sweep!(|v| v + s),
+            (ArithmeticOp::Add, true) => sweep!(|v| s + v),
+            (ArithmeticOp::Sub, false) => sweep!(|v| v - s),
+            (ArithmeticOp::Sub, true) => sweep!(|v| s - v),
+            (ArithmeticOp::Mul, false) => sweep!(|v| v * s),
+            (ArithmeticOp::Mul, true) => sweep!(|v| s * v),
+            (ArithmeticOp::Div, false) => sweep!(|v| v / s),
+            (ArithmeticOp::Div, true) => sweep!(|v| s / v),
+            (ArithmeticOp::Pow | ArithmeticOp::Mod | ArithmeticOp::FloorDiv, _) => {
+                let apply = binary_f64_apply(op);
+                let out = if scalar_left {
+                    par_map_vec_f64(data.len(), |i| apply(s, data[i] as f64))
+                } else {
+                    par_map_vec_f64(data.len(), |i| apply(data[i] as f64, s))
+                };
+                return Self::from_f64_values_owned(out);
+            }
+        };
+        Self::from_f64_values_owned_tracked(out, output_nan)
     }
 
     /// Same-index Float64 arithmetic fast path.
@@ -21013,6 +21152,16 @@ impl Column {
             && let Scalar::Int64(s) = scalar
         {
             return Ok(Self::from_bool_values(compare_i64_scalar(data, *s, op)));
+        }
+        // An int column against a float: scalar_compare reads both as f64 (the
+        // pair's common dtype), so the typed f64 compare over the values read
+        // as f64 answers each cell (k > 0.5 went cell by cell: 1.0 ms, pandas
+        // 0.37; br-frankenpandas-uf0mw).
+        if let Some(data) = self.as_i64_slice()
+            && let Scalar::Float64(s) = scalar
+        {
+            let values: Vec<f64> = data.iter().map(|&v| v as f64).collect();
+            return Ok(Self::from_bool_values(compare_f64_scalar(&values, *s, op)));
         }
 
         // Nullable Float64 fast path: the all-valid `as_f64_slice` above bails on
@@ -27743,8 +27892,9 @@ impl Column {
             && let Some(data) = self.as_i64_slice()
         {
             let out: Vec<f64> = data.iter().map(|&x| x as f64).collect();
-            // `x as f64` is always finite → all-valid output → MOVE (no realloc).
-            return Ok(Self::from_f64_values_owned(out));
+            // `x as f64` is always finite → all-valid output → MOVE (no realloc),
+            // and no NaN to scan for (br-frankenpandas-uf0mw).
+            return Ok(Self::from_f64_values_owned_tracked(out, false));
         }
         if target == DType::Int64
             && let Some(data) = self.as_f64_slice()
@@ -35110,8 +35260,9 @@ mod tests {
     };
 
     use super::{
-        ArithmeticOp, BoolAffineSelectionWitness, Column, ColumnData, ColumnError, ScalarValues,
-        SparseColumn, ValidityMask,
+        ArithmeticOp, BoolAffineSelectionWitness, Column, ColumnData, ColumnError, ComparisonOp,
+        ScalarValues, SparseColumn, ValidityMask, python_floor_div_i64, python_mod_i64,
+        scalar_compare,
     };
 
     #[test]
@@ -39260,12 +39411,19 @@ mod tests {
                 .binary_scalar(&Scalar::Float64(2.0), ArithmeticOp::Pow, false)
                 .is_none()
         );
+        // (An int column's / and a float against it are typed now - see
+        // binary_scalar_int_arms_match_the_broadcast_operand_uf0mw - but a
+        // zero divisor, a negative exponent and a NaN keep the broadcast.)
         assert!(
-            ints.binary_scalar(&Scalar::Int64(2), ArithmeticOp::Div, false)
+            ints.binary_scalar(&Scalar::Int64(0), ArithmeticOp::FloorDiv, false)
                 .is_none()
         );
         assert!(
-            ints.binary_scalar(&Scalar::Float64(2.0), ArithmeticOp::Add, false)
+            ints.binary_scalar(&Scalar::Int64(-1), ArithmeticOp::Pow, false)
+                .is_none()
+        );
+        assert!(
+            ints.binary_scalar(&Scalar::Float64(f64::NAN), ArithmeticOp::Add, false)
                 .is_none()
         );
         let gapped = Column::from_f64_values(vec![1.0, f64::NAN]);
@@ -39274,6 +39432,192 @@ mod tests {
                 .binary_scalar(&Scalar::Float64(2.0), ArithmeticOp::Add, false)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn binary_scalar_int_arms_match_the_broadcast_operand_uf0mw() {
+        // br-frankenpandas-uf0mw: an int64 column against a float, and against
+        // an int under / // % **, without the broadcast column: the column
+        // binary_numeric makes with that broadcast, both sides of the op, bit
+        // for bit (wrap, a generated NaN, a signed zero, inf); declined where
+        // the broadcast path must promote or raise.
+        let bits = |column: &Column| -> (DType, Vec<(Option<u64>, bool)>) {
+            let cells = (0..column.len())
+                .map(|i| {
+                    let value = match &column.values()[i] {
+                        Scalar::Float64(v) => Some(v.to_bits()),
+                        Scalar::Int64(v) => Some(*v as u64),
+                        _ => None,
+                    };
+                    (value, column.validity().get(i))
+                })
+                .collect();
+            (column.dtype(), cells)
+        };
+        let all_ops = [
+            ArithmeticOp::Add,
+            ArithmeticOp::Sub,
+            ArithmeticOp::Mul,
+            ArithmeticOp::Div,
+            ArithmeticOp::Mod,
+            ArithmeticOp::FloorDiv,
+            ArithmeticOp::Pow,
+        ];
+        let ints = Column::from_i64_values(vec![3, -7, i64::MAX, i64::MIN, 0, 1, 12]);
+        for s in [2.5, -0.5, 0.0, -0.0, f64::INFINITY, f64::NEG_INFINITY, 3.0] {
+            let broadcast = Column::from_f64_values(vec![s; ints.len()]);
+            for op in all_ops {
+                let ours = ints.binary_scalar(&Scalar::Float64(s), op, false).unwrap();
+                let theirs = ints.binary_numeric(&broadcast, op).unwrap();
+                assert_eq!(bits(&ours), bits(&theirs), "{op:?} {s}");
+                let ours = ints.binary_scalar(&Scalar::Float64(s), op, true).unwrap();
+                let theirs = broadcast.binary_numeric(&ints, op).unwrap();
+                assert_eq!(bits(&ours), bits(&theirs), "reflected {op:?} {s}");
+            }
+        }
+        let nonzero = Column::from_i64_values(vec![3, -7, i64::MAX, i64::MIN, 5, 1, -12]);
+        let natural = Column::from_i64_values(vec![3, 0, 62, 63, 5, 1, 12]);
+        for s in [3, -2, 1, i64::MAX, i64::MIN, 7] {
+            let broadcast = Column::from_i64_values(vec![s; ints.len()]);
+            for op in [ArithmeticOp::Div, ArithmeticOp::Mod, ArithmeticOp::FloorDiv] {
+                let ours = ints.binary_scalar(&Scalar::Int64(s), op, false).unwrap();
+                let theirs = ints.binary_numeric(&broadcast, op).unwrap();
+                assert_eq!(bits(&ours), bits(&theirs), "{op:?} {s}");
+                let ours = nonzero.binary_scalar(&Scalar::Int64(s), op, true).unwrap();
+                let theirs = broadcast.binary_numeric(&nonzero, op).unwrap();
+                assert_eq!(bits(&ours), bits(&theirs), "reflected {op:?} {s}");
+            }
+            let ours = natural
+                .binary_scalar(&Scalar::Int64(s), ArithmeticOp::Pow, true)
+                .unwrap();
+            let theirs = broadcast
+                .binary_numeric(&natural, ArithmeticOp::Pow)
+                .unwrap();
+            assert_eq!(bits(&ours), bits(&theirs), "reflected ** {s}");
+        }
+        for e in [0, 1, 2, 3, 62, 63, i64::MAX] {
+            let broadcast = Column::from_i64_values(vec![e; ints.len()]);
+            let ours = ints
+                .binary_scalar(&Scalar::Int64(e), ArithmeticOp::Pow, false)
+                .unwrap();
+            let theirs = ints.binary_numeric(&broadcast, ArithmeticOp::Pow).unwrap();
+            assert_eq!(bits(&ours), bits(&theirs), "** {e}");
+        }
+        // int / 0 is a float inf / nan, as the broadcast divides.
+        let broadcast = Column::from_i64_values(vec![0; ints.len()]);
+        let ours = ints
+            .binary_scalar(&Scalar::Int64(0), ArithmeticOp::Div, false)
+            .unwrap();
+        assert_eq!(
+            bits(&ours),
+            bits(&ints.binary_numeric(&broadcast, ArithmeticOp::Div).unwrap())
+        );
+        // Negatives: a zero divisor promotes, a negative exponent raises, a
+        // NaN keeps the broadcast - all left to binary_numeric.
+        for op in [ArithmeticOp::Mod, ArithmeticOp::FloorDiv] {
+            assert!(ints.binary_scalar(&Scalar::Int64(0), op, false).is_none());
+            assert!(ints.binary_scalar(&Scalar::Int64(5), op, true).is_none());
+        }
+        assert!(
+            ints.binary_scalar(&Scalar::Int64(-1), ArithmeticOp::Pow, false)
+                .is_none()
+        );
+        assert!(
+            ints.binary_scalar(&Scalar::Int64(2), ArithmeticOp::Pow, true)
+                .is_none()
+        );
+        assert!(
+            ints.binary_scalar(&Scalar::Float64(f64::NAN), ArithmeticOp::Mul, false)
+                .is_none()
+        );
+        assert!(matches!(
+            ints.binary_numeric(
+                &Column::from_i64_values(vec![-1; ints.len()]),
+                ArithmeticOp::Pow
+            ),
+            Err(ColumnError::NegativeIntegerPower)
+        ));
+    }
+
+    #[test]
+    fn all_valid_int_kernels_match_the_per_row_loop_uf0mw() {
+        // br-frankenpandas-uf0mw: the all-valid i64 loops (+ - * // % and the
+        // typed **) write what the per-row validity loop writes; one missing
+        // row sends the same pair down that loop.
+        let left = vec![3, -7, i64::MAX, i64::MIN, 0, 1, 12, -5];
+        let right = vec![2, 3, 2, -1, 5, -4, 7, 3];
+        let expect = |op: ArithmeticOp, l: i64, r: i64| match op {
+            ArithmeticOp::Add => l.wrapping_add(r),
+            ArithmeticOp::Sub => l.wrapping_sub(r),
+            ArithmeticOp::Mul => l.wrapping_mul(r),
+            ArithmeticOp::Mod => python_mod_i64(l, r),
+            ArithmeticOp::FloorDiv => python_floor_div_i64(l, r),
+            _ => unreachable!(),
+        };
+        let dense_left = Column::from_i64_values(left.clone());
+        let dense_right = Column::from_i64_values(right.clone());
+        let mut validity = ValidityMask::all_valid(left.len());
+        validity.set(2, false);
+        let gapped_left = Column::from_i64_values_with_validity(left.clone(), validity);
+        for op in [
+            ArithmeticOp::Add,
+            ArithmeticOp::Sub,
+            ArithmeticOp::Mul,
+            ArithmeticOp::Mod,
+            ArithmeticOp::FloorDiv,
+        ] {
+            let dense = dense_left.binary_numeric(&dense_right, op).unwrap();
+            let gapped = gapped_left.binary_numeric(&dense_right, op).unwrap();
+            for i in 0..left.len() {
+                let want = Scalar::Int64(expect(op, left[i], right[i]));
+                assert_eq!(dense.values()[i], want, "{op:?} row {i}");
+                if i != 2 {
+                    assert_eq!(gapped.values()[i], want, "gapped {op:?} row {i}");
+                }
+            }
+            assert!(gapped.values()[2].is_missing());
+        }
+        let bases = Column::from_i64_values(vec![3, -7, 2, 0, -1, 10]);
+        let exponents = Column::from_i64_values(vec![2, 3, 62, 0, 7, 19]);
+        let powered = bases.binary_numeric(&exponents, ArithmeticOp::Pow).unwrap();
+        assert_eq!(powered.dtype(), DType::Int64);
+        let want: Vec<Scalar> = [9, -343, 1 << 62, 1, -1, 10_i64.wrapping_pow(19)]
+            .into_iter()
+            .map(Scalar::Int64)
+            .collect();
+        assert_eq!(powered.values(), want.as_slice());
+    }
+
+    #[test]
+    fn int_column_against_a_float_compares_as_scalar_compare_uf0mw() {
+        // br-frankenpandas-uf0mw: the typed int-against-float compare reads
+        // each value as f64, as scalar_compare does cell by cell (2**53 + 1
+        // equals 2.0**53 both ways).
+        let data = vec![1, -3, 0, 1 << 53, (1 << 53) + 1, i64::MAX, i64::MIN];
+        let ints = Column::from_i64_values(data.clone());
+        for s in [
+            0.5,
+            2.0,
+            -0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            (1_i64 << 53) as f64,
+        ] {
+            for op in [
+                ComparisonOp::Gt,
+                ComparisonOp::Lt,
+                ComparisonOp::Eq,
+                ComparisonOp::Ne,
+                ComparisonOp::Ge,
+                ComparisonOp::Le,
+            ] {
+                let ours = ints.compare_scalar(&Scalar::Float64(s), op).unwrap();
+                for (i, &v) in data.iter().enumerate() {
+                    let want = scalar_compare(&Scalar::Int64(v), &Scalar::Float64(s), op).unwrap();
+                    assert_eq!(ours.values()[i], Scalar::Bool(want), "{op:?} {s} row {i}");
+                }
+            }
+        }
     }
 
     #[test]

@@ -25879,7 +25879,7 @@ _4OHJC_OPS = {
     "round": lambda s: s.round(1),
     "interp": lambda s: s.interpolate(),
 }
-_4OHJC_EMPTY_RESIDUE = {("cumsum", "datetime64[ns]"), ("cumprod", "datetime64[ns]"), ("gb mean", "object"), ("gb mean", "string"), ("diff", "bool"), ("diff", "object"), ("diff", "string"), ("pct", "bool"), ("pct", "object"), ("pct", "string"), ("abs", "datetime64[ns]"), ("pow2", "int64"), ("pow2", "Int64"), ("pow2", "string"), ("pow2", "datetime64[ns]"), ("pow2", "timedelta64[ns]"), ("pow2", "int32"), ("add1", "datetime64[ns]"), ("div2", "string"), ("div2", "datetime64[ns]"), ("div2", "timedelta64[ns]"), ("eq1", "datetime64[ns]"), ("eq1", "timedelta64[ns]"), ("roll sum", "object"), ("roll sum", "string"), ("exp mean", "object"), ("exp mean", "string"), ("interp", "Int64")}
+_4OHJC_EMPTY_RESIDUE = {("cumsum", "datetime64[ns]"), ("cumprod", "datetime64[ns]"), ("gb mean", "object"), ("gb mean", "string"), ("diff", "bool"), ("diff", "object"), ("diff", "string"), ("pct", "bool"), ("pct", "object"), ("pct", "string"), ("abs", "datetime64[ns]"), ("pow2", "Int64"), ("pow2", "string"), ("pow2", "datetime64[ns]"), ("pow2", "timedelta64[ns]"),("add1", "datetime64[ns]"), ("div2", "string"), ("div2", "datetime64[ns]"), ("div2", "timedelta64[ns]"), ("eq1", "datetime64[ns]"), ("eq1", "timedelta64[ns]"), ("roll sum", "object"), ("roll sum", "string"), ("exp mean", "object"), ("exp mean", "string"), ("interp", "Int64")}
 _4OHJC_ONE_ROW_RESIDUE = {("cumprod", "object"), ("diff", "object"), ("diff", "string"), ("pct", "bool"), ("pct", "object"), ("pct", "string"), ("abs", "datetime64[ns]")}
 
 
@@ -27791,3 +27791,65 @@ def test_del_reads_the_label_like_pandas_it9kh(case: str) -> None:
         return _it9kh_after_del(lambda: make(m), label)
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-uf0mw: int64 Series arithmetic against a float or under
+# / // % ** takes typed kernels - the dtype, values (wrap included), zero-
+# divisor promotion and negative-exponent error pandas gives.
+_UF0MW_K = [5, -7, 3, 12, 2**40, -(2**40), 1, -1]
+_UF0MW_SMALL = [0, 1, 2, 3, 5, 7, 4, 6]
+
+
+def _uf0mw_shown(series: Any) -> Any:
+    return [
+        str(series.dtype),
+        [repr(v) if not (isinstance(v, float) and math.isnan(v)) else "nan" for v in series.tolist()],
+        series.isna().tolist(),
+    ]
+
+
+_UF0MW_CASES = {
+    "k * 1.5": lambda m: m.Series(_UF0MW_K) * 1.5,
+    "1.5 * k": lambda m: 1.5 * m.Series(_UF0MW_K),
+    "k - 0.5": lambda m: m.Series(_UF0MW_K) - 0.5,
+    "0.5 - k": lambda m: 0.5 - m.Series(_UF0MW_K),
+    "k / 2": lambda m: m.Series(_UF0MW_K) / 2,
+    "2 / k": lambda m: 2 / m.Series(_UF0MW_K),
+    "k / 0.0": lambda m: m.Series(_UF0MW_K) / 0.0,
+    "k // 3": lambda m: m.Series(_UF0MW_K) // 3,
+    "7 // k": lambda m: 7 // m.Series(_UF0MW_K),
+    "k % 3": lambda m: m.Series(_UF0MW_K) % 3,
+    "-3 % k": lambda m: -3 % m.Series(_UF0MW_K),
+    "k // 2.5": lambda m: m.Series(_UF0MW_K) // 2.5,
+    "k % 2.5": lambda m: m.Series(_UF0MW_K) % 2.5,
+    "small ** 2": lambda m: m.Series(_UF0MW_SMALL) ** 2,
+    "2 ** small": lambda m: 2 ** m.Series(_UF0MW_SMALL),
+    "small ** 0.5": lambda m: m.Series(_UF0MW_SMALL) ** 0.5,
+    "k > 0.5": lambda m: m.Series(_UF0MW_K) > 0.5,
+    "k == 3.0": lambda m: m.Series(_UF0MW_K) == 3.0,
+    "k * k": lambda m: m.Series(_UF0MW_K) * m.Series(_UF0MW_K),
+    "k // k": lambda m: m.Series(_UF0MW_K) // m.Series(_UF0MW_K),
+    "x + k": lambda m: m.Series([0.5, -1.5, 3.25, 7.0, 1e300, -2.0, 0.0, 9.5]) + m.Series(_UF0MW_K),
+    "int8 // 3": lambda m: m.Series(np.array([1, 2, -3, 100], dtype="int8")) // 3,
+    "int32 * 1.5": lambda m: m.Series(np.array([1, 2, -3, 100], dtype="int32")) * 1.5,
+    "Int64 * 1.5": lambda m: m.Series([1, None, 3], dtype="Int64") * 1.5,
+    "k.mul(1.5)": lambda m: m.Series(_UF0MW_K).mul(1.5),
+    "k.pow(2)": lambda m: m.Series(_UF0MW_SMALL).pow(2),
+    "k // 0 (NEGATIVE: float64 inf / nan, not int)": lambda m: m.Series(_UF0MW_SMALL) // 0,
+    "k % 0 (NEGATIVE: float64 nan, not int)": lambda m: m.Series(_UF0MW_SMALL) % 0,
+    "max * 2 (NEGATIVE: wraps as int64)": lambda m: m.Series([2**62, 2**63 - 1]) * 2,
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_UF0MW_CASES))
+def test_int_arithmetic_like_pandas_uf0mw(case: str) -> None:
+    assert _uf0mw_shown(_UF0MW_CASES[case](fpd)) == _uf0mw_shown(_UF0MW_CASES[case](pd))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_negative_int_exponent_raises_like_pandas_uf0mw() -> None:
+    with pytest.raises(ValueError):
+        pd.Series([1, 2]) ** -1
+    with pytest.raises(ValueError):
+        fpd.Series([1, 2]) ** -1
