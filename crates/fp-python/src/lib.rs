@@ -33643,10 +33643,21 @@ impl PySeries {
                 // A point over an IntervalIndex drops the intervals holding it.
                 let rows = interval_drop_labels(py, self.inner.index(), &rows)?;
                 let wanted = py_label_list(&rows)?;
-                let present: HashSet<&IndexLabel> = self.inner.index().labels().iter().collect();
-                let (found, missing): (Vec<IndexLabel>, Vec<IndexLabel>) = wanted
-                    .into_iter()
-                    .partition(|label| present.contains(label));
+                // A unique index checks a few labels by its lookup, not a
+                // set of all its labels (br-frankenpandas-v52yl).
+                let (found, missing): (Vec<IndexLabel>, Vec<IndexLabel>) =
+                    match fp_frame::drop_positions_by_lookup(self.inner.index(), &wanted) {
+                        Some((_, missing)) => wanted
+                            .into_iter()
+                            .partition(|label| !missing.contains(label)),
+                        None => {
+                            let present: HashSet<&IndexLabel> =
+                                self.inner.index().labels().iter().collect();
+                            wanted
+                                .into_iter()
+                                .partition(|label| present.contains(label))
+                        }
+                    };
                 if !missing.is_empty() && errors != "ignore" {
                     return Err(not_found_in_axis(py, &missing)?);
                 }
@@ -43480,24 +43491,34 @@ impl PyDataFrame {
             // A point over an IntervalIndex drops the intervals holding it.
             let rows = interval_drop_labels(rows.py(), out.index(), &rows)?;
             let wanted = py_label_list(&rows)?;
-            let present: HashSet<&IndexLabel> = out.index().labels().iter().collect();
-            let missing: Vec<IndexLabel> = wanted
-                .iter()
-                .filter(|label| !present.contains(label))
-                .cloned()
-                .collect();
-            if !missing.is_empty() && !ignore {
-                return Err(not_found_in_axis(py, &missing)?);
-            }
-            let dropped: HashSet<&IndexLabel> = wanted.iter().collect();
-            let keep: Vec<usize> = out
-                .index()
-                .labels()
-                .iter()
-                .enumerate()
-                .filter(|(_, label)| !dropped.contains(label))
-                .map(|(position, _)| position)
-                .collect();
+            // A unique index finds a few labels by its lookup, not a set of
+            // all its labels (br-frankenpandas-v52yl).
+            let keep: Vec<usize> = if let Some((keep, missing)) =
+                fp_frame::drop_positions_by_lookup(out.index(), &wanted)
+            {
+                if !missing.is_empty() && !ignore {
+                    return Err(not_found_in_axis(py, &missing)?);
+                }
+                keep
+            } else {
+                let present: HashSet<&IndexLabel> = out.index().labels().iter().collect();
+                let missing: Vec<IndexLabel> = wanted
+                    .iter()
+                    .filter(|label| !present.contains(label))
+                    .cloned()
+                    .collect();
+                if !missing.is_empty() && !ignore {
+                    return Err(not_found_in_axis(py, &missing)?);
+                }
+                let dropped: HashSet<&IndexLabel> = wanted.iter().collect();
+                out.index()
+                    .labels()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, label)| !dropped.contains(label))
+                    .map(|(position, _)| position)
+                    .collect()
+            };
             out = out.take_rows(&keep).map_err(frame_error_to_py)?;
         }
         // Under MultiIndex columns a tuple names its column and a top-level

@@ -16302,6 +16302,17 @@ impl Series {
     /// Matches `pd.Series.drop(labels)`. Returns a new Series excluding
     /// the specified index labels.
     pub fn drop(&self, labels: &[IndexLabel]) -> Result<Self, FrameError> {
+        // A unique index finds a few labels by its lookup (v52yl).
+        if let Some((positions, missing)) = drop_positions_by_lookup(&self.index, labels) {
+            if !missing.is_empty() {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "drop: labels {missing:?} not found in index"
+                )));
+            }
+            let index = self.index.take(&positions).rename_index(self.index.name());
+            let column = self.column.take_positions(&positions);
+            return self.with_row_subset(index, column);
+        }
         // Per br-frankenpandas-0d6f8: HashSet<&IndexLabel> for O(1)
         // membership; was O(n × |labels|) Vec::contains. IndexLabel
         // derives Hash + Eq.
@@ -67585,6 +67596,40 @@ fn keep_concat_zone<'a>(column: Column, mut pieces: impl Iterator<Item = &'a Col
     } else {
         column
     }
+}
+
+/// The rows a drop of `labels` keeps, and the labels `index` lacks, found by
+/// the index's own lookup when it is unique and the request small (any
+/// request on a range): every one of a million labels was hashed into a set
+/// to drop a few (df.drop(index=[1, 2, 3]) 97 ms; br-frankenpandas-v52yl).
+/// None for any other index or request - the caller scans.
+#[must_use]
+#[doc(hidden)]
+pub fn drop_positions_by_lookup(
+    index: &Index,
+    labels: &[IndexLabel],
+) -> Option<(Vec<usize>, Vec<IndexLabel>)> {
+    if index.has_duplicates() || (index.range_span().is_none() && labels.len() > 4) {
+        return None;
+    }
+    let mut dropped = Vec::with_capacity(labels.len());
+    let mut missing = Vec::new();
+    for label in labels {
+        match index.position(label) {
+            Some(position) => dropped.push(position),
+            None => missing.push(label.clone()),
+        }
+    }
+    dropped.sort_unstable();
+    dropped.dedup();
+    let mut keep = Vec::with_capacity(index.len() - dropped.len());
+    let mut next = 0;
+    for &position in &dropped {
+        keep.extend(next..position);
+        next = position + 1;
+    }
+    keep.extend(next..index.len());
+    Some((keep, missing))
 }
 
 /// Pieces that are all-valid contiguous Utf8 columns (or row-range views of
@@ -180452,6 +180497,30 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result.column().values()[0], Scalar::Int64(10));
         assert_eq!(result.column().values()[1], Scalar::Int64(30));
+    }
+
+    #[test]
+    fn drop_positions_by_lookup_keeps_the_complement_v52yl() {
+        // A unique index answers a drop by its lookup: the kept rows are the
+        // complement of the found ones, repeats folded, and a label it lacks
+        // is reported (br-frankenpandas-v52yl).
+        let range = Index::from_range(0, 10, 1);
+        let wanted = [7_i64.into(), 2_i64.into(), 7_i64.into(), 99_i64.into()];
+        let (keep, missing) = crate::drop_positions_by_lookup(&range, &wanted).unwrap();
+        assert_eq!(keep, vec![0, 1, 3, 4, 5, 6, 8, 9]);
+        assert_eq!(missing, vec![IndexLabel::Int64(99)]);
+        let text = Index::new(vec!["p".into(), "q".into(), "r".into()]);
+        let (keep, missing) = crate::drop_positions_by_lookup(&text, &["r".into()]).unwrap();
+        assert_eq!((keep, missing), (vec![0, 1], Vec::new()));
+        // NEGATIVE: an index with repeats, or many labels off a range, is
+        // the caller's scan.
+        let repeated = Index::new(vec![1_i64.into(), 1_i64.into(), 2_i64.into()]);
+        assert!(crate::drop_positions_by_lookup(&repeated, &[1_i64.into()]).is_none());
+        let many: Vec<IndexLabel> = ["p", "q", "r", "p", "q"]
+            .iter()
+            .map(|&t| t.into())
+            .collect();
+        assert!(crate::drop_positions_by_lookup(&text, &many).is_none());
     }
 
     #[test]
