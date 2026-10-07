@@ -69859,6 +69859,23 @@ const LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN: usize = 256;
 /// The default is unchanged at 256, so a process that sets nothing behaves exactly
 /// as before.
 #[cfg(feature = "lazy-transpose-view")]
+/// The column name a transposed frame gives the row labelled `label` (its
+/// typed label is kept on the column axis beside it).
+fn transposed_column_name(label: &IndexLabel) -> String {
+    match label {
+        IndexLabel::Int64(v) => v.to_string(),
+        IndexLabel::Utf8(v) => v.clone(),
+        IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
+        IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
+        f @ (IndexLabel::Float64(_)
+        | IndexLabel::Bool(_)
+        | IndexLabel::Period(_)
+        | IndexLabel::Interval(_)) => f.to_string(),
+        IndexLabel::Object(object) => object.to_string(),
+        null @ IndexLabel::Null(_) => null.to_string(),
+    }
+}
+
 fn lazy_transpose_page_len() -> usize {
     static PAGE_LEN: OnceLock<usize> = OnceLock::new();
     *PAGE_LEN.get_or_init(|| {
@@ -70962,6 +70979,16 @@ impl LazyDataFrameColumns {
         )
     }
 
+    /// The plan of an unmaterialized homogeneous transpose.
+    fn homogeneous_transpose_plan(&self) -> Option<&LazyTransposeFramePlan> {
+        match self {
+            Self::HomogeneousTranspose {
+                plan, materialized, ..
+            } if materialized.get().is_none() => Some(plan),
+            _ => None,
+        }
+    }
+
     // The delegating reads below exist so that call sites resolve to
     // [`ColumnStore`]'s surface rather than silently deref-ing past it into
     // the inner `BTreeMap`. Each materializes exactly where the `Deref` impl
@@ -71750,6 +71777,20 @@ impl ColumnAxis {
     #[cfg(feature = "lazy-transpose-view")]
     fn is_lazy_range(&self) -> bool {
         self.order.is_lazy_range()
+    }
+
+    /// The `(start, len)` of a lazy integer range of names (a transposed
+    /// RangeIndex) whose names were never written out.
+    #[cfg(feature = "lazy-transpose-view")]
+    fn lazy_unit_range(&self) -> Option<(i64, usize)> {
+        match &self.order {
+            LazyDataFrameColumnOrder::Int64UnitRange {
+                start,
+                len,
+                materialized,
+            } if materialized.get().is_none() => Some((*start, *len)),
+            _ => None,
+        }
     }
 
     #[cfg(feature = "lazy-transpose-view")]
@@ -78797,6 +78838,117 @@ impl DataFrame {
         self.columns.is_lazy_transpose() && self.column_order.is_lazy_range()
     }
 
+    /// The source columns of a lazily transposed frame and the dtype its
+    /// columns take: row `r` of this frame is source column `r`, column `c`
+    /// that column's row `c` - for a consumer that reads the transposed
+    /// values off them rather than building one column per source row
+    /// (br-frankenpandas-5il43). None for any other storage.
+    #[cfg(feature = "lazy-transpose-view")]
+    #[must_use]
+    #[doc(hidden)]
+    pub fn lazy_transpose_sources(&self) -> Option<(&[Column], DType)> {
+        if !self.is_lazy_transpose_storage() {
+            return None;
+        }
+        let plan = self.columns.homogeneous_transpose_plan()?;
+        (plan.source_columns.len() == self.len() && plan.output_columns == self.num_columns())
+            .then(|| (&plan.source_columns[..], plan.dtype.clone()))
+    }
+
+    /// A lazily transposed frame's column labels as an index - its source's
+    /// RangeIndex, with the axis name and zone - read off the range: asking
+    /// for the labels wrote out every column name, for good (the axis no
+    /// longer a lazy range, each later op on the view built its columns:
+    /// t.T 50 ms a call on a kept 100k-column view;
+    /// br-frankenpandas-5il43). None unless the axis is that range.
+    #[cfg(feature = "lazy-transpose-view")]
+    fn lazy_range_columns_index(&self) -> Option<Index> {
+        let (start, len) = self.column_order.lazy_unit_range()?;
+        if self.column_order.labels.is_some() {
+            return None;
+        }
+        let end = start.checked_add(i64::try_from(len).ok()?)?;
+        let span = self
+            .column_order
+            .range
+            .filter(|&(first, stop, step)| (first, stop, step) == (start, end, 1));
+        let index = Index::new_known_unique_int64_unit_range(start, len).with_range_span(span);
+        let index = match self.columns_name() {
+            Some(name) => index.rename_index(Some(name)),
+            None => index,
+        };
+        Some(match self.columns_tz() {
+            Some(zone) => index.clone().with_tz(Some(zone)).unwrap_or(index),
+            None => index,
+        })
+    }
+
+    /// Each column's sum (`mean` false) or mean of a lazily transposed
+    /// float frame, NaN skipped: its source row's, folded source column by
+    /// source column from +0.0 as pandas' block sum adds them (a NaN as
+    /// 0.0, which leaves a sum begun at +0.0 as it was) - a column holding
+    /// fewer than `min_count` numbers NaN, a mean of none NaN - where each
+    /// column, a source row, was built and then reduced (df.T.sum() of
+    /// 100k x 10 54.9 ms, pandas 7.0; br-frankenpandas-5il43). An unnamed
+    /// Series over the column labels, their axis name kept as pandas keeps
+    /// it (the column path dropped it). None unless every source is float64
+    /// holding NaN on its missing rows.
+    #[cfg(feature = "lazy-transpose-view")]
+    #[doc(hidden)]
+    pub fn lazy_transpose_sum_or_mean(
+        &self,
+        mean: bool,
+        min_count: usize,
+    ) -> Option<Result<Series, FrameError>> {
+        let (sources, dtype) = self.lazy_transpose_sources()?;
+        let width = self.num_columns();
+        if dtype != DType::Float64 || sources.is_empty() || width == 0 {
+            return None;
+        }
+        let index = self.lazy_range_columns_index()?;
+        let rows: Vec<&[f64]> = sources
+            .iter()
+            .map(|column| {
+                let (data, validity) = column.as_f64_slice_with_validity()?;
+                (column.nan_missing_exact() || validity.all()).then_some(data)
+            })
+            .collect::<Option<_>>()?;
+        if rows.iter().any(|row| row.len() != width) {
+            return None;
+        }
+        let mut sums = vec![0.0_f64; width];
+        let mut counts = vec![0_usize; width];
+        for row in rows {
+            for ((sum, count), &value) in sums.iter_mut().zip(counts.iter_mut()).zip(row) {
+                let present = !value.is_nan();
+                *sum += if present { value } else { 0.0 };
+                *count += usize::from(present);
+            }
+        }
+        let values: Vec<f64> = sums
+            .into_iter()
+            .zip(counts)
+            .map(|(sum, count)| {
+                if mean {
+                    if count == 0 {
+                        f64::NAN
+                    } else {
+                        sum / count as f64
+                    }
+                } else if count < min_count {
+                    f64::NAN
+                } else {
+                    sum
+                }
+            })
+            .collect();
+        Some(Series::new(
+            String::new(),
+            index,
+            Column::from_f64_values(values),
+        ))
+    }
+
     /// Return a Series of dtypes, one per column.
     ///
     /// Matches `pd.DataFrame.dtypes`.
@@ -85002,6 +85154,10 @@ impl DataFrame {
     }
 
     pub fn transpose(&self) -> Result<Self, FrameError> {
+        #[cfg(feature = "lazy-transpose-view")]
+        if let Some(back) = self.transposed_back()? {
+            return Ok(back);
+        }
         // Each row is one value of every column: numpy's dtype for the
         // columns (an all-int32 frame transposes to int32 columns; fvsao.23).
         let width = self
@@ -85081,6 +85237,74 @@ impl DataFrame {
         self.transpose_materialized()
     }
 
+    /// The transposed frame of `pairs` - one column per row of this frame,
+    /// each named by its row label (`transposed_column_name`) - over
+    /// `new_index` (this frame's columns as rows): this frame's row labels
+    /// become the typed column labels, a RangeIndex if they were one, and
+    /// the axes trade names and zones.
+    fn finish_transpose(
+        &self,
+        new_index: Index,
+        pairs: Vec<(String, Column)>,
+    ) -> Result<Self, FrameError> {
+        let new_order: Vec<String> = pairs.iter().map(|(name, _)| name.clone()).collect();
+        let new_columns = ColumnStore::from_pairs(pairs);
+        if !self.allows_duplicate_labels
+            && (new_columns.has_duplicates() || new_index.has_duplicates())
+        {
+            return Err(FrameError::CompatibilityRejected(
+                "transpose: duplicate labels are present".to_owned(),
+            ));
+        }
+        let mut out = Self::new_with_axes_trusted(new_index, None, new_columns, new_order, None);
+        out.allows_duplicate_labels = self.allows_duplicate_labels;
+        // The new columns are the row labels, typed (each keyed by its
+        // text, as `transposed_column_name` spells it), a RangeIndex if the
+        // rows were one.
+        out.column_order.record(self.index.labels().iter().cloned());
+        out.column_order.range = self.index.range_span();
+        // The axes trade names and zones too.
+        out.column_order.name = self.index.name().cloned();
+        out.column_order.tz = self.index.tz().map(str::to_owned);
+        Ok(out)
+    }
+
+    /// A lazily transposed frame transposed back (`df.T.T`): its source
+    /// columns under this frame's labels - its index as the columns, its
+    /// columns as the index - where the transpose walked every column of
+    /// the view, one per source row, more than once (df.T.T of 100k x 10
+    /// 119 ms, pandas 7.0; br-frankenpandas-5il43). Only a plan whose
+    /// every source column holds the view's own float / int / bool dtype,
+    /// plain (a promoted int / float plan keeps the general path, which
+    /// casts each column to float64 as pandas does).
+    #[cfg(feature = "lazy-transpose-view")]
+    fn transposed_back(&self) -> Result<Option<Self>, FrameError> {
+        let Some((sources, dtype)) = self.lazy_transpose_sources() else {
+            return Ok(None);
+        };
+        if !matches!(dtype, DType::Float64 | DType::Int64 | DType::Bool)
+            || sources.iter().any(|column| {
+                column.dtype() != dtype
+                    || column.width().is_some()
+                    || column.categorical().is_some()
+                    || column.is_pandas_string()
+            })
+        {
+            return Ok(None);
+        }
+        let Some(new_index) = self.lazy_range_columns_index() else {
+            return Ok(None);
+        };
+        let pairs: Vec<(String, Column)> = self
+            .index
+            .labels()
+            .iter()
+            .map(transposed_column_name)
+            .zip(sources.iter().cloned())
+            .collect();
+        self.finish_transpose(new_index, pairs).map(Some)
+    }
+
     fn transpose_materialized(&self) -> Result<Self, FrameError> {
         if !self.allows_duplicate_labels
             && (self.index.has_duplicates() || self.columns.has_duplicates())
@@ -85097,48 +85321,14 @@ impl DataFrame {
         // DataFrame([[1, 2]]).T; fvsao.32), a RangeIndex if they were one.
         let new_index = self.columns_as_row_index();
 
-        let label_to_name = |label: &IndexLabel| -> String {
-            match label {
-                IndexLabel::Int64(v) => v.to_string(),
-                IndexLabel::Utf8(v) => v.clone(),
-                IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
-                IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-                f @ (IndexLabel::Float64(_)
-                | IndexLabel::Bool(_)
-                | IndexLabel::Period(_)
-                | IndexLabel::Interval(_)) => f.to_string(),
-                IndexLabel::Object(object) => object.to_string(),
-                null @ IndexLabel::Null(_) => null.to_string(),
-            }
-        };
+        let label_to_name = transposed_column_name;
         let src_cols: Vec<&Column> = (0..n_cols)
             .map(|pos| self.column_at(pos).expect("column position in bounds"))
             .collect();
 
-        let finish_transpose =
-            |new_index: Index, pairs: Vec<(String, Column)>| -> Result<Self, FrameError> {
-                let new_order: Vec<String> = pairs.iter().map(|(name, _)| name.clone()).collect();
-                let new_columns = ColumnStore::from_pairs(pairs);
-                if !self.allows_duplicate_labels
-                    && (new_columns.has_duplicates() || new_index.has_duplicates())
-                {
-                    return Err(FrameError::CompatibilityRejected(
-                        "transpose: duplicate labels are present".to_owned(),
-                    ));
-                }
-                let mut out =
-                    Self::new_with_axes_trusted(new_index, None, new_columns, new_order, None);
-                out.allows_duplicate_labels = self.allows_duplicate_labels;
-                // The new columns are the row labels, typed (each keyed by
-                // its text, as `label_to_name` spells it), a RangeIndex if
-                // the rows were one.
-                out.column_order.record(self.index.labels().iter().cloned());
-                out.column_order.range = self.index.range_span();
-                // The axes trade names and zones too.
-                out.column_order.name = self.index.name().cloned();
-                out.column_order.tz = self.index.tz().map(str::to_owned);
-                Ok(out)
-            };
+        let finish_transpose = |new_index: Index, pairs: Vec<(String, Column)>| {
+            self.finish_transpose(new_index, pairs)
+        };
 
         // Shared-row-plan Float64 fast path: for Arc-backed all-valid Float64
         // sources, every transposed output column is a lazy view of one source
@@ -100747,6 +100937,13 @@ impl DataFrame {
             } else {
                 df
             };
+            if matches!(
+                op,
+                ArithmeticOp::Add | ArithmeticOp::Sub | ArithmeticOp::Mul | ArithmeticOp::Div
+            ) && let Some(out) = df.typed_scalar_arith(value, op, reflected)?
+            {
+                return Ok(out);
+            }
             match (op, reflected) {
                 (ArithmeticOp::Add, _) => df.add_scalar(value),
                 (ArithmeticOp::Mul, _) => df.mul_scalar(value),
@@ -102717,6 +102914,45 @@ impl DataFrame {
         self.with_column(name, col)
     }
 
+    /// `self <op> value` (`value <op> self` when `reflected`) for + - * /,
+    /// each column by its own typed kernel - the one a Series takes
+    /// (`Column::binary_scalar`: 4-lane divide, a NaN-holding column kept
+    /// NaN-exact, an int column read as floats in one sweep) - where the
+    /// frame mapped every column through a closure into a fresh buffer and
+    /// scanned it for NaN (df * 2 of one 1M-row column 0.25 ms, a Series
+    /// 0.13, pandas 0.16; br-frankenpandas-hbr8c). Threaded by column over
+    /// the bandwidth-bound op's 3M values, as `apply_scalar_op_inner`.
+    /// None unless every column is a plain float64 / int64 one the kernel
+    /// answers (a narrow, categorical or other column keeps that path).
+    fn typed_scalar_arith(
+        &self,
+        value: f64,
+        op: ArithmeticOp,
+        reflected: bool,
+    ) -> Result<Option<Self>, FrameError> {
+        let n_cols = self.num_columns();
+        let plain = (0..n_cols).all(|pos| {
+            self.column_at(pos).is_some_and(|column| {
+                matches!(column.dtype(), DType::Float64 | DType::Int64)
+                    && column.width().is_none()
+                    && column.categorical().is_none()
+            })
+        });
+        if n_cols == 0 || !plain {
+            return Ok(None);
+        }
+        let number = Scalar::Float64(value);
+        let columns = self.par_map_column_positions_min(3 << 20, |pos| {
+            Ok(self
+                .column_at(pos)
+                .and_then(|column| column.binary_scalar(&number, op, reflected)))
+        })?;
+        let Some(columns) = columns.into_iter().collect::<Option<Vec<Column>>>() else {
+            return Ok(None);
+        };
+        Ok(Some(self.with_columns_at_positions(columns)))
+    }
+
     /// Internal: apply a binary f64 operation with a scalar to each numeric column.
     fn apply_scalar_op<F>(&self, scalar: f64, op: F) -> Result<Self, FrameError>
     where
@@ -102745,8 +102981,15 @@ impl DataFrame {
         // NaN - missing - for every op but power, whose NaN ** 0 and 1 ** NaN
         // are 1 (they stayed missing; br-frankenpandas-oie6x).
         let missing_result = op(f64::NAN, scalar);
+        // A thread a column pays for a bandwidth-bound op (+ - * /) only over
+        // a few million values: below, the spawns cost more than they bring
+        // (df * 2 one core vs threaded: 100 x 10k 0.31 / 2.30 ms, 10 x 100k
+        // 0.26 / 0.37, 2 x 1M 0.69 / 1.73; over: 4 x 1M 2.86 / 2.51, 40 x
+        // 100k 2.77 / 1.95; br-frankenpandas-hbr8c). Compute-bound ones keep
+        // theirs.
+        let par_min_values = if compute_bound { 16_384 } else { 3 << 20 };
         // By position: a repeated column key is its own column (i17d4).
-        let computed = self.par_map_column_positions_min(16_384, |pos| {
+        let computed = self.par_map_column_positions_min(par_min_values, |pos| {
             let col = self.column_at(pos).expect("column in bounds");
             // Typed fast path: an all-valid Int64/Float64 column applies the op
             // over its contiguous buffer (Int64 promoted to f64, matching the
@@ -220641,6 +220884,232 @@ mod tests {
         assert!(matches!(nan_row.values()[0], Scalar::Float64(value) if value.is_nan()));
         assert!(!nan_row.validity().get(0));
         assert_eq!(nan_row.values()[1], Scalar::Float64(4.0));
+    }
+
+    #[cfg(feature = "lazy-transpose-view")]
+    #[test]
+    fn transposed_back_is_the_source_5il43() {
+        // br-frankenpandas-5il43: a lazily transposed frame transposed back
+        // is the source - its columns, their order, values (NaN, -0.0),
+        // dtypes and typed labels, its RangeIndex - and the view hands out
+        // the source columns row for row. NEGATIVE: a promoted plan (an int
+        // column beside a float one) comes back float64 everywhere, as
+        // pandas' T.T, not the int source column.
+        let frame = |columns: Vec<(&str, Column)>| {
+            let order: Vec<String> = columns.iter().map(|(name, _)| (*name).to_owned()).collect();
+            let len = columns[0].1.len();
+            DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, len),
+                columns
+                    .into_iter()
+                    .map(|(name, column)| (name.to_owned(), column))
+                    .collect::<BTreeMap<String, Column>>(),
+                order,
+            )
+            .unwrap()
+        };
+        let source = frame(vec![
+            ("b", Column::from_f64_values(vec![1.5, f64::NAN, -0.0, 4.0])),
+            (
+                "a",
+                Column::from_f64_values(vec![2.0, 3.0, f64::INFINITY, 5.0]),
+            ),
+            ("c", Column::from_f64_values(vec![f64::NAN; 4])),
+        ]);
+        let view = source.transpose().unwrap();
+        assert!(view.is_lazy_transpose_storage());
+        let (sources, dtype) = view.lazy_transpose_sources().unwrap();
+        assert_eq!(dtype, DType::Float64);
+        assert_eq!(sources.len(), 3);
+        let back = view.transpose().unwrap();
+        assert_eq!(back.column_names(), source.column_names());
+        assert_eq!(back.column_labels(), source.column_labels());
+        assert_eq!(back.index().labels(), source.index().labels());
+        for name in ["a", "b", "c"] {
+            let (got, want) = (back.column(name).unwrap(), source.column(name).unwrap());
+            assert_eq!(got.dtype(), want.dtype(), "{name}");
+            let bits = |c: &Column| -> Vec<u64> {
+                c.values()
+                    .iter()
+                    .map(|cell| cell.to_f64().map_or(u64::MAX, f64::to_bits))
+                    .collect()
+            };
+            assert_eq!(bits(got), bits(want), "{name}");
+            assert_eq!(got.validity(), want.validity(), "{name}");
+        }
+        let promoted = frame(vec![
+            ("k", Column::from_i64_values(vec![1, 2, 3])),
+            ("x", Column::from_f64_values(vec![0.5, 1.5, 2.5])),
+        ]);
+        let back = promoted.transpose().unwrap().transpose().unwrap();
+        assert_eq!(back.column("k").unwrap().dtype(), DType::Float64);
+        assert_eq!(back.column("x").unwrap().dtype(), DType::Float64);
+    }
+
+    #[cfg(feature = "lazy-transpose-view")]
+    #[test]
+    fn transposed_sums_are_the_column_path_5il43() {
+        // br-frankenpandas-5il43: a lazily transposed float frame's column
+        // sums and means are the column path's - each column built and
+        // reduced - bit for bit over NaN, -0.0, infinities, an all-NaN
+        // column, labels and all. NEGATIVE: an int frame's view declines
+        // (None), and a min_count above a column's numbers makes it NaN.
+        let n = 70_usize;
+        let value = |i: usize, j: usize| match (i * 7 + j * 3) % 13 {
+            0 => f64::NAN,
+            1 => -0.0,
+            2 => f64::INFINITY,
+            _ => ((i * 31 + j * 17) % 97) as f64 * 0.37 - 15.0,
+        };
+        let order: Vec<String> = (0..4).map(|j| format!("c{j}")).collect();
+        let columns: BTreeMap<String, Column> = order
+            .iter()
+            .enumerate()
+            .map(|(j, name)| {
+                let data = (0..n)
+                    .map(|i| if i == 5 { f64::NAN } else { value(i, j) })
+                    .collect();
+                (name.clone(), Column::from_f64_values(data))
+            })
+            .collect();
+        let source = DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, n),
+            columns,
+            order,
+        )
+        .unwrap();
+        let view = source.transpose().unwrap();
+        assert!(view.is_lazy_transpose_storage());
+        // A missing cell is missing (NaN or null), a present one its bits.
+        let shown = |s: &Series| -> (Vec<IndexLabel>, Vec<Option<u64>>) {
+            (
+                s.index().labels().to_vec(),
+                s.values()
+                    .iter()
+                    .map(|cell| {
+                        (!cell.is_missing()).then(|| cell.to_f64().map_or(u64::MAX, f64::to_bits))
+                    })
+                    .collect(),
+            )
+        };
+        // The column path: the eagerly transposed frame's reductions.
+        let eager = source.transpose_materialized().unwrap();
+        assert!(!eager.is_lazy_transpose_storage());
+        let sums = view.lazy_transpose_sum_or_mean(false, 0).unwrap().unwrap();
+        let means = view.lazy_transpose_sum_or_mean(true, 0).unwrap().unwrap();
+        assert_eq!(shown(&sums), shown(&eager.sum().unwrap()));
+        assert_eq!(shown(&means), shown(&eager.mean().unwrap()));
+        // Column 5 holds no number: its sum 0.0, under min_count 4 NaN.
+        assert_eq!(sums.values()[5], Scalar::Float64(0.0));
+        let strict = view.lazy_transpose_sum_or_mean(false, 4).unwrap().unwrap();
+        assert!(strict.values()[5].is_missing());
+        let ints = DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, 3),
+            BTreeMap::from([("k".to_owned(), Column::from_i64_values(vec![1, 2, 3]))]),
+            vec!["k".to_owned()],
+        )
+        .unwrap()
+        .transpose()
+        .unwrap();
+        assert!(ints.is_lazy_transpose_storage());
+        assert!(ints.lazy_transpose_sum_or_mean(false, 0).is_none());
+    }
+
+    #[test]
+    fn frame_scalar_arith_is_each_columns_kernel_hbr8c() {
+        // br-frankenpandas-hbr8c: a frame's + - * / by a number through each
+        // column's Series kernel gives the closure path's values - present
+        // cells to the bit, missing cells missing - over a float column with
+        // NaN / -0.0 / inf, an all-valid one and an int one, both operand
+        // orders. NEGATIVE: a frame with a bool or a text column declines
+        // (None), keeping the closure path.
+        use fp_columnar::ArithmeticOp;
+        type Apply = fn(f64, f64) -> f64;
+        type Case = (ArithmeticOp, Apply, Apply);
+        let n = 70_usize;
+        let x: Vec<f64> = (0..n)
+            .map(|i| match i % 9 {
+                0 => f64::NAN,
+                1 => -0.0,
+                2 => f64::INFINITY,
+                _ => (i as f64) * 0.75 - 20.0,
+            })
+            .collect();
+        let y: Vec<f64> = (0..n).map(|i| (i as f64).sin() * 5.0).collect();
+        let k: Vec<i64> = (0..n as i64).map(|i| i % 9 - 4).collect();
+        let frame = DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, n),
+            BTreeMap::from([
+                ("x".to_owned(), Column::from_f64_values(x)),
+                ("y".to_owned(), Column::from_f64_values(y)),
+                ("k".to_owned(), Column::from_i64_values(k)),
+            ]),
+            vec!["x".to_owned(), "y".to_owned(), "k".to_owned()],
+        )
+        .unwrap();
+        let cells = |df: &DataFrame| -> Vec<Vec<Option<u64>>> {
+            (0..df.num_columns())
+                .map(|pos| {
+                    df.column_at(pos)
+                        .unwrap()
+                        .values()
+                        .iter()
+                        .map(|cell| {
+                            (!cell.is_missing())
+                                .then(|| cell.to_f64().map_or(u64::MAX, f64::to_bits))
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+        let cases: [Case; 4] = [
+            (ArithmeticOp::Add, |a, b| a + b, |a, b| b + a),
+            (ArithmeticOp::Sub, |a, b| a - b, |a, b| b - a),
+            (ArithmeticOp::Mul, |a, b| a * b, |a, b| b * a),
+            (ArithmeticOp::Div, |a, b| a / b, |a, b| b / a),
+        ];
+        let mut answered = 0;
+        for (op, forward, backward) in cases {
+            for value in [2.0, 0.0, -0.0, 0.5, f64::INFINITY, f64::NAN] {
+                for reflected in [false, true] {
+                    let Some(typed) = frame.typed_scalar_arith(value, op, reflected).unwrap()
+                    else {
+                        continue;
+                    };
+                    answered += 1;
+                    let apply = if reflected { backward } else { forward };
+                    let closure = frame.apply_scalar_op(value, apply).unwrap();
+                    assert_eq!(cells(&typed), cells(&closure), "{op:?} {value} {reflected}");
+                }
+            }
+        }
+        // Half of the 48 answer: for the column missing rows the Series
+        // kernel declines an infinite or NaN number and a zero under * or /
+        // (24 combinations), and the frame keeps its closure path then.
+        assert!(answered >= 24, "{answered}");
+        let with = |name: &str, column: Column| {
+            DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, 2),
+                BTreeMap::from([
+                    ("y".to_owned(), Column::from_f64_values(vec![1.0, 2.0])),
+                    (name.to_owned(), column),
+                ]),
+                vec!["y".to_owned(), name.to_owned()],
+            )
+            .unwrap()
+        };
+        let flags = Column::from_values(vec![Scalar::Bool(true), Scalar::Bool(false)]).unwrap();
+        let text = Column::from_values(vec![
+            Scalar::Utf8("a".to_owned()),
+            Scalar::Utf8("b".to_owned()),
+        ])
+        .unwrap();
+        for (name, column) in [("p", flags), ("s", text)] {
+            let declined = with(name, column)
+                .typed_scalar_arith(2.0, ArithmeticOp::Mul, false)
+                .unwrap();
+            assert!(declined.is_none(), "{name}");
+        }
     }
 
     #[cfg(feature = "lazy-transpose-view")]

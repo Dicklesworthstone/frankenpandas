@@ -36698,6 +36698,42 @@ impl<'a> CellSource<'a> {
             }
         }
     }
+
+    /// How many cells it holds.
+    fn cell_count(&self) -> usize {
+        match self {
+            Self::Float(data) => data.len(),
+            Self::IntAsFloat(data) | Self::Int(data) => data.len(),
+            Self::Bytes(bytes) => bytes.len() / 8,
+        }
+    }
+
+    /// Its cells, in order, as one row of a block (a transposed frame's
+    /// source column; br-frankenpandas-5il43).
+    fn fill_row(&self, row: &mut [[u8; 8]]) {
+        match self {
+            Self::Float(data) => {
+                for (cell, value) in row.iter_mut().zip(*data) {
+                    *cell = value.to_ne_bytes();
+                }
+            }
+            Self::IntAsFloat(data) => {
+                for (cell, &value) in row.iter_mut().zip(*data) {
+                    *cell = (value as f64).to_ne_bytes();
+                }
+            }
+            Self::Int(data) => {
+                for (cell, value) in row.iter_mut().zip(*data) {
+                    *cell = value.to_ne_bytes();
+                }
+            }
+            Self::Bytes(bytes) => {
+                for (cell, chunk) in row.iter_mut().zip(bytes.as_chunks::<8>().0) {
+                    *cell = *chunk;
+                }
+            }
+        }
+    }
 }
 
 fn numpy_bytes(column: &Column, kind: &str) -> Vec<u8> {
@@ -36952,8 +36988,81 @@ fn labels_ndarray<'py>(py: Python<'py>, labels: &[IndexLabel]) -> PyResult<Bound
 /// the columns' common numpy dtype (one kind for all; int64 with float64
 /// -> float64; no columns -> float64) interleaved row-major from byte
 /// buffers, else an object array filled column by column.
+/// Whether `frame` is a lazily transposed view (`df.T` of a homogeneous
+/// frame, its columns not yet built).
+fn lazy_transpose_storage(frame: &DataFrame) -> bool {
+    #[cfg(feature = "lazy-transpose-view")]
+    {
+        frame.is_lazy_transpose_storage()
+    }
+    #[cfg(not(feature = "lazy-transpose-view"))]
+    {
+        let _ = frame;
+        false
+    }
+}
+
+/// A lazily transposed frame's 2-D array (`df.T.values`): row `r` is source
+/// column `r` (see `DataFrame::lazy_transpose_sources`), its numbers copied
+/// in as a row - where each of the view's columns, one per source row, was
+/// built and then read a cell at a time (df.T.to_numpy() of 100k x 10
+/// 11.0 ms, pandas 0.05; br-frankenpandas-5il43). The block `frame_ndarray`
+/// builds from those columns: float64 for a float view (an int source's
+/// numbers cast, a float source's missing rows NaN), int64 for an int one.
+/// None for any source held otherwise (it keeps the column path).
+#[cfg(feature = "lazy-transpose-view")]
+fn lazy_transpose_ndarray<'py>(
+    py: Python<'py>,
+    np: &Bound<'py, PyModule>,
+    frame: &DataFrame,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let Some((sources, dtype)) = frame.lazy_transpose_sources() else {
+        return Ok(None);
+    };
+    let (rows, width) = frame.shape();
+    let kind = match dtype {
+        DType::Float64 => "float64",
+        DType::Int64 => "int64",
+        _ => return Ok(None),
+    };
+    let mut cells: Vec<CellSource<'_>> = Vec::with_capacity(rows);
+    for source in sources {
+        let row = match (
+            kind,
+            source.as_f64_slice_with_validity(),
+            source.as_i64_slice(),
+        ) {
+            ("float64", Some((data, validity)), _)
+                if source.nan_missing_exact() || validity.all() =>
+            {
+                CellSource::Float(data)
+            }
+            ("float64", None, Some(data)) => CellSource::IntAsFloat(data),
+            ("int64", None, Some(data)) => CellSource::Int(data),
+            _ => return Ok(None),
+        };
+        cells.push(row);
+    }
+    if rows == 0 || width == 0 || cells.iter().any(|row| row.cell_count() != width) {
+        return Ok(None);
+    }
+    let buffer = pyo3::types::PyByteArray::new_with(py, rows * width * 8, |buffer| {
+        let (block, _) = buffer.as_chunks_mut::<8>();
+        for (row, out) in cells.iter().zip(block.chunks_exact_mut(width)) {
+            row.fill_row(out);
+        }
+        Ok(())
+    })?;
+    let flat = np.call_method1("frombuffer", (buffer, kind))?;
+    Ok(Some(flat.call_method1("reshape", ((rows, width),))?))
+}
+
 fn frame_ndarray<'py>(py: Python<'py>, frame: &DataFrame) -> PyResult<Bound<'py, PyAny>> {
     let np = py.import("numpy")?;
+    #[cfg(feature = "lazy-transpose-view")]
+    if let Some(block) = lazy_transpose_ndarray(py, &np, frame)? {
+        return Ok(block);
+    }
     let (rows, width) = frame.shape();
     let columns: Vec<&Column> = (0..width)
         .filter_map(|position| frame.column_at(position))
@@ -38448,10 +38557,14 @@ impl PyDataFrame {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         // Each output column is one source row: a tz-aware column's instant
         // is a Timestamp in its zone among the object cells, as `zoned_row`
-        // makes a row (the core's cell is the naive UTC instant; mxjyl).
-        if (0..self.inner.num_columns())
-            .filter_map(|position| self.inner.column_at(position))
-            .any(|column| column.timezone().is_some())
+        // makes a row (the core's cell is the naive UTC instant; mxjyl). A
+        // lazily transposed frame holds no zone (a zoned frame transposes
+        // eagerly) - asking its columns built every one, a source row each
+        // (df.T.T of 100k x 10 9.6 ms, pandas 6.7; br-frankenpandas-5il43).
+        if !lazy_transpose_storage(&self.inner)
+            && (0..self.inner.num_columns())
+                .filter_map(|position| self.inner.column_at(position))
+                .any(|column| column.timezone().is_some())
         {
             let columns = Python::attach(|py| {
                 (0..result.num_columns())
@@ -43070,6 +43183,15 @@ impl PyDataFrame {
         numpy_compat_kwargs("sum", kwargs)?;
         Self::warn_axis_none(py, "sum", &axis)?;
         let ax = parse_axis_param(axis.0.as_ref().filter(|axis| !axis.is_none()))?;
+        // A lazily transposed float frame: each column's source row
+        // (br-frankenpandas-5il43).
+        #[cfg(feature = "lazy-transpose-view")]
+        if ax == 0
+            && skipna
+            && let Some(summed) = self.inner.lazy_transpose_sum_or_mean(false, min_count)
+        {
+            return wrap_series(summed);
+        }
         self.refuse_masked_rows("sum", ax, numeric_only)?;
         if let Some(answer) = self.empty_object_rows_answer(ax, numeric_only)? {
             return Ok(answer);
@@ -43148,6 +43270,15 @@ impl PyDataFrame {
             return Ok(value);
         }
         let ax = parse_axis_param(axis.0.as_ref())?;
+        // A lazily transposed float frame: each column's source row
+        // (br-frankenpandas-5il43).
+        #[cfg(feature = "lazy-transpose-view")]
+        if ax == 0
+            && skipna
+            && let Some(means) = self.inner.lazy_transpose_sum_or_mean(true, 0)
+        {
+            return wrap_series(means)?.into_py_any(py);
+        }
         self.refuse_masked_rows("mean", ax, numeric_only)?;
         wrap_series(self.mean_internal(ax, skipna, numeric_only))
             .and_then(|s| self.masked_answer("mean", ax, numeric_only, s))?

@@ -28586,3 +28586,90 @@ def test_series_of_a_float_array_like_pandas_br362(case: str) -> None:
         return shown, float(s.sum()), int(s.count()), list(array.view("u8"))
 
     assert run(fpd) == run(pd)
+
+
+def _5il43_frame(m: Any, case: str) -> Any:
+    rng = np.random.default_rng(29)
+    data = rng.normal(size=(40, 3))
+    data[rng.random((40, 3)) < 0.15] = np.nan
+    data[3] = np.nan
+    data[4] = -0.0
+    data[6, 1] = np.inf
+    if case == "float":
+        return m.DataFrame({f"c{j}": data[:, j] for j in range(3)})
+    if case == "named index":
+        frame = m.DataFrame({f"c{j}": data[:, j] for j in range(3)})
+        frame.index.name = "rows"
+        return frame
+    if case == "int labels":
+        return m.DataFrame({j: data[:, j] for j in range(3)})
+    if case == "int":
+        return m.DataFrame({"a": np.arange(40) - 7, "b": np.arange(40) * 3})
+    if case == "promoted":
+        return m.DataFrame({"k": np.arange(40) - 7, "x": data[:, 0]})
+    return m.DataFrame({"s": ["x", "y", "z"], "t": ["u", "v", "w"]})
+
+
+def _5il43_shown(obj: Any) -> Any:
+    if isinstance(obj, tuple):
+        return tuple(_5il43_shown(part) for part in obj)
+    if isinstance(obj, np.ndarray):
+        cells = [v.hex() if isinstance(v, float) and v == v else repr(v) for v in obj.ravel().tolist()]
+        return str(obj.dtype), obj.shape, cells
+    if hasattr(obj, "columns"):
+        return (
+            list(obj.columns),
+            [type(c).__name__ for c in obj.columns],
+            obj.columns.name,
+            list(obj.index),
+            obj.index.name,
+            [str(d) for d in obj.dtypes],
+            _5il43_shown(obj.to_numpy()),
+        )
+    return str(obj.dtype), list(obj.index), obj.index.name, obj.name, _5il43_shown(obj.to_numpy())
+
+
+def _5il43_kept_view(df: Any) -> Any:
+    view = df.T
+    return view.sum(), view.mean(), view.T
+
+
+def _5il43_renamed(df: Any) -> Any:
+    view = df.T
+    view.index = [f"r{i}" for i in range(len(view.index))]
+    return view
+
+
+_5IL43_OPS = {
+    "T.to_numpy()": lambda df: df.T.to_numpy(),
+    "T.values": lambda df: df.T.values,
+    "T.T": lambda df: df.T.T,
+    "T.sum()": lambda df: df.T.sum(),
+    "T.mean()": lambda df: df.T.mean(),
+    "T.sum(min_count=3)": lambda df: df.T.sum(min_count=3),
+    "renamed view .T": lambda df: _5il43_renamed(df).T,
+    "one view, three ops": _5il43_kept_view,
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "case", ["float", "named index", "int labels", "int", "promoted", "object (NEGATIVE)"]
+)
+@pytest.mark.parametrize("op", list(_5IL43_OPS))
+def test_transposed_frame_ops_like_pandas_5il43(case: str, op: str) -> None:
+    # A transposed frame's array, its transpose back and its column sums /
+    # means, answered from the lazily transposed source (br-frankenpandas-5il43):
+    # values to the bit (NaN, -0.0, inf, an all-NaN row), dtypes, labels and
+    # their types; a view whose index was renamed first. NEGATIVE: an object
+    # frame keeps the column path's answers.
+    if case.startswith("object") and op == "T.sum(min_count=3)":
+        pytest.skip("object sum below min_count: NaN vs pandas' None (br-frankenpandas-rdnkd)")
+
+    def run(m: Any) -> Any:
+        try:
+            return _5il43_shown(_5IL43_OPS[op](_5il43_frame(m, case)))
+        except Exception as error:  # noqa: BLE001
+            return "raises " + type(error).__name__
+
+    assert run(fpd) == run(pd)
