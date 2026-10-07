@@ -100449,10 +100449,18 @@ impl DataFrame {
             let mut columns = Vec::with_capacity(n_cols);
             for pos in 0..n_cols {
                 let column = column_at(pos);
-                columns.push(if reflected {
-                    Self::column_pair_arith(&broadcast, column, op)?
-                } else {
-                    Self::column_pair_arith(column, &broadcast, op)?
+                // A float column to a number is numpy's power by one number,
+                // which an array of exponents is not (br-frankenpandas-pucep).
+                let power = (matches!(op, ArithmeticOp::Pow)
+                    && !reflected
+                    && column.dtype() == DType::Float64
+                    && column.width().is_none())
+                .then(|| column.binary_scalar(scalar, op, false))
+                .flatten();
+                columns.push(match power {
+                    Some(power) => power,
+                    None if reflected => Self::column_pair_arith(&broadcast, column, op)?,
+                    None => Self::column_pair_arith(column, &broadcast, op)?,
                 });
             }
             return Ok(self.with_columns_at_positions(columns));
@@ -100588,7 +100596,9 @@ impl DataFrame {
                 Ok(s.clone())
             }
         })?;
-        promoted.apply_scalar_op_inner(value, |a, b| a.powf(b), true)
+        // numpy's power by one number: square, root, reciprocal for 2, 0.5,
+        // -1 (pow misses by an ulp, and keeps no -0.0; br-frankenpandas-pucep).
+        promoted.apply_scalar_op_inner(value, fp_columnar::power_by_number, true)
     }
 
     /// Modulo all numeric columns by a scalar.
@@ -174160,6 +174170,76 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn frame_power_by_a_number_is_numpys_pucep() {
+        // br-frankenpandas-pucep: a frame's float column ** a number is
+        // numpy's power by one number - pandas 2.2.3 live: (-413.0340877931743)
+        // ** 2 is 170597.1576791396 (glibc's pow ...964), (-0.0) ** 0.5 -0.0,
+        // (-inf) ** 0.5 NaN - a plain frame and one holding a bool column
+        // (whose number is broadcast) alike. NEGATIVE: an array of exponents
+        // is pow throughout - pandas' [-0.0, -inf] ** [0.5, 0.5] is [0.0, inf].
+        let index = Index::from_range(0, 4, 1);
+        let floats = Series::new(
+            "x",
+            index.clone(),
+            Column::from_f64_values(vec![
+                -413.034_087_793_174_3,
+                -0.0,
+                f64::NEG_INFINITY,
+                f64::NAN,
+            ]),
+        )
+        .unwrap();
+        let flags = Series::new(
+            "b",
+            index.clone(),
+            Column::from_bool_values(vec![true, false, true, false]),
+        )
+        .unwrap();
+        let cells = |column: &Column| -> Vec<Option<u64>> {
+            column
+                .values()
+                .iter()
+                .map(|cell| (!cell.is_missing()).then(|| cell.to_f64().unwrap().to_bits()))
+                .collect()
+        };
+        let plain = DataFrame::from_series(vec![floats.clone()]).unwrap();
+        let mixed = DataFrame::from_series(vec![floats.clone(), flags]).unwrap();
+        for (k, frame) in [&plain, &mixed].into_iter().enumerate() {
+            let squared = frame
+                .arith_scalar(&Scalar::Int64(2), fp_columnar::ArithmeticOp::Pow, false)
+                .unwrap();
+            assert_eq!(
+                cells(squared.column_at(0).unwrap()),
+                vec![
+                    Some(170_597.157_679_139_6_f64.to_bits()),
+                    Some(0.0_f64.to_bits()),
+                    Some(f64::INFINITY.to_bits()),
+                    None
+                ],
+                "{k}"
+            );
+            let root = frame
+                .arith_scalar(&Scalar::Float64(0.5), fp_columnar::ArithmeticOp::Pow, false)
+                .unwrap();
+            assert_eq!(
+                cells(root.column_at(0).unwrap()),
+                vec![None, Some((-0.0_f64).to_bits()), None, None],
+                "{k}"
+            );
+        }
+        let halves = Series::new("e", index, Column::from_f64_values(vec![0.5; 4])).unwrap();
+        assert_eq!(
+            cells(floats.pow(&halves).unwrap().column()),
+            vec![
+                None,
+                Some(0.0_f64.to_bits()),
+                Some(f64::INFINITY.to_bits()),
+                None
+            ]
+        );
     }
 
     #[test]

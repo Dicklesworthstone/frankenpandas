@@ -788,7 +788,21 @@ fn evaluate_node(
                 .map_err(ExprError::from)
         }
         Expr::Pow { left, right } => {
-            let (lhs, rhs) = evaluate_arith_operands(left, right, context, policy, ledger)?;
+            // A column to a number is numpy's power by one number (`a ** 2`
+            // the square, `a ** 0.5` the root), which the number's broadcast
+            // - an array of exponents, pow throughout - cannot give
+            // (br-frankenpandas-pucep).
+            let (lhs, rhs) = match evaluate_scalar_arith(
+                left,
+                right,
+                ArithmeticOp::Pow,
+                context,
+                policy,
+                ledger,
+            )? {
+                Ok(answer) => return Ok(answer),
+                Err(operands) => operands,
+            };
             lhs.pow_with_policy(&rhs, policy, ledger)
                 .map_err(ExprError::from)
         }
@@ -7704,6 +7718,53 @@ mod tests {
 
         let result = super::eval_str("(-2) ** 2", &frame, &policy, &mut ledger).unwrap();
         assert_eq!(result.values()[0], Scalar::Int64(4));
+    }
+
+    #[test]
+    fn eval_column_to_a_number_is_numpys_power_pucep() {
+        // br-frankenpandas-pucep, pandas 2.2.3 live: df.eval('a ** 2') of
+        // -413.0340877931743 is 170597.1576791396 (x * x; glibc's pow
+        // ...964), df.eval('a ** 0.5') of -0.0 / -inf is -0.0 / NaN (the
+        // root; pow's 0.0 / inf). NEGATIVE: 'a ** b', b a column of 0.5, is
+        // pow throughout - 0.0 / inf.
+        let policy = RuntimePolicy::strict();
+        let mut ledger = EvidenceLedger::new();
+        let labels: Vec<fp_index::IndexLabel> =
+            (0..3_i64).map(fp_index::IndexLabel::from).collect();
+        let frame = fp_frame::DataFrame::from_series(vec![
+            fp_frame::Series::from_values(
+                "a",
+                labels.clone(),
+                vec![
+                    Scalar::Float64(-413.034_087_793_174_3),
+                    Scalar::Float64(-0.0),
+                    Scalar::Float64(f64::NEG_INFINITY),
+                ],
+            )
+            .unwrap(),
+            fp_frame::Series::from_values("b", labels, vec![Scalar::Float64(0.5); 3]).unwrap(),
+        ])
+        .unwrap();
+        let cells = |expr: &str, ledger: &mut EvidenceLedger| -> Vec<Option<u64>> {
+            super::eval_str(expr, &frame, &policy, ledger)
+                .unwrap()
+                .values()
+                .iter()
+                .map(|cell| (!cell.is_missing()).then(|| cell.to_f64().unwrap().to_bits()))
+                .collect()
+        };
+        assert_eq!(
+            cells("a ** 2", &mut ledger)[0],
+            Some(170_597.157_679_139_6_f64.to_bits())
+        );
+        assert_eq!(
+            cells("a ** 0.5", &mut ledger)[1..],
+            [Some((-0.0_f64).to_bits()), None]
+        );
+        assert_eq!(
+            cells("a ** b", &mut ledger)[1..],
+            [Some(0.0_f64.to_bits()), Some(f64::INFINITY.to_bits())]
+        );
     }
 
     #[test]

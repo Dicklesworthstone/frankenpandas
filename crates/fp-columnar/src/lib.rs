@@ -2230,6 +2230,62 @@ fn binary_f64_apply(op: ArithmeticOp) -> fn(f64, f64) -> f64 {
     }
 }
 
+/// `base ** exponent` as numpy's power loop computes a float array raised
+/// to one number: an exponent of 2 squares, 0.5 takes the square root and
+/// -1 the reciprocal - each correctly rounded, where glibc's pow misses by
+/// an ulp about once in 1400 values, and the root keeps -0.0 and makes -inf
+/// NaN (pow's 0.0 and inf) - any other exponent is pow. An array of
+/// exponents is pow throughout, as numpy computes it (br-frankenpandas-pucep).
+pub fn power_by_number(base: f64, exponent: f64) -> f64 {
+    if exponent == 2.0 {
+        base * base
+    } else if exponent == 0.5 {
+        base.sqrt()
+    } else if exponent == -1.0 {
+        1.0 / base
+    } else {
+        base.powf(exponent)
+    }
+}
+
+/// [`power_by_number`] of every value, a NaN value's slot 0.0 when
+/// `nan_to_zero` (a missing row's datum) in its own pass storing a select;
+/// the exponent's case chosen once: the square and the reciprocal a
+/// vectorizing map, the root fp-dot-kernel's 4-lane one, pow, compute-bound,
+/// on threads. (A zeroed buffer for the map paid an 8 MB memset a million
+/// rows first: alloc_zeroed of a recycled block is a full memset.)
+fn powers_by_number(data: &[f64], exponent: f64, nan_to_zero: bool) -> Vec<f64> {
+    let mut out: Vec<f64> = if exponent == 2.0 {
+        data.iter().map(|&x| x * x).collect()
+    } else if exponent == -1.0 {
+        data.iter().map(|&x| 1.0 / x).collect()
+    } else if exponent == 0.5 {
+        sqrt_values(data)
+    } else {
+        par_map_vec_f64(data.len(), |i| data[i].powf(exponent))
+    };
+    if nan_to_zero {
+        for (slot, &x) in out.iter_mut().zip(data) {
+            *slot = if x.is_nan() { 0.0 } else { *slot };
+        }
+    }
+    out
+}
+
+/// The square root of every value: fp-dot-kernel's 4-lane kernel where the
+/// CPU has AVX2 (Column::sqrt's - the guard is not optional, that crate
+/// emits AVX2 unconditionally), else the baseline 2-lane map. IEEE's root
+/// either way.
+fn sqrt_values(data: &[f64]) -> Vec<f64> {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        let mut out = vec![0.0_f64; data.len()];
+        fp_dot_kernel::sqrt_f64_into(data, &mut out);
+        return out;
+    }
+    data.iter().map(|&x| x.sqrt()).collect()
+}
+
 /// Single-pass monomorphized binary f64 kernel that also reports whether any
 /// input or output element was NaN (br-frankenpandas-9houf). Each op is
 /// monomorphized into its own arm (closed-form for Add/Sub/Mul/Div so LLVM
@@ -19658,8 +19714,10 @@ impl Column {
     /// Float64 column and a non-NaN number, + - * /, the column
     /// [`Self::aligned_binary_f64_same_positions`] makes of `self` and that
     /// broadcast; for an all-valid Int64 column and an Int64 scalar, + - *,
-    /// the wrapping column [`Self::binary_numeric`] makes. None for anything
-    /// else (an input NaN included) - the caller broadcasts.
+    /// the wrapping column [`Self::binary_numeric`] makes. A Float64 column
+    /// ** a number is numpy's power by one number ([`power_by_number`]),
+    /// which that broadcast cannot give: an array of exponents is pow.
+    /// None for anything else - the caller broadcasts.
     #[must_use]
     pub fn binary_scalar(
         &self,
@@ -19670,6 +19728,9 @@ impl Column {
         match (&self.dtype, scalar) {
             (DType::Float64, Scalar::Float64(_) | Scalar::Int64(_)) => {
                 let s = scalar.to_f64().ok().filter(|s| !s.is_nan())?;
+                if matches!(op, ArithmeticOp::Pow) && !scalar_left {
+                    return self.f64_power_by_number(s);
+                }
                 let Some(data) = self.as_f64_slice() else {
                     return self.nullable_f64_scalar(s, op, scalar_left);
                 };
@@ -19837,6 +19898,57 @@ impl Column {
         Some(Self::from_f64_values_with_validity(out, validity))
     }
 
+    /// `self ** s` of a Float64 column: numpy's power by one number
+    /// ([`power_by_number`]) in the column the number's broadcast and the
+    /// same-positions arithmetic build - its all-valid builders for a column
+    /// all present, else a missing row's datum 0.0 under its cleared bit and
+    /// a NaN power's (a negative number to 0.5) NaN under its cleared bit
+    /// (br-frankenpandas-pucep). None for an exponent of 0, whose missing
+    /// rows' NaN ** 0 are a present 1.0.
+    fn f64_power_by_number(&self, s: f64) -> Option<Self> {
+        if s == 0.0 {
+            return None;
+        }
+        // The square and the reciprocal make a NaN of a NaN alone.
+        let nan_free_powers = s == 2.0 || s == -1.0;
+        if let Some(data) = self.as_f64_slice() {
+            // numpy's ** 0.5 is its sqrt: the column's, on the 4-lane kernel.
+            if s == 0.5 {
+                return self.sqrt().ok();
+            }
+            // An all-valid slice holds no NaN, as binary_scalar's arms read
+            // it, so only a pow can make one.
+            let out = powers_by_number(data, s, false);
+            if nan_free_powers || !out.iter().fold(false, |any, v| any | v.is_nan()) {
+                return Some(Self::from_f64_all_valid_with_finite_opt(out, None));
+            }
+            return Some(Self::from_f64_values(out));
+        }
+        let (data, validity) = self.as_f64_slice_with_validity()?;
+        // NaN exactly at the missing rows: each one's datum 0.0 in the
+        // power's own loop, and the square and the reciprocal keep the mask.
+        if self.nan_missing_exact() {
+            let out = powers_by_number(data, s, true);
+            let validity = if nan_free_powers {
+                validity.clone()
+            } else {
+                validity.and_mask(&ValidityMask::from_f64(&out))
+            };
+            return Some(Self::from_f64_values_nullable(out, validity));
+        }
+        let present = self.nan_aware_validity();
+        let mut out = powers_by_number(data, s, false);
+        if present.all() {
+            if out.iter().fold(false, |any, v| any | v.is_nan()) {
+                return Some(Self::from_f64_values(out));
+            }
+            return Some(Self::from_f64_all_valid_with_finite_opt(out, None));
+        }
+        present.for_each_invalid_range(|start, run| out[start..start + run].fill(0.0));
+        let validity = present.and_mask(&ValidityMask::from_f64(&out));
+        Some(Self::from_f64_values_nullable(out, validity))
+    }
+
     /// `data <op> s` (`s <op> data` when `scalar_left`) with `data` read as
     /// f64: the column binary_numeric makes of an all-valid Int64 column and
     /// the number's all-valid broadcast - + - * / in one sweep, ** // % by
@@ -19883,7 +19995,13 @@ impl Column {
             (ArithmeticOp::Div, false) => sweep!(|v| v / s),
             (ArithmeticOp::Div, true) => sweep!(|v| s / v),
             (ArithmeticOp::Pow | ArithmeticOp::Mod | ArithmeticOp::FloorDiv, _) => {
-                let apply = binary_f64_apply(op);
+                // The ints to a number: numpy's power by one number
+                // (br-frankenpandas-pucep).
+                let apply = if matches!(op, ArithmeticOp::Pow) && !scalar_left {
+                    power_by_number
+                } else {
+                    binary_f64_apply(op)
+                };
                 let out = if scalar_left {
                     par_map_vec_f64(data.len(), |i| apply(s, data[i] as f64))
                 } else {
@@ -36344,8 +36462,8 @@ mod tests {
     use super::{
         ArithmeticOp, BoolAffineSelectionWitness, Column, ColumnData, ColumnError, ComparisonOp,
         ConstDivisorU64, ScalarValues, SparseColumn, ValidityMask, affine_positions,
-        affine_positions_fit, binary_f64_apply, python_floor_div_i64, python_mod_i64,
-        scalar_compare, wrapping_pow_all, wrapping_pow_i64,
+        affine_positions_fit, binary_f64_apply, power_by_number, python_floor_div_i64,
+        python_mod_i64, scalar_compare, wrapping_pow_all, wrapping_pow_i64,
     };
 
     #[test]
@@ -40486,9 +40604,13 @@ mod tests {
                 .binary_scalar(&Scalar::Float64(f64::NAN), ArithmeticOp::Add, false)
                 .is_none()
         );
+        // (A float column ** a number is numpy's power by one number now,
+        // which the broadcast's pow is not - see power_by_a_number_is_numpys_
+        // scalar_power_pucep - but ** 0 keeps the broadcast: a missing row's
+        // NaN ** 0 is a present 1.0.)
         assert!(
             floats
-                .binary_scalar(&Scalar::Float64(2.0), ArithmeticOp::Pow, false)
+                .binary_scalar(&Scalar::Float64(0.0), ArithmeticOp::Pow, false)
                 .is_none()
         );
         // (An int column's / and a float against it, a NaN included, are
@@ -40732,6 +40854,159 @@ mod tests {
         assert_eq!(columns[4].f64_finite_witness(), Some(true));
         assert!(columns[0].abs().unwrap().nan_missing_exact());
         assert!(columns[0].round(2).unwrap().nan_missing_exact());
+    }
+
+    #[test]
+    fn power_by_a_number_is_numpys_scalar_power_pucep() {
+        // br-frankenpandas-pucep: a float column ** a number is numpy's power
+        // by one number - ** 2 the square, ** 0.5 the root, ** -1 the
+        // reciprocal, each correctly rounded (the values pandas 2.2.3 /
+        // numpy 2.3.5 gave live below; glibc's pow is an ulp off each), the
+        // root keeping -0.0 and making -inf NaN - in the column the
+        // same-positions arm builds of the number's broadcast: every datum's
+        // bits and mask bit. NEGATIVE: ** 3, 1.5, -2.5 and 1 stay pow, that
+        // arm's column bit for bit (pandas' (-899.26) ** 3 is pow's, not
+        // x * x * x); ** 0 and a number to the column decline.
+        let bits = |v: f64| v.to_bits();
+        assert_eq!(
+            bits(power_by_number(-413.034_087_793_174_3, 2.0)),
+            bits(170_597.157_679_139_6)
+        );
+        assert_eq!(
+            bits(power_by_number(541.554_330_565_267_6, 0.5)),
+            bits(23.271_319_914_548_627)
+        );
+        assert_eq!(
+            bits(power_by_number(-273.916_272_172_320_36, -1.0)),
+            bits(-0.003_650_750_618_316_320_4)
+        );
+        assert_eq!(bits(power_by_number(-0.0, 0.5)), bits(-0.0));
+        assert!(power_by_number(f64::NEG_INFINITY, 0.5).is_nan());
+        assert_eq!(
+            bits(power_by_number(-899.26, 3.0)),
+            bits((-899.26_f64).powf(3.0))
+        );
+
+        let n = 130;
+        let value = |i: usize| match i % 13 {
+            0 => -0.0,
+            1 => f64::NEG_INFINITY,
+            2 => f64::INFINITY,
+            3 => 5e-324,
+            4 => -413.034_087_793_174_3,
+            5 => 541.554_330_565_267_6,
+            6 => -273.916_272_172_320_36,
+            7 => -899.26,
+            8 => 0.0,
+            _ => (i as f64) * 0.37 - 20.0,
+        };
+        let numbers: Vec<f64> = (0..n).map(value).collect();
+        let with_nan: Vec<f64> = (0..n)
+            .map(|i| if i % 7 == 3 { f64::NAN } else { value(i) })
+            .collect();
+        let mut gaps = ValidityMask::all_valid(n);
+        for i in (2..n).step_by(5) {
+            gaps.set(i, false);
+        }
+        let mut valid_nan = numbers.clone();
+        valid_nan[9] = f64::NAN;
+        let columns = [
+            Column::from_f64_values(numbers.clone()),
+            Column::from_f64_values(with_nan),
+            Column::from_f64_values_with_validity(numbers, gaps.clone()),
+            Column::from_f64_values_with_validity(valid_nan, gaps),
+        ];
+        let raw = |column: &Column| {
+            let (data, validity) = column.as_f64_slice_with_validity().unwrap();
+            (
+                data.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                (0..n).map(|i| validity.get(i)).collect::<Vec<_>>(),
+            )
+        };
+        for (k, column) in columns.iter().enumerate() {
+            let (data, _) = column.as_f64_slice_with_validity().unwrap();
+            let present = column.nan_aware_validity();
+            for exponent in [2.0, 0.5, -1.0, 3.0, 1.5, -2.5, 1.0] {
+                let ours = column
+                    .binary_scalar(&Scalar::Float64(exponent), ArithmeticOp::Pow, false)
+                    .unwrap();
+                let broadcast = Column::from_f64_values(vec![exponent; n]);
+                let theirs = column
+                    .aligned_binary_f64_same_positions(&broadcast, ArithmeticOp::Pow)
+                    .unwrap();
+                if [2.0, 0.5, -1.0].contains(&exponent) {
+                    // The broadcast arm's conventions with numpy's power.
+                    let want: (Vec<u64>, Vec<bool>) = (0..n)
+                        .map(|i| {
+                            if present.get(i) {
+                                let power = power_by_number(data[i], exponent);
+                                (power.to_bits(), !power.is_nan())
+                            } else {
+                                (0.0_f64.to_bits(), false)
+                            }
+                        })
+                        .unzip();
+                    assert_eq!(raw(&ours), want, "{k} ** {exponent}");
+                } else {
+                    assert_eq!(raw(&ours), raw(&theirs), "{k} ** {exponent}");
+                    assert_eq!(
+                        format!("{:?}", ours.values()),
+                        format!("{:?}", theirs.values()),
+                        "{k} ** {exponent}"
+                    );
+                }
+                let (_, ours_valid) = raw(&ours);
+                for (i, cell) in ours.values().iter().enumerate() {
+                    assert_eq!(cell.is_missing(), !ours_valid[i], "{k} ** {exponent} {i}");
+                }
+            }
+            let int_two = column
+                .binary_scalar(&Scalar::Int64(2), ArithmeticOp::Pow, false)
+                .unwrap();
+            assert_eq!(raw(&int_two).0[4], bits(170_597.157_679_139_6), "{k}");
+            for (exponent, scalar_left) in [(0.0, false), (0.5, true)] {
+                assert!(
+                    column
+                        .binary_scalar(&Scalar::Float64(exponent), ArithmeticOp::Pow, scalar_left)
+                        .is_none(),
+                    "{k} {exponent} {scalar_left}"
+                );
+            }
+        }
+        // The -0.0 / -inf rows: the root's -0.0 and NaN, pow's 0.0 and inf.
+        let root = columns[0]
+            .binary_scalar(&Scalar::Float64(0.5), ArithmeticOp::Pow, false)
+            .unwrap();
+        let (root_data, root_valid) = raw(&root);
+        assert_eq!(root_data[0], bits(-0.0));
+        assert!(!root_valid[1]);
+        let pow = columns[0]
+            .aligned_binary_f64_same_positions(
+                &Column::from_f64_values(vec![0.5; n]),
+                ArithmeticOp::Pow,
+            )
+            .unwrap();
+        assert_eq!(raw(&pow).0[0], bits(0.0));
+        assert!(raw(&pow).1[1]);
+
+        // An int column to a number: its values read as f64, numpy's power.
+        let ints: Vec<i64> = (0..n as i64).map(|i| i * 7919 - 400_000).collect();
+        let int_column = Column::from_i64_values(ints.clone());
+        for exponent in [2.0, 0.5, -1.0, 3.0] {
+            let ours = int_column
+                .binary_scalar(&Scalar::Float64(exponent), ArithmeticOp::Pow, false)
+                .unwrap();
+            let want: Vec<u64> = ints
+                .iter()
+                .map(|&v| power_by_number(v as f64, exponent).to_bits())
+                .collect();
+            let (got, _) = ours.as_f64_slice_with_validity().unwrap();
+            assert_eq!(
+                got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                want,
+                "int ** {exponent}"
+            );
+        }
     }
 
     #[test]
