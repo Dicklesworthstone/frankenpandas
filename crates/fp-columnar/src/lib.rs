@@ -8289,6 +8289,36 @@ fn compare_f64_pairs(l: &[f64], r: &[f64], op: ComparisonOp) -> Vec<bool> {
     out
 }
 
+/// `k as f64 <op> s` - scalar_compare's reading of an int against a float -
+/// as one int compare, or a constant. The conversion rounds monotonically
+/// and is exact below 2^53, so for `|s|` below 2^53 every int lands on the
+/// side of `s` it does as an int: `> s` is `> floor(s)`, `<= s` is `<=
+/// floor(s)`, `>= s` is `>= ceil(s)`, `< s` is `< ceil(s)`, and `==` / `!=`
+/// a fractional `s` is false / true (br-frankenpandas-uf0mw).
+enum IntAgainstFloat {
+    Compare(ComparisonOp, i64),
+    Constant(bool),
+}
+
+impl IntAgainstFloat {
+    /// None for a NaN, an infinity or `|s|` of 2^53 or more.
+    #[allow(clippy::cast_possible_truncation)] // floor / ceil below 2^53
+    fn of(s: f64, op: ComparisonOp) -> Option<Self> {
+        if s.is_nan() || s.abs() >= 9_007_199_254_740_992.0 {
+            return None;
+        }
+        let (floor, ceil) = (s.floor() as i64, s.ceil() as i64);
+        let integral = floor == ceil;
+        Some(match op {
+            ComparisonOp::Gt | ComparisonOp::Le => Self::Compare(op, floor),
+            ComparisonOp::Ge | ComparisonOp::Lt => Self::Compare(op, ceil),
+            ComparisonOp::Eq | ComparisonOp::Ne if integral => Self::Compare(op, floor),
+            ComparisonOp::Eq => Self::Constant(false),
+            ComparisonOp::Ne => Self::Constant(true),
+        })
+    }
+}
+
 /// The `i64` sibling of [`compare_f64_scalar`].
 fn compare_i64_scalar(data: &[i64], s: i64, op: ComparisonOp) -> Vec<bool> {
     #[cfg(target_arch = "x86_64")]
@@ -22619,6 +22649,18 @@ impl Column {
         if let Some(data) = self.as_i64_slice()
             && let Scalar::Float64(s) = scalar
         {
+            // Below 2^53 the float is the int compare against its floor or
+            // ceiling (see `IntAgainstFloat`) - no f64 copy of the column
+            // (k > 0.5 0.37 ms, pandas 0.35; br-frankenpandas-uf0mw).
+            match IntAgainstFloat::of(*s, op) {
+                Some(IntAgainstFloat::Compare(op, t)) => {
+                    return Ok(Self::from_bool_values(compare_i64_scalar(data, t, op)));
+                }
+                Some(IntAgainstFloat::Constant(value)) => {
+                    return Ok(Self::from_bool_constant(value, data.len()));
+                }
+                None => {}
+            }
             let values: Vec<f64> = data.iter().map(|&v| v as f64).collect();
             return Ok(Self::from_bool_arc(compare_f64_scalar_arc(&values, *s, op)));
         }
@@ -42343,12 +42385,36 @@ mod tests {
         // br-frankenpandas-uf0mw: the typed int-against-float compare reads
         // each value as f64, as scalar_compare does cell by cell (2**53 + 1
         // equals 2.0**53 both ways).
-        let data = vec![1, -3, 0, 1 << 53, (1 << 53) + 1, i64::MAX, i64::MIN];
+        // The int compare against a floor / ceiling below 2^53 (fractional
+        // negatives are where truncating toward zero would answer wrong; a
+        // fractional float past 2^52; 2^53 itself takes the f64 path).
+        let data = vec![
+            1,
+            -3,
+            0,
+            -1,
+            2,
+            3,
+            -2,
+            1 << 53,
+            (1 << 53) + 1,
+            -(1 << 53) - 1,
+            i64::MAX,
+            i64::MIN,
+        ];
         let ints = Column::from_i64_values(data.clone());
         for s in [
             0.5,
             2.0,
             -0.0,
+            -0.5,
+            1.5,
+            -2.5,
+            3.0,
+            f64::NAN,
+            9e15,
+            4_503_599_627_370_496.5,
+            -9_007_199_254_740_991.0,
             f64::INFINITY,
             f64::NEG_INFINITY,
             (1_i64 << 53) as f64,
