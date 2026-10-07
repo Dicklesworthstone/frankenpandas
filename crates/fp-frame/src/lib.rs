@@ -1497,10 +1497,11 @@ fn shifted_f64_differences(
     data: &[f64],
     periods: i64,
     p: usize,
-    difference: impl Fn(f64, f64) -> f64,
+    difference: impl FnMut(f64, f64) -> f64,
 ) -> Vec<f64> {
     let n = data.len();
     let boundary = std::iter::repeat_n(0.0, p);
+    let mut difference = difference;
     if periods >= 0 {
         boundary
             .chain(
@@ -1517,6 +1518,48 @@ fn shifted_f64_differences(
             .map(|(&cur, &next)| difference(cur, next))
             .chain(boundary)
             .collect()
+    }
+}
+
+/// Clears the validity bit of every NaN row of `out` and zeroes its datum: a
+/// float64 difference that comes out NaN (inf - inf) is missing in pandas,
+/// which has no present NaN in a float64 column; it stayed present
+/// (br-frankenpandas-3lpgw). A 64-row chunk without one is passed over on
+/// a folded test. Run only when the subtraction counted a NaN: a source
+/// known finite (its witness) needs no count, and a separate pass over the
+/// output, or a block-at-a-time test, cost `x.diff()` two to three fifths.
+fn clear_nan_differences(out: &mut [f64], valid_words: &mut [u64]) {
+    for (chunk, word) in out.chunks_mut(64).zip(valid_words.iter_mut()) {
+        if !chunk.iter().fold(false, |nan, value| nan | value.is_nan()) {
+            continue;
+        }
+        for (bit, value) in chunk.iter_mut().enumerate() {
+            if value.is_nan() {
+                *value = 0.0;
+                *word &= !(1_u64 << bit);
+            }
+        }
+    }
+}
+
+/// Clears the validity bit of each row still present whose difference with
+/// its partner is NaN - an infinity minus itself, missing in pandas - for
+/// the rare NaN-exact column whose subtraction counted one
+/// (br-frankenpandas-3lpgw).
+fn clear_infinite_differences(data: &[f64], periods: i64, p: usize, valid_words: &mut [u64]) {
+    let n = data.len();
+    for row in 0..n {
+        let partner = if periods >= 0 {
+            row.checked_sub(p)
+        } else {
+            Some(row + p).filter(|&partner| partner < n)
+        };
+        if let Some(partner) = partner
+            && (valid_words[row / 64] >> (row % 64)) & 1 == 1
+            && (data[row] - data[partner]).is_nan()
+        {
+            valid_words[row / 64] &= !(1_u64 << (row % 64));
+        }
     }
 }
 
@@ -1589,25 +1632,45 @@ fn nullable_f64_diff(
     let p = usize::try_from(periods.unsigned_abs()).map_or(n, |p| p.min(n));
     let words = validity.packed_words_for_scan();
     let partners = shifted_validity_words(validity, n, periods);
-    let valid_words: Vec<u64> = words
+    let mut valid_words: Vec<u64> = words
         .iter()
         .zip(&partners)
         .map(|(own, partner)| own & partner)
         .collect();
+    // A NaN difference - inf - inf, missing in pandas - is counted in the
+    // subtraction (a u64: a bool flag packs each compare to bytes) and
+    // cleared after it (br-frankenpandas-3lpgw).
+    let mut nans = 0_u64;
     if nan_exact {
+        // A NaN operand and inf - inf both make the difference NaN, so one
+        // test zeroes and counts it (where two tested the operands): the
+        // NaN-operand rows are the in-range rows the mask leaves invalid,
+        // any more an inf - inf, found again in the source.
         let out = shifted_f64_differences(data, periods, p, |cur, other| {
-            if cur.is_nan() || other.is_nan() {
-                0.0
-            } else {
-                cur - other
-            }
+            let difference = cur - other;
+            let nan = difference.is_nan();
+            nans += u64::from(nan);
+            if nan { 0.0 } else { difference }
         });
+        let present: u64 = valid_words
+            .iter()
+            .map(|word| u64::from(word.count_ones()))
+            .sum();
+        if nans + present > (n - p) as u64 {
+            clear_infinite_differences(data, periods, p, &mut valid_words);
+        }
         return Column::from_f64_values_with_validity(
             out,
             ValidityMask::from_words(valid_words, n),
         );
     }
-    let mut out = shifted_f64_differences(data, periods, p, |cur, other| cur - other);
+    let mut out = shifted_f64_differences(data, periods, p, |cur, other| {
+        let difference = cur - other;
+        nans += u64::from(difference.is_nan());
+        difference
+    });
+    // A missing row's datum can be NaN: uncounted as it is zeroed, `nans`
+    // is left the present rows' NaN differences.
     for (k, &word) in valid_words.iter().enumerate() {
         let mut missing = !word;
         while missing != 0 {
@@ -1615,9 +1678,13 @@ fn nullable_f64_diff(
             if i >= n {
                 break;
             }
+            nans -= u64::from(out[i].is_nan());
             out[i] = 0.0;
             missing &= missing - 1;
         }
+    }
+    if nans > 0 {
+        clear_nan_differences(&mut out, &mut valid_words);
     }
     Column::from_f64_values_with_validity(out, ValidityMask::from_words(valid_words, n))
 }
@@ -23591,7 +23658,26 @@ impl Series {
                     n,
                 )
             };
-            let out = shifted_f64_differences(data, periods, invalid_len, |cur, other| cur - other);
+            // inf - inf is NaN, missing in pandas (br-frankenpandas-3lpgw).
+            // inf - inf is NaN, missing in pandas (br-frankenpandas-3lpgw): no
+            // source known finite has one, any other counts them in the pass.
+            let mut nans = 0_u64;
+            let mut out = if self.column.f64_finite_witness() == Some(true) {
+                shifted_f64_differences(data, periods, invalid_len, |cur, other| cur - other)
+            } else {
+                shifted_f64_differences(data, periods, invalid_len, |cur, other| {
+                    let difference = cur - other;
+                    nans += u64::from(difference.is_nan());
+                    difference
+                })
+            };
+            let validity = if nans > 0 {
+                let mut words = validity.packed_words_for_scan();
+                clear_nan_differences(&mut out, &mut words);
+                fp_columnar::ValidityMask::from_words(words, n)
+            } else {
+                validity
+            };
             let column = Column::from_f64_values_with_validity(out, validity);
             return Series::new(self.name.clone(), self.index.clone(), column);
         }
@@ -98350,39 +98436,28 @@ impl DataFrame {
         Self::row_sample_var(vals).sqrt() / n.sqrt()
     }
 
-    fn row_skew(vals: &[f64]) -> f64 {
-        let count = vals.len();
-        if count < 3 {
-            return f64::NAN;
-        }
-        let n = count as f64;
-        let mean = vals.iter().sum::<f64>() / n;
-        let m2 = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>();
-        let m3 = vals.iter().map(|v| (v - mean).powi(3)).sum::<f64>();
-        let s2 = m2 / (n - 1.0);
-        if s2 == 0.0 {
-            return 0.0;
-        }
-        let s3 = s2.powf(1.5);
-        (n / ((n - 1.0) * (n - 2.0))) * (m3 / s3)
+    /// A row's present values as pandas' nanops reads them: numpy's addition
+    /// order, the moments zeroed below 1e-14, libm's pow
+    /// ([`fp_types::PandasReductions`]).
+    fn row_reductions(vals: &[f64]) -> fp_types::PandasReductions<'_> {
+        fp_types::PandasReductions::new(
+            fp_types::ReductionValues::Float(vals),
+            None,
+            fp_types::MissingLayout::Numpy,
+        )
     }
 
+    /// pandas' nanskew of a row: NaN below 3 values, 0 for constant ones.
+    /// The row's own formula, `n / ((n-1)(n-2)) * m3 / s2^1.5`, differed in
+    /// the last bits on 171 of 300 random rows (br-frankenpandas-y1jia).
+    fn row_skew(vals: &[f64]) -> f64 {
+        Self::row_reductions(vals).skew()
+    }
+
+    /// pandas' nankurt of a row: NaN below 4 values, 0 when the
+    /// denominator vanishes (148 of 300 rows differed; y1jia).
     fn row_kurtosis(vals: &[f64]) -> f64 {
-        let count = vals.len();
-        if count < 4 {
-            return f64::NAN;
-        }
-        let n = count as f64;
-        let mean = vals.iter().sum::<f64>() / n;
-        let m2 = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>();
-        let m4 = vals.iter().map(|v| (v - mean).powi(4)).sum::<f64>();
-        let s2 = m2 / (n - 1.0);
-        if s2 == 0.0 {
-            return 0.0;
-        }
-        let adj = (n * (n + 1.0)) / ((n - 1.0) * (n - 2.0) * (n - 3.0));
-        let sub = (3.0 * (n - 1.0).powi(2)) / ((n - 2.0) * (n - 3.0));
-        adj * (m4 / (s2 * s2)) - sub
+        Self::row_reductions(vals).kurt()
     }
 
     /// Sum across columns per row.
@@ -175402,8 +175477,8 @@ mod tests {
     fn nan_exact_diff_zeroes_missing_rows_in_the_subtraction_1f8c6() {
         // A Series diff of a numpy-style column (its NaN rows its missing
         // rows) zeroes a missing row in the subtraction: the same mask and
-        // bits as the mask-zeroing loop, an infinity minus itself staying a
-        // present NaN. NEGATIVE: a column whose missing rows hold finite
+        // bits as the mask-zeroing loop, an infinity minus itself missing in
+        // both (br-frankenpandas-3lpgw). NEGATIVE: a column whose missing rows hold finite
         // values (no NaN) is not NaN-exact - a NaN test there would keep
         // `cur - 0.0` at a missing row, where the loop leaves 0.0
         // (br-frankenpandas-1f8c6).
@@ -175445,6 +175520,84 @@ mod tests {
                             want[i].to_bits(),
                             "n {n} periods {periods} row {i}"
                         );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inf_minus_inf_differences_are_missing_3lpgw() {
+        // br-frankenpandas-3lpgw: pandas has no present NaN in a float64
+        // column, so a difference that comes out NaN (an infinity minus
+        // itself) is missing - from an all-valid column, a numpy-style one
+        // (its NaN rows its missing rows) and one whose missing rows hold
+        // finite values, both signs. NEGATIVE: an infinity minus a finite
+        // value or the other infinity stays a present infinity.
+        let base = [
+            1.0,
+            f64::INFINITY,
+            f64::INFINITY,
+            2.0,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            5.0,
+        ];
+        let series = |column: Column| {
+            Series::new("x", Index::from_range(0, column.len() as i64, 1), column).unwrap()
+        };
+        let all_valid = Column::from_f64_values(base.to_vec());
+        assert!(all_valid.as_f64_slice().is_some());
+        let got = series(all_valid.clone()).diff(1).unwrap();
+        let values = got.column().values();
+        let missing: Vec<usize> = (0..base.len())
+            .filter(|&i| values[i].is_missing())
+            .collect();
+        assert_eq!(missing, vec![0, 2, 5]);
+        assert_eq!(values[1], Scalar::Float64(f64::INFINITY));
+        assert_eq!(values[6], Scalar::Float64(f64::INFINITY));
+        assert_eq!(values[7], Scalar::Float64(f64::NEG_INFINITY));
+
+        let mut with_nan = base.to_vec();
+        with_nan.push(f64::NAN);
+        let numpy = Column::from_f64_values(with_nan.clone());
+        assert!(numpy.nan_missing_exact());
+        let mut held_data = base.to_vec();
+        held_data.push(0.5);
+        let mut held_mask = ValidityMask::all_valid(held_data.len());
+        held_mask.set(held_data.len() - 1, false);
+        let held = Column::from_f64_values_with_validity(held_data.clone(), held_mask);
+        assert!(!held.nan_missing_exact());
+        let mut last_missing = vec![true; with_nan.len()];
+        last_missing[with_nan.len() - 1] = false;
+        for (column, data, valid) in [
+            (all_valid, base.to_vec(), vec![true; base.len()]),
+            (numpy, with_nan, last_missing.clone()),
+            (held, held_data, last_missing),
+        ] {
+            let n = data.len();
+            for periods in [1_i64, 2, 4, -1, -2, -4] {
+                let got = series(column.clone()).diff(periods).unwrap();
+                let values = got.column().values();
+                let p = periods.unsigned_abs() as usize;
+                for i in 0..n {
+                    let partner = if periods >= 0 {
+                        i.checked_sub(p)
+                    } else {
+                        Some(i + p).filter(|&j| j < n)
+                    };
+                    let want = partner
+                        .filter(|&j| valid[i] && valid[j])
+                        .map(|j| data[i] - data[j])
+                        .filter(|difference| !difference.is_nan());
+                    match want {
+                        Some(difference) => assert_eq!(
+                            values[i],
+                            Scalar::Float64(difference),
+                            "n {n} periods {periods} row {i}"
+                        ),
+                        None => assert!(values[i].is_missing(), "n {n} periods {periods} row {i}"),
                     }
                 }
             }
@@ -180391,6 +180544,51 @@ mod tests {
         assert!(v1.abs() < 1e-10);
         let v2 = expect_float64(&result.column().values()[2]);
         assert!(v2.is_nan());
+    }
+
+    #[test]
+    fn row_skew_and_kurt_are_pandas_nanops_y1jia() {
+        // br-frankenpandas-y1jia: a row's skew / kurt are pandas' nanskew /
+        // nankurt bits (the values live pandas 2.2.3 answers): the row's own
+        // formula differed in the last bits (1.2056594965075207,
+        // 0.32815903670624813) and kept the moments pandas zeroes below
+        // 1e-14 (4.08e-07 and 1.5 for a row 1e-9 off constant, pandas 0.0).
+        // NEGATIVE: a row the old formula already matched keeps its bits,
+        // and below 3 (skew) / 4 (kurt) values is NaN.
+        let row = |values: &[f64]| {
+            let names: Vec<String> = (0..values.len()).map(|j| format!("c{j}")).collect();
+            let order: Vec<&str> = names.iter().map(String::as_str).collect();
+            let columns = names
+                .iter()
+                .zip(values)
+                .map(|(name, &value)| (name.as_str(), vec![Scalar::Float64(value)]))
+                .collect();
+            DataFrame::from_dict(&order, columns).unwrap()
+        };
+        let first = |series: Series| expect_float64(&series.column().values()[0]);
+        let skew = |values: &[f64]| first(row(values).skew_axis1().unwrap());
+        let kurt = |values: &[f64]| first(row(values).kurtosis_axis1().unwrap());
+        assert_eq!(
+            skew(&[1.0, 3.0, 0.25]).to_bits(),
+            1.2056594965075205_f64.to_bits()
+        );
+        assert_eq!(
+            kurt(&[0.68, -1.06, -0.84, -2.0, -3.17]).to_bits(),
+            0.32815903670624635_f64.to_bits()
+        );
+        let nearly_constant = [1.0, 1.0 + 1e-9, 1.0 - 1e-9, 1.0];
+        assert_eq!(skew(&nearly_constant).to_bits(), 0.0_f64.to_bits());
+        assert_eq!(kurt(&nearly_constant).to_bits(), 0.0_f64.to_bits());
+        assert_eq!(
+            skew(&[0.5, -2.0, 7.25, 1.5]).to_bits(),
+            1.1472383271041235_f64.to_bits()
+        );
+        assert_eq!(
+            kurt(&[0.5, -2.0, 7.25, 1.5]).to_bits(),
+            1.9838385611204625_f64.to_bits()
+        );
+        assert!(skew(&[1.0, 2.0]).is_nan());
+        assert!(kurt(&[1.0, 2.0, 3.0]).is_nan());
     }
 
     #[test]

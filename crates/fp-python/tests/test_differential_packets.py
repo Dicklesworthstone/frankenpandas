@@ -28935,3 +28935,207 @@ def test_row_sums_of_negative_zeros_like_pandas_pzlmt(case: str, op: str) -> Non
         return str(result.dtype), [v.hex() if v == v else "nan" for v in result.tolist()]
 
     assert run(fpd) == run(pd)
+
+
+_3LPGW_INF = float("inf")
+_3LPGW_ROWS = [1.0, _3LPGW_INF, _3LPGW_INF, 2.0, -_3LPGW_INF, -_3LPGW_INF, _3LPGW_INF, 5.0, float("nan"), 3.0]
+_3LPGW_DIFF_CASES = {
+    "diff()": lambda m: m.Series(_3LPGW_ROWS).diff(),
+    "diff(-1)": lambda m: m.Series(_3LPGW_ROWS).diff(-1),
+    "diff(3)": lambda m: m.Series(_3LPGW_ROWS).diff(3),
+    "no NaN, diff()": lambda m: m.Series(_3LPGW_ROWS[:8]).diff(),
+    "float32 diff()": lambda m: m.Series(_3LPGW_ROWS, dtype="float32").diff(),
+    "where-masked diff()": lambda m: m.Series(_3LPGW_ROWS[:8]).where(m.Series([True] * 7 + [False])).diff(),
+    "frame diff()": lambda m: m.DataFrame({"a": _3LPGW_ROWS, "b": list(range(10))}).diff()["a"],
+    "frame diff(-2)": lambda m: m.DataFrame({"a": _3LPGW_ROWS, "b": [0.5] * 10}).diff(-2)["a"],
+    "inf minus a number (NEGATIVE)": lambda m: m.Series([_3LPGW_INF, 1.0, -_3LPGW_INF, _3LPGW_INF]).diff(),
+    "numbers (NEGATIVE)": lambda m: m.Series([1.5, -2.0, 4.0, float("nan"), 0.25]).diff(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_3LPGW_DIFF_CASES))
+def test_inf_minus_inf_differences_are_missing_3lpgw(case: str) -> None:
+    # pandas has no present NaN in a float64 / float32 column: a difference
+    # that comes out NaN (an infinity minus itself) is missing - isna True,
+    # counted out of count() - from an all-valid column, one with NaN rows,
+    # a masked one and a frame's (fp kept it a present NaN;
+    # br-frankenpandas-3lpgw). NEGATIVE: an infinity minus a number or the
+    # other infinity stays a present infinity, and finite rows are their
+    # differences.
+    def run(m: Any) -> Any:
+        result = _3LPGW_DIFF_CASES[case](m)
+        values = ["nan" if v != v else v for v in result.tolist()]
+        return str(result.dtype), values, result.isna().tolist(), int(result.count())
+
+    assert run(fpd) == run(pd)
+
+
+_BQCI7_OBJECT_FRAMES = {
+    "bool+int": lambda m: m.DataFrame({"b": [True, False, True], "i": [1, -2, 0]}),
+    "bool+float": lambda m: m.DataFrame({"b": [True, False, True], "f": [1.5, float("nan"), -0.5]}),
+    "bool+int+float": lambda m: m.DataFrame(
+        {"b": [True, False, False], "i": [3, 0, -1], "f": [0.25, 2.0, float("nan")]}
+    ),
+    "bool+bool+int": lambda m: m.DataFrame({"b": [True, False, True], "c": [True, True, False], "i": [2, 0, 1]}),
+    "bool+int8": lambda m: m.DataFrame({"b": [True, False], "i": m.Series([5, -3], dtype="int8")}),
+    "bool+float32": lambda m: m.DataFrame({"b": [False, True], "f": m.Series([0.1, -2.5], dtype="float32")}),
+    "past 2**53": lambda m: m.DataFrame(
+        {"b": [True, False], "i": [2**53 + 1, 2**62], "f": [9007199254740992.0, 2.0**62]}
+    ),
+    # A frame without rows answers numbers in pandas, fp's dtypes there
+    # being br-frankenpandas-1f4yb.
+}
+_BQCI7_OBJECT_OPS = ["sum", "prod", "min", "max", "mean", "median", "std", "var", "sem", "skew", "kurt", "count"]
+_BQCI7_OBJECT_CASES = {
+    **{
+        f"{op} of {frame} over rows": (lambda m, op=op, frame=frame: getattr(_BQCI7_OBJECT_FRAMES[frame](m), op)(axis=1))
+        for op in _BQCI7_OBJECT_OPS
+        for frame in _BQCI7_OBJECT_FRAMES
+    },
+    **{
+        f"{op} of bool+float skipna=False": (
+            lambda m, op=op: getattr(_BQCI7_OBJECT_FRAMES["bool+float"](m), op)(axis=1, skipna=False)
+        )
+        for op in ["sum", "prod", "min", "max", "mean", "std"]
+    },
+    "sum min_count=2 of bool+float": lambda m: _BQCI7_OBJECT_FRAMES["bool+float"](m).sum(axis=1, min_count=2),
+    "prod min_count=3 of bool+int+float": lambda m: _BQCI7_OBJECT_FRAMES["bool+int+float"](m).prod(axis=1, min_count=3),
+    **{
+        f"{op} numeric_only beside text": (
+            lambda m, op=op: getattr(
+                m.DataFrame({"b": [True, False], "t": ["x", "y"], "i": [4, -1]}), op
+            )(axis=1, numeric_only=True)
+        )
+        for op in ["sum", "min", "mean"]
+    },
+    # NEGATIVE: the columns' reductions, and rows of numbers or of bools
+    # alone, keep their numpy dtypes.
+    "sum of bool+int columns (NEGATIVE)": lambda m: _BQCI7_OBJECT_FRAMES["bool+int"](m).sum(),
+    "mean of bool+float columns (NEGATIVE)": lambda m: _BQCI7_OBJECT_FRAMES["bool+float"](m).mean(),
+    "sum of int+float rows (NEGATIVE)": lambda m: m.DataFrame({"i": [1, 2], "f": [0.5, 1.5]}).sum(axis=1),
+    "min of bool+bool rows (NEGATIVE)": lambda m: m.DataFrame({"b": [True, False], "c": [True, True]}).min(axis=1),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_BQCI7_OBJECT_CASES))
+def test_bool_beside_number_rows_are_objects_bqci7(case: str) -> None:
+    # Over rows pandas casts a bool column beside a number one to object:
+    # sum / prod / min / max fold the cells as Python's numbers (True + 1 is
+    # the int 2, min(True, 1) the first, True; an int against a float
+    # exactly, past 2**53 too), mean / std / ... are floats in an object
+    # Series, and median of bools beside floats without an int is its
+    # TypeError (fp answered float64; br-frankenpandas-bqci7). Each cell's
+    # Python type compared. NEGATIVE: column reductions and rows of numbers
+    # or of bools alone keep their dtypes.
+    def run(m: Any) -> Any:
+        try:
+            result = _BQCI7_OBJECT_CASES[case](m)
+        except TypeError:
+            return "raises TypeError"
+        cells = [(type(v).__name__, "nan" if v != v else repr(v)) for v in result.tolist()]
+        return str(result.dtype), cells, list(result.index), result.isna().tolist()
+
+    assert run(fpd) == run(pd)
+
+
+def _wa3we_frame(m: Any, columns: dict) -> Any:
+    return m.DataFrame({name: m.Series(cells, dtype=object) for name, cells in columns.items()})
+
+
+_WA3WE_FRAMES = {
+    "ints": {"a": [1, 5, -2], "b": [4, 2, 7], "c": [3, 3, 0]},
+    "numbers with None": {"a": [1, None, 2.5], "b": [True, None, 3], "c": [0.5, None, 7]},
+    "numbers with NaN": {"a": [1.5, float("nan"), 4], "b": [2, float("nan"), float("nan")]},
+    "text": {"a": ["x", "b", "q"], "b": ["u", "v", "a"]},
+    "text with None": {"a": ["x", None, "q"], "b": ["u", "v", None]},
+    "bools beside floats": {"a": [True, False], "b": [1.5, -0.5]},
+    "ints past 2**53": {"a": [2**53 + 1, 3], "b": [9007199254740992.0, 3]},
+}
+_WA3WE_ROW_CASES = {
+    **{
+        f"{op} of {frame} over rows": (lambda m, op=op, frame=frame: getattr(_wa3we_frame(m, _WA3WE_FRAMES[frame]), op)(axis=1))
+        for op in ["min", "max", "mean", "median", "std", "var", "sem", "skew", "kurt"]
+        for frame in _WA3WE_FRAMES
+    },
+    **{
+        f"{op} of numbers with NaN skipna=False": (
+            lambda m, op=op: getattr(_wa3we_frame(m, _WA3WE_FRAMES["numbers with NaN"]), op)(axis=1, skipna=False)
+        )
+        for op in ["min", "max", "mean", "std"]
+    },
+    # A None without skipna: Python's TypeError where pandas adds or
+    # compares it (min / max / mean, and std / var / sem's float64 sum), NaN
+    # where it casts it (median, skew, kurt).
+    **{
+        f"{op} of numbers with None skipna=False": (
+            lambda m, op=op: getattr(_wa3we_frame(m, _WA3WE_FRAMES["numbers with None"]), op)(axis=1, skipna=False)
+        )
+        for op in ["min", "max", "mean", "median", "std", "var", "sem", "skew", "kurt"]
+    },
+    # NEGATIVE: an object frame's column sums (its other column reductions
+    # are br-frankenpandas-tl288), and a number frame's rows, reduce as
+    # before.
+    "sum of the ints' columns (NEGATIVE)": lambda m: _wa3we_frame(m, _WA3WE_FRAMES["ints"]).sum(),
+    "mean of an int frame's rows (NEGATIVE)": lambda m: m.DataFrame(_WA3WE_FRAMES["ints"]).mean(axis=1),
+    "max of a float frame's rows (NEGATIVE)": lambda m: m.DataFrame({"a": [1.5, float("nan")], "b": [0.5, 2.0]}).max(axis=1),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_WA3WE_ROW_CASES))
+def test_object_rows_reduce_like_pandas_wa3we(case: str) -> None:
+    # pandas reduces an object frame's rows as numpy object arrays: min / max
+    # fold the cells with Python's <= / >= (the first kept on ties; a
+    # missing cell +inf / -inf under skipna, a row of none None; text by
+    # text), mean their Python sum over the counted cells as a float,
+    # median / std / ... the cells as floats (text its TypeError, bools
+    # beside floats without an int median's) - an object Series each; fp
+    # raised TypeError for every one (br-frankenpandas-wa3we). Each cell's
+    # Python type compared. NEGATIVE: column reductions and number rows.
+    def run(m: Any) -> Any:
+        try:
+            result = _WA3WE_ROW_CASES[case](m)
+        except TypeError:
+            return "raises TypeError"
+        cells = [(type(v).__name__, "nan" if v != v else repr(v)) for v in result.tolist()]
+        return str(result.dtype), cells, result.isna().tolist()
+
+    assert run(fpd) == run(pd)
+
+
+def _y1jia_frames(m: Any) -> list:
+    rng = np.random.default_rng(7)
+    frames = []
+    for t in range(60):
+        # 3-7 columns (half with NaN), then 8-24 all present: pandas copies
+        # the values to C order for skew / kurt, so each row adds pairwise.
+        wide = t >= 40
+        k = int(rng.integers(8, 25)) if wide else int(rng.integers(3, 8))
+        rows = rng.normal(size=(4, k)) * 10 ** float(rng.integers(-3, 4))
+        if not wide and t % 2:
+            rows[rng.random(rows.shape) < 0.15] = np.nan
+        frames.append(m.DataFrame({f"c{j}": rows[:, j] for j in range(k)}))
+    return frames
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("op", ["skew", "kurt"])
+def test_row_skew_and_kurt_bits_like_pandas_y1jia(op: str) -> None:
+    # A row's skew / kurt are pandas' nanskew / nankurt bits (fp's row
+    # formula differed in the last bits on about half of rows and kept the
+    # moments pandas zeroes below 1e-14; br-frankenpandas-y1jia). The
+    # nearly-constant row is pandas' 0.0 (fp gave 4.08e-07 / 1.5).
+    # NEGATIVE: the columns' answers, and rows below 3 / 4 values NaN.
+    def bits(values: list) -> list:
+        return ["nan" if v != v else float(v).hex() for v in values]
+
+    def run(m: Any) -> Any:
+        rows = [bits(getattr(frame, op)(axis=1).tolist()) for frame in _y1jia_frames(m)]
+        near = m.DataFrame([[1.0, 1.0 + 1e-9, 1.0 - 1e-9, 1.0]])
+        short = m.DataFrame([[1.0, 2.0, 3.0][: 2 if op == "skew" else 3]])
+        columns = bits(getattr(_y1jia_frames(m)[0], op)().tolist())
+        return rows, bits(getattr(near, op)(axis=1).tolist()), bits(getattr(short, op)(axis=1).tolist()), columns
+
+    assert run(fpd) == run(pd)

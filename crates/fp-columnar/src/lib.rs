@@ -14373,8 +14373,12 @@ impl Column {
     /// Read the cached all-finite witness of an all-valid Float64 column, if it
     /// has already been resolved. Never forces a scan (`None` when unknown).
     /// Used by finiteness-preserving maps (e.g. `abs`) to carry the input's
-    /// witness onto the output for free.
-    fn f64_finite_witness(&self) -> Option<bool> {
+    /// witness onto the output for free, and by fp-frame's diff, whose
+    /// finite input cannot subtract an infinity from itself
+    /// (br-frankenpandas-3lpgw).
+    #[must_use]
+    #[doc(hidden)]
+    pub fn f64_finite_witness(&self) -> Option<bool> {
         self.values.all_valid_float64_finite_witness()
     }
 
