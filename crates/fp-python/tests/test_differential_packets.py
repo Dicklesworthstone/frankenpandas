@@ -28453,3 +28453,75 @@ def test_map_dict_of_ints_like_pandas_qnm4v(case: Any) -> None:
         return [str(s.dtype), [repr(v) for v in s.tolist()]]
 
     assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-pucep: a float column ** a number is numpy's power by one
+# number - ** 2 the square, ** 0.5 the root, ** -1 the reciprocal, exact where
+# glibc's pow is an ulp off ((-413.0340877931743) ** 2), the root keeping -0.0
+# and making -inf NaN - through a Series, its pow method, a frame, eval and an
+# int column; NEGATIVE: an array of exponents and a number ** a column stay pow.
+_PUCEP_X = [-413.0340877931743, 541.5543305652676, -273.91627217232036, -0.0, float("-inf"), float("inf"), 2.25, float("nan"), -899.26, 5e-324]
+
+
+def _pucep_shown(values: Any) -> Any:
+    return [
+        str(values.dtype),
+        [repr(v) if not (isinstance(v, float) and math.isnan(v)) else "nan" for v in values.tolist()],
+        values.isna().tolist(),
+    ]
+
+
+_PUCEP_CASES = {
+    "s ** 2": lambda m: m.Series(_PUCEP_X) ** 2,
+    "s ** 0.5": lambda m: m.Series(_PUCEP_X) ** 0.5,
+    "s ** -1": lambda m: m.Series(_PUCEP_X) ** -1,
+    "s ** 3 (pow)": lambda m: m.Series(_PUCEP_X) ** 3,
+    "s.pow(0.5)": lambda m: m.Series(_PUCEP_X).pow(0.5),
+    "s ** np.float64(0.5)": lambda m: m.Series(_PUCEP_X) ** np.float64(0.5),
+    "df ** 0.5": lambda m: (m.DataFrame({"a": _PUCEP_X}) ** 0.5)["a"],
+    "df ** 2 beside a bool column": lambda m: (m.DataFrame({"a": _PUCEP_X, "b": [True] * 10}) ** 2)["a"],
+    "eval a ** 2": lambda m: m.DataFrame({"a": _PUCEP_X}).eval("a ** 2"),
+    "eval a ** 0.5": lambda m: m.DataFrame({"a": _PUCEP_X}).eval("a ** 0.5"),
+    "int ** 0.5": lambda m: m.Series([4, 0, -9, 2**40 + 1, 7]) ** 0.5,
+    "int ** 2.0": lambda m: m.Series([94906267, -3, 2**31 - 1, 0]) ** 2.0,
+    "s ** Series(0.5) (NEGATIVE: pow)": lambda m: m.Series(_PUCEP_X) ** m.Series([0.5] * 10),
+    "2 ** s (NEGATIVE: pow)": lambda m: 2 ** m.Series([0.5, -1.25, 3.0]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_PUCEP_CASES))
+def test_float_power_by_a_number_like_pandas_pucep(case: str) -> None:
+    with np.errstate(all="ignore"):
+        want = _pucep_shown(_PUCEP_CASES[case](pd))
+    assert _pucep_shown(_PUCEP_CASES[case](fpd)) == want
+
+
+# br-frankenpandas-cmgnp: np.sqrt of a plain float64 / int64 Series is the
+# column's own root - -0.0 kept, a negative / -inf / missing value NaN, the
+# name and index kept; NEGATIVE: a float32 and a masked Int64 Series keep
+# their dtype rules (float32, Float64), a categorical raises.
+_CMGNP_SQRT_CASES = {
+    "float with NaN": lambda m: np.sqrt(m.Series([4.0, float("nan"), -0.0, -1.0, float("-inf"), float("inf"), 2.0], name="r", index=[9, 8, 7, 6, 5, 4, 3])),
+    "int": lambda m: np.sqrt(m.Series([0, 4, -9, 2**40 + 1, 7])),
+    "int with a missing value": lambda m: np.sqrt(m.Series([1, None, 4])),
+    "float32 (NEGATIVE: float32)": lambda m: np.sqrt(m.Series(np.array([2.0, -0.0, 9.0], dtype="float32"))),
+    "masked Int64 (NEGATIVE: Float64)": lambda m: np.sqrt(m.Series([1, None, 4, 9], dtype="Int64")),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_CMGNP_SQRT_CASES))
+def test_np_sqrt_of_a_series_like_pandas_cmgnp(case: str) -> None:
+    with np.errstate(all="ignore"):
+        want = _pucep_shown(_CMGNP_SQRT_CASES[case](pd)), list(_CMGNP_SQRT_CASES[case](pd).index), _CMGNP_SQRT_CASES[case](pd).name
+        got = _pucep_shown(_CMGNP_SQRT_CASES[case](fpd)), list(_CMGNP_SQRT_CASES[case](fpd).index), _CMGNP_SQRT_CASES[case](fpd).name
+    assert got == want
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_np_sqrt_of_a_categorical_raises_like_pandas_cmgnp() -> None:
+    with pytest.raises(TypeError):
+        np.sqrt(pd.Series([1.0, 4.0], dtype="category"))
+    with pytest.raises(TypeError):
+        np.sqrt(fpd.Series([1.0, 4.0], dtype="category"))

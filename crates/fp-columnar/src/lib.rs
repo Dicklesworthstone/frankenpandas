@@ -32497,6 +32497,16 @@ impl Column {
         } else if let Some(data) = self.as_i64_slice() {
             par_map_slice_f64_with_witness(data, |x: i64| f(x as f64))
         } else if self.dtype == DType::Float64
+            && self.nan_missing_exact()
+            && f(f64::NAN).is_nan()
+            && let Some((data, _)) = self.as_f64_slice_with_validity()
+        {
+            // NaN exactly at the missing rows, and `f` of NaN is NaN: `f` over
+            // the slice is the arm below's answer - a missing row's NaN is f's
+            // NaN - without its mask bit a row (np.sqrt of a column 10% NaN
+            // 3.4 ms a million rows, pandas 1.05; br-frankenpandas-cmgnp).
+            par_map_slice_f64_with_witness(data, &f)
+        } else if self.dtype == DType::Float64
             && let Some((data, validity)) = self.as_f64_slice_with_validity()
         {
             // Nullable Float64 INPUT (the all-valid `as_f64_slice` above bails on
@@ -41006,6 +41016,61 @@ mod tests {
                 want,
                 "int ** {exponent}"
             );
+        }
+    }
+
+    #[test]
+    fn nan_exact_unary_is_the_masked_row_loop_cmgnp() {
+        // br-frankenpandas-cmgnp: a unary kernel (sqrt, exp, ln) of a column
+        // holding NaN exactly at its missing rows maps the slice - the
+        // masked row loop's answer: every datum's bits and mask bit.
+        // NEGATIVE: a column whose missing rows hold
+        // numbers, and an `f` whose answer for NaN is a number, keep the
+        // loop - a missing row NaN, not f of its datum.
+        type Unary = fn(f64) -> f64;
+        let n = 1000;
+        let value = |i: usize| match i % 11 {
+            1 => -0.0,
+            2 => f64::INFINITY,
+            3 => -4.0,
+            4 => 800.0,
+            _ => (i as f64) * 0.01,
+        };
+        let mut gaps = ValidityMask::all_valid(n);
+        for i in (0..n).step_by(9) {
+            gaps.set(i, false);
+        }
+        let columns = [
+            Column::from_f64_values(
+                (0..n)
+                    .map(|i| if i % 6 == 5 { f64::NAN } else { value(i) })
+                    .collect(),
+            ),
+            Column::from_f64_values_with_validity((0..n).map(value).collect(), gaps),
+        ];
+        assert!(columns[0].nan_missing_exact());
+        let functions: [Unary; 4] = [f64::sqrt, f64::exp, f64::ln, |x| {
+            if x.is_nan() { 1.0 } else { x.sqrt() }
+        }];
+        for (k, column) in columns.iter().enumerate() {
+            let (data, validity) = column.as_f64_slice_with_validity().unwrap();
+            for (j, &f) in functions.iter().enumerate() {
+                let want: Vec<f64> = (0..n)
+                    .map(|i| {
+                        if validity.get(i) {
+                            f(data[i])
+                        } else {
+                            f64::NAN
+                        }
+                    })
+                    .collect();
+                let got = column.typed_float_unary_nullable_owned_par(f).unwrap();
+                let (got_data, got_valid) = got.as_f64_slice_with_validity().unwrap();
+                for (i, (g, w)) in got_data.iter().zip(&want).enumerate() {
+                    assert_eq!(g.to_bits(), w.to_bits(), "{k} f{j} {i}");
+                    assert_eq!(got_valid.get(i), !w.is_nan(), "{k} f{j} {i}");
+                }
+            }
         }
     }
 

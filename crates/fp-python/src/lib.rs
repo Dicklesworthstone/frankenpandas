@@ -28370,6 +28370,23 @@ fn array_ufunc<'py>(
     {
         return Ok(result);
     }
+    // np.sqrt of a plain float64 / int64 Series: the column's own root -
+    // IEEE's, numpy's - where the values went out to numpy and back
+    // (np.sqrt of a million rows 10% NaN 3.4 ms, pandas 1.05;
+    // br-frankenpandas-cmgnp). A float32 / bool / masked / categorical one
+    // keeps numpy's dtype rules below.
+    if name == "sqrt"
+        && method == "__call__"
+        && no_kwargs
+        && inputs.len() == 1
+        && inputs.get_item(0)?.is(this)
+        && let Ok(series) = this.extract::<PyRef<'_, PySeries>>()
+        && matches!(series.inner.dtype(), DType::Float64 | DType::Int64)
+        && series.inner.column().width().is_none()
+    {
+        let result = wrap_series(series.inner.sqrt())?;
+        return Ok(Py::new(py, result)?.into_bound(py).into_any());
+    }
     let has_series = inputs.iter().any(|x| x.is_instance_of::<PySeries>());
     let has_frame = inputs.iter().any(|x| x.is_instance_of::<PyDataFrame>());
     if has_series && has_frame {
