@@ -749,6 +749,47 @@ macro_rules! made_nan_f64_arc {
     };
 }
 
+/// `a[i] op b[i]` for two float columns collected into a fresh Vec, with
+/// whether any result is NaN - the `elementwise_f64_kernel` values and
+/// witness without the zero fill of a buffer they are then written into
+/// (x + y a million rows 0.23 ms, pandas 0.18; br-frankenpandas-uf0mw).
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
+/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+macro_rules! nan_witness_f64_collect {
+    ($name:ident, $op:tt, $doc:literal) => {
+        #[doc = $doc]
+        ///
+        /// # Panics
+        /// Panics if `a` and `b` differ in length.
+        #[inline(never)]
+        #[must_use]
+        pub fn $name(a: &[f64], b: &[f64]) -> (Vec<f64>, bool) {
+            assert_eq!(
+                a.len(),
+                b.len(),
+                concat!(stringify!($name), ": a/b length mismatch")
+            );
+            let mut output_nan = false;
+            let out = a
+                .iter()
+                .zip(b)
+                .map(|(&x, &y)| {
+                    let r = x $op y;
+                    output_nan |= r.is_nan();
+                    r
+                })
+                .collect();
+            (out, output_nan)
+        }
+    };
+}
+
+nan_witness_f64_collect!(add_f64_collect, +, "`a[i] + b[i]` into a fresh Vec.");
+nan_witness_f64_collect!(sub_f64_collect, -, "`a[i] - b[i]` into a fresh Vec.");
+nan_witness_f64_collect!(mul_f64_collect, *, "`a[i] * b[i]` into a fresh Vec.");
+nan_witness_f64_collect!(div_f64_collect, /, "`a[i] / b[i]` into a fresh Vec.");
+
 made_nan_f64_arc!(add_f64_made_nan_arc, +, "`a[i] + b[i]` into a fresh Arc.");
 made_nan_f64_arc!(sub_f64_made_nan_arc, -, "`a[i] - b[i]` into a fresh Arc.");
 made_nan_f64_arc!(mul_f64_made_nan_arc, *, "`a[i] * b[i]` into a fresh Arc.");
@@ -1341,6 +1382,7 @@ mod tests {
     fn made_nan_kernels_are_the_scalar_loop_cmgnp() {
         type Kernel = fn(&[f64], &[f64], &mut [f64]) -> bool;
         type ArcKernel = fn(&[f64], &[f64]) -> (std::sync::Arc<[f64]>, bool);
+        type VecKernel = fn(&[f64], &[f64]) -> (Vec<f64>, bool);
         type Case = (Kernel, fn(f64, f64) -> f64);
         let kernels: [Case; 4] = [
             (add_f64_made_nan_into, |x, y| x + y),
@@ -1354,6 +1396,13 @@ mod tests {
             sub_f64_made_nan_arc,
             mul_f64_made_nan_arc,
             div_f64_made_nan_arc,
+        ];
+        // And into a fresh Vec, witnessing any NaN result (br-frankenpandas-uf0mw).
+        let collects: [VecKernel; 4] = [
+            add_f64_collect,
+            sub_f64_collect,
+            mul_f64_collect,
+            div_f64_collect,
         ];
         let (inf, nan) = (f64::INFINITY, f64::NAN);
         let left = [1.5, inf, 0.0, -0.0, nan, 3.0, -inf, 5e-324];
@@ -1382,6 +1431,13 @@ mod tests {
                     "arc {k} {len}"
                 );
                 assert_eq!(collected_made, made, "arc {k} {len}");
+                let (vec, any_nan) = collects[k](&a, &b);
+                assert_eq!(
+                    vec.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    "vec {k} {len}"
+                );
+                assert_eq!(any_nan, want.iter().any(|v| v.is_nan()), "vec {k} {len}");
             }
         }
         let mut got = vec![0.0; 5];

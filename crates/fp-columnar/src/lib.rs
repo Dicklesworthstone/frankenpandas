@@ -2448,12 +2448,33 @@ fn apply_f64_slices_nan_tracked(op: ArithmeticOp, a: &[f64], b: &[f64]) -> (Vec<
     const PARALLEL_MAX_CHUNKS: usize = 8;
     let parallel_min_len = binary_parallel_min_len(op);
 
-    let mut data = vec![0.0_f64; a.len()];
-
     let worker_count = cached_available_parallelism()
         .min(PARALLEL_MAX_CHUNKS)
         .min(a.len().max(1));
-    if a.len() >= parallel_min_len && worker_count >= 2 {
+    let parallel = a.len() >= parallel_min_len && worker_count >= 2;
+    // One thread: + - * / collected into a fresh Vec where the CPU has AVX2 -
+    // the zeroed buffer the kernel then wrote was a memset the size of the
+    // op's own stores (x + y a million rows 0.23 ms, pandas 0.18;
+    // br-frankenpandas-uf0mw). The values and witnesses the sweep gives.
+    #[cfg(target_arch = "x86_64")]
+    if !parallel && std::arch::is_x86_feature_detected!("avx2") {
+        let collected = match op {
+            ArithmeticOp::Add => Some(fp_dot_kernel::add_f64_collect(a, b)),
+            ArithmeticOp::Sub => Some(fp_dot_kernel::sub_f64_collect(a, b)),
+            ArithmeticOp::Mul => Some(fp_dot_kernel::mul_f64_collect(a, b)),
+            ArithmeticOp::Div => Some(fp_dot_kernel::div_f64_collect(a, b)),
+            ArithmeticOp::Pow | ArithmeticOp::Mod | ArithmeticOp::FloorDiv => None,
+        };
+        if let Some((data, output_nan)) = collected {
+            let input_nan =
+                output_nan && (a.iter().any(|x| x.is_nan()) || b.iter().any(|y| y.is_nan()));
+            return (data, input_nan, output_nan);
+        }
+    }
+
+    let mut data = vec![0.0_f64; a.len()];
+
+    if parallel {
         let chunk_len = a.len().div_ceil(worker_count);
         let mut chunks = Vec::with_capacity(worker_count);
         let mut rest = data.as_mut_slice();
