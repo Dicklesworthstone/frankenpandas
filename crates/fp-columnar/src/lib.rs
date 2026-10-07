@@ -20049,7 +20049,13 @@ impl Column {
         if !missing_is_nan(self) || !missing_is_nan(right) {
             both.for_each_invalid_range(|start, run| data[start..start + run].fill(0.0));
         }
-        let validity = if data.iter().fold(false, |any, v| any | v.is_nan()) {
+        // + and - make a NaN of numbers only from two infinities, so a side
+        // whose finiteness witness says it holds none leaves no NaN result to
+        // look for (the look was a third of nx + y).
+        let finite_side = matches!(op, ArithmeticOp::Add | ArithmeticOp::Sub)
+            && (self.f64_finite_witness() == Some(true)
+                || right.f64_finite_witness() == Some(true));
+        let validity = if !finite_side && data.iter().fold(false, |any, v| any | v.is_nan()) {
             both.and_mask(&ValidityMask::from_f64(&data))
         } else {
             both
@@ -22560,6 +22566,20 @@ impl Column {
             // new variant. The NaN scan is a cheap sequential read vs the alloc+copy.
             if validity.all() && !data.iter().any(|d| d.is_nan()) {
                 return Ok(self.clone());
+            }
+            // A NaN-exact column's missing slots are its NaN slots: the data
+            // copied, then each NaN slot the fill in one in-place select (every
+            // slot stored, so it vectorizes), where the word walk below tested
+            // a mask bit per slot of every word holding a gap (nx.fillna(0)
+            // 1.8 ms a million rows, pandas 1.5; br-frankenpandas-cmgnp). The
+            // same all-valid, NaN-free column.
+            if self.nan_missing_exact() {
+                let fill = *fv;
+                let mut out = data.to_vec();
+                for value in &mut out {
+                    *value = if value.is_nan() { fill } else { *value };
+                }
+                return Ok(Self::from_f64_all_valid_with_finite_opt(out, None));
             }
             // Iterate the PACKED validity words instead of `validity.get(i)` per
             // element (a ~4-branch, non-inlined call ×n): an all-invalid word fills
@@ -34578,9 +34598,55 @@ impl Column {
     /// decimals. Bool columns pass through unchanged. Missing values are
     /// preserved.
     pub fn round(&self, decimals: i32) -> Result<Self, ColumnError> {
+        if let Some(rounded) = self.float32_round(decimals) {
+            return Ok(rounded);
+        }
         // float32 rounds to a float32 (1.25 to one decimal is float32's 1.2).
         self.round_storage(decimals)
             .map(|column| column.keeping_dtype_of(self).confined())
+    }
+
+    /// A float32 column's round in float32 arithmetic, as numpy's: each
+    /// value times float32(10**decimals) rounded to f32 - 3.0e38 by 10
+    /// overflows to inf - then half to even, then divided by it. In f64 the
+    /// product never overflowed (round(3.0e38, 1) was 3.0e38, numpy inf) and
+    /// rounded half to even before float32's rounding of it
+    /// (br-frankenpandas-ttc8x). None for any other column.
+    fn float32_round(&self, decimals: i32) -> Option<Self> {
+        if self.width != Some(NumericWidth::Float32) || self.dtype != DType::Float64 {
+            return None;
+        }
+        #[allow(clippy::cast_possible_truncation)] // float32(10**decimals), as numpy
+        let factor = 10_f64.powi(decimals) as f32;
+        // A factor of 0 or inf could make a NaN of a number (inf * 0).
+        if !factor.is_finite() || factor == 0.0 {
+            return None;
+        }
+        #[allow(clippy::cast_possible_truncation)] // a float32 column's values
+        let round = |x: f64| {
+            let scaled = (x as f32) * factor;
+            // Half to even by 2^23's magic (std's lowers to a libm call
+            // per value without SSE4.1); |v| >= 2^23, inf and NaN are
+            // integral already.
+            let magnitude = scaled.abs();
+            let even = ((magnitude + 8_388_608.0) - 8_388_608.0).copysign(scaled);
+            let rounded = if magnitude < 8_388_608.0 {
+                even
+            } else {
+                scaled
+            };
+            f64::from(rounded / factor)
+        };
+        let (data, validity) = self.as_f64_slice_with_validity()?;
+        let column = if self.nan_missing_exact() {
+            Self::nan_exact_float64(data.iter().map(|&x| round(x)).collect(), validity.clone())
+        } else {
+            Self::from_f64_values_with_validity(
+                data.iter().map(|&x| round(x)).collect(),
+                validity.clone(),
+            )
+        };
+        Some(column.with_width_unchecked(NumericWidth::Float32))
     }
 
     fn round_storage(&self, decimals: i32) -> Result<Self, ColumnError> {
@@ -40437,11 +40503,15 @@ mod tests {
         }
         let mut valid_nan = numbers.clone();
         valid_nan[10] = f64::NAN;
+        // All finite (its witness says so): + / - against it skip the look
+        // for a NaN result; the infinities of the others keep it.
+        let finite: Vec<f64> = (0..n).map(|i| (i as f64).sin() * 9.0).collect();
         let columns = [
             Column::from_f64_values(with_nan),
             Column::from_f64_values_with_validity(numbers.clone(), gaps.clone()),
             Column::from_f64_values_with_validity(valid_nan, gaps),
             Column::from_f64_values(numbers),
+            Column::from_f64_values(finite),
         ];
         let datum = |c: &Column, i: usize| c.as_f64_slice_with_validity().unwrap().0[i];
         let present = |c: &Column, i: usize| {
@@ -40562,7 +40632,22 @@ mod tests {
             }
             let present_rows = (0..n).filter(|&i| present(column, i)).count();
             assert_eq!(column.count(), present_rows, "count {k}");
+            // fillna: each missing row the fill, all valid.
+            let filled = column.fillna(&Scalar::Float64(0.5)).unwrap();
+            let want = Column::from_f64_values(
+                (0..n)
+                    .map(|i| {
+                        if present(column, i) {
+                            datum(column, i)
+                        } else {
+                            0.5
+                        }
+                    })
+                    .collect(),
+            );
+            assert_eq!(raw(&filled), raw(&want), "fillna {k}");
         }
+        assert_eq!(columns[4].f64_finite_witness(), Some(true));
         assert!(columns[0].abs().unwrap().nan_missing_exact());
         assert!(columns[0].round(2).unwrap().nan_missing_exact());
     }
@@ -70264,6 +70349,56 @@ mod numeric_width_columns_fvsao23 {
             .cast_to_width(NumericWidth::Int32, false)
             .unwrap();
         assert_eq!(truncated.as_i64_slice().unwrap(), &[1, -2]);
+    }
+
+    #[test]
+    #[allow(clippy::cast_possible_truncation)] // numpy's float32 arithmetic
+    fn float32_round_is_float32_arithmetic_ttc8x() {
+        // br-frankenpandas-ttc8x: a float32 column rounds as numpy's float32
+        // round - the value times float32(10**d) in f32 (3.0e38 by 10
+        // overflows to inf), half to even, divided in f32 - NaN as missing
+        // and a mask over numbers alike, the width kept. NEGATIVE: a float64
+        // column of the same values rounds in f64, where 3.0e38 stays finite.
+        let values = vec![3.0e38, -3.0e38, 1.25, -2.5, 0.35, f64::NAN, 1e-3, 123.456];
+        let reference = |x: f64, decimals: i32| {
+            let factor = 10_f64.powi(decimals) as f32;
+            f64::from(((x as f32) * factor).round_ties_even() / factor)
+        };
+        let numbers: Vec<f64> = values
+            .iter()
+            .map(|v| if v.is_nan() { 0.0 } else { *v })
+            .collect();
+        let mut mask = ValidityMask::all_valid(values.len());
+        mask.set(5, false);
+        let columns = [
+            Column::from_f64_values(values.clone()),
+            Column::from_f64_values_with_validity(numbers, mask),
+        ];
+        for column in &columns {
+            let column = column.cast_to_width(NumericWidth::Float32, false).unwrap();
+            let (source, _) = column.as_f64_slice_with_validity().unwrap();
+            for decimals in [1, 0, 2, -1] {
+                let got = column.round(decimals).unwrap();
+                assert_eq!(got.width(), Some(NumericWidth::Float32));
+                let (data, validity) = got.as_f64_slice_with_validity().unwrap();
+                for (i, &x) in source.iter().enumerate() {
+                    assert_eq!(validity.get(i), i != 5, "{decimals} {i}");
+                    if i != 5 {
+                        assert_eq!(
+                            data[i].to_bits(),
+                            reference(x, decimals).to_bits(),
+                            "{decimals} {i}"
+                        );
+                    }
+                }
+            }
+            let rounded = column.round(1).unwrap();
+            let (overflowed, _) = rounded.as_f64_slice_with_validity().unwrap();
+            assert!(overflowed[0].is_infinite() && overflowed[0] > 0.0);
+        }
+        let wide = Column::from_f64_values(values).round(1).unwrap();
+        assert!(wide.as_f64_slice_with_validity().unwrap().0[0].is_finite());
+        assert_eq!(wide.width(), None);
     }
 
     #[test]

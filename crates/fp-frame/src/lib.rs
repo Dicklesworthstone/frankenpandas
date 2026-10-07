@@ -15703,6 +15703,9 @@ impl Series {
                         fp_columnar::ValidityMask::from_invalid_ranges(invalid_ranges, n),
                     )
                 };
+                // The source's values carried: a float32 column stays float32
+                // (it came back float64; br-frankenpandas-ttc8x).
+                let column = column.keeping_dtype_of(&self.column);
                 return Series::new(self.name.clone(), self.index.clone(), column);
             }
 
@@ -15736,7 +15739,8 @@ impl Series {
                 Column::from_f64_values_all_valid_unchecked(out)
             } else {
                 Column::from_f64_values_with_validity(out, out_valid)
-            };
+            }
+            .keeping_dtype_of(&self.column);
             return Series::new(self.name.clone(), self.index.clone(), column);
         }
 
@@ -15804,7 +15808,10 @@ impl Series {
                     out_valid.set(i, false);
                 }
             }
-            let column = Column::from_f64_values_with_validity(out, out_valid);
+            // The source's values carried: a float32 column stays float32
+            // (br-frankenpandas-ttc8x).
+            let column = Column::from_f64_values_with_validity(out, out_valid)
+                .keeping_dtype_of(&self.column);
             return Series::new(self.name.clone(), self.index.clone(), column);
         }
 
@@ -15863,6 +15870,13 @@ impl Series {
     /// and leading/trailing NaNs are left as NaN. Only interior NaN gaps
     /// between two valid numeric values are filled.
     pub fn interpolate(&self) -> Result<Self, FrameError> {
+        // A float32 Series' interpolation is float32, its new values rounded
+        // to it as numpy assigns them (it came back float64;
+        // br-frankenpandas-ttc8x).
+        self.keeping_width(self.interpolate_storage(), false)
+    }
+
+    fn interpolate_storage(&self) -> Result<Self, FrameError> {
         // Nothing-to-interpolate short-circuit (any dtype): no missing value ⇒ no
         // gaps to fill ⇒ interpolate is identity ⇒ O(1) clone. Avoids the per-row
         // values()/to_f64 materialization the general path runs on e.g. an all-valid
@@ -24642,6 +24656,77 @@ impl Series {
         )
     }
 
+    /// `where` (`keep_when` true) / `mask` (false) of a Float64 Series with
+    /// gaps under an all-valid Bool condition, `other` a number or the
+    /// default missing value: each row this Series' datum where the condition
+    /// is `keep_when`, else the fill - one vectorized select - and the mask a
+    /// 64-row word at a time: a kept row its own bit (its datum kept, so it
+    /// renders as it did; under the missing fill less a NaN row, as the
+    /// Scalar map's Column::from_values reads one), a filled row the fill's
+    /// (a missing fill a 0.0 datum under a cleared bit, the map's Null(NaN)).
+    /// The number arms read and set a mask bit per row and the missing fill
+    /// took the Scalar map (nx.where(nx > 0) 36 ms a million rows, pandas
+    /// 3.5; nx.mask(nx > 0) 52 vs 3.8; br-frankenpandas-cmgnp). None for any
+    /// other case.
+    fn nullable_f64_select(
+        &self,
+        cmask: &[bool],
+        keep_when: bool,
+        fill: &Scalar,
+    ) -> Option<Column> {
+        let (data, validity) = self.column.as_f64_slice_with_validity()?;
+        let fill_value = match fill {
+            Scalar::Float64(value) if !value.is_nan() => Some(*value),
+            Scalar::Null(NullKind::NaN) => None,
+            _ => return None,
+        };
+        let len = data.len();
+        if cmask.len() != len {
+            return None;
+        }
+        let fill_bits = fill_value.unwrap_or(0.0).to_bits();
+        let out: Vec<f64> = data
+            .iter()
+            .zip(cmask)
+            .map(|(&value, &c)| {
+                let keep = u64::from(c == keep_when).wrapping_neg();
+                f64::from_bits((value.to_bits() & keep) | (fill_bits & !keep))
+            })
+            .collect();
+        let kept_words = if fill_value.is_some() || self.column.nan_missing_exact() {
+            validity.packed_words_for_scan()
+        } else {
+            validity
+                .and_mask(&ValidityMask::from_f64(data))
+                .packed_words_for_scan()
+        };
+        let word_count = len.div_ceil(64);
+        let tail = len % 64;
+        let words: Vec<u64> = cmask
+            .chunks(64)
+            .zip(&kept_words)
+            .enumerate()
+            .map(|(k, (chunk, &kept))| {
+                let held = chunk
+                    .iter()
+                    .enumerate()
+                    .fold(0_u64, |word, (bit, &c)| word | (u64::from(c) << bit));
+                let keep = if keep_when { held } else { !held };
+                let filled = if fill_value.is_some() { !keep } else { 0 };
+                let word = (keep & kept) | filled;
+                if k + 1 == word_count && tail != 0 {
+                    word & ((1_u64 << tail) - 1)
+                } else {
+                    word
+                }
+            })
+            .collect();
+        Some(Column::from_f64_values_nullable(
+            out,
+            ValidityMask::from_words(words, len),
+        ))
+    }
+
     fn where_cond_selected(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
         let fill = other.cloned().unwrap_or(Scalar::Null(NullKind::NaN));
 
@@ -24742,41 +24827,12 @@ impl Series {
                     Column::from_i64_values_owned(out),
                 );
             }
-            // Nullable Float64 self + all-valid Bool cond + finite fill: the
-            // all-valid `as_f64_slice` path above bails on ANY NaN, so a nullable
-            // self fell to the per-element Scalar map (~183ms / 6x slower than
-            // pandas). out[i] = cond ? self[i] : fill, with the validity bit set iff
-            // (cond ? self-valid[i] : true). Emit via the LazyNullableFloat64-backed
-            // `from_f64_values_nullable`, carrying the raw self datum at a cleared
-            // slot so its rendering (Float64(NaN) or Null) EXACTLY matches the
-            // Scalar path's `val.clone()` of that missing slot. Bit-identical.
-            if let (Some((sd, svalid)), Some(cmask)) = (
-                self.column.as_f64_slice_with_validity(),
-                cond.column.as_bool_slice(),
-            ) && let Scalar::Float64(fillv) = &fill
-                && !fillv.is_nan()
+            // Float64 self with gaps + all-valid Bool cond + a number or the
+            // default missing `other` (see nullable_f64_select).
+            if let Some(cmask) = cond.column.as_bool_slice()
+                && let Some(column) = self.nullable_f64_select(cmask, true, &fill)
             {
-                let fv = *fillv;
-                let len = sd.len();
-                let mut out = vec![0.0_f64; len];
-                let mut valid_words = vec![0_u64; len.div_ceil(64)];
-                for i in 0..len {
-                    if cmask[i] {
-                        out[i] = sd[i];
-                        if svalid.get(i) {
-                            valid_words[i / 64] |= 1_u64 << (i % 64);
-                        }
-                    } else {
-                        out[i] = fv;
-                        valid_words[i / 64] |= 1_u64 << (i % 64);
-                    }
-                }
-                let validity = fp_columnar::ValidityMask::from_words(valid_words, len);
-                return Series::new(
-                    self.name.clone(),
-                    self.index.clone(),
-                    Column::from_f64_values_nullable(out, validity),
-                );
+                return Series::new(self.name.clone(), self.index.clone(), column);
             }
             let values: Vec<Scalar> = self
                 .column
@@ -25226,37 +25282,12 @@ impl Series {
                     Column::from_i64_values_owned(out),
                 );
             }
-            // Nullable Float64 self (mirror of where_cond): cond ⇒ fill (present),
-            // else ⇒ self[i] (validity carried). Was the ~186ms / 6x-slower Scalar
-            // map. Carry self's raw datum at a cleared slot so from_f64_values_nullable
-            // renders it identically to `val.clone()`. Bit-identical.
-            if let (Some((sd, svalid)), Some(cmask)) = (
-                self.column.as_f64_slice_with_validity(),
-                cond.column.as_bool_slice(),
-            ) && let Scalar::Float64(fillv) = &fill
-                && !fillv.is_nan()
+            // Float64 self with gaps (mirror of where_cond): a row whose
+            // condition holds the fill (see nullable_f64_select).
+            if let Some(cmask) = cond.column.as_bool_slice()
+                && let Some(column) = self.nullable_f64_select(cmask, false, &fill)
             {
-                let fv = *fillv;
-                let len = sd.len();
-                let mut out = vec![0.0_f64; len];
-                let mut valid_words = vec![0_u64; len.div_ceil(64)];
-                for i in 0..len {
-                    if cmask[i] {
-                        out[i] = fv;
-                        valid_words[i / 64] |= 1_u64 << (i % 64);
-                    } else {
-                        out[i] = sd[i];
-                        if svalid.get(i) {
-                            valid_words[i / 64] |= 1_u64 << (i % 64);
-                        }
-                    }
-                }
-                let validity = fp_columnar::ValidityMask::from_words(valid_words, len);
-                return Series::new(
-                    self.name.clone(),
-                    self.index.clone(),
-                    Column::from_f64_values_nullable(out, validity),
-                );
+                return Series::new(self.name.clone(), self.index.clone(), column);
             }
             let values: Vec<Scalar> = self
                 .column
@@ -79432,20 +79463,58 @@ impl DataFrame {
                 );
             }
         } else {
-            for row_position in 0..row_count {
-                let mut missing_count = 0_usize;
-                for &pos in &selected_positions {
-                    let column = self.column_at(pos).expect("selected column must exist");
-                    if column.values()[row_position].is_missing() {
-                        missing_count += 1;
+            // Each selected column's present rows as mask words - a typed
+            // float's valid bits less its NaN rows, a typed int's valid bits,
+            // any other column's cells read once - then the rows every (how
+            // 'any') or some (how 'all') of them holds, a word at a time.
+            // Every selected cell was read as a Scalar per row (df.dropna()
+            // of two NaN float columns and an int one 70.8 ms a million rows,
+            // pandas 6.8; br-frankenpandas-cmgnp).
+            let present_words = |column: &Column| -> Vec<u64> {
+                if column.dtype() == DType::Float64
+                    && let Some((data, validity)) = column.as_f64_slice_with_validity()
+                {
+                    return validity
+                        .and_mask(&ValidityMask::from_f64(data))
+                        .packed_words_for_scan();
+                }
+                if column.dtype() == DType::Int64
+                    && let Some((_, validity)) = column.as_i64_slice_with_validity()
+                {
+                    return validity.packed_words_for_scan();
+                }
+                let mut words = vec![0_u64; row_count.div_ceil(64)];
+                for (row, value) in column.values().iter().enumerate() {
+                    if !value.is_missing() {
+                        words[row / 64] |= 1 << (row % 64);
                     }
                 }
-                let row_keep = match how {
-                    DropNaHow::Any => missing_count == 0,
-                    DropNaHow::All => missing_count < selected_positions.len(),
-                };
-                if row_keep {
-                    keep_positions.push(row_position);
+                words
+            };
+            let mut kept: Option<Vec<u64>> = None;
+            for &pos in &selected_positions {
+                let words = present_words(self.column_at(pos).expect("selected column must exist"));
+                kept = Some(match kept {
+                    None => words,
+                    Some(mut kept) => {
+                        for (word, other) in kept.iter_mut().zip(&words) {
+                            *word = match how {
+                                DropNaHow::Any => *word & other,
+                                DropNaHow::All => *word | other,
+                            };
+                        }
+                        kept
+                    }
+                });
+            }
+            for (k, &word) in kept.unwrap_or_default().iter().enumerate() {
+                let mut bits = word;
+                while bits != 0 {
+                    let row = k * 64 + bits.trailing_zeros() as usize;
+                    if row < row_count {
+                        keep_positions.push(row);
+                    }
+                    bits &= bits - 1;
                 }
             }
         }
@@ -173857,6 +173926,177 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn where_and_mask_with_gaps_select_by_words_cmgnp() {
+        // br-frankenpandas-cmgnp: where / mask of Float64 columns with gaps -
+        // NaN as missing, a mask over numbers, a valid row holding NaN -
+        // under a condition, the default missing `other` or a number, are the
+        // per-row definitions: a kept row renders as it did (its mask bit,
+        // under the missing fill, its cell's presence; under a number, its
+        // own bit as the typed loop carried it), a filled row the fill.
+        // NEGATIVE: the masked column's missing rows hold numbers - a select
+        // reading the data alone would make them present.
+        let n = 130_usize;
+        let index = Index::from_range(0, n as i64, 1);
+        let value = |i: usize| i as f64 * 0.5 - 20.0;
+        let mut gaps = ValidityMask::all_valid(n);
+        for i in (2..n).step_by(5) {
+            gaps.set(i, false);
+        }
+        let mut valid_nan: Vec<f64> = (0..n).map(value).collect();
+        valid_nan[9] = f64::NAN;
+        let columns = [
+            Column::from_f64_values(
+                (0..n)
+                    .map(|i| if i % 7 == 1 { f64::NAN } else { value(i) })
+                    .collect(),
+            ),
+            Column::from_f64_values_with_validity((0..n).map(value).collect(), gaps.clone()),
+            Column::from_f64_values_with_validity(valid_nan, gaps),
+        ];
+        let held: Vec<bool> = (0..n).map(|i| i % 3 != 0).collect();
+        let cond = Series::new("c", index.clone(), Column::from_bool_values(held.clone())).unwrap();
+        for (k, column) in columns.iter().enumerate() {
+            let series = Series::new("x", index.clone(), column.clone()).unwrap();
+            let rendered = column.values();
+            let raw_valid = column.validity();
+            for keep_when in [true, false] {
+                for fill in [None, Some(Scalar::Float64(0.5))] {
+                    let got = if keep_when {
+                        series.where_cond(&cond, fill.as_ref())
+                    } else {
+                        series.mask(&cond, fill.as_ref())
+                    }
+                    .unwrap();
+                    for (i, &holds) in held.iter().enumerate() {
+                        let (want, want_valid) = match (&fill, holds == keep_when) {
+                            (None, true) => (rendered[i].clone(), !rendered[i].is_missing()),
+                            (Some(_), true) => (rendered[i].clone(), raw_valid.get(i)),
+                            (None, false) => (Scalar::Null(NullKind::NaN), false),
+                            (Some(number), false) => (number.clone(), true),
+                        };
+                        let context = format!("{k} {keep_when} {fill:?} {i}");
+                        assert_eq!(
+                            format!("{:?}", got.values()[i]),
+                            format!("{want:?}"),
+                            "{context}"
+                        );
+                        assert_eq!(got.column().validity().get(i), want_valid, "{context}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dropna_by_mask_words_is_the_cell_scan_cmgnp() {
+        // br-frankenpandas-cmgnp: a frame's dropna over columns of mixed
+        // kinds - NaN as missing, a mask over numbers, a nullable int, text
+        // with a None - keeps the rows the per-cell scan keeps, how 'any' and
+        // 'all', every subset shape. NEGATIVE: the masked float's missing
+        // rows hold numbers and the int's hold 0, so a test of the data
+        // alone would keep them.
+        let n = 130_usize;
+        let floats: Vec<f64> = (0..n)
+            .map(|i| if i % 7 == 3 { f64::NAN } else { i as f64 })
+            .collect();
+        let mut gaps = ValidityMask::all_valid(n);
+        let mut int_gaps = ValidityMask::all_valid(n);
+        for i in 0..n {
+            gaps.set(i, i % 5 != 1);
+            int_gaps.set(i, i % 11 != 4 && i != 64);
+        }
+        let text: Vec<Scalar> = (0..n)
+            .map(|i| {
+                if i % 13 == 6 {
+                    Scalar::Null(NullKind::Null)
+                } else {
+                    Scalar::Utf8(format!("t{i}"))
+                }
+            })
+            .collect();
+        let index = Index::from_range(0, n as i64, 1);
+        let base = Series::new("f", index, Column::from_f64_values(floats)).unwrap();
+        let frame = DataFrame::from_series(vec![base])
+            .unwrap()
+            .with_column(
+                "g",
+                Column::from_f64_values_with_validity(vec![2.5; n], gaps),
+            )
+            .unwrap()
+            .with_column(
+                "i",
+                Column::from_i64_values_with_validity(vec![0; n], int_gaps),
+            )
+            .unwrap()
+            .with_column("t", Column::from_values(text).unwrap())
+            .unwrap();
+        let names = ["f", "g", "i", "t"].map(str::to_owned);
+        let subsets: [Option<Vec<String>>; 3] = [
+            None,
+            Some(vec![names[1].clone(), names[2].clone()]),
+            Some(vec![names[3].clone(), names[0].clone()]),
+        ];
+        for how in [DropNaHow::Any, DropNaHow::All] {
+            for subset in &subsets {
+                let selected: Vec<&String> = subset
+                    .as_ref()
+                    .map_or_else(|| names.iter().collect(), |s| s.iter().collect());
+                let want: Vec<IndexLabel> = (0..n)
+                    .filter(|&row| {
+                        let present = selected
+                            .iter()
+                            .filter(|name| !frame.column(name).unwrap().values()[row].is_missing());
+                        match how {
+                            DropNaHow::Any => present.count() == selected.len(),
+                            DropNaHow::All => present.count() > 0,
+                        }
+                    })
+                    .map(|row| IndexLabel::Int64(row as i64))
+                    .collect();
+                let got = frame.dropna_with_options(how, subset.as_deref()).unwrap();
+                assert_eq!(got.index().labels(), want.as_slice(), "{how:?} {subset:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn float32_fills_and_interpolation_stay_float32_ttc8x() {
+        // br-frankenpandas-ttc8x: a float32 Series' ffill / bfill (with and
+        // without a limit) carry its own values and stay float32; its
+        // interpolation is float32, the new values rounded to it, as pandas.
+        // NEGATIVE: the float64 Series of the same values stays float64.
+        let values = vec![f64::NAN, 0.1, f64::NAN, f64::NAN, 2.5, f64::NAN];
+        let index = Index::from_range(0, 6, 1);
+        let narrow = Column::from_f64_values(values.clone())
+            .cast_to_width(fp_types::NumericWidth::Float32, false)
+            .unwrap();
+        let s32 = Series::new("x", index.clone(), narrow).unwrap();
+        let s64 = Series::new("x", index, Column::from_f64_values(values)).unwrap();
+        for (series, width) in [(&s32, Some(fp_types::NumericWidth::Float32)), (&s64, None)] {
+            for got in [
+                series.ffill(None).unwrap(),
+                series.ffill(Some(1)).unwrap(),
+                series.bfill(None).unwrap(),
+                series.bfill(Some(1)).unwrap(),
+                series.interpolate().unwrap(),
+            ] {
+                assert_eq!(got.column().width(), width);
+            }
+        }
+        let interpolated = s32.interpolate().unwrap();
+        let (data, _) = interpolated.column().as_f64_slice_with_validity().unwrap();
+        let low = fp_types::NumericWidth::round_f32(0.1);
+        let middle = low + (1.0 / 3.0) * (2.5 - low);
+        assert_eq!(
+            data[2].to_bits(),
+            fp_types::NumericWidth::round_f32(middle).to_bits()
+        );
+        let filled = s32.ffill(None).unwrap();
+        let (carried, _) = filled.column().as_f64_slice_with_validity().unwrap();
+        assert_eq!(carried[3].to_bits(), low.to_bits());
     }
 
     #[test]
