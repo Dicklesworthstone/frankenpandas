@@ -2280,6 +2280,22 @@ fn powers_by_number(data: &[f64], exponent: f64) -> Vec<f64> {
     }
 }
 
+/// `data / s` (`s / data` when `number_first`): fp-dot-kernel's 4-lane divide
+/// where the CPU has AVX2 - the guard is not optional, that crate emits AVX2
+/// unconditionally - else the baseline 2-lane map. IEEE's quotient, the same
+/// bits, either way (br-frankenpandas-3tk83).
+fn divided_by_number(data: &[f64], s: f64, number_first: bool) -> Vec<f64> {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        return fp_dot_kernel::div_by_number_f64(data, s, number_first);
+    }
+    if number_first {
+        data.iter().map(|&v| s / v).collect()
+    } else {
+        data.iter().map(|&v| v / s).collect()
+    }
+}
+
 /// [`sqrt_values`] into the `Arc<[f64]>` a NaN-exact column keeps, the
 /// kernel writing a fresh buffer of it - not a Vec copied into one.
 fn sqrt_values_arc(data: &[f64]) -> Arc<[f64]> {
@@ -19792,8 +19808,9 @@ impl Column {
                         (ArithmeticOp::Sub, false) => data.iter().map(|&v| v - s).collect(),
                         (ArithmeticOp::Sub, true) => data.iter().map(|&v| s - v).collect(),
                         (ArithmeticOp::Mul, _) => data.iter().map(|&v| v * s).collect(),
-                        (ArithmeticOp::Div, false) => data.iter().map(|&v| v / s).collect(),
-                        (ArithmeticOp::Div, true) => data.iter().map(|&v| s / v).collect(),
+                        (ArithmeticOp::Div, number_first) => {
+                            divided_by_number(data, s, number_first)
+                        }
                         _ => return None,
                     };
                     return Some(Self::from_f64_all_valid_with_finite_opt(out, None));
@@ -19924,8 +19941,9 @@ impl Column {
                 (ArithmeticOp::Sub, true) => data.iter().map(|&v| s - v).collect(),
                 (ArithmeticOp::Mul, false) => data.iter().map(|&v| v * s).collect(),
                 (ArithmeticOp::Mul, true) => data.iter().map(|&v| s * v).collect(),
-                (ArithmeticOp::Div, false) => data.iter().map(|&v| v / s).collect(),
-                (ArithmeticOp::Div, true) => data.iter().map(|&v| s / v).collect(),
+                (ArithmeticOp::Div, number_first) => {
+                    Arc::from(divided_by_number(data, s, number_first))
+                }
                 _ => return None,
             };
             return Some(Self::nan_exact_float64(out, validity.clone()));
@@ -19941,8 +19959,7 @@ impl Column {
             (ArithmeticOp::Sub, true) => data.iter().map(|&v| s - v).collect(),
             (ArithmeticOp::Mul, false) => data.iter().map(|&v| v * s).collect(),
             (ArithmeticOp::Mul, true) => data.iter().map(|&v| s * v).collect(),
-            (ArithmeticOp::Div, false) => data.iter().map(|&v| v / s).collect(),
-            (ArithmeticOp::Div, true) => data.iter().map(|&v| s / v).collect(),
+            (ArithmeticOp::Div, number_first) => divided_by_number(data, s, number_first),
             _ => return None,
         };
         for value in &mut out {

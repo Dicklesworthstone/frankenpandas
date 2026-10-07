@@ -366,6 +366,38 @@ pub fn div_f64_into(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
     output_nan
 }
 
+/// `a / s` (`s / a` when `number_first`) four lanes wide - the 2-lane
+/// `divpd` of fp-columnar's baseline build was a column-by-number divide's
+/// whole loss to numpy (x / 3 0.54 ms a million rows, pandas 0.30;
+/// br-frankenpandas-3tk83). IEEE division is correctly rounded lane by lane,
+/// so the quotients are the baseline loop's bits. The output is built with
+/// its capacity, not over a zeroed buffer: zeroing a recycled 8 MB block is
+/// a memset the size of the divide's own stores.
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`], so the `+avx2`
+/// codegen is this crate's; the CALLER MUST GUARD with
+/// `is_x86_feature_detected!("avx2")`.
+#[inline(never)]
+#[must_use]
+pub fn div_by_number_f64(a: &[f64], s: f64, number_first: bool) -> Vec<f64> {
+    const LANES: usize = 4;
+    let mut out = Vec::with_capacity(a.len());
+    let sv = Simd::<f64, LANES>::splat(s);
+    let (chunks, rest) = a.as_chunks::<LANES>();
+    if number_first {
+        for chunk in chunks {
+            out.extend_from_slice(&(sv / Simd::<f64, LANES>::from_array(*chunk)).to_array());
+        }
+        out.extend(rest.iter().map(|&x| s / x));
+    } else {
+        for chunk in chunks {
+            out.extend_from_slice(&(Simd::<f64, LANES>::from_array(*chunk) / sv).to_array());
+        }
+        out.extend(rest.iter().map(|&x| x / s));
+    }
+    out
+}
+
 /// The `+`, `-` and `*` siblings of [`div_f64_into`], generated from one body.
 ///
 /// br-frankenpandas-uza04. `div` was given this crate's 4-lane width because
@@ -806,6 +838,39 @@ mod tests {
             "x/0 is +inf, a PRESENT value; the witness must not claim NaN"
         );
         assert!(out.iter().all(|v| *v == f64::INFINITY));
+    }
+
+    /// br-frankenpandas-3tk83: dividing by a number four lanes wide is the
+    /// scalar loop's quotient bit for bit, the number second and first, at
+    /// lengths straddling the 4-lane chunk, over zeros of both signs,
+    /// infinities, NaN and subnormals - and numbers among those too (x / 0.0
+    /// is inf, 0.0 / 0.0 NaN). NEGATIVE: the other direction differs.
+    #[test]
+    fn div_by_number_is_the_scalar_quotient_3tk83() {
+        let special = [1.5, -0.0, 0.0, f64::INFINITY, -2.0, f64::NAN, 5e-324, 1.0];
+        for len in [0usize, 1, 3, 4, 5, 7, 8, 9, 17, 1001] {
+            let a: Vec<f64> = (0..len)
+                .map(|i| special[i % special.len()] * (1.0 + i as f64 / 7.0))
+                .collect();
+            for s in [3.0, -0.25, 0.0, -0.0, f64::INFINITY, f64::NAN, 5e-324] {
+                for number_first in [false, true] {
+                    let got = div_by_number_f64(&a, s, number_first);
+                    let want: Vec<u64> = a
+                        .iter()
+                        .map(|&x| (if number_first { s / x } else { x / s }).to_bits())
+                        .collect();
+                    assert_eq!(
+                        got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        want,
+                        "{len} {s} {number_first}"
+                    );
+                }
+            }
+        }
+        let a = [2.0, 8.0, 1.0, 0.5, 4.0];
+        let swapped = div_by_number_f64(&a, 4.0, true);
+        assert_eq!(swapped, vec![2.0, 0.5, 4.0, 8.0, 1.0]);
+        assert_ne!(swapped, div_by_number_f64(&a, 4.0, false));
     }
 
     /// br-frankenpandas-uza04. Same obligation the `div` test above discharges,
