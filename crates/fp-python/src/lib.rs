@@ -40356,6 +40356,85 @@ impl PyDataFrame {
         Ok(Some(PySeries { inner }))
     }
 
+    /// `op` (sum / prod) across the columns of a frame holding an object
+    /// column, as pandas reduces its object values: each row's cells folded
+    /// left to right through Python's operator - the missing ones the op's
+    /// identity under skipna, as [`object_cells_reduce`] fills them - and
+    /// None where a row has fewer than `min_count` present cells, an object
+    /// Series (fp refused every such row reduction: ['x', 'y'] + ['u', 'v']
+    /// by row is pandas' ['xu', 'yv']; br-frankenpandas-rdnkd). None for
+    /// frames of numbers, those holding masked numbers, dates or durations,
+    /// and those all pandas strings or all categorical (a string result, a
+    /// categorical's TypeError: pandas' own reductions).
+    fn object_row_totals(
+        &self,
+        py: Python<'_>,
+        axis: usize,
+        numeric_only: bool,
+        skipna: bool,
+        min_count: usize,
+        op: &str,
+    ) -> PyResult<Option<PySeries>> {
+        if axis != 1 || numeric_only || !self.has_non_numeric() {
+            return Ok(None);
+        }
+        let columns: Vec<&Column> = (0..self.inner.num_columns())
+            .filter_map(|position| self.inner.column_at(position))
+            .collect();
+        let folded = columns.iter().all(|column| {
+            matches!(
+                column.dtype(),
+                DType::Null
+                    | DType::Bool
+                    | DType::Int64
+                    | DType::Float64
+                    | DType::Utf8
+                    | DType::Categorical
+            )
+        });
+        let one_extension_dtype = columns.iter().all(|column| column.is_pandas_string())
+            || columns
+                .iter()
+                .all(|column| column.dtype() == DType::Categorical);
+        if !folded || one_extension_dtype {
+            return Ok(None);
+        }
+        let operator = py.import("operator")?.getattr(op)?;
+        let identity = i64::from(op == "mul");
+        let rows = self.inner.index().len();
+        let mut totals: Vec<Option<Bound<'_, PyAny>>> = vec![None; rows];
+        let mut present = vec![0_usize; rows];
+        for column in columns {
+            for (row, value) in column.values().iter().enumerate() {
+                let cell = if skipna && value.is_missing() {
+                    identity.into_bound_py_any(py)?
+                } else {
+                    cell_to_py(py, column, value)?.into_bound(py)
+                };
+                present[row] += usize::from(!value.is_missing());
+                totals[row] = Some(match totals[row].take() {
+                    Some(total) => operator.call1((total, cell))?,
+                    None => cell,
+                });
+            }
+        }
+        let values = totals
+            .iter()
+            .zip(present)
+            .map(|(total, count)| match total {
+                Some(total) if count >= min_count => py_to_cell(py, total),
+                _ => Ok(Scalar::Null(NullKind::Null)),
+            })
+            .collect::<PyResult<Vec<Scalar>>>()?;
+        let inner = Series::new(
+            "",
+            self.inner.index().clone(),
+            Column::from_object_values(values),
+        )
+        .map_err(frame_error_to_py)?;
+        Ok(Some(PySeries { inner }))
+    }
+
     /// pandas' min_count for sum/prod: a column (or row, for axis=1) with
     /// fewer valid values than `min_count` reduces to NaN (fvsao.5).
     fn below_min_count_is_nan(
@@ -43214,6 +43293,11 @@ impl PyDataFrame {
         }
         self.refuse_masked_rows("sum", ax, numeric_only)?;
         if let Some(answer) = self.empty_object_rows_answer(ax, numeric_only)? {
+            return Ok(answer);
+        }
+        if let Some(answer) =
+            self.object_row_totals(py, ax, numeric_only, skipna, min_count, "add")?
+        {
             return Ok(answer);
         }
         let summed = self.sum_internal(ax, skipna, numeric_only);
@@ -48146,8 +48230,13 @@ impl PyDataFrame {
         if let Some(answer) = self.empty_object_rows_answer(ax, numeric_only)? {
             return Ok(answer);
         }
-        let product = self.prod_internal(ax, skipna, numeric_only);
         let min_count = min_count.unwrap_or(0);
+        if let Some(answer) =
+            self.object_row_totals(py, ax, numeric_only, skipna, min_count, "mul")?
+        {
+            return Ok(answer);
+        }
+        let product = self.prod_internal(ax, skipna, numeric_only);
         wrap_series(
             product.and_then(|s| self.below_min_count_is_nan(s, ax, numeric_only, min_count)),
         )

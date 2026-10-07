@@ -28706,6 +28706,78 @@ def test_object_sum_below_min_count_like_pandas_rdnkd(case: str) -> None:
     assert run(fpd) == run(pd)
 
 
+def _rdnkd_rows(m: Any, **columns: Any) -> Any:
+    return m.DataFrame(columns, index=["r1", "r2"])
+
+
+_RDNKD_ROW_CASES = {
+    "text": lambda m: _rdnkd_rows(m, s=["x", "y"], t=["u", "v"]).sum(axis=1),
+    "text min_count unmet": lambda m: _rdnkd_rows(m, s=["x", "y"], t=["u", "v"]).sum(axis=1, min_count=3),
+    "text min_count met": lambda m: _rdnkd_rows(m, s=["x", "y"], t=["u", "v"]).sum(axis=1, min_count=2),
+    "one text column": lambda m: _rdnkd_rows(m, s=["x", "y"]).sum(axis=1),
+    "all-missing row is 0": lambda m: _rdnkd_rows(m, s=["x", None], t=["u", None]).sum(axis=1),
+    "missing beside text (TypeError)": lambda m: _rdnkd_rows(m, s=["x", None], t=["u", "v"]).sum(axis=1),
+    "skipna=False (TypeError)": lambda m: _rdnkd_rows(m, s=["x", None], t=["u", "v"]).sum(axis=1, skipna=False),
+    "object numbers": lambda m: _rdnkd_rows(
+        m, a=m.Series([1, 2], dtype=object, index=["r1", "r2"]), b=m.Series([3, 4.5], dtype=object, index=["r1", "r2"])
+    ).sum(axis=1),
+    "object beside int": lambda m: _rdnkd_rows(m, a=m.Series([1, 2], dtype=object, index=["r1", "r2"]), b=[3, 4]).sum(
+        axis=1
+    ),
+    "object beside NaN, min_count 2": lambda m: _rdnkd_rows(
+        m, a=[1.5, float("nan")], s=m.Series([2, 3], dtype=object, index=["r1", "r2"])
+    ).sum(axis=1, min_count=2),
+    "bool beside object": lambda m: _rdnkd_rows(
+        m, b=[True, False], s=m.Series([1, 2], dtype=object, index=["r1", "r2"])
+    ).sum(axis=1),
+    "lists": lambda m: _rdnkd_rows(
+        m, a=m.Series([[1], [2]], index=["r1", "r2"]), b=m.Series([[3], [4]], index=["r1", "r2"])
+    ).sum(axis=1),
+    "categorical beside text": lambda m: _rdnkd_rows(
+        m, s=m.Series(m.Categorical(["x", "y"]), index=["r1", "r2"]), t=["u", "v"]
+    ).sum(axis=1),
+    "prod of object numbers": lambda m: _rdnkd_rows(
+        m, a=m.Series([2, 3], dtype=object, index=["r1", "r2"]), b=m.Series([3, 4.5], dtype=object, index=["r1", "r2"])
+    ).prod(axis=1),
+    "prod text by int": lambda m: _rdnkd_rows(
+        m, a=["x", "y"], b=m.Series([3, 2], dtype=object, index=["r1", "r2"])
+    ).prod(axis=1),
+    "prod min_count unmet": lambda m: _rdnkd_rows(
+        m, a=["x", "y"], b=m.Series([3, 2], dtype=object, index=["r1", "r2"])
+    ).prod(axis=1, min_count=3),
+    "prod of text (TypeError)": lambda m: _rdnkd_rows(m, s=["x", "y"], t=["u", "v"]).prod(axis=1),
+    "text beside int (NEGATIVE: TypeError)": lambda m: _rdnkd_rows(m, a=[1, 2], s=["x", "y"]).sum(axis=1),
+    "numeric_only (NEGATIVE: int64)": lambda m: _rdnkd_rows(m, a=[1, 2], s=["x", "y"]).sum(axis=1, numeric_only=True),
+    "numbers (NEGATIVE: float64)": lambda m: _rdnkd_rows(m, f=[1.0, 2.0], k=[1, 2]).sum(axis=1),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_RDNKD_ROW_CASES))
+def test_object_row_sums_like_pandas_rdnkd(case: str) -> None:
+    # A frame holding an object column summed / multiplied by row: each row's
+    # cells folded through Python's + / * as pandas folds its object values
+    # (the missing ones 0 / 1 under skipna, None below min_count), an object
+    # Series - fp raised TypeError for every one (br-frankenpandas-rdnkd).
+    # NEGATIVE: Python's own TypeError where pandas raises one (text + int,
+    # 0 + text, text * text), and numeric frames keep their dtypes.
+    def cell(value: Any) -> Any:
+        if value is None:
+            return "None"
+        if isinstance(value, float) and math.isnan(value):
+            return "nan"
+        return value
+
+    def run(m: Any) -> Any:
+        try:
+            result = _RDNKD_ROW_CASES[case](m)
+        except Exception as error:  # noqa: BLE001
+            return "raises " + type(error).__name__
+        return str(result.dtype), list(result.index), [cell(v) for v in result.tolist()]
+
+    assert run(fpd) == run(pd)
+
+
 _PZLMT_FRAMES = {
     "-0.0 beside NaN": {"a": [-0.0, -0.0, -2.5], "b": [float("nan"), -0.0, float("nan")], "c": [-0.0, -0.0, 1.0]},
     "all -0.0 (typed path)": {"a": [-0.0, -0.0], "b": [-0.0, -0.0]},
