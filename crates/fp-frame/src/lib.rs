@@ -2474,21 +2474,50 @@ struct Float64BitsIndex {
     keys: Vec<u64>,
     indices: Vec<usize>,
     mask: usize,
+    len: usize,
 }
 
 impl Float64BitsIndex {
     const EMPTY: usize = usize::MAX;
 
+    /// An index that starts at 64 slots and doubles past half full, so a
+    /// few distinct values probe an L1-resident table - one sized for the
+    /// rows (2n slots, 32 MB a million) or capped at 2^18 missed cache at
+    /// every probe (br-frankenpandas-d9b5z).
+    fn growing() -> Self {
+        Self::with_slots(64)
+    }
+
+    /// The index sized for `expected_entries` (twice as many slots, a
+    /// power of two) - a column of many distinct values, which would
+    /// otherwise rehash its way up.
     fn with_expected_entries(expected_entries: usize) -> Self {
         let target = expected_entries.saturating_mul(2).max(16);
-        let capacity = target
-            .checked_next_power_of_two()
-            .unwrap_or(1_usize << (usize::BITS - 1));
+        Self::with_slots(
+            target
+                .checked_next_power_of_two()
+                .unwrap_or(1_usize << (usize::BITS - 1)),
+        )
+    }
+
+    fn with_slots(capacity: usize) -> Self {
         Self {
             keys: vec![0; capacity],
             indices: vec![Self::EMPTY; capacity],
             mask: capacity - 1,
+            len: 0,
         }
+    }
+
+    fn grow(&mut self) {
+        let mut bigger = Self::with_slots(self.keys.len() * 2);
+        for (&bits, &idx) in self.keys.iter().zip(&self.indices) {
+            if idx != Self::EMPTY {
+                bigger.place(bits, idx);
+            }
+        }
+        bigger.len = self.len;
+        *self = bigger;
     }
 
     fn mix(bits: u64) -> usize {
@@ -2518,8 +2547,24 @@ impl Float64BitsIndex {
         }
     }
 
+    /// `bits` into the index as a set member (its slot index the count so
+    /// far) unless already there (br-frankenpandas-mw1vw).
+    fn insert_if_new(&mut self, bits: u64) {
+        if self.get(bits).is_none() {
+            self.insert_new(bits, self.len);
+        }
+    }
+
     fn insert_new(&mut self, bits: u64, idx: usize) {
         debug_assert_ne!(idx, Self::EMPTY);
+        if (self.len + 1) * 2 > self.keys.len() {
+            self.grow();
+        }
+        self.place(bits, idx);
+        self.len += 1;
+    }
+
+    fn place(&mut self, bits: u64, idx: usize) {
         let mut slot = Self::mix(bits) & self.mask;
         loop {
             if self.indices[slot] == Self::EMPTY {
@@ -2529,6 +2574,39 @@ impl Float64BitsIndex {
             }
             debug_assert_ne!(self.keys[slot], bits);
             slot = (slot + 1) & self.mask;
+        }
+    }
+}
+
+/// Whether `values`' first 2048 numbers hold at most a quarter distinct (a
+/// NaN skipped, both zeros one value): a column the growing bits index
+/// serves from an L1-resident table, where one sized for many distinct
+/// values missed cache at every probe - and many distinct values keep their
+/// presized table, the growing one rehashing its way up (nunique of 900k
+/// distinct floats 15 -> 35 ms on it; br-frankenpandas-mw1vw).
+fn few_distinct_f64(values: &[f64]) -> bool {
+    let sample = &values[..values.len().min(2048)];
+    let mut seen = Float64BitsIndex::with_slots(4096);
+    for &v in sample {
+        if !v.is_nan() {
+            seen.insert_if_new(if v == 0.0 { 0 } else { v.to_bits() });
+        }
+    }
+    seen.len * 4 <= sample.len()
+}
+
+/// Each present row's canonical bits (a set mask bit over a number that is
+/// not NaN, both zeros one key) into `f`, the rows by the mask's 64-row
+/// words (br-frankenpandas-mw1vw).
+fn for_each_present_f64_key(data: &[f64], words: &[u64], mut f: impl FnMut(u64)) {
+    for (w, &word) in words.iter().enumerate() {
+        let mut rows = word;
+        while rows != 0 {
+            let v = data[w * 64 + rows.trailing_zeros() as usize];
+            rows &= rows - 1;
+            if !v.is_nan() {
+                f(if v == 0.0 { 0 } else { v.to_bits() });
+            }
         }
     }
 }
@@ -17135,33 +17213,57 @@ impl Series {
             if let Some(out) = allvalid_float64_unique_value_counts(slice) {
                 ValueCountsTally::Float64AllCountsOne(out)
             } else {
-                // CAPPED pre-size (br-frankenpandas nunique-cap lever): sizing the
-                // bits->index map to `slice.len()` (e.g. 2M) builds a cache-COLD
-                // ~n-slot table when distinct << n (high-card scattered probes cost
-                // ~146ms), while `default()` collision-thrashes at LOW cardinality.
-                // `min(n, 1<<18)` = 262144 slots (2 MB, L2-resident): zero-collision
-                // + L1-hot for few distinct AND cache-resident for many. Bit-transparent
-                // (capacity only). The `out` (value,count) list is grown organically
-                // (Vec push is cache-sequential; over-reserving n was a 48 MB waste).
-                let mut idx_by_bits: FxHashMap<u64, usize> = FxHashMap::with_capacity_and_hasher(
-                    slice.len().min(1 << 18),
-                    Default::default(),
-                );
+                // The bits->index table. Few distinct values (a sample says):
+                // the growing bits index, 64 slots under a full mixer doubling
+                // as needed, L1-resident - an FxHashMap capped at 2^18 slots
+                // (2 MB) still probed L2 (rounded floats' value_counts 25 ms a
+                // million rows, pandas 5.7; br-frankenpandas-d9b5z). Many: that
+                // capped map (CAPPED pre-size, the nunique-cap lever: sized to
+                // `slice.len()` it was a cache-COLD ~n-slot table, `default()`
+                // collision-thrashes at low cardinality). Bit-transparent
+                // (first-seen order is `out`'s). The `out` (value,count) list is
+                // grown organically (over-reserving n was a 48 MB waste).
                 let mut out: Vec<Float64ValueCount> = Vec::new();
-                for &v in slice {
-                    if v.is_nan() {
-                        continue;
+                if few_distinct_f64(slice) {
+                    let mut idx_by_bits = Float64BitsIndex::growing();
+                    for &v in slice {
+                        if v.is_nan() {
+                            continue;
+                        }
+                        let bits = canonical_float64_value_counts_bits(v);
+                        match idx_by_bits.get(bits) {
+                            Some(idx) => out[idx].count += 1,
+                            None => {
+                                idx_by_bits.insert_new(bits, out.len());
+                                out.push(Float64ValueCount {
+                                    canonical_bits: bits,
+                                    value: v,
+                                    count: 1,
+                                });
+                            }
+                        }
                     }
-                    let bits = canonical_float64_value_counts_bits(v);
-                    match idx_by_bits.get(&bits) {
-                        Some(&idx) => out[idx].count += 1,
-                        None => {
-                            idx_by_bits.insert(bits, out.len());
-                            out.push(Float64ValueCount {
-                                canonical_bits: bits,
-                                value: v,
-                                count: 1,
-                            });
+                } else {
+                    let mut idx_by_bits: FxHashMap<u64, usize> =
+                        FxHashMap::with_capacity_and_hasher(
+                            slice.len().min(1 << 18),
+                            Default::default(),
+                        );
+                    for &v in slice {
+                        if v.is_nan() {
+                            continue;
+                        }
+                        let bits = canonical_float64_value_counts_bits(v);
+                        match idx_by_bits.get(&bits) {
+                            Some(&idx) => out[idx].count += 1,
+                            None => {
+                                idx_by_bits.insert(bits, out.len());
+                                out.push(Float64ValueCount {
+                                    canonical_bits: bits,
+                                    value: v,
+                                    count: 1,
+                                });
+                            }
                         }
                     }
                 }
@@ -17182,7 +17284,13 @@ impl Series {
             if let Some(out) = nullable_float64_unique_value_counts(data, validity) {
                 ValueCountsTally::Float64AllCountsOne(out)
             } else {
-                let mut idx_by_bits = Float64BitsIndex::with_expected_entries(data.len());
+                // Few distinct values: the growing index, L1-resident
+                // (br-frankenpandas-d9b5z); many: sized for the rows.
+                let mut idx_by_bits = if few_distinct_f64(data) {
+                    Float64BitsIndex::growing()
+                } else {
+                    Float64BitsIndex::with_expected_entries(data.len())
+                };
                 let mut out: Vec<Float64ValueCount> = Vec::with_capacity(data.len());
                 // Skip missing rows by iterating the PACKED validity words (skip
                 // all-invalid words, `trailing_zeros` over present bits) instead of
@@ -17276,7 +17384,13 @@ impl Series {
             Some(&self.name)
         };
         let index = Index::new(labels).rename_index(index_name);
-        let column = Column::from_values(values)?;
+        // No value to count still counts in int64, as pandas types it (an
+        // empty list of cells infers object; br-frankenpandas-d9b5z).
+        let column = if values.is_empty() {
+            Column::from_i64_values(Vec::new())
+        } else {
+            Column::from_values(values)?
+        };
         Self::new("count".to_string(), index, column)
     }
 
@@ -17292,6 +17406,22 @@ impl Series {
     ) -> Result<Self, FrameError> {
         if self.categorical.is_some() {
             return self.categorical_value_counts_with_options(normalize, sort, ascending, dropna);
+        }
+        // The default options on a float / int column are value_counts()'s
+        // typed tallies (the float bit-tally and all-distinct proof, the
+        // nullable float word walk, the int dense and wide tallies) - the
+        // same count-descending first-seen order, labels and counts, where
+        // the tally below keyed a ScalarKey per row over the materialized
+        // cells (nx.value_counts() 23.9 ms a million rows, pandas 7.2;
+        // br-frankenpandas-d9b5z).
+        if !normalize
+            && sort
+            && !ascending
+            && dropna
+            && matches!(self.column.dtype(), DType::Float64 | DType::Int64)
+            && self.column.timezone().is_none()
+        {
+            return self.value_counts();
         }
 
         // Per br-frankenpandas-7c7d0: O(n) HashMap-driven counter; see
@@ -17912,31 +18042,53 @@ impl Series {
         // the nullable branch collapses every missing/NaN row to the single
         // `ScalarKey::Null(NaN)` class (counted iff `!dropna` and any present).
         // Bit-identical distinct count to the ScalarKey path.
+        // Few distinct values (a sample says): the growing bits index, 64
+        // slots under a full mixer, L1-resident - the FxHashSet capped at
+        // 2^18 slots probed L2 for them (rounded floats' nunique 9.0 ms a
+        // million rows, pandas 5.8). Many: that capped set, presized. The
+        // present rows by the mask words, not a mask bit read a row
+        // (br-frankenpandas-mw1vw).
         if self.categorical.is_none() {
             if let Some(data) = self.column.as_f64_slice() {
+                let key = |v: f64| if v == 0.0 { 0 } else { v.to_bits() };
+                if few_distinct_f64(data) {
+                    let mut seen = Float64BitsIndex::growing();
+                    for &v in data {
+                        seen.insert_if_new(key(v));
+                    }
+                    return seen.len;
+                }
                 let mut seen: FxHashSet<u64> = FxHashSet::with_capacity_and_hasher(
                     data.len().min(1 << 18),
                     Default::default(),
                 );
                 for &v in data {
-                    seen.insert(if v == 0.0 { 0 } else { v.to_bits() });
+                    seen.insert(key(v));
                 }
                 return seen.len();
             }
             if let Some((data, validity)) = self.column.as_f64_slice_with_validity() {
-                let mut seen: FxHashSet<u64> = FxHashSet::with_capacity_and_hasher(
-                    data.len().min(1 << 18),
-                    Default::default(),
-                );
-                let mut any_missing = false;
-                for (i, &v) in data.iter().enumerate() {
-                    if validity.get(i) && !v.is_nan() {
-                        seen.insert(if v == 0.0 { 0 } else { v.to_bits() });
-                    } else {
-                        any_missing = true;
-                    }
-                }
-                return seen.len() + usize::from(!dropna && any_missing);
+                let words = validity.packed_words_for_scan();
+                let mut present = 0_usize;
+                let distinct = if few_distinct_f64(data) {
+                    let mut seen = Float64BitsIndex::growing();
+                    for_each_present_f64_key(data, &words, |bits| {
+                        present += 1;
+                        seen.insert_if_new(bits);
+                    });
+                    seen.len
+                } else {
+                    let mut seen: FxHashSet<u64> = FxHashSet::with_capacity_and_hasher(
+                        data.len().min(1 << 18),
+                        Default::default(),
+                    );
+                    for_each_present_f64_key(data, &words, |bits| {
+                        present += 1;
+                        seen.insert(bits);
+                    });
+                    seen.len()
+                };
+                return distinct + usize::from(!dropna && present < data.len());
             }
         }
 
@@ -174288,6 +174440,213 @@ mod tests {
                     assert_eq!(got.values()[i], Scalar::Bool(want), "{k} {inclusive} {i}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn float_nunique_counts_present_canonical_values_mw1vw() {
+        // br-frankenpandas-mw1vw: a float column's nunique is the count of
+        // distinct present values - -0.0 one value with 0.0, inf counted -
+        // and under dropna=False one more when any row is missing; all
+        // valid, NaN-holding, missing over numbers, all missing, empty.
+        // NEGATIVE: the numbers under cleared bits are not counted.
+        let n = 2000_usize;
+        let value = |i: usize| match i % 13 {
+            0 => -0.0,
+            1 => 0.0,
+            2 => f64::INFINITY,
+            _ => ((i * 31) % 211) as f64 * 0.5,
+        };
+        let mut gaps = ValidityMask::all_valid(n);
+        for i in (5..n).step_by(7) {
+            gaps.set(i, false);
+        }
+        let columns = [
+            Column::from_f64_values((0..n).map(value).collect()),
+            Column::from_f64_values(
+                (0..n)
+                    .map(|i| if i % 6 == 4 { f64::NAN } else { value(i) })
+                    .collect(),
+            ),
+            Column::from_f64_values_with_validity((0..n).map(|i| value(i) + 1e6).collect(), gaps),
+            Column::from_f64_values(vec![f64::NAN; n]),
+            Column::from_f64_values(Vec::new()),
+        ];
+        for (k, column) in columns.into_iter().enumerate() {
+            let len = column.len();
+            let series = Series::new("x", Index::from_range(0, len as i64, 1), column).unwrap();
+            let mut keys: Vec<u64> = series
+                .values()
+                .iter()
+                .filter(|cell| !cell.is_missing())
+                .map(|cell| {
+                    let v = cell.to_f64().unwrap();
+                    if v == 0.0 { 0 } else { v.to_bits() }
+                })
+                .collect();
+            let present = keys.len();
+            keys.sort_unstable();
+            keys.dedup();
+            assert_eq!(series.nunique_with_dropna(true), keys.len(), "{k}");
+            assert_eq!(
+                series.nunique_with_dropna(false),
+                keys.len() + usize::from(present < len),
+                "{k}"
+            );
+        }
+    }
+
+    #[test]
+    fn value_counts_defaults_are_the_typed_tally_d9b5z() {
+        // br-frankenpandas-d9b5z: value_counts_with_options at the default
+        // options (what Python calls) on a float / int column is the
+        // first-seen tally of the present values - -0.0 counted with 0.0
+        // under the first one's payload - sorted by count descending, ties in
+        // first-seen order: labels, counts, name, index name, against a tally
+        // written here. NEGATIVE: normalize, sort=False and dropna=False keep
+        // their own answers (proportions, first-seen order, a NaN bucket).
+        let n = 3000_usize;
+        let floats: Vec<f64> = (0..n)
+            .map(|i| match i % 11 {
+                0 => f64::NAN,
+                1 => -0.0,
+                2 => 0.0,
+                3 => f64::INFINITY,
+                _ => ((i * 7) % 50) as f64 * 0.25,
+            })
+            .collect();
+        let distinct: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 9 == 4 {
+                    f64::NAN
+                } else {
+                    i as f64 * 1.5 - 7.0
+                }
+            })
+            .collect();
+        let series = |name: &str, column: Column| {
+            Series::new(name, Index::from_range(0, n as i64, 1), column).unwrap()
+        };
+        let cases = [
+            series("f", Column::from_f64_values(floats.clone())),
+            series(
+                "v",
+                Column::from_f64_values(
+                    floats
+                        .iter()
+                        .map(|v| if v.is_nan() { 1.0 } else { *v })
+                        .collect(),
+                ),
+            ),
+            series("d", Column::from_f64_values(distinct)),
+            series(
+                "k",
+                Column::from_i64_values((0..n as i64).map(|i| (i * 13) % 97 - 40).collect()),
+            ),
+            series(
+                "w",
+                Column::from_i64_values((0..n as i64).map(|i| ((i * 13) % 97) << 40).collect()),
+            ),
+        ];
+        let shown = |s: &Series| -> (Vec<String>, Vec<String>, String, String) {
+            (
+                s.index()
+                    .labels()
+                    .iter()
+                    .map(|label| format!("{label:?}"))
+                    .collect(),
+                s.values()
+                    .iter()
+                    .map(|value| format!("{value:?}"))
+                    .collect(),
+                format!("{:?}", s.name()),
+                format!("{:?}", s.index().name()),
+            )
+        };
+        for (k, s) in cases.iter().enumerate() {
+            // The tally: canonical key (0.0 for both zeros), first-seen order.
+            let mut order: Vec<(Scalar, usize)> = Vec::new();
+            let mut at: HashMap<u64, usize> = HashMap::new();
+            for cell in s.values() {
+                if cell.is_missing() {
+                    continue;
+                }
+                let key = match cell {
+                    Scalar::Float64(v) if *v == 0.0 => 0.0_f64.to_bits(),
+                    Scalar::Float64(v) => v.to_bits(),
+                    Scalar::Int64(v) => *v as u64,
+                    other => panic!("{other:?}"),
+                };
+                match at.get(&key) {
+                    Some(&slot) => order[slot].1 += 1,
+                    None => {
+                        at.insert(key, order.len());
+                        order.push((cell.clone(), 1));
+                    }
+                }
+            }
+            order.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+            let got = s
+                .value_counts_with_options(false, true, false, true)
+                .unwrap();
+            let (labels, counts, name, index_name) = shown(&got);
+            let want_labels: Vec<String> = order
+                .iter()
+                .map(|(value, _)| match value {
+                    Scalar::Float64(v) => {
+                        format!("{:?}", IndexLabel::Float64(fp_index::OrderedF64(*v)))
+                    }
+                    Scalar::Int64(v) => format!("{:?}", IndexLabel::Int64(*v)),
+                    other => panic!("{other:?}"),
+                })
+                .collect();
+            let want_counts: Vec<String> = order
+                .iter()
+                .map(|(_, count)| format!("{:?}", Scalar::Int64(*count as i64)))
+                .collect();
+            assert_eq!(labels, want_labels, "{k}");
+            assert_eq!(counts, want_counts, "{k}");
+            assert_eq!(got.column().dtype(), DType::Int64, "{k}");
+            // The counts are named "count", their index after the Series.
+            assert_eq!(
+                name,
+                format!("{:?}", fp_index::LabelName::from("count")),
+                "{k}"
+            );
+            assert_eq!(index_name, format!("{:?}", Some(s.name())), "{k}");
+            // NEGATIVE: the other options' own answers.
+            let proportions = s
+                .value_counts_with_options(true, true, false, true)
+                .unwrap();
+            assert!(matches!(proportions.values()[0], Scalar::Float64(_)), "{k}");
+            let unsorted = s
+                .value_counts_with_options(false, false, false, true)
+                .unwrap();
+            assert_eq!(unsorted.len(), order.len(), "{k}");
+            if k == 0 {
+                let with_nan = s
+                    .value_counts_with_options(false, true, false, false)
+                    .unwrap();
+                assert_eq!(with_nan.len(), order.len() + 1);
+            }
+        }
+        // An empty or all-NaN float column, an empty int column: no labels,
+        // the counts still int64 (pandas'), not an empty list's object.
+        for (k, column) in [
+            Column::from_f64_values(Vec::new()),
+            Column::from_f64_values(vec![f64::NAN; 5]),
+            Column::from_i64_values(Vec::new()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let len = column.len();
+            let s = Series::new("e", Index::from_range(0, len as i64, 1), column).unwrap();
+            let got = s
+                .value_counts_with_options(false, true, false, true)
+                .unwrap();
+            assert_eq!(got.len(), 0, "{k}");
+            assert_eq!(got.column().dtype(), DType::Int64, "{k}");
         }
     }
 
