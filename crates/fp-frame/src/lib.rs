@@ -1525,49 +1525,47 @@ fn shifted_f64_differences(
 /// is outside the column, and every bit past `n` 0.
 fn shifted_validity_words(validity: &ValidityMask, n: usize, periods: i64) -> Vec<u64> {
     let p = usize::try_from(periods.unsigned_abs()).map_or(n, |p| p.min(n));
-    let words = validity.packed_words_for_scan();
     let word_count = n.div_ceil(64);
     let tail = n % 64;
-    let within = |k: usize, word: u64| {
-        if k + 1 == word_count && tail != 0 {
-            word & ((1_u64 << tail) - 1)
-        } else {
-            word
-        }
-    };
-    // A source word, its bits past `n` 0 (past the last word, none).
-    let at = |k: usize| {
-        if k < word_count {
-            within(k, words.get(k).copied().unwrap_or(0))
-        } else {
-            0
-        }
-    };
+    // The source words, their bits past `n` cleared and a zero word past the
+    // end, so each output word is two neighbouring source words shifted -
+    // slices zipped, which vectorize, where a closure per word bounds-checked
+    // and masked each read (a fifth of nx.shift(1); br-frankenpandas-cmgnp).
+    let mut src = validity.packed_words_for_scan();
+    src.resize(word_count + 1, 0);
+    if tail != 0 {
+        src[word_count - 1] &= (1_u64 << tail) - 1;
+    }
     let (word_shift, bit_shift) = (p / 64, p % 64);
-    (0..word_count)
-        .map(|k| {
-            let shifted = if periods >= 0 {
-                // Bit i is bit i - p: the words shifted up.
-                k.checked_sub(word_shift).map_or(0, |src| {
-                    let low = src
-                        .checked_sub(1)
-                        .filter(|_| bit_shift > 0)
-                        .map_or(0, |below| at(below) >> (64 - bit_shift));
-                    (at(src) << bit_shift) | low
-                })
+    let mut out = vec![0_u64; word_count];
+    if word_shift < word_count {
+        if periods >= 0 {
+            // Bit i is bit i - p: the words shifted up, the rows below p 0.
+            let (body, from) = (&mut out[word_shift..], &src[..word_count - word_shift]);
+            if bit_shift == 0 {
+                body.copy_from_slice(from);
             } else {
-                // Bit i is bit i + p: shifted down; past the end reads 0.
-                let src = k + word_shift;
-                let high = if bit_shift > 0 {
-                    at(src + 1) << (64 - bit_shift)
-                } else {
-                    0
-                };
-                (at(src) >> bit_shift) | high
-            };
-            within(k, shifted)
-        })
-        .collect()
+                body[0] = from[0] << bit_shift;
+                for ((word, &cur), &below) in body[1..].iter_mut().zip(&from[1..]).zip(from) {
+                    *word = (cur << bit_shift) | (below >> (64 - bit_shift));
+                }
+            }
+        } else {
+            // Bit i is bit i + p: the words shifted down; past the end reads 0.
+            let (body, from) = (&mut out[..word_count - word_shift], &src[word_shift..]);
+            if bit_shift == 0 {
+                body.copy_from_slice(&from[..body.len()]);
+            } else {
+                for ((word, &cur), &above) in body.iter_mut().zip(from).zip(&from[1..]) {
+                    *word = (cur >> bit_shift) | (above << (64 - bit_shift));
+                }
+            }
+        }
+    }
+    if tail != 0 {
+        out[word_count - 1] &= (1_u64 << tail) - 1;
+    }
+    out
 }
 
 /// `diff(periods)` of a nullable float64 buffer of `n` rows: row i is
