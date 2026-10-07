@@ -509,6 +509,89 @@ elementwise_f64_kernel!(
     "Lane-wise `out[i] = a[i] * b[i]`, four doubles per instruction."
 );
 
+/// `out[i] = a[i] op b[i]` four lanes wide, and whether a result of two
+/// numbers is NaN (inf - inf, 0 * inf, 0 / 0) - a NaN operand's NaN result
+/// is not one: fp-columnar's column pair with missing rows, whose mask is
+/// the operands' unless the op made a NaN of its own, and whose baseline
+/// build divided two lanes at a time and then searched the output for a
+/// NaN (nx / ny 0.80 ms a million rows, pandas 0.36;
+/// br-frankenpandas-cmgnp). IEEE `+ - * /` are correctly rounded lane by
+/// lane, so every result is the baseline loop's bits. Into `out`, as
+/// [`div_f64_into`]: a `Vec` grown in the loop carried a capacity check
+/// whose call spilled the witness and the operands to the stack every
+/// four rows (0.48 -> 0.70 ms on nx - ny).
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`], so the `+avx2`
+/// codegen is this crate's; the CALLER MUST GUARD with
+/// `is_x86_feature_detected!("avx2")`.
+macro_rules! made_nan_f64_kernel {
+    ($name:ident, $simd_op:expr, $scalar_op:expr, $doc:literal) => {
+        #[doc = $doc]
+        ///
+        /// Returns whether a result of two numbers is NaN. See
+        /// `made_nan_f64_kernel` for the width and bit-identity argument.
+        ///
+        /// # Panics
+        /// Panics if `a`, `b` and `out` do not all have the same length.
+        #[inline(never)]
+        pub fn $name(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
+            const LANES: usize = 4;
+            assert_eq!(
+                a.len(),
+                b.len(),
+                concat!(stringify!($name), ": a/b length mismatch")
+            );
+            assert_eq!(
+                a.len(),
+                out.len(),
+                concat!(stringify!($name), ": out length mismatch")
+            );
+            let mut made_acc = Mask::<i64, LANES>::splat(false);
+            let (a_chunks, a_rest) = a.as_chunks::<LANES>();
+            let (b_chunks, b_rest) = b.as_chunks::<LANES>();
+            let (out_chunks, out_rest) = out.as_chunks_mut::<LANES>();
+            for ((x, y), slots) in a_chunks.iter().zip(b_chunks).zip(out_chunks) {
+                let (xv, yv) = (Simd::from_array(*x), Simd::from_array(*y));
+                let r = $simd_op(xv, yv);
+                made_acc |= r.simd_ne(r) & xv.simd_eq(xv) & yv.simd_eq(yv);
+                *slots = r.to_array();
+            }
+            let mut made_nan = made_acc.any();
+            for ((slot, &x), &y) in out_rest.iter_mut().zip(a_rest).zip(b_rest) {
+                let r = $scalar_op(x, y);
+                made_nan |= r.is_nan() && !x.is_nan() && !y.is_nan();
+                *slot = r;
+            }
+            made_nan
+        }
+    };
+}
+
+made_nan_f64_kernel!(
+    add_f64_made_nan_into,
+    |x: Simd<f64, 4>, y: Simd<f64, 4>| x + y,
+    |x: f64, y: f64| x + y,
+    "`out[i] = a[i] + b[i]`, four doubles per instruction."
+);
+made_nan_f64_kernel!(
+    sub_f64_made_nan_into,
+    |x: Simd<f64, 4>, y: Simd<f64, 4>| x - y,
+    |x: f64, y: f64| x - y,
+    "`out[i] = a[i] - b[i]`, four doubles per instruction."
+);
+made_nan_f64_kernel!(
+    mul_f64_made_nan_into,
+    |x: Simd<f64, 4>, y: Simd<f64, 4>| x * y,
+    |x: f64, y: f64| x * y,
+    "`out[i] = a[i] * b[i]`, four doubles per instruction."
+);
+made_nan_f64_kernel!(
+    div_f64_made_nan_into,
+    |x: Simd<f64, 4>, y: Simd<f64, 4>| x / y,
+    |x: f64, y: f64| x / y,
+    "`out[i] = a[i] / b[i]`, four doubles per instruction."
+);
+
 /// Lane-wise `out[i] = sqrt(a[i])`, four doubles per instruction, folding the
 /// TWO witnesses `Column::sqrt`'s typed arm needs: `(domain_held, all_finite)`.
 ///
@@ -669,6 +752,58 @@ compare_scalar_kernel!(lt_i64_scalar_into, i64, simd_lt, <);
 compare_scalar_kernel!(le_i64_scalar_into, i64, simd_le, <=);
 compare_scalar_kernel!(eq_i64_scalar_into, i64, simd_eq, ==);
 compare_scalar_kernel!(ne_i64_scalar_into, i64, simd_ne, !=);
+
+/// `out[i] = a[i] <op> b[i]` over two float columns, eight lanes per step -
+/// the pair sibling of `compare_scalar_kernel`: the baseline loop compared
+/// two lanes and narrowed each to a byte (nx > ny 0.34 ms a million rows,
+/// pandas 0.19; br-frankenpandas-cmgnp). BIT-IDENTICAL to `a[i] <op> b[i]`
+/// for the same reason: `simd_ne` is unordered-or-unequal (NaN != x is
+/// true), the others ordered (false on NaN); -0.0 == 0.0.
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as `compare_scalar_kernel`; the
+/// CALLER MUST GUARD with `is_x86_feature_detected!("avx2")`.
+macro_rules! compare_pairs_kernel {
+    ($name:ident, $simd_cmp:ident, $op:tt) => {
+        #[doc = concat!(
+            "Lane-wise `out[i] = a[i] ", stringify!($op),
+            " b[i]` over `f64`; see `compare_pairs_kernel`."
+        )]
+        ///
+        /// # Panics
+        /// Panics if `a`, `b` and `out` do not all have the same length.
+        #[inline(never)]
+        pub fn $name(a: &[f64], b: &[f64], out: &mut [bool]) {
+            const LANES: usize = 8;
+            assert_eq!(
+                a.len(),
+                b.len(),
+                concat!(stringify!($name), ": a/b length mismatch")
+            );
+            assert_eq!(
+                a.len(),
+                out.len(),
+                concat!(stringify!($name), ": out length mismatch")
+            );
+            let (a_chunks, a_tail) = a.as_chunks::<LANES>();
+            let (b_chunks, b_tail) = b.as_chunks::<LANES>();
+            let (out_chunks, out_tail) = out.as_chunks_mut::<LANES>();
+            for ((x, y), slots) in a_chunks.iter().zip(b_chunks).zip(out_chunks) {
+                let mask = Simd::from_array(*x).$simd_cmp(Simd::from_array(*y));
+                *slots = MASK_BYTES[mask.to_bitmask() as usize];
+            }
+            for ((slot, &x), &y) in out_tail.iter_mut().zip(a_tail).zip(b_tail) {
+                *slot = x $op y;
+            }
+        }
+    };
+}
+
+compare_pairs_kernel!(gt_f64_pairs_into, simd_gt, >);
+compare_pairs_kernel!(ge_f64_pairs_into, simd_ge, >=);
+compare_pairs_kernel!(lt_f64_pairs_into, simd_lt, <);
+compare_pairs_kernel!(le_f64_pairs_into, simd_le, <=);
+compare_pairs_kernel!(eq_f64_pairs_into, simd_eq, ==);
+compare_pairs_kernel!(ne_f64_pairs_into, simd_ne, !=);
 
 #[cfg(test)]
 mod compare_scalar_4h4mp {
@@ -871,6 +1006,94 @@ mod tests {
         let swapped = div_by_number_f64(&a, 4.0, true);
         assert_eq!(swapped, vec![2.0, 0.5, 4.0, 8.0, 1.0]);
         assert_ne!(swapped, div_by_number_f64(&a, 4.0, false));
+    }
+
+    /// br-frankenpandas-cmgnp: each made-NaN kernel is the scalar loop bit
+    /// for bit, and its witness is whether a result of two numbers is NaN,
+    /// at lengths straddling the 4-lane chunks. The operands pair
+    /// infinities and zeros so inf - inf, inf + -inf, 0 * inf, 0 / 0 and
+    /// inf / inf make NaN results; NEGATIVE: a NaN operand's NaN result
+    /// never sets the witness.
+    #[test]
+    fn made_nan_kernels_are_the_scalar_loop_cmgnp() {
+        type Kernel = fn(&[f64], &[f64], &mut [f64]) -> bool;
+        type Case = (Kernel, fn(f64, f64) -> f64);
+        let kernels: [Case; 4] = [
+            (add_f64_made_nan_into, |x, y| x + y),
+            (sub_f64_made_nan_into, |x, y| x - y),
+            (mul_f64_made_nan_into, |x, y| x * y),
+            (div_f64_made_nan_into, |x, y| x / y),
+        ];
+        let (inf, nan) = (f64::INFINITY, f64::NAN);
+        let left = [1.5, inf, 0.0, -0.0, nan, 3.0, -inf, 5e-324];
+        let right = [2.0, inf, 0.0, nan, 1.0, -0.0, inf, 7.0, 0.5];
+        for (k, (kernel, op)) in kernels.into_iter().enumerate() {
+            for len in [0usize, 1, 3, 4, 5, 7, 8, 9, 17, 1001] {
+                let a: Vec<f64> = (0..len).map(|i| left[i % left.len()]).collect();
+                let b: Vec<f64> = (0..len).map(|i| right[i % right.len()]).collect();
+                let want: Vec<f64> = a.iter().zip(&b).map(|(&x, &y)| op(x, y)).collect();
+                let made = (0..len).any(|i| want[i].is_nan() && !a[i].is_nan() && !b[i].is_nan());
+                // Over a zeroed and a garbage-filled `out`: every slot written.
+                for fill in [0.0, 77.5] {
+                    let mut got = vec![fill; len];
+                    let made_nan = kernel(&a, &b, &mut got);
+                    assert_eq!(
+                        got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        "{k} {len} {fill}"
+                    );
+                    assert_eq!(made_nan, made, "{k} {len}");
+                }
+            }
+        }
+        let mut got = vec![0.0; 5];
+        let (holes, divisors) = ([nan, 6.0, 1.0, 2.0, 9.0], [1.0, 1.0, 1.0, nan, 1.0]);
+        assert!(!div_f64_made_nan_into(&holes, &divisors, &mut got));
+        assert!(got[0].is_nan() && got[3].is_nan());
+        let (zeros, ones) = ([1.0, 0.0, 2.0, 3.0, 4.0], [1.0, 0.0, 1.0, 1.0, 1.0]);
+        assert!(div_f64_made_nan_into(&zeros, &ones, &mut got));
+        assert!(sub_f64_made_nan_into(&[inf; 5], &[inf; 5], &mut got));
+    }
+
+    /// br-frankenpandas-cmgnp: each pair-compare kernel is `a[i] <op> b[i]`
+    /// at every length up to two 8-lane chunks and a tail, over a `false`
+    /// and a `true` fill, on pairs of NaN, both zeros, infinities and equal
+    /// numbers. NEGATIVE: NaN against itself is unequal (true under !=,
+    /// false under == and the orders).
+    #[test]
+    fn pair_compares_are_the_scalar_compare_cmgnp() {
+        type Kernel = fn(&[f64], &[f64], &mut [bool]);
+        type Case = (Kernel, fn(f64, f64) -> bool);
+        let kernels: [Case; 6] = [
+            (gt_f64_pairs_into, |x, y| x > y),
+            (ge_f64_pairs_into, |x, y| x >= y),
+            (lt_f64_pairs_into, |x, y| x < y),
+            (le_f64_pairs_into, |x, y| x <= y),
+            (eq_f64_pairs_into, |x, y| x == y),
+            (ne_f64_pairs_into, |x, y| x != y),
+        ];
+        let (inf, nan) = (f64::INFINITY, f64::NAN);
+        let left = [0.5, nan, -0.0, 0.0, inf, 2.0, nan, -inf, 3.0, 1.0, 7.5];
+        let right = [
+            0.5, 1.0, 0.0, -0.0, inf, -2.0, nan, 4.0, 3.0, nan, 7.0, -inf, 0.0,
+        ];
+        let a: Vec<f64> = (0..21).map(|i| left[i % left.len()]).collect();
+        let b: Vec<f64> = (0..21).map(|i| right[i % right.len()]).collect();
+        for (k, (kernel, compare)) in kernels.into_iter().enumerate() {
+            for len in 0..=a.len() {
+                let want: Vec<bool> = (0..len).map(|i| compare(a[i], b[i])).collect();
+                for fill in [false, true] {
+                    let mut got = vec![fill; len];
+                    kernel(&a[..len], &b[..len], &mut got);
+                    assert_eq!(got, want, "{k} {len} {fill}");
+                }
+            }
+        }
+        let mut got = [false; 2];
+        ne_f64_pairs_into(&[nan, 1.0], &[nan, 1.0], &mut got);
+        assert_eq!(got, [true, false]);
+        eq_f64_pairs_into(&[nan, 1.0], &[nan, 1.0], &mut got);
+        assert_eq!(got, [false, true]);
     }
 
     /// br-frankenpandas-uza04. Same obligation the `div` test above discharges,

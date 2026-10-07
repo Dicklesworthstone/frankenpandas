@@ -22496,6 +22496,31 @@ impl Series {
             }
             return Ok(Scalar::Float64(typed_median_f64(present)));
         }
+        // A Float64 column missing rows: its present numbers (a set mask bit
+        // over a value that is not NaN), by the mask's 64-row words, into the
+        // same select - it took the Scalar sort below (nx.median() 17.4 ms a
+        // million rows, pandas 18.1, x.median() 1.4; br-frankenpandas-cmgnp).
+        // The same multiset, so the same order statistics; none present is
+        // NaN, as the sort path answers.
+        if self.categorical.is_none()
+            && let Some((data, validity)) = self.column.as_f64_slice_with_validity()
+        {
+            let mut present: Vec<f64> = Vec::with_capacity(validity.count_valid());
+            for (w, &word) in validity.packed_words_for_scan().iter().enumerate() {
+                let mut rows = word;
+                while rows != 0 {
+                    let v = data[w * 64 + rows.trailing_zeros() as usize];
+                    rows &= rows - 1;
+                    if !v.is_nan() {
+                        present.push(v);
+                    }
+                }
+            }
+            if present.is_empty() {
+                return Ok(Scalar::Float64(f64::NAN));
+            }
+            return Ok(Scalar::Float64(typed_median_f64(present)));
+        }
 
         // Typed Timedelta64 fast path (sibling of the Int64/Float64 arms above and
         // of cummin/cumsum): an all-valid, no-NaT Timedelta64 column computes the
@@ -174493,6 +174518,80 @@ mod tests {
                 keys.len() + usize::from(present < len),
                 "{k}"
             );
+        }
+    }
+
+    #[test]
+    fn nan_holding_median_is_the_sort_of_present_values_cmgnp() {
+        // br-frankenpandas-cmgnp: the median of a Float64 column missing
+        // rows - NaN as missing, a mask bit over a number, both - is the
+        // midpoint of its sorted present values, odd and even counts, both
+        // zeros, infinities; none present is NaN. NEGATIVE: 1e9s under
+        // cleared bits would pull the median up if they were counted.
+        let value = |i: usize| match i % 17 {
+            0 => -0.0,
+            1 => 0.0,
+            2 => f64::INFINITY,
+            3 => f64::NEG_INFINITY,
+            _ => ((i * 37) % 101) as f64 * 0.5 - 20.0,
+        };
+        for n in [1_usize, 2, 63, 64, 65, 200, 201] {
+            let mut gaps = ValidityMask::all_valid(n);
+            for i in (0..n).filter(|i| i % 3 == 1) {
+                gaps.set(i, false);
+            }
+            let columns = [
+                Column::from_f64_values(
+                    (0..n)
+                        .map(|i| if i % 4 == 2 { f64::NAN } else { value(i) })
+                        .collect(),
+                ),
+                Column::from_f64_values_with_validity(
+                    (0..n)
+                        .map(|i| if i % 3 == 1 { 1e9 } else { value(i) })
+                        .collect(),
+                    gaps.clone(),
+                ),
+                Column::from_f64_values_with_validity(
+                    (0..n)
+                        .map(|i| {
+                            if i.is_multiple_of(5) {
+                                f64::NAN
+                            } else {
+                                value(i)
+                            }
+                        })
+                        .collect(),
+                    gaps,
+                ),
+                Column::from_f64_values(vec![f64::NAN; n]),
+            ];
+            for (k, column) in columns.into_iter().enumerate() {
+                let series = Series::new("m", Index::from_range(0, n as i64, 1), column).unwrap();
+                let mut present: Vec<f64> = series
+                    .values()
+                    .iter()
+                    .filter(|cell| !cell.is_missing())
+                    .map(|cell| cell.to_f64().unwrap())
+                    .collect();
+                present.sort_by(f64::total_cmp);
+                let want = match present.len() {
+                    0 => f64::NAN,
+                    len if !len.is_multiple_of(2) => present[len / 2],
+                    len => (present[len / 2 - 1] + present[len / 2]) / 2.0,
+                };
+                let planted = 1e9_f64.to_bits();
+                assert!(present.iter().all(|v| v.to_bits() != planted), "{n} {k}");
+                let Scalar::Float64(got) = series.median().unwrap() else {
+                    panic!("{n} {k}: not a float");
+                };
+                // A median between both zeros is either zero (the select's
+                // arrangement decides, as numpy's partition does).
+                assert!(
+                    got.to_bits() == want.to_bits() || (got == 0.0 && want == 0.0),
+                    "{n} {k}: {got} {want}"
+                );
+            }
         }
     }
 

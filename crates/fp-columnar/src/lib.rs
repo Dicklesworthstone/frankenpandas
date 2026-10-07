@@ -2218,6 +2218,42 @@ fn vectorized_binary_f64(
     (out, combined)
 }
 
+/// `out[i] = a[i] op b[i]` for + - * / (None for the others), and whether
+/// the op made a NaN of two numbers (inf - inf, 0 * inf, 0 / 0) - a NaN
+/// operand's NaN is not one: four lanes wide where the CPU has AVX2, the
+/// same loop otherwise (br-frankenpandas-cmgnp).
+fn f64_pair_made_nan_into(op: ArithmeticOp, a: &[f64], b: &[f64], out: &mut [f64]) -> Option<bool> {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        let kernel = match op {
+            ArithmeticOp::Add => fp_dot_kernel::add_f64_made_nan_into,
+            ArithmeticOp::Sub => fp_dot_kernel::sub_f64_made_nan_into,
+            ArithmeticOp::Mul => fp_dot_kernel::mul_f64_made_nan_into,
+            ArithmeticOp::Div => fp_dot_kernel::div_f64_made_nan_into,
+            ArithmeticOp::Pow | ArithmeticOp::Mod | ArithmeticOp::FloorDiv => return None,
+        };
+        return Some(kernel(a, b, out));
+    }
+    macro_rules! sweep {
+        ($apply:expr) => {{
+            let mut made_nan = false;
+            for ((slot, &x), &y) in out.iter_mut().zip(a).zip(b) {
+                let r: f64 = $apply(x, y);
+                made_nan |= r.is_nan() & !x.is_nan() & !y.is_nan();
+                *slot = r;
+            }
+            made_nan
+        }};
+    }
+    Some(match op {
+        ArithmeticOp::Add => sweep!(|x: f64, y: f64| x + y),
+        ArithmeticOp::Sub => sweep!(|x: f64, y: f64| x - y),
+        ArithmeticOp::Mul => sweep!(|x: f64, y: f64| x * y),
+        ArithmeticOp::Div => sweep!(|x: f64, y: f64| x / y),
+        ArithmeticOp::Pow | ArithmeticOp::Mod | ArithmeticOp::FloorDiv => return None,
+    })
+}
+
 fn binary_f64_apply(op: ArithmeticOp) -> fn(f64, f64) -> f64 {
     match op {
         ArithmeticOp::Add => |a, b| a + b,
@@ -8117,6 +8153,21 @@ fn compare_f64_scalar(data: &[f64], s: f64, op: ComparisonOp) -> Vec<bool> {
 /// (br-frankenpandas-cmgnp).
 fn compare_f64_pairs(l: &[f64], r: &[f64], op: ComparisonOp) -> Vec<bool> {
     let mut out = vec![false; l.len()];
+    // Eight lanes a step where the CPU has AVX2: the fill below compares
+    // two lanes and narrows each to a byte (nx > ny 0.34 ms a million rows,
+    // pandas 0.19; br-frankenpandas-cmgnp). The fill is the complete loop.
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        match op {
+            ComparisonOp::Gt => fp_dot_kernel::gt_f64_pairs_into(l, r, &mut out),
+            ComparisonOp::Lt => fp_dot_kernel::lt_f64_pairs_into(l, r, &mut out),
+            ComparisonOp::Eq => fp_dot_kernel::eq_f64_pairs_into(l, r, &mut out),
+            ComparisonOp::Ne => fp_dot_kernel::ne_f64_pairs_into(l, r, &mut out),
+            ComparisonOp::Ge => fp_dot_kernel::ge_f64_pairs_into(l, r, &mut out),
+            ComparisonOp::Le => fp_dot_kernel::le_f64_pairs_into(l, r, &mut out),
+        }
+        return out;
+    }
     macro_rules! fill {
         ($test:expr) => {
             for ((flag, &a), &b) in out.iter_mut().zip(l).zip(r) {
@@ -20234,14 +20285,17 @@ impl Column {
 
     /// [`Self::aligned_binary_f64_same_positions`]' + - * / of two Float64
     /// columns at least one of which is missing a row (`lvalid` / `rvalid`
-    /// their masks less their NaN rows): every row's result in one
-    /// monomorphic, vectorizing sweep, a NaN operand's row 0.0 (a missing
-    /// row's datum), then a row missing by a mask bit alone, over a number,
-    /// 0.0 too; the mask is the rows present on both sides less a NaN
-    /// result (inf - inf, 0 / 0). The data and mask the per-row loop builds,
-    /// which read two mask bits and called the op through a pointer a row
-    /// (nx + y 6.7 ms a million rows, pandas 0.26; br-frankenpandas-cmgnp).
-    /// None for ** // % (the loop's).
+    /// their masks less their NaN rows): every row's result in one sweep
+    /// that says whether the op made a NaN of two numbers (inf - inf,
+    /// 0 / 0). Two operands whose missing rows hold NaN (numpy's form, or
+    /// none missing) leave NaN on exactly the rows either misses, so the
+    /// result is NaN-exact itself, written into the buffer it keeps - its
+    /// mask the rows both hold, less a made NaN - and the ops after it take
+    /// the NaN-exact paths ((nx - ny) / ny 1.30 ms a million rows on the
+    /// 0.0-datum form, pandas 0.31). Otherwise a missing row's datum is
+    /// 0.0, as the per-row loop built it, which read two mask bits and
+    /// called the op through a pointer a row (nx + y 6.7 ms, pandas 0.26;
+    /// br-frankenpandas-cmgnp). None for ** // % (the loop's).
     fn nullable_f64_arithmetic(
         &self,
         right: &Self,
@@ -20251,45 +20305,28 @@ impl Column {
         lvalid: &ValidityMask,
         rvalid: &ValidityMask,
     ) -> Option<Self> {
-        macro_rules! sweep {
-            ($apply:expr) => {
-                lsrc.iter()
-                    .zip(rsrc)
-                    .map(|(&l, &r)| {
-                        if l.is_nan() || r.is_nan() {
-                            0.0
-                        } else {
-                            $apply(l, r)
-                        }
-                    })
-                    .collect::<Vec<f64>>()
-            };
-        }
         let both = lvalid.and_mask(rvalid);
-        let mut data = match op {
-            ArithmeticOp::Add => sweep!(|l: f64, r: f64| l + r),
-            ArithmeticOp::Sub => sweep!(|l: f64, r: f64| l - r),
-            ArithmeticOp::Mul => sweep!(|l: f64, r: f64| l * r),
-            ArithmeticOp::Div => sweep!(|l: f64, r: f64| l / r),
-            ArithmeticOp::Pow | ArithmeticOp::Mod | ArithmeticOp::FloorDiv => return None,
-        };
-        if both.all() {
-            // No operand is missing or NaN: the loop's all-present column.
-            return Some(Self::from_f64_values(data));
+        let nan_on_missing =
+            |column: &Self, valid: &ValidityMask| column.nan_missing_exact() || valid.all();
+        if nan_on_missing(self, lvalid) && nan_on_missing(right, rvalid) {
+            // Filled in place: a buffer collected into the Arc after the
+            // sweep was a copy, a zipped collect into it did not vectorize
+            // (nx - ny 0.34 -> 0.54 ms).
+            let mut data: Arc<[f64]> = std::iter::repeat_n(0.0, lsrc.len()).collect();
+            let made_nan = f64_pair_made_nan_into(op, lsrc, rsrc, Arc::get_mut(&mut data)?)?;
+            let validity = if made_nan {
+                ValidityMask::from_f64(&data)
+            } else {
+                both
+            };
+            return Some(Self::nan_exact_float64(data, validity));
         }
-        // A side whose missing rows are not all NaN (a mask bit over a
-        // number) left a result on them.
-        let missing_is_nan = |column: &Self| column.nan_missing_exact() || column.validity.all();
-        if !missing_is_nan(self) || !missing_is_nan(right) {
-            both.for_each_invalid_range(|start, run| data[start..start + run].fill(0.0));
-        }
-        // + and - make a NaN of numbers only from two infinities, so a side
-        // whose finiteness witness says it holds none leaves no NaN result to
-        // look for (the look was a third of nx + y).
-        let finite_side = matches!(op, ArithmeticOp::Add | ArithmeticOp::Sub)
-            && (self.f64_finite_witness() == Some(true)
-                || right.f64_finite_witness() == Some(true));
-        let validity = if !finite_side && data.iter().fold(false, |any, v| any | v.is_nan()) {
+        let mut data = vec![0.0; lsrc.len()];
+        let made_nan = f64_pair_made_nan_into(op, lsrc, rsrc, &mut data)?;
+        // A missing row's datum is 0.0: a NaN operand's result and a
+        // number's under a cleared mask bit alike.
+        both.for_each_invalid_range(|start, run| data[start..start + run].fill(0.0));
+        let validity = if made_nan {
             both.and_mask(&ValidityMask::from_f64(&data))
         } else {
             both
@@ -40823,6 +40860,21 @@ mod tests {
             }
             Column::from_f64_values_with_validity(data, mask)
         };
+        // NaN at its missing rows, the result is so (NaN-exact): the row
+        // loop's present rows and mask, NaN at each missing row (its 0.0
+        // datum the other form).
+        let nan_exact_matches = |got: &Column, want: &Column, label: &str| {
+            assert!(got.nan_missing_exact(), "{label}");
+            for (i, (g, w)) in raw(got).iter().zip(raw(want)).enumerate() {
+                assert_eq!(g.1, w.1, "{label} {i}");
+                if w.1 {
+                    assert_eq!(g.0, w.0, "{label} {i}");
+                } else {
+                    assert!(f64::from_bits(g.0).is_nan(), "{label} {i}");
+                }
+            }
+        };
+        let nan_on_missing = |c: &Column| c.nan_missing_exact() || c.validity().all();
         let ops: [(ArithmeticOp, Apply); 4] = [
             (ArithmeticOp::Add, |a, b| a + b),
             (ArithmeticOp::Sub, |a, b| a - b),
@@ -40831,9 +40883,16 @@ mod tests {
         ];
         for (op, apply) in ops {
             for (k, l) in columns.iter().enumerate() {
-                for r in &columns {
+                for (j, r) in columns.iter().enumerate() {
                     let got = l.aligned_binary_f64_same_positions(r, op).unwrap();
-                    assert_eq!(raw(&got), raw(&row_loop(l, r, apply)), "{op:?} {k}");
+                    let want = row_loop(l, r, apply);
+                    let label = format!("{op:?} {k} {j}");
+                    if nan_on_missing(l) && nan_on_missing(r) && !want.validity().all() {
+                        // Both operands hold NaN at their missing rows.
+                        nan_exact_matches(&got, &want, &label);
+                    } else {
+                        assert_eq!(raw(&got), raw(&want), "{label}");
+                    }
                 }
                 for s in [2.5, -0.5, 0.0, 1e300] {
                     let broadcast = Column::from_f64_values(vec![s; n]);
@@ -40849,18 +40908,7 @@ mod tests {
                         };
                         let label = format!("{op:?} {k} {s} {reflected}");
                         if l.nan_missing_exact() && !l.validity().all() {
-                            // NaN at its missing rows, the column stays so:
-                            // the row loop's present rows and mask, NaN at
-                            // each missing row (its 0.0 datum the other form).
-                            assert!(got.nan_missing_exact(), "{label}");
-                            for (i, (g, w)) in raw(&got).iter().zip(raw(&want)).enumerate() {
-                                assert_eq!(g.1, w.1, "{label} {i}");
-                                if w.1 {
-                                    assert_eq!(g.0, w.0, "{label} {i}");
-                                } else {
-                                    assert!(f64::from_bits(g.0).is_nan(), "{label} {i}");
-                                }
-                            }
+                            nan_exact_matches(&got, &want, &label);
                         } else {
                             assert_eq!(raw(&got), raw(&want), "{label}");
                         }
