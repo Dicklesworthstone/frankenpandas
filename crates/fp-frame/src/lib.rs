@@ -98413,7 +98413,13 @@ impl DataFrame {
         if let Some(series) = self.reduce_rows_f64(0.0, |acc, v| acc + v)? {
             return Ok(series);
         }
-        self.reduce_rows(|vals| vals.iter().sum(), Scalar::Float64(0.0))
+        // From +0.0, as numpy's sum: `Sum` for f64 folds from -0.0, so a row
+        // of -0.0 (beside a NaN, which this path skips) summed to -0.0,
+        // pandas +0.0 (br-frankenpandas-pzlmt).
+        self.reduce_rows(
+            |vals| vals.iter().fold(0.0, |sum, value| sum + value),
+            Scalar::Float64(0.0),
+        )
     }
 
     /// Mean across columns per row.
@@ -98481,7 +98487,8 @@ impl DataFrame {
             return Series::new("", index, Column::from_f64_values(values));
         }
         self.reduce_rows(
-            |vals| vals.iter().sum::<f64>() / vals.len() as f64,
+            // Summed from +0.0, as sum_axis1's (br-frankenpandas-pzlmt).
+            |vals| vals.iter().fold(0.0, |sum, value| sum + value) / vals.len() as f64,
             Scalar::Null(NullKind::NaN),
         )
     }
@@ -221013,6 +221020,50 @@ mod tests {
         .unwrap();
         assert!(ints.is_lazy_transpose_storage());
         assert!(ints.lazy_transpose_sum_or_mean(false, 0).is_none());
+    }
+
+    #[test]
+    fn row_sums_of_negative_zeros_are_positive_pzlmt() {
+        // br-frankenpandas-pzlmt: sum / mean across a row holding only -0.0 -
+        // beside a NaN (the generic row path) or all valid (the typed one) -
+        // are +0.0, as numpy sums from +0.0. NEGATIVE: a row of numbers keeps
+        // its exact, negative sum and mean, its NaN skipped.
+        let frame = |columns: Vec<(&str, Vec<f64>)>| {
+            let order: Vec<String> = columns.iter().map(|(name, _)| (*name).to_owned()).collect();
+            let len = columns[0].1.len();
+            DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, len),
+                columns
+                    .into_iter()
+                    .map(|(name, data)| (name.to_owned(), Column::from_f64_values(data)))
+                    .collect::<BTreeMap<String, Column>>(),
+                order,
+            )
+            .unwrap()
+        };
+        let bits = |s: &Series| -> Vec<u64> {
+            s.values()
+                .iter()
+                .map(|cell| cell.to_f64().map_or(u64::MAX, f64::to_bits))
+                .collect()
+        };
+        let gaps = frame(vec![
+            ("a", vec![-0.0, -0.0, -2.5]),
+            ("b", vec![f64::NAN, -0.0, f64::NAN]),
+            ("c", vec![-0.0, -0.0, 1.0]),
+        ]);
+        let zero = 0.0_f64.to_bits();
+        assert_eq!(
+            bits(&gaps.sum_axis1().unwrap()),
+            vec![zero, zero, (-1.5_f64).to_bits()]
+        );
+        assert_eq!(
+            bits(&gaps.mean_axis1().unwrap()),
+            vec![zero, zero, (-0.75_f64).to_bits()]
+        );
+        let all_valid = frame(vec![("a", vec![-0.0]), ("b", vec![-0.0])]);
+        assert_eq!(bits(&all_valid.sum_axis1().unwrap()), vec![zero]);
+        assert_eq!(bits(&all_valid.mean_axis1().unwrap()), vec![zero]);
     }
 
     #[test]
