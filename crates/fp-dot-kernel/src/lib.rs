@@ -705,6 +705,26 @@ pub fn float_as_int_collect(a: &[f64], mask: i64, sign: i64) -> Option<Vec<i64>>
     (outside == 0).then_some(out)
 }
 
+/// `k / s` for an int column over a number (`s / k` when `number_first`),
+/// each int converted and divided four lanes at a time - the baseline build
+/// converts one int at a time (no packed int64 -> double before AVX-512) and
+/// divides two lanes wide (k / 2 a million rows 0.51 ms, pandas 0.52;
+/// br-frankenpandas-uf0mw) - collected into a fresh Vec. The values `k as
+/// f64 / s` makes: [`int_as_float`] is `as f64`'s rounding. (+ - * by a
+/// number gained nothing so: memory-bound already.)
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
+/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+#[inline(never)]
+#[must_use]
+pub fn div_i64_number_collect(a: &[i64], s: f64, number_first: bool) -> Vec<f64> {
+    if number_first {
+        a.iter().map(|&k| s / int_as_float(k)).collect()
+    } else {
+        a.iter().map(|&k| int_as_float(k) / s).collect()
+    }
+}
+
 float_int_collect!(add_f64_i64_collect, +, "A float column plus an int one.");
 float_int_collect!(sub_f64_i64_collect, -, "A float column minus an int one.");
 float_int_collect!(mul_f64_i64_collect, *, "A float column times an int one.");
@@ -1573,6 +1593,54 @@ mod tests {
             assert_eq!(mul_i64_collect(&a, &b), want, "mul {len}");
         }
         assert_eq!(mul_i64_collect(&[i64::MAX], &[2]), vec![-2]);
+    }
+
+    /// br-frankenpandas-uf0mw: an int column over a number is `k as f64 / s`
+    /// bit for bit, both orders, over the int64 extremes, zero and ints `as
+    /// f64` rounds (2^53 + 1), at lengths straddling the 4-lane chunks.
+    /// NEGATIVE: the orders differ (s / k is not k / s), and s / 0 is inf.
+    #[test]
+    #[allow(clippy::cast_precision_loss)] // `as f64` is the reference
+    fn int_number_division_is_the_converted_quotient_uf0mw() {
+        let two53 = 1_i64 << 53;
+        let ints = [
+            0,
+            -1,
+            3,
+            i64::MIN,
+            i64::MAX,
+            two53 + 1,
+            -two53 - 3,
+            0xFFFF_FFFF,
+            -7,
+            2,
+        ];
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        for len in [0usize, 1, 3, 4, 5, 7, 8, 9, 17, 101] {
+            let a: Vec<i64> = (0..len).map(|i| ints[i % ints.len()]).collect();
+            for s in [2.0, 1.5, -0.5, 3.0, 1e-300] {
+                for number_first in [false, true] {
+                    let want: Vec<f64> = a
+                        .iter()
+                        .map(|&k| {
+                            if number_first {
+                                s / k as f64
+                            } else {
+                                k as f64 / s
+                            }
+                        })
+                        .collect();
+                    assert_eq!(
+                        bits(&div_i64_number_collect(&a, s, number_first)),
+                        bits(&want),
+                        "{len} {s} {number_first}"
+                    );
+                }
+            }
+        }
+        assert_eq!(div_i64_number_collect(&[4], 2.0, false), vec![2.0]);
+        assert_eq!(div_i64_number_collect(&[4], 2.0, true), vec![0.5]);
+        assert_eq!(div_i64_number_collect(&[0], 2.0, true), vec![f64::INFINITY]);
     }
 
     /// br-frankenpandas-uf0mw: the f64 floor division and modulo are the

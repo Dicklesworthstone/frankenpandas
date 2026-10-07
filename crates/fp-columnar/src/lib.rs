@@ -20309,6 +20309,15 @@ impl Column {
         // * and /) makes no NaN: the plain sweep, as binary_scalar's float arm.
         let plain =
             s.is_finite() && (s != 0.0 || matches!(op, ArithmeticOp::Add | ArithmeticOp::Sub));
+        // A divide four lanes at a time where the CPU has AVX2: this build
+        // converts one int at a time and divides two lanes wide (k / 2 a
+        // million rows 0.51 ms, pandas 0.52; br-frankenpandas-uf0mw). The
+        // same quotients; + - * gained nothing so.
+        #[cfg(target_arch = "x86_64")]
+        if plain && matches!(op, ArithmeticOp::Div) && std::arch::is_x86_feature_detected!("avx2") {
+            let out = fp_dot_kernel::div_i64_number_collect(data, s, scalar_left);
+            return Self::from_f64_values_owned_tracked(out, false);
+        }
         let out: Option<Vec<f64>> = match (op, scalar_left) {
             _ if !plain => None,
             (ArithmeticOp::Add, false) => Some(data.iter().map(|&v| v as f64 + s).collect()),
