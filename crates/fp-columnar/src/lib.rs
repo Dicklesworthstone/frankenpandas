@@ -19346,6 +19346,52 @@ impl Column {
                     let (result, _, output_nan) = apply_f64_slices_nan_tracked(op, l, r);
                     return Some(Ok(Self::from_f64_values_owned_tracked(result, output_nan)));
                 }
+                // A float column and an int one, + - * /, below the parallel
+                // length: one AVX2 pass converting each int where it is used,
+                // collected - the int column made into an 8 MB float buffer and
+                // the result a zeroed one first (x + k a million rows 0.62 ms,
+                // pandas 0.46; br-frankenpandas-uf0mw). The same values.
+                #[cfg(target_arch = "x86_64")]
+                if std::arch::is_x86_feature_detected!("avx2")
+                    && matches!(
+                        op,
+                        ArithmeticOp::Add
+                            | ArithmeticOp::Sub
+                            | ArithmeticOp::Mul
+                            | ArithmeticOp::Div
+                    )
+                {
+                    let pair = match (self.as_f64_slice(), right.as_i64_slice()) {
+                        (Some(floats), Some(ints)) => Some((floats, ints, false)),
+                        _ => match (right.as_f64_slice(), self.as_i64_slice()) {
+                            (Some(floats), Some(ints)) => Some((floats, ints, true)),
+                            _ => None,
+                        },
+                    };
+                    if let Some((floats, ints, int_first)) = pair
+                        && floats.len() == ints.len()
+                        && floats.len() < BINARY_BANDWIDTH_PARALLEL_MIN_LEN
+                    {
+                        let kernel = match op {
+                            ArithmeticOp::Add => fp_dot_kernel::add_f64_i64_collect,
+                            ArithmeticOp::Sub => fp_dot_kernel::sub_f64_i64_collect,
+                            ArithmeticOp::Mul => fp_dot_kernel::mul_f64_i64_collect,
+                            _ => fp_dot_kernel::div_f64_i64_collect,
+                        };
+                        let (result, output_nan) = kernel(floats, ints, int_first);
+                        return Some(Ok(Self::from_f64_values_owned_tracked(result, output_nan)));
+                    }
+                    // Two int columns' true division, both converted where
+                    // they are divided (k / k 0.99 ms, pandas 0.74).
+                    if matches!(op, ArithmeticOp::Div)
+                        && let (Some(l), Some(r)) = (self.as_i64_slice(), right.as_i64_slice())
+                        && l.len() == r.len()
+                        && l.len() < BINARY_BANDWIDTH_PARALLEL_MIN_LEN
+                    {
+                        let (result, output_nan) = fp_dot_kernel::div_i64_i64_collect(l, r);
+                        return Some(Ok(Self::from_f64_values_owned_tracked(result, output_nan)));
+                    }
+                }
                 // Typed MIXED / int-promoted fast path: the both-Float64 borrow above
                 // declined because a side is Int64 (Int64 op Float64, or Int64 / Int64
                 // which promotes to Float64). Build an f64 view per side — an all-valid
@@ -22023,6 +22069,39 @@ impl Column {
         // as f64 (their common dtype), so the ints read as f64 in the sweep
         // answer each cell (x > k went cell by cell: 3.5 ms, pandas 0.4;
         // br-frankenpandas-uf0mw).
+        // A float column and an int one: one AVX2 pass converting each int
+        // where it is compared, an int on the left compared as the float's
+        // mirror (k > x is x < k) - the ints became an 8 MB float buffer
+        // first (x > k a million rows 0.55 ms, pandas 0.40;
+        // br-frankenpandas-uf0mw).
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("avx2") {
+            let mirrored = |op: ComparisonOp| match op {
+                ComparisonOp::Gt => ComparisonOp::Lt,
+                ComparisonOp::Lt => ComparisonOp::Gt,
+                ComparisonOp::Ge => ComparisonOp::Le,
+                ComparisonOp::Le => ComparisonOp::Ge,
+                same @ (ComparisonOp::Eq | ComparisonOp::Ne) => same,
+            };
+            let pair = match (self.as_f64_slice(), right.as_i64_slice()) {
+                (Some(floats), Some(ints)) => Some((floats, ints, op)),
+                _ => match (right.as_f64_slice(), self.as_i64_slice()) {
+                    (Some(floats), Some(ints)) => Some((floats, ints, mirrored(op))),
+                    _ => None,
+                },
+            };
+            if let Some((floats, ints, op)) = pair {
+                let bools = match op {
+                    ComparisonOp::Gt => fp_dot_kernel::gt_f64_i64_collect(floats, ints),
+                    ComparisonOp::Ge => fp_dot_kernel::ge_f64_i64_collect(floats, ints),
+                    ComparisonOp::Lt => fp_dot_kernel::lt_f64_i64_collect(floats, ints),
+                    ComparisonOp::Le => fp_dot_kernel::le_f64_i64_collect(floats, ints),
+                    ComparisonOp::Eq => fp_dot_kernel::eq_f64_i64_collect(floats, ints),
+                    ComparisonOp::Ne => fp_dot_kernel::ne_f64_i64_collect(floats, ints),
+                };
+                return Ok(Self::from_bool_values(bools));
+            }
+        }
         let mixed: Option<(Vec<f64>, &[f64], bool)> =
             match (self.as_i64_slice(), right.as_f64_slice()) {
                 (Some(l), Some(r)) => Some((l.iter().map(|&v| v as f64).collect(), r, false)),

@@ -398,6 +398,133 @@ pub fn div_by_number_f64(a: &[f64], s: f64, number_first: bool) -> Vec<f64> {
     out
 }
 
+/// `k as f64` four lanes at a time without AVX-512's conversion: the
+/// signed upper and unsigned lower 32 bits are each a double exactly, the
+/// upper scaled by 2^32 (exact), and the two added - one rounding, to
+/// nearest even, the conversion's own: the same bits.
+#[inline]
+#[allow(clippy::cast_possible_truncation)] // the halves are the point
+fn int_as_float(k: i64) -> f64 {
+    f64::from((k >> 32) as i32) * 4_294_967_296.0 + f64::from(k as u32)
+}
+
+/// `a[i] op b[i]` for a float column and an int one (the int's as `k as
+/// f64`; `int_first` puts it on the left), collected into a fresh Vec with
+/// whether any result is NaN - each int converted in the loop that uses
+/// it, where the int column became an 8 MB float buffer first and the
+/// result a zeroed one (x + k a million rows 0.62 ms, pandas 0.46;
+/// br-frankenpandas-uf0mw). The values the two-pass path computes.
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
+/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+macro_rules! float_int_collect {
+    ($name:ident, $op:tt, $doc:literal) => {
+        #[doc = $doc]
+        ///
+        /// # Panics
+        /// Panics if `a` and `b` differ in length.
+        #[inline(never)]
+        #[must_use]
+        pub fn $name(a: &[f64], b: &[i64], int_first: bool) -> (Vec<f64>, bool) {
+            assert_eq!(
+                a.len(),
+                b.len(),
+                concat!(stringify!($name), ": a/b length mismatch")
+            );
+            let mut output_nan = false;
+            let out = if int_first {
+                a.iter()
+                    .zip(b)
+                    .map(|(&x, &k)| {
+                        let r = int_as_float(k) $op x;
+                        output_nan |= r.is_nan();
+                        r
+                    })
+                    .collect()
+            } else {
+                a.iter()
+                    .zip(b)
+                    .map(|(&x, &k)| {
+                        let r = x $op int_as_float(k);
+                        output_nan |= r.is_nan();
+                        r
+                    })
+                    .collect()
+            };
+            (out, output_nan)
+        }
+    };
+}
+
+/// `a[i] as f64 / b[i] as f64` for two int columns (pandas' true division),
+/// collected with whether any quotient is NaN (0 / 0) - both converted in
+/// the loop that divides them, where each became an 8 MB float buffer first
+/// (k / k a million rows 0.99 ms, pandas 0.74; br-frankenpandas-uf0mw).
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
+/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+///
+/// # Panics
+/// Panics if `a` and `b` differ in length.
+#[inline(never)]
+#[must_use]
+pub fn div_i64_i64_collect(a: &[i64], b: &[i64]) -> (Vec<f64>, bool) {
+    assert_eq!(a.len(), b.len(), "div_i64_i64_collect: a/b length mismatch");
+    let mut output_nan = false;
+    let out = a
+        .iter()
+        .zip(b)
+        .map(|(&x, &y)| {
+            let r = int_as_float(x) / int_as_float(y);
+            output_nan |= r.is_nan();
+            r
+        })
+        .collect();
+    (out, output_nan)
+}
+
+/// `a[i] <op> b[i] as f64` for a float column and an int one, each int
+/// converted in the loop that compares it - the int column was an 8 MB float
+/// buffer first, then compared two lanes at a time (x > k a million rows
+/// 0.55 ms, pandas 0.40; br-frankenpandas-uf0mw). The comparisons are the
+/// scalar ones: NaN compares false, true under !=.
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
+/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+macro_rules! compare_float_int_kernel {
+    ($name:ident, $op:tt) => {
+        #[doc = concat!(
+            "`a[i] ", stringify!($op),
+            " b[i] as f64`; see `compare_float_int_kernel`."
+        )]
+        ///
+        /// # Panics
+        /// Panics if `a` and `b` differ in length.
+        #[inline(never)]
+        #[must_use]
+        pub fn $name(a: &[f64], b: &[i64]) -> Vec<bool> {
+            assert_eq!(
+                a.len(),
+                b.len(),
+                concat!(stringify!($name), ": a/b length mismatch")
+            );
+            a.iter().zip(b).map(|(&x, &k)| x $op int_as_float(k)).collect()
+        }
+    };
+}
+
+compare_float_int_kernel!(gt_f64_i64_collect, >);
+compare_float_int_kernel!(ge_f64_i64_collect, >=);
+compare_float_int_kernel!(lt_f64_i64_collect, <);
+compare_float_int_kernel!(le_f64_i64_collect, <=);
+compare_float_int_kernel!(eq_f64_i64_collect, ==);
+compare_float_int_kernel!(ne_f64_i64_collect, !=);
+
+float_int_collect!(add_f64_i64_collect, +, "A float column plus an int one.");
+float_int_collect!(sub_f64_i64_collect, -, "A float column minus an int one.");
+float_int_collect!(mul_f64_i64_collect, *, "A float column times an int one.");
+float_int_collect!(div_f64_i64_collect, /, "A float column over an int one.");
+
 /// [`div_by_number_f64`] collected straight into the `Arc<[f64]>` a
 /// NaN-exact column keeps, each quotient written into the fresh buffer - its
 /// quotients in a Vec copied into one were 8 MB more (nx / 3 0.58 ms a
@@ -1066,6 +1193,115 @@ mod tests {
         let swapped = div_by_number_f64(&a, 4.0, true);
         assert_eq!(swapped, vec![2.0, 0.5, 4.0, 8.0, 1.0]);
         assert_ne!(swapped, div_by_number_f64(&a, 4.0, false));
+    }
+
+    /// br-frankenpandas-uf0mw: each float-int kernel is the two-pass path -
+    /// the ints converted with `as f64`, then the op - bit for bit with its
+    /// NaN witness, both operand orders, over NaN / inf / -0.0 floats and
+    /// ints at the extremes and past 2^53 (where the conversion rounds),
+    /// lengths straddling 4-lane chunks. NEGATIVE: the orders differ (k - x
+    /// is not x - k).
+    #[test]
+    fn float_int_kernels_are_the_two_pass_path_uf0mw() {
+        type Kernel = fn(&[f64], &[i64], bool) -> (Vec<f64>, bool);
+        type Case = (Kernel, fn(f64, f64) -> f64);
+        type Compare = fn(&[f64], &[i64]) -> Vec<bool>;
+        type CompareCase = (Compare, fn(f64, f64) -> bool);
+        let cases: [Case; 4] = [
+            (add_f64_i64_collect, |x, y| x + y),
+            (sub_f64_i64_collect, |x, y| x - y),
+            (mul_f64_i64_collect, |x, y| x * y),
+            (div_f64_i64_collect, |x, y| x / y),
+        ];
+        let (inf, nan) = (f64::INFINITY, f64::NAN);
+        let floats = [1.5, nan, -0.0, inf, -2.25, 0.0, -inf, 7.0, 3.5];
+        let two53 = 1_i64 << 53;
+        let ints = [
+            0,
+            -1,
+            3,
+            i64::MIN,
+            i64::MAX,
+            two53 + 1,
+            -two53 - 3,
+            0xFFFF_FFFF,
+            -7,
+            2,
+        ];
+        for (k, (kernel, op)) in cases.into_iter().enumerate() {
+            for len in [0usize, 1, 3, 4, 5, 7, 8, 9, 17, 101] {
+                let a: Vec<f64> = (0..len).map(|i| floats[i % floats.len()]).collect();
+                let b: Vec<i64> = (0..len).map(|i| ints[i % ints.len()]).collect();
+                for int_first in [false, true] {
+                    let want: Vec<f64> = a
+                        .iter()
+                        .zip(&b)
+                        .map(|(&x, &y)| {
+                            if int_first {
+                                op(y as f64, x)
+                            } else {
+                                op(x, y as f64)
+                            }
+                        })
+                        .collect();
+                    let (got, output_nan) = kernel(&a, &b, int_first);
+                    assert_eq!(
+                        got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        "{k} {len} {int_first}"
+                    );
+                    assert_eq!(output_nan, want.iter().any(|v| v.is_nan()), "{k} {len}");
+                }
+            }
+        }
+        let (forward, _) = sub_f64_i64_collect(&[1.5], &[4], false);
+        let (backward, _) = sub_f64_i64_collect(&[1.5], &[4], true);
+        assert_eq!((forward[0], backward[0]), (-2.5, 2.5));
+        // Two int columns' true division, a zero divisor included (0 / 0 is
+        // NaN and sets the witness, 3 / 0 is inf and does not).
+        for len in [0usize, 1, 3, 4, 5, 9, 101] {
+            let a: Vec<i64> = (0..len).map(|i| ints[i % ints.len()]).collect();
+            let b: Vec<i64> = (0..len).map(|i| ints[(i * 3 + 1) % ints.len()]).collect();
+            let want: Vec<f64> = a
+                .iter()
+                .zip(&b)
+                .map(|(&x, &y)| x as f64 / y as f64)
+                .collect();
+            let (got, output_nan) = div_i64_i64_collect(&a, &b);
+            assert_eq!(
+                got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "div {len}"
+            );
+            assert_eq!(output_nan, want.iter().any(|v| v.is_nan()), "div {len}");
+        }
+        assert!(div_i64_i64_collect(&[0, 3], &[0, 0]).1);
+        assert!(!div_i64_i64_collect(&[3, -3], &[0, 0]).1);
+        // The six comparisons of a float column with an int one: the
+        // scalar ones (NaN false, true under !=; past 2^53 the int compares
+        // as the double it rounds to).
+        let compares: [CompareCase; 6] = [
+            (gt_f64_i64_collect, |x, y| x > y),
+            (ge_f64_i64_collect, |x, y| x >= y),
+            (lt_f64_i64_collect, |x, y| x < y),
+            (le_f64_i64_collect, |x, y| x <= y),
+            (eq_f64_i64_collect, |x, y| x == y),
+            (ne_f64_i64_collect, |x, y| x != y),
+        ];
+        let close = [9_007_199_254_740_992.0, 3.0, nan, -0.0, 2.0];
+        for (k, (kernel, compare)) in compares.into_iter().enumerate() {
+            for len in [0usize, 1, 5, 9, 101] {
+                let a: Vec<f64> = (0..len).map(|i| close[i % close.len()]).collect();
+                let b: Vec<i64> = (0..len).map(|i| ints[(i * 7) % ints.len()]).collect();
+                let want: Vec<bool> = a
+                    .iter()
+                    .zip(&b)
+                    .map(|(&x, &y)| compare(x, y as f64))
+                    .collect();
+                assert_eq!(kernel(&a, &b), want, "compare {k} {len}");
+            }
+        }
+        assert_eq!(ne_f64_i64_collect(&[nan, 2.0], &[2, 2]), vec![true, false]);
     }
 
     /// br-frankenpandas-3tk83: the Arc divide is the Vec-building one's
