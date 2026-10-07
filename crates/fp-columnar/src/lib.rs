@@ -2898,6 +2898,28 @@ fn python_floor_div_f64(lhs: f64, rhs: f64) -> f64 {
     npy_divmod_f64(lhs, rhs).0
 }
 
+/// `lhs // rhs` (or `lhs % rhs`) of two int64 values as pandas answers them
+/// once a zero divisor has promoted the column to float64: numpy's int64
+/// result cast to f64 - the exact quotient, a zero never -0.0 - and at a zero
+/// divisor `dispatch_fill_zeros`' fill: `//` inf / -inf by the dividend's
+/// sign and NaN for 0 // 0, `%` NaN. The f64 path divided the floats: 0 //
+/// -7 was -0.0 and 2**62 // -7 rounded (br-frankenpandas-woubx).
+#[allow(clippy::cast_precision_loss)] // numpy's cast of the int result
+fn promoted_int_floor_op(lhs: i64, rhs: i64, op: ArithmeticOp) -> f64 {
+    if rhs == 0 {
+        return match op {
+            ArithmeticOp::FloorDiv if lhs > 0 => f64::INFINITY,
+            ArithmeticOp::FloorDiv if lhs < 0 => f64::NEG_INFINITY,
+            _ => f64::NAN,
+        };
+    }
+    if matches!(op, ArithmeticOp::Mod) {
+        python_mod_i64(lhs, rhs) as f64
+    } else {
+        python_floor_div_i64(lhs, rhs) as f64
+    }
+}
+
 fn python_floor_div_i64(lhs: i64, rhs: i64) -> i64 {
     debug_assert_ne!(rhs, 0);
     if lhs == i64::MIN && rhs == -1 {
@@ -3036,6 +3058,11 @@ fn wrapping_pow_all(data: &[i64], exponent: u64) -> Vec<i64> {
     match exponent {
         0 => vec![1; data.len()],
         1 => data.to_vec(),
+        // Two 32-bit multiplies a square, four lanes at a time where the CPU
+        // has AVX2 (k ** 2 0.179 ms a million rows, numpy's square 0.169;
+        // br-frankenpandas-uf0mw).
+        #[cfg(target_arch = "x86_64")]
+        2 if std::arch::is_x86_feature_detected!("avx2") => fp_dot_kernel::square_i64_collect(data),
         2 => data.iter().map(|&v| v.wrapping_mul(v)).collect(),
         3 => data
             .iter()
@@ -19675,6 +19702,20 @@ impl Column {
                     let out =
                         par_map_vec_i64(l.len(), |i| wrapping_pow_i64(l[i], r[i].unsigned_abs()));
                     return Some(Ok(Self::from_i64_values_owned(out)));
+                }
+                // // and % with a zero divisor are pandas' float64: the int
+                // results cast, the zero divisors filled (see
+                // promoted_int_floor_op; br-frankenpandas-woubx).
+                if matches!(op, ArithmeticOp::FloorDiv | ArithmeticOp::Mod)
+                    && let (Some(l), Some(r)) = (self.as_i64_slice(), right.as_i64_slice())
+                    && r.contains(&0)
+                {
+                    let out: Vec<f64> = l
+                        .iter()
+                        .zip(r)
+                        .map(|(&a, &b)| promoted_int_floor_op(a, b, op))
+                        .collect();
+                    return Some(Ok(Self::from_f64_values(out)));
                 }
                 // Typed-input fast path (see the Float64 arm): both operands are
                 // all-valid contiguous i64 buffers, so feed vectorized_binary_i64
@@ -41647,6 +41688,61 @@ mod tests {
                 assert_eq!(got_valid.get(i), !w.is_nan(), "{k} sqrt {i}");
             }
         }
+    }
+
+    #[test]
+    fn promoted_int_floor_division_is_the_int_result_woubx() {
+        // br-frankenpandas-woubx: int // and % with a zero divisor are pandas'
+        // float64 - numpy's int64 quotient / remainder cast at the nonzero
+        // divisors (0 // -7 is 0.0, not -0.0; 2**62 // -7 and int64's
+        // minimum by 3 exact before the cast), inf / -inf / NaN (//) and NaN
+        // (%) at the zero ones, a NaN missing. Expected: pandas 2.2.3 live.
+        // NEGATIVE: float64 columns keep numpy's float floor division
+        // (0.0 // -7.0 is -0.0).
+        let nan = f64::NAN;
+        let a = Column::from_i64_values(vec![5, -7, 0, 3, 0, -7, 1 << 62, i64::MIN, i64::MIN, 7]);
+        let b = Column::from_i64_values(vec![0, 0, 0, 2, -7, 7, -7, -1, 3, -1]);
+        let cases = [
+            (
+                ArithmeticOp::FloorDiv,
+                [
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                    nan,
+                    1.0,
+                    0.0,
+                    -1.0,
+                    -6.588_122_883_467_697e17,
+                    -9.223_372_036_854_776e18,
+                    -3.074_457_345_618_258_4e18,
+                    -7.0,
+                ],
+            ),
+            (
+                ArithmeticOp::Mod,
+                [nan, nan, nan, 1.0, 0.0, 0.0, -3.0, 0.0, 1.0, 0.0],
+            ),
+        ];
+        for (op, want) in cases {
+            let got = a.binary_numeric(&b, op).unwrap();
+            assert_eq!(got.dtype(), DType::Float64, "{op:?}");
+            let (data, validity) = got.as_f64_slice_with_validity().unwrap();
+            for (i, (&g, &w)) in data.iter().zip(&want).enumerate() {
+                if w.is_nan() {
+                    assert!(g.is_nan() && !validity.get(i), "{op:?} {i}");
+                } else {
+                    assert_eq!(g.to_bits(), w.to_bits(), "{op:?} {i}");
+                    assert!(validity.get(i), "{op:?} {i}");
+                }
+            }
+        }
+        let floats = Column::from_f64_values(vec![0.0])
+            .binary_numeric(&Column::from_f64_values(vec![-7.0]), ArithmeticOp::FloorDiv)
+            .unwrap();
+        assert_eq!(
+            floats.as_f64_slice().unwrap()[0].to_bits(),
+            (-0.0_f64).to_bits()
+        );
     }
 
     #[test]

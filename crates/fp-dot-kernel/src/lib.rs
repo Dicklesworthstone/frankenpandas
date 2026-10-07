@@ -623,6 +623,28 @@ pub fn floor_div_by_number_i64(a: &[i64], s: i64, modulo: bool) -> Option<Vec<i6
     (outside == 0).then_some(out)
 }
 
+/// `v * v` wrapping for every int, collected - k ** 2 (numpy's square: 0.169
+/// ms a million rows against fp's multiply-shaped 0.179;
+/// br-frankenpandas-uf0mw). With `v = hi * 2^32 + lo` the square mod 2^64 is
+/// `lo * lo + (lo * hi) << 33`: two 32 x 32 -> 64 multiplies, where the
+/// general int64 multiply's emulation needs three. The same ints as
+/// `v.wrapping_mul(v)`.
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
+/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+#[inline(never)]
+#[must_use]
+#[allow(clippy::cast_sign_loss, clippy::cast_possible_wrap)] // bit patterns
+pub fn square_i64_collect(a: &[i64]) -> Vec<i64> {
+    a.iter()
+        .map(|&v| {
+            let bits = v as u64;
+            let (lo, hi) = (bits & 0xFFFF_FFFF, bits >> 32);
+            (lo * lo).wrapping_add((lo * hi) << 33) as i64
+        })
+        .collect()
+}
+
 /// [`floor_div_by_number_i64`] for a positive divisor and values past 2^51
 /// whose quotients are not - nanosecond timestamps by 10**9 took the integer
 /// divide (ts // 10**9 a million rows 0.97 ms, pandas 0.61;
@@ -1593,6 +1615,29 @@ mod tests {
             assert_eq!(mul_i64_collect(&a, &b), want, "mul {len}");
         }
         assert_eq!(mul_i64_collect(&[i64::MAX], &[2]), vec![-2]);
+        // The square on two 32 x 32 multiplies: v.wrapping_mul(v) for every
+        // int, the extremes and 32-bit edges among them.
+        let edges = [
+            0,
+            1,
+            -1,
+            3,
+            i64::MAX,
+            i64::MIN,
+            0xFFFF_FFFF,
+            0x1_0000_0000,
+            -0x1_0000_0001,
+            0x7FFF_FFFF_0000_0001,
+            -3_037_000_500,
+        ];
+        for len in [0usize, 1, 3, 4, 5, 9, 101] {
+            let a: Vec<i64> = (0..len)
+                .map(|i| edges[i % edges.len()] ^ edges[(i * 7) % edges.len()])
+                .collect();
+            let want: Vec<i64> = a.iter().map(|&v| v.wrapping_mul(v)).collect();
+            assert_eq!(square_i64_collect(&a), want, "square {len}");
+        }
+        assert_eq!(square_i64_collect(&[i64::MIN, 3]), vec![0, 9]);
     }
 
     /// br-frankenpandas-uf0mw: an int column over a number is `k as f64 / s`

@@ -28778,6 +28778,49 @@ def test_object_row_sums_like_pandas_rdnkd(case: str) -> None:
     assert run(fpd) == run(pd)
 
 
+_WOUBX_K = [5, -7, 0, 3, 0, -7, 2**62, -(2**63), -(2**63), 7]
+_WOUBX_D = [0, 0, 0, 2, -7, 7, -7, -1, 3, -1]
+_WOUBX_CASES = {
+    "k // d": lambda m: m.Series(_WOUBX_K) // m.Series(_WOUBX_D),
+    "k % d": lambda m: m.Series(_WOUBX_K) % m.Series(_WOUBX_D),
+    "0 // d": lambda m: 0 // m.Series(_WOUBX_D),
+    "0 % d": lambda m: 0 % m.Series(_WOUBX_D),
+    "2 % d": lambda m: 2 % m.Series(_WOUBX_D),
+    "2**62 // d": lambda m: 2**62 // m.Series(_WOUBX_D),
+    "2**62 % d": lambda m: 2**62 % m.Series(_WOUBX_D),
+    "k // 0": lambda m: m.Series(_WOUBX_K) // 0,
+    "k % 0": lambda m: m.Series(_WOUBX_K) % 0,
+    "frame // frame": lambda m: (m.DataFrame({"a": _WOUBX_K}) // m.DataFrame({"a": _WOUBX_D}))["a"],
+    "float // float (NEGATIVE: numpy's -0.0)": lambda m: m.Series([0.0, 2.0, -7.0]) // m.Series([-7.0, -1.0, 7.0]),
+    "float % float (NEGATIVE: numpy's -0.0)": lambda m: m.Series([0.0, 2.0, -7.0]) % m.Series([-7.0, -1.0, 7.0]),
+    "no zero divisor (NEGATIVE: int64)": lambda m: m.Series([0, 5, -7]) // m.Series([-7, 2, 3]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_WOUBX_CASES))
+def test_promoted_int_floor_ops_like_pandas_woubx(case: str) -> None:
+    # int // and % with a zero divisor are pandas' float64: numpy's int64
+    # quotient / remainder cast (0 // -7 is 0.0 - fp's float division gave
+    # -0.0 - and 2**62 // -7 exact before the cast), inf / -inf / NaN (//)
+    # and NaN (%) at the zero divisors (br-frankenpandas-woubx). Signed zeros
+    # told apart. NEGATIVE: float64 columns keep numpy's -0.0, and without a
+    # zero divisor the result stays int64.
+    def cell(value: Any) -> Any:
+        if isinstance(value, float):
+            if math.isnan(value):
+                return "nan"
+            if value == 0.0:
+                return "-0.0" if math.copysign(1.0, value) < 0 else "0.0"
+        return value
+
+    def run(m: Any) -> Any:
+        result = _WOUBX_CASES[case](m)
+        return str(result.dtype), [cell(v) for v in result.tolist()], result.isna().tolist()
+
+    assert run(fpd) == run(pd)
+
+
 _PZLMT_FRAMES = {
     "-0.0 beside NaN": {"a": [-0.0, -0.0, -2.5], "b": [float("nan"), -0.0, float("nan")], "c": [-0.0, -0.0, 1.0]},
     "all -0.0 (typed path)": {"a": [-0.0, -0.0], "b": [-0.0, -0.0]},
