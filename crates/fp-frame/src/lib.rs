@@ -1520,6 +1520,56 @@ fn shifted_f64_differences(
     }
 }
 
+/// The words of `validity` (`n` rows) shifted by `periods` rows, a 64-row
+/// word at a time: bit i is the source's bit i - periods, 0 where that row
+/// is outside the column, and every bit past `n` 0.
+fn shifted_validity_words(validity: &ValidityMask, n: usize, periods: i64) -> Vec<u64> {
+    let p = usize::try_from(periods.unsigned_abs()).map_or(n, |p| p.min(n));
+    let words = validity.packed_words_for_scan();
+    let word_count = n.div_ceil(64);
+    let tail = n % 64;
+    let within = |k: usize, word: u64| {
+        if k + 1 == word_count && tail != 0 {
+            word & ((1_u64 << tail) - 1)
+        } else {
+            word
+        }
+    };
+    // A source word, its bits past `n` 0 (past the last word, none).
+    let at = |k: usize| {
+        if k < word_count {
+            within(k, words.get(k).copied().unwrap_or(0))
+        } else {
+            0
+        }
+    };
+    let (word_shift, bit_shift) = (p / 64, p % 64);
+    (0..word_count)
+        .map(|k| {
+            let shifted = if periods >= 0 {
+                // Bit i is bit i - p: the words shifted up.
+                k.checked_sub(word_shift).map_or(0, |src| {
+                    let low = src
+                        .checked_sub(1)
+                        .filter(|_| bit_shift > 0)
+                        .map_or(0, |below| at(below) >> (64 - bit_shift));
+                    (at(src) << bit_shift) | low
+                })
+            } else {
+                // Bit i is bit i + p: shifted down; past the end reads 0.
+                let src = k + word_shift;
+                let high = if bit_shift > 0 {
+                    at(src + 1) << (64 - bit_shift)
+                } else {
+                    0
+                };
+                (at(src) >> bit_shift) | high
+            };
+            within(k, shifted)
+        })
+        .collect()
+}
+
 /// `diff(periods)` of a nullable float64 buffer of `n` rows: row i is
 /// `data[i] - data[i - periods]`, present iff both rows are. The mask is the
 /// source's ANDed with itself shifted by `periods`, a word at a time, and the
@@ -1540,31 +1590,12 @@ fn nullable_f64_diff(
     let n = data.len();
     let p = usize::try_from(periods.unsigned_abs()).map_or(n, |p| p.min(n));
     let words = validity.packed_words_for_scan();
-    let (word_shift, bit_shift) = (p / 64, p % 64);
-    let at = |k: usize| words.get(k).copied().unwrap_or(0);
-    let partner = |k: usize| -> u64 {
-        if periods >= 0 {
-            // Bit i of the partner mask is bit i - p: the words shifted up.
-            let Some(src) = k.checked_sub(word_shift) else {
-                return 0;
-            };
-            let low = src
-                .checked_sub(1)
-                .filter(|_| bit_shift > 0)
-                .map_or(0, |below| at(below) >> (64 - bit_shift));
-            (at(src) << bit_shift) | low
-        } else {
-            // Bit i is bit i + p: shifted down; past the end reads 0.
-            let src = k + word_shift;
-            let high = if bit_shift > 0 {
-                at(src + 1) << (64 - bit_shift)
-            } else {
-                0
-            };
-            (at(src) >> bit_shift) | high
-        }
-    };
-    let valid_words: Vec<u64> = (0..words.len()).map(|k| at(k) & partner(k)).collect();
+    let partners = shifted_validity_words(validity, n, periods);
+    let valid_words: Vec<u64> = words
+        .iter()
+        .zip(&partners)
+        .map(|(own, partner)| own & partner)
+        .collect();
     if nan_exact {
         let out = shifted_f64_differences(data, periods, p, |cur, other| {
             if cur.is_nan() || other.is_nan() {
@@ -23132,31 +23163,25 @@ impl Series {
                 _ => None,
             };
             if let Some((fill_datum, fill_valid)) = fill {
-                let mut out = vec![0.0_f64; n];
-                let mut words = vec![0u64; n.div_ceil(64)];
+                // The data moved as a slice and the mask a word at a time,
+                // the vacated rows the fill's: a mask bit was read and set
+                // per row (nx.shift(1) 4.2 ms a million rows, pandas 0.17;
+                // br-frankenpandas-cmgnp).
                 let p = periods.unsigned_abs().min(n as u64) as usize;
-                // `place(i, datum, valid)` writes one output cell.
-                let mut place = |i: usize, datum: f64, valid: bool| {
-                    out[i] = datum;
-                    if valid {
-                        words[i / 64] |= 1u64 << (i % 64);
-                    }
-                };
-                if periods >= 0 {
-                    for i in 0..p {
-                        place(i, fill_datum, fill_valid);
-                    }
-                    for i in p..n {
-                        let src = i - p;
-                        place(i, data[src], validity.get(src));
-                    }
+                let mut out = Vec::with_capacity(n);
+                let vacated = if periods >= 0 {
+                    out.resize(p, fill_datum);
+                    out.extend_from_slice(&data[..n - p]);
+                    0..p
                 } else {
-                    for i in 0..n - p {
-                        let src = i + p;
-                        place(i, data[src], validity.get(src));
-                    }
-                    for i in n - p..n {
-                        place(i, fill_datum, fill_valid);
+                    out.extend_from_slice(&data[p..]);
+                    out.resize(n, fill_datum);
+                    n - p..n
+                };
+                let mut words = shifted_validity_words(validity, n, periods);
+                if fill_valid {
+                    for i in vacated {
+                        words[i / 64] |= 1u64 << (i % 64);
                     }
                 }
                 let column = Column::from_f64_values_with_validity(
@@ -99339,27 +99364,20 @@ impl DataFrame {
             if col.dtype() == DType::Float64
                 && let Some((data, validity)) = col.as_f64_slice_with_validity()
             {
+                // The data moved as a slice and the mask a word at a time
+                // (a mask bit was read per row; br-frankenpandas-cmgnp); the
+                // vacated rows 0.0 and missing.
                 let n = data.len();
-                let mut out = vec![0.0_f64; n];
-                let mut words = vec![0u64; n.div_ceil(64)];
                 let p = periods.unsigned_abs().min(n as u64) as usize;
+                let mut out = Vec::with_capacity(n);
                 if periods >= 0 {
-                    for i in p..n {
-                        let src = i - p;
-                        out[i] = data[src];
-                        if validity.get(src) {
-                            words[i / 64] |= 1u64 << (i % 64);
-                        }
-                    }
+                    out.resize(p, 0.0);
+                    out.extend_from_slice(&data[..n - p]);
                 } else {
-                    for i in 0..n - p {
-                        let src = i + p;
-                        out[i] = data[src];
-                        if validity.get(src) {
-                            words[i / 64] |= 1u64 << (i % 64);
-                        }
-                    }
+                    out.extend_from_slice(&data[p..]);
+                    out.resize(n, 0.0);
                 }
+                let words = shifted_validity_words(validity, n, periods);
                 // The source's values moved: a float32 column stays float32
                 // (it came back float64; br-frankenpandas-o8m7y).
                 Ok(Column::from_f64_values_with_validity(
@@ -173757,6 +173775,85 @@ mod tests {
                         expected.to_bits(),
                         "n {n} periods {periods} row {i}"
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shift_moves_the_mask_a_word_at_a_time_as_the_row_loop_cmgnp() {
+        // br-frankenpandas-cmgnp: a Float64 Series' shift (a missing or a
+        // number fill) and a frame's typed shift move the data as a slice
+        // and the mask a word at a time - every datum's bits and mask bit the
+        // row loop's, for lengths and periods across word edges, both signs,
+        // past the length. NEGATIVE: the mask is over numbers, so a missing
+        // row moved stays missing however its datum reads, and the shifted
+        // words carry no bit past the length.
+        for n in [1_usize, 63, 64, 65, 129, 200] {
+            let data: Vec<f64> = (0..n).map(|i| i as f64 * 1.5 - 7.0).collect();
+            let mut mask = ValidityMask::all_valid(n);
+            for i in 0..n {
+                if i % 5 == 3 || i % 64 == 0 {
+                    mask.set(i, false);
+                }
+            }
+            let column = Column::from_f64_values_with_validity(data.clone(), mask.clone());
+            let index = Index::from_range(0, n as i64, 1);
+            let series = Series::new("x", index.clone(), column.clone()).unwrap();
+            let base = Series::new("y", index, Column::from_f64_values(vec![0.0; n])).unwrap();
+            let frame = DataFrame::from_series(vec![base])
+                .unwrap()
+                .with_column("x", column)
+                .unwrap();
+            for periods in [0_i64, 1, 2, 63, 64, 65, 300, -1, -2, -64, -65, -300] {
+                let p = usize::try_from(periods.unsigned_abs()).unwrap().min(n);
+                let source = |i: usize| {
+                    if periods >= 0 {
+                        i.checked_sub(p)
+                    } else {
+                        Some(i + p).filter(|&j| j < n)
+                    }
+                };
+                let words = crate::shifted_validity_words(&mask, n, periods);
+                for i in 0..n {
+                    let bit = (words[i / 64] >> (i % 64)) & 1 == 1;
+                    assert_eq!(
+                        bit,
+                        source(i).is_some_and(|j| mask.get(j)),
+                        "{n} {periods} {i}"
+                    );
+                }
+                if n % 64 != 0 {
+                    assert_eq!(words[n / 64] >> (n % 64), 0, "{n} {periods}");
+                }
+                let fills = [
+                    (Scalar::Null(NullKind::NaN), f64::NAN, false),
+                    (Scalar::Float64(0.5), 0.5, true),
+                ];
+                for (fill, fill_datum, fill_valid) in fills {
+                    let got = series.shift_with_fill_value(periods, fill).unwrap();
+                    let (values, validity) = got.column().as_f64_slice_with_validity().unwrap();
+                    for i in 0..n {
+                        let (datum, valid) =
+                            source(i).map_or((fill_datum, fill_valid), |j| (data[j], mask.get(j)));
+                        assert_eq!(values[i].to_bits(), datum.to_bits(), "{n} {periods} {i}");
+                        assert_eq!(validity.get(i), valid, "{n} {periods} {i}");
+                    }
+                }
+                let shifted = frame.shift(periods).unwrap();
+                let (values, validity) = shifted
+                    .column_at(1)
+                    .unwrap()
+                    .as_f64_slice_with_validity()
+                    .unwrap();
+                for i in 0..n {
+                    let (datum, valid) = source(i).map_or((0.0, false), |j| (data[j], mask.get(j)));
+                    assert_eq!(
+                        values[i].to_bits(),
+                        datum.to_bits(),
+                        "frame {n} {periods} {i}"
+                    );
+                    assert_eq!(validity.get(i), valid, "frame {n} {periods} {i}");
                 }
             }
         }
