@@ -2248,6 +2248,21 @@ pub fn power_by_number(base: f64, exponent: f64) -> f64 {
     }
 }
 
+/// Whether `data` holds a NaN, and whether every value is finite: `x - x`
+/// is NaN exactly for a NaN or an infinity, so one subtraction a value
+/// answers the second, and only a buffer holding a non-finite value is
+/// searched for a NaN, to its first (a NaN test and a finiteness test a
+/// value were most of a million-row float column's construction;
+/// br-frankenpandas-br362).
+#[allow(clippy::eq_op)] // `v - v` is the test: NaN for a NaN or an infinity.
+fn nan_and_finite(data: &[f64]) -> (bool, bool) {
+    let non_finite = data.iter().fold(false, |any, &v| any | (v - v).is_nan());
+    if !non_finite {
+        return (false, true);
+    }
+    (data.iter().any(|v| v.is_nan()), false)
+}
+
 /// [`power_by_number`] of every value, a NaN value's slot 0.0 when
 /// `nan_to_zero` (a missing row's datum) in its own pass storing a select;
 /// the exponent's case chosen once: the square and the reciprocal a
@@ -13988,13 +14003,31 @@ impl Column {
     }
 
     pub fn from_f64_values(data: Vec<f64>) -> Self {
-        let mut has_nan = false;
-        let mut all_finite = true;
-        for value in &data {
-            has_nan |= value.is_nan();
-            all_finite &= value.is_finite();
-        }
+        let (has_nan, all_finite) = nan_and_finite(&data);
         Self::from_f64_values_with_finite_witness(data, has_nan, all_finite)
+    }
+
+    /// [`Self::from_f64_values`] of a buffer already in the `Arc<[f64]>` that
+    /// column keeps: the same NaN-exact column without its `Arc::from(Vec)`
+    /// copy - for a reader that can fill the Arc directly (a numpy array's
+    /// contiguous buffer; br-frankenpandas-br362).
+    #[must_use]
+    pub fn from_f64_arc(data: Arc<[f64]>) -> Self {
+        let (has_nan, all_finite) = nan_and_finite(&data);
+        let validity = if has_nan {
+            ValidityMask::from_f64(&data)
+        } else {
+            ValidityMask::all_valid(data.len())
+        };
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_all_valid_float64_arc_nan_exact(data, Some(all_finite)),
+            validity,
+            data: None,
+            categorical: None,
+            width: None,
+            pandas_string: false,
+        }
     }
 
     /// Like `from_f64_values` but, for the all-valid (no-NaN) case, MOVES the
@@ -14009,7 +14042,10 @@ impl Column {
     /// take_positions/binary zero-copy fast paths — fine for terminal outputs).
     #[must_use]
     pub fn from_f64_values_owned(data: Vec<f64>) -> Self {
-        let has_nan = data.iter().any(|v| v.is_nan());
+        // A fold, which vectorizes: `any` stops at a NaN and so stayed a
+        // scalar loop over every value of a NaN-free output (73% of a
+        // one-column frame's x * 2; br-frankenpandas-br362).
+        let has_nan = data.iter().fold(false, |any, v| any | v.is_nan());
         Self::from_f64_values_owned_tracked(data, has_nan)
     }
 
@@ -36472,8 +36508,8 @@ mod tests {
     use super::{
         ArithmeticOp, BoolAffineSelectionWitness, Column, ColumnData, ColumnError, ComparisonOp,
         ConstDivisorU64, ScalarValues, SparseColumn, ValidityMask, affine_positions,
-        affine_positions_fit, binary_f64_apply, power_by_number, python_floor_div_i64,
-        python_mod_i64, scalar_compare, wrapping_pow_all, wrapping_pow_i64,
+        affine_positions_fit, binary_f64_apply, nan_and_finite, power_by_number,
+        python_floor_div_i64, python_mod_i64, scalar_compare, wrapping_pow_all, wrapping_pow_i64,
     };
 
     #[test]
@@ -41016,6 +41052,65 @@ mod tests {
                 want,
                 "int ** {exponent}"
             );
+        }
+    }
+
+    #[test]
+    fn from_f64_arc_is_from_f64_values_br362() {
+        // br-frankenpandas-br362: a buffer handed over as the Arc is the
+        // column from_f64_values builds of it - datum bits, mask, NaN-exact
+        // flag, finiteness witness and cells - with or without NaN and inf.
+        // NEGATIVE: NaN rows are missing (a holey mask, not an all-valid
+        // stamp of the buffer).
+        let inputs = [
+            vec![1.5, -0.0, 2.25, 1e300],
+            vec![1.5, f64::NAN, -0.0, f64::NAN, 7.0],
+            vec![f64::INFINITY, 3.0, f64::NEG_INFINITY],
+            vec![],
+        ];
+        for (k, data) in inputs.iter().enumerate() {
+            let ours = Column::from_f64_arc(Arc::from(data.as_slice()));
+            let theirs = Column::from_f64_values(data.clone());
+            let (ours_data, ours_valid) = ours.as_f64_slice_with_validity().unwrap();
+            let (theirs_data, theirs_valid) = theirs.as_f64_slice_with_validity().unwrap();
+            assert_eq!(
+                ours_data.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                theirs_data.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "{k}"
+            );
+            assert_eq!(ours_valid, theirs_valid, "{k}");
+            assert_eq!(ours.nan_missing_exact(), theirs.nan_missing_exact(), "{k}");
+            assert_eq!(
+                ours.f64_finite_witness(),
+                theirs.f64_finite_witness(),
+                "{k}"
+            );
+            assert_eq!(
+                format!("{:?}", ours.values()),
+                format!("{:?}", theirs.values()),
+                "{k}"
+            );
+        }
+        let holey = Column::from_f64_arc(Arc::from(inputs[1].as_slice()));
+        assert!(!holey.validity().all());
+        assert!(!holey.validity().get(1));
+        // The one-subtraction scan is the two tests a value (NEGATIVE: an
+        // infinity is not finite and not NaN).
+        let specials: [&[f64]; 7] = [
+            &[],
+            &[1.0, -0.0, 5e-324, 1e308],
+            &[f64::INFINITY],
+            &[2.0, f64::NEG_INFINITY],
+            &[f64::NAN],
+            &[1.0, f64::INFINITY, f64::NAN],
+            &[f64::MAX, f64::MIN, f64::MIN_POSITIVE],
+        ];
+        for data in specials {
+            let want = (
+                data.iter().any(|v| v.is_nan()),
+                data.iter().all(|v| v.is_finite()),
+            );
+            assert_eq!(nan_and_finite(data), want, "{data:?}");
         }
     }
 

@@ -8744,7 +8744,17 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
         "i" if native => Column::from_i64_values(ndarray_elements::<i64>(py, obj)?),
         "i" => Column::from_i64_values(obj.call_method0("tolist")?.extract::<Vec<i64>>()?),
         "f" if native && name == "float64" => {
-            Column::from_f64_values(ndarray_elements::<f64>(py, obj)?)
+            // A contiguous buffer read straight into the column's Arc: one
+            // copy where to_vec and from_f64_values' Arc::from made two
+            // (Series(ndarray) of a million floats 1.0 ms;
+            // br-frankenpandas-br362). A strided view gathers as before.
+            let buffer = pyo3::buffer::PyBuffer::<f64>::get(obj)?;
+            match buffer.as_slice(py) {
+                Some(cells) => Column::from_f64_arc(
+                    cells.iter().map(pyo3::buffer::ReadOnlyCell::get).collect(),
+                ),
+                None => Column::from_f64_values(buffer.to_vec(py)?),
+            }
         }
         // A numpy bool is one byte, zero or not.
         "b" => Column::from_bool_values(

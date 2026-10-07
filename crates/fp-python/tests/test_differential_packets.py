@@ -28555,3 +28555,34 @@ def test_float_ufunc_of_a_series_like_pandas_zgx6u(case: str) -> None:
         return _pucep_shown(result), result.name, _pucep_shown(s)
 
     assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-br362: a Series of a float64 numpy array reads a
+# contiguous buffer straight into its column - pandas' values, NaN missing,
+# -0.0 / inf kept, the array untouched; NEGATIVE: a strided view, a column of
+# a 2-D array and a big-endian array (gathered / converted, not the buffer).
+def _br362_arrays() -> Any:
+    base = np.array([1.5, float("nan"), -0.0, float("inf"), -2.25, 1e-310, float("nan"), 3.0])
+    return {
+        "contiguous": base.copy(),
+        "strided (NEGATIVE)": base.copy()[::2],
+        "2-D column (NEGATIVE)": np.stack([base, base * 2], axis=1)[:, 1],
+        "big-endian (NEGATIVE)": base.astype(">f8"),
+        "empty": np.array([], dtype="float64"),
+    }
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_br362_arrays()))
+def test_series_of_a_float_array_like_pandas_br362(case: str) -> None:
+    # pandas keeps a big-endian array's '>f8' (and its sum raises); fp holds
+    # float64 - the values and missing rows are what is compared there.
+    def run(m: Any) -> Any:
+        array = _br362_arrays()[case]
+        s = m.Series(array)
+        shown = _pucep_shown(s)
+        if case.startswith("big-endian"):
+            return shown[1:], list(array.view("u8"))
+        return shown, float(s.sum()), int(s.count()), list(array.view("u8"))
+
+    assert run(fpd) == run(pd)
