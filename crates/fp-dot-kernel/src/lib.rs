@@ -430,13 +430,14 @@ macro_rules! float_int_collect {
                 b.len(),
                 concat!(stringify!($name), ": a/b length mismatch")
             );
-            let mut output_nan = false;
+            // A count, not a bool: see `made_nan_f64_arc`.
+            let mut nans = 0_u64;
             let out = if int_first {
                 a.iter()
                     .zip(b)
                     .map(|(&x, &k)| {
                         let r = int_as_float(k) $op x;
-                        output_nan |= r.is_nan();
+                        nans += u64::from(r.is_nan());
                         r
                     })
                     .collect()
@@ -445,12 +446,12 @@ macro_rules! float_int_collect {
                     .zip(b)
                     .map(|(&x, &k)| {
                         let r = x $op int_as_float(k);
-                        output_nan |= r.is_nan();
+                        nans += u64::from(r.is_nan());
                         r
                     })
                     .collect()
             };
-            (out, output_nan)
+            (out, nans > 0)
         }
     };
 }
@@ -469,17 +470,18 @@ macro_rules! float_int_collect {
 #[must_use]
 pub fn div_i64_i64_collect(a: &[i64], b: &[i64]) -> (Vec<f64>, bool) {
     assert_eq!(a.len(), b.len(), "div_i64_i64_collect: a/b length mismatch");
-    let mut output_nan = false;
+    // A count, not a bool: see `made_nan_f64_arc`.
+    let mut nans = 0_u64;
     let out = a
         .iter()
         .zip(b)
         .map(|(&x, &y)| {
             let r = int_as_float(x) / int_as_float(y);
-            output_nan |= r.is_nan();
+            nans += u64::from(r.is_nan());
             r
         })
         .collect();
-    (out, output_nan)
+    (out, nans > 0)
 }
 
 /// `a[i] <op> b[i] as f64` for a float column and an int one, each int
@@ -600,11 +602,12 @@ pub fn floor_div_by_number_i64(a: &[i64], s: i64, modulo: bool) -> Option<Vec<i6
             guess
         }
     };
-    let mut outside = false;
+    // A count, not a bool: see `made_nan_f64_arc`.
+    let mut outside = 0_u64;
     let out = if modulo {
         a.iter()
             .map(|&k| {
-                outside |= k.unsigned_abs() >= LIMIT;
+                outside += u64::from(k.unsigned_abs() >= LIMIT);
                 let x = small_int_as_float(k);
                 small_float_as_int((-quotient(x)).mul_add(divisor, x))
             })
@@ -612,12 +615,12 @@ pub fn floor_div_by_number_i64(a: &[i64], s: i64, modulo: bool) -> Option<Vec<i6
     } else {
         a.iter()
             .map(|&k| {
-                outside |= k.unsigned_abs() >= LIMIT;
+                outside += u64::from(k.unsigned_abs() >= LIMIT);
                 small_float_as_int(quotient(small_int_as_float(k)))
             })
             .collect()
     };
-    (!outside).then_some(out)
+    (outside == 0).then_some(out)
 }
 
 /// [`floor_div_by_number_i64`] for a positive divisor and values past 2^51
@@ -647,12 +650,13 @@ pub fn floor_div_wide_by_number_i64(a: &[i64], s: i64, modulo: bool) -> Option<V
     if a.first().is_some_and(|&k| guess(k).abs() >= LIMIT) {
         return None;
     }
-    let mut outside = false;
+    // A count, not a bool: see `made_nan_f64_arc`.
+    let mut outside = 0_u64;
     let out = if modulo {
         a.iter()
             .map(|&k| {
                 let q = guess(k);
-                outside |= q.abs() >= LIMIT;
+                outside += u64::from(q.abs() >= LIMIT);
                 let rest = k.wrapping_sub(small_float_as_int(q).wrapping_mul(s));
                 rest + (s & -i64::from(rest < 0)) - (s & -i64::from(rest >= s))
             })
@@ -661,14 +665,14 @@ pub fn floor_div_wide_by_number_i64(a: &[i64], s: i64, modulo: bool) -> Option<V
         a.iter()
             .map(|&k| {
                 let q = guess(k);
-                outside |= q.abs() >= LIMIT;
+                outside += u64::from(q.abs() >= LIMIT);
                 let q = small_float_as_int(q);
                 let rest = k.wrapping_sub(q.wrapping_mul(s));
                 q - i64::from(rest < 0) + i64::from(rest >= s)
             })
             .collect()
     };
-    (!outside).then_some(out)
+    (outside == 0).then_some(out)
 }
 
 /// `v as i64` (toward zero) of every float, wrapped as `((t & mask) ^
@@ -689,15 +693,16 @@ pub fn floor_div_wide_by_number_i64(a: &[i64], s: i64, modulo: bool) -> Option<V
 #[must_use]
 pub fn float_as_int_collect(a: &[f64], mask: i64, sign: i64) -> Option<Vec<i64>> {
     const LIMIT: f64 = 2_251_799_813_685_248.0; // 2^51
-    let mut outside = false;
+    // A count, not a bool: see `made_nan_f64_arc`.
+    let mut outside = 0_u64;
     let out = a
         .iter()
         .map(|&v| {
-            outside |= v.is_nan() | (v.abs() >= LIMIT);
+            outside += u64::from(v.is_nan() | (v.abs() >= LIMIT));
             ((small_float_as_int(v.trunc()) & mask) ^ sign).wrapping_sub(sign)
         })
         .collect();
-    (!outside).then_some(out)
+    (outside == 0).then_some(out)
 }
 
 float_int_collect!(add_f64_i64_collect, +, "A float column plus an int one.");
@@ -914,17 +919,20 @@ macro_rules! made_nan_f64_arc {
                 b.len(),
                 concat!(stringify!($name), ": a/b length mismatch")
             );
-            let mut made_nan = false;
+            // A count, not a bool: a bool accumulator lives in bytes, and
+            // each 4-lane compare was packed down to them (5 shuffles a
+            // vector); a u64 count adds the compare's lanes as they are.
+            let mut made_nan = 0_u64;
             let out = a
                 .iter()
                 .zip(b)
                 .map(|(&x, &y)| {
                     let r = x $op y;
-                    made_nan |= r.is_nan() & !x.is_nan() & !y.is_nan();
+                    made_nan += u64::from(r.is_nan() & !x.is_nan() & !y.is_nan());
                     r
                 })
                 .collect();
-            (out, made_nan)
+            (out, made_nan > 0)
         }
     };
 }
@@ -950,17 +958,18 @@ macro_rules! nan_witness_f64_collect {
                 b.len(),
                 concat!(stringify!($name), ": a/b length mismatch")
             );
-            let mut output_nan = false;
+            // A count, not a bool: see `made_nan_f64_arc`.
+            let mut nans = 0_u64;
             let out = a
                 .iter()
                 .zip(b)
                 .map(|(&x, &y)| {
                     let r = x $op y;
-                    output_nan |= r.is_nan();
+                    nans += u64::from(r.is_nan());
                     r
                 })
                 .collect();
-            (out, output_nan)
+            (out, nans > 0)
         }
     };
 }
@@ -1055,19 +1064,20 @@ made_nan_f64_kernel!(
 #[inline(never)]
 #[must_use]
 pub fn sqrt_f64_collect(a: &[f64]) -> (Vec<f64>, bool, bool) {
-    let mut out_of_domain = false;
-    let mut non_finite = false;
+    // Counts, not bools: see `made_nan_f64_arc`.
+    let mut out_of_domain = 0_u64;
+    let mut non_finite = 0_u64;
     let out = a
         .iter()
         .map(|&x| {
             // NaN counts as OUT of domain; see the note above.
-            out_of_domain |= x.is_nan() | (x < 0.0);
+            out_of_domain += u64::from(x.is_nan() | (x < 0.0));
             let r = x.sqrt();
-            non_finite |= !r.is_finite();
+            non_finite += u64::from(!r.is_finite());
             r
         })
         .collect();
-    (out, !out_of_domain, !non_finite)
+    (out, out_of_domain == 0, non_finite == 0)
 }
 
 /// Every value's square root collected straight into the `Arc<[f64]>` a
