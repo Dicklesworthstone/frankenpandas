@@ -20107,15 +20107,19 @@ impl Column {
                     // binary_numeric promote the column: declined here).
                     // Four lanes at a time through f64 where the CPU has
                     // AVX2 and the values are below 2^51 (k // 3 a million
-                    // rows 1.65 ms, pandas 0.62; br-frankenpandas-uf0mw);
-                    // else a positive divisor divides through its reciprocal.
+                    // rows 1.65 ms, pandas 0.62; br-frankenpandas-uf0mw), or
+                    // past it with the quotients below it (ts // 10**9 0.97
+                    // ms, pandas 0.61); else a positive divisor divides
+                    // through its reciprocal.
                     (ArithmeticOp::FloorDiv | ArithmeticOp::Mod, false) if s != 0 => {
                         let modulo = matches!(op, ArithmeticOp::Mod);
                         #[cfg(target_arch = "x86_64")]
                         if std::arch::is_x86_feature_detected!("avx2")
                             && std::arch::is_x86_feature_detected!("fma")
                             && let Some(out) =
-                                fp_dot_kernel::floor_div_by_number_i64(data, s, modulo)
+                                fp_dot_kernel::floor_div_by_number_i64(data, s, modulo).or_else(
+                                    || fp_dot_kernel::floor_div_wide_by_number_i64(data, s, modulo),
+                                )
                         {
                             return Some(Self::from_i64_values_owned(out));
                         }

@@ -620,6 +620,57 @@ pub fn floor_div_by_number_i64(a: &[i64], s: i64, modulo: bool) -> Option<Vec<i6
     (!outside).then_some(out)
 }
 
+/// [`floor_div_by_number_i64`] for a positive divisor and values past 2^51
+/// whose quotients are not - nanosecond timestamps by 10**9 took the integer
+/// divide (ts // 10**9 a million rows 0.97 ms, pandas 0.61;
+/// br-frankenpandas-uf0mw). The guess `k * (1 / s)` in f64, floored, rounds
+/// three times (the int, the reciprocal, the product), so for a quotient
+/// below 2^51 it is the quotient or one off it; the remainder `k - q * s` in
+/// wrapping int64 - exact, the true one being small - says which way, added
+/// in as its comparisons' 0 / 1 so the loop has no branch. The integer
+/// quotients and remainders.
+///
+/// `None` when the divisor is not in `1..2^53`, or any quotient is 2^51 or
+/// more in magnitude.
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
+/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+#[inline(never)]
+#[must_use]
+pub fn floor_div_wide_by_number_i64(a: &[i64], s: i64, modulo: bool) -> Option<Vec<i64>> {
+    const LIMIT: f64 = 2_251_799_813_685_248.0; // 2^51
+    if !(1..1 << 53).contains(&s) {
+        return None;
+    }
+    let reciprocal = 1.0 / int_as_float(s);
+    let guess = |k: i64| (int_as_float(k) * reciprocal).floor();
+    if a.first().is_some_and(|&k| guess(k).abs() >= LIMIT) {
+        return None;
+    }
+    let mut outside = false;
+    let out = if modulo {
+        a.iter()
+            .map(|&k| {
+                let q = guess(k);
+                outside |= q.abs() >= LIMIT;
+                let rest = k.wrapping_sub(small_float_as_int(q).wrapping_mul(s));
+                rest + (s & -i64::from(rest < 0)) - (s & -i64::from(rest >= s))
+            })
+            .collect()
+    } else {
+        a.iter()
+            .map(|&k| {
+                let q = guess(k);
+                outside |= q.abs() >= LIMIT;
+                let q = small_float_as_int(q);
+                let rest = k.wrapping_sub(q.wrapping_mul(s));
+                q - i64::from(rest < 0) + i64::from(rest >= s)
+            })
+            .collect()
+    };
+    (!outside).then_some(out)
+}
+
 /// `v as i64` (toward zero) of every float, wrapped as `((t & mask) ^
 /// sign) - sign`: a narrow int width's wrap, its value bits sign-extended
 /// from `sign` (0 for an unsigned width; mask -1 and sign 0 keep the
@@ -1602,6 +1653,85 @@ mod tests {
         assert_eq!(floor_div_by_number_i64(&[3], bound, false), None);
         assert_eq!(floor_div_by_number_i64(&[3], -bound, true), None);
         assert_eq!(floor_div_by_number_i64(&[3], 0, false), None);
+    }
+
+    /// br-frankenpandas-uf0mw: the wide floor division is the integer one for
+    /// values past 2^51 whose quotients are below it - nanosecond timestamps
+    /// by 10**9, the int64 extremes by large divisors, a step either side of
+    /// the divisor's multiples - and Python's modulo, at prefixes straddling
+    /// the lanes. NEGATIVE: a quotient at 2^51 or beyond, and a divisor of 0,
+    /// a negative one or 2^53, answer None.
+    #[test]
+    fn floor_div_wide_is_the_integer_floor_division_uf0mw() {
+        fn floor_div(k: i64, s: i64) -> i64 {
+            let q = k / s;
+            if k % s != 0 && (k < 0) != (s < 0) {
+                q - 1
+            } else {
+                q
+            }
+        }
+        let limit = 1_i64 << 51;
+        let divisors = [
+            1_000_000_000_i64,
+            1_000_000,
+            86_400_000_000_000,
+            7,
+            3 << 20,
+            (1 << 30) + 1,
+            (1 << 52) + 3,
+        ];
+        for s in divisors {
+            let mut values = vec![
+                i64::MAX,
+                i64::MIN,
+                i64::MIN + 1,
+                0,
+                1,
+                -1,
+                1_700_000_000_000_000_000,
+                -1_700_000_000_000_000_123,
+            ];
+            for m in [
+                i64::MAX / s,
+                i64::MIN / s,
+                1_700_000_000,
+                -1_700_000_000,
+                12_345,
+            ] {
+                for step in [-1, 0, 1] {
+                    if let Some(k) = m.checked_mul(s).and_then(|v| v.checked_add(step)) {
+                        values.push(k);
+                    }
+                }
+            }
+            values.retain(|&k| floor_div(k, s).abs() < limit);
+            for modulo in [false, true] {
+                let want: Vec<i64> = values
+                    .iter()
+                    .map(|&k| {
+                        let q = floor_div(k, s);
+                        if modulo {
+                            k.wrapping_sub(s.wrapping_mul(q))
+                        } else {
+                            q
+                        }
+                    })
+                    .collect();
+                for len in [0, 1, 3, 4, 5, 8, 9, values.len()] {
+                    assert_eq!(
+                        floor_div_wide_by_number_i64(&values[..len], s, modulo).as_deref(),
+                        Some(&want[..len]),
+                        "{s} {modulo} {len}"
+                    );
+                }
+            }
+        }
+        assert_eq!(floor_div_wide_by_number_i64(&[1, 1 << 60], 3, false), None);
+        assert_eq!(floor_div_wide_by_number_i64(&[i64::MAX], 7, true), None);
+        assert_eq!(floor_div_wide_by_number_i64(&[5], 0, false), None);
+        assert_eq!(floor_div_wide_by_number_i64(&[5], -3, false), None);
+        assert_eq!(floor_div_wide_by_number_i64(&[5], 1 << 53, false), None);
     }
 
     /// br-frankenpandas-uf0mw: the 4-lane float -> int conversion is `as
