@@ -14513,6 +14513,23 @@ impl Series {
             return Ok(None);
         };
         let missing = table[table.len() - 1];
+        // The categories answer as a missing row does but at one code at
+        // most (a category list holds each value once): each row compares
+        // its code with that one in a vectorizable pass, where a table
+        // lookup a row was a gather (br-frankenpandas-mwpo1).
+        let mut odd = (0..ncat)
+            .zip(&table[..table.len() - 1])
+            .filter(|&(_, &flag)| flag != missing)
+            .map(|(code, _)| code);
+        if let (target, None) = (odd.next(), odd.next()) {
+            // -2 is no row's code: every row then answers as a missing one.
+            let target = target.unwrap_or(-2);
+            let flags = codes
+                .iter()
+                .map(|&code| (code == target) != missing)
+                .collect();
+            return Ok(Some(Column::from_bool_values(flags)));
+        }
         let flags = codes
             .iter()
             .map(|&code| usize::try_from(code).map_or(missing, |code| table[code]))
@@ -173695,6 +173712,74 @@ mod tests {
                         expected.to_bits(),
                         "n {n} periods {periods} row {i}"
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn codes_equality_is_one_code_compare_or_the_table_mwpo1() {
+        // `==` / `!=` of a categorical held as codes is the comparison of
+        // the same column held by value: a member, an absent value, a
+        // missing scalar, missing rows. NEGATIVE: categories 1 and 1.0 both
+        // equal the scalar 1 - true at two codes, which a compare with one
+        // code cannot answer, so the table lookup serves it
+        // (br-frankenpandas-mwpo1).
+        let n = 150_usize;
+        let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+        let text: Vec<Scalar> = ["a", "b", "c"]
+            .into_iter()
+            .map(|s| Scalar::Utf8(s.to_owned()))
+            .collect();
+        let numbers = vec![Scalar::Int64(1), Scalar::Float64(1.0), Scalar::Int64(7)];
+        for categories in [text, numbers] {
+            let codes: Vec<i32> = (0..n)
+                .map(|i| match i % 9 {
+                    4 => -1,
+                    _ => i32::try_from(i * 7 % categories.len()).unwrap(),
+                })
+                .collect();
+            let meta = fp_types::CategoricalMetadata {
+                categories: categories.clone(),
+                ordered: false,
+            };
+            let coded = Series::new(
+                "k",
+                Index::new(labels.clone()),
+                Column::from_categorical_codes(codes.clone(), meta.clone()),
+            )
+            .unwrap();
+            assert!(coded.column().categorical_codes().is_some());
+            let by_value = Series::new(
+                "k",
+                Index::new(labels.clone()),
+                Column::new(DType::Categorical, coded.values().to_vec())
+                    .unwrap()
+                    .with_categorical(Some(meta)),
+            )
+            .unwrap();
+            assert!(by_value.column().categorical_codes().is_none());
+            let absent = [
+                Scalar::Utf8("zz".to_owned()),
+                Scalar::Int64(5),
+                Scalar::Null(NullKind::NaN),
+            ];
+            for scalar in categories.iter().chain(&absent) {
+                for op in [fp_columnar::ComparisonOp::Eq, fp_columnar::ComparisonOp::Ne] {
+                    let got = coded
+                        .compare_scalar(scalar, op)
+                        .map(|s| s.values().to_vec());
+                    let want = by_value
+                        .compare_scalar(scalar, op)
+                        .map(|s| s.values().to_vec());
+                    assert_eq!(format!("{got:?}"), format!("{want:?}"), "{scalar:?} {op:?}");
+                    if matches!(scalar, Scalar::Int64(1)) && op == fp_columnar::ComparisonOp::Eq {
+                        let got = got.unwrap();
+                        for code in [0, 1] {
+                            let row = codes.iter().position(|&c| c == code).unwrap();
+                            assert_eq!(got[row], Scalar::Bool(true), "code {code}");
+                        }
+                    }
                 }
             }
         }
