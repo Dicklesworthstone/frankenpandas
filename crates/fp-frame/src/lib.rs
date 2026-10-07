@@ -21799,6 +21799,14 @@ impl Series {
             let found = validity.count_valid() > 0;
             return Ok(Scalar::Float64(if found { result } else { f64::NAN }));
         }
+        // Any other Float64 column with gaps (missing rows over numbers -
+        // an op's 0.0-datum result): the same fold by its mask words.
+        if self.column.dtype() == DType::Float64
+            && let Some((data, validity)) = self.column.as_f64_slice_with_validity()
+        {
+            let extreme = Self::masked_f64_extreme(data, validity, false);
+            return Ok(Scalar::Float64(extreme.unwrap_or(f64::NAN)));
+        }
 
         let mut result = f64::INFINITY;
         let mut found = false;
@@ -21975,6 +21983,14 @@ impl Series {
             let found = validity.count_valid() > 0;
             return Ok(Scalar::Float64(if found { result } else { f64::NAN }));
         }
+        // Any other Float64 column with gaps (missing rows over numbers):
+        // the same fold by its mask words (see min).
+        if self.column.dtype() == DType::Float64
+            && let Some((data, validity)) = self.column.as_f64_slice_with_validity()
+        {
+            let extreme = Self::masked_f64_extreme(data, validity, true);
+            return Ok(Scalar::Float64(extreme.unwrap_or(f64::NAN)));
+        }
 
         let mut result = f64::NEG_INFINITY;
         let mut found = false;
@@ -21992,6 +22008,73 @@ impl Series {
         } else {
             Scalar::Float64(f64::NAN)
         })
+    }
+
+    /// The Scalar fold's min (`v < result` from +inf) or max (`v > result`
+    /// from -inf) of a Float64 column's present rows, by its mask a 64-row
+    /// word at a time: a missing row reads as the seed, which never wins, a
+    /// full word folds its block plainly, and a NaN datum passes over as in
+    /// that fold. None when no present row holds a number - where the Scalar
+    /// fold built every cell ((nx - ny).max() 9.6 ms a million rows, pandas
+    /// 4.4; br-frankenpandas-cmgnp).
+    fn masked_f64_extreme(data: &[f64], validity: &ValidityMask, max: bool) -> Option<f64> {
+        if max {
+            Self::masked_f64_fold(data, validity, f64::NEG_INFINITY, |v, result| v > result)
+        } else {
+            Self::masked_f64_fold(data, validity, f64::INFINITY, |v, result| v < result)
+        }
+    }
+
+    /// [`Self::masked_f64_extreme`] for one direction (`wins`, from `seed`).
+    /// First the plain fold over every row: when the row it settles on - the
+    /// first holding its answer - is present, no present row before it ties
+    /// it and none beats it, so that is the present rows' answer; the word
+    /// walk only when a row missing over a number won.
+    fn masked_f64_fold(
+        data: &[f64],
+        validity: &ValidityMask,
+        seed: f64,
+        wins: impl Fn(f64, f64) -> bool + Copy,
+    ) -> Option<f64> {
+        let mut first = seed;
+        for &v in data {
+            if wins(v, first) {
+                first = v;
+            }
+        }
+        if wins(first, seed)
+            && let Some(at) = data.iter().position(|v| v.to_bits() == first.to_bits())
+            && validity.get(at)
+        {
+            return Some(first);
+        }
+        let words = validity.packed_words_for_scan();
+        let mut result = seed;
+        let mut found = false;
+        let (blocks, rest) = data.as_chunks::<64>();
+        let mut fold = |v: f64, present: bool| {
+            let v = if present { v } else { seed };
+            found |= present & !v.is_nan();
+            if wins(v, result) {
+                result = v;
+            }
+        };
+        for (block, &word) in blocks.iter().zip(&words) {
+            if word == u64::MAX {
+                for &v in block {
+                    fold(v, true);
+                }
+            } else if word != 0 {
+                for (bit, &v) in block.iter().enumerate() {
+                    fold(v, (word >> bit) & 1 == 1);
+                }
+            }
+        }
+        let tail = words.get(blocks.len()).copied().unwrap_or(0);
+        for (bit, &v) in rest.iter().enumerate() {
+            fold(v, (tail >> bit) & 1 == 1);
+        }
+        found.then_some(result)
     }
 
     fn categorical_extreme(
@@ -174107,6 +174190,22 @@ mod tests {
         for i in (0..n).step_by(4) {
             gaps.set(i, false);
         }
+        // A full mask word, an empty one over numbers that would win (99),
+        // a mixed tail, a NaN under a set bit and both zeros: each word
+        // shape of the masked fold; and every row missing over numbers.
+        let mut blocks = ValidityMask::all_valid(n);
+        for i in (64..128).chain([129]) {
+            blocks.set(i, false);
+        }
+        let block_values = (0..n)
+            .map(|i| match i {
+                3 => f64::NAN,
+                5 => -0.0,
+                6 => 0.0,
+                64..128 => 99.0,
+                _ => value(i),
+            })
+            .collect();
         let columns = [
             Column::from_f64_values(
                 (0..n)
@@ -174115,6 +174214,8 @@ mod tests {
             ),
             Column::from_f64_values_with_validity((0..n).map(value).collect(), gaps),
             Column::from_f64_values(vec![f64::NAN; n]),
+            Column::from_f64_values_with_validity(block_values, blocks),
+            Column::from_f64_values_with_validity(vec![99.0; n], ValidityMask::all_invalid(n)),
         ];
         for (k, column) in columns.iter().enumerate() {
             let series = Series::new("x", index.clone(), column.clone()).unwrap();
