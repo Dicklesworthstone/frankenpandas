@@ -539,6 +539,88 @@ pub fn mul_i64_collect(a: &[i64], b: &[i64]) -> Vec<i64> {
     a.iter().zip(b).map(|(&x, &y)| x.wrapping_mul(y)).collect()
 }
 
+/// 2^52 + 2^51: a double in [2^52, 2^53) steps by 1, so an int below 2^51
+/// in magnitude added to this stays in that binade with the int in the low
+/// bits of its mantissa - the conversion both ways without AVX-512's.
+const MAGIC: f64 = 6_755_399_441_055_744.0;
+const MAGIC_BITS: i64 = 0x4338_0000_0000_0000;
+
+/// `k as f64` for `|k| < 2^51` (exact).
+#[inline]
+#[allow(clippy::cast_sign_loss)] // a bit pattern
+fn small_int_as_float(k: i64) -> f64 {
+    f64::from_bits(k.wrapping_add(MAGIC_BITS) as u64) - MAGIC
+}
+
+/// `x as i64` for an integral `|x| < 2^51` (exact).
+#[inline]
+#[allow(clippy::cast_possible_wrap)] // a bit pattern
+fn small_float_as_int(x: f64) -> i64 {
+    ((x + MAGIC).to_bits() as i64).wrapping_sub(MAGIC_BITS)
+}
+
+/// Python's floor division `k // s` of every int by one divisor, or its
+/// modulo `k % s` (`modulo`), four lanes at a time through f64 - the
+/// integer divide's multiply-high has no vector instruction before
+/// AVX-512, and its sign branch mispredicted on mixed signs (k // 3 a
+/// million rows 1.65 ms, pandas 0.62; br-frankenpandas-uf0mw). Below 2^51
+/// every int is a double exactly, `k * (1 / s)` floors to the quotient or
+/// one off it, and the remainder `k - q * s` - one fused multiply-add,
+/// exact as an int below 2^53 - says which way: the integer quotients and
+/// remainders.
+///
+/// `None` when the divisor is 0, or it or any value is 2^51 or more in
+/// magnitude.
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
+/// MUST GUARD with `is_x86_feature_detected!("avx2")` and `("fma")`.
+#[inline(never)]
+#[must_use]
+pub fn floor_div_by_number_i64(a: &[i64], s: i64, modulo: bool) -> Option<Vec<i64>> {
+    const LIMIT: u64 = 1 << 51;
+    if s == 0 || s.unsigned_abs() >= LIMIT || a.first().is_some_and(|k| k.unsigned_abs() >= LIMIT) {
+        return None;
+    }
+    // floor(k / s) = floor(-k / -s): the quotient of a positive divisor.
+    let divisor = small_int_as_float(s);
+    let (sign, positive) = if s < 0 {
+        (-1.0, -divisor)
+    } else {
+        (1.0, divisor)
+    };
+    let reciprocal = 1.0 / positive;
+    let quotient = |x: f64| {
+        let x = x * sign;
+        let guess = (x * reciprocal).floor();
+        let rest = (-guess).mul_add(positive, x);
+        if rest < 0.0 {
+            guess - 1.0
+        } else if rest >= positive {
+            guess + 1.0
+        } else {
+            guess
+        }
+    };
+    let mut outside = false;
+    let out = if modulo {
+        a.iter()
+            .map(|&k| {
+                outside |= k.unsigned_abs() >= LIMIT;
+                let x = small_int_as_float(k);
+                small_float_as_int((-quotient(x)).mul_add(divisor, x))
+            })
+            .collect()
+    } else {
+        a.iter()
+            .map(|&k| {
+                outside |= k.unsigned_abs() >= LIMIT;
+                small_float_as_int(quotient(small_int_as_float(k)))
+            })
+            .collect()
+    };
+    (!outside).then_some(out)
+}
+
 float_int_collect!(add_f64_i64_collect, +, "A float column plus an int one.");
 float_int_collect!(sub_f64_i64_collect, -, "A float column minus an int one.");
 float_int_collect!(mul_f64_i64_collect, *, "A float column times an int one.");
@@ -1370,6 +1452,96 @@ mod tests {
             assert_eq!(mul_i64_collect(&a, &b), want, "mul {len}");
         }
         assert_eq!(mul_i64_collect(&[i64::MAX], &[2]), vec![-2]);
+    }
+
+    /// br-frankenpandas-uf0mw: the f64 floor division and modulo are the
+    /// integer ones (Python's: the remainder takes the divisor's sign) for
+    /// divisors of both signs up to the 2^51 bound, at values a step either
+    /// side of the divisor's multiples - near the bound, where `k * (1 / s)`
+    /// lands an ulp off and only the remainder's correction gets it right -
+    /// and at prefixes straddling the 4-lane chunks. NEGATIVE: a value or
+    /// divisor at 2^51 or beyond, and the divisor 0, answer None.
+    #[test]
+    fn floor_div_by_number_is_the_integer_floor_division_uf0mw() {
+        fn floor_div(k: i64, s: i64) -> i64 {
+            let q = k / s;
+            if k % s != 0 && (k < 0) != (s < 0) {
+                q - 1
+            } else {
+                q
+            }
+        }
+        let limit = (1_i64 << 51) - 1;
+        let divisors = [
+            1,
+            -1,
+            2,
+            -2,
+            3,
+            -3,
+            7,
+            -7,
+            10,
+            1000,
+            -1000,
+            999_999_937,
+            1 << 30,
+            3 << 40,
+            limit - 1,
+            limit,
+            -limit,
+        ];
+        for s in divisors {
+            let mut values = vec![0, 1, -1, 2, -2, limit, -limit, limit - 1, 1 - limit];
+            let top = limit / s.abs();
+            for m in [top, top - 1, top / 3, 12_345, 2, 1] {
+                if m > top {
+                    continue;
+                }
+                for step in [-1, 0, 1] {
+                    for sign in [1, -1] {
+                        let k = (m * s.abs() + step) * sign;
+                        if k.abs() <= limit {
+                            values.push(k);
+                        }
+                    }
+                }
+            }
+            for modulo in [false, true] {
+                let want: Vec<i64> = values
+                    .iter()
+                    .map(|&k| {
+                        if modulo {
+                            k - s * floor_div(k, s)
+                        } else {
+                            floor_div(k, s)
+                        }
+                    })
+                    .collect();
+                for len in [0, 1, 3, 4, 5, 8, 9, values.len()] {
+                    assert_eq!(
+                        floor_div_by_number_i64(&values[..len], s, modulo).as_deref(),
+                        Some(&want[..len]),
+                        "{s} {modulo} {len}"
+                    );
+                }
+            }
+        }
+        assert_eq!(floor_div_by_number_i64(&[-7, 7], 2, true), Some(vec![1, 1]));
+        assert_eq!(
+            floor_div_by_number_i64(&[-7, 7], -2, false),
+            Some(vec![3, -4])
+        );
+        let bound = 1_i64 << 51;
+        assert_eq!(floor_div_by_number_i64(&[3, bound, 5], 3, false), None);
+        assert_eq!(
+            floor_div_by_number_i64(&[3, 4, 5, 6, -bound], 3, true),
+            None
+        );
+        assert_eq!(floor_div_by_number_i64(&[i64::MIN], 3, false), None);
+        assert_eq!(floor_div_by_number_i64(&[3], bound, false), None);
+        assert_eq!(floor_div_by_number_i64(&[3], -bound, true), None);
+        assert_eq!(floor_div_by_number_i64(&[3], 0, false), None);
     }
 
     /// br-frankenpandas-3tk83: the Arc divide is the Vec-building one's

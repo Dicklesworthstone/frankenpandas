@@ -20023,23 +20023,36 @@ impl Column {
                         return Some(Self::int_float_scalar(data, s as f64, op, scalar_left));
                     }
                     // // and % keep int64 while no divisor is 0 (a 0 makes
-                    // binary_numeric promote the column: declined here). A
-                    // positive divisor divides through its reciprocal.
-                    (ArithmeticOp::FloorDiv | ArithmeticOp::Mod, false) if s > 0 => {
-                        let divisor = ConstDivisorU64::new(s.unsigned_abs());
-                        if matches!(op, ArithmeticOp::Mod) {
-                            par_map_vec_i64(data.len(), |i| divisor.floor_mod(data[i], s))
-                        } else {
-                            par_map_vec_i64(data.len(), |i| divisor.floor_div(data[i], s))
-                        }
-                    }
+                    // binary_numeric promote the column: declined here).
+                    // Four lanes at a time through f64 where the CPU has
+                    // AVX2 and the values are below 2^51 (k // 3 a million
+                    // rows 1.65 ms, pandas 0.62; br-frankenpandas-uf0mw);
+                    // else a positive divisor divides through its reciprocal.
                     (ArithmeticOp::FloorDiv | ArithmeticOp::Mod, false) if s != 0 => {
-                        let apply = if matches!(op, ArithmeticOp::Mod) {
-                            python_mod_i64
+                        let modulo = matches!(op, ArithmeticOp::Mod);
+                        #[cfg(target_arch = "x86_64")]
+                        if std::arch::is_x86_feature_detected!("avx2")
+                            && std::arch::is_x86_feature_detected!("fma")
+                            && let Some(out) =
+                                fp_dot_kernel::floor_div_by_number_i64(data, s, modulo)
+                        {
+                            return Some(Self::from_i64_values_owned(out));
+                        }
+                        if s > 0 {
+                            let divisor = ConstDivisorU64::new(s.unsigned_abs());
+                            if modulo {
+                                par_map_vec_i64(data.len(), |i| divisor.floor_mod(data[i], s))
+                            } else {
+                                par_map_vec_i64(data.len(), |i| divisor.floor_div(data[i], s))
+                            }
                         } else {
-                            python_floor_div_i64
-                        };
-                        par_map_vec_i64(data.len(), |i| apply(data[i], s))
+                            let apply = if modulo {
+                                python_mod_i64
+                            } else {
+                                python_floor_div_i64
+                            };
+                            par_map_vec_i64(data.len(), |i| apply(data[i], s))
+                        }
                     }
                     (ArithmeticOp::FloorDiv | ArithmeticOp::Mod, true) if !data.contains(&0) => {
                         let apply = if matches!(op, ArithmeticOp::Mod) {
