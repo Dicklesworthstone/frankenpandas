@@ -28704,3 +28704,25 @@ def test_object_sum_below_min_count_like_pandas_rdnkd(case: str) -> None:
         return str(result.dtype), list(result.index), [cell(v) for v in result.tolist()]
 
     assert run(fpd) == run(pd)
+
+
+_PZLMT_FRAMES = {
+    "-0.0 beside NaN": {"a": [-0.0, -0.0, -2.5], "b": [float("nan"), -0.0, float("nan")], "c": [-0.0, -0.0, 1.0]},
+    "all -0.0 (typed path)": {"a": [-0.0, -0.0], "b": [-0.0, -0.0]},
+    "all NaN row": {"a": [float("nan"), 1.5], "b": [float("nan"), -4.0]},
+    "numbers (NEGATIVE)": {"a": [-1.5, 0.25], "b": [float("nan"), -3.0], "c": [-0.5, 2.0]},
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("op", ["sum", "mean"])
+@pytest.mark.parametrize("case", list(_PZLMT_FRAMES))
+def test_row_sums_of_negative_zeros_like_pandas_pzlmt(case: str, op: str) -> None:
+    # A row's sum / mean across columns folds from +0.0, as numpy's: a row
+    # of -0.0 (beside a NaN or not) is +0.0 (br-frankenpandas-pzlmt); a row
+    # of numbers keeps its exact value. Bits compared, the sign of zero too.
+    def run(m: Any) -> Any:
+        result = getattr(m.DataFrame(_PZLMT_FRAMES[case]), op)(axis=1)
+        return str(result.dtype), [v.hex() if v == v else "nan" for v in result.tolist()]
+
+    assert run(fpd) == run(pd)
