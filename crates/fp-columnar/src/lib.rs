@@ -2997,6 +2997,25 @@ impl ConstDivisorU64 {
     }
 }
 
+/// The `(mask, sign)` wrapping an int into `width` as
+/// [`NumericWidth::wrap_int`] does, as `((v & mask) ^ sign) - sign`: the
+/// width's value bits, sign-extended from `sign` (0 for an unsigned width) -
+/// one formula for every width, which vectorizes (the fallible wrap per
+/// value collected through a Result did not; br-frankenpandas-uf0mw). None
+/// for uint64, which refuses a negative value, and float32.
+const fn int_wrap_masks(width: NumericWidth) -> Option<(i64, i64)> {
+    let (bits, signed) = match width {
+        NumericWidth::Int8 => (8, true),
+        NumericWidth::Int16 => (16, true),
+        NumericWidth::Int32 => (32, true),
+        NumericWidth::UInt8 => (8, false),
+        NumericWidth::UInt16 => (16, false),
+        NumericWidth::UInt32 => (32, false),
+        NumericWidth::UInt64 | NumericWidth::Float32 => return None,
+    };
+    Some(((1 << bits) - 1, if signed { 1 << (bits - 1) } else { 0 }))
+}
+
 /// numpy's int64 power: `base ** exponent` mod 2^64, square-and-multiply over
 /// the whole exponent. `i64::wrapping_pow` takes a u32, and clamping the
 /// exponent to u32::MAX read 3 ** 2**62 as 3 ** (2**32 - 1)
@@ -18436,9 +18455,29 @@ impl Column {
     pub fn cast_to_width(&self, width: NumericWidth, nullable: bool) -> Result<Self, ColumnError> {
         self.refuse_temporal_width_cast(width, nullable)?;
         let storage = width.storage(nullable);
+        // Floats, every one present and below 2^51, to a numpy int width:
+        // truncated and wrapped four lanes at a time in one pass - the
+        // infinity search, the cast's range pass and a fallible wrap per
+        // value collected through a Result were most of x.astype('int32')
+        // (3.4 ms a million rows, pandas 0.29; br-frankenpandas-uf0mw). The
+        // ints the checked path below makes; it answers anything else.
+        #[cfg(target_arch = "x86_64")]
+        if !nullable
+            && let Some((mask, sign)) = int_wrap_masks(width)
+            && let Some(values) = self.as_f64_slice()
+            && std::arch::is_x86_feature_detected!("avx2")
+            && let Some(ints) = fp_dot_kernel::float_as_int_collect(values, mask, sign)
+        {
+            return Ok(Self::from_i64_values_owned(ints)
+                .keeping_nullable_dtype(&storage)
+                .with_width_unchecked(width));
+        }
         if !nullable && !width.is_float() {
             let infinite = match self.as_f64_slice() {
-                Some(values) => values.iter().any(|value| value.is_infinite()),
+                // A fold, not a search: it vectorizes.
+                Some(values) => values
+                    .iter()
+                    .fold(false, |any, value| any | value.is_infinite()),
                 None => {
                     self.dtype.is_floating()
                         && self
@@ -18469,11 +18508,18 @@ impl Column {
             value: value as u64,
         };
         if let Some(values) = base.as_i64_slice() {
-            let wrapped = values
-                .iter()
-                .map(|&value| width.wrap_int(value).ok_or_else(|| refuse(value)))
-                .collect::<Result<Vec<_>, _>>()?;
-            return Ok(Self::from_i64_values(wrapped)
+            let wrapped = if let Some((mask, sign)) = int_wrap_masks(width) {
+                values
+                    .iter()
+                    .map(|&value| ((value & mask) ^ sign).wrapping_sub(sign))
+                    .collect()
+            } else {
+                values
+                    .iter()
+                    .map(|&value| width.wrap_int(value).ok_or_else(|| refuse(value)))
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            return Ok(Self::from_i64_values_owned(wrapped)
                 .keeping_nullable_dtype(&storage)
                 .with_width_unchecked(width));
         }
@@ -29284,13 +29330,24 @@ impl Column {
         }
         if target == DType::Int64
             && let Some(data) = self.as_f64_slice()
-            && data
+        {
+            // Four lanes at a time where the CPU has AVX2 and every value is
+            // below 2^51: one pass, the same truncations (x.astype('int64')
+            // a million rows 1.40 ms, pandas 0.59; br-frankenpandas-uf0mw).
+            #[cfg(target_arch = "x86_64")]
+            if std::arch::is_x86_feature_detected!("avx2")
+                && let Some(out) = fp_dot_kernel::float_as_int_collect(data, -1, 0)
+            {
+                return Ok(Self::from_i64_values_owned(out));
+            }
+            if data
                 .iter()
                 .all(|&v| v >= i64::MIN as f64 && v < 9_223_372_036_854_775_808.0)
-        {
-            let out: Vec<i64> = data.iter().map(|&v| v as i64).collect();
-            // all-valid output → MOVE (no Arc::from realloc).
-            return Ok(Self::from_i64_values_owned(out));
+            {
+                let out: Vec<i64> = data.iter().map(|&v| v as i64).collect();
+                // all-valid output → MOVE (no Arc::from realloc).
+                return Ok(Self::from_i64_values_owned(out));
+            }
         }
         // Utf8 -> Float64: parse each field's bytes straight from the contiguous
         // buffer into a typed Vec<f64>, skipping the per-cell Scalar map +
@@ -71162,6 +71219,85 @@ mod numeric_width_columns_fvsao23 {
             .cast_to_width(NumericWidth::Int32, false)
             .unwrap();
         assert_eq!(truncated.as_i64_slice().unwrap(), &[1, -2]);
+    }
+
+    /// br-frankenpandas-uf0mw: floats to every numpy int width are each
+    /// value truncated then wrapped (the 4-lane path below 2^51, the checked
+    /// one past it), and an int column's wrap is the same in place.
+    /// NEGATIVE: an infinity or a NaN is IntCastingNaN, a negative value to
+    /// uint64 UInt64OutOfRange.
+    #[test]
+    #[allow(clippy::cast_possible_truncation)] // the truncation under test
+    fn float_casts_to_int_widths_truncate_then_wrap_uf0mw() {
+        let edge = 2_251_799_813_685_247.5; // 2^51 - 0.5
+        let floats = [
+            0.4,
+            -0.0,
+            1.7,
+            -2.7,
+            300.7,
+            -5.9,
+            70_000.2,
+            -1_099_511_627_775.5,
+            edge,
+            -edge,
+        ];
+        let widths = [
+            NumericWidth::Int8,
+            NumericWidth::Int16,
+            NumericWidth::Int32,
+            NumericWidth::UInt8,
+            NumericWidth::UInt16,
+            NumericWidth::UInt32,
+        ];
+        for width in widths {
+            let want: Vec<i64> = floats
+                .iter()
+                .map(|&v| width.wrap_int(v as i64).unwrap())
+                .collect();
+            let cast = Column::from_f64_values(floats.to_vec())
+                .cast_to_width(width, false)
+                .unwrap();
+            assert_eq!(cast.width(), Some(width));
+            assert_eq!(cast.dtype(), DType::Int64);
+            assert_eq!(cast.as_i64_slice().unwrap(), want.as_slice(), "{width:?}");
+            // Past 2^51 the checked path answers, the same way.
+            let past = Column::from_f64_values(vec![1.5, 4_503_599_627_370_497.0])
+                .cast_to_width(width, false)
+                .unwrap();
+            let big = width.wrap_int(4_503_599_627_370_497).unwrap();
+            assert_eq!(past.as_i64_slice().unwrap(), &[1, big], "{width:?}");
+            let source = ints(&[300, -5, 70_000]);
+            let wrapped = source.cast_to_width(width, false).unwrap();
+            let want: Vec<i64> = [300, -5, 70_000]
+                .iter()
+                .map(|&v| width.wrap_int(v).unwrap())
+                .collect();
+            assert_eq!(
+                wrapped.as_i64_slice().unwrap(),
+                want.as_slice(),
+                "{width:?}"
+            );
+        }
+        assert_eq!(
+            ints(&[300, -5, 70_000])
+                .cast_to_width(NumericWidth::Int8, false)
+                .unwrap()
+                .as_i64_slice()
+                .unwrap(),
+            &[44, -5, 112]
+        );
+        for bad in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            let column = Column::from_f64_values(vec![1.0, 2.0, 3.0, 4.0, bad]);
+            assert!(matches!(
+                column.cast_to_width(NumericWidth::Int32, false),
+                Err(ColumnError::IntCastingNaN)
+            ));
+        }
+        assert!(matches!(
+            Column::from_f64_values(vec![-1.5]).cast_to_width(NumericWidth::UInt64, false),
+            Err(ColumnError::UInt64OutOfRange { .. })
+        ));
     }
 
     #[test]

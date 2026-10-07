@@ -621,6 +621,35 @@ pub fn floor_div_by_number_i64(a: &[i64], s: i64, modulo: bool) -> Option<Vec<i6
     (!outside).then_some(out)
 }
 
+/// `v as i64` (toward zero) of every float, wrapped as `((t & mask) ^
+/// sign) - sign`: a narrow int width's wrap, its value bits sign-extended
+/// from `sign` (0 for an unsigned width; mask -1 and sign 0 keep the
+/// int64). Four lanes at a time: the conversion has no vector instruction
+/// before AVX-512, and the scalar one's saturation, a range pass first and
+/// a wrap pass after were most of x.astype('int64') and x.astype('int32')
+/// (1.40 and 3.4 ms a million rows, pandas 0.59 and 0.29;
+/// br-frankenpandas-uf0mw). The same ints: below 2^51 the truncated double
+/// converts exactly.
+///
+/// `None` when any value is NaN, infinite, or 2^51 or more in magnitude.
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
+/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+#[inline(never)]
+#[must_use]
+pub fn float_as_int_collect(a: &[f64], mask: i64, sign: i64) -> Option<Vec<i64>> {
+    const LIMIT: f64 = 2_251_799_813_685_248.0; // 2^51
+    let mut outside = false;
+    let out = a
+        .iter()
+        .map(|&v| {
+            outside |= v.is_nan() | (v.abs() >= LIMIT);
+            ((small_float_as_int(v.trunc()) & mask) ^ sign).wrapping_sub(sign)
+        })
+        .collect();
+    (!outside).then_some(out)
+}
+
 float_int_collect!(add_f64_i64_collect, +, "A float column plus an int one.");
 float_int_collect!(sub_f64_i64_collect, -, "A float column minus an int one.");
 float_int_collect!(mul_f64_i64_collect, *, "A float column times an int one.");
@@ -1542,6 +1571,69 @@ mod tests {
         assert_eq!(floor_div_by_number_i64(&[3], bound, false), None);
         assert_eq!(floor_div_by_number_i64(&[3], -bound, true), None);
         assert_eq!(floor_div_by_number_i64(&[3], 0, false), None);
+    }
+
+    /// br-frankenpandas-uf0mw: the 4-lane float -> int conversion is `as
+    /// i64` (toward zero, -0.0 to 0) for values up to the 2^51 bound, then
+    /// each narrow width's wrap (`as i8 as i64`, `as u16 as i64`, ...), at
+    /// lengths straddling the 4-lane chunks. NEGATIVE: NaN, an infinity, or
+    /// a value at 2^51 or beyond anywhere answers None.
+    #[test]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // the casts under test
+    fn float_as_int_is_the_truncating_cast_uf0mw() {
+        type Wrap = (i64, i64, fn(i64) -> i64);
+        let edge = 2_251_799_813_685_247.5; // 2^51 - 0.5
+        let floats = [
+            0.0, -0.0, 1.5, -1.5, 2.999_999, -2.999_999, 0.49, -0.49, 1e15, -1e15, edge, -edge,
+            7.0, 5e-324, 300.7, -129.5, 70_000.2, -40_000.9,
+        ];
+        let wraps: [Wrap; 7] = [
+            (-1, 0, |v| v),
+            (0xFF, 0x80, |v| i64::from(v as i8)),
+            (0xFFFF, 0x8000, |v| i64::from(v as i16)),
+            (0xFFFF_FFFF, 0x8000_0000, |v| i64::from(v as i32)),
+            (0xFF, 0, |v| i64::from(v as u8)),
+            (0xFFFF, 0, |v| i64::from(v as u16)),
+            (0xFFFF_FFFF, 0, |v| i64::from(v as u32)),
+        ];
+        for (mask, sign, wrap) in wraps {
+            for len in [0usize, 1, 3, 4, 5, 8, 9, 17, 101] {
+                let a: Vec<f64> = (0..len).map(|i| floats[i % floats.len()]).collect();
+                let want: Vec<i64> = a.iter().map(|&v| wrap(v as i64)).collect();
+                assert_eq!(
+                    float_as_int_collect(&a, mask, sign),
+                    Some(want),
+                    "{mask} {len}"
+                );
+            }
+        }
+        assert_eq!(
+            float_as_int_collect(&[edge, -edge], -1, 0),
+            Some(vec![2_251_799_813_685_247, -2_251_799_813_685_247])
+        );
+        assert_eq!(
+            float_as_int_collect(&[300.7, -5.9], 0xFF, 0x80),
+            Some(vec![44, -5])
+        );
+        assert_eq!(
+            float_as_int_collect(&[300.7, -5.9], 0xFF, 0),
+            Some(vec![44, 251])
+        );
+        let bound = 2_251_799_813_685_248.0;
+        for bad in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            bound,
+            -bound,
+            1e300,
+        ] {
+            assert_eq!(
+                float_as_int_collect(&[1.0, 2.0, 3.0, 4.0, bad], -1, 0),
+                None,
+                "{bad}"
+            );
+        }
     }
 
     /// br-frankenpandas-3tk83: the Arc divide is the Vec-building one's

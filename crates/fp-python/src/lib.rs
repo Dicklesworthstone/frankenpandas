@@ -74509,13 +74509,19 @@ fn pandas_astype_int_source(column: &Column, dtype: &Bound<'_, PyAny>) -> PyResu
                 &owned
             };
             if !nullable {
-                if floats.iter().any(|value| !value.is_finite()) {
+                // A fold, not a search: it vectorizes (the search's early
+                // exit read a million values one at a time;
+                // br-frankenpandas-uf0mw).
+                if floats
+                    .iter()
+                    .fold(false, |any, value| any | !value.is_finite())
+                {
                     return Err(PyErr::new::<IntCastingNaNError, _>(
                         "Cannot convert non-finite values (NA or inf) to integer",
                     ));
                 }
                 if width.is_some_and(NumericWidth::is_unsigned)
-                    && floats.iter().any(|value| *value < 0.0)
+                    && floats.iter().fold(false, |any, value| any | (*value < 0.0))
                 {
                     return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                         "Cannot losslessly cast from float64 to {name}"
