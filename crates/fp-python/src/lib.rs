@@ -29943,7 +29943,7 @@ impl PySeries {
     ) -> PyResult<()> {
         let key = &interval_point_key(py, self.inner.index(), key, false)?;
         let target = series_setitem_target(&self.inner, key)?;
-        self.inner = series_write(py, &self.inner, target, value)?;
+        self.inner = series_write(py, &self.inner, target, value, false)?;
         Ok(())
     }
 
@@ -37344,7 +37344,7 @@ impl PySeriesILoc {
         let key = &resolve_callable_key(self.parent.bind(py).as_any(), key)?;
         write_series_through(py, &self.parent, &mut self.inner, |series| {
             let positions = resolve_iloc_positions(series.len(), key)?;
-            series_write(py, series, RowTarget::Rows(positions), value)
+            series_write(py, series, RowTarget::Rows(positions), value, true)
         })
     }
 
@@ -37411,7 +37411,7 @@ impl PySeriesLoc {
         let key = &resolve_callable_key(self.parent.bind(py).as_any(), key)?;
         let key = &interval_point_key(py, self.inner.index(), key, false)?;
         write_series_through(py, &self.parent, &mut self.inner, |series| {
-            series_write(py, series, series_loc_target(series, key)?, value)
+            series_write(py, series, series_loc_target(series, key)?, value, true)
         })
     }
 
@@ -37479,7 +37479,7 @@ impl PySeriesIAt {
         let at = key.extract::<i64>()?;
         write_series_through(py, &self.parent, &mut self.inner, |series| {
             let positions = resolve_iloc_positions(series.len(), &at.into_bound_py_any(py)?)?;
-            series_write(py, series, RowTarget::Rows(positions), value)
+            series_write(py, series, RowTarget::Rows(positions), value, true)
         })
     }
 
@@ -37524,7 +37524,7 @@ impl PySeriesAt {
                 Some(_) => series_loc_target(series, key)?,
                 None => RowTarget::Append(label),
             };
-            series_write(py, series, target, value)
+            series_write(py, series, target, value, true)
         })
     }
 
@@ -54258,11 +54258,30 @@ fn loc_assign(
         }
         return Ok(out);
     }
+    // A scalar over no rows still types each existing column with it (see
+    // unwritten_write).
+    if positions.is_empty()
+        && let Some(cell) = scalar_write_value(py, value)?
+        && columns.iter().all(|name| df.column(name).is_some())
+    {
+        let mut out = df.clone();
+        for name in columns {
+            let column = out.column(name).ok_or_else(|| loc_key_error(name))?;
+            let typed = unwritten_write(column, &cell)?;
+            out = out
+                .with_column(name.clone(), typed)
+                .map_err(frame_error_to_py)?;
+        }
+        return Ok(out);
+    }
     let cells = assign_cells(py, labels, positions, value)?;
     let mut out = df.clone();
     for name in columns {
         let column = match out.column(name) {
-            Some(column) => write_cells(column, positions, cells.clone())?,
+            Some(column) => match list_float_column(column, value, &cells)? {
+                Some(floats) => write_cells(&floats, positions, cells.clone())?,
+                None => write_cells(column, positions, cells.clone())?,
+            },
             None => write_cells(
                 &Column::new(
                     DType::Float64,
@@ -54360,6 +54379,96 @@ fn assign_cells(
         ));
     }
     Ok(cells)
+}
+
+/// Whether pandas' setitem casts `column` to object for `cell` - the column
+/// cannot hold it (np_can_hold_element) and the two's common type
+/// (find_result_type) is object: a bool column taking anything but a bool, a
+/// 64-bit int / float column (or a float32 one) a bool or text, a datetime /
+/// duration column anything but its kind or a missing value, an object
+/// column anything. Re-inferring the written values took the cell's own
+/// dtype instead (a bool column = 7 over every row int64, pandas object;
+/// br-frankenpandas-d3ylw).
+fn setitem_makes_object(column: &Column, cell: &Scalar) -> bool {
+    if column.is_pandas_string() || column.categorical().is_some() || column.dtype().is_nullable() {
+        return false;
+    }
+    let plain = matches!(column.width(), None | Some(NumericWidth::Float32));
+    match (column.dtype(), cell) {
+        (DType::Utf8, _) => true,
+        (DType::Bool, Scalar::Bool(_)) => false,
+        (DType::Bool, _) => true,
+        (DType::Int64 | DType::Float64, Scalar::Bool(_) | Scalar::Utf8(_)) => plain,
+        (DType::Datetime64 { .. }, Scalar::Datetime64(_))
+        | (DType::Timedelta64, Scalar::Timedelta64(_)) => false,
+        (DType::Datetime64 { .. } | DType::Timedelta64, cell) => !cell.is_missing(),
+        _ => false,
+    }
+}
+
+/// `column` after a write of `value` that selects no rows, typed as pandas
+/// types it: a value the column cannot hold still upcasts it (an int column
+/// = 2.5 is float64, a bool column = 7 object) and one a categorical or a
+/// masked column refuses is the same TypeError - pandas casts the block
+/// before it looks at the rows, where fp kept the column as it was
+/// (br-frankenpandas-d3ylw). The dtype is the one a write of `value` over
+/// the column's first row gives.
+fn unwritten_write(column: &Column, value: &Scalar) -> PyResult<Column> {
+    if column.is_empty() {
+        return Ok(column.clone());
+    }
+    let mut first = column.take(&[0]).map_err(column_error_to_py)?;
+    // A take drops a narrow width's tag; the row keeps the column's.
+    if let Some(width) = column.width()
+        && first.width().is_none()
+    {
+        first = first
+            .cast_to_width(width, column.dtype().is_nullable())
+            .map_err(column_error_to_py)?;
+    }
+    let written = write_cells(&first, &[0], vec![value.clone()])?;
+    if written.dtype() == column.dtype() && written.width() == column.width() {
+        return Ok(column.clone());
+    }
+    if is_object_column(&written) {
+        return Ok(Column::from_object_values(column.values().to_vec()));
+    }
+    column.astype(written.dtype()).map_err(column_error_to_py)
+}
+
+/// The scalar a write assigns, or None for a Series, an array-like or a
+/// list (the cells [`assign_cells`] reads item by item).
+fn scalar_write_value(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Option<Scalar>> {
+    if value.extract::<PyRef<'_, PySeries>>().is_ok()
+        || value.cast::<PyList>().is_ok()
+        || py_array_like_column(py, value)?.is_some()
+    {
+        return Ok(None);
+    }
+    py_to_scalar(py, value).map(Some)
+}
+
+/// The column a list write lands in: a Python list holding a float written
+/// into a plain int64 column makes it float64 - pandas keeps the floats
+/// (a -0.0 its sign) even when each is integral, where a numpy array of
+/// integral floats stays int64 (br-frankenpandas-d3ylw). None to write the
+/// column as it is.
+fn list_float_column(
+    column: &Column,
+    value: &Bound<'_, PyAny>,
+    cells: &[Scalar],
+) -> PyResult<Option<Column>> {
+    if value.cast::<PyList>().is_err()
+        || column.dtype() != DType::Int64
+        || column.width().is_some()
+        || !cells.iter().any(|cell| matches!(cell, Scalar::Float64(_)))
+    {
+        return Ok(None);
+    }
+    column
+        .astype(DType::Float64)
+        .map(Some)
+        .map_err(column_error_to_py)
 }
 
 /// `column` with `cells` written at `positions`, typed as pandas types the
@@ -54517,9 +54626,16 @@ fn write_cells(column: &Column, positions: &[usize], cells: Vec<Scalar>) -> PyRe
     {
         return Ok(written);
     }
+    // pandas' upcast to object (see setitem_makes_object) keeps every value
+    // as it is; anything else is the values inferred again (an int column
+    // taking a fraction or a missing value float64).
+    let object = cells.iter().any(|cell| setitem_makes_object(column, cell));
     let mut values = column.values().to_vec();
     for (&position, cell) in positions.iter().zip(cells) {
         values[position] = cell;
+    }
+    if object {
+        return Ok(Column::from_object_values(values));
     }
     Column::from_values(pandas_promote_int_with_missing(values)).map_err(column_error_to_py)
 }
@@ -54867,16 +54983,36 @@ fn series_setitem_target(series: &Series, key: &Bound<'_, PyAny>) -> PyResult<Ro
 /// `series` after writing `value` at `target`: the rows take their cells
 /// (see [`assign_cells`] / [`write_cells`]); a new label appends one row,
 /// whose dtype follows pandas' concat (an int joining int64 stays int64).
+/// `indexer` is a `.loc` / `.iloc` write, whose scalar over no rows still
+/// types the column (see [`unwritten_write`]); `s[key] = value` keeps it,
+/// pandas' boolean-key write being a `where` that changes nothing then.
 fn series_write(
     py: Python<'_>,
     series: &Series,
     target: RowTarget,
     value: &Bound<'_, PyAny>,
+    indexer: bool,
 ) -> PyResult<Series> {
     match target {
         RowTarget::Rows(positions) => {
+            if indexer
+                && positions.is_empty()
+                && let Some(cell) = scalar_write_value(py, value)?
+            {
+                let column = unwritten_write(series.column(), &cell)?;
+                return Series::new(series.name(), series.index().clone(), column)
+                    .map_err(frame_error_to_py);
+            }
             let cells = assign_cells(py, series.index().labels(), &positions, value)?;
-            let column = write_cells(series.column(), &positions, cells)?;
+            let floats = if indexer {
+                list_float_column(series.column(), value, &cells)?
+            } else {
+                None
+            };
+            let column = match floats {
+                Some(floats) => write_cells(&floats, &positions, cells)?,
+                None => write_cells(series.column(), &positions, cells)?,
+            };
             Series::new(series.name(), series.index().clone(), column).map_err(frame_error_to_py)
         }
         RowTarget::Append(label) => {

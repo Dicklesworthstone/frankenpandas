@@ -28821,6 +28821,100 @@ def test_promoted_int_floor_ops_like_pandas_woubx(case: str) -> None:
     assert run(fpd) == run(pd)
 
 
+_D3YLW_COLUMNS = {
+    "int": lambda m: m.Series([1, -2, 3, 0, 9]),
+    "float": lambda m: m.Series([1.5, -2.0, 3.25, 0.0, 9.0]),
+    "bool": lambda m: m.Series([True, False, True, False, True]),
+    "object": lambda m: m.Series(["a", "b", "c", "d", "e"]),
+    "datetime": lambda m: m.Series(m.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"])),
+    "Int64": lambda m: m.Series([1, None, 3, 4, 5], dtype="Int64"),
+    "category": lambda m: m.Series(["x", "y", "x", "y", "x"], dtype="category"),
+    "float32": lambda m: m.Series([1.0, 2.0, 3.0, 4.0, 5.0], dtype="float32"),
+}
+
+
+def _d3ylw_write(m: Any, column: str, rows: str, value: Any, via: str = "loc") -> Any:
+    d = m.DataFrame({"key": [0, 1, 2, 3, 4]})
+    d["v"] = _D3YLW_COLUMNS[column](m)
+    key = {"all rows": d["key"] > -1, "no rows": d["key"] > 99, "mask": d["key"] > 2}[rows]
+    if via == "iloc":
+        d.iloc[[i for i, k in enumerate(key.tolist()) if k], 1] = value
+    else:
+        d.loc[key, "v"] = value
+    return d["v"]
+
+
+_D3YLW_WRITE_CASES = {
+    "int no rows = 2.5": lambda m: _d3ylw_write(m, "int", "no rows", 2.5),
+    "int no rows = None": lambda m: _d3ylw_write(m, "int", "no rows", None),
+    "int no rows = True": lambda m: _d3ylw_write(m, "int", "no rows", True),
+    "int no rows = 'z'": lambda m: _d3ylw_write(m, "int", "no rows", "z"),
+    "int all rows = True": lambda m: _d3ylw_write(m, "int", "all rows", True),
+    "int mask = [0.0, -0.0]": lambda m: _d3ylw_write(m, "int", "mask", [0.0, -0.0]),
+    "int iloc no rows = 2.5": lambda m: _d3ylw_write(m, "int", "no rows", 2.5, "iloc"),
+    "bool all rows = 7": lambda m: _d3ylw_write(m, "bool", "all rows", 7),
+    "bool all rows = nan": lambda m: _d3ylw_write(m, "bool", "all rows", float("nan")),
+    "bool no rows = 'z'": lambda m: _d3ylw_write(m, "bool", "no rows", "z"),
+    "float all rows = True": lambda m: _d3ylw_write(m, "float", "all rows", True),
+    "float no rows = 'z'": lambda m: _d3ylw_write(m, "float", "no rows", "z"),
+    "object all rows = 7": lambda m: _d3ylw_write(m, "object", "all rows", 7),
+    "object all rows = 2.5": lambda m: _d3ylw_write(m, "object", "all rows", 2.5),
+    "datetime all rows = 7": lambda m: _d3ylw_write(m, "datetime", "all rows", 7),
+    "datetime no rows = 'z'": lambda m: _d3ylw_write(m, "datetime", "no rows", "z"),
+    "Int64 no rows = 2.5 (TypeError)": lambda m: _d3ylw_write(m, "Int64", "no rows", 2.5),
+    "category no rows = 7 (TypeError)": lambda m: _d3ylw_write(m, "category", "no rows", 7),
+    "float32 all rows = True": lambda m: _d3ylw_write(m, "float32", "all rows", True),
+    "float32 no rows = 2.5": lambda m: _d3ylw_write(m, "float32", "no rows", 2.5),
+    "Series.loc no rows = 2.5": lambda m: (lambda s: (s.loc.__setitem__(s > 99, 2.5), s)[1])(m.Series([1, 2, 3])),
+    "int no rows = 7 (NEGATIVE: int64)": lambda m: _d3ylw_write(m, "int", "no rows", 7),
+    "int mask = -0.0 (NEGATIVE: int64)": lambda m: _d3ylw_write(m, "int", "mask", -0.0),
+    "int mask = ndarray [0.0, -0.0] (NEGATIVE: int64)": lambda m: _d3ylw_write(
+        m, "int", "mask", np.array([0.0, -0.0])
+    ),
+    "float no rows = 7 (NEGATIVE: float64)": lambda m: _d3ylw_write(m, "float", "no rows", 7),
+    "datetime no rows = None (NEGATIVE: datetime)": lambda m: _d3ylw_write(m, "datetime", "no rows", None),
+    "Int64 no rows = 7 (NEGATIVE: Int64)": lambda m: _d3ylw_write(m, "Int64", "no rows", 7),
+    "category no rows = 'x' (NEGATIVE: category)": lambda m: _d3ylw_write(m, "category", "no rows", "x"),
+    "s[no rows] = 7 (NEGATIVE: where keeps bool)": lambda m: (
+        lambda s: (s.__setitem__(m.Series([False, False]), 7), s)[1]
+    )(m.Series([True, False])),
+    "s[s > 9] = None (NEGATIVE: where keeps int64)": lambda m: (lambda s: (s.__setitem__(s > 9, None), s)[1])(
+        m.Series([1, 2, 3])
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_D3YLW_WRITE_CASES))
+def test_loc_writes_type_the_column_like_pandas_d3ylw(case: str) -> None:
+    # df.loc / .iloc writes typed as pandas' setitem types them
+    # (br-frankenpandas-d3ylw): a value the column cannot hold upcasts it -
+    # to object where the common type is object (a bool / object / datetime
+    # column taking a number, a number column a bool or text), even when
+    # the mask selects every row (fp took the value's dtype) or none (fp kept
+    # the dtype); a masked or categorical column refuses such a value over no
+    # rows too; a list of floats into an int column is float64 (a -0.0 kept).
+    # NEGATIVE: a value the column holds keeps its dtype, a numpy array of
+    # integral floats keeps int64, and s[mask] = v - pandas' where - changes
+    # nothing over no rows. Signed zeros told apart.
+    def cell(value: Any) -> Any:
+        if isinstance(value, float):
+            if math.isnan(value):
+                return "nan"
+            if value == 0.0:
+                return "-0.0" if math.copysign(1.0, value) < 0 else "0.0"
+        return repr(value)
+
+    def run(m: Any) -> Any:
+        try:
+            result = _D3YLW_WRITE_CASES[case](m)
+        except Exception as error:  # noqa: BLE001
+            return "raises " + type(error).__name__
+        return str(result.dtype), [cell(v) for v in result.tolist()]
+
+    assert run(fpd) == run(pd)
+
+
 _PZLMT_FRAMES = {
     "-0.0 beside NaN": {"a": [-0.0, -0.0, -2.5], "b": [float("nan"), -0.0, float("nan")], "c": [-0.0, -0.0, 1.0]},
     "all -0.0 (typed path)": {"a": [-0.0, -0.0], "b": [-0.0, -0.0]},
