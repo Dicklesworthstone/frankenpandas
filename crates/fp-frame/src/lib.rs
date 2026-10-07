@@ -23501,6 +23501,9 @@ impl Series {
         // sums to uint64, a signed one to int64, as numpy's cumsum (fvsao.23).
         match self.column.width() {
             Some(NumericWidth::Float32) => {
+                if let Some(running) = self.float32_running(0.0, |acc, value| acc + value) {
+                    return running;
+                }
                 let mut acc = 0.0_f64;
                 let out: Vec<Scalar> = self
                     .column
@@ -23528,6 +23531,42 @@ impl Series {
             _ => {}
         }
         self.cumsum_storage()
+    }
+
+    /// A float32 column's running sum or product (`step` from `start`), each
+    /// partial rounded to f32 as numpy accumulates float32, over the
+    /// column's buffer and mask: a missing row stays missing and is skipped,
+    /// a partial gone NaN (an infinity less itself) is missing and so is
+    /// every one after it - the Scalars the per-row rebuild built, without
+    /// building them (x.cumsum() of a float32 column 28.6 ms a million
+    /// rows, pandas 3.0; br-frankenpandas-o8m7y). None for any other
+    /// storage, the nullable extension dtype among it.
+    fn float32_running(
+        &self,
+        start: f64,
+        step: impl Fn(f64, f64) -> f64,
+    ) -> Option<Result<Self, FrameError>> {
+        let (data, validity) = self.column.as_f64_slice_with_validity()?;
+        let n = data.len();
+        let mut words = vec![0_u64; n.div_ceil(64)];
+        let mut acc = start;
+        let out: Vec<f64> = data
+            .iter()
+            .enumerate()
+            .map(|(i, &value)| {
+                if !validity.get(i) || value.is_nan() {
+                    return 0.0;
+                }
+                acc = NumericWidth::round_f32(step(acc, value));
+                if !acc.is_nan() {
+                    words[i / 64] |= 1 << (i % 64);
+                }
+                acc
+            })
+            .collect();
+        let column = Column::from_f64_values_with_validity(out, ValidityMask::from_words(words, n))
+            .keeping_dtype_of(&self.column);
+        Some(Self::new(self.name.clone(), self.index.clone(), column))
     }
 
     fn cumsum_storage(&self) -> Result<Self, FrameError> {
@@ -23872,6 +23911,9 @@ impl Series {
         // A float32 column multiplies in float32, each partial product
         // rounded, as cumsum adds (it was float64; br-frankenpandas-wwbb1).
         if self.column.width() == Some(NumericWidth::Float32) {
+            if let Some(running) = self.float32_running(1.0, |acc, value| acc * value) {
+                return running;
+            }
             let mut acc = 1.0_f64;
             let out: Vec<Scalar> = self
                 .column
@@ -99318,10 +99360,13 @@ impl DataFrame {
                         }
                     }
                 }
+                // The source's values moved: a float32 column stays float32
+                // (it came back float64; br-frankenpandas-o8m7y).
                 Ok(Column::from_f64_values_with_validity(
                     out,
                     fp_columnar::ValidityMask::from_words(words, n),
-                ))
+                )
+                .keeping_dtype_of(col))
             } else {
                 // EVERY dtype shifts: pandas moves object/datetime/timedelta/
                 // categorical/nullable columns too. This arm used to return non-
@@ -173711,6 +173756,78 @@ mod tests {
                         values[i].to_bits(),
                         expected.to_bits(),
                         "n {n} periods {periods} row {i}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn float32_running_sum_and_product_are_the_scalar_loop_o8m7y() {
+        // A float32 column's cumsum / cumprod over its buffer and mask is
+        // the per-row Scalar loop it replaces - the same Scalars, mask and
+        // width - for an all-valid column, NaN as missing, missing rows
+        // holding numbers, and a running sum gone NaN past an infinity less
+        // itself (missing from there on). NEGATIVE: a running sum that kept
+        // that NaN row present, or a sum that did not skip a missing row
+        // holding a number, would differ (br-frankenpandas-o8m7y).
+        let scalar_loop = |series: &Series, start: f64, step: fn(f64, f64) -> f64| {
+            let mut acc = start;
+            let dtype = series.column().dtype();
+            let out: Vec<Scalar> = series
+                .column()
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Float64(v) if !v.is_nan() => {
+                        acc = fp_types::NumericWidth::round_f32(step(acc, *v));
+                        Scalar::Float64(acc)
+                    }
+                    _ => Scalar::missing_for_dtype(dtype.clone()),
+                })
+                .collect();
+            Column::new(dtype, out).unwrap()
+        };
+        let plain = vec![0.1, 0.2, 1.5, -3.25, 1e-30, 7.0, 0.3];
+        let holes = vec![0.1, f64::NAN, 1.5, f64::NAN, 2.0, -0.5, f64::NAN];
+        let infinite = vec![1.5, f64::INFINITY, 2.0, f64::NEG_INFINITY, 3.0, 0.5];
+        let mut mask = ValidityMask::all_valid(plain.len());
+        mask.set(2, false);
+        mask.set(5, false);
+        let columns = [
+            Column::from_f64_values(plain.clone()),
+            Column::from_f64_values(holes),
+            Column::from_f64_values_with_validity(plain, mask),
+            Column::from_f64_values(infinite),
+        ];
+        for (k, column) in columns.into_iter().enumerate() {
+            let column = column
+                .cast_to_width(fp_types::NumericWidth::Float32, false)
+                .unwrap();
+            let n = column.len();
+            let series = Series::new("x", Index::from_range(0, n as i64, 1), column).unwrap();
+            let add: fn(f64, f64) -> f64 = |acc, v| acc + v;
+            let multiply: fn(f64, f64) -> f64 = |acc, v| acc * v;
+            for (name, got, start, step) in [
+                ("cumsum", series.cumsum().unwrap(), 0.0, add),
+                ("cumprod", series.cumprod().unwrap(), 1.0, multiply),
+            ] {
+                let want = scalar_loop(&series, start, step);
+                assert_eq!(
+                    got.column().width(),
+                    Some(fp_types::NumericWidth::Float32),
+                    "{name} {k}"
+                );
+                assert_eq!(
+                    format!("{:?}", got.values()),
+                    format!("{:?}", want.values()),
+                    "{name} {k}"
+                );
+                for i in 0..n {
+                    assert_eq!(
+                        got.column().validity().get(i),
+                        want.validity().get(i),
+                        "{name} {k} row {i}"
                     );
                 }
             }

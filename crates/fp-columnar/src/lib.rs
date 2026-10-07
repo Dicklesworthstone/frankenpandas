@@ -16871,15 +16871,20 @@ impl Column {
             (start..start + len).all(|row| self.validity.get(row) && !data[base + row].is_nan())
         }));
 
+        // The source's values: a float32 column stays float32 (a frame's
+        // dropna of NaN-holding float32 columns came back float64;
+        // br-frankenpandas-o8m7y).
         if out_len == 0 {
-            return Some(Self::from_f64_values_all_valid_unchecked(Vec::new()));
+            return Some(
+                Self::from_f64_values_all_valid_unchecked(Vec::new()).keeping_dtype_of(self),
+            );
         }
 
         let chunks = runs
             .iter()
             .map(|&(start, len)| (Arc::clone(&data), base + start, len))
             .collect();
-        Some(Self::from_f64_all_valid_chunks(chunks, out_len))
+        Some(Self::from_f64_all_valid_chunks(chunks, out_len).keeping_dtype_of(self))
     }
 
     /// Gather a contiguous row range without first materializing
@@ -18017,8 +18022,9 @@ impl Column {
                     {
                         return self;
                     }
-                    let rounded = values.iter().map(|&value| single(value)).collect();
-                    return Self::from_f64_values(rounded)
+                }
+                if let Some(rounded) = self.f32_rounded() {
+                    return rounded
                         .keeping_nullable_dtype(&self.dtype)
                         .with_width_unchecked(NumericWidth::Float32);
                 }
@@ -18092,6 +18098,48 @@ impl Column {
         self
     }
 
+    /// This float64 column's values rounded to the nearest f32 over its own
+    /// buffer, where a column holding a missing row built, rounded and read
+    /// back a Scalar per row (`nx.abs()` of a float32 column 52 ms a
+    /// million rows, pandas 0.07; br-frankenpandas-o8m7y). A NaN-exact
+    /// column (numpy's float, the form the typed float kernels key on) stays
+    /// one: rounding keeps every NaN and makes none, so its mask holds and
+    /// the rounded values collect straight into the shared buffer. Another
+    /// all-valid one is `from_f64_values` of the rounded values, as before;
+    /// one with a missing row is rounded under the same mask - a row valid
+    /// but NaN (an infinity less itself) leaving it, as `Column::new` of
+    /// the Scalars reads it - and keeps each missing row's datum, so its
+    /// Scalar view is the rebuild's. None for other storage - the nullable
+    /// extension dtype, whose NaN is a value, among it.
+    fn f32_rounded(&self) -> Option<Self> {
+        let round = |value: &f64| NumericWidth::round_f32(*value);
+        let (values, validity) = self.as_f64_slice_with_validity()?;
+        if self.nan_missing_exact() {
+            return Some(Self {
+                dtype: DType::Float64,
+                values: ScalarValues::lazy_all_valid_float64_arc_nan_exact(
+                    values.iter().map(round).collect(),
+                    None,
+                ),
+                validity: validity.clone(),
+                data: None,
+                categorical: None,
+                width: None,
+                pandas_string: false,
+            });
+        }
+        if self.as_f64_slice().is_some() {
+            return Some(Self::from_f64_values(values.iter().map(round).collect()));
+        }
+        let rounded = values.iter().map(round).collect();
+        let validity = if values.iter().fold(false, |any, v| any | v.is_nan()) {
+            validity.and_mask(&ValidityMask::from_f64(values))
+        } else {
+            validity.clone()
+        };
+        Some(Self::from_f64_values_with_validity(rounded, validity))
+    }
+
     fn with_width_dropped(mut self) -> Self {
         self.width = None;
         self
@@ -18135,12 +18183,8 @@ impl Column {
             self.astype(storage.clone())?
         };
         if width.is_float() {
-            if let Some(values) = base.as_f64_slice() {
-                let rounded = values
-                    .iter()
-                    .map(|value| NumericWidth::round_f32(*value))
-                    .collect();
-                return Ok(Self::from_f64_values(rounded)
+            if let Some(rounded) = base.f32_rounded() {
+                return Ok(rounded
                     .keeping_nullable_dtype(&storage)
                     .with_width_unchecked(width));
             }
@@ -69819,7 +69863,7 @@ mod floordiv_mod_f64_pandas_special_value_lock {
 mod numeric_width_columns_fvsao23 {
     use fp_types::{DType, NumericWidth, Scalar};
 
-    use super::{Column, ColumnError};
+    use super::{Column, ColumnError, ValidityMask};
 
     fn ints(values: &[i64]) -> Column {
         Column::from_i64_values(values.to_vec())
@@ -69849,6 +69893,114 @@ mod numeric_width_columns_fvsao23 {
             .cast_to_width(NumericWidth::Int32, false)
             .unwrap();
         assert_eq!(truncated.as_i64_slice().unwrap(), &[1, -2]);
+    }
+
+    #[test]
+    fn float32_rounding_over_the_buffer_is_the_scalar_rebuild_o8m7y() {
+        // A float64 column narrowed to float32 - all valid, NaN as missing,
+        // missing rows holding numbers, a valid row holding NaN - rounds
+        // over its own buffer to the column the Scalar rebuild made: the
+        // same Scalars, mask and dtype, past f32::MAX an infinity. NEGATIVE:
+        // the valid row holding NaN (an infinity less itself) leaves the
+        // mask, as Column::new reads a NaN; a rounding that kept the mask as
+        // given would count it present (br-frankenpandas-o8m7y).
+        let rebuild = |column: &Column| {
+            let rounded = column
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Float64(v) => Scalar::Float64(NumericWidth::round_f32(*v)),
+                    other => other.clone(),
+                })
+                .collect();
+            Column::new(column.dtype(), rounded).unwrap()
+        };
+        let data = [
+            0.1,
+            f64::NAN,
+            1.5,
+            -2.7e-3,
+            f64::INFINITY,
+            3.4e39,
+            -0.0,
+            7.25,
+        ];
+        let numbers: Vec<f64> = data
+            .iter()
+            .map(|v| if v.is_nan() { 0.0 } else { *v })
+            .collect();
+        let mut mask = ValidityMask::all_valid(data.len());
+        mask.set(2, false);
+        mask.set(5, false);
+        let valid_nan = Column::from_f64_values_with_validity(data.to_vec(), mask.clone());
+        let columns = [
+            Column::from_f64_values(numbers.clone()),
+            Column::from_f64_values(data.to_vec()),
+            Column::from_f64_values_with_validity(numbers, mask),
+            valid_nan.clone(),
+        ];
+        let float32 = Column::from_f64_values(vec![1.0])
+            .cast_to_width(NumericWidth::Float32, false)
+            .unwrap();
+        for (k, column) in columns.iter().enumerate() {
+            let want = rebuild(column);
+            let cast = column.cast_to_width(NumericWidth::Float32, false).unwrap();
+            let narrowed = column.clone().narrowed_like(&float32);
+            for got in [cast, narrowed] {
+                assert_eq!(got.width(), Some(NumericWidth::Float32), "column {k}");
+                assert_eq!(got.dtype(), want.dtype(), "column {k}");
+                assert_eq!(
+                    format!("{:?}", got.values()),
+                    format!("{:?}", want.values()),
+                    "column {k}"
+                );
+                for i in 0..data.len() {
+                    assert_eq!(
+                        got.validity().get(i),
+                        want.validity().get(i),
+                        "column {k} row {i}"
+                    );
+                }
+            }
+        }
+        assert!(valid_nan.validity().get(1));
+        let narrowed = valid_nan
+            .cast_to_width(NumericWidth::Float32, false)
+            .unwrap();
+        assert!(!narrowed.validity().get(1));
+        assert_eq!(narrowed.values()[5], Scalar::Null(fp_types::NullKind::NaN));
+        // numpy's form stays numpy's (the typed kernels key on it): the
+        // all-valid and NaN-holding columns' NaN rows are their missing rows;
+        // missing rows holding numbers are not.
+        let nan_exact = |column: &Column| {
+            column
+                .cast_to_width(NumericWidth::Float32, false)
+                .unwrap()
+                .nan_missing_exact()
+        };
+        assert!(nan_exact(&columns[0]) && nan_exact(&columns[1]));
+        assert!(!nan_exact(&columns[2]) && !nan_exact(&columns[3]));
+        // NEGATIVE: the nullable extension dtype (Float32) keeps the rebuild.
+        let masked = Column::new(
+            DType::Float64Nullable,
+            vec![
+                Scalar::Float64(0.1),
+                Scalar::Null(fp_types::NullKind::NaN),
+                Scalar::Float64(3.4e39),
+            ],
+        )
+        .unwrap();
+        let cast = masked.cast_to_width(NumericWidth::Float32, true).unwrap();
+        let want = rebuild(&masked);
+        assert_eq!(cast.dtype(), DType::Float64Nullable);
+        assert_eq!(
+            format!("{:?}", cast.values()),
+            format!("{:?}", want.values())
+        );
+        assert_eq!(
+            (0..3).map(|i| cast.validity().get(i)).collect::<Vec<_>>(),
+            [true, false, true]
+        );
     }
 
     #[test]
