@@ -398,6 +398,25 @@ pub fn div_by_number_f64(a: &[f64], s: f64, number_first: bool) -> Vec<f64> {
     out
 }
 
+/// [`div_by_number_f64`] collected straight into the `Arc<[f64]>` a
+/// NaN-exact column keeps, each quotient written into the fresh buffer - its
+/// quotients in a Vec copied into one were 8 MB more (nx / 3 0.58 ms a
+/// million rows, pandas 0.30), a zero-filled one divided in place still a
+/// fill before the divide (0.34 ms; br-frankenpandas-3tk83). The same
+/// quotients: this crate's codegen divides four lanes at a time.
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
+/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+#[inline(never)]
+#[must_use]
+pub fn div_by_number_f64_arc(a: &[f64], s: f64, number_first: bool) -> std::sync::Arc<[f64]> {
+    if number_first {
+        a.iter().map(|&x| s / x).collect()
+    } else {
+        a.iter().map(|&x| x / s).collect()
+    }
+}
+
 /// The `+`, `-` and `*` siblings of [`div_f64_into`], generated from one body.
 ///
 /// br-frankenpandas-uza04. `div` was given this crate's 4-lane width because
@@ -566,6 +585,47 @@ macro_rules! made_nan_f64_kernel {
         }
     };
 }
+
+/// `a[i] op b[i]` collected straight into the `Arc<[f64]>` a NaN-exact
+/// column keeps, with whether the op made a NaN of two numbers - the
+/// `made_nan_f64_kernel` values without the zero fill of a buffer they are
+/// then written into (br-frankenpandas-cmgnp).
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
+/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+macro_rules! made_nan_f64_arc {
+    ($name:ident, $op:tt, $doc:literal) => {
+        #[doc = $doc]
+        ///
+        /// # Panics
+        /// Panics if `a` and `b` differ in length.
+        #[inline(never)]
+        #[must_use]
+        pub fn $name(a: &[f64], b: &[f64]) -> (std::sync::Arc<[f64]>, bool) {
+            assert_eq!(
+                a.len(),
+                b.len(),
+                concat!(stringify!($name), ": a/b length mismatch")
+            );
+            let mut made_nan = false;
+            let out = a
+                .iter()
+                .zip(b)
+                .map(|(&x, &y)| {
+                    let r = x $op y;
+                    made_nan |= r.is_nan() & !x.is_nan() & !y.is_nan();
+                    r
+                })
+                .collect();
+            (out, made_nan)
+        }
+    };
+}
+
+made_nan_f64_arc!(add_f64_made_nan_arc, +, "`a[i] + b[i]` into a fresh Arc.");
+made_nan_f64_arc!(sub_f64_made_nan_arc, -, "`a[i] - b[i]` into a fresh Arc.");
+made_nan_f64_arc!(mul_f64_made_nan_arc, *, "`a[i] * b[i]` into a fresh Arc.");
+made_nan_f64_arc!(div_f64_made_nan_arc, /, "`a[i] / b[i]` into a fresh Arc.");
 
 made_nan_f64_kernel!(
     add_f64_made_nan_into,
@@ -1008,6 +1068,33 @@ mod tests {
         assert_ne!(swapped, div_by_number_f64(&a, 4.0, false));
     }
 
+    /// br-frankenpandas-3tk83: the Arc divide is the Vec-building one's
+    /// quotients bit for bit, both operand orders, at lengths straddling the
+    /// 4-lane chunks. NEGATIVE: the orders differ.
+    #[test]
+    fn div_by_number_arc_is_the_vec_divide_3tk83() {
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        let special = [1.5, -0.0, 0.0, f64::INFINITY, -2.0, f64::NAN, 5e-324, 1.0];
+        for len in [0usize, 1, 3, 4, 5, 7, 8, 9, 17, 1001] {
+            let a: Vec<f64> = (0..len)
+                .map(|i| special[i % special.len()] * (1.0 + i as f64 / 7.0))
+                .collect();
+            for s in [3.0, -0.25, 0.0, -0.0, f64::INFINITY, f64::NAN, 5e-324] {
+                for number_first in [false, true] {
+                    assert_eq!(
+                        bits(&div_by_number_f64_arc(&a, s, number_first)),
+                        bits(&div_by_number_f64(&a, s, number_first)),
+                        "{len} {s} {number_first}"
+                    );
+                }
+            }
+        }
+        let forward = div_by_number_f64_arc(&[2.0, 8.0, 1.0], 4.0, false);
+        let backward = div_by_number_f64_arc(&[2.0, 8.0, 1.0], 4.0, true);
+        assert_eq!(&forward[..], &[0.5, 2.0, 0.25]);
+        assert_eq!(&backward[..], &[2.0, 0.5, 4.0]);
+    }
+
     /// br-frankenpandas-cmgnp: each made-NaN kernel is the scalar loop bit
     /// for bit, and its witness is whether a result of two numbers is NaN,
     /// at lengths straddling the 4-lane chunks. The operands pair
@@ -1017,12 +1104,20 @@ mod tests {
     #[test]
     fn made_nan_kernels_are_the_scalar_loop_cmgnp() {
         type Kernel = fn(&[f64], &[f64], &mut [f64]) -> bool;
+        type ArcKernel = fn(&[f64], &[f64]) -> (std::sync::Arc<[f64]>, bool);
         type Case = (Kernel, fn(f64, f64) -> f64);
         let kernels: [Case; 4] = [
             (add_f64_made_nan_into, |x, y| x + y),
             (sub_f64_made_nan_into, |x, y| x - y),
             (mul_f64_made_nan_into, |x, y| x * y),
             (div_f64_made_nan_into, |x, y| x / y),
+        ];
+        // Their siblings collecting into a fresh Arc, in the same order.
+        let arcs: [ArcKernel; 4] = [
+            add_f64_made_nan_arc,
+            sub_f64_made_nan_arc,
+            mul_f64_made_nan_arc,
+            div_f64_made_nan_arc,
         ];
         let (inf, nan) = (f64::INFINITY, f64::NAN);
         let left = [1.5, inf, 0.0, -0.0, nan, 3.0, -inf, 5e-324];
@@ -1044,6 +1139,13 @@ mod tests {
                     );
                     assert_eq!(made_nan, made, "{k} {len}");
                 }
+                let (collected, collected_made) = arcs[k](&a, &b);
+                assert_eq!(
+                    collected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    "arc {k} {len}"
+                );
+                assert_eq!(collected_made, made, "arc {k} {len}");
             }
         }
         let mut got = vec![0.0; 5];

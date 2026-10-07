@@ -2254,6 +2254,26 @@ fn f64_pair_made_nan_into(op: ArithmeticOp, a: &[f64], b: &[f64], out: &mut [f64
     })
 }
 
+/// [`f64_pair_made_nan_into`] collected straight into the `Arc<[f64]>` a
+/// NaN-exact column keeps: fp-dot-kernel's collect where the CPU has AVX2,
+/// else a zero-filled one the same sweep writes (a buffer collected into
+/// the Arc after the sweep was a copy; br-frankenpandas-cmgnp).
+fn f64_pair_made_nan_arc(op: ArithmeticOp, a: &[f64], b: &[f64]) -> Option<(Arc<[f64]>, bool)> {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        return match op {
+            ArithmeticOp::Add => Some(fp_dot_kernel::add_f64_made_nan_arc(a, b)),
+            ArithmeticOp::Sub => Some(fp_dot_kernel::sub_f64_made_nan_arc(a, b)),
+            ArithmeticOp::Mul => Some(fp_dot_kernel::mul_f64_made_nan_arc(a, b)),
+            ArithmeticOp::Div => Some(fp_dot_kernel::div_f64_made_nan_arc(a, b)),
+            ArithmeticOp::Pow | ArithmeticOp::Mod | ArithmeticOp::FloorDiv => None,
+        };
+    }
+    let mut data: Arc<[f64]> = std::iter::repeat_n(0.0, a.len()).collect();
+    let made_nan = f64_pair_made_nan_into(op, a, b, Arc::get_mut(&mut data)?)?;
+    Some((data, made_nan))
+}
+
 fn binary_f64_apply(op: ArithmeticOp) -> fn(f64, f64) -> f64 {
     match op {
         ArithmeticOp::Add => |a, b| a + b,
@@ -2324,6 +2344,23 @@ fn divided_by_number(data: &[f64], s: f64, number_first: bool) -> Vec<f64> {
     #[cfg(target_arch = "x86_64")]
     if std::arch::is_x86_feature_detected!("avx2") {
         return fp_dot_kernel::div_by_number_f64(data, s, number_first);
+    }
+    if number_first {
+        data.iter().map(|&v| s / v).collect()
+    } else {
+        data.iter().map(|&v| v / s).collect()
+    }
+}
+
+/// [`divided_by_number`] collected straight into the `Arc<[f64]>` a
+/// NaN-exact column keeps - its quotients in a Vec copied into one were 8 MB
+/// more (nx / 3 0.58 ms a million rows, pandas 0.30;
+/// br-frankenpandas-3tk83): fp-dot-kernel's 4-lane collect where the CPU has
+/// AVX2, the same quotients otherwise.
+fn divided_by_number_arc(data: &[f64], s: f64, number_first: bool) -> Arc<[f64]> {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        return fp_dot_kernel::div_by_number_f64_arc(data, s, number_first);
     }
     if number_first {
         data.iter().map(|&v| s / v).collect()
@@ -19992,9 +20029,7 @@ impl Column {
                 (ArithmeticOp::Sub, true) => data.iter().map(|&v| s - v).collect(),
                 (ArithmeticOp::Mul, false) => data.iter().map(|&v| v * s).collect(),
                 (ArithmeticOp::Mul, true) => data.iter().map(|&v| s * v).collect(),
-                (ArithmeticOp::Div, number_first) => {
-                    Arc::from(divided_by_number(data, s, number_first))
-                }
+                (ArithmeticOp::Div, number_first) => divided_by_number_arc(data, s, number_first),
                 _ => return None,
             };
             return Some(Self::nan_exact_float64(out, validity.clone()));
@@ -20309,11 +20344,7 @@ impl Column {
         let nan_on_missing =
             |column: &Self, valid: &ValidityMask| column.nan_missing_exact() || valid.all();
         if nan_on_missing(self, lvalid) && nan_on_missing(right, rvalid) {
-            // Filled in place: a buffer collected into the Arc after the
-            // sweep was a copy, a zipped collect into it did not vectorize
-            // (nx - ny 0.34 -> 0.54 ms).
-            let mut data: Arc<[f64]> = std::iter::repeat_n(0.0, lsrc.len()).collect();
-            let made_nan = f64_pair_made_nan_into(op, lsrc, rsrc, Arc::get_mut(&mut data)?)?;
+            let (data, made_nan) = f64_pair_made_nan_arc(op, lsrc, rsrc)?;
             let validity = if made_nan {
                 ValidityMask::from_f64(&data)
             } else {
