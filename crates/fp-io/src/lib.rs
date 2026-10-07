@@ -968,6 +968,10 @@ fn push_csv_default_numeric_field(values: &mut CsvTypedColumnValues, field: &[u8
     {
         return false;
     }
+    // A padded infinity is text to pandas' parser, the column object
+    // (br-frankenpandas-kih58): a number for these paths only unpadded.
+    let number =
+        |value: f64| !value.is_nan() && (!value.is_infinite() || trimmed.len() == field.len());
 
     match values {
         CsvTypedColumnValues::Int64(out) => {
@@ -978,7 +982,7 @@ fn push_csv_default_numeric_field(values: &mut CsvTypedColumnValues, field: &[u8
                 true
             } else {
                 match parse_f64_csv_number(trimmed) {
-                    Some(value) if !value.is_nan() => {
+                    Some(value) if number(value) => {
                         let mut promoted = Vec::with_capacity(out.capacity());
                         promoted.extend(out.iter().copied().map(fp_types::pandas_int_to_f64));
                         promoted.push(value);
@@ -990,7 +994,7 @@ fn push_csv_default_numeric_field(values: &mut CsvTypedColumnValues, field: &[u8
             }
         }
         CsvTypedColumnValues::Float64(out) => match parse_f64_csv_number(trimmed) {
-            Some(value) if !value.is_nan() => {
+            Some(value) if number(value) => {
                 out.push(value);
                 true
             }
@@ -1881,12 +1885,25 @@ impl CsvColumnAcc {
                     None => Column::from_f64_values(buf),
                 }
             }
-            Self::Bool(buf, valid) if has_value(buf.len(), &valid) => {
-                match valid.as_deref().and_then(validity_from_bools) {
-                    Some(mask) => Column::from_bool_values_with_validity(buf, mask),
-                    None => Column::from_bool_values(buf),
-                }
-            }
+            Self::Bool(buf, valid) if has_value(buf.len(), &valid) => match valid {
+                // A missing cell is NaN, as the Scalar path reads it
+                // (parse_scalar) and pandas' parser gives it: booleans and
+                // NaN (br-frankenpandas-kih58; the nullable bool backing read
+                // it as None).
+                Some(valid) if valid.contains(&false) => Column::from_values(
+                    buf.into_iter()
+                        .zip(valid)
+                        .map(|(value, present)| {
+                            if present {
+                                Scalar::Bool(value)
+                            } else {
+                                Scalar::Null(NullKind::NaN)
+                            }
+                        })
+                        .collect(),
+                )?,
+                _ => Column::from_bool_values(buf),
+            },
             // Text cells only (never empty: an empty field is missing).
             Self::Text => Column::from_utf8_contiguous(raw_bytes, raw_offsets),
             // Any ambiguous cell, all-NA, or empty → exact legacy path from raw.
@@ -20352,6 +20369,46 @@ mod tests {
     }
 
     #[test]
+    fn csv_bool_missing_is_nan_and_padded_inf_is_text_kih58() {
+        // br-frankenpandas-kih58, measured against pandas 2.2.3: a boolean
+        // column's missing cell is NaN (booleans and NaN, object), and a
+        // padded infinity is text - the column object, its cells verbatim.
+        let frame = read_csv_str("a,b\n1,True\n2,\n3,false\n").unwrap();
+        assert_eq!(
+            frame.column("b").unwrap().values(),
+            &[
+                Scalar::Bool(true),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Bool(false)
+            ]
+        );
+        let padded = read_csv_str("a,b\n1, inf\n2,1.5\n3,-inf\n").unwrap();
+        let b = padded.column("b").unwrap();
+        assert_eq!(b.dtype(), DType::Utf8);
+        assert_eq!(
+            b.values(),
+            &[
+                Scalar::Utf8(" inf".to_owned()),
+                Scalar::Utf8("1.5".to_owned()),
+                Scalar::Utf8("-inf".to_owned())
+            ]
+        );
+        // NEGATIVE: unpadded infinities stay float64, and a boolean column
+        // with no missing cell stays a typed bool column.
+        let bare = read_csv_str("a,b\n1,inf\n2,1.5\n3,-inf\n").unwrap();
+        assert_eq!(
+            bare.column("b").unwrap().values(),
+            &[
+                Scalar::Float64(f64::INFINITY),
+                Scalar::Float64(1.5),
+                Scalar::Float64(f64::NEG_INFINITY)
+            ]
+        );
+        let flags = read_csv_str("a,b\n1,True\n2,false\n").unwrap();
+        assert_eq!(flags.column("b").unwrap().dtype(), DType::Bool);
+    }
+
+    #[test]
     fn csv_closed_and_literal_quotes_are_not_unterminated() {
         assert!(!csv_input_has_unterminated_quote(
             "a,b\n\"x,y\",2\n",
@@ -22689,19 +22746,19 @@ mod tests {
         let frame = read_csv_str("flag\nTrue\nNA\nfalse\n").expect("typed bool csv");
         let flag = frame.column("flag").expect("flag column");
 
+        // TEST-CHANGE (br-frankenpandas-kih58): the missing cell is NaN, as
+        // pandas 2.2.3 reads it (measured: read_csv of this input gives
+        // object [True, nan, False]); the nullable bool backing read it as
+        // Null (None), so the column is now built from its Bool / NaN cells
+        // and the backing assertion is gone. Measured cost: none - a
+        // million-row bool column with 5% missing cells read in 27.3 ms
+        // before, 27.0 after (pandas 93.1).
         assert_eq!(flag.dtype(), DType::Bool);
-        let (values, validity) = flag
-            .as_nullable_bool_slice()
-            .expect("typed nullable Bool backing");
-        assert_eq!(values, &[true, false, false]);
-        assert!(validity.get(0));
-        assert!(!validity.get(1));
-        assert!(validity.get(2));
         assert_eq!(
             flag.values(),
             &[
                 Scalar::Bool(true),
-                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::NaN),
                 Scalar::Bool(false)
             ]
         );
