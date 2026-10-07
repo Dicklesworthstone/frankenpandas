@@ -25126,6 +25126,9 @@ fn object_cells_reduce(
     if counted < min_count {
         return f64::NAN.into_py_any(py);
     }
+    if let Some(total) = native_object_total(values, op == "mul", skipna) {
+        return scalar_to_py(py, &total);
+    }
     let operator = py.import("operator")?.getattr(op)?;
     let identity = if op == "mul" { 1 } else { 0 };
     // pandas fills the missing cells with the identity under skipna
@@ -40590,38 +40593,12 @@ impl PyDataFrame {
                 });
             }
         }
-        // pandas' _ensure_numeric of the totals: the kinds infer_dtype sees
-        // (a NaN skipped), text or anything else not a number refused.
-        let (mut bools, mut ints, mut floats) = (false, false, false);
-        for total in totals.iter().flatten() {
-            if total.is_instance_of::<pyo3::types::PyBool>() {
-                bools = true;
-            } else if total.is_instance_of::<pyo3::types::PyInt>() {
-                ints = true;
-            } else if total.is_instance_of::<pyo3::types::PyFloat>() {
-                floats |= !total.extract::<f64>()?.is_nan();
-            } else {
-                return Err(pyo3::exceptions::PyTypeError::new_err(format!(
-                    "Could not convert {} to numeric",
-                    total.repr()?
-                )));
-            }
-        }
-        if bools && floats && !ints {
-            return Err(pyo3::exceptions::PyTypeError::new_err(
-                "Could not convert the rows' bool and float totals to numeric",
-            ));
-        }
-        let values = totals
-            .iter()
-            .zip(counted)
-            .map(|(total, count)| {
-                Ok(Scalar::Float64(match total {
-                    Some(total) if count > 0 => total.extract::<f64>()? / count as f64,
-                    _ => f64::NAN,
-                }))
-            })
-            .collect::<PyResult<Vec<Scalar>>>()?;
+        let totals: Vec<(Option<Bound<'_, PyAny>>, usize)> =
+            totals.into_iter().zip(counted).collect();
+        let values = object_means(&totals)?
+            .into_iter()
+            .map(Scalar::Float64)
+            .collect();
         let inner = Series::new(
             "",
             self.inner.index().clone(),
@@ -40632,16 +40609,10 @@ impl PyDataFrame {
     }
 
     /// An object frame's rows ([`Self::object_row_columns`]) as pandas casts
-    /// them to float64 for median / std / var / sem / skew / kurt: each
-    /// cell's float - a bool 0 / 1, an int rounded as numpy casts it, a
-    /// missing cell missing - in a float frame of the same rows, which the
-    /// number reductions answer (boxed by [`object_answer`]); a text cell
-    /// is pandas' TypeError, and so for median are cells that infer as
-    /// 'mixed' (bools beside floats without an int), and for std / var /
-    /// sem without skipna a None (numpy's float64 sum of it; median, skew
-    /// and kurt cast it to NaN) (fp raised TypeError;
-    /// br-frankenpandas-wa3we). None for any other frame, one without rows
-    /// or a cell neither a number nor text.
+    /// them to float64 for median / std / var / sem / skew / kurt
+    /// ([`object_columns_as_floats`]; fp raised TypeError;
+    /// br-frankenpandas-wa3we). None for any other frame or one without
+    /// rows.
     fn object_rows_as_floats(
         &self,
         axis: usize,
@@ -40652,66 +40623,427 @@ impl PyDataFrame {
         let Some(columns) = self.object_row_columns(axis, numeric_only) else {
             return Ok(None);
         };
-        let rows = self.inner.index().len();
-        if rows == 0 {
+        if self.inner.index().is_empty() {
             return Ok(None);
         }
-        let none_refused = !skipna && matches!(op, "std" | "var" | "sem");
-        let (mut bools, mut ints, mut floats) = (false, false, false);
-        let mut float_columns = BTreeMap::new();
-        let mut names = Vec::with_capacity(columns.len());
-        for (position, column) in columns.into_iter().enumerate() {
-            let mut data = Vec::with_capacity(rows);
-            let mut validity = fp_columnar::ValidityMask::all_valid(rows);
-            for (row, value) in column.values().iter().enumerate() {
-                data.push(match value {
-                    Scalar::Null(NullKind::Null) if none_refused => {
-                        return Err(pyo3::exceptions::PyTypeError::new_err(
-                            "float() argument must be a string or a real number, not 'NoneType'",
-                        ));
-                    }
-                    value if value.is_missing() => {
-                        validity.set(row, false);
-                        0.0
-                    }
-                    Scalar::Bool(value) => {
-                        bools = true;
-                        f64::from(u8::from(*value))
-                    }
-                    Scalar::Int64(value) => {
-                        ints = true;
-                        *value as f64
-                    }
-                    Scalar::Float64(value) => {
-                        floats = true;
-                        *value
-                    }
-                    Scalar::Utf8(text) => {
-                        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
-                            "could not convert string to float: '{text}'"
-                        )));
-                    }
-                    _ => return Ok(None),
-                });
-            }
-            let name = position.to_string();
-            float_columns.insert(
-                name.clone(),
-                Column::from_f64_values_with_validity(data, validity),
-            );
-            names.push(name);
-        }
-        if op == "median" && bools && floats && !ints {
-            return Err(pyo3::exceptions::PyTypeError::new_err(
-                "Cannot convert the rows' bool and float values to numeric",
-            ));
-        }
-        let inner =
-            DataFrame::new_with_column_order(self.inner.index().clone(), float_columns, names)
-                .map_err(frame_error_to_py)?;
-        Ok(Some(Self { inner }))
+        object_columns_as_floats(&columns, self.inner.index(), skipna, op)
     }
 
+    /// `op` (min / max / mean / median / std / var / sem / skew / kurt) over
+    /// the columns (axis 0) of a frame holding an object column, as pandas
+    /// reduces its object block: each object column as the rows of the
+    /// object frames reduce theirs - min / max a Python fold
+    /// ([`object_cells_extreme`]), mean a Python sum over the counted cells,
+    /// the rest the cells as floats ([`object_columns_as_floats`]) - and
+    /// each number column its own answer, in an object Series (min / max
+    /// answered int64 or float64, mean and the rest raised TypeError;
+    /// br-frankenpandas-tl288). None for rows, numeric_only, a frame
+    /// without rows or object columns, or one holding a column neither a
+    /// plain number nor object.
+    fn object_column_answers(
+        &self,
+        py: Python<'_>,
+        axis: usize,
+        numeric_only: bool,
+        skipna: bool,
+        ddof: usize,
+        op: &str,
+    ) -> PyResult<Option<PySeries>> {
+        if axis != 0 || numeric_only || self.inner.index().is_empty() {
+            return Ok(None);
+        }
+        let columns: Vec<&Column> = (0..self.inner.num_columns())
+            .filter_map(|position| self.inner.column_at(position))
+            .collect();
+        let object = |column: &Column| {
+            is_object_column(column) || (column.dtype() == DType::Bool && column.has_any_missing())
+        };
+        let number = |column: &Column| {
+            matches!(column.dtype(), DType::Int64 | DType::Float64)
+                || (column.dtype() == DType::Bool && !column.has_any_missing())
+        };
+        if !columns.iter().any(|&column| object(column))
+            || !columns
+                .iter()
+                .all(|&column| object(column) || number(column))
+        {
+            return Ok(None);
+        }
+        let mut answers: Vec<Scalar> = Vec::with_capacity(columns.len());
+        for &column in &columns {
+            answers.push(if object(column) {
+                Scalar::Null(NullKind::Null)
+            } else {
+                // A number column's own answer, in its own dtype (the
+                // frame's numeric answers share one: 3 beside 0.5 is 3.0).
+                let one = DataFrame::new_with_column_order(
+                    self.inner.index().clone(),
+                    BTreeMap::from([("0".to_owned(), column.clone())]),
+                    vec!["0".to_owned()],
+                )
+                .map_err(frame_error_to_py)?;
+                let answer = Self { inner: one }
+                    .float_frame_answers(op, 0, skipna, ddof)
+                    .map_err(frame_error_to_py)?;
+                answer
+                    .values()
+                    .first()
+                    .cloned()
+                    .unwrap_or(Scalar::Null(NullKind::NaN))
+            });
+        }
+        let objects: Vec<usize> = (0..columns.len())
+            .filter(|&position| object(columns[position]))
+            .collect();
+        match op {
+            "min" | "max" => {
+                for &position in &objects {
+                    answers[position] = object_cells_extreme(py, columns[position], skipna, op)?;
+                }
+            }
+            "mean" => {
+                let mut totals = Vec::with_capacity(objects.len());
+                for &position in &objects {
+                    totals.push(object_cells_total(py, columns[position], skipna)?);
+                }
+                let means = object_means(&totals)?;
+                for (&position, mean) in objects.iter().zip(means) {
+                    answers[position] = Scalar::Float64(mean);
+                }
+            }
+            _ => {
+                let object_columns: Vec<&Column> =
+                    objects.iter().map(|&position| columns[position]).collect();
+                let Some(floats) =
+                    object_columns_as_floats(&object_columns, self.inner.index(), skipna, op)?
+                else {
+                    return Ok(None);
+                };
+                let reduced = floats
+                    .float_frame_answers(op, 0, skipna, ddof)
+                    .map_err(frame_error_to_py)?;
+                for (&position, value) in objects.iter().zip(reduced.values()) {
+                    answers[position] = value.clone();
+                }
+            }
+        }
+        // The frame's column labels, in order: its count's index.
+        let labels = self.count_internal(0, false).map_err(frame_error_to_py)?;
+        if labels.len() != answers.len() {
+            return Ok(None);
+        }
+        let inner = Series::new(
+            labels.name(),
+            labels.index().clone(),
+            Column::from_object_values(answers),
+        )
+        .map_err(frame_error_to_py)?;
+        Ok(Some(PySeries { inner }))
+    }
+
+    /// `op`'s answers over `axis` of this frame of numbers, as its float
+    /// reductions give them (skew / kurt NaN for a missing value without
+    /// skipna).
+    fn float_frame_answers(
+        &self,
+        op: &str,
+        axis: usize,
+        skipna: bool,
+        ddof: usize,
+    ) -> Result<Series, FrameError> {
+        match op {
+            "min" => self.min_internal(axis, skipna, false),
+            "max" => self.max_internal(axis, skipna, false),
+            "mean" => self.mean_internal(axis, skipna, false),
+            "median" => self.median_internal(axis, skipna, false),
+            "std" => self.std_internal(axis, skipna, ddof, false),
+            "var" => self.var_internal(axis, skipna, ddof, false),
+            "sem" => self.sem_internal(axis, skipna, ddof, false),
+            "skew" => self
+                .skew_internal(axis, false)
+                .and_then(|s| self.missing_is_nan(s, axis, false, skipna)),
+            _ => self
+                .kurt_internal(axis, false)
+                .and_then(|s| self.missing_is_nan(s, axis, false, skipna)),
+        }
+    }
+}
+
+/// Object columns as pandas casts their cells to float64 for median / std /
+/// var / sem / skew / kurt (nanops over an object block, by row or by
+/// column): each cell's float - a bool 0 / 1, an int rounded as numpy casts
+/// it, a missing cell missing - in a float frame over `index`, which the
+/// number reductions answer (boxed by [`object_answer`]); a text cell is
+/// pandas' TypeError, and so for median are cells that infer as 'mixed'
+/// (bools beside floats without an int), and for std / var / sem without
+/// skipna a None (numpy's float64 sum of it; median, skew and kurt cast it
+/// to NaN) (br-frankenpandas-wa3we, tl288). None for a cell neither a
+/// number nor text.
+fn object_columns_as_floats(
+    columns: &[&Column],
+    index: &Index,
+    skipna: bool,
+    op: &str,
+) -> PyResult<Option<PyDataFrame>> {
+    let rows = index.len();
+    let none_refused = !skipna && matches!(op, "std" | "var" | "sem");
+    let (mut bools, mut ints, mut floats) = (false, false, false);
+    let mut float_columns = BTreeMap::new();
+    let mut names = Vec::with_capacity(columns.len());
+    for (position, column) in columns.iter().enumerate() {
+        let mut data = Vec::with_capacity(rows);
+        let mut validity = fp_columnar::ValidityMask::all_valid(rows);
+        for (row, value) in column.values().iter().enumerate() {
+            data.push(match value {
+                Scalar::Null(NullKind::Null) if none_refused => {
+                    return Err(pyo3::exceptions::PyTypeError::new_err(
+                        "float() argument must be a string or a real number, not 'NoneType'",
+                    ));
+                }
+                value if value.is_missing() => {
+                    validity.set(row, false);
+                    0.0
+                }
+                Scalar::Bool(value) => {
+                    bools = true;
+                    f64::from(u8::from(*value))
+                }
+                Scalar::Int64(value) => {
+                    ints = true;
+                    *value as f64
+                }
+                Scalar::Float64(value) => {
+                    floats = true;
+                    *value
+                }
+                Scalar::Utf8(text) => {
+                    return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                        "could not convert string to float: '{text}'"
+                    )));
+                }
+                _ => return Ok(None),
+            });
+        }
+        let name = position.to_string();
+        float_columns.insert(
+            name.clone(),
+            Column::from_f64_values_with_validity(data, validity),
+        );
+        names.push(name);
+    }
+    if op == "median" && bools && floats && !ints {
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "Cannot convert the bool and float values to numeric",
+        ));
+    }
+    let inner = DataFrame::new_with_column_order(index.clone(), float_columns, names)
+        .map_err(frame_error_to_py)?;
+    Ok(Some(PyDataFrame { inner }))
+}
+
+/// Python's left fold of `+` (or `*` when `multiply`) over cells that are
+/// all bools, ints and floats - a missing one the op's identity under
+/// skipna - computed natively ([`RowObject`]): pandas' sum / prod of an
+/// object column of numbers, which a Python call per cell answered at
+/// 0.77x pandas. None for any other cell, a missing one without skipna, or
+/// a total past i64, which the caller folds through Python
+/// (br-frankenpandas-tl288).
+fn native_object_total(values: &[Scalar], multiply: bool, skipna: bool) -> Option<Scalar> {
+    let identity = RowObject::Int(i128::from(multiply));
+    let mut total: Option<RowObject> = None;
+    for value in values {
+        let cell = if value.is_missing() {
+            if !skipna {
+                return None;
+            }
+            identity
+        } else {
+            RowObject::of(value)?
+        };
+        total = Some(match total {
+            None => cell,
+            Some(running) => running.combine(cell, multiply)?,
+        });
+    }
+    total.unwrap_or(identity).into_scalar()
+}
+
+/// [`object_cells_extreme`] computed natively when every cell is a bool,
+/// int, float or (under skipna) missing ([`RowObject`]'s exact ordering);
+/// None otherwise (br-frankenpandas-tl288).
+fn native_object_extreme(values: &[Scalar], skipna: bool, min: bool) -> Option<Scalar> {
+    let fill = RowObject::Float(if min {
+        f64::INFINITY
+    } else {
+        f64::NEG_INFINITY
+    });
+    let keeps: fn(std::cmp::Ordering) -> bool = if min {
+        std::cmp::Ordering::is_le
+    } else {
+        std::cmp::Ordering::is_ge
+    };
+    let mut extreme: Option<RowObject> = None;
+    let mut present = false;
+    for value in values {
+        let cell = if value.is_missing() {
+            if !skipna {
+                return None;
+            }
+            fill
+        } else {
+            present = true;
+            RowObject::of(value)?
+        };
+        extreme = Some(match extreme {
+            Some(running) if running.compare(cell).is_some_and(keeps) => running,
+            _ => cell,
+        });
+    }
+    if !present {
+        return Some(Scalar::Null(NullKind::Null));
+    }
+    extreme?.into_scalar()
+}
+
+/// [`object_cells_total`] computed natively when every cell is a bool, int,
+/// float or (under skipna) missing: the total (None over no cells) and the
+/// count; None otherwise (br-frankenpandas-tl288).
+fn native_object_cells_total(values: &[Scalar], skipna: bool) -> Option<(Option<Scalar>, usize)> {
+    let mut total: Option<RowObject> = None;
+    let mut counted = 0_usize;
+    for value in values {
+        let cell = if value.is_missing() {
+            if !skipna {
+                return None;
+            }
+            RowObject::Int(0)
+        } else {
+            counted += 1;
+            RowObject::of(value)?
+        };
+        total = Some(match total {
+            None => cell,
+            Some(running) => running.combine(cell, false)?,
+        });
+    }
+    let total = match total {
+        Some(total) => Some(total.into_scalar()?),
+        None => None,
+    };
+    Some((total, counted))
+}
+
+/// numpy's object min / max of a column's cells, as pandas reduces an
+/// object column: left to right, the running cell kept while Python's `<=`
+/// (min) / `>=` (max) against the next is true - a missing cell +inf / -inf
+/// under skipna, as pandas fills it (text beside one is its TypeError) -
+/// and None when no cell is present (br-frankenpandas-tl288).
+fn object_cells_extreme(
+    py: Python<'_>,
+    column: &Column,
+    skipna: bool,
+    op: &str,
+) -> PyResult<Scalar> {
+    if let Some(extreme) = native_object_extreme(column.values(), skipna, op == "min") {
+        return Ok(extreme);
+    }
+    let (fill, keep) = if op == "min" {
+        (f64::INFINITY, pyo3::basic::CompareOp::Le)
+    } else {
+        (f64::NEG_INFINITY, pyo3::basic::CompareOp::Ge)
+    };
+    let mut extreme: Option<Bound<'_, PyAny>> = None;
+    let mut present = false;
+    for value in column.values().iter() {
+        let cell = if skipna && value.is_missing() {
+            fill.into_bound_py_any(py)?
+        } else {
+            cell_to_py(py, column, value)?.into_bound(py)
+        };
+        present |= !value.is_missing();
+        extreme = Some(match extreme.take() {
+            Some(running) if running.rich_compare(&cell, keep)?.is_truthy()? => running,
+            _ => cell,
+        });
+    }
+    match extreme {
+        Some(extreme) if present || !skipna => py_to_cell(py, &extreme),
+        _ => Ok(Scalar::Null(NullKind::Null)),
+    }
+}
+
+/// A column's cells summed left to right through Python's `+` (a missing
+/// cell 0 under skipna), as pandas' nanmean of an object column sums them,
+/// and the count it divides by (the present cells under skipna, every one
+/// without) (br-frankenpandas-tl288).
+fn object_cells_total<'py>(
+    py: Python<'py>,
+    column: &Column,
+    skipna: bool,
+) -> PyResult<(Option<Bound<'py, PyAny>>, usize)> {
+    if let Some((total, counted)) = native_object_cells_total(column.values(), skipna) {
+        let total = match total {
+            Some(total) => Some(scalar_to_py(py, &total)?.into_bound(py)),
+            None => None,
+        };
+        return Ok((total, counted));
+    }
+    let add = py.import("operator")?.getattr("add")?;
+    let mut total: Option<Bound<'py, PyAny>> = None;
+    let mut counted = 0_usize;
+    for value in column.values().iter() {
+        let cell = if skipna && value.is_missing() {
+            0_i64.into_bound_py_any(py)?
+        } else {
+            cell_to_py(py, column, value)?.into_bound(py)
+        };
+        counted += usize::from(!skipna || !value.is_missing());
+        total = Some(match total.take() {
+            Some(total) => add.call1((total, cell))?,
+            None => cell,
+        });
+    }
+    Ok((total, counted))
+}
+
+/// pandas' nanmean of object cells from their totals and counts
+/// ([`object_cells_total`]): the totals as floats - pandas will not convert
+/// a text total, nor bools beside floats without an int ('mixed') - over
+/// the counts, NaN for none (br-frankenpandas-wa3we, tl288).
+fn object_means(totals: &[(Option<Bound<'_, PyAny>>, usize)]) -> PyResult<Vec<f64>> {
+    let (mut bools, mut ints, mut floats) = (false, false, false);
+    for (total, _) in totals {
+        let Some(total) = total else { continue };
+        if total.is_instance_of::<pyo3::types::PyBool>() {
+            bools = true;
+        } else if total.is_instance_of::<pyo3::types::PyInt>() {
+            ints = true;
+        } else if total.is_instance_of::<pyo3::types::PyFloat>() {
+            floats |= !total.extract::<f64>()?.is_nan();
+        } else {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "Could not convert {} to numeric",
+                total.repr()?
+            )));
+        }
+    }
+    if bools && floats && !ints {
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "Could not convert the bool and float totals to numeric",
+        ));
+    }
+    totals
+        .iter()
+        .map(|(total, count)| {
+            Ok(match total {
+                Some(total) if *count > 0 => total.extract::<f64>()? / *count as f64,
+                _ => f64::NAN,
+            })
+        })
+        .collect()
+}
+
+impl PyDataFrame {
     /// `op` (sum / prod) across the columns of a frame holding an object
     /// column, as pandas reduces its object values: each row's cells folded
     /// left to right through Python's operator - the missing ones the op's
@@ -41594,11 +41926,17 @@ impl PyDataFrame {
                 pandas_promote_int_with_missing(scalars)
             }
         };
+        let object_cells_kept =
+            dtype.is_some_and(|dtype| !dtype.is_none() && is_object_dtype_arg(dtype));
         // An empty list / tuple / iterable is numpy's empty float64 array
-        // in pandas (it was object).
+        // in pandas (it was object). Under dtype=object each cell stays as
+        // given: an int beside a float stays an int (the list was inferred
+        // float64 first, 1 read 1.0; br-frankenpandas-d1ac4).
         let sequence_column = |scalars: Vec<Scalar>| {
             if scalars.is_empty() && !keep_objects {
                 Column::new(DType::Float64, Vec::new())
+            } else if object_cells_kept {
+                Ok(Column::from_object_values(scalars))
             } else {
                 Column::from_values(promote(scalars))
             }
@@ -42070,10 +42408,11 @@ impl PyDataFrame {
 
                     let mut col_map = BTreeMap::new();
                     for (i, name) in col_order.iter().enumerate() {
-                        let col =
-                            Column::from_values(promote(col_scalars[i].clone())).map_err(|e| {
-                                PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                            })?;
+                        // As a dict's lists: dtype=object keeps each cell
+                        // (br-frankenpandas-d1ac4).
+                        let col = sequence_column(col_scalars[i].clone()).map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                        })?;
                         col_map.insert(name.clone(), col);
                     }
 
@@ -43867,6 +44206,9 @@ impl PyDataFrame {
         if let Some(answer) = self.object_row_means(py, ax, numeric_only, skipna)? {
             return answer.into_py_any(py);
         }
+        if let Some(answer) = self.object_column_answers(py, ax, numeric_only, skipna, 1, "mean")? {
+            return answer.into_py_any(py);
+        }
         wrap_series(self.mean_internal(ax, skipna, numeric_only))
             .and_then(|s| self.masked_answer("mean", ax, numeric_only, s))?
             .into_py_any(py)
@@ -43899,6 +44241,11 @@ impl PyDataFrame {
             return object_answer(wrap_series(floats.median_internal(1, skipna, false))?)?
                 .into_py_any(py);
         }
+        if let Some(answer) =
+            self.object_column_answers(py, ax, numeric_only, skipna, 1, "median")?
+        {
+            return answer.into_py_any(py);
+        }
         wrap_series(self.median_internal(ax, skipna, numeric_only))
             .and_then(|s| self.masked_answer("median", ax, numeric_only, s))?
             .into_py_any(py)
@@ -43922,8 +44269,13 @@ impl PyDataFrame {
         self.refuse_masked_rows("std", ax, numeric_only)?;
         if let Some(floats) = self.object_rows_as_floats(ax, numeric_only, skipna, "std")? {
             return object_answer(wrap_series(
-                floats.std_internal(1, skipna, ddof_val, false),
+                floats.float_frame_answers("std", 1, skipna, ddof_val),
             )?);
+        }
+        if let Some(answer) =
+            self.object_column_answers(py, ax, numeric_only, skipna, ddof_val, "std")?
+        {
+            return Ok(answer);
         }
         wrap_series(self.std_internal(ax, skipna, ddof_val, numeric_only))
             .and_then(|s| self.masked_answer("std", ax, numeric_only, s))
@@ -43947,8 +44299,13 @@ impl PyDataFrame {
         self.refuse_masked_rows("var", ax, numeric_only)?;
         if let Some(floats) = self.object_rows_as_floats(ax, numeric_only, skipna, "var")? {
             return object_answer(wrap_series(
-                floats.var_internal(1, skipna, ddof_val, false),
+                floats.float_frame_answers("var", 1, skipna, ddof_val),
             )?);
+        }
+        if let Some(answer) =
+            self.object_column_answers(py, ax, numeric_only, skipna, ddof_val, "var")?
+        {
+            return Ok(answer);
         }
         wrap_series(self.var_internal(ax, skipna, ddof_val, numeric_only))
             .and_then(|s| self.masked_answer("var", ax, numeric_only, s))
@@ -43990,6 +44347,9 @@ impl PyDataFrame {
         if let Some(answer) = self.object_row_extremes(py, ax, numeric_only, skipna, "min")? {
             return answer.into_py_any(py);
         }
+        if let Some(answer) = self.object_column_answers(py, ax, numeric_only, skipna, 1, "min")? {
+            return answer.into_py_any(py);
+        }
         wrap_series(self.min_internal(ax, skipna, numeric_only))
             .and_then(|s| self.masked_answer("min", ax, numeric_only, s))?
             .into_py_any(py)
@@ -44021,6 +44381,9 @@ impl PyDataFrame {
             return answer.into_py_any(py);
         }
         if let Some(answer) = self.object_row_extremes(py, ax, numeric_only, skipna, "max")? {
+            return answer.into_py_any(py);
+        }
+        if let Some(answer) = self.object_column_answers(py, ax, numeric_only, skipna, 1, "max")? {
             return answer.into_py_any(py);
         }
         wrap_series(self.max_internal(ax, skipna, numeric_only))
@@ -49020,8 +49383,13 @@ impl PyDataFrame {
         self.refuse_masked_rows("sem", ax, numeric_only)?;
         if let Some(floats) = self.object_rows_as_floats(ax, numeric_only, skipna, "sem")? {
             return object_answer(wrap_series(
-                floats.sem_internal(1, skipna, ddof_val, false),
+                floats.float_frame_answers("sem", 1, skipna, ddof_val),
             )?);
+        }
+        if let Some(answer) =
+            self.object_column_answers(py, ax, numeric_only, skipna, ddof_val, "sem")?
+        {
+            return Ok(answer);
         }
         wrap_series(self.sem_internal(ax, skipna, ddof_val, numeric_only))
             .and_then(|s| self.masked_answer("sem", ax, numeric_only, s))
@@ -49047,9 +49415,13 @@ impl PyDataFrame {
         let ax = parse_axis_param(axis.0.as_ref())?;
         self.refuse_masked_rows("skew", ax, numeric_only)?;
         if let Some(floats) = self.object_rows_as_floats(ax, numeric_only, skipna, "skew")? {
-            let skewed = floats.skew_internal(1, false);
-            let skewed = skewed.and_then(|s| floats.missing_is_nan(s, 1, false, skipna));
-            return object_answer(wrap_series(skewed)?)?.into_py_any(py);
+            return object_answer(wrap_series(
+                floats.float_frame_answers("skew", 1, skipna, 1),
+            )?)?
+            .into_py_any(py);
+        }
+        if let Some(answer) = self.object_column_answers(py, ax, numeric_only, skipna, 1, "skew")? {
+            return answer.into_py_any(py);
         }
         let skewed = self.skew_internal(ax, numeric_only);
         wrap_series(skewed.and_then(|s| self.missing_is_nan(s, ax, numeric_only, skipna)))
@@ -49077,9 +49449,13 @@ impl PyDataFrame {
         let ax = parse_axis_param(axis.0.as_ref())?;
         self.refuse_masked_rows("kurt", ax, numeric_only)?;
         if let Some(floats) = self.object_rows_as_floats(ax, numeric_only, skipna, "kurt")? {
-            let kurtosis = floats.kurt_internal(1, false);
-            let kurtosis = kurtosis.and_then(|s| floats.missing_is_nan(s, 1, false, skipna));
-            return object_answer(wrap_series(kurtosis)?)?.into_py_any(py);
+            return object_answer(wrap_series(
+                floats.float_frame_answers("kurt", 1, skipna, 1),
+            )?)?
+            .into_py_any(py);
+        }
+        if let Some(answer) = self.object_column_answers(py, ax, numeric_only, skipna, 1, "kurt")? {
+            return answer.into_py_any(py);
         }
         let kurtosis = self.kurt_internal(ax, numeric_only);
         wrap_series(kurtosis.and_then(|s| self.missing_is_nan(s, ax, numeric_only, skipna)))

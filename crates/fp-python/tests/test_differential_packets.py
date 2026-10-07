@@ -29139,3 +29139,91 @@ def test_row_skew_and_kurt_bits_like_pandas_y1jia(op: str) -> None:
         return rows, bits(getattr(near, op)(axis=1).tolist()), bits(getattr(short, op)(axis=1).tolist()), columns
 
     assert run(fpd) == run(pd)
+
+
+_TL288_FRAMES = {
+    "ints": {"a": [1, 5, -2], "b": [4, 2, 7]},
+    "numbers with None": {"a": [1, None, 2.5], "b": [True, None, 3]},
+    "all None beside ints": {"a": [None, None], "b": [1, 2]},
+    "text": {"a": ["x", "b", "q"], "b": ["u", "v", "a"]},
+    "text with None": {"a": ["x", None, "q"]},
+    "bools beside floats": {"a": [True, False, True], "b": [1.5, -0.5, 2.0]},
+}
+_TL288_MIXED = {
+    "object beside int": lambda m: m.DataFrame({"a": m.Series([1, 2.5], dtype=object), "n": [3, 4]}),
+    "object beside float": lambda m: m.DataFrame({"a": m.Series([True, 2], dtype=object), "f": [0.5, float("nan")]}),
+}
+_TL288_OPS = ["min", "max", "mean", "median", "std", "var", "sem", "skew", "kurt"]
+_TL288_CASES = {
+    **{
+        f"{op} of {frame} skipna={skipna}": (
+            lambda m, op=op, frame=frame, skipna=skipna: getattr(_wa3we_frame(m, _TL288_FRAMES[frame]), op)(skipna=skipna)
+        )
+        for op in _TL288_OPS
+        for frame in _TL288_FRAMES
+        for skipna in (True, False)
+    },
+    **{
+        f"{op} of {frame}": (lambda m, op=op, frame=frame: getattr(_TL288_MIXED[frame](m), op)())
+        for op in _TL288_OPS
+        for frame in _TL288_MIXED
+    },
+    # NEGATIVE: number frames' columns, and numeric_only over a mixed frame,
+    # reduce as before.
+    "min of int and float columns (NEGATIVE)": lambda m: m.DataFrame({"i": [3, 1], "f": [0.5, 2.0]}).min(),
+    "mean numeric_only of a mixed frame (NEGATIVE)": lambda m: _TL288_MIXED["object beside int"](m).mean(numeric_only=True),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_TL288_CASES))
+def test_object_columns_reduce_like_pandas_tl288(case: str) -> None:
+    # pandas reduces a frame's object columns (axis 0) as its object rows:
+    # min / max a Python fold of the cells (+inf / -inf for a missing one
+    # under skipna, None for none; text by text), mean their Python sum as a
+    # float over the counted cells, median / std / ... the cells as floats -
+    # an object Series beside the number columns' own answers; fp answered
+    # int64 / float64 or raised TypeError (br-frankenpandas-tl288). Each
+    # cell's Python type compared, a numpy scalar read as its Python value
+    # (pandas' numpy scalars for number columns are br-frankenpandas-jy7fq).
+    def cell(value: Any) -> Any:
+        if type(value).__module__ == "numpy":
+            value = value.item()
+        return type(value).__name__, "nan" if value != value else repr(value)
+
+    def run(m: Any) -> Any:
+        try:
+            result = _TL288_CASES[case](m)
+        except TypeError:
+            return "raises TypeError"
+        return str(result.dtype), [cell(v) for v in result.tolist()], list(result.index)
+
+    assert run(fpd) == run(pd)
+
+
+_D1AC4_CASES = {
+    "dict of a list, int beside float": lambda m: m.DataFrame({"a": [1, 2.5]}, dtype=object)["a"],
+    "dict of a tuple, int beside float": lambda m: m.DataFrame({"a": (3, -0.5, 7)}, dtype=object)["a"],
+    "dict of a list, ints, a float and None": lambda m: m.DataFrame({"a": [1, None, 2.5, 4]}, dtype=object)["a"],
+    "list of dicts, int beside float": lambda m: m.DataFrame([{"a": 1}, {"a": 2.5}], dtype=object)["a"],
+    "list of dicts, a missing key": lambda m: m.DataFrame([{"a": 1, "b": 2}, {"a": 2.5}], dtype=object)["b"],
+    # NEGATIVE: without dtype=object the list infers float64, and lists of
+    # one kind already kept their cells.
+    "no dtype, int beside float (NEGATIVE)": lambda m: m.DataFrame({"a": [1, 2.5]})["a"],
+    "dtype=object, ints alone (NEGATIVE)": lambda m: m.DataFrame({"a": [1, 2]}, dtype=object)["a"],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_D1AC4_CASES))
+def test_object_dtype_frame_keeps_cells_d1ac4(case: str) -> None:
+    # DataFrame(dict / list of dicts, dtype=object) keeps each cell as
+    # given - an int beside a float stays an int; fp inferred the list as
+    # float64 first, 1 read 1.0 (br-frankenpandas-d1ac4). Each cell's Python
+    # type compared. NEGATIVE: no dtype= infers, and one-kind lists kept
+    # their cells already.
+    def run(m: Any) -> Any:
+        result = _D1AC4_CASES[case](m)
+        return str(result.dtype), [(type(v).__name__, "nan" if v != v else repr(v)) for v in result.tolist()]
+
+    assert run(fpd) == run(pd)
