@@ -1489,11 +1489,16 @@ fn slice_freq(index: &Index, step: isize) -> Option<String> {
     fp_index::scale_freq(index.freq()?, i64::try_from(step).ok()?)
 }
 
-/// `data[i] - data[i - periods]` for every row with a partner (`p` =
-/// |periods|, at most the length), 0.0 for the `p` without: one collected
+/// `difference(data[i], data[i - periods])` for every row with a partner (`p`
+/// = |periods|, at most the length), 0.0 for the `p` without: one collected
 /// pass, where zeroing a `vec![0.0; n]` first was 41% of `df.diff()` (its
 /// page faults, in each worker's fresh allocation).
-fn shifted_f64_differences(data: &[f64], periods: i64, p: usize) -> Vec<f64> {
+fn shifted_f64_differences(
+    data: &[f64],
+    periods: i64,
+    p: usize,
+    difference: impl Fn(f64, f64) -> f64,
+) -> Vec<f64> {
     let n = data.len();
     let boundary = std::iter::repeat_n(0.0, p);
     if periods >= 0 {
@@ -1502,14 +1507,14 @@ fn shifted_f64_differences(data: &[f64], periods: i64, p: usize) -> Vec<f64> {
                 data[p..]
                     .iter()
                     .zip(&data[..n - p])
-                    .map(|(cur, prev)| cur - prev),
+                    .map(|(&cur, &prev)| difference(cur, prev)),
             )
             .collect()
     } else {
         data[..n - p]
             .iter()
             .zip(&data[p..])
-            .map(|(cur, next)| cur - next)
+            .map(|(&cur, &next)| difference(cur, next))
             .chain(boundary)
             .collect()
     }
@@ -1520,7 +1525,18 @@ fn shifted_f64_differences(data: &[f64], periods: i64, p: usize) -> Vec<f64> {
 /// source's ANDed with itself shifted by `periods`, a word at a time, and the
 /// subtraction runs over every in-range row; a missing row keeps the 0.0
 /// datum. It read two mask bits per row (35% of `df.diff()`).
-fn nullable_f64_diff(data: &[f64], validity: &ValidityMask, periods: i64) -> Column {
+///
+/// `nan_exact`: the source's missing rows are exactly its NaN rows (a
+/// numpy-built column's mask is `!data[i].is_nan()`), so a row's difference
+/// is missing iff an operand is NaN and the subtraction zeroes it in its own
+/// pass. Zeroing the missing rows by the mask afterwards was a second walk
+/// of the output, 26% of `s.diff()` with NaN (br-frankenpandas-1f8c6).
+fn nullable_f64_diff(
+    data: &[f64],
+    validity: &ValidityMask,
+    periods: i64,
+    nan_exact: bool,
+) -> Column {
     let n = data.len();
     let p = usize::try_from(periods.unsigned_abs()).map_or(n, |p| p.min(n));
     let words = validity.packed_words_for_scan();
@@ -1549,7 +1565,20 @@ fn nullable_f64_diff(data: &[f64], validity: &ValidityMask, periods: i64) -> Col
         }
     };
     let valid_words: Vec<u64> = (0..words.len()).map(|k| at(k) & partner(k)).collect();
-    let mut out = shifted_f64_differences(data, periods, p);
+    if nan_exact {
+        let out = shifted_f64_differences(data, periods, p, |cur, other| {
+            if cur.is_nan() || other.is_nan() {
+                0.0
+            } else {
+                cur - other
+            }
+        });
+        return Column::from_f64_values_with_validity(
+            out,
+            ValidityMask::from_words(valid_words, n),
+        );
+    }
+    let mut out = shifted_f64_differences(data, periods, p, |cur, other| cur - other);
     for (k, &word) in valid_words.iter().enumerate() {
         let mut missing = !word;
         while missing != 0 {
@@ -23186,7 +23215,7 @@ impl Series {
                     n,
                 )
             };
-            let out = shifted_f64_differences(data, periods, invalid_len);
+            let out = shifted_f64_differences(data, periods, invalid_len, |cur, other| cur - other);
             let column = Column::from_f64_values_with_validity(out, validity);
             return Series::new(self.name.clone(), self.index.clone(), column);
         }
@@ -23200,7 +23229,8 @@ impl Series {
         // missing-operand slot ⇒ cleared bit ⇒ `Null(NullKind::NaN)` (the same
         // `from_f64_values_with_validity` 0.0-datum + cleared-bit convention).
         if let Some((data, in_valid)) = self.column.as_f64_slice_with_validity() {
-            let column = nullable_f64_diff(data, in_valid, periods);
+            let nan_exact = self.column.nan_missing_exact();
+            let column = nullable_f64_diff(data, in_valid, periods, nan_exact);
             return Series::new(self.name.clone(), self.index.clone(), column);
         }
 
@@ -173641,7 +173671,7 @@ mod tests {
                 }
             }
             for periods in [0_i64, 1, 2, 63, 64, 65, 200, -1, -2, -64, -65, -200] {
-                let got = crate::nullable_f64_diff(&data, &validity, periods);
+                let got = crate::nullable_f64_diff(&data, &validity, periods, false);
                 let p = usize::try_from(periods.unsigned_abs()).unwrap().min(n);
                 for i in 0..n {
                     let partner = if periods >= 0 {
@@ -173665,6 +173695,59 @@ mod tests {
                         expected.to_bits(),
                         "n {n} periods {periods} row {i}"
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nan_exact_diff_zeroes_missing_rows_in_the_subtraction_1f8c6() {
+        // A Series diff of a numpy-style column (its NaN rows its missing
+        // rows) zeroes a missing row in the subtraction: the same mask and
+        // bits as the mask-zeroing loop, an infinity minus itself staying a
+        // present NaN. NEGATIVE: a column whose missing rows hold finite
+        // values (no NaN) is not NaN-exact - a NaN test there would keep
+        // `cur - 0.0` at a missing row, where the loop leaves 0.0
+        // (br-frankenpandas-1f8c6).
+        let cell = |i: usize| match i % 7 {
+            3 => f64::NAN,
+            5 if i % 2 == 0 => f64::INFINITY,
+            _ => (i * i) as f64 * 0.25 - 9.0,
+        };
+        for n in [4_usize, 63, 64, 65, 129, 200] {
+            let nan_rows: Vec<f64> = (0..n).map(cell).collect();
+            let finite_rows: Vec<f64> = (0..n)
+                .map(|i| if cell(i).is_nan() { 0.5 } else { cell(i) })
+                .collect();
+            let mut validity = ValidityMask::all_valid(n);
+            for (i, value) in nan_rows.iter().enumerate() {
+                validity.set(i, !value.is_nan());
+            }
+            let numpy = Column::from_f64_values(nan_rows.clone());
+            let held = Column::from_f64_values_with_validity(finite_rows.clone(), validity.clone());
+            assert!(numpy.nan_missing_exact());
+            assert!(!held.nan_missing_exact());
+            // 0, 14 and -28 subtract an infinity from itself.
+            for periods in [0_i64, 1, 3, 14, 64, 65, 300, -1, -7, -28, -64, -65] {
+                for (column, data) in [(numpy.clone(), &nan_rows), (held.clone(), &finite_rows)] {
+                    let series =
+                        Series::new("x", Index::from_range(0, n as i64, 1), column).unwrap();
+                    let got = series.diff(periods).unwrap();
+                    let expected = crate::nullable_f64_diff(data, &validity, periods, false);
+                    let (values, mask) = got.column().as_f64_slice_with_validity().unwrap();
+                    let (want, want_mask) = expected.as_f64_slice_with_validity().unwrap();
+                    for i in 0..n {
+                        assert_eq!(
+                            mask.get(i),
+                            want_mask.get(i),
+                            "n {n} periods {periods} row {i}"
+                        );
+                        assert_eq!(
+                            values[i].to_bits(),
+                            want[i].to_bits(),
+                            "n {n} periods {periods} row {i}"
+                        );
+                    }
                 }
             }
         }
