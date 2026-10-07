@@ -28525,3 +28525,33 @@ def test_np_sqrt_of_a_categorical_raises_like_pandas_cmgnp() -> None:
         np.sqrt(pd.Series([1.0, 4.0], dtype="category"))
     with pytest.raises(TypeError):
         np.sqrt(fpd.Series([1.0, 4.0], dtype="category"))
+
+
+# br-frankenpandas-zgx6u: a float64 -> float64 numpy ufunc of a Series
+# computes into the call's own copy of the values (out= itself) - pandas'
+# answer, NaN / -0.0 / inf / out-of-domain values included; NEGATIVE: the
+# Series itself is unchanged, and ufuncs answering another dtype (isnan's
+# bool, an int Series' exp) keep their own result.
+_ZGX6U_X = [0.5, -0.0, float("nan"), float("inf"), float("-inf"), -3.25, 710.0, 1e-310, 2.0]
+_ZGX6U_CASES = {
+    "np.exp": lambda m, s: np.exp(s),
+    "np.log": lambda m, s: np.log(s),
+    "np.sin": lambda m, s: np.sin(s),
+    "np.floor": lambda m, s: np.floor(s),
+    "np.arctanh": lambda m, s: np.arctanh(s),
+    "np.exp of a frame": lambda m, s: np.exp(m.DataFrame({"a": s, "b": s * 2}))["b"],
+    "np.isnan (NEGATIVE: bool)": lambda m, s: np.isnan(s),
+    "np.exp of ints (NEGATIVE: float64)": lambda m, s: np.exp(m.Series([0, 1, -2, 700])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_ZGX6U_CASES))
+def test_float_ufunc_of_a_series_like_pandas_zgx6u(case: str) -> None:
+    def run(m: Any) -> Any:
+        s = m.Series(_ZGX6U_X, name="v")
+        with np.errstate(all="ignore"):
+            result = _ZGX6U_CASES[case](m, s)
+        return _pucep_shown(result), result.name, _pucep_shown(s)
+
+    assert run(fpd) == run(pd)

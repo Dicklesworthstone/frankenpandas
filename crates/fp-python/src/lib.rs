@@ -28243,6 +28243,45 @@ fn ufunc_dunder(name: &str) -> Option<(&'static str, &'static str)> {
     })
 }
 
+/// A one-input ufunc whose float64 loop answers float64 (numpy's `d->d`),
+/// so a float64 array can take its own result (`out=` itself).
+fn float_to_float_ufunc(name: &str) -> bool {
+    matches!(
+        name,
+        "exp"
+            | "exp2"
+            | "expm1"
+            | "log"
+            | "log2"
+            | "log10"
+            | "log1p"
+            | "sin"
+            | "cos"
+            | "tan"
+            | "arcsin"
+            | "arccos"
+            | "arctan"
+            | "sinh"
+            | "cosh"
+            | "tanh"
+            | "arcsinh"
+            | "arccosh"
+            | "arctanh"
+            | "cbrt"
+            | "square"
+            | "reciprocal"
+            | "rint"
+            | "floor"
+            | "ceil"
+            | "trunc"
+            | "fabs"
+            | "degrees"
+            | "radians"
+            | "deg2rad"
+            | "rad2deg"
+    )
+}
+
 /// The ufunc as the operator it stands for, when `this` is one of the
 /// inputs and the operator exists; None to take the array path.
 fn dispatch_ufunc_to_dunder<'py>(
@@ -28527,7 +28566,30 @@ fn array_ufunc<'py>(
             arrays.push(argument.clone());
         }
     }
-    let result = call(arrays, kwargs)?;
+    // One Series to a float64 -> float64 ufunc: its array is this call's
+    // own copy, so the ufunc writes into it - one 8 MB numpy buffer a
+    // million rows, not two, whose freed pair crossed glibc's trim
+    // threshold and was faulted back in every call (np.exp 9.0 ms and
+    // 1240 page faults a call, pandas 3.6; br-frankenpandas-zgx6u).
+    let in_place = nin == 1
+        && nout == 1
+        && method == "__call__"
+        && no_kwargs
+        && arguments.len() == 1
+        && arguments[0].is_instance_of::<PySeries>()
+        && float_to_float_ufunc(&name)
+        && arrays[0]
+            .getattr("dtype")?
+            .getattr("char")?
+            .extract::<String>()?
+            == "d";
+    let result = if in_place {
+        let into = PyDict::new(py);
+        into.set_item("out", &arrays[0])?;
+        call(arrays.clone(), Some(&into))?
+    } else {
+        call(arrays, kwargs)?
+    };
     names.dedup_by(|a, b| a.label() == b.label());
     let name = match names.as_slice() {
         [only] => only.clone(),
