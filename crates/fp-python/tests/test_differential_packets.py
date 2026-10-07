@@ -28663,13 +28663,44 @@ def test_transposed_frame_ops_like_pandas_5il43(case: str, op: str) -> None:
     # values to the bit (NaN, -0.0, inf, an all-NaN row), dtypes, labels and
     # their types; a view whose index was renamed first. NEGATIVE: an object
     # frame keeps the column path's answers.
-    if case.startswith("object") and op == "T.sum(min_count=3)":
-        pytest.skip("object sum below min_count: NaN vs pandas' None (br-frankenpandas-rdnkd)")
-
     def run(m: Any) -> Any:
         try:
             return _5il43_shown(_5IL43_OPS[op](_5il43_frame(m, case)))
         except Exception as error:  # noqa: BLE001
             return "raises " + type(error).__name__
+
+    assert run(fpd) == run(pd)
+
+
+_RDNKD_CASES = {
+    "object frame": lambda m: m.DataFrame({"s": ["x", "y"], "t": ["u", "v"]}).sum(min_count=3),
+    "object beside float": lambda m: m.DataFrame({"s": ["x", "y"], "f": [1.0, 2.0]}).sum(min_count=3),
+    "object met": lambda m: m.DataFrame({"s": ["x", "y"], "f": [1.0, 2.0]}).sum(min_count=2),
+    "transposed object": lambda m: m.DataFrame({"s": ["x", "y", "z"], "t": ["u", "v", "w"]}).T.sum(min_count=3),
+    "Series (NEGATIVE: nan)": lambda m: m.Series(["a", "b"], dtype=object).sum(min_count=3),
+    "numbers (NEGATIVE: NaN)": lambda m: m.DataFrame({"f": [1.0, 2.0], "k": [1, 2]}).sum(min_count=3),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_RDNKD_CASES))
+def test_object_sum_below_min_count_like_pandas_rdnkd(case: str) -> None:
+    # A frame's object column summed below min_count is None in the object
+    # result, a number column's NaN beside it (br-frankenpandas-rdnkd); a
+    # Series' own total stays NaN, a numeric frame's NaN.
+    # None and NaN told apart; numbers by value (pandas' object result holds
+    # numpy scalars where fp's holds Python floats - equal, and not this bead).
+    def cell(value: Any) -> Any:
+        if value is None:
+            return "None"
+        if isinstance(value, float) and math.isnan(value):
+            return "nan"
+        return value
+
+    def run(m: Any) -> Any:
+        result = _RDNKD_CASES[case](m)
+        if not hasattr(result, "index"):
+            return "scalar", cell(result)
+        return str(result.dtype), list(result.index), [cell(v) for v in result.tolist()]
 
     assert run(fpd) == run(pd)

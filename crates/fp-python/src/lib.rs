@@ -40375,13 +40375,33 @@ impl PyDataFrame {
             ));
         }
         let below = |count: &Scalar| matches!(count, Scalar::Int64(n) if usize::try_from(*n).unwrap_or(0) < min_count);
+        // A column's total below min_count is NaN for a number column and
+        // None for any other, as pandas fills an object result (it was NaN
+        // throughout; br-frankenpandas-rdnkd).
+        let per_column = axis == 0 && !numeric_only && reduced.len() == self.inner.num_columns();
+        let null_at = |position: usize| {
+            let numeric = !per_column
+                || self.inner.column_at(position).is_none_or(|column| {
+                    column.dtype().is_nullable()
+                        || matches!(
+                            column.dtype(),
+                            DType::Int64 | DType::Float64 | DType::Bool | DType::Timedelta64
+                        )
+                });
+            Scalar::Null(if numeric {
+                NullKind::NaN
+            } else {
+                NullKind::Null
+            })
+        };
         let values: Vec<Scalar> = reduced
             .values()
             .iter()
             .zip(counts.values())
-            .map(|(value, count)| {
+            .enumerate()
+            .map(|(position, (value, count))| {
                 if below(count) {
-                    Scalar::Null(NullKind::NaN)
+                    null_at(position)
                 } else {
                     value.clone()
                 }
@@ -43237,6 +43257,13 @@ impl PyDataFrame {
         let mut values = result.inner.values().to_vec();
         for position in objects {
             let column = self.column_series_at(position)?.inner;
+            // Fewer cells than min_count: pandas' object result holds None
+            // there (a Series' own total is NaN; br-frankenpandas-rdnkd).
+            let present = column.values().iter().filter(|value| !value.is_missing());
+            if present.count() < min_count {
+                values[position] = Scalar::Null(NullKind::Null);
+                continue;
+            }
             let total = object_cells_reduce(py, &column, op, skipna, min_count)?;
             values[position] = py_to_cell(py, total.bind(py))?;
         }
