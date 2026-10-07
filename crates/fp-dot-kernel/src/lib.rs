@@ -1245,57 +1245,43 @@ compare_scalar_arc_kernel!(le_f64_scalar_arc, <=);
 compare_scalar_arc_kernel!(eq_f64_scalar_arc, ==);
 compare_scalar_arc_kernel!(ne_f64_scalar_arc, !=);
 
-/// `out[i] = a[i] <op> b[i]` over two float columns, eight lanes per step -
-/// the pair sibling of `compare_scalar_kernel`: the baseline loop compared
-/// two lanes and narrowed each to a byte (nx > ny 0.34 ms a million rows,
-/// pandas 0.19; br-frankenpandas-cmgnp). BIT-IDENTICAL to `a[i] <op> b[i]`
-/// for the same reason: `simd_ne` is unordered-or-unequal (NaN != x is
-/// true), the others ordered (false on NaN); -0.0 == 0.0.
+/// `a[i] <op> b[i]` over two float columns, collected straight into the
+/// `Arc<[bool]>` an all-valid bool column keeps - the pair sibling of
+/// `compare_scalar_arc_kernel`: the 8-lane kernel wrote a zeroed buffer the
+/// column then copied (nx > ny 0.18 ms a million rows, pandas 0.17;
+/// br-frankenpandas-cmgnp). The scalar comparisons: NaN compares false
+/// (true under !=); -0.0 == 0.0.
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as `compare_scalar_kernel`; the
 /// CALLER MUST GUARD with `is_x86_feature_detected!("avx2")`.
-macro_rules! compare_pairs_kernel {
-    ($name:ident, $simd_cmp:ident, $op:tt) => {
+macro_rules! compare_pairs_arc_kernel {
+    ($name:ident, $op:tt) => {
         #[doc = concat!(
-            "Lane-wise `out[i] = a[i] ", stringify!($op),
-            " b[i]` over `f64`; see `compare_pairs_kernel`."
+            "`a[i] ", stringify!($op),
+            " b[i]` into an `Arc<[bool]>`; see `compare_pairs_arc_kernel`."
         )]
         ///
         /// # Panics
-        /// Panics if `a`, `b` and `out` do not all have the same length.
+        /// Panics if `a` and `b` differ in length.
         #[inline(never)]
-        pub fn $name(a: &[f64], b: &[f64], out: &mut [bool]) {
-            const LANES: usize = 8;
+        #[must_use]
+        pub fn $name(a: &[f64], b: &[f64]) -> std::sync::Arc<[bool]> {
             assert_eq!(
                 a.len(),
                 b.len(),
                 concat!(stringify!($name), ": a/b length mismatch")
             );
-            assert_eq!(
-                a.len(),
-                out.len(),
-                concat!(stringify!($name), ": out length mismatch")
-            );
-            let (a_chunks, a_tail) = a.as_chunks::<LANES>();
-            let (b_chunks, b_tail) = b.as_chunks::<LANES>();
-            let (out_chunks, out_tail) = out.as_chunks_mut::<LANES>();
-            for ((x, y), slots) in a_chunks.iter().zip(b_chunks).zip(out_chunks) {
-                let mask = Simd::from_array(*x).$simd_cmp(Simd::from_array(*y));
-                *slots = MASK_BYTES[mask.to_bitmask() as usize];
-            }
-            for ((slot, &x), &y) in out_tail.iter_mut().zip(a_tail).zip(b_tail) {
-                *slot = x $op y;
-            }
+            a.iter().zip(b).map(|(&x, &y)| x $op y).collect()
         }
     };
 }
 
-compare_pairs_kernel!(gt_f64_pairs_into, simd_gt, >);
-compare_pairs_kernel!(ge_f64_pairs_into, simd_ge, >=);
-compare_pairs_kernel!(lt_f64_pairs_into, simd_lt, <);
-compare_pairs_kernel!(le_f64_pairs_into, simd_le, <=);
-compare_pairs_kernel!(eq_f64_pairs_into, simd_eq, ==);
-compare_pairs_kernel!(ne_f64_pairs_into, simd_ne, !=);
+compare_pairs_arc_kernel!(gt_f64_pairs_arc, >);
+compare_pairs_arc_kernel!(ge_f64_pairs_arc, >=);
+compare_pairs_arc_kernel!(lt_f64_pairs_arc, <);
+compare_pairs_arc_kernel!(le_f64_pairs_arc, <=);
+compare_pairs_arc_kernel!(eq_f64_pairs_arc, ==);
+compare_pairs_arc_kernel!(ne_f64_pairs_arc, !=);
 
 #[cfg(test)]
 mod compare_scalar_4h4mp {
@@ -2025,21 +2011,20 @@ mod tests {
     }
 
     /// br-frankenpandas-cmgnp: each pair-compare kernel is `a[i] <op> b[i]`
-    /// at every length up to two 8-lane chunks and a tail, over a `false`
-    /// and a `true` fill, on pairs of NaN, both zeros, infinities and equal
-    /// numbers. NEGATIVE: NaN against itself is unequal (true under !=,
-    /// false under == and the orders).
+    /// at every length up to two 8-lane chunks and a tail, on pairs of NaN,
+    /// both zeros, infinities and equal numbers. NEGATIVE: NaN against
+    /// itself is unequal (true under !=, false under == and the orders).
     #[test]
     fn pair_compares_are_the_scalar_compare_cmgnp() {
-        type Kernel = fn(&[f64], &[f64], &mut [bool]);
+        type Kernel = fn(&[f64], &[f64]) -> std::sync::Arc<[bool]>;
         type Case = (Kernel, fn(f64, f64) -> bool);
         let kernels: [Case; 6] = [
-            (gt_f64_pairs_into, |x, y| x > y),
-            (ge_f64_pairs_into, |x, y| x >= y),
-            (lt_f64_pairs_into, |x, y| x < y),
-            (le_f64_pairs_into, |x, y| x <= y),
-            (eq_f64_pairs_into, |x, y| x == y),
-            (ne_f64_pairs_into, |x, y| x != y),
+            (gt_f64_pairs_arc, |x, y| x > y),
+            (ge_f64_pairs_arc, |x, y| x >= y),
+            (lt_f64_pairs_arc, |x, y| x < y),
+            (le_f64_pairs_arc, |x, y| x <= y),
+            (eq_f64_pairs_arc, |x, y| x == y),
+            (ne_f64_pairs_arc, |x, y| x != y),
         ];
         let (inf, nan) = (f64::INFINITY, f64::NAN);
         let left = [0.5, nan, -0.0, 0.0, inf, 2.0, nan, -inf, 3.0, 1.0, 7.5];
@@ -2051,18 +2036,11 @@ mod tests {
         for (k, (kernel, compare)) in kernels.into_iter().enumerate() {
             for len in 0..=a.len() {
                 let want: Vec<bool> = (0..len).map(|i| compare(a[i], b[i])).collect();
-                for fill in [false, true] {
-                    let mut got = vec![fill; len];
-                    kernel(&a[..len], &b[..len], &mut got);
-                    assert_eq!(got, want, "{k} {len} {fill}");
-                }
+                assert_eq!(*kernel(&a[..len], &b[..len]), *want, "{k} {len}");
             }
         }
-        let mut got = [false; 2];
-        ne_f64_pairs_into(&[nan, 1.0], &[nan, 1.0], &mut got);
-        assert_eq!(got, [true, false]);
-        eq_f64_pairs_into(&[nan, 1.0], &[nan, 1.0], &mut got);
-        assert_eq!(got, [false, true]);
+        assert_eq!(*ne_f64_pairs_arc(&[nan, 1.0], &[nan, 1.0]), [true, false]);
+        assert_eq!(*eq_f64_pairs_arc(&[nan, 1.0], &[nan, 1.0]), [false, true]);
     }
 
     /// br-frankenpandas-cmgnp: each Arc compare is the scalar comparison `v

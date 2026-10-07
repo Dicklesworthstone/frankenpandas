@@ -8278,42 +8278,33 @@ fn compare_f64_scalar_arc(data: &[f64], s: f64, op: ComparisonOp) -> Arc<[bool]>
     }
 }
 
-/// `l[i] <op> r[i]` for every row of two slices of one length, each
-/// operator's loop filling a sized buffer in this function so it vectorizes
-/// (br-frankenpandas-cmgnp).
-fn compare_f64_pairs(l: &[f64], r: &[f64], op: ComparisonOp) -> Vec<bool> {
-    let mut out = vec![false; l.len()];
-    // Eight lanes a step where the CPU has AVX2: the fill below compares
-    // two lanes and narrows each to a byte (nx > ny 0.34 ms a million rows,
-    // pandas 0.19; br-frankenpandas-cmgnp). The fill is the complete loop.
+/// `l[i] <op> r[i]` for every row of two slices of one length, collected
+/// straight into the `Arc<[bool]>` an all-valid bool column keeps -
+/// fp-dot-kernel's where the CPU has AVX2 - one monomorphic loop per
+/// operator: a zeroed buffer filled and then copied into the column were two
+/// passes the size of the answer (nx > ny 0.18 ms a million rows, pandas
+/// 0.17; br-frankenpandas-cmgnp).
+fn compare_f64_pairs(l: &[f64], r: &[f64], op: ComparisonOp) -> Arc<[bool]> {
     #[cfg(target_arch = "x86_64")]
     if std::arch::is_x86_feature_detected!("avx2") {
-        match op {
-            ComparisonOp::Gt => fp_dot_kernel::gt_f64_pairs_into(l, r, &mut out),
-            ComparisonOp::Lt => fp_dot_kernel::lt_f64_pairs_into(l, r, &mut out),
-            ComparisonOp::Eq => fp_dot_kernel::eq_f64_pairs_into(l, r, &mut out),
-            ComparisonOp::Ne => fp_dot_kernel::ne_f64_pairs_into(l, r, &mut out),
-            ComparisonOp::Ge => fp_dot_kernel::ge_f64_pairs_into(l, r, &mut out),
-            ComparisonOp::Le => fp_dot_kernel::le_f64_pairs_into(l, r, &mut out),
-        }
-        return out;
-    }
-    macro_rules! fill {
-        ($test:expr) => {
-            for ((flag, &a), &b) in out.iter_mut().zip(l).zip(r) {
-                *flag = $test(a, b);
-            }
+        return match op {
+            ComparisonOp::Gt => fp_dot_kernel::gt_f64_pairs_arc(l, r),
+            ComparisonOp::Lt => fp_dot_kernel::lt_f64_pairs_arc(l, r),
+            ComparisonOp::Eq => fp_dot_kernel::eq_f64_pairs_arc(l, r),
+            ComparisonOp::Ne => fp_dot_kernel::ne_f64_pairs_arc(l, r),
+            ComparisonOp::Ge => fp_dot_kernel::ge_f64_pairs_arc(l, r),
+            ComparisonOp::Le => fp_dot_kernel::le_f64_pairs_arc(l, r),
         };
     }
+    let pairs = l.iter().zip(r);
     match op {
-        ComparisonOp::Gt => fill!(|a: f64, b: f64| a > b),
-        ComparisonOp::Lt => fill!(|a: f64, b: f64| a < b),
-        ComparisonOp::Eq => fill!(|a: f64, b: f64| a == b),
-        ComparisonOp::Ne => fill!(|a: f64, b: f64| a != b),
-        ComparisonOp::Ge => fill!(|a: f64, b: f64| a >= b),
-        ComparisonOp::Le => fill!(|a: f64, b: f64| a <= b),
+        ComparisonOp::Gt => pairs.map(|(&a, &b)| a > b).collect(),
+        ComparisonOp::Lt => pairs.map(|(&a, &b)| a < b).collect(),
+        ComparisonOp::Eq => pairs.map(|(&a, &b)| a == b).collect(),
+        ComparisonOp::Ne => pairs.map(|(&a, &b)| a != b).collect(),
+        ComparisonOp::Ge => pairs.map(|(&a, &b)| a >= b).collect(),
+        ComparisonOp::Le => pairs.map(|(&a, &b)| a <= b).collect(),
     }
-    out
 }
 
 /// `k as f64 <op> s` - scalar_compare's reading of an int against a float -
@@ -22184,7 +22175,7 @@ impl Column {
             )
             && l.len() == r.len()
         {
-            return Ok(Self::from_bool_values(compare_f64_pairs(l, r, op)));
+            return Ok(Self::from_bool_arc(compare_f64_pairs(l, r, op)));
         }
         let result = self.binary_comparison_propagating(right, op)?;
         if self.dtype.is_nullable() || right.dtype.is_nullable() {
