@@ -102525,6 +102525,24 @@ impl DataFrame {
             if col.dtype() == DType::Float64
                 && let Some((d, v)) = col.as_f64_slice_with_validity()
             {
+                // NaN exactly at the missing rows, whose answer is NaN: the op
+                // over every row, then a missing row's datum 0.0 by a select
+                // on its NaN - two vectorizing loops for the walk below, a
+                // mask bit a row (g * 2 of a NaN-holding column 3.7 ms a
+                // million rows, its Series 0.33; br-frankenpandas-cmgnp). The
+                // walk's data and mask.
+                if col.nan_missing_exact() && missing_result.is_nan() {
+                    let mut out: Vec<f64> = if par_inner {
+                        par_map_f64_buf(d, |x| op(x, scalar))
+                    } else {
+                        d.iter().map(|&x| op(x, scalar)).collect()
+                    };
+                    for (slot, &x) in out.iter_mut().zip(d) {
+                        *slot = if x.is_nan() { 0.0 } else { *slot };
+                    }
+                    let validity = v.and_mask(&fp_columnar::ValidityMask::from_f64(&out));
+                    return Ok(Column::from_f64_values_nullable(out, validity));
+                }
                 let len = d.len();
                 let mut out = vec![0.0_f64; len];
                 let mut valid_words = vec![0_u64; len.div_ceil(64)];
@@ -174240,6 +174258,88 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn frame_scalar_arithmetic_of_a_nan_holding_column_is_the_row_walk_cmgnp() {
+        // br-frankenpandas-cmgnp: a frame's scalar op of a column holding NaN
+        // exactly at its missing rows - + - * / // % ** and reflected ones,
+        // a valid row's NaN (inf - inf) included - is the per-row walk it
+        // replaces: every datum's bits (a missing row's 0.0) and mask bit,
+        // serial and on threads (compute_bound, one column). NEGATIVE: a
+        // column whose missing rows hold numbers keeps them out (0.0, cleared)
+        // - a select on NaN alone would keep `number op s` there.
+        type Op = fn(f64, f64) -> f64;
+        let n = 300_usize;
+        let value = |i: usize| match i % 9 {
+            2 => f64::INFINITY,
+            5 => -0.0,
+            _ => (i as f64) * 0.5 - 70.0,
+        };
+        let mut gaps = ValidityMask::all_valid(n);
+        for i in (1..n).step_by(4) {
+            gaps.set(i, false);
+        }
+        let columns = [
+            Column::from_f64_values(
+                (0..n)
+                    .map(|i| if i % 7 == 3 { f64::NAN } else { value(i) })
+                    .collect(),
+            ),
+            Column::from_f64_values_with_validity((0..n).map(value).collect(), gaps),
+        ];
+        assert!(columns[0].nan_missing_exact());
+        let ops: [(Op, f64); 8] = [
+            (|a, b| a + b, 1.5),
+            (|a, b| a - b, f64::INFINITY),
+            (|a, b| a * b, 2.0),
+            (|a, b| a / b, 0.0),
+            (|a, b| (a / b).floor(), 3.0),
+            (|a, b| a - (a / b).floor() * b, -4.0),
+            (fp_columnar::power_by_number, 0.5),
+            (|a, b| b / a, 1.0),
+        ];
+        let raw = |column: &Column| {
+            let (data, validity) = column.as_f64_slice_with_validity().unwrap();
+            (
+                data.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                (0..n).map(|i| validity.get(i)).collect::<Vec<_>>(),
+            )
+        };
+        for (k, column) in columns.iter().enumerate() {
+            let frame = DataFrame::from_series(vec![
+                Series::new("c", Index::from_range(0, n as i64, 1), column.clone()).unwrap(),
+            ])
+            .unwrap();
+            // The frame's column is the NaN-exact one: the select is reached.
+            assert_eq!(frame.column_at(0).unwrap().nan_missing_exact(), k == 0);
+            let (data, validity) = column.as_f64_slice_with_validity().unwrap();
+            for (o, &(op, scalar)) in ops.iter().enumerate() {
+                let missing = op(f64::NAN, scalar);
+                let want: (Vec<u64>, Vec<bool>) = (0..n)
+                    .map(|i| {
+                        if validity.get(i) {
+                            let r = op(data[i], scalar);
+                            (r.to_bits(), !r.is_nan())
+                        } else if missing.is_nan() {
+                            (0.0_f64.to_bits(), false)
+                        } else {
+                            (missing.to_bits(), true)
+                        }
+                    })
+                    .unzip();
+                for compute_bound in [false, true] {
+                    let got = frame
+                        .apply_scalar_op_inner(scalar, op, compute_bound)
+                        .unwrap();
+                    assert_eq!(
+                        raw(got.column_at(0).unwrap()),
+                        want,
+                        "{k} op {o} {compute_bound}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
