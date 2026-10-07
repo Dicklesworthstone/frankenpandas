@@ -2263,14 +2263,13 @@ fn nan_and_finite(data: &[f64]) -> (bool, bool) {
     (data.iter().any(|v| v.is_nan()), false)
 }
 
-/// [`power_by_number`] of every value, a NaN value's slot 0.0 when
-/// `nan_to_zero` (a missing row's datum) in its own pass storing a select;
-/// the exponent's case chosen once: the square and the reciprocal a
-/// vectorizing map, the root fp-dot-kernel's 4-lane one, pow, compute-bound,
-/// on threads. (A zeroed buffer for the map paid an 8 MB memset a million
-/// rows first: alloc_zeroed of a recycled block is a full memset.)
-fn powers_by_number(data: &[f64], exponent: f64, nan_to_zero: bool) -> Vec<f64> {
-    let mut out: Vec<f64> = if exponent == 2.0 {
+/// [`power_by_number`] of every value, the exponent's case chosen once: the
+/// square and the reciprocal a vectorizing map, the root fp-dot-kernel's
+/// 4-lane one, pow, compute-bound, on threads. (A zeroed buffer for the map
+/// paid an 8 MB memset a million rows first: alloc_zeroed of a recycled
+/// block is a full memset.)
+fn powers_by_number(data: &[f64], exponent: f64) -> Vec<f64> {
+    if exponent == 2.0 {
         data.iter().map(|&x| x * x).collect()
     } else if exponent == -1.0 {
         data.iter().map(|&x| 1.0 / x).collect()
@@ -2278,11 +2277,21 @@ fn powers_by_number(data: &[f64], exponent: f64, nan_to_zero: bool) -> Vec<f64> 
         sqrt_values(data)
     } else {
         par_map_vec_f64(data.len(), |i| data[i].powf(exponent))
-    };
-    if nan_to_zero {
-        for (slot, &x) in out.iter_mut().zip(data) {
-            *slot = if x.is_nan() { 0.0 } else { *slot };
-        }
+    }
+}
+
+/// [`sqrt_values`] into the `Arc<[f64]>` a NaN-exact column keeps, the
+/// kernel writing a fresh buffer of it - not a Vec copied into one.
+fn sqrt_values_arc(data: &[f64]) -> Arc<[f64]> {
+    let mut out: Arc<[f64]> = std::iter::repeat_n(0.0, data.len()).collect();
+    let slots = Arc::get_mut(&mut out).expect("a fresh Arc is unique");
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        fp_dot_kernel::sqrt_f64_into(data, slots);
+        return out;
+    }
+    for (slot, &x) in slots.iter_mut().zip(data) {
+        *slot = x.sqrt();
     }
     out
 }
@@ -19902,6 +19911,25 @@ impl Column {
             return None;
         }
         let (data, validity) = self.as_f64_slice_with_validity()?;
+        // NaN exactly at the missing rows: such a number keeps a NaN NaN and
+        // makes none of a number, so the op over the buffer is NaN exactly
+        // there too - the column stays NaN-exact under the input's mask, one
+        // pass where the select below zeroed each NaN for the 0.0-datum form
+        // (nx * 2 0.25 ms a million rows, pandas 0.16; br-frankenpandas-cmgnp).
+        if self.nan_missing_exact() {
+            let out: Arc<[f64]> = match (op, scalar_left) {
+                (ArithmeticOp::Add, false) => data.iter().map(|&v| v + s).collect(),
+                (ArithmeticOp::Add, true) => data.iter().map(|&v| s + v).collect(),
+                (ArithmeticOp::Sub, false) => data.iter().map(|&v| v - s).collect(),
+                (ArithmeticOp::Sub, true) => data.iter().map(|&v| s - v).collect(),
+                (ArithmeticOp::Mul, false) => data.iter().map(|&v| v * s).collect(),
+                (ArithmeticOp::Mul, true) => data.iter().map(|&v| s * v).collect(),
+                (ArithmeticOp::Div, false) => data.iter().map(|&v| v / s).collect(),
+                (ArithmeticOp::Div, true) => data.iter().map(|&v| s / v).collect(),
+                _ => return None,
+            };
+            return Some(Self::nan_exact_float64(out, validity.clone()));
+        }
         // The plain vectorized op, then a NaN row (a NaN operand: such a
         // number makes no other) to the missing rows' 0.0 in its own pass,
         // every slot stored (a select): a NaN test inside the op's loop, or a
@@ -19939,7 +19967,8 @@ impl Column {
     /// same-positions arithmetic build - its all-valid builders for a column
     /// all present, else a missing row's datum 0.0 under its cleared bit and
     /// a NaN power's (a negative number to 0.5) NaN under its cleared bit
-    /// (br-frankenpandas-pucep). None for an exponent of 0, whose missing
+    /// (br-frankenpandas-pucep); a NaN-exact column's powers stay NaN-exact
+    /// (br-frankenpandas-cmgnp). None for an exponent of 0, whose missing
     /// rows' NaN ** 0 are a present 1.0.
     fn f64_power_by_number(&self, s: f64) -> Option<Self> {
         if s == 0.0 {
@@ -19954,26 +19983,37 @@ impl Column {
             }
             // An all-valid slice holds no NaN, as binary_scalar's arms read
             // it, so only a pow can make one.
-            let out = powers_by_number(data, s, false);
+            let out = powers_by_number(data, s);
             if nan_free_powers || !out.iter().fold(false, |any, v| any | v.is_nan()) {
                 return Some(Self::from_f64_all_valid_with_finite_opt(out, None));
             }
             return Some(Self::from_f64_values(out));
         }
         let (data, validity) = self.as_f64_slice_with_validity()?;
-        // NaN exactly at the missing rows: each one's datum 0.0 in the
-        // power's own loop, and the square and the reciprocal keep the mask.
+        // NaN exactly at the missing rows: a power of NaN is NaN, so the
+        // powers are NaN at those rows and at the present rows' NaN powers
+        // (a negative number to 0.5) - a NaN-exact column, the square's and
+        // the reciprocal's under the input's mask (they make no NaN of a
+        // number), one pass where a select zeroed each missing row's datum.
         if self.nan_missing_exact() {
-            let out = powers_by_number(data, s, true);
+            let out: Arc<[f64]> = if s == 2.0 {
+                data.iter().map(|&x| x * x).collect()
+            } else if s == -1.0 {
+                data.iter().map(|&x| 1.0 / x).collect()
+            } else if s == 0.5 {
+                sqrt_values_arc(data)
+            } else {
+                Arc::from(powers_by_number(data, s))
+            };
             let validity = if nan_free_powers {
                 validity.clone()
             } else {
-                validity.and_mask(&ValidityMask::from_f64(&out))
+                ValidityMask::from_f64(&out)
             };
-            return Some(Self::from_f64_values_nullable(out, validity));
+            return Some(Self::nan_exact_float64(out, validity));
         }
         let present = self.nan_aware_validity();
-        let mut out = powers_by_number(data, s, false);
+        let mut out = powers_by_number(data, s);
         if present.all() {
             if out.iter().fold(false, |any, v| any | v.is_nan()) {
                 return Some(Self::from_f64_values(out));
@@ -40683,7 +40723,12 @@ mod tests {
                 ArithmeticOp::Add,
             )
             .unwrap();
-        assert_eq!(bits(&ours), bits(&theirs));
+        // Its present value and mask; the missing row a NaN of a NaN-exact
+        // column, which the broadcast's form holds as a 0.0 under the
+        // cleared bit (br-frankenpandas-cmgnp).
+        assert_eq!(bits(&ours)[0], bits(&theirs)[0]);
+        assert_eq!(ours.validity(), theirs.validity());
+        assert!(ours.nan_missing_exact() && ours.values()[1].is_missing());
         assert!(
             gapped
                 .binary_scalar(&Scalar::Float64(0.0), ArithmeticOp::Mul, false)
@@ -40776,13 +40821,32 @@ mod tests {
                 for s in [2.5, -0.5, 0.0, 1e300] {
                     let broadcast = Column::from_f64_values(vec![s; n]);
                     let number = Scalar::Float64(s);
-                    if let Some(got) = l.binary_scalar(&number, op, false) {
-                        let want = row_loop(l, &broadcast, apply);
-                        assert_eq!(raw(&got), raw(&want), "{op:?} {k} {s}");
-                    }
-                    if let Some(got) = l.binary_scalar(&number, op, true) {
-                        let want = row_loop(&broadcast, l, apply);
-                        assert_eq!(raw(&got), raw(&want), "reflected {op:?} {k} {s}");
+                    for reflected in [false, true] {
+                        let Some(got) = l.binary_scalar(&number, op, reflected) else {
+                            continue;
+                        };
+                        let want = if reflected {
+                            row_loop(&broadcast, l, apply)
+                        } else {
+                            row_loop(l, &broadcast, apply)
+                        };
+                        let label = format!("{op:?} {k} {s} {reflected}");
+                        if l.nan_missing_exact() && !l.validity().all() {
+                            // NaN at its missing rows, the column stays so:
+                            // the row loop's present rows and mask, NaN at
+                            // each missing row (its 0.0 datum the other form).
+                            assert!(got.nan_missing_exact(), "{label}");
+                            for (i, (g, w)) in raw(&got).iter().zip(raw(&want)).enumerate() {
+                                assert_eq!(g.1, w.1, "{label} {i}");
+                                if w.1 {
+                                    assert_eq!(g.0, w.0, "{label} {i}");
+                                } else {
+                                    assert!(f64::from_bits(g.0).is_nan(), "{label} {i}");
+                                }
+                            }
+                        } else {
+                            assert_eq!(raw(&got), raw(&want), "{label}");
+                        }
                     }
                 }
             }
@@ -40980,9 +41044,10 @@ mod tests {
                 let theirs = column
                     .aligned_binary_f64_same_positions(&broadcast, ArithmeticOp::Pow)
                     .unwrap();
-                if [2.0, 0.5, -1.0].contains(&exponent) {
+                let numpy_fast = [2.0, 0.5, -1.0].contains(&exponent);
+                let (want_data, want_valid): (Vec<u64>, Vec<bool>) = if numpy_fast {
                     // The broadcast arm's conventions with numpy's power.
-                    let want: (Vec<u64>, Vec<bool>) = (0..n)
+                    (0..n)
                         .map(|i| {
                             if present.get(i) {
                                 let power = power_by_number(data[i], exponent);
@@ -40991,10 +41056,25 @@ mod tests {
                                 (0.0_f64.to_bits(), false)
                             }
                         })
-                        .unzip();
-                    assert_eq!(raw(&ours), want, "{k} ** {exponent}");
+                        .unzip()
                 } else {
-                    assert_eq!(raw(&ours), raw(&theirs), "{k} ** {exponent}");
+                    raw(&theirs)
+                };
+                // A NaN-exact column's powers stay NaN-exact - NaN at each
+                // missing row (br-frankenpandas-cmgnp); any other column's
+                // missing rows hold the 0.0 of the broadcast arm's form.
+                let nan_exact = column.nan_missing_exact() && !column.validity().all();
+                assert!(!nan_exact || ours.nan_missing_exact(), "{k} ** {exponent}");
+                let (ours_data, ours_valid) = raw(&ours);
+                assert_eq!(ours_valid, want_valid, "{k} ** {exponent}");
+                for (i, (&got, &want)) in ours_data.iter().zip(&want_data).enumerate() {
+                    if want_valid[i] || !nan_exact {
+                        assert_eq!(got, want, "{k} ** {exponent} {i}");
+                    } else {
+                        assert!(f64::from_bits(got).is_nan(), "{k} ** {exponent} {i}");
+                    }
+                }
+                if !numpy_fast && !nan_exact {
                     assert_eq!(
                         format!("{:?}", ours.values()),
                         format!("{:?}", theirs.values()),
