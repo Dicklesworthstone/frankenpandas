@@ -31728,24 +31728,20 @@ impl Series {
             let mut sum_x = 0.0_f64;
             let mut sum_y = 0.0_f64;
             let mut count = 0_usize;
-            for i in 0..xd.len() {
-                if xv.get(i) && yv.get(i) {
-                    sum_x += xd[i];
-                    sum_y += yd[i];
-                    count += 1;
-                }
-            }
+            for_each_row_valid_in_both(xv, yv, xd.len(), |i| {
+                sum_x += xd[i];
+                sum_y += yd[i];
+                count += 1;
+            });
             if count == 0 {
                 return Ok((0.0, 0));
             }
             let mean_x = sum_x / count as f64;
             let mean_y = sum_y / count as f64;
             let mut cross = 0.0_f64;
-            for i in 0..xd.len() {
-                if xv.get(i) && yv.get(i) {
-                    cross += (xd[i] - mean_x) * (yd[i] - mean_y);
-                }
-            }
+            for_each_row_valid_in_both(xv, yv, xd.len(), |i| {
+                cross += (xd[i] - mean_x) * (yd[i] - mean_y);
+            });
             return Ok((cross, count));
         }
         // Scalar fallback: materialize the aligned pairs once, then fold twice.
@@ -31798,13 +31794,11 @@ impl Series {
             let mut sum_x = 0.0_f64;
             let mut sum_y = 0.0_f64;
             let mut count = 0_usize;
-            for i in 0..xd.len() {
-                if xv.get(i) && yv.get(i) {
-                    sum_x += xd[i];
-                    sum_y += yd[i];
-                    count += 1;
-                }
-            }
+            for_each_row_valid_in_both(xv, yv, xd.len(), |i| {
+                sum_x += xd[i];
+                sum_y += yd[i];
+                count += 1;
+            });
             if count < 2 {
                 return Ok((f64::NAN, f64::NAN, f64::NAN, count));
             }
@@ -31814,15 +31808,13 @@ impl Series {
             let mut cross = 0.0_f64;
             let mut ss_x = 0.0_f64;
             let mut ss_y = 0.0_f64;
-            for i in 0..xd.len() {
-                if xv.get(i) && yv.get(i) {
-                    let dx = xd[i] - mean_x;
-                    let dy = yd[i] - mean_y;
-                    cross += dx * dy;
-                    ss_x += dx * dx;
-                    ss_y += dy * dy;
-                }
-            }
+            for_each_row_valid_in_both(xv, yv, xd.len(), |i| {
+                let dx = xd[i] - mean_x;
+                let dy = yd[i] - mean_y;
+                cross += dx * dy;
+                ss_x += dx * dx;
+                ss_y += dy * dy;
+            });
             let denom = n - 1.0;
             return Ok((
                 cross / denom,
@@ -73251,6 +73243,39 @@ fn complete_spearman_centered_parallel(
     Some(centered)
 }
 
+/// `visit` each row valid in both masks (of `len` rows), ascending - the rows
+/// and the order a scan testing `x.get(i) && y.get(i)` row by row visits -
+/// a 64-row word at a time: a whole valid word's rows straight through, else
+/// its set bits. Two bit reads a row were half of a frame's cov
+/// (br-frankenpandas-sqeub).
+fn for_each_row_valid_in_both(
+    x: &ValidityMask,
+    y: &ValidityMask,
+    len: usize,
+    mut visit: impl FnMut(usize),
+) {
+    let (x_words, y_words) = (x.packed_words_for_scan(), y.packed_words_for_scan());
+    for (word_index, (&x_word, &y_word)) in x_words.iter().zip(&y_words).enumerate() {
+        let base = word_index * 64;
+        let word = x_word & y_word;
+        if word == u64::MAX && base + 64 <= len {
+            for row in base..base + 64 {
+                visit(row);
+            }
+            continue;
+        }
+        let mut bits = word;
+        while bits != 0 {
+            let row = base + bits.trailing_zeros() as usize;
+            if row >= len {
+                break;
+            }
+            visit(row);
+            bits &= bits - 1;
+        }
+    }
+}
+
 /// A variable's centred (two-pass) sum of squares, or 0.0 when it is only the
 /// round-off of a constant: each deviation of a constant variable is the same
 /// `value - mean` residue, at most `count * EPSILON * |mean|`. pandas'
@@ -87996,11 +88021,11 @@ impl DataFrame {
             && let Some((data, validity)) = col.as_f64_slice_with_validity()
             && data.len() == len
         {
-            return std::borrow::Cow::Owned(
-                (0..len)
-                    .map(|i| if validity.get(i) { data[i] } else { f64::NAN })
-                    .collect(),
-            );
+            // The data, then NaN over each invalid run - a bit read a row was
+            // a fifth of a frame's corr (br-frankenpandas-sqeub).
+            let mut values = data.to_vec();
+            validity.for_each_invalid_range(|start, run| values[start..start + run].fill(f64::NAN));
+            return std::borrow::Cow::Owned(values);
         }
 
         // Typed all-valid Int64 fast path (sister to the Float64 arms): map `v as f64`
@@ -88565,7 +88590,10 @@ impl DataFrame {
                 .min(pairs.len().max(1));
             let big_enough = (pairs.len() as u128) * (len as u128) >= (1u128 << 20);
             if worker_count >= 2 && big_enough {
-                const MORSEL: usize = 8;
+                // Morsels of up to 8 pairs, fewer when the pairs are few: a
+                // fixed 8 left 3 columns' 6 pairs to one worker - serial
+                // (br-frankenpandas-sqeub). Only the owning thread changes.
+                let morsel = (pairs.len() / (worker_count * 4)).clamp(1, 8);
                 let pairs_ref: &[(usize, usize)] = &pairs;
                 let compute_ref = &compute_pair;
                 let next = std::sync::atomic::AtomicUsize::new(0);
@@ -88577,11 +88605,11 @@ impl DataFrame {
                             let mut out: Vec<(usize, usize, f64)> = Vec::new();
                             loop {
                                 let start =
-                                    next.fetch_add(MORSEL, std::sync::atomic::Ordering::Relaxed);
+                                    next.fetch_add(morsel, std::sync::atomic::Ordering::Relaxed);
                                 if start >= pairs_ref.len() {
                                     break;
                                 }
-                                let end = (start + MORSEL).min(pairs_ref.len());
+                                let end = (start + morsel).min(pairs_ref.len());
                                 for &(i, j) in &pairs_ref[start..end] {
                                     out.push((i, j, compute_ref(i, j)));
                                 }
@@ -173521,6 +173549,43 @@ mod tests {
                             "{func} {column} sort {sort} missing {with_missing}"
                         );
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rows_valid_in_both_are_the_row_scan_sqeub() {
+        // br-frankenpandas-sqeub: the word-at-a-time walk visits exactly the
+        // rows a row-by-row `x.get(i) && y.get(i)` scan visits, in its order -
+        // across word edges, whole valid words, a partial last word, an
+        // all-valid sentinel and invalid ranges.
+        for len in [0_usize, 1, 63, 64, 65, 127, 128, 130, 1000] {
+            let mut sparse = ValidityMask::all_valid(len);
+            for i in 0..len {
+                if i % 5 == 2 || (64..100).contains(&i) {
+                    sparse.set(i, false);
+                }
+            }
+            // A run from a third of the way in, a quarter long (none in no rows).
+            let run = if len == 0 {
+                vec![]
+            } else {
+                vec![(len / 3, len / 4 + 1)]
+            };
+            let ranges = ValidityMask::from_invalid_ranges(std::sync::Arc::from(run), len);
+            let masks = [
+                sparse,
+                ranges,
+                ValidityMask::all_valid(len),
+                ValidityMask::all_invalid(len),
+            ];
+            for x in &masks {
+                for y in &masks {
+                    let scan: Vec<usize> = (0..len).filter(|&i| x.get(i) && y.get(i)).collect();
+                    let mut walked = Vec::new();
+                    crate::for_each_row_valid_in_both(x, y, len, |row| walked.push(row));
+                    assert_eq!(walked, scan, "len {len}");
                 }
             }
         }
