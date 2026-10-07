@@ -356,7 +356,19 @@ fn holds_only_typed_cells(dtype: &DType) -> bool {
 
 /// The frequency of a Period column's values (None when none is a period).
 fn column_period_freq(column: &Column) -> Option<PeriodFreq> {
-    if holds_only_typed_cells(&column.dtype()) {
+    if holds_only_typed_cells(&column.dtype()) || column.as_utf8_contiguous().is_some() {
+        return None;
+    }
+    // A categorical held as codes holds its categories only: no period among
+    // them, none among its cells - which every comparison boxed a million of
+    // to scan (`s == 'key7'` spent 59% here; br-frankenpandas-mwpo1).
+    if column.categorical_codes().is_some()
+        && let Some(meta) = column.categorical()
+        && !meta
+            .categories
+            .iter()
+            .any(|category| matches!(category, Scalar::Period(_)))
+    {
         return None;
     }
     column.values().iter().find_map(|value| match value {
@@ -94798,6 +94810,37 @@ mod tests {
                 .expect("name getter") // ubs:ignore — test helper
                 .map(|name| name.bind(py).str().expect("str").to_string()) // ubs:ignore — test helper
         })
+    }
+
+    #[test]
+    fn category_ranks_are_the_category_scan_5fo6z() {
+        // br-frankenpandas-5fo6z: the hashed ranks are category_rank's for
+        // every label - a category's text, a category the label's value is,
+        // and NEGATIVE: a label that is no category ranks last, so a
+        // category key's groups put such labels after the categories, in
+        // first-seen order.
+        let meta = CategoricalMetadata::new(
+            vec![
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Int64(3),
+                Scalar::Utf8("a".to_owned()),
+            ],
+            false,
+        );
+        let labels = vec![
+            IndexLabel::Utf8("zz".to_owned()),
+            IndexLabel::Utf8("a".to_owned()),
+            IndexLabel::Int64(3),
+            IndexLabel::Utf8("yy".to_owned()),
+            IndexLabel::Utf8("b".to_owned()),
+        ];
+        let ranks = CategoryRanks::new(&meta);
+        for label in &labels {
+            assert_eq!(ranks.rank(label), category_rank(&meta, label), "{label:?}");
+        }
+        assert_eq!(ranks.rank(&IndexLabel::Utf8("zz".to_owned())), usize::MAX);
+        let index = fp_index::Index::new(labels);
+        assert_eq!(category_order(&meta, &index), vec![4, 2, 1, 0, 3]);
     }
 
     #[cfg(feature = "lazy-transpose-view")]
