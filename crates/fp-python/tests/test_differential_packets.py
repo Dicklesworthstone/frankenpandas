@@ -28422,3 +28422,34 @@ def test_category_key_groups_are_a_categorical_index_like_pandas_vriq2(case: Any
         }[op]()
 
     assert _vriq2_shown(run(fpd)) == _vriq2_shown(run(pd))
+
+
+# br-frankenpandas-qnm4v: Series.map(dict) of an int column reads a dict whose
+# int keys span a bounded range through a table addressed by the key - the
+# same rows mapped, absent keys and missing rows NaN - and (NEGATIVE) a dict
+# whose int keys span past that table through the hash, same answer.
+_QNM4V_MAPPERS = {
+    "dense": {i: i * 2 for i in range(1000)},
+    "dense float values": {i: i / 3 for i in range(0, 1000, 3)},
+    "negative keys": {i: str(i) for i in range(-60, 60)},
+    "wide span": {0: "a", 1 << 40: "b", -(1 << 41): "c", 7: "d"},
+    "int and float keys": {**{i: i for i in range(300)}, 300.0: -1, 2.5: 99},
+}
+_QNM4V_CASES = [(column, mapper) for column in ("int", "int missing") for mapper in _QNM4V_MAPPERS]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _QNM4V_CASES, ids=lambda case: f"{case[0]}-{case[1]}")
+def test_map_dict_of_ints_like_pandas_qnm4v(case: Any) -> None:
+    column, mapper_name = case
+    k = np.arange(2000)
+    values = list((k * 37) % 1110 - 50)
+    if column == "int missing":
+        values = [None if i % 9 == 0 else int(v) for i, v in enumerate(values)]
+    mapper = _QNM4V_MAPPERS[mapper_name]
+
+    def run(m: Any) -> Any:
+        s = m.Series(values).map(mapper)
+        return [str(s.dtype), [repr(v) for v in s.tolist()]]
+
+    assert run(fpd) == run(pd)

@@ -18626,9 +18626,13 @@ impl Column {
     ) -> Result<Self, ColumnError> {
         let mut present_positions = Vec::with_capacity(positions.len());
         let mut all_present = true;
+        // The length once: read a row at a time it was a match over every
+        // storage variant per row (14% of a million-row map(dict);
+        // br-frankenpandas-qnm4v).
+        let len = self.len();
         for position in positions {
             match position {
-                Some(idx) if *idx < self.len() => present_positions.push(*idx),
+                Some(idx) if *idx < len => present_positions.push(*idx),
                 Some(_) | None => {
                     all_present = false;
                     break;
@@ -18957,9 +18961,13 @@ impl Column {
     ) -> Result<Self, ColumnError> {
         let mut present_positions = Vec::with_capacity(positions.len());
         let mut all_present = true;
+        // The length once: read a row at a time it was a match over every
+        // storage variant per row (14% of a million-row map(dict);
+        // br-frankenpandas-qnm4v).
+        let len = self.len();
         for position in positions {
             match position {
-                Some(idx) if *idx < self.len() => present_positions.push(*idx),
+                Some(idx) if *idx < len => present_positions.push(*idx),
                 Some(_) | None => {
                     all_present = false;
                     break;

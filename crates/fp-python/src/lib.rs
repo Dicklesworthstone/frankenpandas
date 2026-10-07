@@ -34572,7 +34572,36 @@ impl PySeries {
                         by_int.entry(int).or_insert(at);
                     }
                 }
-                ints.iter().map(|int| by_int.get(int).copied()).collect()
+                // Keys spanning a bounded range: a table addressed by the
+                // key, an array read a row (a hash lookup a row was a third
+                // of a million-row map; br-frankenpandas-qnm4v). A key's
+                // position is by_int's, the first occurrence.
+                let lo = by_int.keys().copied().min();
+                let hi = by_int.keys().copied().max();
+                match (lo, hi) {
+                    (Some(lo), Some(hi))
+                        if i128::from(hi) - i128::from(lo)
+                            < i128::try_from(by_int.len().saturating_mul(8).max(4096))
+                                .unwrap_or(i128::MAX) =>
+                    {
+                        let span = (i128::from(hi) - i128::from(lo) + 1) as u64;
+                        let mut table: Vec<Option<usize>> = vec![None; span as usize];
+                        for (&int, &at) in &by_int {
+                            table[int.wrapping_sub(lo) as u64 as usize] = Some(at);
+                        }
+                        ints.iter()
+                            .map(|&int| {
+                                let offset = int.wrapping_sub(lo) as u64;
+                                if offset < span {
+                                    table[offset as usize]
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    }
+                    _ => ints.iter().map(|int| by_int.get(int).copied()).collect(),
+                }
             } else if let Some(floats) = column.as_f64_slice() {
                 // A float row finds the float key or the int key equal to
                 // it, a NaN row the NaN key.
