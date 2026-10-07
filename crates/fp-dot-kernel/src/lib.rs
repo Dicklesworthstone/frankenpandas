@@ -520,6 +520,25 @@ compare_float_int_kernel!(le_f64_i64_collect, <=);
 compare_float_int_kernel!(eq_f64_i64_collect, ==);
 compare_float_int_kernel!(ne_f64_i64_collect, !=);
 
+/// `a[i] * b[i]` wrapping, for two all-valid int columns, collected - this
+/// crate's 4-lane codegen: an int64 multiply has no vector instruction
+/// before AVX-512, and the 4-lane emulation beats the baseline's 2-lane one
+/// (k * k a million rows 0.28 ms, pandas 0.21; br-frankenpandas-uf0mw; +
+/// and - gained nothing so). Wrapping multiplication is exact, so the
+/// values are the baseline loop's.
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
+/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+///
+/// # Panics
+/// Panics if `a` and `b` differ in length.
+#[inline(never)]
+#[must_use]
+pub fn mul_i64_collect(a: &[i64], b: &[i64]) -> Vec<i64> {
+    assert_eq!(a.len(), b.len(), "mul_i64_collect: a/b length mismatch");
+    a.iter().zip(b).map(|(&x, &y)| x.wrapping_mul(y)).collect()
+}
+
 float_int_collect!(add_f64_i64_collect, +, "A float column plus an int one.");
 float_int_collect!(sub_f64_i64_collect, -, "A float column minus an int one.");
 float_int_collect!(mul_f64_i64_collect, *, "A float column times an int one.");
@@ -1343,6 +1362,14 @@ mod tests {
             }
         }
         assert_eq!(ne_f64_i64_collect(&[nan, 2.0], &[2, 2]), vec![true, false]);
+        // The wrapping int multiply: overflow wraps as the scalar op does.
+        for len in [0usize, 1, 3, 4, 5, 9, 101] {
+            let a: Vec<i64> = (0..len).map(|i| ints[i % ints.len()]).collect();
+            let b: Vec<i64> = (0..len).map(|i| ints[(i * 3 + 1) % ints.len()]).collect();
+            let want: Vec<i64> = a.iter().zip(&b).map(|(&x, &y)| x.wrapping_mul(y)).collect();
+            assert_eq!(mul_i64_collect(&a, &b), want, "mul {len}");
+        }
+        assert_eq!(mul_i64_collect(&[i64::MAX], &[2]), vec![-2]);
     }
 
     /// br-frankenpandas-3tk83: the Arc divide is the Vec-building one's

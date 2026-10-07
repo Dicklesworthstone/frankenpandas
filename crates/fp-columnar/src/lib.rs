@@ -3093,6 +3093,13 @@ fn vectorized_binary_i64(
     // vectorize (k * k 1.4 ms, pandas 0.28; br-frankenpandas-uf0mw). The
     // values the general loop below writes.
     if combined.all() {
+        // * four lanes wide where the CPU has AVX2: the int64 multiply's
+        // emulation two lanes wide was most of k * k (0.28 ms a million
+        // rows, pandas 0.21; br-frankenpandas-uf0mw).
+        #[cfg(target_arch = "x86_64")]
+        if matches!(op, ArithmeticOp::Mul) && std::arch::is_x86_feature_detected!("avx2") {
+            return Some((fp_dot_kernel::mul_i64_collect(left, right), combined));
+        }
         let out: Vec<i64> = match op {
             ArithmeticOp::Add => left
                 .iter()
