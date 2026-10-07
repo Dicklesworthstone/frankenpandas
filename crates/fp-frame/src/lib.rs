@@ -2804,6 +2804,26 @@ fn pivot_axis_dense_codes(col: &Column) -> Option<(Vec<u32>, Vec<IndexLabel>, Ve
     // Factorize an i64-valued axis: first-seen distinct, sort ascending, assign
     // each its sorted rank, then remap every row to its rank.
     let i64_axis = |s: &[i64]| -> (Vec<u32>, Vec<i64>) {
+        // A bounded span: a table addressed by the key, read in ascending
+        // order, gives the distinct keys sorted and each one's rank - no
+        // hash a row (a pivot over keys 0..1000 spent a third of its time
+        // inserting into the map; br-frankenpandas-sriqq).
+        if let Some((min, range)) = i64_dense_histogram_range(s) {
+            let slot = |key: i64| (i128::from(key) - i128::from(min)) as usize;
+            let mut rank = vec![u32::MAX; range];
+            for &key in s {
+                rank[slot(key)] = 0;
+            }
+            let mut keys: Vec<i64> = Vec::new();
+            for (offset, rank) in rank.iter_mut().enumerate() {
+                if *rank == 0 {
+                    *rank = keys.len() as u32;
+                    keys.push(min + offset as i64);
+                }
+            }
+            let codes = s.iter().map(|&key| rank[slot(key)]).collect();
+            return (codes, keys);
+        }
         let mut pos: FxHashMap<i64, u32> = FxHashMap::default();
         let mut keys: Vec<i64> = Vec::new();
         for &k in s {
@@ -173503,6 +173523,41 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn pivot_int_axis_codes_are_ranks_by_table_or_map_sriqq() {
+        // br-frankenpandas-sriqq: an int pivot axis codes each row by its
+        // key's rank among the distinct keys sorted ascending, labelled and
+        // named by them - from the table addressed by the key when the span
+        // is bounded, and (NEGATIVE) from the hash map when it is not.
+        let narrow = vec![5_i64, -2, 7, 5, 0, -2, 7, 7];
+        let wide = vec![1_i64 << 40, -3, 5, 1 << 40, -(1 << 41), 5];
+        assert!(crate::i64_dense_histogram_range(&narrow).is_some());
+        assert!(crate::i64_dense_histogram_range(&wide).is_none());
+        for keys in [narrow, wide] {
+            let column = Column::from_i64_values(keys.clone());
+            let (codes, labels, names) = crate::pivot_axis_dense_codes(&column).unwrap();
+            let mut distinct = keys.clone();
+            distinct.sort_unstable();
+            distinct.dedup();
+            let ranks: Vec<u32> = keys
+                .iter()
+                .map(|key| distinct.binary_search(key).unwrap() as u32)
+                .collect();
+            assert_eq!(codes, ranks, "{keys:?}");
+            assert_eq!(
+                labels,
+                distinct
+                    .iter()
+                    .map(|&key| IndexLabel::Int64(key))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                names,
+                distinct.iter().map(i64::to_string).collect::<Vec<_>>()
+            );
         }
     }
 

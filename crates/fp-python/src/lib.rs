@@ -26364,7 +26364,11 @@ fn pivot_array_keys<'py>(
             return Ok(key.clone());
         }
         let column = if let Ok(series) = key.extract::<PyRef<'_, PySeries>>() {
-            if series.inner.index().labels() == frame.index().labels() {
+            // Index equality answers from a shared label identity (or its
+            // cache) before comparing labels - it compared every label each
+            // call (br-frankenpandas-sriqq); equal labels in another zone
+            // reindex to the same column.
+            if series.inner.index() == frame.index() {
                 series.inner.column().clone()
             } else {
                 series
@@ -47348,11 +47352,14 @@ impl PyDataFrame {
                 return Ok(slf.clone().into_any());
             }
             let frame = &slf.borrow().inner;
-            let cells: Vec<&[Scalar]> = names
-                .iter()
-                .filter_map(|name| frame.column(name))
-                .map(Column::values)
-                .collect();
+            let columns: Vec<&Column> =
+                names.iter().filter_map(|name| frame.column(name)).collect();
+            // Keys missing no cell drop no row: no Scalar view to scan (each
+            // key column's was built every call; br-frankenpandas-sriqq).
+            if !columns.iter().any(|column| column.has_any_missing()) {
+                return Ok(slf.clone().into_any());
+            }
+            let cells: Vec<&[Scalar]> = columns.into_iter().map(Column::values).collect();
             let keep: Vec<usize> = (0..frame.len())
                 .filter(|&row| cells.iter().all(|cells| !cells[row].is_missing()))
                 .collect();
@@ -47439,11 +47446,13 @@ impl PyDataFrame {
                     .is_some_and(|column| column.dtype() == DType::Int64),
                 _ => false,
             };
-            let complete = (0..res.num_columns()).all(|position| {
-                res.column_at(position)
-                    .is_some_and(|column| !column.values().iter().any(Scalar::is_missing))
-            });
-            if int_aggregate && complete {
+            let complete = || {
+                (0..res.num_columns()).all(|position| {
+                    res.column_at(position)
+                        .is_some_and(|column| !column.has_any_missing())
+                })
+            };
+            if int_aggregate && complete() {
                 res = res.astype(DType::Int64).map_err(frame_error_to_py)?;
             }
             // sort=False: rows and columns in the order their key value
