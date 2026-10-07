@@ -8016,6 +8016,29 @@ fn compare_f64_scalar(data: &[f64], s: f64, op: ComparisonOp) -> Vec<bool> {
     }
 }
 
+/// `l[i] <op> r[i]` for every row of two slices of one length, each
+/// operator's loop filling a sized buffer in this function so it vectorizes
+/// (br-frankenpandas-cmgnp).
+fn compare_f64_pairs(l: &[f64], r: &[f64], op: ComparisonOp) -> Vec<bool> {
+    let mut out = vec![false; l.len()];
+    macro_rules! fill {
+        ($test:expr) => {
+            for ((flag, &a), &b) in out.iter_mut().zip(l).zip(r) {
+                *flag = $test(a, b);
+            }
+        };
+    }
+    match op {
+        ComparisonOp::Gt => fill!(|a: f64, b: f64| a > b),
+        ComparisonOp::Lt => fill!(|a: f64, b: f64| a < b),
+        ComparisonOp::Eq => fill!(|a: f64, b: f64| a == b),
+        ComparisonOp::Ne => fill!(|a: f64, b: f64| a != b),
+        ComparisonOp::Ge => fill!(|a: f64, b: f64| a >= b),
+        ComparisonOp::Le => fill!(|a: f64, b: f64| a <= b),
+    }
+    out
+}
+
 /// The `i64` sibling of [`compare_f64_scalar`].
 fn compare_i64_scalar(data: &[i64], s: i64, op: ComparisonOp) -> Vec<bool> {
     #[cfg(target_arch = "x86_64")]
@@ -21615,6 +21638,23 @@ impl Column {
     ///
     /// Both columns must have the same length.
     pub fn binary_comparison(&self, right: &Self, op: ComparisonOp) -> Result<Self, ColumnError> {
+        // Two NaN-exact float columns: a missing row is a NaN on a side, which
+        // compares as pandas answers a missing row (false, true under !=),
+        // so the data's comparison is the result - the missing rows were set
+        // after it a run at a time (nx > ny 1.2 ms a million rows, pandas
+        // 0.18; br-frankenpandas-cmgnp).
+        if self.dtype == DType::Float64
+            && right.dtype == DType::Float64
+            && self.nan_missing_exact()
+            && right.nan_missing_exact()
+            && let (Some((l, _)), Some((r, _))) = (
+                self.as_f64_slice_with_validity(),
+                right.as_f64_slice_with_validity(),
+            )
+            && l.len() == r.len()
+        {
+            return Ok(Self::from_bool_values(compare_f64_pairs(l, r, op)));
+        }
         let result = self.binary_comparison_propagating(right, op)?;
         if self.dtype.is_nullable() || right.dtype.is_nullable() {
             // pandas' masked comparison is the nullable `boolean` dtype, <NA>
@@ -31042,6 +31082,20 @@ impl Column {
             let witness = self.f64_finite_witness();
             let out: Vec<f64> = data.iter().map(|&x| -x).collect();
             return Ok(Self::from_f64_all_valid_with_finite_opt(out, witness));
+        }
+        // A NaN-exact column's negation is one too (-NaN is NaN, -x of a number
+        // never is): collected straight into the shared buffer under its mask -
+        // the nullable arm's data, mask and Scalars, without its zeroed buffer
+        // and threads (-nx 1.2 ms a million rows, pandas 0.16;
+        // br-frankenpandas-cmgnp).
+        if self.dtype == DType::Float64
+            && self.nan_missing_exact()
+            && let Some((data, validity)) = self.as_f64_slice_with_validity()
+        {
+            return Ok(Self::nan_exact_float64(
+                data.iter().map(|&x| -x).collect(),
+                validity.clone(),
+            ));
         }
         // Nullable Float64 fast path (mirror of abs): neg preserves missingness
         // exactly, so negate every raw slot branchlessly and carry the input
@@ -40606,6 +40660,34 @@ mod tests {
                 data.iter().map(|x| x.abs()).collect(),
                 validity.clone(),
             );
+            let negated = column.neg().unwrap();
+            let want_negated = Column::from_f64_values_with_validity(
+                data.iter().map(|x| -x).collect(),
+                validity.clone(),
+            );
+            assert_eq!(raw(&negated), raw(&want_negated), "neg {k}");
+            assert_eq!(
+                format!("{:?}", negated.values()),
+                format!("{:?}", want_negated.values()),
+                "neg {k}"
+            );
+            // A comparison with each column: the row loop's (missing false,
+            // true under !=).
+            for (j, other) in columns.iter().enumerate() {
+                for op in [ComparisonOp::Gt, ComparisonOp::Eq, ComparisonOp::Ne] {
+                    let got = column.binary_comparison(other, op).unwrap();
+                    let want: Vec<Scalar> = (0..n)
+                        .map(|i| {
+                            Scalar::Bool(if present(column, i) && present(other, i) {
+                                compare(datum(column, i), datum(other, i), op)
+                            } else {
+                                op == ComparisonOp::Ne
+                            })
+                        })
+                        .collect();
+                    assert_eq!(got.values(), want.as_slice(), "{op:?} {k} {j}");
+                }
+            }
             let got = column.abs().unwrap();
             assert_eq!(raw(&got), raw(&want), "abs {k}");
             assert_eq!(

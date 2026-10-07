@@ -15786,6 +15786,35 @@ impl Series {
         // of the ffill fast path above.
         if let Some((data, validity)) = self.column.as_f64_slice_with_validity() {
             let n = data.len();
+            // No limit: each missing run takes the value after it (a run is
+            // maximal, so that row is present) and a trailing run stays
+            // missing - ffill's run walk, mirrored; the loop below read a mask
+            // bit per row (nx.bfill() 3.2 ms a million rows, pandas 1.6;
+            // br-frankenpandas-cmgnp). The loop's data and mask.
+            if limit.is_none() {
+                let mut out = data.to_vec();
+                let mut trailing_start = n;
+                validity.for_each_invalid_range(|start, run_len| {
+                    let end = start + run_len;
+                    if end < n {
+                        let fill = out[end];
+                        out[start..end].fill(fill);
+                    } else {
+                        trailing_start = start;
+                    }
+                });
+                let out_valid = if trailing_start == n {
+                    fp_columnar::ValidityMask::all_valid(n)
+                } else {
+                    fp_columnar::ValidityMask::from_invalid_ranges(
+                        std::sync::Arc::from(vec![(trailing_start, n - trailing_start)]),
+                        n,
+                    )
+                };
+                let column = Column::from_f64_values_with_validity(out, out_valid)
+                    .keeping_dtype_of(&self.column);
+                return Series::new(self.name.clone(), self.index.clone(), column);
+            }
             let mut out = vec![0.0_f64; n];
             let mut out_valid = fp_columnar::ValidityMask::all_valid(n);
             let mut next: Option<f64> = None;
@@ -21753,6 +21782,23 @@ impl Series {
                 Scalar::Float64(result)
             });
         }
+        // A NaN-exact column's missing rows are its NaN rows, which `v <
+        // result` passes over: the same fold over the data, a row present
+        // iff its mask bit - where the Scalar fold below built every cell
+        // (nx.min() 7.3 ms a million rows, pandas 1.4; br-frankenpandas-cmgnp).
+        if self.column.dtype() == DType::Float64
+            && self.column.nan_missing_exact()
+            && let Some((data, validity)) = self.column.as_f64_slice_with_validity()
+        {
+            let mut result = f64::INFINITY;
+            for &v in data {
+                if v < result {
+                    result = v;
+                }
+            }
+            let found = validity.count_valid() > 0;
+            return Ok(Scalar::Float64(if found { result } else { f64::NAN }));
+        }
 
         let mut result = f64::INFINITY;
         let mut found = false;
@@ -21912,6 +21958,22 @@ impl Series {
             } else {
                 Scalar::Float64(result)
             });
+        }
+        // A NaN-exact column (see min): the fold over the data, NaN rows
+        // passed over by `v > result` (nx.max() 7.5 ms a million rows, pandas
+        // 1.4; br-frankenpandas-cmgnp).
+        if self.column.dtype() == DType::Float64
+            && self.column.nan_missing_exact()
+            && let Some((data, validity)) = self.column.as_f64_slice_with_validity()
+        {
+            let mut result = f64::NEG_INFINITY;
+            for &v in data {
+                if v > result {
+                    result = v;
+                }
+            }
+            let found = validity.count_valid() > 0;
+            return Ok(Scalar::Float64(if found { result } else { f64::NAN }));
         }
 
         let mut result = f64::NEG_INFINITY;
@@ -25739,17 +25801,29 @@ impl Series {
                 // keeps this correct even if a missing slot holds a non-NaN value).
                 // Bit-identical to the prior closure: valid slot ⇒ predicate, missing
                 // slot ⇒ false (== `!valid.get(i)` early-return).
-                let mut flags: Vec<bool> = match mode {
-                    InclusiveMode::Both => d.iter().map(|&v| v >= lo && v <= hi).collect(),
-                    InclusiveMode::Neither => d.iter().map(|&v| v > lo && v < hi).collect(),
-                    InclusiveMode::Left => d.iter().map(|&v| v >= lo && v < hi).collect(),
-                    InclusiveMode::Right => d.iter().map(|&v| v > lo && v <= hi).collect(),
-                };
-                valid.for_each_invalid_range(|start, len| {
-                    for f in &mut flags[start..start + len] {
-                        *f = false;
-                    }
-                });
+                // The predicate fills a sized buffer in this function's own
+                // loop (`&`, not `&&`): collected through an iterator it stayed
+                // scalar and branchy (nx.between(-1, 1) 3.0 ms a million rows,
+                // pandas 0.31; br-frankenpandas-cmgnp). A NaN-exact column's
+                // missing slots are its NaN slots, false already.
+                let mut flags = vec![false; d.len()];
+                macro_rules! fill {
+                    ($test:expr) => {
+                        for (flag, &v) in flags.iter_mut().zip(d) {
+                            *flag = $test(v);
+                        }
+                    };
+                }
+                match mode {
+                    InclusiveMode::Both => fill!(|v: f64| (v >= lo) & (v <= hi)),
+                    InclusiveMode::Neither => fill!(|v: f64| (v > lo) & (v < hi)),
+                    InclusiveMode::Left => fill!(|v: f64| (v >= lo) & (v < hi)),
+                    InclusiveMode::Right => fill!(|v: f64| (v > lo) & (v <= hi)),
+                }
+                if !self.column.nan_missing_exact() {
+                    valid
+                        .for_each_invalid_range(|start, len| flags[start..start + len].fill(false));
+                }
                 return Series::new(
                     self.name.clone(),
                     self.index.clone(),
@@ -173985,6 +174059,104 @@ mod tests {
                         );
                         assert_eq!(got.column().validity().get(i), want_valid, "{context}");
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nan_holding_min_max_between_are_the_cell_scan_cmgnp() {
+        // br-frankenpandas-cmgnp: min / max of a NaN-holding Float64 Series
+        // fold its data (NaN rows passed over) to the Scalar fold's answer, an
+        // all-NaN one NaN; between, every inclusive mode, is each present
+        // row's test and false at a missing one. NEGATIVE: a column whose
+        // missing rows hold numbers (0.0 under a cleared bit) keeps those out
+        // of min, max and between.
+        let n = 130_usize;
+        let index = Index::from_range(0, n as i64, 1);
+        let value = |i: usize| (i as f64 - 64.0) * 0.5;
+        let mut gaps = ValidityMask::all_valid(n);
+        for i in (0..n).step_by(4) {
+            gaps.set(i, false);
+        }
+        let columns = [
+            Column::from_f64_values(
+                (0..n)
+                    .map(|i| if i % 6 == 2 { f64::NAN } else { value(i) })
+                    .collect(),
+            ),
+            Column::from_f64_values_with_validity((0..n).map(value).collect(), gaps),
+            Column::from_f64_values(vec![f64::NAN; n]),
+        ];
+        for (k, column) in columns.iter().enumerate() {
+            let series = Series::new("x", index.clone(), column.clone()).unwrap();
+            let present: Vec<f64> = series
+                .values()
+                .iter()
+                .filter(|cell| !cell.is_missing())
+                .map(|cell| cell.to_f64().unwrap())
+                .collect();
+            let fold = |seed: f64, better: fn(f64, f64) -> bool| {
+                if present.is_empty() {
+                    f64::NAN
+                } else {
+                    present
+                        .iter()
+                        .fold(seed, |best, &v| if better(v, best) { v } else { best })
+                }
+            };
+            let wants = [
+                (
+                    series.min().unwrap(),
+                    fold(f64::INFINITY, |v, best| v < best),
+                ),
+                (
+                    series.max().unwrap(),
+                    fold(f64::NEG_INFINITY, |v, best| v > best),
+                ),
+            ];
+            for (got, want) in wants {
+                assert_eq!(
+                    format!("{got:?}"),
+                    format!("{:?}", Scalar::Float64(want)),
+                    "{k}"
+                );
+            }
+            // bfill without a limit: the reverse loop's data and mask.
+            let (data, validity) = column.as_f64_slice_with_validity().unwrap();
+            let mut want = data.to_vec();
+            let mut want_valid = vec![true; n];
+            let mut next: Option<f64> = None;
+            for (i, (slot, valid)) in want.iter_mut().zip(&mut want_valid).enumerate().rev() {
+                if validity.get(i) {
+                    next = Some(data[i]);
+                } else if let Some(fill) = next {
+                    *slot = fill;
+                } else {
+                    *valid = false;
+                }
+            }
+            let filled = series.bfill(None).unwrap();
+            let (got_data, got_valid) = filled.column().as_f64_slice_with_validity().unwrap();
+            for (i, (got, want)) in got_data.iter().zip(&want).enumerate() {
+                assert_eq!(got.to_bits(), want.to_bits(), "bfill {k} {i}");
+                assert_eq!(got_valid.get(i), want_valid[i], "bfill {k} {i}");
+            }
+            for inclusive in ["both", "neither", "left", "right"] {
+                let got = series
+                    .between(&Scalar::Float64(-10.0), &Scalar::Float64(10.0), inclusive)
+                    .unwrap();
+                for (i, cell) in series.values().iter().enumerate() {
+                    let want = match cell.to_f64() {
+                        Ok(v) if !cell.is_missing() => match inclusive {
+                            "both" => (-10.0..=10.0).contains(&v),
+                            "neither" => v > -10.0 && v < 10.0,
+                            "left" => (-10.0..10.0).contains(&v),
+                            _ => v > -10.0 && v <= 10.0,
+                        },
+                        _ => false,
+                    };
+                    assert_eq!(got.values()[i], Scalar::Bool(want), "{k} {inclusive} {i}");
                 }
             }
         }
