@@ -2369,20 +2369,15 @@ fn divided_by_number_arc(data: &[f64], s: f64, number_first: bool) -> Arc<[f64]>
     }
 }
 
-/// [`sqrt_values`] into the `Arc<[f64]>` a NaN-exact column keeps, the
-/// kernel writing a fresh buffer of it - not a Vec copied into one.
+/// [`sqrt_values`] collected straight into the `Arc<[f64]>` a NaN-exact
+/// column keeps - not a Vec copied into one, nor a zero-filled Arc written
+/// over (its fill was larger than the roots; br-frankenpandas-cmgnp).
 fn sqrt_values_arc(data: &[f64]) -> Arc<[f64]> {
-    let mut out: Arc<[f64]> = std::iter::repeat_n(0.0, data.len()).collect();
-    let slots = Arc::get_mut(&mut out).expect("a fresh Arc is unique");
     #[cfg(target_arch = "x86_64")]
     if std::arch::is_x86_feature_detected!("avx2") {
-        fp_dot_kernel::sqrt_f64_into(data, slots);
-        return out;
+        return fp_dot_kernel::sqrt_f64_arc(data);
     }
-    for (slot, &x) in slots.iter_mut().zip(data) {
-        *slot = x.sqrt();
-    }
-    out
+    data.iter().map(|&x| x.sqrt()).collect()
 }
 
 /// The square root of every value: fp-dot-kernel's 4-lane kernel where the
@@ -2392,9 +2387,7 @@ fn sqrt_values_arc(data: &[f64]) -> Arc<[f64]> {
 fn sqrt_values(data: &[f64]) -> Vec<f64> {
     #[cfg(target_arch = "x86_64")]
     if std::arch::is_x86_feature_detected!("avx2") {
-        let mut out = vec![0.0_f64; data.len()];
-        fp_dot_kernel::sqrt_f64_into(data, &mut out);
-        return out;
+        return fp_dot_kernel::sqrt_f64_collect(data).0;
     }
     data.iter().map(|&x| x.sqrt()).collect()
 }
@@ -8232,6 +8225,32 @@ fn compare_f64_scalar(data: &[f64], s: f64, op: ComparisonOp) -> Vec<bool> {
     }
 }
 
+/// [`compare_f64_scalar`] collected straight into the `Arc<[bool]>` an
+/// all-valid bool column keeps - fp-dot-kernel's where the CPU has AVX2 -
+/// where that filled a zeroed Vec the column then copied (nx > 0 a million
+/// rows 0.111 ms, pandas 0.108; br-frankenpandas-cmgnp). The same bools.
+fn compare_f64_scalar_arc(data: &[f64], s: f64, op: ComparisonOp) -> Arc<[bool]> {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        return match op {
+            ComparisonOp::Gt => fp_dot_kernel::gt_f64_scalar_arc(data, s),
+            ComparisonOp::Lt => fp_dot_kernel::lt_f64_scalar_arc(data, s),
+            ComparisonOp::Eq => fp_dot_kernel::eq_f64_scalar_arc(data, s),
+            ComparisonOp::Ne => fp_dot_kernel::ne_f64_scalar_arc(data, s),
+            ComparisonOp::Ge => fp_dot_kernel::ge_f64_scalar_arc(data, s),
+            ComparisonOp::Le => fp_dot_kernel::le_f64_scalar_arc(data, s),
+        };
+    }
+    match op {
+        ComparisonOp::Gt => data.iter().map(|&v| v > s).collect(),
+        ComparisonOp::Lt => data.iter().map(|&v| v < s).collect(),
+        ComparisonOp::Eq => data.iter().map(|&v| v == s).collect(),
+        ComparisonOp::Ne => data.iter().map(|&v| v != s).collect(),
+        ComparisonOp::Ge => data.iter().map(|&v| v >= s).collect(),
+        ComparisonOp::Le => data.iter().map(|&v| v <= s).collect(),
+    }
+}
+
 /// `l[i] <op> r[i]` for every row of two slices of one length, each
 /// operator's loop filling a sized buffer in this function so it vectorizes
 /// (br-frankenpandas-cmgnp).
@@ -13345,6 +13364,22 @@ impl Column {
             values: ScalarValues::lazy_all_valid_int64_arc(
                 std::iter::repeat_n(value, len).collect(),
             ),
+            validity: ValidityMask::all_valid(len),
+            data: None,
+            categorical: None,
+            width: None,
+            pandas_string: false,
+        }
+    }
+
+    /// An all-valid bool column over `data` itself - the
+    /// [`from_bool_values`](Self::from_bool_values) column, without its copy
+    /// of a Vec into the Arc (br-frankenpandas-cmgnp).
+    fn from_bool_arc(data: Arc<[bool]>) -> Self {
+        let len = data.len();
+        Self {
+            dtype: DType::Bool,
+            values: ScalarValues::lazy_all_valid_bool_arc(data),
             validity: ValidityMask::all_valid(len),
             data: None,
             categorical: None,
@@ -22519,7 +22554,7 @@ impl Column {
             && let Ok(s) = scalar.to_f64()
             && let Some((data, _)) = self.as_f64_slice_with_validity()
         {
-            return Ok(Self::from_bool_values(compare_f64_scalar(data, s, op)));
+            return Ok(Self::from_bool_arc(compare_f64_scalar_arc(data, s, op)));
         }
         let result = self.compare_scalar_propagating(scalar, op)?;
         if self.dtype.is_nullable() {
@@ -22556,7 +22591,7 @@ impl Column {
         if let Some(data) = self.as_f64_slice()
             && let Ok(s) = scalar.to_f64()
         {
-            return Ok(Self::from_bool_values(compare_f64_scalar(data, s, op)));
+            return Ok(Self::from_bool_arc(compare_f64_scalar_arc(data, s, op)));
         }
         if let Some(data) = self.as_i64_slice()
             && let Scalar::Int64(s) = scalar
@@ -22566,12 +22601,13 @@ impl Column {
         // An int column against a float: scalar_compare reads both as f64 (the
         // pair's common dtype), so the typed f64 compare over the values read
         // as f64 answers each cell (k > 0.5 went cell by cell: 1.0 ms, pandas
-        // 0.37; br-frankenpandas-uf0mw).
+        // 0.37; br-frankenpandas-uf0mw). Converting each int inside the
+        // compare loop instead measured slower (0.327 -> 0.346 ms).
         if let Some(data) = self.as_i64_slice()
             && let Scalar::Float64(s) = scalar
         {
             let values: Vec<f64> = data.iter().map(|&v| v as f64).collect();
-            return Ok(Self::from_bool_values(compare_f64_scalar(&values, *s, op)));
+            return Ok(Self::from_bool_arc(compare_f64_scalar_arc(&values, *s, op)));
         }
 
         // Nullable Float64 fast path: the all-valid `as_f64_slice` above bails on
@@ -31658,7 +31694,7 @@ impl Column {
         // called with `preserves_finiteness = true` and `par_min = usize::MAX`, so
         // for an `as_f64_slice` input it runs SERIALLY over the whole slice and
         // returns `from_f64_all_valid_with_finite_opt(out, all_finite)` when the
-        // domain held, `None` otherwise. `sqrt_f64_into` folds the SAME two
+        // domain held, `None` otherwise. `sqrt_f64_collect` folds the SAME two
         // witnesses in the same pass — `domain_held = all(x >= 0.0)` and
         // `all_finite = all(out.is_finite())` — and `all_finite` is then
         // overridden by the input witness when one is known, mirroring
@@ -31691,8 +31727,7 @@ impl Column {
             // a single serial pass, which is also what sqrt's
             // `par_min_override = usize::MAX` selects on the generic arm.
             record_elementwise_workers(1);
-            let mut out = vec![0.0_f64; data.len()];
-            let (domain_held, computed_all_finite) = fp_dot_kernel::sqrt_f64_into(data, &mut out);
+            let (out, domain_held, computed_all_finite) = fp_dot_kernel::sqrt_f64_collect(data);
             if domain_held {
                 let all_finite = self.f64_finite_witness().unwrap_or(computed_all_finite);
                 return Ok(Self::from_f64_all_valid_with_finite_opt(
@@ -31700,6 +31735,25 @@ impl Column {
                     Some(all_finite),
                 ));
             }
+        }
+
+        // NaN exactly at the missing rows: a missing row's root is its NaN and
+        // a negative value's the NaN that marks it missing, so the roots of the
+        // whole slice, their NaNs marked, are the column - collected into its
+        // Arc on one thread, where the generic arm below split a zeroed buffer
+        // across threads and its fill outweighed the roots (np.sqrt of a column
+        // 10% NaN 1.12 ms a million rows, pandas 1.02; br-frankenpandas-cmgnp).
+        #[cfg(target_arch = "x86_64")]
+        if self.dtype == DType::Float64
+            && self.nan_missing_exact()
+            && !elementwise_write_once_enabled()
+            && std::arch::is_x86_feature_detected!("avx2")
+            && let Some((data, _)) = self.as_f64_slice_with_validity()
+        {
+            record_elementwise_workers(1);
+            let out = fp_dot_kernel::sqrt_f64_arc(data);
+            let validity = ValidityMask::from_f64(&out);
+            return Ok(Self::nan_exact_float64(out, validity));
         }
 
         // All-valid f64 with no negative element: `sqrt` cannot mint a NaN, so the
@@ -41518,6 +41572,24 @@ mod tests {
                     assert_eq!(g.to_bits(), w.to_bits(), "{k} f{j} {i}");
                     assert_eq!(got_valid.get(i), !w.is_nan(), "{k} f{j} {i}");
                 }
+            }
+            // Column::sqrt itself: the NaN-exact column's roots of the slice
+            // collected on one thread (its own arm), the other's masked loop -
+            // the same bits and mask bits.
+            let want: Vec<f64> = (0..n)
+                .map(|i| {
+                    if validity.get(i) {
+                        data[i].sqrt()
+                    } else {
+                        f64::NAN
+                    }
+                })
+                .collect();
+            let got = column.sqrt().unwrap();
+            let (got_data, got_valid) = got.as_f64_slice_with_validity().unwrap();
+            for (i, (g, w)) in got_data.iter().zip(&want).enumerate() {
+                assert_eq!(g.to_bits(), w.to_bits(), "{k} sqrt {i}");
+                assert_eq!(got_valid.get(i), !w.is_nan(), "{k} sqrt {i}");
             }
         }
     }

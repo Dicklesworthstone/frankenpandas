@@ -32,9 +32,8 @@
 #![forbid(unsafe_code)]
 
 use std::simd::{
-    Mask, Simd, StdFloat as _,
+    Mask, Simd,
     cmp::{SimdPartialEq, SimdPartialOrd},
-    num::SimdFloat as _,
 };
 
 /// Materialize `out[row] = Σ_j a_slices[j][row] * b_col[j]` for `len` rows.
@@ -950,8 +949,9 @@ made_nan_f64_kernel!(
     "`out[i] = a[i] / b[i]`, four doubles per instruction."
 );
 
-/// Lane-wise `out[i] = sqrt(a[i])`, four doubles per instruction, folding the
-/// TWO witnesses `Column::sqrt`'s typed arm needs: `(domain_held, all_finite)`.
+/// `sqrt(a[i])` of every value, four doubles per instruction, with the TWO
+/// witnesses `Column::sqrt`'s typed arm needs: `(roots, domain_held,
+/// all_finite)`.
 ///
 /// br-frankenpandas-uza04 / oxv4u. `sqrt @10M` measured **0.808x** against live
 /// pandas 2.2.3 on 2026-08-30 (fp 19302.89us vs pandas 16101.55us, cv 7.46% /
@@ -975,13 +975,18 @@ made_nan_f64_kernel!(
 /// domain test and a finiteness fold into the same pass, and both must come back
 /// or the caller pays a second traversal that this kernel exists to avoid:
 ///
-///   * `domain_held` is `all(x >= 0.0)`. ⚠️ It is folded as `!(x >= 0.0)`, NOT as
-///     `x < 0.0`. Those differ on NaN: `NaN < 0.0` is FALSE, so a `simd_lt` fold
-///     would report a NaN input as IN domain and hand back `sqrt(NaN)` as a
-///     PRESENT value, where the scalar predicate `|x| x >= 0.0` marks it missing.
-///     That is a parity break, not a rounding difference.
-///   * `all_finite` is `all(out[i].is_finite())`, folded as `!(|y| < inf)` so that
-///     both NaN and +/-inf count as non-finite, matching `f64::is_finite`.
+///   * `domain_held` is `all(x >= 0.0)`. ⚠️ It is folded as `x.is_nan() | (x <
+///     0.0)`, NOT as `x < 0.0` alone. Those differ on NaN: `NaN < 0.0` is FALSE,
+///     so a bare `x < 0.0` fold would report a NaN input as IN domain and hand
+///     back `sqrt(NaN)` as a PRESENT value, where the scalar predicate `|x| x >=
+///     0.0` marks it missing. That is a parity break, not a rounding difference.
+///   * `all_finite` is `all(out[i].is_finite())`, so that both NaN and +/-inf
+///     count as non-finite.
+///
+/// COLLECTED, NOT WRITTEN OVER. The roots go straight into a fresh Vec: the
+/// form that wrote them into the caller's zeroed buffer paid a memset the size
+/// of its own stores (glibc's calloc of a recycled block; np.sqrt of a column
+/// 10% NaN spent more in the memset than in the roots; br-frankenpandas-cmgnp).
 ///
 /// BIT-IDENTICAL to the baseline loop. IEEE-754 square root is correctly rounded
 /// and lane-independent, so `vsqrtpd` returns the same bits per lane as `sqrtpd`
@@ -996,41 +1001,38 @@ made_nan_f64_kernel!(
 ///
 /// ⚠️ CALLER MUST GUARD with `is_x86_feature_detected!("avx2")`; this crate emits
 /// AVX2 unconditionally and entering it on a pre-AVX2 CPU is SIGILL.
-///
-/// # Panics
-/// Panics if `a` and `out` do not have the same length.
 #[inline(never)]
-pub fn sqrt_f64_into(a: &[f64], out: &mut [f64]) -> (bool, bool) {
-    assert_eq!(a.len(), out.len(), "sqrt_f64_into: out length mismatch");
+#[must_use]
+pub fn sqrt_f64_collect(a: &[f64]) -> (Vec<f64>, bool, bool) {
+    let mut out_of_domain = false;
+    let mut non_finite = false;
+    let out = a
+        .iter()
+        .map(|&x| {
+            // NaN counts as OUT of domain; see the note above.
+            out_of_domain |= x.is_nan() | (x < 0.0);
+            let r = x.sqrt();
+            non_finite |= !r.is_finite();
+            r
+        })
+        .collect();
+    (out, !out_of_domain, !non_finite)
+}
 
-    const LANES: usize = 4;
-    let n = a.len();
-    let chunk_end = n - n % LANES;
-    let zero = Simd::<f64, LANES>::splat(0.0);
-    let inf = Simd::<f64, LANES>::splat(f64::INFINITY);
-    let mut out_of_domain = Mask::<i64, LANES>::splat(false);
-    let mut non_finite = Mask::<i64, LANES>::splat(false);
-    let mut index = 0usize;
-    while index < chunk_end {
-        let av = Simd::<f64, LANES>::from_slice(&a[index..index + LANES]);
-        // `!(x >= 0.0)` so NaN counts as OUT of domain; see the note above.
-        out_of_domain |= !av.simd_ge(zero);
-        let r = av.sqrt();
-        non_finite |= !r.abs().simd_lt(inf);
-        r.copy_to_slice(&mut out[index..index + LANES]);
-        index += LANES;
-    }
-    let mut domain_held = !out_of_domain.any();
-    let mut all_finite = !non_finite.any();
-    // Scalar remainder, identical to the baseline body.
-    for offset in chunk_end..n {
-        let x = a[offset];
-        domain_held &= x >= 0.0;
-        let r = x.sqrt();
-        all_finite &= r.is_finite();
-        out[offset] = r;
-    }
-    (domain_held, all_finite)
+/// Every value's square root collected straight into the `Arc<[f64]>` a
+/// NaN-exact column keeps: a NaN's root is NaN and a negative value's is the
+/// NaN its missing row needs, so the caller marks the output's NaNs. The
+/// roots in a zeroed Arc, or a zeroed buffer split across threads, paid a
+/// memset larger than the roots (np.sqrt of a column 10% NaN 1.12 ms a
+/// million rows, pandas 1.02; br-frankenpandas-cmgnp). The same bits as
+/// [`sqrt_f64_collect`].
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`sqrt_f64_collect`]; the CALLER
+/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+#[inline(never)]
+#[must_use]
+pub fn sqrt_f64_arc(a: &[f64]) -> std::sync::Arc<[f64]> {
+    a.iter().map(|&x| x.sqrt()).collect()
 }
 
 /// The eight `bool`s of every 8-lane compare mask, bit `i` -> lane `i`.
@@ -1110,6 +1112,35 @@ compare_scalar_kernel!(lt_i64_scalar_into, i64, simd_lt, <);
 compare_scalar_kernel!(le_i64_scalar_into, i64, simd_le, <=);
 compare_scalar_kernel!(eq_i64_scalar_into, i64, simd_eq, ==);
 compare_scalar_kernel!(ne_i64_scalar_into, i64, simd_ne, !=);
+
+/// `a[i] <op> s` for every value, collected straight into the `Arc<[bool]>`
+/// an all-valid bool column keeps: `compare_scalar_kernel`'s zeroed buffer
+/// and the column's copy of it were two passes the size of the answer (nx >
+/// 0 a million rows 0.111 ms, pandas 0.108; br-frankenpandas-cmgnp). The
+/// same bools - a comparison is exact; NaN compares false, true under !=.
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
+/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+macro_rules! compare_scalar_arc_kernel {
+    ($name:ident, $op:tt) => {
+        #[doc = concat!(
+            "`a[i] ", stringify!($op),
+            " s` into an `Arc<[bool]>`; see `compare_scalar_arc_kernel`."
+        )]
+        #[inline(never)]
+        #[must_use]
+        pub fn $name(a: &[f64], s: f64) -> std::sync::Arc<[bool]> {
+            a.iter().map(|&v| v $op s).collect()
+        }
+    };
+}
+
+compare_scalar_arc_kernel!(gt_f64_scalar_arc, >);
+compare_scalar_arc_kernel!(ge_f64_scalar_arc, >=);
+compare_scalar_arc_kernel!(lt_f64_scalar_arc, <);
+compare_scalar_arc_kernel!(le_f64_scalar_arc, <=);
+compare_scalar_arc_kernel!(eq_f64_scalar_arc, ==);
+compare_scalar_arc_kernel!(ne_f64_scalar_arc, !=);
 
 /// `out[i] = a[i] <op> b[i]` over two float columns, eight lanes per step -
 /// the pair sibling of `compare_scalar_kernel`: the baseline loop compared
@@ -1781,6 +1812,45 @@ mod tests {
         assert_eq!(got, [false, true]);
     }
 
+    /// br-frankenpandas-cmgnp: each Arc compare is the scalar comparison `v
+    /// <op> s` at every length up to two 8-lane chunks and a tail, against
+    /// NaN, both zeros and infinities. NEGATIVE: NaN compares false (true
+    /// under !=) and -0.0 == 0.0.
+    #[test]
+    fn arc_compares_are_the_scalar_compare_cmgnp() {
+        type FloatKernel = fn(&[f64], f64) -> std::sync::Arc<[bool]>;
+        type Compare = fn(f64, f64) -> bool;
+        let compares: [Compare; 6] = [
+            |x, y| x > y,
+            |x, y| x >= y,
+            |x, y| x < y,
+            |x, y| x <= y,
+            |x, y| x == y,
+            |x, y| x != y,
+        ];
+        let floats: [FloatKernel; 6] = [
+            gt_f64_scalar_arc,
+            ge_f64_scalar_arc,
+            lt_f64_scalar_arc,
+            le_f64_scalar_arc,
+            eq_f64_scalar_arc,
+            ne_f64_scalar_arc,
+        ];
+        let (inf, nan) = (f64::INFINITY, f64::NAN);
+        let values = [0.5, nan, -0.0, 0.0, inf, 2.0, -inf, 3.0, 1.0, 7.5, -1.5];
+        let a: Vec<f64> = (0..21).map(|i| values[i % values.len()]).collect();
+        for s in [0.0, -0.0, 0.5, nan, inf, -inf, 3.0] {
+            for (j, compare) in compares.into_iter().enumerate() {
+                for len in 0..=a.len() {
+                    let want: Vec<bool> = a[..len].iter().map(|&v| compare(v, s)).collect();
+                    assert_eq!(*floats[j](&a[..len], s), *want, "{j} {s} {len}");
+                }
+            }
+        }
+        assert_eq!(*ne_f64_scalar_arc(&[nan, -0.0], nan), [true, true]);
+        assert_eq!(*eq_f64_scalar_arc(&[nan, -0.0], 0.0), [false, true]);
+    }
+
     /// br-frankenpandas-uza04. Same obligation the `div` test above discharges,
     /// for the three siblings: bit-identical values and an identical witness
     /// against the scalar fold, at lengths that straddle the 4-lane chunk so the
@@ -1916,11 +1986,12 @@ mod tests {
         assert!(out.iter().all(|v| *v == f64::INFINITY));
     }
 
-    /// br-frankenpandas-uza04. `sqrt_f64_into` must agree with the SCALAR fold on
-    /// values AND on both witnesses, at lengths straddling the 4-lane chunk.
+    /// br-frankenpandas-uza04. `sqrt_f64_collect` must agree with the SCALAR fold
+    /// on values AND on both witnesses, at lengths straddling the 4-lane chunk;
+    /// `sqrt_f64_arc` holds the same bits (br-frankenpandas-cmgnp).
     ///
     /// THE NaN CASE IS THE WHOLE POINT of this test. `domain_held` is
-    /// `all(x >= 0.0)`, and a natural-looking `simd_lt(zero)` fold gets NaN
+    /// `all(x >= 0.0)`, and a natural-looking bare `x < 0.0` fold gets NaN
     /// BACKWARDS — `NaN < 0.0` is false, so NaN would read as in-domain and
     /// `sqrt(NaN)` would be handed back as a PRESENT value where the caller's
     /// predicate marks it missing. The fixture therefore contains NaN, and a
@@ -1972,8 +2043,9 @@ mod tests {
             for len in [0usize, 1, 3, 4, 5, 7, 8, 9, 16, 17, 1000, 1001] {
                 let a: Vec<f64> = (0..len).map(make).collect();
                 let (want, want_domain, want_finite) = scalar(&a);
-                let mut got = vec![0.0; len];
-                let (got_domain, got_finite) = sqrt_f64_into(&a, &mut got);
+                let (got, got_domain, got_finite) = sqrt_f64_collect(&a);
+                let arc = sqrt_f64_arc(&a);
+                assert_eq!(arc.len(), len, "{name}: arc length");
                 assert_eq!(
                     got_domain, want_domain,
                     "{name}: domain witness at len {len}"
@@ -1988,28 +2060,37 @@ mod tests {
                         want[i].to_bits(),
                         "{name}: value at len {len} index {i}"
                     );
+                    assert_eq!(
+                        arc[i].to_bits(),
+                        want[i].to_bits(),
+                        "{name}: arc value at len {len} index {i}"
+                    );
                 }
             }
         }
 
         // NON-VACUITY: each witness must actually be observed FALSE, or the
         // equality assertions above passed against `true == true` throughout.
-        let mut out = [0.0; 8];
         assert!(
-            !sqrt_f64_into(&[-1.0; 8], &mut out).0,
+            !sqrt_f64_collect(&[-1.0; 8]).1,
             "negative must clear domain"
         );
         assert!(
-            !sqrt_f64_into(&[f64::NAN; 8], &mut out).0,
-            "NaN must clear domain: `!(x >= 0.0)`, NOT `x < 0.0`"
+            !sqrt_f64_collect(&[f64::NAN; 8]).1,
+            "NaN must clear domain: `x.is_nan() | (x < 0.0)`, NOT `x < 0.0`"
         );
         assert!(
-            !sqrt_f64_into(&[f64::INFINITY; 8], &mut out).1,
+            !sqrt_f64_collect(&[f64::INFINITY; 8]).2,
             "sqrt(inf) is inf, which is NOT finite"
         );
-        let both = sqrt_f64_into(&[4.0; 8], &mut out);
-        assert_eq!(both, (true, true), "a clean positive column must set both");
+        let (out, domain, finite) = sqrt_f64_collect(&[4.0; 8]);
+        assert_eq!(
+            (domain, finite),
+            (true, true),
+            "a clean positive column must set both"
+        );
         assert!(out.iter().all(|v| *v == 2.0));
+        assert!(sqrt_f64_arc(&[-1.0, 4.0])[0].is_nan());
     }
 
     #[test]
