@@ -29398,6 +29398,47 @@ def test_index_arrays_like_pandas_bss5q3(case: str) -> None:
     assert run(fpd) == run(pd)
 
 
+def _bss5q3_agg_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "k": [1, 2, 1, 3, 2, 1, 3, 3],
+            "a": [0.5, 1.5, -2.0, 4.0, 0.25, 3.0, -1.0, 2.0],
+            "b": [float("nan"), 2.5, 1.0, float("nan"), float("nan"), -3.5, 0.75, float("nan")],
+            "i": [3, 1, 4, 1, 5, 9, 2, 6],
+        }
+    )
+
+
+_BSS5Q3_AGG_CASES = {
+    "sum / max with NaN": lambda m: _bss5q3_agg_frame(m).groupby("k").agg({"a": "sum", "b": "max"}),
+    "mean / min / count": lambda m: _bss5q3_agg_frame(m).groupby("k").agg({"b": "mean", "a": "min", "i": "count"}),
+    "std / var / median": lambda m: _bss5q3_agg_frame(m).groupby("k").agg({"b": "std", "a": "var", "i": "median"}),
+    "first / last / prod": lambda m: _bss5q3_agg_frame(m).groupby("k").agg({"b": "first", "a": "last", "i": "prod"}),
+    "a group all NaN": lambda m: _bss5q3_agg_frame(m).assign(b=[float("nan"), 1.0] * 4).groupby("k").agg({"b": "max"}),
+    # NEGATIVE: all-valid columns took the fast path already.
+    "all valid (NEGATIVE)": lambda m: _bss5q3_agg_frame(m).groupby("k").agg({"a": "sum", "i": "max"}),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_BSS5Q3_AGG_CASES))
+def test_groupby_agg_dict_with_missing_like_pandas_bss5q3(case: str) -> None:
+    # A dict agg over a float column with missing values takes the typed
+    # reducers (it took the per-group Scalar body: 0.21x pandas;
+    # br-frankenpandas-bss5q.3) - each func skipping the missing values as
+    # pandas, a group of them NaN. NEGATIVE: all-valid columns as before.
+    def run(m: Any) -> Any:
+        result = _BSS5Q3_AGG_CASES[case](m)
+        return (
+            [str(dtype) for dtype in result.dtypes],
+            list(result.columns),
+            list(result.index),
+            [["nan" if v != v else v for v in row] for row in result.values.tolist()],
+        )
+
+    assert run(fpd) == run(pd)
+
+
 def _vug8g_frame(m: Any) -> Any:
     nan = float("nan")
     return m.DataFrame(
