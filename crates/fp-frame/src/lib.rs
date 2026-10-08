@@ -102141,105 +102141,29 @@ impl DataFrame {
     /// Aligns on index (outer join), compares shared columns,
     /// produces a DataFrame of Bool values.
     fn binary_cmp_op(&self, other: &Self, op: ComparisonOp) -> Result<Self, FrameError> {
-        // Typed Float64 fast path (br-frankenpandas-p1725): identical index + same
-        // column order + every column Float64 on both sides => the Outer
-        // alignment is the identity (no row/column reindex, no Scalar
-        // materialization of either operand), so compare each column straight
-        // from the f64 + validity slices. Bit-identical to the general path
-        // below: a pair where EITHER side is missing (validity clear OR a
-        // valid-bit NaN that Scalar::is_missing treats as missing) yields
-        // Null(NullKind::Null); otherwise `l <op> r` over the identical f64s — the
-        // same `to_f64` numeric arm. The Bool column is built the same way
-        // (from_values of the [Bool/Null] vector; from_bool_values when no pair is
-        // missing yields an all-valid Bool that materializes identically).
-        // Identically labelled frames pair their columns by position, so a
-        // repeated column key compares its own columns (i17d4).
-        let same_labels = self.index == other.index && self.column_order == other.column_order;
-        if same_labels
-            && self.index.is_unique()
-            && (0..self.num_columns()).all(|pos| {
-                self.column_at(pos)
-                    .is_some_and(|c| matches!(c.dtype(), DType::Float64 | DType::Int64))
-                    && other
-                        .column_at(pos)
-                        .is_some_and(|c| matches!(c.dtype(), DType::Float64 | DType::Int64))
-            })
-        {
-            // Column-parallel (br-frankenpandas-cmp-par): each column's typed
-            // compare is independent, so spread them across par_map_columns scope
-            // workers. The closure returns None when a column can't take the typed
-            // path (length mismatch or a non-contiguous Float64/Int64 backing);
-            // if ANY column bails the whole op falls through to the general path
-            // below — exactly the old `typed_ok = false` semantics, just computed
-            // in parallel. Bit-identical: identical per-column arms reassembled in
-            // column_order.
-            let computed: Vec<Option<Column>> =
-                self.par_map_column_positions_min(16_384, |pos| {
-                    let lc = self.column_at(pos).expect("column in bounds");
-                    let rc = other.column_at(pos).expect("column in bounds");
-                    if let (Some((ld, lv)), Some((rd, rv))) = (
-                        lc.as_f64_slice_with_validity(),
-                        rc.as_f64_slice_with_validity(),
-                    ) {
-                        if ld.len() != rd.len() {
-                            return Ok(None);
-                        }
-                        let n = ld.len();
-                        let mut bools = vec![false; n];
-                        for i in 0..n {
-                            let lp = lv.get(i) && !ld[i].is_nan();
-                            let rp = rv.get(i) && !rd[i].is_nan();
-                            bools[i] = if lp && rp {
-                                match op {
-                                    ComparisonOp::Eq => ld[i] == rd[i],
-                                    ComparisonOp::Ne => ld[i] != rd[i],
-                                    ComparisonOp::Gt => ld[i] > rd[i],
-                                    ComparisonOp::Ge => ld[i] >= rd[i],
-                                    ComparisonOp::Lt => ld[i] < rd[i],
-                                    ComparisonOp::Le => ld[i] <= rd[i],
-                                }
-                            } else {
-                                // numpy Float64/Int64: a missing operand compares
-                                // False, True under != (br-frankenpandas-zwfz3; it
-                                // was carried as missing).
-                                op == ComparisonOp::Ne
-                            };
-                        }
-                        Ok(Some(Column::from_bool_values(bools)))
-                    } else if let (Some(ld), Some(rd)) = (lc.as_i64_slice(), rc.as_i64_slice()) {
-                        // All-valid Int64 on both sides: the general path compares
-                        // via to_f64, so compare each i64 cast to f64 —
-                        // bit-identical, including the precision loss above 2^53.
-                        // All-valid means no missing pair.
-                        if ld.len() != rd.len() {
-                            return Ok(None);
-                        }
-                        let n = ld.len();
-                        let mut bools = vec![false; n];
-                        for i in 0..n {
-                            let l = ld[i] as f64;
-                            let r = rd[i] as f64;
-                            bools[i] = match op {
-                                ComparisonOp::Eq => l == r,
-                                ComparisonOp::Ne => l != r,
-                                ComparisonOp::Gt => l > r,
-                                ComparisonOp::Ge => l >= r,
-                                ComparisonOp::Lt => l < r,
-                                ComparisonOp::Le => l <= r,
-                            };
-                        }
-                        Ok(Some(Column::from_bool_values(bools)))
-                    } else {
-                        Ok(None)
-                    }
-                })?;
-            if let Some(columns) = computed.into_iter().collect::<Option<Vec<_>>>() {
-                return Ok(self.with_columns_at_positions(columns));
-            }
-        }
-
-        // The general per-pair compare.
+        // Each pair of columns compares as two Series' columns do
+        // (Column::binary_comparison: typed, an int64 pair exactly, a missing
+        // value False - True under != - and pandas' boolean beside a masked
+        // column): the frame compared every pair through f64, so 2**53 equalled
+        // 2**53 + 1, a text column was ordered against numbers by its printed
+        // text, and a masked pair answered object; its typed loop read each
+        // mask bit by bit (df == df 0.07x pandas; br-frankenpandas-u3a2c). A
+        // categorical column keeps the per-pair compare below.
         let compare = |lc: &Column, rc: &Column| -> Result<Column, FrameError> {
+            if lc.dtype() != DType::Categorical && rc.dtype() != DType::Categorical {
+                return Ok(lc.binary_comparison(rc, op)?);
+            }
+            // An unordered categorical has no order, as two Series' (it
+            // answered by its values).
+            if is_ordering_comparison(op)
+                && [lc, rc]
+                    .iter()
+                    .any(|column| column.categorical().is_some_and(|meta| !meta.ordered))
+            {
+                return Err(FrameError::CompatibilityRejected(
+                    "Unordered Categoricals can only compare equality or not".to_owned(),
+                ));
+            }
             // pd.NA propagates only through the nullable extension dtypes; a
             // numpy-backed missing value compares False, True under !=
             // (br-frankenpandas-zwfz3).
@@ -102285,14 +102209,17 @@ impl DataFrame {
             Ok(Column::from_values(vals)?)
         };
 
-        if same_labels {
-            let columns = (0..self.num_columns())
-                .map(|pos| {
-                    let lc = self.column_at(pos).expect("column in bounds");
-                    let rc = other.column_at(pos).expect("column in bounds");
-                    compare(lc, rc)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+        // Identically labelled frames pair their columns by position, so a
+        // repeated column key compares its own columns (i17d4); the pairs are
+        // independent, spread over scoped workers (br-frankenpandas-cmp-par)
+        // from a million cells - a pair's typed compare is ~25 us per 200k
+        // rows, a scope's threads cost more below that.
+        if self.index == other.index && self.column_order == other.column_order {
+            let columns = self.par_map_indices_min(self.num_columns(), 1 << 20, |pos| {
+                let lc = self.column_at(pos).expect("column in bounds");
+                let rc = other.column_at(pos).expect("column in bounds");
+                compare(lc, rc)
+            })?;
             return Ok(self.with_columns_at_positions(columns));
         }
 
@@ -180851,6 +180778,35 @@ mod tests {
         assert!(assert_series_equal_default(&shared.max().unwrap(), &fresh.max().unwrap()).is_ok());
         assert!(
             assert_series_equal_default(&shared.count().unwrap(), &fresh.count().unwrap()).is_ok()
+        );
+    }
+
+    #[test]
+    fn frame_int_comparisons_are_exact_u3a2c() {
+        // br-frankenpandas-u3a2c: two frames' int64 columns compare as ints
+        // - through f64, 2**53 equalled 2**53 + 1. NEGATIVE: an int beside a
+        // float compares through the float, as numpy.
+        let big = 1_i64 << 53;
+        let frame =
+            |values: Vec<Scalar>| DataFrame::from_dict(&["a"], vec![("a", values)]).unwrap();
+        let left = frame(vec![Scalar::Int64(big), Scalar::Int64(5)]);
+        let right = frame(vec![Scalar::Int64(big + 1), Scalar::Int64(5)]);
+        let answers = |result: DataFrame| result.column("a").unwrap().values().to_vec();
+        assert_eq!(
+            answers(left.eq_df(&right).unwrap()),
+            [Scalar::Bool(false), Scalar::Bool(true)]
+        );
+        assert_eq!(
+            answers(left.lt_df(&right).unwrap()),
+            [Scalar::Bool(true), Scalar::Bool(false)]
+        );
+        let floats = frame(vec![
+            Scalar::Float64(9_007_199_254_740_992.0),
+            Scalar::Float64(5.0),
+        ]);
+        assert_eq!(
+            answers(right.eq_df(&floats).unwrap()),
+            [Scalar::Bool(true), Scalar::Bool(true)]
         );
     }
 

@@ -29734,3 +29734,83 @@ def test_datetime_arrays_index_as_dates_v0p5k(case: str) -> None:
         return type(index).__name__, [str(v) for v in index]
 
     assert run(fpd) == run(pd)
+
+
+_U3A2C_BIG = 2**53
+_U3A2C_CASES = {
+    "ints above 2**53": (
+        lambda m: m.DataFrame({"a": [_U3A2C_BIG, 5, -_U3A2C_BIG], "b": [1, _U3A2C_BIG + 2, 0]}),
+        lambda m: m.DataFrame({"a": [_U3A2C_BIG + 1, 5, -_U3A2C_BIG - 1], "b": [1, _U3A2C_BIG + 3, 0]}),
+    ),
+    "floats with NaN": (
+        lambda m: m.DataFrame({"a": [0.5, float("nan"), 2.0], "b": [float("nan"), float("nan"), -1.0]}),
+        lambda m: m.DataFrame({"a": [0.5, 1.0, float("nan")], "b": [float("nan"), 0.0, -2.0]}),
+    ),
+    "masked Int64": (
+        lambda m: m.DataFrame({"a": m.array([1, None, 3], dtype="Int64")}),
+        lambda m: m.DataFrame({"a": m.array([1, 2, None], dtype="Int64")}),
+    ),
+    "text beside ints": (
+        lambda m: m.DataFrame({"a": ["x", "y", "z"]}),
+        lambda m: m.DataFrame({"a": [1, 2, 3]}),
+    ),
+    # NEGATIVE: an int beside a float compares through the float, as numpy;
+    # categoricals of the same categories keep their compare.
+    "int beside float (NEGATIVE)": (
+        lambda m: m.DataFrame({"a": [_U3A2C_BIG + 1, 5, 7]}),
+        lambda m: m.DataFrame({"a": [float(_U3A2C_BIG), 5.0, 6.5]}),
+    ),
+    "categoricals (NEGATIVE)": (
+        lambda m: m.DataFrame({"a": m.Categorical(["x", "y", "x"], categories=["x", "y"])}),
+        lambda m: m.DataFrame({"a": m.Categorical(["x", "x", "y"], categories=["x", "y"])}),
+    ),
+}
+_U3A2C_OPERATORS = ["__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__", "eq", "ne", "lt", "le", "gt", "ge"]
+# An unordered categorical has no order (pandas' TypeError; it answered by
+# its values); its equality is the NEGATIVE above. Ordered categoricals'
+# order is br-frankenpandas-x6p40.
+_U3A2C_CASE_OPERATORS = {
+    "categoricals (NEGATIVE)": ["__eq__", "__ne__", "eq", "ne"],
+    "unordered categoricals ordered": ["__lt__", "__le__", "__gt__", "__ge__", "lt", "le", "gt", "ge"],
+}
+_U3A2C_CASES["unordered categoricals ordered"] = _U3A2C_CASES["categoricals (NEGATIVE)"]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_U3A2C_CASES))
+def test_frame_comparisons_like_pandas_u3a2c(case: str) -> None:
+    # Two frames compare each pair of columns as two Series do
+    # (br-frankenpandas-u3a2c): an int64 pair exactly (2**53 equalled
+    # 2**53 + 1 through f64), a missing value False (True under !=), a masked
+    # pair pandas' boolean (it was object), text ordered against numbers
+    # pandas' TypeError (it compared the printed text) - under every
+    # operator and its flex method, the flex methods also on frames aligned
+    # in another row order. NEGATIVE: an int beside a float through the
+    # float; categoricals of the same categories as before.
+    def run(m: Any) -> Any:
+        left_of, right_of = _U3A2C_CASES[case]
+        answers = []
+        for shuffled in (False, True):
+            left, right = left_of(m), right_of(m)
+            if shuffled:
+                right = right.iloc[[2, 0, 1]]
+            for name in _U3A2C_CASE_OPERATORS.get(case, _U3A2C_OPERATORS):
+                if shuffled and name.startswith("__"):
+                    continue
+                try:
+                    result = getattr(left, name)(right)
+                except Exception as error:  # noqa: BLE001
+                    answers.append((shuffled, name, type(error).__name__))
+                    continue
+                answers.append(
+                    (
+                        shuffled,
+                        name,
+                        [str(dtype) for dtype in result.dtypes],
+                        [str(v) for v in result.index],
+                        [[str(v) for v in row] for row in result.values.tolist()],
+                    )
+                )
+        return answers
+
+    assert run(fpd) == run(pd)
