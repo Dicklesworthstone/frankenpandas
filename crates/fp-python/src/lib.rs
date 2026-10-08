@@ -37362,7 +37362,18 @@ enum CellSource<'a> {
 impl<'a> CellSource<'a> {
     /// `column`'s cells in numpy's `kind` ("float64" / "int64").
     fn of(column: &'a Column, kind: &str) -> Self {
-        match (kind, column.as_f64_slice(), column.as_i64_slice()) {
+        // A float column whose missing values are exactly its NaNs holds
+        // pandas' float64 array already: its data copies as an all-valid
+        // column's (it went through numpy_bytes, a Scalar per cell made anew
+        // for each selection - df[['a', 'b']].values 0.20x pandas at 1M;
+        // br-frankenpandas-px927).
+        let floats = column.as_f64_slice().or_else(|| {
+            column
+                .as_f64_slice_with_validity()
+                .filter(|_| column.nan_missing_exact())
+                .map(|(data, _)| data)
+        });
+        match (kind, floats, column.as_i64_slice()) {
             ("float64", Some(data), _) => Self::Float(data),
             ("float64", None, Some(data)) => Self::IntAsFloat(data),
             ("int64", _, Some(data)) => Self::Int(data),

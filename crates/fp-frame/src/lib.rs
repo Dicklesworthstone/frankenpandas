@@ -52352,6 +52352,9 @@ impl SeriesGroupBy<'_> {
             let index = Index::new(order).rename_index(idx_name);
             return Series::new(self.series.name(), index, column);
         }
+        if let Some(result) = self.nan_holding_first_last(false) {
+            return result;
+        }
         let (order, order_keys, groups) = self.build_groups();
         let labels: Vec<IndexLabel> = order.to_vec();
         // Typed value column: for an all-valid Float64/Int64 column the first
@@ -52400,6 +52403,54 @@ impl SeriesGroupBy<'_> {
     }
 
     /// Last value of each group.
+    /// first / last of a float column whose missing values are exactly its
+    /// NaNs: each dense group's first (or last) present value in one pass,
+    /// NaN for a group with none, as pandas' group_nth / group_last skip a
+    /// NaN. They went through values(), a Scalar per row: g['b'].first() of
+    /// a column holding NaN 0.45x pandas at 1M (br-frankenpandas-5eklr).
+    fn nan_holding_first_last(&self, last: bool) -> Option<Result<Series, FrameError>> {
+        let column = &self.series.column;
+        let (data, _) = column
+            .as_f64_slice_with_validity()
+            .filter(|_| column.nan_missing_exact())?;
+        let (gids, ngroups) = self.dense_group_ids()?;
+        let order = self.dense_group_labels(&gids, ngroups)?;
+        let mut out = vec![f64::NAN; ngroups];
+        let mut filled = 0_usize;
+        let mut take = |group: usize, value: f64| {
+            if out[group].is_nan() && !value.is_nan() {
+                out[group] = value;
+                filled += 1;
+            }
+            filled == ngroups
+        };
+        if last {
+            for (&group, &value) in gids.iter().zip(data).rev() {
+                if take(group, value) {
+                    break;
+                }
+            }
+        } else {
+            for (&group, &value) in gids.iter().zip(data) {
+                if take(group, value) {
+                    break;
+                }
+            }
+        }
+        let by_name = self.by.name();
+        let idx_name = if by_name.is_empty() {
+            None
+        } else {
+            Some(by_name)
+        };
+        let index = Index::new(order).rename_index(idx_name);
+        Some(Series::new(
+            self.series.name(),
+            index,
+            Column::from_f64_values(out),
+        ))
+    }
+
     pub fn last(&self) -> Result<Series, FrameError> {
         // Dense fast path (mirror of `first`): an all-valid typed value column's
         // last non-missing value of each group is the value at its last-seen row.
@@ -52428,6 +52479,9 @@ impl SeriesGroupBy<'_> {
             };
             let index = Index::new(order).rename_index(idx_name);
             return Series::new(self.series.name(), index, column);
+        }
+        if let Some(result) = self.nan_holding_first_last(true) {
+            return result;
         }
         let (order, order_keys, groups) = self.build_groups();
         let labels: Vec<IndexLabel> = order.to_vec();
@@ -112758,7 +112812,21 @@ impl DataFrameGroupBy<'_> {
             .filter(|c| !self.by.contains(c))
             .cloned()
             .collect();
-        if value_cols.is_empty() || !value_cols.iter().all(|c| !self.df.columns[c].has_nulls()) {
+        // A value column holding NaN as its missing values takes its own first
+        // / last present value per group below (br-frankenpandas-5eklr); any
+        // other column with missing values keeps the generic path.
+        fn nan_floats(column: &Column) -> Option<&[f64]> {
+            column
+                .as_f64_slice_with_validity()
+                .filter(|_| column.nan_missing_exact())
+                .map(|(data, _)| data)
+        }
+        if value_cols.is_empty()
+            || !value_cols.iter().all(|c| {
+                let column = &self.df.columns[c];
+                !column.has_nulls() || nan_floats(column).is_some()
+            })
+        {
             return Ok(None);
         }
         // Single-key dense grouping: bounded-Int64 direct-address, else contiguous-
@@ -112820,10 +112888,26 @@ impl DataFrameGroupBy<'_> {
         let mut result_cols = BTreeMap::new();
         let mut col_order = Vec::with_capacity(value_cols.len());
         for col_name in &value_cols {
-            result_cols.insert(
-                col_name.clone(),
-                self.df.columns[col_name].take_positions(&positions),
-            );
+            let column = &self.df.columns[col_name];
+            let taken = match nan_floats(column).filter(|_| column.has_nulls()) {
+                Some(data) => {
+                    let mut present = vec![f64::NAN; ng];
+                    let mut fill = |row: usize| {
+                        let (group, value) = (gid_per_row[row], data[row]);
+                        if present[group].is_nan() && !value.is_nan() {
+                            present[group] = value;
+                        }
+                    };
+                    if want_first {
+                        (0..data.len()).for_each(&mut fill);
+                    } else {
+                        (0..data.len()).rev().for_each(&mut fill);
+                    }
+                    Column::from_f64_values(order.iter().map(|&g| present[g]).collect())
+                }
+                None => column.take_positions(&positions),
+            };
+            result_cols.insert(col_name.clone(), taken);
             col_order.push(col_name.clone());
         }
         Ok(Some(DataFrame::new_with_axes(
@@ -182344,6 +182428,71 @@ mod tests {
             .map(shape)
             .collect();
         assert_eq!(got, brute(&[1.0, nan, 3.0, nan], 3, 1, false, true));
+    }
+
+    #[test]
+    fn groupby_first_last_nan_holding_5eklr() {
+        // br-frankenpandas-5eklr: first / last of a float column whose missing
+        // values are its NaNs take each group's first / last present value
+        // in one pass - a group of NaNs only is NaN - for a Series and a
+        // frame's value columns. NEGATIVE: an all-valid column beside it
+        // keeps its first / last row's value.
+        let nan = f64::NAN;
+        let index = Index::from_range(0, 6, 1);
+        let keys = Series::new(
+            "k",
+            index.clone(),
+            Column::from_i64_values(vec![1, 1, 1, 2, 2, 3]),
+        )
+        .unwrap();
+        let vals = Series::new(
+            "v",
+            index.clone(),
+            Column::from_f64_values(vec![nan, 1.0, 2.0, nan, nan, 5.0]),
+        )
+        .unwrap();
+        assert!(vals.column().nan_missing_exact());
+        let floats = |column: &Column| -> Vec<Option<f64>> {
+            column
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Float64(x) if !x.is_nan() => Some(*x),
+                    _ => None,
+                })
+                .collect()
+        };
+        let grouped = vals.groupby(&keys).unwrap();
+        assert_eq!(
+            floats(grouped.first().unwrap().column()),
+            [Some(1.0), None, Some(5.0)]
+        );
+        assert_eq!(
+            floats(grouped.last().unwrap().column()),
+            [Some(2.0), None, Some(5.0)]
+        );
+        let plain = Column::from_f64_values(vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0]);
+        let frame =
+            DataFrame::from_series(vec![keys, vals, Series::new("a", index, plain).unwrap()])
+                .unwrap();
+        let firsts = frame.groupby(&["k"]).unwrap().first().unwrap();
+        assert_eq!(
+            floats(firsts.column("v").unwrap()),
+            [Some(1.0), None, Some(5.0)]
+        );
+        assert_eq!(
+            floats(firsts.column("a").unwrap()),
+            [Some(7.0), Some(10.0), Some(12.0)]
+        );
+        let lasts = frame.groupby(&["k"]).unwrap().last().unwrap();
+        assert_eq!(
+            floats(lasts.column("v").unwrap()),
+            [Some(2.0), None, Some(5.0)]
+        );
+        assert_eq!(
+            floats(lasts.column("a").unwrap()),
+            [Some(9.0), Some(11.0), Some(12.0)]
+        );
     }
 
     #[test]

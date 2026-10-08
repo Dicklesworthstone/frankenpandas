@@ -30251,6 +30251,89 @@ def test_crosstab_counts_like_pandas_fxk1a(case: str) -> None:
     assert run(fpd) == run(pd)
 
 
+def _5eklr_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "k": np.array([3, 1, 3, 2, 1, 3, 2, 1]),
+            "t": np.array(["x", "y", "x", "z", "y", "x", "z", "y"]),
+            "b": np.array([np.nan, 1.5, 2.5, np.nan, np.nan, 4.0, np.nan, 0.5]),
+            "a": np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]),
+            "i": np.array([1, 2, 3, 4, 5, 6, 7, 8]),
+        }
+    )
+
+
+_5EKLR_CASES = {
+    "Series first, NaN column": lambda m: _5eklr_frame(m).groupby("k")["b"].first(),
+    "Series last, NaN column": lambda m: _5eklr_frame(m).groupby("k")["b"].last(),
+    "Series first, text key": lambda m: _5eklr_frame(m).groupby("t")["b"].first(),
+    "frame first": lambda m: _5eklr_frame(m).groupby("k").first(),
+    "frame last": lambda m: _5eklr_frame(m).groupby("k").last(),
+    "frame last, two keys": lambda m: _5eklr_frame(m)[["k", "i", "b"]].assign(i=lambda f: f["i"] % 2).groupby(["k", "i"]).last(),
+    # NEGATIVE: an all-valid column answers its first / last row's value, as before.
+    "Series first, all valid (NEGATIVE)": lambda m: _5eklr_frame(m).groupby("k")["a"].first(),
+    "Series last, all valid (NEGATIVE)": lambda m: _5eklr_frame(m).groupby("k")["a"].last(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_5EKLR_CASES))
+def test_groupby_first_last_with_nan_like_pandas_5eklr(case: str) -> None:
+    # groupby first / last of a float column holding NaN take each group's
+    # first / last present value in one pass, NaN for a group with none
+    # (br-frankenpandas-5eklr: a per-group Scalar find, 0.31x-0.45x pandas at
+    # 1M): values (floats as float.hex, NaN as None), labels and dtypes.
+    def run(m: Any) -> Any:
+        out = _5EKLR_CASES[case](m)
+        frame = out.to_frame() if hasattr(out, "to_frame") and not hasattr(out, "columns") else out
+        cells = {
+            str(name): [None if x != x else (float(x).hex() if isinstance(x, float) else x) for x in frame[name].tolist()]
+            for name in frame.columns
+        }
+        return (repr(list(frame.index)), [str(d) for d in frame.dtypes], cells)
+
+    assert run(fpd) == run(pd)
+
+
+def _px927_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "a": np.array([0.5, 1.5, -2.0, 3.25]),
+            "b": np.array([1.0, np.nan, np.nan, 4.0]),
+            "c": np.array([np.nan, 2.0, 3.0, np.nan]),
+            "k": np.array([1, 2, 3, 4]),
+            "t": np.array([True, False, True, True]),
+        }
+    )
+
+
+_PX927_CASES = {
+    "two floats, one holding NaN": lambda m: _px927_frame(m)[["a", "b"]].values,
+    "floats holding NaN to_numpy": lambda m: _px927_frame(m)[["b", "c"]].to_numpy(),
+    "NaN-holding float beside an int": lambda m: _px927_frame(m)[["b", "k"]].values,
+    "one NaN-holding column": lambda m: _px927_frame(m)[["c"]].values,
+    # NEGATIVE: all-valid floats, ints and bools copy as before.
+    "all-valid float (NEGATIVE)": lambda m: _px927_frame(m)[["a"]].values,
+    "ints (NEGATIVE)": lambda m: _px927_frame(m)[["k", "k"]].values,
+    "bools (NEGATIVE)": lambda m: _px927_frame(m)[["t"]].values,
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_PX927_CASES))
+def test_frame_values_with_nan_like_pandas_px927(case: str) -> None:
+    # A float column holding NaN as its missing values copies its data into
+    # the frame's array, as an all-valid one (br-frankenpandas-px927: a Scalar
+    # per cell, 0.20x pandas at 1M): shape, dtype, F-contiguity and the
+    # values (floats as float.hex, NaN as None) vs pandas.
+    def run(m: Any) -> Any:
+        array = _PX927_CASES[case](m)
+        cells = [[None if x != x else (float(x).hex() if isinstance(x, float) else x) for x in row] for row in array.tolist()]
+        return (array.shape, str(array.dtype), bool(array.flags.f_contiguous), cells)
+
+    assert run(fpd) == run(pd)
+
+
 _IOV9I_CASES = {
     "int keys on different indexes": lambda m: m.crosstab(m.Series([1, 2, 1], index=[0, 1, 2]), m.Series([3, 3, 4], index=[1, 2, 3])),
     "text keys on shifted indexes": lambda m: m.crosstab(m.Series(["a", "b", "a", "b"]), m.Series(["x", "y", "x"], index=[2, 3, 4])),
