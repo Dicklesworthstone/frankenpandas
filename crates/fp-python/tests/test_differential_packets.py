@@ -29396,3 +29396,89 @@ def test_index_arrays_like_pandas_bss5q3(case: str) -> None:
         return str(array.dtype), values
 
     assert run(fpd) == run(pd)
+
+
+def _vug8g_frame(m: Any) -> Any:
+    nan = float("nan")
+    return m.DataFrame(
+        {
+            "k": [3, 1, 2, 3, 1, 2, 2, 3, 1, 1, 2, 3],
+            "k2": [1, 1, 2, 2, 3, 3, 1, 1, 2, 2, 3, 3],
+            "t": ["x", "y", "x", "z", "y", "x", "z", "z", "y", "x", "x", "y"],
+            "kn": [1.0, nan, 2.0, 1.0, nan, 2.0, 3.0, 1.0, 2.0, nan, 3.0, 1.0],
+            "a": [0.5, 1.5, -2.0, 4.0, 0.25, 3.0, -1.0, 2.0, 7.5, -0.5, 1.25, 6.0],
+            "b": [nan, 2.5, 1.0, nan, nan, -3.5, 0.75, nan, 4.0, 5.0, nan, -1.0],
+        }
+    )
+
+
+def _vug8g_selections(g: Any) -> list:
+    return [
+        g["a"].sum(),
+        g["b"].max(),
+        g["b"].mean(),
+        g["a"].cumsum(),
+        g["b"].count(),
+        g["a"].nunique(),
+        g["b"].first(),
+        g["a"].size(),
+        g["b"].cummax(),
+        g["a"].count(),
+        g["kn"].count(),
+        g["t"].count(),
+    ]
+
+
+def _vug8g_replaced_keys(m: Any) -> list:
+    df = _vug8g_frame(m)
+    g = df.groupby("k")
+    before = g["a"].sum()
+    df["k"] = df["k2"]
+    return [before, g["a"].sum(), g["b"].max(), df.groupby("k")["a"].sum()]
+
+
+def _vug8g_two_keys(m: Any) -> list:
+    df = _vug8g_frame(m)
+    g1, g2 = df.groupby("k"), df.groupby("k2")
+    return [g1["a"].sum(), g2["a"].sum(), g1["b"].max(), g2["b"].max(), g1["a"].cumsum(), g2["a"].cumsum()]
+
+
+def _vug8g_series_groupby(m: Any) -> list:
+    df = _vug8g_frame(m)
+    g = df["a"].groupby(df["k"])
+    return [g.sum(), g.max(), g.cumsum(), g.nunique(), g.size()]
+
+
+_VUG8G_CASES = {
+    "int key, every selection": lambda m: _vug8g_selections(_vug8g_frame(m).groupby("k")),
+    "text key, every selection": lambda m: _vug8g_selections(_vug8g_frame(m).groupby("t")),
+    "unsorted int key": lambda m: _vug8g_selections(_vug8g_frame(m).groupby("k", sort=False)),
+    "a Series' own groupby": _vug8g_series_groupby,
+    # NEGATIVE: ids shared by length or by frame would answer these with
+    # another key's groups.
+    "two keys of one frame interleaved (NEGATIVE)": _vug8g_two_keys,
+    "keys replaced after the groupby (NEGATIVE)": _vug8g_replaced_keys,
+    "several keys (NEGATIVE)": lambda m: _vug8g_selections(_vug8g_frame(m).groupby(["k", "t"])),
+    "dropna=False key (NEGATIVE)": lambda m: _vug8g_selections(_vug8g_frame(m).groupby("kn", dropna=False)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VUG8G_CASES))
+def test_groupby_selections_share_group_ids_vug8g(case: str) -> None:
+    # A groupby's column selections reuse one factorize of its key
+    # (br-frankenpandas-vug8g; each selection refactorized it, a third of
+    # g['b'].max()): every reduction, scan and count as pandas. NEGATIVE:
+    # two keys of one frame interleaved, keys replaced after the groupby
+    # (pandas keeps the old ones; a new groupby takes the new), several
+    # keys and a dropna=False key.
+    def plain(values: Any) -> list:
+        return ["nan" if v != v else v for v in values]
+
+    def run(m: Any) -> Any:
+        return [
+            (str(result.dtype), plain(result.index), plain(result.tolist()))
+            for result in _VUG8G_CASES[case](m)
+        ]
+
+    assert run(fpd) == run(pd)
