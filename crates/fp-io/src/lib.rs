@@ -29689,7 +29689,9 @@ mod tests {
             ],
         };
 
-        let chunks = read_sql_chunks_with_options(
+        // Stub-backend test, compiled without `sql-sqlite`: the read_sql_* imports
+        // above are SQLite-gated, so call the function by path (issue #39).
+        let chunks = super::read_sql_chunks_with_options(
             &conn,
             "SELECT id, name FROM paged_source WHERE keep = ? ORDER BY id;",
             &SqlReadOptions {
