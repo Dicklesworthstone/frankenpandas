@@ -30751,35 +30751,11 @@ _LSN8D2_OPS = {
     "Series shift freq": lambda m, i: _lsn8d2_frame(m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").shift(1, freq="D").to_frame()),
     "Series shift -2 hours": lambda m, i: _lsn8d2_index(m.Series(np.arange(len(i), dtype="float64"), index=i).shift(-2, freq="h").index),
 }
-# Set ops and argsort of a datetime index diverge from pandas on these
-# (NaT placed first, difference unsorted and without its freq, union
-# deduplicated): br-frankenpandas-wvpfb, older than this bead.
-_LSN8D2_WVPFB = {
-    ("a date_range", "difference"),
-    ("descending", "difference"),
-    ("unsorted", "difference"),
-    ("holding NaT", "difference"),
-    ("Index(array)", "difference"),
-    ("a Series' index", "difference"),
-    ("holding NaT", "argsort"),
-    ("Index(array)", "argsort"),
-    ("holding NaT", "union"),
-    ("Index(array)", "union"),
-    ("with duplicates", "union"),
-}
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-@pytest.mark.parametrize(
-    ("index", "op"),
-    [
-        pytest.param(index, op, marks=pytest.mark.xfail(strict=True, reason="br-frankenpandas-wvpfb"))
-        if (index, op) in _LSN8D2_WVPFB
-        else (index, op)
-        for index in _LSN8D2_INDEXES
-        for op in _LSN8D2_OPS
-    ],
-)
+@pytest.mark.parametrize("index", list(_LSN8D2_INDEXES))
+@pytest.mark.parametrize("op", list(_LSN8D2_OPS))
 def test_typed_datetime_index_like_pandas_lsn8d(index: str, op: str) -> None:
     # A DatetimeIndex built from an array holds its instants, as do the
     # indexes taken, sliced, sorted, localized or reset from one (it was a
@@ -30844,6 +30820,139 @@ def test_join_on_equal_indexes_like_pandas_lsn8d(rows: str, join: str) -> None:
             (type(out.index).__name__, out.index.name, [str(label) for label in out.index]),
             getattr(out.index, "freqstr", None),
         )
+
+    assert run(fpd) == run(pd)
+
+
+_WVPFB_STAMPS = np.array(
+    ["2020-01-03", "2020-01-05", "2020-01-04", "2020-01-08", "2020-01-01", "NaT"], dtype="datetime64[ns]"
+)
+
+
+def _wvpfb_like(m: Any, index: Any, positions: list[int], name: str) -> Any:
+    out = m.DatetimeIndex(_WVPFB_STAMPS[positions], name=name)
+    return out if index.tz is None else out.tz_localize(index.tz)
+
+
+_WVPFB_SHAPES = {
+    "sorted": lambda m: m.DatetimeIndex(_WVPFB_STAMPS[[4, 0, 2, 1, 3]], name="x"),
+    "unsorted": lambda m: m.DatetimeIndex(_WVPFB_STAMPS[[1, 0, 3, 4, 2]], name="x"),
+    "repeating": lambda m: m.DatetimeIndex(_WVPFB_STAMPS[[0, 0, 1, 3, 1]], name="x"),
+    "holding NaT": lambda m: m.DatetimeIndex(_WVPFB_STAMPS[[1, 5, 0, 3]], name="x"),
+    "empty": lambda m: m.DatetimeIndex(np.array([], dtype="datetime64[ns]"), name="x"),
+    "a date_range": lambda m: m.date_range("2020-01-01", periods=6, freq="D", name="x"),
+    "aware": lambda m: m.DatetimeIndex(_WVPFB_STAMPS[[1, 0, 3]], name="x").tz_localize("UTC"),
+}
+_WVPFB_OTHERS = {
+    "a slice": lambda m, i: i[1:3],
+    "another name, unsorted": lambda m, i: _wvpfb_like(m, i, [3, 0], "y"),
+    "holding NaT": lambda m, i: _wvpfb_like(m, i, [5, 2], "x"),
+    "repeating": lambda m, i: _wvpfb_like(m, i, [0, 0, 2], "x"),
+    "itself": lambda m, i: i,
+    "a copy": lambda m, i: i.copy(),
+    "empty": lambda m, i: i[:0],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("shape", list(_WVPFB_SHAPES))
+@pytest.mark.parametrize("other", list(_WVPFB_OTHERS))
+@pytest.mark.parametrize("op", ["union", "intersection", "difference", "symmetric_difference"])
+@pytest.mark.parametrize("sort", ["default", False, True])
+def test_datetime_index_set_ops_like_pandas_wvpfb(shape: str, other: str, op: str, sort: Any) -> None:
+    # A DatetimeIndex's union / intersection / difference / symmetric_difference
+    # as pandas: the sort keyword, NaT last, repeats kept by count, the shared
+    # name, the freq of a range or a run, the class (intersection, difference
+    # and symmetric_difference took no sort, NaT sorted first, union kept each
+    # instant once, symmetric_difference was a plain Index;
+    # br-frankenpandas-wvpfb): instants, order, name, freq vs pandas.
+    def run(m: Any) -> Any:
+        try:
+            left = _WVPFB_SHAPES[shape](m)
+            right = _WVPFB_OTHERS[other](m, left)
+            method = getattr(left, op)
+            out = method(right) if sort == "default" else method(right, sort=sort)
+        except Exception as error:  # noqa: BLE001
+            return ("raises", type(error).__name__)
+        return (type(out).__name__, str(out.dtype), out.name, [str(v) for v in out], out.freqstr)
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("kind", ["DatetimeIndex", "TimedeltaIndex"])
+@pytest.mark.parametrize("values", [["2", None, "1", "3"], ["2", "1", "3"], [None, None]])
+def test_datetimelike_argsort_puts_nat_last_wvpfb(kind: str, values: list[Any]) -> None:
+    # argsort of instants or durations: NaT last, as pandas (it came first,
+    # the order of its i64::MIN; br-frankenpandas-wvpfb). NEGATIVE: none
+    # missing is the plain order.
+    def run(m: Any) -> Any:
+        if kind == "DatetimeIndex":
+            index = m.DatetimeIndex([None if v is None else f"2020-01-0{v}" for v in values])
+        else:
+            index = m.TimedeltaIndex([None if v is None else f"{v}D" for v in values])
+        return [int(position) for position in index.argsort()]
+
+    assert run(fpd) == run(pd)
+
+
+_FF5IK_INDEXES = {
+    "ints": lambda m, name, n: m.Index([1, 2, 3][-n:], name=name),
+    "text": lambda m, name, n: m.Index(["a", "b", "c"][-n:], name=name),
+    "RangeIndex": lambda m, name, n: m.RangeIndex(4 - n, 4, name=name),
+    "TimedeltaIndex": lambda m, name, n: m.TimedeltaIndex(["1D", "2D", "3D"][-n:], name=name),
+    "PeriodIndex": lambda m, name, n: m.period_range(["2020-01", "2020-02", "2020-03"][-n], periods=n, freq="M", name=name),
+    "DatetimeIndex": lambda m, name, n: m.DatetimeIndex(["2020-01-01", "2020-01-02", "2020-01-03"][-n:], name=name),
+    "CategoricalIndex": lambda m, name, n: m.CategoricalIndex(["a", "b", "c"][-n:], name=name),
+}
+_FF5IK_OTHERS = {
+    "named otherwise": lambda m, kind, i: _FF5IK_INDEXES[kind](m, "y", 2),
+    # NEGATIVE: one name between the two stays.
+    "the same name": lambda m, kind, i: _FF5IK_INDEXES[kind](m, "x", 2),
+    "unnamed": lambda m, kind, i: _FF5IK_INDEXES[kind](m, None, 2),
+    # A list is the Index of it under this one's name (pandas).
+    "a list": lambda m, kind, i: list(_FF5IK_INDEXES[kind](m, None, 2)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("kind", list(_FF5IK_INDEXES))
+@pytest.mark.parametrize("other", list(_FF5IK_OTHERS))
+@pytest.mark.parametrize("op", ["union", "intersection", "difference", "symmetric_difference"])
+def test_set_op_names_like_pandas_ff5ik(kind: str, other: str, op: str) -> None:
+    # A set op's result name, pandas' get_op_result_name: the shared name,
+    # else none - for a difference too (it kept this index's name,
+    # br-frankenpandas-6r1lq); a list operand is an Index under this one's
+    # name, so the result keeps it (union / intersection /
+    # symmetric_difference dropped it; br-frankenpandas-ff5ik): name and
+    # labels vs pandas, or the same exception kind.
+    def run(m: Any) -> Any:
+        left = _FF5IK_INDEXES[kind](m, "x", 3)
+        try:
+            out = getattr(left, op)(_FF5IK_OTHERS[other](m, kind, left))
+        except Exception as error:  # noqa: BLE001
+            return ("raises", type(error).__name__)
+        return (out.name, sorted(str(v) for v in out))
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    ("freq", "values"),
+    [
+        ("M", ["2020-01", None, "2021-03"]),
+        ("D", ["2020-01-01", None, "2021-03-04"]),
+        ("Y", ["2020", None, "2021"]),
+        ("Q", ["2020Q1", None, "2021Q3"]),
+    ],
+)
+def test_period_index_asi8_is_an_int64_array_lsn8d(freq: str, values: list[Any]) -> None:
+    # PeriodIndex.asi8 is a numpy int64 array of its ordinals, NaT as
+    # i64::MIN, as pandas (it was a list; br-frankenpandas-lsn8d).
+    def run(m: Any) -> Any:
+        asi8 = m.PeriodIndex(values, freq=freq).asi8
+        return (type(asi8).__name__, str(asi8.dtype), asi8.tolist())
 
     assert run(fpd) == run(pd)
 

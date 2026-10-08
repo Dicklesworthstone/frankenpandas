@@ -12150,8 +12150,23 @@ pub struct PyIndex {
 /// An index-like argument. pandas' set operations, append, get_indexer and
 /// asof_locs take any array-like (`df.columns.difference(['id'])`); they
 /// raised TypeError unless handed an Index. An Index is taken as is,
-/// anything else through `Index(obj)`.
-pub struct IndexArg(PyIndex);
+/// anything else through `Index(obj)`; the flag says it was an index.
+pub struct IndexArg(PyIndex, bool);
+
+impl IndexArg {
+    /// This operand of a set op as pandas reads it (`_convert_can_do_setop`):
+    /// an index as it is, anything else - a list, an array - the Index of it
+    /// carrying `name`, the other operand's, so the result keeps that name
+    /// (it went unnamed and the result's name was dropped;
+    /// br-frankenpandas-ff5ik).
+    fn named_like(self, name: Option<&LabelName>) -> Self {
+        if self.1 {
+            return self;
+        }
+        let inner = self.0.inner.rename_index(name.cloned());
+        Self(PyIndex { inner }, false)
+    }
+}
 
 /// Whether `obj` is one of the typed index classes - DatetimeIndex,
 /// TimedeltaIndex, PeriodIndex, CategoricalIndex, MultiIndex - which are
@@ -12258,7 +12273,7 @@ impl<'a, 'py> FromPyObject<'a, 'py> for IndexArg {
 
     fn extract(obj: pyo3::Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
         if let Ok(index) = plain_index_ref(&obj) {
-            return Ok(Self(index.clone()));
+            return Ok(Self(index.clone(), true));
         }
         // The typed index classes carry their labels directly.
         let typed = if let Ok(instants) = obj.extract::<PyRef<'_, PyDatetimeIndex>>() {
@@ -12269,15 +12284,20 @@ impl<'a, 'py> FromPyObject<'a, 'py> for IndexArg {
                 .map(|durations| durations.inner.clone().into_index())
         };
         if let Some(inner) = typed {
-            return Ok(Self(PyIndex { inner }));
+            return Ok(Self(PyIndex { inner }, true));
         }
         // A list is the Index pandas' constructor makes of it: numbers
         // beside a missing one float64 ([None, 1] kept None, which a float
         // index's NaN did not match; l5sed).
         let index = PyIndex::new(Some(&obj), None)?;
-        Ok(Self(PyIndex {
-            inner: float_labelled(index.inner),
-        }))
+        // Another typed index (a PeriodIndex, a CategoricalIndex) keeps its
+        // name, which a set op reads (it came unnamed; br-frankenpandas-ff5ik).
+        let typed = typed_index_object(&obj);
+        let mut inner = float_labelled(index.inner);
+        if typed {
+            inner = inner.rename_index(py_axis_name(&obj.getattr("name")?)?);
+        }
+        Ok(Self(PyIndex { inner }, typed))
     }
 }
 
@@ -13412,6 +13432,7 @@ impl PyIndex {
     /// [`index_common_dtype`]).
     #[pyo3(signature = (other, sort=Some(false)))]
     fn intersection(&self, other: IndexArg, sort: Option<bool>) -> Self {
+        let other = other.named_like(self.inner.name());
         // Equal indexes answer this one in its own dtype, as pandas' shortcut
         // does (Index([1, 2]) and Index([1.0, 2.0]) are equal; l5sed).
         let dtype = if self.inner.equals(&other.inner) {
@@ -13429,6 +13450,7 @@ impl PyIndex {
     /// indexes' common dtype (see [`index_common_dtype`]).
     #[pyo3(signature = (other, sort=None))]
     fn union(&self, other: IndexArg, sort: Option<bool>) -> Self {
+        let other = other.named_like(self.inner.name());
         let dtype = index_common_dtype(self.inner.dtype(), other.inner.dtype());
         let result = index_in_dtype(self.inner.union(&other.inner), dtype);
         PyIndex {
@@ -13438,6 +13460,7 @@ impl PyIndex {
 
     #[pyo3(signature = (other, sort=None))]
     fn difference(&self, other: IndexArg, sort: Option<bool>) -> Self {
+        let other = other.named_like(self.inner.name());
         PyIndex {
             inner: setop_sorted(
                 self.inner.difference(&other.inner),
@@ -14042,6 +14065,7 @@ impl PyIndex {
         result_name: Option<&Bound<'_, PyAny>>,
         sort: Option<bool>,
     ) -> PyResult<Self> {
+        let other = other.named_like(self.inner.name());
         let dtype = index_common_dtype(self.inner.dtype(), other.inner.dtype());
         let inner = index_in_dtype(self.inner.symmetric_difference(&other.inner), dtype);
         let inner = setop_sorted(inner, &self.inner, &other.inner, sort);
@@ -14995,6 +15019,23 @@ impl PyDatetimeIndex {
             .unwrap_or(1)
     }
 
+    /// `other` of a set op as a DatetimeIndex: one as it is, an Index of
+    /// stamps under its own name, anything else (a list, an array) the
+    /// DatetimeIndex of it under this index's name, as pandas reads it (a
+    /// list was a TypeError; br-frankenpandas-ff5ik).
+    fn setop_operand(&self, other: &Bound<'_, PyAny>) -> PyResult<DatetimeIndex> {
+        if let Ok(other) = other.extract::<PyRef<'_, PyDatetimeIndex>>() {
+            return Ok(other.inner.clone());
+        }
+        let index = other.is_instance_of::<PyIndex>();
+        let built = Self::new(other.py(), Some(other), None, None, None)?.inner;
+        Ok(if index {
+            built
+        } else {
+            built.rename_index(self.inner.name().cloned())
+        })
+    }
+
     /// The same index (name and time zone kept) over new instants - taken,
     /// sorted, filtered or moved by a duration from this one's.
     fn with_nanos(&self, nanos: Vec<i64>) -> Self {
@@ -15664,26 +15705,37 @@ impl PyDatetimeIndex {
         Ok(self.inner.isin(&nanos).into())
     }
 
-    fn intersection(&self, other: &PyDatetimeIndex) -> Self {
-        PyDatetimeIndex {
-            inner: self.inner.intersection(&other.inner),
-        }
+    /// pandas' `intersection(other, sort=False)` (see
+    /// [`DatetimeIndex::intersection_sorted`]; `sort` was not taken,
+    /// br-frankenpandas-wvpfb).
+    #[pyo3(signature = (other, sort=Some(false)))]
+    fn intersection(&self, other: &Bound<'_, PyAny>, sort: Option<bool>) -> PyResult<Self> {
+        let other = self.setop_operand(other)?;
+        Ok(PyDatetimeIndex {
+            inner: self.inner.intersection_sorted(&other, sort),
+        })
     }
 
     /// pandas' `union(other, sort=None)`: sorted (it kept first-seen
     /// order), `sort=False` first-seen order (see
     /// [`DatetimeIndex::union_sorted`]).
     #[pyo3(signature = (other, sort=None))]
-    fn union(&self, other: &PyDatetimeIndex, sort: Option<bool>) -> Self {
-        PyDatetimeIndex {
-            inner: self.inner.union_sorted(&other.inner, sort),
-        }
+    fn union(&self, other: &Bound<'_, PyAny>, sort: Option<bool>) -> PyResult<Self> {
+        let other = self.setop_operand(other)?;
+        Ok(PyDatetimeIndex {
+            inner: self.inner.union_sorted(&other, sort),
+        })
     }
 
-    fn difference(&self, other: &PyDatetimeIndex) -> Self {
-        PyDatetimeIndex {
-            inner: self.inner.difference(&other.inner),
-        }
+    /// pandas' `difference(other, sort=None)` (see
+    /// [`DatetimeIndex::difference_sorted`]; `sort` was not taken,
+    /// br-frankenpandas-wvpfb).
+    #[pyo3(signature = (other, sort=None))]
+    fn difference(&self, other: &Bound<'_, PyAny>, sort: Option<bool>) -> PyResult<Self> {
+        let other = self.setop_operand(other)?;
+        Ok(PyDatetimeIndex {
+            inner: self.inner.difference_sorted(&other, sort),
+        })
     }
 
     fn round(&self, freq: &str) -> PyResult<Self> {
@@ -16034,10 +16086,32 @@ impl PyDatetimeIndex {
         false
     }
 
-    fn symmetric_difference(&self, other: IndexArg) -> PyIndex {
-        PyIndex {
-            inner: self.inner.as_index().symmetric_difference(&other.inner),
+    /// pandas' `symmetric_difference(other, result_name=None, sort=None)`:
+    /// against a DatetimeIndex its typed set op, a DatetimeIndex (it was a
+    /// plain Index, unsorted; br-frankenpandas-wvpfb), `result_name` naming
+    /// it; any other `other` the generic one.
+    #[pyo3(signature = (other, result_name=None, sort=None))]
+    fn symmetric_difference(
+        &self,
+        py: Python<'_>,
+        other: &Bound<'_, PyAny>,
+        result_name: Option<&Bound<'_, PyAny>>,
+        sort: Option<bool>,
+    ) -> PyResult<Py<PyAny>> {
+        let result_name = result_name.map(py_axis_name).transpose()?.flatten();
+        if let Ok(other) = other.extract::<PyRef<'_, PyDatetimeIndex>>() {
+            let mut inner = self.inner.symmetric_difference_sorted(&other.inner, sort);
+            if let Some(name) = result_name {
+                inner = inner.set_name(name);
+            }
+            return Ok(Py::new(py, Self { inner })?.into_any());
         }
+        let other = other.extract::<IndexArg>()?.named_like(self.inner.name());
+        let mut inner = self.inner.as_index().symmetric_difference(&other.inner);
+        if let Some(name) = result_name {
+            inner = inner.set_name(name);
+        }
+        PyIndex { inner }.into_py_any(py)
     }
 
     /// pandas' `get_loc`: a date string coarser than the index's resolution
@@ -16382,8 +16456,10 @@ impl PyDatetimeIndex {
         )
     }
 
+    /// pandas' `argsort()` of instants or durations: ascending, NaT last
+    /// (it came first, the order of its i64::MIN; br-frankenpandas-wvpfb).
     fn argsort(&self) -> IndexerArray {
-        self.as_py_index().argsort()
+        nargsort(self.inner.as_index(), true, false).into()
     }
 
     /// pandas' `Index.array` (see [`index_array`]; it was a method
@@ -19802,24 +19878,28 @@ impl PyTimedeltaIndex {
     }
 
     fn union(&self, other: IndexArg) -> PyIndex {
+        let other = other.named_like(self.inner.name());
         PyIndex {
             inner: self.inner.as_index().union(&other.inner),
         }
     }
 
     fn intersection(&self, other: IndexArg) -> PyIndex {
+        let other = other.named_like(self.inner.name());
         PyIndex {
             inner: self.inner.as_index().intersection(&other.inner),
         }
     }
 
     fn difference(&self, other: IndexArg) -> PyIndex {
+        let other = other.named_like(self.inner.name());
         PyIndex {
             inner: self.inner.as_index().difference(&other.inner),
         }
     }
 
     fn symmetric_difference(&self, other: IndexArg) -> PyIndex {
+        let other = other.named_like(self.inner.name());
         PyIndex {
             inner: self.inner.as_index().symmetric_difference(&other.inner),
         }
@@ -20126,8 +20206,10 @@ impl PyTimedeltaIndex {
         Ok(Py::new(py, Self { inner: out })?.into_any())
     }
 
+    /// pandas' `argsort()` of instants or durations: ascending, NaT last
+    /// (it came first, the order of its i64::MIN; br-frankenpandas-wvpfb).
     fn argsort(&self) -> IndexerArray {
-        self.as_py_index().argsort()
+        nargsort(self.inner.as_index(), true, false).into()
     }
 
     /// pandas' `Index.array` (see [`index_array`]; it was a method
@@ -20927,6 +21009,14 @@ fn period_field_index<T: Into<i64>>(
 }
 
 impl PyPeriodIndex {
+    /// Its labels as an Index under its name, which a set op reads (the
+    /// conversion dropped it; br-frankenpandas-ff5ik).
+    fn named_index(&self) -> Index {
+        self.inner
+            .to_index()
+            .rename_index(self.inner.name().cloned())
+    }
+
     /// Its labels as a column: a period one (to_series / to_frame).
     fn series_column(&self) -> PyResult<Column> {
         let periods = self.inner.values().iter().copied().map(Scalar::Period);
@@ -21311,26 +21401,30 @@ impl PyPeriodIndex {
     }
 
     pub fn union(&self, other: IndexArg) -> PyIndex {
+        let other = other.named_like(self.inner.name());
         PyIndex {
-            inner: self.inner.to_index().union(&other.inner),
+            inner: self.named_index().union(&other.inner),
         }
     }
 
     pub fn intersection(&self, other: IndexArg) -> PyIndex {
+        let other = other.named_like(self.inner.name());
         PyIndex {
-            inner: self.inner.to_index().intersection(&other.inner),
+            inner: self.named_index().intersection(&other.inner),
         }
     }
 
     pub fn difference(&self, other: IndexArg) -> PyIndex {
+        let other = other.named_like(self.inner.name());
         PyIndex {
-            inner: self.inner.to_index().difference(&other.inner),
+            inner: self.named_index().difference(&other.inner),
         }
     }
 
     pub fn symmetric_difference(&self, other: IndexArg) -> PyIndex {
+        let other = other.named_like(self.inner.name());
         PyIndex {
-            inner: self.inner.to_index().symmetric_difference(&other.inner),
+            inner: self.named_index().symmetric_difference(&other.inner),
         }
     }
 
@@ -22309,6 +22403,14 @@ pub struct PyCategoricalIndex {
 index_subclass_object!(PyCategoricalIndex);
 
 impl PyCategoricalIndex {
+    /// Its labels as an Index under its name, which a set op reads (the
+    /// conversion dropped it; br-frankenpandas-ff5ik).
+    fn named_index(&self) -> Index {
+        self.inner
+            .to_index()
+            .rename_index(self.inner.name().cloned())
+    }
+
     /// Its labels as a column: a categorical one (to_series / to_frame).
     fn series_column(&self) -> PyResult<Column> {
         categorical_index_column(&self.inner)
@@ -22753,26 +22855,30 @@ impl PyCategoricalIndex {
     }
 
     pub fn union(&self, other: IndexArg) -> PyIndex {
+        let other = other.named_like(self.inner.name());
         PyIndex {
-            inner: self.inner.to_index().union(&other.inner),
+            inner: self.named_index().union(&other.inner),
         }
     }
 
     pub fn intersection(&self, other: IndexArg) -> PyIndex {
+        let other = other.named_like(self.inner.name());
         PyIndex {
-            inner: self.inner.to_index().intersection(&other.inner),
+            inner: self.named_index().intersection(&other.inner),
         }
     }
 
     pub fn difference(&self, other: IndexArg) -> PyIndex {
+        let other = other.named_like(self.inner.name());
         PyIndex {
-            inner: self.inner.to_index().difference(&other.inner),
+            inner: self.named_index().difference(&other.inner),
         }
     }
 
     pub fn symmetric_difference(&self, other: IndexArg) -> PyIndex {
+        let other = other.named_like(self.inner.name());
         PyIndex {
-            inner: self.inner.to_index().symmetric_difference(&other.inner),
+            inner: self.named_index().symmetric_difference(&other.inner),
         }
     }
 
@@ -97920,7 +98026,7 @@ mod tests {
         let idx_b = PyIndex {
             inner: Index::new(vec![IndexLabel::Int64(2), IndexLabel::Int64(3)]),
         };
-        let arg = || IndexArg(idx_b.clone());
+        let arg = || IndexArg(idx_b.clone(), true);
         assert_eq!(idx_a.union(arg(), None).len(), 3);
         assert_eq!(idx_a.intersection(arg(), Some(false)).len(), 1);
         assert_eq!(idx_a.difference(arg(), None).len(), 1);

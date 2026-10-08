@@ -5042,8 +5042,16 @@ impl Index {
         result
     }
 
+    /// The labels of this index `other` lacks, named for both - their
+    /// shared name, else none, as pandas names an Index's difference (this
+    /// index's name was kept; br-frankenpandas-ff5ik).
     #[must_use]
     pub fn difference(&self, other: &Self) -> Self {
+        self.difference_labels(other)
+            .rename_index(self.shared_name(other))
+    }
+
+    fn difference_labels(&self, other: &Self) -> Self {
         // Two-pointer merge when both sides are strictly ascending (see
         // intersection / sorted_merge_set_op).
         if let Some(labels) = self.sorted_merge_set_op_i64(other, SetMergeKind::Difference) {
@@ -8862,6 +8870,98 @@ pub fn infer_datetime_freq(wall: &[i64], instants: &[i64]) -> Option<String> {
     .map(|(unit, rule)| freq_with_count(step / unit, rule))
 }
 
+/// Each instant once, in the order first seen (NaT one value among them).
+fn unique_instants(nanos: &[i64]) -> Vec<i64> {
+    let mut seen = FxHashSet::<i64>::default();
+    nanos
+        .iter()
+        .copied()
+        .filter(|at| seen.insert(*at))
+        .collect()
+}
+
+/// Instants in numpy's datetime order, which a set op's sort reads:
+/// ascending, NaT (i64::MIN) last.
+fn sort_instants_nat_last(nanos: &mut [i64]) {
+    nanos.sort_unstable_by_key(|&at| (at == i64::MIN, at));
+}
+
+/// The instants two ascending runs share, each once, ascending (pandas'
+/// inner join of two increasing indexes, then drop_duplicates).
+fn sorted_shared_instants(left: &[i64], right: &[i64]) -> Vec<i64> {
+    let (mut i, mut j) = (0, 0);
+    let mut shared = Vec::new();
+    while i < left.len() && j < right.len() {
+        match left[i].cmp(&right[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                if shared.last() != Some(&left[i]) {
+                    shared.push(left[i]);
+                }
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    shared
+}
+
+/// Two ascending runs merged, an instant repeated on one side as often as
+/// that side repeats it (pandas' outer join of two increasing indexes, at
+/// most one of them repeating).
+fn merged_instants(left: &[i64], right: &[i64]) -> Vec<i64> {
+    let (mut i, mut j) = (0, 0);
+    let mut merged = Vec::with_capacity(left.len() + right.len());
+    while i < left.len() && j < right.len() {
+        match left[i].cmp(&right[j]) {
+            std::cmp::Ordering::Less => {
+                merged.push(left[i]);
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                merged.push(right[j]);
+                j += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                let at = left[i];
+                let left_run = left[i..].iter().take_while(|&&next| next == at).count();
+                let right_run = right[j..].iter().take_while(|&&next| next == at).count();
+                merged.extend(std::iter::repeat_n(at, left_run.max(right_run)));
+                i += left_run;
+                j += right_run;
+            }
+        }
+    }
+    merged.extend_from_slice(&left[i..]);
+    merged.extend_from_slice(&right[j..]);
+    merged
+}
+
+/// Each instant of either side, in the order first seen across `left`
+/// then `right`, repeated as often as the side repeating it more does
+/// (pandas' `union_with_duplicates`).
+fn instants_at_larger_count(left: &[i64], right: &[i64]) -> Vec<i64> {
+    let count = |nanos: &[i64]| {
+        let mut counts = FxHashMap::<i64, usize>::default();
+        for &at in nanos {
+            *counts.entry(at).or_default() += 1;
+        }
+        counts
+    };
+    let (left_counts, right_counts) = (count(left), count(right));
+    let mut out = Vec::with_capacity(left.len().max(right.len()));
+    for at in unique_instants(&[left, right].concat()) {
+        let times = left_counts
+            .get(&at)
+            .copied()
+            .unwrap_or(0)
+            .max(right_counts.get(&at).copied().unwrap_or(0));
+        out.extend(std::iter::repeat_n(at, times));
+    }
+    out
+}
+
 /// Public pandas-style datetime index wrapper.
 ///
 /// The canonical storage remains [`Index`] with `Datetime64` labels so existing
@@ -9640,31 +9740,54 @@ impl DatetimeIndex {
             .max()
     }
 
-    /// Labels present in both indexes, matching
-    /// `pd.DatetimeIndex.intersection(other)`. Preserves first-seen order
-    /// from `self`.
+    /// `pd.DatetimeIndex.intersection(other)` (pandas' default
+    /// `sort=False`); see [`Self::intersection_sorted`].
     #[must_use]
     pub fn intersection(&self, other: &Self) -> Self {
-        let other_set: FxHashSet<i64> = other
-            .index
-            .labels()
-            .iter()
-            .filter_map(|label| match label {
-                IndexLabel::Datetime64(n) => Some(*n),
-                _ => None,
-            })
-            .collect();
-        let mut seen = FxHashSet::<i64>::default();
-        let nanos: Vec<i64> = self
-            .index
-            .labels()
-            .iter()
-            .filter_map(|label| match label {
-                IndexLabel::Datetime64(n) if other_set.contains(n) && seen.insert(*n) => Some(*n),
-                _ => None,
-            })
-            .collect();
-        // pandas infers the freq of the shared labels.
+        self.intersection_sorted(other, Some(false))
+    }
+
+    /// `pd.DatetimeIndex.intersection(other, sort=)`: an equal index is
+    /// this one, its repeats dropped; an empty side the empty result; two
+    /// tick-freq indexes meet as ranges ([`Self::range_set_op`]), two of one
+    /// other freq as the overlap of the one starting first (freq kept); two
+    /// increasing ones in order; any others in this index's order, each
+    /// shared instant once - sorted, NaT last, unless `sort=False`. The
+    /// freq of the last two is inferred (br-frankenpandas-wvpfb).
+    #[must_use]
+    pub fn intersection_sorted(&self, other: &Self, sort: Option<bool>) -> Self {
+        if self.index == other.index {
+            let result = if self.index.has_duplicates() {
+                self.with_instants(unique_instants(&self.asi8()))
+            } else {
+                self.clone()
+            };
+            return result.named_for(self, other).sorted_if(sort == Some(true));
+        }
+        if self.is_empty() || other.is_empty() {
+            let empty = if self.is_empty() { self } else { other };
+            return empty.emptied().named_for(self, other);
+        }
+        if let Some(result) = self.range_set_op(other, false) {
+            return result;
+        }
+        if let Some(result) = self.fast_intersection(other) {
+            return result;
+        }
+        let (left, right) = (self.asi8(), other.asi8());
+        let nanos = if self.is_monotonic_increasing() && other.is_monotonic_increasing() {
+            sorted_shared_instants(&left, &right)
+        } else {
+            let present: FxHashSet<i64> = right.iter().copied().collect();
+            let mut nanos: Vec<i64> = unique_instants(&left)
+                .into_iter()
+                .filter(|at| present.contains(at))
+                .collect();
+            if sort != Some(false) {
+                sort_instants_nat_last(&mut nanos);
+            }
+            nanos
+        };
         let shared = self.with_joined_instants(other, nanos);
         let freq = shared.inferred_freq();
         shared.with_freq(freq)
@@ -9677,116 +9800,261 @@ impl DatetimeIndex {
         self.union_sorted(other, None)
     }
 
-    /// `pd.DatetimeIndex.union(other, sort=)`: the labels of both, each
-    /// once, sorted (pandas' default `sort=None` returns this index itself
-    /// when `other` is empty or equal, and `other` when this one is empty;
-    /// `sort=False` keeps first-seen order - it never sorted, so
-    /// `[03, 01] | [02]` came back `[03, 01, 02]`). The result carries its
-    /// inferred freq, as pandas'.
+    /// `pd.DatetimeIndex.union(other, sort=)`: an empty or equal `other` is
+    /// this index, an empty one `other` (sorted only for `sort=True`); two
+    /// tick-freq indexes join as ranges ([`Self::range_set_op`]); else two
+    /// increasing ones merge in order (a repeat on one side kept), an
+    /// `other` with repeats gives each instant its larger count, any other
+    /// `other` adds the instants this one lacks - then sorted, NaT last,
+    /// unless `sort=False` (the merge is sorted already). The freq is
+    /// inferred. Instants were each kept once and NaT sorted first
+    /// (br-frankenpandas-wvpfb).
     #[must_use]
     pub fn union_sorted(&self, other: &Self, sort: Option<bool>) -> Self {
-        if sort.is_none() {
-            if other.is_empty() || self.index == other.index {
-                return self.clone();
-            }
-            if self.is_empty() {
-                return other.clone();
-            }
+        if other.is_empty() || self.index == other.index {
+            return self
+                .clone()
+                .named_for(self, other)
+                .sorted_if(sort == Some(true));
         }
-        let mut seen = FxHashSet::<i64>::default();
-        let mut nanos: Vec<i64> = Vec::new();
-        for label in self
-            .index
-            .labels()
-            .iter()
-            .chain(other.index.labels().iter())
+        if self.is_empty() {
+            return other
+                .clone()
+                .named_for(self, other)
+                .sorted_if(sort == Some(true));
+        }
+        if let Some(result) = self.range_set_op(other, true) {
+            return result;
+        }
+        let (left, right) = (self.asi8(), other.asi8());
+        let (left_rising, right_rising) = (
+            self.is_monotonic_increasing(),
+            other.is_monotonic_increasing(),
+        );
+        let nanos = if sort != Some(false)
+            && left_rising
+            && right_rising
+            && !(self.index.has_duplicates() && other.index.has_duplicates())
         {
-            if let IndexLabel::Datetime64(n) = label
-                && seen.insert(*n)
-            {
-                nanos.push(*n);
+            merged_instants(&left, &right)
+        } else if other.index.has_duplicates() {
+            let mut nanos = instants_at_larger_count(&left, &right);
+            if sort != Some(false) {
+                sort_instants_nat_last(&mut nanos);
             }
-        }
-        if sort != Some(false) {
-            nanos.sort_unstable();
-        }
+            nanos
+        } else {
+            let present: FxHashSet<i64> = left.iter().copied().collect();
+            let mut nanos = left.clone();
+            nanos.extend(right.iter().copied().filter(|at| !present.contains(at)));
+            if sort != Some(false) && !(left_rising && right_rising) {
+                sort_instants_nat_last(&mut nanos);
+            }
+            nanos
+        };
         let joined = self.with_joined_instants(other, nanos);
         let freq = joined.inferred_freq();
         joined.with_freq(freq)
     }
 
-    /// Labels in self not in other, matching
-    /// `pd.DatetimeIndex.difference(other)`.
+    /// `pd.DatetimeIndex.difference(other)` (pandas' default `sort=None`);
+    /// see [`Self::difference_sorted`].
     #[must_use]
     pub fn difference(&self, other: &Self) -> Self {
-        let other_set: FxHashSet<i64> = other
-            .index
-            .labels()
-            .iter()
-            .filter_map(|label| match label {
-                IndexLabel::Datetime64(n) => Some(*n),
-                _ => None,
-            })
-            .collect();
-        let mut seen = FxHashSet::<i64>::default();
-        let nanos: Vec<i64> = self
-            .index
-            .labels()
-            .iter()
-            .filter_map(|label| match label {
-                IndexLabel::Datetime64(n) if !other_set.contains(n) && seen.insert(*n) => Some(*n),
-                _ => None,
-            })
-            .collect();
-        // Per br-frankenpandas-6r1lq: difference is asymmetric — pandas
-        // always preserves self.name (unlike union/intersection which use
-        // shared_name).
-        let mut out = self.with_instants(nanos);
-        out.index.tz = joined_tz(&self.index, &other.index);
-        out
+        self.difference_sorted(other, None)
     }
 
-    /// Labels in either but not both, matching
-    /// `pd.DatetimeIndex.symmetric_difference(other)`.
+    /// `pd.DatetimeIndex.difference(other, sort=)`: the instants of this
+    /// index `other` lacks, each once, in this order - sorted, NaT last,
+    /// unless `sort=False`. An equal `other` leaves none, an empty one this
+    /// index's instants unsorted (`sort=True` aside). The freq stays when
+    /// the rows kept are one run already in order (pandas takes them as a
+    /// slice). Named for both: a shared name, else none - it kept this
+    /// index's name (br-frankenpandas-wvpfb).
+    #[must_use]
+    pub fn difference_sorted(&self, other: &Self, sort: Option<bool>) -> Self {
+        if self.index == other.index {
+            return self.emptied().named_for(self, other);
+        }
+        let left = self.asi8();
+        if other.is_empty() {
+            let unique = if self.index.has_duplicates() {
+                self.with_instants(unique_instants(&left))
+            } else {
+                self.clone()
+            };
+            return unique.named_for(self, other).sorted_if(sort == Some(true));
+        }
+        let absent: FxHashSet<i64> = other.asi8().into_iter().collect();
+        let kept: Vec<usize> = (0..left.len())
+            .filter(|&position| !absent.contains(&left[position]))
+            .collect();
+        let run = kept.windows(2).all(|pair| pair[1] == pair[0] + 1);
+        let mut nanos = unique_instants(&kept.iter().map(|&at| left[at]).collect::<Vec<_>>());
+        let ordered = nanos.windows(2).all(|pair| pair[0] <= pair[1]);
+        if sort != Some(false) {
+            sort_instants_nat_last(&mut nanos);
+        }
+        let freq = self
+            .freq()
+            .filter(|_| run && (ordered || sort == Some(false)));
+        self.with_instants(nanos)
+            .with_freq(freq)
+            .with_tz_of(joined_tz(&self.index, &other.index))
+            .named_for(self, other)
+    }
+
+    /// `pd.DatetimeIndex.symmetric_difference(other)` (pandas' default
+    /// `sort=None`); see [`Self::symmetric_difference_sorted`].
     #[must_use]
     pub fn symmetric_difference(&self, other: &Self) -> Self {
-        let self_set: FxHashSet<i64> = self
-            .index
-            .labels()
-            .iter()
-            .filter_map(|label| match label {
-                IndexLabel::Datetime64(n) => Some(*n),
-                _ => None,
-            })
-            .collect();
-        let other_set: FxHashSet<i64> = other
-            .index
-            .labels()
-            .iter()
-            .filter_map(|label| match label {
-                IndexLabel::Datetime64(n) => Some(*n),
-                _ => None,
-            })
-            .collect();
-        let mut seen = FxHashSet::<i64>::default();
-        let mut nanos: Vec<i64> = Vec::new();
-        for label in self.index.labels() {
-            if let IndexLabel::Datetime64(n) = label
-                && !other_set.contains(n)
-                && seen.insert(*n)
-            {
-                nanos.push(*n);
+        self.symmetric_difference_sorted(other, None)
+    }
+
+    /// `pd.DatetimeIndex.symmetric_difference(other, sort=)`: the instants
+    /// of this index `other` lacks, then those of `other` this one lacks,
+    /// each once - sorted, NaT last, unless `sort=False`; named for both
+    /// (br-frankenpandas-wvpfb: never sorted). The freq stays as pandas
+    /// appends the two pieces: each a run of its index under this index's
+    /// tick freq, the second starting a tick after the first ends, and the
+    /// sort leaving them in place.
+    #[must_use]
+    pub fn symmetric_difference_sorted(&self, other: &Self, sort: Option<bool>) -> Self {
+        let (left, right) = (self.asi8(), other.asi8());
+        let (left_unique, right_unique) = (unique_instants(&left), unique_instants(&right));
+        let left_set: FxHashSet<i64> = left_unique.iter().copied().collect();
+        let right_set: FxHashSet<i64> = right_unique.iter().copied().collect();
+        let piece = |instants: &[i64], absent: &FxHashSet<i64>| -> (Vec<i64>, bool) {
+            let kept: Vec<usize> = (0..instants.len())
+                .filter(|&at| !absent.contains(&instants[at]))
+                .collect();
+            let run = kept.windows(2).all(|pair| pair[1] == pair[0] + 1);
+            (kept.into_iter().map(|at| instants[at]).collect(), run)
+        };
+        let (mut nanos, left_run) = piece(&left_unique, &right_set);
+        let (right_piece, right_run) = piece(&right_unique, &left_set);
+        // A piece keeps its index's freq when it is a run of that index's
+        // own (unique) instants; the two join under this index's.
+        let left_freq = self
+            .freq()
+            .filter(|_| left_run && left.len() == left_unique.len());
+        let right_freq = other
+            .freq()
+            .filter(|_| right_run && right.len() == right_unique.len());
+        let tick = left_freq
+            .as_deref()
+            .and_then(tick_count)
+            .and_then(|(count, unit)| count.checked_mul(TICK_UNITS[unit].1));
+        let joins = match (nanos.last(), right_piece.first()) {
+            (Some(&end), Some(&start)) => {
+                right_freq == left_freq
+                    && tick.and_then(|tick| end.checked_add(tick)) == Some(start)
             }
+            (None, Some(_)) => right_freq == left_freq,
+            _ => true,
+        };
+        nanos.extend(right_piece);
+        let ordered = nanos.windows(2).all(|pair| pair[0] <= pair[1]);
+        if sort != Some(false) {
+            sort_instants_nat_last(&mut nanos);
         }
-        for label in other.index.labels() {
-            if let IndexLabel::Datetime64(n) = label
-                && !self_set.contains(n)
-                && seen.insert(*n)
-            {
-                nanos.push(*n);
-            }
+        let freq = left_freq.filter(|_| joins && (ordered || sort == Some(false)));
+        self.with_joined_instants(other, nanos).with_freq(freq)
+    }
+
+    /// pandas' set op of two indexes whose freqs are both ticks
+    /// (`_range_union` / `_range_intersect`): each index's instants as the
+    /// range (first, last + tick, tick), the two met as RangeIndexes. The
+    /// freq is the result range's step, this index's when nothing is left,
+    /// none when the result is no range. `None` unless both freqs are ticks
+    /// (br-frankenpandas-wvpfb).
+    fn range_set_op(&self, other: &Self, union: bool) -> Option<Self> {
+        let as_range = |index: &Self| -> Option<RangeIndex> {
+            let (count, unit) = tick_count(&index.freq()?)?;
+            let tick = count.checked_mul(TICK_UNITS[unit].1)?;
+            let first = index.asi8_at(0)?;
+            let last = index.asi8_at(index.len().checked_sub(1)?)?;
+            RangeIndex::new(first, last.checked_add(tick)?, tick).ok()
+        };
+        let (left, right) = (as_range(self)?, as_range(other)?);
+        let met = if union {
+            left.union(&right)
+        } else {
+            left.intersection(&right)
+        };
+        let freq = if met.is_empty() {
+            self.freq()
+        } else {
+            met.labels
+                .int64_affine_range()
+                .map(|range| duration_tick(range.step))
+        };
+        let nanos = met.int64_label_values()?.as_ref().clone();
+        Some(self.with_joined_instants(other, nanos).with_freq(freq))
+    }
+
+    /// pandas' `_fast_intersect`: two increasing indexes of one freq that is
+    /// no tick and counts one - the instants of the one starting first from
+    /// the other's start to the earlier end, a slice keeping the freq.
+    fn fast_intersection(&self, other: &Self) -> Option<Self> {
+        let freq = self.freq()?;
+        if other.freq().as_deref() != Some(freq.as_str())
+            || !self.is_monotonic_increasing()
+            || split_freq_count(&freq)?.0 != 1
+        {
+            return None;
         }
-        self.with_joined_instants(other, nanos)
+        let (left, right) = if self.asi8_at(0)? <= other.asi8_at(0)? {
+            (self, other)
+        } else {
+            (other, self)
+        };
+        let start = right.asi8_at(0)?;
+        let end = left
+            .asi8_at(left.len() - 1)?
+            .min(right.asi8_at(right.len() - 1)?);
+        let instants = left.asi8();
+        let first = instants.partition_point(|&at| at < start);
+        let stop = instants.partition_point(|&at| at <= end).max(first);
+        let index = left.index.slice(first, stop - first);
+        Some(
+            Self { index }
+                .with_tz_of(joined_tz(&self.index, &other.index))
+                .named_for(self, other),
+        )
+    }
+
+    /// This index with none of its instants (pandas' `self[:0]`: freq,
+    /// zone and name kept).
+    fn emptied(&self) -> Self {
+        Self {
+            index: self.index.slice(0, 0),
+        }
+    }
+
+    /// This index named for the set op of `left` and `right`: their shared
+    /// name, else none (pandas' `get_op_result_name`).
+    fn named_for(self, left: &Self, right: &Self) -> Self {
+        let name = left.name().filter(|_| left.name() == right.name()).cloned();
+        self.rename_index(name)
+    }
+
+    /// This index in `tz` (as set ops join two zones).
+    fn with_tz_of(mut self, tz: Option<String>) -> Self {
+        self.index.tz = tz;
+        self
+    }
+
+    /// This index sorted, NaT last, when `sort` - kept as it is (its freq
+    /// too) when already in order (pandas' `sort_values` for a set op's
+    /// `sort=True`).
+    fn sorted_if(self, sort: bool) -> Self {
+        if !sort || self.index.is_monotonic_increasing() {
+            return self;
+        }
+        let mut nanos = self.asi8();
+        sort_instants_nat_last(&mut nanos);
+        self.with_instants(nanos)
     }
 
     /// Sort labels ascending, matching `pd.DatetimeIndex.sort_values()`.
@@ -12223,13 +12491,10 @@ impl TimedeltaIndex {
                 _ => None,
             })
             .collect();
-        let mut out = Self::new(nanos);
-        // Per br-frankenpandas-6r1lq: difference preserves self.name only
-        // (asymmetric op).
-        if let Some(name) = self.name() {
-            out = out.set_name(name);
-        }
-        out
+        // Named for both - a shared name, else none, as pandas (this
+        // index's name was kept; br-frankenpandas-ff5ik).
+        let name = self.name().filter(|_| self.name() == other.name());
+        Self::new(nanos).rename_index(name.cloned())
     }
 
     /// Labels in either but not both, matching
@@ -15996,11 +16261,12 @@ impl RangeIndex {
     }
 
     fn difference_ascending(&self, other: &Self) -> Index {
-        // Per br-frankenpandas-6r1lq: difference preserves self.name (not
-        // shared_name like union/intersection).
+        // Named for both - a shared name, else none, as pandas (this
+        // range's name was kept; br-frankenpandas-ff5ik).
+        let shared_name = self.name().filter(|_| self.name() == other.name());
         if let Some(span) = self.single_difference_span_positions(other) {
             let (first, len) = span.unwrap_or((0, 0));
-            if let Some(index) = self.affine_span_index(first, len, self.name()) {
+            if let Some(index) = self.affine_span_index(first, len, shared_name) {
                 return index;
             }
         }
@@ -16012,7 +16278,7 @@ impl RangeIndex {
             }
         }
         let mut idx = Index::from_i64_values(labels);
-        if let Some(name) = self.name() {
+        if let Some(name) = shared_name {
             idx = idx.set_name(name);
         }
         idx
@@ -17878,18 +18144,17 @@ impl CategoricalIndex {
     /// `pd.CategoricalIndex.difference(other)`.
     #[must_use]
     pub fn difference(&self, other: &Self) -> Self {
-        // Per br-frankenpandas-6r1lq: difference preserves self.name (not
-        // shared_name like set_op_via_string applies for union/intersection).
-        let mut out = self.set_op_via_string(other, |left, right| {
+        // Named for both, as set_op_via_string names it - a shared name,
+        // else none, as pandas (this index's name was kept;
+        // br-frankenpandas-ff5ik).
+        self.set_op_via_string(other, |left, right| {
             let right_set: FxHashSet<&&IndexLabel> = right.iter().collect();
             let mut seen = FxHashSet::<&IndexLabel>::default();
             left.into_iter()
                 .filter(|label| !right_set.contains(label) && seen.insert(label))
                 .cloned()
                 .collect()
-        });
-        out.name = self.name.clone();
-        out
+        })
     }
 
     /// Sort labels ascending, matching `pd.CategoricalIndex.sort_values()`.
@@ -25844,13 +26109,20 @@ mod tests {
     }
 
     #[test]
-    fn difference_preserves_self_name_even_when_other_differs_6r1lq() {
-        // Per br-frankenpandas-6r1lq: difference is asymmetric — pandas
-        // preserves self.name regardless of whether other has the same name.
+    fn difference_is_named_for_both_ff5ik() {
+        // TEST-CHANGE (br-frankenpandas-ff5ik): this test asserted 6r1lq's
+        // "difference keeps self.name"; pandas 2.2.3 names an Index's
+        // difference by the shared name, none when the names differ
+        // (checked live for seven index types).
         let left = Index::from_i64(vec![1, 2, 3]).set_name("left_axis");
         let right = Index::from_i64(vec![2, 3, 4]).set_name("right_axis");
-        let result = left.difference(&right);
-        assert_eq!(result.name().map(|n| n.as_str()), Some("left_axis"));
+        assert_eq!(left.difference(&right).name(), None);
+        // NEGATIVE: a shared name stays.
+        let same = Index::from_i64(vec![2, 3, 4]).set_name("left_axis");
+        assert_eq!(
+            left.difference(&same).name().map(|n| n.as_str()),
+            Some("left_axis")
+        );
     }
 
     #[test]
@@ -37100,10 +37372,9 @@ mod tests {
         assert_eq!(left.intersection(&mismatched).name(), None);
         assert_eq!(left.union(&mismatched).name(), None);
         assert_eq!(left.symmetric_difference(&mismatched).name(), None);
-        assert_eq!(
-            left.difference(&mismatched).name().map(|n| n.as_str()),
-            Some("k")
-        );
+        // TEST-CHANGE (br-frankenpandas-ff5ik): pandas 2.2.3 names a
+        // difference by the shared name too - it asserted "k" (6r1lq).
+        assert_eq!(left.difference(&mismatched).name(), None);
 
         // intersection (self-order) and this single-span difference keep lazy
         // affine backing; union/symmetric materialize because reconciling the
