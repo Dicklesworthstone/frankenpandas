@@ -33179,8 +33179,28 @@ impl Series {
         Ok(SeriesGroupBy {
             series: self,
             by,
-            dense_ids: std::cell::OnceCell::new(),
+            dense_ids: Arc::default(),
         })
+    }
+
+    /// [`Self::groupby`] reusing `layout`, the dense group ids of the groupbys
+    /// already built over this same `by` key (br-frankenpandas-vug8g): a
+    /// layout belongs to ONE key, and the caller keeps it beside that key.
+    /// A layout holding the ids of a key of another length is not used.
+    pub fn groupby_sharing<'a>(
+        &'a self,
+        by: &'a Series,
+        layout: &Arc<DenseGroupLayout>,
+    ) -> Result<SeriesGroupBy<'a>, FrameError> {
+        let mut grouped = self.groupby(by)?;
+        let fits = match layout.ids.get() {
+            Some(Some((ids, _))) => ids.len() == by.len(),
+            Some(None) | None => true,
+        };
+        if fits {
+            grouped.dense_ids = Arc::clone(layout);
+        }
+        Ok(grouped)
     }
 
     /// Access string methods on a Utf8 Series (analogous to `pandas.Series.str`).
@@ -43299,14 +43319,26 @@ impl GroupMoments for fp_types::SkewMoments {
 pub struct SeriesGroupBy<'a> {
     series: &'a Series,
     by: &'a Series,
-    // Lazily-computed dense gid layout, cached for the object's lifetime. The
-    // layout depends ONLY on `by` (fixed for the borrow), so repeated aggregations
-    // on the SAME groupby object (`g = s.groupby(k); g.sum(); g.mean(); ...`) reuse
-    // one factorize instead of re-running the open-addr/dense-histogram pass each
-    // call. Rc gives O(1) hand-out (the gid Vec is n usizes = 16 MB @2M). Matches
-    // pandas, which caches its factorize in the GroupBy object (fresh construction
-    // still pays once, exactly as before). See seriesgroupby-wide-i64-key.
-    dense_ids: std::cell::OnceCell<Option<(std::rc::Rc<[usize]>, usize)>>,
+    // Lazily-computed dense gid layout. The layout depends ONLY on `by` (fixed
+    // for the borrow), so repeated aggregations on the SAME groupby object
+    // (`g = s.groupby(k); g.sum(); g.mean(); ...`) reuse one factorize instead of
+    // re-running the open-addr/dense-histogram pass each call, and
+    // [`Series::groupby_sharing`] hands one layout to every groupby over a key.
+    // Matches pandas, which caches its factorize in the GroupBy object (fresh
+    // construction still pays once). See seriesgroupby-wide-i64-key.
+    dense_ids: Arc<DenseGroupLayout>,
+}
+
+/// The dense group ids of one grouping key - each row's group number in
+/// first-seen order, and the group count - computed by the first groupby
+/// that needs them and shared by every [`SeriesGroupBy`] built over that key
+/// with [`Series::groupby_sharing`]: pandas' groupby object factorizes its
+/// keys once for all its column selections (`g['a'].sum(); g['b'].max()`),
+/// where each selection here refactorized them (br-frankenpandas-vug8g).
+/// The ids are an `Arc` so a hand-out is O(1) (n usizes, 16 MB at 2M rows).
+#[derive(Debug, Default)]
+pub struct DenseGroupLayout {
+    ids: OnceLock<Option<(Arc<[usize]>, usize)>>,
 }
 
 #[cfg(test)]
@@ -45140,18 +45172,19 @@ impl SeriesGroupBy<'_> {
     /// per-gid running scan over rows in order reproduces the generic per-group
     /// scan exactly.
     /// Caching wrapper over [`Self::compute_dense_group_ids`]. Computes the dense
-    /// gid layout once per SeriesGroupBy object and hands out an O(1) `Rc` clone on
-    /// every subsequent call, so a reused groupby (`g.sum(); g.mean(); g.max()`)
+    /// gid layout once per [`DenseGroupLayout`] and hands out an O(1) `Arc` clone
+    /// on every subsequent call, so a reused groupby (`g.sum(); g.mean(); g.max()`)
     /// pays the factorize once — matching pandas' GroupBy-object factorize cache.
     /// The layout depends only on `by` (immutably borrowed, cannot change), so the
-    /// cache is never stale. A fresh groupby still builds its object-local gid
-    /// vector once; for all-valid contiguous Utf8 keys that build may reuse the
-    /// immutable column-level default-factorize witness.
-    fn dense_group_ids(&self) -> Option<(std::rc::Rc<[usize]>, usize)> {
+    /// cache is never stale. A fresh groupby still builds its gid vector once; for
+    /// all-valid contiguous Utf8 keys that build may reuse the immutable
+    /// column-level default-factorize witness.
+    fn dense_group_ids(&self) -> Option<(Arc<[usize]>, usize)> {
         self.dense_ids
+            .ids
             .get_or_init(|| {
                 self.compute_dense_group_ids()
-                    .map(|(v, n)| (std::rc::Rc::from(v), n))
+                    .map(|(v, n)| (Arc::from(v), n))
             })
             .clone()
     }
@@ -45368,13 +45401,22 @@ impl SeriesGroupBy<'_> {
                 }
             }
         } else if let Some(ks) = self.by.column.as_i64_slice() {
+            // Every arm stops at the last group's first row: the rest of
+            // the rows hold no new group (the int arm read all 200k rows of
+            // 100 keys, a tenth of g['b'].max(); br-frankenpandas-vug8g).
             for (i, &g) in gids.iter().enumerate() {
+                if order.len() == ngroups {
+                    break;
+                }
                 if g == order.len() {
                     order.push(IndexLabel::Int64(ks[i]));
                 }
             }
         } else if let Some((bytes, offsets)) = self.by.column.as_utf8_contiguous() {
             for (i, &g) in gids.iter().enumerate() {
+                if order.len() == ngroups {
+                    break;
+                }
                 if g == order.len() {
                     let s = std::str::from_utf8(&bytes[offsets[i]..offsets[i + 1]])
                         .expect("contiguous utf8 buffer is valid by construction");
@@ -45384,6 +45426,9 @@ impl SeriesGroupBy<'_> {
         } else if self.by.column.dtype() == DType::Utf8 && self.by.column.validity().all() {
             let vals = self.by.column.values();
             for (i, &g) in gids.iter().enumerate() {
+                if order.len() == ngroups {
+                    break;
+                }
                 if g == order.len() {
                     match &vals[i] {
                         Scalar::Utf8(s) => order.push(IndexLabel::Utf8(s.as_str().to_owned())),
@@ -45396,6 +45441,9 @@ impl SeriesGroupBy<'_> {
             // and the DataFrameGroupBy temporal path). Pairs with the temporal arm
             // in `compute_dense_group_ids`.
             for (i, &g) in gids.iter().enumerate() {
+                if order.len() == ngroups {
+                    break;
+                }
                 if g == order.len() {
                     order.push(IndexLabel::Datetime64(ks[i]));
                 }
@@ -45403,6 +45451,9 @@ impl SeriesGroupBy<'_> {
         } else {
             let ks = self.by.column.as_timedelta64_slice()?;
             for (i, &g) in gids.iter().enumerate() {
+                if order.len() == ngroups {
+                    break;
+                }
                 if g == order.len() {
                     order.push(IndexLabel::Timedelta64(ks[i]));
                 }
@@ -47097,6 +47148,15 @@ impl SeriesGroupBy<'_> {
 
     /// Count of non-null values in each group.
     pub fn count(&self) -> Result<Series, FrameError> {
+        // An earlier selection of this groupby already factorized its key
+        // (br-frankenpandas-vug8g): a group's count tallies its rows' ids, as
+        // pandas counts from its cached codes (0.21 ms per 200k rows; the
+        // passes below refactorize the key every call, 0.40 ms).
+        if let Some(Some((gids, ngroups))) = self.dense_ids.ids.get()
+            && let Some(counted) = self.count_from_ids(gids, *ngroups)
+        {
+            return counted;
+        }
         // Dense direct-address fast path: a bounded-Int64 key + an all-valid
         // value column (ANY dtype — `!has_any_missing()` ⇒ no excluded rows)
         // means every row counts, so a group's count is simply its size. Assign
@@ -47545,10 +47605,7 @@ impl SeriesGroupBy<'_> {
     /// Per-row group ids (`usize::MAX` for a row whose key the grouping drops),
     /// the group count, and the group labels in first-seen order when
     /// `want_labels`: the dense layout when it applies, else `build_groups`.
-    fn row_group_layout(
-        &self,
-        want_labels: bool,
-    ) -> (std::rc::Rc<[usize]>, usize, Vec<IndexLabel>) {
+    fn row_group_layout(&self, want_labels: bool) -> (Arc<[usize]>, usize, Vec<IndexLabel>) {
         if let Some((gids, ngroups)) = self.dense_group_ids() {
             if !want_labels {
                 return (gids, ngroups, Vec::new());
@@ -47564,7 +47621,7 @@ impl SeriesGroupBy<'_> {
                 gids[row] = g;
             }
         }
-        (std::rc::Rc::from(gids), keys.len(), order)
+        (Arc::from(gids), keys.len(), order)
     }
 
     /// `values` as an Int64 column, or as Bool when the input was Bool and
@@ -47668,6 +47725,39 @@ impl SeriesGroupBy<'_> {
     /// gates miss (caller falls back to `agg_numeric`). Bit-identical: first-seen
     /// gids/labels, value-order fold == the bucket's `iter().fold`, by-name
     /// index, all groups non-empty for an all-valid value column.
+    /// [`Self::count`] over a dense id per row (`gids`, `ngroups` groups in
+    /// first-seen order): None unless the values are all present or a float
+    /// column, whose missing rows - masked, or a NaN held as a value - are
+    /// not counted (br-frankenpandas-vug8g).
+    fn count_from_ids(&self, gids: &[usize], ngroups: usize) -> Option<Result<Series, FrameError>> {
+        let float = self.series.column.as_f64_slice_with_validity();
+        if float.is_none() && self.series.column.has_any_missing() {
+            return None;
+        }
+        let order = self.dense_group_labels(gids, ngroups)?;
+        let mut counts = vec![0_i64; ngroups];
+        if let Some((data, validity)) = float {
+            let words = validity.packed_words_for_scan();
+            for (row, (&g, &value)) in gids.iter().zip(data).enumerate() {
+                let present = (words[row / 64] >> (row % 64)) & 1 == 1 && !value.is_nan();
+                counts[g] += i64::from(present);
+            }
+        } else {
+            for &g in gids {
+                counts[g] += 1;
+            }
+        }
+        let by_name = self.by.name();
+        let idx_name = if by_name.is_empty() {
+            None
+        } else {
+            Some(by_name)
+        };
+        let index = Index::new(order).rename_index(idx_name);
+        let column = Column::from_i64_values_owned(counts);
+        Some(Series::new(self.series.name(), index, column))
+    }
+
     fn dense_group_fold<A: Copy>(
         &self,
         init: A,
@@ -180692,6 +180782,76 @@ mod tests {
             low_bits(&|hasher| scalar_key_allow_missing(&negative_zero).hash(hasher))
         );
         assert!(scalar_key_allow_missing(&zero) == scalar_key_allow_missing(&negative_zero));
+    }
+
+    #[test]
+    fn groupby_sharing_reuses_one_layout_vug8g() {
+        // br-frankenpandas-vug8g: the selections of one groupby share its
+        // key's dense group ids - the first fills the layout, the next reads
+        // it - and a count over the shared ids leaves a missing value out
+        // as a fresh groupby does. NEGATIVE: a layout filled by a key of
+        // another length is not used.
+        use crate::testing::assert_series_equal_default;
+        let key = Series::from_values(
+            "k",
+            (0..6).map(IndexLabel::Int64).collect(),
+            [3, 1, 3, 2, 1, 3].map(Scalar::Int64).to_vec(),
+        )
+        .unwrap();
+        let values = Series::from_values(
+            "v",
+            (0..6).map(IndexLabel::Int64).collect(),
+            vec![
+                Scalar::Float64(1.5),
+                Scalar::Float64(f64::NAN),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(-2.0),
+                Scalar::Float64(4.0),
+                Scalar::Float64(0.5),
+            ],
+        )
+        .unwrap();
+        let layout = std::sync::Arc::default();
+        let largest = values
+            .groupby_sharing(&key, &layout)
+            .unwrap()
+            .max()
+            .unwrap();
+        assert!(layout.ids.get().is_some_and(Option::is_some));
+        let counted = values
+            .groupby_sharing(&key, &layout)
+            .unwrap()
+            .count()
+            .unwrap();
+        let fresh = values.groupby(&key).unwrap().count().unwrap();
+        assert!(assert_series_equal_default(&counted, &fresh).is_ok());
+        assert_eq!(
+            counted.column().values(),
+            &[Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(1)]
+        );
+        assert!(
+            assert_series_equal_default(&largest, &values.groupby(&key).unwrap().max().unwrap())
+                .is_ok()
+        );
+
+        let other_key = Series::from_values(
+            "k",
+            (0..4).map(IndexLabel::Int64).collect(),
+            [7, 7, 8, 9].map(Scalar::Int64).to_vec(),
+        )
+        .unwrap();
+        let other = Series::from_values(
+            "v",
+            (0..4).map(IndexLabel::Int64).collect(),
+            [1.0, 2.0, 3.0, 4.0].map(Scalar::Float64).to_vec(),
+        )
+        .unwrap();
+        let shared = other.groupby_sharing(&other_key, &layout).unwrap();
+        let fresh = other.groupby(&other_key).unwrap();
+        assert!(assert_series_equal_default(&shared.max().unwrap(), &fresh.max().unwrap()).is_ok());
+        assert!(
+            assert_series_equal_default(&shared.count().unwrap(), &fresh.count().unwrap()).is_ok()
+        );
     }
 
     #[test]
