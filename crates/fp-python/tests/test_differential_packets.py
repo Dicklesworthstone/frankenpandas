@@ -29523,3 +29523,125 @@ def test_groupby_selections_share_group_ids_vug8g(case: str) -> None:
         ]
 
     assert run(fpd) == run(pd)
+
+
+_1F4YB_COLUMNS = {
+    "b": ("bool", [True, False]),
+    "i": ("int64", [3, -1]),
+    "u": ("uint8", [2, 7]),
+    "f": ("float64", [0.5, float("nan")]),
+    "g": ("float32", [1.5, -2.0]),
+    "o": ("object", ["x", 1]),
+    "d": ("datetime64[ns]", ["2020-01-01", "2021-06-30"]),
+    "z": ("datetime64[ns, UTC]", ["2020-01-01", "2021-06-30"]),
+    "t": ("timedelta64[ns]", ["1D", "2h"]),
+}
+_1F4YB_FRAMES = ["b", "i", "u", "g", "bi", "if", "gi", "oi", "o", "d", "z", "t", "df", "dz", ""]
+_1F4YB_OPS = [
+    ("sum", {}),
+    ("sum", {"min_count": 1}),
+    ("prod", {}),
+    ("min", {}),
+    ("max", {}),
+    ("mean", {}),
+    ("median", {}),
+    ("std", {}),
+    ("var", {"ddof": 0}),
+    ("sem", {}),
+    ("skew", {}),
+    ("kurt", {}),
+    ("mean", {"skipna": False}),
+    ("sum", {"numeric_only": True}),
+    ("max", {"numeric_only": True}),
+]
+
+
+def _1f4yb_frame(m: Any, columns: str, rows: bool) -> Any:
+    index = m.Index([10, 20] if rows else [], dtype="int64")
+    return m.DataFrame(
+        {
+            name: m.Series(_1F4YB_COLUMNS[name][1] if rows else [], dtype=_1F4YB_COLUMNS[name][0], index=index)
+            for name in columns
+        },
+        index=index,
+    )
+
+
+def _1f4yb_answers(m: Any, frame: Any, axis: int, ops: list) -> list:
+    answers = []
+    for op, kwargs in ops:
+        try:
+            result = getattr(frame, op)(axis=axis, **kwargs)
+        except Exception as error:  # noqa: BLE001
+            answers.append((op, kwargs, type(error).__name__, str(error)))
+            continue
+        answers.append(
+            (op, kwargs, str(result.dtype), [str(v) for v in result.index], [str(v) for v in result.tolist()])
+        )
+    return answers
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("axis", [0, 1])
+@pytest.mark.parametrize("columns", _1F4YB_FRAMES)
+def test_rowless_frame_reductions_like_pandas_1f4yb(columns: str, axis: int) -> None:
+    # A frame without rows reduces as pandas' blocks reduce an empty array
+    # (br-frankenpandas-1f4yb): a number's sum its identity (int64, uint64
+    # unsigned, float32 a float32's), NaN with a min_count, every other op
+    # NaN float64 (a float32's skew / kurt float32); an object column's
+    # identity or NaN, object; a date's min / mean NaT of its dtype, its std
+    # a NaT duration, its sum pandas' TypeError; the columns' common dtype
+    # over the columns, and over the rows that dtype emptied. An int's min
+    # was int64, a float's std object, a bool beside an int's sum object,
+    # mean(skipna=False) dropped the columns. NEGATIVE: the same frames with
+    # rows (dates and durations aside, br-frankenpandas-4ckef).
+    assert _1f4yb_answers(fpd, _1f4yb_frame(fpd, columns, False), axis, _1F4YB_OPS) == _1f4yb_answers(
+        pd, _1f4yb_frame(pd, columns, False), axis, _1F4YB_OPS
+    )
+
+
+_1F4YB_ROWS_CASES = {
+    "int min": ("i", 0, [("min", {}), ("max", {})]),
+    "int + float std": ("if", 0, [("std", {}), ("var", {"ddof": 0}), ("sem", {})]),
+    "bool + int sum over rows": ("bi", 1, [("sum", {})]),
+    "object beside int count": ("oi", 0, [("count", {})]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_1F4YB_ROWS_CASES))
+def test_frame_reductions_with_rows_unchanged_1f4yb(case: str) -> None:
+    # NEGATIVE of br-frankenpandas-1f4yb: frames with rows keep their own
+    # answers - an int's min int64, a bool beside an int object over rows.
+    columns, axis, ops = _1F4YB_ROWS_CASES[case]
+    assert _1f4yb_answers(fpd, _1f4yb_frame(fpd, columns, True), axis, ops) == _1f4yb_answers(
+        pd, _1f4yb_frame(pd, columns, True), axis, ops
+    )
+
+
+_4CKEF_REFUSED = [("sum", {}), ("prod", {}), ("var", {}), ("sem", {}), ("skew", {}), ("kurt", {})]
+_4CKEF_CASES = {
+    "dates": ("d", _4CKEF_REFUSED),
+    "zoned dates": ("z", _4CKEF_REFUSED),
+    "durations": ("t", _4CKEF_REFUSED),
+    "dates beside an int": ("di", [("sum", {}), ("var", {})]),
+    # NEGATIVE: what pandas reduces keeps answering, and numeric_only drops
+    # the dates and durations.
+    "dates answered (NEGATIVE)": ("d", [("min", {}), ("max", {}), ("count", {})]),
+    "durations answered (NEGATIVE)": ("t", [("sum", {}), ("std", {}), ("min", {})]),
+    "numeric_only (NEGATIVE)": ("dti", [("sum", {"numeric_only": True}), ("var", {"numeric_only": True})]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_4CKEF_CASES))
+def test_temporal_frame_reductions_refuse_like_pandas_4ckef(case: str) -> None:
+    # A frame's reductions over its columns refuse a date's sum / prod /
+    # var / sem / skew / kurt and a duration's prod / var / sem / skew /
+    # kurt with pandas' TypeError naming the array and dtype
+    # (br-frankenpandas-4ckef; a date's sum answered, a duration's skew
+    # too, others raised 'could not convert' or a ValueError).
+    columns, ops = _4CKEF_CASES[case]
+    assert _1f4yb_answers(fpd, _1f4yb_frame(fpd, columns, True), 0, ops) == _1f4yb_answers(
+        pd, _1f4yb_frame(pd, columns, True), 0, ops
+    )
