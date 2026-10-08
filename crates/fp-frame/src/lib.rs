@@ -27449,6 +27449,63 @@ impl Series {
             );
         }
 
+        // A float column whose missing values are exactly its NaNs: the same
+        // pair sort over its present values - ascending, each present row
+        // takes the next position of the sorted present values and a missing
+        // row -1, as pandas; descending, the missing rows last - it went
+        // through values() and a Scalar compare (argsort of a column holding
+        // NaN 0.10x pandas at 1M; br-frankenpandas-smodn).
+        if let Some((data, _)) = self
+            .column
+            .as_f64_slice_with_validity()
+            .filter(|_| self.column.nan_missing_exact())
+        {
+            let positions: Vec<i64> = if ascending {
+                let mut present: Vec<(f64, i64)> = data
+                    .iter()
+                    .copied()
+                    .filter(|value| !value.is_nan())
+                    .enumerate()
+                    .map(|(k, value)| (value, k as i64))
+                    .collect();
+                present.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                let mut sorted = present.into_iter().map(|(_, k)| k);
+                data.iter()
+                    .map(|value| {
+                        if value.is_nan() {
+                            -1
+                        } else {
+                            sorted.next().unwrap_or(-1)
+                        }
+                    })
+                    .collect()
+            } else {
+                let mut present: Vec<(f64, i64)> = data
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .filter(|(_, value)| !value.is_nan())
+                    .map(|(i, value)| (value, i as i64))
+                    .collect();
+                present.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                present
+                    .into_iter()
+                    .map(|(_, i)| i)
+                    .chain(
+                        data.iter()
+                            .enumerate()
+                            .filter(|(_, value)| value.is_nan())
+                            .map(|(i, _)| i as i64),
+                    )
+                    .collect()
+            };
+            return Series::new(
+                self.name.clone(),
+                self.index.clone(),
+                Column::from_i64_values_owned(positions),
+            );
+        }
+
         let mut order: Vec<usize> = (0..self.len()).collect();
         let vals = self.column.values();
         if ascending && vals.iter().any(Scalar::is_missing) {
@@ -37080,8 +37137,49 @@ impl Expanding<'_> {
                 }
             }
             let index = self.series.index().clone();
-            let column = Column::new(DType::Float64, out)?;
-            return Series::new(self.series.name(), index, column);
+            return Series::new(self.series.name(), index, rolling_float_column(&out));
+        }
+        // A float column folds its data - a value present where it is not
+        // NaN and, for a column whose missing values are not exactly its
+        // NaNs, its validity bit is set - in row order with the same
+        // acc.max / acc.min, into data + validity words: it folded a Scalar
+        // per row (expanding().max() of a column holding NaN 0.48x pandas at
+        // 1M; br-frankenpandas-fqgw7).
+        let column = self.series.column();
+        if let Some((data, validity)) = column.as_f64_slice_with_validity() {
+            let read_bits = !(validity.all() || column.nan_missing_exact());
+            let mut acc = if want_max {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            };
+            let mut count = 0_usize;
+            let mut out: Vec<f64> = Vec::with_capacity(data.len());
+            let mut words = vec![0_u64; data.len().div_ceil(64)];
+            for (i, &value) in data.iter().enumerate() {
+                if !value.is_nan() && (!read_bits || validity.get(i)) {
+                    acc = if want_max {
+                        acc.max(value)
+                    } else {
+                        acc.min(value)
+                    };
+                    count += 1;
+                }
+                // Below min_periods Null(NaN) (a cleared bit); an empty prefix
+                // Float64(NaN) and every extremum a set one.
+                if count < self.min_periods {
+                    out.push(0.0);
+                } else {
+                    words[i / 64] |= 1_u64 << (i % 64);
+                    out.push(if count == 0 { f64::NAN } else { acc });
+                }
+            }
+            let validity = fp_columnar::ValidityMask::from_words(words, data.len());
+            return Series::new(
+                self.series.name(),
+                self.series.index().clone(),
+                Column::from_f64_values_with_validity(out, validity),
+            );
         }
         let vals = self.series.column().values();
         let mut out = Vec::with_capacity(vals.len());
@@ -37108,8 +37206,7 @@ impl Expanding<'_> {
         }
         // Typed: a prefix with nothing observed is NaN, never object.
         let index = self.series.index().clone();
-        let column = Column::new(DType::Float64, out)?;
-        Series::new(self.series.name(), index, column)
+        Series::new(self.series.name(), index, rolling_float_column(&out))
     }
 
     /// Expanding sample standard deviation (ddof=1).
@@ -51846,6 +51943,45 @@ impl SeriesGroupBy<'_> {
                     Column::from_f64_values_owned(out),
                 );
             }
+        }
+
+        // A float column whose missing values are exactly its NaNs: the same
+        // dense pass, a NaN skipped as pandas' group_sum / group_mean (a group
+        // of NaNs only sums to 0.0 and averages NaN), broadcast to every row -
+        // it took the generic build_groups path (transform('mean') of a column
+        // holding NaN 0.11x pandas at 1M; br-frankenpandas-pfxck).
+        if matches!(func, "sum" | "mean")
+            && let Some((data, _)) = self
+                .series
+                .column()
+                .as_f64_slice_with_validity()
+                .filter(|_| self.series.column().nan_missing_exact())
+            && let Some((gids, ngroups)) = self.dense_group_ids()
+            && gids.len() == data.len()
+        {
+            let mut sum = vec![fp_types::KahanSum::default(); ngroups];
+            let mut count = vec![0_usize; ngroups];
+            for (&group, &value) in gids.iter().zip(data) {
+                if !value.is_nan() {
+                    sum[group].add(value);
+                    count[group] += 1;
+                }
+            }
+            let agg: Vec<f64> = sum
+                .iter()
+                .zip(&count)
+                .map(|(total, &present)| match (func, present) {
+                    ("mean", 0) => f64::NAN,
+                    ("mean", present) => total.sum() / present as f64,
+                    _ => total.sum(),
+                })
+                .collect();
+            let out: Vec<f64> = gids.iter().map(|&group| agg[group]).collect();
+            return Series::new(
+                self.series.name(),
+                self.series.index.clone(),
+                Column::from_f64_values(out),
+            );
         }
 
         if matches!(func, "std" | "var" | "min" | "max")
@@ -182492,6 +182628,94 @@ mod tests {
         assert_eq!(
             floats(lasts.column("a").unwrap()),
             [Some(9.0), Some(11.0), Some(12.0)]
+        );
+    }
+
+    #[test]
+    fn expanding_float_extremum_typed_fqgw7() {
+        // br-frankenpandas-fqgw7: a float column's expanding max / min fold
+        // its data in row order - a NaN skipped - and answer the prefix
+        // fold: Null(NaN) below min_periods, Float64(NaN) for an empty
+        // prefix allowed by min_periods 0; every path's output is a typed
+        // nullable f64 column (the grouped readers' expectation; Column::new
+        // over Scalars gave none). NEGATIVE: an int column, and a column
+        // built from Scalars, answer the same fold.
+        let nan = f64::NAN;
+        let shape = |value: &Scalar| match value {
+            Scalar::Float64(x) if x.is_nan() => "Float64(NaN)".to_owned(),
+            Scalar::Float64(x) => format!("Float64({})", x.to_bits()),
+            other => format!("{other:?}"),
+        };
+        let brute = |values: &[f64], min_periods: usize, max: bool| -> Vec<String> {
+            let mut acc = if max {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            };
+            let mut count = 0_usize;
+            values
+                .iter()
+                .map(|&value| {
+                    if !value.is_nan() {
+                        acc = if max { acc.max(value) } else { acc.min(value) };
+                        count += 1;
+                    }
+                    let cell = if count < min_periods {
+                        Scalar::Null(NullKind::NaN)
+                    } else if count == 0 {
+                        Scalar::Float64(f64::NAN)
+                    } else {
+                        Scalar::Float64(acc)
+                    };
+                    shape(&cell)
+                })
+                .collect()
+        };
+        let values = [nan, 3.0, nan, 1.0, 5.0, nan, 2.0];
+        let columns = [
+            Column::from_f64_values(values.to_vec()),
+            Column::from_values(
+                values
+                    .iter()
+                    .map(|&v| {
+                        if v.is_nan() {
+                            Scalar::Null(NullKind::NaN)
+                        } else {
+                            Scalar::Float64(v)
+                        }
+                    })
+                    .collect(),
+            )
+            .unwrap(),
+        ];
+        for column in columns {
+            let s = Series::new("x", Index::from_range(0, 7, 1), column).unwrap();
+            for min_periods in [1, 0, 3] {
+                for max in [true, false] {
+                    let expanding = s.expanding(Some(min_periods));
+                    let out = if max {
+                        expanding.max()
+                    } else {
+                        expanding.min()
+                    }
+                    .unwrap();
+                    assert!(out.column().as_f64_slice_with_validity().is_some());
+                    let got: Vec<String> = out.values().iter().map(shape).collect();
+                    assert_eq!(got, brute(&values, min_periods, max), "{min_periods} {max}");
+                }
+            }
+        }
+        let ints = Series::new(
+            "x",
+            Index::from_range(0, 4, 1),
+            Column::from_i64_values(vec![4, 9, 2, 7]),
+        )
+        .unwrap();
+        let out = ints.expanding(Some(1)).max().unwrap();
+        assert!(out.column().as_f64_slice_with_validity().is_some());
+        assert_eq!(
+            out.values().iter().map(shape).collect::<Vec<_>>(),
+            brute(&[4.0, 9.0, 2.0, 7.0], 1, true)
         );
     }
 

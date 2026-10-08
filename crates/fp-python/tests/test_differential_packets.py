@@ -30251,6 +30251,99 @@ def test_crosstab_counts_like_pandas_fxk1a(case: str) -> None:
     assert run(fpd) == run(pd)
 
 
+_FQGW7_SERIES = {
+    "floats holding NaN": [np.nan, 3.0, np.nan, 1.0, 5.0, np.nan, 2.0],
+    "an all-NaN start": [np.nan, np.nan, 2.0, 1.0],
+    "floats with inf": [1.0, np.inf, 0.5, -np.inf, 2.0],
+    "ints": [4, 9, 2, 7, 1],
+    # NEGATIVE: a column without NaN folds as before.
+    "no NaN (NEGATIVE)": [2.0, 1.0, 3.0, 0.5],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("min_periods", [1, 0, 3])
+@pytest.mark.parametrize("values", list(_FQGW7_SERIES))
+def test_expanding_extremum_like_pandas_fqgw7(values: str, min_periods: int) -> None:
+    # expanding max / min of a float column fold its data in row order, a
+    # NaN skipped (br-frankenpandas-fqgw7: a Scalar per row, 0.48x pandas at
+    # 1M holding NaN): values as float.hex, NaN as None, dtype vs pandas.
+    def run(m: Any) -> Any:
+        s = m.Series(np.array(_FQGW7_SERIES[values]))
+        answers = []
+        for op in ["max", "min"]:
+            out = getattr(s.expanding(min_periods=min_periods), op)()
+            answers.append((op, str(out.dtype), [None if x != x else float(x).hex() for x in out.tolist()]))
+        return answers
+
+    assert run(fpd) == run(pd)
+
+
+_PFXCK_CASES = {
+    "mean, int key": ("k", "b", "mean"),
+    "sum, int key": ("k", "b", "sum"),
+    "mean, text key": ("t", "b", "mean"),
+    "sum, text key": ("t", "b", "sum"),
+    # NEGATIVE: an all-valid column transforms as before.
+    "mean, all valid (NEGATIVE)": ("k", "a", "mean"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_PFXCK_CASES))
+def test_groupby_transform_with_nan_like_pandas_pfxck(case: str) -> None:
+    # groupby transform('mean' / 'sum') of a float column holding NaN in the
+    # dense pass, a NaN skipped (br-frankenpandas-pfxck: the generic path,
+    # 0.11x pandas at 1M): an all-NaN group sums to 0.0 and averages NaN,
+    # broadcast to every row; values as float.hex, index, dtype vs pandas.
+    key, column, func = _PFXCK_CASES[case]
+
+    def run(m: Any) -> Any:
+        frame = m.DataFrame(
+            {
+                "k": np.array([3, 1, 3, 2, 1, 3, 2, 1]),
+                "t": np.array(["x", "y", "x", "z", "y", "x", "z", "y"]),
+                "b": np.array([np.nan, 1.5, 2.25, np.nan, np.nan, 4.0, np.nan, 0.1]),
+                "a": np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]),
+            }
+        )
+        out = frame.groupby(key)[column].transform(func)
+        return ([None if x != x else float(x).hex() for x in out.tolist()], list(out.index), str(out.dtype))
+
+    assert run(fpd) == run(pd)
+
+
+_SMODN_VALUES = {
+    "floats holding NaN": [3.0, np.nan, 1.0, np.nan, 2.0, 0.5],
+    "ties and NaN": [2.0, 1.0, np.nan, 2.0, 1.0, np.nan, 2.0],
+    "signed zeros and NaN": [0.0, -0.0, np.nan, -1.0, 0.0],
+    "all NaN": [np.nan, np.nan, np.nan],
+    # NEGATIVE: a column without NaN sorts as before, an int column's ties
+    # in their positions' order. (Float ties are not compared: numpy's default
+    # quicksort - a vectorized sort here - orders them, and -0.0 before 0.0,
+    # its own way; fp keeps the stable order.)
+    "no NaN (NEGATIVE)": [3.0, 1.0, 2.0, 1.0],
+    "int ties (NEGATIVE)": [5, 3, 5, 3, 1, 5],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("values", list(_SMODN_VALUES))
+def test_argsort_with_nan_like_pandas_smodn(values: str) -> None:
+    # argsort of a float column holding NaN pair-sorts its present values
+    # (br-frankenpandas-smodn: a Scalar compare, 0.10x pandas at 1M): a missing
+    # row -1, each present row the next position of the sorted present values;
+    # values, index and dtype vs pandas.
+    def run(m: Any) -> Any:
+        s = m.Series(np.array(_SMODN_VALUES[values]), index=[10 + i for i in range(len(_SMODN_VALUES[values]))], name="v")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            out = s.argsort()
+        return (out.tolist(), list(out.index), str(out.dtype), out.name)
+
+    assert run(fpd) == run(pd)
+
+
 def _5eklr_frame(m: Any) -> Any:
     return m.DataFrame(
         {
