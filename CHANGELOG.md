@@ -3,11 +3,65 @@
 All notable changes to FrankenPandas are documented in this file, organized by capability area.
 
 FrankenPandas is a clean-room Rust reimplementation of the full pandas API surface:
-**15 workspace crates, `#![forbid(unsafe_code)]` workspace-wide**. Workspace version is **0.4.0**.
+**15 workspace crates, `#![forbid(unsafe_code)]` workspace-wide**. Workspace version is **0.5.0**.
 
 Repository: <https://github.com/Dicklesworthstone/frankenpandas>
 
-## 0.4.0 release qualification (2026-10-03, pending publication)
+## 0.5.0 (2026-10-08)
+
+About 270 commits since 0.4.0, most of them measured native fast paths and
+pandas-fidelity fixes. Published to crates.io (`frankenpandas` and all
+`fp-*` crates at 0.5.0) and to PyPI (`frankenpandas`, CPython 3.13
+manylinux_2_28 x86-64 wheel plus sdist).
+
+### Features
+
+- `DataFrame.style` is pandas' `Styler` (its methods and HTML to the byte),
+  with `Styler.bar` (align mid / left / right / zero / mean / a number / a
+  callable, colours).
+- `to_json` takes `index=` (split / table without the index, pandas'
+  refusals by orient) and `indent=`.
+- Anchored period frequencies: fiscal years `Y-<MON>`, fiscal quarters
+  `Q-<MON>` and weeks `W-<DAY>`; pandas-style frequency inference families.
+- Time-based rolling `apply` / `agg` / `corr` / `cov` / `rank` and
+  expanding windows reach the Python surface.
+
+### Performance
+
+- Float columns holding NaN stay on native paths: argsort, rolling max /
+  min (a monotonic deque over the data), resample reductions,
+  `DataFrame.values`, groupby and merge kernels; indexes keep their
+  monotonic flags and label kinds across operations.
+
+### Release-review fixes (independent review against 0.4.0)
+
+- Frame reductions on a frame with a repeated column label and an all-NaN,
+  float32 or temporal column answered the first repeat for every repeat;
+  columns are now read by position.
+- `to_datetime(format=...)` with multi-byte literals (`'%Y年%m月%d日'`) and
+  dateutil parsing with a no-break or ideographic space before the clock
+  no longer panic.
+- Reindexing over a descending `RangeIndex` with a label near `i64::MIN` no
+  longer overflows.
+- `fp-io` library tests compile with `--no-default-features --features hdf5`
+  ([#39](https://github.com/Dicklesworthstone/frankenpandas/issues/39)).
+
+### Dependencies
+
+- Semver-compatible lockfile refresh. `hdf5-metno` stays at 0.12.x: the 0.15
+  update was withdrawn because of
+  [#40](https://github.com/Dicklesworthstone/frankenpandas/issues/40).
+
+### Known issues
+
+- [#38](https://github.com/Dicklesworthstone/frankenpandas/issues/38) merge
+  keys for hashable Python host objects,
+  [#40](https://github.com/Dicklesworthstone/frankenpandas/issues/40)
+  HDF/Pickle snapshots and nullable dtypes,
+  [#41](https://github.com/Dicklesworthstone/frankenpandas/issues/41) G6
+  sidecar parity reports in clean checkouts.
+
+## 0.4.0 (published 2026-10-03)
 
 - Arrow-family writers allocate distinct physical fields for row-index levels,
   preserving data columns whose names collide with synthetic index fields and
