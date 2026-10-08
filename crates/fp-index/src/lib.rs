@@ -9465,20 +9465,30 @@ impl DatetimeIndex {
         if let Some(&position) = positions.iter().find(|&&p| p >= length) {
             return Err(IndexError::OutOfBounds { position, length });
         }
-        let nanos: Vec<i64> = if let Some(held) = self.index.labels.datetime64_nanos() {
-            positions.iter().map(|&p| held[p]).collect()
-        } else {
-            let labels = self.index.labels();
-            positions
-                .iter()
-                .map(|&p| match labels[p] {
-                    IndexLabel::Datetime64(n) => n,
-                    _ => i64::MIN,
-                })
-                .collect()
-        };
         let freq = take_freq(self.freq(), positions);
-        Ok(self.with_instants(nanos).with_freq(freq))
+        Ok(self.with_instants(self.nanos_at(positions)).with_freq(freq))
+    }
+
+    /// The instants at `positions` (each in bounds), NaT where a label is
+    /// not one: a typed backing or a date_range's range gathered with no
+    /// label made (`idx[perm]` read one position a call, its length
+    /// recomputed each; br-frankenpandas-lsn8d).
+    #[must_use]
+    pub fn nanos_at(&self, positions: &[usize]) -> Vec<i64> {
+        if let Some(range) = self.index.labels.datetime64_affine_range() {
+            return positions.iter().map(|&p| range.value_at(p)).collect();
+        }
+        if let Some(held) = self.index.labels.datetime64_nanos() {
+            return positions.iter().map(|&p| held[p]).collect();
+        }
+        let labels = self.index.labels();
+        positions
+            .iter()
+            .map(|&p| match labels[p] {
+                IndexLabel::Datetime64(n) => n,
+                _ => i64::MIN,
+            })
+            .collect()
     }
 
     /// Repeat each label `repeats` times, matching `pd.DatetimeIndex.repeat()`.
@@ -19284,6 +19294,42 @@ pub fn joined_tz(left: &Index, right: &Index) -> Option<String> {
     }
 }
 
+/// The freq of the index joining two DatetimeIndexes, as pandas'
+/// `_get_join_freq`: the left's when the two can fast-union - one freq,
+/// the left increasing, and the later-starting one starting inside the
+/// other or one tick past its end (an empty side always) - else None. A
+/// freq that is no tick only counts the overlap (a calendar step past the
+/// end is not computed here; such a join keeps no freq). It was dropped:
+/// df.join / merge of date_range indexes answered freq None
+/// (br-frankenpandas-lsn8d).
+#[must_use]
+pub fn joined_freq(left: &Index, right: &Index) -> Option<String> {
+    let freq = left.freq()?;
+    if right.freq() != Some(freq) || !left.is_monotonic_increasing() {
+        return None;
+    }
+    let (Some(left_nanos), Some(right_nanos)) = (
+        left.datetime64_label_values(),
+        right.datetime64_label_values(),
+    ) else {
+        return None;
+    };
+    let (Some(&left_first), Some(&right_first)) = (left_nanos.first(), right_nanos.first()) else {
+        return Some(freq.to_owned());
+    };
+    let (earlier, later_start) = if left_first <= right_first {
+        (&left_nanos, right_first)
+    } else {
+        (&right_nanos, left_first)
+    };
+    let earlier_end = *earlier.last()?;
+    let adjoins = tick_count(freq)
+        .and_then(|(count, unit)| count.checked_mul(TICK_UNITS[unit].1))
+        .and_then(|tick| earlier_end.checked_add(tick))
+        == Some(later_start);
+    (adjoins || earlier.binary_search(&later_start).is_ok()).then(|| freq.to_owned())
+}
+
 /// pandas refuses to join a tz-aware datetime index with a tz-naive one
 /// ("Cannot join tz-naive with tz-aware DatetimeIndex"); callers that align
 /// two indexes check this first.
@@ -26124,6 +26170,31 @@ mod tests {
         assert_eq!(
             result.labels(),
             &[IndexLabel::Int64(1), IndexLabel::Int64(3)]
+        );
+    }
+
+    #[test]
+    fn joined_freq_keeps_a_fast_union_s_freq_lsn8d() {
+        // pandas' _get_join_freq: two daily ranges that overlap or adjoin
+        // join under 'D' (br-frankenpandas-lsn8d).
+        let day = 86_400_000_000_000_i64;
+        let range = |start: i64, n: i64| {
+            Index::from_datetime64_values((0..n).map(|k| start + k * day).collect())
+                .with_freq(Some("D".to_owned()))
+        };
+        let six = range(0, 6);
+        let joined = crate::joined_freq;
+        assert_eq!(joined(&six, &range(day, 5)).as_deref(), Some("D"));
+        assert_eq!(joined(&six, &range(6 * day, 3)).as_deref(), Some("D"));
+        assert_eq!(joined(&range(6 * day, 3), &six).as_deref(), Some("D"));
+        assert_eq!(joined(&six, &range(0, 0)).as_deref(), Some("D"));
+        // NEGATIVE: a gap between them, another freq, none on one side.
+        assert_eq!(joined(&six, &range(8 * day, 3)), None);
+        let two_day = range(day, 5).with_freq(Some("2D".to_owned()));
+        assert_eq!(joined(&six, &two_day), None);
+        assert_eq!(
+            joined(&six, &Index::from_datetime64_values(vec![day])),
+            None
         );
     }
 

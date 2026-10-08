@@ -30928,6 +30928,50 @@ _LSN8D2_OPS = {
     "frame between_time": lambda m, i: _lsn8d2_frame(
         m.DataFrame({"v": np.arange(len(i), dtype="float64")}, index=i).between_time("05:00", "19:00")
     ),
+    # NEGATIVE: a position past either end is pandas' IndexError.
+    "i[positions out of bounds]": lambda m, i: _lsn8d2_index(i[np.array([0, 99])]),
+    "take out of bounds": lambda m, i: _lsn8d2_index(i.take([-99])),
+    "frame loc by its index's every other": lambda m, i: _lsn8d2_frame(
+        m.DataFrame({"v": np.arange(len(i), dtype="float64")}, index=i).loc[i[::2]]
+    ),
+    # NEGATIVE: a key missing from the index is pandas' KeyError.
+    "frame loc by a missing key": lambda m, i: _lsn8d2_frame(
+        m.DataFrame({"v": np.arange(len(i), dtype="float64")}, index=i).loc[m.DatetimeIndex(["1999-01-01"]).append(i[:1])]
+    ),
+    "frame join a subset": lambda m, i: _lsn8d2_frame(
+        m.DataFrame({"v": np.arange(len(i), dtype="float64")}, index=i).join(
+            m.DataFrame({"w": np.arange(len(i[::2]), dtype="float64")}, index=i[::2])
+        )
+    ),
+    "frame join reversed, inner": lambda m, i: _lsn8d2_frame(
+        m.DataFrame({"v": np.arange(len(i), dtype="float64")}, index=i).join(
+            m.DataFrame({"w": np.arange(len(i), dtype="float64")}, index=i[::-1]), how="inner"
+        )
+    ),
+    "frame join reversed, outer": lambda m, i: _lsn8d2_frame(
+        m.DataFrame({"v": np.arange(len(i), dtype="float64")}, index=i).join(
+            m.DataFrame({"w": np.arange(len(i), dtype="float64")}, index=i[::-1]), how="outer"
+        )
+    ),
+    "frame join its tail": lambda m, i: (lambda out: (_lsn8d2_frame(out), _lsn8d2_index(out.index)))(
+        m.DataFrame({"v": np.arange(len(i), dtype="float64")}, index=i).join(
+            m.DataFrame({"w": np.arange(len(i[1:]), dtype="float64")}, index=i[1:]), how="outer"
+        )
+    ),
+    # NEGATIVE: every other row is another freq - none kept.
+    "frame join every other, its index": lambda m, i: _lsn8d2_index(
+        m.DataFrame({"v": np.arange(len(i), dtype="float64")}, index=i)
+        .join(m.DataFrame({"w": np.arange(len(i[::2]), dtype="float64")}, index=i[::2]), how="inner")
+        .index
+    ),
+    "merge on both indexes": lambda m, i: (lambda out: (_lsn8d2_frame(out), _lsn8d2_index(out.index)))(
+        m.merge(
+            m.DataFrame({"v": np.arange(len(i), dtype="float64")}, index=i),
+            m.DataFrame({"w": np.arange(len(i[1:]), dtype="float64")}, index=i[1:]),
+            left_index=True,
+            right_index=True,
+        )
+    ),
     # Each field under the index's name (the named indexes failed: it was
     # dropped), int32 - float64 beside NaT.
     "calendar fields": lambda m, i: [

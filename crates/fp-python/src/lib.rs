@@ -16076,36 +16076,13 @@ impl PyDatetimeIndex {
             let run = positions.windows(2).all(|pair| pair[1] == pair[0] + 1);
             (positions, run)
         } else if let Ok(Positions(requested)) = key.extract::<Positions>() {
-            let length = i64::try_from(len).unwrap_or(i64::MAX);
-            let resolve = |position: i64| -> PyResult<usize> {
-                let at = if position < 0 {
-                    position + length
-                } else {
-                    position
-                };
-                usize::try_from(at)
-                    .ok()
-                    .filter(|&at| at < len)
-                    .ok_or_else(|| {
-                        PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
-                            "index {position} is out of bounds for axis 0 with size {length}"
-                        ))
-                    })
-            };
-            let positions = requested
-                .into_iter()
-                .map(resolve)
-                .collect::<PyResult<Vec<usize>>>()?;
-            (positions, false)
+            (take_positions(&requested, len)?, false)
         } else {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "Index indices must be integers, slices, boolean masks or integer arrays",
             ));
         };
-        let picked: Vec<i64> = positions
-            .iter()
-            .filter_map(|&position| self.inner.asi8_at(position))
-            .collect();
+        let picked = self.inner.nanos_at(&positions);
         let freq = self.inner.freq().filter(|_| run);
         let inner = self.with_nanos(picked).inner.with_freq(freq);
         Ok(Py::new(py, Self { inner })?.into_any())
@@ -56185,10 +56162,24 @@ fn loc_missing_labels_error(
     wanted: &[IndexLabel],
     key: &Bound<'_, PyAny>,
 ) -> PyResult<Option<PyErr>> {
-    let present: HashSet<&IndexLabel> = index.labels().iter().collect();
+    // A unique datetime / timedelta / text index answers from its lookup
+    // cached by label identity, which the rows' resolution reads next; any
+    // other from a set of its labels - a SipHash set of a million labels was
+    // half of df.loc[idx[::3]] (br-frankenpandas-lsn8d).
+    let resolved = index
+        .unique_datetime64_positions(wanted)
+        .or_else(|| index.unique_timedelta64_positions(wanted))
+        .or_else(|| index.unique_utf8_positions(wanted));
+    let found: Vec<bool> = match resolved {
+        Some(positions) => positions.iter().map(Option::is_some).collect(),
+        None => {
+            let present: rustc_hash::FxHashSet<&IndexLabel> = index.labels().iter().collect();
+            wanted.iter().map(|label| present.contains(label)).collect()
+        }
+    };
     let mut missing: Vec<&IndexLabel> = Vec::new();
-    for label in wanted {
-        if !present.contains(label) && !missing.contains(&label) {
+    for (label, &here) in wanted.iter().zip(&found) {
+        if !here && !missing.contains(&label) {
             missing.push(label);
         }
     }
@@ -56196,7 +56187,7 @@ fn loc_missing_labels_error(
         return Ok(None);
     }
     let py = key.py();
-    let message = if wanted.iter().all(|label| !present.contains(label)) {
+    let message = if found.iter().all(|&here| !here) {
         // A Series key reads as its array (unnamed), an Index as itself.
         let values = if key.is_instance_of::<PySeries>() {
             key.call_method0("to_numpy")?
@@ -56260,6 +56251,12 @@ fn loc_label_list(key: &Bound<'_, PyAny>) -> Option<PyResult<Vec<IndexLabel>>> {
             .iter()
             .map(scalar_to_index_label_converter)
             .collect()));
+    }
+    // A DatetimeIndex key is its own labels - it went out as a list of
+    // Timestamps and each came back a label (df.loc[idx[::3]];
+    // br-frankenpandas-lsn8d).
+    if let Ok(dti) = key.extract::<PyRef<'_, PyDatetimeIndex>>() {
+        return Some(Ok(dti.inner.as_index().labels().to_vec()));
     }
     let list = if let Ok(list) = key.cast::<PyList>() {
         list.clone()
@@ -57383,6 +57380,19 @@ fn int_list_key(key: &Bound<'_, PyAny>) -> Option<Vec<i64>> {
 /// mask of the wrong length; an empty bool array is one, of the wrong length
 /// (br-frankenpandas-0l1nu).
 fn bool_mask_key(key: &Bound<'_, PyAny>) -> Option<Vec<bool>> {
+    // An array whose dtype is neither bool nor object holds no mask - its
+    // elements were each made a Python object to find that out (a
+    // DatetimeIndex key's every Timestamp, df.loc[idx[::3]];
+    // br-frankenpandas-lsn8d).
+    if let Ok(kind) = key
+        .getattr("dtype")
+        .and_then(|dtype| dtype.getattr("kind"))
+        .and_then(|kind| kind.extract::<String>())
+        && kind != "b"
+        && kind != "O"
+    {
+        return None;
+    }
     let mask = key.extract::<Vec<bool>>().ok()?;
     if mask.is_empty() {
         let kind = key
@@ -79774,6 +79784,26 @@ fn index_join_name<'a>(left: &'a Index, right: &'a Index, how: &str) -> Option<&
     kept_side()
 }
 
+/// An index's labels as a merge key column: a DatetimeIndex's instants
+/// (naive, as their Scalars read) or an int index's ints, typed - a Scalar
+/// a label was built and their column inferred back (df.join of date
+/// indexes 0.20x pandas at 1M; br-frankenpandas-lsn8d) - else the labels'
+/// column. An empty index keeps the labels' (its inferred dtype).
+fn index_key_column(index: &Index) -> Result<Column, fp_columnar::ColumnError> {
+    if !index.is_empty() {
+        if let Some(nanos) = index.datetime64_label_values() {
+            return Ok(Column::from_temporal_nanos(
+                DType::datetime64_naive(),
+                nanos.into_owned(),
+            ));
+        }
+        if let Some(ints) = index.int64_label_values() {
+            return Ok(Column::from_i64_values(Arc::unwrap_or_clone(ints)));
+        }
+    }
+    Column::from_values(index.labels().iter().map(index_label_to_scalar).collect())
+}
+
 fn merge_impl(
     left: &DataFrame,
     right: &DataFrame,
@@ -79967,13 +79997,7 @@ fn merge_impl(
         const KEY: &str = "__fp_merge_index_key__";
         const LABEL: &str = "__fp_merge_row_label__";
         let with_labels = |frame: &DataFrame, name: &str| -> PyResult<DataFrame> {
-            let labels: Vec<Scalar> = frame
-                .index()
-                .labels()
-                .iter()
-                .map(index_label_to_scalar)
-                .collect();
-            let column = Column::from_values(labels).map_err(column_error_to_py)?;
+            let column = index_key_column(frame.index()).map_err(column_error_to_py)?;
             frame.with_column(name, column).map_err(frame_error_to_py)
         };
         let (keyed_left, keyed_right, left_key, right_key) = if index_on_left {
@@ -80058,13 +80082,7 @@ fn merge_impl(
         fp_index::check_tz_compatible(left.index(), right.index()).map_err(index_error_to_py)?;
         const KEY: &str = "__fp_merge_index_key__";
         let keyed = |frame: &DataFrame| -> PyResult<DataFrame> {
-            let labels: Vec<Scalar> = frame
-                .index()
-                .labels()
-                .iter()
-                .map(index_label_to_scalar)
-                .collect();
-            let key = Column::from_values(labels)
+            let key = index_key_column(frame.index())
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
             frame.with_column(KEY, key).map_err(frame_error_to_py)
         };
@@ -80096,11 +80114,12 @@ fn merge_impl(
                 .and_then(|merged| merged.with_index(left.index().clone()))
                 .map_err(frame_error_to_py)?
         } else {
-            let merged = run(&keyed(left)?, &keyed(right)?, &key, &key)?
+            // The key column made the index as set_index makes it (typed
+            // instants for dates), renamed below - its labels were copied
+            // out and an index rebuilt from them.
+            run(&keyed(left)?, &keyed(right)?, &key, &key)?
                 .set_index(KEY, true)
-                .map_err(frame_error_to_py)?;
-            let labels = merged.index().labels().to_vec();
-            merged.set_axis(labels, 0).map_err(frame_error_to_py)?
+                .map_err(frame_error_to_py)?
         };
         // pandas' index name (see [`index_join_name`]) - never the internal
         // key column's, which leaked (fvsao.31).
@@ -80113,12 +80132,27 @@ fn merge_impl(
         });
         // Two tz-aware indexes join in their shared zone, or in UTC for two
         // zones (they came back naive UTC, fvsao.60).
+        // pandas' index join: equal indexes are the joined one as it is (the
+        // right's for a right join), freq and all; two DatetimeIndexes that
+        // can fast-union keep the left's freq (it was dropped;
+        // br-frankenpandas-lsn8d).
+        let freq = if same_rows {
+            if join_type == fp_join::JoinType::Right {
+                right.index().freq()
+            } else {
+                left.index().freq()
+            }
+            .map(str::to_owned)
+        } else {
+            fp_index::joined_freq(left.index(), right.index())
+        };
         let index = frame
             .index()
             .rename_index(name)
             .with_range_span(span)
             .with_tz(fp_index::joined_tz(left.index(), right.index()).as_deref())
-            .map_err(index_error_to_py)?;
+            .map_err(index_error_to_py)?
+            .with_freq(freq);
         return frame.with_index(index).map_err(frame_error_to_py);
     }
 
@@ -94115,22 +94149,29 @@ fn take_bounds(indices: &[i64], len: usize) -> PyResult<()> {
 
 /// `take` positions over `len` rows, negative from the end, as numpy reads
 /// them; one out of range is its IndexError.
+#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)] // checked into 0..len first
 fn take_positions(indices: &[i64], len: usize) -> PyResult<Vec<usize>> {
     let length = i64::try_from(len).unwrap_or(i64::MAX);
-    indices
+    // The bounds in one pass, then each negative position wrapped without a
+    // branch: a Result a position kept the collect from vectorizing
+    // (idx.take(perm) 0.19x pandas at 1M; br-frankenpandas-lsn8d).
+    let (low, high) = indices.iter().fold((0_i64, -1_i64), |(low, high), &at| {
+        (low.min(at), high.max(at))
+    });
+    if low >= -length && high < length {
+        return Ok(indices
+            .iter()
+            .map(|&at| (at + ((at >> 63) & length)) as usize)
+            .collect());
+    }
+    let index = indices
         .iter()
-        .map(|&index| {
-            let at = if index < 0 { index + length } else { index };
-            usize::try_from(at)
-                .ok()
-                .filter(|&at| at < len)
-                .ok_or_else(|| {
-                    PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
-                        "index {index} is out of bounds for axis 0 with size {len}"
-                    ))
-                })
-        })
-        .collect()
+        .copied()
+        .find(|&at| at < -length || at >= length)
+        .unwrap_or(high);
+    Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+        "index {index} is out of bounds for axis 0 with size {len}"
+    )))
 }
 
 /// The count an index of `len` labels is repeated by, as numpy checks it:
