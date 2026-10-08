@@ -8548,6 +8548,28 @@ fn typed_index_of(data: &Bound<'_, PyAny>) -> PyResult<Option<Index>> {
             Index::new(Vec::new()).with_declared_dtype(Some(declared)),
         ));
     }
+    // A datetime64 / timedelta64 array of any unit: its nanoseconds through
+    // an int64 view, dates / durations - they were read a numpy scalar at a
+    // time as their nanoseconds (Series(v, index=dates).index float64,
+    // Index(dates) int64; br-frankenpandas-v0p5k). numpy's NaT is
+    // i64::MIN, as fp's.
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    if flat && (kind == "M" || kind == "m") {
+        let unit = if kind == "M" {
+            "datetime64[ns]"
+        } else {
+            "timedelta64[ns]"
+        };
+        let nanos = data
+            .call_method1("astype", (unit,))?
+            .call_method1("view", ("int64",))?;
+        let nanos = ndarray_elements::<i64>(data.py(), &nanos)?;
+        return Ok(Some(if kind == "M" {
+            Index::from_datetime64(nanos)
+        } else {
+            Index::from_timedelta64(nanos)
+        }));
+    }
     let int64 = dtype_name == "int64";
     let native = dtype.getattr("isnative")?.extract::<bool>()?;
     if !(int64 && native && flat) {
@@ -14783,6 +14805,23 @@ impl PyDatetimeIndex {
                 )
                 .map_err(to_datetime_error)?;
                 converted_datetime_index(&dt_series)?.inner
+            } else if let Some(index) = typed_index_of(d)?.filter(|index| {
+                index
+                    .labels()
+                    .iter()
+                    .all(|label| matches!(label, IndexLabel::Datetime64(_)))
+            }) {
+                // A datetime64 array (date_range(...).values): its dates
+                // (it raised TypeError; br-frankenpandas-v0p5k).
+                DatetimeIndex::from_index(index)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+            } else if !d.is_instance_of::<pyo3::types::PyString>()
+                && let Ok(items) = d.try_iter()
+            {
+                // Any other array-like (a tuple, an array of strings or
+                // numbers) as the list it holds.
+                let items = PyList::new(py, items.collect::<PyResult<Vec<_>>>()?)?;
+                return Self::new(py, Some(items.as_any()), freq, tz, name);
             } else {
                 return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                     "DatetimeIndex data must be sequence of datetime values",

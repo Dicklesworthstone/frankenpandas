@@ -29693,3 +29693,44 @@ def test_frame_values_layout_like_pandas_bss5q3(case: str) -> None:
         return answers
 
     assert run(fpd) == run(pd)
+
+
+_V0P5K_NS = np.array(["2020-01-01", "NaT", "2021-06-30T12:30"], dtype="datetime64[ns]")
+_V0P5K_TD = np.array([1, -2, 86_400_000_000_000], dtype="timedelta64[ns]")
+_V0P5K_CASES = {
+    "Series(index=dates)": lambda m: m.Series([1, 2, 3], index=_V0P5K_NS).index,
+    "DataFrame(index=dates)": lambda m: m.DataFrame({"a": [1, 2, 3]}, index=_V0P5K_NS).index,
+    "Index(dates)": lambda m: m.Index(_V0P5K_NS),
+    "DatetimeIndex(dates)": lambda m: m.DatetimeIndex(_V0P5K_NS),
+    "DatetimeIndex(date_range values)": lambda m: m.DatetimeIndex(pd.date_range("2024-02-27", periods=4).values),
+    "DatetimeIndex(tuple of text)": lambda m: m.DatetimeIndex(("2020-01-01", "2020-03-01")),
+    "DatetimeIndex(array of text)": lambda m: m.DatetimeIndex(np.array(["2020-01-01", "2020-03-01"])),
+    "Index(durations)": lambda m: m.Index(_V0P5K_TD),
+    "Series(index=durations)": lambda m: m.Series([1, 2, 3], index=_V0P5K_TD).index,
+    # NEGATIVE: number arrays stay numeric indexes.
+    "Series(index=ints) (NEGATIVE)": lambda m: m.Series([1, 2], index=np.array([5, 7])).index,
+    "Index(floats) (NEGATIVE)": lambda m: m.Index(np.array([0.5, 2.0])),
+}
+# A second-resolution array keeps its unit in pandas, fp holds nanoseconds
+# (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.16): its labels.
+_V0P5K_UNIT_CASES = {
+    "Series(index=dates[s])": lambda m: m.Series([1, 2], index=_V0P5K_NS[[0, 2]].astype("datetime64[s]")).index,
+    "Index(dates[ms])": lambda m: m.Index(_V0P5K_NS.astype("datetime64[ms]")),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_V0P5K_CASES) + list(_V0P5K_UNIT_CASES))
+def test_datetime_arrays_index_as_dates_v0p5k(case: str) -> None:
+    # A numpy datetime64 / timedelta64 array as an index is dates /
+    # durations (br-frankenpandas-v0p5k): Series(index=dates) was a float64
+    # index of the nanoseconds, Index(dates) int64, DatetimeIndex(dates)
+    # raised TypeError. NEGATIVE: int and float arrays stay numeric.
+    def run(m: Any) -> Any:
+        if case in _V0P5K_CASES:
+            index = _V0P5K_CASES[case](m)
+            return type(index).__name__, str(index.dtype), [str(v) for v in index]
+        index = _V0P5K_UNIT_CASES[case](m)
+        return type(index).__name__, [str(v) for v in index]
+
+    assert run(fpd) == run(pd)
