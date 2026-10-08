@@ -11016,6 +11016,117 @@ fn categorical_code(value: &Scalar) -> Option<i64> {
     }
 }
 
+/// A categorical column's codes (-1 missing): as it holds them, or read off
+/// its values through its categories - a frame's column holds its values
+/// after DataFrame::from_series or a reindex, and its compare skipped the
+/// codes, ordering two ordered columns by their text (x6p40). None when a
+/// value is none of the categories.
+fn categorical_codes_held_or_read<'c>(
+    column: &'c Column,
+    meta: &CategoricalMetadata,
+) -> Option<std::borrow::Cow<'c, [i32]>> {
+    if let Some(codes) = column.categorical_codes() {
+        return Some(std::borrow::Cow::Borrowed(codes));
+    }
+    let positions: FxHashMap<ScalarKey<'_>, i32> = meta
+        .categories
+        .iter()
+        .enumerate()
+        .filter_map(|(position, category)| {
+            Some((
+                scalar_key_skip_missing(category)?,
+                i32::try_from(position).ok()?,
+            ))
+        })
+        .collect();
+    column
+        .values()
+        .iter()
+        .map(|value| match scalar_key_skip_missing(value) {
+            None => Some(-1),
+            Some(key) => positions.get(&key).copied(),
+        })
+        .collect::<Option<Vec<i32>>>()
+        .map(std::borrow::Cow::Owned)
+}
+
+/// Two categorical columns compared as pandas' Categorical compares them
+/// (`_cat_compare_op`): an ordering of an unordered left side refused; the
+/// categories must match - the same set when both are unordered (the right
+/// codes read as the left's categories), the same categories in the same
+/// order when ordered - else pandas' TypeError; then the codes compare, a
+/// missing value False (True under !=). Two ordered columns were ordered by
+/// their values, mismatched categories compared (br-frankenpandas-x6p40).
+/// None unless both columns are categoricals of one length.
+fn categorical_columns_compare(
+    left: &Column,
+    right: &Column,
+    op: ComparisonOp,
+) -> Option<Result<Column, FrameError>> {
+    let (left_meta, right_meta) = (left.categorical()?, right.categorical()?);
+    let (left_codes, right_codes) = (
+        categorical_codes_held_or_read(left, left_meta)?,
+        categorical_codes_held_or_read(right, right_meta)?,
+    );
+    let (left_codes, right_codes) = (&*left_codes, &*right_codes);
+    if left_codes.len() != right_codes.len() {
+        return None;
+    }
+    let refuse = |message: &str| Some(Err(FrameError::CompatibilityRejected(message.to_owned())));
+    if is_ordering_comparison(op) && !left_meta.ordered {
+        return refuse("Unordered Categoricals can only compare equality or not");
+    }
+    let mismatch = "Categoricals can only be compared if 'categories' are the same.";
+    let same = categorical_categories_match(left_meta, right_meta);
+    let recoded: Option<Vec<i32>> = if left_meta.ordered || right_meta.ordered {
+        if !(same && left_meta.ordered == right_meta.ordered) {
+            return refuse(mismatch);
+        }
+        None
+    } else if same {
+        None
+    } else {
+        // A permutation: each right category's position among the left's.
+        let positions = (left_meta.categories.len() == right_meta.categories.len())
+            .then(|| {
+                right_meta
+                    .categories
+                    .iter()
+                    .map(|category| {
+                        left_meta
+                            .categories
+                            .iter()
+                            .position(|candidate| candidate.semantic_eq(category))
+                            .and_then(|position| i32::try_from(position).ok())
+                    })
+                    .collect::<Option<Vec<i32>>>()
+            })
+            .flatten();
+        let Some(positions) = positions else {
+            return refuse(mismatch);
+        };
+        Some(positions)
+    };
+    let flags = left_codes
+        .iter()
+        .zip(right_codes)
+        .map(|(&left_code, &right_code)| {
+            let right_code = match &recoded {
+                Some(positions) => usize::try_from(right_code)
+                    .ok()
+                    .map_or(-1, |code| positions[code]),
+                None => right_code,
+            };
+            if left_code < 0 || right_code < 0 {
+                op == ComparisonOp::Ne
+            } else {
+                compare_categorical_codes(i64::from(left_code), i64::from(right_code), op)
+            }
+        })
+        .collect();
+    Some(Ok(Column::from_bool_values(flags)))
+}
+
 fn compare_categorical_codes(left: i64, right: i64, op: ComparisonOp) -> bool {
     match op {
         ComparisonOp::Gt => left > right,
@@ -14585,6 +14696,27 @@ impl Series {
         {
             return self.categorical_ordering_comparison_op(other, op);
         }
+        // Two categoricals' equality needs their categories to match, as
+        // pandas: the same set when both are unordered, the same order when
+        // ordered (they compared; br-frankenpandas-x6p40).
+        if let (Some(left), Some(right)) = (&self.categorical, &other.categorical) {
+            let matching = if left.ordered || right.ordered {
+                left.ordered == right.ordered && categorical_categories_match(left, right)
+            } else {
+                left.categories.len() == right.categories.len()
+                    && left.categories.iter().all(|category| {
+                        right
+                            .categories
+                            .iter()
+                            .any(|candidate| candidate.semantic_eq(category))
+                    })
+            };
+            if !matching {
+                return Err(FrameError::CompatibilityRejected(
+                    "Categoricals can only be compared if 'categories' are the same.".to_owned(),
+                ));
+            }
+        }
 
         let out_name = self.shared_name(other);
 
@@ -14632,21 +14764,19 @@ impl Series {
             };
             return other.categorical_ordering_comparison_op(self, flipped);
         };
-        if !left_meta.ordered
-            || other
-                .categorical
-                .as_ref()
-                .is_some_and(|right_meta| !right_meta.ordered)
-        {
+        if !left_meta.ordered {
             return Err(FrameError::CompatibilityRejected(
                 "Unordered Categoricals can only compare equality or not".to_owned(),
             ));
         }
         let right_codes = match other.categorical.as_ref() {
             Some(right_meta) => {
-                if !categorical_categories_match(left_meta, right_meta) {
+                // An unordered right side is a category mismatch to pandas,
+                // in its words (br-frankenpandas-x6p40).
+                if !right_meta.ordered || !categorical_categories_match(left_meta, right_meta) {
                     return Err(FrameError::CompatibilityRejected(
-                        "Categoricals can only compare if categories are the same".to_owned(),
+                        "Categoricals can only be compared if 'categories' are the same."
+                            .to_owned(),
                     ));
                 }
                 other.category_codes_column()?
@@ -79241,6 +79371,48 @@ impl DataFrame {
         })
     }
 
+    /// Each row's sum (`mean` false) or mean of a lazily transposed float
+    /// frame: its source column's, as Series::sum / mean answer it - pandas'
+    /// df.T.sum(axis=1) has df.sum()'s bits - where each row was a column
+    /// of the materialized view, reduced across (df.T.sum(axis=1) of 100k x
+    /// 4 21.3 ms, pandas 7.6; br-frankenpandas-rc0923-epic-zero-certified-
+    /// losses-bss5q.2). A row of fewer than `min_count` numbers is NaN.
+    /// None unless every source is float64.
+    #[cfg(feature = "lazy-transpose-view")]
+    #[doc(hidden)]
+    pub fn lazy_transpose_row_sum_or_mean(
+        &self,
+        mean: bool,
+        min_count: usize,
+    ) -> Option<Result<Series, FrameError>> {
+        let (sources, dtype) = self.lazy_transpose_sources()?;
+        if dtype != DType::Float64
+            || sources
+                .iter()
+                .any(|source| source.dtype() != DType::Float64)
+        {
+            return None;
+        }
+        let positions = Index::from_range(0, i64::try_from(self.num_columns()).ok()?, 1);
+        let answers = sources
+            .iter()
+            .map(|source| {
+                let series = Series::new("", positions.clone(), source.clone())?;
+                let answer = if mean {
+                    series.mean()?
+                } else if series.count() < min_count {
+                    Scalar::Null(NullKind::NaN)
+                } else {
+                    series.sum()?
+                };
+                Ok(answer.to_f64().unwrap_or(f64::NAN))
+            })
+            .collect::<Result<Vec<f64>, FrameError>>();
+        Some(answers.and_then(|answers| {
+            Series::new("", self.index.clone(), Column::from_f64_values(answers))
+        }))
+    }
+
     /// Each column's sum (`mean` false) or mean of a lazily transposed
     /// float frame, NaN skipped: its source row's, folded source column by
     /// source column from +0.0 as pandas' block sum adds them (a NaN as
@@ -102304,6 +102476,10 @@ impl DataFrame {
         let compare = |lc: &Column, rc: &Column| -> Result<Column, FrameError> {
             if lc.dtype() != DType::Categorical && rc.dtype() != DType::Categorical {
                 return Ok(lc.binary_comparison(rc, op)?);
+            }
+            // Two categoricals: by their codes (br-frankenpandas-x6p40).
+            if let Some(compared) = categorical_columns_compare(lc, rc, op) {
+                return compared;
             }
             // An unordered categorical has no order, as two Series' (it
             // answered by its values).
@@ -180959,6 +181135,69 @@ mod tests {
         assert_eq!(
             answers(right.eq_df(&floats).unwrap()),
             [Scalar::Bool(true), Scalar::Bool(true)]
+        );
+    }
+
+    #[test]
+    fn categorical_frame_comparisons_x6p40() {
+        // br-frankenpandas-x6p40: two ordered categorical columns compare by
+        // their categories' order (y before x, so x < y is false), a NaN
+        // code false - true under != - and unordered categories that differ
+        // refuse; a column holding its values (Series::with_categories' form)
+        // compares by the codes read off them. NEGATIVE: equal unordered
+        // categories compare by value.
+        use fp_types::CategoricalMetadata;
+        let meta = |categories: &[&str], ordered: bool| CategoricalMetadata {
+            categories: categories
+                .iter()
+                .map(|category| Scalar::Utf8((*category).to_owned()))
+                .collect(),
+            ordered,
+        };
+        let frame = |column: Column| {
+            DataFrame::new(
+                Index::from_range(0, 3, 1),
+                BTreeMap::from([("a".to_owned(), column)]),
+            )
+            .unwrap()
+        };
+        let coded = |codes: Vec<i32>, meta: CategoricalMetadata| {
+            frame(Column::from_categorical_codes(codes, meta))
+        };
+        let flags = |result: DataFrame| result.column("a").unwrap().values().to_vec();
+        let left = coded(vec![1, 0, -1], meta(&["y", "x"], true));
+        let right = coded(vec![0, 0, 1], meta(&["y", "x"], true));
+        let none_less = [
+            Scalar::Bool(false),
+            Scalar::Bool(false),
+            Scalar::Bool(false),
+        ];
+        assert_eq!(flags(left.lt_df(&right).unwrap()), none_less);
+        assert_eq!(
+            flags(left.ne_df(&right).unwrap()),
+            [Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)]
+        );
+        let held = frame(
+            Column::from_values(vec![
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Utf8("y".to_owned()),
+                Scalar::Null(NullKind::NaN),
+            ])
+            .unwrap()
+            .with_categorical(Some(meta(&["y", "x"], true)))
+            .with_dtype(DType::Categorical),
+        );
+        assert_eq!(flags(held.lt_df(&right).unwrap()), none_less);
+        let unordered = coded(vec![0, 1, 0], meta(&["x", "y"], false));
+        assert!(
+            unordered
+                .eq_df(&coded(vec![0, 0, 0], meta(&["a"], false)))
+                .is_err()
+        );
+        let same = coded(vec![0, 0, -1], meta(&["x", "y"], false));
+        assert_eq!(
+            flags(unordered.eq_df(&same).unwrap()),
+            [Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false)]
         );
     }
 

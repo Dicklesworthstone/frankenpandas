@@ -7564,6 +7564,18 @@ fn reduction_to_py(
         }
         .into_py_any(py);
     }
+    // A date's or a duration's missing answer is NaT (a date's std a NaT
+    // duration), as pandas: an all-NaT column's mean / std was NaN
+    // (br-frankenpandas-eb0hv).
+    if result.is_missing()
+        && matches!(
+            series.dtype(),
+            DType::Datetime64 { .. } | DType::Timedelta64
+        )
+        && matches!(op, "min" | "max" | "mean" | "median" | "std")
+    {
+        return nat_object(py);
+    }
     let nan = matches!(result, Scalar::Float64(v) if v.is_nan())
         || matches!(result, Scalar::Null(NullKind::NaN));
     if nan
@@ -7596,7 +7608,9 @@ fn reduction_width(width: Option<NumericWidth>, op: &str) -> Option<NumericWidth
     let width = width?;
     match op {
         "min" | "max" | "first" | "last" => Some(width),
-        "sum" | "mean" | "median" | "std" | "var" | "prod" | "quantile" if width.is_float() => {
+        "sum" | "mean" | "median" | "std" | "var" | "sem" | "prod" | "quantile"
+            if width.is_float() =>
+        {
             Some(width)
         }
         "sum" | "prod" if width.is_unsigned() => Some(NumericWidth::UInt64),
@@ -11125,6 +11139,75 @@ impl RowlessKind {
     }
 }
 
+/// The dtype of one column's own answer to a reduction over the columns,
+/// as pandas' block reductions give it (br-frankenpandas-eb0hv; see
+/// [`PyDataFrame::column_series_answers`]).
+#[derive(Clone, PartialEq, Eq)]
+enum AnswerKind {
+    Bool,
+    Int64,
+    Float64,
+    Float32,
+    /// The column's own datetime dtype, its zone kept.
+    Datetime(DType),
+    Timedelta,
+}
+
+impl AnswerKind {
+    /// `column`'s answer to `op`: a date's std a duration, the rest of a
+    /// date's or duration's answers their own dtype, a float32 column's
+    /// float32, an int's sum / prod / min / max int64 (a bool's min / max
+    /// bool, sum / prod int64), any other float64. None for a column this
+    /// does not cover (masked, categorical, text, object, a narrow int).
+    fn of(column: &Column, op: &str) -> Option<Self> {
+        let width = column.width();
+        let dtype = column.dtype();
+        Some(match dtype {
+            DType::Datetime64 { .. } if op == "std" => Self::Timedelta,
+            DType::Datetime64 { .. } => Self::Datetime(dtype),
+            DType::Timedelta64 => Self::Timedelta,
+            DType::Float64 if width == Some(NumericWidth::Float32) => Self::Float32,
+            DType::Float64 if width.is_none() => Self::Float64,
+            DType::Int64 if width.is_none() && matches!(op, "sum" | "prod" | "min" | "max") => {
+                Self::Int64
+            }
+            DType::Int64 if width.is_none() => Self::Float64,
+            DType::Bool if matches!(op, "min" | "max") => Self::Bool,
+            DType::Bool if matches!(op, "sum" | "prod") => Self::Int64,
+            DType::Bool => Self::Float64,
+            _ => return None,
+        })
+    }
+
+    /// pandas' common dtype of the answers (find_common_type): one kind
+    /// stays itself, numbers of several kinds float64; a bool, a date or a
+    /// duration beside another kind object (None).
+    fn common(kinds: &[Self]) -> Option<Self> {
+        let first = kinds.first()?;
+        if kinds.iter().all(|kind| kind == first) {
+            return Some(first.clone());
+        }
+        kinds
+            .iter()
+            .all(|kind| matches!(kind, Self::Int64 | Self::Float64 | Self::Float32))
+            .then_some(Self::Float64)
+    }
+
+    /// The column of `values` in this dtype.
+    fn column(&self, values: Vec<Scalar>) -> Result<Column, fp_columnar::ColumnError> {
+        Ok(match self {
+            Self::Bool => Column::new(DType::Bool, values)?,
+            Self::Int64 => Column::new(DType::Int64, values)?,
+            Self::Float64 => Column::new(DType::Float64, values)?,
+            Self::Float32 => {
+                Column::new(DType::Float64, values)?.cast_to_width(NumericWidth::Float32, false)?
+            }
+            Self::Datetime(dtype) => Column::new(dtype.clone(), values)?,
+            Self::Timedelta => Column::new(DType::Timedelta64, values)?,
+        })
+    }
+}
+
 /// pandas' TypeError for `op` over a date or duration column - a date's
 /// sum / prod / var / sem / skew / kurt, a duration's prod / var / sem /
 /// skew / kurt: "'DatetimeArray' with dtype datetime64[ns] does not support
@@ -11146,6 +11229,22 @@ fn temporal_refusal(dtype: &DType, op: &str) -> Option<PyErr> {
         "'{array}' with dtype {} does not support reduction '{op}'",
         pandas_dtype_name(dtype)
     )))
+}
+
+/// The keyword arguments a frame reduction hands each column's Series
+/// reduction ([`PyDataFrame::column_series_answers`]): `skipna`, and the
+/// op's own count - `min_count` for sum / prod, `ddof` for std / var / sem.
+fn reduction_kwargs<'py>(
+    py: Python<'py>,
+    skipna: bool,
+    count: Option<(&str, usize)>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("skipna", skipna)?;
+    if let Some((name, value)) = count {
+        kwargs.set_item(name, value)?;
+    }
+    Ok(kwargs)
 }
 
 /// What `column`, holding no rows, answers for `op` (sum / prod / min /
@@ -23108,7 +23207,10 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 // pandas' groupby cumulative refusals by dtype (cemrq).
                 || msg.starts_with("function is not implemented for this dtype: [how->")
                 || msg.ends_with(" is not supported for object dtype")
-                || msg == r#"keep must be either "first", "last" or "all""#;
+                || msg == r#"keep must be either "first", "last" or "all""#
+                // pandas' Categorical comparison refusals (x6p40).
+                || msg == "Unordered Categoricals can only compare equality or not"
+                || msg == "Categoricals can only be compared if 'categories' are the same.";
             let text = if pandas_verbatim {
                 msg.clone()
             } else {
@@ -23134,6 +23236,7 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 // pandas' TypeErrors for unordered categoricals (hrxn9).
                 || lower.contains("categorical is not ordered for operation")
                 || lower.contains("unordered categoricals can only compare")
+                || lower.contains("categoricals can only be compared if")
                 || lower.contains("cannot compare a categorical")
                 // pandas' TypeErrors for localizing an aware column and
                 // converting a naive one.
@@ -34067,6 +34170,23 @@ impl PySeries {
             self.require_numeric("sem")?;
         }
         let ddof_val = ddof.unwrap_or(1);
+        // A float32 column's sem is numpy's float32 arithmetic: its var's
+        // sqrt over the count's, each a float32 (1.7500001 where the f64
+        // quotient rounded to 1.75; br-frankenpandas-eb0hv).
+        if self.inner.column().width() == Some(NumericWidth::Float32)
+            && let Scalar::Float64(var) = self.inner.column().var_skipna(ddof_val, skipna)
+            && !var.is_nan()
+        {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+            let sem = (var as f32).sqrt() / (self.inner.count() as f32).sqrt();
+            return Python::attach(|py| {
+                numpy_scalar_of(
+                    py,
+                    &Scalar::Float64(f64::from(sem)),
+                    Some(NumericWidth::Float32),
+                )
+            });
+        }
         let result = self.inner.column().sem_skipna(ddof_val, skipna);
         Python::attach(|py| reduction_to_py(py, &self.inner, "sem", &result))
     }
@@ -39965,7 +40085,7 @@ impl PyDataFrame {
         numeric_only: bool,
     ) -> Result<Series, FrameError> {
         if axis == 1 {
-            if numeric_only {
+            let reduced = if numeric_only {
                 self.numeric_inner()?.sum_axis1()
             } else if self.has_non_numeric() {
                 Err(FrameError::CompatibilityRejected(
@@ -39974,7 +40094,10 @@ impl PyDataFrame {
                 ))
             } else {
                 self.inner.sum_axis1()
-            }
+            }?;
+            // skipna=False: a row holding a missing value is NaN (it was
+            // skipped, as under skipna=True; br-frankenpandas-xm57b).
+            self.missing_is_nan(reduced, axis, numeric_only, skipna)
         } else {
             let df = if numeric_only {
                 self.numeric_inner()?
@@ -39996,7 +40119,7 @@ impl PyDataFrame {
         numeric_only: bool,
     ) -> Result<Series, FrameError> {
         if axis == 1 {
-            if numeric_only {
+            let reduced = if numeric_only {
                 self.numeric_inner()?.mean_axis1()
             } else if self.has_non_numeric() {
                 Err(FrameError::CompatibilityRejected(
@@ -40005,7 +40128,10 @@ impl PyDataFrame {
                 ))
             } else {
                 self.inner.mean_axis1()
-            }
+            }?;
+            // skipna=False: a row holding a missing value is NaN (it was
+            // skipped, as under skipna=True; br-frankenpandas-xm57b).
+            self.missing_is_nan(reduced, axis, numeric_only, skipna)
         } else {
             let df = if numeric_only {
                 self.numeric_inner()?
@@ -40472,7 +40598,7 @@ impl PyDataFrame {
         numeric_only: bool,
     ) -> Result<Series, FrameError> {
         if axis == 1 {
-            if numeric_only {
+            let reduced = if numeric_only {
                 self.numeric_inner()?.prod_axis1()
             } else if self.has_non_numeric() {
                 Err(FrameError::CompatibilityRejected(
@@ -40481,7 +40607,10 @@ impl PyDataFrame {
                 ))
             } else {
                 self.inner.prod_axis1()
-            }
+            }?;
+            // skipna=False: a row holding a missing value is NaN (it was
+            // skipped, as under skipna=True; br-frankenpandas-xm57b).
+            self.missing_is_nan(reduced, axis, numeric_only, skipna)
         } else {
             let df = if numeric_only {
                 self.numeric_inner()?
@@ -40686,7 +40815,10 @@ impl PyDataFrame {
         numeric_only: bool,
         min_count: usize,
     ) -> PyResult<Option<PySeries>> {
-        if !self.inner.index().is_empty()
+        // Over the columns, a frame without columns answers as one without
+        // rows: an empty float64 Series (it was object; ksd1f).
+        let columnless = axis == 0 && self.inner.num_columns() == 0;
+        if !(self.inner.index().is_empty() || columnless)
             || self.inner.row_multiindex().is_some()
             || self.inner.columns_multiindex().is_some()
         {
@@ -40728,6 +40860,100 @@ impl PyDataFrame {
             (index, answers)
         };
         let column = common.column(values).map_err(column_error_to_py)?;
+        let inner = Series::new("", index, column).map_err(frame_error_to_py)?;
+        Ok(Some(PySeries { inner }))
+    }
+
+    /// pandas' `op` over the columns (axis=0) of a frame holding a date, a
+    /// duration or a float32 column, or a float column of missing values
+    /// alone: each column's own Series answer
+    /// (`kwargs` the frame call's), in their common dtype ([`AnswerKind`]),
+    /// as pandas reduces each block alone and finds the blocks' common type.
+    /// A date column's mean / median / std raised; a float32 frame answered
+    /// float64 (pandas float32, its std rounded there); an all-NaN column's
+    /// std and an all-NaT date's min answered object
+    /// (br-frankenpandas-eb0hv). None for any other frame.
+    fn column_series_answers(
+        &self,
+        py: Python<'_>,
+        op: &str,
+        axis: usize,
+        numeric_only: bool,
+        kwargs: &Bound<'_, PyDict>,
+    ) -> PyResult<Option<PySeries>> {
+        if axis != 0
+            || self.inner.index().is_empty()
+            || self.inner.row_multiindex().is_some()
+            || self.inner.columns_multiindex().is_some()
+        {
+            return Ok(None);
+        }
+        let mut kinds = Vec::new();
+        let mut picked = Vec::new();
+        let mut needed = false;
+        for name in self.inner.column_names() {
+            let Some(column) = self.inner.column(name) else {
+                return Ok(None);
+            };
+            let dtype = column.dtype();
+            let number = matches!(
+                dtype,
+                DType::Bool
+                    | DType::Int64
+                    | DType::Float64
+                    | DType::BoolNullable
+                    | DType::Int64Nullable
+                    | DType::Float64Nullable
+            );
+            if numeric_only && !number {
+                continue;
+            }
+            let Some(kind) = AnswerKind::of(column, op) else {
+                return Ok(None);
+            };
+            let all_missing = || {
+                column
+                    .as_f64_slice_with_validity()
+                    .is_some_and(|(data, validity)| {
+                        data.iter()
+                            .enumerate()
+                            .all(|(row, value)| !validity.get(row) || value.is_nan())
+                    })
+            };
+            needed |= matches!(kind, AnswerKind::Datetime(_) | AnswerKind::Timedelta)
+                || kind == AnswerKind::Float32
+                || all_missing();
+            kinds.push(kind);
+            picked.push(name.clone());
+        }
+        if !needed {
+            return Ok(None);
+        }
+        let mut answers = Vec::with_capacity(picked.len());
+        for name in &picked {
+            let Some(column) = self.inner.column(name).cloned() else {
+                return Ok(None);
+            };
+            let series = Series::new(name.as_str(), self.inner.index().clone(), column)
+                .map_err(frame_error_to_py)?;
+            let answer = Py::new(py, PySeries { inner: series })?
+                .into_bound(py)
+                .call_method(op, (), Some(kwargs))?;
+            answers.push(py_to_scalar(py, &answer)?);
+        }
+        let column = match AnswerKind::common(&kinds) {
+            Some(kind) => kind.column(answers).map_err(column_error_to_py)?,
+            None => Column::from_object_values(answers),
+        };
+        let index = if picked.len() == self.inner.num_columns() {
+            self.column_axis_index()
+        } else {
+            let labels = picked
+                .iter()
+                .map(|name| self.inner.column_label(name))
+                .collect();
+            Index::new(labels).rename_index(self.inner.columns_name())
+        };
         let inner = Series::new("", index, column).map_err(frame_error_to_py)?;
         Ok(Some(PySeries { inner }))
     }
@@ -42946,6 +43172,15 @@ impl PyDataFrame {
             Some(span) if built.row_multiindex().is_none() => built.with_range_span(Some(span)),
             _ => built,
         };
+        // A frame built without columns, none named, has pandas' empty
+        // RangeIndex columns (DataFrame(), DataFrame({}), DataFrame(index=
+        // [1, 2]); they were an object Index; br-frankenpandas-ksd1f).
+        // Named ones (columns=[]) stay object, as pandas keeps them.
+        let built = if built.num_columns() == 0 && columns.is_none_or(|columns| columns.is_none()) {
+            built.with_column_range((0, 0, 1))
+        } else {
+            built
+        };
         let column_multi = match columns {
             Some(columns) => columns
                 .extract::<PyRef<'_, PyMultiIndex>>()
@@ -44400,8 +44635,21 @@ impl PyDataFrame {
         {
             return wrap_series(summed);
         }
+        // Its rows' sums: its source columns' (br-frankenpandas-rc0923-epic-
+        // zero-certified-losses-bss5q.2).
+        #[cfg(feature = "lazy-transpose-view")]
+        if ax == 1
+            && skipna
+            && let Some(summed) = self.inner.lazy_transpose_row_sum_or_mean(false, min_count)
+        {
+            return wrap_series(summed);
+        }
         self.refuse_temporal_columns("sum", ax, numeric_only)?;
         if let Some(answer) = self.rowless_answer("sum", ax, numeric_only, min_count)? {
+            return Ok(answer);
+        }
+        let kwargs = reduction_kwargs(py, skipna, Some(("min_count", min_count)))?;
+        if let Some(answer) = self.column_series_answers(py, "sum", ax, numeric_only, &kwargs)? {
             return Ok(answer);
         }
         self.refuse_masked_rows("sum", ax, numeric_only)?;
@@ -44508,7 +44756,19 @@ impl PyDataFrame {
         {
             return wrap_series(means)?.into_py_any(py);
         }
+        // Its rows' means: its source columns' (bss5q.2).
+        #[cfg(feature = "lazy-transpose-view")]
+        if ax == 1
+            && skipna
+            && let Some(means) = self.inner.lazy_transpose_row_sum_or_mean(true, 0)
+        {
+            return wrap_series(means)?.into_py_any(py);
+        }
         if let Some(answer) = self.rowless_answer("mean", ax, numeric_only, 0)? {
+            return answer.into_py_any(py);
+        }
+        let kwargs = reduction_kwargs(py, skipna, None)?;
+        if let Some(answer) = self.column_series_answers(py, "mean", ax, numeric_only, &kwargs)? {
             return answer.into_py_any(py);
         }
         self.refuse_masked_rows("mean", ax, numeric_only)?;
@@ -44550,6 +44810,10 @@ impl PyDataFrame {
         if let Some(answer) = self.rowless_answer("median", ax, numeric_only, 0)? {
             return answer.into_py_any(py);
         }
+        let kwargs = reduction_kwargs(py, skipna, None)?;
+        if let Some(answer) = self.column_series_answers(py, "median", ax, numeric_only, &kwargs)? {
+            return answer.into_py_any(py);
+        }
         self.refuse_masked_rows("median", ax, numeric_only)?;
         self.refuse_mixed_object_median(ax, numeric_only)?;
         if let Some(floats) = self.object_rows_as_floats(ax, numeric_only, skipna, "median")? {
@@ -44582,6 +44846,10 @@ impl PyDataFrame {
         let ax = parse_axis_param(axis.0.as_ref().filter(|axis| !axis.is_none()))?;
         let ddof_val = ddof.unwrap_or(1);
         if let Some(answer) = self.rowless_answer("std", ax, numeric_only, 0)? {
+            return Ok(answer);
+        }
+        let kwargs = reduction_kwargs(py, skipna, Some(("ddof", ddof_val)))?;
+        if let Some(answer) = self.column_series_answers(py, "std", ax, numeric_only, &kwargs)? {
             return Ok(answer);
         }
         self.refuse_masked_rows("std", ax, numeric_only)?;
@@ -44618,6 +44886,10 @@ impl PyDataFrame {
         if let Some(answer) = self.rowless_answer("var", ax, numeric_only, 0)? {
             return Ok(answer);
         }
+        let kwargs = reduction_kwargs(py, skipna, Some(("ddof", ddof_val)))?;
+        if let Some(answer) = self.column_series_answers(py, "var", ax, numeric_only, &kwargs)? {
+            return Ok(answer);
+        }
         self.refuse_masked_rows("var", ax, numeric_only)?;
         if let Some(floats) = self.object_rows_as_floats(ax, numeric_only, skipna, "var")? {
             return object_answer(wrap_series(
@@ -44649,6 +44921,17 @@ impl PyDataFrame {
             .map_err(frame_error_to_py)?;
             return Ok(PySeries { inner });
         }
+        // Over the columns of a frame without any: pandas' empty int64 (it
+        // was object; br-frankenpandas-ksd1f).
+        if ax == 0 && self.inner.num_columns() == 0 && self.inner.columns_multiindex().is_none() {
+            let inner = Series::new(
+                "",
+                self.column_axis_index(),
+                Column::from_i64_values_owned(Vec::new()),
+            )
+            .map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner });
+        }
         wrap_series(self.count_internal(ax, numeric_only))
     }
 
@@ -44674,6 +44957,10 @@ impl PyDataFrame {
         }
         let ax = parse_axis_param(axis.0.as_ref())?;
         if let Some(answer) = self.rowless_answer("min", ax, numeric_only, 0)? {
+            return answer.into_py_any(py);
+        }
+        let kwargs = reduction_kwargs(py, skipna, None)?;
+        if let Some(answer) = self.column_series_answers(py, "min", ax, numeric_only, &kwargs)? {
             return answer.into_py_any(py);
         }
         self.refuse_masked_rows("min", ax, numeric_only)?;
@@ -44713,6 +45000,10 @@ impl PyDataFrame {
         }
         let ax = parse_axis_param(axis.0.as_ref())?;
         if let Some(answer) = self.rowless_answer("max", ax, numeric_only, 0)? {
+            return answer.into_py_any(py);
+        }
+        let kwargs = reduction_kwargs(py, skipna, None)?;
+        if let Some(answer) = self.column_series_answers(py, "max", ax, numeric_only, &kwargs)? {
             return answer.into_py_any(py);
         }
         self.refuse_masked_rows("max", ax, numeric_only)?;
@@ -49438,6 +49729,10 @@ impl PyDataFrame {
         {
             return Ok(answer);
         }
+        let kwargs = reduction_kwargs(py, skipna, Some(("min_count", min_count.unwrap_or(0))))?;
+        if let Some(answer) = self.column_series_answers(py, "prod", ax, numeric_only, &kwargs)? {
+            return Ok(answer);
+        }
         self.refuse_masked_rows("prod", ax, numeric_only)?;
         if let Some(answer) = self.empty_object_rows_answer(ax, numeric_only)? {
             return Ok(answer);
@@ -49730,6 +50025,10 @@ impl PyDataFrame {
         if let Some(answer) = self.rowless_answer("sem", ax, numeric_only, 0)? {
             return Ok(answer);
         }
+        let kwargs = reduction_kwargs(py, skipna, Some(("ddof", ddof_val)))?;
+        if let Some(answer) = self.column_series_answers(py, "sem", ax, numeric_only, &kwargs)? {
+            return Ok(answer);
+        }
         self.refuse_masked_rows("sem", ax, numeric_only)?;
         if let Some(floats) = self.object_rows_as_floats(ax, numeric_only, skipna, "sem")? {
             return object_answer(wrap_series(
@@ -49765,6 +50064,10 @@ impl PyDataFrame {
         let ax = parse_axis_param(axis.0.as_ref())?;
         self.refuse_temporal_columns("skew", ax, numeric_only)?;
         if let Some(answer) = self.rowless_answer("skew", ax, numeric_only, 0)? {
+            return answer.into_py_any(py);
+        }
+        let kwargs = reduction_kwargs(py, skipna, None)?;
+        if let Some(answer) = self.column_series_answers(py, "skew", ax, numeric_only, &kwargs)? {
             return answer.into_py_any(py);
         }
         self.refuse_masked_rows("skew", ax, numeric_only)?;
@@ -49803,6 +50106,10 @@ impl PyDataFrame {
         let ax = parse_axis_param(axis.0.as_ref())?;
         self.refuse_temporal_columns("kurt", ax, numeric_only)?;
         if let Some(answer) = self.rowless_answer("kurt", ax, numeric_only, 0)? {
+            return answer.into_py_any(py);
+        }
+        let kwargs = reduction_kwargs(py, skipna, None)?;
+        if let Some(answer) = self.column_series_answers(py, "kurt", ax, numeric_only, &kwargs)? {
             return answer.into_py_any(py);
         }
         self.refuse_masked_rows("kurt", ax, numeric_only)?;
@@ -52766,6 +53073,16 @@ impl PyDataFrame {
             let inner = Series::new(
                 "",
                 self.inner.index().clone(),
+                Column::new(DType::Float64, Vec::new()).map_err(column_error_to_py)?,
+            )
+            .map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner });
+        }
+        // ... and over the columns of a frame without any (ksd1f).
+        if ax == 0 && self.inner.num_columns() == 0 && self.inner.columns_multiindex().is_none() {
+            let inner = Series::new(
+                "",
+                self.column_axis_index(),
                 Column::new(DType::Float64, Vec::new()).map_err(column_error_to_py)?,
             )
             .map_err(frame_error_to_py)?;

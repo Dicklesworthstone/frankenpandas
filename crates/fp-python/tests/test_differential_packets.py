@@ -29901,3 +29901,228 @@ def test_resample_extremes_and_counts_like_pandas_bss5q3(case: str) -> None:
         )
 
     assert run(fpd) == run(pd)
+
+
+def _bss5q2_frame(m: Any, holes: bool) -> Any:
+    rng = np.random.default_rng(47)
+    frame = m.DataFrame({name: rng.normal(size=500) * 1e3 for name in ["a", "b", "c"]})
+    if holes:
+        frame = m.DataFrame(
+            {
+                "a": np.where(np.arange(500) % 9 == 0, np.nan, rng.normal(size=500)),
+                "b": np.full(500, np.nan),
+                "c": rng.normal(size=500),
+            }
+        )
+    return frame
+
+
+_BSS5Q2_CASES = {
+    "T.sum(axis=1)": lambda m: _bss5q2_frame(m, False).T.sum(axis=1),
+    "T.mean(axis=1)": lambda m: _bss5q2_frame(m, False).T.mean(axis=1),
+    "T.sum(axis=1) with NaN": lambda m: _bss5q2_frame(m, True).T.sum(axis=1),
+    "T.mean(axis=1) with NaN": lambda m: _bss5q2_frame(m, True).T.mean(axis=1),
+    "T.sum(axis=1, min_count=400)": lambda m: _bss5q2_frame(m, True).T.sum(axis=1, min_count=400),
+    "int columns T.T": lambda m: m.DataFrame({0: [1.5, 2.0], 1: [3.0, -1.0]}).T.sum(axis=1),
+    # NEGATIVE: ints keep the column path (skipna=False too, whose wide rows'
+    # last bits are br-frankenpandas-gqjc5).
+    "ints T.sum(axis=1) (NEGATIVE)": lambda m: m.DataFrame({"a": np.arange(50), "b": np.arange(50) * 3}).T.sum(axis=1),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_BSS5Q2_CASES))
+def test_transposed_row_reductions_like_pandas_bss5q2(case: str) -> None:
+    # A lazily transposed float frame's row sums / means are its source
+    # columns' (pandas answers df.T.sum(axis=1) with df.sum()'s bits; each
+    # row was a column of the materialized view: 0.36x pandas;
+    # br-frankenpandas-rc0923-epic-zero-certified-losses-bss5q.2): bits,
+    # labels (int column labels stay ints), min_count. NEGATIVE: an int frame
+    # through the column path.
+    def run(m: Any) -> Any:
+        result = _BSS5Q2_CASES[case](m)
+        return (
+            str(result.dtype),
+            [repr(v) for v in result.index],
+            [v.hex() if isinstance(v, float) and v == v else repr(v) for v in result.tolist()],
+        )
+
+    assert run(fpd) == run(pd)
+
+
+def _xm57b_frame(m: Any) -> Any:
+    nan = float("nan")
+    return m.DataFrame(
+        {
+            "a": [1.0, nan, 3.0, 4.0],
+            "b": [2.0, 3.0, nan, 5.0],
+            "c": [0.5, 1.0, 1.5, 2.5],
+            "t": ["x", "y", "z", "w"],
+        }
+    )
+
+
+_XM57B_CASES = {
+    **{
+        f"{op}": (lambda m, op=op: getattr(_xm57b_frame(m)[["a", "b", "c"]], op)(axis=1, skipna=False))
+        for op in ["sum", "prod", "mean"]
+    },
+    **{
+        f"{op} numeric_only": (
+            lambda m, op=op: getattr(_xm57b_frame(m), op)(axis=1, skipna=False, numeric_only=True)
+        )
+        for op in ["sum", "prod", "mean"]
+    },
+    "sum of a transposed frame": lambda m: _xm57b_frame(m)[["a", "b", "c"]].T.sum(axis=1, skipna=False),
+    "sum min_count=2": lambda m: _xm57b_frame(m)[["a", "b", "c"]].sum(axis=1, skipna=False, min_count=2),
+    # NEGATIVE: median already took skipna; a frame without NaN and an int
+    # frame answer the same for either skipna.
+    "median (NEGATIVE)": lambda m: _xm57b_frame(m)[["a", "b", "c"]].median(axis=1, skipna=False),
+    "no NaN (NEGATIVE)": lambda m: _xm57b_frame(m)[["c"]].assign(d=[1.0, 2.0, 3.0, 4.0]).sum(axis=1, skipna=False),
+    "ints (NEGATIVE)": lambda m: m.DataFrame({"i": [1, 2], "j": [3, 4]}).mean(axis=1, skipna=False),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_XM57B_CASES))
+def test_row_reductions_skipna_false_like_pandas_xm57b(case: str) -> None:
+    # sum / prod / mean over rows with skipna=False: a row holding a missing
+    # value is NaN, as pandas (it was skipped as under skipna=True: [3.0,
+    # 3.0] for pandas' [3.0, nan]; br-frankenpandas-xm57b). NEGATIVE: median
+    # (already right), a frame without NaN, an int frame.
+    def run(m: Any) -> Any:
+        result = _XM57B_CASES[case](m)
+        return str(result.dtype), list(result.index), [repr(v) if v == v else "nan" for v in result.tolist()]
+
+    assert run(fpd) == run(pd)
+
+
+def _eb0hv_frames(m: Any) -> dict:
+    nan = float("nan")
+    index = [10, 20]
+    return {
+        "all-NaN float": m.DataFrame({"f": [nan, nan]}, index=index),
+        "all-NaN float beside an int": m.DataFrame({"f": [nan, nan], "i": [1, 2]}, index=index),
+        "float32": m.DataFrame({"g": m.Series([1.5, -2.0], dtype="float32", index=index)}, index=index),
+        "float32 beside float64": m.DataFrame(
+            {"g": m.Series([1.5, -2.0], dtype="float32", index=index), "f": [0.5, 1.0]}, index=index
+        ),
+        "dates": m.DataFrame({"d": m.to_datetime(["2020-01-01", "2021-06-30"])}),
+        "all-NaT dates": m.DataFrame({"d": m.to_datetime([None, None])}),
+        "all-NaT durations": m.DataFrame({"t": m.to_timedelta([None, None])}),
+        "dates beside an int": m.DataFrame({"d": m.to_datetime(["2020-01-01", "2021-06-30"]), "i": [1, 2]}),
+        # NEGATIVE: plain float and int frames keep their path.
+        "floats (NEGATIVE)": m.DataFrame({"f": [0.5, 2.0, -1.0], "h": [1.0, nan, 3.0]}),
+        "ints (NEGATIVE)": m.DataFrame({"i": [1, 2, 4], "j": [5, -1, 0]}),
+    }
+
+
+_EB0HV_OPS = ["sum", "prod", "min", "max", "mean", "median", "std", "var", "sem", "skew", "kurt"]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("frame", list(_eb0hv_frames(pd)))
+def test_column_reductions_keep_dtypes_like_pandas_eb0hv(frame: str) -> None:
+    # A frame's reductions over its columns answer each column as its own
+    # Series does, in the columns' common dtype, as pandas reduces each
+    # block (br-frankenpandas-eb0hv): a float32 frame float32 (its std
+    # rounded there; it was float64), a date's mean / median / std (they
+    # raised), an all-NaN column's std float64 and an all-NaT date's min
+    # datetime64 (they were object). NEGATIVE: plain float and int frames.
+    def run(m: Any) -> Any:
+        answers = []
+        for op in _EB0HV_OPS:
+            try:
+                result = getattr(_eb0hv_frames(m)[frame], op)()
+            except Exception as error:  # noqa: BLE001
+                answers.append((op, type(error).__name__))
+                continue
+            answers.append((op, str(result.dtype), list(result.index), [str(v) for v in result.tolist()]))
+        return answers
+
+    assert run(fpd) == run(pd)
+
+
+_KSD1F_CASES = {
+    "DataFrame()": lambda m: m.DataFrame(),
+    "DataFrame({})": lambda m: m.DataFrame({}),
+    "DataFrame([])": lambda m: m.DataFrame([]),
+    "DataFrame(index=[1, 2])": lambda m: m.DataFrame(index=[1, 2]),
+    "columns=[]": lambda m: m.DataFrame(columns=[]),
+    "every column dropped": lambda m: m.DataFrame({"a": ["x"]}).drop(columns=["a"]),
+    # NEGATIVE: named-empty and dropped-to-nothing column axes stay object.
+    "columns=[] axis (NEGATIVE)": lambda m: m.DataFrame(columns=[]),
+    "every column dropped axis (NEGATIVE)": lambda m: m.DataFrame({"a": ["x"]}).drop(columns=["a"]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_KSD1F_CASES))
+def test_columnless_frame_axis_like_pandas_ksd1f(case: str) -> None:
+    # A frame built without columns, none named, has pandas' empty
+    # RangeIndex columns (it was an object Index, so its reductions'
+    # index was object; br-frankenpandas-ksd1f): the column axis and the
+    # sum / count / nunique answers' dtypes and index dtypes. NEGATIVE:
+    # columns=[] and a frame whose columns were all dropped stay object.
+    def run(m: Any) -> Any:
+        frame = _KSD1F_CASES[case](m)
+        answers = [(type(frame.columns).__name__, str(frame.columns.dtype), list(frame.columns))]
+        if case.endswith("(NEGATIVE)"):
+            return answers
+        for op in ["sum", "count", "nunique", "mean"]:
+            result = getattr(frame, op)()
+            answers.append((op, str(result.dtype), str(result.index.dtype), len(result)))
+        return answers
+
+    assert run(fpd) == run(pd)
+
+
+def _x6p40_pair(m: Any, left: tuple, right: tuple, frame: bool) -> tuple:
+    def build(values: list, categories: list, ordered: bool) -> Any:
+        column = m.Categorical(values, categories=categories, ordered=ordered)
+        return m.DataFrame({"a": column}) if frame else m.Series(column)
+
+    return build(*left), build(*right)
+
+
+_X6P40_PAIRS = {
+    "ordered, categories y before x": ((["x", "y", "x"], ["y", "x"], True), (["y", "y", "x"], ["y", "x"], True)),
+    "ordered with a NaN": ((["x", None, "y"], ["y", "x"], True), (["y", "y", None], ["y", "x"], True)),
+    "unordered, categories differ": ((["a", "b"], ["a", "b"], False), (["b", "b"], ["b"], False)),
+    "unordered, categories permuted": ((["x", "y"], ["x", "y"], False), (["y", "y"], ["y", "x"], False)),
+    "ordered beside unordered": ((["x", "y"], ["x", "y"], True), (["x", "y"], ["x", "y"], False)),
+    "ordered, categories in another order": ((["x", "y"], ["x", "y"], True), (["x", "y"], ["y", "x"], True)),
+    # NEGATIVE: equal unordered categories compare by value, a NaN False
+    # (True under !=), as before.
+    "unordered, same categories (NEGATIVE)": ((["x", None, "y"], ["x", "y"], False), (["x", None, "x"], ["x", "y"], False)),
+}
+_X6P40_OPERATORS = ["__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__"]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("frame", [False, True])
+@pytest.mark.parametrize("pair", list(_X6P40_PAIRS))
+def test_categorical_comparisons_like_pandas_x6p40(pair: str, frame: bool) -> None:
+    # Two categoricals compare as pandas' Categorical does
+    # (br-frankenpandas-x6p40): ordered ones by their categories' order (a
+    # frame ordered them by their values' text), equality only over
+    # matching categories - any order when unordered, the same order when
+    # ordered - else pandas' TypeError (they compared), an ordering of an
+    # unordered one refused; a NaN False, True under !=. Frame and Series.
+    # NEGATIVE: equal unordered categories under == / !=.
+    operators = _X6P40_OPERATORS[:2] if pair.endswith("(NEGATIVE)") else _X6P40_OPERATORS
+
+    def run(m: Any) -> Any:
+        left, right = _x6p40_pair(m, *_X6P40_PAIRS[pair], frame)
+        answers = []
+        for name in operators:
+            try:
+                result = getattr(left, name)(right)
+            except Exception as error:  # noqa: BLE001
+                answers.append((name, type(error).__name__, str(error)))
+                continue
+            result = result["a"] if frame else result
+            answers.append((name, str(result.dtype), result.tolist()))
+        return answers
+
+    assert run(fpd) == run(pd)
