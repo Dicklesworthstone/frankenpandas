@@ -30898,6 +30898,38 @@ _LSN8D2_OPS = {
     "sort_index": lambda m, i: _lsn8d2_frame(m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").sort_index().to_frame()),
     "Series shift freq": lambda m, i: _lsn8d2_frame(m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").shift(1, freq="D").to_frame()),
     "Series shift -2 hours": lambda m, i: _lsn8d2_index(m.Series(np.arange(len(i), dtype="float64"), index=i).shift(-2, freq="h").index),
+    "sort_index descending": lambda m, i: _lsn8d2_frame(m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").sort_index(ascending=False).to_frame()),
+    # NEGATIVE: NaT is placed where asked, which the instants alone cannot say.
+    "sort_index, NaT first": lambda m, i: _lsn8d2_frame(m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").sort_index(na_position="first").to_frame()),
+    "groupby its hour": lambda m, i: _lsn8d2_frame(m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").groupby(i.hour).sum().to_frame()),
+    "groupby an Index of ints": lambda m, i: _lsn8d2_frame(m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").groupby(m.Index(np.arange(len(i)) % 2)).sum().to_frame()),
+    "groupby a list": lambda m, i: _lsn8d2_frame(m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").groupby([k % 3 for k in range(len(i))]).sum().to_frame()),
+    "between_time 05:00-13:00": lambda m, i: (lambda out: (_lsn8d2_frame(out.to_frame()), _lsn8d2_index(out.index)))(
+        m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").between_time("05:00", "13:00")
+    ),
+    # Past midnight it wraps: the times after 17:00 or before 01:00.
+    "between_time 17:00-01:00": lambda m, i: (lambda out: (_lsn8d2_frame(out.to_frame()), _lsn8d2_index(out.index)))(
+        m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").between_time("17:00", "01:00")
+    ),
+    # NEGATIVE: open ends leave 06:00 and 18:00 out.
+    "between_time open": lambda m, i: _lsn8d2_frame(
+        m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").between_time("06:00", "18:00", inclusive="neither").to_frame()
+    ),
+    "at_time midnight": lambda m, i: (lambda out: (_lsn8d2_frame(out.to_frame()), _lsn8d2_index(out.index)))(
+        m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").at_time("00:00")
+    ),
+    "frame between_time": lambda m, i: _lsn8d2_frame(
+        m.DataFrame({"v": np.arange(len(i), dtype="float64")}, index=i).between_time("05:00", "19:00")
+    ),
+    # Each field under the index's name (the named indexes failed: it was
+    # dropped), int32 - float64 beside NaT.
+    "calendar fields": lambda m, i: [
+        (field, getattr(i, field).name, str(getattr(i, field).dtype), [str(v) for v in getattr(i, field)])
+        for field in (
+            "year", "month", "day", "hour", "minute", "second", "microsecond", "nanosecond", "dayofweek",
+            "day_of_week", "weekday", "quarter", "dayofyear", "day_of_year", "days_in_month", "daysinmonth",
+        )
+    ],
 }
 
 

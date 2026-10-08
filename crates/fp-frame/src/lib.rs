@@ -16086,6 +16086,30 @@ impl Series {
             let order = fp_columnar::radix_argsort_i64(&values, ascending);
             return self.sorted_index_by_positions(&order);
         }
+        // A datetime index without NaT sorts as its nanos (UTC instants for
+        // a zoned one): returned as it is when already ordered the asked way
+        // (its cached order flags), else radix-sorted - its labels were
+        // built and compared a pair at a time (s.sort_index() of a sorted
+        // index 0.04x pandas at 1M; br-frankenpandas-lsn8d).
+        if ranks.is_none()
+            && let Some(nanos) = self.index.datetime64_label_values()
+            && !nanos.contains(&i64::MIN)
+        {
+            let increasing = self.index.is_monotonic_increasing();
+            let decreasing = self.index.is_monotonic_decreasing();
+            if (ascending && increasing) || (!ascending && decreasing) {
+                return Ok(self.clone());
+            }
+            // Strictly ordered the other way it is the reverse, `[::-1]`, as
+            // the int index above (the radix sort measured 4x the labels'
+            // sort, which meets that as one run); repeats keep their order,
+            // so they sort.
+            if (increasing || decreasing) && !self.index.has_duplicates() {
+                return self.iloc_step(self.len() - 1, -1, self.len());
+            }
+            let order = fp_columnar::radix_argsort_i64(&nanos, ascending);
+            return self.sorted_index_by_positions(&order);
+        }
         let mut order = (0..self.len()).collect::<Vec<_>>();
         let labels = self.index.labels();
         order.sort_by(|&left, &right| {
@@ -32223,28 +32247,10 @@ impl Series {
     ///
     /// Matches `s.at_time(time)`.
     pub fn at_time(&self, time: &str) -> Result<Self, FrameError> {
-        // Per br-frankenpandas-g3jqn: pandas raises TypeError when the
-        // index is not a DatetimeIndex. We approximate by requiring that
-        // at least one label parses as a datetime string (the storage
-        // format used for datetime indices in this crate).
-        require_datetime_index(self.index.labels(), "at_time")?;
-        let target = time_argument(time, "at_time")?;
-        let keep = between_time_positions(
-            &wall_clock_labels(&self.index),
-            target,
-            target,
-            IntervalClosed::Both,
-        );
-
-        // A temporal selector builds a datetime index from string input, so the
-        // result renders the parsed Timestamp rather than echoing the caller's
-        // spelling. br-frankenpandas-at-time-index-string-preserved-qddtp added
-        // `canonicalize_datetime_index_labels` for exactly this and applied it to
-        // the DATAFRAME selectors only; these two Series siblings kept the ISO
-        // `T`. (br-frankenpandas-2und8)
+        let (keep, instants) =
+            time_of_day_rows(&self.index, "at_time", time, time, IntervalClosed::Both)?;
         let mut selected = self.reorder_by_positions(&keep)?;
-        let freq = fp_index::take_freq(self.index.freq().map(str::to_owned), &keep);
-        selected.index = canonicalize_datetime_index_labels(&selected.index, freq);
+        selected.index = time_of_day_index(&self.index, &selected.index, &keep, instants);
         Ok(selected)
     }
 
@@ -32263,19 +32269,10 @@ impl Series {
         end: &str,
         inclusive: IntervalClosed,
     ) -> Result<Self, FrameError> {
-        // Per br-frankenpandas-g3jqn: see Series::at_time.
-        require_datetime_index(self.index.labels(), "between_time")?;
-        let keep = between_time_positions(
-            &wall_clock_labels(&self.index),
-            time_argument(start, "between_time")?,
-            time_argument(end, "between_time")?,
-            inclusive,
-        );
-
-        // See `Series::at_time` (br-frankenpandas-2und8).
+        let (keep, instants) =
+            time_of_day_rows(&self.index, "between_time", start, end, inclusive)?;
         let mut selected = self.reorder_by_positions(&keep)?;
-        let freq = fp_index::take_freq(self.index.freq().map(str::to_owned), &keep);
-        selected.index = canonicalize_datetime_index_labels(&selected.index, freq);
+        selected.index = time_of_day_index(&self.index, &selected.index, &keep, instants);
         Ok(selected)
     }
 
@@ -66670,43 +66667,101 @@ fn label_time_of_day(label: &IndexLabel) -> Option<i64> {
     }
 }
 
-/// The positions `between_time(start, end, inclusive=)` keeps: start <= t
-/// <= end (each end closed as `inclusive` says), or, when start is after
-/// end, the times past start or before end (pandas' wrap past midnight).
-fn between_time_positions(
-    labels: &[IndexLabel],
-    start: i64,
-    end: i64,
+/// The rows a time-of-day selection (`op`: `at_time`, or `between_time`
+/// with pandas' `inclusive=`) keeps of `index` - start <= t <= end (each end
+/// closed as `inclusive` says), or, when start is after end, the times past
+/// start or before end (pandas' wrap past midnight) - and whether the index
+/// holds its instants. One holding them (a typed DatetimeIndex backing, a
+/// date_range) is read off its nanos (an aware index's wall time in its
+/// zone): its labels were made, moved into the zone a label
+/// at a time and the result rebuilt from them (s.between_time 0.74x pandas
+/// at 1M; br-frankenpandas-lsn8d). Any other index is read off its labels,
+/// instants or datetime text - anything else is pandas' TypeError
+/// (br-frankenpandas-g3jqn).
+fn time_of_day_rows(
+    index: &Index,
+    op: &str,
+    start: &str,
+    end: &str,
     inclusive: IntervalClosed,
-) -> Vec<usize> {
-    let after_start = |time: i64| {
-        if inclusive.left_closed() {
-            start <= time
+) -> Result<(Vec<usize>, bool), FrameError> {
+    let instants = index.datetime64_label_values();
+    if instants.is_none() {
+        require_datetime_index(index.labels(), op)?;
+    }
+    // pandas compares microseconds since midnight (`_get_time_micros`), a
+    // NaT's -1: a window wrapping past midnight keeps NaT (-1 is before its
+    // end), no other does - it was never kept.
+    let start = time_argument(start, op)?.div_euclid(1000);
+    let end = time_argument(end, op)?.div_euclid(1000);
+    let kept = |micros: i64| {
+        let after_start = if inclusive.left_closed() {
+            start <= micros
         } else {
-            start < time
+            start < micros
+        };
+        let before_end = if inclusive.right_closed() {
+            micros <= end
+        } else {
+            micros < end
+        };
+        if start <= end {
+            after_start && before_end
+        } else {
+            after_start || before_end
         }
     };
-    let before_end = |time: i64| {
-        if inclusive.right_closed() {
-            time <= end
-        } else {
-            time < end
-        }
+    let Some(nanos) = instants else {
+        let rows = wall_clock_labels(index)
+            .iter()
+            .enumerate()
+            .filter(|(_, label)| {
+                let micros = if label.is_missing() {
+                    Some(-1)
+                } else {
+                    label_time_of_day(label).map(|time| time.div_euclid(1000))
+                };
+                micros.is_some_and(kept)
+            })
+            .map(|(row, _)| row)
+            .collect();
+        return Ok((rows, false));
     };
-    labels
+    // The zone parsed once and the rows read in parallel, as the dt
+    // accessor's wall clock (a parse a row made an aware index 0.25x pandas).
+    let spec = index.tz().and_then(|zone| parse_tz_spec(zone).ok());
+    let flags = DatetimeAccessor::par_map_nanos(&nanos, |ns| {
+        let micros = if ns == i64::MIN {
+            -1
+        } else {
+            let wall = spec.as_ref().map_or(ns, |spec| {
+                ns.saturating_add(i64::from(spec_offset_seconds(spec, ns)) * 1_000_000_000)
+            });
+            wall.rem_euclid(NANOS_PER_DAY).div_euclid(1000)
+        };
+        kept(micros)
+    });
+    let rows = flags
         .iter()
         .enumerate()
-        .filter(|(_, label)| {
-            label_time_of_day(label).is_some_and(|time| {
-                if start <= end {
-                    after_start(time) && before_end(time)
-                } else {
-                    after_start(time) || before_end(time)
-                }
-            })
-        })
-        .map(|(position, _)| position)
-        .collect()
+        .filter(|&(_, &keep)| keep)
+        .map(|(row, _)| row)
+        .collect();
+    Ok((rows, true))
+}
+
+/// The index of a time-of-day selection's rows `keep` of `source`, taken
+/// as `taken`: under the freq the selection keeps (pandas' take: the
+/// source's, scaled by a steady step - between_time over a run of hours
+/// 'h', at_time over days '24h'), its labels canonical unless it held
+/// instants (see `canonicalize_datetime_index_labels`; br-frankenpandas-2und8).
+fn time_of_day_index(source: &Index, taken: &Index, keep: &[usize], instants: bool) -> Index {
+    let freq = fp_index::take_freq(source.freq().map(str::to_owned), keep);
+    if instants {
+        taken.clone().with_freq(freq)
+    } else {
+        canonicalize_datetime_index_labels(taken, freq)
+    }
 }
 
 /// The strings pandas' `to_datetime` reads as missing rather than as an
@@ -76803,6 +76858,13 @@ impl DataFrame {
                 gathered.push(values[pos]);
             }
             Index::from_i64_values(gathered)
+        } else if let Some(nanos) = self.index.datetime64_label_values() {
+            // A DatetimeIndex's instants gathered typed, its zone kept as the
+            // labels' gather below keeps it - a 32 B label a row was cloned
+            // and an index rebuilt from them (df.between_time 0.64x pandas at
+            // 1M; br-frankenpandas-lsn8d).
+            Index::from_datetime64_values(positions.iter().map(|&pos| nanos[pos]).collect())
+                .with_tz(self.index.tz())?
         } else {
             let index_labels = self.index.labels();
 
@@ -77080,6 +77142,11 @@ impl DataFrame {
                 gathered.push(values[pos]);
             }
             Index::from_i64_values(gathered)
+        } else if let Some(nanos) = self.index.datetime64_label_values() {
+            // A DatetimeIndex's instants gathered typed (see
+            // take_rows_by_positions_unchecked).
+            Index::from_datetime64_values(positions.iter().map(|&pos| nanos[pos]).collect())
+                .with_tz(self.index.tz())?
         } else {
             let index_labels = self.index.labels();
 
@@ -94721,18 +94788,10 @@ impl DataFrame {
         end: &str,
         inclusive: IntervalClosed,
     ) -> Result<Self, FrameError> {
-        // Per br-frankenpandas-g3jqn: pandas raises TypeError on non-DatetimeIndex.
-        require_datetime_index(self.index.labels(), "between_time")?;
-        let keep = between_time_positions(
-            &wall_clock_labels(&self.index),
-            time_argument(start, "between_time")?,
-            time_argument(end, "between_time")?,
-            inclusive,
-        );
-
+        let (keep, instants) =
+            time_of_day_rows(&self.index, "between_time", start, end, inclusive)?;
         let mut selected = self.take_rows_by_positions(&keep)?;
-        let freq = fp_index::take_freq(self.index.freq().map(str::to_owned), &keep);
-        selected.index = canonicalize_datetime_index_labels(&selected.index, freq);
+        selected.index = time_of_day_index(&self.index, &selected.index, &keep, instants);
         Ok(selected)
     }
 
@@ -94740,19 +94799,10 @@ impl DataFrame {
     ///
     /// Matches `df.at_time(time)`.
     pub fn at_time(&self, time: &str) -> Result<Self, FrameError> {
-        // Per br-frankenpandas-g3jqn: pandas raises TypeError on non-DatetimeIndex.
-        require_datetime_index(self.index.labels(), "at_time")?;
-        let target = time_argument(time, "at_time")?;
-        let keep = between_time_positions(
-            &wall_clock_labels(&self.index),
-            target,
-            target,
-            IntervalClosed::Both,
-        );
-
+        let (keep, instants) =
+            time_of_day_rows(&self.index, "at_time", time, time, IntervalClosed::Both)?;
         let mut selected = self.take_rows_by_positions(&keep)?;
-        let freq = fp_index::take_freq(self.index.freq().map(str::to_owned), &keep);
-        selected.index = canonicalize_datetime_index_labels(&selected.index, freq);
+        selected.index = time_of_day_index(&self.index, &selected.index, &keep, instants);
         Ok(selected)
     }
 
@@ -176211,6 +176261,154 @@ mod tests {
         // NEGATIVE: any other column is the caller's path.
         let ints = Series::from_values("i", vec![0_i64.into()], vec![Scalar::Int64(4)]).unwrap();
         assert!(ints.temporal_typed_extreme(true).is_none());
+    }
+
+    #[test]
+    fn time_of_day_selection_reads_the_instants_lsn8d() {
+        // between_time / at_time over a DatetimeIndex holding its instants
+        // equal those over the same instants held as labels, an aware
+        // index's in its zone's wall time (br-frankenpandas-lsn8d).
+        type Pick = fn(&Series) -> Result<Series, FrameError>;
+        let hour = 3_600_000_000_000_i64;
+        // From 2021-03-13 00:00 UTC, 7 hours apart: across New York's
+        // spring-forward of 2021-03-14.
+        let base = 1_615_593_600_000_000_000_i64;
+        let nanos: Vec<i64> = (0..30)
+            .map(|i| {
+                if i % 11 == 5 {
+                    i64::MIN
+                } else {
+                    base + i * 7 * hour
+                }
+            })
+            .collect();
+        let values: Vec<Scalar> = (0..30).map(Scalar::Int64).collect();
+        let typed = Index::from_datetime64_values(nanos.clone());
+        let labelled = Index::new(typed.labels().to_vec());
+        assert!(labelled.datetime64_label_values().is_none());
+        let series = |index: Index| {
+            Series::new(
+                "s",
+                index,
+                Column::new(DType::Int64, values.clone()).unwrap(),
+            )
+            .unwrap()
+        };
+        let picks: [(&str, Pick); 4] = [
+            ("05:00-13:00", |s| s.between_time("05:00", "13:00")),
+            ("17:00-01:00 wraps", |s| s.between_time("17:00", "01:00")),
+            ("07:00-21:00 open", |s| {
+                s.between_time_inclusive("07:00", "21:00", IntervalClosed::Neither)
+            }),
+            ("at 07:00", |s| s.at_time("07:00")),
+        ];
+        for zone in [
+            None,
+            Some("Asia/Tokyo"),
+            Some("America/New_York"),
+            Some("+05:30"),
+        ] {
+            let zoned = |index: &Index| match zone {
+                Some(zone) => index.clone().with_tz(Some(zone)).unwrap(),
+                None => index.clone(),
+            };
+            let (a, b) = (series(zoned(&typed)), series(zoned(&labelled)));
+            let mut selected = 0;
+            for (name, pick) in picks {
+                let (x, y) = (pick(&a).unwrap(), pick(&b).unwrap());
+                selected += x.len();
+                assert_eq!(x.column().values(), y.column().values(), "{name} {zone:?}");
+                assert_eq!(x.index().labels(), y.index().labels(), "{name} {zone:?}");
+                assert_eq!(x.index().tz(), y.index().tz(), "{name} {zone:?}");
+            }
+            assert!(selected > 0, "{zone:?}");
+            // A frame's rows too (its index gathered typed).
+            let (fx, fy) = (
+                a.to_frame(None)
+                    .unwrap()
+                    .between_time("05:00", "13:00")
+                    .unwrap(),
+                b.to_frame(None)
+                    .unwrap()
+                    .between_time("05:00", "13:00")
+                    .unwrap(),
+            );
+            assert_eq!(fx.index().labels(), fy.index().labels(), "frame {zone:?}");
+            assert_eq!(fx.index().tz(), fy.index().tz(), "frame {zone:?}");
+            assert!(fx.index().datetime64_label_values().is_some());
+        }
+        // pandas reads a NaT's time of day as -1 microseconds: a window
+        // wrapping past midnight keeps it (-1 is before its end); NEGATIVE:
+        // one that does not wrap never does, the whole day asked for, and
+        // neither does at_time.
+        let nat_rows = nanos.iter().filter(|&&ns| ns == i64::MIN).count();
+        let present = nanos.len() - nat_rows;
+        let s = series(typed);
+        let wraps = s.between_time("23:30", "00:30").unwrap();
+        let midnights = s.at_time("00:00").unwrap().len();
+        assert_eq!(wraps.len(), midnights + nat_rows);
+        assert_eq!(s.between_time("00:00", "23:59").unwrap().len(), present);
+        assert!(midnights > 0);
+    }
+
+    #[test]
+    fn sort_index_of_a_datetime_index_reads_its_nanos_lsn8d() {
+        // A NaT-free DatetimeIndex sorts as its nanos, stably, the values
+        // following; already ordered it comes back as it is
+        // (br-frankenpandas-lsn8d).
+        let series = |nanos: Vec<i64>| {
+            let values = (0..nanos.len() as i64).map(Scalar::Int64).collect();
+            Series::new(
+                "s",
+                Index::from_datetime64_values(nanos),
+                Column::new(DType::Int64, values).unwrap(),
+            )
+            .unwrap()
+        };
+        let labels = |s: &Series| s.index().datetime64_label_values().unwrap().into_owned();
+        let rows = |s: &Series| {
+            s.column()
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Int64(row) => *row,
+                    other => panic!("{other:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        let unsorted = series(vec![30, 10, 20, 10, -5]);
+        let up = unsorted.sort_index_na(true, "last").unwrap();
+        assert_eq!(labels(&up), vec![-5, 10, 10, 20, 30]);
+        assert_eq!(rows(&up), vec![4, 1, 3, 2, 0]);
+        let down = unsorted.sort_index_na(false, "last").unwrap();
+        assert_eq!(labels(&down), vec![30, 20, 10, 10, -5]);
+        // Ties keep their order descending too.
+        assert_eq!(rows(&down), vec![0, 2, 1, 3, 4]);
+        // Strictly ordered: the reverse, both ways.
+        let strict = series(vec![1, 4, 9]);
+        let reversed = strict.sort_index_na(false, "last").unwrap();
+        assert_eq!(labels(&reversed), vec![9, 4, 1]);
+        assert_eq!(rows(&reversed), vec![2, 1, 0]);
+        let back = reversed.sort_index_na(true, "last").unwrap();
+        assert_eq!(labels(&back), vec![1, 4, 9]);
+        assert_eq!(rows(&back), vec![0, 1, 2]);
+        // NEGATIVE: ordered with repeats, sorting the other way keeps the
+        // repeats in their order (a reverse would swap them).
+        let sorted = series(vec![1, 2, 2, 9]);
+        assert_eq!(
+            rows(&sorted.sort_index_na(true, "last").unwrap()),
+            vec![0, 1, 2, 3]
+        );
+        assert_eq!(
+            rows(&sorted.sort_index_na(false, "last").unwrap()),
+            vec![3, 1, 2, 0]
+        );
+        // NEGATIVE: NaT takes the labels' path, which puts it where asked.
+        let with_nat = series(vec![7, i64::MIN, 3]);
+        let last = with_nat.sort_index_na(true, "last").unwrap();
+        assert_eq!(rows(&last), vec![2, 0, 1]);
+        let first = with_nat.sort_index_na(true, "first").unwrap();
+        assert_eq!(rows(&first), vec![1, 2, 0]);
     }
 
     #[test]

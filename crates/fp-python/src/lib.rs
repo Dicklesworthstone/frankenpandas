@@ -9030,6 +9030,16 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
     if let Ok(tdi) = obj.extract::<PyRef<'_, PyTimedeltaIndex>>() {
         return Ok(Some(nanos_column(tdi.inner.asi8(), false)));
     }
+    // An index of ints is their column - every label an Int64, as the
+    // labels' column below infers (an empty one infers no dtype) - read off
+    // its int view, where a Scalar a label was built and read back
+    // (s.groupby(idx.hour) 0.38x pandas at 1M; br-frankenpandas-lsn8d).
+    if let Ok(index) = plain_index_ref(obj)
+        && let Some(values) = index.inner.int64_label_values()
+        && !values.is_empty()
+    {
+        return Ok(Some(Column::from_i64_values(Arc::unwrap_or_clone(values))));
+    }
     // A RangeIndex is an Index.
     let labels = plain_index_ref(obj)
         .ok()
@@ -14938,6 +14948,40 @@ fn datetime_labels_follow(index: &DatetimeIndex, freqstr: &str) -> PyResult<bool
 }
 
 impl PyDatetimeIndex {
+    /// A calendar / clock field as pandas' Index of it, under this index's
+    /// name (it was unnamed): with no NaT among the instants, the column
+    /// accessor's typed `field` over them (an aware index's wall time in its
+    /// zone) as int32 labels - each label went through chrono and back into
+    /// a label (idx.year 12 ms a million rows, pandas 11.6;
+    /// br-frankenpandas-lsn8d) - else `labels`, int32 or float64 with NaN.
+    fn calendar_field<T: Into<i64>>(
+        &self,
+        field: fn(&fp_frame::DatetimeAccessor<'_>) -> Result<Series, fp_frame::FrameError>,
+        labels: impl FnOnce() -> Vec<Option<T>>,
+    ) -> PyIndex {
+        let nanos = self.inner.asi8();
+        let typed = (!nanos.contains(&i64::MIN))
+            .then(|| {
+                let column = nanos_column(nanos, true);
+                let column = match self.inner.tz() {
+                    Some(zone) => column.with_dtype(DType::datetime64_tz(zone)),
+                    None => column,
+                };
+                let instants = Series::new("", Index::default_range(column.len()), column).ok()?;
+                let values = field(&instants.dt()).ok()?;
+                let values = values.column().as_i64_slice()?.to_vec();
+                Some(
+                    Index::from_i64_values(values)
+                        .with_declared_dtype(Some(fp_index::DeclaredDtype::Int32)),
+                )
+            })
+            .flatten();
+        let index = typed.unwrap_or_else(|| datetime_field_index(labels()).inner);
+        PyIndex {
+            inner: index.rename_index(self.inner.name().cloned()),
+        }
+    }
+
     /// Whether a label is NaT.
     fn holds_nat(&self) -> bool {
         self.inner
@@ -15478,47 +15522,47 @@ impl PyDatetimeIndex {
 
     #[getter]
     fn year(&self) -> PyIndex {
-        datetime_field_index(self.inner.year())
+        self.calendar_field(|dt| dt.year(), || self.inner.year())
     }
 
     #[getter]
     fn month(&self) -> PyIndex {
-        datetime_field_index(self.inner.month())
+        self.calendar_field(|dt| dt.month(), || self.inner.month())
     }
 
     #[getter]
     fn day(&self) -> PyIndex {
-        datetime_field_index(self.inner.day())
+        self.calendar_field(|dt| dt.day(), || self.inner.day())
     }
 
     #[getter]
     fn hour(&self) -> PyIndex {
-        datetime_field_index(self.inner.hour())
+        self.calendar_field(|dt| dt.hour(), || self.inner.hour())
     }
 
     #[getter]
     fn minute(&self) -> PyIndex {
-        datetime_field_index(self.inner.minute())
+        self.calendar_field(|dt| dt.minute(), || self.inner.minute())
     }
 
     #[getter]
     fn second(&self) -> PyIndex {
-        datetime_field_index(self.inner.second())
+        self.calendar_field(|dt| dt.second(), || self.inner.second())
     }
 
     #[getter]
     fn microsecond(&self) -> PyIndex {
-        datetime_field_index(self.inner.microsecond())
+        self.calendar_field(|dt| dt.microsecond(), || self.inner.microsecond())
     }
 
     #[getter]
     fn nanosecond(&self) -> PyIndex {
-        datetime_field_index(self.inner.nanosecond())
+        self.calendar_field(|dt| dt.nanosecond(), || self.inner.nanosecond())
     }
 
     #[getter]
     fn dayofweek(&self) -> PyIndex {
-        datetime_field_index(self.inner.dayofweek())
+        self.calendar_field(|dt| dt.dayofweek(), || self.inner.dayofweek())
     }
 
     #[pyo3(signature = (locale=None))]
@@ -15540,7 +15584,7 @@ impl PyDatetimeIndex {
 
     #[getter]
     fn days_in_month(&self) -> PyIndex {
-        datetime_field_index(self.inner.days_in_month())
+        self.calendar_field(|dt| dt.days_in_month(), || self.inner.days_in_month())
     }
 
     /// The instants as Timestamps in the index's zone, NaT kept, as pandas
@@ -16543,22 +16587,22 @@ impl PyDatetimeIndex {
 
     #[getter]
     fn day_of_week(&self) -> PyIndex {
-        datetime_field_index(self.inner.day_of_week())
+        self.calendar_field(|dt| dt.day_of_week(), || self.inner.day_of_week())
     }
 
     #[getter]
     fn day_of_year(&self) -> PyIndex {
-        datetime_field_index(self.inner.day_of_year())
+        self.calendar_field(|dt| dt.day_of_year(), || self.inner.day_of_year())
     }
 
     #[getter]
     fn dayofyear(&self) -> PyIndex {
-        datetime_field_index(self.inner.dayofyear())
+        self.calendar_field(|dt| dt.dayofyear(), || self.inner.dayofyear())
     }
 
     #[getter]
     fn daysinmonth(&self) -> PyIndex {
-        datetime_field_index(self.inner.daysinmonth())
+        self.calendar_field(|dt| dt.daysinmonth(), || self.inner.daysinmonth())
     }
 
     fn delete(&self, loc: &Bound<'_, PyAny>) -> PyResult<Self> {
@@ -16817,7 +16861,7 @@ impl PyDatetimeIndex {
 
     #[getter]
     fn quarter(&self) -> PyIndex {
-        datetime_field_index(self.inner.quarter())
+        self.calendar_field(|dt| dt.quarter(), || self.inner.quarter())
     }
 
     fn ravel(&self) -> Self {
@@ -17122,7 +17166,7 @@ impl PyDatetimeIndex {
 
     #[getter]
     fn weekday(&self) -> PyIndex {
-        datetime_field_index(self.inner.weekday())
+        self.calendar_field(|dt| dt.weekday(), || self.inner.weekday())
     }
 
     #[pyo3(signature = (cond, other=None))]
@@ -29757,34 +29801,44 @@ fn extract_or_build_series(
     if let Ok(series) = by.extract::<PyRef<'_, PySeries>>() {
         return Ok(series.inner.clone());
     }
-    let labels = like.index().labels().to_vec();
+    // The key rows are `like`'s own: its index shared, where a copy of its
+    // labels was made into a new index (and compared back against it) per
+    // call - s.groupby(idx.hour) 0.38x pandas at 1M (br-frankenpandas-lsn8d).
+    let keyed = |name: &str, values: Vec<Scalar>| {
+        Column::from_values(values)
+            .map_err(fp_frame::FrameError::from)
+            .and_then(|column| Series::new(name, like.index().clone(), column))
+            .map_err(frame_error_to_py)
+    };
     // An Index/array key is unnamed unless the Index is named, as pandas
     // names the group level; these were all named "group", and a
     // DatetimeIndex or ndarray key raised (fvsao.19).
     if let Some(column) = py_array_like_column(py, by)? {
         let name = py_index_arg_name(by).unwrap_or_default();
-        return Series::new(&name, Index::new(labels), column).map_err(frame_error_to_py);
+        return Series::new(&name, like.index().clone(), column).map_err(frame_error_to_py);
     }
     // pandas applies a callable key to each index label.
     if by.is_callable() {
-        let values = labels
+        let values = like
+            .index()
+            .labels()
             .iter()
             .map(|label| {
                 let mapped = by.call1((index_label_to_py(py, label)?,))?;
                 py_to_scalar(py, &mapped)
             })
             .collect::<PyResult<Vec<_>>>()?;
-        return Series::from_values("", labels, values).map_err(frame_error_to_py);
+        return keyed("", values);
     }
     if let Ok(list) = by.cast::<PyList>() {
         let scalars: Vec<Scalar> = list
             .iter()
             .map(|v| py_to_scalar(py, &v))
             .collect::<PyResult<Vec<_>>>()?;
-        return Series::from_values("", labels, scalars).map_err(frame_error_to_py);
+        return keyed("", scalars);
     }
     let scalar = py_to_scalar(py, by)?;
-    Series::from_values("", labels, vec![scalar; like.len()]).map_err(frame_error_to_py)
+    keyed("", vec![scalar; like.len()])
 }
 
 fn check_series_axis(axis: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
