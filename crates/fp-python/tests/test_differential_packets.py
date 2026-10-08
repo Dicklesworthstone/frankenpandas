@@ -30251,6 +30251,242 @@ def test_crosstab_counts_like_pandas_fxk1a(case: str) -> None:
     assert run(fpd) == run(pd)
 
 
+def _vk7y9_dates(m: Any) -> Any:
+    stamps = ["2020-01-05", "NaT", "2019-12-31T06:30", "2020-03-01", "NaT", "2021-07-04"]
+    return m.Series(np.array(stamps, dtype="datetime64[ns]"))
+
+
+_VK7Y9_SHIFT_CASES = {
+    "dates holding NaT, shift(2)": lambda m: _vk7y9_dates(m).shift(2),
+    "dates holding NaT, shift(-1)": lambda m: _vk7y9_dates(m).shift(-1),
+    "dates, shift past the length": lambda m: _vk7y9_dates(m).shift(9),
+    "dates, a Timestamp fill": lambda m: _vk7y9_dates(m).shift(1, fill_value=m.Timestamp("2000-01-01")),
+    "dates, a NaN fill": lambda m: _vk7y9_dates(m).shift(1, fill_value=np.nan),
+    "dates, a None fill": lambda m: _vk7y9_dates(m).shift(-2, fill_value=None),
+    "aware dates holding NaT": lambda m: _vk7y9_dates(m).dt.tz_localize("UTC").shift(1),
+    # The fill a Timestamp of the column's zone or another: an instant read
+    # in the column's zone (fp dropped the zone and read it as naive UTC).
+    "aware dates, a fill in their zone": lambda m: _vk7y9_dates(m).dt.tz_localize("Asia/Tokyo").shift(2, fill_value=m.Timestamp("2000-01-01", tz="Asia/Tokyo")),
+    "aware dates, a fill in another zone": lambda m: _vk7y9_dates(m).dt.tz_localize("UTC").shift(-1, fill_value=m.Timestamp("2000-01-01", tz="Asia/Tokyo")),
+    "durations holding NaT": lambda m: (_vk7y9_dates(m) - m.Timestamp("2020-01-01")).shift(2),
+    "durations, a Timedelta fill": lambda m: (_vk7y9_dates(m) - m.Timestamp("2020-01-01")).shift(-1, fill_value=m.Timedelta("1h")),
+    # NEGATIVE: dates without NaT shift as before.
+    "dates without NaT (NEGATIVE)": lambda m: m.Series(np.array(["2020-01-01", "2020-02-01", "2020-03-01"], dtype="datetime64[ns]")).shift(1),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VK7Y9_SHIFT_CASES))
+def test_temporal_shift_like_pandas_vk7y9(case: str) -> None:
+    # A datetime / timedelta column - holding NaT or not - shifts its nanos
+    # and its mask (br-frankenpandas-vk7y9: a Scalar per row, d.shift() 0.01x
+    # pandas at 1M): dtype, missing rows and values vs pandas.
+    def run(m: Any) -> Any:
+        out = _VK7Y9_SHIFT_CASES[case](m)
+        return (str(out.dtype), out.isna().tolist(), out.astype(str).tolist(), list(out.index))
+
+    assert run(fpd) == run(pd)
+
+
+_VK7Y9_STAMPS = np.array(
+    ["2020-01-05", "NaT", "2019-12-31T06:30", "2020-03-01", "NaT", "2021-07-04", "1969-12-31T23:59:59.5"],
+    dtype="datetime64[ns]",
+)
+_VK7Y9_LONG = np.datetime64("2020-01-01", "ns") + np.arange(150).astype("timedelta64[h]")
+_VK7Y9_LONG[[3, 64, 65, 149]] = np.datetime64("NaT")
+
+
+def _vk7y9_unit(m: Any, array: Any) -> Any:
+    # pandas keeps a unit other than ns, fp has ns only (fvsao.16): pandas
+    # reads the array in ns here, so its values and ops are compared.
+    return m.Series(array if m is fpd else array.astype(f"{array.dtype.kind}8[ns]"))
+
+
+_VK7Y9_BUILD_CASES = {
+    "dates holding NaT": lambda m: m.Series(_VK7Y9_STAMPS),
+    "dates, no NaT": lambda m: m.Series(_VK7Y9_STAMPS[[0, 2, 3]]),
+    "dates, all NaT": lambda m: m.Series(_VK7Y9_STAMPS[[1, 4]]),
+    "dates, empty": lambda m: m.Series(_VK7Y9_STAMPS[:0]),
+    "dates across words, a strided view": lambda m: m.Series(_VK7Y9_LONG[::-1][::2]),
+    # NEGATIVE: an array not in ns, or not in native order, read as its
+    # raw int64 is off by its unit / byte-swapped.
+    "dates in seconds (NEGATIVE)": lambda m: _vk7y9_unit(m, _VK7Y9_STAMPS[[0, 1, 2]].astype("datetime64[s]")),
+    "dates in days (NEGATIVE)": lambda m: _vk7y9_unit(m, _VK7Y9_STAMPS.astype("datetime64[D]")),
+    "big-endian dates (NEGATIVE)": lambda m: m.Series(_VK7Y9_STAMPS.astype(">M8[ns]")),
+    "durations holding NaT": lambda m: m.Series(_VK7Y9_STAMPS - np.datetime64("2020-01-01", "ns")),
+    "durations in minutes": lambda m: _vk7y9_unit(m, (_VK7Y9_STAMPS - np.datetime64("2020-01-01", "ns")).astype("timedelta64[m]")),
+    "a DatetimeIndex holding NaT": lambda m: m.Series(m.DatetimeIndex(_VK7Y9_STAMPS)),
+    "an aware DatetimeIndex holding NaT": lambda m: m.Series(m.DatetimeIndex(_VK7Y9_STAMPS).tz_localize("Asia/Tokyo")),
+    "a TimedeltaIndex holding NaT": lambda m: m.Series(m.TimedeltaIndex(_VK7Y9_STAMPS - np.datetime64("2020-01-01", "ns"))),
+    "a frame's column holding NaT": lambda m: m.DataFrame({"d": _VK7Y9_LONG, "k": np.arange(150)})["d"],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VK7Y9_BUILD_CASES))
+def test_temporal_array_builds_typed_like_pandas_vk7y9(case: str) -> None:
+    # A datetime64 / timedelta64 array - any unit, byte order, stride, NaT
+    # or not - builds a column of its nanoseconds and mask (it built a
+    # Scalar per row: Series(dates) 35 ms a million rows, pandas 0.03;
+    # br-frankenpandas-vk7y9), and the everyday ops read it: dtype, missing
+    # rows, values, fillna / dropna / sort_values / shift / min / max /
+    # a comparison vs pandas.
+    def run(m: Any) -> Any:
+        s = _VK7Y9_BUILD_CASES[case](m)
+        if str(s.dtype).startswith("timedelta"):
+            fill = m.Timedelta("1h")
+        else:
+            fill = m.Timestamp("2000-01-01", tz=s.dt.tz)
+        shown = lambda out: (str(out.dtype), out.isna().tolist(), out.astype(str).tolist(), list(out.index))
+        return (
+            shown(s),
+            shown(s.fillna(fill)),
+            shown(s.dropna()),
+            shown(s.sort_values()),
+            shown(s.shift(1)),
+            str(s.min()),
+            str(s.max()),
+            (s > fill).tolist(),
+        )
+
+    assert run(fpd) == run(pd)
+
+
+_VK7Y9_FIELD_SERIES = {
+    "dates holding NaT": lambda m: m.Series(_VK7Y9_STAMPS),
+    "dates across words holding NaT": lambda m: m.Series(_VK7Y9_LONG),
+    "aware dates holding NaT": lambda m: m.Series(_VK7Y9_STAMPS).dt.tz_localize("Asia/Tokyo"),
+    # NEGATIVE: without NaT the fields stay integers.
+    "dates, no NaT (NEGATIVE)": lambda m: m.Series(_VK7Y9_STAMPS[[0, 2, 3, 6]]),
+}
+_VK7Y9_FIELDS = ["year", "month", "day", "quarter", "dayofyear", "hour", "minute", "second",
+                 "microsecond", "nanosecond", "dayofweek", "days_in_month"]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VK7Y9_FIELD_SERIES))
+def test_datetime_fields_with_nat_like_pandas_vk7y9(case: str) -> None:
+    # The integer dt fields of dates holding NaT read the nanos (a NaT sent
+    # the column through a Timestamp and a Scalar a row: dt.year 0.26x pandas
+    # at 1M; br-frankenpandas-vk7y9): dtype, missing rows, values vs pandas.
+    def run(m: Any) -> Any:
+        s = _VK7Y9_FIELD_SERIES[case](m)
+        out = []
+        for field in _VK7Y9_FIELDS:
+            got = getattr(s.dt, field)
+            out.append((field, str(got.dtype), got.isna().tolist(), got.astype(str).tolist()))
+        return out
+
+    assert run(fpd) == run(pd)
+
+
+_VK7Y9_SCALAR_OPS = {
+    "dates > Timestamp": lambda m, s, t: s > t,
+    "dates == Timestamp": lambda m, s, t: s == t,
+    "dates != Timestamp": lambda m, s, t: s != t,
+    "dates <= Timestamp": lambda m, s, t: s <= t,
+    "dates - Timestamp": lambda m, s, t: s - t,
+    "Timestamp - dates": lambda m, s, t: t - s,
+    "durations > Timedelta": lambda m, s, t: (s - t) > m.Timedelta("-3D"),
+    "durations + Timedelta": lambda m, s, t: (s - t) + m.Timedelta("90min"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VK7Y9_SCALAR_OPS))
+@pytest.mark.parametrize("zone", [None, "UTC"])
+def test_temporal_scalar_ops_like_pandas_vk7y9(case: str, zone: Any) -> None:
+    # A Timestamp / Timedelta operand is broadcast typed (it was a Scalar a
+    # row: d > ts 0.08x pandas at 1M; br-frankenpandas-vk7y9): dtype, missing
+    # rows, values vs pandas, NaT rows included, naive and aware.
+    def run(m: Any) -> Any:
+        s = m.Series(_VK7Y9_STAMPS)
+        # Nanosecond precision: pandas keeps a coarser Timestamp's unit
+        # (fvsao.16).
+        t = m.Timestamp("2020-02-01T00:00:00.000000001")
+        if zone is not None:
+            s = s.dt.tz_localize(zone)
+            t = t.tz_localize(zone)
+        out = _VK7Y9_SCALAR_OPS[case](m, s, t)
+        return (str(out.dtype), out.isna().tolist(), out.astype(str).tolist())
+
+    assert run(fpd) == run(pd)
+
+
+_VK7Y9_TIES = np.array(
+    ["2020-03-01", "NaT", "2020-01-01", "2020-03-01", "NaT", "2020-01-01", "1999-01-01"],
+    dtype="datetime64[ns]",
+)
+_VK7Y9_SORT_SERIES = {
+    "dates holding NaT and ties": lambda m: m.Series(_VK7Y9_TIES, index=list("abcdefg")),
+    "dates across words holding NaT": lambda m: m.Series(_VK7Y9_LONG[::-1]),
+    "aware dates holding NaT": lambda m: m.Series(_VK7Y9_TIES).dt.tz_localize("Asia/Tokyo"),
+    "durations holding NaT and ties": lambda m: m.Series(_VK7Y9_TIES - np.datetime64("2020-01-01", "ns")),
+    "dates, no NaT": lambda m: m.Series(_VK7Y9_TIES[[0, 2, 3, 5, 6]]),
+    "dates, all NaT": lambda m: m.Series(_VK7Y9_TIES[[1, 4]]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VK7Y9_SORT_SERIES))
+@pytest.mark.parametrize("ascending", [True, False])
+@pytest.mark.parametrize("na_position", ["last", "first"])
+def test_temporal_sort_values_like_pandas_vk7y9(case: str, ascending: bool, na_position: str) -> None:
+    # A datetime / timedelta column sorts its present nanos typed, NaT rows
+    # at na_position (the comparator sort over its Scalars: 0.32x pandas at
+    # 1M; br-frankenpandas-vk7y9): values, index order (ties keep their
+    # order - a small array, where numpy's sort is stable too), dtype.
+    def run(m: Any) -> Any:
+        out = _VK7Y9_SORT_SERIES[case](m).sort_values(ascending=ascending, na_position=na_position)
+        return (str(out.dtype), out.astype(str).tolist(), list(out.index))
+
+    assert run(fpd) == run(pd)
+
+
+_VK7Y9_GB_VALUES = {
+    "dates holding NaT": lambda m: m.Series(_VK7Y9_TIES),
+    "aware dates holding NaT": lambda m: m.Series(_VK7Y9_TIES).dt.tz_localize("Asia/Tokyo"),
+    "durations holding NaT": lambda m: m.Series(_VK7Y9_TIES - np.datetime64("2020-01-01", "ns")),
+    # NEGATIVE: without NaT every row counts and folds.
+    "dates, no NaT (NEGATIVE)": lambda m: m.Series(_VK7Y9_TIES[[0, 2, 3, 5, 6, 0, 2]]),
+}
+_VK7Y9_GB_KEYS = {
+    # Key 3 holds only the NaT rows: its count 0, its max / min NaT.
+    "int keys": [1, 3, 2, 1, 3, 2, 1],
+    "text keys": ["b", "z", "a", "b", "z", "a", "b"],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("values", list(_VK7Y9_GB_VALUES))
+@pytest.mark.parametrize("keys", list(_VK7Y9_GB_KEYS))
+@pytest.mark.parametrize("how", ["count", "max", "min", "first", "last"])
+def test_groupby_temporal_reductions_like_pandas_vk7y9(values: str, keys: str, how: str) -> None:
+    # groupby count / max / min of a datetime / timedelta column fold its
+    # nanos per group, a NaT skipped (build_groups and a Scalar a row: gb
+    # d.count 0.06x, d.max 0.11x pandas at 1M; br-frankenpandas-vk7y9):
+    # dtype, missing groups, values, index vs pandas.
+    def run(m: Any) -> Any:
+        frame = m.DataFrame({"k": _VK7Y9_GB_KEYS[keys], "d": _VK7Y9_GB_VALUES[values](m)})
+        out = getattr(frame.groupby("k")["d"], how)()
+        return (str(out.dtype), out.isna().tolist(), out.astype(str).tolist(), list(out.index))
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_frame_column_assigned_a_timestamp_like_pandas_vk7y9() -> None:
+    # A naive Timestamp assigned as a column broadcasts typed
+    # (br-frankenpandas-vk7y9); an aware one keeps its zone in pandas, fp's
+    # is naive (ufwpf). Values and dtype vs pandas.
+    def run(m: Any) -> Any:
+        t = m.Timestamp("2020-02-01T00:00:00.000000001")
+        out = m.DataFrame({"d": _VK7Y9_STAMPS}).assign(z=t)["z"]
+        return (str(out.dtype), out.isna().tolist(), out.astype(str).tolist())
+
+    assert run(fpd) == run(pd)
+
+
 _FQGW7_SERIES = {
     "floats holding NaN": [np.nan, 3.0, np.nan, 1.0, 5.0, np.nan, 2.0],
     "an all-NaN start": [np.nan, np.nan, 2.0, 1.0],

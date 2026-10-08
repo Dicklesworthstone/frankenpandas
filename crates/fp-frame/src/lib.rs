@@ -16080,6 +16080,38 @@ impl Series {
             }
             return self.sorted_by_positions(&order);
         }
+        // A datetime / timedelta column the same way: its present nanos - not
+        // a gap, not a NaT datum - by the int64 argsort (ns order is the
+        // comparator's), the missing rows in their order at na_position. The
+        // comparator sort over its Scalars took 243 ms a million rows, pandas
+        // 79 (br-frankenpandas-vk7y9).
+        if self.categorical.is_none()
+            && let Some((data, validity)) = self.column.as_temporal_nanos_with_validity()
+        {
+            let n = data.len();
+            let all_valid = validity.all();
+            let mut present_positions: Vec<usize> = Vec::with_capacity(n);
+            let mut present_values: Vec<i64> = Vec::with_capacity(n);
+            let mut missing_positions: Vec<usize> = Vec::new();
+            for (i, &ns) in data.iter().enumerate() {
+                if ns != i64::MIN && (all_valid || validity.get(i)) {
+                    present_positions.push(i);
+                    present_values.push(ns);
+                } else {
+                    missing_positions.push(i);
+                }
+            }
+            let sub_order = Column::from_i64_values(present_values).argsort_with(ascending);
+            let mut order: Vec<usize> = Vec::with_capacity(n);
+            if na_first {
+                order.extend_from_slice(&missing_positions);
+            }
+            order.extend(sub_order.iter().map(|&j| present_positions[j]));
+            if !na_first {
+                order.extend_from_slice(&missing_positions);
+            }
+            return self.sorted_by_positions(&order);
+        }
         // All-valid Utf8 (any backing): with no missing values, na_position is
         // moot, so the order is a pure stable byte-lexicographic value sort.
         // Column::argsort_with routes all-valid Utf8 — contiguous *and*
@@ -17218,6 +17250,29 @@ impl Series {
                 index,
                 Column::from_f64_values_owned(kept),
             );
+        }
+        // A datetime / timedelta column keeps its present nanos - a gap or a
+        // NaT datum dropped - by the same word scan, in its dtype (it built a
+        // Scalar a row to test and to gather: d.dropna() 0.14x pandas at 1M;
+        // br-frankenpandas-vk7y9).
+        if let Some((data, validity)) = self.column.as_temporal_nanos_with_validity() {
+            let mut positions: Vec<usize> = Vec::with_capacity(data.len());
+            let mut kept: Vec<i64> = Vec::with_capacity(data.len());
+            for (w, &word) in validity.packed_words_for_scan().iter().enumerate() {
+                let mut bits = word;
+                while bits != 0 {
+                    let i = w * 64 + bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    if data[i] != i64::MIN {
+                        positions.push(i);
+                        kept.push(data[i]);
+                    }
+                }
+            }
+            let index = self.index.take(&positions).rename_index(self.index.name());
+            let present = fp_columnar::ValidityMask::all_valid(kept.len());
+            let column = temporal_column(self.column.dtype(), kept, present);
+            return Self::new(self.name.clone(), index, column);
         }
         // perf (br-frankenpandas-9i6my): collect the non-missing positions once, then
         // gather index + column zero-copy (Index::take + take_positions) instead of
@@ -24035,6 +24090,48 @@ impl Series {
                     out,
                     fp_columnar::ValidityMask::from_words(words, n),
                 );
+                return Self::new(self.name.clone(), self.index.clone(), column);
+            }
+        }
+
+        // A datetime / timedelta column - all valid or holding NaT - shifts as
+        // the nullable Float64 one: its nanos moved as a slice, its mask a
+        // word at a time, the vacated rows the fill's (NaT, or an instant /
+        // duration of the column's kind) - it went through values(), a Scalar
+        // per row (d.shift() of dates holding NaT 0.01x pandas at 1M;
+        // br-frankenpandas-vk7y9).
+        let dtype = self.column.dtype();
+        if let Some((data, validity)) = self.column.as_temporal_nanos_with_validity() {
+            let fill = match (&dtype, &fill_value) {
+                (DType::Datetime64 { .. }, Scalar::Datetime64(nanos))
+                | (DType::Timedelta64, Scalar::Timedelta64(nanos))
+                    if *nanos != i64::MIN =>
+                {
+                    Some((*nanos, true))
+                }
+                (_, fill) if fill.is_missing() => Some((i64::MIN, false)),
+                _ => None,
+            };
+            if let Some((fill_datum, fill_valid)) = fill {
+                let p = periods.unsigned_abs().min(n as u64) as usize;
+                let mut out = Vec::with_capacity(n);
+                let vacated = if periods >= 0 {
+                    out.resize(p, fill_datum);
+                    out.extend_from_slice(&data[..n - p]);
+                    0..p
+                } else {
+                    out.extend_from_slice(&data[p..]);
+                    out.resize(n, fill_datum);
+                    n - p..n
+                };
+                let mut words = shifted_validity_words(validity, n, periods);
+                if fill_valid {
+                    for i in vacated {
+                        words[i / 64] |= 1u64 << (i % 64);
+                    }
+                }
+                let validity = fp_columnar::ValidityMask::from_words(words, n);
+                let column = temporal_column(dtype, out, validity);
                 return Self::new(self.name.clone(), self.index.clone(), column);
             }
         }
@@ -34217,6 +34314,17 @@ fn rolling_float_column(cells: &[Scalar]) -> Column {
     }
     let validity = fp_columnar::ValidityMask::from_words(words, cells.len());
     Column::from_f64_values_with_validity(data, validity)
+}
+
+/// A column of `dtype` - a datetime of any zone, or a timedelta - holding
+/// `nanos` under `validity`: a typed op's output in its source's dtype
+/// (br-frankenpandas-vk7y9).
+fn temporal_column(dtype: DType, nanos: Vec<i64>, validity: fp_columnar::ValidityMask) -> Column {
+    if dtype == DType::Timedelta64 {
+        Column::from_timedelta64_values_with_validity(nanos, validity)
+    } else {
+        Column::from_datetime64_values_with_validity(nanos, validity).with_dtype(dtype)
+    }
 }
 
 /// What pandas' window kernels read (`BaseWindow._prep_values`): the values
@@ -48283,17 +48391,24 @@ impl SeriesGroupBy<'_> {
         // present count, Int64 output, by-name index.
         let nvi = self.series.column.as_i64_slice_with_validity();
         let nvf = self.series.column.as_f64_slice_with_validity();
-        if nvi.is_some() || nvf.is_some() {
+        // A datetime / timedelta value column: present == neither a gap nor
+        // a NaT datum (build_groups and a Scalar a row: gb d.count 0.06x
+        // pandas at 1M; br-frankenpandas-vk7y9).
+        let nvt = self.series.column.as_temporal_nanos_with_validity();
+        if nvi.is_some() || nvf.is_some() || nvt.is_some() {
             let nrows = self.series.column.len();
             let mut present = vec![false; nrows];
             if let Some((_d, v)) = nvi {
                 for (i, p) in present.iter_mut().enumerate() {
                     *p = v.get(i);
                 }
-            } else {
-                let (d, v) = nvf.unwrap();
+            } else if let Some((d, v)) = nvf {
                 for (i, p) in present.iter_mut().enumerate() {
                     *p = v.get(i) && !d[i].is_nan();
+                }
+            } else if let Some((d, v)) = nvt {
+                for (i, p) in present.iter_mut().enumerate() {
+                    *p = v.get(i) && d[i] != i64::MIN;
                 }
             }
             let by_name = self.by.name();
@@ -48697,7 +48812,10 @@ impl SeriesGroupBy<'_> {
     /// not counted (br-frankenpandas-vug8g).
     fn count_from_ids(&self, gids: &[usize], ngroups: usize) -> Option<Result<Series, FrameError>> {
         let float = self.series.column.as_f64_slice_with_validity();
-        if float.is_none() && self.series.column.has_any_missing() {
+        // A datetime / timedelta column counts its rows neither a gap nor a
+        // NaT datum (br-frankenpandas-vk7y9).
+        let temporal = self.series.column.as_temporal_nanos_with_validity();
+        if float.is_none() && temporal.is_none() && self.series.column.has_any_missing() {
             return None;
         }
         let order = self.dense_group_labels(gids, ngroups)?;
@@ -48706,6 +48824,12 @@ impl SeriesGroupBy<'_> {
             let words = validity.packed_words_for_scan();
             for (row, (&g, &value)) in gids.iter().zip(data).enumerate() {
                 let present = (words[row / 64] >> (row % 64)) & 1 == 1 && !value.is_nan();
+                counts[g] += i64::from(present);
+            }
+        } else if let Some((data, validity)) = temporal {
+            let words = validity.packed_words_for_scan();
+            for (row, (&g, &ns)) in gids.iter().zip(data).enumerate() {
+                let present = (words[row / 64] >> (row % 64)) & 1 == 1 && ns != i64::MIN;
                 counts[g] += i64::from(present);
             }
         } else {
@@ -48872,6 +48996,40 @@ impl SeriesGroupBy<'_> {
     where
         F: Fn(i64, i64) -> i64,
     {
+        // The nanos folded per group in one pass over the dense group ids, a
+        // gap or a NaT skipped, into the column's own dtype (build_groups and
+        // a Scalar a row: gb d.max 0.11x pandas at 1M; br-frankenpandas-vk7y9).
+        if let Some((data, validity)) = self.series.column.as_temporal_nanos_with_validity()
+            && let Some((gids, ngroups)) = self.dense_group_ids()
+            && let Some(order) = self.dense_group_labels(&gids, ngroups)
+        {
+            let words = validity.packed_words_for_scan();
+            let mut best: Vec<Option<i64>> = vec![None; ngroups];
+            for (row, (&g, &ns)) in gids.iter().zip(data).enumerate() {
+                if (words[row / 64] >> (row % 64)) & 1 == 1 && ns != i64::MIN {
+                    best[g] = Some(best[g].map_or(ns, |prev| combine(prev, ns)));
+                }
+            }
+            let mut found = vec![0_u64; ngroups.div_ceil(64)];
+            let nanos: Vec<i64> = best
+                .iter()
+                .enumerate()
+                .map(|(g, best)| {
+                    found[g / 64] |= u64::from(best.is_some()) << (g % 64);
+                    best.unwrap_or(i64::MIN)
+                })
+                .collect();
+            let found = fp_columnar::ValidityMask::from_words(found, ngroups);
+            let by_name = self.by.name();
+            let idx_name = if by_name.is_empty() {
+                None
+            } else {
+                Some(by_name)
+            };
+            let index = Index::new(order).rename_index(idx_name);
+            let column = temporal_column(self.series.column.dtype(), nanos, found);
+            return Series::new(self.series.name(), index, column);
+        }
         let wrap: fn(i64) -> Scalar = if self.column_is_datetime() {
             Scalar::Datetime64
         } else {
@@ -59972,83 +60130,71 @@ impl DatetimeAccessor<'_> {
         Series::new(name, index, column)
     }
 
-    /// Map each datetime ns → an i64 component over the raw `&[i64]`, parallelized
-    /// across scoped threads. The civil/calendar conversion is COMPUTE-bound
+    /// Map each datetime ns → a component (an i64 field, a bool predicate, an
+    /// f64 field with NaN for NaT) over the raw `&[i64]`, parallelized across
+    /// scoped threads. The civil/calendar conversion is COMPUTE-bound
     /// (~12 integer ops/elem, the loads hide behind the math), unlike the
     /// bandwidth-bound elementwise ops where threads only contend — so this scales
     /// near-linearly with cores. Output order is preserved (chunk i writes
     /// out[i*chunk..]) → bit-identical to the serial map. Small inputs and
     /// single-core hosts run serial (no spawn overhead).
-    fn par_map_i64_from_nanos<F>(nanos: &[i64], map: F) -> Vec<i64>
+    fn par_map_nanos<T, F>(nanos: &[i64], map: F) -> Vec<T>
+    where
+        T: Copy + Default + Send,
+        F: Fn(i64) -> T + Sync,
+    {
+        const PAR_MIN: usize = 200_000;
+        let n = nanos.len();
+        let mut out = vec![T::default(); n];
+        let workers = fp_columnar::cached_available_parallelism().min(8);
+        if workers <= 1 || n < PAR_MIN {
+            for (o, &ns) in out.iter_mut().zip(nanos) {
+                *o = map(ns);
+            }
+            return out;
+        }
+        let chunk = n.div_ceil(workers);
+        std::thread::scope(|scope| {
+            for (in_c, out_c) in nanos.chunks(chunk).zip(out.chunks_mut(chunk)) {
+                let map = &map;
+                scope.spawn(move || {
+                    for (o, &ns) in out_c.iter_mut().zip(in_c) {
+                        *o = map(ns);
+                    }
+                });
+            }
+        });
+        out
+    }
+
+    /// An integer `field` of each instant of a tz-naive column, over its
+    /// nanos: int64 while no row is NaT, else float64 with NaN at each NaT -
+    /// pandas' dtype for a field with a missing row (a NaT sent the column
+    /// to a chrono Timestamp and a Scalar a row: dt.year of dates holding
+    /// NaT 0.26x pandas at 1M; br-frankenpandas-vk7y9). None for a column
+    /// without a naive nanos buffer.
+    fn typed_datetime_int_field<F>(
+        &self,
+        name: &LabelName,
+        field: F,
+    ) -> Option<Result<Series, FrameError>>
     where
         F: Fn(i64) -> i64 + Sync,
     {
-        const PAR_MIN: usize = 200_000;
-        let n = nanos.len();
-        let mut out = vec![0_i64; n];
-        let workers = fp_columnar::cached_available_parallelism().min(8);
-        if workers <= 1 || n < PAR_MIN {
-            for (o, &ns) in out.iter_mut().zip(nanos) {
-                *o = map(ns);
-            }
-            return out;
-        }
-        let chunk = n.div_ceil(workers);
-        std::thread::scope(|scope| {
-            for (in_c, out_c) in nanos.chunks(chunk).zip(out.chunks_mut(chunk)) {
-                let map = &map;
-                scope.spawn(move || {
-                    for (o, &ns) in out_c.iter_mut().zip(in_c) {
-                        *o = map(ns);
-                    }
-                });
-            }
-        });
-        out
-    }
-
-    /// Bool-output sibling of [`Self::par_map_i64_from_nanos`] for compute-bound
-    /// boolean calendar predicates (is_leap_year/is_month_start/…).
-    fn par_map_bool_from_nanos<F>(nanos: &[i64], map: F) -> Vec<bool>
-    where
-        F: Fn(i64) -> bool + Sync,
-    {
-        const PAR_MIN: usize = 200_000;
-        let n = nanos.len();
-        let mut out = vec![false; n];
-        let workers = fp_columnar::cached_available_parallelism().min(8);
-        if workers <= 1 || n < PAR_MIN {
-            for (o, &ns) in out.iter_mut().zip(nanos) {
-                *o = map(ns);
-            }
-            return out;
-        }
-        let chunk = n.div_ceil(workers);
-        std::thread::scope(|scope| {
-            for (in_c, out_c) in nanos.chunks(chunk).zip(out.chunks_mut(chunk)) {
-                let map = &map;
-                scope.spawn(move || {
-                    for (o, &ns) in out_c.iter_mut().zip(in_c) {
-                        *o = map(ns);
-                    }
-                });
-            }
-        });
-        out
-    }
-
-    fn typed_datetime_year_all_valid(
-        &self,
-        name: &LabelName,
-    ) -> Option<Result<Series, FrameError>> {
         let nanos = self.naive_datetime_slice()?;
-        if nanos.contains(&fp_types::Timestamp::NAT) {
-            return None;
-        }
-        let years = Self::par_map_i64_from_nanos(nanos, Self::datetime64_year_from_nanos);
-        let index = self.series.index().clone();
-        let column = Column::from_i64_values_owned(years);
-        Some(Series::new(name, index, column))
+        let nat = fp_types::Timestamp::NAT;
+        let column = if nanos.contains(&nat) {
+            Column::from_f64_values(Self::par_map_nanos(nanos, |ns| {
+                if ns == nat {
+                    f64::NAN
+                } else {
+                    field(ns) as f64
+                }
+            }))
+        } else {
+            Column::from_i64_values_owned(Self::par_map_nanos(nanos, field))
+        };
+        Some(Series::new(name, self.series.index().clone(), column))
     }
 
     fn datetime64_year_from_epoch_day(days_since_epoch: i64) -> i64 {
@@ -60101,24 +60247,16 @@ impl DatetimeAccessor<'_> {
     /// VERBATIM `fp_types::Timestamp::dayofyear`: the cumulative days-before-month
     /// table plus a leap-year bump for March onward, evaluated on the civil
     /// (y, m, d). Bit-identical to the chrono path (which calls that very method);
-    /// `None` (caller falls back) on non-dense / any NaT.
-    fn typed_datetime_dayofyear_all_valid(
-        &self,
-        name: &LabelName,
-    ) -> Option<Result<Series, FrameError>> {
-        let nanos = self.naive_datetime_slice()?;
-        if nanos.contains(&fp_types::Timestamp::NAT) {
-            return None;
-        }
-        let out = Self::par_map_i64_from_nanos(nanos, |ns| {
+    /// a NaT row NaN (see [`Self::typed_datetime_int_field`]); `None` (caller
+    /// falls back) on a column without a naive nanos buffer.
+    fn typed_datetime_dayofyear(&self, name: &LabelName) -> Option<Result<Series, FrameError>> {
+        self.typed_datetime_int_field(name, |ns| {
             let (y, m, d) = Self::datetime64_civil_from_nanos(ns);
             let is_leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
             const DAYS_BEFORE: [i64; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
             let base = DAYS_BEFORE[(m - 1) as usize] + d;
             if is_leap && m > 2 { base + 1 } else { base }
-        });
-        let index = self.series.index().clone();
-        Some(Series::new(name, index, Column::from_i64_values_owned(out)))
+        })
     }
 
     /// Number of ISO-8601 weeks (52 or 53) in a proleptic-Gregorian `year`.
@@ -60154,7 +60292,7 @@ impl DatetimeAccessor<'_> {
         if nanos.contains(&fp_types::Timestamp::NAT) {
             return None;
         }
-        let out = Self::par_map_i64_from_nanos(nanos, |ns| {
+        let out = Self::par_map_nanos(nanos, |ns| {
             let (y, m, d) = Self::datetime64_civil_from_nanos(ns);
             // dayofyear (verbatim Timestamp::dayofyear)
             let is_leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
@@ -60178,30 +60316,21 @@ impl DatetimeAccessor<'_> {
         Some(Series::new(name, index, Column::from_i64_values_owned(out)))
     }
 
-    /// Typed all-valid Datetime64 component extraction over the raw `&[i64]`
-    /// nanos with pure integer civil arithmetic — no per-element
-    /// `Timestamp::from_nanos` (chrono) and no `Scalar` materialization. Returns
-    /// `None` (caller falls back to the generic path) if the column is not a
-    /// dense datetime64 slice or contains any NaT, so the all-valid output is
-    /// exactly the generic `extract_component_typed` Int64 result.
-    fn typed_datetime_civil_component_all_valid(
+    /// Typed Datetime64 component extraction over the raw `&[i64]` nanos with
+    /// pure integer civil arithmetic — no per-element `Timestamp::from_nanos`
+    /// (chrono) and no `Scalar` materialization: the generic
+    /// `extract_component_typed` result, a NaT row NaN (see
+    /// [`Self::typed_datetime_int_field`]). `None` (caller falls back to the
+    /// generic path) for a column without a naive nanos buffer.
+    fn typed_datetime_civil_component(
         &self,
         component: fn((i64, i64, i64)) -> i64,
         name: &LabelName,
     ) -> Option<Result<Series, FrameError>> {
-        let nanos = self.naive_datetime_slice()?;
-        if nanos.contains(&fp_types::Timestamp::NAT) {
-            return None;
-        }
-        let out = Self::par_map_i64_from_nanos(nanos, |ns| {
-            component(Self::datetime64_civil_from_nanos(ns))
-        });
-        let index = self.series.index().clone();
-        let column = Column::from_i64_values_owned(out);
-        Some(Series::new(name, index, column))
+        self.typed_datetime_int_field(name, |ns| component(Self::datetime64_civil_from_nanos(ns)))
     }
 
-    /// Bool-output sibling of [`Self::typed_datetime_civil_component_all_valid`]
+    /// Bool-output sibling of [`Self::typed_datetime_civil_component`]
     /// for boolean calendar predicates (is_month_start/is_leap_year/…). Evaluates
     /// `component(y, m, d)` over the raw `&[i64]` nanos via the integer civil
     /// helper and builds an all-valid Bool column. `None` (caller falls back) on
@@ -60218,14 +60347,12 @@ impl DatetimeAccessor<'_> {
         if nanos.contains(&fp_types::Timestamp::NAT) {
             return None;
         }
-        let out = Self::par_map_bool_from_nanos(nanos, |ns| {
-            component(Self::datetime64_civil_from_nanos(ns))
-        });
+        let out = Self::par_map_nanos(nanos, |ns| component(Self::datetime64_civil_from_nanos(ns)));
         let index = self.series.index().clone();
         Some(Series::new(name, index, Column::from_bool_values(out)))
     }
 
-    /// Utf8-output sibling of [`Self::typed_datetime_civil_component_all_valid`]
+    /// Utf8-output sibling of [`Self::typed_datetime_civil_component`]
     /// for calendar-name components derived from civil (y, m, d) — month_name.
     /// Builds via `Scalar::Utf8` + `Column::from_values`, the SAME builder the
     /// generic `extract_component_typed_str` uses, so the output is bit-identical
@@ -60390,22 +60517,17 @@ impl DatetimeAccessor<'_> {
         Some(Series::new(name, index, column))
     }
 
-    /// Typed all-valid Datetime64 time-of-day component over raw `&[i64]` nanos
-    /// — `component(ns)` is pure integer arithmetic (no chrono, no Scalar). Used
-    /// by hour/minute/second. `None` (caller falls back) on non-dense / any NaT,
-    /// so the all-valid Int64 output equals the generic `extract_component_typed`.
-    fn typed_datetime_nanos_component_all_valid(
+    /// Typed Datetime64 time-of-day component over raw `&[i64]` nanos —
+    /// `component(ns)` is pure integer arithmetic (no chrono, no Scalar). Used
+    /// by hour/minute/second: the generic `extract_component_typed` result, a
+    /// NaT row NaN (see [`Self::typed_datetime_int_field`]). `None` (caller
+    /// falls back) for a column without a naive nanos buffer.
+    fn typed_datetime_nanos_component(
         &self,
         component: fn(i64) -> i64,
         name: &LabelName,
     ) -> Option<Result<Series, FrameError>> {
-        let nanos = self.naive_datetime_slice()?;
-        if nanos.contains(&fp_types::Timestamp::NAT) {
-            return None;
-        }
-        let out = Self::par_map_i64_from_nanos(nanos, component);
-        let index = self.series.index().clone();
-        Some(Series::new(name, index, Column::from_i64_values_owned(out)))
+        self.typed_datetime_int_field(name, component)
     }
 
     /// True when the underlying column is a typed `Datetime64` backing.
@@ -60464,7 +60586,9 @@ impl DatetimeAccessor<'_> {
 
     fn year_int64(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
-            if let Some(result) = self.typed_datetime_year_all_valid(self.series.name()) {
+            if let Some(result) =
+                self.typed_datetime_int_field(self.series.name(), Self::datetime64_year_from_nanos)
+            {
                 return result;
             }
             return self.extract_component_typed(|ts| ts.year(), self.series.name());
@@ -60482,7 +60606,7 @@ impl DatetimeAccessor<'_> {
     fn month_int64(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
             if let Some(result) =
-                self.typed_datetime_civil_component_all_valid(|(_, m, _)| m, self.series.name())
+                self.typed_datetime_civil_component(|(_, m, _)| m, self.series.name())
             {
                 return result;
             }
@@ -60501,7 +60625,7 @@ impl DatetimeAccessor<'_> {
     fn day_int64(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
             if let Some(result) =
-                self.typed_datetime_civil_component_all_valid(|(_, _, d)| d, self.series.name())
+                self.typed_datetime_civil_component(|(_, _, d)| d, self.series.name())
             {
                 return result;
             }
@@ -60519,7 +60643,7 @@ impl DatetimeAccessor<'_> {
 
     fn hour_int64(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
-            if let Some(result) = self.typed_datetime_nanos_component_all_valid(
+            if let Some(result) = self.typed_datetime_nanos_component(
                 |ns| ns.rem_euclid(Timedelta::NANOS_PER_DAY) / Timedelta::NANOS_PER_HOUR,
                 self.series.name(),
             ) {
@@ -60539,7 +60663,7 @@ impl DatetimeAccessor<'_> {
 
     fn minute_int64(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
-            if let Some(result) = self.typed_datetime_nanos_component_all_valid(
+            if let Some(result) = self.typed_datetime_nanos_component(
                 |ns| ns.rem_euclid(Timedelta::NANOS_PER_HOUR) / Timedelta::NANOS_PER_MIN,
                 self.series.name(),
             ) {
@@ -60559,7 +60683,7 @@ impl DatetimeAccessor<'_> {
 
     fn second_int64(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
-            if let Some(result) = self.typed_datetime_nanos_component_all_valid(
+            if let Some(result) = self.typed_datetime_nanos_component(
                 |ns| ns.rem_euclid(Timedelta::NANOS_PER_MIN) / 1_000_000_000,
                 self.series.name(),
             ) {
@@ -60582,7 +60706,7 @@ impl DatetimeAccessor<'_> {
             // Provably bit-identical to the chrono path: `Timestamp::microsecond`
             // IS `(nanos.rem_euclid(NANOS_PER_SEC) as u64 / 1000) as i64`, so
             // compute it directly over the raw &[i64] nanos (no Scalar / chrono).
-            if let Some(result) = self.typed_datetime_nanos_component_all_valid(
+            if let Some(result) = self.typed_datetime_nanos_component(
                 |ns| (ns.rem_euclid(Timedelta::NANOS_PER_SEC) as u64 / 1000) as i64,
                 self.series.name(),
             ) {
@@ -60604,7 +60728,7 @@ impl DatetimeAccessor<'_> {
         if self.is_typed_datetime() {
             // Provably bit-identical: `Timestamp::nanosecond` IS
             // `(nanos.rem_euclid(NANOS_PER_SEC) as u64 % 1000) as i64`.
-            if let Some(result) = self.typed_datetime_nanos_component_all_valid(
+            if let Some(result) = self.typed_datetime_nanos_component(
                 |ns| (ns.rem_euclid(Timedelta::NANOS_PER_SEC) as u64 % 1000) as i64,
                 self.series.name(),
             ) {
@@ -60628,7 +60752,7 @@ impl DatetimeAccessor<'_> {
             // IS `((nanos.div_euclid(NANOS_PER_DAY) + 3) % 7 + 7) % 7` (Monday=0,
             // floored for pre-1970), so compute it directly over the raw &[i64]
             // nanos — no Timestamp::from_nanos, no Scalar materialization.
-            if let Some(result) = self.typed_datetime_nanos_component_all_valid(
+            if let Some(result) = self.typed_datetime_nanos_component(
                 |ns| ((ns.div_euclid(Timedelta::NANOS_PER_DAY) + 3) % 7 + 7) % 7,
                 self.series.name(),
             ) {
@@ -61244,10 +61368,9 @@ impl DatetimeAccessor<'_> {
 
     fn quarter_int64(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
-            if let Some(result) = self.typed_datetime_civil_component_all_valid(
-                |(_, m, _)| (m - 1) / 3 + 1,
-                self.series.name(),
-            ) {
+            if let Some(result) =
+                self.typed_datetime_civil_component(|(_, m, _)| (m - 1) / 3 + 1, self.series.name())
+            {
                 return result;
             }
             return self.extract_component_typed(|ts| ts.quarter(), self.series.name());
@@ -61273,7 +61396,7 @@ impl DatetimeAccessor<'_> {
 
     fn dayofyear_int64(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
-            if let Some(result) = self.typed_datetime_dayofyear_all_valid(self.series.name()) {
+            if let Some(result) = self.typed_datetime_dayofyear(self.series.name()) {
                 return result;
             }
             return self.extract_component_typed(|ts| ts.dayofyear(), self.series.name());
@@ -62066,7 +62189,7 @@ impl DatetimeAccessor<'_> {
             // the same (year, month) the civil helper yields — which equals
             // `Timestamp::year()/month()`. Reuses the verified Int64 civil fast
             // path (the one `quarter` uses).
-            if let Some(result) = self.typed_datetime_civil_component_all_valid(
+            if let Some(result) = self.typed_datetime_civil_component(
                 |(y, m, _)| {
                     let is_leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
                     let days: [i64; 12] = [
@@ -182717,6 +182840,179 @@ mod tests {
             out.values().iter().map(shape).collect::<Vec<_>>(),
             brute(&[4.0, 9.0, 2.0, 7.0], 1, true)
         );
+    }
+
+    #[test]
+    fn datetime_int_fields_of_dates_holding_nat_vk7y9() {
+        // br-frankenpandas-vk7y9: the integer dt fields of naive dates holding
+        // NaT read the nanos - each present row the Timestamp's own field
+        // (chrono's calendar), a NaT row missing, the column float64 (pandas'
+        // dtype for a field with a missing row) - for a column built from
+        // Scalars and one from nanos + mask. NEGATIVE: the same dates without
+        // NaT stay an integer column of the same fields.
+        type Field = fn(&crate::DatetimeAccessor<'_>) -> Result<Series, FrameError>;
+        type Want = fn(&fp_types::Timestamp) -> Option<i64>;
+        let fields: [(&str, Field, Want); 12] = [
+            ("year", |a| a.year(), |t| t.year()),
+            ("month", |a| a.month(), |t| t.month()),
+            ("day", |a| a.day(), |t| t.day()),
+            ("quarter", |a| a.quarter(), |t| t.quarter()),
+            ("dayofyear", |a| a.dayofyear(), |t| t.dayofyear()),
+            ("hour", |a| a.hour(), |t| t.hour()),
+            ("minute", |a| a.minute(), |t| t.minute()),
+            ("second", |a| a.second(), |t| t.second()),
+            ("microsecond", |a| a.microsecond(), |t| t.microsecond()),
+            ("nanosecond", |a| a.nanosecond(), |t| t.nanosecond()),
+            ("dayofweek", |a| a.dayofweek(), |t| t.dayofweek()),
+            (
+                "days_in_month",
+                |a| a.days_in_month(),
+                |t| t.days_in_month(),
+            ),
+        ];
+        let nat = fp_types::Timestamp::NAT;
+        let nanos: Vec<i64> = vec![
+            1_577_836_800_123_456_789,
+            nat,
+            -1,
+            951_830_825_000_000_007,
+            nat,
+            4_102_444_799_999_999_999,
+        ];
+        let present: Vec<i64> = nanos.iter().copied().filter(|&ns| ns != nat).collect();
+        let cells = |values: &[i64]| -> Vec<Scalar> {
+            values
+                .iter()
+                .map(|&ns| {
+                    if ns == nat {
+                        Scalar::Null(NullKind::NaT)
+                    } else {
+                        Scalar::Datetime64(ns)
+                    }
+                })
+                .collect()
+        };
+        let mut mask = ValidityMask::all_valid(nanos.len());
+        for i in [1, 4] {
+            mask.set(i, false);
+        }
+        let columns = [
+            (
+                Column::new(DType::datetime64_naive(), cells(&nanos)).unwrap(),
+                &nanos,
+            ),
+            (
+                Column::from_datetime64_values_with_validity(nanos.clone(), mask),
+                &nanos,
+            ),
+            (
+                Column::new(DType::datetime64_naive(), cells(&present)).unwrap(),
+                &present,
+            ),
+        ];
+        for (column, stamps) in columns {
+            let holds_nat = stamps.contains(&nat);
+            let n = stamps.len() as i64;
+            let series = Series::new("d", Index::from_range(0, n, 1), column).unwrap();
+            for (name, field, want) in fields {
+                let out = field(&series.dt()).unwrap();
+                assert_eq!(out.column().dtype() == DType::Float64, holds_nat, "{name}");
+                for (value, &ns) in out.values().iter().zip(stamps.iter()) {
+                    if ns == nat {
+                        assert!(value.is_missing(), "{name} {ns}");
+                    } else {
+                        let want = want(&fp_types::Timestamp::from_nanos(ns)).unwrap();
+                        assert_eq!(value.to_f64().unwrap(), want as f64, "{name} {ns}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn temporal_shift_moves_nanos_and_mask_vk7y9() {
+        // br-frankenpandas-vk7y9: a datetime / timedelta column - holding NaT
+        // or not, built from Scalars or from nanos + mask, tz-aware - shifts
+        // its nanos as a slice and its mask a word at a time: every cell the
+        // row loop's (the source row's, the fill in a vacated row), its dtype
+        // kept, a typed backing out. NEGATIVE: a fill of the other kind (a
+        // duration into dates, an instant into durations) stays that kind -
+        // it is not taken for nanos of the column's.
+        let n = 70_usize;
+        let nanos = |i: usize| 1_577_836_800_000_000_000_i64 + i as i64 * 3_600_000_000_000;
+        let gap = |i: usize| i % 7 == 2 || i == 64;
+        let date_cells: Vec<Scalar> = (0..n)
+            .map(|i| {
+                if gap(i) {
+                    Scalar::Null(NullKind::NaT)
+                } else {
+                    Scalar::Datetime64(nanos(i))
+                }
+            })
+            .collect();
+        let span_cells: Vec<Scalar> = (0..n)
+            .map(|i| {
+                if gap(i) {
+                    Scalar::Null(NullKind::NaT)
+                } else {
+                    Scalar::Timedelta64(nanos(i) - nanos(30))
+                }
+            })
+            .collect();
+        let mut mask = ValidityMask::all_valid(n);
+        for i in (0..n).filter(|&i| gap(i)) {
+            mask.set(i, false);
+        }
+        let raw: Vec<i64> = (0..n)
+            .map(|i| if gap(i) { i64::MIN } else { nanos(i) })
+            .collect();
+        let columns = [
+            Column::new(DType::datetime64_naive(), date_cells.clone()).unwrap(),
+            Column::from_datetime64_values_with_validity(raw, mask),
+            Column::new(DType::datetime64_tz("Asia/Tokyo"), date_cells).unwrap(),
+            Column::from_datetime64_values_with_validity(
+                (0..n).map(nanos).collect(),
+                ValidityMask::all_valid(n),
+            ),
+            Column::new(DType::Timedelta64, span_cells).unwrap(),
+        ];
+        let cell = |value: &Scalar| format!("{value:?}");
+        for column in columns {
+            let dtype = column.dtype();
+            let source = Series::new("x", Index::from_range(0, n as i64, 1), column).unwrap();
+            let cells = source.values().to_vec();
+            let (present_fill, other_fill) = if matches!(dtype, DType::Timedelta64) {
+                (Scalar::Timedelta64(-5), Scalar::Datetime64(nanos(1)))
+            } else {
+                (Scalar::Datetime64(nanos(99)), Scalar::Timedelta64(5))
+            };
+            for periods in [0_i64, 1, 3, 64, 69, 70, 99, -1, -3, -65, -70, -99] {
+                let p = usize::try_from(periods.unsigned_abs()).unwrap().min(n);
+                let from = |i: usize| {
+                    if periods >= 0 {
+                        i.checked_sub(p)
+                    } else {
+                        Some(i + p).filter(|&j| j < n)
+                    }
+                };
+                for fill in [Scalar::Null(NullKind::NaT), present_fill.clone()] {
+                    let got = source.shift_with_fill_value(periods, fill.clone()).unwrap();
+                    assert_eq!(got.column().dtype(), dtype, "{dtype:?} {periods}");
+                    assert!(got.column().as_temporal_nanos_with_validity().is_some());
+                    for (i, value) in got.values().iter().enumerate() {
+                        let want = from(i).map_or(&fill, |j| &cells[j]);
+                        assert_eq!(cell(value), cell(want), "{dtype:?} {periods} {fill:?} {i}");
+                    }
+                }
+                let got = source
+                    .shift_with_fill_value(periods, other_fill.clone())
+                    .unwrap();
+                for (i, value) in got.values().iter().enumerate() {
+                    let want = from(i).map_or(&other_fill, |j| &cells[j]);
+                    assert_eq!(cell(value), cell(want), "{dtype:?} {periods} other {i}");
+                }
+            }
+        }
     }
 
     #[test]

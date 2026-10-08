@@ -3352,17 +3352,21 @@ enum ScalarValues {
     /// contiguous ns `data` + `validity`; an invalid slot materializes
     /// `Scalar::Null(NullKind::NaT)` (= `missing_for_dtype(Datetime64)`), a valid
     /// slot `Scalar::Datetime64(data[i])`. Used by null-introducing datetime
-    /// gathers (outer join / align / reindex on a datetime column).
+    /// gathers (outer join / align / reindex on a datetime column) and by a
+    /// numpy datetime64 array's column. Its clones share the nanos and the
+    /// Scalar view: a Series' ops clone its column, and a copied buffer and
+    /// a fresh view per clone made `d - d` 2.5x slower than a Scalar-built
+    /// column's shared Arc (br-frankenpandas-vk7y9).
     LazyNullableDatetime64 {
-        data: Vec<i64>,
+        data: Arc<Vec<i64>>,
         validity: ValidityMask,
-        values: OnceLock<Vec<Scalar>>,
+        values: Arc<OnceLock<Vec<Scalar>>>,
     },
     /// Nullable Timedelta64 sibling of `LazyNullableDatetime64`.
     LazyNullableTimedelta64 {
-        data: Vec<i64>,
+        data: Arc<Vec<i64>>,
         validity: ValidityMask,
-        values: OnceLock<Vec<Scalar>>,
+        values: Arc<OnceLock<Vec<Scalar>>>,
     },
     /// Nullable Period backing. Valid slots materialize with `freq`; invalid
     /// slots materialize with `missing_freq` so null-introducing reindex keeps
@@ -4011,17 +4015,17 @@ impl ScalarValues {
 
     fn lazy_nullable_datetime64(data: Vec<i64>, validity: ValidityMask) -> Self {
         Self::LazyNullableDatetime64 {
-            data,
+            data: Arc::new(data),
             validity,
-            values: OnceLock::new(),
+            values: Arc::new(OnceLock::new()),
         }
     }
 
     fn lazy_nullable_timedelta64(data: Vec<i64>, validity: ValidityMask) -> Self {
         Self::LazyNullableTimedelta64 {
-            data,
+            data: Arc::new(data),
             validity,
-            values: OnceLock::new(),
+            values: Arc::new(OnceLock::new()),
         }
     }
 
@@ -7343,8 +7347,6 @@ impl ScalarValues {
             | Self::LazyAllValidDatetime64Vec { values, .. }
             | Self::LazyAllValidTimedelta64Vec { values, .. }
             | Self::LazyAllValidPeriodVec { values, .. }
-            | Self::LazyNullableDatetime64 { values, .. }
-            | Self::LazyNullableTimedelta64 { values, .. }
             | Self::LazyNullablePeriod { values, .. }
             | Self::LazyAllValidFloat64 { values, .. }
             | Self::LazyAllValidFloat64Vec { values, .. }
@@ -7387,7 +7389,9 @@ impl ScalarValues {
             | Self::LazyLeftJoinDenseCycleRightInt64 { values, .. }
             | Self::LazyNullableRepeatPositionsI64AsFloat64 { values, .. }
             | Self::LazyUtf8Slice { values, .. } => values.get().is_some(),
-            Self::LazyCategoryCodes { values, .. } => values.get().is_some(),
+            Self::LazyCategoryCodes { values, .. }
+            | Self::LazyNullableDatetime64 { values, .. }
+            | Self::LazyNullableTimedelta64 { values, .. } => values.get().is_some(),
         }
     }
 }
@@ -7619,12 +7623,24 @@ impl Clone for ScalarValues {
                 categories: Arc::clone(categories),
                 values: Arc::clone(values),
             },
-            Self::LazyNullableDatetime64 { data, validity, .. } => {
-                Self::lazy_nullable_datetime64(data.clone(), validity.clone())
-            }
-            Self::LazyNullableTimedelta64 { data, validity, .. } => {
-                Self::lazy_nullable_timedelta64(data.clone(), validity.clone())
-            }
+            Self::LazyNullableDatetime64 {
+                data,
+                validity,
+                values,
+            } => Self::LazyNullableDatetime64 {
+                data: Arc::clone(data),
+                validity: validity.clone(),
+                values: Arc::clone(values),
+            },
+            Self::LazyNullableTimedelta64 {
+                data,
+                validity,
+                values,
+            } => Self::LazyNullableTimedelta64 {
+                data: Arc::clone(data),
+                validity: validity.clone(),
+                values: Arc::clone(values),
+            },
             Self::LazyNullablePeriod {
                 data,
                 freq,
@@ -14865,10 +14881,16 @@ impl Column {
     /// Datetime64 counterpart of [`Self::from_i64_values_with_validity`]: invalid
     /// slots materialize `Scalar::Null(NullKind::NaT)` (= `missing_for_dtype`),
     /// valid slots `Scalar::Datetime64(data[i])`. All-valid folds to the owned
-    /// move backing. Used by the null-introducing datetime gather.
+    /// move backing. Used by the null-introducing datetime gather. An invalid
+    /// slot's datum is written NaT, so the buffer reads as a Scalar-built
+    /// column's ([`Self::as_datetime64_slice`]: NaT inline).
     #[doc(hidden)]
-    pub fn from_datetime64_values_with_validity(data: Vec<i64>, validity: ValidityMask) -> Self {
+    pub fn from_datetime64_values_with_validity(
+        mut data: Vec<i64>,
+        validity: ValidityMask,
+    ) -> Self {
         debug_assert_eq!(data.len(), validity.len());
+        validity.for_each_invalid_range(|start, len| data[start..start + len].fill(Timestamp::NAT));
         if validity.all() {
             return Self {
                 dtype: DType::datetime64_naive(),
@@ -14893,8 +14915,12 @@ impl Column {
 
     /// Timedelta64 sibling of [`Self::from_datetime64_values_with_validity`].
     #[doc(hidden)]
-    pub fn from_timedelta64_values_with_validity(data: Vec<i64>, validity: ValidityMask) -> Self {
+    pub fn from_timedelta64_values_with_validity(
+        mut data: Vec<i64>,
+        validity: ValidityMask,
+    ) -> Self {
         debug_assert_eq!(data.len(), validity.len());
+        validity.for_each_invalid_range(|start, len| data[start..start + len].fill(Timedelta::NAT));
         if validity.all() {
             return Self {
                 dtype: DType::Timedelta64,
@@ -15504,6 +15530,11 @@ impl Column {
         if let ScalarValues::LazyAllValidDatetime64Vec { data, .. } = &self.values {
             return Some(data.as_slice());
         }
+        // A nullable backing holds NaT in its gaps (its constructor writes
+        // them), as a Scalar-built column's buffer below (br-frankenpandas-vk7y9).
+        if let ScalarValues::LazyNullableDatetime64 { data, .. } = &self.values {
+            return Some(data.as_slice());
+        }
         if let Some(data) = self.values.i64_arc_window_data(I64CellKind::Datetime64) {
             return Some(data);
         }
@@ -15514,15 +15545,18 @@ impl Column {
     }
 
     /// Borrow the raw `&[i64]` nanosecond backing of a `Timedelta64` column.
-    /// Sibling of [`Self::as_datetime64_slice`] (Timedelta64 stores its nanos in
-    /// `ColumnData::Timedelta64`; there is no lazy Timedelta64 variant). Missing
-    /// values are `Timedelta::NAT` in the buffer, so callers handle NaT inline.
+    /// Sibling of [`Self::as_datetime64_slice`]: the lazy backings' nanos, or
+    /// `ColumnData::Timedelta64` of a Scalar-built column. Missing values are
+    /// `Timedelta::NAT` in the buffer, so callers handle NaT inline.
     /// Returns `None` for any other dtype or a non-materialized column.
     pub fn as_timedelta64_slice(&self) -> Option<&[i64]> {
         if self.dtype != DType::Timedelta64 {
             return None;
         }
         if let ScalarValues::LazyAllValidTimedelta64Vec { data, .. } = &self.values {
+            return Some(data.as_slice());
+        }
+        if let ScalarValues::LazyNullableTimedelta64 { data, .. } = &self.values {
             return Some(data.as_slice());
         }
         if let Some(data) = self.values.i64_arc_window_data(I64CellKind::Timedelta64) {
@@ -15532,6 +15566,21 @@ impl Column {
             return Some(data);
         }
         None
+    }
+
+    /// A datetime (any zone) or timedelta column's nanosecond buffer with its
+    /// validity - all-valid or holding NaT - for a typed consumer that reads
+    /// presence from the mask. None for any other dtype or a backing without
+    /// a contiguous buffer (br-frankenpandas-vk7y9).
+    #[must_use]
+    #[doc(hidden)]
+    pub fn as_temporal_nanos_with_validity(&self) -> Option<(&[i64], &ValidityMask)> {
+        let data = match &self.dtype {
+            DType::Datetime64 { .. } => self.as_datetime64_slice()?,
+            DType::Timedelta64 => self.as_timedelta64_slice()?,
+            _ => return None,
+        };
+        (data.len() == self.validity.len()).then_some((data, &self.validity))
     }
 
     /// Borrow a Period column's contiguous ordinal backing plus its uniform
@@ -18684,11 +18733,18 @@ impl Column {
         };
         let width = self.width.filter(|width| width.fits_storage(&dtype));
         let pandas_string = self.pandas_string && dtype == DType::Utf8;
+        // The typed buffer is the values' under a dtype of the same kind - a
+        // datetime given its zone (tz_localize) kept nothing typed, and every
+        // typed datetime path read its Scalars (br-frankenpandas-vk7y9).
+        let data = self
+            .data
+            .clone()
+            .filter(|_| std::mem::discriminant(&self.dtype) == std::mem::discriminant(&dtype));
         Self {
             dtype,
             values: self.values.clone(),
             validity: self.validity.clone(),
-            data: None,
+            data,
             categorical,
             width,
             pandas_string,
@@ -18922,6 +18978,12 @@ impl Column {
                 | DType::Interval
         ) {
             return !self.validity.all();
+        }
+
+        // A datetime / timedelta column: a gap, or a NaT datum, read from its
+        // nanos - it built a Scalar a row to ask (br-frankenpandas-vk7y9).
+        if let Some((data, validity)) = self.as_temporal_nanos_with_validity() {
+            return !validity.all() || data.contains(&i64::MIN);
         }
 
         self.values.iter().any(Scalar::is_missing)
@@ -22138,21 +22200,13 @@ impl Column {
     /// path). Shared by the typed temporal arms of `binary_comparison` and
     /// `compare_scalar`; a method (not a closure) so the borrows tie to `self`.
     fn temporal_i64_backing(&self) -> Option<(&[i64], &ValidityMask, i64)> {
-        let (all_valid, nat) = match &self.dtype {
-            DType::Datetime64 { .. } => (self.as_datetime64_slice(), Timestamp::NAT),
-            DType::Timedelta64 => (self.as_timedelta64_slice(), Timedelta::NAT),
+        let nat = match &self.dtype {
+            DType::Datetime64 { .. } => Timestamp::NAT,
+            DType::Timedelta64 => Timedelta::NAT,
             _ => return None,
         };
-        if let Some(slice) = all_valid {
-            return Some((slice, &self.validity, nat));
-        }
-        match &self.values {
-            ScalarValues::LazyNullableDatetime64 { data, validity, .. }
-            | ScalarValues::LazyNullableTimedelta64 { data, validity, .. } => {
-                Some((data.as_slice(), validity, nat))
-            }
-            _ => None,
-        }
+        self.as_temporal_nanos_with_validity()
+            .map(|(data, validity)| (data, validity, nat))
     }
 
     /// Element-wise comparison producing an all-valid `Bool` column, with
@@ -23314,56 +23368,36 @@ impl Column {
             return Ok(Self::from_utf8_contiguous(out_bytes, out_offsets));
         }
 
-        // Typed nullable temporal fillna: a `LazyNullableDatetime64` / `LazyNullableTimedelta64`
-        // column (the common `df["date"].fillna(default)` shape — a temporal column WITH missing
-        // rows) and a matching NON-NaT temporal fill. The generic loop below materializes a
-        // `Vec<Scalar::Datetime64/Timedelta64>` (32 B/row) just to clone present values + the fill
-        // for missing. Build the filled i64-ns buffer directly: a present slot (validity set AND
-        // not the NaT sentinel — exactly the materialized `!is_missing`) keeps `data[i]`, a missing
-        // slot takes the fill ns. Every slot is filled ⇒ all-valid output. Bit-identical to the
-        // loop: present ⇒ the same value, missing ⇒ the fill, dtype unchanged. A NaT fill keeps
-        // nulls (its post-cast scalar IS missing) so it falls to the generic path.
-        if let (
-            Scalar::Datetime64(fill),
-            ScalarValues::LazyNullableDatetime64 { data, validity, .. },
-        ) = (&cast_fill, &self.values)
-            && *fill != Timestamp::NAT
-        {
-            let out: Vec<i64> = data
-                .iter()
-                .enumerate()
-                .map(|(i, &v)| {
-                    if validity.get(i) && v != Timestamp::NAT {
-                        v
-                    } else {
-                        *fill
-                    }
-                })
-                .collect();
-            return Ok(Self::from_datetime64_values(out));
-        }
-        if let (
-            Scalar::Timedelta64(fill),
-            ScalarValues::LazyNullableTimedelta64 { data, validity, .. },
-        ) = (&cast_fill, &self.values)
-            && *fill != Timedelta::NAT
+        // Typed temporal fillna: a datetime / timedelta column - its nanos
+        // whatever the backing (a Scalar-built one, a numpy array's until
+        // br-frankenpandas-vk7y9, took the loop below: d.fillna(ts) 0.08x
+        // pandas at 1M) - and a matching non-NaT fill. The nanos copied, each
+        // gap and each NaT datum (the materialized `is_missing`) the fill's,
+        // every slot present; the zone comes back in `fillna`. A NaT fill keeps
+        // the gaps (its post-cast scalar is missing) on the loop.
+        let temporal_fill = match (&self.dtype, &cast_fill) {
+            (DType::Datetime64 { .. }, Scalar::Datetime64(fill)) if *fill != Timestamp::NAT => {
+                Some((*fill, Timestamp::NAT))
+            }
+            (DType::Timedelta64, Scalar::Timedelta64(fill)) if *fill != Timedelta::NAT => {
+                Some((*fill, Timedelta::NAT))
+            }
+            _ => None,
+        };
+        if let Some((fill, nat)) = temporal_fill
+            && let Some((data, validity)) = self.as_temporal_nanos_with_validity()
         {
             let n = data.len();
-            let out: Vec<i64> = data
-                .iter()
-                .enumerate()
-                .map(|(i, &v)| {
-                    if validity.get(i) && v != Timedelta::NAT {
-                        v
-                    } else {
-                        *fill
-                    }
-                })
-                .collect();
-            return Ok(Self::from_timedelta64_values_with_validity(
-                out,
-                ValidityMask::all_valid(n),
-            ));
+            let mut out = data.to_vec();
+            validity.for_each_invalid_range(|start, len| out[start..start + len].fill(fill));
+            for value in &mut out {
+                *value = if *value == nat { fill } else { *value };
+            }
+            return Ok(if self.dtype == DType::Timedelta64 {
+                Self::from_timedelta64_values_with_validity(out, ValidityMask::all_valid(n))
+            } else {
+                Self::from_datetime64_values(out)
+            });
         }
 
         let values = self
@@ -28628,17 +28662,7 @@ impl Column {
         // the generic non_missing filter AND typed_radix_perm use — so the present
         // prefix + typed i64 `==` tie-walk are bit-identical to the comparator rank.
         if matches!(self.dtype, DType::Datetime64 { .. } | DType::Timedelta64) {
-            let ns: Option<&[i64]> = match &self.dtype {
-                DType::Datetime64 { .. } => self.as_datetime64_slice().or(match &self.values {
-                    ScalarValues::LazyNullableDatetime64 { data, .. } => Some(data.as_slice()),
-                    _ => None,
-                }),
-                DType::Timedelta64 => self.as_timedelta64_slice().or(match &self.values {
-                    ScalarValues::LazyNullableTimedelta64 { data, .. } => Some(data.as_slice()),
-                    _ => None,
-                }),
-                _ => None,
-            };
+            let ns = self.as_temporal_nanos_with_validity().map(|(data, _)| data);
             if let Some(data) = ns
                 && let Some(perm) = self.typed_radix_perm(ascending)
             {
@@ -30287,19 +30311,8 @@ impl Column {
         // datum is the NaT sentinel (mirroring the Float64 `!is_nan` split). Present
         // slots sort by i64_radix_key (ns order, reversed for descending); missing/
         // NaT indices append in original order. Bit-identical to the stable Scalar
-        // na-last comparator. The buffer accessor also reaches the LazyNullable*
-        // backing (as_datetime64_slice only exposes the all-valid backings).
-        let temporal_ns: Option<&[i64]> = match &self.dtype {
-            DType::Datetime64 { .. } => self.as_datetime64_slice().or(match &self.values {
-                ScalarValues::LazyNullableDatetime64 { data, .. } => Some(data.as_slice()),
-                _ => None,
-            }),
-            DType::Timedelta64 => self.as_timedelta64_slice().or(match &self.values {
-                ScalarValues::LazyNullableTimedelta64 { data, .. } => Some(data.as_slice()),
-                _ => None,
-            }),
-            _ => None,
-        };
+        // na-last comparator.
+        let temporal_ns = self.as_temporal_nanos_with_validity().map(|(data, _)| data);
         if let Some(data) = temporal_ns {
             let n = data.len();
             let mut present_keys: Vec<u64> = Vec::with_capacity(n);
@@ -41633,6 +41646,71 @@ mod tests {
     }
 
     #[test]
+    fn temporal_nanos_read_through_every_backing_vk7y9() {
+        // br-frankenpandas-vk7y9: a datetime / timedelta built from nanos and
+        // a mask holds NaT in its gaps whatever was passed there, so its
+        // buffer reads as a Scalar-built column's (NaT inline); a zone given
+        // by with_dtype keeps the typed buffer; fillna with an instant / a
+        // duration fills the gaps typed, in the column's dtype. NEGATIVE: a
+        // present datum stays as passed, a cast to another kind drops the
+        // buffer, and a NaT fill keeps the gaps.
+        let nat = i64::MIN;
+        let n = 70_usize;
+        let mut mask = ValidityMask::all_valid(n);
+        for i in [1_usize, 2, 64, 69] {
+            mask.set(i, false);
+        }
+        let raw: Vec<i64> = (0..n).map(|i| i as i64 * 1_000 - 5).collect();
+        let want: Vec<i64> = (0..n)
+            .map(|i| if mask.get(i) { raw[i] } else { nat })
+            .collect();
+        let cells: Vec<Scalar> = want
+            .iter()
+            .map(|&ns| {
+                if ns == nat {
+                    Scalar::Null(NullKind::NaT)
+                } else {
+                    Scalar::Datetime64(ns)
+                }
+            })
+            .collect();
+        let dates = Column::from_datetime64_values_with_validity(raw.clone(), mask.clone());
+        let spans = Column::from_timedelta64_values_with_validity(raw, mask.clone());
+        let scalar_built = Column::new(DType::datetime64_naive(), cells).unwrap();
+        let aware = scalar_built.with_dtype(DType::datetime64_tz("Asia/Tokyo"));
+        assert_eq!(dates.as_datetime64_slice(), Some(want.as_slice()));
+        assert_eq!(spans.as_timedelta64_slice(), Some(want.as_slice()));
+        assert_eq!(scalar_built.as_datetime64_slice(), Some(want.as_slice()));
+        assert_eq!(aware.as_datetime64_slice(), Some(want.as_slice()));
+        assert_eq!(dates.values(), scalar_built.values());
+        let (_, validity) = aware.as_temporal_nanos_with_validity().unwrap();
+        assert!((0..n).all(|i| validity.get(i) == mask.get(i)));
+        assert!(scalar_built.with_dtype(DType::Utf8).data.is_none());
+        let filled_want: Vec<i64> = want
+            .iter()
+            .map(|&ns| if ns == nat { 7 } else { ns })
+            .collect();
+        for column in [&dates, &scalar_built, &aware] {
+            let filled = column.fillna(&Scalar::Datetime64(7)).unwrap();
+            assert_eq!(filled.as_datetime64_slice(), Some(filled_want.as_slice()));
+            assert!(filled.validity().all());
+            assert_eq!(filled.dtype(), column.dtype());
+        }
+        let filled = spans.fillna(&Scalar::Timedelta64(7)).unwrap();
+        assert_eq!(filled.as_timedelta64_slice(), Some(filled_want.as_slice()));
+        assert_eq!(filled.dtype(), DType::Timedelta64);
+        // The NaT fill takes the Scalar loop, whose gap cells read
+        // Datetime64(NaT) where the nullable backing's read Null(NaT): the
+        // same nanos, the same missing rows.
+        let kept = dates.fillna(&Scalar::Null(NullKind::NaT)).unwrap();
+        assert_eq!(kept.as_datetime64_slice(), Some(want.as_slice()));
+        let missing = |column: &Column| -> Vec<bool> {
+            column.values().iter().map(Scalar::is_missing).collect()
+        };
+        assert_eq!(missing(&kept), missing(&dates));
+    }
+
+    #[test]
     fn nan_exact_unary_is_the_masked_row_loop_cmgnp() {
         // br-frankenpandas-cmgnp: a unary kernel (sqrt, exp, ln) of a column
         // holding NaN exactly at its missing rows maps the slice - the
@@ -45803,10 +45881,11 @@ mod tests {
 
         #[test]
         fn fillna_nullable_temporal_typed_matches_generic() {
-            // The typed nullable-temporal fillna arm (LazyNullableDatetime64/Timedelta64 +
-            // matching temporal fill) must be BIT-EXACT to the generic clone-fill path. A/B
-            // on identical data: col_typed (from_*_with_validity => LazyNullable) exercises
-            // the typed arm; col_eager (Column::new, Eager) falls to the generic path.
+            // The typed temporal fillna arm (a datetime / timedelta buffer + matching
+            // temporal fill) must be BIT-EXACT to the clone-fill of the materialized
+            // cells. col_typed (from_*_with_validity => LazyNullable) and col_eager
+            // (Column::new, Eager + its ColumnData buffer) both take the typed arm since
+            // br-frankenpandas-vk7y9, so each is checked against that brute fill too.
             // ~25% validity-null + ~10% NaT-in-buffer (validity-true) => both are "missing"
             // and get filled. NaT fill keeps nulls (both generic). Values near 1.6e18.
             let mut state: u64 = 0xF117_DA7E_1234_9E37;
@@ -45873,6 +45952,20 @@ mod tests {
                             b.values(),
                             "is_dt={is_dt} trial {trial} fill {fill:?}"
                         );
+                        if !fill.is_missing() {
+                            let brute: Vec<Scalar> = col_eager
+                                .values()
+                                .iter()
+                                .map(|v| {
+                                    if v.is_missing() {
+                                        fill.clone()
+                                    } else {
+                                        v.clone()
+                                    }
+                                })
+                                .collect();
+                            assert_eq!(a.values(), brute.as_slice(), "brute {trial} {fill:?}");
+                        }
                     }
                 }
             }

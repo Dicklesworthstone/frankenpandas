@@ -8816,6 +8816,29 @@ fn narrow_ndarray_column(
     }
 }
 
+/// A datetime (`datetime` true) or timedelta column of `nanos`, typed: its
+/// mask the rows not NaT (numpy's and fp's i64::MIN). A Scalar was built per
+/// row and read back (Series(dates) 35 ms a million rows, pandas 0.03;
+/// br-frankenpandas-vk7y9).
+fn nanos_column(nanos: Vec<i64>, datetime: bool) -> Column {
+    let words = nanos
+        .chunks(64)
+        .map(|chunk| {
+            chunk.iter().enumerate().fold(0_u64, |word, (bit, &ns)| {
+                word | (u64::from(ns != i64::MIN) << bit)
+            })
+        })
+        .collect();
+    let validity = fp_columnar::ValidityMask::from_words(words, nanos.len());
+    match (datetime, validity.all()) {
+        // Dates all present: the shared buffer a slice or a window views
+        // without a copy (br-frankenpandas-d2xp1), as a DatetimeIndex's was.
+        (true, true) => Column::from_datetime64_values(nanos),
+        (true, false) => Column::from_datetime64_values_with_validity(nanos, validity),
+        (false, _) => Column::from_timedelta64_values_with_validity(nanos, validity),
+    }
+}
+
 fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Option<Column>> {
     // An array is its column, dtype and all.
     if let Ok(array) = obj.extract::<PyRef<'_, PyExtensionArray>>() {
@@ -8832,26 +8855,10 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
     if let Ok(categorical) = obj.extract::<PyRef<'_, PyCategorical>>() {
         return Ok(Some(categorical.inner.column().clone()));
     }
-    let temporal = |dtype: DType, nanos: Vec<Option<i64>>, wrap: fn(i64) -> Scalar| {
-        let values = nanos
-            .into_iter()
-            .map(|ns| ns.map_or(Scalar::Null(NullKind::NaT), wrap))
-            .collect();
-        Column::new(dtype, values).map_err(column_error_to_py)
-    };
     if let Ok(dti) = obj.extract::<PyRef<'_, PyDatetimeIndex>>() {
-        // Its instants typed while none is NaT (their Scalar cells were
-        // built and read back; br-frankenpandas-so0mr).
-        let instants = dti.inner.asi8();
-        let column = if instants.contains(&i64::MIN) {
-            temporal(
-                DType::Datetime64 { tz: None },
-                dti.inner.nanos(),
-                Scalar::Datetime64,
-            )?
-        } else {
-            Column::from_datetime64_values(instants)
-        };
+        // Its instants typed, NaT or not (their Scalar cells were built and
+        // read back; br-frankenpandas-so0mr, vk7y9).
+        let column = nanos_column(dti.inner.asi8(), true);
         // A tz-aware index gives a column of its dtype (datetime64[ns, tz]).
         return Ok(Some(match dti.inner.tz() {
             Some(zone) => column.with_dtype(DType::datetime64_tz(zone)),
@@ -8859,8 +8866,7 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
         }));
     }
     if let Ok(tdi) = obj.extract::<PyRef<'_, PyTimedeltaIndex>>() {
-        let column = temporal(DType::Timedelta64, tdi.inner.nanos(), Scalar::Timedelta64)?;
-        return Ok(Some(column));
+        return Ok(Some(nanos_column(tdi.inner.asi8(), false)));
     }
     // A RangeIndex is an Index.
     let labels = plain_index_ref(obj)
@@ -8930,26 +8936,20 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
             .map(Some)
             .map_err(column_error_to_py);
     }
-    let temporal_array = |ns_dtype: &str| -> PyResult<Vec<Option<i64>>> {
+    // A datetime64 / timedelta64 array of any unit or byte order: the int64
+    // view of its native ns form (the array itself when it is one) read
+    // through its buffer.
+    let temporal_nanos = |ns_dtype: &str| -> PyResult<Vec<i64>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("copy", false)?;
         let nanos = obj
-            .call_method1("astype", (ns_dtype,))?
-            .call_method1("astype", ("int64",))?;
-        Ok(ndarray_elements::<i64>(py, &nanos)?
-            .into_iter()
-            .map(|ns| (ns != i64::MIN).then_some(ns))
-            .collect())
+            .call_method("astype", (ns_dtype,), Some(&kwargs))?
+            .call_method1("view", ("int64",))?;
+        ndarray_elements::<i64>(py, &nanos)
     };
     let column = match kind.as_str() {
-        "M" => temporal(
-            DType::Datetime64 { tz: None },
-            temporal_array("datetime64[ns]")?,
-            Scalar::Datetime64,
-        )?,
-        "m" => temporal(
-            DType::Timedelta64,
-            temporal_array("timedelta64[ns]")?,
-            Scalar::Timedelta64,
-        )?,
+        "M" => nanos_column(temporal_nanos("datetime64[ns]")?, true),
+        "m" => nanos_column(temporal_nanos("timedelta64[ns]")?, false),
         "i" if native => Column::from_i64_values(ndarray_elements::<i64>(py, obj)?),
         "i" => Column::from_i64_values(obj.call_method0("tolist")?.extract::<Vec<i64>>()?),
         "f" if native && name == "float64" => {
@@ -25206,6 +25206,18 @@ fn broadcast_column(scalar: Scalar, len: usize) -> PyResult<Column> {
         Scalar::Float64(value) if len > 0 => Ok(Column::from_f64_constant(value, len)),
         Scalar::Int64(value) if len > 0 => Ok(Column::from_i64_constant(value, len)),
         Scalar::Bool(value) if len > 0 => Ok(Column::from_bool_constant(value, len)),
+        // An instant's or a duration's copies typed: a Scalar each was built
+        // and inferred (d > ts broadcast a million Timestamps, 0.08x pandas;
+        // br-frankenpandas-vk7y9).
+        Scalar::Datetime64(nanos) if len > 0 && nanos != Timestamp::NAT => {
+            Ok(Column::from_datetime64_values(vec![nanos; len]))
+        }
+        Scalar::Timedelta64(nanos) if len > 0 && nanos != Timedelta::NAT => {
+            Ok(Column::from_timedelta64_values_with_validity(
+                vec![nanos; len],
+                fp_columnar::ValidityMask::all_valid(len),
+            ))
+        }
         scalar => Column::from_values(vec![scalar; len]).map_err(column_error_to_py),
     }
 }
