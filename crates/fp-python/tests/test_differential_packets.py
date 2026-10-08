@@ -30574,6 +30574,65 @@ def test_temporal_argsort_like_pandas_vk7y9(case: str) -> None:
     assert run(fpd) == run(pd)
 
 
+def _vk7y9p3_dates(m: Any) -> Any:
+    return m.Series(np.array(["2020-01-05T03:00", "NaT", "NaT", "2019-12-31T06:30", "2021-07-04", "NaT", "1969-12-31T23:59:59.5"], dtype="datetime64[ns]"))
+
+
+def _vk7y9p3_spans(m: Any) -> Any:
+    return _vk7y9p3_dates(m) - m.Timestamp("2020-01-01")
+
+
+_VK7Y9P3_CASES = {
+    "dates astype int64": lambda m: _vk7y9p3_dates(m).astype("int64"),
+    "durations astype int64": lambda m: _vk7y9p3_spans(m).astype("int64"),
+    "aware dates astype int64": lambda m: _vk7y9p3_dates(m).dt.tz_localize("Asia/Tokyo").astype("int64"),
+    "tz_localize UTC": lambda m: _vk7y9p3_dates(m).dt.tz_localize("UTC"),
+    "tz_localize +05:30": lambda m: _vk7y9p3_dates(m).dt.tz_localize("+05:30"),
+    "tz_localize None of UTC": lambda m: _vk7y9p3_dates(m).dt.tz_localize("UTC").dt.tz_localize(None),
+    "tz_localize None of Lord_Howe": lambda m: _vk7y9p3_dates(m).dt.tz_localize("UTC").dt.tz_convert("Australia/Lord_Howe").dt.tz_localize(None),
+    "ffill": lambda m: _vk7y9p3_dates(m).ffill(),
+    "ffill limit 1": lambda m: _vk7y9p3_dates(m).ffill(limit=1),
+    "bfill": lambda m: _vk7y9p3_dates(m).bfill(),
+    "bfill limit 1": lambda m: _vk7y9p3_dates(m).bfill(limit=1),
+    "aware ffill": lambda m: _vk7y9p3_dates(m).dt.tz_localize("Asia/Tokyo").ffill(),
+    "durations bfill": lambda m: _vk7y9p3_spans(m).bfill(),
+    "between both": lambda m: _vk7y9p3_dates(m).between(m.Timestamp("2019-12-31T06:30"), m.Timestamp("2021-07-04")),
+    "between neither": lambda m: _vk7y9p3_dates(m).between(m.Timestamp("2019-12-31T06:30"), m.Timestamp("2021-07-04"), inclusive="neither"),
+    "between left": lambda m: _vk7y9p3_dates(m).between(m.Timestamp("2019-12-31T06:30"), m.Timestamp("2021-07-04"), inclusive="left"),
+    "durations between right": lambda m: _vk7y9p3_spans(m).between(m.Timedelta("-1D"), m.Timedelta("4h"), inclusive="right"),
+    "clip both": lambda m: _vk7y9p3_dates(m).clip(m.Timestamp("2000-01-01"), m.Timestamp("2020-06-01")),
+    "clip lower": lambda m: _vk7y9p3_dates(m).clip(lower=m.Timestamp("2020-01-01")),
+    "durations clip upper": lambda m: _vk7y9p3_spans(m).clip(upper=m.Timedelta("1D")),
+    "where": lambda m: _vk7y9p3_dates(m).where(_vk7y9p3_dates(m) > m.Timestamp("2020-01-01")),
+    "where, a Timestamp fill": lambda m: _vk7y9p3_dates(m).where(_vk7y9p3_dates(m) > m.Timestamp("2020-01-01"), m.Timestamp("2000-01-01")),
+    "aware where": lambda m: _vk7y9p3_dates(m).dt.tz_localize("Asia/Tokyo").where(_vk7y9p3_dates(m) > m.Timestamp("2020-01-01")),
+    "durations where, a Timedelta fill": lambda m: _vk7y9p3_spans(m).where(_vk7y9p3_spans(m) > m.Timedelta(0), m.Timedelta("1h")),
+    "total_seconds": lambda m: _vk7y9p3_spans(m).dt.total_seconds(),
+    "days": lambda m: _vk7y9p3_spans(m).dt.days,
+    "seconds": lambda m: _vk7y9p3_spans(m).dt.seconds,
+    "microseconds": lambda m: _vk7y9p3_spans(m).dt.microseconds,
+    "nanoseconds": lambda m: _vk7y9p3_spans(m).dt.nanoseconds,
+    # NEGATIVE: without NaT the fields stay int64 and nothing is filled.
+    "days, no NaT (NEGATIVE)": lambda m: _vk7y9p3_spans(m).dropna().dt.days,
+    "ffill, no NaT (NEGATIVE)": lambda m: _vk7y9p3_dates(m).dropna().ffill(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VK7Y9P3_CASES))
+def test_temporal_ops_part3_like_pandas_vk7y9(case: str) -> None:
+    # astype int64 (a NaT is numpy's i64::MIN, present), tz_localize to a
+    # fixed offset and to None, ffill / bfill, between, clip and the
+    # duration fields of columns holding NaT read the nanos (each a Scalar
+    # a row: 0.01x - 0.48x pandas at 1M; br-frankenpandas-vk7y9): dtype,
+    # missing rows, values vs pandas.
+    def run(m: Any) -> Any:
+        out = _VK7Y9P3_CASES[case](m)
+        return (str(out.dtype), out.isna().tolist(), out.astype(str).tolist(), list(out.index))
+
+    assert run(fpd) == run(pd)
+
+
 def _geqye_dates(m: Any) -> Any:
     return m.Series(np.array(["2020-01-05", "NaT", "2020-03-01"], dtype="datetime64[ns]"))
 

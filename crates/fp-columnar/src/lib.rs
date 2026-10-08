@@ -15569,9 +15569,11 @@ impl Column {
     }
 
     /// A datetime (any zone) or timedelta column's nanosecond buffer with its
-    /// validity - all-valid or holding NaT - for a typed consumer that reads
-    /// presence from the mask. None for any other dtype or a backing without
-    /// a contiguous buffer (br-frankenpandas-vk7y9).
+    /// validity - all-valid or holding NaT. Every missing slot's datum is NaT
+    /// (i64::MIN): the nullable constructors write it, a Scalar-built
+    /// column's buffer holds it, the other backings are all-valid - so a
+    /// row is present exactly when its datum is not NaT. None for any other
+    /// dtype or a backing without a contiguous buffer (br-frankenpandas-vk7y9).
     #[must_use]
     #[doc(hidden)]
     pub fn as_temporal_nanos_with_validity(&self) -> Option<(&[i64], &ValidityMask)> {
@@ -29826,6 +29828,15 @@ impl Column {
                 offsets.push(bytes.len());
             }
             return Ok(Self::from_utf8_contiguous(bytes, offsets));
+        }
+        // A datetime (any zone) or timedelta column's int64 is its nanos, a
+        // NaT the i64::MIN numpy holds it as - a present value, as pandas
+        // returns it (each row was a Scalar cast, and a NaT a missing cell:
+        // astype('int64') 0.01x pandas at 1M; br-frankenpandas-vk7y9).
+        if target == DType::Int64
+            && let Some((data, _)) = self.as_temporal_nanos_with_validity()
+        {
+            return Ok(Self::from_i64_values(data.to_vec()));
         }
         let out: Vec<Scalar> = self
             .values

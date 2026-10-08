@@ -16312,6 +16312,9 @@ impl Series {
             .keeping_dtype_of(&self.column);
             return Series::new(self.name.clone(), self.index.clone(), column);
         }
+        if let Some(result) = self.temporal_carry(true, limit) {
+            return result;
+        }
 
         let vals = self.column.values();
         let mut out = Vec::with_capacity(vals.len());
@@ -16338,6 +16341,62 @@ impl Series {
         }
 
         self.with_values_preserving_index(out)
+    }
+
+    /// ffill (`forward`) or bfill of a datetime / timedelta column over its
+    /// nanos: a missing row - a gap or a NaT datum - takes the last (next)
+    /// present nanos within `limit` consecutive fills, a leading (trailing)
+    /// run staying NaT, in the column's dtype. It cloned a Scalar a row
+    /// (d.ffill() 0.07x pandas at 1M; br-frankenpandas-vk7y9). None for
+    /// any other column.
+    fn temporal_carry(
+        &self,
+        forward: bool,
+        limit: Option<usize>,
+    ) -> Option<Result<Self, FrameError>> {
+        // A row is present exactly when its datum is not NaT (see
+        // as_temporal_nanos_with_validity), so the mask is not read.
+        let (data, _) = self.column.as_temporal_nanos_with_validity()?;
+        let n = data.len();
+        let mut out = vec![i64::MIN; n];
+        if limit.is_none() {
+            // The last present datum carried, NaT before any: one store a row.
+            let mut last = i64::MIN;
+            let mut carry = |(slot, &ns): (&mut i64, &i64)| {
+                if ns != i64::MIN {
+                    last = ns;
+                }
+                *slot = last;
+            };
+            if forward {
+                out.iter_mut().zip(data).for_each(&mut carry);
+            } else {
+                out.iter_mut().zip(data).rev().for_each(&mut carry);
+            }
+        } else {
+            let mut last: Option<i64> = None;
+            let mut run = 0_usize;
+            let mut step = |i: usize| {
+                if data[i] != i64::MIN {
+                    out[i] = data[i];
+                    last = Some(data[i]);
+                    run = 0;
+                } else if let Some(value) = last {
+                    run += 1;
+                    if limit.is_none_or(|limit| run <= limit) {
+                        out[i] = value;
+                    }
+                }
+            };
+            if forward {
+                (0..n).for_each(&mut step);
+            } else {
+                (0..n).rev().for_each(&mut step);
+            }
+        }
+        let validity = nanos_validity(&out);
+        let column = temporal_column(self.column.dtype(), out, validity);
+        Some(Self::new(self.name.clone(), self.index.clone(), column))
     }
 
     /// Back-fill missing values (propagate next valid observation backward).
@@ -16411,6 +16470,9 @@ impl Series {
             let column = Column::from_f64_values_with_validity(out, out_valid)
                 .keeping_dtype_of(&self.column);
             return Series::new(self.name.clone(), self.index.clone(), column);
+        }
+        if let Some(result) = self.temporal_carry(false, limit) {
+            return result;
         }
 
         let vals = self.column.values();
@@ -20520,6 +20582,25 @@ impl Series {
             DType::Timedelta64 => Scalar::Timedelta64,
             _ => return Ok(None),
         };
+        // The nanos clipped, NaT kept, in the column's dtype: it read and
+        // built a Scalar a row (d.clip() 0.14x pandas at 1M;
+        // br-frankenpandas-vk7y9).
+        if let Some((data, _)) = self.column.as_temporal_nanos_with_validity() {
+            let out: Vec<i64> = data
+                .iter()
+                .map(|&ns| {
+                    if ns == i64::MIN {
+                        ns
+                    } else {
+                        let clipped = lower.map_or(ns, |lo| ns.max(lo));
+                        upper.map_or(clipped, |hi| clipped.min(hi))
+                    }
+                })
+                .collect();
+            let validity = nanos_validity(&out);
+            let column = temporal_column(dtype, out, validity);
+            return Self::new(self.name(), self.index.clone(), column).map(Some);
+        }
         let values = self
             .column
             .values()
@@ -25737,6 +25818,28 @@ impl Series {
                     Column::from_i64_values_owned(out),
                 );
             }
+            // A datetime / timedelta column keeps its nanos where the
+            // condition holds - NaT, or a fill of its own kind, elsewhere - in
+            // its dtype (a Scalar a row: d.where(d > ts) 0.05x pandas at 1M;
+            // br-frankenpandas-vk7y9).
+            if let Some(cmask) = cond.column.as_bool_slice()
+                && let Some((data, _)) = self.column.as_temporal_nanos_with_validity()
+                && let Some(fill_ns) = match (self.column.dtype(), &fill) {
+                    (_, fill) if fill.is_missing() => Some(i64::MIN),
+                    (DType::Datetime64 { .. }, Scalar::Datetime64(ns))
+                    | (DType::Timedelta64, Scalar::Timedelta64(ns)) => Some(*ns),
+                    _ => None,
+                }
+            {
+                let out: Vec<i64> = data
+                    .iter()
+                    .zip(cmask)
+                    .map(|(&ns, &keep)| if keep { ns } else { fill_ns })
+                    .collect();
+                let validity = nanos_validity(&out);
+                let column = temporal_column(self.column.dtype(), out, validity);
+                return Series::new(self.name.clone(), self.index.clone(), column);
+            }
             // Float64 self with gaps + all-valid Bool cond + a number or the
             // default missing `other` (see nullable_f64_select).
             if let Some(cmask) = cond.column.as_bool_slice()
@@ -26558,20 +26661,19 @@ impl Series {
             }
             _ => None,
         };
+        // A column holding NaT takes it too, a missing row false whatever
+        // its datum (it went to the Scalar loop: d.between() 0.13x pandas at
+        // 1M; br-frankenpandas-vk7y9).
         if let Some((lo, hi)) = temporal_bounds
-            && self.column.validity().all()
-            && let Some(d) = if self.column.dtype().is_datetime() {
-                self.column.as_datetime64_slice()
-            } else {
-                self.column.as_timedelta64_slice()
-            }
+            && let Some((d, validity)) = self.column.as_temporal_nanos_with_validity()
         {
-            let flags: Vec<bool> = match mode {
+            let mut flags: Vec<bool> = match mode {
                 InclusiveMode::Both => d.iter().map(|&v| v >= lo && v <= hi).collect(),
                 InclusiveMode::Neither => d.iter().map(|&v| v > lo && v < hi).collect(),
                 InclusiveMode::Left => d.iter().map(|&v| v >= lo && v < hi).collect(),
                 InclusiveMode::Right => d.iter().map(|&v| v > lo && v <= hi).collect(),
             };
+            validity.for_each_invalid_range(|start, len| flags[start..start + len].fill(false));
             return Series::new(
                 self.name.clone(),
                 self.index.clone(),
@@ -34350,6 +34452,19 @@ fn rolling_float_column(cells: &[Scalar]) -> Column {
     }
     let validity = fp_columnar::ValidityMask::from_words(words, cells.len());
     Column::from_f64_values_with_validity(data, validity)
+}
+
+/// The mask of a typed temporal op's output `nanos`: the rows not NaT.
+fn nanos_validity(nanos: &[i64]) -> fp_columnar::ValidityMask {
+    let words = nanos
+        .chunks(64)
+        .map(|chunk| {
+            chunk.iter().enumerate().fold(0_u64, |word, (bit, &ns)| {
+                word | (u64::from(ns != i64::MIN) << bit)
+            })
+        })
+        .collect();
+    fp_columnar::ValidityMask::from_words(words, nanos.len())
 }
 
 /// A column of `dtype` - a datetime of any zone, or a timedelta - holding
@@ -62551,21 +62666,31 @@ impl DatetimeAccessor<'_> {
         // equals `from_values` of those floats (all finite — i64 nanos / 1e9 never
         // NaN). Falls back on any NaT (which the Scalar path renders as missing
         // via the `Scalar::Null` arm) or a non-materialized backing.
-        if let Some(nanos) = self.series.column().as_timedelta64_slice()
-            && !nanos.contains(&fp_types::Timedelta::NAT)
-        {
+        if let Some(nanos) = self.series.column().as_timedelta64_slice() {
+            let nat = fp_types::Timedelta::NAT;
+            let holds_nat = nanos.contains(&nat);
             let out: Vec<f64> = nanos
                 .iter()
-                .map(|&n| fp_types::Timedelta::total_seconds(n))
+                .map(|&n| {
+                    if n == nat {
+                        f64::NAN
+                    } else {
+                        fp_types::Timedelta::total_seconds(n)
+                    }
+                })
                 .collect();
             let index = self.series.index().clone();
             // i64 nanos / 1e9 is always finite (no NaN) ⇒ MOVE the hot output Vec
             // into the backing instead of from_f64_values' Arc::from(Vec) copy.
-            return Series::new(
-                self.series.name(),
-                index,
-                Column::from_f64_values_owned(out),
-            );
+            // A NaT is NaN, missing, as pandas (it took the Scalar loop below:
+            // total_seconds() of durations holding NaT 0.21x pandas at 1M;
+            // br-frankenpandas-vk7y9).
+            let column = if holds_nat {
+                Column::from_f64_values(out)
+            } else {
+                Column::from_f64_values_owned(out)
+            };
+            return Series::new(self.series.name(), index, column);
         }
         let vals = self.series.column().values();
         let mut out = Vec::with_capacity(vals.len());
@@ -62644,7 +62769,18 @@ impl DatetimeAccessor<'_> {
         if let Some(nanos) = self.series.column().as_timedelta64_slice() {
             let raw: Vec<Option<i64>> = nanos.iter().map(|&n| component(n)).collect();
             let index = self.series.index().clone();
-            let column = Column::from_values(Self::promote_components(&raw))?;
+            // promote_components' columns built typed: int64, or float64 with
+            // NaN where a value is missing - it boxed a Scalar a row
+            // ((d - ts).dt.days 0.48x pandas at 1M; br-frankenpandas-vk7y9).
+            let column = if raw.iter().all(Option::is_some) {
+                Column::from_i64_values(raw.into_iter().flatten().collect())
+            } else {
+                Column::from_f64_values(
+                    raw.iter()
+                        .map(|slot| slot.map_or(f64::NAN, |v| v as f64))
+                        .collect(),
+                )
+            };
             return Series::new(self.series.name(), index, column);
         }
 
@@ -63235,15 +63371,7 @@ impl DatetimeAccessor<'_> {
                     }
                 })
                 .collect();
-            let present = out
-                .chunks(64)
-                .map(|chunk| {
-                    chunk.iter().enumerate().fold(0_u64, |word, (bit, &ns)| {
-                        word | (u64::from(ns != Timestamp::NAT) << bit)
-                    })
-                })
-                .collect();
-            let present = fp_columnar::ValidityMask::from_words(present, out.len());
+            let present = nanos_validity(&out);
             let column = temporal_column(self.series.column().dtype(), out, present);
             return Series::new(
                 self.series.name().to_owned(),
@@ -63413,6 +63541,20 @@ impl DatetimeAccessor<'_> {
                         ));
                     }
                     None => {
+                        // The wall clock's nanos, a zone lookup a row across
+                        // threads, NaT kept: it read a Scalar and built one a
+                        // row (tz_localize(None) 0.08x pandas at 1M;
+                        // br-frankenpandas-vk7y9).
+                        if let Some(wall) = self.wall_datetime_nanos(true) {
+                            let wall = wall.into_owned();
+                            let validity = nanos_validity(&wall);
+                            let column = temporal_column(DType::datetime64_naive(), wall, validity);
+                            return Series::new(
+                                self.series.name().to_owned(),
+                                self.series.index().clone(),
+                                column,
+                            );
+                        }
                         let current_tz = self.series.column().timezone().unwrap();
                         let current_spec = parse_tz_spec(current_tz)?;
                         let values = self
@@ -63468,6 +63610,41 @@ impl DatetimeAccessor<'_> {
                         }
                         TimeZoneSpec::Named { name, .. } => DType::datetime64_tz(name),
                     };
+                    // A fixed offset - UTC among them - localizes each wall
+                    // time by its arithmetic on the nanos (no DST to
+                    // resolve), NaT kept: it built a TzLocalizeInput and a
+                    // Scalar a row (tz_localize('UTC') 0.06x pandas at 1M;
+                    // br-frankenpandas-vk7y9).
+                    if let TimeZoneSpec::Fixed(offset) = &tz_spec
+                        && let Some((nanos, _)) =
+                            self.series.column().as_temporal_nanos_with_validity()
+                    {
+                        let shift = i64::from(offset.local_minus_utc()) * 1_000_000_000;
+                        let nat = fp_types::Timestamp::NAT;
+                        let column = if shift == 0 {
+                            // UTC: the same nanos under the zone, no copy.
+                            self.series.column().with_dtype(target_dtype)
+                        } else {
+                            if nanos.iter().any(|&ns| {
+                                ns != nat && ns.checked_sub(shift).is_none_or(|utc| utc == nat)
+                            }) {
+                                return Err(FrameError::CompatibilityRejected(
+                                    "timestamp overflow".to_owned(),
+                                ));
+                            }
+                            let utc: Vec<i64> = nanos
+                                .iter()
+                                .map(|&ns| if ns == nat { nat } else { ns - shift })
+                                .collect();
+                            let validity = nanos_validity(&utc);
+                            temporal_column(target_dtype, utc, validity)
+                        };
+                        return Series::new(
+                            self.series.name().to_owned(),
+                            self.series.index().clone(),
+                            column,
+                        );
+                    }
                     let inputs = self
                         .series
                         .column()
@@ -63705,6 +63882,16 @@ fn parse_tz_spec(tz: &str) -> Result<TimeZoneSpec, FrameError> {
     }
     if trimmed == "UTC" || trimmed == "Z" || is_fixed_offset_suffix(trimmed) {
         return Ok(TimeZoneSpec::Fixed(parse_fixed_offset(trimmed)?));
+    }
+    // The name a fixed offset's column carries - 'UTC+05:30', pandas' -
+    // reads back as that offset: a column localized to one failed every op
+    // reading its zone ("unknown timezone 'UTC+05:30'";
+    // br-frankenpandas-vk7y9).
+    if let Some(offset) = trimmed
+        .strip_prefix("UTC")
+        .filter(|rest| is_fixed_offset_suffix(rest))
+    {
+        return Ok(TimeZoneSpec::Fixed(parse_fixed_offset(offset)?));
     }
     let zone = Tz::from_str(trimmed)
         .map_err(|_| FrameError::CompatibilityRejected(format!("unknown timezone '{trimmed}'")))?;
