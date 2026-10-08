@@ -84354,11 +84354,38 @@ fn crosstab<'py>(
     };
     let rows = to_series(&row_arrays)?;
     let cols = to_series(&col_arrays)?;
+    // pandas builds the keys' frame on the intersection of the key Series'
+    // indexes (get_objs_combined_axis(intersect=True, sort=False)): keys on
+    // different indexes count their shared labels, int keys staying int64
+    // (the union widened them to float labels; br-frankenpandas-iov9i).
+    // Keys on one index keep it; keys that are not all Series are placed by
+    // position, as before.
+    let keys = || row_arrays.iter().chain(&col_arrays);
+    let mut common: Option<Bound<'py, PyAny>> = None;
+    if keys().all(|key| key.extract::<PyRef<'_, PySeries>>().is_ok()) {
+        let indexes = keys()
+            .map(|key| key.getattr("index"))
+            .collect::<PyResult<Vec<_>>>()?;
+        if let Some((first, others)) = indexes.split_first() {
+            let mut differ = false;
+            for other in others {
+                differ |= !first.call_method1("equals", (other,))?.extract::<bool>()?;
+            }
+            if differ {
+                let mut shared = first.clone();
+                for other in others {
+                    shared = shared.call_method1("intersection", (other,))?;
+                }
+                common = Some(shared);
+            }
+        }
+    }
     let n = rows.first().map_or(0, |row| row.inner.len());
-    if rows
-        .iter()
-        .chain(&cols)
-        .any(|series| series.inner.len() != n)
+    if common.is_none()
+        && rows
+            .iter()
+            .chain(&cols)
+            .any(|series| series.inner.len() != n)
     {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "index and columns must have the same length",
@@ -84429,7 +84456,14 @@ fn crosstab<'py>(
     // dropna=False keeps a missing key as its own row / column (it was
     // refused), as pandas' pivot does.
     pivot_kwargs.set_item("dropna", dropna)?;
-    let frame = py.get_type::<PyDataFrame>().call1((data,))?;
+    let frame = match &common {
+        Some(index) => {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("index", index)?;
+            py.get_type::<PyDataFrame>().call((data,), Some(&kwargs))?
+        }
+        None => py.get_type::<PyDataFrame>().call1((data,))?,
+    };
     // Counting, the values are pandas' df['__dummy__'] = 0 over the frame's
     // rows: a list of n Python zeros was converted one by one (two thirds
     // of a 200k-row crosstab; br-frankenpandas-fxk1a).

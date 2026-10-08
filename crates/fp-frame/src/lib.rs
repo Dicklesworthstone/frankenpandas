@@ -34143,6 +34143,25 @@ impl RollingOrderStat {
     }
 }
 
+/// A rolling output of `Float64` / `Null(NaN)` cells as rolling_var_online
+/// builds its own - data and validity words, `Null(NaN)` a cleared bit and
+/// `Float64(v)` a set one - so a typed float64 column even when every cell
+/// is missing (from_values made that object; br-frankenpandas-2umll).
+fn rolling_float_column(cells: &[Scalar]) -> Column {
+    let mut data = Vec::with_capacity(cells.len());
+    let mut words = vec![0_u64; cells.len().div_ceil(64)];
+    for (i, cell) in cells.iter().enumerate() {
+        if let Scalar::Float64(value) = cell {
+            words[i / 64] |= 1_u64 << (i % 64);
+            data.push(*value);
+        } else {
+            data.push(0.0);
+        }
+    }
+    let validity = fp_columnar::ValidityMask::from_words(words, cells.len());
+    Column::from_f64_values_with_validity(data, validity)
+}
+
 /// What pandas' window kernels read (`BaseWindow._prep_values`): the values
 /// with +-inf as NaN, in every rolling / expanding / ewm aggregation.
 /// Borrowed when the column holds no infinity (an all-valid float64 column
@@ -35168,7 +35187,7 @@ impl Rolling<'_> {
         // no missing (every index is admitted / retired, `value_at` never None), no
         // Float64(-0.0) (so the neg-zero fallback is never taken), `to_f64(Int64(v)) ==
         // v as f64`, the same `total_cmp` extremum, the same emission (Null(NaN) below
-        // min_periods, Float64 otherwise), and the SAME `Column::from_values(out)`.
+        // min_periods, Float64 otherwise), and the SAME float64 output column.
         if let Some(data) = self.series.column().as_i64_slice() {
             let len = data.len();
             let min_periods = self.min_periods;
@@ -35224,8 +35243,89 @@ impl Rolling<'_> {
                     ));
                 }
             }
-            let column = Column::from_values(out)?;
+            // float64 even when every window is short, as pandas (an
+            // all-missing from_values column was object; 2umll).
+            let column = rolling_float_column(&out);
             return Series::new(self.series.name(), index, column);
+        }
+
+        // A float column runs the same deque over its data - a value present
+        // where its validity bit is set and it is not NaN - into a typed
+        // output: it read a Scalar per row and built one (rolling(20).max()
+        // 0.35x pandas at 1M, 0.49x holding NaN; br-frankenpandas-2umll). The
+        // output is rolling_var_online's - Null(NaN) a cleared bit, Float64(v)
+        // a set one, as from_values over the Scalars. A negative zero keeps
+        // the fold below.
+        let column = self.series.column();
+        if let Some((data, validity)) = column.as_f64_slice_with_validity()
+            && !data.iter().any(|x| *x == 0.0 && x.is_sign_negative())
+        {
+            // An all-valid or NaN-exact column needs no validity bit: a bit
+            // read a value cost the deque 15%.
+            let read_bits = !(validity.all() || column.nan_missing_exact());
+            let present = |i: usize| !data[i].is_nan() && (!read_bits || validity.get(i));
+            let len = data.len();
+            let mut out: Vec<f64> = Vec::with_capacity(len);
+            let mut words = vec![0_u64; len.div_ceil(64)];
+            let mut dq: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+            let mut nonnull = 0_usize;
+            let mut r = 0_usize;
+            let mut l = 0_usize;
+            for i in 0..len {
+                let (start, end) = self.window_bounds(i, len);
+                while r < end {
+                    let x = data[r];
+                    if present(r) {
+                        while let Some(&b) = dq.back() {
+                            let order = data[b].total_cmp(&x);
+                            let drop_back = if want_max {
+                                order == std::cmp::Ordering::Less
+                            } else {
+                                order == std::cmp::Ordering::Greater
+                            };
+                            if drop_back {
+                                dq.pop_back();
+                            } else {
+                                break;
+                            }
+                        }
+                        dq.push_back(r);
+                        nonnull += 1;
+                    }
+                    r += 1;
+                }
+                while l < start {
+                    if present(l) {
+                        nonnull -= 1;
+                    }
+                    l += 1;
+                }
+                while let Some(&f) = dq.front() {
+                    if f < start {
+                        dq.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+                // Below min_periods, and an empty min window: Null(NaN). An
+                // empty max window (min_periods 0): Float64(NaN).
+                let value = if nonnull < self.min_periods || (nonnull == 0 && !want_max) {
+                    None
+                } else if nonnull == 0 {
+                    Some(f64::NAN)
+                } else {
+                    Some(data[*dq.front().expect("non-empty window")])
+                };
+                if let Some(value) = value {
+                    words[i / 64] |= 1_u64 << (i % 64);
+                    out.push(value);
+                } else {
+                    out.push(0.0);
+                }
+            }
+            let validity = fp_columnar::ValidityMask::from_words(words, len);
+            let column = Column::from_f64_values_with_validity(out, validity);
+            return Series::new(self.series.name(), self.series.index().clone(), column);
         }
 
         let vals = self.series.column().values();
@@ -35276,7 +35376,7 @@ impl Rolling<'_> {
                     ));
                 }
             }
-            let column = Column::from_values(out)?;
+            let column = rolling_float_column(&out);
             return Series::new(self.series.name(), index, column);
         }
 
@@ -35340,7 +35440,7 @@ impl Rolling<'_> {
             }
         }
 
-        let column = Column::from_values(out)?;
+        let column = rolling_float_column(&out);
         Series::new(self.series.name(), index, column)
     }
 
@@ -35414,6 +35514,15 @@ impl Rolling<'_> {
         let owned: Vec<f64>;
         let vals: &[f64] = if let Some(slice) = col.as_f64_slice() {
             slice
+        } else if let Some((data, _)) = col
+            .as_f64_slice_with_validity()
+            .filter(|_| col.nan_missing_exact())
+        {
+            // A float column whose missing values are exactly its NaNs lends
+            // its data too (`value_at` reads a NaN as missing): it built the
+            // view from a Scalar per row (rolling(20).var() of a column
+            // holding NaN 0.86x pandas at 1M; br-frankenpandas-2umll).
+            data
         } else if let Some(data) = col.as_i64_slice() {
             // Typed all-valid Int64 input (sister to the all-valid Float64 borrow
             // above): build the f64 view via `v as f64` instead of materializing
@@ -182133,6 +182242,108 @@ mod tests {
             floats(full.resample("h").max()),
             [Some(5.0), Some(7.0), Some(3.0), Some(8.0)]
         );
+    }
+
+    #[test]
+    fn rolling_float_extremum_typed_2umll() {
+        // br-frankenpandas-2umll: a float column's rolling max / min run the
+        // deque over its data - all valid, or holding NaN as missing - and
+        // answer the per-window fold: the extreme of the window's present
+        // values, Null(NaN) below min_periods, an empty min window Null(NaN)
+        // and an empty max window Float64(NaN); trailing and centered.
+        // NEGATIVE: a negative zero keeps the fold, its -0.0 / 0.0 ties as
+        // f64::max / f64::min order them.
+        let nan = f64::NAN;
+        let series = |values: &[f64]| {
+            let column = Column::from_f64_values(values.to_vec());
+            assert!(column.validity().all() || column.nan_missing_exact());
+            Series::new("x", Index::from_range(0, values.len() as i64, 1), column).unwrap()
+        };
+        let shape = |value: &Scalar| match value {
+            Scalar::Float64(x) if x.is_nan() => "Float64(NaN)".to_owned(),
+            Scalar::Float64(x) => format!("Float64({})", x.to_bits()),
+            other => format!("{other:?}"),
+        };
+        // The fold the deque must equal, over each window's present values.
+        let brute = |values: &[f64], window: usize, min_periods: usize, center: bool, max: bool| {
+            let len = values.len();
+            (0..len)
+                .map(|i| {
+                    let (start, end) = if center {
+                        let half = window / 2;
+                        (i.saturating_sub(half), (i + half + window % 2).min(len))
+                    } else {
+                        ((i + 1).saturating_sub(window), i + 1)
+                    };
+                    let present: Vec<f64> = values[start..end]
+                        .iter()
+                        .copied()
+                        .filter(|x| !x.is_nan())
+                        .collect();
+                    let value = if present.len() < min_periods || (present.is_empty() && !max) {
+                        Scalar::Null(NullKind::NaN)
+                    } else if present.is_empty() {
+                        Scalar::Float64(f64::NAN)
+                    } else if max {
+                        Scalar::Float64(present.iter().copied().fold(f64::NEG_INFINITY, f64::max))
+                    } else {
+                        Scalar::Float64(present.iter().copied().fold(f64::INFINITY, f64::min))
+                    };
+                    shape(&value)
+                })
+                .collect::<Vec<_>>()
+        };
+        for values in [
+            vec![4.0, 1.0, 3.0, 2.0, 5.0, 2.0],
+            vec![1.0, nan, 3.0, 2.0, nan, nan, nan, 5.0, 4.0],
+            vec![0.0, -0.0, 1.0, -0.0, 0.0],
+        ] {
+            let s = series(&values);
+            for (min_periods, center) in [(3, false), (1, false), (0, false), (1, true)] {
+                let rolling = || {
+                    if center {
+                        s.rolling_center(3, Some(min_periods))
+                    } else {
+                        s.rolling(3, Some(min_periods))
+                    }
+                };
+                for max in [true, false] {
+                    let got = if max {
+                        rolling().max()
+                    } else {
+                        rolling().min()
+                    };
+                    let got: Vec<String> = got.unwrap().values().iter().map(shape).collect();
+                    assert_eq!(
+                        got,
+                        brute(&values, 3, min_periods, center, max),
+                        "{values:?} min_periods={min_periods} center={center} max={max}"
+                    );
+                }
+            }
+        }
+        // A column built from Scalars (its missing values a validity bit):
+        // the same answers, and float64 when every window is short.
+        let scalars = Column::from_values(vec![
+            Scalar::Float64(1.0),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Float64(3.0),
+            Scalar::Null(NullKind::NaN),
+        ])
+        .unwrap();
+        let s = Series::new("x", Index::from_range(0, 4, 1), scalars).unwrap();
+        let short = s.rolling(3, Some(3)).max().unwrap();
+        assert_eq!(short.column().dtype(), DType::Float64);
+        assert!(short.values().iter().all(Scalar::is_missing));
+        let got: Vec<String> = s
+            .rolling(3, Some(1))
+            .max()
+            .unwrap()
+            .values()
+            .iter()
+            .map(shape)
+            .collect();
+        assert_eq!(got, brute(&[1.0, nan, 3.0, nan], 3, 1, false, true));
     }
 
     #[test]

@@ -30163,6 +30163,40 @@ def test_aligned_categorical_frames_compare_like_pandas_d468v(case: str) -> None
     assert run(fpd) == run(pd)
 
 
+_2UMLL_SERIES = {
+    "floats": [4.0, 1.0, 3.0, 2.0, 5.0, 2.0, 7.5, -1.0],
+    "floats with NaN": [1.0, np.nan, 3.0, 2.0, np.nan, np.nan, np.nan, 5.0, 4.0],
+    "floats with inf": [1.0, np.inf, 3.0, -np.inf, 2.0, 0.5],
+    # NEGATIVE: a negative zero keeps the per-window fold.
+    "negative zero (NEGATIVE)": [0.0, -0.0, 1.0, -0.0, 0.0, -2.0],
+}
+_2UMLL_WINDOWS = {
+    "rolling(3)": lambda s: s.rolling(3),
+    "rolling(3, min_periods=1)": lambda s: s.rolling(3, min_periods=1),
+    "rolling(3, min_periods=0)": lambda s: s.rolling(3, min_periods=0),
+    "rolling(3, center=True, min_periods=1)": lambda s: s.rolling(3, center=True, min_periods=1),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("window", list(_2UMLL_WINDOWS))
+@pytest.mark.parametrize("values", list(_2UMLL_SERIES))
+def test_rolling_extremum_like_pandas_2umll(values: str, window: str) -> None:
+    # A float column's rolling max / min, all valid or holding NaN, run the
+    # deque over its data into a typed output (br-frankenpandas-2umll: a
+    # Scalar per row in and out, 0.35x pandas at 1M): the values as float.hex,
+    # missing as None, dtype vs pandas. NEGATIVE: a negative zero.
+    def run(m: Any) -> Any:
+        s = m.Series(_2UMLL_SERIES[values])
+        answers = []
+        for op in ["max", "min"]:
+            out = getattr(_2UMLL_WINDOWS[window](s), op)()
+            answers.append((op, str(out.dtype), [None if x != x else float(x).hex() for x in out.tolist()]))
+        return answers
+
+    assert run(fpd) == run(pd)
+
+
 def _8ycr8_series(m: Any, holed: bool) -> Any:
     rng = np.random.default_rng(83)
     values = rng.random(4 * 48)
@@ -30211,6 +30245,30 @@ def test_crosstab_counts_like_pandas_fxk1a(case: str) -> None:
     # one): the counts, labels and the axes' dtypes vs pandas.
     def run(m: Any) -> Any:
         out = _FXK1A_CASES[case](m)
+        axes = (repr(list(out.index)), str(out.index.dtype), repr(list(out.columns)), str(out.columns.dtype))
+        return (out.shape, out.values.tolist(), axes, [str(d) for d in out.dtypes])
+
+    assert run(fpd) == run(pd)
+
+
+_IOV9I_CASES = {
+    "int keys on different indexes": lambda m: m.crosstab(m.Series([1, 2, 1], index=[0, 1, 2]), m.Series([3, 3, 4], index=[1, 2, 3])),
+    "text keys on shifted indexes": lambda m: m.crosstab(m.Series(["a", "b", "a", "b"]), m.Series(["x", "y", "x"], index=[2, 3, 4])),
+    "keys of different lengths": lambda m: m.crosstab(m.Series([1, 2, 1, 2]), m.Series([5, 6], index=[1, 3])),
+    # NEGATIVE: keys on one index and lists count as before.
+    "keys on one index (NEGATIVE)": lambda m: m.crosstab(m.Series([1, 2, 1], index=[5, 6, 7]), m.Series([3, 3, 4], index=[5, 6, 7])),
+    "lists (NEGATIVE)": lambda m: m.crosstab([1, 2, 1], [3, 3, 4]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_IOV9I_CASES))
+def test_crosstab_keys_on_shared_labels_like_pandas_iov9i(case: str) -> None:
+    # Key Series on different indexes count over the labels they share, as
+    # pandas' crosstab (its frame on the indexes' intersection): int keys stay
+    # int64 labels (the union widened them to floats; br-frankenpandas-iov9i).
+    def run(m: Any) -> Any:
+        out = _IOV9I_CASES[case](m)
         axes = (repr(list(out.index)), str(out.index.dtype), repr(list(out.columns)), str(out.columns.dtype))
         return (out.shape, out.values.tolist(), axes, [str(d) for d in out.dtypes])
 
