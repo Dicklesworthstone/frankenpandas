@@ -4605,10 +4605,14 @@ fn reindex_positions_typed(source: &Index, target: &Index) -> Option<Vec<Option<
                 .iter()
                 .map(|&value| {
                     let offset = value.checked_sub(start)?;
-                    if offset % step != 0 {
+                    // checked: `i64::MIN % -1` (a descending range and a
+                    // label near i64::MIN) overflows and panicked.
+                    if offset.checked_rem(step)? != 0 {
                         return None;
                     }
-                    usize::try_from(offset / step).ok().filter(|&at| at < len)
+                    usize::try_from(offset.checked_div(step)?)
+                        .ok()
+                        .filter(|&at| at < len)
                 })
                 .collect(),
         );
@@ -67102,7 +67106,14 @@ pub fn dateutil_date(
     // The clock is the whitespace-separated tail holding the first ':'.
     let (date, clock) = match text.find(':') {
         Some(colon) => {
-            let start = text[..colon].rfind(char::is_whitespace)? + 1;
+            // Past the whole separator: a no-break space (U+00A0) or an
+            // ideographic space (U+3000) is more than one byte, and `+ 1`
+            // sliced inside it and panicked.
+            let (space, separator) = text[..colon]
+                .char_indices()
+                .rev()
+                .find(|(_, ch)| ch.is_whitespace())?;
+            let start = space + separator.len_utf8();
             (text[..start].trim_end(), Some(text[start..].trim()))
         }
         None => (text, None),
@@ -67439,12 +67450,16 @@ impl<'a> PandasStrptime<'a> {
             .zip(&spans)
             .find_map(|(piece, &(from, to))| {
                 matches!(piece, StrptimePiece::Name(b'p', _))
-                    .then(|| text[from..to].eq_ignore_ascii_case("pm"))
+                    .then(|| text.get(from..to).unwrap_or("").eq_ignore_ascii_case("pm"))
             });
         let (mut year, mut month, mut day) = (1900, 1, 1);
         let (mut hour, mut minute, mut second, mut nanos) = (0, 0, 0, 0);
         for (piece, &(from, to)) in self.pieces.iter().zip(&spans) {
-            let field = &text[from..to];
+            // Literal pieces are matched byte by byte, so a multi-byte literal
+            // (`'%Y年%m月%d日'`) has spans that end inside a character:
+            // slicing them panicked. Only ASCII number / name / fraction
+            // spans are ever read, so a split literal reads as "".
+            let field = text.get(from..to).unwrap_or("");
             let number = field
                 .bytes()
                 .filter(u8::is_ascii_digit)
@@ -204057,6 +204072,29 @@ mod tests {
         let out = super::to_datetime_with_format(&s, Some("%d-%m-%Y")).unwrap();
         assert_eq!(out.values()[0], datetime64_scalar("2024-01-15 00:00:00"));
         assert_eq!(out.values()[1], datetime64_scalar("2024-01-16 00:00:00"));
+
+        // A format with multi-byte literals (it sliced inside one and
+        // panicked; v0.5.0 release review). pandas: 2024-01-02.
+        let s = Series::from_values("ts", ints(1), vec![utf8("2024年01月02日")]).unwrap();
+        let out = super::to_datetime_with_format(&s, Some("%Y年%m月%d日")).unwrap();
+        assert_eq!(out.values()[0], datetime64_scalar("2024-01-02 00:00:00"));
+    }
+
+    #[test]
+    fn reindex_over_a_descending_range_survives_an_extreme_label() {
+        // `i64::MIN % -1` overflowed in the affine position lookup and
+        // panicked (v0.5.0 release review); the label is simply absent.
+        let s = Series::from_values(
+            "x",
+            Index::from_range(0, -3, -1),
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+        )
+        .unwrap();
+        let out = s
+            .reindex_to_index(&Index::from_i64_values(vec![i64::MIN]))
+            .unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(out.values()[0].is_missing());
     }
 
     #[test]
@@ -245474,6 +245512,10 @@ mod dateutil_dates_fvsao46 {
             ("5 Jan 24", false, false, "2024-01-05 00:00"),
             ("01/02/24 10:30", false, false, "2024-01-02 10:30"),
             ("01/02/24 10:30 PM", false, false, "2024-01-02 22:30"),
+            // A multi-byte space before the clock (it sliced inside one and
+            // panicked; v0.5.0 release review).
+            ("01/02/24\u{a0}10:30", false, false, "2024-01-02 10:30"),
+            ("01/02/24\u{3000}10:30", false, false, "2024-01-02 10:30"),
         ] {
             assert_eq!(
                 dateutil_date(text, dayfirst, yearfirst, 2026),

@@ -41115,8 +41115,9 @@ impl PyDataFrame {
         let mut kinds = Vec::new();
         let mut answers = Vec::new();
         let mut labels = Vec::new();
-        for name in self.inner.column_names() {
-            let Some(column) = self.inner.column(name) else {
+        // By position: a repeated label must read each of its own columns.
+        for (position, name) in self.inner.column_names().iter().enumerate() {
+            let Some(column) = self.inner.column_at(position) else {
                 return Ok(None);
             };
             let number = matches!(
@@ -41178,9 +41179,15 @@ impl PyDataFrame {
         }
         let mut kinds = Vec::new();
         let mut picked = Vec::new();
+        // Positions, not names: a repeated column label must reduce its own
+        // column, as `reduce_with_numeric_only` does (i17d4). Looking the
+        // name up again returned the FIRST column under that label, so
+        // `DataFrame([[1.25, 5.75, nan]], columns=['a', 'a', 'b']).sum()`
+        // answered the first `a` for both.
+        let mut positions = Vec::new();
         let mut needed = false;
-        for name in self.inner.column_names() {
-            let Some(column) = self.inner.column(name) else {
+        for (position, name) in self.inner.column_names().iter().enumerate() {
+            let Some(column) = self.inner.column_at(position) else {
                 return Ok(None);
             };
             let dtype = column.dtype();
@@ -41213,13 +41220,14 @@ impl PyDataFrame {
                 || all_missing();
             kinds.push(kind);
             picked.push(name.clone());
+            positions.push(position);
         }
         if !needed {
             return Ok(None);
         }
         let mut answers = Vec::with_capacity(picked.len());
-        for name in &picked {
-            let Some(column) = self.inner.column(name).cloned() else {
+        for (name, &position) in picked.iter().zip(&positions) {
+            let Some(column) = self.inner.column_at(position).cloned() else {
                 return Ok(None);
             };
             let series = Series::new(name.as_str(), self.inner.index().clone(), column)
@@ -41255,10 +41263,11 @@ impl PyDataFrame {
         if axis != 0 || numeric_only {
             return Ok(());
         }
-        for name in self.inner.column_names() {
+        // By position: a repeated label must check each of its own columns.
+        for position in 0..self.inner.column_names().len() {
             if let Some(refusal) = self
                 .inner
-                .column(name)
+                .column_at(position)
                 .and_then(|column| temporal_refusal(&column.dtype(), op))
             {
                 return Err(refusal);
@@ -100700,5 +100709,46 @@ mod tests {
         );
         assert_eq!(pandas_timedelta_text(1_000, true), "0 days 00:00:00.000001");
         assert_eq!(python_center("..", 3), " ..");
+    }
+
+    #[test]
+    fn repeated_column_labels_reduce_their_own_columns_in_column_answers() {
+        // A repeated label reduces its own column (i17d4). The per-column
+        // answers (taken when some column is all-NaN, float32 or temporal)
+        // looked the name up again and answered the FIRST `a` for both:
+        // pandas sums [[1.25, 5.75, nan], [4.5, 2.25, nan]] with columns
+        // a, a, b to a=5.75, a=8.0, b=0.0 (v0.5.0 release review).
+        let float = |values: &[f64]| {
+            fp_columnar::Column::new(
+                DType::Float64,
+                values.iter().map(|&value| Scalar::Float64(value)).collect(),
+            )
+            .expect("float column") // ubs:ignore — test fixture
+        };
+        let names: Vec<String> = ["a", "a", "b"].iter().map(|n| (*n).to_owned()).collect();
+        let frame = DataFrame::new_with_column_order(
+            fp_index::Index::from_i64_values(vec![0, 1]),
+            fp_frame::ColumnStore::from_pairs(names.iter().cloned().zip([
+                float(&[1.25, 4.5]),
+                float(&[5.75, 2.25]),
+                float(&[f64::NAN, f64::NAN]),
+            ])),
+            names.clone(),
+        )
+        .expect("frame with a repeated label"); // ubs:ignore — test fixture
+        Python::initialize();
+        Python::attach(|py| {
+            let kwargs = PyDict::new(py);
+            let answers = PyDataFrame { inner: frame }
+                .column_series_answers(py, "sum", 0, false, &kwargs)
+                .expect("sum") // ubs:ignore — test assertion
+                .expect("an all-NaN column takes the per-column answers"); // ubs:ignore — test assertion
+            let (values, _) = answers
+                .inner
+                .column()
+                .as_f64_slice_with_validity()
+                .expect("float answers"); // ubs:ignore — test assertion
+            assert_eq!(values, &[5.75, 8.0, 0.0][..]);
+        });
     }
 }
