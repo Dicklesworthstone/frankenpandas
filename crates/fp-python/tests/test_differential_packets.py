@@ -30604,7 +30604,23 @@ _VK7Y9P4_CASES = {
     "mean of one present": lambda m: m.Series(np.array(["NaT", "2020-02-29T12:00"], dtype="datetime64[ns]")).mean(),
     "quantile all NaT": lambda m: m.Series(np.array(["NaT", "NaT"], dtype="datetime64[ns]")).quantile(0.5),
     "mean all NaT": lambda m: m.Series(np.array(["NaT", "NaT"], dtype="datetime64[ns]")).mean(),
+    "idxmax": lambda m: _vk7y9p3_dates(m).idxmax(),
+    "idxmin": lambda m: _vk7y9p3_dates(m).idxmin(),
+    "durations idxmax": lambda m: _vk7y9p3_spans(m).idxmax(),
+    "idxmax of a tie": lambda m: m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m)], ignore_index=True).idxmax(),
+    "set_index": lambda m: (lambda out: [str(v) for v in out.index] + [str(out.index.dtype), str(out.index.name)])(
+        m.DataFrame({"t": _vk7y9p3_dates(m), "v": np.arange(7)}).set_index("t")
+    ),
+    "set_index, aware": lambda m: [str(v) for v in m.DataFrame({"t": _vk7y9p3_dates(m).dt.tz_localize("UTC"), "v": np.arange(7)}).set_index("t").index],
+    "unique": lambda m: (lambda out: [str(v) for v in out] + [str(out.dtype), type(out).__name__])(
+        m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m).iloc[::-1]]).unique()
+    ),
+    "durations unique": lambda m: [str(v) for v in m.concat([_vk7y9p3_spans(m), _vk7y9p3_spans(m)]).unique()],
+    "aware unique": lambda m: (lambda out: [str(v) for v in out] + [str(out.dtype)])(
+        m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m)]).dt.tz_localize("Asia/Tokyo").unique()
+    ),
     # NEGATIVE: no NaT reads the buffer as it is.
+    "unique, no NaT": lambda m: [str(v) for v in _vk7y9p3_dates(m).dropna().unique()],
     "mean, no NaT": lambda m: _vk7y9p3_dates(m).dropna().mean(),
     "quantile, no NaT": lambda m: _vk7y9p3_dates(m).dropna().quantile(0.3),
 }

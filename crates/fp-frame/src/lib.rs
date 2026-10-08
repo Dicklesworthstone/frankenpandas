@@ -18411,6 +18411,25 @@ impl Series {
         self.apply(func)
     }
 
+    /// The distinct instants / durations of a datetime / timedelta column
+    /// as a column of its dtype, in the order first seen, NaT once among
+    /// them - what [`Self::unique`] answers, off the nanos (keyed spread, as
+    /// [`temporal_duplicate_flags`]) where that built and hashed a Scalar a
+    /// row (d.unique() 0.51x pandas at 1M; br-frankenpandas-vk7y9). None for
+    /// any other column.
+    #[must_use]
+    pub fn unique_temporal_column(&self) -> Option<Column> {
+        let (nanos, _) = self.column.as_temporal_nanos_with_validity()?;
+        let mut seen: FxHashSet<u64> = FxHashSet::default();
+        let distinct: Vec<i64> = nanos
+            .iter()
+            .copied()
+            .filter(|at| seen.insert(spread_float_bits(at.cast_unsigned())))
+            .collect();
+        let validity = nanos_validity(&distinct);
+        Some(temporal_column(self.column.dtype(), distinct, validity))
+    }
+
     /// Return unique non-null values in first-seen order.
     ///
     /// Matches `pd.Series.unique()`.
@@ -27047,19 +27066,17 @@ impl Series {
         }
         // Per br-frankenpandas-9kt88: pandas Timedelta64 idxmin compares ns
         // directly. f64 path below errored via to_f64() on every Timedelta
-        // value, propagating the failure.
-        if matches!(self.column.dtype(), DType::Timedelta64) {
+        // value, propagating the failure. Over the nanos, NaT skipped (it
+        // read a Scalar a row; br-frankenpandas-vk7y9).
+        if self.column.dtype() == DType::Timedelta64
+            && let Some((nanos, _)) = self.column.as_temporal_nanos_with_validity()
+        {
             let mut best_idx: Option<usize> = None;
             let mut best_ns: i64 = i64::MAX;
-            for (i, val) in self.column.values().iter().enumerate() {
-                if let Scalar::Timedelta64(ns) = val {
-                    if *ns == Timedelta::NAT {
-                        continue;
-                    }
-                    if best_idx.is_none() || *ns < best_ns {
-                        best_ns = *ns;
-                        best_idx = Some(i);
-                    }
+            for (i, &ns) in nanos.iter().enumerate() {
+                if ns != Timedelta::NAT && (best_idx.is_none() || ns < best_ns) {
+                    best_ns = ns;
+                    best_idx = Some(i);
                 }
             }
             return best_idx.map(|i| self.index_label_at(i)).ok_or_else(|| {
@@ -27195,19 +27212,18 @@ impl Series {
                 FrameError::CompatibilityRejected("idxmax of empty or all-null series".to_owned())
             });
         }
-        // Per br-frankenpandas-9kt88: sister to idxmin Timedelta branch.
-        if matches!(self.column.dtype(), DType::Timedelta64) {
+        // Per br-frankenpandas-9kt88: sister to idxmin Timedelta branch -
+        // over the nanos, NaT skipped (a Scalar a row: a datetime column's
+        // idxmax 0.51x pandas at 1M; br-frankenpandas-vk7y9).
+        if self.column.dtype() == DType::Timedelta64
+            && let Some((nanos, _)) = self.column.as_temporal_nanos_with_validity()
+        {
             let mut best_idx: Option<usize> = None;
             let mut best_ns: i64 = i64::MIN;
-            for (i, val) in self.column.values().iter().enumerate() {
-                if let Scalar::Timedelta64(ns) = val {
-                    if *ns == Timedelta::NAT {
-                        continue;
-                    }
-                    if best_idx.is_none() || *ns > best_ns {
-                        best_ns = *ns;
-                        best_idx = Some(i);
-                    }
+            for (i, &ns) in nanos.iter().enumerate() {
+                if ns != Timedelta::NAT && (best_idx.is_none() || ns > best_ns) {
+                    best_ns = ns;
+                    best_idx = Some(i);
                 }
             }
             return best_idx.map(|i| self.index_label_at(i)).ok_or_else(|| {
@@ -83277,12 +83293,13 @@ impl DataFrame {
             Index::from_utf8_contiguous(std::sync::Arc::from(bytes), std::sync::Arc::from(offsets))
                 .rename_index(Some(&index_name))
         } else if let Some(data) = source.as_datetime64_slice() {
-            // Typed Datetime64 -> Datetime64 labels directly (the common
-            // `df.set_index('datetime_col')` time-series path), skipping the
-            // `.values()` Scalar Vec. Bit-identical to `set_index_label`, which
-            // makes a NaT the NaT label too (it was rejected).
-            let labels: Vec<IndexLabel> = data.iter().map(|&v| IndexLabel::Datetime64(v)).collect();
-            Index::new(labels).rename_index(Some(&index_name))
+            // Typed Datetime64 -> a typed DatetimeIndex backing over the
+            // instants (the common `df.set_index('datetime_col')` time-series
+            // path), skipping the `.values()` Scalar Vec - and the 32 B label
+            // a row it then built (df.set_index(t) 0.50x pandas at 1M;
+            // br-frankenpandas-lsn8d). The same labels as `set_index_label`,
+            // which makes a NaT the NaT label too (it was rejected).
+            Index::from_datetime64_values(data.to_vec()).rename_index(Some(&index_name))
         } else if let Some(data) = source.as_bool_slice() {
             // Typed all-valid Bool (as_bool_slice requires validity.all) -> Bool
             // labels directly. Bit-identical:

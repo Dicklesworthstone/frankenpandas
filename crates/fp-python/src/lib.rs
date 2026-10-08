@@ -32519,6 +32519,11 @@ impl PySeries {
         // column's its IntegerArray / StringArray ... (they were numpy
         // arrays, Int64's float64; br-frankenpandas-5y62q).
         let source = self.inner.column();
+        // A datetime / duration column's distinct values off its nanos
+        // (br-frankenpandas-vk7y9).
+        if let Some(distinct) = self.inner.unique_temporal_column() {
+            return extension_array(py, distinct.keeping_dtype_of(source));
+        }
         if ArrayKind::of(source) != ArrayKind::Numpy {
             let distinct = Column::new(source.dtype(), self.inner.unique())
                 .map_err(column_error_to_py)?
