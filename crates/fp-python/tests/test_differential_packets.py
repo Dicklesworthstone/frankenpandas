@@ -30163,6 +30163,58 @@ def test_aligned_categorical_frames_compare_like_pandas_d468v(case: str) -> None
     assert run(fpd) == run(pd)
 
 
+def _x6p40_plain_operands(m: Any, case: str) -> tuple:
+    kind, side, dtype_name, operand = _X6P40_PLAIN_CASES[case]
+    dtype = m.CategoricalDtype(["y", "x"], ordered=dtype_name == "ordered")
+    categorical = m.Series(["x", "y", None], dtype=dtype)
+    plain = m.Series(["y", "y", "x"])
+    if kind == "frame":
+        categorical, plain = m.DataFrame({"a": categorical}), m.DataFrame({"a": plain})
+    other = plain if operand == "plain" else operand
+    return (other, categorical) if side == "right" else (categorical, other)
+
+
+_X6P40_PLAIN_CASES = {
+    f"{kind} {dtype_name} {side} vs {operand!r}": (kind, side, dtype_name, operand)
+    for kind in ("series", "frame")
+    for dtype_name in ("ordered", "unordered")
+    for side, operand in (("left", "plain"), ("right", "plain"), ("left", "y"), ("left", "z"), ("left", 1), ("left", None))
+}
+_X6P40_PLAIN_NEGATIVE = [case for case in _X6P40_PLAIN_CASES if case.startswith(("series ordered left", "frame ordered left"))]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "case, operators",
+    [(case, ["__lt__", "__ge__", "__gt__", "__le__"]) for case in _X6P40_PLAIN_CASES]
+    # NEGATIVE: == / != against plain values, a category and other scalars
+    # compare values, as before.
+    + [(case, ["__eq__", "__ne__"]) for case in _X6P40_PLAIN_NEGATIVE],
+)
+def test_categorical_against_plain_values_like_pandas_x6p40(case: str, operators: list) -> None:
+    # A categorical against plain values compares as pandas' Categorical
+    # (br-frankenpandas-x6p40): a scalar among the categories by its
+    # position (a frame compared the text), any other scalar pandas'
+    # "Invalid comparison" for an ordering, an ordered one against a plain
+    # Series / frame pandas' TypeError naming the operator as the
+    # categorical sees it (they compared), an unordered one refused any
+    # ordering: the result or the exception vs pandas.
+    def run(m: Any) -> Any:
+        answers = []
+        for name in operators:
+            left, right = _x6p40_plain_operands(m, case)
+            try:
+                result = getattr(left, name)(right)
+            except Exception as error:  # noqa: BLE001
+                answers.append((name, type(error).__name__, str(error)))
+                continue
+            result = result["a"] if hasattr(result, "columns") else result
+            answers.append((name, str(result.dtype), result.tolist()))
+        return answers
+
+    assert run(fpd) == run(pd)
+
+
 # Everyday Series operations over awkward inputs, pandas live vs fp
 # (br-frankenpandas-anux4).
 _ANUX4_INPUTS = {

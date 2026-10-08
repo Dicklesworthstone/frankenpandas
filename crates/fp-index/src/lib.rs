@@ -1822,6 +1822,15 @@ impl IndexLabels {
         })
     }
 
+    /// The labels when they are held - materialized, or a slice of held
+    /// ones - without materializing a lazy backing.
+    fn held(&self) -> Option<&[IndexLabel]> {
+        if let Some(slice) = &self.materialized_slice {
+            return Some(slice.as_slice());
+        }
+        self.materialized.get().map(|labels| labels.as_slice())
+    }
+
     fn int64_unit_range(&self) -> Option<Int64UnitRangeLabels> {
         self.int64_unit_range
     }
@@ -2065,6 +2074,32 @@ impl PartialEq for IndexLabels {
 
 impl Eq for IndexLabels {}
 
+/// Whether held datetime labels never descend (`INCREASING`) or never
+/// ascend, in one pass comparing each stamp inline; NaT (i64::MIN) anywhere
+/// answers false, as pandas' monotonic flags. None at the first label that
+/// is not a datetime before any answer, for the generic order to decide.
+/// The flags scanned the labels for NaT, then compared each pair through
+/// IndexLabel::cmp, a call per pair: a fifth of a one-shot resample, which
+/// asks at construction (br-frankenpandas-pirog).
+fn held_datetimes_monotonic<const INCREASING: bool>(labels: &[IndexLabel]) -> Option<bool> {
+    let mut previous = if INCREASING { i64::MIN } else { i64::MAX };
+    for label in labels {
+        let IndexLabel::Datetime64(stamp) = *label else {
+            return None;
+        };
+        let reversed = if INCREASING {
+            stamp < previous
+        } else {
+            stamp > previous
+        };
+        if stamp == i64::MIN || reversed {
+            return Some(false);
+        }
+        previous = stamp;
+    }
+    Some(true)
+}
+
 impl std::ops::Deref for IndexLabels {
     type Target = [IndexLabel];
 
@@ -2116,6 +2151,13 @@ pub struct Index {
     /// AG-13: Cached sort order for adaptive backend selection.
     #[serde(skip)]
     sort_order_cache: OnceLock<SortOrder>,
+    /// The monotonic flags (increasing, decreasing) once asked, shared by
+    /// clones as the labels are: the labels never change, and pandas keeps
+    /// them on its engine - a repeated `is_monotonic_increasing` rescanned
+    /// the labels (0.12 ms over 200k stamps against pandas' 0.2 us), and a
+    /// resampler asked a clone each time (br-frankenpandas-pirog).
+    #[serde(skip)]
+    monotonic_cache: Arc<[OnceLock<bool>; 2]>,
     /// Runtime-only cache for labels-derived AACE semantic fingerprints.
     #[serde(skip)]
     semantic_fingerprint_cache: OnceLock<String>,
@@ -2404,6 +2446,7 @@ impl Index {
             label_identity: next_index_label_identity(),
             duplicate_cache: OnceLock::new(),
             sort_order_cache: OnceLock::new(),
+            monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
@@ -2466,6 +2509,7 @@ impl Index {
             label_identity: next_index_label_identity(),
             duplicate_cache: OnceLock::new(),
             sort_order_cache: OnceLock::new(),
+            monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
@@ -2501,6 +2545,7 @@ impl Index {
             label_identity: next_index_label_identity(),
             duplicate_cache: OnceLock::new(),
             sort_order_cache: OnceLock::new(),
+            monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
@@ -2527,6 +2572,7 @@ impl Index {
             label_identity: next_index_label_identity(),
             duplicate_cache: OnceLock::new(),
             sort_order_cache: OnceLock::new(),
+            monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
@@ -2564,6 +2610,7 @@ impl Index {
             label_identity: next_index_label_identity(),
             duplicate_cache: OnceLock::new(),
             sort_order_cache: OnceLock::new(),
+            monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
@@ -2591,6 +2638,7 @@ impl Index {
             label_identity: next_index_label_identity(),
             duplicate_cache: OnceLock::new(),
             sort_order_cache: OnceLock::new(),
+            monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
@@ -2615,6 +2663,7 @@ impl Index {
             label_identity: next_index_label_identity(),
             duplicate_cache: OnceLock::new(),
             sort_order_cache: OnceLock::new(),
+            monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
@@ -2681,12 +2730,20 @@ impl Index {
             .fold(LabelKinds::default(), |kinds, label| {
                 kinds.union(LabelKinds::of(label))
             });
+        self.remember_label_kinds(kinds);
+        kinds
+    }
+
+    /// Keeps `kinds` as the label kinds of this label identity, for
+    /// [`Self::label_kinds`]: its own pass, or another that read every label
+    /// (a datetime ascent, br-frankenpandas-pirog).
+    fn remember_label_kinds(&self, kinds: LabelKinds) {
+        let cache = INDEX_LABEL_KINDS_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
         let mut guard = cache.lock().expect("index label kinds cache poisoned");
         if guard.len() >= INDEX_LABEL_KINDS_CACHE_MAX {
             guard.clear();
         }
         guard.insert(self.label_identity, kinds);
-        kinds
     }
 
     #[must_use]
@@ -2710,6 +2767,7 @@ impl Index {
             label_identity: next_index_label_identity(),
             duplicate_cache: OnceLock::new(),
             sort_order_cache: OnceLock::new(),
+            monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
@@ -4234,6 +4292,23 @@ impl Index {
 
     #[must_use]
     pub fn is_monotonic_increasing(&self) -> bool {
+        *self.monotonic_cache[0].get_or_init(|| self.labels_ascend())
+    }
+
+    fn labels_ascend(&self) -> bool {
+        if let Some(answer) = self
+            .labels
+            .held()
+            .and_then(held_datetimes_monotonic::<true>)
+        {
+            // An ascent read every label as a datetime, none NaT: those are
+            // the label kinds, kept for the next asker (a resampler's axis
+            // check scanned them again on a fresh index).
+            if answer && !self.labels.is_empty() {
+                self.remember_label_kinds(LabelKinds::DATETIME64);
+            }
+            return answer;
+        }
         if self.labels.has_datetime64_nat() {
             return false;
         }
@@ -4279,6 +4354,17 @@ impl Index {
 
     #[must_use]
     pub fn is_monotonic_decreasing(&self) -> bool {
+        *self.monotonic_cache[1].get_or_init(|| self.labels_descend())
+    }
+
+    fn labels_descend(&self) -> bool {
+        if let Some(answer) = self
+            .labels
+            .held()
+            .and_then(held_datetimes_monotonic::<false>)
+        {
+            return answer;
+        }
         if self.labels.has_datetime64_nat() {
             return false;
         }
@@ -5140,6 +5226,7 @@ impl Index {
             label_identity: next_index_label_identity(),
             duplicate_cache: OnceLock::new(),
             sort_order_cache: OnceLock::new(),
+            monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
@@ -28536,6 +28623,64 @@ mod tests {
                 "{name}: monotonic alias must preserve increasing semantics",
             );
         }
+    }
+
+    #[test]
+    fn held_datetime_monotonic_flags_in_one_pass_pirog() {
+        // br-frankenpandas-pirog: held datetime labels answer both flags in
+        // one pass, as pandas' DatetimeIndex: equal neighbours keep an
+        // ascent, a descending pair breaks it, NaT anywhere breaks both.
+        // NEGATIVE: datetimes followed by a text label leave the pass at the
+        // text, and the generic label order answers, as before - it ranks
+        // text below a datetime, so an ascent into text is no ascent (pandas
+        // False too: a Timestamp and a str do not compare).
+        for (name, stamps, increasing, decreasing) in [
+            ("equal neighbours", vec![1, 1, 2], true, false),
+            ("all equal", vec![5, 5, 5], true, true),
+            ("descending pair", vec![1, 3, 2], false, false),
+            ("descending", vec![3, 2, 2], false, true),
+            ("NaT first", vec![i64::MIN, 1, 2], false, false),
+            ("NaT last of a descent", vec![2, 1, i64::MIN], false, false),
+            ("empty", vec![], true, true),
+        ] {
+            let index = Index::from_datetime64(stamps);
+            assert_eq!(
+                (
+                    index.is_monotonic_increasing(),
+                    index.is_monotonic_decreasing()
+                ),
+                (increasing, decreasing),
+                "{name}"
+            );
+        }
+        let mixed = Index::new(vec![
+            IndexLabel::Datetime64(1),
+            IndexLabel::Datetime64(2),
+            IndexLabel::Utf8("a".to_owned()),
+        ]);
+        assert!(!mixed.is_monotonic_increasing());
+        assert!(!mixed.is_monotonic_decreasing());
+        // The flags are remembered, shared by clones (a clone asked first
+        // answers the original); an index taken from a remembered one
+        // answers its own order.
+        let ascending = Index::from_datetime64(vec![1, 2, 3]);
+        assert!(ascending.clone().is_monotonic_increasing());
+        assert_eq!(ascending.monotonic_cache[0].get(), Some(&true));
+        assert!(ascending.is_monotonic_increasing());
+        let reversed = ascending.take(&[2, 1, 0]);
+        assert!(!reversed.is_monotonic_increasing());
+        assert!(reversed.is_monotonic_decreasing());
+        // An ascent read every label: the label kinds are kept from it (no
+        // second pass for a resampler's axis check). NEGATIVE: the mixed
+        // index's pass stopped at the text, so its kinds are its own.
+        let fresh = Index::from_datetime64(vec![4, 5, 6]);
+        assert!(fresh.is_monotonic_increasing());
+        let kept = crate::INDEX_LABEL_KINDS_CACHE
+            .get()
+            .and_then(|cache| cache.lock().ok()?.get(&fresh.label_identity).copied());
+        assert_eq!(kept, Some(crate::LabelKinds::DATETIME64));
+        assert_eq!(fresh.label_kinds(), crate::LabelKinds::DATETIME64);
+        assert!(mixed.label_kinds().intersects(crate::LabelKinds::UTF8));
     }
 
     #[test]

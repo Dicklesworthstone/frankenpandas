@@ -11235,6 +11235,64 @@ fn compare_categorical_codes(left: i64, right: i64, op: ComparisonOp) -> bool {
     }
 }
 
+/// pandas' refusal to order a categorical against plain values -
+/// Categorical._cat_compare_op orders only two categoricals - naming `op` as
+/// the categorical sees it (br-frankenpandas-x6p40).
+#[must_use]
+pub fn categorical_array_ordering_refusal(op: ComparisonOp) -> String {
+    let name = match op {
+        ComparisonOp::Gt => "__gt__",
+        ComparisonOp::Lt => "__lt__",
+        ComparisonOp::Ge => "__ge__",
+        ComparisonOp::Le => "__le__",
+        ComparisonOp::Eq => "__eq__",
+        ComparisonOp::Ne => "__ne__",
+    };
+    format!(
+        "Cannot compare a Categorical for op {name} with type <class 'numpy.ndarray'>.\n\
+         If you want to compare values, use 'np.asarray(cat) <op> other'."
+    )
+}
+
+/// A categorical column ordered against a scalar, as pandas' Categorical:
+/// an unordered one refused; a scalar among the categories compared by its
+/// position, a missing row False; any other scalar pandas' invalid
+/// comparison (br-frankenpandas-x6p40: a frame compared the values' text).
+fn categorical_ordering_against_scalar(
+    column: &Column,
+    meta: &CategoricalMetadata,
+    scalar: &Scalar,
+    op: ComparisonOp,
+) -> Result<Column, FrameError> {
+    if !meta.ordered {
+        return Err(FrameError::CompatibilityRejected(
+            "Unordered Categoricals can only compare equality or not".to_owned(),
+        ));
+    }
+    let Some(position) = meta
+        .categories
+        .iter()
+        .position(|category| category.semantic_eq(scalar))
+        .and_then(|position| i64::try_from(position).ok())
+    else {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "Invalid comparison between dtype=category and {}",
+            scalar.python_type_name()
+        )));
+    };
+    let codes = categorical_codes_held_or_read(column, meta).ok_or_else(|| {
+        FrameError::CompatibilityRejected(
+            "a categorical column holds a value outside its categories".to_owned(),
+        )
+    })?;
+    Ok(Column::from_bool_values(
+        codes
+            .iter()
+            .map(|&code| code >= 0 && compare_categorical_codes(i64::from(code), position, op))
+            .collect(),
+    ))
+}
+
 /// The positions of category `codes` (-1: missing) of `ncat` categories in
 /// category order - ascending or not, the missing first or last - each
 /// category's rows in their own order: a stable counting sort (the
@@ -15063,7 +15121,8 @@ impl Series {
             .position(|category| category.semantic_eq(scalar))
         else {
             return Err(FrameError::CompatibilityRejected(format!(
-                "invalid comparison between dtype=category and {scalar:?}"
+                "Invalid comparison between dtype=category and {}",
+                scalar.python_type_name()
             )));
         };
         let category_code = i64::try_from(category_code).map_err(|_| {
@@ -39889,7 +39948,8 @@ impl ResampleBin for BinMean {
 }
 
 /// pandas' group_max / group_min: the first extreme in row order (strict
-/// `>` / `<`, so -0.0 and 0.0 keep the first), an empty bin NaN.
+/// `>` / `<`, so -0.0 and 0.0 keep the first), a NaN skipped, an empty or
+/// all-NaN bin NaN.
 #[derive(Clone)]
 struct BinExtreme {
     value: Option<f64>,
@@ -39906,13 +39966,19 @@ impl ResampleBin for BinExtreme {
     const SINGLETON_IS_VALUE: bool = true;
 
     fn add(&mut self, value: f64) {
-        let replaces = self.value.is_none_or(|current| {
-            if self.max {
-                value > current
-            } else {
-                value < current
+        // A NaN never replaces a value (both comparisons are false), so only
+        // an empty bin asks whether one came: a NaN check a value cost the
+        // fold more than the scan for one it replaces.
+        let replaces = match self.value {
+            None => !value.is_nan(),
+            Some(current) => {
+                if self.max {
+                    value > current
+                } else {
+                    value < current
+                }
             }
-        });
+        };
         if replaces {
             self.value = Some(value);
         }
@@ -41025,14 +41091,26 @@ impl Resample<'_> {
     /// per-bin `Vec<Scalar>` gather + nan_* dispatch. Bit-identical to nanmin/
     /// nanmax: a `reduce` with strict `<`/`>` keeps the first extreme exactly as
     /// they do (so -0.0/0.0 ties match), and an empty bin -> `Null(NaN)` (their
-    /// `None` case). `None` (fall back to nan_*) for a non-f64 column or any NaN.
+    /// `None` case). `None` (fall back to nan_*) for a non-f64 column, or any
+    /// NaN outside the one-pass bins.
     fn resample_extremum_typed(&self, want_max: bool) -> Option<Result<Series, FrameError>> {
         let vals = self.series.column().as_f64_slice()?;
+        if let Err(err) = self.validate() {
+            return Some(Err(err));
+        }
+        // The one-pass bins (calendar, daily and sub-daily; build_groups'
+        // per-bin gather took resample('h').max() 3.5 ms per 200k rows,
+        // pandas 0.81 - br-frankenpandas-bss5q.3) skip a NaN as pandas'
+        // group_max does, so the values are not scanned for one first: that
+        // second pass was 15-27% of a reused r.max at 1M rows
+        // (br-frankenpandas-pirog).
+        if let Some(r) = self.resample_reduce_single_pass(vals, BinExtreme::new(want_max)) {
+            return Some(r);
+        }
         if vals.iter().any(|x| x.is_nan()) {
             return None;
         }
         Some((|| -> Result<Series, FrameError> {
-            self.validate()?;
             // Calendar (M/Q/Y/A) single-pass extremum: accumulate the per-bucket
             // min/max in ONE pass instead of build_groups' Vec<usize> scatter +
             // per-bin gather. Strict >/< + ±inf init keeps the first extreme (so
@@ -41054,12 +41132,6 @@ impl Resample<'_> {
                 {
                     return r;
                 }
-            }
-            // Daily and sub-daily bins in one pass over the stamps, as sum
-            // and mean - build_groups' per-bin gather took resample('h').max()
-            // 3.5 ms per 200k rows, pandas 0.81 (br-frankenpandas-bss5q.3).
-            if let Some(r) = self.resample_reduce_single_pass(vals, BinExtreme::new(want_max)) {
-                return r;
             }
             let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
@@ -102847,6 +102919,29 @@ impl DataFrame {
                     "Unordered Categoricals can only compare equality or not".to_owned(),
                 ));
             }
+            // An ordered categorical against plain values: pandas orders only
+            // two categoricals, and names the operator as the categorical
+            // sees it (they compared the values; br-frankenpandas-x6p40).
+            let (left_categorical, right_categorical) = (
+                lc.dtype() == DType::Categorical,
+                rc.dtype() == DType::Categorical,
+            );
+            if is_ordering_comparison(op) && left_categorical != right_categorical {
+                let seen = if left_categorical {
+                    op
+                } else {
+                    match op {
+                        ComparisonOp::Gt => ComparisonOp::Lt,
+                        ComparisonOp::Lt => ComparisonOp::Gt,
+                        ComparisonOp::Ge => ComparisonOp::Le,
+                        ComparisonOp::Le => ComparisonOp::Ge,
+                        same => same,
+                    }
+                };
+                return Err(FrameError::CompatibilityRejected(
+                    categorical_array_ordering_refusal(seen),
+                ));
+            }
             // pd.NA propagates only through the nullable extension dtypes; a
             // numpy-backed missing value compares False, True under !=
             // (br-frankenpandas-zwfz3).
@@ -102976,6 +103071,14 @@ impl DataFrame {
         let mut result_cols = Vec::with_capacity(self.num_columns());
         for pos in 0..self.num_columns() {
             let col = self.column_at(pos).expect("column in bounds");
+            // A categorical column orders by its categories, as a Series
+            // does (br-frankenpandas-x6p40).
+            if is_ordering_comparison(op)
+                && let Some(meta) = col.categorical()
+            {
+                result_cols.push(categorical_ordering_against_scalar(col, meta, scalar, op)?);
+                continue;
+            }
             // Fast path: an all-valid contiguous Float64 column vs a numeric
             // scalar reduces, in the per-cell branch below, to `v <op>
             // scalar.to_f64()` (since `v.to_f64() == v` for Float64 and no cell
@@ -181617,6 +181720,75 @@ mod tests {
     }
 
     #[test]
+    fn categorical_against_plain_values_x6p40() {
+        // br-frankenpandas-x6p40: a frame's ordered categorical orders against
+        // a scalar among its categories by position (y before x: no x < y),
+        // refuses one outside them as pandas' invalid comparison and refuses
+        // plain values, naming the operator as the categorical sees it; an
+        // unordered one refuses any ordering. NEGATIVE: == against plain
+        // values and against a scalar outside the categories compare values.
+        use fp_types::CategoricalMetadata;
+        let frame = |column: Column| {
+            DataFrame::new(
+                Index::from_range(0, 3, 1),
+                BTreeMap::from([("a".to_owned(), column)]),
+            )
+            .unwrap()
+        };
+        let text = |value: &str| Scalar::Utf8(value.to_owned());
+        let categorical = |ordered: bool| {
+            let meta = CategoricalMetadata {
+                categories: vec![text("y"), text("x")],
+                ordered,
+            };
+            frame(Column::from_categorical_codes(vec![1, 0, -1], meta))
+        };
+        let plain = frame(Column::from_values(vec![text("y"), text("y"), text("x")]).unwrap());
+        let flags = |result: DataFrame| result.column("a").unwrap().values().to_vec();
+        let refusal = |result: Result<DataFrame, FrameError>| match result {
+            Err(FrameError::CompatibilityRejected(message)) => message,
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+        let ordered = categorical(true);
+        assert_eq!(
+            flags(ordered.lt_scalar_df(&text("y")).unwrap()),
+            vec![Scalar::Bool(false); 3]
+        );
+        assert_eq!(
+            flags(ordered.ge_scalar_df(&text("y")).unwrap()),
+            [Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(false)]
+        );
+        assert_eq!(
+            refusal(ordered.lt_scalar_df(&text("z"))),
+            "Invalid comparison between dtype=category and str"
+        );
+        assert_eq!(
+            refusal(ordered.lt_scalar_df(&Scalar::Int64(1))),
+            "Invalid comparison between dtype=category and int"
+        );
+        assert!(
+            refusal(ordered.lt_df(&plain))
+                .starts_with("Cannot compare a Categorical for op __lt__ with type")
+        );
+        assert!(
+            refusal(plain.lt_df(&ordered))
+                .starts_with("Cannot compare a Categorical for op __gt__ with type")
+        );
+        assert_eq!(
+            refusal(categorical(false).lt_scalar_df(&text("y"))),
+            "Unordered Categoricals can only compare equality or not"
+        );
+        assert_eq!(
+            flags(ordered.eq_df(&plain).unwrap()),
+            [Scalar::Bool(false), Scalar::Bool(true), Scalar::Bool(false)]
+        );
+        assert_eq!(
+            flags(ordered.eq_scalar_df(&text("z")).unwrap()),
+            vec![Scalar::Bool(false); 3]
+        );
+    }
+
+    #[test]
     fn edge_input_answers_anux4() {
         // br-frankenpandas-anux4 (expectations pandas 2.2.3 / numpy 2.3.5):
         // int64 diff subtracts in int64 (through f64, 2**53 + 1 less 2**53
@@ -181733,6 +181905,84 @@ mod tests {
         let frame = DataFrame::from_series(vec![long.clone(), long.rename("y").unwrap()]).unwrap();
         let means = frame.resample("h").mean().unwrap();
         assert_eq!(means.column("y").unwrap().values(), shared[3].1.as_slice());
+    }
+
+    #[test]
+    fn resample_extremum_skips_nan_pirog() {
+        // br-frankenpandas-pirog: max / min no longer scan the values for a
+        // NaN before the one pass: the fold skips one, as pandas' group_max /
+        // group_min (a bin's NaN passed over, an all-NaN bin NaN), and the
+        // answers are unchanged - a NaN-free column through a reused
+        // resampler's kept bins, a column holding NaN through its own path.
+        // NEGATIVE: -0.0 then 0.0 keep the first under both.
+        use std::sync::Arc;
+
+        use super::{BinExtreme, ResampleBin, ResampleLayout};
+        let fold = |max: bool, values: &[f64]| {
+            let mut bin = BinExtreme::new(max);
+            for &value in values {
+                bin.add(value);
+            }
+            bin.value().to_bits()
+        };
+        assert_eq!(fold(true, &[f64::NAN, 2.0, 1.0]), 2.0_f64.to_bits());
+        assert_eq!(fold(false, &[3.0, f64::NAN, 1.0]), 1.0_f64.to_bits());
+        assert!(f64::from_bits(fold(true, &[f64::NAN, f64::NAN])).is_nan());
+        assert!(f64::from_bits(fold(false, &[])).is_nan());
+        assert_eq!(fold(true, &[-0.0, 0.0]), (-0.0_f64).to_bits());
+        assert_eq!(fold(false, &[-0.0, 0.0]), (-0.0_f64).to_bits());
+
+        let base = 1_577_836_800_000_000_000_i64;
+        let half_hour = 1_800_000_000_000_i64;
+        let series = |values: Vec<f64>| {
+            let stamps = (0..8).map(|i| base + i * half_hour).collect();
+            Series::new(
+                "x",
+                Index::from_datetime64(stamps),
+                Column::from_f64_values(values),
+            )
+            .unwrap()
+        };
+        let bits = |result: Series| -> Vec<Option<u64>> {
+            result
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Float64(x) if !x.is_nan() => Some(x.to_bits()),
+                    _ => None,
+                })
+                .collect()
+        };
+        // Hourly bins [-0.0, 0.0], [5.0, 1.0], [2.0, 2.5], [7.0, -1.0].
+        let plain = series(vec![-0.0, 0.0, 5.0, 1.0, 2.0, 2.5, 7.0, -1.0]);
+        let layout = Arc::new(ResampleLayout::default());
+        for _ in 0..2 {
+            let kept = plain.resample("h").sharing(&layout);
+            assert_eq!(
+                bits(kept.max().unwrap()),
+                [-0.0, 5.0, 2.5, 7.0].map(|x: f64| Some(x.to_bits()))
+            );
+            assert_eq!(
+                bits(kept.min().unwrap()),
+                [-0.0, 1.0, 2.0, -1.0].map(|x: f64| Some(x.to_bits()))
+            );
+        }
+        assert!(layout.bins.get().is_some_and(Option::is_some));
+        // Hourly bins [NaN, 2.0], [NaN, NaN], [-0.0, 0.0], [3.0, NaN].
+        let holed = series(vec![
+            f64::NAN,
+            2.0,
+            f64::NAN,
+            f64::NAN,
+            -0.0,
+            0.0,
+            3.0,
+            f64::NAN,
+        ]);
+        let expected =
+            [Some(2.0), None, Some(-0.0), Some(3.0)].map(|x: Option<f64>| x.map(f64::to_bits));
+        assert_eq!(bits(holed.resample("h").max().unwrap()), expected);
+        assert_eq!(bits(holed.resample("h").min().unwrap()), expected);
     }
 
     #[test]

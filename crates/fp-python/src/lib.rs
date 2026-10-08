@@ -23383,7 +23383,9 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 || msg == r#"keep must be either "first", "last" or "all""#
                 // pandas' Categorical comparison refusals (x6p40).
                 || msg == "Unordered Categoricals can only compare equality or not"
-                || msg == "Categoricals can only be compared if 'categories' are the same.";
+                || msg == "Categoricals can only be compared if 'categories' are the same."
+                || msg.starts_with("Cannot compare a Categorical for op ")
+                || msg.starts_with("Invalid comparison between dtype=category and ");
             let text = if pandas_verbatim {
                 msg.clone()
             } else {
@@ -23411,6 +23413,7 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 || lower.contains("unordered categoricals can only compare")
                 || lower.contains("categoricals can only be compared if")
                 || lower.contains("cannot compare a categorical")
+                || lower.starts_with("invalid comparison between dtype=category and ")
                 // pandas' TypeErrors for localizing an aware column and
                 // converting a naive one.
                 || lower.contains("already tz-aware")
@@ -25803,6 +25806,60 @@ fn scalar_comparison(
     }
     let scalar = plain_number_operand(like, other)?;
     Some(wrap_series(like.compare_scalar(&scalar, op)))
+}
+
+/// An ordering with a categorical side, as pandas' Categorical
+/// (br-frankenpandas-x6p40): a scalar against the categorical's categories
+/// (Series::compare_scalar - by position, an unordered categorical or a
+/// scalar outside the categories refused; it was broadcast and read as a
+/// category, outside them in fp's words); an ordered categorical against
+/// plain values pandas' TypeError, naming the operator as the categorical
+/// sees it (they compared). None for any other ordering - an unordered
+/// categorical against values meets the Series' own refusal.
+fn categorical_ordering(
+    py: Python<'_>,
+    like: &Series,
+    other: &Bound<'_, PyAny>,
+    op: ComparisonOp,
+) -> PyResult<Option<PySeries>> {
+    let ordered = |series: &Series| series.cat().map(|cat| cat.ordered());
+    let other_series = other
+        .extract::<PyRef<'_, PySeries>>()
+        .ok()
+        .map(|series| series.inner.clone());
+    if !like.is_categorical() && !other_series.as_ref().is_some_and(Series::is_categorical) {
+        return Ok(None);
+    }
+    // Unequal labels refuse first, as pandas.
+    check_comparable(like, other)?;
+    let refuse = |seen: ComparisonOp| {
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            fp_frame::categorical_array_ordering_refusal(seen),
+        ))
+    };
+    match (ordered(like), other_series.as_ref().map(ordered)) {
+        // Plain values against an ordered categorical: the categorical's op
+        // is the reflection.
+        (None, Some(Some(true))) => refuse(match op {
+            ComparisonOp::Gt => ComparisonOp::Lt,
+            ComparisonOp::Lt => ComparisonOp::Gt,
+            ComparisonOp::Ge => ComparisonOp::Le,
+            ComparisonOp::Le => ComparisonOp::Ge,
+            same => same,
+        }),
+        (Some(true), Some(None)) => refuse(op),
+        // A list, an array or a scalar.
+        (Some(left_ordered), None) => {
+            if listlike_series_operand(py, other, like, true)?.is_some() {
+                return if left_ordered { refuse(op) } else { Ok(None) };
+            }
+            let Some(scalar) = comparison_scalar(py, &unwrap_0d(other)?, &like.dtype())? else {
+                return Ok(None);
+            };
+            wrap_series(like.compare_scalar(&scalar, op)).map(Some)
+        }
+        _ => Ok(None),
+    }
 }
 
 /// A comparison operand against a column of `dtype`: a string compared with
@@ -30999,6 +31056,9 @@ impl PySeries {
         {
             return Ok(PySeries { inner });
         }
+        if let Some(result) = categorical_ordering(py, &self.inner, other, ComparisonOp::Gt)? {
+            return Ok(result);
+        }
         if let Some(result) = scalar_comparison(&self.inner, other, ComparisonOp::Gt) {
             return result;
         }
@@ -31010,6 +31070,9 @@ impl PySeries {
             period_comparison(&self.inner, other, std::cmp::Ordering::is_ge, false)?
         {
             return Ok(PySeries { inner });
+        }
+        if let Some(result) = categorical_ordering(py, &self.inner, other, ComparisonOp::Ge)? {
+            return Ok(result);
         }
         if let Some(result) = scalar_comparison(&self.inner, other, ComparisonOp::Ge) {
             return result;
@@ -31023,6 +31086,9 @@ impl PySeries {
         {
             return Ok(PySeries { inner });
         }
+        if let Some(result) = categorical_ordering(py, &self.inner, other, ComparisonOp::Lt)? {
+            return Ok(result);
+        }
         if let Some(result) = scalar_comparison(&self.inner, other, ComparisonOp::Lt) {
             return result;
         }
@@ -31034,6 +31100,9 @@ impl PySeries {
             period_comparison(&self.inner, other, std::cmp::Ordering::is_le, false)?
         {
             return Ok(PySeries { inner });
+        }
+        if let Some(result) = categorical_ordering(py, &self.inner, other, ComparisonOp::Le)? {
+            return Ok(result);
         }
         if let Some(result) = scalar_comparison(&self.inner, other, ComparisonOp::Le) {
             return result;
@@ -89452,22 +89521,17 @@ fn tz_error_to_py_any(err: fp_types::TimeZoneError) -> PyErr {
 }
 
 fn require_resample_axis(index: &Index) -> PyResult<()> {
-    // A date_range's lazy labels are datetimes, not made to be read
-    // (br-frankenpandas-so0mr).
-    if index.datetime64_affine_labels().is_some() {
+    // The index's label kinds, kept per label identity (a date_range's lazy
+    // labels answer without being read; br-frankenpandas-so0mr): every
+    // resampler scanned the labels here, 2 ms of a million-row construction
+    // pandas makes in 0.4 (br-frankenpandas-pirog).
+    use fp_index::LabelKinds;
+    let kinds = index.label_kinds();
+    let missing = LabelKinds::NAT.union(LabelKinds::OTHER_NULL);
+    if kinds.within(LabelKinds::DATETIME64.union(missing)) {
         return Ok(());
     }
-    let labels = index.labels();
-    if labels
-        .iter()
-        .all(|label| matches!(label, IndexLabel::Datetime64(_) | IndexLabel::Null(_)))
-    {
-        return Ok(());
-    }
-    if labels
-        .iter()
-        .all(|label| matches!(label, IndexLabel::Timedelta64(_) | IndexLabel::Null(_)))
-    {
+    if kinds.within(LabelKinds::TIMEDELTA64.union(missing)) {
         return Err(not_implemented("resample over a TimedeltaIndex"));
     }
     Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
