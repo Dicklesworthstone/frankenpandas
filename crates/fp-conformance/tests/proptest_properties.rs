@@ -1796,6 +1796,73 @@ fn same_cells_up_to_numeric_width(left: &DataFrame, right: &DataFrame) -> bool {
         })
 }
 
+#[test]
+fn combine_first_poisoned_all_missing_column_keeps_cells_rqucs() {
+    // br-frankenpandas-rqucs: gate c79's case. Poisoning right 'a' at 65
+    // (under left's 0) makes an all-missing column hold a value, so the
+    // result's dtype moves, as pandas' does - the strict form failed here -
+    // while its cells stay. NEGATIVE: a value reaching a row only right
+    // holds is caught by the cell comparison.
+    let frame = |labels: [i64; 2], columns: Vec<(&str, Vec<Scalar>)>| {
+        let order: Vec<String> = columns.iter().map(|(name, _)| (*name).to_owned()).collect();
+        let columns = columns
+            .into_iter()
+            .map(|(name, values)| {
+                (
+                    name.to_owned(),
+                    fp_columnar::Column::from_values(values).expect("column"),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        DataFrame::new_with_column_order(
+            Index::new(labels.map(IndexLabel::Int64).to_vec()),
+            columns,
+            order,
+        )
+        .expect("frame")
+    };
+    let zeros = || vec![Scalar::Int64(0), Scalar::Int64(0)];
+    let right_with = |a: Vec<Scalar>| {
+        frame(
+            [65, 86],
+            vec![
+                ("a", a),
+                (
+                    "b",
+                    vec![Scalar::Float64(-883_610.0), Scalar::Float64(78_595.5)],
+                ),
+                (
+                    "c",
+                    vec![Scalar::Float64(738_528.0), Scalar::Float64(-95_146.25)],
+                ),
+            ],
+        )
+    };
+    let left = frame(
+        [25, 65],
+        vec![("a", zeros()), ("b", zeros()), ("c", zeros())],
+    );
+    let right = right_with(vec![
+        Scalar::Null(NullKind::Null),
+        Scalar::Null(NullKind::Null),
+    ]);
+    let baseline = left.combine_first(&right).expect("combine_first");
+    let poisoned = left
+        .combine_first(&poison_dataframe_right_cells_for_combine_first(
+            &left, &right,
+        ))
+        .expect("combine_first");
+    assert!(!baseline.equals(&poisoned), "the dtype moves on this input");
+    assert!(same_cells_up_to_numeric_width(&baseline, &poisoned));
+    let leaked = left
+        .combine_first(&right_with(vec![
+            Scalar::Null(NullKind::Null),
+            Scalar::Int64(9),
+        ]))
+        .expect("combine_first");
+    assert!(!same_cells_up_to_numeric_width(&baseline, &leaked));
+}
+
 fn poison_dataframe_right_cells_for_combine_first(
     left: &DataFrame,
     right: &DataFrame,
@@ -2663,7 +2730,11 @@ proptest! {
     }
 
     /// Right-side cell edits hidden behind non-missing left cells must not affect
-    /// the observed dataframe result.
+    /// the result's cells. Its dtypes may move, as pandas' do: a poisoned cell
+    /// can make an all-missing right column hold a value, and combine_first
+    /// keeps self's aligned column only beside an all-missing one (measured
+    /// live 2026-10-08: left int64 [0, 0] at [25, 65], right 'a' [None, None]
+    /// at [65, 86] gives object, [1, None] float64; br-frankenpandas-rqucs).
     #[test]
     fn prop_dataframe_combine_first_ignores_poisoned_right_values(
         (left, right) in (arb_combine_first_dataframe(8), arb_combine_first_dataframe(8))
@@ -2676,7 +2747,7 @@ proptest! {
             .combine_first(&poisoned_right)
             .expect("combine_first must succeed for poisoned dataframe inputs");
         prop_assert!(
-            baseline.equals(&poisoned),
+            same_cells_up_to_numeric_width(&baseline, &poisoned),
             "right-side changes under non-missing left cells must be observationally irrelevant"
         );
     }
