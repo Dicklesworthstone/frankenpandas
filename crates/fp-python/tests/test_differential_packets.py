@@ -30574,6 +30574,97 @@ def test_temporal_argsort_like_pandas_vk7y9(case: str) -> None:
     assert run(fpd) == run(pd)
 
 
+def _geqye_dates(m: Any) -> Any:
+    return m.Series(np.array(["2020-01-05", "NaT", "2020-03-01"], dtype="datetime64[ns]"))
+
+
+_GEQYE_CASES = {
+    "dates, an int": lambda m: _geqye_dates(m).shift(1, fill_value=0),
+    "dates, a bool": lambda m: _geqye_dates(m).shift(1, fill_value=True),
+    "dates, a numpy int": lambda m: _geqye_dates(m).shift(1, fill_value=np.int64(3)),
+    "dates, a float": lambda m: _geqye_dates(m).shift(1, fill_value=1.5),
+    "dates, a date": lambda m: _geqye_dates(m).shift(1, fill_value=datetime.date(2000, 1, 1)),
+    "dates, a Timedelta": lambda m: _geqye_dates(m).shift(1, fill_value=m.Timedelta("1h")),
+    "dates, a date string": lambda m: _geqye_dates(m).shift(1, fill_value="2000-01-01"),
+    "dates, text": lambda m: _geqye_dates(m).shift(1, fill_value="abc"),
+    "dates, an aware Timestamp": lambda m: _geqye_dates(m).shift(1, fill_value=m.Timestamp("2000-01-01", tz="UTC")),
+    "dates, an aware string": lambda m: _geqye_dates(m).shift(1, fill_value="2000-01-01T00:00+05:00"),
+    "aware dates, a naive Timestamp": lambda m: _geqye_dates(m).dt.tz_localize("UTC").shift(1, fill_value=m.Timestamp("2000-01-01")),
+    "aware dates, a naive string": lambda m: _geqye_dates(m).dt.tz_localize("Asia/Tokyo").shift(1, fill_value="2000-01-01"),
+    "aware dates, an aware string": lambda m: _geqye_dates(m).dt.tz_localize("UTC").shift(-1, fill_value="2000-01-01T00:00+05:00"),
+    "durations, an int": lambda m: (_geqye_dates(m) - m.Timestamp("2020-01-01")).shift(1, fill_value=5),
+    "durations, a Timestamp": lambda m: (_geqye_dates(m) - m.Timestamp("2020-01-01")).shift(1, fill_value=m.Timestamp("2000-01-01")),
+    "durations, a duration string": lambda m: (_geqye_dates(m) - m.Timestamp("2020-01-01")).shift(1, fill_value="1h"),
+    "durations, text": lambda m: (_geqye_dates(m) - m.Timestamp("2020-01-01")).shift(1, fill_value="abc"),
+    "durations, a timedelta": lambda m: (_geqye_dates(m) - m.Timestamp("2020-01-01")).shift(1, fill_value=datetime.timedelta(hours=2)),
+    "a frame, dates and ints, a Timestamp": lambda m: m.DataFrame({"a": _geqye_dates(m), "b": [1, 2, 3]}).shift(1, fill_value=m.Timestamp("2000-01-01")),
+    "a frame, dates and ints, an int": lambda m: m.DataFrame({"a": _geqye_dates(m), "b": [1, 2, 3]}).shift(1, fill_value=0),
+    "a frame, dates and text, a date string": lambda m: m.DataFrame({"a": _geqye_dates(m), "b": ["x", "y", "z"]}).shift(1, fill_value="2000-01-01"),
+    # NEGATIVE: a fill of the column's kind, a missing fill, or no row
+    # moved is no error.
+    "dates, a Timestamp (NEGATIVE)": lambda m: _geqye_dates(m).shift(1, fill_value=m.Timestamp("2000-01-01")),
+    "dates, a datetime (NEGATIVE)": lambda m: _geqye_dates(m).shift(-1, fill_value=datetime.datetime(2000, 1, 1, 6)),
+    "dates, a numpy datetime64 (NEGATIVE)": lambda m: _geqye_dates(m).shift(1, fill_value=np.datetime64("2000-01-01T00:00:00.000000000")),
+    "dates, None (NEGATIVE)": lambda m: _geqye_dates(m).shift(1, fill_value=None),
+    "dates, NaN (NEGATIVE)": lambda m: _geqye_dates(m).shift(1, fill_value=np.nan),
+    "dates, no row moved (NEGATIVE)": lambda m: _geqye_dates(m).shift(0, fill_value=0),
+    "ints, a string (NEGATIVE)": lambda m: m.Series([1, 2, 3]).shift(1, fill_value="x"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_GEQYE_CASES))
+def test_temporal_shift_fill_like_pandas_geqye(case: str) -> None:
+    # shift(fill_value=) of a datetime / timedelta column reads the fill as
+    # pandas: a wrong kind is its TypeError, a string parses, an aware
+    # string's awareness must match (fp put any fill in an object column;
+    # br-frankenpandas-geqye): exception and message, or dtypes and values.
+    def run(m: Any) -> Any:
+        try:
+            out = _GEQYE_CASES[case](m)
+        except Exception as error:  # noqa: BLE001
+            return ("raises", type(error).__name__, str(error))
+        if hasattr(out, "columns"):
+            return [(c, str(out[c].dtype), out[c].astype(str).tolist()) for c in out.columns]
+        return (str(out.dtype), out.astype(str).tolist())
+
+    assert run(fpd) == run(pd)
+
+
+_UFWPF_VALUES = {
+    "aware Timestamp in UTC": lambda m: m.Timestamp("2020-02-01T00:00:00.000000001").tz_localize("UTC"),
+    "aware Timestamp in a named zone": lambda m: m.Timestamp("2020-02-01T09:30:00.000000001").tz_localize("Asia/Tokyo"),
+    "datetime with timezone.utc": lambda m: datetime.datetime(2020, 2, 1, 9, 30, tzinfo=datetime.timezone.utc),
+    "NaT": lambda m: m.NaT,
+    # NEGATIVE: a naive instant stays naive.
+    "naive Timestamp (NEGATIVE)": lambda m: m.Timestamp("2020-02-01T00:00:00.000000001"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("value", list(_UFWPF_VALUES))
+@pytest.mark.parametrize("how", ["assign", "setitem", "constructor"])
+def test_frame_column_of_an_aware_timestamp_like_pandas_ufwpf(value: str, how: str) -> None:
+    # A Timestamp / datetime assigned as a whole column keeps its zone,
+    # pandas' datetime64[ns, tz] (the broadcast Scalar holds UTC nanos only,
+    # so the column came back naive; br-frankenpandas-ufwpf): dtype, values.
+    def run(m: Any) -> Any:
+        v = _UFWPF_VALUES[value](m)
+        if how == "assign":
+            out = m.DataFrame({"a": [1, 2, 3]}).assign(z=v)["z"]
+        elif how == "setitem":
+            frame = m.DataFrame({"a": [1, 2, 3]})
+            frame["z"] = v
+            out = frame["z"]
+        else:
+            out = m.DataFrame({"a": [1, 2, 3], "z": v})["z"]
+        # pandas keeps a datetime's microsecond unit, fp has ns only
+        # (fvsao.16): the zone is compared, not the unit.
+        return (str(out.dtype).replace("[us,", "[ns,"), out.astype(str).tolist())
+
+    assert run(fpd) == run(pd)
+
+
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_frame_column_assigned_a_timestamp_like_pandas_vk7y9() -> None:
     # A naive Timestamp assigned as a column broadcasts typed

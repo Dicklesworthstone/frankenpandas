@@ -101623,12 +101623,30 @@ impl DataFrame {
         periods: i64,
         fill_value: Scalar,
     ) -> Result<Self, FrameError> {
+        self.shift_with_column_fills(periods, &vec![fill_value; self.num_columns()])
+    }
+
+    /// [`Self::shift_with_fill_value`] with each column's own fill, by
+    /// position: pandas reads a fill per column (a string a datetime column
+    /// parses fills an object column as text; br-frankenpandas-geqye).
+    pub fn shift_with_column_fills(
+        &self,
+        periods: i64,
+        fills: &[Scalar],
+    ) -> Result<Self, FrameError> {
+        if fills.len() != self.num_columns() {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "shift: {} fills for {} columns",
+                fills.len(),
+                self.num_columns()
+            )));
+        }
         // Every dtype shifts (see `shift`): `apply_per_column` passes non-numeric
         // columns through untouched, which left object columns unshifted.
         let transformed = self.par_map_column_positions_min(131_072, |pos| {
             Ok(self
                 .column_at_as_series(pos)?
-                .shift_with_fill_value(periods, fill_value.clone())?
+                .shift_with_fill_value(periods, fills[pos].clone())?
                 .column()
                 .clone())
         })?;
