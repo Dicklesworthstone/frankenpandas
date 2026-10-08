@@ -634,7 +634,7 @@ fn emit_groupby_result<'a>(
     Ok(Series::new("sum", Index::new(out_index), out_column)?)
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum GroupKeyRef<'a> {
     Bool(bool),
     Int64(i64),
@@ -646,6 +646,32 @@ enum GroupKeyRef<'a> {
     Period(i64),
     Interval(u64, u64, fp_types::IntervalClosed),
     Object(&'a fp_types::ObjectValue),
+}
+
+/// As derived, but a float's bits hashed spread
+/// ([`fp_types::spread_float_bits`]): equal keys still hash equal, and
+/// round float keys no longer share FxHash buckets (a groupby on 100 of
+/// them ran 4.4x slower than on fractional ones; br-frankenpandas-bss5q.3).
+impl std::hash::Hash for GroupKeyRef<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Self::Bool(value) => value.hash(state),
+            Self::Int64(value)
+            | Self::Timedelta64(value)
+            | Self::Datetime64(value)
+            | Self::Period(value) => value.hash(state),
+            Self::FloatBits(bits) => fp_types::spread_float_bits(*bits).hash(state),
+            Self::Utf8(text) => text.hash(state),
+            Self::Null(kind) => kind.hash(state),
+            Self::Interval(left, right, closed) => {
+                fp_types::spread_float_bits(*left).hash(state);
+                fp_types::spread_float_bits(*right).hash(state);
+                closed.hash(state);
+            }
+            Self::Object(object) => object.hash(state),
+        }
+    }
 }
 
 impl<'a> GroupKeyRef<'a> {
@@ -2227,17 +2253,19 @@ fn nunique_value_key(value: &Scalar) -> Option<NuniqueValueKey<'_>> {
     Some(match value {
         Scalar::Bool(v) => NuniqueValueKey::Bool(*v),
         Scalar::Int64(v) => NuniqueValueKey::Int64(*v),
+        // A float's bits spread (bijective, so equality is kept), as round
+        // floats otherwise share FxHash buckets (br-frankenpandas-bss5q.3).
         Scalar::Float64(v) => {
             let normalized = if *v == 0.0 { 0.0 } else { *v };
-            NuniqueValueKey::FloatBits(normalized.to_bits())
+            NuniqueValueKey::FloatBits(fp_types::spread_float_bits(normalized.to_bits()))
         }
         Scalar::Utf8(v) => NuniqueValueKey::Utf8(v.as_str()),
         Scalar::Timedelta64(v) => NuniqueValueKey::Timedelta64(*v),
         Scalar::Datetime64(v) => NuniqueValueKey::Datetime64(*v),
         Scalar::Period(v) => NuniqueValueKey::Period(v.ordinal, v.freq),
         Scalar::Interval(v) => NuniqueValueKey::Interval(
-            if v.left == 0.0 { 0.0 } else { v.left }.to_bits(),
-            if v.right == 0.0 { 0.0 } else { v.right }.to_bits(),
+            fp_types::spread_float_bits(if v.left == 0.0 { 0.0 } else { v.left }.to_bits()),
+            fp_types::spread_float_bits(if v.right == 0.0 { 0.0 } else { v.right }.to_bits()),
             v.closed,
         ),
         Scalar::Object(object) => NuniqueValueKey::Object(object),

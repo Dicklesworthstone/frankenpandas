@@ -149,7 +149,7 @@ pub const fn overflow_policy_for_mode(mode: RuntimeMode) -> OverflowPolicy {
 use fp_types::{
     DType, Interval, IntervalClosed, NullKind, NumericWidth, NumpyNumeric, OverflowPolicy,
     PandasTemporalError, Period, PeriodFreq, Scalar, SparseDType, TemporalFailure, Timedelta,
-    Timestamp, common_dtype,
+    Timestamp, common_dtype, spread_float_bits,
 };
 use regex::Regex;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -3581,7 +3581,58 @@ fn percentile_with_interpolation(sorted: &[f64], q: f64, mode: QuantileInterpola
     }
 }
 
-#[derive(Hash, PartialEq, Eq, Clone, Copy)]
+/// The duplicate flags of a float column's rows under `keep`, as
+/// `scalar_key_allow_missing` keys its cells: a present value by its bits
+/// (-0.0 as 0.0, spread for the hash), every missing value and NaN one more
+/// key (pandas collapses them to one value). `First` / `Last` flag each
+/// repeat after / before the kept row, `None` every row whose key repeats.
+/// duplicated() of a float Series took the Scalar path (0.11x pandas on
+/// round keys; br-frankenpandas-bss5q.3).
+fn float_duplicate_flags(data: &[f64], validity: &ValidityMask, keep: DuplicateKeep) -> Vec<bool> {
+    let n = data.len();
+    let missing = |i: usize| !validity.get(i) || data[i].is_nan();
+    let key = |i: usize| spread_float_bits(if data[i] == 0.0 { 0 } else { data[i].to_bits() });
+    let mut flags = vec![false; n];
+    match keep {
+        DuplicateKeep::First | DuplicateKeep::Last => {
+            let mut seen: FxHashSet<u64> = FxHashSet::default();
+            let mut seen_missing = false;
+            let mut mark = |i: usize| {
+                flags[i] = if missing(i) {
+                    std::mem::replace(&mut seen_missing, true)
+                } else {
+                    !seen.insert(key(i))
+                };
+            };
+            if matches!(keep, DuplicateKeep::Last) {
+                (0..n).rev().for_each(&mut mark);
+            } else {
+                (0..n).for_each(&mut mark);
+            }
+        }
+        DuplicateKeep::None => {
+            let mut counts: FxHashMap<u64, usize> = FxHashMap::default();
+            let mut missing_count = 0_usize;
+            for i in 0..n {
+                if missing(i) {
+                    missing_count += 1;
+                } else {
+                    *counts.entry(key(i)).or_insert(0) += 1;
+                }
+            }
+            for (i, flag) in flags.iter_mut().enumerate() {
+                *flag = if missing(i) {
+                    missing_count > 1
+                } else {
+                    counts[&key(i)] > 1
+                };
+            }
+        }
+    }
+    flags
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
 enum ScalarKey<'a> {
     Null(NullKind),
     Bool(bool),
@@ -3594,6 +3645,30 @@ enum ScalarKey<'a> {
     Interval(u64, u64, fp_types::IntervalClosed),
     /// An object cell (a list, a host value), by its own hash and equality.
     Object(&'a fp_types::ObjectValue),
+}
+
+/// As derived, but a float's bits hashed spread ([`spread_float_bits`]):
+/// equal keys still hash equal, round floats no longer share buckets.
+impl std::hash::Hash for ScalarKey<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Self::Null(kind) => kind.hash(state),
+            Self::Bool(value) => value.hash(state),
+            Self::Int64(value)
+            | Self::Timedelta64(value)
+            | Self::Datetime64(value)
+            | Self::Period(value) => value.hash(state),
+            Self::FloatBits(bits) => spread_float_bits(*bits).hash(state),
+            Self::Utf8(text) => text.hash(state),
+            Self::Interval(left, right, closed) => {
+                spread_float_bits(*left).hash(state);
+                spread_float_bits(*right).hash(state);
+                closed.hash(state);
+            }
+            Self::Object(object) => object.hash(state),
+        }
+    }
 }
 
 type GroupKey<'a> = Vec<ScalarKey<'a>>;
@@ -17917,18 +17992,36 @@ impl Series {
             let mut seen: rustc_hash::FxHashSet<u64> = rustc_hash::FxHashSet::default();
             let mut out: Vec<Scalar> = Vec::new();
             for &v in data {
-                // splitmix64 finalizer (bijective ⇒ membership identical) spreads the
-                // low-entropy bits of integer-valued f64 before FxHash, avoiding bucket
+                // Spread (bijective ⇒ membership identical) against bucket
                 // clustering on floored/integer float data (br-frankenpandas-mixf64).
-                let mut key = (if v == 0.0 { 0.0 } else { v }).to_bits();
-                key = (key ^ (key >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-                key = (key ^ (key >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-                key ^= key >> 31;
+                let key = spread_float_bits((if v == 0.0 { 0.0 } else { v }).to_bits());
                 if seen.insert(key) {
                     out.push(Scalar::Float64(v));
                 }
             }
             return out;
+        }
+        // A float column with missing values: the rows `First` keeps, every
+        // missing value one NaN where first seen, as pandas - the Scalar path
+        // below was 0.13x pandas on round keys with NaN
+        // (br-frankenpandas-bss5q.3).
+        if self.categorical.is_none()
+            && let Some((data, validity)) = self.column.as_f64_slice_with_validity()
+        {
+            let flags = float_duplicate_flags(data, validity, DuplicateKeep::First);
+            return data
+                .iter()
+                .zip(flags)
+                .enumerate()
+                .filter(|(_, (_, repeat))| !repeat)
+                .map(|(row, (&value, _))| {
+                    if validity.get(row) && !value.is_nan() {
+                        Scalar::Float64(value)
+                    } else {
+                        Scalar::Null(NullKind::NaN)
+                    }
+                })
+                .collect();
         }
 
         // String byte-span dedup (br-frankenpandas-vcstr): an all-valid
@@ -30706,6 +30799,13 @@ impl Series {
             };
             return self.bool_mask_preserving_name(flags);
         }
+        // A float column's flags from its typed buffer and mask, keyed as the
+        // Scalar path below keys them (br-frankenpandas-bss5q.3).
+        if self.categorical.is_none()
+            && let Some((data, validity)) = self.column.as_f64_slice_with_validity()
+        {
+            return self.bool_mask_preserving_name(float_duplicate_flags(data, validity, keep));
+        }
         // Per br-frankenpandas-d8d9d: O(n) HashMap-based dedup; replaces
         // O(n²) iter().any() in First/Last branches and O(n²) explicit
         // filter().count() per element in None branch.
@@ -30955,64 +31055,8 @@ impl Series {
         if self.categorical.is_none()
             && let Some((data, validity)) = self.column.as_f64_slice_with_validity()
         {
-            let n = data.len();
-            let key_bits = |i: usize| -> u64 {
-                if data[i] == 0.0 {
-                    0u64
-                } else {
-                    data[i].to_bits()
-                }
-            };
-            let is_missing = |i: usize| -> bool { !validity.get(i) || data[i].is_nan() };
-            let mut indices: Vec<usize> = Vec::new();
-            match keep {
-                DuplicateKeep::First | DuplicateKeep::Last => {
-                    let last = matches!(keep, DuplicateKeep::Last);
-                    let mut seen: FxHashMap<u64, ()> = FxHashMap::default();
-                    let mut seen_missing = false;
-                    let mut push_if_new = |i: usize, indices: &mut Vec<usize>| {
-                        if is_missing(i) {
-                            if !seen_missing {
-                                seen_missing = true;
-                                indices.push(i);
-                            }
-                        } else if seen.insert(key_bits(i), ()).is_none() {
-                            indices.push(i);
-                        }
-                    };
-                    if last {
-                        for i in (0..n).rev() {
-                            push_if_new(i, &mut indices);
-                        }
-                        indices.reverse();
-                    } else {
-                        for i in 0..n {
-                            push_if_new(i, &mut indices);
-                        }
-                    }
-                }
-                DuplicateKeep::None => {
-                    let mut counts: FxHashMap<u64, usize> = FxHashMap::default();
-                    let mut missing_count = 0usize;
-                    for i in 0..n {
-                        if is_missing(i) {
-                            missing_count += 1;
-                        } else {
-                            *counts.entry(key_bits(i)).or_insert(0) += 1;
-                        }
-                    }
-                    for i in 0..n {
-                        let unique = if is_missing(i) {
-                            missing_count == 1
-                        } else {
-                            counts.get(&key_bits(i)).copied().unwrap_or(0) == 1
-                        };
-                        if unique {
-                            indices.push(i);
-                        }
-                    }
-                }
-            }
+            let flags = float_duplicate_flags(data, validity, keep);
+            let indices: Vec<usize> = (0..data.len()).filter(|&i| !flags[i]).collect();
             let labels_src = self.index.labels();
             let labels: Vec<IndexLabel> = indices.iter().map(|&i| labels_src[i].clone()).collect();
             let index = self.index.relabeled(labels);
@@ -180589,6 +180633,53 @@ mod tests {
         );
         assert!(skew(&[1.0, 2.0]).is_nan());
         assert!(kurt(&[1.0, 2.0, 3.0]).is_nan());
+    }
+
+    #[test]
+    fn round_float_keys_hash_over_many_buckets_bss5q3() {
+        // br-frankenpandas-bss5q.3: a hash table takes a key's bucket from
+        // the low bits of its FxHash, which for a round float's raw bits are
+        // nearly constant - 100 of them shared a handful of buckets, and
+        // drop_duplicates / duplicated / groupby of round floats ran 4-6x
+        // slower than of fractional ones. Spread (ScalarKey's hash), they
+        // fill most of 128 buckets; equal keys still hash equal, -0.0 as
+        // 0.0. NEGATIVE: the raw bits hashed alone land in a handful.
+        use std::hash::{Hash, Hasher};
+
+        use rustc_hash::FxHashSet;
+
+        use crate::scalar_key_allow_missing;
+        let low_bits = |key: &dyn Fn(&mut rustc_hash::FxHasher)| {
+            let mut hasher = rustc_hash::FxHasher::default();
+            key(&mut hasher);
+            hasher.finish() & 127
+        };
+        let floats: Vec<f64> = (1..=100).map(f64::from).collect();
+        let spread: FxHashSet<u64> = floats
+            .iter()
+            .map(|value| {
+                let cell = Scalar::Float64(*value);
+                low_bits(&|hasher| scalar_key_allow_missing(&cell).hash(hasher))
+            })
+            .collect();
+        let raw: FxHashSet<u64> = floats
+            .iter()
+            .map(|value| low_bits(&|hasher| value.to_bits().hash(hasher)))
+            .collect();
+        // About 69 of 128 for 100 random keys.
+        assert!(
+            spread.len() >= 50,
+            "spread keys took {} buckets",
+            spread.len()
+        );
+        assert!(raw.len() <= 8, "raw keys took {} buckets", raw.len());
+        let zero = Scalar::Float64(0.0);
+        let negative_zero = Scalar::Float64(-0.0);
+        assert_eq!(
+            low_bits(&|hasher| scalar_key_allow_missing(&zero).hash(hasher)),
+            low_bits(&|hasher| scalar_key_allow_missing(&negative_zero).hash(hasher))
+        );
+        assert!(scalar_key_allow_missing(&zero) == scalar_key_allow_missing(&negative_zero));
     }
 
     #[test]

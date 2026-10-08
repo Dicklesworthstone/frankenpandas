@@ -29227,3 +29227,48 @@ def test_object_dtype_frame_keeps_cells_d1ac4(case: str) -> None:
         return str(result.dtype), [(type(v).__name__, "nan" if v != v else repr(v)) for v in result.tolist()]
 
     assert run(fpd) == run(pd)
+
+
+_BSS5Q3_KEYS = [3.0, -0.0, 7.0, 3.0, float("nan"), 0.0, 1024.0, 7.0, float("nan"), 2.0**40, 1024.0, -5.0]
+_BSS5Q3_CASES = {
+    "drop_duplicates": lambda m: m.Series(_BSS5Q3_KEYS).drop_duplicates(),
+    "drop_duplicates keep=last": lambda m: m.Series(_BSS5Q3_KEYS).drop_duplicates(keep="last"),
+    "drop_duplicates keep=False": lambda m: m.Series(_BSS5Q3_KEYS).drop_duplicates(keep=False),
+    "duplicated": lambda m: m.Series(_BSS5Q3_KEYS).duplicated(),
+    "duplicated keep=False": lambda m: m.Series(_BSS5Q3_KEYS).duplicated(keep=False),
+    "unique": lambda m: m.Series(m.Series(_BSS5Q3_KEYS).unique()),
+    "nunique": lambda m: m.Series([m.Series(_BSS5Q3_KEYS).nunique()]),
+    "value_counts": lambda m: m.Series(_BSS5Q3_KEYS).value_counts(dropna=False).sort_index(),
+    "groupby sum": lambda m: m.DataFrame({"k": _BSS5Q3_KEYS, "v": range(12)}).groupby("k", dropna=False)["v"].sum(),
+    "groupby nunique": lambda m: m.DataFrame({"k": [1, 1, 2, 2, 2, 3] * 2, "v": _BSS5Q3_KEYS}).groupby("k")["v"].nunique(),
+    "Index.duplicated": lambda m: m.Series(m.Index(_BSS5Q3_KEYS).duplicated()),
+    "Index.unique": lambda m: m.Series(m.Index(_BSS5Q3_KEYS).unique()),
+    "Index.get_loc": lambda m: m.Series([m.Index(_BSS5Q3_KEYS[2:4] + [1024.0, 2.5]).get_loc(1024.0)]),
+    "merge on float keys": lambda m: m.DataFrame({"k": _BSS5Q3_KEYS, "a": range(12)}).merge(
+        m.DataFrame({"k": [7.0, 1024.0, 0.0, 9.0], "b": [1, 2, 3, 4]}), on="k"
+    )["b"],
+    # NEGATIVE: keys that are not floats dedup as before.
+    "int drop_duplicates (NEGATIVE)": lambda m: m.Series([3, 0, 7, 3, 0, 1024]).drop_duplicates(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_BSS5Q3_CASES))
+def test_round_float_keys_hash_as_before_bss5q3(case: str) -> None:
+    # Float keys are hashed spread now (a round float's raw bits shared
+    # FxHash buckets: dedup / groupby of round floats ran 4-6x slower;
+    # br-frankenpandas-bss5q.3): the answers stay pandas' - -0.0 one key with
+    # 0.0, NaN one key, every keep mode, groupby / Index / merge. NEGATIVE:
+    # int keys as before.
+    def cell(value: Any) -> Any:
+        if type(value).__module__ == "numpy":
+            value = value.item()
+        if isinstance(value, float):
+            return "nan" if value != value else value.hex()
+        return value
+
+    def run(m: Any) -> Any:
+        result = _BSS5Q3_CASES[case](m)
+        return str(result.dtype), [cell(v) for v in result.tolist()], [cell(v) for v in result.index.tolist()]
+
+    assert run(fpd) == run(pd)

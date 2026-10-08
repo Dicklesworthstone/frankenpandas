@@ -128,9 +128,12 @@ impl PartialEq for OrderedF64 {
     }
 }
 impl Eq for OrderedF64 {}
+/// The canonical bits spread ([`fp_types::spread_float_bits`]): a round
+/// float's raw bits end in zeros FxHash keeps where its tables take their
+/// buckets from (br-frankenpandas-bss5q.3). Equal labels still hash equal.
 impl std::hash::Hash for OrderedF64 {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.canonical_bits().hash(state);
+        fp_types::spread_float_bits(self.canonical_bits()).hash(state);
     }
 }
 impl Ord for OrderedF64 {

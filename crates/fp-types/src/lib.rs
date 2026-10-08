@@ -1371,6 +1371,19 @@ impl<A: std::ops::Add<Output = A>, B: std::ops::Add<Output = B>> std::ops::Add f
     }
 }
 
+/// A float key's bits spread for an FxHash table: the high half folded
+/// into the low (bijective, so equal bits stay equal and distinct stay
+/// distinct). An integer-valued float's bits end in up to 52 zeros, which
+/// FxHash's multiply keeps where the table takes its bucket from: 100 round
+/// keys shared about two buckets, and drop_duplicates / duplicated / groupby
+/// of round floats ran 4-6x slower than of fractional ones. The splitmix64
+/// finalizer spread them too but cost fractional keys a sixth
+/// (br-frankenpandas-mixf64, br-frankenpandas-bss5q.3).
+#[must_use]
+pub const fn spread_float_bits(bits: u64) -> u64 {
+    bits ^ (bits >> 32)
+}
+
 /// pandas' `_zero_out_fperr`: a moment below 1e-14 in magnitude is 0.
 fn zero_out_fperr(value: f64) -> f64 {
     if value.abs() < 1e-14 { 0.0 } else { value }
