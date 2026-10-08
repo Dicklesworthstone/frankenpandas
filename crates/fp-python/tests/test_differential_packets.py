@@ -30663,6 +30663,24 @@ _VK7Y9P3_CASES = {
     "is_year_end": lambda m: _vk7y9p3_dates(m).dt.is_year_end,
     "is_leap_year": lambda m: _vk7y9p3_dates(m).dt.is_leap_year,
     "aware is_month_end": lambda m: _vk7y9p3_dates(m).dt.tz_localize("Asia/Tokyo").dt.is_month_end,
+    # Duplicate flags of a column holding NaT read its nanos, NaT one value.
+    "duplicated": lambda m: m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m).iloc[::2]]).duplicated(),
+    "duplicated keep last": lambda m: m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m).iloc[::2]]).duplicated(keep="last"),
+    "duplicated keep False": lambda m: m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m).iloc[::2]]).duplicated(keep=False),
+    "drop_duplicates": lambda m: m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m).iloc[::2]]).drop_duplicates(),
+    "drop_duplicates keep last": lambda m: m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m).iloc[::2]]).drop_duplicates(keep="last"),
+    "drop_duplicates keep False": lambda m: m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m).iloc[::2]]).drop_duplicates(keep=False),
+    "aware drop_duplicates": lambda m: m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m)]).dt.tz_localize("Asia/Tokyo").drop_duplicates(),
+    "durations drop_duplicates": lambda m: m.concat([_vk7y9p3_spans(m), _vk7y9p3_spans(m).iloc[1::3]]).drop_duplicates(),
+    "durations duplicated keep False": lambda m: m.concat([_vk7y9p3_spans(m), _vk7y9p3_spans(m).iloc[1::3]]).duplicated(keep=False),
+    "aware duplicated": lambda m: m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m)]).dt.tz_localize("UTC").duplicated(),
+    # Membership of a column holding NaT reads its nanos (NaT never a match).
+    "isin": lambda m: _vk7y9p3_dates(m).isin([m.Timestamp("2020-01-05T03:00"), m.Timestamp("2021-07-04")]),
+    "isin with a NaT needle": lambda m: _vk7y9p3_dates(m).isin([m.NaT, m.Timestamp("2021-07-04")]),
+    "durations isin": lambda m: _vk7y9p3_spans(m).isin([m.Timedelta("4D 03:00:00"), m.Timedelta("-1D")]),
+    "aware isin": lambda m: _vk7y9p3_dates(m).dt.tz_localize("UTC").isin([m.Timestamp("2021-07-04", tz="UTC")]),
+    # NEGATIVE: no needle present is all False.
+    "isin of no match": lambda m: _vk7y9p3_dates(m).isin([m.Timestamp("1999-01-01")]),
     # NEGATIVE: without NaT the fields stay int64 and nothing is filled.
     "days, no NaT (NEGATIVE)": lambda m: _vk7y9p3_spans(m).dropna().dt.days,
     "ffill, no NaT (NEGATIVE)": lambda m: _vk7y9p3_dates(m).dropna().ffill(),
@@ -30782,6 +30800,7 @@ _LSN8D2_OPS = {
     "argsort": lambda m, i: list(i.argsort()),
     "unique": lambda m, i: _lsn8d2_index(i.unique()),
     "monotonic": lambda m, i: (i.is_monotonic_increasing, i.is_monotonic_decreasing),
+    "inferred_type / dtype": lambda m, i: (i.inferred_type, str(i.dtype)),
     "is_unique / hasnans": lambda m, i: (i.is_unique, i.hasnans),
     "tz_localize UTC": lambda m, i: _lsn8d2_index(i.tz_localize("UTC")),
     "tz_localize Tokyo": lambda m, i: _lsn8d2_index(i.tz_localize("Asia/Tokyo")),
@@ -30984,6 +31003,19 @@ def test_set_op_names_like_pandas_ff5ik(kind: str, other: str, op: str) -> None:
         except Exception as error:  # noqa: BLE001
             return ("raises", type(error).__name__)
         return (out.name, sorted(str(v) for v in out))
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("dtype", ["int64", "int32", "float64", "bool", "object", "datetime64[ns]", "timedelta64[ns]"])
+def test_empty_index_inferred_type_lsn8d(dtype: str) -> None:
+    # An empty index of a dtype infers that dtype's kind, as pandas (an
+    # empty DatetimeIndex / int64 / float64 Index said "empty";
+    # br-frankenpandas-lsn8d). NEGATIVE: an object one is "empty".
+    def run(m: Any) -> Any:
+        index = m.Index(np.array([], dtype=dtype))
+        return (index.inferred_type, str(index.dtype))
 
     assert run(fpd) == run(pd)
 

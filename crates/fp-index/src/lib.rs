@@ -6955,10 +6955,29 @@ impl Index {
     #[must_use]
     pub fn inferred_type(&self) -> &'static str {
         if self.labels.is_empty() {
-            return "empty";
+            // No label shows a kind: an index declared a dtype is that
+            // dtype's kind, as pandas (an empty DatetimeIndex said "empty";
+            // br-frankenpandas-lsn8d), an object or undeclared one "empty".
+            return match self.declared {
+                Some(DeclaredDtype::Int64 | DeclaredDtype::Int32) => "integer",
+                Some(DeclaredDtype::Float64) => "floating",
+                Some(DeclaredDtype::Bool) => "boolean",
+                Some(DeclaredDtype::Datetime64) => "datetime64",
+                Some(DeclaredDtype::Timedelta64) => "timedelta64",
+                Some(DeclaredDtype::Object) | None => "empty",
+            };
         }
         if self.labels.has_lazy_int64_backing() {
             return "integer";
+        }
+        // Instants held as instants are Datetime64 labels, NaT among them:
+        // "datetime64" by either branch below, without reading a million of
+        // them per call (an empty slice of a DatetimeIndex asked its dtype:
+        // idx[5:5] 1.3 ms; br-frankenpandas-lsn8d).
+        if self.labels.datetime64_strided.is_some()
+            || self.labels.datetime64_affine_range().is_some()
+        {
+            return "datetime64";
         }
         let mut non_missing = self.labels.iter().filter(|label| !label.is_missing());
         let Some(first) = non_missing.next() else {

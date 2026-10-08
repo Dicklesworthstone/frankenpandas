@@ -3664,6 +3664,35 @@ fn float_duplicate_flags(data: &[f64], validity: &ValidityMask, keep: DuplicateK
     flags
 }
 
+/// A datetime / timedelta column's duplicate flags off its nanos - NaT one
+/// value, as the Scalar path keys every missing slot of such a column -
+/// each instant keyed spread ([`spread_float_bits`]; round instants share
+/// FxHash buckets). A column holding NaT took the Scalar path
+/// (d.duplicated() 0.44x pandas at 1M; br-frankenpandas-vk7y9).
+fn temporal_duplicate_flags(nanos: &[i64], keep: DuplicateKeep) -> Vec<bool> {
+    let key = |at: i64| spread_float_bits(at.cast_unsigned());
+    match keep {
+        DuplicateKeep::First | DuplicateKeep::Last => {
+            let mut seen: FxHashSet<u64> = FxHashSet::default();
+            let mut flags = vec![false; nanos.len()];
+            let mut mark = |i: usize| flags[i] = !seen.insert(key(nanos[i]));
+            if matches!(keep, DuplicateKeep::Last) {
+                (0..nanos.len()).rev().for_each(&mut mark);
+            } else {
+                (0..nanos.len()).for_each(&mut mark);
+            }
+            flags
+        }
+        DuplicateKeep::None => {
+            let mut counts: FxHashMap<u64, usize> = FxHashMap::default();
+            for &at in nanos {
+                *counts.entry(key(at)).or_insert(0) += 1;
+            }
+            nanos.iter().map(|&at| counts[&key(at)] > 1).collect()
+        }
+    }
+}
+
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum ScalarKey<'a> {
     Null(NullKind),
@@ -26560,6 +26589,42 @@ impl Series {
             );
         }
 
+        // A datetime / timedelta column tested against present instants /
+        // durations of its kind: membership of its nanos (NaT never a match),
+        // keyed spread - the generic path below compares the same nanos a
+        // Scalar a row (d.isin(3 stamps) 0.46x pandas at 1M;
+        // br-frankenpandas-vk7y9). Any other needle (NaT, text, another kind)
+        // keeps that path.
+        if let Some((data, _)) = self.column.as_temporal_nanos_with_validity() {
+            let timedelta = self.column.dtype() == DType::Timedelta64;
+            let needles: Option<FxHashSet<u64>> = test_values
+                .iter()
+                .map(|value| match value {
+                    Scalar::Datetime64(at) if !timedelta && *at != Timestamp::NAT => {
+                        Some(spread_float_bits(at.cast_unsigned()))
+                    }
+                    Scalar::Timedelta64(at) if timedelta && *at != Timedelta::NAT => {
+                        Some(spread_float_bits(at.cast_unsigned()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if let Some(needles) = needles.filter(|needles| !needles.is_empty()) {
+                let flags: Vec<bool> = data
+                    .iter()
+                    .map(|&at| {
+                        at != Timestamp::NAT
+                            && needles.contains(&spread_float_bits(at.cast_unsigned()))
+                    })
+                    .collect();
+                return Series::new(
+                    self.name.clone(),
+                    self.index.clone(),
+                    Column::from_bool_values(flags),
+                );
+            }
+        }
+
         // String byte-span membership (br-frankenpandas-vcstr): an all-valid
         // contiguous-Utf8 column probes an FxHashMap of the string needles' raw
         // bytes — no per-row Scalar::Utf8 materialization, no SipHash — and emits
@@ -31517,6 +31582,9 @@ impl Series {
         {
             return self.bool_mask_preserving_name(float_duplicate_flags(data, validity, keep));
         }
+        if let Some((data, _)) = self.column.as_temporal_nanos_with_validity() {
+            return self.bool_mask_preserving_name(temporal_duplicate_flags(data, keep));
+        }
         // Per br-frankenpandas-d8d9d: O(n) HashMap-based dedup; replaces
         // O(n²) iter().any() in First/Last branches and O(n²) explicit
         // filter().count() per element in None branch.
@@ -31697,6 +31765,24 @@ impl Series {
                 self.name.clone(),
                 index,
                 Column::new(DType::Timedelta64, kept)?,
+            );
+        }
+
+        // A datetime / timedelta column holding NaT (the two paths above take
+        // one without): the rows its nanos' flags keep
+        // ([`temporal_duplicate_flags`], NaT one value), taken typed with
+        // their labels - it built a Scalar a row (d.drop_duplicates() 0.29x
+        // pandas at 1M; br-frankenpandas-vk7y9).
+        if let Some((data, _)) = self.column.as_temporal_nanos_with_validity() {
+            let kept: Vec<usize> = temporal_duplicate_flags(data, keep)
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &repeat)| (!repeat).then_some(i))
+                .collect();
+            return Self::new(
+                self.name.clone(),
+                self.index.take(&kept),
+                self.column.take_positions(&kept),
             );
         }
 
