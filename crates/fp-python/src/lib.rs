@@ -23656,6 +23656,7 @@ enum PyErrorKind {
     Key,
     NotImplemented,
     Memory,
+    Overflow,
 }
 
 fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
@@ -23689,6 +23690,15 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
         // the process).
         FrameError::CompatibilityRejected(msg) if msg.starts_with("cannot allocate memory") => {
             (PyErrorKind::Memory, msg.clone())
+        }
+        // pandas' OverflowError for a datetime / timedelta sum past int64
+        // ("Overflow in int64 addition"): the class the engine names first,
+        // its operation detail left out - it was a ValueError behind the
+        // gate prefix (br-frankenpandas-vk7y9).
+        FrameError::CompatibilityRejected(msg) if msg.starts_with("OverflowError: ") => {
+            let text = &msg["OverflowError: ".len()..];
+            let text = text.split_once(" (").map_or(text, |(head, _)| head);
+            (PyErrorKind::Overflow, text.to_owned())
         }
         FrameError::CompatibilityRejected(msg) => {
             let lower = msg.to_lowercase();
@@ -23826,6 +23836,7 @@ fn frame_error_to_py(err: fp_frame::FrameError) -> PyErr {
             PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(msg)
         }
         PyErrorKind::Memory => PyErr::new::<pyo3::exceptions::PyMemoryError, _>(msg),
+        PyErrorKind::Overflow => PyErr::new::<pyo3::exceptions::PyOverflowError, _>(msg),
     }
 }
 
@@ -26260,7 +26271,31 @@ fn comparison_operand(
         return Ok(Some(series));
     }
     let operand = unwrap_0d(other)?;
-    let Some(mut scalar) = comparison_scalar(py, &operand, &like.dtype())? else {
+    let Some((scalar, zone_dtype)) = comparison_operand_scalar(py, &operand, like)? else {
+        return Ok(None);
+    };
+    // Broadcast over `like`'s own index (a copy of its labels dropped a
+    // tz-aware index's zone, so the comparison realigned and came back naive).
+    let column = broadcast_column(scalar, like.len())?;
+    let column = match zone_dtype {
+        Some(zone) => column.with_dtype(DType::datetime64_tz(zone)),
+        None => column,
+    };
+    Series::new(like.name(), like.index().clone(), column)
+        .map(Some)
+        .map_err(frame_error_to_py)
+}
+
+/// The scalar a plain `operand` compares against `like`'s rows as (an
+/// instant in a zoned column's UTC nanos), with the zone a datetime
+/// column's broadcast of it carries; None when it compares as pandas'
+/// invalid comparison.
+fn comparison_operand_scalar(
+    py: Python<'_>,
+    operand: &Bound<'_, PyAny>,
+    like: &Series,
+) -> PyResult<Option<(Scalar, Option<String>)>> {
+    let Some(mut scalar) = comparison_scalar(py, operand, &like.dtype())? else {
         return Ok(None);
     };
     // A number against datetimes or durations is pandas' invalid comparison
@@ -26301,16 +26336,43 @@ fn comparison_operand(
             (None, _) => {}
         }
     }
-    // Broadcast over `like`'s own index (a copy of its labels dropped a
-    // tz-aware index's zone, so the comparison realigned and came back naive).
-    let column = broadcast_column(scalar, like.len())?;
-    let column = match zone_dtype {
-        Some(zone) => column.with_dtype(DType::datetime64_tz(zone)),
-        None => column,
+    Ok(Some((scalar, zone_dtype)))
+}
+
+/// `like <op> other` for a datetime / timedelta Series and a Timestamp /
+/// Timedelta / datetime / timedelta of its kind: the column's nanos against
+/// the operand's (Column::compare_scalar; a NaT row false, true under !=),
+/// where the operand was broadcast to a column and the two compared a pair
+/// at a time (d > ts 0.61x pandas at 1M; br-frankenpandas-vk7y9). None for
+/// any other operand - one of another kind, zone-awareness or NaT takes
+/// the broadcast, which answers or refuses it as pandas.
+fn temporal_scalar_comparison(
+    py: Python<'_>,
+    like: &Series,
+    other: &Bound<'_, PyAny>,
+    op: ComparisonOp,
+) -> PyResult<Option<PySeries>> {
+    if !matches!(like.dtype(), DType::Datetime64 { .. } | DType::Timedelta64)
+        || like.is_categorical()
+        || !(other.extract::<PyRef<'_, PyTimestamp>>().is_ok()
+            || other.extract::<PyRef<'_, PyTimedelta>>().is_ok()
+            || other.cast::<PyDateTime>().is_ok()
+            || other.cast::<PyDelta>().is_ok())
+    {
+        return Ok(None);
+    }
+    let Some((scalar, _)) = comparison_operand_scalar(py, other, like)? else {
+        return Ok(None);
     };
-    Series::new(like.name(), like.index().clone(), column)
-        .map(Some)
-        .map_err(frame_error_to_py)
+    let own_kind = match (like.dtype(), &scalar) {
+        (DType::Datetime64 { .. }, Scalar::Datetime64(nanos))
+        | (DType::Timedelta64, Scalar::Timedelta64(nanos)) => *nanos != i64::MIN,
+        _ => false,
+    };
+    if !own_kind {
+        return Ok(None);
+    }
+    wrap_series(like.compare_scalar(&scalar, op)).map(Some)
 }
 
 /// `side` with `fill` wherever it is missing and `against` is not: pandas'
@@ -29913,6 +29975,11 @@ impl PySeries {
         equal: bool,
     ) -> PyResult<PySeries> {
         check_comparable(&self.inner, other)?;
+        let op = if equal {
+            ComparisonOp::Eq
+        } else {
+            ComparisonOp::Ne
+        };
         // A categorical held as codes compares a plain scalar by its codes
         // (Series::compare_scalar); the scalar was broadcast to a Series of a
         // million cells first (c == 'key7' 55 ms; br-frankenpandas-5oup5).
@@ -29923,12 +29990,10 @@ impl PySeries {
                 || other.is_instance_of::<pyo3::types::PyFloat>())
         {
             let scalar = py_to_scalar(py, other)?;
-            let op = if equal {
-                ComparisonOp::Eq
-            } else {
-                ComparisonOp::Ne
-            };
             return wrap_series(self.inner.compare_scalar(&scalar, op));
+        }
+        if let Some(result) = temporal_scalar_comparison(py, &self.inner, other, op)? {
+            return Ok(result);
         }
         let Some(rhs) = comparison_operand(py, other, &self.inner)? else {
             let column = Column::from_values(vec![Scalar::Bool(!equal); self.inner.len()])
@@ -31418,6 +31483,10 @@ impl PySeries {
         if let Some(result) = scalar_comparison(&self.inner, other, ComparisonOp::Gt) {
             return result;
         }
+        if let Some(result) = temporal_scalar_comparison(py, &self.inner, other, ComparisonOp::Gt)?
+        {
+            return Ok(result);
+        }
         let rhs = self.ordering_operand(py, other)?;
         masked_string_comparison(&self.inner, wrap_series(self.inner.gt(&rhs)))
     }
@@ -31432,6 +31501,10 @@ impl PySeries {
         }
         if let Some(result) = scalar_comparison(&self.inner, other, ComparisonOp::Ge) {
             return result;
+        }
+        if let Some(result) = temporal_scalar_comparison(py, &self.inner, other, ComparisonOp::Ge)?
+        {
+            return Ok(result);
         }
         let rhs = self.ordering_operand(py, other)?;
         masked_string_comparison(&self.inner, wrap_series(self.inner.ge(&rhs)))
@@ -31448,6 +31521,10 @@ impl PySeries {
         if let Some(result) = scalar_comparison(&self.inner, other, ComparisonOp::Lt) {
             return result;
         }
+        if let Some(result) = temporal_scalar_comparison(py, &self.inner, other, ComparisonOp::Lt)?
+        {
+            return Ok(result);
+        }
         let rhs = self.ordering_operand(py, other)?;
         masked_string_comparison(&self.inner, wrap_series(self.inner.lt(&rhs)))
     }
@@ -31462,6 +31539,10 @@ impl PySeries {
         }
         if let Some(result) = scalar_comparison(&self.inner, other, ComparisonOp::Le) {
             return result;
+        }
+        if let Some(result) = temporal_scalar_comparison(py, &self.inner, other, ComparisonOp::Le)?
+        {
+            return Ok(result);
         }
         let rhs = self.ordering_operand(py, other)?;
         masked_string_comparison(&self.inner, wrap_series(self.inner.le(&rhs)))
@@ -98006,6 +98087,18 @@ mod tests {
         let (kind, msg) = classify_frame_error(&pop_missing_label);
         assert_eq!(kind, PyErrorKind::Key);
         assert!(msg.contains("not found in index"));
+
+        // A datetime / timedelta sum past int64 is pandas' OverflowError and
+        // text (br-frankenpandas-vk7y9); NEGATIVE: an overflow named only
+        // inside a message stays the gate's ValueError.
+        let overflow = FrameError::CompatibilityRejected(
+            "OverflowError: Overflow in int64 addition (Timedelta::add)".into(),
+        );
+        let (kind, msg) = classify_frame_error(&overflow);
+        assert_eq!(kind, PyErrorKind::Overflow);
+        assert_eq!(msg, "Overflow in int64 addition");
+        let inner = FrameError::CompatibilityRejected("rolling: OverflowError: x".into());
+        assert_eq!(classify_frame_error(&inner).0, PyErrorKind::Value);
     }
 
     #[test]

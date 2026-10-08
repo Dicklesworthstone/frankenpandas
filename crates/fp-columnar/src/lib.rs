@@ -8378,6 +8378,24 @@ fn compare_i64_scalar(data: &[i64], s: i64, op: ComparisonOp) -> Vec<bool> {
     }
 }
 
+/// [`compare_i64_scalar`] of a datetime / timedelta buffer, NaT (i64::MIN)
+/// at its missing slots, against a present `s`: a missing row false, true
+/// under != (br-frankenpandas-vk7y9). NaT orders below every value, so the
+/// kernel answers that already for every op but `<` / `<=`, whose missing
+/// rows are cleared off the mask.
+fn compare_nanos_scalar(
+    data: &[i64],
+    validity: &ValidityMask,
+    s: i64,
+    op: ComparisonOp,
+) -> Vec<bool> {
+    let mut out = compare_i64_scalar(data, s, op);
+    if matches!(op, ComparisonOp::Lt | ComparisonOp::Le) {
+        validity.for_each_invalid_range(|start, len| out[start..start + len].fill(false));
+    }
+    out
+}
+
 /// Largest `k` for which the typed `nkeep` uses a bounded top-`k` linear scan.
 /// For small `k` (the dominant case) this is O(n) with a tiny working set and a
 /// cheap threshold reject — far better than a full O(n·log n) sort or a
@@ -14935,6 +14953,45 @@ impl Column {
         Self {
             dtype: DType::Timedelta64,
             values: ScalarValues::lazy_nullable_timedelta64(data, validity.clone()),
+            validity,
+            data: None,
+            categorical: None,
+            width: None,
+            pandas_string: false,
+        }
+    }
+
+    /// A datetime (`dtype`, its zone kept) or timedelta column over `data`,
+    /// missing exactly where it holds NaT (i64::MIN): the mask read off the
+    /// data a 64-row word at a time and nothing written back - where
+    /// [`Self::from_datetime64_values_with_validity`] over that mask fills
+    /// NaT in again over every missing run, a call a run (a `where` that
+    /// fills half the rows meets a run every fourth; br-frankenpandas-vk7y9).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn from_temporal_nanos(dtype: DType, data: Vec<i64>) -> Self {
+        debug_assert!(matches!(
+            dtype,
+            DType::Datetime64 { .. } | DType::Timedelta64
+        ));
+        let words = data
+            .chunks(64)
+            .map(|chunk| {
+                chunk.iter().enumerate().fold(0_u64, |word, (bit, &ns)| {
+                    word | (u64::from(ns != i64::MIN) << bit)
+                })
+            })
+            .collect();
+        let validity = ValidityMask::from_words(words, data.len());
+        let values = match (validity.all(), dtype == DType::Timedelta64) {
+            (true, false) => ScalarValues::lazy_all_valid_datetime64_owned(data),
+            (true, true) => ScalarValues::lazy_all_valid_timedelta64_owned(data),
+            (false, false) => ScalarValues::lazy_nullable_datetime64(data, validity.clone()),
+            (false, true) => ScalarValues::lazy_nullable_timedelta64(data, validity.clone()),
+        };
+        Self {
+            dtype,
+            values,
             validity,
             data: None,
             categorical: None,
@@ -22691,6 +22748,20 @@ impl Column {
         {
             return Ok(Self::from_bool_arc(compare_f64_scalar_arc(data, s, op)));
         }
+        // A datetime / timedelta column against an instant / duration of its
+        // own kind (in the column's nanos - UTC for a zoned one): a NaT row
+        // is false, true under !=, as for a missing one - the scalar was
+        // broadcast to a column and compared a pair at a time (d > ts 0.61x
+        // pandas at 1M; br-frankenpandas-vk7y9).
+        if let Some((data, validity)) = self.as_temporal_nanos_with_validity()
+            && let (DType::Datetime64 { .. }, Scalar::Datetime64(s))
+            | (DType::Timedelta64, Scalar::Timedelta64(s)) = (&self.dtype, scalar)
+            && *s != i64::MIN
+        {
+            return Ok(Self::from_bool_values(compare_nanos_scalar(
+                data, validity, *s, op,
+            )));
+        }
         let result = self.compare_scalar_propagating(scalar, op)?;
         if self.dtype.is_nullable() {
             // The nullable `boolean` dtype, <NA> where missing (see
@@ -25112,6 +25183,12 @@ impl Column {
                 | DType::Utf8
                 | DType::Interval
         ) {
+            return self.validity.count_valid();
+        }
+        // A datetime / timedelta buffer's missing slots are its NaT, which the
+        // mask leaves out: the Scalar view was walked a row (two thirds of
+        // d.mean(), which counts; br-frankenpandas-vk7y9).
+        if self.as_temporal_nanos_with_validity().is_some() {
             return self.validity.count_valid();
         }
 
@@ -59133,6 +59210,86 @@ mod tests {
             ));
             if let ScalarValues::LazyNullableInt64 { values, .. } = &col.values {
                 assert!(values.get().is_none());
+            }
+        }
+
+        #[test]
+        fn from_temporal_nanos_masks_exactly_the_nat_rows_vk7y9() {
+            // The mask is the rows not NaT, the dtype (zone) the one given,
+            // and the column the one `from_*_values_with_validity` builds
+            // over that mask (br-frankenpandas-vk7y9).
+            let nat = i64::MIN;
+            let nanos: Vec<i64> = (0..130_i64)
+                .map(|i| if i % 9 == 4 { nat } else { i * 7 - 300 })
+                .chain([nat + 1, i64::MAX])
+                .collect();
+            let words: Vec<u64> = nanos
+                .chunks(64)
+                .map(|chunk| {
+                    chunk
+                        .iter()
+                        .enumerate()
+                        .filter(|&(_, &ns)| ns != nat)
+                        .fold(0, |word, (bit, _)| word | (1 << bit))
+                })
+                .collect();
+            let mask = ValidityMask::from_words(words, nanos.len());
+            let zoned = DType::datetime64_tz("Asia/Tokyo");
+            let built = Column::from_temporal_nanos(zoned.clone(), nanos.clone());
+            let reference =
+                Column::from_datetime64_values_with_validity(nanos.clone(), mask.clone())
+                    .with_dtype(zoned.clone());
+            assert_eq!(built.dtype(), zoned);
+            assert_eq!(built.validity(), &mask);
+            assert_eq!(built.values(), reference.values());
+            let durations = Column::from_temporal_nanos(DType::Timedelta64, nanos.clone());
+            assert_eq!(
+                durations.values(),
+                Column::from_timedelta64_values_with_validity(nanos.clone(), mask).values()
+            );
+            // NEGATIVE: the instant beside NaT is present; no NaT is all-valid.
+            assert!(built.validity().get(130));
+            let full = Column::from_temporal_nanos(DType::Timedelta64, vec![nat + 1, 0, 5]);
+            assert!(full.validity().all());
+            assert_eq!(full.count(), 3);
+        }
+
+        #[test]
+        fn temporal_count_reads_the_mask_vk7y9() {
+            // A datetime / timedelta column's count is its mask's - NaT left
+            // out - equal to the Scalar view's present rows (br-frankenpandas-vk7y9).
+            let nat = i64::MIN;
+            let nanos = vec![5, nat, -3, nat, nat, 0, i64::MAX];
+            let columns = [
+                Column::from_datetime64_values_with_validity(
+                    nanos.clone(),
+                    ValidityMask::from_words(vec![0b110_0101], 7),
+                ),
+                Column::from_timedelta64_values_with_validity(
+                    nanos,
+                    ValidityMask::from_words(vec![0b110_0101], 7),
+                ),
+                Column::new(
+                    DType::datetime64_naive(),
+                    vec![
+                        Scalar::Datetime64(1),
+                        Scalar::Null(NullKind::NaT),
+                        Scalar::Datetime64(3),
+                    ],
+                )
+                .unwrap(),
+                Column::new(DType::Timedelta64, vec![Scalar::Null(NullKind::NaT); 2]).unwrap(),
+            ];
+            // NEGATIVE: none counts its length (the all-NaT one is 0 of 2).
+            let expected = [4, 4, 2, 0];
+            for (col, want) in columns.iter().zip(expected) {
+                assert!(col.as_temporal_nanos_with_validity().is_some());
+                assert_ne!(col.count(), col.len());
+                assert_eq!(col.count(), want);
+                assert_eq!(
+                    col.values().iter().filter(|v| !v.is_missing()).count(),
+                    want
+                );
             }
         }
 

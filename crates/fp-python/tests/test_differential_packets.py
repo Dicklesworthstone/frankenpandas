@@ -30587,6 +30587,14 @@ def _vk7y9p3_spans(m: Any) -> Any:
     return _vk7y9p3_dates(m) - m.Timestamp("2020-01-01")
 
 
+def _vk7y9p5_outcome(make: Any) -> Any:
+    # The values, or the class of what pandas raises.
+    try:
+        return make()
+    except Exception as err:  # noqa: BLE001 - the class is the answer
+        return type(err).__name__
+
+
 _VK7Y9P4_CASES = {
     "mean": lambda m: _vk7y9p3_dates(m).mean(),
     "mean, an aware column": lambda m: _vk7y9p3_dates(m).dt.tz_localize("Asia/Tokyo").mean(),
@@ -30608,6 +30616,59 @@ _VK7Y9P4_CASES = {
     "idxmin": lambda m: _vk7y9p3_dates(m).idxmin(),
     "durations idxmax": lambda m: _vk7y9p3_spans(m).idxmax(),
     "idxmax of a tie": lambda m: m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m)], ignore_index=True).idxmax(),
+    "max": lambda m: _vk7y9p3_dates(m).max(),
+    "min": lambda m: _vk7y9p3_dates(m).min(),
+    "durations max": lambda m: _vk7y9p3_spans(m).max(),
+    "durations min": lambda m: _vk7y9p3_spans(m).min(),
+    "aware min": lambda m: _vk7y9p3_dates(m).dt.tz_localize("Asia/Tokyo").min(),
+    "min all NaT": lambda m: m.Series(np.array(["NaT", "NaT"], dtype="datetime64[ns]")).min(),
+    "durations max all NaT": lambda m: m.Series(np.array(["NaT", "NaT"], dtype="timedelta64[ns]")).max(),
+    "mode": lambda m: (lambda out: [str(v) for v in out] + [str(out.dtype), str(list(out.index))])(
+        m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m).iloc[[4, 0]]]).mode()
+    ),
+    "mode, every value once": lambda m: [str(v) for v in _vk7y9p3_dates(m).mode()],
+    "durations mode": lambda m: [str(v) for v in m.concat([_vk7y9p3_spans(m), _vk7y9p3_spans(m).iloc[[3]]]).mode()],
+    "aware mode": lambda m: (lambda out: [str(v) for v in out] + [str(out.dtype)])(
+        m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m).iloc[[6]]]).dt.tz_localize("Asia/Tokyo").mode()
+    ),
+    "mode all NaT": lambda m: (lambda out: [str(len(out)), str(out.dtype)])(
+        m.Series(np.array(["NaT", "NaT"], dtype="datetime64[ns]")).mode()
+    ),
+    # NEGATIVE: dropna=False counts NaT, the mode here (three of them).
+    "mode dropna=False": lambda m: [str(v) for v in _vk7y9p3_dates(m).mode(dropna=False)],
+    "count": lambda m: [_vk7y9p3_dates(m).count(), _vk7y9p3_spans(m).count()],
+    "d > ts": lambda m: list(_vk7y9p3_dates(m) > m.Timestamp("2020-01-01")),
+    "d < ts (NaT False)": lambda m: list(_vk7y9p3_dates(m) < m.Timestamp("2020-01-01")),
+    "d <= ts": lambda m: list(_vk7y9p3_dates(m) <= m.Timestamp("2019-12-31T06:30")),
+    "d >= datetime": lambda m: list(_vk7y9p3_dates(m) >= datetime.datetime(2019, 12, 31, 6, 30)),
+    "d == ts": lambda m: list(_vk7y9p3_dates(m) == m.Timestamp("2021-07-04")),
+    "d != ts (NaT True)": lambda m: list(_vk7y9p3_dates(m) != m.Timestamp("2021-07-04")),
+    "aware > aware ts of another zone": lambda m: list(
+        _vk7y9p3_dates(m).dt.tz_localize("Asia/Tokyo") > m.Timestamp("2020-01-04T20:00", tz="UTC")
+    ),
+    "durations < Timedelta": lambda m: list(_vk7y9p3_spans(m) < m.Timedelta("4D")),
+    "durations <= timedelta": lambda m: list(_vk7y9p3_spans(m) <= datetime.timedelta(days=-1)),
+    # NEGATIVE: an operand of another zone-awareness or kind stays pandas'
+    # invalid comparison (== all False, ordering TypeError).
+    "aware > naive ts": lambda m: _vk7y9p5_outcome(
+        lambda: list(_vk7y9p3_dates(m).dt.tz_localize("UTC") > m.Timestamp("2020-01-01"))
+    ),
+    "aware == naive ts": lambda m: list(_vk7y9p3_dates(m).dt.tz_localize("UTC") == m.Timestamp("2020-01-05T03:00")),
+    "durations > ts": lambda m: _vk7y9p5_outcome(lambda: list(_vk7y9p3_spans(m) > m.Timestamp("2020-01-01"))),
+    "d + 1 day": lambda m: [str(v) for v in _vk7y9p3_dates(m) + m.Timedelta("1D")],
+    "d - ts": lambda m: (lambda out: [str(v) for v in out] + [str(out.dtype)])(_vk7y9p3_dates(m) - m.Timestamp("2020-01-01")),
+    "aware - 90 minutes": lambda m: (lambda out: [str(v) for v in out] + [str(out.dtype)])(
+        _vk7y9p3_dates(m).dt.tz_localize("Asia/Tokyo") - m.Timedelta("90min")
+    ),
+    "durations + durations": lambda m: [str(v) for v in _vk7y9p3_spans(m) + _vk7y9p3_spans(m).iloc[::-1].reset_index(drop=True)],
+    # NEGATIVE: a present pair past the int64 range raises; NaT beside the
+    # extreme operand does not.
+    "overflow raises": lambda m: _vk7y9p5_outcome(
+        lambda: [str(v) for v in m.Series(np.array(["2262-04-11", "NaT"], dtype="datetime64[ns]")) + m.Timedelta("2D")]
+    ),
+    "NaT beside the extreme": lambda m: [
+        str(v) for v in m.Series(np.array(["NaT", "2262-04-09"], dtype="datetime64[ns]")) + m.Timedelta("1D")
+    ],
     "set_index": lambda m: (lambda out: [str(v) for v in out.index] + [str(out.index.dtype), str(out.index.name)])(
         m.DataFrame({"t": _vk7y9p3_dates(m), "v": np.arange(7)}).set_index("t")
     ),
@@ -30622,6 +30683,7 @@ _VK7Y9P4_CASES = {
     # NEGATIVE: no NaT reads the buffer as it is.
     "unique, no NaT": lambda m: [str(v) for v in _vk7y9p3_dates(m).dropna().unique()],
     "mean, no NaT": lambda m: _vk7y9p3_dates(m).dropna().mean(),
+    "durations min, no NaT": lambda m: _vk7y9p3_spans(m).dropna().min(),
     "quantile, no NaT": lambda m: _vk7y9p3_dates(m).dropna().quantile(0.3),
 }
 
