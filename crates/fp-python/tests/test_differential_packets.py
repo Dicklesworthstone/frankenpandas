@@ -29272,3 +29272,127 @@ def test_round_float_keys_hash_as_before_bss5q3(case: str) -> None:
         return str(result.dtype), [cell(v) for v in result.tolist()], [cell(v) for v in result.index.tolist()]
 
     assert run(fpd) == run(pd)
+
+
+_BSS5Q3_INDEX_CASES = {
+    "duplicated first": lambda m: m.Index(_BSS5Q3_KEYS).duplicated(),
+    "duplicated last": lambda m: m.Index(_BSS5Q3_KEYS).duplicated(keep="last"),
+    "duplicated none": lambda m: m.Index(_BSS5Q3_KEYS).duplicated(keep=False),
+    "drop_duplicates first": lambda m: m.Index(_BSS5Q3_KEYS).drop_duplicates(),
+    "drop_duplicates last": lambda m: m.Index(_BSS5Q3_KEYS).drop_duplicates(keep="last"),
+    "drop_duplicates none": lambda m: m.Index(_BSS5Q3_KEYS).drop_duplicates(keep=False),
+    "unique": lambda m: m.Index(_BSS5Q3_KEYS).unique(),
+    "int isin": lambda m: m.Index([3, 0, 7, 3, 1024]).isin([3, 1024]),
+    # NEGATIVE: an index of text, not floats, as before.
+    "text duplicated (NEGATIVE)": lambda m: m.Index(["a", "b", "a", "c"]).duplicated(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_BSS5Q3_INDEX_CASES))
+def test_float_index_dedup_and_bool_arrays_bss5q3(case: str) -> None:
+    # A float index dedups through spread keys (-0.0 one label with 0.0,
+    # NaN one), every keep mode; a bool answer is numpy's own writable bool
+    # array (it was built from a Python list, 4.5 ms per 200k;
+    # br-frankenpandas-bss5q.3). NEGATIVE: a text index as before.
+    def cell(value: Any) -> Any:
+        if type(value).__module__ == "numpy":
+            value = value.item()
+        if isinstance(value, float):
+            return "nan" if value != value else value.hex()
+        return value
+
+    def run(m: Any) -> Any:
+        result = _BSS5Q3_INDEX_CASES[case](m)
+        if isinstance(result, np.ndarray):
+            # Not owndata: pandas' isin answers a view, its duplicated not.
+            return "ndarray", str(result.dtype), result.flags.writeable, result.tolist()
+        return type(result).__name__, str(result.dtype), [cell(v) for v in result.tolist()]
+
+    assert run(fpd) == run(pd)
+
+
+_BSS5Q3_CODES_CASES = {
+    "Categorical with a missing value": lambda m: m.Categorical(["b", "a", None, "b"]).codes,
+    "Categorical of 300 categories (int16)": lambda m: m.Categorical([f"c{i}" for i in range(300)] * 2).codes,
+    "CategoricalIndex": lambda m: m.CategoricalIndex(["p", "q", "p"]).codes,
+    "empty Categorical": lambda m: m.Categorical([]).codes,
+    # NEGATIVE: a MultiIndex's codes were read-only already, and stay so.
+    "MultiIndex level 0 (NEGATIVE)": lambda m: m.MultiIndex.from_arrays([[1, 2, 1], ["x", "y", "y"]]).codes[0],
+    "MultiIndex level 1 (NEGATIVE)": lambda m: m.MultiIndex.from_arrays([[1, 2, 1], ["x", "y", "y"]]).codes[1],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_BSS5Q3_CODES_CASES))
+def test_codes_arrays_like_pandas_bss5q3(case: str) -> None:
+    # Codes leave through an int64 buffer narrowed to pandas' width (a list
+    # of Python ints cost 5-18 ms per 200k), read-only as pandas' (the
+    # Categorical / CategoricalIndex ones were writable;
+    # br-frankenpandas-bss5q.3). Values, dtype and the writeable flag.
+    def run(m: Any) -> Any:
+        codes = _BSS5Q3_CODES_CASES[case](m)
+        return str(codes.dtype), codes.flags.writeable, codes.tolist()
+
+    assert run(fpd) == run(pd)
+
+
+_BSS5Q3_ARGSORT_VALUES = ["b", "a", None, "c", "a", "b", None, "c", "a", "b"]
+_BSS5Q3_ARGSORT_CASES = {
+    "ascending": lambda m: m.Categorical(_BSS5Q3_ARGSORT_VALUES).argsort(),
+    "descending": lambda m: m.Categorical(_BSS5Q3_ARGSORT_VALUES).argsort(ascending=False),
+    "ordered categories": lambda m: m.Categorical(
+        _BSS5Q3_ARGSORT_VALUES, categories=["c", "a", "b"], ordered=True
+    ).argsort(),
+    "ordered descending": lambda m: m.Categorical(
+        _BSS5Q3_ARGSORT_VALUES, categories=["c", "a", "b"], ordered=True
+    ).argsort(ascending=False),
+    "one category": lambda m: m.Categorical(["x", "x", None, "x"]).argsort(),
+    # NEGATIVE: all missing - the positions in order.
+    "all missing (NEGATIVE)": lambda m: m.Categorical([None, None, None], categories=["a"]).argsort(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_BSS5Q3_ARGSORT_CASES))
+def test_categorical_argsort_like_pandas_bss5q3(case: str) -> None:
+    # Categorical.argsort by a counting sort over its codes (a comparison
+    # sort and a list of Python ints were 0.27x pandas;
+    # br-frankenpandas-bss5q.3): each code's positions in order, ascending or
+    # descending, missing ones last - pandas' stable nargsort. NEGATIVE: all
+    # missing keeps the positions' order.
+    def run(m: Any) -> Any:
+        result = _BSS5Q3_ARGSORT_CASES[case](m)
+        return result.dtype.kind, result.tolist()
+
+    assert run(fpd) == run(pd)
+
+
+_BSS5Q3_INDEX_ARRAY_CASES = {
+    "RangeIndex.values": lambda m: m.RangeIndex(2, 12, 3).values,
+    "int Index.to_numpy": lambda m: m.Index([5, -2, 7, 5]).to_numpy(),
+    "float Index.values (-0.0)": lambda m: m.Index([1.5, -0.0, 3.25]).values,
+    "float Index with NaN": lambda m: m.Index([1.5, float("nan"), 2.0]).to_numpy(),
+    "empty Index.values": lambda m: m.Index([]).values,
+    "int Index == 5": lambda m: m.Index([5, -2, 7, 5]) == 5,
+    "float Index < Index": lambda m: m.Index([1.5, 2.0, -1.0]) < m.Index([2.0, 2.0, -3.0]),
+    "np.asarray(RangeIndex)": lambda m: np.asarray(m.RangeIndex(4)),
+    # NEGATIVE: text and datetime indexes as before.
+    "text Index.values (NEGATIVE)": lambda m: m.Index(["a", "b"]).values,
+    "datetime Index.values (NEGATIVE)": lambda m: m.DatetimeIndex(["2024-01-01", "2024-01-02"]).values,
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_BSS5Q3_INDEX_ARRAY_CASES))
+def test_index_arrays_like_pandas_bss5q3(case: str) -> None:
+    # An int index's array from its cached int64 view, a float index's from
+    # its floats (a label, Scalar and column per row took 3-6 ms per 200k;
+    # br-frankenpandas-bss5q.3): pandas' dtype and values, -0.0 kept, an
+    # empty index pandas' object array. NEGATIVE: text and datetime indexes.
+    def run(m: Any) -> Any:
+        array = _BSS5Q3_INDEX_ARRAY_CASES[case](m)
+        values = [("nan" if v != v else (v.hex() if isinstance(v, float) else v)) for v in array.tolist()]
+        return str(array.dtype), values
+
+    assert run(fpd) == run(pd)

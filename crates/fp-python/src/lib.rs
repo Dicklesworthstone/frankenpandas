@@ -11845,11 +11845,18 @@ impl<'py> IntoPyObject<'py> for BoolArray {
     type Output = Bound<'py, PyAny>;
     type Error = PyErr;
 
+    /// numpy over a bytearray of the flags, copied so the array owns its
+    /// data as numpy.array's did: a Python list of a bool per row made
+    /// numpy.array of 200k flags cost ~4.5 ms (Index.duplicated was 0.18x
+    /// pandas, its hashing a tenth of that; br-frankenpandas-bss5q.3).
     fn into_pyobject(self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("dtype", "bool")?;
+        let marks: Vec<u8> = self.0.into_iter().map(u8::from).collect();
         py.import("numpy")?
-            .call_method("array", (self.0,), Some(&kwargs))
+            .call_method1(
+                "frombuffer",
+                (pyo3::types::PyByteArray::new(py, &marks), "bool"),
+            )?
+            .call_method0("copy")
     }
 }
 
@@ -12080,10 +12087,10 @@ impl PyIndex {
         {
             return Ok(py.NotImplemented());
         }
-        let labels = labels_ndarray(py, self.inner.labels())?;
+        let labels = index_ndarray(py, &self.inner)?;
         let (other, name) = match plain_index_ref(other) {
             Ok(index) => (
-                labels_ndarray(py, index.inner.labels())?,
+                index_ndarray(py, &index.inner)?,
                 self.inner
                     .name()
                     .filter(|name| index.inner.name() == Some(*name))
@@ -12166,7 +12173,7 @@ impl PyIndex {
 
     /// `-index`, `+index`, `abs(index)`: numpy's answer as an Index.
     fn unary(&self, py: Python<'_>, op: &str) -> PyResult<Py<PyAny>> {
-        let out = labels_ndarray(py, self.inner.labels())?.call_method0(op)?;
+        let out = index_ndarray(py, &self.inner)?.call_method0(op)?;
         Ok(Py::new(py, Self::new(Some(&out), self.inner.name().cloned())?)?.into_any())
     }
 
@@ -12543,7 +12550,7 @@ impl PyIndex {
     /// pandas' `Index.values`: a numpy array of the labels (it was a list).
     #[getter]
     fn values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        labels_ndarray(py, self.inner.labels())
+        index_ndarray(py, &self.inner)
     }
 
     /// pandas' `Index.to_numpy(dtype=None, copy=False, na_value=...)`:
@@ -12558,11 +12565,12 @@ impl PyIndex {
         na_value: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let _ = copy;
-        let labels = self.inner.labels();
         let missing = na_value
-            .map(|_| labels_missing_ndarray(py, labels.iter().map(IndexLabel::is_missing)))
+            .map(|_| {
+                labels_missing_ndarray(py, self.inner.labels().iter().map(IndexLabel::is_missing))
+            })
             .transpose()?;
-        finish_to_numpy(labels_ndarray(py, labels)?, missing, dtype, na_value)
+        finish_to_numpy(index_ndarray(py, &self.inner)?, missing, dtype, na_value)
     }
 
     #[pyo3(signature = (dtype=None, copy=None))]
@@ -12573,7 +12581,7 @@ impl PyIndex {
         copy: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let _ = copy;
-        finish_to_numpy(labels_ndarray(py, self.inner.labels())?, None, dtype, None)
+        finish_to_numpy(index_ndarray(py, &self.inner)?, None, dtype, None)
     }
 
     /// `index == x` (and the other comparisons) compare every label, as
@@ -12585,9 +12593,9 @@ impl PyIndex {
         other: &Bound<'py, PyAny>,
         op: pyo3::class::basic::CompareOp,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let labels = labels_ndarray(py, self.inner.labels())?;
+        let labels = index_ndarray(py, &self.inner)?;
         let other = match plain_index_ref(other) {
-            Ok(index) => labels_ndarray(py, index.inner.labels())?,
+            Ok(index) => index_ndarray(py, &index.inner)?,
             Err(_) => other.clone(),
         };
         labels.rich_compare(other, op)
@@ -17104,7 +17112,6 @@ impl PyMultiIndex {
     /// br-frankenpandas-bl9gf).
     #[getter]
     fn codes(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let np = py.import("numpy")?;
         let codes = self
             .inner
             .codes()
@@ -17117,7 +17124,8 @@ impl PyMultiIndex {
                     size if size < 1 << 31 => "int32",
                     _ => "int64",
                 };
-                let array = np.call_method1("array", (level, dtype))?;
+                let level: Vec<i64> = level.into_iter().map(|code| code as i64).collect();
+                let array = int_ndarray(py, &level, dtype)?;
                 array.getattr("flags")?.setattr("writeable", false)?;
                 Ok(array.unbind())
             })
@@ -21752,12 +21760,10 @@ impl PyCategoricalIndex {
             n if n < 2_147_483_647 => "int32",
             _ => "int64",
         };
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("dtype", dtype)?;
-        Ok(py
-            .import("numpy")?
-            .call_method("array", (codes,), Some(&kwargs))?
-            .unbind())
+        // Read-only, as pandas' (it was writable).
+        let array = int_ndarray(py, &codes, dtype)?;
+        array.getattr("flags")?.setattr("writeable", false)?;
+        Ok(array.unbind())
     }
 
     #[getter]
@@ -37080,6 +37086,36 @@ fn pandas_default_ndarray<'py>(
     column_ndarray(py, &plain).map(Some)
 }
 
+/// [`labels_ndarray`] of `index`: an all-Int64 index (a range, an int
+/// buffer) from its cached i64 view through [`int_ndarray`], an all-Float64
+/// one from its labels' floats through a float64 buffer - without a label,
+/// a Scalar and a column per row: Index.values / to_numpy took 3-6 ms per
+/// 200k, pandas hands back a stored array (br-frankenpandas-bss5q.3). An
+/// empty index keeps the label path (pandas' object array).
+fn index_ndarray<'py>(py: Python<'py>, index: &Index) -> PyResult<Bound<'py, PyAny>> {
+    if !index.is_empty() {
+        if let Some(values) = index.int64_label_values() {
+            return int_ndarray(py, &values, "int64");
+        }
+        if let Some(values) = index
+            .labels()
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Float64(value) => Some(value.0),
+                _ => None,
+            })
+            .collect::<Option<Vec<f64>>>()
+        {
+            let array = py
+                .import("numpy")?
+                .call_method1("empty", (values.len(), "float64"))?;
+            pyo3::buffer::PyBuffer::<f64>::get(&array)?.copy_from_slice(py, &values)?;
+            return Ok(array);
+        }
+    }
+    labels_ndarray(py, index.labels())
+}
+
 /// A numpy array of an index's labels, as pandas' `Index.values`: the
 /// labels' column dtype (int64, float64, object ...), an object array when
 /// they do not form one column.
@@ -37314,6 +37350,23 @@ fn missing_ndarray<'py>(
         return Ok(flat);
     }
     flat.call_method1("reshape", ((rows, columns.len()),))
+}
+
+/// A numpy int array of `values` in `dtype` (an int width): an int64 array
+/// filled through its buffer, then narrowed. numpy.array over a list of
+/// Python ints parsed each one - a Categorical's or MultiIndex's codes took
+/// 8-18 ms per 200k, which pandas hands back stored
+/// (br-frankenpandas-bss5q.3).
+fn int_ndarray<'py>(py: Python<'py>, values: &[i64], dtype: &str) -> PyResult<Bound<'py, PyAny>> {
+    let array = py
+        .import("numpy")?
+        .call_method1("empty", (values.len(), "int64"))?;
+    pyo3::buffer::PyBuffer::<i64>::get(&array)?.copy_from_slice(py, values)?;
+    if dtype == "int64" {
+        Ok(array)
+    } else {
+        array.call_method1("astype", (dtype,))
+    }
 }
 
 /// A numpy bool array of `flags` (which labels are missing).
@@ -60223,7 +60276,6 @@ fn groups_dict(
             .cast_into::<PyDict>()?,
         None => PyDict::new(py),
     };
-    let numpy = py.import("numpy")?;
     for ((_, positions), key) in groups.iter().zip(keys) {
         match row_labels {
             Some(index) => dict.set_item(
@@ -60242,9 +60294,8 @@ fn groups_dict(
                     }
                     _ => group_key_object(py, key, true)?,
                 };
-                let positions =
-                    numpy.call_method1("array", (PyList::new(py, positions)?, "int64"))?;
-                dict.set_item(py_key, positions)?;
+                let positions: Vec<i64> = positions.iter().map(|&row| row as i64).collect();
+                dict.set_item(py_key, int_ndarray(py, &positions, "int64")?)?;
             }
         }
     }
@@ -87465,12 +87516,10 @@ impl PyCategorical {
     /// missing value (it was a Python list; br-frankenpandas-7679g).
     #[getter]
     fn codes(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("dtype", self.code_dtype())?;
-        Ok(py
-            .import("numpy")?
-            .call_method("array", (self.code_values()?,), Some(&kwargs))?
-            .unbind())
+        // Read-only, as pandas' (it was writable).
+        let array = int_ndarray(py, &self.code_values()?, self.code_dtype())?;
+        array.getattr("flags")?.setattr("writeable", false)?;
+        Ok(array.unbind())
     }
 
     #[getter]
@@ -88049,6 +88098,45 @@ impl PyCategorical {
     fn argsort(&self, py: Python<'_>, ascending: bool, kind: &str) -> PyResult<Py<PyAny>> {
         let _ = kind;
         let codes = self.code_values()?;
+        // A counting sort over the codes (0..categories): the positions of
+        // each code in turn - ascending or descending codes, each code's in
+        // position order, as pandas' stable nargsort orders ties - then the
+        // missing ones in position order. A comparison sort and a list of
+        // Python ints took it to 0.27x pandas (br-frankenpandas-bss5q.3).
+        let categories = self.meta().categories.len();
+        if codes.iter().all(|&code| code < categories as i64) {
+            let mut counts = vec![0_usize; categories];
+            for &code in &codes {
+                if code >= 0 {
+                    counts[code as usize] += 1;
+                }
+            }
+            let mut offsets = vec![0_usize; categories];
+            let mut total = 0_usize;
+            let order: Vec<usize> = if ascending {
+                (0..categories).collect()
+            } else {
+                (0..categories).rev().collect()
+            };
+            for code in order {
+                offsets[code] = total;
+                total += counts[code];
+            }
+            let mut sorted = vec![0_i64; codes.len()];
+            let mut missing_at = total;
+            for (position, &code) in codes.iter().enumerate() {
+                let slot = if code >= 0 {
+                    let offset = &mut offsets[code as usize];
+                    *offset += 1;
+                    *offset - 1
+                } else {
+                    missing_at += 1;
+                    missing_at - 1
+                };
+                sorted[slot] = position as i64;
+            }
+            return Ok(int_ndarray(py, &sorted, "int64")?.unbind());
+        }
         let (mut present, missing): (Vec<usize>, Vec<usize>) =
             (0..codes.len()).partition(|&position| codes[position] >= 0);
         if !ascending {
@@ -88204,6 +88292,10 @@ impl PyCategorical {
             .cat()
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyTypeError, _>("not categorical"))?;
         let codes = cat.codes().map_err(frame_error_to_py)?;
+        // All present: the typed buffer, no Scalar per code.
+        if let Some(data) = codes.column().as_i64_slice() {
+            return Ok(data.to_vec());
+        }
         Ok(codes
             .values()
             .iter()

@@ -3828,6 +3828,23 @@ impl Index {
     /// `duplicated` mask over raw `i64` keys — bit-identical to the
     /// `FxHashMap<&IndexLabel>` path for all-Int64 indexes, with inline `i64`
     /// keys (dense bitsets when the value span is bounded, else hash sets).
+    /// Every label's canonical float bits spread
+    /// ([`fp_types::spread_float_bits`]) as an i64 key when every label is a
+    /// Float64: bijective, so equal keys are exactly equal labels (-0.0 as
+    /// 0.0, NaN as NaN), for the i64 duplicate masks. None for any other
+    /// label (br-frankenpandas-bss5q.3).
+    fn float_label_keys(&self) -> Option<Vec<i64>> {
+        self.labels
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Float64(value) => {
+                    Some(fp_types::spread_float_bits(value.canonical_bits()) as i64)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     fn duplicated_i64(vals: &[i64], keep: DuplicateKeep) -> Vec<bool> {
         let n = vals.len();
         let mut result = vec![false; n];
@@ -4316,6 +4333,19 @@ impl Index {
         if let Some(ns) = self.temporal_ns_present(false) {
             return self.propagate_name(Self::from_timedelta64(Self::unique_i64(&ns)));
         }
+        // Float64 labels: the first of each through the i64 mask over their
+        // keys ([`Self::float_label_keys`]).
+        if let Some(keys) = self.float_label_keys() {
+            let repeats = Self::duplicated_i64(&keys, DuplicateKeep::First);
+            let labels: Vec<IndexLabel> = self
+                .labels
+                .iter()
+                .zip(repeats)
+                .filter(|(_, repeat)| !repeat)
+                .map(|(label, _)| label.clone())
+                .collect();
+            return self.propagate_name(Self::new(labels));
+        }
         let mut seen = FxHashMap::<&IndexLabel, ()>::default();
         let labels: Vec<IndexLabel> = self
             .labels
@@ -4348,6 +4378,11 @@ impl Index {
             .or_else(|| self.temporal_ns_present(false))
         {
             return Self::duplicated_i64(&ns, keep);
+        }
+        // Float64 labels through the i64 mask over their keys
+        // ([`Self::float_label_keys`]): the label map was 0.54x pandas.
+        if let Some(keys) = self.float_label_keys() {
+            return Self::duplicated_i64(&keys, keep);
         }
         match keep {
             DuplicateKeep::First => {
@@ -26450,6 +26485,46 @@ mod tests {
         assert_eq!(dropped.len(), 2);
         assert_eq!(dropped.labels()[0], IndexLabel::Utf8("a".into()));
         assert_eq!(dropped.labels()[1], IndexLabel::Utf8("c".into()));
+    }
+
+    #[test]
+    fn float_index_dedups_through_spread_keys_bss5q3() {
+        // br-frankenpandas-bss5q.3: a float index's duplicated / unique /
+        // drop_duplicates run through the i64 masks over its spread canonical
+        // bits - -0.0 one label with 0.0, every NaN one label, each keep
+        // mode as pandas answers it. NEGATIVE: a Float64 beside an Int64
+        // label gives no float keys (the label map answers).
+        let float = |value: f64| IndexLabel::Float64(OrderedF64(value));
+        let index = crate::Index::new(vec![
+            float(3.0),
+            float(-0.0),
+            float(f64::NAN),
+            float(0.0),
+            float(3.0),
+            float(f64::NAN),
+            float(1024.0),
+        ]);
+        assert_eq!(
+            index.duplicated(crate::DuplicateKeep::First),
+            vec![false, false, false, true, true, true, false]
+        );
+        assert_eq!(
+            index.duplicated(crate::DuplicateKeep::Last),
+            vec![true, true, true, false, false, false, false]
+        );
+        assert_eq!(
+            index.duplicated(crate::DuplicateKeep::None),
+            vec![true, true, true, true, true, true, false]
+        );
+        let unique = index.unique();
+        assert_eq!(unique.len(), 4);
+        assert_eq!(unique.labels()[1], float(-0.0));
+        assert_eq!(
+            index.drop_duplicates_keep(crate::DuplicateKeep::None).len(),
+            1
+        );
+        let mixed = crate::Index::new(vec![float(1.0), IndexLabel::Int64(1)]);
+        assert!(mixed.float_label_keys().is_none());
     }
 
     #[test]
