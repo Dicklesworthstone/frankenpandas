@@ -25879,8 +25879,8 @@ _4OHJC_OPS = {
     "round": lambda s: s.round(1),
     "interp": lambda s: s.interpolate(),
 }
-_4OHJC_EMPTY_RESIDUE = {("cumsum", "datetime64[ns]"), ("cumprod", "datetime64[ns]"), ("gb mean", "object"), ("gb mean", "string"), ("diff", "bool"), ("diff", "object"), ("diff", "string"), ("pct", "bool"), ("pct", "object"), ("pct", "string"), ("abs", "datetime64[ns]"), ("pow2", "Int64"), ("pow2", "string"), ("pow2", "datetime64[ns]"), ("pow2", "timedelta64[ns]"),("add1", "datetime64[ns]"), ("div2", "string"), ("div2", "datetime64[ns]"), ("div2", "timedelta64[ns]"), ("eq1", "datetime64[ns]"), ("eq1", "timedelta64[ns]"), ("roll sum", "object"), ("roll sum", "string"), ("exp mean", "object"), ("exp mean", "string"), ("interp", "Int64")}
-_4OHJC_ONE_ROW_RESIDUE = {("cumprod", "object"), ("diff", "object"), ("diff", "string"), ("pct", "bool"), ("pct", "object"), ("pct", "string"), ("abs", "datetime64[ns]")}
+_4OHJC_EMPTY_RESIDUE = {("cumsum", "datetime64[ns]"), ("cumprod", "datetime64[ns]"), ("gb mean", "object"), ("gb mean", "string"), ("diff", "bool"), ("diff", "string"), ("pct", "object"), ("pct", "string"), ("pow2", "Int64"), ("pow2", "string"), ("pow2", "datetime64[ns]"), ("pow2", "timedelta64[ns]"),("add1", "datetime64[ns]"), ("div2", "string"), ("div2", "datetime64[ns]"), ("div2", "timedelta64[ns]"), ("eq1", "datetime64[ns]"), ("eq1", "timedelta64[ns]"), ("roll sum", "object"), ("roll sum", "string"), ("exp mean", "object"), ("exp mean", "string"), ("interp", "Int64")}
+_4OHJC_ONE_ROW_RESIDUE = {("cumprod", "object"), ("diff", "string"), ("pct", "object"), ("pct", "string")}
 
 
 def _4ohjc_cells(residue: set[tuple[str, str]], bead: str) -> list[Any]:
@@ -30124,5 +30124,223 @@ def test_categorical_comparisons_like_pandas_x6p40(pair: str, frame: bool) -> No
             result = result["a"] if frame else result
             answers.append((name, str(result.dtype), result.tolist()))
         return answers
+
+    assert run(fpd) == run(pd)
+
+
+_D468V_CASES = {
+    "ordered, right index reversed": (True, [2, 1, 0]),
+    "ordered, right index shifted": (True, [1, 2, 3]),
+    # NEGATIVE: unordered categoricals refuse an ordering after alignment too.
+    "unordered, right index reversed (NEGATIVE)": (False, [2, 1, 0]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_D468V_CASES))
+def test_aligned_categorical_frames_compare_like_pandas_d468v(case: str) -> None:
+    # Frames whose indexes differ align before comparing, and their ordered
+    # categoricals keep their categories' order through it (the alignment
+    # dropped it, so an ordering refused them as unordered;
+    # br-frankenpandas-d468v): lt / le / gt / ge / eq / ne, the result or
+    # the exception vs pandas. NEGATIVE: unordered ones still refuse.
+    ordered, right_index = _D468V_CASES[case]
+
+    def run(m: Any) -> Any:
+        dtype = m.CategoricalDtype(["y", "x"], ordered=ordered)
+        left = m.DataFrame({"a": m.Series(["x", "y", "x"], dtype=dtype)})
+        right = m.DataFrame({"a": m.Series(["y", "y", "x"], dtype=dtype, index=right_index)})
+        answers = []
+        for name in ["lt", "le", "gt", "ge", "eq", "ne"]:
+            try:
+                result = getattr(left, name)(right)
+            except Exception as error:  # noqa: BLE001
+                answers.append((name, type(error).__name__, str(error)))
+                continue
+            answers.append((name, list(result.index), str(result["a"].dtype), result["a"].tolist()))
+        return answers
+
+    assert run(fpd) == run(pd)
+
+
+# Everyday Series operations over awkward inputs, pandas live vs fp
+# (br-frankenpandas-anux4).
+_ANUX4_INPUTS = {
+    "floats with NaN": lambda m: m.Series([1.5, np.nan, -2.0, 0.0, np.nan, 3.25]),
+    "all NaN": lambda m: m.Series([np.nan, np.nan, np.nan]),
+    "empty float": lambda m: m.Series([], dtype="float64"),
+    "big ints": lambda m: m.Series([2**53 + 1, 2**53, -(2**53) - 3, 7]),
+    "float32": lambda m: m.Series([1.5, -2.25, 0.1, 3.0], dtype="float32"),
+    "dates with NaT": lambda m: m.Series(m.to_datetime(["2020-01-05", None, "2019-12-31", "2020-03-01"])),
+    "text with None": lambda m: m.Series(["b", None, "a", "c", "a"]),
+    "bools": lambda m: m.Series([True, False, True, True]),
+}
+_ANUX4_OPS = {
+    "sum": lambda s: s.sum(),
+    "mean": lambda s: s.mean(),
+    "min": lambda s: s.min(),
+    "max": lambda s: s.max(),
+    "median": lambda s: s.median(),
+    "std": lambda s: s.std(),
+    "count": lambda s: s.count(),
+    "nunique": lambda s: s.nunique(),
+    "cumsum": lambda s: s.cumsum(),
+    "cummax": lambda s: s.cummax(),
+    "diff": lambda s: s.diff(),
+    "shift": lambda s: s.shift(1),
+    "rank": lambda s: s.rank(),
+    "rank pct": lambda s: s.rank(pct=True),
+    "sort_values": lambda s: s.sort_values(),
+    "sort desc na_first": lambda s: s.sort_values(ascending=False, na_position="first"),
+    "argsort": lambda s: s.argsort(),
+    "unique": lambda s: s.unique(),
+    "value_counts": lambda s: s.value_counts(),
+    "value_counts dropna": lambda s: s.value_counts(dropna=False),
+    "duplicated": lambda s: s.duplicated(),
+    "isna": lambda s: s.isna(),
+    "fillna": lambda s: s.fillna(s.iloc[0] if len(s) else 0),
+    "dropna": lambda s: s.dropna(),
+    "ffill": lambda s: s.ffill(),
+    "abs": lambda s: s.abs(),
+    "neg": lambda s: -s,
+    "add self": lambda s: s + s,
+    "mul 2": lambda s: s * 2,
+    "eq shift": lambda s: s == s.shift(1),
+    "lt first": lambda s: s < s.iloc[0] if len(s) else s,
+    "clip": lambda s: s.clip(lower=s.min()),
+    "round": lambda s: s.round(1),
+    "astype str": lambda s: s.astype(str),
+    "astype object": lambda s: s.astype(object),
+    "idxmax": lambda s: s.idxmax(),
+    "nlargest": lambda s: s.nlargest(2),
+    "quantile": lambda s: s.quantile(0.3),
+    "describe": lambda s: s.describe(),
+    "pct_change": lambda s: s.pct_change(),
+    "rolling sum": lambda s: s.rolling(2).sum(),
+    "expanding max": lambda s: s.expanding().max(),
+    "where": lambda s: s.where(s.notna(), s.iloc[0] if len(s) else 0),
+    "isin first": lambda s: s.isin(list(s.iloc[:1])),
+    "map dict": lambda s: s.map({s.iloc[0]: "x"} if len(s) else {}),
+    "replace": lambda s: s.replace(s.iloc[0], s.iloc[-1]) if len(s) else s,
+    "between": lambda s: s.between(s.iloc[0], s.iloc[-1]) if len(s) else s,
+    "to_list": lambda s: s.tolist(),
+    "groupby self count": lambda s: s.groupby(s).count(),
+}
+# The object columns pandas reduces with Python's own comparisons and
+# subtraction: dates, mixed numbers, bools beside numbers.
+_ANUX4_OBJECT_INPUTS = {
+    "object dates": lambda m: m.Series(
+        [datetime.date(2020, 1, 2), datetime.date(2019, 1, 1), datetime.date(2021, 5, 5)], dtype=object
+    ),
+    "object numbers with NaN": lambda m: m.Series([1, 2.5, np.nan, 4], dtype=object),
+    "object bool and numbers": lambda m: m.Series([True, 1, 2.5], dtype=object),
+    "object text and int": lambda m: m.Series(["b", 1, "a"], dtype=object),
+    # NEGATIVE: text without a missing value keeps its min / max / arg /
+    # cum answers (its diff is pandas' TypeError now; it was NaN).
+    "object text (NEGATIVE)": lambda m: m.Series(["b", "a", "c"]),
+}
+_ANUX4_OBJECT_OPS = {
+    "min": lambda s: s.min(),
+    "max skipna=False": lambda s: s.max(skipna=False),
+    "idxmin": lambda s: s.idxmin(),
+    "argmax": lambda s: s.argmax(),
+    "cummax": lambda s: s.cummax(),
+    "cummin skipna=False": lambda s: s.cummin(skipna=False),
+    "diff": lambda s: s.diff(),
+    "diff -1": lambda s: s.diff(-1),
+}
+
+
+def _anux4_view(value: Any, top: bool = True) -> Any:
+    """A result as its kind, dtype, labels and values (NaN as 'nan'); a
+    scalar answer's numpy type too, a cell's value only."""
+    if hasattr(value, "index") and hasattr(value, "dtype") and hasattr(value, "tolist"):
+        return (
+            "series",
+            str(value.dtype),
+            [repr(label) for label in value.index.tolist()],
+            [_anux4_view(cell, False) for cell in value.tolist()],
+        )
+    if hasattr(value, "tolist") and not isinstance(value, (str, bytes)):
+        listed = value.tolist()
+        if isinstance(listed, list):
+            return ("array", str(getattr(value, "dtype", "")), [_anux4_view(cell, False) for cell in listed])
+        return (type(value).__name__, _anux4_view(listed, False)) if top else _anux4_view(listed, False)
+    if isinstance(value, float):
+        return "nan" if value != value else repr(value)
+    if isinstance(value, list):
+        return [_anux4_view(cell, False) for cell in value]
+    if type(value).__name__ in ("NaTType", "Timestamp", "Timedelta", "NAType"):
+        return str(value)
+    return repr(value)
+
+
+def _anux4_answer(m: Any, build: Any, op: Any) -> Any:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            return _anux4_view(op(build(m)))
+        except Exception as error:  # noqa: BLE001
+            return ("raises", type(error).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("op", list(_ANUX4_OPS))
+@pytest.mark.parametrize("data", list(_ANUX4_INPUTS))
+def test_edge_inputs_like_pandas_anux4(data: str, op: str) -> None:
+    # Each everyday Series op over each awkward input answers as pandas -
+    # values, dtype, labels, or the exception and its message
+    # (br-frankenpandas-anux4): int64 diff wraps in int64 (2**53 + 1 less
+    # 2**53 was 0.0), an all-NaN nlargest its NaN rows (empty), float32
+    # astype(str) float32's digits, all-missing rank / expanding max /
+    # replace float64 (object), text holding None refuses min / max /
+    # cummax / diff / idxmax as pandas (it answered), bool pct_change's
+    # ZeroDivisionError, a date's abs TypeError, quantile / describe of big
+    # ints and float32 in numpy's arithmetic. NEGATIVE: the 373 cases that
+    # already matched are parametrizations here too and stay equal.
+    build, call = _ANUX4_INPUTS[data], _ANUX4_OPS[op]
+    assert _anux4_answer(fpd, build, call) == _anux4_answer(pd, build, call)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("op", list(_ANUX4_OBJECT_OPS))
+@pytest.mark.parametrize("data", list(_ANUX4_OBJECT_INPUTS))
+def test_object_reductions_like_pandas_anux4(data: str, op: str) -> None:
+    # An object column's min / max / argmax / idxmin / cummin / cummax /
+    # diff run Python's own comparisons and subtraction as pandas' numpy
+    # object kernels do (br-frankenpandas-anux4): dates keep their cells and
+    # subtract to durations, mixed numbers stay object, text beside an int
+    # is the TypeError (they read as float64, NaN, or the first row).
+    # NEGATIVE: text with nothing missing keeps its comparisons' answers.
+    build, call = _ANUX4_OBJECT_INPUTS[data], _ANUX4_OBJECT_OPS[op]
+    assert _anux4_answer(fpd, build, call) == _anux4_answer(pd, build, call)
+
+
+def _xmwso_series(m: Any, shift_minutes: int = 0) -> Any:
+    stamps = pd.date_range("2020-01-01", periods=600, freq="min") + pd.Timedelta(minutes=shift_minutes)
+    rows = np.arange(600)
+    values = np.where(rows % 7 == 3, np.nan, (rows * 37 % 101).astype(float))
+    return m.Series(values, index=m.to_datetime(stamps.values))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_resampler_reuse_like_pandas_xmwso() -> None:
+    # One resampler answers each reduction - and again after the others -
+    # as pandas, its rows' bins kept by the first (br-frankenpandas-xmwso);
+    # a frame's columns, and a column picked off its resampler, too.
+    # NEGATIVE: a resampler of another freq, and one over another series'
+    # stamps, made after it, answer their own bins.
+    def run(m: Any) -> Any:
+        s = _xmwso_series(m)
+        r = s.resample("h")
+        answers = [getattr(r, op)() for op in ("max", "count", "min", "sum", "mean", "max", "std")]
+        answers.append(s.resample("15min").max())
+        answers.append(_xmwso_series(m, 30).resample("h").max())
+        rf = m.DataFrame({"a": s, "b": s * 2}).resample("h")
+        answers += [rf.mean()["b"], rf.max()["a"], rf["b"].count()]
+        return [
+            (str(x.dtype), [str(label) for label in x.index], ["nan" if v != v else v for v in x.tolist()])
+            for x in answers
+        ]
 
     assert run(fpd) == run(pd)

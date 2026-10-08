@@ -3544,8 +3544,40 @@ fn numpy_lerp(a: f64, b: f64, t: f64) -> f64 {
     }
 }
 
-/// Compute the q-th quantile of a pre-sorted slice using the given interpolation.
-fn percentile_with_interpolation(sorted: &[f64], q: f64, mode: QuantileInterpolation) -> f64 {
+/// [`numpy_lerp`] of a float32 column's values: numpy subtracts them in
+/// float32 and steps in float64 (a float32 quantile was rounded to float32
+/// instead, 0.13500000536441803 for pandas' 0.13499998897314092;
+/// br-frankenpandas-anux4).
+#[allow(clippy::cast_possible_truncation)] // the values are float32's
+fn numpy_lerp_f32(a: f64, b: f64, t: f64) -> f64 {
+    let diff = f64::from(b as f32 - a as f32);
+    if t >= 0.5 {
+        b - diff * (1.0 - t)
+    } else {
+        a + diff * t
+    }
+}
+
+/// [`numpy_lerp`] of int64 values: numpy subtracts them in int64, so ints
+/// past 2**53 step by their exact difference (they were floats first; anux4).
+#[allow(clippy::cast_precision_loss)] // numpy's int64 * float64 step
+fn numpy_lerp_i64(a: i64, b: i64, t: f64) -> f64 {
+    let diff = b.wrapping_sub(a) as f64;
+    if t >= 0.5 {
+        b as f64 - diff * (1.0 - t)
+    } else {
+        a as f64 + diff * t
+    }
+}
+
+/// Compute the q-th quantile of a pre-sorted slice using the given
+/// interpolation, `lerp` [`numpy_lerp`] or [`numpy_lerp_f32`].
+fn percentile_with_interpolation(
+    sorted: &[f64],
+    q: f64,
+    mode: QuantileInterpolation,
+    lerp: fn(f64, f64, f64) -> f64,
+) -> f64 {
     if sorted.len() == 1 {
         return sorted[0];
     }
@@ -3557,7 +3589,7 @@ fn percentile_with_interpolation(sorted: &[f64], q: f64, mode: QuantileInterpola
     }
     let frac = pos - lower as f64;
     match mode {
-        QuantileInterpolation::Linear => numpy_lerp(sorted[lower], sorted[upper], frac),
+        QuantileInterpolation::Linear => lerp(sorted[lower], sorted[upper], frac),
         QuantileInterpolation::Lower => sorted[lower],
         QuantileInterpolation::Higher => sorted[upper],
         QuantileInterpolation::Nearest => {
@@ -3577,7 +3609,7 @@ fn percentile_with_interpolation(sorted: &[f64], q: f64, mode: QuantileInterpola
                 sorted[upper]
             }
         }
-        QuantileInterpolation::Midpoint => numpy_lerp(sorted[lower], sorted[upper], 0.5),
+        QuantileInterpolation::Midpoint => lerp(sorted[lower], sorted[upper], 0.5),
     }
 }
 
@@ -10154,8 +10186,14 @@ fn group_nanquantile_f64(v: &mut [f64], q: f64) -> f64 {
 /// statistics (upper-lower <= 1) are needed: `select_nth_unstable_by(upper)`
 /// yields the upper one and leaves earlier elements <= it, so the lower one is
 /// `max(lower_partition)`. The interpolation match mirrors
-/// `percentile_with_interpolation` exactly (incl `Nearest`'s banker's rounding).
-fn typed_quantile_f64(mut v: Vec<f64>, q: f64, mode: QuantileInterpolation) -> f64 {
+/// `percentile_with_interpolation` exactly (incl `Nearest`'s banker's rounding);
+/// `lerp` is [`numpy_lerp`], or [`numpy_lerp_f32`] for a float32 column.
+fn typed_quantile_f64(
+    mut v: Vec<f64>,
+    q: f64,
+    mode: QuantileInterpolation,
+    lerp: fn(f64, f64, f64) -> f64,
+) -> f64 {
     let n = v.len();
     if n == 1 {
         return v[0];
@@ -10173,7 +10211,7 @@ fn typed_quantile_f64(mut v: Vec<f64>, q: f64, mode: QuantileInterpolation) -> f
     let s_lower = lo_part.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let frac = pos - lower as f64;
     match mode {
-        QuantileInterpolation::Linear => numpy_lerp(s_lower, s_upper, frac),
+        QuantileInterpolation::Linear => lerp(s_lower, s_upper, frac),
         QuantileInterpolation::Lower => s_lower,
         QuantileInterpolation::Higher => s_upper,
         QuantileInterpolation::Nearest => {
@@ -10187,7 +10225,66 @@ fn typed_quantile_f64(mut v: Vec<f64>, q: f64, mode: QuantileInterpolation) -> f
                 s_upper
             }
         }
-        QuantileInterpolation::Midpoint => numpy_lerp(s_lower, s_upper, 0.5),
+        QuantileInterpolation::Midpoint => lerp(s_lower, s_upper, 0.5),
+    }
+}
+
+/// [`typed_quantile_f64`] of int64 values as numpy takes them: the order
+/// statistics stay integers, so lower / higher / nearest answer one exactly
+/// and linear / midpoint step by their int64 difference ([`numpy_lerp_i64`];
+/// ints past 2**53 went through f64 first; br-frankenpandas-anux4).
+fn typed_quantile_i64(mut v: Vec<i64>, q: f64, mode: QuantileInterpolation) -> Scalar {
+    let pos = numpy_percentile_rank(q, v.len());
+    let lower = pos.floor() as usize;
+    let upper = pos.ceil() as usize;
+    let (lo_part, kth, _) = v.select_nth_unstable(upper);
+    let s_upper = *kth;
+    let s_lower = if lower == upper {
+        s_upper
+    } else {
+        lo_part.iter().copied().max().unwrap_or(s_upper)
+    };
+    int_quantile_between(s_lower, s_upper, pos, mode)
+}
+
+/// The quantile at rank `pos` of int64 values whose order statistics at
+/// `floor(pos)` / `ceil(pos)` are `s_lower` / `s_upper` ([`typed_quantile_i64`]).
+fn int_quantile_between(
+    s_lower: i64,
+    s_upper: i64,
+    pos: f64,
+    mode: QuantileInterpolation,
+) -> Scalar {
+    let frac = pos - pos.floor();
+    match mode {
+        QuantileInterpolation::Linear => Scalar::Float64(numpy_lerp_i64(s_lower, s_upper, frac)),
+        QuantileInterpolation::Midpoint => {
+            let t = if frac == 0.0 { 0.0 } else { 0.5 };
+            Scalar::Float64(numpy_lerp_i64(s_lower, s_upper, t))
+        }
+        QuantileInterpolation::Lower => Scalar::Int64(s_lower),
+        QuantileInterpolation::Higher => Scalar::Int64(s_upper),
+        QuantileInterpolation::Nearest => {
+            if frac < 0.5 || (frac == 0.5 && (pos.floor() as usize).is_multiple_of(2)) {
+                Scalar::Int64(s_lower)
+            } else {
+                Scalar::Int64(s_upper)
+            }
+        }
+    }
+}
+
+/// A duration column's quantile as pandas takes it: over the int64
+/// nanoseconds ([`typed_quantile_i64`]), an interpolated answer truncated
+/// back to nanoseconds. The f64 interpolation was off by up to a few hundred
+/// ns past 2**53 ns - every date's quantile (br-frankenpandas-anux4).
+fn timedelta_quantile(nanos: Vec<i64>, q: f64, mode: QuantileInterpolation) -> Scalar {
+    match typed_quantile_i64(nanos, q, mode) {
+        Scalar::Int64(ns) => Scalar::Timedelta64(ns),
+        Scalar::Float64(value) if value.is_finite() => {
+            Scalar::Timedelta64(value.clamp(i64::MIN as f64, i64::MAX as f64) as i64)
+        }
+        _ => Scalar::Timedelta64(Timedelta::NAT),
     }
 }
 
@@ -19235,15 +19332,37 @@ impl Series {
             }
             values.get_or_insert_with(|| after.to_vec())[pos] = value;
         }
+        let result = out.column.dtype();
         let Some(mut values) = values else {
+            // Missing only where missing was (a NaN put back for a NaN): a
+            // float / datetime / timedelta column keeps its dtype, which
+            // inference over nothing but missing values could not find.
+            if result == DType::Null
+                && matches!(
+                    source,
+                    DType::Float64 | DType::Datetime64 { .. } | DType::Timedelta64
+                )
+                && !after
+                    .iter()
+                    .any(|value| matches!(value, Scalar::Null(NullKind::Null)))
+            {
+                let missing = if source == DType::Float64 {
+                    NullKind::NaN
+                } else {
+                    NullKind::NaT
+                };
+                let column = Column::new(source, vec![Scalar::Null(missing); after.len()])?;
+                return Self::new(out.name.clone(), out.index.clone(), column);
+            }
             return Ok(out);
         };
-        let result = out.column.dtype();
         let numeric = matches!(result, DType::Int64 | DType::Float64 | DType::Null);
         let column = match source {
             DType::Int64 | DType::Float64 if wrote_none && numeric => {
                 Column::from_object_values(values)
             }
+            // Every value replaced by NaN: still float64.
+            DType::Float64 if result == DType::Null => Column::new(DType::Float64, values)?,
             DType::Int64 if numeric => {
                 for value in &mut values {
                     if value.is_missing() {
@@ -19252,7 +19371,9 @@ impl Series {
                 }
                 Column::new(DType::Float64, values)?
             }
-            DType::Datetime64 { .. } | DType::Timedelta64 if result == source => {
+            DType::Datetime64 { .. } | DType::Timedelta64
+                if result == source || result == DType::Null =>
+            {
                 for value in &mut values {
                     if value.is_missing() {
                         *value = Scalar::Null(NullKind::NaT);
@@ -19508,27 +19629,28 @@ impl Series {
         // Typed quickselect fast path: an all-valid Int64/Float64 column finds
         // the 1-2 needed order statistics in O(n) (vs the O(n log n) sort) with
         // no Scalar materialization. Bit-identical to the sort + percentile_
-        // with_interpolation path (typed_quantile_f64 mirrors it). Int64 → f64
-        // → Float64, matching the general to_f64 path.
+        // with_interpolation path (typed_quantile_f64 mirrors it). An Int64
+        // column's order statistics stay integers (typed_quantile_i64): lower /
+        // higher / nearest pick one, which pandas returns as an integer.
+        let lerp = if self.column.width() == Some(NumericWidth::Float32) {
+            numpy_lerp_f32
+        } else {
+            numpy_lerp
+        };
         if let Some(data) = self.column.as_f64_slice()
             && !data.is_empty()
         {
-            return Ok(Scalar::Float64(typed_quantile_f64(data.to_vec(), q, mode)));
+            return Ok(Scalar::Float64(typed_quantile_f64(
+                data.to_vec(),
+                q,
+                mode,
+                lerp,
+            )));
         }
         if let Some(data) = self.column.as_i64_slice()
             && !data.is_empty()
         {
-            let value = typed_quantile_f64(data.iter().map(|&x| x as f64).collect(), q, mode);
-            // lower / higher / nearest pick one of the integers, which pandas
-            // returns as an integer (linear and midpoint interpolate: float).
-            return Ok(match mode {
-                QuantileInterpolation::Lower
-                | QuantileInterpolation::Higher
-                | QuantileInterpolation::Nearest => Scalar::Int64(value as i64),
-                QuantileInterpolation::Linear | QuantileInterpolation::Midpoint => {
-                    Scalar::Float64(value)
-                }
-            });
+            return Ok(typed_quantile_i64(data.to_vec(), q, mode));
         }
         // Typed NULLABLE Float64 fast path: the all-valid paths above bail on any
         // missing, so a nullable Float64 column fell to the generic filter +
@@ -19547,52 +19669,42 @@ impl Series {
             if present.is_empty() {
                 return Ok(Scalar::Float64(f64::NAN));
             }
-            return Ok(Scalar::Float64(typed_quantile_f64(present, q, mode)));
+            return Ok(Scalar::Float64(typed_quantile_f64(present, q, mode, lerp)));
         }
         // Typed NULLABLE Int64 fast path (sister to the nullable Float64 arm above and
         // the nullable Int64 sum/min/max/median paths): a nullable Int64 column fell to
         // the generic filter + FULL SORT below. Gather the present values off the raw
-        // `(&[i64], &ValidityMask)` (`v as f64`) and run the same `typed_quantile_f64`
-        // the all-valid Int64 arm uses. Bit-identical: `validity.get(i)` is exactly the
-        // generic `!val.is_missing()` filter for an Int64 cell (Int64 has no NaN),
-        // `v as f64 == Scalar::Int64(v).to_f64()`, same present values in row order, and
-        // typed_quantile_f64 mirrors the sort + percentile_with_interpolation.
+        // `(&[i64], &ValidityMask)` and run the same `typed_quantile_i64` the
+        // all-valid Int64 arm uses (`validity.get(i)` is exactly the generic
+        // `!val.is_missing()` filter for an Int64 cell), answered as Float64.
         // All-missing yields Float64(NaN).
         if let Some((data, validity)) = self.column.as_i64_slice_with_validity() {
-            let present: Vec<f64> = (0..data.len())
+            let present: Vec<i64> = (0..data.len())
                 .filter(|&i| validity.get(i))
-                .map(|i| data[i] as f64)
+                .map(|i| data[i])
                 .collect();
             if present.is_empty() {
                 return Ok(Scalar::Float64(f64::NAN));
             }
-            return Ok(Scalar::Float64(typed_quantile_f64(present, q, mode)));
+            return Ok(match typed_quantile_i64(present, q, mode) {
+                Scalar::Int64(value) => Scalar::Float64(value as f64),
+                other => other,
+            });
         }
 
         // Typed Timedelta64 fast path (sibling of median's typed arm and the
-        // Int64/Float64 arms above): an all-valid, no-NaT Timedelta64 column runs
-        // the SAME `sort_by` + `percentile_with_interpolation` + clamp straight over
-        // `as_timedelta64_slice`'s raw `&[i64]` ns, skipping the
-        // `self.column.values()` Vec<Scalar::Timedelta64> materialization plus the
-        // has_td / all_td_or_missing scans and per-Scalar filter_map of the generic
-        // Timedelta64 branch below. Bit-identical for an all-valid no-NaT column:
-        // `nums` becomes the same `ns as f64` in the same order (the generic
-        // filter_map keeps every non-NaT value and all-valid drops nothing), and the
-        // same `sort_by` + `percentile_with_interpolation(.., q, mode)` + clamp yield
-        // the same ns; the empty and `!finite` guards are dead here (non-empty by
-        // gate, finite interpolation of finite ns). The `!has_nulls` + no-`i64::MIN`
-        // (Timedelta::NAT) gates keep any NaT/null column on the generic path (where
-        // NaT is excluded before the quantile).
+        // Int64/Float64 arms above): an all-valid, no-NaT Timedelta64 column's
+        // quantile straight off `as_timedelta64_slice`'s raw `&[i64]` ns
+        // ([`timedelta_quantile`]), skipping the Scalar materialization and the
+        // scans of the generic Timedelta64 branch below, which answers the same
+        // for such a column. The `!has_nulls` + no-`i64::MIN` (Timedelta::NAT)
+        // gates keep any NaT/null column on the generic path.
         if let Some(data) = self.column.as_timedelta64_slice()
             && !data.is_empty()
             && !self.column.has_nulls()
             && !data.contains(&i64::MIN)
         {
-            let mut nums: Vec<f64> = data.iter().map(|&ns| ns as f64).collect();
-            nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let result = percentile_with_interpolation(&nums, q, mode);
-            let clamped = result.clamp(i64::MIN as f64, i64::MAX as f64);
-            return Ok(Scalar::Timedelta64(clamped as i64));
+            return Ok(timedelta_quantile(data.to_vec(), q, mode));
         }
 
         // Per br-frankenpandas-ppc2r: pandas pd.Series([td1, td2,
@@ -19611,25 +19723,19 @@ impl Series {
                 || matches!(v, Scalar::Null(NullKind::NaT))
         });
         if has_td && all_td_or_missing {
-            let mut nums: Vec<f64> = self
+            let nanos: Vec<i64> = self
                 .column
                 .values()
                 .iter()
                 .filter_map(|v| match v {
-                    Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => Some(*ns as f64),
+                    Scalar::Timedelta64(ns) if *ns != Timedelta::NAT => Some(*ns),
                     _ => None,
                 })
                 .collect();
-            if nums.is_empty() {
+            if nanos.is_empty() {
                 return Ok(Scalar::Timedelta64(Timedelta::NAT));
             }
-            nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let result = percentile_with_interpolation(&nums, q, mode);
-            if !result.is_finite() {
-                return Ok(Scalar::Timedelta64(Timedelta::NAT));
-            }
-            let clamped = result.clamp(i64::MIN as f64, i64::MAX as f64);
-            return Ok(Scalar::Timedelta64(clamped as i64));
+            return Ok(timedelta_quantile(nanos, q, mode));
         }
         let mut nums: Vec<f64> = Vec::new();
         for val in self.column.values() {
@@ -19642,7 +19748,7 @@ impl Series {
         }
         nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         Ok(Scalar::Float64(percentile_with_interpolation(
-            &nums, q, mode,
+            &nums, q, mode, lerp,
         )))
     }
 
@@ -19682,10 +19788,37 @@ impl Series {
             && let Some(mode) = mode
             && quantiles.iter().all(|&q| (0.0..=1.0).contains(&q))
         {
+            let labels = || -> Vec<IndexLabel> {
+                quantiles
+                    .iter()
+                    .map(|&q| IndexLabel::Float64(fp_index::OrderedF64(q)))
+                    .collect()
+            };
+            // Int64: the order statistics stay integers, as the single
+            // quantile's (typed_quantile_i64).
+            if let Some(data) = self.column.as_i64_slice()
+                && !data.is_empty()
+            {
+                let mut sorted = data.to_vec();
+                sorted.sort_unstable();
+                let values: Vec<Scalar> = quantiles
+                    .iter()
+                    .map(|&q| {
+                        let pos = numpy_percentile_rank(q, sorted.len());
+                        let (lower, upper) = (pos.floor() as usize, pos.ceil() as usize);
+                        int_quantile_between(sorted[lower], sorted[upper], pos, mode)
+                    })
+                    .collect();
+                let column = Column::from_values(values)?;
+                return Self::new(self.name.clone(), Index::new(labels()), column);
+            }
+            let lerp = if self.column.width() == Some(NumericWidth::Float32) {
+                numpy_lerp_f32
+            } else {
+                numpy_lerp
+            };
             let present: Option<Vec<f64>> = if let Some(data) = self.column.as_f64_slice() {
                 Some(data.to_vec())
-            } else if let Some(data) = self.column.as_i64_slice() {
-                Some(data.iter().map(|&x| x as f64).collect())
             } else if let Some((data, validity)) = self.column.as_f64_slice_with_validity() {
                 Some(
                     (0..data.len())
@@ -19706,15 +19839,13 @@ impl Series {
                     nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                     quantiles
                         .iter()
-                        .map(|&q| Scalar::Float64(percentile_with_interpolation(&nums, q, mode)))
+                        .map(|&q| {
+                            Scalar::Float64(percentile_with_interpolation(&nums, q, mode, lerp))
+                        })
                         .collect()
                 };
-                let labels: Vec<IndexLabel> = quantiles
-                    .iter()
-                    .map(|&q| IndexLabel::Float64(fp_index::OrderedF64(q)))
-                    .collect();
                 let column = Column::from_values(values)?;
-                return Self::new(self.name.clone(), Index::new(labels), column);
+                return Self::new(self.name.clone(), Index::new(labels()), column);
             }
         }
 
@@ -23975,12 +24106,15 @@ impl Series {
             };
             if periods >= 0 {
                 let p = invalid_len;
+                // pandas subtracts the int64s (wrapping, as numpy) and stores
+                // the difference as float64: through f64 first, 2**53 + 1
+                // less 2**53 was 0.0 (br-frankenpandas-anux4).
                 for ((dst, &cur), &prev) in out[p..]
                     .iter_mut()
                     .zip(data[p..].iter())
                     .zip(data[..n - p].iter())
                 {
-                    *dst = cur as f64 - prev as f64;
+                    *dst = cur.wrapping_sub(prev) as f64;
                 }
             } else {
                 let p = invalid_len;
@@ -23990,7 +24124,7 @@ impl Series {
                     .zip(data[..valid_len].iter())
                     .zip(data[p..].iter())
                 {
-                    *dst = cur as f64 - next as f64;
+                    *dst = cur.wrapping_sub(next) as f64;
                 }
             }
             let column = Column::from_f64_values_with_validity(out, validity);
@@ -26949,15 +27083,39 @@ impl Series {
             indexed.truncate(n);
         }
 
-        let labels: Vec<IndexLabel> = indexed
-            .iter()
-            .map(|(i, _)| self.index_label_at(*i))
-            .collect();
-        let values: Vec<Scalar> = indexed.iter().map(|(_, v)| (*v).clone()).collect();
-
         // Per br-frankenpandas-0trpd: preserve index name through nlargest.
+        let positions: Vec<usize> = indexed.iter().map(|(i, _)| *i).collect();
+        self.taking_top_positions(positions, n)
+    }
+
+    /// The rows at `positions` (an nlargest / nsmallest selection of the
+    /// present values, in order), filled up to `n` with the missing rows in
+    /// their order, as pandas fills a short selection (an all-NaN Series'
+    /// nlargest(2) is two NaN rows; it was empty), the rows keeping their
+    /// dtype (it was object; br-frankenpandas-anux4).
+    fn taking_top_positions(
+        &self,
+        mut positions: Vec<usize>,
+        n: usize,
+    ) -> Result<Self, FrameError> {
+        if positions.len() < n {
+            let wanted = n - positions.len();
+            positions.extend(
+                self.column
+                    .values()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, value)| value.is_missing())
+                    .map(|(position, _)| position)
+                    .take(wanted),
+            );
+        }
+        let labels: Vec<IndexLabel> = positions
+            .iter()
+            .map(|&position| self.index_label_at(position))
+            .collect();
         let index = self.index.relabeled(labels);
-        let column = Column::from_values(values)?;
+        let column = self.column.take_positions(&positions);
         Self::new(self.name.clone(), index, column)
     }
 
@@ -27053,16 +27211,9 @@ impl Series {
             indexed.truncate(n);
         }
 
-        let labels: Vec<IndexLabel> = indexed
-            .iter()
-            .map(|(i, _)| self.index_label_at(*i))
-            .collect();
-        let values: Vec<Scalar> = indexed.iter().map(|(_, v)| (*v).clone()).collect();
-
         // Per br-frankenpandas-0trpd: preserve index name through nsmallest.
-        let index = self.index.relabeled(labels);
-        let column = Column::from_values(values)?;
-        Self::new(self.name.clone(), index, column)
+        let positions: Vec<usize> = indexed.iter().map(|(i, _)| *i).collect();
+        self.taking_top_positions(positions, n)
     }
 
     /// Return the `n` smallest values with `keep` parameter.
@@ -27122,6 +27273,7 @@ impl Series {
             indexed.sort_by(|a, b| b.1.semantic_cmp(a.1));
         }
 
+        let fill_with_missing = !matches!(keep, TopKeep::All);
         match keep {
             TopKeep::Last => {
                 // Reverse position order for ties
@@ -27160,17 +27312,10 @@ impl Series {
             }
         }
 
-        let labels: Vec<IndexLabel> = indexed
-            .iter()
-            .map(|(i, _)| self.index_label_at(*i))
-            .collect();
-        let values: Vec<Scalar> = indexed.iter().map(|(_, v)| (*v).clone()).collect();
-
         // Per br-frankenpandas-0trpd: preserve index name through
         // nlargest_keep/nsmallest_keep variants.
-        let index = self.index.relabeled(labels);
-        let column = Column::from_values(values)?;
-        Self::new(self.name.clone(), index, column)
+        let positions: Vec<usize> = indexed.iter().map(|(i, _)| *i).collect();
+        self.taking_top_positions(positions, if fill_with_missing { n } else { 0 })
     }
 
     // ── Positional indexing ──────────────────────────────────────
@@ -29439,27 +29584,29 @@ impl Series {
                     };
                     (mean, std)
                 });
+            // A float32 column's mean and std are float32, as its own.
+            let (mean, std) = if self.column.width() == Some(NumericWidth::Float32) {
+                (NumericWidth::round_f32(mean), NumericWidth::round_f32(std))
+            } else {
+                (mean, std)
+            };
             let min = floats.iter().copied().fold(f64::INFINITY, f64::min);
             let max = floats.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             (mean, std, min, max)
         };
 
-        let mut sorted = floats.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
+        // The percentiles are the Series' own quantiles: an int column's
+        // interpolated between its integers, a float32 one's in float32 (they
+        // were over the values as f64; br-frankenpandas-anux4). The
+        // percentiles are validated, so only a value no number reads fails.
         let compute_percentile = |p: f64| -> f64 {
-            if sorted.is_empty() {
+            if floats.is_empty() {
                 return f64::NAN;
             }
-            let idx = numpy_percentile_rank(p, sorted.len());
-            let lo = idx.floor() as usize;
-            let hi = idx.ceil() as usize;
-            if lo == hi || hi >= sorted.len() {
-                sorted[lo.min(sorted.len() - 1)]
-            } else {
-                let frac = idx - lo as f64;
-                numpy_lerp(sorted[lo], sorted[hi], frac)
-            }
+            self.quantile(p)
+                .ok()
+                .and_then(|value| value.to_f64().ok())
+                .unwrap_or(f64::NAN)
         };
 
         let mut labels = vec![
@@ -32046,6 +32193,7 @@ impl Series {
             closed: None,
             label: None,
             origin: None,
+            layout: None,
         }
     }
 
@@ -32062,6 +32210,7 @@ impl Series {
             closed: closed.map(str::to_string),
             label: label.map(str::to_string),
             origin: origin.map(str::to_string),
+            layout: None,
         }
     }
 
@@ -32341,6 +32490,15 @@ impl Series {
                 self.name.clone(),
                 self.index.clone(),
                 Column::from_f64_values(Vec::new()),
+            );
+        }
+        // Nothing to rank keeps every row NaN, float64 too (it inferred
+        // object; br-frankenpandas-anux4).
+        if na_option == "keep" && self.count() == 0 {
+            return Self::new(
+                self.name.clone(),
+                self.index.clone(),
+                Column::from_f64_values(vec![f64::NAN; self.len()]),
             );
         }
         // An ordered categorical ranks by category order, never by value, so
@@ -36754,7 +36912,7 @@ impl Expanding<'_> {
                 }
             }
             let index = self.series.index().clone();
-            let column = Column::from_values(out)?;
+            let column = Column::new(DType::Float64, out)?;
             return Series::new(self.series.name(), index, column);
         }
         let vals = self.series.column().values();
@@ -36780,8 +36938,9 @@ impl Expanding<'_> {
                 out.push(Scalar::Float64(acc));
             }
         }
+        // Typed: a prefix with nothing observed is NaN, never object.
         let index = self.series.index().clone();
-        let column = Column::from_values(out)?;
+        let column = Column::new(DType::Float64, out)?;
         Series::new(self.series.name(), index, column)
     }
 
@@ -38561,9 +38720,49 @@ fn parse_resample_freq(freq: &str) -> Option<(i64, String)> {
     Some((mult, unit.to_string()))
 }
 
+/// Whether the stamps `labels` are already their own `bucket_ns` bins: one
+/// every `bucket_ns` from the first, which lies on the grid pandas anchors
+/// at midnight of the first day (origin='start_day').
+fn stamps_are_their_own_bins(labels: &[IndexLabel], bucket_ns: i64) -> bool {
+    let Some(IndexLabel::Datetime64(first_ns)) = labels.first() else {
+        return false;
+    };
+    if first_ns
+        .rem_euclid(Timedelta::NANOS_PER_DAY)
+        .rem_euclid(bucket_ns)
+        != 0
+    {
+        return false;
+    }
+    labels.iter().enumerate().all(|(i, label)| {
+        let IndexLabel::Datetime64(ns) = label else {
+            return false;
+        };
+        i64::try_from(i)
+            .ok()
+            .and_then(|i| i.checked_mul(bucket_ns))
+            .and_then(|offset| first_ns.checked_add(offset))
+            == Some(*ns)
+    })
+}
+
 /// Convert a datelike index label to nanoseconds since epoch for sub-day
-/// resample bucketing. Per gauntlet CONF-RC2/bead 2.5.
+/// resample bucketing. Per gauntlet CONF-RC2/bead 2.5. A datetime is its
+/// stamp here, inline in the label loops; the parse of any other label is
+/// [`resample_other_label_to_ns`] (with it inlined the loops' calls were
+/// not, a call per row: 23% of a one-shot resample('15min').max();
+/// br-frankenpandas-xmwso).
+#[inline]
 fn resample_label_to_ns(label: &IndexLabel) -> Option<i64> {
+    match label {
+        IndexLabel::Datetime64(ns) => Some(*ns),
+        _ => resample_other_label_to_ns(label),
+    }
+}
+
+/// [`resample_label_to_ns`] of a label that is not a datetime: text parsed
+/// as an ISO datetime or date, a period at its start instant.
+fn resample_other_label_to_ns(label: &IndexLabel) -> Option<i64> {
     match label {
         IndexLabel::Datetime64(ns) => Some(*ns),
         IndexLabel::Utf8(s) => {
@@ -39578,6 +39777,62 @@ pub struct Resample<'a> {
     closed: Option<String>,
     label: Option<String>,
     origin: Option<String>,
+    /// The bins of the rows, kept for the next reduction of the same
+    /// resampler ([`Resample::sharing`]).
+    layout: Option<Arc<ResampleLayout>>,
+}
+
+/// One resampler's rows in their bins as the single-pass reductions bin
+/// them ([`Resample::compute_row_bins`]): its `rows` rows as runs of
+/// consecutive rows in one bin - `(bin, end row)`, `u32::MAX` in none; a
+/// resampler's rows are in time order, so a run per bin - the bins emitted
+/// (all of them, in order, when `emitted` is `None`) and their index
+/// (unnamed), and whether the stamps are already their own bins.
+#[derive(Debug)]
+struct ResampleRowBins {
+    runs: Vec<(u32, u32)>,
+    rows: usize,
+    bins: usize,
+    emitted: Option<Vec<usize>>,
+    index: Index,
+    identity: bool,
+}
+
+/// The runs of [`ResampleRowBins`] as the rows are binned in order: a run
+/// written only when the bin changes (rows below `u32::MAX`).
+#[derive(Default)]
+struct RowRuns {
+    runs: Vec<(u32, u32)>,
+    bin: Option<u32>,
+}
+
+impl RowRuns {
+    /// Row `row` - the next one - in `bin`.
+    fn row(&mut self, row: usize, bin: u32) {
+        if self.bin != Some(bin) {
+            if let Some(previous) = self.bin {
+                self.runs.push((previous, row as u32));
+            }
+            self.bin = Some(bin);
+        }
+    }
+
+    /// The runs of `rows` rows.
+    fn finish(mut self, rows: usize) -> Vec<(u32, u32)> {
+        if let Some(previous) = self.bin {
+            self.runs.push((previous, rows as u32));
+        }
+        self.runs
+    }
+}
+
+/// The bins of a resampler's rows, computed by its first single-pass
+/// reduction and read by the rest - and by every column of a frame's - so
+/// they only fold their values, as pandas' resampler holds its binner (each
+/// reduction read every row's stamp twice; br-frankenpandas-xmwso).
+#[derive(Debug, Default)]
+pub struct ResampleLayout {
+    bins: OnceLock<Option<Arc<ResampleRowBins>>>,
 }
 
 /// One bin's running reduction in the single-pass resample kernels, which
@@ -39727,6 +39982,16 @@ impl ResampleBin for BinSpread {
 impl Resample<'_> {
     pub fn closed(mut self, closed: &str) -> Self {
         self.closed = Some(closed.to_string());
+        self
+    }
+
+    /// This view keeping its rows' bins in `layout`, which every reduction
+    /// of one resampler - over the same rows, freq and options - shares
+    /// (br-frankenpandas-xmwso). Bins kept for another number of rows are
+    /// never read.
+    #[must_use]
+    pub fn sharing(mut self, layout: &Arc<ResampleLayout>) -> Self {
+        self.layout = Some(Arc::clone(layout));
         self
     }
 
@@ -40169,25 +40434,85 @@ impl Resample<'_> {
         self.aggregate_scalar(fp_types::nanmean_grouped)
     }
 
-    /// One-pass daily resample mean over an all-valid no-NaN f64 slice: accumulate
-    /// sum+count per day index instead of build_groups' Vec<usize> scatter + gather
-    /// (2 passes). VERBATIM the "D" path of `resample_build_groups` for the day
-    /// ords + key_of + contiguous min..=max bin order + empty-bin NaN, so the
-    /// emitted index and `sum/count` (== `nanmean_grouped` for no-NaN, the
-    /// row-order compensated sum) are bit-identical. `None` (caller falls back)
-    /// for an empty/all-NaT input, a more-than-1e6-day span (past datetime64's
-    /// range), or any non-Datetime64/Date label.
-    /// Dispatch the calendar / daily / sub-daily one-pass resample reduce, each
-    /// bin a clone of `empty`. `None` (caller uses build_groups) for other
-    /// freqs or when a helper bails (empty / sparse / non-datetime label).
+    /// The one-pass resample reduce, each bin a clone of `empty`: every row's
+    /// value added to its bin in row order, then each emitted bin's value -
+    /// an empty bin's included. The bins are the ones an earlier reduction
+    /// of the resampler kept in its [`ResampleLayout`]; else the rows are
+    /// binned now, each value folded as its row finds its bin (a second pass
+    /// over the kept bins cost a one-shot resample 10-20%), and the bins
+    /// kept. A sum or mean of stamps that are already their own bins is the
+    /// Series itself. `None` (caller uses build_groups) for other freqs or
+    /// when the binning bails (empty / sparse / non-datetime label).
     fn resample_reduce_single_pass<B: ResampleBin>(
         &self,
         vals: &[f64],
         empty: B,
     ) -> Option<Result<Series, FrameError>> {
+        let kept = self
+            .layout
+            .as_ref()
+            .and_then(|layout| layout.bins.get().cloned());
+        let (bins, acc) = match kept {
+            Some(kept) => {
+                let bins = kept.filter(|bins| bins.rows == vals.len())?;
+                let mut acc = vec![empty; bins.bins];
+                let mut start = 0_usize;
+                for &(bin, end) in &bins.runs {
+                    let end = end as usize;
+                    if let Some(slot) = acc.get_mut(bin as usize) {
+                        for &value in &vals[start..end] {
+                            slot.add(value);
+                        }
+                    }
+                    start = end;
+                }
+                (bins, acc)
+            }
+            None => {
+                let (bins, acc) = match self.compute_row_bins(vals, empty) {
+                    Some((bins, acc)) => (Some(Arc::new(bins)), acc),
+                    None => (None, Vec::new()),
+                };
+                if let Some(layout) = &self.layout {
+                    // Another reduction may have kept them first; the same.
+                    let _ = layout.bins.set(bins.clone());
+                }
+                (bins?, acc)
+            }
+        };
+        if B::SINGLETON_IS_VALUE && bins.identity {
+            return Some(Series::new(
+                self.series.name(),
+                self.series.index().clone(),
+                self.series.column().clone(),
+            ));
+        }
+        let out_f64: Vec<f64> = match &bins.emitted {
+            Some(emitted) => emitted.iter().map(|&bin| acc[bin].value()).collect(),
+            None => acc.iter().map(ResampleBin::value).collect(),
+        };
+        let index = bins.index.clone().rename_index(self.series.index().name());
+        Some(Series::new(
+            self.series.name(),
+            index,
+            Column::from_f64_values(out_f64),
+        ))
+    }
+
+    /// Dispatch the calendar / daily / sub-daily binning of the rows - the
+    /// default edges, labels and origin only - each row's value in `vals`
+    /// folded into its bin (a clone of `empty`) as the row finds it, in the
+    /// binning's own loop (the bins a local of it, as the fold was before
+    /// the bins were kept).
+    fn compute_row_bins<B: ResampleBin>(
+        &self,
+        vals: &[f64],
+        empty: B,
+    ) -> Option<(ResampleRowBins, Vec<B>)> {
         if self.closed.is_some() || self.label.is_some() || self.origin.is_some() {
             return None;
         }
+        u32::try_from(self.series.len()).ok()?;
         let (mult, unit) = parse_resample_freq(&self.freq)?;
         let months_per_period = match unit.as_str() {
             "M" | "ME" => 1,
@@ -40196,13 +40521,10 @@ impl Resample<'_> {
             _ => 0,
         };
         if months_per_period > 0 {
-            return self.monthly_reduce_single_pass(vals, months_per_period, mult, empty);
+            return self.monthly_row_bins(months_per_period, mult, vals, empty);
         }
-        if unit == "D"
-            && mult <= 1
-            && let Some(r) = self.daily_reduce_single_pass(vals, empty.clone())
-        {
-            return Some(r);
+        if unit == "D" && mult <= 1 {
+            return self.daily_row_bins(vals, empty);
         }
         let ns_per: i64 = match unit.to_lowercase().as_str() {
             "h" => 3_600_000_000_000,
@@ -40213,25 +40535,22 @@ impl Resample<'_> {
             "ns" => 1,
             _ => return None,
         };
-        self.subdaily_reduce_single_pass(vals, ns_per, mult, empty)
+        self.subdaily_row_bins(ns_per, mult, vals, empty)
     }
 
-    /// One-pass calendar (M/Q/Y/A) resample reduce over an all-valid no-NaN f64
-    /// slice: accumulate each bucket's bin in ONE pass instead of
-    /// build_groups' Vec<usize> scatter + per-bin gather. VERBATIM the M/Q/Y/A
-    /// path's month ordinals + period_end_mo/bucket_end_mo bucketing + contiguous
+    /// The calendar (M/Q/Y/A) bins of the rows. VERBATIM the M/Q/Y/A path's
+    /// month ordinals + period_end_mo/bucket_end_mo bucketing + contiguous
     /// first..=last right-edge cursors + resample_month_end_key + filled empty
-    /// buckets (their bin's empty value). bidx = (bucket_end_mo(mo)-first)/bucket_months
-    /// is direct (no order map). `None` (caller falls back) on empty/all-bad input
-    /// or a >1e6-bucket span. Bit-identical: same buckets/keys/order, row-order
-    /// adds (== contiguous bucket value order for time-ordered data).
-    fn monthly_reduce_single_pass<B: ResampleBin>(
+    /// buckets. bidx = (bucket_end_mo(mo)-first)/bucket_months is direct (no
+    /// order map). `None` (caller falls back) on empty/all-bad input or a
+    /// >1e6-bucket span.
+    fn monthly_row_bins<B: ResampleBin>(
         &self,
-        vals: &[f64],
         months_per_period: i64,
         mult: i64,
+        vals: &[f64],
         empty: B,
-    ) -> Option<Result<Series, FrameError>> {
+    ) -> Option<(ResampleRowBins, Vec<B>)> {
         let bucket_months = mult.checked_mul(months_per_period)?;
         if bucket_months <= 0 {
             return None;
@@ -40262,33 +40581,39 @@ impl Resample<'_> {
         if n >= 1_000_000 {
             return None;
         }
-        let mut bins = vec![empty; n];
+        let mut acc = vec![empty; n];
+        let mut runs = RowRuns::default();
         for (i, mo_opt) in month_ords.iter().enumerate() {
-            if let Some(mo) = *mo_opt {
-                let bidx = ((bucket_end_mo(mo) - first) / bucket_months) as usize;
-                if bidx < n {
-                    bins[bidx].add(vals[i]);
-                }
+            let bin = mo_opt
+                .map(|mo| ((bucket_end_mo(mo) - first) / bucket_months) as usize)
+                .filter(|&bidx| bidx < n)
+                .and_then(|bidx| u32::try_from(bidx).ok());
+            if let Some(bin) = bin {
+                acc[bin as usize].add(vals[i]);
             }
+            runs.row(i, bin.unwrap_or(u32::MAX));
         }
         let mut out_labels = Vec::new();
-        let mut out_f64 = Vec::new();
+        let mut emitted = Vec::new();
         let mut cursor = first;
         let mut bidx = 0usize;
         while cursor <= last && bidx < n {
             if let Some(key) = resample_month_end_key(cursor) {
                 out_labels.push(resample_bin_label(&key));
-                out_f64.push(bins[bidx].value());
+                emitted.push(bidx);
             }
             cursor += bucket_months;
             bidx += 1;
         }
-        let index = Index::new(out_labels).rename_index(self.series.index().name());
-        Some(Series::new(
-            self.series.name(),
-            index,
-            Column::from_f64_values(out_f64),
-        ))
+        let bins = ResampleRowBins {
+            runs: runs.finish(month_ords.len()),
+            rows: month_ords.len(),
+            bins: n,
+            emitted: Some(emitted),
+            index: Index::new(out_labels),
+            identity: false,
+        };
+        Some((bins, acc))
     }
 
     /// One-pass calendar (M/Q/Y/A) resample min/max over an all-valid no-NaN f64
@@ -40296,7 +40621,7 @@ impl Resample<'_> {
     /// init keeps the first extreme exactly like resample_extremum_typed's reduce,
     /// so -0.0/0.0 ties match) instead of build_groups' scatter + gather. Emits
     /// Vec<Scalar> (Null(NaN) for empty bucket) via from_values — bit-identical to
-    /// the extremum path. Shares the M/Q/Y/A bucketing with monthly_reduce_single_pass.
+    /// the extremum path. Shares the M/Q/Y/A bucketing with monthly_row_bins.
     fn monthly_extremum_single_pass(
         &self,
         vals: &[f64],
@@ -40380,69 +40705,118 @@ impl Resample<'_> {
         })())
     }
 
-    fn daily_reduce_single_pass<B: ResampleBin>(
+    /// The daily bins of the rows. VERBATIM the "D" path of
+    /// `resample_build_groups` for the day ords + key_of + contiguous
+    /// min..=max bin order. `None` (caller falls back) for an empty/all-NaT
+    /// input, a more-than-1e6-day span (past datetime64's range), or any
+    /// non-Datetime64/Date label.
+    fn daily_row_bins<B: ResampleBin>(
         &self,
         vals: &[f64],
         empty: B,
-    ) -> Option<Result<Series, FrameError>> {
+    ) -> Option<(ResampleRowBins, Vec<B>)> {
         use chrono::Datelike;
+        const DAY: i64 = Timedelta::NANOS_PER_DAY;
         let labels = self.series.index().labels();
-        let day_ords: Vec<Option<i64>> = labels
-            .iter()
-            .map(|l| match l {
+        // A label's day ordinal: a datetime's its stamp's day, another
+        // label's parsed date. The span reads the datetimes' extreme stamps
+        // (a division each, not one a row - nor 16 bytes a row kept).
+        let other_day =
+            |l: &IndexLabel| resample_label_to_date(l).map(|d| i64::from(d.num_days_from_ce()));
+        let widen = |span: Option<(i64, i64)>, lo: i64, hi: i64| {
+            Some(span.map_or((lo, hi), |(a, b): (i64, i64)| (a.min(lo), b.max(hi))))
+        };
+        let (mut min_ns, mut max_ns) = (i64::MAX, i64::MIN);
+        let mut span = None;
+        for l in labels {
+            match l {
                 IndexLabel::Datetime64(ns) => {
-                    Some(ns.div_euclid(Timedelta::NANOS_PER_DAY) + 719_163)
+                    min_ns = min_ns.min(*ns);
+                    max_ns = max_ns.max(*ns);
                 }
-                _ => resample_label_to_date(l).map(|d| i64::from(d.num_days_from_ce())),
-            })
-            .collect();
-        let (min, max) = day_ords.iter().filter_map(|o| *o).fold(None, |acc, o| {
-            Some(acc.map_or((o, o), |(lo, hi): (i64, i64)| (lo.min(o), hi.max(o))))
-        })?;
+                _ => {
+                    if let Some(ord) = other_day(l) {
+                        span = widen(span, ord, ord);
+                    }
+                }
+            }
+        }
+        if min_ns <= max_ns {
+            let ord_of = |ns: i64| ns.div_euclid(DAY) + 719_163;
+            span = widen(span, ord_of(min_ns), ord_of(max_ns));
+        }
+        let (min, max) = span?;
         let n = (max - min + 1) as usize;
         if n >= 1_000_000 {
             return None;
         }
-        let mut bins = vec![empty; n];
-        for (i, o) in day_ords.iter().enumerate() {
-            if let Some(ord) = *o {
-                bins[(ord - min) as usize].add(vals[i]);
+        let mut acc = vec![empty; n];
+        // The current day is a cursor, as the sub-daily bins': stamps in
+        // order divide only where they cross into another day.
+        // A run changes only where the cursor does: any other row closes
+        // the cursor, so the next stamp reopens its day's run.
+        let mut runs = RowRuns::default();
+        let (mut start, mut end, mut day_bin) = (0_i64, 0_i64, 0_u32);
+        for (i, l) in labels.iter().enumerate() {
+            if let IndexLabel::Datetime64(ns) = l
+                && *ns >= start
+                && *ns < end
+            {
+                acc[day_bin as usize].add(vals[i]);
+                continue;
             }
+            (start, end) = (0, 0);
+            let bin = match l {
+                IndexLabel::Datetime64(ns) => {
+                    let day = ns.div_euclid(DAY);
+                    let bin = u32::try_from(day + 719_163 - min).ok();
+                    if let (Some(bin), Some(first)) = (bin, day.checked_mul(DAY)) {
+                        (start, end, day_bin) = (first, first.saturating_add(DAY), bin);
+                    }
+                    bin
+                }
+                _ => other_day(l).and_then(|ord| u32::try_from(ord - min).ok()),
+            };
+            if let Some(bin) = bin {
+                acc[bin as usize].add(vals[i]);
+            }
+            runs.row(i, bin.unwrap_or(u32::MAX));
         }
         let key_of = |ord: i64| -> Option<String> {
             let d = NaiveDate::from_num_days_from_ce_opt(i32::try_from(ord).ok()?)?;
             Some(format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day()))
         };
         let mut out_labels = Vec::with_capacity(n);
-        let mut out_f64 = Vec::with_capacity(n);
-        for (bidx, bin) in bins.iter().enumerate() {
+        let mut emitted = Vec::with_capacity(n);
+        for bidx in 0..n {
             if let Some(key) = key_of(min + bidx as i64) {
                 out_labels.push(resample_bin_label(&key));
-                out_f64.push(bin.value());
+                emitted.push(bidx);
             }
         }
-        let index = Index::new(out_labels).rename_index(self.series.index().name());
-        Some(Series::new(
-            self.series.name(),
-            index,
-            Column::from_f64_values(out_f64),
-        ))
+        let bins = ResampleRowBins {
+            runs: runs.finish(labels.len()),
+            rows: labels.len(),
+            bins: n,
+            emitted: Some(emitted),
+            index: Index::new(out_labels),
+            identity: false,
+        };
+        Some((bins, acc))
     }
 
-    /// One-pass sub-daily (H/min/s/ms/us/ns) resample reduce over an all-valid
-    /// no-NaN f64 slice: accumulate each bin index's bin in ONE pass instead of
-    /// build_groups' Vec<usize> scatter + per-bin gather. VERBATIM the sub-day
+    /// The sub-daily (H/min/s/ms/us/ns) bins of the rows. VERBATIM the sub-day
     /// path's `bin = (ns-origin).div_euclid(bucket_ns)`, the dense-range gate,
     /// the bin-start Datetime64 label, and every bin from the first to the last.
     /// `None` (caller falls back) on empty input or a sparse range (matching
     /// the dense_done gate -> the HashMap/sort path).
-    fn subdaily_reduce_single_pass<B: ResampleBin>(
+    fn subdaily_row_bins<B: ResampleBin>(
         &self,
-        vals: &[f64],
         ns_per: i64,
         mult: i64,
+        vals: &[f64],
         empty: B,
-    ) -> Option<Result<Series, FrameError>> {
+    ) -> Option<(ResampleRowBins, Vec<B>)> {
         let bucket_ns = mult.checked_mul(ns_per)?;
         if bucket_ns <= 0 {
             return None;
@@ -40454,38 +40828,27 @@ impl Resample<'_> {
             .series
             .index()
             .datetime64_affine_labels()
-            .filter(|&(_, step, len)| step > 0 && len > 0 && len == vals.len());
+            .filter(|&(_, step, len)| step > 0 && len > 0 && len == self.series.len());
         let labels = match affine {
             Some(_) => &[][..],
             None => self.series.index().labels(),
         };
         // Stamps that are already their own bins: each bin holds one value.
-        if B::SINGLETON_IS_VALUE {
-            if let Some((first, step, len)) = affine {
-                if first
+        let identity = match affine {
+            Some((first, step, len)) => {
+                first
                     .rem_euclid(Timedelta::NANOS_PER_DAY)
                     .rem_euclid(bucket_ns)
                     == 0
                     && (len == 1 || step == bucket_ns)
-                {
-                    return Some(Series::new(
-                        self.series.name(),
-                        self.series.index().clone(),
-                        self.series.column().clone(),
-                    ));
-                }
-            } else if let Some(identity) =
-                self.subdaily_exact_target_frequency_result(labels, bucket_ns)
-            {
-                return Some(identity);
             }
-        }
-        // Fused: find origin (min ns) AND max ns in one pass, then accumulate
-        // sum/count per bin in a second pass — instead of materializing two 16MB
+            None => stamps_are_their_own_bins(labels, bucket_ns),
+        };
+        // Fused: find origin (min ns) AND max ns in one pass, then each row's
+        // bin in a second pass — instead of materializing two 16MB
         // Vec<Option<i64>> temps (ns_ords + bins) and scanning them (resample 'h'
         // @16667 bins). origin is the min ns, so every bin = (ns-origin)/bucket_ns
-        // is >= 0 (bmin == 0); bidx is the bin directly. Bit-identical: same
-        // origin/bins/bound, same row-order accumulation.
+        // is >= 0 (bmin == 0); bidx is the bin directly.
         let mut min_ns = i64::MAX;
         let mut max_ns = i64::MIN;
         if let Some((first, step, len)) = affine {
@@ -40522,84 +40885,60 @@ impl Resample<'_> {
             return None;
         }
         let nb = (bmax + 1) as usize;
-        let mut bins = vec![empty; nb];
+        u32::try_from(nb).ok()?;
+        let mut acc = vec![empty; nb];
+        let mut runs = RowRuns::default();
         if let Some((first, step, _)) = affine {
             let mut ns = first;
             for (i, &value) in vals.iter().enumerate() {
                 if i > 0 {
                     ns += step;
                 }
-                bins[(ns - origin).div_euclid(bucket_ns) as usize].add(value);
+                let bin = (ns - origin).div_euclid(bucket_ns) as u32;
+                acc[bin as usize].add(value);
+                runs.row(i, bin);
             }
         }
         // The current bin is a cursor: stamps in order (the usual series)
         // divide only where they cross into another bin - a division per
         // row was the pass's largest cost (br-frankenpandas-bss5q.3). A
         // stamp outside the cursor's bin, in any order, finds its own.
-        let mut bin = 0_usize;
+        let mut bin = 0_u32;
         let mut start = origin;
         let mut end = origin;
+        // A run changes only where the cursor does: a row in no bin closes
+        // the cursor, so the next stamp reopens its bin's run.
         for (i, l) in labels.iter().enumerate() {
-            if let Some(ns) = resample_label_to_ns(l) {
-                if ns < start || ns >= end {
-                    let offset = (ns - origin).div_euclid(bucket_ns);
-                    bin = offset as usize;
-                    start = origin + offset * bucket_ns;
-                    end = start + bucket_ns;
-                }
-                bins[bin].add(vals[i]);
+            let Some(ns) = resample_label_to_ns(l) else {
+                runs.row(i, u32::MAX);
+                (start, end) = (origin, origin);
+                continue;
+            };
+            if ns < start || ns >= end {
+                let offset = (ns - origin).div_euclid(bucket_ns);
+                bin = offset as u32;
+                start = origin + offset * bucket_ns;
+                end = start + bucket_ns;
+                runs.row(i, bin);
             }
+            acc[bin as usize].add(vals[i]);
         }
-        let out_f64: Vec<f64> = bins.iter().map(ResampleBin::value).collect();
-        let index = Index::from_datetime64_affine_range(origin, bucket_ns, nb)
-            .unwrap_or_else(|| {
+        let index =
+            Index::from_datetime64_affine_range(origin, bucket_ns, nb).unwrap_or_else(|| {
                 let labels = (0..nb)
                     .map(|didx| origin + didx as i64 * bucket_ns)
                     .collect();
                 Index::from_datetime64(labels)
-            })
-            .rename_index(self.series.index().name());
-        Some(Series::new(
-            self.series.name(),
+            });
+        let bins = ResampleRowBins {
+            runs: runs.finish(rows),
+            rows,
+            bins: nb,
+            emitted: None,
             index,
-            Column::from_f64_values(out_f64),
-        ))
-    }
-
-    fn subdaily_exact_target_frequency_result(
-        &self,
-        labels: &[IndexLabel],
-        bucket_ns: i64,
-    ) -> Option<Result<Series, FrameError>> {
-        if labels.is_empty() {
-            return None;
-        }
-        let IndexLabel::Datetime64(first_ns) = labels[0] else {
-            return None;
+            identity,
         };
-        // The stamps are their own bins only on the grid pandas anchors at
-        // midnight of the first day (origin='start_day').
-        if first_ns
-            .rem_euclid(Timedelta::NANOS_PER_DAY)
-            .rem_euclid(bucket_ns)
-            != 0
-        {
-            return None;
-        }
-        for (i, label) in labels.iter().enumerate() {
-            let IndexLabel::Datetime64(ns) = label else {
-                return None;
-            };
-            let offset = i64::try_from(i).ok()?.checked_mul(bucket_ns)?;
-            if first_ns.checked_add(offset)? != *ns {
-                return None;
-            }
-        }
-        Some(Series::new(
-            self.series.name(),
-            self.series.index().clone(),
-            self.series.column().clone(),
-        ))
+        Some((bins, acc))
     }
 
     /// Resample count.
@@ -42882,11 +43221,22 @@ pub struct DataFrameResample<'a> {
     label: Option<String>,
     origin: Option<String>,
     numeric_only: bool,
+    /// The bins of the frame's rows, which every column's reduction reads
+    /// (each column binned the rows again; br-frankenpandas-xmwso).
+    layout: Arc<ResampleLayout>,
 }
 
 impl<'a> DataFrameResample<'a> {
     pub fn closed(mut self, closed: &str) -> Self {
         self.closed = Some(closed.to_string());
+        self
+    }
+
+    /// The frame's bins kept in `layout`, shared with the resampler's other
+    /// reductions ([`Resample::sharing`]).
+    #[must_use]
+    pub fn sharing(mut self, layout: &Arc<ResampleLayout>) -> Self {
+        self.layout = Arc::clone(layout);
         self
     }
 
@@ -42934,12 +43284,14 @@ impl<'a> DataFrameResample<'a> {
     }
 
     fn series_resample<'s>(&self, series: &'s Series) -> Resample<'s> {
-        series.resample_ext(
-            &self.freq,
-            self.closed.as_deref(),
-            self.label.as_deref(),
-            self.origin.as_deref(),
-        )
+        series
+            .resample_ext(
+                &self.freq,
+                self.closed.as_deref(),
+                self.label.as_deref(),
+                self.origin.as_deref(),
+            )
+            .sharing(&self.layout)
     }
 
     fn numeric_column_positions(&self) -> Vec<usize> {
@@ -85324,6 +85676,7 @@ impl DataFrame {
                                     row_vals.clone(),
                                     0.5,
                                     QuantileInterpolation::Linear,
+                                    numpy_lerp,
                                 ))
                             }
                         }
@@ -93064,6 +93417,7 @@ impl DataFrame {
             label: None,
             origin: None,
             numeric_only: false,
+            layout: Arc::default(),
         }
     }
 
@@ -93081,6 +93435,7 @@ impl DataFrame {
             label: label.map(str::to_string),
             origin: origin.map(str::to_string),
             numeric_only: false,
+            layout: Arc::default(),
         }
     }
 
@@ -104878,7 +105233,14 @@ impl DataFrame {
                 } else {
                     column.dtype()
                 };
-                Column::new(output_dtype, values).map_err(FrameError::from)
+                let aligned = Column::new(output_dtype, values)?;
+                // A categorical keeps its categories and their order: an
+                // aligned pair of ordered categoricals refused an ordering
+                // as unordered (br-frankenpandas-d468v).
+                Ok(match column.categorical() {
+                    Some(meta) => aligned.with_categorical(Some(meta.clone())),
+                    None => aligned,
+                })
             } else {
                 // A column this side lacks is pandas' all-NaN float64 column;
                 // from_values left it untyped (br-frankenpandas-qmru2).
@@ -146668,9 +147030,12 @@ mod tests {
     }
 
     #[test]
-    fn series_nlargest_nsmallest_exclude_nan_ovpm9() {
-        // Differential (br-frankenpandas-ovpm9): nlargest/nsmallest drop NaN and
-        // return the top/bottom-n of the finite values. Distinct values (no ties).
+    fn series_nlargest_nsmallest_fill_with_nan_ovpm9() {
+        // Differential (br-frankenpandas-ovpm9): nlargest/nsmallest return the
+        // top/bottom-n of the finite values, and a selection short of n finite
+        // values fills with the NaN rows, as pandas 2.2.3 ([2.0, nan, 1.0]
+        // .nlargest(4) is [2.0, 1.0, nan]; br-frankenpandas-anux4). Distinct
+        // values (no ties); a missing value is None for the comparison.
         let mut st: u64 = 0x0a16_e57a_2b3c_4d5e;
         let mut next = || {
             st = st
@@ -146701,25 +147066,33 @@ mod tests {
             desc.sort_by(|a, b| b.partial_cmp(a).unwrap());
             let mut asc = finite.clone();
             asc.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            let as_f = |s: &[Scalar]| -> Vec<f64> {
+            let as_f = |s: &[Scalar]| -> Vec<Option<f64>> {
                 s.iter()
                     .map(|v| match v {
-                        Scalar::Float64(x) => *x,
-                        Scalar::Int64(x) => *x as f64,
-                        _ => f64::NAN,
+                        Scalar::Float64(x) if !x.is_nan() => Some(*x),
+                        Scalar::Int64(x) => Some(*x as f64),
+                        _ => None,
                     })
                     .collect()
             };
             for k in [0usize, 1, 2, finite.len(), finite.len() + 2] {
                 let m = k.min(finite.len());
+                let expected = |sorted: &[f64]| -> Vec<Option<f64>> {
+                    sorted[..m]
+                        .iter()
+                        .copied()
+                        .map(Some)
+                        .chain(std::iter::repeat_n(None, k.min(n) - m))
+                        .collect()
+                };
                 assert_eq!(
                     as_f(series.nlargest(k).unwrap().values()),
-                    desc[..m].to_vec(),
+                    expected(&desc),
                     "nlargest iter={iter} k={k}"
                 );
                 assert_eq!(
                     as_f(series.nsmallest(k).unwrap().values()),
-                    asc[..m].to_vec(),
+                    expected(&asc),
                     "nsmallest iter={iter} k={k}"
                 );
             }
@@ -181199,6 +181572,167 @@ mod tests {
             flags(unordered.eq_df(&same).unwrap()),
             [Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false)]
         );
+    }
+
+    #[test]
+    fn aligned_categorical_frames_compare_by_order_d468v() {
+        // br-frankenpandas-d468v: frames over differently ordered indexes
+        // align before comparing, their ordered categoricals keeping their
+        // order (y before x): no x < y, every x >= y. NEGATIVE: unordered
+        // categoricals still refuse an ordering after alignment.
+        use fp_types::CategoricalMetadata;
+        let frame = |codes: Vec<i32>, labels: [i64; 3], ordered: bool| {
+            let meta = CategoricalMetadata {
+                categories: vec![Scalar::Utf8("y".to_owned()), Scalar::Utf8("x".to_owned())],
+                ordered,
+            };
+            DataFrame::new(
+                Index::new(labels.into_iter().map(IndexLabel::Int64).collect()),
+                BTreeMap::from([("a".to_owned(), Column::from_categorical_codes(codes, meta))]),
+            )
+            .unwrap()
+        };
+        let flags = |result: DataFrame| result.column("a").unwrap().values().to_vec();
+        // [x, y, x] at 0, 1, 2 against [y, y, x] at 2, 1, 0.
+        let left = frame(vec![1, 0, 1], [0, 1, 2], true);
+        let right = frame(vec![0, 0, 1], [2, 1, 0], true);
+        assert_eq!(
+            flags(left.lt_df(&right).unwrap()),
+            vec![Scalar::Bool(false); 3]
+        );
+        assert_eq!(
+            flags(left.ge_df(&right).unwrap()),
+            vec![Scalar::Bool(true); 3]
+        );
+        assert_eq!(
+            flags(left.eq_df(&right).unwrap()),
+            [Scalar::Bool(true), Scalar::Bool(true), Scalar::Bool(false)]
+        );
+        let unordered = frame(vec![1, 0, 1], [0, 1, 2], false);
+        assert!(
+            unordered
+                .lt_df(&frame(vec![0, 0, 1], [2, 1, 0], false))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn edge_input_answers_anux4() {
+        // br-frankenpandas-anux4 (expectations pandas 2.2.3 / numpy 2.3.5):
+        // int64 diff subtracts in int64 (through f64, 2**53 + 1 less 2**53
+        // was 0.0); quantiles of ints past 2**53, of durations and of a
+        // float32 column step by their int64 / float32 difference, as numpy's
+        // _lerp; all-missing rank / expanding max / replace stay float64 (they
+        // were object); an all-NaN nlargest is its NaN rows (it was empty).
+        // NEGATIVE: small ints' and float64 quantiles are as before.
+        use fp_types::NumericWidth;
+        let big = 1_i64 << 53;
+        let labels = |n: usize| {
+            (0..n)
+                .map(|i| IndexLabel::Int64(i64::try_from(i).unwrap()))
+                .collect::<Vec<_>>()
+        };
+        let series =
+            |values: Vec<Scalar>| Series::from_values("s", labels(values.len()), values).unwrap();
+        let ints = |values: &[i64]| series(values.iter().map(|&v| Scalar::Int64(v)).collect());
+        let floats = |values: &[f64]| series(values.iter().map(|&v| Scalar::Float64(v)).collect());
+        assert_eq!(
+            ints(&[big, big + 1]).diff(1).unwrap().values()[1],
+            Scalar::Float64(1.0)
+        );
+        let wide = ints(&[big + 1, big, -big - 3, 7]);
+        assert_eq!(
+            wide.quantile(0.3).unwrap(),
+            Scalar::Float64(-900_719_925_474_094.0)
+        );
+        assert_eq!(
+            wide.quantile_with_interpolation(0.3, "lower").unwrap(),
+            Scalar::Int64(-big - 3)
+        );
+        let durations = series(vec![
+            Scalar::Timedelta64(1_600_000_000_000_000_009),
+            Scalar::Timedelta64(1_600_000_000_000_013_218),
+        ]);
+        assert_eq!(
+            durations.quantile(0.3).unwrap(),
+            Scalar::Timedelta64(1_600_000_000_000_003_840)
+        );
+        let float32 = floats(&[1.5, -2.25, 0.1, 3.0])
+            .astype_width(NumericWidth::Float32, false)
+            .unwrap();
+        assert_eq!(
+            float32.quantile(0.3).unwrap(),
+            Scalar::Float64(-0.134_999_988_973_140_92)
+        );
+        let nan = floats(&[f64::NAN; 3]);
+        assert_eq!(
+            nan.rank("average", true, "keep").unwrap().dtype(),
+            DType::Float64
+        );
+        assert_eq!(nan.expanding(None).max().unwrap().dtype(), DType::Float64);
+        let missing = Scalar::Null(NullKind::NaN);
+        assert_eq!(
+            nan.replace(&[(missing.clone(), missing)]).unwrap().dtype(),
+            DType::Float64
+        );
+        let largest = nan.nlargest(2).unwrap();
+        assert_eq!((largest.len(), largest.dtype()), (2, DType::Float64));
+        assert_eq!(
+            ints(&[1, 2, 3, 4]).quantile(0.5).unwrap(),
+            Scalar::Float64(2.5)
+        );
+        assert_eq!(
+            floats(&[1.0, 2.0, 4.0]).quantile(0.25).unwrap(),
+            Scalar::Float64(1.5)
+        );
+    }
+
+    #[test]
+    fn resample_layout_shared_by_reductions_xmwso() {
+        // br-frankenpandas-xmwso: the reductions of one resampler bin its
+        // rows once - the first keeps the bins in the layout, the rest read
+        // them - and answer as views that bin for themselves; a frame's
+        // columns share the frame's. NEGATIVE: bins kept for another
+        // series' rows (another length) are never read.
+        use std::sync::Arc;
+
+        use super::ResampleLayout;
+        let base = 1_577_836_800_000_000_000_i64;
+        let minute = 60_000_000_000_i64;
+        let series = |rows: i64| {
+            let stamps = (0..rows).map(|i| base + i * minute + 7).collect();
+            let values = (0..rows).map(|i| ((i * 37) % 101) as f64).collect();
+            Series::new(
+                "x",
+                Index::from_datetime64(stamps),
+                Column::from_f64_values(values),
+            )
+            .unwrap()
+        };
+        let long = series(300);
+        let layout = Arc::new(ResampleLayout::default());
+        let answers = |s: &Series, layout: Option<&Arc<ResampleLayout>>| {
+            let view = || match layout {
+                Some(layout) => s.resample("h").sharing(layout),
+                None => s.resample("h"),
+            };
+            [
+                view().max().unwrap(),
+                view().count().unwrap(),
+                view().sum().unwrap(),
+                view().mean().unwrap(),
+            ]
+            .map(|r| (r.index().labels().to_vec(), r.values().to_vec()))
+        };
+        let shared = answers(&long, Some(&layout));
+        assert!(layout.bins.get().is_some_and(Option::is_some));
+        assert_eq!(shared, answers(&long, None));
+        assert_eq!(shared[1].1[0], Scalar::Int64(60));
+        let short = series(100);
+        assert_eq!(answers(&short, Some(&layout)), answers(&short, None));
+        let frame = DataFrame::from_series(vec![long.clone(), long.rename("y").unwrap()]).unwrap();
+        let means = frame.resample("h").mean().unwrap();
+        assert_eq!(means.column("y").unwrap().values(), shared[3].1.as_slice());
     }
 
     #[test]

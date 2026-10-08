@@ -7747,8 +7747,8 @@ fn py_to_cell_with_ancestors<'py>(
 /// in as +inf (min) / -inf (max) under skipna - so a date beside a missing
 /// value or a string beside an int is pandas' TypeError. The winning row and
 /// cell; None when every cell is missing. fp-frame read such cells as NaN
-/// (fvsao.67). A text-only column keeps fp-frame's path, as pandas' `string`
-/// dtype (which the binding does not tell from object) answers.
+/// (fvsao.67). An argmin / argmax fills a missing cell under skipna=False
+/// too (numpy's nanargmax does), and a missing cell then makes it None.
 fn object_extreme(
     py: Python<'_>,
     series: &Series,
@@ -7763,9 +7763,10 @@ fn object_extreme(
         f64::INFINITY
     };
     let mut best: Option<(usize, Bound<'_, PyAny>)> = None;
-    let mut any_present = false;
+    let (mut any_present, mut any_missing) = (false, false);
     for (row, value) in column.values().iter().enumerate() {
-        let cell = if value.is_missing() && skipna {
+        any_missing |= value.is_missing();
+        let cell = if value.is_missing() && (skipna || position) {
             fill.into_bound_py_any(py)?
         } else {
             any_present |= !value.is_missing();
@@ -7787,8 +7788,180 @@ fn object_extreme(
         });
     }
     Ok(best
-        .filter(|_| any_present)
+        .filter(|_| any_present && (skipna || !(position && any_missing)))
         .map(|(row, cell)| (row, cell.unbind())))
+}
+
+/// Whether pandas reduces this column as numpy objects ([`object_extreme`]):
+/// it holds non-text cells, or it is object text holding a missing value,
+/// the +/-inf standing in for which beside a string is Python's TypeError
+/// (min / max / argmax / cummax answered from the text; br-frankenpandas-anux4).
+/// pandas' `string` dtype answers from its mask, as fp-frame does.
+fn compares_as_objects(series: &Series) -> bool {
+    let column = series.column();
+    column.holds_non_text()
+        || (column.dtype() == DType::Utf8 && !column.is_pandas_string() && column.has_nulls())
+}
+
+/// pandas' cummin / cummax (`maximum`) over an object column
+/// ([`compares_as_objects`]): numpy's object accumulate, Python's own `<=` /
+/// `>=` keeping the running cell, a missing cell standing in as +inf / -inf
+/// under skipna and NaN in the answer - text beside a missing value is
+/// Python's TypeError, dates keep their cells (they were refused, mixed
+/// numbers read as float64; br-frankenpandas-anux4).
+fn object_accumulate(
+    py: Python<'_>,
+    series: &Series,
+    maximum: bool,
+    skipna: bool,
+) -> PyResult<Series> {
+    let column = series.column();
+    let values = column.values();
+    let fill = if maximum {
+        f64::NEG_INFINITY
+    } else {
+        f64::INFINITY
+    };
+    let mut running: Option<(Option<usize>, Bound<'_, PyAny>)> = None;
+    let mut out = Vec::with_capacity(values.len());
+    for (row, value) in values.iter().enumerate() {
+        let filled = value.is_missing() && skipna;
+        let (from, cell) = if filled {
+            (None, fill.into_bound_py_any(py)?)
+        } else {
+            (Some(row), cell_to_py(py, column, value)?.into_bound(py))
+        };
+        let next = match running.take() {
+            None => (from, cell),
+            Some((at, current)) => {
+                let keep = if maximum {
+                    current.ge(&cell)?
+                } else {
+                    current.le(&cell)?
+                };
+                if keep { (at, current) } else { (from, cell) }
+            }
+        };
+        out.push(match next.0 {
+            Some(at) if !filled => values[at].clone(),
+            _ => Scalar::Null(NullKind::NaN),
+        });
+        running = Some(next);
+    }
+    Series::new(
+        series.name(),
+        series.index().clone(),
+        Column::from_object_values(out),
+    )
+    .map_err(frame_error_to_py)
+}
+
+/// pandas' pct_change of a bool Series (nothing missing to fill), `periods`
+/// not 0: each value over the one `periods` before it as Python divides
+/// bools - a False divisor is ZeroDivisionError - less 1, in an object
+/// column whose first `periods` are NaN (its shift is object). They were
+/// float64 changes, inf where pandas raises (br-frankenpandas-anux4).
+fn bool_pct_change(series: &Series, periods: i64) -> PyResult<Series> {
+    let values = series.column().values();
+    let len = values.len();
+    let lag = usize::try_from(periods.unsigned_abs()).unwrap_or(usize::MAX);
+    let mut out = vec![Scalar::Null(NullKind::NaN); len];
+    for (row, slot) in out.iter_mut().enumerate() {
+        let other = if periods >= 0 {
+            row.checked_sub(lag)
+        } else {
+            row.checked_add(lag).filter(|other| *other < len)
+        };
+        let Some(other) = other else {
+            continue;
+        };
+        let (Scalar::Bool(value), Scalar::Bool(base)) = (&values[row], &values[other]) else {
+            continue;
+        };
+        if !base {
+            return Err(PyErr::new::<pyo3::exceptions::PyZeroDivisionError, _>(
+                "division by zero",
+            ));
+        }
+        *slot = Scalar::Float64(f64::from(u8::from(*value)) - 1.0);
+    }
+    Series::new(
+        series.name(),
+        series.index().clone(),
+        Column::from_object_values(out),
+    )
+    .map_err(frame_error_to_py)
+}
+
+/// pandas' TypeError for `op` ("abs" / "neg" / "pos") over a datetime
+/// column: numpy's own (its ufunc's no-loop error) for the absolute value
+/// of naive instants, the Timestamp's for zoned ones, the DatetimeArray's
+/// for a sign. They were fp-frame's non-numeric message, `abs()` a
+/// ValueError (anux4).
+fn refuse_datetime_unary(py: Python<'_>, series: &Series, op: &str) -> PyResult<()> {
+    let DType::Datetime64 { tz } = series.dtype() else {
+        return Ok(());
+    };
+    let message = match op {
+        "abs" if tz.is_some() => "bad operand type for abs(): 'Timestamp'",
+        "abs" => {
+            let numpy = py.import("numpy")?;
+            let instants = numpy.call_method1("zeros", (1, "datetime64[ns]"))?;
+            numpy.getattr("absolute")?.call1((instants,))?;
+            "ufunc 'absolute' did not contain a loop with signature matching types \
+             <class 'numpy.dtypes.DateTime64DType'> -> None"
+        }
+        "neg" => "bad operand type for unary -: 'DatetimeArray'",
+        _ => "bad operand type for unary +: 'DatetimeArray'",
+    };
+    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(message))
+}
+
+/// pandas' diff over an object column: numpy's object subtraction, each cell
+/// less the one `periods` before it by Python's own `-` (text is its
+/// TypeError, dates subtract), the first `periods` NaN; object unless every
+/// difference is a duration, which pandas' constructor makes timedelta64.
+/// fp-frame read the cells as numbers, so text and dates were NaN
+/// (br-frankenpandas-anux4).
+fn object_diff(py: Python<'_>, series: &Series, periods: i64) -> PyResult<Series> {
+    let column = series.column();
+    let values = column.values();
+    let len = values.len();
+    let lag = usize::try_from(periods.unsigned_abs()).unwrap_or(usize::MAX);
+    let mut out = vec![Scalar::Null(NullKind::NaN); len];
+    for (row, slot) in out.iter_mut().enumerate() {
+        let other = if periods >= 0 {
+            row.checked_sub(lag)
+        } else {
+            row.checked_add(lag).filter(|other| *other < len)
+        };
+        let Some(other) = other else {
+            continue;
+        };
+        let left = cell_to_py(py, column, &values[row])?.into_bound(py);
+        let right = cell_to_py(py, column, &values[other])?.into_bound(py);
+        *slot = py_to_cell(py, &left.sub(&right)?)?;
+    }
+    let durations = out.iter().any(|value| !value.is_missing())
+        && out
+            .iter()
+            .all(|value| value.is_missing() || matches!(value, Scalar::Timedelta64(_)));
+    let column = if durations {
+        let durations = out
+            .into_iter()
+            .map(|value| {
+                if value.is_missing() {
+                    Scalar::Null(NullKind::NaT)
+                } else {
+                    value
+                }
+            })
+            .collect();
+        Column::new(DType::Timedelta64, durations).map_err(column_error_to_py)?
+    } else {
+        Column::from_object_values(out)
+    };
+    Series::new(series.name(), series.index().clone(), column).map_err(frame_error_to_py)
 }
 
 /// `series` with each `datetime.date` / naive `datetime.datetime` object
@@ -30751,6 +30924,7 @@ impl PySeries {
     /// `-s`; pandas negates a bool Series as logical NOT (it raised), an
     /// object column cell by cell ([`host_object_unary`]).
     fn __neg__(&self, py: Python<'_>) -> PyResult<PySeries> {
+        refuse_datetime_unary(py, &self.inner, "neg")?;
         if let Some(inner) = host_object_unary(py, &self.inner, "neg")? {
             return Ok(PySeries { inner });
         }
@@ -30770,12 +30944,14 @@ impl PySeries {
     }
     /// `abs(s)` and `+s`, as pandas.
     fn __abs__(&self, py: Python<'_>) -> PyResult<PySeries> {
+        refuse_datetime_unary(py, &self.inner, "abs")?;
         if let Some(inner) = host_object_unary(py, &self.inner, "abs")? {
             return Ok(PySeries { inner });
         }
         unary_keeping_width(self.inner.abs(), &self.inner)
     }
     fn __pos__(&self, py: Python<'_>) -> PyResult<PySeries> {
+        refuse_datetime_unary(py, &self.inner, "pos")?;
         if let Some(inner) = host_object_unary(py, &self.inner, "pos")? {
             return Ok(PySeries { inner });
         }
@@ -31304,7 +31480,7 @@ impl PySeries {
             self.check_numeric_only("min")?;
         }
         Python::attach(|py| {
-            if self.inner.column().holds_non_text() {
+            if compares_as_objects(&self.inner) {
                 return object_extreme(py, &self.inner, false, false, skipna)?
                     .map_or_else(|| f64::NAN.into_py_any(py), |(_, cell)| Ok(cell));
             }
@@ -31333,7 +31509,7 @@ impl PySeries {
             self.check_numeric_only("max")?;
         }
         Python::attach(|py| {
-            if self.inner.column().holds_non_text() {
+            if compares_as_objects(&self.inner) {
                 return object_extreme(py, &self.inner, true, false, skipna)?
                     .map_or_else(|| f64::NAN.into_py_any(py), |(_, cell)| Ok(cell));
             }
@@ -31538,13 +31714,27 @@ impl PySeries {
     ) -> PyResult<Py<PyAny>> {
         // Booleans and text are pandas' TypeError, not a number (o46uo).
         quantile_refusal(&[self.inner.column()], 0)?;
+        // A float32 column's quantile is float32 when numpy's percentile picks
+        // a value (lower / higher / nearest) or through pandas' masked path (a
+        // missing value present); an interpolation without one is float64
+        // (it was float32; br-frankenpandas-anux4).
+        let answer = |r: &Scalar| {
+            if self.inner.column().width() == Some(NumericWidth::Float32)
+                && matches!(interpolation, "linear" | "midpoint")
+                && !self.inner.column().has_any_missing()
+            {
+                numpy_scalar_of(py, r, None)
+            } else {
+                reduction_to_py(py, &self.inner, "quantile", r)
+            }
+        };
         if let Some(q_obj) = q {
             if let Ok(f) = q_obj.extract::<f64>() {
                 let r = self
                     .inner
                     .quantile_with_interpolation(f, interpolation)
                     .map_err(frame_error_to_py)?;
-                reduction_to_py(py, &self.inner, "quantile", &r)
+                answer(&r)
             } else if let Ok(it) = q_obj.try_iter() {
                 let mut qs = Vec::new();
                 for item in it {
@@ -31590,7 +31780,7 @@ impl PySeries {
                 .inner
                 .quantile_with_interpolation(0.5, interpolation)
                 .map_err(frame_error_to_py)?;
-            reduction_to_py(py, &self.inner, "quantile", &r)
+            answer(&r)
         }
     }
 
@@ -31665,6 +31855,7 @@ impl PySeries {
                 "bad operand type for abs(): 'str'",
             ));
         }
+        refuse_datetime_unary(py, &self.inner, "abs")?;
         if let Some(inner) = host_object_unary(py, &self.inner, "abs")? {
             return Ok(PySeries { inner });
         }
@@ -32227,6 +32418,10 @@ impl PySeries {
                 "No axis named {ax} for object type Series"
             )));
         }
+        if compares_as_objects(&self.inner) {
+            let inner = Python::attach(|py| object_accumulate(py, &self.inner, false, skipna))?;
+            return Ok(PySeries { inner });
+        }
         let r = self
             .inner
             .cummin_with_skipna(skipna)
@@ -32250,6 +32445,10 @@ impl PySeries {
                 "No axis named {ax} for object type Series"
             )));
         }
+        if compares_as_objects(&self.inner) {
+            let inner = Python::attach(|py| object_accumulate(py, &self.inner, true, skipna))?;
+            return Ok(PySeries { inner });
+        }
         let r = self
             .inner
             .cummax_with_skipna(skipna)
@@ -32265,6 +32464,11 @@ impl PySeries {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "No axis named {ax} for object type Series"
             )));
+        }
+        let column = self.inner.column();
+        if column.dtype() == DType::Utf8 && !column.is_pandas_string() {
+            let inner = Python::attach(|py| object_diff(py, &self.inner, periods))?;
+            return Ok(PySeries { inner });
         }
         let r = self.inner.diff(periods).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: r })
@@ -32298,6 +32502,10 @@ impl PySeries {
             return Ok(PySeries {
                 inner: changes.extract::<PyRef<'_, PySeries>>()?.inner.clone(),
             });
+        }
+        if self.inner.dtype() == DType::Bool && periods != 0 {
+            let inner = bool_pct_change(&self.inner, periods)?;
+            return Ok(PySeries { inner });
         }
         let r = self
             .inner
@@ -33244,7 +33452,7 @@ impl PySeries {
             )));
         }
         refuse_temporal_all_missing(&self.inner, skipna, true)?;
-        let found = if self.inner.column().holds_non_text() {
+        let found = if compares_as_objects(&self.inner) {
             object_extreme(py, &self.inner, true, true, skipna)?
                 .and_then(|(row, _)| self.inner.index().labels().get(row).cloned())
         } else {
@@ -33273,7 +33481,7 @@ impl PySeries {
             )));
         }
         refuse_temporal_all_missing(&self.inner, skipna, false)?;
-        let found = if self.inner.column().holds_non_text() {
+        let found = if compares_as_objects(&self.inner) {
             object_extreme(py, &self.inner, false, true, skipna)?
                 .and_then(|(row, _)| self.inner.index().labels().get(row).cloned())
         } else {
@@ -61857,12 +62065,16 @@ fn series_arg_extreme(
         ));
     }
     refuse_temporal_all_missing(s, skipna, max)?;
-    let position = if max {
-        s.argmax_skipna(skipna)
+    // Objects compare as Python does: text beside a missing value or an int
+    // is its TypeError (it answered the first row; anux4).
+    let position = if compares_as_objects(s) {
+        object_extreme(py, s, max, true, skipna)?
+            .map_or(-1, |(row, _)| i64::try_from(row).unwrap_or(i64::MAX))
+    } else if max {
+        s.argmax_skipna(skipna).map_err(frame_error_to_py)?
     } else {
-        s.argmin_skipna(skipna)
-    }
-    .map_err(frame_error_to_py)?;
+        s.argmin_skipna(skipna).map_err(frame_error_to_py)?
+    };
     if position == -1 {
         PyErr::warn(
             py,
@@ -73416,6 +73628,10 @@ pub struct PyResampler {
     /// of every bin; a transform answers them NaN, first
     /// (br-frankenpandas-88rwi).
     nat_rows: usize,
+    /// The bins of `target`'s rows, kept by the first reduction for the
+    /// rest - pandas' resampler holds its binner; every reduction binned
+    /// the rows again (br-frankenpandas-xmwso).
+    layout: Arc<fp_frame::ResampleLayout>,
 }
 
 impl PyResampler {
@@ -73484,6 +73700,7 @@ impl PyResampler {
                 zone: None,
                 group_keys: false,
                 nat_rows,
+                layout: Arc::default(),
             });
         };
         let unit = freq.trim_start_matches(|c: char| c.is_ascii_digit());
@@ -73527,6 +73744,7 @@ impl PyResampler {
             }),
             group_keys: false,
             nat_rows,
+            layout: Arc::default(),
         })
     }
 
@@ -73618,11 +73836,15 @@ impl PyResampler {
         );
         let (sizes, rows) = match &self.target {
             ResampleTarget::Series(s) => {
-                let resampler = s.resample_ext(&self.freq, closed, label, origin);
+                let resampler = s
+                    .resample_ext(&self.freq, closed, label, origin)
+                    .sharing(&self.layout);
                 (resampler.size(), resampler.indices())
             }
             ResampleTarget::DataFrame(df) => {
-                let resampler = df.resample_ext(&self.freq, closed, label, origin);
+                let resampler = df
+                    .resample_ext(&self.freq, closed, label, origin)
+                    .sharing(&self.layout);
                 (resampler.size(), resampler.indices())
             }
         };
@@ -73671,7 +73893,8 @@ impl PyResampler {
         }
     }
 
-    /// The same resampling over `series`.
+    /// The same resampling over `series`, its own bins (its stamps may be
+    /// another series').
     fn over(&self, series: Series) -> Self {
         Self {
             target: ResampleTarget::Series(series),
@@ -73682,6 +73905,7 @@ impl PyResampler {
             zone: self.zone.clone(),
             group_keys: self.group_keys,
             nat_rows: self.nat_rows,
+            layout: Arc::default(),
         }
     }
 
@@ -74058,12 +74282,14 @@ impl PyResampler {
                         "Cannot use numeric_only=True with SeriesGroupBy.{how} and non-numeric dtypes."
                     )));
                 }
-                let resampler = s.resample_ext(
-                    &self.freq,
-                    self.closed.as_deref(),
-                    self.label.as_deref(),
-                    self.origin.as_deref(),
-                );
+                let resampler = s
+                    .resample_ext(
+                        &self.freq,
+                        self.closed.as_deref(),
+                        self.label.as_deref(),
+                        self.origin.as_deref(),
+                    )
+                    .sharing(&self.layout);
                 let res = self.zoned_series(series_op(&resampler).map_err(to_py)?)?;
                 Ok(Py::new(py, PySeries { inner: res })?.into_any())
             }
@@ -74075,6 +74301,7 @@ impl PyResampler {
                         self.label.as_deref(),
                         self.origin.as_deref(),
                     )
+                    .sharing(&self.layout)
                     .numeric_only(numeric_only);
                 let res = self.zoned_frame(frame_op(&resampler).map_err(to_py)?)?;
                 Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
@@ -74111,6 +74338,7 @@ impl PyResampler {
             let names: Vec<&str> = names.iter().map(String::as_str).collect();
             ResampleTarget::DataFrame(frame.select_columns(&names).map_err(frame_error_to_py)?)
         };
+        // The columns keep the frame's rows, so its bins.
         Ok(Self {
             target,
             freq: self.freq.clone(),
@@ -74120,6 +74348,7 @@ impl PyResampler {
             zone: self.zone.clone(),
             group_keys: self.group_keys,
             nat_rows: self.nat_rows,
+            layout: Arc::clone(&self.layout),
         })
     }
 
@@ -74179,6 +74408,7 @@ impl PyResampler {
                         self.label.as_deref(),
                         self.origin.as_deref(),
                     )
+                    .sharing(&self.layout)
                     .count()
                     .map_err(frame_error_to_py)?;
                 let res = self.zoned_series(res)?;
@@ -74192,6 +74422,7 @@ impl PyResampler {
                         self.label.as_deref(),
                         self.origin.as_deref(),
                     )
+                    .sharing(&self.layout)
                     .count()
                     .map_err(frame_error_to_py)?;
                 let res = self.zoned_frame(res)?;

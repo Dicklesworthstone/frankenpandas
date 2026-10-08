@@ -29384,6 +29384,26 @@ impl Column {
     /// failing conversion. Missing values pass through as the
     /// target dtype's canonical missing representation.
     pub fn astype(&self, target: DType) -> Result<Self, ColumnError> {
+        // A float32 column's text is numpy's: each value's shortest float32
+        // digits ('0.1'), not those of the float64 its bits read as
+        // ('0.10000000149011612'; br-frankenpandas-anux4).
+        if target == DType::Utf8
+            && self.dtype == DType::Float64
+            && self.width == Some(NumericWidth::Float32)
+        {
+            let values: Vec<Scalar> = self
+                .values()
+                .iter()
+                .map(|value| match value {
+                    #[allow(clippy::cast_possible_truncation)] // a float32 column's value
+                    Scalar::Float64(value) if value.is_finite() => {
+                        Scalar::Float64(format!("{}", *value as f32).parse().unwrap_or(*value))
+                    }
+                    other => other.clone(),
+                })
+                .collect();
+            return Self::new(DType::Float64, values)?.astype(target);
+        }
         // A DType names the 64-bit storage: astype('int64') of an int32
         // column is int64 (its same-dtype shortcut kept the width), astype
         // ('float64') of float32 is float64 holding the float32 values.
