@@ -29347,9 +29347,10 @@ impl Series {
         };
         let index_column_name = column_key(&index_label);
 
-        let index_values = index_labels_to_column_scalars(self.index.labels());
-
-        let index_column = Column::from_values(index_values)?;
+        let index_column = match held_datetime_index_column(&self.index) {
+            Some(column) => column,
+            None => Column::from_values(index_labels_to_column_scalars(self.index.labels()))?,
+        };
         // A tz-aware index comes back as a column of its dtype.
         let index_column = match self.index.tz() {
             Some(zone) => index_column.with_dtype(DType::datetime64_tz(zone)),
@@ -34553,6 +34554,18 @@ fn nanos_validity(nanos: &[i64]) -> fp_columnar::ValidityMask {
         })
         .collect();
     fp_columnar::ValidityMask::from_words(words, nanos.len())
+}
+
+/// The column of an index holding its instants as instants (a typed
+/// DatetimeIndex backing, a date_range), NaT missing: reset_index built it
+/// a Scalar a row (br-frankenpandas-lsn8d).
+fn held_datetime_index_column(index: &Index) -> Option<Column> {
+    let nanos = index.datetime64_label_values()?;
+    let validity = nanos_validity(&nanos);
+    Some(Column::from_datetime64_values_with_validity(
+        nanos.into_owned(),
+        validity,
+    ))
 }
 
 /// A column of `dtype` - a datetime of any zone, or a timedelta - holding
@@ -83570,9 +83583,13 @@ impl DataFrame {
         // per-label Scalar materialize + re-validation. An all-Int64 index (default
         // RangeIndex / int indexes) has no missing labels, so from_i64_values is
         // bit-identical to from_values([Scalar::Int64..]).
-        let index_column = match self.index.int64_label_values() {
-            Some(view) => Column::from_i64_values_owned(view.as_ref().clone()),
-            None => Column::from_values(Self::index_labels_to_scalars(self.index.labels()))?,
+        // Held instants first: an empty datetime index is vacuously all-Int64.
+        let index_column = match held_datetime_index_column(&self.index) {
+            Some(column) => column,
+            None => match self.index.int64_label_values() {
+                Some(view) => Column::from_i64_values_owned(view.as_ref().clone()),
+                None => Column::from_values(Self::index_labels_to_scalars(self.index.labels()))?,
+            },
         };
         // A tz-aware index comes back as a column of its dtype
         // (datetime64[ns, zone]); it came back naive.

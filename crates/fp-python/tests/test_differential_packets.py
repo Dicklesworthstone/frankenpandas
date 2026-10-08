@@ -30685,6 +30685,169 @@ def test_datetime_index_loc_like_pandas_lsn8d(index: str, key: str, frame: bool)
     assert run(fpd) == run(pd)
 
 
+_LSN8D2_NAT = np.concatenate([_LSN8D_STAMPS[:3], np.array(["NaT"], dtype="datetime64[ns]"), _LSN8D_STAMPS[3:5]])
+_LSN8D2_INDEXES = {
+    "ascending": lambda m: m.DatetimeIndex(_LSN8D_STAMPS),
+    "descending": lambda m: m.DatetimeIndex(_LSN8D_STAMPS[::-1]),
+    "unsorted": lambda m: m.DatetimeIndex(_LSN8D_STAMPS[[2, 0, 5, 1, 4, 3]]),
+    "holding NaT": lambda m: m.DatetimeIndex(_LSN8D2_NAT),
+    "with duplicates": lambda m: m.DatetimeIndex(_LSN8D_STAMPS[[0, 1, 1, 3, 4, 5]]),
+    "aware": lambda m: m.DatetimeIndex(_LSN8D_STAMPS).tz_localize("UTC"),
+    "named": lambda m: m.DatetimeIndex(_LSN8D_STAMPS, name="when"),
+    "every other": lambda m: m.DatetimeIndex(_LSN8D_STAMPS)[::2],
+    "empty": lambda m: m.DatetimeIndex(np.array([], dtype="datetime64[ns]")),
+    "Index(array)": lambda m: m.Index(_LSN8D2_NAT),
+    "a Series' index": lambda m: m.Series(np.arange(6.0), index=_LSN8D_STAMPS[[2, 0, 5, 1, 4, 3]]).index,
+    "a date_range": lambda m: m.date_range("2020-01-01", periods=6, freq="D", name="day"),
+}
+
+
+def _lsn8d2_index(out: Any) -> Any:
+    return (type(out).__name__, str(out.dtype), out.name, [str(label) for label in out], getattr(out, "freqstr", None))
+
+
+def _lsn8d2_frame(out: Any) -> Any:
+    return ([str(dtype) for dtype in out.dtypes], out.astype(str).values.tolist(), [str(label) for label in out.index])
+
+
+_LSN8D2_OPS = {
+    "asi8": lambda m, i: (type(i.asi8).__name__, str(i.asi8.dtype), i.asi8.tolist()),
+    "values": lambda m, i: (str(i.values.dtype), i.values.astype("int64").tolist()),
+    "iterate": lambda m, i: [str(label) for label in i],
+    "i[2]": lambda m, i: str(i[2]),
+    "i[-1]": lambda m, i: str(i[-1]),
+    "i[::2]": lambda m, i: _lsn8d2_index(i[::2]),
+    "i[1:4]": lambda m, i: _lsn8d2_index(i[1:4]),
+    "i[::-2]": lambda m, i: _lsn8d2_index(i[::-2]),
+    "i[4:1:-1]": lambda m, i: _lsn8d2_index(i[4:1:-1]),
+    "i[10:20]": lambda m, i: _lsn8d2_index(i[10:20]),
+    "i[positions array]": lambda m, i: _lsn8d2_index(i[np.array([2, -1, 0])]),
+    "i[positions list]": lambda m, i: _lsn8d2_index(i[[1, 0, -2]]),
+    "i[a mask]": lambda m, i: _lsn8d2_index(i[np.array([False, True, True, True, False, False])]),
+    "take": lambda m, i: _lsn8d2_index(i.take([4, 0, 2])),
+    "sort_values": lambda m, i: _lsn8d2_index(i.sort_values()),
+    "sort_values, an indexer": lambda m, i: (lambda out: (_lsn8d2_index(out[0]), list(out[1])))(i.sort_values(return_indexer=True)),
+    "sort_values descending": lambda m, i: _lsn8d2_index(i.sort_values(ascending=False)),
+    "argsort": lambda m, i: list(i.argsort()),
+    "unique": lambda m, i: _lsn8d2_index(i.unique()),
+    "monotonic": lambda m, i: (i.is_monotonic_increasing, i.is_monotonic_decreasing),
+    "is_unique / hasnans": lambda m, i: (i.is_unique, i.hasnans),
+    "tz_localize UTC": lambda m, i: _lsn8d2_index(i.tz_localize("UTC")),
+    "tz_localize Tokyo": lambda m, i: _lsn8d2_index(i.tz_localize("Asia/Tokyo")),
+    "tz_localize UTC, then None": lambda m, i: _lsn8d2_index(i.tz_localize("UTC").tz_localize(None)),
+    "shift freq": lambda m, i: _lsn8d2_index(i.shift(1, freq="D")),
+    "union": lambda m, i: _lsn8d2_index(i.union(i[:3])),
+    "intersection": lambda m, i: _lsn8d2_index(i.intersection(i[2:])),
+    "difference": lambda m, i: _lsn8d2_index(i.difference(i[:2])),
+    "min / max": lambda m, i: (str(i.min()), str(i.max())),
+    "year": lambda m, i: [str(year) for year in i.year],
+    "equals a copy": lambda m, i: i.equals(i.copy()),
+    # NEGATIVE: an index moved by an hour, or put in a zone, is another.
+    "equals a shifted (NEGATIVE)": lambda m, i: i.equals(i.shift(1, freq="h")),
+    "equals itself in UTC (NEGATIVE)": lambda m, i: i.equals(i.tz_localize("UTC")),
+    "Series reset_index": lambda m, i: _lsn8d2_frame(m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").reset_index()),
+    "frame reset_index": lambda m, i: _lsn8d2_frame(m.DataFrame({"v": np.arange(len(i), dtype="float64")}, index=i).reset_index()),
+    "sort_index": lambda m, i: _lsn8d2_frame(m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").sort_index().to_frame()),
+    "Series shift freq": lambda m, i: _lsn8d2_frame(m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").shift(1, freq="D").to_frame()),
+    "Series shift -2 hours": lambda m, i: _lsn8d2_index(m.Series(np.arange(len(i), dtype="float64"), index=i).shift(-2, freq="h").index),
+}
+# Set ops and argsort of a datetime index diverge from pandas on these
+# (NaT placed first, difference unsorted and without its freq, union
+# deduplicated): br-frankenpandas-wvpfb, older than this bead.
+_LSN8D2_WVPFB = {
+    ("a date_range", "difference"),
+    ("descending", "difference"),
+    ("unsorted", "difference"),
+    ("holding NaT", "difference"),
+    ("Index(array)", "difference"),
+    ("a Series' index", "difference"),
+    ("holding NaT", "argsort"),
+    ("Index(array)", "argsort"),
+    ("holding NaT", "union"),
+    ("Index(array)", "union"),
+    ("with duplicates", "union"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    ("index", "op"),
+    [
+        pytest.param(index, op, marks=pytest.mark.xfail(strict=True, reason="br-frankenpandas-wvpfb"))
+        if (index, op) in _LSN8D2_WVPFB
+        else (index, op)
+        for index in _LSN8D2_INDEXES
+        for op in _LSN8D2_OPS
+    ],
+)
+def test_typed_datetime_index_like_pandas_lsn8d(index: str, op: str) -> None:
+    # A DatetimeIndex built from an array holds its instants, as do the
+    # indexes taken, sliced, sorted, localized or reset from one (it was a
+    # 32 B label a row: DatetimeIndex(stamps) 7.2 ms a million, pandas 0.01,
+    # asi8 38 ms; br-frankenpandas-lsn8d): each op vs pandas, or the same
+    # exception kind.
+    def run(m: Any) -> Any:
+        try:
+            return _LSN8D2_OPS[op](m, _LSN8D2_INDEXES[index](m))
+        except Exception as error:  # noqa: BLE001
+            return ("raises", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+_LSN8D3_ROWS = {
+    "sorted dates": lambda m: m.DatetimeIndex(_LSN8D_STAMPS),
+    "unsorted dates": lambda m: m.DatetimeIndex(_LSN8D_STAMPS[[2, 0, 5, 1, 4, 3]]),
+    "a date_range": lambda m: m.date_range("2020-01-01", periods=6, freq="D", name="day"),
+    "a RangeIndex": lambda m: m.RangeIndex(6),
+    "text": lambda m: m.Index(["f", "b", "e", "a", "d", "c"]),
+    # NEGATIVE: equal indexes repeating a label pair every copy, and unequal
+    # ones match labels - neither is a row-for-row pairing.
+    "dates repeating one (NEGATIVE)": lambda m: m.DatetimeIndex(_LSN8D_STAMPS[[0, 1, 1, 3, 4, 5]]),
+    "unequal dates (NEGATIVE)": lambda m: m.DatetimeIndex(_LSN8D_STAMPS),
+}
+_LSN8D3_JOINS = {
+    "join": lambda left, right: left.join(right),
+    "join, sort": lambda left, right: left.join(right, sort=True),
+    "join inner": lambda left, right: left.join(right, how="inner"),
+    "join outer": lambda left, right: left.join(right, how="outer"),
+    "join right": lambda left, right: left.join(right, how="right"),
+    "join, a shared column": lambda left, right: left.join(right.rename(columns={"b": "a"}), lsuffix="_l", rsuffix="_r"),
+    "merge on the indexes, indicator": lambda left, right: left.merge(right, left_index=True, right_index=True, indicator=True),
+    "merge on the indexes, 1:1": lambda left, right: left.merge(right, left_index=True, right_index=True, validate="1:1"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("rows", list(_LSN8D3_ROWS))
+@pytest.mark.parametrize("join", list(_LSN8D3_JOINS))
+def test_join_on_equal_indexes_like_pandas_lsn8d(rows: str, join: str) -> None:
+    # Two frames on equal unique indexes pair row for row, the index kept
+    # (each side's labels became a key column, were merged and set back:
+    # df.join 66 ms a million on equal date indexes, pandas 3.3;
+    # br-frankenpandas-lsn8d): rows, values, columns, index and its freq vs
+    # pandas, or the same exception kind.
+    def run(m: Any) -> Any:
+        left_rows = _LSN8D3_ROWS[rows](m)
+        right_rows = _LSN8D3_ROWS[rows](m)
+        if rows.startswith("unequal"):
+            right_rows = right_rows[::-1]
+        left = m.DataFrame({"a": np.arange(6.0)}, index=left_rows)
+        right = m.DataFrame({"b": np.arange(6.0) * 10}, index=right_rows)
+        try:
+            out = _LSN8D3_JOINS[join](left, right)
+        except Exception as error:  # noqa: BLE001
+            return ("raises", type(error).__name__)
+        return (
+            [str(column) for column in out.columns],
+            out.astype(str).values.tolist(),
+            (type(out.index).__name__, out.index.name, [str(label) for label in out.index]),
+            getattr(out.index, "freqstr", None),
+        )
+
+    assert run(fpd) == run(pd)
+
+
 def _geqye_dates(m: Any) -> Any:
     return m.Series(np.array(["2020-01-05", "NaT", "2020-03-01"], dtype="datetime64[ns]"))
 

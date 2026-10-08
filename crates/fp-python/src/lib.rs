@@ -201,6 +201,30 @@ fn shift_index_by_freq(
             1,
         )?;
     }
+    let overflow = || PyErr::new::<pyo3::exceptions::PyOverflowError, _>("Timestamp overflow");
+    // An index holding its instants moves them as they are, NaT staying
+    // (each became a label and was rebuilt: s.shift(freq='D') 27.6 ms a
+    // million, pandas 7.7; br-frankenpandas-lsn8d).
+    if let Some(nanos) = index.datetime64_label_values() {
+        let step = parse_freq_to_nanos(freq)?
+            .checked_mul(periods)
+            .ok_or_else(overflow)?;
+        let moved = nanos
+            .iter()
+            .map(|&at| {
+                if at == i64::MIN {
+                    Ok(at)
+                } else {
+                    at.checked_add(step).ok_or_else(overflow)
+                }
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        return Index::from_datetime64_values(moved)
+            .set_names(index.name())
+            .with_tz(index.tz())
+            .map(|shifted| shifted.with_freq(index.freq().map(str::to_owned)))
+            .map_err(index_error_to_py);
+    }
     let labels = index.labels();
     let kind = |datetime: bool| {
         labels.iter().any(|label| match label {
@@ -219,7 +243,6 @@ fn shift_index_by_freq(
             "This method is only implemented for DatetimeIndex, PeriodIndex and TimedeltaIndex; Got type Index",
         ));
     }
-    let overflow = || PyErr::new::<pyo3::exceptions::PyOverflowError, _>("Timestamp overflow");
     let step = parse_freq_to_nanos(freq)?
         .checked_mul(periods)
         .ok_or_else(overflow)?;
@@ -8876,7 +8899,7 @@ fn typed_index_of(data: &Bound<'_, PyAny>) -> PyResult<Option<Index>> {
             .call_method1("view", ("int64",))?;
         let nanos = ndarray_elements::<i64>(data.py(), &nanos)?;
         return Ok(Some(if kind == "M" {
-            Index::from_datetime64(nanos)
+            Index::from_datetime64_values(nanos)
         } else {
             Index::from_timedelta64(nanos)
         }));
@@ -8890,6 +8913,21 @@ fn typed_index_of(data: &Bound<'_, PyAny>) -> PyResult<Option<Index>> {
         data.py(),
         data,
     )?)))
+}
+
+/// A numpy array of `dtype` (int64, datetime64[ns], ...) over `values`, its
+/// bytes written once into a bytearray numpy reads in place: a Vec<i64>
+/// handed to Python became a list of a million ints (DatetimeIndex.asi8
+/// 39 ms, pandas' array 0.0003; br-frankenpandas-lsn8d).
+fn i64_ndarray<'py>(py: Python<'py>, values: &[i64], dtype: &str) -> PyResult<Bound<'py, PyAny>> {
+    let buffer = pyo3::types::PyByteArray::new_with(py, values.len() * 8, |bytes| {
+        for (chunk, value) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(values) {
+            *chunk = value.to_ne_bytes();
+        }
+        Ok(())
+    })?;
+    py.import("numpy")?
+        .call_method1("frombuffer", (buffer, dtype))
 }
 
 /// A native-order array of a numpy dtype narrower than 64 bits, or of
@@ -10901,9 +10939,10 @@ fn float_index_labels(labels: Vec<IndexLabel>) -> Vec<IndexLabel> {
 /// are left as they are (rebuilding them dropped the zone when a NaT was
 /// among them; br-frankenpandas-wtu8e).
 fn float_labelled(index: Index) -> Index {
-    // Typed ints hold no float and no missing label: their million labels
-    // were made only to find none (br-frankenpandas-lnb7i).
-    if index.has_int64_backing() {
+    // Typed ints hold no float and no missing label, instants no int, float
+    // or null label: their million labels were made only to find none
+    // (br-frankenpandas-lnb7i, lsn8d).
+    if index.has_int64_backing() || index.label_kinds().within(fp_index::LabelKinds::DATETIME64) {
         return index;
     }
     let labels = index.labels();
@@ -10924,19 +10963,7 @@ fn float_labelled(index: Index) -> Index {
 /// kept, where its million labels were copied out
 /// (br-frankenpandas-so0mr) - anything else its extracted labels.
 fn index_arg_rows(index: &Bound<'_, PyAny>, len: usize) -> PyResult<Index> {
-    let rows = if let Ok(dti) = index.extract::<PyRef<'_, PyDatetimeIndex>>() {
-        dti.inner.as_index().clone()
-    } else if let Ok(plain) = plain_index_ref(index) {
-        // An Index is its own rows, its labels shared: they were copied out
-        // and rebuilt (Series(v, index=Index(arr)) 14.7 ms a million;
-        // br-frankenpandas-nmna9).
-        plain.inner.clone()
-    } else if let Some(typed) = typed_index_of(index)? {
-        // A range or an int64 array, typed without a label each.
-        typed
-    } else {
-        Index::new(extract_index_labels(Some(index), len)?)
-    };
+    let rows = index_arg_index(index)?;
     if rows.len() != len {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
             "Length of values ({len}) does not match length of index ({})",
@@ -10944,6 +10971,27 @@ fn index_arg_rows(index: &Bound<'_, PyAny>, len: usize) -> PyResult<Index> {
         )));
     }
     Ok(rows)
+}
+
+/// The rows an `index=` argument names, of any length: an Index is its
+/// own rows, shared - a DatetimeIndex's typed instants among them - a range
+/// or an int64 / datetime64 array typed, anything else its labels.
+fn index_arg_index(index: &Bound<'_, PyAny>) -> PyResult<Index> {
+    Ok(
+        if let Ok(dti) = index.extract::<PyRef<'_, PyDatetimeIndex>>() {
+            dti.inner.as_index().clone()
+        } else if let Ok(plain) = plain_index_ref(index) {
+            // An Index is its own rows, its labels shared: they were copied
+            // out and rebuilt (Series(v, index=Index(arr)) 14.7 ms a million;
+            // br-frankenpandas-nmna9).
+            plain.inner.clone()
+        } else if let Some(typed) = typed_index_of(index)? {
+            // A range or an int64 array, typed without a label each.
+            typed
+        } else {
+            Index::new(extract_index_labels(Some(index), 0)?)
+        },
+    )
 }
 
 /// Extract index labels from an optional Python object (Index, list, tuple, sequence, or None).
@@ -11879,6 +11927,17 @@ fn frame_fill_area(
     }
     Ok(out)
 }
+
+/// The label kinds an index of one kind holds when [`Index`]'s order of its
+/// labels is pandas' order of their values (ints, floats, text, instants,
+/// durations): a sorted one of these needs no sort.
+const SINGLE_ORDERABLE_KINDS: [fp_index::LabelKinds; 5] = [
+    fp_index::LabelKinds::INT64,
+    fp_index::LabelKinds::FLOAT64,
+    fp_index::LabelKinds::UTF8,
+    fp_index::LabelKinds::DATETIME64,
+    fp_index::LabelKinds::TIMEDELTA64,
+];
 
 /// The positions ordering `index` as pandas' nargsort does: its present
 /// labels ascending, or descending with tied labels in index order, and the
@@ -14110,6 +14169,23 @@ impl PyIndex {
                 }
                 nargsort(&keyed, ascending, na_first)
             }
+            // An index of one orderable kind already in order, holding no
+            // missing label, is its own sort, as pandas returns it: its
+            // positions were sorted and taken (a sorted DatetimeIndex 5 ms a
+            // million, pandas 0.003; br-frankenpandas-lsn8d). Mixed kinds
+            // keep the sort, which refuses them as pandas does.
+            None if ascending
+                && SINGLE_ORDERABLE_KINDS.contains(&self.inner.label_kinds())
+                && !self.inner.hasnans()
+                && self.inner.is_monotonic_increasing() =>
+            {
+                let order = if return_indexer {
+                    (0..self.inner.len()).collect()
+                } else {
+                    Vec::new()
+                };
+                return sorted_index_result(py, self.clone(), order, return_indexer);
+            }
             None => nargsort(&self.inner, ascending, na_first),
         };
         let sorted = PyIndex {
@@ -15202,12 +15278,9 @@ impl PyDatetimeIndex {
                 )
                 .map_err(to_datetime_error)?;
                 converted_datetime_index(&dt_series)?.inner
-            } else if let Some(index) = typed_index_of(d)?.filter(|index| {
-                index
-                    .labels()
-                    .iter()
-                    .all(|label| matches!(label, IndexLabel::Datetime64(_)))
-            }) {
+            } else if let Some(index) = typed_index_of(d)?
+                .filter(|index| index.label_kinds().within(fp_index::LabelKinds::DATETIME64))
+            {
                 // A datetime64 array (date_range(...).values): its dates
                 // (it raised TypeError; br-frankenpandas-v0p5k).
                 DatetimeIndex::from_index(index)
@@ -15355,9 +15428,11 @@ impl PyDatetimeIndex {
         self.inner.has_duplicates()
     }
 
+    /// pandas' `DatetimeIndex.asi8`: an int64 numpy array of the instants,
+    /// NaT as i64::MIN (it was a list).
     #[getter]
-    fn asi8(&self) -> Vec<i64> {
-        self.inner.asi8().to_vec()
+    fn asi8<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        i64_ndarray(py, &self.inner.asi8(), "int64")
     }
 
     #[getter]
@@ -15445,16 +15520,9 @@ impl PyDatetimeIndex {
     /// was a list of nanosecond integers).
     #[getter]
     fn values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let bytes: Vec<u8> = self
-            .inner
-            .values()
-            .into_iter()
-            .flat_map(|nanos| nanos.unwrap_or(i64::MIN).to_ne_bytes())
-            .collect();
-        py.import("numpy")?.call_method1(
-            "frombuffer",
-            (pyo3::types::PyByteArray::new(py, &bytes), "datetime64[ns]"),
-        )
+        // The instants, NaT as i64::MIN, read in place by numpy (an Option a
+        // row and a byte Vec were built first; br-frankenpandas-lsn8d).
+        i64_ndarray(py, &self.inner.asi8(), "datetime64[ns]")
     }
 
     /// pandas' `to_numpy(dtype=None, copy=False, na_value=...)`: `na_value`
@@ -15811,19 +15879,15 @@ impl PyDatetimeIndex {
         }
         if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
             let s_idx = slice.indices(self.inner.len() as isize)?;
-            let mut sliced = Vec::new();
-            let asi8 = self.inner.asi8();
-            let mut i = s_idx.start;
-            if s_idx.step > 0 {
-                while i < s_idx.stop {
-                    sliced.push(asi8[i as usize]);
-                    i += s_idx.step;
-                }
-            } else if s_idx.step < 0 {
-                while i > s_idx.stop {
-                    sliced.push(asi8[i as usize]);
-                    i += s_idx.step;
-                }
+            // A run of positions is a view of the same instants (name, zone
+            // and freq kept); any other step reads only the stamps it picks
+            // - the whole asi8 was copied for every slice (idx[::2] 3.7 ms a
+            // million, pandas 0.003; br-frankenpandas-lsn8d).
+            if s_idx.step == 1 {
+                let start = usize::try_from(s_idx.start).unwrap_or(0);
+                let index = self.inner.as_index().slice(start, s_idx.slicelength);
+                let inner = DatetimeIndex::from_index(index).map_err(index_error_to_py)?;
+                return Ok(Py::new(py, Self { inner })?.into_any());
             }
             // A slice keeps the freq, scaled by its step ('D'[::2] is '2D',
             // [::-1] '-1D'), as pandas.
@@ -15831,25 +15895,46 @@ impl PyDatetimeIndex {
                 .inner
                 .freq()
                 .and_then(|freq| fp_index::scale_freq(&freq, i64::try_from(s_idx.step).ok()?));
+            if let (Ok(start), Ok(step)) =
+                (usize::try_from(s_idx.start), usize::try_from(s_idx.step))
+                && let Some(index) =
+                    self.inner
+                        .as_index()
+                        .stepped_view(start, step, s_idx.slicelength)
+            {
+                let inner = DatetimeIndex::from_index(index)
+                    .map_err(index_error_to_py)?
+                    .with_freq(freq);
+                return Ok(Py::new(py, Self { inner })?.into_any());
+            }
+            let sliced: Vec<i64> = (0..s_idx.slicelength)
+                .filter_map(|k| {
+                    let at = s_idx.start + isize::try_from(k).ok()? * s_idx.step;
+                    self.inner.asi8_at(usize::try_from(at).ok()?)
+                })
+                .collect();
             let inner = self.with_nanos(sliced).inner.with_freq(freq);
             return Ok(Py::new(py, Self { inner })?.into_any());
         }
         // A boolean mask keeps the freq when it selects a run (pandas turns
         // it into a slice); integer positions drop it. Both raised TypeError.
-        let asi8 = self.inner.asi8();
+        // Only the stamps picked are read, an array of positions through
+        // its buffer (the whole asi8 was copied, the positions read a
+        // Python int each: idx[perm] 42 ms a million; lsn8d).
+        let len = self.inner.len();
         let (positions, run) = if let Some(mask) = bool_mask_key(key) {
-            if mask.len() != asi8.len() {
+            if mask.len() != len {
                 return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
                     "boolean index did not match indexed array along axis 0; size of axis is {} but size of corresponding boolean axis is {}",
-                    asi8.len(),
+                    len,
                     mask.len()
                 )));
             }
             let positions: Vec<usize> = (0..mask.len()).filter(|&i| mask[i]).collect();
             let run = positions.windows(2).all(|pair| pair[1] == pair[0] + 1);
             (positions, run)
-        } else if let Ok(requested) = key.extract::<Vec<i64>>() {
-            let length = i64::try_from(asi8.len()).unwrap_or(i64::MAX);
+        } else if let Ok(Positions(requested)) = key.extract::<Positions>() {
+            let length = i64::try_from(len).unwrap_or(i64::MAX);
             let resolve = |position: i64| -> PyResult<usize> {
                 let at = if position < 0 {
                     position + length
@@ -15858,7 +15943,7 @@ impl PyDatetimeIndex {
                 };
                 usize::try_from(at)
                     .ok()
-                    .filter(|&at| at < asi8.len())
+                    .filter(|&at| at < len)
                     .ok_or_else(|| {
                         PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
                             "index {position} is out of bounds for axis 0 with size {length}"
@@ -15875,7 +15960,10 @@ impl PyDatetimeIndex {
                 "Index indices must be integers, slices, boolean masks or integer arrays",
             ));
         };
-        let picked: Vec<i64> = positions.iter().map(|&position| asi8[position]).collect();
+        let picked: Vec<i64> = positions
+            .iter()
+            .filter_map(|&position| self.inner.asi8_at(position))
+            .collect();
         let freq = self.inner.freq().filter(|_| run);
         let inner = self.with_nanos(picked).inner.with_freq(freq);
         Ok(Py::new(py, Self { inner })?.into_any())
@@ -16136,6 +16224,22 @@ impl PyDatetimeIndex {
         key: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let this = slf.borrow();
+        // Instants already in order, no NaT among them, are their own sort,
+        // as pandas returns them: they were sorted and taken (5 ms a
+        // million, pandas 0.003; br-frankenpandas-lsn8d).
+        if key.is_none_or(|key| key.is_none())
+            && ascending
+            && !this.inner.hasnans()
+            && this.inner.is_monotonic_increasing()
+        {
+            na_position_first(na_position)?;
+            let order = if return_indexer {
+                (0..this.inner.len()).collect()
+            } else {
+                Vec::new()
+            };
+            return sorted_index_result(slf.py(), this.clone(), order, return_indexer);
+        }
         let order = typed_sort_order(
             slf.as_any(),
             this.inner.len(),
@@ -21582,9 +21686,12 @@ impl PyPeriodIndex {
         index_array(slf.as_any())
     }
 
+    /// pandas' `PeriodIndex.asi8`: an int64 numpy array of the ordinals (it
+    /// was a list).
     #[getter]
-    fn asi8(&self) -> Vec<i64> {
-        self.inner.values().iter().map(|p| p.ordinal).collect()
+    fn asi8<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let ordinals: Vec<i64> = self.inner.values().iter().map(|p| p.ordinal).collect();
+        i64_ndarray(py, &ordinals, "int64")
     }
 
     fn asof(&self, py: Python<'_>, label: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -43059,15 +43166,18 @@ impl PyDataFrame {
                     }
                 }
 
-                let common_labels = if let Some(idx_arg) = index {
-                    Some(extract_index_labels(Some(idx_arg), 0)?)
+                // An index given is its own rows, shared: its labels were
+                // copied out and rebuilt (a DatetimeIndex lost its typed
+                // instants; br-frankenpandas-lsn8d).
+                let common_rows = if let Some(idx_arg) = index {
+                    Some(index_arg_index(idx_arg)?)
                 } else if !series_indices.is_empty() {
                     // pandas' union_indexes: identical indexes keep their
                     // order, others are united and SORTED (it kept the
                     // first-seen order).
                     let first = series_indices[0].labels();
                     if series_indices.iter().all(|idx| idx.labels() == first) {
-                        Some(first.to_vec())
+                        Some(Index::new(first.to_vec()))
                     } else {
                         let mut seen = HashSet::new();
                         let mut union_labels: Vec<IndexLabel> = series_indices
@@ -43077,7 +43187,7 @@ impl PyDataFrame {
                             .cloned()
                             .collect();
                         sort_union_labels(&mut union_labels)?;
-                        Some(union_labels)
+                        Some(Index::new(union_labels))
                     }
                 } else {
                     None
@@ -43092,16 +43202,16 @@ impl PyDataFrame {
                     refuse_unordered_set(&value)?;
 
                     let col = if let Ok(s) = value.extract::<PyRef<'_, PySeries>>() {
-                        if let Some(target_labels) = common_labels
+                        if let Some(target) = common_rows
                             .as_ref()
-                            .filter(|target| s.inner.index().labels() != target.as_slice())
+                            .filter(|target| s.inner.index().labels() != target.labels())
                         {
                             // A Series already on the target labels - repeated
                             // labels too - is taken as it is, as pandas' (the
                             // reindex refused a repeated index;
                             // br-frankenpandas-rbiki).
                             let reindexed =
-                                s.inner.reindex(target_labels.clone()).map_err(|e| {
+                                s.inner.reindex(target.labels().to_vec()).map_err(|e| {
                                     PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
                                 })?;
                             reindexed.column().clone()
@@ -43211,7 +43321,7 @@ impl PyDataFrame {
                         // an aware instant in its zone (it was a Scalar a
                         // row, naive; br-frankenpandas-ufwpf).
                         let zone = scalar_zone(&value)?;
-                        let Some(nr) = common_labels.as_ref().map(Vec::len) else {
+                        let Some(nr) = common_rows.as_ref().map(Index::len) else {
                             detected_order.push(col_name.clone());
                             scalar_columns.push((col_name, scalar, zone));
                             continue;
@@ -43241,8 +43351,8 @@ impl PyDataFrame {
                 // No index= and no Series is the default range, built as one:
                 // its labels were made, scanned back into a range and dropped
                 // (half of a DataFrame of arrays; br-frankenpandas-1ze1o).
-                let rows = match common_labels {
-                    Some(labels) => Index::new(labels),
+                let rows = match common_rows {
+                    Some(rows) => rows,
                     None => Index::default_range(n_rows),
                 };
 
@@ -79582,11 +79692,39 @@ fn merge_impl(
             frame.with_column(KEY, key).map_err(frame_error_to_py)
         };
         let key = vec![KEY.to_owned()];
-        let merged = run(&keyed(left)?, &keyed(right)?, &key, &key)?
-            .set_index(KEY, true)
-            .map_err(frame_error_to_py)?;
-        let labels = merged.index().labels().to_vec();
-        let frame = merged.set_axis(labels, 0).map_err(frame_error_to_py)?;
+        // Two equal unique indexes pair row for row - pandas' Index.join of
+        // equal ones is the index itself - so the rows merge on their
+        // positions, the index kept: each side's labels became a key column
+        // of Scalars, were merged and set back as the index (df.join 66 ms
+        // a million on equal date indexes, pandas 3.3; br-frankenpandas-lsn8d).
+        // A sort - and an outer join, which pandas sorts - orders those
+        // positions only when the labels already are.
+        let same_rows = join_type != fp_join::JoinType::Cross
+            && left.index().row_multiindex().is_none()
+            && left.index().len() == right.index().len()
+            && ((!args.sort && join_type != fp_join::JoinType::Outer)
+                || left.index().is_monotonic_increasing())
+            && left.index() == right.index()
+            && left.index().is_unique();
+        let frame = if same_rows {
+            let rows = i64::try_from(left.len()).map_err(|_| not_implemented("2^63 rows"))?;
+            let positions = Column::from_i64_values_owned((0..rows).collect());
+            let at_positions = |frame: &DataFrame| -> PyResult<DataFrame> {
+                frame
+                    .with_column(KEY, positions.clone())
+                    .map_err(frame_error_to_py)
+            };
+            run(&at_positions(left)?, &at_positions(right)?, &key, &key)?
+                .set_index(KEY, true)
+                .and_then(|merged| merged.with_index(left.index().clone()))
+                .map_err(frame_error_to_py)?
+        } else {
+            let merged = run(&keyed(left)?, &keyed(right)?, &key, &key)?
+                .set_index(KEY, true)
+                .map_err(frame_error_to_py)?;
+            let labels = merged.index().labels().to_vec();
+            merged.set_axis(labels, 0).map_err(frame_error_to_py)?
+        };
         // pandas' index name (see [`index_join_name`]) - never the internal
         // key column's, which leaked (fvsao.31).
         let name = index_join_name(left.index(), right.index(), args.how);
@@ -97852,7 +97990,9 @@ mod tests {
         assert_eq!(labels(dti.days_in_month()), ints([31, 31]));
         assert_eq!(dti.is_leap_year(), vec![true, true]);
 
-        assert_eq!(dti.asi8(), vec![nanos1, nanos2]);
+        // The binding's asi8 is a numpy array (lsn8d; pinned by the pytest
+        // test_typed_datetime_index_like_pandas_lsn8d): the instants it holds.
+        assert_eq!(dti.inner.asi8(), vec![nanos1, nanos2]);
         assert_eq!(dti.nunique(), 2);
         assert_eq!(dti.isna(), vec![false, false]);
         assert_eq!(dti.notna(), vec![true, true]);
@@ -97868,7 +98008,7 @@ mod tests {
             dti.shift(py, 1, Some(freq.as_any())).expect("shift") // ubs:ignore — valid freq
         });
         assert_eq!(shifted.len(), 2);
-        assert_eq!(shifted.asi8()[0], nanos2);
+        assert_eq!(shifted.inner.asi8()[0], nanos2);
 
         let diffed = dti.diff(1);
         assert_eq!(diffed, vec![None, Some(86_400_000_000_000)]);
