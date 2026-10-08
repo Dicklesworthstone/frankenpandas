@@ -30163,6 +30163,60 @@ def test_aligned_categorical_frames_compare_like_pandas_d468v(case: str) -> None
     assert run(fpd) == run(pd)
 
 
+def _8ycr8_series(m: Any, holed: bool) -> Any:
+    rng = np.random.default_rng(83)
+    values = rng.random(4 * 48)
+    if holed:
+        values[rng.random(4 * 48) < 0.2] = np.nan
+        values[6:8] = np.nan  # an all-NaN hour
+    stamps = np.datetime64("2020-01-30T00:00", "ns") + np.arange(4 * 48) * np.timedelta64(30, "m")
+    return m.Series(values, index=m.to_datetime(stamps))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("freq", ["h", "15min", "D", "ME"])
+@pytest.mark.parametrize("holed", [True, False], ids=["NaN held", "NaN-free (NEGATIVE)"])
+def test_nan_holding_resample_like_pandas_8ycr8(freq: str, holed: bool) -> None:
+    # A float column holding NaN reduces per bin skipping each NaN, as
+    # pandas' group reductions (br-frankenpandas-8ycr8: it went through the
+    # per-Scalar path, 0.29x-0.37x pandas at 1M): an all-NaN bin sums to 0.0,
+    # is NaN under the rest; the bits are pandas' (Kahan / Welford over the
+    # present values in row order). NEGATIVE: a NaN-free column as before.
+    def run(m: Any) -> Any:
+        r = _8ycr8_series(m, holed).resample(freq)
+        answers = []
+        for op in ["max", "min", "sum", "mean", "std", "var", "sem", "count"]:
+            out = getattr(r, op)()
+            values = [None if x != x else float(x).hex() for x in out.tolist()]
+            answers.append((op, str(out.dtype), [str(label) for label in out.index], values))
+        return answers
+
+    assert run(fpd) == run(pd)
+
+
+_FXK1A_CASES = {
+    # NEGATIVE (the change is speed): keys sharing an index, lists and a
+    # missing key count as before.
+    "keys on one index (NEGATIVE)": lambda m: m.crosstab(m.Series([1, 2, 1]), m.Series([3, 3, 4])),
+    "lists (NEGATIVE)": lambda m: m.crosstab([1, 2, 1], [3, 3, 4]),
+    "missing key (NEGATIVE)": lambda m: m.crosstab(m.Series([1.0, None, 1.0]), m.Series([3, 3, 4])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FXK1A_CASES))
+def test_crosstab_counts_like_pandas_fxk1a(case: str) -> None:
+    # crosstab counts over pandas' df['__dummy__'] = 0 on the keys' frame
+    # (br-frankenpandas-fxk1a: a list of n Python zeros was converted one by
+    # one): the counts, labels and the axes' dtypes vs pandas.
+    def run(m: Any) -> Any:
+        out = _FXK1A_CASES[case](m)
+        axes = (repr(list(out.index)), str(out.index.dtype), repr(list(out.columns)), str(out.columns.dtype))
+        return (out.shape, out.values.tolist(), axes, [str(d) for d in out.dtypes])
+
+    assert run(fpd) == run(pd)
+
+
 def _x6p40_plain_operands(m: Any, case: str) -> tuple:
     kind, side, dtype_name, operand = _X6P40_PLAIN_CASES[case]
     dtype = m.CategoricalDtype(["y", "x"], ordered=dtype_name == "ordered")

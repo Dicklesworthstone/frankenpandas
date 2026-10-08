@@ -84417,7 +84417,6 @@ fn crosstab<'py>(
             pivot_kwargs.set_item("aggfunc", aggfunc)?;
         }
         _ => {
-            data.set_item("__dummy__", PyList::new(py, vec![0_i64; n])?)?;
             pivot_kwargs.set_item("aggfunc", "count")?;
             pivot_kwargs.set_item("fill_value", 0_i64)?;
         }
@@ -84431,6 +84430,12 @@ fn crosstab<'py>(
     // refused), as pandas' pivot does.
     pivot_kwargs.set_item("dropna", dropna)?;
     let frame = py.get_type::<PyDataFrame>().call1((data,))?;
+    // Counting, the values are pandas' df['__dummy__'] = 0 over the frame's
+    // rows: a list of n Python zeros was converted one by one (two thirds
+    // of a 200k-row crosstab; br-frankenpandas-fxk1a).
+    if values.is_none() {
+        frame.set_item("__dummy__", 0_i64)?;
+    }
     let table = frame.call_method("pivot_table", (), Some(&pivot_kwargs))?;
     let table = match normalize.as_deref() {
         None => table,

@@ -39989,6 +39989,26 @@ impl ResampleBin for BinExtreme {
     }
 }
 
+/// A bin that passes a NaN over before `B` sees it, as pandas' group
+/// reductions skip a missing value (br-frankenpandas-8ycr8). A bin of one
+/// value is not that value: a NaN alone sums to 0.0.
+#[derive(Clone)]
+struct SkipNan<B>(B);
+
+impl<B: ResampleBin> ResampleBin for SkipNan<B> {
+    const SINGLETON_IS_VALUE: bool = false;
+
+    fn add(&mut self, value: f64) {
+        if !value.is_nan() {
+            self.0.add(value);
+        }
+    }
+
+    fn value(&self) -> f64 {
+        self.0.value()
+    }
+}
+
 /// A bin's count of present values (a NaN is missing), as a float the
 /// caller turns back into pandas' int64.
 #[derive(Clone, Default)]
@@ -40369,6 +40389,15 @@ impl Resample<'_> {
             let index = Index::new(out_labels).rename_index(self.series.index().name());
             return Series::new(self.series.name(), index, Column::from_f64_values(out_f64));
         }
+        // A float column holding NaN as its missing values: the one pass
+        // skips them, as pandas' group_sum (an all-NaN bin sums to 0.0;
+        // br-frankenpandas-8ycr8).
+        if let Some(vals) = self.nan_holding_f64() {
+            self.validate()?;
+            if let Some(r) = self.resample_reduce_single_pass(vals, SkipNan(BinSum::default())) {
+                return r;
+            }
+        }
         // Typed all-valid Int64 path (sister to the f64 block above): pandas keeps
         // an int64 sum int64, an empty bin summing to 0 (this was Float64;
         // br-frankenpandas-0yilt). While every partial sum stays under 2^53 the f64
@@ -40466,6 +40495,15 @@ impl Resample<'_> {
             let index = Index::new(out_labels).rename_index(self.series.index().name());
             return Series::new(self.series.name(), index, Column::from_f64_values(out_f64));
         }
+        // A float column holding NaN as its missing values: the one pass
+        // skips them, as pandas' group_mean (an all-NaN bin is NaN;
+        // br-frankenpandas-8ycr8).
+        if let Some(vals) = self.nan_holding_f64() {
+            self.validate()?;
+            if let Some(r) = self.resample_reduce_single_pass(vals, SkipNan(BinMean::default())) {
+                return r;
+            }
+        }
         // Typed all-valid Int64 fast path (sister to the f64 block above): `nanmean`
         // coerces each value via `to_f64` and returns `Scalar::Float64(sum / count)`,
         // so an Int64 column also yields a Float64 mean — build the `v as f64` view
@@ -40498,6 +40536,17 @@ impl Resample<'_> {
             return Series::new(self.series.name(), index, Column::from_f64_values(out_f64));
         }
         self.aggregate_scalar(fp_types::nanmean_grouped)
+    }
+
+    /// The values of a float column whose missing values are exactly its
+    /// NaNs, for the one-pass bins to fold skipping them (pandas' group
+    /// reductions skip a NaN); None for any other column. Such a column went
+    /// through aggregate_scalar's Scalar per row: resample('h').max() 0.29x
+    /// pandas at 1M rows (br-frankenpandas-8ycr8).
+    fn nan_holding_f64(&self) -> Option<&[f64]> {
+        let column = self.series.column();
+        let (data, validity) = column.as_f64_slice_with_validity()?;
+        (!validity.all() && column.nan_missing_exact()).then_some(data)
     }
 
     /// The one-pass resample reduce, each bin a clone of `empty`: every row's
@@ -41094,7 +41143,12 @@ impl Resample<'_> {
     /// `None` case). `None` (fall back to nan_*) for a non-f64 column, or any
     /// NaN outside the one-pass bins.
     fn resample_extremum_typed(&self, want_max: bool) -> Option<Result<Series, FrameError>> {
-        let vals = self.series.column().as_f64_slice()?;
+        // A float column holding NaN as its missing values folds its data
+        // too, the NaNs skipped (br-frankenpandas-8ycr8).
+        let vals = match self.series.column().as_f64_slice() {
+            Some(vals) => vals,
+            None => self.nan_holding_f64()?,
+        };
         if let Err(err) = self.validate() {
             return Some(Err(err));
         }
@@ -41340,6 +41394,15 @@ impl Resample<'_> {
     /// sqrt(nanvar_grouped)`. Returns `None` for a non-f64 column (e.g.
     /// Timedelta) or any NaN, so those keep the nan_* path.
     fn resample_var_typed(&self, want_std: bool) -> Option<Result<Series, FrameError>> {
+        // A float column holding NaN as its missing values: the one pass
+        // skips them, as pandas' group_var (br-frankenpandas-8ycr8).
+        if let Some(vals) = self.nan_holding_f64() {
+            if let Err(err) = self.validate() {
+                return Some(Err(err));
+            }
+            let spread = if want_std { Spread::Std } else { Spread::Var };
+            return self.resample_reduce_single_pass(vals, SkipNan(BinSpread::new(spread)));
+        }
         // f64 borrows its contiguous slice (rejecting any NaN); an all-valid Int64
         // column materializes the `v as f64` view once (the grouped reducers coerce
         // via to_f64 and return Float64, so Int64 var/std widen to Float64 — dtype-
@@ -41971,6 +42034,16 @@ impl Resample<'_> {
         // aggregate_scalar(|v| nansem_grouped(v,1)) on an all-valid Int64 column: it
         // is the same `WelfordVar` over the bin's values in row order, and the
         // `n <= 1 -> Null(NaN)` gate matches (empty/singleton bins included).
+        // A float column holding NaN as its missing values: the one pass skips
+        // them (br-frankenpandas-8ycr8).
+        if let Some(vals) = self.nan_holding_f64() {
+            self.validate()?;
+            if let Some(r) =
+                self.resample_reduce_single_pass(vals, SkipNan(BinSpread::new(Spread::Sem)))
+            {
+                return r;
+            }
+        }
         let owned_i64: Vec<f64>;
         let typed: Option<&[f64]> = if let Some(v) = self.series.column().as_f64_slice() {
             if v.iter().any(|x| x.is_nan()) {
@@ -181983,6 +182056,83 @@ mod tests {
             [Some(2.0), None, Some(-0.0), Some(3.0)].map(|x: Option<f64>| x.map(f64::to_bits));
         assert_eq!(bits(holed.resample("h").max().unwrap()), expected);
         assert_eq!(bits(holed.resample("h").min().unwrap()), expected);
+    }
+
+    #[test]
+    fn resample_nan_holding_reductions_8ycr8() {
+        // br-frankenpandas-8ycr8: a float column whose missing values are its
+        // NaNs reduces in the one pass, each NaN skipped as pandas' group_*:
+        // an all-NaN bin sums to 0.0 and is NaN under mean / max / min / var
+        // / std / sem - when binning and over a reused resampler's kept bins.
+        // NEGATIVE: the NaN-free column's answers are unchanged.
+        use std::sync::Arc;
+
+        use super::ResampleLayout;
+        let base = 1_577_836_800_000_000_000_i64;
+        let half_hour = 1_800_000_000_000_i64;
+        let series = |values: Vec<f64>| {
+            let stamps = (0..8).map(|i| base + i * half_hour).collect();
+            Series::new(
+                "x",
+                Index::from_datetime64(stamps),
+                Column::from_f64_values(values),
+            )
+            .unwrap()
+        };
+        let floats = |result: Result<Series, FrameError>| -> Vec<Option<f64>> {
+            result
+                .unwrap()
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Float64(x) if !x.is_nan() => Some(*x),
+                    _ => None,
+                })
+                .collect()
+        };
+        // Hourly bins [NaN, 2.0], [NaN, NaN], [1.0, 3.0], [4.0, NaN].
+        let nan = f64::NAN;
+        let holed = series(vec![nan, 2.0, nan, nan, 1.0, 3.0, 4.0, nan]);
+        assert!(
+            holed.column().nan_missing_exact(),
+            "the one-pass path reads it"
+        );
+        let layout = Arc::new(ResampleLayout::default());
+        for _ in 0..2 {
+            let view = || holed.resample("h").sharing(&layout);
+            assert_eq!(
+                floats(view().sum()),
+                [Some(2.0), Some(0.0), Some(4.0), Some(4.0)]
+            );
+            assert_eq!(
+                floats(view().mean()),
+                [Some(2.0), None, Some(2.0), Some(4.0)]
+            );
+            assert_eq!(
+                floats(view().max()),
+                [Some(2.0), None, Some(3.0), Some(4.0)]
+            );
+            assert_eq!(
+                floats(view().min()),
+                [Some(2.0), None, Some(1.0), Some(4.0)]
+            );
+            assert_eq!(floats(view().var()), [None, None, Some(2.0), None]);
+            assert_eq!(
+                floats(view().std()),
+                [None, None, Some(2.0_f64.sqrt()), None]
+            );
+            assert_eq!(floats(view().sem()), [None, None, Some(1.0), None]);
+        }
+        assert!(layout.bins.get().is_some_and(Option::is_some));
+        let full = series(vec![5.0, 2.0, 7.0, 6.0, 1.0, 3.0, 4.0, 8.0]);
+        assert_eq!(
+            floats(full.resample("h").sum()),
+            [Some(7.0), Some(13.0), Some(4.0), Some(12.0)]
+        );
+        assert_eq!(
+            floats(full.resample("h").max()),
+            [Some(5.0), Some(7.0), Some(3.0), Some(8.0)]
+        );
     }
 
     #[test]
