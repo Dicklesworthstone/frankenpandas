@@ -71779,8 +71779,12 @@ impl PySeriesGroupBy {
             return Series::new(s.name(), index, s.column().clone()).map_err(frame_error_to_py);
         }
         let positions = group_code_positions(groups, s.index().labels())?;
-        Series::new(s.name(), taken_groups(groups, &positions), s.column().clone())
-            .map_err(frame_error_to_py)
+        Series::new(
+            s.name(),
+            taken_groups(groups, &positions),
+            s.column().clone(),
+        )
+        .map_err(frame_error_to_py)
     }
 
     /// A per-group frame (describe, ohlc) indexed by group code, relabelled
