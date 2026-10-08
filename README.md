@@ -1850,9 +1850,9 @@ A: As of 2026-09-24 the tracker holds about 4,100 beads, of which 79 are open. M
 
 | Priority | Feature | Status |
 |----------|---------|--------|
-| Done | Release to crates.io | 0.3.0 was published on 2026-09-12 (`frankenpandas`, `fp-*`); the `v0.3.0` tag carries an SSH signature |
+| Done | Release to crates.io | 0.5.0 was published on 2026-10-08 (`frankenpandas`, `fp-*`), after 0.4.0 (2026-10-03) and 0.3.0 (2026-09-12, whose `v0.3.0` tag carries an SSH signature) |
 | High | Verifiable signed releases | `AUTHORS.md` records the W4 release-worker fingerprint for local signature verification; GitHub signing-key registration and other identity keys remain pending. Qualify the next release through pinned RCH gates and native DSR artifact builds. |
-| In progress | Python packaging for `fp-python` | Version 0.4.0 targets a Linux x86-64 / CPython 3.13 wheel and pinned-toolchain source distribution; other prebuilt platforms remain unqualified. `frankenpandas.pyi` type stubs and differential pytest harness are included. Check the published release and PyPI for availability; the binding is not yet a drop-in replacement (see Limitations) |
+| In progress | Python packaging for `fp-python` | Version 0.5.0 targets a Linux x86-64 / CPython 3.13 wheel and pinned-toolchain source distribution; other prebuilt platforms remain unqualified. `frankenpandas.pyi` type stubs and differential pytest harness are included. Check the published release and PyPI for availability; the binding is not yet a drop-in replacement (see Limitations) |
 | Done | Tokio-free PostgreSQL `SqlConnection` adapter | `PostgresConnection` behind `sql-postgresql` with pure synchronous wire protocol and live-server integration tests |
 | Done | MySQL `SqlConnection` adapter | `MysqlConnection` behind `sql-mysql`; release qualification includes 38 live MySQL 8.4.11 checks covering prepared-cache eviction, Unicode/nulls, transactions and dataframe writes. TLS and other platforms remain unqualified. |
 | Medium | Rust constructor spelling of ints with a missing value (DISC-011) | Every observable path promotes as pandas; the Rust constructors' `Int64` holding a missing value is the open decision, taken with the harness and the fixtures that pin it (br-frankenpandas-ih6ho) |
