@@ -19935,18 +19935,23 @@ impl Series {
         }
 
         // Typed Timedelta64 fast path (sibling of median's typed arm and the
-        // Int64/Float64 arms above): an all-valid, no-NaT Timedelta64 column's
-        // quantile straight off `as_timedelta64_slice`'s raw `&[i64]` ns
-        // ([`timedelta_quantile`]), skipping the Scalar materialization and the
-        // scans of the generic Timedelta64 branch below, which answers the same
-        // for such a column. The `!has_nulls` + no-`i64::MIN` (Timedelta::NAT)
-        // gates keep any NaT/null column on the generic path.
-        if let Some(data) = self.column.as_timedelta64_slice()
-            && !data.is_empty()
-            && !self.column.has_nulls()
-            && !data.contains(&i64::MIN)
+        // Int64/Float64 arms above): the quantile of a Timedelta64 column's
+        // present nanos ([`timedelta_quantile`]), its NaT slots left out, off
+        // the raw buffer - the generic Timedelta64 branch below answers the
+        // same for a column with a present value, after a Scalar a row (a
+        // datetime column holding NaT came here: d.quantile() 0.33x pandas at
+        // 1M; br-frankenpandas-vk7y9). No present value keeps that branch.
+        if self.column.dtype() == DType::Timedelta64
+            && let Some((data, _)) = self.column.as_temporal_nanos_with_validity()
         {
-            return Ok(timedelta_quantile(data.to_vec(), q, mode));
+            let present: Vec<i64> = data
+                .iter()
+                .copied()
+                .filter(|&ns| ns != Timedelta::NAT)
+                .collect();
+            if !present.is_empty() {
+                return Ok(timedelta_quantile(present, q, mode));
+            }
         }
 
         // Per br-frankenpandas-ppc2r: pandas pd.Series([td1, td2,
@@ -22407,41 +22412,30 @@ impl Series {
     /// numpy's cast buffer ([`fp_types::PandasReductions`]), divided by the
     /// non-NaT count and truncated to int64; all-NaT or empty gives NaT.
     fn datetime_mean(&self) -> Scalar {
-        // The nanos off the typed buffer, NaT at a missing slot (it read a
-        // Scalar a row: d.mean() 0.33x pandas at 1M; br-frankenpandas-vk7y9),
-        // else off the Scalar view.
-        let (nanos, present) =
-            if let Some((data, _)) = self.column.as_temporal_nanos_with_validity() {
-                let mut present = vec![0_u64; data.len().div_ceil(64)];
-                let nanos: Vec<i64> = data
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &ns)| {
-                        if ns == Timestamp::NAT {
-                            0
-                        } else {
-                            present[i / 64] |= 1 << (i % 64);
-                            ns
-                        }
-                    })
-                    .collect();
-                (nanos, present)
-            } else {
-                let values = self.column.values();
-                let mut present = vec![0_u64; values.len().div_ceil(64)];
-                let nanos: Vec<i64> = values
-                    .iter()
-                    .enumerate()
-                    .map(|(i, value)| match value {
-                        Scalar::Datetime64(ns) if *ns != Timestamp::NAT => {
-                            present[i / 64] |= 1 << (i % 64);
-                            *ns
-                        }
-                        _ => 0,
-                    })
-                    .collect();
-                (nanos, present)
-            };
+        // The nanos off the typed buffer, NaT at a missing slot read as 0
+        // in place (int64_mean_skipping) - per-row presence bits, a filled
+        // copy and a mask the sum only re-zeroed made d.mean() 0.37x pandas
+        // at 1M (br-frankenpandas-vk7y9) - else off the Scalar view.
+        if let Some((data, _)) = self.column.as_temporal_nanos_with_validity() {
+            let mean = fp_types::PandasReductions::int64_mean_skipping(data, Timestamp::NAT);
+            if mean.is_nan() {
+                return Scalar::Datetime64(Timestamp::NAT);
+            }
+            return Scalar::Datetime64(mean as i64);
+        }
+        let values = self.column.values();
+        let mut present = vec![0_u64; values.len().div_ceil(64)];
+        let nanos: Vec<i64> = values
+            .iter()
+            .enumerate()
+            .map(|(i, value)| match value {
+                Scalar::Datetime64(ns) if *ns != Timestamp::NAT => {
+                    present[i / 64] |= 1 << (i % 64);
+                    *ns
+                }
+                _ => 0,
+            })
+            .collect();
         let reductions = fp_types::PandasReductions::new(
             fp_types::ReductionValues::Int(&nanos),
             Some(&present),
@@ -23269,22 +23263,34 @@ impl Series {
         // empty and `!finite` guards are dead here (non-empty by gate, finite mean
         // of finite ns). The `!has_nulls` + no-`i64::MIN` (Timedelta::NAT) gates
         // keep any NaT/null column on the generic path (where NaT is excluded
-        // before the median).
-        if let Some(data) = self.column.as_timedelta64_slice()
-            && !data.is_empty()
-            && !self.column.has_nulls()
-            && !data.contains(&i64::MIN)
+        // before the median). Now a column holding NaT reads its present
+        // nanos here too (a datetime column's median came this way: 0.62x
+        // pandas at 1M; br-frankenpandas-vk7y9), and the middle values are
+        // selected, not sorted for - the same order statistics. No present
+        // value keeps the generic path.
+        if self.column.dtype() == DType::Timedelta64
+            && let Some((data, _)) = self.column.as_temporal_nanos_with_validity()
         {
-            let mut nums: Vec<f64> = data.iter().map(|&ns| ns as f64).collect();
-            nums.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let mid = nums.len() / 2;
-            let median_ns = if nums.len().is_multiple_of(2) {
-                (nums[mid - 1] + nums[mid]) / 2.0
-            } else {
-                nums[mid]
-            };
-            let clamped = median_ns.clamp(i64::MIN as f64, i64::MAX as f64);
-            return Ok(Scalar::Timedelta64(clamped as i64));
+            let mut nums: Vec<f64> = data
+                .iter()
+                .filter(|&&ns| ns != Timedelta::NAT)
+                .map(|&ns| ns as f64)
+                .collect();
+            if !nums.is_empty() {
+                let even = nums.len().is_multiple_of(2);
+                let mid = nums.len() / 2;
+                let (below, &mut upper, _) = nums.select_nth_unstable_by(mid, |a, b| {
+                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let median_ns = if even {
+                    let lower = below.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                    (lower + upper) / 2.0
+                } else {
+                    upper
+                };
+                let clamped = median_ns.clamp(i64::MIN as f64, i64::MAX as f64);
+                return Ok(Scalar::Timedelta64(clamped as i64));
+            }
         }
 
         // Per br-frankenpandas-rbt10: pandas pd.Series([td1, td2,
@@ -60654,20 +60660,23 @@ impl DatetimeAccessor<'_> {
     /// Bool-output sibling of [`Self::typed_datetime_civil_component`]
     /// for boolean calendar predicates (is_month_start/is_leap_year/…). Evaluates
     /// `component(y, m, d)` over the raw `&[i64]` nanos via the integer civil
-    /// helper and builds an all-valid Bool column. `None` (caller falls back) on
-    /// non-dense / any NaT, so the output equals the generic
-    /// `extract_component_typed_bool` Bool result for all-valid input
+    /// helper and builds an all-valid Bool column, NaT False - as the generic
+    /// `extract_component_typed_bool` answers it, and pandas (a column holding
+    /// NaT took that path, a Scalar a row: is_month_start 0.37x pandas at 1M;
+    /// br-frankenpandas-vk7y9). `None` (caller falls back) on non-dense
     /// (`from_bool_values` is the all-valid Bool column, bit-identical to the
     /// `from_values(Scalar::Bool)` path the comparison ops already rely on). A
     /// zoned column reads its wall clock.
-    fn typed_datetime_civil_bool_component_all_valid(
+    fn typed_datetime_civil_bool_component(
         &self,
         component: fn((i64, i64, i64)) -> bool,
         name: &LabelName,
     ) -> Option<Result<Series, FrameError>> {
-        let wall = self.wall_datetime_nanos(false)?;
+        let wall = self.wall_datetime_nanos(true)?;
         let nanos: &[i64] = &wall;
-        let out = Self::par_map_nanos(nanos, |ns| component(Self::datetime64_civil_from_nanos(ns)));
+        let out = Self::par_map_nanos(nanos, |ns| {
+            ns != fp_types::Timestamp::NAT && component(Self::datetime64_civil_from_nanos(ns))
+        });
         let index = self.series.index().clone();
         Some(Series::new(name, index, Column::from_bool_values(out)))
     }
@@ -60873,8 +60882,10 @@ impl DatetimeAccessor<'_> {
     /// Scalar path, a chrono Timestamp a row (br-frankenpandas-vk7y9). None
     /// for a column without a nanos buffer, or holding NaT when `nat_ok` is
     /// false (asked before the lookups, which a caller that bails on NaT
-    /// would waste).
-    fn wall_datetime_nanos(&self, nat_ok: bool) -> Option<std::borrow::Cow<'_, [i64]>> {
+    /// would waste). The binding's `dt.date` / `dt.time` build their
+    /// objects from it.
+    #[must_use]
+    pub fn wall_datetime_nanos(&self, nat_ok: bool) -> Option<std::borrow::Cow<'_, [i64]>> {
         let nanos = self.series.column().as_datetime64_slice()?;
         let nat = fp_types::Timestamp::NAT;
         if !nat_ok && nanos.contains(&nat) {
@@ -62033,10 +62044,9 @@ impl DatetimeAccessor<'_> {
     /// Matches `pd.Series.dt.is_month_start`.
     pub fn is_month_start(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
-            if let Some(result) = self.typed_datetime_civil_bool_component_all_valid(
-                |(_, _, d)| d == 1,
-                self.series.name(),
-            ) {
+            if let Some(result) =
+                self.typed_datetime_civil_bool_component(|(_, _, d)| d == 1, self.series.name())
+            {
                 return result;
             }
             return self.extract_component_typed_bool(|ts| ts.is_month_start(), self.series.name());
@@ -62052,7 +62062,7 @@ impl DatetimeAccessor<'_> {
     /// Matches `pd.Series.dt.is_month_end`.
     pub fn is_month_end(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
-            if let Some(result) = self.typed_datetime_civil_bool_component_all_valid(
+            if let Some(result) = self.typed_datetime_civil_bool_component(
                 |(y, m, d)| {
                     let is_leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
                     let days: [i64; 12] = [
@@ -62107,7 +62117,7 @@ impl DatetimeAccessor<'_> {
     /// Matches `pd.Series.dt.is_quarter_start`.
     pub fn is_quarter_start(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
-            if let Some(result) = self.typed_datetime_civil_bool_component_all_valid(
+            if let Some(result) = self.typed_datetime_civil_bool_component(
                 |(_, m, d)| d == 1 && (m == 1 || m == 4 || m == 7 || m == 10),
                 self.series.name(),
             ) {
@@ -62130,7 +62140,7 @@ impl DatetimeAccessor<'_> {
     /// Matches `pd.Series.dt.is_quarter_end`.
     pub fn is_quarter_end(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
-            if let Some(result) = self.typed_datetime_civil_bool_component_all_valid(
+            if let Some(result) = self.typed_datetime_civil_bool_component(
                 |(_, m, d)| {
                     (m == 3 && d == 31)
                         || (m == 6 && d == 30)
@@ -62581,7 +62591,7 @@ impl DatetimeAccessor<'_> {
     /// Matches `pd.Series.dt.is_leap_year`.
     pub fn is_leap_year(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
-            if let Some(result) = self.typed_datetime_civil_bool_component_all_valid(
+            if let Some(result) = self.typed_datetime_civil_bool_component(
                 |(y, _, _)| (y % 4 == 0 && y % 100 != 0) || y % 400 == 0,
                 self.series.name(),
             ) {
@@ -62600,7 +62610,7 @@ impl DatetimeAccessor<'_> {
     /// Matches `pd.Series.dt.is_year_start`.
     pub fn is_year_start(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
-            if let Some(result) = self.typed_datetime_civil_bool_component_all_valid(
+            if let Some(result) = self.typed_datetime_civil_bool_component(
                 |(_, m, d)| m == 1 && d == 1,
                 self.series.name(),
             ) {
@@ -62619,7 +62629,7 @@ impl DatetimeAccessor<'_> {
     /// Matches `pd.Series.dt.is_year_end`.
     pub fn is_year_end(&self) -> Result<Series, FrameError> {
         if self.is_typed_datetime() {
-            if let Some(result) = self.typed_datetime_civil_bool_component_all_valid(
+            if let Some(result) = self.typed_datetime_civil_bool_component(
                 |(_, m, d)| m == 12 && d == 31,
                 self.series.name(),
             ) {

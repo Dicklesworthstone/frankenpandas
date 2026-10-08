@@ -61096,6 +61096,22 @@ impl PySeriesDatetimeAccessor {
     }
 }
 
+/// A wall-clock instant's civil fields - year, month, day, hour, minute,
+/// second, microsecond (its nanoseconds dropped, as pandas' date / time
+/// drop them), as a Timestamp's `civil_fields`; None for NaT.
+fn wall_civil_fields(wall: i64) -> Option<(i32, u8, u8, u8, u8, u8, u32)> {
+    let stamp = Timestamp::from_nanos(wall);
+    Some((
+        i32::try_from(stamp.year()?).ok()?,
+        u8::try_from(stamp.month()?).ok()?,
+        u8::try_from(stamp.day()?).ok()?,
+        u8::try_from(stamp.hour()?).ok()?,
+        u8::try_from(stamp.minute()?).ok()?,
+        u8::try_from(stamp.second()?).ok()?,
+        u32::try_from(stamp.microsecond()?).ok()?,
+    ))
+}
+
 impl PySeriesDatetimeAccessor {
     /// pandas' `dt.to_period()` frequency: the values' inferred one (three
     /// or more, evenly spaced or month ends), as a period - a month end is
@@ -61162,18 +61178,46 @@ impl PySeriesDatetimeAccessor {
                 format!("'{kind}' object has no attribute '{method}'"),
             ));
         }
-        let cells = self
-            .series
-            .values()
-            .iter()
-            .map(|value| {
-                if value.is_missing() {
-                    return Ok(Scalar::Null(NullKind::NaT));
-                }
-                let stamp = cell_to_py(py, column, value)?;
-                py_to_cell(py, &stamp.bind(py).call_method0(method)?)
-            })
-            .collect::<PyResult<Vec<_>>>()?;
+        // A date or a wall-clock time is built from each instant's wall
+        // nanos: a Timestamp object was made and asked for it, and its
+        // answer probed back into a cell, a row at a time (dt.date 116 ms a
+        // million rows, pandas 9.7; br-frankenpandas-vk7y9).
+        let accessor = self.series.dt();
+        let walls = matches!(method, "date" | "time")
+            .then(|| accessor.wall_datetime_nanos(true))
+            .flatten();
+        let cells = if let Some(walls) = walls {
+            walls
+                .iter()
+                .map(|&wall| {
+                    let Some((year, month, day, hour, minute, second, micro)) =
+                        wall_civil_fields(wall)
+                    else {
+                        return Ok(Scalar::Null(NullKind::NaT));
+                    };
+                    let object = if method == "date" {
+                        pyo3::types::PyDate::new(py, year, month, day)?.into_any()
+                    } else {
+                        pyo3::types::PyTime::new(py, hour, minute, second, micro, None)?.into_any()
+                    };
+                    Ok(Scalar::Object(fp_types::ObjectValue::Host(
+                        fp_types::HostValue::new(PyHost(object.unbind())),
+                    )))
+                })
+                .collect::<PyResult<Vec<_>>>()?
+        } else {
+            self.series
+                .values()
+                .iter()
+                .map(|value| {
+                    if value.is_missing() {
+                        return Ok(Scalar::Null(NullKind::NaT));
+                    }
+                    let stamp = cell_to_py(py, column, value)?;
+                    py_to_cell(py, &stamp.bind(py).call_method0(method)?)
+                })
+                .collect::<PyResult<Vec<_>>>()?
+        };
         let column = if !cells.is_empty() && cells.iter().all(Scalar::is_missing) {
             Column::new(DType::datetime64_naive(), cells).map_err(column_error_to_py)?
         } else {

@@ -4865,6 +4865,11 @@ _OBJECT_LABEL_CASES = {
     "dt.timetz of a zoned column": lambda m: [str(v.tzinfo) for v in _stamps(m).dt.tz_localize("UTC").dt.timetz.dropna()],
     "dt.date all NaT": lambda m: m.Series(m.to_datetime([None, None])).dt.date,
     "dt.time empty": lambda m: m.Series(m.to_datetime([])).dt.time,
+    # vk7y9: the date / time are built from the wall nanos - before 1970
+    # (negative nanos) too, and a column from a numpy array (NaT at a gap).
+    "dt.date before 1970": lambda m: m.Series(m.to_datetime(["1969-12-31 23:59:59.999999999", "1900-03-01", None])).dt.date,
+    "dt.time before 1970": lambda m: m.Series(m.to_datetime(["1969-12-31 23:59:59.999999999", "1900-03-01 01:02:03", None])).dt.time,
+    "dt.date of an array column": lambda m: m.Series(np.array(["2020-01-05T03:04", "NaT", "1960-02-29T23:00"], dtype="datetime64[ns]")).dt.date,
     "groupby dt.date": lambda m: _stamped_frame(m).groupby(_stamped_frame(m)["ts"].dt.date)["v"].sum(),
     "groupby a date column": lambda m: _stamped_frame(m).assign(day=lambda f: f["ts"].dt.date).groupby("day")["v"].sum(),
     "groupby dates and text": lambda m: _stamped_frame(m).assign(day=lambda f: f["ts"].dt.date).groupby(["k", "day"])["v"].sum(),
@@ -30582,6 +30587,43 @@ def _vk7y9p3_spans(m: Any) -> Any:
     return _vk7y9p3_dates(m) - m.Timestamp("2020-01-01")
 
 
+_VK7Y9P4_CASES = {
+    "mean": lambda m: _vk7y9p3_dates(m).mean(),
+    "mean, an aware column": lambda m: _vk7y9p3_dates(m).dt.tz_localize("Asia/Tokyo").mean(),
+    "mean of durations": lambda m: _vk7y9p3_spans(m).mean(),
+    "quantile": lambda m: _vk7y9p3_dates(m).quantile(0.3),
+    "quantile lower": lambda m: _vk7y9p3_dates(m).quantile(0.3, interpolation="lower"),
+    "quantile higher": lambda m: _vk7y9p3_dates(m).quantile(0.7, interpolation="higher"),
+    "quantile nearest": lambda m: _vk7y9p3_dates(m).quantile(0.5, interpolation="nearest"),
+    "quantile midpoint": lambda m: _vk7y9p3_dates(m).quantile(0.5, interpolation="midpoint"),
+    "quantile list": lambda m: list(_vk7y9p3_dates(m).quantile([0.1, 0.9])),
+    "quantile of durations": lambda m: _vk7y9p3_spans(m).quantile(0.25),
+    "median": lambda m: _vk7y9p3_dates(m).median(),
+    "median of an odd count": lambda m: _vk7y9p3_dates(m).iloc[:5].median(),
+    "median of durations": lambda m: _vk7y9p3_spans(m).median(),
+    "mean of one present": lambda m: m.Series(np.array(["NaT", "2020-02-29T12:00"], dtype="datetime64[ns]")).mean(),
+    "quantile all NaT": lambda m: m.Series(np.array(["NaT", "NaT"], dtype="datetime64[ns]")).quantile(0.5),
+    "mean all NaT": lambda m: m.Series(np.array(["NaT", "NaT"], dtype="datetime64[ns]")).mean(),
+    # NEGATIVE: no NaT reads the buffer as it is.
+    "mean, no NaT": lambda m: _vk7y9p3_dates(m).dropna().mean(),
+    "quantile, no NaT": lambda m: _vk7y9p3_dates(m).dropna().quantile(0.3),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VK7Y9P4_CASES))
+def test_temporal_reductions_like_pandas_vk7y9(case: str) -> None:
+    # A datetime / duration column's mean and quantile read its nanos, NaT
+    # left out (a quantile built a Scalar a row, a mean built per-row
+    # presence bits: 0.33x / 0.39x pandas at 1M; br-frankenpandas-vk7y9):
+    # each result, NaT included, vs pandas.
+    def run(m: Any) -> Any:
+        out = _VK7Y9P4_CASES[case](m)
+        return [str(v) for v in out] if isinstance(out, list) else str(out)
+
+    assert run(fpd) == run(pd)
+
+
 _VK7Y9P3_CASES = {
     "dates astype int64": lambda m: _vk7y9p3_dates(m).astype("int64"),
     "durations astype int64": lambda m: _vk7y9p3_spans(m).astype("int64"),
@@ -30612,6 +30654,15 @@ _VK7Y9P3_CASES = {
     "seconds": lambda m: _vk7y9p3_spans(m).dt.seconds,
     "microseconds": lambda m: _vk7y9p3_spans(m).dt.microseconds,
     "nanoseconds": lambda m: _vk7y9p3_spans(m).dt.nanoseconds,
+    # The calendar flags of a column holding NaT read its nanos, NaT False.
+    "is_month_start": lambda m: (_vk7y9p3_dates(m) + m.Timedelta("27D")).dt.is_month_start,
+    "is_month_end": lambda m: _vk7y9p3_dates(m).dt.is_month_end,
+    "is_quarter_start": lambda m: (_vk7y9p3_dates(m) + m.Timedelta("27D")).dt.is_quarter_start,
+    "is_quarter_end": lambda m: _vk7y9p3_dates(m).dt.is_quarter_end,
+    "is_year_start": lambda m: (_vk7y9p3_dates(m) + m.Timedelta("1D")).dt.is_year_start,
+    "is_year_end": lambda m: _vk7y9p3_dates(m).dt.is_year_end,
+    "is_leap_year": lambda m: _vk7y9p3_dates(m).dt.is_leap_year,
+    "aware is_month_end": lambda m: _vk7y9p3_dates(m).dt.tz_localize("Asia/Tokyo").dt.is_month_end,
     # NEGATIVE: without NaT the fields stay int64 and nothing is filled.
     "days, no NaT (NEGATIVE)": lambda m: _vk7y9p3_spans(m).dropna().dt.days,
     "ffill, no NaT (NEGATIVE)": lambda m: _vk7y9p3_dates(m).dropna().ffill(),
