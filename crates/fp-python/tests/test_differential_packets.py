@@ -30380,6 +30380,36 @@ def test_datetime_fields_with_nat_like_pandas_vk7y9(case: str) -> None:
     assert run(fpd) == run(pd)
 
 
+_VK7Y9_ZONED = np.array(
+    ["2024-03-10T06:59:59", "2024-03-10T07:00:00", "NaT", "2024-11-03T05:30", "2024-12-30T00:30",
+     "2024-12-31T19:00", "2023-01-01T04:59", "2024-02-29T18:31"],
+    dtype="datetime64[ns]",
+)
+_VK7Y9_ZONED_FIELDS = ["year", "month", "day", "hour", "minute", "dayofweek", "dayofyear", "quarter",
+                       "days_in_month", "is_month_start", "is_month_end", "is_year_start", "is_leap_year"]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("zone", ["UTC", "America/New_York", "Asia/Kolkata", "Australia/Lord_Howe"])
+@pytest.mark.parametrize("nat", [True, False])
+def test_zoned_datetime_fields_like_pandas_vk7y9(zone: str, nat: bool) -> None:
+    # The dt fields of a tz-aware column read its wall clock from the nanos
+    # (a zone sent the column through a chrono Timestamp and a Scalar a
+    # row; br-frankenpandas-vk7y9): UTC instants across a DST change, a
+    # +05:30 and a half-hour-DST zone, with NaT and without (NEGATIVE: the
+    # UTC instant's fields differ from the wall clock's in each zone but UTC).
+    def run(m: Any) -> Any:
+        stamps = _VK7Y9_ZONED if nat else _VK7Y9_ZONED[[0, 1, 3, 4, 5, 6, 7]]
+        s = m.Series(stamps).dt.tz_localize("UTC").dt.tz_convert(zone)
+        out = [(f, str(getattr(s.dt, f).dtype), getattr(s.dt, f).astype(str).tolist()) for f in _VK7Y9_ZONED_FIELDS]
+        iso = s.dt.isocalendar()
+        # Column by column: a frame's astype(str) spells NA 'None' (abewp).
+        out.append(("isocalendar", [(str(iso[c].dtype), iso[c].astype(str).tolist()) for c in iso.columns]))
+        return out
+
+    assert run(fpd) == run(pd)
+
+
 _VK7Y9_SCALAR_OPS = {
     "dates > Timestamp": lambda m, s, t: s > t,
     "dates == Timestamp": lambda m, s, t: s == t,
@@ -30470,6 +30500,76 @@ def test_groupby_temporal_reductions_like_pandas_vk7y9(values: str, keys: str, h
         frame = m.DataFrame({"k": _VK7Y9_GB_KEYS[keys], "d": _VK7Y9_GB_VALUES[values](m)})
         out = getattr(frame.groupby("k")["d"], how)()
         return (str(out.dtype), out.isna().tolist(), out.astype(str).tolist(), list(out.index))
+
+    assert run(fpd) == run(pd)
+
+
+_VK7Y9_DIFF_SERIES = {
+    "dates holding NaT": lambda m: m.Series(_VK7Y9_STAMPS),
+    "dates across words holding NaT": lambda m: m.Series(_VK7Y9_LONG),
+    "aware dates holding NaT": lambda m: m.Series(_VK7Y9_STAMPS).dt.tz_localize("Asia/Tokyo"),
+    "durations holding NaT": lambda m: m.Series(_VK7Y9_STAMPS - np.datetime64("2020-01-01", "ns")),
+    "dates, all NaT": lambda m: m.Series(_VK7Y9_STAMPS[[1, 4]]),
+    # NEGATIVE: without NaT every partner in range answers.
+    "dates, no NaT (NEGATIVE)": lambda m: m.Series(_VK7Y9_STAMPS[[0, 2, 3, 6]]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VK7Y9_DIFF_SERIES))
+@pytest.mark.parametrize("periods", [1, 2, -1, 0, 70, -200])
+def test_temporal_diff_like_pandas_vk7y9(case: str, periods: int) -> None:
+    # diff of a datetime / timedelta column subtracts its nanos into
+    # durations, NaT where a side is missing or out of range (a Scalar a
+    # row: d.diff() 0.20x pandas at 1M; br-frankenpandas-vk7y9).
+    def run(m: Any) -> Any:
+        out = _VK7Y9_DIFF_SERIES[case](m).diff(periods)
+        return (str(out.dtype), out.isna().tolist(), out.astype(str).tolist())
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VK7Y9_DIFF_SERIES))
+@pytest.mark.parametrize("how", ["floor", "ceil", "round"])
+@pytest.mark.parametrize("freq", ["h", "D", "15min", "ms"])
+def test_temporal_snap_like_pandas_vk7y9(case: str, how: str, freq: str) -> None:
+    # dt.floor / ceil / round of a datetime / timedelta column snap its
+    # nanos, NaT staying NaT (a NaT sent it through a Scalar a row:
+    # dt.floor('h') 0.14x pandas at 1M; br-frankenpandas-vk7y9).
+    def run(m: Any) -> Any:
+        out = getattr(_VK7Y9_DIFF_SERIES[case](m).dt, how)(freq)
+        return (str(out.dtype), out.isna().tolist(), out.astype(str).tolist())
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VK7Y9_SORT_SERIES))
+@pytest.mark.parametrize("method", ["average", "min", "max", "first", "dense"])
+@pytest.mark.parametrize("na_option", ["keep", "top", "bottom"])
+@pytest.mark.parametrize("ascending", [True, False])
+@pytest.mark.parametrize("pct", [False, True])
+def test_temporal_rank_like_pandas_vk7y9(case: str, method: str, na_option: str, ascending: bool, pct: bool) -> None:
+    # rank of a datetime / timedelta column keys its nanos typed (a Scalar
+    # sort and a binary search a row: d.rank() 0.13x pandas at 1M;
+    # br-frankenpandas-vk7y9): ranks as float.hex, missing rows, dtype.
+    def run(m: Any) -> Any:
+        out = _VK7Y9_SORT_SERIES[case](m).rank(method=method, na_option=na_option, ascending=ascending, pct=pct)
+        return (str(out.dtype), [float.hex(v) if v == v else "nan" for v in out.tolist()])
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VK7Y9_SORT_SERIES))
+def test_temporal_argsort_like_pandas_vk7y9(case: str) -> None:
+    # argsort of a datetime / timedelta column sorts its present nanos typed,
+    # a NaT row -1 (a Scalar compare a pair: d.argsort() 0.35x pandas at 1M;
+    # br-frankenpandas-vk7y9): positions, index, dtype.
+    def run(m: Any) -> Any:
+        out = _VK7Y9_SORT_SERIES[case](m).argsort()
+        return (str(out.dtype), out.tolist(), list(out.index))
 
     assert run(fpd) == run(pd)
 
