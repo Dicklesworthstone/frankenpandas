@@ -6812,6 +6812,130 @@ fn py_datetime_zone(dt: &Bound<'_, PyDateTime>) -> PyResult<Option<String>> {
 /// column built from it keeps (pandas' datetime64[ns, tz]; it came back
 /// naive). None when any value is naive or the zones differ (pandas makes
 /// an object column).
+/// The zone of an aware Timestamp / datetime scalar; None for a naive one,
+/// NaT or anything else.
+fn scalar_zone(value: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    if let Ok(ts) = value.extract::<PyRef<'_, PyTimestamp>>() {
+        return Ok(if ts.inner.is_nat() {
+            None
+        } else {
+            ts.inner.tz.clone()
+        });
+    }
+    if let Ok(dt) = value.cast::<PyDateTime>() {
+        return py_datetime_zone(dt);
+    }
+    Ok(None)
+}
+
+/// `column`, a naive datetime column broadcast from an instant, in `zone`
+/// (the instant's, when it is aware): pandas' datetime64[ns, tz] column (the
+/// Scalar holds the UTC nanos only, so assign(z=ts), df['z'] = ts and
+/// DataFrame({.., 'z': ts}) came back naive; br-frankenpandas-ufwpf).
+fn zoned(column: Column, zone: Option<String>) -> Column {
+    match (zone, column.dtype()) {
+        (Some(zone), DType::Datetime64 { tz: None }) => {
+            column.with_dtype(DType::datetime64_tz(zone))
+        }
+        _ => column,
+    }
+}
+
+/// [`zoned`] in the zone of the scalar `value` the column was broadcast from.
+fn with_scalar_zone(column: Column, value: &Bound<'_, PyAny>) -> PyResult<Column> {
+    Ok(zoned(column, scalar_zone(value)?))
+}
+
+/// A shift `fill_value` for a datetime (any zone) or timedelta column, as
+/// pandas reads one per column: a missing value (None, NaN, NaT) is NaT; a
+/// datetime column takes an instant - a Timestamp, a datetime, a numpy
+/// datetime64 or a string it parses, a naive string read in the column's
+/// zone - as aware as itself, a timedelta column a duration (a Timedelta, a
+/// timedelta, a numpy timedelta64 or a string it parses); anything else is
+/// pandas' TypeError. fp put the fill in an object column
+/// (br-frankenpandas-geqye).
+fn temporal_shift_fill(py: Python<'_>, dtype: &DType, fill: &Bound<'_, PyAny>) -> PyResult<Scalar> {
+    if py_to_scalar(py, fill).is_ok_and(|scalar| scalar.is_missing()) {
+        return Ok(Scalar::Null(NullKind::NaT));
+    }
+    let kind = fill.get_type().name()?.to_string();
+    let text = fill.is_instance_of::<pyo3::types::PyString>();
+    let type_error = |message: String| PyErr::new::<pyo3::exceptions::PyTypeError, _>(message);
+    let module = py.import("frankenpandas")?;
+    match dtype {
+        DType::Datetime64 { tz } => {
+            let refuse = || {
+                type_error(format!(
+                    "value should be a 'Timestamp' or 'NaT'. Got '{kind}' instead."
+                ))
+            };
+            let instant = if text {
+                module
+                    .getattr("Timestamp")?
+                    .call1((fill,))
+                    .map_err(|_| refuse())?
+            } else if fill.extract::<PyRef<'_, PyTimestamp>>().is_ok()
+                || fill.cast::<PyDateTime>().is_ok()
+                || kind == "datetime64"
+            {
+                fill.clone()
+            } else {
+                return Err(refuse());
+            };
+            match (tz, scalar_zone(&instant)?) {
+                (None, Some(_)) => Err(type_error(
+                    "Cannot compare tz-naive and tz-aware datetime-like objects.".to_owned(),
+                )),
+                (Some(_), None) if !text => Err(type_error(
+                    "Cannot compare tz-naive and tz-aware datetime-like objects".to_owned(),
+                )),
+                (Some(zone), None) => {
+                    py_to_scalar(py, &instant.call_method1("tz_localize", (zone.as_str(),))?)
+                }
+                _ => py_to_scalar(py, &instant),
+            }
+        }
+        DType::Timedelta64 => {
+            let refuse = || {
+                type_error(format!(
+                    "value should be a 'Timedelta' or 'NaT'. Got '{kind}' instead."
+                ))
+            };
+            let duration = if text {
+                module
+                    .getattr("Timedelta")?
+                    .call1((fill,))
+                    .map_err(|_| refuse())?
+            } else if fill.extract::<PyRef<'_, PyTimedelta>>().is_ok()
+                || fill.cast::<PyDelta>().is_ok()
+                || kind == "timedelta64"
+            {
+                fill.clone()
+            } else {
+                return Err(refuse());
+            };
+            py_to_scalar(py, &duration)
+        }
+        _ => py_to_scalar(py, fill),
+    }
+}
+
+/// The scalar `fill` for a shift of `periods` of a column of `dtype`: a
+/// datetime or timedelta column's as [`temporal_shift_fill`] reads it -
+/// pandas checks nothing when no row moves.
+fn shift_fill(
+    py: Python<'_>,
+    dtype: &DType,
+    periods: i64,
+    fill: &Bound<'_, PyAny>,
+) -> PyResult<Scalar> {
+    if periods != 0 && matches!(dtype, DType::Datetime64 { .. } | DType::Timedelta64) {
+        temporal_shift_fill(py, dtype, fill)
+    } else {
+        py_to_scalar(py, fill)
+    }
+}
+
 fn sequence_zone(data: &Bound<'_, PyAny>) -> Option<String> {
     if !(data.is_instance_of::<PyList>() || data.is_instance_of::<PyTuple>()) {
         return None;
@@ -8816,6 +8940,29 @@ fn narrow_ndarray_column(
     }
 }
 
+/// A datetime (`datetime` true) or timedelta column of `nanos`, typed: its
+/// mask the rows not NaT (numpy's and fp's i64::MIN). A Scalar was built per
+/// row and read back (Series(dates) 35 ms a million rows, pandas 0.03;
+/// br-frankenpandas-vk7y9).
+fn nanos_column(nanos: Vec<i64>, datetime: bool) -> Column {
+    let words = nanos
+        .chunks(64)
+        .map(|chunk| {
+            chunk.iter().enumerate().fold(0_u64, |word, (bit, &ns)| {
+                word | (u64::from(ns != i64::MIN) << bit)
+            })
+        })
+        .collect();
+    let validity = fp_columnar::ValidityMask::from_words(words, nanos.len());
+    match (datetime, validity.all()) {
+        // Dates all present: the shared buffer a slice or a window views
+        // without a copy (br-frankenpandas-d2xp1), as a DatetimeIndex's was.
+        (true, true) => Column::from_datetime64_values(nanos),
+        (true, false) => Column::from_datetime64_values_with_validity(nanos, validity),
+        (false, _) => Column::from_timedelta64_values_with_validity(nanos, validity),
+    }
+}
+
 fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Option<Column>> {
     // An array is its column, dtype and all.
     if let Ok(array) = obj.extract::<PyRef<'_, PyExtensionArray>>() {
@@ -8832,26 +8979,10 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
     if let Ok(categorical) = obj.extract::<PyRef<'_, PyCategorical>>() {
         return Ok(Some(categorical.inner.column().clone()));
     }
-    let temporal = |dtype: DType, nanos: Vec<Option<i64>>, wrap: fn(i64) -> Scalar| {
-        let values = nanos
-            .into_iter()
-            .map(|ns| ns.map_or(Scalar::Null(NullKind::NaT), wrap))
-            .collect();
-        Column::new(dtype, values).map_err(column_error_to_py)
-    };
     if let Ok(dti) = obj.extract::<PyRef<'_, PyDatetimeIndex>>() {
-        // Its instants typed while none is NaT (their Scalar cells were
-        // built and read back; br-frankenpandas-so0mr).
-        let instants = dti.inner.asi8();
-        let column = if instants.contains(&i64::MIN) {
-            temporal(
-                DType::Datetime64 { tz: None },
-                dti.inner.nanos(),
-                Scalar::Datetime64,
-            )?
-        } else {
-            Column::from_datetime64_values(instants)
-        };
+        // Its instants typed, NaT or not (their Scalar cells were built and
+        // read back; br-frankenpandas-so0mr, vk7y9).
+        let column = nanos_column(dti.inner.asi8(), true);
         // A tz-aware index gives a column of its dtype (datetime64[ns, tz]).
         return Ok(Some(match dti.inner.tz() {
             Some(zone) => column.with_dtype(DType::datetime64_tz(zone)),
@@ -8859,8 +8990,7 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
         }));
     }
     if let Ok(tdi) = obj.extract::<PyRef<'_, PyTimedeltaIndex>>() {
-        let column = temporal(DType::Timedelta64, tdi.inner.nanos(), Scalar::Timedelta64)?;
-        return Ok(Some(column));
+        return Ok(Some(nanos_column(tdi.inner.asi8(), false)));
     }
     // A RangeIndex is an Index.
     let labels = plain_index_ref(obj)
@@ -8930,26 +9060,20 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
             .map(Some)
             .map_err(column_error_to_py);
     }
-    let temporal_array = |ns_dtype: &str| -> PyResult<Vec<Option<i64>>> {
+    // A datetime64 / timedelta64 array of any unit or byte order: the int64
+    // view of its native ns form (the array itself when it is one) read
+    // through its buffer.
+    let temporal_nanos = |ns_dtype: &str| -> PyResult<Vec<i64>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("copy", false)?;
         let nanos = obj
-            .call_method1("astype", (ns_dtype,))?
-            .call_method1("astype", ("int64",))?;
-        Ok(ndarray_elements::<i64>(py, &nanos)?
-            .into_iter()
-            .map(|ns| (ns != i64::MIN).then_some(ns))
-            .collect())
+            .call_method("astype", (ns_dtype,), Some(&kwargs))?
+            .call_method1("view", ("int64",))?;
+        ndarray_elements::<i64>(py, &nanos)
     };
     let column = match kind.as_str() {
-        "M" => temporal(
-            DType::Datetime64 { tz: None },
-            temporal_array("datetime64[ns]")?,
-            Scalar::Datetime64,
-        )?,
-        "m" => temporal(
-            DType::Timedelta64,
-            temporal_array("timedelta64[ns]")?,
-            Scalar::Timedelta64,
-        )?,
+        "M" => nanos_column(temporal_nanos("datetime64[ns]")?, true),
+        "m" => nanos_column(temporal_nanos("timedelta64[ns]")?, false),
         "i" if native => Column::from_i64_values(ndarray_elements::<i64>(py, obj)?),
         "i" => Column::from_i64_values(obj.call_method0("tolist")?.extract::<Vec<i64>>()?),
         "f" if native && name == "float64" => {
@@ -9771,8 +9895,9 @@ fn py_value_to_column(
     }
     if let Ok(s) = py_to_scalar(py, val) {
         // A number or bool fills its typed buffer (assign(z=1) built a
-        // million Scalars; br-frankenpandas-4jsxs).
-        return broadcast_assigned_column(s, expected_len);
+        // million Scalars; br-frankenpandas-4jsxs); an aware instant keeps
+        // its zone.
+        return with_scalar_zone(broadcast_assigned_column(s, expected_len)?, val);
     }
     Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
         "Cannot convert value to DataFrame column",
@@ -25206,6 +25331,18 @@ fn broadcast_column(scalar: Scalar, len: usize) -> PyResult<Column> {
         Scalar::Float64(value) if len > 0 => Ok(Column::from_f64_constant(value, len)),
         Scalar::Int64(value) if len > 0 => Ok(Column::from_i64_constant(value, len)),
         Scalar::Bool(value) if len > 0 => Ok(Column::from_bool_constant(value, len)),
+        // An instant's or a duration's copies typed: a Scalar each was built
+        // and inferred (d > ts broadcast a million Timestamps, 0.08x pandas;
+        // br-frankenpandas-vk7y9).
+        Scalar::Datetime64(nanos) if len > 0 && nanos != Timestamp::NAT => {
+            Ok(Column::from_datetime64_values(vec![nanos; len]))
+        }
+        Scalar::Timedelta64(nanos) if len > 0 && nanos != Timedelta::NAT => {
+            Ok(Column::from_timedelta64_values_with_validity(
+                vec![nanos; len],
+                fp_columnar::ValidityMask::all_valid(len),
+            ))
+        }
         scalar => Column::from_values(vec![scalar; len]).map_err(column_error_to_py),
     }
 }
@@ -25217,6 +25354,12 @@ fn broadcast_column(scalar: Scalar, len: usize) -> PyResult<Column> {
 fn broadcast_assigned_column(scalar: Scalar, len: usize) -> PyResult<Column> {
     match scalar {
         Scalar::Null(NullKind::NaN) => Ok(Column::from_f64_constant(f64::NAN, len)),
+        // NaT is a datetime64[ns] column of NaT, as pandas (it inferred
+        // object; br-frankenpandas-ufwpf).
+        Scalar::Null(NullKind::NaT) => Ok(Column::from_datetime64_values_with_validity(
+            vec![Timestamp::NAT; len],
+            fp_columnar::ValidityMask::from_words(vec![0; len.div_ceil(64)], len),
+        )),
         // A number assigned over no rows keeps its dtype: an empty frame's
         // df['z'] = 1.5 is float64, as pandas (the untyped empty column read
         // as object; br-frankenpandas-6i8lq).
@@ -29911,7 +30054,7 @@ impl PySeries {
             return Ok(PySeries { inner: res });
         }
         let res = if let Some(fv) = fill_value {
-            let sc = py_to_scalar(fv.py(), fv)?;
+            let sc = shift_fill(fv.py(), &self.inner.dtype(), periods, fv)?;
             self.inner
                 .shift_with_fill_value(periods, sc)
                 .map_err(frame_error_to_py)?
@@ -38554,9 +38697,20 @@ impl PyDataFrame {
         };
         let res = match ax {
             0 => {
-                if let Some(sc) = fill_sc {
+                if let Some(fv) = fill_value {
+                    // Each column reads the fill as pandas does: a datetime
+                    // or timedelta column checks and parses it (geqye).
+                    let fills = (0..self.inner.num_columns())
+                        .map(|pos| {
+                            let dtype = self.inner.column_at(pos).map(Column::dtype);
+                            match dtype {
+                                Some(dtype) => shift_fill(fv.py(), &dtype, periods, fv),
+                                None => py_to_scalar(fv.py(), fv),
+                            }
+                        })
+                        .collect::<PyResult<Vec<_>>>()?;
                     self.inner
-                        .shift_with_fill_value(periods, sc)
+                        .shift_with_column_fills(periods, &fills)
                         .map_err(frame_error_to_py)?
                 } else {
                     self.inner.shift(periods).map_err(frame_error_to_py)?
@@ -40132,8 +40286,12 @@ impl PyDataFrame {
             values
         } else {
             // A number or bool fills its typed buffer (df['z'] = 1.5 built a
-            // million Scalars; br-frankenpandas-roqqq).
-            let column = broadcast_assigned_column(py_to_scalar(py, value)?, n)?;
+            // million Scalars; br-frankenpandas-roqqq); an aware instant
+            // keeps its zone (ufwpf).
+            let column = with_scalar_zone(
+                broadcast_assigned_column(py_to_scalar(py, value)?, n)?,
+                value,
+            )?;
             self.inner = self
                 .inner
                 .with_column(name, column)
@@ -42891,7 +43049,7 @@ impl PyDataFrame {
                 let mut col_map = BTreeMap::new();
                 let mut detected_order = Vec::new();
                 let mut detected_nrows: Option<usize> = None;
-                let mut scalar_columns: Vec<(String, Scalar)> = Vec::new();
+                let mut scalar_columns: Vec<(String, Scalar, Option<String>)> = Vec::new();
 
                 // Check for any PySeries in dict to align indices
                 let mut series_indices: Vec<Index> = Vec::new();
@@ -43049,15 +43207,16 @@ impl PyDataFrame {
                         let scalar = py_to_cell(py, &value)?;
                         // A scalar broadcasts to the length the other values
                         // give, however they are ordered (a scalar before a
-                        // list made one row; br-frankenpandas-vzoct).
+                        // list made one row; br-frankenpandas-vzoct), typed,
+                        // an aware instant in its zone (it was a Scalar a
+                        // row, naive; br-frankenpandas-ufwpf).
+                        let zone = scalar_zone(&value)?;
                         let Some(nr) = common_labels.as_ref().map(Vec::len) else {
                             detected_order.push(col_name.clone());
-                            scalar_columns.push((col_name, scalar));
+                            scalar_columns.push((col_name, scalar, zone));
                             continue;
                         };
-                        Column::from_values(vec![scalar; nr]).map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                        })?
+                        zoned(broadcast_assigned_column(scalar, nr)?, zone)
                     };
 
                     detected_order.push(col_name.clone());
@@ -43069,11 +43228,11 @@ impl PyDataFrame {
                             "If using all scalar values, you must pass an index",
                         ));
                     };
-                    for (col_name, scalar) in scalar_columns {
-                        let col = Column::from_values(vec![scalar; nr]).map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                        })?;
-                        col_map.insert(col_name, col);
+                    for (col_name, scalar, zone) in scalar_columns {
+                        col_map.insert(
+                            col_name,
+                            zoned(broadcast_assigned_column(scalar, nr)?, zone),
+                        );
                     }
                 }
 
@@ -55767,13 +55926,21 @@ fn series_label_get(
         }
         LocKey::Label(label) => label,
     };
-    match series
-        .index()
-        .labels()
-        .iter()
-        .filter(|l| **l == label)
-        .count()
-    {
+    // A unique index - its verdict cached and shared by clones - answers by
+    // its lookup: the label was counted among every row first (s.loc[ts] of
+    // a million-row DatetimeIndex 4.9 ms, pandas 0.007;
+    // br-frankenpandas-lsn8d).
+    let matches = if series.index().is_unique() {
+        usize::from(series.index().position(&label).is_some())
+    } else {
+        series
+            .index()
+            .labels()
+            .iter()
+            .filter(|l| **l == label)
+            .count()
+    };
+    match matches {
         0 => Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
             key.clone().unbind(),
         )),
