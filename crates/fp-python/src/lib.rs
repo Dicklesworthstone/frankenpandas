@@ -6757,6 +6757,52 @@ impl PyPeriod {
     }
 }
 
+/// The wall-clock instant a Period of a Timestamp, a datetime or a date
+/// reads (an aware one's local time, a date's midnight), as pandas'
+/// `Period(value, freq)`; None for any other object.
+fn py_wall_instant_nanos(item: &Bound<'_, PyAny>) -> PyResult<Option<i64>> {
+    if let Ok(stamp) = item.extract::<PyRef<'_, PyTimestamp>>() {
+        let nanos = stamp.inner.nanos;
+        return Ok(Some(match &stamp.inner.tz {
+            Some(zone) if nanos != i64::MIN => {
+                fp_types::tz_utc_to_wall_nanos(zone, nanos).unwrap_or(nanos)
+            }
+            _ => nanos,
+        }));
+    }
+    if let Ok(dt) = item.cast::<PyDateTime>() {
+        let instant = py_datetime_nanos(dt)?;
+        if dt.get_tzinfo().is_none() {
+            return Ok(Some(instant));
+        }
+        let offset = dt.call_method0("utcoffset")?;
+        let shift = match offset.cast::<PyDelta>() {
+            Ok(delta) => py_delta_nanos(delta)?,
+            Err(_) => 0,
+        };
+        return Ok(Some(instant.saturating_add(shift)));
+    }
+    if let Ok(date) = item.cast::<pyo3::types::PyDate>() {
+        let days = days_from_ymd(
+            i64::from(date.get_year()),
+            i64::from(date.get_month()),
+            i64::from(date.get_day()),
+        );
+        return days
+            .checked_mul(86_400_000_000_000)
+            .map(Some)
+            .ok_or_else(|| {
+                OutOfBoundsDatetime::new_err(format!(
+                    "Out of bounds nanosecond timestamp: {}-{:02}-{:02}",
+                    date.get_year(),
+                    date.get_month(),
+                    date.get_day()
+                ))
+            });
+    }
+    Ok(None)
+}
+
 /// Nanoseconds since the epoch of a `datetime.datetime`, as pandas reads one
 /// into a datetime64[ns] column: a naive one's wall clock, a tz-aware one's
 /// UTC instant (its wall clock less `utcoffset()`; its zone is
@@ -21122,14 +21168,55 @@ impl PyPeriodIndex {
                     if let Ok(period) = item.extract::<PyRef<'_, PyPeriod>>() {
                         periods.push(Some(period.inner));
                     } else if let Ok(s) = item.extract::<String>() {
-                        let p = Period::parse(&s).map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{e}"))
-                        })?;
+                        // At another resolution than the given freq it is the
+                        // period of that freq holding its start ('2020-01-01'
+                        // with 'M' is 2020-01; it stayed a day), and a datetime
+                        // text no period spelling reads ('2020-05-17T13:45')
+                        // the one holding its wall clock (br-frankenpandas-448q6).
+                        let unreadable = |error: &dyn std::fmt::Display| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{error}"))
+                        };
+                        let p = match (Period::parse(&s), given_freq) {
+                            (Ok(p), Some(freq)) if p.freq != freq => {
+                                fp_index::datetime_nanos_to_period(
+                                    fp_index::period_start_nanos(p).map_err(index_error_to_py)?,
+                                    freq,
+                                )
+                                .map_err(index_error_to_py)?
+                            }
+                            (Ok(p), _) => p,
+                            (Err(error), Some(freq)) => {
+                                let stamp = Timestamp::parse(&s)
+                                    .or_else(|_| parsed_timestamp(&s))
+                                    .map_err(|_| unreadable(&error))?;
+                                let wall = match &stamp.tz {
+                                    Some(zone) => fp_types::tz_utc_to_wall_nanos(zone, stamp.nanos)
+                                        .unwrap_or(stamp.nanos),
+                                    None => stamp.nanos,
+                                };
+                                fp_index::datetime_nanos_to_period(wall, freq)
+                                    .map_err(index_error_to_py)?
+                            }
+                            (Err(error), None) => return Err(unreadable(&error)),
+                        };
                         periods.push(Some(p));
                     } else if let Ok(ord) = item.extract::<i64>() {
                         periods.push(Some(Period::new(ord, period_freq)));
                     } else if py_to_scalar(item.py(), &item).is_ok_and(|value| value.is_missing()) {
                         periods.push(None);
+                    } else if let Some(wall) = py_wall_instant_nanos(&item)? {
+                        // A Timestamp / datetime / date is the period of the
+                        // given freq holding its wall clock (it was refused);
+                        // without one, pandas' refusal.
+                        let Some(freq) = given_freq else {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                "freq not specified and cannot be inferred",
+                            ));
+                        };
+                        periods.push(Some(
+                            fp_index::datetime_nanos_to_period(wall, freq)
+                                .map_err(index_error_to_py)?,
+                        ));
                     } else {
                         return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                             "Unsupported element in PeriodIndex data",

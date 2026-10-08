@@ -30637,6 +30637,13 @@ _VK7Y9P4_CASES = {
     # NEGATIVE: dropna=False counts NaT, the mode here (three of them).
     "mode dropna=False": lambda m: [str(v) for v in _vk7y9p3_dates(m).mode(dropna=False)],
     "count": lambda m: [_vk7y9p3_dates(m).count(), _vk7y9p3_spans(m).count()],
+    "nunique": lambda m: [
+        _vk7y9p3_dates(m).nunique(),
+        _vk7y9p3_dates(m).nunique(dropna=False),
+        m.concat([_vk7y9p3_spans(m), _vk7y9p3_spans(m)]).nunique(),
+        m.concat([_vk7y9p3_spans(m), _vk7y9p3_spans(m)]).nunique(dropna=False),
+        _vk7y9p3_dates(m).dropna().nunique(dropna=False),
+    ],
     "d > ts": lambda m: list(_vk7y9p3_dates(m) > m.Timestamp("2020-01-01")),
     "d < ts (NaT False)": lambda m: list(_vk7y9p3_dates(m) < m.Timestamp("2020-01-01")),
     "d <= ts": lambda m: list(_vk7y9p3_dates(m) <= m.Timestamp("2019-12-31T06:30")),
@@ -30947,6 +30954,86 @@ def test_typed_datetime_index_like_pandas_lsn8d(index: str, op: str) -> None:
             return _LSN8D2_OPS[op](m, _LSN8D2_INDEXES[index](m))
         except Exception as error:  # noqa: BLE001
             return ("raises", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+_P448Q6_CASES = {
+    "days, freq M": (["2020-01-01", None, "2021-03-04"], "M"),
+    "days, freq Q": (["2020-05-17", "2020-12-31"], "Q"),
+    "days, freq Y": (["2020-05-17", "2019-01-01"], "Y"),
+    "days, freq W": (["2020-05-17", "2020-05-18"], "W"),
+    "minutes, freq h": (["2020-05-17T13:45", "2020-05-17T00:59"], "h"),
+    "a year, freq D (coarser)": (["2020"], "D"),
+    "Timestamps, freq M": ([pd.Timestamp("2020-01-05"), pd.Timestamp("2021-02-28T23:00")], "M"),
+    "datetimes, freq D": ([datetime.datetime(2020, 1, 5, 3), datetime.datetime(2020, 1, 6)], "D"),
+    "dates, freq M": ([datetime.date(2020, 1, 5), datetime.date(2020, 3, 1)], "M"),
+    "an aware datetime, freq D": ([datetime.datetime(2020, 1, 5, 23, 30, tzinfo=datetime.timezone(datetime.timedelta(hours=-5)))], "D"),
+    # NEGATIVE: strings at the freq's own resolution are as they were.
+    "months, freq M": (["2020-01", "2021-03"], "M"),
+    "quarters, freq Q": (["2020Q1", "2021Q4"], "Q"),
+    # NEGATIVE: an instant without a freq is pandas' refusal.
+    "a Timestamp, no freq": ([pd.Timestamp("2020-01-05")], None),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_P448Q6_CASES))
+def test_period_index_takes_the_given_freq_448q6(case: str) -> None:
+    # PeriodIndex(data, freq=) puts each string, Timestamp, datetime or date
+    # in the period of the given freq holding its start (day strings with
+    # 'M' built a daily index; a Timestamp was refused;
+    # br-frankenpandas-448q6): freqstr, labels and ordinals vs pandas.
+    data, freq = _P448Q6_CASES[case]
+
+    def run(m: Any) -> Any:
+        values = [m.Timestamp(str(v)) if isinstance(v, pd.Timestamp) else v for v in data]
+        try:
+            out = m.PeriodIndex(values, freq=freq)
+        except Exception as error:  # noqa: BLE001
+            return ("raises", type(error).__name__)
+        return (out.freqstr, [str(p) for p in out], [int(v) for v in out.asi8])
+
+    assert run(fpd) == run(pd)
+
+
+def _abewp_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "i": m.array([1, None, 3], dtype="Int64"),
+            "u": m.array([4, None, 6], dtype="UInt32"),
+            "b": m.array([True, None, False], dtype="boolean"),
+            "f": m.array([1.5, None, 2.0], dtype="Float64"),
+            "s": m.array(["x", None, "z"], dtype="string"),
+            "plain": [7, 8, 9],
+        }
+    )
+
+
+_ABEWP_CASES = {
+    "astype(str)": lambda m: _abewp_frame(m).astype(str),
+    "astype(str), a dict": lambda m: _abewp_frame(m).astype({"i": str, "b": str}),
+    "astype('string')": lambda m: _abewp_frame(m).astype("string"),
+    # NEGATIVE: an object column's None and a float column's NaN keep their text.
+    "object None / float NaN": lambda m: m.DataFrame({"o": ["a", None], "x": [1.5, float("nan")]}).astype(str),
+    # NEGATIVE: masked columns without NA are their values' text.
+    "no NA": lambda m: _abewp_frame(m).iloc[[0, 2]].astype(str),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_ABEWP_CASES))
+def test_frame_astype_str_spells_na_like_pandas_abewp(case: str) -> None:
+    # DataFrame.astype(str) of a masked / string column spells its NA '<NA>'
+    # as pandas (it wrote 'None'; br-frankenpandas-abewp): values, missing
+    # cells and dtypes vs pandas.
+    def run(m: Any) -> Any:
+        out = _ABEWP_CASES[case](m)
+        return (
+            [str(dtype) for dtype in out.dtypes],
+            [[str(cell) for cell in row] for row in out.values.tolist()],
+            [list(out[column].isna()) for column in out.columns],
+        )
 
     assert run(fpd) == run(pd)
 

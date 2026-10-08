@@ -18723,37 +18723,22 @@ impl Series {
             return Self::oa_distinct_i64(data, false).0;
         }
 
-        // Datetime64 (all-valid, no NaT): count distinct ns via FxHashSet<i64>
-        // instead of the `.values()` + ScalarKey + SipHash generic path
-        // (nunique over a Datetime64 column was 0.47x pandas — as_i64_slice is
-        // Int64-gated, so a ns-backed column missed every typed path). NaT
-        // (i64::MIN value) or any missing slot bails to the generic dropna path.
-        // Bit-identical: distinct present ns == distinct timestamps.
+        // A datetime / timedelta column counts its distinct present nanos in
+        // the open-addressing table (splitmix64 keys: raw FxHash of round
+        // instants clusters), NaT once more when dropna is off - a column
+        // holding NaT took the `.values()` + ScalarKey path (d.nunique() 0.93x
+        // pandas at 1M with NaT among; br-frankenpandas-vk7y9). Distinct
+        // present ns == distinct timestamps.
         if self.categorical.is_none()
-            && let Some(data) = self.column.as_datetime64_slice()
-            && self.column.validity().all()
-            && !data.contains(&i64::MIN)
+            && let Some((data, _)) = self.column.as_temporal_nanos_with_validity()
         {
-            let mut seen: FxHashSet<i64> =
-                FxHashSet::with_capacity_and_hasher(data.len(), Default::default());
-            for &v in data {
-                seen.insert(v);
+            // NaT by the datum: an all-valid column built over NaT holds one
+            // its mask calls valid.
+            if !data.contains(&i64::MIN) {
+                return Self::oa_distinct_i64(data, false).0;
             }
-            return seen.len();
-        }
-
-        // Timedelta64 sibling (Timedelta::NAT == i64::MIN bails). Same lever.
-        if self.categorical.is_none()
-            && let Some(data) = self.column.as_timedelta64_slice()
-            && self.column.validity().all()
-            && !data.contains(&i64::MIN)
-        {
-            let mut seen: FxHashSet<i64> =
-                FxHashSet::with_capacity_and_hasher(data.len(), Default::default());
-            for &v in data {
-                seen.insert(v);
-            }
-            return seen.len();
+            let present: Vec<i64> = data.iter().copied().filter(|&ns| ns != i64::MIN).collect();
+            return Self::oa_distinct_i64(&present, false).0 + usize::from(!dropna);
         }
 
         // String byte-span distinct count (br-frankenpandas-vcstr): all-valid
@@ -24062,10 +24047,11 @@ impl Series {
         if self.categorical.is_some() {
             return Ok(None);
         }
-        let Some((nanos, validity)) = self.column.as_temporal_nanos_with_validity() else {
+        let Some((nanos, _)) = self.column.as_temporal_nanos_with_validity() else {
             return Ok(None);
         };
-        if !dropna && !validity.all() {
+        // NaT by the datum (an all-valid column built over NaT holds one).
+        if !dropna && nanos.contains(&i64::MIN) {
             return Ok(None);
         }
         let key = |ns: i64| spread_float_bits(ns.cast_unsigned());
@@ -32597,11 +32583,19 @@ impl Series {
         closed: IntervalClosed,
         center: bool,
     ) -> Result<Rolling<'_>, FrameError> {
-        let times = self.index().labels().iter().map(|label| match label {
-            IndexLabel::Datetime64(v) | IndexLabel::Timedelta64(v) => Some(*v),
-            _ => None,
-        });
-        let bounds = offset_window(window, times, closed, center)?;
+        // A DatetimeIndex's instants as they are, NaT among them a missing
+        // time offset_window refuses - its labels were made a row at a time
+        // (s.rolling('1D') over a fresh index 0.68x pandas at 200k;
+        // br-frankenpandas-lsn8d).
+        let bounds = if let Some(nanos) = self.index().datetime64_label_values() {
+            offset_window(window, nanos.iter().map(|&ns| Some(ns)), closed, center)?
+        } else {
+            let times = self.index().labels().iter().map(|label| match label {
+                IndexLabel::Datetime64(v) | IndexLabel::Timedelta64(v) => Some(*v),
+                _ => None,
+            });
+            offset_window(window, times, closed, center)?
+        };
         // pandas defaults min_periods to 1 for offset windows.
         Ok(Rolling::with_bounds(self, bounds, min_periods.unwrap_or(1)))
     }
@@ -94576,8 +94570,20 @@ impl DataFrame {
         center: bool,
     ) -> Result<DataFrameRolling<'_>, FrameError> {
         let on = self.rolling_on(on)?;
-        let bounds = match on.as_deref().and_then(|name| self.column(name)) {
-            Some(column) => offset_window(
+        let on_column = on.as_deref().and_then(|name| self.column(name));
+        // The instants of an `on` column or a DatetimeIndex holding them as
+        // nanos read as they are (see Series::rolling_offset_centered).
+        let nanos = match on_column {
+            Some(column) => column
+                .as_temporal_nanos_with_validity()
+                .map(|(nanos, _)| std::borrow::Cow::Borrowed(nanos)),
+            None => self.index.datetime64_label_values(),
+        };
+        let bounds = match (nanos, on_column) {
+            (Some(nanos), _) => {
+                offset_window(window, nanos.iter().map(|&ns| Some(ns)), closed, center)?
+            }
+            (None, Some(column)) => offset_window(
                 window,
                 column.values().iter().map(|value| match value {
                     Scalar::Datetime64(v) | Scalar::Timedelta64(v) => Some(*v),
@@ -94586,7 +94592,7 @@ impl DataFrame {
                 closed,
                 center,
             )?,
-            None => offset_window(
+            (None, None) => offset_window(
                 window,
                 self.index.labels().iter().map(|label| match label {
                     IndexLabel::Datetime64(v) | IndexLabel::Timedelta64(v) => Some(*v),
@@ -176264,6 +176270,44 @@ mod tests {
     }
 
     #[test]
+    fn offset_rolling_reads_a_datetime_index_s_instants_lsn8d() {
+        // A time-based window over a DatetimeIndex holding its instants
+        // equals the one over the same instants held as labels
+        // (br-frankenpandas-lsn8d).
+        let minute = 60_000_000_000_i64;
+        let nanos: Vec<i64> = (0..50_i64).map(|i| i * i * 7 * minute).collect();
+        let values: Vec<Scalar> = (0..50).map(|i| Scalar::Float64(f64::from(i))).collect();
+        let typed = Index::from_datetime64_values(nanos);
+        let labelled = Index::new(typed.labels().to_vec());
+        assert!(labelled.datetime64_label_values().is_none());
+        let series = |index: Index| {
+            Series::new(
+                "s",
+                index,
+                Column::new(DType::Float64, values.clone()).unwrap(),
+            )
+            .unwrap()
+        };
+        let (a, b) = (series(typed), series(labelled));
+        for window in ["1h", "3h", "1D"] {
+            let x = a.rolling_offset(window, None).unwrap().sum().unwrap();
+            let y = b.rolling_offset(window, None).unwrap().sum().unwrap();
+            assert_eq!(x.column().values(), y.column().values(), "{window}");
+        }
+        // NEGATIVE: a NaT among the instants is the missing time pandas
+        // refuses, typed or not.
+        let with_nat = Index::from_datetime64_values(vec![0, i64::MIN, 5 * minute]);
+        let nat_values = vec![Scalar::Float64(1.0); 3];
+        let nat_series = Series::new(
+            "s",
+            with_nat,
+            Column::new(DType::Float64, nat_values).unwrap(),
+        )
+        .unwrap();
+        assert!(nat_series.rolling_offset("1h", None).is_err());
+    }
+
+    #[test]
     fn time_of_day_selection_reads_the_instants_lsn8d() {
         // between_time / at_time over a DatetimeIndex holding its instants
         // equal those over the same instants held as labels, an aware
@@ -176409,6 +176453,51 @@ mod tests {
         assert_eq!(rows(&last), vec![2, 0, 1]);
         let first = with_nat.sort_index_na(true, "first").unwrap();
         assert_eq!(rows(&first), vec![1, 2, 0]);
+    }
+
+    #[test]
+    fn temporal_nunique_counts_present_nanos_and_nat_vk7y9() {
+        // A datetime / timedelta column's distinct present values, NaT once
+        // more only with dropna off (br-frankenpandas-vk7y9).
+        let day = 86_400_000_000_000_i64;
+        let nat = i64::MIN;
+        let nanos: Vec<i64> = (0..300_i64)
+            .map(|i| if i % 13 == 4 { nat } else { (i % 37) * day })
+            .collect();
+        let distinct = nanos
+            .iter()
+            .filter(|&&ns| ns != nat)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        for dtype in [DType::datetime64_naive(), DType::Timedelta64] {
+            let s = Series::new(
+                "d",
+                Index::default_range(nanos.len()),
+                Column::from_temporal_nanos(dtype.clone(), nanos.clone()),
+            )
+            .unwrap();
+            assert_eq!(s.nunique_with_dropna(true), distinct, "{dtype:?}");
+            assert_eq!(s.nunique_with_dropna(false), distinct + 1, "{dtype:?}");
+            // NEGATIVE: all NaT is no value, one with dropna off.
+            let all_nat = Series::new(
+                "d",
+                Index::default_range(3),
+                Column::from_temporal_nanos(dtype.clone(), vec![nat; 3]),
+            )
+            .unwrap();
+            assert_eq!(all_nat.nunique_with_dropna(true), 0);
+            assert_eq!(all_nat.nunique_with_dropna(false), 1);
+        }
+        // NEGATIVE: a column built all-valid over NaT (its mask calls the NaT
+        // valid) still leaves it out.
+        let masked_valid = Series::new(
+            "d",
+            Index::default_range(4),
+            Column::from_datetime64_values(vec![5, nat, 5, 9]),
+        )
+        .unwrap();
+        assert_eq!(masked_valid.nunique_with_dropna(true), 2);
+        assert_eq!(masked_valid.nunique_with_dropna(false), 3);
     }
 
     #[test]

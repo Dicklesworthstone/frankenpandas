@@ -8381,17 +8381,15 @@ fn compare_i64_scalar(data: &[i64], s: i64, op: ComparisonOp) -> Vec<bool> {
 /// [`compare_i64_scalar`] of a datetime / timedelta buffer, NaT (i64::MIN)
 /// at its missing slots, against a present `s`: a missing row false, true
 /// under != (br-frankenpandas-vk7y9). NaT orders below every value, so the
-/// kernel answers that already for every op but `<` / `<=`, whose missing
-/// rows are cleared off the mask.
-fn compare_nanos_scalar(
-    data: &[i64],
-    validity: &ValidityMask,
-    s: i64,
-    op: ComparisonOp,
-) -> Vec<bool> {
+/// kernel answers that already for every op but `<` / `<=`, whose NaT rows
+/// are cleared - by their datum, which an all-valid column built over NaT
+/// holds under a mask calling it valid.
+fn compare_nanos_scalar(data: &[i64], s: i64, op: ComparisonOp) -> Vec<bool> {
     let mut out = compare_i64_scalar(data, s, op);
     if matches!(op, ComparisonOp::Lt | ComparisonOp::Le) {
-        validity.for_each_invalid_range(|start, len| out[start..start + len].fill(false));
+        for (flag, &ns) in out.iter_mut().zip(data) {
+            *flag &= ns != i64::MIN;
+        }
     }
     out
 }
@@ -15627,10 +15625,13 @@ impl Column {
 
     /// A datetime (any zone) or timedelta column's nanosecond buffer with its
     /// validity - all-valid or holding NaT. Every missing slot's datum is NaT
-    /// (i64::MIN): the nullable constructors write it, a Scalar-built
-    /// column's buffer holds it, the other backings are all-valid - so a
-    /// row is present exactly when its datum is not NaT. None for any other
-    /// dtype or a backing without a contiguous buffer (br-frankenpandas-vk7y9).
+    /// (i64::MIN): the nullable constructors write it and a Scalar-built
+    /// column's buffer holds it. The converse does not hold: an all-valid
+    /// column built over NaT (`from_datetime64_values`) holds NaT under a
+    /// mask calling it valid, and its Scalar reads missing - so a row is
+    /// missing exactly when its DATUM is NaT; read that, not the mask. None
+    /// for any other dtype or a backing without a contiguous buffer
+    /// (br-frankenpandas-vk7y9).
     #[must_use]
     #[doc(hidden)]
     pub fn as_temporal_nanos_with_validity(&self) -> Option<(&[i64], &ValidityMask)> {
@@ -22753,14 +22754,12 @@ impl Column {
         // is false, true under !=, as for a missing one - the scalar was
         // broadcast to a column and compared a pair at a time (d > ts 0.61x
         // pandas at 1M; br-frankenpandas-vk7y9).
-        if let Some((data, validity)) = self.as_temporal_nanos_with_validity()
+        if let Some((data, _)) = self.as_temporal_nanos_with_validity()
             && let (DType::Datetime64 { .. }, Scalar::Datetime64(s))
             | (DType::Timedelta64, Scalar::Timedelta64(s)) = (&self.dtype, scalar)
             && *s != i64::MIN
         {
-            return Ok(Self::from_bool_values(compare_nanos_scalar(
-                data, validity, *s, op,
-            )));
+            return Ok(Self::from_bool_values(compare_nanos_scalar(data, *s, op)));
         }
         let result = self.compare_scalar_propagating(scalar, op)?;
         if self.dtype.is_nullable() {
@@ -25185,11 +25184,13 @@ impl Column {
         ) {
             return self.validity.count_valid();
         }
-        // A datetime / timedelta buffer's missing slots are its NaT, which the
-        // mask leaves out: the Scalar view was walked a row (two thirds of
+        // A datetime / timedelta buffer's missing values are its NaT - the
+        // nullable constructors write one in each gap, and an all-valid
+        // column built over NaT holds one its mask calls valid - counted off
+        // the buffer: the Scalar view was walked a row (two thirds of
         // d.mean(), which counts; br-frankenpandas-vk7y9).
-        if self.as_temporal_nanos_with_validity().is_some() {
-            return self.validity.count_valid();
+        if let Some((data, _)) = self.as_temporal_nanos_with_validity() {
+            return data.iter().filter(|&&ns| ns != i64::MIN).count();
         }
 
         self.values.iter().filter(|v| !v.is_missing()).count()
@@ -29506,6 +29507,28 @@ impl Column {
                 })
                 .collect();
             return Self::new(DType::Float64, values)?.astype(target);
+        }
+        // A masked column's (or a `string` one's) missing value is pandas'
+        // NA, whose text is '<NA>': it was the text of an object column's
+        // None, 'None' (DataFrame.astype(str); br-frankenpandas-abewp).
+        if target == DType::Utf8
+            && (self.dtype.is_nullable() || self.pandas_string)
+            && self.has_any_missing()
+        {
+            let cast = self.astype_storage(target)?;
+            let values = cast
+                .values()
+                .iter()
+                .zip(self.values())
+                .map(|(text, value)| {
+                    if value.is_missing() {
+                        Scalar::Utf8("<NA>".to_owned())
+                    } else {
+                        text.clone()
+                    }
+                })
+                .collect();
+            return Self::new(DType::Utf8, values);
         }
         // A DType names the 64-bit storage: astype('int64') of an int32
         // column is int64 (its same-dtype shortcut kept the width), astype
@@ -59255,9 +59278,65 @@ mod tests {
         }
 
         #[test]
-        fn temporal_count_reads_the_mask_vk7y9() {
-            // A datetime / timedelta column's count is its mask's - NaT left
-            // out - equal to the Scalar view's present rows (br-frankenpandas-vk7y9).
+        fn temporal_compare_scalar_answers_nat_like_pandas_vk7y9() {
+            // A datetime / timedelta column against an instant / duration:
+            // the nanos compared, a NaT row false - true under != - whether
+            // its mask calls it missing or (built all-valid over NaT) valid
+            // (br-frankenpandas-vk7y9).
+            let nat = i64::MIN;
+            let nanos = vec![5, nat, -3, 9, nat, 5];
+            let mask = ValidityMask::from_words(vec![0b10_1101], 6);
+            let columns = [
+                Column::from_datetime64_values_with_validity(nanos.clone(), mask.clone()),
+                Column::from_timedelta64_values_with_validity(nanos.clone(), mask),
+                Column::from_datetime64_values(nanos.clone()),
+            ];
+            let ops = [
+                ComparisonOp::Lt,
+                ComparisonOp::Le,
+                ComparisonOp::Gt,
+                ComparisonOp::Ge,
+                ComparisonOp::Eq,
+                ComparisonOp::Ne,
+            ];
+            for col in &columns {
+                let scalar = if col.dtype() == DType::Timedelta64 {
+                    Scalar::Timedelta64(5)
+                } else {
+                    Scalar::Datetime64(5)
+                };
+                for op in ops {
+                    let expected: Vec<bool> = nanos
+                        .iter()
+                        .map(|&ns| {
+                            if ns == nat {
+                                op == ComparisonOp::Ne
+                            } else {
+                                match op {
+                                    ComparisonOp::Lt => ns < 5,
+                                    ComparisonOp::Le => ns <= 5,
+                                    ComparisonOp::Gt => ns > 5,
+                                    ComparisonOp::Ge => ns >= 5,
+                                    ComparisonOp::Eq => ns == 5,
+                                    ComparisonOp::Ne => ns != 5,
+                                }
+                            }
+                        })
+                        .collect();
+                    let got = col.compare_scalar(&scalar, op).expect("compare");
+                    // NEGATIVE: NaT is never less than an instant (its raw
+                    // i64::MIN is).
+                    assert_eq!(got.as_bool_slice(), Some(expected.as_slice()), "{op:?}");
+                }
+            }
+        }
+
+        #[test]
+        fn temporal_count_reads_the_nat_datum_vk7y9() {
+            // A datetime / timedelta column's count is its datums that are not
+            // NaT, equal to the Scalar view's present rows - an all-valid
+            // column built over NaT included (its mask calls the NaT valid;
+            // br-frankenpandas-vk7y9).
             let nat = i64::MIN;
             let nanos = vec![5, nat, -3, nat, nat, 0, i64::MAX];
             let columns = [
@@ -59279,9 +59358,11 @@ mod tests {
                 )
                 .unwrap(),
                 Column::new(DType::Timedelta64, vec![Scalar::Null(NullKind::NaT); 2]).unwrap(),
+                Column::from_datetime64_values(vec![1, nat, 3]),
             ];
-            // NEGATIVE: none counts its length (the all-NaT one is 0 of 2).
-            let expected = [4, 4, 2, 0];
+            // NEGATIVE: none counts its length (the all-NaT one is 0 of 2),
+            // nor its mask (the last is all-valid over a NaT: 2, not 3).
+            let expected = [4, 4, 2, 0, 2];
             for (col, want) in columns.iter().zip(expected) {
                 assert!(col.as_temporal_nanos_with_validity().is_some());
                 assert_ne!(col.count(), col.len());
@@ -61313,6 +61394,56 @@ mod tests {
             assert_eq!(
                 clean.astype(DType::Utf8).expect("astype").values(),
                 &[Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned())]
+            );
+        }
+
+        /// A masked column's NA casts to pandas' `str(pd.NA)`, '<NA>'
+        /// (br-frankenpandas-abewp).
+        #[test]
+        fn astype_utf8_spells_a_masked_na_like_pandas_abewp() {
+            let ints = Column::new(
+                DType::Int64Nullable,
+                vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)],
+            )
+            .expect("Int64 col");
+            assert_eq!(
+                ints.astype(DType::Utf8).expect("astype").values(),
+                &[
+                    Scalar::Utf8("1".to_owned()),
+                    Scalar::Utf8("<NA>".to_owned())
+                ]
+            );
+            let flags = Column::new(
+                DType::BoolNullable,
+                vec![Scalar::Null(NullKind::Null), Scalar::Bool(true)],
+            )
+            .expect("boolean col");
+            assert_eq!(
+                flags.astype(DType::Utf8).expect("astype").values(),
+                &[
+                    Scalar::Utf8("<NA>".to_owned()),
+                    Scalar::Utf8("True".to_owned())
+                ]
+            );
+            // NEGATIVE: an object column's None stays 'None', a float
+            // column's NaN 'nan'.
+            let objects = Column::new(
+                DType::Utf8,
+                vec![Scalar::Utf8("a".into()), Scalar::Null(NullKind::Null)],
+            )
+            .expect("utf8 col");
+            assert_eq!(
+                objects.astype(DType::Utf8).expect("astype").values()[1],
+                Scalar::Utf8("None".to_owned())
+            );
+            let floats = Column::new(
+                DType::Float64,
+                vec![Scalar::Float64(1.5), Scalar::Null(NullKind::NaN)],
+            )
+            .expect("float col");
+            assert_eq!(
+                floats.astype(DType::Utf8).expect("astype").values()[1],
+                Scalar::Utf8("nan".to_owned())
             );
         }
 
