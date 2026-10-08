@@ -47694,18 +47694,25 @@ impl SeriesGroupBy<'_> {
         let order = self.dense_group_labels(&gids, ngroups)?;
         let mut acc = vec![init; ngroups];
         let mut count = vec![0_i64; ngroups];
-        for (i, &g) in gids.iter().enumerate() {
-            if let Some(f) = vf {
-                acc[g] = fold(acc[g], f[i]);
+        if let Some(f) = vf {
+            for (&g, &value) in gids.iter().zip(f) {
+                acc[g] = fold(acc[g], value);
                 count[g] += 1;
-            } else if let Some(vi2) = vi {
-                acc[g] = fold(acc[g], vi2[i] as f64);
+            }
+        } else if let Some(vi2) = vi {
+            for (&g, &value) in gids.iter().zip(vi2) {
+                acc[g] = fold(acc[g], value as f64);
                 count[g] += 1;
-            } else {
-                // Nullable Float64 skipna: only fold/count non-missing slots.
-                let (data, validity) = vfv.unwrap();
-                if validity.get(i) {
-                    acc[g] = fold(acc[g], data[i]);
+            }
+        } else if let Some((data, validity)) = vfv {
+            // Nullable Float64 skipna: only fold/count non-missing slots, the
+            // mask's bits read off its words here - a ValidityMask::get per
+            // row, not inlined across the crates, was a fifth of
+            // g['b'].max() (br-frankenpandas-bss5q.3).
+            let words = validity.packed_words_for_scan();
+            for (row, (&g, &value)) in gids.iter().zip(data).enumerate() {
+                if (words[row / 64] >> (row % 64)) & 1 == 1 {
+                    acc[g] = fold(acc[g], value);
                     count[g] += 1;
                 }
             }
@@ -112282,12 +112289,17 @@ impl DataFrameGroupBy<'_> {
                 .iter()
                 .filter_map(|c| func_map.get(c).map(|f| (c.clone(), f.clone())))
                 .collect();
+            // A float column with missing values too: agg_typed_pairs runs
+            // each func through gb.<func>(), which skips them as the generic
+            // body does - it took that body (a dict of a float column with
+            // NaN was 0.21x pandas; br-frankenpandas-bss5q.3).
             let dense_ok = specs.len() == func_map.len()
                 && specs.iter().all(|(c, f)| {
                     !self.by.contains(c)
                         && DENSE_AGG_FUNCS.contains(&f.as_str())
                         && self.df.columns.get(c).is_some_and(|col| {
-                            col.as_f64_slice().is_some() || col.as_i64_slice().is_some()
+                            col.as_f64_slice_with_validity().is_some()
+                                || col.as_i64_slice().is_some()
                         })
                 });
             if dense_ok {
