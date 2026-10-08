@@ -36912,7 +36912,7 @@ fn numpy_kind(column: &Column) -> Option<&'static str> {
 /// [`numpy_kind`]): a missing float is NaN, a missing datetime/timedelta
 /// NaT (`i64::MIN`).
 #[allow(clippy::cast_precision_loss)] // pandas performs the same int64 -> float64 widening
-/// One column's 8-byte cells as [`frame_ndarray`] writes them into numpy's
+/// One column's cells as [`frame_ndarray`] copies them into numpy's
 /// buffer: a typed number column read as it is held, else its bytes as
 /// [`numpy_bytes`] makes them (br-frankenpandas-myn6q).
 enum CellSource<'a> {
@@ -36934,30 +36934,19 @@ impl<'a> CellSource<'a> {
         }
     }
 
-    /// This column's rows from `first` on into cell `position` of each
-    /// `width`-cell row of `block`.
-    fn fill_column(&self, block: &mut [[u8; 8]], width: usize, position: usize, first: usize) {
-        let rows = block.chunks_exact_mut(width);
+    /// Copies this column's cells into `row`, a 1-D numpy array of its
+    /// numpy kind and length.
+    fn copy_into(&self, py: Python<'_>, row: &Bound<'_, PyAny>) -> PyResult<()> {
         match self {
-            Self::Float(data) => {
-                for (row, value) in rows.zip(&data[first..]) {
-                    row[position] = value.to_ne_bytes();
-                }
-            }
+            Self::Float(data) => pyo3::buffer::PyBuffer::<f64>::get(row)?.copy_from_slice(py, data),
             Self::IntAsFloat(data) => {
-                for (row, &value) in rows.zip(&data[first..]) {
-                    row[position] = (value as f64).to_ne_bytes();
-                }
+                let floats: Vec<f64> = data.iter().map(|&value| value as f64).collect();
+                pyo3::buffer::PyBuffer::<f64>::get(row)?.copy_from_slice(py, &floats)
             }
-            Self::Int(data) => {
-                for (row, value) in rows.zip(&data[first..]) {
-                    row[position] = value.to_ne_bytes();
-                }
-            }
+            Self::Int(data) => pyo3::buffer::PyBuffer::<i64>::get(row)?.copy_from_slice(py, data),
             Self::Bytes(bytes) => {
-                for (row, cell) in rows.zip(&bytes.as_chunks::<8>().0[first..]) {
-                    row[position] = *cell;
-                }
+                let row = row.call_method1("view", ("uint8",))?;
+                pyo3::buffer::PyBuffer::<u8>::get(&row)?.copy_from_slice(py, bytes)
             }
         }
     }
@@ -37350,6 +37339,27 @@ fn lazy_transpose_ndarray<'py>(
     Ok(Some(flat.call_method1("reshape", ((rows, width),))?))
 }
 
+/// `columns` (`rows` each, numpy `kind` "float64" / "int64" / "bool" /
+/// datetime / timedelta) as pandas' `DataFrame.values` lays them out: its 2-D block
+/// is (columns, rows) and `.values` the block's transpose, F-ordered. Each
+/// column is copied once into its row of a numpy.empty block, where a
+/// zeroed bytearray took every cell interleaved one at a time (df.values
+/// of two float columns 0.65 ms per 200k rows, pandas 0.30;
+/// br-frankenpandas-bss5q.3).
+fn columns_block<'py>(
+    py: Python<'py>,
+    np: &Bound<'py, PyModule>,
+    columns: &[&Column],
+    kind: &str,
+    rows: usize,
+) -> PyResult<Bound<'py, PyAny>> {
+    let block = np.call_method1("empty", ((columns.len(), rows), kind))?;
+    for (position, column) in columns.iter().enumerate() {
+        CellSource::of(column, kind).copy_into(py, &block.get_item(position)?)?;
+    }
+    block.getattr("T")
+}
+
 fn frame_ndarray<'py>(py: Python<'py>, frame: &DataFrame) -> PyResult<Bound<'py, PyAny>> {
     let np = py.import("numpy")?;
     #[cfg(feature = "lazy-transpose-view")]
@@ -37400,43 +37410,11 @@ fn frame_ndarray<'py>(py: Python<'py>, frame: &DataFrame) -> PyResult<Bound<'py,
         Some(_) => None,
     };
     if let Some(kind) = common {
-        let cell = if kind == "bool" { 1 } else { 8 };
-        // Each cell written straight into numpy's buffer - a typed number
-        // column read as it is held, a block of rows at a time so a wide
-        // frame's strided stores stay in cache - where every column's bytes
-        // were copied out, interleaved 8 at a time into a third buffer and
-        // copied again into the bytearray (br-frankenpandas-myn6q).
-        let buffer = pyo3::types::PyByteArray::new_with(py, rows * width * cell, |buffer| {
-            if width == 0 {
-                return Ok(());
-            }
-            if cell == 1 {
-                let per_column: Vec<Vec<u8>> = columns
-                    .iter()
-                    .map(|column| numpy_bytes(column, kind))
-                    .collect();
-                for (row, out) in buffer.chunks_exact_mut(width).enumerate() {
-                    for (column, out) in per_column.iter().zip(out) {
-                        *out = column[row];
-                    }
-                }
-                return Ok(());
-            }
-            let sources: Vec<CellSource<'_>> = columns
-                .iter()
-                .map(|column| CellSource::of(column, kind))
-                .collect();
-            const BLOCK_ROWS: usize = 1024;
-            let (cells, _) = buffer.as_chunks_mut::<8>();
-            for (block_index, block) in cells.chunks_mut(BLOCK_ROWS * width).enumerate() {
-                for (position, source) in sources.iter().enumerate() {
-                    source.fill_column(block, width, position, block_index * BLOCK_ROWS);
-                }
-            }
-            Ok(())
-        })?;
-        let flat = np.call_method1("frombuffer", (buffer, kind))?;
-        let array = flat.call_method1("reshape", ((rows, width),))?;
+        let array = if rows > 0 && width > 0 {
+            columns_block(py, &np, &columns, kind, rows)?
+        } else {
+            np.call_method1("empty", ((rows, width), kind))?
+        };
         // Narrow columns' common numpy dtype (fvsao.23): int32 and uint8 are
         // int32, float32 alone float32 - numpy's result_type over them.
         let narrow = columns
@@ -37456,7 +37434,9 @@ fn frame_ndarray<'py>(py: Python<'py>, frame: &DataFrame) -> PyResult<Bound<'py,
     }
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", "object")?;
-    let array = np.call_method("empty", ((rows, width),), Some(&kwargs))?;
+    // pandas' object block is (columns, rows) too, `.values` its transpose
+    // (see [`columns_block`]).
+    let block = np.call_method("empty", ((width, rows),), Some(&kwargs))?;
     for (position, column) in columns.iter().enumerate() {
         // A zoned column's instants are Timestamps in its zone, a masked or
         // `string` column's gaps pd.NA (they were None; un0ea).
@@ -37473,9 +37453,9 @@ fn frame_ndarray<'py>(py: Python<'py>, frame: &DataFrame) -> PyResult<Bound<'py,
         } else {
             object_ndarray(py, &np, column.values())?
         };
-        array.set_item((pyo3::types::PySlice::full(py), position), cells)?;
+        block.set_item(position, cells)?;
     }
-    Ok(array)
+    block.getattr("T")
 }
 
 /// A numpy bool array marking the missing cells of `columns` (row-major

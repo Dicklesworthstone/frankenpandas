@@ -29645,3 +29645,51 @@ def test_temporal_frame_reductions_refuse_like_pandas_4ckef(case: str) -> None:
     assert _1f4yb_answers(fpd, _1f4yb_frame(fpd, columns, True), 0, ops) == _1f4yb_answers(
         pd, _1f4yb_frame(pd, columns, True), 0, ops
     )
+
+
+_BSS5Q3_FRAME_VALUES_CASES = {
+    "floats": lambda m: m.DataFrame({"a": [0.5, -1.25, 3.0], "b": [2.0, 0.0, -0.0]}),
+    "floats with NaN": lambda m: m.DataFrame({"a": [0.5, float("nan"), 3.0], "b": [float("nan"), 1.0, 2.0]}),
+    "ints": lambda m: m.DataFrame({"a": [1, -2, 3], "b": [4, 5, 2**62]}),
+    "int beside float": lambda m: m.DataFrame({"i": [1, -2, 3], "f": [0.5, float("nan"), 2.0]}),
+    "bools": lambda m: m.DataFrame({"p": [True, False, True], "q": [False, False, True]}),
+    "dates": lambda m: m.DataFrame(
+        {"d": m.to_datetime(["2020-01-01", None, "2021-06-30"]), "e": m.to_datetime(["2000-01-01"] * 3)}
+    ),
+    "durations": lambda m: m.DataFrame({"t": m.to_timedelta(["1D", "2h", None])}),
+    "float32": lambda m: m.DataFrame(
+        {"g": m.Series([1.5, -2.0, 0.25], dtype="float32"), "h": m.Series([1.0, 2.0, 3.0], dtype="float32")}
+    ),
+    "text": lambda m: m.DataFrame({"s": ["x", "y"], "t": ["z", None]}),
+    "text beside a number": lambda m: m.DataFrame({"s": ["x", "y"], "n": [1.5, 2.0]}),
+    # NEGATIVE: one column (both layouts at once) and no rows were laid out
+    # as pandas' already.
+    "one column (NEGATIVE)": lambda m: m.DataFrame({"a": [1.0, 2.0]}),
+    "no rows (NEGATIVE)": lambda m: m.DataFrame({"a": m.Series([], dtype="float64"), "b": m.Series([], dtype="float64")}),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_BSS5Q3_FRAME_VALUES_CASES))
+def test_frame_values_layout_like_pandas_bss5q3(case: str) -> None:
+    # df.values is pandas' block transposed - F-ordered - each column copied
+    # once into its row of a numpy.empty block (a zeroed bytearray took
+    # every cell interleaved: 0.46x pandas; br-frankenpandas-bss5q.3): its
+    # dtype, layout and values as pandas', to_numpy() the same, an object
+    # frame's too. NEGATIVE: one column and no rows, laid out as before.
+    def run(m: Any) -> Any:
+        frame = _BSS5Q3_FRAME_VALUES_CASES[case](m)
+        answers = []
+        for array in (frame.values, frame.to_numpy()):
+            answers.append(
+                (
+                    str(array.dtype),
+                    array.shape,
+                    bool(array.flags["F_CONTIGUOUS"]),
+                    bool(array.flags["C_CONTIGUOUS"]),
+                    [[str(v) for v in row] for row in array.tolist()],
+                )
+            )
+        return answers
+
+    assert run(fpd) == run(pd)
