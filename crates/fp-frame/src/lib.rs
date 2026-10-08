@@ -7640,6 +7640,67 @@ fn repeat_text(text: &str, count: usize) -> Result<String, FrameError> {
     Ok(out)
 }
 
+/// [`loc_slice_positions`] over `index`: a DatetimeIndex holding no NaT reads
+/// its kinds and its order from the index's caches (shared by clones) and
+/// places each bound by a binary search - each call scanned every label
+/// three times for them (s.loc[ts:ts] 4.7 ms a million rows, pandas 0.03;
+/// br-frankenpandas-lsn8d). The bounds resolve as there: date text names a
+/// period, and a decreasing index takes only instants. Any other index, or
+/// an unsorted one, is `loc_slice_positions` over its labels.
+fn index_loc_slice_positions(
+    index: &Index,
+    start: Option<&IndexLabel>,
+    stop: Option<&IndexLabel>,
+) -> Result<Option<(usize, usize)>, FrameError> {
+    let labels = index.labels();
+    if !labels.is_empty() && index.label_kinds().within(fp_index::LabelKinds::DATETIME64) {
+        let resolve = |label: Option<&IndexLabel>, end: bool| -> Result<_, FrameError> {
+            Ok(match label {
+                Some(IndexLabel::Utf8(text)) => {
+                    let (first, last) = partial_date_bounds(text)?;
+                    Some(IndexLabel::Datetime64(if end { last } else { first }))
+                }
+                other => other.cloned(),
+            })
+        };
+        let date_text = [start, stop]
+            .iter()
+            .any(|bound| matches!(bound, Some(IndexLabel::Utf8(_))));
+        let low = resolve(start, false)?;
+        let high = resolve(stop, true)?;
+        let instant = |bound: &Option<IndexLabel>| {
+            bound
+                .as_ref()
+                .is_none_or(|bound| matches!(bound, IndexLabel::Datetime64(_)))
+        };
+        if instant(&low) && instant(&high) {
+            let ascending = index.is_monotonic_increasing();
+            if ascending || (!date_text && index.is_monotonic_decreasing()) {
+                let first = low.as_ref().map_or(0, |bound| {
+                    labels.partition_point(|label| {
+                        if ascending {
+                            label < bound
+                        } else {
+                            label > bound
+                        }
+                    })
+                });
+                let end = high.as_ref().map_or(labels.len(), |bound| {
+                    labels.partition_point(|label| {
+                        if ascending {
+                            label <= bound
+                        } else {
+                            label >= bound
+                        }
+                    })
+                });
+                return Ok((first < end).then(|| (first, end - 1)));
+            }
+        }
+    }
+    loc_slice_positions(labels, start, stop)
+}
+
 /// The inclusive row positions of `.loc[start:stop]` over `labels`, as pandas
 /// resolves them (`None` for an empty selection): on a datetime index a string
 /// bound names a period at its own resolution, so `"2024-01-05"` as the stop
@@ -15857,7 +15918,7 @@ impl Series {
         if labels.is_empty() {
             return Ok(Vec::new());
         }
-        Ok(loc_slice_positions(labels, start, stop)?
+        Ok(index_loc_slice_positions(&self.index, start, stop)?
             .map_or_else(Vec::new, |(first, last)| (first..=last).collect()))
     }
 
@@ -15877,7 +15938,8 @@ impl Series {
         if labels.is_empty() {
             return self.iloc_slice(Some(0), Some(0));
         }
-        let Some((start_pos, end_pos)) = loc_slice_positions(labels, start, stop)? else {
+        let Some((start_pos, end_pos)) = index_loc_slice_positions(&self.index, start, stop)?
+        else {
             return self.iloc_slice(Some(0), Some(0));
         };
         // The labels between are a run of positions: slice them, which keeps
@@ -22341,19 +22403,41 @@ impl Series {
     /// numpy's cast buffer ([`fp_types::PandasReductions`]), divided by the
     /// non-NaT count and truncated to int64; all-NaT or empty gives NaT.
     fn datetime_mean(&self) -> Scalar {
-        let values = self.column.values();
-        let mut present = vec![0_u64; values.len().div_ceil(64)];
-        let nanos: Vec<i64> = values
-            .iter()
-            .enumerate()
-            .map(|(i, value)| match value {
-                Scalar::Datetime64(ns) if *ns != Timestamp::NAT => {
-                    present[i / 64] |= 1 << (i % 64);
-                    *ns
-                }
-                _ => 0,
-            })
-            .collect();
+        // The nanos off the typed buffer, NaT at a missing slot (it read a
+        // Scalar a row: d.mean() 0.33x pandas at 1M; br-frankenpandas-vk7y9),
+        // else off the Scalar view.
+        let (nanos, present) =
+            if let Some((data, _)) = self.column.as_temporal_nanos_with_validity() {
+                let mut present = vec![0_u64; data.len().div_ceil(64)];
+                let nanos: Vec<i64> = data
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &ns)| {
+                        if ns == Timestamp::NAT {
+                            0
+                        } else {
+                            present[i / 64] |= 1 << (i % 64);
+                            ns
+                        }
+                    })
+                    .collect();
+                (nanos, present)
+            } else {
+                let values = self.column.values();
+                let mut present = vec![0_u64; values.len().div_ceil(64)];
+                let nanos: Vec<i64> = values
+                    .iter()
+                    .enumerate()
+                    .map(|(i, value)| match value {
+                        Scalar::Datetime64(ns) if *ns != Timestamp::NAT => {
+                            present[i / 64] |= 1 << (i % 64);
+                            *ns
+                        }
+                        _ => 0,
+                    })
+                    .collect();
+                (nanos, present)
+            };
         let reductions = fp_types::PandasReductions::new(
             fp_types::ReductionValues::Int(&nanos),
             Some(&present),
@@ -84643,7 +84727,8 @@ impl DataFrame {
             );
         }
 
-        let Some((start_pos, end_pos)) = loc_slice_positions(labels, start, stop)? else {
+        let Some((start_pos, end_pos)) = index_loc_slice_positions(&self.index, start, stop)?
+        else {
             return self.take_rows_by_positions(&[]);
         };
         // A label slice is a contiguous run of rows: a slice of the index,
@@ -84668,7 +84753,7 @@ impl DataFrame {
         if self.index.labels().is_empty() {
             return Ok(Vec::new());
         }
-        Ok(loc_slice_positions(self.index.labels(), start, stop)?
+        Ok(index_loc_slice_positions(&self.index, start, stop)?
             .map_or_else(Vec::new, |(first, last)| (first..=last).collect()))
     }
 

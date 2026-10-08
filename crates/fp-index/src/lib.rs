@@ -2146,11 +2146,16 @@ pub struct Index {
     /// Runtime-only immutable identity for this label vector lineage.
     #[serde(skip, default = "next_index_label_identity")]
     label_identity: u64,
+    /// Whether the labels repeat, once asked - shared by clones as the
+    /// monotonic flags are: a Series' `.loc` / `.at` takes a clone, which
+    /// asked afresh each lookup, a pass over every label
+    /// (br-frankenpandas-lsn8d).
     #[serde(skip)]
-    duplicate_cache: OnceLock<bool>,
-    /// AG-13: Cached sort order for adaptive backend selection.
+    duplicate_cache: Arc<OnceLock<bool>>,
+    /// AG-13: Cached sort order for adaptive backend selection, shared by
+    /// clones (see `duplicate_cache`).
     #[serde(skip)]
-    sort_order_cache: OnceLock<SortOrder>,
+    sort_order_cache: Arc<OnceLock<SortOrder>>,
     /// The monotonic flags (increasing, decreasing) once asked, shared by
     /// clones as the labels are: the labels never change, and pandas keeps
     /// them on its engine - a repeated `is_monotonic_increasing` rescanned
@@ -2444,8 +2449,8 @@ impl Index {
             labels: IndexLabels::new(labels),
             name: None,
             label_identity: next_index_label_identity(),
-            duplicate_cache: OnceLock::new(),
-            sort_order_cache: OnceLock::new(),
+            duplicate_cache: Arc::default(),
+            sort_order_cache: Arc::default(),
             monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
@@ -2507,8 +2512,8 @@ impl Index {
             labels,
             name: None,
             label_identity: next_index_label_identity(),
-            duplicate_cache: OnceLock::new(),
-            sort_order_cache: OnceLock::new(),
+            duplicate_cache: Arc::default(),
+            sort_order_cache: Arc::default(),
             monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
@@ -2543,8 +2548,8 @@ impl Index {
             labels,
             name: None,
             label_identity: next_index_label_identity(),
-            duplicate_cache: OnceLock::new(),
-            sort_order_cache: OnceLock::new(),
+            duplicate_cache: Arc::default(),
+            sort_order_cache: Arc::default(),
             monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
@@ -2570,8 +2575,8 @@ impl Index {
             labels,
             name: None,
             label_identity: next_index_label_identity(),
-            duplicate_cache: OnceLock::new(),
-            sort_order_cache: OnceLock::new(),
+            duplicate_cache: Arc::default(),
+            sort_order_cache: Arc::default(),
             monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
@@ -2608,8 +2613,8 @@ impl Index {
             labels: IndexLabels::new_int64_values(Arc::new(values)),
             name: None,
             label_identity: next_index_label_identity(),
-            duplicate_cache: OnceLock::new(),
-            sort_order_cache: OnceLock::new(),
+            duplicate_cache: Arc::default(),
+            sort_order_cache: Arc::default(),
             monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
@@ -2636,8 +2641,8 @@ impl Index {
             labels: IndexLabels::new_int64_strided(values, start, step, len)?,
             name: None,
             label_identity: next_index_label_identity(),
-            duplicate_cache: OnceLock::new(),
-            sort_order_cache: OnceLock::new(),
+            duplicate_cache: Arc::default(),
+            sort_order_cache: Arc::default(),
             monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
@@ -2661,8 +2666,8 @@ impl Index {
             labels: IndexLabels::new_utf8_contiguous(bytes, offsets),
             name: None,
             label_identity: next_index_label_identity(),
-            duplicate_cache: OnceLock::new(),
-            sort_order_cache: OnceLock::new(),
+            duplicate_cache: Arc::default(),
+            sort_order_cache: Arc::default(),
             monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
@@ -2765,8 +2770,8 @@ impl Index {
             labels,
             name: None,
             label_identity: next_index_label_identity(),
-            duplicate_cache: OnceLock::new(),
-            sort_order_cache: OnceLock::new(),
+            duplicate_cache: Arc::default(),
+            sort_order_cache: Arc::default(),
             monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
@@ -5224,8 +5229,8 @@ impl Index {
             labels: self.labels.slice(start, len),
             name: None,
             label_identity: next_index_label_identity(),
-            duplicate_cache: OnceLock::new(),
-            sort_order_cache: OnceLock::new(),
+            duplicate_cache: Arc::default(),
+            sort_order_cache: Arc::default(),
             monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,

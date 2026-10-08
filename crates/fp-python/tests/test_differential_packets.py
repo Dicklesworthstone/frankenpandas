@@ -30633,6 +30633,58 @@ def test_temporal_ops_part3_like_pandas_vk7y9(case: str) -> None:
     assert run(fpd) == run(pd)
 
 
+_LSN8D_STAMPS = np.array(
+    ["2020-01-03", "2020-01-05T06:00", "2020-01-05T18:00", "2020-01-08", "2020-02-01", "2020-02-02T12:00"],
+    dtype="datetime64[ns]",
+)
+_LSN8D_INDEXES = {
+    "ascending": lambda m: m.DatetimeIndex(_LSN8D_STAMPS),
+    "descending": lambda m: m.DatetimeIndex(_LSN8D_STAMPS[::-1]),
+    "unsorted": lambda m: m.DatetimeIndex(_LSN8D_STAMPS[[2, 0, 5, 1, 4, 3]]),
+    "holding NaT": lambda m: m.DatetimeIndex(np.concatenate([_LSN8D_STAMPS[:3], np.array(["NaT"], dtype="datetime64[ns]"), _LSN8D_STAMPS[3:5]])),
+    "with duplicates": lambda m: m.DatetimeIndex(_LSN8D_STAMPS[[0, 1, 1, 3, 4, 5]]),
+    "aware": lambda m: m.DatetimeIndex(_LSN8D_STAMPS).tz_localize("UTC"),
+}
+_LSN8D_KEYS = {
+    "Timestamp bounds": lambda m, z: slice(m.Timestamp("2020-01-05", tz=z), m.Timestamp("2020-02-01", tz=z)),
+    "bounds between labels": lambda m, z: slice(m.Timestamp("2020-01-04", tz=z), m.Timestamp("2020-01-09", tz=z)),
+    "bounds outside": lambda m, z: slice(m.Timestamp("2019-01-01", tz=z), m.Timestamp("2030-01-01", tz=z)),
+    "open start": lambda m, z: slice(None, m.Timestamp("2020-01-08", tz=z)),
+    "date text": lambda m, z: slice("2020-01-05", "2020-01-08"),
+    "month text": lambda m, z: slice("2020-01", "2020-01"),
+    "a label": lambda m, z: m.Timestamp("2020-01-08", tz=z),
+    "a label between": lambda m, z: m.Timestamp("2020-01-04", tz=z),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("index", list(_LSN8D_INDEXES))
+@pytest.mark.parametrize("key", list(_LSN8D_KEYS))
+@pytest.mark.parametrize("frame", [False, True])
+def test_datetime_index_loc_like_pandas_lsn8d(index: str, key: str, frame: bool) -> None:
+    # .loc of a datetime-indexed Series / frame - a slice by instants or date
+    # text, or one label - reads the index's cached kinds and order (each
+    # lookup scanned every label: s.loc[ts] 4.9 ms, s.loc[ts:ts] 4.7 ms a
+    # million rows, pandas 0.007 / 0.03; br-frankenpandas-lsn8d): rows and
+    # values vs pandas, or the same exception kind.
+    def run(m: Any) -> Any:
+        idx = _LSN8D_INDEXES[index](m)
+        zone = "UTC" if index == "aware" else None
+        obj = m.Series(np.arange(len(idx), dtype="float64"), index=idx, name="v")
+        if frame:
+            obj = obj.to_frame()
+        try:
+            out = obj.loc[_LSN8D_KEYS[key](m, zone)]
+        except Exception as error:  # noqa: BLE001
+            return ("raises", type(error).__name__)
+        if not hasattr(out, "index"):
+            return ("scalar", float(out))
+        values = out.to_numpy().ravel().tolist()
+        return ([str(label) for label in out.index], values)
+
+    assert run(fpd) == run(pd)
+
+
 def _geqye_dates(m: Any) -> Any:
     return m.Series(np.array(["2020-01-05", "NaT", "2020-03-01"], dtype="datetime64[ns]"))
 

@@ -55917,13 +55917,21 @@ fn series_label_get(
         }
         LocKey::Label(label) => label,
     };
-    match series
-        .index()
-        .labels()
-        .iter()
-        .filter(|l| **l == label)
-        .count()
-    {
+    // A unique index - its verdict cached and shared by clones - answers by
+    // its lookup: the label was counted among every row first (s.loc[ts] of
+    // a million-row DatetimeIndex 4.9 ms, pandas 0.007;
+    // br-frankenpandas-lsn8d).
+    let matches = if series.index().is_unique() {
+        usize::from(series.index().position(&label).is_some())
+    } else {
+        series
+            .index()
+            .labels()
+            .iter()
+            .filter(|l| **l == label)
+            .count()
+    };
+    match matches {
         0 => Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
             key.clone().unbind(),
         )),
