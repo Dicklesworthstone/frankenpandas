@@ -10194,19 +10194,52 @@ fn typed_quantile_f64(mut v: Vec<f64>, q: f64, mode: QuantileInterpolation) -> f
 fn i64_dense_histogram_range(data: &[i64]) -> Option<(i64, usize)> {
     let mut min = *data.first()?;
     let mut max = min;
-    for &v in &data[1..] {
-        if v < min {
-            min = v;
-        } else if v > max {
-            max = v;
+    let limit = (1u128 << 24).min((data.len() as u128).saturating_mul(16));
+    let span = |min: i64, max: i64| (max as i128 - min as i128 + 1) as u128;
+    // A block at a time, a wide column stops at its first block past the
+    // limit: it was read to its end first (a duplicated over an int column
+    // beside a wide one scanned both; br-frankenpandas-bss5q.3).
+    for block in data[1..].chunks(4096) {
+        for &v in block {
+            if v < min {
+                min = v;
+            } else if v > max {
+                max = v;
+            }
+        }
+        if span(min, max) > limit {
+            return None;
         }
     }
-    let range = (max as i128 - min as i128 + 1) as u128;
-    if range <= (1u128 << 24) && range <= (data.len() as u128).saturating_mul(16) {
-        Some((min, range as usize))
-    } else {
-        None
+    Some((min, span(min, max) as usize))
+}
+
+/// One exact int key per row of several all-valid int64 columns: each
+/// column's offset from its minimum weighted by the product of the ranges
+/// before it (mixed radix), so two rows share a key exactly when they share
+/// every value. None unless every column's range is bounded
+/// ([`i64_dense_histogram_range`]) and the product of the ranges fits an
+/// i64.
+fn combined_int_row_keys(columns: &[&[i64]]) -> Option<Vec<i64>> {
+    // Every column's range first: a wide one (the digest path's) costs a
+    // scan, not the keys built up to it.
+    let mut spans = Vec::with_capacity(columns.len());
+    let mut product = 1_i64;
+    for data in columns {
+        let (min, range) = i64_dense_histogram_range(data)?;
+        let range = i64::try_from(range).ok()?;
+        product = product.checked_mul(range)?;
+        spans.push((min, range));
     }
+    let mut keys = vec![0_i64; columns.first()?.len()];
+    let mut stride = 1_i64;
+    for (data, (min, range)) in columns.iter().zip(spans) {
+        for (key, &value) in keys.iter_mut().zip(data.iter()) {
+            *key += (value - min) * stride;
+        }
+        stride *= range;
+    }
+    Some(keys)
 }
 
 /// First-seen dense group ids for an all-valid `i64` key slice: a dense
@@ -39470,6 +39503,60 @@ impl ResampleBin for BinMean {
     }
 }
 
+/// pandas' group_max / group_min: the first extreme in row order (strict
+/// `>` / `<`, so -0.0 and 0.0 keep the first), an empty bin NaN.
+#[derive(Clone)]
+struct BinExtreme {
+    value: Option<f64>,
+    max: bool,
+}
+
+impl BinExtreme {
+    const fn new(max: bool) -> Self {
+        Self { value: None, max }
+    }
+}
+
+impl ResampleBin for BinExtreme {
+    const SINGLETON_IS_VALUE: bool = true;
+
+    fn add(&mut self, value: f64) {
+        let replaces = self.value.is_none_or(|current| {
+            if self.max {
+                value > current
+            } else {
+                value < current
+            }
+        });
+        if replaces {
+            self.value = Some(value);
+        }
+    }
+
+    fn value(&self) -> f64 {
+        self.value.unwrap_or(f64::NAN)
+    }
+}
+
+/// A bin's count of present values (a NaN is missing), as a float the
+/// caller turns back into pandas' int64.
+#[derive(Clone, Default)]
+struct BinCount(u32);
+
+impl ResampleBin for BinCount {
+    const SINGLETON_IS_VALUE: bool = false;
+
+    fn add(&mut self, value: f64) {
+        if !value.is_nan() {
+            self.0 += 1;
+        }
+    }
+
+    fn value(&self) -> f64 {
+        f64::from(self.0)
+    }
+}
+
 /// Which spread a [`BinSpread`] reports.
 #[derive(Clone, Copy)]
 enum Spread {
@@ -40315,9 +40402,22 @@ impl Resample<'_> {
                 bins[(ns - origin).div_euclid(bucket_ns) as usize].add(value);
             }
         }
+        // The current bin is a cursor: stamps in order (the usual series)
+        // divide only where they cross into another bin - a division per
+        // row was the pass's largest cost (br-frankenpandas-bss5q.3). A
+        // stamp outside the cursor's bin, in any order, finds its own.
+        let mut bin = 0_usize;
+        let mut start = origin;
+        let mut end = origin;
         for (i, l) in labels.iter().enumerate() {
             if let Some(ns) = resample_label_to_ns(l) {
-                bins[(ns - origin).div_euclid(bucket_ns) as usize].add(vals[i]);
+                if ns < start || ns >= end {
+                    let offset = (ns - origin).div_euclid(bucket_ns);
+                    bin = offset as usize;
+                    start = origin + offset * bucket_ns;
+                    end = start + bucket_ns;
+                }
+                bins[bin].add(vals[i]);
             }
         }
         let out_f64: Vec<f64> = bins.iter().map(ResampleBin::value).collect();
@@ -40394,6 +40494,33 @@ impl Resample<'_> {
             let index = Index::new(out_labels).rename_index(self.series.index().name());
             return Series::new(self.series.name(), index, Column::from_values(out)?);
         }
+        // A float column whose missing values are its NaNs: each bin's count
+        // in one pass over the stamps - aggregate_scalar's per-bin Scalar
+        // gather took resample('h').count() 4.1 ms per 200k rows, pandas
+        // 0.62 (br-frankenpandas-bss5q.3).
+        let column = self.series.column();
+        if let Some((data, validity)) = column.as_f64_slice_with_validity()
+            && (validity.all() || column.nan_missing_exact())
+        {
+            self.validate()?;
+            if let Some(r) = self.resample_reduce_single_pass(data, BinCount::default()) {
+                return r.and_then(|counts| {
+                    let ints = counts
+                        .values()
+                        .iter()
+                        .map(|count| match count {
+                            Scalar::Float64(count) => *count as i64,
+                            _ => 0,
+                        })
+                        .collect();
+                    Series::new(
+                        counts.name(),
+                        counts.index().clone(),
+                        Column::from_i64_values(ints),
+                    )
+                });
+            }
+        }
         self.aggregate_scalar(fp_types::nancount)
     }
 
@@ -40458,6 +40585,12 @@ impl Resample<'_> {
                 {
                     return r;
                 }
+            }
+            // Daily and sub-daily bins in one pass over the stamps, as sum
+            // and mean - build_groups' per-bin gather took resample('h').max()
+            // 3.5 ms per 200k rows, pandas 0.81 (br-frankenpandas-bss5q.3).
+            if let Some(r) = self.resample_reduce_single_pass(vals, BinExtreme::new(want_max)) {
+                return r;
             }
             let (order, groups) = self.build_groups()?;
             let mut out_labels = Vec::with_capacity(order.len());
@@ -80536,6 +80669,25 @@ impl DataFrame {
                 }
             })
             .collect();
+
+        // Every selected column an all-valid int64 of a bounded range: each
+        // row's values combine into one exact int key, deduplicated as one
+        // int column - the digest + bucket path below took
+        // df.duplicated(['k', 'k2']) 5.8 ms per 200k rows, pandas 2.4
+        // (br-frankenpandas-bss5q.3).
+        if let Some(typed) = &typed_cols
+            && typed.len() > 1
+            && let Some(keys) = typed
+                .iter()
+                .map(|tc| match tc {
+                    TypedDedupCol::I64(data) => Some(*data),
+                    _ => None,
+                })
+                .collect::<Option<Vec<&[i64]>>>()
+                .and_then(|columns| combined_int_row_keys(&columns))
+        {
+            return Ok(Self::duplicated_single_i64(&keys, keep));
+        }
 
         enum RowBucket {
             Single(usize),
@@ -180811,6 +180963,53 @@ mod tests {
     }
 
     #[test]
+    fn duplicated_over_int_columns_bss5q3() {
+        // br-frankenpandas-bss5q.3: int64 columns of bounded range
+        // deduplicate through one combined int key per row - rows match
+        // exactly when every value does - under each keep. NEGATIVE: a
+        // column of wide range keeps the digest path, with the same answers.
+        let first = [3_i64, -1, 3, 2, -1, 3, 2, 0];
+        let brute = |second: &[i64], keep: DuplicateKeep| -> Vec<bool> {
+            let same = |i: usize, j: usize| first[i] == first[j] && second[i] == second[j];
+            (0..first.len())
+                .map(|i| match keep {
+                    DuplicateKeep::First => (0..i).any(|j| same(i, j)),
+                    DuplicateKeep::Last => (i + 1..first.len()).any(|j| same(i, j)),
+                    DuplicateKeep::None => (0..first.len()).any(|j| j != i && same(i, j)),
+                })
+                .collect()
+        };
+        for second in [
+            [7_i64, 5, 7, 6, 5, 8, 6, 7],
+            [1 << 40, 5, 1 << 40, 6, 5, 8, 6, 7],
+        ] {
+            let frame = DataFrame::from_dict(
+                &["a", "b"],
+                vec![
+                    ("a", first.map(Scalar::Int64).to_vec()),
+                    ("b", second.map(Scalar::Int64).to_vec()),
+                ],
+            )
+            .unwrap();
+            for keep in [
+                DuplicateKeep::First,
+                DuplicateKeep::Last,
+                DuplicateKeep::None,
+            ] {
+                let flags: Vec<bool> = frame
+                    .duplicated(None, keep)
+                    .unwrap()
+                    .column()
+                    .values()
+                    .iter()
+                    .map(|value| matches!(value, Scalar::Bool(true)))
+                    .collect();
+                assert_eq!(flags, brute(&second, keep));
+            }
+        }
+    }
+
+    #[test]
     fn df_apply_axis1_supports_sem_skew_kurtosis() {
         let df = DataFrame::from_dict(
             &["a", "b", "c", "d"],
@@ -240874,6 +241073,55 @@ mod resample_spread_single_pass_7x91u {
                 assert_eq!(fast.index().labels(), hashed.index().labels(), "{freq}");
                 assert_eq!(bits_at(fast, &every), bits_at(hashed, &every), "{freq}");
             }
+        }
+    }
+
+    #[test]
+    fn single_pass_extremes_and_counts_bss5q3() {
+        // br-frankenpandas-bss5q.3: resample max / min / count take the
+        // single pass over daily and sub-daily bins, answering as the
+        // label-hashing path (origin='start_day' routes there) - the gap's
+        // empty bins NaN / 0. NEGATIVE: a NaN counts nothing.
+        let s = minutes();
+        let values: Vec<f64> = s
+            .values()
+            .iter()
+            .enumerate()
+            .map(|(i, value)| match value {
+                Scalar::Float64(value) if i % 7 != 3 => *value,
+                _ => f64::NAN,
+            })
+            .collect();
+        let present = values.iter().filter(|value| !value.is_nan()).count();
+        let holed = Series::new("v", s.index().clone(), Column::from_f64_values(values)).unwrap();
+        for freq in ["h", "15min", "D"] {
+            for (fast, hashed) in [
+                (
+                    s.resample(freq).max().unwrap(),
+                    s.resample(freq).origin("start_day").max().unwrap(),
+                ),
+                (
+                    s.resample(freq).min().unwrap(),
+                    s.resample(freq).origin("start_day").min().unwrap(),
+                ),
+            ] {
+                let every: Vec<usize> = (0..hashed.len()).collect();
+                assert_eq!(fast.index().labels(), hashed.index().labels(), "{freq}");
+                assert_eq!(bits_at(&fast, &every), bits_at(&hashed, &every), "{freq}");
+            }
+            let fast = holed.resample(freq).count().unwrap();
+            let hashed = holed.resample(freq).origin("start_day").count().unwrap();
+            assert_eq!(fast.index().labels(), hashed.index().labels(), "{freq}");
+            assert_eq!(fast.values(), hashed.values(), "{freq}");
+            let counted: i64 = fast
+                .values()
+                .iter()
+                .map(|count| match count {
+                    Scalar::Int64(count) => *count,
+                    other => panic!("{freq}: {other:?}"),
+                })
+                .sum();
+            assert_eq!(counted, i64::try_from(present).unwrap(), "{freq}");
         }
     }
 }

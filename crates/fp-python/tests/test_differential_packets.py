@@ -29814,3 +29814,90 @@ def test_frame_comparisons_like_pandas_u3a2c(case: str) -> None:
         return answers
 
     assert run(fpd) == run(pd)
+
+
+def _bss5q3_dup_frame(m: Any) -> Any:
+    rng = np.random.default_rng(41)
+    return m.DataFrame(
+        {
+            "k": rng.integers(-3, 4, 60),
+            "k2": rng.integers(0, 3, 60),
+            "k3": rng.integers(10, 13, 60),
+            "w": rng.integers(0, 2**40, 60) * rng.integers(0, 2, 60),
+            "a": rng.random(60),
+        }
+    )
+
+
+_BSS5Q3_DUP_CASES = {
+    "two ints": lambda m: _bss5q3_dup_frame(m).duplicated(["k", "k2"]),
+    "two ints keep=last": lambda m: _bss5q3_dup_frame(m).duplicated(["k", "k2"], keep="last"),
+    "two ints keep=False": lambda m: _bss5q3_dup_frame(m).duplicated(["k", "k2"], keep=False),
+    "three ints": lambda m: _bss5q3_dup_frame(m).duplicated(["k", "k2", "k3"]),
+    "drop_duplicates": lambda m: _bss5q3_dup_frame(m).drop_duplicates(["k3", "k"])["a"],
+    "drop_duplicates keep=last": lambda m: _bss5q3_dup_frame(m).drop_duplicates(["k", "k2"], keep="last")["a"],
+    # NEGATIVE: a column of wide range keeps the digest path.
+    "wide column (NEGATIVE)": lambda m: _bss5q3_dup_frame(m).duplicated(["k", "w"]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_BSS5Q3_DUP_CASES))
+def test_duplicated_over_int_columns_like_pandas_bss5q3(case: str) -> None:
+    # Several int columns of bounded range deduplicate through one combined
+    # int key per row (the digest + bucket path took 0.42x pandas;
+    # br-frankenpandas-bss5q.3): the same rows flagged and kept as pandas
+    # under each keep. NEGATIVE: a wide column, through the digest path.
+    def run(m: Any) -> Any:
+        result = _BSS5Q3_DUP_CASES[case](m)
+        return str(result.dtype), list(result.index), [str(v) for v in result.tolist()]
+
+    assert run(fpd) == run(pd)
+
+
+def _bss5q3_minutes(m: Any, holes: bool) -> Any:
+    rng = np.random.default_rng(43)
+    stamps = pd.date_range("2024-01-01", periods=1000, freq="min")
+    keep = [k for k in range(1000) if not 300 <= k < 480 or k == 330]
+    values = rng.normal(size=1000)[keep]
+    if holes:
+        values[::7] = np.nan
+    values[5] = -0.0
+    values[6] = 0.0
+    return m.Series(values, index=m.to_datetime(stamps[keep].values))
+
+
+_BSS5Q3_RESAMPLE_CASES = {
+    **{
+        f"{op} {freq}": (lambda m, op=op, freq=freq: getattr(_bss5q3_minutes(m, False).resample(freq), op)())
+        for op in ["max", "min"]
+        for freq in ["h", "15min", "D"]
+    },
+    **{
+        f"count {freq} with NaN": (lambda m, freq=freq: _bss5q3_minutes(m, True).resample(freq).count())
+        for freq in ["h", "15min", "D"]
+    },
+    # NEGATIVE: an int column's count keeps its path.
+    "int count (NEGATIVE)": lambda m: m.Series(np.arange(1000), index=m.to_datetime(
+        pd.date_range("2024-01-01", periods=1000, freq="min").values
+    )).resample("h").count(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_BSS5Q3_RESAMPLE_CASES))
+def test_resample_extremes_and_counts_like_pandas_bss5q3(case: str) -> None:
+    # resample max / min / count over daily and sub-daily bins in one pass
+    # over the stamps (a per-bin Scalar gather took max 0.23x and count
+    # 0.15x pandas; br-frankenpandas-bss5q.3): each bin's answer, a gap's
+    # empty bins NaN / 0, -0.0 beside 0.0 the first, as pandas. NEGATIVE:
+    # an int column's count.
+    def run(m: Any) -> Any:
+        result = _BSS5Q3_RESAMPLE_CASES[case](m)
+        return (
+            str(result.dtype),
+            [str(v) for v in result.index],
+            [repr(v) if v == v else "nan" for v in result.tolist()],
+        )
+
+    assert run(fpd) == run(pd)
