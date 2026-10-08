@@ -204084,10 +204084,11 @@ mod tests {
     fn reindex_over_a_descending_range_survives_an_extreme_label() {
         // `i64::MIN % -1` overflowed in the affine position lookup and
         // panicked (v0.5.0 release review); the label is simply absent.
-        let s = Series::from_values(
+        let s = Series::new(
             "x",
             Index::from_range(0, -3, -1),
-            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            Column::from_values(vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)])
+                .unwrap(),
         )
         .unwrap();
         let out = s

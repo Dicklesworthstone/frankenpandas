@@ -41219,7 +41219,7 @@ impl PyDataFrame {
                 || kind == AnswerKind::Float32
                 || all_missing();
             kinds.push(kind);
-            picked.push(name.clone());
+            picked.push((*name).clone());
             positions.push(position);
         }
         if !needed {
