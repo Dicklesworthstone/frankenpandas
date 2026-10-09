@@ -1389,11 +1389,6 @@ impl Int64StridedLabels {
         labels
     }
 
-    /// The view's labels as instants (a typed DatetimeIndex backing).
-    fn materialize_datetime64(&self) -> Vec<IndexLabel> {
-        self.iter().map(IndexLabel::Datetime64).collect()
-    }
-
     /// The values the view reads, in its order, nothing allocated.
     fn iter(&self) -> impl Iterator<Item = i64> + '_ {
         (0..self.len).map(move |offset| self.value_at(offset))
@@ -1414,6 +1409,39 @@ impl Int64StridedLabels {
             len if self.step == 1 => Cow::Borrowed(&self.values[self.start..self.start + len]),
             _ => Cow::Owned(self.iter().collect()),
         }
+    }
+}
+
+/// The kind of instant a [`TemporalStridedLabels`] backing holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TemporalKind {
+    Datetime,
+    Timedelta,
+}
+
+impl TemporalKind {
+    fn label(self, nanos: i64) -> IndexLabel {
+        match self {
+            Self::Datetime => IndexLabel::Datetime64(nanos),
+            Self::Timedelta => IndexLabel::Timedelta64(nanos),
+        }
+    }
+}
+
+/// A typed DatetimeIndex / TimedeltaIndex backing: label `k` is
+/// `kind.label(view.value_at(k))`, NaT as i64::MIN.
+#[derive(Debug, Clone)]
+struct TemporalStridedLabels {
+    kind: TemporalKind,
+    view: Int64StridedLabels,
+}
+
+impl TemporalStridedLabels {
+    fn materialize(&self) -> Vec<IndexLabel> {
+        self.view
+            .iter()
+            .map(|nanos| self.kind.label(nanos))
+            .collect()
     }
 }
 
@@ -1451,11 +1479,12 @@ struct IndexLabels {
     int64_two_affine: Option<Box<Int64TwoAffineLabels>>,
     int64_strided: Option<Int64StridedLabels>,
     datetime64_affine: Option<Int64AffineLabels>,
-    /// Lazy typed Datetime64 backing (br-frankenpandas-lsn8d): label `k` is
-    /// `Datetime64(values[start + k * step])`, NaT as i64::MIN - an index
-    /// built from an array of instants, and the slices and takes of one,
+    /// Lazy typed Datetime64 / Timedelta64 backing (br-frankenpandas-lsn8d,
+    /// br-frankenpandas-5s8nr): label `k` is `Datetime64` or `Timedelta64`
+    /// of `values[start + k * step]`, NaT as i64::MIN - an index built from
+    /// an array of instants or durations, and the slices and takes of one,
     /// without a 32 B enum per row until something reads the labels.
-    datetime64_strided: Option<Int64StridedLabels>,
+    temporal_strided: Option<TemporalStridedLabels>,
     /// Lazy typed Int64 backing (br-frankenpandas-dxqpm). `Some(values)` once
     /// computed means every label is `IndexLabel::Int64` and `values` is the
     /// raw `i64` view; `None` once computed means the labels are not all
@@ -1484,7 +1513,7 @@ impl IndexLabels {
             int64_two_affine: None,
             int64_strided: None,
             datetime64_affine: None,
-            datetime64_strided: None,
+            temporal_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         }
@@ -1499,7 +1528,7 @@ impl IndexLabels {
             int64_two_affine: None,
             int64_strided: None,
             datetime64_affine: None,
-            datetime64_strided: None,
+            temporal_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         })
@@ -1517,7 +1546,7 @@ impl IndexLabels {
             int64_two_affine: None,
             int64_strided: None,
             datetime64_affine: None,
-            datetime64_strided: None,
+            temporal_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         })
@@ -1532,7 +1561,7 @@ impl IndexLabels {
             int64_two_affine: Some(Box::new(Int64TwoAffineLabels::new(first, second)?)),
             int64_strided: None,
             datetime64_affine: None,
-            datetime64_strided: None,
+            temporal_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         })
@@ -1552,7 +1581,7 @@ impl IndexLabels {
             int64_two_affine: None,
             int64_strided: Some(Int64StridedLabels::new(values, start, step, len)?),
             datetime64_affine: None,
-            datetime64_strided: None,
+            temporal_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         })
@@ -1569,7 +1598,7 @@ impl IndexLabels {
             int64_two_affine: None,
             int64_strided: None,
             datetime64_affine: None,
-            datetime64_strided: None,
+            temporal_strided: None,
             int64_typed,
             utf8_contiguous: None,
         }
@@ -1584,13 +1613,14 @@ impl IndexLabels {
             int64_two_affine: None,
             int64_strided: None,
             datetime64_affine: Some(Int64AffineLabels::new(start, step, len)?),
-            datetime64_strided: None,
+            temporal_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         })
     }
 
-    fn new_datetime64_strided(
+    fn new_temporal_strided(
+        kind: TemporalKind,
         values: Arc<Vec<i64>>,
         start: usize,
         step: usize,
@@ -1604,10 +1634,29 @@ impl IndexLabels {
             int64_two_affine: None,
             int64_strided: None,
             datetime64_affine: None,
-            datetime64_strided: Some(Int64StridedLabels::new(values, start, step, len)?),
+            temporal_strided: Some(TemporalStridedLabels {
+                kind,
+                view: Int64StridedLabels::new(values, start, step, len)?,
+            }),
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         })
+    }
+
+    /// The typed backing when it holds instants (a DatetimeIndex's).
+    fn datetime64_strided(&self) -> Option<&Int64StridedLabels> {
+        self.temporal_strided
+            .as_ref()
+            .filter(|strided| strided.kind == TemporalKind::Datetime)
+            .map(|strided| &strided.view)
+    }
+
+    /// The typed backing when it holds durations (a TimedeltaIndex's).
+    fn timedelta64_strided(&self) -> Option<&Int64StridedLabels> {
+        self.temporal_strided
+            .as_ref()
+            .filter(|strided| strided.kind == TemporalKind::Timedelta)
+            .map(|strided| &strided.view)
     }
 
     fn new_utf8_contiguous(bytes: Arc<[u8]>, offsets: Arc<[usize]>) -> Self {
@@ -1621,7 +1670,7 @@ impl IndexLabels {
             int64_two_affine: None,
             int64_strided: None,
             datetime64_affine: None,
-            datetime64_strided: None,
+            temporal_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: Some((bytes, offsets)),
         }
@@ -1660,8 +1709,8 @@ impl IndexLabels {
                 if let Some(range) = self.datetime64_affine {
                     return Arc::new(range.materialize_datetime64());
                 }
-                if let Some(strided) = &self.datetime64_strided {
-                    return Arc::new(strided.materialize_datetime64());
+                if let Some(strided) = &self.temporal_strided {
+                    return Arc::new(strided.materialize());
                 }
                 if let Some(strided) = self.int64_strided.clone() {
                     return Arc::new(strided.materialize());
@@ -1695,8 +1744,8 @@ impl IndexLabels {
         if let Some(range) = self.datetime64_affine {
             return range.materialize_datetime64();
         }
-        if let Some(strided) = &self.datetime64_strided {
-            return strided.materialize_datetime64();
+        if let Some(strided) = &self.temporal_strided {
+            return strided.materialize();
         }
         if let Some((bytes, offsets)) = &self.utf8_contiguous {
             return offsets
@@ -1736,8 +1785,8 @@ impl IndexLabels {
         if let Some(range) = self.datetime64_affine {
             return range.len;
         }
-        if let Some(strided) = &self.datetime64_strided {
-            return strided.len;
+        if let Some(strided) = &self.temporal_strided {
+            return strided.view.len;
         }
         if let Some((_, offsets)) = &self.utf8_contiguous {
             return offsets.len() - 1;
@@ -1817,14 +1866,16 @@ impl IndexLabels {
             return labels;
         }
 
-        // A typed DatetimeIndex's slice is a view of the same instants.
-        if let Some(strided) = &self.datetime64_strided
-            && let Some(offset) = strided.step.checked_mul(start)
-            && let Some(next_start) = strided.start.checked_add(offset)
-            && let Some(labels) = Self::new_datetime64_strided(
-                Arc::clone(&strided.values),
+        // A typed DatetimeIndex's / TimedeltaIndex's slice is a view of the
+        // same instants or durations.
+        if let Some(TemporalStridedLabels { kind, view }) = &self.temporal_strided
+            && let Some(offset) = view.step.checked_mul(start)
+            && let Some(next_start) = view.start.checked_add(offset)
+            && let Some(labels) = Self::new_temporal_strided(
+                *kind,
+                Arc::clone(&view.values),
                 next_start,
-                strided.step,
+                view.step,
                 len,
             )
         {
@@ -1854,7 +1905,7 @@ impl IndexLabels {
                 int64_two_affine: None,
                 int64_strided: None,
                 datetime64_affine: None,
-                datetime64_strided: None,
+                temporal_strided: None,
                 int64_typed: OnceLock::new(),
                 utf8_contiguous: None,
             };
@@ -1871,7 +1922,7 @@ impl IndexLabels {
                 int64_two_affine: None,
                 int64_strided: None,
                 datetime64_affine: None,
-                datetime64_strided: None,
+                temporal_strided: None,
                 int64_typed: OnceLock::new(),
                 utf8_contiguous: None,
             };
@@ -1894,7 +1945,7 @@ impl IndexLabels {
         if let Some(range) = self.datetime64_affine {
             return range.position(i64::MIN).is_some();
         }
-        if let Some(strided) = &self.datetime64_strided {
+        if let Some(strided) = self.datetime64_strided() {
             return strided.iter().any(|value| value == i64::MIN);
         }
         if let Some(slice) = &self.materialized_slice {
@@ -1938,11 +1989,15 @@ impl IndexLabels {
     }
 
     /// The instants of a typed DatetimeIndex backing (see
-    /// `datetime64_strided`; NaT as i64::MIN), its labels never made.
+    /// `temporal_strided`; NaT as i64::MIN), its labels never made.
     fn datetime64_nanos(&self) -> Option<Cow<'_, [i64]>> {
-        self.datetime64_strided
-            .as_ref()
-            .map(Int64StridedLabels::values)
+        self.datetime64_strided().map(Int64StridedLabels::values)
+    }
+
+    /// The durations of a typed TimedeltaIndex backing (NaT as i64::MIN),
+    /// its labels never made.
+    fn timedelta64_nanos(&self) -> Option<Cow<'_, [i64]>> {
+        self.timedelta64_strided().map(Int64StridedLabels::values)
     }
 
     /// The raw `i64` view of an all-Int64 label vector, computing and caching
@@ -2180,7 +2235,7 @@ impl Clone for IndexLabels {
             int64_two_affine: self.int64_two_affine.clone(),
             int64_strided: self.int64_strided.clone(),
             datetime64_affine: self.datetime64_affine,
-            datetime64_strided: self.datetime64_strided.clone(),
+            temporal_strided: self.temporal_strided.clone(),
             int64_typed,
             utf8_contiguous: self.utf8_contiguous.clone(),
         }
@@ -2863,6 +2918,18 @@ impl Index {
         self.labels.datetime64_nanos()
     }
 
+    /// The durations of an index holding them as durations - a typed
+    /// TimedeltaIndex backing or no label at all under a declared timedelta
+    /// dtype, NaT as i64::MIN - with no label made; `None` for any other
+    /// backing (br-frankenpandas-5s8nr).
+    #[must_use]
+    pub fn timedelta64_label_values(&self) -> Option<Cow<'_, [i64]>> {
+        if self.labels.is_empty() && self.declared == Some(DeclaredDtype::Timedelta64) {
+            return Some(Cow::Borrowed(&[]));
+        }
+        self.labels.timedelta64_nanos()
+    }
+
     /// The cached `i64` label view if already computed (never computes).
     /// Outer `None` = not yet computed; `Some(None)` = known non-Int64.
     #[must_use]
@@ -2894,9 +2961,12 @@ impl Index {
             return LabelKinds::INT64;
         }
         if self.labels.datetime64_affine_range().is_some()
-            || self.labels.datetime64_strided.is_some()
+            || self.labels.datetime64_strided().is_some()
         {
             return LabelKinds::DATETIME64;
+        }
+        if self.labels.timedelta64_strided().is_some() {
+            return LabelKinds::TIMEDELTA64;
         }
         let cache = INDEX_LABEL_KINDS_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
         if let Some(kinds) = cache
@@ -2980,11 +3050,34 @@ impl Index {
     #[must_use]
     #[doc(hidden)]
     pub fn from_datetime64_values(nanos: Vec<i64>) -> Self {
+        Self::from_temporal_values(TemporalKind::Datetime, nanos)
+    }
+
+    /// [`Self::from_timedelta64`] over a typed backing, as
+    /// [`Self::from_datetime64_values`] holds instants: the durations held
+    /// as they are (NaT as i64::MIN). A TimedeltaIndex was a 32 B enum per
+    /// row, made again by every take and slice (TimedeltaIndex(array) 5.3 ms
+    /// a million rows, pandas 0.009; br-frankenpandas-5s8nr).
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_timedelta64_values(nanos: Vec<i64>) -> Self {
+        Self::from_temporal_values(TemporalKind::Timedelta, nanos)
+    }
+
+    fn from_temporal_values(kind: TemporalKind, nanos: Vec<i64>) -> Self {
+        let declared = match kind {
+            TemporalKind::Datetime => DeclaredDtype::Datetime64,
+            TemporalKind::Timedelta => DeclaredDtype::Timedelta64,
+        };
         let len = nanos.len();
         let values = Arc::new(nanos);
-        let Some(labels) = IndexLabels::new_datetime64_strided(Arc::clone(&values), 0, 1, len)
+        let Some(labels) = IndexLabels::new_temporal_strided(kind, Arc::clone(&values), 0, 1, len)
         else {
-            return Self::from_datetime64(Arc::unwrap_or_clone(values));
+            let nanos = Arc::unwrap_or_clone(values);
+            return match kind {
+                TemporalKind::Datetime => Self::from_datetime64(nanos),
+                TemporalKind::Timedelta => Self::from_timedelta64(nanos),
+            };
         };
         Self {
             labels,
@@ -3001,7 +3094,7 @@ impl Index {
             declared: None,
             categories: None,
         }
-        .declared_if_empty(DeclaredDtype::Datetime64)
+        .declared_if_empty(declared)
     }
 
     /// No labels show a type, so an empty index built as `dtype` declares
@@ -3223,7 +3316,7 @@ impl Index {
         // A date_range's lazy range is datetimes without its labels made
         // (br-frankenpandas-so0mr), as is a typed backing (lsn8d).
         if self.labels.datetime64_affine_range().is_some()
-            || self.labels.datetime64_strided.is_some()
+            || self.labels.datetime64_strided().is_some()
         {
             return true;
         }
@@ -3762,6 +3855,9 @@ impl Index {
     fn all_temporal_ns(&self, datetime: bool) -> Option<Vec<i64>> {
         if let Some(nanos) = self.labels.datetime64_nanos() {
             return (datetime && !nanos.is_empty()).then(|| nanos.into_owned());
+        }
+        if let Some(nanos) = self.labels.timedelta64_nanos() {
+            return (!datetime && !nanos.is_empty()).then(|| nanos.into_owned());
         }
         let labels = self.labels();
         if labels.is_empty() {
@@ -5331,16 +5427,25 @@ impl Index {
         }
         // Datetime64 / Timedelta64: stable i64 argsort + gather, rebuilt with the
         // temporal dtype (sort_values over a DatetimeIndex was 0.58x pandas).
-        // Bit-identical to the comparison-sort fallback (see argsort).
+        // NaT last, as pandas' sort_values (na_position='last'): the argsort
+        // puts it, i64::MIN, first (br-frankenpandas-5s8nr).
+        let sorted_nat_last = |ns: &[i64]| -> Vec<i64> {
+            let order = Self::argsort_i64(ns);
+            let mut sorted: Vec<i64> = order.iter().map(|&idx| ns[idx]).collect();
+            let nat = sorted
+                .iter()
+                .take_while(|&&value| value == i64::MIN)
+                .count();
+            sorted.rotate_left(nat);
+            sorted
+        };
         if let Some(ns) = self.all_temporal_ns(true) {
-            let order = Self::argsort_i64(&ns);
-            let sorted = order.iter().map(|&idx| ns[idx]).collect();
+            let sorted = sorted_nat_last(&ns);
             return self.propagate_name(Self::from_datetime64_values(sorted));
         }
         if let Some(ns) = self.all_temporal_ns(false) {
-            let order = Self::argsort_i64(&ns);
-            let sorted = order.iter().map(|&idx| ns[idx]).collect();
-            return self.propagate_name(Self::from_timedelta64(sorted));
+            let sorted = sorted_nat_last(&ns);
+            return self.propagate_name(Self::from_timedelta64_values(sorted));
         }
         let order = self.argsort();
         self.propagate_name(Self::new(
@@ -5479,18 +5584,17 @@ impl Index {
     }
 
     /// Every `step`-th label from `start`, `len` of them: a view of the same
-    /// instants for a typed DatetimeIndex backing (name and zone kept),
-    /// `None` for any other backing or a run past the buffer
-    /// (br-frankenpandas-lsn8d).
+    /// instants or durations for a typed DatetimeIndex / TimedeltaIndex
+    /// backing (name and zone kept), `None` for any other backing or a run
+    /// past the buffer (br-frankenpandas-lsn8d, br-frankenpandas-5s8nr).
     #[must_use]
     pub fn stepped_view(&self, start: usize, step: usize, len: usize) -> Option<Self> {
-        let strided = self.labels.datetime64_strided.as_ref()?;
-        let labels = IndexLabels::new_datetime64_strided(
-            Arc::clone(&strided.values),
-            strided
-                .start
-                .checked_add(strided.step.checked_mul(start)?)?,
-            strided.step.checked_mul(step)?,
+        let TemporalStridedLabels { kind, view } = self.labels.temporal_strided.as_ref()?;
+        let labels = IndexLabels::new_temporal_strided(
+            *kind,
+            Arc::clone(&view.values),
+            view.start.checked_add(view.step.checked_mul(start)?)?,
+            view.step.checked_mul(step)?,
             len,
         )?;
         Some(self.propagate_name(Self {
@@ -7036,11 +7140,15 @@ impl Index {
         // Instants held as instants are Datetime64 labels, NaT among them:
         // "datetime64" by either branch below, without reading a million of
         // them per call (an empty slice of a DatetimeIndex asked its dtype:
-        // idx[5:5] 1.3 ms; br-frankenpandas-lsn8d).
-        if self.labels.datetime64_strided.is_some()
+        // idx[5:5] 1.3 ms; br-frankenpandas-lsn8d). Durations likewise
+        // (5s8nr).
+        if self.labels.datetime64_strided().is_some()
             || self.labels.datetime64_affine_range().is_some()
         {
             return "datetime64";
+        }
+        if self.labels.timedelta64_strided().is_some() {
+            return "timedelta64";
         }
         let mut non_missing = self.labels.iter().filter(|label| !label.is_missing());
         let Some(first) = non_missing.next() else {
@@ -9075,7 +9183,7 @@ impl DatetimeIndex {
 
     pub fn from_index(index: Index) -> Result<Self, IndexError> {
         if index.labels.datetime64_affine_range().is_none()
-            && index.labels.datetime64_strided.is_none()
+            && index.labels.datetime64_strided().is_none()
         {
             ensure_index_kind(&index, LabelKinds::DATETIME64, "DatetimeIndex")?;
         }
@@ -9389,7 +9497,7 @@ impl DatetimeIndex {
         if let Some(range) = self.index.labels.datetime64_affine_range() {
             return Some(range.value_at(pos));
         }
-        if let Some(strided) = &self.index.labels.datetime64_strided {
+        if let Some(strided) = self.index.labels.datetime64_strided() {
             return Some(strided.value_at(pos));
         }
         Some(match self.index.labels().get(pos)? {
@@ -10246,6 +10354,9 @@ impl DatetimeIndex {
             })
             .collect();
         nanos.sort_unstable();
+        // NaT (i64::MIN) last, as pandas' na_position='last' (5s8nr).
+        let nat = nanos.iter().take_while(|&&n| n == i64::MIN).count();
+        nanos.rotate_left(nat);
         self.with_instants(nanos)
     }
 
@@ -11346,11 +11457,22 @@ pub struct TimedeltaIndex {
 }
 
 impl TimedeltaIndex {
+    /// Over a typed backing: the durations held as they are, labels made
+    /// only when something reads them, slices views of the same buffer
+    /// (br-frankenpandas-5s8nr).
     #[must_use]
     pub fn new(nanos: Vec<i64>) -> Self {
         Self {
-            index: Index::from_timedelta64(nanos),
+            index: Index::from_timedelta64_values(nanos),
         }
+    }
+
+    /// The duration at `pos` of a typed backing (NaT as i64::MIN), no label
+    /// made; `None` past the end or for labels held as labels.
+    #[must_use]
+    pub fn held_nanos_at(&self, pos: usize) -> Option<i64> {
+        let view = self.index.labels.timedelta64_strided()?;
+        (pos < view.len).then(|| view.value_at(pos))
     }
 
     pub fn from_index(index: Index) -> Result<Self, IndexError> {
@@ -11632,6 +11754,9 @@ impl TimedeltaIndex {
     /// `Timedelta::NAT` is preserved at the sentinel value.
     #[must_use]
     pub fn asi8(&self) -> Vec<i64> {
+        if let Some(held) = self.index.timedelta64_label_values() {
+            return held.into_owned();
+        }
         self.index
             .labels()
             .iter()
@@ -12294,22 +12419,24 @@ impl TimedeltaIndex {
     /// `pd.TimedeltaIndex.take()`. Out-of-bounds positions raise
     /// [`IndexError::OutOfBounds`].
     pub fn take(&self, positions: &[usize]) -> Result<Self, IndexError> {
-        let labels = self.index.labels();
-        for &p in positions {
-            if p >= labels.len() {
-                return Err(IndexError::OutOfBounds {
-                    position: p,
-                    length: labels.len(),
-                });
-            }
+        let length = self.len();
+        if let Some(&position) = positions.iter().find(|&&p| p >= length) {
+            return Err(IndexError::OutOfBounds { position, length });
         }
-        let nanos: Vec<i64> = positions
-            .iter()
-            .map(|&p| match labels[p] {
-                IndexLabel::Timedelta64(n) => n,
-                _ => Timedelta::NAT,
-            })
-            .collect();
+        // A typed backing's durations gathered as they are (the labels were
+        // made to be read; br-frankenpandas-5s8nr).
+        let nanos: Vec<i64> = if let Some(held) = self.index.timedelta64_label_values() {
+            positions.iter().map(|&p| held[p]).collect()
+        } else {
+            let labels = self.index.labels();
+            positions
+                .iter()
+                .map(|&p| match labels[p] {
+                    IndexLabel::Timedelta64(n) => n,
+                    _ => Timedelta::NAT,
+                })
+                .collect()
+        };
         let mut out = Self::new(nanos);
         if let Some(name) = self.name() {
             out = out.set_name(name);
@@ -12320,18 +12447,38 @@ impl TimedeltaIndex {
     /// [`Self::take`] of numpy's signed positions (negative from the end),
     /// its freq that of the positions as given (a negative one keeps none,
     /// as pandas; br-frankenpandas-lsn8d). `None` when a position is out of
-    /// range.
+    /// range. A typed backing's positions are wrapped, checked and gathered
+    /// in one pass, as DatetimeIndex::take_signed (tdi.take(perm) 0.08x
+    /// pandas; br-frankenpandas-5s8nr).
     pub fn take_signed<I>(&self, positions: I) -> Option<Self>
     where
         I: ExactSizeIterator<Item = i64> + Clone,
     {
         let length = i64::try_from(self.len()).ok()?;
-        let wrapped: Option<Vec<usize>> = positions
-            .clone()
-            .map(|at| usize::try_from(at + ((at >> 63) & length)).ok())
-            .collect();
+        let wrap = |at: i64| usize::try_from(at + ((at >> 63) & length)).ok();
+        let freq = signed_take_freq(self.freq(), positions.clone());
+        if let Some(held) = self.index.timedelta64_label_values() {
+            let mut missed = 0_usize;
+            let gather = |at: i64| match wrap(at).and_then(|position| held.get(position)) {
+                Some(&nanos) => nanos,
+                None => {
+                    missed += 1;
+                    Timedelta::NAT
+                }
+            };
+            let nanos: Vec<i64> = positions.map(gather).collect();
+            if missed > 0 {
+                return None;
+            }
+            let mut out = Self::new(nanos);
+            if let Some(name) = self.name() {
+                out = out.set_name(name);
+            }
+            return Some(out.with_freq(freq));
+        }
+        let wrapped: Option<Vec<usize>> = positions.map(wrap).collect();
         let taken = self.take(&wrapped?).ok()?;
-        Some(taken.with_freq(signed_take_freq(self.freq(), positions)))
+        Some(taken.with_freq(freq))
     }
 
     /// Repeat each label `repeats` times, matching
@@ -12359,6 +12506,9 @@ impl TimedeltaIndex {
     #[must_use]
     pub fn isin(&self, values: &[i64]) -> Vec<bool> {
         let needle: FxHashSet<i64> = values.iter().copied().collect();
+        if let Some(held) = self.index.timedelta64_label_values() {
+            return held.iter().map(|nanos| needle.contains(nanos)).collect();
+        }
         self.index
             .labels()
             .iter()
@@ -12740,16 +12890,22 @@ impl TimedeltaIndex {
     /// `na_position='first'` default.
     #[must_use]
     pub fn sort_values(&self) -> Self {
-        let mut nanos: Vec<i64> = self
-            .index
-            .labels()
-            .iter()
-            .filter_map(|label| match label {
-                IndexLabel::Timedelta64(n) => Some(*n),
-                _ => None,
-            })
-            .collect();
+        let mut nanos: Vec<i64> = match self.index.timedelta64_label_values() {
+            Some(held) => held.into_owned(),
+            None => self
+                .index
+                .labels()
+                .iter()
+                .filter_map(|label| match label {
+                    IndexLabel::Timedelta64(n) => Some(*n),
+                    _ => None,
+                })
+                .collect(),
+        };
         nanos.sort_unstable();
+        // NaT (i64::MIN) last, as pandas' na_position='last' (5s8nr).
+        let nat = nanos.iter().take_while(|&&n| n == Timedelta::NAT).count();
+        nanos.rotate_left(nat);
         let mut out = Self::new(nanos);
         if let Some(name) = self.name() {
             out = out.set_name(name);
@@ -24425,15 +24581,87 @@ mod tests {
         assert!(DatetimeIndex::from_index(Index::from_i64_values(vec![1, 2])).is_err());
         // A strided view reads every other instant; an empty slice of it,
         // its start past the buffer, reads nothing.
-        let view =
-            crate::IndexLabels::new_datetime64_strided(Arc::new(vec![1, 2, 3, 4, 5]), 0, 2, 3)
-                .unwrap();
+        let view = crate::IndexLabels::new_temporal_strided(
+            crate::TemporalKind::Datetime,
+            Arc::new(vec![1, 2, 3, 4, 5]),
+            0,
+            2,
+            3,
+        )
+        .unwrap();
         assert_eq!(view.datetime64_nanos().unwrap().as_ref(), &[1, 3, 5]);
         assert_eq!(
             view.slice(1, 2).datetime64_nanos().unwrap().as_ref(),
             &[3, 5]
         );
         assert!(view.slice(3, 0).datetime64_nanos().unwrap().is_empty());
+    }
+
+    #[test]
+    fn typed_timedelta_index_reads_its_durations_5s8nr() {
+        // A TimedeltaIndex holds its durations as they are; every read
+        // answers as the labelled index does (br-frankenpandas-5s8nr).
+        const NAT: i64 = i64::MIN;
+        let nanos = vec![50, NAT, 10, 40, 30];
+        let typed = Index::from_timedelta64_values(nanos.clone());
+        let labelled = Index::from_timedelta64(nanos.clone());
+        assert_eq!(typed.labels(), labelled.labels());
+        assert_eq!(typed.label_kinds(), LabelKinds::TIMEDELTA64);
+        assert_eq!(typed.inferred_type(), labelled.inferred_type());
+        assert_eq!(typed.inferred_type(), "timedelta64");
+        assert_eq!(
+            typed.timedelta64_label_values().as_deref(),
+            Some(&nanos[..])
+        );
+        assert_eq!(typed.slice(1, 3).labels(), labelled.slice(1, 3).labels());
+        assert_eq!(
+            typed.stepped_view(0, 2, 3).unwrap().labels(),
+            &[
+                IndexLabel::Timedelta64(50),
+                IndexLabel::Timedelta64(10),
+                IndexLabel::Timedelta64(30)
+            ]
+        );
+        assert_eq!(
+            typed.take(&[4, 0, 2]).labels(),
+            labelled.take(&[4, 0, 2]).labels()
+        );
+        assert_eq!(typed.argsort(), labelled.argsort());
+        assert_eq!(typed.unique().labels(), labelled.unique().labels());
+        let other = Index::from_timedelta64_values(vec![20, 40]);
+        assert_eq!(
+            typed.union_with(&other).labels(),
+            labelled.union_with(&other).labels()
+        );
+        // The wrapper reads them in place: asi8, a take of signed positions
+        // (name and the positions' freq kept), one duration.
+        let index = TimedeltaIndex::new(nanos.clone()).set_name("d");
+        assert_eq!(index.asi8(), nanos);
+        assert_eq!(index.held_nanos_at(1), Some(NAT));
+        assert_eq!(index.held_nanos_at(5), None);
+        let taken = index.take_signed([-1_i64, 0, 2].into_iter()).unwrap();
+        assert_eq!(taken.asi8(), vec![30, 50, 10]);
+        assert_eq!(taken.name(), index.name());
+        assert_eq!(index.take(&[3, 1]).unwrap().asi8(), vec![40, NAT]);
+        // NEGATIVES: a position past either end is refused; durations are no
+        // DatetimeIndex and read as no instants, instants as no durations.
+        assert!(index.take_signed([5_i64].into_iter()).is_none());
+        assert!(index.take_signed([-6_i64].into_iter()).is_none());
+        assert!(index.take(&[5]).is_err());
+        assert!(DatetimeIndex::from_index(typed.clone()).is_err());
+        assert!(typed.datetime64_label_values().is_none());
+        assert!(
+            Index::from_datetime64_values(vec![1, 2])
+                .timedelta64_label_values()
+                .is_none()
+        );
+        assert!(TimedeltaIndex::from_index(Index::from_datetime64_values(vec![1, 2])).is_err());
+        assert_eq!(
+            Index::from_timedelta64_values(Vec::new())
+                .timedelta64_label_values()
+                .as_deref(),
+            Some(&[][..])
+        );
     }
 
     #[test]
@@ -37428,8 +37656,9 @@ mod tests {
 
         let sorted = dt.sort_values();
         let sorted_alias = dt.sort();
-        // NAT sorts first (na_position='first' default).
-        assert_eq!(sorted.values(), vec![None, Some(a), Some(b), Some(c)]);
+        // NaT sorts last: pandas' sort_values defaults to na_position='last'
+        // (pandas 2.2.3 live; this pinned it first - 5s8nr).
+        assert_eq!(sorted.values(), vec![Some(a), Some(b), Some(c), None]);
         assert_eq!(sorted_alias.values(), sorted.values());
         assert_eq!(sorted.name().map(|n| n.as_str()), Some("ts"));
         assert_eq!(sorted_alias.name().map(|n| n.as_str()), Some("ts"));
@@ -37455,7 +37684,8 @@ mod tests {
 
         let sorted = td.sort_values();
         let sorted_alias = td.sort();
-        assert_eq!(sorted.values(), vec![None, Some(100), Some(200), Some(300)]);
+        // NaT last, as pandas (see the DatetimeIndex test above).
+        assert_eq!(sorted.values(), vec![Some(100), Some(200), Some(300), None]);
         assert_eq!(sorted_alias.values(), sorted.values());
         assert_eq!(sorted.name().map(|n| n.as_str()), Some("d"));
         assert_eq!(sorted_alias.name().map(|n| n.as_str()), Some("d"));

@@ -4030,12 +4030,31 @@ impl PyTimedelta {
             }
             Ok(Py::new(py, PyTimedelta { nanos })?.into_any())
         };
+        // pandas' Timedelta(value, unit=None, **kwargs): the unit may come
+        // second, positionally (Timedelta(10, 's') was 10 nanoseconds;
+        // br-frankenpandas-5s8nr).
+        if args.len() > 2 {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "__new__() takes at most 3 positional arguments ({} given)",
+                args.len() + 1
+            )));
+        }
         let mut value = args.iter().next();
-        let mut unit = None;
+        let mut unit = args
+            .iter()
+            .nth(1)
+            .filter(|unit| !unit.is_none())
+            .map(|unit| unit.extract::<String>())
+            .transpose()?;
         let mut components = Vec::new();
         for (key, item) in kwargs.into_iter().flat_map(|kwargs| kwargs.iter()) {
             match key.extract::<String>()?.as_str() {
                 "value" => value = Some(item),
+                "unit" if unit.is_some() => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                        "__new__() got multiple values for keyword argument 'unit'",
+                    ));
+                }
                 "unit" => unit = Some(item.extract::<String>()?),
                 name => {
                     let scale = match name {
@@ -8989,14 +9008,11 @@ fn typed_index_of(data: &Bound<'_, PyAny>) -> PyResult<Option<Index>> {
         } else {
             "timedelta64[ns]"
         };
-        let nanos = data
-            .call_method1("astype", (unit,))?
-            .call_method1("view", ("int64",))?;
-        let nanos = ndarray_elements::<i64>(data.py(), &nanos)?;
+        let nanos = ndarray_elements::<i64>(data.py(), &nanosecond_view(data, unit)?)?;
         return Ok(Some(if kind == "M" {
             Index::from_datetime64_values(nanos)
         } else {
-            Index::from_timedelta64(nanos)
+            Index::from_timedelta64_values(nanos)
         }));
     }
     let int64 = dtype_name == "int64";
@@ -9026,10 +9042,21 @@ fn timedelta64_ndarray_nanos(data: &Bound<'_, PyAny>) -> PyResult<Option<Vec<i64
     if kind != "m" {
         return Ok(None);
     }
-    let nanos = data
-        .call_method1("astype", ("timedelta64[ns]",))?
-        .call_method1("view", ("int64",))?;
+    let nanos = nanosecond_view(data, "timedelta64[ns]")?;
     ndarray_elements::<i64>(data.py(), &nanos).map(Some)
+}
+
+/// A datetime64 / timedelta64 array as its nanoseconds' int64 view: one of
+/// `unit` (native nanoseconds) is read as it is, any other converted first
+/// (astype copied an array already in nanoseconds, a second copy beside the
+/// read's; br-frankenpandas-5s8nr).
+fn nanosecond_view<'py>(data: &Bound<'py, PyAny>, unit: &str) -> PyResult<Bound<'py, PyAny>> {
+    let native = if data.getattr("dtype")?.str()?.to_cow()? == unit {
+        data.clone()
+    } else {
+        data.call_method1("astype", (unit,))?
+    };
+    native.call_method1("view", ("int64",))
 }
 
 /// A numpy array of `dtype` (int64, datetime64[ns], ...) over `values`, its
@@ -19329,6 +19356,23 @@ impl PyTimedeltaIndex {
         }
     }
 
+    /// This index as a plain Index, for the operations an Index answers.
+    fn as_plain(&self) -> PyIndex {
+        PyIndex {
+            inner: self.inner.as_index().clone(),
+        }
+    }
+
+    /// A set operation's result as pandas types it: a TimedeltaIndex while
+    /// every label is a duration, else an Index (two TimedeltaIndexes'
+    /// union was a plain Index; br-frankenpandas-5s8nr).
+    fn set_result(py: Python<'_>, index: Index) -> PyResult<Py<PyAny>> {
+        if let Ok(inner) = TimedeltaIndex::from_index(index.clone()) {
+            return Ok(Py::new(py, Self { inner })?.into_any());
+        }
+        Ok(Py::new(py, PyIndex { inner: index })?.into_any())
+    }
+
     /// A duration field as pandas answers it: an Index of ints under the
     /// index's name - int64 days, numpy's int32 for the rest (they were
     /// int64; br-frankenpandas-pqjzo) - float64 with NaN when a NaT is
@@ -19632,9 +19676,11 @@ impl PyTimedeltaIndex {
         }
     }
 
+    /// pandas' `TimedeltaIndex.asi8`: an int64 numpy array of the durations,
+    /// NaT as i64::MIN (it was a list; br-frankenpandas-5s8nr).
     #[getter]
-    pub fn asi8(&self) -> Vec<i64> {
-        self.inner.asi8()
+    fn asi8<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        i64_ndarray(py, &self.inner.asi8(), "int64")
     }
 
     #[getter]
@@ -19810,8 +19856,39 @@ impl PyTimedeltaIndex {
         Ok(self.inner.duplicated(k).into())
     }
 
-    pub fn isin(&self, values: Vec<i64>) -> BoolArray {
-        self.inner.isin(&values).into()
+    /// pandas' datetime-like `isin`: Timedeltas, `datetime.timedelta`s,
+    /// numpy timedelta64s and NaT match their durations; values all text
+    /// match as the durations they parse to, when every one parses (pandas
+    /// 2.2's deprecated cast, its FutureWarning raised); a number, None or
+    /// text beside other values matches nothing. It took nanosecond ints
+    /// only - a Timedelta was a TypeError, an int matched its nanoseconds
+    /// (br-frankenpandas-5s8nr).
+    pub fn isin(&self, py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<BoolArray> {
+        let items: Vec<Bound<'_, PyAny>> = values.try_iter()?.collect::<PyResult<_>>()?;
+        let texts: Option<Vec<String>> = items.iter().map(|item| item.extract().ok()).collect();
+        if let Some(texts) = texts.filter(|texts| !texts.is_empty()) {
+            let parsed: Option<Vec<i64>> = texts
+                .iter()
+                .map(|text| Timedelta::parse(text).ok())
+                .collect();
+            let Some(durations) = parsed else {
+                return Ok(vec![false; self.inner.len()].into());
+            };
+            PyErr::warn(
+                py,
+                &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+                c"The behavior of 'isin' with dtype=timedelta64[ns] and castable values (e.g. strings) is deprecated. In a future version, these will not be considered matching by isin. Explicitly cast to the appropriate dtype before calling isin instead.",
+                1,
+            )?;
+            return Ok(self.inner.isin(&durations).into());
+        }
+        let mut durations = Vec::new();
+        for item in &items {
+            if let Some(nanos) = duration_operand(item)? {
+                durations.push(nanos);
+            }
+        }
+        Ok(self.inner.isin(&durations).into())
     }
 
     /// The durations as Timedeltas, NaT kept, as pandas (these were raw
@@ -19954,39 +20031,46 @@ impl PyTimedeltaIndex {
                     "index out of bounds",
                 ));
             }
+            // A typed backing answers its one duration, no label made (every
+            // label was made for it; br-frankenpandas-5s8nr).
+            if let Some(nanos) = self.inner.held_nanos_at(pos as usize) {
+                return index_label_to_py(py, &IndexLabel::Timedelta64(nanos));
+            }
             let label = &self.inner.as_index().labels()[pos as usize];
             return index_label_to_py(py, label);
         }
         if let Ok(slice) = item.cast::<pyo3::types::PySlice>() {
             let indices = slice.indices(self.inner.len() as isize)?;
-            let mut sliced = Vec::new();
-            let mut i = indices.start;
-            if indices.step > 0 {
-                while i < indices.stop {
-                    if let IndexLabel::Timedelta64(ns) = self.inner.as_index().labels()[i as usize]
-                    {
-                        sliced.push(ns);
-                    }
-                    i += indices.step;
-                }
-            } else {
-                while i > indices.stop {
-                    if let IndexLabel::Timedelta64(ns) = self.inner.as_index().labels()[i as usize]
-                    {
-                        sliced.push(ns);
-                    }
-                    i += indices.step;
-                }
-            }
-            let mut out = TimedeltaIndex::new(sliced);
-            if let Some(n) = self.inner.name() {
-                out = out.set_name(n);
-            }
             // A slice keeps the freq scaled by its step, as pandas.
             let freq = self
                 .inner
                 .freq()
                 .and_then(|freq| fp_index::scale_freq(&freq, i64::try_from(indices.step).ok()?));
+            // A run, or an even step of a typed backing, is a view of the same
+            // durations (name kept); any other slice takes the ones it picks.
+            // Every slice made and read the labels (tdi[::2] 3.5 ms a million,
+            // pandas 0.003; br-frankenpandas-5s8nr).
+            let index = self.inner.as_index();
+            let view = match (
+                usize::try_from(indices.start),
+                usize::try_from(indices.step),
+            ) {
+                (Ok(start), Ok(1)) => Some(index.slice(start, indices.slicelength)),
+                (Ok(start), Ok(step)) => index.stepped_view(start, step, indices.slicelength),
+                _ => None,
+            };
+            let out = match view {
+                Some(view) => TimedeltaIndex::from_index(view).map_err(index_error_to_py)?,
+                None => {
+                    let positions: Vec<usize> = (0..indices.slicelength)
+                        .filter_map(|k| {
+                            let at = indices.start + isize::try_from(k).ok()? * indices.step;
+                            usize::try_from(at).ok()
+                        })
+                        .collect();
+                    self.inner.take(&positions).map_err(index_error_to_py)?
+                }
+            };
             return Py::new(
                 py,
                 PyTimedeltaIndex {
@@ -20071,32 +20155,45 @@ impl PyTimedeltaIndex {
         false
     }
 
-    fn union(&self, other: IndexArg) -> PyIndex {
-        let other = other.named_like(self.inner.name());
-        PyIndex {
-            inner: self.inner.as_index().union(&other.inner),
-        }
+    /// pandas' `union(other, sort=None)`, as an Index answers it (sorted,
+    /// NaT last; it kept the order met; br-frankenpandas-5s8nr), typed.
+    #[pyo3(signature = (other, sort=None))]
+    fn union(&self, py: Python<'_>, other: IndexArg, sort: Option<bool>) -> PyResult<Py<PyAny>> {
+        Self::set_result(py, self.as_plain().union(other, sort).inner)
     }
 
-    fn intersection(&self, other: IndexArg) -> PyIndex {
-        let other = other.named_like(self.inner.name());
-        PyIndex {
-            inner: self.inner.as_index().intersection(&other.inner),
-        }
+    #[pyo3(signature = (other, sort=Some(false)))]
+    fn intersection(
+        &self,
+        py: Python<'_>,
+        other: IndexArg,
+        sort: Option<bool>,
+    ) -> PyResult<Py<PyAny>> {
+        Self::set_result(py, self.as_plain().intersection(other, sort).inner)
     }
 
-    fn difference(&self, other: IndexArg) -> PyIndex {
-        let other = other.named_like(self.inner.name());
-        PyIndex {
-            inner: self.inner.as_index().difference(&other.inner),
-        }
+    #[pyo3(signature = (other, sort=None))]
+    fn difference(
+        &self,
+        py: Python<'_>,
+        other: IndexArg,
+        sort: Option<bool>,
+    ) -> PyResult<Py<PyAny>> {
+        Self::set_result(py, self.as_plain().difference(other, sort).inner)
     }
 
-    fn symmetric_difference(&self, other: IndexArg) -> PyIndex {
-        let other = other.named_like(self.inner.name());
-        PyIndex {
-            inner: self.inner.as_index().symmetric_difference(&other.inner),
-        }
+    #[pyo3(signature = (other, result_name=None, sort=None))]
+    fn symmetric_difference(
+        &self,
+        py: Python<'_>,
+        other: IndexArg,
+        result_name: Option<&Bound<'_, PyAny>>,
+        sort: Option<bool>,
+    ) -> PyResult<Py<PyAny>> {
+        let out = self
+            .as_plain()
+            .symmetric_difference(other, result_name, sort)?;
+        Self::set_result(py, out.inner)
     }
 
     /// pandas' `get_loc`: a string is the Timedelta it parses to (it was

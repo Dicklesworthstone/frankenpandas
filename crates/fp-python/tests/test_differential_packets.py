@@ -33164,3 +33164,70 @@ def test_frame_of_a_2d_array_in_any_layout_e186m(matrix: str) -> None:
         )
 
     assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-5s8nr: a TimedeltaIndex holds its durations as they are -
+# slices are views of the same buffer, a scalar reads one duration, takes and
+# reads gather in place - and answers as pandas for each; NEGATIVE: NaT, a
+# name, a freq scaled by a slice's step, a negative step, an empty slice and
+# a DatetimeIndex's slices as before.
+def _5s8nr_spans(m: Any) -> Any:
+    return m.TimedeltaIndex(np.array([50, "NaT", 10, 40, 30, 20, 60], dtype="timedelta64[s]"), name="d")
+
+
+def _5s8nr_hours(m: Any) -> Any:
+    return m.timedelta_range("1D", periods=9, freq="h", name="t")
+
+
+_5S8NR_CASES = {
+    **{f"spans[{key}]": (lambda key: lambda m: eval(f"_5s8nr_spans(m)[{key}]"))(key)
+       for key in ["1:4", "::2", "::-1", "5:1:-2", "3:3", "-2:", "0", "-1", "1"]},
+    **{f"hours[{key}]": (lambda key: lambda m: eval(f"_5s8nr_hours(m)[{key}]"))(key)
+       for key in ["2:7", "::3", "1::2", "::-2", "8:9"]},
+    "slice of a slice": lambda m: _5s8nr_hours(m)[1:8][::2],
+    "take of a slice": lambda m: _5s8nr_hours(m)[::2].take(np.array([-1, 0], dtype="int64")),
+    "sort_values": lambda m: _5s8nr_spans(m).sort_values(),
+    "argsort": lambda m: list(_5s8nr_spans(m).argsort()),
+    "unique": lambda m: _5s8nr_spans(m).unique(),
+    "isin": lambda m: list(_5s8nr_spans(m).isin([m.Timedelta(10, "s"), m.Timedelta(60, "s")])),
+    "isin NaT": lambda m: list(_5s8nr_spans(m).isin([m.NaT, m.Timedelta(50, "s")])),
+    "isin None": lambda m: list(_5s8nr_spans(m).isin([None])),
+    "isin ints match nothing": lambda m: list(_5s8nr_spans(m).isin([10_000_000_000, 10])),
+    "isin text matches nothing": lambda m: list(_5s8nr_spans(m).isin(["10s"])),
+    "isin timedelta64": lambda m: list(_5s8nr_spans(m).isin(np.array([20, 40], dtype="timedelta64[s]"))),
+    "get_loc": lambda m: _5s8nr_hours(m).get_loc(m.Timedelta("1 days 03:00:00")),
+    "union": lambda m: _5s8nr_spans(m)[::2].union(_5s8nr_spans(m)[1::2]),
+    "intersection": lambda m: _5s8nr_spans(m).intersection(_5s8nr_spans(m)[2:5]),
+    "difference": lambda m: _5s8nr_spans(m).difference(_5s8nr_spans(m)[2:5]),
+    "symmetric_difference": lambda m: _5s8nr_spans(m)[:4].symmetric_difference(_5s8nr_spans(m)[2:]),
+    "union with ints": lambda m: _5s8nr_spans(m)[:2].union(m.Index([1, 2])),
+    "union sort=False": lambda m: _5s8nr_spans(m)[::2].union(_5s8nr_spans(m)[1::2], sort=False),
+    "intersection sort=True": lambda m: _5s8nr_spans(m).intersection(_5s8nr_spans(m)[1:6], sort=True),
+    "symmetric_difference result_name": lambda m: _5s8nr_spans(m)[:4].symmetric_difference(_5s8nr_spans(m)[2:], result_name="r"),
+    "isin text not parsing": lambda m: list(_5s8nr_spans(m).isin(["10s", "nope"])),
+    "isin text beside a Timedelta": lambda m: list(_5s8nr_spans(m).isin([m.Timedelta(10, unit="s"), "20s"])),
+    "Timedelta positional unit": lambda m: [repr(m.Timedelta(10, "s")), repr(m.Timedelta(1.5, "h")), repr(m.Timedelta(3, "D")), repr(m.Timedelta(10, None))],
+    "Timedelta text and a unit raises": lambda m: m.Timedelta("10s", "s"),
+    "Timedelta three positionals raise": lambda m: m.Timedelta(10, "s", 3),
+    "Timedelta unit twice raises": lambda m: m.Timedelta(10, "s", unit="ms"),
+    "equals": lambda m: _5s8nr_hours(m)[::2].equals(m.timedelta_range("1D", periods=5, freq="2h")),
+    "series loc": lambda m: list(m.Series(np.arange(9.0), index=_5s8nr_hours(m)).loc[m.Timedelta("1 days 02:00:00"):m.Timedelta("1 days 05:00:00")]),
+    "asi8": lambda m: (type(_5s8nr_hours(m).asi8).__name__, str(_5s8nr_hours(m).asi8.dtype), [int(nanos) for nanos in _5s8nr_hours(m)[::3].asi8]),
+    "total_seconds": lambda m: _5s8nr_spans(m)[2:].total_seconds(),
+    "datetime slices as before": lambda m: m.date_range("2024-01-01", periods=6, freq="D")[::-2],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_5S8NR_CASES))
+def test_timedelta_index_slices_and_reads_like_pandas_5s8nr(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _5S8NR_CASES[case](m)
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+        if hasattr(out, "freqstr") or hasattr(out, "dtype") and hasattr(out, "name") and not np.isscalar(out):
+            return (type(out).__name__, [str(span) for span in out], out.dtype.kind, getattr(out, "freqstr", None), out.name)
+        return repr(out) if not isinstance(out, list) else repr(out)
+
+    assert run(fpd) == run(pd)
