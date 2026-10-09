@@ -28785,8 +28785,16 @@ def test_categorical_index_categories_like_pandas_7zs0a(case: str) -> None:
     assert run(fpd) == run(pd)
 
 
+# br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.24: fillna / ffill /
+# bfill of an object column keep the fill and the values as they are (a fill
+# was made text, and a column of numbers stringified), then downcast as pandas
+# 2.2 does with its FutureWarning; NEGATIVE: text stays object with no warning,
+# text beside numbers stays object.
 _FVSAO24_FILLS = {
     "ints fillna 0": lambda m: m.Series([1, None, 2], dtype=object).fillna(0),
+    "ints ffill": lambda m: m.Series([1, None, 2], dtype=object).ffill(),
+    "ints bfill": lambda m: m.Series([1, None, 2], dtype=object).bfill(),
+    "leading None ffill": lambda m: m.Series([None, 1, 2], dtype=object).ffill(),
     "floats fillna": lambda m: m.Series([1.5, None], dtype=object).fillna(0.5),
     "bools fillna": lambda m: m.Series([True, None], dtype=object).fillna(False),
     "int and float fillna": lambda m: m.Series([1, None, 2.5], dtype=object).fillna(0),
@@ -28794,6 +28802,11 @@ _FVSAO24_FILLS = {
     "limit fillna": lambda m: m.Series([1, None, None], dtype=object).fillna(0, limit=1),
     "text fillna": lambda m: m.Series(["a", None], dtype=object).fillna("z"),
     "text and int fillna": lambda m: m.Series(["a", None, 1], dtype=object).fillna(0),
+    "frame fillna": lambda m: m.DataFrame(
+        {"a": m.Series([1, None], dtype=object), "b": m.Series(["x", None], dtype=object)}
+    ).fillna(0),
+    "frame ffill": lambda m: m.DataFrame({"a": m.Series([1, None], dtype=object)}).ffill(),
+    "frame bfill": lambda m: m.DataFrame({"a": m.Series([None, 2.5], dtype=object)}).bfill(),
 }
 
 

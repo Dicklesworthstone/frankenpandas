@@ -11758,6 +11758,26 @@ impl Series {
         Self::new(self.name.clone(), self.index.clone(), column)
     }
 
+    /// [`Self::with_values_preserving_index`] of values a fill carried: an
+    /// object column's stay object, as pandas' fill keeps its object array
+    /// (its deprecated downcast is the binding's) - Column::from_values made
+    /// [None, 1, 2] int64 holding a None, where pandas' is float64 after the
+    /// downcast (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.24).
+    /// A column holding only text infers as before.
+    fn with_carried_values(&self, values: Vec<Scalar>) -> Result<Self, FrameError> {
+        if self.column.dtype() == DType::Utf8
+            && !self.column.is_pandas_string()
+            && self.categorical.is_none()
+            && values
+                .iter()
+                .any(|value| !matches!(value, Scalar::Utf8(_) | Scalar::Null(_)))
+        {
+            let column = Column::from_object_values(values);
+            return Self::new(self.name.clone(), self.index.clone(), column);
+        }
+        self.with_values_preserving_index(values)
+    }
+
     /// [`Self::diff`] of a nullable Int64 / Float64 / boolean Series:
     /// `value[i] - value[i - periods]` in the Series' own dtype (integers
     /// wrap, as numpy's; booleans xor), NA where a side is missing or absent.
@@ -16593,7 +16613,7 @@ impl Series {
             }
         }
 
-        self.with_values_preserving_index(out)
+        self.with_carried_values(out)
     }
 
     /// Forward-fill missing values (propagate last valid observation forward).
@@ -16721,7 +16741,7 @@ impl Series {
             }
         }
 
-        self.with_values_preserving_index(out)
+        self.with_carried_values(out)
     }
 
     /// ffill (`forward`) or bfill of a datetime / timedelta column over its
@@ -16880,7 +16900,7 @@ impl Series {
             }
         }
 
-        self.with_values_preserving_index(out)
+        self.with_carried_values(out)
     }
 
     /// Deprecated pandas alias for [`Self::ffill`]. Matches
@@ -125610,6 +125630,59 @@ mod tests {
     /// skipped entirely and x0 weighs `(1-a)^1 = 0.5`, giving `2.333…`. An
     /// unweighted `(1+3)/2 = 2.0` is neither, and is the value the fixture
     /// pinned. (br-frankenpandas-fixture-divergence-triage-9s0c4)
+    #[test]
+    fn object_fills_keep_their_values_fvsao24() {
+        // ffill / bfill / fillna(limit=) of an object column keep it object
+        // with its numbers numbers - Column::from_values made [None, 1, None]
+        // ffilled an int64 column holding a None - pandas' downcast being
+        // the binding's (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.24).
+        let objects = Series::new(
+            "o",
+            Index::from_range(0, 3, 1),
+            Column::from_object_values(vec![
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+            ]),
+        )
+        .unwrap();
+        let ffilled = objects.ffill(None).unwrap();
+        assert_eq!(ffilled.column().dtype(), DType::Utf8);
+        assert_eq!(
+            ffilled.values(),
+            &[
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(1),
+                Scalar::Int64(1)
+            ]
+        );
+        let bfilled = objects.bfill(None).unwrap();
+        assert_eq!(bfilled.column().dtype(), DType::Utf8);
+        assert_eq!(bfilled.values()[..2], [Scalar::Int64(1), Scalar::Int64(1)]);
+        let limited = objects.fillna_limit(&Scalar::Int64(0), 1).unwrap();
+        assert_eq!(limited.column().dtype(), DType::Utf8);
+        assert_eq!(limited.values()[..2], [Scalar::Int64(0), Scalar::Int64(1)]);
+        // NEGATIVE: a text column carries its text as before.
+        let text = Series::from_values(
+            "t",
+            (0..3_i64).map(IndexLabel::Int64).collect(),
+            vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("b".to_owned()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            text.ffill(None).unwrap().values(),
+            &[
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("b".to_owned())
+            ]
+        );
+    }
+
     #[test]
     fn ewm_mean_decays_the_prior_weight_across_a_gap() {
         let subject = Series::from_values(
