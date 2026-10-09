@@ -30463,12 +30463,54 @@ fn normalize_series_other(
 }
 
 fn execute_series_where(inner: &Series, cond: &Series, other: &SeriesOrScalar) -> PyResult<Series> {
-    match other {
+    let result = match other {
         SeriesOrScalar::Scalar(sc) => inner.where_cond(cond, Some(sc)).map_err(frame_error_to_py),
         SeriesOrScalar::Series(other_s) => inner
             .where_cond_series(cond, other_s)
             .map_err(frame_error_to_py),
+    }?;
+    Ok(keep_object(inner, result))
+}
+
+/// `result` of an op that keeps an object Series' own values (where /
+/// mask, drop_duplicates, combine_first, update, repeat, cumsum, a group's
+/// first): an object column still, as pandas keeps its object array - the
+/// engine rebuilt the values and inferred int64 / float64 / bool
+/// (br-frankenpandas-7v4wf).
+fn keep_object(source: &Series, result: Series) -> Series {
+    if !is_object_column(source.column())
+        || !matches!(
+            result.column().dtype(),
+            DType::Int64 | DType::Float64 | DType::Bool
+        )
+    {
+        return result;
     }
+    let column = Column::from_object_values(result.column().values().to_vec());
+    match Series::new(result.name().clone(), result.index().clone(), column) {
+        Ok(object) => object,
+        Err(_) => result,
+    }
+}
+
+/// [`keep_object`] of a frame's columns (DataFrame.where / mask).
+fn keep_object_frame(source: &DataFrame, result: DataFrame) -> DataFrame {
+    let mut out = result;
+    for name in source.column_names() {
+        let Some(column) = source
+            .column(name)
+            .filter(|before| is_object_column(before))
+            .and(out.column(name))
+            .filter(|after| matches!(after.dtype(), DType::Int64 | DType::Float64 | DType::Bool))
+            .map(|after| Column::from_object_values(after.values().to_vec()))
+        else {
+            continue;
+        };
+        if let Ok(next) = out.with_column(name.clone(), column) {
+            out = next;
+        }
+    }
+    out
 }
 
 impl PySeries {
@@ -32645,7 +32687,9 @@ impl PySeries {
             .inner
             .cumsum_with_skipna(skipna)
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: r })
+        Ok(PySeries {
+            inner: keep_object(&self.inner, r),
+        })
     }
 
     /// Return counts of unique values (descending) as a new Series. With
@@ -32853,6 +32897,12 @@ impl PySeries {
         // column's dtype - a float64 column's [nan] and an empty int64
         // column's [] were object arrays (wsu74).
         let distinct = self.inner.unique();
+        // An object column's are an object array of its own values (a
+        // column of numbers became int64; br-frankenpandas-7v4wf).
+        if source.dtype() == DType::Utf8 && !source.is_pandas_string() {
+            let column = Column::from_object_values(distinct);
+            return Ok(column_ndarray(py, &column)?.unbind());
+        }
         let column = if distinct.iter().all(Scalar::is_missing) && source.dtype() != DType::Null {
             Column::new(source.dtype(), distinct)
         } else {
@@ -33564,6 +33614,67 @@ impl PySeries {
                     .map_err(frame_error_to_py)?
                     .expect("temporal dtype checked above");
                 return Ok(PySeries { inner: clipped });
+            }
+
+            // An object column of numbers clips cell by cell, as pandas'
+            // where does: a cell past a number bound becomes that bound as
+            // given, every other cell stays itself, the column object - it
+            // became float64 (br-frankenpandas-7v4wf).
+            if is_object_column(self.inner.column())
+                && self.inner.values().iter().all(|cell| {
+                    cell.is_missing()
+                        || matches!(
+                            cell,
+                            Scalar::Int64(_) | Scalar::Float64(_) | Scalar::Bool(_)
+                        )
+                })
+            {
+                // Some(None): no bound on that side (None or NaN, as pandas);
+                // Some(Some(..)): a number; None: anything else (a Series),
+                // for the path below.
+                type NumberBound = Option<Option<(f64, Scalar)>>;
+                let number_bound = |bound: Option<&Bound<'_, PyAny>>| -> PyResult<NumberBound> {
+                    let Some(bound) = bound.filter(|bound| !bound.is_none()) else {
+                        return Ok(Some(None));
+                    };
+                    if bound.extract::<PyRef<'_, PySeries>>().is_ok() {
+                        return Ok(None);
+                    }
+                    let Ok(value) = bound.extract::<f64>() else {
+                        return Ok(None);
+                    };
+                    if value.is_nan() {
+                        return Ok(Some(None));
+                    }
+                    Ok(Some(Some((value, py_to_scalar(py, bound)?))))
+                };
+                if let (Some(low), Some(high)) = (number_bound(lower)?, number_bound(upper)?) {
+                    let values = self
+                        .inner
+                        .values()
+                        .iter()
+                        .map(|cell| {
+                            if cell.is_missing() {
+                                return cell.clone();
+                            }
+                            let Ok(value) = cell.to_f64() else {
+                                return cell.clone();
+                            };
+                            match (&low, &high) {
+                                (Some((bound, scalar)), _) if value < *bound => scalar.clone(),
+                                (_, Some((bound, scalar))) if value > *bound => scalar.clone(),
+                                _ => cell.clone(),
+                            }
+                        })
+                        .collect();
+                    let inner = Series::new(
+                        self.inner.name().clone(),
+                        self.inner.index().clone(),
+                        Column::from_object_values(values),
+                    )
+                    .map_err(frame_error_to_py)?;
+                    return Ok(PySeries { inner });
+                }
             }
 
             let extract_bound = |b: &Bound<'_, PyAny>| -> PyResult<SeriesOrScalarBound> {
@@ -34309,10 +34420,25 @@ impl PySeries {
     ) -> PyResult<Option<PySeries>> {
         let result = (|| -> PyResult<PySeries> {
             let keep_enum = parse_duplicate_keep(keep)?;
-            let res = self
-                .inner
-                .drop_duplicates_keep(keep_enum)
-                .map_err(frame_error_to_py)?;
+            // An object column keeps its rows as they are: the dedup rebuilt
+            // the values, [1, 1, 2.5] coming back float64 [1.0, 2.5]
+            // (br-frankenpandas-7v4wf).
+            let res = if is_object_column(self.inner.column()) {
+                let repeats = self
+                    .inner
+                    .duplicated_keep(keep_enum)
+                    .map_err(frame_error_to_py)?;
+                let kept: Vec<bool> = repeats
+                    .values()
+                    .iter()
+                    .map(|repeat| !matches!(repeat, Scalar::Bool(true)))
+                    .collect();
+                self.inner.iloc_bool(&kept).map_err(frame_error_to_py)?
+            } else {
+                self.inner
+                    .drop_duplicates_keep(keep_enum)
+                    .map_err(frame_error_to_py)?
+            };
             let final_series = if ignore_index {
                 match res.reset_index(true).map_err(frame_error_to_py)? {
                     fp_frame::SeriesResetIndexResult::Series(s) => s,
@@ -34322,7 +34448,7 @@ impl PySeries {
                 res
             };
             Ok(PySeries {
-                inner: final_series,
+                inner: keep_object(&self.inner, final_series),
             })
         })()?;
         Ok(series_inplace(&mut self.inner, result, inplace))
@@ -35424,7 +35550,9 @@ impl PySeries {
         }
         let repeats = repeat_count(self.inner.len(), repeats)?;
         let res = self.inner.repeat(repeats).map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        Ok(PySeries {
+            inner: keep_object(&self.inner, res),
+        })
     }
 
     /// pandas' `searchsorted(value, side='left', sorter=None)`: one position
@@ -35618,7 +35746,9 @@ impl PySeries {
             .inner
             .combine_first(&other.inner)
             .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        Ok(PySeries {
+            inner: keep_object(&self.inner, res),
+        })
     }
 
     /// pandas' `align(other, join='outer', axis=None, level=None, copy=None,
@@ -36884,6 +37014,22 @@ impl PySeries {
                     "interpolate is not implemented for dtype=boolean",
                 ));
             }
+            // pandas 2.2 leaves an object column as it is, with its
+            // FutureWarning (Block.interpolate) - its numbers were
+            // interpolated (br-frankenpandas-7v4wf).
+            if is_object_column(self.inner.column()) {
+                Python::attach(|py| {
+                    PyErr::warn(
+                        py,
+                        &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+                        c"Series.interpolate with object dtype is deprecated and will raise in a future version. Call obj.infer_objects(copy=False) before interpolating instead.",
+                        1,
+                    )
+                })?;
+                return Ok(PySeries {
+                    inner: self.inner.clone(),
+                });
+            }
             if !Series::interpolate_supports(method, limit_direction, limit_area) {
                 return Err(not_implemented(&format!(
                     "Series.interpolate(method='{method}') with limit_direction or limit_area"
@@ -37024,7 +37170,8 @@ impl PySeries {
     }
 
     fn update(&mut self, other: &PySeries) -> PyResult<()> {
-        self.inner = self.inner.update(&other.inner).map_err(frame_error_to_py)?;
+        let updated = self.inner.update(&other.inner).map_err(frame_error_to_py)?;
+        self.inner = keep_object(&self.inner, updated);
         Ok(())
     }
 
@@ -52760,7 +52907,10 @@ impl PyDataFrame {
         let ax = parse_axis_param_for_type(axis, "DataFrame")?;
         let cond_norm = normalize_df_cond(py, &self.inner, cond)?;
         let other_norm = normalize_df_other(py, &self.inner, other)?;
-        let res_inner = execute_df_where(&self.inner, &cond_norm, &other_norm, ax)?;
+        let res_inner = keep_object_frame(
+            &self.inner,
+            execute_df_where(&self.inner, &cond_norm, &other_norm, ax)?,
+        );
         if inplace.unwrap_or(false) {
             self.inner = res_inner;
             Ok(None)
@@ -52783,7 +52933,10 @@ impl PyDataFrame {
         let ax = parse_axis_param_for_type(axis, "DataFrame")?;
         let cond_norm = normalize_df_cond(py, &self.inner, cond)?;
         let other_norm = normalize_df_other(py, &self.inner, other)?;
-        let res_inner = execute_df_mask(&self.inner, &cond_norm, &other_norm, ax)?;
+        let res_inner = keep_object_frame(
+            &self.inner,
+            execute_df_mask(&self.inner, &cond_norm, &other_norm, ax)?,
+        );
         if inplace.unwrap_or(false) {
             self.inner = res_inner;
             Ok(None)
@@ -73149,7 +73302,8 @@ impl PySeriesGroupBy {
             .first_skipna(skipna)
             .and_then(|s| gb.with_min_count(s, min_count, true))
             .map_err(frame_error_to_py)?;
-        self.wrap_result("first", res)
+        // A group's first value of an object column is object (7v4wf).
+        self.wrap_result("first", keep_object(&self.series, res))
     }
 
     #[pyo3(signature = (numeric_only=false, min_count=-1, skipna=true))]
@@ -73161,7 +73315,7 @@ impl PySeriesGroupBy {
             .last_skipna(skipna)
             .and_then(|s| gb.with_min_count(s, min_count, true))
             .map_err(frame_error_to_py)?;
-        self.wrap_result("last", res)
+        self.wrap_result("last", keep_object(&self.series, res))
     }
 
     #[pyo3(signature = (numeric_only=false))]
@@ -76296,6 +76450,34 @@ fn concat_kept_dtypes<'py>(
             return result
                 .call_method1("astype", (target,))?
                 .call_method1("astype", ("object",));
+        }
+        // A piece holding objects makes the stacked Series object, each cell
+        // as its piece held it, as pandas' (a column of numbers came back
+        // int64; br-frankenpandas-7v4wf).
+        if names.iter().any(|name| name == "object")
+            && let Ok(stacked) = result.extract::<PyRef<'_, PySeries>>()
+            && !is_object_column(stacked.inner.column())
+        {
+            let mut cells = Vec::with_capacity(stacked.inner.len());
+            for piece in pieces {
+                cells.extend(
+                    piece
+                        .extract::<PyRef<'_, PySeries>>()?
+                        .inner
+                        .values()
+                        .iter()
+                        .cloned(),
+                );
+            }
+            if cells.len() == stacked.inner.len() {
+                let inner = Series::new(
+                    stacked.inner.name().clone(),
+                    stacked.inner.index().clone(),
+                    Column::from_object_values(cells),
+                )
+                .map_err(frame_error_to_py)?;
+                return PySeries { inner }.into_bound_py_any(result.py());
+            }
         }
         return Ok(result.clone());
     }

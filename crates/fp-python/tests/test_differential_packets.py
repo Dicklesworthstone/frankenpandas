@@ -28785,6 +28785,172 @@ def test_categorical_index_categories_like_pandas_7zs0a(case: str) -> None:
     assert run(fpd) == run(pd)
 
 
+# br-frankenpandas-1r2sj: categories compare by pandas' equality (1 == 1.0)
+# through the editors - set / remove / reorder_categories after an int / float
+# mix made the categories floats keep the values (they went missing), on a
+# Series and a CategoricalIndex - and mixed ints and floats are told apart as
+# the floats they become (2**53 and 2**53 + 1 one category beside 0.5);
+# what is left of an unordered categorical's categories after a removal is
+# sorted (pandas' Index.difference; fp kept their order); NEGATIVE: a value
+# set_categories drops is missing, an ordered categorical or a removal of
+# nothing keeps the categories' order.
+def _1r2sj_series(m: Any) -> Any:
+    return m.Series([3, 1, 3]).astype("category").cat.add_categories([2.5])
+
+
+_1R2SJ_CASES = {
+    "set back to ints": lambda m: _1r2sj_series(m).cat.set_categories([1, 3]),
+    "set drops one": lambda m: _1r2sj_series(m).cat.set_categories([3]),
+    "remove int": lambda m: _1r2sj_series(m).cat.remove_categories([1]),
+    "reorder by ints": lambda m: _1r2sj_series(m).cat.reorder_categories([2.5, 3, 1]),
+    "index set back to ints": lambda m: m.CategoricalIndex([3, 1, 3])
+    .add_categories([2.5])
+    .set_categories([1, 3]),
+    "index remove int": lambda m: m.CategoricalIndex([3, 1, 3]).add_categories([2.5]).remove_categories([1]),
+    "values 2**53": lambda m: m.Categorical([2**53, 2**53 + 1, 0.5]),
+    "remove sorts the rest": lambda m: m.Series(["b", "a", "c"])
+    .astype(m.CategoricalDtype(["c", "b", "a"]))
+    .cat.remove_categories(["b"]),
+    "index remove sorts the rest": lambda m: m.CategoricalIndex(["b", "a", "c"], categories=["c", "b", "a"])
+    .remove_categories(["b"]),
+    "ordered remove keeps order": lambda m: m.Series(["b", "a", "c"])
+    .astype(m.CategoricalDtype(["c", "b", "a"], ordered=True))
+    .cat.remove_categories(["b"]),
+    "remove nothing keeps order": lambda m: m.Series([3, 1, 2])
+    .astype(m.CategoricalDtype([3, 1, 2]))
+    .cat.remove_categories([]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_1R2SJ_CASES))
+def test_category_editors_compare_numbers_like_pandas_1r2sj(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _1R2SJ_CASES[case](m)
+        except Exception as error:  # noqa: BLE001
+            return type(error).__name__
+        holder = out.cat if hasattr(out, "cat") else out
+        values = [None if v != v else v for v in list(out)]
+        return [repr(values), repr(list(holder.categories)), str(holder.categories.dtype), list(holder.codes)]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-7undg: repeat / combine_first / ffill / bfill keep the
+# nullable extension dtypes (Int64, Float64, boolean, string) with their
+# <NA>, and Int64 combined with float64 is Float64 (pandas' common dtype);
+# NEGATIVE: numpy int64 / float64 Series as before.
+_7UNDG_SOURCES = {
+    "Int64": lambda m: m.Series([1, None, 3], dtype="Int64"),
+    "Float64": lambda m: m.Series([1.5, None, 3.0], dtype="Float64"),
+    "boolean": lambda m: m.Series([True, None, False], dtype="boolean"),
+    "string": lambda m: m.Series(["a", None, "c"], dtype="string"),
+    "int64": lambda m: m.Series([1, 2, 3]),
+    "float64": lambda m: m.Series([1.5, None, 3.0]),
+}
+_7UNDG_OPS = {
+    "repeat": lambda s, m: s.repeat(2),
+    "combine_first": lambda s, m: s.combine_first(s.iloc[::-1].reset_index(drop=True)),
+    "ffill": lambda s, m: s.ffill(),
+    "bfill": lambda s, m: s.bfill(),
+}
+_7UNDG_CASES = [(src, op) for src in _7UNDG_SOURCES for op in _7UNDG_OPS] + [
+    ("Int64", "combine_first float64"),
+]
+
+
+def _7undg_cell(v: Any) -> Any:
+    if v is None or type(v).__name__ == "NAType":
+        return "NA"
+    if isinstance(v, float) and v != v:
+        return "nan"
+    return (type(v).__name__, v)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _7UNDG_CASES, ids=lambda case: f"{case[0]}-{case[1]}")
+def test_extension_dtypes_kept_like_pandas_7undg(case: Any) -> None:
+    src, op = case
+
+    def run(m: Any) -> Any:
+        s = _7UNDG_SOURCES[src](m)
+        if op == "combine_first float64":
+            out = s.combine_first(m.Series([9.5, 2.5, 7.5]))
+        else:
+            out = _7UNDG_OPS[op](s, m)
+        return [str(out.dtype), [_7undg_cell(v) for v in out.tolist()]]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-7v4wf: an object column of numbers keeps its values - mode
+# (its ints were stringified), interpolate (pandas 2.2 leaves an object column
+# as it is, with a FutureWarning; fp interpolated it), clip (pandas' where
+# keeps the cells and the bounds as given; fp made floats); NEGATIVE: text
+# object columns and numeric columns as before.
+_7V4WF_OBJECT_OPS = {
+    "mode ints": lambda m: m.Series([1, 1, 2], dtype=object).mode(),
+    "mode floats": lambda m: m.Series([1.5, 1.5, 2], dtype=object).mode(),
+    "mode text": lambda m: m.Series(["a", "a", "b"], dtype=object).mode(),
+    "mode int64": lambda m: m.Series([1, 1, 2]).mode(),
+    "interpolate ints": lambda m: m.Series([1, None, 2, 3], dtype=object).interpolate(),
+    "interpolate text": lambda m: m.Series(["a", None, "b"], dtype=object).interpolate(),
+    "interpolate float64": lambda m: m.Series([1.0, None, 3.0]).interpolate(),
+    "clip ints": lambda m: m.Series([3, 1, 2], dtype=object).clip(1, 2),
+    "clip lower float bound": lambda m: m.Series([1, None, 0], dtype=object).clip(0.5, None),
+    "clip upper only": lambda m: m.Series([3, 1.5, 2], dtype=object).clip(upper=2),
+    "clip int64": lambda m: m.Series([3, 1, 2]).clip(1, 2),
+    "where": lambda m: m.Series([1, None, 2], dtype=object).where(m.Series([True, False, True]), 0),
+    "mask": lambda m: m.Series([1, None, 2], dtype=object).mask(m.Series([False, True, False]), 9),
+    "drop_duplicates": lambda m: m.Series([1, 1, 2.5], dtype=object).drop_duplicates(),
+    "combine_first": lambda m: m.Series([1, None], dtype=object).combine_first(m.Series([5, 6], dtype=object)),
+    "update": lambda m: (lambda s: (s.update(m.Series([9], index=[1], dtype=object)), s)[1])(
+        m.Series([3, 1, 2], dtype=object)
+    ),
+    "repeat": lambda m: m.Series([3, 1], dtype=object).repeat(2),
+    "cumsum": lambda m: m.Series([3, 1, 2], dtype=object).cumsum(),
+    "unique": lambda m: m.Series([3, 1, 3], dtype=object).unique(),
+    "groupby first": lambda m: m.DataFrame({"k": [1, 1, 2], "v": m.Series([3, 1, 2], dtype=object)})
+    .groupby("k")["v"]
+    .first(),
+    "groupby last": lambda m: m.DataFrame({"k": [1, 1, 2], "v": m.Series([3, 1, 2], dtype=object)})
+    .groupby("k")["v"]
+    .last(),
+    "frame where": lambda m: m.DataFrame({"v": m.Series([1, None], dtype=object), "f": [1.5, 2.5]})
+    .where(m.DataFrame({"v": [True, False], "f": [True, False]}), 0)["v"],
+    "frame mask": lambda m: m.DataFrame({"v": m.Series([1, 2], dtype=object)})
+    .mask(m.DataFrame({"v": [False, True]}), 7)["v"],
+    "concat": lambda m: m.concat([m.Series([3, 1], dtype=object), m.Series([2.5], dtype=object)], ignore_index=True),
+    "concat object and int64": lambda m: m.concat([m.Series([3], dtype=object), m.Series([4])], ignore_index=True),
+    "concat int64": lambda m: m.concat([m.Series([3]), m.Series([4])], ignore_index=True),
+    "where text": lambda m: m.Series(["a", None], dtype=object).where(m.Series([True, False]), "z"),
+    "where int64": lambda m: m.Series([1, 2]).where(m.Series([True, False]), 0),
+}
+
+
+def _7v4wf_cell(v: Any) -> Any:
+    if v is None or (isinstance(v, float) and v != v):
+        return "missing"
+    return (type(v).__name__, v)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_7V4WF_OBJECT_OPS))
+def test_object_column_ops_keep_values_like_pandas_7v4wf(case: str) -> None:
+    def run(m: Any) -> Any:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            try:
+                out = _7V4WF_OBJECT_OPS[case](m)
+            except Exception as error:  # noqa: BLE001
+                return type(error).__name__
+        future = sorted({w.category.__name__ for w in caught if "object dtype is deprecated" in str(w.message)})
+        return [future, str(out.dtype), [_7v4wf_cell(v) for v in out.tolist()]]
+
+    assert run(fpd) == run(pd)
+
+
 # br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.24: fillna / ffill /
 # bfill of an object column keep the fill and the values as they are (a fill
 # was made text, and a column of numbers stringified), then downcast as pandas

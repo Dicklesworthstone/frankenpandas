@@ -11408,6 +11408,46 @@ fn category_key(category: &Scalar) -> ScalarKey<'_> {
     )
 }
 
+/// The order of what is left of an unordered categorical's categories after
+/// a removal, as pandas takes it (`Index.difference`, sorted by its
+/// `safe_sort`): numbers (bools, ints, floats) by value, then text by text,
+/// and categories of one other kind by value - positions into `categories`.
+/// `None` for any other mix (pandas' sort fails on it and keeps it).
+fn safe_sorted_category_positions(categories: &[Scalar]) -> Option<Vec<usize>> {
+    #[allow(clippy::cast_precision_loss)] // only ordering int vs float
+    let number = |value: &Scalar| match value {
+        Scalar::Bool(flag) => Some(f64::from(u8::from(*flag))),
+        Scalar::Int64(int) => Some(*int as f64),
+        Scalar::Float64(float) => Some(*float),
+        _ => None,
+    };
+    let numbers_and_text = categories
+        .iter()
+        .all(|category| number(category).is_some() || matches!(category, Scalar::Utf8(_)));
+    let one_kind = categories.first().is_some_and(|first| {
+        categories
+            .iter()
+            .all(|category| std::mem::discriminant(category) == std::mem::discriminant(first))
+    });
+    if !numbers_and_text && !one_kind {
+        return None;
+    }
+    let mut order: Vec<usize> = (0..categories.len()).collect();
+    order.sort_by(|&a, &b| {
+        let (a, b) = (&categories[a], &categories[b]);
+        match (a, b) {
+            (Scalar::Int64(x), Scalar::Int64(y)) => x.cmp(y),
+            _ => match (number(a), number(b)) {
+                (Some(x), Some(y)) => x.total_cmp(&y),
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => compare_scalars_with_na_position(a, b, true, false),
+            },
+        }
+    });
+    Some(order)
+}
+
 fn categorical_categories_match(left: &CategoricalMetadata, right: &CategoricalMetadata) -> bool {
     left.categories.len() == right.categories.len()
         && left
@@ -11775,7 +11815,9 @@ impl Series {
             let column = Column::from_object_values(values);
             return Self::new(self.name.clone(), self.index.clone(), column);
         }
-        self.with_values_preserving_index(values)
+        // A nullable column - pandas' string too - stays in its dtype (a
+        // string ffill came back object; br-frankenpandas-7undg).
+        self.keeping_extension_dtype(self.with_values_preserving_index(values))
     }
 
     /// [`Self::diff`] of a nullable Int64 / Float64 / boolean Series:
@@ -14726,6 +14768,32 @@ impl Series {
     /// Matches `pd.Series.combine_first(other)`: uses outer alignment,
     /// then for each position takes self's value if non-null, else other's.
     pub fn combine_first(&self, other: &Self) -> Result<Self, FrameError> {
+        let mut combined = self.combine_first_storage(other)?;
+        // pandas' common dtype keeps a nullable side nullable: an Int64 or
+        // Float64 Series combined with numbers is Int64 / Float64 by the
+        // result's kind (Int64 with float64 is Float64), and two Series of
+        // one nullable dtype (boolean, string) stay in it - the result came
+        // back numpy int64 / float64, bool or object (br-frankenpandas-7undg).
+        let nullable = match (self.column.dtype(), combined.column.dtype()) {
+            (DType::Int64Nullable | DType::Float64Nullable, DType::Float64) => {
+                Some(DType::Float64Nullable)
+            }
+            (DType::Int64Nullable, DType::Int64) => Some(DType::Int64Nullable),
+            _ => None,
+        };
+        if let Some(dtype) = nullable {
+            combined.column = combined.column.astype(dtype)?;
+            return Ok(combined);
+        }
+        if other.column.dtype() == self.column.dtype()
+            && other.column.is_pandas_string() == self.column.is_pandas_string()
+        {
+            return self.keeping_extension_dtype(Ok(combined));
+        }
+        Ok(combined)
+    }
+
+    fn combine_first_storage(&self, other: &Self) -> Result<Self, FrameError> {
         // pandas combine_first uses the SORTED union of the two indexes when
         // they differ (Index.union sorts), but keeps the original order when the
         // indexes are identical. align_union_plan's unique path returns the
@@ -24353,6 +24421,13 @@ impl Series {
         // the result keeps its dtype and narrow width, as pandas': a mode
         // that is the missing value was Int64, an empty one object
         // (br-frankenpandas-5thmj).
+        // An object column's modes stay as they are: Column::new over text
+        // storage stringified a column of numbers (Series([1, 1, 2],
+        // dtype=object).mode() was ['1']; br-frankenpandas-7v4wf).
+        if self.column.dtype() == DType::Utf8 && !self.column.is_pandas_string() {
+            let column = Column::from_object_values(modes);
+            return Self::new(self.name.clone(), Index::new(labels), column);
+        }
         let column = match Column::new(self.column.dtype(), modes.clone()) {
             Ok(column) => match self.column.width() {
                 Some(width) => column.cast_to_width(width, self.column.dtype().is_nullable())?,
@@ -29516,6 +29591,13 @@ impl Series {
     ///
     /// Matches the array-like `repeats` form of `pd.Series.repeat(repeats)`.
     pub fn repeat_by(&self, repeats: &[usize]) -> Result<Self, FrameError> {
+        // In this Series' nullable dtype, as pandas' repeat keeps it (an
+        // Int64 one came back an int64 column holding <NA>;
+        // br-frankenpandas-7undg).
+        self.keeping_extension_dtype(self.repeat_by_storage(repeats))
+    }
+
+    fn repeat_by_storage(&self, repeats: &[usize]) -> Result<Self, FrameError> {
         if repeats.len() != self.len() {
             return Err(FrameError::CompatibilityRejected(format!(
                 "repeat_by() requires {} repeat counts, got {}",
@@ -34615,31 +34697,37 @@ impl Series {
     /// two categories (br-frankenpandas-7zs0a), [1, 2.5] an object mix
     /// (br-frankenpandas-yrjrc).
     fn first_seen_codes(values: &[Scalar]) -> Result<(Vec<i32>, Vec<Scalar>), FrameError> {
+        // Mixed ints and floats are told apart as the floats they become:
+        // 2**53 and 2**53 + 1 beside 0.5 are one category, where keying the
+        // ints first made two holding one float (br-frankenpandas-1r2sj).
+        let present = || values.iter().filter(|value| !value.is_missing());
+        let floats = present().any(|value| matches!(value, Scalar::Float64(_)))
+            && present().all(|value| matches!(value, Scalar::Int64(_) | Scalar::Float64(_)));
+        let float_key =
+            |float: f64| ScalarKey::FloatBits(if float == 0.0 { 0.0_f64 } else { float }.to_bits());
         let mut positions: FxHashMap<ScalarKey<'_>, i32> = FxHashMap::default();
         let mut categories: Vec<Scalar> = Vec::new();
         let mut codes = Vec::with_capacity(values.len());
-        let (mut floats, mut numbers) = (false, true);
         for value in values {
             if value.is_missing() {
                 codes.push(-1);
                 continue;
             }
-            floats |= matches!(value, Scalar::Float64(_));
-            numbers &= matches!(value, Scalar::Int64(_) | Scalar::Float64(_));
             let next = i32::try_from(categories.len())
                 .map_err(|_| FrameError::CompatibilityRejected("too many categories".to_owned()))?;
-            let code = *positions.entry(category_key(value)).or_insert_with(|| {
-                categories.push(value.clone());
+            let key = match value {
+                Scalar::Int64(int) if floats => float_key(*int as f64),
+                Scalar::Float64(float) if floats => float_key(*float),
+                _ => category_key(value),
+            };
+            let code = *positions.entry(key).or_insert_with(|| {
+                categories.push(match value {
+                    Scalar::Int64(int) if floats => Scalar::Float64(*int as f64),
+                    _ => value.clone(),
+                });
                 next
             });
             codes.push(code);
-        }
-        if floats && numbers {
-            for category in &mut categories {
-                if let Scalar::Int64(value) = *category {
-                    *category = Scalar::Float64(value as f64);
-                }
-            }
         }
         Ok((codes, categories))
     }
@@ -55522,17 +55610,39 @@ impl CategoricalAccessor<'_> {
     /// Matches `pd.Series.cat.remove_categories(removals)`.
     /// Values in removed categories become missing (-1).
     pub fn remove_categories(&self, removals: &[Scalar]) -> Result<Series, FrameError> {
-        let removal_set: FxHashSet<ScalarKey<'_>> =
-            removals.iter().map(scalar_key_allow_missing).collect();
+        // A removal matches its category by pandas' equality (1 == 1.0;
+        // br-frankenpandas-1r2sj).
+        let removal_set: FxHashSet<ScalarKey<'_>> = removals.iter().map(category_key).collect();
 
         // Build new categories excluding removals.
         let mut new_categories = Vec::new();
         let mut remap: Vec<i64> = vec![-1; self.meta.categories.len()];
         for (old_code, cat) in self.meta.categories.iter().enumerate() {
-            if !removal_set.contains(&scalar_key_allow_missing(cat)) {
+            if !removal_set.contains(&category_key(cat)) {
                 remap[old_code] = new_categories.len() as i64;
                 new_categories.push(cat.clone());
             }
+        }
+        // pandas takes what is left of an unordered categorical's categories
+        // sorted (Index.difference); an ordered one, or nothing removed,
+        // keeps their order (it kept the order).
+        if !self.meta.ordered
+            && removals.iter().any(|removal| !removal.is_missing())
+            && let Some(order) = safe_sorted_category_positions(&new_categories)
+        {
+            let mut rank = vec![0_i64; order.len()];
+            for (new, &kept) in order.iter().enumerate() {
+                rank[kept] = new as i64;
+            }
+            for code in &mut remap {
+                if let Ok(kept) = usize::try_from(*code) {
+                    *code = rank[kept];
+                }
+            }
+            new_categories = order
+                .into_iter()
+                .map(|kept| new_categories[kept].clone())
+                .collect();
         }
 
         // Remap codes.
@@ -55557,14 +55667,11 @@ impl CategoricalAccessor<'_> {
                 self.meta.categories.len()
             )));
         }
-        let old_set: FxHashSet<ScalarKey<'_>> = self
-            .meta
-            .categories
-            .iter()
-            .map(scalar_key_allow_missing)
-            .collect();
-        let new_set: FxHashSet<ScalarKey<'_>> =
-            new_order.iter().map(scalar_key_allow_missing).collect();
+        // Categories compare by pandas' equality (1 == 1.0;
+        // br-frankenpandas-1r2sj).
+        let old_set: FxHashSet<ScalarKey<'_>> =
+            self.meta.categories.iter().map(category_key).collect();
+        let new_set: FxHashSet<ScalarKey<'_>> = new_order.iter().map(category_key).collect();
         if old_set != new_set {
             return Err(FrameError::CompatibilityRejected(
                 "reorder_categories: new order must contain the same categories".to_owned(),
@@ -55574,7 +55681,7 @@ impl CategoricalAccessor<'_> {
         // Build old-value -> new-code mapping.
         let mut new_code_map: HashMap<ScalarKey<'_>, i64> = HashMap::new();
         for (i, cat) in new_order.iter().enumerate() {
-            new_code_map.insert(scalar_key_allow_missing(cat), i as i64);
+            new_code_map.insert(category_key(cat), i as i64);
         }
 
         // Remap codes.
@@ -55585,7 +55692,7 @@ impl CategoricalAccessor<'_> {
                 usize::try_from(code)
                     .ok()
                     .and_then(|c| self.meta.categories.get(c))
-                    .and_then(|cat| new_code_map.get(&scalar_key_allow_missing(cat)).copied())
+                    .and_then(|cat| new_code_map.get(&category_key(cat)).copied())
                     .unwrap_or(-1)
             })
             .collect();
@@ -55598,10 +55705,13 @@ impl CategoricalAccessor<'_> {
     /// Matches `pd.Series.cat.set_categories(new_categories)`.
     /// Values not in new_categories become missing (-1).
     pub fn set_categories(&self, new_categories: Vec<Scalar>) -> Result<Series, FrameError> {
-        // Build old-value -> new-code mapping.
+        // Build old-value -> new-code mapping, a category matching by pandas'
+        // equality (1 == 1.0): categories made floats by an int / float
+        // mix met int replacements under exact keys and lost their values
+        // (br-frankenpandas-1r2sj).
         let mut new_code_map: HashMap<ScalarKey<'_>, i64> = HashMap::new();
         for (i, cat) in new_categories.iter().enumerate() {
-            new_code_map.insert(scalar_key_allow_missing(cat), i as i64);
+            new_code_map.insert(category_key(cat), i as i64);
         }
 
         // Remap each old code through: old_code -> old_category -> new_code.
@@ -55612,7 +55722,7 @@ impl CategoricalAccessor<'_> {
                 usize::try_from(code)
                     .ok()
                     .and_then(|c| self.meta.categories.get(c))
-                    .and_then(|cat| new_code_map.get(&scalar_key_allow_missing(cat)).copied())
+                    .and_then(|cat| new_code_map.get(&category_key(cat)).copied())
                     .unwrap_or(-1)
             })
             .collect();
@@ -125612,24 +125722,101 @@ mod tests {
         );
     }
 
-    /// `ewm(span=3).mean()` over a gap: the gap still DECAYS the prior weight,
-    /// it does not restart or average.
-    ///
-    /// MEASURED, live pandas 2.2.3, on `pd.Series([1.0, None, 3.0, 4.0, 5.0])`
-    /// with `span=3` (so `alpha = 2/(span+1) = 0.5`):
-    ///
-    /// ```text
-    /// .ewm(span=3).mean()                  -> [1.0, 1.0, 2.6, 3.461538, 4.310345]
-    /// .ewm(span=3, ignore_na=True).mean()  -> [1.0, 1.0, 2.333333, 3.285714, 4.2]
-    /// ```
-    ///
-    /// The default is `ignore_na=False`, and index 2 is the discriminator. Hand
-    /// check: the surviving observations are x0 at t=0 and x2 at t=2, so with
-    /// two periods elapsed x0 carries weight `(1-a)^2 = 0.25`:
-    /// `(0.25*1 + 1*3) / (0.25 + 1) = 2.6`. Under `ignore_na=True` the gap is
-    /// skipped entirely and x0 weighs `(1-a)^1 = 0.5`, giving `2.333…`. An
-    /// unweighted `(1+3)/2 = 2.0` is neither, and is the value the fixture
-    /// pinned. (br-frankenpandas-fixture-divergence-triage-9s0c4)
+    #[test]
+    fn nullable_dtypes_survive_repeat_combine_first_and_fills_7undg() {
+        // repeat / combine_first / ffill keep a Series' nullable dtype, an
+        // Int64 combined with float64 is Float64 (pandas' common dtype), and
+        // pandas' string stays string (br-frankenpandas-7undg).
+        let index = || Index::from_range(0, 3, 1);
+        let ints = Series::new(
+            "i",
+            index(),
+            Column::new(
+                DType::Int64Nullable,
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Int64(3),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ints.repeat(2).unwrap().dtype(), DType::Int64Nullable);
+        assert_eq!(
+            ints.combine_first(&ints).unwrap().dtype(),
+            DType::Int64Nullable
+        );
+        let floats =
+            Series::new("f", index(), Column::from_f64_values(vec![9.5, 2.5, 7.5])).unwrap();
+        let promoted = ints.combine_first(&floats).unwrap();
+        assert_eq!(promoted.dtype(), DType::Float64Nullable);
+        assert_eq!(promoted.values()[1], Scalar::Float64(2.5));
+        let text = Series::new(
+            "t",
+            index(),
+            Column::new(
+                DType::Utf8,
+                vec![
+                    Scalar::Utf8("a".to_owned()),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Utf8("c".to_owned()),
+                ],
+            )
+            .unwrap()
+            .as_pandas_string(),
+        )
+        .unwrap();
+        assert!(text.ffill(None).unwrap().column().is_pandas_string());
+        assert!(text.repeat(2).unwrap().column().is_pandas_string());
+        // NEGATIVE: a numpy int64 Series repeats as numpy int64.
+        let plain = Series::from_values(
+            "p",
+            (0..3_i64).map(IndexLabel::Int64).collect(),
+            vec![Scalar::Int64(4), Scalar::Int64(5), Scalar::Int64(6)],
+        )
+        .unwrap();
+        assert_eq!(plain.repeat(2).unwrap().dtype(), DType::Int64);
+    }
+
+    #[test]
+    fn object_mode_keeps_its_values_7v4wf() {
+        // The modes of an object column of numbers are those numbers, the
+        // column object - Column::new over text storage stringified them
+        // (br-frankenpandas-7v4wf).
+        let objects = Series::new(
+            "o",
+            Index::from_range(0, 3, 1),
+            Column::from_object_values(vec![
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Float64(2.5),
+            ]),
+        )
+        .unwrap();
+        let modes = objects.mode().unwrap();
+        assert_eq!(modes.column().dtype(), DType::Utf8);
+        assert_eq!(modes.values(), &[Scalar::Int64(1)]);
+        // NEGATIVE: an int64 column's modes stay int64, a text column's text.
+        let ints = Series::from_values(
+            "i",
+            (0..3_i64).map(IndexLabel::Int64).collect(),
+            vec![Scalar::Int64(4), Scalar::Int64(4), Scalar::Int64(2)],
+        )
+        .unwrap();
+        assert_eq!(ints.mode().unwrap().column().dtype(), DType::Int64);
+        let text = Series::from_values(
+            "t",
+            (0..2_i64).map(IndexLabel::Int64).collect(),
+            vec![Scalar::Utf8("b".to_owned()), Scalar::Utf8("b".to_owned())],
+        )
+        .unwrap();
+        assert_eq!(
+            text.mode().unwrap().values(),
+            &[Scalar::Utf8("b".to_owned())]
+        );
+    }
+
     #[test]
     fn object_fills_keep_their_values_fvsao24() {
         // ffill / bfill / fillna(limit=) of an object column keep it object
@@ -125683,6 +125870,24 @@ mod tests {
         );
     }
 
+    /// `ewm(span=3).mean()` over a gap: the gap still DECAYS the prior weight,
+    /// it does not restart or average.
+    ///
+    /// MEASURED, live pandas 2.2.3, on `pd.Series([1.0, None, 3.0, 4.0, 5.0])`
+    /// with `span=3` (so `alpha = 2/(span+1) = 0.5`):
+    ///
+    /// ```text
+    /// .ewm(span=3).mean()                  -> [1.0, 1.0, 2.6, 3.461538, 4.310345]
+    /// .ewm(span=3, ignore_na=True).mean()  -> [1.0, 1.0, 2.333333, 3.285714, 4.2]
+    /// ```
+    ///
+    /// The default is `ignore_na=False`, and index 2 is the discriminator. Hand
+    /// check: the surviving observations are x0 at t=0 and x2 at t=2, so with
+    /// two periods elapsed x0 carries weight `(1-a)^2 = 0.25`:
+    /// `(0.25*1 + 1*3) / (0.25 + 1) = 2.6`. Under `ignore_na=True` the gap is
+    /// skipped entirely and x0 weighs `(1-a)^1 = 0.5`, giving `2.333…`. An
+    /// unweighted `(1+3)/2 = 2.0` is neither, and is the value the fixture
+    /// pinned. (br-frankenpandas-fixture-divergence-triage-9s0c4)
     #[test]
     fn ewm_mean_decays_the_prior_weight_across_a_gap() {
         let subject = Series::from_values(
@@ -246987,6 +247192,81 @@ mod typed_index_labels_9m9zf {
                 .add_categories(vec![Scalar::Bool(true)])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn category_editors_compare_numbers_1r2sj() {
+        // After an int / float mix made a categorical's categories floats,
+        // set / remove / reorder_categories by ints match them by pandas'
+        // equality and keep the values; mixed ints and floats are told
+        // apart as the floats they become (br-frankenpandas-1r2sj).
+        let floated =
+            Series::from_categorical("c", vec![Scalar::Int64(3), Scalar::Int64(1)], false)
+                .unwrap()
+                .cat()
+                .unwrap()
+                .add_categories(vec![Scalar::Float64(2.5)])
+                .unwrap();
+        let reset = floated
+            .cat()
+            .unwrap()
+            .set_categories(vec![Scalar::Int64(1), Scalar::Int64(3)])
+            .unwrap();
+        assert_eq!(reset.values(), &[Scalar::Int64(3), Scalar::Int64(1)]);
+        let removed = floated
+            .cat()
+            .unwrap()
+            .remove_categories(&[Scalar::Int64(1)])
+            .unwrap();
+        assert!(removed.values()[1].is_missing());
+        assert_eq!(removed.values()[0], Scalar::Float64(3.0));
+        // What is left of an unordered categorical's categories is sorted,
+        // as pandas' Index.difference takes it; an ordered one keeps them.
+        assert_eq!(
+            removed.cat().unwrap().categories(),
+            &[Scalar::Float64(2.5), Scalar::Float64(3.0)]
+        );
+        let kept = floated
+            .cat()
+            .unwrap()
+            .as_ordered()
+            .cat()
+            .unwrap()
+            .remove_categories(&[Scalar::Int64(1)])
+            .unwrap();
+        assert_eq!(
+            kept.cat().unwrap().categories(),
+            &[Scalar::Float64(3.0), Scalar::Float64(2.5)]
+        );
+        let reordered = floated
+            .cat()
+            .unwrap()
+            .reorder_categories(vec![
+                Scalar::Float64(2.5),
+                Scalar::Int64(3),
+                Scalar::Int64(1),
+            ])
+            .unwrap();
+        assert_eq!(reordered.values()[0], Scalar::Float64(3.0));
+        let big = 1_i64 << 53;
+        let mixed = Series::from_categorical(
+            "m",
+            vec![
+                Scalar::Int64(big),
+                Scalar::Int64(big + 1),
+                Scalar::Float64(0.5),
+            ],
+            false,
+        )
+        .unwrap();
+        assert_eq!(mixed.cat().unwrap().categories().len(), 2);
+        // NEGATIVE: a value set_categories drops is missing.
+        let dropped = floated
+            .cat()
+            .unwrap()
+            .set_categories(vec![Scalar::Int64(3)])
+            .unwrap();
+        assert!(dropped.values()[1].is_missing());
     }
 
     #[test]

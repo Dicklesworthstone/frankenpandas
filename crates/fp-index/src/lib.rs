@@ -16751,6 +16751,57 @@ fn category_label_key(label: &IndexLabel) -> CategoryLabelKey<'_> {
     })
 }
 
+/// pandas' `safe_sort` order: numbers (bools, ints, floats) by value first,
+/// then strings, then any other kind in its own order.
+fn safe_sort_cmp(a: &IndexLabel, b: &IndexLabel) -> std::cmp::Ordering {
+    fn number(label: &IndexLabel) -> Option<f64> {
+        match label {
+            IndexLabel::Bool(value) => Some(f64::from(u8::from(*value))),
+            #[allow(clippy::cast_precision_loss)] // only ordering int vs float
+            IndexLabel::Int64(value) => Some(*value as f64),
+            IndexLabel::Float64(value) => Some(value.0),
+            _ => None,
+        }
+    }
+    fn kind(label: &IndexLabel) -> u8 {
+        match label {
+            IndexLabel::Bool(_) | IndexLabel::Int64(_) | IndexLabel::Float64(_) => 0,
+            IndexLabel::Utf8(_) => 1,
+            _ => 2,
+        }
+    }
+    match (a, b) {
+        (IndexLabel::Int64(x), IndexLabel::Int64(y)) => x.cmp(y),
+        _ => match (number(a), number(b)) {
+            (Some(x), Some(y)) => x.total_cmp(&y).then_with(|| a.cmp(b)),
+            _ => kind(a).cmp(&kind(b)).then_with(|| a.cmp(b)),
+        },
+    }
+}
+
+/// What is left of an unordered categorical's categories after a removal,
+/// as pandas takes it (`Index.difference`, sorted by its `safe_sort`):
+/// numbers and strings, or labels of one kind, sorted; any other mix as it
+/// is (pandas' sort fails on it and keeps it).
+fn safe_sort_categories(categories: &mut [IndexLabel]) {
+    let sortable = categories.iter().all(|category| {
+        matches!(
+            category,
+            IndexLabel::Bool(_)
+                | IndexLabel::Int64(_)
+                | IndexLabel::Float64(_)
+                | IndexLabel::Utf8(_)
+        )
+    }) || categories.first().is_some_and(|first| {
+        categories
+            .iter()
+            .all(|category| std::mem::discriminant(category) == std::mem::discriminant(first))
+    });
+    if sortable {
+        categories.sort_by(safe_sort_cmp);
+    }
+}
+
 impl CategoricalIndex {
     fn category_codes_for(labels: &[IndexLabel], categories: &[IndexLabel]) -> Option<Vec<usize>> {
         let map = {
@@ -17953,43 +18004,52 @@ impl CategoricalIndex {
     /// category, and a label of a removed one becomes NaN (it was refused,
     /// no label could be missing; lztvp).
     pub fn remove_categories(&self, removals: &[IndexLabel]) -> Result<Self, IndexError> {
-        let category_set: FxHashSet<&IndexLabel> = self.categories.iter().collect();
+        // A removal names its category by pandas' equality (1 == 1.0;
+        // br-frankenpandas-1r2sj).
+        let category_set: FxHashSet<CategoryLabelKey<'_>> =
+            self.categories.iter().map(category_label_key).collect();
         for cat in removals {
-            if !category_set.contains(cat) {
+            if !category_set.contains(&category_label_key(cat)) {
                 return Err(IndexError::InvalidArgument(format!(
                     "remove_categories: {cat:?} is not a category"
                 )));
             }
         }
-        let removals_set: FxHashSet<&IndexLabel> = removals.iter().collect();
-        let categories: Vec<IndexLabel> = self
+        let removals_set: FxHashSet<CategoryLabelKey<'_>> =
+            removals.iter().map(category_label_key).collect();
+        let mut categories: Vec<IndexLabel> = self
             .categories
             .iter()
-            .filter(|cat| !removals_set.contains(cat))
+            .filter(|cat| !removals_set.contains(&category_label_key(cat)))
             .cloned()
             .collect();
+        // pandas takes what is left of an unordered index's categories
+        // sorted (Index.difference); an ordered one, or nothing removed,
+        // keeps their order (it kept the order).
+        if !self.ordered && removals.iter().any(|removal| !removal.is_missing()) {
+            safe_sort_categories(&mut categories);
+        }
         Ok(self.recategorized(categories, self.ordered))
     }
 
-    /// This index over `categories`: a label no longer among them is NaN,
-    /// as pandas' `set_categories` / `remove_categories`.
+    /// This index over `categories`: each label the category it equals by
+    /// pandas' equality (1 == 1.0), so labels follow categories made floats
+    /// or ints - float labels met int categories under exact equality and
+    /// went missing (br-frankenpandas-1r2sj) - and a label no longer among
+    /// them NaN, as pandas' `set_categories` / `remove_categories`.
     fn recategorized(&self, categories: Vec<IndexLabel>, ordered: bool) -> Self {
-        let floats = float_categories(&categories);
-        let kept: FxHashSet<&IndexLabel> = categories.iter().collect();
+        let kept: FxHashMap<CategoryLabelKey<'_>, &IndexLabel> = categories
+            .iter()
+            .map(|category| (category_label_key(category), category))
+            .collect();
         let labels: Vec<IndexLabel> = self
             .labels
             .iter()
             .map(|label| {
-                let label = if floats {
-                    floated_label(label.clone())
-                } else {
-                    label.clone()
-                };
-                if kept.contains(&label) {
-                    label
-                } else {
-                    IndexLabel::Null(fp_types::NullKind::NaN)
-                }
+                kept.get(&category_label_key(label))
+                    .map_or(IndexLabel::Null(fp_types::NullKind::NaN), |category| {
+                        (*category).clone()
+                    })
             })
             .collect();
         drop(kept);
@@ -18082,26 +18142,26 @@ impl CategoricalIndex {
                 new.len()
             )));
         }
-        let existing: FxHashSet<&IndexLabel> = self.categories.iter().collect();
+        // Categories compare by pandas' equality (1 == 1.0), each label then
+        // the category it equals (br-frankenpandas-1r2sj).
+        let existing: FxHashSet<CategoryLabelKey<'_>> =
+            self.categories.iter().map(category_label_key).collect();
         for cat in &new {
-            if !existing.contains(cat) {
+            if !existing.contains(&category_label_key(cat)) {
                 return Err(IndexError::InvalidArgument(format!(
                     "reorder_categories: {cat:?} is not an existing category"
                 )));
             }
         }
-        let new_set: FxHashSet<&IndexLabel> = new.iter().collect();
+        let new_set: FxHashSet<CategoryLabelKey<'_>> = new.iter().map(category_label_key).collect();
         if new_set.len() != new.len() {
             return Err(IndexError::InvalidArgument(
                 "reorder_categories: new categories contain duplicates".to_owned(),
             ));
         }
-        Ok(Self::from_parts(
-            self.labels.clone(),
-            new,
-            ordered,
-            self.name.clone(),
-        ))
+        drop(existing);
+        drop(new_set);
+        Ok(self.recategorized(new, ordered))
     }
 
     /// Convert to a flat [`Index`] of utf8 labels, matching
@@ -21408,35 +21468,13 @@ impl MultiIndex {
     /// the distinct non-missing labels, numbers (bools, ints, floats) by
     /// value first, then strings, then any other kind in its own order.
     fn level_catalog(level: &[IndexLabel]) -> Vec<IndexLabel> {
-        fn number(label: &IndexLabel) -> Option<f64> {
-            match label {
-                IndexLabel::Bool(value) => Some(f64::from(u8::from(*value))),
-                #[allow(clippy::cast_precision_loss)] // only ordering int vs float
-                IndexLabel::Int64(value) => Some(*value as f64),
-                IndexLabel::Float64(value) => Some(value.0),
-                _ => None,
-            }
-        }
-        fn kind(label: &IndexLabel) -> u8 {
-            match label {
-                IndexLabel::Bool(_) | IndexLabel::Int64(_) | IndexLabel::Float64(_) => 0,
-                IndexLabel::Utf8(_) => 1,
-                _ => 2,
-            }
-        }
         let mut seen = FxHashMap::<&IndexLabel, ()>::default();
         let mut catalog: Vec<IndexLabel> = level
             .iter()
             .filter(|label| !label.is_missing() && seen.insert(label, ()).is_none())
             .cloned()
             .collect();
-        catalog.sort_by(|a, b| match (a, b) {
-            (IndexLabel::Int64(x), IndexLabel::Int64(y)) => x.cmp(y),
-            _ => match (number(a), number(b)) {
-                (Some(x), Some(y)) => x.total_cmp(&y).then_with(|| a.cmp(b)),
-                _ => kind(a).cmp(&kind(b)).then_with(|| a.cmp(b)),
-            },
-        });
+        catalog.sort_by(safe_sort_cmp);
         catalog
     }
 
@@ -38773,6 +38811,49 @@ mod tests {
         );
         assert!(super::CategoricalIndex::with_categories(vec!["a"], vec![nan()], false).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn categorical_index_editors_compare_numbers_1r2sj() {
+        // A CategoricalIndex whose categories an int / float mix made
+        // floats takes int categories back by pandas' equality: its labels
+        // follow them (they went missing), and an int removal names its
+        // float category (br-frankenpandas-1r2sj).
+        use super::CategoricalIndex;
+        let float = |value: f64| IndexLabel::Float64(OrderedF64(value));
+        let floated =
+            CategoricalIndex::from_values(vec![IndexLabel::Int64(3), IndexLabel::Int64(1)], false)
+                .add_categories(vec![float(2.5)])
+                .unwrap();
+        let reset = floated
+            .set_categories(vec![IndexLabel::Int64(1), IndexLabel::Int64(3)])
+            .unwrap();
+        assert_eq!(
+            reset.labels(),
+            &[IndexLabel::Int64(3), IndexLabel::Int64(1)]
+        );
+        let removed = floated.remove_categories(&[IndexLabel::Int64(1)]).unwrap();
+        assert_eq!(removed.labels()[0], float(3.0));
+        assert!(removed.labels()[1].is_missing());
+        // What is left of an unordered index's categories is sorted, as
+        // pandas' Index.difference takes it; an ordered one keeps them.
+        assert_eq!(removed.categories(), &[float(2.5), float(3.0)]);
+        let kept = floated
+            .as_ordered()
+            .remove_categories(&[IndexLabel::Int64(1)])
+            .unwrap();
+        assert_eq!(kept.categories(), &[float(3.0), float(2.5)]);
+        let reordered = floated
+            .reorder_categories(
+                vec![IndexLabel::Int64(1), float(2.5), IndexLabel::Int64(3)],
+                false,
+            )
+            .unwrap();
+        assert_eq!(reordered.labels().len(), 2);
+        assert!(!reordered.labels()[0].is_missing());
+        // NEGATIVE: a label set_categories drops is NaN.
+        let dropped = floated.set_categories(vec![IndexLabel::Int64(3)]).unwrap();
+        assert!(dropped.labels()[1].is_missing());
     }
 
     #[test]
