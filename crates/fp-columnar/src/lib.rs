@@ -23302,6 +23302,34 @@ impl Column {
         // alone still yields Int64 where pandas has float64 and cannot be made
         // green. Blocked on br-frankenpandas-9ooer (oracle dtype chooser) and
         // the int64->float64-on-null construction divergence.
+        // An object column (Utf8 storage that is not pandas' `string`) holds
+        // any value: nothing missing is nothing to fill, and a fill that is
+        // not text is kept as it is, the column rebuilt without coercion, as
+        // pandas' object array holds them - the fill was cast to text and
+        // Column::new stringified a column of numbers
+        // (Series([1, None], dtype=object).fillna(0) was [1, '0'] and
+        // Series([1, 2], dtype=object).fillna(0) ['1', '2'];
+        // br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.24).
+        if self.dtype == DType::Utf8 && !self.pandas_string && self.categorical.is_none() {
+            if !self.has_any_missing() {
+                return Ok(self.clone());
+            }
+            if !matches!(fill_value, Scalar::Utf8(_)) {
+                let values = self
+                    .values
+                    .iter()
+                    .map(|value| {
+                        if value.is_missing() {
+                            fill_value.clone()
+                        } else {
+                            value.clone()
+                        }
+                    })
+                    .collect();
+                return Ok(Self::from_object_values(values));
+            }
+        }
+
         let cast_fill = cast_scalar(fill_value, self.dtype.clone())?;
 
         // Typed Float64 fast path (br-frankenpandas-e8vzt): fill every missing
@@ -45953,6 +45981,61 @@ mod tests {
             let result = col.fillna(&Scalar::Int64(0)).expect("fillna");
             assert_eq!(result.dtype(), DType::Int64);
             assert_eq!(result.values()[1], Scalar::Int64(0));
+        }
+
+        #[test]
+        fn fillna_of_an_object_column_keeps_its_values_fvsao24() {
+            // An object column (Utf8 storage, not pandas' string) holds any
+            // value: a fill that is not text stays itself and the numbers
+            // already there stay numbers; nothing missing is nothing filled
+            // (the fill was cast to '0' and a column of numbers stringified;
+            // br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.24).
+            let gaps = Column::from_object_values(vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(2),
+            ]);
+            let filled = gaps.fillna(&Scalar::Int64(0)).expect("fillna");
+            assert_eq!(filled.dtype(), DType::Utf8);
+            assert_eq!(
+                filled.values(),
+                &[Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(2)]
+            );
+            let float_fill = gaps.fillna(&Scalar::Float64(0.5)).expect("fillna");
+            assert_eq!(float_fill.values()[1], Scalar::Float64(0.5));
+            let text_fill = gaps.fillna(&Scalar::Utf8("z".to_owned())).expect("fillna");
+            assert_eq!(
+                text_fill.values(),
+                &[
+                    Scalar::Int64(1),
+                    Scalar::Utf8("z".to_owned()),
+                    Scalar::Int64(2)
+                ]
+            );
+            let whole = Column::from_object_values(vec![Scalar::Int64(1), Scalar::Int64(2)]);
+            assert_eq!(
+                whole.fillna(&Scalar::Int64(0)).expect("fillna").values(),
+                &[Scalar::Int64(1), Scalar::Int64(2)]
+            );
+            // NEGATIVE: a text column fills with text as before, and a
+            // numeric column still casts its fill to its dtype.
+            let text = Column::from_values(vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Null(NullKind::Null),
+            ])
+            .expect("text");
+            assert_eq!(
+                text.fillna(&Scalar::Utf8("z".to_owned()))
+                    .expect("fillna")
+                    .values(),
+                &[Scalar::Utf8("a".to_owned()), Scalar::Utf8("z".to_owned())]
+            );
+            let floats =
+                Column::from_values(vec![Scalar::Float64(1.5), Scalar::Null(NullKind::NaN)])
+                    .expect("floats");
+            let cast = floats.fillna(&Scalar::Int64(2)).expect("fillna");
+            assert_eq!(cast.dtype(), DType::Float64);
+            assert_eq!(cast.values()[1], Scalar::Float64(2.0));
         }
 
         #[test]
