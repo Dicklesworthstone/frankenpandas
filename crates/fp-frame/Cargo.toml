@@ -54,6 +54,7 @@ unicode-casefold = { workspace = true }
 unicode-normalization = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+rayon = { workspace = true }
 rustix = { workspace = true }
 
 [package.metadata.docs.rs]

@@ -15694,6 +15694,118 @@ impl Column {
         (data.len() == self.validity.len()).then_some((data, &self.validity))
     }
 
+    /// This column's nanoseconds as `target`, its buffer shared rather than
+    /// copied: a datetime (any zone) or timedelta column as int64 - a NaT
+    /// the i64::MIN in its buffer, a present int64, as
+    /// [`Self::as_temporal_nanos_with_validity`] reads it - or an all-valid
+    /// int64 one as a datetime (`target`'s zone) or timedelta. An int64
+    /// column holding i64::MIN is `None`: that value is NaT, missing, which
+    /// the Scalar cast marks. `None` too for any other cast, or a backing
+    /// with no buffer to share.
+    fn temporal_int64_retagged(&self, target: &DType) -> Option<Self> {
+        let len = self.len();
+        let values = match (&self.dtype, target) {
+            (DType::Datetime64 { .. } | DType::Timedelta64, DType::Int64) => match &self.values {
+                ScalarValues::LazyAllValidDatetime64 { data, .. } => {
+                    ScalarValues::lazy_all_valid_int64_arc(Arc::clone(data))
+                }
+                ScalarValues::LazyAllValidDatetime64Vec { data, .. }
+                | ScalarValues::LazyAllValidTimedelta64Vec { data, .. }
+                | ScalarValues::LazyNullableDatetime64 { data, .. }
+                | ScalarValues::LazyNullableTimedelta64 { data, .. } => {
+                    ScalarValues::LazyAllValidInt64Vec {
+                        data: Arc::clone(data),
+                        values: OnceLock::new(),
+                    }
+                }
+                ScalarValues::LazyI64ArcWindow {
+                    data, start, kind, ..
+                } if *kind != I64CellKind::Int64 => ScalarValues::lazy_i64_arc_window(
+                    Arc::clone(data),
+                    *start,
+                    len,
+                    I64CellKind::Int64,
+                ),
+                ScalarValues::Eager(_) => match &self.data {
+                    Some(ColumnData::Datetime64(data) | ColumnData::Timedelta64(data))
+                        if data.len() == len =>
+                    {
+                        ScalarValues::lazy_all_valid_int64_arc(Arc::clone(data))
+                    }
+                    _ => return None,
+                },
+                _ => return None,
+            },
+            (DType::Int64, DType::Datetime64 { .. } | DType::Timedelta64) => {
+                if self.as_i64_slice()?.contains(&i64::MIN) {
+                    return None;
+                }
+                let datetime = target.is_datetime();
+                let kind = if datetime {
+                    I64CellKind::Datetime64
+                } else {
+                    I64CellKind::Timedelta64
+                };
+                let shared = match (&self.values, &self.data) {
+                    (ScalarValues::LazyAllValidInt64 { data, .. }, _)
+                    | (ScalarValues::Eager(_), Some(ColumnData::Int64(data))) => {
+                        Some((Arc::clone(data), 0))
+                    }
+                    (
+                        ScalarValues::LazyI64ArcWindow {
+                            data,
+                            start,
+                            kind: I64CellKind::Int64,
+                            ..
+                        },
+                        _,
+                    ) => Some((Arc::clone(data), *start)),
+                    _ => None,
+                }
+                .filter(|(data, start)| {
+                    start.checked_add(len).is_some_and(|end| end <= data.len())
+                });
+                match (&self.values, shared) {
+                    (_, Some((data, 0))) if datetime && data.len() == len => {
+                        ScalarValues::lazy_all_valid_datetime64_arc(data)
+                    }
+                    (_, Some((data, start))) => {
+                        ScalarValues::lazy_i64_arc_window(data, start, len, kind)
+                    }
+                    (ScalarValues::LazyAllValidInt64Vec { data, .. }, None) if datetime => {
+                        ScalarValues::LazyAllValidDatetime64Vec {
+                            data: Arc::clone(data),
+                            values: OnceLock::new(),
+                        }
+                    }
+                    (ScalarValues::LazyAllValidInt64Vec { data, .. }, None) => {
+                        ScalarValues::LazyAllValidTimedelta64Vec {
+                            data: Arc::clone(data),
+                            values: OnceLock::new(),
+                        }
+                    }
+                    // Any other backing (a window, chunks, runs): one copy.
+                    (_, None) if datetime => {
+                        ScalarValues::lazy_all_valid_datetime64_owned(self.as_i64_slice()?.to_vec())
+                    }
+                    (_, None) => ScalarValues::lazy_all_valid_timedelta64_owned(
+                        self.as_i64_slice()?.to_vec(),
+                    ),
+                }
+            }
+            _ => return None,
+        };
+        Some(Self {
+            dtype: target.clone(),
+            values,
+            validity: ValidityMask::all_valid(len),
+            data: None,
+            categorical: None,
+            width: None,
+            pandas_string: false,
+        })
+    }
+
     /// Borrow a Period column's contiguous ordinal backing plus its uniform
     /// frequency when the column is all-valid.
     #[must_use]
@@ -30028,6 +30140,12 @@ impl Column {
             }
             return Ok(Self::from_utf8_contiguous(bytes, offsets));
         }
+        // The same nanoseconds under the other dtype, the buffer shared where
+        // the backing allows (int.astype('datetime64[ns]') a million rows
+        // 40.6 ms, pandas 0.21: a Scalar cast a row; br-frankenpandas-vk7y9).
+        if let Some(retagged) = self.temporal_int64_retagged(&target) {
+            return Ok(retagged);
+        }
         // A datetime (any zone) or timedelta column's int64 is its nanos, a
         // NaT the i64::MIN numpy holds it as - a present value, as pandas
         // returns it (each row was a Scalar cast, and a NaT a missing cell:
@@ -30035,7 +30153,7 @@ impl Column {
         if target == DType::Int64
             && let Some((data, _)) = self.as_temporal_nanos_with_validity()
         {
-            return Ok(Self::from_i64_values(data.to_vec()));
+            return Ok(Self::from_i64_values_owned(data.to_vec()));
         }
         let out: Vec<Scalar> = self
             .values
@@ -61967,6 +62085,78 @@ mod tests {
             // Integer-valued floats still coerce fine (1.0 -> 1).
             let ok = Column::new(DType::Int64, vec![Scalar::Float64(2.0)]).expect("integer float");
             assert_eq!(ok.values(), &[Scalar::Int64(2)]);
+        }
+
+        #[test]
+        fn temporal_and_int64_casts_share_the_nanos_vk7y9() {
+            let nanos = vec![0_i64, 1_700_000_000_000_000_000, -5, 86_400_000_000_000];
+            let datetime = Column::from_datetime64_values(nanos.clone());
+            let ints = datetime.astype(DType::Int64).expect("int64");
+            assert_eq!(ints.dtype(), DType::Int64);
+            assert_eq!(ints.as_i64_slice(), Some(nanos.as_slice()));
+            assert_eq!(ints.values()[1], Scalar::Int64(1_700_000_000_000_000_000));
+            // The datetime's own buffer, not a copy.
+            assert_eq!(
+                ints.as_i64_slice().map(<[i64]>::as_ptr),
+                datetime.as_datetime64_slice().map(<[i64]>::as_ptr)
+            );
+            // And back, under a zone: the same UTC nanoseconds.
+            let aware = ints.astype(DType::datetime64_tz("UTC")).expect("datetime");
+            assert_eq!(aware.dtype(), DType::datetime64_tz("UTC"));
+            assert_eq!(aware.as_datetime64_slice(), Some(nanos.as_slice()));
+            assert_eq!(aware.values()[3], Scalar::Datetime64(86_400_000_000_000));
+            assert!(aware.validity().all());
+            let deltas = ints.astype(DType::Timedelta64).expect("timedelta");
+            assert_eq!(deltas.dtype(), DType::Timedelta64);
+            assert_eq!(deltas.as_timedelta64_slice(), Some(nanos.as_slice()));
+            assert_eq!(deltas.values()[2], Scalar::Timedelta64(-5));
+            let deltas_ints = deltas.astype(DType::Int64).expect("int64");
+            assert_eq!(deltas_ints.as_i64_slice(), Some(nanos.as_slice()));
+
+            // A window keeps its offset: rows 1..3, not the buffer's first two.
+            let window = datetime
+                .take_contiguous_range(1, 2)
+                .astype(DType::Int64)
+                .expect("int64");
+            assert_eq!(window.as_i64_slice(), Some(&nanos[1..3]));
+            let window_back = ints
+                .take_contiguous_range(2, 2)
+                .astype(DType::datetime64_naive())
+                .expect("datetime");
+            assert_eq!(window_back.as_datetime64_slice(), Some(&nanos[2..4]));
+            assert_eq!(window_back.values()[0], Scalar::Datetime64(-5));
+
+            // NEGATIVE: an int64 i64::MIN is NaT, missing after the cast (a
+            // buffer shared as all-valid would call it present).
+            let with_min = Column::from_i64_values(vec![7, i64::MIN]);
+            let cast = with_min
+                .astype(DType::datetime64_naive())
+                .expect("datetime");
+            assert!(cast.validity().get(0));
+            assert!(!cast.validity().get(1));
+            assert!(cast.values()[1].is_missing());
+            let cast = with_min.astype(DType::Timedelta64).expect("timedelta");
+            assert!(!cast.validity().get(1));
+
+            // A NaT-holding datetime's int64 is i64::MIN, a present value.
+            let mut validity = ValidityMask::all_valid(3);
+            validity.set(1, false);
+            let with_nat = Column::from_datetime64_values_with_validity(vec![3, 4, 5], validity);
+            let ints = with_nat.astype(DType::Int64).expect("int64");
+            assert_eq!(ints.as_i64_slice(), Some([3, i64::MIN, 5].as_slice()));
+            assert!(ints.validity().all());
+
+            // A nullable int64 keeps the Scalar path: its gap is NaT.
+            let nullable = Column::new(
+                DType::Int64,
+                vec![Scalar::Int64(9), Scalar::Null(NullKind::Null)],
+            )
+            .expect("col");
+            let cast = nullable
+                .astype(DType::datetime64_naive())
+                .expect("datetime");
+            assert_eq!(cast.values()[0], Scalar::Datetime64(9));
+            assert!(cast.values()[1].is_missing());
         }
     }
 

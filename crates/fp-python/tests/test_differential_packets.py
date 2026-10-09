@@ -33654,3 +33654,245 @@ def test_replace_on_nan_holding_floats_like_pandas_e186m(case: str) -> None:
         return (dtypes, repr(got.to_numpy().tolist()))
 
     assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-41ma0 / bss5q.4: a wide pass on a host with several L3
+# domains runs on its domain's persistent worker pool. A forked child
+# (multiprocessing's default on Linux) inherits the pools but none of their
+# threads: it must spawn its own workers, not wait forever. NEGATIVE: the
+# child's answer equals the parent's, and pandas'.
+def _41ma0_child_shift(conn: Any) -> None:
+    frame = fpd.DataFrame(np.arange(1_000_000, dtype=float).reshape(1000, 1000))
+    conn.send(frame.shift(1).sum().sum())
+    conn.close()
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs fork")
+def test_forked_child_runs_wide_passes_41ma0() -> None:
+    import multiprocessing
+
+    frame = fpd.DataFrame(np.arange(1_000_000, dtype=float).reshape(1000, 1000))
+    expected = frame.shift(1).sum().sum()  # the parent's pools are built here
+    context = multiprocessing.get_context("fork")
+    parent_end, child_end = context.Pipe()
+    child = context.Process(target=_41ma0_child_shift, args=(child_end,))
+    child.start()
+    child.join(timeout=60)
+    if child.is_alive():
+        child.kill()
+        pytest.fail("the forked child hung on a wide pass")
+    assert child.exitcode == 0
+    assert parent_end.recv() == expected
+    pd_frame = pd.DataFrame(np.arange(1_000_000, dtype=float).reshape(1000, 1000))
+    assert expected == pd_frame.shift(1).sum().sum()
+
+
+# br-frankenpandas-vk7y9: astype between int64 and datetime64[ns] (naive or
+# zoned) / timedelta64[ns] reads the same nanoseconds, the buffer shared
+# where it can be (int.astype('datetime64[ns]') was a Scalar cast a row).
+# Each result is then used, not only shown. NEGATIVE: an int64 holding
+# numpy's NaT value (int64 min) casts to NaT, missing; a datetime / timedelta
+# holding NaT casts to that int64 value, present; a slice keeps its offset.
+_VK7Y9CAST_NANOS = np.array([0, 1_700_000_000_123_456_789, -5, 86_400_000_000_000, 7, 1_700_000_000_123_456_789], dtype=np.int64)
+_VK7Y9CAST_INAT = np.array([3, np.iinfo(np.int64).min, -2, 9], dtype=np.int64)
+
+
+def _vk7y9cast_sources(m: Any) -> dict[str, Any]:
+    dates = _VK7Y9CAST_NANOS.astype("datetime64[ns]")
+    with_nat = dates.copy()
+    with_nat[[1, 4]] = np.datetime64("NaT")
+    deltas = _VK7Y9CAST_NANOS.astype("timedelta64[ns]")
+    deltas_nat = deltas.copy()
+    deltas_nat[2] = np.timedelta64("NaT")
+    return {
+        "datetime": m.Series(dates, name="t"),
+        "datetime NaT": m.Series(with_nat, name="t"),
+        "datetime UTC": m.Series(dates, name="t").dt.tz_localize("UTC"),
+        "datetime slice": m.Series(dates, name="t").iloc[2:],
+        "timedelta": m.Series(deltas, name="t"),
+        "timedelta NaT": m.Series(deltas_nat, name="t"),
+        "int": m.Series(_VK7Y9CAST_NANOS, name="t"),
+        "int slice": m.Series(_VK7Y9CAST_NANOS, name="t").iloc[1:4],
+        "int iNaT": m.Series(_VK7Y9CAST_INAT, name="t"),
+    }
+
+
+_VK7Y9CAST_TARGETS = {
+    "datetime": ["int64"],
+    "datetime NaT": ["int64"],
+    "datetime UTC": ["int64"],
+    "datetime slice": ["int64"],
+    "timedelta": ["int64"],
+    "timedelta NaT": ["int64"],
+    "int": ["datetime64[ns]", "datetime64[ns, UTC]", "datetime64[ns, America/New_York]", "timedelta64[ns]"],
+    "int slice": ["datetime64[ns]", "timedelta64[ns]"],
+    "int iNaT": ["datetime64[ns]", "timedelta64[ns]"],
+}
+
+_VK7Y9CAST_USES = {
+    "as cast": lambda s: s,
+    "isna": lambda s: s.isna(),
+    "min": lambda s: s.min(),
+    "max": lambda s: s.max(),
+    "diff": lambda s: s.diff(),
+    "sort_values": lambda s: s.sort_values(),
+    "shift": lambda s: s.shift(1),
+    "== first": lambda s: s == s.iloc[0],
+    "iloc[::2]": lambda s: s.iloc[::2],
+    "value_counts": lambda s: s.value_counts(),
+    "to_numpy": lambda s: s.to_numpy(),
+}
+
+
+def _vk7y9cast_show(value: Any) -> Any:
+    if isinstance(value, (pd.Series, fpd.Series)):
+        return ("Series", str(value.dtype), value.name, [repr(x) for x in value.index], [repr(x) for x in value.tolist()])
+    if isinstance(value, np.ndarray):
+        return ("ndarray", str(value.dtype), [repr(x) for x in value.tolist()])
+    return (type(value).__name__, repr(value))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    ("source", "target", "use"),
+    [(source, target, use) for source, targets in _VK7Y9CAST_TARGETS.items() for target in targets for use in _VK7Y9CAST_USES],
+)
+def test_temporal_int64_casts_like_pandas_vk7y9(source: str, target: str, use: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            cast = _vk7y9cast_sources(m)[source].astype(target)
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("cast raises", type(error).__name__)
+        try:
+            return _vk7y9cast_show(_VK7Y9CAST_USES[use](cast))
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: df.T reads its columns by position, each kind of
+# homogeneous frame through its own view. NEGATIVE: two columns under one
+# name, float32 beside float64, transpose to float64 as pandas (reading by
+# name saw the first one twice and gave float32).
+def _e186mT_frames(m: Any) -> dict[str, Any]:
+    stamps = np.array(["2024-01-05", "2023-12-31T06:00", "1969-07-20"], dtype="datetime64[ns]")
+    frames = {
+        "float": m.DataFrame({"a": [1.5, 2.5, 3.5], "b": [0.25, -1.0, 2.0]}),
+        "int": m.DataFrame({"a": [1, 2, 3], "b": [4, -5, 6]}),
+        "datetime": m.DataFrame({"a": stamps, "b": stamps[::-1].copy()}),
+        "timedelta": m.DataFrame({"a": stamps - stamps[2], "b": stamps[0] - stamps}),
+        "bool": m.DataFrame({"a": [True, False, True], "b": [False, False, True]}),
+        "string": m.DataFrame({"a": ["x", "y", "z"], "b": ["p", "q", "r"]}),
+        "Int64": m.DataFrame({"a": m.array([1, None, 3], dtype="Int64"), "b": m.array([4, 5, None], dtype="Int64")}),
+        "int + float": m.DataFrame({"a": [1, 2, 3], "b": [0.5, 1.5, 2.5]}),
+        "wide": m.DataFrame(np.arange(150, dtype=float).reshape(3, 50)),
+    }
+    narrow = m.Series(np.array([1.5, 2.25, 3.0], dtype="float32"), name="a").to_frame()
+    wide = m.Series(np.array([3.5, 4.125, 5.0]), name="a").to_frame()
+    frames["a: float32 + float64"] = m.concat([narrow, wide], axis=1)
+    ints = m.Series(np.array([1, 2, 3], dtype="int32"), name="a").to_frame()
+    frames["a: int32 + float32"] = m.concat([ints, narrow], axis=1)
+    return frames
+
+
+_E186MT_OPS = {
+    "T": lambda df: df.T,
+    "T.T": lambda df: df.T.T,
+    "T.iloc[1]": lambda df: df.T.iloc[1],
+    "T.max()": lambda df: df.T.max(),
+}
+
+
+def _e186mT_show(value: Any) -> Any:
+    if isinstance(value, (pd.DataFrame, fpd.DataFrame)):
+        return ("DataFrame", [str(d) for d in value.dtypes], [repr(c) for c in value.columns], [repr(i) for i in value.index], repr(value.to_numpy().tolist()))
+    if isinstance(value, (pd.Series, fpd.Series)):
+        return ("Series", str(value.dtype), repr(value.name), [repr(i) for i in value.index], repr(value.tolist()))
+    return (type(value).__name__, repr(value))
+
+
+_E186MT_FRAMES = ["float", "int", "datetime", "timedelta", "bool", "string", "Int64", "int + float", "wide", "a: float32 + float64", "a: int32 + float32"]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(("frame", "op"), [(frame, op) for frame in _E186MT_FRAMES for op in _E186MT_OPS])
+def test_transpose_reads_every_column_like_pandas_e186m(frame: str, op: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            return _e186mT_show(_E186MT_OPS[op](_e186mT_frames(m)[frame]))
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-05cm6: a row read (iloc / loc) takes pandas' interleaved
+# dtype of the columns: their own when they share one (a masked Int64 /
+# Float64 / boolean, int32, float32, `string`, a category, timedelta even
+# when the row is all NaT), numpy's result type for numbers (int8 + int16 is
+# int16), masked when any column is. NEGATIVE: int64 beside float64 is
+# float64 (no mask), categories that differ, period frequencies that
+# differ, datetime beside timedelta make an object row. Not here: an object
+# row of numbers holds numpy scalars in pandas (np.int64(1)), and a masked
+# gap in an object row is 0xeam's.
+def _05cm6_frames(m: Any) -> dict[str, Any]:
+    st = np.array(["2024-01-05", "NaT"], dtype="datetime64[ns]")
+    return {
+        "Int64": m.DataFrame({"a": m.array([1, None], dtype="Int64"), "b": m.array([4, 5], dtype="Int64")}),
+        "Float64": m.DataFrame({"a": m.array([1.5, None], dtype="Float64"), "b": m.array([4.0, 5.5], dtype="Float64")}),
+        "boolean": m.DataFrame({"a": m.array([True, None], dtype="boolean"), "b": m.array([False, True], dtype="boolean")}),
+        "Int64 + int64": m.DataFrame({"a": m.array([1, None], dtype="Int64"), "b": [4, 5]}),
+        "Int64 + float64": m.DataFrame({"a": m.array([1, None], dtype="Int64"), "b": [4.5, 5.5]}),
+        "Int64 + Float64": m.DataFrame({"a": m.array([1, None], dtype="Int64"), "b": m.array([4.5, None], dtype="Float64")}),
+        "boolean + bool": m.DataFrame({"a": m.array([True, None], dtype="boolean"), "b": [True, False]}),
+        "Float64 + float32": m.DataFrame({"a": m.array([1.5, None], dtype="Float64"), "b": np.array([3.5, 4], dtype="float32")}),
+        "one Int64": m.DataFrame({"a": m.array([1, None], dtype="Int64")}),
+        "int32": m.DataFrame({"a": np.array([1, 2], dtype="int32"), "b": np.array([3, 4], dtype="int32")}),
+        "int32 + int64": m.DataFrame({"a": np.array([1, 2], dtype="int32"), "b": [3, 4]}),
+        "int8 + int16": m.DataFrame({"a": np.array([1, 2], dtype="int8"), "b": np.array([3, 4], dtype="int16")}),
+        "uint8 + int8": m.DataFrame({"a": np.array([1, 2], dtype="uint8"), "b": np.array([3, 4], dtype="int8")}),
+        "int32 + float32": m.DataFrame({"a": np.array([1, 2], dtype="int32"), "b": np.array([3.5, 4], dtype="float32")}),
+        "float32": m.DataFrame({"a": np.array([1.5, 2], dtype="float32"), "b": np.array([3, 4], dtype="float32")}),
+        "int + float": m.DataFrame({"a": [1, 2], "b": [1.5, np.nan]}),
+        "bool": m.DataFrame({"a": [True, False], "b": [False, False]}),
+        "string": m.DataFrame({"a": m.array(["x", None], dtype="string"), "b": m.array(["y", "z"], dtype="string")}),
+        "object text": m.DataFrame({"a": ["x", None], "b": ["y", "z"]}),
+        "object mixed": m.DataFrame({"a": ["x", 1], "b": [2, "y"]}),
+        "datetime": m.DataFrame({"a": st, "b": st[::-1].copy()}),
+        "datetime UTC": m.DataFrame({"a": m.Series(st).dt.tz_localize("UTC"), "b": m.Series(st).dt.tz_localize("UTC")}),
+        "timedelta": m.DataFrame({"a": st - st[0], "b": st[0] - st}),
+        "datetime + timedelta": m.DataFrame({"a": st, "b": st - st[0]}),
+        "category": m.DataFrame({"a": m.Categorical(["x", "y"]), "b": m.Categorical(["y", "x"])}),
+        "category differs": m.DataFrame({"a": m.Categorical(["x", "y"]), "b": m.Categorical(["p", "q"])}),
+        "period": m.DataFrame({"a": m.period_range("2024-01", periods=2, freq="M"), "b": m.period_range("2023-01", periods=2, freq="M")}),
+        "period M + D": m.DataFrame({"a": m.period_range("2024-01", periods=2, freq="M"), "b": m.period_range("2023-01-01", periods=2, freq="D")}),
+    }
+
+
+_05CM6_READS = {
+    "iloc[0]": lambda df: df.iloc[0],
+    "iloc[1]": lambda df: df.iloc[1],
+    "loc[1]": lambda df: df.loc[1],
+    "iloc[1].isna()": lambda df: df.iloc[1].isna(),
+    "iloc[0] category": lambda df: list(df.iloc[0].cat.categories) if str(df.iloc[0].dtype) == "category" else "not category",
+}
+
+
+def _05cm6_show(value: Any) -> Any:
+    if isinstance(value, (pd.Series, fpd.Series)):
+        return ("Series", str(value.dtype), repr(value.name), [repr(x) for x in value.index], [repr(x) for x in value.tolist()])
+    return (type(value).__name__, repr(value))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(("frame", "read"), [(frame, read) for frame in _05cm6_frames(pd) for read in _05CM6_READS])
+def test_row_reads_take_the_interleaved_dtype_like_pandas_05cm6(frame: str, read: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            return _05cm6_show(_05CM6_READS[read](_05cm6_frames(m)[frame]))
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)

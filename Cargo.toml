@@ -85,6 +85,10 @@ ryu = "1.0.23"
 # host with several (br-frankenpandas-41ma0). Already in the tree through
 # other crates; no new crate is fetched.
 rustix = { version = "1.1.5", default-features = false, features = ["std", "thread"] }
+# fp-frame (Linux): each L3 domain's persistent worker pool, its threads
+# pinned to the domain (br-frankenpandas-rc0923-epic-zero-certified-losses-bss5q.4).
+# Already in the tree (sas7bdat); no new crate is fetched.
+rayon = "1.12.0"
 sas7bdat = "0.9.0"
 sas_xport = "0.4.1"
 scraper = "0.27.0"

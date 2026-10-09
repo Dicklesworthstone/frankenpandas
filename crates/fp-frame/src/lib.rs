@@ -1598,6 +1598,8 @@ fn column_workers(ncols: usize, rows: usize, par_min_values: usize) -> usize {
 struct NearCaller {
     #[cfg(target_os = "linux")]
     cpus: rustix::thread::CpuSet,
+    #[cfg(target_os = "linux")]
+    domain: usize,
     count: usize,
 }
 
@@ -1614,6 +1616,7 @@ impl NearCaller {
             let domain = (*domains.domain_of.get(rustix::thread::sched_getcpu())?)?;
             Some(Self {
                 cpus: domains.cpus[domain],
+                domain,
                 count: domains.sizes[domain],
             })
         }
@@ -1632,6 +1635,39 @@ impl NearCaller {
             let _ = rustix::thread::sched_setaffinity(None, &self.cpus);
         }
     }
+
+    /// The domain's persistent worker pool - a thread a CPU, each pinned to
+    /// the domain - built at its first pass: a pass wakes its threads where
+    /// spawning them cost more than a light pass's work (a 1000 x 1000
+    /// df + 1 spawned on 8 threads 0.65-0.73 ms, alone 0.43;
+    /// br-frankenpandas-rc0923-epic-zero-certified-losses-bss5q.4). None when
+    /// it cannot be built.
+    #[cfg(target_os = "linux")]
+    fn pool(self) -> Option<&'static rayon::ThreadPool> {
+        let domains = cache_domains()?;
+        // A forked child (Python's multiprocessing) inherits the pools but
+        // none of their threads: a pass there would wait forever, so it
+        // spawns its workers instead.
+        if domains.pid != std::process::id() {
+            return None;
+        }
+        domains
+            .pools
+            .get(self.domain)?
+            .get_or_init(|| {
+                let cpus = self.cpus;
+                let domain = self.domain;
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(self.count)
+                    .thread_name(move |i| format!("fp-l3-{domain}-{i}"))
+                    .start_handler(move |_| {
+                        let _ = rustix::thread::sched_setaffinity(None, &cpus);
+                    })
+                    .build()
+                    .ok()
+            })
+            .as_ref()
+    }
 }
 
 /// The L3 cache domains among the CPUs this process may run on, and one
@@ -1643,6 +1679,10 @@ struct CacheDomains {
     /// Each domain's allowed CPUs, and how many they are.
     cpus: Vec<rustix::thread::CpuSet>,
     sizes: Vec<usize>,
+    /// Each domain's worker pool, built at its first pass, and the process
+    /// the domains were read in (whose pools these are).
+    pools: Vec<std::sync::OnceLock<Option<rayon::ThreadPool>>>,
+    pid: u32,
     l3_bytes: usize,
 }
 
@@ -1664,6 +1704,8 @@ fn read_cache_domains() -> Option<CacheDomains> {
         domain_of: vec![None; CpuSet::MAX_CPU],
         cpus: Vec::new(),
         sizes: Vec::new(),
+        pools: Vec::new(),
+        pid: std::process::id(),
         l3_bytes: 0,
     };
     for cpu in (0..CpuSet::MAX_CPU).filter(|&cpu| allowed.is_set(cpu)) {
@@ -1680,6 +1722,7 @@ fn read_cache_domains() -> Option<CacheDomains> {
             lists.push(list);
             domains.cpus.push(CpuSet::new());
             domains.sizes.push(0);
+            domains.pools.push(std::sync::OnceLock::new());
             lists.len() - 1
         };
         domains.domain_of[cpu] = Some(domain);
@@ -1730,6 +1773,22 @@ where
 
     if worker_count < 2 {
         return (0..ncols).map(&f).collect();
+    }
+
+    // Kept near the caller, the pass runs on its domain's persistent pool,
+    // in column order and the first error by position raised, as below.
+    #[cfg(target_os = "linux")]
+    if let Some(pool) = near.and_then(NearCaller::pool) {
+        use rayon::prelude::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
+        let min_len = ncols.div_ceil(worker_count.saturating_mul(4)).max(1);
+        let results: Vec<Result<T, FrameError>> = pool.install(|| {
+            (0..ncols)
+                .into_par_iter()
+                .with_min_len(min_len)
+                .map(&f)
+                .collect()
+        });
+        return results.into_iter().collect();
     }
 
     let next = std::sync::atomic::AtomicUsize::new(0);
@@ -72323,6 +72382,86 @@ fn concat_nullable_dtype(frames: &[&DataFrame], col_name: &str) -> Option<DType>
         .then_some(nullable)
 }
 
+/// A row read across `columns` - `values`, one cell of each - under pandas'
+/// interleaved dtype for them: the columns' own dtype when they share it
+/// (its width, zone, `string` flag and categories too), and for numbers and
+/// bools numpy's result type of theirs, masked (Int64 / Float64 / boolean)
+/// when any column is, its gaps pd.NA. A row of masked Int64 columns was
+/// int64 holding None, of int8 / int16 ones int64, of a `string` or a
+/// categorical one object (br-frankenpandas-05cm6). Period columns of two
+/// frequencies make an object row. `None` for the rest - bool beside a
+/// number, mixed kinds, period and interval rows of one kind - which the
+/// caller builds.
+fn interleaved_row(columns: &[&Column], values: &[Scalar]) -> Option<Column> {
+    let first = *columns.first()?;
+    let dtype = first.dtype();
+    let shared = columns.iter().all(|column| {
+        column.dtype() == dtype
+            && column.width() == first.width()
+            && column.is_pandas_string() == first.is_pandas_string()
+            && column.categorical() == first.categorical()
+    });
+    if shared {
+        if first.categorical().is_some() {
+            let row = categories_kept(first, Column::from_object_values(values.to_vec()));
+            return row.categorical().is_some().then_some(row);
+        }
+        return match dtype {
+            DType::Period => {
+                let mut freqs = values.iter().filter_map(|value| match value {
+                    Scalar::Period(period) => Some(period.freq),
+                    _ => None,
+                });
+                let freq = freqs.next();
+                (!freqs.all(|other| Some(other) == freq))
+                    .then(|| Column::from_object_values(values.to_vec()))
+            }
+            DType::Interval | DType::Sparse => None,
+            DType::Utf8 if !first.is_pandas_string() => {
+                Some(Column::from_object_values(values.to_vec()))
+            }
+            _ => Column::new(dtype, values.to_vec())
+                .ok()
+                .map(|row| row.keeping_dtype_of(first)),
+        };
+    }
+    let kinds = columns
+        .iter()
+        .map(|column| NumpyNumeric::of(&column.dtype(), column.width()))
+        .collect::<Option<Vec<_>>>()?;
+    let bools = kinds
+        .iter()
+        .filter(|kind| **kind == NumpyNumeric::Bool)
+        .count();
+    if bools != 0 && bools != kinds.len() {
+        return None;
+    }
+    let common = kinds.into_iter().reduce(NumpyNumeric::result_type)?;
+    let masked = columns.iter().any(|column| column.dtype().is_nullable());
+    let target = match (common, masked) {
+        (NumpyNumeric::Bool, true) => DType::BoolNullable,
+        (NumpyNumeric::Bool, false) => DType::Bool,
+        (kind, true) if kind.is_float() => DType::Float64Nullable,
+        (_, true) => DType::Int64Nullable,
+        (kind, false) if kind.is_float() => DType::Float64,
+        (_, false) => DType::Int64,
+    };
+    #[allow(clippy::cast_precision_loss)] // numpy widens int64 to float64
+    let cells: Vec<Scalar> = values
+        .iter()
+        .map(|value| match value {
+            missing if missing.is_missing() && masked => Scalar::Null(NullKind::Null),
+            Scalar::Int64(number) if common.is_float() => Scalar::Float64(*number as f64),
+            other => other.clone(),
+        })
+        .collect();
+    let row = Column::new(target, cells).ok()?;
+    match common.width() {
+        Some(width) => row.cast_to_width(width, masked).ok(),
+        None => Some(row),
+    }
+}
+
 /// `result`, `source`'s categorical values moved, selected or filled (shift,
 /// where / mask, ffill / bfill, combine_first, the groupby first / last /
 /// shift / ffill), categorical again over `source`'s categories while every
@@ -86412,6 +86551,7 @@ impl DataFrame {
     fn row_to_series(&self, position: usize) -> Result<Series, FrameError> {
         let mut labels = Vec::with_capacity(self.column_order.len());
         let mut values = Vec::with_capacity(self.column_order.len());
+        let mut columns: Vec<&Column> = Vec::with_capacity(self.column_order.len());
         let mut dtypes: Vec<DType> = Vec::with_capacity(self.column_order.len());
 
         // By position: each repeated column key gives its own cell (i17d4).
@@ -86427,6 +86567,7 @@ impl DataFrame {
             if !dtypes.contains(&col.dtype()) {
                 dtypes.push(col.dtype());
             }
+            columns.push(col);
         }
 
         // The index label is the Series name, typed (pandas semantics).
@@ -86435,6 +86576,10 @@ impl DataFrame {
         // their MultiIndex when they have one (g3bux).
         let span = self.column_range_span();
         let finish = |series: Series| self.with_column_levels(series.with_range_span(span));
+
+        if let Some(column) = interleaved_row(&columns, &values) {
+            return Series::new(name, Index::new(labels), column).map(finish);
+        }
 
         // The row's dtype is the columns' common one, as pandas'
         // interleaved dtype - not what this row's values happen to be (a
@@ -88303,12 +88448,18 @@ impl DataFrame {
                 column_len,
             }));
         }
+        // By position (no name repeats here): a name lookup per column per
+        // source kind was half of a 1000-column frame's df.T
+        // (br-frankenpandas-e186m).
+        let Some(columns) = (0..self.num_columns())
+            .map(|position| self.column_at(position))
+            .collect::<Option<Vec<&Column>>>()
+        else {
+            return Ok(None);
+        };
 
         let mut f64_columns = Vec::with_capacity(self.column_order.len());
-        for name in &self.column_order {
-            let Some(column) = self.columns.get(name) else {
-                return Ok(None);
-            };
+        for &column in &columns {
             let Some(values) = column.as_f64_slice() else {
                 f64_columns.clear();
                 break;
@@ -88328,10 +88479,7 @@ impl DataFrame {
         }
 
         let mut i64_columns = Vec::with_capacity(self.column_order.len());
-        for name in &self.column_order {
-            let Some(column) = self.columns.get(name) else {
-                return Ok(None);
-            };
+        for &column in &columns {
             let Some(values) = column.as_i64_slice() else {
                 i64_columns.clear();
                 break;
@@ -88351,10 +88499,7 @@ impl DataFrame {
         }
 
         let mut datetime_columns = Vec::with_capacity(self.column_order.len());
-        for name in &self.column_order {
-            let Some(column) = self.columns.get(name) else {
-                return Ok(None);
-            };
+        for &column in &columns {
             // `as_datetime64_slice()` may expose a cached raw nanos buffer for
             // a nullable eager column.  The view currently carries no validity
             // masks, so admitting that shape would turn NaT into a present raw
@@ -88382,10 +88527,7 @@ impl DataFrame {
         }
 
         let mut timedelta_columns = Vec::with_capacity(self.column_order.len());
-        for name in &self.column_order {
-            let Some(column) = self.columns.get(name) else {
-                return Ok(None);
-            };
+        for &column in &columns {
             // Timedelta64 has the same cached-data/validity split as
             // Datetime64.  Keep nullable inputs on the eager fallback until a
             // future view representation carries per-source validity masks.
@@ -88412,10 +88554,7 @@ impl DataFrame {
         }
 
         let mut bool_columns = Vec::with_capacity(self.column_order.len());
-        for name in &self.column_order {
-            let Some(column) = self.columns.get(name) else {
-                return Ok(None);
-            };
+        for &column in &columns {
             let Some(values) = column.as_bool_slice() else {
                 bool_columns.clear();
                 break;
@@ -88441,10 +88580,7 @@ impl DataFrame {
         // (plain `from_values` construction) have no contiguous view and keep
         // the eager fallback.
         let mut utf8_columns: Vec<(&[u8], &[usize])> = Vec::with_capacity(self.column_order.len());
-        for name in &self.column_order {
-            let Some(column) = self.columns.get(name) else {
-                return Ok(None);
-            };
+        for &column in &columns {
             let Some((bytes, offsets)) = column.as_utf8_contiguous() else {
                 utf8_columns.clear();
                 break;
@@ -88473,10 +88609,7 @@ impl DataFrame {
         // frames where at least one Int64 column carries nulls.
         let mut nullable_i64_columns: Vec<(&[i64], &ValidityMask)> =
             Vec::with_capacity(self.column_order.len());
-        for name in &self.column_order {
-            let Some(column) = self.columns.get(name) else {
-                return Ok(None);
-            };
+        for &column in &columns {
             let Some((values, validity)) = column.as_i64_slice_with_validity() else {
                 nullable_i64_columns.clear();
                 break;
@@ -88501,10 +88634,7 @@ impl DataFrame {
         // mixed-validity frames stay on the eager fallback.
         let mut nullable_f64_columns: Vec<(&[f64], &ValidityMask)> =
             Vec::with_capacity(self.column_order.len());
-        for name in &self.column_order {
-            let Some(column) = self.columns.get(name) else {
-                return Ok(None);
-            };
+        for &column in &columns {
             let Some((values, validity)) = column.as_canonical_nullable_f64() else {
                 nullable_f64_columns.clear();
                 break;
@@ -88534,10 +88664,7 @@ impl DataFrame {
         let mut numeric_sources = Vec::with_capacity(self.column_order.len());
         let mut has_f64 = false;
         let mut has_i64 = false;
-        for name in &self.column_order {
-            let Some(column) = self.columns.get(name) else {
-                return Ok(None);
-            };
+        for &column in &columns {
             if !column.validity().all() {
                 return Ok(None);
             }
@@ -88579,10 +88706,8 @@ impl DataFrame {
         }
         // Each row is one value of every column: numpy's dtype for the
         // columns (an all-int32 frame transposes to int32 columns; fvsao.23).
-        let width = self
-            .column_order
-            .iter()
-            .filter_map(|name| self.columns.get(name))
+        let width = (0..self.num_columns())
+            .filter_map(|position| self.column_at(position))
             .map(|column| NumpyNumeric::of(&column.dtype(), column.width()))
             .reduce(|left, right| left.zip(right).map(|(left, right)| left.result_type(right)))
             .flatten()
@@ -88616,13 +88741,10 @@ impl DataFrame {
             .viewable()
             && let Some(view) = self.transpose_view()?
         {
-            let source_columns: Arc<[Column]> = self
-                .column_order
-                .iter()
-                .map(|name| {
-                    self.columns
-                        .get(name)
-                        .expect("column name listed in order must exist")
+            let source_columns: Arc<[Column]> = (0..self.num_columns())
+                .map(|position| {
+                    self.column_at(position)
+                        .expect("a position below num_columns holds a column")
                         .clone()
                 })
                 .collect::<Vec<_>>()
@@ -139601,6 +139723,75 @@ mod tests {
         assert!(
             matches!(err, FrameError::CompatibilityRejected(msg) if msg.contains("out of bounds"))
         );
+    }
+
+    #[test]
+    fn row_reads_take_the_columns_interleaved_dtype_05cm6() {
+        use fp_types::NumericWidth;
+        fn frame(columns: Vec<Column>) -> DataFrame {
+            let names: Vec<String> = (0..columns.len()).map(|at| format!("c{at}")).collect();
+            DataFrame::new_with_column_order(
+                Index::from_i64(vec![0, 1]),
+                super::ColumnStore::from_pairs(names.iter().cloned().zip(columns)),
+                names,
+            )
+            .expect("frame")
+        }
+        fn masked(values: Vec<Scalar>) -> Column {
+            Column::new(DType::Int64Nullable, values).expect("Int64")
+        }
+        fn narrow(values: Vec<i64>, width: NumericWidth) -> Column {
+            Column::from_i64_values(values)
+                .cast_to_width(width, false)
+                .expect("width")
+        }
+        let gap = Scalar::Null(NullKind::Null);
+        let floats = Column::from_f64_values(vec![4.5, 5.5]);
+        let ints = Column::from_i64_values(vec![1, 2]);
+
+        // Masked Int64 columns: a masked Int64 row, its gap missing.
+        let both = frame(vec![
+            masked(vec![Scalar::Int64(1), gap.clone()]),
+            masked(vec![Scalar::Int64(4), Scalar::Int64(5)]),
+        ]);
+        let row = both.iloc_row(1).expect("row");
+        assert_eq!(row.column().dtype(), DType::Int64Nullable);
+        assert!(row.values()[0].is_missing());
+        assert_eq!(row.values()[1], Scalar::Int64(5));
+        // Beside a float64 column: masked Float64.
+        let row = frame(vec![masked(vec![Scalar::Int64(1), gap]), floats.clone()])
+            .iloc_row(0)
+            .expect("row");
+        assert_eq!(row.column().dtype(), DType::Float64Nullable);
+        assert_eq!(row.values(), &[Scalar::Float64(1.0), Scalar::Float64(4.5)]);
+        // int8 beside int16: numpy's result type, int16.
+        let row = frame(vec![
+            narrow(vec![1, 2], NumericWidth::Int8),
+            narrow(vec![3, 4], NumericWidth::Int16),
+        ])
+        .iloc_row(0)
+        .expect("row");
+        assert_eq!(row.column().width(), Some(NumericWidth::Int16));
+        assert_eq!(row.values(), &[Scalar::Int64(1), Scalar::Int64(3)]);
+        // Two period frequencies: an object row.
+        let row = frame(vec![
+            Column::from_period_values_owned(vec![648, 649], PeriodFreq::Monthly),
+            Column::from_period_values_owned(vec![19_723, 19_724], PeriodFreq::Daily),
+        ])
+        .iloc_row(0)
+        .expect("row");
+        assert_eq!(row.column().dtype(), DType::Utf8);
+
+        // NEGATIVE: int64 beside float64 stays numpy's float64; a bool
+        // beside an int is an object row holding each value as it is.
+        let row = frame(vec![ints.clone(), floats]).iloc_row(1).expect("row");
+        assert_eq!(row.column().dtype(), DType::Float64);
+        assert_eq!(row.values(), &[Scalar::Float64(2.0), Scalar::Float64(5.5)]);
+        let bools =
+            Column::from_values(vec![Scalar::Bool(true), Scalar::Bool(false)]).expect("bools");
+        let row = frame(vec![bools, ints]).iloc_row(0).expect("row");
+        assert_eq!(row.column().dtype(), DType::Utf8);
+        assert_eq!(row.values(), &[Scalar::Bool(true), Scalar::Int64(1)]);
     }
 
     #[test]

@@ -1364,6 +1364,7 @@ dependencies = [
  "fp-runtime",
  "fp-types",
  "mimalloc",
+ "rayon",
  "regex",
  "rustc-hash",
  "rustix",
