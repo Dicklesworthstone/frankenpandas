@@ -28559,6 +28559,150 @@ def test_text_isin_like_pandas_knu1r(case: Any) -> None:
     assert run(fpd) == run(pd)
 
 
+# br-frankenpandas-knu1r: rolling aggregations of a float column holding NaN
+# (each window's present values off the typed buffer) - scattered NaN, a NaN
+# run longer than the window, NaN at the ends; windows 3 and 20, min_periods
+# 1, centered; NEGATIVE: an all-NaN window (min_periods unmet) is NaN.
+def _knu1r_rolling_values() -> Any:
+    k = np.arange(120, dtype=float)
+    values = np.sin(k * 0.7) * 10 + k / 7
+    values[[0, 5, 6, 40, 77, 119]] = np.nan
+    values[50:75] = np.nan
+    return values
+
+
+_KNU1R_ROLLING_CASES = [
+    (op, window, extra)
+    for op in ("median", "quantile", "skew", "kurt", "var", "std", "sem", "sum", "mean", "min", "max", "count")
+    for window in (3, 20)
+    for extra in ("", "min_periods=1", "center")
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _KNU1R_ROLLING_CASES, ids=lambda case: f"{case[0]}-{case[1]}-{case[2]}")
+def test_rolling_over_nan_like_pandas_knu1r(case: Any) -> None:
+    op, window, extra = case
+    keywords = {"": {}, "min_periods=1": {"min_periods": 1}, "center": {"center": True}}[extra]
+
+    def run(m: Any) -> Any:
+        rolling = m.Series(_knu1r_rolling_values(), name="v").rolling(window, **keywords)
+        out = rolling.quantile(0.3) if op == "quantile" else getattr(rolling, op)()
+        return [str(out.dtype), [None if v != v else round(float(v), 9) for v in out.tolist()]]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-knu1r: rolling skew / kurt of constant stretches a NaN
+# interrupts - the window of equal present values is constant (skew 0, kurt
+# -3), as pandas' run of equal values skips the NaN; NEGATIVE: a window too
+# short for kurt (fewer than 4 values) is NaN.
+_KNU1R_MOMENT_CASES = [
+    (op, window, min_periods)
+    for op in ("skew", "kurt")
+    for window in (3, 4, 5)
+    for min_periods in (None, 1, 3)
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _KNU1R_MOMENT_CASES, ids=lambda case: f"{case[0]}-{case[1]}-{case[2]}")
+def test_rolling_moments_of_constant_stretches_like_pandas_knu1r(case: Any) -> None:
+    op, window, min_periods = case
+    values = [4.0, 4.0, np.nan, 4.0, 4.0, 4.0, 4.0, 5.0, 5.0, np.nan, np.nan, 5.0, 5.0, 1.0, np.nan, 1.0, 1.0, 1.0]
+
+    def run(m: Any) -> Any:
+        out = getattr(m.Series(values).rolling(window, min_periods=min_periods), op)()
+        return [None if v != v else round(float(v), 9) for v in out.tolist()]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-knu1r: grouped cumsum / cumprod / cummax / cummin of a
+# float column holding NaN (a group's first value, runs of them) by an int
+# key (the key-offset kernel) and a text key (the group-id kernel);
+# NEGATIVE: a NaN row stays NaN and does not reset its group's running value.
+def _knu1r_cum_frame(m: Any, key: str) -> Any:
+    k = np.arange(90)
+    values = (k * 7 % 13) / 4.0 - 1.0
+    values[[0, 3, 4, 5, 33, 34, 60, 89]] = np.nan
+    keys = (k * 5) % 4 if key == "int" else [f"g{(v * 5) % 4}" for v in k]
+    return m.DataFrame({"k": keys, "v": values})
+
+
+_KNU1R_CUM_CASES = [(op, key) for op in ("cumsum", "cumprod", "cummax", "cummin") for key in ("int", "text")]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _KNU1R_CUM_CASES, ids=lambda case: f"{case[0]}-{case[1]}")
+def test_grouped_cum_over_nan_like_pandas_knu1r(case: Any) -> None:
+    op, key = case
+
+    def run(m: Any) -> Any:
+        out = getattr(_knu1r_cum_frame(m, key).groupby("k")["v"], op)()
+        return [str(out.dtype), [None if v != v else round(float(v), 9) for v in out.tolist()]]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-knu1r: tolist / iteration of a float64 column holding
+# missing values gives Python floats with nan in their place - built from
+# numpy, by where, by a reindex adding a label, float32, with infinities and
+# -0.0; NEGATIVE: a nullable Float64 keeps <NA> and a datetime NaT.
+_KNU1R_TOLIST = {
+    "numpy nan": lambda m: m.Series(np.array([1.5, np.nan, -0.0, np.inf, np.nan, -np.inf])),
+    "where": lambda m: m.Series([0.2, 0.7, 0.9, 0.1]).where(m.Series([0.2, 0.7, 0.9, 0.1]) > 0.5),
+    "reindex": lambda m: m.Series([1.0, 2.0, 3.0], index=[0, 1, 2]).reindex([2, 7, 0]),
+    "float32": lambda m: m.Series(np.array([0.1, np.nan, 2.5], dtype="float32")),
+    "nullable Float64": lambda m: m.Series([1.5, None, 2.0], dtype="Float64"),
+    "datetime NaT": lambda m: m.Series(np.array(["2021-01-01", "NaT"], dtype="datetime64[ns]")),
+}
+_KNU1R_TOLIST_CASES = [(kind, how) for kind in _KNU1R_TOLIST for how in ("tolist", "iter")]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _KNU1R_TOLIST_CASES, ids=lambda case: f"{case[0]}-{case[1]}")
+def test_float_tolist_like_pandas_knu1r(case: Any) -> None:
+    kind, how = case
+
+    def run(m: Any) -> Any:
+        s = _KNU1R_TOLIST[kind](m)
+        values = s.tolist() if how == "tolist" else list(s)
+        return [(type(v).__name__, repr(v)) for v in values]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-knu1r: rolling count - a float column holding NaN and an
+# infinity (counted), text holding None, ints - windows wider than the
+# column (every window short: a float64 of NaN, it was object), centered,
+# min_periods; NEGATIVE: a NaN is never counted, an infinity always is.
+_KNU1R_COUNT_VALUES = {
+    "floats": [1.0, np.nan, np.inf, 4.0, np.nan, np.nan, 7.0, -np.inf, 9.0],
+    "text": ["a", None, "b", "c", None, "d", "e", None, "f"],
+    "ints": [1, 2, 3, 4, 5, 6, 7, 8, 9],
+}
+_KNU1R_COUNT_CASES = [
+    (kind, window, extra)
+    for kind in _KNU1R_COUNT_VALUES
+    for window in (2, 4, 20)
+    for extra in ("", "min_periods=1", "center")
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _KNU1R_COUNT_CASES, ids=lambda case: f"{case[0]}-{case[1]}-{case[2]}")
+def test_rolling_count_like_pandas_knu1r(case: Any) -> None:
+    kind, window, extra = case
+    keywords = {"": {}, "min_periods=1": {"min_periods": 1}, "center": {"center": True}}[extra]
+
+    def run(m: Any) -> Any:
+        out = m.Series(_KNU1R_COUNT_VALUES[kind]).rolling(window, **keywords).count()
+        return [str(out.dtype), [None if v != v else float(v) for v in out.tolist()]]
+
+    assert run(fpd) == run(pd)
+
+
 # br-frankenpandas-vk7y9: value_counts of a datetime / timedelta column holding
 # NaT (day stamps, each counted a different number of times) - the default
 # options tally the nanos; normalize, ascending, unsorted and dropna=False

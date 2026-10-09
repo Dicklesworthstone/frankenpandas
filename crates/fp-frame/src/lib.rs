@@ -35682,6 +35682,33 @@ impl Rolling<'_> {
             return Series::new(name, index, column);
         }
 
+        // A Float64 column holding missing values (NaN or a cleared bit): each
+        // window's present values gathered off the typed buffer into one
+        // reused Vec, the same values in the same order as `window_values` -
+        // the loop below built a Vec a window off the Scalar view
+        // (s.rolling(20).median() of a 10% NaN column 0.82x pandas at 200k
+        // rows; br-frankenpandas-knu1r).
+        if let Some((data, validity)) = self.series.column().as_f64_slice_with_validity() {
+            let words = validity.packed_words_for_scan();
+            let present = |j: usize| (words[j / 64] >> (j % 64)) & 1 == 1 && !data[j].is_nan();
+            let len = data.len();
+            let mut nums: Vec<f64> = Vec::with_capacity(self.window.min(len));
+            let mut out = Vec::with_capacity(len);
+            for i in 0..len {
+                let (start, end) = self.window_bounds(i, len);
+                nums.clear();
+                nums.extend((start..end).filter(|&j| present(j)).map(|j| data[j]));
+                if nums.len() < self.min_periods {
+                    out.push(Scalar::Null(NullKind::NaN));
+                } else {
+                    out.push(Scalar::Float64(agg(&nums)));
+                }
+            }
+            let index = self.series.index().clone();
+            let column = Column::from_values(out)?;
+            return Series::new(name, index, column);
+        }
+
         let vals = self.series.column().values();
         let len = vals.len();
         let mut out = Vec::with_capacity(len);
@@ -35745,6 +35772,30 @@ impl Rolling<'_> {
             // v as f64`, so the downstream rolling sum/mean sees the identical values.
             owned = data.iter().map(|&v| v as f64).collect();
             &owned
+        } else if let Some((data, validity)) = col.as_f64_slice_with_validity() {
+            // A float column holding missing values: its buffer as it is when
+            // its missing rows are exactly its NaN rows, else with NaN written
+            // at each cleared bit - the f64 view the generic build below
+            // makes, off the typed buffer (it made the Scalar view of every
+            // row; s.rolling(20, min_periods=1).mean() of a 10% NaN column
+            // 0.82x pandas at 200k rows; br-frankenpandas-knu1r).
+            if col.nan_missing_exact() {
+                data
+            } else {
+                let words = validity.packed_words_for_scan();
+                owned = data
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &x)| {
+                        if (words[i / 64] >> (i % 64)) & 1 == 1 {
+                            x
+                        } else {
+                            f64::NAN
+                        }
+                    })
+                    .collect();
+                &owned
+            }
         } else {
             let scalars = col.values();
             owned = scalars
@@ -36227,8 +36278,26 @@ impl Rolling<'_> {
     /// number of non-nulls (which can be 0).
     pub fn count(&self) -> Result<Series, FrameError> {
         self.validate()?;
-        let vals = self.source.column().values();
-        let len = vals.len();
+        // A float column's cells off its typed buffer (a set bit and not NaN
+        // is present - an infinity counts), any other's off the Scalar view;
+        // the counts a float64 column built directly - a Scalar a row each
+        // way (s.rolling(20).count() of a 10% NaN column 0.73x pandas at 200k
+        // rows; br-frankenpandas-knu1r), and a column every window was short
+        // for was inferred from its nulls.
+        let column = self.source.column();
+        let len = column.len();
+        let typed = column
+            .as_f64_slice_with_validity()
+            .map(|(data, validity)| (data, validity.packed_words_for_scan()));
+        let scalars: &[Scalar] = if typed.is_some() {
+            &[]
+        } else {
+            column.values()
+        };
+        let present = |j: usize| match &typed {
+            Some((data, words)) => (words[j / 64] >> (j % 64)) & 1 == 1 && !data[j].is_nan(),
+            None => !scalars[j].is_missing(),
+        };
         let mut out = Vec::with_capacity(len);
 
         // O(n) running non-missing count via a two-pointer sweep over the
@@ -36237,35 +36306,40 @@ impl Rolling<'_> {
         // per-window `filter(!is_missing).count()`. For count(), min_periods
         // gates on the physical WINDOW SIZE (`end - start`), not the non-null
         // count — preserved exactly.
+        // A short window's cell is missing as `rolling_float_column` holds it
+        // (a cleared bit over 0.0, read back Null(NaN); NaN in the buffer
+        // would read back Float64(NaN)).
+        let mut words = vec![0_u64; len.div_ceil(64)];
         let mut count = 0_usize;
         let mut r = 0_usize;
         let mut l = 0_usize;
         for i in 0..len {
             let (start, end) = self.window_bounds(i, len);
             while r < end {
-                if !vals[r].is_missing() {
-                    count += 1;
-                }
+                count += usize::from(present(r));
                 r += 1;
             }
             while l < start {
-                if !vals[l].is_missing() {
-                    count -= 1;
-                }
+                count -= usize::from(present(l));
                 l += 1;
             }
             if end - start < self.min_periods {
-                out.push(Scalar::Null(NullKind::NaN));
+                out.push(0.0);
             } else {
-                out.push(Scalar::Float64(count as f64));
+                words[i / 64] |= 1_u64 << (i % 64);
+                out.push(count as f64);
             }
         }
 
         // Per br-frankenpandas-i9t7h: pandas rolling().count preserves source
         // axis name. Inline impl, not via apply_rolling.
         let index = self.series.index().clone();
-        let column = Column::from_values(out)?;
-        Series::new(self.series.name(), index, column)
+        let validity = fp_columnar::ValidityMask::from_words(words, len);
+        Series::new(
+            self.series.name(),
+            index,
+            Column::from_f64_values_with_validity(out, validity),
+        )
     }
 
     /// Rolling sample variance (ddof=1).
@@ -36375,28 +36449,12 @@ impl Rolling<'_> {
     /// Rolling median.
     pub fn median(&self) -> Result<Series, FrameError> {
         self.validate()?;
-        // For wide trailing windows, an order-statistics Fenwick tree replaces
-        // the O(n·window·log window) per-window sort with O(n·log U) sliding
-        // selection, bit-identically (see `rolling_order_stat_noncenter`).
-        if self.window >= ROLLING_ORDER_STAT_MIN_WINDOW {
-            return self.rolling_order_stat(RollingOrderStat::Median);
-        }
-        self.apply_rolling(
-            |nums| {
-                if nums.is_empty() {
-                    return f64::NAN;
-                }
-                let mut sorted = nums.to_vec();
-                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let mid = sorted.len() / 2;
-                if sorted.len() % 2 == 0 {
-                    (sorted[mid - 1] + sorted[mid]) / 2.0
-                } else {
-                    sorted[mid]
-                }
-            },
-            self.series.name(),
-        )
+        // The window kept sorted as it slides (a NaN or -0.0 aside: see
+        // `rolling_order_stat`), bit-identically to a sort of each window -
+        // a window under 32 rows sorted a copy of itself, 240 ns a window
+        // (s.rolling(20).median() 0.91x pandas at 200k rows;
+        // br-frankenpandas-knu1r).
+        self.rolling_order_stat(RollingOrderStat::Median)
     }
 
     /// Rolling first non-null value.
@@ -36544,20 +36602,8 @@ impl Rolling<'_> {
         self.validate()?;
         require_window_quantile(q)?;
         let mode = parse_quantile_interpolation(interpolation)?;
-        if self.window >= ROLLING_ORDER_STAT_MIN_WINDOW {
-            return self.rolling_order_stat(RollingOrderStat::Quantile(q, mode));
-        }
-        self.apply_rolling(
-            |nums| {
-                if nums.is_empty() {
-                    return f64::NAN;
-                }
-                let mut sorted = nums.to_vec();
-                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                window_quantile(sorted.len(), q, mode, &|k| sorted[k])
-            },
-            self.series.name(),
-        )
+        // The sliding sorted window at every width (see `median`).
+        self.rolling_order_stat(RollingOrderStat::Quantile(q, mode))
     }
 
     /// O(n·log U) trailing-window rolling median/quantile via an
@@ -36573,16 +36619,32 @@ impl Rolling<'_> {
     /// which would lose the sign bit of a -0.0 tied with +0.0; since the
     /// per-window sort is stable and could surface either, the function falls
     /// back to the exact per-window sort whenever any -0.0 is present (absent
-    /// from real columns). Only invoked for non-center windows at least
-    /// ROLLING_ORDER_STAT_MIN_WINDOW wide, where the log-time selection beats
-    /// the small-window sort.
+    /// from real columns). Every rolling median / quantile comes here: a
+    /// window up to ROLLING_SORTED_WINDOW_MAX_W wide slides a sorted window,
+    /// a wider one walks the Fenwick tree.
     fn rolling_order_stat(&self, stat: RollingOrderStat) -> Result<Series, FrameError> {
-        let vals = self.series.column().values();
-        let len = vals.len();
+        // Each cell as window_values reads it: a float column's off its typed
+        // buffer (a set bit and not NaN), any other off the Scalar view - a
+        // million-row float column's Scalars were made for this
+        // (br-frankenpandas-knu1r).
+        let column = self.series.column();
+        let len = column.len();
         let min_periods = self.min_periods;
+        let typed = column
+            .as_f64_slice_with_validity()
+            .map(|(data, validity)| (data, validity.packed_words_for_scan()));
+        let scalars: &[Scalar] = if typed.is_some() {
+            &[]
+        } else {
+            column.values()
+        };
 
         let value_at = |idx: usize| -> Option<f64> {
-            let v = &vals[idx];
+            if let Some((data, words)) = &typed {
+                let x = data[idx];
+                return ((words[idx / 64] >> (idx % 64)) & 1 == 1 && !x.is_nan()).then_some(x);
+            }
+            let v = &scalars[idx];
             if v.is_missing() {
                 None
             } else {
@@ -36590,9 +36652,8 @@ impl Rolling<'_> {
             }
         };
 
-        let has_neg_zero = vals
-            .iter()
-            .any(|v| matches!(v, Scalar::Float64(f) if *f == 0.0 && f.is_sign_negative()));
+        let has_neg_zero =
+            (0..len).any(|idx| value_at(idx).is_some_and(|x| x == 0.0 && x.is_sign_negative()));
 
         let index = self.series.index().clone();
 
@@ -36601,7 +36662,7 @@ impl Rolling<'_> {
             let mut out = Vec::with_capacity(len);
             for i in 0..len {
                 let (start, end) = self.window_bounds(i, len);
-                let nums = Self::window_values(&vals[start..end]);
+                let nums: Vec<f64> = (start..end).filter_map(&value_at).collect();
                 if nums.len() < min_periods {
                     out.push(Scalar::Null(NullKind::NaN));
                 } else if nums.is_empty() {
@@ -36625,11 +36686,10 @@ impl Rolling<'_> {
         // sorted by `total_cmp` and read the k-th order statistic by direct index
         // — BIT-IDENTICAL (`win[k]` == `uniq[fen_kth(k)]`, the k-th smallest in
         // the window; `eval_kth` is unchanged). Order-independent, so this serves
-        // centered windows too.
-        let has_nan = vals
-            .iter()
-            .any(|v| matches!(v, Scalar::Float64(f) if f.is_nan()));
-        if !has_nan && self.window <= ROLLING_SORTED_WINDOW_MAX_W {
+        // centered windows too. A NaN is missing to `value_at`, so it never
+        // enters the window (it was kept off this path, to the global Fenwick
+        // tree).
+        if self.window <= ROLLING_SORTED_WINDOW_MAX_W {
             let mut win: Vec<f64> = Vec::with_capacity(self.window.min(len) + 1);
             let mut out = Vec::with_capacity(len);
             let mut r = 0_usize;
@@ -36941,6 +37001,66 @@ impl Rolling<'_> {
                 );
             }
             return Series::new(self.series.name(), index, Column::from_f64_values(out));
+        }
+        // A float column holding missing values (NaN or a cleared bit): the
+        // same recurrence over its present cells off the typed buffer, the
+        // missing ones skipped by the sums and by the run of equal values
+        // alike, as pandas' roll_skew / roll_kurt skip them. The window's
+        // present values are the last `nobs` present cells, so they are all
+        // equal exactly when that run covers them - the multiset below
+        // answers the same, at a BTreeMap step a row (s.rolling(20).skew() of
+        // a 10% NaN column 0.32x pandas at 200k rows; br-frankenpandas-knu1r).
+        if let Some((data, validity)) = self.series.column().as_f64_slice_with_validity() {
+            let words = validity.packed_words_for_scan();
+            let present = |j: usize| (words[j / 64] >> (j % 64)) & 1 == 1 && !data[j].is_nan();
+            let len = data.len();
+            let index = self.series.index().clone();
+            let mut out = Vec::with_capacity(len);
+            let mut out_words = vec![0_u64; len.div_ceil(64)];
+            let mut state = RollingMomentState::default();
+            let mut left = 0_usize;
+            let mut right = 0_usize;
+            let mut run = 0_usize;
+            let mut prev = f64::NAN;
+            for i in 0..len {
+                let (start, end) = self.window_bounds(i, len);
+                while right < end {
+                    if present(right) {
+                        let value = data[right];
+                        state.add_sums(value);
+                        if value == prev {
+                            run += 1;
+                        } else {
+                            run = 1;
+                            prev = value;
+                        }
+                    }
+                    right += 1;
+                }
+                while left < start {
+                    if present(left) {
+                        state.remove_sums(data[left]);
+                    }
+                    left += 1;
+                }
+                let is_constant = state.nobs > 0 && run >= state.nobs;
+                // Each cell as `rolling_float_column` holds the multiset
+                // path's Scalars: a Float64 a set bit (NaN among them), a
+                // missing one a cleared bit over 0.0, read back Null(NaN).
+                match state.output(self.min_periods, want_kurt, is_constant) {
+                    Scalar::Float64(f) => {
+                        out_words[i / 64] |= 1_u64 << (i % 64);
+                        out.push(f);
+                    }
+                    _ => out.push(0.0),
+                }
+            }
+            let validity = fp_columnar::ValidityMask::from_words(out_words, len);
+            return Series::new(
+                self.series.name(),
+                index,
+                Column::from_f64_values_with_validity(out, validity),
+            );
         }
         let vals = self.series.column().values();
         let len = vals.len();
@@ -47348,12 +47468,17 @@ impl SeriesGroupBy<'_> {
         let index = self.series.index.clone();
         let mut out = vec![0.0_f64; n];
         let mut words = vec![0u64; n.div_ceil(64)];
+        // The source's validity a word at a time: a ValidityMask::get call a
+        // row was a quarter of g.cummax() over a 10% NaN column (0.83x pandas
+        // at 1M rows; br-frankenpandas-knu1r).
+        let valid_words = validity.packed_words_for_scan();
+        let is_valid = |row: usize| (valid_words[row / 64] >> (row % 64)) & 1 == 1;
         if let Some(keys) = self.by.column.as_i64_slice()
             && let Some((min, range)) = i64_dense_histogram_range(keys)
         {
             let mut acc = vec![init; range];
             for row in 0..n {
-                if validity.get(row) {
+                if is_valid(row) {
                     let off = (keys[row] as i128 - min as i128) as usize;
                     let (next, value) = step(acc[off], data[row]);
                     acc[off] = next;
@@ -47373,7 +47498,7 @@ impl SeriesGroupBy<'_> {
         let mut acc = vec![init; ngroups];
         #[allow(clippy::needless_range_loop)] // row indexes data, gids, out
         for row in 0..n {
-            if validity.get(row) {
+            if is_valid(row) {
                 let g = gids[row];
                 let (next, value) = step(acc[g], data[row]);
                 acc[g] = next;
@@ -180699,6 +180824,193 @@ mod tests {
         assert!(result.values()[1].is_missing());
         // median([1,3,2]) = 2.0
         assert_eq!(result.values()[2], Scalar::Float64(2.0));
+    }
+
+    #[test]
+    fn rolling_moments_skip_missing_like_the_multiset_knu1r() {
+        // Rolling skew / kurt of a float column holding NaN (its typed arm,
+        // the run of equal present values) equal the same values held as a
+        // nullable int column (the multiset path) - constant stretches broken
+        // by missing values among them, centered or not, every min_periods
+        // (br-frankenpandas-knu1r).
+        let pattern: Vec<Option<i64>> = (0..90_i64)
+            .map(|i| match i % 15 {
+                2 | 9 => None,
+                0..=7 => Some(4),
+                _ => Some((i * 7) % 5),
+            })
+            .collect();
+        let floats: Vec<f64> = pattern
+            .iter()
+            .map(|value| value.map_or(f64::NAN, |v| v as f64))
+            .collect();
+        let mut words = vec![0_u64; pattern.len().div_ceil(64)];
+        for (i, value) in pattern.iter().enumerate() {
+            if value.is_some() {
+                words[i / 64] |= 1 << (i % 64);
+            }
+        }
+        let ints = Column::from_i64_values_with_validity(
+            pattern.iter().map(|value| value.unwrap_or(0)).collect(),
+            fp_columnar::ValidityMask::from_words(words, pattern.len()),
+        );
+        let float_series = Series::new(
+            "x",
+            Index::default_range(floats.len()),
+            Column::from_f64_values(floats),
+        )
+        .unwrap();
+        let int_series = Series::new("x", Index::default_range(pattern.len()), ints).unwrap();
+        assert!(int_series.column().as_f64_slice_with_validity().is_none());
+        for window in [3_usize, 4, 6, 10] {
+            for center in [false, true] {
+                for min_periods in [None, Some(1), Some(3)] {
+                    let (float_roll, int_roll) = if center {
+                        (
+                            float_series.rolling_center(window, min_periods),
+                            int_series.rolling_center(window, min_periods),
+                        )
+                    } else {
+                        (
+                            float_series.rolling(window, min_periods),
+                            int_series.rolling(window, min_periods),
+                        )
+                    };
+                    for kurt in [false, true] {
+                        let got = if kurt {
+                            float_roll.kurt()
+                        } else {
+                            float_roll.skew()
+                        }
+                        .unwrap();
+                        let want = if kurt {
+                            int_roll.kurt()
+                        } else {
+                            int_roll.skew()
+                        }
+                        .unwrap();
+                        let case = format!("w{window} c{center} mp{min_periods:?} kurt {kurt}");
+                        for (row, (got, want)) in got.values().iter().zip(want.values()).enumerate()
+                        {
+                            match (got, want) {
+                                (got, want) if got.is_missing() || want.is_missing() => {
+                                    assert!(got.is_missing() && want.is_missing(), "{case} {row}");
+                                }
+                                (Scalar::Float64(got), Scalar::Float64(want)) => {
+                                    assert_eq!(got.to_bits(), want.to_bits(), "{case} {row}");
+                                }
+                                (got, want) => panic!("{case} {row}: {got:?} {want:?}"),
+                            }
+                        }
+                        // NEGATIVE: a window of equal present values is
+                        // constant - skew 0, kurt -3 (rows 3 - 6 all 4) - and
+                        // one whose run a missing value interrupts still is
+                        // (rows 1, 3, 4 around the missing row 2, skew).
+                        if !center && window == 4 && min_periods == Some(1) {
+                            let constant = if kurt { -3.0 } else { 0.0 };
+                            assert_eq!(got.values()[6], Scalar::Float64(constant), "{case}");
+                            if !kurt {
+                                assert_eq!(got.values()[4], Scalar::Float64(0.0), "{case}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rolling_order_stats_slide_a_sorted_window_knu1r() {
+        // Rolling median / quantile of every window width (below and above
+        // the old 32-row switch) over a float column holding NaN, centered
+        // or not, equal a sort of each window's present values
+        // (br-frankenpandas-knu1r).
+        let n = 150_usize;
+        let values: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 11 == 3 || (60..75).contains(&i) {
+                    f64::NAN
+                } else {
+                    ((i * 37) % 23) as f64 - 9.5
+                }
+            })
+            .collect();
+        let series = |data: &[f64]| {
+            Series::new(
+                "x",
+                Index::default_range(data.len()),
+                Column::from_f64_values(data.to_vec()),
+            )
+            .unwrap()
+        };
+        // The reference: each window's present values sorted, through the
+        // per-window aggregation path these windows took before.
+        let sorted = |nums: &[f64]| {
+            let mut sorted = nums.to_vec();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            sorted
+        };
+        let old_median = |nums: &[f64]| {
+            if nums.is_empty() {
+                return f64::NAN;
+            }
+            let sorted = sorted(nums);
+            let mid = sorted.len() / 2;
+            if sorted.len().is_multiple_of(2) {
+                (sorted[mid - 1] + sorted[mid]) / 2.0
+            } else {
+                sorted[mid]
+            }
+        };
+        let old_quantile = |nums: &[f64]| {
+            if nums.is_empty() {
+                return f64::NAN;
+            }
+            let sorted = sorted(nums);
+            crate::window_quantile(
+                sorted.len(),
+                0.3,
+                crate::QuantileInterpolation::Linear,
+                &|k| sorted[k],
+            )
+        };
+        let s = series(&values);
+        for window in [1_usize, 2, 3, 7, 20, 31, 32, 40] {
+            for center in [false, true] {
+                for min_periods in [window, 1] {
+                    let rolling = if center {
+                        s.rolling_center(window, Some(min_periods))
+                    } else {
+                        s.rolling(window, Some(min_periods))
+                    };
+                    let case = format!("w{window} c{center} mp{min_periods}");
+                    assert_eq!(
+                        format!("{:?}", rolling.median().unwrap().values()),
+                        format!(
+                            "{:?}",
+                            rolling.apply_rolling(old_median, "x").unwrap().values()
+                        ),
+                        "median {case}"
+                    );
+                    assert_eq!(
+                        format!("{:?}", rolling.quantile(0.3).unwrap().values()),
+                        format!(
+                            "{:?}",
+                            rolling.apply_rolling(old_quantile, "x").unwrap().values()
+                        ),
+                        "quantile {case}"
+                    );
+                }
+            }
+        }
+        // NEGATIVE: a column holding -0.0 keeps the exact per-window sort
+        // (the sorted window would order -0.0 before 0.0), and its windows
+        // short of min_periods are NaN.
+        let signed = series(&[0.0, -0.0, 1.0, f64::NAN, -0.0]);
+        let out = signed.rolling(2, None).median().unwrap();
+        assert!(out.values()[0].is_missing());
+        assert_eq!(out.values()[1], Scalar::Float64(0.0));
+        assert!(out.values()[3].is_missing());
     }
 
     #[test]

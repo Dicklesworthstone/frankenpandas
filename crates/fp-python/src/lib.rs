@@ -1118,7 +1118,28 @@ fn categories_index(py: Python<'_>, categories: &[Scalar]) -> PyResult<Py<PyAny>
 /// floats 28.7 ms, pandas 20.2; br-frankenpandas-zsm50). None for any other
 /// column.
 fn typed_column_list(py: Python<'_>, column: &Column) -> PyResult<Option<Py<PyAny>>> {
-    if !column.validity().all() || column.is_pandas_string() {
+    if column.is_pandas_string() {
+        return Ok(None);
+    }
+    if !column.validity().all() {
+        // A float64 column holding missing values: its floats with NaN in
+        // their place, as pandas' (numpy's) tolist gives them - a Scalar a
+        // row was boxed (s.tolist() of a 10% NaN column 0.69x pandas;
+        // br-frankenpandas-knu1r). Any other column holding missing values
+        // (a nullable one's pd.NA, NaT, None) keeps its cells.
+        if column.dtype() == DType::Float64
+            && let Some((data, validity)) = column.as_f64_slice_with_validity()
+        {
+            let words = validity.packed_words_for_scan();
+            let values = data.iter().enumerate().map(|(i, &x)| {
+                if (words[i / 64] >> (i % 64)) & 1 == 1 {
+                    x
+                } else {
+                    f64::NAN
+                }
+            });
+            return Ok(Some(PyList::new(py, values)?.into_any().unbind()));
+        }
         return Ok(None);
     }
     let list = match column.dtype() {
