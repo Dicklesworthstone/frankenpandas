@@ -38724,7 +38724,7 @@ impl PySeriesILoc {
         if let Ok(Positions(positions)) = key.extract::<Positions>() {
             let s = self
                 .inner
-                .iloc(&positions)
+                .iloc_owned(positions)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
             return Ok(Py::new(py, PySeries { inner: s })?.into_any());
         }

@@ -2122,6 +2122,47 @@ impl IndexLabels {
 
         None
     }
+
+    /// [`Self::take_i64_values`] of a unit range or a typed buffer gathered
+    /// into the positions' own buffer (a usize and an i64 share a layout);
+    /// any other backing, or a position past the labels, hands the positions
+    /// back as they came.
+    fn take_i64_values_owned(&self, indices: Vec<usize>) -> Result<Vec<i64>, Vec<usize>> {
+        if let Some(range) = self.int64_unit_range {
+            // Wrapping arithmetic undoes exactly, so a position past the
+            // range is handed back without a bounds pass ahead of the gather
+            // (in bounds, start + position is a label: it cannot wrap).
+            let mut past = 0_usize;
+            let labels: Vec<i64> = indices
+                .into_iter()
+                .map(|position| {
+                    past += usize::from(position >= range.len);
+                    range
+                        .start
+                        .wrapping_add_unsigned(u64::try_from(position).unwrap_or(u64::MAX))
+                })
+                .collect();
+            if past == 0 {
+                return Ok(labels);
+            }
+            return Err(labels
+                .into_iter()
+                .map(|label| {
+                    usize::try_from(label.wrapping_sub(range.start).cast_unsigned())
+                        .unwrap_or(usize::MAX)
+                })
+                .collect());
+        }
+        if let Some(Some(values)) = self.int64_typed.get()
+            && indices.iter().all(|&position| position < values.len())
+        {
+            return Ok(indices
+                .into_iter()
+                .map(|position| values[position])
+                .collect());
+        }
+        Err(indices)
+    }
 }
 
 impl Clone for IndexLabels {
@@ -5325,6 +5366,25 @@ impl Index {
         {
             Some(Ok(levels)) => taken.attach_row_multiindex(levels),
             _ => taken,
+        }
+    }
+
+    /// [`Self::take`] of owned positions: an int64 index's labels (a
+    /// RangeIndex's arithmetic, a typed buffer's values) gathered into the
+    /// positions' own buffer, where take wrote a second one - a page-faulted
+    /// 8 MB a million rows (s.iloc[perm] 0.75x pandas;
+    /// br-frankenpandas-lsn8d). Any other index takes as [`Self::take`].
+    #[must_use]
+    pub fn take_owned(&self, indices: Vec<usize>) -> Self {
+        if self.row_multiindex.is_some() || self.freq.is_some() {
+            return self.take(&indices);
+        }
+        if let Some(taken) = self.take_affine_positions(&indices) {
+            return taken;
+        }
+        match self.labels.take_i64_values_owned(indices) {
+            Ok(values) => self.propagate_name(Self::from_i64_values(values)),
+            Err(indices) => self.take(&indices),
         }
     }
 
@@ -26259,6 +26319,53 @@ mod tests {
         assert_eq!(
             ranged.take_owned(vec![2, 4, 6]).unwrap().freq().as_deref(),
             Some("2D")
+        );
+    }
+
+    #[test]
+    fn take_owned_gathers_int64_labels_into_their_positions_lsn8d() {
+        // take_owned equals take over a named RangeIndex (the unit range),
+        // a stepped range, a typed int64 index, a text index and a dated
+        // range holding a freq: shuffled, reversed, repeated, stepped and no
+        // positions (br-frankenpandas-lsn8d).
+        let day = 86_400_000_000_000_i64;
+        let unit = Index::from_range(5, 45, 1).rename_index(Some("r"));
+        let stepped = Index::from_range(100, -20, -3);
+        let typed = Index::from_i64_values((0..40).map(|k| (k * 7919) % 101 - 50).collect());
+        let text = Index::new((0..40).map(|k| IndexLabel::Utf8(format!("k{k}"))).collect());
+        let dated = Index::from_datetime64_affine_range(3 * day, day, 40)
+            .unwrap()
+            .with_freq(Some("D".to_owned()));
+        for index in [&unit, &stepped, &typed, &text, &dated] {
+            let len = index.len();
+            for positions in [
+                (0..len).map(|k| (k * 17) % len).collect::<Vec<usize>>(),
+                (0..len).rev().collect(),
+                vec![len - 1, 0, 7, 7, 31],
+                vec![2, 3, 4],
+                Vec::new(),
+            ] {
+                let owned = index.take_owned(positions.clone());
+                let borrowed = index.take(&positions);
+                assert_eq!(owned.labels(), borrowed.labels());
+                assert_eq!(owned.name(), borrowed.name());
+                assert_eq!(owned.freq(), borrowed.freq());
+            }
+        }
+        assert_eq!(
+            unit.labels.take_i64_values_owned(vec![3, 39, 0]),
+            Ok(vec![8, 44, 5])
+        );
+        // NEGATIVE: a position past the range - or past every usize - is
+        // handed back as it came, never made a label; a text index's too.
+        assert_eq!(
+            unit.labels
+                .take_i64_values_owned(vec![3, 40, 0, usize::MAX]),
+            Err(vec![3, 40, 0, usize::MAX])
+        );
+        assert_eq!(
+            text.labels.take_i64_values_owned(vec![1, 2]),
+            Err(vec![1, 2])
         );
     }
 

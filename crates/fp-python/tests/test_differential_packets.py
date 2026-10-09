@@ -28646,6 +28646,51 @@ def test_series_text_key_like_pandas_fvsao14(case: str) -> None:
     assert run(fpd) == run(pd)
 
 
+# br-frankenpandas-lsn8d: s.iloc[positions] normalizes them in their own
+# buffer and gathers an int64 index's labels back into it - a RangeIndex,
+# a stepped one, an int64 index, a text index, a daily range holding its
+# freq; positions as an int64 / int32 array or a list, negative, repeated,
+# consecutive; NEGATIVE: a position out of bounds is pandas' IndexError.
+def _lsn8d_iloc_index(m: Any, kind: str) -> Any:
+    if kind == "range":
+        return m.RangeIndex(40)
+    if kind == "stepped":
+        return m.RangeIndex(100, -20, -3)
+    if kind == "int":
+        return m.Index((np.arange(40) * 37) % 41 - 20)
+    if kind == "text":
+        return m.Index([f"r{k}" for k in range(40)])
+    return m.date_range("2021-01-01", periods=40, freq="D", name="when")
+
+
+_LSN8D_ILOC_POSITIONS = {
+    "shuffled": lambda: np.random.default_rng(7).permutation(40),
+    "int32 negative": lambda: (np.arange(40, dtype="int32") * 7) % 80 - 40,
+    "list repeated": lambda: [-1, 0, 5, 5, -40],
+    "consecutive": lambda: np.array([3, 4, 5]),
+    "out of bounds": lambda: np.array([0, 40]),
+}
+_LSN8D_ILOC_CASES = [
+    (kind, how) for kind in ("range", "stepped", "int", "text", "dated") for how in _LSN8D_ILOC_POSITIONS
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _LSN8D_ILOC_CASES, ids=lambda case: f"{case[0]}-{case[1]}")
+def test_series_iloc_positions_like_pandas_lsn8d(case: Any) -> None:
+    kind, how = case
+
+    def run(m: Any) -> Any:
+        s = m.Series(np.arange(40) * 0.5, index=_lsn8d_iloc_index(m, kind), name="v")
+        try:
+            out = s.iloc[_LSN8D_ILOC_POSITIONS[how]()]
+        except Exception as error:  # noqa: BLE001
+            return type(error).__name__
+        return [repr(out.index), out.name, out.tolist()]
+
+    assert run(fpd) == run(pd)
+
+
 # br-frankenpandas-knu1r: grouped cumsum / cumprod / cummax / cummin of a
 # float column holding NaN (a group's first value, runs of them) by an int
 # key (the key-offset kernel) and a text key (the group-id kernel);

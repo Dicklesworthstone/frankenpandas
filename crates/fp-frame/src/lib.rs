@@ -1745,15 +1745,35 @@ fn normalize_iloc_position(position: i64, len: usize) -> Result<usize, FrameErro
 /// (`s.iloc[perm]` 0.64x pandas at 1M rows; br-frankenpandas-lsn8d).
 #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)] // checked into 0..len first
 fn normalize_iloc_positions(positions: &[i64], len: usize) -> Result<Vec<usize>, i64> {
+    let length = iloc_positions_length(positions, len)?;
+    Ok(positions
+        .iter()
+        .map(|&at| (at + ((at >> 63) & length)) as usize)
+        .collect())
+}
+
+/// [`normalize_iloc_positions`] in the positions' own buffer (an i64 and a
+/// usize share a layout): a second buffer was a page-faulted 8 MB a million
+/// rows (br-frankenpandas-lsn8d).
+#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)] // checked into 0..len first
+fn normalize_iloc_positions_owned(positions: Vec<i64>, len: usize) -> Result<Vec<usize>, i64> {
+    let length = iloc_positions_length(&positions, len)?;
+    Ok(positions
+        .into_iter()
+        .map(|at| (at + ((at >> 63) & length)) as usize)
+        .collect())
+}
+
+/// The length negative `positions` wrap at, when every one of them is in
+/// bounds over `len` rows (one min / max pass); `Err` is the first out of
+/// bounds.
+fn iloc_positions_length(positions: &[i64], len: usize) -> Result<i64, i64> {
     let length = i64::try_from(len).unwrap_or(i64::MAX);
     let (low, high) = positions.iter().fold((0_i64, -1_i64), |(low, high), &at| {
         (low.min(at), high.max(at))
     });
     if low >= -length && high < length {
-        return Ok(positions
-            .iter()
-            .map(|&at| (at + ((at >> 63) & length)) as usize)
-            .collect());
+        return Ok(length);
     }
     Err(positions
         .iter()
@@ -15975,6 +15995,30 @@ impl Series {
             self.name.clone(),
             self.index.take(&normalized).with_freq(freq),
             self.column.take_positions(&normalized),
+        )
+    }
+
+    /// [`Self::iloc`] of owned positions: they are normalized in their own
+    /// buffer and an int64 index's labels gathered back into it
+    /// ([`Index::take_owned`]) - a million-row shuffle wrote four 8 MB
+    /// buffers where pandas writes two (s.iloc[perm] of a RangeIndex 0.75x
+    /// pandas; br-frankenpandas-lsn8d).
+    ///
+    /// # Errors
+    /// Rejects a position out of bounds, as `iloc` does.
+    pub fn iloc_owned(&self, positions: Vec<i64>) -> Result<Self, FrameError> {
+        let len = self.len();
+        let normalized = normalize_iloc_positions_owned(positions, len).map_err(|position| {
+            FrameError::CompatibilityRejected(format!(
+                "iloc position {position} out of bounds for length {len}"
+            ))
+        })?;
+        let freq = fp_index::take_freq(self.index.freq().map(str::to_owned), &normalized);
+        let column = self.column.take_positions(&normalized);
+        Self::new(
+            self.name.clone(),
+            self.index.take_owned(normalized).with_freq(freq),
+            column,
         )
     }
 
@@ -177009,6 +177053,52 @@ mod tests {
         let empty = s.iloc(&[]).unwrap();
         assert!(empty.iloc(&[0]).is_err());
         assert!(empty.iloc(&[-1]).is_err());
+    }
+
+    #[test]
+    fn iloc_owned_equals_iloc_lsn8d() {
+        // iloc_owned - its positions normalized in place, an int64 index's
+        // labels gathered back into them - equals iloc over a RangeIndex, a
+        // typed int64 index, a text index and a named daily range holding
+        // its freq: shuffled, negative, repeated, consecutive, reversed and
+        // no positions (br-frankenpandas-lsn8d).
+        let day = 86_400_000_000_000_i64;
+        let values: Vec<f64> = (0..60_i32).map(|k| f64::from(k) * 0.5 - 3.0).collect();
+        let indexes = [
+            Index::from_range(0, 60, 1),
+            Index::from_i64_values((0..60).map(|k| (k * 37) % 61).collect()),
+            Index::new((0..60).map(|k| IndexLabel::Utf8(format!("r{k}"))).collect()),
+            Index::from_datetime64_affine_range(day, day, 60)
+                .unwrap()
+                .with_freq(Some("D".to_owned()))
+                .rename_index(Some("when")),
+        ];
+        for index in indexes {
+            let s = Series::new("v", index, Column::from_f64_values(values.clone())).unwrap();
+            for positions in [
+                (0..60_i64)
+                    .map(|k| (k * 7919) % 120 - 60)
+                    .collect::<Vec<i64>>(),
+                vec![-1, 0, 5, 5, -60],
+                vec![3, 4, 5],
+                (0..60).rev().collect(),
+                Vec::new(),
+            ] {
+                let owned = s.iloc_owned(positions.clone()).unwrap();
+                let borrowed = s.iloc(&positions).unwrap();
+                assert_eq!(owned.index().labels(), borrowed.index().labels());
+                assert_eq!(owned.index().name(), borrowed.index().name());
+                assert_eq!(owned.index().freq(), borrowed.index().freq());
+                assert_eq!(owned.values(), borrowed.values());
+            }
+            // NEGATIVE: a position out of bounds either side is iloc's error.
+            for bad in [vec![0, 60], vec![-61, 2]] {
+                assert_eq!(
+                    format!("{:?}", s.iloc_owned(bad.clone()).unwrap_err()),
+                    format!("{:?}", s.iloc(&bad).unwrap_err())
+                );
+            }
+        }
     }
 
     #[test]
