@@ -11347,6 +11347,67 @@ fn is_ordering_comparison(op: ComparisonOp) -> bool {
     )
 }
 
+/// A categorical's categories as pandas' CategoricalDtype makes them: an
+/// int / float mix is float64, every int its float, as pandas' Index infers
+/// it; none may be missing ("Categorical categories cannot be null") and none
+/// may equal another by pandas' equality - 1, 1.0 and True are one value -
+/// ("Categorical categories must be unique"). They were kept as given:
+/// Categorical([1, 1.0], categories=[1, 1.0]) built two categories where
+/// pandas raises (br-frankenpandas-7zs0a), and add_categories([2.5]) on int
+/// categories left them object (br-frankenpandas-yrjrc).
+///
+/// # Errors
+/// pandas' ValueError texts above, for a missing or a repeated category.
+pub fn normalize_categories(mut categories: Vec<Scalar>) -> Result<Vec<Scalar>, FrameError> {
+    if categories.iter().any(Scalar::is_missing) {
+        return Err(FrameError::CompatibilityRejected(
+            "Categorical categories cannot be null".to_owned(),
+        ));
+    }
+    if categories
+        .iter()
+        .any(|category| matches!(category, Scalar::Float64(_)))
+        && categories
+            .iter()
+            .all(|category| matches!(category, Scalar::Int64(_) | Scalar::Float64(_)))
+    {
+        for category in &mut categories {
+            if let Scalar::Int64(value) = *category {
+                *category = Scalar::Float64(value as f64);
+            }
+        }
+    }
+    let mut seen: FxHashSet<ScalarKey<'_>> =
+        FxHashSet::with_capacity_and_hasher(categories.len(), Default::default());
+    if !categories
+        .iter()
+        .all(|category| seen.insert(category_key(category)))
+    {
+        return Err(FrameError::CompatibilityRejected(
+            "Categorical categories must be unique".to_owned(),
+        ));
+    }
+    Ok(categories)
+}
+
+/// A category's key under pandas' equality: a bool, an int a float holds
+/// exactly and a float are one number (1 == 1.0 == True); anything else
+/// keys as itself.
+fn category_key(category: &Scalar) -> ScalarKey<'_> {
+    let number = match category {
+        Scalar::Bool(flag) => Some(f64::from(u8::from(*flag))),
+        Scalar::Int64(value) => {
+            let float = *value as f64;
+            (float as i128 == i128::from(*value)).then_some(float)
+        }
+        _ => None,
+    };
+    number.map_or_else(
+        || scalar_key_allow_missing(category),
+        |float| ScalarKey::FloatBits(if float == 0.0 { 0.0_f64 } else { float }.to_bits()),
+    )
+}
+
 fn categorical_categories_match(left: &CategoricalMetadata, right: &CategoricalMetadata) -> bool {
     left.categories.len() == right.categories.len()
         && left
@@ -34508,6 +34569,12 @@ impl Series {
                 })
             })
             .collect::<Result<Vec<i32>, _>>()?;
+        // Every constructor and category editor arrives here: their
+        // categories as pandas' CategoricalDtype makes them (7zs0a, yrjrc).
+        let meta = CategoricalMetadata {
+            categories: normalize_categories(meta.categories)?,
+            ordered: meta.ordered,
+        };
         let column = Column::from_categorical_codes(codes, meta.clone());
         Ok(Self {
             name: name.into(),
@@ -34521,24 +34588,38 @@ impl Series {
     /// Each value's first-seen code among the distinct present values (-1
     /// where missing), and those values in that order: one hash lookup a
     /// row.
+    ///
+    /// Values equal by pandas' equality are one category (1, 1.0 and True;
+    /// [`category_key`]), and present values mixing ints and floats make
+    /// float categories, as pandas' array of them is float64 - [1, 1.0] made
+    /// two categories (br-frankenpandas-7zs0a), [1, 2.5] an object mix
+    /// (br-frankenpandas-yrjrc).
     fn first_seen_codes(values: &[Scalar]) -> Result<(Vec<i32>, Vec<Scalar>), FrameError> {
         let mut positions: FxHashMap<ScalarKey<'_>, i32> = FxHashMap::default();
         let mut categories: Vec<Scalar> = Vec::new();
         let mut codes = Vec::with_capacity(values.len());
+        let (mut floats, mut numbers) = (false, true);
         for value in values {
             if value.is_missing() {
                 codes.push(-1);
                 continue;
             }
+            floats |= matches!(value, Scalar::Float64(_));
+            numbers &= matches!(value, Scalar::Int64(_) | Scalar::Float64(_));
             let next = i32::try_from(categories.len())
                 .map_err(|_| FrameError::CompatibilityRejected("too many categories".to_owned()))?;
-            let code = *positions
-                .entry(scalar_key_allow_missing(value))
-                .or_insert_with(|| {
-                    categories.push(value.clone());
-                    next
-                });
+            let code = *positions.entry(category_key(value)).or_insert_with(|| {
+                categories.push(value.clone());
+                next
+            });
             codes.push(code);
+        }
+        if floats && numbers {
+            for category in &mut categories {
+                if let Scalar::Int64(value) = *category {
+                    *category = Scalar::Float64(value as f64);
+                }
+            }
         }
         Ok((codes, categories))
     }
@@ -246731,6 +246812,107 @@ mod typed_index_labels_9m9zf {
             matches!(out.index().labels()[0], IndexLabel::Bool(_)),
             "bool category label must stay Bool, got {:?}",
             out.index().labels()[0]
+        );
+    }
+
+    #[test]
+    fn categories_validate_and_infer_like_pandas_7zs0a() {
+        // pandas' CategoricalDtype: a category equal to another by pandas'
+        // equality (1 / 1.0 / True, -0.0 / 0.0, 'a' / 'a') or a missing one
+        // is its ValueError, from the constructors and editors alike; an int /
+        // float mix is float64; categories made of values group them by the
+        // same equality (br-frankenpandas-7zs0a, br-frankenpandas-yrjrc).
+        let message = |categories: Vec<Scalar>| match crate::normalize_categories(categories) {
+            Err(crate::FrameError::CompatibilityRejected(message)) => message,
+            other => panic!("{other:?}"),
+        };
+        let unique = "Categorical categories must be unique";
+        assert_eq!(
+            message(vec![Scalar::Int64(1), Scalar::Float64(1.0)]),
+            unique
+        );
+        assert_eq!(message(vec![Scalar::Int64(1), Scalar::Bool(true)]), unique);
+        assert_eq!(
+            message(vec![Scalar::Float64(-0.0), Scalar::Float64(0.0)]),
+            unique
+        );
+        assert_eq!(
+            message(vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("a".to_owned())
+            ]),
+            unique
+        );
+        assert_eq!(
+            message(vec![Scalar::Float64(f64::NAN), Scalar::Float64(1.0)]),
+            "Categorical categories cannot be null"
+        );
+        assert_eq!(
+            crate::normalize_categories(vec![
+                Scalar::Int64(1),
+                Scalar::Float64(2.5),
+                Scalar::Int64(3)
+            ])
+            .unwrap(),
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.5),
+                Scalar::Float64(3.0)
+            ]
+        );
+        // NEGATIVE: unique categories pandas keeps as given stay so - ints
+        // alone, text with an int, a bool beside numbers (object).
+        for kept in [
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![Scalar::Utf8("a".to_owned()), Scalar::Int64(1)],
+            vec![Scalar::Int64(2), Scalar::Bool(false), Scalar::Float64(2.5)],
+        ] {
+            assert_eq!(crate::normalize_categories(kept.clone()).unwrap(), kept);
+        }
+        // Categories of values: 1 and 1.0 one category, a float among ints
+        // makes them floats, True and 1 one category (the first seen).
+        let cats = |values: Vec<Scalar>| {
+            Series::from_categorical("c", values, false)
+                .unwrap()
+                .cat()
+                .unwrap()
+                .categories()
+                .to_vec()
+        };
+        assert_eq!(
+            cats(vec![
+                Scalar::Int64(1),
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.5)
+            ]),
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.5)]
+        );
+        assert_eq!(
+            cats(vec![Scalar::Bool(true), Scalar::Int64(1)]),
+            vec![Scalar::Bool(true)]
+        );
+        // Editors: a float added to int categories makes them floats; True
+        // added beside 1 is a repeat.
+        let ints =
+            Series::from_categorical("c", vec![Scalar::Int64(3), Scalar::Int64(1)], false).unwrap();
+        let added = ints
+            .cat()
+            .unwrap()
+            .add_categories(vec![Scalar::Float64(2.5)])
+            .unwrap();
+        assert_eq!(
+            added.cat().unwrap().categories(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(2.5)
+            ]
+        );
+        assert!(
+            ints.cat()
+                .unwrap()
+                .add_categories(vec![Scalar::Bool(true)])
+                .is_err()
         );
     }
 

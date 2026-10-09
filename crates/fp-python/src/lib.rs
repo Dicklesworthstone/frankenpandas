@@ -23865,7 +23865,10 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 || msg == "Unordered Categoricals can only compare equality or not"
                 || msg == "Categoricals can only be compared if 'categories' are the same."
                 || msg.starts_with("Cannot compare a Categorical for op ")
-                || msg.starts_with("Invalid comparison between dtype=category and ");
+                || msg.starts_with("Invalid comparison between dtype=category and ")
+                // pandas' CategoricalDtype.validate_categories (7zs0a).
+                || msg == "Categorical categories must be unique"
+                || msg == "Categorical categories cannot be null";
             let text = if pandas_verbatim {
                 msg.clone()
             } else {
@@ -85844,10 +85847,15 @@ impl PyCategoricalDtype {
         categories: Option<&Bound<'_, PyAny>>,
         ordered: Option<bool>,
     ) -> PyResult<Self> {
+        // Validated and inferred as pandas' CategoricalDtype makes them
+        // (repeated or missing categories raise; br-frankenpandas-7zs0a).
         Ok(Self {
             categories: categories
                 .filter(|categories| !categories.is_none())
-                .map(|categories| py_categories(py, categories))
+                .map(|categories| {
+                    fp_frame::normalize_categories(py_categories(py, categories)?)
+                        .map_err(frame_error_to_py)
+                })
                 .transpose()?,
             ordered: ordered.unwrap_or(false),
         })

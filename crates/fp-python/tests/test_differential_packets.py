@@ -28691,6 +28691,100 @@ def test_series_iloc_positions_like_pandas_lsn8d(case: Any) -> None:
     assert run(fpd) == run(pd)
 
 
+# br-frankenpandas-7zs0a / br-frankenpandas-yrjrc: a categorical's
+# categories as pandas' CategoricalDtype makes them - a category equal to
+# another by pandas' equality (1 / 1.0 / True, 'a' / 'a') or a missing one is
+# pandas' ValueError from Categorical, from_codes, CategoricalDtype and the
+# category editors; an int / float mix is float64 (constructors and editors);
+# NEGATIVE: unique categories of mixed kinds stay object, an int-only
+# addition stays int64, a text addition object.
+def _7zs0a_series(m: Any) -> Any:
+    return m.Series([3, 1, 3]).astype("category")
+
+
+_7ZS0A_CATEGORIES = {
+    "ctor 1 / 1.0": lambda m: m.Categorical([1, 1.0], categories=[1, 1.0]),
+    "ctor 1 / True": lambda m: m.Categorical([1], categories=[1, True]),
+    "ctor a / a": lambda m: m.Categorical(["a"], categories=["a", "a"]),
+    "ctor nan": lambda m: m.Categorical([1.0], categories=[np.nan, 1.0]),
+    "ctor floats": lambda m: m.Categorical([1.0, 2.0], categories=[1.0, 2.0]),
+    "ctor text and int": lambda m: m.Categorical(["a", 1], categories=["a", 1]),
+    "ctor int / float mix": lambda m: m.Categorical([1, 2.5], categories=[1, 2.5]),
+    "values 1 / 1.0 / 2.5": lambda m: m.Categorical([1, 1.0, 2.5]),
+    "values int / float": lambda m: m.Categorical([3, 2.5, 1]),
+    "from_codes 1 / 1.0": lambda m: m.Categorical.from_codes([0, 1, 0], categories=[1, 1.0]),
+    "dtype 1 / 1.0": lambda m: m.CategoricalDtype([1, 1.0]),
+    "dtype int / float": lambda m: m.CategoricalDtype([1, 2.5]),
+    "set dup": lambda m: _7zs0a_series(m).cat.set_categories([1, 1.0, 3]),
+    "set int / float": lambda m: _7zs0a_series(m).cat.set_categories([1, 2.5, 3]),
+    "add float": lambda m: _7zs0a_series(m).cat.add_categories([2.5]),
+    "float add int": lambda m: m.Series([1.5, 3.0]).astype("category").cat.add_categories([7]),
+    "add int": lambda m: _7zs0a_series(m).cat.add_categories([7]),
+    "add text": lambda m: _7zs0a_series(m).cat.add_categories(["x"]),
+    "add True": lambda m: _7zs0a_series(m).cat.add_categories([True]),
+    "rename int / float": lambda m: _7zs0a_series(m).cat.rename_categories([10, 2.5]),
+    "rename dup": lambda m: _7zs0a_series(m).cat.rename_categories([10, 10.0]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_7ZS0A_CATEGORIES))
+def test_categories_validate_and_infer_like_pandas_7zs0a(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _7ZS0A_CATEGORIES[case](m)
+        except Exception as error:  # noqa: BLE001
+            return type(error).__name__
+        holder = out.cat if hasattr(out, "cat") else out
+        categories = holder.categories
+        codes = list(holder.codes) if hasattr(holder, "codes") else None
+        return [repr(list(categories)), str(categories.dtype), codes]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-7zs0a / br-frankenpandas-yrjrc over a CategoricalIndex:
+# repeated categories by pandas' equality are its ValueError from the
+# constructor and the editors; an int / float mix makes categories and labels
+# floats; NEGATIVE: an int addition stays int64, a text one object, text with
+# an int object.
+def _7zs0a_index(m: Any) -> Any:
+    return m.CategoricalIndex([3, 1, 3], categories=[1, 3])
+
+
+_7ZS0A_INDEX = {
+    "ctor 1 / 1.0": lambda m: m.CategoricalIndex(["a"], categories=[1, 1.0]),
+    "ctor 1 / True": lambda m: m.CategoricalIndex([1], categories=[1, True]),
+    "ctor int / float": lambda m: m.CategoricalIndex([1, 3], categories=[1, 2.5, 3]),
+    "ctor int label, float categories": lambda m: m.CategoricalIndex([1], categories=[1.0]),
+    "values int / float": lambda m: m.CategoricalIndex([1, 2.5, 1]),
+    "values 1 / 1.0": lambda m: m.CategoricalIndex([1, 1.0, 2.5]),
+    "add float": lambda m: _7zs0a_index(m).add_categories([2.5]),
+    "float add int": lambda m: m.CategoricalIndex([1.5, 3.0]).add_categories([7]),
+    "add True": lambda m: _7zs0a_index(m).add_categories([True]),
+    "add int": lambda m: _7zs0a_index(m).add_categories([7]),
+    "add text": lambda m: _7zs0a_index(m).add_categories(["x"]),
+    "set dup": lambda m: _7zs0a_index(m).set_categories([1, 1.0]),
+    "set int / float": lambda m: _7zs0a_index(m).set_categories([1, 2.5, 3]),
+    "rename int / float": lambda m: _7zs0a_index(m).rename_categories([10, 2.5]),
+    "rename dup": lambda m: _7zs0a_index(m).rename_categories([10, 10.0]),
+    "ctor text and int": lambda m: m.CategoricalIndex(["a", 1], categories=["a", 1]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_7ZS0A_INDEX))
+def test_categorical_index_categories_like_pandas_7zs0a(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _7ZS0A_INDEX[case](m)
+        except Exception as error:  # noqa: BLE001
+            return type(error).__name__
+        return [repr(list(out)), repr(list(out.categories)), str(out.categories.dtype), list(out.codes)]
+
+    assert run(fpd) == run(pd)
+
+
 # br-frankenpandas-knu1r: grouped shift / diff / pct_change by periods other
 # than 1 (each group's ring stepped by a cursor) - by an int key (the
 # key-offset kernels) and a text key (the group-id kernels), over floats
