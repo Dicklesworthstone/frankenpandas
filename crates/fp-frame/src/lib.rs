@@ -1585,6 +1585,123 @@ fn column_workers(ncols: usize, rows: usize, par_min_values: usize) -> usize {
         .min(cells.div_ceil(per_worker))
 }
 
+/// Where a column-parallel pass's workers run (br-frankenpandas-41ma0). On a
+/// host whose allowed CPUs span several L3 caches, a pass whose cells fit in
+/// one L3 keeps its workers in the caller's L3 domain: spread over the others
+/// they moved its data across the fabric, 2-2.5x slower than in one domain
+/// and slower than one core (shift / astype of 1000 x 1000 floats on a
+/// 4-domain Threadripper: 0.34 / 0.29 ms in one domain, 0.79 / 0.71 spread,
+/// 0.42 / 0.40 on one core). A bigger pass, a heavy one (its threshold below
+/// 16k cells), a host with one L3, or one whose topology cannot be read places
+/// them as the OS does.
+#[derive(Clone, Copy)]
+struct NearCaller {
+    #[cfg(target_os = "linux")]
+    cpus: rustix::thread::CpuSet,
+    count: usize,
+}
+
+impl NearCaller {
+    /// The caller's L3 domain for a pass of `cells` 8-byte values: when they
+    /// fit in one L3 and the allowed CPUs span several; None otherwise.
+    fn for_cells(cells: usize) -> Option<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            let domains = cache_domains()?;
+            if cells.saturating_mul(8) > domains.l3_bytes {
+                return None;
+            }
+            let domain = (*domains.domain_of.get(rustix::thread::sched_getcpu())?)?;
+            Some(Self {
+                cpus: domains.cpus[domain],
+                count: domains.sizes[domain],
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = cells;
+            None
+        }
+    }
+
+    /// Runs the current (worker) thread on the domain's CPUs; a refusal
+    /// leaves it where it is.
+    fn pin_current(self) {
+        #[cfg(target_os = "linux")]
+        {
+            let _ = rustix::thread::sched_setaffinity(None, &self.cpus);
+        }
+    }
+}
+
+/// The L3 cache domains among the CPUs this process may run on, and one
+/// L3's size in bytes.
+#[cfg(target_os = "linux")]
+struct CacheDomains {
+    /// Each CPU's domain, by CPU number (None for a CPU not allowed).
+    domain_of: Vec<Option<usize>>,
+    /// Each domain's allowed CPUs, and how many they are.
+    cpus: Vec<rustix::thread::CpuSet>,
+    sizes: Vec<usize>,
+    l3_bytes: usize,
+}
+
+/// This process's L3 domains, read once from Linux sysfs
+/// (`cpuN/cache/index3/shared_cpu_list` and `size`); None where the allowed
+/// CPUs share one L3 or the topology cannot be read.
+#[cfg(target_os = "linux")]
+fn cache_domains() -> Option<&'static CacheDomains> {
+    static DOMAINS: std::sync::OnceLock<Option<CacheDomains>> = std::sync::OnceLock::new();
+    DOMAINS.get_or_init(read_cache_domains).as_ref()
+}
+
+#[cfg(target_os = "linux")]
+fn read_cache_domains() -> Option<CacheDomains> {
+    use rustix::thread::CpuSet;
+    let allowed = rustix::thread::sched_getaffinity(None).ok()?;
+    let mut lists: Vec<String> = Vec::new();
+    let mut domains = CacheDomains {
+        domain_of: vec![None; CpuSet::MAX_CPU],
+        cpus: Vec::new(),
+        sizes: Vec::new(),
+        l3_bytes: 0,
+    };
+    for cpu in (0..CpuSet::MAX_CPU).filter(|&cpu| allowed.is_set(cpu)) {
+        let base = format!("/sys/devices/system/cpu/cpu{cpu}/cache/index3");
+        let list = std::fs::read_to_string(format!("{base}/shared_cpu_list")).ok()?;
+        let list = list.trim().to_owned();
+        let domain = if let Some(domain) = lists.iter().position(|seen| *seen == list) {
+            domain
+        } else {
+            if domains.l3_bytes == 0 {
+                domains.l3_bytes =
+                    cache_size_bytes(&std::fs::read_to_string(format!("{base}/size")).ok()?)?;
+            }
+            lists.push(list);
+            domains.cpus.push(CpuSet::new());
+            domains.sizes.push(0);
+            lists.len() - 1
+        };
+        domains.domain_of[cpu] = Some(domain);
+        domains.cpus[domain].set(cpu);
+        domains.sizes[domain] += 1;
+    }
+    (lists.len() > 1 && domains.l3_bytes > 0).then_some(domains)
+}
+
+/// A sysfs cache size ("32768K", "32M") in bytes.
+#[cfg(target_os = "linux")]
+fn cache_size_bytes(text: &str) -> Option<usize> {
+    let text = text.trim();
+    let (digits, scale) = match text.chars().last()? {
+        'K' => (&text[..text.len() - 1], 1 << 10),
+        'M' => (&text[..text.len() - 1], 1 << 20),
+        'G' => (&text[..text.len() - 1], 1 << 30),
+        _ => (text, 1),
+    };
+    digits.parse::<usize>().ok()?.checked_mul(scale)
+}
+
 /// `f` over `0..ncols` output columns of `rows` rows each, threaded by
 /// column once there are `par_min_values` cells ([`column_workers`]): the
 /// results in column order, the first error by position raised.
@@ -1599,6 +1716,17 @@ where
     F: Fn(usize) -> Result<T, FrameError> + Sync,
 {
     let worker_count = column_workers(ncols, rows, par_min_values);
+    // A pass that fits in one L3 keeps its workers in the caller's L3 domain
+    // on a host with several (NearCaller), no more of them than it has CPUs.
+    // A heavy pass - one whose threshold is below the usual 16k cells, as
+    // rank's - keeps every core it is given: confined to one domain, a 1000
+    // x 1000 rank ran 2.6 -> 3.0-3.4 ms.
+    let near = if worker_count < 2 || par_min_values < 16_384 {
+        None
+    } else {
+        NearCaller::for_cells(ncols.saturating_mul(rows))
+    };
+    let worker_count = near.map_or(worker_count, |near| worker_count.min(near.count));
 
     if worker_count < 2 {
         return (0..ncols).map(&f).collect();
@@ -1611,6 +1739,9 @@ where
             let next = &next;
             let f = &f;
             handles.push(scope.spawn(move || -> Result<Vec<(usize, T)>, FrameError> {
+                if let Some(near) = near {
+                    near.pin_current();
+                }
                 let mut out = Vec::new();
                 loop {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -126219,6 +126350,32 @@ mod tests {
         // NEGATIVE: under the threshold, or one column, runs inline.
         assert_eq!(crate::column_workers(1000, 10, 16_384), 1);
         assert_eq!(crate::column_workers(1, 10_000_000, 16_384), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cache_sizes_read_as_sysfs_writes_them_41ma0() {
+        // sysfs writes a cache size with a binary unit (br-frankenpandas-41ma0).
+        assert_eq!(crate::cache_size_bytes("32768K\n"), Some(32 << 20));
+        assert_eq!(crate::cache_size_bytes("32M"), Some(32 << 20));
+        assert_eq!(crate::cache_size_bytes("1G"), Some(1 << 30));
+        assert_eq!(crate::cache_size_bytes("4096"), Some(4096));
+        // NEGATIVE: no number, no size.
+        assert_eq!(crate::cache_size_bytes("K"), None);
+        assert_eq!(crate::cache_size_bytes("large"), None);
+    }
+
+    #[test]
+    fn workers_near_the_caller_keep_the_column_order_41ma0() {
+        // A pass small enough to keep its workers near the caller and one too
+        // big to (8 MB vs 800 MB of cells) both answer in column order, every
+        // column once, whatever the host's L3 domains (br-frankenpandas-41ma0).
+        for (ncols, rows) in [(1000, 1000), (1000, 100_000)] {
+            let positions = crate::par_map_indices_over(ncols, rows, 16_384, Ok).expect("map");
+            assert_eq!(positions, (0..ncols).collect::<Vec<_>>());
+        }
+        // NEGATIVE: a pass past one L3 never keeps its workers near.
+        assert!(crate::NearCaller::for_cells(1 << 40).is_none());
     }
 
     #[test]

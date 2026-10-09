@@ -53,6 +53,9 @@ ucd = { workspace = true }
 unicode-casefold = { workspace = true }
 unicode-normalization = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true }
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
